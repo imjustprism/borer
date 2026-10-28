@@ -15,6 +15,10 @@
 //! turns it off, and it is skipped where nobody reads the notice: with `CI`
 //! set, or stderr not a terminal (a script, a pipe).
 //!
+//! A binary a package manager installed (Homebrew, Scoop, npm, cargo, pipx,
+//! uv or pip) is never replaced: `update` and the notice name that
+//! manager's own command instead.
+//!
 //! Downloads are `curl` run as a process, as [`crate::symsrv`] fetches
 //! PDBs, and unpacking is `tar`; Windows 10 1803 and later ship both.
 
@@ -235,8 +239,83 @@ fn aside(exe: &Path) -> PathBuf {
         .unwrap_or(first)
 }
 
-/// `borer update [--check]`: says whether a newer release is out and,
-/// without `--check`, installs it over this binary.
+/// The command that updates this binary when a package manager installed it.
+///
+/// It is read from where the binary lives: Homebrew's cellar, a Scoop app,
+/// an npm package, cargo's bin folder, a pipx or uv tool, or a wheel (a
+/// `borer-*.dist-info` folder beside the scripts folder it was put in).
+///
+/// # Arguments
+///
+/// * `exe` - The running binary, its links resolved.
+///
+/// # Returns
+///
+/// The command, or `None` for a binary nothing manages, which `borer
+/// update` replaces itself.
+fn manager(exe: &Path) -> Option<&'static str> {
+    let path = exe
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+    let has = |part: &str| path.contains(part);
+    let found = if has("/cellar/") || has("/homebrew/") || has("/linuxbrew/") {
+        "brew upgrade borer"
+    } else if has("/scoop/apps/") {
+        "scoop update borer"
+    } else if has("/node_modules/") {
+        "npm install -g borer-mcp@latest"
+    } else if has("/.cargo/bin/") {
+        "cargo binstall borer"
+    } else if has("/pipx/") {
+        "pipx upgrade borer"
+    } else if has("/uv/tools/") {
+        "uv tool upgrade borer"
+    } else if from_wheel(exe) {
+        "pip install -U borer"
+    } else {
+        return None;
+    };
+    Some(found)
+}
+
+/// Whether a wheel put this binary where it runs: its scripts folder sits
+/// beside a `site-packages` holding a `borer-*.dist-info`.
+///
+/// # Arguments
+///
+/// * `exe` - The running binary.
+fn from_wheel(exe: &Path) -> bool {
+    let Some(root) = exe.parent().and_then(Path::parent) else {
+        return false;
+    };
+    let lib = |name: &str| root.join(name).read_dir().into_iter().flatten().flatten();
+    let mut sites = vec![
+        root.join("site-packages"),
+        root.join("Lib").join("site-packages"),
+    ];
+    sites.extend(lib("lib").map(|d| d.path().join("site-packages")));
+    sites.iter().any(|site| {
+        site.read_dir().into_iter().flatten().flatten().any(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("borer-") && name.ends_with(".dist-info")
+        })
+    })
+}
+
+/// The running binary with its links resolved, so a package manager's
+/// link (`/opt/homebrew/bin/borer`) reads as the file it points at.
+fn running_exe() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    Some(std::fs::canonicalize(&exe).unwrap_or(exe))
+}
+
+/// `borer update [--check]`: says whether a newer release is out.
+///
+/// Without `--check` it installs the release over this binary; a binary a
+/// package manager installed is left to it, and the report names its
+/// command.
 ///
 /// # Arguments
 ///
@@ -260,6 +339,11 @@ pub(crate) fn update(check_only: bool) -> anyhow::Result<String> {
         return Ok(format!("borer {VERSION} is the latest release\n"));
     }
     let shown = tag.trim_start_matches('v');
+    if let Some(cmd) = running_exe().as_deref().and_then(manager) {
+        return Ok(format!(
+            "borer {shown} is out (this is {VERSION}); a package manager installed this one, so `{cmd}` updates it\n"
+        ));
+    }
     if check_only {
         return Ok(format!(
             "borer {shown} is out (this is {VERSION}); `borer update` installs it\n"
@@ -401,7 +485,11 @@ pub(crate) fn check() -> Option<String> {
     let (tag, _) = kept?;
     is_newer(&tag).then(|| {
         let shown = tag.trim_start_matches('v');
-        format!("borer {shown} is out (this is {VERSION}); run `borer update`")
+        let cmd = running_exe()
+            .as_deref()
+            .and_then(manager)
+            .unwrap_or("borer update");
+        format!("borer {shown} is out (this is {VERSION}); run `{cmd}`")
     })
 }
 
@@ -559,6 +647,54 @@ mod tests {
         assert!(is_newer("v999.0.0"));
         assert!(!is_newer(&format!("v{VERSION}")));
         assert!(!is_newer("v0.0.1"));
+    }
+
+    /// A binary under a package manager's folder names that manager's
+    /// update command, a wheel's binary is told by the `dist-info` beside
+    /// its scripts folder, and a binary anywhere else names none.
+    ///
+    /// # Panics
+    ///
+    /// When a path is read as the wrong manager.
+    #[test]
+    fn a_package_managers_binary_names_its_update_command() {
+        let cases = [
+            (
+                "/opt/homebrew/Cellar/borer/0.2.5/bin/borer",
+                Some("brew upgrade borer"),
+            ),
+            (
+                r"C:\Users\a\scoop\apps\borer\current\borer.exe",
+                Some("scoop update borer"),
+            ),
+            (
+                "/usr/lib/node_modules/borer-mcp-linux-x64/bin/borer",
+                Some("npm install -g borer-mcp@latest"),
+            ),
+            ("/home/a/.cargo/bin/borer", Some("cargo binstall borer")),
+            (
+                "/home/a/.local/pipx/venvs/borer/bin/borer",
+                Some("pipx upgrade borer"),
+            ),
+            (
+                "/home/a/.local/share/uv/tools/borer/bin/borer",
+                Some("uv tool upgrade borer"),
+            ),
+            ("/home/a/bin/borer", None),
+        ];
+        for (path, want) in cases {
+            assert_eq!(manager(Path::new(path)), want, "{path}");
+        }
+        let venv = std::env::temp_dir().join(format!("borer-wheel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&venv);
+        let site = venv.join("Lib").join("site-packages");
+        std::fs::create_dir_all(site.join("borer-0.2.5.dist-info")).expect("dist-info");
+        std::fs::create_dir_all(venv.join("Scripts")).expect("scripts");
+        let exe = venv.join("Scripts").join("borer.exe");
+        assert_eq!(manager(&exe), Some("pip install -U borer"));
+        std::fs::remove_dir_all(site.join("borer-0.2.5.dist-info")).expect("removed");
+        assert_eq!(manager(&exe), None);
+        let _ = std::fs::remove_dir_all(&venv);
     }
 
     /// `SHA256SUMS` lines are read with or without the binary-mode star.
