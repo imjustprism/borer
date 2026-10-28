@@ -8,7 +8,7 @@
 
 const { spawn } = require("node:child_process");
 
-const pkg = `borer-mcp-${process.platform}-${process.arch}`;
+const pkg = `borer-re-${process.platform}-${process.arch}`;
 const exe = process.platform === "win32" ? "borer.exe" : "borer";
 
 let binary;
@@ -16,7 +16,7 @@ try {
   binary = require.resolve(`${pkg}/bin/${exe}`);
 } catch {
   process.stderr.write(
-    `borer-mcp: no borer binary for ${process.platform}-${process.arch} (package ${pkg} is not installed).\n` +
+    `borer-re: no borer binary for ${process.platform}-${process.arch} (package ${pkg} is not installed).\n` +
       "Prebuilt binaries exist for win32-x64, linux-x64 (glibc 2.35+), darwin-x64 and darwin-arm64.\n" +
       "On one of those, reinstall without --omit=optional or --no-optional.\n" +
       "Elsewhere, build from source: https://github.com/imjustprism/borer#install\n",
@@ -30,7 +30,7 @@ for (const signal of signals) {
   process.on(signal, () => child.kill(signal));
 }
 child.on("error", (err) => {
-  process.stderr.write(`borer-mcp: could not run ${binary}: ${err.message}\n`);
+  process.stderr.write(`borer-re: could not run ${binary}: ${err.message}\n`);
   process.exit(1);
 });
 child.on("exit", (code, signal) => {

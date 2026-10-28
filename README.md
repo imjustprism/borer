@@ -167,12 +167,12 @@ cargo binstall borer                      # or cargo install borer (builds it)
 brew install imjustprism/tap/borer        # macOS, Linux x64
 scoop bucket add imjustprism https://github.com/imjustprism/scoop-bucket
 scoop install imjustprism/borer           # Windows x64
-npm install -g borer-mcp                  # or npx -y borer-mcp
+npm install -g borer-re                   # or npx -y borer-re
 pipx install borer                        # or uvx borer, pip install borer
 ```
 
-npm and PyPI give a `borer` command (npm also `borer-mcp`), so an MCP
-client can launch `npx -y borer-mcp` or `uvx borer` with no install step.
+npm and PyPI give a `borer` command (npm also `borer-re`), so an MCP
+client can launch `npx -y borer-re` or `uvx borer` with no install step.
 Update a package-managed borer with its package manager, not
 `borer update`.
 

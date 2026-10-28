@@ -9,10 +9,10 @@
 `manifests` writes the Homebrew formula and the Scoop manifest
 (`OUT/homebrew/borer.rb`, `OUT/scoop/borer.json`, `OUT` being `packaging/`
 by default) from the release's SHA256SUMS alone. `npm` writes one directory
-per npm package under `OUT`: `borer-mcp`, whose `borer-mcp` and `borer`
-commands run packaging/npm/borer-mcp.js, and `borer-mcp-<os>-<cpu>` per
+per npm package under `OUT`: `borer-re`, whose `borer-re` and `borer`
+commands run packaging/npm/borer-re.js, and `borer-re-<os>-<cpu>` per
 target, holding only that target's binary, its licenses and a package.json
-whose `os` and `cpu` let npm install it on that platform alone; `borer-mcp`
+whose `os` and `cpu` let npm install it on that platform alone; `borer-re`
 names them all as optionalDependencies (the esbuild pattern). `wheels`
 writes one PyPI wheel of `borer` per target into `OUT`, the binary as the
 wheel's script so pip puts a `borer` command on PATH (the ruff and uv
@@ -61,7 +61,7 @@ TARGETS = {
 NOTICES = ("LICENSE", "NOTICE", "THIRD-PARTY-LICENSES", "RUST-STD-COPYRIGHT.html")
 """The license files each archive carries beside the binary, which travel with it."""
 
-NPM = "borer-mcp"
+NPM = "borer-re"
 """The npm package (`borer` is taken on npm)."""
 
 ABOUT = f"""# borer
@@ -235,7 +235,7 @@ def manifests(assets: Path, out: Path) -> None:
 
 
 def npm(assets: Path, out: Path) -> None:
-    """Writes the `borer-mcp` package and one platform package per target under `out`."""
+    """Writes the `borer-re` package and one platform package per target under `out`."""
     version, archives = release(assets)
     common = {
         "version": version,
@@ -268,15 +268,15 @@ def npm(assets: Path, out: Path) -> None:
         "description": DESCRIPTION,
         **common,
         "keywords": ["mcp", "mcp-server", "reverse-engineering", "decompiler", "disassembler"],
-        "bin": {NPM: "bin/borer-mcp.js", "borer": "bin/borer-mcp.js"},
+        "bin": {NPM: "bin/borer-re.js", "borer": "bin/borer-re.js"},
         "engines": {"node": ">=18"},
         "optionalDependencies": platforms,
     }
     write(launcher / "package.json", json.dumps(manifest, indent=2) + "\n")
     write(launcher / "README.md", ABOUT)
     write(launcher / "LICENSE", (ROOT / "LICENSE").read_bytes())
-    script = (ROOT / "packaging" / "npm" / "borer-mcp.js").read_bytes()
-    write(launcher / "bin" / "borer-mcp.js", script, 0o755)
+    script = (ROOT / "packaging" / "npm" / "borer-re.js").read_bytes()
+    write(launcher / "bin" / "borer-re.js", script, 0o755)
     print(f"wrote {launcher}")
 
 
