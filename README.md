@@ -158,9 +158,7 @@ when a session starts and replaces it when the plugin updates:
 /plugin install borer@borer
 ```
 
-Through a package manager, which installs the same release binary. These
-are set up but **not published yet**; until they are, use the commands
-above:
+Through a package manager, which installs the same release binary:
 
 ```bash
 cargo binstall borer                      # or cargo install borer (builds it)

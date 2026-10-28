@@ -3,13 +3,15 @@
 The release workflow (`.github/workflows/release.yml`) builds every package
 from the GitHub release's archives (`scripts/dev/packages.py`) and publishes
 it after the release job, but each publish job is skipped until its
-credential exists. Nothing here is set up yet. Do the steps in order; each
-ends with one command that shows it worked. GitHub secrets and variables go
-under the borer repository's Settings > Secrets and variables > Actions.
+credential exists. All five were set up and went live with v0.2.6; the
+steps below are kept as the reference for renewing a credential or setting
+them up again. Each ends with one command that shows it worked. GitHub
+secrets and variables go under the borer repository's Settings > Secrets
+and variables > Actions.
 
-All names below are free as of 2026-10-28. `borer` is taken on npm, so the
-npm packages live under the scope `@imjustprism`, which is the npm user
-named `imjustprism`.
+`borer` is taken on npm, so the npm packages live under the scope
+`@imjustprism`, which is the npm user named `imjustprism`. The npm token
+expires on 2027-01-26; renew it, or move npm to trusted publishing.
 
 ## 1. crates.io: `cargo install borer`, `cargo binstall borer`
 
@@ -107,8 +109,6 @@ scoop install imjustprism/borer; borer --version
   which publishers were on (`crates=true` and so on). A job left off shows
   as skipped and the release stays green.
 - To try a package before a tag:
-  `gh release download v0.2.5 -R imjustprism/borer -D dist`, then
+  `gh release download <tag> -R imjustprism/borer -D dist` (for example `v0.2.6`), then
   `python scripts/dev/packages.py npm dist out` (or `wheels dist out`,
   `manifests dist`).
-- When all five are live, update the Install section of README.md: it marks
-  these commands as not published yet.
