@@ -291,13 +291,30 @@ fn manager(exe: &Path, cargo_home: Option<&Path>) -> Option<String> {
             "python"
         });
         if python.exists() {
-            return Some(format!("\"{}\" -m pip install -U borer", shown(&python)));
+            return Some(format!("{} -m pip install -U borer", program(&python)));
         }
         "pip install -U borer"
     } else {
         return None;
     };
     Some(found.to_owned())
+}
+
+/// A program's path as the first word of a command a person pastes.
+///
+/// It is bare when it has no space, so any shell runs it, else quoted, and
+/// on Windows behind PowerShell's `&`, which a quoted program needs there.
+///
+/// # Arguments
+///
+/// * `path` - The program.
+fn program(path: &Path) -> String {
+    let text = shown(path);
+    match (text.contains(' '), cfg!(windows)) {
+        (false, _) => text,
+        (true, true) => format!("& \"{text}\""),
+        (true, false) => format!("\"{text}\""),
+    }
 }
 
 /// A path as a person types it, without the `\\?\` prefix Windows puts on
@@ -758,11 +775,29 @@ mod tests {
         std::fs::write(&python, b"").expect("python");
         assert_eq!(
             manager(&exe, None),
-            Some(format!("\"{}\" -m pip install -U borer", python.display()))
+            Some(format!("{} -m pip install -U borer", program(&python)))
         );
         std::fs::remove_dir_all(site.join("borer-0.2.5.dist-info")).expect("removed");
         assert_eq!(manager(&exe, None), None);
         let _ = std::fs::remove_dir_all(&venv);
+    }
+
+    /// A program path is bare without spaces and quoted with them, behind
+    /// PowerShell's `&` on Windows.
+    ///
+    /// # Panics
+    ///
+    /// When a path is written another way.
+    #[test]
+    fn a_program_path_is_quoted_only_when_it_must_be() {
+        assert_eq!(program(Path::new("/v/bin/python")), "/v/bin/python");
+        let spaced = program(Path::new("/my env/bin/python"));
+        let want = if cfg!(windows) {
+            "& \"/my env/bin/python\""
+        } else {
+            "\"/my env/bin/python\""
+        };
+        assert_eq!(spaced, want);
     }
 
     /// `SHA256SUMS` lines are read with or without the binary-mode star.
