@@ -4,7 +4,9 @@ name: release
 # each with LICENSE, NOTICE, README.md and the licenses of everything the
 # binary links (THIRD-PARTY-LICENSES and RUST-STD-COPYRIGHT.html, written by
 # scripts/dev/licenses.py for that target), and attaches the archives and their
-# SHA-256 sums to the GitHub Release of a pushed `v*` tag. Run by hand on
+# SHA-256 sums to the GitHub Release of a pushed `v*` tag. From that release
+# it then publishes to crates.io, npm and PyPI and updates the Homebrew tap and
+# the Scoop bucket, each only when its credential is configured. Run by hand on
 # a branch, it builds and uploads the archives as workflow artifacts and
 # publishes nothing; run by hand on a tag, it publishes that tag.
 
@@ -142,3 +144,159 @@ jobs:
           --title "borer $GITHUB_REF_NAME"
           --notes-file notes.md
           --verify-tag
+
+  # Which package registries this repository may publish to. Each publish job
+  # below runs only when its credential is configured (a secret, or for PyPI
+  # the PYPI_PUBLISH variable saying its trusted publisher is registered), so a
+  # release without them stays green with those jobs skipped.
+  # packaging/SETUP.md lists what to create.
+  registries:
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      crates: ${{ steps.check.outputs.crates }}
+      npm: ${{ steps.check.outputs.npm }}
+      pypi: ${{ steps.check.outputs.pypi }}
+      manifests: ${{ steps.check.outputs.manifests }}
+    steps:
+      - id: check
+        env:
+          CRATES: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
+          NPM: ${{ secrets.NPM_TOKEN != '' }}
+          PYPI: ${{ vars.PYPI_PUBLISH == 'true' }}
+          MANIFESTS: ${{ secrets.HOMEBREW_TAP_TOKEN != '' || secrets.SCOOP_BUCKET_TOKEN != '' }}
+        run: |
+          {
+            echo "crates=$CRATES"
+            echo "npm=$NPM"
+            echo "pypi=$PYPI"
+            echo "manifests=$MANIFESTS"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  # crates.io, for `cargo install borer` and `cargo binstall borer` (which reads
+  # [package.metadata.binstall] in crates/borer/Cargo.toml and fetches the
+  # release archive). The engine and live crates go first: borer depends on them.
+  crates:
+    needs: registries
+    if: needs.registries.outputs.crates == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: toolchain
+        run: rustup toolchain install --no-self-update
+      - name: publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked -p borer-engine -p borer-live -p borer
+
+  # npm: borer-mcp and its four platform packages (scripts/dev/packages.py).
+  # The Linux pair is installed and run before anything is published; a
+  # package whose version npm already has (a rerun) is left alone.
+  npm:
+    needs: registries
+    if: needs.registries.outputs.npm == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir dist
+      - name: packages
+        run: python3 scripts/dev/packages.py npm dist npm
+      - name: try
+        working-directory: ${{ runner.temp }}
+        run: |
+          npm init -y > /dev/null
+          npm pack "$GITHUB_WORKSPACE/npm/borer-mcp" "$GITHUB_WORKSPACE/npm/borer-mcp-linux-x64"
+          npm install --no-audit --no-fund ./borer-mcp-*.tgz
+          npx --no-install borer-mcp --version
+      - name: publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          echo "//registry.npmjs.org/:_authToken=\${NODE_AUTH_TOKEN}" > ~/.npmrc
+          for dir in npm/borer-mcp-*/ npm/borer-mcp/; do
+            spec=$(node -p "const p = require('./${dir}package.json'); p.name + '@' + p.version")
+            if npm view "$spec" version > /dev/null 2>&1; then
+              echo "$spec is already published"
+            else
+              npm publish "$dir" --access public --provenance
+            fi
+          done
+
+  # PyPI: the borer wheels (scripts/dev/packages.py), the Linux one installed
+  # and run before anything is uploaded, through trusted
+  # publishing, so no token: PyPI trusts this workflow in the `pypi`
+  # environment once it is registered there as the project's publisher.
+  pypi:
+    needs: registries
+    if: needs.registries.outputs.pypi == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir dist
+      - name: wheels
+        run: python3 scripts/dev/packages.py wheels dist wheels
+      - name: try
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --no-index wheels/borer-*-manylinux_*_x86_64.whl
+          "$RUNNER_TEMP/venv/bin/borer" --version
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: wheels
+          skip-existing: true
+
+  # The Homebrew formula and the Scoop manifest, committed to the tap and the
+  # bucket repositories; either is skipped while its token is not set.
+  manifests:
+    needs: registries
+    if: needs.registries.outputs.manifests == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: write
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir dist --pattern SHA256SUMS
+          python3 scripts/dev/packages.py manifests dist out
+      - name: push
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+        run: |
+          push() {
+            local repo=$1 token=$2 from=$3 to=$4 dir="$RUNNER_TEMP/$1"
+            if [ -z "$token" ]; then echo "$repo: no token, skipped"; return; fi
+            git clone -q --depth 1 "https://x-access-token:$token@github.com/imjustprism/$repo.git" "$dir"
+            mkdir -p "$(dirname "$dir/$to")"
+            cp "$from" "$dir/$to"
+            git -C "$dir" add "$to"
+            if git -C "$dir" diff --cached --quiet; then
+              echo "$repo: $to is already current"
+              return
+            fi
+            git -C "$dir" -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -q -m "borer ${GITHUB_REF_NAME#v}"
+            git -C "$dir" push -q origin HEAD
+          }
+          push homebrew-tap "$TAP_TOKEN" out/homebrew/borer.rb Formula/borer.rb
+          push scoop-bucket "$BUCKET_TOKEN" out/scoop/borer.json bucket/borer.json
