@@ -249,12 +249,14 @@ fn aside(exe: &Path) -> PathBuf {
 /// # Arguments
 ///
 /// * `exe` - The running binary, its links resolved.
-/// * `cargo_home` - `CARGO_HOME`, when set.
+/// * `cargo_home` - `CARGO_HOME`, when set, its links resolved.
+///
 /// # Returns
 ///
-/// The command, or `None` for a binary nothing manages, which `borer
-/// update` replaces itself.
-fn manager(exe: &Path, cargo_home: Option<&Path>) -> Option<&'static str> {
+/// The command, naming the project or Python environment that owns the
+/// binary where the plain command could update another copy, or `None` for
+/// a binary nothing manages, which `borer update` replaces itself.
+fn manager(exe: &Path, cargo_home: Option<&Path>) -> Option<String> {
     let norm = |p: &Path| p.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
     let path = norm(exe);
     let has = |part: &str| path.contains(part);
@@ -268,7 +270,14 @@ fn manager(exe: &Path, cargo_home: Option<&Path>) -> Option<&'static str> {
     } else if has("/npm/node_modules/") || has("/lib/node_modules/") {
         "npm install -g borer-mcp@latest"
     } else if has("/node_modules/") {
-        "npm install borer-mcp@latest"
+        let project = exe
+            .ancestors()
+            .find(|a| a.file_name().is_some_and(|n| n == "node_modules"))
+            .and_then(Path::parent)?;
+        return Some(format!(
+            "npm install borer-mcp@latest --prefix \"{}\"",
+            shown(project)
+        ));
     } else if in_cargo || has("/.cargo/bin/") {
         "cargo install borer"
     } else if has("/pipx/") {
@@ -276,11 +285,31 @@ fn manager(exe: &Path, cargo_home: Option<&Path>) -> Option<&'static str> {
     } else if has("/uv/tools/") {
         "uv tool upgrade borer"
     } else if from_wheel(exe) {
+        let python = exe.with_file_name(if cfg!(windows) {
+            "python.exe"
+        } else {
+            "python"
+        });
+        if python.exists() {
+            return Some(format!("\"{}\" -m pip install -U borer", shown(&python)));
+        }
         "pip install -U borer"
     } else {
         return None;
     };
-    Some(found)
+    Some(found.to_owned())
+}
+
+/// A path as a person types it, without the `\\?\` prefix Windows puts on
+/// a resolved one.
+///
+/// # Arguments
+///
+/// * `path` - The path.
+fn shown(path: &Path) -> String {
+    let text = path.display().to_string();
+    text.strip_prefix(r"\\?\")
+        .map_or_else(|| text.clone(), str::to_owned)
 }
 
 /// Whether a wheel put this binary where it runs: its scripts folder sits
@@ -308,9 +337,11 @@ fn from_wheel(exe: &Path) -> bool {
     })
 }
 
-/// `CARGO_HOME`, where cargo installs binaries when it is set.
+/// `CARGO_HOME`, where cargo installs binaries when it is set, with its
+/// links resolved as the running binary's are.
 fn cargo_home() -> Option<PathBuf> {
-    std::env::var_os("CARGO_HOME").map(PathBuf::from)
+    let home = PathBuf::from(std::env::var_os("CARGO_HOME")?);
+    Some(std::fs::canonicalize(&home).unwrap_or(home))
 }
 
 /// The running binary with its links resolved, so a package manager's
@@ -496,7 +527,7 @@ pub(crate) fn check() -> Option<String> {
         let shown = tag.trim_start_matches('v');
         let cmd = running_exe()
             .and_then(|exe| manager(&exe, cargo_home().as_deref()))
-            .unwrap_or("borer update");
+            .unwrap_or_else(|| "borer update".to_owned());
         format!("borer {shown} is out (this is {VERSION}); run `{cmd}`")
     })
 }
@@ -690,7 +721,7 @@ mod tests {
             ),
             (
                 "/home/a/proj/node_modules/borer-mcp-linux-x64/bin/borer",
-                Some("npm install borer-mcp@latest"),
+                Some("npm install borer-mcp@latest --prefix \"/home/a/proj\""),
             ),
             ("/home/a/.cargo/bin/borer", Some("cargo install borer")),
             (
@@ -704,11 +735,11 @@ mod tests {
             ("/home/a/bin/borer", None),
         ];
         for (path, want) in cases {
-            assert_eq!(manager(Path::new(path), None), want, "{path}");
+            assert_eq!(manager(Path::new(path), None).as_deref(), want, "{path}");
         }
         let home = Path::new("/opt/cargo");
         assert_eq!(
-            manager(Path::new("/opt/cargo/bin/borer"), Some(home)),
+            manager(Path::new("/opt/cargo/bin/borer"), Some(home)).as_deref(),
             Some("cargo install borer")
         );
         assert_eq!(manager(Path::new("/opt/cargo/bin/borer"), None), None);
@@ -718,7 +749,17 @@ mod tests {
         std::fs::create_dir_all(site.join("borer-0.2.5.dist-info")).expect("dist-info");
         std::fs::create_dir_all(venv.join("Scripts")).expect("scripts");
         let exe = venv.join("Scripts").join("borer.exe");
-        assert_eq!(manager(&exe, None), Some("pip install -U borer"));
+        assert_eq!(manager(&exe, None).as_deref(), Some("pip install -U borer"));
+        let python = exe.with_file_name(if cfg!(windows) {
+            "python.exe"
+        } else {
+            "python"
+        });
+        std::fs::write(&python, b"").expect("python");
+        assert_eq!(
+            manager(&exe, None),
+            Some(format!("\"{}\" -m pip install -U borer", python.display()))
+        );
         std::fs::remove_dir_all(site.join("borer-0.2.5.dist-info")).expect("removed");
         assert_eq!(manager(&exe, None), None);
         let _ = std::fs::remove_dir_all(&venv);
