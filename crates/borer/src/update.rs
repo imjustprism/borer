@@ -242,31 +242,35 @@ fn aside(exe: &Path) -> PathBuf {
 /// The command that updates this binary when a package manager installed it.
 ///
 /// It is read from where the binary lives: Homebrew's cellar, a Scoop app,
-/// an npm package, cargo's bin folder, a pipx or uv tool, or a wheel (a
+/// an npx cache or a global or project npm package, cargo's bin folder
+/// (`CARGO_HOME`'s when set), a pipx or uv tool, or a wheel (a
 /// `borer-*.dist-info` folder beside the scripts folder it was put in).
 ///
 /// # Arguments
 ///
 /// * `exe` - The running binary, its links resolved.
-///
+/// * `cargo_home` - `CARGO_HOME`, when set.
 /// # Returns
 ///
 /// The command, or `None` for a binary nothing manages, which `borer
 /// update` replaces itself.
-fn manager(exe: &Path) -> Option<&'static str> {
-    let path = exe
-        .to_string_lossy()
-        .replace('\\', "/")
-        .to_ascii_lowercase();
+fn manager(exe: &Path, cargo_home: Option<&Path>) -> Option<&'static str> {
+    let norm = |p: &Path| p.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+    let path = norm(exe);
     let has = |part: &str| path.contains(part);
-    let found = if has("/cellar/") || has("/homebrew/") || has("/linuxbrew/") {
+    let in_cargo = cargo_home.is_some_and(|home| path.starts_with(&format!("{}/bin/", norm(home))));
+    let found = if has("/cellar/") || has("/linuxbrew/") {
         "brew upgrade borer"
     } else if has("/scoop/apps/") {
         "scoop update borer"
-    } else if has("/node_modules/") {
+    } else if has("/_npx/") {
+        "npx -y borer-mcp@latest"
+    } else if has("/npm/node_modules/") || has("/lib/node_modules/") {
         "npm install -g borer-mcp@latest"
-    } else if has("/.cargo/bin/") {
-        "cargo binstall borer"
+    } else if has("/node_modules/") {
+        "npm install borer-mcp@latest"
+    } else if in_cargo || has("/.cargo/bin/") {
+        "cargo install borer"
     } else if has("/pipx/") {
         "pipx upgrade borer"
     } else if has("/uv/tools/") {
@@ -304,6 +308,11 @@ fn from_wheel(exe: &Path) -> bool {
     })
 }
 
+/// `CARGO_HOME`, where cargo installs binaries when it is set.
+fn cargo_home() -> Option<PathBuf> {
+    std::env::var_os("CARGO_HOME").map(PathBuf::from)
+}
+
 /// The running binary with its links resolved, so a package manager's
 /// link (`/opt/homebrew/bin/borer`) reads as the file it points at.
 fn running_exe() -> Option<PathBuf> {
@@ -339,7 +348,7 @@ pub(crate) fn update(check_only: bool) -> anyhow::Result<String> {
         return Ok(format!("borer {VERSION} is the latest release\n"));
     }
     let shown = tag.trim_start_matches('v');
-    if let Some(cmd) = running_exe().as_deref().and_then(manager) {
+    if let Some(cmd) = running_exe().and_then(|exe| manager(&exe, cargo_home().as_deref())) {
         return Ok(format!(
             "borer {shown} is out (this is {VERSION}); a package manager installed this one, so `{cmd}` updates it\n"
         ));
@@ -486,8 +495,7 @@ pub(crate) fn check() -> Option<String> {
     is_newer(&tag).then(|| {
         let shown = tag.trim_start_matches('v');
         let cmd = running_exe()
-            .as_deref()
-            .and_then(manager)
+            .and_then(|exe| manager(&exe, cargo_home().as_deref()))
             .unwrap_or("borer update");
         format!("borer {shown} is out (this is {VERSION}); run `{cmd}`")
     })
@@ -663,15 +671,28 @@ mod tests {
                 "/opt/homebrew/Cellar/borer/0.2.5/bin/borer",
                 Some("brew upgrade borer"),
             ),
+            ("/opt/homebrew/opt/other/borer", None),
             (
                 r"C:\Users\a\scoop\apps\borer\current\borer.exe",
                 Some("scoop update borer"),
             ),
             (
+                "/home/a/.npm/_npx/1f2e/node_modules/borer-mcp-linux-x64/bin/borer",
+                Some("npx -y borer-mcp@latest"),
+            ),
+            (
                 "/usr/lib/node_modules/borer-mcp-linux-x64/bin/borer",
                 Some("npm install -g borer-mcp@latest"),
             ),
-            ("/home/a/.cargo/bin/borer", Some("cargo binstall borer")),
+            (
+                r"C:\Users\a\AppData\Roaming\npm\node_modules\borer-mcp-win32-x64\bin\borer.exe",
+                Some("npm install -g borer-mcp@latest"),
+            ),
+            (
+                "/home/a/proj/node_modules/borer-mcp-linux-x64/bin/borer",
+                Some("npm install borer-mcp@latest"),
+            ),
+            ("/home/a/.cargo/bin/borer", Some("cargo install borer")),
             (
                 "/home/a/.local/pipx/venvs/borer/bin/borer",
                 Some("pipx upgrade borer"),
@@ -683,17 +704,23 @@ mod tests {
             ("/home/a/bin/borer", None),
         ];
         for (path, want) in cases {
-            assert_eq!(manager(Path::new(path)), want, "{path}");
+            assert_eq!(manager(Path::new(path), None), want, "{path}");
         }
+        let home = Path::new("/opt/cargo");
+        assert_eq!(
+            manager(Path::new("/opt/cargo/bin/borer"), Some(home)),
+            Some("cargo install borer")
+        );
+        assert_eq!(manager(Path::new("/opt/cargo/bin/borer"), None), None);
         let venv = std::env::temp_dir().join(format!("borer-wheel-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&venv);
         let site = venv.join("Lib").join("site-packages");
         std::fs::create_dir_all(site.join("borer-0.2.5.dist-info")).expect("dist-info");
         std::fs::create_dir_all(venv.join("Scripts")).expect("scripts");
         let exe = venv.join("Scripts").join("borer.exe");
-        assert_eq!(manager(&exe), Some("pip install -U borer"));
+        assert_eq!(manager(&exe, None), Some("pip install -U borer"));
         std::fs::remove_dir_all(site.join("borer-0.2.5.dist-info")).expect("removed");
-        assert_eq!(manager(&exe), None);
+        assert_eq!(manager(&exe, None), None);
         let _ = std::fs::remove_dir_all(&venv);
     }
 
