@@ -25,3 +25,14 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 terminal_size = "0.4"
 tokio = { version = "1.53.1", features = ["full"] }
+
+# cargo-binstall (`cargo binstall borer`) takes the release archive instead of
+# building: each holds one directory, borer-v<version>-<target>/, with the binary.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }.tar.gz"
+bin-dir = "{ name }-v{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-v{ version }-{ target }.zip"
+pkg-fmt = "zip"
