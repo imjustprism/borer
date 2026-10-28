@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "borer analysis core: binary loading, disassembly, queries. Sync, pure, MCP-free (wasm-friendly)."
+readme = "../../README.md"
 repository.workspace = true
 keywords.workspace = true
 categories.workspace = true

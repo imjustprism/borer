@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Read-only access to a running process for borer's live view: attach, modules, regions, memory."
+readme = "../../README.md"
 repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
