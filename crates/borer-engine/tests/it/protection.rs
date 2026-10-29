@@ -21,6 +21,10 @@ pub(crate) const IMAGE_BASE: u64 = 0x1_4000_0000;
 pub(crate) const PE_AT: usize = 0x80;
 /// Bytes of the PE32+ optional header.
 const OPTIONAL: usize = 240;
+/// Bytes of the PE32 optional header.
+const OPTIONAL32: usize = 224;
+/// The preferred load address of a PE32 image.
+const IMAGE_BASE32: u64 = 0x40_0000;
 /// `IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ`.
 const CODE: u32 = 0x6000_0020;
 /// `IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE`.
@@ -86,23 +90,50 @@ fn put64(b: &mut [u8], at: usize, v: u64) {
 /// * `secs` - The sections, in table order.
 /// * `entry_rva` - The entry point, relative to [`IMAGE_BASE`].
 pub(crate) fn pe(secs: &[Sec], entry_rva: u32) -> Vec<u8> {
+    image(secs, entry_rva, true)
+}
+
+/// Builds an x86 PE32 image as [`pe`] builds a PE32+ one, loaded at
+/// [`IMAGE_BASE32`].
+///
+/// # Arguments
+///
+/// * `secs` - The sections, in table order.
+/// * `entry_rva` - The entry point, relative to [`IMAGE_BASE32`].
+fn pe32(secs: &[Sec], entry_rva: u32) -> Vec<u8> {
+    image(secs, entry_rva, false)
+}
+
+/// Builds a PE32+ x64 image when `wide`, else a PE32 x86 one.
+///
+/// # Arguments
+///
+/// * `secs` - The sections, in table order.
+/// * `entry_rva` - The entry point, relative to the image base.
+/// * `wide` - PE32+ for x64, else PE32 for x86.
+fn image(secs: &[Sec], entry_rva: u32, wide: bool) -> Vec<u8> {
+    let optional = if wide { OPTIONAL } else { OPTIONAL32 };
     let mut b = vec![0u8; HEADERS];
     b[..2].copy_from_slice(b"MZ");
     put32(&mut b, 0x3c, u32::try_from(PE_AT).expect("fits"));
     b[PE_AT..PE_AT + 4].copy_from_slice(b"PE\0\0");
     let coff = PE_AT + 4;
-    put16(&mut b, coff, 0x8664);
+    put16(&mut b, coff, if wide { 0x8664 } else { 0x14c });
     put16(
         &mut b,
         coff + 2,
         u16::try_from(secs.len()).expect("few sections"),
     );
-    put16(&mut b, coff + 16, u16::try_from(OPTIONAL).expect("fits"));
-    put16(&mut b, coff + 18, 0x0022);
+    put16(&mut b, coff + 16, u16::try_from(optional).expect("fits"));
+    put16(&mut b, coff + 18, if wide { 0x0022 } else { 0x0102 });
     let opt = coff + 20;
-    put16(&mut b, opt, 0x20b);
+    put16(&mut b, opt, if wide { 0x20b } else { 0x10b });
     put32(&mut b, opt + 16, entry_rva);
-    put64(&mut b, opt + 24, IMAGE_BASE);
+    if wide {
+        put64(&mut b, opt + 24, IMAGE_BASE);
+    } else {
+        put32(&mut b, opt + 28, u32::try_from(IMAGE_BASE32).expect("fits"));
+    }
     put32(&mut b, opt + 32, 0x1000);
     put32(&mut b, opt + 36, u32::try_from(FILE_ALIGN).expect("fits"));
     put16(&mut b, opt + 48, 6);
@@ -114,12 +145,20 @@ pub(crate) fn pe(secs: &[Sec], entry_rva: u32) -> Vec<u8> {
     put32(&mut b, opt + 56, image_end.div_ceil(0x1000) * 0x1000);
     put32(&mut b, opt + 60, u32::try_from(HEADERS).expect("fits"));
     put16(&mut b, opt + 68, 3);
-    put64(&mut b, opt + 72, 0x10_0000);
-    put64(&mut b, opt + 80, 0x1000);
-    put64(&mut b, opt + 88, 0x10_0000);
-    put64(&mut b, opt + 96, 0x1000);
-    put32(&mut b, opt + 108, 16);
-    let mut row = opt + OPTIONAL;
+    if wide {
+        put64(&mut b, opt + 72, 0x10_0000);
+        put64(&mut b, opt + 80, 0x1000);
+        put64(&mut b, opt + 88, 0x10_0000);
+        put64(&mut b, opt + 96, 0x1000);
+        put32(&mut b, opt + 108, 16);
+    } else {
+        put32(&mut b, opt + 72, 0x10_0000);
+        put32(&mut b, opt + 76, 0x1000);
+        put32(&mut b, opt + 80, 0x10_0000);
+        put32(&mut b, opt + 84, 0x1000);
+        put32(&mut b, opt + 92, 16);
+    }
+    let mut row = opt + optional;
     let mut at = HEADERS;
     for s in secs {
         let raw = u32::try_from(s.data.len().div_ceil(FILE_ALIGN) * FILE_ALIGN).expect("fits");
@@ -448,19 +487,19 @@ fn a_plain_image_raises_no_entropy_blind_spot() {
 }
 
 /// Builds a PE whose first section holds no file bytes and states file
-/// offset 0, the shape FSG writes, entered at `entry_rva`.
+/// offset 0, the shape FSG writes, as an x86 PE32 entered at `entry_rva`.
 ///
 /// # Arguments
 ///
 /// * `stub` - Bytes written at the entry: into the headers when
 ///   `entry_rva` is below `0x400`, else at the start of the second section.
-/// * `entry_rva` - The entry point, relative to [`IMAGE_BASE`].
+/// * `entry_rva` - The entry point, relative to [`IMAGE_BASE32`].
 fn fsg_shape(stub: &[u8], entry_rva: u32) -> Vec<u8> {
     let mut body = high_entropy(0x800, 0x77);
     if entry_rva >= 0x8000 {
         body[..stub.len()].copy_from_slice(stub);
     }
-    let mut bytes = pe(
+    let mut bytes = pe32(
         &[
             Sec {
                 name: "",
@@ -479,7 +518,7 @@ fn fsg_shape(stub: &[u8], entry_rva: u32) -> Vec<u8> {
         ],
         entry_rva,
     );
-    let first_row = PE_AT + 24 + OPTIONAL;
+    let first_row = PE_AT + 24 + OPTIONAL32;
     bytes[first_row + 20..first_row + 24].fill(0);
     if entry_rva < 0x400 {
         let at = usize::try_from(entry_rva).expect("fits");
@@ -499,7 +538,7 @@ fn fsg_20_entered_in_the_headers_names_fsg() {
     ];
     let out = report(fsg_shape(&stub, 0x300));
     assert!(out.contains("# protected: FSG"), "{out}");
-    assert!(out.contains("entry stub at 0x140000300"), "{out}");
+    assert!(out.contains("entry stub at 0x400300"), "{out}");
     assert!(out.contains("FSG 2.0's aPLib loop"), "{out}");
 }
 
@@ -524,7 +563,7 @@ fn mpress_entry_stub_names_mpress() {
         0x60, 0xe8, 0x00, 0x00, 0x00, 0x00, 0x58, 0x05, 0x5a, 0x0b, 0x00, 0x00, 0x8b, 0x30, 0x03,
         0xf0, 0x2b, 0xc0, 0x8b, 0xfe, 0x66, 0xad, 0xc1, 0xe0, 0x0c,
     ]);
-    let out = report(pe(&[sec(".text", 0x1000, code)], 0x1000));
+    let out = report(pe32(&[sec(".text", 0x1000, code)], 0x1000));
     assert!(out.contains("# protected: MPRESS"), "{out}");
     assert!(out.contains("an x86 MPRESS 2.x stub"), "{out}");
 }
