@@ -1809,15 +1809,9 @@ impl Program {
     /// of its section's file bytes, or maps past any file offset.
     pub fn read_va_upto(&self, va: u64, max: usize) -> Option<&[u8]> {
         let Some(s) = self.section_at(va) else {
-            let first = self.sections.first()?;
-            let cap = first
-                .va
-                .0
-                .checked_sub(self.image_base)?
-                .min(first.file_off.0);
             let off = va.checked_sub(self.image_base)?;
-            let room = usize::try_from(cap.checked_sub(off)?).ok()?;
-            return self.header_slice(va, max.min(room));
+            let room = self.headers_len(off)?.checked_sub(off)?;
+            return self.header_slice(va, max.min(saturating_usize(room)));
         };
         let off = s.file_off.0.checked_add(va - s.va.0)?;
         let limit = (s.file_off.0 + s.file_size).min(from_usize(self.bytes.len()));
@@ -1860,9 +1854,8 @@ impl Program {
     /// image base is asking for the `MZ`, which is a fair question, and the
     /// live reader has always answered it.
     ///
-    /// The extent is where the first section begins, in the image and in the
-    /// file, whichever comes first: below that offset a file holds headers and
-    /// nothing else, so the mapping is exact rather than assumed.
+    /// The extent is [`Program::headers_len`]: below it a file holds headers
+    /// and nothing else, so the mapping is exact rather than assumed.
     ///
     /// # Arguments
     ///
@@ -1871,24 +1864,50 @@ impl Program {
     ///
     /// # Returns
     ///
-    /// The bytes, or `None` when the range is not entirely inside the headers.
+    /// The bytes, or `None` when the range does not start inside the headers
+    /// or runs past them.
     fn header_slice(&self, va: u64, len: usize) -> Option<&[u8]> {
         if self.format != BinaryFormat::Pe || va < self.image_base {
             return None;
         }
-        let first = self.sections.first()?;
-        let cap = first
-            .va
-            .0
-            .checked_sub(self.image_base)?
-            .min(first.file_off.0);
         let off = va - self.image_base;
-        let end = off.checked_add(from_usize(len))?;
-        if end > cap {
+        let cap = self.headers_len(off)?;
+        if off.checked_add(from_usize(len))? > cap {
             return None;
         }
         self.bytes
-            .get(usize::try_from(off).ok()?..usize::try_from(end).ok()?)
+            .get(saturating_usize(off)..saturating_usize(off).saturating_add(len))
+    }
+
+    /// Returns how many bytes a PE's mapped headers span from the image base,
+    /// when `off` lies inside them.
+    ///
+    /// They end where the first section begins in the image, or where the
+    /// lowest section holding file bytes begins in the file, whichever comes
+    /// first. A first section with no file bytes (a packer's empty target,
+    /// MSVC's `.textbss`) states a file offset that holds nothing of it,
+    /// often 0, so it does not end the headers in the file. Only an `off`
+    /// below the first section's start in the image looks past it, so the
+    /// reads no section maps cost no scan.
+    ///
+    /// # Arguments
+    ///
+    /// * `off` - Bytes from the image base.
+    ///
+    /// # Returns
+    ///
+    /// The length, or `None` when `off` is not inside the headers, there
+    /// are no sections, or the first maps below the image base.
+    fn headers_len(&self, off: u64) -> Option<u64> {
+        let first = self.sections.first()?;
+        let in_image = first.va.0.checked_sub(self.image_base)?;
+        let cap = if first.file_size > 0 || off >= in_image {
+            in_image.min(first.file_off.0)
+        } else {
+            let backed = self.sections.iter().filter(|s| s.file_size > 0);
+            backed.map(|s| s.file_off.0).fold(in_image, u64::min)
+        };
+        (off < cap).then_some(cap)
     }
 
     /// Tells whether `va` lies in a PE's mapped headers: the image's first

@@ -433,6 +433,65 @@ fn a_read_past_the_headers_is_refused() {
     );
 }
 
+/// A first section with no file bytes does not end the headers.
+///
+/// FSG 2.0 writes an empty target section whose table row says file offset
+/// 0 and enters its stub inside the headers; the headers still run to the
+/// first section that holds file bytes, so the entry reads.
+#[test]
+fn an_empty_first_section_does_not_end_the_headers() {
+    use borer_engine::program::{Arch, BinaryFormat, Program, Section};
+    let mut bytes = vec![0u8; 0x400];
+    bytes[0x154] = 0x87;
+    bytes.extend_from_slice(&[0x90; 16]);
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86,
+        0x400000,
+        Some(0x400154),
+        vec![
+            Section::mapped("", 0x401000, 0, 0, true, true),
+            Section::mapped("", 0x437000, 0x400, 16, true, true),
+        ],
+    );
+    p.format = BinaryFormat::Pe;
+    assert_eq!(p.read_va(0x400154, 1), Some(&[0x87][..]));
+    assert!(p.in_headers(0x400154));
+    assert!(p.read_va(0x400400, 1).is_none());
+    assert!(
+        p.read_va_upto(0x400400, 16).is_none(),
+        "the headers' end reads as no bytes, not an empty slice"
+    );
+}
+
+/// Behind an empty first section the headers end at the lowest file offset
+/// any section holds, not at the lowest-addressed section's: section bytes
+/// never read as headers.
+#[test]
+fn the_headers_end_at_the_lowest_file_offset() {
+    use borer_engine::program::{Arch, BinaryFormat, Program, Section};
+    let mut bytes = vec![0u8; 0x400];
+    bytes.extend_from_slice(&[0x41; 0x800]);
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86,
+        0x400000,
+        None,
+        vec![
+            Section::mapped("", 0x401000, 0, 0, true, true),
+            Section::mapped("a", 0x402000, 0x800, 0x400, false, true),
+            Section::mapped("b", 0x403000, 0x400, 0x400, false, true),
+        ],
+    );
+    p.format = BinaryFormat::Pe;
+    assert!(p.read_va(0x4003ff, 1).is_some());
+    assert!(
+        p.read_va(0x400400, 1).is_none(),
+        "section b's bytes read as headers"
+    );
+    assert!(!p.in_headers(0x400600));
+}
+
 /// A PE whose headers are mapped at the base, the layout a linker writes.
 fn pe_with_headers() -> borer_engine::program::Program {
     use borer_engine::program::{Arch, BinaryFormat, Program, Section};
