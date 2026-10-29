@@ -528,3 +528,166 @@ fn mpress_entry_stub_names_mpress() {
     assert!(out.contains("# protected: MPRESS"), "{out}");
     assert!(out.contains("an x86 MPRESS 2.x stub"), "{out}");
 }
+
+/// Loads `bytes`, lets `edit` set what the builder cannot write, and
+/// renders the protection report.
+fn report_with(bytes: Vec<u8>, edit: impl FnOnce(&mut Program)) -> String {
+    let mut p = Program::from_bytes(PathBuf::from("plain.exe"), bytes).expect("a PE loads");
+    edit(&mut p);
+    let a = Analysis::compute(&p);
+    protection_tsv(&p, &a)
+}
+
+/// Import symbols by name.
+fn imports(names: &[&str]) -> Vec<borer_engine::program::Symbol> {
+    names
+        .iter()
+        .map(|n| borer_engine::program::Symbol {
+            name: (*n).to_owned(),
+            addr: 0,
+            kind: borer_engine::program::SymbolKind::Import,
+        })
+        .collect()
+}
+
+/// An MSVC debug build: an empty writable and executable `.textbss` comes
+/// first, the entry is in `.text`, a TLS callback runs and few functions
+/// are imported. None of that is packing, so it stays plain.
+#[test]
+fn an_msvc_debug_layout_with_tls_is_plain() {
+    let mut code = vec![0xcc; 0x200];
+    code[..6].copy_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]);
+    let bytes = pe(
+        &[
+            Sec {
+                name: ".textbss",
+                rva: 0x1000,
+                data: Vec::new(),
+                vsize: 0x10000,
+                chars: WX,
+            },
+            sec(".text", 0x11000, code),
+            data(".data", 0x12000, vec![0; 0x200]),
+        ],
+        0x11000,
+    );
+    let out = report_with(bytes, |p| p.headers.tls_callbacks.push(0x1_4001_1000));
+    assert!(
+        out.starts_with("# plain: no mark only packing leaves"),
+        "{out}"
+    );
+    assert!(!out.contains("writable and executable"), "{out}");
+    assert!(!out.contains("not the first code section"), "{out}");
+    assert!(out.contains("TLS callback"), "{out}");
+}
+
+/// A packer that strips the code to an empty read-only `.text` and enters a
+/// later high-entropy section still shows both marks: the empty section is
+/// not bss, so it stays the first code section.
+#[test]
+fn an_empty_read_only_text_before_the_entry_is_still_first() {
+    let mut body = high_entropy(0x800, 0x99);
+    body[..6].copy_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]);
+    let bytes = pe(
+        &[
+            Sec {
+                name: ".text",
+                rva: 0x1000,
+                data: Vec::new(),
+                vsize: 0x2000,
+                chars: CODE,
+            },
+            sec(".lxz", 0x3000, body),
+        ],
+        0x3000,
+    );
+    let out = report_with(bytes, |p| p.symbols = imports(&TWELVE_IMPORTS));
+    assert!(out.starts_with("# packed"), "{out}");
+    assert!(
+        out.contains("entry point in .lxz, not the first code section"),
+        "{out}"
+    );
+}
+
+/// A .NET image imports `_CorExeMain` alone by design, which is no thin
+/// import table.
+#[test]
+fn a_clr_image_with_one_import_is_not_thin() {
+    let mut code = vec![0xcc; 0x200];
+    code[..6].copy_from_slice(&[0xff, 0x25, 0x00, 0x20, 0x40, 0x00]);
+    let bytes = pe(&[sec(".text", 0x1000, code)], 0x1000);
+    let out = report_with(bytes, |p| {
+        p.headers.directories.push("clr");
+        p.symbols = imports(&["mscoree.dll!_CorExeMain"]);
+    });
+    assert!(out.starts_with("# plain: no packer marks"), "{out}");
+}
+
+/// A hand-assembled program whose one code section is writable, entered
+/// there, is one fact: writable code holding the entry. It is not called
+/// packed on that alone.
+#[test]
+fn an_entry_in_writable_code_is_one_mark() {
+    let mut code = vec![0xcc; 0x200];
+    code[..6].copy_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]);
+    let bytes = pe(
+        &[Sec {
+            chars: WX,
+            ..sec(".text", 0x1000, code)
+        }],
+        0x1000,
+    );
+    let out = report_with(bytes, |p| p.symbols = imports(&TWELVE_IMPORTS));
+    assert!(out.starts_with("# plain: one mark only"), "{out}");
+    assert!(out.contains("writable and executable: .text"), "{out}");
+    assert!(!out.contains("writable memory"), "{out}");
+}
+
+/// A Visual Basic program's `.text` holds P-code and forms the runtime
+/// reads, so few functions in it, even at high entropy, say nothing of
+/// packing.
+#[test]
+fn a_visual_basic_image_is_not_sparse_code() {
+    let mut code = high_entropy(0x12000, 0x5b);
+    code[..6].copy_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]);
+    let bytes = pe(&[sec(".text", 0x1000, code)], 0x1000);
+    let vb = report_with(bytes.clone(), |p| {
+        p.headers.libraries.push("MSVBVM60.DLL".to_owned());
+        p.symbols = imports(&TWELVE_IMPORTS);
+    });
+    assert!(vb.starts_with("# plain: one mark only"), "{vb}");
+    assert!(!vb.contains("functions in"), "{vb}");
+    let native = report_with(bytes, |p| p.symbols = imports(&TWELVE_IMPORTS));
+    assert!(native.starts_with("# packed"), "{native}");
+    assert!(native.contains("functions in"), "{native}");
+}
+
+/// Enough imports that the table is not thin.
+const TWELVE_IMPORTS: [&str; 12] = [
+    "a!a", "a!b", "a!c", "a!d", "a!e", "a!f", "a!g", "a!h", "a!i", "a!j", "a!k", "a!l",
+];
+
+/// A dynamically linked GCC ELF enters `.text` after `.init` and `.plt`
+/// and imports a few libc functions: neither is a mark.
+#[test]
+fn a_gcc_elf_entered_after_init_and_plt_is_plain() {
+    use borer_engine::program::{Arch, BinaryFormat, Section};
+    let mut bytes = vec![0u8; 0x1000];
+    bytes.extend(std::iter::repeat_n(0xc3, 0x300));
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0x40_0000,
+        Some(0x40_1100),
+        vec![
+            Section::mapped(".init", 0x40_1000, 0x1000, 0x20, false, true),
+            Section::mapped(".plt", 0x40_1020, 0x1020, 0x40, false, true),
+            Section::mapped(".text", 0x40_1100, 0x1100, 0x200, false, true),
+        ],
+    );
+    p.format = BinaryFormat::Elf;
+    p.symbols = imports(&["puts", "strcmp", "__libc_start_main"]);
+    let a = Analysis::compute(&p);
+    let out = protection_tsv(&p, &a);
+    assert!(out.starts_with("# plain: no packer marks"), "{out}");
+}

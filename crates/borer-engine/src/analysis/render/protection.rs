@@ -1351,6 +1351,113 @@ pub fn packer_marks(p: &Program) -> BTreeMap<&'static str, Vec<String>> {
     names
 }
 
+/// Section names an ELF linker places before `.text`: stubs and init code,
+/// not where a program's code begins.
+const ELF_STUB_SECTIONS: [&str; 5] = [".init", ".plt", ".plt.got", ".plt.sec", ".fini"];
+
+/// The Visual Basic runtimes whose import makes an image P-code and forms
+/// the runtime reads, not machine code.
+const VB_RUNTIMES: [&str; 2] = ["msvbvm60.dll", "msvbvm50.dll"];
+
+/// The marks any packer leaves whatever its name, strong and weak.
+///
+/// A strong mark is one packing needs and a compiler does not leave: most
+/// of the file at high entropy, file bytes both writable and executable
+/// (counted once with an entry point in them, one fact), an entry point in
+/// other writable memory, or executable bytes with almost no code found in
+/// them (not for a .NET or Visual Basic image, whose program is CIL or
+/// P-code the runtime reads, not machine code). A weak mark is ordinary in
+/// plain builds too, so it only backs a strong one: a thin import table
+/// (not for a .NET image, which imports one function by design, nor an ELF
+/// that links dynamically), an entry point past the first code section
+/// (a writable section with no file bytes, such as MSVC's `.textbss`, and
+/// an ELF's `.init` and `.plt` do not count as first; an empty read-only
+/// code section a packer stripped does), and TLS callbacks, which
+/// `MinGW` and MSVC write on their own.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis, for how much code was found.
+/// * `share` - Percent of the file's section bytes at [`PACKED_ENTROPY`] or
+///   above, `None` when the sections hold no file bytes.
+/// * `wx` - Sections both writable and executable.
+///
+/// # Returns
+///
+/// The strong marks and the weak ones, each a sentence of evidence.
+fn packing_marks(
+    p: &Program,
+    a: &Analysis,
+    share: Option<u64>,
+    wx: &[&Section],
+) -> (Vec<String>, Vec<String>) {
+    let (mut strong, mut weak) = (Vec::new(), Vec::new());
+    if let Some(pct) = share.filter(|&pct| pct >= 50) {
+        strong.push(format!(
+            "{pct}% of the file is at entropy {PACKED_ENTROPY} or above"
+        ));
+    }
+    let backed: Vec<&Section> = wx.iter().copied().filter(|s| s.file_size > 0).collect();
+    if !backed.is_empty() {
+        let names: Vec<&str> = backed.iter().map(|s| s.name.as_str()).collect();
+        strong.push(format!("writable and executable: {}", names.join(", ")));
+    }
+    let entry_section = p.entry.and_then(|e| p.section_at(e));
+    if entry_section.is_some_and(|s| s.writable && !backed.iter().any(|w| w.va == s.va)) {
+        strong.push("the entry point sits in writable memory".to_owned());
+    }
+    let clr = p.headers.directories.contains(&"clr");
+    let vb = p
+        .headers
+        .libraries
+        .iter()
+        .any(|l| VB_RUNTIMES.iter().any(|r| l.eq_ignore_ascii_case(r)));
+    let code_bytes: u64 = p
+        .sections
+        .iter()
+        .filter(|s| s.executable)
+        .map(|s| s.file_size)
+        .sum();
+    let covered = from_usize(a.functions.len());
+    if !clr && !vb && code_bytes > 0x10000 && covered * SPARSE_CODE < code_bytes {
+        strong.push(format!(
+            "{covered} functions in {} KB of executable bytes, one per {} bytes",
+            code_bytes / 1024,
+            code_bytes / covered.max(1)
+        ));
+    }
+    let imports = p
+        .symbols
+        .iter()
+        .filter(|s| matches!(s.kind, SymbolKind::Import))
+        .count();
+    let by_design = clr || (p.format == BinaryFormat::Elf && imports > 0);
+    if imports < THIN_IMPORTS && !by_design {
+        weak.push(format!("{imports} imports, too few to run a program"));
+    }
+    let elf = p.format == BinaryFormat::Elf;
+    let first_code = p.sections.iter().find(|s| {
+        let bss = s.file_size == 0 && s.writable;
+        s.executable && !bss && !(elf && ELF_STUB_SECTIONS.contains(&s.name.as_str()))
+    });
+    if let (Some(sec), Some(first)) = (entry_section, first_code)
+        && sec.va != first.va
+    {
+        weak.push(format!(
+            "entry point in {}, not the first code section",
+            sec.name
+        ));
+    }
+    if !p.headers.tls_callbacks.is_empty() {
+        weak.push(format!(
+            "{} TLS callback(s), which run before the entry point",
+            p.headers.tls_callbacks.len()
+        ));
+    }
+    (strong, weak)
+}
+
 /// Reports the marks a packer or protector leaves.
 ///
 /// Nothing here decrypts anything: it says what the image looks like before
@@ -1372,11 +1479,10 @@ pub fn packer_marks(p: &Program) -> BTreeMap<&'static str, Vec<String>> {
 /// The verdict, the evidence and the section table.
 pub fn protection_tsv(p: &Program, a: &Analysis) -> String {
     let names = packer_marks(p);
-    let mut evidence: Vec<String> = Vec::new();
     let mut rows = String::new();
     let mut packed_bytes = 0u64;
     let mut total_bytes = 0u64;
-    let mut wx: Vec<&str> = Vec::new();
+    let mut wx: Vec<&Section> = Vec::new();
     for s in &p.sections {
         let len = usize::try_from(s.file_size).unwrap_or(0);
         let e = p.read_va(s.va.0, len).map_or(0.0, crate::entropy::shannon);
@@ -1385,7 +1491,7 @@ pub fn protection_tsv(p: &Program, a: &Analysis) -> String {
             packed_bytes += s.file_size;
         }
         if s.writable && s.executable {
-            wx.push(&s.name);
+            wx.push(s);
         }
         let grows = s.vsize > s.file_size * 2 && s.file_size > 0;
         let _ = writeln!(
@@ -1399,68 +1505,19 @@ pub fn protection_tsv(p: &Program, a: &Analysis) -> String {
             if grows { "  expands in memory" } else { "" }
         );
     }
-    let imports = p
-        .symbols
-        .iter()
-        .filter(|s| matches!(s.kind, SymbolKind::Import))
-        .count();
-    let entry_section = p
-        .entry
-        .and_then(|e| p.section_at(e))
-        .map(|s| s.name.clone());
-    if total_bytes > 0 && packed_bytes * 2 >= total_bytes {
-        evidence.push(format!(
-            "{}% of the file is at entropy {PACKED_ENTROPY} or above",
-            packed_bytes * 100 / total_bytes
-        ));
-    }
-    if imports < THIN_IMPORTS {
-        evidence.push(format!("{imports} imports, too few to run a program"));
-    }
-    if !wx.is_empty() {
-        evidence.push(format!("writable and executable: {}", wx.join(", ")));
-    }
-    let first_code = p.sections.iter().find(|s| s.executable).map(|s| &s.name);
-    if let Some(name) = &entry_section
-        && first_code.is_some_and(|f| f != name)
-    {
-        evidence.push(format!("entry point in {name}, not the first code section"));
-    }
-    if !p.headers.tls_callbacks.is_empty() {
-        evidence.push(format!(
-            "{} TLS callback(s), which run before the entry point",
-            p.headers.tls_callbacks.len()
-        ));
-    }
-    if p.entry
-        .and_then(|e| p.section_at(e))
-        .is_some_and(|s| s.writable)
-    {
-        evidence.push("the entry point sits in writable memory".to_owned());
-    }
-    let code_bytes: u64 = p
-        .sections
-        .iter()
-        .filter(|s| s.executable)
-        .map(|s| s.file_size)
-        .sum();
-    let covered = from_usize(a.functions.len());
-    if code_bytes > 0x10000 && covered * SPARSE_CODE < code_bytes {
-        evidence.push(format!(
-            "{covered} functions in {} KB of executable bytes, one per {} bytes",
-            code_bytes / 1024,
-            code_bytes / covered.max(1)
-        ));
-    }
+    let share = (total_bytes > 0).then(|| packed_bytes * 100 / total_bytes);
+    let (strong, weak) = packing_marks(p, a, share, &wx);
     let verdict = if !names.is_empty() {
         format!(
             "protected: {}",
             names.keys().copied().collect::<Vec<_>>().join(", ")
         )
-    } else if evidence.len() >= 2 {
+    } else if !strong.is_empty() && strong.len() + weak.len() >= 2 {
         "packed: no name, but the marks are there".to_owned()
-    } else if evidence.is_empty() {
+    } else if strong.is_empty() && weak.is_empty() {
         "plain: no packer marks".to_owned()
+    } else if strong.is_empty() {
+        "plain: no mark only packing leaves (entropy, writable code, sparse code)".to_owned()
     } else {
         "plain: one mark only, not enough to call it packed".to_owned()
     };
@@ -1468,7 +1525,7 @@ pub fn protection_tsv(p: &Program, a: &Analysis) -> String {
     for (name, marks) in &names {
         let _ = writeln!(out, "# - {name}: {}", marks.join("; "));
     }
-    for e in &evidence {
+    for e in strong.iter().chain(&weak) {
         let _ = writeln!(out, "# - {e}");
     }
     out.push_str("# section      va             raw         virtual  rwx  entropy\n");
