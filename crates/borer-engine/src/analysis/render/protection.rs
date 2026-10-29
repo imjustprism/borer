@@ -1067,7 +1067,7 @@ pub(super) struct EntrySig {
 
 /// Entry stubs a packer writes, as `??`-wildcard patterns read at the entry
 /// point. Each entry's [`EntrySig::stub`] line is its documentation.
-pub(super) const PACKER_ENTRY_SIGS: [EntrySig; 5] = [
+pub(super) const PACKER_ENTRY_SIGS: [EntrySig; 9] = [
     EntrySig {
         packer: "SteamStub",
         pattern: "60 81 EC 00 10 00 00 BE ?? ?? ?? ?? B9 ?? ?? ?? ?? 8D BD ?? ?? ?? ?? F3 A5",
@@ -1090,6 +1090,31 @@ pub(super) const PACKER_ENTRY_SIGS: [EntrySig; 5] = [
         pattern: "87 25 ?? ?? ?? ?? 61 94 F3 A5 5F C3",
         stub: "xchg esp, [imm32]; popad; xchg eax, ebp; rep movsd; pop edi; \
                ret",
+    },
+    EntrySig {
+        packer: "FSG",
+        pattern: "87 25 ?? ?? ?? ?? 61 94 55 A4 B6 80 FF 13 73 F9 33 C9 FF 13 73 16 33 C0",
+        stub: "xchg esp, [imm32]; popad; xchg eax, esp; push ebp; movsb; mov \
+               dh, 0x80; call [ebx]: FSG 2.0's aPLib loop, entered in the headers",
+    },
+    EntrySig {
+        packer: "FSG",
+        pattern: "BE ?? ?? ?? ?? AD 93 AD 97 AD 56 96 B2 80 A4 B6 80 FF 13 73 F9",
+        stub: "mov esi, imm32; lodsd; xchg ebx, eax; lodsd; xchg edi, eax; \
+               lodsd; push esi; xchg esi, eax; mov dl, 0x80; movsb: FSG 1.3x",
+    },
+    EntrySig {
+        packer: "FSG",
+        pattern: "BB D0 01 40 00 BF 00 10 40 00 BE ?? ?? ?? ??",
+        stub: "mov ebx, 0x4001d0; mov edi, 0x401000; mov esi, imm32: FSG 1.x \
+               reading its table from the headers into the first section",
+    },
+    EntrySig {
+        packer: "MPRESS",
+        pattern: "60 E8 00 00 00 00 58 05 ?? ?? ?? ?? 8B 30 03 F0 2B C0 8B FE 66 AD C1 E0 0C",
+        stub: "pushad; call $+5; pop eax; add eax, imm32; mov esi, [eax]; add \
+               esi, eax; sub eax, eax; mov edi, esi; lodsw; shl eax, 12: an x86 \
+               MPRESS 2.x stub",
     },
     EntrySig {
         packer: "ASPack",

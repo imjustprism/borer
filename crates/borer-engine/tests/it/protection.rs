@@ -446,3 +446,85 @@ fn a_plain_image_raises_no_entropy_blind_spot() {
     assert!(!out.contains("# blind spot: packed"), "{out}");
     assert!(!out.contains("TLS callback"), "{out}");
 }
+
+/// Builds a PE whose first section holds no file bytes and states file
+/// offset 0, the shape FSG writes, entered at `entry_rva`.
+///
+/// # Arguments
+///
+/// * `stub` - Bytes written at the entry: into the headers when
+///   `entry_rva` is below `0x400`, else at the start of the second section.
+/// * `entry_rva` - The entry point, relative to [`IMAGE_BASE`].
+fn fsg_shape(stub: &[u8], entry_rva: u32) -> Vec<u8> {
+    let mut body = high_entropy(0x800, 0x77);
+    if entry_rva >= 0x8000 {
+        body[..stub.len()].copy_from_slice(stub);
+    }
+    let mut bytes = pe(
+        &[
+            Sec {
+                name: "",
+                rva: 0x1000,
+                data: Vec::new(),
+                vsize: 0x7000,
+                chars: WX,
+            },
+            Sec {
+                name: "",
+                rva: 0x8000,
+                data: body,
+                vsize: 0x1000,
+                chars: WX,
+            },
+        ],
+        entry_rva,
+    );
+    let first_row = PE_AT + 24 + OPTIONAL;
+    bytes[first_row + 20..first_row + 24].fill(0);
+    if entry_rva < 0x400 {
+        let at = usize::try_from(entry_rva).expect("fits");
+        bytes[at..at + stub.len()].copy_from_slice(stub);
+    }
+    bytes
+}
+
+/// FSG 2.0 enters its aPLib loop inside the headers, behind an empty first
+/// section whose row says file offset 0; the stub still reads and names
+/// FSG.
+#[test]
+fn fsg_20_entered_in_the_headers_names_fsg() {
+    let stub = [
+        0x87, 0x25, 0x50, 0xf2, 0x44, 0x00, 0x61, 0x94, 0x55, 0xa4, 0xb6, 0x80, 0xff, 0x13, 0x73,
+        0xf9, 0x33, 0xc9, 0xff, 0x13, 0x73, 0x16, 0x33, 0xc0,
+    ];
+    let out = report(fsg_shape(&stub, 0x300));
+    assert!(out.contains("# protected: FSG"), "{out}");
+    assert!(out.contains("entry stub at 0x140000300"), "{out}");
+    assert!(out.contains("FSG 2.0's aPLib loop"), "{out}");
+}
+
+/// FSG 1.3x loads its table pointer, then runs the same aPLib loop from a
+/// section, and names FSG.
+#[test]
+fn fsg_13_stub_in_a_section_names_fsg() {
+    let stub = [
+        0xbe, 0xa4, 0x01, 0x40, 0x00, 0xad, 0x93, 0xad, 0x97, 0xad, 0x56, 0x96, 0xb2, 0x80, 0xa4,
+        0xb6, 0x80, 0xff, 0x13, 0x73, 0xf9,
+    ];
+    let out = report(fsg_shape(&stub, 0x8000));
+    assert!(out.contains("# protected: FSG"), "{out}");
+    assert!(out.contains("FSG 1.3x"), "{out}");
+}
+
+/// MPRESS's x86 stub names MPRESS with ordinary section names.
+#[test]
+fn mpress_entry_stub_names_mpress() {
+    let mut code = vec![0xcc; 0x200];
+    code[..25].copy_from_slice(&[
+        0x60, 0xe8, 0x00, 0x00, 0x00, 0x00, 0x58, 0x05, 0x5a, 0x0b, 0x00, 0x00, 0x8b, 0x30, 0x03,
+        0xf0, 0x2b, 0xc0, 0x8b, 0xfe, 0x66, 0xad, 0xc1, 0xe0, 0x0c,
+    ]);
+    let out = report(pe(&[sec(".text", 0x1000, code)], 0x1000));
+    assert!(out.contains("# protected: MPRESS"), "{out}");
+    assert!(out.contains("an x86 MPRESS 2.x stub"), "{out}");
+}
