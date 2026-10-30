@@ -448,14 +448,21 @@ fn called_imports(p: &Program, a: &Analysis, entry: u64) -> Vec<String> {
 }
 
 /// Whether a pushed or moved immediate names a known debugger window.
+///
+/// `FindWindowA` passes ASCII. `FindWindowW` passes UTF-16, so a wide
+/// `OLLYDBG` counts. A one-character narrow reading of that wide string
+/// does not.
 fn debugger_string(p: &Program, instrs: &[Instruction]) -> bool {
-    instrs.iter().any(|i| {
-        immediate_any(i).is_some_and(|imm| {
-            imm != 0
-                && cstr_at(p, imm, 4, 64)
-                    .is_some_and(|(_, s)| DEBUGGER_WINDOWS.iter().any(|w| s.contains(w)))
-        })
-    })
+    instrs
+        .iter()
+        .any(|i| immediate_any(i).is_some_and(|imm| imm != 0 && debugger_name(p, imm)))
+}
+
+/// Whether the ASCII or UTF-16 run at `va` is a known debugger window.
+fn debugger_name(p: &Program, va: u64) -> bool {
+    let named = |text: &str| DEBUGGER_WINDOWS.iter().any(|w| text.contains(w));
+    cstr_at(p, va, 4, 64).is_some_and(|(_, text)| named(&text))
+        || wstr_at(p, va, 4, 64).is_some_and(|(_, text)| named(&text))
 }
 
 /// Whether a compare of `0xCC` is followed by a store into executable memory.

@@ -331,6 +331,37 @@ fn a_debugger_window_is_named_and_an_ordinary_class_is_not() {
     assert!(!text.contains("debugger window"), "{text}");
 }
 
+/// `FindWindowW` of a wide debugger class is the same tell. A wide
+/// ordinary class is not.
+#[test]
+fn a_wide_debugger_window_is_named() {
+    let wide = |bytes: &[u8]| {
+        let mut data = vec![0u8; 0x100 + bytes.len()];
+        data[0x100..].copy_from_slice(bytes);
+        let code = [
+            0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0xe8, 0x06, 0x10, 0x00, 0x00, // ASM: call 0x402010
+            0x68, 0x00, 0x21, 0x40, 0x00, // ASM: push 0x402100
+            0xc3, // ASM: ret
+        ];
+        report_calls(
+            &code,
+            &data,
+            &[("FindWindowW", 0x402000), ("ExitProcess", 0x402010)],
+        )
+    };
+    let olly = wide(&[
+        0x4f, 0x00, 0x4c, 0x00, 0x4c, 0x00, 0x59, 0x00, 0x44, 0x00, 0x42, 0x00, 0x47, 0x00, 0x00,
+        0x00,
+    ]);
+    assert!(olly.contains("debugger window"), "{olly}");
+    let notepad = wide(&[
+        0x4e, 0x00, 0x4f, 0x00, 0x54, 0x00, 0x45, 0x00, 0x50, 0x00, 0x41, 0x00, 0x44, 0x00, 0x00,
+        0x00,
+    ]);
+    assert!(!notepad.contains("debugger window"), "{notepad}");
+}
+
 /// Creating a process and waiting on a debug event is a debug block.
 #[test]
 fn a_debug_process_block_is_a_tell() {
