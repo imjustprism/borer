@@ -146,6 +146,22 @@ fn a_debug_port_query_is_a_tell_and_the_import_alone_is_not() {
     );
     assert!(port.contains("debug port"), "{port}");
     assert!(port.starts_with("# anti-analysis:"), "{port}");
+    let other = report_calls(
+        &[
+            0xba, 0x00, 0x00, 0x00, 0x00, // ASM: mov edx, 0
+            0xe8, 0xf6, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0xba, 0x07, 0x00, 0x00, 0x00, // ASM: mov edx, 7
+            0xe8, 0xfc, 0x0f, 0x00, 0x00, // ASM: call 0x402010
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[
+            ("NtQueryInformationProcess", 0x402000),
+            ("GetCurrentProcessId", 0x402010),
+        ],
+    );
+    assert!(!other.contains("debug port"), "{other}");
+    assert!(!other.starts_with("# anti-analysis:"), "{other}");
 }
 
 /// `fs:[0x30]` is a PEB read and not a named field. `fs:[0x18]` then a

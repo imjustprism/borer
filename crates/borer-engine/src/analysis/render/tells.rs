@@ -311,7 +311,7 @@ fn patterns(
     if has("createprocess") && (has("waitfordebugevent") || has("continuedebugevent")) {
         out.push(("debug block (DEBUG_PROCESS)", ip));
     }
-    if has("ntqueryinformationprocess") && debug_port(instrs, bits) {
+    if has("ntqueryinformationprocess") && debug_port(p, a, f.entry, instrs, bits) {
         out.push(("debug port (NtQueryInformationProcess)", ip));
     }
     let exits = has("exitprocess") || has("terminateprocess");
@@ -336,22 +336,55 @@ fn patterns(
     out
 }
 
-/// Whether a call passes `ProcessDebugPort` (`7`).
+/// Whether the `NtQueryInformationProcess` call passes `ProcessDebugPort`.
 ///
-/// On x64 the class is `edx`. On x86 it is the second push. Another class,
-/// including `ProcessBasicInformation` (`0`), is not this tell.
+/// On x64 the class is `edx`. On x86 it is the second push. The `7` has to
+/// belong to that call. The same immediate passed to another call is not
+/// this tell, and neither is `ProcessBasicInformation` (`0`).
 ///
 /// # Arguments
 ///
+/// * `p` - The loaded image.
+/// * `a` - The analysis, for the call's target.
+/// * `entry` - The function the calls sit in.
 /// * `instrs` - The function, in address order.
 /// * `bits` - Decoder bitness, which picks the class operand.
-fn debug_port(instrs: &[Instruction], bits: u32) -> bool {
+fn debug_port(p: &Program, a: &Analysis, entry: u64, instrs: &[Instruction], bits: u32) -> bool {
+    let sites = query_sites(p, a, entry);
+    if sites.is_empty() {
+        return false;
+    }
     instrs.iter().enumerate().any(|(at, i)| {
         matches!(
             i.flow_control(),
             FlowControl::Call | FlowControl::IndirectCall
-        ) && class_is_debug_port(&instrs[..at], bits)
+        ) && sites.contains(&i.ip())
+            && class_is_debug_port(&instrs[..at], bits)
     })
+}
+
+/// Instruction addresses that call `NtQueryInformationProcess`.
+fn query_sites(p: &Program, a: &Analysis, entry: u64) -> Vec<u64> {
+    let mut sites = Vec::new();
+    for (target, site) in a.refs_from(entry) {
+        if site.kind != RefKind::Call {
+            continue;
+        }
+        let slot = a.function(target).and_then(|g| g.thunk).unwrap_or(target);
+        let Some(sym) = a
+            .symbol_at(p, slot)
+            .filter(|s| s.kind == SymbolKind::Import)
+        else {
+            continue;
+        };
+        if bare_name(&sym.name)
+            .to_lowercase()
+            .contains("ntqueryinformationprocess")
+        {
+            sites.push(site.va);
+        }
+    }
+    sites
 }
 
 /// Whether the call `before` leads to passes `ProcessDebugPort`.
@@ -366,6 +399,12 @@ fn class_is_debug_port(before: &[Instruction], bits: u32) -> bool {
 /// The immediate in `edx`, when the last write of it is a `mov`.
 fn edx_class(before: &[Instruction]) -> Option<u64> {
     for n in before.iter().rev().take(8) {
+        if matches!(
+            n.flow_control(),
+            FlowControl::Call | FlowControl::IndirectCall
+        ) {
+            return None;
+        }
         if n.op0_kind() != OpKind::Register || n.op0_register().full_register() != Register::RDX {
             continue;
         }
