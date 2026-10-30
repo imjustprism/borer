@@ -165,6 +165,35 @@ pub(super) enum Yields {
 /// The widths a sized helper has, narrowest first.
 const WIDTHS: [u8; 4] = [8, 16, 32, 64];
 
+/// The bits of a folded constant.
+///
+/// # Arguments
+///
+/// * `e` - A folded expression.
+///
+/// # Returns
+///
+/// The constant, or `None` when folding left an expression.
+fn const_bits(e: &Expr) -> Option<u64> {
+    match e {
+        Expr::Const(c) => Some(*c),
+        Expr::Var(_)
+        | Expr::Str(_)
+        | Expr::Sp(_)
+        | Expr::Bin(..)
+        | Expr::Un(..)
+        | Expr::Deref(..)
+        | Expr::Cond(_)
+        | Expr::Ternary(..)
+        | Expr::Sext(..)
+        | Expr::Cast(..)
+        | Expr::Bitcast(..)
+        | Expr::Call(..)
+        | Expr::Helper(..)
+        | Expr::FConst(..) => None,
+    }
+}
+
 impl Helper {
     /// Returns every helper, in [`Ord`] order.
     #[cfg(test)]
@@ -547,10 +576,7 @@ impl Helper {
         let a = args.first().copied();
         let b = args.get(1).copied();
         if let Some(op) = self.op() {
-            return match fold(op, Expr::Const(a?), Expr::Const(b?), self.width()?) {
-                Expr::Const(c) => Some(c),
-                _ => None,
-            };
+            return const_bits(&fold(op, Expr::Const(a?), Expr::Const(b?), self.width()?));
         }
         if let Some(op) = self.unop() {
             return match unary(op, Expr::Const(a?), bits) {
