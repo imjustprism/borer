@@ -1734,5 +1734,28 @@ impl Exec<'_, '_> {
                 Expr::Helper(Helper::Rdtsc(4, nonce), Vec::new()),
             );
         }
+        self.share_timestamp(Register::EAX);
+        self.share_timestamp(Register::EDX);
+        if aux {
+            self.share_timestamp(Register::ECX);
+        }
+    }
+
+    /// Writes a timestamp out once when the block reads that register again.
+    ///
+    /// A second store of the same half would otherwise print a second call.
+    ///
+    /// # Arguments
+    ///
+    /// * `r` - `eax`, `edx`, or `ecx` from [`Exec::timestamp`].
+    fn share_timestamp(&mut self, r: Register) {
+        let key = self.canon(r);
+        if self.reads_ahead.get(&key).copied().unwrap_or(0) < 2 {
+            return;
+        }
+        match self.deferred.as_mut() {
+            Some(d) => d.push(key),
+            None => self.materialize(key, &mut Vec::new(), None),
+        }
     }
 }
