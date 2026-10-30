@@ -267,6 +267,39 @@ fn a_call_hides_the_argument_register() {
     );
 }
 
+/// A copy the fallthrough always runs names that argument.
+#[test]
+fn a_copied_argument_keeps_its_number() {
+    let code = [
+        0x89, 0xd1, // ASM: mov ecx, edx
+        0x81, 0xf9, 0xcd, 0xab, 0x37, 0x13, // ASM: cmp ecx, 0x1337abcd
+        0x0f, 0x94, 0xc0, // ASM: sete al
+        0xc3, // ASM: ret
+    ];
+    assert_eq!(
+        steps(&code),
+        ["borer://solve/0x401000,a2 (compares against 0x1337abcd: solve tries it as a2)"]
+    );
+}
+
+/// A branch that jumps over the copy still reaches the compare, so the
+/// hint does not name the register only one path holds.
+#[test]
+fn a_branch_over_a_copy_does_not_name_that_argument() {
+    let code = [
+        0x45, 0x85, 0xc0, // ASM: test r8d, r8d
+        0x74, 0x02, // ASM: jz 0x401007
+        0x89, 0xd1, // ASM: mov ecx, edx
+        0x81, 0xf9, 0xcd, 0xab, 0x37, 0x13, // ASM: cmp ecx, 0x1337abcd
+        0x0f, 0x94, 0xc0, // ASM: sete al
+        0xc3, // ASM: ret
+    ];
+    assert_eq!(
+        steps(&code),
+        ["borer://solve/0x401000 (compares against 0x1337abcd: not shown to be a1)"]
+    );
+}
+
 /// A byte copy does not make the whole compared register the argument.
 #[test]
 fn a_partial_copy_is_not_the_argument() {

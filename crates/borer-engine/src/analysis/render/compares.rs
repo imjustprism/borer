@@ -114,6 +114,9 @@ fn flags_decide(instrs: &[Instruction], at: usize) -> bool {
 /// register that still holds an argument is that argument's number in
 /// `conv`. A convention with no register arguments never claims one.
 ///
+/// A branch that jumps over a copy and still reaches the compare leaves
+/// the source unnamed.
+///
 /// # Arguments
 ///
 /// * `instrs` - The function's instructions, in address order.
@@ -143,6 +146,9 @@ pub(super) fn compared_source(instrs: &[Instruction], at: usize, conv: &Conv) ->
             continue;
         }
         if let Some(src) = copied_from(n, reg, need) {
+            if branch_skips(instrs, n.ip(), i.ip()) {
+                return Compared::Other;
+            }
             reg = src;
             continue;
         }
@@ -192,6 +198,30 @@ fn reg_touch(factory: &mut InstructionInfoFactory, n: &Instruction, reg: Registe
         );
     }
     (read, write)
+}
+
+/// Whether a branch before `from` lands in `(from, to]`.
+///
+/// That branch reaches `to` without running the instruction at `from`.
+///
+/// # Arguments
+///
+/// * `instrs` - The function's instructions, in address order.
+/// * `from` - The instruction a path can jump over.
+/// * `to` - The instruction that path still reaches.
+fn branch_skips(instrs: &[Instruction], from: u64, to: u64) -> bool {
+    instrs.iter().any(|n| {
+        if n.ip() >= from
+            || !matches!(
+                n.flow_control(),
+                FlowControl::ConditionalBranch | FlowControl::UnconditionalBranch
+            )
+        {
+            return false;
+        }
+        let target = n.near_branch_target();
+        target > from && target <= to
+    })
 }
 
 /// The register a full-width `mov` into `dest` copies.
