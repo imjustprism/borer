@@ -25,7 +25,7 @@ use super::{
 };
 use crate::analysis::{BlockTerm, Function, NameSource, RefKind, RefSite, dedup_sorted, is_imm};
 use crate::fxmap::{FxHashMap, FxHashSet};
-use crate::isa::x86::{Code, FlowControl, Mnemonic, OpKind, Register};
+use crate::isa::x86::{Code, FlowControl, Instruction, Mnemonic, OpKind, Register};
 use crate::program::Program;
 use smallvec::SmallVec;
 
@@ -1269,6 +1269,39 @@ pub(super) enum Via {
     Branch,
 }
 
+/// Whether `instr` is one undecoded instruction with a jump or a call after
+/// it. The transfer is queued; a second bad instruction is not skipped.
+///
+/// # Arguments
+///
+/// * `cursors` - The walk's decoders.
+/// * `instr` - The instruction that did not decode.
+/// * `pending` - Where the transfer is queued.
+///
+/// # Returns
+///
+/// `true` when a jump or a call was queued.
+fn past_bad(cursors: &mut Cursors<'_>, instr: &Instruction, pending: &mut Vec<(u64, Via)>) -> bool {
+    let next = instr.next_ip();
+    if next == instr.ip() {
+        return false;
+    }
+    let Some(n) = cursors.decode(next) else {
+        return false;
+    };
+    if n.code() == Code::INVALID {
+        return false;
+    }
+    if !matches!(
+        n.flow_control(),
+        FlowControl::UnconditionalBranch | FlowControl::Call
+    ) {
+        return false;
+    }
+    pending.push((next, Via::Fall));
+    true
+}
+
 /// Walks one function by decoding from its entry.
 ///
 /// Every reachable instruction is decoded once; near branches are followed,
@@ -1390,7 +1423,7 @@ pub(super) fn walk_function(
                 continue;
             };
             if instr.code() == Code::INVALID {
-                junk |= linear && !in_handlers;
+                junk |= linear && !in_handlers && !past_bad(cursors, &instr, &mut pending);
                 bad_entry |= recs.is_empty() && !in_handlers;
                 continue;
             }

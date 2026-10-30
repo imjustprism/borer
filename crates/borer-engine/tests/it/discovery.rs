@@ -158,6 +158,24 @@ fn int_2d_falls_through_to_the_next_instruction() {
     assert!(!holds(Arch::X86_64, &stop, TEXT, TEXT + 4));
     assert!(!holds(Arch::X86, &stop, TEXT, TEXT + 4));
 }
+
+/// One instruction that does not decode, then a jump, stays in the
+/// function. The jump's target does too. A plain instruction after the bad
+/// bytes does not.
+#[test]
+fn one_undecoded_instruction_keeps_the_following_jump() {
+    let jump = [
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xf0, 0xf0, 0xc7, 0xc8, // ASM: two lock prefixes, not an instruction
+        0xeb, 0x01, // ASM: jmp short +1
+        0x6e, // ASM: outsb, skipped
+        0x31, 0xc0, 0xc3, // ASM: xor eax, eax; ret
+    ];
+    let plain = [0x31, 0xc0, 0xf0, 0xf0, 0xc7, 0xc8, 0x31, 0xc0, 0xc3];
+    assert!(holds(Arch::X86_64, &jump, TEXT, TEXT + 9), "{jump:?}");
+    assert!(!holds(Arch::X86_64, &jump, TEXT, TEXT + 8));
+    assert!(!holds(Arch::X86_64, &plain, TEXT, TEXT + 6));
+}
 /// `push rbx; xor eax, eax; pop rbx; ret`: a function with a frame.
 const FRAMED: [u8; 5] = [0x53, 0x31, 0xc0, 0x5b, 0xc3];
 
