@@ -123,6 +123,81 @@ fn a_partial_product_loop_is_a_hidden_number_problem() {
     assert!(solved.contains("borer://partial/0x401000"), "{solved}");
 }
 
+/// A `sub` whose flags a following `xor` overwrites is a mixer, not the
+/// constant `solve` should try. The later `cmp` of the argument is.
+#[test]
+fn arithmetic_that_feeds_a_xor_is_not_the_solved_constant() {
+    let code = [
+        0x81, 0xea, 0xa2, 0xc8, 0x56, 0x07, // ASM: sub edx, 0x0756c8a2
+        0x33, 0xf2, // ASM: xor esi, edx
+        0x81, 0xf9, 0xcd, 0xab, 0x37, 0x13, // ASM: cmp ecx, 0x1337abcd
+        0x0f, 0x94, 0xc0, // ASM: sete al
+        0xc3, // ASM: ret
+    ];
+    assert_eq!(
+        steps(&code),
+        ["borer://solve/0x401000 (compares against 0x1337abcd: solve tries it as a1)"]
+    );
+}
+
+/// A `sub` that nothing reads, followed by a branch on its flags, is the
+/// compare. The argument register was not written before it.
+#[test]
+fn a_sub_whose_flags_a_branch_reads_is_still_a_compare() {
+    let code = [
+        0x81, 0xe9, 0xcd, 0xab, 0x37, 0x13, // ASM: sub ecx, 0x1337abcd
+        0x0f, 0x84, 0x03, 0x00, 0x00, 0x00, // ASM: jz 0x40100f
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xc3, // ASM: ret
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+        0xc3, // ASM: ret
+    ];
+    assert_eq!(
+        steps(&code),
+        ["borer://solve/0x401000 (compares against 0x1337abcd: solve tries it as a1)"]
+    );
+}
+
+/// A compare of a register copied from a call's return value is not `a1`.
+#[test]
+fn a_compare_of_a_call_result_does_not_name_a1() {
+    let code = [
+        0x89, 0xc8, // ASM: mov eax, ecx
+        0xe8, 0x0c, 0x00, 0x00, 0x00, // ASM: call 0x401013
+        0x89, 0xc2, // ASM: mov edx, eax
+        0x81, 0xfa, 0x0a, 0x10, 0x00, 0x00, // ASM: cmp edx, 0x100a
+        0x74, 0x01, // ASM: je 0x401012
+        0xc3, // ASM: ret
+        0xc3, // ASM: ret
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xc3, // ASM: ret
+    ];
+    assert_eq!(
+        steps(&code),
+        ["borer://solve/0x401000 (compares against 0x100a: a call result, not an argument)"]
+    );
+}
+
+/// A `!= 0` test of a named global does not parse the address digits in
+/// the name as a decimal constant.
+#[test]
+fn a_global_name_is_not_the_compared_constant() {
+    let code = [
+        0x85, 0xc9, // ASM: test ecx, ecx
+        0x83, 0x3d, 0x07, 0x10, 0x00, 0x00, 0x00, // ASM: cmp dword [rip+0x1007], 0
+        0x75, 0x01, // ASM: jne 0x40100c
+        0xc3, // ASM: ret
+        0xc3, // ASM: ret
+    ];
+    let hinted = steps(&code);
+    assert!(
+        hinted
+            .iter()
+            .all(|s| !s.contains("0x6225a") && !s.contains("402010")),
+        "{hinted:?}"
+    );
+}
+
 /// A compare of the argument against a telling constant points at the
 /// value it accepts, and the summary ends with the same step.
 #[test]

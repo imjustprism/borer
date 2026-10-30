@@ -7,6 +7,7 @@
 
 mod calls;
 mod catalog;
+mod compares;
 mod dataflow;
 mod decoded;
 mod diff;

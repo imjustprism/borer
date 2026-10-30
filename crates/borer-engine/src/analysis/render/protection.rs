@@ -629,9 +629,12 @@ fn telling(s: &str) -> bool {
 
 /// The distinctive constants a function compares against.
 ///
-/// A check tests the input against the value it wants, `cmp eax, 0x4a2b`;
-/// small values (0, 1, sizes), the all-ones sentinels and page-sized round
-/// numbers are not secrets, so they are left out.
+/// A check tests the input against the value it wants, `cmp eax, 0x4a2b`.
+/// A `sub`, `xor` or `and` counts only when its flags are what a later
+/// branch reads and its result is dead; a hash mixes those immediates and
+/// then overwrites the flags. Small values (0, 1, sizes), the all-ones
+/// sentinels and page-sized round numbers are not secrets, so they are
+/// left out.
 ///
 /// # Arguments
 ///
@@ -644,29 +647,20 @@ fn telling(s: &str) -> bool {
 ///
 /// The telling constants, in first-seen order, without duplicates.
 pub(super) fn check_constants(p: &Program, a: &Analysis, entry: u64, bits: u32) -> Vec<u64> {
-    let Some(f) = a.function(entry) else {
+    if p.arch.bitness() != Some(bits) {
         return Vec::new();
-    };
+    }
+    let instrs = function_instructions(p, a, entry);
     let mut out: Vec<u64> = Vec::new();
     let mut seen: BTreeSet<u64> = BTreeSet::new();
-    each_instruction(p, f, bits, |i| {
-        if !matches!(i.mnemonic(), Mnemonic::Cmp | Mnemonic::Sub) {
-            return;
-        }
-        if !matches!(
-            i.op1_kind(),
-            OpKind::Immediate16
-                | OpKind::Immediate32
-                | OpKind::Immediate32to64
-                | OpKind::Immediate64
-        ) {
-            return;
-        }
-        let v = i.immediate(1);
+    for (at, _) in instrs.iter().enumerate() {
+        let Some(v) = compares::compare_immediate(&instrs, at) else {
+            continue;
+        };
         if telling_constant(v) && seen.insert(v) {
             out.push(v);
         }
-    });
+    }
     out
 }
 

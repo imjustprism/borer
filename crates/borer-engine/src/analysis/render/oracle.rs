@@ -241,7 +241,9 @@ pub fn solve_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
 /// reads them, each with the instruction that compares: what [`solve_tsv`]
 /// tries as an argument and [`vectors_tsv`] seeds inputs with.
 ///
-/// The immediates of `cmp`, `test`, `sub`, `xor` and `and`, each value once.
+/// The immediates of `cmp` and `test`, and of a `sub`, `xor` or `and`
+/// whose flags a later branch reads while the result is dead. Each value
+/// once. A mixer that overwrites the flags does not contribute.
 ///
 /// # Arguments
 ///
@@ -258,31 +260,15 @@ pub(super) fn compared_constants(
     mut candidates: Vec<Candidate>,
     max: usize,
 ) -> Vec<Candidate> {
-    for i in instrs {
-        if !matches!(
-            i.mnemonic(),
-            Mnemonic::Cmp | Mnemonic::Test | Mnemonic::Sub | Mnemonic::Xor | Mnemonic::And
-        ) {
+    for (at, i) in instrs.iter().enumerate() {
+        let Some(value) = compares::compare_immediate(instrs, at) else {
             continue;
-        }
-        for n in 0..i.op_count() {
-            let value = match i.op_kind(n) {
-                OpKind::Immediate8 => u64::from(i.immediate8()),
-                OpKind::Immediate8to16
-                | OpKind::Immediate8to32
-                | OpKind::Immediate8to64
-                | OpKind::Immediate16
-                | OpKind::Immediate32
-                | OpKind::Immediate32to64
-                | OpKind::Immediate64 => i.immediate(n),
-                _ => continue,
-            };
-            if !candidates.iter().any(|c| c.value == value) {
-                candidates.push(Candidate {
-                    value,
-                    from: Some(i.ip()),
-                });
-            }
+        };
+        if !candidates.iter().any(|c| c.value == value) {
+            candidates.push(Candidate {
+                value,
+                from: Some(i.ip()),
+            });
         }
         if candidates.len() >= max {
             break;

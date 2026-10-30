@@ -208,11 +208,12 @@ fn partial_step(p: &Program, a: &Analysis, o: &Overlay, f: &Function) -> Option<
 }
 
 /// Points a function that takes arguments and compares against a telling
-/// constant at [`solve_tsv`], which tries the constant as `a1`.
+/// constant at [`solve_tsv`].
 ///
-/// The step names the constant, not a value `a1` is known to need: the
-/// compare may test anything the function computed, and `_stat64`'s step
-/// said its `a1` was accepted where `solve` found no constant decides it.
+/// The step says `solve` should try the constant as `a1` only when the
+/// compared register still holds that argument. A value copied out of a
+/// call's return register is named as a call result, and anything else is
+/// named without an argument to vary.
 ///
 /// # Arguments
 ///
@@ -238,12 +239,22 @@ fn check_step(
     if params == 0 {
         return None;
     }
-    let value = check_constants(p, a, f.entry, bits)
-        .first()
-        .copied()
-        .or_else(|| compared_constant(text))?;
+    let instrs = function_instructions(p, a, f.entry);
+    let found = instrs.iter().enumerate().find_map(|(at, _)| {
+        let value = compares::compare_immediate(&instrs, at)?;
+        telling_constant(value).then_some((at, value))
+    });
+    let (value, source) = match found {
+        Some((at, value)) => (value, compares::compared_source(&instrs, at, bits)),
+        None => (compared_constant(text)?, compares::Compared::Other),
+    };
+    let note = match source {
+        compares::Compared::Argument => "solve tries it as a1",
+        compares::Compared::CallResult => "a call result, not an argument",
+        compares::Compared::Other => "not an argument solve can vary",
+    };
     Some(format!(
-        "borer://solve/{:#x} (compares against {value:#x}: solve tries it as a1)",
+        "borer://solve/{:#x} (compares against {value:#x}: {note})",
         f.entry
     ))
 }
@@ -262,7 +273,7 @@ fn compared_constant(text: &str) -> Option<u64> {
     text.lines()
         .filter(|l| !l.trim_start().starts_with("//"))
         .filter(|l| l.contains(" == ") || l.contains(" != "))
-        .flat_map(|l| l.split(|c: char| !c.is_ascii_alphanumeric()))
+        .flat_map(|l| l.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')))
         .filter_map(|t| match t.strip_prefix("0x") {
             Some(hex) => u64::from_str_radix(hex, 16).ok(),
             None => t
