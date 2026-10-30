@@ -26,7 +26,7 @@ use std::ops::ControlFlow;
 
 use crate::analysis::classes::class_layout;
 use crate::analysis::{Analysis, Overlay, name_of};
-use crate::memory::{Kind, Value, decode, le_word, not_text, scalar_text};
+use crate::memory::{Kind, Value, decode, le_word, not_text, one_empty, scalar_text};
 use crate::num::{from_usize, lo16, lo32};
 use crate::program::Program;
 use crate::search::demangled_name;
@@ -428,6 +428,12 @@ pub fn read_values(
     let out = decode(read, word == 8, va, kind, count);
     if !out.is_empty() {
         return Ok(out);
+    }
+    if count == 1
+        && let Some(raw) = mem.read(va, kind.size(2))
+        && let Some(v) = one_empty(kind, va, &raw)
+    {
+        return Ok(vec![v]);
     }
     let Some(first) = mem.read(va, 1).and_then(|b| b.first().copied()) else {
         return Err(format!("{va:#x} is not readable in the process"));
@@ -1283,9 +1289,10 @@ mod tests {
 
     /// A process string reads as the file's reader reads one.
     ///
-    /// It runs to its terminator whatever the count asked, a leading NUL is
-    /// no string, and bytes that are there but are not text are refused as
-    /// not text rather than as unreadable.
+    /// It runs to its terminator whatever the count asked. One value at a
+    /// leading NUL is the empty string; asking for more still refuses it.
+    /// Bytes that are there but are not text are refused as not text rather
+    /// than as unreadable.
     #[test]
     fn process_strings_read_as_the_files_do() {
         let mut data = vec![0u8; 4096];
@@ -1308,6 +1315,10 @@ mod tests {
         assert!(code.contains("the byte there is 0x90"), "{code}");
         let gone = read_values(&mem, 0x9000, Kind::CStr, 1, 8).unwrap_err();
         assert_eq!(gone, "0x9000 is not readable in the process");
+        let empty = read_values(&mem, 0x1000, Kind::CStr, 1, 8).unwrap();
+        assert_eq!(empty[0].text, "\"\" (len 0)");
+        let wide = read_values(&mem, 0x13e9, Kind::WStr, 1, 8).unwrap();
+        assert_eq!(wide[0].text, "L\"\" (len 0)");
         let short = read_values(&mem, 0x1ffc, Kind::U64, 1, 8).unwrap_err();
         assert_eq!(
             short,

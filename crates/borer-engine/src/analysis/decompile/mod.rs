@@ -102,6 +102,7 @@ pub use enums::*;
 use fields::*;
 pub use finish::*;
 use line::*;
+pub(crate) use literal::empty_literal_at;
 use literal::literal_at;
 pub(in crate::analysis) use liveness::*;
 use masks::*;

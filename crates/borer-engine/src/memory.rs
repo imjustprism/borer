@@ -263,8 +263,44 @@ fn read_values_with<'a>(
     if !out.is_empty() {
         return Ok(out);
     }
+    if count == 1
+        && let Some(raw) = read(start, kind.size(2))
+        && let Some(v) = one_empty(kind, start, &raw)
+    {
+        return Ok(vec![v]);
+    }
     let first = read(start, 1).and_then(|b| b.first().copied());
     Err(why(first))
+}
+
+/// The empty string a one-value read of a terminator holds.
+///
+/// A longer read refuses the same bytes, so a scan of several strings does
+/// not take the padding before the next literal as a string of its own.
+///
+/// # Arguments
+///
+/// * `kind` - The string kind asked for.
+/// * `start` - Position of the terminator.
+/// * `raw` - The bytes at `start`, at least one for a narrow string and two
+///   for a wide one.
+///
+/// # Returns
+///
+/// The empty literal, or `None` when `kind` is not a string or the first
+/// unit is not zero.
+pub(crate) fn one_empty(kind: Kind, start: u64, raw: &[u8]) -> Option<Value> {
+    let (text, size) = match kind {
+        Kind::CStr if raw.first() == Some(&0) => ("\"\" (len 0)", 1),
+        Kind::WStr if raw.len() >= 2 && raw[0] == 0 && raw[1] == 0 => ("L\"\" (len 0)", 2),
+        _ => return None,
+    };
+    Some(Value {
+        at: start,
+        text: text.to_owned(),
+        target: None,
+        size,
+    })
 }
 
 /// Says how to read the bytes no section maps, for an error about an

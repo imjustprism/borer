@@ -42,6 +42,7 @@ mod decompile;
 mod discovery;
 mod eh;
 mod elf;
+mod emptystr;
 mod emulate_calls;
 mod engine;
 mod families;

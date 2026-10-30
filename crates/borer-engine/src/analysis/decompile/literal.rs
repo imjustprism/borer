@@ -58,7 +58,8 @@ pub(super) fn literal_at(program: &Program, addr: u64, own_name: &str) -> Option
 /// is not cut to the narrow `"%"`. A lone terminator reads as `""` only
 /// beside another literal: right after one, or right before a run of text
 /// that ends in its own terminator, not before one printable byte and
-/// binary (a jump table's first entry). A literal that does not read back to the
+/// binary (a jump table's first entry). A zero `wchar_t` after a wide
+/// literal, padding included, reads as `L""`. A literal that does not read back to the
 /// image's bytes through the text's own tokenizer ([`round_trips`]) is not
 /// printed.
 fn string_at(program: &Program, addr: u64) -> Option<String> {
@@ -85,6 +86,9 @@ fn string_at(program: &Program, addr: u64) -> Option<String> {
         && let Some(head) = program.read_va_upto(addr, 1)
         && head.first() == Some(&0)
     {
+        if wide_empty(program, addr) {
+            return Some(String::from("L\"\""));
+        }
         let after_a_literal = addr
             .checked_sub(2)
             .and_then(|at| program.read_va(at, 2))
@@ -124,6 +128,79 @@ fn string_at(program: &Program, addr: u64) -> Option<String> {
         (None, None) => return None,
     };
     round_trips(program, addr, &literal).then_some(literal)
+}
+
+/// The empty literal at `addr`, `""` or `L""`.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `addr` - Address a reference points at.
+///
+/// # Returns
+///
+/// The literal, or `None` when the address is not an empty string.
+pub(crate) fn empty_literal_at(program: &Program, addr: u64) -> Option<String> {
+    string_at(program, addr).filter(|s| matches!(s.as_str(), "\"\"" | "L\"\""))
+}
+
+/// Whether `addr` is an empty wide literal after a wide string.
+///
+/// The address is two-byte aligned and its first unit is zero. Walking
+/// back over at most three zero units lands on a wide character whose
+/// preceding byte is a terminator or the section start. The tail of an
+/// ASCII literal is not that character.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `addr` - Address of the candidate empty literal.
+///
+/// # Returns
+///
+/// `true` when the bytes there are `L""`.
+fn wide_empty(program: &Program, addr: u64) -> bool {
+    if !addr.is_multiple_of(2) {
+        return false;
+    }
+    let zeros = |at: u64| program.read_va(at, 2).is_some_and(|b| b == [0, 0]);
+    if !zeros(addr) {
+        return false;
+    }
+    let mut at = addr;
+    for _ in 0..3 {
+        let Some(prev) = at.checked_sub(2) else {
+            break;
+        };
+        if !zeros(prev) {
+            break;
+        }
+        at = prev;
+    }
+    let Some(unit) = at.checked_sub(2) else {
+        return false;
+    };
+    let Some(section) = program.section_at(addr) else {
+        return false;
+    };
+    if unit < section.va.0 {
+        return false;
+    }
+    let Some(bytes) = program.read_va(unit, 2) else {
+        return false;
+    };
+    let Some(&lo) = bytes.first() else {
+        return false;
+    };
+    if !crate::strings::printable(lo) || bytes.get(1) != Some(&0) {
+        return false;
+    }
+    unit == section.va.0
+        || unit
+            .checked_sub(1)
+            .and_then(|b| program.read_va(b, 1))
+            .and_then(|b| b.first().copied())
+            .is_some_and(|c| c == 0 || !crate::strings::printable(c))
 }
 
 /// Fewest wide characters, past a one-character narrow reading, that make
@@ -236,6 +313,9 @@ mod tests {
 
     /// A zero byte is the empty string only beside another literal.
     ///
+    /// Padding after `L"*"` is `L""`, including two units of alignment.
+    /// Padding after the ASCII literal `ABC` is not a wide literal.
+    ///
     /// The last byte of a pointer followed by a bytecode table (`00 03 00
     /// 5a`) is no string pool, so it keeps its address, nor is a jump
     /// table whose first offset reads `00 '0'` and then binary (`00 30 98
@@ -249,11 +329,16 @@ mod tests {
         bytes[0x20..0x24].copy_from_slice(b"\0AB\0");
         bytes[0x30..0x34].copy_from_slice(b"AB\0\0");
         bytes[0x40..0x44].copy_from_slice(&[0x00, 0x30, 0x98, 0xff]);
+        bytes[0x60..0x68].copy_from_slice(&[0x2a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        bytes[0x70..0x78].copy_from_slice(&[0x41, 0x42, 0x43, 0x00, 0x00, 0x00, 0x00, 0x00]);
         let rdata = Section::mapped(".rdata", 0x2000, 0, 0x1000, false, false);
         let p = Program::raw(bytes, Arch::X86_64, 0, None, vec![rdata]);
         assert_eq!(super::string_at(&p, 0x2010), None);
         assert_eq!(super::string_at(&p, 0x2020).as_deref(), Some("\"\""));
         assert_eq!(super::string_at(&p, 0x2033).as_deref(), Some("\"\""));
         assert_eq!(super::string_at(&p, 0x2040), None);
+        assert_eq!(super::string_at(&p, 0x2062).as_deref(), Some("L\"\""));
+        assert_eq!(super::string_at(&p, 0x2064).as_deref(), Some("L\"\""));
+        assert_ne!(super::string_at(&p, 0x2074).as_deref(), Some("L\"\""));
     }
 }
