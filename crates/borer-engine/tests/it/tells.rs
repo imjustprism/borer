@@ -100,7 +100,8 @@ fn one_real_anti_debug_import_tips_and_the_runtime_one_does_not() {
     assert!(!runtime.starts_with("# anti-analysis:"), "{runtime}");
 }
 
-/// `fs:[0x30]` is a PEB read. `fs:[0x18]` then a stack-base read is not.
+/// `fs:[0x30]` is a PEB read and not a named field. `fs:[0x18]` then a
+/// stack-base read is not a PEB read.
 #[test]
 fn a_peb_read_is_a_tell_and_the_teb_stack_base_is_not() {
     let peb = report(&[
@@ -108,6 +109,7 @@ fn a_peb_read_is_a_tell_and_the_teb_stack_base_is_not() {
         0xc3, // ASM: ret
     ]);
     assert!(peb.contains("peb read"), "{peb}");
+    assert!(!peb.contains("BeingDebugged"), "{peb}");
     assert!(peb.starts_with("# anti-analysis:"), "{peb}");
     let stack = report(&[
         0x64, 0x8b, 0x04, 0x25, 0x18, 0x00, 0x00, 0x00, // ASM: mov eax, fs:[0x18]
@@ -115,6 +117,53 @@ fn a_peb_read_is_a_tell_and_the_teb_stack_base_is_not() {
         0xc3, // ASM: ret
     ]);
     assert!(!stack.contains("peb read"), "{stack}");
+}
+
+/// A byte at `+2` is `BeingDebugged`. `+0x68` and `+0xBC` are `NtGlobalFlag`.
+/// An `Ldr` walk stays a plain PEB read.
+#[test]
+fn a_peb_field_is_named_from_the_following_read() {
+    let debugged = report(&[
+        0x64, 0x8b, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, // ASM: mov eax, fs:[0x30]
+        0x8a, 0x40, 0x02, // ASM: mov al, [eax+2]
+        0xc3, // ASM: ret
+    ]);
+    assert!(debugged.contains("peb read (BeingDebugged)"), "{debugged}");
+    let teb = report(&[
+        0x64, 0x8b, 0x04, 0x25, 0x18, 0x00, 0x00, 0x00, // ASM: mov eax, fs:[0x18]
+        0x8b, 0x40, 0x30, // ASM: mov eax, [eax+0x30]
+        0x0f, 0xb6, 0x40, 0x02, // ASM: movzx eax, byte [eax+2]
+        0xc3, // ASM: ret
+    ]);
+    assert!(teb.contains("peb read (BeingDebugged)"), "{teb}");
+    let flag32 = report(&[
+        0x64, 0x8b, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, // ASM: mov eax, fs:[0x30]
+        0x8b, 0x80, 0x68, 0x00, 0x00, 0x00, // ASM: mov eax, [eax+0x68]
+        0xc3, // ASM: ret
+    ]);
+    assert!(flag32.contains("peb read (NtGlobalFlag)"), "{flag32}");
+    assert!(!flag32.contains("BeingDebugged"), "{flag32}");
+    let flag64 = report(&[
+        0x65, 0x48, 0x8b, 0x04, 0x25, 0x60, 0x00, 0x00, 0x00, // ASM: mov rax, gs:[0x60]
+        0x8b, 0x80, 0xbc, 0x00, 0x00, 0x00, // ASM: mov eax, [rax+0xbc]
+        0xc3, // ASM: ret
+    ]);
+    assert!(flag64.contains("peb read (NtGlobalFlag)"), "{flag64}");
+    let ldr = report(&[
+        0x64, 0x8b, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, // ASM: mov eax, fs:[0x30]
+        0x8b, 0x40, 0x0c, // ASM: mov eax, [eax+0x0c]
+        0xc3, // ASM: ret
+    ]);
+    assert!(ldr.contains("peb read"), "{ldr}");
+    assert!(!ldr.contains("BeingDebugged"), "{ldr}");
+    assert!(!ldr.contains("NtGlobalFlag"), "{ldr}");
+    let wide = report(&[
+        0x64, 0x8b, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, // ASM: mov eax, fs:[0x30]
+        0x8b, 0x40, 0x02, // ASM: mov eax, [eax+2]
+        0xc3, // ASM: ret
+    ]);
+    assert!(wide.contains("peb read"), "{wide}");
+    assert!(!wide.contains("BeingDebugged"), "{wide}");
 }
 
 /// `mov dr0` inside a function is a hardware-breakpoint tell.

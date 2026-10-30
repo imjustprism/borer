@@ -170,8 +170,8 @@ fn patterns(
     let Some(ip) = instrs.first().map(Instruction::ip) else {
         return out;
     };
-    if let Some(at) = peb_read(instrs) {
-        out.push(("peb read (BeingDebugged)", at));
+    if let Some((at, label)) = peb_read(instrs) {
+        out.push((label, at));
     }
     let called = called_imports(p, a, f.entry);
     let has = |frag: &str| called.iter().any(|n| n.contains(frag));
@@ -256,12 +256,13 @@ fn decodes_invalid(p: &Program, bits: u32, at: u64) -> bool {
     decoder.can_decode() && decoder.decode().is_invalid()
 }
 
-/// The address of a PEB read, when the instructions perform one.
+/// The address and label of a PEB read, when the instructions perform one.
 ///
 /// `fs:[0x30]` and `gs:[0x60]` are the PEB. `fs:[0x18]` and `gs:[0x30]` are
 /// the TEB's self pointer, and count only when a following use indexes the
 /// PEB (`0x30` or `0x60`). A read of the stack base at `+4` or `+8` does not.
-fn peb_read(instrs: &[Instruction]) -> Option<u64> {
+/// The label names the field a later read shows.
+fn peb_read(instrs: &[Instruction]) -> Option<(u64, &'static str)> {
     for (at, i) in instrs.iter().enumerate() {
         let Some((seg, disp, base)) = memory(i) else {
             continue;
@@ -269,18 +270,40 @@ fn peb_read(instrs: &[Instruction]) -> Option<u64> {
         let direct = (seg == Register::FS && disp == 0x30) || (seg == Register::GS && disp == 0x60);
         let teb = (seg == Register::FS && disp == 0x18) || (seg == Register::GS && disp == 0x30);
         if direct {
-            return Some(i.ip());
+            return Some((i.ip(), peb_field(&instrs[at + 1..])));
         }
         if teb && base == Register::None {
             let indexed = instrs.iter().skip(at + 1).take(4).any(|n| {
                 memory(n).is_some_and(|(_, d, b)| b != Register::None && matches!(d, 0x30 | 0x60))
             });
             if indexed {
-                return Some(i.ip());
+                return Some((i.ip(), peb_field(&instrs[at + 1..])));
             }
         }
     }
     None
+}
+
+/// Names the PEB field a later read uses.
+///
+/// A byte at displacement 2 is `BeingDebugged`. A read at `0x68` or `0xBC`
+/// is `NtGlobalFlag`. An `Ldr` walk stays a plain PEB read.
+fn peb_field(rest: &[Instruction]) -> &'static str {
+    for n in rest.iter().take(4) {
+        let Some((_, disp, base)) = memory(n) else {
+            continue;
+        };
+        if base == Register::None {
+            continue;
+        }
+        if disp == 2 && n.memory_size().size() == 1 {
+            return "peb read (BeingDebugged)";
+        }
+        if matches!(disp, 0x68 | 0xbc) {
+            return "peb read (NtGlobalFlag)";
+        }
+    }
+    "peb read"
 }
 
 /// The bare import names this function calls, in lower case.
