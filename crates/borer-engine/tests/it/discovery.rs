@@ -328,6 +328,31 @@ fn a_call_does_not_return_into_the_bytes_it_skips() {
     }
 }
 
+/// An add through `fs` does not rewrite the return address.
+///
+/// `add dword ptr fs:[esp], 1` writes another segment. The caller
+/// continues at the next instruction.
+#[test]
+fn an_add_through_fs_does_not_rewrite_the_return_address() {
+    for arch in [Arch::X86_64, Arch::X86] {
+        let mut code = vec![0x6e_u8; 0x20];
+        code[0] = 0xe8;
+        code[1..5].copy_from_slice(&rel32(TEXT, TEXT + 0x10));
+        code[5..8].copy_from_slice(&LEAF);
+        code[0x10..0x16].copy_from_slice(&[0x64, 0x83, 0x04, 0x24, 0x01, 0xc3]);
+        assert!(
+            holds(arch, &code, TEXT, TEXT + 5),
+            "{arch:?} skipped the instruction after the call"
+        );
+        let edge = call_successors(arch, &code, TEXT, TEXT);
+        assert!(edge.contains(&(TEXT + 5)), "{arch:?} edge {edge:?}");
+        assert!(
+            !edge.contains(&(TEXT + 6)),
+            "{arch:?} edge skipped a byte {edge:?}"
+        );
+    }
+}
+
 /// `int 2dh` is a breakpoint check that falls through when no debugger
 /// swallows it. `int 0x29` still ends the walk.
 #[test]

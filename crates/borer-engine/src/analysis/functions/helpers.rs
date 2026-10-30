@@ -875,6 +875,8 @@ fn ret_adjust(program: &Program, bitness: u32, va: u64, depth: u8) -> Option<(u6
 
 /// An `add` of an immediate to the return slot, or to the caller's.
 ///
+/// A segment other than `ss` is not that slot.
+///
 /// # Returns
 ///
 /// `(far, immediate, bytes)`: `far` is the caller's slot, and `bytes` is
@@ -887,6 +889,9 @@ fn stack_add(instr: &Instruction, bitness: u32) -> Option<(bool, u64, u32)> {
         return None;
     }
     if instr.memory_base().full_register() != Register::RSP {
+        return None;
+    }
+    if !matches!(instr.segment_prefix(), Register::None | Register::SS) {
         return None;
     }
     let far = if bitness == 32 { 4 } else { 8 };
