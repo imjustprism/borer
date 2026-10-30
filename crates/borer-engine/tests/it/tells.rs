@@ -64,6 +64,37 @@ fn a_cleared_timestamp_is_a_read() {
     assert!(!text.contains("rdtsc (timing)"), "{text}");
 }
 
+/// A leaf overwritten before `cpuid` is not a hypervisor probe.
+///
+/// A test of `ecx` against the hypervisor bit is. A test of another
+/// register is not.
+#[test]
+fn a_replaced_leaf_is_not_a_hypervisor_probe() {
+    let replaced = report(&[
+        0xb8, 0x00, 0x00, 0x00, 0x40, // ASM: mov eax, 0x40000000
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+        0x0f, 0xa2, // ASM: cpuid
+        0xc3, // ASM: ret
+    ]);
+    assert!(replaced.contains("cpuid (feature probe)"), "{replaced}");
+    assert!(!replaced.contains("hypervisor"), "{replaced}");
+    let bit = report(&[
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+        0x0f, 0xa2, // ASM: cpuid
+        0xf7, 0xc1, 0x00, 0x00, 0x00, 0x80, // ASM: test ecx, 0x80000000
+        0xc3, // ASM: ret
+    ]);
+    assert!(bit.contains("cpuid (hypervisor probe)"), "{bit}");
+    let other = report(&[
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+        0x0f, 0xa2, // ASM: cpuid
+        0xf7, 0xc2, 0x00, 0x00, 0x00, 0x80, // ASM: test edx, 0x80000000
+        0xc3, // ASM: ret
+    ]);
+    assert!(other.contains("cpuid (feature probe)"), "{other}");
+    assert!(!other.contains("hypervisor"), "{other}");
+}
+
 /// A discarded read before a measured pair does not hide that pair.
 #[test]
 fn a_discarded_rdtsc_does_not_hide_a_later_pair() {

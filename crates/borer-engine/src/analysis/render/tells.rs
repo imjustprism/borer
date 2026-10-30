@@ -242,19 +242,47 @@ fn difference_checked(instrs: &[Instruction], at: usize) -> bool {
     false
 }
 
-/// Whether `cpuid` at `at` follows a hypervisor vendor leaf or is followed
-/// by a test of the hypervisor bit.
+/// Whether `cpuid` at `at` runs the hypervisor vendor leaf or is followed
+/// by a test of the hypervisor bit in `ecx`.
+///
+/// The leaf is the last write of `rax` before the instruction. A constant
+/// an earlier `mov` left, and that a later `mov` replaced, is not the leaf.
+/// A test of some other register is not the hypervisor bit.
 fn cpuid_hypervisor(instrs: &[Instruction], at: usize) -> bool {
-    let leaf = instrs[..at]
+    hypervisor_leaf(instrs, at) || hypervisor_bit(instrs, at)
+}
+
+/// Whether the last write of `rax` before `instrs[at]` is the vendor leaf.
+fn hypervisor_leaf(instrs: &[Instruction], at: usize) -> bool {
+    instrs[..at]
         .iter()
         .rev()
         .take(6)
-        .any(|n| moved_immediate(n, Register::RAX, 0x4000_0000));
-    let bit =
-        instrs.iter().skip(at + 1).take(8).any(|n| {
-            moved_immediate(n, Register::RCX, 0x8000_0000) || tests_immediate(n, 0x8000_0000)
-        });
-    leaf || bit
+        .find(|n| writes_register(n, Register::RAX))
+        .is_some_and(|n| moved_immediate(n, Register::RAX, 0x4000_0000))
+}
+
+/// Whether a later instruction tests the hypervisor bit in `ecx`.
+fn hypervisor_bit(instrs: &[Instruction], at: usize) -> bool {
+    instrs
+        .iter()
+        .skip(at + 1)
+        .take(8)
+        .any(|n| tests_register(n, Register::RCX, 0x8000_0000))
+}
+
+/// Whether `i` writes `reg`, other than a compare that only reads it.
+fn writes_register(i: &Instruction, reg: Register) -> bool {
+    i.op0_kind() == OpKind::Register
+        && i.op0_register().full_register() == reg
+        && !matches!(i.mnemonic(), Mnemonic::Cmp | Mnemonic::Test | Mnemonic::Bt)
+}
+
+/// Whether `i` tests or compares `reg` against `imm`.
+fn tests_register(i: &Instruction, reg: Register, imm: u64) -> bool {
+    tests_immediate(i, imm)
+        && (0..i.op_count())
+            .any(|k| i.op_kind(k) == OpKind::Register && i.op_register(k).full_register() == reg)
 }
 
 /// Whether the `in` at `at` is aimed at the `VMware` backdoor.
