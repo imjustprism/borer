@@ -60,3 +60,17 @@ fn rdtscp_keeps_the_aux_register_it_writes() {
     assert!(text.contains("rdtscp_ecx"), "{text}");
     assert!(!text.contains("rdtscp();"), "{text}");
 }
+
+/// `rdtsc` writes `edx:eax` and leaves `ecx` alone.
+#[test]
+fn a_plain_rdtsc_keeps_the_ecx_it_did_not_write() {
+    let code = [
+        0xb9, 0x05, 0x00, 0x00, 0x00, // ASM: mov ecx, 5
+        0x0f, 0x31, // ASM: rdtsc
+        0x01, 0xc8, // ASM: add eax, ecx
+        0xc3, // ASM: ret
+    ];
+    let text = decompiled(&program64(&code), 0x1_4000_1000);
+    assert!(text.contains("rdtsc"), "{text}");
+    assert!(text.contains('5'), "{text}");
+}

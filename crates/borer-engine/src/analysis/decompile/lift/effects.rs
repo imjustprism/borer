@@ -1726,8 +1726,6 @@ impl Exec<'_, '_> {
         );
         if aux {
             self.reg_write(Register::ECX, Expr::Helper(Helper::Rdtsc(4), Vec::new()));
-        } else {
-            self.clobber(self.canon(Register::RCX));
         }
     }
 }
