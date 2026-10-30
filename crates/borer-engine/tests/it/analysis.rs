@@ -1634,8 +1634,8 @@ fn the_emulator_takes_call_site_arguments() {
 /// The anti-analysis report finds the stealthy instruction tells.
 ///
 /// A routine of `cpuid; rdtsc; sidt; in; int3` carries three strong tells a
-/// compiler never emits (the descriptor-table read, the backdoor `in`, the
-/// trap), so the verdict calls it out; `cpuid` and `rdtsc` alone would not.
+/// compiler never emits (the descriptor-table read, the port `in`, the
+/// trap), so the verdict calls it out; `cpuid` and one `rdtsc` alone would not.
 #[test]
 fn the_anti_analysis_report_finds_the_tells() {
     let mut bytes = vec![0xc3u8; 0x1000];
@@ -1659,7 +1659,7 @@ fn the_anti_analysis_report_finds_the_tells() {
         "verdict wrong: {text}"
     );
     assert!(text.contains("descriptor-table"), "{text}");
-    assert!(text.contains("VMware backdoor"), "{text}");
+    assert!(text.contains("port read"), "{text}");
     assert!(text.contains("debugger trap"), "{text}");
     let plain = borer_engine::analysis::render::anti_analysis_tsv(
         &fixture(),

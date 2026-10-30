@@ -74,7 +74,15 @@ const CRT_IMPORTS: [&str; 5] = [
 pub fn anti_analysis_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
     let sites = anti_sites(p, a);
     let mut out = String::new();
-    let weak = |tag: &str| tag.starts_with("cpuid") || tag.starts_with("rdtsc");
+    let weak = |tag: &str| tag.starts_with("cpuid") || tag.starts_with("rdtsc (read)");
+    let alone = |tag: &str| {
+        tag.starts_with("int 2d")
+            || tag.starts_with("peb read")
+            || tag.starts_with("hardware breakpoint")
+            || tag.starts_with("debugger window")
+            || tag.starts_with("debug block")
+            || tag.starts_with("breakpoint ")
+    };
     let strong = sites.keys().filter(|tag| !weak(tag)).count();
     let instr_count: usize = sites.values().map(Vec::len).sum();
     for (tag, at) in sites.iter() {
@@ -119,7 +127,7 @@ pub fn anti_analysis_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
         let _ = writeln!(out, "{label:<32}  import");
     }
     let telling = imports.iter().any(|label| !CRT_IMPORTS.contains(label));
-    let verdict = if strong >= 3 || (strong >= 1 && telling) {
+    let verdict = if strong >= 3 || telling || sites.keys().any(|tag| alone(tag)) {
         "anti-analysis: a program that resists being watched"
     } else if instr_count + imports.len() == 0 {
         "no anti-analysis tells"
@@ -152,44 +160,12 @@ fn anti_sites(p: &Program, a: &Analysis) -> Arc<BTreeMap<&'static str, Vec<u64>>
             return sites;
         };
         for f in &a.functions {
-            let mut after = FlowControl::Next;
-            each_instruction(p, f, bits, |i| {
-                let trap = i.mnemonic() == Mnemonic::Int3 && after != FlowControl::Next;
-                if let Some(tag) = anti_instruction(i).filter(|_| !trap) {
-                    sites.entry(tag).or_default().push(i.ip());
-                }
-                if i.mnemonic() != Mnemonic::Nop {
-                    after = i.flow_control();
-                }
-            });
+            for (tag, ip) in tells::sites(p, a, f, bits) {
+                sites.entry(tag).or_default().push(ip);
+            }
         }
         sites
     })
-}
-
-/// The anti-analysis technique an instruction is, if any.
-///
-/// # Arguments
-///
-/// * `i` - The instruction.
-///
-/// # Returns
-///
-/// A short label, or `None` when the instruction is not a tell.
-pub(super) fn anti_instruction(i: &Instruction) -> Option<&'static str> {
-    match i.mnemonic() {
-        Mnemonic::Rdtsc | Mnemonic::Rdtscp => Some("rdtsc (timing)"),
-        Mnemonic::Cpuid => Some("cpuid (hypervisor probe)"),
-        Mnemonic::Int3 => Some("int3 (debugger trap)"),
-        Mnemonic::Int1 => Some("icebp (debugger trap)"),
-        Mnemonic::Sidt | Mnemonic::Sgdt | Mnemonic::Sldt | Mnemonic::Str => {
-            Some("descriptor-table read (VM red pill)")
-        }
-        Mnemonic::In | Mnemonic::Insb | Mnemonic::Insw | Mnemonic::Insd => {
-            Some("in (VMware backdoor port)")
-        }
-        _ => None,
-    }
 }
 
 /// Phrases that mark a function as judging a key, serial or license.
@@ -630,11 +606,11 @@ fn telling(s: &str) -> bool {
 /// The distinctive constants a function compares against.
 ///
 /// A check tests the input against the value it wants, `cmp eax, 0x4a2b`.
-/// A `sub`, `xor` or `and` counts only when its flags are what a later
-/// branch reads and its result is dead; a hash mixes those immediates and
-/// then overwrites the flags. Small values (0, 1, sizes), the all-ones
-/// sentinels and page-sized round numbers are not secrets, so they are
-/// left out.
+/// A `sub`, `xor` or `and` counts only when a later instruction reads its
+/// flags before they are overwritten. A hash mixes those immediates and
+/// then overwrites the flags.
+/// Small values (0, 1, sizes), the all-ones sentinels and page-sized round
+/// numbers are not secrets, so they are left out.
 ///
 /// # Arguments
 ///

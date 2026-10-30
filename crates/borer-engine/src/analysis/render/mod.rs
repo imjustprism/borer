@@ -25,6 +25,7 @@ mod protection;
 mod runs;
 mod signature;
 mod summary;
+mod tells;
 mod triage;
 mod typed;
 mod unpack;

@@ -74,6 +74,7 @@ mod shapes;
 mod strings;
 mod structure;
 mod syscalls;
+mod tells;
 mod textcheck;
 mod toolchain;
 mod typelib;
