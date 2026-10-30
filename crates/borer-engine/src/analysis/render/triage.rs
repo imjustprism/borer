@@ -460,7 +460,10 @@ fn call_sites(p: &Program, a: &Analysis, entry: u64, stem: &str) -> Vec<u64> {
             if site.kind != RefKind::Call {
                 return None;
             }
-            let sym = a.symbol_at(p, target)?;
+            let slot = a.function(target).and_then(|g| g.thunk).unwrap_or(target);
+            let sym = a
+                .symbol_at(p, slot)
+                .filter(|s| s.kind == SymbolKind::Import)?;
             bare_name(&sym.name)
                 .to_lowercase()
                 .starts_with(stem)

@@ -146,6 +146,24 @@ fn a_crt_import_is_a_capability_only_when_a_caller_checks_it() {
     ];
     let text = map(&twice, "QueryPerformanceCounter");
     assert!(text.contains("QueryPerformanceCounter"), "{text}");
+    let thunked = |check: bool| {
+        let mut code = vec![0xcc_u8; 0x16];
+        code[0] = 0xe8;
+        code[1..5].copy_from_slice(&[0x0b, 0x00, 0x00, 0x00]); // ASM: call 0x401010
+        if check {
+            code[5] = 0x85; // ASM: test eax, eax
+            code[6] = 0xc0;
+            code[7] = 0xc3;
+        } else {
+            code[5] = 0xc3;
+        }
+        code[0x10..0x16].copy_from_slice(&[0xff, 0x25, 0xea, 0x0f, 0x00, 0x00]); // ASM: jmp qword [rip+0xfea]
+        code
+    };
+    let text = map(&thunked(true), "IsDebuggerPresent");
+    assert!(text.contains("IsDebuggerPresent"), "{text}");
+    let text = map(&thunked(false), "IsDebuggerPresent");
+    assert!(!text.contains("IsDebuggerPresent"), "{text}");
 }
 
 /// `Software\` settings are a registry write. A Run key or a service stays
