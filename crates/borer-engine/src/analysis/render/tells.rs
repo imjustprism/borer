@@ -35,11 +35,12 @@ pub(super) fn sites(
     bits: u32,
 ) -> Vec<(&'static str, u64)> {
     let instrs = decoded(p, f, bits);
+    let timing = rdtsc_timing(&instrs);
     let mut out = Vec::new();
     let mut after = FlowControl::Next;
     for (at, i) in instrs.iter().enumerate() {
         let trap = i.mnemonic() == Mnemonic::Int3 && after != FlowControl::Next;
-        if !trap && let Some(tag) = instruction_tag(&instrs, at) {
+        if !trap && let Some(tag) = instruction_tag(&instrs, at, timing) {
             out.push((tag, i.ip()));
         }
         if i.mnemonic() != Mnemonic::Nop {
@@ -51,11 +52,17 @@ pub(super) fn sites(
 }
 
 /// The label of one instruction, using the instructions around it.
-fn instruction_tag(instrs: &[Instruction], at: usize) -> Option<&'static str> {
+///
+/// # Arguments
+///
+/// * `instrs` - The function's instructions.
+/// * `at` - The instruction's index.
+/// * `timing` - Two timestamp reads are subtracted and a branch reads that.
+fn instruction_tag(instrs: &[Instruction], at: usize, timing: bool) -> Option<&'static str> {
     let i = instrs.get(at)?;
     Some(match i.mnemonic() {
         Mnemonic::Rdtsc | Mnemonic::Rdtscp => {
-            if rdtsc_timing(instrs) {
+            if timing {
                 "rdtsc (timing)"
             } else {
                 "rdtsc (read)"
