@@ -1136,13 +1136,7 @@ fn triage_of(p: &Program, a: &Analysis, o: &Overlay) -> String {
         }
     }
     let mut ranked: Vec<(u64, Vec<String>)> = reasons.into_iter().collect();
-    ranked.sort_by(|l, r| {
-        let (ls, rs) = (
-            score.get(&l.0).copied().unwrap_or(0),
-            score.get(&r.0).copied().unwrap_or(0),
-        );
-        rs.cmp(&ls).then(l.0.cmp(&r.0))
-    });
+    rank_reading(a, &score, &mut ranked);
     let telling = ranked.len();
     if telling < READ_MAX {
         let have: BTreeSet<u64> = ranked.iter().map(|r| r.0).collect();
@@ -1170,6 +1164,30 @@ fn triage_of(p: &Program, a: &Analysis, o: &Overlay) -> String {
     }
     out.push_str("# next: function_summary(addr), then decompile(addr); emulate/<addr> runs one\n");
     out
+}
+
+/// Orders the reading list so a function left mostly unchecked is not first.
+///
+/// The checker stops at [`ANSWER_BLOCKS`](crate::analysis::decompile::replay::ANSWER_BLOCKS).
+/// More than twice that many blocks means most of the function was not
+/// checked. Those sort after every function the checker can cover. Score,
+/// then address, still orders each group.
+///
+/// # Arguments
+///
+/// * `a` - The analysis, for each function's blocks.
+/// * `score` - The rank each entry earned.
+/// * `ranked` - The candidates, sorted in place.
+fn rank_reading(a: &Analysis, score: &BTreeMap<u64, usize>, ranked: &mut [(u64, Vec<String>)]) {
+    let limit = 2 * crate::analysis::decompile::replay::ANSWER_BLOCKS;
+    let open = |e: u64| a.function(e).is_some_and(|f| f.blocks.len() > limit);
+    ranked.sort_by(|l, r| {
+        open(l.0).cmp(&open(r.0)).then_with(|| {
+            let ls = score.get(&l.0).copied().unwrap_or(0);
+            let rs = score.get(&r.0).copied().unwrap_or(0);
+            rs.cmp(&ls).then(l.0.cmp(&r.0))
+        })
+    });
 }
 
 /// Least file bytes a section needs before its entropy or its lack of code

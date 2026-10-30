@@ -237,7 +237,7 @@ fn check_step(
     text: &str,
     params: usize,
 ) -> Option<String> {
-    if params == 0 {
+    if params == 0 || f.blocks.len() > 2 * crate::analysis::decompile::replay::ANSWER_BLOCKS {
         return None;
     }
     let instrs = function_instructions(p, a, f.entry);

@@ -82,6 +82,7 @@ mod textcheck;
 mod toolchain;
 mod typelib;
 mod types;
+mod unchecked;
 mod unit;
 mod void_results;
 mod x86;
