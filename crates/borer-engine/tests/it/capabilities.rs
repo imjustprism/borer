@@ -242,3 +242,17 @@ fn a_copied_check_stays_and_an_overwrite_does_not() {
     let text = debugger_map(&overwritten);
     assert!(!text.contains("IsDebuggerPresent"), "{text}");
 }
+
+/// A later call replaces `eax`. Testing it then is not the debugger check.
+#[test]
+fn a_check_after_another_call_is_not_the_debugger_result() {
+    let code = [
+        0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0xe8, 0x03, 0x00, 0x00, 0x00, // ASM: call 0x40100d
+        0x85, 0xc0, // ASM: test eax, eax
+        0xc3, // ASM: ret
+        0xc3, // ASM: ret
+    ];
+    let text = debugger_map(&code);
+    assert!(!text.contains("IsDebuggerPresent"), "{text}");
+}
