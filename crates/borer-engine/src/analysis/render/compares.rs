@@ -4,6 +4,9 @@
 use super::*;
 use crate::analysis::decompile::abi::Conv;
 
+/// Most instructions [`flags_decide`] visits for one flag write.
+const FLAG_SCAN_MAX: usize = 4096;
+
 /// Where a compared value comes from, so a hint does not call every one
 /// the function's first argument.
 pub(super) enum Compared {
@@ -57,7 +60,8 @@ pub(super) fn compare_immediate(instrs: &[Instruction], at: usize) -> Option<u64
 /// reads one of those flags: `sub` then `inc` then `jz` does not, because
 /// `inc` replaced the zero flag. A write of one flag leaves the others:
 /// `clc` clears carry and a following `sete` still reads the compare's
-/// zero flag. Each instruction is visited once, so the scan stops at a loop.
+/// zero flag. Each instruction is visited once, and at most
+/// [`FLAG_SCAN_MAX`] of them, so the scan stops at a loop.
 ///
 /// # Arguments
 ///
@@ -70,7 +74,7 @@ fn flags_decide(instrs: &[Instruction], at: usize) -> bool {
     }
     let mut cursor = at.saturating_add(1);
     let mut seen = BTreeSet::new();
-    while seen.insert(cursor) {
+    while seen.len() < FLAG_SCAN_MAX && seen.insert(cursor) {
         if cursor >= instrs.len() {
             return false;
         }
@@ -84,7 +88,7 @@ fn flags_decide(instrs: &[Instruction], at: usize) -> bool {
         }
         if n.flow_control() == FlowControl::UnconditionalBranch {
             let target = n.near_branch_target();
-            let Some(pos) = instrs.iter().position(|i| i.ip() == target) else {
+            let Ok(pos) = instrs.binary_search_by_key(&target, Instruction::ip) else {
                 return false;
             };
             cursor = pos;
