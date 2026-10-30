@@ -710,6 +710,8 @@ pub(crate) fn panic_helper_name(
 /// this call's return. Anything else, including a read of the slot, comes
 /// back to `next`.
 ///
+/// A byte or word add changes only that field of the address.
+///
 /// # Arguments
 ///
 /// * `program` - The loaded image.
@@ -721,10 +723,30 @@ pub(crate) fn panic_helper_name(
 ///
 /// The address the caller continues at.
 pub(super) fn call_lands(program: &Program, bitness: u32, target: u64, next: u64) -> u64 {
-    let Some(adj) = ret_adjust(program, bitness, target, 0) else {
+    let Some((own, _, bytes)) = ret_adjust(program, bitness, target, 0) else {
         return next;
     };
-    next.wrapping_add(adj.0)
+    add_low(next, own, bytes)
+}
+
+/// Adds `imm` to the low `bytes` of `addr`, leaving the rest as they are.
+///
+/// # Arguments
+///
+/// * `addr` - The address being adjusted.
+/// * `imm` - The immediate, sign-extended.
+/// * `bytes` - The add's operand width. Eight or more adds the whole address.
+///
+/// # Returns
+///
+/// The adjusted address.
+fn add_low(addr: u64, imm: u64, bytes: u32) -> u64 {
+    let bits = bytes.saturating_mul(8);
+    if bits == 0 || bits >= 64 {
+        return addr.wrapping_add(imm);
+    }
+    let mask = (1u64 << bits) - 1;
+    (addr & !mask) | ((addr & mask).wrapping_add(imm) & mask)
 }
 
 /// Sets a call block's edge to the instruction the call returns to.
@@ -777,14 +799,18 @@ fn call_fall(recs: &[(u64, InstrRec)], next: u64) -> u64 {
     }
 }
 
-/// The constant added to this function's return address, and the constant
-/// it adds to its caller's.
-fn ret_adjust(program: &Program, bitness: u32, va: u64, depth: u8) -> Option<(u64, u64)> {
+/// The constant added to this function's return address, the constant it
+/// adds to its caller's, and the width of those adds.
+///
+/// Mixed widths are not one adjustment. The same width adds within that
+/// field.
+fn ret_adjust(program: &Program, bitness: u32, va: u64, depth: u8) -> Option<(u64, u64, u32)> {
     if depth > 1 {
         return None;
     }
     let mut own = 0u64;
     let mut caller = 0u64;
+    let mut width: Option<u32> = None;
     let mut saw = false;
     let mut ip = va;
     for _ in 0..6 {
@@ -792,7 +818,11 @@ fn ret_adjust(program: &Program, bitness: u32, va: u64, depth: u8) -> Option<(u6
         if instr.code() == Code::INVALID {
             return None;
         }
-        if let Some((far, imm)) = stack_add(&instr, bitness) {
+        if let Some((far, imm, bytes)) = stack_add(&instr, bitness) {
+            if width.is_some_and(|w| w != bytes) {
+                return None;
+            }
+            width = Some(bytes);
             saw = true;
             if far {
                 caller = caller.wrapping_add(imm);
@@ -803,17 +833,18 @@ fn ret_adjust(program: &Program, bitness: u32, va: u64, depth: u8) -> Option<(u6
             continue;
         }
         if saw && instr.mnemonic() == Mnemonic::Ret && instr.op_count() == 0 {
-            return Some((own, caller));
+            return Some((own, caller, width?));
         }
         if !saw
             && instr.flow_control() == FlowControl::Call
             && let Some(t) = near_target(&instr)
-            && let Some((inner_own, inner_caller)) = ret_adjust(program, bitness, t, depth + 1)
+            && let Some((inner_own, inner_caller, inner_bytes)) =
+                ret_adjust(program, bitness, t, depth + 1)
         {
-            let land = instr.next_ip().wrapping_add(inner_own);
+            let land = add_low(instr.next_ip(), inner_own, inner_bytes);
             let at = decode_at(program, bitness, land)?;
             if at.code() != Code::INVALID && at.mnemonic() == Mnemonic::Ret && at.op_count() == 0 {
-                return Some((inner_caller, 0));
+                return Some((inner_caller, 0, inner_bytes));
             }
         }
         return None;
@@ -825,8 +856,9 @@ fn ret_adjust(program: &Program, bitness: u32, va: u64, depth: u8) -> Option<(u6
 ///
 /// # Returns
 ///
-/// `(far, immediate)`: `far` is the caller's slot.
-fn stack_add(instr: &Instruction, bitness: u32) -> Option<(bool, u64)> {
+/// `(far, immediate, bytes)`: `far` is the caller's slot, and `bytes` is
+/// the width of the memory operand.
+fn stack_add(instr: &Instruction, bitness: u32) -> Option<(bool, u64, u32)> {
     if instr.mnemonic() != Mnemonic::Add || instr.op0_kind() != OpKind::Memory {
         return None;
     }
@@ -841,5 +873,9 @@ fn stack_add(instr: &Instruction, bitness: u32) -> Option<(bool, u64)> {
     if disp != 0 && disp != far {
         return None;
     }
-    Some((disp == far, instr.try_immediate(1).ok()?))
+    let bytes = u32::try_from(instr.memory_size().size()).ok()?;
+    if !matches!(bytes, 1 | 2 | 4 | 8) {
+        return None;
+    }
+    Some((disp == far, instr.try_immediate(1).ok()?, bytes))
 }

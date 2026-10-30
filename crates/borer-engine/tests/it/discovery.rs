@@ -191,6 +191,35 @@ fn an_add_to_the_return_address_is_where_the_caller_continues() {
     }
 }
 
+/// A byte add to the return address changes that byte only.
+///
+/// At a return address of `0x4010ff`, `add byte [rsp], 1` continues at
+/// `0x401000`. Adding the immediate to the whole address continues at
+/// `0x401100`, and ignoring the add decodes `0x4010ff`.
+#[test]
+fn a_byte_add_to_the_return_address_stays_in_that_byte() {
+    for arch in [Arch::X86_64, Arch::X86] {
+        let mut code = vec![0x6e_u8; 0x115];
+        code[..0xfa].fill(0x90);
+        code[0xfa] = 0xe8;
+        code[0xfb..0xff].copy_from_slice(&rel32(TEXT + 0xfa, TEXT + 0x110));
+        code[0x100..0x106].copy_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]);
+        code[0x110..0x115].copy_from_slice(&[0x80, 0x04, 0x24, 0x01, 0xc3]);
+        assert!(
+            holds(arch, &code, TEXT, TEXT + 0xfa),
+            "{arch:?} lost the call"
+        );
+        assert!(
+            !holds(arch, &code, TEXT, TEXT + 0xff),
+            "{arch:?} decoded the next byte"
+        );
+        assert!(
+            !holds(arch, &code, TEXT, TEXT + 0x100),
+            "{arch:?} added into the next byte of the address"
+        );
+    }
+}
+
 /// `int 2dh` is a breakpoint check that falls through when no debugger
 /// swallows it. `int 0x29` still ends the walk.
 #[test]
