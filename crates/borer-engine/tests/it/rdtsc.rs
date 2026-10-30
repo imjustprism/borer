@@ -74,3 +74,38 @@ fn a_plain_rdtsc_keeps_the_ecx_it_did_not_write() {
     assert!(text.contains("rdtsc"), "{text}");
     assert!(text.contains('5'), "{text}");
 }
+
+/// Two `rdtsc` reads keep a difference. One read xor-ed with itself is zero.
+#[test]
+fn a_timestamp_delta_is_not_zero_and_one_read_xor_itself_is() {
+    let delta = [
+        0x0f, 0x31, // ASM: rdtsc
+        0x89, 0xc3, // ASM: mov ebx, eax
+        0x0f, 0x31, // ASM: rdtsc
+        0x29, 0xd8, // ASM: sub eax, ebx
+        0xc3, // ASM: ret
+    ];
+    let program = program64(&delta);
+    let text = decompiled(&program, 0x1_4000_1000);
+    assert!(text.matches("rdtsc(").count() >= 2, "{text}");
+    assert!(!text.contains("return 0"), "{text}");
+    let analysis = Analysis::compute(&program);
+    let warn = warnings(
+        &program,
+        &analysis,
+        &Overlay::default(),
+        0x1_4000_1000,
+        &text,
+        None,
+    )
+    .unwrap_or_default();
+    assert!(!warn.contains("contradict"), "{text}\n{warn}");
+    let same = [
+        0x0f, 0x31, // ASM: rdtsc
+        0x89, 0xc3, // ASM: mov ebx, eax
+        0x31, 0xd8, // ASM: xor eax, ebx
+        0xc3, // ASM: ret
+    ];
+    let folded = decompiled(&program64(&same), 0x1_4000_1000);
+    assert!(folded.contains("return 0"), "{folded}");
+}

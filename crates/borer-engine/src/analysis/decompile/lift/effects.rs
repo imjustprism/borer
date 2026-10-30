@@ -1719,13 +1719,20 @@ impl Exec<'_, '_> {
     /// * `aux` - `rdtscp`, which also writes `ecx`.
     pub(super) fn timestamp(&mut self, aux: bool) {
         let base = u8::from(aux) * 2;
-        self.reg_write(Register::EAX, Expr::Helper(Helper::Rdtsc(base), Vec::new()));
+        let nonce = u32::try_from(self.at & 0xffff_ffff).unwrap_or(0);
+        self.reg_write(
+            Register::EAX,
+            Expr::Helper(Helper::Rdtsc(base, nonce), Vec::new()),
+        );
         self.reg_write(
             Register::EDX,
-            Expr::Helper(Helper::Rdtsc(base + 1), Vec::new()),
+            Expr::Helper(Helper::Rdtsc(base + 1, nonce), Vec::new()),
         );
         if aux {
-            self.reg_write(Register::ECX, Expr::Helper(Helper::Rdtsc(4), Vec::new()));
+            self.reg_write(
+                Register::ECX,
+                Expr::Helper(Helper::Rdtsc(4, nonce), Vec::new()),
+            );
         }
     }
 }
