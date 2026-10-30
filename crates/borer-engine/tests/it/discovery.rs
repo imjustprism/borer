@@ -14,7 +14,7 @@
 use crate::raw;
 
 use borer_engine::analysis::Analysis;
-use borer_engine::program::{Arch, Program};
+use borer_engine::program::{Arch, Program, Section};
 use std::path::PathBuf;
 
 /// Where [`raw::image`] maps `.text`; the entry point is its first byte.
@@ -36,6 +36,28 @@ fn entries(code: &[u8], data: &[u8]) -> Vec<u64> {
 
 /// `xor eax, eax; ret`: the entry function, three bytes.
 const LEAF: [u8; 3] = [0x31, 0xc0, 0xc3];
+
+/// The image entry is discovered when its section is not marked executable.
+/// A second leaf in that section, not reached from the entry, is not.
+#[test]
+fn the_entry_in_a_non_executable_section_is_a_function() {
+    let mut bytes = vec![0u8; 0x40];
+    bytes[..LEAF.len()].copy_from_slice(&LEAF);
+    bytes[0x20..0x20 + LEAF.len()].copy_from_slice(&LEAF);
+    let p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0x400000,
+        Some(0x402000),
+        vec![Section::mapped(".data", 0x402000, 0, 0x40, true, false)],
+    );
+    let entries: Vec<u64> = Analysis::compute(&p)
+        .functions
+        .iter()
+        .map(|f| f.entry)
+        .collect();
+    assert_eq!(entries, vec![0x402000], "{entries:?}");
+}
 /// `push rbx; xor eax, eax; pop rbx; ret`: a function with a frame.
 const FRAMED: [u8; 5] = [0x53, 0x31, 0xc0, 0x5b, 0xc3];
 

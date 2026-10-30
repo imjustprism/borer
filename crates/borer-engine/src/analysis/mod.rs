@@ -2129,15 +2129,17 @@ pub fn slot_name_of(analysis: &Analysis, overlay: &Overlay, slot: u64) -> String
 ///
 /// The entry point, every non-import symbol that marks code, every declared
 /// function range start and every funclet that lies in executable memory,
-/// sorted and deduplicated. A data symbol never seeds: what it names sits
-/// in a data section, which no function lives in. Nor does a PE export
+/// sorted and deduplicated. The entry is seeded wherever it is mapped,
+/// including a section the headers do not mark executable: a packer stub
+/// runs there when the loader has no DEP. A data symbol never seeds: what
+/// it names sits in a data section, which no function lives in. Nor does a PE export
 /// whose first instructions are two zero bytes' `add [eax], al`
 /// ([`opens_as_data`]): a PE export does not say whether it is code, and a
 /// DLL that merges its read-only data into `.text` exports variables there.
 pub(crate) fn seeds(program: &Program) -> Vec<u64> {
     let mut s: Vec<u64> = Vec::new();
     if let Some(e) = program.entry
-        && is_executable_va(program, e)
+        && program.section_at(e).is_some()
     {
         s.push(e);
     }

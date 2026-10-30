@@ -848,7 +848,8 @@ impl<'a> Cursors<'a> {
     /// # Returns
     ///
     /// The instruction (possibly with [`Code::INVALID`]), or `None` when
-    /// `va` is not in executable, file-backed memory.
+    /// `va` is not in file-backed memory of an executable section or of
+    /// the section that holds the image entry.
     fn decode(&mut self, va: u64) -> Option<Instruction> {
         let idx = match self.open.iter().position(|c| va >= c.va && va < c.end) {
             Some(i) => i,
@@ -892,12 +893,17 @@ impl<'a> Cursors<'a> {
     /// # Returns
     ///
     /// The index of the decoder covering `va`, or `None` when `va` is not
-    /// in executable, file-backed memory (a section already open but whose
-    /// file bytes end before `va` included).
+    /// in file-backed memory of an executable section or of the section
+    /// that holds the image entry (a section already open but whose file
+    /// bytes end before `va` included).
     fn open_section(&mut self, va: u64) -> Option<usize> {
         let program = self.program;
         let s = program.section_at(va)?;
-        if !s.executable || self.open.iter().any(|c| c.va == s.va.0) {
+        let entry_here = program
+            .entry
+            .and_then(|e| program.section_at(e))
+            .is_some_and(|entry| entry.va == s.va);
+        if (!s.executable && !entry_here) || self.open.iter().any(|c| c.va == s.va.0) {
             return None;
         }
         let limit = (s.file_off.0 + s.file_size).min(from_usize(program.bytes.len()));
