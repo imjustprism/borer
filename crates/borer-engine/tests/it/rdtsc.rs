@@ -110,6 +110,23 @@ fn a_timestamp_delta_is_not_zero_and_one_read_xor_itself_is() {
     assert!(folded.contains("return 0"), "{folded}");
 }
 
+/// One `rdtsc` copied into another register and stored twice is one call.
+///
+/// The copy is the only read of `eax`. Both stores read the copy.
+#[test]
+fn a_copied_timestamp_stored_twice_is_one_call() {
+    let code = [
+        0x0f, 0x31, // ASM: rdtsc
+        0x89, 0xc3, // ASM: mov ebx, eax
+        0x89, 0x1f, // ASM: mov [rdi], ebx
+        0x89, 0x5f, 0x04, // ASM: mov [rdi+4], ebx
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xc3, // ASM: ret
+    ];
+    let text = decompiled(&program64(&code), 0x1_4000_1000);
+    assert_eq!(text.matches("= rdtsc(").count(), 1, "{text}");
+}
+
 /// One `rdtsc` stored twice is one call. The machine read the counter once.
 #[test]
 fn one_timestamp_stored_twice_is_one_call() {

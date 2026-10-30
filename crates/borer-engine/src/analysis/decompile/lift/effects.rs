@@ -45,7 +45,8 @@ pub(in crate::analysis::decompile) type Effects = (Lanes, Lanes);
 ///
 /// A backward pass: a write takes the reads pending for its register and
 /// clears them, a read adds one for the definition before it; an
-/// instruction naming a register in two operands reads it once.
+/// instruction naming a register in two operands reads it once. A
+/// same-width register copy counts as every later read of that copy.
 ///
 /// # Arguments
 ///
@@ -61,17 +62,58 @@ pub(super) fn read_counts(
     let mut out: Vec<FxHashMap<Key, u32>> = vec![FxHashMap::default(); instrs.len()];
     for (idx, instr) in instrs.iter().enumerate().rev() {
         let (reads, writes) = reg_effects(ctx, factory, instr);
+        let copy = register_copy(instr, ctx.bitness);
+        let mut weight: Option<(Key, u32)> = None;
         if let Some(counts) = out.get_mut(idx) {
             for (k, _) in &writes {
-                counts.insert(*k, pending.remove(k).unwrap_or(0));
+                let n = pending.remove(k).unwrap_or(0);
+                counts.insert(*k, n);
+                if let Some((dst, src)) = copy
+                    && dst == *k
+                {
+                    weight = Some((src, n));
+                }
             }
         }
         let distinct: BTreeSet<Key> = reads.iter().map(|(k, _)| *k).collect();
         for k in distinct {
-            *pending.entry(k).or_default() += 1;
+            let add = weight
+                .filter(|(src, n)| src == &k && *n > 1)
+                .map_or(1, |(_, n)| n);
+            *pending.entry(k).or_default() += add;
         }
     }
     out
+}
+
+/// The registers a same-width `mov` copies.
+///
+/// A byte or word move keeps the rest of the register, so it is not one
+/// value's later reads.
+///
+/// # Arguments
+///
+/// * `instr` - Any decoded instruction.
+/// * `bitness` - Decoder bitness.
+///
+/// # Returns
+///
+/// The destination and the source, when both are registers of at least four
+/// bytes and they are not the same register.
+fn register_copy(instr: &Instruction, bitness: u32) -> Option<(Key, Key)> {
+    if instr.mnemonic() != Mnemonic::Mov
+        || instr.op0_kind() != OpKind::Register
+        || instr.op1_kind() != OpKind::Register
+    {
+        return None;
+    }
+    let dst = instr.op0_register();
+    let src = instr.op1_register();
+    if dst.size() < 4 || src.size() < 4 {
+        return None;
+    }
+    let (dst, src) = (Key::Reg(canon(dst, bitness)), Key::Reg(canon(src, bitness)));
+    (dst != src).then_some((dst, src))
 }
 
 /// The import symbols by address and by demangled name.
