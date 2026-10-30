@@ -1783,6 +1783,14 @@ impl Exec<'_, '_> {
         }
     }
 
+    /// Tells whether `v` is one timestamp the machine already read.
+    ///
+    /// A call between that read and a later use would print the read
+    /// after the call.
+    pub(super) fn saved_time(v: &Expr) -> bool {
+        matches!(v, Expr::Helper(Helper::Rdtsc(..), _))
+    }
+
     /// Writes a timestamp out once when the block reads that register again.
     ///
     /// A second store of the same half would otherwise print a second call.

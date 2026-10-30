@@ -1663,6 +1663,7 @@ impl Exec<'_, '_> {
                     && !matches!(k, Key::Slot(o) if window.as_ref().is_some_and(|w| w.contains(o)))
                     && (v.any_var(&|x| volatile.contains(&x))
                         || v.mem_dependent()
+                        || Self::saved_time(v)
                         || matches!(k, Key::Slot(o) if self.exposed(*o)))
             })
             .map(|(k, _)| *k)

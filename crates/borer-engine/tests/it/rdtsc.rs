@@ -110,6 +110,29 @@ fn a_timestamp_delta_is_not_zero_and_one_read_xor_itself_is() {
     assert!(folded.contains("return 0"), "{folded}");
 }
 
+/// A timestamp copied across a call is printed before that call.
+///
+/// The copy has one later use. The call sits between the read and the use.
+#[test]
+fn a_timestamp_saved_across_a_call_is_printed_before_it() {
+    let mut code = vec![0x6e_u8; 0x28];
+    code[0..2].copy_from_slice(&[0x0f, 0x31]);
+    code[2..4].copy_from_slice(&[0x89, 0xc3]);
+    code[4] = 0xe8;
+    let rel = i32::try_from(0x20u64.wrapping_sub(9)).unwrap_or(0);
+    code[5..9].copy_from_slice(&rel.to_le_bytes());
+    code[9..13].copy_from_slice(&[0x0f, 0x31, 0x29, 0xd8]);
+    code[13] = 0xc3;
+    code[0x20..0x26].copy_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]);
+    let text = decompiled(&program64(&code), 0x1_4000_1000);
+    let call = text.find("sub_140001020();").unwrap_or(text.len());
+    assert!(call < text.len(), "{text}");
+    let (before, after) = text.split_at(call);
+    assert!(before.matches("rdtsc(").count() >= 2, "{text}");
+    assert!(after.contains("rdtsc("), "{text}");
+    assert!(!text.contains("rdtsc() - rdtsc()"), "{text}");
+}
+
 /// One `rdtsc` copied into another register and stored twice is one call.
 ///
 /// The copy is the only read of `eax`. Both stores read the copy.
