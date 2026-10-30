@@ -250,15 +250,21 @@ fn check_step(
         Some((at, value)) => (value, compares::compared_source(&instrs, at, conv)),
         None => (compared_constant(text)?, compares::Compared::Other),
     };
-    let note = match source {
-        compares::Compared::Argument(n) => format!("solve tries it as a{n}"),
-        compares::Compared::CallResult => "a call result, not an argument".to_string(),
-        compares::Compared::Other => "not shown to be a1".to_string(),
+    let (uri, note) = match source {
+        compares::Compared::Argument(n) => (
+            format!("borer://solve/{:#x},a{n}", f.entry),
+            format!("solve tries it as a{n}"),
+        ),
+        compares::Compared::CallResult => (
+            format!("borer://solve/{:#x}", f.entry),
+            "a call result, not an argument".to_string(),
+        ),
+        compares::Compared::Other => (
+            format!("borer://solve/{:#x}", f.entry),
+            "not shown to be a1".to_string(),
+        ),
     };
-    Some(format!(
-        "borer://solve/{:#x} (compares against {value:#x}: {note})",
-        f.entry
-    ))
+    Some(format!("{uri} (compares against {value:#x}: {note})"))
 }
 
 /// The first telling constant a decompiled text compares with `==` or

@@ -50,28 +50,35 @@ pub(super) fn compare_immediate(instrs: &[Instruction], at: usize) -> Option<u64
     }
 }
 
-/// Whether an instruction after `at` reads the flags `instrs[at]` wrote
-/// before another instruction overwrites them.
+/// Whether a later instruction reads a flag `instrs[at]` wrote that no
+/// instruction in between has overwritten.
+///
+/// A direct jump is followed. A write of one flag leaves the others: `clc`
+/// clears carry and a following `sete` still reads the compare's zero flag.
+/// Each instruction is visited once, so the scan stops at a loop.
 ///
 /// # Arguments
 ///
 /// * `instrs` - The function's instructions, in address order.
 /// * `at` - The instruction that wrote the flags.
 fn flags_decide(instrs: &[Instruction], at: usize) -> bool {
+    let mut live = instrs.get(at).map_or(0, Instruction::rflags_modified);
+    if live == 0 {
+        return false;
+    }
     let mut cursor = at.saturating_add(1);
-    let mut seen = [usize::MAX; 8];
-    let mut nseen = 0usize;
-    while nseen < seen.len() {
-        if cursor >= instrs.len() || seen[..nseen].contains(&cursor) {
+    let mut seen = BTreeSet::new();
+    while seen.insert(cursor) {
+        if cursor >= instrs.len() {
             return false;
         }
-        seen[nseen] = cursor;
-        nseen += 1;
         let n = &instrs[cursor];
-        if reads_flags(n) {
+        let branch = n.flow_control() == FlowControl::ConditionalBranch;
+        if n.rflags_read() & live != 0 || branch && live != 0 {
             return true;
         }
-        if n.rflags_modified() != 0 {
+        live &= !n.rflags_modified();
+        if live == 0 {
             return false;
         }
         if n.flow_control() == FlowControl::UnconditionalBranch {
@@ -165,11 +172,6 @@ fn immediate_of(i: &Instruction) -> Option<u64> {
         | OpKind::Immediate64 => Some(i.immediate(n)),
         _ => None,
     })
-}
-
-/// Whether `n` reads the flags a compare writes.
-fn reads_flags(n: &Instruction) -> bool {
-    n.flow_control() == FlowControl::ConditionalBranch || n.rflags_read() != 0
 }
 
 /// Whether `n` reads and writes `reg`, by its full register.

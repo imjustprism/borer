@@ -136,7 +136,7 @@ fn arithmetic_that_feeds_a_xor_is_not_the_solved_constant() {
     ];
     assert_eq!(
         steps(&code),
-        ["borer://solve/0x401000 (compares against 0x1337abcd: solve tries it as a1)"]
+        ["borer://solve/0x401000,a1 (compares against 0x1337abcd: solve tries it as a1)"]
     );
 }
 
@@ -154,7 +154,41 @@ fn a_sub_whose_flags_a_branch_reads_is_still_a_compare() {
     ];
     assert_eq!(
         steps(&code),
-        ["borer://solve/0x401000 (compares against 0x1337abcd: solve tries it as a1)"]
+        ["borer://solve/0x401000,a1 (compares against 0x1337abcd: solve tries it as a1)"]
+    );
+}
+
+/// Flags still decide the compare after a run of flag-preserving moves,
+/// and after an instruction that writes a different flag.
+#[test]
+fn a_late_flag_read_and_a_carry_clear_keep_the_compare() {
+    let mut late = vec![
+        0x81, 0xe9, 0xcd, 0xab, 0x37, 0x13, // ASM: sub ecx, 0x1337abcd
+    ];
+    late.extend(
+        std::iter::repeat_n(
+            [0x89, 0xc2], // ASM: mov edx, eax
+            8,
+        )
+        .flatten(),
+    );
+    late.extend_from_slice(&[
+        0x0f, 0x94, 0xc0, // ASM: sete al
+        0xc3, // ASM: ret
+    ]);
+    assert_eq!(
+        steps(&late),
+        ["borer://solve/0x401000,a1 (compares against 0x1337abcd: solve tries it as a1)"]
+    );
+    let cleared = [
+        0x81, 0xe9, 0xcd, 0xab, 0x37, 0x13, // ASM: sub ecx, 0x1337abcd
+        0xf8, // ASM: clc
+        0x0f, 0x94, 0xc0, // ASM: sete al
+        0xc3, // ASM: ret
+    ];
+    assert_eq!(
+        steps(&cleared),
+        ["borer://solve/0x401000,a1 (compares against 0x1337abcd: solve tries it as a1)"]
     );
 }
 
@@ -191,7 +225,7 @@ fn a_copied_sub_result_is_still_a_compare() {
     ];
     assert_eq!(
         steps(&code),
-        ["borer://solve/0x401000 (compares against 0x1337abcd: solve tries it as a1)"]
+        ["borer://solve/0x401000,a1 (compares against 0x1337abcd: solve tries it as a1)"]
     );
 }
 
@@ -211,7 +245,7 @@ fn a_jump_to_the_flag_read_keeps_the_compare() {
     ];
     assert_eq!(
         steps(&code),
-        ["borer://solve/0x401000 (compares against 0x1337abcd: solve tries it as a1)"]
+        ["borer://solve/0x401000,a1 (compares against 0x1337abcd: solve tries it as a1)"]
     );
 }
 
@@ -263,7 +297,7 @@ fn an_elf_argument_is_named_from_its_register() {
     let got = next_steps(&p, &a, &Overlay::default(), 0x40_1000);
     assert_eq!(
         got.as_slice(),
-        ["borer://solve/0x401000 (compares against 0x1337abcd: solve tries it as a1)"]
+        ["borer://solve/0x401000,a1 (compares against 0x1337abcd: solve tries it as a1)"]
     );
 
     let rcx = [
@@ -278,7 +312,7 @@ fn an_elf_argument_is_named_from_its_register() {
     let got = next_steps(&p, &a, &Overlay::default(), 0x40_1000);
     assert_eq!(
         got.as_slice(),
-        ["borer://solve/0x401000 (compares against 0x1337abcd: solve tries it as a4)"]
+        ["borer://solve/0x401000,a4 (compares against 0x1337abcd: solve tries it as a4)"]
     );
 }
 
@@ -312,7 +346,7 @@ fn a_serial_check_hints_solve_and_the_summary_ends_with_it() {
         0x0f, 0xb6, 0xc0, // ASM: movzx eax, al
         0xc3, // ASM: ret
     ];
-    let step = "borer://solve/0x401000 (compares against 0x1337abcd: solve tries it as a1)";
+    let step = "borer://solve/0x401000,a1 (compares against 0x1337abcd: solve tries it as a1)";
     assert_eq!(steps(&code), [step]);
     let p = image(Arch::X86_64, &code, &[]);
     let a = Analysis::compute(&p);
