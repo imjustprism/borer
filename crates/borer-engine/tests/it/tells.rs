@@ -115,6 +115,39 @@ fn one_real_anti_debug_import_tips_and_the_runtime_one_does_not() {
     assert!(!runtime.starts_with("# anti-analysis:"), "{runtime}");
 }
 
+/// A lone `NtQueryInformationProcess` import does not decide the verdict.
+/// A call that asks for `ProcessDebugPort` does. `ProcessBasicInformation`
+/// does not.
+#[test]
+fn a_debug_port_query_is_a_tell_and_the_import_alone_is_not() {
+    let alone = report_calls(&[0xc3], &[], &[("NtQueryInformationProcess", 0x402000)]);
+    assert!(alone.contains("NtQueryInformationProcess"), "{alone}");
+    assert!(!alone.contains("debug port"), "{alone}");
+    assert!(!alone.starts_with("# anti-analysis:"), "{alone}");
+    let basic = report_calls(
+        &[
+            0xba, 0x00, 0x00, 0x00, 0x00, // ASM: mov edx, 0
+            0xe8, 0xf6, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[("NtQueryInformationProcess", 0x402000)],
+    );
+    assert!(!basic.contains("debug port"), "{basic}");
+    assert!(!basic.starts_with("# anti-analysis:"), "{basic}");
+    let port = report_calls(
+        &[
+            0xba, 0x07, 0x00, 0x00, 0x00, // ASM: mov edx, 7
+            0xe8, 0xf6, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[("NtQueryInformationProcess", 0x402000)],
+    );
+    assert!(port.contains("debug port"), "{port}");
+    assert!(port.starts_with("# anti-analysis:"), "{port}");
+}
+
 /// `fs:[0x30]` is a PEB read and not a named field. `fs:[0x18]` then a
 /// stack-base read is not a PEB read.
 #[test]

@@ -9,14 +9,12 @@ pub(super) const ANTI_SITES_MAX: usize = 12;
 /// The import names that signal an anti-analysis technique.
 ///
 /// The ones [`CRT_IMPORTS`] names come with every C runtime as well, so
-/// they are listed but never decide the verdict.
+/// they are listed but never decide the verdict. `NtQueryInformationProcess`
+/// is listed without a debug-port claim; the call's class is a separate tell.
 pub(super) const ANTI_IMPORTS: [(&str, &str); 8] = [
     ("isdebuggerpresent", "IsDebuggerPresent"),
     ("checkremotedebugger", "CheckRemoteDebuggerPresent"),
-    (
-        "ntqueryinformationprocess",
-        "NtQueryInformationProcess (debug port)",
-    ),
+    ("ntqueryinformationprocess", "NtQueryInformationProcess"),
     (
         "ntsetinformationthread",
         "NtSetInformationThread (hide from debugger)",
@@ -41,6 +39,12 @@ const CRT_IMPORTS: [&str; 5] = [
     "NtClose (invalid-handle probe)",
 ];
 
+/// Labels of [`ANTI_IMPORTS`] that also read ordinary process information.
+///
+/// The import is listed. It does not decide the verdict unless a call asks
+/// for the debug port.
+const QUIET_IMPORTS: [&str; 1] = ["NtQueryInformationProcess"];
+
 /// Reports the anti-debug and anti-VM techniques the binary carries.
 ///
 /// The loud ones are imports (`IsDebuggerPresent`); the stealthy ones are
@@ -57,9 +61,11 @@ const CRT_IMPORTS: [&str; 5] = [
 /// after a call, a branch, a return or another `int3` (nops aside) is the
 /// trap MSVC and clang put after a call that does not return, or padding;
 /// and the imports of [`CRT_IMPORTS`] come with every C runtime, so they
-/// are listed without tipping the verdict. The verdict counts techniques,
-/// not sites: msvcrt's `_inp` is three `in` instructions because reading a
-/// port is its job, and three sites of one instruction are one technique.
+/// are listed without tipping the verdict. `NtQueryInformationProcess` is
+/// listed the same way until a call asks for the debug port. The verdict
+/// counts techniques, not sites: msvcrt's `_inp` is three `in` instructions
+/// because reading a port is its job, and three sites of one instruction
+/// are one technique.
 ///
 /// # Arguments
 ///
@@ -83,6 +89,7 @@ pub fn anti_analysis_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
             || tag.starts_with("debug block")
             || tag.starts_with("breakpoint ")
             || tag.starts_with("illegal opcode")
+            || tag.starts_with("debug port")
     };
     let strong = sites.keys().filter(|tag| !weak(tag)).count();
     let instr_count: usize = sites.values().map(Vec::len).sum();
@@ -127,7 +134,9 @@ pub fn anti_analysis_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
     for label in &imports {
         let _ = writeln!(out, "{label:<32}  import");
     }
-    let telling = imports.iter().any(|label| !CRT_IMPORTS.contains(label));
+    let telling = imports
+        .iter()
+        .any(|label| !CRT_IMPORTS.contains(label) && !QUIET_IMPORTS.contains(label));
     let verdict = if strong >= 3 || telling || sites.keys().any(|tag| alone(tag)) {
         "anti-analysis: a program that resists being watched"
     } else if instr_count + imports.len() == 0 {

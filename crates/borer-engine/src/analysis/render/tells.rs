@@ -311,6 +311,9 @@ fn patterns(
     if has("createprocess") && (has("waitfordebugevent") || has("continuedebugevent")) {
         out.push(("debug block (DEBUG_PROCESS)", ip));
     }
+    if has("ntqueryinformationprocess") && debug_port(instrs, bits) {
+        out.push(("debug port (NtQueryInformationProcess)", ip));
+    }
     let exits = has("exitprocess") || has("terminateprocess");
     let cc = instrs
         .iter()
@@ -331,6 +334,68 @@ fn patterns(
         out.push(("illegal opcode (exception filter)", ip));
     }
     out
+}
+
+/// Whether a call passes `ProcessDebugPort` (`7`).
+///
+/// On x64 the class is `edx`. On x86 it is the second push. Another class,
+/// including `ProcessBasicInformation` (`0`), is not this tell.
+///
+/// # Arguments
+///
+/// * `instrs` - The function, in address order.
+/// * `bits` - Decoder bitness, which picks the class operand.
+fn debug_port(instrs: &[Instruction], bits: u32) -> bool {
+    instrs.iter().enumerate().any(|(at, i)| {
+        matches!(
+            i.flow_control(),
+            FlowControl::Call | FlowControl::IndirectCall
+        ) && class_is_debug_port(&instrs[..at], bits)
+    })
+}
+
+/// Whether the call `before` leads to passes `ProcessDebugPort`.
+fn class_is_debug_port(before: &[Instruction], bits: u32) -> bool {
+    if bits == 32 {
+        pushed_class(before) == Some(7)
+    } else {
+        edx_class(before) == Some(7)
+    }
+}
+
+/// The immediate in `edx`, when the last write of it is a `mov`.
+fn edx_class(before: &[Instruction]) -> Option<u64> {
+    for n in before.iter().rev().take(8) {
+        if n.op0_kind() != OpKind::Register || n.op0_register().full_register() != Register::RDX {
+            continue;
+        }
+        if n.mnemonic() == Mnemonic::Mov {
+            return immediate_any(n);
+        }
+        return None;
+    }
+    None
+}
+
+/// The second `push` before the call, which is the class on x86.
+fn pushed_class(before: &[Instruction]) -> Option<u64> {
+    let mut seen = 0u32;
+    for i in before.iter().rev().take(12) {
+        if matches!(
+            i.flow_control(),
+            FlowControl::Call | FlowControl::IndirectCall
+        ) {
+            break;
+        }
+        if i.mnemonic() != Mnemonic::Push {
+            continue;
+        }
+        seen += 1;
+        if seen == 2 {
+            return immediate_any(i);
+        }
+    }
+    None
 }
 
 /// Whether the filter argument is an address in executable memory.
