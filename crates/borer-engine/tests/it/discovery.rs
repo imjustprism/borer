@@ -13,7 +13,8 @@
 
 use crate::raw;
 
-use borer_engine::analysis::Analysis;
+use borer_engine::analysis::decompile::decompile;
+use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::program::{Arch, Program, Section};
 use std::path::PathBuf;
 
@@ -248,6 +249,22 @@ fn one_undecoded_instruction_keeps_the_following_jump() {
     assert!(holds(Arch::X86_64, &jump, TEXT, TEXT + 9), "{jump:?}");
     assert!(!holds(Arch::X86_64, &jump, TEXT, TEXT + 8));
     assert!(!holds(Arch::X86_64, &plain, TEXT, TEXT + 6));
+    let entry_edge = call_successors(Arch::X86_64, &jump, TEXT, TEXT);
+    assert!(entry_edge.contains(&(TEXT + 6)), "{entry_edge:?}");
+    let jump_edge = call_successors(Arch::X86_64, &jump, TEXT, TEXT + 6);
+    assert!(jump_edge.contains(&(TEXT + 9)), "{jump_edge:?}");
+    let marked = [
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xf0, 0xf0, 0xc7, 0xc8, // ASM: two lock prefixes, not an instruction
+        0xeb, 0x01, // ASM: jmp short +1
+        0x6e, // ASM: outsb, skipped
+        0xb8, 0x2a, 0x00, 0x00, 0x00, // ASM: mov eax, 42
+        0xc3, // ASM: ret
+    ];
+    let program = raw::image(Arch::X86_64, &marked, &[]);
+    let analysis = Analysis::compute(&program);
+    let text = decompile(&program, &analysis, &Overlay::default(), TEXT).unwrap_or_default();
+    assert!(text.contains("42") || text.contains("0x2a"), "{text}");
 }
 
 /// `lea` of a prologue that does `mov ebx, imm32; xlatb` with `imm32` in

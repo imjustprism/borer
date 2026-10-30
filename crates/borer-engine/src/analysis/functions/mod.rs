@@ -48,8 +48,8 @@ use frame::moves_rsp_by_imm;
 use guess::plausible_entry;
 use helpers::{
     COOKIE_CHECK_INSTRS_MAX, EPILOG_INSTRS_MAX, PANIC_INSTRS_MAX, cookie_check_name,
-    epilog_helper_name, exits_on_status_name, frame_helper_name, is_noreturn_name, note_call,
-    panic_helper_name, prints_assert_banner, refcount_helper_name,
+    epilog_helper_name, exits_on_status_name, frame_helper_name, gap_jump, is_noreturn_name,
+    note_call, panic_helper_name, prints_assert_banner, refcount_helper_name,
 };
 use seeds::{got_base, mapped_range, pointer_seeds, record_table_refs, reloc_seeds};
 use sets::{AddrSet, Covered};
@@ -1875,7 +1875,7 @@ fn build_blocks(
         });
         if leaders.get(next_leader) == Some(&addr) || !falls_in {
             if let Some(mut b) = current.take() {
-                if b.term == BlockTerm::Fall && b.end == addr {
+                if b.term == BlockTerm::Fall && (b.end == addr || gap_jump(b.end, addr, rec.flow)) {
                     b.successors.push(addr);
                 }
                 blocks.push(b);

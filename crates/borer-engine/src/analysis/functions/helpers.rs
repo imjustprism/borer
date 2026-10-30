@@ -749,6 +749,26 @@ fn add_low(addr: u64, imm: u64, bytes: u32) -> u64 {
     (addr & !mask) | ((addr & mask).wrapping_add(imm) & mask)
 }
 
+/// Whether `addr` is a jump or a call at most one instruction past `end`.
+///
+/// The walk records that transfer after one instruction that did not
+/// decode, and the bytes between are not a block of their own.
+///
+/// # Arguments
+///
+/// * `end` - Where the block before the gap ends.
+/// * `addr` - The next recorded instruction.
+/// * `flow` - That instruction's control flow.
+///
+/// # Returns
+///
+/// `true` when the gap is short and the instruction transfers.
+pub(super) fn gap_jump(end: u64, addr: u64, flow: FlowControl) -> bool {
+    addr > end
+        && addr - end <= 15
+        && matches!(flow, FlowControl::UnconditionalBranch | FlowControl::Call)
+}
+
 /// Sets a call block's edge to the instruction the call returns to.
 ///
 /// A direct call whose fallthrough was not recorded returns at the next
