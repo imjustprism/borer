@@ -336,7 +336,7 @@ impl WalkState<'_> {
         }
         let named = matches!(self.seed, Seed::Pointer | Seed::Reloc)
             && (w.prologue || self.taken_by_code(w.func.entry));
-        if w.zero_bytes && (w.surely_data || !named) {
+        if w.zero_bytes && (w.surely_data || !named) && !self.xlat_table(w) {
             return Some(w.odd.unwrap_or("decoded an instruction no compiler emits"));
         }
         if matches!(self.seed, Seed::Pointer | Seed::Reloc) {
@@ -366,6 +366,53 @@ impl WalkState<'_> {
             Seed::Gap if !w.prologue => Some("opens like no function does"),
             Seed::Gap => None,
         }
+    }
+
+    /// A pointer seed whose body is `mov ebx, imm32; xlatb` with `imm32` in
+    /// the image, opened like a function and named by code.
+    ///
+    /// # Arguments
+    ///
+    /// * `w` - The walk's result.
+    fn xlat_table(&self, w: &Walked) -> bool {
+        self.seed == Seed::Pointer
+            && w.prologue
+            && w.odd == Some("decoded xlatb")
+            && self.taken_by_code(w.func.entry)
+            && self.ebx_xlat(&w.recs)
+    }
+
+    /// Whether the walk holds `mov ebx, imm32` immediately before `xlatb`,
+    /// and `imm32` is mapped.
+    ///
+    /// # Arguments
+    ///
+    /// * `recs` - The walked instructions, in address order.
+    fn ebx_xlat(&self, recs: &[(u64, InstrRec)]) -> bool {
+        let program = self.worker.cursors.program;
+        let bitness = self.worker.cursors.bitness;
+        let mut prev = None;
+        for &(addr, _) in recs {
+            let Some(i) = decode_at(program, bitness, addr) else {
+                prev = None;
+                continue;
+            };
+            if i.mnemonic() == Mnemonic::Xlatb
+                && let Some(at) = prev
+                && let Some(mov) = decode_at(program, bitness, at)
+                && mov.next_ip() == addr
+                && mov.mnemonic() == Mnemonic::Mov
+                && mov.op0_kind() == OpKind::Register
+                && mov.op0_register().full_register() == Register::RBX
+                && mov
+                    .try_immediate(1)
+                    .is_ok_and(|imm| program.section_at(imm).is_some())
+            {
+                return true;
+            }
+            prev = Some(addr);
+        }
+        false
     }
 
     /// Whether a walked function's code takes the address `va`, as a `lea`

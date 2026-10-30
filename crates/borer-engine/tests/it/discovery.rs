@@ -176,6 +176,38 @@ fn one_undecoded_instruction_keeps_the_following_jump() {
     assert!(!holds(Arch::X86_64, &jump, TEXT, TEXT + 8));
     assert!(!holds(Arch::X86_64, &plain, TEXT, TEXT + 6));
 }
+
+/// `lea` of a prologue that does `mov ebx, imm32; xlatb` with `imm32` in
+/// the image is a function. The same body opening on `xlatb`, or translating
+/// through an unmapped address, is not.
+#[test]
+fn an_xlat_table_named_by_code_is_a_function() {
+    let mut kept = vec![
+        0x48, 0x8d, 0x05, 0x09, 0x00, 0x00, 0x00, // ASM: lea rax, [rip + 9]
+        0xc3, // ASM: ret
+    ];
+    kept.resize(0x10, 0xcc);
+    kept.extend_from_slice(&[
+        0x55, // ASM: push rbp
+        0x48, 0x89, 0xe5, // ASM: mov rbp, rsp
+        0xbb, 0x00, 0x20, 0x40, 0x00, // ASM: mov ebx, 0x402000
+        0xd7, // ASM: xlatb
+        0x31, 0xc0, 0xc3, // ASM: xor eax, eax; ret
+    ]);
+    assert_eq!(entries(&kept, &[]), vec![TEXT, TEXT + 0x10]);
+
+    let mut opens = vec![
+        0x48, 0x8d, 0x05, 0x09, 0x00, 0x00, 0x00, // ASM: lea rax, [rip + 9]
+        0xc3, // ASM: ret
+    ];
+    opens.resize(0x10, 0xcc);
+    opens.extend_from_slice(&[0xd7, 0xc3]); // ASM: xlatb; ret
+    assert_eq!(entries(&opens, &[]), vec![TEXT]);
+
+    let mut unmapped = kept.clone();
+    unmapped[0x15..0x19].copy_from_slice(&[0x01, 0x00, 0x00, 0x00]); // ASM: mov ebx, 1
+    assert_eq!(entries(&unmapped, &[]), vec![TEXT]);
+}
 /// `push rbx; xor eax, eax; pop rbx; ret`: a function with a frame.
 const FRAMED: [u8; 5] = [0x53, 0x31, 0xc0, 0x5b, 0xc3];
 
