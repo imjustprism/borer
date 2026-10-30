@@ -175,11 +175,7 @@ fn patterns(
     }
     let called = called_imports(p, a, f.entry);
     let has = |frag: &str| called.iter().any(|n| n.contains(frag));
-    if has("getthreadcontext")
-        && instrs
-            .iter()
-            .any(|i| has_immediate(i, 0x1_0010) || has_immediate(i, 0x10_0010))
-    {
+    if (has("getthreadcontext") || has("getcontextthread")) && context_debug(instrs, bits) {
         out.push(("hardware breakpoint (GetThreadContext)", ip));
     }
     if has("findwindow")
@@ -398,6 +394,73 @@ fn compares_byte(i: &Instruction, imm: u64) -> bool {
 /// Whether one of `i`'s immediates is `imm`.
 fn has_immediate(i: &Instruction, imm: u64) -> bool {
     immediate_any(i).is_some_and(|v| v == imm)
+}
+
+/// Whether a context call asks for the debug registers or reads them back.
+///
+/// `CONTEXT_ALL` includes `CONTEXT_DEBUG_REGISTERS` along with other flags.
+/// `CONTEXT_CONTROL` and `CONTEXT_INTEGER` do not. A later load of `Dr0`
+/// through `Dr7` through a register counts the same way.
+///
+/// # Arguments
+///
+/// * `instrs` - The function, in address order.
+/// * `bits` - Decoder bitness, which picks the `CONTEXT` offsets.
+fn context_debug(instrs: &[Instruction], bits: u32) -> bool {
+    let mut after_call = false;
+    for i in instrs {
+        if immediate_any(i).is_some_and(debug_context_flags) {
+            return true;
+        }
+        if after_call && dr_field(i, bits) {
+            return true;
+        }
+        if i.flow_control() == FlowControl::Call {
+            after_call = true;
+        }
+    }
+    false
+}
+
+/// Whether `imm` is an architecture context-flags word that includes the
+/// debug registers.
+fn debug_context_flags(imm: u64) -> bool {
+    let feature = 0x3f;
+    let debug = 0x10;
+    let arch = |bit: u64| {
+        let rest = imm & !bit;
+        imm & bit == bit && rest & !feature == 0 && rest & debug == debug
+    };
+    arch(0x1_0000) || arch(0x10_0000)
+}
+
+/// Whether `i` loads a debug-register slot of a `CONTEXT`.
+///
+/// A stack base is a frame slot, not the structure offset. A store does
+/// not count.
+///
+/// # Arguments
+///
+/// * `i` - One instruction after the context call.
+/// * `bits` - `32` uses the x86 `Dr` offsets; anything else the x64 ones.
+fn dr_field(i: &Instruction, bits: u32) -> bool {
+    if i.mnemonic() == Mnemonic::Lea
+        || (i.mnemonic() == Mnemonic::Mov && i.op0_kind() == OpKind::Memory)
+    {
+        return false;
+    }
+    let Some((_, disp, base)) = memory(i) else {
+        return false;
+    };
+    if base == Register::None || matches!(base.full_register(), Register::RSP | Register::RBP) {
+        return false;
+    }
+    let size = i.memory_size().size();
+    if bits == 32 {
+        size == 4 && matches!(disp, 4 | 8 | 0xc | 0x10 | 0x14 | 0x18)
+    } else {
+        size == 8 && matches!(disp, 0x48 | 0x50 | 0x58 | 0x60 | 0x68 | 0x70)
+    }
 }
 
 /// The first immediate operand of `i`.

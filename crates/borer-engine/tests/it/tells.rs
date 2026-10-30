@@ -214,6 +214,62 @@ fn get_thread_context_needs_the_debug_register_flags() {
     assert!(!plain.contains("hardware breakpoint"), "{plain}");
 }
 
+/// `CONTEXT_ALL` and a load of `Dr0` are hardware-breakpoint tells.
+/// `CONTEXT_CONTROL` is not, and neither is a store into that slot.
+#[test]
+fn context_all_and_a_dr_read_are_hardware_breakpoints() {
+    let all = report_calls(
+        &[
+            0xb8, 0x1f, 0x00, 0x10, 0x00, // ASM: mov eax, 0x10001f
+            0xe8, 0xf6, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[("NtGetContextThread", 0x402000)],
+    );
+    assert!(all.contains("hardware breakpoint"), "{all}");
+    let control = report_calls(
+        &[
+            0xb8, 0x01, 0x00, 0x10, 0x00, // ASM: mov eax, 0x100001
+            0xe8, 0xf6, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[("GetThreadContext", 0x402000)],
+    );
+    assert!(!control.contains("hardware breakpoint"), "{control}");
+    let integer = report_calls(
+        &[
+            0xb8, 0x02, 0x00, 0x10, 0x00, // ASM: mov eax, 0x100002
+            0xe8, 0xf6, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[("ZwGetContextThread", 0x402000)],
+    );
+    assert!(!integer.contains("hardware breakpoint"), "{integer}");
+    let read = report_calls(
+        &[
+            0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0x48, 0x8b, 0x42, 0x48, // ASM: mov rax, [rdx+0x48]
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[("GetThreadContext", 0x402000)],
+    );
+    assert!(read.contains("hardware breakpoint"), "{read}");
+    let store = report_calls(
+        &[
+            0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0x48, 0x89, 0x42, 0x48, // ASM: mov [rdx+0x48], rax
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[("GetThreadContext", 0x402000)],
+    );
+    assert!(!store.contains("hardware breakpoint"), "{store}");
+}
+
 /// `FindWindow` of a debugger class, followed by an exit, is a tell.
 /// An ordinary class is not.
 #[test]
