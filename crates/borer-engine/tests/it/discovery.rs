@@ -146,6 +146,18 @@ fn an_add_to_the_return_address_is_where_the_caller_continues() {
         );
     }
 }
+
+/// `int 2dh` is a breakpoint check that falls through when no debugger
+/// swallows it. `int 0x29` still ends the walk.
+#[test]
+fn int_2d_falls_through_to_the_next_instruction() {
+    let fall = [0x31, 0xc0, 0xcd, 0x2d, 0x31, 0xc0, 0xc3];
+    let stop = [0x31, 0xc0, 0xcd, 0x29, 0x31, 0xc0, 0xc3];
+    assert!(holds(Arch::X86_64, &fall, TEXT, TEXT + 4));
+    assert!(holds(Arch::X86, &fall, TEXT, TEXT + 4));
+    assert!(!holds(Arch::X86_64, &stop, TEXT, TEXT + 4));
+    assert!(!holds(Arch::X86, &stop, TEXT, TEXT + 4));
+}
 /// `push rbx; xor eax, eax; pop rbx; ret`: a function with a frame.
 const FRAMED: [u8; 5] = [0x53, 0x31, 0xc0, 0x5b, 0xc3];
 

@@ -1403,7 +1403,7 @@ pub(super) fn walk_function(
             let flow = match instr.flow_control() {
                 FlowControl::Interrupt
                     if instr.mnemonic() == Mnemonic::Int
-                        && instr.try_immediate(0).ok() == Some(0x80) =>
+                        && matches!(instr.try_immediate(0).ok(), Some(0x80 | 0x2d)) =>
                 {
                     FlowControl::Next
                 }
