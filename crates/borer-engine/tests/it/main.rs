@@ -66,6 +66,7 @@ mod opcodes;
 mod param_types;
 mod protection;
 mod protos;
+mod rdtsc;
 mod regression;
 mod reloc;
 mod replay_rows;

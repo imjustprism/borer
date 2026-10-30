@@ -124,6 +124,12 @@ pub(super) enum Helper {
     /// result of `cpuid`. `0` is `eax`, `1` is `ebx`, `2` is `ecx`, `3` is
     /// `edx`.
     Cpuid(u8),
+    /// `rdtsc()` and `rdtsc_hi()`, or `rdtscp`, `rdtscp_hi` and `rdtscp_ecx`.
+    ///
+    /// `0` and `1` are the low and high halves of `rdtsc`. `2` and `3` are
+    /// those halves of `rdtscp`, and `4` is the processor id `rdtscp` writes
+    /// to `ecx`.
+    Rdtsc(u8),
 }
 
 /// How a reader converts a helper's arguments before [`Helper::eval`].
@@ -224,6 +230,11 @@ impl Helper {
                 Helper::Cpuid(1),
                 Helper::Cpuid(2),
                 Helper::Cpuid(3),
+                Helper::Rdtsc(0),
+                Helper::Rdtsc(1),
+                Helper::Rdtsc(2),
+                Helper::Rdtsc(3),
+                Helper::Rdtsc(4),
             ])
             .collect();
         all.sort();
@@ -278,6 +289,11 @@ impl Helper {
             "cpuid_ebx" => Some(Helper::Cpuid(1)),
             "cpuid_ecx" => Some(Helper::Cpuid(2)),
             "cpuid_edx" => Some(Helper::Cpuid(3)),
+            "rdtsc" => Some(Helper::Rdtsc(0)),
+            "rdtsc_hi" => Some(Helper::Rdtsc(1)),
+            "rdtscp" => Some(Helper::Rdtsc(2)),
+            "rdtscp_hi" => Some(Helper::Rdtsc(3)),
+            "rdtscp_ecx" => Some(Helper::Rdtsc(4)),
             _ => None,
         };
         if fixed.is_some() {
@@ -357,7 +373,8 @@ impl Helper {
             | Helper::XgetbvHi
             | Helper::FpuStatus
             | Helper::Lahf
-            | Helper::Cpuid(_) => None,
+            | Helper::Cpuid(_)
+            | Helper::Rdtsc(_) => None,
         }
     }
 
@@ -411,7 +428,8 @@ impl Helper {
             | Helper::XgetbvHi
             | Helper::FpuStatus
             | Helper::Lahf
-            | Helper::Cpuid(_) => None,
+            | Helper::Cpuid(_)
+            | Helper::Rdtsc(_) => None,
         }
     }
 
@@ -446,7 +464,8 @@ impl Helper {
             | Helper::XgetbvHi
             | Helper::FpuStatus
             | Helper::Lahf
-            | Helper::Cpuid(_) => Operands::Raw,
+            | Helper::Cpuid(_)
+            | Helper::Rdtsc(_) => Operands::Raw,
             Helper::Min | Helper::Max | Helper::Llabs => Operands::Word { signed: true },
             Helper::UMin | Helper::UMax | Helper::SubSat | Helper::Midpoint | Helper::AlignUp => {
                 Operands::Word { signed: false }
@@ -505,7 +524,8 @@ impl Helper {
             | Helper::XgetbvHi
             | Helper::FpuStatus
             | Helper::Lahf
-            | Helper::Cpuid(_) => Yields::Word { signed: false },
+            | Helper::Cpuid(_)
+            | Helper::Rdtsc(_) => Yields::Word { signed: false },
         }
     }
 
@@ -615,7 +635,8 @@ impl Helper {
             | Helper::XgetbvHi
             | Helper::FpuStatus
             | Helper::Lahf
-            | Helper::Cpuid(_) => None,
+            | Helper::Cpuid(_)
+            | Helper::Rdtsc(_) => None,
         }
     }
 
@@ -669,7 +690,8 @@ impl Helper {
             | Helper::XgetbvHi
             | Helper::FpuStatus
             | Helper::Lahf
-            | Helper::Cpuid(_) => None,
+            | Helper::Cpuid(_)
+            | Helper::Rdtsc(_) => None,
         }
     }
 
@@ -847,7 +869,7 @@ impl Helper {
                 )]
             }
             Helper::X87Load80 => vec!["extern double x87_load80(uint64_t p);".to_owned()],
-            Helper::Stmxcsr | Helper::FpuStatus | Helper::Lahf => {
+            Helper::Stmxcsr | Helper::FpuStatus | Helper::Lahf | Helper::Rdtsc(_) => {
                 vec![format!("extern {wu} {self}(void);")]
             }
             Helper::Xgetbv | Helper::XgetbvHi | Helper::Cpuid(_) => machine_extern(&wu, self),
@@ -985,6 +1007,7 @@ impl fmt::Display for Helper {
             Helper::FpuStatus => return f.write_str("fpu_status"),
             Helper::Lahf => return f.write_str("lahf"),
             Helper::Cpuid(part) => return f.write_str(cpuid_part(part)),
+            Helper::Rdtsc(part) => return f.write_str(rdtsc_part(part)),
         };
         write!(f, "{stem}{w}")
     }
@@ -1016,6 +1039,22 @@ fn cpuid_part(part: u8) -> &'static str {
         1 => "cpuid_ebx",
         2 => "cpuid_ecx",
         _ => "cpuid_edx",
+    }
+}
+
+/// The printed name of one `rdtsc` or `rdtscp` result.
+///
+/// # Arguments
+///
+/// * `part` - `0` and `1` are the low and high halves of `rdtsc`. `2` and
+///   `3` are those halves of `rdtscp`. Anything else is `rdtscp`'s `ecx`.
+fn rdtsc_part(part: u8) -> &'static str {
+    match part {
+        0 => "rdtsc",
+        1 => "rdtsc_hi",
+        2 => "rdtscp",
+        3 => "rdtscp_hi",
+        _ => "rdtscp_ecx",
     }
 }
 

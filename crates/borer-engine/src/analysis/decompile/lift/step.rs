@@ -1363,14 +1363,7 @@ impl Exec<'_, '_> {
                 self.record(EffectKind::Unmodeled);
             }
             Mnemonic::Cpuid => self.cpuid(),
-            Mnemonic::Rdtsc | Mnemonic::Rdtscp => {
-                emit_line!(self, format!("{mn:?}();").to_lowercase());
-                self.record(EffectKind::Unmodeled);
-                for r in [Register::RAX, Register::RDX, Register::RCX] {
-                    let k = self.canon(r);
-                    self.clobber(k);
-                }
-            }
+            Mnemonic::Rdtsc | Mnemonic::Rdtscp => self.timestamp(mn == Mnemonic::Rdtscp),
             Mnemonic::Xgetbv => {
                 let ecx = self.reg_read(Register::ECX);
                 self.reg_write(

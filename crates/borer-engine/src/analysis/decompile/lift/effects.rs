@@ -1708,3 +1708,26 @@ pub(in crate::analysis::decompile) fn static_target(instr: &Instruction) -> Opti
         _ => near_target(instr),
     }
 }
+
+impl Exec<'_, '_> {
+    /// Models `rdtsc` and `rdtscp` as the registers they write.
+    ///
+    /// A live store keeps the timestamp. A dead result writes nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `aux` - `rdtscp`, which also writes `ecx`.
+    pub(super) fn timestamp(&mut self, aux: bool) {
+        let base = u8::from(aux) * 2;
+        self.reg_write(Register::EAX, Expr::Helper(Helper::Rdtsc(base), Vec::new()));
+        self.reg_write(
+            Register::EDX,
+            Expr::Helper(Helper::Rdtsc(base + 1), Vec::new()),
+        );
+        if aux {
+            self.reg_write(Register::ECX, Expr::Helper(Helper::Rdtsc(4), Vec::new()));
+        } else {
+            self.clobber(self.canon(Register::RCX));
+        }
+    }
+}
