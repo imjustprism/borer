@@ -54,7 +54,43 @@ pub fn next_steps(p: &Program, a: &Analysis, o: &Overlay, entry: u64) -> Arc<Vec
         "next_steps",
         o.fingerprint(),
         entry,
-        || steps_of(p, a, o, entry),
+        || {
+            let text = decompile(p, a, o, entry).unwrap_or_default();
+            steps_of(p, a, o, entry, &text)
+        },
+        |steps| steps.iter().map(String::capacity).sum(),
+    )
+}
+
+/// The next steps for a text the caller already decompiled.
+///
+/// The steps share the memo of [`next_steps`], so a sweep can ask with
+/// the text it rendered and a later ask reads those steps.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - Names in force.
+/// * `entry` - The function's entry.
+/// * `text` - The decompilation [`next_steps`] would have rendered.
+///
+/// # Returns
+///
+/// As [`next_steps`].
+pub fn next_steps_for(
+    p: &Program,
+    a: &Analysis,
+    o: &Overlay,
+    entry: u64,
+    text: &str,
+) -> Arc<Vec<String>> {
+    let owned = text.to_owned();
+    a.derived.get_or_build_item(
+        "next_steps",
+        o.fingerprint(),
+        entry,
+        || steps_of(p, a, o, entry, &owned),
         |steps| steps.iter().map(String::capacity).sum(),
     )
 }
@@ -67,27 +103,27 @@ pub fn next_steps(p: &Program, a: &Analysis, o: &Overlay, entry: u64) -> Arc<Vec
 /// * `a` - The analysis.
 /// * `o` - Names in force.
 /// * `entry` - The function's entry.
+/// * `text` - The decompilation the rules read.
 ///
 /// # Returns
 ///
 /// As [`next_steps`].
-fn steps_of(p: &Program, a: &Analysis, o: &Overlay, entry: u64) -> Vec<String> {
+fn steps_of(p: &Program, a: &Analysis, o: &Overlay, entry: u64, text: &str) -> Vec<String> {
     if !matches!(p.arch.isa(), Some(crate::isa::Isa::X86 { .. })) {
         return Vec::new();
     }
     let (Some(f), Some(bits)) = (a.function(entry), p.arch.bitness()) else {
         return Vec::new();
     };
-    let text = decompile(p, a, o, entry).unwrap_or_default();
-    let params = parameters(&text);
+    let params = parameters(text);
     let rules: [&dyn Fn() -> Option<String>; 7] = [
         &|| vm_step(p, a, f),
         &|| flat_step(a, f),
-        &|| switch_step(a, f, &text),
+        &|| switch_step(a, f, text),
         &|| partial_step(p, a, o, f),
-        &|| check_step(p, a, f, bits, &text, params),
+        &|| check_step(p, a, f, bits, text, params),
         &|| loop_step(p, f, bits),
-        &|| layout_step(p, f, bits, &text, params),
+        &|| layout_step(p, f, bits, text, params),
     ];
     rules
         .iter()

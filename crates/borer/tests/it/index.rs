@@ -67,12 +67,17 @@ fn the_index_stores_the_warning_the_decompile_answer_shows() {
     let analysis = Analysis::compute(&program);
     let overlay = Overlay::default();
     let index = build(&program, &analysis, &overlay);
+    let filled = analysis.derived.builds();
     let stored = index
         .functions
         .iter()
         .find(|f| f.entry == 0x1000)
         .expect("the caller is indexed");
     let body = decompile_named(&program, &analysis, &overlay, 0x1000).expect("a body");
+    assert!(
+        analysis.derived.builds() > filled,
+        "the index decompiled the body again for its header"
+    );
     let mut header: Vec<String> = decompile::checked_header(&program, &analysis, &overlay, 0x1000)
         .into_iter()
         .chain(
