@@ -635,8 +635,18 @@ fn tests_immediate(i: &Instruction, imm: u64) -> bool {
 }
 
 /// Whether `i` compares a byte with `imm`.
+///
+/// A wider compare, such as `cmp eax, 0x90`, is a counter. It is not a
+/// scan for an `int3` or a `nop`.
 fn compares_byte(i: &Instruction, imm: u64) -> bool {
-    matches!(i.mnemonic(), Mnemonic::Cmp | Mnemonic::Test) && has_immediate(i, imm)
+    if !matches!(i.mnemonic(), Mnemonic::Cmp | Mnemonic::Test) || !has_immediate(i, imm) {
+        return false;
+    }
+    match i.op0_kind() {
+        OpKind::Register => i.op0_register().size() == 1,
+        OpKind::Memory => i.memory_size().size() == 1,
+        _ => false,
+    }
 }
 
 /// Whether one of `i`'s immediates is `imm`.

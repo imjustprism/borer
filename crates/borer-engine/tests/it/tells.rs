@@ -569,6 +569,19 @@ fn a_breakpoint_scan_needs_a_loop_and_an_exit() {
         0xc3, // ASM: ret
     ]);
     assert!(patch.contains("breakpoint patch"), "{patch}");
+    let counter = report_calls(
+        &[
+            0xff, 0xc0, // ASM: inc eax
+            0x3d, 0x90, 0x00, 0x00, 0x00, // ASM: cmp eax, 0x90
+            0x75, 0xf7, // ASM: jne 0x401000
+            0xe8, 0xf2, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[("ExitProcess", 0x402000)],
+    );
+    assert!(!counter.contains("breakpoint"), "{counter}");
+    assert!(!counter.starts_with("# anti-analysis:"), "{counter}");
 }
 
 /// An exception filter over an illegal opcode is a tell.
