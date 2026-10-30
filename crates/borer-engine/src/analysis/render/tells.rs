@@ -57,7 +57,7 @@ pub(super) fn sites(
 ///
 /// * `instrs` - The function's instructions.
 /// * `at` - The instruction's index.
-/// * `timing` - Two timestamp reads are subtracted and a branch reads that.
+/// * `timing` - Two timestamp reads are subtracted and a check reads that.
 fn instruction_tag(instrs: &[Instruction], at: usize, timing: bool) -> Option<&'static str> {
     let i = instrs.get(at)?;
     Some(match i.mnemonic() {
@@ -93,34 +93,149 @@ fn instruction_tag(instrs: &[Instruction], at: usize, timing: bool) -> Option<&'
     })
 }
 
-/// Whether two `rdtsc` reads are subtracted and a branch reads that difference.
+/// Whether two timestamp reads are subtracted and a later check reads that
+/// difference.
+///
+/// The subtraction has to use the earlier read, or a register it was copied
+/// into. `sub eax, eax` clears the register, and a compare of some other
+/// register is not that check.
 fn rdtsc_timing(instrs: &[Instruction]) -> bool {
-    let mut seen = 0u32;
+    let mut first = None;
     let mut second = None;
     for (at, i) in instrs.iter().enumerate() {
-        if matches!(i.mnemonic(), Mnemonic::Rdtsc | Mnemonic::Rdtscp) {
-            seen += 1;
-            if seen == 2 {
-                second = Some(at);
-            }
+        if !matches!(i.mnemonic(), Mnemonic::Rdtsc | Mnemonic::Rdtscp) {
+            continue;
+        }
+        if first.is_none() {
+            first = Some(at);
+        } else if second.is_none() {
+            second = Some(at);
         }
     }
-    let Some(at) = second else {
+    let (Some(earlier), Some(later)) = (first, second) else {
         return false;
     };
-    let Some(sub) = instrs.iter().skip(at + 1).take(8).position(subtracts_rax) else {
+    let saved = saved_timestamp(&instrs[earlier + 1..later], instrs[later].mnemonic());
+    let Some(gap) = instrs
+        .iter()
+        .skip(later + 1)
+        .take(8)
+        .position(|n| timestamp_difference(n, &saved))
+    else {
         return false;
     };
-    instrs.iter().skip(at + 1 + sub).take(6).any(|n| {
-        n.mnemonic() == Mnemonic::Cmp || n.flow_control() == FlowControl::ConditionalBranch
-    })
+    difference_checked(instrs, later + 1 + gap)
 }
 
-/// Whether `n` subtracts from `rax`, where `rdtsc` left its low half.
-fn subtracts_rax(n: &Instruction) -> bool {
-    n.mnemonic() == Mnemonic::Sub
-        && n.op0_kind() == OpKind::Register
-        && n.op0_register().full_register() == Register::RAX
+/// Registers still holding the first timestamp when the second read runs.
+///
+/// The second read replaces `rax` and `rdx`. `rdtscp` also replaces `rcx`.
+///
+/// # Arguments
+///
+/// * `between` - Instructions after the first read and before the second.
+/// * `second` - The second read's mnemonic.
+fn saved_timestamp(between: &[Instruction], second: Mnemonic) -> [Register; 6] {
+    let mut held = [Register::None; 6];
+    held[0] = Register::RAX;
+    held[1] = Register::RDX;
+    let mut count = 2usize;
+    for n in between {
+        if let Some(dest) = copied_timestamp(n, &held[..count]) {
+            if count < held.len() && !held[..count].contains(&dest) {
+                held[count] = dest;
+                count += 1;
+            }
+            continue;
+        }
+        drop_timestamp(n, &mut held, &mut count);
+    }
+    drop_one(&mut held, &mut count, Register::RAX);
+    drop_one(&mut held, &mut count, Register::RDX);
+    if second == Mnemonic::Rdtscp {
+        drop_one(&mut held, &mut count, Register::RCX);
+    }
+    held
+}
+
+/// The full register a full-width `mov` copies out of `held`.
+fn copied_timestamp(n: &Instruction, held: &[Register]) -> Option<Register> {
+    if n.mnemonic() != Mnemonic::Mov
+        || n.op_count() != 2
+        || n.op0_kind() != OpKind::Register
+        || n.op1_kind() != OpKind::Register
+        || n.op0_register().size() < 4
+        || !held.contains(&n.op1_register().full_register())
+    {
+        return None;
+    }
+    Some(n.op0_register().full_register())
+}
+
+/// Drops a timestamp register `n` writes, other than a compare.
+fn drop_timestamp(n: &Instruction, held: &mut [Register], count: &mut usize) {
+    if n.op0_kind() != OpKind::Register || matches!(n.mnemonic(), Mnemonic::Cmp | Mnemonic::Test) {
+        return;
+    }
+    drop_one(held, count, n.op0_register().full_register());
+}
+
+/// Removes `reg` from the live prefix of `held`.
+fn drop_one(held: &mut [Register], count: &mut usize, reg: Register) {
+    let Some(at) = held[..*count].iter().position(|r| *r == reg) else {
+        return;
+    };
+    held[at] = held[*count - 1];
+    held[*count - 1] = Register::None;
+    *count -= 1;
+}
+
+/// Whether `n` subtracts a saved timestamp from the new `rax` read, or the
+/// new read from a saved one. `sub eax, eax` does neither.
+fn timestamp_difference(n: &Instruction, saved: &[Register]) -> bool {
+    if n.mnemonic() != Mnemonic::Sub
+        || n.op0_kind() != OpKind::Register
+        || n.op1_kind() != OpKind::Register
+    {
+        return false;
+    }
+    let dest = n.op0_register().full_register();
+    let src = n.op1_register().full_register();
+    if src == dest {
+        return false;
+    }
+    let live = |r: Register| r != Register::None && saved.contains(&r);
+    (dest == Register::RAX && live(src)) || (src == Register::RAX && live(dest))
+}
+
+/// Whether a later compare reads the difference, or a branch reads the
+/// flags the subtraction wrote.
+fn difference_checked(instrs: &[Instruction], at: usize) -> bool {
+    let Some(sub) = instrs.get(at) else {
+        return false;
+    };
+    let diff = sub.op0_register().full_register();
+    let mut flags = sub.rflags_modified();
+    let mut held = true;
+    for n in instrs.iter().skip(at + 1).take(6) {
+        let reads = (0..n.op_count())
+            .any(|k| n.op_kind(k) == OpKind::Register && n.op_register(k).full_register() == diff);
+        if held && matches!(n.mnemonic(), Mnemonic::Cmp | Mnemonic::Test) && reads {
+            return true;
+        }
+        if n.flow_control() == FlowControl::ConditionalBranch && n.rflags_read() & flags != 0 {
+            return true;
+        }
+        flags &= !n.rflags_modified();
+        if held
+            && n.op0_kind() == OpKind::Register
+            && n.op0_register().full_register() == diff
+            && !matches!(n.mnemonic(), Mnemonic::Cmp | Mnemonic::Test)
+        {
+            held = false;
+        }
+    }
+    false
 }
 
 /// Whether `cpuid` at `at` follows a hypervisor vendor leaf or is followed

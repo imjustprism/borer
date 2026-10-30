@@ -49,6 +49,21 @@ fn cpuid_and_rdtsc_are_labeled_by_what_the_code_does() {
     assert!(!timing.contains("rdtsc (read)"), "{timing}");
 }
 
+/// `sub eax, eax` clears the timestamp. A compare of another register is
+/// not a timing check, so both reads stay plain reads.
+#[test]
+fn a_cleared_timestamp_is_a_read() {
+    let text = report(&[
+        0x0f, 0x31, // ASM: rdtsc
+        0x0f, 0x31, // ASM: rdtsc
+        0x29, 0xc0, // ASM: sub eax, eax
+        0x83, 0xf9, 0x01, // ASM: cmp ecx, 1
+        0xc3, // ASM: ret
+    ]);
+    assert!(text.contains("rdtsc (read)"), "{text}");
+    assert!(!text.contains("rdtsc (timing)"), "{text}");
+}
+
 /// A bare `in` is a port read. The `VMware` backdoor is the `VMXh` magic.
 #[test]
 fn a_bare_in_is_a_port_read_and_the_backdoor_magic_is_named() {
