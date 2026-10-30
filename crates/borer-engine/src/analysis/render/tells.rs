@@ -307,10 +307,9 @@ fn called_imports(p: &Program, a: &Analysis, entry: u64) -> Vec<String> {
     let mut names = Vec::new();
     for (target, _) in a.refs_from(entry) {
         let slot = a.function(target).and_then(|g| g.thunk).unwrap_or(target);
-        let Some(sym) = p
-            .symbols
-            .iter()
-            .find(|s| s.addr == slot && matches!(s.kind, SymbolKind::Import))
+        let Some(sym) = a
+            .symbol_at(p, slot)
+            .filter(|s| s.kind == SymbolKind::Import)
         else {
             continue;
         };
