@@ -25,6 +25,10 @@ use crate::isa::Isa;
 /// name, so `WriteProcessMemory` lands under process injection whichever DLL
 /// exports it. A fragment written `=name` must equal the whole API name,
 /// which the short socket verbs need so `send` does not catch `SendMessage`.
+/// `~stem` matches that stem plus an optional `A`, `W`, `Ex` or `2` suffix,
+/// so `ReadFile` matches and `InternetReadFile` does not. `^part` matches
+/// `part` only at the start of the name or at a capital letter, so `crypt`
+/// matches `CryptEncrypt` and `BCrypt` and not `DecryptFileW`.
 /// The list leans on the fragments a Windows program cannot avoid for a
 /// behavior, and stays deliberately short of guessing. A framework's
 /// network classes count as well: a Qt or OpenSSL client never touches a
@@ -95,7 +99,6 @@ pub(super) const CAPABILITIES: [(&str, &[&str]); 16] = [
             "ntunmapviewofsection",
             "queueuserapc",
             "setthreadcontext",
-            "getthreadcontext",
             "ntmapviewofsection",
             "rtlcreateuserthread",
         ],
@@ -142,9 +145,9 @@ pub(super) const CAPABILITIES: [(&str, &[&str]); 16] = [
     (
         "cryptography",
         &[
-            "crypt",
+            "^crypt",
             "bcrypt",
-            "ncrypt",
+            "^ncrypt",
             "cryptacquire",
             "cryptencrypt",
             "cryptdecrypt",
@@ -205,14 +208,14 @@ pub(super) const CAPABILITIES: [(&str, &[&str]); 16] = [
     ),
     (
         "clipboard",
-        &["openclipboard", "getclipboarddata", "setclipboarddata"],
+        &["~openclipboard", "getclipboarddata", "setclipboarddata"],
     ),
     (
         "filesystem",
         &[
-            "createfile",
-            "writefile",
-            "readfile",
+            "~createfile",
+            "~writefile",
+            "~readfile",
             "deletefile",
             "movefile",
             "copyfile",
@@ -252,6 +255,44 @@ pub(super) const CAPABILITIES: [(&str, &[&str]); 16] = [
     ),
 ];
 
+/// Whether `api` is one of `fragments`.
+///
+/// `=name` is the whole name, `~stem` is that stem with an empty suffix or
+/// `a` / `w` / `ex` / `2`, and `^part` is `part` at the start or at a
+/// capital letter. Anything else is a case-insensitive substring.
+///
+/// # Arguments
+///
+/// * `fragments` - The capability's fragments.
+/// * `api` - The import's bare name, in its original spelling.
+///
+/// # Returns
+///
+/// True when one fragment matches.
+fn name_gives(fragments: &[&str], api: &str) -> bool {
+    let lower = api.to_lowercase();
+    fragments.iter().any(|frag| {
+        if let Some(exact) = frag.strip_prefix('=') {
+            lower == exact
+        } else if let Some(stem) = frag.strip_prefix('~') {
+            lower
+                .strip_prefix(stem)
+                .is_some_and(|rest| matches!(rest, "" | "a" | "w" | "ex" | "2"))
+        } else if let Some(part) = frag.strip_prefix('^') {
+            let part = part.to_lowercase();
+            lower.match_indices(&part).any(|(at, _)| {
+                at == 0
+                    || api
+                        .as_bytes()
+                        .get(at)
+                        .is_some_and(|b| b.is_ascii_uppercase())
+            })
+        } else {
+            lower.contains(frag)
+        }
+    })
+}
+
 /// Groups the imports and the syscall sites into the capabilities they
 /// grant.
 ///
@@ -286,13 +327,7 @@ pub fn capability_map_tsv(p: &Program, a: Option<&Analysis>) -> String {
     let sites = a.map(|a| crate::analysis::syscalls::syscall_sites(p, a));
     let sites = sites.as_deref().map_or(&[][..], Vec::as_slice);
     let called: BTreeSet<&str> = sites.iter().filter_map(|s| s.name).collect();
-    let gives = |fragments: &[&str], api: &str| {
-        let api = api.to_lowercase();
-        fragments.iter().any(|frag| match frag.strip_prefix('=') {
-            Some(exact) => api == exact,
-            None => api.contains(frag),
-        })
-    };
+    let gives = name_gives;
     let mut hits: Vec<(&str, Vec<String>)> = Vec::new();
     for (capability, fragments) in CAPABILITIES {
         let mut named: BTreeSet<&str> = BTreeSet::new();
