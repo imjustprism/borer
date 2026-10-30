@@ -333,7 +333,8 @@ impl Exec<'_, '_> {
     /// A parameter that takes a constant group names its value by the group
     /// ([`typelib::render`]), at the width the parameter's type passes; a
     /// pointer parameter passed zero is `NULL`, a `REFIID` or `GUID *`
-    /// passed an address in data is that GUID, and a signed one passed a
+    /// passed an address in data keeps the address and names the GUID in a
+    /// comment, and a signed one passed a
     /// small negative value at its width is that negative number (`-1` for
     /// an `int` set as `0xffffffff`). Only bare numbers change:
     /// an expression, a string or a named global stays as it was. The value
@@ -363,7 +364,7 @@ impl Exec<'_, '_> {
                 (Some(g), _) => typelib::render(g, v, pass.map_or(word, |p| p.bits(word)).max(8)),
                 (None, Some(Pass::Pointer)) if v == 0 => Some("NULL".to_owned()),
                 (None, Some(Pass::Pointer)) if guid_type(param.ty) => {
-                    guid_text(self.ctx.program, v)
+                    guid_text(self.ctx.program, v).map(|g| format!("{arg} /* {g} */"))
                 }
                 (None, Some(Pass::Int { bits, signed: true })) => negative(v, bits),
                 (None, _) => None,

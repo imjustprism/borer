@@ -170,9 +170,11 @@ fn a_refiid_argument_prints_the_guid() {
     );
     let (text, _) = decompiled(&p);
     assert!(
-        text.contains("CreateDXGIFactory({B68F9A8C-39E0-4649-0102-030405060708}, NULL)"),
+        text.contains("/* {B68F9A8C-39E0-4649-0102-030405060708} */"),
         "{text}"
     );
+    assert!(!text.contains("({"), "{text}");
+    assert!(text.contains("NULL"), "{text}");
 }
 
 /// A `void` import binds no result.
