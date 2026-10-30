@@ -596,34 +596,147 @@ fn has_immediate(i: &Instruction, imm: u64) -> bool {
     immediate_any(i).is_some_and(|v| v == imm)
 }
 
-/// Whether a context call asks for the debug registers or reads them back.
+/// Whether a context call asks for the debug registers or reads them back
+/// from the buffer it was given.
 ///
-/// `CONTEXT_ALL` includes `CONTEXT_DEBUG_REGISTERS` along with other flags.
-/// `CONTEXT_CONTROL` and `CONTEXT_INTEGER` do not. A later load of `Dr0`
-/// through `Dr7` through a register counts the same way, after a direct
-/// or an indirect call.
+/// `CONTEXT_ALL` includes `CONTEXT_DEBUG_REGISTERS`. `CONTEXT_CONTROL` and
+/// `CONTEXT_INTEGER` do not. A later load of `Dr0` through `Dr7` counts
+/// when its base is the pointer passed to the call, or the stack slot that
+/// pointer was loaded from. A load through another register is not the
+/// buffer. The call may be direct or indirect.
 ///
 /// # Arguments
 ///
 /// * `instrs` - The function, in address order.
 /// * `bits` - Decoder bitness, which picks the `CONTEXT` offsets.
 fn context_debug(instrs: &[Instruction], bits: u32) -> bool {
-    let mut after_call = false;
-    for i in instrs {
-        if immediate_any(i).is_some_and(debug_context_flags) {
-            return true;
-        }
-        if after_call && dr_field(i, bits) {
-            return true;
-        }
-        if matches!(
+    if instrs
+        .iter()
+        .any(|i| immediate_any(i).is_some_and(debug_context_flags))
+    {
+        return true;
+    }
+    instrs.iter().enumerate().any(|(at, i)| {
+        matches!(
             i.flow_control(),
             FlowControl::Call | FlowControl::IndirectCall
+        ) && reads_context_dr(&instrs[..at], &instrs[at + 1..], bits)
+    })
+}
+
+/// Whether a load after the call reads a debug-register slot of the
+/// context pointer set up before it.
+///
+/// # Arguments
+///
+/// * `before` - Instructions before the call.
+/// * `after` - Instructions after the call.
+/// * `bits` - Decoder bitness, which picks the `CONTEXT` offsets.
+fn reads_context_dr(before: &[Instruction], after: &[Instruction], bits: u32) -> bool {
+    let ptr = context_ptr(before, bits);
+    after.iter().take(8).any(|n| dr_from_ptr(n, bits, ptr))
+}
+
+/// The callee-saved register holding the context pointer, and the frame
+/// slot it was loaded from.
+///
+/// On x64 the pointer is `rdx`. On x86 it is the second push. A register
+/// the call clobbers is not returned: the load has to use a copy that
+/// survives, or the frame slot itself.
+///
+/// # Arguments
+///
+/// * `before` - Instructions before the call.
+/// * `bits` - Decoder bitness.
+///
+/// # Returns
+///
+/// The surviving register (`Register::None` when there is none) and the
+/// frame slot, when the pointer was addressed that way.
+fn context_ptr(before: &[Instruction], bits: u32) -> (Register, Option<(Register, u64)>) {
+    if bits == 32 {
+        return (pushed_context(before), None);
+    }
+    let mut reg = Register::None;
+    let mut slot = None;
+    for n in before.iter().rev().take(8) {
+        if n.op0_kind() != OpKind::Register || n.op0_register().full_register() != Register::RDX {
+            continue;
+        }
+        if n.mnemonic() == Mnemonic::Lea {
+            slot = frame_slot(n);
+        } else if n.mnemonic() == Mnemonic::Mov && n.op1_kind() == OpKind::Register {
+            let src = n.op1_register().full_register();
+            if kept(src) {
+                reg = src;
+            }
+            if let Some(lea) = lea_of(before, src) {
+                slot = frame_slot(lea);
+            }
+        }
+        break;
+    }
+    (reg, slot)
+}
+
+/// The register pushed as the context pointer, when the call keeps it.
+fn pushed_context(before: &[Instruction]) -> Register {
+    let mut seen = 0u32;
+    for n in before.iter().rev().take(8) {
+        if matches!(
+            n.flow_control(),
+            FlowControl::Call | FlowControl::IndirectCall
         ) {
-            after_call = true;
+            break;
+        }
+        if n.mnemonic() != Mnemonic::Push {
+            continue;
+        }
+        seen += 1;
+        if seen == 2 {
+            if n.op0_kind() == OpKind::Register {
+                let src = n.op0_register().full_register();
+                if kept(src) {
+                    return src;
+                }
+            }
+            break;
         }
     }
-    false
+    Register::None
+}
+
+/// The last `lea` that writes `reg`.
+fn lea_of(instrs: &[Instruction], reg: Register) -> Option<&Instruction> {
+    instrs.iter().rev().find(|n| {
+        n.mnemonic() == Mnemonic::Lea
+            && n.op0_kind() == OpKind::Register
+            && n.op0_register().full_register() == reg
+    })
+}
+
+/// The frame register and displacement of an `lea` of a stack slot.
+fn frame_slot(n: &Instruction) -> Option<(Register, u64)> {
+    let (seg, disp, base) = memory(n)?;
+    if seg != Register::None && seg != Register::DS {
+        return None;
+    }
+    let frame = base.full_register();
+    matches!(frame, Register::RSP | Register::RBP).then_some((frame, disp))
+}
+
+/// Whether `reg` still holds its value after a call.
+fn kept(reg: Register) -> bool {
+    matches!(
+        reg,
+        Register::RBX
+            | Register::RSI
+            | Register::RDI
+            | Register::R12
+            | Register::R13
+            | Register::R14
+            | Register::R15
+    )
 }
 
 /// Whether `imm` is an architecture context-flags word that includes the
@@ -638,16 +751,18 @@ fn debug_context_flags(imm: u64) -> bool {
     arch(0x1_0000) || arch(0x10_0000)
 }
 
-/// Whether `i` loads a debug-register slot of a `CONTEXT`.
+/// Whether `i` loads a debug-register slot of `ptr`.
 ///
-/// A stack base is a frame slot, not the structure offset. A store does
-/// not count.
+/// `ptr` is the surviving register and the frame slot from
+/// [`context_ptr`]. A store does not count. A stack base counts only when
+/// it is that slot.
 ///
 /// # Arguments
 ///
 /// * `i` - One instruction after the context call.
 /// * `bits` - `32` uses the x86 `Dr` offsets; anything else the x64 ones.
-fn dr_field(i: &Instruction, bits: u32) -> bool {
+/// * `ptr` - The context pointer the call was given.
+fn dr_from_ptr(i: &Instruction, bits: u32, ptr: (Register, Option<(Register, u64)>)) -> bool {
     if i.mnemonic() == Mnemonic::Lea
         || (i.mnemonic() == Mnemonic::Mov && i.op0_kind() == OpKind::Memory)
     {
@@ -656,15 +771,23 @@ fn dr_field(i: &Instruction, bits: u32) -> bool {
     let Some((_, disp, base)) = memory(i) else {
         return false;
     };
-    if base == Register::None || matches!(base.full_register(), Register::RSP | Register::RBP) {
+    let base = base.full_register();
+    if base == Register::None {
         return false;
     }
     let size = i.memory_size().size();
-    if bits == 32 {
-        size == 4 && matches!(disp, 4 | 8 | 0xc | 0x10 | 0x14 | 0x18)
-    } else {
-        size == 8 && matches!(disp, 0x48 | 0x50 | 0x58 | 0x60 | 0x68 | 0x70)
+    let field = |d: u64| {
+        if bits == 32 {
+            size == 4 && matches!(d, 4 | 8 | 0xc | 0x10 | 0x14 | 0x18)
+        } else {
+            size == 8 && matches!(d, 0x48 | 0x50 | 0x58 | 0x60 | 0x68 | 0x70)
+        }
+    };
+    let (reg, slot) = ptr;
+    if reg != Register::None && base == reg && field(disp) {
+        return true;
     }
+    slot.is_some_and(|(frame, at)| base == frame && field(disp.wrapping_sub(at)))
 }
 
 /// The first immediate operand of `i`.

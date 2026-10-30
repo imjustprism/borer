@@ -279,8 +279,9 @@ fn get_thread_context_needs_the_debug_register_flags() {
     assert!(!plain.contains("hardware breakpoint"), "{plain}");
 }
 
-/// `CONTEXT_ALL` and a load of `Dr0` are hardware-breakpoint tells.
-/// `CONTEXT_CONTROL` is not, and neither is a store into that slot.
+/// `CONTEXT_ALL` is a hardware-breakpoint tell. A `Dr0` load is one when
+/// it reads the context buffer the call was given. `CONTEXT_CONTROL` is
+/// not, a store is not, and a load through another register is not.
 #[test]
 fn context_all_and_a_dr_read_are_hardware_breakpoints() {
     let all = report_calls(
@@ -315,14 +316,37 @@ fn context_all_and_a_dr_read_are_hardware_breakpoints() {
     assert!(!integer.contains("hardware breakpoint"), "{integer}");
     let read = report_calls(
         &[
-            0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
-            0x48, 0x8b, 0x42, 0x48, // ASM: mov rax, [rdx+0x48]
+            0x48, 0x8d, 0x5c, 0x24, 0x20, // ASM: lea rbx, [rsp+0x20]
+            0x48, 0x89, 0xda, // ASM: mov rdx, rbx
+            0xe8, 0xf3, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0x48, 0x8b, 0x43, 0x48, // ASM: mov rax, [rbx+0x48]
             0xc3, // ASM: ret
         ],
         &[],
         &[("GetThreadContext", 0x402000)],
     );
     assert!(read.contains("hardware breakpoint"), "{read}");
+    let slot = report_calls(
+        &[
+            0x48, 0x8d, 0x54, 0x24, 0x20, // ASM: lea rdx, [rsp+0x20]
+            0xe8, 0xf6, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0x48, 0x8b, 0x44, 0x24, 0x68, // ASM: mov rax, [rsp+0x68]
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[("GetThreadContext", 0x402000)],
+    );
+    assert!(slot.contains("hardware breakpoint"), "{slot}");
+    let other = report_calls(
+        &[
+            0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0x48, 0x8b, 0x43, 0x48, // ASM: mov rax, [rbx+0x48]
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[("GetThreadContext", 0x402000)],
+    );
+    assert!(!other.contains("hardware breakpoint"), "{other}");
     let store = report_calls(
         &[
             0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
@@ -444,14 +468,16 @@ fn addresses_of_debug_apis_are_not_a_debug_block() {
     assert!(!text.contains("debug block"), "{text}");
 }
 
-/// An indirect `GetThreadContext` followed by a `Dr0` load is a hardware
-/// breakpoint. The call alone is not.
+/// An indirect `GetThreadContext` followed by a `Dr0` load of its buffer
+/// is a hardware breakpoint. The call alone is not.
 #[test]
 fn an_indirect_context_call_and_a_dr_read_is_a_hardware_breakpoint() {
     let read = report_calls(
         &[
-            0xff, 0x15, 0xfa, 0x0f, 0x00, 0x00, // ASM: call qword [rip+0xffa]
-            0x48, 0x8b, 0x42, 0x48, // ASM: mov rax, [rdx+0x48]
+            0x48, 0x8d, 0x5c, 0x24, 0x20, // ASM: lea rbx, [rsp+0x20]
+            0x48, 0x89, 0xda, // ASM: mov rdx, rbx
+            0xff, 0x15, 0xf2, 0x0f, 0x00, 0x00, // ASM: call qword [rip+0xff2]
+            0x48, 0x8b, 0x43, 0x48, // ASM: mov rax, [rbx+0x48]
             0xc3, // ASM: ret
         ],
         &[],
