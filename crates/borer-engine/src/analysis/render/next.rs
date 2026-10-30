@@ -250,7 +250,8 @@ fn partial_step(p: &Program, a: &Analysis, o: &Overlay, f: &Function) -> Option<
 /// argument of the function's convention. A value copied out of a call's
 /// return register is named as a call result. Anything the scan cannot
 /// place is named as not shown to be `a1`, which is not a claim that no
-/// argument decides it.
+/// argument decides it. A `sub`, `xor` or `and` whose flags a call kills
+/// is not that compare, even when the text still prints it as `==`.
 ///
 /// # Arguments
 ///
@@ -284,7 +285,10 @@ fn check_step(
     let conv = abi::conv_at(p, f.entry, bits);
     let (value, source) = match found {
         Some((at, value)) => (value, compares::compared_source(&instrs, at, conv)),
-        None => (compared_constant(text)?, compares::Compared::Other),
+        None => (
+            compared_constant(text, &compares::undecided_immediates(&instrs))?,
+            compares::Compared::Other,
+        ),
     };
     let (uri, note) = match source {
         compares::Compared::Argument(n) => (
@@ -306,14 +310,18 @@ fn check_step(
 /// The first telling constant a decompiled text compares with `==` or
 /// `!=`.
 ///
+/// A constant in `skip` is one the instruction scan already refused, so
+/// the text printing it as `==` is not a second copy of the check.
+///
 /// # Arguments
 ///
 /// * `text` - The decompiled text.
+/// * `skip` - Immediates the instruction scan refused.
 ///
 /// # Returns
 ///
 /// The constant ([`telling_constant`]), or `None` when no compare has one.
-fn compared_constant(text: &str) -> Option<u64> {
+fn compared_constant(text: &str, skip: &BTreeSet<u64>) -> Option<u64> {
     text.lines()
         .filter(|l| !l.trim_start().starts_with("//"))
         .filter(|l| l.contains(" == ") || l.contains(" != "))
@@ -325,7 +333,7 @@ fn compared_constant(text: &str) -> Option<u64> {
                 .then(|| t.parse::<u64>().ok())
                 .flatten(),
         })
-        .find(|v| telling_constant(*v))
+        .find(|v| telling_constant(*v) && !skip.contains(v))
 }
 
 /// Points a function with a loop that mixes bytes (xor, rotate) and

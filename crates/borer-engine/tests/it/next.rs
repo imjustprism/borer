@@ -140,6 +140,24 @@ fn arithmetic_that_feeds_a_xor_is_not_the_solved_constant() {
     );
 }
 
+/// A call between a `sub` and the flag read leaves the flags undefined.
+/// The immediate is not the check.
+#[test]
+fn a_call_between_a_sub_and_its_flag_read_hides_the_compare() {
+    let code = [
+        0x81, 0xe9, 0xcd, 0xab, 0x37, 0x13, // ASM: sub ecx, 0x1337abcd
+        0xe8, 0x04, 0x00, 0x00, 0x00, // ASM: call 0x40100f
+        0x0f, 0x94, 0xc0, // ASM: sete al
+        0xc3, // ASM: ret
+        0xc3, // ASM: ret
+    ];
+    let got = steps(&code);
+    assert!(
+        got.iter().all(|step| !step.contains("0x1337abcd")),
+        "{got:?}"
+    );
+}
+
 /// A `sub` that nothing reads, followed by a branch on its flags, is the
 /// compare. The argument register was not written before it.
 #[test]

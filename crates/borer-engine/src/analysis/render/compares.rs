@@ -53,6 +53,30 @@ pub(super) fn compare_immediate(instrs: &[Instruction], at: usize) -> Option<u64
     }
 }
 
+/// Immediates of `sub`, `xor` and `and` that no later flag read decides.
+///
+/// A call, a return or another flag write leaves them undecided. The
+/// decompiled text can still print one as `==`, and a hint skips it.
+///
+/// # Arguments
+///
+/// * `instrs` - The function's instructions, in address order.
+///
+/// # Returns
+///
+/// Those immediates, each once.
+pub(super) fn undecided_immediates(instrs: &[Instruction]) -> BTreeSet<u64> {
+    instrs
+        .iter()
+        .enumerate()
+        .filter(|(at, i)| {
+            matches!(i.mnemonic(), Mnemonic::Sub | Mnemonic::Xor | Mnemonic::And)
+                && compare_immediate(instrs, *at).is_none()
+        })
+        .filter_map(|(_, i)| immediate_of(i))
+        .collect()
+}
+
 /// Whether a later instruction reads a flag `instrs[at]` wrote that no
 /// instruction in between has overwritten.
 ///
@@ -60,7 +84,8 @@ pub(super) fn compare_immediate(instrs: &[Instruction], at: usize) -> Option<u64
 /// reads one of those flags: `sub` then `inc` then `jz` does not, because
 /// `inc` replaced the zero flag. A write of one flag leaves the others:
 /// `clc` clears carry and a following `sete` still reads the compare's
-/// zero flag. Each instruction is visited once, and at most
+/// zero flag. A call leaves the flags undefined, so the scan stops there.
+/// Each instruction is visited once, and at most
 /// [`FLAG_SCAN_MAX`] of them, so the scan stops at a loop.
 ///
 /// # Arguments
@@ -97,6 +122,8 @@ fn flags_decide(instrs: &[Instruction], at: usize) -> bool {
         if matches!(
             n.flow_control(),
             FlowControl::Return
+                | FlowControl::Call
+                | FlowControl::IndirectCall
                 | FlowControl::IndirectBranch
                 | FlowControl::Interrupt
                 | FlowControl::Exception
