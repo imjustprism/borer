@@ -28,7 +28,7 @@ use rayon::prelude::*;
 
 mod key;
 mod memo;
-pub use key::index_key;
+pub use key::{answer_header, index_key};
 
 /// Magic bytes opening an index file.
 const MAGIC: &[u8; 8] = b"BORERIDX";
@@ -451,7 +451,7 @@ pub fn build(program: &Program, analysis: &Analysis, overlay: &Overlay) -> CodeI
         .map(|(&entry, text)| IndexedFunction {
             entry,
             name: name_of(analysis, overlay, entry),
-            text: text.unwrap_or_default(),
+            text: key::shown(program, analysis, overlay, entry, text),
         })
         .collect();
     let postings = trigram_postings(&functions);

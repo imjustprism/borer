@@ -1102,7 +1102,7 @@ pub fn with_header(text: &str, header: Option<&str>) -> String {
 /// name nothing declares, an operator C refuses on a float, a pointer or
 /// an integer, a missing label, an instruction left as asm.
 ///
-/// Only the tools' rendering carries it, like [`checked_header`]. Each
+/// The decompile answer and the index carry it, like [`checked_header`]. Each
 /// warning is a fact of the text, never a guess, so it flags no right
 /// text; a text with no line may still be wrong in ways no fact of the
 /// text shows. The input a run of the text still differs on after the

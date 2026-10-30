@@ -200,24 +200,7 @@ pub(crate) fn decompile_header(
     entry: u64,
     differs: Option<&str>,
 ) -> Option<String> {
-    use borer_engine::analysis::decompile;
-    let mut lines: Vec<String> = decompile::checked_header(p, a, o, entry)
-        .into_iter()
-        .chain(
-            a.incomplete
-                .then(|| format!("//{}", render::INCOMPLETE_NOTE.trim_start_matches('#'))),
-        )
-        .collect();
-    lines.extend(
-        decompile::decompile_named(p, a, o, entry)
-            .and_then(|text| decompile::warnings(p, a, o, entry, &text, differs)),
-    );
-    lines.extend(
-        render::next_steps(p, a, o, entry)
-            .iter()
-            .map(|step| format!("// next: {step}")),
-    );
-    (!lines.is_empty()).then(|| lines.join("\n"))
+    borer::index::answer_header(p, a, o, entry, differs)
 }
 
 #[tool_router(router = decompile_tools, vis = "pub(crate)")]
@@ -231,8 +214,8 @@ impl BorerServer {
     /// does not know.
     ///
     /// The answer's second line says what of it was checked against the
-    /// binary ([`borer_engine::analysis::decompile::checked_header`]); only
-    /// this rendering carries it, never the text other readers parse.
+    /// binary ([`borer_engine::analysis::decompile::checked_header`]). The
+    /// index stores this same text, so a `grep` line is a line of this answer.
     ///
     /// # Arguments
     ///

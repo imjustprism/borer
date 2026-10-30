@@ -4,6 +4,7 @@
 use std::fmt::Write as _;
 use std::time::UNIX_EPOCH;
 
+use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::pack::Packs;
 use borer_engine::program::Program;
 
@@ -84,4 +85,74 @@ impl std::fmt::Write for Fnv {
         self.0 = fnv1a(self.0, s.as_bytes());
         Ok(())
     }
+}
+
+/// The check, warning and next lines a `decompile` answer splices in.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `analysis` - Its analysis.
+/// * `overlay` - Names in force.
+/// * `entry` - The function's entry.
+/// * `differs` - The repair search's note, when the text still differs.
+///
+/// # Returns
+///
+/// The lines without a final newline, or `None` when there are none.
+pub fn answer_header(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    entry: u64,
+    differs: Option<&str>,
+) -> Option<String> {
+    use borer_engine::analysis::{decompile, render};
+    let mut lines: Vec<String> = decompile::checked_header(program, analysis, overlay, entry)
+        .into_iter()
+        .chain(
+            analysis
+                .incomplete
+                .then(|| format!("//{}", render::INCOMPLETE_NOTE.trim_start_matches('#'))),
+        )
+        .collect();
+    lines.extend(
+        decompile::decompile_named(program, analysis, overlay, entry).and_then(|text| {
+            decompile::warnings(program, analysis, overlay, entry, &text, differs)
+        }),
+    );
+    lines.extend(
+        render::next_steps(program, analysis, overlay, entry)
+            .iter()
+            .map(|step| format!("// next: {step}")),
+    );
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+/// The text a `decompile` answer shows, so an index line is that line.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `analysis` - Its analysis.
+/// * `overlay` - Names in force.
+/// * `entry` - The function's entry.
+/// * `text` - The body, or `None` when decompilation produced nothing.
+///
+/// # Returns
+///
+/// The body with [`answer_header`] under its first line, or empty when
+/// there is no body.
+pub(super) fn shown(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    entry: u64,
+    text: Option<String>,
+) -> String {
+    let Some(text) = text.filter(|body| !body.is_empty()) else {
+        return String::new();
+    };
+    let header = answer_header(program, analysis, overlay, entry, None);
+    borer_engine::analysis::decompile::with_header(&text, header.as_deref())
 }
