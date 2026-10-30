@@ -345,6 +345,26 @@ fn a_debug_process_block_is_a_tell() {
     assert!(!alone.contains("debug block"), "{alone}");
 }
 
+/// Taking the address of the two debug APIs is not a call, so it is not a
+/// debug block.
+#[test]
+fn addresses_of_debug_apis_are_not_a_debug_block() {
+    let code = [
+        0x48, 0x8d, 0x05, 0xf9, 0x0f, 0x00, 0x00, // ASM: lea rax, [rip+0xff9]
+        0x48, 0x8d, 0x05, 0x02, 0x10, 0x00, 0x00, // ASM: lea rax, [rip+0x1002]
+        0xc3, // ASM: ret
+    ];
+    let text = report_calls(
+        &code,
+        &[],
+        &[
+            ("CreateProcessA", 0x402000),
+            ("WaitForDebugEvent", 0x402010),
+        ],
+    );
+    assert!(!text.contains("debug block"), "{text}");
+}
+
 /// A loop that compares with `0xCC` and then exits is a breakpoint scan.
 /// The compare alone is not, and a compare followed by a store into
 /// executable memory is a patch.

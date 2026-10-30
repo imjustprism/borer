@@ -312,9 +312,14 @@ fn peb_field(rest: &[Instruction]) -> &'static str {
 }
 
 /// The bare import names this function calls, in lower case.
+///
+/// A load or an `lea` of the import's address is not a call.
 fn called_imports(p: &Program, a: &Analysis, entry: u64) -> Vec<String> {
     let mut names = Vec::new();
-    for (target, _) in a.refs_from(entry) {
+    for (target, site) in a.refs_from(entry) {
+        if site.kind != RefKind::Call {
+            continue;
+        }
         let slot = a.function(target).and_then(|g| g.thunk).unwrap_or(target);
         let Some(sym) = a
             .symbol_at(p, slot)
