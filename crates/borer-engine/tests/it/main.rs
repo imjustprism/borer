@@ -31,6 +31,7 @@ mod abi;
 mod analysis;
 mod bundle;
 mod calls;
+mod capabilities;
 mod carve;
 mod clr;
 mod clr_il;
