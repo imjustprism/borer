@@ -526,8 +526,8 @@ fn fastfail(p: &Program, a: &Analysis, entry: u64) -> bool {
 /// Whether the instructions after the call test the value it returned.
 ///
 /// A full-width copy (`mov ebx, eax`) carries the value. A write that is
-/// not such a copy, such as `mov eax, 1`, drops it. A later call replaces
-/// `eax`, so the scan stops there.
+/// not such a copy, such as `mov eax, 1`, drops it. A later call, return
+/// or unconditional jump ends this function, so the scan stops there.
 fn result_tested(p: &Program, va: u64) -> bool {
     let Some(bits) = p.arch.bitness() else {
         return false;
@@ -558,7 +558,11 @@ fn result_tested(p: &Program, va: u64) -> bool {
         if next.is_invalid()
             || matches!(
                 next.flow_control(),
-                FlowControl::Call | FlowControl::IndirectCall
+                FlowControl::Call
+                    | FlowControl::IndirectCall
+                    | FlowControl::Return
+                    | FlowControl::UnconditionalBranch
+                    | FlowControl::IndirectBranch
             )
         {
             return false;

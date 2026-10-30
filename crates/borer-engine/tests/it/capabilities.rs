@@ -281,3 +281,33 @@ fn a_check_after_another_call_is_not_the_debugger_result() {
     let text = debugger_map(&code);
     assert!(!text.contains("IsDebuggerPresent"), "{text}");
 }
+
+/// A return or a jump ends the function. A `test` past it is not this
+/// call's check.
+#[test]
+fn a_check_past_a_return_or_jump_is_not_the_debugger_result() {
+    let ret = [
+        0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0xc3, // ASM: ret
+        0x85, 0xc0, // ASM: test eax, eax
+        0xc3, // ASM: ret
+    ];
+    let text = debugger_map(&ret);
+    assert!(!text.contains("IsDebuggerPresent"), "{text}");
+    let jump = [
+        0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0xeb, 0x02, // ASM: jmp 0x401009
+        0x85, 0xc0, // ASM: test eax, eax
+        0xc3, // ASM: ret
+    ];
+    let text = debugger_map(&jump);
+    assert!(!text.contains("IsDebuggerPresent"), "{text}");
+    let indirect = [
+        0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0xff, 0xe0, // ASM: jmp rax
+        0x85, 0xc0, // ASM: test eax, eax
+        0xc3, // ASM: ret
+    ];
+    let text = debugger_map(&indirect);
+    assert!(!text.contains("IsDebuggerPresent"), "{text}");
+}
