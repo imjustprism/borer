@@ -48,7 +48,7 @@ use frame::moves_rsp_by_imm;
 use guess::plausible_entry;
 use helpers::{
     COOKIE_CHECK_INSTRS_MAX, EPILOG_INSTRS_MAX, PANIC_INSTRS_MAX, cookie_check_name,
-    epilog_helper_name, exits_on_status_name, frame_helper_name, is_noreturn_name,
+    epilog_helper_name, exits_on_status_name, frame_helper_name, is_noreturn_name, note_call,
     panic_helper_name, prints_assert_banner, refcount_helper_name,
 };
 use seeds::{got_base, mapped_range, pointer_seeds, record_table_refs, reloc_seeds};
@@ -171,7 +171,7 @@ const GAP_INSTRS_MIN: usize = 4;
 
 /// What the walk remembers about one decoded instruction.
 #[derive(Debug, Clone)]
-struct InstrRec {
+pub(in crate::analysis::functions) struct InstrRec {
     /// Address of the following instruction.
     next: u64,
     /// Control-flow class from iced.
@@ -1922,10 +1922,7 @@ fn build_blocks(
                 }
             }
             FlowControl::Call | FlowControl::IndirectCall => {
-                block.term = BlockTerm::Call;
-                if ended.binary_search(&addr).is_err() {
-                    block.successors.push(rec.next);
-                }
+                note_call(block, recs, ended, addr, rec);
             }
             FlowControl::Return => block.term = BlockTerm::Ret,
             FlowControl::Interrupt | FlowControl::Exception => block.term = BlockTerm::Invalid,

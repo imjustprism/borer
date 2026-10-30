@@ -4,8 +4,8 @@
 
 use super::guess::{slot_jump, thunk_slot};
 use super::walk::Via;
-use super::{Cursors, Recorded, decode_at, near_target, straight_line_before};
-use crate::analysis::{Analysis, Function, bare_name, is_imm};
+use super::{Cursors, InstrRec, Recorded, decode_at, near_target, straight_line_before};
+use crate::analysis::{Analysis, BasicBlock, BlockTerm, Function, bare_name, is_imm};
 use crate::fxmap::FxHashSet;
 use crate::isa::x86::{
     Code, ConditionCode, FlowControl, Instruction, InstructionInfoFactory, Mnemonic, OpAccess,
@@ -725,6 +725,56 @@ pub(super) fn call_lands(program: &Program, bitness: u32, target: u64, next: u64
         return next;
     };
     next.wrapping_add(adj.0)
+}
+
+/// Sets a call block's edge to the instruction the call returns to.
+///
+/// A direct call whose fallthrough was not recorded returns at the next
+/// recorded instruction. An indirect call returns at its fallthrough. A
+/// call in `ended` has no successor.
+///
+/// # Arguments
+///
+/// * `block` - The block the call ends.
+/// * `recs` - The function's instructions, in address order.
+/// * `ended` - Calls that do not return, sorted.
+/// * `addr` - The call.
+/// * `rec` - The call's record.
+pub(super) fn note_call(
+    block: &mut BasicBlock,
+    recs: &[(u64, InstrRec)],
+    ended: &[u64],
+    addr: u64,
+    rec: &InstrRec,
+) {
+    block.term = BlockTerm::Call;
+    if ended.binary_search(&addr).is_ok() {
+        return;
+    }
+    let land = if rec.flow == FlowControl::Call {
+        call_fall(recs, rec.next)
+    } else {
+        rec.next
+    };
+    block.successors.push(land);
+}
+
+/// The recorded instruction a direct call falls through to.
+///
+/// # Arguments
+///
+/// * `recs` - The function's instructions, in address order.
+/// * `next` - The architectural fallthrough.
+///
+/// # Returns
+///
+/// `next` when that address was recorded, otherwise the first recorded
+/// address after it.
+fn call_fall(recs: &[(u64, InstrRec)], next: u64) -> u64 {
+    match recs.binary_search_by_key(&next, |(at, _)| *at) {
+        Ok(_) => next,
+        Err(i) => recs.get(i).map_or(next, |(at, _)| *at),
+    }
 }
 
 /// The constant added to this function's return address, and the constant

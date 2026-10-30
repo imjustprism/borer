@@ -68,6 +68,18 @@ fn holds(arch: Arch, code: &[u8], entry: u64, va: u64) -> bool {
         .any(|f| f.blocks.iter().any(|b| (b.start..b.end).contains(&va)))
 }
 
+/// The successors of the block that starts at `call`.
+fn call_successors(arch: Arch, code: &[u8], entry: u64, call: u64) -> Vec<u64> {
+    let analysis = Analysis::compute(&raw::image(arch, code, &[]));
+    analysis
+        .functions
+        .iter()
+        .find(|f| f.entry == entry)
+        .and_then(|f| f.blocks.iter().find(|b| b.start == call))
+        .map(|b| b.successors.iter().copied().collect())
+        .unwrap_or_default()
+}
+
 /// Little-endian rel32 from the instruction after `at` to `target`.
 fn rel32(at: u64, target: u64) -> [u8; 4] {
     let bytes = target.wrapping_sub(at.wrapping_add(5)).to_le_bytes();
@@ -113,6 +125,24 @@ fn an_add_to_the_return_address_is_where_the_caller_continues() {
             !holds(arch, &code, TEXT + 0x1a, TEXT + 0x1f),
             "{arch:?} decoded the inner skip"
         );
+        let outer = call_successors(arch, &code, TEXT, TEXT);
+        assert!(
+            outer.contains(&(TEXT + 0x17)),
+            "{arch:?} outer edge {outer:?}"
+        );
+        assert!(
+            !outer.contains(&(TEXT + 5)),
+            "{arch:?} outer edge stayed on the skip {outer:?}"
+        );
+        let inner = call_successors(arch, &code, TEXT + 0x1a, TEXT + 0x1a);
+        assert!(
+            inner.contains(&(TEXT + 0x29)),
+            "{arch:?} inner edge {inner:?}"
+        );
+        assert!(
+            !inner.contains(&(TEXT + 0x1f)),
+            "{arch:?} inner edge stayed on the skip {inner:?}"
+        );
 
         let mut direct = vec![0x6e_u8; 0x20];
         direct[0] = 0xe8;
@@ -127,6 +157,15 @@ fn an_add_to_the_return_address_is_where_the_caller_continues() {
         assert!(
             !holds(arch, &direct, TEXT, TEXT + 5),
             "{arch:?} nearer add decoded the skip"
+        );
+        let nearer = call_successors(arch, &direct, TEXT, TEXT);
+        assert!(
+            nearer.contains(&(TEXT + 0x0d)),
+            "{arch:?} nearer edge {nearer:?}"
+        );
+        assert!(
+            !nearer.contains(&(TEXT + 5)),
+            "{arch:?} nearer edge stayed on the skip {nearer:?}"
         );
 
         let read = if arch == Arch::X86_64 {
@@ -143,6 +182,11 @@ fn an_add_to_the_return_address_is_where_the_caller_continues() {
         assert!(
             holds(arch, &ordinary, TEXT, TEXT + 5),
             "{arch:?} a read returns to the next instruction"
+        );
+        let ordinary_edge = call_successors(arch, &ordinary, TEXT, TEXT);
+        assert!(
+            ordinary_edge.contains(&(TEXT + 5)),
+            "{arch:?} ordinary edge {ordinary_edge:?}"
         );
     }
 }
