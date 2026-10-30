@@ -192,6 +192,31 @@ fn settings_keys_are_a_registry_write_and_a_run_key_stays_persistence() {
     assert!(service.contains("persistence"), "{service}");
 }
 
+/// Winlogon, Image File Execution Options, `AppInit_DLLs` and Shell
+/// Folders stay persistence.
+#[test]
+fn a_known_persistence_key_is_not_a_registry_write() {
+    let map = |data: &[u8]| {
+        let mut p = image(Arch::X86_64, &[0xc3], data);
+        p.symbols.push(Symbol {
+            name: "ADVAPI32.dll!RegSetValueExW".to_owned(),
+            addr: 0,
+            kind: SymbolKind::Import,
+        });
+        borer_engine::analysis::render::capability_map_tsv(&p, None)
+    };
+    for data in [
+        &b"Software\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon\0"[..],
+        &b"Software\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\notepad.exe\0"[..],
+        &b"Software\\Microsoft\\Windows NT\\CurrentVersion\\Windows\\AppInit_DLLs\0"[..],
+        &b"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders\0"[..],
+    ] {
+        let text = map(data);
+        assert!(text.contains("persistence"), "{text}");
+        assert!(!text.contains("registry write"), "{text}");
+    }
+}
+
 /// The capability map of a function that calls `IsDebuggerPresent`.
 ///
 /// # Arguments

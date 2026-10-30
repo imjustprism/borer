@@ -660,6 +660,9 @@ fn forget_writes(
 /// A Run key, a startup folder or a service stays persistence. Settings
 /// under `Software\` with none of those are a registry write. No key
 /// string at all stays persistence: the key may be built at runtime.
+///
+/// Winlogon, Image File Execution Options, `AppInit_DLLs` and Shell
+/// Folders are persistence keys too.
 fn settings_keys(p: &Program, apis: &[String]) -> bool {
     if apis.iter().any(|n| n.to_lowercase().contains("service")) {
         return false;
@@ -674,6 +677,10 @@ fn settings_keys(p: &Program, apis: &[String]) -> bool {
             || s.contains("runonce")
             || s.contains("\\startup")
             || s.contains("\\services\\")
+            || s.contains("winlogon")
+            || s.contains("image file execution options")
+            || s.contains("appinit_dlls")
+            || s.contains("shell folders")
     };
     texts
         .iter()
