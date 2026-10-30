@@ -1037,7 +1037,7 @@ pub(super) struct EntrySig {
 
 /// Entry stubs a packer writes, as `??`-wildcard patterns read at the entry
 /// point. Each entry's [`EntrySig::stub`] line is its documentation.
-pub(super) const PACKER_ENTRY_SIGS: [EntrySig; 9] = [
+pub(super) const PACKER_ENTRY_SIGS: [EntrySig; 10] = [
     EntrySig {
         packer: "SteamStub",
         pattern: "60 81 EC 00 10 00 00 BE ?? ?? ?? ?? B9 ?? ?? ?? ?? 8D BD ?? ?? ?? ?? F3 A5",
@@ -1053,7 +1053,13 @@ pub(super) const PACKER_ENTRY_SIGS: [EntrySig; 9] = [
         packer: "UPX",
         pattern: "60 BE ?? ?? ?? ?? 8D BE ?? ?? ?? ?? 57 83 CD FF EB",
         stub: "pushad; mov esi, imm32; lea edi, [esi+disp32]; push edi; or \
-               ecx, -1",
+               ebp, -1",
+    },
+    EntrySig {
+        packer: "UPX",
+        pattern: "60 BE ?? ?? ?? ?? 8D BE ?? ?? ?? ?? 57 EB",
+        stub: "pushad; mov esi, imm32; lea edi, [esi+disp32]; push edi; jmp \
+               short: UPX with ebx as the bit register",
     },
     EntrySig {
         packer: "FSG",
@@ -1370,7 +1376,16 @@ fn packing_marks(
     }
     let backed: Vec<&Section> = wx.iter().copied().filter(|s| s.file_size > 0).collect();
     if !backed.is_empty() {
-        let names: Vec<&str> = backed.iter().map(|s| s.name.as_str()).collect();
+        let names: Vec<String> = backed
+            .iter()
+            .map(|s| {
+                if s.name.is_empty() {
+                    format!("{:#x}", s.va.0)
+                } else {
+                    s.name.clone()
+                }
+            })
+            .collect();
         strong.push(format!("writable and executable: {}", names.join(", ")));
     }
     let entry_section = p.entry.and_then(|e| p.section_at(e));

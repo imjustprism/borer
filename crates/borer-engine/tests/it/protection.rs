@@ -189,7 +189,7 @@ fn report(bytes: Vec<u8>) -> String {
 }
 
 /// The UPX stub's first bytes: `pushad; mov esi, imm32; lea edi, [esi+disp32];
-/// push edi; or ecx, -1`, wildcards as they vary per packed file.
+/// push edi; or ebp, -1`, wildcards as they vary per packed file.
 const UPX_STUB: [u8; 17] = [
     0x60, 0xbe, 0x78, 0x56, 0x34, 0x12, 0x8d, 0xbe, 0x00, 0x00, 0xff, 0xff, 0x57, 0x83, 0xcd, 0xff,
     0xeb,
@@ -228,6 +228,33 @@ fn upx_sections_and_entry_stub_name_upx() {
         "{out}"
     );
     assert!(out.contains("pushad; mov esi"), "{out}");
+}
+
+/// UPX that uses `ebx` as its bit register is `push edi; jmp short`, and a
+/// section with no name is reported by its address.
+#[test]
+fn an_upx_ebx_stub_names_upx_and_an_empty_section_prints_its_address() {
+    let stub = [
+        0x60, 0xbe, 0x78, 0x56, 0x34, 0x12, 0x8d, 0xbe, 0x00, 0x00, 0xff, 0xff, 0x57, 0xeb,
+    ];
+    let vsize = u32::try_from(stub.len()).expect("fits");
+    let bytes = pe(
+        &[Sec {
+            name: "",
+            rva: 0x3000,
+            data: stub.to_vec(),
+            vsize,
+            chars: WX,
+        }],
+        0x3000,
+    );
+    let out = report(bytes);
+    assert!(out.contains("UPX"), "{out}");
+    assert!(out.contains("entry stub at 0x140003000"), "{out}");
+    assert!(
+        out.contains("writable and executable: 0x140003000"),
+        "{out}"
+    );
 }
 
 /// A protector that only its section names give away: `VMProtect` with plain
