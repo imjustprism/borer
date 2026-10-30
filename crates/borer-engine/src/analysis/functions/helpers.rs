@@ -771,9 +771,10 @@ pub(super) fn gap_jump(end: u64, addr: u64, flow: FlowControl) -> bool {
 
 /// Sets a call block's edge to the instruction the call returns to.
 ///
-/// A direct call whose fallthrough was not recorded returns at the next
-/// recorded instruction. An indirect call returns at its fallthrough. A
-/// call in `ended` has no successor.
+/// A direct call whose callee rewrites the return address continues at that
+/// landing. Otherwise a direct call whose fallthrough was not recorded
+/// returns at the next recorded instruction. An indirect call returns at its
+/// fallthrough. A call in `ended` has no successor.
 ///
 /// # Arguments
 ///
@@ -794,7 +795,7 @@ pub(super) fn note_call(
         return;
     }
     let land = if rec.flow == FlowControl::Call {
-        call_fall(recs, rec.next)
+        rec.land.unwrap_or_else(|| call_fall(recs, rec.next))
     } else {
         rec.next
     };

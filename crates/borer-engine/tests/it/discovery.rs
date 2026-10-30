@@ -235,6 +235,50 @@ fn a_byte_add_to_the_return_address_stays_in_that_byte() {
             !holds(arch, &code, TEXT, TEXT + 0x100),
             "{arch:?} added into the next byte of the address"
         );
+        let edge = call_successors(arch, &code, TEXT, TEXT);
+        assert!(edge.contains(&TEXT), "{arch:?} wrapped edge {edge:?}");
+        assert!(
+            !edge.contains(&(TEXT + 0xff)),
+            "{arch:?} wrapped edge stayed on the next byte {edge:?}"
+        );
+    }
+}
+
+/// A branch into the bytes a call skips is not where that call returns.
+///
+/// The callee adds `0x10` to the return address. The jump lands inside
+/// that gap. The call continues at the adjusted address.
+#[test]
+fn a_call_does_not_return_into_the_bytes_it_skips() {
+    for arch in [Arch::X86_64, Arch::X86] {
+        let mut code = vec![0x6e_u8; 0x40];
+        code[0] = 0x31;
+        code[1] = 0xc0;
+        code[2] = 0x74;
+        code[3] = 0x10;
+        code[4] = 0xe8;
+        code[5..9].copy_from_slice(&rel32(TEXT + 4, TEXT + 0x30));
+        code[0x14] = 0x90;
+        code[0x19..0x1f].copy_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]);
+        code[0x30..0x35].copy_from_slice(&[0x83, 0x04, 0x24, 0x10, 0xc3]);
+        assert!(
+            holds(arch, &code, TEXT, TEXT + 0x14),
+            "{arch:?} lost the branch into the gap"
+        );
+        assert!(
+            !holds(arch, &code, TEXT, TEXT + 9),
+            "{arch:?} decoded the skipped byte"
+        );
+        assert!(
+            holds(arch, &code, TEXT, TEXT + 0x19),
+            "{arch:?} lost the landing"
+        );
+        let edge = call_successors(arch, &code, TEXT, TEXT + 4);
+        assert!(edge.contains(&(TEXT + 0x19)), "{arch:?} call edge {edge:?}");
+        assert!(
+            !edge.contains(&(TEXT + 0x14)),
+            "{arch:?} call edge entered the gap {edge:?}"
+        );
     }
 }
 

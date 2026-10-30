@@ -178,6 +178,8 @@ pub(in crate::analysis::functions) struct InstrRec {
     flow: FlowControl,
     /// Near branch or call target, when the operand is a near branch.
     target: Option<u64>,
+    /// Where a direct call continues, when that is not the next instruction.
+    land: Option<u64>,
     /// Structural fingerprint of the instruction ([`fingerprint`]).
     print: u64,
     /// Shape of the instruction: mnemonic and operand kinds only.
@@ -1809,6 +1811,9 @@ pub(crate) fn string_at(program: &Program, va: u64) -> bool {
 /// after a call that does not return ends the call's block, which has no
 /// successor: what follows the `nop` may be another path's code.
 ///
+/// A direct call whose callee adds to the return address leads at that
+/// landing. The bytes between the call and the landing are not its edge.
+///
 /// The blocks and their successor lists hold no spare room: a list grown a
 /// push at a time keeps room for four successors where a block has one or
 /// two, and over a large program's million blocks that room was tens of
@@ -1851,7 +1856,7 @@ fn build_blocks(
             }
             FlowControl::Call | FlowControl::IndirectCall => {
                 if !tail_nops.contains(&rec.next) {
-                    leaders.push(rec.next);
+                    leaders.push(rec.land.unwrap_or(rec.next));
                 }
             }
             FlowControl::XbeginXabortXend => {

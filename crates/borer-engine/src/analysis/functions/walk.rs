@@ -1316,6 +1316,28 @@ pub(super) enum Via {
     Branch,
 }
 
+/// A recorded instruction that falls through and is not a call.
+///
+/// # Arguments
+///
+/// * `next` - The address of the following instruction.
+/// * `print` - The structural fingerprint.
+/// * `shape` - The shape fingerprint.
+///
+/// # Returns
+///
+/// The record.
+fn fall_rec(next: u64, print: u64, shape: u64) -> InstrRec {
+    InstrRec {
+        next,
+        flow: FlowControl::Next,
+        target: None,
+        land: None,
+        print,
+        shape,
+    }
+}
+
 /// Whether `instr` is one undecoded instruction with a jump or a call after
 /// it. The transfer is queued; a second bad instruction is not skipped.
 ///
@@ -1588,6 +1610,7 @@ pub(super) fn walk_function(
                 next,
                 flow,
                 target,
+                land: None,
                 print,
                 shape,
             };
@@ -1718,7 +1741,13 @@ pub(super) fn walk_function(
                         }
                     } else {
                         followed_calls.insert(t);
-                        pending.push((call_lands(program, bitness, t, next), Via::Fall));
+                        let at = call_lands(program, bitness, t, next);
+                        if at != next
+                            && let Some((_, r)) = recs.last_mut()
+                        {
+                            r.land = Some(at);
+                        }
+                        pending.push((at, Via::Fall));
                     }
                 }
                 FlowControl::IndirectCall => {
@@ -1774,16 +1803,7 @@ pub(super) fn walk_function(
         };
         let (print, shape) = fingerprint(&mapped, &nop);
         visited.insert(va);
-        recs.push((
-            va,
-            InstrRec {
-                next: nop.next_ip(),
-                flow: FlowControl::Next,
-                target: None,
-                print,
-                shape,
-            },
-        ));
+        recs.push((va, fall_rec(nop.next_ip(), print, shape)));
         tail_nops.push(va);
     }
     for (addr, _) in &recs {
