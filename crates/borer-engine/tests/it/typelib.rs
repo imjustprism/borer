@@ -137,6 +137,44 @@ fn create_file_renders_its_constants_and_its_handle() {
     assert!(!header.contains("contradicted"), "{header}");
 }
 
+/// A `REFIID` argument prints the 16 data bytes it points at as a GUID.
+///
+/// A null pointer beside it stays `NULL`.
+#[test]
+fn a_refiid_argument_prints_the_guid() {
+    let mut code = vec![
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp, 0x28
+        0x48, 0x8d, 0x0d, 0x00, 0x00, 0x00, 0x00, // ASM: lea rcx, [rip+guid]
+        0x31, 0xd2, // ASM: xor edx, edx
+    ];
+    let guid = RDATA + 0x10;
+    let lea_end = TEXT + 11;
+    let disp = i32::try_from(guid - lea_end).expect("near").to_le_bytes();
+    code[7..11].copy_from_slice(&disp);
+    let at = TEXT + u64::try_from(code.len()).expect("small");
+    code.extend_from_slice(&call_slot(at, RDATA));
+    code.extend_from_slice(&[
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp, 0x28
+        0xc3, // ASM: ret
+    ]);
+    let mut data = vec![0u8; 0x10];
+    data.extend_from_slice(&[
+        0x8c, 0x9a, 0x8f, 0xb6, 0xe0, 0x39, 0x49, 0x46, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+        0x08,
+    ]);
+    let p = image(
+        BinaryFormat::Pe,
+        &code,
+        &data,
+        &["dxgi.dll!CreateDXGIFactory"],
+    );
+    let (text, _) = decompiled(&p);
+    assert!(
+        text.contains("CreateDXGIFactory({B68F9A8C-39E0-4649-0102-030405060708}, NULL)"),
+        "{text}"
+    );
+}
+
 /// A `void` import binds no result.
 ///
 /// Where the code after it reads `xmm0`, which a call leaves undefined, the

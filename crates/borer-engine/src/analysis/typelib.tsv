@@ -153,6 +153,7 @@ RegSetValueExW	win	LSTATUS	-	HKEY hKey|LPCWSTR lpValueName|DWORD Reserved|DWORD 
 ReleaseSRWLockExclusive	win	void	-	PSRWLOCK SRWLock	-
 ReleaseSRWLockShared	win	void	-	PSRWLOCK SRWLock	-
 ResumeThread	win	DWORD	-	HANDLE hThread	-
+RoGetActivationFactory	win	HRESULT	-	HSTRING activatableClassId|REFIID iid|void **factory	-|-|-
 RtlCaptureContext	win	void	-	PCONTEXT ContextRecord	-
 RtlInitUnicodeString	win	void	-	PUNICODE_STRING DestinationString|PCWSTR SourceString	-
 SHGetFolderPathW	win	HRESULT	-	HWND hwnd|int csidl|HANDLE hToken|DWORD dwFlags|LPWSTR pszPath	-|csidl|-|-|-

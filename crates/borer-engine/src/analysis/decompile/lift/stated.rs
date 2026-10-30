@@ -14,6 +14,7 @@
 
 use super::*;
 use crate::analysis::typelib::{self, Decl, Pass};
+use crate::program::Program;
 
 /// What a declaration states a callee hands back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,6 +205,54 @@ fn arg_value(text: &str) -> Option<u64> {
     Some(if negative { v.wrapping_neg() } else { v })
 }
 
+/// Whether `ty` is a pointer to a GUID.
+///
+/// # Arguments
+///
+/// * `ty` - The parameter's type as the declaration spells it.
+///
+/// # Returns
+///
+/// `true` for `REFIID`, `REFCLSID`, and a `GUID *`.
+fn guid_type(ty: &str) -> bool {
+    matches!(
+        ty,
+        "REFIID" | "REFCLSID" | "GUID *" | "const GUID *" | "LPGUID" | "LPCGUID"
+    )
+}
+
+/// The GUID at `addr`, in registry form.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `addr` - Address of the 16 bytes.
+///
+/// # Returns
+///
+/// `{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}`, or `None` when the address
+/// is unmapped or in executable memory.
+fn guid_text(program: &Program, addr: u64) -> Option<String> {
+    if program.section_at(addr).is_none_or(|s| s.executable) {
+        return None;
+    }
+    let raw = program.read_va(addr, 16)?;
+    let Ok(bytes) = <[u8; 16]>::try_from(raw) else {
+        return None;
+    };
+    let data1 = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let data2 = u16::from_le_bytes([bytes[4], bytes[5]]);
+    let data3 = u16::from_le_bytes([bytes[6], bytes[7]]);
+    let mut tail = String::new();
+    for (i, b) in bytes[8..].iter().enumerate() {
+        if i == 2 {
+            tail.push('-');
+        }
+        tail.push_str(&format!("{b:02X}"));
+    }
+    Some(format!("{{{data1:08X}-{data2:04X}-{data3:04X}-{tail}}}"))
+}
+
 /// Spells a value read as a signed integer of `bits` as a negative number,
 /// when it is one of small magnitude.
 ///
@@ -283,7 +332,8 @@ impl Exec<'_, '_> {
     ///
     /// A parameter that takes a constant group names its value by the group
     /// ([`typelib::render`]), at the width the parameter's type passes; a
-    /// pointer parameter passed zero is `NULL`, and a signed one passed a
+    /// pointer parameter passed zero is `NULL`, a `REFIID` or `GUID *`
+    /// passed an address in data is that GUID, and a signed one passed a
     /// small negative value at its width is that negative number (`-1` for
     /// an `int` set as `0xffffffff`). Only bare numbers change:
     /// an expression, a string or a named global stays as it was. The value
@@ -312,6 +362,9 @@ impl Exec<'_, '_> {
             let named = match (param.group.and_then(typelib::group), pass) {
                 (Some(g), _) => typelib::render(g, v, pass.map_or(word, |p| p.bits(word)).max(8)),
                 (None, Some(Pass::Pointer)) if v == 0 => Some("NULL".to_owned()),
+                (None, Some(Pass::Pointer)) if guid_type(param.ty) => {
+                    guid_text(self.ctx.program, v)
+                }
                 (None, Some(Pass::Int { bits, signed: true })) => negative(v, bits),
                 (None, _) => None,
             };
