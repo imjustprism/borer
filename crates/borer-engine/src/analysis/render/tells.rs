@@ -5,7 +5,8 @@
 //! surrounding instructions show a hypervisor leaf, a subtracted pair of
 //! reads, or the VMware backdoor. The same pass reports the patterns a
 //! single instruction does not hold: a PEB read, a debug-register check,
-//! a debugger window, a debug spawn, and a scan or patch of `0xCC`.
+//! a debugger window, a debug spawn, a scan or patch of `0xCC`, and an
+//! illegal opcode after an exception filter.
 
 use super::*;
 
@@ -45,7 +46,7 @@ pub(super) fn sites(
             after = i.flow_control();
         }
     }
-    out.extend(patterns(p, a, f, &instrs));
+    out.extend(patterns(p, a, f, &instrs, bits));
     out
 }
 
@@ -163,6 +164,7 @@ fn patterns(
     a: &Analysis,
     f: &Function,
     instrs: &[Instruction],
+    bits: u32,
 ) -> Vec<(&'static str, u64)> {
     let mut out = Vec::new();
     let Some(ip) = instrs.first().map(Instruction::ip) else {
@@ -202,7 +204,56 @@ fn patterns(
     } else if cc && writes_executable(p, instrs) {
         out.push(("breakpoint patch", ip));
     }
+    if has("setunhandledexceptionfilter")
+        && executable_handler(p, instrs)
+        && continued_past_bad(p, f, instrs, bits)
+    {
+        out.push(("illegal opcode (exception filter)", ip));
+    }
     out
+}
+
+/// Whether the filter argument is an address in executable memory.
+///
+/// On x86 the argument is pushed. On x64 it is moved into `ecx`. A call
+/// that passes something else is not this tell.
+fn executable_handler(p: &Program, instrs: &[Instruction]) -> bool {
+    instrs.iter().any(|i| {
+        let Some(imm) = immediate_any(i) else {
+            return false;
+        };
+        if !p.section_at(imm).is_some_and(|s| s.executable) {
+            return false;
+        }
+        i.mnemonic() == Mnemonic::Push
+            || (i.mnemonic() == Mnemonic::Mov
+                && i.op0_kind() == OpKind::Register
+                && i.op0_register().full_register() == Register::RCX)
+    })
+}
+
+/// Whether the function keeps going after an instruction that does not decode.
+///
+/// The bytes sit between two instructions the walk kept. A filter call that
+/// returns, with nothing undecodable after it, does not.
+fn continued_past_bad(p: &Program, f: &Function, instrs: &[Instruction], bits: u32) -> bool {
+    let starts: BTreeSet<u64> = f.blocks.iter().map(|b| b.start).collect();
+    instrs.iter().any(|i| {
+        let gap = i.next_ip();
+        gap != i.ip()
+            && !starts.contains(&gap)
+            && f.blocks.iter().any(|b| b.start > gap)
+            && decodes_invalid(p, bits, gap)
+    })
+}
+
+/// Reports whether the bytes at `at` are not an instruction.
+fn decodes_invalid(p: &Program, bits: u32, at: u64) -> bool {
+    let Some(code) = p.read_va(at, 16) else {
+        return false;
+    };
+    let mut decoder = Decoder::with_ip(bits, code, at, DecoderOptions::NONE);
+    decoder.can_decode() && decoder.decode().is_invalid()
 }
 
 /// The address of a PEB read, when the instructions perform one.

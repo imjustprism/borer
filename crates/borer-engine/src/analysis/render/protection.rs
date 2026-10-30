@@ -82,6 +82,7 @@ pub fn anti_analysis_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
             || tag.starts_with("debugger window")
             || tag.starts_with("debug block")
             || tag.starts_with("breakpoint ")
+            || tag.starts_with("illegal opcode")
     };
     let strong = sites.keys().filter(|tag| !weak(tag)).count();
     let instr_count: usize = sites.values().map(Vec::len).sum();

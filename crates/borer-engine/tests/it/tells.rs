@@ -254,3 +254,47 @@ fn a_breakpoint_scan_needs_a_loop_and_an_exit() {
     ]);
     assert!(patch.contains("breakpoint patch"), "{patch}");
 }
+
+/// `SetUnhandledExceptionFilter` of an executable address, followed by one
+/// instruction that does not decode, is a tell. The call alone is not, and
+/// neither is the bad instruction when the address is not executable.
+#[test]
+fn an_exception_filter_over_an_illegal_opcode_is_a_tell() {
+    let trap = [
+        0xb9, 0x30, 0x10, 0x40, 0x00, // ASM: mov ecx, 0x401030
+        0xe8, 0xf6, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0xf0, 0xf0, 0xc7, 0xc8, // ASM: two lock prefixes, not an instruction
+        0xeb, 0x01, // ASM: jmp short +1
+        0x6e, // ASM: outsb, skipped
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xc3, // ASM: ret
+    ];
+    let text = report_calls(&trap, &[], &[("SetUnhandledExceptionFilter", 0x402000)]);
+    assert!(text.contains("illegal opcode"), "{text}");
+    assert!(text.starts_with("# anti-analysis:"), "{text}");
+    let plain = report_calls(
+        &[
+            0xb9, 0x30, 0x10, 0x40, 0x00, // ASM: mov ecx, 0x401030
+            0xe8, 0xf6, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[("SetUnhandledExceptionFilter", 0x402000)],
+    );
+    assert!(!plain.contains("illegal opcode"), "{plain}");
+    assert!(!plain.starts_with("# anti-analysis:"), "{plain}");
+    let data = report_calls(
+        &[
+            0xb9, 0x00, 0x21, 0x40, 0x00, // ASM: mov ecx, 0x402100
+            0xe8, 0xf6, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0xf0, 0xf0, 0xc7, 0xc8, // ASM: two lock prefixes, not an instruction
+            0xeb, 0x01, // ASM: jmp short +1
+            0x6e, // ASM: outsb, skipped
+            0x31, 0xc0, // ASM: xor eax, eax
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[("SetUnhandledExceptionFilter", 0x402000)],
+    );
+    assert!(!data.contains("illegal opcode"), "{data}");
+}
