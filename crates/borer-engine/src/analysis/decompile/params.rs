@@ -1234,7 +1234,8 @@ pub(super) fn shape_built(
 /// inside one executable section and end where an instruction does, so the
 /// decoder sees the same file-backed bytes, cut at the same section end,
 /// and stops where the per-instruction decode did (an instruction that does
-/// not decode, or the block or the section's file bytes running out).
+/// not decode, or the block or the section's file bytes running out). The
+/// entry's section counts when the headers do not mark it executable.
 ///
 /// # Arguments
 ///
@@ -1245,7 +1246,7 @@ pub(super) fn decode_blocks(ctx: &Ctx<'_>, f: &Function) -> Vec<Vec<Instruction>
         .iter()
         .map(|b| {
             let mut v = Vec::new();
-            if !crate::analysis::is_executable_va(ctx.program, b.start) {
+            if !crate::analysis::is_code_va(ctx.program, b.start) {
                 return v;
             }
             let len = usize::try_from(b.end.saturating_sub(b.start)).unwrap_or(0);

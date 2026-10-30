@@ -60,6 +60,23 @@ fn the_entry_in_a_non_executable_section_is_a_function() {
     assert_eq!(entries, vec![0x402000], "{entries:?}");
 }
 
+/// The entry in a non-executable section decompiles to the bytes there.
+#[test]
+fn the_entry_in_a_non_executable_section_decompiles() {
+    let mut bytes = vec![0u8; 0x40];
+    bytes[..LEAF.len()].copy_from_slice(&LEAF);
+    let p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0x400000,
+        Some(0x402000),
+        vec![Section::mapped(".data", 0x402000, 0, 0x40, true, false)],
+    );
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), 0x402000).unwrap_or_default();
+    assert!(text.contains("return 0"), "{text}");
+}
+
 /// Whether the function entered at `entry` decoded `va`.
 fn holds(arch: Arch, code: &[u8], entry: u64, va: u64) -> bool {
     Analysis::compute(&raw::image(arch, code, &[]))

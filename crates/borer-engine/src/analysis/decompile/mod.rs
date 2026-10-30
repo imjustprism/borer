@@ -373,9 +373,9 @@ impl<'a> Ctx<'a> {
     /// # Returns
     ///
     /// The instruction, or `None` when the address is unmapped, not
-    /// executable, or does not decode.
+    /// code, or does not decode.
     fn decode(&self, va: u64) -> Option<Instruction> {
-        if !super::is_executable_va(self.program, va) {
+        if !super::is_code_va(self.program, va) {
             return None;
         }
         let bytes = self.program.read_va_upto(va, 15)?;

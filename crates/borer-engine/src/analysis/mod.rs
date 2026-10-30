@@ -2214,6 +2214,22 @@ pub(crate) fn is_executable_va(program: &Program, va: u64) -> bool {
     })
 }
 
+/// Whether `va` is executable, or lies in the section that holds the entry.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `va` - A virtual address.
+pub(crate) fn is_code_va(program: &Program, va: u64) -> bool {
+    is_executable_va(program, va)
+        || program.section_at(va).is_some_and(|s| {
+            program
+                .entry
+                .and_then(|e| program.section_at(e))
+                .is_some_and(|entry| entry.va == s.va)
+        })
+}
+
 /// Parses an address as typed by an agent.
 ///
 /// Bare digits are decimal: `140001064` is `0x8583f28`, and hex takes its
