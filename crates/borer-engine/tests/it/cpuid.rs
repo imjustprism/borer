@@ -44,3 +44,25 @@ fn cpuid_keeps_the_leaf_and_the_copy_taken_before_the_next() {
         warnings(&program, &analysis, &Overlay::default(), entry, &text, None).unwrap_or_default();
     assert!(!warn.contains("undeclared"), "{text}\n{warn}");
 }
+
+/// A wide subleaf is still the leaf `cpuid` read, in every result register.
+#[test]
+fn a_wide_subleaf_keeps_the_cpuid_leaf() {
+    let code = [
+        0x89, 0xc1, // ASM: mov ecx, eax
+        0x01, 0xd1, // ASM: add ecx, edx
+        0x44, 0x31, 0xc1, // ASM: xor ecx, r8d
+        0x44, 0x01, 0xc9, // ASM: add ecx, r9d
+        0x0f, 0xa2, // ASM: cpuid
+        0x41, 0x89, 0xc2, // ASM: mov r10d, eax
+        0x41, 0x89, 0xc3, // ASM: mov r11d, eax
+        0x41, 0x01, 0xda, // ASM: add r10d, ebx
+        0x41, 0x01, 0xd2, // ASM: add r10d, edx
+        0x44, 0x89, 0xd0, // ASM: mov eax, r10d
+        0xc3, // ASM: ret
+    ];
+    let text = decompiled(&program64(&code), 0x1_4000_1000);
+    let leaf = "cpuid_ebx(rax, ((rax + a2) ^ a3) + a4)";
+    let high = "cpuid_edx(rax, ((rax + a2) ^ a3) + a4)";
+    assert!(text.contains(leaf) && text.contains(high), "{text}");
+}

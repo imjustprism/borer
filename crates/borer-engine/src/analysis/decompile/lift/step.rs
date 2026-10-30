@@ -1533,13 +1533,17 @@ impl Exec<'_, '_> {
     /// `ecx` and `edx`.
     ///
     /// A copy taken before the next `cpuid` keeps the earlier result, so a
-    /// vendor test stays on the leaf that produced it.
+    /// vendor test stays on the leaf that produced it. The four results are
+    /// recorded before any is written out, so a later result still reads
+    /// the leaf rather than `eax`.
     fn cpuid(&mut self) {
         let args = vec![self.reg_read(Register::EAX), self.reg_read(Register::ECX)];
-        self.reg_write(Register::EAX, Expr::Helper(Helper::Cpuid(0), args.clone()));
-        self.reg_write(Register::EBX, Expr::Helper(Helper::Cpuid(1), args.clone()));
-        self.reg_write(Register::ECX, Expr::Helper(Helper::Cpuid(2), args.clone()));
-        self.reg_write(Register::EDX, Expr::Helper(Helper::Cpuid(3), args));
+        self.reg_write_all(vec![
+            (Register::EAX, Expr::Helper(Helper::Cpuid(0), args.clone())),
+            (Register::EBX, Expr::Helper(Helper::Cpuid(1), args.clone())),
+            (Register::ECX, Expr::Helper(Helper::Cpuid(2), args.clone())),
+            (Register::EDX, Expr::Helper(Helper::Cpuid(3), args)),
+        ]);
     }
 
     /// The registers a comparison names.
