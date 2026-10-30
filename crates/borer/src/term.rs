@@ -81,11 +81,6 @@ pub(crate) fn styled_out() -> bool {
     styled(std::io::stdout().is_terminal())
 }
 
-/// Whether stderr is a person's terminal.
-pub(crate) fn styled_err() -> bool {
-    styled(std::io::stderr().is_terminal())
-}
-
 /// Adds to the answer; the CLI's `print!` and `println!` land here.
 ///
 /// # Arguments
@@ -119,7 +114,8 @@ pub(crate) fn note(line: &str) {
     if BUSY
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .is_some()
+        .as_ref()
+        .is_some_and(|b| b.drew.load(Ordering::Relaxed))
     {
         let _ = write!(err, "\r\x1b[2K");
     }
@@ -135,6 +131,8 @@ struct Busy {
     label: Arc<Mutex<String>>,
     /// The drawing thread.
     thread: JoinHandle<()>,
+    /// Set once a frame has been written. The clear is that frame's undo.
+    drew: Arc<AtomicBool>,
 }
 
 /// The spinner's frames.
@@ -154,7 +152,7 @@ const WINDOW: usize = 14;
 /// * `label` - What is happening, e.g. `loading notepad.exe`.
 /// * `bytes` - Some of the file's bytes to stream; empty for none.
 pub(crate) fn busy(label: &str, bytes: &[u8]) {
-    if !styled_err() {
+    if !show_spinner(std::io::stderr().is_terminal()) {
         return;
     }
     let mut slot = BUSY.lock().unwrap_or_else(PoisonError::into_inner);
@@ -164,17 +162,32 @@ pub(crate) fn busy(label: &str, bytes: &[u8]) {
     }
     let done = Arc::new(AtomicBool::new(false));
     let shown = Arc::new(Mutex::new(label.to_owned()));
+    let drew = Arc::new(AtomicBool::new(false));
     let hex: Vec<String> = bytes.iter().map(|b| format!("{b:02x}")).collect();
     let thread = {
         let done = Arc::clone(&done);
         let shown = Arc::clone(&shown);
-        std::thread::spawn(move || draw(&done, &shown, &hex))
+        let drew = Arc::clone(&drew);
+        std::thread::spawn(move || draw(&done, &shown, &hex, &drew))
     };
     *slot = Some(Busy {
         done,
         label: shown,
         thread,
+        drew,
     });
+}
+
+/// Whether the loading line may be drawn.
+///
+/// `FORCE_COLOR` still colors usage text on a pipe. The loading line is a
+/// cursor move, so it stays off unless stderr is a terminal.
+///
+/// # Arguments
+///
+/// * `terminal` - Whether stderr is a terminal.
+fn show_spinner(terminal: bool) -> bool {
+    terminal && styled(terminal)
 }
 
 /// Draws frames until told to stop.
@@ -184,7 +197,8 @@ pub(crate) fn busy(label: &str, bytes: &[u8]) {
 /// * `done` - Set when the line is to go.
 /// * `label` - What the line says.
 /// * `hex` - The bytes to stream, as hex pairs.
-fn draw(done: &AtomicBool, label: &Mutex<String>, hex: &[String]) {
+/// * `drew` - Set after the first frame is written.
+fn draw(done: &AtomicBool, label: &Mutex<String>, hex: &[String], drew: &AtomicBool) {
     #[expect(
         clippy::disallowed_methods,
         reason = "the loading line shows a person how long the work has taken; no answer reads it"
@@ -211,6 +225,7 @@ fn draw(done: &AtomicBool, label: &Mutex<String>, hex: &[String]) {
         let _ = err.write_all(line.as_bytes());
         let _ = err.flush();
         drop(err);
+        drew.store(true, Ordering::Relaxed);
         frame = frame.wrapping_add(1);
         std::thread::sleep(Duration::from_millis(70));
     }
@@ -223,9 +238,22 @@ pub(crate) fn stop() {
     };
     b.done.store(true, Ordering::Relaxed);
     let _ = b.thread.join();
+    let clear = clear_bytes(b.drew.load(Ordering::Relaxed));
+    if clear.is_empty() {
+        return;
+    }
     let mut err = std::io::stderr().lock();
-    let _ = err.write_all(b"\r\x1b[2K");
+    let _ = err.write_all(clear);
     let _ = err.flush();
+}
+
+/// The bytes that take a drawn frame down. Nothing, when no frame was drawn.
+///
+/// # Arguments
+///
+/// * `drew` - Whether a frame reached stderr.
+fn clear_bytes(drew: bool) -> &'static [u8] {
+    if drew { b"\r\x1b[2K" } else { b"" }
 }
 
 /// The usage text styled for a terminal: section headings bold, command
@@ -324,4 +352,18 @@ pub(crate) fn welcome() -> String {
     }
     let _ = writeln!(out, "\n{d}docs: https://borer.lol/docs{r}");
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clear_bytes, show_spinner};
+
+    /// A pipe stays quiet even when color is forced, and a frame that was
+    /// never drawn has nothing to clear.
+    #[test]
+    fn a_pipe_draws_no_spinner_and_an_undrawn_line_is_not_cleared() {
+        assert!(!show_spinner(false));
+        assert!(clear_bytes(false).is_empty());
+        assert_eq!(clear_bytes(true), b"\r\x1b[2K");
+    }
 }
