@@ -170,7 +170,9 @@ fn patterns(
     let Some(ip) = instrs.first().map(Instruction::ip) else {
         return out;
     };
-    if let Some((at, label)) = peb_read(instrs) {
+    if !matches!(p.format, BinaryFormat::Elf | BinaryFormat::MachO)
+        && let Some((at, label)) = peb_read(instrs)
+    {
         out.push((label, at));
     }
     let called = called_imports(p, a, f.entry);

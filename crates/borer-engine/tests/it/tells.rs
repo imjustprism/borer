@@ -6,7 +6,7 @@
 )]
 
 use borer_engine::analysis::{Analysis, Overlay};
-use borer_engine::program::{Arch, Symbol, SymbolKind};
+use borer_engine::program::{Arch, BinaryFormat, Symbol, SymbolKind};
 
 use crate::raw::image;
 
@@ -117,6 +117,23 @@ fn a_peb_read_is_a_tell_and_the_teb_stack_base_is_not() {
         0xc3, // ASM: ret
     ]);
     assert!(!stack.contains("peb read"), "{stack}");
+}
+
+/// `fs:[0x30]` on ELF is the thread pointer guard, not the Windows PEB.
+#[test]
+fn an_elf_thread_word_is_not_a_peb_read() {
+    let mut p = image(
+        Arch::X86_64,
+        &[
+            0x64, 0x8b, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, // ASM: mov eax, fs:[0x30]
+            0xc3, // ASM: ret
+        ],
+        &[],
+    );
+    p.format = BinaryFormat::Elf;
+    let a = Analysis::compute(&p);
+    let text = borer_engine::analysis::render::anti_analysis_tsv(&p, &a, &Overlay::default());
+    assert!(!text.contains("peb read"), "{text}");
 }
 
 /// A byte at `+2` is `BeingDebugged`. `+0x68` and `+0xBC` are `NtGlobalFlag`.
