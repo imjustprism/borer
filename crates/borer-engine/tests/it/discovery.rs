@@ -58,6 +58,94 @@ fn the_entry_in_a_non_executable_section_is_a_function() {
         .collect();
     assert_eq!(entries, vec![0x402000], "{entries:?}");
 }
+
+/// Whether the function entered at `entry` decoded `va`.
+fn holds(arch: Arch, code: &[u8], entry: u64, va: u64) -> bool {
+    Analysis::compute(&raw::image(arch, code, &[]))
+        .functions
+        .iter()
+        .filter(|f| f.entry == entry)
+        .any(|f| f.blocks.iter().any(|b| (b.start..b.end).contains(&va)))
+}
+
+/// Little-endian rel32 from the instruction after `at` to `target`.
+fn rel32(at: u64, target: u64) -> [u8; 4] {
+    let bytes = target.wrapping_sub(at.wrapping_add(5)).to_le_bytes();
+    [bytes[0], bytes[1], bytes[2], bytes[3]]
+}
+
+/// A callee that only adds to the return slots skips the caller's next
+/// bytes. A callee that reads the slot returns to the next instruction.
+///
+/// The nested shape is the one in the halsten crackme: the stub adds to
+/// `[rsp+8]` / `[esp+4]`, and the call one frame out continues at its own
+/// fallthrough plus that constant. The nearer add is where the stub itself
+/// returns.
+#[test]
+fn an_add_to_the_return_address_is_where_the_caller_continues() {
+    for (arch, far) in [
+        (Arch::X86_64, [0x83, 0x44, 0x24, 0x08, 0x12]),
+        (Arch::X86, [0x83, 0x44, 0x24, 0x04, 0x12]),
+    ] {
+        let mut code = vec![0x6e_u8; 0x40];
+        code[0] = 0xe8;
+        code[1..5].copy_from_slice(&rel32(TEXT, TEXT + 0x1a));
+        code[0x17..0x1a].copy_from_slice(&LEAF);
+        code[0x1a] = 0xe8;
+        code[1 + 0x1a..5 + 0x1a].copy_from_slice(&rel32(TEXT + 0x1a, TEXT + 0x2a));
+        code[0x29] = 0xc3;
+        code[0x2a..0x2f].copy_from_slice(&far);
+        code[0x2f..0x33].copy_from_slice(&[0x83, 0x04, 0x24, 0x0a]);
+        code[0x33] = 0xc3;
+        assert!(
+            holds(arch, &code, TEXT, TEXT + 0x17),
+            "{arch:?} skipped the real return"
+        );
+        assert!(
+            !holds(arch, &code, TEXT, TEXT + 5),
+            "{arch:?} decoded the skipped bytes"
+        );
+        assert!(
+            holds(arch, &code, TEXT + 0x1a, TEXT + 0x29),
+            "{arch:?} stub did not return onto its ret"
+        );
+        assert!(
+            !holds(arch, &code, TEXT + 0x1a, TEXT + 0x1f),
+            "{arch:?} decoded the inner skip"
+        );
+
+        let mut direct = vec![0x6e_u8; 0x20];
+        direct[0] = 0xe8;
+        direct[1..5].copy_from_slice(&rel32(TEXT, TEXT + 0x10));
+        direct[0x0d..0x10].copy_from_slice(&LEAF);
+        direct[0x10..0x14].copy_from_slice(&[0x83, 0x04, 0x24, 0x08]);
+        direct[0x14] = 0xc3;
+        assert!(
+            holds(arch, &direct, TEXT, TEXT + 0x0d),
+            "{arch:?} nearer add"
+        );
+        assert!(
+            !holds(arch, &direct, TEXT, TEXT + 5),
+            "{arch:?} nearer add decoded the skip"
+        );
+
+        let read = if arch == Arch::X86_64 {
+            [0x8b, 0x44, 0x24, 0x08]
+        } else {
+            [0x8b, 0x44, 0x24, 0x04]
+        };
+        let mut ordinary = vec![0u8; 0x10];
+        ordinary[0] = 0xe8;
+        ordinary[1..5].copy_from_slice(&rel32(TEXT, TEXT + 8));
+        ordinary[5..8].copy_from_slice(&LEAF);
+        ordinary[8..12].copy_from_slice(&read);
+        ordinary[12] = 0xc3;
+        assert!(
+            holds(arch, &ordinary, TEXT, TEXT + 5),
+            "{arch:?} a read returns to the next instruction"
+        );
+    }
+}
 /// `push rbx; xor eax, eax; pop rbx; ret`: a function with a frame.
 const FRAMED: [u8; 5] = [0x53, 0x31, 0xc0, 0x5b, 0xc3];
 

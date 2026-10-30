@@ -11,7 +11,7 @@ use super::guess::{
     prologue_like, slot_jump, thunk_slot,
 };
 use super::helpers::{
-    CHKSTK_X86, call_slot, epilog_helper_name, exits_with_status, frame_helper_name,
+    CHKSTK_X86, call_lands, call_slot, epilog_helper_name, exits_with_status, frame_helper_name,
 };
 use super::seeds::{DataRef, record_data_refs};
 use super::sets::{AddrSet, Covered};
@@ -1638,7 +1638,7 @@ pub(super) fn walk_function(
                         }
                     } else {
                         followed_calls.insert(t);
-                        pending.push((next, Via::Fall));
+                        pending.push((call_lands(program, bitness, t, next), Via::Fall));
                     }
                 }
                 FlowControl::IndirectCall => {

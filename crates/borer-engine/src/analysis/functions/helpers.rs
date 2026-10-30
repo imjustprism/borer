@@ -8,8 +8,8 @@ use super::{Cursors, Recorded, decode_at, near_target, straight_line_before};
 use crate::analysis::{Analysis, Function, bare_name, is_imm};
 use crate::fxmap::FxHashSet;
 use crate::isa::x86::{
-    ConditionCode, FlowControl, Instruction, InstructionInfoFactory, Mnemonic, OpAccess, OpKind,
-    Register,
+    Code, ConditionCode, FlowControl, Instruction, InstructionInfoFactory, Mnemonic, OpAccess,
+    OpKind, Register,
 };
 use crate::num::lo32;
 use crate::program::{BinaryFormat, Program, SymbolKind};
@@ -697,4 +697,99 @@ pub(crate) fn panic_helper_name(
         at = i.next_ip();
     }
     found
+}
+
+/// Where a direct call continues, when its callee adds a constant to a
+/// return address and otherwise only returns.
+///
+/// The callee's own return slot is `[esp]` or `[rsp]`. The slot above it,
+/// `[esp+4]` or `[rsp+8]`, is the return address of whoever called that
+/// callee. A callee whose whole body is those adds and `ret` comes back to
+/// `next` plus the nearer add. A callee whose body is one call to such a
+/// stub comes back to `next` plus the stub's farther add: that add rewrote
+/// this call's return. Anything else, including a read of the slot, comes
+/// back to `next`.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `bitness` - Decoder bitness.
+/// * `target` - The callee.
+/// * `next` - The call's architectural fallthrough.
+///
+/// # Returns
+///
+/// The address the caller continues at.
+pub(super) fn call_lands(program: &Program, bitness: u32, target: u64, next: u64) -> u64 {
+    let Some(adj) = ret_adjust(program, bitness, target, 0) else {
+        return next;
+    };
+    next.wrapping_add(adj.0)
+}
+
+/// The constant added to this function's return address, and the constant
+/// it adds to its caller's.
+fn ret_adjust(program: &Program, bitness: u32, va: u64, depth: u8) -> Option<(u64, u64)> {
+    if depth > 1 {
+        return None;
+    }
+    let mut own = 0u64;
+    let mut caller = 0u64;
+    let mut saw = false;
+    let mut ip = va;
+    for _ in 0..6 {
+        let instr = decode_at(program, bitness, ip)?;
+        if instr.code() == Code::INVALID {
+            return None;
+        }
+        if let Some((far, imm)) = stack_add(&instr, bitness) {
+            saw = true;
+            if far {
+                caller = caller.wrapping_add(imm);
+            } else {
+                own = own.wrapping_add(imm);
+            }
+            ip = instr.next_ip();
+            continue;
+        }
+        if saw && instr.mnemonic() == Mnemonic::Ret && instr.op_count() == 0 {
+            return Some((own, caller));
+        }
+        if !saw
+            && instr.flow_control() == FlowControl::Call
+            && let Some(t) = near_target(&instr)
+            && let Some((inner_own, inner_caller)) = ret_adjust(program, bitness, t, depth + 1)
+        {
+            let land = instr.next_ip().wrapping_add(inner_own);
+            let at = decode_at(program, bitness, land)?;
+            if at.code() != Code::INVALID && at.mnemonic() == Mnemonic::Ret && at.op_count() == 0 {
+                return Some((inner_caller, 0));
+            }
+        }
+        return None;
+    }
+    None
+}
+
+/// An `add` of an immediate to the return slot, or to the caller's.
+///
+/// # Returns
+///
+/// `(far, immediate)`: `far` is the caller's slot.
+fn stack_add(instr: &Instruction, bitness: u32) -> Option<(bool, u64)> {
+    if instr.mnemonic() != Mnemonic::Add || instr.op0_kind() != OpKind::Memory {
+        return None;
+    }
+    if instr.memory_index() != Register::None || !matches!(bitness, 32 | 64) {
+        return None;
+    }
+    if instr.memory_base().full_register() != Register::RSP {
+        return None;
+    }
+    let far = if bitness == 32 { 4 } else { 8 };
+    let disp = instr.memory_displacement64();
+    if disp != 0 && disp != far {
+        return None;
+    }
+    Some((disp == far, instr.try_immediate(1).ok()?))
 }
