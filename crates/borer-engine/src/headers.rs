@@ -557,7 +557,9 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
 ///
 /// A slot below the image base makes the strict parse drop the whole
 /// directory. The callbacks before that slot still ran. When the directory
-/// itself cannot be read, the parsed list is kept.
+/// itself cannot be read, the parsed list is kept. More than 64 callbacks
+/// are left to that parsed list too: it has no cap, and a cut list must
+/// not replace it.
 ///
 /// # Arguments
 ///
@@ -608,19 +610,11 @@ fn read_tls_callbacks(pe: &PE<'_>, bytes: &[u8], sections: &[Section]) -> Option
         return Some(Vec::new());
     }
     let rva = callbacks.checked_sub(pe.image_base)?;
+    const CAP: u64 = 64;
     let mut out = Vec::new();
-    for i in 0..64u64 {
-        let Some(slot_rva) = rva.checked_add(i * stride) else {
-            break;
-        };
-        let Some(slot_bytes) = file_slice(sections, pe.image_base, bytes, slot_rva, width) else {
-            break;
-        };
-        let Some(slot) = (if pe.is_64 {
-            u64_le(slot_bytes, 0)
-        } else {
-            u32_le(slot_bytes, 0).map(u64::from)
-        }) else {
+    for i in 0..CAP {
+        let Some(slot) = callback_slot(sections, pe.image_base, bytes, rva, i, stride, pe.is_64)
+        else {
             break;
         };
         if slot == 0 || !sections.iter().any(|s| in_section(s, slot)) {
@@ -628,7 +622,47 @@ fn read_tls_callbacks(pe: &PE<'_>, bytes: &[u8], sections: &[Section]) -> Option
         }
         out.push(slot);
     }
+    let cut = u64::try_from(out.len()).ok() == Some(CAP)
+        && callback_slot(sections, pe.image_base, bytes, rva, CAP, stride, pe.is_64)
+            .is_some_and(|slot| slot != 0 && sections.iter().any(|s| in_section(s, slot)));
+    if cut {
+        return None;
+    }
     Some(out)
+}
+
+/// The callback word `index` slots after `rva`.
+///
+/// # Arguments
+///
+/// * `sections` - The loader's sections.
+/// * `image_base` - The image base the directory's addresses use.
+/// * `bytes` - The file bytes.
+/// * `rva` - The first callback slot.
+/// * `index` - Which slot, counting from zero.
+/// * `stride` - Four or eight.
+/// * `is_64` - Whether the slot is eight bytes.
+///
+/// # Returns
+///
+/// The address, or `None` when the slot is not in the file.
+fn callback_slot(
+    sections: &[Section],
+    image_base: u64,
+    bytes: &[u8],
+    rva: u64,
+    index: u64,
+    stride: u64,
+    is_64: bool,
+) -> Option<u64> {
+    let width = usize::try_from(stride).ok()?;
+    let slot_rva = rva.checked_add(index.checked_mul(stride)?)?;
+    let slot_bytes = file_slice(sections, image_base, bytes, slot_rva, width)?;
+    if is_64 {
+        u64_le(slot_bytes, 0)
+    } else {
+        u32_le(slot_bytes, 0).map(u64::from)
+    }
 }
 
 /// Reports whether `va` falls in `s`.

@@ -980,6 +980,28 @@ fn a_bad_tls_slot_keeps_the_earlier_callback() {
     assert_eq!(load(one).headers.tls_callbacks, vec![good32]);
 }
 
+/// More than 64 TLS callbacks stay on the list. The strict read stops at
+/// 64 and must not replace the parsed directory with that cut.
+#[test]
+fn a_long_tls_callback_list_is_kept() {
+    let _serial = serial();
+    const TLS_DIR: usize = 9;
+    let good = IMAGE_BASE + 0x1000;
+    let mut data = vec![0u8; 0x28 + 66 * 8];
+    put64(&mut data, 24, IMAGE_BASE + 0x2000 + 0x28);
+    for i in 0..65 {
+        put64(&mut data, 0x28 + i * 8, good);
+    }
+    let bytes = pe(
+        &[
+            Sec::sound(".text", 0x1000, text(), CODE),
+            Sec::sound(".rdata", 0x2000, data, DATA),
+        ],
+        &[(TLS_DIR, 0x2000, 40)],
+    );
+    assert_eq!(load(bytes).headers.tls_callbacks, vec![good; 65]);
+}
+
 /// Header fields the Windows loader ignores do not refuse the file.
 ///
 /// A damaged Rich header in the DOS stub and a data directory count past
