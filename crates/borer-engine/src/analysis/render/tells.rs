@@ -93,38 +93,42 @@ fn instruction_tag(instrs: &[Instruction], at: usize, timing: bool) -> Option<&'
     })
 }
 
+/// Consecutive timestamp pairs one function is searched for.
+const TIMESTAMP_PAIRS: usize = 8;
+
 /// Whether two timestamp reads are subtracted and a later check reads that
 /// difference.
 ///
 /// The subtraction has to use the earlier read, or a register it was copied
 /// into. `sub eax, eax` clears the register, and a compare of some other
-/// register is not that check.
+/// register is not that check. An earlier read that nothing saves does not
+/// hide a later pair. At most [`TIMESTAMP_PAIRS`] pairs are checked.
 fn rdtsc_timing(instrs: &[Instruction]) -> bool {
-    let mut first = None;
-    let mut second = None;
+    let mut reads = [0usize; TIMESTAMP_PAIRS + 1];
+    let mut count = 0usize;
     for (at, i) in instrs.iter().enumerate() {
         if !matches!(i.mnemonic(), Mnemonic::Rdtsc | Mnemonic::Rdtscp) {
             continue;
         }
-        if first.is_none() {
-            first = Some(at);
-        } else if second.is_none() {
-            second = Some(at);
+        if count == reads.len() {
+            break;
         }
+        reads[count] = at;
+        count += 1;
     }
-    let (Some(earlier), Some(later)) = (first, second) else {
-        return false;
-    };
-    let saved = saved_timestamp(&instrs[earlier + 1..later], instrs[later].mnemonic());
-    let Some(gap) = instrs
-        .iter()
-        .skip(later + 1)
-        .take(8)
-        .position(|n| timestamp_difference(n, &saved))
-    else {
-        return false;
-    };
-    difference_checked(instrs, later + 1 + gap)
+    reads[..count].windows(2).any(|pair| {
+        let (earlier, later) = (pair[0], pair[1]);
+        let saved = saved_timestamp(&instrs[earlier + 1..later], instrs[later].mnemonic());
+        let Some(gap) = instrs
+            .iter()
+            .skip(later + 1)
+            .take(8)
+            .position(|n| timestamp_difference(n, &saved))
+        else {
+            return false;
+        };
+        difference_checked(instrs, later + 1 + gap)
+    })
 }
 
 /// Registers still holding the first timestamp when the second read runs.
