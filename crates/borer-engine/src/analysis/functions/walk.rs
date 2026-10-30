@@ -1684,7 +1684,7 @@ pub(super) fn walk_function(
                         pending.push((next, Via::Fall));
                         continue;
                     };
-                    if !crate::analysis::is_executable_va(program, t) {
+                    if !crate::analysis::is_code_va(program, t) {
                         pending.push((next, Via::Fall));
                         continue;
                     }

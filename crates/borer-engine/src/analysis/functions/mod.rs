@@ -1506,9 +1506,9 @@ fn trace_seeds() -> bool {
 /// # Returns
 ///
 /// The instruction (possibly with [`Code::INVALID`]), or `None` when `va` is
-/// not in executable, file-backed memory.
+/// not code the image maps from a file. The entry's section counts.
 pub(crate) fn decode_at(program: &Program, bitness: u32, va: u64) -> Option<Instruction> {
-    if !super::is_executable_va(program, va) {
+    if !super::is_code_va(program, va) {
         return None;
     }
     let bytes = program.read_va_upto(va, 15)?;

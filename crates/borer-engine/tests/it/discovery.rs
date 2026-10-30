@@ -77,6 +77,52 @@ fn the_entry_in_a_non_executable_section_decompiles() {
     assert!(text.contains("return 0"), "{text}");
 }
 
+/// A helper the entry calls in its own non-executable section is reached.
+///
+/// The helper adds one to the return address. The call continues at that
+/// byte, and the byte it skips stays undecoded.
+#[test]
+fn a_helper_in_the_entrys_section_is_reached() {
+    for arch in [Arch::X86_64, Arch::X86] {
+        let entry = 0x402000;
+        let helper = 0x402020;
+        let mut bytes = vec![0x6e_u8; 0x40];
+        bytes[0] = 0xe8;
+        bytes[1..5].copy_from_slice(&rel32(entry, helper));
+        bytes[0x06..0x0c].copy_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]);
+        bytes[0x20..0x25].copy_from_slice(&[0x80, 0x04, 0x24, 0x01, 0xc3]);
+        let p = Program::raw(
+            bytes,
+            arch,
+            0x400000,
+            Some(entry),
+            vec![Section::mapped(".data", entry, 0, 0x40, true, false)],
+        );
+        let analysis = Analysis::compute(&p);
+        let found: Vec<u64> = analysis.functions.iter().map(|f| f.entry).collect();
+        assert!(found.contains(&helper), "{arch:?} {found:?}");
+        let edge: Vec<u64> = analysis
+            .functions
+            .iter()
+            .find(|f| f.entry == entry)
+            .and_then(|f| f.blocks.iter().find(|b| b.start == entry))
+            .map(|b| b.successors.iter().copied().collect())
+            .unwrap_or_default();
+        assert!(edge.contains(&(entry + 6)), "{arch:?} {edge:?}");
+        assert!(!edge.contains(&(entry + 5)), "{arch:?} {edge:?}");
+        let skipped = analysis
+            .functions
+            .iter()
+            .filter(|f| f.entry == entry)
+            .any(|f| {
+                f.blocks
+                    .iter()
+                    .any(|b| (b.start..b.end).contains(&(entry + 5)))
+            });
+        assert!(!skipped, "{arch:?} decoded the skipped byte");
+    }
+}
+
 /// Whether the function entered at `entry` decoded `va`.
 fn holds(arch: Arch, code: &[u8], entry: u64, va: u64) -> bool {
     Analysis::compute(&raw::image(arch, code, &[]))
