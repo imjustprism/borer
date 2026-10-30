@@ -279,9 +279,11 @@ fn get_thread_context_needs_the_debug_register_flags() {
     assert!(!plain.contains("hardware breakpoint"), "{plain}");
 }
 
-/// `CONTEXT_ALL` is a hardware-breakpoint tell. A `Dr0` load is one when
-/// it reads the context buffer the call was given. `CONTEXT_CONTROL` is
-/// not, a store is not, and a load through another register is not.
+/// `CONTEXT_ALL` is a hardware-breakpoint tell.
+///
+/// A `Dr0` load is one when it reads the context buffer the call was given.
+/// `CONTEXT_CONTROL` is not, a store is not, and a load through another
+/// register is not.
 #[test]
 fn context_all_and_a_dr_read_are_hardware_breakpoints() {
     let all = report_calls(
