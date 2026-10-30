@@ -364,8 +364,20 @@ pub fn capability_map_tsv(p: &Program, a: Option<&Analysis>) -> String {
                 .filter(|n| gives(fragments, n))
                 .map(|n| format!("{n} (syscall)")),
         );
+        if found.is_empty() {
+            continue;
+        }
+        let mut label = capability;
+        if capability == "persistence" && settings_keys(p, &found) {
+            label = "registry write";
+        }
+        if capability == "anti-analysis"
+            && let Some(analysis) = a
+        {
+            found.retain(|name| called_as_check(p, analysis, name));
+        }
         if !found.is_empty() {
-            hits.push((capability, found));
+            hits.push((label, found));
         }
     }
     hits.sort_by_key(|(cap, named)| (std::cmp::Reverse(named.len()), *cap));
@@ -398,6 +410,169 @@ pub fn capability_map_tsv(p: &Program, a: Option<&Analysis>) -> String {
         };
         let _ = writeln!(out, "{capability:<24}  {}{more}", shown.join(", "));
     }
+    out
+}
+
+/// Whether an anti-analysis import is kept on the capability map.
+///
+/// The C runtime's failure and timing imports stay off the map unless a
+/// caller uses the result as a check. Every other import stays.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - Its functions.
+/// * `api` - The imported name, as the map shows it.
+fn called_as_check(p: &Program, a: &Analysis, api: &str) -> bool {
+    let Some(stem) = crt_stem(api) else {
+        return true;
+    };
+    a.functions.iter().any(|f| {
+        let sites = call_sites(p, a, f.entry, stem);
+        if sites.is_empty() || crt_failure(p, a, f.entry) {
+            return false;
+        }
+        if stem == "queryperformancecounter" {
+            sites.len() >= 2
+        } else {
+            sites.iter().any(|va| result_tested(p, *va))
+        }
+    })
+}
+
+/// The C runtime stem of `api`, when the capability map must see a check.
+fn crt_stem(api: &str) -> Option<&'static str> {
+    let name = api.to_lowercase();
+    [
+        "isdebuggerpresent",
+        "outputdebugstring",
+        "queryperformancecounter",
+    ]
+    .into_iter()
+    .find(|stem| name.starts_with(stem))
+}
+
+/// Call sites in `entry` whose import name starts with `stem`.
+fn call_sites(p: &Program, a: &Analysis, entry: u64, stem: &str) -> Vec<u64> {
+    a.refs_from(entry)
+        .into_iter()
+        .filter_map(|(target, site)| {
+            if site.kind != RefKind::Call {
+                return None;
+            }
+            let sym = a.symbol_at(p, target)?;
+            bare_name(&sym.name)
+                .to_lowercase()
+                .starts_with(stem)
+                .then_some(site.va)
+        })
+        .collect()
+}
+
+/// Whether `entry` is the C runtime's failure path.
+///
+/// That path calls `IsDebuggerPresent` beside the unwind helpers or
+/// `__fastfail`, and the one call is not a check.
+fn crt_failure(p: &Program, a: &Analysis, entry: u64) -> bool {
+    const MARK: [&str; 5] = [
+        "unhandledexceptionfilter",
+        "rtlcapturecontext",
+        "rtlvirtualunwind",
+        "rtllookupfunctionentry",
+        "setunhandledexceptionfilter",
+    ];
+    let helped = a.refs_from(entry).iter().any(|(target, _)| {
+        a.symbol_at(p, *target).is_some_and(|sym| {
+            let name = bare_name(&sym.name).to_lowercase();
+            MARK.iter().any(|m| name.contains(m))
+        })
+    });
+    helped || fastfail(p, a, entry)
+}
+
+/// Whether `entry` executes `int 0x29` (`__fastfail`).
+fn fastfail(p: &Program, a: &Analysis, entry: u64) -> bool {
+    let Some(f) = a.function(entry) else {
+        return false;
+    };
+    f.blocks.iter().any(|b| {
+        let len = usize::try_from(b.end.saturating_sub(b.start)).unwrap_or(0);
+        p.read_va(b.start, len)
+            .is_some_and(|code| code.windows(2).any(|w| w == [0xcd, 0x29]))
+    })
+}
+
+/// Whether the instructions after the call test `eax`.
+fn result_tested(p: &Program, va: u64) -> bool {
+    let Some(bits) = p.arch.bitness() else {
+        return false;
+    };
+    let Some(code) = p.read_va(va, 32) else {
+        return false;
+    };
+    let mut decoder = Decoder::with_ip(bits, code, va, DecoderOptions::NONE);
+    if !decoder.can_decode() {
+        return false;
+    }
+    let call = decoder.decode();
+    if call.flow_control() != FlowControl::Call {
+        return false;
+    }
+    for _ in 0..4 {
+        if !decoder.can_decode() {
+            return false;
+        }
+        let next = decoder.decode();
+        if next.is_invalid() {
+            return false;
+        }
+        if matches!(next.mnemonic(), Mnemonic::Test | Mnemonic::Cmp)
+            && next.op0_kind() == OpKind::Register
+            && next.op0_register().full_register() == Register::RAX
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether the registry APIs write the program's own settings.
+///
+/// A Run key, a startup folder or a service stays persistence. Settings
+/// under `Software\` with none of those are a registry write. No key
+/// string at all stays persistence: the key may be built at runtime.
+fn settings_keys(p: &Program, apis: &[String]) -> bool {
+    if apis.iter().any(|n| n.to_lowercase().contains("service")) {
+        return false;
+    }
+    let texts = program_strings(p);
+    if texts.is_empty() {
+        return false;
+    }
+    let run = |s: &str| {
+        let s = s.to_lowercase();
+        s.contains("\\run")
+            || s.contains("runonce")
+            || s.contains("\\startup")
+            || s.contains("\\services\\")
+    };
+    texts
+        .iter()
+        .any(|s| s.to_lowercase().contains("software\\"))
+        && !texts.iter().any(|s| run(s))
+}
+
+/// The ASCII and wide strings in the image.
+fn program_strings(p: &Program) -> Vec<String> {
+    let mut out: Vec<String> = crate::strings::find_strings(&p.bytes, 4)
+        .into_iter()
+        .map(|hit| hit.text)
+        .collect();
+    out.extend(
+        crate::strings::find_wide_strings(&p.bytes, 4)
+            .into_iter()
+            .map(|hit| hit.text),
+    );
     out
 }
 
