@@ -494,14 +494,32 @@ fn crt_failure(p: &Program, a: &Analysis, entry: u64) -> bool {
 }
 
 /// Whether `entry` executes `int 0x29` (`__fastfail`).
+///
+/// The interrupt is decoded. A constant that happens to hold the bytes
+/// `cd 29`, such as `mov edx, 0x29cd`, is not the instruction.
 fn fastfail(p: &Program, a: &Analysis, entry: u64) -> bool {
-    let Some(f) = a.function(entry) else {
+    let (Some(f), Some(bits)) = (a.function(entry), p.arch.bitness()) else {
         return false;
     };
     f.blocks.iter().any(|b| {
         let len = usize::try_from(b.end.saturating_sub(b.start)).unwrap_or(0);
-        p.read_va(b.start, len)
-            .is_some_and(|code| code.windows(2).any(|w| w == [0xcd, 0x29]))
+        let Some(code) = p.read_va(b.start, len) else {
+            return false;
+        };
+        let mut decoder = Decoder::with_ip(bits, code, b.start, DecoderOptions::NONE);
+        while decoder.can_decode() {
+            let i = decoder.decode();
+            if i.is_invalid() || i.ip() >= b.end {
+                break;
+            }
+            if i.mnemonic() == Mnemonic::Int
+                && i.op0_kind() == OpKind::Immediate8
+                && i.immediate8() == 0x29
+            {
+                return true;
+            }
+        }
+        false
     })
 }
 

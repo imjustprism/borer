@@ -191,3 +191,33 @@ fn settings_keys_are_a_registry_write_and_a_run_key_stays_persistence() {
     let service = map("CreateServiceA", b"Software\\Vendor\\App\0");
     assert!(service.contains("persistence"), "{service}");
 }
+
+/// The capability map of a function that calls `IsDebuggerPresent`.
+///
+/// # Arguments
+///
+/// * `code` - The function's bytes.
+fn debugger_map(code: &[u8]) -> String {
+    let mut p = image(Arch::X86_64, code, &[]);
+    p.symbols.push(Symbol {
+        name: "KERNEL32.dll!IsDebuggerPresent".to_owned(),
+        addr: 0x402000,
+        kind: SymbolKind::Import,
+    });
+    let a = Analysis::compute(&p);
+    borer_engine::analysis::render::capability_map_tsv(&p, Some(&a))
+}
+
+/// `mov edx, 0x29cd` holds the bytes of `int 0x29` and is not `__fastfail`.
+/// A checked call stays on the map.
+#[test]
+fn a_constant_holding_fastfail_bytes_keeps_the_check() {
+    let code = [
+        0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0x85, 0xc0, // ASM: test eax, eax
+        0xba, 0xcd, 0x29, 0x00, 0x00, // ASM: mov edx, 0x29cd
+        0xc3, // ASM: ret
+    ];
+    let text = debugger_map(&code);
+    assert!(text.contains("IsDebuggerPresent"), "{text}");
+}
