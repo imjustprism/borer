@@ -365,6 +365,31 @@ fn addresses_of_debug_apis_are_not_a_debug_block() {
     assert!(!text.contains("debug block"), "{text}");
 }
 
+/// An indirect `GetThreadContext` followed by a `Dr0` load is a hardware
+/// breakpoint. The call alone is not.
+#[test]
+fn an_indirect_context_call_and_a_dr_read_is_a_hardware_breakpoint() {
+    let read = report_calls(
+        &[
+            0xff, 0x15, 0xfa, 0x0f, 0x00, 0x00, // ASM: call qword [rip+0xffa]
+            0x48, 0x8b, 0x42, 0x48, // ASM: mov rax, [rdx+0x48]
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[("GetThreadContext", 0x402000)],
+    );
+    assert!(read.contains("hardware breakpoint"), "{read}");
+    let bare = report_calls(
+        &[
+            0xff, 0x15, 0xfa, 0x0f, 0x00, 0x00, // ASM: call qword [rip+0xffa]
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[("GetThreadContext", 0x402000)],
+    );
+    assert!(!bare.contains("hardware breakpoint"), "{bare}");
+}
+
 /// A loop that compares with `0xCC` and then exits is a breakpoint scan.
 /// The compare alone is not, and a compare followed by a store into
 /// executable memory is a patch.

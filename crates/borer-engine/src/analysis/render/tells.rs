@@ -413,7 +413,8 @@ fn has_immediate(i: &Instruction, imm: u64) -> bool {
 ///
 /// `CONTEXT_ALL` includes `CONTEXT_DEBUG_REGISTERS` along with other flags.
 /// `CONTEXT_CONTROL` and `CONTEXT_INTEGER` do not. A later load of `Dr0`
-/// through `Dr7` through a register counts the same way.
+/// through `Dr7` through a register counts the same way, after a direct
+/// or an indirect call.
 ///
 /// # Arguments
 ///
@@ -428,7 +429,10 @@ fn context_debug(instrs: &[Instruction], bits: u32) -> bool {
         if after_call && dr_field(i, bits) {
             return true;
         }
-        if i.flow_control() == FlowControl::Call {
+        if matches!(
+            i.flow_control(),
+            FlowControl::Call | FlowControl::IndirectCall
+        ) {
             after_call = true;
         }
     }
