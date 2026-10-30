@@ -120,6 +120,10 @@ pub(super) enum Helper {
     FpuStatus,
     /// `lahf()`: the low byte of the flags register.
     Lahf,
+    /// `cpuid(leaf, subleaf)`, `cpuid_ebx`, `cpuid_ecx`, `cpuid_edx`: one
+    /// result of `cpuid`. `0` is `eax`, `1` is `ebx`, `2` is `ecx`, `3` is
+    /// `edx`.
+    Cpuid(u8),
 }
 
 /// How a reader converts a helper's arguments before [`Helper::eval`].
@@ -216,6 +220,10 @@ impl Helper {
                 Helper::XgetbvHi,
                 Helper::FpuStatus,
                 Helper::Lahf,
+                Helper::Cpuid(0),
+                Helper::Cpuid(1),
+                Helper::Cpuid(2),
+                Helper::Cpuid(3),
             ])
             .collect();
         all.sort();
@@ -266,6 +274,10 @@ impl Helper {
             "xgetbv_hi" => Some(Helper::XgetbvHi),
             "fpu_status" => Some(Helper::FpuStatus),
             "lahf" => Some(Helper::Lahf),
+            "cpuid" => Some(Helper::Cpuid(0)),
+            "cpuid_ebx" => Some(Helper::Cpuid(1)),
+            "cpuid_ecx" => Some(Helper::Cpuid(2)),
+            "cpuid_edx" => Some(Helper::Cpuid(3)),
             _ => None,
         };
         if fixed.is_some() {
@@ -344,7 +356,8 @@ impl Helper {
             | Helper::Xgetbv
             | Helper::XgetbvHi
             | Helper::FpuStatus
-            | Helper::Lahf => None,
+            | Helper::Lahf
+            | Helper::Cpuid(_) => None,
         }
     }
 
@@ -397,7 +410,8 @@ impl Helper {
             | Helper::Xgetbv
             | Helper::XgetbvHi
             | Helper::FpuStatus
-            | Helper::Lahf => None,
+            | Helper::Lahf
+            | Helper::Cpuid(_) => None,
         }
     }
 
@@ -431,7 +445,8 @@ impl Helper {
             | Helper::Xgetbv
             | Helper::XgetbvHi
             | Helper::FpuStatus
-            | Helper::Lahf => Operands::Raw,
+            | Helper::Lahf
+            | Helper::Cpuid(_) => Operands::Raw,
             Helper::Min | Helper::Max | Helper::Llabs => Operands::Word { signed: true },
             Helper::UMin | Helper::UMax | Helper::SubSat | Helper::Midpoint | Helper::AlignUp => {
                 Operands::Word { signed: false }
@@ -489,7 +504,8 @@ impl Helper {
             | Helper::Xgetbv
             | Helper::XgetbvHi
             | Helper::FpuStatus
-            | Helper::Lahf => Yields::Word { signed: false },
+            | Helper::Lahf
+            | Helper::Cpuid(_) => Yields::Word { signed: false },
         }
     }
 
@@ -513,20 +529,7 @@ impl Helper {
         if let Some(op) = self.op() {
             return match fold(op, Expr::Const(a?), Expr::Const(b?), self.width()?) {
                 Expr::Const(c) => Some(c),
-                Expr::Var(_)
-                | Expr::Str(_)
-                | Expr::Sp(_)
-                | Expr::Bin(..)
-                | Expr::Un(..)
-                | Expr::Deref(..)
-                | Expr::Cond(_)
-                | Expr::Ternary(..)
-                | Expr::Sext(..)
-                | Expr::Cast(..)
-                | Expr::Bitcast(..)
-                | Expr::Call(..)
-                | Expr::Helper(..)
-                | Expr::FConst(..) => None,
+                _ => None,
             };
         }
         if let Some(op) = self.unop() {
@@ -611,7 +614,8 @@ impl Helper {
             | Helper::Xgetbv
             | Helper::XgetbvHi
             | Helper::FpuStatus
-            | Helper::Lahf => None,
+            | Helper::Lahf
+            | Helper::Cpuid(_) => None,
         }
     }
 
@@ -664,7 +668,8 @@ impl Helper {
             | Helper::Xgetbv
             | Helper::XgetbvHi
             | Helper::FpuStatus
-            | Helper::Lahf => None,
+            | Helper::Lahf
+            | Helper::Cpuid(_) => None,
         }
     }
 
@@ -845,7 +850,7 @@ impl Helper {
             Helper::Stmxcsr | Helper::FpuStatus | Helper::Lahf => {
                 vec![format!("extern {wu} {self}(void);")]
             }
-            Helper::Xgetbv | Helper::XgetbvHi => vec![format!("extern {wu} {self}(uint64_t n);")],
+            Helper::Xgetbv | Helper::XgetbvHi | Helper::Cpuid(_) => machine_extern(&wu, self),
             Helper::Llabs
             | Helper::Sqrt
             | Helper::Fabs
@@ -979,8 +984,38 @@ impl fmt::Display for Helper {
             Helper::XgetbvHi => return f.write_str("xgetbv_hi"),
             Helper::FpuStatus => return f.write_str("fpu_status"),
             Helper::Lahf => return f.write_str("lahf"),
+            Helper::Cpuid(part) => return f.write_str(cpuid_part(part)),
         };
         write!(f, "{stem}{w}")
+    }
+}
+
+/// The `extern` line of a helper that reads machine state.
+///
+/// # Arguments
+///
+/// * `wu` - The unsigned word type, `uint32_t` or `uint64_t`.
+/// * `h` - The helper.
+fn machine_extern(wu: &str, h: Helper) -> Vec<String> {
+    let args = match h {
+        Helper::Cpuid(_) => "uint64_t leaf, uint64_t subleaf",
+        _ => "uint64_t n",
+    };
+    vec![format!("extern {wu} {h}({args});")]
+}
+
+/// The printed name of one `cpuid` result.
+///
+/// # Arguments
+///
+/// * `part` - `0` for `eax`, `1` for `ebx`, `2` for `ecx`, anything else
+///   for `edx`.
+fn cpuid_part(part: u8) -> &'static str {
+    match part {
+        0 => "cpuid",
+        1 => "cpuid_ebx",
+        2 => "cpuid_ecx",
+        _ => "cpuid_edx",
     }
 }
 

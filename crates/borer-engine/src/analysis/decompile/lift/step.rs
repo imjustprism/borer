@@ -1362,14 +1362,7 @@ impl Exec<'_, '_> {
                 emit_line!(self, format!("__interrupt({n});"));
                 self.record(EffectKind::Unmodeled);
             }
-            Mnemonic::Cpuid => {
-                emit_line!(self, "cpuid();".to_owned());
-                self.record(EffectKind::Unmodeled);
-                for r in [Register::RAX, Register::RBX, Register::RCX, Register::RDX] {
-                    let k = self.canon(r);
-                    self.clobber(k);
-                }
-            }
+            Mnemonic::Cpuid => self.cpuid(),
             Mnemonic::Rdtsc | Mnemonic::Rdtscp => {
                 emit_line!(self, format!("{mn:?}();").to_lowercase());
                 self.record(EffectKind::Unmodeled);
@@ -1541,6 +1534,19 @@ impl Exec<'_, '_> {
         self.flags = Flags::Unknown;
         self.materialize(k, &mut Vec::new(), None);
         self.flags = rebased;
+    }
+
+    /// Models `cpuid` as reading `eax` and `ecx` and writing `eax`, `ebx`,
+    /// `ecx` and `edx`.
+    ///
+    /// A copy taken before the next `cpuid` keeps the earlier result, so a
+    /// vendor test stays on the leaf that produced it.
+    fn cpuid(&mut self) {
+        let args = vec![self.reg_read(Register::EAX), self.reg_read(Register::ECX)];
+        self.reg_write(Register::EAX, Expr::Helper(Helper::Cpuid(0), args.clone()));
+        self.reg_write(Register::EBX, Expr::Helper(Helper::Cpuid(1), args.clone()));
+        self.reg_write(Register::ECX, Expr::Helper(Helper::Cpuid(2), args.clone()));
+        self.reg_write(Register::EDX, Expr::Helper(Helper::Cpuid(3), args));
     }
 
     /// The registers a comparison names.

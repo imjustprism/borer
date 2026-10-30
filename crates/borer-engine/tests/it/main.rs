@@ -36,6 +36,7 @@ mod carve;
 mod clr;
 mod clr_il;
 mod com;
+mod cpuid;
 mod decoded;
 mod decompile;
 mod discovery;
