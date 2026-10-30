@@ -31,6 +31,7 @@ fn capability_fragments_match_a_name_boundary() {
         "DuplicateEncryptionInfoFile",
         "GetOpenClipboardWindow",
         "GetThreadContext",
+        "NtCreateFileMapping",
     ]);
     let text = borer_engine::analysis::render::capability_map_tsv(&p, None);
     assert!(!text.contains("filesystem"), "{text}");
@@ -60,4 +61,30 @@ fn capability_fragments_match_a_name_boundary() {
     assert!(text.contains("OpenClipboard"), "{text}");
     assert!(text.contains("process injection"), "{text}");
     assert!(text.contains("SetThreadContext"), "{text}");
+    p.symbols = imports(&[
+        "EVP_EncryptInit",
+        "AES_encrypt",
+        "mbedtls_aes_crypt_cbc",
+        "gcry_cipher_decrypt",
+    ]);
+    let text = borer_engine::analysis::render::capability_map_tsv(&p, None);
+    assert!(text.contains("cryptography"), "{text}");
+    assert!(text.contains("EVP_EncryptInit"), "{text}");
+    assert!(text.contains("AES_encrypt"), "{text}");
+    assert!(text.contains("mbedtls_aes_crypt_cbc"), "{text}");
+    assert!(text.contains("gcry_cipher_decrypt"), "{text}");
+    p.symbols = imports(&[
+        "NtCreateFile",
+        "ZwWriteFile",
+        "ReadFileScatter",
+        "WriteFileGather",
+        "CreateFileTransactedW",
+    ]);
+    let text = borer_engine::analysis::render::capability_map_tsv(&p, None);
+    assert!(text.contains("filesystem"), "{text}");
+    assert!(text.contains("NtCreateFile"), "{text}");
+    assert!(text.contains("ZwWriteFile"), "{text}");
+    assert!(text.contains("ReadFileScatter"), "{text}");
+    assert!(text.contains("WriteFileGather"), "{text}");
+    assert!(text.contains("CreateFileTransactedW"), "{text}");
 }

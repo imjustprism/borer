@@ -148,6 +148,9 @@ pub(super) const CAPABILITIES: [(&str, &[&str]); 16] = [
             "^crypt",
             "bcrypt",
             "^ncrypt",
+            "_crypt",
+            "_encrypt",
+            "_decrypt",
             "cryptacquire",
             "cryptencrypt",
             "cryptdecrypt",
@@ -216,6 +219,12 @@ pub(super) const CAPABILITIES: [(&str, &[&str]); 16] = [
             "~createfile",
             "~writefile",
             "~readfile",
+            "=ntcreatefile",
+            "=ntreadfile",
+            "=ntwritefile",
+            "=zwcreatefile",
+            "=zwreadfile",
+            "=zwwritefile",
             "deletefile",
             "movefile",
             "copyfile",
@@ -257,9 +266,10 @@ pub(super) const CAPABILITIES: [(&str, &[&str]); 16] = [
 
 /// Whether `api` is one of `fragments`.
 ///
-/// `=name` is the whole name, `~stem` is that stem with an empty suffix or
-/// `a` / `w` / `ex` / `2`, and `^part` is `part` at the start or at a
-/// capital letter. Anything else is a case-insensitive substring.
+/// `=name` is the whole name. `~stem` is that stem with an empty suffix,
+/// `a` / `w` / `ex` / `2`, `scatter`, `gather`, or `transacted` with an
+/// optional `a` or `w`. `^part` is `part` at the start or at a capital
+/// letter. Anything else is a case-insensitive substring.
 ///
 /// # Arguments
 ///
@@ -275,9 +285,20 @@ fn name_gives(fragments: &[&str], api: &str) -> bool {
         if let Some(exact) = frag.strip_prefix('=') {
             lower == exact
         } else if let Some(stem) = frag.strip_prefix('~') {
-            lower
-                .strip_prefix(stem)
-                .is_some_and(|rest| matches!(rest, "" | "a" | "w" | "ex" | "2"))
+            lower.strip_prefix(stem).is_some_and(|rest| {
+                matches!(
+                    rest,
+                    "" | "a"
+                        | "w"
+                        | "ex"
+                        | "2"
+                        | "scatter"
+                        | "gather"
+                        | "transacted"
+                        | "transacteda"
+                        | "transactedw"
+                )
+            })
         } else if let Some(part) = frag.strip_prefix('^') {
             let part = part.to_lowercase();
             lower.match_indices(&part).any(|(at, _)| {
