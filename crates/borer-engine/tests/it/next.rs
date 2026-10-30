@@ -158,6 +158,26 @@ fn a_sub_whose_flags_a_branch_reads_is_still_a_compare() {
     );
 }
 
+/// A branch on a flag a later instruction replaced is not that compare.
+///
+/// `inc` writes the zero flag and leaves carry. `jz` reads the zero flag
+/// `inc` wrote, so the immediate is not the check.
+#[test]
+fn a_branch_on_a_replaced_flag_is_not_the_compare() {
+    let code = [
+        0x81, 0xe9, 0xcd, 0xab, 0x37, 0x13, // ASM: sub ecx, 0x1337abcd
+        0xff, 0xc2, // ASM: inc edx
+        0x74, 0x01, // ASM: jz 0x40100b
+        0xc3, // ASM: ret
+        0xc3, // ASM: ret
+    ];
+    let got = steps(&code);
+    assert!(
+        got.iter().all(|step| !step.contains("0x1337abcd")),
+        "{got:?}"
+    );
+}
+
 /// Flags still decide the compare after a run of flag-preserving moves,
 /// and after an instruction that writes a different flag.
 #[test]

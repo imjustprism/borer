@@ -53,9 +53,11 @@ pub(super) fn compare_immediate(instrs: &[Instruction], at: usize) -> Option<u64
 /// Whether a later instruction reads a flag `instrs[at]` wrote that no
 /// instruction in between has overwritten.
 ///
-/// A direct jump is followed. A write of one flag leaves the others: `clc`
-/// clears carry and a following `sete` still reads the compare's zero flag.
-/// Each instruction is visited once, so the scan stops at a loop.
+/// A direct jump is followed. A conditional branch counts only when it
+/// reads one of those flags: `sub` then `inc` then `jz` does not, because
+/// `inc` replaced the zero flag. A write of one flag leaves the others:
+/// `clc` clears carry and a following `sete` still reads the compare's
+/// zero flag. Each instruction is visited once, so the scan stops at a loop.
 ///
 /// # Arguments
 ///
@@ -73,8 +75,7 @@ fn flags_decide(instrs: &[Instruction], at: usize) -> bool {
             return false;
         }
         let n = &instrs[cursor];
-        let branch = n.flow_control() == FlowControl::ConditionalBranch;
-        if n.rflags_read() & live != 0 || branch && live != 0 {
+        if n.rflags_read() & live != 0 {
             return true;
         }
         live &= !n.rflags_modified();
