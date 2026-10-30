@@ -406,6 +406,32 @@ fn a_debugger_window_is_named_and_an_ordinary_class_is_not() {
     assert!(!text.contains("debugger window"), "{text}");
 }
 
+/// `lea rcx, [rip+name]` passes the class on x64.
+///
+/// `OLLYDBG` there is a debugger window. An ordinary name is not.
+#[test]
+fn a_rip_relative_debugger_window_is_named() {
+    let named = |bytes: &[u8]| {
+        let mut data = vec![0u8; 0x100 + bytes.len()];
+        data[0x100..].copy_from_slice(bytes);
+        let code = [
+            0x48, 0x8d, 0x0d, 0xf9, 0x10, 0x00, 0x00, // ASM: lea rcx, [rip+0x10f9]
+            0xe8, 0xf4, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0xe8, 0xff, 0x0f, 0x00, 0x00, // ASM: call 0x402010
+            0xc3, // ASM: ret
+        ];
+        report_calls(
+            &code,
+            &data,
+            &[("FindWindowA", 0x402000), ("ExitProcess", 0x402010)],
+        )
+    };
+    let olly = named(b"OLLYDBG\0");
+    assert!(olly.contains("debugger window"), "{olly}");
+    let notepad = named(b"NOTEPAD\0");
+    assert!(!notepad.contains("debugger window"), "{notepad}");
+}
+
 /// `FindWindowW` of a wide debugger class is the same tell. A wide
 /// ordinary class is not.
 #[test]

@@ -551,15 +551,24 @@ fn called_imports(p: &Program, a: &Analysis, entry: u64) -> Vec<String> {
     names
 }
 
-/// Whether a pushed or moved immediate names a known debugger window.
+/// Whether a pushed, moved, or RIP-relative address names a debugger window.
 ///
-/// `FindWindowA` passes ASCII. `FindWindowW` passes UTF-16, so a wide
-/// `OLLYDBG` counts. A one-character narrow reading of that wide string
-/// does not.
+/// `FindWindowA` passes ASCII. `FindWindowW` passes UTF-16. The address
+/// may be an immediate or `lea reg, [rip+name]`. A one-character narrow
+/// reading of a wide string does not count.
 fn debugger_string(p: &Program, instrs: &[Instruction]) -> bool {
     instrs
         .iter()
-        .any(|i| immediate_any(i).is_some_and(|imm| imm != 0 && debugger_name(p, imm)))
+        .any(|i| string_address(i).is_some_and(|va| va != 0 && debugger_name(p, va)))
+}
+
+/// An immediate, or the target of a RIP-relative `lea`, that may name a window.
+fn string_address(i: &Instruction) -> Option<u64> {
+    if let Some(imm) = immediate_any(i) {
+        return Some(imm);
+    }
+    (i.mnemonic() == Mnemonic::Lea && i.is_ip_rel_memory_operand())
+        .then_some(i.ip_rel_memory_address())
 }
 
 /// Whether the ASCII or UTF-16 run at `va` is a known debugger window.
