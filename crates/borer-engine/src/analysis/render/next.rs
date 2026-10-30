@@ -210,10 +210,11 @@ fn partial_step(p: &Program, a: &Analysis, o: &Overlay, f: &Function) -> Option<
 /// Points a function that takes arguments and compares against a telling
 /// constant at [`solve_tsv`].
 ///
-/// The step says `solve` should try the constant as `a1` only when the
-/// compared register still holds that argument. A value copied out of a
-/// call's return register is named as a call result, and anything else is
-/// named without an argument to vary.
+/// The step names `aN` only when the compared register still holds that
+/// argument of the function's convention. A value copied out of a call's
+/// return register is named as a call result. Anything the scan cannot
+/// place is named as not shown to be `a1`, which is not a claim that no
+/// argument decides it.
 ///
 /// # Arguments
 ///
@@ -244,14 +245,15 @@ fn check_step(
         let value = compares::compare_immediate(&instrs, at)?;
         telling_constant(value).then_some((at, value))
     });
+    let conv = abi::conv_at(p, f.entry, bits);
     let (value, source) = match found {
-        Some((at, value)) => (value, compares::compared_source(&instrs, at, bits)),
+        Some((at, value)) => (value, compares::compared_source(&instrs, at, conv)),
         None => (compared_constant(text)?, compares::Compared::Other),
     };
     let note = match source {
-        compares::Compared::Argument => "solve tries it as a1",
-        compares::Compared::CallResult => "a call result, not an argument",
-        compares::Compared::Other => "not an argument solve can vary",
+        compares::Compared::Argument(n) => format!("solve tries it as a{n}"),
+        compares::Compared::CallResult => "a call result, not an argument".to_string(),
+        compares::Compared::Other => "not shown to be a1".to_string(),
     };
     Some(format!(
         "borer://solve/{:#x} (compares against {value:#x}: {note})",

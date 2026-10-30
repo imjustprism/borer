@@ -13,7 +13,7 @@ use borer_engine::analysis::render::{
     NEXT_MAX, function_summary, next_steps, partial_tsv, solve_tsv,
 };
 use borer_engine::analysis::{Analysis, Overlay};
-use borer_engine::program::Arch;
+use borer_engine::program::{Arch, BinaryFormat};
 
 use crate::common::fixture;
 use crate::raw::image;
@@ -175,6 +175,110 @@ fn a_compare_of_a_call_result_does_not_name_a1() {
     assert_eq!(
         steps(&code),
         ["borer://solve/0x401000 (compares against 0x100a: a call result, not an argument)"]
+    );
+}
+
+/// Copying the difference does not hide a `sub` whose flags a later
+/// instruction still reads.
+#[test]
+fn a_copied_sub_result_is_still_a_compare() {
+    let code = [
+        0x81, 0xe9, 0xcd, 0xab, 0x37, 0x13, // ASM: sub ecx, 0x1337abcd
+        0x89, 0xca, // ASM: mov edx, ecx
+        0x0f, 0x94, 0xc0, // ASM: sete al
+        0x0f, 0xb6, 0xc0, // ASM: movzx eax, al
+        0xc3, // ASM: ret
+    ];
+    assert_eq!(
+        steps(&code),
+        ["borer://solve/0x401000 (compares against 0x1337abcd: solve tries it as a1)"]
+    );
+}
+
+/// A direct jump to the flag read is the path that runs. A flag write that
+/// only sits between the two in address order is another block.
+#[test]
+fn a_jump_to_the_flag_read_keeps_the_compare() {
+    let code = [
+        0x81, 0xe9, 0xcd, 0xab, 0x37, 0x13, // ASM: sub ecx, 0x1337abcd
+        0xe9, 0x04, 0x00, 0x00, 0x00, // ASM: jmp 0x40100f
+        0x83, 0xc0, 0x01, // ASM: add eax, 1
+        0xc3, // ASM: ret
+        0x74, 0x05, // ASM: jz 0x401016
+        0xe9, 0xf5, 0xff, 0xff, 0xff, // ASM: jmp 0x40100b
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+        0xc3, // ASM: ret
+    ];
+    assert_eq!(
+        steps(&code),
+        ["borer://solve/0x401000 (compares against 0x1337abcd: solve tries it as a1)"]
+    );
+}
+
+/// A call may change `rcx`, so a compare of `ecx` after the call is not
+/// shown to be `a1`.
+#[test]
+fn a_call_hides_the_argument_register() {
+    let code = [
+        0x89, 0xc8, // ASM: mov eax, ecx
+        0xe8, 0x0a, 0x00, 0x00, 0x00, // ASM: call 0x401011
+        0x81, 0xf9, 0xcd, 0xab, 0x37, 0x13, // ASM: cmp ecx, 0x1337abcd
+        0x0f, 0x94, 0xc0, // ASM: sete al
+        0xc3, // ASM: ret
+        0xc3, // ASM: ret
+    ];
+    assert_eq!(
+        steps(&code),
+        ["borer://solve/0x401000 (compares against 0x1337abcd: not shown to be a1)"]
+    );
+}
+
+/// A byte copy does not make the whole compared register the argument.
+#[test]
+fn a_partial_copy_is_not_the_argument() {
+    let code = [
+        0x31, 0xd2, // ASM: xor edx, edx
+        0x88, 0xca, // ASM: mov dl, cl
+        0x81, 0xfa, 0xcd, 0xab, 0x37, 0x13, // ASM: cmp edx, 0x1337abcd
+        0x0f, 0x94, 0xc0, // ASM: sete al
+        0xc3, // ASM: ret
+    ];
+    assert_eq!(
+        steps(&code),
+        ["borer://solve/0x401000 (compares against 0x1337abcd: not shown to be a1)"]
+    );
+}
+
+/// On System V the first argument arrives in `rdi`. `rcx` is the fourth.
+#[test]
+fn an_elf_argument_is_named_from_its_register() {
+    let rdi = [
+        0x81, 0xff, 0xcd, 0xab, 0x37, 0x13, // ASM: cmp edi, 0x1337abcd
+        0x0f, 0x94, 0xc0, // ASM: sete al
+        0xc3, // ASM: ret
+    ];
+    let mut p = image(Arch::X86_64, &rdi, &[]);
+    p.format = BinaryFormat::Elf;
+    let a = Analysis::compute(&p);
+    let got = next_steps(&p, &a, &Overlay::default(), 0x40_1000);
+    assert_eq!(
+        got.as_slice(),
+        ["borer://solve/0x401000 (compares against 0x1337abcd: solve tries it as a1)"]
+    );
+
+    let rcx = [
+        0x89, 0xf8, // ASM: mov eax, edi
+        0x81, 0xf9, 0xcd, 0xab, 0x37, 0x13, // ASM: cmp ecx, 0x1337abcd
+        0x0f, 0x94, 0xc0, // ASM: sete al
+        0xc3, // ASM: ret
+    ];
+    let mut p = image(Arch::X86_64, &rcx, &[]);
+    p.format = BinaryFormat::Elf;
+    let a = Analysis::compute(&p);
+    let got = next_steps(&p, &a, &Overlay::default(), 0x40_1000);
+    assert_eq!(
+        got.as_slice(),
+        ["borer://solve/0x401000 (compares against 0x1337abcd: solve tries it as a4)"]
     );
 }
 

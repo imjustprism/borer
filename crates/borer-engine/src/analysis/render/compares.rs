@@ -2,26 +2,30 @@
 //! constants it mixes into a hash.
 
 use super::*;
+use crate::analysis::decompile::abi::Conv;
 
 /// Where a compared value comes from, so a hint does not call every one
 /// the function's first argument.
 pub(super) enum Compared {
-    /// The architecture's first integer argument, never written before the
-    /// compare.
-    Argument,
+    /// Argument `n` (counting from 1) still in the register the convention
+    /// passed it in.
+    Argument(u8),
     /// A register copied from a call's return register.
     CallResult,
-    /// Anything else: a local, a memory operand, or a value the scan cannot
-    /// show is the argument.
+    /// Anything else: a local, a memory operand, a later argument the scan
+    /// cannot place, or a value the scan cannot show is an argument.
     Other,
 }
 
 /// The immediate `instrs[at]` compares, when it does.
 ///
-/// A `cmp` or `test` always does. A `sub`, `xor` or `and` does only when a
-/// later instruction reads the flags it wrote and nothing reads the result
-/// first: `sub ecx, imm; jz` is a compare, and `sub edx, imm; xor esi, edx`
-/// is arithmetic whose flags the `xor` overwrites.
+/// A `cmp` or `test` always does. A `sub`, `xor` or `and` does when a
+/// later instruction reads the flags it wrote before anything overwrites
+/// them. The scan follows a direct jump, so a block that only sits between
+/// the two in address order cannot hide the check. Copying the result does
+/// not hide it either: `sub ecx, imm; mov edx, ecx; sete al` still
+/// compares, and `sub edx, imm; xor esi, edx` does not, because the `xor`
+/// overwrites the flags.
 ///
 /// # Arguments
 ///
@@ -39,54 +43,85 @@ pub(super) fn compare_immediate(instrs: &[Instruction], at: usize) -> Option<u64
         return None;
     }
     let value = immediate_of(i)?;
-    if plain {
-        return Some(value);
+    if plain || flags_decide(instrs, at) {
+        Some(value)
+    } else {
+        None
     }
-    if i.op0_kind() != OpKind::Register {
-        return None;
-    }
-    let dest = i.op0_register().full_register();
-    let mut factory = InstructionInfoFactory::new();
-    let mut read = false;
-    for n in instrs.iter().skip(at + 1).take(8) {
-        let (reads, writes) = reg_touch(&mut factory, n, dest);
-        read |= reads && !writes;
-        if reads_flags(n) {
-            return (!read).then_some(value);
-        }
-        if n.rflags_modified() != 0 {
-            return None;
-        }
-        if writes && !reads {
-            read = false;
-        }
-    }
-    None
 }
 
-/// Says whether the value compared at `at` is the first argument or a
-/// call's result.
+/// Whether an instruction after `at` reads the flags `instrs[at]` wrote
+/// before another instruction overwrites them.
 ///
-/// The scan walks back to the entry. A copy (`mov ecx, eax`) follows the
-/// source register. A call defines the return register and nothing else
-/// this scan tracks, so `call; mov ecx, eax; cmp ecx, imm` is a call
-/// result and a `cmp ecx, imm` with `ecx` still intact is the argument.
-/// On a 32-bit target the first argument arrives on the stack, so a
-/// register compare is never claimed as one.
+/// # Arguments
+///
+/// * `instrs` - The function's instructions, in address order.
+/// * `at` - The instruction that wrote the flags.
+fn flags_decide(instrs: &[Instruction], at: usize) -> bool {
+    let mut cursor = at.saturating_add(1);
+    let mut seen = [usize::MAX; 8];
+    let mut nseen = 0usize;
+    while nseen < seen.len() {
+        if cursor >= instrs.len() || seen[..nseen].contains(&cursor) {
+            return false;
+        }
+        seen[nseen] = cursor;
+        nseen += 1;
+        let n = &instrs[cursor];
+        if reads_flags(n) {
+            return true;
+        }
+        if n.rflags_modified() != 0 {
+            return false;
+        }
+        if n.flow_control() == FlowControl::UnconditionalBranch {
+            let target = n.near_branch_target();
+            let Some(pos) = instrs.iter().position(|i| i.ip() == target) else {
+                return false;
+            };
+            cursor = pos;
+            continue;
+        }
+        if matches!(
+            n.flow_control(),
+            FlowControl::Return
+                | FlowControl::IndirectBranch
+                | FlowControl::Interrupt
+                | FlowControl::Exception
+        ) {
+            return false;
+        }
+        cursor += 1;
+    }
+    false
+}
+
+/// Says whether the value compared at `at` is an argument or a call's
+/// result.
+///
+/// The scan walks back to the entry. A copy of every compared byte
+/// (`mov ecx, eax`) follows the source register. A copy of fewer bytes
+/// (`mov dl, cl` under `cmp edx, imm`) does not. A call defines the return
+/// register and ends the trace of every register it may clobber, so
+/// `call; cmp ecx, imm` is not an argument on either x64 convention. A
+/// register that still holds an argument is that argument's number in
+/// `conv`. A convention with no register arguments never claims one.
 ///
 /// # Arguments
 ///
 /// * `instrs` - The function's instructions, in address order.
 /// * `at` - The comparing instruction.
-/// * `bits` - The decoder bitness.
-pub(super) fn compared_source(instrs: &[Instruction], at: usize, bits: u32) -> Compared {
+/// * `conv` - The function's calling convention.
+pub(super) fn compared_source(instrs: &[Instruction], at: usize, conv: &Conv) -> Compared {
     let Some(i) = instrs.get(at) else {
         return Compared::Other;
     };
-    if i.op0_kind() != OpKind::Register || bits != 64 {
+    if i.op0_kind() != OpKind::Register {
         return Compared::Other;
     }
-    let mut reg = i.op0_register().full_register();
+    let compared = i.op0_register();
+    let need = compared.size();
+    let mut reg = compared.full_register();
     for n in instrs[..at].iter().rev() {
         if matches!(
             n.flow_control(),
@@ -95,9 +130,12 @@ pub(super) fn compared_source(instrs: &[Instruction], at: usize, bits: u32) -> C
             if reg == Register::RAX {
                 return Compared::CallResult;
             }
+            if conv.volatile.iter().any(|r| *r == reg) {
+                return Compared::Other;
+            }
             continue;
         }
-        if let Some(src) = copied_from(n, reg) {
+        if let Some(src) = copied_from(n, reg, need) {
             reg = src;
             continue;
         }
@@ -105,11 +143,13 @@ pub(super) fn compared_source(instrs: &[Instruction], at: usize, bits: u32) -> C
             return Compared::Other;
         }
     }
-    if reg == Register::RCX {
-        Compared::Argument
-    } else {
-        Compared::Other
-    }
+    let Some(pos) = conv.args.iter().position(|r| *r == reg) else {
+        return Compared::Other;
+    };
+    let Some(n) = pos.checked_add(1).and_then(|n| u8::try_from(n).ok()) else {
+        return Compared::Other;
+    };
+    Compared::Argument(n)
 }
 
 /// The first immediate operand of `i`.
@@ -152,9 +192,17 @@ fn reg_touch(factory: &mut InstructionInfoFactory, n: &Instruction, reg: Registe
     (read, write)
 }
 
-/// The register a `mov` into `dest` copies, when that is all the
-/// instruction does.
-fn copied_from(n: &Instruction, dest: Register) -> Option<Register> {
+/// The register a full-width `mov` into `dest` copies.
+///
+/// A write narrower than `need` bytes, other than a 32-bit write that
+/// zero-extends, does not define the compared value.
+///
+/// # Arguments
+///
+/// * `n` - The instruction that may be the copy.
+/// * `dest` - The full register the compare reads.
+/// * `need` - How many bytes of `dest` the compare reads.
+fn copied_from(n: &Instruction, dest: Register, need: usize) -> Option<Register> {
     if n.mnemonic() != Mnemonic::Mov
         || n.op_count() != 2
         || n.op0_kind() != OpKind::Register
@@ -163,5 +211,17 @@ fn copied_from(n: &Instruction, dest: Register) -> Option<Register> {
     {
         return None;
     }
-    Some(n.op1_register().full_register())
+    let written = n.op0_register();
+    let source = n.op1_register();
+    if !covers(written, need) || !covers(source, need) {
+        return None;
+    }
+    Some(source.full_register())
+}
+
+/// Whether a write of `reg` defines at least `need` bytes.
+///
+/// A 32-bit write zero-extends, so it defines the whole register.
+fn covers(reg: Register, need: usize) -> bool {
+    reg.size() >= need || reg.size() == 4 && need <= 8
 }
