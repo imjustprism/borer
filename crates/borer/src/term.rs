@@ -360,6 +360,10 @@ mod tests {
 
     /// A pipe stays quiet even when color is forced, and a frame that was
     /// never drawn has nothing to clear.
+    ///
+    /// # Panics
+    ///
+    /// When a pipe draws a spinner, or clearing an undrawn line writes.
     #[test]
     fn a_pipe_draws_no_spinner_and_an_undrawn_line_is_not_cleared() {
         assert!(!show_spinner(false));
