@@ -523,7 +523,10 @@ fn fastfail(p: &Program, a: &Analysis, entry: u64) -> bool {
     })
 }
 
-/// Whether the instructions after the call test `eax`.
+/// Whether the instructions after the call test the value it returned.
+///
+/// A full-width copy (`mov ebx, eax`) carries the value. A write that is
+/// not such a copy, such as `mov eax, 1`, drops it.
 fn result_tested(p: &Program, va: u64) -> bool {
     let Some(bits) = p.arch.bitness() else {
         return false;
@@ -542,6 +545,10 @@ fn result_tested(p: &Program, va: u64) -> bool {
     ) {
         return false;
     }
+    let mut held = [Register::None; 5];
+    held[0] = Register::RAX;
+    let mut count = 1usize;
+    let mut info = InstructionInfoFactory::new();
     for _ in 0..4 {
         if !decoder.can_decode() {
             return false;
@@ -550,14 +557,96 @@ fn result_tested(p: &Program, va: u64) -> bool {
         if next.is_invalid() {
             return false;
         }
-        if matches!(next.mnemonic(), Mnemonic::Test | Mnemonic::Cmp)
-            && next.op0_kind() == OpKind::Register
-            && next.op0_register().full_register() == Register::RAX
-        {
+        if tests_held(&next, &held[..count]) {
             return true;
         }
+        if let Some(dest) = copied_to(&next, &held[..count]) {
+            if count < held.len() && !held[..count].contains(&dest) {
+                held[count] = dest;
+                count += 1;
+            }
+            continue;
+        }
+        forget_writes(&mut info, &next, &mut held, &mut count);
     }
     false
+}
+
+/// Whether `i` tests or compares a register in `held`.
+///
+/// # Arguments
+///
+/// * `i` - One instruction after the call.
+/// * `held` - Full registers that still hold the returned value.
+fn tests_held(i: &Instruction, held: &[Register]) -> bool {
+    matches!(i.mnemonic(), Mnemonic::Test | Mnemonic::Cmp)
+        && i.op0_kind() == OpKind::Register
+        && held.contains(&i.op0_register().full_register())
+}
+
+/// The full register a full-width `mov` copies out of `held`.
+///
+/// A write narrower than 32 bits does not carry the returned value.
+///
+/// # Arguments
+///
+/// * `i` - One instruction after the call.
+/// * `held` - Full registers that still hold the returned value.
+///
+/// # Returns
+///
+/// The destination, or `None` when `i` is not that copy.
+fn copied_to(i: &Instruction, held: &[Register]) -> Option<Register> {
+    if i.mnemonic() != Mnemonic::Mov
+        || i.op_count() != 2
+        || i.op0_kind() != OpKind::Register
+        || i.op1_kind() != OpKind::Register
+        || i.op0_register().size() < 4
+        || !held.contains(&i.op1_register().full_register())
+    {
+        return None;
+    }
+    Some(i.op0_register().full_register())
+}
+
+/// Drops every register in `held` that `i` writes.
+///
+/// # Arguments
+///
+/// * `factory` - Reused across the instructions after the call.
+/// * `i` - One instruction after the call.
+/// * `held` - Full registers that still hold the returned value.
+/// * `count` - How many leading slots of `held` are live.
+fn forget_writes(
+    factory: &mut InstructionInfoFactory,
+    i: &Instruction,
+    held: &mut [Register],
+    count: &mut usize,
+) {
+    let mut doomed = [Register::None; 5];
+    let mut n = 0usize;
+    for ur in factory.info(i).used_registers() {
+        let reg = ur.register().full_register();
+        let writes = matches!(
+            ur.access(),
+            OpAccess::Write | OpAccess::ReadWrite | OpAccess::CondWrite | OpAccess::ReadCondWrite
+        );
+        if writes
+            && held[..*count].contains(&reg)
+            && n < doomed.len()
+            && !doomed[..n].contains(&reg)
+        {
+            doomed[n] = reg;
+            n += 1;
+        }
+    }
+    for reg in doomed[..n].iter().copied() {
+        let Some(at) = held[..*count].iter().position(|r| *r == reg) else {
+            continue;
+        };
+        *count -= 1;
+        held[at] = held[*count];
+    }
 }
 
 /// Whether the registry APIs write the program's own settings.

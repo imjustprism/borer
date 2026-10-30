@@ -221,3 +221,24 @@ fn a_constant_holding_fastfail_bytes_keeps_the_check() {
     let text = debugger_map(&code);
     assert!(text.contains("IsDebuggerPresent"), "{text}");
 }
+
+/// A copy of the returned value is still the check. An overwrite is not.
+#[test]
+fn a_copied_check_stays_and_an_overwrite_does_not() {
+    let copied = [
+        0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0x89, 0xc3, // ASM: mov ebx, eax
+        0x85, 0xdb, // ASM: test ebx, ebx
+        0xc3, // ASM: ret
+    ];
+    let text = debugger_map(&copied);
+    assert!(text.contains("IsDebuggerPresent"), "{text}");
+    let overwritten = [
+        0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+        0x85, 0xc0, // ASM: test eax, eax
+        0xc3, // ASM: ret
+    ];
+    let text = debugger_map(&overwritten);
+    assert!(!text.contains("IsDebuggerPresent"), "{text}");
+}
