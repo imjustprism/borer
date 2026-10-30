@@ -257,11 +257,11 @@ fn check_step(
         ),
         compares::Compared::CallResult => (
             format!("borer://solve/{:#x}", f.entry),
-            "a call result, not an argument".to_string(),
+            "a call result, not an argument".to_owned(),
         ),
         compares::Compared::Other => (
             format!("borer://solve/{:#x}", f.entry),
-            "not shown to be a1".to_string(),
+            "not shown to be a1".to_owned(),
         ),
     };
     Some(format!("{uri} (compares against {value:#x}: {note})"))

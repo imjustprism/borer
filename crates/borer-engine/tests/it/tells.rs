@@ -49,7 +49,7 @@ fn cpuid_and_rdtsc_are_labeled_by_what_the_code_does() {
     assert!(!timing.contains("rdtsc (read)"), "{timing}");
 }
 
-/// A bare `in` is a port read. The VMware backdoor is the `VMXh` magic.
+/// A bare `in` is a port read. The `VMware` backdoor is the `VMXh` magic.
 #[test]
 fn a_bare_in_is_a_port_read_and_the_backdoor_magic_is_named() {
     let bare = report(&[
@@ -255,9 +255,10 @@ fn a_breakpoint_scan_needs_a_loop_and_an_exit() {
     assert!(patch.contains("breakpoint patch"), "{patch}");
 }
 
-/// `SetUnhandledExceptionFilter` of an executable address, followed by one
-/// instruction that does not decode, is a tell. The call alone is not, and
-/// neither is the bad instruction when the address is not executable.
+/// An exception filter over an illegal opcode is a tell.
+///
+/// The call alone is not, and neither is the bad instruction when its
+/// address is not executable.
 #[test]
 fn an_exception_filter_over_an_illegal_opcode_is_a_tell() {
     let trap = [

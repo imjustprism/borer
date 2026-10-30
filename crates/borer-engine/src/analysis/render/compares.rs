@@ -137,7 +137,7 @@ pub(super) fn compared_source(instrs: &[Instruction], at: usize, conv: &Conv) ->
             if reg == Register::RAX {
                 return Compared::CallResult;
             }
-            if conv.volatile.iter().any(|r| *r == reg) {
+            if conv.volatile.contains(&reg) {
                 return Compared::Other;
             }
             continue;

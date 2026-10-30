@@ -3,7 +3,7 @@
 //! A bare `cpuid` is a feature probe, a bare `rdtsc` is one read, and a
 //! bare `in` is a port read. The labels here say otherwise only when the
 //! surrounding instructions show a hypervisor leaf, a subtracted pair of
-//! reads, or the VMware backdoor. The same pass reports the patterns a
+//! reads, or the `VMware` backdoor. The same pass reports the patterns a
 //! single instruction does not hold: a PEB read, a debug-register check,
 //! a debugger window, a debug spawn, a scan or patch of `0xCC`, and an
 //! illegal opcode after an exception filter.
@@ -131,7 +131,7 @@ fn cpuid_hypervisor(instrs: &[Instruction], at: usize) -> bool {
     leaf || bit
 }
 
-/// Whether the `in` at `at` is aimed at the VMware backdoor.
+/// Whether the `in` at `at` is aimed at the `VMware` backdoor.
 ///
 /// The backdoor is port `0x5658`, and the call sets `eax` to `VMXh`
 /// (`0x564d5868`) first. A bare `in` has neither.
