@@ -847,6 +847,139 @@ fn bytes_after_the_certificate_table_are_overlay() {
     );
 }
 
+/// Builds a PE32 image, entered at the first byte of the first section.
+///
+/// The image base is `0x400000`: a 32-bit file stores it in four bytes.
+/// [`pe`] builds the 64-bit form at [`IMAGE_BASE`].
+///
+/// # Arguments
+///
+/// * `secs` - The sections, in table order.
+/// * `dirs` - Data directory entries as `(slot, rva, size)`.
+fn pe32(secs: &[Sec], dirs: &[(usize, u32, u32)]) -> Vec<u8> {
+    const OPTIONAL32: usize = 224;
+    const BASE: u32 = 0x0040_0000;
+    let mut b = vec![0u8; HEADERS];
+    b[..2].copy_from_slice(b"MZ");
+    put32(&mut b, 0x3c, u32::try_from(PE_AT).expect("fits"));
+    b[PE_AT..PE_AT + 4].copy_from_slice(b"PE\0\0");
+    let coff = PE_AT + 4;
+    put16(&mut b, coff, 0x014c);
+    put16(
+        &mut b,
+        coff + 2,
+        u16::try_from(secs.len()).expect("few sections"),
+    );
+    put16(&mut b, coff + 16, u16::try_from(OPTIONAL32).expect("fits"));
+    put16(&mut b, coff + 18, 0x0102);
+    let opt = coff + 20;
+    put16(&mut b, opt, 0x10b);
+    put32(&mut b, opt + 16, secs.first().map_or(0, |s| s.rva));
+    put32(&mut b, opt + 28, BASE);
+    put32(&mut b, opt + 32, 0x1000);
+    put32(&mut b, opt + 36, u32::try_from(FILE_ALIGN).expect("fits"));
+    put16(&mut b, opt + 48, 6);
+    let image_end = secs
+        .iter()
+        .map(|s| s.rva.saturating_add(s.vsize.max(1)))
+        .max()
+        .unwrap_or(0x1000);
+    put32(&mut b, opt + 56, image_end.div_ceil(0x1000) * 0x1000);
+    put32(&mut b, opt + 60, u32::try_from(HEADERS).expect("fits"));
+    put16(&mut b, opt + 68, 3);
+    put32(&mut b, opt + 72, 0x10_0000);
+    put32(&mut b, opt + 76, 0x1000);
+    put32(&mut b, opt + 80, 0x10_0000);
+    put32(&mut b, opt + 84, 0x1000);
+    put32(&mut b, opt + 92, 16);
+    for &(slot, rva, size) in dirs {
+        put32(&mut b, opt + 96 + slot * 8, rva);
+        put32(&mut b, opt + 96 + slot * 8 + 4, size);
+    }
+    let mut row = opt + OPTIONAL32;
+    let mut at = HEADERS;
+    for s in secs {
+        let raw = s.raw_size.unwrap_or_else(|| {
+            u32::try_from(s.data.len().div_ceil(FILE_ALIGN) * FILE_ALIGN).expect("fits")
+        });
+        let name = s.name.as_bytes();
+        b[row..row + name.len()].copy_from_slice(name);
+        put32(&mut b, row + 8, s.vsize);
+        put32(&mut b, row + 12, s.rva);
+        put32(&mut b, row + 16, raw);
+        put32(&mut b, row + 20, u32::try_from(at).expect("fits"));
+        put32(&mut b, row + 36, s.chars);
+        row += 40;
+        at += s.data.len().div_ceil(FILE_ALIGN) * FILE_ALIGN;
+    }
+    assert!(row <= HEADERS, "the section table runs into the sections");
+    for s in secs {
+        b.extend_from_slice(&s.data);
+        b.resize(b.len().div_ceil(FILE_ALIGN) * FILE_ALIGN, 0);
+    }
+    b
+}
+
+/// Stops the TLS list at a slot below the image base and keeps the callbacks
+/// before it.
+///
+/// The strict parse drops the whole directory when it sees that slot. The
+/// earlier callback still ran, on both a 64-bit image and the 32-bit layout
+/// whose second slot is `0xf4`. A list that ends on a null stays one callback.
+#[test]
+fn a_bad_tls_slot_keeps_the_earlier_callback() {
+    let _serial = serial();
+    const TLS_DIR: usize = 9;
+    let good64 = IMAGE_BASE + 0x1000;
+    let mut data64 = vec![0u8; 0x40];
+    put64(&mut data64, 24, IMAGE_BASE + 0x2000 + 0x28);
+    put64(&mut data64, 0x28, good64);
+    put64(&mut data64, 0x30, 0xf4);
+    let plus = pe(
+        &[
+            Sec::sound(".text", 0x1000, text(), CODE),
+            Sec::sound(".rdata", 0x2000, data64, DATA),
+        ],
+        &[(TLS_DIR, 0x2000, 40)],
+    );
+    assert_eq!(load(plus).headers.tls_callbacks, vec![good64]);
+
+    const BASE: u64 = 0x400000;
+    let good32 = BASE + 0x1000;
+    let mut data32 = vec![0u8; 0x40];
+    put32(
+        &mut data32,
+        12,
+        u32::try_from(BASE + 0x2000 + 0x20).expect("fits"),
+    );
+    put32(&mut data32, 0x20, u32::try_from(good32).expect("fits"));
+    put32(&mut data32, 0x24, 0xf4);
+    let thirty = pe32(
+        &[
+            Sec::sound(".text", 0x1000, text(), CODE),
+            Sec::sound(".rdata", 0x2000, data32, DATA),
+        ],
+        &[(TLS_DIR, 0x2000, 24)],
+    );
+    assert_eq!(load(thirty).headers.tls_callbacks, vec![good32]);
+
+    let mut clean = vec![0u8; 0x30];
+    put32(
+        &mut clean,
+        12,
+        u32::try_from(BASE + 0x2000 + 0x18).expect("fits"),
+    );
+    put32(&mut clean, 0x18, u32::try_from(good32).expect("fits"));
+    let one = pe32(
+        &[
+            Sec::sound(".text", 0x1000, text(), CODE),
+            Sec::sound(".rdata", 0x2000, clean, DATA),
+        ],
+        &[(TLS_DIR, 0x2000, 24)],
+    );
+    assert_eq!(load(one).headers.tls_callbacks, vec![good32]);
+}
+
 /// Header fields the Windows loader ignores do not refuse the file.
 ///
 /// A damaged Rich header in the DOS stub and a data directory count past

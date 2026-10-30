@@ -16,7 +16,7 @@ use goblin::elf::Elf;
 use goblin::pe::PE;
 use goblin::pe::data_directories::DataDirectoryType;
 
-use crate::num::{u16_le, u32_le};
+use crate::num::{u16_le, u32_le, u64_le};
 use crate::program::Section;
 
 /// A handler the x64 unwind tables register for one function.
@@ -552,6 +552,117 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     (y, m, d)
 }
 
+/// Returns the TLS callback addresses, keeping every one that falls in the
+/// image and stopping at the first slot that does not.
+///
+/// A slot below the image base makes the strict parse drop the whole
+/// directory. The callbacks before that slot still ran. When the directory
+/// itself cannot be read, the parsed list is kept.
+///
+/// # Arguments
+///
+/// * `pe` - The parsed file.
+/// * `bytes` - The file bytes.
+/// * `sections` - The loader's sections.
+fn tls_callbacks(pe: &PE<'_>, bytes: &[u8], sections: &[Section]) -> Vec<u64> {
+    read_tls_callbacks(pe, bytes, sections).unwrap_or_else(|| {
+        pe.tls_data
+            .as_ref()
+            .map(|t| t.callbacks.clone())
+            .unwrap_or_default()
+    })
+}
+
+/// Reads the callback list from the TLS directory.
+///
+/// # Returns
+///
+/// The callbacks, or `None` when the directory is absent or its
+/// `AddressOfCallBacks` cannot be read.
+fn read_tls_callbacks(pe: &PE<'_>, bytes: &[u8], sections: &[Section]) -> Option<Vec<u64>> {
+    let opt = pe.header.optional_header.as_ref()?;
+    let dir = opt
+        .data_directories
+        .dirs()
+        .find(|(kind, _)| *kind == DataDirectoryType::TlsTable)
+        .map(|(_, d)| d)?;
+    if dir.virtual_address == 0 || dir.size == 0 {
+        return None;
+    }
+    let stride = if pe.is_64 { 8u64 } else { 4 };
+    let at = if pe.is_64 { 24 } else { 12 };
+    let width = usize::try_from(stride).ok()?;
+    let dir_bytes = file_slice(
+        sections,
+        pe.image_base,
+        bytes,
+        u64::from(dir.virtual_address),
+        at + width,
+    )?;
+    let callbacks = if pe.is_64 {
+        u64_le(dir_bytes, at)?
+    } else {
+        u64::from(u32_le(dir_bytes, at)?)
+    };
+    if callbacks == 0 {
+        return Some(Vec::new());
+    }
+    let rva = callbacks.checked_sub(pe.image_base)?;
+    let mut out = Vec::new();
+    for i in 0..64u64 {
+        let Some(slot_rva) = rva.checked_add(i * stride) else {
+            break;
+        };
+        let Some(slot_bytes) = file_slice(sections, pe.image_base, bytes, slot_rva, width) else {
+            break;
+        };
+        let Some(slot) = (if pe.is_64 {
+            u64_le(slot_bytes, 0)
+        } else {
+            u32_le(slot_bytes, 0).map(u64::from)
+        }) else {
+            break;
+        };
+        if slot == 0 || !sections.iter().any(|s| in_section(s, slot)) {
+            break;
+        }
+        out.push(slot);
+    }
+    Some(out)
+}
+
+/// Reports whether `va` falls in `s`.
+fn in_section(s: &Section, va: u64) -> bool {
+    let start = s.va.0;
+    va >= start && va < start.saturating_add(s.vsize.max(s.file_size))
+}
+
+/// Returns `n` file bytes at `rva`.
+///
+/// # Returns
+///
+/// The bytes, or `None` when `rva` is not backed by a section.
+fn file_slice<'a>(
+    sections: &[Section],
+    image_base: u64,
+    bytes: &'a [u8],
+    rva: u64,
+    n: usize,
+) -> Option<&'a [u8]> {
+    let va = image_base.wrapping_add(rva);
+    let s = sections.iter().find(|s| {
+        let start = s.va.0;
+        va >= start && va < start.saturating_add(s.file_size)
+    })?;
+    let off = usize::try_from(s.file_off.0.checked_add(va - s.va.0)?).ok()?;
+    let end = off.checked_add(n)?;
+    let sec_end = usize::try_from(s.file_off.0.checked_add(s.file_size)?).ok()?;
+    if end > sec_end {
+        return None;
+    }
+    bytes.get(off..end)
+}
+
 /// Reads the PE header facts.
 ///
 /// Mitigations come from the optional header's DLL characteristics and the
@@ -641,11 +752,7 @@ pub(crate) fn from_pe(
         }
     }
     h.libraries = pe.libraries.iter().map(|l| (*l).to_owned()).collect();
-    h.tls_callbacks = pe
-        .tls_data
-        .as_ref()
-        .map(|t| t.callbacks.clone())
-        .unwrap_or_default();
+    h.tls_callbacks = tls_callbacks(pe, bytes, sections);
     h.tls_index = pe
         .tls_data
         .as_ref()
