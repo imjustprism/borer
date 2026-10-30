@@ -515,7 +515,10 @@ fn result_tested(p: &Program, va: u64) -> bool {
         return false;
     }
     let call = decoder.decode();
-    if call.flow_control() != FlowControl::Call {
+    if !matches!(
+        call.flow_control(),
+        FlowControl::Call | FlowControl::IndirectCall
+    ) {
         return false;
     }
     for _ in 0..4 {

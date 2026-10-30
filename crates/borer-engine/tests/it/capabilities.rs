@@ -112,6 +112,19 @@ fn a_crt_import_is_a_capability_only_when_a_caller_checks_it() {
     ];
     let text = map(&checked, "IsDebuggerPresent");
     assert!(text.contains("IsDebuggerPresent"), "{text}");
+    let indirect = [
+        0xff, 0x15, 0xfa, 0x0f, 0x00, 0x00, // ASM: call qword [rip+0xffa]
+        0x85, 0xc0, // ASM: test eax, eax
+        0xc3, // ASM: ret
+    ];
+    let text = map(&indirect, "IsDebuggerPresent");
+    assert!(text.contains("IsDebuggerPresent"), "{text}");
+    let bare = [
+        0xff, 0x15, 0xfa, 0x0f, 0x00, 0x00, // ASM: call qword [rip+0xffa]
+        0xc3, // ASM: ret
+    ];
+    let text = map(&bare, "IsDebuggerPresent");
+    assert!(!text.contains("IsDebuggerPresent"), "{text}");
     let fail = [
         0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
         0x85, 0xc0, // ASM: test eax, eax
