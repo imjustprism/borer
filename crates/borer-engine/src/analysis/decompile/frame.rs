@@ -11,7 +11,12 @@
 //! float. A constant stored there is the float with its bits
 //! ([`Frame::store`]), never the integer converted. A slot whose
 //! votes conflict, or that shares bytes with another, keeps the type of
-//! its first access, as before: a conflict never picks a side.
+//! its first access, as before: a conflict never picks a float.
+//!
+//! A slot both loaded and stored at 64 bits, with no float access and no
+//! wider access, whose eight bytes overlap no other slot, is `uint64_t`.
+//! A narrower first access must not turn that 8-byte read into a cast
+//! through a 4-byte local.
 //!
 //! Each slot solved as a float is a choice point ([`Site::Slot`]): a
 //! decompile whose [`Choices`] render it literally leaves it unsolved, so
@@ -58,6 +63,10 @@ struct Votes {
     int: bool,
     /// Some access stored a value that is no constant.
     stored: bool,
+    /// Some access read an integer at 64 bits.
+    load64: bool,
+    /// Some access stored an integer at 64 bits.
+    store64: bool,
 }
 
 /// The frame's slots, their votes and, once solved, their types.
@@ -85,13 +94,56 @@ impl Frame {
             return;
         }
         let v = self.votes.entry(k).or_default();
-        v.widths.insert(access.bits());
+        let bits = access.bits();
+        v.widths.insert(bits);
         match access {
             Access::Load(Ty::F32 | Ty::F64) | Access::StoreFloat(_) => v.float = true,
-            Access::Load(_) => v.int = true,
-            Access::StoreInt(_) => (v.int, v.stored) = (true, true),
-            Access::StoreConst(_) => {}
+            Access::Load(_) => {
+                v.int = true;
+                if bits >= 64 {
+                    v.load64 = true;
+                }
+            }
+            Access::StoreInt(_) => {
+                v.int = true;
+                v.stored = true;
+                if bits >= 64 {
+                    v.store64 = true;
+                }
+            }
+            Access::StoreConst(_) => {
+                if bits >= 64 {
+                    v.store64 = true;
+                }
+            }
         }
+    }
+
+    /// Returns whether a slot holds an 8-byte integer.
+    ///
+    /// It was loaded and stored at 64 bits, nothing wider and no float
+    /// touched it, and those eight bytes overlap no other slot. A narrower
+    /// access then does not decide the declaration.
+    ///
+    /// # Arguments
+    ///
+    /// * `k` - The slot's offset.
+    pub(super) fn wide(&self, k: i64) -> bool {
+        let Some(v) = self.votes.get(&k) else {
+            return false;
+        };
+        if v.float || !v.load64 || !v.store64 || v.widths.iter().any(|b| *b > 64) {
+            return false;
+        }
+        let end = k.saturating_add(8);
+        self.votes.iter().all(|(&o, other)| {
+            if o == k {
+                return true;
+            }
+            let len = other.widths.last().map_or(1, |b| i64::from(b / 8).max(1));
+            let other_end = o.saturating_add(len);
+            other_end <= k || end <= o
+        })
     }
 
     /// Solves the slots' types from the votes recorded so far, and stops
@@ -234,5 +286,43 @@ mod tests {
         let kept = votes(&literal);
         assert_eq!(kept.ty(-0xc), None);
         assert_eq!(kept.floats().count(), 0);
+    }
+
+    /// A slot loaded and stored at 64 bits is wide even after a dword
+    /// store. A float, a 128-bit access, or a neighbor in those eight
+    /// bytes is not.
+    ///
+    /// # Panics
+    ///
+    /// When the check fails.
+    #[test]
+    fn a_qword_slot_is_wide_and_a_conflict_is_not() {
+        let mut f = Frame::default();
+        f.note(-8, Access::StoreConst(Ty::U32));
+        f.note(-8, Access::StoreInt(Ty::U64));
+        f.note(-8, Access::Load(Ty::U64));
+        f.solve(&Choices::default());
+        assert!(f.wide(-8));
+        assert_eq!(f.ty(-8), None);
+
+        let mut float = Frame::default();
+        float.note(-8, Access::StoreFloat(Ty::F64));
+        float.note(-8, Access::Load(Ty::F64));
+        float.solve(&Choices::default());
+        assert!(!float.wide(-8));
+        assert_eq!(float.ty(-8), Some(Ty::F64));
+
+        let mut neighbor = Frame::default();
+        neighbor.note(-8, Access::StoreInt(Ty::U64));
+        neighbor.note(-8, Access::Load(Ty::U64));
+        neighbor.note(-4, Access::Load(Ty::U32));
+        neighbor.solve(&Choices::default());
+        assert!(!neighbor.wide(-8));
+
+        let mut wide_vec = Frame::default();
+        wide_vec.note(-16, Access::StoreInt(Ty::U128));
+        wide_vec.note(-16, Access::Load(Ty::U64));
+        wide_vec.solve(&Choices::default());
+        assert!(!wide_vec.wide(-16));
     }
 }

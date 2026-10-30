@@ -51,6 +51,7 @@ mod float_results;
 mod go;
 mod groundtruth;
 mod hashing;
+mod hkey;
 mod idioms;
 mod iocs;
 mod layout;

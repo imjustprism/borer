@@ -1737,6 +1737,9 @@ impl<'a> Exec<'_, 'a> {
 
     /// Records a variable's declaration type on first sight (emission pass only).
     ///
+    /// A slot loaded and stored at 64 bits, and not a float, is `uint64_t`
+    /// ahead of that first access.
+    ///
     /// # Arguments
     ///
     /// * `key` - The variable.
@@ -1744,7 +1747,12 @@ impl<'a> Exec<'_, 'a> {
     pub(in crate::analysis::decompile) fn declare(&mut self, key: Key, ty: Ty) {
         if self.emit && !self.ctx.declared.contains_key(&key) {
             let ty = match key {
-                Key::Slot(k) => self.ctx.frame.ty(k).unwrap_or(ty),
+                Key::Slot(k) => self
+                    .ctx
+                    .frame
+                    .ty(k)
+                    .or_else(|| self.ctx.frame.wide(k).then_some(Ty::U64))
+                    .unwrap_or(ty),
                 Key::Reg(_)
                 | Key::Param(_)
                 | Key::Tmp(_)
