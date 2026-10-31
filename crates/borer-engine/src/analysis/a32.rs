@@ -859,6 +859,8 @@ pub(crate) fn start_gap_function(
     for (i, f) in analysis.functions.iter().enumerate() {
         analysis.entry_index.insert(f.entry, i);
     }
+    analysis.clones = super::functions::shared_classes(&analysis.functions, |f| f.body_hash);
+    analysis.shapes = super::functions::shared_classes(&analysis.functions, |f| f.shape_hash);
     for (caller, callees) in added {
         for callee in callees {
             if let Some(f) = analysis.function_mut(callee)

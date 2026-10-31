@@ -572,12 +572,12 @@ fn a_gap_is_recovered_into_a_clone_of_the_analysis() {
     use borer_engine::analysis::{entry_or_gap, in_blocks};
     let text: [u16; 16] = [
         0xb510, // ASM: push {r4, lr}
-        0xf000, // ASM: bl 0xe
-        0xf804, // ASM: (bl, second half)
+        0xf000, // ASM: bl 0xc
+        0xf803, // ASM: (bl, second half)
         0x2000, // ASM: movs r0, #0
         0xbd10, // ASM: pop {r4, pc}
         0xbf00, // ASM: nop
-        0xbf00, // ASM: nop
+        0x2001, // ASM: movs r0, #1
         0x4770, // ASM: bx lr
         0xde00, // ASM: udf #0
         0x2001, // ASM: movs r0, #1
@@ -599,6 +599,8 @@ fn a_gap_is_recovered_into_a_clone_of_the_analysis() {
     assert_eq!(entry_or_gap(&p, &mut grown, ELF_TEXT + 2), Ok(ELF_TEXT));
     assert_eq!(entry_or_gap(&p, &mut grown, gap | 1), Ok(gap));
     assert!(in_blocks(&p, &grown, gap, gap));
+    assert_eq!(grown.clones_of(gap), [ELF_TEXT + 0xc, gap]);
+    assert_eq!(grown.shapes_of(gap), [ELF_TEXT + 0xc, gap]);
     assert!(a.function(gap).is_none());
     assert_eq!(grown.functions.len(), a.functions.len() + 1);
 }
