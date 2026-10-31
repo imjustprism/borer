@@ -220,30 +220,37 @@ fn timestamp_difference(n: &Instruction, saved: &[Register]) -> bool {
 
 /// Whether a later compare reads the difference, or a branch reads the
 /// flags the subtraction wrote.
+///
+/// A full-width copy of the difference is still that value. A later write
+/// drops only the register it writes.
 fn difference_checked(instrs: &[Instruction], at: usize) -> bool {
     let Some(sub) = instrs.get(at) else {
         return false;
     };
-    let diff = sub.op0_register().full_register();
+    let mut held = [Register::None; 4];
+    held[0] = sub.op0_register().full_register();
+    let mut count = 1usize;
     let mut flags = sub.rflags_modified();
-    let mut held = true;
     for n in instrs.iter().skip(at + 1).take(6) {
-        let reads = (0..n.op_count())
-            .any(|k| n.op_kind(k) == OpKind::Register && n.op_register(k).full_register() == diff);
-        if held && matches!(n.mnemonic(), Mnemonic::Cmp | Mnemonic::Test) && reads {
+        let reads = (0..n.op_count()).any(|k| {
+            n.op_kind(k) == OpKind::Register
+                && held[..count].contains(&n.op_register(k).full_register())
+        });
+        if matches!(n.mnemonic(), Mnemonic::Cmp | Mnemonic::Test) && reads {
             return true;
         }
         if n.flow_control() == FlowControl::ConditionalBranch && n.rflags_read() & flags != 0 {
             return true;
         }
         flags &= !n.rflags_modified();
-        if held
-            && n.op0_kind() == OpKind::Register
-            && n.op0_register().full_register() == diff
-            && !matches!(n.mnemonic(), Mnemonic::Cmp | Mnemonic::Test)
-        {
-            held = false;
+        if let Some(dest) = copied_timestamp(n, &held[..count]) {
+            if count < held.len() && !held[..count].contains(&dest) {
+                held[count] = dest;
+                count += 1;
+            }
+            continue;
         }
+        drop_timestamp(n, &mut held, &mut count);
     }
     false
 }

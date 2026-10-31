@@ -127,6 +127,23 @@ fn an_overwritten_timestamp_is_a_read() {
     assert!(!text.contains("rdtsc (timing)"), "{text}");
 }
 
+/// A compare of a copied difference is still a timing check.
+#[test]
+fn a_copied_timestamp_difference_is_timing() {
+    let text = report(&[
+        0x0f, 0x31, // ASM: rdtsc
+        0x89, 0xc3, // ASM: mov ebx, eax
+        0x0f, 0x31, // ASM: rdtsc
+        0x29, 0xd8, // ASM: sub eax, ebx
+        0x89, 0xc7, // ASM: mov edi, eax
+        0x85, 0xff, // ASM: test edi, edi
+        0x74, 0x00, // ASM: jz 0x40100e
+        0xc3, // ASM: ret
+    ]);
+    assert!(text.contains("rdtsc (timing)"), "{text}");
+    assert!(!text.contains("rdtsc (read)"), "{text}");
+}
+
 /// A bare `in` is a port read. The `VMware` backdoor is the `VMXh` magic.
 #[test]
 fn a_bare_in_is_a_port_read_and_the_backdoor_magic_is_named() {
