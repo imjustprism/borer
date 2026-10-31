@@ -336,6 +336,33 @@ fn an_output_debug_string_call_stays_unless_it_is_the_failure_path() {
     assert!(!text.contains("OutputDebugString"), "{text}");
 }
 
+/// A `call` then `ret` wrapper stays when its caller tests the value.
+///
+/// A caller that does not test it drops the import.
+#[test]
+fn a_returned_check_keeps_the_debugger_import() {
+    let code = |check: bool| {
+        let mut code = vec![0xcc_u8; 0x16];
+        code[..5].copy_from_slice(&[0xe8, 0x0b, 0x00, 0x00, 0x00]); // ASM: call 0x401010
+        if check {
+            code[5] = 0x85; // ASM: test eax, eax
+            code[6] = 0xc0;
+            code[7] = 0xc3; // ASM: ret
+        } else {
+            code[5] = 0xc3; // ASM: ret
+        }
+        code[0x10..0x16].copy_from_slice(&[
+            0xe8, 0xeb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0xc3, // ASM: ret
+        ]);
+        code
+    };
+    let text = debugger_map(&code(true));
+    assert!(text.contains("IsDebuggerPresent"), "{text}");
+    let text = debugger_map(&code(false));
+    assert!(!text.contains("IsDebuggerPresent"), "{text}");
+}
+
 /// `mov edx, 0x29cd` holds the bytes of `int 0x29` and is not `__fastfail`.
 /// A checked call stays on the map.
 #[test]

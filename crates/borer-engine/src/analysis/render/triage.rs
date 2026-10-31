@@ -418,6 +418,8 @@ pub fn capability_map_tsv(p: &Program, a: Option<&Analysis>) -> String {
 /// The C runtime's failure and timing imports stay off the map unless a
 /// caller uses the result as a check. `OutputDebugString` returns nothing,
 /// so a call outside that failure path stays. Every other import stays.
+/// A call whose next instruction is a bare `ret` stays when one caller
+/// tests the value that wrapper returned.
 ///
 /// An instruction set this scan cannot read keeps the import.
 ///
@@ -443,7 +445,9 @@ fn called_as_check(p: &Program, a: &Analysis, api: &str) -> bool {
         } else if stem == "outputdebugstring" {
             true
         } else {
-            sites.iter().any(|va| result_tested(p, *va))
+            sites
+                .iter()
+                .any(|va| result_tested(p, *va) || returned_to_a_check(p, a, f.entry, *va))
         }
     })
 }
@@ -529,6 +533,51 @@ fn fastfail(p: &Program, a: &Analysis, entry: u64) -> bool {
         }
         false
     })
+}
+
+/// Whether `va` is a call that returns straight into a checked caller.
+///
+/// The next instruction has to be a bare `ret`. One caller of that
+/// function has to test the returned value. A second wrapper is not
+/// followed.
+fn returned_to_a_check(p: &Program, a: &Analysis, entry: u64, va: u64) -> bool {
+    if !returns_immediately(p, va) {
+        return false;
+    }
+    a.functions.iter().any(|caller| {
+        caller.entry != entry
+            && a.refs_from(caller.entry).iter().any(|(target, site)| {
+                site.kind == RefKind::Call && *target == entry && result_tested(p, site.va)
+            })
+    })
+}
+
+/// Whether the instruction after the call at `va` is a bare `ret`.
+fn returns_immediately(p: &Program, va: u64) -> bool {
+    let Some(bits) = p.arch.bitness() else {
+        return false;
+    };
+    let Some(code) = p.read_va_upto(va, 16) else {
+        return false;
+    };
+    let mut decoder = Decoder::with_ip(bits, code, va, DecoderOptions::NONE);
+    if !decoder.can_decode() {
+        return false;
+    }
+    let call = decoder.decode();
+    if call.is_invalid()
+        || !matches!(
+            call.flow_control(),
+            FlowControl::Call | FlowControl::IndirectCall
+        )
+    {
+        return false;
+    }
+    if !decoder.can_decode() {
+        return false;
+    }
+    let next = decoder.decode();
+    !next.is_invalid() && next.mnemonic() == Mnemonic::Ret && next.op_count() == 0
 }
 
 /// Whether the instructions after the call test the value it returned.
