@@ -1783,12 +1783,12 @@ impl Exec<'_, '_> {
         }
     }
 
-    /// Tells whether `v` is one timestamp the machine already read.
+    /// Tells whether `v` holds a timestamp the machine already read.
     ///
-    /// A call between that read and a later use would print the read
-    /// after the call.
+    /// The timestamp may sit inside a larger expression. A call between
+    /// that read and a later use would print the read after the call.
     pub(super) fn saved_time(v: &Expr) -> bool {
-        matches!(v, Expr::Helper(Helper::Rdtsc(..), _))
+        contains_timestamp(v)
     }
 
     /// Writes a timestamp out once when the block reads that register again.
@@ -1807,5 +1807,40 @@ impl Exec<'_, '_> {
             Some(d) => d.push(key),
             None => self.materialize(key, &mut Vec::new(), None),
         }
+    }
+}
+
+/// Whether `v` contains a timestamp helper, including under an operator.
+fn contains_timestamp(v: &Expr) -> bool {
+    match v {
+        Expr::Helper(Helper::Rdtsc(..), _) => true,
+        Expr::Helper(_, args) | Expr::Call(_, args) => args.iter().any(contains_timestamp),
+        Expr::Bin(_, left, right) => contains_timestamp(left) || contains_timestamp(right),
+        Expr::Un(_, inner)
+        | Expr::Deref(inner, _)
+        | Expr::Sext(inner, _)
+        | Expr::Cast(inner, _)
+        | Expr::Bitcast(inner, _) => contains_timestamp(inner),
+        Expr::Ternary(cond, left, right) => {
+            flags_hold_time(&cond.flags) || contains_timestamp(left) || contains_timestamp(right)
+        }
+        Expr::Cond(cond) => flags_hold_time(&cond.flags),
+        Expr::Const(_) | Expr::Var(_) | Expr::Str(_) | Expr::Sp(_) | Expr::FConst(..) => false,
+    }
+}
+
+/// Whether a condition's operands contain a timestamp helper.
+fn flags_hold_time(flags: &Flags) -> bool {
+    match flags {
+        Flags::Cmp(left, right, _)
+        | Flags::Float(left, right, _)
+        | Flags::FCmp(_, left, right, _)
+        | Flags::Test(left, right, _)
+        | Flags::Add(left, right, _) => contains_timestamp(left) || contains_timestamp(right),
+        Flags::Result(inner, _) | Flags::Carry(inner) | Flags::Truth(inner, _) => {
+            contains_timestamp(inner)
+        }
+        Flags::Shift(inner, _, carried) => contains_timestamp(inner) || contains_timestamp(carried),
+        Flags::Unknown => false,
     }
 }
