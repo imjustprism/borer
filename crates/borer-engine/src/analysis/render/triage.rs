@@ -480,19 +480,19 @@ fn call_sites(p: &Program, a: &Analysis, entry: u64, stem: &str) -> Vec<u64> {
 /// Whether `entry` is the C runtime's failure path.
 ///
 /// That path calls `IsDebuggerPresent` beside the unwind helpers or
-/// `__fastfail`, and the one call is not a check.
+/// `__fastfail`, and the one call is not a check. Installing the filter
+/// is a different call.
 fn crt_failure(p: &Program, a: &Analysis, entry: u64) -> bool {
-    const MARK: [&str; 5] = [
+    const MARK: [&str; 4] = [
         "unhandledexceptionfilter",
         "rtlcapturecontext",
         "rtlvirtualunwind",
         "rtllookupfunctionentry",
-        "setunhandledexceptionfilter",
     ];
     let helped = a.refs_from(entry).iter().any(|(target, _)| {
         a.symbol_at(p, *target).is_some_and(|sym| {
             let name = bare_name(&sym.name).to_lowercase();
-            MARK.iter().any(|m| name.contains(m))
+            !name.contains("setunhandledexceptionfilter") && MARK.iter().any(|m| name.contains(m))
         })
     });
     helped || fastfail(p, a, entry)

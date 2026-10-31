@@ -275,6 +275,37 @@ fn an_arm64_debugger_import_stays_on_the_map() {
     assert!(text.contains("IsDebuggerPresent"), "{text}");
 }
 
+/// Installing an exception filter keeps a checked debugger call.
+///
+/// The runtime helper of the same stem still hides that call.
+#[test]
+fn a_filter_install_keeps_a_checked_debugger_call() {
+    let map = |other: &str| {
+        let code = [
+            0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0x85, 0xc0, // ASM: test eax, eax
+            0xe8, 0x04, 0x10, 0x00, 0x00, // ASM: call 0x402010
+            0xc3, // ASM: ret
+        ];
+        let mut p = image(Arch::X86_64, &code, &[]);
+        p.symbols.push(Symbol {
+            name: "KERNEL32.dll!IsDebuggerPresent".to_owned(),
+            addr: 0x402000,
+            kind: SymbolKind::Import,
+        });
+        p.symbols.push(Symbol {
+            name: format!("KERNEL32.dll!{other}"),
+            addr: 0x402010,
+            kind: SymbolKind::Import,
+        });
+        borer_engine::analysis::render::capability_map_tsv(&p, Some(&Analysis::compute(&p)))
+    };
+    let installed = map("SetUnhandledExceptionFilter");
+    assert!(installed.contains("IsDebuggerPresent"), "{installed}");
+    let runtime = map("UnhandledExceptionFilter");
+    assert!(!runtime.contains("IsDebuggerPresent"), "{runtime}");
+}
+
 /// `mov edx, 0x29cd` holds the bytes of `int 0x29` and is not `__fastfail`.
 /// A checked call stays on the map.
 #[test]
