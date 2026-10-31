@@ -1760,6 +1760,7 @@ impl Exec<'_, '_> {
     ///
     /// * `aux` - `rdtscp`, which also writes `ecx`.
     pub(super) fn timestamp(&mut self, aux: bool) {
+        self.keep_earlier_time(aux);
         let base = u8::from(aux) * 2;
         let nonce = u32::try_from(self.at & 0xffff_ffff).unwrap_or(0);
         self.reg_write(
@@ -1794,6 +1795,7 @@ impl Exec<'_, '_> {
     /// Writes a timestamp out once when the block reads that register again.
     ///
     /// A second store of the same half would otherwise print a second call.
+    /// The next timestamp instruction writes an earlier read out on its own.
     ///
     /// # Arguments
     ///
@@ -1806,6 +1808,200 @@ impl Exec<'_, '_> {
         match self.deferred.as_mut() {
             Some(d) => d.push(key),
             None => self.materialize(key, &mut Vec::new(), None),
+        }
+    }
+
+    /// Writes out a timestamp a later read still uses.
+    ///
+    /// Two reads left in one expression run in either order. The earlier
+    /// read is its own statement, even when that register is used once.
+    ///
+    /// # Arguments
+    ///
+    /// * `aux` - `rdtscp`, which also writes `ecx`.
+    fn keep_earlier_time(&mut self, aux: bool) {
+        if self.ctx.symbolic_only {
+            return;
+        }
+        for helper in self.live_timestamps(aux) {
+            self.bind_timestamp(aux, &helper);
+        }
+    }
+
+    /// Returns the timestamp helpers a later read of this block still uses.
+    ///
+    /// # Arguments
+    ///
+    /// * `aux` - `rdtscp`, which also writes `ecx`.
+    fn live_timestamps(&self, aux: bool) -> Vec<Expr> {
+        let mut out = Vec::new();
+        for (k, v) in &self.env.vals {
+            if self.writes_time(*k, aux) || !self.still_read(*k) {
+                continue;
+            }
+            timestamp_calls(v, &mut out);
+        }
+        if self.flags_needed != 0 {
+            timestamp_flags(&self.flags, &mut out);
+        }
+        if let Some(idx) = &self.switch_idx {
+            timestamp_calls(idx, &mut out);
+        }
+        out
+    }
+
+    /// Binds `helper` to one statement and points later reads at it.
+    ///
+    /// A register this instruction overwrites is the home only when no
+    /// earlier copy survives. Those reads are written out first.
+    ///
+    /// # Arguments
+    ///
+    /// * `aux` - `rdtscp`, which also writes `ecx`.
+    /// * `helper` - The earlier `rdtsc` or `rdtscp` read.
+    fn bind_timestamp(&mut self, aux: bool, helper: &Expr) {
+        let stable = self.exact_holder(helper, aux, true);
+        let doomed = self.exact_holder(helper, aux, false);
+        if let Some(home) = stable.or(doomed) {
+            self.materialize(home, &mut Vec::new(), None);
+            self.retarget(aux, helper, &Expr::Var(home));
+            if doomed == Some(home) {
+                self.freeze_mentions(home);
+            }
+            return;
+        }
+        self.spill_nested(aux, helper);
+    }
+
+    /// A register whose value is exactly `helper`.
+    ///
+    /// # Arguments
+    ///
+    /// * `helper` - The earlier read.
+    /// * `aux` - `rdtscp`, which also writes `ecx`.
+    /// * `stable` - A register this instruction does not write, when true.
+    fn exact_holder(&self, helper: &Expr, aux: bool, stable: bool) -> Option<Key> {
+        self.env.vals.iter().find_map(|(k, v)| {
+            let keep = if stable {
+                !self.writes_time(*k, aux) && self.still_read(*k)
+            } else {
+                self.writes_time(*k, aux)
+            };
+            (keep && v == helper).then_some(*k)
+        })
+    }
+
+    /// Whether this `rdtsc` or `rdtscp` writes `k`.
+    ///
+    /// # Arguments
+    ///
+    /// * `k` - A text variable.
+    /// * `aux` - `rdtscp`, which also writes `ecx`.
+    fn writes_time(&self, k: Key, aux: bool) -> bool {
+        k == self.canon(Register::EAX)
+            || k == self.canon(Register::EDX)
+            || (aux && k == self.canon(Register::ECX))
+    }
+
+    /// Whether a later instruction still reads `k`.
+    ///
+    /// Unknown liveness counts as a read. A dead register is not saved.
+    ///
+    /// # Arguments
+    ///
+    /// * `k` - A text variable.
+    fn still_read(&self, k: Key) -> bool {
+        self.regs_needed
+            .as_ref()
+            .is_none_or(|need| need.get(&k).is_some_and(|lane| *lane > 0))
+    }
+
+    /// Points every surviving read of `helper` at `name`.
+    ///
+    /// # Arguments
+    ///
+    /// * `aux` - `rdtscp`, which also writes `ecx`.
+    /// * `helper` - The earlier read.
+    /// * `name` - The variable that statement wrote.
+    fn retarget(&mut self, aux: bool, helper: &Expr, name: &Expr) {
+        let planned: Vec<(Key, Expr)> = self
+            .env
+            .vals
+            .iter()
+            .filter_map(|(k, v)| {
+                if self.writes_time(*k, aux) {
+                    return None;
+                }
+                let next = v.subst(helper, name);
+                (next != *v).then_some((*k, next))
+            })
+            .collect();
+        for (k, next) in planned {
+            self.assign(k, next);
+        }
+        if self.flags_needed != 0 {
+            let next = subst_flags(&self.flags, helper, name);
+            if next != self.flags {
+                self.flags = next;
+            }
+        }
+        if let Some(idx) = self.switch_idx.take() {
+            self.switch_idx = Some(idx.subst(helper, name));
+        }
+    }
+
+    /// Writes out every value that still names `home`.
+    ///
+    /// `home` is about to be overwritten, so a later read has to be a
+    /// statement that still sees the earlier value.
+    ///
+    /// # Arguments
+    ///
+    /// * `home` - The register this instruction writes.
+    fn freeze_mentions(&mut self, home: Key) {
+        let keys: Vec<Key> = self
+            .env
+            .vals
+            .iter()
+            .filter(|(_, v)| v.mentions(home))
+            .map(|(k, _)| *k)
+            .collect();
+        for k in keys {
+            self.materialize(k, &mut Vec::new(), None);
+        }
+        if self.flags_needed != 0 && self.flags.any_var(&|k| k == home) {
+            self.protect_flags(&|e: &Expr| e.mentions(home));
+        }
+        if let Some(idx) = self.switch_idx.take() {
+            self.switch_idx = Some(if idx.mentions(home) {
+                self.tmp_if(idx, &|e: &Expr| e.mentions(home))
+            } else {
+                idx
+            });
+        }
+    }
+
+    /// Writes out a timestamp that no register holds on its own.
+    ///
+    /// # Arguments
+    ///
+    /// * `aux` - `rdtscp`, which also writes `ecx`.
+    /// * `helper` - The earlier read, nested under another operator.
+    fn spill_nested(&mut self, aux: bool, helper: &Expr) {
+        let keys: Vec<Key> = self
+            .env
+            .vals
+            .iter()
+            .filter(|(k, v)| {
+                !self.writes_time(**k, aux) && self.still_read(**k) && holds(v, helper)
+            })
+            .map(|(k, _)| *k)
+            .collect();
+        for k in &keys {
+            self.materialize(*k, &mut Vec::new(), None);
+        }
+        if keys.is_empty() && self.flags_needed != 0 && flags_hold(helper, &self.flags) {
+            self.protect_flags(&|e: &Expr| holds(e, helper));
         }
     }
 }
@@ -1842,5 +2038,97 @@ fn flags_hold_time(flags: &Flags) -> bool {
         }
         Flags::Shift(inner, _, carried) => contains_timestamp(inner) || contains_timestamp(carried),
         Flags::Unknown => false,
+    }
+}
+
+/// Whether `v` contains `helper`.
+fn holds(v: &Expr, helper: &Expr) -> bool {
+    v == helper || v.subst(helper, &Expr::Const(0)) != *v
+}
+
+/// Whether `flags` contains `helper`.
+fn flags_hold(helper: &Expr, flags: &Flags) -> bool {
+    subst_flags(flags, helper, &Expr::Const(0)) != *flags
+}
+
+/// Appends each distinct timestamp helper in `v` to `out`.
+fn timestamp_calls(v: &Expr, out: &mut Vec<Expr>) {
+    match v {
+        Expr::Helper(Helper::Rdtsc(..), _) => {
+            if !out.contains(v) {
+                out.push(v.clone());
+            }
+        }
+        Expr::Helper(_, args) | Expr::Call(_, args) => {
+            for arg in args {
+                timestamp_calls(arg, out);
+            }
+        }
+        Expr::Bin(_, left, right) => {
+            timestamp_calls(left, out);
+            timestamp_calls(right, out);
+        }
+        Expr::Un(_, inner)
+        | Expr::Deref(inner, _)
+        | Expr::Sext(inner, _)
+        | Expr::Cast(inner, _)
+        | Expr::Bitcast(inner, _) => timestamp_calls(inner, out),
+        Expr::Ternary(cond, left, right) => {
+            timestamp_flags(&cond.flags, out);
+            timestamp_calls(left, out);
+            timestamp_calls(right, out);
+        }
+        Expr::Cond(cond) => timestamp_flags(&cond.flags, out),
+        Expr::Const(_) | Expr::Var(_) | Expr::Str(_) | Expr::Sp(_) | Expr::FConst(..) => {}
+    }
+}
+
+/// Appends each distinct timestamp helper in `flags` to `out`.
+fn timestamp_flags(flags: &Flags, out: &mut Vec<Expr>) {
+    match flags {
+        Flags::Cmp(left, right, _)
+        | Flags::Float(left, right, _)
+        | Flags::FCmp(_, left, right, _)
+        | Flags::Test(left, right, _)
+        | Flags::Add(left, right, _) => {
+            timestamp_calls(left, out);
+            timestamp_calls(right, out);
+        }
+        Flags::Result(inner, _) | Flags::Carry(inner) | Flags::Truth(inner, _) => {
+            timestamp_calls(inner, out);
+        }
+        Flags::Shift(inner, _, carried) => {
+            timestamp_calls(inner, out);
+            timestamp_calls(carried, out);
+        }
+        Flags::Unknown => {}
+    }
+}
+
+/// Replaces `from` with `to` in `flags`.
+fn subst_flags(flags: &Flags, from: &Expr, to: &Expr) -> Flags {
+    match flags {
+        Flags::Cmp(left, right, bits) => {
+            Flags::Cmp(left.subst(from, to), right.subst(from, to), *bits)
+        }
+        Flags::Float(left, right, bits) => {
+            Flags::Float(left.subst(from, to), right.subst(from, to), *bits)
+        }
+        Flags::FCmp(pred, left, right, bits) => {
+            Flags::FCmp(*pred, left.subst(from, to), right.subst(from, to), *bits)
+        }
+        Flags::Test(left, right, bits) => {
+            Flags::Test(left.subst(from, to), right.subst(from, to), *bits)
+        }
+        Flags::Result(inner, bits) => Flags::Result(inner.subst(from, to), *bits),
+        Flags::Add(left, right, bits) => {
+            Flags::Add(left.subst(from, to), right.subst(from, to), *bits)
+        }
+        Flags::Carry(inner) => Flags::Carry(inner.subst(from, to)),
+        Flags::Shift(inner, bits, carried) => {
+            Flags::Shift(inner.subst(from, to), *bits, carried.subst(from, to))
+        }
+        Flags::Truth(inner, cc) => Flags::Truth(inner.subst(from, to), *cc),
+        Flags::Unknown => Flags::Unknown,
     }
 }

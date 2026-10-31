@@ -88,6 +88,13 @@ fn a_timestamp_delta_is_not_zero_and_one_read_xor_itself_is() {
     let program = program64(&delta);
     let text = decompiled(&program, 0x1_4000_1000);
     assert!(text.matches("rdtsc(").count() >= 2, "{text}");
+    assert!(text.contains("= rdtsc("), "{text}");
+    assert!(!text.contains("rdtsc() - rdtsc()"), "{text}");
+    let saved = text.find("= rdtsc(").unwrap_or(text.len());
+    assert!(
+        saved < text.len() && text[saved + 1..].contains("rdtsc("),
+        "{text}"
+    );
     assert!(!text.contains("return 0"), "{text}");
     let analysis = Analysis::compute(&program);
     let warn = warnings(
@@ -108,6 +115,25 @@ fn a_timestamp_delta_is_not_zero_and_one_read_xor_itself_is() {
     ];
     let folded = decompiled(&program64(&same), 0x1_4000_1000);
     assert!(folded.contains("return 0"), "{folded}");
+}
+
+/// A timestamp inside a sum is printed before the next read.
+///
+/// The sum has one later use. The next `rdtsc` must not share its expression.
+#[test]
+fn a_timestamp_sum_is_printed_before_the_next_read() {
+    let code = [
+        0x0f, 0x31, // ASM: rdtsc
+        0x89, 0xc3, // ASM: mov ebx, eax
+        0x83, 0xc3, 0x01, // ASM: add ebx, 1
+        0x0f, 0x31, // ASM: rdtsc
+        0x29, 0xd8, // ASM: sub eax, ebx
+        0xc3, // ASM: ret
+    ];
+    let text = decompiled(&program64(&code), 0x1_4000_1000);
+    assert!(text.contains("= rdtsc("), "{text}");
+    assert!(!text.contains("rdtsc() - rdtsc()"), "{text}");
+    assert!(!text.contains("return 0"), "{text}");
 }
 
 /// A timestamp copied across a call is printed before that call.
