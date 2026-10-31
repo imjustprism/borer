@@ -1828,31 +1828,60 @@ impl Exec<'_, '_> {
     /// Writes a live timestamp out before a later store.
     ///
     /// One reader is enough. Leaving the call in that reader prints it
-    /// after the store, so the clock looks later than it ran. Each pair is
-    /// the value written and the variable that now holds it.
+    /// after the store, so the clock looks later than it ran. Copies of one
+    /// read share one statement. Each pair is the value written and the
+    /// variable that now holds it.
     pub(super) fn park_timestamps(&mut self) -> Vec<(Expr, Expr)> {
         if self.ctx.symbolic_only {
             return Vec::new();
         }
-        let keys: Vec<Key> = self
+        let prior: Vec<(Key, Expr)> = self
             .env
             .vals
             .iter()
             .filter(|(k, v)| self.still_read(**k) && contains_timestamp(v))
-            .map(|(k, _)| *k)
+            .map(|(k, v)| (*k, v.clone()))
             .collect();
+        self.share_copied_time(&prior);
         let mut parked = Vec::new();
-        for key in keys {
-            let Some(val) = self.env.vals.get(&key).cloned() else {
-                continue;
-            };
-            if !contains_timestamp(&val) {
+        for (key, old) in prior {
+            if !self.env.vals.contains_key(&key) {
                 continue;
             }
             self.materialize(key, &mut Vec::new(), None);
-            parked.push((val, Expr::Var(key)));
+            parked.push((old, Expr::Var(key)));
         }
         parked
+    }
+
+    /// Binds a timestamp that several parked values share.
+    ///
+    /// One statement then feeds every copy. Writing the copies out
+    /// separately would read the clock once each.
+    ///
+    /// # Arguments
+    ///
+    /// * `prior` - Each live value that still contains a timestamp.
+    fn share_copied_time(&mut self, prior: &[(Key, Expr)]) {
+        let mut helpers = Vec::new();
+        for (_, val) in prior {
+            timestamp_calls(val, &mut helpers);
+        }
+        for helper in helpers {
+            if prior.iter().filter(|(_, val)| holds(val, &helper)).count() < 2 {
+                continue;
+            }
+            let saved = self.tmp_of(&helper, self.word_ty());
+            for (key, _) in prior {
+                let Some(val) = self.env.vals.get(key).cloned() else {
+                    continue;
+                };
+                let next = val.subst(&helper, &saved);
+                if next != val {
+                    self.assign(*key, next);
+                }
+            }
+        }
     }
 
     /// Writes out a timestamp a later read still uses.

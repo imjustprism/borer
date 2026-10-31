@@ -293,6 +293,34 @@ fn two_nested_timestamps_are_one_earlier_read() {
     assert_eq!(text.matches("rdtsc()").count(), 2, "{text}");
 }
 
+/// Two changed reloads of one timestamp stay one call across a later store.
+///
+/// The store writes each live copy out. Each copy is a different
+/// expression, and each has one reader, so neither was saved on its own.
+#[test]
+fn a_later_store_shares_one_reloaded_timestamp() {
+    let code = [
+        0x0f, 0x31, // ASM: rdtsc
+        0x89, 0x44, 0x24, 0x08, // ASM: mov [rsp+8], eax
+        0x8b, 0x5c, 0x24, 0x08, // ASM: mov ebx, [rsp+8]
+        0x8b, 0x4c, 0x24, 0x08, // ASM: mov ecx, [rsp+8]
+        0xd1, 0xe3, // ASM: shl ebx, 1
+        0x83, 0xc1, 0x01, // ASM: add ecx, 1
+        0xc7, 0x44, 0x24, 0x08, 0x00, 0x00, 0x00, 0x00, // ASM: mov dword [rsp+8], 0
+        0x31, 0xc0, // ASM: xor eax, eax
+        0x31, 0xd2, // ASM: xor edx, edx
+        0xc7, 0x07, 0x01, 0x00, 0x00, 0x00, // ASM: mov dword [rdi], 1
+        0x01, 0xd8, // ASM: add eax, ebx
+        0x01, 0xc8, // ASM: add eax, ecx
+        0xc3, // ASM: ret
+    ];
+    let text = decompiled(&program64(&code), 0x1_4000_1000);
+    assert_eq!(text.matches("rdtsc()").count(), 1, "{text}");
+    let store = text.find("= 1").unwrap_or(text.len());
+    assert!(text[..store].contains("= rdtsc()"), "{text}");
+    assert!(!text[store..].contains("rdtsc"), "{text}");
+}
+
 /// A store after `rdtscp` stays after the clock read.
 ///
 /// The return is the only reader. Printing the call there would time the
