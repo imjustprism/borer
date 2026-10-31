@@ -82,7 +82,7 @@ fn the_entry_in_a_non_executable_section_decompiles() {
 /// The helper adds one to the return address. The call continues at that
 /// byte, and the byte it skips stays undecoded.
 #[test]
-fn a_helper_in_the_entrys_section_is_reached() {
+fn a_helper_in_the_entry_section_is_reached() {
     for arch in [Arch::X86_64, Arch::X86] {
         let entry = 0x402000;
         let helper = 0x402020;
