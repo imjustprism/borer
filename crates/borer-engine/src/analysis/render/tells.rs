@@ -313,13 +313,16 @@ fn cpu_leaf(instrs: &[Instruction], at: usize) -> Option<u64> {
 /// Whether a later instruction tests the hypervisor bit in `ecx`.
 ///
 /// The `cpuid` has to be leaf 1. Leaf 7 returns a different feature in
-/// that bit. A write of `ecx`, or a call, replaces the `cpuid` result.
+/// that bit. `test ecx, 0x80000000` names the bit by its mask. `bt ecx, 31`
+/// names it by its index. A write of `ecx`, or a call, replaces the result.
 fn hypervisor_bit(instrs: &[Instruction], at: usize) -> bool {
     if cpu_leaf(instrs, at) != Some(1) {
         return false;
     }
     for n in instrs.iter().skip(at + 1).take(8) {
-        if tests_register(n, Register::RCX, 0x8000_0000) {
+        if tests_register(n, Register::RCX, 0x8000_0000)
+            || (n.mnemonic() == Mnemonic::Bt && tests_register(n, Register::RCX, 31))
+        {
             return true;
         }
         if writes_register(n, Register::RCX)

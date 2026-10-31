@@ -122,6 +122,49 @@ fn a_cleared_hypervisor_bit_is_a_feature_probe() {
     assert!(!text.contains("hypervisor"), "{text}");
 }
 
+/// `bt ecx, 31` after leaf 1 is the hypervisor bit. The same bit test after
+/// leaf 7 is a feature. `bt edx, 31`, `test ecx, 31`, and `cmp ecx, 31` are
+/// not that bit.
+#[test]
+fn a_bit_test_of_ecx_is_the_hypervisor_bit() {
+    let bit = report(&[
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+        0x0f, 0xa2, // ASM: cpuid
+        0x0f, 0xba, 0xe1, 0x1f, // ASM: bt ecx, 31
+        0xc3, // ASM: ret
+    ]);
+    assert!(bit.contains("cpuid (hypervisor probe)"), "{bit}");
+    let leaf = report(&[
+        0xb8, 0x07, 0x00, 0x00, 0x00, // ASM: mov eax, 7
+        0x0f, 0xa2, // ASM: cpuid
+        0x0f, 0xba, 0xe1, 0x1f, // ASM: bt ecx, 31
+        0xc3, // ASM: ret
+    ]);
+    assert!(leaf.contains("cpuid (feature probe)"), "{leaf}");
+    assert!(!leaf.contains("hypervisor"), "{leaf}");
+    let other = report(&[
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+        0x0f, 0xa2, // ASM: cpuid
+        0x0f, 0xba, 0xe2, 0x1f, // ASM: bt edx, 31
+        0xc3, // ASM: ret
+    ]);
+    assert!(!other.contains("hypervisor"), "{other}");
+    let masked = report(&[
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+        0x0f, 0xa2, // ASM: cpuid
+        0xf7, 0xc1, 0x1f, 0x00, 0x00, 0x00, // ASM: test ecx, 31
+        0xc3, // ASM: ret
+    ]);
+    assert!(!masked.contains("hypervisor"), "{masked}");
+    let compared = report(&[
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+        0x0f, 0xa2, // ASM: cpuid
+        0x83, 0xf9, 0x1f, // ASM: cmp ecx, 31
+        0xc3, // ASM: ret
+    ]);
+    assert!(!compared.contains("hypervisor"), "{compared}");
+}
+
 /// A call or a multiply replaces `eax` before `cpuid`. The earlier leaf is
 /// not the one that ran.
 #[test]
