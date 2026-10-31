@@ -357,6 +357,33 @@ fn a_peb_field_is_named_from_the_following_read() {
     assert!(!wide.contains("BeingDebugged"), "{wide}");
 }
 
+/// A field read has to use the PEB pointer. Another base, and a store,
+/// stay a plain PEB read. A copy of the pointer still names the field.
+#[test]
+fn a_peb_field_read_uses_the_peb_pointer() {
+    let other = report(&[
+        0x65, 0x48, 0x8b, 0x04, 0x25, 0x60, 0x00, 0x00, 0x00, // ASM: mov rax, gs:[0x60]
+        0x0f, 0xb6, 0x53, 0x02, // ASM: movzx edx, byte [rbx+2]
+        0xc3, // ASM: ret
+    ]);
+    assert!(other.contains("peb read"), "{other}");
+    assert!(!other.contains("BeingDebugged"), "{other}");
+    let store = report(&[
+        0x65, 0x48, 0x8b, 0x04, 0x25, 0x60, 0x00, 0x00, 0x00, // ASM: mov rax, gs:[0x60]
+        0xc6, 0x40, 0x02, 0x00, // ASM: mov byte [rax+2], 0
+        0xc3, // ASM: ret
+    ]);
+    assert!(store.contains("peb read"), "{store}");
+    assert!(!store.contains("BeingDebugged"), "{store}");
+    let copied = report(&[
+        0x65, 0x48, 0x8b, 0x04, 0x25, 0x60, 0x00, 0x00, 0x00, // ASM: mov rax, gs:[0x60]
+        0x48, 0x89, 0xc3, // ASM: mov rbx, rax
+        0x0f, 0xb6, 0x53, 0x02, // ASM: movzx edx, byte [rbx+2]
+        0xc3, // ASM: ret
+    ]);
+    assert!(copied.contains("peb read (BeingDebugged)"), "{copied}");
+}
+
 /// `mov dr0` inside a function is a hardware-breakpoint tell.
 #[test]
 fn a_debug_register_move_is_a_tell() {

@@ -600,14 +600,14 @@ fn peb_read(instrs: &[Instruction]) -> Option<(u64, &'static str)> {
         let direct = (seg == Register::FS && disp == 0x30) || (seg == Register::GS && disp == 0x60);
         let teb = (seg == Register::FS && disp == 0x18) || (seg == Register::GS && disp == 0x30);
         if direct {
-            return Some((i.ip(), peb_field(&instrs[at + 1..])));
+            return Some((i.ip(), peb_field(&instrs[at + 1..], pointer_dest(i))));
         }
         if teb && base == Register::None {
             let indexed = instrs.iter().skip(at + 1).take(4).any(|n| {
                 memory(n).is_some_and(|(_, d, b)| b != Register::None && matches!(d, 0x30 | 0x60))
             });
             if indexed {
-                return Some((i.ip(), peb_field(&instrs[at + 1..])));
+                return Some((i.ip(), peb_field(&instrs[at + 1..], pointer_dest(i))));
             }
         }
     }
@@ -617,23 +617,81 @@ fn peb_read(instrs: &[Instruction]) -> Option<(u64, &'static str)> {
 /// Names the PEB field a later read uses.
 ///
 /// A byte at displacement 2 is `BeingDebugged`. A read at `0x68` or `0xBC`
-/// is `NtGlobalFlag`. An `Ldr` walk stays a plain PEB read.
-fn peb_field(rest: &[Instruction]) -> &'static str {
+/// is `NtGlobalFlag`. The base has to be `origin` or a copy of it. A store
+/// and an `Ldr` walk stay a plain PEB read.
+fn peb_field(rest: &[Instruction], origin: Register) -> &'static str {
+    let mut held = [Register::None; 4];
+    let mut count = 0usize;
+    if origin != Register::None {
+        held[0] = origin;
+        count = 1;
+    }
     for n in rest.iter().take(4) {
-        let Some((_, disp, base)) = memory(n) else {
+        if let Some(label) = peb_field_read(n, &held[..count]) {
+            return label;
+        }
+        if let Some(dest) = copied_timestamp(n, &held[..count]) {
+            if count < held.len() && !held[..count].contains(&dest) {
+                held[count] = dest;
+                count += 1;
+            }
             continue;
-        };
-        if base == Register::None {
+        }
+        if let Some(dest) = peb_pointer(n, &held[..count]) {
+            if count < held.len() && !held[..count].contains(&dest) {
+                held[count] = dest;
+                count += 1;
+            }
             continue;
         }
-        if disp == 2 && n.memory_size().size() == 1 {
-            return "peb read (BeingDebugged)";
-        }
-        if matches!(disp, 0x68 | 0xbc) {
-            return "peb read (NtGlobalFlag)";
-        }
+        drop_timestamp(n, &mut held, &mut count);
     }
     "peb read"
+}
+
+/// The register a PEB or TEB read writes.
+fn pointer_dest(i: &Instruction) -> Register {
+    if i.op0_kind() == OpKind::Register {
+        i.op0_register().full_register()
+    } else {
+        Register::None
+    }
+}
+
+/// The field `n` reads through one of `held`.
+///
+/// A store writes that slot instead of reading it, so it is not a field.
+fn peb_field_read(n: &Instruction, held: &[Register]) -> Option<&'static str> {
+    if held.is_empty()
+        || n.mnemonic() == Mnemonic::Lea
+        || (n.mnemonic() == Mnemonic::Mov && n.op0_kind() == OpKind::Memory)
+    {
+        return None;
+    }
+    let (_, disp, base) = memory(n)?;
+    let base = base.full_register();
+    if base == Register::None || !held.contains(&base) {
+        return None;
+    }
+    if disp == 2 && n.memory_size().size() == 1 {
+        return Some("peb read (BeingDebugged)");
+    }
+    if matches!(disp, 0x68 | 0xbc) {
+        return Some("peb read (NtGlobalFlag)");
+    }
+    None
+}
+
+/// The register a load of the PEB pointer from the TEB writes.
+fn peb_pointer(n: &Instruction, held: &[Register]) -> Option<Register> {
+    if n.op0_kind() != OpKind::Register || held.is_empty() {
+        return None;
+    }
+    let (_, disp, base) = memory(n)?;
+    if !matches!(disp, 0x30 | 0x60) || !held.contains(&base.full_register()) {
+        return None;
+    }
+    Some(n.op0_register().full_register())
 }
 
 /// The bare import names this function calls, in lower case.
