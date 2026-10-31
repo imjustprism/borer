@@ -660,6 +660,19 @@ fn context_all_and_a_dr_read_are_hardware_breakpoints() {
         &[("GetThreadContext", 0x402000)],
     );
     assert!(read.contains("hardware breakpoint"), "{read}");
+    let replaced = report_calls(
+        &[
+            0x48, 0x8d, 0x5c, 0x24, 0x20, // ASM: lea rbx, [rsp+0x20]
+            0x48, 0x89, 0xf3, // ASM: mov rbx, rsi
+            0x48, 0x89, 0xda, // ASM: mov rdx, rbx
+            0xe8, 0xf0, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0x48, 0x8b, 0x84, 0x24, 0x68, 0x00, 0x00, 0x00, // ASM: mov rax, [rsp+0x68]
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[("GetThreadContext", 0x402000)],
+    );
+    assert!(!replaced.contains("hardware breakpoint"), "{replaced}");
     let slot = report_calls(
         &[
             0x48, 0x8d, 0x54, 0x24, 0x20, // ASM: lea rdx, [rsp+0x20]

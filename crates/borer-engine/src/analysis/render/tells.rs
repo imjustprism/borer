@@ -1317,13 +1317,17 @@ fn pushed_context(before: &[Instruction]) -> Register {
     Register::None
 }
 
-/// The last `lea` that writes `reg`.
+/// The last `lea` that writes `reg`, when that `lea` is still the value.
+///
+/// A later write of `reg` replaces the address. The earlier `lea` is not
+/// where a following load reads.
 fn lea_of(instrs: &[Instruction], reg: Register) -> Option<&Instruction> {
-    instrs.iter().rev().find(|n| {
-        n.mnemonic() == Mnemonic::Lea
-            && n.op0_kind() == OpKind::Register
-            && n.op0_register().full_register() == reg
-    })
+    for n in instrs.iter().rev() {
+        if n.op0_kind() == OpKind::Register && n.op0_register().full_register() == reg {
+            return (n.mnemonic() == Mnemonic::Lea).then_some(n);
+        }
+    }
+    None
 }
 
 /// The frame register and displacement of an `lea` of a stack slot.
