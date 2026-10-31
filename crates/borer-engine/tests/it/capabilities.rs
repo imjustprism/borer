@@ -11,6 +11,23 @@ use borer_engine::program::{Arch, Program, Section, Symbol, SymbolKind};
 use crate::common::fixture;
 use crate::raw::image;
 
+/// A character whose lowercase form grows does not move the capital check.
+///
+/// `İ` lowercases to two characters. Five of them before `crypt` would
+/// otherwise land the match on the following capital and claim cryptography.
+#[test]
+fn a_growing_lowercase_does_not_invent_a_capability() {
+    let mut p = fixture();
+    let name = format!("{}cryptA", "\u{0130}".repeat(5));
+    p.symbols = vec![Symbol {
+        name: format!("KERNEL32.dll!{name}"),
+        addr: 0,
+        kind: SymbolKind::Import,
+    }];
+    let text = borer_engine::analysis::render::capability_map_tsv(&p, None);
+    assert!(!text.contains("cryptography"), "{text}");
+}
+
 /// A longer name that only contains a filesystem or crypto stem is not that
 /// capability, and `GetThreadContext` alone is not process injection.
 #[test]

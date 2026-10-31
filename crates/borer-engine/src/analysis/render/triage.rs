@@ -269,7 +269,8 @@ pub(super) const CAPABILITIES: [(&str, &[&str]); 16] = [
 /// `=name` is the whole name. `~stem` is that stem with an empty suffix,
 /// `a` / `w` / `ex` / `2`, `scatter`, `gather`, or `transacted` with an
 /// optional `a` or `w`. `^part` is `part` at the start or at a capital
-/// letter. Anything else is a case-insensitive substring.
+/// letter. Anything else is a case-insensitive substring. The fold is
+/// ASCII, so a capital-letter index stays on that byte.
 ///
 /// # Arguments
 ///
@@ -280,7 +281,7 @@ pub(super) const CAPABILITIES: [(&str, &[&str]); 16] = [
 ///
 /// True when one fragment matches.
 fn name_gives(fragments: &[&str], api: &str) -> bool {
-    let lower = api.to_lowercase();
+    let lower = api.to_ascii_lowercase();
     fragments.iter().any(|frag| {
         if let Some(exact) = frag.strip_prefix('=') {
             lower == exact
@@ -300,7 +301,7 @@ fn name_gives(fragments: &[&str], api: &str) -> bool {
                 )
             })
         } else if let Some(part) = frag.strip_prefix('^') {
-            let part = part.to_lowercase();
+            let part = part.to_ascii_lowercase();
             lower.match_indices(&part).any(|(at, _)| {
                 at == 0
                     || api
