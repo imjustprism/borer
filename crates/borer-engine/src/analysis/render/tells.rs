@@ -300,12 +300,25 @@ fn tests_register(i: &Instruction, reg: Register, imm: u64) -> bool {
 
 /// Whether the `in` at `at` is aimed at the `VMware` backdoor.
 ///
-/// The backdoor is port `0x5658`, and the call sets `eax` to `VMXh`
-/// (`0x564d5868`) first. A bare `in` has neither.
+/// The backdoor is port `0x5658`, or the call sets `eax` to `VMXh`
+/// (`0x564d5868`). A later write of that register replaces the value.
+/// A bare `in` has neither.
 fn vmware_backdoor(instrs: &[Instruction], at: usize) -> bool {
-    instrs[..at].iter().rev().take(6).any(|n| {
-        moved_immediate(n, Register::RAX, 0x564d_5868) || moved_immediate(n, Register::RDX, 0x5658)
-    })
+    let mut magic = false;
+    let mut port = false;
+    let mut saw_rax = false;
+    let mut saw_rdx = false;
+    for n in instrs[..at].iter().rev().take(6) {
+        if !saw_rax && writes_register(n, Register::RAX) {
+            saw_rax = true;
+            magic = moved_immediate(n, Register::RAX, 0x564d_5868);
+        }
+        if !saw_rdx && writes_register(n, Register::RDX) {
+            saw_rdx = true;
+            port = moved_immediate(n, Register::RDX, 0x5658);
+        }
+    }
+    magic || port
 }
 
 /// Whether `i` moves a debug register.

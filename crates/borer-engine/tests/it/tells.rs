@@ -163,6 +163,36 @@ fn a_bare_in_is_a_port_read_and_the_backdoor_magic_is_named() {
     assert!(backdoor.contains("in (VMware backdoor port)"), "{backdoor}");
 }
 
+/// A port or magic overwritten before `in` is a plain port read.
+///
+/// The value still in the register is what the instruction uses.
+#[test]
+fn an_overwritten_port_is_a_plain_read() {
+    let port = report(&[
+        0xba, 0x58, 0x56, 0x00, 0x00, // ASM: mov edx, 0x5658
+        0xba, 0x80, 0x00, 0x00, 0x00, // ASM: mov edx, 0x80
+        0xed, // ASM: in eax, dx
+        0xc3, // ASM: ret
+    ]);
+    assert!(port.contains("in (port read)"), "{port}");
+    assert!(!port.contains("VMware"), "{port}");
+    let magic = report(&[
+        0xb8, 0x68, 0x58, 0x4d, 0x56, // ASM: mov eax, 0x564d5868
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+        0xed, // ASM: in eax, dx
+        0xc3, // ASM: ret
+    ]);
+    assert!(magic.contains("in (port read)"), "{magic}");
+    assert!(!magic.contains("VMware"), "{magic}");
+    let live = report(&[
+        0xba, 0x80, 0x00, 0x00, 0x00, // ASM: mov edx, 0x80
+        0xba, 0x58, 0x56, 0x00, 0x00, // ASM: mov edx, 0x5658
+        0xed, // ASM: in eax, dx
+        0xc3, // ASM: ret
+    ]);
+    assert!(live.contains("in (VMware backdoor port)"), "{live}");
+}
+
 /// `int 2dh` is its own strong tell and tips the verdict by itself.
 #[test]
 fn int_2dh_tips_the_verdict() {
