@@ -1754,13 +1754,20 @@ fn readable(expr: &str, var: &str) -> bool {
 /// and that cannot fault when moved ahead of its test.
 ///
 /// A memory operand or an address can name the same bytes as the slot the
-/// fold stores, through another local. A plain value cannot.
+/// fold stores, through another local, and a division or remainder can
+/// divide by zero when moved ahead of the guard that checks its divisor.
+/// A plain value cannot.
 ///
 /// # Arguments
 ///
 /// * `expr` - One test or one stored value.
 fn plain_value(expr: &str) -> bool {
-    !expr.contains('*') && !expr.contains('[') && !expr.contains('&') && !expr.contains("->")
+    !expr.contains('*')
+        && !expr.contains('/')
+        && !expr.contains('%')
+        && !expr.contains('[')
+        && !expr.contains('&')
+        && !expr.contains("->")
 }
 
 /// Tells whether a line only declares names: a type and a list, no value,
@@ -1954,6 +1961,8 @@ return 0;
         assert_eq!(select_statements(&aliased), aliased);
         let guarded = "uint32_t local_c;\n\nif (a1 == 0) {\n  local_c = 1;\n} else {\n  local_c = *(uint32_t*)a1;\n  if (a2 != 0) {\n    local_c = 1;\n  }\n}\nreturn local_c;\n";
         assert_eq!(select_statements(guarded), guarded);
+        let divided = "uint32_t local_c;\n\nif (a2 == 0) {\n  local_c = 1;\n} else {\n  local_c = a1 / a2;\n  if (a3 != 0) {\n    local_c = 1;\n  }\n}\nreturn local_c;\n";
+        assert_eq!(select_statements(divided), divided);
         let alias = "uint32_t local_c;\nuint32_t local_58;\n\nif (((uint32_t*)&local_58)[a1] == 1) {\n  local_c = 2;\n} else {\n  local_c = 0;\n  if (a2 != 0) {\n    local_c = 2;\n  }\n}\nreturn local_c;\n";
         assert_eq!(select_statements(alias), alias);
     }
