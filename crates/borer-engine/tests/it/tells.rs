@@ -679,24 +679,46 @@ fn a_wide_debugger_window_is_named() {
     assert!(!notepad.contains("debugger window"), "{notepad}");
 }
 
-/// Creating a process and waiting on a debug event is a debug block.
+/// Creating a process with `DEBUG_PROCESS` and waiting on a debug event
+/// is a debug block. The same calls without that flag are not.
 #[test]
 fn a_debug_process_block_is_a_tell() {
-    let code = [
-        0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
-        0xe8, 0x06, 0x10, 0x00, 0x00, // ASM: call 0x402010
-        0xc3, // ASM: ret
-    ];
-    let text = report_calls(
-        &code,
+    let flagged = |flag: u8| {
+        let code = [
+            0xc7, 0x44, 0x24, 0x28, flag, 0x00, 0x00, 0x00, // ASM: mov dword [rsp+0x28], flag
+            0xe8, 0xf3, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0xe8, 0xfe, 0x0f, 0x00, 0x00, // ASM: call 0x402010
+            0xc3, // ASM: ret
+        ];
+        report_calls(
+            &code,
+            &[],
+            &[
+                ("CreateProcessA", 0x402000),
+                ("WaitForDebugEvent", 0x402010),
+            ],
+        )
+    };
+    let debug = flagged(1);
+    assert!(debug.contains("debug block"), "{debug}");
+    assert!(debug.starts_with("# anti-analysis:"), "{debug}");
+    let only = flagged(2);
+    assert!(only.contains("debug block"), "{only}");
+    let suspended = flagged(4);
+    assert!(!suspended.contains("debug block"), "{suspended}");
+    let plain = report_calls(
+        &[
+            0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0xe8, 0x06, 0x10, 0x00, 0x00, // ASM: call 0x402010
+            0xc3, // ASM: ret
+        ],
         &[],
         &[
             ("CreateProcessA", 0x402000),
             ("WaitForDebugEvent", 0x402010),
         ],
     );
-    assert!(text.contains("debug block"), "{text}");
-    assert!(text.starts_with("# anti-analysis:"), "{text}");
+    assert!(!plain.contains("debug block"), "{plain}");
     let alone = report_calls(
         &[
             0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000

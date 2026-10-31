@@ -379,7 +379,9 @@ fn patterns(
     {
         out.push(("debugger window (FindWindow)", ip));
     }
-    if has("createprocess") && (has("waitfordebugevent") || has("continuedebugevent")) {
+    if (has("waitfordebugevent") || has("continuedebugevent"))
+        && debug_spawn(p, a, f.entry, instrs, bits)
+    {
         out.push(("debug block (DEBUG_PROCESS)", ip));
     }
     if has("ntqueryinformationprocess") && debug_port(p, a, f.entry, instrs, bits) {
@@ -402,6 +404,103 @@ fn patterns(
         out.push(("illegal opcode (exception filter)", ip));
     }
     out
+}
+
+/// Whether a `CreateProcess` call passes a debug creation flag.
+///
+/// The flags are the sixth argument. `DEBUG_PROCESS` and
+/// `DEBUG_ONLY_THIS_PROCESS` are the low two bits. An ordinary helper,
+/// or `CREATE_SUSPENDED` alone, is not this tell.
+fn debug_spawn(p: &Program, a: &Analysis, entry: u64, instrs: &[Instruction], bits: u32) -> bool {
+    for (target, site) in a.refs_from(entry) {
+        if site.kind != RefKind::Call {
+            continue;
+        }
+        let slot = a.function(target).and_then(|g| g.thunk).unwrap_or(target);
+        let Some(sym) = a
+            .symbol_at(p, slot)
+            .filter(|s| s.kind == SymbolKind::Import)
+        else {
+            continue;
+        };
+        let name = bare_name(&sym.name).to_ascii_lowercase();
+        if !matches!(
+            name.as_str(),
+            "createprocess" | "createprocessa" | "createprocessw"
+        ) {
+            continue;
+        }
+        let Some(at) = instrs.iter().position(|i| i.ip() == site.va) else {
+            continue;
+        };
+        if creation_flags(&instrs[..at], bits) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether the sixth argument passed before this call is a debug flag.
+fn creation_flags(before: &[Instruction], bits: u32) -> bool {
+    let disp = if bits == 32 { 0x14 } else { 0x28 };
+    if bits == 32 && pushed_immediate(before, 6).is_some_and(debug_creation) {
+        return true;
+    }
+    for n in before.iter().rev().take(16) {
+        if matches!(
+            n.flow_control(),
+            FlowControl::Call | FlowControl::IndirectCall
+        ) {
+            return false;
+        }
+        if stack_immediate(n, disp, bits).is_some_and(debug_creation) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether `imm` includes `DEBUG_PROCESS` or `DEBUG_ONLY_THIS_PROCESS`.
+fn debug_creation(imm: u64) -> bool {
+    (imm & 3) != 0
+}
+
+/// The `nth` immediate `push` before the call, counting from the call.
+fn pushed_immediate(before: &[Instruction], nth: u32) -> Option<u64> {
+    let mut seen = 0u32;
+    for i in before.iter().rev().take(24) {
+        if matches!(
+            i.flow_control(),
+            FlowControl::Call | FlowControl::IndirectCall
+        ) {
+            return None;
+        }
+        if i.mnemonic() != Mnemonic::Push {
+            continue;
+        }
+        seen += 1;
+        if seen == nth {
+            return immediate_any(i);
+        }
+    }
+    None
+}
+
+/// The immediate stored at `[rsp+disp]` or `[esp+disp]`.
+fn stack_immediate(n: &Instruction, disp: u64, bits: u32) -> Option<u64> {
+    if n.mnemonic() != Mnemonic::Mov || n.op0_kind() != OpKind::Memory {
+        return None;
+    }
+    let width = if bits == 32 { 4 } else { 8 };
+    if n.memory_base().full_register() != Register::RSP
+        || n.memory_base().size() != width
+        || n.memory_index() != Register::None
+        || n.memory_displacement64() != disp
+        || !matches!(n.segment_prefix(), Register::None | Register::SS)
+    {
+        return None;
+    }
+    immediate_any(n)
 }
 
 /// Whether the `NtQueryInformationProcess` call passes `ProcessDebugPort`.
