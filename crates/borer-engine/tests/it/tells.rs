@@ -855,6 +855,33 @@ fn context_all_and_a_dr_read_are_hardware_breakpoints() {
     assert!(!store.contains("hardware breakpoint"), "{store}");
 }
 
+/// A register that held the context buffer, then held something else, is
+/// not a debug-register load. The frame slot the call wrote still is.
+#[test]
+fn a_reused_context_register_is_not_a_hardware_breakpoint() {
+    let reused = [
+        0x48, 0x89, 0xda, // ASM: mov rdx, rbx
+        0xe8, 0xf8, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0x48, 0x89, 0xf3, // ASM: mov rbx, rsi
+        0x48, 0x8b, 0x43, 0x48, // ASM: mov rax, [rbx+0x48]
+        0xc3, // ASM: ret
+    ];
+    assert_eq!(direct_call(&reused, 3), 0x402000);
+    let text = report_calls(&reused, &[], &[("GetThreadContext", 0x402000)]);
+    assert!(!text.contains("hardware breakpoint"), "{text}");
+    let slot = [
+        0x48, 0x8d, 0x5c, 0x24, 0x20, // ASM: lea rbx, [rsp+0x20]
+        0x48, 0x89, 0xda, // ASM: mov rdx, rbx
+        0xe8, 0xf3, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0x48, 0x89, 0xf3, // ASM: mov rbx, rsi
+        0x48, 0x8b, 0x44, 0x24, 0x68, // ASM: mov rax, [rsp+0x68]
+        0xc3, // ASM: ret
+    ];
+    assert_eq!(direct_call(&slot, 8), 0x402000);
+    let kept = report_calls(&slot, &[], &[("GetThreadContext", 0x402000)]);
+    assert!(kept.contains("hardware breakpoint"), "{kept}");
+}
+
 /// A buffer passed to a later call is not the context `GetThreadContext` got.
 #[test]
 fn a_later_call_does_not_make_a_context_buffer() {

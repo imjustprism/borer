@@ -1257,14 +1257,25 @@ fn remember_flags(n: &Instruction, held: &mut [Register], count: &mut usize) {
 /// Whether a load after the call reads a debug-register slot of the
 /// context pointer set up before it.
 ///
+/// A later write of the pointer register addresses a different object.
+/// The frame slot still counts, because the call wrote that memory.
+///
 /// # Arguments
 ///
 /// * `before` - Instructions before the call.
 /// * `after` - Instructions after the call.
 /// * `bits` - Decoder bitness, which picks the `CONTEXT` offsets.
 fn reads_context_dr(before: &[Instruction], after: &[Instruction], bits: u32) -> bool {
-    let ptr = context_ptr(before, bits);
-    after.iter().take(8).any(|n| dr_from_ptr(n, bits, ptr))
+    let (mut reg, slot) = context_ptr(before, bits);
+    for n in after.iter().take(8) {
+        if dr_from_ptr(n, bits, (reg, slot)) {
+            return true;
+        }
+        if reg != Register::None && writes_register(n, reg) {
+            reg = Register::None;
+        }
+    }
+    false
 }
 
 /// The callee-saved register holding the context pointer, and the frame
