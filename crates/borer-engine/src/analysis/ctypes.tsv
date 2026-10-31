@@ -28,6 +28,7 @@ HMODULE	ptr
 HOOKPROC	ptr
 HRESULT	i32
 HRSRC	ptr
+HSTRING	ptr
 HWND	ptr
 ID3D11Device	ptr
 ID3D11DeviceContext	ptr

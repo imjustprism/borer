@@ -2382,6 +2382,16 @@ WIN: list[tuple[str, str, str | None, list[Param]]] = [
         None,
         [("REFIID", "riid", None), ("void **", "ppFactory", None)],
     ),
+    (
+        "RoGetActivationFactory",
+        "HRESULT",
+        None,
+        [
+            ("HSTRING", "activatableClassId", None),
+            ("REFIID", "iid", None),
+            ("void **", "factory", None),
+        ],
+    ),
     # DirectDraw, DirectInput and DirectSound creation: the interface each
     # hands back types the calls made through it.
     (
@@ -3272,6 +3282,7 @@ POINTER_WORDS = {
     "LPHANDLE",
     "LPWSADATA",
     "PMEMORY_BASIC_INFORMATION",
+    "HSTRING",
 }
 
 
