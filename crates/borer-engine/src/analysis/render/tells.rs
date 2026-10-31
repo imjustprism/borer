@@ -101,7 +101,8 @@ const TIMESTAMP_PAIRS: usize = 8;
 ///
 /// The subtraction has to use the earlier read, or a register it was copied
 /// into. A write of that register after the second read and before the
-/// subtraction drops it. `sub eax, eax` clears the register, and a compare
+/// subtraction drops it. A write of `eax` replaces the second read.
+/// `sub eax, eax` clears the register, and a compare
 /// of some other register is not that check. An earlier read that nothing
 /// saves does not hide a later pair. At most [`TIMESTAMP_PAIRS`] pairs are
 /// checked.
@@ -122,11 +123,15 @@ fn rdtsc_timing(instrs: &[Instruction]) -> bool {
         let (earlier, later) = (pair[0], pair[1]);
         let mut saved = saved_timestamp(&instrs[earlier + 1..later], instrs[later].mnemonic());
         let mut live = saved.iter().take_while(|r| **r != Register::None).count();
+        let mut second = true;
         let mut gap = None;
         for (offset, n) in instrs.iter().skip(later + 1).take(8).enumerate() {
-            if timestamp_difference(n, &saved) {
+            if second && timestamp_difference(n, &saved) {
                 gap = Some(offset);
                 break;
+            }
+            if writes_register(n, Register::RAX) {
+                second = false;
             }
             drop_timestamp(n, &mut saved, &mut live);
         }
