@@ -58,7 +58,9 @@ pub(super) fn literal_at(program: &Program, addr: u64, own_name: &str) -> Option
 /// is not cut to the narrow `"%"`. A lone terminator reads as `""` only
 /// beside another literal: right after one, or right before a run of text
 /// that ends in its own terminator, not before one printable byte and
-/// binary (a jump table's first entry). A zero `wchar_t` after a wide
+/// binary (a jump table's first entry). A short literal on three relative
+/// offsets into executable code is that table too (`3f 00 91 ff` is not
+/// `"?"`). A zero `wchar_t` after a wide
 /// literal, padding included, reads as `L""`. A literal that does not read back to the
 /// image's bytes through the text's own tokenizer ([`round_trips`]) is not
 /// printed.
@@ -113,6 +115,9 @@ fn string_at(program: &Program, addr: u64) -> Option<String> {
             .read_va_upto(addr.wrapping_add(4), 4)
             .is_some_and(|b| b.iter().any(|c| *c != 0))
     {
+        return None;
+    }
+    if narrow.as_ref().is_some_and(|(len, _)| *len < MIN) && relative_table(program, addr) {
         return None;
     }
     let run = wide_run_start(program, addr)
@@ -201,6 +206,40 @@ fn wide_empty(program: &Program, addr: u64) -> bool {
             .and_then(|b| program.read_va(b, 1))
             .and_then(|b| b.first().copied())
             .is_some_and(|c| c == 0 || !crate::strings::printable(c))
+}
+
+/// Whether `addr` begins a relative jump table.
+///
+/// Three aligned dwords, each a signed offset from `addr` into executable
+/// code, are a jump table. The first of those dwords is often a printable
+/// byte and a zero (`3f 00 91 ff`), which otherwise reads as `"?"`.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `addr` - Address of the candidate literal.
+fn relative_table(program: &Program, addr: u64) -> bool {
+    if !addr.is_multiple_of(4) {
+        return false;
+    }
+    let mut hits = 0u32;
+    for i in 0..4u64 {
+        let at = addr.wrapping_add(i.saturating_mul(4));
+        let Some(raw) = program.read_va(at, 4) else {
+            break;
+        };
+        let Ok(buf) = <[u8; 4]>::try_from(raw) else {
+            break;
+        };
+        let rel = i64::from(i32::from_le_bytes(buf));
+        let target = addr.wrapping_add(rel.cast_unsigned());
+        if program.section_at(target).is_some_and(|s| s.executable) {
+            hits += 1;
+        } else {
+            break;
+        }
+    }
+    hits >= 3
 }
 
 /// Fewest wide characters, past a one-character narrow reading, that make
@@ -340,5 +379,26 @@ mod tests {
         assert_eq!(super::string_at(&p, 0x2062).as_deref(), Some("L\"\""));
         assert_eq!(super::string_at(&p, 0x2064).as_deref(), Some("L\"\""));
         assert_ne!(super::string_at(&p, 0x2074).as_deref(), Some("L\"\""));
+    }
+
+    /// A jump table whose first offset is `"?"` keeps its address. A real
+    /// `"?"` followed by zeros still reads as that literal.
+    ///
+    /// # Panics
+    ///
+    /// When the check fails.
+    #[test]
+    fn a_relative_jump_table_is_not_a_short_string() {
+        use crate::program::{Arch, Program, Section};
+        let mut bytes = vec![0u8; 0x1200];
+        bytes[0x1000..0x100c].copy_from_slice(&[
+            0x3f, 0x00, 0x91, 0xff, 0x61, 0x00, 0x91, 0xff, 0x8b, 0x00, 0x91, 0xff,
+        ]);
+        bytes[0x1100] = 0x3f;
+        let text = Section::mapped(".text", 0x110000, 0, 0x1000, false, true);
+        let rdata = Section::mapped(".rdata", 0x800000, 0x1000, 0x200, false, false);
+        let p = Program::raw(bytes, Arch::X86_64, 0, None, vec![text, rdata]);
+        assert_eq!(super::string_at(&p, 0x800000), None);
+        assert_eq!(super::string_at(&p, 0x800100).as_deref(), Some("\"?\""));
     }
 }
