@@ -570,7 +570,7 @@ fn a_thunk_body_and_a_span_hole_are_recovered_as_functions() {
 #[test]
 fn a_gap_is_recovered_into_a_clone_of_the_analysis() {
     use borer_engine::analysis::{entry_or_gap, in_blocks};
-    let text: [u16; 12] = [
+    let text: [u16; 16] = [
         0xb510, // ASM: push {r4, lr}
         0xf000, // ASM: bl 0xe
         0xf804, // ASM: (bl, second half)
@@ -583,6 +583,10 @@ fn a_gap_is_recovered_into_a_clone_of_the_analysis() {
         0x2001, // ASM: movs r0, #1
         0x4770, // ASM: bx lr
         0xbf00, // ASM: nop
+        0xf7ff, // ASM: bl 0x6
+        0xfff5, // ASM: (bl, second half)
+        0x4770, // ASM: bx lr
+        0xbf00, // ASM: nop
     ];
     let bytes: Vec<u8> = text.iter().flat_map(|h| h.to_le_bytes()).collect();
     let p = Program::from_bytes(PathBuf::from("gap.elf"), elf32(&bytes, &[], ELF_TEXT | 1))
@@ -591,6 +595,7 @@ fn a_gap_is_recovered_into_a_clone_of_the_analysis() {
     let gap = ELF_TEXT + 0x12;
     assert!(a.function(gap).is_none());
     let mut grown = a.clone();
+    assert_eq!(grown.start_gap_function(&p, ELF_TEXT + 0x18), None);
     assert_eq!(entry_or_gap(&p, &mut grown, ELF_TEXT + 2), Ok(ELF_TEXT));
     assert_eq!(entry_or_gap(&p, &mut grown, gap | 1), Ok(gap));
     assert!(in_blocks(&p, &grown, gap, gap));

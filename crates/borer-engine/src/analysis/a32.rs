@@ -724,6 +724,7 @@ fn function_at_gap(program: &Program, functions: &[Function], va: u64) -> Option
     let free = |a: u64| guess::covers(&covered, a).is_none();
     let ok = !w.bad
         && w.into.is_empty()
+        && w.callees.iter().all(|c| starts.contains(c) || free(*c))
         && (w.exits || guess::closed(&w))
         && !guess::dead_start(&w, va)
         && !w.seen.is_empty()
