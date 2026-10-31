@@ -432,6 +432,17 @@ fn a_peb_field_is_named_from_the_following_read() {
     assert!(!wide.contains("BeingDebugged"), "{wide}");
 }
 
+/// A TEB read is a PEB read only when the next access uses that pointer.
+#[test]
+fn an_unrelated_slot_after_a_teb_read_is_not_a_peb_read() {
+    let text = report(&[
+        0x65, 0x48, 0x8b, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, // ASM: mov rax, gs:[0x30]
+        0x48, 0x8b, 0x4b, 0x60, // ASM: mov rcx, [rbx+0x60]
+        0xc3, // ASM: ret
+    ]);
+    assert!(!text.contains("peb read"), "{text}");
+}
+
 /// A field read has to use the PEB pointer. Another base, and a store,
 /// stay a plain PEB read. A copy of the pointer still names the field.
 #[test]

@@ -747,9 +747,9 @@ fn decodes_invalid(p: &Program, bits: u32, at: u64) -> bool {
 /// The address and label of a PEB read, when the instructions perform one.
 ///
 /// `fs:[0x30]` and `gs:[0x60]` are the PEB. `fs:[0x18]` and `gs:[0x30]` are
-/// the TEB's self pointer, and count only when a following use indexes the
-/// PEB (`0x30` or `0x60`). A read of the stack base at `+4` or `+8` does not.
-/// The label names the field a later read shows.
+/// the TEB's self pointer, and count only when a following use of that
+/// pointer indexes the PEB (`0x30` or `0x60`). A read of the stack base at
+/// `+4` or `+8` does not. The label names the field a later read shows.
 fn peb_read(instrs: &[Instruction]) -> Option<(u64, &'static str)> {
     for (at, i) in instrs.iter().enumerate() {
         let Some((seg, disp, base)) = memory(i) else {
@@ -761,11 +761,9 @@ fn peb_read(instrs: &[Instruction]) -> Option<(u64, &'static str)> {
             return Some((i.ip(), peb_field(&instrs[at + 1..], pointer_dest(i))));
         }
         if teb && base == Register::None {
-            let indexed = instrs.iter().skip(at + 1).take(4).any(|n| {
-                memory(n).is_some_and(|(_, d, b)| b != Register::None && matches!(d, 0x30 | 0x60))
-            });
-            if indexed {
-                return Some((i.ip(), peb_field(&instrs[at + 1..], pointer_dest(i))));
+            let origin = pointer_dest(i);
+            if teb_indexes_peb(&instrs[at + 1..], origin) {
+                return Some((i.ip(), peb_field(&instrs[at + 1..], origin)));
             }
         }
     }
@@ -838,6 +836,35 @@ fn peb_field_read(n: &Instruction, held: &[Register]) -> Option<&'static str> {
         return Some("peb read (NtGlobalFlag)");
     }
     None
+}
+
+/// Whether a later access indexes the PEB through the TEB pointer.
+///
+/// The base has to be `origin` or a copy of it. Another register is a
+/// different object.
+fn teb_indexes_peb(rest: &[Instruction], origin: Register) -> bool {
+    if origin == Register::None {
+        return false;
+    }
+    let mut held = [Register::None; 4];
+    held[0] = origin;
+    let mut count = 1usize;
+    for n in rest.iter().take(4) {
+        if memory(n).is_some_and(|(_, disp, base)| {
+            matches!(disp, 0x30 | 0x60) && held[..count].contains(&base.full_register())
+        }) {
+            return true;
+        }
+        if let Some(dest) = copied_timestamp(n, &held[..count]) {
+            if count < held.len() && !held[..count].contains(&dest) {
+                held[count] = dest;
+                count += 1;
+            }
+            continue;
+        }
+        drop_timestamp(n, &mut held, &mut count);
+    }
+    false
 }
 
 /// The register a load of the PEB pointer from the TEB writes.
