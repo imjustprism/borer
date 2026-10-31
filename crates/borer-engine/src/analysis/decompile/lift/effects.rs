@@ -1784,6 +1784,20 @@ impl Exec<'_, '_> {
         }
     }
 
+    /// Returns `cpuid`'s `eax` and `ecx` inputs.
+    ///
+    /// A timestamp in either input is one statement. Each result then names
+    /// that statement instead of reading the clock again.
+    pub(super) fn cpuid_inputs(&mut self) -> Vec<Expr> {
+        let mut args = vec![self.reg_read(Register::EAX), self.reg_read(Register::ECX)];
+        for arg in &mut args {
+            if Self::saved_time(arg) {
+                *arg = self.tmp_of(arg, self.word_ty());
+            }
+        }
+        args
+    }
+
     /// Tells whether `v` holds a timestamp the machine already read.
     ///
     /// The timestamp may sit inside a larger expression. A call between

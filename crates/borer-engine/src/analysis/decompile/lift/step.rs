@@ -1535,9 +1535,9 @@ impl Exec<'_, '_> {
     /// A copy taken before the next `cpuid` keeps the earlier result, so a
     /// vendor test stays on the leaf that produced it. The four results are
     /// recorded before any is written out, so a later result still reads
-    /// the leaf rather than `eax`.
+    /// the leaf rather than `eax`. A timestamp in an input is saved once.
     fn cpuid(&mut self) {
-        let args = vec![self.reg_read(Register::EAX), self.reg_read(Register::ECX)];
+        let args = self.cpuid_inputs();
         self.reg_write_all(vec![
             (Register::EAX, Expr::Helper(Helper::Cpuid(0), args.clone())),
             (Register::EBX, Expr::Helper(Helper::Cpuid(1), args.clone())),

@@ -252,3 +252,17 @@ fn a_saved_carry_reads_the_earlier_timestamp_once() {
     assert!(text.contains("uaddo32("), "{text}");
     assert!(!text.contains("uaddo32(rdtsc("), "{text}");
 }
+
+/// One timestamp used as `cpuid`'s leaf is one read for every result.
+#[test]
+fn a_timestamp_leaf_is_one_call() {
+    let code = [
+        0x0f, 0x31, // ASM: rdtsc
+        0x31, 0xc9, // ASM: xor ecx, ecx
+        0x0f, 0xa2, // ASM: cpuid
+        0x01, 0xd8, // ASM: add eax, ebx
+        0xc3, // ASM: ret
+    ];
+    let text = decompiled(&program64(&code), 0x1_4000_1000);
+    assert_eq!(text.matches("rdtsc()").count(), 1, "{text}");
+}
