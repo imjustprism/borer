@@ -244,6 +244,10 @@ fn zero_checks(n: &Instruction, held: &[Register; 4], need: usize) -> bool {
 }
 
 /// The register a full-width `mov` copies a held result into.
+///
+/// A 32-bit destination zero-extends, so it can hold a 64-bit result. The
+/// source has to cover `need` itself: `mov ebx, eax` keeps only the low
+/// half of `rax`.
 fn copied_into(n: &Instruction, held: &[Register; 4], need: usize) -> Option<Register> {
     if n.mnemonic() != Mnemonic::Mov
         || n.op_count() != 2
@@ -254,7 +258,7 @@ fn copied_into(n: &Instruction, held: &[Register; 4], need: usize) -> Option<Reg
     }
     let dest = n.op0_register();
     let source = n.op1_register();
-    if !held.contains(&source.full_register()) || !covers(dest, need) || !covers(source, need) {
+    if !held.contains(&source.full_register()) || !covers(dest, need) || source.size() < need {
         return None;
     }
     Some(dest.full_register())
@@ -383,8 +387,9 @@ fn branch_skips(instrs: &[Instruction], from: u64, to: u64) -> bool {
 
 /// The register a full-width `mov` into `dest` copies.
 ///
-/// A write narrower than `need` bytes, other than a 32-bit write that
-/// zero-extends, does not define the compared value.
+/// A 32-bit write zero-extends, so it defines a 64-bit destination. The
+/// source has to be at least `need` bytes. `mov ecx, eax` does not carry
+/// the high half of `rax` into a compare of `rcx`.
 ///
 /// # Arguments
 ///
@@ -402,7 +407,7 @@ fn copied_from(n: &Instruction, dest: Register, need: usize) -> Option<Register>
     }
     let written = n.op0_register();
     let source = n.op1_register();
-    if !covers(written, need) || !covers(source, need) {
+    if !covers(written, need) || source.size() < need {
         return None;
     }
     Some(source.full_register())

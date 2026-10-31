@@ -517,3 +517,59 @@ fn an_arm64_function_gets_no_step() {
     let a = Analysis::compute(&p);
     assert!(next_steps(&p, &a, &Overlay::default(), 0x40_1000).is_empty());
 }
+
+/// A 32-bit copy does not carry a 64-bit value into a compare.
+///
+/// `mov ebx, eax` after `sub rax, imm` keeps the low half. `test rbx, rbx`
+/// is not that subtraction. `mov eax, ecx` then `cmp rax, imm` is a compare,
+/// and it is not a compare of `a1`. The full-width copies are.
+#[test]
+fn a_narrow_copy_is_not_a_wide_compare() {
+    let low = [
+        0x48, 0x81, 0xe8, 0xcd, 0xab, 0x37, 0x13, // ASM: sub rax, 0x1337abcd
+        0x89, 0xc3, // ASM: mov ebx, eax
+        0x48, 0x85, 0xdb, // ASM: test rbx, rbx
+        0x74, 0x03, // ASM: jz 0x401011
+        0x89, 0xc8, // ASM: mov eax, ecx
+        0xc3, // ASM: ret
+        0xc3, // ASM: ret
+    ];
+    let got = steps(&low);
+    assert!(
+        got.iter().all(|step| !step.contains("0x1337abcd")),
+        "{got:?}"
+    );
+    let wide = [
+        0x48, 0x81, 0xe8, 0xcd, 0xab, 0x37, 0x13, // ASM: sub rax, 0x1337abcd
+        0x48, 0x89, 0xc3, // ASM: mov rbx, rax
+        0x48, 0x85, 0xdb, // ASM: test rbx, rbx
+        0x74, 0x03, // ASM: jz 0x401012
+        0x89, 0xc8, // ASM: mov eax, ecx
+        0xc3, // ASM: ret
+        0xc3, // ASM: ret
+    ];
+    assert_eq!(
+        steps(&wide),
+        ["borer://solve/0x401000 (compares against 0x1337abcd: not shown to be a1)"]
+    );
+    let half = [
+        0x89, 0xc8, // ASM: mov eax, ecx
+        0x48, 0x81, 0xf8, 0xcd, 0xab, 0x37, 0x13, // ASM: cmp rax, 0x1337abcd
+        0x0f, 0x94, 0xc0, // ASM: sete al
+        0xc3, // ASM: ret
+    ];
+    assert_eq!(
+        steps(&half),
+        ["borer://solve/0x401000 (compares against 0x1337abcd: not shown to be a1)"]
+    );
+    let full = [
+        0x48, 0x89, 0xc8, // ASM: mov rax, rcx
+        0x48, 0x81, 0xf8, 0xcd, 0xab, 0x37, 0x13, // ASM: cmp rax, 0x1337abcd
+        0x0f, 0x94, 0xc0, // ASM: sete al
+        0xc3, // ASM: ret
+    ];
+    assert_eq!(
+        steps(&full),
+        ["borer://solve/0x401000,a1 (compares against 0x1337abcd: solve tries it as a1)"]
+    );
+}
