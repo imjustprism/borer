@@ -153,8 +153,9 @@ pub(crate) fn empty_literal_at(program: &Program, addr: u64) -> Option<String> {
 ///
 /// The address is two-byte aligned and its first unit is zero. Walking
 /// back over at most three zero units lands on a wide character whose
-/// preceding byte is a terminator or the section start. The tail of an
-/// ASCII literal is not that character.
+/// preceding byte is a terminator. The tail of an ASCII literal is not
+/// that character. A character at the section start is not wide: nothing
+/// before it shows the encoding, so `A\0\0\0` there is `""`.
 ///
 /// # Arguments
 ///
@@ -200,12 +201,10 @@ fn wide_empty(program: &Program, addr: u64) -> bool {
     if !crate::strings::printable(lo) || bytes.get(1) != Some(&0) {
         return false;
     }
-    unit == section.va.0
-        || unit
-            .checked_sub(1)
-            .and_then(|b| program.read_va(b, 1))
-            .and_then(|b| b.first().copied())
-            .is_some_and(|c| c == 0 || !crate::strings::printable(c))
+    unit.checked_sub(1)
+        .and_then(|b| program.read_va(b, 1))
+        .and_then(|b| b.first().copied())
+        .is_some_and(|c| c == 0 || !crate::strings::printable(c))
 }
 
 /// Whether `addr` begins a relative jump table.
@@ -400,5 +399,21 @@ mod tests {
         let p = Program::raw(bytes, Arch::X86_64, 0, None, vec![text, rdata]);
         assert_eq!(super::string_at(&p, 0x800000), None);
         assert_eq!(super::string_at(&p, 0x800100).as_deref(), Some("\"?\""));
+    }
+
+    /// `A\0\0\0` at the start of a section is `""`. The same bytes are a
+    /// wide character, and the section start is not a wide terminator.
+    ///
+    /// # Panics
+    ///
+    /// When the check fails.
+    #[test]
+    fn a_section_start_empty_string_stays_narrow() {
+        use crate::program::{Arch, Program, Section};
+        let mut bytes = vec![0u8; 0x10];
+        bytes[0..4].copy_from_slice(&[0x41, 0x00, 0x00, 0x00]);
+        let rdata = Section::mapped(".rdata", 0x2000, 0, 0x10, false, false);
+        let p = Program::raw(bytes, Arch::X86_64, 0, None, vec![rdata]);
+        assert_eq!(super::string_at(&p, 0x2002).as_deref(), Some("\"\""));
     }
 }
