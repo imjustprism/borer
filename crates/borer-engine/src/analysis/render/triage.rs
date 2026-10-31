@@ -418,6 +418,8 @@ pub fn capability_map_tsv(p: &Program, a: Option<&Analysis>) -> String {
 /// The C runtime's failure and timing imports stay off the map unless a
 /// caller uses the result as a check. Every other import stays.
 ///
+/// An instruction set this scan cannot read keeps the import.
+///
 /// # Arguments
 ///
 /// * `p` - The loaded image.
@@ -427,6 +429,9 @@ fn called_as_check(p: &Program, a: &Analysis, api: &str) -> bool {
     let Some(stem) = crt_stem(api) else {
         return true;
     };
+    if p.arch.bitness().is_none() {
+        return true;
+    }
     a.functions.iter().any(|f| {
         let sites = call_sites(p, a, f.entry, stem);
         if sites.is_empty() || crt_failure(p, a, f.entry) {
@@ -527,12 +532,13 @@ fn fastfail(p: &Program, a: &Analysis, entry: u64) -> bool {
 ///
 /// A full-width copy (`mov ebx, eax`) carries the value. A write that is
 /// not such a copy, such as `mov eax, 1`, drops it. A later call, return
-/// or unconditional jump ends this function, so the scan stops there.
+/// or unconditional jump ends this function, so the scan stops there. A
+/// section that ends inside the window is still read.
 fn result_tested(p: &Program, va: u64) -> bool {
     let Some(bits) = p.arch.bitness() else {
         return false;
     };
-    let Some(code) = p.read_va(va, 32) else {
+    let Some(code) = p.read_va_upto(va, 32) else {
         return false;
     };
     let mut decoder = Decoder::with_ip(bits, code, va, DecoderOptions::NONE);

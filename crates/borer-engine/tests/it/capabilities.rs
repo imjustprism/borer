@@ -6,7 +6,7 @@
 )]
 
 use borer_engine::analysis::Analysis;
-use borer_engine::program::{Arch, Symbol, SymbolKind};
+use borer_engine::program::{Arch, Program, Section, Symbol, SymbolKind};
 
 use crate::common::fixture;
 use crate::raw::image;
@@ -231,6 +231,48 @@ fn debugger_map(code: &[u8]) -> String {
     });
     let a = Analysis::compute(&p);
     borer_engine::analysis::render::capability_map_tsv(&p, Some(&a))
+}
+
+/// A check that ends its section is still a check.
+///
+/// The call and the test are in the section. A fixed 32-byte window runs
+/// past the file bytes.
+#[test]
+fn a_check_at_the_end_of_a_section_stays_on_the_map() {
+    let code = [
+        0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0x85, 0xc0, // ASM: test eax, eax
+        0xc3, // ASM: ret
+    ];
+    let mut p = Program::raw(
+        code.to_vec(),
+        Arch::X86_64,
+        0x400000,
+        Some(0x401000),
+        vec![Section::mapped(".text", 0x401000, 0, 8, false, true)],
+    );
+    p.symbols.push(Symbol {
+        name: "KERNEL32.dll!IsDebuggerPresent".to_owned(),
+        addr: 0x402000,
+        kind: SymbolKind::Import,
+    });
+    let text = borer_engine::analysis::render::capability_map_tsv(&p, Some(&Analysis::compute(&p)));
+    assert!(text.contains("IsDebuggerPresent"), "{text}");
+}
+
+/// An import whose calls are not x86 stays on the map.
+///
+/// The check cannot be read, so the import is not dropped.
+#[test]
+fn an_arm64_debugger_import_stays_on_the_map() {
+    let mut p = image(Arch::Arm64, &[0xc0, 0x03, 0x5f, 0xd6], &[]);
+    p.symbols.push(Symbol {
+        name: "KERNEL32.dll!IsDebuggerPresent".to_owned(),
+        addr: 0x402000,
+        kind: SymbolKind::Import,
+    });
+    let text = borer_engine::analysis::render::capability_map_tsv(&p, Some(&Analysis::compute(&p)));
+    assert!(text.contains("IsDebuggerPresent"), "{text}");
 }
 
 /// `mov edx, 0x29cd` holds the bytes of `int 0x29` and is not `__fastfail`.
