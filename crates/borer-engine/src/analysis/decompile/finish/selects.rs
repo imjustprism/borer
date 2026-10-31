@@ -808,13 +808,6 @@ fn preassigned_if_else(lines: &mut Vec<String>, k: usize) -> bool {
     else {
         return false;
     };
-    let local_unaliased = private(lines, &v)
-        || (lines
-            .iter()
-            .any(|l| declares(l) && !l.contains("//") && mentions_ident(l, &v))
-            && !lines
-                .iter()
-                .any(|l| !l.trim_start().starts_with("//") && l.contains(&format!("&{v}"))));
     let Some(cond) = if_opener(if_line.trim()).map(str::to_owned) else {
         return false;
     };
@@ -823,7 +816,11 @@ fn preassigned_if_else(lines: &mut Vec<String>, k: usize) -> bool {
     else {
         return false;
     };
-    if !local_unaliased || close < k + 3 || changes_state(&cond) || mentions_ident(&cond, &v) {
+    if !local_unaliased(lines, &v)
+        || close < k + 3
+        || changes_state(&cond)
+        || mentions_ident(&cond, &v)
+    {
         return false;
     }
     let Some((v2, other)) = lines
@@ -1378,10 +1375,10 @@ fn complement_bits(lines: &mut Vec<String>, k: usize) -> bool {
     let Some(ty) = decl_type(lines, temp).filter(|t| integer_type(t)) else {
         return false;
     };
-    if temp_lives(lines, k, temp)
+    if !local_unaliased(lines, temp)
+        || temp_lives(lines, k, temp)
         || base.contains('?')
         || mentions_ident(base, temp)
-        || address_taken(lines, temp)
     {
         return false;
     }
@@ -1552,19 +1549,6 @@ fn any_assignment(line: &str) -> Option<(&str, &str)> {
     Some((left.trim(), right.trim()))
 }
 
-/// Tells whether some line has taken the address of a stack slot.
-///
-/// A later read can use the saved pointer and never write the slot's name.
-///
-/// # Arguments
-///
-/// * `lines` - The function.
-/// * `name` - The temporary.
-fn address_taken(lines: &[String], name: &str) -> bool {
-    (name.starts_with("local_") || name.starts_with("home_"))
-        && lines.iter().any(|l| l.contains(&format!("&{name}")))
-}
-
 /// Tells whether line `k` sits in a `while`, `for` or `do`.
 ///
 /// The next iteration can read a temporary the lines after this one never
@@ -1653,6 +1637,23 @@ fn brace_delta(line: &str) -> i32 {
 /// * `expr` - A condition.
 fn changes_state(expr: &str) -> bool {
     impure(expr) || expr.contains("++") || expr.contains("--")
+}
+
+/// Tells whether `name` is a function-local variable or register whose
+/// address is never taken.
+///
+/// # Arguments
+///
+/// * `lines` - All lines of the function.
+/// * `name` - A variable name.
+fn local_unaliased(lines: &[String], name: &str) -> bool {
+    private(lines, name)
+        || (lines
+            .iter()
+            .any(|l| declares(l) && !l.contains("//") && mentions_ident(l, name))
+            && !lines
+                .iter()
+                .any(|l| !l.trim_start().starts_with("//") && l.contains(&format!("&{name}"))))
 }
 
 /// Tells whether `ty` is an integer a bit update can be stored as.
@@ -2019,6 +2020,8 @@ return 0;
         assert_eq!(select_statements(indexed), indexed);
         let escaped = "uint32_t local_c;\n\nescape(&local_c);\nlocal_c = (a2 != 8 ? (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc) | 0x1000 : (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc));\na1->field_0xc = local_c;\n";
         assert_eq!(select_statements(escaped), escaped);
+        let global = "uint32_t g32_1000; // @ 0x1000\n\ng32_1000 = (a2 != 8 ? (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc) | 0x1000 : (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc));\na1->field_0xc = g32_1000;\n";
+        assert_eq!(select_statements(global), global);
         let wide = "uint64_t r3;\n\nr3 = (a2 != 8 ? (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc) | 0x1000 : (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc));\na1->field_0xc = r3;\n";
         assert_eq!(
             select_statements(wide),
