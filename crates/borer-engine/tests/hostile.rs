@@ -175,6 +175,33 @@ fn put64(b: &mut [u8], at: usize, v: u64) {
     b[at..at + 8].copy_from_slice(&v.to_le_bytes());
 }
 
+/// Writes the section table at `row` and appends each section's bytes.
+///
+/// `row` is the file offset of the first section header. A section with no
+/// stated raw size uses its bytes rounded up to the file alignment.
+fn lay_sections(b: &mut Vec<u8>, mut row: usize, secs: &[Sec]) {
+    let mut at = HEADERS;
+    for s in secs {
+        let raw = s.raw_size.unwrap_or_else(|| {
+            u32::try_from(s.data.len().div_ceil(FILE_ALIGN) * FILE_ALIGN).expect("fits")
+        });
+        let name = s.name.as_bytes();
+        b[row..row + name.len()].copy_from_slice(name);
+        put32(b, row + 8, s.vsize);
+        put32(b, row + 12, s.rva);
+        put32(b, row + 16, raw);
+        put32(b, row + 20, u32::try_from(at).expect("fits"));
+        put32(b, row + 36, s.chars);
+        row += 40;
+        at += s.data.len().div_ceil(FILE_ALIGN) * FILE_ALIGN;
+    }
+    assert!(row <= HEADERS, "the section table runs into the sections");
+    for s in secs {
+        b.extend_from_slice(&s.data);
+        b.resize(b.len().div_ceil(FILE_ALIGN) * FILE_ALIGN, 0);
+    }
+}
+
 /// Builds a PE32+ image: DOS stub, headers, the section table and the
 /// sections' bytes at file-aligned offsets, entered at the first byte of
 /// the first section.
@@ -221,27 +248,7 @@ fn pe(secs: &[Sec], dirs: &[(usize, u32, u32)]) -> Vec<u8> {
         put32(&mut b, opt + 112 + slot * 8, rva);
         put32(&mut b, opt + 112 + slot * 8 + 4, size);
     }
-    let mut row = opt + OPTIONAL;
-    let mut at = HEADERS;
-    for s in secs {
-        let raw = s.raw_size.unwrap_or_else(|| {
-            u32::try_from(s.data.len().div_ceil(FILE_ALIGN) * FILE_ALIGN).expect("fits")
-        });
-        let name = s.name.as_bytes();
-        b[row..row + name.len()].copy_from_slice(name);
-        put32(&mut b, row + 8, s.vsize);
-        put32(&mut b, row + 12, s.rva);
-        put32(&mut b, row + 16, raw);
-        put32(&mut b, row + 20, u32::try_from(at).expect("fits"));
-        put32(&mut b, row + 36, s.chars);
-        row += 40;
-        at += s.data.len().div_ceil(FILE_ALIGN) * FILE_ALIGN;
-    }
-    assert!(row <= HEADERS, "the section table runs into the sections");
-    for s in secs {
-        b.extend_from_slice(&s.data);
-        b.resize(b.len().div_ceil(FILE_ALIGN) * FILE_ALIGN, 0);
-    }
+    lay_sections(&mut b, opt + OPTIONAL, secs);
     b
 }
 
@@ -896,27 +903,7 @@ fn pe32(secs: &[Sec], dirs: &[(usize, u32, u32)]) -> Vec<u8> {
         put32(&mut b, opt + 96 + slot * 8, rva);
         put32(&mut b, opt + 96 + slot * 8 + 4, size);
     }
-    let mut row = opt + OPTIONAL32;
-    let mut at = HEADERS;
-    for s in secs {
-        let raw = s.raw_size.unwrap_or_else(|| {
-            u32::try_from(s.data.len().div_ceil(FILE_ALIGN) * FILE_ALIGN).expect("fits")
-        });
-        let name = s.name.as_bytes();
-        b[row..row + name.len()].copy_from_slice(name);
-        put32(&mut b, row + 8, s.vsize);
-        put32(&mut b, row + 12, s.rva);
-        put32(&mut b, row + 16, raw);
-        put32(&mut b, row + 20, u32::try_from(at).expect("fits"));
-        put32(&mut b, row + 36, s.chars);
-        row += 40;
-        at += s.data.len().div_ceil(FILE_ALIGN) * FILE_ALIGN;
-    }
-    assert!(row <= HEADERS, "the section table runs into the sections");
-    for s in secs {
-        b.extend_from_slice(&s.data);
-        b.resize(b.len().div_ceil(FILE_ALIGN) * FILE_ALIGN, 0);
-    }
+    lay_sections(&mut b, opt + OPTIONAL32, secs);
     b
 }
 
