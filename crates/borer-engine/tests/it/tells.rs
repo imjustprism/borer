@@ -7,6 +7,7 @@
 
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::program::{Arch, BinaryFormat, Symbol, SymbolKind};
+use iced_x86::{Decoder, DecoderOptions, Mnemonic, Register};
 
 use crate::raw::image;
 
@@ -14,6 +15,18 @@ fn report(code: &[u8]) -> String {
     let p = image(Arch::X86_64, code, &[]);
     let a = Analysis::compute(&p);
     borer_engine::analysis::render::anti_analysis_tsv(&p, &a, &Overlay::default())
+}
+
+/// Returns the first instruction's mnemonic, segment, base, index, and displacement.
+fn segment_slot(code: &[u8]) -> (Mnemonic, Register, Register, Register, u64) {
+    let i = Decoder::with_ip(64, code, 0x401000, DecoderOptions::NONE).decode();
+    (
+        i.mnemonic(),
+        i.segment_prefix(),
+        i.memory_base(),
+        i.memory_index(),
+        i.memory_displacement64(),
+    )
 }
 
 /// One `cpuid` and one `rdtsc` are a feature probe and a read. A hypervisor
@@ -448,6 +461,93 @@ fn a_peb_read_is_a_tell_and_the_teb_stack_base_is_not() {
         0xc3, // ASM: ret
     ]);
     assert!(!stack.contains("peb read"), "{stack}");
+}
+
+/// `lea gs:[0x60]` names the address. A base, an index, or a store is a
+/// different access, and `lea` of the TEB does not become the PEB pointer.
+#[test]
+fn an_address_or_another_slot_is_not_a_peb_read() {
+    let address = [
+        0x65, 0x48, 0x8d, 0x04, 0x25, 0x60, 0x00, 0x00, 0x00, // ASM: lea rax, gs:[0x60]
+        0xc3, // ASM: ret
+    ];
+    assert_eq!(
+        segment_slot(&address),
+        (
+            Mnemonic::Lea,
+            Register::GS,
+            Register::None,
+            Register::None,
+            0x60
+        )
+    );
+    let address_text = report(&address);
+    assert!(!address_text.contains("peb read"), "{address_text}");
+    let based = [
+        0x65, 0x48, 0x8b, 0x43, 0x60, // ASM: mov rax, gs:[rbx+0x60]
+        0xc3, // ASM: ret
+    ];
+    assert_eq!(
+        segment_slot(&based),
+        (
+            Mnemonic::Mov,
+            Register::GS,
+            Register::RBX,
+            Register::None,
+            0x60
+        )
+    );
+    let based_text = report(&based);
+    assert!(!based_text.contains("peb read"), "{based_text}");
+    let indexed = [
+        0x65, 0x48, 0x8b, 0x04, 0x1d, 0x60, 0x00, 0x00, 0x00, // ASM: mov rax, gs:[rbx*1+0x60]
+        0xc3, // ASM: ret
+    ];
+    assert_eq!(
+        segment_slot(&indexed),
+        (
+            Mnemonic::Mov,
+            Register::GS,
+            Register::None,
+            Register::RBX,
+            0x60
+        )
+    );
+    let indexed_text = report(&indexed);
+    assert!(!indexed_text.contains("peb read"), "{indexed_text}");
+    let stored = [
+        0x65, 0x48, 0x89, 0x04, 0x25, 0x60, 0x00, 0x00, 0x00, // ASM: mov gs:[0x60], rax
+        0xc3, // ASM: ret
+    ];
+    assert_eq!(
+        segment_slot(&stored),
+        (
+            Mnemonic::Mov,
+            Register::GS,
+            Register::None,
+            Register::None,
+            0x60
+        )
+    );
+    let stored_text = report(&stored);
+    assert!(!stored_text.contains("peb read"), "{stored_text}");
+    let teb = [
+        0x65, 0x48, 0x8d, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, // ASM: lea rax, gs:[0x30]
+        0x48, 0x8b, 0x40, 0x60, // ASM: mov rax, [rax+0x60]
+        0xc3, // ASM: ret
+    ];
+    assert_eq!(
+        segment_slot(&teb),
+        (
+            Mnemonic::Lea,
+            Register::GS,
+            Register::None,
+            Register::None,
+            0x30
+        )
+    );
+    let teb_text = report(&teb);
+    assert!(!teb_text.contains("peb read"), "{teb_text}");
 }
 
 /// `fs:[0x30]` on ELF is the thread pointer guard, not the Windows PEB.

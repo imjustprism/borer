@@ -777,21 +777,26 @@ fn decodes_invalid(p: &Program, bits: u32, at: u64) -> bool {
 
 /// The address and label of a PEB read, when the instructions perform one.
 ///
-/// `fs:[0x30]` and `gs:[0x60]` are the PEB. `fs:[0x18]` and `gs:[0x30]` are
-/// the TEB's self pointer, and count only when a following use of that
-/// pointer indexes the PEB (`0x30` or `0x60`). A read of the stack base at
-/// `+4` or `+8` does not. The label names the field a later read shows.
+/// `fs:[0x30]` and `gs:[0x60]` are the PEB when the instruction reads that
+/// fixed slot. `lea`, a base, or an index does not. `fs:[0x18]` and
+/// `gs:[0x30]` are the TEB's self pointer, and count only when a following
+/// use of that pointer indexes the PEB (`0x30` or `0x60`). A read of the
+/// stack base at `+4` or `+8` does not. The label names the field a later
+/// read shows.
 fn peb_read(instrs: &[Instruction]) -> Option<(u64, &'static str)> {
     for (at, i) in instrs.iter().enumerate() {
-        let Some((seg, disp, base)) = memory(i) else {
+        let Some((seg, disp, _)) = memory(i) else {
             continue;
         };
+        if !reads_fixed_segment(i) {
+            continue;
+        }
         let direct = (seg == Register::FS && disp == 0x30) || (seg == Register::GS && disp == 0x60);
         let teb = (seg == Register::FS && disp == 0x18) || (seg == Register::GS && disp == 0x30);
         if direct {
             return Some((i.ip(), peb_field(&instrs[at + 1..], pointer_dest(i))));
         }
-        if teb && base == Register::None {
+        if teb {
             let origin = pointer_dest(i);
             if teb_indexes_peb(&instrs[at + 1..], origin) {
                 return Some((i.ip(), peb_field(&instrs[at + 1..], origin)));
@@ -799,6 +804,17 @@ fn peb_read(instrs: &[Instruction]) -> Option<(u64, &'static str)> {
         }
     }
     None
+}
+
+/// Whether `i` reads a segment slot with no base and no index.
+///
+/// `lea` names the address and does not load it. A base or an index is a
+/// different slot. A `mov` into the slot writes it.
+fn reads_fixed_segment(i: &Instruction) -> bool {
+    i.mnemonic() != Mnemonic::Lea
+        && i.memory_base() == Register::None
+        && i.memory_index() == Register::None
+        && !(i.mnemonic() == Mnemonic::Mov && i.op0_kind() == OpKind::Memory)
 }
 
 /// Names the PEB field a later read uses.
