@@ -756,3 +756,48 @@ fn an_exception_filter_over_an_illegal_opcode_is_a_tell() {
     );
     assert!(!data.contains("illegal opcode"), "{data}");
 }
+
+/// A code address passed to another call is not the filter's handler.
+///
+/// Clearing the filter and then running into bad bytes is not the tell.
+/// Bad bytes before the filter call are not it either.
+#[test]
+fn a_filter_needs_its_own_handler_and_the_bad_bytes_after_it() {
+    let cleared = report_calls(
+        &[
+            0xb9, 0x40, 0x10, 0x40, 0x00, // ASM: mov ecx, 0x401040
+            0xe8, 0x06, 0x10, 0x00, 0x00, // ASM: call 0x402010
+            0xb9, 0x00, 0x00, 0x00, 0x00, // ASM: mov ecx, 0
+            0xe8, 0xec, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0xf0, 0xf0, 0xc7, 0xc8, // ASM: two lock prefixes, not an instruction
+            0xeb, 0x01, // ASM: jmp short +1
+            0x6e, // ASM: outsb, skipped
+            0x31, 0xc0, // ASM: xor eax, eax
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[
+            ("SetUnhandledExceptionFilter", 0x402000),
+            ("CloseHandle", 0x402010),
+        ],
+    );
+    assert!(!cleared.contains("illegal opcode"), "{cleared}");
+    let earlier = report_calls(
+        &[
+            0xb9, 0x40, 0x10, 0x40, 0x00, // ASM: mov ecx, 0x401040
+            0xe8, 0x06, 0x10, 0x00, 0x00, // ASM: call 0x402010
+            0xf0, 0xf0, 0xc7, 0xc8, // ASM: two lock prefixes, not an instruction
+            0xeb, 0x01, // ASM: jmp short +1
+            0x6e, // ASM: outsb, skipped
+            0xb9, 0x30, 0x10, 0x40, 0x00, // ASM: mov ecx, 0x401030
+            0xe8, 0xd7, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[
+            ("SetUnhandledExceptionFilter", 0x402000),
+            ("CloseHandle", 0x402010),
+        ],
+    );
+    assert!(!earlier.contains("illegal opcode"), "{earlier}");
+}

@@ -385,10 +385,7 @@ fn patterns(
     } else if cc && writes_executable(p, instrs) {
         out.push(("breakpoint patch", ip));
     }
-    if has("setunhandledexceptionfilter")
-        && executable_handler(p, instrs)
-        && continued_past_bad(p, f, instrs, bits)
-    {
+    if illegal_filter(p, a, f, instrs, bits) {
         out.push(("illegal opcode (exception filter)", ip));
     }
     out
@@ -492,26 +489,80 @@ fn pushed_class(before: &[Instruction]) -> Option<u64> {
     None
 }
 
+/// Whether `SetUnhandledExceptionFilter` is given code and then runs into
+/// bytes that do not decode.
+///
+/// The code address has to be that call's argument. Undecodable bytes
+/// before the call, or a code address passed to another call, are not
+/// this tell.
+fn illegal_filter(
+    p: &Program,
+    a: &Analysis,
+    f: &Function,
+    instrs: &[Instruction],
+    bits: u32,
+) -> bool {
+    import_sites(p, a, f.entry, "setunhandledexceptionfilter")
+        .iter()
+        .any(|site| {
+            let Some(at) = instrs.iter().position(|i| i.ip() == *site) else {
+                return false;
+            };
+            executable_handler(p, &instrs[..at], bits)
+                && continued_past_bad(p, f, &instrs[at..], bits)
+        })
+}
+
 /// Whether the filter argument is an address in executable memory.
 ///
 /// On x86 the argument is pushed. On x64 it is moved into `ecx`. A call
 /// that passes something else is not this tell.
-fn executable_handler(p: &Program, instrs: &[Instruction]) -> bool {
-    instrs.iter().any(|i| {
-        let Some(imm) = immediate_any(i) else {
-            return false;
-        };
-        if !p.section_at(imm).is_some_and(|s| s.executable) {
-            return false;
-        }
-        i.mnemonic() == Mnemonic::Push
-            || (i.mnemonic() == Mnemonic::Mov
-                && i.op0_kind() == OpKind::Register
-                && i.op0_register().full_register() == Register::RCX)
-    })
+fn executable_handler(p: &Program, before: &[Instruction], bits: u32) -> bool {
+    let imm = if bits == 32 {
+        pushed_handler(before)
+    } else {
+        rcx_handler(before)
+    };
+    imm.is_some_and(|addr| p.section_at(addr).is_some_and(|s| s.executable))
 }
 
-/// Whether the function keeps going after an instruction that does not decode.
+/// The immediate in `ecx`, when the last write of it is a `mov`.
+fn rcx_handler(before: &[Instruction]) -> Option<u64> {
+    for n in before.iter().rev().take(8) {
+        if matches!(
+            n.flow_control(),
+            FlowControl::Call | FlowControl::IndirectCall
+        ) {
+            return None;
+        }
+        if n.op0_kind() != OpKind::Register || n.op0_register().full_register() != Register::RCX {
+            continue;
+        }
+        if n.mnemonic() == Mnemonic::Mov {
+            return immediate_any(n);
+        }
+        return None;
+    }
+    None
+}
+
+/// The immediate pushed as the filter, when that push is the argument.
+fn pushed_handler(before: &[Instruction]) -> Option<u64> {
+    for n in before.iter().rev().take(8) {
+        if matches!(
+            n.flow_control(),
+            FlowControl::Call | FlowControl::IndirectCall
+        ) {
+            return None;
+        }
+        if n.mnemonic() == Mnemonic::Push {
+            return immediate_any(n);
+        }
+    }
+    None
+}
+
+/// Whether the instructions keep going after bytes that do not decode.
 ///
 /// The bytes sit between two instructions the walk kept. A filter call that
 /// returns, with nothing undecodable after it, does not.
