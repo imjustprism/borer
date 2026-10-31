@@ -277,16 +277,37 @@ fn hypervisor_leaf(instrs: &[Instruction], at: usize) -> bool {
 }
 
 /// The immediate the last `mov` wrote into `eax` before `instrs[at]`.
+///
+/// A call, or any other write of `rax`, replaces that immediate. The leaf
+/// is then unknown.
 fn cpu_leaf(instrs: &[Instruction], at: usize) -> Option<u64> {
-    let wrote = instrs[..at]
-        .iter()
-        .rev()
-        .take(6)
-        .find(|n| writes_register(n, Register::RAX))?;
-    if wrote.mnemonic() != Mnemonic::Mov {
-        return None;
+    let mut info = InstructionInfoFactory::new();
+    for n in instrs[..at].iter().rev().take(6) {
+        if matches!(
+            n.flow_control(),
+            FlowControl::Call | FlowControl::IndirectCall
+        ) {
+            return None;
+        }
+        let writes_rax = info.info(n).used_registers().iter().any(|ur| {
+            ur.register().full_register() == Register::RAX
+                && matches!(
+                    ur.access(),
+                    OpAccess::Write
+                        | OpAccess::ReadWrite
+                        | OpAccess::CondWrite
+                        | OpAccess::ReadCondWrite
+                )
+        });
+        if !writes_rax {
+            continue;
+        }
+        if n.mnemonic() != Mnemonic::Mov {
+            return None;
+        }
+        return immediate_any(n);
     }
-    immediate_any(wrote)
+    None
 }
 
 /// Whether a later instruction tests the hypervisor bit in `ecx`.

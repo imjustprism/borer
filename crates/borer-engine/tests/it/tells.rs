@@ -122,6 +122,45 @@ fn a_cleared_hypervisor_bit_is_a_feature_probe() {
     assert!(!text.contains("hypervisor"), "{text}");
 }
 
+/// A call or a multiply replaces `eax` before `cpuid`. The earlier leaf is
+/// not the one that ran.
+#[test]
+fn a_call_before_cpuid_replaces_the_leaf() {
+    let called = report_calls(
+        &[
+            0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+            0xe8, 0xf6, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0x0f, 0xa2, // ASM: cpuid
+            0xf7, 0xc1, 0x00, 0x00, 0x00, 0x80, // ASM: test ecx, 0x80000000
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[("GetCurrentProcess", 0x402000)],
+    );
+    assert!(called.contains("cpuid (feature probe)"), "{called}");
+    assert!(!called.contains("hypervisor"), "{called}");
+    let vendor = report_calls(
+        &[
+            0xb8, 0x00, 0x00, 0x00, 0x40, // ASM: mov eax, 0x40000000
+            0xe8, 0xf6, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0x0f, 0xa2, // ASM: cpuid
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[("GetCurrentProcess", 0x402000)],
+    );
+    assert!(!vendor.contains("hypervisor"), "{vendor}");
+    let multiplied = report(&[
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+        0xf7, 0xe1, // ASM: mul ecx
+        0x0f, 0xa2, // ASM: cpuid
+        0xf7, 0xc1, 0x00, 0x00, 0x00, 0x80, // ASM: test ecx, 0x80000000
+        0xc3, // ASM: ret
+    ]);
+    assert!(multiplied.contains("cpuid (feature probe)"), "{multiplied}");
+    assert!(!multiplied.contains("hypervisor"), "{multiplied}");
+}
+
 /// A discarded read before a measured pair does not hide that pair.
 #[test]
 fn a_discarded_rdtsc_does_not_hide_a_later_pair() {
