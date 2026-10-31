@@ -250,6 +250,58 @@ fn a_compare_of_a_call_result_does_not_name_a1() {
     );
 }
 
+/// A `test` of an `xor` result is the compare the `xor` flags no longer are.
+///
+/// `test ecx, ecx` replaces those flags, and `sete` reads the test. A copy
+/// of the result is still that compare. Overwriting the register first, or
+/// leaving the test's flags unread, is not.
+#[test]
+fn a_tested_xor_result_is_still_a_compare() {
+    let code = [
+        0x81, 0xf1, 0xcd, 0xab, 0x37, 0x13, // ASM: xor ecx, 0x1337abcd
+        0x85, 0xc9, // ASM: test ecx, ecx
+        0x0f, 0x94, 0xc0, // ASM: sete al
+        0xc3, // ASM: ret
+    ];
+    assert_eq!(
+        steps(&code),
+        ["borer://solve/0x401000,a1 (compares against 0x1337abcd: solve tries it as a1)"]
+    );
+    let copied = [
+        0x81, 0xf1, 0xcd, 0xab, 0x37, 0x13, // ASM: xor ecx, 0x1337abcd
+        0x89, 0xca, // ASM: mov edx, ecx
+        0x85, 0xd2, // ASM: test edx, edx
+        0x0f, 0x94, 0xc0, // ASM: sete al
+        0xc3, // ASM: ret
+    ];
+    assert_eq!(
+        steps(&copied),
+        ["borer://solve/0x401000,a1 (compares against 0x1337abcd: solve tries it as a1)"]
+    );
+    let replaced = [
+        0x81, 0xf1, 0xcd, 0xab, 0x37, 0x13, // ASM: xor ecx, 0x1337abcd
+        0x89, 0xc1, // ASM: mov ecx, eax
+        0x85, 0xc9, // ASM: test ecx, ecx
+        0x0f, 0x94, 0xc0, // ASM: sete al
+        0xc3, // ASM: ret
+    ];
+    let got = steps(&replaced);
+    assert!(
+        got.iter().all(|step| !step.contains("0x1337abcd")),
+        "{got:?}"
+    );
+    let unread = [
+        0x81, 0xf1, 0xcd, 0xab, 0x37, 0x13, // ASM: xor ecx, 0x1337abcd
+        0x85, 0xc9, // ASM: test ecx, ecx
+        0xc3, // ASM: ret
+    ];
+    let got = steps(&unread);
+    assert!(
+        got.iter().all(|step| !step.contains("0x1337abcd")),
+        "{got:?}"
+    );
+}
+
 /// Copying the difference does not hide a `sub` whose flags a later
 /// instruction still reads.
 #[test]

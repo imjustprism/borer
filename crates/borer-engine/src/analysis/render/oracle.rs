@@ -242,8 +242,10 @@ pub fn solve_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
 /// tries as an argument and [`vectors_tsv`] seeds inputs with.
 ///
 /// The immediates of `cmp` and `test`, and of a `sub`, `xor` or `and`
-/// whose flags a later branch reads while the result is dead. Each value
-/// once. A mixer that overwrites the flags does not contribute.
+/// whose flags a later branch reads while the result is dead. A `test` of
+/// that result against itself counts when something reads the flags the
+/// test wrote. Each value once. A mixer that overwrites the flags does not
+/// contribute.
 ///
 /// # Arguments
 ///

@@ -28,7 +28,8 @@ pub(super) enum Compared {
 /// the two in address order cannot hide the check. Copying the result does
 /// not hide it either: `sub ecx, imm; mov edx, ecx; sete al` still
 /// compares, and `sub edx, imm; xor esi, edx` does not, because the `xor`
-/// overwrites the flags.
+/// overwrites the flags. A later `test` of the result against itself is
+/// that compare when something reads the flags the `test` wrote.
 ///
 /// # Arguments
 ///
@@ -46,7 +47,7 @@ pub(super) fn compare_immediate(instrs: &[Instruction], at: usize) -> Option<u64
         return None;
     }
     let value = immediate_of(i)?;
-    if plain || flags_decide(instrs, at) {
+    if plain || flags_decide(instrs, at) || result_checked(instrs, at) {
         Some(value)
     } else {
         None
@@ -55,8 +56,9 @@ pub(super) fn compare_immediate(instrs: &[Instruction], at: usize) -> Option<u64
 
 /// Immediates of `sub`, `xor` and `and` that no later flag read decides.
 ///
-/// A call, a return or another flag write leaves them undecided. The
-/// decompiled text can still print one as `==`, and a hint skips it.
+/// A call, a return, or a flag write that is not a test of the result
+/// leaves them undecided. The decompiled text can still print one as
+/// `==`, and a hint skips it.
 ///
 /// # Arguments
 ///
@@ -133,6 +135,129 @@ fn flags_decide(instrs: &[Instruction], at: usize) -> bool {
         cursor += 1;
     }
     false
+}
+
+/// Whether a later instruction tests the result of `instrs[at]` against
+/// zero and something reads the flags that test wrote.
+///
+/// `test` of the register against itself, or `cmp` of it with zero,
+/// replaces the flags the arithmetic wrote. A full-width copy of the
+/// result is still that result. A write of every copy, a call, or a return
+/// ends the scan.
+///
+/// # Arguments
+///
+/// * `instrs` - The function's instructions, in address order.
+/// * `at` - The arithmetic instruction.
+fn result_checked(instrs: &[Instruction], at: usize) -> bool {
+    let Some(wrote) = instrs.get(at).and_then(arith_reg) else {
+        return false;
+    };
+    let mut held = [Register::None; 4];
+    held[0] = wrote.full_register();
+    let need = wrote.size();
+    let mut factory = InstructionInfoFactory::new();
+    let mut cursor = at.saturating_add(1);
+    let mut seen = BTreeSet::new();
+    while seen.len() < FLAG_SCAN_MAX && seen.insert(cursor) {
+        if cursor >= instrs.len() {
+            return false;
+        }
+        let n = &instrs[cursor];
+        if zero_checks(n, &held, need) && flags_decide(instrs, cursor) {
+            return true;
+        }
+        if let Some(dest) = copied_into(n, &held, need) {
+            if !held.contains(&dest)
+                && let Some(slot) = held.iter_mut().find(|r| **r == Register::None)
+            {
+                *slot = dest;
+            }
+        } else {
+            for reg in &mut held {
+                if *reg != Register::None && reg_touch(&mut factory, n, *reg).1 {
+                    *reg = Register::None;
+                }
+            }
+        }
+        if held.iter().all(|r| *r == Register::None) {
+            return false;
+        }
+        if n.flow_control() == FlowControl::UnconditionalBranch {
+            let target = n.near_branch_target();
+            let Ok(pos) = instrs.binary_search_by_key(&target, Instruction::ip) else {
+                return false;
+            };
+            cursor = pos;
+            continue;
+        }
+        if matches!(
+            n.flow_control(),
+            FlowControl::Return
+                | FlowControl::Call
+                | FlowControl::IndirectCall
+                | FlowControl::IndirectBranch
+                | FlowControl::Interrupt
+                | FlowControl::Exception
+        ) {
+            return false;
+        }
+        cursor += 1;
+    }
+    false
+}
+
+/// The register a `sub`, `xor` or `and` writes, when it writes one.
+fn arith_reg(i: &Instruction) -> Option<Register> {
+    if !matches!(i.mnemonic(), Mnemonic::Sub | Mnemonic::Xor | Mnemonic::And) {
+        return None;
+    }
+    if i.op0_kind() != OpKind::Register {
+        return None;
+    }
+    Some(i.op0_register())
+}
+
+/// Whether `n` compares a held register with zero.
+///
+/// The tested width is the width that was written, or the full register
+/// after a 32-bit write, which zero-extends.
+fn zero_checks(n: &Instruction, held: &[Register; 4], need: usize) -> bool {
+    if n.op0_kind() != OpKind::Register {
+        return false;
+    }
+    let reg = n.op0_register();
+    let width = reg.size() == need || reg.size() == 8 && need == 4;
+    if !width || !held.contains(&reg.full_register()) {
+        return false;
+    }
+    match n.mnemonic() {
+        Mnemonic::Test => {
+            n.op_count() == 2
+                && n.op1_kind() == OpKind::Register
+                && n.op1_register().full_register() == reg.full_register()
+                && n.op1_register().size() == reg.size()
+        }
+        Mnemonic::Cmp => immediate_of(n) == Some(0),
+        _ => false,
+    }
+}
+
+/// The register a full-width `mov` copies a held result into.
+fn copied_into(n: &Instruction, held: &[Register; 4], need: usize) -> Option<Register> {
+    if n.mnemonic() != Mnemonic::Mov
+        || n.op_count() != 2
+        || n.op0_kind() != OpKind::Register
+        || n.op1_kind() != OpKind::Register
+    {
+        return None;
+    }
+    let dest = n.op0_register();
+    let source = n.op1_register();
+    if !held.contains(&source.full_register()) || !covers(dest, need) || !covers(source, need) {
+        return None;
+    }
+    Some(dest.full_register())
 }
 
 /// Says whether the value compared at `at` is an argument or a call's
