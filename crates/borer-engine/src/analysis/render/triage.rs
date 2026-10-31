@@ -490,9 +490,9 @@ fn call_sites(p: &Program, a: &Analysis, entry: u64, stem: &str) -> Vec<u64> {
 
 /// Whether `entry` is the C runtime's failure path.
 ///
-/// That path calls `IsDebuggerPresent` beside the unwind helpers or
-/// `__fastfail`, and the one call is not a check. Installing the filter
-/// is a different call.
+/// That path calls `IsDebuggerPresent` beside the unwind helpers, or
+/// `__fastfail` follows the import call. A `__fastfail` on another path
+/// is a separate check. Installing the filter is a different call.
 fn crt_failure(p: &Program, a: &Analysis, entry: u64) -> bool {
     const MARK: [&str; 4] = [
         "unhandledexceptionfilter",
@@ -509,34 +509,50 @@ fn crt_failure(p: &Program, a: &Analysis, entry: u64) -> bool {
     helped || fastfail(p, a, entry)
 }
 
-/// Whether `entry` executes `int 0x29` (`__fastfail`).
+/// Whether `int 0x29` follows a runtime call in `entry`.
 ///
-/// The interrupt is decoded. A constant that happens to hold the bytes
-/// `cd 29`, such as `mov edx, 0x29cd`, is not the instruction.
+/// The interrupt has to be one of the next few instructions on that path.
+/// A `__fastfail` reached by another branch is a separate check. A constant
+/// that holds the bytes `cd 29`, such as `mov edx, 0x29cd`, is not it.
 fn fastfail(p: &Program, a: &Analysis, entry: u64) -> bool {
-    let (Some(f), Some(bits)) = (a.function(entry), p.arch.bitness()) else {
+    let Some(bits) = p.arch.bitness() else {
         return false;
     };
-    f.blocks.iter().any(|b| {
-        let len = usize::try_from(b.end.saturating_sub(b.start)).unwrap_or(0);
-        let Some(code) = p.read_va(b.start, len) else {
-            return false;
-        };
-        let mut decoder = Decoder::with_ip(bits, code, b.start, DecoderOptions::NONE);
-        while decoder.can_decode() {
-            let i = decoder.decode();
-            if i.is_invalid() || i.ip() >= b.end {
-                break;
-            }
-            if i.mnemonic() == Mnemonic::Int
-                && i.op0_kind() == OpKind::Immediate8
-                && i.immediate8() == 0x29
-            {
-                return true;
-            }
+    let mut sites = call_sites(p, a, entry, "isdebuggerpresent");
+    sites.extend(call_sites(p, a, entry, "outputdebugstring"));
+    sites.extend(call_sites(p, a, entry, "queryperformancecounter"));
+    sites.iter().any(|va| int29_follows(p, bits, *va))
+}
+
+/// Whether `int 0x29` is one of the next few instructions after `va`.
+///
+/// A return, a call, or an unconditional jump ends the path. A conditional
+/// branch does not: the failure interrupt often sits on the fallthrough.
+fn int29_follows(p: &Program, bits: u32, va: u64) -> bool {
+    let Some(code) = p.read_va_upto(va, 32) else {
+        return false;
+    };
+    let mut decoder = Decoder::with_ip(bits, code, va, DecoderOptions::NONE);
+    if !decoder.can_decode() || decoder.decode().ip() != va {
+        return false;
+    }
+    for _ in 0..4 {
+        let n = decoder.decode();
+        if n.mnemonic() == Mnemonic::Int
+            && n.op0_kind() == OpKind::Immediate8
+            && n.immediate8() == 0x29
+        {
+            return true;
         }
-        false
-    })
+        let fall = matches!(
+            n.flow_control(),
+            FlowControl::Next | FlowControl::ConditionalBranch
+        );
+        if n.is_invalid() || !fall {
+            return false;
+        }
+    }
+    false
 }
 
 /// Whether `va` is a call that returns straight into a checked caller.

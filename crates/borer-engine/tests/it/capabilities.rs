@@ -419,6 +419,24 @@ fn a_constant_holding_fastfail_bytes_keeps_the_check() {
     assert!(text.contains("IsDebuggerPresent"), "{text}");
 }
 
+/// A checked call stays when `int 0x29` is on the other side of a return.
+///
+/// The jump skips that return and fast-fails. The call itself was tested,
+/// so it is not the runtime helper's straight-line path.
+#[test]
+fn a_separate_fastfail_keeps_the_checked_call() {
+    let code = [
+        0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0x85, 0xc0, // ASM: test eax, eax
+        0x74, 0x01, // ASM: jz 0x40100a
+        0xc3, // ASM: ret
+        0xcd, 0x29, // ASM: int 0x29
+        0xc3, // ASM: ret
+    ];
+    let text = debugger_map(&code);
+    assert!(text.contains("IsDebuggerPresent"), "{text}");
+}
+
 /// A stack slot that saves the returned value is still the check.
 ///
 /// A compare of another slot is not.
