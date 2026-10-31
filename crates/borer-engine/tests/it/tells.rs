@@ -17,6 +17,14 @@ fn report(code: &[u8]) -> String {
     borer_engine::analysis::render::anti_analysis_tsv(&p, &a, &Overlay::default())
 }
 
+/// Returns the direct call at `at`, relative to the image's code base.
+fn direct_call(code: &[u8], at: usize) -> u64 {
+    let ip = 0x401000 + u64::try_from(at).unwrap_or(0);
+    let i = Decoder::with_ip(64, &code[at..], ip, DecoderOptions::NONE).decode();
+    assert_eq!(i.mnemonic(), Mnemonic::Call, "{at:#x}");
+    i.near_branch_target()
+}
+
 /// Returns the first instruction's mnemonic, segment, base, index, and displacement.
 fn segment_slot(code: &[u8]) -> (Mnemonic, Register, Register, Register, u64) {
     let i = Decoder::with_ip(64, code, 0x401000, DecoderOptions::NONE).decode();
@@ -740,16 +748,14 @@ fn a_replaced_context_flag_is_not_a_hardware_breakpoint() {
         &[("GetThreadContext", 0x402000)],
     );
     assert!(kept.contains("hardware breakpoint"), "{kept}");
-    let unknown = report_calls(
-        &[
-            0xc7, 0x42, 0x30, 0x10, 0x00, 0x01, 0x00, // ASM: mov dword [rdx+0x30], 0x10010
-            0x89, 0x42, 0x30, // ASM: mov [rdx+0x30], eax
-            0xe8, 0xf0, 0x0f, 0x00, 0x00, // ASM: call 0x402000
-            0xc3, // ASM: ret
-        ],
-        &[],
-        &[("GetThreadContext", 0x402000)],
-    );
+    let unknown_code = [
+        0xc7, 0x42, 0x30, 0x10, 0x00, 0x01, 0x00, // ASM: mov dword [rdx+0x30], 0x10010
+        0x89, 0x42, 0x30, // ASM: mov [rdx+0x30], eax
+        0xe8, 0xf1, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0xc3, // ASM: ret
+    ];
+    assert_eq!(direct_call(&unknown_code, 10), 0x402000);
+    let unknown = report_calls(&unknown_code, &[], &[("GetThreadContext", 0x402000)]);
     assert!(!unknown.contains("hardware breakpoint"), "{unknown}");
 }
 
@@ -1235,17 +1241,20 @@ fn a_filter_needs_its_own_handler_and_the_bad_bytes_after_it() {
         ],
     );
     assert!(!cleared.contains("illegal opcode"), "{cleared}");
+    let earlier_code = [
+        0xb9, 0x40, 0x10, 0x40, 0x00, // ASM: mov ecx, 0x401040
+        0xe8, 0x06, 0x10, 0x00, 0x00, // ASM: call 0x402010
+        0xf0, 0xf0, 0xc7, 0xc8, // ASM: two lock prefixes, not an instruction
+        0xeb, 0x01, // ASM: jmp short +1
+        0x6e, // ASM: outsb, skipped
+        0xb9, 0x30, 0x10, 0x40, 0x00, // ASM: mov ecx, 0x401030
+        0xe8, 0xe5, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0xc3, // ASM: ret
+    ];
+    assert_eq!(direct_call(&earlier_code, 5), 0x402010);
+    assert_eq!(direct_call(&earlier_code, 22), 0x402000);
     let earlier = report_calls(
-        &[
-            0xb9, 0x40, 0x10, 0x40, 0x00, // ASM: mov ecx, 0x401040
-            0xe8, 0x06, 0x10, 0x00, 0x00, // ASM: call 0x402010
-            0xf0, 0xf0, 0xc7, 0xc8, // ASM: two lock prefixes, not an instruction
-            0xeb, 0x01, // ASM: jmp short +1
-            0x6e, // ASM: outsb, skipped
-            0xb9, 0x30, 0x10, 0x40, 0x00, // ASM: mov ecx, 0x401030
-            0xe8, 0xd7, 0x0f, 0x00, 0x00, // ASM: call 0x402000
-            0xc3, // ASM: ret
-        ],
+        &earlier_code,
         &[],
         &[
             ("SetUnhandledExceptionFilter", 0x402000),
