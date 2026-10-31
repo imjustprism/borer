@@ -4522,9 +4522,11 @@ RtlCopyDeviceMemory	ppi	3	c
 RtlCopyVolatileMemory	ppi	3	c
 RtlCrc32	pii	3	s
 RtlCrc64	pii	4	s
+RtlDeleteCriticalSection	p	1	s
 RtlDeleteFunctionTable	p	-	-
 RtlDeleteGrowableFunctionTable	p	-	-
 RtlDrainNonVolatileFlush	p	-	-
+RtlEnterCriticalSection	p	1	s
 RtlExtendCorrelationVector	p	1	s
 RtlFillDeviceMemory	pii	3	c
 RtlFillNonVolatileMemory	ppiii	-	-
@@ -4549,6 +4551,7 @@ RtlInitString	pp	2	s
 RtlInitStringEx	pp	2	s
 RtlInitUnicodeString	pp	2	s
 RtlInitializeCorrelationVector	pip	3	s
+RtlInitializeCriticalSection	p	1	s
 RtlInitializeSListHead	p	1	s
 RtlInstallFunctionTableCallback	iiippp	-	-
 RtlInterlockedFlushSList	p	1	s
@@ -4557,6 +4560,7 @@ RtlInterlockedPushEntrySList	pp	2	s
 RtlInterlockedPushListSListEx	pppi	4	s
 RtlIsNameLegalDOS8Dot3	ppp	3	s
 RtlIsZeroMemory	pi	2	s
+RtlLeaveCriticalSection	p	1	s
 RtlLocalTimeToSystemTime	pp	2	s
 RtlLookupFunctionEntry	ipp	-	-
 RtlMoveVolatileMemory	ppi	3	c

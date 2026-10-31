@@ -77,6 +77,8 @@ const KERNEL32_BASELINE: &[&str] = &[
     "OutputDebugStringW",
     "AddVectoredExceptionHandler",
     "RemoveVectoredExceptionHandler",
+    "GetShortPathNameW",
+    "GetLongPathNameW",
 ];
 
 /// Names `ntdll.dll` exports even when the image imports none of them.
@@ -94,6 +96,10 @@ const NTDLL_BASELINE: &[&str] = &[
     "ZwGetContextThread",
     "NtQuerySystemInformation",
     "ZwQuerySystemInformation",
+    "RtlInitializeCriticalSection",
+    "RtlEnterCriticalSection",
+    "RtlLeaveCriticalSection",
+    "RtlDeleteCriticalSection",
 ];
 
 /// The names a system dll keeps on top of whatever the image imports.

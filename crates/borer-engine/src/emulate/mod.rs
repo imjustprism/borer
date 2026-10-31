@@ -1606,7 +1606,7 @@ impl<'a> Emulator<'a> {
             }
             Mnemonic::Push => {
                 let v = self.source(i)?;
-                self.push(v)?;
+                self.push_bytes(v, self.stack_bytes(i))?;
                 Ok(None)
             }
             Mnemonic::Pusha | Mnemonic::Pushad => {
@@ -1649,7 +1649,7 @@ impl<'a> Emulator<'a> {
                 Ok(None)
             }
             Mnemonic::Pop => {
-                let v = self.pop()?;
+                let v = self.pop_bytes(self.stack_bytes(i))?;
                 self.store(i, v)?;
                 Ok(None)
             }
@@ -1665,11 +1665,11 @@ impl<'a> Emulator<'a> {
                 Ok(None)
             }
             Mnemonic::Pushf | Mnemonic::Pushfd | Mnemonic::Pushfq => {
-                self.push(self.rflags())?;
+                self.push_bytes(self.rflags(), self.stack_bytes(i))?;
                 Ok(None)
             }
             Mnemonic::Popf | Mnemonic::Popfd | Mnemonic::Popfq => {
-                let v = self.pop()?;
+                let v = self.pop_bytes(self.stack_bytes(i))?;
                 self.set_rflags(v);
                 Ok(None)
             }
@@ -1679,34 +1679,7 @@ impl<'a> Emulator<'a> {
                 self.string_op(i, op, bytes)
             }
             _ if let Some(op) = Alu::of(m) => self.alu(i, op),
-            Mnemonic::Inc | Mnemonic::Dec => {
-                let a = self.dest(i)?;
-                let r = if m == Mnemonic::Inc {
-                    a.wrapping_add(1)
-                } else {
-                    a.wrapping_sub(1)
-                };
-                self.set_flags(r, op_bits(i));
-                self.store(i, r)?;
-                Ok(None)
-            }
-            Mnemonic::Neg | Mnemonic::Not => {
-                let a = self.dest(i)?;
-                let r = if m == Mnemonic::Neg {
-                    0u64.wrapping_sub(a)
-                } else {
-                    !a
-                };
-                if m == Mnemonic::Neg {
-                    let bits = op_bits(i);
-                    let a = mask(a, bits);
-                    self.flags_carry = a != 0;
-                    self.set_flags(r, bits);
-                    self.flags_over = Some(a == 1 << (bits - 1));
-                }
-                self.store(i, r)?;
-                Ok(None)
-            }
+            Mnemonic::Inc | Mnemonic::Dec | Mnemonic::Neg | Mnemonic::Not => self.unary(i, m),
             Mnemonic::Imul if i.op_count() == 2 => {
                 let a = self.dest(i)?;
                 let b = self.source(i)?;

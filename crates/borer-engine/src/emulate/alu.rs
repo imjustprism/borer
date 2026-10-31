@@ -146,6 +146,51 @@ impl Emulator<'_> {
         Ok(None)
     }
 
+    /// `inc`, `dec`, `neg` and `not` on operand 0, with the flags each sets.
+    ///
+    /// `inc` and `dec` leave carry as it was and set overflow when the
+    /// operand steps into or out of the signed minimum (`0x7fff.. + 1` or
+    /// `0x8000.. - 1`); `neg` is `0 - a` and sets carry for any non-zero
+    /// operand; `not` touches no flags.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction.
+    /// * `m` - Its mnemonic.
+    ///
+    /// # Errors
+    ///
+    /// When operand 0 cannot be read or written.
+    pub(super) fn unary(&mut self, i: &Instruction, m: Mnemonic) -> Result<Option<u64>, Stop> {
+        let bits = op_bits(i);
+        let a = mask(self.dest(i)?, bits);
+        let half = 1u64 << (bits - 1);
+        let r = match m {
+            Mnemonic::Inc => {
+                let r = mask(a.wrapping_add(1), bits);
+                self.set_flags(r, bits);
+                self.flags_over = Some(r == half);
+                r
+            }
+            Mnemonic::Dec => {
+                let r = mask(a.wrapping_sub(1), bits);
+                self.set_flags(r, bits);
+                self.flags_over = Some(a == half);
+                r
+            }
+            Mnemonic::Neg => {
+                let r = mask(0u64.wrapping_sub(a), bits);
+                self.flags_carry = a != 0;
+                self.set_flags(r, bits);
+                self.flags_over = Some(a == half);
+                r
+            }
+            _ => !a,
+        };
+        self.store(i, r)?;
+        Ok(None)
+    }
+
     /// A shift or rotate of operand 0 by operand 1.
     ///
     /// # Arguments
@@ -210,5 +255,42 @@ impl Emulator<'_> {
         });
         self.store(i, r)?;
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test"
+)]
+mod tests {
+    use super::super::tests::{image, returned};
+
+    /// `inc` and `dec` set the overflow flag and preserve carry, so signed
+    /// conditions (`setg`, `setl`, `seto`) after them read a defined flag.
+    #[test]
+    fn inc_and_dec_set_overflow_and_preserve_carry() {
+        let emu = returned(image(
+            &[
+                0xf9, // ASM: stc
+                0xb8, 0xff, 0xff, 0xff, 0x7f, // ASM: mov eax,0x7fffffff
+                0xff, 0xc0, // ASM: inc eax
+                0x0f, 0x90, 0xc1, // ASM: seto cl
+                0x0f, 0x92, 0xc2, // ASM: setb dl
+                0xff, 0xc8, // ASM: dec eax
+                0x41, 0x0f, 0x90, 0xc0, // ASM: seto r8b
+                0x41, 0x0f, 0x9c, 0xc1, // ASM: setl r9b
+                0xff, 0xc8, // ASM: dec eax
+                0x41, 0x0f, 0x9f, 0xc2, // ASM: setg r10b
+                0xc3, // ASM: ret
+            ],
+            &[],
+        ));
+        assert_eq!(emu.register("rax"), Some(0x7fff_fffe));
+        assert_eq!(emu.register("rcx"), Some(1), "0x7fffffff + 1 overflows");
+        assert_eq!(emu.register("rdx"), Some(1), "inc preserves carry");
+        assert_eq!(emu.register("r8"), Some(1), "0x80000000 - 1 overflows");
+        assert_eq!(emu.register("r9"), Some(1), "SF != OF on signed underflow");
+        assert_eq!(emu.register("r10"), Some(1), "0x7ffffffe > 0 signed");
     }
 }

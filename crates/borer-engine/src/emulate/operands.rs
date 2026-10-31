@@ -404,15 +404,69 @@ impl Emulator<'_> {
             && addr < self.stack_base.wrapping_add(self.stack_span)
     }
 
+    /// The byte width `i` pushes or pops on the stack.
+    ///
+    /// A 16-bit `push` or `pop` (`push ax`, `push word ptr [rcx]`,
+    /// `66 push imm`, `pushf`, `popf`) moves the stack pointer by two
+    /// bytes; every other form moves it by the target's word width.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The stack instruction.
+    pub(super) fn stack_bytes(&self, i: &Instruction) -> usize {
+        if matches!(i.mnemonic(), Mnemonic::Pushf | Mnemonic::Popf) {
+            return 2;
+        }
+        match i.op0_kind() {
+            OpKind::Register if i.op0_register().is_gpr() => i.op0_register().size(),
+            OpKind::Memory => mem_bytes(i),
+            OpKind::Immediate16 | OpKind::Immediate8to16 => 2,
+            _ => self.word,
+        }
+    }
+
+    /// Pushes the low `bytes` bytes of `v` onto the scratch stack.
+    ///
+    /// # Arguments
+    ///
+    /// * `v` - The value.
+    /// * `bytes` - The stack slot width in bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`Stop::MemoryFull`] when the bytes would take memory past its cap.
+    pub(super) fn push_bytes(&mut self, v: u64, bytes: usize) -> Result<(), Stop> {
+        let sp = self.narrow(self.reg(Register::RSP).wrapping_sub(from_usize(bytes)));
+        self.set_reg(Register::RSP, sp);
+        self.write(sp, v, bytes)
+    }
+
     /// Pushes a word onto the scratch stack.
     ///
     /// # Errors
     ///
     /// [`Stop::MemoryFull`] when the word would take memory past its cap.
     pub(super) fn push(&mut self, v: u64) -> Result<(), Stop> {
-        let sp = self.narrow(self.reg(Register::RSP).wrapping_sub(from_usize(self.word)));
-        self.set_reg(Register::RSP, sp);
-        self.write(sp, v, self.word)
+        self.push_bytes(v, self.word)
+    }
+
+    /// Pops `bytes` bytes from the scratch stack, zero-extended.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The stack slot width in bytes.
+    ///
+    /// # Errors
+    ///
+    /// A fault when the stack bytes were never written.
+    pub(super) fn pop_bytes(&mut self, bytes: usize) -> Result<u64, Stop> {
+        let sp = self.reg(Register::RSP);
+        let v = self.load(sp, bytes)?;
+        self.set_reg(
+            Register::RSP,
+            self.narrow(sp.wrapping_add(from_usize(bytes))),
+        );
+        Ok(v)
     }
 
     /// Pops a word from the scratch stack.
@@ -421,13 +475,7 @@ impl Emulator<'_> {
     ///
     /// A fault when the stack word was never written.
     pub(super) fn pop(&mut self) -> Result<u64, Stop> {
-        let sp = self.reg(Register::RSP);
-        let v = self.load(sp, self.word)?;
-        self.set_reg(
-            Register::RSP,
-            self.narrow(sp.wrapping_add(from_usize(self.word))),
-        );
-        Ok(v)
+        self.pop_bytes(self.word)
     }
 
     /// Writes `v` into register `r` honoring its named width.
@@ -495,5 +543,36 @@ impl Emulator<'_> {
         {
             *slot = v;
         }
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test"
+)]
+mod tests {
+    use super::super::STACK_BASE;
+    use super::super::tests::{image, returned};
+
+    /// Sixteen-bit `push`, `pop`, `pushf` and `popf` move the stack pointer
+    /// by two bytes rather than a full stack word.
+    #[test]
+    fn sixteen_bit_stack_ops_move_rsp_by_two_bytes() {
+        let emu = returned(image(
+            &[
+                0x66, 0xb8, 0x34, 0x12, // ASM: mov ax,0x1234
+                0x66, 0x50, // ASM: push ax
+                0x48, 0x89, 0xe2, // ASM: mov rdx,rsp
+                0x66, 0x9c, // ASM: pushf
+                0x66, 0x9d, // ASM: popf
+                0x66, 0x59, // ASM: pop cx
+                0xc3, // ASM: ret
+            ],
+            &[],
+        ));
+        assert_eq!(emu.register("rdx"), Some(STACK_BASE - 2));
+        assert_eq!(emu.register("rcx"), Some(0x1234));
+        assert_eq!(emu.register("rsp"), Some(STACK_BASE));
     }
 }

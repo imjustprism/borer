@@ -173,6 +173,7 @@ impl Emulator<'_> {
         let r = mask(r, bits);
         self.flags_carry = carry;
         self.set_flags(r, bits);
+        self.flags_over = (count == 1).then(|| (a ^ r) >> (bits - 1) & 1 == 1);
         self.store(i, r)?;
         Ok(None)
     }
@@ -429,5 +430,26 @@ mod tests {
             Some(0),
             "cmc flipped the carry stc set"
         );
+    }
+
+    /// A one-bit `shld` or `shrd` sets the overflow flag when the sign bit
+    /// changes.
+    #[test]
+    fn one_bit_double_shifts_set_overflow() {
+        let emu = returned(image(
+            &[
+                0xb8, 0x00, 0x00, 0x00, 0x40, // ASM: mov eax,0x40000000
+                0xba, 0x00, 0x00, 0x00, 0x00, // ASM: mov edx,0
+                0x0f, 0xa4, 0xd0, 0x01, // ASM: shld eax,edx,1
+                0x0f, 0x90, 0xc1, // ASM: seto cl
+                0x0f, 0xac, 0xd0, 0x01, // ASM: shrd eax,edx,1
+                0x41, 0x0f, 0x90, 0xc0, // ASM: seto r8b
+                0xc3, // ASM: ret
+            ],
+            &[],
+        ));
+        assert_eq!(emu.register("rax"), Some(0x4000_0000));
+        assert_eq!(emu.register("rcx"), Some(1), "shld by 1 flipped sign bit");
+        assert_eq!(emu.register("r8"), Some(1), "shrd by 1 flipped sign bit");
     }
 }

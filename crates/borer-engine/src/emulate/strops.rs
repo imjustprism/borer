@@ -148,13 +148,13 @@ impl Emulator<'_> {
                 StringOp::Scas => {
                     let a = mask(self.reg(Register::RAX), bits);
                     let b = self.load(di, bytes)?;
-                    self.set_flags(a.wrapping_sub(b), bits);
+                    self.cmp_flags(a, b, bits);
                     self.set_reg(Register::RDI, next_di);
                 }
                 StringOp::Cmps => {
                     let a = self.load(si, bytes)?;
                     let b = self.load(di, bytes)?;
-                    self.set_flags(a.wrapping_sub(b), bits);
+                    self.cmp_flags(a, b, bits);
                     self.set_reg(Register::RSI, next_si);
                     self.set_reg(Register::RDI, next_di);
                 }
@@ -171,5 +171,58 @@ impl Emulator<'_> {
             }
         }
         Ok(None)
+    }
+
+    /// Sets the flags of `a - b` at `bits` width, as `scas` and `cmps` do.
+    ///
+    /// # Arguments
+    ///
+    /// * `a` - The minuend (`rax` for `scas`, `[rsi]` for `cmps`).
+    /// * `b` - The subtrahend (`[rdi]`).
+    /// * `bits` - Element width in bits.
+    fn cmp_flags(&mut self, a: u64, b: u64, bits: u32) {
+        let (a, b) = (mask(a, bits), mask(b, bits));
+        let r = mask(a.wrapping_sub(b), bits);
+        self.flags_carry = a < b;
+        self.set_flags(r, bits);
+        let signed = |v: u64| v >> (bits - 1) & 1 == 1;
+        self.flags_over = Some(signed(a) != signed(b) && signed(r) != signed(a));
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test"
+)]
+mod tests {
+    use super::super::tests::{image, returned};
+
+    /// `scas` and `cmps` set carry and overflow as `cmp` does, so unsigned
+    /// and signed conditions after them read defined flags.
+    #[test]
+    fn scas_and_cmps_set_carry_and_overflow() {
+        let emu = returned(image(
+            &[
+                0xbf, 0x00, 0x20, 0x00, 0x00, // ASM: mov edi,0x2000
+                0xc7, 0x07, 0x01, 0x00, 0x00, 0x00, // ASM: mov dword [rdi],1
+                0xb8, 0x00, 0x00, 0x00, 0x80, // ASM: mov eax,0x80000000
+                0xaf, // ASM: scasd
+                0x0f, 0x90, 0xc1, // ASM: seto cl
+                0x0f, 0x92, 0xc2, // ASM: setb dl
+                0xbe, 0x00, 0x20, 0x00, 0x00, // ASM: mov esi,0x2000
+                0xbf, 0x04, 0x20, 0x00, 0x00, // ASM: mov edi,0x2004
+                0xc7, 0x07, 0x02, 0x00, 0x00, 0x00, // ASM: mov dword [rdi],2
+                0xa7, // ASM: cmpsd
+                0x41, 0x0f, 0x92, 0xc0, // ASM: setb r8b
+                0x41, 0x0f, 0x9c, 0xc1, // ASM: setl r9b
+                0xc3, // ASM: ret
+            ],
+            &[],
+        ));
+        assert_eq!(emu.register("rcx"), Some(1), "0x80000000 - 1 overflows");
+        assert_eq!(emu.register("rdx"), Some(0), "0x80000000 >= 1 unsigned");
+        assert_eq!(emu.register("r8"), Some(1), "1 < 2 unsigned");
+        assert_eq!(emu.register("r9"), Some(1), "1 < 2 signed");
     }
 }
