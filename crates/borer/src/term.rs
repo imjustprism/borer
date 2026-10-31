@@ -222,10 +222,8 @@ fn draw(done: &AtomicBool, label: &Mutex<String>, hex: &[String], drew: &AtomicB
         }
         let _ = write!(line, " \x1b[2m{:.1}s\x1b[0m", start.elapsed().as_secs_f32());
         let mut err = std::io::stderr().lock();
-        let _ = err.write_all(line.as_bytes());
-        let _ = err.flush();
+        publish_frame(&mut err, line.as_bytes(), drew);
         drop(err);
-        drew.store(true, Ordering::Relaxed);
         frame = frame.wrapping_add(1);
         std::thread::sleep(Duration::from_millis(70));
     }
@@ -245,6 +243,22 @@ pub(crate) fn stop() {
     let mut err = std::io::stderr().lock();
     let _ = err.write_all(clear);
     let _ = err.flush();
+}
+
+/// Writes one frame and records that the write happened.
+///
+/// The record is stored before this returns, while the caller still holds
+/// the stderr lock. A `note` that takes the lock next then sees the frame.
+///
+/// # Arguments
+///
+/// * `err` - The locked stderr.
+/// * `line` - The frame, including its clear.
+/// * `drew` - Set once the frame has been written.
+fn publish_frame(err: &mut impl std::io::Write, line: &[u8], drew: &AtomicBool) {
+    let _ = err.write_all(line);
+    let _ = err.flush();
+    drew.store(true, Ordering::Relaxed);
 }
 
 /// The bytes that take a drawn frame down. Nothing, when no frame was drawn.
@@ -356,7 +370,51 @@ pub(crate) fn welcome() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{clear_bytes, show_spinner};
+    use super::{clear_bytes, publish_frame, show_spinner};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// The drawn flag is set after the bytes are written, before the caller
+    /// drops the stderr lock.
+    ///
+    /// # Panics
+    ///
+    /// When the flag is set before the write, or is still clear afterward.
+    #[test]
+    fn a_frame_is_marked_drawn_before_the_lock_returns() {
+        let drew = AtomicBool::new(false);
+        let early = AtomicBool::new(false);
+        let mut buf = Vec::new();
+        struct Watch<'a> {
+            buf: &'a mut Vec<u8>,
+            drew: &'a AtomicBool,
+            early: &'a AtomicBool,
+        }
+        impl std::io::Write for Watch<'_> {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if self.drew.load(Ordering::Relaxed) {
+                    self.early.store(true, Ordering::Relaxed);
+                }
+                self.buf.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        publish_frame(
+            &mut Watch {
+                buf: &mut buf,
+                drew: &drew,
+                early: &early,
+            },
+            b"\r\x1b[2Kframe",
+            &drew,
+        );
+        assert!(!early.load(Ordering::Relaxed));
+        assert!(drew.load(Ordering::Relaxed));
+        assert_eq!(buf, b"\r\x1b[2Kframe");
+    }
 
     /// A pipe stays quiet even when color is forced, and a frame that was
     /// never drawn has nothing to clear.
