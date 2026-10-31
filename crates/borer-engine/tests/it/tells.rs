@@ -273,6 +273,65 @@ fn a_replaced_second_timestamp_is_a_read() {
     assert!(!text.contains("rdtsc (timing)"), "{text}");
 }
 
+/// A helper return copied into `ebx` is not the earlier timestamp.
+///
+/// The copy made before the call still is. A multiply writes `eax`, so
+/// the copy after it is the product. A call after the second read
+/// replaces that read too.
+#[test]
+fn a_call_return_is_not_a_saved_timestamp() {
+    let called = [
+        0x0f, 0x31, // ASM: rdtsc
+        0xe8, 0xf9, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0x89, 0xc3, // ASM: mov ebx, eax
+        0x0f, 0x31, // ASM: rdtsc
+        0x29, 0xd8, // ASM: sub eax, ebx
+        0x3d, 0xe8, 0x03, 0x00, 0x00, // ASM: cmp eax, 1000
+        0xc3, // ASM: ret
+    ];
+    assert_eq!(direct_call(&called, 2), 0x402000);
+    let text = report_calls(&called, &[], &[("GetCurrentProcess", 0x402000)]);
+    assert!(text.contains("rdtsc (read)"), "{text}");
+    assert!(!text.contains("rdtsc (timing)"), "{text}");
+    let saved = [
+        0x0f, 0x31, // ASM: rdtsc
+        0x89, 0xc3, // ASM: mov ebx, eax
+        0xe8, 0xf7, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0x0f, 0x31, // ASM: rdtsc
+        0x29, 0xd8, // ASM: sub eax, ebx
+        0x3d, 0xe8, 0x03, 0x00, 0x00, // ASM: cmp eax, 1000
+        0xc3, // ASM: ret
+    ];
+    assert_eq!(direct_call(&saved, 4), 0x402000);
+    let kept = report_calls(&saved, &[], &[("GetCurrentProcess", 0x402000)]);
+    assert!(kept.contains("rdtsc (timing)"), "{kept}");
+    assert!(!kept.contains("rdtsc (read)"), "{kept}");
+    let product = report(&[
+        0x0f, 0x31, // ASM: rdtsc
+        0xf7, 0xe1, // ASM: mul ecx
+        0x89, 0xc3, // ASM: mov ebx, eax
+        0x0f, 0x31, // ASM: rdtsc
+        0x29, 0xd8, // ASM: sub eax, ebx
+        0x3d, 0xe8, 0x03, 0x00, 0x00, // ASM: cmp eax, 1000
+        0xc3, // ASM: ret
+    ]);
+    assert!(product.contains("rdtsc (read)"), "{product}");
+    assert!(!product.contains("rdtsc (timing)"), "{product}");
+    let later = [
+        0x0f, 0x31, // ASM: rdtsc
+        0x89, 0xc3, // ASM: mov ebx, eax
+        0x0f, 0x31, // ASM: rdtsc
+        0xe8, 0xf5, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0x29, 0xd8, // ASM: sub eax, ebx
+        0x3d, 0xe8, 0x03, 0x00, 0x00, // ASM: cmp eax, 1000
+        0xc3, // ASM: ret
+    ];
+    assert_eq!(direct_call(&later, 6), 0x402000);
+    let replaced = report_calls(&later, &[], &[("GetCurrentProcess", 0x402000)]);
+    assert!(replaced.contains("rdtsc (read)"), "{replaced}");
+    assert!(!replaced.contains("rdtsc (timing)"), "{replaced}");
+}
+
 /// A compare of a copied difference is still a timing check.
 #[test]
 fn a_copied_timestamp_difference_is_timing() {

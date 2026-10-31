@@ -130,10 +130,9 @@ fn rdtsc_timing(instrs: &[Instruction]) -> bool {
                 gap = Some(offset);
                 break;
             }
-            if writes_register(n, Register::RAX) {
+            if drop_timestamp(n, &mut saved, &mut live) {
                 second = false;
             }
-            drop_timestamp(n, &mut saved, &mut live);
         }
         let Some(gap) = gap else {
             return false;
@@ -187,12 +186,49 @@ fn copied_timestamp(n: &Instruction, held: &[Register]) -> Option<Register> {
     Some(n.op0_register().full_register())
 }
 
-/// Drops a timestamp register `n` writes, other than a compare.
-fn drop_timestamp(n: &Instruction, held: &mut [Register], count: &mut usize) {
-    if n.op0_kind() != OpKind::Register || matches!(n.mnemonic(), Mnemonic::Cmp | Mnemonic::Test) {
-        return;
+/// Drops timestamp registers `n` replaces.
+///
+/// A call's return replaces every caller-saved register. Any other write
+/// replaces the register it names, including a multiply's `rax` and `rdx`.
+/// A compare only reads its register.
+///
+/// # Returns
+///
+/// Whether `rax` was replaced. The second timestamp lives there.
+fn drop_timestamp(n: &Instruction, held: &mut [Register], count: &mut usize) -> bool {
+    if matches!(
+        n.flow_control(),
+        FlowControl::Call | FlowControl::IndirectCall
+    ) {
+        for reg in [
+            Register::RAX,
+            Register::RCX,
+            Register::RDX,
+            Register::R8,
+            Register::R9,
+            Register::R10,
+            Register::R11,
+        ] {
+            drop_one(held, count, reg);
+        }
+        return true;
     }
-    drop_one(held, count, n.op0_register().full_register());
+    let mut info = InstructionInfoFactory::new();
+    let mut wrote_rax = false;
+    for ur in info.info(n).used_registers() {
+        if !matches!(
+            ur.access(),
+            OpAccess::Write | OpAccess::ReadWrite | OpAccess::CondWrite | OpAccess::ReadCondWrite
+        ) {
+            continue;
+        }
+        let reg = ur.register().full_register();
+        if reg == Register::RAX {
+            wrote_rax = true;
+        }
+        drop_one(held, count, reg);
+    }
+    wrote_rax
 }
 
 /// Removes `reg` from the live prefix of `held`.
