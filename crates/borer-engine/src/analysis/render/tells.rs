@@ -260,27 +260,38 @@ fn difference_checked(instrs: &[Instruction], at: usize) -> bool {
 ///
 /// The leaf is the last write of `rax` before the instruction. A constant
 /// an earlier `mov` left, and that a later `mov` replaced, is not the leaf.
-/// A test of some other register is not the hypervisor bit. A write of
-/// `ecx` before the test, or a call, replaces that bit.
+/// A test of some other register is not the hypervisor bit. The bit is
+/// leaf 1's. A write of `ecx` before the test, or a call, replaces it.
 fn cpuid_hypervisor(instrs: &[Instruction], at: usize) -> bool {
     hypervisor_leaf(instrs, at) || hypervisor_bit(instrs, at)
 }
 
 /// Whether the last write of `rax` before `instrs[at]` is the vendor leaf.
 fn hypervisor_leaf(instrs: &[Instruction], at: usize) -> bool {
-    instrs[..at]
+    cpu_leaf(instrs, at) == Some(0x4000_0000)
+}
+
+/// The immediate the last `mov` wrote into `eax` before `instrs[at]`.
+fn cpu_leaf(instrs: &[Instruction], at: usize) -> Option<u64> {
+    let wrote = instrs[..at]
         .iter()
         .rev()
         .take(6)
-        .find(|n| writes_register(n, Register::RAX))
-        .is_some_and(|n| moved_immediate(n, Register::RAX, 0x4000_0000))
+        .find(|n| writes_register(n, Register::RAX))?;
+    if wrote.mnemonic() != Mnemonic::Mov {
+        return None;
+    }
+    immediate_any(wrote)
 }
 
 /// Whether a later instruction tests the hypervisor bit in `ecx`.
 ///
-/// A write of `ecx`, or a call, replaces the `cpuid` result. A test after
-/// that reads the new value.
+/// The `cpuid` has to be leaf 1. Leaf 7 returns a different feature in
+/// that bit. A write of `ecx`, or a call, replaces the `cpuid` result.
 fn hypervisor_bit(instrs: &[Instruction], at: usize) -> bool {
+    if cpu_leaf(instrs, at) != Some(1) {
+        return false;
+    }
     for n in instrs.iter().skip(at + 1).take(8) {
         if tests_register(n, Register::RCX, 0x8000_0000) {
             return true;
