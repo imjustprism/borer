@@ -33,6 +33,19 @@ struct Chunk {
     patched: u8,
 }
 
+/// Result of reading a span that may lie within a single chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ChunkRead {
+    /// Every byte of the span was held in the chunk, little-endian.
+    Hit(u64),
+    /// No byte of the span is held in the store, and the span lies within
+    /// one chunk.
+    Empty,
+    /// The span crosses a chunk boundary or is only partly held in the
+    /// chunk.
+    Split,
+}
+
 /// The bytes a run holds, by address, and which of them it wrote outside
 /// the stack.
 ///
@@ -44,7 +57,7 @@ struct Chunk {
 /// The run a fresh clone is poked with ([`Store::poke_run`], a trial's
 /// seeded stack) is held in place, its chunks side by side, rather than
 /// as map entries.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(super) struct Store {
     /// Chunks by address shifted right three bits, shared between clones;
     /// a key in [`Store::chunks`] or [`Store::run`] hides the one here.
@@ -57,6 +70,12 @@ pub(super) struct Store {
     /// This store's own chunks of consecutive keys from
     /// [`Store::run_first`], one per key.
     run: Vec<Chunk>,
+    /// Lowest chunk key holding a `dirty` or `patched` byte, `u64::MAX`
+    /// when none is held.
+    mod_min: u64,
+    /// Highest chunk key holding a `dirty` or `patched` byte, `0` when
+    /// none is held.
+    mod_max: u64,
     /// Bytes held: the set `held` bits of every chunk either layer shows.
     len: usize,
     /// The address the bytes held below are counted at as they are held
@@ -64,6 +83,22 @@ pub(super) struct Store {
     split: u64,
     /// Bytes held below [`Store::split`].
     below: usize,
+}
+
+impl Default for Store {
+    fn default() -> Self {
+        Self {
+            base: Arc::default(),
+            chunks: BTreeMap::new(),
+            run_first: 0,
+            run: Vec::new(),
+            mod_min: u64::MAX,
+            mod_max: 0,
+            len: 0,
+            split: 0,
+            below: 0,
+        }
+    }
 }
 
 /// The chunk key of an address and the position of its byte in the chunk.
@@ -226,12 +261,114 @@ impl Store {
     /// none of them until it changes one.
     pub(super) fn freeze(&mut self) {
         let mut own = std::mem::take(&mut self.chunks);
-        own.extend((self.run_first..).zip(std::mem::take(&mut self.run)));
+        own.extend(
+            (self.run_first..)
+                .zip(std::mem::take(&mut self.run))
+                .filter(|(_, c)| c.held != 0),
+        );
         if self.base.is_empty() {
             self.base = Arc::new(own);
         } else {
             Arc::make_mut(&mut self.base).extend(own);
         }
+    }
+
+    /// Pre-sizes the flat chunk run over `range` when no run is held yet,
+    /// copying any chunks already held in that span into the run so reads
+    /// and writes there index the slice directly instead of the B-tree.
+    ///
+    /// # Arguments
+    ///
+    /// * `range` - The address span to cover.
+    pub(super) fn warm_run(&mut self, range: Range<u64>) {
+        if !self.run.is_empty() || range.is_empty() {
+            return;
+        }
+        let (first, _) = place(range.start);
+        let (last, _) = place(range.end - 1);
+        self.run_first = first;
+        self.run = (first..=last)
+            .map(|key| {
+                self.chunks
+                    .remove(&key)
+                    .or_else(|| self.base.get(&key).copied())
+                    .unwrap_or_default()
+            })
+            .collect();
+    }
+
+    /// Reads `bytes` little-endian bytes at `a` in one chunk lookup when the
+    /// span lies within a single chunk.
+    ///
+    /// # Arguments
+    ///
+    /// * `a` - The start address.
+    /// * `bytes` - The width in bytes, 1 to 8.
+    pub(super) fn read_le(&self, a: u64, bytes: usize) -> ChunkRead {
+        let (key, k) = place(a);
+        let from = usize::from(k);
+        if bytes == 0 || bytes > 8 - from {
+            return ChunkRead::Split;
+        }
+        let Some(c) = self.chunk(key) else {
+            return ChunkRead::Empty;
+        };
+        let mask = lo8(((1u64 << bytes) - 1) << from);
+        if c.held & mask == mask {
+            let mut buf = [0u8; 8];
+            buf[..bytes].copy_from_slice(&c.bytes[from..from + bytes]);
+            ChunkRead::Hit(u64::from_le_bytes(buf))
+        } else if c.held & mask == 0 {
+            ChunkRead::Empty
+        } else {
+            ChunkRead::Split
+        }
+    }
+
+    /// Writes the low `bytes` little-endian bytes of `v` at `a` in one
+    /// chunk lookup when the span lies within a single chunk and does not
+    /// straddle [`Store::split`].
+    ///
+    /// # Arguments
+    ///
+    /// * `a` - The start address.
+    /// * `v` - The little-endian value.
+    /// * `bytes` - The width in bytes, 1 to 8.
+    /// * `dirty` - Whether the run wrote the span outside the stack.
+    ///
+    /// # Returns
+    ///
+    /// Whether the span fit in a single chunk without crossing the split.
+    pub(super) fn write_le(&mut self, a: u64, v: u64, bytes: usize, dirty: bool) -> bool {
+        let (key, k) = place(a);
+        let from = usize::from(k);
+        if bytes == 0 || bytes > 8 - from {
+            return false;
+        }
+        let (chunk_start, chunk_end) = (address(key, 0), address(key, 7));
+        if chunk_start < self.split && chunk_end >= self.split {
+            return false;
+        }
+        let bits = lo8(((1u64 << bytes) - 1) << from);
+        let c = own_chunk(
+            (&self.base, &mut self.chunks),
+            (self.run_first, &mut self.run),
+            key,
+        );
+        let added = saturating_usize(u64::from((bits & !c.held).count_ones()));
+        self.len += added;
+        if chunk_end < self.split {
+            self.below += added;
+        }
+        c.held |= bits;
+        if dirty {
+            c.dirty |= bits;
+            self.mod_min = self.mod_min.min(key);
+            self.mod_max = self.mod_max.max(key);
+        }
+        let le = v.to_le_bytes();
+        c.bytes[from..from + bytes].copy_from_slice(&le[..bytes]);
+        true
     }
 
     /// Whether a byte is held at `a`.
@@ -268,6 +405,8 @@ impl Store {
         c.held |= bit;
         if dirty {
             c.dirty |= bit;
+            self.mod_min = self.mod_min.min(key);
+            self.mod_max = self.mod_max.max(key);
         }
         c.bytes[usize::from(k)] = v;
     }
@@ -349,6 +488,8 @@ impl Store {
             a = a.wrapping_add(from_usize(n));
             rest = later;
         }
+        self.mod_min = self.mod_min.min(first);
+        self.mod_max = self.mod_max.max(last);
         self.run_first = first;
         self.run = run;
     }
@@ -368,6 +509,8 @@ impl Store {
             chunks,
             run_first,
             run,
+            mod_min,
+            mod_max,
             len,
             split,
             below,
@@ -391,6 +534,8 @@ impl Store {
             c.held |= bit;
             if patched {
                 c.patched |= bit;
+                *mod_min = (*mod_min).min(key);
+                *mod_max = (*mod_max).max(key);
             }
             c.bytes[usize::from(k)] = v;
         }
@@ -406,17 +551,45 @@ impl Store {
         self.chunk(key).is_some_and(|c| c.dirty & (1 << k) != 0)
     }
 
+    /// Whether any byte in `range` was written outside the stack or set up
+    /// before the run.
+    ///
+    /// # Arguments
+    ///
+    /// * `range` - The addresses, start included, end excluded.
+    pub(super) fn any_dirty_or_patched(&self, range: Range<u64>) -> bool {
+        if range.is_empty() || self.mod_min > self.mod_max {
+            return false;
+        }
+        let (first, _) = place(range.start);
+        let (last, _) = place(range.end - 1);
+        if last < self.mod_min || first > self.mod_max {
+            return false;
+        }
+        (first.max(self.mod_min)..=last.min(self.mod_max)).any(|key| {
+            self.chunk(key).is_some_and(|c| {
+                let marks = c.dirty | c.patched;
+                marks != 0
+                    && (0..8).any(|k| marks & (1 << k) != 0 && range.contains(&address(key, k)))
+            })
+        })
+    }
+
     /// Whether any byte in `range` was written outside the stack.
     ///
     /// # Arguments
     ///
     /// * `range` - The addresses, start included, end excluded.
+    #[cfg(test)]
     pub(super) fn any_dirty(&self, range: Range<u64>) -> bool {
-        if range.is_empty() {
+        if range.is_empty() || self.mod_min > self.mod_max {
             return false;
         }
         let (first, _) = place(range.start);
         let (last, _) = place(range.end - 1);
+        if last < self.mod_min || first > self.mod_max {
+            return false;
+        }
         self.shown(first..=last).any(|(key, c)| {
             (0..8).any(|k| c.dirty & (1 << k) != 0 && range.contains(&address(key, k)))
         })
@@ -427,12 +600,16 @@ impl Store {
     /// # Arguments
     ///
     /// * `range` - The addresses, start included, end excluded.
+    #[cfg(test)]
     pub(super) fn any_patched(&self, range: Range<u64>) -> bool {
-        if range.is_empty() {
+        if range.is_empty() || self.mod_min > self.mod_max {
             return false;
         }
         let (first, _) = place(range.start);
         let (last, _) = place(range.end - 1);
+        if last < self.mod_min || first > self.mod_max {
+            return false;
+        }
         self.shown(first..=last).any(|(key, c)| {
             (0..8).any(|k| c.patched & (1 << k) != 0 && range.contains(&address(key, k)))
         })
@@ -675,5 +852,28 @@ mod tests {
         assert_eq!(s.held_below(0x3005), 3);
         assert_eq!(s.held_below(0x5001), 5);
         assert_eq!(s.held_below(u64::MAX), 5);
+    }
+
+    /// Single-chunk little-endian reads and writes agree with byte-by-byte
+    /// accesses across a warmed run, and `any_dirty_or_patched` agrees with
+    /// the union of `any_dirty` and `any_patched`.
+    #[test]
+    fn chunk_reads_writes_and_dirty_or_patched_agree() {
+        let mut s = Store::split_at(0x8000);
+        s.warm_run(0x7ff0..0x8020);
+        assert_eq!(s.read_le(0x7ff8, 8), super::ChunkRead::Empty);
+        assert!(s.write_le(0x7ff8, 0x0102_0304_0506_0708, 8, false));
+        assert_eq!(
+            s.read_le(0x7ff8, 8),
+            super::ChunkRead::Hit(0x0102_0304_0506_0708)
+        );
+        assert_eq!(s.held_below(0x8000), 8);
+        assert!(!s.any_dirty_or_patched(0x7ff0..0x8010));
+        assert!(s.write_le(0x8008, 0xdead_beef, 4, true));
+        assert!(s.any_dirty_or_patched(0x8000..0x8010));
+        assert!(!s.any_dirty_or_patched(0x7ff0..0x8008));
+        s.poke(0x7ff2, 0x55);
+        assert!(s.any_dirty_or_patched(0x7ff0..0x7ff8));
+        assert_eq!(s.read_le(0x7ff0, 4), super::ChunkRead::Split);
     }
 }

@@ -2,9 +2,10 @@
 //! overlay, and the stack.
 
 use super::sse::Width;
+use super::store::ChunkRead;
 use super::{
     Emulator, HISTORY_MAX, PAGE, Stop, Written, branch_target, canon, lane_shift, lo64, mask,
-    mem_bytes, reg_bits, seg_slot,
+    mem_bytes, named_register, readout_order, reg_bits, seg_slot,
 };
 use crate::isa::x86::{Instruction, Mnemonic, OpKind, Register, gpr_bank_index, xmm_slot};
 use crate::num::{from_usize, lo8};
@@ -293,19 +294,30 @@ impl Emulator<'_> {
     /// not the encrypted ones on disk. Code written into space the image never
     /// mapped (a packer's virtual-only section) is fetched from memory alone.
     ///
+    /// # Arguments
+    ///
+    /// * `ip` - The instruction pointer.
+    /// * `scratch` - Stack buffer filled when the bytes come from the overlay.
+    ///
     /// # Returns
     ///
     /// The bytes to decode, or `None` when neither memory nor image backs `ip`.
-    pub(super) fn fetch(&self, ip: u64) -> Option<Vec<u8>> {
+    pub(super) fn fetch<'s>(&'s self, ip: u64, scratch: &'s mut [u8; 16]) -> Option<&'s [u8]> {
         let window = ip..ip.saturating_add(16);
-        if !self.mem.any_dirty(window.clone())
-            && !self.mem.any_patched(window)
+        if !self.mem.any_dirty_or_patched(window)
             && let Some(s) = self.program.read_va_upto(ip, 16)
         {
-            return Some(s.to_vec());
+            return Some(s);
         }
-        let out = self.code_at(ip, 16);
-        (!out.is_empty()).then_some(out)
+        let mut len = 0;
+        for slot in scratch.iter_mut() {
+            let Some(b) = self.byte(ip.wrapping_add(from_usize(len))) else {
+                break;
+            };
+            *slot = b;
+            len += 1;
+        }
+        (len > 0).then_some(&scratch[..len])
     }
 
     /// Loads `bytes` bytes from `addr`, little-endian.
@@ -322,12 +334,27 @@ impl Emulator<'_> {
             let entry = pages.entry(addr & !(PAGE - 1)).or_insert((0, self.last_ip));
             entry.0 += 1;
         }
-        let mut v = 0u64;
-        for k in 0..from_usize(bytes) {
-            let a = self.narrow(addr.wrapping_add(k));
-            let byte = self.byte_at(a).ok_or(Stop::Fault(a))?;
-            v |= u64::from(byte) << (k * 8);
-        }
+        let base = self.narrow(addr);
+        let v = match self.mem.read_le(base, bytes) {
+            ChunkRead::Hit(v) => v,
+            ChunkRead::Empty
+                if let Some(s) = self.program.read_va_upto(base, bytes)
+                    && s.len() == bytes =>
+            {
+                let mut buf = [0u8; 8];
+                buf[..bytes].copy_from_slice(s);
+                u64::from_le_bytes(buf)
+            }
+            ChunkRead::Empty | ChunkRead::Split => {
+                let mut v = 0u64;
+                for k in 0..from_usize(bytes) {
+                    let a = self.narrow(addr.wrapping_add(k));
+                    let byte = self.byte_at(a).ok_or(Stop::Fault(a))?;
+                    v |= u64::from(byte) << (k * 8);
+                }
+                v
+            }
+        };
         if self.trace_cap > 0 {
             self.step_memory.borrow_mut().push((false, addr, bytes, v));
         }
@@ -347,6 +374,28 @@ impl Emulator<'_> {
     pub(super) fn write(&mut self, addr: u64, v: u64, bytes: usize) -> Result<(), Stop> {
         if self.trace_cap > 0 {
             self.step_memory.borrow_mut().push((true, addr, bytes, v));
+        }
+        let base = self.narrow(addr);
+        if self.mem.len().saturating_add(bytes) <= self.memory_max
+            && self.mem.write_le(base, v, bytes, !self.on_stack(base))
+        {
+            if self.history.len() < HISTORY_MAX {
+                for k in 0..from_usize(bytes) {
+                    if self.history.len() >= HISTORY_MAX {
+                        break;
+                    }
+                    self.history.push(Written {
+                        addr: base.wrapping_add(k),
+                        value: lo8(v >> (k * 8)),
+                    });
+                }
+            }
+            if self.origin.is_some() {
+                for k in 0..from_usize(bytes) {
+                    self.step_writes.push(base.wrapping_add(k));
+                }
+            }
+            return Ok(());
         }
         for k in 0..from_usize(bytes) {
             let a = self.narrow(addr.wrapping_add(k));
@@ -392,6 +441,57 @@ impl Emulator<'_> {
                 (0..8).all(|k| self.byte(at.wrapping_add(k)) == Some(lo8(watch >> (k * 8))))
             })
         })
+    }
+
+    /// Appends one executed instruction's register and memory changes to
+    /// [`Emulator::trace`].
+    ///
+    /// # Arguments
+    ///
+    /// * `ip` - The instruction's address.
+    /// * `instr` - The decoded instruction.
+    /// * `before` - The register snapshot before the step.
+    /// * `outcome` - The step's result.
+    pub(super) fn record_trace(
+        &mut self,
+        ip: u64,
+        instr: &Instruction,
+        before: &[u64; 16],
+        outcome: &Result<Option<u64>, Stop>,
+    ) {
+        if self.trace.len() >= self.trace_cap {
+            self.trace.pop_front();
+        }
+        let changed = readout_order(self.bitness)
+            .iter()
+            .filter_map(|name| {
+                let r = named_register(name)?;
+                let at = gpr_bank_index(r)?;
+                let (was, now) = (before.get(at)?, self.regs.get(at)?);
+                (was != now).then(|| format!("{name}={now:#x}"))
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let touched = self
+            .step_memory
+            .borrow()
+            .iter()
+            .map(|&(stored, at, width, v)| {
+                let verb = if stored { "w" } else { "r" };
+                format!("{verb}{width}[{at:#x}]={v:#x}")
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let note = match outcome {
+            Ok(_) if changed.is_empty() && touched.is_empty() => {
+                String::from("(no register changed)")
+            }
+            Ok(_) if changed.is_empty() => touched,
+            Ok(_) if touched.is_empty() => changed,
+            Ok(_) => format!("{changed} {touched}"),
+            Err(stop) => format!("stopped: {stop}"),
+        };
+        self.trace.push_back(format!("{ip:#x}  {instr}    {note}"));
     }
 
     /// Whether `addr` is in the scratch stack the emulator hands the routine.

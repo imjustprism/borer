@@ -9,8 +9,7 @@
 //! a real debugger.
 
 use crate::isa::x86::{
-    Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register, gpr_bank_index,
-    st_depth_mod8, xmm_slot,
+    Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register, st_depth_mod8, xmm_slot,
 };
 use crate::num::{from_usize, lo8, lo32};
 use crate::program::Program;
@@ -1246,50 +1245,6 @@ impl<'a> Emulator<'a> {
         self.origin_at.clone()
     }
 
-    /// Names the loads and stores one step made, in the order it made them.
-    ///
-    /// # Arguments
-    ///
-    /// * `touched` - `(stored, address, width, value)` per access.
-    ///
-    /// # Returns
-    ///
-    /// `r<width>[addr]=value` per load and `w<width>[addr]=value` per
-    /// store, or an empty string.
-    fn memory_note(touched: &[(bool, u64, usize, u64)]) -> String {
-        touched
-            .iter()
-            .map(|&(stored, at, width, v)| {
-                let verb = if stored { "w" } else { "r" };
-                format!("{verb}{width}[{at:#x}]={v:#x}")
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-
-    /// Names the registers that differ between two snapshots.
-    ///
-    /// # Arguments
-    ///
-    /// * `before` - The register file before the instruction.
-    /// * `after` - The register file after it.
-    ///
-    /// # Returns
-    ///
-    /// `name=value` for each changed register, or an empty string.
-    fn register_changes(bitness: u32, before: &[u64; 16], after: &[u64; 16]) -> String {
-        readout_order(bitness)
-            .iter()
-            .filter_map(|name| {
-                let r = named_register(name)?;
-                let at = gpr_bank_index(r)?;
-                let (was, now) = (before.get(at)?, after.get(at)?);
-                (was != now).then(|| format!("{name}={now:#x}"))
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-
     /// Writes a byte into the emulator's memory before a run.
     ///
     /// The byte is data to a load and code to a fetch, so a write over an
@@ -1415,7 +1370,10 @@ impl<'a> Emulator<'a> {
     /// The stop reason, the step count, and every byte written, in address
     /// order.
     pub fn run(&mut self, entry: u64) -> Run {
+        self.mem
+            .warm_run(self.stack_base.saturating_sub(0x2000)..self.stack_base.saturating_add(0x100));
         let mut ip = entry;
+        let mut scratch = [0u8; 16];
         self.steps = 0;
         let stop = loop {
             if self.stop_at == Some(ip) {
@@ -1451,7 +1409,7 @@ impl<'a> Emulator<'a> {
             if self.on_stack(ip) {
                 break Stop::Derailed(ip);
             }
-            let Some(bytes) = self.fetch(ip) else {
+            let Some(bytes) = self.fetch(ip, &mut scratch) else {
                 if self.permissive && self.reg(Register::RSP) < self.stack_base {
                     self.steps += 1;
                     self.skipped += 1;
@@ -1465,7 +1423,7 @@ impl<'a> Emulator<'a> {
                 }
                 break Stop::Fault(ip);
             };
-            let mut decoder = Decoder::with_ip(self.bitness, &bytes, ip, DecoderOptions::NONE);
+            let mut decoder = Decoder::with_ip(self.bitness, bytes, ip, DecoderOptions::NONE);
             let instr = decoder.decode();
             if instr.is_invalid() {
                 let executable = self.program.section_at(ip).is_some_and(|s| s.executable);
@@ -1491,21 +1449,7 @@ impl<'a> Emulator<'a> {
                 self.origin_at = Some((ip, format!("{instr}")));
             }
             if watched {
-                if self.trace.len() >= self.trace_cap {
-                    self.trace.pop_front();
-                }
-                let changed = Self::register_changes(self.bitness, &before, &self.regs);
-                let touched = Self::memory_note(&self.step_memory.borrow());
-                let note = match &outcome {
-                    Ok(_) if changed.is_empty() && touched.is_empty() => {
-                        String::from("(no register changed)")
-                    }
-                    Ok(_) if changed.is_empty() => touched,
-                    Ok(_) if touched.is_empty() => changed,
-                    Ok(_) => format!("{changed} {touched}"),
-                    Err(stop) => format!("stopped: {stop}"),
-                };
-                self.trace.push_back(format!("{ip:#x}  {instr}    {note}"));
+                self.record_trace(ip, &instr, &before, &outcome);
             }
             self.fall_through = instr.next_ip();
             match outcome {
