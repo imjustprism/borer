@@ -266,3 +266,20 @@ fn a_timestamp_leaf_is_one_call() {
     let text = decompiled(&program64(&code), 0x1_4000_1000);
     assert_eq!(text.matches("rdtsc()").count(), 1, "{text}");
 }
+
+/// A store after `rdtscp` stays after the clock read.
+///
+/// The return is the only reader. Printing the call there would time the
+/// store instead of the moment the instruction ran.
+#[test]
+fn a_later_store_stays_after_the_timestamp() {
+    let code = [
+        0x0f, 0x01, 0xf9, // ASM: rdtscp
+        0xc7, 0x07, 0x01, 0x00, 0x00, 0x00, // ASM: mov dword [rdi], 1
+        0xc3, // ASM: ret
+    ];
+    let text = decompiled(&program64(&code), 0x1_4000_1000);
+    let store = text.find("= 1").unwrap_or(text.len());
+    assert!(text[..store].contains("= rdtscp()"), "{text}");
+    assert!(!text[store..].contains("rdtscp"), "{text}");
+}

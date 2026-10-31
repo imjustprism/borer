@@ -1151,6 +1151,13 @@ impl<'a> Exec<'_, 'a> {
         match addr {
             Expr::Sp(k) => self.slot_write(k, ty, v),
             other => {
+                let parked = self.park_timestamps();
+                let mut other = other;
+                let mut v = v;
+                for (from, to) in &parked {
+                    other = other.subst(from, to);
+                    v = v.subst(from, to);
+                }
                 let pending = self.pending(Self::frame_base(&other).is_some());
                 let other = self.hold_index(other, &pending);
                 let v = self.hold_pending_reads(v, ty, &pending);

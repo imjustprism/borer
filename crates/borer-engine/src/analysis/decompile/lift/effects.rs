@@ -1825,6 +1825,36 @@ impl Exec<'_, '_> {
         }
     }
 
+    /// Writes a live timestamp out before a later store.
+    ///
+    /// One reader is enough. Leaving the call in that reader prints it
+    /// after the store, so the clock looks later than it ran. Each pair is
+    /// the value written and the variable that now holds it.
+    pub(super) fn park_timestamps(&mut self) -> Vec<(Expr, Expr)> {
+        if self.ctx.symbolic_only {
+            return Vec::new();
+        }
+        let keys: Vec<Key> = self
+            .env
+            .vals
+            .iter()
+            .filter(|(k, v)| self.still_read(**k) && contains_timestamp(v))
+            .map(|(k, _)| *k)
+            .collect();
+        let mut parked = Vec::new();
+        for key in keys {
+            let Some(val) = self.env.vals.get(&key).cloned() else {
+                continue;
+            };
+            if !contains_timestamp(&val) {
+                continue;
+            }
+            self.materialize(key, &mut Vec::new(), None);
+            parked.push((val, Expr::Var(key)));
+        }
+        parked
+    }
+
     /// Writes out a timestamp a later read still uses.
     ///
     /// Two reads left in one expression run in either order. The earlier
