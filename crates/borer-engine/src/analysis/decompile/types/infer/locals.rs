@@ -694,8 +694,8 @@ fn classify_ident_rhs(lines: &[String], rhs: &str, depth: u8, before: usize) -> 
             }
         }
     }
-    if let Some(src) = sole_rhs(lines, rhs, before) {
-        return classify_rhs(lines, src, depth + 1, before);
+    if let Some((at, src)) = sole_rhs(lines, rhs, before) {
+        return classify_rhs(lines, src, depth + 1, at);
     }
     RhsType::Neutral
 }

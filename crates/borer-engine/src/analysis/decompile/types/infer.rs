@@ -1384,14 +1384,19 @@ fn call_is_whole(l: &Line<'_>) -> bool {
 ///
 /// # Returns
 ///
-/// The right-hand side, or `None` when `name` is a global, is written
-/// more than once before the use, or is not assigned before it.
-fn sole_rhs<'a>(lines: &'a [String], name: &str, before: usize) -> Option<&'a str> {
+/// The line index and right-hand side, or `None` when `name` is a global,
+/// is written more than once before the use, or is not assigned before it.
+fn sole_rhs<'a>(lines: &'a [String], name: &str, before: usize) -> Option<(usize, &'a str)> {
     if global_name(lines, name) || assigned_values(&lines[..before], name) != 1 {
         return None;
     }
     let mut found = None;
-    for line in lines.iter().take(before).filter(|l| !l.starts_with("//")) {
+    for (at, line) in lines
+        .iter()
+        .enumerate()
+        .take(before)
+        .filter(|(_, l)| !l.starts_with("//"))
+    {
         let code = line.split("//").next().unwrap_or("").trim();
         let Some(stmt) = code.strip_suffix(';') else {
             continue;
@@ -1405,7 +1410,7 @@ fn sole_rhs<'a>(lines: &'a [String], name: &str, before: usize) -> Option<&'a st
         if found.is_some() {
             return None;
         }
-        found = Some(rhs.trim());
+        found = Some((at, rhs.trim()));
     }
     found
 }
@@ -1458,7 +1463,8 @@ fn resolved_format(lines: &[String], expr: &str, depth: u8, before: usize) -> Op
     if !is_ident(expr) {
         return None;
     }
-    resolved_format(lines, sole_rhs(lines, expr, before)?, depth + 1, before)
+    let (at, rhs) = sole_rhs(lines, expr, before)?;
+    resolved_format(lines, rhs, depth + 1, at)
 }
 
 /// What a variadic format argument is, when the format is not itself a
@@ -2000,23 +2006,14 @@ printf(g64_1000, a1);
 g64_1000 = gettext(\"%s\");",
         );
         assert_eq!(api_pointer(&text, "a1"), None);
-        let text = lines(
-            "printf(format, a1);
-format = gettext(\"%s\");",
-        );
+        let text = lines("printf(format, a1);\nformat = gettext(\"%s\");");
         assert_eq!(api_pointer(&text, "a1"), None);
-        let text = lines(
-            "format = gettext(\"%s %lu\");
-format += 3;
-printf(format, a1);",
-        );
+        let text = lines("format = gettext(\"%s %lu\");\nformat += 3;\nprintf(format, a1);");
         assert_eq!(api_pointer(&text, "a1"), None);
-        let text = lines(
-            "format = gettext(\"%s\");
-format++;
-printf(format, a1);",
-        );
+        let text = lines("format = gettext(\"%s\");\nformat++;\nprintf(format, a1);");
         assert_eq!(api_pointer(&text, "a1"), None);
+        let text = lines("saved = a1;\na1 = gettext(\"%s\");\nprintf(saved, a2);");
+        assert_eq!(api_pointer(&text, "a2"), None);
         let typed = super::type_parameters(
             "// signature: void f(char *a1, uint64_t a2)\nformat = gettext(a1);\nerror(0, 0, format, a2);\n",
             "uint64_t",
