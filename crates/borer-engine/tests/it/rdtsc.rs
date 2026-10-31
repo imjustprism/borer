@@ -228,3 +228,27 @@ fn a_timestamp_plus_one_stored_twice_is_one_call() {
     let text = decompiled(&program64(&code), 0x1_4000_1000);
     assert_eq!(text.matches("= rdtsc(").count(), 1, "{text}");
 }
+
+/// A carry saved beside a copied timestamp reads the earlier counter once.
+///
+/// `add ebx, 1` sets the carry from the copied timestamp. `setc` reads
+/// that carry after the next `rdtsc`. The carry must not read the clock
+/// again.
+#[test]
+fn a_saved_carry_reads_the_earlier_timestamp_once() {
+    let code = [
+        0x0f, 0x31, // ASM: rdtsc
+        0x89, 0xc3, // ASM: mov ebx, eax
+        0x83, 0xc3, 0x01, // ASM: add ebx, 1
+        0xb8, 0x00, 0x00, 0x00, 0x00, // ASM: mov eax, 0
+        0x0f, 0x31, // ASM: rdtsc
+        0x0f, 0x92, 0xc1, // ASM: setc cl
+        0x29, 0xd8, // ASM: sub eax, ebx
+        0x00, 0xc8, // ASM: add al, cl
+        0xc3, // ASM: ret
+    ];
+    let text = decompiled(&program64(&code), 0x1_4000_1000);
+    assert_eq!(text.matches("rdtsc()").count(), 2, "{text}");
+    assert!(text.contains("uaddo32("), "{text}");
+    assert!(!text.contains("uaddo32(rdtsc("), "{text}");
+}

@@ -1983,6 +1983,9 @@ impl Exec<'_, '_> {
 
     /// Writes out a timestamp that no register holds on its own.
     ///
+    /// A live flag that names the same read shares that statement. Writing
+    /// the register and the flag separately would read the clock twice.
+    ///
     /// # Arguments
     ///
     /// * `aux` - `rdtscp`, which also writes `ecx`.
@@ -1997,6 +2000,11 @@ impl Exec<'_, '_> {
             })
             .map(|(k, _)| *k)
             .collect();
+        if !keys.is_empty() && self.flags_needed != 0 && flags_hold(helper, &self.flags) {
+            let saved = self.tmp_of(helper, self.word_ty());
+            self.retarget(aux, helper, &saved);
+            return;
+        }
         for k in &keys {
             self.materialize(*k, &mut Vec::new(), None);
         }
