@@ -260,7 +260,8 @@ fn difference_checked(instrs: &[Instruction], at: usize) -> bool {
 ///
 /// The leaf is the last write of `rax` before the instruction. A constant
 /// an earlier `mov` left, and that a later `mov` replaced, is not the leaf.
-/// A test of some other register is not the hypervisor bit.
+/// A test of some other register is not the hypervisor bit. A write of
+/// `ecx` before the test, or a call, replaces that bit.
 fn cpuid_hypervisor(instrs: &[Instruction], at: usize) -> bool {
     hypervisor_leaf(instrs, at) || hypervisor_bit(instrs, at)
 }
@@ -276,12 +277,24 @@ fn hypervisor_leaf(instrs: &[Instruction], at: usize) -> bool {
 }
 
 /// Whether a later instruction tests the hypervisor bit in `ecx`.
+///
+/// A write of `ecx`, or a call, replaces the `cpuid` result. A test after
+/// that reads the new value.
 fn hypervisor_bit(instrs: &[Instruction], at: usize) -> bool {
-    instrs
-        .iter()
-        .skip(at + 1)
-        .take(8)
-        .any(|n| tests_register(n, Register::RCX, 0x8000_0000))
+    for n in instrs.iter().skip(at + 1).take(8) {
+        if tests_register(n, Register::RCX, 0x8000_0000) {
+            return true;
+        }
+        if writes_register(n, Register::RCX)
+            || matches!(
+                n.flow_control(),
+                FlowControl::Call | FlowControl::IndirectCall
+            )
+        {
+            return false;
+        }
+    }
+    false
 }
 
 /// Whether `i` writes `reg`, other than a compare that only reads it.

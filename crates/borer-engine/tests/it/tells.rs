@@ -95,6 +95,20 @@ fn a_replaced_leaf_is_not_a_hypervisor_probe() {
     assert!(!other.contains("hypervisor"), "{other}");
 }
 
+/// `ecx` overwritten before the hypervisor-bit test is a feature probe.
+#[test]
+fn a_cleared_hypervisor_bit_is_a_feature_probe() {
+    let text = report(&[
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+        0x0f, 0xa2, // ASM: cpuid
+        0x31, 0xc9, // ASM: xor ecx, ecx
+        0xf7, 0xc1, 0x00, 0x00, 0x00, 0x80, // ASM: test ecx, 0x80000000
+        0xc3, // ASM: ret
+    ]);
+    assert!(text.contains("cpuid (feature probe)"), "{text}");
+    assert!(!text.contains("hypervisor"), "{text}");
+}
+
 /// A discarded read before a measured pair does not hide that pair.
 #[test]
 fn a_discarded_rdtsc_does_not_hide_a_later_pair() {
