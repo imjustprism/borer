@@ -11,6 +11,31 @@ use borer_engine::program::{Arch, Program, Section, Symbol, SymbolKind};
 use crate::common::fixture;
 use crate::raw::image;
 
+/// `CreateFileFromAppW` and `CreateFile2FromAppW` open files.
+///
+/// A mapping API that shares the stem does not.
+#[test]
+fn a_desktop_bridge_create_file_is_filesystem() {
+    let map = |names: &[&str]| {
+        let mut p = fixture();
+        p.symbols = names
+            .iter()
+            .map(|n| Symbol {
+                name: format!("KERNEL32.dll!{n}"),
+                addr: 0,
+                kind: SymbolKind::Import,
+            })
+            .collect();
+        borer_engine::analysis::render::capability_map_tsv(&p, None)
+    };
+    let opened = map(&["CreateFileFromAppW", "CreateFile2FromAppW"]);
+    assert!(opened.contains("filesystem"), "{opened}");
+    assert!(opened.contains("CreateFileFromAppW"), "{opened}");
+    assert!(opened.contains("CreateFile2FromAppW"), "{opened}");
+    let mapped = map(&["CreateFileMappingA", "CreateFileMappingFromApp"]);
+    assert!(!mapped.contains("filesystem"), "{mapped}");
+}
+
 /// A character whose lowercase form grows does not move the capital check.
 ///
 /// `İ` lowercases to two characters. Five of them before `crypt` would

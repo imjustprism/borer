@@ -267,9 +267,10 @@ pub(super) const CAPABILITIES: [(&str, &[&str]); 16] = [
 /// Whether `api` is one of `fragments`.
 ///
 /// `=name` is the whole name. `~stem` is that stem with an empty suffix,
-/// `a` / `w` / `ex` / `2`, `scatter`, `gather`, or `transacted` with an
-/// optional `a` or `w`. `^part` is `part` at the start or at a capital
-/// letter. Anything else is a case-insensitive substring. The fold is
+/// `a` / `w` / `ex` / `2`, `scatter`, `gather`, `transacted` with an
+/// optional `a` or `w`, or the desktop-bridge `fromappw` and `2fromappw`.
+/// `^part` is `part` at the start or at a capital letter. Anything else
+/// is a case-insensitive substring. The fold is
 /// ASCII, so a capital-letter index stays on that byte.
 ///
 /// # Arguments
@@ -298,6 +299,8 @@ fn name_gives(fragments: &[&str], api: &str) -> bool {
                         | "transacted"
                         | "transacteda"
                         | "transactedw"
+                        | "fromappw"
+                        | "2fromappw"
                 )
             })
         } else if let Some(part) = frag.strip_prefix('^') {
