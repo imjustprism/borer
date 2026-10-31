@@ -782,6 +782,60 @@ fn a_debug_process_block_is_a_tell() {
     assert!(!alone.contains("debug block"), "{alone}");
 }
 
+/// A later store of the process flags replaces an earlier debug flag.
+///
+/// `CREATE_SUSPENDED` after `DEBUG_PROCESS` is not a debug block. A later
+/// `DEBUG_PROCESS` still is. A register stored over the flag is not a
+/// known debug flag either.
+#[test]
+fn a_replaced_process_flag_is_not_a_debug_block() {
+    let replaced = report_calls(
+        &[
+            0xc7, 0x44, 0x24, 0x28, 0x01, 0x00, 0x00, 0x00, // ASM: mov dword [rsp+0x28], 1
+            0xc7, 0x44, 0x24, 0x28, 0x04, 0x00, 0x00, 0x00, // ASM: mov dword [rsp+0x28], 4
+            0xe8, 0xeb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0xe8, 0xf6, 0x0f, 0x00, 0x00, // ASM: call 0x402010
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[
+            ("CreateProcessA", 0x402000),
+            ("WaitForDebugEvent", 0x402010),
+        ],
+    );
+    assert!(!replaced.contains("debug block"), "{replaced}");
+    let kept = report_calls(
+        &[
+            0xc7, 0x44, 0x24, 0x28, 0x04, 0x00, 0x00, 0x00, // ASM: mov dword [rsp+0x28], 4
+            0xc7, 0x44, 0x24, 0x28, 0x01, 0x00, 0x00, 0x00, // ASM: mov dword [rsp+0x28], 1
+            0xe8, 0xeb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0xe8, 0xf6, 0x0f, 0x00, 0x00, // ASM: call 0x402010
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[
+            ("CreateProcessA", 0x402000),
+            ("WaitForDebugEvent", 0x402010),
+        ],
+    );
+    assert!(kept.contains("debug block"), "{kept}");
+    let unknown = report_calls(
+        &[
+            0xc7, 0x44, 0x24, 0x28, 0x01, 0x00, 0x00, 0x00, // ASM: mov dword [rsp+0x28], 1
+            0x89, 0x44, 0x24, 0x28, // ASM: mov [rsp+0x28], eax
+            0xe8, 0xef, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0xe8, 0xfa, 0x0f, 0x00, 0x00, // ASM: call 0x402010
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[
+            ("CreateProcessA", 0x402000),
+            ("WaitForDebugEvent", 0x402010),
+        ],
+    );
+    assert!(!unknown.contains("debug block"), "{unknown}");
+}
+
 /// Taking the address of the two debug APIs is not a call, so it is not a
 /// debug block.
 #[test]

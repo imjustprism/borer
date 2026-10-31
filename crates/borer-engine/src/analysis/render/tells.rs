@@ -457,6 +457,9 @@ fn debug_spawn(p: &Program, a: &Analysis, entry: u64, instrs: &[Instruction], bi
 }
 
 /// Whether the sixth argument passed before this call is a debug flag.
+///
+/// The latest store to that stack slot is the value the call sees. An
+/// earlier debug flag does not count once a later store replaces it.
 fn creation_flags(before: &[Instruction], bits: u32) -> bool {
     let disp = if bits == 32 { 0x14 } else { 0x28 };
     if bits == 32 && pushed_immediate(before, 6).is_some_and(debug_creation) {
@@ -469,8 +472,8 @@ fn creation_flags(before: &[Instruction], bits: u32) -> bool {
         ) {
             return false;
         }
-        if stack_immediate(n, disp, bits).is_some_and(debug_creation) {
-            return true;
+        if stack_slot(n, disp, bits) {
+            return stack_immediate(n, disp, bits).is_some_and(debug_creation);
         }
     }
     false
@@ -502,18 +505,22 @@ fn pushed_immediate(before: &[Instruction], nth: u32) -> Option<u64> {
     None
 }
 
-/// The immediate stored at `[rsp+disp]` or `[esp+disp]`.
-fn stack_immediate(n: &Instruction, disp: u64, bits: u32) -> Option<u64> {
+/// Whether `n` stores at `[rsp+disp]` or `[esp+disp]`.
+fn stack_slot(n: &Instruction, disp: u64, bits: u32) -> bool {
     if n.mnemonic() != Mnemonic::Mov || n.op0_kind() != OpKind::Memory {
-        return None;
+        return false;
     }
     let width = if bits == 32 { 4 } else { 8 };
-    if n.memory_base().full_register() != Register::RSP
-        || n.memory_base().size() != width
-        || n.memory_index() != Register::None
-        || n.memory_displacement64() != disp
-        || !matches!(n.segment_prefix(), Register::None | Register::SS)
-    {
+    n.memory_base().full_register() == Register::RSP
+        && n.memory_base().size() == width
+        && n.memory_index() == Register::None
+        && n.memory_displacement64() == disp
+        && matches!(n.segment_prefix(), Register::None | Register::SS)
+}
+
+/// The immediate stored at `[rsp+disp]` or `[esp+disp]`.
+fn stack_immediate(n: &Instruction, disp: u64, bits: u32) -> Option<u64> {
+    if !stack_slot(n, disp, bits) {
         return None;
     }
     immediate_any(n)
