@@ -1252,15 +1252,101 @@ pub(super) const HANDLER_SPAN: u64 = 64;
 ///
 /// `(instructions read, a description)`.
 pub(super) fn handler_effect(p: &Program, a: &Analysis, at: u64) -> (usize, String) {
-    let end = a
-        .function_at(at)
-        .and_then(|f| f.blocks.iter().find(|b| b.start == at).map(|b| b.end))
-        .unwrap_or(at + HANDLER_SPAN);
-    let len = usize::try_from(end.saturating_sub(at)).unwrap_or(0).max(1);
-    let Some(code) = p.read_va(at, len) else {
+    let body = resolve_thunk_va(p, a, at);
+    let block_end = a
+        .function_at(body)
+        .and_then(|f| f.blocks.iter().find(|b| b.start == body).map(|b| b.end));
+    let end = block_end.unwrap_or(body + HANDLER_SPAN);
+    let len = usize::try_from(end.saturating_sub(body))
+        .unwrap_or(0)
+        .max(1);
+    let Some(raw) = p.read_va(body, len) else {
         return (0, "unreadable".to_owned());
     };
-    handler_effect_code(p, at, code)
+    let code = trim_handler_code(p, body, raw, block_end.is_some());
+    handler_effect_code(p, body, code)
+}
+
+/// Follows up to four single-instruction unconditional jump thunks from `at`
+/// to the handler body when `at` is not a multi-instruction block in `a`.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `at` - The handler entry address.
+pub(super) fn resolve_thunk_va(p: &Program, a: &Analysis, at: u64) -> u64 {
+    let Some(bits) = p.arch.bitness() else {
+        return at;
+    };
+    let mut cur = at;
+    for _ in 0..4 {
+        if a.function_at(cur)
+            .and_then(|f| f.blocks.iter().find(|b| b.start == cur))
+            .is_some_and(|b| b.end.saturating_sub(b.start) > 5)
+        {
+            break;
+        }
+        let Some(code) = p.read_va(cur, 16) else {
+            break;
+        };
+        let mut d = Decoder::with_ip(bits, code, cur, DecoderOptions::NONE);
+        let instr = d.decode();
+        if instr.is_invalid() || instr.flow_control() != FlowControl::UnconditionalBranch {
+            break;
+        }
+        let target = instr.near_branch_target();
+        if target == 0 || target == cur {
+            break;
+        }
+        cur = target;
+    }
+    cur
+}
+
+/// Trims a handler byte slice before any invalid opcode and, when no static
+/// block bounds the handler, after its first terminal branch.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image, for its architecture.
+/// * `at` - The address of `code`.
+/// * `code` - The raw handler bytes.
+/// * `bounded` - Whether a static basic block already bounds `code`.
+pub(super) fn trim_handler_code<'a>(
+    p: &Program,
+    at: u64,
+    code: &'a [u8],
+    bounded: bool,
+) -> &'a [u8] {
+    let Some(bits) = p.arch.bitness() else {
+        return code;
+    };
+    let mut d = Decoder::with_ip(bits, code, at, DecoderOptions::NONE);
+    let mut i = Instruction::default();
+    let mut end = 0usize;
+    while d.can_decode() {
+        d.decode_out(&mut i);
+        if i.is_invalid() {
+            break;
+        }
+        end = usize::try_from(i.next_ip().saturating_sub(at))
+            .unwrap_or(code.len())
+            .min(code.len());
+        if !bounded
+            && matches!(
+                i.flow_control(),
+                FlowControl::UnconditionalBranch
+                    | FlowControl::IndirectBranch
+                    | FlowControl::Return
+                    | FlowControl::Interrupt
+                    | FlowControl::Exception
+            )
+        {
+            break;
+        }
+    }
+    if end == 0 { code } else { &code[..end] }
 }
 
 /// Summarizes a handler from instruction bytes a caller holds.

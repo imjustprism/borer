@@ -106,6 +106,7 @@ pub fn devirtualize_tsv(
     emu.install_imports();
     let strict = rest.iter().any(|p| matches!(*p, "strict" | "nobesteffort"));
     emu.set_permissive(!strict);
+    let mut has_preset = false;
     for token in rest
         .iter()
         .filter(|t| !matches!(**t, "strict" | "nobesteffort"))
@@ -129,7 +130,9 @@ pub fn devirtualize_tsv(
                 one_line(reg)
             ));
         }
+        has_preset = true;
     }
+    let seed = emu.clone();
     let run = emu.run(entry);
     let jumps = emu.indirect_jumps();
     if jumps.is_empty() {
@@ -140,47 +143,10 @@ pub fn devirtualize_tsv(
             run.steps
         ));
     }
-    let mut sites: BTreeMap<u64, (usize, BTreeSet<u64>)> = BTreeMap::new();
-    for (from, to) in jumps {
-        let site = sites.entry(*from).or_default();
-        site.0 += 1;
-        site.1.insert(*to);
-    }
-    let loops = dispatch_loops(p, a);
-    let Some(dispatch) = sites
-        .iter()
-        .filter(|(from, (_, targets))| {
-            targets.len() >= VM_MIN_FETCHED || loops.iter().any(|d| d.site == **from)
-        })
-        .max_by_key(|(_, (n, _))| *n)
-        .map(|(from, _)| *from)
-    else {
-        let widest = sites.values().map(|(_, t)| t.len()).max().unwrap_or(0);
-        let why = loops.iter().find(|d| d.entry == entry).map_or_else(
-            || "a thunk or a switch is no interpreter".to_owned(),
-            |d| {
-                format!(
-                    "the run stopped before the dispatch borer://vm finds at {:#x}",
-                    d.site
-                )
-            },
-        );
-        return Ok(format!(
-            "# {}: no dispatch loop ran ({} after {} steps): {} indirect jump{} from {} site{}, none a dispatch borer://vm finds and none reaching {VM_MIN_FETCHED} handlers (the most was {widest}); {why}\n",
-            name_of(a, o, entry),
-            run.stop,
-            run.steps,
-            jumps.len(),
-            plural(jumps.len()),
-            sites.len(),
-            plural(sites.len())
-        ));
+    let (dispatch, trace, threaded) = match select_dispatch_trace(p, a, o, entry, &run, jumps) {
+        Ok(found) => found,
+        Err(report) => return Ok(report),
     };
-    let trace: Vec<u64> = jumps
-        .iter()
-        .filter(|(from, _)| *from == dispatch)
-        .map(|(_, to)| *to)
-        .collect();
     let mut order: Vec<u64> = Vec::new();
     for h in &trace {
         if !order.contains(h) {
@@ -200,23 +166,33 @@ pub fn devirtualize_tsv(
         order.len(),
         run.stop
     );
+    if !has_preset
+        && let Some(expr) = recover_algebraic_expr(&seed, &emu, &run, entry)
+    {
+        let _ = writeln!(out, "# recovered expression: eax = {expr}");
+    }
     out.push_str("# handlers:\n");
     let mut view: BTreeMap<u64, HandlerView> = BTreeMap::new();
     for h in &order {
-        let bytes = handler_bytes(p, a, &emu, *h);
+        let (body_at, bytes) = handler_bytes(p, a, &emu, *h, dispatch);
         let (n, effect) = if bytes.is_empty() {
             (0, "unreadable".to_owned())
         } else {
-            handler_effect_code(p, *h, &bytes)
+            handler_effect_code(p, body_at, &bytes)
         };
         let _ = writeln!(
             out,
             "  {:<4} {h:#x}  {n} instrs  {effect}",
             name_of_handler(*h)
         );
-        view.insert(*h, handler_view(p, *h, &bytes));
+        view.insert(*h, handler_view(p, body_at, &bytes));
     }
-    let dead = dead_stores(&trace, &view, &dispatch_step(p, a, &emu, dispatch));
+    let fetch = if threaded {
+        StepState::default()
+    } else {
+        dispatch_step(p, a, &emu, dispatch)
+    };
+    let dead = dead_stores(&trace, &view, &fetch);
     let kept: Vec<usize> = (0..trace.len()).filter(|i| !dead.contains(i)).collect();
     if kept.is_empty() {
         out.push_str(
@@ -519,12 +495,245 @@ fn step_state(instrs: &[Instruction]) -> StepState {
     st
 }
 
-/// A handler's instruction bytes, from the run's memory or the image.
+/// Picks the dispatch site and virtual instruction trace from a run's
+/// indirect jumps, falling back to a direct-threaded handler chain when
+/// each handler ends in its own indirect jump.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - User names.
+/// * `entry` - The virtualized function's entry.
+/// * `run` - The finished run.
+/// * `jumps` - The indirect jumps `(from, to)` taken during the run.
+///
+/// # Errors
+///
+/// Returns the explanatory report line when no dispatch loop or threaded
+/// chain of at least [`VM_MIN_FETCHED`] handlers ran.
+fn select_dispatch_trace(
+    p: &Program,
+    a: &Analysis,
+    o: &Overlay,
+    entry: u64,
+    run: &crate::emulate::Run,
+    jumps: &[(u64, u64)],
+) -> Result<(u64, Vec<u64>, bool), String> {
+    let mut sites: BTreeMap<u64, (usize, BTreeSet<u64>)> = BTreeMap::new();
+    for (from, to) in jumps {
+        let site = sites.entry(*from).or_default();
+        site.0 += 1;
+        site.1.insert(*to);
+    }
+    let loops = dispatch_loops(p, a);
+    if let Some(dispatch) = sites
+        .iter()
+        .filter(|(from, (_, targets))| {
+            targets.len() >= VM_MIN_FETCHED || loops.iter().any(|d| d.site == **from)
+        })
+        .max_by_key(|(_, (n, _))| *n)
+        .map(|(from, _)| *from)
+    {
+        let trace = jumps
+            .iter()
+            .filter(|(from, _)| *from == dispatch)
+            .map(|(_, to)| *to)
+            .collect();
+        return Ok((dispatch, trace, false));
+    }
+    let distinct_targets: BTreeSet<u64> = jumps.iter().map(|(_, to)| *to).collect();
+    if sites.len() >= VM_MIN_FETCHED && distinct_targets.len() >= VM_MIN_FETCHED {
+        let dispatch = jumps[0].0;
+        let trace = jumps.iter().map(|(_, to)| *to).collect();
+        return Ok((dispatch, trace, true));
+    }
+    let widest = sites.values().map(|(_, t)| t.len()).max().unwrap_or(0);
+    let why = loops.iter().find(|d| d.entry == entry).map_or_else(
+        || "a thunk or a switch is no interpreter".to_owned(),
+        |d| {
+            format!(
+                "the run stopped before the dispatch borer://vm finds at {:#x}",
+                d.site
+            )
+        },
+    );
+    Err(format!(
+        "# {}: no dispatch loop ran ({} after {} steps): {} indirect jump{} from {} site{}, none a dispatch borer://vm finds and none reaching {VM_MIN_FETCHED} handlers (the most was {widest}); {why}\n",
+        name_of(a, o, entry),
+        run.stop,
+        run.steps,
+        jumps.len(),
+        plural(jumps.len()),
+        sites.len(),
+        plural(sites.len())
+    ))
+}
+
+/// Probes a bounded returning VM function across deterministic input pairs
+/// to recover a closed-form 32-bit algebraic expression in `ecx` and `edx`.
+///
+/// # Arguments
+///
+/// * `seed` - Pre-run emulator clone with imports and mode installed.
+/// * `emu` - The finished default run's emulator.
+/// * `run` - The finished default run.
+/// * `entry` - The virtualized function's entry.
+fn recover_algebraic_expr(
+    seed: &Emulator<'_>,
+    emu: &Emulator<'_>,
+    run: &crate::emulate::Run,
+    entry: u64,
+) -> Option<String> {
+    if run.stop != Stop::Returned || run.steps > 250_000 {
+        return None;
+    }
+    let y00 = u32::try_from(emu.register("rax")? & 0xffff_ffff).ok()?;
+    let probes: [(u32, u32); 6] = [
+        (0x7777_7777, 0x4444_4444),
+        (0, 1),
+        (0x3333_3333, 0x1111_1111),
+        (0x5555_5555, 0x2222_2222),
+        (0x1234_5678, 0x9abc_def0),
+        (0xdead_beef, 0x1357_9bdf),
+    ];
+    let mut obs = Vec::with_capacity(7);
+    obs.push((0u32, 0u32, y00));
+    for (x, y) in probes {
+        let mut p_emu = seed.clone();
+        p_emu.set_register("rcx", u64::from(x));
+        p_emu.set_register("rdx", u64::from(y));
+        let p_run = p_emu.run(entry);
+        if p_run.stop != Stop::Returned {
+            return None;
+        }
+        let z = u32::try_from(p_emu.register("rax")? & 0xffff_ffff).ok()?;
+        obs.push((x, y, z));
+    }
+    if obs.iter().all(|(_, _, z)| *z == y00) {
+        return None;
+    }
+    let stack = emu
+        .register("rsp")
+        .map(|sp| emu.code_at(sp.saturating_sub(0x400), 0x400))
+        .unwrap_or_default();
+    solve_linear_xor(&obs, &stack)
+}
+
+/// Solves `((ecx ^ k1) * m1 + edx * m2) ^ k3` mod `2^32` by bit-slice lifting.
+///
+/// # Arguments
+///
+/// * `obs` - Observed `(ecx, edx, eax)` triples, `(0, 0, y00)` first.
+/// * `stack` - Bytes from the run's stack frame to disambiguate the top bit.
+fn solve_linear_xor(obs: &[(u32, u32, u32)], stack: &[u8]) -> Option<String> {
+    /// Ceiling on partial bit-slice candidates kept at any bit position.
+    const CANDS_MAX: usize = 64;
+    let y00 = obs.first()?.2;
+    for m1 in [1u32, 2, 3, 4, 5, 8, 0] {
+        for m2 in [0u32, 1, 2, 3, 4, 5, 8] {
+            if m1 == 0 && m2 == 0 {
+                continue;
+            }
+            let mut cands = vec![0u32];
+            for b in 0..32u32 {
+                let mask = if b == 31 {
+                    u32::MAX
+                } else {
+                    (1u32 << (b + 1)) - 1
+                };
+                let mut next = Vec::new();
+                let bits: &[u32] = if m1 == 0 || (m2 == 0 && m1.is_power_of_two()) {
+                    &[0]
+                } else {
+                    &[0, 1]
+                };
+                for &k1 in &cands {
+                    for &bit in bits {
+                        let k1_try = k1 | (bit << b);
+                        let k3_try = (y00 ^ k1_try.wrapping_mul(m1)) & mask;
+                        if obs.iter().all(|&(x, y, z)| {
+                            let v = (x ^ k1_try).wrapping_mul(m1).wrapping_add(y.wrapping_mul(m2))
+                                ^ k3_try;
+                            (v & mask) == (z & mask)
+                        }) {
+                            next.push(k1_try);
+                        }
+                    }
+                }
+                next.truncate(CANDS_MAX);
+                cands = next;
+                if cands.is_empty() {
+                    break;
+                }
+            }
+            if !cands.is_empty() {
+                let best = cands
+                    .iter()
+                    .copied()
+                    .max_by_key(|&k1| {
+                        let k3 = y00 ^ k1.wrapping_mul(m1);
+                        let s1 = stack.windows(4).any(|w| w == k1.to_le_bytes());
+                        let s3 = stack.windows(4).any(|w| w == k3.to_le_bytes());
+                        (u8::from(s1) + u8::from(s3), u8::from(k1 >> 31 == 0))
+                    })?;
+                let k3 = y00 ^ best.wrapping_mul(m1);
+                return Some(format_linear_xor(m1, m2, best, k3));
+            }
+        }
+    }
+    None
+}
+
+/// Renders `((ecx ^ k1) * m1 + edx * m2) ^ k3` with unit multipliers and
+/// zero masks omitted.
+///
+/// # Arguments
+///
+/// * `m1` - Multiplier on `ecx ^ k1`.
+/// * `m2` - Multiplier on `edx`.
+/// * `k1` - Pre-mask on `ecx`.
+/// * `k3` - Output mask.
+fn format_linear_xor(m1: u32, m2: u32, k1: u32, k3: u32) -> String {
+    let mut terms = Vec::new();
+    if m1 != 0 {
+        let base = if k1 == 0 {
+            "ecx".to_owned()
+        } else {
+            format!("(ecx ^ {k1:#x})")
+        };
+        terms.push(if m1 == 1 {
+            base
+        } else {
+            format!("{base} * {m1}")
+        });
+    }
+    if m2 != 0 {
+        terms.push(if m2 == 1 {
+            "edx".to_owned()
+        } else {
+            format!("edx * {m2}")
+        });
+    }
+    let sum = terms.join(" + ");
+    if k3 == 0 {
+        sum
+    } else if terms.len() > 1 {
+        format!("({sum}) ^ {k3:#x}")
+    } else {
+        format!("{sum} ^ {k3:#x}")
+    }
+}
+
+/// A handler's resolved body address and instruction bytes, from the run's
+/// memory or the image.
 ///
 /// Written bytes take precedence, so a handler the protector decrypted
-/// reads as itself; the length is held to the block the analysis gives the
-/// handler when it gives one, so one handler does not summarize its
-/// neighbors.
+/// reads as itself; leading single-instruction unconditional jump thunks
+/// (that do not jump into the dispatch block) are followed to the real
+/// handler body; and the length is held to the block the analysis gives the
+/// handler or trimmed at its first terminal branch so one handler does not
+/// summarize its neighbors.
 ///
 /// # Arguments
 ///
@@ -532,22 +741,72 @@ fn step_state(instrs: &[Instruction]) -> StepState {
 /// * `a` - The analysis, for the handler's block.
 /// * `emu` - The finished run.
 /// * `at` - The handler's first instruction.
+/// * `dispatch` - The dispatch site's address.
 ///
 /// # Returns
 ///
-/// The bytes, empty when neither the run nor the image backs them.
-fn handler_bytes(p: &Program, a: &Analysis, emu: &Emulator<'_>, at: u64) -> Vec<u8> {
-    let bounded = a
-        .function_at(at)
-        .and_then(|f| f.blocks.iter().find(|b| b.start == at).map(|b| b.end))
-        .map_or(HANDLER_SPAN, |end| end.saturating_sub(at))
+/// `(resolved body address, instruction bytes)`.
+fn handler_bytes(
+    p: &Program,
+    a: &Analysis,
+    emu: &Emulator<'_>,
+    at: u64,
+    dispatch: u64,
+) -> (u64, Vec<u8>) {
+    let dispatch_head = a
+        .function_at(dispatch)
+        .and_then(|f| {
+            f.blocks
+                .iter()
+                .find(|b| b.start <= dispatch && dispatch < b.end)
+                .map(|b| b.start)
+        })
+        .unwrap_or(dispatch);
+    let mut body = at;
+    if let Some(bits) = p.arch.bitness() {
+        for _ in 0..4 {
+            if a.function_at(body)
+                .and_then(|f| f.blocks.iter().find(|b| b.start == body))
+                .is_some_and(|b| b.end.saturating_sub(b.start) > 5)
+            {
+                break;
+            }
+            let probe = emu.code_at(body, 16);
+            let probe = if probe.is_empty() {
+                p.read_va(body, 16).unwrap_or(&[])
+            } else {
+                probe.as_slice()
+            };
+            if probe.is_empty() {
+                break;
+            }
+            let mut d = Decoder::with_ip(bits, probe, body, DecoderOptions::NONE);
+            let instr = d.decode();
+            if instr.is_invalid() || instr.flow_control() != FlowControl::UnconditionalBranch {
+                break;
+            }
+            let target = instr.near_branch_target();
+            if target == 0 || target == body || target == dispatch || target == dispatch_head {
+                break;
+            }
+            body = target;
+        }
+    }
+    let block_end = a
+        .function_at(body)
+        .and_then(|f| f.blocks.iter().find(|b| b.start == body).map(|b| b.end));
+    let bounded = block_end
+        .map_or(HANDLER_SPAN, |end| end.saturating_sub(body))
         .min(HANDLER_SPAN);
     let len = usize::try_from(bounded).unwrap_or(0);
-    let live = emu.code_at(at, len);
-    if live.is_empty() {
-        return p.read_va(at, len).map_or_else(Vec::new, <[u8]>::to_vec);
-    }
-    live
+    let live = emu.code_at(body, len);
+    let raw = if live.is_empty() {
+        p.read_va(body, len).map_or_else(Vec::new, <[u8]>::to_vec)
+    } else {
+        live
+    };
+    let trimmed = trim_handler_code(p, body, &raw, block_end.is_some()).to_vec();
+    (body, trimmed)
 }
 
 /// Reads a handler's bytes into its program shape: the word a step of it
@@ -1653,5 +1912,80 @@ mod tests {
             "{out}"
         );
         assert!(!out.contains("virtual instructions"), "{out}");
+    }
+
+    /// A threaded VM whose handlers are entered through unconditional jump
+    /// thunks and chain directly from handler to handler is traced across
+    /// its sites, summarizes each handler at its real body, and recovers
+    /// the closed-form algebraic expression it computes.
+    ///
+    /// # Panics
+    ///
+    /// When the threaded dispatch is refused, a thunk hides its handler's
+    /// body, or the closed-form expression is not recovered.
+    #[test]
+    fn a_threaded_dispatch_with_jump_thunks_recovers_handlers_and_expression() {
+        let mut bytes = vec![0xccu8; 0x1000];
+        let entry: [u8; 10] = [
+            0x48, 0xb8, 0x20, 0x10, 0, 0, 0, 0, 0, 0, // ASM: mov rax,0x1020
+        ];
+        bytes[0..10].copy_from_slice(&entry);
+        bytes[10..12].copy_from_slice(&[0xff, 0xe0]); // ASM: jmp rax (at 0x100a)
+
+        bytes[0x20..0x25].copy_from_slice(&[0xe9, 0xdb, 0x00, 0x00, 0x00]); // ASM: jmp 0x1100
+        bytes[0x25..0x2a].copy_from_slice(&[0xe9, 0xd6, 0x01, 0x00, 0x00]); // ASM: jmp 0x1200
+        bytes[0x2a..0x2f].copy_from_slice(&[0xe9, 0xd1, 0x02, 0x00, 0x00]); // ASM: jmp 0x1300
+
+        let h0: [u8; 19] = [
+            0x89, 0xc8, // ASM: mov eax,ecx
+            0x35, 0x68, 0x24, 0x57, 0x13, // ASM: xor eax,0x13572468
+            0x48, 0xbb, 0x25, 0x10, 0, 0, 0, 0, 0, 0, // ASM: mov rbx,0x1025
+            0xff, 0xe3, // ASM: jmp rbx
+        ];
+        bytes[0x100..0x100 + h0.len()].copy_from_slice(&h0);
+
+        let h1: [u8; 17] = [
+            0x6b, 0xd2, 0x03, // ASM: imul edx,edx,3
+            0x01, 0xd0, // ASM: add eax,edx
+            0x48, 0xbb, 0x2a, 0x10, 0, 0, 0, 0, 0, 0, // ASM: mov rbx,0x102a
+            0xff, 0xe3, // ASM: jmp rbx
+        ];
+        bytes[0x200..0x200 + h1.len()].copy_from_slice(&h1);
+
+        let h2: [u8; 6] = [
+            0x35, 0xbe, 0xba, 0xfe, 0xca, // ASM: xor eax,0xcafebabe
+            0xc3, // ASM: ret
+        ];
+        bytes[0x300..0x300 + h2.len()].copy_from_slice(&h2);
+
+        let p = Program::raw_x64(&bytes);
+        let a = Analysis::compute(&p);
+        let out = devirtualize_tsv(&p, &a, &Overlay::default(), "0x1000").unwrap();
+        assert!(
+            out.contains("3 virtual instructions over 3 handlers, dispatch at 0x100a (returned)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("# recovered expression: eax = ((ecx ^ 0x13572468) + edx * 3) ^ 0xcafebabe"),
+            "{out}"
+        );
+        assert!(out.contains("v0   0x1020  4 instrs  virtual logic: xor"), "{out}");
+        assert!(
+            out.contains("v1   0x1025  4 instrs  virtual arithmetic: imul add"),
+            "{out}"
+        );
+        assert!(out.contains("v2   0x102a  2 instrs  virtual logic: xor"), "{out}");
+        assert!(
+            out.contains("# virtual program: 3 of 3 instructions in 1 run\n# run 1\n  v0 = xor;\n  v1 = imul add;\n  v2 = xor;"),
+            "{out}"
+        );
+        assert_eq!(
+            super::solve_linear_xor(&[(0, 0, 0), (1, 0, 1), (0x1234_5678, 9, 0x1234_5678)], &[]),
+            Some("ecx".to_owned())
+        );
+        assert_eq!(
+            super::solve_linear_xor(&[(0, 0, 0), (1, 0, 2), (0x1234_5678, 9, 0x2468_acf0)], &[]),
+            Some("ecx * 2".to_owned())
+        );
     }
 }
