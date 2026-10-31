@@ -288,6 +288,38 @@ fn a_debug_port_query_is_a_tell_and_the_import_alone_is_not() {
     assert!(!other.starts_with("# anti-analysis:"), "{other}");
 }
 
+/// A byte written over `edx` is not the whole information class.
+///
+/// `mov edx, 0x100; mov dl, 7` passes `0x107`. A compare of `edx` does
+/// not erase a class of `7` moved into it.
+#[test]
+fn a_partial_class_write_is_not_the_debug_port() {
+    let mixed = report_calls(
+        &[
+            0xba, 0x00, 0x01, 0x00, 0x00, // ASM: mov edx, 0x100
+            0xb2, 0x07, // ASM: mov dl, 7
+            0xe8, 0xf4, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[("NtQueryInformationProcess", 0x402000)],
+    );
+    assert!(!mixed.contains("debug port"), "{mixed}");
+    assert!(!mixed.starts_with("# anti-analysis:"), "{mixed}");
+    let compared = report_calls(
+        &[
+            0xba, 0x07, 0x00, 0x00, 0x00, // ASM: mov edx, 7
+            0x83, 0xfa, 0x01, // ASM: cmp edx, 1
+            0xe8, 0xf3, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[("NtQueryInformationProcess", 0x402000)],
+    );
+    assert!(compared.contains("debug port"), "{compared}");
+    assert!(compared.starts_with("# anti-analysis:"), "{compared}");
+}
+
 /// `fs:[0x30]` is a PEB read and not a named field. `fs:[0x18]` then a
 /// stack-base read is not a PEB read.
 #[test]

@@ -461,8 +461,13 @@ fn class_is_debug_port(before: &[Instruction], bits: u32) -> bool {
     }
 }
 
-/// The immediate in `edx`, when the last write of it is a `mov`.
+/// The information class in `edx`, when moves of immediates set it.
+///
+/// A compare does not write the register. A later write of `dl` or `dh`
+/// replaces only that byte, so `mov edx, 0x100; mov dl, 7` is `0x107`,
+/// not `7`.
 fn edx_class(before: &[Instruction]) -> Option<u64> {
+    let mut part: Option<(u64, u64)> = None;
     for n in before.iter().rev().take(8) {
         if matches!(
             n.flow_control(),
@@ -470,15 +475,40 @@ fn edx_class(before: &[Instruction]) -> Option<u64> {
         ) {
             return None;
         }
-        if n.op0_kind() != OpKind::Register || n.op0_register().full_register() != Register::RDX {
+        if !writes_register(n, Register::RDX) {
             continue;
         }
-        if n.mnemonic() == Mnemonic::Mov {
-            return immediate_any(n);
+        if n.mnemonic() != Mnemonic::Mov {
+            return None;
         }
-        return None;
+        let imm = immediate_any(n)?;
+        let (mask, shift) = rdx_field(n.op0_register())?;
+        if mask >= 0xffff_ffff {
+            let full = imm & 0xffff_ffff;
+            let class = match part {
+                Some((value, keep)) => (full & !keep) | value,
+                None => full,
+            };
+            return Some(class);
+        }
+        let bits = (imm << shift) & mask;
+        part = Some(match part {
+            Some((value, keep)) => (value | (bits & !keep), keep | mask),
+            None => (bits, mask),
+        });
     }
     None
+}
+
+/// The bits of `edx` that `reg` writes, and the shift of that immediate.
+fn rdx_field(reg: Register) -> Option<(u64, u32)> {
+    match reg {
+        Register::DL => Some((0xff, 0)),
+        Register::DH => Some((0xff00, 8)),
+        Register::DX => Some((0xffff, 0)),
+        Register::EDX | Register::RDX => Some((0xffff_ffff, 0)),
+        _ => None,
+    }
 }
 
 /// The second `push` before the call, which is the class on x86.
