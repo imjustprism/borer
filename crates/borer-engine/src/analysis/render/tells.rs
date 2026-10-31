@@ -1008,28 +1008,170 @@ fn context_debug(p: &Program, a: &Analysis, entry: u64, instrs: &[Instruction], 
             i.flow_control(),
             FlowControl::Call | FlowControl::IndirectCall
         ) && sites.contains(&i.ip())
-            && (context_flags(&instrs[..at])
+            && (context_flags(&instrs[..at], bits)
                 || reads_context_dr(&instrs[..at], &instrs[at + 1..], bits))
     })
 }
 
-/// Whether the instructions before a context call ask for the debug registers.
+/// Whether the instructions before a context call store the debug-register
+/// flags into that call's buffer.
 ///
-/// The word has to be moved. A compare that happens to hold it is not a
-/// request, and the same flags passed to an earlier call do not count.
-fn context_flags(before: &[Instruction]) -> bool {
-    for n in before.iter().rev().take(8) {
-        if matches!(
-            n.flow_control(),
-            FlowControl::Call | FlowControl::IndirectCall
-        ) {
-            return false;
-        }
-        if n.mnemonic() == Mnemonic::Mov && immediate_any(n).is_some_and(debug_context_flags) {
+/// The word has to reach the context. A mov into a register that nothing
+/// stores, a compare, and the same flags passed to an earlier call do not
+/// count.
+///
+/// # Arguments
+///
+/// * `before` - Instructions before the call.
+/// * `bits` - Decoder bitness, which picks the `ContextFlags` offset.
+fn context_flags(before: &[Instruction], bits: u32) -> bool {
+    let window = flag_window(before);
+    let off = if bits == 32 { 0 } else { 0x30 };
+    let buf = context_buffer(window, bits);
+    let mut held = [Register::None; 4];
+    let mut count = 0usize;
+    for (at, n) in window.iter().enumerate() {
+        if flags_stored(n, off, buf, at, &held[..count]) {
             return true;
         }
+        remember_flags(n, &mut held, &mut count);
     }
     false
+}
+
+/// The instructions after the previous call, at most eight of them.
+fn flag_window(before: &[Instruction]) -> &[Instruction] {
+    let tail = &before[before.len().saturating_sub(8)..];
+    let start = tail
+        .iter()
+        .rposition(|n| {
+            matches!(
+                n.flow_control(),
+                FlowControl::Call | FlowControl::IndirectCall
+            )
+        })
+        .map_or(0, |i| i + 1);
+    &tail[start..]
+}
+
+/// The register that already holds the buffer, the one that receives it,
+/// the instruction that receives it, and the frame slot.
+///
+/// On x64 the buffer is `rdx`. On x86 it is the second push. A write that
+/// replaces `rdx` with anything other than the pointer drops it.
+fn context_buffer(
+    window: &[Instruction],
+    bits: u32,
+) -> (Register, Register, usize, Option<(Register, u64)>) {
+    if bits == 32 {
+        return pushed_buffer(window);
+    }
+    let Some(at) = window
+        .iter()
+        .rposition(|n| writes_register(n, Register::RDX))
+    else {
+        return (Register::RDX, Register::None, 0, None);
+    };
+    let n = &window[at];
+    let wide = n.op0_kind() == OpKind::Register && n.op0_register().size() == 8;
+    if !wide {
+        return (Register::None, Register::None, 0, None);
+    }
+    if n.mnemonic() == Mnemonic::Lea {
+        return (Register::None, Register::RDX, at, frame_slot(n));
+    }
+    if n.mnemonic() == Mnemonic::Mov && n.op1_kind() == OpKind::Register {
+        let src = n.op1_register().full_register();
+        let slot = lea_of(&window[..=at], src).and_then(frame_slot);
+        return (src, Register::RDX, at, slot);
+    }
+    if n.mnemonic() == Mnemonic::Mov && n.op1_kind() == OpKind::Memory {
+        return (Register::None, Register::RDX, at, None);
+    }
+    (Register::None, Register::None, 0, None)
+}
+
+/// The register pushed as the context pointer, and the frame slot it came from.
+fn pushed_buffer(window: &[Instruction]) -> (Register, Register, usize, Option<(Register, u64)>) {
+    let mut seen = 0u32;
+    for n in window.iter().rev() {
+        if n.mnemonic() != Mnemonic::Push {
+            continue;
+        }
+        seen += 1;
+        if seen == 2 {
+            if n.op0_kind() == OpKind::Register {
+                let src = n.op0_register().full_register();
+                let slot = lea_of(window, src).and_then(frame_slot);
+                return (src, Register::None, 0, slot);
+            }
+            break;
+        }
+    }
+    (Register::None, Register::None, 0, None)
+}
+
+/// Whether `n` writes the debug-register flags into the context buffer.
+///
+/// # Arguments
+///
+/// * `n` - One instruction before the call.
+/// * `off` - The `ContextFlags` displacement.
+/// * `buf` - The pointer registers, when the second becomes the pointer, and the slot.
+/// * `at` - `n`'s index in the window.
+/// * `held` - Registers that still hold the flags word.
+fn flags_stored(
+    n: &Instruction,
+    off: u64,
+    buf: (Register, Register, usize, Option<(Register, u64)>),
+    at: usize,
+    held: &[Register],
+) -> bool {
+    if n.mnemonic() != Mnemonic::Mov
+        || n.op0_kind() != OpKind::Memory
+        || n.memory_size().size() != 4
+    {
+        return false;
+    }
+    if n.memory_index() != Register::None {
+        return false;
+    }
+    let Some((seg, disp, base)) = memory(n) else {
+        return false;
+    };
+    if seg != Register::None && seg != Register::DS && seg != Register::SS {
+        return false;
+    }
+    let (early, late, from, slot) = buf;
+    let base = base.full_register();
+    let through = (early != Register::None && base == early)
+        || (at >= from && late != Register::None && base == late);
+    let field = (through && disp == off)
+        || slot.is_some_and(|(frame, at)| base == frame && disp == at.wrapping_add(off));
+    if !field {
+        return false;
+    }
+    immediate_any(n).is_some_and(debug_context_flags)
+        || (n.op1_kind() == OpKind::Register && held.contains(&n.op1_register().full_register()))
+}
+
+/// Records a mov of the debug-register flags and drops a register `n` writes.
+fn remember_flags(n: &Instruction, held: &mut [Register], count: &mut usize) {
+    if n.op0_kind() != OpKind::Register {
+        return;
+    }
+    let dest = n.op0_register().full_register();
+    if !writes_register(n, dest) {
+        return;
+    }
+    drop_one(held, count, dest);
+    if n.mnemonic() == Mnemonic::Mov
+        && immediate_any(n).is_some_and(debug_context_flags)
+        && *count < held.len()
+    {
+        held[*count] = dest;
+        *count += 1;
+    }
 }
 
 /// Whether a load after the call reads a debug-register slot of the

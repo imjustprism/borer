@@ -483,10 +483,21 @@ fn report_calls(code: &[u8], data: &[u8], imports: &[(&str, u64)]) -> String {
     borer_engine::analysis::render::anti_analysis_tsv(&p, &a, &Overlay::default())
 }
 
-/// `GetThreadContext` is a hardware-breakpoint tell only beside the debug-register flags.
+/// `GetThreadContext` is a hardware-breakpoint tell only when the
+/// debug-register flags are stored into its buffer.
 #[test]
 fn get_thread_context_needs_the_debug_register_flags() {
     let flagged = report_calls(
+        &[
+            0xc7, 0x42, 0x30, 0x10, 0x00, 0x01, 0x00, // ASM: mov dword [rdx+0x30], 0x10010
+            0xe8, 0xf4, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[("GetThreadContext", 0x402000)],
+    );
+    assert!(flagged.contains("GetThreadContext"), "{flagged}");
+    let unstored = report_calls(
         &[
             0xb8, 0x10, 0x00, 0x01, 0x00, // ASM: mov eax, 0x10010
             0xe8, 0xf6, 0x0f, 0x00, 0x00, // ASM: call 0x402000
@@ -495,7 +506,7 @@ fn get_thread_context_needs_the_debug_register_flags() {
         &[],
         &[("GetThreadContext", 0x402000)],
     );
-    assert!(flagged.contains("GetThreadContext"), "{flagged}");
+    assert!(!unstored.contains("hardware breakpoint"), "{unstored}");
     let plain = report_calls(
         &[
             0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
@@ -517,7 +528,8 @@ fn context_all_and_a_dr_read_are_hardware_breakpoints() {
     let all = report_calls(
         &[
             0xb8, 0x1f, 0x00, 0x10, 0x00, // ASM: mov eax, 0x10001f
-            0xe8, 0xf6, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0x89, 0x42, 0x30, // ASM: mov [rdx+0x30], eax
+            0xe8, 0xf3, 0x0f, 0x00, 0x00, // ASM: call 0x402000
             0xc3, // ASM: ret
         ],
         &[],
