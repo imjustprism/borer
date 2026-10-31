@@ -111,6 +111,22 @@ fn a_discarded_rdtsc_does_not_hide_a_later_pair() {
     assert!(text.contains("rdtsc (timing)"), "{text}");
 }
 
+/// A saved timestamp overwritten before the subtraction is a plain read.
+#[test]
+fn an_overwritten_timestamp_is_a_read() {
+    let text = report(&[
+        0x0f, 0x31, // ASM: rdtsc
+        0x89, 0xc3, // ASM: mov ebx, eax
+        0x0f, 0x31, // ASM: rdtsc
+        0x31, 0xdb, // ASM: xor ebx, ebx
+        0x29, 0xd8, // ASM: sub eax, ebx
+        0x3d, 0xe8, 0x03, 0x00, 0x00, // ASM: cmp eax, 0x3e8
+        0xc3, // ASM: ret
+    ]);
+    assert!(text.contains("rdtsc (read)"), "{text}");
+    assert!(!text.contains("rdtsc (timing)"), "{text}");
+}
+
 /// A bare `in` is a port read. The `VMware` backdoor is the `VMXh` magic.
 #[test]
 fn a_bare_in_is_a_port_read_and_the_backdoor_magic_is_named() {

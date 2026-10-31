@@ -100,9 +100,11 @@ const TIMESTAMP_PAIRS: usize = 8;
 /// difference.
 ///
 /// The subtraction has to use the earlier read, or a register it was copied
-/// into. `sub eax, eax` clears the register, and a compare of some other
-/// register is not that check. An earlier read that nothing saves does not
-/// hide a later pair. At most [`TIMESTAMP_PAIRS`] pairs are checked.
+/// into. A write of that register after the second read and before the
+/// subtraction drops it. `sub eax, eax` clears the register, and a compare
+/// of some other register is not that check. An earlier read that nothing
+/// saves does not hide a later pair. At most [`TIMESTAMP_PAIRS`] pairs are
+/// checked.
 fn rdtsc_timing(instrs: &[Instruction]) -> bool {
     let mut reads = [0usize; TIMESTAMP_PAIRS + 1];
     let mut count = 0usize;
@@ -118,13 +120,17 @@ fn rdtsc_timing(instrs: &[Instruction]) -> bool {
     }
     reads[..count].windows(2).any(|pair| {
         let (earlier, later) = (pair[0], pair[1]);
-        let saved = saved_timestamp(&instrs[earlier + 1..later], instrs[later].mnemonic());
-        let Some(gap) = instrs
-            .iter()
-            .skip(later + 1)
-            .take(8)
-            .position(|n| timestamp_difference(n, &saved))
-        else {
+        let mut saved = saved_timestamp(&instrs[earlier + 1..later], instrs[later].mnemonic());
+        let mut live = saved.iter().take_while(|r| **r != Register::None).count();
+        let mut gap = None;
+        for (offset, n) in instrs.iter().skip(later + 1).take(8).enumerate() {
+            if timestamp_difference(n, &saved) {
+                gap = Some(offset);
+                break;
+            }
+            drop_timestamp(n, &mut saved, &mut live);
+        }
+        let Some(gap) = gap else {
             return false;
         };
         difference_checked(instrs, later + 1 + gap)
