@@ -457,6 +457,24 @@ fn context_all_and_a_dr_read_are_hardware_breakpoints() {
     assert!(!store.contains("hardware breakpoint"), "{store}");
 }
 
+/// A buffer passed to a later call is not the context `GetThreadContext` got.
+#[test]
+fn a_later_call_does_not_make_a_context_buffer() {
+    let text = report_calls(
+        &[
+            0xb8, 0x01, 0x00, 0x10, 0x00, // ASM: mov eax, 0x100001
+            0xe8, 0xf6, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0x48, 0x89, 0xda, // ASM: mov rdx, rbx
+            0xe8, 0xfe, 0x0f, 0x00, 0x00, // ASM: call 0x402010
+            0x48, 0x8b, 0x43, 0x48, // ASM: mov rax, [rbx+0x48]
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[("GetThreadContext", 0x402000), ("SuspendThread", 0x402010)],
+    );
+    assert!(!text.contains("hardware breakpoint"), "{text}");
+}
+
 /// `FindWindow` of a debugger class, followed by an exit, is a tell.
 /// An ordinary class is not.
 #[test]

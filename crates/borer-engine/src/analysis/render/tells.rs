@@ -344,7 +344,7 @@ fn patterns(
     }
     let called = called_imports(p, a, f.entry);
     let has = |frag: &str| called.iter().any(|n| n.contains(frag));
-    if (has("getthreadcontext") || has("getcontextthread")) && context_debug(instrs, bits) {
+    if context_debug(p, a, f.entry, instrs, bits) {
         out.push(("hardware breakpoint (GetThreadContext)", ip));
     }
     if has("findwindow")
@@ -395,7 +395,7 @@ fn patterns(
 /// * `instrs` - The function, in address order.
 /// * `bits` - Decoder bitness, which picks the class operand.
 fn debug_port(p: &Program, a: &Analysis, entry: u64, instrs: &[Instruction], bits: u32) -> bool {
-    let sites = query_sites(p, a, entry);
+    let sites = import_sites(p, a, entry, "ntqueryinformationprocess");
     if sites.is_empty() {
         return false;
     }
@@ -408,8 +408,8 @@ fn debug_port(p: &Program, a: &Analysis, entry: u64, instrs: &[Instruction], bit
     })
 }
 
-/// Instruction addresses that call `NtQueryInformationProcess`.
-fn query_sites(p: &Program, a: &Analysis, entry: u64) -> Vec<u64> {
+/// Instruction addresses that call an import whose name contains `stem`.
+fn import_sites(p: &Program, a: &Analysis, entry: u64, stem: &str) -> Vec<u64> {
     let mut sites = Vec::new();
     for (target, site) in a.refs_from(entry) {
         if site.kind != RefKind::Call {
@@ -422,10 +422,7 @@ fn query_sites(p: &Program, a: &Analysis, entry: u64) -> Vec<u64> {
         else {
             continue;
         };
-        if bare_name(&sym.name)
-            .to_lowercase()
-            .contains("ntqueryinformationprocess")
-        {
+        if bare_name(&sym.name).to_lowercase().contains(stem) {
             sites.push(site.va);
         }
     }
@@ -704,27 +701,55 @@ fn has_immediate(i: &Instruction, imm: u64) -> bool {
 ///
 /// `CONTEXT_ALL` includes `CONTEXT_DEBUG_REGISTERS`. `CONTEXT_CONTROL` and
 /// `CONTEXT_INTEGER` do not. A later load of `Dr0` through `Dr7` counts
-/// when its base is the pointer passed to the call, or the stack slot that
+/// when its base is the pointer passed to that call, or the stack slot that
 /// pointer was loaded from. A load through another register is not the
-/// buffer. The call may be direct or indirect.
+/// buffer, and neither is a buffer passed to a different call. The call may
+/// be direct or indirect.
 ///
 /// # Arguments
 ///
+/// * `p` - The loaded image.
+/// * `a` - The analysis, for the call's target.
+/// * `entry` - The function the calls sit in.
 /// * `instrs` - The function, in address order.
 /// * `bits` - Decoder bitness, which picks the `CONTEXT` offsets.
-fn context_debug(instrs: &[Instruction], bits: u32) -> bool {
-    if instrs
-        .iter()
-        .any(|i| immediate_any(i).is_some_and(debug_context_flags))
-    {
-        return true;
+fn context_debug(p: &Program, a: &Analysis, entry: u64, instrs: &[Instruction], bits: u32) -> bool {
+    let mut sites = import_sites(p, a, entry, "getthreadcontext");
+    for site in import_sites(p, a, entry, "getcontextthread") {
+        if !sites.contains(&site) {
+            sites.push(site);
+        }
+    }
+    if sites.is_empty() {
+        return false;
     }
     instrs.iter().enumerate().any(|(at, i)| {
         matches!(
             i.flow_control(),
             FlowControl::Call | FlowControl::IndirectCall
-        ) && reads_context_dr(&instrs[..at], &instrs[at + 1..], bits)
+        ) && sites.contains(&i.ip())
+            && (context_flags(&instrs[..at])
+                || reads_context_dr(&instrs[..at], &instrs[at + 1..], bits))
     })
+}
+
+/// Whether the instructions before a context call ask for the debug registers.
+///
+/// The immediate has to reach that call. The same flags passed to an earlier
+/// call do not.
+fn context_flags(before: &[Instruction]) -> bool {
+    for n in before.iter().rev().take(8) {
+        if matches!(
+            n.flow_control(),
+            FlowControl::Call | FlowControl::IndirectCall
+        ) {
+            return false;
+        }
+        if immediate_any(n).is_some_and(debug_context_flags) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Whether a load after the call reads a debug-register slot of the
