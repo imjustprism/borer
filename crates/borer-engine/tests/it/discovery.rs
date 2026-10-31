@@ -328,6 +328,44 @@ fn a_call_does_not_return_into_the_bytes_it_skips() {
     }
 }
 
+/// A call continues past an `int3` when its callee skips that byte.
+///
+/// The byte after the call is `int3`. Adding one to the return address
+/// lands on the next instruction. A callee that returns to the `int3`
+/// leaves the instruction after it outside the caller.
+#[test]
+fn a_return_that_skips_an_int3_is_followed() {
+    for arch in [Arch::X86_64, Arch::X86] {
+        let mut code = vec![0x6e_u8; 0x30];
+        code[0] = 0xe8;
+        code[1..5].copy_from_slice(&rel32(TEXT, TEXT + 0x20));
+        code[5] = 0xcc;
+        code[6..12].copy_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]);
+        code[0x20..0x25].copy_from_slice(&[0x83, 0x04, 0x24, 0x01, 0xc3]);
+        assert!(
+            holds(arch, &code, TEXT, TEXT + 6),
+            "{arch:?} lost the instruction after the trap"
+        );
+        assert!(
+            !holds(arch, &code, TEXT, TEXT + 5),
+            "{arch:?} decoded the int3"
+        );
+        let edge = call_successors(arch, &code, TEXT, TEXT);
+        assert!(edge.contains(&(TEXT + 6)), "{arch:?} edge {edge:?}");
+
+        let mut plain = vec![0x6e_u8; 0x20];
+        plain[0] = 0xe8;
+        plain[1..5].copy_from_slice(&rel32(TEXT, TEXT + 0x10));
+        plain[5] = 0xcc;
+        plain[6..12].copy_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]);
+        plain[0x10] = 0xc3;
+        assert!(
+            !holds(arch, &plain, TEXT, TEXT + 6),
+            "{arch:?} followed past a real int3"
+        );
+    }
+}
+
 /// An add through `fs` does not rewrite the return address.
 ///
 /// `add dword ptr fs:[esp], 1` writes another segment. The caller

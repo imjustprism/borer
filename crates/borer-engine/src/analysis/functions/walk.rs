@@ -1377,8 +1377,8 @@ fn past_bad(cursors: &mut Cursors<'_>, instr: &Instruction, pending: &mut Vec<(u
 /// near call targets become callees, an unconditional jump into another
 /// known function start is a tail call (a callee, not followed), a call to a
 /// function that never returns (by name, through an import slot or a thunk
-/// to one, or because another function's start, `int3` padding, a `ud2`
-/// trap or undecodable bytes follow the call) ends the path, and indirect jumps are
+/// to one, or because it returns into another function's start, `int3`
+/// padding, a `ud2` trap or undecodable bytes) ends the path, and indirect jumps are
 /// resolved through [`resolve_jump_table`]
 /// using the walk's own decode chain (the last decoded instruction whose
 /// next address is the one asked for). The `call X; sub rsp, rax` idiom
@@ -1720,11 +1720,12 @@ pub(super) fn walk_function(
                     }
                     arg_consts.extend(call_arg_consts(program, bitness, addr, t, &recorded));
                     registrations.extend(class_registration(program, bitness, addr, &recorded));
-                    let start_after = next != entry && starts.contains(next);
+                    let at = call_lands(program, bitness, t, next);
+                    let start_after = at != entry && starts.contains(at);
                     let ends_here = start_after
-                        || (next != entry
-                            && (is_padding(cursors, next)
-                                || reloc_sites.is_some_and(|s| s.contains(next))));
+                        || (at != entry
+                            && (is_padding(cursors, at)
+                                || reloc_sites.is_some_and(|s| s.contains(at))));
                     if start_after {
                         found_noreturn.insert(t);
                     } else if ends_here {
@@ -1741,7 +1742,6 @@ pub(super) fn walk_function(
                         }
                     } else {
                         followed_calls.insert(t);
-                        let at = call_lands(program, bitness, t, next);
                         if at != next
                             && let Some((_, r)) = recs.last_mut()
                         {
