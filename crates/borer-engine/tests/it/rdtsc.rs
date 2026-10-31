@@ -267,6 +267,32 @@ fn a_timestamp_leaf_is_one_call() {
     assert_eq!(text.matches("rdtsc()").count(), 1, "{text}");
 }
 
+/// Two nested reloads of one timestamp share a single earlier read.
+///
+/// The clock is stored, loaded into `ebx` and `ecx`, then shifted and
+/// incremented. Those are different expressions. Writing each one out
+/// reads the counter again before the next `rdtsc`.
+#[test]
+fn two_nested_timestamps_are_one_earlier_read() {
+    let code = [
+        0x0f, 0x31, // ASM: rdtsc
+        0x89, 0x44, 0x24, 0x08, // ASM: mov [rsp+8], eax
+        0x8b, 0x5c, 0x24, 0x08, // ASM: mov ebx, [rsp+8]
+        0x8b, 0x4c, 0x24, 0x08, // ASM: mov ecx, [rsp+8]
+        0xd1, 0xe3, // ASM: shl ebx, 1
+        0x83, 0xc1, 0x01, // ASM: add ecx, 1
+        0xc7, 0x44, 0x24, 0x08, 0x00, 0x00, 0x00, 0x00, // ASM: mov dword [rsp+8], 0
+        0x31, 0xc0, // ASM: xor eax, eax
+        0x31, 0xd2, // ASM: xor edx, edx
+        0x0f, 0x31, // ASM: rdtsc
+        0x01, 0xd8, // ASM: add eax, ebx
+        0x01, 0xc8, // ASM: add eax, ecx
+        0xc3, // ASM: ret
+    ];
+    let text = decompiled(&program64(&code), 0x1_4000_1000);
+    assert_eq!(text.matches("rdtsc()").count(), 2, "{text}");
+}
+
 /// A store after `rdtscp` stays after the clock read.
 ///
 /// The return is the only reader. Printing the call there would time the

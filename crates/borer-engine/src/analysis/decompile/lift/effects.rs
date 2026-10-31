@@ -2027,8 +2027,9 @@ impl Exec<'_, '_> {
 
     /// Writes out a timestamp that no register holds on its own.
     ///
-    /// A live flag that names the same read shares that statement. Writing
-    /// the register and the flag separately would read the clock twice.
+    /// Every register, live flag, and switch index that names the same read
+    /// shares one statement. Writing each copy out on its own would read
+    /// the clock again.
     ///
     /// # Arguments
     ///
@@ -2044,7 +2045,13 @@ impl Exec<'_, '_> {
             })
             .map(|(k, _)| *k)
             .collect();
-        if !keys.is_empty() && self.flags_needed != 0 && flags_hold(helper, &self.flags) {
+        let flags = self.flags_needed != 0 && flags_hold(helper, &self.flags);
+        let jumped = self
+            .switch_idx
+            .as_ref()
+            .is_some_and(|idx| holds(idx, helper));
+        let shared = keys.len() + usize::from(flags) + usize::from(jumped) > 1;
+        if shared || (jumped && keys.is_empty()) {
             let saved = self.tmp_of(helper, self.word_ty());
             self.retarget(aux, helper, &saved);
             return;
@@ -2052,7 +2059,7 @@ impl Exec<'_, '_> {
         for k in &keys {
             self.materialize(*k, &mut Vec::new(), None);
         }
-        if keys.is_empty() && self.flags_needed != 0 && flags_hold(helper, &self.flags) {
+        if flags {
             self.protect_flags(&|e: &Expr| holds(e, helper));
         }
     }
