@@ -416,7 +416,8 @@ pub fn capability_map_tsv(p: &Program, a: Option<&Analysis>) -> String {
 /// Whether an anti-analysis import is kept on the capability map.
 ///
 /// The C runtime's failure and timing imports stay off the map unless a
-/// caller uses the result as a check. Every other import stays.
+/// caller uses the result as a check. `OutputDebugString` returns nothing,
+/// so a call outside that failure path stays. Every other import stays.
 ///
 /// An instruction set this scan cannot read keeps the import.
 ///
@@ -439,6 +440,8 @@ fn called_as_check(p: &Program, a: &Analysis, api: &str) -> bool {
         }
         if stem == "queryperformancecounter" {
             sites.len() >= 2
+        } else if stem == "outputdebugstring" {
+            true
         } else {
             sites.iter().any(|va| result_tested(p, *va))
         }

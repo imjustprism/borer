@@ -307,6 +307,35 @@ fn a_filter_install_keeps_a_checked_debugger_call() {
     assert!(!runtime.contains("IsDebuggerPresent"), "{runtime}");
 }
 
+/// `OutputDebugString` returns nothing, so the call itself is the check.
+///
+/// A call on the runtime failure path still stays off the map.
+#[test]
+fn an_output_debug_string_call_stays_unless_it_is_the_failure_path() {
+    let map = |code: &[u8]| {
+        let mut p = image(Arch::X86_64, code, &[]);
+        p.symbols.push(Symbol {
+            name: "KERNEL32.dll!OutputDebugStringA".to_owned(),
+            addr: 0x402000,
+            kind: SymbolKind::Import,
+        });
+        borer_engine::analysis::render::capability_map_tsv(&p, Some(&Analysis::compute(&p)))
+    };
+    let plain = [
+        0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0xc3, // ASM: ret
+    ];
+    let text = map(&plain);
+    assert!(text.contains("OutputDebugStringA"), "{text}");
+    let fail = [
+        0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0xcd, 0x29, // ASM: int 0x29
+        0xc3, // ASM: ret
+    ];
+    let text = map(&fail);
+    assert!(!text.contains("OutputDebugString"), "{text}");
+}
+
 /// `mov edx, 0x29cd` holds the bytes of `int 0x29` and is not `__fastfail`.
 /// A checked call stays on the map.
 #[test]
