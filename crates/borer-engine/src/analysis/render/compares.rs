@@ -84,7 +84,8 @@ pub(super) fn undecided_immediates(instrs: &[Instruction]) -> BTreeSet<u64> {
 ///
 /// A direct jump is followed. A conditional branch counts only when it
 /// reads one of those flags: `sub` then `inc` then `jz` does not, because
-/// `inc` replaced the zero flag. A write of one flag leaves the others:
+/// `inc` replaced the zero flag. `adc` reads the carry to continue the
+/// sum, so it is not that check. A write of one flag leaves the others:
 /// `clc` clears carry and a following `sete` still reads the compare's
 /// zero flag. A call leaves the flags undefined, so the scan stops there.
 /// Each instruction is visited once, and at most
@@ -106,7 +107,10 @@ fn flags_decide(instrs: &[Instruction], at: usize) -> bool {
             return false;
         }
         let n = &instrs[cursor];
-        if n.rflags_read() & live != 0 {
+        let reads = n.rflags_read() & live != 0;
+        let decides =
+            n.flow_control() == FlowControl::ConditionalBranch || n.rflags_modified() == 0;
+        if reads && decides {
             return true;
         }
         live &= !n.rflags_modified();

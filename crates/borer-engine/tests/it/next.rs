@@ -176,6 +176,22 @@ fn a_sub_whose_flags_a_branch_reads_is_still_a_compare() {
     );
 }
 
+/// `adc` reads the carry to continue a sum. That is not a check of the
+/// subtracted constant.
+#[test]
+fn an_adc_is_not_a_check_of_the_subtracted_constant() {
+    let code = [
+        0x81, 0xe9, 0xcd, 0xab, 0x37, 0x13, // ASM: sub ecx, 0x1337abcd
+        0x83, 0xd2, 0x00, // ASM: adc edx, 0
+        0xc3, // ASM: ret
+    ];
+    let got = steps(&code);
+    assert!(
+        got.iter().all(|step| !step.contains("0x1337abcd")),
+        "{got:?}"
+    );
+}
+
 /// A branch on a flag a later instruction replaced is not that compare.
 ///
 /// `inc` writes the zero flag and leaves carry. `jz` reads the zero flag
