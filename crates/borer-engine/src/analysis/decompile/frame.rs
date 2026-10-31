@@ -15,8 +15,9 @@
 //!
 //! A slot both loaded and stored at 64 bits, with no float access and no
 //! wider access, whose eight bytes overlap no other slot, is `uint64_t`.
-//! A narrower first access must not turn that 8-byte read into a cast
-//! through a 4-byte local.
+//! A constant stored at a narrower width does not change that. A
+//! non-constant narrower store keeps the first access's width, so a later
+//! wider compare reads the slot through a cast.
 //!
 //! Each slot solved as a float is a choice point ([`Site::Slot`]): a
 //! decompile whose [`Choices`] render it literally leaves it unsolved, so
@@ -67,6 +68,8 @@ struct Votes {
     load64: bool,
     /// Some access stored an integer at 64 bits.
     store64: bool,
+    /// Some access stored a non-constant integer narrower than 64 bits.
+    narrow_store: bool,
 }
 
 /// The frame's slots, their votes and, once solved, their types.
@@ -109,6 +112,8 @@ impl Frame {
                 v.stored = true;
                 if bits >= 64 {
                     v.store64 = true;
+                } else {
+                    v.narrow_store = true;
                 }
             }
             Access::StoreConst(_) => {
@@ -122,8 +127,9 @@ impl Frame {
     /// Returns whether a slot holds an 8-byte integer.
     ///
     /// It was loaded and stored at 64 bits, nothing wider and no float
-    /// touched it, and those eight bytes overlap no other slot. A narrower
-    /// access then does not decide the declaration.
+    /// touched it, and those eight bytes overlap no other slot. A constant
+    /// stored narrower does not decide the declaration. A non-constant
+    /// store narrower than 64 bits keeps the first access's width.
     ///
     /// # Arguments
     ///
@@ -132,7 +138,8 @@ impl Frame {
         let Some(v) = self.votes.get(&k) else {
             return false;
         };
-        if v.float || !v.load64 || !v.store64 || v.widths.iter().any(|b| *b > 64) {
+        if v.float || v.narrow_store || !v.load64 || !v.store64 || v.widths.iter().any(|b| *b > 64)
+        {
             return false;
         }
         let end = k.saturating_add(8);
@@ -288,9 +295,9 @@ mod tests {
         assert_eq!(kept.floats().count(), 0);
     }
 
-    /// A slot loaded and stored at 64 bits is wide even after a dword
-    /// store. A float, a 128-bit access, or a neighbor in those eight
-    /// bytes is not.
+    /// A slot loaded and stored at 64 bits is wide after a constant dword
+    /// store. A non-constant narrower store, a float, a 128-bit access, or
+    /// a neighbor in those eight bytes is not.
     ///
     /// # Panics
     ///
@@ -304,6 +311,13 @@ mod tests {
         f.solve(&Choices::default());
         assert!(f.wide(-8));
         assert_eq!(f.ty(-8), None);
+
+        let mut narrow = Frame::default();
+        narrow.note(-8, Access::StoreInt(Ty::U32));
+        narrow.note(-8, Access::StoreInt(Ty::U64));
+        narrow.note(-8, Access::Load(Ty::U64));
+        narrow.solve(&Choices::default());
+        assert!(!narrow.wide(-8));
 
         let mut float = Frame::default();
         float.note(-8, Access::StoreFloat(Ty::F64));

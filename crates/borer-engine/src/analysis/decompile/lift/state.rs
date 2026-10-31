@@ -1748,8 +1748,8 @@ impl<'a> Exec<'_, 'a> {
 
     /// Records a variable's declaration type on first sight (emission pass only).
     ///
-    /// A slot loaded and stored at 64 bits, and not a float, is `uint64_t`
-    /// ahead of that first access.
+    /// A wide 8-byte slot is `uint64_t` ahead of that first access. A
+    /// non-constant store narrower than 64 bits leaves the first width.
     ///
     /// # Arguments
     ///
