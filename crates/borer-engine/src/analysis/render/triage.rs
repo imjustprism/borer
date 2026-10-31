@@ -587,9 +587,11 @@ fn returns_immediately(p: &Program, va: u64) -> bool {
 /// Whether the instructions after the call test the value it returned.
 ///
 /// A full-width copy (`mov ebx, eax`) carries the value. A write that is
-/// not such a copy, such as `mov eax, 1`, drops it. A later call, return
-/// or unconditional jump ends this function, so the scan stops there. A
-/// section that ends inside the window is still read.
+/// not such a copy, such as `mov eax, 1`, drops it. A stack store carries
+/// it too: a later compare of that slot is the check, and a later write of
+/// the slot drops it. A later call, return or unconditional jump ends this
+/// function, so the scan stops there. A section that ends inside the window
+/// is still read.
 fn result_tested(p: &Program, va: u64) -> bool {
     let Some(bits) = p.arch.bitness() else {
         return false;
@@ -611,6 +613,7 @@ fn result_tested(p: &Program, va: u64) -> bool {
     let mut held = [Register::None; 5];
     held[0] = Register::RAX;
     let mut count = 1usize;
+    let mut slot: Option<(Register, u64, usize)> = None;
     let mut info = InstructionInfoFactory::new();
     for _ in 0..4 {
         if !decoder.can_decode() {
@@ -629,7 +632,7 @@ fn result_tested(p: &Program, va: u64) -> bool {
         {
             return false;
         }
-        if tests_held(&next, &held[..count]) {
+        if tests_held(&next, &held[..count]) || tests_slot(&next, slot) {
             return true;
         }
         if let Some(dest) = copied_to(&next, &held[..count]) {
@@ -638,6 +641,11 @@ fn result_tested(p: &Program, va: u64) -> bool {
                 count += 1;
             }
             continue;
+        }
+        if let Some(saved) = spilled(&next, &held[..count]) {
+            slot = Some(saved);
+        } else if replaces_slot(&next, slot) {
+            slot = None;
         }
         forget_writes(&mut info, &next, &mut held, &mut count);
     }
@@ -654,6 +662,58 @@ fn tests_held(i: &Instruction, held: &[Register]) -> bool {
     matches!(i.mnemonic(), Mnemonic::Test | Mnemonic::Cmp)
         && i.op0_kind() == OpKind::Register
         && held.contains(&i.op0_register().full_register())
+}
+
+/// Whether `i` compares the stack slot that holds the returned value.
+fn tests_slot(i: &Instruction, slot: Option<(Register, u64, usize)>) -> bool {
+    matches!(i.mnemonic(), Mnemonic::Test | Mnemonic::Cmp)
+        && stack_slot(i).is_some_and(|found| Some(found) == slot)
+}
+
+/// The stack slot `i` stores a held register into.
+fn spilled(i: &Instruction, held: &[Register]) -> Option<(Register, u64, usize)> {
+    if i.mnemonic() != Mnemonic::Mov
+        || i.op0_kind() != OpKind::Memory
+        || i.op1_kind() != OpKind::Register
+        || i.op1_register().size() < 4
+        || !held.contains(&i.op1_register().full_register())
+    {
+        return None;
+    }
+    let slot = stack_slot(i)?;
+    matches!(slot.2, 4 | 8).then_some(slot)
+}
+
+/// Whether `i` writes the stack slot and so replaces the saved value.
+fn replaces_slot(i: &Instruction, slot: Option<(Register, u64, usize)>) -> bool {
+    if matches!(i.mnemonic(), Mnemonic::Cmp | Mnemonic::Test) {
+        return false;
+    }
+    let Some(found) = stack_slot(i) else {
+        return false;
+    };
+    i.op0_kind() == OpKind::Memory
+        && slot.is_some_and(|saved| found.0 == saved.0 && found.1 == saved.1)
+}
+
+/// The frame register, displacement and width of a stack operand.
+///
+/// An indexed address is not a slot. `rsp` and `rbp` are the frame.
+fn stack_slot(i: &Instruction) -> Option<(Register, u64, usize)> {
+    let mem = (0..i.op_count()).any(|n| i.op_kind(n) == OpKind::Memory);
+    if !mem || i.memory_index() != Register::None {
+        return None;
+    }
+    let seg = i.segment_prefix();
+    if seg != Register::None && seg != Register::DS && seg != Register::SS {
+        return None;
+    }
+    let base = i.memory_base();
+    let frame = base.full_register();
+    if !matches!(frame, Register::RSP | Register::RBP) || !matches!(base.size(), 4 | 8) {
+        return None;
+    }
+    Some((frame, i.memory_displacement64(), i.memory_size().size()))
 }
 
 /// The full register a full-width `mov` copies out of `held`.

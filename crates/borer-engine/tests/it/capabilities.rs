@@ -419,6 +419,29 @@ fn a_constant_holding_fastfail_bytes_keeps_the_check() {
     assert!(text.contains("IsDebuggerPresent"), "{text}");
 }
 
+/// A stack slot that saves the returned value is still the check.
+///
+/// A compare of another slot is not.
+#[test]
+fn a_stack_saved_check_stays_on_the_map() {
+    let saved = [
+        0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0x89, 0x44, 0x24, 0x20, // ASM: mov [rsp+0x20], eax
+        0x83, 0x7c, 0x24, 0x20, 0x00, // ASM: cmp dword [rsp+0x20], 0
+        0xc3, // ASM: ret
+    ];
+    let text = debugger_map(&saved);
+    assert!(text.contains("IsDebuggerPresent"), "{text}");
+    let other = [
+        0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0x89, 0x44, 0x24, 0x20, // ASM: mov [rsp+0x20], eax
+        0x83, 0x7c, 0x24, 0x28, 0x00, // ASM: cmp dword [rsp+0x28], 0
+        0xc3, // ASM: ret
+    ];
+    let text = debugger_map(&other);
+    assert!(!text.contains("IsDebuggerPresent"), "{text}");
+}
+
 /// A copy of the returned value is still the check. An overwrite is not.
 #[test]
 fn a_copied_check_stays_and_an_overwrite_does_not() {
