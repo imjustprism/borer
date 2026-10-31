@@ -875,7 +875,8 @@ fn ret_adjust(program: &Program, bitness: u32, va: u64, depth: u8) -> Option<(u6
 
 /// An `add` of an immediate to the return slot, or to the caller's.
 ///
-/// A segment other than `ss` is not that slot.
+/// A segment other than `ss` is not that slot. An address-size override
+/// names a narrower pointer, so it is not that slot either.
 ///
 /// # Returns
 ///
@@ -888,7 +889,8 @@ fn stack_add(instr: &Instruction, bitness: u32) -> Option<(bool, u64, u32)> {
     if instr.memory_index() != Register::None || !matches!(bitness, 32 | 64) {
         return None;
     }
-    if instr.memory_base().full_register() != Register::RSP {
+    let width = if bitness == 32 { 4 } else { 8 };
+    if instr.memory_base().full_register() != Register::RSP || instr.memory_base().size() != width {
         return None;
     }
     if !matches!(instr.segment_prefix(), Register::None | Register::SS) {

@@ -353,6 +353,26 @@ fn an_add_through_fs_does_not_rewrite_the_return_address() {
     }
 }
 
+/// An add through a 32-bit address does not rewrite the 64-bit return slot.
+///
+/// `add dword ptr [esp], 1` writes the low half of the address. The caller
+/// continues at the next instruction.
+#[test]
+fn an_add_through_esp_does_not_rewrite_the_return_address() {
+    let mut code = vec![0x6e_u8; 0x20];
+    code[0] = 0xe8;
+    code[1..5].copy_from_slice(&rel32(TEXT, TEXT + 0x10));
+    code[5..8].copy_from_slice(&LEAF);
+    code[0x10..0x16].copy_from_slice(&[0x67, 0x83, 0x04, 0x24, 0x01, 0xc3]);
+    assert!(
+        holds(Arch::X86_64, &code, TEXT, TEXT + 5),
+        "skipped the instruction after the call"
+    );
+    let edge = call_successors(Arch::X86_64, &code, TEXT, TEXT);
+    assert!(edge.contains(&(TEXT + 5)), "{edge:?}");
+    assert!(!edge.contains(&(TEXT + 6)), "{edge:?}");
+}
+
 /// `int 2dh` is a breakpoint check that falls through when no debugger
 /// swallows it. `int 0x29` still ends the walk.
 #[test]
