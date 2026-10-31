@@ -568,6 +568,48 @@ fn get_thread_context_needs_the_debug_register_flags() {
     assert!(!plain.contains("hardware breakpoint"), "{plain}");
 }
 
+/// The last store of `ContextFlags` is the request the call makes.
+///
+/// `CONTEXT_DEBUG_REGISTERS` replaced by `CONTEXT_CONTROL` is not a
+/// hardware breakpoint. The other order still is. A register stored over
+/// the field, with no debug flags in that register, is not either.
+#[test]
+fn a_replaced_context_flag_is_not_a_hardware_breakpoint() {
+    let replaced = report_calls(
+        &[
+            0xc7, 0x42, 0x30, 0x10, 0x00, 0x01, 0x00, // ASM: mov dword [rdx+0x30], 0x10010
+            0xc7, 0x42, 0x30, 0x01, 0x00, 0x10, 0x00, // ASM: mov dword [rdx+0x30], 0x100001
+            0xe8, 0xed, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[("GetThreadContext", 0x402000)],
+    );
+    assert!(!replaced.contains("hardware breakpoint"), "{replaced}");
+    let kept = report_calls(
+        &[
+            0xc7, 0x42, 0x30, 0x01, 0x00, 0x10, 0x00, // ASM: mov dword [rdx+0x30], 0x100001
+            0xc7, 0x42, 0x30, 0x10, 0x00, 0x01, 0x00, // ASM: mov dword [rdx+0x30], 0x10010
+            0xe8, 0xed, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[("GetThreadContext", 0x402000)],
+    );
+    assert!(kept.contains("hardware breakpoint"), "{kept}");
+    let unknown = report_calls(
+        &[
+            0xc7, 0x42, 0x30, 0x10, 0x00, 0x01, 0x00, // ASM: mov dword [rdx+0x30], 0x10010
+            0x89, 0x42, 0x30, // ASM: mov [rdx+0x30], eax
+            0xe8, 0xf0, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[("GetThreadContext", 0x402000)],
+    );
+    assert!(!unknown.contains("hardware breakpoint"), "{unknown}");
+}
+
 /// `CONTEXT_ALL` is a hardware-breakpoint tell.
 ///
 /// A `Dr0` load is one when it reads the context buffer the call was given.

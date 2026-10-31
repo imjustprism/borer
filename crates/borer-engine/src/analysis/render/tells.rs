@@ -1073,7 +1073,7 @@ fn context_debug(p: &Program, a: &Analysis, entry: u64, instrs: &[Instruction], 
 ///
 /// The word has to reach the context. A mov into a register that nothing
 /// stores, a compare, and the same flags passed to an earlier call do not
-/// count.
+/// count. The latest store of that field is the value the call sees.
 ///
 /// # Arguments
 ///
@@ -1085,13 +1085,14 @@ fn context_flags(before: &[Instruction], bits: u32) -> bool {
     let buf = context_buffer(window, bits);
     let mut held = [Register::None; 4];
     let mut count = 0usize;
+    let mut last = None;
     for (at, n) in window.iter().enumerate() {
-        if flags_stored(n, off, buf, at, &held[..count]) {
-            return true;
+        if let Some(debug) = flags_stored(n, off, buf, at, &held[..count]) {
+            last = Some(debug);
         }
         remember_flags(n, &mut held, &mut count);
     }
-    false
+    last.unwrap_or(false)
 }
 
 /// The instructions after the previous call, at most eight of them.
@@ -1166,7 +1167,11 @@ fn pushed_buffer(window: &[Instruction]) -> (Register, Register, usize, Option<(
     (Register::None, Register::None, 0, None)
 }
 
-/// Whether `n` writes the debug-register flags into the context buffer.
+/// Whether `n` writes the context flags field, and whether that write asks
+/// for the debug registers.
+///
+/// `None` is not a store of the field. `Some(false)` is a later value the
+/// call sees instead of an earlier debug-register request.
 ///
 /// # Arguments
 ///
@@ -1181,21 +1186,19 @@ fn flags_stored(
     buf: (Register, Register, usize, Option<(Register, u64)>),
     at: usize,
     held: &[Register],
-) -> bool {
+) -> Option<bool> {
     if n.mnemonic() != Mnemonic::Mov
         || n.op0_kind() != OpKind::Memory
         || n.memory_size().size() != 4
     {
-        return false;
+        return None;
     }
     if n.memory_index() != Register::None {
-        return false;
+        return None;
     }
-    let Some((seg, disp, base)) = memory(n) else {
-        return false;
-    };
+    let (seg, disp, base) = memory(n)?;
     if seg != Register::None && seg != Register::DS && seg != Register::SS {
-        return false;
+        return None;
     }
     let (early, late, from, slot) = buf;
     let base = base.full_register();
@@ -1204,10 +1207,13 @@ fn flags_stored(
     let field = (through && disp == off)
         || slot.is_some_and(|(frame, at)| base == frame && disp == at.wrapping_add(off));
     if !field {
-        return false;
+        return None;
     }
-    immediate_any(n).is_some_and(debug_context_flags)
-        || (n.op1_kind() == OpKind::Register && held.contains(&n.op1_register().full_register()))
+    Some(
+        immediate_any(n).is_some_and(debug_context_flags)
+            || (n.op1_kind() == OpKind::Register
+                && held.contains(&n.op1_register().full_register())),
+    )
 }
 
 /// Records a mov of the debug-register flags and drops a register `n` writes.
