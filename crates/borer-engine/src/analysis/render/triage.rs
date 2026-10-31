@@ -671,8 +671,8 @@ fn forget_writes(
 /// under `Software\` with none of those are a registry write. No key
 /// string at all stays persistence: the key may be built at runtime.
 ///
-/// Winlogon, Image File Execution Options, `AppInit_DLLs` and Shell
-/// Folders are persistence keys too.
+/// Winlogon, Image File Execution Options, `AppInit_DLLs`, Shell Folders
+/// and the `exefile` open command are persistence keys too.
 fn settings_keys(p: &Program, apis: &[String]) -> bool {
     if apis.iter().any(|n| n.to_lowercase().contains("service")) {
         return false;
@@ -691,6 +691,7 @@ fn settings_keys(p: &Program, apis: &[String]) -> bool {
             || s.contains("image file execution options")
             || s.contains("appinit_dlls")
             || s.contains("shell folders")
+            || s.contains("exefile\\shell\\open\\command")
     };
     texts
         .iter()

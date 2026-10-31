@@ -210,6 +210,7 @@ fn a_known_persistence_key_is_not_a_registry_write() {
         &b"Software\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\notepad.exe\0"[..],
         &b"Software\\Microsoft\\Windows NT\\CurrentVersion\\Windows\\AppInit_DLLs\0"[..],
         &b"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders\0"[..],
+        &b"Software\\Classes\\exefile\\shell\\open\\command\0"[..],
     ] {
         let text = map(data);
         assert!(text.contains("persistence"), "{text}");
