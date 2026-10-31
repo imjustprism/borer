@@ -758,6 +758,9 @@ impl<'a> Exec<'_, 'a> {
     /// does half of a division idiom ([`Expr::partial_idiom`]), which only
     /// reads as the division it is once its sign fix folds into it.
     ///
+    /// A timestamp the block reads twice is written out even when it is
+    /// small, so two stores do not read the clock twice.
+    ///
     /// # Arguments
     ///
     /// * `key` - The variable.
@@ -773,8 +776,9 @@ impl<'a> Exec<'_, 'a> {
         let reads = self.reads_ahead.get(&key).copied().unwrap_or(0);
         let scalar = !matches!(key, Key::Reg(r) if r.is_vector_register())
             && !matches!(key, Key::A64(crate::isa::a64::Reg::V(_)));
+        let timed = scalar && reads >= 2 && !v.partial_idiom() && Self::saved_time(&v);
         let reuse = scalar && v.size() > INLINE_MAX && reads >= 2 && !v.partial_idiom();
-        if v.size() > MAX_EXPR || reuse {
+        if v.size() > MAX_EXPR || reuse || timed {
             self.big_written.insert(key, v);
             match self.deferred.as_mut() {
                 Some(d) => d.push(key),

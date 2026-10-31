@@ -211,3 +211,20 @@ fn one_timestamp_stored_twice_is_one_call() {
     let text = decompiled(&program64(&code), 0x1_4000_1000);
     assert_eq!(text.matches("= rdtsc(").count(), 1, "{text}");
 }
+
+/// One timestamp plus a constant, stored twice, is one call.
+///
+/// The add rewrites `eax`. Both stores read that sum.
+#[test]
+fn a_timestamp_plus_one_stored_twice_is_one_call() {
+    let code = [
+        0x0f, 0x31, // ASM: rdtsc
+        0x83, 0xc0, 0x01, // ASM: add eax, 1
+        0x89, 0x07, // ASM: mov [rdi], eax
+        0x89, 0x47, 0x04, // ASM: mov [rdi+4], eax
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xc3, // ASM: ret
+    ];
+    let text = decompiled(&program64(&code), 0x1_4000_1000);
+    assert_eq!(text.matches("= rdtsc(").count(), 1, "{text}");
+}
