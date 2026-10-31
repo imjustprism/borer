@@ -1002,6 +1002,27 @@ fn a_long_tls_callback_list_is_kept() {
     assert_eq!(load(bytes).headers.tls_callbacks, vec![good; 65]);
 }
 
+/// A callback in the mapped headers stays, and so does the callback after it.
+#[test]
+fn a_tls_callback_in_the_headers_stays() {
+    let _serial = serial();
+    const TLS_DIR: usize = 9;
+    let header = IMAGE_BASE + 0x200;
+    let text_va = IMAGE_BASE + 0x1000;
+    let mut data = vec![0u8; 0x28 + 3 * 8];
+    put64(&mut data, 24, IMAGE_BASE + 0x2000 + 0x28);
+    put64(&mut data, 0x28, header);
+    put64(&mut data, 0x30, text_va);
+    let bytes = pe(
+        &[
+            Sec::sound(".text", 0x1000, text(), CODE),
+            Sec::sound(".rdata", 0x2000, data, DATA),
+        ],
+        &[(TLS_DIR, 0x2000, 40)],
+    );
+    assert_eq!(load(bytes).headers.tls_callbacks, vec![header, text_va]);
+}
+
 /// Header fields the Windows loader ignores do not refuse the file.
 ///
 /// A damaged Rich header in the DOS stub and a data directory count past

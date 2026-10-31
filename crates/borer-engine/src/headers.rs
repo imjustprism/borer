@@ -580,7 +580,9 @@ fn tls_callbacks(pe: &PE<'_>, bytes: &[u8], sections: &[Section]) -> Vec<u64> {
 /// # Returns
 ///
 /// The callbacks, or `None` when the directory is absent or its
-/// `AddressOfCallBacks` cannot be read.
+/// `AddressOfCallBacks` cannot be read. A callback in a section or in
+/// the mapped headers is in the image. A word that is neither ends the
+/// list.
 fn read_tls_callbacks(pe: &PE<'_>, bytes: &[u8], sections: &[Section]) -> Option<Vec<u64>> {
     let opt = pe.header.optional_header.as_ref()?;
     let dir = opt
@@ -617,14 +619,14 @@ fn read_tls_callbacks(pe: &PE<'_>, bytes: &[u8], sections: &[Section]) -> Option
         else {
             break;
         };
-        if slot == 0 || !sections.iter().any(|s| in_section(s, slot)) {
+        if !image_callback(pe, sections, slot) {
             break;
         }
         out.push(slot);
     }
     let cut = u64::try_from(out.len()).ok() == Some(CAP)
         && callback_slot(sections, pe.image_base, bytes, rva, CAP, stride, pe.is_64)
-            .is_some_and(|slot| slot != 0 && sections.iter().any(|s| in_section(s, slot)));
+            .is_some_and(|slot| image_callback(pe, sections, slot));
     if cut {
         return None;
     }
@@ -663,6 +665,20 @@ fn callback_slot(
     } else {
         u32_le(slot_bytes, 0).map(u64::from)
     }
+}
+
+/// Whether `slot` is a callback in a section or the mapped headers.
+fn image_callback(pe: &PE<'_>, sections: &[Section], slot: u64) -> bool {
+    slot != 0 && (sections.iter().any(|s| in_section(s, slot)) || in_mapped_headers(pe, slot))
+}
+
+/// Whether `va` is inside the headers the loader maps at the image base.
+fn in_mapped_headers(pe: &PE<'_>, va: u64) -> bool {
+    let Some(opt) = pe.header.optional_header.as_ref() else {
+        return false;
+    };
+    let size = u64::from(opt.windows_fields.size_of_headers);
+    size != 0 && va >= pe.image_base && va < pe.image_base.saturating_add(size)
 }
 
 /// Reports whether `va` falls in `s`.
