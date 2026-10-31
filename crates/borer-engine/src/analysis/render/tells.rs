@@ -857,8 +857,8 @@ fn context_debug(p: &Program, a: &Analysis, entry: u64, instrs: &[Instruction], 
 
 /// Whether the instructions before a context call ask for the debug registers.
 ///
-/// The immediate has to reach that call. The same flags passed to an earlier
-/// call do not.
+/// The word has to be moved. A compare that happens to hold it is not a
+/// request, and the same flags passed to an earlier call do not count.
 fn context_flags(before: &[Instruction]) -> bool {
     for n in before.iter().rev().take(8) {
         if matches!(
@@ -867,7 +867,7 @@ fn context_flags(before: &[Instruction]) -> bool {
         ) {
             return false;
         }
-        if immediate_any(n).is_some_and(debug_context_flags) {
+        if n.mnemonic() == Mnemonic::Mov && immediate_any(n).is_some_and(debug_context_flags) {
             return true;
         }
     }

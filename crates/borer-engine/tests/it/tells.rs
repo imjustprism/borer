@@ -532,6 +532,21 @@ fn a_later_call_does_not_make_a_context_buffer() {
     assert!(!text.contains("hardware breakpoint"), "{text}");
 }
 
+/// A compare that holds the debug-register flags is not a request for them.
+#[test]
+fn a_compared_context_word_is_not_a_hardware_breakpoint() {
+    let text = report_calls(
+        &[
+            0x3d, 0x10, 0x00, 0x10, 0x00, // ASM: cmp eax, 0x100010
+            0xe8, 0xf6, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[("GetThreadContext", 0x402000)],
+    );
+    assert!(!text.contains("hardware breakpoint"), "{text}");
+}
+
 /// `FindWindow` of a debugger class, followed by an exit, is a tell.
 /// An ordinary class is not.
 #[test]
