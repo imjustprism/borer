@@ -1310,16 +1310,19 @@ fn an_indirect_context_call_and_a_dr_read_is_a_hardware_breakpoint() {
     assert!(!bare.contains("hardware breakpoint"), "{bare}");
 }
 
-/// A loop that compares with `0xCC` and then exits is a breakpoint scan.
-/// The compare alone is not, and a compare followed by a store into
+/// A loop over code bytes that exits when one is `0xCC` is a breakpoint
+/// scan. The compare alone is not, and a compare followed by a store into
 /// executable memory is a patch.
 #[test]
 fn a_breakpoint_scan_needs_a_loop_and_an_exit() {
     let scan = report_calls(
         &[
-            0x3c, 0xcc, // ASM: cmp al, 0xcc
-            0x75, 0xfc, // ASM: jne 0x401000
-            0xe8, 0xf7, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0x48, 0x8d, 0x35, 0xf9, 0xff, 0xff, 0xff, // ASM: lea rsi, [rip-7]
+            0x80, 0x3e, 0xcc, // ASM: cmp byte [rsi], 0xcc
+            0x74, 0x05, // ASM: je 0x401011
+            0x48, 0xff, 0xc6, // ASM: inc rsi
+            0xeb, 0xf6, // ASM: jmp 0x401007
+            0xe8, 0xea, 0x0f, 0x00, 0x00, // ASM: call 0x402000
             0xc3, // ASM: ret
         ],
         &[],
@@ -1353,6 +1356,27 @@ fn a_breakpoint_scan_needs_a_loop_and_an_exit() {
     );
     assert!(!counter.contains("breakpoint"), "{counter}");
     assert!(!counter.starts_with("# anti-analysis:"), "{counter}");
+}
+
+/// A parser that loops over a data buffer and exits on a `0x90` byte reads
+/// no code, so it is no breakpoint scan.
+#[test]
+fn a_data_parser_is_no_breakpoint_scan() {
+    let text = report_calls(
+        &[
+            0x48, 0x8d, 0x35, 0xf9, 0x10, 0x00, 0x00, // ASM: lea rsi, [rip+0x10f9]
+            0x80, 0x3e, 0x90, // ASM: cmp byte [rsi], 0x90
+            0x74, 0x05, // ASM: je 0x401011
+            0x48, 0xff, 0xc6, // ASM: inc rsi
+            0xeb, 0xf6, // ASM: jmp 0x401007
+            0xe8, 0xea, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0xc3, // ASM: ret
+        ],
+        &[0u8; 0x110],
+        &[("ExitProcess", 0x402000)],
+    );
+    assert!(!text.contains("breakpoint"), "{text}");
+    assert!(!text.starts_with("# anti-analysis:"), "{text}");
 }
 
 /// An exception filter over an illegal opcode is a tell.

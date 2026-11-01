@@ -453,15 +453,10 @@ fn patterns(
     if has("ntqueryinformationprocess") && debug_port(p, a, f.entry, instrs, bits) {
         out.push(("debug port (NtQueryInformationProcess)", ip));
     }
-    let exits = has("exitprocess") || has("terminateprocess");
     let cc = instrs
         .iter()
         .any(|i| compares_byte(i, 0xcc) || compares_byte(i, 0x90));
-    let loops = f
-        .blocks
-        .iter()
-        .any(|b| b.successors.iter().any(|s| *s <= b.start));
-    if exits && cc && loops {
+    if cc && breakpoint_scan(p, a, f, instrs) {
         out.push(("breakpoint scan", ip));
     } else if cc && writes_executable(p, instrs) {
         out.push(("breakpoint patch", ip));
@@ -1067,6 +1062,83 @@ fn debugger_name(p: &Program, va: u64) -> bool {
     let named = |text: &str| DEBUGGER_WINDOWS.iter().any(|w| text.contains(w));
     cstr_at(p, va, 4, 64).is_some_and(|(_, text)| named(&text))
         || wstr_at(p, va, 4, 64).is_some_and(|(_, text)| named(&text))
+}
+
+/// Whether `f` loops over code bytes and exits when one is a breakpoint.
+///
+/// The byte compared with `0xCC` or `0x90` is read through a register
+/// that holds a code address, and the branch on that compare reaches an
+/// `ExitProcess` or `TerminateProcess` call within a few instructions. A
+/// parser that compares bytes of its input and exits on bad input reads
+/// no code.
+fn breakpoint_scan(p: &Program, a: &Analysis, f: &Function, instrs: &[Instruction]) -> bool {
+    let mut exits = import_sites(p, a, f.entry, "exitprocess");
+    exits.extend(import_sites(p, a, f.entry, "terminateprocess"));
+    let loops = f
+        .blocks
+        .iter()
+        .any(|b| b.successors.iter().any(|s| *s <= b.start));
+    if exits.is_empty() || !loops {
+        return false;
+    }
+    let code: Vec<Register> = instrs
+        .iter()
+        .filter(|i| {
+            matches!(i.mnemonic(), Mnemonic::Mov | Mnemonic::Lea)
+                && i.op0_kind() == OpKind::Register
+        })
+        .filter(|i| {
+            string_address(i).is_some_and(|va| p.section_at(va).is_some_and(|s| s.executable))
+        })
+        .map(|i| i.op0_register().full_register())
+        .collect();
+    instrs.iter().enumerate().any(|(k, i)| {
+        (compares_byte(i, 0xcc) || compares_byte(i, 0x90))
+            && reads_code(&instrs[..k], i, &code)
+            && instrs.get(k + 1).is_some_and(|j| {
+                j.flow_control() == FlowControl::ConditionalBranch
+                    && [j.near_branch_target(), j.next_ip()]
+                        .iter()
+                        .any(|&t| exits_at(instrs, t, &exits))
+            })
+    })
+}
+
+/// Whether the byte `i` compares is read through one of `code`: its own
+/// memory operand, or the load of its register just before it.
+fn reads_code(before: &[Instruction], i: &Instruction, code: &[Register]) -> bool {
+    let through = |n: &Instruction| {
+        n.op_count() > 0
+            && (0..n.op_count()).any(|k| n.op_kind(k) == OpKind::Memory)
+            && code.contains(&n.memory_base().full_register())
+    };
+    if i.op0_kind() == OpKind::Memory {
+        return through(i);
+    }
+    let reg = i.op0_register().full_register();
+    before
+        .iter()
+        .rev()
+        .take(3)
+        .find(|n| writes_register(n, reg))
+        .is_some_and(through)
+}
+
+/// Whether the instructions from `at` call one of `exits` before a return,
+/// within a few instructions.
+fn exits_at(instrs: &[Instruction], at: u64, exits: &[u64]) -> bool {
+    let Some(from) = instrs.iter().position(|i| i.ip() == at) else {
+        return false;
+    };
+    for i in instrs.iter().skip(from).take(8) {
+        if exits.contains(&i.ip()) {
+            return true;
+        }
+        if i.flow_control() == FlowControl::Return {
+            return false;
+        }
+    }
+    false
 }
 
 /// Whether a compare of `0xCC` is followed by a store into executable memory.
