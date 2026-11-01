@@ -674,8 +674,10 @@ fn shared_return(lines: &mut [String], k: usize) -> bool {
         })
         .collect();
     for &j in &inner {
-        if let Some(l) = lines.get_mut(j) {
-            *l = l.replacen(&ret, "break;", 1);
+        if let Some(l) = lines.get_mut(j)
+            && let Some(head) = l.strip_suffix(ret.as_str())
+        {
+            *l = format!("{head}break;");
         }
     }
     !inner.is_empty()
@@ -1000,10 +1002,10 @@ mod tests {
     /// `break`; one inside a nested `switch`, or another value, stays.
     #[test]
     fn a_return_the_loop_is_followed_by_is_a_break() {
-        let text = "for (i = 0; t[i] != -1; i += 1) {\n  if (a1 == t[i]) {\n    return u[i];\n  }\n  if (i == a2) return u[i];\n  switch (i) {\n  case 3: return u[i];\n  }\n  if (i == 9) {\n    return 0;\n  }\n}\nreturn u[i];\n";
+        let text = "for (i = 0; t[i] != -1; i += 1) {\n  if (a1 == t[i]) {\n    return u[i];\n  }\n  if (i == a2) return u[i];\n  if (s(\"return u[i];\") == i) return u[i];\n  switch (i) {\n  case 3: return u[i];\n  }\n  if (i == 9) {\n    return 0;\n  }\n}\nreturn u[i];\n";
         assert_eq!(
             run(text),
-            "for (i = 0; t[i] != -1; i += 1) {\n  if (a1 == t[i]) {\n    break;\n  }\n  if (i == a2) break;\n  switch (i) {\n  case 3: return u[i];\n  }\n  if (i == 9) {\n    return 0;\n  }\n}\nreturn u[i];\n"
+            "for (i = 0; t[i] != -1; i += 1) {\n  if (a1 == t[i]) {\n    break;\n  }\n  if (i == a2) break;\n  if (s(\"return u[i];\") == i) break;\n  switch (i) {\n  case 3: return u[i];\n  }\n  if (i == 9) {\n    return 0;\n  }\n}\nreturn u[i];\n"
         );
     }
 
