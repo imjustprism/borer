@@ -1475,7 +1475,7 @@ impl Analysis {
             Some(Isa::X86 { bits }) => functions::discover(program, bits),
             Some(Isa::A64) => a64::discover(program),
             Some(Isa::A32) => a32::discover(program),
-            None => {
+            Some(Isa::Rv(_)) | None => {
                 let mut empty = Analysis::default();
                 empty.finish_index(program);
                 empty
@@ -1494,6 +1494,7 @@ impl Analysis {
         match program.arch.isa() {
             Some(Isa::A64) => a64::infer_returns(program, &mut analysis),
             Some(Isa::A32) => a32::infer_returns(program, &mut analysis),
+            Some(Isa::Rv(_)) => {}
             Some(Isa::X86 { .. }) | None => returns::infer(program, &mut analysis),
         }
         phases.mark("analysis returns");

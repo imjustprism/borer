@@ -16,10 +16,12 @@ use crate::headers::Headers;
 use crate::isa::Isa;
 use crate::num::{from_usize, saturating_usize, u32_le};
 
+mod arch;
 mod arm;
 pub(crate) mod file;
 pub(crate) mod pe;
 
+pub use arch::{Arch, Feature};
 pub use file::{Parent, read_regular, unusable_path};
 use file::{Take, magic_name, parse_object, read_program_bytes};
 use pe::{
@@ -54,108 +56,6 @@ impl BinaryFormat {
             BinaryFormat::Raw => "raw",
         }
     }
-}
-
-/// Instruction-set architectures the engine recognizes.
-///
-/// What the engine does with each one's code is [`Arch::supports`]; an
-/// architecture it does not analyze is still identified from the headers
-/// so the summary can say what a file is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Arch {
-    /// 32-bit x86.
-    X86,
-    /// 64-bit x86 (AMD64).
-    X86_64,
-    /// 64-bit ARM (AArch64).
-    Arm64,
-    /// 32-bit ARM: A32 and T32 (Thumb-2) code, which instruction set at
-    /// which address told by [`Program::modes`].
-    Arm,
-    /// Anything else, or a header the loader could not read.
-    Unknown,
-}
-
-impl Arch {
-    /// Returns the display name used in summaries (`x86`, `x86-64`, `arm64`, `unknown`).
-    pub fn name(self) -> &'static str {
-        match self {
-            Arch::X86 => "x86",
-            Arch::X86_64 => "x86-64",
-            Arch::Arm64 => "arm64",
-            Arch::Arm => "arm",
-            Arch::Unknown => "unknown",
-        }
-    }
-
-    /// Returns the decoder bitness for architectures the disassembler supports.
-    ///
-    /// # Returns
-    ///
-    /// `32` or `64` for x86 variants, `None` for everything else.
-    pub fn bitness(self) -> Option<u32> {
-        match self {
-            Arch::X86 => Some(32),
-            Arch::X86_64 => Some(64),
-            _ => None,
-        }
-    }
-
-    /// Returns the instruction set this architecture's code is written in.
-    ///
-    /// # Returns
-    ///
-    /// The instruction set, or `None` for [`Arch::Unknown`].
-    pub fn isa(self) -> Option<Isa> {
-        match self {
-            Arch::X86 => Some(Isa::X86 { bits: 32 }),
-            Arch::X86_64 => Some(Isa::X86 { bits: 64 }),
-            Arch::Arm64 => Some(Isa::A64),
-            Arch::Arm => Some(Isa::A32),
-            Arch::Unknown => None,
-        }
-    }
-
-    /// Tells whether the engine does `feature` with this architecture's code.
-    ///
-    /// The one table of what each instruction set supports: a stage lands
-    /// for an instruction set by flipping its arm here, and every gate
-    /// ([`Program::refuses`]) follows.
-    ///
-    /// # Arguments
-    ///
-    /// * `feature` - What a tool asks of the code.
-    pub fn supports(self, feature: Feature) -> bool {
-        match self.isa() {
-            Some(Isa::X86 { .. }) => true,
-            Some(Isa::A64) => match feature {
-                Feature::Disasm | Feature::Discover | Feature::Emulate | Feature::Decompile => true,
-            },
-            Some(Isa::A32) => match feature {
-                Feature::Disasm | Feature::Discover | Feature::Decompile => true,
-                Feature::Emulate => false,
-            },
-            None => false,
-        }
-    }
-}
-
-/// What a code tool asks the engine to do with a program's instructions.
-///
-/// Support arrives one instruction set and one stage at a time, so a tool
-/// names the stage it needs ([`Program::refuses`]) instead of reading
-/// support off [`Arch::bitness`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Feature {
-    /// Decoding instructions to text: a linear listing at an address.
-    Disasm,
-    /// Function discovery, and every answer read from the analysis it
-    /// builds (functions, references, the call graph).
-    Discover,
-    /// Running code in the emulator.
-    Emulate,
-    /// Lifting functions to pseudo-C.
-    Decompile,
 }
 
 /// A virtual address: where a byte sits once the image is mapped.
@@ -651,7 +551,10 @@ impl Program {
             path: PathBuf::new(),
             bytes,
             format: BinaryFormat::Raw,
-            is_64: matches!(arch.isa(), Some(Isa::X86 { bits: 64 } | Isa::A64)),
+            is_64: matches!(
+                arch.isa(),
+                Some(Isa::X86 { bits: 64 } | Isa::A64 | Isa::Rv(crate::isa::rv::Xlen::X64))
+            ),
             arch,
             entry,
             image_base,
@@ -1116,13 +1019,7 @@ impl Program {
             goblin::Object::Elf(elf) => {
                 format = BinaryFormat::Elf;
                 is_64 = elf.is_64;
-                arch = match elf.header.e_machine {
-                    62 => Arch::X86_64,
-                    3 => Arch::X86,
-                    183 => Arch::Arm64,
-                    40 => Arch::Arm,
-                    _ => Arch::Unknown,
-                };
+                arch = Arch::from_elf(elf.header.e_machine, elf.is_64);
                 entry = (elf.entry != 0).then_some(elf.entry);
                 if arch == Arch::Arm {
                     arm_marks = arm::mapping_symbols(elf);

@@ -1,14 +1,15 @@
 //! The instruction sets the engine decodes, one module each.
 //!
 //! [`x86`] carries x86 and x86-64 (iced-x86), [`a64`] carries AArch64
-//! (yaxpeax-arm) and [`a32`] carries ARM32's A32 and T32 (the engine's own
-//! decoder). No module outside `isa` names a decoder crate: consumers
+//! (yaxpeax-arm), [`a32`] carries ARM32's A32 and T32 and [`rv`] carries
+//! RISC-V's RV32GC and RV64GC (the last two the engine's own decoders). No module outside `isa` names a decoder crate: consumers
 //! import an instruction set's names from its module here, so a decoder's
 //! types stop at this boundary. [`Isa`] is the engine-owned name for which
 //! of them a program's code is written in.
 
 pub mod a32;
 pub mod a64;
+pub mod rv;
 pub mod x86;
 
 /// An instruction set the engine knows how to decode, with what its decoder
@@ -30,4 +31,20 @@ pub enum Isa {
     /// instructions, which at which address told by the program's
     /// [`a32::Modes`].
     A32,
+    /// RISC-V: four-byte instructions and two-byte compressed ones, little
+    /// endian, with registers of the width named.
+    Rv(rv::Xlen),
+}
+
+impl Isa {
+    /// Returns the width of its general registers in bits: `32` or `64`.
+    #[must_use]
+    pub fn bits(self) -> u32 {
+        match self {
+            Isa::X86 { bits } => bits,
+            Isa::A64 => 64,
+            Isa::A32 => 32,
+            Isa::Rv(xlen) => xlen.bits(),
+        }
+    }
 }

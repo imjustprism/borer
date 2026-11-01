@@ -18,6 +18,9 @@ extend-ignore-re = [
 ]
 
 [default.extend-words]
+# RISC-V's `fle` (float less or equal) mnemonic and its `sie` CSR
+fle = "fle"
+sie = "sie"
 # the transposed name (WinMian for WinMain) the name suggestions are tested with
 Mian = "Mian"
 # ELF relocation sections (.rela.plt) and Windows structured exception handling.

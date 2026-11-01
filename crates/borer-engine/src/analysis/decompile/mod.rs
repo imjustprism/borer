@@ -400,6 +400,7 @@ impl<'a> Ctx<'a> {
         let (first_stack, reg_params) = match self.program.arch.isa() {
             Some(crate::isa::Isa::A64) => (0, u32::from(lift_a64::INT_ARGS)),
             Some(crate::isa::Isa::A32) => (0, 4),
+            Some(crate::isa::Isa::Rv(_)) => (0, 8),
             Some(crate::isa::Isa::X86 { .. }) | None => (
                 self.conv.word + self.conv.shadow,
                 u32::try_from(self.conv.args.len()).unwrap_or(0),
@@ -1488,6 +1489,7 @@ fn decompile_in_run(
         }
         crate::isa::Isa::A64 => decompile_in::<arch::A64>(run, 64, cleanup, assume, witness),
         crate::isa::Isa::A32 => decompile_in::<arch::A32>(run, 32, cleanup, assume, witness),
+        crate::isa::Isa::Rv(_) => None,
     };
     if crate::cancel::Cancel::raised() {
         return done.map(|_| Decompiled::stopped(run.3));

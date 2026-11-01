@@ -423,7 +423,8 @@ pub(super) fn rip_data(
             Some(crate::isa::Isa::X86 { bits: 64 }) => {
                 x86_leas(program, analysis, &mut leas, &mut immediates);
             }
-            Some(crate::isa::Isa::X86 { .. } | crate::isa::Isa::A32) | None => return leas,
+            Some(crate::isa::Isa::X86 { .. } | crate::isa::Isa::A32 | crate::isa::Isa::Rv(_))
+            | None => return leas,
         }
         leas.retain(|&a| {
             !immediates.contains(&a)

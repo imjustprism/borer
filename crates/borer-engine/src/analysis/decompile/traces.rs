@@ -483,7 +483,7 @@ fn function_code(
                 i.predicated(),
             )
         }),
-        None => f.blocks.iter().map(|_| BlockCode::default()).collect(),
+        Some(Isa::Rv(_)) | None => f.blocks.iter().map(|_| BlockCode::default()).collect(),
     }
 }
 

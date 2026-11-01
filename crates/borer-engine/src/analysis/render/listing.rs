@@ -1074,7 +1074,7 @@ pub fn instruction_at_or_before(p: &Program, a: &Analysis, va: u64) -> Option<u6
     let bitness = match p.isa_for(Feature::Disasm).ok()? {
         Isa::X86 { bits } => bits,
         Isa::A64 => return Some(va - va % from_usize(a64::INSN_LEN)),
-        Isa::A32 => {
+        isa @ (Isa::A32 | Isa::Rv(_)) => {
             let Some(b) = a
                 .function_at(va)
                 .and_then(|f| f.blocks.iter().find(|b| b.start <= va && va < b.end))
@@ -1083,7 +1083,7 @@ pub fn instruction_at_or_before(p: &Program, a: &Analysis, va: u64) -> Option<u6
             };
             let len = usize::try_from(b.end - b.start).ok()?;
             let code = p.read_va(b.start, len)?;
-            return disasm::disassemble_program(p, code, b.start, Isa::A32, len)
+            return disasm::disassemble_program(p, code, b.start, isa, len)
                 .iter()
                 .map(|l| l.va)
                 .take_while(|&at| at <= va)

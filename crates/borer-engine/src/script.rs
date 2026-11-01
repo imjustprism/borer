@@ -580,12 +580,7 @@ fn register(engine: &mut Engine, host: &Rc<Host>) {
             ("arch", p.arch.name().into()),
             (
                 "bits",
-                Dynamic::from_int(INT::from(match p.arch.isa() {
-                    Some(Isa::X86 { bits }) => bits,
-                    Some(Isa::A64) => 64,
-                    Some(Isa::A32) => 32,
-                    None => 0,
-                })),
+                Dynamic::from_int(INT::from(p.arch.isa().map_or(0, Isa::bits))),
             ),
             ("base", Dynamic::from_int(int(p.image_base))),
             (

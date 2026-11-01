@@ -523,6 +523,8 @@ pub(crate) fn program(path: std::path::PathBuf, bytes: Vec<u8>) -> Option<Progra
         Arch::X86_64 => "x86-64".to_owned(),
         Arch::Arm64 => "arm64".to_owned(),
         Arch::Arm => "arm".to_owned(),
+        Arch::RiscV64 => "riscv64".to_owned(),
+        Arch::RiscV32 => "riscv32".to_owned(),
         Arch::Unknown => "unknown".to_owned(),
     });
     Some(p)

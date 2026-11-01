@@ -831,7 +831,7 @@ pub fn replay(program: &Program, analysis: &Analysis, entries: &[u64], seed: u64
         Some(Isa::X86 { .. }) => replay_in::<arch::X86>(program, analysis, entries, seed),
         Some(Isa::A64) => replay_in::<arch::A64>(program, analysis, entries, seed),
         Some(Isa::A32) => replay_in::<arch::A32>(program, analysis, entries, seed),
-        None => Replayed::default(),
+        Some(Isa::Rv(_)) | None => Replayed::default(),
     }
 }
 
@@ -891,7 +891,7 @@ pub fn replay_function(program: &Program, analysis: &Analysis, entry: u64, seed:
         Some(Isa::A32) => arch::A32::rig(program, analysis)
             .map(|t| replay_one::<arch::A32>(program, analysis, &t, entry, seed))
             .unwrap_or_default(),
-        None => Replayed::default(),
+        Some(Isa::Rv(_)) | None => Replayed::default(),
     }
 }
 

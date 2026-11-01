@@ -1,12 +1,13 @@
 //! Linear disassembly: x86/x86-64 through iced-x86, AArch64 through
-//! [`crate::isa::a64`], ARM32 through [`crate::isa::a32`].
+//! [`crate::isa::a64`], ARM32 through [`crate::isa::a32`], RISC-V through
+//! [`crate::isa::rv`].
 //!
 //! [`disassemble_isa`] picks the decoder an instruction set needs;
 //! [`disassemble`] is the x86 sweep the x86-only passes call directly.
 
 use crate::isa::Isa;
 use crate::isa::x86::{Code, Decoder, DecoderOptions, Formatter, Instruction, NasmFormatter};
-use crate::isa::{a32, a64};
+use crate::isa::{a32, a64, rv};
 use crate::program::Program;
 
 /// One decoded instruction as text.
@@ -157,6 +158,9 @@ pub fn disassemble_isa(code: &[u8], va: u64, isa: Isa, max_instrs: usize) -> Vec
             out
         }
         Isa::A32 => disassemble_a32(code, va, &a32::Modes::default(), max_instrs),
+        Isa::Rv(xlen) => sweep(code, va, max_instrs, |rest, at| {
+            rv::decode(rest, at, xlen).map(|i| (usize::from(i.len), rv::text(&i), i.target()))
+        }),
     }
 }
 
@@ -184,15 +188,14 @@ pub fn disassemble_program(
 ) -> Vec<DisasmLine> {
     match isa {
         Isa::A32 => disassemble_a32(code, va, &program.modes, max_instrs),
-        Isa::X86 { .. } | Isa::A64 => disassemble_isa(code, va, isa, max_instrs),
+        Isa::X86 { .. } | Isa::A64 | Isa::Rv(_) => disassemble_isa(code, va, isa, max_instrs),
     }
 }
 
 /// Disassembles ARM32 code in the instruction sets `modes` names.
 ///
 /// Each instruction is read in the instruction set `modes` names for its
-/// address, an `IT` block's conditions carried along; bytes that do not
-/// make an instruction are one `(bad)` line of two bytes.
+/// address, an `IT` block's conditions carried along ([`sweep`]).
 ///
 /// # Arguments
 ///
@@ -201,34 +204,45 @@ pub fn disassemble_program(
 /// * `modes` - Which instruction set each address is in.
 /// * `max_instrs` - Hard cap on the number of instructions returned.
 fn disassemble_a32(code: &[u8], va: u64, modes: &a32::Modes, max_instrs: usize) -> Vec<DisasmLine> {
-    let mut out = Vec::new();
     let mut it = a32::ItState::default();
+    sweep(code, va, max_instrs, |rest, at| {
+        a32::decode(rest, at, modes.at(at), &mut it)
+            .map(|i| (usize::from(i.len), a32::text(&i), i.target()))
+    })
+}
+
+/// Decodes a run of two- and four-byte instructions one at a time.
+///
+/// Bytes that do not make an instruction are one `(bad)` line of two
+/// bytes, so a listing never drops bytes it was handed.
+///
+/// # Arguments
+///
+/// * `code` - The bytes.
+/// * `va` - Virtual address of `code[0]`.
+/// * `max_instrs` - Hard cap on the number of instructions returned.
+/// * `decode` - Decodes the instruction at the start of the bytes at an
+///   address into its length, text and branch target, or `None`.
+fn sweep(
+    code: &[u8],
+    va: u64,
+    max_instrs: usize,
+    mut decode: impl FnMut(&[u8], u64) -> Option<(usize, String, Option<u64>)>,
+) -> Vec<DisasmLine> {
+    let mut out = Vec::new();
     let mut off = 0usize;
     while out.len() < max_instrs && off < code.len() {
         let at = va.wrapping_add(crate::num::from_usize(off));
         let rest = code.get(off..).unwrap_or_default();
-        match a32::decode(rest, at, modes.at(at), &mut it) {
-            Some(i) => {
-                let len = usize::from(i.len);
-                out.push(DisasmLine {
-                    va: at,
-                    bytes: rest.get(..len).map(<[u8]>::to_vec).unwrap_or_default(),
-                    text: a32::text(&i),
-                    target: i.target(),
-                });
-                off += len;
-            }
-            None => {
-                let len = rest.len().min(2);
-                out.push(DisasmLine {
-                    va: at,
-                    bytes: rest.get(..len).map(<[u8]>::to_vec).unwrap_or_default(),
-                    text: "(bad)".to_owned(),
-                    target: None,
-                });
-                off += len;
-            }
-        }
+        let (len, text, target) =
+            decode(rest, at).unwrap_or_else(|| (rest.len().min(2), "(bad)".to_owned(), None));
+        out.push(DisasmLine {
+            va: at,
+            bytes: rest.get(..len).map(<[u8]>::to_vec).unwrap_or_default(),
+            text,
+            target,
+        });
+        off += len;
     }
     out
 }

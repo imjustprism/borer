@@ -1078,7 +1078,7 @@ fn render_runs(
                 "{} (no signature: an arm64 run passes its inputs untyped)",
                 short_name(a, o, req.entry)
             ),
-            Some(Isa::X86 { .. } | Isa::A32) | None => format!(
+            Some(Isa::X86 { .. } | Isa::A32 | Isa::Rv(_)) | None => format!(
                 "{} (no signature: it does not decompile)",
                 short_name(a, o, req.entry)
             ),

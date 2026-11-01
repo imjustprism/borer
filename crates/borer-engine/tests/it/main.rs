@@ -74,6 +74,7 @@ mod replay_rows;
 mod replayed;
 mod returns;
 mod riprel;
+mod rv;
 mod search;
 mod shapes;
 mod strings;

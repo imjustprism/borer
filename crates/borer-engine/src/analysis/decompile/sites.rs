@@ -97,8 +97,9 @@ pub(crate) fn call_sites(
             let conv = abi::conv(program, bits);
             (bits, conv.word + conv.shadow)
         }
-        crate::isa::Isa::A64 => (64, 0),
-        crate::isa::Isa::A32 => (32, 0),
+        isa @ (crate::isa::Isa::A64 | crate::isa::Isa::A32 | crate::isa::Isa::Rv(_)) => {
+            (isa.bits(), 0)
+        }
     };
     let f = analysis.function(caller)?;
     let memo = decompiled_cached(program, analysis, overlay, overlay.fingerprint(), caller);

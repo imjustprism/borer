@@ -213,7 +213,9 @@ pub(in crate::analysis::decompile) fn shape(
         || match program.arch.isa() {
             Some(Isa::A64) => lift_a64::built_shape(program, analysis, overlay, f),
             Some(Isa::A32) => lift_a32::built_shape(program, analysis, overlay, f),
-            Some(Isa::X86 { .. }) | None => shape_built(program, analysis, overlay, f, bitness),
+            Some(Isa::X86 { .. } | Isa::Rv(_)) | None => {
+                shape_built(program, analysis, overlay, f, bitness)
+            }
         },
         |shape| shape.params.capacity() * size_of::<Register>(),
     )

@@ -70,6 +70,7 @@ pub(in crate::analysis::decompile) fn check_decompiled(
         Isa::X86 { .. } => check_in::<arch::X86>(program, analysis, overlay, entry, witnessed),
         Isa::A64 => check_in::<arch::A64>(program, analysis, overlay, entry, witnessed),
         Isa::A32 => check_in::<arch::A32>(program, analysis, overlay, entry, witnessed),
+        Isa::Rv(_) => None,
     }
 }
 
