@@ -55,7 +55,9 @@ const QUIET_IMPORTS: [&str; 1] = ["NtQueryInformationProcess"];
 /// inline `int3` or `icebp` traps a debugger; a read of the PEB
 /// (`gs:[0x60]`, `fs:[0x30]`) reaches the `BeingDebugged` byte. A little
 /// `cpuid` is ordinary feature detection; a pile of these together is a
-/// program that does not want to be watched.
+/// program that does not want to be watched. A PEB read decides alone only
+/// when the next read names `BeingDebugged` or `NtGlobalFlag`; a plain one,
+/// such as a loader or heap walk, only counts toward the pile.
 ///
 /// Two of these a compiler does emit, and they are not counted: an `int3`
 /// after a call, a branch, a return or another `int3` (nops aside) is the
@@ -83,7 +85,7 @@ pub fn anti_analysis_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
     let weak = |tag: &str| tag.starts_with("cpuid") || tag.starts_with("rdtsc (read)");
     let alone = |tag: &str| {
         tag.starts_with("int 2d")
-            || tag.starts_with("peb read")
+            || tag.starts_with("peb read (")
             || tag.starts_with("hardware breakpoint")
             || tag.starts_with("debugger window")
             || tag.starts_with("debug block")

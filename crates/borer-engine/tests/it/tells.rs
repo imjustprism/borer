@@ -521,7 +521,6 @@ fn a_peb_read_is_a_tell_and_the_teb_stack_base_is_not() {
     ]);
     assert!(peb.contains("peb read"), "{peb}");
     assert!(!peb.contains("BeingDebugged"), "{peb}");
-    assert!(peb.starts_with("# anti-analysis:"), "{peb}");
     let stack = report(&[
         0x64, 0x8b, 0x04, 0x25, 0x18, 0x00, 0x00, 0x00, // ASM: mov eax, fs:[0x18]
         0x8b, 0x40, 0x04, // ASM: mov eax, [eax+4]
@@ -679,6 +678,25 @@ fn a_peb_field_is_named_from_the_following_read() {
     ]);
     assert!(wide.contains("peb read"), "{wide}");
     assert!(!wide.contains("BeingDebugged"), "{wide}");
+}
+
+/// A plain PEB read, such as an `Ldr` walk, is listed without deciding the
+/// verdict. A read of `BeingDebugged` decides it alone.
+#[test]
+fn only_a_named_peb_field_decides_the_verdict_alone() {
+    let ldr = report(&[
+        0x64, 0x8b, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, // ASM: mov eax, fs:[0x30]
+        0x8b, 0x40, 0x0c, // ASM: mov eax, [eax+0x0c]
+        0xc3, // ASM: ret
+    ]);
+    assert!(ldr.contains("peb read"), "{ldr}");
+    assert!(!ldr.starts_with("# anti-analysis:"), "{ldr}");
+    let debugged = report(&[
+        0x64, 0x8b, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, // ASM: mov eax, fs:[0x30]
+        0x8a, 0x40, 0x02, // ASM: mov al, [eax+2]
+        0xc3, // ASM: ret
+    ]);
+    assert!(debugged.starts_with("# anti-analysis:"), "{debugged}");
 }
 
 /// A TEB read is a PEB read only when the next access uses that pointer.
