@@ -924,7 +924,8 @@ fn peb_field_read(n: &Instruction, held: &[Register]) -> Option<&'static str> {
     None
 }
 
-/// Whether a later access indexes the PEB through the TEB pointer.
+/// Whether a later instruction loads the PEB pointer through the TEB
+/// pointer ([`peb_pointer`]).
 ///
 /// The base has to be `origin` or a copy of it. Another register is a
 /// different object.
@@ -936,9 +937,7 @@ fn teb_indexes_peb(rest: &[Instruction], origin: Register) -> bool {
     held[0] = origin;
     let mut count = 1usize;
     for n in rest.iter().take(4) {
-        if memory(n).is_some_and(|(_, disp, base)| {
-            matches!(disp, 0x30 | 0x60) && held[..count].contains(&base.full_register())
-        }) {
+        if peb_pointer(n, &held[..count]).is_some() {
             return true;
         }
         if let Some(dest) = copied_timestamp(n, &held[..count]) {
@@ -954,12 +953,22 @@ fn teb_indexes_peb(rest: &[Instruction], origin: Register) -> bool {
 }
 
 /// The register a load of the PEB pointer from the TEB writes.
+///
+/// The load is a `mov` of the pointer's width with no index: four bytes
+/// at `0x30` (32-bit) or eight at `0x60` (64-bit). An `lea` is an address
+/// inside the TEB, and eight bytes at `0x30` is the 64-bit TEB's self
+/// pointer.
 fn peb_pointer(n: &Instruction, held: &[Register]) -> Option<Register> {
-    if n.op0_kind() != OpKind::Register || held.is_empty() {
+    if n.mnemonic() != Mnemonic::Mov
+        || n.op0_kind() != OpKind::Register
+        || n.memory_index() != Register::None
+        || held.is_empty()
+    {
         return None;
     }
     let (_, disp, base) = memory(n)?;
-    if !matches!(disp, 0x30 | 0x60) || !held.contains(&base.full_register()) {
+    let width = n.op0_register().size();
+    if !matches!((disp, width), (0x30, 4) | (0x60, 8)) || !held.contains(&base.full_register()) {
         return None;
     }
     Some(n.op0_register().full_register())

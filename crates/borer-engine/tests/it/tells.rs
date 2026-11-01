@@ -775,6 +775,26 @@ fn a_pointer_read_from_the_peb_is_not_the_peb() {
     assert!(teb.contains("peb read (BeingDebugged)"), "{teb}");
 }
 
+/// An `lea` of the TEB's PEB slot is an address inside the TEB, not the
+/// PEB, and a 64-bit load of the 32-bit slot is the TEB's self pointer.
+#[test]
+fn only_a_pointer_load_from_the_teb_is_the_peb() {
+    let lea = report(&[
+        0x65, 0x48, 0x8b, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, // ASM: mov rax, gs:[0x30]
+        0x48, 0x8d, 0x58, 0x60, // ASM: lea rbx, [rax+0x60]
+        0x80, 0x7b, 0x02, 0x00, // ASM: cmp byte [rbx+2], 0
+        0xc3, // ASM: ret
+    ]);
+    assert!(!lea.contains("BeingDebugged"), "{lea}");
+    let wide = report(&[
+        0x65, 0x48, 0x8b, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, // ASM: mov rax, gs:[0x30]
+        0x48, 0x8b, 0x58, 0x30, // ASM: mov rbx, [rax+0x30]
+        0x80, 0x7b, 0x02, 0x00, // ASM: cmp byte [rbx+2], 0
+        0xc3, // ASM: ret
+    ]);
+    assert!(!wide.contains("BeingDebugged"), "{wide}");
+}
+
 /// `mov dr0` inside a function is a hardware-breakpoint tell.
 #[test]
 fn a_debug_register_move_is_a_tell() {
