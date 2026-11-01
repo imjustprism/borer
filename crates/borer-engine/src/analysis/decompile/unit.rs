@@ -913,6 +913,7 @@ pub(super) fn own_prototype(text: &str, name: &str, sig: &str) -> Option<String>
         .any(|&n| n != proto.params.len())
         || value_read && proto.ret == CTy::parse("void")
         || passed_on && caller.is_none_or(|c| c.ret != proto.ret)
+        || !types_known(text, sig, &proto)
     {
         return None;
     }
@@ -957,6 +958,47 @@ pub(super) fn platform_declarations(
             Some(out.trim_end().to_owned())
         })
         .collect()
+}
+
+/// Tells whether the caller's text can spell every type a callee names.
+///
+/// Those are C's own types ([`plain_type`]), a tagged type (`struct X *`
+/// needs no definition), and a name the text defines or its own signature
+/// uses.
+///
+/// # Arguments
+///
+/// * `text` - The calling function's text.
+/// * `sig` - The callee's signature.
+/// * `proto` - The signature read, for the names that are no types.
+fn types_known(text: &str, sig: &str, proto: &Proto) -> bool {
+    let names: BTreeSet<&str> = std::iter::once(proto.name.as_str())
+        .chain(
+            proto
+                .params
+                .iter()
+                .filter_map(|(_, n)| n.as_ref().map(Name::as_str)),
+        )
+        .collect();
+    let defined: Vec<&str> = text
+        .lines()
+        .filter(|l| {
+            ["#define ", "typedef ", "// signature: "]
+                .iter()
+                .any(|p| l.starts_with(p))
+        })
+        .collect();
+    let mut tagged = false;
+    sig.split(|c: char| !is_ident_char(c))
+        .filter(|w| !w.is_empty() && !names.contains(w))
+        .all(|w| {
+            let ok = tagged
+                || matches!(w, "struct" | "union" | "enum")
+                || plain_type(w)
+                || defined.iter().any(|l| !word_positions(l, w).is_empty());
+            tagged = matches!(w, "struct" | "union" | "enum");
+            ok
+        })
 }
 
 /// Reads one parameter: its type and the name after it, when it has one.
@@ -1607,6 +1649,15 @@ mod tests {
         let declared = "extern void sub_2(void);\nextern void *sub_3(uint64_t a1);\nsub_2();\nx = sub_3(a1);\n";
         assert!(own_prototype(declared, "sub_2", "void sub_2(void)").is_some());
         assert!(own_prototype(declared, "sub_3", "void *sub_3(uint64_t a1)").is_some());
+        assert_eq!(
+            own_prototype(text, "sub_1", "code_t sub_1(uint32_t a1, char *a2)"),
+            None
+        );
+        let typed = "#define code_t int\nx = sub_1(a1, a2);\n";
+        assert!(own_prototype(typed, "sub_1", "code_t sub_1(uint32_t a1, char *a2)").is_some());
+        assert!(
+            own_prototype(text, "sub_1", "uint32_t sub_1(struct node *a1, char *a2)").is_some()
+        );
         let passed = "// signature: uint64_t f(uint64_t a1)\nreturn sub_1(a1, 0);\n";
         assert_eq!(
             own_prototype(passed, "sub_1", "uint32_t sub_1(uint64_t a1, char *a2)"),
