@@ -64,8 +64,12 @@ pub fn next_steps(p: &Program, a: &Analysis, o: &Overlay, entry: u64) -> Arc<Vec
 
 /// The next steps for a text the caller already decompiled.
 ///
-/// The steps share the memo of [`next_steps`], so a sweep can ask with
-/// the text it rendered and a later ask reads those steps.
+/// The steps are memoized apart from [`next_steps`] and keyed by the text
+/// as well: the text depends on overlay facts (a prototype, a callee's
+/// names) this build does not read, so a result filed under the function
+/// alone would survive an edit that changes the text. Keyed by the text,
+/// an edit that changes it asks again, and one that does not leaves steps
+/// that are still right.
 ///
 /// # Arguments
 ///
@@ -85,13 +89,12 @@ pub fn next_steps_for(
     entry: u64,
     text: &str,
 ) -> Arc<Vec<String>> {
-    let owned = text.to_owned();
     a.derived.get_or_build_item(
-        "next_steps",
+        "next_steps_text",
         o.fingerprint(),
-        entry,
-        || steps_of(p, a, o, entry, &owned),
-        |steps| steps.iter().map(String::capacity).sum(),
+        (entry, text.to_owned()),
+        || steps_of(p, a, o, entry, text),
+        |steps| text.len() + steps.iter().map(String::capacity).sum::<usize>(),
     )
 }
 

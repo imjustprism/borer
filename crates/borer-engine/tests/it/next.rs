@@ -9,8 +9,10 @@
     reason = "assertions are the point of a test"
 )]
 
+use borer_engine::analysis::decompile::decompile;
+use borer_engine::analysis::protos::Proto;
 use borer_engine::analysis::render::{
-    NEXT_MAX, function_summary, next_steps, partial_tsv, solve_tsv,
+    NEXT_MAX, function_summary, next_steps, next_steps_for, partial_tsv, solve_tsv,
 };
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::program::{Arch, BinaryFormat};
@@ -121,6 +123,32 @@ fn a_partial_product_loop_is_a_hidden_number_problem() {
     }
     let solved = solve_tsv(&p, &a, &o, "0x401000").expect("solves");
     assert!(solved.contains("borer://partial/0x401000"), "{solved}");
+}
+
+/// Steps built from a text the caller rendered do not outlive a prototype
+/// edit: after the edit the steps are the ones the new prototype gives.
+#[test]
+fn steps_from_a_rendered_text_follow_a_prototype_edit() {
+    let code = [
+        0x81, 0xf9, 0xcd, 0xab, 0x37, 0x13, // ASM: cmp ecx, 0x1337abcd
+        0x0f, 0x94, 0xc0, // ASM: sete al
+        0xc3, // ASM: ret
+    ];
+    let p = image(Arch::X86_64, &code, &[]);
+    let a = Analysis::compute(&p);
+    let mut before = Overlay::default();
+    before.comments.insert(0x40_1009, "kept".to_owned());
+    let text = decompile(&p, &a, &before, 0x40_1000).unwrap_or_default();
+    let first = next_steps_for(&p, &a, &before, 0x40_1000, &text).to_vec();
+    let mut after = before.clone();
+    after
+        .prototypes
+        .insert(0x40_1000, Proto::parse("int f(void)").expect("parses"));
+    a.derived.moved(&a, &before, &after);
+    let cached = next_steps(&p, &a, &after, 0x40_1000).to_vec();
+    let fresh = next_steps(&p, &Analysis::compute(&p), &after, 0x40_1000).to_vec();
+    assert_ne!(first, fresh, "the prototype changes nothing to test");
+    assert_eq!(cached, fresh);
 }
 
 /// A `sub` whose flags a following `xor` overwrites is a mixer, not the
