@@ -276,7 +276,12 @@ impl Hoisted {
     ///
     /// * `kind` - What it declares.
     /// * `line` - The line.
-    fn hoist(&mut self, kind: Kind, line: &str) {
+    ///
+    /// # Returns
+    ///
+    /// `false` when an earlier function stated the name otherwise and that
+    /// statement was kept: a conflict.
+    fn hoist(&mut self, kind: Kind, line: &str) -> bool {
         let (store, key) = match kind {
             Kind::Type => (&mut self.types, line.to_owned()),
             Kind::Macro => (&mut self.helpers, line.to_owned()),
@@ -287,6 +292,7 @@ impl Hoisted {
         };
         let kept = store.add(&key, line);
         self.conflict(kept, line);
+        kept
     }
 
     /// Counts a declaration a function stated otherwise than the one kept,
@@ -364,8 +370,8 @@ impl Hoisted {
         for line in lines.get(comments..decls_end).unwrap_or_default() {
             match classify(line, &self.functions) {
                 Some(kind) => {
-                    self.hoist(kind, line);
-                    if let Some(local) = block_declaration(kind, line) {
+                    let kept = self.hoist(kind, line);
+                    if let Some(local) = block_declaration(kind, line).filter(|_| kept) {
                         locals = true;
                         let _ = writeln!(out, "  {local}");
                     }
@@ -397,8 +403,9 @@ impl Hoisted {
                 && !line.starts_with("static ")
                 && classify(line, &self.functions) == Some(Kind::Data)
             {
-                self.hoist(Kind::Data, line);
-                let _ = writeln!(out, "  extern {line}");
+                if self.hoist(Kind::Data, line) {
+                    let _ = writeln!(out, "  extern {line}");
+                }
             } else {
                 let _ = writeln!(out, "  {line}");
             }
@@ -1439,6 +1446,10 @@ mod tests {
             "{body}"
         );
         assert!(body.contains("// d @ 0x30: does not decompile"), "{body}");
+        assert!(
+            !body.contains("  extern uint32_t c(uint64_t);"),
+            "a conflicting declaration stays out of the body: {body}"
+        );
         assert_eq!((h.written, h.failed, h.conflicts), (3, 1, 1));
         let mut grouped = Hoisted::new(["f"].map(str::to_owned).into());
         let mut out = String::new();

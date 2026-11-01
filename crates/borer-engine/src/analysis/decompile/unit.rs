@@ -879,7 +879,16 @@ fn parse_proto(sig: &str, name: &str) -> Option<Proto> {
 /// declaration would put that width into the call.
 pub(super) fn own_prototype(text: &str, name: &str, sig: &str) -> Option<String> {
     let proto = parse_proto(sig, name).filter(|p| !p.variadic)?;
-    let value_read = text.lines().filter(|l| !l.starts_with("//")).any(|l| {
+    let body: String = text
+        .lines()
+        .filter(|l| {
+            !["//", "extern ", "static "]
+                .iter()
+                .any(|p| l.starts_with(p))
+        })
+        .flat_map(|l| [l, "\n"])
+        .collect();
+    let value_read = body.lines().any(|l| {
         let code = code_of(l);
         let start = code.len() - code.trim_start().len();
         word_positions(code, name)
@@ -894,15 +903,15 @@ pub(super) fn own_prototype(text: &str, name: &str, sig: &str) -> Option<String>
             let callee = head.rsplit(|c: char| !is_ident_char(c)).next()?;
             parse_proto(own.trim(), callee)
         });
-    let passed_on = text.lines().any(|l| {
+    let passed_on = body.lines().any(|l| {
         code_of(l)
             .trim_start()
             .starts_with(&format!("return {name}("))
     });
-    if call_arities(text, name)
+    if call_arities(&body, name)
         .iter()
         .any(|&n| n != proto.params.len())
-        || value_read && sig.trim_start().starts_with("void ")
+        || value_read && proto.ret == CTy::parse("void")
         || passed_on && caller.is_none_or(|c| c.ret != proto.ret)
     {
         return None;
@@ -1595,6 +1604,9 @@ mod tests {
             .as_deref(),
             Some("extern void sub_1(uint32_t a1, char *a2);")
         );
+        let declared = "extern void sub_2(void);\nextern void *sub_3(uint64_t a1);\nsub_2();\nx = sub_3(a1);\n";
+        assert!(own_prototype(declared, "sub_2", "void sub_2(void)").is_some());
+        assert!(own_prototype(declared, "sub_3", "void *sub_3(uint64_t a1)").is_some());
         let passed = "// signature: uint64_t f(uint64_t a1)\nreturn sub_1(a1, 0);\n";
         assert_eq!(
             own_prototype(passed, "sub_1", "uint32_t sub_1(uint64_t a1, char *a2)"),
