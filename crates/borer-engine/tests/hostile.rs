@@ -1250,3 +1250,40 @@ fn wrapper_tables_past_the_file_are_bounded() {
     assert!(table.lines().count() < 64, "{table}");
     assert!(lines.len() < 16, "{lines:?}");
 }
+
+/// A call whose fallthrough the walk refused links to no far block.
+///
+/// The `mov` after the call straddles a relocated word it does not patch,
+/// so the walk does not record it. The next recorded instruction is a
+/// branch target 0x29 bytes on, which is not where the call returns.
+#[test]
+fn a_call_with_an_unwalked_fallthrough_has_no_edge_to_a_far_block() {
+    let _serial = serial();
+    const RELOC_DIR: usize = 5;
+    let mut code = vec![0xcc_u8; 0x200];
+    code[..2].copy_from_slice(&[0x74, 0x2e]); // ASM: jz 0x30
+    code[2..7].copy_from_slice(&[0xe8, 0x19, 0x00, 0x00, 0x00]); // ASM: call 0x20
+    code[7..12].copy_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00]); // ASM: mov eax, 1
+    code[12] = 0xc3; // ASM: ret
+    code[0x20] = 0xc3; // ASM: ret
+    code[0x30] = 0xc3; // ASM: ret
+    let mut reloc = vec![0u8; 12];
+    put32(&mut reloc, 0, 0x1000);
+    put32(&mut reloc, 4, 12);
+    put16(&mut reloc, 8, 0xa009);
+    let p = load(pe(
+        &[
+            Sec::sound(".text", 0x1000, code, CODE),
+            Sec::sound(".reloc", 0x2000, reloc, DATA),
+        ],
+        &[(RELOC_DIR, 0x2000, 12)],
+    ));
+    let a = Analysis::compute(&p);
+    let call = IMAGE_BASE + 0x1002;
+    let edges: Vec<u64> = a
+        .function(IMAGE_BASE + 0x1000)
+        .and_then(|f| f.blocks.iter().find(|b| b.start == call))
+        .map(|b| b.successors.to_vec())
+        .expect("the call starts a block");
+    assert!(!edges.contains(&(IMAGE_BASE + 0x1030)), "{edges:x?}");
+}

@@ -773,8 +773,10 @@ pub(super) fn gap_jump(end: u64, addr: u64, flow: FlowControl) -> bool {
 ///
 /// A direct call whose callee rewrites the return address continues at that
 /// landing. Otherwise a direct call whose fallthrough was not recorded
-/// returns at the next recorded instruction. An indirect call returns at its
-/// fallthrough. A call in `ended` has no successor.
+/// returns at the next recorded instruction, when only one skipped
+/// instruction lies between them, and has no successor otherwise. An
+/// indirect call returns at its fallthrough. A call in `ended` has no
+/// successor.
 ///
 /// # Arguments
 ///
@@ -795,11 +797,11 @@ pub(super) fn note_call(
         return;
     }
     let land = if rec.flow == FlowControl::Call {
-        rec.land.unwrap_or_else(|| call_fall(recs, rec.next))
+        rec.land.or_else(|| call_fall(recs, rec.next))
     } else {
-        rec.next
+        Some(rec.next)
     };
-    block.successors.push(land);
+    block.successors.extend(land);
 }
 
 /// The recorded instruction a direct call falls through to.
@@ -812,11 +814,16 @@ pub(super) fn note_call(
 /// # Returns
 ///
 /// `next` when that address was recorded, otherwise the first recorded
-/// address after it.
-fn call_fall(recs: &[(u64, InstrRec)], next: u64) -> u64 {
+/// address after it when [`gap_jump`] accepts the gap: one skipped
+/// instruction before a jump or a call. `None` for any other gap, which
+/// says nothing about where the call returns.
+fn call_fall(recs: &[(u64, InstrRec)], next: u64) -> Option<u64> {
     match recs.binary_search_by_key(&next, |(at, _)| *at) {
-        Ok(_) => next,
-        Err(i) => recs.get(i).map_or(next, |(at, _)| *at),
+        Ok(_) => Some(next),
+        Err(i) => recs
+            .get(i)
+            .filter(|(at, r)| gap_jump(next, *at, r.flow))
+            .map(|(at, _)| *at),
     }
 }
 
