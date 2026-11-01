@@ -66,3 +66,36 @@ fn a_rip_relative_data_address_is_named_as_its_global() {
     assert!(!text(0x1020).contains("&g64_3010"), "{}", text(0x1020));
     assert!(!text(0x1030).contains("&g64_3010"), "{}", text(0x1030));
 }
+
+/// The export declares the global a body names only by its address, and
+/// writes it `extern` in the body.
+#[test]
+fn an_export_declares_a_global_named_by_its_address() {
+    use borer_engine::analysis::decompile::export::{Library, export};
+    use std::collections::BTreeSet;
+    let p = image();
+    let a = Analysis::compute(&p);
+    let mut body = String::new();
+    let only = BTreeSet::from([0x1000]);
+    let hoisted = export(
+        &p,
+        &a,
+        &Overlay::default(),
+        Library::Skip,
+        Some(&only),
+        &mut |t| {
+            body.push_str(t);
+            Ok(())
+        },
+    )
+    .expect("exports");
+    let file = format!("{}{body}", hoisted.head("t"));
+    assert!(
+        file.contains("\nuint64_t g64_3000; // @ 0x3000\n"),
+        "{file}"
+    );
+    assert!(
+        file.contains("  extern uint64_t g64_3000; // @ 0x3000\n"),
+        "{file}"
+    );
+}

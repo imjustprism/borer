@@ -1183,6 +1183,57 @@ fn declarations(text: &str) -> String {
         .join("\n")
 }
 
+/// Declares each `g<bits>_<addr>` global a text's code names but does not
+/// declare, as the text declares the globals it reads.
+///
+/// The declaration is `uint64_t g64_5b000; // @ 0x5b000`. A text spells a
+/// global's address `&g64_5b000` where it passes or computes the address
+/// and reads nothing through it, which declares nothing. The export adds
+/// these so a definition compiles alone; `decompile` leaves them out, as
+/// the address already says what it is. A width C has no integer of stays
+/// undeclared, and a name inside a literal or a comment is no use
+/// ([`words`]).
+///
+/// # Arguments
+///
+/// * `text` - The finished decompilation.
+///
+/// # Returns
+///
+/// The text with the declarations after its own, or unchanged.
+pub(super) fn declare_globals(text: &str) -> String {
+    let declarations: Vec<&str> = text
+        .lines()
+        .filter(|l| {
+            l.contains("// @ 0x") || ["extern ", "static "].iter().any(|p| l.starts_with(p))
+        })
+        .collect();
+    let declared = |w: &str| {
+        declarations
+            .iter()
+            .any(|l| !word_positions(code_of(l), w).is_empty())
+    };
+    let lines: Vec<String> = words(text)
+        .into_iter()
+        .filter(|w| is_global_name(w) && !declared(w))
+        .filter_map(|w| {
+            let (bits, addr) = w.strip_prefix('g')?.split_once('_')?;
+            matches!(bits, "8" | "16" | "32" | "64")
+                .then(|| format!("uint{bits}_t {w}; // @ 0x{addr}"))
+        })
+        .collect();
+    if lines.is_empty() {
+        return text.to_owned();
+    }
+    let comments = text.lines().take_while(|l| l.starts_with("//")).count();
+    let at = declarations_end(text).unwrap_or(comments);
+    let mut all: Vec<&str> = text.lines().collect();
+    all.splice(at..at, lines.iter().map(String::as_str));
+    let mut out = all.join("\n");
+    out.push('\n');
+    out
+}
+
 /// Returns the identifiers a text's code uses, each once, in order of
 /// first use: not the header comments, the comment ending a line, string
 /// and character literals, or a member a `.` or `->` names.
@@ -1372,9 +1423,24 @@ fn code_of(line: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        Index, Item, call_arities, code_of, implementation_named, library_items, own_prototype,
-        parse_proto, plain_type, platform_declarations, words,
+        Index, Item, call_arities, code_of, declare_globals, implementation_named, library_items,
+        own_prototype, parse_proto, plain_type, platform_declarations, words,
     };
+
+    /// A global the code names undeclared is declared after the text's own
+    /// declarations; one only a literal spells is not, nor one declared.
+    ///
+    /// # Panics
+    ///
+    /// When a declaration is written or left out otherwise.
+    #[test]
+    fn a_named_global_is_declared() {
+        let text = "// f @ 0x10\nuint64_t var1;\nuint32_t g32_10; // @ 0x10\n\nvar1 = &g64_3000;\nputs(\"g64_4000\");\nreturn g32_10;\n";
+        assert_eq!(
+            declare_globals(text),
+            "// f @ 0x10\nuint64_t var1;\nuint64_t g64_3000; // @ 0x3000\nuint32_t g32_10; // @ 0x10\n\nvar1 = &g64_3000;\nputs(\"g64_4000\");\nreturn g32_10;\n"
+        );
+    }
     use crate::analysis::decompile::cir;
     use crate::program::BinaryFormat;
     use std::collections::BTreeMap;
