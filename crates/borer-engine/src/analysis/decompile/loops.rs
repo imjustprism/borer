@@ -43,6 +43,7 @@ pub(super) fn recover_loops(lines: &mut Vec<String>) -> bool {
             || counted_while(lines, k)
             || returning_while(lines, k)
             || exit_arm(lines, k)
+            || shared_return(lines, k)
         {
             changed = true;
             continue;
@@ -626,6 +627,60 @@ fn exit_arm(lines: &mut Vec<String>, k: usize) -> bool {
     true
 }
 
+/// Turns a loop's `return R;` into `break;` when the loop is followed by
+/// that same `return R;`: `for (...) { if (C) { return R; } } return R;`
+/// is `for (...) { if (C) { break; } } return R;`.
+///
+/// Leaving the loop reaches the `return R;` right after it with nothing
+/// run between, so `R` is read in the same state and the function returns
+/// the same value; the one return is what the machine shares between both
+/// ways out. A `return` inside a nested loop or `switch` stays, where a
+/// `break` would leave that instead.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+/// * `k` - The line of the loop's opener.
+///
+/// # Returns
+///
+/// Whether a `return` became a `break`.
+fn shared_return(lines: &mut [String], k: usize) -> bool {
+    let Some(open) = lines.get(k).map(|l| l.trim()) else {
+        return false;
+    };
+    if !["while (", "for (", "do {"]
+        .iter()
+        .any(|p| open.starts_with(p))
+        || !open.ends_with('{')
+    {
+        return false;
+    }
+    let pad = lines.get(k).map_or(0, |l| indent_of(l));
+    let Some((close, ret)) = closing(lines, k, pad).and_then(|c| {
+        lines
+            .get(c + 1)
+            .filter(|l| indent_of(l) == pad && l.trim().starts_with("return "))
+            .map(|l| (c, l.trim().to_owned()))
+    }) else {
+        return false;
+    };
+    let inner: Vec<usize> = (k + 1..close)
+        .filter(|&j| {
+            lines.get(j).is_some_and(|l| {
+                let t = l.trim();
+                t == ret || t.starts_with("if (") && t.ends_with(&format!(") {ret}"))
+            }) && breaks_loop(lines, k, j)
+        })
+        .collect();
+    for &j in &inner {
+        if let Some(l) = lines.get_mut(j) {
+            *l = l.replacen(&ret, "break;", 1);
+        }
+    }
+    !inner.is_empty()
+}
+
 /// Tells whether the `break` on line `j` leaves the loop opened on line
 /// `k`, not a loop or `switch` nested in it.
 ///
@@ -939,6 +994,17 @@ mod tests {
             "  case 1: break;\n  }\n  if (rax == 2) {\n    break;\n",
         );
         assert_eq!(run(&two), two);
+    }
+
+    /// A loop's `return` of what the line after the loop returns is a
+    /// `break`; one inside a nested `switch`, or another value, stays.
+    #[test]
+    fn a_return_the_loop_is_followed_by_is_a_break() {
+        let text = "for (i = 0; t[i] != -1; i += 1) {\n  if (a1 == t[i]) {\n    return u[i];\n  }\n  if (i == a2) return u[i];\n  switch (i) {\n  case 3: return u[i];\n  }\n  if (i == 9) {\n    return 0;\n  }\n}\nreturn u[i];\n";
+        assert_eq!(
+            run(text),
+            "for (i = 0; t[i] != -1; i += 1) {\n  if (a1 == t[i]) {\n    break;\n  }\n  if (i == a2) break;\n  switch (i) {\n  case 3: return u[i];\n  }\n  if (i == 9) {\n    return 0;\n  }\n}\nreturn u[i];\n"
+        );
     }
 
     /// A `while` whose variable is set right before it and stepped at the
