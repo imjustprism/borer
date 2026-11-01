@@ -12,6 +12,7 @@ mod callee;
 pub(super) use callee::{CALLEE_INSTRUCTIONS_MAX, agreed_params};
 mod callfmt;
 mod selects;
+mod truths;
 
 /// The text passes every decompile ends with.
 ///

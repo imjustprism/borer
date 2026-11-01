@@ -66,7 +66,7 @@ pub(super) fn select_statements(text: &str) -> String {
             k = k.saturating_sub(1);
             continue;
         }
-        changed |= truth_diamond(&mut lines, k);
+        changed |= truth_diamond(&mut lines, k) || truths::return_chain(&mut lines, k);
         k += 1;
     }
     let flags = byte_names(&lines);
