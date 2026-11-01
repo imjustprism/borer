@@ -134,7 +134,8 @@ fn capability_fragments_match_a_name_boundary() {
 }
 
 /// A runtime failure path is not an anti-analysis capability. A caller that
-/// tests the result is.
+/// tests the result is. The runtime's `__fastfail` sits beside its
+/// `IsProcessorFeaturePresent` guard.
 #[test]
 fn a_crt_import_is_a_capability_only_when_a_caller_checks_it() {
     let map = |code: &[u8], name: &str| {
@@ -142,6 +143,11 @@ fn a_crt_import_is_a_capability_only_when_a_caller_checks_it() {
         p.symbols.push(Symbol {
             name: format!("KERNEL32.dll!{name}"),
             addr: 0x402000,
+            kind: SymbolKind::Import,
+        });
+        p.symbols.push(Symbol {
+            name: "KERNEL32.dll!IsProcessorFeaturePresent".to_owned(),
+            addr: 0x402008,
             kind: SymbolKind::Import,
         });
         let a = Analysis::compute(&p);
@@ -168,7 +174,8 @@ fn a_crt_import_is_a_capability_only_when_a_caller_checks_it() {
     let text = map(&bare, "IsDebuggerPresent");
     assert!(!text.contains("IsDebuggerPresent"), "{text}");
     let fail = [
-        0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0xe8, 0x03, 0x10, 0x00, 0x00, // ASM: call 0x402008
+        0xe8, 0xf6, 0x0f, 0x00, 0x00, // ASM: call 0x402000
         0x85, 0xc0, // ASM: test eax, eax
         0xcd, 0x29, // ASM: int 0x29
         0xc3, // ASM: ret
@@ -394,7 +401,8 @@ fn a_filter_install_keeps_a_checked_debugger_call() {
 
 /// `OutputDebugString` returns nothing, so the call itself is the check.
 ///
-/// A call on the runtime failure path still stays off the map.
+/// A call on the runtime failure path, `__fastfail` beside its
+/// `IsProcessorFeaturePresent` guard, still stays off the map.
 #[test]
 fn an_output_debug_string_call_stays_unless_it_is_the_failure_path() {
     let map = |code: &[u8]| {
@@ -402,6 +410,11 @@ fn an_output_debug_string_call_stays_unless_it_is_the_failure_path() {
         p.symbols.push(Symbol {
             name: "KERNEL32.dll!OutputDebugStringA".to_owned(),
             addr: 0x402000,
+            kind: SymbolKind::Import,
+        });
+        p.symbols.push(Symbol {
+            name: "KERNEL32.dll!IsProcessorFeaturePresent".to_owned(),
+            addr: 0x402008,
             kind: SymbolKind::Import,
         });
         borer_engine::analysis::render::capability_map_tsv(&p, Some(&Analysis::compute(&p)))
@@ -413,7 +426,8 @@ fn an_output_debug_string_call_stays_unless_it_is_the_failure_path() {
     let text = map(&plain);
     assert!(text.contains("OutputDebugStringA"), "{text}");
     let fail = [
-        0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0xe8, 0x03, 0x10, 0x00, 0x00, // ASM: call 0x402008
+        0xe8, 0xf6, 0x0f, 0x00, 0x00, // ASM: call 0x402000
         0xcd, 0x29, // ASM: int 0x29
         0xc3, // ASM: ret
     ];
@@ -566,4 +580,56 @@ fn a_check_past_a_return_or_jump_is_not_the_debugger_result() {
     ];
     let text = debugger_map(&indirect);
     assert!(!text.contains("IsDebuggerPresent"), "{text}");
+}
+
+/// `__fastfail` after a tested debugger call is the program's own check.
+///
+/// It is the runtime's fail-fast only beside the `IsProcessorFeaturePresent`
+/// guard, and then only for the call it follows: another tested call in
+/// the same function stays a check.
+#[test]
+fn a_fastfail_hides_a_debugger_call_only_beside_the_runtime_guard() {
+    let map = |code: &[u8]| {
+        let mut p = image(Arch::X86_64, code, &[]);
+        for (name, addr) in [
+            ("IsDebuggerPresent", 0x402000),
+            ("IsProcessorFeaturePresent", 0x402008),
+        ] {
+            p.symbols.push(Symbol {
+                name: format!("KERNEL32.dll!{name}"),
+                addr,
+                kind: SymbolKind::Import,
+            });
+        }
+        let a = Analysis::compute(&p);
+        borer_engine::analysis::render::capability_map_tsv(&p, Some(&a))
+    };
+    let own = [
+        0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0x85, 0xc0, // ASM: test eax, eax
+        0x74, 0x02, // ASM: jz 0x40100b
+        0xcd, 0x29, // ASM: int 0x29
+        0xc3, // ASM: ret
+    ];
+    let text = map(&own);
+    assert!(text.contains("IsDebuggerPresent"), "{text}");
+    let mut runtime = vec![
+        0xe8, 0x03, 0x10, 0x00, 0x00, // ASM: call 0x402008
+        0x85, 0xc0, // ASM: test eax, eax
+        0xe8, 0xf4, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0x85, 0xc0, // ASM: test eax, eax
+        0x74, 0x02, // ASM: jz 0x401012
+        0xcd, 0x29, // ASM: int 0x29
+    ];
+    let mut both = runtime.clone();
+    runtime.push(0xc3); // ASM: ret
+    let text = map(&runtime);
+    assert!(!text.contains("IsDebuggerPresent"), "{text}");
+    both.extend([
+        0xe8, 0xe9, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0x85, 0xc0, // ASM: test eax, eax
+        0xc3, // ASM: ret
+    ]);
+    let text = map(&both);
+    assert!(text.contains("IsDebuggerPresent"), "{text}");
 }

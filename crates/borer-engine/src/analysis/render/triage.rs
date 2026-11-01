@@ -420,7 +420,11 @@ pub fn capability_map_tsv(p: &Program, a: Option<&Analysis>) -> String {
 /// Whether an anti-analysis import is kept on the capability map.
 ///
 /// The C runtime's failure and timing imports stay off the map unless a
-/// caller uses the result as a check. `OutputDebugString` returns nothing,
+/// caller uses the result as a check. A call that `int 0x29` follows is
+/// the runtime's `__fastfail` only in a function that also asks
+/// `IsProcessorFeaturePresent`, its guard; that call alone is dropped, and
+/// without the guard the fail-fast is the program's own reaction. A
+/// constant holding the bytes `cd 29`, such as `mov edx, 0x29cd`, is not it. `OutputDebugString` returns nothing,
 /// so a call outside that failure path stays. Every other import stays.
 /// A call whose next instruction is a bare `ret` stays when one caller
 /// tests the value that wrapper returned.
@@ -436,12 +440,18 @@ fn called_as_check(p: &Program, a: &Analysis, api: &str) -> bool {
     let Some(stem) = crt_stem(api) else {
         return true;
     };
-    if p.arch.bitness().is_none() {
+    let Some(bits) = p.arch.bitness() else {
         return true;
-    }
+    };
     a.functions.iter().any(|f| {
-        let sites = call_sites(p, a, f.entry, stem);
-        if sites.is_empty() || crt_failure(p, a, f.entry) {
+        let mut sites = call_sites(p, a, f.entry, stem);
+        if crt_failure(p, a, f.entry) {
+            return false;
+        }
+        if !call_sites(p, a, f.entry, "isprocessorfeaturepresent").is_empty() {
+            sites.retain(|va| !int29_follows(p, bits, *va));
+        }
+        if sites.is_empty() {
             return false;
         }
         if stem == "queryperformancecounter" {
@@ -490,9 +500,9 @@ pub(super) fn call_sites(p: &Program, a: &Analysis, entry: u64, stem: &str) -> V
 
 /// Whether `entry` is the C runtime's failure path.
 ///
-/// That path calls `IsDebuggerPresent` beside the unwind helpers, or
-/// `__fastfail` follows the import call. A `__fastfail` on another path
-/// is a separate check. Installing the filter is a different call.
+/// That path calls `IsDebuggerPresent` beside the unwind helpers.
+/// Installing the filter is a different call. The runtime's `__fastfail`
+/// is judged per call site in [`called_as_check`].
 fn crt_failure(p: &Program, a: &Analysis, entry: u64) -> bool {
     const MARK: [&str; 4] = [
         "unhandledexceptionfilter",
@@ -500,28 +510,12 @@ fn crt_failure(p: &Program, a: &Analysis, entry: u64) -> bool {
         "rtlvirtualunwind",
         "rtllookupfunctionentry",
     ];
-    let helped = a.refs_from(entry).iter().any(|(target, _)| {
+    a.refs_from(entry).iter().any(|(target, _)| {
         a.symbol_at(p, *target).is_some_and(|sym| {
             let name = bare_name(&sym.name).to_lowercase();
             !name.contains("setunhandledexceptionfilter") && MARK.iter().any(|m| name.contains(m))
         })
-    });
-    helped || fastfail(p, a, entry)
-}
-
-/// Whether `int 0x29` follows a runtime call in `entry`.
-///
-/// The interrupt has to be one of the next few instructions on that path.
-/// A `__fastfail` reached by another branch is a separate check. A constant
-/// that holds the bytes `cd 29`, such as `mov edx, 0x29cd`, is not it.
-fn fastfail(p: &Program, a: &Analysis, entry: u64) -> bool {
-    let Some(bits) = p.arch.bitness() else {
-        return false;
-    };
-    let mut sites = call_sites(p, a, entry, "isdebuggerpresent");
-    sites.extend(call_sites(p, a, entry, "outputdebugstring"));
-    sites.extend(call_sites(p, a, entry, "queryperformancecounter"));
-    sites.iter().any(|va| int29_follows(p, bits, *va))
+    })
 }
 
 /// Whether `int 0x29` is one of the next few instructions after `va`.
