@@ -989,6 +989,29 @@ fn a_long_tls_callback_list_is_kept() {
     assert_eq!(load(bytes).headers.tls_callbacks, vec![good; 65]);
 }
 
+/// A bad slot after more than 64 callbacks empties the strict parse, so
+/// the 64 read before it stay.
+#[test]
+fn a_bad_slot_after_a_long_tls_list_keeps_the_callbacks_read() {
+    let _serial = serial();
+    const TLS_DIR: usize = 9;
+    let good = IMAGE_BASE + 0x1000;
+    let mut data = vec![0u8; 0x28 + 67 * 8];
+    put64(&mut data, 24, IMAGE_BASE + 0x2000 + 0x28);
+    for i in 0..65 {
+        put64(&mut data, 0x28 + i * 8, good);
+    }
+    put64(&mut data, 0x28 + 65 * 8, 0xf4);
+    let bytes = pe(
+        &[
+            Sec::sound(".text", 0x1000, text(), CODE),
+            Sec::sound(".rdata", 0x2000, data, DATA),
+        ],
+        &[(TLS_DIR, 0x2000, 40)],
+    );
+    assert_eq!(load(bytes).headers.tls_callbacks, vec![good; 64]);
+}
+
 /// A callback in the mapped headers stays, and so does the callback after it.
 #[test]
 fn a_tls_callback_in_the_headers_stays() {

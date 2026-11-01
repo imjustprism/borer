@@ -558,8 +558,9 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
 /// A slot below the image base makes the strict parse drop the whole
 /// directory. The callbacks before that slot still ran. When the directory
 /// itself cannot be read, the parsed list is kept. More than 64 callbacks
-/// are left to that parsed list too: it has no cap, and a cut list must
-/// not replace it.
+/// are left to that parsed list too, when it is the longer one: it has no
+/// cap, but a bad slot past the 64th empties it, and the 64 read here
+/// still ran.
 ///
 /// # Arguments
 ///
@@ -628,7 +629,15 @@ fn read_tls_callbacks(pe: &PE<'_>, bytes: &[u8], sections: &[Section]) -> Option
         && callback_slot(sections, pe.image_base, bytes, rva, CAP, stride, pe.is_64)
             .is_some_and(|slot| image_callback(pe, sections, slot));
     if cut {
-        return None;
+        let parsed = pe
+            .tls_data
+            .as_ref()
+            .map_or_else(Vec::new, |t| t.callbacks.clone());
+        return Some(if parsed.len() > out.len() {
+            parsed
+        } else {
+            out
+        });
     }
     Some(out)
 }
