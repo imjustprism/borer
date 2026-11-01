@@ -104,7 +104,8 @@ impl Names<'_> {
     /// known algorithm's table (`crc_32_table`), `&__ImageBase` for a PE's
     /// own image base, a mapped overlay-named address, the quoted literal
     /// for a string in non-code memory when `literal` allows it, `&gN_addr`
-    /// for an address in
+    /// for a zero-filled (`.bss`) address the program computes from `rip`
+    /// ([`super::globals::rip_data`]), `&gN_addr` for an address in
     /// writable data that holds no literal, or `None` when the value names
     /// nothing.
     pub(super) fn const_name(&self, v: u64, literal: bool) -> Option<String> {
@@ -170,6 +171,13 @@ impl Names<'_> {
         }
         if literal && let Some(text) = super::literal_at(self.program, v, &self.own_name) {
             return Some(text);
+        }
+        if super::globals::rip_data(self.program, self.analysis).contains(&v) {
+            let bits = self
+                .global_types
+                .get(&v)
+                .map_or(self.word * 8, |t| i64::from(t.bits()));
+            return Some(format!("&g{bits}_{v:x}"));
         }
         self.program
             .section_at(v)

@@ -797,6 +797,12 @@ fn own_callees(
                 out.push('\n');
             }
         }
+        if i == decls_end {
+            for d in undeclared_globals(text) {
+                out.push_str(&d);
+                out.push('\n');
+            }
+        }
         let name = declared_name(line);
         let callee = (comments..decls_end).contains(&i)
             && line.starts_with("extern ")
@@ -824,6 +830,45 @@ fn own_callees(
         }
     }
     out
+}
+
+/// Returns a declaration for each `g<bits>_<addr>` global a text names but
+/// does not declare, as the text declares the ones it reads:
+/// `uint64_t g64_5b000; // @ 0x5b000`.
+///
+/// A text spells a global's address `&g64_5b000` where it passes or
+/// computes the address and reads nothing through it; the export declares
+/// it so the definition says what the name is ([`Hoisted::add`] writes it
+/// `extern`). A width C has no integer of stays undeclared.
+///
+/// # Arguments
+///
+/// * `text` - The function's finished text.
+///
+/// # Returns
+///
+/// The declarations, in name order.
+fn undeclared_globals(text: &str) -> Vec<String> {
+    let declares = |l: &str| l.contains("; // @ 0x") || l.starts_with("extern ");
+    let declared: BTreeSet<String> = text
+        .lines()
+        .filter(|l| declares(l))
+        .map(declared_name)
+        .collect();
+    let named: BTreeSet<&str> = text
+        .lines()
+        .filter(|l| !l.starts_with("//") && !declares(l))
+        .flat_map(|l| l.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')))
+        .filter(|w| super::line::is_global_name(w) && !declared.contains(*w))
+        .collect();
+    named
+        .into_iter()
+        .filter_map(|w| {
+            let (bits, addr) = w.strip_prefix('g')?.split_once('_')?;
+            matches!(bits, "8" | "16" | "32" | "64")
+                .then(|| format!("uint{bits}_t {w}; // @ 0x{addr}"))
+        })
+        .collect()
 }
 
 /// Returns a function's own `// signature:`, built once per function under

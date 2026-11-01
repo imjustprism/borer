@@ -378,6 +378,73 @@ pub(super) fn debug_typed(
     out
 }
 
+/// Returns the data addresses a rip-relative `lea` of the program computes
+/// and no instruction writes as an immediate, built once per program
+/// through [`crate::analysis::Analysis::derived`].
+///
+/// `lea rsi, [rip + 0x4f0a9]` puts the address of a global in a register;
+/// the lifter folds it to the constant `0x5b000`, which by its value alone
+/// cannot be told from a flag or a size that falls in the range of `.bss`.
+/// An address a `lea` computes from `rip` is an address by its provenance,
+/// so a constant one of those leaves names that global. A value the
+/// program also writes as an immediate operand is a number somewhere, so
+/// it stays a number everywhere.
+///
+/// An address counts when it lies in a zero-filled section that holds no
+/// code (`.bss`): one with file bytes is named by what it holds (a string,
+/// a table, a GUID) or as writable data, by the passes that read them.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `analysis` - Its functions.
+///
+/// # Returns
+///
+/// The addresses; empty for any image but a 64-bit x86 one.
+pub(super) fn rip_data(
+    program: &Program,
+    analysis: &crate::analysis::Analysis,
+) -> std::sync::Arc<BTreeSet<u64>> {
+    analysis.derived.get_or_build("rip_data", (), || {
+        let mut leas = BTreeSet::new();
+        let mut immediates = BTreeSet::new();
+        if program.arch.isa() != Some(crate::isa::Isa::X86 { bits: 64 }) {
+            return leas;
+        }
+        for f in &analysis.functions {
+            for blk in &f.blocks {
+                for i in crate::analysis::functions::decode_block(program, 64, blk) {
+                    if i.mnemonic() == iced_x86::Mnemonic::Lea && i.is_ip_rel_memory_operand() {
+                        leas.insert(i.ip_rel_memory_address());
+                    }
+                    for op in 0..i.op_count() {
+                        if matches!(
+                            i.op_kind(op),
+                            iced_x86::OpKind::Immediate8
+                                | iced_x86::OpKind::Immediate16
+                                | iced_x86::OpKind::Immediate32
+                                | iced_x86::OpKind::Immediate64
+                                | iced_x86::OpKind::Immediate8to16
+                                | iced_x86::OpKind::Immediate8to32
+                                | iced_x86::OpKind::Immediate8to64
+                                | iced_x86::OpKind::Immediate32to64
+                        ) {
+                            immediates.insert(i.immediate(op));
+                        }
+                    }
+                }
+            }
+        }
+        leas.retain(|&a| {
+            !immediates.contains(&a)
+                && program.section_at(a).is_none()
+                && program.zero_fill_at(a).is_some_and(|s| !s.executable)
+        });
+        leas
+    })
+}
+
 #[cfg(test)]
 #[expect(
     clippy::missing_panics_doc,

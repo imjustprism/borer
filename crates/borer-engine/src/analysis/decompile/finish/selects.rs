@@ -1754,13 +1754,15 @@ fn readable(expr: &str, var: &str) -> bool {
 /// and that cannot fault when moved ahead of its test.
 ///
 /// A memory operand or an address can name the same bytes as the slot the
-/// fold stores, through another local. A plain value cannot.
+/// fold stores, through another local. A plain value cannot, and neither
+/// can a global's address, `&g64_5b000`: a constant no local aliases.
 ///
 /// # Arguments
 ///
 /// * `expr` - One test or one stored value.
 fn plain_value(expr: &str) -> bool {
-    !expr.contains('*') && !expr.contains('[') && !expr.contains('&') && !expr.contains("->")
+    expr.strip_prefix('&').is_some_and(is_global_name)
+        || !expr.contains('*') && !expr.contains('[') && !expr.contains('&') && !expr.contains("->")
 }
 
 /// Tells whether a line only declares names: a type and a list, no value,
@@ -1956,6 +1958,19 @@ return 0;
         assert_eq!(select_statements(guarded), guarded);
         let alias = "uint32_t local_c;\nuint32_t local_58;\n\nif (((uint32_t*)&local_58)[a1] == 1) {\n  local_c = 2;\n} else {\n  local_c = 0;\n  if (a2 != 0) {\n    local_c = 2;\n  }\n}\nreturn local_c;\n";
         assert_eq!(select_statements(alias), alias);
+    }
+
+    /// A global's address set before an `if` that sets another moves into
+    /// the `else` arm, as a constant does; a local's address stays.
+    #[test]
+    fn a_global_address_before_an_if_is_its_else() {
+        let text = "uint64_t buf;\n\nbuf = &g64_c740;\nif (g32_c728 != 0) {\n  kill(-g32_c728, 9);\n  buf = &g64_c840;\n}\nwrite(2, buf, 1);\n";
+        assert_eq!(
+            select_statements(text),
+            "uint64_t buf;\n\nif (g32_c728 != 0) {\n  kill(-g32_c728, 9);\n  buf = &g64_c840;\n} else {\n  buf = &g64_c740;\n}\nwrite(2, buf, 1);\n"
+        );
+        let local = text.replace("&g64_c740", "&local_8");
+        assert_eq!(select_statements(&local), local);
     }
 
     /// Arms that store two different names of one type are a choice. An arm

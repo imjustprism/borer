@@ -1,0 +1,68 @@
+//! A data address a `lea` computes from `rip` is named as the global it
+//! is; a value the program also writes as an immediate stays a number.
+#![expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test"
+)]
+
+use borer_engine::analysis::decompile::decompile;
+use borer_engine::analysis::{Analysis, Overlay};
+use borer_engine::program::{Arch, BinaryFormat, Program, Section};
+
+/// Four x64 leaves at `0x1000`, `.bss` at `0x3000`:
+///
+/// ```text
+/// +0x00 lea rax, [rip + 0x1ff9] ; 0x3000; ret
+/// +0x10 mov eax, 0x3008         ; ret
+/// +0x20 lea rax, [rip + 0x1fe9] ; 0x3010; ret
+/// +0x30 mov eax, 0x3010         ; ret
+/// ```
+fn image() -> Program {
+    let mut bytes = vec![0xccu8; 0x2000];
+    let code: [(usize, &[u8]); 4] = [
+        (0x00, &[0x48, 0x8d, 0x05, 0xf9, 0x1f, 0x00, 0x00, 0xc3]), // ASM: lea rax, [rip+0x1ff9]; ret
+        (0x10, &[0xb8, 0x08, 0x30, 0x00, 0x00, 0xc3]),             // ASM: mov eax, 0x3008; ret
+        (0x20, &[0x48, 0x8d, 0x05, 0xe9, 0x1f, 0x00, 0x00, 0xc3]), // ASM: lea rax, [rip+0x1fe9]; ret
+        (0x30, &[0xb8, 0x10, 0x30, 0x00, 0x00, 0xc3]),             // ASM: mov eax, 0x3010; ret
+    ];
+    for (at, b) in code {
+        bytes[0x1000 + at..0x1000 + at + b.len()].copy_from_slice(b);
+    }
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0,
+        Some(0x1000),
+        vec![
+            Section::mapped(".text", 0x1000, 0x1000, 0x1000, false, true),
+            Section {
+                file_size: 0,
+                ..Section::mapped(".bss", 0x3000, 0, 0x1000, true, false)
+            },
+        ],
+    );
+    p.format = BinaryFormat::Elf;
+    p.function_ranges = vec![
+        (0x1000, 0x1008),
+        (0x1010, 0x1016),
+        (0x1020, 0x1028),
+        (0x1030, 0x1036),
+    ];
+    p
+}
+
+/// Only the `.bss` address no immediate also spells is named.
+#[test]
+fn a_rip_relative_data_address_is_named_as_its_global() {
+    let p = image();
+    let a = Analysis::compute(&p);
+    let text = |entry| decompile(&p, &a, &Overlay::default(), entry).expect("decompiles");
+    assert!(
+        text(0x1000).contains("return &g64_3000;"),
+        "{}",
+        text(0x1000)
+    );
+    assert!(text(0x1010).contains("return 0x3008;"), "{}", text(0x1010));
+    assert!(!text(0x1020).contains("&g64_3010"), "{}", text(0x1020));
+    assert!(!text(0x1030).contains("&g64_3010"), "{}", text(0x1030));
+}
