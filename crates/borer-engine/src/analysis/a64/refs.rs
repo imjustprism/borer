@@ -894,25 +894,72 @@ pub(crate) fn formed(program: &Program, f: &Function) -> (Vec<u64>, Vec<u64>) {
     let insns = decode_function(&text, f);
     let mut addresses = Vec::new();
     Tracker::new(&insns, &f.blocks).refs(&mut |target, va, kind| {
-        let add = insns
+        let forms = insns
             .binary_search_by_key(&va, |i| i.va)
             .ok()
             .and_then(|k| insns.get(k))
-            .is_some_and(|i| i.mnemonic == Mnemonic::Add);
-        if add && kind == RefKind::Data {
+            .is_some_and(|i| i.mnemonic == Mnemonic::Add || i.op == Op::Adr);
+        if forms && kind == RefKind::Data {
             addresses.push(target);
         }
     });
-    let immediates = insns
+    let mut immediates: Vec<u64> = insns
         .iter()
         .filter(|i| i.mnemonic != Mnemonic::Add)
         .flat_map(|i| i.operands)
-        .filter_map(|o| match o {
-            Opnd::Imm(v) => Some(v),
-            _ => None,
-        })
+        .filter_map(|o| if let Opnd::Imm(v) = o { Some(v) } else { None })
         .collect();
+    immediates.extend(wide_constants(&insns));
     (addresses, immediates)
+}
+
+/// Returns the whole values `movz`, `movn` and `movk` runs build in
+/// registers, each value as it stands after each instruction of a run.
+///
+/// `movz x0, #2, lsl #16; movk x0, #0x10` builds `0x20010`, which neither
+/// immediate spells alone. The instructions are read in address order and
+/// any other write to a register ends its run, so a value is built only
+/// from instructions that can run one after the other.
+///
+/// # Arguments
+///
+/// * `insns` - A function's instructions, in address order.
+fn wide_constants(insns: &[Insn]) -> Vec<u64> {
+    let mut held: [Option<u64>; REGS] = [None; REGS];
+    let mut out = Vec::new();
+    for i in insns {
+        let lane = u64::from((i.word >> 5) & 0xffff) << (((i.word >> 21) & 3) * 16);
+        let keep = !(0xffff_u64 << (((i.word >> 21) & 3) * 16));
+        let narrow = |v: u64| {
+            if i.word >> 31 == 1 {
+                v
+            } else {
+                v & 0xffff_ffff
+            }
+        };
+        let reg = any_reg(&i.operands[0]);
+        let before = reg.and_then(|r| held.get(r).copied().flatten());
+        let built = if i.mnemonic == Mnemonic::Movz {
+            Some(narrow(lane))
+        } else if i.mnemonic == Mnemonic::Movn {
+            Some(narrow(!lane))
+        } else if i.mnemonic == Mnemonic::Movk {
+            before.map(|v| narrow((v & keep) | lane))
+        } else {
+            None
+        };
+        let mask = writes(i);
+        for (n, r) in held.iter_mut().enumerate() {
+            if mask & (1u32 << n) != 0 {
+                *r = None;
+            }
+        }
+        if let (Some(v), Some(r)) = (built, reg.and_then(|r| held.get_mut(r))) {
+            out.push(v);
+            *r = Some(v);
+        }
+    }
+    out
 }
 
 /// Indexes every reference the functions make through the constants their

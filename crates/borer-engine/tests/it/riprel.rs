@@ -106,9 +106,12 @@ fn an_export_declares_a_global_named_by_its_address() {
 /// +0x00 adrp x0, 0x20000; add x0, x0, #0x10; ret
 /// +0x10 mov x0, #0x20; ret
 /// +0x20 adrp x8, 0x20000; ldr x0, [x8, #0x18]; ret
+/// +0x30 adr x0, 0x20020; ret
+/// +0x40 movz x0, #2, lsl #16; movk x0, #0x30; ret   (0x20030, a number)
+/// +0x50 adrp x0, 0x20000; add x0, x0, #0x30; ret
 /// ```
 fn a64_image() -> Program {
-    let words: [u32; 10] = [
+    let words: [u32; 24] = [
         0x9000_0080, // ASM: adrp x0, 0x20000
         0x9100_4000, // ASM: add x0, x0, #0x10
         0xd65f_03c0, // ASM: ret
@@ -119,16 +122,29 @@ fn a64_image() -> Program {
         0xd503_201f, // ASM: nop
         0x9000_0088, // ASM: adrp x8, 0x20000
         0xf940_0d00, // ASM: ldr x0, [x8, #0x18]
+        0xd65f_03c0, // ASM: ret
+        0xd503_201f, // ASM: nop
+        0x1007_ff80, // ASM: adr x0, 0x20020
+        0xd65f_03c0, // ASM: ret
+        0xd503_201f, // ASM: nop
+        0xd503_201f, // ASM: nop
+        0xd2a0_0040, // ASM: movz x0, #2, lsl #16
+        0xf280_0600, // ASM: movk x0, #0x30
+        0xd65f_03c0, // ASM: ret
+        0xd503_201f, // ASM: nop
+        0x9000_0080, // ASM: adrp x0, 0x20000
+        0x9100_c000, // ASM: add x0, x0, #0x30
+        0xd65f_03c0, // ASM: ret
+        0xd503_201f, // ASM: nop
     ];
-    let mut code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
-    code.extend(0xd65f_03c0u32.to_le_bytes()); // ASM: ret
+    let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
     let mut p = Program::raw(
         code,
         Arch::Arm64,
         0,
         Some(0x10000),
         vec![
-            Section::mapped(".text", 0x10000, 0, 0x2c, false, true),
+            Section::mapped(".text", 0x10000, 0, 0x60, false, true),
             Section {
                 file_size: 0,
                 ..Section::mapped(".bss", 0x20000, 0, 0x1000, true, false)
@@ -136,13 +152,21 @@ fn a64_image() -> Program {
         ],
     );
     p.format = BinaryFormat::Elf;
-    p.function_ranges = vec![(0x10000, 0x1000c), (0x10010, 0x10018), (0x10020, 0x1002c)];
+    p.function_ranges = vec![
+        (0x10000, 0x1000c),
+        (0x10010, 0x10018),
+        (0x10020, 0x1002c),
+        (0x10030, 0x10038),
+        (0x10040, 0x1004c),
+        (0x10050, 0x1005c),
+    ];
     p
 }
 
-/// An arm64 address formed from an `adrp` page and an `add` is named as
-/// the global it is, a load through the page reads that global, and a
-/// `mov` of a number stays a number.
+/// An arm64 address an `adrp` page and an `add`, or an `adr`, forms is named.
+///
+/// A load through the page reads that global. A `mov` of a number stays a
+/// number, and so does an address a `movz` and `movk` also build elsewhere.
 #[test]
 fn an_adrp_page_address_is_named_as_its_global() {
     let p = a64_image();
@@ -159,4 +183,11 @@ fn an_adrp_page_address_is_named_as_its_global() {
         "{}",
         text(0x10020)
     );
+    assert!(
+        text(0x10030).contains("return &g64_20020;"),
+        "{}",
+        text(0x10030)
+    );
+    assert!(!text(0x10040).contains("g64_20030"), "{}", text(0x10040));
+    assert!(!text(0x10050).contains("g64_20030"), "{}", text(0x10050));
 }
