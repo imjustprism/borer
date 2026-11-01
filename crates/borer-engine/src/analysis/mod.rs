@@ -18,6 +18,7 @@ mod cell;
 pub mod classes;
 pub mod decompile;
 mod descriptors;
+mod discover;
 pub mod eh;
 pub mod encode;
 pub mod fieldrefs;
@@ -41,6 +42,7 @@ pub mod render;
 mod returns;
 pub(crate) mod rtti;
 pub mod runtime;
+mod rv;
 pub mod schema;
 pub mod sdk;
 mod seh32;
@@ -1471,17 +1473,8 @@ impl Analysis {
     #[must_use]
     pub fn compute_with(program: &Program, packs: Arc<crate::pack::Packs>) -> Analysis {
         let mut phases = crate::timing::Phases::new();
-        let discover = || match program.arch.isa() {
-            Some(Isa::X86 { bits }) => functions::discover(program, bits),
-            Some(Isa::A64) => a64::discover(program),
-            Some(Isa::A32) => a32::discover(program),
-            Some(Isa::Rv(_)) | None => {
-                let mut empty = Analysis::default();
-                empty.finish_index(program);
-                empty
-            }
-        };
-        let (mut analysis, crypto) = beside(discover, || crypto_tables(program));
+        let (mut analysis, crypto) =
+            beside(|| discover::discover(program), || crypto_tables(program));
         let crypto = crypto.unwrap_or_else(|| crypto_tables(program));
         phases.mark("analysis discover");
         analysis.packs = packs;
@@ -1491,12 +1484,7 @@ impl Analysis {
         phases.mark("analysis naming handlers");
         descriptors::qualify_registrations(&mut analysis);
         phases.mark("analysis descriptors");
-        match program.arch.isa() {
-            Some(Isa::A64) => a64::infer_returns(program, &mut analysis),
-            Some(Isa::A32) => a32::infer_returns(program, &mut analysis),
-            Some(Isa::Rv(_)) => {}
-            Some(Isa::X86 { .. }) | None => returns::infer(program, &mut analysis),
-        }
+        discover::infer_returns(program, &mut analysis);
         phases.mark("analysis returns");
         vtables::infer(program, &mut analysis);
         phases.mark("analysis vtables");

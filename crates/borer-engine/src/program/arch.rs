@@ -111,8 +111,8 @@ impl Arch {
                 Feature::Emulate => false,
             },
             Some(Isa::Rv(_)) => match feature {
-                Feature::Disasm => true,
-                Feature::Discover | Feature::Emulate | Feature::Decompile => false,
+                Feature::Disasm | Feature::Discover => true,
+                Feature::Emulate | Feature::Decompile => false,
             },
             None => false,
         }
