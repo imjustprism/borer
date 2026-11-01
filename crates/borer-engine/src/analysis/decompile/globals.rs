@@ -378,9 +378,12 @@ pub(super) fn debug_typed(
     out
 }
 
-/// Returns the data addresses a rip-relative `lea` of the program computes
-/// and no instruction writes as an immediate, built once per program
-/// through [`crate::analysis::Analysis::derived`].
+/// Returns the data addresses the program computes from its own position
+/// and never writes as an immediate.
+///
+/// They are the targets of an x86-64 rip-relative `lea` and of an arm64
+/// `adrp` page plus an `add` ([`crate::analysis::a64::formed`]), built
+/// once per program through [`crate::analysis::Analysis::derived`].
 ///
 /// `lea rsi, [rip + 0x4f0a9]` puts the address of a global in a register;
 /// the lifter folds it to the constant `0x5b000`, which by its value alone
@@ -401,7 +404,7 @@ pub(super) fn debug_typed(
 ///
 /// # Returns
 ///
-/// The addresses; empty for any image but a 64-bit x86 one.
+/// The addresses; empty for any image but an x86-64 or arm64 one.
 pub(super) fn rip_data(
     program: &Program,
     analysis: &crate::analysis::Analysis,
@@ -409,32 +412,18 @@ pub(super) fn rip_data(
     analysis.derived.get_or_build("rip_data", (), || {
         let mut leas = BTreeSet::new();
         let mut immediates = BTreeSet::new();
-        if program.arch.isa() != Some(crate::isa::Isa::X86 { bits: 64 }) {
-            return leas;
-        }
-        for f in &analysis.functions {
-            for blk in &f.blocks {
-                for i in crate::analysis::functions::decode_block(program, 64, blk) {
-                    if i.mnemonic() == iced_x86::Mnemonic::Lea && i.is_ip_rel_memory_operand() {
-                        leas.insert(i.ip_rel_memory_address());
-                    }
-                    for op in 0..i.op_count() {
-                        if matches!(
-                            i.op_kind(op),
-                            iced_x86::OpKind::Immediate8
-                                | iced_x86::OpKind::Immediate16
-                                | iced_x86::OpKind::Immediate32
-                                | iced_x86::OpKind::Immediate64
-                                | iced_x86::OpKind::Immediate8to16
-                                | iced_x86::OpKind::Immediate8to32
-                                | iced_x86::OpKind::Immediate8to64
-                                | iced_x86::OpKind::Immediate32to64
-                        ) {
-                            immediates.insert(i.immediate(op));
-                        }
-                    }
+        match program.arch.isa() {
+            Some(crate::isa::Isa::A64) => {
+                for f in &analysis.functions {
+                    let (formed, imms) = crate::analysis::a64::formed(program, f);
+                    leas.extend(formed);
+                    immediates.extend(imms);
                 }
             }
+            Some(crate::isa::Isa::X86 { bits: 64 }) => {
+                x86_leas(program, analysis, &mut leas, &mut immediates);
+            }
+            Some(crate::isa::Isa::X86 { .. } | crate::isa::Isa::A32) | None => return leas,
         }
         leas.retain(|&a| {
             !immediates.contains(&a)
@@ -443,6 +432,47 @@ pub(super) fn rip_data(
         });
         leas
     })
+}
+
+/// Collects the targets of an x86-64 program's rip-relative `lea`s and the
+/// values its immediate operands write.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `analysis` - Its functions.
+/// * `leas` - Takes the `lea` targets.
+/// * `immediates` - Takes the immediates.
+fn x86_leas(
+    program: &Program,
+    analysis: &crate::analysis::Analysis,
+    leas: &mut BTreeSet<u64>,
+    immediates: &mut BTreeSet<u64>,
+) {
+    for f in &analysis.functions {
+        for blk in &f.blocks {
+            for i in crate::analysis::functions::decode_block(program, 64, blk) {
+                if i.mnemonic() == iced_x86::Mnemonic::Lea && i.is_ip_rel_memory_operand() {
+                    leas.insert(i.ip_rel_memory_address());
+                }
+                for op in 0..i.op_count() {
+                    if matches!(
+                        i.op_kind(op),
+                        iced_x86::OpKind::Immediate8
+                            | iced_x86::OpKind::Immediate16
+                            | iced_x86::OpKind::Immediate32
+                            | iced_x86::OpKind::Immediate64
+                            | iced_x86::OpKind::Immediate8to16
+                            | iced_x86::OpKind::Immediate8to32
+                            | iced_x86::OpKind::Immediate8to64
+                            | iced_x86::OpKind::Immediate32to64
+                    ) {
+                        immediates.insert(i.immediate(op));
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

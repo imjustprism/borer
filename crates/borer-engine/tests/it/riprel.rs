@@ -99,3 +99,64 @@ fn an_export_declares_a_global_named_by_its_address() {
         "{file}"
     );
 }
+
+/// arm64 routines at `0x10000`, `.bss` at `0x20000`:
+///
+/// ```text
+/// +0x00 adrp x0, 0x20000; add x0, x0, #0x10; ret
+/// +0x10 mov x0, #0x20; ret
+/// +0x20 adrp x8, 0x20000; ldr x0, [x8, #0x18]; ret
+/// ```
+fn a64_image() -> Program {
+    let words: [u32; 10] = [
+        0x9000_0080, // ASM: adrp x0, 0x20000
+        0x9100_4000, // ASM: add x0, x0, #0x10
+        0xd65f_03c0, // ASM: ret
+        0xd503_201f, // ASM: nop
+        0xd280_0400, // ASM: mov x0, #0x20
+        0xd65f_03c0, // ASM: ret
+        0xd503_201f, // ASM: nop
+        0xd503_201f, // ASM: nop
+        0x9000_0088, // ASM: adrp x8, 0x20000
+        0xf940_0d00, // ASM: ldr x0, [x8, #0x18]
+    ];
+    let mut code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    code.extend(0xd65f_03c0u32.to_le_bytes()); // ASM: ret
+    let mut p = Program::raw(
+        code,
+        Arch::Arm64,
+        0,
+        Some(0x10000),
+        vec![
+            Section::mapped(".text", 0x10000, 0, 0x2c, false, true),
+            Section {
+                file_size: 0,
+                ..Section::mapped(".bss", 0x20000, 0, 0x1000, true, false)
+            },
+        ],
+    );
+    p.format = BinaryFormat::Elf;
+    p.function_ranges = vec![(0x10000, 0x1000c), (0x10010, 0x10018), (0x10020, 0x1002c)];
+    p
+}
+
+/// An arm64 address formed from an `adrp` page and an `add` is named as
+/// the global it is, a load through the page reads that global, and a
+/// `mov` of a number stays a number.
+#[test]
+fn an_adrp_page_address_is_named_as_its_global() {
+    let p = a64_image();
+    let a = Analysis::compute(&p);
+    let text = |entry| decompile(&p, &a, &Overlay::default(), entry).expect("decompiles");
+    assert!(
+        text(0x10000).contains("return &g64_20010;"),
+        "{}",
+        text(0x10000)
+    );
+    assert!(text(0x10010).contains("return 32;"), "{}", text(0x10010));
+    assert!(
+        text(0x10020).contains("return g64_20018;"),
+        "{}",
+        text(0x10020)
+    );
+}

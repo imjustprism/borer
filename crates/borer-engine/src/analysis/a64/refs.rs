@@ -874,6 +874,47 @@ pub(crate) fn calls(program: &Program, f: &Function) -> Vec<Call> {
     out
 }
 
+/// Returns the addresses a function forms from an `adrp` page with an
+/// `add` ([`Tracker`]), and the immediates its other instructions write.
+///
+/// An `add` of a page offset to a tracked page is an address by its
+/// provenance; a constant a `mov` or an arithmetic immediate writes is a
+/// number, whatever range it falls in.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `f` - The function.
+///
+/// # Returns
+///
+/// `(addresses, immediates)`, each in instruction order.
+pub(crate) fn formed(program: &Program, f: &Function) -> (Vec<u64>, Vec<u64>) {
+    let text = Text::new(program);
+    let insns = decode_function(&text, f);
+    let mut addresses = Vec::new();
+    Tracker::new(&insns, &f.blocks).refs(&mut |target, va, kind| {
+        let add = insns
+            .binary_search_by_key(&va, |i| i.va)
+            .ok()
+            .and_then(|k| insns.get(k))
+            .is_some_and(|i| i.mnemonic == Mnemonic::Add);
+        if add && kind == RefKind::Data {
+            addresses.push(target);
+        }
+    });
+    let immediates = insns
+        .iter()
+        .filter(|i| i.mnemonic != Mnemonic::Add)
+        .flat_map(|i| i.operands)
+        .filter_map(|o| match o {
+            Opnd::Imm(v) => Some(v),
+            _ => None,
+        })
+        .collect();
+    (addresses, immediates)
+}
+
 /// Indexes every reference the functions make through the constants their
 /// registers hold ([`Tracker`]) that lands in one of the image's sections.
 ///
