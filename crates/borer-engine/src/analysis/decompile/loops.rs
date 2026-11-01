@@ -711,7 +711,7 @@ fn breaks_loop(lines: &[String], k: usize, j: usize) -> bool {
         }
         ind = indent_of(l);
         let t = l.trim();
-        if ["while (", "for (", "do {", "switch ("]
+        if ["while (", "for (", "do {", "switch (", "default:"]
             .iter()
             .any(|p| t.starts_with(p))
             || is_case(t)
@@ -1007,6 +1007,8 @@ mod tests {
             run(text),
             "for (i = 0; t[i] != -1; i += 1) {\n  if (a1 == t[i]) {\n    break;\n  }\n  if (i == a2) break;\n  if (s(\"return u[i];\") == i) break;\n  switch (i) {\n  case 3: return u[i];\n  }\n  if (i == 9) {\n    return 0;\n  }\n}\nreturn u[i];\n"
         );
+        let arm = "for (i = 0; i < a1; i += 1) {\n  switch (t[i]) {\n  case 1: {\n    return 0;\n  }\n  default: {\n    return 0;\n  }\n  }\n}\nreturn 0;\n";
+        assert_eq!(run(arm), arm);
     }
 
     /// A `while` whose variable is set right before it and stepped at the
