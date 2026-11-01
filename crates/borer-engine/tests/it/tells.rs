@@ -1289,6 +1289,43 @@ fn a_replaced_process_flag_is_not_a_debug_block() {
     assert!(!unknown.contains("debug block"), "{unknown}");
 }
 
+/// On x86 a pushed `DEBUG_PROCESS` overwritten in its stack slot before
+/// `CreateProcess` is not a debug block. The pushed flag alone still is.
+#[test]
+fn an_overwritten_pushed_process_flag_is_not_a_debug_block() {
+    let report = |store: bool| {
+        let mut code = vec![0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00]; // ASM: push 0 (x4)
+        code.extend([0x6a, 0x01]); // ASM: push 1
+        code.extend([0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00]); // ASM: push 0 (x5)
+        if store {
+            code.extend([0xc7, 0x44, 0x24, 0x14, 0x04, 0x00, 0x00, 0x00]); // ASM: mov dword [esp+0x14], 4
+        }
+        let call = 0x40_1000 + u32::try_from(code.len()).unwrap_or(0);
+        code.push(0xe8); // ASM: call 0x402000
+        code.extend((0x40_2000 - (call + 5)).to_le_bytes());
+        code.push(0xe8); // ASM: call 0x402010
+        code.extend((0x40_2010 - (call + 10)).to_le_bytes());
+        code.push(0xc3); // ASM: ret
+        let mut p = image(Arch::X86, &code, &[]);
+        for (name, addr) in [
+            ("CreateProcessA", 0x402000),
+            ("WaitForDebugEvent", 0x402010),
+        ] {
+            p.symbols.push(Symbol {
+                name: format!("KERNEL32.dll!{name}"),
+                addr,
+                kind: SymbolKind::Import,
+            });
+        }
+        let a = Analysis::compute(&p);
+        borer_engine::analysis::render::anti_analysis_tsv(&p, &a, &Overlay::default())
+    };
+    let pushed = report(false);
+    assert!(pushed.contains("debug block"), "{pushed}");
+    let replaced = report(true);
+    assert!(!replaced.contains("debug block"), "{replaced}");
+}
+
 /// Taking the address of the two debug APIs is not a call, so it is not a
 /// debug block.
 #[test]

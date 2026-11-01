@@ -504,12 +504,10 @@ fn debug_spawn(p: &Program, a: &Analysis, entry: u64, instrs: &[Instruction], bi
 /// Whether the sixth argument passed before this call is a debug flag.
 ///
 /// The latest store to that stack slot is the value the call sees. An
-/// earlier debug flag does not count once a later store replaces it.
+/// earlier debug flag does not count once a later store replaces it. On
+/// x86 a store after the last `push` replaces the pushed flag.
 fn creation_flags(before: &[Instruction], bits: u32) -> bool {
     let disp = if bits == 32 { 0x14 } else { 0x28 };
-    if bits == 32 && pushed_immediate(before, 6).is_some_and(debug_creation) {
-        return true;
-    }
     for n in before.iter().rev().take(16) {
         if matches!(
             n.flow_control(),
@@ -520,8 +518,11 @@ fn creation_flags(before: &[Instruction], bits: u32) -> bool {
         if stack_slot(n, disp, bits) {
             return stack_immediate(n, disp, bits).is_some_and(debug_creation);
         }
+        if bits == 32 && n.mnemonic() == Mnemonic::Push {
+            break;
+        }
     }
-    false
+    bits == 32 && pushed_immediate(before, 6).is_some_and(debug_creation)
 }
 
 /// Whether `imm` includes `DEBUG_PROCESS` or `DEBUG_ONLY_THIS_PROCESS`.
