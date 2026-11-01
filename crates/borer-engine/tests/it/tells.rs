@@ -753,6 +753,28 @@ fn a_peb_field_read_uses_the_peb_pointer() {
     assert!(copied.contains("peb read (BeingDebugged)"), "{copied}");
 }
 
+/// A pointer loaded from the PEB at `+0x30` is the process heap, not
+/// another PEB, so a byte read through it is not `BeingDebugged`. The same
+/// load from the TEB is the PEB.
+#[test]
+fn a_pointer_read_from_the_peb_is_not_the_peb() {
+    let heap = report(&[
+        0x65, 0x48, 0x8b, 0x04, 0x25, 0x60, 0x00, 0x00, 0x00, // ASM: mov rax, gs:[0x60]
+        0x48, 0x8b, 0x58, 0x30, // ASM: mov rbx, [rax+0x30]
+        0x80, 0x7b, 0x02, 0x00, // ASM: cmp byte [rbx+2], 0
+        0xc3, // ASM: ret
+    ]);
+    assert!(heap.contains("peb read"), "{heap}");
+    assert!(!heap.contains("BeingDebugged"), "{heap}");
+    let teb = report(&[
+        0x65, 0x48, 0x8b, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, // ASM: mov rax, gs:[0x30]
+        0x48, 0x8b, 0x58, 0x60, // ASM: mov rbx, [rax+0x60]
+        0x80, 0x7b, 0x02, 0x00, // ASM: cmp byte [rbx+2], 0
+        0xc3, // ASM: ret
+    ]);
+    assert!(teb.contains("peb read (BeingDebugged)"), "{teb}");
+}
+
 /// `mov dr0` inside a function is a hardware-breakpoint tell.
 #[test]
 fn a_debug_register_move_is_a_tell() {
