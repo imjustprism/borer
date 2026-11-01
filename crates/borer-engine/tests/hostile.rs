@@ -1287,3 +1287,42 @@ fn a_call_with_an_unwalked_fallthrough_has_no_edge_to_a_far_block() {
         .expect("the call starts a block");
     assert!(!edges.contains(&(IMAGE_BASE + 0x1030)), "{edges:x?}");
 }
+
+/// A deeply nested text is warned about on a thread with a small stack.
+///
+/// The warning reads the text's statements by recursion as deep as their
+/// nesting. Read on the caller's thread, `notepad.exe`'s function at
+/// `0x140013154`, 45 blocks deep, overflowed the CLI's 1 MiB main thread
+/// in an unoptimized build. Here 199 `if`s deep, read from a 128 KiB
+/// thread, overflowed it the same way.
+#[test]
+fn a_deep_text_is_warned_about_on_a_small_stack() {
+    let _serial = serial();
+    let p = load(pe(&[Sec::sound(".text", 0x1000, text(), CODE)], &[]));
+    let a = Analysis::compute(&p);
+    let depth = 199;
+    let mut body = String::from("// signature: uint32_t f(uint32_t a1)\n\n");
+    for d in 0..depth {
+        body.push_str(&format!("{}if (a1 == {d}) {{\n", "  ".repeat(d)));
+    }
+    body.push_str(&format!("{}return 1;\n", "  ".repeat(depth)));
+    for d in (0..depth).rev() {
+        body.push_str(&format!("{}}}\n", "  ".repeat(d)));
+    }
+    body.push_str("return 0;\n");
+    let warned = std::thread::Builder::new()
+        .stack_size(128 << 10)
+        .spawn(move || {
+            borer_engine::analysis::decompile::warnings(
+                &p,
+                &a,
+                &borer_engine::analysis::Overlay::default(),
+                IMAGE_BASE + 0x1000,
+                &body,
+                None,
+            )
+        })
+        .expect("a thread")
+        .join();
+    assert!(warned.is_ok(), "the warning panicked");
+}

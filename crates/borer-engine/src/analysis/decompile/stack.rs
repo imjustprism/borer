@@ -12,6 +12,21 @@ thread_local! {
     static ROOMY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// Runs `f` in place: a wasm build has one thread, and its stack is the
+/// host's.
+///
+/// # Arguments
+///
+/// * `f` - The decompile.
+///
+/// # Returns
+///
+/// What `f` returned.
+#[cfg(target_arch = "wasm32")]
+pub(super) fn roomy<T: Send>(f: impl FnOnce() -> Option<T> + Send) -> Option<T> {
+    f()
+}
+
 /// Runs a decompile with [`DECOMPILE_STACK`] bytes of stack: in place on a
 /// thread that has that room and runs no decompile, else on a thread of its
 /// own, which notes its reads into the caller's build.

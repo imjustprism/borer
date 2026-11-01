@@ -1044,6 +1044,10 @@ pub fn with_header(text: &str, header: Option<&str>) -> String {
 /// repair search ([`crate::analysis::render::Repair::note`]) is the last
 /// item.
 ///
+/// The text is read on a decompile's stack ([`stack::roomy`]): its
+/// statements nest as deep as the function's, and a caller's thread may
+/// have too little room for that.
+///
 /// # Arguments
 ///
 /// * `program` - The loaded image.
@@ -1081,7 +1085,8 @@ pub fn warnings(
             (g.thunk.is_none() && target != entry).then(|| name_of(analysis, overlay, target))
         })
         .collect();
-    match (warn::line(text, &in_binary, word), differs) {
+    let line = stack::roomy(|| warn::line(text, &in_binary, word));
+    match (line, differs) {
         (Some(line), Some(d)) => Some(format!("{line}; {d}")),
         (None, Some(d)) => Some(format!("{} {d}", warn::WARN)),
         (line, None) => line,
@@ -1448,14 +1453,7 @@ fn decompile_with(
     witness: bool,
 ) -> Option<Decompiled> {
     let run = (program, analysis, overlay, entry);
-    #[cfg(target_arch = "wasm32")]
-    {
-        decompile_in_run(run, cleanup, assume, witness)
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        stack::roomy(|| decompile_in_run(run, cleanup, assume, witness))
-    }
+    stack::roomy(|| decompile_in_run(run, cleanup, assume, witness))
 }
 
 /// [`decompile_with`] past the stack choice: pick the instruction set's
