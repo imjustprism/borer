@@ -888,7 +888,8 @@ pub(crate) fn calls(program: &Program, f: &Function) -> Vec<Call> {
 ///
 /// # Returns
 ///
-/// `(addresses, immediates)`, each in instruction order.
+/// `(addresses, immediates)`: the addresses in instruction order, the
+/// immediates in no order a caller may read (they are a set to exclude).
 pub(crate) fn formed(program: &Program, f: &Function) -> (Vec<u64>, Vec<u64>) {
     let text = Text::new(program);
     let insns = decode_function(&text, f);
