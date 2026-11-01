@@ -1057,9 +1057,9 @@ fn a_debugger_window_is_named_and_an_ordinary_class_is_not() {
     let mut olly = vec![0u8; 0x108];
     olly[0x100..0x107].copy_from_slice(b"OLLYDBG");
     let code = [
-        0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
-        0xe8, 0x06, 0x10, 0x00, 0x00, // ASM: call 0x402010
-        0x68, 0x00, 0x21, 0x40, 0x00, // ASM: push 0x402100
+        0xb9, 0x00, 0x21, 0x40, 0x00, // ASM: mov ecx, 0x402100
+        0xe8, 0xf6, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0xe8, 0x01, 0x10, 0x00, 0x00, // ASM: call 0x402010
         0xc3, // ASM: ret
     ];
     let text = report_calls(
@@ -1074,6 +1074,28 @@ fn a_debugger_window_is_named_and_an_ordinary_class_is_not() {
     let text = report_calls(
         &code,
         &ordinary,
+        &[("FindWindowA", 0x402000), ("ExitProcess", 0x402010)],
+    );
+    assert!(!text.contains("debugger window"), "{text}");
+}
+
+/// A debugger name the function holds but does not pass to `FindWindow`
+/// is no debugger search: here it goes to the exit call.
+#[test]
+fn a_debugger_name_not_passed_to_find_window_is_no_tell() {
+    let mut data = vec![0u8; 0x110];
+    data[0x100..0x107].copy_from_slice(b"OLLYDBG");
+    data[0x108..0x10f].copy_from_slice(b"NOTEPAD");
+    let code = [
+        0xb9, 0x08, 0x21, 0x40, 0x00, // ASM: mov ecx, 0x402108
+        0xe8, 0xf6, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0xb9, 0x00, 0x21, 0x40, 0x00, // ASM: mov ecx, 0x402100
+        0xe8, 0xfc, 0x0f, 0x00, 0x00, // ASM: call 0x402010
+        0xc3, // ASM: ret
+    ];
+    let text = report_calls(
+        &code,
+        &data,
         &[("FindWindowA", 0x402000), ("ExitProcess", 0x402010)],
     );
     assert!(!text.contains("debugger window"), "{text}");
@@ -1113,9 +1135,9 @@ fn a_wide_debugger_window_is_named() {
         let mut data = vec![0u8; 0x100 + bytes.len()];
         data[0x100..].copy_from_slice(bytes);
         let code = [
-            0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
-            0xe8, 0x06, 0x10, 0x00, 0x00, // ASM: call 0x402010
-            0x68, 0x00, 0x21, 0x40, 0x00, // ASM: push 0x402100
+            0xb9, 0x00, 0x21, 0x40, 0x00, // ASM: mov ecx, 0x402100
+            0xe8, 0xf6, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0xe8, 0x01, 0x10, 0x00, 0x00, // ASM: call 0x402010
             0xc3, // ASM: ret
         ];
         report_calls(

@@ -441,7 +441,7 @@ fn patterns(
     }
     if has("findwindow")
         && (has("postquitmessage") || has("exitprocess") || has("terminateprocess"))
-        && debugger_string(p, instrs)
+        && debugger_window(p, a, f.entry, instrs, bits)
     {
         out.push(("debugger window (FindWindow)", ip));
     }
@@ -995,15 +995,62 @@ fn called_imports(p: &Program, a: &Analysis, entry: u64) -> Vec<String> {
     names
 }
 
-/// Whether a pushed, moved, or RIP-relative address names a debugger window.
+/// Whether a `FindWindow` call in the function gets a debugger window as
+/// its class or title.
 ///
 /// `FindWindowA` passes ASCII. `FindWindowW` passes UTF-16. The address
 /// may be an immediate or `lea reg, [rip+name]`. A one-character narrow
-/// reading of a wide string does not count.
-fn debugger_string(p: &Program, instrs: &[Instruction]) -> bool {
-    instrs
-        .iter()
-        .any(|i| string_address(i).is_some_and(|va| va != 0 && debugger_name(p, va)))
+/// reading of a wide string does not count. A name the function holds
+/// for another call is not this tell.
+fn debugger_window(
+    p: &Program,
+    a: &Analysis,
+    entry: u64,
+    instrs: &[Instruction],
+    bits: u32,
+) -> bool {
+    let sites = import_sites(p, a, entry, "findwindow");
+    instrs.iter().enumerate().any(|(at, i)| {
+        matches!(
+            i.flow_control(),
+            FlowControl::Call | FlowControl::IndirectCall
+        ) && sites.contains(&i.ip())
+            && debugger_argument(p, &instrs[..at], bits)
+    })
+}
+
+/// Whether the call after `before` gets a known debugger window as one
+/// of its first two arguments.
+///
+/// On x86 they are the last two pushes before the call; on x64, the last
+/// writes of `rcx` and `rdx`. An earlier call ends the search.
+fn debugger_argument(p: &Program, before: &[Instruction], bits: u32) -> bool {
+    let mut pushes = 0u32;
+    let mut seen = [false; 2];
+    for i in before.iter().rev().take(12) {
+        if matches!(
+            i.flow_control(),
+            FlowControl::Call | FlowControl::IndirectCall
+        ) {
+            break;
+        }
+        let arg = if bits == 32 {
+            (i.mnemonic() == Mnemonic::Push).then(|| {
+                pushes += 1;
+                pushes <= 2
+            })
+        } else {
+            [Register::RCX, Register::RDX]
+                .iter()
+                .position(|&r| writes_register(i, r))
+                .map(|k| !std::mem::replace(&mut seen[k], true))
+        };
+        if arg == Some(true) && string_address(i).is_some_and(|va| va != 0 && debugger_name(p, va))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// An immediate, or the target of a RIP-relative `lea`, that may name a window.
