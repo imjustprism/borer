@@ -106,3 +106,27 @@ fn the_index_stores_the_warning_the_decompile_answer_shows() {
     assert_eq!(hits[0].line_no, at + 1);
     assert!(hits[0].line.contains("callee _callee"), "{}", hits[0].line);
 }
+
+/// An index build checks each answer from the decompilation its batch
+/// already made: it keeps the checks and decompiles nothing again for the
+/// headers.
+#[test]
+fn an_index_build_checks_from_the_batch_decompilation() {
+    use borer::index::build;
+    use borer_engine::analysis::decompile::checked_header;
+    use borer_engine::analysis::{Analysis, Overlay};
+    let code = vec![
+        0x89, 0xc8, // ASM: mov eax, ecx
+        0x83, 0xc0, 0x01, // ASM: add eax, 1
+        0xc3, // ASM: ret
+    ];
+    let text = Section::mapped(".text", 0x1000, 0, 6, false, true);
+    let program = Program::raw(code, Arch::X86_64, 0, Some(0x1000), vec![text]);
+    let analysis = Analysis::compute(&program);
+    let overlay = Overlay::default();
+    let index = build(&program, &analysis, &overlay);
+    assert_eq!(analysis.derived.held("plain_text"), 0, "decompiled again");
+    assert_eq!(analysis.derived.held("text_check"), index.functions.len());
+    let header = checked_header(&program, &analysis, &overlay, 0x1000).expect("a check line");
+    assert!(index.functions[0].text.contains(&header), "{header}");
+}

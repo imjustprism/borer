@@ -19,7 +19,7 @@ use std::io::{BufReader, BufWriter, Read, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use borer_engine::analysis::decompile::decompile_named_all;
+use borer_engine::analysis::decompile::decompile_checked_all;
 use borer_engine::analysis::{Analysis, Overlay, name_of, render};
 use borer_engine::pack::Packs;
 use borer_engine::program::Program;
@@ -444,7 +444,7 @@ fn require_cache_dir() -> Result<PathBuf, String> {
 #[must_use]
 pub fn build(program: &Program, analysis: &Analysis, overlay: &Overlay) -> CodeIndex {
     let entries: Vec<u64> = analysis.functions.iter().map(|f| f.entry).collect();
-    let texts = decompile_named_all(program, analysis, overlay, &entries);
+    let texts = decompile_checked_all(program, analysis, overlay, &entries);
     let functions: Vec<IndexedFunction> = entries
         .iter()
         .zip(texts)

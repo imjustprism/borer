@@ -90,7 +90,6 @@ use super::verify::{
     aligns_stack, low, sext, word,
 };
 use super::{Ctx, decompile_with, table_target};
-use crate::analysis::decompiled_witnessed;
 use crate::analysis::{Analysis, BasicBlock, Overlay, striped_with};
 use crate::emulate::{Emulator, Stop, fill_byte};
 use crate::fxmap::{FxHashMap, FxHashSet};
@@ -99,10 +98,14 @@ use crate::num::{from_usize, lo8};
 use crate::program::Program;
 use subset::{integer_or_zero_fill, outside_subset, reads_whole_lanes};
 
+mod answer;
 mod prove;
 mod report;
 mod subset;
 mod term;
+
+pub(crate) use answer::check_answer;
+pub(super) use answer::check_decompiled;
 
 pub use report::replay_tsv;
 
@@ -931,76 +934,6 @@ fn replay_one<L: Replay>(
         usize::MAX,
         Sampling::Every,
     )
-}
-
-/// Checks the statements of one function's answer against the binary, as
-/// [`replay_function`] does, under the answer's names and within
-/// [`ANSWER_BLOCKS`].
-///
-/// # Arguments
-///
-/// * `program` - The image.
-/// * `analysis` - Its functions.
-/// * `overlay` - The names the answer is decompiled under.
-/// * `entry` - The function's entry.
-///
-/// # Returns
-///
-/// What was checked, `None` when the function does not decompile or the
-/// image has no emulator.
-pub(crate) fn check_answer(
-    program: &Program,
-    analysis: &Analysis,
-    overlay: &Overlay,
-    entry: u64,
-) -> Option<TextCheck> {
-    match program.arch.isa()? {
-        Isa::X86 { .. } => check_answer_in::<arch::X86>(program, analysis, overlay, entry),
-        Isa::A64 => check_answer_in::<arch::A64>(program, analysis, overlay, entry),
-        Isa::A32 => check_answer_in::<arch::A32>(program, analysis, overlay, entry),
-    }
-}
-
-/// [`check_answer`] for one instruction set.
-///
-/// # Arguments
-///
-/// * `program` - The image.
-/// * `analysis` - Its functions.
-/// * `overlay` - The names the answer is decompiled under.
-/// * `entry` - The function's entry.
-fn check_answer_in<L: Replay>(
-    program: &Program,
-    analysis: &Analysis,
-    overlay: &Overlay,
-    entry: u64,
-) -> Option<TextCheck> {
-    let f = analysis.function(entry)?;
-    let template = L::rig(program, analysis)?;
-    let shared = decompiled_witnessed(program, analysis, overlay, overlay.fingerprint(), entry);
-    let fresh;
-    let (d, w) = match shared.as_ref().as_ref().map(|d| (d, d.take_witness())) {
-        Some((d, Some(w))) => (d, w),
-        _ => {
-            fresh = decompile_with(program, analysis, overlay, entry, true, &[], true)?;
-            let w = fresh.take_witness()?;
-            (&fresh, w)
-        }
-    };
-    let effects = effects_of(d, f);
-    let r = replay_effects::<L>(
-        program,
-        analysis,
-        overlay,
-        &template,
-        entry,
-        ANSWER_SEED,
-        (&w, &d.live.succs),
-        &effects,
-        ANSWER_BLOCKS,
-        Sampling::UntilProved,
-    );
-    (r.functions == 1).then(|| TextCheck::of(&r))
 }
 
 /// What the check of one function's answer found: the header line the

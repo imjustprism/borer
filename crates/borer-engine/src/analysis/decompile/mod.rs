@@ -30,6 +30,7 @@ pub(crate) mod abi;
 mod arch;
 mod asserts;
 mod canary;
+mod checked;
 pub mod choice;
 mod cir;
 mod ctext;
@@ -96,6 +97,7 @@ mod wire;
 pub use crate::timing::step_times;
 use arch::Lifter;
 pub use asserts::*;
+pub use checked::{checked_header, decompile_checked_all, text_check};
 pub use choice::{Choices, Site};
 use emit::*;
 pub use enums::*;
@@ -980,45 +982,6 @@ pub fn decompile_named(
     memo.as_ref().clone()
 }
 
-/// What the check of a function's answer found ([`replay::TextCheck`]),
-/// once per overlay, through [`Analysis::derived`] beside the text.
-///
-/// The statements the lifter emitted for the function under `overlay` are
-/// replayed against the emulator from fixed states within a fixed block
-/// budget, so the result is a function of the binary, the names and the
-/// entry alone. It is an item result, let go with the names it was read
-/// under, like the text.
-///
-/// # Arguments
-///
-/// * `program` - The loaded image.
-/// * `analysis` - Discovery results, holding the memo.
-/// * `overlay` - Names in force.
-/// * `entry` - The function's entry.
-///
-/// # Returns
-///
-/// The check, `None` inside when the function does not decompile or the
-/// image has no emulator.
-pub fn text_check(
-    program: &Program,
-    analysis: &Analysis,
-    overlay: &Overlay,
-    entry: u64,
-) -> std::sync::Arc<Option<replay::TextCheck>> {
-    analysis.derived.get_or_build_item(
-        "text_check",
-        overlay.fingerprint(),
-        entry,
-        || {
-            crate::timing::timed(crate::timing::Step::Replay, || {
-                replay::check_answer(program, analysis, overlay, entry)
-            })
-        },
-        |c| c.as_ref().map_or(0, replay::TextCheck::bytes),
-    )
-}
-
 /// Returns the choice points the lift met in a function besides the text
 /// passes ([`Site`]): the frame slots it solved as floats and a 64-bit
 /// integer return.
@@ -1047,34 +1010,6 @@ pub fn choice_points(
         .as_ref()
         .as_ref()
         .map_or_else(Vec::new, |d| d.sites.clone())
-}
-
-/// The header line a `decompile` answer prints under its first line: what
-/// of the text was checked against the binary ([`text_check`]).
-///
-/// Only the tools' rendering carries it; the text every other reader
-/// parses ([`decompile_named`], [`decompile_plain`] and the memo) does not.
-///
-/// # Arguments
-///
-/// * `program` - The loaded image.
-/// * `analysis` - Discovery results, holding the memo.
-/// * `overlay` - Names in force.
-/// * `entry` - The function's entry.
-///
-/// # Returns
-///
-/// The line, without its newline; `None` when nothing could be checked.
-pub fn checked_header(
-    program: &Program,
-    analysis: &Analysis,
-    overlay: &Overlay,
-    entry: u64,
-) -> Option<String> {
-    text_check(program, analysis, overlay, entry)
-        .as_ref()
-        .as_ref()
-        .map(replay::TextCheck::header)
 }
 
 /// Puts the header line of [`checked_header`] under a text's first line.
