@@ -75,6 +75,7 @@ mod replayed;
 mod returns;
 mod riprel;
 mod rv;
+mod rv_emulate;
 mod search;
 mod shapes;
 mod strings;

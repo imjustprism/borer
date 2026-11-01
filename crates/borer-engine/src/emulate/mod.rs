@@ -25,6 +25,7 @@ pub mod calls;
 mod fpu;
 mod loader;
 mod operands;
+pub mod rv;
 mod sse;
 mod store;
 mod strops;
