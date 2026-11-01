@@ -201,8 +201,24 @@ fn an_adrp_page_address_is_named_as_its_global() {
         "{}",
         text(0x10030)
     );
-    assert!(!text(0x10040).contains("g64_20030"), "{}", text(0x10040));
-    assert!(!text(0x10050).contains("g64_20030"), "{}", text(0x10050));
-    assert!(!text(0x10060).contains("g64_20000"), "{}", text(0x10060));
-    assert!(!text(0x10070).contains("g64_20000"), "{}", text(0x10070));
+    assert!(
+        text(0x10040).contains("return 0x20030;"),
+        "{}",
+        text(0x10040)
+    );
+    assert!(
+        text(0x10050).contains("return 0x20030;"),
+        "{}",
+        text(0x10050)
+    );
+    assert!(
+        text(0x10060).contains("return 0x20000;"),
+        "{}",
+        text(0x10060)
+    );
+    assert!(
+        text(0x10070).contains("return a2 + 0x20000;"),
+        "{}",
+        text(0x10070)
+    );
 }

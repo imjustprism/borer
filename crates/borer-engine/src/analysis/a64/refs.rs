@@ -928,10 +928,11 @@ pub(crate) fn formed(program: &Program, f: &Function) -> (Vec<u64>, Vec<u64>) {
 /// * `insns` - A function's instructions, in address order.
 /// * `blocks` - Its basic blocks.
 fn wide_constants(insns: &[Insn], blocks: &[BasicBlock]) -> Vec<u64> {
+    let starts: std::collections::BTreeSet<u64> = blocks.iter().map(|b| b.start).collect();
     let mut held: [Option<u64>; REGS] = [None; REGS];
     let mut out = Vec::new();
     for i in insns {
-        if blocks.iter().any(|b| b.start == i.va) {
+        if starts.contains(&i.va) {
             held = [None; REGS];
         }
         let lane = u64::from((i.word >> 5) & 0xffff) << (((i.word >> 21) & 3) * 16);
