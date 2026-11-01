@@ -208,8 +208,27 @@ fn a_crt_import_is_a_capability_only_when_a_caller_checks_it() {
     assert!(!text.contains("IsDebuggerPresent"), "{text}");
 }
 
-/// `Software\` settings are a registry write. A Run key or a service stays
-/// persistence.
+/// The capability map of a function that calls `name`, imported at
+/// 0x402100, with `data` at 0x402000.
+///
+/// # Arguments
+///
+/// * `code` - The function's bytes.
+/// * `name` - The imported registry API.
+/// * `data` - The bytes of `.rdata`.
+fn registry_map(code: &[u8], name: &str, data: &[u8]) -> String {
+    let mut p = image(Arch::X86_64, code, data);
+    p.symbols.push(Symbol {
+        name: format!("ADVAPI32.dll!{name}"),
+        addr: 0x402100,
+        kind: SymbolKind::Import,
+    });
+    let a = Analysis::compute(&p);
+    borer_engine::analysis::render::capability_map_tsv(&p, Some(&a))
+}
+
+/// `Software\` settings the caller passes are a registry write. A Run key
+/// or a service stays persistence.
 #[test]
 fn settings_keys_are_a_registry_write_and_a_run_key_stays_persistence() {
     let map = |name: &str, data: &[u8]| {
@@ -221,7 +240,15 @@ fn settings_keys_are_a_registry_write_and_a_run_key_stays_persistence() {
         });
         borer_engine::analysis::render::capability_map_tsv(&p, None)
     };
-    let settings = map("RegCreateKeyExW", b"Software\\Vendor\\App\0");
+    let settings = registry_map(
+        &[
+            0x48, 0x8d, 0x0d, 0xf9, 0x0f, 0x00, 0x00, // ASM: lea rcx, [rip+0xff9]
+            0xe8, 0xf4, 0x10, 0x00, 0x00, // ASM: call 0x402100
+            0xc3, // ASM: ret
+        ],
+        "RegCreateKeyExW",
+        b"Software\\Vendor\\App\0",
+    );
     assert!(settings.contains("registry write"), "{settings}");
     assert!(!settings.contains("persistence"), "{settings}");
     let run = map(
@@ -232,6 +259,22 @@ fn settings_keys_are_a_registry_write_and_a_run_key_stays_persistence() {
     assert!(!run.contains("registry write"), "{run}");
     let service = map("CreateServiceA", b"Software\\Vendor\\App\0");
     assert!(service.contains("persistence"), "{service}");
+}
+
+/// A `Software\` string the registry call does not use leaves the key
+/// unknown, so the call stays persistence.
+#[test]
+fn an_unused_settings_string_keeps_persistence() {
+    let text = registry_map(
+        &[
+            0xe8, 0xfb, 0x10, 0x00, 0x00, // ASM: call 0x402100
+            0xc3, // ASM: ret
+        ],
+        "RegSetValueExW",
+        b"Software\\Vendor\\App\0",
+    );
+    assert!(text.contains("persistence"), "{text}");
+    assert!(!text.contains("registry write"), "{text}");
 }
 
 /// Winlogon, Image File Execution Options, `AppInit_DLLs` and Shell

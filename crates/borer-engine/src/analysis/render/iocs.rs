@@ -3,6 +3,7 @@
 //! read it.
 
 use super::calls::{Reach, gather, listed_args};
+use super::triage::call_sites;
 use super::*;
 use crate::analysis::decompile::CallArg;
 use crate::cancel::Cancel;
@@ -751,6 +752,74 @@ pub fn iocs_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<St
         );
     }
     Ok(out)
+}
+
+/// Whether the registry APIs write the program's own settings.
+///
+/// A Run key, a startup folder or a service stays persistence. Settings
+/// are a registry write only when every function that calls one of the
+/// APIs references a `Software\` key, and no key string names one of
+/// those. A caller with no such key, or no code analysis to find the
+/// callers, stays persistence: the key may be built at runtime.
+///
+/// Winlogon, Image File Execution Options, `AppInit_DLLs`, Shell Folders
+/// and the `exefile` open command are persistence keys too.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - Its functions, for the callers and the keys they reference.
+/// * `apis` - The persistence imports and syscalls, as the map shows them.
+pub(super) fn settings_keys(p: &Program, a: Option<&Analysis>, apis: &[String]) -> bool {
+    let Some(a) = a else {
+        return false;
+    };
+    if apis.iter().any(|n| n.to_lowercase().contains("service")) {
+        return false;
+    }
+    let run = |s: &str| {
+        let s = s.to_lowercase();
+        s.contains("\\run")
+            || s.contains("runonce")
+            || s.contains("\\startup")
+            || s.contains("\\services\\")
+            || s.contains("winlogon")
+            || s.contains("image file execution options")
+            || s.contains("appinit_dlls")
+            || s.contains("shell folders")
+            || s.contains("exefile\\shell\\open\\command")
+    };
+    if program_strings(p).iter().any(|s| run(s)) {
+        return false;
+    }
+    let keyed: BTreeSet<u64> = referenced_strings(p, a)
+        .iter()
+        .filter(|r| r.folded.contains("software\\"))
+        .flat_map(|r| a.xrefs_to(r.target).iter().filter_map(|s| s.from_entry))
+        .collect();
+    apis.iter().all(|api| {
+        let stem = api.to_lowercase();
+        let mut callers = a
+            .functions
+            .iter()
+            .filter(|f| !call_sites(p, a, f.entry, &stem).is_empty())
+            .peekable();
+        callers.peek().is_some() && callers.all(|f| keyed.contains(&f.entry))
+    })
+}
+
+/// The ASCII and wide strings in the image.
+fn program_strings(p: &Program) -> Vec<String> {
+    let mut out: Vec<String> = crate::strings::find_strings(&p.bytes, 4)
+        .into_iter()
+        .map(|hit| hit.text)
+        .collect();
+    out.extend(
+        crate::strings::find_wide_strings(&p.bytes, 4)
+            .into_iter()
+            .map(|hit| hit.text),
+    );
+    out
 }
 
 #[cfg(test)]

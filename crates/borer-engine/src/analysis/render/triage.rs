@@ -2,7 +2,7 @@
 //! and the one-call overview.
 
 use super::calls::{Reach, gather};
-use super::iocs::iocs_line;
+use super::iocs::{iocs_line, settings_keys};
 use super::*;
 use crate::analysis::decompile::signature::passing;
 use crate::emulate::Run;
@@ -372,7 +372,7 @@ pub fn capability_map_tsv(p: &Program, a: Option<&Analysis>) -> String {
             continue;
         }
         let mut label = capability;
-        if capability == "persistence" && settings_keys(p, &found) {
+        if capability == "persistence" && settings_keys(p, a, &found) {
             label = "registry write";
         }
         if capability == "anti-analysis"
@@ -469,7 +469,7 @@ fn crt_stem(api: &str) -> Option<&'static str> {
 }
 
 /// Call sites in `entry` whose import name starts with `stem`.
-fn call_sites(p: &Program, a: &Analysis, entry: u64, stem: &str) -> Vec<u64> {
+pub(super) fn call_sites(p: &Program, a: &Analysis, entry: u64, stem: &str) -> Vec<u64> {
     a.refs_from(entry)
         .into_iter()
         .filter_map(|(target, site)| {
@@ -795,54 +795,6 @@ fn forget_writes(
         *count -= 1;
         held[at] = held[*count];
     }
-}
-
-/// Whether the registry APIs write the program's own settings.
-///
-/// A Run key, a startup folder or a service stays persistence. Settings
-/// under `Software\` with none of those are a registry write. No key
-/// string at all stays persistence: the key may be built at runtime.
-///
-/// Winlogon, Image File Execution Options, `AppInit_DLLs`, Shell Folders
-/// and the `exefile` open command are persistence keys too.
-fn settings_keys(p: &Program, apis: &[String]) -> bool {
-    if apis.iter().any(|n| n.to_lowercase().contains("service")) {
-        return false;
-    }
-    let texts = program_strings(p);
-    if texts.is_empty() {
-        return false;
-    }
-    let run = |s: &str| {
-        let s = s.to_lowercase();
-        s.contains("\\run")
-            || s.contains("runonce")
-            || s.contains("\\startup")
-            || s.contains("\\services\\")
-            || s.contains("winlogon")
-            || s.contains("image file execution options")
-            || s.contains("appinit_dlls")
-            || s.contains("shell folders")
-            || s.contains("exefile\\shell\\open\\command")
-    };
-    texts
-        .iter()
-        .any(|s| s.to_lowercase().contains("software\\"))
-        && !texts.iter().any(|s| run(s))
-}
-
-/// The ASCII and wide strings in the image.
-fn program_strings(p: &Program) -> Vec<String> {
-    let mut out: Vec<String> = crate::strings::find_strings(&p.bytes, 4)
-        .into_iter()
-        .map(|hit| hit.text)
-        .collect();
-    out.extend(
-        crate::strings::find_wide_strings(&p.bytes, 4)
-            .into_iter()
-            .map(|hit| hit.text),
-    );
-    out
 }
 
 /// Resolves a function name or address string to an entry address.
