@@ -109,9 +109,11 @@ fn an_export_declares_a_global_named_by_its_address() {
 /// +0x30 adr x0, 0x20020; ret
 /// +0x40 movz x0, #2, lsl #16; movk x0, #0x30; ret   (0x20030, a number)
 /// +0x50 adrp x0, 0x20000; add x0, x0, #0x30; ret
+/// +0x60 adrp x0, 0x20000; add x0, x0, #0; ret
+/// +0x70 add x0, x1, #0x20, lsl #12; ret               (0x20000, a number)
 /// ```
 fn a64_image() -> Program {
-    let words: [u32; 24] = [
+    let words: [u32; 32] = [
         0x9000_0080, // ASM: adrp x0, 0x20000
         0x9100_4000, // ASM: add x0, x0, #0x10
         0xd65f_03c0, // ASM: ret
@@ -136,6 +138,14 @@ fn a64_image() -> Program {
         0x9100_c000, // ASM: add x0, x0, #0x30
         0xd65f_03c0, // ASM: ret
         0xd503_201f, // ASM: nop
+        0x9000_0080, // ASM: adrp x0, 0x20000
+        0x9100_0000, // ASM: add x0, x0, #0
+        0xd65f_03c0, // ASM: ret
+        0xd503_201f, // ASM: nop
+        0x9140_8020, // ASM: add x0, x1, #0x20, lsl #12
+        0xd65f_03c0, // ASM: ret
+        0xd503_201f, // ASM: nop
+        0xd503_201f, // ASM: nop
     ];
     let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
     let mut p = Program::raw(
@@ -144,7 +154,7 @@ fn a64_image() -> Program {
         0,
         Some(0x10000),
         vec![
-            Section::mapped(".text", 0x10000, 0, 0x60, false, true),
+            Section::mapped(".text", 0x10000, 0, 0x80, false, true),
             Section {
                 file_size: 0,
                 ..Section::mapped(".bss", 0x20000, 0, 0x1000, true, false)
@@ -159,6 +169,8 @@ fn a64_image() -> Program {
         (0x10030, 0x10038),
         (0x10040, 0x1004c),
         (0x10050, 0x1005c),
+        (0x10060, 0x1006c),
+        (0x10070, 0x10078),
     ];
     p
 }
@@ -166,7 +178,8 @@ fn a64_image() -> Program {
 /// An arm64 address an `adrp` page and an `add`, or an `adr`, forms is named.
 ///
 /// A load through the page reads that global. A `mov` of a number stays a
-/// number, and so does an address a `movz` and `movk` also build elsewhere.
+/// number, and so does an address a `movz` and `movk`, or a shifted `add`
+/// immediate, also build elsewhere.
 #[test]
 fn an_adrp_page_address_is_named_as_its_global() {
     let p = a64_image();
@@ -190,4 +203,6 @@ fn an_adrp_page_address_is_named_as_its_global() {
     );
     assert!(!text(0x10040).contains("g64_20030"), "{}", text(0x10040));
     assert!(!text(0x10050).contains("g64_20030"), "{}", text(0x10050));
+    assert!(!text(0x10060).contains("g64_20000"), "{}", text(0x10060));
+    assert!(!text(0x10070).contains("g64_20000"), "{}", text(0x10070));
 }

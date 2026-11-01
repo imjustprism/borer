@@ -893,6 +893,7 @@ pub(crate) fn formed(program: &Program, f: &Function) -> (Vec<u64>, Vec<u64>) {
     let text = Text::new(program);
     let insns = decode_function(&text, f);
     let mut addresses = Vec::new();
+    let mut sites = std::collections::BTreeSet::new();
     Tracker::new(&insns, &f.blocks).refs(&mut |target, va, kind| {
         let forms = insns
             .binary_search_by_key(&va, |i| i.va)
@@ -901,15 +902,16 @@ pub(crate) fn formed(program: &Program, f: &Function) -> (Vec<u64>, Vec<u64>) {
             .is_some_and(|i| i.mnemonic == Mnemonic::Add || i.op == Op::Adr);
         if forms && kind == RefKind::Data {
             addresses.push(target);
+            sites.insert(va);
         }
     });
     let mut immediates: Vec<u64> = insns
         .iter()
-        .filter(|i| i.mnemonic != Mnemonic::Add)
+        .filter(|i| !sites.contains(&i.va))
         .flat_map(|i| i.operands)
         .filter_map(|o| if let Opnd::Imm(v) = o { Some(v) } else { None })
         .collect();
-    immediates.extend(wide_constants(&insns));
+    immediates.extend(wide_constants(&insns, &f.blocks));
     (addresses, immediates)
 }
 
@@ -917,17 +919,21 @@ pub(crate) fn formed(program: &Program, f: &Function) -> (Vec<u64>, Vec<u64>) {
 /// registers, each value as it stands after each instruction of a run.
 ///
 /// `movz x0, #2, lsl #16; movk x0, #0x10` builds `0x20010`, which neither
-/// immediate spells alone. The instructions are read in address order and
-/// any other write to a register ends its run, so a value is built only
-/// from instructions that can run one after the other.
+/// immediate spells alone. The instructions are read in address order; a
+/// block's start and any other write to a register end a run, so a value is
+/// built only from instructions that run one after the other.
 ///
 /// # Arguments
 ///
 /// * `insns` - A function's instructions, in address order.
-fn wide_constants(insns: &[Insn]) -> Vec<u64> {
+/// * `blocks` - Its basic blocks.
+fn wide_constants(insns: &[Insn], blocks: &[BasicBlock]) -> Vec<u64> {
     let mut held: [Option<u64>; REGS] = [None; REGS];
     let mut out = Vec::new();
     for i in insns {
+        if blocks.iter().any(|b| b.start == i.va) {
+            held = [None; REGS];
+        }
         let lane = u64::from((i.word >> 5) & 0xffff) << (((i.word >> 21) & 3) * 16);
         let keep = !(0xffff_u64 << (((i.word >> 21) & 3) * 16));
         let narrow = |v: u64| {
