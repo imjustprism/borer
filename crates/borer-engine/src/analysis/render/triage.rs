@@ -9,6 +9,7 @@ use crate::emulate::Run;
 use crate::emulate::a64::Machine as A64Machine;
 use crate::emulate::calls::ApiCall;
 use crate::isa::Isa;
+use crate::isa::x86::ConditionCode;
 
 /// A capability and the API-name fragments that give it away.
 ///
@@ -424,7 +425,9 @@ pub fn capability_map_tsv(p: &Program, a: Option<&Analysis>) -> String {
 /// the runtime's `__fastfail` only in a function that also asks
 /// `IsProcessorFeaturePresent`, its guard; that call alone is dropped, and
 /// without the guard the fail-fast is the program's own reaction. A
-/// constant holding the bytes `cd 29`, such as `mov edx, 0x29cd`, is not it. `OutputDebugString` returns nothing,
+/// constant holding the bytes `cd 29`, such as `mov edx, 0x29cd`, is not it.
+/// A call whose branch breaks into the debugger it finds
+/// ([`breaks_into_debugger`]) welcomes the debugger and is dropped too. `OutputDebugString` returns nothing,
 /// so a call outside that failure path stays. `GetThreadContext` stays
 /// where its caller asks for the debug registers (the hardware-breakpoint
 /// tell) or takes a handle to a thread of its own (`GetCurrentThread`,
@@ -456,6 +459,7 @@ fn called_as_check(p: &Program, a: &Analysis, api: &str) -> bool {
         if !call_sites(p, a, f.entry, "isprocessorfeaturepresent").is_empty() {
             sites.retain(|va| !int29_follows(p, bits, *va));
         }
+        sites.retain(|va| !breaks_into_debugger(p, bits, *va));
         if sites.is_empty() {
             return false;
         }
@@ -536,6 +540,40 @@ fn crt_failure(p: &Program, a: &Analysis, entry: u64) -> bool {
             !name.contains("setunhandledexceptionfilter") && MARK.iter().any(|m| name.contains(m))
         })
     })
+}
+
+/// Whether the call at `va` breaks into the debugger it finds.
+///
+/// The call's result has to be tested (`test eax, eax`) and the next
+/// branch has to reach an `int3` on its nonzero side: the target of a
+/// `jne`, or what follows a `je`. That is `if (IsDebuggerPresent())
+/// __debugbreak();`, as a debug build's error report does. A trap on the
+/// zero side, or any other shape, is not this.
+fn breaks_into_debugger(p: &Program, bits: u32, va: u64) -> bool {
+    let Some(code) = p.read_va_upto(va, 32) else {
+        return false;
+    };
+    let mut decoder = Decoder::with_ip(bits, code, va, DecoderOptions::NONE);
+    if !decoder.can_decode() || decoder.decode().ip() != va || !decoder.can_decode() {
+        return false;
+    }
+    let test = decoder.decode();
+    let tested = test.mnemonic() == Mnemonic::Test
+        && test.op0_kind() == OpKind::Register
+        && test.op1_kind() == OpKind::Register
+        && test.op0_register() == test.op1_register()
+        && test.op0_register().full_register() == Register::RAX;
+    if !tested || !decoder.can_decode() {
+        return false;
+    }
+    let branch = decoder.decode();
+    let present = match branch.condition_code() {
+        ConditionCode::ne => branch.near_branch_target(),
+        ConditionCode::e => branch.next_ip(),
+        _ => return false,
+    };
+    branch.flow_control() == FlowControl::ConditionalBranch
+        && p.read_va(present, 1) == Some(&[0xcc][..])
 }
 
 /// Whether `int 0x29` is one of the next few instructions after `va`.

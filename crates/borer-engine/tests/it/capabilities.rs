@@ -582,6 +582,45 @@ fn a_check_past_a_return_or_jump_is_not_the_debugger_result() {
     assert!(!text.contains("IsDebuggerPresent"), "{text}");
 }
 
+/// A check that breaks into the debugger it found is not anti-analysis.
+///
+/// `if (IsDebuggerPresent()) __debugbreak();`, as a debug build's error
+/// report does, welcomes the debugger. A check whose branch goes elsewhere
+/// still is one.
+#[test]
+fn a_check_that_breaks_into_the_debugger_is_not_anti_analysis() {
+    let breaks = [
+        0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0x85, 0xc0, // ASM: test eax, eax
+        0x75, 0x01, // ASM: jne 0x40100a
+        0xc3, // ASM: ret
+        0xcc, // ASM: int3
+        0xc3, // ASM: ret
+    ];
+    let text = debugger_map(&breaks);
+    assert!(!text.contains("IsDebuggerPresent"), "{text}");
+    let exits = [
+        0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0x85, 0xc0, // ASM: test eax, eax
+        0x75, 0x01, // ASM: jne 0x40100a
+        0xc3, // ASM: ret
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xc3, // ASM: ret
+    ];
+    let text = debugger_map(&exits);
+    assert!(text.contains("IsDebuggerPresent"), "{text}");
+    let absent = [
+        0xe8, 0xfb, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0x85, 0xc0, // ASM: test eax, eax
+        0x74, 0x01, // ASM: jz 0x40100a
+        0xc3, // ASM: ret
+        0xcc, // ASM: int3
+        0xc3, // ASM: ret
+    ];
+    let text = debugger_map(&absent);
+    assert!(text.contains("IsDebuggerPresent"), "{text}");
+}
+
 /// `GetThreadContext` is anti-analysis on a thread of the caller's own.
 ///
 /// The caller takes it with `GetCurrentThread` or `OpenThread`. A thread
