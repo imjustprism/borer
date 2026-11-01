@@ -1017,6 +1017,32 @@ fn a_reused_context_register_is_not_a_hardware_breakpoint() {
     assert!(kept.contains("hardware breakpoint"), "{kept}");
 }
 
+/// A register copied into the context pointer, then replaced, no longer
+/// addresses the buffer: the flags stored through it go elsewhere. Stored
+/// before the replacement, they still reach the call.
+#[test]
+fn flags_stored_through_a_replaced_register_are_not_a_hardware_breakpoint() {
+    let replaced = [
+        0x48, 0x89, 0xda, // ASM: mov rdx, rbx
+        0x48, 0x89, 0xf3, // ASM: mov rbx, rsi
+        0xc7, 0x43, 0x30, 0x10, 0x00, 0x10, 0x00, // ASM: mov dword [rbx+0x30], 0x100010
+        0xe8, 0xee, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0xc3, // ASM: ret
+    ];
+    assert_eq!(direct_call(&replaced, 13), 0x402000);
+    let text = report_calls(&replaced, &[], &[("GetThreadContext", 0x402000)]);
+    assert!(!text.contains("hardware breakpoint"), "{text}");
+    let copied = [
+        0x48, 0x89, 0xda, // ASM: mov rdx, rbx
+        0xc7, 0x43, 0x30, 0x10, 0x00, 0x10, 0x00, // ASM: mov dword [rbx+0x30], 0x100010
+        0xe8, 0xf1, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0xc3, // ASM: ret
+    ];
+    assert_eq!(direct_call(&copied, 10), 0x402000);
+    let kept = report_calls(&copied, &[], &[("GetThreadContext", 0x402000)]);
+    assert!(kept.contains("hardware breakpoint"), "{kept}");
+}
+
 /// A buffer passed to a later call is not the context `GetThreadContext` got.
 #[test]
 fn a_later_call_does_not_make_a_context_buffer() {

@@ -1259,7 +1259,9 @@ fn context_debug(p: &Program, a: &Analysis, entry: u64, instrs: &[Instruction], 
 ///
 /// The word has to reach the context. A mov into a register that nothing
 /// stores, a compare, and the same flags passed to an earlier call do not
-/// count. The latest store of that field is the value the call sees.
+/// count. The latest store of that field is the value the call sees. A
+/// register copied into the pointer and then replaced no longer addresses
+/// the buffer.
 ///
 /// # Arguments
 ///
@@ -1268,13 +1270,20 @@ fn context_debug(p: &Program, a: &Analysis, entry: u64, instrs: &[Instruction], 
 fn context_flags(before: &[Instruction], bits: u32) -> bool {
     let window = flag_window(before);
     let off = if bits == 32 { 0 } else { 0x30 };
-    let buf = context_buffer(window, bits);
+    let mut buf = context_buffer(window, bits);
     let mut held = [Register::None; 4];
     let mut count = 0usize;
     let mut last = None;
     for (at, n) in window.iter().enumerate() {
         if let Some(debug) = flags_stored(n, off, buf, at, &held[..count]) {
             last = Some(debug);
+        }
+        if buf.0 != Register::None
+            && buf.1 != Register::None
+            && at > buf.2
+            && writes_register(n, buf.0)
+        {
+            buf.0 = Register::None;
         }
         remember_flags(n, &mut held, &mut count);
     }
