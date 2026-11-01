@@ -406,6 +406,24 @@ fn a_branch_over_a_copy_does_not_name_that_argument() {
     );
 }
 
+/// A copy at a later address that jumps back to the compare is not in the
+/// address-order trace, so the hint does not name `a1`.
+#[test]
+fn a_later_copy_that_jumps_back_does_not_name_the_argument() {
+    let code = [
+        0xeb, 0x0a, // ASM: jmp 0x40100c
+        0x81, 0xf9, 0xcd, 0xab, 0x37, 0x13, // ASM: cmp ecx, 0x1337abcd
+        0x0f, 0x94, 0xc0, // ASM: sete al
+        0xc3, // ASM: ret
+        0x89, 0xd1, // ASM: mov ecx, edx
+        0xeb, 0xf2, // ASM: jmp 0x401002
+    ];
+    assert_eq!(
+        steps(&code),
+        ["borer://solve/0x401000 (compares against 0x1337abcd: not shown to be a1)"]
+    );
+}
+
 /// A byte copy does not make the whole compared register the argument.
 #[test]
 fn a_partial_copy_is_not_the_argument() {

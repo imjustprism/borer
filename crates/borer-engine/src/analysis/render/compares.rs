@@ -280,7 +280,8 @@ fn copied_into(n: &Instruction, held: &[Register; 4], need: usize) -> Option<Reg
 /// `conv`. A convention with no register arguments never claims one.
 ///
 /// A branch that jumps over a copy and still reaches the compare leaves
-/// the source unnamed.
+/// the source unnamed, and so does a later block that writes a traced
+/// register and jumps back.
 ///
 /// # Arguments
 ///
@@ -297,37 +298,83 @@ pub(super) fn compared_source(instrs: &[Instruction], at: usize, conv: &Conv) ->
     let compared = i.op0_register();
     let need = compared.size();
     let mut reg = compared.full_register();
-    for n in instrs[..at].iter().rev() {
-        if matches!(
-            n.flow_control(),
-            FlowControl::Call | FlowControl::IndirectCall
-        ) {
-            if reg == Register::RAX {
-                return Compared::CallResult;
+    let mut traced = vec![reg];
+    let found = 'walk: {
+        for n in instrs[..at].iter().rev() {
+            if matches!(
+                n.flow_control(),
+                FlowControl::Call | FlowControl::IndirectCall
+            ) {
+                if reg == Register::RAX {
+                    break 'walk Compared::CallResult;
+                }
+                if conv.volatile.contains(&reg) {
+                    return Compared::Other;
+                }
+                continue;
             }
-            if conv.volatile.contains(&reg) {
+            if let Some(src) = copied_from(n, reg, need) {
+                if branch_skips(instrs, n.ip(), i.ip()) {
+                    return Compared::Other;
+                }
+                reg = src;
+                traced.push(src);
+                continue;
+            }
+            if reg_touch(&mut InstructionInfoFactory::new(), n, reg).1 {
                 return Compared::Other;
             }
-            continue;
         }
-        if let Some(src) = copied_from(n, reg, need) {
-            if branch_skips(instrs, n.ip(), i.ip()) {
-                return Compared::Other;
-            }
-            reg = src;
-            continue;
-        }
-        if reg_touch(&mut InstructionInfoFactory::new(), n, reg).1 {
+        let Some(pos) = conv.args.iter().position(|r| *r == reg) else {
             return Compared::Other;
-        }
+        };
+        let Some(n) = pos.checked_add(1).and_then(|n| u8::try_from(n).ok()) else {
+            return Compared::Other;
+        };
+        Compared::Argument(n)
+    };
+    if rejoined(instrs, at, &traced, conv) {
+        return Compared::Other;
     }
-    let Some(pos) = conv.args.iter().position(|r| *r == reg) else {
-        return Compared::Other;
+    found
+}
+
+/// Whether code after the compare at `at` may jump back to or before it
+/// after writing a register the trace read.
+///
+/// The trace walks back in address order, which is execution order only
+/// when no later block jumps back. A later block that writes `rcx` and
+/// jumps to the compare defines it on a path the trace never saw. An
+/// indirect jump may land anywhere, and a call clobbers its volatile
+/// registers.
+///
+/// # Arguments
+///
+/// * `instrs` - The function's instructions, in address order.
+/// * `at` - The comparing instruction.
+/// * `traced` - The full registers the trace followed back from the compare.
+/// * `conv` - The function's calling convention.
+fn rejoined(instrs: &[Instruction], at: usize, traced: &[Register], conv: &Conv) -> bool {
+    let Some((cmp, later)) = instrs.get(at..).and_then(<[_]>::split_first) else {
+        return false;
     };
-    let Some(n) = pos.checked_add(1).and_then(|n| u8::try_from(n).ok()) else {
-        return Compared::Other;
-    };
-    Compared::Argument(n)
+    let back = later.iter().any(|n| match n.flow_control() {
+        FlowControl::ConditionalBranch | FlowControl::UnconditionalBranch => {
+            n.near_branch_target() <= cmp.ip()
+        }
+        FlowControl::IndirectBranch => true,
+        _ => false,
+    });
+    let mut factory = InstructionInfoFactory::new();
+    back && later.iter().any(|n| {
+        traced.iter().any(|&r| {
+            reg_touch(&mut factory, n, r).1
+                || (matches!(
+                    n.flow_control(),
+                    FlowControl::Call | FlowControl::IndirectCall
+                ) && (r == Register::RAX || conv.volatile.contains(&r)))
+        })
+    })
 }
 
 /// The first immediate operand of `i`.
