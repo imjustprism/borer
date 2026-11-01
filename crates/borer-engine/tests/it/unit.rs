@@ -291,3 +291,41 @@ fn an_export_of_one_entry_writes_only_that_body() {
         "odd stays declared: {one}"
     );
 }
+
+/// An exported body declares the function it calls by that function's
+/// own signature, the one the file writes it under, and keeps the
+/// declaration inside the definition so it compiles alone.
+#[test]
+fn an_exported_body_declares_its_callee_by_its_own_signature() {
+    use std::collections::BTreeSet;
+
+    use borer_engine::analysis::decompile::export::{Library, export};
+    let p = image();
+    let a = Analysis::compute(&p);
+    let file = |only: Option<&BTreeSet<u64>>| {
+        let mut bodies = String::new();
+        let hoisted = export(
+            &p,
+            &a,
+            &Overlay::default(),
+            Library::Skip,
+            only,
+            &mut |text| {
+                bodies.push_str(text);
+                Ok(())
+            },
+        )
+        .expect("exports");
+        format!("{}{bodies}", hoisted.head("t"))
+    };
+    let all = file(None);
+    let odd = all
+        .lines()
+        .find(|l| l.contains(" odd(") && !l.ends_with(';') && !l.starts_with("//"))
+        .expect("odd is defined");
+    let one = file(Some(&BTreeSet::from([TEXT])));
+    assert!(
+        one.lines().any(|l| l == format!("  extern {odd};")),
+        "{odd} in {one}"
+    );
+}

@@ -363,7 +363,13 @@ impl Hoisted {
         let mut locals = false;
         for line in lines.get(comments..decls_end).unwrap_or_default() {
             match classify(line, &self.functions) {
-                Some(kind) => self.hoist(kind, line),
+                Some(kind) => {
+                    self.hoist(kind, line);
+                    if let Some(local) = block_declaration(kind, line) {
+                        locals = true;
+                        let _ = writeln!(out, "  {local}");
+                    }
+                }
                 None => {
                     locals = true;
                     match super::vars::declaration(line) {
@@ -499,6 +505,32 @@ fn classify(line: &str, functions: &BTreeSet<String>) -> Option<Kind> {
         Some(Kind::Data)
     } else {
         None
+    }
+}
+
+/// Returns the declaration a hoisted line also leaves in the body.
+///
+/// The definition then compiles alone: an `extern` prototype or object as
+/// it stands, and a `static inline` function of the binary as its
+/// prototype. Types, macros, tables and the runtime's own definitions stay at file
+/// scope only.
+///
+/// # Arguments
+///
+/// * `kind` - What the line declares ([`classify`]).
+/// * `line` - The hoisted line.
+///
+/// # Returns
+///
+/// The block-scope declaration, or `None` for a line that leaves none.
+fn block_declaration(kind: Kind, line: &str) -> Option<String> {
+    match kind {
+        Kind::Extern | Kind::Runtime if line.starts_with("extern ") => Some(line.to_owned()),
+        Kind::Inline => line
+            .strip_prefix("static inline ")
+            .and_then(|l| l.split_once(" {"))
+            .map(|(head, _)| format!("extern {head};")),
+        Kind::Extern | Kind::Runtime | Kind::Type | Kind::Macro | Kind::Data => None,
     }
 }
 
@@ -649,6 +681,7 @@ fn export_on(
             .is_none()
             .then(|| named(program, analysis, overlay, entry))
             .flatten()
+            .map(|text| own_callees(&text, program, analysis, overlay, entry))
     };
     let mut out = String::new();
     let cost = |entry: u64| match over(entry) {
@@ -710,6 +743,110 @@ fn named(program: &Program, analysis: &Analysis, overlay: &Overlay, entry: u64) 
     };
     super::name_fields(program, analysis, overlay, entry, &text)
         .map(|out| super::finished(&out, program, analysis, overlay, entry))
+}
+
+/// Declares each function of the image a text calls by that function's
+/// own signature, in place of the prototype its unit states from ABI
+/// facts alone.
+///
+/// A prototype from ABI facts gives every parameter and the result the
+/// machine word; a callee that reads 32 bits of a parameter, or returns a
+/// pointer, says so in its own text. A callee whose own signature is
+/// unsure is left undeclared rather than declared wrong: one over
+/// [`super::finish::CALLEE_INSTRUCTIONS_MAX`] instructions (its text is
+/// not built for a caller), one that does not decompile, one with a name
+/// several functions share, and one a call passes another argument count
+/// ([`super::unit::own_prototype`]). A function the C library or the
+/// runtime declares keeps its declaration.
+///
+/// # Arguments
+///
+/// * `text` - The function's finished text.
+/// * `program` - The loaded binary.
+/// * `analysis` - Its analysis.
+/// * `overlay` - Names, types and comments to apply.
+/// * `entry` - The function's entry.
+///
+/// # Returns
+///
+/// The text with its callees' declarations replaced or dropped.
+fn own_callees(
+    text: &str,
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    entry: u64,
+) -> String {
+    let comments = text.lines().take_while(|l| l.starts_with("//")).count();
+    let decls_end = super::declarations_end(text).unwrap_or(comments);
+    let mut out = String::with_capacity(text.len());
+    for (i, line) in text.lines().enumerate() {
+        let name = declared_name(line);
+        let callee = (comments..decls_end).contains(&i)
+            && line.starts_with("extern ")
+            && line.contains('(')
+            && crate::analysis::typelib::declared(&name, program.format).is_none()
+            && crate::analysis::runtime::helper(&name).is_none();
+        let own = callee
+            .then(|| super::unit::function_named(program, analysis, overlay, &name))
+            .flatten()
+            .filter(|&g| g != entry);
+        match own {
+            Some(g) => {
+                if let Some(p) = own_signature(program, analysis, overlay, g)
+                    .as_deref()
+                    .and_then(|sig| super::unit::own_prototype(text, &name, sig))
+                {
+                    out.push_str(&p);
+                    out.push('\n');
+                }
+            }
+            None => {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
+/// Returns a function's own `// signature:`, built once per function under
+/// the names in force through [`Analysis::derived`].
+///
+/// # Arguments
+///
+/// * `program` - The loaded binary.
+/// * `analysis` - Its analysis.
+/// * `overlay` - Names, types and comments to apply.
+/// * `entry` - The function's entry.
+///
+/// # Returns
+///
+/// The signature without its prefix, `None` for a function over
+/// [`super::finish::CALLEE_INSTRUCTIONS_MAX`] instructions or one that
+/// does not decompile.
+fn own_signature(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    entry: u64,
+) -> std::sync::Arc<Option<String>> {
+    analysis.derived.get_or_build_item(
+        "export_signature",
+        overlay.fingerprint(),
+        entry,
+        || {
+            analysis.function(entry).filter(|f| {
+                f.entry == entry && f.instr_count <= super::finish::CALLEE_INSTRUCTIONS_MAX
+            })?;
+            let text = named(program, analysis, overlay, entry)?;
+            text.lines()
+                .take_while(|l| l.starts_with("//"))
+                .find_map(|l| l.strip_prefix("// signature: "))
+                .map(|s| s.trim().to_owned())
+        },
+        |s| s.as_ref().map_or(0, String::len),
+    )
 }
 
 /// What the functions rendered but not yet taken, and how far the taking
@@ -1289,7 +1426,7 @@ mod tests {
         assert!(!head.contains("extern uint64_t a("), "{head}");
         assert!(head.contains("uint64_t a(uint64_t a1);"), "{head}");
         assert!(
-            body.contains("uint64_t a(uint64_t a1)\n{\n  uint64_t var1;\n\n  return c(a1);\n}\n"),
+            body.contains("uint64_t a(uint64_t a1)\n{\n  extern uint64_t c(uint64_t);\n  uint64_t var1;\n\n  return c(a1);\n}\n"),
             "{body}"
         );
         assert!(body.contains("// d @ 0x30: does not decompile"), "{body}");

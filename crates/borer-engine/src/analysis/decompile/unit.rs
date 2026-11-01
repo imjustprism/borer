@@ -846,6 +846,57 @@ fn parse_proto(sig: &str, name: &str) -> Option<Proto> {
     })
 }
 
+/// Returns the declaration of a callee from its own signature, when every
+/// call of it in a text passes the arguments that signature takes.
+///
+/// # Arguments
+///
+/// * `text` - The calling function's text.
+/// * `name` - The callee's name.
+/// * `sig` - The callee's own `// signature:`, without the prefix.
+///
+/// # Returns
+///
+/// `extern T name(...);`, or `None` when the signature does not parse, is
+/// variadic, a call passes another count, the signature returns nothing
+/// where the text reads a call's value, or the text returns a call's value
+/// as its own under another type: one of the two is wrong, and a
+/// declaration would put that width into the call.
+pub(super) fn own_prototype(text: &str, name: &str, sig: &str) -> Option<String> {
+    let proto = parse_proto(sig, name).filter(|p| !p.variadic)?;
+    let value_read = text.lines().filter(|l| !l.starts_with("//")).any(|l| {
+        let code = code_of(l);
+        let start = code.len() - code.trim_start().len();
+        word_positions(code, name)
+            .into_iter()
+            .any(|at| at != start && arity_at(code, at, name.len()).is_some())
+    });
+    let caller = text
+        .lines()
+        .find_map(|l| l.strip_prefix("// signature: "))
+        .and_then(|own| {
+            let head = own.split_once('(')?.0.trim_end();
+            let callee = head.rsplit(|c: char| !is_ident_char(c)).next()?;
+            parse_proto(own.trim(), callee)
+        });
+    let passed_on = text.lines().any(|l| {
+        code_of(l)
+            .trim_start()
+            .starts_with(&format!("return {name}("))
+    });
+    if call_arities(text, name)
+        .iter()
+        .any(|&n| n != proto.params.len())
+        || value_read && sig.trim_start().starts_with("void ")
+        || passed_on && caller.is_none_or(|c| c.ret != proto.ret)
+    {
+        return None;
+    }
+    let mut out = String::new();
+    cir::print_items(&[Item::Extern(proto)], &mut out);
+    Some(out.trim_end().to_owned())
+}
+
 /// Reads one parameter: its type and the name after it, when it has one.
 ///
 /// # Arguments
@@ -1217,8 +1268,8 @@ fn code_of(line: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        Index, Item, call_arities, code_of, implementation_named, library_items, parse_proto,
-        plain_type, words,
+        Index, Item, call_arities, code_of, implementation_named, library_items, own_prototype,
+        parse_proto, plain_type, words,
     };
     use crate::analysis::decompile::cir;
     use crate::program::BinaryFormat;
@@ -1454,5 +1505,47 @@ mod tests {
     fn a_call_counts_its_arguments() {
         let text = "x = f(g(a, b), c) + f() + p->f(a);\n";
         assert_eq!(call_arities(text, "f"), [2, 0]);
+    }
+
+    /// A callee is declared by its own signature only when every call
+    /// passes its count and it takes no variable list.
+    ///
+    /// # Panics
+    ///
+    /// When a declaration is written or left out otherwise.
+    #[test]
+    fn callees_are_declared_by_their_own_signatures() {
+        let text = "x = sub_1(a1, a2);\nsub_1(x, 0);\nreturn dcgettext(NULL, \"a\", 5);\n";
+        assert_eq!(
+            own_prototype(text, "sub_1", "uint32_t sub_1(uint32_t a1, char *a2)").as_deref(),
+            Some("extern uint32_t sub_1(uint32_t a1, char *a2);")
+        );
+        assert_eq!(
+            own_prototype(text, "sub_1", "uint32_t sub_1(uint32_t a1)"),
+            None
+        );
+        assert_eq!(
+            own_prototype(text, "sub_1", "uint32_t sub_1(uint32_t a1, ...)"),
+            None
+        );
+        assert_eq!(
+            own_prototype(text, "sub_1", "void sub_1(uint32_t a1, char *a2)"),
+            None
+        );
+        assert_eq!(
+            own_prototype(
+                "sub_1(a1, 0);\n",
+                "sub_1",
+                "void sub_1(uint32_t a1, char *a2)"
+            )
+            .as_deref(),
+            Some("extern void sub_1(uint32_t a1, char *a2);")
+        );
+        let passed = "// signature: uint64_t f(uint64_t a1)\nreturn sub_1(a1, 0);\n";
+        assert_eq!(
+            own_prototype(passed, "sub_1", "uint32_t sub_1(uint64_t a1, char *a2)"),
+            None
+        );
+        assert!(own_prototype(passed, "sub_1", "uint64_t sub_1(uint64_t a1, char *a2)").is_some());
     }
 }
