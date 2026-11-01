@@ -317,7 +317,6 @@ fn hypervisor_leaf(instrs: &[Instruction], at: usize) -> bool {
 /// A call, or any other write of `rax`, replaces that immediate. The leaf
 /// is then unknown.
 fn cpu_leaf(instrs: &[Instruction], at: usize) -> Option<u64> {
-    let mut info = InstructionInfoFactory::new();
     for n in instrs[..at].iter().rev().take(6) {
         if matches!(
             n.flow_control(),
@@ -325,17 +324,7 @@ fn cpu_leaf(instrs: &[Instruction], at: usize) -> Option<u64> {
         ) {
             return None;
         }
-        let writes_rax = info.info(n).used_registers().iter().any(|ur| {
-            ur.register().full_register() == Register::RAX
-                && matches!(
-                    ur.access(),
-                    OpAccess::Write
-                        | OpAccess::ReadWrite
-                        | OpAccess::CondWrite
-                        | OpAccess::ReadCondWrite
-                )
-        });
-        if !writes_rax {
+        if !writes_register(n, Register::RAX) {
             continue;
         }
         if n.mnemonic() != Mnemonic::Mov {
@@ -373,11 +362,12 @@ fn hypervisor_bit(instrs: &[Instruction], at: usize) -> bool {
     false
 }
 
-/// Whether `i` writes `reg`, other than a compare that only reads it.
+/// Whether `i` writes `reg`, by its full register.
+///
+/// An implicit write counts: `cpuid` writes `rcx`, `rdtsc` writes `rdx`.
+/// A compare only reads its operands.
 fn writes_register(i: &Instruction, reg: Register) -> bool {
-    i.op0_kind() == OpKind::Register
-        && i.op0_register().full_register() == reg
-        && !matches!(i.mnemonic(), Mnemonic::Cmp | Mnemonic::Test | Mnemonic::Bt)
+    compares::reg_touch(&mut InstructionInfoFactory::new(), i, reg).1
 }
 
 /// Whether `i` tests or compares `reg` against `imm`.

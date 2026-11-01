@@ -116,6 +116,22 @@ fn a_replaced_leaf_is_not_a_hypervisor_probe() {
     assert!(!other.contains("hypervisor"), "{other}");
 }
 
+/// A later `cpuid` writes `ecx`, so a test after it reads that leaf's bit,
+/// not the hypervisor bit of the leaf 1 before it.
+#[test]
+fn a_later_cpuid_replaces_the_hypervisor_bit() {
+    let text = report(&[
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+        0x0f, 0xa2, // ASM: cpuid
+        0xb8, 0x07, 0x00, 0x00, 0x00, // ASM: mov eax, 7
+        0x0f, 0xa2, // ASM: cpuid
+        0xf7, 0xc1, 0x00, 0x00, 0x00, 0x80, // ASM: test ecx, 0x80000000
+        0xc3, // ASM: ret
+    ]);
+    assert!(text.contains("cpuid (feature probe)"), "{text}");
+    assert!(!text.contains("hypervisor"), "{text}");
+}
+
 /// Leaf 7's top `ecx` bit is a feature, not the hypervisor bit.
 #[test]
 fn a_feature_leaf_bit_is_not_a_hypervisor_probe() {
