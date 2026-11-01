@@ -425,7 +425,12 @@ pub fn capability_map_tsv(p: &Program, a: Option<&Analysis>) -> String {
 /// `IsProcessorFeaturePresent`, its guard; that call alone is dropped, and
 /// without the guard the fail-fast is the program's own reaction. A
 /// constant holding the bytes `cd 29`, such as `mov edx, 0x29cd`, is not it. `OutputDebugString` returns nothing,
-/// so a call outside that failure path stays. Every other import stays.
+/// so a call outside that failure path stays. `GetThreadContext` stays
+/// where its caller asks for the debug registers (the hardware-breakpoint
+/// tell) or takes a handle to a thread of its own (`GetCurrentThread`,
+/// `OpenThread`); a thread library suspending another thread or an
+/// injector does not. Every
+/// other import stays.
 /// A call whose next instruction is a bare `ret` stays when one caller
 /// tests the value that wrapper returned.
 ///
@@ -456,6 +461,17 @@ fn called_as_check(p: &Program, a: &Analysis, api: &str) -> bool {
         }
         if stem == "queryperformancecounter" {
             sites.len() >= 2
+        } else if stem == "getthreadcontext" {
+            let requested = anti_sites(p, a)
+                .get("hardware breakpoint (GetThreadContext)")
+                .is_some_and(|at| {
+                    at.iter()
+                        .any(|&va| a.function_at(va).is_some_and(|g| g.entry == f.entry))
+                });
+            requested
+                || ["=getcurrentthread", "=openthread"]
+                    .iter()
+                    .any(|own| !call_sites(p, a, f.entry, own).is_empty())
         } else if stem == "outputdebugstring" {
             true
         } else {
@@ -466,19 +482,23 @@ fn called_as_check(p: &Program, a: &Analysis, api: &str) -> bool {
     })
 }
 
-/// The C runtime stem of `api`, when the capability map must see a check.
+/// The stem of `api`, when the capability map must see a check: the C
+/// runtime's imports, and `GetThreadContext`, which a thread library and
+/// an injector call on other threads.
 fn crt_stem(api: &str) -> Option<&'static str> {
     let name = api.to_lowercase();
     [
         "isdebuggerpresent",
         "outputdebugstring",
         "queryperformancecounter",
+        "getthreadcontext",
     ]
     .into_iter()
     .find(|stem| name.starts_with(stem))
 }
 
-/// Call sites in `entry` whose import name starts with `stem`.
+/// Call sites in `entry` whose import name starts with `stem`, or equals
+/// it when `stem` is written `=name`.
 pub(super) fn call_sites(p: &Program, a: &Analysis, entry: u64, stem: &str) -> Vec<u64> {
     a.refs_from(entry)
         .into_iter()
@@ -490,9 +510,9 @@ pub(super) fn call_sites(p: &Program, a: &Analysis, entry: u64, stem: &str) -> V
             let sym = a
                 .symbol_at(p, slot)
                 .filter(|s| s.kind == SymbolKind::Import)?;
-            bare_name(&sym.name)
-                .to_lowercase()
-                .starts_with(stem)
+            let name = bare_name(&sym.name).to_lowercase();
+            stem.strip_prefix('=')
+                .map_or_else(|| name.starts_with(stem), |exact| name == exact)
                 .then_some(site.va)
         })
         .collect()

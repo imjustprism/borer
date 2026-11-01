@@ -165,7 +165,7 @@ pub fn anti_analysis_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
 ///
 /// Each technique's label and its instruction addresses, in function
 /// then address order; empty for an architecture with no x86 decoder.
-fn anti_sites(p: &Program, a: &Analysis) -> Arc<BTreeMap<&'static str, Vec<u64>>> {
+pub(super) fn anti_sites(p: &Program, a: &Analysis) -> Arc<BTreeMap<&'static str, Vec<u64>>> {
     a.derived.get_or_build("anti_sites", (), || {
         let mut sites: BTreeMap<&'static str, Vec<u64>> = BTreeMap::new();
         let Some(bits) = p.arch.bitness() else {

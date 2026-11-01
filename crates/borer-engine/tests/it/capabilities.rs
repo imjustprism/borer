@@ -582,6 +582,54 @@ fn a_check_past_a_return_or_jump_is_not_the_debugger_result() {
     assert!(!text.contains("IsDebuggerPresent"), "{text}");
 }
 
+/// `GetThreadContext` is anti-analysis on a thread of the caller's own.
+///
+/// The caller takes it with `GetCurrentThread` or `OpenThread`. A thread
+/// library suspending another thread, an injector, and an import nothing
+/// calls are not.
+#[test]
+fn a_thread_context_is_anti_analysis_only_on_an_own_thread() {
+    let map = |code: &[u8]| {
+        let mut p = image(Arch::X86_64, code, &[]);
+        for (name, addr) in [
+            ("GetThreadContext", 0x402000),
+            ("GetCurrentThread", 0x402008),
+            ("SuspendThread", 0x402010),
+        ] {
+            p.symbols.push(Symbol {
+                name: format!("KERNEL32.dll!{name}"),
+                addr,
+                kind: SymbolKind::Import,
+            });
+        }
+        let a = Analysis::compute(&p);
+        borer_engine::analysis::render::capability_map_tsv(&p, Some(&a))
+    };
+    let own = [
+        0xe8, 0x03, 0x10, 0x00, 0x00, // ASM: call 0x402008
+        0xe8, 0xf6, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0xc3, // ASM: ret
+    ];
+    let text = map(&own);
+    assert!(text.contains("GetThreadContext"), "{text}");
+    let other = [
+        0xe8, 0x0b, 0x10, 0x00, 0x00, // ASM: call 0x402010
+        0xe8, 0xf6, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0xc3, // ASM: ret
+    ];
+    let text = map(&other);
+    assert!(!text.contains("GetThreadContext"), "{text}");
+    let uncalled = map(&[0xc3]);
+    assert!(!uncalled.contains("GetThreadContext"), "{uncalled}");
+    let helper = [
+        0xc7, 0x42, 0x30, 0x10, 0x00, 0x10, 0x00, // ASM: mov dword [rdx+0x30], 0x100010
+        0xe8, 0xf4, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+        0xc3, // ASM: ret
+    ];
+    let text = map(&helper);
+    assert!(text.contains("GetThreadContext"), "{text}");
+}
+
 /// `__fastfail` after a tested debugger call is the program's own check.
 ///
 /// It is the runtime's fail-fast only beside the `IsProcessorFeaturePresent`
