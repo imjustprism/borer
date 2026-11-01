@@ -655,8 +655,23 @@ fn implementation_named(name: &str, format: crate::program::BinaryFormat) -> boo
 /// * `name` - The function's name.
 /// * `format` - The binary's format, which picks the platform.
 fn library(name: &str, format: crate::program::BinaryFormat) -> Option<Proto> {
-    let d = crate::analysis::typelib::declared(name, format)
-        .filter(|d| d.os == crate::analysis::typelib::Os::C)?;
+    library_in(name, format, crate::analysis::typelib::Os::C)
+}
+
+/// Returns a platform library's prototype of a function, when the type
+/// library states one for that platform in C's own types.
+///
+/// # Arguments
+///
+/// * `name` - The function's name.
+/// * `format` - The binary's format, which picks the platform.
+/// * `os` - The library the declaration must come from.
+fn library_in(
+    name: &str,
+    format: crate::program::BinaryFormat,
+    os: crate::analysis::typelib::Os,
+) -> Option<Proto> {
+    let d = crate::analysis::typelib::declared(name, format).filter(|d| d.os == os)?;
     std::iter::once(d.ret)
         .chain(d.params.iter().map(|p| p.ty))
         .all(plain_type)
@@ -895,6 +910,44 @@ pub(super) fn own_prototype(text: &str, name: &str, sig: &str) -> Option<String>
     let mut out = String::new();
     cir::print_items(&[Item::Extern(proto)], &mut out);
     Some(out.trim_end().to_owned())
+}
+
+/// Returns the POSIX library's declarations of the functions a text calls,
+/// which its unit leaves to the platform's headers.
+///
+/// A function is declared when the type library states it for POSIX in
+/// C's own types and every call passes the arguments it takes; one it
+/// states otherwise stays undeclared.
+///
+/// # Arguments
+///
+/// * `text` - The function's text.
+/// * `format` - The binary's format, which picks the platform.
+///
+/// # Returns
+///
+/// One `extern` line per function, in name order.
+pub(super) fn platform_declarations(
+    text: &str,
+    format: crate::program::BinaryFormat,
+) -> Vec<String> {
+    use crate::analysis::typelib::{Os, declared};
+    let calls = identifier_arities(text, |w| {
+        declared(w, format).is_some_and(|d| d.os == Os::Posix)
+    });
+    calls
+        .into_iter()
+        .filter_map(|(name, arities)| {
+            let p = library_in(name, format, Os::Posix)?;
+            let n = p.params.len();
+            if !arities.iter().all(|&a| a == n || p.variadic && a > n) {
+                return None;
+            }
+            let mut out = String::new();
+            cir::print_items(&[Item::Extern(p)], &mut out);
+            Some(out.trim_end().to_owned())
+        })
+        .collect()
 }
 
 /// Reads one parameter: its type and the name after it, when it has one.
@@ -1269,7 +1322,7 @@ fn code_of(line: &str) -> &str {
 mod tests {
     use super::{
         Index, Item, call_arities, code_of, implementation_named, library_items, own_prototype,
-        parse_proto, plain_type, words,
+        parse_proto, plain_type, platform_declarations, words,
     };
     use crate::analysis::decompile::cir;
     use crate::program::BinaryFormat;
@@ -1508,7 +1561,8 @@ mod tests {
     }
 
     /// A callee is declared by its own signature only when every call
-    /// passes its count and it takes no variable list.
+    /// passes its count and it takes no variable list; a POSIX function
+    /// the text calls is declared as the type library states it.
     ///
     /// # Panics
     ///
@@ -1547,5 +1601,10 @@ mod tests {
             None
         );
         assert!(own_prototype(passed, "sub_1", "uint64_t sub_1(uint64_t a1, char *a2)").is_some());
+        assert_eq!(
+            platform_declarations(text, BinaryFormat::Elf),
+            ["extern char *dcgettext(const char *domainname, const char *msgid, int category);"]
+        );
+        assert!(platform_declarations(text, BinaryFormat::Pe).is_empty());
     }
 }

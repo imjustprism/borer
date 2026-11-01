@@ -757,7 +757,10 @@ fn named(program: &Program, analysis: &Analysis, overlay: &Overlay, entry: u64) 
 /// not built for a caller), one that does not decompile, one with a name
 /// several functions share, and one a call passes another argument count
 /// ([`super::unit::own_prototype`]). A function the C library or the
-/// runtime declares keeps its declaration.
+/// runtime declares keeps its declaration, and one the POSIX library
+/// states in C's types is declared as it states it
+/// ([`super::unit::platform_declarations`]), where a reader's headers
+/// would.
 ///
 /// # Arguments
 ///
@@ -781,6 +784,12 @@ fn own_callees(
     let decls_end = super::declarations_end(text).unwrap_or(comments);
     let mut out = String::with_capacity(text.len());
     for (i, line) in text.lines().enumerate() {
+        if i == comments {
+            for d in super::unit::platform_declarations(text, program.format) {
+                out.push_str(&d);
+                out.push('\n');
+            }
+        }
         let name = declared_name(line);
         let callee = (comments..decls_end).contains(&i)
             && line.starts_with("extern ")
