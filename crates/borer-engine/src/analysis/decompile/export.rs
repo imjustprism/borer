@@ -3,9 +3,9 @@
 //! Each function is decompiled as the `decompile` tool shows it
 //! ([`super::decompile_named_all`]), its translation-unit closure included, and
 //! split at its declarations: the file-scope ones (vector typedefs, helper
-//! definitions, prototypes, tables and globals) are hoisted to the top of
-//! the file, each once, and what is left becomes a C function definition
-//! whose head is the text's `// signature:`. A function the file defines
+//! definitions, prototypes and tables) are hoisted to the top of the file,
+//! each once, and what is left becomes a C function definition whose head
+//! is the text's `// signature:`, a global it reads declared `extern` in it. A function the file defines
 //! is declared by that signature alone, so the closure's own prototype or
 //! `static inline` copy of it is dropped.
 //!
@@ -325,7 +325,10 @@ impl Hoisted {
     /// Splits one function's finished text: hoists its file-scope
     /// declarations and writes the rest as a C definition, one local per
     /// declaration line (`T a;` and `T *b;` for `T a, *b;`), the form
-    /// tools that read the file one declaration at a time expect.
+    /// tools that read the file one declaration at a time expect. A global
+    /// the text declares among its locals (`T g; // @ 0x..`) is written
+    /// `extern T g;`, so the definition reads the global rather than a
+    /// local of its name, and compiles alone.
     ///
     /// # Arguments
     ///
@@ -378,9 +381,16 @@ impl Hoisted {
         let body = lines.get(decls_end..).unwrap_or_default();
         let blank = body.iter().take_while(|l| l.is_empty()).count();
         let skip = if locals { 0 } else { blank };
+        let mut head_run = true;
         for line in body.get(skip..).unwrap_or_default() {
+            head_run &= !line.is_empty();
             if line.is_empty() {
                 out.push('\n');
+            } else if head_run
+                && !line.starts_with("static ")
+                && classify(line, &self.functions) == Some(Kind::Data)
+            {
+                let _ = writeln!(out, "  extern {line}");
             } else {
                 let _ = writeln!(out, "  {line}");
             }
@@ -1293,6 +1303,25 @@ mod tests {
         assert!(
             head.contains("\n// extern uint32_t c(uint64_t);\n"),
             "{head}"
+        );
+    }
+
+    /// A global a function's declarations name is declared `extern` in
+    /// its body, so the definition reads the global and does not shadow it
+    /// with a local of the same name.
+    ///
+    /// # Panics
+    ///
+    /// When the global is written as a local or a later line changes.
+    #[test]
+    fn a_global_in_a_body_is_declared_extern() {
+        let mut h = Hoisted::new(["f"].map(str::to_owned).into());
+        let mut out = String::new();
+        let f = "// f @ 0x10\n// signature: uint32_t f(void)\nuint32_t var1;\nint32_t g32_4010; // @ 0x4010\n\nvar1 = g32_4010;\nreturn var1; // @ 0x14\n";
+        h.add("f", 0x10, Some(f), &mut out);
+        assert!(
+            out.contains("  uint32_t var1;\n  extern int32_t g32_4010; // @ 0x4010\n\n  var1 = g32_4010;\n  return var1; // @ 0x14\n"),
+            "{out}"
         );
     }
 }
