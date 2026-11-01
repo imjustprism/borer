@@ -696,6 +696,57 @@ fn a_peb_field_is_named_from_the_following_read() {
     assert!(!wide.contains("BeingDebugged"), "{wide}");
 }
 
+/// `NtGlobalFlag` tested for another bit is a plain PEB read.
+///
+/// The heap-debugging flags a debugger sets are `0x70`; the C runtime's
+/// exit path shifts the word right by 8 and tests the low bit. Tested
+/// against `0x70`, it is still the debugger check.
+#[test]
+fn a_global_flag_tested_for_another_bit_is_a_plain_peb_read() {
+    let runtime = report(&[
+        0x64, 0x8b, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, // ASM: mov eax, fs:[0x30]
+        0x8b, 0x40, 0x68, // ASM: mov eax, [eax+0x68]
+        0xc1, 0xe8, 0x08, // ASM: shr eax, 8
+        0xa8, 0x01, // ASM: test al, 1
+        0xc3, // ASM: ret
+    ]);
+    assert!(runtime.contains("peb read"), "{runtime}");
+    assert!(!runtime.contains("NtGlobalFlag"), "{runtime}");
+    assert!(!runtime.starts_with("# anti-analysis:"), "{runtime}");
+    let other = report(&[
+        0x64, 0x8b, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, // ASM: mov eax, fs:[0x30]
+        0xf7, 0x40, 0x68, 0x00, 0x01, 0x00, 0x00, // ASM: test dword [eax+0x68], 0x100
+        0xc3, // ASM: ret
+    ]);
+    assert!(!other.contains("NtGlobalFlag"), "{other}");
+    let debugger = report(&[
+        0x64, 0x8b, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, // ASM: mov eax, fs:[0x30]
+        0x8b, 0x40, 0x68, // ASM: mov eax, [eax+0x68]
+        0x83, 0xe0, 0x70, // ASM: and eax, 0x70
+        0xc3, // ASM: ret
+    ]);
+    assert!(debugger.contains("peb read (NtGlobalFlag)"), "{debugger}");
+    let compared = report(&[
+        0x64, 0x8b, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, // ASM: mov eax, fs:[0x30]
+        0x83, 0x78, 0x68, 0x70, // ASM: cmp dword [eax+0x68], 0x70
+        0xc3, // ASM: ret
+    ]);
+    assert!(compared.contains("peb read (NtGlobalFlag)"), "{compared}");
+    let zero = report(&[
+        0x64, 0x8b, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, // ASM: mov eax, fs:[0x30]
+        0x83, 0x78, 0x68, 0x00, // ASM: cmp dword [eax+0x68], 0
+        0xc3, // ASM: ret
+    ]);
+    assert!(zero.contains("peb read (NtGlobalFlag)"), "{zero}");
+    let bit = report(&[
+        0x64, 0x8b, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, // ASM: mov eax, fs:[0x30]
+        0x8b, 0x40, 0x68, // ASM: mov eax, [eax+0x68]
+        0x0f, 0xba, 0xe0, 0x04, // ASM: bt eax, 4
+        0xc3, // ASM: ret
+    ]);
+    assert!(bit.contains("peb read (NtGlobalFlag)"), "{bit}");
+}
+
 /// A plain PEB read, such as an `Ldr` walk, is listed without deciding the
 /// verdict. A read of `BeingDebugged` decides it alone.
 #[test]

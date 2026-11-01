@@ -861,8 +861,8 @@ fn peb_field(rest: &[Instruction], peb: Register, teb: Register) -> &'static str
     let (mut np, mut nt) = (0usize, 0usize);
     hold(&mut pebs, &mut np, peb);
     hold(&mut tebs, &mut nt, teb);
-    for n in rest.iter().take(4) {
-        if let Some(label) = peb_field_read(n, &pebs[..np]) {
+    for (k, n) in rest.iter().take(4).enumerate() {
+        if let Some(label) = peb_field_read(n, &pebs[..np], &rest[k + 1..]) {
             return label;
         }
         let to_peb = copied_timestamp(n, &pebs[..np]).or_else(|| peb_pointer(n, &tebs[..nt]));
@@ -899,7 +899,19 @@ fn pointer_dest(i: &Instruction) -> Register {
 /// The field `n` reads through one of `held`.
 ///
 /// A store writes that slot instead of reading it, so it is not a field.
-fn peb_field_read(n: &Instruction, held: &[Register]) -> Option<&'static str> {
+/// `NtGlobalFlag` tested for another bit ([`other_global_flag`]) is a plain
+/// PEB read.
+///
+/// # Arguments
+///
+/// * `n` - One instruction after the PEB read.
+/// * `held` - Registers holding the PEB pointer.
+/// * `after` - The instructions after `n`.
+fn peb_field_read(
+    n: &Instruction,
+    held: &[Register],
+    after: &[Instruction],
+) -> Option<&'static str> {
     if held.is_empty()
         || n.mnemonic() == Mnemonic::Lea
         || (n.mnemonic() == Mnemonic::Mov && n.op0_kind() == OpKind::Memory)
@@ -915,9 +927,51 @@ fn peb_field_read(n: &Instruction, held: &[Register]) -> Option<&'static str> {
         return Some("peb read (BeingDebugged)");
     }
     if matches!(disp, 0x68 | 0xbc) {
+        if other_global_flag(n, after) {
+            return Some("peb read");
+        }
         return Some("peb read (NtGlobalFlag)");
     }
     None
+}
+
+/// The `NtGlobalFlag` bits a debugger sets: heap tail, free and parameter
+/// checking.
+const HEAP_DEBUG_FLAGS: u64 = 0x70;
+
+/// Whether the `NtGlobalFlag` read `n` is tested for a bit other than
+/// [`HEAP_DEBUG_FLAGS`].
+///
+/// The read itself may carry the mask (`test dword [eax+0x68], 0x100`).
+/// Otherwise the first of the next few instructions to use the loaded
+/// register decides: a right shift by 7 or more drops every debugger bit,
+/// a bit test of another bit reads that bit, and a `test`, `and` or `cmp`
+/// with a nonzero mask missing every debugger bit does too. A zero
+/// compares the whole word, debugger bits included, and a shift or bit
+/// index the scan cannot read keeps the name. The C runtime's exit path
+/// shifts the flags right by 8 and tests the low bit.
+fn other_global_flag(n: &Instruction, after: &[Instruction]) -> bool {
+    let skips = |imm: u64| imm != 0 && imm & HEAP_DEBUG_FLAGS == 0;
+    if let Some(imm) = immediate_any(n) {
+        return skips(imm);
+    }
+    if n.op0_kind() != OpKind::Register {
+        return false;
+    }
+    let reg = n.op0_register().full_register();
+    let Some(m) = after.iter().take(4).find(|m| {
+        (0..m.op_count())
+            .any(|k| m.op_kind(k) == OpKind::Register && m.op_register(k).full_register() == reg)
+    }) else {
+        return false;
+    };
+    let imm = immediate_any(m);
+    match m.mnemonic() {
+        Mnemonic::Shr | Mnemonic::Sar => imm.is_some_and(|k| k >= 7),
+        Mnemonic::Bt => imm.is_some_and(|bit| !(4..=6).contains(&bit)),
+        Mnemonic::Test | Mnemonic::And | Mnemonic::Cmp => imm.is_some_and(skips),
+        _ => false,
+    }
 }
 
 /// Whether a later instruction loads the PEB pointer through the TEB
