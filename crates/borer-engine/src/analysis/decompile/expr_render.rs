@@ -414,17 +414,18 @@ pub(super) fn bare(name: &str) -> std::borrow::Cow<'_, str> {
 ///   address the arguments sit above.
 /// * `shadow` - Bytes of callee-owned home space above the return address:
 ///   32 under the Microsoft x64 convention, 0 elsewhere.
+/// * `frame` - Bytes from the entry stack pointer down to the frame base.
 ///
 /// # Returns
 ///
-/// `local_N` below the return address, `retaddr` at it, `home_N` in the
+/// [`local_at`](crate::analysis::protos::local_at) below the return address, `retaddr` at it, `home_N` in the
 /// shadow space above it and `arg_N` past that, where N counts from the
-/// first slot past the return address: the home slots
-/// are the callee's own, where it spills or keeps a local, so a write
-/// there is no write to an argument.
-pub(super) fn slot_name(off: i64, word: i64, shadow: i64) -> String {
+/// first slot past the return address: the home slots are the callee's
+/// own, where it spills or keeps a local, so a write there is no write to
+/// an argument.
+pub(super) fn slot_name(off: i64, word: i64, shadow: i64, frame: i64) -> String {
     if off < 0 {
-        format!("local_{:x}", -off)
+        crate::analysis::protos::local_at(off, frame)
     } else if off == 0 {
         "retaddr".to_owned()
     } else if off < word + shadow {
@@ -460,7 +461,8 @@ impl Names<'_> {
         if self.first_stack == 0 && off >= 0 {
             return format!("arg_{off:x}");
         }
-        slot_name(off, self.word, self.first_stack - self.word)
+        let frame = crate::analysis::protos::frame_base(self.program);
+        slot_name(off, self.word, self.first_stack - self.word, frame)
     }
 
     /// Names an access of `ty` to the stack slot at `off`: the slot's name

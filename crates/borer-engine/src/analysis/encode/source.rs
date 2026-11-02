@@ -476,23 +476,18 @@ pub(super) fn out_arg_source_below(
             .map(|(field, _)| (field, callee.to_owned()))
     });
     exact.or_else(|| {
-        let inside = var
-            .strip_prefix("local_")
-            .and_then(|h| u64::from_str_radix(h, 16).ok())?;
-        let mut best: Option<(u64, &str)> = None;
+        let inside = crate::analysis::protos::local_depth(var)?;
+        let mut best: Option<(i64, &str)> = None;
         for (k, line) in lines.iter().enumerate().take(at).skip(from) {
             let mut rest = *line;
             while let Some(pos) = rest.find("&local_") {
-                let hex: String = rest[pos + "&local_".len()..]
-                    .chars()
-                    .take_while(char::is_ascii_hexdigit)
-                    .collect();
                 rest = &rest[pos + 1..];
-                let Ok(base) = u64::from_str_radix(&hex, 16) else {
+                let name: String = rest.chars().take_while(|&c| ident_char(c)).collect();
+                let Some(base) = crate::analysis::protos::local_depth(&name) else {
                     continue;
                 };
                 if base > inside
-                    && base - inside <= OBJECT_SPAN_MAX
+                    && u64::try_from(base - inside).is_ok_and(|d| d <= OBJECT_SPAN_MAX)
                     && best.is_none_or(|(b, _)| base < b)
                 {
                     best = Some((base, lines[k]));
@@ -501,6 +496,7 @@ pub(super) fn out_arg_source_below(
         }
         let (base, _) = best?;
         let below = hops.checked_sub(1)?;
-        out_arg_source_below(lines, at, &format!("local_{base:x}"), below)
+        let name = crate::analysis::protos::local_name(base);
+        out_arg_source_below(lines, at, &name, below)
     })
 }

@@ -1576,12 +1576,12 @@ fn an_escaping_local_is_declared() {
     p.function_ranges = vec![(0x1040, 0x1053), (0x1080, 0x1083)];
     let text = decompiled(&p, 0x1040);
     assert!(
-        text.contains("&local_18"),
+        text.contains("&local_10"),
         "the escaping local is not used: {text}"
     );
     let declared = text.lines().any(|l| {
         l.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-            .any(|w| w == "local_18")
+            .any(|w| w == "local_10")
             && (l.starts_with("uint") || l.starts_with("int") || l.starts_with("char"))
     });
     assert!(

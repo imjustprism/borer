@@ -36,5 +36,5 @@ fn an_eight_byte_slot_is_not_a_narrow_local() {
     });
     let text = decompiled(&program, 0x1_4000_1000);
     assert!(!text.contains("*(uint64_t*)&"), "{text}");
-    assert!(text.contains("uint64_t local_8"), "{text}");
+    assert!(text.contains("uint64_t local_0"), "{text}");
 }

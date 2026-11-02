@@ -36,6 +36,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::analysis::protos::{frame_base, local_offset};
 use crate::isa::x86::Register;
 
 use super::ctext::{
@@ -500,13 +501,14 @@ fn constant(e: &Ast) -> Option<u64> {
 }
 
 /// The frame offset a stack slot's name stands for: `local_N` below the
-/// return address, `retaddr` at it, `home_N` and `arg_N` past it.
+/// frame base, `retaddr` at the return address, `home_N` and `arg_N` past it.
 ///
 /// # Arguments
 ///
 /// * `name` - The name.
 /// * `word` - The stack word in bytes.
-fn slot_offset(name: &str, word: u64) -> Option<i64> {
+/// * `frame` - Bytes from the entry stack pointer down to the frame base.
+fn slot_offset(name: &str, word: u64, frame: i64) -> Option<i64> {
     let hex = |h: &str| {
         u64::from_str_radix(h, 16)
             .ok()
@@ -515,13 +517,12 @@ fn slot_offset(name: &str, word: u64) -> Option<i64> {
     if name == "retaddr" {
         return Some(0);
     }
-    if let Some(h) = name.strip_prefix("local_") {
-        return hex(h).map(i64::wrapping_neg);
-    }
     let h = name
         .strip_prefix("home_")
-        .or_else(|| name.strip_prefix("arg_"))?;
-    hex(h).map(|v| v.wrapping_add(i64::try_from(word).unwrap_or(8)))
+        .or_else(|| name.strip_prefix("arg_"));
+    h.and_then(hex)
+        .map(|v| v.wrapping_add(i64::try_from(word).unwrap_or(8)))
+        .or_else(|| local_offset(name, frame))
 }
 
 /// The frame offset a debug-named local stands for, read back from the
@@ -997,7 +998,7 @@ impl<'p> Script<'p> {
         for (name, ty, at) in &head.declared {
             let slot = if let Some(addr) = at {
                 Slot::Mem(*addr)
-            } else if let Some(off) = slot_offset(name, wbytes)
+            } else if let Some(off) = slot_offset(name, wbytes, frame_base(program))
                 .or_else(|| stated_local(overlay, entry, name))
                 .or_else(|| debug_local(program, entry, name))
             {

@@ -2,6 +2,7 @@
 //! declarations, and value widths.
 
 use super::*;
+use crate::analysis::protos::{local_depth, local_name};
 
 mod infer;
 
@@ -1117,7 +1118,7 @@ pub(super) fn stack_arrays(text: &str) -> String {
                 .collect::<Vec<_>>()
         })
         .collect();
-    let named: Vec<u64> = lines
+    let named: Vec<i64> = lines
         .iter()
         .filter(|l| is_declaration(l))
         .flat_map(|l| {
@@ -1141,8 +1142,8 @@ pub(super) fn stack_arrays(text: &str) -> String {
         let size = slot_size(ty);
         let mut members = vec![name.clone()];
         let mut at = base;
-        while let Some(next) = at.checked_sub(size).filter(|&n| n > 0) {
-            let next_name = format!("local_{next:x}");
+        while let Some(next) = at.checked_sub_unsigned(size) {
+            let next_name = local_name(next);
             if declared.get(&next_name) != Some(ty) {
                 break;
             }
@@ -1158,7 +1159,7 @@ pub(super) fn stack_arrays(text: &str) -> String {
                 .filter(|&d| d < base)
                 .max()
                 .unwrap_or(0);
-            (base - top).div_ceil(size)
+            u64::try_from(base.saturating_sub(top)).map_or(0, |n| n.div_ceil(size))
         };
         if len > 1 {
             arrays.push((name.clone(), ty, members, len));
@@ -1262,14 +1263,13 @@ fn slot_size(ty: &str) -> u64 {
     }
 }
 
-/// The frame offset `local_N` names.
+/// The depth below the frame base `local_N` names ([`local_depth`]).
 ///
 /// # Arguments
 ///
 /// * `name` - A variable name.
-fn slot_offset(name: &str) -> Option<u64> {
-    let base = name.split('[').next()?;
-    u64::from_str_radix(base.strip_prefix("local_")?, 16).ok()
+fn slot_offset(name: &str) -> Option<i64> {
+    local_depth(name.split('[').next()?)
 }
 
 /// The names the text reads through `&name` at an offset it computes: an
@@ -3541,15 +3541,15 @@ mod stack_array_tests {
             "{out}"
         );
         let run = [
-            "uint64_t local_28, local_20;",
+            "uint64_t local_8, local_0;",
             "",
-            "((uint32_t*)&local_28)[a1] = 1;",
-            "return ((uint8_t*)&local_20)[a1];",
+            "((uint32_t*)&local_8)[a1] = 1;",
+            "return ((uint8_t*)&local_0)[a1];",
         ]
         .join("\n");
         let out = stack_arrays(&run);
-        assert!(out.contains("uint64_t local_28[2];"), "{out}");
-        assert!(out.contains("((uint8_t*)&local_28[1])[a1]"), "{out}");
+        assert!(out.contains("uint64_t local_8[2];"), "{out}");
+        assert!(out.contains("((uint8_t*)&local_8[1])[a1]"), "{out}");
     }
 }
 

@@ -406,8 +406,8 @@ pub fn declarator(ty: &CType, name: &str) -> String {
 pub enum VarKey {
     /// A parameter, by its position from zero (`a1` is 0).
     Param(u8),
-    /// A stack slot, by its offset from the stack pointer at entry
-    /// (`local_58` is -0x58).
+    /// A stack slot, by its offset from the stack pointer at entry (on
+    /// x64, whose frame base sits 8 bytes below it, `local_50` is -0x58).
     Slot(i64),
 }
 
@@ -420,12 +420,14 @@ impl VarKey {
     /// * `text` - The name.
     /// * `word` - The stack word in bytes (4 or 8), which the slots above
     ///   the return address count from.
+    /// * `frame` - The bytes between the entry stack pointer and the frame
+    ///   base the `local_N` slots count from ([`frame_base`]).
     ///
     /// # Errors
     ///
     /// When the text names no parameter or stack slot: a register, which
     /// holds many values over a function, is refused with that reason.
-    pub fn parse(text: &str, word: i64) -> anyhow::Result<Self> {
+    pub fn parse(text: &str, word: i64, frame: i64) -> anyhow::Result<Self> {
         let hex = |s: &str| {
             (!s.is_empty() && s.len() <= 8)
                 .then(|| i64::from_str_radix(s, 16).ok())
@@ -439,8 +441,8 @@ impl VarKey {
         {
             return Ok(Self::Param(n - 1));
         }
-        if let Some(off) = text.strip_prefix("local_").and_then(hex) {
-            return Ok(Self::Slot(-off));
+        if let Some(off) = local_offset(text, frame) {
+            return Ok(Self::Slot(off));
         }
         if let Some(off) = text
             .strip_prefix("home_")
@@ -462,7 +464,7 @@ impl VarKey {
     pub fn spell_saved(self) -> String {
         match self {
             Self::Param(i) => format!("a{}", u32::from(i) + 1),
-            Self::Slot(off) if off < 0 => format!("local_{:x}", -off),
+            Self::Slot(off) if off < 0 => local_at(off, 0),
             Self::Slot(off) => format!("sp+{off:#x}"),
         }
     }
@@ -490,7 +492,7 @@ impl VarKey {
                 crate::text::quoted(text)
             ));
         }
-        Self::parse(text, 0)
+        Self::parse(text, 0, 0)
     }
 
     /// Spells the key as the text names the variable before any name.
@@ -500,15 +502,103 @@ impl VarKey {
     /// * `word` - The stack word in bytes.
     /// * `shadow` - The callee-owned home space above the return address
     ///   in bytes: 32 under the Microsoft x64 convention, else 0.
+    /// * `frame` - The bytes between the entry stack pointer and the frame
+    ///   base ([`frame_base`]).
     #[must_use]
-    pub fn spell(self, word: i64, shadow: i64) -> String {
+    pub fn spell(self, word: i64, shadow: i64, frame: i64) -> String {
         match self {
             Self::Param(i) => format!("a{}", u32::from(i) + 1),
-            Self::Slot(off) if off < 0 => format!("local_{:x}", -off),
+            Self::Slot(off) if off < 0 => local_at(off, frame),
             Self::Slot(off) if off < word + shadow => format!("home_{:x}", off - word),
             Self::Slot(off) => format!("arg_{:x}", off - word),
         }
     }
+}
+
+/// Returns the bytes between the entry stack pointer and the frame base,
+/// where `local_0` sits.
+///
+/// On x86 that is the saved frame pointer's word below the return
+/// address, so `local_N` is the slot a compiler and its debug information
+/// place at `rbp - N`; elsewhere it is none.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+#[must_use]
+pub fn frame_base(program: &crate::program::Program) -> i64 {
+    match program.arch.isa() {
+        Some(crate::isa::Isa::X86 { bits }) => i64::from(bits / 8),
+        Some(crate::isa::Isa::A64 | crate::isa::Isa::A32 | crate::isa::Isa::Rv(_)) | None => 0,
+    }
+}
+
+/// Returns the name of the stack local `depth` bytes below the frame base:
+/// `local_N`, or `local_mN` for a slot `N` bytes above it.
+///
+/// # Arguments
+///
+/// * `depth` - Bytes below the frame base ([`frame_base`]).
+#[must_use]
+pub fn local_name(depth: i64) -> String {
+    if depth < 0 {
+        format!("local_m{:x}", depth.unsigned_abs())
+    } else {
+        format!("local_{depth:x}")
+    }
+}
+
+/// Returns how many bytes below the frame base a name [`local_name`]
+/// spells sits.
+///
+/// # Arguments
+///
+/// * `name` - A variable name.
+///
+/// # Returns
+///
+/// `None` when the name is no `local_N` or `local_mN`.
+#[must_use]
+pub fn local_depth(name: &str) -> Option<i64> {
+    let digits = name.strip_prefix("local_")?;
+    let (above, hex) = digits
+        .strip_prefix('m')
+        .map_or((false, digits), |h| (true, h));
+    if hex.is_empty() || hex.len() > 15 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let n = i64::from_str_radix(hex, 16).ok()?;
+    Some(if above { -n } else { n })
+}
+
+/// Returns the name of the stack local at `off` from the entry stack
+/// pointer, `frame` bytes above the frame base: [`local_name`] of its
+/// depth below that base.
+///
+/// # Arguments
+///
+/// * `off` - Byte offset from the entry stack pointer, negative.
+/// * `frame` - Bytes from the entry stack pointer down to the frame base
+///   ([`frame_base`]).
+#[must_use]
+pub fn local_at(off: i64, frame: i64) -> String {
+    local_name(off.saturating_neg().saturating_sub(frame))
+}
+
+/// Returns the offset from the entry stack pointer of the local a
+/// `local_N` or `local_mN` name spells, [`local_at`] read back.
+///
+/// # Arguments
+///
+/// * `name` - A variable name.
+/// * `frame` - Bytes from the entry stack pointer down to the frame base.
+///
+/// # Returns
+///
+/// `None` when the name is no `local_N` or `local_mN`.
+#[must_use]
+pub fn local_offset(name: &str, frame: i64) -> Option<i64> {
+    local_depth(name).map(|d| d.saturating_add(frame).saturating_neg())
 }
 
 /// A name and maybe a type an agent stated for one variable.
@@ -858,19 +948,29 @@ mod tests {
     /// Variables key by the name the text shows, and refuse registers.
     #[test]
     fn variable_keys_read_the_texts_names() {
-        assert_eq!(VarKey::parse("a1", 8).ok(), Some(VarKey::Param(0)));
-        assert_eq!(VarKey::parse("local_58", 8).ok(), Some(VarKey::Slot(-0x58)));
-        assert_eq!(VarKey::parse("arg_28", 8).ok(), Some(VarKey::Slot(0x30)));
-        assert_eq!(VarKey::parse("home_8", 8).ok(), Some(VarKey::Slot(0x10)));
-        assert!(VarKey::parse("rax", 8).is_err());
-        assert!(VarKey::parse("a0", 8).is_err());
+        assert_eq!(VarKey::parse("a1", 8, 0).ok(), Some(VarKey::Param(0)));
+        assert_eq!(
+            VarKey::parse("local_58", 8, 0).ok(),
+            Some(VarKey::Slot(-0x58))
+        );
+        assert_eq!(VarKey::parse("arg_28", 8, 0).ok(), Some(VarKey::Slot(0x30)));
+        assert_eq!(VarKey::parse("home_8", 8, 0).ok(), Some(VarKey::Slot(0x10)));
+        assert!(VarKey::parse("rax", 8, 0).is_err());
+        assert!(VarKey::parse("a0", 8, 0).is_err());
+        assert_eq!(
+            VarKey::parse("local_50", 8, 8).ok(),
+            Some(VarKey::Slot(-0x58))
+        );
+        assert_eq!(VarKey::parse("local_m4", 8, 8).ok(), Some(VarKey::Slot(-4)));
+        assert!(VarKey::parse("local_+4", 8, 8).is_err());
+        assert_eq!(VarKey::Slot(-4).spell(8, 32, 8), "local_m4");
         for key in [
             VarKey::Param(2),
             VarKey::Slot(-0x58),
             VarKey::Slot(0x30),
             VarKey::Slot(0x10),
         ] {
-            assert_eq!(VarKey::parse(&key.spell(8, 32), 8).ok(), Some(key));
+            assert_eq!(VarKey::parse(&key.spell(8, 32, 8), 8, 8).ok(), Some(key));
         }
         let v = Var::parse("wchar_t *path").expect("typed");
         assert_eq!(
@@ -883,6 +983,11 @@ mod tests {
             assert_eq!(VarKey::parse_saved(&key.spell_saved()).ok(), Some(key));
         }
         assert!(VarKey::parse_saved("arg_28").is_err());
+        assert_eq!(VarKey::Slot(-0x58).spell_saved(), "local_58");
+        assert_eq!(
+            VarKey::parse_saved("local_58").ok(),
+            Some(VarKey::Slot(-0x58))
+        );
     }
 
     /// Types pass through user types first, then the library's words, and

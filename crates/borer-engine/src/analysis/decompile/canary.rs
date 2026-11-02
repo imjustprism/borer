@@ -71,10 +71,12 @@ fn is_cookie(v: &str) -> bool {
     let Some((cookie, frame)) = v.split_once(" ^ ") else {
         return false;
     };
-    let frame_slot = frame
-        .strip_prefix("&local_")
-        .or_else(|| frame.strip_prefix("&arg_"))
-        .is_some_and(|h| !h.is_empty() && h.bytes().all(|b| b.is_ascii_hexdigit()));
+    let frame_slot = frame.strip_prefix('&').is_some_and(|slot| {
+        crate::analysis::protos::local_depth(slot).is_some()
+            || slot
+                .strip_prefix("arg_")
+                .is_some_and(|h| !h.is_empty() && h.bytes().all(|b| b.is_ascii_hexdigit()))
+    });
     frame_slot && (is_global_name(cookie) || cookie == "__security_cookie")
 }
 

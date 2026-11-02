@@ -2659,8 +2659,8 @@ fn callee_saved_register_saves_are_hidden() {
 #[test]
 fn stack_address_in_an_uncounted_argument_register_escapes() {
     let out = dc(0x1410);
-    assert!(out.contains("local_8 = 0;"), "{out}");
-    assert!(out.contains("return local_8;"), "{out}");
+    assert!(out.contains("local_0 = 0;"), "{out}");
+    assert!(out.contains("return local_0;"), "{out}");
     assert!(!out.contains("return 0;"), "{out}");
 }
 
@@ -6934,7 +6934,7 @@ fn a_load_wider_than_its_slot_reads_the_slots_above() {
         0xc3, // ASM: ret
     ];
     let text = runs_agree(&program64(&code), 0x1_4000_1000);
-    assert!(text.contains("*(uint32_t*)&local_c"), "{text}");
+    assert!(text.contains("*(uint32_t*)&local_4"), "{text}");
     assert!(text.contains("(a2 << 8) | a2"), "{text}");
 }
 

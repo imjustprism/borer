@@ -15,6 +15,7 @@
 use super::ctext::{self, Tok};
 use super::vars::{declaration, parts};
 use super::*;
+use crate::analysis::protos::local_offset;
 
 /// Fewest stores a run takes before its bytes count as a string, so one
 /// wide constant that happens to read as text stays a number.
@@ -353,7 +354,7 @@ fn frame_slots<'t>(
     let mut first = None;
     let mut covered = Vec::new();
     for (name, ty) in decls {
-        let Some(off) = slot_of(name) else {
+        let Some(off) = local_offset(name, 0) else {
             continue;
         };
         let size = match *ty {
@@ -698,7 +699,7 @@ fn signed_const(t: &str) -> Option<u64> {
 /// * `decls` - The declared names and their types.
 fn store_at<'t>(target: &'t str, decls: &BTreeMap<&str, &str>) -> Option<Store<'t>> {
     let target = target.trim();
-    if let Some(off) = slot_of(target) {
+    if let Some(off) = local_offset(target, 0) {
         let width = type_bytes(decls.get(target)?)?;
         return Some(Store {
             base: Base::Frame,
@@ -710,7 +711,7 @@ fn store_at<'t>(target: &'t str, decls: &BTreeMap<&str, &str>) -> Option<Store<'
     let (ty, addr) = rest.split_once("*)")?;
     let width = type_bytes(ty)?;
     if let Some(slot) = addr.strip_prefix('&') {
-        let off = slot_of(slot).filter(|_| decls.contains_key(slot))?;
+        let off = local_offset(slot, 0).filter(|_| decls.contains_key(slot))?;
         return Some(Store {
             base: Base::Frame,
             off,
@@ -724,23 +725,11 @@ fn store_at<'t>(target: &'t str, decls: &BTreeMap<&str, &str>) -> Option<Store<'
         }
         None => (addr, 0),
     };
-    (is_ident(p) && slot_of(p).is_none()).then_some(Store {
+    (is_ident(p) && local_offset(p, 0).is_none()).then_some(Store {
         base: Base::Pointer(p),
         off,
         width,
     })
-}
-
-/// The frame offset a `local_N` slot names: `N` bytes below the frame's
-/// base.
-///
-/// # Arguments
-///
-/// * `name` - A name.
-fn slot_of(name: &str) -> Option<i64> {
-    let hex = name.strip_prefix("local_")?;
-    let n = u64::from_str_radix(hex, 16).ok()?;
-    i64::try_from(n).ok().map(i64::wrapping_neg)
 }
 
 /// The width in bytes of an integer type a store or a slot has.

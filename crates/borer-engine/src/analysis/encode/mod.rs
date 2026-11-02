@@ -493,19 +493,14 @@ fn fixed_kind(bits: u64, declared: Option<&str>) -> String {
 /// `(local, bytes)` pairs, or none when the buffer is not a frame local
 /// or nothing else lies inside it.
 pub(crate) fn packed_components(lines: &[&str], buffer: &str, bits: u64) -> Vec<(String, u64)> {
-    let Some(base) = buffer
-        .strip_prefix("local_")
-        .and_then(|h| u64::from_str_radix(h, 16).ok())
-    else {
+    let Some(base) = crate::analysis::protos::local_depth(buffer) else {
         return Vec::new();
     };
-    let bytes = bits.div_ceil(8);
-    let low = base.saturating_sub(bytes);
-    let mut offsets: Vec<u64> = Vec::new();
+    let low = base.saturating_sub_unsigned(bits.div_ceil(8));
+    let mut offsets: Vec<i64> = Vec::new();
     for line in lines {
         for word in identifiers(line) {
-            if let Some(h) = word.strip_prefix("local_")
-                && let Ok(off) = u64::from_str_radix(h, 16)
+            if let Some(off) = crate::analysis::protos::local_depth(word)
                 && off > low
                 && off <= base
                 && !offsets.contains(&off)
@@ -521,9 +516,10 @@ pub(crate) fn packed_components(lines: &[&str], buffer: &str, bits: u64) -> Vec<
     offsets
         .iter()
         .enumerate()
-        .map(|(i, &off)| {
+        .filter_map(|(i, &off)| {
             let next = offsets.get(i + 1).copied().unwrap_or(low);
-            (format!("local_{off:x}"), off - next)
+            let bytes = u64::try_from(off.saturating_sub(next)).ok()?;
+            Some((crate::analysis::protos::local_name(off), bytes))
         })
         .collect()
 }
@@ -1533,6 +1529,25 @@ return;
             Some("this+0xe0")
         );
         assert!(sites.iter().all(|s| s.repeat.is_none()));
+    }
+
+    /// A packed buffer runs on past the frame base into the slots there
+    /// (`local_0`, `local_m4`), each as wide as the bytes up to the next.
+    ///
+    /// # Panics
+    ///
+    /// When a component disagrees with the text.
+    #[test]
+    fn a_packed_buffer_spans_the_frame_base() {
+        let lines = ["local_8 = local_4 = local_0 = local_m4 = 0;"];
+        let parts = packed_components(&lines, "local_8", 128);
+        let names: Vec<&str> = parts.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            ["local_8", "local_4", "local_0", "local_m4"],
+            "{parts:?}"
+        );
+        assert!(parts.iter().all(|(_, w)| *w == 4), "{parts:?}");
     }
 
     /// A packed buffer written whole is split into its locals by address,

@@ -2320,10 +2320,10 @@ fn decompile_in<L: Lifter>(
         .collect();
     let debug_named: BTreeSet<&str> = names.debug_locals.values().map(String::as_str).collect();
     let scratch_slot = |w: &str| {
-        let digits = w
-            .strip_prefix("local_")
-            .or_else(|| w.strip_prefix("home_"))
-            .or_else(|| w.strip_prefix("arg_"))?;
+        if crate::analysis::protos::local_depth(w).is_some() {
+            return Some(());
+        }
+        let digits = w.strip_prefix("home_").or_else(|| w.strip_prefix("arg_"))?;
         (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_hexdigit())).then_some(())
     };
     let mut escaped: Vec<String> = used

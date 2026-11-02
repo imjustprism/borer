@@ -2254,14 +2254,14 @@ mod tests {
         let overlay = crate::analysis::Overlay::default();
         let text = crate::analysis::decompile::decompile(&program, &a, &overlay, sub.low_pc)
             .unwrap_or_default();
+        let frame = crate::analysis::protos::frame_base(&program);
         for name in ["alpha", "beta", "gamma"] {
             let off = sub
                 .locals
                 .iter()
-                .find(|(_, n)| n.as_str() == name)
-                .map(|(off, _)| *off)
+                .find_map(|(off, n)| (n.as_str() == name).then_some(*off))
                 .unwrap_or_default();
-            let synthesized = format!("local_{:x}", -off);
+            let synthesized = crate::analysis::protos::local_at(off, frame);
             assert!(
                 text.contains(name) && !text.contains(&synthesized),
                 "the local {name} at {off:#x} does not render as itself:

@@ -224,22 +224,22 @@ fn a_stated_variable_renames_every_use() {
     ]);
     let p = image(&code);
     let (before, _) = decompiled(&p, &Overlay::default(), 0x401_000);
-    assert!(before.contains("local_10"), "{before}");
+    assert!(before.contains("local_8"), "{before}");
     let mut o = Overlay::default();
     let mut vars = BTreeMap::new();
     vars.insert(
-        VarKey::parse("local_10", 8).expect("a slot"),
+        VarKey::parse("local_8", 8, 8).expect("a slot"),
         Var::parse("wchar_t *path").expect("a declaration"),
     );
     o.vars.insert(0x401_000, vars);
     let mut callee = BTreeMap::new();
     callee.insert(
-        VarKey::parse("a1", 8).expect("a parameter"),
+        VarKey::parse("a1", 8, 0).expect("a parameter"),
         Var::parse("cell").expect("a name"),
     );
     o.vars.insert(0x401_040, callee);
     let (text, header) = decompiled(&p, &o, 0x401_000);
-    assert!(!text.contains("local_10"), "{text}");
+    assert!(!text.contains("local_8"), "{text}");
     assert!(text.contains("&path"), "{text}");
     assert!(text.contains("wchar_t *path;"), "{text}");
     assert!(fully_checked(&header), "{header}");

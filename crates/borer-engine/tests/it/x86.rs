@@ -243,8 +243,8 @@ fn a_callee_popping_its_arguments_moves_the_stack_pointer() {
     let callee = a.function(0x401040).expect("callee discovered");
     assert_eq!((callee.stack_pop, callee.stack_args), (4, 1));
     let text = decompile(&p, &a, &Overlay::default(), 0x401000).unwrap_or_default();
-    assert!(text.contains("local_4"), "{text}");
-    assert!(!text.contains("local_8"), "{text}");
+    assert!(text.contains("local_0"), "{text}");
+    assert!(!text.contains("local_4"), "{text}");
 }
 
 /// An argument read after a call has popped the caller's pushes is still a
@@ -371,10 +371,10 @@ fn a_stdcall_import_takes_the_pushes_as_its_arguments() {
         &[(0x402000, "Foo.dll!?bar@@YGXHH@Z")],
     );
     assert!(text.contains("bar(1, 2);"), "{text}");
-    assert!(text.contains("local_4"), "{text}");
-    assert!(!text.contains("local_c"), "{text}");
-    assert!(!text.contains("local_8 = 1;"), "{text}");
-    assert!(!text.contains("local_4 = 2;"), "{text}");
+    assert!(text.contains("local_0"), "{text}");
+    assert!(!text.contains("local_8"), "{text}");
+    assert!(!text.contains("local_4 = 1;"), "{text}");
+    assert!(!text.contains("local_0 = 2;"), "{text}");
 }
 
 /// A tail jump through an import is a call that returns its result, and it
@@ -423,12 +423,12 @@ fn win32_imports_pop_and_runtime_imports_do_not() {
         win32.contains("WriteFile(NULL, NULL, 0, NULL, NULL);"),
         "{win32}"
     );
-    assert!(win32.contains("local_4"), "{win32}");
+    assert!(win32.contains("local_0"), "{win32}");
     let mut three = vec![0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00];
     three.extend_from_slice(&tail);
     let crt = dc_with(&three, &[(0x402000, "MSVCR100.dll!memset")]);
     assert!(crt.contains("memset(NULL, 0, 0);"), "{crt}");
-    assert!(crt.contains("local_10"), "{crt}");
+    assert!(crt.contains("local_c"), "{crt}");
 }
 
 /// A function that reads `ecx` before writing it is a `__thiscall` method,
@@ -2132,7 +2132,7 @@ fn an_exception_funclet_belongs_to_its_parent() {
         text.contains("// note: the unwind action of state 0 of sub_401000;"),
         "{text}"
     );
-    assert!(text.contains("return local_8;"), "{text}");
+    assert!(text.contains("return local_4;"), "{text}");
 }
 
 /// A `push ecx` the next call takes as an argument reads `this`, so a
@@ -2723,7 +2723,7 @@ fn an_unknown_callee_pops_its_arguments_so_the_join_keeps_the_stack() {
     let text = decompiled(&p, 0x401000);
     assert!(text.contains("sub_401040(&local_"), "{text}");
     assert!(text.contains("\"AID\")"), "{text}");
-    assert!(text.contains("(&local_c)"), "{text}");
+    assert!(text.contains("(&local_8)"), "{text}");
     assert!(!text.contains("(&a1)"), "{text}");
 }
 
@@ -3662,10 +3662,10 @@ fn a_rep_movs_over_the_frame_overwrites_pending_slots() {
         0x8b, 0xfc, 0xb9, 0x08, 0x00, 0x00, 0x00, 0xf3, 0xa5, 0x8b, 0x44, 0x24, 0x08, 0x83, 0xc4,
         0x20, 0xc3,
     ]);
-    let copy = text.find("memcpy(&local_20, a1, 32);").unwrap_or(0);
-    let zero = text.find("local_18 = 0;").unwrap_or(usize::MAX);
+    let copy = text.find("memcpy(&local_1c, a1, 32);").unwrap_or(0);
+    let zero = text.find("local_14 = 0;").unwrap_or(usize::MAX);
     assert!(zero < copy, "{text}");
-    assert!(text.contains("return local_18;"), "{text}");
+    assert!(text.contains("return local_14;"), "{text}");
     assert!(!text.contains("return 0;"), "{text}");
 }
 
@@ -4172,8 +4172,8 @@ fn a_narrow_read_of_a_pending_slot_store_masks_it() {
         0x83, 0xec, 0x08, 0x8b, 0x44, 0x24, 0x0c, 0x89, 0x04, 0x24, 0x0f, 0xb7, 0x04, 0x24, 0x03,
         0x44, 0x24, 0x0c, 0x83, 0xc4, 0x08, 0xc3,
     ]);
-    assert!(text.contains("local_8 = a1;"), "{text}");
-    assert!(text.contains("return (local_8 & 0xffff) + a1;"), "{text}");
+    assert!(text.contains("local_4 = a1;"), "{text}");
+    assert!(text.contains("return (local_4 & 0xffff) + a1;"), "{text}");
 }
 
 /// A ten-byte x87 store keeps all ten bytes: it is a call on the value,
@@ -4418,7 +4418,7 @@ fn an_exception_funclet_of_a_linked_handler_belongs_to_its_parent() {
         })
     );
     let text = decompile(&p, &a, &Overlay::default(), 0x401050).unwrap_or_default();
-    assert!(text.contains("return local_8;"), "{text}");
+    assert!(text.contains("return local_4;"), "{text}");
 }
 
 /// The zeros pushed for a bitmap that only a computed address reads are
@@ -4462,8 +4462,8 @@ fn zeros_pushed_for_a_bitmap_read_through_its_address_are_stored() {
         0xc3, // ASM: ret
     ];
     let text = runs_agree(&image(&code), 0x401000);
-    assert!(text.contains("uint32_t local_28[8];"), "{text}");
-    assert!(text.contains("local_28[7] = 0"), "{text}");
+    assert!(text.contains("uint32_t local_24[8];"), "{text}");
+    assert!(text.contains("local_24[7] = 0"), "{text}");
 }
 
 /// A stack parameter read as a word is its low half.
@@ -4534,7 +4534,7 @@ fn an_unwinder_restoring_the_chain_head_registers_no_handler() {
         "{text}"
     );
     assert!(
-        text.contains("local_c = NtCurrentTeb()->NtTib.ExceptionList;"),
+        text.contains("local_8 = NtCurrentTeb()->NtTib.ExceptionList;"),
         "{text}"
     );
 }

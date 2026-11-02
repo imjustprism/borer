@@ -1185,24 +1185,28 @@ pub(crate) fn must_be_in_a_section(
     ))
 }
 
-/// Returns the stack word and the callee-owned home space above the
-/// return address, in bytes.
+/// Returns the stack word, the callee-owned home space above the return
+/// address and the frame base's distance below the entry stack pointer,
+/// in bytes.
 ///
 /// The decompiled text numbers a function's slots by them: 32 bytes of
-/// home space under the Microsoft x64 convention, none elsewhere.
+/// home space under the Microsoft x64 convention, none elsewhere; locals
+/// count down from the frame base
+/// ([`frame_base`](borer_engine::analysis::protos::frame_base)).
 ///
 /// # Arguments
 ///
 /// * `p` - The loaded program.
-pub(crate) fn frame_words(p: &program::Program) -> (i64, i64) {
+pub(crate) fn frame_words(p: &program::Program) -> (i64, i64, i64) {
     let windows = !matches!(
         p.format,
         program::BinaryFormat::Elf | program::BinaryFormat::MachO
     );
+    let frame = borer_engine::analysis::protos::frame_base(p);
     match (p.is_64, windows) {
-        (true, true) => (8, 32),
-        (true, false) => (8, 0),
-        (false, _) => (4, 0),
+        (true, true) => (8, 32, frame),
+        (true, false) => (8, 0, frame),
+        (false, _) => (4, 0, frame),
     }
 }
 
@@ -1242,7 +1246,7 @@ pub(crate) fn plan_var(
     String,
 > {
     use borer_engine::analysis::protos::{VARS_MAX, Var, VarKey};
-    let (stack, shadow) = frame_words(p);
+    let (stack, shadow, frame) = frame_words(p);
     let stated = o.vars.get(&entry);
     let key = stated
         .and_then(|vs| vs.iter().find(|(_, v)| v.name == var).map(|(k, _)| *k))
@@ -1255,7 +1259,10 @@ pub(crate) fn plan_var(
                 .position(|q| q.name == var)?;
             u8::try_from(i).ok().map(VarKey::Param)
         })
-        .map_or_else(|| VarKey::parse(var, stack).map_err(|e| e.to_string()), Ok)?;
+        .map_or_else(
+            || VarKey::parse(var, stack, frame).map_err(|e| e.to_string()),
+            Ok,
+        )?;
     let name = name.ok_or("naming a variable needs `name`, its new name (`type` is optional)")?;
     let decl = ty.map_or_else(|| name.to_owned(), |t| format!("{t} {name}"));
     let var = Var::parse(&decl).map_err(|e| e.to_string())?;
@@ -1265,7 +1272,7 @@ pub(crate) fn plan_var(
         return Err(format!(
             "{} already names {} of this function",
             var.name,
-            other.spell(stack, shadow)
+            other.spell(stack, shadow, frame)
         ));
     }
     let held: usize = o.vars.values().map(std::collections::BTreeMap::len).sum();

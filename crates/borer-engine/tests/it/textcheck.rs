@@ -932,7 +932,7 @@ fn constant_stores_that_spell_a_string_are_a_strcpy() {
     let a = Analysis::compute(&p);
     let o = Overlay::default();
     for (entry, copy) in [
-        (TEXT, "strcpy(local_10, \"abcde\");"),
+        (TEXT, "strcpy(local_8, \"abcde\");"),
         (TEXT + 0x70, "strcpy(a1, \"hello, world\");"),
     ] {
         let text = decompile_named(&p, &a, &o, entry).unwrap_or_default();
@@ -1003,7 +1003,7 @@ fn wide_moves_between_objects_are_a_memcpy() {
     let o = Overlay::default();
     for (entry, copy) in [
         (TEXT, "memcpy(a1, a2, 0x20);"),
-        (TEXT + 0x10, "memcpy(local_28, a1, 0x20);"),
+        (TEXT + 0x10, "memcpy(local_20, a1, 0x20);"),
     ] {
         let text = decompile_named(&p, &a, &o, entry).unwrap_or_default();
         assert!(text.contains(copy), "{text}");
@@ -1132,8 +1132,8 @@ fn a_compare_reads_a_slot_at_the_width_it_was_stored() {
     let p = program(&code, &[]);
     let a = Analysis::compute(&p);
     for (entry, compare) in [
-        (TEXT, "a3 < *(uint64_t*)&local_18 - 1 + a3"),
-        (TEXT + 0x40, "*(uint32_t*)&local_18 < a3"),
+        (TEXT, "a3 < *(uint64_t*)&local_10 - 1 + a3"),
+        (TEXT + 0x40, "*(uint32_t*)&local_10 < a3"),
     ] {
         let (text, _) = text_of(&p, entry);
         assert!(text.contains(compare), "{text}");

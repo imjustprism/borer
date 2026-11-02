@@ -194,11 +194,13 @@ impl Repair {
 ///
 /// * `site` - The site.
 /// * `line` - The line, trimmed.
-fn implicated(site: Site, line: &str) -> bool {
+/// * `frame` - Bytes from the entry stack pointer down to the frame base
+///   the slot names count from.
+fn implicated(site: Site, line: &str, frame: i64) -> bool {
     match site {
         Site::Return => line.starts_with("return "),
         Site::Slot(k) => {
-            let name = format!("local_{:x}", k.unsigned_abs());
+            let name = crate::analysis::protos::local_at(k, frame);
             line.match_indices(&name).any(|(i, _)| {
                 let word =
                     |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
@@ -295,7 +297,7 @@ pub fn repair_iso(p: &Program, a: &Analysis, o: &Overlay, entry: u64, budget: Bu
     let points = choice_points(p, a, o, entry);
     let mut order: Vec<Site> = points
         .iter()
-        .filter(|s| implicated(**s, &at.line))
+        .filter(|s| implicated(**s, &at.line, crate::analysis::protos::frame_base(p)))
         .copied()
         .collect();
     if base.differs.is_some() {
@@ -437,11 +439,12 @@ mod tests {
     /// When the check fails.
     #[test]
     fn a_line_implicates_the_sites_it_reads() {
-        assert!(implicated(Site::Return, "return a1 / -5;"));
-        assert!(!implicated(Site::Return, "returned = 1;"));
-        assert!(implicated(Site::Slot(-0xc), "x = local_c * 2.0f;"));
-        assert!(!implicated(Site::Slot(-0xc), "x = local_c0 * 2.0f;"));
-        assert!(!implicated(Site::Slot(-0xc), "x = home_local_c;"));
+        assert!(implicated(Site::Return, "return a1 / -5;", 0));
+        assert!(!implicated(Site::Return, "returned = 1;", 0));
+        assert!(implicated(Site::Slot(-0xc), "x = local_c * 2.0f;", 0));
+        assert!(implicated(Site::Slot(-0xc), "x = local_4 * 2.0f;", 8));
+        assert!(!implicated(Site::Slot(-0xc), "x = local_c0 * 2.0f;", 0));
+        assert!(!implicated(Site::Slot(-0xc), "x = home_local_c;", 0));
     }
 
     /// Only a text that still differs in what its run leaves behind gets a

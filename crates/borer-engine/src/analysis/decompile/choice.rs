@@ -96,11 +96,17 @@ impl Site {
     }
 
     /// Returns the site as a report names it.
+    ///
+    /// # Arguments
+    ///
+    /// * `frame` - Bytes from the entry stack pointer down to the frame
+    ///   base a slot's name counts from
+    ///   ([`frame_base`](crate::analysis::protos::frame_base)).
     #[must_use]
-    pub fn name(self) -> String {
+    pub fn name(self, frame: i64) -> String {
         match self {
             Self::Pass(p) => format!("pass {}", p.name()),
-            Self::Slot(k) => format!("slot local_{:x}", k.unsigned_abs()),
+            Self::Slot(k) => format!("slot {}", crate::analysis::protos::local_at(k, frame)),
             Self::Return => "return".to_owned(),
         }
     }
@@ -208,6 +214,7 @@ mod tests {
             assert!(kinds.contains(&k), "{}", k.name());
         }
         assert_eq!(Site::Pass(Pass::Elvis).rungs(), ["applied", "skipped"]);
-        assert_eq!(Site::Slot(-0x1c).name(), "slot local_1c");
+        assert_eq!(Site::Slot(-0x1c).name(0), "slot local_1c");
+        assert_eq!(Site::Slot(-0x1c).name(8), "slot local_14");
     }
 }

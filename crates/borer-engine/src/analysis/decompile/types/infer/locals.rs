@@ -105,7 +105,7 @@ struct LocalLines {
     runs: BTreeMap<String, Vec<usize>>,
     /// The frame offset of each `local_<hex>` the declarations declare,
     /// ascending.
-    declared: Vec<u64>,
+    declared: Vec<i64>,
 }
 
 impl LocalLines {
@@ -141,9 +141,8 @@ impl LocalLines {
                         n.trim()
                             .trim_start_matches('*')
                             .split('[')
-                            .next()?
-                            .strip_prefix("local_")
-                            .and_then(|s| u64::from_str_radix(s, 16).ok())
+                            .next()
+                            .and_then(local_depth)
                     })
             })
             .collect();
@@ -293,16 +292,14 @@ fn byte_buffer_local_span(
     at: &[usize],
     name: &str,
 ) -> Option<u64> {
-    let base = name
-        .strip_prefix("local_")
-        .and_then(|s| u64::from_str_radix(s, 16).ok())?;
+    let base = local_depth(name)?;
     let below = index.declared.partition_point(|&d| d < base);
     let top = below
         .checked_sub(1)
         .and_then(|k| index.declared.get(k))
         .copied()
         .unwrap_or(0);
-    let span = base.saturating_sub(top);
+    let span = u64::try_from(base.saturating_sub(top)).ok()?;
     if span < 16 {
         return None;
     }

@@ -402,8 +402,8 @@ impl BorerServer {
                     "`var` names a variable of a function: give the function's `address`".to_owned()
                 })?;
                 let (key, stated) = plan_var(p, o, entry, var, name.as_deref(), ty.as_deref())?;
-                let (stack, shadow) = frame_words(p);
-                let spelled = key.spell(stack, shadow);
+                let (stack, shadow, frame) = frame_words(p);
+                let spelled = key.spell(stack, shadow, frame);
                 let renamed = o.vars.get(&entry).is_some_and(|v| v.contains_key(&key));
                 if !renamed
                     && let Some(text) =
@@ -418,7 +418,7 @@ impl BorerServer {
                 }
                 let what = format!(
                     "{} of {} ({entry:#x}) {}",
-                    key.spell(stack, shadow),
+                    key.spell(stack, shadow, frame),
                     borer_engine::analysis::name_of(a, o, entry),
                     stated.spell()
                 );

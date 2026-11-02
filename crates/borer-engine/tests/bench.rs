@@ -463,10 +463,11 @@ fn repair_search() {
             let r = repair_iso(&program, &a, &o, f.entry, Budget::FULL);
             let spent = t.elapsed();
             let name = name_of(&a, &o, f.entry);
+            let frame = borer_engine::analysis::protos::frame_base(&program);
             let tried = |t: &[borer_engine::analysis::render::Tried]| {
                 t.iter()
                     .map(|x| {
-                        let sites: Vec<String> = x.sites.iter().map(|s| s.name()).collect();
+                        let sites: Vec<String> = x.sites.iter().map(|s| s.name(frame)).collect();
                         let ev = match &x.evidence {
                             Evidence::Tested(n) => format!("tested x{n}"),
                             Evidence::Refuted(c) => format!("refuted: {}", c.why),
@@ -487,7 +488,7 @@ fn repair_search() {
                     moved, tried: t, ..
                 } => {
                     repaired += 1;
-                    let sites: Vec<String> = moved.iter().map(|s| s.name()).collect();
+                    let sites: Vec<String> = moved.iter().map(|s| s.name(frame)).collect();
                     println!("{bin}	{name}	repaired	{}	{}", sites.join(" + "), tried(t));
                 }
                 Repair::Disagrees { at, tried: t, .. } => {

@@ -75,10 +75,10 @@ fn a_d3d9_device_calls_its_methods_by_name() {
     ];
     let text = decompiled(&image(&code), 0x401000);
     assert!(
-        text.contains("->CreateDevice(0, 1, 0, 32, 0, &local_c)"),
+        text.contains("->CreateDevice(0, 1, 0, 32, 0, &local_8)"),
         "{text}"
     );
-    assert!(text.contains("IDirect3DDevice9 *local_c"), "{text}");
+    assert!(text.contains("IDirect3DDevice9 *local_8"), "{text}");
     assert!(text.contains("->BeginScene()"), "{text}");
     assert!(!text.contains("vtable["), "{text}");
 }
@@ -121,7 +121,7 @@ fn dinput(between: &[u8]) -> String {
 fn an_iid_names_the_interface_a_creator_hands_back() {
     let text = dinput(&[]);
     assert!(text.contains("->Release()"), "{text}");
-    assert!(text.contains("IDirectInput8A *local_8"), "{text}");
+    assert!(text.contains("IDirectInput8A *local_4"), "{text}");
 }
 
 /// A call is named before it retypes its receiver's own local.
@@ -143,10 +143,10 @@ fn a_call_is_named_before_it_retypes_its_receiver() {
         0xff, 0x51, 0x0c, // ASM: call [ecx+0xc]
     ]);
     assert!(
-        text.contains("->CreateDevice(0x402100, &local_8, 0)"),
+        text.contains("->CreateDevice(0x402100, &local_4, 0)"),
         "{text}"
     );
-    assert!(text.contains("uint32_t local_8"), "{text}");
+    assert!(text.contains("uint32_t local_4"), "{text}");
     assert!(text.contains("->Release()"), "{text}");
 }
 
