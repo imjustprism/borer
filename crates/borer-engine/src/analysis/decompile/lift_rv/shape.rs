@@ -19,7 +19,7 @@ use super::super::lift::{self, Env};
 use super::super::{Ctx, Shape, declared_arity, new_ctx, pointee_type};
 use super::{decode_blocks, live};
 use crate::analysis::{Analysis, Function, Overlay};
-use crate::isa::rv::{Alu, Flow, Insn, Op as ROp, Reg, Xlen};
+use crate::isa::rv::{Alu, Flow, Fmt, Insn, Op as ROp, Reg, Xlen};
 use crate::program::Program;
 
 /// Most paths the parameter walk follows from the entry.
@@ -461,10 +461,12 @@ pub(in crate::analysis::decompile) fn param_types(
 ) -> BTreeMap<usize, String> {
     let mut typed: BTreeMap<usize, String> = BTreeMap::new();
     let mut holds: BTreeMap<Reg, usize> = BTreeMap::new();
+    let mut floats: BTreeMap<Reg, usize> = BTreeMap::new();
     for (p, r) in params_of(ctx).iter().enumerate().take(ctx.arg_count) {
         match r {
             Reg::F(_) => {
                 typed.insert(p, "double".to_owned());
+                floats.insert(*r, p);
             }
             Reg::X(_) => {
                 holds.insert(*r, p);
@@ -505,9 +507,19 @@ pub(in crate::analysis::decompile) fn param_types(
             } => holds.get(&rs1).copied().map(|p| (rd, p)),
             _ => None,
         };
+        if let ROp::Float(f) = i.op {
+            let read = f.reads_fmt();
+            for r in i.registers().reads {
+                if let (Some(p), Some(fmt)) = (floats.remove(&r), read) {
+                    let name = if fmt == Fmt::S { "float" } else { "double" };
+                    typed.insert(p, name.to_owned());
+                }
+            }
+        }
         for (k, _) in live::effects(ctx, i).1 {
             if let Key::Rv(r) = k {
                 holds.remove(&r);
+                floats.remove(&r);
             }
         }
         if let Some((rd, p)) = copied {

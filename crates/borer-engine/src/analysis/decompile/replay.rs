@@ -73,8 +73,7 @@ use crate::isa::x86::{
 use super::abi::Conv;
 use super::arch::{self, Lifter};
 use super::expr::{
-    Cond, Expr, Flags, Key, Op, TLS_BASE, Ty, UnOp, a64_code, either_width, fcvt_float_width, fold,
-    known_bits, unary,
+    Cond, Expr, Flags, Key, Op, TLS_BASE, Ty, UnOp, a64_code, either_width, fold, known_bits, unary,
 };
 use super::floats::{
     agree, cast_integer, convert_float, float_arith, float_carried, float_of, float_scale_at,
@@ -85,6 +84,7 @@ use super::lift::{
     ArgAt, Call, Callee, Effect, EffectKind, Env, Routine, SLOT_BYTES_MAX, Shown, try_level_store,
 };
 use super::liveness::Live;
+use super::round_to_int::fcvt_float_width;
 use super::verify::{
     Bench, EVAL_DEPTH, FRAME_SPAN, GOLDEN, REGION_MAX, REGS, REGS_32, Rng, STACK_WORDS, XMMS,
     aligns_stack, low, sext, word,

@@ -170,6 +170,7 @@ impl Lift<'_, '_> {
                 Some(())
             }
             ROp::Fence { .. } | ROp::FenceI => Some(()),
+            ROp::Float(f) => self.float(f),
             ROp::Jal { .. }
             | ROp::Jalr { .. }
             | ROp::Branch { .. }
@@ -179,7 +180,6 @@ impl Lift<'_, '_> {
             | ROp::Lr { .. }
             | ROp::Sc { .. }
             | ROp::Amo { .. }
-            | ROp::Float(_)
             | ROp::TrapRet
             | ROp::System
             | ROp::Unknown

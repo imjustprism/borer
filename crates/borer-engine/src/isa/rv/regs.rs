@@ -1,7 +1,7 @@
 //! Which registers a RISC-V instruction reads and writes, and a register's
 //! one-byte code.
 
-use super::{CsrSrc, FOp, Insn, Op, Reg, ZERO};
+use super::{CsrSrc, FOp, Fmt, Insn, Op, Reg, ZERO};
 
 /// The registers an instruction reads and writes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -41,6 +41,53 @@ pub fn from_code(c: u8) -> Option<Reg> {
         0..=31 => Some(Reg::X(c)),
         32..=63 => Some(Reg::F(c - 32)),
         _ => None,
+    }
+}
+
+impl FOp {
+    /// Returns the format the operation reads its float registers in.
+    ///
+    /// # Returns
+    ///
+    /// The format, or `None` for one that reads no float register.
+    #[must_use]
+    pub fn reads_fmt(self) -> Option<Fmt> {
+        match self {
+            Self::Store { fmt, .. }
+            | Self::Arith { fmt, .. }
+            | Self::Sqrt { fmt, .. }
+            | Self::Fused { fmt, .. }
+            | Self::Cmp { fmt, .. }
+            | Self::Class { fmt, .. }
+            | Self::ToInt { fmt, .. }
+            | Self::MvToInt { fmt, .. }
+            | Self::Convert { from: fmt, .. } => Some(fmt),
+            Self::Load { .. } | Self::FromInt { .. } | Self::MvFromInt { .. } => None,
+        }
+    }
+
+    /// Returns the format the operation writes its float register in.
+    ///
+    /// # Returns
+    ///
+    /// The format, or `None` for one that writes an integer register or
+    /// nothing.
+    #[must_use]
+    pub fn writes_fmt(self) -> Option<Fmt> {
+        match self {
+            Self::Load { fmt, .. }
+            | Self::Arith { fmt, .. }
+            | Self::Sqrt { fmt, .. }
+            | Self::Fused { fmt, .. }
+            | Self::FromInt { fmt, .. }
+            | Self::MvFromInt { fmt, .. }
+            | Self::Convert { to: fmt, .. } => Some(fmt),
+            Self::Store { .. }
+            | Self::Cmp { .. }
+            | Self::Class { .. }
+            | Self::ToInt { .. }
+            | Self::MvToInt { .. } => None,
+        }
     }
 }
 

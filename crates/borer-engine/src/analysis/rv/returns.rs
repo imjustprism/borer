@@ -18,9 +18,11 @@
 //! at the width the reading instruction takes, and nowhere as `a0`, it is
 //! the function's result, and so it is when a later call takes `fa0` as
 //! its first float argument. A caller reading `a1` before writing it, or
-//! a later call taking it, reads a second result. A function nothing calls has no call site to ask and is
-//! left unknown. A result is read at the register's full width: no read is
-//! taken as evidence of a narrow one.
+//! a later call taking it, reads a second result. A function nothing
+//! calls has no call site to ask: the writes nearest its returns answer
+//! whether it leaves a float ([`float_left`]), and its integer result is
+//! left unknown. A result is read at the register's full width: no read
+//! is taken as evidence of a narrow one.
 
 use std::collections::BTreeMap;
 
@@ -36,6 +38,9 @@ const SCAN_MAX: usize = 16;
 const PATHS_MAX: usize = 8;
 /// Longest prologue read for whether a callee reads its first argument.
 const LEADING_MAX: usize = 16;
+/// Blocks walked back along a path from a return for the result a
+/// function nothing calls leaves ([`float_left`]).
+const LEFT_DEPTH: u8 = 4;
 /// The integer result register and first argument, `a0`.
 const A0: Reg = Reg::X(10);
 /// The second integer result register, `a1`.
@@ -272,6 +277,77 @@ fn hands_back_own(program: &Program, xlen: Xlen, f: &Function) -> bool {
     })
 }
 
+/// The float a function nothing calls leaves in `fa0`, read off the
+/// writes nearest its returns.
+///
+/// Walking back from each return, at most [`LEFT_DEPTH`] blocks along a
+/// path: a call, a store of `fa0` or a write of `a0` met first decides
+/// against a float, and
+/// a float instruction writing `fa0` met first is a vote for one at its
+/// format's width. A path that runs out of blocks first says nothing.
+///
+/// # Arguments
+///
+/// * `program` - The image.
+/// * `xlen` - The register width.
+/// * `f` - The function.
+///
+/// # Returns
+///
+/// 32 or 64 when some return's nearest result write is a float one and
+/// none is `a0`; `None` otherwise.
+fn float_left(program: &Program, xlen: Xlen, f: &Function) -> Option<u8> {
+    let preds = call_returns::preds(f);
+    let mut todo: Vec<(usize, u8)> = f
+        .blocks
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.term == crate::analysis::BlockTerm::Ret)
+        .map(|(k, _)| (k, 1))
+        .collect();
+    let mut seen = vec![false; f.blocks.len()];
+    let mut width: Option<u8> = None;
+    while let Some((k, depth)) = todo.pop() {
+        if seen.get_mut(k).is_none_or(|s| std::mem::replace(s, true)) {
+            continue;
+        }
+        let b = f.blocks.get(k)?;
+        let mut insns = Vec::new();
+        let mut at = b.start;
+        while at < b.end {
+            let i = decode(program, at, xlen)?;
+            at = i.next();
+            insns.push(i);
+        }
+        let mut settled = false;
+        for i in insns.iter().rev() {
+            let regs = i.registers();
+            let writes = regs.writes;
+            let stored = matches!(i.op, Op::Float(FOp::Store { .. })) && regs.reads.contains(&FA0);
+            if i.flow() == Flow::Call || stored || writes.contains(&A0) {
+                return None;
+            }
+            if writes.contains(&FA0) {
+                let Op::Float(op) = i.op else {
+                    return None;
+                };
+                let bits = match op.writes_fmt()? {
+                    Fmt::S => 32,
+                    Fmt::D => 64,
+                };
+                width = Some(width.map_or(bits, |w: u8| w.max(bits)));
+                settled = true;
+                break;
+            }
+        }
+        if !settled && depth < LEFT_DEPTH {
+            let from = preds.get(k).map_or(&[][..], Vec::as_slice);
+            todo.extend(from.iter().map(|&p| (p, depth + 1)));
+        }
+    }
+    width
+}
+
 /// Fills the return facts of every RISC-V function from its call sites
 /// ([`call_returns::settle`]).
 ///
@@ -294,7 +370,7 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis, xlen: Xlen) {
     call_returns::settle(
         analysis,
         facts,
-        |_| None,
+        |f| float_left(program, xlen, f),
         |f| hands_back_own(program, xlen, f),
     );
 }

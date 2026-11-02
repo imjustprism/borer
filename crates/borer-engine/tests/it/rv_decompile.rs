@@ -316,6 +316,9 @@ fn a_loop_of_registers_reading_each_other_keeps_its_test() {
 /// A function that reads all eight integer argument registers and `fa0`
 /// lists the double first, and a caller's declaration of it agrees with
 /// its own signature.
+///
+/// `fclass`, which the lifter leaves as asm, keeps the callee a
+/// declaration rather than an inlined body.
 #[test]
 fn a_float_past_eight_integers_keeps_its_type() {
     let code = [
@@ -327,7 +330,7 @@ fn a_float_past_eight_integers_keeps_its_type() {
         (0x00d6_02b3, 4), // ASM: add t0, a2, a3
         (0x00f7_02b3, 4), // ASM: add t0, a4, a5
         (0x0118_02b3, 4), // ASM: add t0, a6, a7
-        (0xe205_0353, 4), // ASM: fmv.x.d t1, fa0
+        (0xe205_1353, 4), // ASM: fclass.d t1, fa0
         (0x0000_8067, 4), // ASM: ret
     ];
     let texts = decompiled(&code, Arch::RiscV64);
@@ -633,4 +636,83 @@ fn a_second_result_word_passed_on_keeps_the_result() {
     let texts = decompiled_named(&code, &[("forward", 0x20), ("three", 0x30), ("take", 0x40)]);
     let forward = texts.first().expect("the forwarder");
     assert!(!forward.contains("void forward("), "{forward}");
+}
+
+/// Double and single arithmetic on the float argument registers decompiles
+/// to the C operators at each width, the parameters and the result typed
+/// so.
+#[test]
+fn float_arithmetic_takes_and_returns_floats() {
+    let double = [
+        (0x12b5_7553, 4), // ASM: fmul.d fa0, fa0, fa1
+        (0x0000_8067, 4), // ASM: ret
+    ];
+    let text = decompiled(&double, Arch::RiscV64).concat();
+    assert!(
+        text.contains("double sub_10000(double a1, double a2)"),
+        "{text}"
+    );
+    assert!(text.contains("a1 * a2"), "{text}");
+    let single = [
+        (0x00b5_7553, 4), // ASM: fadd.s fa0, fa0, fa1
+        (0x0000_8067, 4), // ASM: ret
+    ];
+    let text = decompiled(&single, Arch::RiscV64).concat();
+    assert!(
+        text.contains("float sub_10000(float a1, float a2)"),
+        "{text}"
+    );
+    assert!(text.contains("a1 + a2"), "{text}");
+}
+
+/// A double a function computes and stores is not what it hands back:
+/// nothing calls it, and the store, not the return, takes `fa0`.
+#[test]
+fn a_stored_double_is_no_result() {
+    let code = [
+        (0x02b5_7553, 4), // ASM: fadd.d fa0, fa0, fa1
+        (0x00a5_3027, 4), // ASM: fsd fa0, 0(a0)
+        (0x0000_8067, 4), // ASM: ret
+    ];
+    let text = decompiled(&code, Arch::RiscV64).concat();
+    assert!(!text.contains("double sub_10000("), "{text}");
+}
+
+/// A double two branches compute into one register and the join reads is
+/// a double variable, not an integer one.
+#[test]
+fn a_double_two_branches_compute_stays_a_double() {
+    let code = [
+        (0x0005_0663, 4), // ASM: beqz a0, 0x1000c
+        (0x02b5_7053, 4), // ASM: fadd.d ft0, fa0, fa1
+        (0x0080_006f, 4), // ASM: j 0x10010
+        (0x12b5_7053, 4), // ASM: fmul.d ft0, fa0, fa1
+        (0xe200_0553, 4), // ASM: fmv.x.d a0, ft0
+        (0x0000_8067, 4), // ASM: ret
+    ];
+    let text = decompiled(&code, Arch::RiscV64).concat();
+    assert!(text.contains("double "), "{text}");
+    assert!(!text.contains("uint64_t v"), "{text}");
+}
+
+/// A negation of a minimum and an absolute value of a fused multiply-add
+/// stay the C operators on the call, not integer bit masks of it.
+#[test]
+fn a_sign_of_a_library_result_stays_a_float_operator() {
+    let neg = [
+        (0x2ab5_0053, 4), // ASM: fmin.d ft0, fa0, fa1
+        (0x2200_1553, 4), // ASM: fneg.d fa0, ft0
+        (0x0000_8067, 4), // ASM: ret
+    ];
+    let text = decompiled(&neg, Arch::RiscV64).concat();
+    assert!(text.contains("-fmin(a1, a2)"), "{text}");
+    assert!(!text.contains('^'), "{text}");
+    let abs = [
+        (0x62b5_70c3, 4), // ASM: fmadd.d ft1, fa0, fa1, fa2
+        (0x2210_a553, 4), // ASM: fabs.d fa0, ft1
+        (0x0000_8067, 4), // ASM: ret
+    ];
+    let text = decompiled(&abs, Arch::RiscV64).concat();
+    assert!(text.contains("fabs(fma(a1, a2, a3))"), "{text}");
+    assert!(!text.contains('&'), "{text}");
 }

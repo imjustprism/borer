@@ -15,11 +15,10 @@ use std::collections::BTreeMap;
 
 use crate::isa::x86::ConditionCode;
 
-use super::super::expr::{
-    Cc, Cond, Expr, Flags, Key, Op, Ty, UnOp as EUn, fcvt_float_width, tls_slot,
-};
+use super::super::expr::{Cc, Cond, Expr, Flags, Key, Op, Ty, UnOp as EUn, tls_slot};
 use super::super::fcmp::FPred;
 use super::super::helper::{Helper, Operands, arg_bits};
+use super::super::round_to_int::fcvt_float_width;
 use super::super::verify::EVAL_DEPTH;
 use super::{
     BinOp, Body, FOp, FUnOp, Hole, IPred, Inst, Lane, MTy, OvfOp, Prov, UnOp, Val, WideOp,

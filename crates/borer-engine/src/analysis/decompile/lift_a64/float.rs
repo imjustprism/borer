@@ -18,10 +18,9 @@
 //! the sign operations, which are bit operations at heart, mask the sign
 //! bits instead.
 
-use super::super::expr::{
-    Expr, Flags, Key, Op, RoundToInt, Ty, UnOp, bitcast, fold, ternary, unary,
-};
+use super::super::expr::{Expr, Flags, Key, Op, Ty, UnOp, bitcast, fold, ternary, unary};
 use super::super::helper::Helper;
+use super::super::round_to_int::RoundToInt;
 use super::flags::{self, next_reader};
 use super::step::imm;
 use super::{Lift, low, low64, vector, width8};

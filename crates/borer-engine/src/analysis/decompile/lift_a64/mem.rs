@@ -368,6 +368,7 @@ pub(in crate::analysis::decompile) fn float_width(v: &Expr) -> Option<u8> {
         Expr::Un(UnOp::Sqrt | UnOp::Fabs | UnOp::Neg, inner) => float_width(inner),
         Expr::Ternary(_, a, b) => either_width(float_width(a), float_width(b)),
         Expr::Helper(Helper::Fabs, args) => args.first().and_then(float_width),
+        Expr::Call(name, _) if libm_width(name).is_some() => libm_width(name),
         Expr::Const(_)
         | Expr::Var(_)
         | Expr::Str(_)
@@ -411,6 +412,24 @@ pub(in crate::analysis::decompile) fn bear_width(v: Expr, t: Ty) -> Expr {
         Expr::Cast(Box::new(v), t)
     } else {
         v
+    }
+}
+
+/// Returns the width of the float a C library call the lifters emit
+/// returns: `fma`, `fmin` and `fmax` a double, their `f` forms a single.
+///
+/// # Arguments
+///
+/// * `name` - The called name.
+///
+/// # Returns
+///
+/// The width in bits, or `None` for any other name.
+pub(in crate::analysis::decompile) fn libm_width(name: &str) -> Option<u8> {
+    match name {
+        "fma" | "fmin" | "fmax" => Some(64),
+        "fmaf" | "fminf" | "fmaxf" => Some(32),
+        _ => None,
     }
 }
 

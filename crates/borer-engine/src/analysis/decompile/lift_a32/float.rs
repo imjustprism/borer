@@ -8,9 +8,10 @@
 //! `FPSCR`'s flags to a float compare, which `vmrs APSR_nzcv, fpscr`
 //! moves into the flags the conditions read.
 
-use super::super::expr::{Expr, Flags, Key, Op, RoundToInt, Ty, UnOp, fold, unary};
+use super::super::expr::{Expr, Flags, Key, Op, Ty, UnOp, fold, unary};
 use super::super::helper::Helper;
 use super::super::lift_a64::mem::{as_integer_bits, bear_width, float_width, put_at};
+use super::super::round_to_int::RoundToInt;
 use super::{Lift, offset};
 use crate::isa::a32::{Cvt, FpOp, FpUn, Insn, Op as AOp, PC, Reg, run};
 

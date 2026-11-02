@@ -5,39 +5,48 @@
 //! [`crate::emulate::rv::Machine`], which executes the real instructions,
 //! and through the RISC-V lifter ([`super::lift_rv`]), whose symbolic
 //! results are evaluated under that state by the shared evaluator
-//! ([`super::verify::eval`]) at the register width. Four kinds of fact
-//! must agree: every integer register and the stack pointer; every stack
-//! slot the lifter holds a value for; every store and byte the block
-//! writes off the frame; and whether the block's conditional branch is
-//! taken.
+//! ([`super::verify::eval`]) at the register width. Five kinds of fact
+//! must agree: every integer register and the stack pointer; every float
+//! register; every stack slot the lifter holds a value for; every store
+//! and byte the block writes off the frame; and whether the block's
+//! conditional branch is taken.
 //!
 //! A block is checked up to its first control transfer. Memory nothing
 //! backs reads a hash of its address on both sides. The integer registers
 //! are random, except that a register a branch compares with another
-//! mostly starts next to it; the float registers start clear on both
-//! sides. A block holding an instruction either side does not model is
+//! mostly starts next to it; the float registers are random too, those
+//! the block reads as a single first boxed in ones, and compare at the
+//! width the lifter holds them at, any NaN agreeing with any NaN. A block
+//! holding an instruction either side does not model is
 //! not checked. A pass says the lifting agreed on the seeds tried, not
 //! that it is right.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::expr::Key;
+use super::floats::agree;
 use super::lift::{BlockFacts, Env, Pass};
 use super::lift_rv::{decode_blocks, exec_block_rv};
 use super::verify::{
-    Bench, Fact, GOLDEN, Jcc, Near, Probe, Ran, Read, Rng, STACK_WORDS, State, Verified, in_parts,
-    report,
+    Bench, Fact, GOLDEN, Jcc, Near, Probe, Ran, Read, Rng, STACK_WORDS, State, Verified,
+    float_bits, in_parts, low, report,
 };
 use super::{Ctx, new_ctx};
 use crate::analysis::{Analysis, Function, Overlay};
 use crate::emulate::rv::Machine;
 use crate::emulate::{Run, Stop};
 use crate::fxmap::FxHashSet;
-use crate::isa::rv::{self, Flow, Insn, Op, Reg, SP};
+use crate::isa::rv::{self, Flow, Fmt, Insn, Op, Reg, SP};
 use crate::program::Program;
 
 /// The kinds of fact a RISC-V block's check compares, in report order.
-const FACTS: [Fact; 4] = [Fact::Register, Fact::Slot, Fact::Store, Fact::Branch];
+const FACTS: [Fact; 5] = [
+    Fact::Register,
+    Fact::Vector,
+    Fact::Slot,
+    Fact::Store,
+    Fact::Branch,
+];
 
 /// The integer registers compared and seeded: every one but `x0` and the
 /// stack pointer, by number.
@@ -209,6 +218,39 @@ fn straight_line(instrs: &[Insn]) -> (Vec<Insn>, Option<Insn>, Option<u64>) {
     (line, None, end)
 }
 
+/// Returns the float registers a block reads as a single before it
+/// writes them, which the seeds then box in ones: a single not boxed reads
+/// as the canonical NaN on the machine.
+///
+/// # Arguments
+///
+/// * `line` - The block's instructions.
+fn singles(line: &[Insn]) -> BTreeSet<u8> {
+    let mut first = BTreeSet::new();
+    let mut seen = BTreeSet::new();
+    for i in line {
+        let Op::Float(f) = i.op else {
+            continue;
+        };
+        let fmt = f.reads_fmt();
+        let regs = i.registers();
+        for r in regs.reads {
+            if let Reg::F(n) = r
+                && seen.insert(n)
+                && fmt == Some(Fmt::S)
+            {
+                first.insert(n);
+            }
+        }
+        for r in regs.writes {
+            if let Reg::F(n) = r {
+                seen.insert(n);
+            }
+        }
+    }
+    first
+}
+
 /// Reads the registers a branch compares with another, which the seeds
 /// then start near.
 ///
@@ -274,7 +316,8 @@ fn run<'p>(
         tls_block: 0,
         mir: None,
     };
-    plant(&mut emu, &mut st, &mut rng, &comparands(jcc.as_ref()));
+    let near = comparands(jcc.as_ref());
+    plant(&mut emu, &mut st, &mut rng, (&near, &singles(&line)));
     emu.stop_at(Some(end));
     let begin = instrs.first().map_or(start, |i| i.va);
     let run = emu.run(begin);
@@ -337,20 +380,23 @@ fn run<'p>(
 /// Seeds the machine and the evaluator's state alike.
 ///
 /// The integer registers are random, a register a branch compares mostly
-/// next to the other; the float registers are clear; random words fill
-/// the stack around the stack pointer.
+/// next to the other; the float registers are random, those the block
+/// reads as a single first boxed in ones; random words fill the stack
+/// around the stack pointer.
 ///
 /// # Arguments
 ///
 /// * `emu` - The machine.
 /// * `st` - The evaluator's state.
 /// * `rng` - The seeded generator.
-/// * `near` - The registers to start near another ([`comparands`]).
+/// * `(near, singles)` - The registers to start near another
+///   ([`comparands`]) and the float registers read as singles
+///   ([`singles`]).
 fn plant(
     emu: &mut Machine<'_>,
     st: &mut State<'_, Machine<'_>>,
     rng: &mut Rng,
-    near: &BTreeMap<Key, Near>,
+    (near, singles): (&BTreeMap<Key, Near>, &BTreeSet<u8>),
 ) {
     let wide = st.width == 64;
     let word = if wide { u64::MAX } else { 0xffff_ffff };
@@ -365,7 +411,14 @@ fn plant(
         st.regs.insert(key, v);
     }
     for n in 0..32 {
-        st.regs.insert(Key::Rv(Reg::F(n)), 0);
+        let v = rng.next();
+        let v = if singles.contains(&n) {
+            0xffff_ffff_0000_0000 | (v & 0xffff_ffff)
+        } else {
+            v
+        };
+        emu.set_register(rv::name(Reg::F(n)), v);
+        st.regs.insert(Key::Rv(Reg::F(n)), v);
     }
     let step: i64 = if wide { 8 } else { 4 };
     for w in -STACK_WORDS..STACK_WORDS {
@@ -386,10 +439,47 @@ fn plant(
 /// * `out` - Where the counts and disagreements go.
 fn compare(mut ran: Ran<'_, Machine<'_>, ()>, out: &mut Verified) {
     registers(&ran, out);
+    floats(&ran, out);
     let held = ran.slots(out);
     ran.stores(&held, out);
     if let Some((jcc, cond)) = ran.branch.take() {
         ran.step_branch(jcc, &cond, out);
+    }
+}
+
+/// Compares every float register: a single in its low 32 bits, its
+/// boxing aside, and any NaN agreeing with any NaN, since the machine
+/// makes the canonical one where the evaluator keeps a payload.
+///
+/// # Arguments
+///
+/// * `ran` - Both runs.
+/// * `out` - Where the counts and disagreements go.
+fn floats(ran: &Ran<'_, Machine<'_>, ()>, out: &mut Verified) {
+    for n in 0..32 {
+        let r = Reg::F(n);
+        let key = Key::Rv(r);
+        let Some(emulated) = ran.emu.register(rv::name(r)) else {
+            continue;
+        };
+        let value = ran.env.vals.get(&key);
+        let read = value.map_or_else(
+            || Read::Value(ran.st.regs.get(&key).copied().unwrap_or(0)),
+            |e| ran.read(e),
+        );
+        let Some(lifted) = out.count(Fact::Vector, read) else {
+            continue;
+        };
+        let bits = value.and_then(|e| float_bits(e, &ran.st)).unwrap_or(64);
+        if !agree(emulated, lifted, bits, true) {
+            ran.disagree(
+                out,
+                Fact::Vector,
+                rv::name(r).to_owned(),
+                (emulated & low(bits), lifted & low(bits), bits),
+                value.map_or_else(|| "(unchanged)".to_owned(), |e| format!("{e:?}")),
+            );
+        }
     }
 }
 

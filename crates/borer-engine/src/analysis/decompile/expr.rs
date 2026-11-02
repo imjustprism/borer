@@ -901,8 +901,8 @@ impl Expr {
     }
 
     /// Tells whether the value is floating point by its own shape: a float
-    /// constant, load or conversion, a float operation, or a vector or x87
-    /// register.
+    /// constant, load or conversion, a float operation, a C library call
+    /// returning a float, or a vector or x87 register.
     ///
     /// A comparison of such a value is a floating-point one, whose
     /// unordered outcome (a NaN operand) sets the flags `comiss` and
@@ -919,7 +919,10 @@ impl Expr {
             Expr::Var(Key::Reg(r)) => {
                 r.is_vector_register() || (*r >= Register::ST0 && *r <= Register::ST7)
             }
-            Expr::Call(f, _) => matches!(f.as_str(), "__lane_f32" | "__lane_f64"),
+            Expr::Call(f, _) => {
+                matches!(f.as_str(), "__lane_f32" | "__lane_f64")
+                    || super::lift_a64::mem::libm_width(f).is_some()
+            }
             Expr::Helper(h, _) => *h == Helper::Fabs,
             Expr::Ternary(_, a, b) => a.is_float() || b.is_float(),
             Expr::Const(_)
@@ -3172,9 +3175,7 @@ pub(super) fn known_bits(e: &Expr) -> u64 {
             _ => u64::MAX,
         },
         Expr::Helper(Helper::Cls, _) => 0x3f,
-        Expr::Helper(Helper::RoundToInt(RoundToInt::Signed(32) | RoundToInt::Unsigned(32)), _) => {
-            0xffff_ffff
-        }
+        Expr::Helper(Helper::RoundToInt(round), _) if round.bits() == 32 => 0xffff_ffff,
         Expr::Helper(Helper::Rbit | Helper::Rev16 | Helper::Rev32, args) => match args.first() {
             Some(Expr::Cast(_, ty) | Expr::Bitcast(_, ty) | Expr::Deref(_, ty))
                 if ty.bits() <= 64 =>
@@ -3322,7 +3323,7 @@ pub(super) fn rev32_bits(v: u64, bits: u8) -> Option<u64> {
 ///
 /// * `v` - The float's bits.
 /// * `fb` - The float's width.
-fn as_float(v: u64, fb: u8) -> Option<f64> {
+pub(super) fn as_float(v: u64, fb: u8) -> Option<f64> {
     match fb {
         32 => Some(f64::from(f32::from_bits(lo32(v)))),
         64 => Some(f64::from_bits(v)),
@@ -3349,162 +3350,6 @@ pub(super) fn rint_bits(v: u64, fb: u8) -> Option<u64> {
         64 => Some(f64::from_bits(v).round_ties_even().to_bits()),
         _ => None,
     }
-}
-
-/// Which `fcvtz` call a name is: the signedness and the integer width.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(super) enum RoundToInt {
-    /// Toward zero into a signed integer of this width.
-    Signed(u8),
-    /// Toward zero into an unsigned integer of this width.
-    Unsigned(u8),
-}
-
-impl RoundToInt {
-    /// `fcvtzs32`, `fcvtzs64`, `fcvtzu32` or `fcvtzu64`.
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - The call's name.
-    pub(super) fn parse(name: &str) -> Option<Self> {
-        match name {
-            "fcvtzs32" => Some(Self::Signed(32)),
-            "fcvtzs64" => Some(Self::Signed(64)),
-            "fcvtzu32" => Some(Self::Unsigned(32)),
-            "fcvtzu64" => Some(Self::Unsigned(64)),
-            _ => None,
-        }
-    }
-
-    /// The operation for a signedness and an integer width.
-    ///
-    /// A width other than 32 or 64 is `None`.
-    ///
-    /// # Arguments
-    ///
-    /// * `signed` - Whether the integer is signed.
-    /// * `bits` - The integer's width.
-    pub(super) fn new(signed: bool, bits: u8) -> Option<Self> {
-        match (signed, bits) {
-            (true, 32 | 64) => Some(Self::Signed(bits)),
-            (false, 32 | 64) => Some(Self::Unsigned(bits)),
-            _ => None,
-        }
-    }
-
-    /// The printed name, or `None` when the width is not 32 or 64.
-    pub(super) fn name(self) -> Option<&'static str> {
-        match self {
-            Self::Signed(32) => Some("fcvtzs32"),
-            Self::Signed(64) => Some("fcvtzs64"),
-            Self::Unsigned(32) => Some("fcvtzu32"),
-            Self::Unsigned(64) => Some("fcvtzu64"),
-            Self::Signed(_) | Self::Unsigned(_) => None,
-        }
-    }
-
-    /// Converts `v`, a float of `fb` bits, as this operation.
-    ///
-    /// # Arguments
-    ///
-    /// * `v` - The float's bits.
-    /// * `fb` - The float's width.
-    pub(super) fn apply(self, v: u64, fb: u8) -> Option<u64> {
-        match self {
-            Self::Signed(bits) => fcvtzs_bits(v, fb, bits),
-            Self::Unsigned(bits) => fcvtzu_bits(v, fb, bits),
-        }
-    }
-}
-
-/// The float width a `fcvtz` call records in its second argument.
-///
-/// A missing argument uses `fallback`. A present argument that is not the
-/// constant 32 or 64 is `None`: that is not a width, and it is not read
-/// from the value instead.
-///
-/// # Arguments
-///
-/// * `width` - The call's second argument.
-/// * `fallback` - The width the value's own type gives, when the call
-///   records none.
-pub(super) fn fcvt_float_width(width: Option<&Expr>, fallback: Option<u8>) -> Option<u8> {
-    match width {
-        Some(Expr::Const(32)) => Some(32),
-        Some(Expr::Const(64)) => Some(64),
-        Some(_) => None,
-        None => fallback,
-    }
-}
-
-/// `v` as a float of `fb` bits, rounded toward zero into a signed integer
-/// of `bits`.
-///
-/// This is arm64 `fcvtzs`. A NaN is 0. A value past either signed bound
-/// saturates to that bound. Any width other than 32 or 64, for the float
-/// or the integer, is `None`.
-///
-/// # Arguments
-///
-/// * `v` - The float's bits.
-/// * `fb` - The float's width.
-/// * `bits` - The integer's width.
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "the bounds keep the truncated value within the signed integer"
-)]
-pub(super) fn fcvtzs_bits(v: u64, fb: u8, bits: u8) -> Option<u64> {
-    if !matches!(bits, 32 | 64) {
-        return None;
-    }
-    let t = as_float(v, fb)?.trunc();
-    if t.is_nan() {
-        return Some(0);
-    }
-    let top = 2f64.powi(i32::from(bits) - 1);
-    let bound = 1u64 << (u32::from(bits) - 1);
-    if t < -top {
-        return Some(bound);
-    }
-    if t >= top {
-        return Some(bound - 1);
-    }
-    Some((t as i64).cast_unsigned() & mask_bits(bits))
-}
-
-/// `v` as a float of `fb` bits, rounded toward zero into an unsigned
-/// integer of `bits`.
-///
-/// This is arm64 `fcvtzu`. A NaN or a negative value is 0. A value past
-/// the unsigned bound saturates to every bit set. Any width other than
-/// 32 or 64, for the float or the integer, is `None`. A value in
-/// `[2^63, 2^64)` fits the result and not `i64`, so the cast goes
-/// straight to `u64`.
-///
-/// # Arguments
-///
-/// * `v` - The float's bits.
-/// * `fb` - The float's width.
-/// * `bits` - The integer's width.
-pub(super) fn fcvtzu_bits(v: u64, fb: u8, bits: u8) -> Option<u64> {
-    if !matches!(bits, 32 | 64) {
-        return None;
-    }
-    let t = as_float(v, fb)?.trunc();
-    if t.is_nan() || t < 0.0 {
-        return Some(0);
-    }
-    let top = 2f64.powi(i32::from(bits) - 1);
-    if t >= top * 2.0 {
-        return Some(mask_bits(bits));
-    }
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "the bounds keep the truncated value within the unsigned width"
-    )]
-    let v = t as u64;
-    Some(v & mask_bits(bits))
 }
 
 /// `a - b` clamped at zero, at `bits`.
@@ -7430,60 +7275,5 @@ mod fold_tests {
             let mut s = seed;
             sweep_holds(&mut s, true, "sext");
         }
-    }
-
-    /// An unsigned conversion of a value in `[2^63, 2^64)` keeps that value.
-    ///
-    /// Casting the truncated float through `i64` saturates at the signed
-    /// maximum, one binade early. The unsigned result is the value itself
-    /// until `2^64`, and every bit set from there on. A NaN or a negative
-    /// value is 0. The signed conversion still saturates at its own bound,
-    /// including an exact `-2^63`.
-    #[test]
-    fn an_unsigned_conversion_keeps_the_binade_past_the_signed_maximum() {
-        let zu = |bits: u64, fb: u8, width: u8| super::fcvtzu_bits(bits, fb, width);
-        let zs = |bits: u64, fb: u8, width: u8| super::fcvtzs_bits(bits, fb, width);
-        let two63 = 0x43E0_0000_0000_0000;
-        let below64 = 0x43EF_FFFF_FFFF_FFFF;
-        #[expect(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "these two values are exact integers inside the unsigned width"
-        )]
-        let (high, near) = (f64::from_bits(two63) as u64, f64::from_bits(below64) as u64);
-        assert_eq!((high, near), (0x8000_0000_0000_0000, 0xffff_ffff_ffff_f800));
-        assert_eq!(zu(two63, 64, 64), Some(0x8000_0000_0000_0000));
-        assert_eq!(zu(below64, 64, 64), Some(0xffff_ffff_ffff_f800));
-        assert_eq!(zu(0x43F0_0000_0000_0000, 64, 64), Some(u64::MAX));
-        assert_eq!(zu(0x7FF0_0000_0000_0000, 64, 64), Some(u64::MAX));
-        assert_eq!(zu(0x7FF8_0000_0000_0000, 64, 64), Some(0));
-        assert_eq!(zu(0xBFF0_0000_0000_0000, 64, 64), Some(0));
-        assert_eq!(zs(two63, 64, 64), Some(0x7fff_ffff_ffff_ffff));
-        assert_eq!(
-            zs(0xC3E0_0000_0000_0000, 64, 64),
-            Some(0x8000_0000_0000_0000)
-        );
-        assert_eq!(zs(0x7FF8_0000_0000_0000, 64, 64), Some(0));
-        assert_eq!(zu(0x4F00_0000, 32, 32), Some(0x8000_0000));
-        assert_eq!(zu(0x4F80_0000, 32, 32), Some(0xffff_ffff));
-        assert_eq!(zu(two63, 64, 32), Some(0xffff_ffff));
-        assert_eq!(zs(0xC1E0_0000_0000_0000, 64, 32), Some(0x8000_0000));
-        assert_eq!(zu(0, 16, 64), None);
-        assert_eq!(zu(two63, 64, 16), None);
-        assert_eq!(super::RoundToInt::parse("fcvtzu"), None);
-        assert_eq!(super::RoundToInt::parse("__fcvtzs64"), None);
-        assert_eq!(
-            super::RoundToInt::parse("fcvtzu64").and_then(|op| op.apply(two63, 64)),
-            Some(0x8000_0000_0000_0000)
-        );
-        assert_eq!(
-            super::fcvt_float_width(Some(&Expr::Const(16)), Some(64)),
-            None
-        );
-        assert_eq!(
-            super::fcvt_float_width(Some(&Expr::Const(32)), None),
-            Some(32)
-        );
-        assert_eq!(super::fcvt_float_width(None, Some(64)), Some(64));
     }
 }

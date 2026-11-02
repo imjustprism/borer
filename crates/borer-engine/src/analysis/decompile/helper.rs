@@ -12,11 +12,12 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use super::expr::{Expr, Op, RoundToInt, UnOp, fold, mask_bits, sext, unary};
+use super::expr::{Expr, Op, UnOp, fold, mask_bits, sext, unary};
 use super::expr::{
     abs_bits, align_up_bits, cls_bits, midpoint_bits, rbit_bits, rev16_bits, rev32_bits, rint_bits,
     sub_sat_bits,
 };
+use super::round_to_int::RoundToInt;
 use crate::program::Program;
 
 /// One helper call the decompiler prints.
@@ -247,6 +248,7 @@ impl Helper {
                     .into_iter()
                     .flat_map(|signed| [32, 64].map(|b| RoundToInt::new(signed, b)))
                     .flatten()
+                    .flat_map(|r| [r, r.nan_max()])
                     .map(Helper::RoundToInt),
             )
             .chain([
@@ -875,26 +877,7 @@ impl Helper {
             Helper::SubSat => word_two(&wu, &wu, "a > b ? a - b : 0"),
             Helper::Midpoint => word_two(&wu, &wu, "(a & b) + ((a ^ b) >> 1)"),
             Helper::AlignUp => word_two(&wu, &wu, "(a + b - 1) & ~(b - 1)"),
-            Helper::RoundToInt(round) => {
-                let (t, lo, hi) = match round {
-                    RoundToInt::Signed(32) => {
-                        ("int32_t", "d <= -2147483648.0 ? -2147483647 - 1", "2147483647.0 ? 2147483647")
-                    }
-                    RoundToInt::Signed(_) => (
-                        "int64_t",
-                        "d <= -9223372036854775808.0 ? INT64_MIN",
-                        "9223372036854775807.0 ? INT64_MAX",
-                    ),
-                    RoundToInt::Unsigned(32) => ("uint32_t", "d <= 0 ? 0", "4294967295.0 ? 4294967295u"),
-                    RoundToInt::Unsigned(_) => {
-                        ("uint64_t", "d <= 0 ? 0", "18446744073709551615.0 ? UINT64_MAX")
-                    }
-                };
-                vec![format!(
-                    "static inline {t} {self}(double d, int fb) {{ (void)fb; return d != d ? 0 : d \
-                     >= {hi} : {lo} : ({t})d; }}"
-                )]
-            }
+            Helper::RoundToInt(round) => vec![round_to_int_c(round, &self.to_string())],
             Helper::X87Load80 => vec!["extern double x87_load80(uint64_t p);".to_owned()],
             Helper::Stmxcsr | Helper::FpuStatus | Helper::Lahf | Helper::Rdtsc(..) => {
                 vec![format!("extern {wu} {self}(void);")]
@@ -1233,6 +1216,51 @@ pub(super) fn declare(text: &str, program: &Program) -> String {
     let mut out = lines.join("\n");
     out.push('\n');
     out
+}
+
+/// Returns the C definition of a conversion toward zero into an integer:
+/// a NaN to 0 or to the largest value as the conversion says, a value
+/// past either bound saturating to it.
+///
+/// # Arguments
+///
+/// * `round` - The conversion.
+/// * `name` - Its printed name.
+fn round_to_int_c(round: RoundToInt, name: &str) -> String {
+    let (t, lo, hi, max) = match (round.signed(), round.bits()) {
+        (true, 32) => (
+            "int32_t",
+            "d <= -2147483648.0 ? -2147483647 - 1",
+            "2147483647.0 ? 2147483647",
+            "2147483647",
+        ),
+        (true, _) => (
+            "int64_t",
+            "d <= -9223372036854775808.0 ? INT64_MIN",
+            "9223372036854775807.0 ? INT64_MAX",
+            "INT64_MAX",
+        ),
+        (false, 32) => (
+            "uint32_t",
+            "d <= 0 ? 0",
+            "4294967295.0 ? 4294967295u",
+            "4294967295u",
+        ),
+        (false, _) => (
+            "uint64_t",
+            "d <= 0 ? 0",
+            "18446744073709551615.0 ? UINT64_MAX",
+            "UINT64_MAX",
+        ),
+    };
+    let nan = match round {
+        RoundToInt::Signed(_) | RoundToInt::Unsigned(_) => "0",
+        RoundToInt::SignedNanMax(_) | RoundToInt::UnsignedNanMax(_) => max,
+    };
+    format!(
+        "static inline {t} {name}(double d, int fb) {{ (void)fb; return d != d ? {nan} : d \
+             >= {hi} : {lo} : ({t})d; }}"
+    )
 }
 
 #[cfg(test)]

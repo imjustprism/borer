@@ -74,6 +74,7 @@ pub mod replay;
 mod replay_a32;
 mod replay_a64;
 mod rewrite;
+mod round_to_int;
 mod scenario;
 pub(crate) mod signature;
 mod sites;

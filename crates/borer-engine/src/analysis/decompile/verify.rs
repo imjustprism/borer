@@ -41,8 +41,7 @@ use crate::isa::x86::{
 };
 
 use super::expr::{
-    Cond, Expr, Flags, Key, TLS_BASE, Ty, UnOp, either_width, fcvt_float_width, fold, tls_slot,
-    unary,
+    Cond, Expr, Flags, Key, TLS_BASE, Ty, UnOp, either_width, fold, tls_slot, unary,
 };
 use super::floats::{
     agree, cast_integer, convert_float, float_arith, float_carried, float_of, float_scale_at,
@@ -53,6 +52,7 @@ use super::lift::{BlockFacts, Env, Pass, exec_block};
 use super::mir::Val;
 use super::mir::build::Builder;
 use super::mir::eval::{Inputs, eval as mir_eval};
+use super::round_to_int::fcvt_float_width;
 use super::{Ctx, new_ctx};
 use crate::analysis::{Analysis, BasicBlock, Function, Overlay};
 use crate::emulate::{Emulator, Run, Stop, fill_byte};

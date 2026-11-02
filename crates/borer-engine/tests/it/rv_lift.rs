@@ -6,7 +6,8 @@
 //! ([`verify`]): every register, slot, store and branch outcome the lifter
 //! computes must equal the machine's, for the integer operations and their
 //! `w` forms, the multiplies and divides, the loads and stores of every
-//! width and extension, and each conditional branch.
+//! width and extension, each conditional branch, and the float
+//! instructions at both widths.
 #![expect(
     clippy::missing_panics_doc,
     clippy::expect_used,
@@ -93,6 +94,82 @@ const MEMORY: &[(u32, &str)] = &[
     (0x0201_0113, "addi sp, sp, 32"),
 ];
 
+/// Double arithmetic, square root, sign injections, compares and
+/// conversions, a move in and out of an integer register, and a store
+/// and load through the stack.
+const DOUBLES: &[(u32, &str)] = &[
+    (0xfe01_0113, "addi sp, sp, -32"),
+    (0xf205_0553, "fmv.d.x fa0, a0"),
+    (0xf205_85d3, "fmv.d.x fa1, a1"),
+    (0x02b5_7653, "fadd.d fa2, fa0, fa1"),
+    (0x0ab5_76d3, "fsub.d fa3, fa0, fa1"),
+    (0x12b5_7753, "fmul.d fa4, fa0, fa1"),
+    (0x1ab5_77d3, "fdiv.d fa5, fa0, fa1"),
+    (0x5a05_7853, "fsqrt.d fa6, fa0"),
+    (0x22a5_18d3, "fneg.d fa7, fa0"),
+    (0x22b5_a053, "fabs.d ft0, fa1"),
+    (0x22a5_00d3, "fmv.d ft1, fa0"),
+    (0xa2b5_2653, "feq.d a2, fa0, fa1"),
+    (0xa2b5_16d3, "flt.d a3, fa0, fa1"),
+    (0xa2b5_0753, "fle.d a4, fa0, fa1"),
+    (0xc205_17d3, "fcvt.w.d a5, fa0, rtz"),
+    (0xc225_9853, "fcvt.l.d a6, fa1, rtz"),
+    (0xc215_18d3, "fcvt.wu.d a7, fa0, rtz"),
+    (0xd205_7153, "fcvt.d.w ft2, a0"),
+    (0xd225_f1d3, "fcvt.d.l ft3, a1"),
+    (0xd235_f253, "fcvt.d.lu ft4, a1"),
+    (0x4015_73d3, "fcvt.s.d ft7, fa0"),
+    (0x2ab5_0453, "fmin.d fs0, fa0, fa1"),
+    (0x62b5_74c3, "fmadd.d fs1, fa0, fa1, fa2"),
+    (0xe205_0e53, "fmv.x.d t3, fa0"),
+    (0x00a1_3427, "fsd fa0, 8(sp)"),
+    (0x0081_3307, "fld ft6, 8(sp)"),
+    (0x0201_0113, "addi sp, sp, 32"),
+];
+
+/// Single arithmetic, square root, a compare and conversions, the moves,
+/// and a store and load through the stack.
+const SINGLES: &[(u32, &str)] = &[
+    (0xfe01_0113, "addi sp, sp, -32"),
+    (0xf005_0553, "fmv.w.x fa0, a0"),
+    (0xf005_85d3, "fmv.w.x fa1, a1"),
+    (0x00b5_7653, "fadd.s fa2, fa0, fa1"),
+    (0x10b5_76d3, "fmul.s fa3, fa0, fa1"),
+    (0x18b5_7753, "fdiv.s fa4, fa0, fa1"),
+    (0x5805_77d3, "fsqrt.s fa5, fa0"),
+    (0xa0b5_1653, "flt.s a2, fa0, fa1"),
+    (0xc005_16d3, "fcvt.w.s a3, fa0, rtz"),
+    (0xd005_7053, "fcvt.s.w ft0, a0"),
+    (0x4205_00d3, "fcvt.d.s ft1, fa0"),
+    (0xe005_0e53, "fmv.x.w t3, fa0"),
+    (0x00a1_2427, "fsw fa0, 8(sp)"),
+    (0x0081_2207, "flw ft4, 8(sp)"),
+    (0x0201_0113, "addi sp, sp, 32"),
+];
+
+/// Floats an incoming register holds, read without a move first: the
+/// seeds put a double or a boxed single there.
+const INCOMING: &[(u32, &str)] = &[
+    (0x02b5_7653, "fadd.d fa2, fa0, fa1"),
+    (0x00d7_f753, "fadd.s fa4, fa5, fa3"),
+    (0x22a5_1653, "fneg.d fa2, fa0"),
+    (0x22b5_a6d3, "fabs.d fa3, fa1"),
+];
+
+/// A negation and an absolute value of what a minimum and a fused
+/// multiply-add computed, moved out to integer registers.
+const SIGNS_OF_CALLS: &[(u32, &str)] = &[
+    (0xf205_0553, "fmv.d.x fa0, a0"),
+    (0xf205_85d3, "fmv.d.x fa1, a1"),
+    (0xf206_0653, "fmv.d.x fa2, a2"),
+    (0x2ab5_0453, "fmin.d fs0, fa0, fa1"),
+    (0x2284_1653, "fneg.d fa2, fs0"),
+    (0x62b5_74c3, "fmadd.d fs1, fa0, fa1, fa2"),
+    (0x2294_a6d3, "fabs.d fa3, fs1"),
+    (0xe206_0553, "fmv.x.d a0, fa2"),
+    (0xe206_85d3, "fmv.x.d a1, fa3"),
+];
+
 /// Checks one routine: its text reads as listed, and every block the
 /// lifter and the machine both model agrees on every seed tried.
 ///
@@ -159,4 +236,29 @@ fn each_branch_agrees_with_the_emulator() {
     for (w, want) in branches {
         agrees(&[(w, want), (0x0010_0513, "li a0, 1")]);
     }
+}
+
+/// The double instructions agree with the emulator.
+#[test]
+fn the_double_instructions_agree_with_the_emulator() {
+    agrees(DOUBLES);
+}
+
+/// The single instructions agree with the emulator.
+#[test]
+fn the_single_instructions_agree_with_the_emulator() {
+    agrees(SINGLES);
+}
+
+/// Floats incoming in their registers agree with the emulator.
+#[test]
+fn incoming_floats_agree_with_the_emulator() {
+    agrees(INCOMING);
+}
+
+/// A negation and an absolute value of a minimum's and a fused
+/// multiply-add's result agree with the emulator.
+#[test]
+fn signs_of_library_results_agree_with_the_emulator() {
+    agrees(SIGNS_OF_CALLS);
 }
