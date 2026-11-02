@@ -314,32 +314,36 @@ fn placed(s: &Shape, f: &Function, isa: Option<Isa>) -> FunctionAbi {
     let target = Target::of(conv, f.stack_pop > 0, isa);
     let floats = s.floats();
     let word = conv.word.unsigned_abs();
-    let first_stack = if matches!(target, Target::Aapcs32 | Target::RiscV) {
+    let table = matches!(target, Target::Aapcs64 | Target::Aapcs32 | Target::RiscV);
+    let first_stack = if table {
         0
     } else {
         word.wrapping_add(conv.shadow.unsigned_abs())
     };
     let regs = s.regs();
+    let reg_at = |i: usize| match target {
+        Target::Aapcs64 => lift_a64::arg_reg(i, floats).map(Loc::A64),
+        Target::Aapcs32 => lift_a32::arg_reg(i, floats).map(Loc::A32),
+        Target::RiscV => lift_rv::arg_reg(i, floats).map(Loc::Rv),
+        Target::SysvX64
+        | Target::Win64
+        | Target::GoX64
+        | Target::X86Cdecl
+        | Target::X86Stdcall
+        | Target::X86Fastcall
+        | Target::X86Thiscall => conv.arg_reg(i, floats).map(Loc::X86),
+    };
     let loc = |i: usize, float: bool| -> Loc {
-        let reg = match target {
-            Target::Aapcs64 => lift_a64::arg_reg(i, floats).map(Loc::A64),
-            Target::Aapcs32 => lift_a32::arg_reg(i, floats).map(Loc::A32),
-            Target::RiscV => lift_rv::arg_reg(i, floats).map(Loc::Rv),
-            Target::SysvX64
-            | Target::Win64
-            | Target::GoX64
-            | Target::X86Cdecl
-            | Target::X86Stdcall
-            | Target::X86Fastcall
-            | Target::X86Thiscall => conv.arg_reg(i, floats).map(Loc::X86),
-        };
-        reg.filter(|_| {
-            float || i < regs || matches!(target, Target::Aapcs64 | Target::Aapcs32 | Target::RiscV)
-        })
-        .unwrap_or_else(|| {
-            let past = from_usize(i.saturating_sub(regs));
-            Loc::Stack(first_stack.wrapping_add(past.wrapping_mul(word)))
-        })
+        reg_at(i)
+            .filter(|_| float || i < regs || table)
+            .unwrap_or_else(|| {
+                let past = if table {
+                    (0..i).filter(|&j| reg_at(j).is_none()).count()
+                } else {
+                    i.saturating_sub(regs)
+                };
+                Loc::Stack(first_stack.wrapping_add(from_usize(past).wrapping_mul(word)))
+            })
     };
     let result_at = s.result_param.map(usize::from);
     let mut params = Vec::with_capacity(s.count);
@@ -369,7 +373,10 @@ fn placed(s: &Shape, f: &Function, isa: Option<Isa>) -> FunctionAbi {
             }
             continue;
         }
-        let float = floats & (1u8 << i.min(7)) != 0;
+        let float = u32::try_from(i)
+            .ok()
+            .and_then(|s| 1u8.checked_shl(s))
+            .is_some_and(|bit| floats & bit != 0);
         params.push(Value {
             class: if float { Class::Float } else { Class::Int },
             locs: vec![loc(seq, float)],
@@ -488,8 +495,9 @@ pub(crate) fn prototype(
 #[cfg(test)]
 mod tests {
     use super::{Class, Loc, Target, cir, of, prototype};
+    use crate::analysis::protos::Proto;
     use crate::analysis::{Analysis, Overlay};
-    use crate::isa::{a64, x86::Register};
+    use crate::isa::{a64, rv, x86::Register};
     use crate::program::{Arch, BinaryFormat, Program, Section, Symbol, SymbolKind};
 
     /// Builds a one-section image of `code` at 0x1000, its function named.
@@ -544,6 +552,65 @@ mod tests {
             declared(&prototype(&p, &a, &o, 0x1000).unwrap()),
             "extern uint64_t f(uint64_t, uint64_t);\n"
         );
+    }
+
+    /// A RISC-V function declared with nine integer arguments takes the
+    /// first eight in `a0` to `a7` and the ninth in the first stack word,
+    /// at the stack pointer where it is called.
+    ///
+    /// # Panics
+    ///
+    /// When the ninth argument sits elsewhere.
+    #[test]
+    fn a_risc_v_argument_past_the_registers_takes_the_first_stack_word() {
+        let p = image(Arch::RiscV64, &0x0000_8067u32.to_le_bytes());
+        let a = Analysis::compute(&p);
+        let mut o = Overlay::default();
+        let text = "long f(long a, long b, long c, long d, long e, long g, long h, long i, long j)";
+        o.prototypes.insert(0x1000, Proto::parse(text).unwrap());
+        let abi = of(&p, &a, &o, 0x1000).unwrap();
+        assert_eq!(abi.target, Target::RiscV);
+        let locs: Vec<Loc> = abi.params.iter().flat_map(|v| v.locs.clone()).collect();
+        assert_eq!(locs.get(7), Some(&Loc::Rv(rv::Reg::X(17))));
+        assert_eq!(locs.get(8), Some(&Loc::Stack(0)));
+    }
+
+    /// A RISC-V function declared with eight doubles and then an integer
+    /// takes the integer in `a0` as an integer: the float mask covers the
+    /// first eight positions only.
+    ///
+    /// # Panics
+    ///
+    /// When the ninth parameter is a float or sits elsewhere.
+    #[test]
+    fn a_position_past_the_float_mask_is_an_integer() {
+        let p = image(Arch::RiscV64, &0x0000_8067u32.to_le_bytes());
+        let a = Analysis::compute(&p);
+        let mut o = Overlay::default();
+        let text = "long f(double a, double b, double c, double d, double e, double g, double h, double i, long j)";
+        o.prototypes.insert(0x1000, Proto::parse(text).unwrap());
+        let abi = of(&p, &a, &o, 0x1000).unwrap();
+        let last = abi.params.get(8).map(|v| (v.class, v.locs.clone()));
+        assert_eq!(last, Some((Class::Int, vec![Loc::Rv(rv::Reg::X(10))])));
+    }
+
+    /// An arm64 function declared with nine integer arguments takes the
+    /// ninth in the first stack word, no return address below it.
+    ///
+    /// # Panics
+    ///
+    /// When the ninth argument sits elsewhere.
+    #[test]
+    fn an_arm64_argument_past_the_registers_takes_the_first_stack_word() {
+        let p = image(Arch::Arm64, &0xd65f_03c0u32.to_le_bytes());
+        let a = Analysis::compute(&p);
+        let mut o = Overlay::default();
+        let text = "long f(long a, long b, long c, long d, long e, long g, long h, long i, long j)";
+        o.prototypes.insert(0x1000, Proto::parse(text).unwrap());
+        let abi = of(&p, &a, &o, 0x1000).unwrap();
+        let locs: Vec<Loc> = abi.params.iter().flat_map(|v| v.locs.clone()).collect();
+        assert_eq!(locs.get(7), Some(&Loc::A64(a64::Reg::X(7))));
+        assert_eq!(locs.get(8), Some(&Loc::Stack(0)));
     }
 
     /// An arm64 function writing through `x8` returns its aggregate
