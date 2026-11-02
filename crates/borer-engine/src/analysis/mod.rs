@@ -13,6 +13,7 @@ pub mod anchors;
 pub mod apihash;
 pub mod apply;
 pub mod attributes;
+pub(crate) mod call_returns;
 pub mod cdecl;
 mod cell;
 pub mod classes;

@@ -30,7 +30,8 @@
 //! reads a second result, which a function returning a pair of words or a
 //! 128-bit integer hands back there.
 
-use crate::analysis::{Analysis, BlockTerm, Function, RefKind, striped};
+use crate::analysis::call_returns::{self, Facts, Own, Site};
+use crate::analysis::{Analysis, BlockTerm, Function, striped};
 use crate::isa::a64::{self, Flow, Insn, Reg};
 use crate::program::Program;
 
@@ -40,28 +41,6 @@ const SCAN_MAX: usize = 16;
 const PATHS_MAX: usize = 8;
 /// Longest prologue read for whether a callee reads its first argument.
 const LEADING_MAX: usize = 16;
-/// Most rounds of the hand-on rule.
-const PASS_ROUNDS_MAX: usize = 64;
-/// Most blocks walked back from a function's returns for the writes of
-/// `x0` they hand back.
-const OWN_BLOCKS_MAX: usize = 32;
-/// The widest a result is recorded as narrow at ([`Function::ret_width`]).
-const NARROW_MAX: u8 = 16;
-
-/// What one call site does with a result register.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Site {
-    /// Read before being written, at this width in bits.
-    Used(u8),
-    /// Written or clobbered before any read.
-    Dead,
-    /// Handed on by the caller's own return or tail jump: used exactly
-    /// when the caller's result is (the caller's entry).
-    Tail(u64),
-    /// Lost: the scan ran out or could not follow a jump.
-    Unknown,
-}
-
 /// Decodes the instruction at `va` in executable memory.
 ///
 /// # Arguments
@@ -196,104 +175,42 @@ fn classify(program: &Program, analysis: &Analysis, site: u64, from: Option<u64>
         };
         found.push(outcome);
     }
-    let used = found
-        .iter()
-        .filter_map(|s| match s {
-            Site::Used(bits) => Some(*bits),
-            Site::Dead | Site::Tail(_) | Site::Unknown => None,
-        })
-        .max();
-    match used {
-        Some(bits) => Site::Used(bits),
-        None if found.contains(&Site::Unknown) => Site::Unknown,
-        None => found
-            .iter()
-            .find(|s| matches!(s, Site::Tail(_)))
-            .copied()
-            .unwrap_or(Site::Dead),
-    }
+    Site::merge(&found)
 }
 
 /// Tells whether every return of a function hands back a value one of its
-/// own instructions put in `x0`.
-///
-/// Walking back from each `ret`, every path must meet a write of `x0`
-/// before it meets a call (whose result is a callee's) or the entry (where
-/// `x0` is the first argument).
+/// own instructions put in `x0` ([`call_returns::hands_back_own`]).
 ///
 /// # Arguments
 ///
 /// * `program` - The image.
 /// * `f` - The function.
-///
-/// # Returns
-///
-/// `false` as well when the function has no return or the walk runs past
-/// [`OWN_BLOCKS_MAX`] blocks.
 fn hands_back_own(program: &Program, f: &Function) -> bool {
-    let index: std::collections::BTreeMap<u64, usize> = f
-        .blocks
-        .iter()
-        .enumerate()
-        .map(|(k, b)| (b.start, k))
-        .collect();
-    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); f.blocks.len()];
-    for (k, b) in f.blocks.iter().enumerate() {
-        for s in &b.successors {
-            if let Some(&t) = index.get(s) {
-                preds[t].push(k);
-            }
-        }
-    }
-    let mut todo: Vec<usize> = f
-        .blocks
-        .iter()
-        .enumerate()
-        .filter(|(_, b)| b.term == BlockTerm::Ret)
-        .map(|(k, _)| k)
-        .collect();
-    if todo.is_empty() {
-        return false;
-    }
-    let mut seen = vec![false; f.blocks.len()];
-    let mut walked = 0usize;
-    while let Some(k) = todo.pop() {
-        if std::mem::replace(&mut seen[k], true) {
-            continue;
-        }
-        walked += 1;
-        if walked > OWN_BLOCKS_MAX {
-            return false;
-        }
-        let b = &f.blocks[k];
+    call_returns::hands_back_own(f, |b| {
         let mut insns = Vec::new();
         let mut at = b.start;
         while at < b.end {
-            let Some(i) = decode(program, at) else {
-                return false;
-            };
+            let i = decode(program, at)?;
             at = next(&i);
             insns.push(i);
         }
-        let mut written = false;
-        for i in insns.iter().rev() {
-            if i.flow == Flow::Call {
-                return false;
-            }
-            if i.registers().writes.contains(&Reg::X(0)) {
-                written = true;
-                break;
-            }
-        }
-        if written {
-            continue;
-        }
-        if b.start == f.entry || preds[k].is_empty() {
-            return false;
-        }
-        todo.extend(preds[k].iter().copied());
-    }
-    true
+        Some(
+            insns
+                .iter()
+                .rev()
+                .find_map(|i| {
+                    if i.flow == Flow::Call {
+                        Some(Own::Call)
+                    } else {
+                        i.registers()
+                            .writes
+                            .contains(&Reg::X(0))
+                            .then_some(Own::Written)
+                    }
+                })
+                .unwrap_or(Own::Through),
+        )
+    })
 }
 
 /// Blocks walked back along a path from a `ret` for the result a function
@@ -320,20 +237,7 @@ const LEFT_DEPTH: u8 = 4;
 /// 32 or 64 when some return's nearest result write is a scalar `s0` or
 /// `d0` and none is `x0`; `None` otherwise.
 fn float_left(program: &Program, f: &Function) -> Option<u8> {
-    let index: std::collections::BTreeMap<u64, usize> = f
-        .blocks
-        .iter()
-        .enumerate()
-        .map(|(k, b)| (b.start, k))
-        .collect();
-    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); f.blocks.len()];
-    for (k, b) in f.blocks.iter().enumerate() {
-        for s in &b.successors {
-            if let Some(&t) = index.get(s) {
-                preds[t].push(k);
-            }
-        }
-    }
+    let preds = call_returns::preds(f);
     let mut todo: Vec<(usize, u8)> = f
         .blocks
         .iter()
@@ -387,51 +291,6 @@ fn float_left(program: &Program, f: &Function) -> Option<u8> {
     width
 }
 
-/// What the call sites of one function say about its results.
-#[derive(Debug, Clone, Default)]
-struct Facts {
-    /// What each call or tail jump into the function does with `x0`.
-    sites: Vec<Site>,
-    /// The widest read of `v0` at a call site, when one reads it.
-    float: Option<u8>,
-    /// Some caller reads `x1` before writing it after the call.
-    second: bool,
-}
-
-/// Reads what one function's callers do with its results.
-///
-/// # Arguments
-///
-/// * `program` - The image.
-/// * `analysis` - The functions and their references.
-/// * `f` - The function.
-fn facts(program: &Program, analysis: &Analysis, f: &Function) -> Facts {
-    let mut out = Facts::default();
-    for s in analysis.xrefs_to(f.entry) {
-        match s.kind {
-            RefKind::Call => {
-                out.sites
-                    .push(classify(program, analysis, s.va, s.from_entry, Reg::X(0)));
-                if let Site::Used(bits) = classify(program, analysis, s.va, s.from_entry, Reg::V(0))
-                {
-                    out.float = Some(out.float.map_or(bits, |b| b.max(bits)));
-                }
-                out.second |= matches!(
-                    classify(program, analysis, s.va, s.from_entry, Reg::X(1)),
-                    Site::Used(_)
-                );
-            }
-            RefKind::Jmp => match s.from_entry {
-                Some(from) if from == f.entry => {}
-                Some(from) => out.sites.push(Site::Tail(from)),
-                None => out.sites.push(Site::Unknown),
-            },
-            RefKind::Data | RefKind::Index | RefKind::Table | RefKind::Ptr => {}
-        }
-    }
-    out
-}
-
 /// Fills the return facts of every arm64 function from its call sites:
 /// [`Function::returns_value`], [`Function::ret_width`],
 /// [`Function::ret_float`] and [`Function::hands_back_rdx`] (here `x1`).
@@ -443,82 +302,19 @@ fn facts(program: &Program, analysis: &Analysis, f: &Function) -> Facts {
 ///   place.
 pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
     let shared: &Analysis = analysis;
-    let facts: Vec<Facts> = striped(&shared.functions, |f| facts(program, shared, f))
-        .into_iter()
-        .map(Option::unwrap_or_default)
-        .collect();
-    let float: Vec<Option<u8>> = facts
-        .iter()
-        .zip(&shared.functions)
-        .map(|(f, func)| {
-            if f.sites.is_empty() {
-                return float_left(program, func);
-            }
-            let int_read = f.sites.iter().any(|s| matches!(s, Site::Used(_)));
-            f.float
-                .filter(|_| !int_read)
-                .map(|bits| if bits <= 32 { 32 } else { 64 })
+    let regs = [Reg::X(0), Reg::V(0), Reg::X(1)];
+    let facts: Vec<Facts> = striped(&shared.functions, |f| {
+        call_returns::facts(shared, f, regs, |va, from, r| {
+            classify(program, shared, va, from, r)
         })
-        .collect();
-    let mut verdicts: Vec<Option<bool>> = facts
-        .iter()
-        .zip(&float)
-        .zip(&analysis.functions)
-        .map(|((f, float), func)| {
-            if float.is_some() || f.sites.iter().any(|s| matches!(s, Site::Used(_))) {
-                Some(true)
-            } else if f
-                .sites
-                .iter()
-                .any(|s| matches!(s, Site::Dead | Site::Tail(_)))
-            {
-                (!hands_back_own(program, func)).then_some(false)
-            } else {
-                None
-            }
-        })
-        .collect();
-    for _ in 0..PASS_ROUNDS_MAX {
-        let mut changed = false;
-        for (i, f) in facts.iter().enumerate() {
-            if verdicts[i] == Some(true) {
-                continue;
-            }
-            let handed_on = f.sites.iter().any(|site| match site {
-                Site::Tail(caller) => analysis
-                    .entry_index
-                    .get(caller)
-                    .is_none_or(|&c| verdicts[c] != Some(false) && float[c].is_none()),
-                Site::Used(_) | Site::Dead | Site::Unknown => false,
-            });
-            if handed_on {
-                verdicts[i] = Some(true);
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    for (((f, verdict), facts), float) in analysis
-        .functions
-        .iter_mut()
-        .zip(verdicts)
-        .zip(facts)
-        .zip(float)
-    {
-        f.returns_value = verdict;
-        f.ret_width = facts
-            .sites
-            .iter()
-            .filter_map(|s| match s {
-                Site::Used(bits) => Some(*bits),
-                Site::Unknown => Some(64),
-                Site::Dead | Site::Tail(_) => None,
-            })
-            .max()
-            .filter(|w| *w <= NARROW_MAX);
-        f.ret_float = float;
-        f.hands_back_rdx = facts.second;
-    }
+    })
+    .into_iter()
+    .map(Option::unwrap_or_default)
+    .collect();
+    call_returns::settle(
+        analysis,
+        facts,
+        |f| float_left(program, f),
+        |f| hands_back_own(program, f),
+    );
 }
