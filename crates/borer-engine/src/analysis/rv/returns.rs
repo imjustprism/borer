@@ -17,8 +17,8 @@
 //! A `float` or a `double` comes back in `fa0`: read there after the call,
 //! at the width the reading instruction takes, and nowhere as `a0`, it is
 //! the function's result, and so it is when a later call takes `fa0` as
-//! its first float argument. A caller reading `a1` before writing it reads a
-//! second result. A function nothing calls has no call site to ask and is
+//! its first float argument. A caller reading `a1` before writing it, or
+//! a later call taking it, reads a second result. A function nothing calls has no call site to ask and is
 //! left unknown. A result is read at the register's full width: no read is
 //! taken as evidence of a narrow one.
 
@@ -107,8 +107,8 @@ fn unmodeled(i: &Insn) -> bool {
 /// Returns what a call to `target` does with `r` as an argument.
 ///
 /// The import a stub reaches reads `a0` when the library says it takes an
-/// argument; whether it reads `fa0` the stub does not say, so that is
-/// unknown. A function reads `r` when it does before writing it in its
+/// argument; whether it reads `a1` or `fa0` the stub does not say, so
+/// that is unknown. A function reads `r` when it does before writing it in its
 /// first instructions, at that instruction's width.
 ///
 /// # Arguments
@@ -117,7 +117,7 @@ fn unmodeled(i: &Insn) -> bool {
 /// * `analysis` - The functions.
 /// * `xlen` - The register width.
 /// * `target` - The callee, when the call names one.
-/// * `r` - The register: `a0` or `fa0`.
+/// * `r` - The register: `a0`, `a1` or `fa0`.
 ///
 /// # Returns
 ///
@@ -187,13 +187,7 @@ fn classify(
     let Some(after) = decode(program, site, xlen).map(|i| i.next()) else {
         return Site::Unknown;
     };
-    let passes = |t: Option<u64>| {
-        if r == A1 {
-            Site::Dead
-        } else {
-            reads_first_argument(program, analysis, xlen, t, r)
-        }
-    };
+    let passes = |t: Option<u64>| reads_first_argument(program, analysis, xlen, t, r);
     let mut paths: Vec<(u64, usize)> = vec![(after, 0)];
     let mut found: Vec<Site> = Vec::new();
     let mut forks = 1usize;

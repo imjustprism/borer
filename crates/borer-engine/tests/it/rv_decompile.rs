@@ -581,3 +581,56 @@ fn a_result_a_branching_callee_may_read_is_not_dropped() {
     let forward = texts.first().expect("the forwarder");
     assert!(!forward.contains("void forward("), "{forward}");
 }
+/// A caller reading `a1` after the call, the high word of a pair, uses the
+/// result though it overwrites `a0`: the callee is not void.
+#[test]
+fn a_read_of_the_second_result_word_keeps_the_result() {
+    let code = [
+        (0x0000_0013, 4), // ASM: nop
+        (0x01c0_00ef, 4), // ASM: jal 0x10020
+        (0x0005_8613, 4), // ASM: mv a2, a1
+        (0x0000_0513, 4), // ASM: li a0, 0
+        (0x0000_8067, 4), // ASM: ret
+        (0x0000_0013, 4), // ASM: nop
+        (0x0000_0013, 4), // ASM: nop
+        (0x0000_0013, 4), // ASM: nop
+        (0x0100_00ef, 4), // ASM: jal 0x10030
+        (0x0000_8067, 4), // ASM: ret
+        (0x0000_0013, 4), // ASM: nop
+        (0x0000_0013, 4), // ASM: nop
+        (0x0030_0513, 4), // ASM: li a0, 3
+        (0x0000_8067, 4), // ASM: ret
+    ];
+    let texts = decompiled_named(&code, &[("forward", 0x20), ("three", 0x30)]);
+    let forward = texts.first().expect("the forwarder");
+    assert!(!forward.contains("void forward("), "{forward}");
+}
+
+/// A second result word the next call takes in `a1` is used, though the
+/// caller overwrites `a0` first: the callee is not void.
+#[test]
+fn a_second_result_word_passed_on_keeps_the_result() {
+    let code = [
+        (0x0000_0013, 4), // ASM: nop
+        (0x01c0_00ef, 4), // ASM: jal 0x10020
+        (0x0000_0513, 4), // ASM: li a0, 0
+        (0x0340_00ef, 4), // ASM: jal 0x10040
+        (0x0000_8067, 4), // ASM: ret
+        (0x0000_0013, 4), // ASM: nop
+        (0x0000_0013, 4), // ASM: nop
+        (0x0000_0013, 4), // ASM: nop
+        (0x0100_00ef, 4), // ASM: jal 0x10030
+        (0x0000_8067, 4), // ASM: ret
+        (0x0000_0013, 4), // ASM: nop
+        (0x0000_0013, 4), // ASM: nop
+        (0x0030_0513, 4), // ASM: li a0, 3
+        (0x0000_8067, 4), // ASM: ret
+        (0x0000_0013, 4), // ASM: nop
+        (0x0000_0013, 4), // ASM: nop
+        (0x0005_8613, 4), // ASM: mv a2, a1
+        (0x0000_8067, 4), // ASM: ret
+    ];
+    let texts = decompiled_named(&code, &[("forward", 0x20), ("three", 0x30), ("take", 0x40)]);
+    let forward = texts.first().expect("the forwarder");
+    assert!(!forward.contains("void forward("), "{forward}");
+}

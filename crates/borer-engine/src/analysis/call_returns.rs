@@ -3,12 +3,13 @@
 //!
 //! Each instruction set classifies its own call sites ([`Site`]) and the
 //! writes before a function's returns ([`Own`]); the verdicts are settled
-//! here the same way for both. A read of the result register after any
-//! call means the function returns a value; callers that all discard it
-//! mean it returns nothing, unless every return hands back a value the
-//! function itself put there ([`hands_back_own`]). A site that hands the
-//! result on through its caller's return counts as the caller's verdict,
-//! run to a fixpoint so a chain of wrappers settles from its far end.
+//! here the same way for both. A read of the result register, or of the
+//! second one, after any call means the function returns a value;
+//! callers that all discard it mean it returns nothing, unless every
+//! return hands back a value the function itself put there
+//! ([`hands_back_own`]). A site that hands the result on through its
+//! caller's return counts as the caller's verdict, run to a fixpoint so a
+//! chain of wrappers settles from its far end.
 
 use crate::analysis::{Analysis, BasicBlock, BlockTerm, Function, RefKind};
 
@@ -238,7 +239,7 @@ pub(crate) fn settle(
         .zip(&float)
         .zip(&analysis.functions)
         .map(|((f, float), func)| {
-            if float.is_some() || f.sites.iter().any(|s| matches!(s, Site::Used(_))) {
+            if float.is_some() || f.second || f.sites.iter().any(|s| matches!(s, Site::Used(_))) {
                 Some(true)
             } else if f
                 .sites
