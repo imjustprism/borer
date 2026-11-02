@@ -269,6 +269,22 @@ pub fn pass_of(spelled: &str, word: u8, format: BinaryFormat) -> Option<Pass> {
     }
 }
 
+/// Tells whether a declared type is a pointer to a tagged struct
+/// (`struct passwd *`), which a variable holding it may be declared as
+/// while the struct's fields stay unknown.
+///
+/// # Arguments
+///
+/// * `ty` - The type as the library spells it.
+#[must_use]
+pub(crate) fn struct_pointer(ty: &str) -> bool {
+    ty.strip_prefix("struct ")
+        .and_then(|t| t.strip_suffix(" *"))
+        .is_some_and(|tag| {
+            !tag.is_empty() && tag.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        })
+}
+
 /// Returns the declaration the library holds for a function a binary of
 /// `format` calls.
 ///

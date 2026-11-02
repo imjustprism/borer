@@ -217,7 +217,10 @@ fn rewrite_local_declarations(
     if let Some(i) = at {
         let mut added: Vec<String> = ptrs
             .iter()
-            .map(|(name, ty)| format!("{ty} {name};"))
+            .map(|(name, ty)| {
+                ty.strip_suffix(" *")
+                    .map_or_else(|| format!("{ty} {name};"), |b| format!("{b} *{name};"))
+            })
             .chain(
                 arrays
                     .iter()
@@ -559,7 +562,8 @@ fn check_chain_write(
 
 /// How an assigned right-hand side relates to a library pointer type.
 enum RhsType {
-    /// A known library pointer (`"char*"` or `"FILE*"`).
+    /// A known library pointer (`"char*"`, `"FILE*"` or a tagged struct's,
+    /// `"struct passwd *"`).
     Known(&'static str),
     /// A null constant, unknown call, or untyped identifier compatible with a pointer.
     Neutral,
@@ -634,6 +638,7 @@ fn classify_rhs(lines: &[String], rhs: &str, depth: u8, before: usize) -> RhsTyp
             "char *" | "const char *" => RhsType::Known("char*"),
             "FILE *" => RhsType::Known("FILE*"),
             "void *" => RhsType::Neutral,
+            t if typelib::struct_pointer(t) => RhsType::Known(t),
             _ => RhsType::NonPointer,
         };
     }
@@ -1125,5 +1130,30 @@ mod tests {
         );
         assert!(joined.contains("char* local_18;"), "{joined}");
         assert!(joined.contains("char* local_20;"), "{joined}");
+    }
+
+    /// A stack local holding only a library's struct pointer, handed on
+    /// whole, takes the library's type; one whose fields are read keeps
+    /// its word.
+    #[test]
+    fn a_library_struct_pointer_types_its_local() {
+        let mut lines: Vec<String> = [
+            "// signature: uint32_t f(char *a1)",
+            "uint64_t local_18, local_10;",
+            "",
+            "local_10 = getpwnam(a1);",
+            "local_18 = getgrnam(a1);",
+            "if (local_10 == 0) {",
+            "  return 1;",
+            "}",
+            "return *(uint32_t*)(local_18 + 0x10) + endpw(local_10);",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        assert!(refine_locals(&mut lines));
+        let joined = lines.join("\n");
+        assert!(joined.contains("struct passwd *local_10;"), "{joined}");
+        assert!(joined.contains("uint64_t local_18;"), "{joined}");
     }
 }

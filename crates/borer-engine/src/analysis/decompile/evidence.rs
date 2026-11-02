@@ -205,7 +205,10 @@ pub(super) fn name_vars(text: &str, word: u8, format: Option<BinaryFormat>) -> S
 /// that declared result, it is declared at the machine word (a narrower
 /// declaration says its uses read part of it), and every read hands the
 /// value on whole (an argument, a return, an assignment, a test against
-/// zero), where a pointer to nothing and a word read the same.
+/// zero), where a pointer to nothing and a word read the same. A pointer
+/// to a library's tagged struct (`struct passwd *` from `getpwnam`) types
+/// the same way: no line reads its fields, so their layout is never
+/// claimed.
 ///
 /// # Arguments
 ///
@@ -252,7 +255,7 @@ fn retype(text: &str, word: u8, formats: &[BinaryFormat]) -> Option<String> {
                 let ret = def
                     .and_then(|(_, rhs)| rhs.split_once('('))
                     .and_then(|(callee, _)| any_decl(callee, formats).map(|(d, _)| d.ret))
-                    .filter(|r| VOID_POINTERS.contains(r));
+                    .filter(|r| VOID_POINTERS.contains(r) || typelib::struct_pointer(r));
                 match (ret, found.get(w).copied().flatten()) {
                     (Some(r), None) => {
                         found.insert(w, Some(r));
@@ -1101,6 +1104,26 @@ HANDLE hProcessHeap;"
         let out = name_vars(&t, WORD, None);
         assert!(out.contains("uint64_t var2;\nHANDLE hProcess;"), "{out}");
         assert!(!out.contains("HANDLE Process;"), "{out}");
+    }
+
+    /// A variable holding only a library's struct pointer, read whole, is
+    /// declared by it; one whose field is read keeps its word.
+    #[test]
+    fn a_library_struct_pointer_types_its_variable() {
+        let t = function(
+            &["uint64_t var1, var2;"],
+            &[
+                "var1 = getpwnam(a1);",
+                "var2 = getgrnam(a1);",
+                "if (var1 == 0) {",
+                "  return 0;",
+                "}",
+                "return *(uint32_t*)(var2 + 0x10);",
+            ],
+        );
+        let out = name_vars(&t, WORD, Some(BinaryFormat::Elf));
+        assert!(out.contains("struct passwd *var1;"), "{out}");
+        assert!(out.contains("uint64_t var2;"), "{out}");
     }
 
     /// A constant folded into a declared API's call, or guessed as a
