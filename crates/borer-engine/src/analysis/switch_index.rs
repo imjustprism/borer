@@ -353,10 +353,10 @@ impl Trace {
         });
         match (i.mnemonic(), dst) {
             (Mnemonic::Cmp | Mnemonic::Sub, Some(h)) if check_bound(i, next).is_some() => {
-                let mut v = self.read(h);
+                let v = self.read(h);
                 if i.mnemonic() == Mnemonic::Sub {
-                    v.off = v.off.wrapping_sub(imm.unwrap_or(0));
-                    self.held.insert(h, v);
+                    let off = v.off.wrapping_sub(imm.unwrap_or(0));
+                    self.held.insert(h, Val { off, ..v });
                 }
                 if next.is_some_and(|j| below_on_path(j, after)) {
                     self.bounds.push(Check {
@@ -618,6 +618,28 @@ mod tests {
             0xff, 0xe0, // ASM: jmp rax
         ];
         assert_eq!(bound(code), Some(4));
+    }
+
+    /// An unoptimized build spills the masked index, reloads it, checks the
+    /// reload with `sub` and `ja`, and indexes the table with a second
+    /// reload of the same spill: the check bounds the table, not the mask.
+    #[test]
+    fn a_check_of_a_spilled_index_bounds_its_reload() {
+        let code: &[u8] = &[
+            0xc1, 0xe8, 0x04, // ASM: shr eax,4
+            0x83, 0xe0, 0x1f, // ASM: and eax,0x1f
+            0x89, 0x84, 0x24, 0x98, 0x00, 0x00, 0x00, // ASM: mov [rsp+0x98],eax
+            0x8b, 0x84, 0x24, 0x98, 0x00, 0x00, 0x00, // ASM: mov eax,[rsp+0x98]
+            0x48, 0x89, 0x84, 0x24, 0x88, 0x00, 0x00, 0x00, // ASM: mov [rsp+0x88],rax
+            0x48, 0x83, 0xe8, 0x1c, // ASM: sub rax,0x1c
+            0x77, 0x18, // ASM: ja +0x18
+            0x48, 0x8b, 0x8c, 0x24, 0x88, 0x00, 0x00, 0x00, // ASM: mov rcx,[rsp+0x88]
+            0x48, 0x8d, 0x05, 0xa8, 0x8d, 0xed, 0x00, // ASM: lea rax,[rip+X]
+            0x48, 0x63, 0x0c, 0x88, // ASM: movsxd rcx,[rax+rcx*4]
+            0x48, 0x01, 0xc8, // ASM: add rax,rcx
+            0xff, 0xe0, // ASM: jmp rax
+        ];
+        assert_eq!(bound(code), Some(29));
     }
 
     /// LLVM checks a rebased byte copy and then rebases the index itself.
