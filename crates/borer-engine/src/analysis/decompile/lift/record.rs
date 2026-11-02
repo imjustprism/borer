@@ -118,6 +118,9 @@ pub(in crate::analysis::decompile) enum ArgAt {
     A64(crate::isa::a64::Reg),
     /// In this ARM32 register: a core register, a single or a double.
     A32(crate::isa::a32::Reg),
+    /// In this RISC-V register: an integer register whole, a float
+    /// register's value.
+    Rv(crate::isa::rv::Reg),
 }
 
 /// How the text shows a call.

@@ -913,27 +913,8 @@ fn step_frame_mem(i: &Insn, frame: &mut BTreeMap<Reg, OffsetSet>) -> bool {
 /// * `ctx` - The function's context.
 /// * `f` - The function.
 fn graph(ctx: &Ctx<'_>, f: &Function) -> (Vec<Vec<Insn>>, Vec<Vec<usize>>, usize) {
-    let idx: BTreeMap<u64, usize> = f
-        .blocks
-        .iter()
-        .enumerate()
-        .map(|(i, b)| (b.start, i))
-        .collect();
-    let succs = f
-        .blocks
-        .iter()
-        .map(|b| {
-            b.successors
-                .iter()
-                .filter_map(|s| idx.get(s).copied())
-                .collect()
-        })
-        .collect();
-    (
-        decode_blocks(ctx.program, f),
-        succs,
-        idx.get(&f.entry).copied().unwrap_or(0),
-    )
+    let (succs, entry) = lift::edges(f);
+    (decode_blocks(ctx.program, f), succs, entry)
 }
 
 /// The float mask of a parameter list: a bit per position held in a VFP

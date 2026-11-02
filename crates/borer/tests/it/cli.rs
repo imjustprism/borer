@@ -1672,3 +1672,49 @@ fn cli_maps_a_dump_at_stated_regions() {
         "{stray_refusal}"
     );
 }
+
+/// `verify` checks RISC-V code against the RISC-V machine, and refuses the
+/// modes it does not run for RISC-V instead of checking nothing.
+///
+/// The fixture is a 64-bit `EM_RISCV` executable of one `PT_LOAD` segment
+/// holding `add a0, a0, a1; ret` at its entry.
+#[test]
+fn cli_verifies_risc_v_code() {
+    const ENTRY: u64 = 0x1_0078;
+    let mut bytes = vec![0u8; 0x78];
+    bytes[..8].copy_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1, 1, 0]);
+    let mut put = |at: usize, v: u64, n: usize| {
+        bytes[at..at + n].copy_from_slice(&v.to_le_bytes()[..n]);
+    };
+    put(0x10, 2, 2);
+    put(0x12, 243, 2);
+    put(0x14, 1, 4);
+    put(0x18, ENTRY, 8);
+    put(0x20, 0x40, 8);
+    put(0x34, 64, 2);
+    put(0x36, 56, 2);
+    put(0x38, 1, 2);
+    put(0x3a, 64, 2);
+    put(0x40, 1, 4);
+    put(0x44, 5, 4);
+    put(0x50, 0x1_0000, 8);
+    put(0x58, 0x1_0000, 8);
+    put(0x60, 0x80, 8);
+    put(0x68, 0x80, 8);
+    put(0x70, 0x1000, 8);
+    bytes.extend_from_slice(&0x00b5_0533u32.to_le_bytes()); // ASM: add a0, a0, a1
+    bytes.extend_from_slice(&0x0000_8067u32.to_le_bytes()); // ASM: ret
+    let path = std::env::temp_dir().join(format!("borer_riscv_verify_{}.elf", std::process::id()));
+    std::fs::write(&path, &bytes).expect("the fixture is writable");
+    let path = path.to_string_lossy().to_string();
+
+    let (ok, out) = run_all(&["verify", &path, &format!("{ENTRY:#x}")]);
+    assert!(
+        ok && out.starts_with("# verified 1 functions, 1 blocks: 1 checked"),
+        "{out}"
+    );
+    let (ok, out) = run_all(&["verify", &path, &format!("{ENTRY:#x}"), "1", "1", "text"]);
+    assert!(!ok && out.contains("block by block only"), "{out}");
+
+    drop(std::fs::remove_file(&path));
+}

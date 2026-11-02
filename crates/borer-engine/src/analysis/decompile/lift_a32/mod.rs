@@ -37,11 +37,9 @@ pub(in crate::analysis::decompile) use shape::{
     writes_result,
 };
 
-use std::collections::btree_map::Entry;
-
 use super::Ctx;
 use super::expr::{Expr, Flags, Key, Op, fold};
-use super::lift::{BlockFacts, BlockOut, Branch, EffectKind, Env, Exec, LiveFn, Pass, PhiFn, pack};
+use super::lift::{BlockFacts, BlockOut, Branch, EffectKind, Env, Exec, LiveFn, Pass, PhiFn};
 use crate::analysis::a32::{decode as decode_at, guarded, skip};
 use crate::analysis::{BlockTerm, Function};
 use crate::fxmap::FxHashMap;
@@ -243,14 +241,7 @@ pub(in crate::analysis::decompile) fn need_after(
     out: &FxHashMap<Key, u8>,
 ) -> Vec<FxHashMap<Key, u8>> {
     let effects: Vec<super::lift::Effects> = instrs.iter().map(|i| effects(ctx, i)).collect();
-    let mut need = super::lift::need_from(&effects, out);
-    for (n, (reads, _)) in need.iter_mut().zip(&effects) {
-        for &(k, lane) in reads {
-            let held = n.entry(k).or_insert(lane);
-            *held = (*held).max(lane);
-        }
-    }
-    need
+    super::lift::need_with_reads(&effects, out)
 }
 
 /// Counts the instructions of a block that render as statements.
@@ -643,20 +634,7 @@ impl Lift<'_, '_> {
         } else {
             Flags::Unknown
         };
-        if ex.emit
-            && let Entry::Vacant(first) = ex.ctx.effects.entry(start)
-        {
-            let mut packed = Vec::new();
-            pack(&ex.effects, start, &mut packed);
-            first.insert(packed);
-        }
-        out.lines = ex.lines;
-        out.effects = ex.effects;
-        out.slot_use = ex.slot_use;
-        out.slot_def = ex.slot_def;
-        out.call_uses = ex.call_uses;
-        out.unmodeled = ex.unmodeled;
-        out
+        ex.close(out, Some(start))
     }
 }
 

@@ -9,10 +9,11 @@
 //! parameters, and that is what [`Lifter`] names. [`X86`] hands every
 //! question to the x86 functions the pipeline called before it was generic,
 //! so the compiled x86 path is the same code; [`A64`] hands it to the arm64
-//! lifter ([`lift_a64`]) and the arm64 procedure call standard.
+//! lifter ([`lift_a64`]) and the arm64 procedure call standard; [`A32`]
+//! and [`Rv`] to the ARM32 and RISC-V lifters likewise.
 
 use super::*;
-use crate::isa::{a32, a64};
+use crate::isa::{a32, a64, rv};
 
 /// What the decompiler's pipeline asks of an instruction set.
 ///
@@ -256,11 +257,13 @@ pub(super) trait Lifter {
     /// * `succs` - Successor block indices per block.
     /// * `declared` - The signature's return type when one is known.
     /// * `analysis` - The functions a jump out of the function may enter.
+    /// * `bitness` - The register width: 32 or 64.
     fn ret_lane(
         code: &[Vec<Self::Insn>],
         succs: &[Vec<usize>],
         declared: Option<&str>,
         analysis: &Analysis,
+        bitness: u32,
     ) -> u8;
 
     /// Infers the pointer and floating-point parameters from how the body
@@ -407,6 +410,7 @@ impl Lifter for X86 {
         succs: &[Vec<usize>],
         declared: Option<&str>,
         analysis: &Analysis,
+        _bitness: u32,
     ) -> u8 {
         lift::ret_lane(code, succs, declared, analysis)
     }
@@ -547,6 +551,7 @@ impl Lifter for A64 {
         succs: &[Vec<usize>],
         declared: Option<&str>,
         _analysis: &Analysis,
+        _bitness: u32,
     ) -> u8 {
         lift_a64::ret_lane(code, succs, declared)
     }
@@ -681,6 +686,7 @@ impl Lifter for A32 {
         _succs: &[Vec<usize>],
         declared: Option<&str>,
         _analysis: &Analysis,
+        _bitness: u32,
     ) -> u8 {
         lift_a32::ret_lane(code, declared)
     }
@@ -700,5 +706,140 @@ impl Lifter for A32 {
 
     fn result_names(_bitness: u32) -> (&'static str, &'static str) {
         ("r0", "r1")
+    }
+}
+
+/// RISC-V (RV32 and RV64), decoded by [`crate::isa::rv`] and lifted by
+/// [`lift_rv`] under the RISC-V calling convention.
+pub(super) struct Rv;
+
+impl Lifter for Rv {
+    type Insn = rv::Insn;
+
+    fn decode_blocks(ctx: &Ctx<'_>, f: &Function) -> Vec<Vec<rv::Insn>> {
+        lift_rv::decode_blocks(ctx.program, f)
+    }
+
+    fn start(i: &rv::Insn) -> u64 {
+        i.va
+    }
+
+    fn exec_block(
+        ctx: &mut Ctx<'_>,
+        instrs: &[rv::Insn],
+        _prev: Option<&[rv::Insn]>,
+        env: &mut Env,
+        pass: lift::Pass,
+        phi: Option<(&lift::PhiFn<'_>, &lift::LiveFn<'_>)>,
+        facts: BlockFacts<'_>,
+    ) -> BlockOut {
+        lift_rv::exec_block_rv(ctx, instrs, env, pass, phi, facts)
+    }
+
+    fn reads_inherited_flags(_instrs: &[rv::Insn]) -> bool {
+        false
+    }
+
+    fn join_reader_cc(_instrs: &[rv::Insn]) -> Option<Cc> {
+        None
+    }
+
+    fn live_in(
+        ctx: &Ctx<'_>,
+        code: &[Vec<rv::Insn>],
+        succs: &[Vec<usize>],
+    ) -> Vec<FxHashMap<Key, u8>> {
+        let effects: Vec<Vec<lift::Effects>> = code
+            .iter()
+            .map(|b| b.iter().map(|i| lift_rv::effects(ctx, i)).collect())
+            .collect();
+        lift::live_from(&effects, succs)
+    }
+
+    fn need_after(
+        ctx: &Ctx<'_>,
+        instrs: &[rv::Insn],
+        out: &FxHashMap<Key, u8>,
+    ) -> Vec<FxHashMap<Key, u8>> {
+        lift_rv::need_after(ctx, instrs, out)
+    }
+
+    fn after(_code: &[Vec<rv::Insn>], _s: usize) -> Option<Instruction> {
+        None
+    }
+
+    fn prologue_block(ctx: &Ctx<'_>, _code: &[Vec<rv::Insn>], b: usize) -> bool {
+        b == ctx.entry_block
+    }
+
+    fn body_len(instrs: &[rv::Insn]) -> usize {
+        lift_rv::body_len(instrs)
+    }
+
+    fn same_test(a: &[rv::Insn], b: &[rv::Insn]) -> bool {
+        lift_rv::same_test(a, b)
+    }
+
+    fn seh_frame(_ctx: &Ctx<'_>, _code: &[Vec<rv::Insn>]) -> bool {
+        false
+    }
+
+    fn go_check(
+        _ctx: &Ctx<'_>,
+        _entry: u64,
+        _code: &[Vec<rv::Insn>],
+        _idx: &BTreeMap<u64, usize>,
+    ) -> Option<(u64, String)> {
+        None
+    }
+
+    fn shape(
+        ctx: &mut Ctx<'_>,
+        f: &Function,
+        code: &[Vec<rv::Insn>],
+        succs: &[Vec<usize>],
+        entry: usize,
+    ) -> std::sync::Arc<Shape> {
+        lift_rv::callee_shape(ctx, f.entry)
+            .unwrap_or_else(|| std::sync::Arc::new(lift_rv::shape(ctx, f, code, succs, entry)))
+    }
+
+    fn entry_env(ctx: &Ctx<'_>) -> Env {
+        lift_rv::entry_env(ctx)
+    }
+
+    fn writes_result(ctx: &Ctx<'_>, code: &[Vec<rv::Insn>]) -> bool {
+        lift_rv::writes_result(ctx, code)
+    }
+
+    fn lanes(_code: &[Vec<rv::Insn>], _ret_float: Option<u8>) -> lanes::Lanes {
+        lanes::Lanes::default()
+    }
+
+    fn ret_lane(
+        _code: &[Vec<rv::Insn>],
+        _succs: &[Vec<usize>],
+        declared: Option<&str>,
+        _analysis: &Analysis,
+        bitness: u32,
+    ) -> u8 {
+        lift_rv::ret_lane(declared, bitness)
+    }
+
+    fn param_types(
+        ctx: &Ctx<'_>,
+        code: &[Vec<rv::Insn>],
+        _succs: &[Vec<usize>],
+        entry: usize,
+    ) -> BTreeMap<usize, String> {
+        lift_rv::param_types(ctx, code, entry)
+    }
+
+    fn witness(code: Vec<Vec<rv::Insn>>) -> replay::Code {
+        replay::Code::Rv(code)
+    }
+
+    fn result_names(_bitness: u32) -> (&'static str, &'static str) {
+        ("a0", "a1")
     }
 }

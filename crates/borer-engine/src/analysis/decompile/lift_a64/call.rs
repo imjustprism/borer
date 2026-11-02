@@ -22,7 +22,7 @@
 
 use super::super::abi::{self, a64 as a64_abi};
 use super::super::expr::{Expr, Key, Ty};
-use super::super::lift::{ArgAt, Callee, EffectKind, Returns, Shown, SlotUse, stated_returns};
+use super::super::lift::{ArgAt, Callee, EffectKind, Returns, Shown, stated_returns};
 use super::Lift;
 use super::shape::{self, FLOAT_ARGS, INT_ARGS, RESULT_REG, arg_reg};
 use crate::isa::a64::{Insn, Opnd, Reg};
@@ -339,20 +339,7 @@ impl Lift<'_, '_> {
         }
         self.ex.env.fresh.clear();
         self.ex.flags = super::super::expr::Flags::Unknown;
-        let written = self
-            .ex
-            .slot_def
-            .iter()
-            .flat_map(|(&o, &b)| o..o.saturating_add(i64::from(b / 8).max(1)))
-            .collect();
-        match (self.ex.env.sp, self.ex.ctx.escape_floor) {
-            (Some(_), Some(f)) => self
-                .ex
-                .call_uses
-                .push((SlotUse::Window(f, i64::MAX), written)),
-            (Some(_), None) => {}
-            (None, _) => self.ex.call_uses.push((SlotUse::All, written)),
-        }
+        self.ex.note_call_slots();
     }
 
     /// Lifts a jump out of the function as a tail call: the callee takes
@@ -367,18 +354,7 @@ impl Lift<'_, '_> {
         let (text, reached) = self.callee_named(&callee);
         let sig = self.signature(Some(target), reached);
         let args = self.arguments(sig, true);
-        if self.ex.emit {
-            let names = self.ex.names();
-            let mut rendered: Vec<String> = args.iter().map(|(_, e)| e.render(&names)).collect();
-            self.ex.name_arguments(reached, &mut rendered);
-            let call = abi::call_text(&text, &rendered);
-            if !self.ex.ctx.unused_result && sig.returns != Returns::Nothing {
-                self.ex.lines.push(format!("return {call};"));
-            } else {
-                self.ex.lines.push(format!("{call};"));
-                self.ex.lines.push("return;".to_owned());
-            }
-        }
+        self.ex.emit_tail(&text, &args, reached, sig.returns);
         self.ex
             .record_call(callee, args, None, None, false, Shown::Tail);
     }

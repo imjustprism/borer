@@ -1126,7 +1126,11 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             let mir = args.get(5).is_some_and(|m| m == "mir");
             let a64 = !text && s.program.arch.isa() == Some(Isa::A64);
             let a32 = !text && s.program.arch.isa() == Some(Isa::A32);
-            let a = s.analysis(if a64 || a32 {
+            let rv = matches!(s.program.arch.isa(), Some(Isa::Rv(_)));
+            if rv && (mir || text) {
+                bail!("risc-v code is checked block by block only; drop `mir` or `text`");
+            }
+            let a = s.analysis(if a64 || a32 || rv {
                 Feature::Discover
             } else {
                 Feature::Decompile
@@ -1161,9 +1165,17 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 }
                 return Ok(());
             }
-            if a32 {
-                let v = decompile::verify_a32::verify(&s.program, &a, &entries, seed);
-                print!("{}", decompile::verify_a32::verify_tsv(&v));
+            if a32 || rv {
+                let (v, table) = if rv {
+                    let v = decompile::verify_rv::verify(&s.program, &a, &entries, seed);
+                    let table = decompile::verify_rv::verify_tsv(&v);
+                    (v, table)
+                } else {
+                    let v = decompile::verify_a32::verify(&s.program, &a, &entries, seed);
+                    let table = decompile::verify_a32::verify_tsv(&v);
+                    (v, table)
+                };
+                print!("{table}");
                 if !v.mismatches.is_empty() {
                     bail!("the lifter and the emulator disagree; see the table above");
                 }

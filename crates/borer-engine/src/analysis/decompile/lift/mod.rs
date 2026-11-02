@@ -28,6 +28,7 @@ mod interfaces;
 mod kernel;
 mod pack;
 mod record;
+mod shared;
 mod state;
 mod stated;
 mod step;
@@ -38,6 +39,7 @@ pub(in crate::analysis::decompile) use conv::*;
 pub(in crate::analysis::decompile) use effects::*;
 pub(in crate::analysis::decompile) use pack::*;
 pub(in crate::analysis::decompile) use record::*;
+pub(in crate::analysis::decompile) use shared::*;
 pub(in crate::analysis::decompile) use state::try_level_store;
 pub(in crate::analysis::decompile) use stated::*;
 
@@ -271,7 +273,8 @@ impl Env {
                     | Key::Tmp(_)
                     | Key::Param(_)
                     | Key::A64(_)
-                    | Key::A32(_) => true,
+                    | Key::A32(_)
+                    | Key::Rv(_) => true,
                 }
         });
         self.classes.retain(|k, v| other.classes.get(k) == Some(v));
@@ -280,7 +283,7 @@ impl Env {
         self.tls_arrays.retain(|k| other.tls_arrays.contains(k));
         self.tls_blocks.retain(|k| other.tls_blocks.contains(k));
         self.narrow.retain(|k, v| match (k, other.narrow.get(k)) {
-            (Key::A64(_) | Key::A32(_), Some(w)) => {
+            (Key::A64(_) | Key::A32(_) | Key::Rv(_), Some(w)) => {
                 *v = (*v).max(*w);
                 true
             }
@@ -333,10 +336,13 @@ impl Env {
     fn set(&mut self, k: Key, v: Expr) {
         self.unset.remove(&k);
         self.clobbered.remove(&k);
-        if matches!(k, Key::Reg(_) | Key::A64(_) | Key::A32(_)) {
+        if matches!(k, Key::Reg(_) | Key::A64(_) | Key::A32(_) | Key::Rv(_)) {
             self.touched.insert(k);
         }
-        if matches!(k, Key::Reg(_) | Key::Slot(_) | Key::A64(_) | Key::A32(_)) {
+        if matches!(
+            k,
+            Key::Reg(_) | Key::Slot(_) | Key::A64(_) | Key::A32(_) | Key::Rv(_)
+        ) {
             self.fresh.insert(k);
         }
         let bits = match &v {
@@ -758,6 +764,36 @@ pub(super) struct Exec<'c, 'a> {
 }
 
 impl<'c, 'a> Exec<'c, 'a> {
+    /// Ends a block's lifting: records what its statements do the first
+    /// time the block is lifted, and moves its lines, effects, slot facts
+    /// and unmodeled count into what the block hands back.
+    ///
+    /// # Arguments
+    ///
+    /// * `out` - What the block found so far.
+    /// * `start` - The block's first address, `None` for an empty block.
+    pub(in crate::analysis::decompile) fn close(
+        self,
+        mut out: BlockOut,
+        start: Option<u64>,
+    ) -> BlockOut {
+        if self.emit
+            && let Some(start) = start
+            && let std::collections::btree_map::Entry::Vacant(first) = self.ctx.effects.entry(start)
+        {
+            let mut packed = Vec::new();
+            pack(&self.effects, start, &mut packed);
+            first.insert(packed);
+        }
+        out.lines = self.lines;
+        out.effects = self.effects;
+        out.slot_use = self.slot_use;
+        out.slot_def = self.slot_def;
+        out.call_uses = self.call_uses;
+        out.unmodeled = self.unmodeled;
+        out
+    }
+
     /// Builds the executor of one block: nothing written yet, the flags
     /// the predecessors left taken out of the environment, and the block's
     /// facts in force.
@@ -998,21 +1034,7 @@ pub(super) fn exec_block(
         ex.record(EffectKind::Switch(idx.clone()));
     }
     out.flag_src = ex.flag_src;
-    out.lines = ex.lines;
-    if ex.emit
-        && let Some(start) = instrs.first().map(Instruction::ip)
-        && let std::collections::btree_map::Entry::Vacant(first) = ex.ctx.effects.entry(start)
-    {
-        let mut packed = Vec::new();
-        pack(&ex.effects, start, &mut packed);
-        first.insert(packed);
-    }
-    out.effects = ex.effects;
-    out.slot_use = ex.slot_use;
-    out.slot_def = ex.slot_def;
-    out.call_uses = ex.call_uses;
-    out.unmodeled = ex.unmodeled;
-    out
+    ex.close(out, instrs.first().map(Instruction::ip))
 }
 
 /// Strips the upper-bit merge from a byte or word write into the return register.
@@ -1214,6 +1236,7 @@ fn integer_bits(v: &Expr) -> bool {
         Expr::Var(Key::Reg(r)) => r.is_gpr(),
         Expr::Var(Key::A64(r)) => matches!(r, crate::isa::a64::Reg::X(_)),
         Expr::Var(Key::A32(r)) => matches!(r, crate::isa::a32::Reg::R(_)),
+        Expr::Var(Key::Rv(r)) => matches!(r, crate::isa::rv::Reg::X(_)),
         Expr::Var(Key::Param(_) | Key::Slot(_) | Key::Global(..) | Key::Tmp(_))
         | Expr::Str(_)
         | Expr::Sp(_)

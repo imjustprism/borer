@@ -1063,9 +1063,12 @@ impl Exec<'_, '_> {
         let mut held: Vec<Key> = if self.emit {
             values
                 .iter()
-                .filter_map(|(at, _)| match at {
-                    ArgAt::Reg(r) => Some(Key::Reg(*r)),
-                    ArgAt::Stack(..) | ArgAt::Operand | ArgAt::A64(_) | ArgAt::A32(_) => None,
+                .filter_map(|(at, _)| {
+                    if let ArgAt::Reg(r) = at {
+                        Some(Key::Reg(*r))
+                    } else {
+                        None
+                    }
                 })
                 .collect()
         } else {
@@ -1116,15 +1119,7 @@ impl Exec<'_, '_> {
             .env
             .vals
             .keys()
-            .filter_map(|k| match k {
-                Key::Slot(o) => Some(*o),
-                Key::Reg(_)
-                | Key::Global(..)
-                | Key::Tmp(_)
-                | Key::Param(_)
-                | Key::A64(_)
-                | Key::A32(_) => None,
-            })
+            .filter_map(|k| if let Key::Slot(o) = k { Some(*o) } else { None })
             .filter(|o| {
                 !self.rendered_arg(*o, rendered)
                     && !self
@@ -2082,7 +2077,7 @@ impl Exec<'_, '_> {
                 let stable = |k: Key| match k {
                     Key::Param(_) | Key::Global(..) | Key::Tmp(_) => true,
                     Key::Slot(o) => !self.exposed(o),
-                    Key::Reg(_) | Key::A64(_) | Key::A32(_) => {
+                    Key::Reg(_) | Key::A64(_) | Key::A32(_) | Key::Rv(_) => {
                         self.env.vals.get(&k) == Some(&Expr::Var(k))
                     }
                 };
@@ -2853,7 +2848,7 @@ impl Exec<'_, '_> {
     pub(super) fn class_of_key(&self, key: Key) -> Option<String> {
         match key {
             Key::Param(i) => self.ctx.param_class.get(&i).cloned(),
-            Key::Reg(_) | Key::Slot(_) | Key::A64(_) | Key::A32(_) => {
+            Key::Reg(_) | Key::Slot(_) | Key::A64(_) | Key::A32(_) | Key::Rv(_) => {
                 self.env.classes.get(&key).cloned()
             }
             Key::Global(addr, _) => match crate::analysis::decompile::expr::tls_slot(addr) {

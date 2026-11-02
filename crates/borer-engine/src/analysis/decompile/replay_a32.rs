@@ -129,7 +129,7 @@ impl Replay for A32 {
     fn code(w: &Witness) -> Option<&[Vec<Insn>]> {
         match &w.code {
             Code::A32(code) => Some(code.as_slice()),
-            Code::X86(_) | Code::A64(_) => None,
+            Code::X86(_) | Code::A64(_) | Code::Rv(_) => None,
         }
     }
 
@@ -261,9 +261,12 @@ impl Replay for A32 {
     fn register_value(emu: &Machine<'_>, at: ArgAt, _width: u8) -> Option<u64> {
         match at {
             ArgAt::A32(r @ Reg::R(_)) => emu.register(&crate::isa::a32::name(r)),
-            ArgAt::A32(_) | ArgAt::Reg(_) | ArgAt::Stack(..) | ArgAt::Operand | ArgAt::A64(_) => {
-                None
-            }
+            ArgAt::A32(_)
+            | ArgAt::Reg(_)
+            | ArgAt::Stack(..)
+            | ArgAt::Operand
+            | ArgAt::A64(_)
+            | ArgAt::Rv(_) => None,
         }
     }
 

@@ -42,12 +42,10 @@ pub(in crate::analysis::decompile) use shape::{
     param_types, ret_lane, shape, writes_result,
 };
 
-use std::collections::btree_map::Entry;
-
 use super::Ctx;
 use super::abi::a64::callee_saved;
 use super::expr::{Cc, Cond, Expr, Flags, Key, Op, Ty, fold, known_bits, mask, sign_extend};
-use super::lift::{BlockFacts, BlockOut, Branch, EffectKind, Env, Exec, LiveFn, Pass, PhiFn, pack};
+use super::lift::{BlockFacts, BlockOut, Branch, EffectKind, Env, Exec, LiveFn, Pass, PhiFn};
 use crate::fxmap::FxHashMap;
 use crate::isa::a64::{self, Flow, Insn, Mnemonic, Opnd, Reg, Shift};
 use crate::isa::x86::ConditionCode;
@@ -697,20 +695,7 @@ impl Lift<'_, '_> {
         } else {
             Flags::Unknown
         };
-        if ex.emit
-            && let Entry::Vacant(first) = ex.ctx.effects.entry(start)
-        {
-            let mut packed = Vec::new();
-            pack(&ex.effects, start, &mut packed);
-            first.insert(packed);
-        }
-        out.lines = ex.lines;
-        out.effects = ex.effects;
-        out.slot_use = ex.slot_use;
-        out.slot_def = ex.slot_def;
-        out.call_uses = ex.call_uses;
-        out.unmodeled = ex.unmodeled;
-        out
+        ex.close(out, Some(start))
     }
 }
 

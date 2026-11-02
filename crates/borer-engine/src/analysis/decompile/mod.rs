@@ -58,6 +58,7 @@ mod lexer;
 pub(crate) mod lift;
 mod lift_a32;
 mod lift_a64;
+mod lift_rv;
 mod line;
 mod literal;
 mod liveness;
@@ -91,6 +92,7 @@ pub mod verify;
 pub mod verify_a32;
 pub mod verify_a64;
 mod verify_lanes;
+pub mod verify_rv;
 mod warn;
 mod wire;
 
@@ -395,12 +397,18 @@ impl<'a> Ctx<'a> {
     /// An x86 function's stack arguments sit above its return address and
     /// shadow space and continue the numbering its convention's registers
     /// start; an arm64 function's sit at the stack pointer it is entered
-    /// with, past the eight registers the standard passes in.
+    /// with, past the eight registers the standard passes in, and a RISC-V
+    /// function's there too, past the positions its registers took.
     fn names(&self) -> Names<'a> {
         let (first_stack, reg_params) = match self.program.arch.isa() {
             Some(crate::isa::Isa::A64) => (0, u32::from(lift_a64::INT_ARGS)),
             Some(crate::isa::Isa::A32) => (0, 4),
-            Some(crate::isa::Isa::Rv(_)) => (0, 8),
+            Some(crate::isa::Isa::Rv(_)) => (
+                0,
+                u32::try_from(self.arg_count)
+                    .unwrap_or(0)
+                    .saturating_sub(self.stack_params),
+            ),
             Some(crate::isa::Isa::X86 { .. }) | None => (
                 self.conv.word + self.conv.shadow,
                 u32::try_from(self.conv.args.len()).unwrap_or(0),
@@ -1489,7 +1497,7 @@ fn decompile_in_run(
         }
         crate::isa::Isa::A64 => decompile_in::<arch::A64>(run, 64, cleanup, assume, witness),
         crate::isa::Isa::A32 => decompile_in::<arch::A32>(run, 32, cleanup, assume, witness),
-        crate::isa::Isa::Rv(_) => None,
+        crate::isa::Isa::Rv(x) => decompile_in::<arch::Rv>(run, x.bits(), cleanup, assume, witness),
     };
     if crate::cancel::Cancel::raised() {
         return done.map(|_| Decompiled::stopped(run.3));
@@ -1600,6 +1608,7 @@ fn decompile_in<L: Lifter>(
             &succs,
             f.signature.as_ref().map(|s| s.ret.as_str()),
             analysis,
+            bitness,
         ),
     };
     ctx.ret_float = match stated_returns {
@@ -2303,7 +2312,9 @@ fn decompile_in<L: Lifter>(
             }
         }
         let stated = match k {
-            Key::Reg(_) | Key::A64(_) | Key::A32(_) => result_typed.get(&name).cloned(),
+            Key::Reg(_) | Key::A64(_) | Key::A32(_) | Key::Rv(_) => {
+                result_typed.get(&name).cloned()
+            }
             Key::Slot(o) => slot_stated.get(o).or_else(|| ctx.frame.held(*o)).cloned(),
             Key::Global(..) | Key::Tmp(_) | Key::Param(_) => None,
         };
@@ -2443,7 +2454,8 @@ fn decompile_in<L: Lifter>(
                     | Key::Param(_)
                     | Key::Global(..)
                     | Key::A64(_)
-                    | Key::A32(_) => None,
+                    | Key::A32(_)
+                    | Key::Rv(_) => None,
                 })
                 .collect(),
             reg_ty: ctx

@@ -733,7 +733,6 @@ pub(super) fn eval<M: Bench>(
     let d = depth.checked_sub(1)?;
     match e {
         Expr::Const(v) | Expr::FConst(v, _) => Some(*v),
-        Expr::Var(k @ (Key::Reg(_) | Key::A64(_) | Key::A32(_))) => st.regs.get(k).copied(),
         Expr::Var(Key::Tmp(id)) => eval(st.temps.get(id)?, st, reads, d),
         Expr::Var(Key::Slot(off)) => {
             let at = st.rsp.wrapping_add_signed(*off) & low(st.width);
@@ -747,6 +746,7 @@ pub(super) fn eval<M: Bench>(
             reads.push((at, n));
             st.read(at, n)
         }
+        Expr::Var(k) => st.regs.get(k).copied(),
         Expr::Sp(off) => Some(st.rsp.wrapping_add_signed(*off) & low(st.width)),
         Expr::Bin(op, l, r) if op.is_float() => {
             let (fa, fb) = (float_bits(l, st)?, float_bits(r, st)?);

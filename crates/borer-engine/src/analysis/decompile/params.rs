@@ -785,15 +785,22 @@ pub(super) enum Declaration {
 /// The positions the declaration lists with the lead, a bit per position
 /// passed in a vector register, whether a variable list follows, and where
 /// the declaration comes from; on a 32-bit x86 target an SDK prototype
-/// counts stack words, and ARM32 code counts positions as a 64-bit target
-/// does, each in a register its procedure call standard names.
+/// counts stack words, and ARM32 and RV32 code counts positions as a
+/// 64-bit target does, each in a register its procedure call standard
+/// names. An RV32 declaration with a 64-bit integer, which takes a pair of
+/// registers no position names, is not read; the body places the
+/// parameters instead.
 pub(super) fn declared_arity(
     ctx: &Ctx<'_>,
     f: &Function,
     lead: usize,
 ) -> Option<(usize, u8, bool, Declaration)> {
     let shifted = |floats: u8| floats.checked_shl(u32::try_from(lead).ok()?);
-    let words = ctx.bitness == 32 && ctx.program.arch != crate::program::Arch::Arm;
+    let words = ctx.bitness == 32
+        && !matches!(
+            ctx.program.arch,
+            crate::program::Arch::Arm | crate::program::Arch::RiscV32
+        );
     if let Some(p) = ctx.overlay.prototypes.get(&f.entry) {
         let word = u8::try_from(ctx.bitness).unwrap_or(64);
         let passes: Vec<Option<Pass>> = p
@@ -801,6 +808,12 @@ pub(super) fn declared_arity(
             .iter()
             .map(|q| q.ty.pass(&ctx.overlay.types, word, ctx.program.format))
             .collect();
+        let pair = |q: &Option<Pass>| {
+            !matches!(q, Some(Pass::Float(_))) && crate::analysis::typelib::words32(*q) > 1
+        };
+        if ctx.program.arch == crate::program::Arch::RiscV32 && passes.iter().any(pair) {
+            return None;
+        }
         let floats = passes
             .iter()
             .take(8)

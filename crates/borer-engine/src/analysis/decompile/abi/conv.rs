@@ -1,6 +1,8 @@
 //! Calling conventions: the argument, volatile and callee-saved registers
 //! of each x86 target, and the convention a program or one function takes.
 
+use crate::isa::Isa;
+use crate::isa::rv::Xlen;
 use crate::isa::x86::Register;
 use crate::program::{BinaryFormat, Program};
 
@@ -287,6 +289,34 @@ pub(crate) const AAPCS32: Conv = Conv {
     shadow: 0,
 };
 
+/// The RISC-V LP64D convention (RV64).
+///
+/// As far as the shared executor reads a convention, it is an eight-byte
+/// word and no shadow space. Its
+/// registers are RISC-V ones, which the RISC-V lifter names
+/// ([`crate::analysis::decompile::lift_rv`]), so the x86 lists are empty.
+pub(crate) const RISCV_LP64: Conv = Conv {
+    args: &[],
+    float_args: &[],
+    float_seq: true,
+    volatile: &[],
+    callee_saved: &[],
+    word: 8,
+    shadow: 0,
+};
+
+/// The RISC-V ILP32D convention (RV32): [`RISCV_LP64`] with a four-byte
+/// word.
+pub(crate) const RISCV_ILP32: Conv = Conv {
+    args: &[],
+    float_args: &[],
+    float_seq: true,
+    volatile: &[],
+    callee_saved: &[],
+    word: 4,
+    shadow: 0,
+};
+
 impl Conv {
     /// The argument slot a register carries, if it carries one.
     ///
@@ -404,18 +434,20 @@ impl Conv {
 /// Picks the calling convention for a program.
 ///
 /// Raw images default to the Microsoft x64 convention (borer is PE-first);
-/// arm64 code follows [`AAPCS64`] in every format.
+/// arm64 code follows [`AAPCS64`], ARM32 code [`AAPCS32`] and RISC-V code
+/// [`RISCV_LP64`] or [`RISCV_ILP32`] in every format.
 ///
 /// # Arguments
 ///
 /// * `program` - The loaded image; its format selects the convention.
 /// * `bitness` - `32` selects cdecl regardless of format.
 pub(crate) fn conv(program: &Program, bitness: u32) -> &'static Conv {
-    if program.arch.isa() == Some(crate::isa::Isa::A64) {
-        return &AAPCS64;
-    }
-    if program.arch.isa() == Some(crate::isa::Isa::A32) {
-        return &AAPCS32;
+    match program.arch.isa() {
+        Some(Isa::A64) => return &AAPCS64,
+        Some(Isa::A32) => return &AAPCS32,
+        Some(Isa::Rv(Xlen::X64)) => return &RISCV_LP64,
+        Some(Isa::Rv(Xlen::X32)) => return &RISCV_ILP32,
+        Some(Isa::X86 { .. }) | None => {}
     }
     if bitness == 32 {
         return &CDECL_X86;

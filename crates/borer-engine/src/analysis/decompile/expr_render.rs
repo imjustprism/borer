@@ -308,6 +308,7 @@ impl Names<'_> {
             Key::Tmp(n) => format!("tmp_{n}"),
             Key::A64(r) => a64_name(r),
             Key::A32(r) => crate::isa::a32::name(r),
+            Key::Rv(r) => crate::isa::rv::name(r).to_owned(),
             Key::Param(0) if self.this_param => "this".to_owned(),
             Key::Param(i) if Some(i) == self.result_param => "result".to_owned(),
             Key::Param(i) => self

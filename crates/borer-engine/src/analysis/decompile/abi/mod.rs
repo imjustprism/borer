@@ -28,6 +28,7 @@ pub(crate) mod a64;
 mod conv;
 pub(crate) mod function;
 pub(crate) mod runtime;
+pub(crate) mod rv;
 mod stubs;
 
 pub(crate) use conv::*;

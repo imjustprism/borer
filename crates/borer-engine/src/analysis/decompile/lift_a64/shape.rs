@@ -137,27 +137,12 @@ struct Walked<'g> {
 /// * `ctx` - Any function's context, for the image.
 /// * `f` - The function.
 fn graph(ctx: &Ctx<'_>, f: &Function) -> Graph {
-    let idx: BTreeMap<u64, usize> = f
-        .blocks
-        .iter()
-        .enumerate()
-        .map(|(i, b)| (b.start, i))
-        .collect();
-    let succs = f
-        .blocks
-        .iter()
-        .map(|b| {
-            b.successors
-                .iter()
-                .filter_map(|s| idx.get(s).copied())
-                .collect()
-        })
-        .collect();
+    let (succs, entry) = lift::edges(f);
     Graph {
         code: decode_blocks(ctx.program, f),
         succs,
-        entry: idx.get(&f.entry).copied().unwrap_or(0),
-        starts: idx.keys().copied().collect(),
+        entry,
+        starts: f.blocks.iter().map(|b| b.start).collect(),
     }
 }
 

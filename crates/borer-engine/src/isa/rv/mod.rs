@@ -14,8 +14,10 @@
 
 mod compressed;
 mod fmt;
+mod regs;
 
 pub use fmt::{name, text};
+pub use regs::{Registers, code, from_code};
 
 /// The zero register, `x0`.
 pub const ZERO: Reg = Reg::X(0);

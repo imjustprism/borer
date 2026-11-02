@@ -43,6 +43,9 @@ pub(super) enum Key {
     /// An ARM32 register: `r0`..`r14`, the stack pointer while it is no
     /// tracked offset, a single `s0`..`s31` or a double `d0`..`d31`.
     A32(crate::isa::a32::Reg),
+    /// A RISC-V register: `x1`..`x31`, the stack pointer while it is no
+    /// tracked offset, or `f0`..`f31`.
+    Rv(crate::isa::rv::Reg),
 }
 
 impl Key {

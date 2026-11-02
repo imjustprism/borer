@@ -130,7 +130,8 @@ pub(super) fn collect_slots(declared: &BTreeMap<Key, Ty>) -> Vec<(i64, Ty)> {
             | Key::Tmp(_)
             | Key::Param(_)
             | Key::A64(_)
-            | Key::A32(_) => None,
+            | Key::A32(_)
+            | Key::Rv(_) => None,
         })
         .collect()
 }

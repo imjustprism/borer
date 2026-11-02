@@ -1410,7 +1410,7 @@ impl<'a> Exec<'_, 'a> {
                 .get(&o)
                 .copied()
                 .unwrap_or_else(|| self.ty_of(key).bits()),
-            Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) | Key::A32(_) => {
+            Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) | Key::A32(_) | Key::Rv(_) => {
                 self.ty_of(key).bits()
             }
         };
@@ -1424,7 +1424,8 @@ impl<'a> Exec<'_, 'a> {
             | Key::Tmp(_)
             | Key::Param(_)
             | Key::A64(_)
-            | Key::A32(_) => val.clone(),
+            | Key::A32(_)
+            | Key::Rv(_) => val.clone(),
         };
         self.record(EffectKind::Assign(key, val.clone(), bits));
         let n = self.names();
@@ -1435,7 +1436,8 @@ impl<'a> Exec<'_, 'a> {
             | Key::Param(_)
             | Key::Global(..)
             | Key::A64(_)
-            | Key::A32(_) => n.key(key),
+            | Key::A32(_)
+            | Key::Rv(_) => n.key(key),
         };
         let shown = if self.ctx.bitness == 64 && self.env.narrow.get(&key) == Some(&32) {
             mask(val.clone(), 0xffff_ffff)
@@ -1730,12 +1732,16 @@ impl<'a> Exec<'_, 'a> {
             Key::A32(crate::isa::a32::Reg::S(_)) => {
                 self.ctx.reg_ty.get(&key).copied().unwrap_or(self.word_ty())
             }
+            Key::Rv(crate::isa::rv::Reg::F(_)) => {
+                self.ctx.reg_ty.get(&key).copied().unwrap_or(Ty::U64)
+            }
             Key::Reg(_)
             | Key::Tmp(_)
             | Key::Global(..)
             | Key::Param(_)
             | Key::A64(_)
-            | Key::A32(_) => self.word_ty(),
+            | Key::A32(_)
+            | Key::Rv(_) => self.word_ty(),
             Key::Slot(k) => self
                 .ctx
                 .declared
@@ -1769,7 +1775,8 @@ impl<'a> Exec<'_, 'a> {
                 | Key::Tmp(_)
                 | Key::Global(..)
                 | Key::A64(_)
-                | Key::A32(_) => ty,
+                | Key::A32(_)
+                | Key::Rv(_) => ty,
             };
             self.ctx.declared.insert(key, ty);
             if let Key::Slot(k) = key {

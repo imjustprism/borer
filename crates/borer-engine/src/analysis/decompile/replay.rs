@@ -215,6 +215,7 @@ impl std::fmt::Debug for Witness {
             Code::X86(code) => code.len(),
             Code::A64(code) => code.len(),
             Code::A32(code) => code.len(),
+            Code::Rv(code) => code.len(),
         };
         f.debug_struct("Witness")
             .field("blocks", &blocks)
@@ -231,6 +232,8 @@ pub(super) enum Code {
     A64(Vec<Vec<crate::isa::a64::Insn>>),
     /// ARM32 instructions, per block.
     A32(Vec<Vec<crate::isa::a32::Insn>>),
+    /// RISC-V instructions, per block; no machine replays them yet.
+    Rv(Vec<Vec<crate::isa::rv::Insn>>),
 }
 
 /// A machine the replay runs blocks on: what the replay asks of it beyond
@@ -537,7 +540,7 @@ impl Replay for arch::X86 {
     fn code(w: &Witness) -> Option<&[Vec<Instruction>]> {
         match &w.code {
             Code::X86(code) => Some(code.as_slice()),
-            Code::A64(_) | Code::A32(_) => None,
+            Code::A64(_) | Code::A32(_) | Code::Rv(_) => None,
         }
     }
 
@@ -626,9 +629,12 @@ impl Replay for arch::X86 {
     fn register_value(emu: &Emulator<'_>, at: ArgAt, width: u8) -> Option<u64> {
         match at {
             ArgAt::Reg(r) if r.is_gpr() => reg_value(emu, r, width),
-            ArgAt::Reg(_) | ArgAt::Stack(..) | ArgAt::Operand | ArgAt::A64(_) | ArgAt::A32(_) => {
-                None
-            }
+            ArgAt::Reg(_)
+            | ArgAt::Stack(..)
+            | ArgAt::Operand
+            | ArgAt::A64(_)
+            | ArgAt::A32(_)
+            | ArgAt::Rv(_) => None,
         }
     }
 
@@ -1759,6 +1765,7 @@ fn key_spot(k: Key) -> u64 {
         Key::Global(a, _) => (4 << 32) ^ a,
         Key::A64(r) => (5 << 32) | u64::from(a64_code(r)),
         Key::A32(r) => (6 << 32) | u64::from(crate::isa::a32::code(r)),
+        Key::Rv(r) => (7 << 32) | u64::from(crate::isa::rv::code(r)),
     };
     TLS_BASE.wrapping_sub(1 << 40) | code
 }
@@ -2023,9 +2030,10 @@ impl<M: Bench> Text<'_, M> {
                 .and_then(|()| self.read(a, u64::from(bits / 8).max(1))),
             Key::Reg(Register::RSP | Register::ESP)
             | Key::A64(crate::isa::a64::Reg::Sp)
-            | Key::A32(crate::isa::a32::SP) => self.rsp,
+            | Key::A32(crate::isa::a32::SP)
+            | Key::Rv(crate::isa::rv::SP) => self.rsp,
             Key::Reg(r) if !r.is_gpr() && !r.is_xmm() => None,
-            Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) | Key::A32(_) => {
+            Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) | Key::A32(_) | Key::Rv(_) => {
                 Some(self.vars.get(&k).copied().unwrap_or_else(|| self.drawn(k)))
             }
         }
@@ -2314,7 +2322,7 @@ impl<M: Bench> Text<'_, M> {
             Key::Slot(o) if !self.foreign(o, 16) => self.read_vec(self.sp0.wrapping_add_signed(o)),
             Key::Global(a, 128) if a < TLS_BASE => self.read_vec(a),
             Key::Reg(r) if !r.is_gpr() && !r.is_xmm() => None,
-            Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) | Key::A32(_) => {
+            Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) | Key::A32(_) | Key::Rv(_) => {
                 self.vecs.get(&k).copied()
             }
             Key::Slot(_) | Key::Global(..) => None,
@@ -2646,7 +2654,7 @@ impl<M: Bench> Text<'_, M> {
                     self.write(a, u64::from(gb / 8).max(1), value);
                 }
             }
-            Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) | Key::A32(_) => {
+            Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) | Key::A32(_) | Key::Rv(_) => {
                 self.result_ty.remove(&k);
                 if bits > 64 {
                     match value {
@@ -3326,7 +3334,8 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                     u64::from(inn.slot_bits.get(&o).copied().unwrap_or(self.width) / 8),
                 ),
                 Key::Global(a, bits) => (a, u64::from(bits / 8).max(1)),
-                Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) | Key::A32(_) => (0, 0),
+                Key::Reg(_) | Key::A64(_) | Key::A32(_) | Key::Rv(_) => (0, 0),
+                Key::Tmp(_) | Key::Param(_) => (0, 0),
             };
             for i in 0..n.min(8) {
                 base.fix(&mut emu, at.wrapping_add(i) & mask, lo8(c >> (8 * i)));
@@ -3428,14 +3437,8 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                     None => continue,
                 },
                 Key::Global(a, bits) if *a < TLS_BASE => (*a, u64::from(*bits / 8).max(1)),
-                Key::Global(..)
-                | Key::Reg(_)
-                | Key::Tmp(_)
-                | Key::Param(_)
-                | Key::A64(_)
-                | Key::A32(_) => {
-                    continue;
-                }
+                Key::Global(..) | Key::Tmp(_) | Key::Param(_) => continue,
+                Key::Reg(_) | Key::A64(_) | Key::A32(_) | Key::Rv(_) => continue,
             };
             let value = wide_value(&text, e, n);
             for i in 0..n {
@@ -3574,19 +3577,12 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                 }
                 let rsp_now = t.emu.register(<L::Rig<'p> as Bench>::SP).unwrap_or(t.rsp);
                 for (at, arg) in &c.args {
-                    let (machine, stored) = match at {
-                        ArgAt::Stack(off, bits) => (
-                            machine_word(
-                                &t.emu,
-                                rsp_now.wrapping_add_signed(*off),
-                                u64::from(self.width / 8),
-                                self.width,
-                            ),
-                            *bits,
-                        ),
-                        ArgAt::Reg(_) | ArgAt::Operand | ArgAt::A64(_) | ArgAt::A32(_) => {
-                            (L::register_value(&t.emu, *at, self.width), 64)
-                        }
+                    let (machine, stored) = if let ArgAt::Stack(off, bits) = at {
+                        let word = u64::from(self.width / 8);
+                        let at = rsp_now.wrapping_add_signed(*off);
+                        (machine_word(&t.emu, at, word, self.width), *bits)
+                    } else {
+                        (L::register_value(&t.emu, *at, self.width), 64)
                     };
                     let Some(m) = machine else { continue };
                     let bits = value_lane(arg, self.width).min(stored.max(8));

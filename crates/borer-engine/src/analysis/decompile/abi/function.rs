@@ -12,12 +12,12 @@ use std::sync::Arc;
 
 use super::super::cir;
 use super::super::expr::Key;
-use super::super::{Shape, lift_a32, lift_a64, shape_built};
+use super::super::{Shape, lift_a32, lift_a64, lift_rv, shape_built};
 use super::conv::{
     AAPCS32, AAPCS64, CDECL_X86, Conv, FASTCALL_X86, GO_X64, MS_X64, SYSV_X64, THISCALL_X86,
 };
 use crate::analysis::{Analysis, Function, Overlay};
-use crate::isa::{Isa, a32, a64, x86::Register};
+use crate::isa::{Isa, a32, a64, rv, x86::Register};
 use crate::num::from_usize;
 use crate::program::Program;
 
@@ -36,6 +36,9 @@ pub(crate) enum Target {
     /// The ARM32 procedure call standard, hard-float: `r0` to `r3`, `s0`
     /// to `s15` and `d0` to `d7`, then the stack.
     Aapcs32,
+    /// The RISC-V convention, LP64D or ILP32D: `a0` to `a7` and `fa0` to
+    /// `fa7`, each bank counting its own arguments, then the stack.
+    RiscV,
     /// 32-bit cdecl: every argument on the stack, the caller pops them.
     X86Cdecl,
     /// 32-bit stdcall: every argument on the stack, the callee pops them.
@@ -54,8 +57,12 @@ impl Target {
     ///
     /// * `conv` - The convention table the function's shape carries.
     /// * `pops` - Whether the callee pops its stack arguments (`ret N`).
-    pub(crate) fn of(conv: &Conv, pops: bool) -> Self {
-        if *conv == MS_X64 {
+    /// * `isa` - The program's instruction set: RISC-V code follows its
+    ///   own convention, whose table reads as arm's.
+    pub(crate) fn of(conv: &Conv, pops: bool, isa: Option<Isa>) -> Self {
+        if matches!(isa, Some(Isa::Rv(_))) {
+            Self::RiscV
+        } else if *conv == MS_X64 {
             Self::Win64
         } else if *conv == SYSV_X64 {
             Self::SysvX64
@@ -112,6 +119,8 @@ pub(crate) enum Loc {
     A64(a64::Reg),
     /// An ARM32 register.
     A32(a32::Reg),
+    /// A RISC-V register.
+    Rv(rv::Reg),
     /// A stack word at this offset in bytes from the stack pointer at the
     /// function's entry.
     Stack(u64),
@@ -180,6 +189,7 @@ pub(in crate::analysis::decompile) fn saved(conv: &Conv, key: Key, bits: u8) -> 
         }
         Key::A64(r) => bits == 64 && super::a64::callee_saved(r),
         Key::A32(r) => super::a32::saved(r, bits),
+        Key::Rv(r) => super::rv::saved(r, bits, conv.word),
         Key::Slot(_) | Key::Global(..) | Key::Tmp(_) | Key::Param(_) => false,
     }
 }
@@ -213,9 +223,8 @@ pub(in crate::analysis::decompile) fn shape(
         || match program.arch.isa() {
             Some(Isa::A64) => lift_a64::built_shape(program, analysis, overlay, f),
             Some(Isa::A32) => lift_a32::built_shape(program, analysis, overlay, f),
-            Some(Isa::X86 { .. } | Isa::Rv(_)) | None => {
-                shape_built(program, analysis, overlay, f, bitness)
-            }
+            Some(Isa::Rv(_)) => lift_rv::built_shape(program, analysis, overlay, f),
+            Some(Isa::X86 { .. }) | None => shape_built(program, analysis, overlay, f, bitness),
         },
         |shape| shape.params.capacity() * size_of::<Register>(),
     )
@@ -254,7 +263,43 @@ pub(crate) fn of(
         f,
         bitness,
     );
-    Some(placed(&s, f))
+    Some(placed(&s, f, program.arch.isa()))
+}
+
+impl Target {
+    /// Returns where a float result of `bits` comes back.
+    ///
+    /// # Arguments
+    ///
+    /// * `bits` - The result's width.
+    fn float_result(self, bits: u8) -> Loc {
+        match self {
+            Target::Aapcs64 => Loc::A64(a64::Reg::V(0)),
+            Target::Aapcs32 if bits == 32 => Loc::A32(a32::Reg::S(0)),
+            Target::Aapcs32 => Loc::A32(a32::Reg::D(0)),
+            Target::RiscV => Loc::Rv(rv::Reg::F(super::rv::FIRST_ARG)),
+            Target::SysvX64
+            | Target::Win64
+            | Target::GoX64
+            | Target::X86Cdecl
+            | Target::X86Stdcall
+            | Target::X86Fastcall
+            | Target::X86Thiscall => Loc::X86(Register::XMM0),
+        }
+    }
+
+    /// Returns where an integer result comes back.
+    fn int_result(self) -> Loc {
+        match self {
+            Target::Aapcs64 => Loc::A64(a64::Reg::X(0)),
+            Target::Aapcs32 => Loc::A32(a32::Reg::R(0)),
+            Target::RiscV => Loc::Rv(rv::Reg::X(super::rv::FIRST_ARG)),
+            Target::X86Cdecl | Target::X86Stdcall | Target::X86Fastcall | Target::X86Thiscall => {
+                Loc::X86(Register::EAX)
+            }
+            Target::SysvX64 | Target::Win64 | Target::GoX64 => Loc::X86(Register::RAX),
+        }
+    }
 }
 
 /// Places a shape's positions by its convention.
@@ -263,12 +308,13 @@ pub(crate) fn of(
 ///
 /// * `s` - The function's shape.
 /// * `f` - The function, for what it hands back.
-fn placed(s: &Shape, f: &Function) -> FunctionAbi {
+/// * `isa` - The program's instruction set.
+fn placed(s: &Shape, f: &Function, isa: Option<Isa>) -> FunctionAbi {
     let conv = s.conv;
-    let target = Target::of(conv, f.stack_pop > 0);
+    let target = Target::of(conv, f.stack_pop > 0, isa);
     let floats = s.floats();
     let word = conv.word.unsigned_abs();
-    let first_stack = if target == Target::Aapcs32 {
+    let first_stack = if matches!(target, Target::Aapcs32 | Target::RiscV) {
         0
     } else {
         word.wrapping_add(conv.shadow.unsigned_abs())
@@ -278,6 +324,7 @@ fn placed(s: &Shape, f: &Function) -> FunctionAbi {
         let reg = match target {
             Target::Aapcs64 => lift_a64::arg_reg(i, floats).map(Loc::A64),
             Target::Aapcs32 => lift_a32::arg_reg(i, floats).map(Loc::A32),
+            Target::RiscV => lift_rv::arg_reg(i, floats).map(Loc::Rv),
             Target::SysvX64
             | Target::Win64
             | Target::GoX64
@@ -286,11 +333,13 @@ fn placed(s: &Shape, f: &Function) -> FunctionAbi {
             | Target::X86Fastcall
             | Target::X86Thiscall => conv.arg_reg(i, floats).map(Loc::X86),
         };
-        reg.filter(|_| float || i < regs || matches!(target, Target::Aapcs64 | Target::Aapcs32))
-            .unwrap_or_else(|| {
-                let past = from_usize(i.saturating_sub(regs));
-                Loc::Stack(first_stack.wrapping_add(past.wrapping_mul(word)))
-            })
+        reg.filter(|_| {
+            float || i < regs || matches!(target, Target::Aapcs64 | Target::Aapcs32 | Target::RiscV)
+        })
+        .unwrap_or_else(|| {
+            let past = from_usize(i.saturating_sub(regs));
+            Loc::Stack(first_stack.wrapping_add(past.wrapping_mul(word)))
+        })
     };
     let result_at = s.result_param.map(usize::from);
     let mut params = Vec::with_capacity(s.count);
@@ -301,6 +350,7 @@ fn placed(s: &Shape, f: &Function) -> FunctionAbi {
             let at = match target {
                 Target::Aapcs64 => Loc::A64(a64::Reg::X(lift_a64::RESULT_REG)),
                 Target::Aapcs32
+                | Target::RiscV
                 | Target::SysvX64
                 | Target::Win64
                 | Target::GoX64
@@ -332,31 +382,12 @@ fn placed(s: &Shape, f: &Function) -> FunctionAbi {
         (_, Some(bits)) => Some(Value {
             class: Class::Float,
             bits: Some(bits),
-            locs: vec![match target {
-                Target::Aapcs64 => Loc::A64(a64::Reg::V(0)),
-                Target::Aapcs32 if bits == 32 => Loc::A32(a32::Reg::S(0)),
-                Target::Aapcs32 => Loc::A32(a32::Reg::D(0)),
-                Target::SysvX64
-                | Target::Win64
-                | Target::GoX64
-                | Target::X86Cdecl
-                | Target::X86Stdcall
-                | Target::X86Fastcall
-                | Target::X86Thiscall => Loc::X86(Register::XMM0),
-            }],
+            locs: vec![target.float_result(bits)],
         }),
         (Some(true) | None, None) => Some(Value {
             class: Class::Int,
             bits: f.ret_width,
-            locs: vec![match target {
-                Target::Aapcs64 => Loc::A64(a64::Reg::X(0)),
-                Target::Aapcs32 => Loc::A32(a32::Reg::R(0)),
-                Target::X86Cdecl
-                | Target::X86Stdcall
-                | Target::X86Fastcall
-                | Target::X86Thiscall => Loc::X86(Register::EAX),
-                Target::SysvX64 | Target::Win64 | Target::GoX64 => Loc::X86(Register::RAX),
-            }],
+            locs: vec![target.int_result()],
         }),
     };
     FunctionAbi {
@@ -427,7 +458,7 @@ pub(crate) fn prototype(
     entry: u64,
 ) -> Option<Prototype> {
     let abi = of(program, analysis, overlay, entry)?;
-    let wide = program.arch.bitness() != Some(32) && program.arch != crate::program::Arch::Arm;
+    let wide = program.arch.isa().is_none_or(|isa| isa.bits() == 64);
     let word = if wide { "uint64_t" } else { "uint32_t" };
     let ty = |v: &Value| match v.class {
         Class::Float if v.bits == Some(32) => "float",

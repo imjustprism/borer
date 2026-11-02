@@ -13,9 +13,7 @@
 use super::super::Ctx;
 use super::super::abi::{self, a32 as a32_abi};
 use super::super::expr::{Expr, Key, Op, Ty, fold, sign_extend};
-use super::super::lift::{
-    self, ArgAt, Callee, EffectKind, Returns, Shown, SlotUse, stated_returns,
-};
+use super::super::lift::{self, ArgAt, Callee, EffectKind, Returns, Shown, stated_returns};
 use super::Lift;
 use super::shape::{arg_reg, arg_regs};
 use crate::isa::a32::{Insn, Op as AOp, PC, Reg};
@@ -271,26 +269,7 @@ impl Lift<'_, '_> {
                 super::shape::callee_shape(self.ex.ctx, abi::reached(self.ex.ctx.analysis, t))
             })
             .map_or(0, |s| i64::from(s.stack));
-        if stack_args > 0
-            && let Some(sp) = self.ex.env.sp
-        {
-            for n in 0..stack_args {
-                let o = sp.saturating_add(4 * n);
-                let k = Key::Slot(o);
-                if !self.ex.slot_def.contains_key(&o) {
-                    let width = self.ex.slot_use.entry(o).or_default();
-                    *width = (*width).max(32);
-                }
-                let v = self
-                    .ex
-                    .env
-                    .vals
-                    .get(&k)
-                    .cloned()
-                    .unwrap_or_else(|| self.ex.env.get(k));
-                out.push((ArgAt::Stack(4 * n, 32), self.ex.assumed(v)));
-            }
-        }
+        out.extend(self.ex.stack_arguments(stack_args, 4));
         for (_, e) in &out {
             self.ex.note_escape(e);
         }
@@ -412,6 +391,7 @@ impl Lift<'_, '_> {
             Key::A32(Reg::R(_) | Reg::D(_))
             | Key::Reg(_)
             | Key::A64(_)
+            | Key::Rv(_)
             | Key::Slot(_)
             | Key::Global(..)
             | Key::Tmp(_)
@@ -444,6 +424,7 @@ impl Lift<'_, '_> {
             Key::A32(Reg::R(_))
             | Key::Reg(_)
             | Key::A64(_)
+            | Key::Rv(_)
             | Key::Slot(_)
             | Key::Global(..)
             | Key::Tmp(_)
@@ -472,20 +453,7 @@ impl Lift<'_, '_> {
         self.ex.env.fresh.clear();
         self.ex.flags = super::super::expr::Flags::Unknown;
         self.fp_flags = super::super::expr::Flags::Unknown;
-        let written = self
-            .ex
-            .slot_def
-            .iter()
-            .flat_map(|(&o, &b)| o..o.saturating_add(i64::from(b / 8).max(1)))
-            .collect();
-        match (self.ex.env.sp, self.ex.ctx.escape_floor) {
-            (Some(_), Some(f)) => self
-                .ex
-                .call_uses
-                .push((SlotUse::Window(f, i64::MAX), written)),
-            (Some(_), None) => {}
-            (None, _) => self.ex.call_uses.push((SlotUse::All, written)),
-        }
+        self.ex.note_call_slots();
     }
 
     /// Lifts a jump out of the function as a tail call: the callee takes
@@ -500,18 +468,7 @@ impl Lift<'_, '_> {
         let (text, reached) = self.callee_named(&callee);
         let returns = self.returns(Some(target), reached);
         let args = self.arguments(Some(target), reached, true);
-        if self.ex.emit {
-            let names = self.ex.names();
-            let mut rendered: Vec<String> = args.iter().map(|(_, e)| e.render(&names)).collect();
-            self.ex.name_arguments(reached, &mut rendered);
-            let call = abi::call_text(&text, &rendered);
-            if !self.ex.ctx.unused_result && returns != Returns::Nothing {
-                self.ex.lines.push(format!("return {call};"));
-            } else {
-                self.ex.lines.push(format!("{call};"));
-                self.ex.lines.push("return;".to_owned());
-            }
-        }
+        self.ex.emit_tail(&text, &args, reached, returns);
         self.ex
             .record_call(callee, args, None, None, false, Shown::Tail);
     }

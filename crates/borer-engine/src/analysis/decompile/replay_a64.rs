@@ -169,7 +169,7 @@ impl Replay for A64 {
     fn code(w: &Witness) -> Option<&[Vec<Insn>]> {
         match &w.code {
             Code::A64(code) => Some(code.as_slice()),
-            Code::X86(_) | Code::A32(_) => None,
+            Code::X86(_) | Code::A32(_) | Code::Rv(_) => None,
         }
     }
 
@@ -267,7 +267,9 @@ impl Replay for A64 {
     fn register_value(emu: &Machine<'_>, at: ArgAt, _width: u8) -> Option<u64> {
         match at {
             ArgAt::A64(r) => reg_value(emu, r),
-            ArgAt::Reg(_) | ArgAt::Stack(..) | ArgAt::Operand | ArgAt::A32(_) => None,
+            ArgAt::Reg(_) | ArgAt::Stack(..) | ArgAt::Operand | ArgAt::A32(_) | ArgAt::Rv(_) => {
+                None
+            }
         }
     }
 
