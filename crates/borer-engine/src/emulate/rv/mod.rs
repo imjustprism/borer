@@ -1,12 +1,12 @@
 //! A bounded RISC-V machine: the RV32 and RV64 integer instructions with
-//! the M and A extensions, the compressed forms, and the float loads,
-//! stores, moves and sign injections.
+//! the M and A extensions, the compressed forms, and the F and D float
+//! instructions ([`float`]).
 //!
 //! The RISC-V counterpart of [`super::a32::Machine`], with its memory
 //! overlay, stop reasons ([`Stop`]), run report ([`Run`]) and method names.
 //! It runs what [`crate::isa::rv`] decodes. Every instruction it does not
-//! model (the float arithmetic, compares and conversions, the CSRs, the
-//! privileged instructions, `fence.i` aside) stops the run with
+//! model (a float operation rounding in a mode other than to nearest, the
+//! CSRs, the privileged instructions, `fence.i` aside) stops the run with
 //! [`Stop::Unmodeled`] and its text: the machine never guesses what an
 //! instruction does.
 //!
@@ -28,6 +28,7 @@ use crate::num::lo8;
 use crate::program::Program;
 
 mod exec;
+mod float;
 
 /// What `ra` holds when a 64-bit run starts: an address no image, stack or
 /// allocation takes, so a transfer to it is the routine returning.

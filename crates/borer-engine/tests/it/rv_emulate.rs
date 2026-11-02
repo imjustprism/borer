@@ -4,8 +4,9 @@
 //! [`Machine`] from a raw RISC-V image with the registers set before and
 //! the registers the manual says each leaves: a loop of compressed
 //! instructions, the stack and the divide and remainder edge cases, an
-//! atomic, the `w` forms, RV32's wrap at 32 bits, a Linux `exit`, and a
-//! float operation the machine does not model, which stops the run.
+//! atomic, the `w` forms, RV32's wrap at 32 bits, a Linux `exit`, the
+//! float arithmetic, and a float operation rounding in a mode the machine
+//! does not keep, which stops the run.
 #![expect(
     clippy::missing_panics_doc,
     clippy::expect_used,
@@ -160,19 +161,77 @@ fn an_exit_call_ends_the_run() {
     run(&p, &[], &Stop::Exited);
 }
 
-/// A float operation the machine does not model stops the run, naming it.
+/// A float operation rounding in a mode the machine does not keep stops
+/// the run, naming it.
 #[test]
 fn an_unmodeled_float_operation_stops_the_run() {
     let code = assemble(&[
-        (0x02b5_7553, 4), // ASM: fadd.d fa0, fa0, fa1
+        (0x02b5_1553, 4), // ASM: fadd.d fa0, fa0, fa1, rtz
         (0x8082, 2),      // ASM: ret
     ]);
     let p = image(&code, Arch::RiscV64);
     run(
         &p,
         &[],
-        &Stop::Unmodeled("fadd.d fa0, fa0, fa1 at 0x10000".to_owned()),
+        &Stop::Unmodeled("fadd.d fa0, fa0, fa1, rtz at 0x10000".to_owned()),
     );
+}
+
+/// Double arithmetic, square root, a fused multiply-add, a conversion to
+/// an integer toward zero, a compare and a classification give what the
+/// D extension defines.
+#[test]
+fn double_arithmetic_rounds_as_the_d_extension_defines() {
+    let code = assemble(&[
+        (0xf205_0553, 4), // ASM: fmv.d.x fa0, a0
+        (0xf205_85d3, 4), // ASM: fmv.d.x fa1, a1
+        (0x02b5_0653, 4), // ASM: fadd.d fa2, fa0, fa1
+        (0x12b5_06d3, 4), // ASM: fmul.d fa3, fa0, fa1
+        (0x1ab5_0753, 4), // ASM: fdiv.d fa4, fa0, fa1
+        (0x5a05_07d3, 4), // ASM: fsqrt.d fa5, fa0
+        (0x62b5_0843, 4), // ASM: fmadd.d fa6, fa0, fa1, fa2
+        (0xc205_1653, 4), // ASM: fcvt.w.d a2, fa0, rtz
+        (0xa2b5_16d3, 4), // ASM: flt.d a3, fa0, fa1
+        (0xe205_1753, 4), // ASM: fclass.d a4, fa0
+        (0x8082, 2),      // ASM: ret
+    ]);
+    let p = image(&code, Arch::RiscV64);
+    let (a, b) = (2.5f64, -1.0f64);
+    let m = run(
+        &p,
+        &[("a0", a.to_bits()), ("a1", b.to_bits())],
+        &Stop::Returned,
+    );
+    let f = |r: &str| m.register(r).map(f64::from_bits);
+    assert_eq!(f("fa2"), Some(1.5));
+    assert_eq!(f("fa3"), Some(-2.5));
+    assert_eq!(f("fa4"), Some(-2.5));
+    assert_eq!(f("fa5"), Some(a.sqrt()));
+    assert_eq!(f("fa6"), Some(-1.0));
+    assert_eq!(m.register("a2"), Some(2));
+    assert_eq!(m.register("a3"), Some(0));
+    assert_eq!(m.register("a4"), Some(1 << 6));
+}
+
+/// A single not boxed in ones reads as the canonical NaN.
+///
+/// An operation on it gives the boxed canonical NaN, `fmin` takes the
+/// number over the NaN, and the NaN converts to the largest unsigned word,
+/// sign-extended.
+#[test]
+fn singles_box_and_nans_are_canonical() {
+    let code = assemble(&[
+        (0xf005_0553, 4), // ASM: fmv.w.x fa0, a0
+        (0x00b5_0653, 4), // ASM: fadd.s fa2, fa0, fa1
+        (0xc016_1653, 4), // ASM: fcvt.wu.s a2, fa2, rtz
+        (0x28c5_06d3, 4), // ASM: fmin.s fa3, fa0, fa2
+        (0x8082, 2),      // ASM: ret
+    ]);
+    let p = image(&code, Arch::RiscV64);
+    let m = run(&p, &[("a0", 0x4020_0000)], &Stop::Returned);
+    assert_eq!(m.register("fa2"), Some(0xffff_ffff_7fc0_0000));
+    assert_eq!(m.register("a2"), Some(u64::MAX));
+    assert_eq!(m.register("fa3"), Some(0xffff_ffff_4020_0000));
 }
 
 /// Random words run to a stop without a panic at both widths.

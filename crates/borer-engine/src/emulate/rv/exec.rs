@@ -2,19 +2,15 @@
 
 use super::{Machine, return_to};
 use crate::emulate::{Stop, lo64, sign_extend};
-use crate::isa::rv::{self, Alu, AmoOp, BrCond, FArith, FOp, Fmt, Insn, Op, Reg, Width, Xlen};
+use crate::isa::rv::{self, Alu, AmoOp, BrCond, Insn, Op, Reg, Width, Xlen};
 use crate::num::{lo32, sext32};
-
-/// The bit pattern a single reads as when its register does not hold it
-/// boxed in ones: the canonical NaN.
-const CANONICAL_NAN_32: u32 = 0x7fc0_0000;
 
 /// The stop for an instruction the machine does not model, naming it.
 ///
 /// # Arguments
 ///
 /// * `i` - The instruction.
-fn unmodeled(i: &Insn) -> Stop {
+pub(super) fn unmodeled(i: &Insn) -> Stop {
     Stop::Unmodeled(format!("{} at {:#x}", rv::text(i), i.va))
 }
 
@@ -23,7 +19,7 @@ fn unmodeled(i: &Insn) -> Stop {
 /// # Arguments
 ///
 /// * `r` - The register.
-fn n(r: Reg) -> usize {
+pub(super) fn n(r: Reg) -> usize {
     match r {
         Reg::X(n) | Reg::F(n) => usize::from(n),
     }
@@ -35,7 +31,7 @@ impl Machine<'_> {
     /// # Arguments
     ///
     /// * `r` - The register.
-    fn get(&self, r: Reg) -> u64 {
+    pub(super) fn get(&self, r: Reg) -> u64 {
         self.x.get(n(r)).copied().unwrap_or(0)
     }
 
@@ -64,38 +60,6 @@ impl Machine<'_> {
     /// Returns the shift amounts' mask at the register width.
     fn shift_mask(&self) -> u64 {
         u64::from(self.xlen.bits() - 1)
-    }
-
-    /// Reads a single from a float register: its low word when the high
-    /// word boxes it in ones, else the canonical NaN.
-    ///
-    /// # Arguments
-    ///
-    /// * `r` - The register.
-    fn single(&self, r: Reg) -> u32 {
-        let v = self.f.get(n(r)).copied().unwrap_or(0);
-        if v >> 32 == 0xffff_ffff {
-            lo32(v)
-        } else {
-            CANONICAL_NAN_32
-        }
-    }
-
-    /// Writes a float register, a single boxed in ones.
-    ///
-    /// # Arguments
-    ///
-    /// * `r` - The register.
-    /// * `fmt` - The format written.
-    /// * `v` - The bits.
-    fn set_f(&mut self, r: Reg, fmt: Fmt, v: u64) {
-        let v = match fmt {
-            Fmt::S => 0xffff_ffff_0000_0000 | (v & 0xffff_ffff),
-            Fmt::D => v,
-        };
-        if let Some(f) = self.f.get_mut(n(r)) {
-            *f = v;
-        }
     }
 
     /// Hands control to `to`, which ends the run when it is the return
@@ -329,78 +293,6 @@ impl Machine<'_> {
         };
         self.store(at, width.bytes(), new)?;
         self.set_x(n(rd), old);
-        Ok(())
-    }
-
-    /// Runs a float instruction: the loads, stores, moves and sign
-    /// injections; any other is unmodeled.
-    ///
-    /// # Arguments
-    ///
-    /// * `i` - The instruction.
-    /// * `f` - Its operation.
-    ///
-    /// # Errors
-    ///
-    /// A fault, a full memory, or an operation the machine does not model.
-    fn float(&mut self, i: &Insn, f: FOp) -> Result<(), Stop> {
-        let bits = |m: &Self, fmt: Fmt, r: Reg| match fmt {
-            Fmt::S => u64::from(m.single(r)),
-            Fmt::D => m.f.get(n(r)).copied().unwrap_or(0),
-        };
-        match f {
-            FOp::Load { fmt, rd, rs1, off } => {
-                let at = self.xlen.addr(self.get(rs1).wrapping_add_signed(off));
-                let v = self.load(at, if fmt == Fmt::S { 4 } else { 8 })?;
-                self.set_f(rd, fmt, v);
-            }
-            FOp::Store { fmt, rs2, rs1, off } => {
-                let at = self.xlen.addr(self.get(rs1).wrapping_add_signed(off));
-                let raw = self.f.get(n(rs2)).copied().unwrap_or(0);
-                self.store(at, if fmt == Fmt::S { 4 } else { 8 }, raw)?;
-            }
-            FOp::MvToInt { fmt, rd, rs1 } => {
-                let raw = self.f.get(n(rs1)).copied().unwrap_or(0);
-                let v = if fmt == Fmt::S { sext32(raw) } else { raw };
-                self.set_x(n(rd), v);
-            }
-            FOp::MvFromInt { fmt, rd, rs1 } => self.set_f(rd, fmt, self.get(rs1)),
-            FOp::Arith {
-                op: op @ (FArith::Sgnj | FArith::Sgnjn | FArith::Sgnjx),
-                fmt,
-                rd,
-                rs1,
-                rs2,
-                ..
-            } => {
-                let sign = if fmt == Fmt::S {
-                    1u64 << 31
-                } else {
-                    1u64 << 63
-                };
-                let (a, b) = (bits(self, fmt, rs1), bits(self, fmt, rs2));
-                let s = match op {
-                    FArith::Sgnjn => !b & sign,
-                    FArith::Sgnjx => (a ^ b) & sign,
-                    FArith::Sgnj
-                    | FArith::Add
-                    | FArith::Sub
-                    | FArith::Mul
-                    | FArith::Div
-                    | FArith::Min
-                    | FArith::Max => b & sign,
-                };
-                self.set_f(rd, fmt, (a & !sign) | s);
-            }
-            FOp::Arith { .. }
-            | FOp::Sqrt { .. }
-            | FOp::Fused { .. }
-            | FOp::Cmp { .. }
-            | FOp::Class { .. }
-            | FOp::ToInt { .. }
-            | FOp::FromInt { .. }
-            | FOp::Convert { .. } => return Err(unmodeled(i)),
-        }
         Ok(())
     }
 }
