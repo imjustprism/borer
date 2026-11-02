@@ -41,7 +41,7 @@ pub(super) fn infer_returns(program: &Program, analysis: &mut Analysis) {
     match program.arch.isa() {
         Some(Isa::A64) => a64::infer_returns(program, analysis),
         Some(Isa::A32) => a32::infer_returns(program, analysis),
-        Some(Isa::Rv(_)) => {}
+        Some(Isa::Rv(xlen)) => rv::infer_returns(program, analysis, xlen),
         Some(Isa::X86 { .. }) | None => returns::infer(program, analysis),
     }
 }

@@ -232,30 +232,45 @@ const HELPER: u64 = 0x1_0030;
 /// `R_RISCV_JUMP_SLOT`.
 const R_JUMP_SLOT: u32 = 5;
 
+/// `main` of [`linked`]: it addresses [`GREETING`] with `auipc` and
+/// `addi`, calls [`HELPER`] with `auipc` and `jalr`, and calls `puts`
+/// through its PLT entry.
+const MAIN: [(usize, u32, usize); 10] = [
+    (0x00, 0x1141, 2),      // ASM: addi sp, sp, -16
+    (0x02, 0xe406, 2),      // ASM: sd ra, 8(sp)
+    (0x04, 0x0000_1517, 4), // ASM: auipc a0, 0x1
+    (0x08, 0xffc5_0513, 4), // ASM: addi a0, a0, -4
+    (0x0c, 0x0000_0097, 4), // ASM: auipc ra, 0x0
+    (0x10, 0x0240_80e7, 4), // ASM: jalr 36(ra)
+    (0x14, 0x02c0_00ef, 4), // ASM: jal 0x10040
+    (0x18, 0x60a2, 2),      // ASM: ld ra, 8(sp)
+    (0x1a, 0x0141, 2),      // ASM: addi sp, sp, 16
+    (0x1c, 0x8082, 2),      // ASM: ret
+];
+
+/// A dynamically linked RV64 executable: [`MAIN`] at [`TEXT`].
+fn linked() -> Program {
+    linked_with(&MAIN)
+}
+
 /// A dynamically linked RV64 executable.
 ///
-/// `main` at [`TEXT`] addresses [`GREETING`] with `auipc` and `addi`, calls [`HELPER`] with `auipc` and
-/// `jalr`, and calls `puts` through its PLT entry at [`PLT_PUTS`], whose
-/// GOT slot a `JUMP_SLOT` relocation binds.
-fn linked() -> Program {
+/// `main` at [`TEXT`] is the code given; [`HELPER`] loads 7 into `a0`,
+/// and `puts` is called through its PLT entry at [`PLT_PUTS`], whose GOT
+/// slot a `JUMP_SLOT` relocation binds.
+///
+/// # Arguments
+///
+/// * `main` - Each instruction's offset in `.text`, encoding and length.
+fn linked_with(main: &[(usize, u32, usize)]) -> Program {
     let mut text = vec![0u8; 0x50];
-    let words: [(usize, u32, usize); 14] = [
-        (0x00, 0x1141, 2),      // ASM: addi sp, sp, -16
-        (0x02, 0xe406, 2),      // ASM: sd ra, 8(sp)
-        (0x04, 0x0000_1517, 4), // ASM: auipc a0, 0x1
-        (0x08, 0xffc5_0513, 4), // ASM: addi a0, a0, -4
-        (0x0c, 0x0000_0097, 4), // ASM: auipc ra, 0x0
-        (0x10, 0x0240_80e7, 4), // ASM: jalr 36(ra)
-        (0x14, 0x02c0_00ef, 4), // ASM: jal 0x10040
-        (0x18, 0x60a2, 2),      // ASM: ld ra, 8(sp)
-        (0x1a, 0x0141, 2),      // ASM: addi sp, sp, 16
-        (0x1c, 0x8082, 2),      // ASM: ret
+    let rest: [(usize, u32, usize); 4] = [
         (0x30, 0x451d, 2),      // ASM: li a0, 7
         (0x32, 0x8082, 2),      // ASM: ret
         (0x40, 0x0000_2e17, 4), // ASM: auipc t3, 0x2
         (0x44, 0xfc0e_3e03, 4), // ASM: ld t3, -64(t3)
     ];
-    for (at, w, n) in words {
+    for &(at, w, n) in main.iter().chain(&rest) {
         text[at..at + n].copy_from_slice(&w.to_le_bytes()[..n]);
     }
     text[0x48..0x4c].copy_from_slice(&0x000e_0367u32.to_le_bytes()); // ASM: jalr t1, 0(t3)
@@ -588,4 +603,24 @@ fn a_caller_ends_at_a_call_whose_next_address_becomes_a_function() {
     assert_eq!(main.end, TEXT + 4, "main ends at its call");
     assert_eq!(main.callees, [TEXT + 0x10]);
     assert!(a.function(TEXT + 4).is_some());
+}
+
+/// A result whose `a0` the caller overwrites before calling an import is
+/// not a float the import reads: the PLT entry says nothing of `fa0`.
+#[test]
+fn an_import_after_a_call_reads_no_float_result() {
+    let p = linked_with(&[
+        (0x00, 0x1141, 2),      // ASM: addi sp, sp, -16
+        (0x02, 0xe406, 2),      // ASM: sd ra, 8(sp)
+        (0x04, 0x02c0_00ef, 4), // ASM: jal 0x10030
+        (0x08, 0x0000_1517, 4), // ASM: auipc a0, 0x1
+        (0x0c, 0xff85_0513, 4), // ASM: addi a0, a0, -8
+        (0x10, 0x0300_00ef, 4), // ASM: jal 0x10040
+        (0x14, 0x60a2, 2),      // ASM: ld ra, 8(sp)
+        (0x16, 0x0141, 2),      // ASM: addi sp, sp, 16
+        (0x18, 0x8082, 2),      // ASM: ret
+    ]);
+    let a = Analysis::compute(&p);
+    let helper = a.function(HELPER).expect("the helper is found");
+    assert_eq!(helper.ret_float, None);
 }

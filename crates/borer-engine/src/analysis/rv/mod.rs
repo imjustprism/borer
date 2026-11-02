@@ -12,10 +12,16 @@
 //! the `addi`, load or store that reads the register it set. A PLT entry
 //! is named after the import its GOT slot holds ([`stub_slot`]).
 //!
+//! Whether a function returns a value is read off its call sites
+//! ([`infer_returns`]).
+//!
 //! Not found yet: the cases of a jump table (a `jr` through a loaded case
 //! ends its path), and the functions only a pointer or nothing names.
 
 use std::collections::{BTreeMap, BTreeSet};
+
+mod returns;
+pub(crate) use returns::infer as infer_returns;
 
 use super::functions::helpers::is_noreturn_name;
 use super::functions::{build_callers_and_names, fuel_for, mix, push_site};

@@ -427,3 +427,157 @@ fn a_jump_linking_in_t1_leaves_the_next_address() {
     let text = decompiled(&code, Arch::RiscV64).concat();
     assert!(text.contains("return 0x10004;"), "{text}");
 }
+
+/// A callee that hands on what its own callee leaves in `a0`, and whose
+/// only caller writes `a0` after the call before reading it, returns
+/// nothing: its declaration is `void` and it hands no value back.
+#[test]
+fn a_result_no_caller_reads_is_void() {
+    let code = [
+        (0x0000_0013, 4), // ASM: nop
+        (0x00c0_00ef, 4), // ASM: jal 0x10010
+        (0x0000_0513, 4), // ASM: li a0, 0
+        (0x0000_8067, 4), // ASM: ret
+        (0x0100_00ef, 4), // ASM: jal 0x10020
+        (0x0000_8067, 4), // ASM: ret
+        (0x0000_0013, 4), // ASM: nop
+        (0x0000_0013, 4), // ASM: nop
+        (0x00b5_3023, 4), // ASM: sd a1, 0(a0)
+        (0x0000_8067, 4), // ASM: ret
+    ];
+    let texts = decompiled(&code, Arch::RiscV64);
+    let callee = texts.get(1).expect("the callee");
+    assert!(callee.contains("void sub_10010("), "{callee}");
+    assert!(!callee.contains("return"), "{callee}");
+}
+
+/// Decompiles a routine with functions named at `AT` offsets, each by its
+/// offset, in the order given.
+///
+/// # Arguments
+///
+/// * `code` - The routine.
+/// * `named` - Each function's name and offset from `AT`.
+fn decompiled_named(code: &[(u32, usize)], named: &[(&str, u64)]) -> Vec<String> {
+    let mut p = image(&assemble(code), Arch::RiscV64);
+    for &(name, off) in named {
+        p.symbols.push(Symbol {
+            name: name.to_owned(),
+            addr: AT + off,
+            kind: SymbolKind::Export,
+        });
+    }
+    let a = Analysis::compute(&p);
+    named
+        .iter()
+        .map(|&(_, off)| decompile(&p, &a, &Overlay::default(), AT + off).expect("decompiles"))
+        .collect()
+}
+
+/// A result an `ecall` may read after the call is not taken as dropped:
+/// a function handing on its own callee's `a0` keeps its result open.
+#[test]
+fn a_result_a_syscall_may_read_is_not_dropped() {
+    let code = [
+        (0x0000_0013, 4), // ASM: nop
+        (0x01c0_00ef, 4), // ASM: jal 0x10020
+        (0x0400_0893, 4), // ASM: li a7, 64
+        (0x0000_0073, 4), // ASM: ecall
+        (0x0000_0513, 4), // ASM: li a0, 0
+        (0x0000_8067, 4), // ASM: ret
+        (0x0000_0013, 4), // ASM: nop
+        (0x0000_0013, 4), // ASM: nop
+        (0x0100_00ef, 4), // ASM: jal 0x10030
+        (0x0000_8067, 4), // ASM: ret
+        (0x0000_0013, 4), // ASM: nop
+        (0x0000_0013, 4), // ASM: nop
+        (0x0030_0513, 4), // ASM: li a0, 3
+        (0x0000_8067, 4), // ASM: ret
+    ];
+    let texts = decompiled_named(&code, &[("forward", 0x20), ("three", 0x30)]);
+    let forward = texts.first().expect("the forwarder");
+    assert!(!forward.contains("void forward("), "{forward}");
+}
+
+/// A double a function leaves in `fa0` and a later call takes as its
+/// first float argument is the function's result: `g(f())`.
+#[test]
+fn a_float_passed_on_to_the_next_call_is_a_result() {
+    let code = [
+        (0x0000_0013, 4), // ASM: nop
+        (0x01c0_00ef, 4), // ASM: jal 0x10020
+        (0x0280_00ef, 4), // ASM: jal 0x10030
+        (0x0000_8067, 4), // ASM: ret
+        (0x0000_0013, 4), // ASM: nop
+        (0x0000_0013, 4), // ASM: nop
+        (0x0000_0013, 4), // ASM: nop
+        (0x0000_0013, 4), // ASM: nop
+        (0x0100_00ef, 4), // ASM: jal 0x10030
+        (0x0000_8067, 4), // ASM: ret
+        (0x0000_0013, 4), // ASM: nop
+        (0x0000_0013, 4), // ASM: nop
+        (0xe205_0553, 4), // ASM: fmv.x.d a0, fa0
+        (0x0000_8067, 4), // ASM: ret
+    ];
+    let texts = decompiled_named(&code, &[("make", 0x20), ("take", 0x30)]);
+    let make = texts.first().expect("the maker");
+    assert!(make.contains("double make("), "{make}");
+}
+
+/// A result an instruction the decoder leaves unknown may read after the
+/// call is not taken as dropped.
+#[test]
+fn a_result_an_unknown_instruction_may_read_is_not_dropped() {
+    let code = [
+        (0x0000_0013, 4), // ASM: nop
+        (0x01c0_00ef, 4), // ASM: jal 0x10020
+        (0x6005_1593, 4), // ASM: clz a1, a0
+        (0x0000_0513, 4), // ASM: li a0, 0
+        (0x0000_8067, 4), // ASM: ret
+        (0x0000_0013, 4), // ASM: nop
+        (0x0000_0013, 4), // ASM: nop
+        (0x0000_0013, 4), // ASM: nop
+        (0x0100_00ef, 4), // ASM: jal 0x10030
+        (0x0000_8067, 4), // ASM: ret
+        (0x0000_0013, 4), // ASM: nop
+        (0x0000_0013, 4), // ASM: nop
+        (0x0030_0513, 4), // ASM: li a0, 3
+        (0x0000_8067, 4), // ASM: ret
+    ];
+    let texts = decompiled_named(&code, &[("forward", 0x20), ("three", 0x30)]);
+    let forward = texts.first().expect("the forwarder");
+    assert!(!forward.contains("void forward("), "{forward}");
+}
+
+/// A result the next callee may read after its first branch is not taken
+/// as dropped: that callee's prologue does not say.
+#[test]
+fn a_result_a_branching_callee_may_read_is_not_dropped() {
+    let code = [
+        (0x0000_0013, 4), // ASM: nop
+        (0x01c0_00ef, 4), // ASM: jal 0x10020
+        (0x0380_00ef, 4), // ASM: jal 0x10040
+        (0x0000_8067, 4), // ASM: ret
+        (0x0000_0013, 4), // ASM: nop
+        (0x0000_0013, 4), // ASM: nop
+        (0x0000_0013, 4), // ASM: nop
+        (0x0000_0013, 4), // ASM: nop
+        (0x0100_00ef, 4), // ASM: jal 0x10030
+        (0x0000_8067, 4), // ASM: ret
+        (0x0000_0013, 4), // ASM: nop
+        (0x0000_0013, 4), // ASM: nop
+        (0x0030_0513, 4), // ASM: li a0, 3
+        (0x0000_8067, 4), // ASM: ret
+        (0x0000_0013, 4), // ASM: nop
+        (0x0000_0013, 4), // ASM: nop
+        (0x0005_8463, 4), // ASM: beqz a1, 0x10048
+        (0x0015_0513, 4), // ASM: addi a0, a0, 1
+        (0x0000_8067, 4), // ASM: ret
+    ];
+    let texts = decompiled_named(
+        &code,
+        &[("forward", 0x20), ("three", 0x30), ("branchy", 0x40)],
+    );
+    let forward = texts.first().expect("the forwarder");
+    assert!(!forward.contains("void forward("), "{forward}");
+}
