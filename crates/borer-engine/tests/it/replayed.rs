@@ -365,3 +365,27 @@ fn a_switch_through_a_table_that_reads_as_a_string_reads_its_index() {
         assert!(switches > 0, "{}", replay_tsv(&r));
     }
 }
+
+/// A block that writes over its own later instructions is not checked:
+/// the machine runs the bytes the block wrote, the text the bytes the
+/// image holds, so no lifting of the image's bytes could agree.
+#[test]
+fn a_block_writing_over_its_own_code_is_not_checked() {
+    let p = program64(&[
+        0x48, 0x8d, 0x05, 0x00, 0x00, 0x00, 0x00, // ASM: lea rax,[rip]
+        0x66, 0xc7, 0x40, 0x08, 0x90, 0x90, // ASM: mov word [rax+8],0x9090
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xff, 0xc0, // ASM: inc eax
+        0xc3, // ASM: ret
+    ]);
+    let a = Analysis::compute(&p);
+    let r = replay(&p, &a, &[0x1_4000_1000], 1);
+    assert_eq!((r.functions, r.blocks), (1, 1), "{}", replay_tsv(&r));
+    assert_eq!(
+        r.skipped.get("the block writes over its own code"),
+        Some(&1),
+        "{}",
+        replay_tsv(&r)
+    );
+    assert!(r.wrong().is_empty(), "{}", replay_tsv(&r));
+}

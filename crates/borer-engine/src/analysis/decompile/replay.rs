@@ -91,7 +91,7 @@ use super::verify::{
 };
 use super::{Ctx, decompile_with, table_target};
 use crate::analysis::{Analysis, BasicBlock, Overlay, striped_with};
-use crate::emulate::{Emulator, Stop, fill_byte};
+use crate::emulate::{Emulator, HISTORY_MAX, Run, Stop, fill_byte};
 use crate::fxmap::{FxHashMap, FxHashSet};
 use crate::isa::Isa;
 use crate::num::{from_usize, lo8};
@@ -1707,6 +1707,40 @@ fn operand(emu: &Emulator<'_>, i: &Instruction, width: u8) -> Option<u64> {
         }
         _ => None,
     }
+}
+
+/// Tells whether a block's run on the machine is one its text can be held
+/// to.
+///
+/// It must stop where the comparison is made and write none of the
+/// block's own bytes, which the machine would then run in place of the
+/// ones the text was lifted from; a run whose writes fill the history
+/// cannot show that, so it is not compared either.
+///
+/// # Arguments
+///
+/// * `run` - The machine's run.
+/// * `stop` - Where it was to stop.
+/// * `code` - The block's bytes.
+///
+/// # Errors
+///
+/// Why the run is not compared.
+fn ran_to(run: &Run, stop: u64, code: std::ops::Range<u64>) -> Result<(), &'static str> {
+    match run.stop {
+        Stop::Stopped(at) if at == stop => {}
+        Stop::Unmodeled(_) => return Err("an instruction the emulator does not model"),
+        Stop::Fault(_) => return Err("a fault on the emulator"),
+        Stop::Budget => return Err("a repeat past the regions compared"),
+        _ => return Err("the emulator stopped early"),
+    }
+    if run.history.len() >= HISTORY_MAX {
+        return Err("more writes than the history keeps");
+    }
+    if run.history.iter().any(|w| code.contains(&w.addr)) {
+        return Err("the block writes over its own code");
+    }
+    Ok(())
 }
 
 /// Where the replay notes the last write of a variable held outside
@@ -3423,13 +3457,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         }
         emu.stop_at(Some(end.stop::<L>()));
         let run = emu.run(block.start);
-        match run.stop {
-            Stop::Stopped(at) if at == end.stop::<L>() => {}
-            Stop::Unmodeled(_) => return Err("an instruction the emulator does not model"),
-            Stop::Fault(_) => return Err("a fault on the emulator"),
-            Stop::Budget => return Err("a repeat past the regions compared"),
-            _ => return Err("the emulator stopped early"),
-        }
+        ran_to(&run, end.stop::<L>(), block.start..block.end)?;
         let written: FxHashSet<u64> = run.history.iter().map(|x| x.addr).collect();
         text.rsp = emu.register(<L::Rig<'p> as Bench>::SP);
         let frame = (sp0, rsp, mask);

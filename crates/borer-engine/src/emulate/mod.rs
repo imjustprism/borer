@@ -136,7 +136,7 @@ pub struct Written {
 }
 
 /// Bytes kept in the write history, so a long run cannot fill memory.
-const HISTORY_MAX: usize = 1 << 16;
+pub(crate) const HISTORY_MAX: usize = 1 << 16;
 
 /// Most distinct bytes memory holds, written, poked and planted alike; at
 /// tens of bytes of map each, a run stays under about a gigabyte.
