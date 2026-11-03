@@ -406,12 +406,13 @@ fn library_items(
     decls: &BTreeMap<String, Declared>,
 ) -> Vec<Item> {
     let (types, declared) = typed_words(text);
+    let declared: BTreeSet<String> = declared.into_iter().collect();
     let used = words(text);
     let objects: Vec<(&String, &'static str)> = used
         .iter()
         .filter(|w| {
             *w != own
-                && !declared.contains(w)
+                && !declared.contains(w.as_str())
                 && !decls.contains_key(*w)
                 && (ix.data.contains_key(*w) || ix.imports.contains(*w))
         })
@@ -453,7 +454,9 @@ fn library_items(
     }
     items.extend(
         used.iter()
-            .filter(|w| !declared.contains(w) && !w.contains(|c: char| c.is_ascii_lowercase()))
+            .filter(|w| {
+                !declared.contains(w.as_str()) && !w.contains(|c: char| c.is_ascii_lowercase())
+            })
             .filter_map(|w| {
                 crate::analysis::typelib::value_of(w, format)
                     .map(|v| Item::Constant(Name::of(w), v))
