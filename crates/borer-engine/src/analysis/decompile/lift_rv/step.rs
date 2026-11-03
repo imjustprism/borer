@@ -186,10 +186,10 @@ impl Lift<'_, '_> {
                 Some(())
             }
             ROp::Float(f) => self.float(f),
+            ROp::Ecall => self.syscall(),
             ROp::Jal { .. }
             | ROp::Jalr { .. }
             | ROp::Branch { .. }
-            | ROp::Ecall
             | ROp::Ebreak
             | ROp::Csr { .. }
             | ROp::TrapRet

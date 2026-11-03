@@ -8,6 +8,8 @@
 //! call leaves alone is written out; afterwards the registers a call may
 //! change hold nothing but its result, in `a0` or `fa0`. A return hands
 //! back `a0` (or `fa0` for a float) unless the function returns nothing.
+//! An `ecall` a Linux image makes with a number the C library names is
+//! that call.
 
 use super::super::Ctx;
 use super::super::abi::{self, rv as rv_abi};
@@ -16,6 +18,42 @@ use super::super::lift::{self, ArgAt, Callee, EffectKind, Returns, Shown, stated
 use super::Lift;
 use super::shape::{arg_reg, arg_regs};
 use crate::isa::rv::{Insn, Op as ROp, Reg};
+use crate::program::BinaryFormat;
+
+/// The register a Linux system call takes its number in, `a7`.
+pub(super) const SYSCALL_NR: Reg = Reg::X(17);
+
+/// Returns the name and argument registers of the Linux system call `nr`
+/// names in an image of `ctx`.
+///
+/// The call is one the generic table names, other than an exit, that the
+/// C library declares with a fixed parameter list: a variable one (`openat`,
+/// `fcntl`) does not say which registers the kernel reads. RISC-V Linux
+/// numbers its calls from the table arm64 uses.
+///
+/// # Arguments
+///
+/// * `ctx` - The function's state, for the image's format.
+/// * `nr` - The number in `a7`.
+///
+/// # Returns
+///
+/// `None` for any other number, or an image that is not ELF.
+pub(super) fn named_syscall(ctx: &Ctx<'_>, nr: u64) -> Option<(&'static str, Vec<Reg>)> {
+    if matches!(nr, 93 | 94) || ctx.program.format != BinaryFormat::Elf {
+        return None;
+    }
+    let name = crate::emulate::a64::a64_syscall_name(nr)?;
+    let d = crate::analysis::typelib::declared(name, BinaryFormat::Elf)?;
+    if d.variadic {
+        return None;
+    }
+    let regs = (0..d.params.len())
+        .filter_map(|k| u8::try_from(k).ok()?.checked_add(rv_abi::FIRST_ARG))
+        .map(Reg::X)
+        .collect();
+    Some((name, regs))
+}
 
 /// The register the function at hand hands its result back in: `fa0` for
 /// a float, else `a0`.
@@ -32,6 +70,47 @@ pub(in crate::analysis::decompile) fn result_reg(ctx: &Ctx<'_>) -> Reg {
 }
 
 impl Lift<'_, '_> {
+    /// Lifts an `ecall` that [`named_syscall`] names: `a0 = write(a0, a1,
+    /// a2);`, its arguments from `a0` up, its result in `a0`, and every
+    /// other register as the kernel leaves it.
+    ///
+    /// What the kernel answers is not modeled, so the instruction still
+    /// counts as unmodeled and the lifter's check skips its block, and
+    /// memory is forgotten, as the kernel may write it. An argument still
+    /// the bare incoming register, which the function's parameters did not
+    /// take (its number set where [`mod@super::shape`] does not look), leaves
+    /// the `ecall` unnamed.
+    ///
+    /// # Returns
+    ///
+    /// `None` for any other `ecall`.
+    pub(super) fn syscall(&mut self) -> Option<()> {
+        let Expr::Const(nr) = self.get(SYSCALL_NR) else {
+            return None;
+        };
+        let (name, regs) = named_syscall(self.ex.ctx, nr)?;
+        if regs
+            .iter()
+            .any(|&r| matches!(self.get(r), Expr::Var(Key::Rv(_))))
+        {
+            return None;
+        }
+        self.forget_memory();
+        let args: Vec<Expr> = regs.into_iter().map(|r| self.get(r)).collect();
+        let t = self.ex.fresh_tmp(self.word_ty());
+        if self.ex.emit {
+            let names = self.ex.names();
+            let shown: Vec<String> = args.iter().map(|a| a.render(&names)).collect();
+            self.ex
+                .lines
+                .push(format!("{} = {name}({});", names.key(t), shown.join(", ")));
+            self.ex.record(EffectKind::Unmodeled);
+        }
+        self.ex.unmodeled += 1;
+        self.write(Reg::X(rv_abi::FIRST_ARG), Expr::Var(t));
+        Some(())
+    }
+
     /// The integer type a register's whole value has.
     fn word_ty(&self) -> Ty {
         if self.w() == 32 { Ty::U32 } else { Ty::U64 }

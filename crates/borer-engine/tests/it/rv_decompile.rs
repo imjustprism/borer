@@ -17,7 +17,7 @@ use borer_engine::analysis::decompile::decompile;
 use borer_engine::analysis::protos::Proto;
 use borer_engine::analysis::render::calls_tsv;
 use borer_engine::analysis::{Analysis, Overlay};
-use borer_engine::program::{Arch, Symbol, SymbolKind};
+use borer_engine::program::{Arch, BinaryFormat, Symbol, SymbolKind};
 
 use crate::rv_emulate::{AT, assemble, image};
 
@@ -738,4 +738,105 @@ fn atomics_read_then_store_what_they_make() {
         }
         assert!(!text.contains("/* asm"), "{text}");
     }
+}
+
+/// Decompiles a routine's first function as a Linux image's.
+///
+/// # Arguments
+///
+/// * `code` - The routine's encodings and their lengths.
+fn decompiled_elf(code: &[(u32, usize)]) -> String {
+    let mut p = image(&assemble(code), Arch::RiscV64);
+    p.format = BinaryFormat::Elf;
+    let a = Analysis::compute(&p);
+    decompile(&p, &a, &Overlay::default(), AT).expect("decompiles")
+}
+
+/// An `ecall` with `a7` set to a number the generic table names is that
+/// call, its arguments from `a0` up and parameters of the function; a
+/// number it does not name stays asm.
+#[test]
+fn an_ecall_a_number_names_is_that_call() {
+    let named = [
+        (0x0400_0893, 4), // ASM: li a7, 64
+        (0x0000_0073, 4), // ASM: ecall
+        (0x0000_8067, 4), // ASM: ret
+    ];
+    let text = decompiled_elf(&named);
+    assert!(text.contains("write(a1, a2, a3);"), "{text}");
+    assert!(!text.contains("/* asm"), "{text}");
+    let unnamed = [
+        (0x3e80_0893, 4), // ASM: li a7, 1000
+        (0x0000_0073, 4), // ASM: ecall
+        (0x0000_8067, 4), // ASM: ret
+    ];
+    let text = decompiled_elf(&unnamed);
+    assert!(text.contains("/* asm: ecall */"), "{text}");
+}
+
+/// A buffer a named `read` fills is read again after it, not the zero
+/// stored before the call.
+#[test]
+fn a_buffer_a_syscall_fills_is_read_again() {
+    let code = [
+        (0xff01_0113, 4), // ASM: addi sp, sp, -16
+        (0x0001_3023, 4), // ASM: sd zero, 0(sp)
+        (0x03f0_0893, 4), // ASM: li a7, 63
+        (0x0000_0513, 4), // ASM: li a0, 0
+        (0x0001_0593, 4), // ASM: mv a1, sp
+        (0x0080_0613, 4), // ASM: li a2, 8
+        (0x0000_0073, 4), // ASM: ecall
+        (0x0001_3503, 4), // ASM: ld a0, 0(sp)
+        (0x0101_0113, 4), // ASM: addi sp, sp, 16
+        (0x0000_8067, 4), // ASM: ret
+    ];
+    let text = decompiled_elf(&code);
+    assert!(text.contains("read(0, "), "{text}");
+    assert!(!text.contains("return 0;"), "{text}");
+}
+
+/// An `ecall` stays asm when its call takes a variable argument list, or
+/// when its number reaches `a7` where the parameters were not found.
+#[test]
+fn an_ecall_without_known_arguments_stays_asm() {
+    let variadic = [
+        (0x0380_0893, 4), // ASM: li a7, 56
+        (0x0000_0073, 4), // ASM: ecall
+        (0x0000_8067, 4), // ASM: ret
+    ];
+    let moved = [
+        (0x0400_0293, 4), // ASM: li t0, 64
+        (0x0002_8893, 4), // ASM: mv a7, t0
+        (0x0000_0073, 4), // ASM: ecall
+        (0x0000_8067, 4), // ASM: ret
+    ];
+    for code in [&variadic[..], &moved[..]] {
+        let text = decompiled_elf(code);
+        assert!(text.contains("/* asm: ecall */"), "{text}");
+    }
+}
+
+/// A value loaded before a named syscall is what the call takes, not a
+/// read through it, and a second syscall's argument the first one's
+/// result is no parameter.
+#[test]
+fn a_syscall_takes_what_was_loaded_and_its_result_is_no_parameter() {
+    let loaded = [
+        (0x0005_3503, 4), // ASM: ld a0, 0(a0)
+        (0x0390_0893, 4), // ASM: li a7, 57
+        (0x0000_0073, 4), // ASM: ecall
+        (0x0000_8067, 4), // ASM: ret
+    ];
+    let text = decompiled_elf(&loaded);
+    assert!(!text.contains("close(*"), "{text}");
+    let chained = [
+        (0x0ac0_0893, 4), // ASM: li a7, 172
+        (0x0000_0073, 4), // ASM: ecall
+        (0x0390_0893, 4), // ASM: li a7, 57
+        (0x0000_0073, 4), // ASM: ecall
+        (0x0000_8067, 4), // ASM: ret
+    ];
+    let text = decompiled_elf(&chained);
+    assert!(text.contains("sub_10000()"), "{text}");
+    assert!(text.contains("getpid()"), "{text}");
 }

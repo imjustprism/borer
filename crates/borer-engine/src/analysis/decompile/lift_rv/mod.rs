@@ -13,8 +13,8 @@
 //! function takes is read from its code ([`mod@shape`]); which registers
 //! each instruction reads and writes is [`live`]'s; the float
 //! instructions are [`float`]'s and the atomics [`atomic`]'s. The CSRs and
-//! `ecall` are not modeled: each stays an `/* asm */` comment and forgets
-//! what it writes.
+//! an `ecall` [`call`] does not name are not modeled: each stays an
+//! `/* asm */` comment and forgets what it writes.
 
 mod atomic;
 mod call;
@@ -385,6 +385,24 @@ impl Lift<'_, '_> {
         }
     }
 
+    /// Forgets what memory held before an instruction that may write it,
+    /// its pending stack stores written out first.
+    fn forget_memory(&mut self) {
+        self.ex.protect_memory();
+        let slots: Vec<Key> = self
+            .ex
+            .env
+            .vals
+            .keys()
+            .copied()
+            .filter(|k| matches!(k, Key::Slot(_)))
+            .collect();
+        for k in slots {
+            self.ex.materialize(k, &mut Vec::new(), None);
+            self.ex.clobber(k);
+        }
+    }
+
     /// Lifts an instruction without a model: keeps its assembly as a
     /// comment and forgets every register it may write and, if it may
     /// write memory, what memory held, its pending stack stores written
@@ -407,19 +425,7 @@ impl Lift<'_, '_> {
             if let Some(p) = &mut self.ex.ctx.probe {
                 p.asm();
             }
-            self.ex.protect_memory();
-            let slots: Vec<Key> = self
-                .ex
-                .env
-                .vals
-                .keys()
-                .copied()
-                .filter(|k| matches!(k, Key::Slot(_)))
-                .collect();
-            for k in slots {
-                self.ex.materialize(k, &mut Vec::new(), None);
-                self.ex.clobber(k);
-            }
+            self.forget_memory();
         }
         let mut written = i.registers().writes;
         if i.op == ROp::Ecall {

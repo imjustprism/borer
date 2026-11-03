@@ -19,7 +19,7 @@ use super::super::lift::{self, Env};
 use super::super::{Ctx, Shape, declared_arity, new_ctx, pointee_type};
 use super::{decode_blocks, live};
 use crate::analysis::{Analysis, Function, Overlay};
-use crate::isa::rv::{Alu, Flow, Fmt, Insn, Op as ROp, Reg, Xlen};
+use crate::isa::rv::{Alu, Flow, Fmt, Insn, Op as ROp, Reg, Xlen, ZERO};
 use crate::program::Program;
 
 /// Most paths the parameter walk follows from the entry.
@@ -123,6 +123,7 @@ fn walk(
         let Some(instrs) = code.get(b) else { continue };
         let mut stopped = false;
         let mut prev = None;
+        let mut nr = None;
         for i in instrs {
             let target = super::transfer_target(prev, i, xlen);
             prev = Some(i);
@@ -140,6 +141,27 @@ fn walk(
             for r in regs.reads {
                 take(&mut found, written, r);
             }
+            if i.op == ROp::Ecall
+                && let Some((_, args)) = nr.and_then(|n| super::call::named_syscall(ctx, n))
+            {
+                for r in args {
+                    take(&mut found, written, r);
+                }
+            }
+            if i.op == ROp::Ecall {
+                written |= arg_bits(Reg::X(rv_abi::FIRST_ARG));
+            }
+            nr = match i.op {
+                ROp::Imm {
+                    op: Alu::Add,
+                    rd: super::call::SYSCALL_NR,
+                    rs1: ZERO,
+                    imm,
+                    word: false,
+                } => Some(xlen.addr(imm.cast_unsigned())),
+                _ if i.registers().writes.contains(&super::call::SYSCALL_NR) => None,
+                _ => nr,
+            };
             if i.flow() == Flow::Call {
                 stopped = true;
                 break;
