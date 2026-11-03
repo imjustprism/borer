@@ -280,9 +280,8 @@ pub(super) fn cast_integer(
 
 /// An integer rounded to `to`, the way `scvtf` and `ucvtf` do.
 ///
-/// The value becomes a double first and a single narrows that double.
-/// For an integer that is the same rounding as a direct conversion to a
-/// single, and it is the rounding the fixed-point form divides before.
+/// The integer rounds once, straight to the width written: a 64-bit
+/// integer made a double first could round twice on its way to a single.
 ///
 /// # Arguments
 ///
@@ -294,21 +293,11 @@ pub(super) fn cast_integer(
     reason = "an integer converted to a float rounds, as the conversion does"
 )]
 pub(super) fn integer_to_float(v: u64, signed: bool, to: Ty) -> u64 {
-    let wide = if signed {
-        v.cast_signed() as f64
-    } else {
-        v as f64
-    };
     match to {
-        Ty::F32 => {
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "narrowing the double to a single is the conversion's last rounding"
-            )]
-            let n = wide as f32;
-            u64::from(n.to_bits())
-        }
-        Ty::F64 => wide.to_bits(),
+        Ty::F32 if signed => u64::from((v.cast_signed() as f32).to_bits()),
+        Ty::F32 => u64::from((v as f32).to_bits()),
+        Ty::F64 if signed => (v.cast_signed() as f64).to_bits(),
+        Ty::F64 => (v as f64).to_bits(),
         Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::U128 => v,
     }
 }

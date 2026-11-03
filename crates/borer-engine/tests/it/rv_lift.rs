@@ -262,3 +262,24 @@ fn incoming_floats_agree_with_the_emulator() {
 fn signs_of_library_results_agree_with_the_emulator() {
     agrees(SIGNS_OF_CALLS);
 }
+
+/// `2^63 + 2^39 + 1`, built in `a0`, converted to a single: rounded once
+/// it is `2^63 + 2^40`, while a double first rounds it to the halfway
+/// point and then to `2^63`.
+const ROUNDED_ONCE: &[(u32, &str)] = &[
+    (0x0010_0513, "li a0, 1"),
+    (0x03f5_1513, "slli a0, a0, 0x3f"),
+    (0x0010_0293, "li t0, 1"),
+    (0x0272_9293, "slli t0, t0, 0x27"),
+    (0x0055_6533, "or a0, a0, t0"),
+    (0x0015_6513, "ori a0, a0, 1"),
+    (0xd035_7553, "fcvt.s.lu fa0, a0"),
+    (0xe005_05d3, "fmv.x.w a1, fa0"),
+];
+
+/// A 64-bit integer converted to a single rounds once, as the machine
+/// does.
+#[test]
+fn a_wide_integer_to_a_single_rounds_once() {
+    agrees(ROUNDED_ONCE);
+}
