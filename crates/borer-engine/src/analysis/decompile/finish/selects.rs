@@ -255,7 +255,8 @@ fn clamp_hoist(lines: &mut Vec<String>, k: usize) -> bool {
         return false;
     };
     let t = line.trim();
-    if t.starts_with("//")
+    if !t.contains('?')
+        || t.starts_with("//")
         || t.starts_with("for (")
         || t.starts_with("return")
         || t.starts_with('}')
@@ -808,6 +809,9 @@ fn preassigned_if_else(lines: &mut Vec<String>, k: usize) -> bool {
     else {
         return false;
     };
+    let Some(cond) = if_opener(if_line.trim()).map(str::to_owned) else {
+        return false;
+    };
     let local_unaliased = private(lines, &v)
         || (lines
             .iter()
@@ -815,9 +819,6 @@ fn preassigned_if_else(lines: &mut Vec<String>, k: usize) -> bool {
             && !lines
                 .iter()
                 .any(|l| !l.trim_start().starts_with("//") && l.contains(&format!("&{v}"))));
-    let Some(cond) = if_opener(if_line.trim()).map(str::to_owned) else {
-        return false;
-    };
     let Some(close) = loops::closing(lines, k + 1, pad)
         .filter(|&c| lines.get(c).is_some_and(|l| l.trim() == "}"))
     else {
