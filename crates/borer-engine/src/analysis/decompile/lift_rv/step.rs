@@ -11,7 +11,7 @@ use super::super::expr::{
     Cc, Cond, Expr, Flags, Op, Ty, fold, mask, mask_bits, sign_extend, ternary,
 };
 use super::{Lift, offset};
-use crate::isa::rv::{Alu, Insn, Op as ROp, Width, Xlen};
+use crate::isa::rv::{Alu, Insn, Op as ROp, Reg, Width, Xlen};
 use crate::isa::x86::ConditionCode;
 
 /// The type a load or store of `width` moves.
@@ -19,7 +19,7 @@ use crate::isa::x86::ConditionCode;
 /// # Arguments
 ///
 /// * `width` - What it moves.
-fn access(width: Width) -> Ty {
+pub(super) fn access(width: Width) -> Ty {
     match width {
         Width::B | Width::Bu => Ty::U8,
         Width::H | Width::Hu => Ty::U16,
@@ -92,6 +92,22 @@ fn divide(op: Op, x: Expr, y: Expr, bits: u8) -> Expr {
 }
 
 impl Lift<'_, '_> {
+    /// Returns a register's value as a store of `ty` writes it: its low
+    /// bits when `ty` is narrower than the register.
+    ///
+    /// # Arguments
+    ///
+    /// * `r` - The register stored.
+    /// * `ty` - The type written.
+    pub(super) fn narrowed(&self, r: Reg, ty: Ty) -> Expr {
+        let v = self.get(r);
+        if ty.bits() < self.w() {
+            mask(v, mask_bits(ty.bits()))
+        } else {
+            v
+        }
+    }
+
     /// Lifts an instruction that does not move control.
     ///
     /// # Arguments
@@ -159,17 +175,16 @@ impl Lift<'_, '_> {
                 off,
             } => {
                 let ty = access(width);
-                let v = self.get(rs2);
-                let v = if ty.bits() < w {
-                    mask(v, (1u64 << ty.bits()) - 1)
-                } else {
-                    v
-                };
+                let v = self.narrowed(rs2, ty);
                 let at = offset(self.get(rs1), off, w);
                 self.ex.store_at(at, ty, v);
                 Some(())
             }
             ROp::Fence { .. } | ROp::FenceI => Some(()),
+            ROp::Lr { .. } | ROp::Sc { .. } | ROp::Amo { .. } => {
+                self.atomic(i.op);
+                Some(())
+            }
             ROp::Float(f) => self.float(f),
             ROp::Jal { .. }
             | ROp::Jalr { .. }
@@ -177,9 +192,6 @@ impl Lift<'_, '_> {
             | ROp::Ecall
             | ROp::Ebreak
             | ROp::Csr { .. }
-            | ROp::Lr { .. }
-            | ROp::Sc { .. }
-            | ROp::Amo { .. }
             | ROp::TrapRet
             | ROp::System
             | ROp::Unknown

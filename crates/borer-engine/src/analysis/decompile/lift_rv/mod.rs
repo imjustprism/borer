@@ -12,9 +12,11 @@
 //! sequence's `auipc` and `jalr` naming their target as one; what a
 //! function takes is read from its code ([`mod@shape`]); which registers
 //! each instruction reads and writes is [`live`]'s; the float
-//! instructions are [`float`]'s. The atomics, the CSRs and `ecall` are not
-//! modeled: each stays an `/* asm */` comment and forgets what it writes.
+//! instructions are [`float`]'s and the atomics [`atomic`]'s. The CSRs and
+//! `ecall` are not modeled: each stays an `/* asm */` comment and forgets
+//! what it writes.
 
+mod atomic;
 mod call;
 mod float;
 mod live;

@@ -716,3 +716,26 @@ fn a_sign_of_a_library_result_stays_a_float_operator() {
     assert!(text.contains("fabs(fma(a1, a2, a3))"), "{text}");
     assert!(!text.contains('&'), "{text}");
 }
+
+/// An atomic memory operation reads the old value and stores what the
+/// operation makes of it.
+///
+/// The cases are a sum, a signed minimum at the word and an unsigned
+/// maximum. A store-conditional is a store that hands back 0.
+#[test]
+fn atomics_read_then_store_what_they_make() {
+    let ret = (0x0000_8067, 4); // ASM: ret
+    let cases: [((u32, usize), &[&str]); 4] = [
+        ((0x00b5_25af, 4), &["*(uint32_t*)a1 = ", " + a2;"]), // ASM: amoadd.w a1, a1, (a0)
+        ((0x80b5_25af, 4), &["(int32_t)", " <= (int32_t)a2"]), // ASM: amomin.w a1, a1, (a0)
+        ((0xe0b5_35af, 4), &["umax(*(uint64_t*)a1, a2)"]),    // ASM: amomaxu.d a1, a1, (a0)
+        ((0x18b5_252f, 4), &["*(uint32_t*)a1 = a2;", "return 0;"]), // ASM: sc.w a0, a1, (a0)
+    ];
+    for (insn, wants) in cases {
+        let text = decompiled(&[insn, ret], Arch::RiscV64).concat();
+        for want in wants {
+            assert!(text.contains(want), "{want}: {text}");
+        }
+        assert!(!text.contains("/* asm"), "{text}");
+    }
+}

@@ -283,3 +283,34 @@ const ROUNDED_ONCE: &[(u32, &str)] = &[
 fn a_wide_integer_to_a_single_rounds_once() {
     agrees(ROUNDED_ONCE);
 }
+
+/// Every atomic memory operation at both widths, the load-reserveds and a
+/// store-conditional, each through the pointer in `a0`.
+///
+/// Each runs alone in its routine: a later one would read the bytes an
+/// earlier one wrote, which the check does not compare. One destination
+/// is also the operand.
+const ATOMICS: &[(u32, &str)] = &[
+    (0x00b5_362f, "amoadd.d a2, a1, (a0)"),
+    (0x08b5_26af, "amoswap.w a3, a1, (a0)"),
+    (0x80c5_272f, "amomin.w a4, a2, (a0)"),
+    (0x80c5_372f, "amomin.d a4, a2, (a0)"),
+    (0xe0b5_37af, "amomaxu.d a5, a1, (a0)"),
+    (0x20b5_282f, "amoxor.w a6, a1, (a0)"),
+    (0x60b5_38af, "amoand.d a7, a1, (a0)"),
+    (0x40c5_232f, "amoor.w t1, a2, (a0)"),
+    (0xa0b5_33af, "amomax.d t2, a1, (a0)"),
+    (0xc0b5_2e2f, "amominu.w t3, a1, (a0)"),
+    (0x00b5_25af, "amoadd.w a1, a1, (a0)"),
+    (0x1005_3eaf, "lr.d t4, (a0)"),
+    (0x1005_2faf, "lr.w t6, (a0)"),
+    (0x18c5_2f2f, "sc.w t5, a2, (a0)"),
+];
+
+/// The atomics agree with the emulator.
+#[test]
+fn the_atomics_agree_with_the_emulator() {
+    for one in ATOMICS {
+        agrees(std::slice::from_ref(one));
+    }
+}
