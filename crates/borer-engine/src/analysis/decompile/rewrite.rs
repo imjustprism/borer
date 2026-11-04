@@ -79,15 +79,18 @@ pub(super) fn merge_chains(lines: &mut Vec<String>) -> bool {
         };
         let indent = pad_of(&lines[i]).to_owned();
         let mut run: Vec<(String, String)> = vec![(first.0.to_owned(), first.1.to_owned())];
+        let mut lefts = BTreeSet::from([first.0]);
+        let mut read: BTreeSet<&str> = tokens(first.1).collect();
         let mut j = i + 1;
         while j < lines.len()
             && let Some((l, r)) = pure(&lines[j])
-            && !run
-                .iter()
-                .any(|(tl, tr)| tl == l || mentions_ident(tr, l) || mentions_ident(r, tl))
-            && !mentions_ident(r, l)
+            && !lefts.contains(l)
+            && !read.contains(l)
+            && !tokens(r).any(|w| w == l || lefts.contains(w))
         {
             run.push((l.to_owned(), r.to_owned()));
+            lefts.insert(l);
+            read.extend(tokens(r));
             j += 1;
         }
         if run.len() == 1 {
