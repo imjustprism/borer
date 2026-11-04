@@ -589,17 +589,23 @@ pub(in crate::analysis::decompile) fn inferred_type(
 }
 
 /// The words a 32-bit cast stands right in front of, on the lines that
-/// are not comments, read once for every variable of a text.
+/// are not comments, and the narrow declarations and located globals of a
+/// text, read once for every variable of it.
 ///
 /// [`inferred_type_on`] asks of each variable whether the text casts it
-/// to 32 bits and never widens it back, which a search of every line for
-/// each variable answered at the cost of the text times its variables.
+/// to 32 bits and never widens it back, and of each assignment what the
+/// destination is declared as, which a search of every line for each
+/// variable answered at the cost of the text times its variables.
 #[derive(Debug, Default)]
 pub(in crate::analysis::decompile) struct Casts<'a> {
     /// The word after each `(int64_t)(int32_t)`.
     widened: BTreeSet<&'a str>,
     /// The word after each `(int32_t)` and `(uint32_t)`.
     narrowed: BTreeSet<&'a str>,
+    /// Each variable's first narrow declaration ([`declared_scalar`]).
+    scalars: BTreeMap<&'a str, &'static str>,
+    /// The words of every line carrying `// @` ([`global_name`]).
+    globals: BTreeSet<&'a str>,
 }
 
 impl<'a> Casts<'a> {
@@ -621,6 +627,18 @@ impl<'a> Casts<'a> {
             casts.widened.extend(words(line, "(int64_t)(int32_t)"));
             casts.narrowed.extend(words(line, "(int32_t)"));
             casts.narrowed.extend(words(line, "(uint32_t)"));
+        }
+        for line in lines {
+            if let Some((ty, names)) = declaration(line)
+                && let Some(w) = scalar_width(ty)
+            {
+                for n in names {
+                    casts.scalars.entry(n).or_insert(w);
+                }
+            }
+            casts
+                .globals
+                .extend(global_words(line).into_iter().flatten());
         }
         casts
     }
@@ -695,7 +713,7 @@ pub(in crate::analysis::decompile) fn inferred_type_on<'a>(
                 stored
             } else if head.trim() == "return" && tail.trim_start().starts_with(';') {
                 scalar_width(signature_result(lines)?)?
-            } else if let Some(width) = assigned_width(lines, head, tail) {
+            } else if let Some(width) = assigned_width(lines, casts, head, tail) {
                 width
             } else if let Some(bits) = mask_width(tail).or_else(|| offset_mask_width(head, tail)) {
                 if has_cast32
@@ -852,9 +870,15 @@ fn is_offset_stmt_tail(tail: &str, paren: bool) -> bool {
 /// # Arguments
 ///
 /// * `lines` - The function, declarations included.
+/// * `casts` - The casts of `lines` ([`Casts::of`]).
 /// * `head` - The line up to the name.
 /// * `tail` - The line after the name.
-fn assigned_width(lines: &[String], head: &str, tail: &str) -> Option<&'static str> {
+fn assigned_width(
+    lines: &[String],
+    casts: &Casts<'_>,
+    head: &str,
+    tail: &str,
+) -> Option<&'static str> {
     let h = head.trim();
     let (dest, paren) = if let Some(d) = h.strip_suffix(" = (") {
         (d.trim(), true)
@@ -871,8 +895,8 @@ fn assigned_width(lines: &[String], head: &str, tail: &str) -> Option<&'static s
         return Some("uint8_t");
     }
     if ((!paren && tail.trim_start().starts_with(';'))
-        || (global_name(lines, dest) && is_offset_stmt_tail(tail, paren)))
-        && let Some(w) = declared_scalar(lines, dest)
+        || (is_offset_stmt_tail(tail, paren) && casts.globals.contains(dest)))
+        && let Some(&w) = casts.scalars.get(dest)
     {
         return Some(w);
     }
@@ -966,21 +990,30 @@ fn var_reads_are_byte(lines: &[String], dest: &str, depth: u8) -> bool {
 /// * `name` - The variable.
 fn declared_scalar(lines: &[String], name: &str) -> Option<&'static str> {
     lines.iter().find_map(|l| {
-        let code = l
-            .split(" //")
-            .next()
-            .unwrap_or(l)
-            .trim()
-            .strip_suffix(';')?;
-        if code.contains(['=', '(', '*']) {
-            return None;
-        }
-        let mut names = code.split(", ");
-        let (ty, first) = names.next()?.rsplit_once(' ')?;
-        (first == name || names.any(|n| n == name))
-            .then(|| scalar_width(ty.trim()))
-            .flatten()
+        let (ty, mut names) = declaration(l)?;
+        names.any(|n| n == name).then(|| scalar_width(ty)).flatten()
     })
+}
+
+/// The type and names of a declaration line with no initializer, call or
+/// pointer: `uint8_t a, b;`.
+///
+/// # Arguments
+///
+/// * `line` - A line of the function.
+fn declaration(line: &str) -> Option<(&str, impl Iterator<Item = &str>)> {
+    let code = line
+        .split(" //")
+        .next()
+        .unwrap_or(line)
+        .trim()
+        .strip_suffix(';')?;
+    if code.contains(['=', '(', '*']) {
+        return None;
+    }
+    let mut names = code.split(", ");
+    let (ty, first) = names.next()?.rsplit_once(' ')?;
+    Some((ty.trim(), std::iter::once(first).chain(names)))
 }
 
 /// The narrow integer a C type name denotes, as [`inferred_type`] spells it.
@@ -1421,15 +1454,21 @@ fn sole_rhs<'a>(lines: &'a [String], name: &str, before: usize) -> Option<&'a st
 ///
 /// Whether a declaration of `name` carries an address comment.
 fn global_name(lines: &[String], name: &str) -> bool {
-    lines.iter().any(|l| {
-        let Some((code, note)) = l.split_once("//") else {
-            return false;
-        };
-        note.contains('@')
-            && code
-                .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-                .any(|w| w == name)
-    })
+    lines
+        .iter()
+        .any(|l| global_words(l).is_some_and(|mut words| words.any(|w| w == name)))
+}
+
+/// The words before a line's `// @` address comment, `None` when it has
+/// none.
+///
+/// # Arguments
+///
+/// * `line` - A line of the function.
+fn global_words(line: &str) -> Option<impl Iterator<Item = &str>> {
+    let (code, note) = line.split_once("//")?;
+    note.contains('@')
+        .then(|| code.split(|c: char| !c.is_ascii_alphanumeric() && c != '_'))
 }
 
 /// The format string `expr` prints, following one assignment of a name.
