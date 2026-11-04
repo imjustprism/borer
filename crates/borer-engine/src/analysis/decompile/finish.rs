@@ -49,7 +49,7 @@ pub fn polish(text: &str, bitness: u32, packs: &crate::pack::Packs) -> String {
 ///
 /// * `text` - A decompiled function, header lines first.
 /// * `skip` - The passes left out ([`Passes`]).
-/// * `program` - The loaded image, for its bitness.
+/// * `program` - The loaded image, for its word width.
 /// * `analysis` - Discovery results, holding the packs in force.
 /// * `overlay` - The names in force, which the callees' texts are built
 ///   under.
@@ -68,7 +68,7 @@ pub(super) fn polish_at(
 ) -> String {
     polish_skipping(
         text,
-        program.arch.bitness().unwrap_or(64),
+        if program.is_64 { 64 } else { 32 },
         &analysis.packs,
         skip,
         Some((program, analysis, overlay, entry)),

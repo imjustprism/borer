@@ -86,14 +86,10 @@ pub(in crate::analysis::decompile) fn type_parameters(text: &str, word: &str) ->
             continue;
         }
         let narrow_copy = narrow_param_override(&lines, &declared, &param);
-        let signed_word = (declared == "uint32_t"
-            && word == "uint64_t"
-            && !lines
-                .iter()
-                .any(|l| is_declaration(l) && !word_positions(l, "r0").is_empty()))
-        .then(|| inferred_type(&lines, &param))
-        .flatten()
-        .filter(|&t| t == "int32_t");
+        let signed_word = (declared == "uint32_t" && word == "uint64_t")
+            .then(|| inferred_type(&lines, &param))
+            .flatten()
+            .filter(|&t| t == "int32_t");
         let ty = if let Some(narrow) = narrow_copy.or(signed_word) {
             narrow
         } else if declared != word {

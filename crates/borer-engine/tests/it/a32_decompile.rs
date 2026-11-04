@@ -133,7 +133,8 @@ fn text(p: &Program, a: &Analysis, name: &str) -> String {
 /// A `tbb` dispatch is a switch over its guarded index; a compare of two
 /// pairs through `subs` and `sbcs` is the 64-bit order; a literal pool's
 /// word is a constant; a register a lane move writes holds nothing it held
-/// before; a function that sums doubles hands back a double; the remainder
+/// before; a function that sums doubles hands back a double, and its count
+/// compared signed is an `int32_t` the compare needs no cast for; the remainder
 /// a division helper hands back in `r1` is the operator; a saturation is
 /// its clamp.
 #[test]
@@ -157,9 +158,10 @@ fn arm32_functions_decompile_with_their_arguments_and_results() {
     assert!(!lane.contains("a1 + a2"), "{lane}");
     let sum = text(&p, &a, "t_sum_doubles");
     assert!(
-        sum.contains("// signature: double t_sum_doubles(uint32_t a1, uint32_t a2)"),
+        sum.contains("// signature: double t_sum_doubles(double *a1, int32_t a2)"),
         "{sum}"
     );
+    assert!(sum.contains("if (a2 < 1) {"), "{sum}");
     assert!(sum.contains("double d0;"), "{sum}");
     let divmod = text(&p, &a, "a_divmod");
     assert!(
