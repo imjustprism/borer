@@ -921,3 +921,92 @@ fn error_with_a_nonzero_status_ends_its_path() {
     let f2 = text(TEXT + 0x20);
     assert!(f2.contains("return 3"), "{f2}");
 }
+
+/// A switch an unoptimized build compiles resolves as a table, its cases
+/// blocks of the function and no functions of their own.
+///
+/// Clang at `-O0` keeps the index in a stack slot across its bound check
+/// and loads the target through a table no register bases, `mov rax,
+/// [rax*8 + T]; jmp rax`; read as a call through a table of function
+/// pointers, every case became a function. The same shape in 32-bit code
+/// reads `mov eax, [eax*4 + T]`, and a `test` of the loaded target before
+/// the jump reads it without changing it. A call between may replace it,
+/// so no table is read then.
+#[test]
+fn an_unoptimized_switch_through_an_absolute_table_resolves() {
+    let x64: &[u8] = &[
+        0x55, // ASM: push rbp
+        0x48, 0x89, 0xe5, // ASM: mov rbp, rsp
+        0x48, 0x89, 0x7d, 0xf0, // ASM: mov [rbp - 0x10], rdi
+        0x48, 0x8b, 0x45, 0xf0, // ASM: mov rax, [rbp - 0x10]
+        0x48, 0x89, 0x45, 0xe8, // ASM: mov [rbp - 0x18], rax
+        0x48, 0x83, 0xe8, 0x02, // ASM: sub rax, 2
+        0x77, 0x23, // ASM: ja 0x401039
+        0x48, 0x8b, 0x45, 0xe8, // ASM: mov rax, [rbp - 0x18]
+        0x48, 0x8b, 0x04, 0xc5, 0x00, 0x20, 0x40, 0x00, // ASM: mov rax, [rax*8 + 0x402000]
+        0xff, 0xe0, // ASM: jmp rax                     (0x401022)
+    ];
+    let x86: &[u8] = &[
+        0x55, // ASM: push ebp
+        0x89, 0xe5, // ASM: mov ebp, esp
+        0x8b, 0x45, 0x08, // ASM: mov eax, [ebp + 8]
+        0x89, 0x45, 0xf8, // ASM: mov [ebp - 8], eax
+        0x83, 0xe8, 0x02, // ASM: sub eax, 2
+        0x77, 0x21, // ASM: ja 0x40102f
+        0x8b, 0x45, 0xf8, // ASM: mov eax, [ebp - 8]
+        0x8b, 0x04, 0x85, 0x00, 0x20, 0x40, 0x00, // ASM: mov eax, [eax*4 + 0x402000]
+        0xff, 0xe0, // ASM: jmp eax                     (0x401018)
+    ];
+    let mut tested = x64.to_vec();
+    tested[21] = 0x26; // ASM: ja 0x40103c
+    tested.splice(34..34, [0x48, 0x85, 0xc0]); // ASM: test rax, rax
+    let mut called = x64.to_vec();
+    called[21] = 0x25; // ASM: ja 0x40103b
+    called.splice(34..34, [0xff, 0xd2]); // ASM: call rdx
+    for (arch, head, width, resolves) in [
+        (Arch::X86_64, x64, 8usize, true),
+        (Arch::X86, x86, 4, true),
+        (Arch::X86_64, &tested, 8, true),
+        (Arch::X86_64, &called, 8, false),
+    ] {
+        let mut code = head.to_vec();
+        let mut data = Vec::new();
+        let mut cases = Vec::new();
+        for value in [10u8, 20, 30] {
+            cases.push(TEXT + raw_len(&code));
+            data.extend_from_slice(&(TEXT + raw_len(&code)).to_le_bytes()[..width]);
+            code.extend_from_slice(&[0xb8, value, 0, 0, 0, 0x5d, 0xc3]); // ASM: mov eax, value; pop; ret
+        }
+        code.extend_from_slice(&[0x31, 0xc0, 0x5d, 0xc3]); // ASM: xor eax, eax; pop; ret
+        let p = raw::image(arch, &code, &data);
+        let a = Analysis::compute(&p);
+        let jump = TEXT + raw_len(head) - 2;
+        if !resolves {
+            assert!(
+                !a.jump_tables.contains_key(&jump),
+                "a call may replace the target"
+            );
+            continue;
+        }
+        assert_eq!(
+            a.jump_tables.get(&jump).cloned().unwrap_or_default(),
+            cases,
+            "{arch:?}: the table was not resolved: {:x?}",
+            a.jump_tables
+        );
+        for case in &cases {
+            assert!(
+                a.function(*case).is_none(),
+                "{arch:?}: case {case:#x} became a function"
+            );
+        }
+        let text = decompile(&p, &a, &Overlay::default(), TEXT).unwrap_or_default();
+        assert!(text.contains("switch ("), "{arch:?}: {text}");
+        assert!(text.contains("return 20;"), "{arch:?}: {text}");
+    }
+}
+
+/// Returns a code length as an address offset.
+fn raw_len(code: &[u8]) -> u64 {
+    u64::try_from(code.len()).unwrap_or(u64::MAX)
+}

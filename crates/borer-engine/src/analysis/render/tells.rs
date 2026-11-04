@@ -367,7 +367,7 @@ fn hypervisor_bit(instrs: &[Instruction], at: usize) -> bool {
 /// An implicit write counts: `cpuid` writes `rcx`, `rdtsc` writes `rdx`.
 /// A compare only reads its operands.
 fn writes_register(i: &Instruction, reg: Register) -> bool {
-    compares::reg_touch(&mut InstructionInfoFactory::new(), i, reg).1
+    reg_touch(&mut InstructionInfoFactory::new(), i, reg).1
 }
 
 /// Whether `i` tests or compares `reg` against `imm`.

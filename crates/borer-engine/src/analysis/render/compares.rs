@@ -393,7 +393,7 @@ fn immediate_of(i: &Instruction) -> Option<u64> {
 }
 
 /// Whether `n` reads and writes `reg`, by its full register.
-pub(super) fn reg_touch(
+pub(crate) fn reg_touch(
     factory: &mut InstructionInfoFactory,
     n: &Instruction,
     reg: Register,

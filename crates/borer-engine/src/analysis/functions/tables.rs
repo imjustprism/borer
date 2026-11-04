@@ -9,7 +9,9 @@ use crate::analysis::switch_index::{
 };
 use crate::analysis::{read_u32, read_u64};
 use crate::fxmap::FxHashSet;
-use crate::isa::x86::{Code, Instruction, Mnemonic, OpKind, Register};
+use crate::isa::x86::{
+    Code, FlowControl, Instruction, InstructionInfoFactory, Mnemonic, OpKind, Register,
+};
 use crate::num::from_usize;
 use crate::program::Program;
 
@@ -121,7 +123,9 @@ fn prev_instructions(
 /// own section.
 ///
 /// Three shapes are tried before that. The jump's own memory operand may
-/// name the table (`jmp qword [rax * 8 + T]`, what GCC emits). A load
+/// name the table (`jmp qword [rax * 8 + T]`, what GCC emits), or the load
+/// into the register it jumps through (`mov rax, [rax * 8 + T]; jmp rax`,
+/// Clang at `-O0`; [`absolute_table`]). A load
 /// through a `lea`-filled register may name it (`lea rdx, [rip + B]; mov
 /// ecx, [rdx + rax * 4 + D]`, what MSVC emits, where the entries are
 /// offsets from `B`), and a byte table read the same way
@@ -238,16 +242,13 @@ fn read_jump_table(
     let entries = usize::try_from(entries).ok()?;
 
     if let Some(jmp) = decode_at(program, bitness, jmp_va)
-        && jmp.op0_kind() == OpKind::Memory
-        && jmp.memory_index() != Register::None
-        && matches!(jmp.memory_base(), Register::None)
+        && let Some((table, index)) = absolute_table(window, &jmp)
     {
-        let table = jmp.memory_displacement64();
         let picker = window
             .iter()
             .skip(cmp_at)
             .rev()
-            .find_map(|i| byte_index_load(program, i, jmp.memory_index()));
+            .find_map(|i| byte_index_load(program, i, index));
         let found = match picker.and_then(|n| index_bytes(program, n, entries).map(|b| (n, b))) {
             Some((picker, indices)) => {
                 let count = usize::from(*indices.iter().max().unwrap_or(&0)) + 1;
@@ -360,6 +361,44 @@ fn read_jump_table(
         targets,
         picker: None,
     })
+}
+
+/// The table of absolute targets a jump reads, and the register indexing
+/// it, when no register bases the read.
+///
+/// The jump's own operand names it (`jmp qword [rax * 8 + T]`, what GCC
+/// emits), or the load that last wrote the jumped-to register does (`mov
+/// rax, [rax * 8 + T]; jmp rax`, what Clang emits at `-O0`), when nothing
+/// after it writes the register and no call between may.
+///
+/// # Arguments
+///
+/// * `window` - The instructions before the jump, in order.
+/// * `jmp` - The indirect jump.
+///
+/// # Returns
+///
+/// The table's address and its index register, or `None` when neither
+/// reads one.
+fn absolute_table(window: &[Instruction], jmp: &Instruction) -> Option<(u64, Register)> {
+    let read = match jmp.op0_kind() {
+        OpKind::Memory => jmp,
+        OpKind::Register => {
+            let target = jmp.op0_register().full_register();
+            let mut info = InstructionInfoFactory::new();
+            window.iter().rev().find(|i| {
+                matches!(
+                    i.flow_control(),
+                    FlowControl::Call | FlowControl::IndirectCall
+                ) || crate::analysis::render::reg_touch(&mut info, i, target).1
+            })?
+        }
+        _ => return None,
+    };
+    let loads =
+        read == jmp || (read.mnemonic() == Mnemonic::Mov && read.op1_kind() == OpKind::Memory);
+    (loads && read.memory_index() != Register::None && read.memory_base() == Register::None)
+        .then(|| (read.memory_displacement64(), read.memory_index()))
 }
 
 /// Reads a table of offsets that no check bounds, entry by entry.

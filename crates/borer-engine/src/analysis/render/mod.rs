@@ -8,6 +8,7 @@
 mod calls;
 mod catalog;
 mod compares;
+pub(crate) use compares::reg_touch;
 mod dataflow;
 mod decoded;
 mod diff;
