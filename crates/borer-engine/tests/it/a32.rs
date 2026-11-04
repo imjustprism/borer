@@ -960,3 +960,78 @@ fn random_bytes_decode_without_a_panic() {
         }
     }
 }
+
+/// An unoptimized A32 switch loads its target into a register and moves
+/// it to `pc`, and its cases are the table's.
+///
+/// Clang at `-O0` spills the index across its check and dispatches with
+/// `ldr r0, [r0, r1, lsl #2]; mov pc, r0` through a table of absolute
+/// addresses kept in the code after the jump. A load through `pc` reads
+/// the table at its own `pc`, not the jump's.
+#[test]
+fn a_switch_moved_to_pc_from_a_loaded_target_resolves() {
+    let mut words: [u32; 28] = [
+        0xe92d_4800, // ASM: push {r11, lr}
+        0xe1a0_b00d, // ASM: mov r11, sp
+        0xe24d_d008, // ASM: sub sp, sp, #8
+        0xe58d_0004, // ASM: str r0, [sp, #4]
+        0xe59d_0004, // ASM: ldr r0, [sp, #4]
+        0xe58d_0000, // ASM: str r0, [sp]
+        0xe350_0002, // ASM: cmp r0, #2
+        0x8a00_0010, // ASM: bhi 0x64
+        0xe59d_1000, // ASM: ldr r1, [sp]
+        0xe28f_0008, // ASM: add r0, pc, #8
+        0xe790_0101, // ASM: ldr r0, [r0, r1, lsl #2]
+        0xe1a0_f000, // ASM: mov pc, r0                (0x2c)
+        0xe320_f000, // ASM: nop
+        0,           // ASM: .word case 0             (0x34)
+        0,           // ASM: .word case 1
+        0,           // ASM: .word case 2
+        0xe3a0_000a, // ASM: mov r0, #10               (0x40)
+        0xe1a0_d00b, // ASM: mov sp, r11
+        0xe8bd_8800, // ASM: pop {r11, pc}
+        0xe3a0_0014, // ASM: mov r0, #20               (0x4c)
+        0xe1a0_d00b, // ASM: mov sp, r11
+        0xe8bd_8800, // ASM: pop {r11, pc}
+        0xe3a0_001e, // ASM: mov r0, #30               (0x58)
+        0xe1a0_d00b, // ASM: mov sp, r11
+        0xe8bd_8800, // ASM: pop {r11, pc}
+        0xe3a0_0000, // ASM: mov r0, #0                (0x64)
+        0xe1a0_d00b, // ASM: mov sp, r11
+        0xe8bd_8800, // ASM: pop {r11, pc}
+    ];
+    let cases = [ELF_TEXT + 0x40, ELF_TEXT + 0x4c, ELF_TEXT + 0x58];
+    for (slot, case) in words[13..16].iter_mut().zip(cases) {
+        *slot = u32::try_from(case).expect("a 32-bit address");
+    }
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let p = Program::from_bytes(PathBuf::from("mov-pc.elf"), elf32(&bytes, &[], ELF_TEXT))
+        .expect("parses");
+    let a = Analysis::compute(&p);
+    assert_eq!(
+        a.jump_tables.get(&(ELF_TEXT + 0x2c)),
+        Some(&cases.to_vec()),
+        "{:x?}",
+        a.jump_tables
+    );
+    for case in cases {
+        assert!(
+            a.function(case).is_none(),
+            "case {case:#x} became a function"
+        );
+    }
+    words[9] = 0xe320_f000; // ASM: nop
+    words[10] = 0xe320_f000; // ASM: nop
+    words[11] = 0xe79f_0101; // ASM: ldr r0, [pc, r1, lsl #2]  (0x2c, table at 0x34)
+    words[12] = 0xe1a0_f000; // ASM: mov pc, r0                 (0x30)
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let p = Program::from_bytes(PathBuf::from("pc-table.elf"), elf32(&bytes, &[], ELF_TEXT))
+        .expect("parses");
+    let a = Analysis::compute(&p);
+    assert_eq!(
+        a.jump_tables.get(&(ELF_TEXT + 0x30)),
+        Some(&cases.to_vec()),
+        "a table the load names through pc starts where the load reads pc: {:x?}",
+        a.jump_tables
+    );
+}

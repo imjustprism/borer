@@ -318,18 +318,8 @@ fn table(program: &Program, seen: &BTreeMap<u64, Insn>, j: &Insn) -> Option<Tabl
             })
             .collect();
         (targets, base..base + count * 4)
-    } else if let Op::Load {
-        rt: PC,
-        addr:
-            a32::Addr {
-                base: rb,
-                offset: Offset::Reg { amount: 2, .. },
-                index: Index::Offset,
-            },
-        ..
-    } = j.op
-    {
-        let base = if rb == PC { j.pc() } else { adr(rb)? };
+    } else if let Some((rb, pc)) = absolute_base(&older, j) {
+        let base = if rb == PC { pc } else { adr(rb)? };
         let targets = (0..count)
             .map(|k| word(base + k * 4, 4).map(|t| t & !1))
             .collect();
@@ -346,6 +336,54 @@ fn table(program: &Program, seen: &BTreeMap<u64, Insn>, j: &Insn) -> Option<Tabl
             targets,
             bytes,
         })
+}
+
+/// The base register of a table of absolute targets a jump reads, with
+/// the index scaled by 4: `ldr pc, [rb, ri, lsl #2]`, or `ldr rt, [rb, ri,
+/// lsl #2]; mov pc, rt` as Clang emits at `-O0`.
+///
+/// # Arguments
+///
+/// * `older` - The instructions before the jump, nearest first.
+/// * `j` - The indirect jump.
+///
+/// # Returns
+///
+/// The base register and the value `pc` reads as in the load, which is
+/// the table's address when the base is `pc`.
+fn absolute_base(older: &[&Insn], j: &Insn) -> Option<(a32::Reg, u64)> {
+    let table = |op: Op, rt: a32::Reg| match op {
+        Op::Load {
+            rt: r,
+            addr:
+                a32::Addr {
+                    base,
+                    offset: Offset::Reg { amount: 2, .. },
+                    index: Index::Offset,
+                },
+            ..
+        } if r == rt => Some(base),
+        _ => None,
+    };
+    if let Some(base) = table(j.op, PC) {
+        return Some((base, j.pc()));
+    }
+    let Op::Dp {
+        kind: DpKind::Mov,
+        rd: PC,
+        src:
+            Operand::Reg {
+                rm,
+                shift: a32::Shift::Lsl,
+                amount: 0,
+            },
+        ..
+    } = j.op
+    else {
+        return None;
+    };
+    let load = older.first()?;
+    table(load.op, rm).map(|base| (base, load.pc()))
 }
 
 /// What one walk found.
