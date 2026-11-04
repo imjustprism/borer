@@ -26,6 +26,7 @@ mod a32_lift;
 mod a64;
 mod a64_decompile;
 mod a64_emulate;
+mod a64_joins;
 mod a64_lift;
 mod abi;
 mod analysis;

@@ -1701,7 +1701,10 @@ pub(super) fn goto_switch<L: Lifter>(
 /// instead of counted as an exit when it is terminal, heads a short
 /// one-way chain into a terminal block (copied whole at every jump), or
 /// leads one way into blocks that are already exits (the default arm two
-/// halves of a compare ladder share before their common tail); the block
+/// halves of a compare ladder share before their common tail), at most
+/// [`DUP_MAX_INSTRS`] of those in all, since a ladder entering a chain of
+/// such blocks at every step would otherwise copy the rest of the chain
+/// into every step; the block
 /// that ends the region (the other arm's start) is copied only in that
 /// last form, never as a return the region reaches anyway, and only when
 /// the branch asks for it after structuring failed without.
@@ -1822,6 +1825,74 @@ pub(super) fn base_of<L: Lifter>(
     Base { members, closed }
 }
 
+/// Tells whether a block is small enough to copy
+/// ([`DUP_MAX_INSTRS`]).
+///
+/// # Arguments
+///
+/// * `st` - Emission state.
+/// * `b` - The block.
+fn small<L: Lifter>(st: &Emit<'_, L>, b: usize) -> bool {
+    L::body_len(&st.code[b]) <= DUP_MAX_INSTRS
+}
+
+/// Tells whether a block is a small one that goes on to one other block
+/// and may be copied.
+///
+/// # Arguments
+///
+/// * `st` - Emission state.
+/// * `b` - The block.
+fn one_way<L: Lifter>(st: &Emit<'_, L>, b: usize) -> bool {
+    st.succs[b].len() == 1
+        && st.succs[b].first() != Some(&b)
+        && small(st, b)
+        && !st.no_dup.contains(&b)
+}
+
+/// The blocks of a short one-way chain from `b` into a terminal block,
+/// copied whole at every jump into it.
+///
+/// # Arguments
+///
+/// * `st` - Emission state.
+/// * `b` - The chain's first block.
+/// * `headers` - Blocks that enter the region, which no chain runs into.
+/// * `stop_at` - The block that ends the region, which no chain runs into.
+///
+/// # Returns
+///
+/// The chain in order, or `None` when `b` heads none of at most
+/// [`DUP_CHAIN_MAX`] blocks and [`DUP_MAX_INSTRS`] instructions.
+fn dup_chain<L: Lifter>(
+    st: &Emit<'_, L>,
+    b: usize,
+    headers: &BTreeSet<usize>,
+    stop_at: Option<usize>,
+) -> Option<Vec<usize>> {
+    let mut order = vec![b];
+    let mut instrs = L::body_len(&st.code[b]);
+    let mut cur = b;
+    while let Some(&next) = st.succs[cur].first() {
+        if !one_way(st, cur)
+            || (!st.copy_calls && st.blocks[cur].term == BlockTerm::Call)
+            || order.len() >= DUP_CHAIN_MAX
+            || headers.contains(&next)
+            || Some(next) == stop_at
+            || order.contains(&next)
+        {
+            return None;
+        }
+        instrs += L::body_len(&st.code[next]);
+        if instrs > DUP_MAX_INSTRS {
+            return None;
+        }
+        order.push(next);
+        cur = next;
+    }
+    (st.succs[cur].is_empty() && small(st, cur)).then_some(order)
+}
+
 /// [`closed_run_from`] with the region's base computed already, or
 /// computed here when `base` is `None`.
 ///
@@ -1845,36 +1916,8 @@ pub(super) fn closed_run_with<L: Lifter>(
     stop_at: Option<usize>,
     base: Option<&Base>,
 ) -> Region {
-    let small = |b: usize| L::body_len(&st.code[b]) <= DUP_MAX_INSTRS;
-    let one_way = |b: usize| {
-        st.succs[b].len() == 1
-            && st.succs[b].first() != Some(&b)
-            && small(b)
-            && !st.no_dup.contains(&b)
-    };
-    let chain = |b: usize| -> Option<Vec<usize>> {
-        let mut order = vec![b];
-        let mut instrs = L::body_len(&st.code[b]);
-        let mut cur = b;
-        while let Some(&next) = st.succs[cur].first() {
-            if !one_way(cur)
-                || (!st.copy_calls && st.blocks[cur].term == BlockTerm::Call)
-                || order.len() >= DUP_CHAIN_MAX
-                || headers.contains(&next)
-                || Some(next) == stop_at
-                || order.contains(&next)
-            {
-                return None;
-            }
-            instrs += L::body_len(&st.code[next]);
-            if instrs > DUP_MAX_INSTRS {
-                return None;
-            }
-            order.push(next);
-            cur = next;
-        }
-        (st.succs[cur].is_empty() && small(cur)).then_some(order)
-    };
+    let one_way = |b: usize| one_way(st, b);
+    let chain = |b: usize| dup_chain(st, b, headers, stop_at);
     let shared = st.preds[start].iter().any(|p| !headers.contains(p));
     if shared && let Some(order) = chain(start) {
         return Region {
@@ -1912,17 +1955,23 @@ pub(super) fn closed_run_with<L: Lifter>(
         .filter(|&s| !is_marked(&in_region, s))
         .collect();
     let mut dups: BTreeSet<usize> = BTreeSet::new();
+    let mut spare = DUP_MAX_INSTRS;
     loop {
         let more: Vec<Vec<usize>> = exits
             .iter()
             .copied()
             .filter(|&s| !headers.contains(&s))
             .filter_map(|s| {
-                let leads_to_exits = one_way(s) && st.succs[s].iter().all(|t| exits.contains(t));
-                if Some(s) == stop_at {
-                    return (st.copy_stop && leads_to_exits).then(|| vec![s]);
-                }
-                chain(s).or_else(|| leads_to_exits.then(|| vec![s]))
+                let len = L::body_len(&st.code[s]);
+                let leads =
+                    one_way(s) && len <= spare && st.succs[s].iter().all(|t| exits.contains(t));
+                let stop = Some(s) == stop_at;
+                (!stop).then(|| chain(s)).flatten().or_else(|| {
+                    (leads && (!stop || st.copy_stop)).then(|| {
+                        spare = spare.saturating_sub(len);
+                        vec![s]
+                    })
+                })
             })
             .collect();
         if more.is_empty() {
