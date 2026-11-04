@@ -174,8 +174,13 @@ pub(super) fn shape(text: &Text<'_>, br: &Insn) -> Option<Shape> {
 /// value number: a copy (or a zero- or sign-extension from bit 0) gives its
 /// destination the source's number, any other write a fresh one. A `cmp`
 /// of a register with an immediate followed by `b.hi` or `b.hs` bounds the
-/// value the register held, and the table's index is bounded when it
-/// still holds that value at the load, whichever register it went through.
+/// value the register held, as `subs r, r, #N` does when the compiler keeps
+/// the difference, and the table's index is bounded when it still holds
+/// that value at the load, whichever register it went through. A store to
+/// a frame slot and a load back from it carry the number, so an
+/// unoptimized build that spills the index across its check (`str x8,
+/// [sp, #8]; subs x8, x8, #0xb; b.hi default; ldr x11, [sp, #8]`) is
+/// bounded too ([`frame_slot`]).
 ///
 /// # Arguments
 ///
@@ -191,6 +196,7 @@ fn bound(older: &[Insn], index: usize) -> Option<u64> {
     let mut fresh = from_usize(held.len());
     let mut compared: Option<(u64, u64)> = None;
     let mut bounded: Option<(u64, u64)> = None;
+    let mut slots: Vec<((a64::Reg, i64, u16), u64)> = Vec::new();
     for insn in older.iter().rev() {
         if let Op::BCond(c) = insn.op {
             if let Some((value, n)) = compared.take() {
@@ -217,16 +223,38 @@ fn bound(older: &[Insn], index: usize) -> Option<u64> {
         }
         if insn.op == Op::Other
             && insn.mnemonic == Mnemonic::Subs
-            && matches!(
+            && let (Some(r), Opnd::Imm(n)) = (any_reg(&insn.operands[1]), insn.operands[2])
+        {
+            compared = held.get(r).map(|&v| (v, n));
+            if matches!(
                 insn.operands[0],
                 Opnd::Reg {
                     reg: a64::Reg::Zr,
                     ..
                 }
-            )
-            && let (Some(r), Opnd::Imm(n)) = (any_reg(&insn.operands[1]), insn.operands[2])
+            ) {
+                continue;
+            }
+        }
+        let slot = frame_slot(insn);
+        if let Some(((base, at, bits), r)) = slot
+            && matches!(insn.mnemonic, Mnemonic::Str(_))
         {
-            compared = held.get(r).map(|&v| (v, n));
+            let end = at.saturating_add(i64::from(bits / 8));
+            slots.retain(|((b, d, w), _)| {
+                *b == base && (d.saturating_add(i64::from(*w / 8)) <= at || *d >= end)
+            });
+            slots.push(((base, at, bits), held.get(r).copied().unwrap_or_default()));
+            continue;
+        }
+        if clobbers_frame(insn) {
+            slots.clear();
+        }
+        if let Some((slot, r)) = slot
+            && let Some(&(_, v)) = slots.iter().find(|(s, _)| *s == slot)
+            && let Some(h) = held.get_mut(r)
+        {
+            *h = v;
             continue;
         }
         let copy = copied_from(insn).and_then(|r| held.get(r).copied());
@@ -242,6 +270,68 @@ fn bound(older: &[Insn], index: usize) -> Option<u64> {
     }
     let (value, entries) = bounded?;
     (held.get(index) == Some(&value)).then_some(entries)
+}
+
+/// The frame slot a register-width `str` or `ldr` moves a register to or
+/// from, `[sp, #d]` or `[x29, #d]` with no index or writeback, and the
+/// register.
+///
+/// # Arguments
+///
+/// * `insn` - The instruction.
+///
+/// # Returns
+///
+/// The slot as (base, offset, width in bits) and the register's number,
+/// or `None` for any other instruction.
+fn frame_slot(insn: &Insn) -> Option<((a64::Reg, i64, u16), usize)> {
+    if !matches!(
+        insn.mnemonic,
+        Mnemonic::Str(Width::Reg) | Mnemonic::Ldr(Width::Reg)
+    ) {
+        return None;
+    }
+    let Opnd::Reg { reg, bits } = insn.operands[0] else {
+        return None;
+    };
+    let m = mem(insn)?;
+    let frame = matches!(m.base, a64::Reg::Sp | a64::Reg::X(29));
+    (frame && m.index.is_none() && m.mode == a64::Mode::Offset)
+        .then_some(((m.base, m.disp, bits), gpr(reg)?))
+}
+
+/// Tells whether an instruction may change what a frame slot holds or
+/// where one is.
+///
+/// That is a store [`frame_slot`] does not read as one (a structure or SVE
+/// store among them), a call (the callee may be handed a slot's address),
+/// or a write to `sp` or `x29`: a load into it, another write, or an
+/// access's writeback.
+///
+/// # Arguments
+///
+/// * `insn` - The instruction.
+fn clobbers_frame(insn: &Insn) -> bool {
+    let stores = matches!(
+        insn.mnemonic,
+        Mnemonic::Str(_)
+            | Mnemonic::Stp
+            | Mnemonic::Stxr(_)
+            | Mnemonic::Stxp
+            | Mnemonic::Atomic(..)
+            | Mnemonic::Cas(_)
+            | Mnemonic::Stn
+    );
+    let sp = mem(insn).is_some_and(|m| m.base == a64::Reg::Sp && m.mode != a64::Mode::Offset)
+        || (matches!(
+            insn.operands[0],
+            Opnd::Reg {
+                reg: a64::Reg::Sp,
+                ..
+            }
+        ) && mem(insn).is_none());
+    let fp = writes(insn) & (1 << 29) != 0;
+    stores || sp || fp || matches!(insn.op, Op::Bl | Op::Blr | Op::Sve | Op::Sme)
 }
 
 /// Returns the register an instruction copies or zero- or sign-extends

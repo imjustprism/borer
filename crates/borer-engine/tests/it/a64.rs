@@ -2229,3 +2229,77 @@ fn error_with_a_nonzero_status_ends_its_path_on_arm64() {
         "a way in found after the call ended it"
     );
 }
+
+/// An unoptimized switch, whose index is spilled across its check, is
+/// bounded and resolved.
+///
+/// Clang at `-O0` stores the index to a frame slot, checks it with
+/// `subs x8, x8, #2` (keeping the difference it never reads) and loads the
+/// index back from the slot for the table: the check bounds the value the
+/// slot carries to the load, so the three cases are the table's and the
+/// switch reads as one. A store over the slot, a call or a reload of the
+/// frame pointer between the check and the load leaves the index
+/// unbounded.
+#[test]
+fn a_switch_whose_index_is_spilled_across_its_check_resolves() {
+    let code = [
+        0xd100_83ff, // ASM: sub sp, sp, #0x20
+        0xf900_0be0, // ASM: str x0, [sp, #0x10]
+        0xf940_0be8, // ASM: ldr x8, [sp, #0x10]
+        0xf900_07e8, // ASM: str x8, [sp, #8]
+        0xf100_0908, // ASM: subs x8, x8, #2
+        0x5400_0208, // ASM: b.hi 0x401054
+        0xf940_07eb, // ASM: ldr x11, [sp, #8]
+        0x1000_7f2a, // ASM: adr x10, 0x402000
+        0x1000_0008, // ASM: adr x8, 0x401020
+        0xb8ab_7949, // ASM: ldrsw x9, [x10, x11, lsl #2]
+        0x8b09_0108, // ASM: add x8, x8, x9
+        0xd61f_0100, // ASM: br x8                     (0x40102c)
+        0x5280_0140, // ASM: mov w0, #10
+        0x9100_83ff, // ASM: add sp, sp, #0x20
+        0xd65f_03c0, // ASM: ret
+        0x5280_0280, // ASM: mov w0, #20
+        0x9100_83ff, // ASM: add sp, sp, #0x20
+        0xd65f_03c0, // ASM: ret
+        0x5280_03c0, // ASM: mov w0, #30
+        0x9100_83ff, // ASM: add sp, sp, #0x20
+        0xd65f_03c0, // ASM: ret
+        0x5280_0000, // ASM: mov w0, #0
+        0x9100_83ff, // ASM: add sp, sp, #0x20
+        0xd65f_03c0, // ASM: ret
+    ];
+    let data: Vec<u8> = [0x10i32, 0x1c, 0x28]
+        .iter()
+        .flat_map(|e| e.to_le_bytes())
+        .collect();
+    let p = crate::raw::image(Arch::Arm64, &le_words(&code), &data);
+    let a = Analysis::compute(&p);
+    assert_eq!(
+        a.jump_tables.get(&(TEXT + 0x2c)),
+        Some(&vec![TEXT + 0x30, TEXT + 0x3c, TEXT + 0x48]),
+        "{:x?}",
+        a.jump_tables
+    );
+    let text = borer_engine::analysis::decompile::decompile(&p, &a, &Overlay::default(), TEXT)
+        .unwrap_or_default();
+    assert!(text.contains("switch ("), "{text}");
+    assert!(text.contains("return 20;"), "{text}");
+    let mut clobbered = code.to_vec();
+    clobbered[5] = 0x5400_0228; // ASM: b.hi 0x401058
+    clobbered.insert(6, 0);
+    clobbered[8] = 0x1000_7f0a; // ASM: adr x10, 0x402000
+    for (word, what) in [
+        (0xb900_0be9, "a store over the slot"), // ASM: str w9, [sp, #8]
+        (0x9400_0040, "a call"),                // ASM: bl 0x401118
+        (0xa941_7bfd, "a reload of x29"),       // ASM: ldp x29, x30, [sp, #0x10]
+    ] {
+        clobbered[6] = word;
+        let a = Analysis::compute(&crate::raw::image(
+            Arch::Arm64,
+            &le_words(&clobbered),
+            &data,
+        ));
+        let bounded = a.jump_tables.contains_key(&(TEXT + 0x30));
+        assert!(!bounded, "{what} after the check still bounds the table");
+    }
+}
