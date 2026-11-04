@@ -1420,9 +1420,6 @@ fn call_is_whole(l: &Line<'_>) -> bool {
 /// The right-hand side, or `None` when `name` is a global, is written
 /// more than once before the use, or is not assigned before it.
 fn sole_rhs<'a>(lines: &'a [String], name: &str, before: usize) -> Option<&'a str> {
-    if global_name(lines, name) || assigned_values(&lines[..before], name) != 1 {
-        return None;
-    }
     let mut found = None;
     for line in lines.iter().take(before).filter(|l| !l.starts_with("//")) {
         let code = line.split("//").next().unwrap_or("").trim();
@@ -1440,7 +1437,7 @@ fn sole_rhs<'a>(lines: &'a [String], name: &str, before: usize) -> Option<&'a st
         }
         found = Some(rhs.trim());
     }
-    found
+    found.filter(|_| !global_name(lines, name) && assigned_values(&lines[..before], name) == 1)
 }
 
 /// Tells whether `name` is a global the text locates with `// @`.
