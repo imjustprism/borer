@@ -8,7 +8,7 @@
 //! says.
 
 use super::super::expr::{
-    Cc, Cond, Expr, Flags, Op, Ty, fold, mask, mask_bits, sign_extend, ternary,
+    Cc, Cond, Expr, Flags, Op, Ty, fold, mask, mask_bits, sign_extend, table_index, ternary,
 };
 use super::{Lift, offset};
 use crate::isa::rv::{Alu, Insn, Op as ROp, Reg, Width, Xlen};
@@ -158,6 +158,9 @@ impl Lift<'_, '_> {
                 off,
             } => {
                 let at = offset(self.get(rs1), off, w);
+                if self.table_load == Some(i.va) {
+                    self.ex.switch_idx = table_index(&at);
+                }
                 let ty = access(width);
                 let v = self.ex.read_at(at, ty);
                 let v = match width {

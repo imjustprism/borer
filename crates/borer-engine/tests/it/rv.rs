@@ -624,3 +624,43 @@ fn an_import_after_a_call_reads_no_float_result() {
     let helper = a.function(HELPER).expect("the helper is found");
     assert_eq!(helper.ret_float, None);
 }
+
+/// A bounded table whose entries include a known function's start is a
+/// table of functions, not a switch: the dispatch takes no cases, and the
+/// function keeps its own body.
+#[test]
+fn a_table_naming_a_function_is_no_switch() {
+    let mut code = crate::rv_emulate::assemble(&[
+        (0x4589, 2),      // ASM: li a1, 2
+        (0x00a5_ef63, 4), // ASM: bltu a1, a0, 0x10020
+        (0x050a, 2),      // ASM: slli a0, a0, 2
+        (0x65c1, 2),      // ASM: lui a1, 0x10
+        (0x4005_8593, 4), // ASM: addi a1, a1, 0x400
+        (0x952e, 2),      // ASM: add a0, a0, a1
+        (0x4108, 2),      // ASM: lw a0, 0(a0)
+        (0x8502, 2),      // ASM: jr a0          (0x10012)
+        (0x4529, 2),      // ASM: li a0, 10      (0x10014, a function)
+        (0x8082, 2),      // ASM: ret
+        (0x4551, 2),      // ASM: li a0, 20
+        (0x8082, 2),      // ASM: ret
+        (0x4579, 2),      // ASM: li a0, 30
+        (0x8082, 2),      // ASM: ret
+        (0x4501, 2),      // ASM: li a0, 0
+        (0x8082, 2),      // ASM: ret
+    ]);
+    code.resize(0x400, 0);
+    for case in [0x14u64, 0x18, 0x1c] {
+        let at = u32::try_from(TEXT + case).expect("32 bits");
+        code.extend(at.to_le_bytes());
+    }
+    let text = Sec::new(".text", PROGBITS, AX, TEXT, code);
+    let p = symbolized(vec![text], &[TEXT, TEXT + 0x14], TEXT);
+    let a = Analysis::compute(&p);
+    assert!(
+        !a.jump_tables.contains_key(&(TEXT + 0x12)),
+        "{:x?}",
+        a.jump_tables
+    );
+    let f = a.function(TEXT + 0x14).expect("the named function");
+    assert_eq!(f.end, TEXT + 0x18);
+}

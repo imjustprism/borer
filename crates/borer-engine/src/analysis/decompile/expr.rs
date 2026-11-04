@@ -3102,7 +3102,8 @@ fn rotl(v: u64, n: u32, bits: u8) -> u64 {
 ///
 /// # Arguments
 ///
-/// * `e` - An address expression, searched anywhere for `table + x * 4` or `* 8`.
+/// * `e` - An address expression, searched anywhere for `table + x * 4` or `* 8`
+///   (or `x << 2`, `<< 3`, as a RISC-V `slli` builds it).
 ///
 /// # Returns
 ///
@@ -3112,6 +3113,9 @@ pub(super) fn table_index(e: &Expr) -> Option<Expr> {
         Expr::Bin(Op::Add, a, b) => {
             let scaled = |side: &Expr| match side {
                 Expr::Bin(Op::Mul, x, c) if matches!(**c, Expr::Const(4 | 8)) => {
+                    Some((**x).clone())
+                }
+                Expr::Bin(Op::Shl, x, c) if matches!(**c, Expr::Const(2 | 3)) => {
                     Some((**x).clone())
                 }
                 _ => None,

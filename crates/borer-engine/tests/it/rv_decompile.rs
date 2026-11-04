@@ -17,7 +17,7 @@ use borer_engine::analysis::decompile::decompile;
 use borer_engine::analysis::protos::Proto;
 use borer_engine::analysis::render::calls_tsv;
 use borer_engine::analysis::{Analysis, Overlay};
-use borer_engine::program::{Arch, BinaryFormat, Symbol, SymbolKind};
+use borer_engine::program::{Arch, BinaryFormat, Program, Section, Symbol, SymbolKind};
 
 use crate::rv_emulate::{AT, assemble, image};
 
@@ -839,4 +839,245 @@ fn a_syscall_takes_what_was_loaded_and_its_result_is_no_parameter() {
     let text = decompiled_elf(&chained);
     assert!(text.contains("sub_10000()"), "{text}");
     assert!(text.contains("getpid()"), "{text}");
+}
+
+/// Where the jump-table tests keep their table, inside the image's page.
+const TABLE: u64 = AT + 0x400;
+
+/// Lays out a switch's code with its table at [`TABLE`], resolves it and
+/// decompiles the function at [`AT`].
+///
+/// # Arguments
+///
+/// * `code` - The encodings and their lengths.
+/// * `entries` - The table's 32-bit entries.
+/// * `jr` - The `jr`'s offset from [`AT`].
+/// * `arch` - [`Arch::RiscV64`] or [`Arch::RiscV32`].
+///
+/// # Returns
+///
+/// The table the analysis resolved for the `jr` at `jr`, if any, and the
+/// text.
+fn switched(
+    code: &[(u32, usize)],
+    entries: &[u32],
+    jr: u64,
+    arch: Arch,
+) -> (Option<Vec<u64>>, String) {
+    let mut bytes = assemble(code);
+    bytes.resize(0x400, 0);
+    bytes.extend(entries.iter().flat_map(|e| e.to_le_bytes()));
+    let p = image(&bytes, arch);
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), AT).unwrap_or_default();
+    (a.jump_tables.get(&(AT + jr)).cloned(), text)
+}
+
+/// Returns 32-bit table entries: case addresses at `cases` from [`AT`],
+/// less `minus`.
+fn entries(cases: [u64; 3], minus: u64) -> Vec<u32> {
+    cases
+        .iter()
+        .map(|c| u32::try_from((AT + c).wrapping_sub(minus) & 0xffff_ffff).expect("32 bits"))
+        .collect()
+}
+
+/// A switch through a jump table reads as a `switch` with every case.
+///
+/// The shapes clang writes: at `-O2`, compressed, the table's address
+/// from `lui`/`addi` and absolute entries, its check falling through to
+/// the dispatch or branching to it (`bgeu c, x, dispatch; j default`), or
+/// a store or another load scheduled between the entry's load and the
+/// jump; at `-O0` the
+/// index spilled to a frame slot across its check; and
+/// position-independent, the table formed with `auipc` and each entry an
+/// offset from it.
+#[test]
+fn a_switch_through_a_jump_table_reads_as_one() {
+    let optimized = optimized();
+    let mut taken = optimized.clone();
+    taken[1] = (0x00a5_f363, 4); // ASM: bgeu a1, a0, 0x10008
+    taken.insert(2, (0xa831, 2)); // ASM: j 0x10022
+    let spilled = spilled();
+    let mut stored = optimized.clone();
+    stored[1] = (0x02a5_e163, 4); // ASM: bltu a1, a0, 0x10024
+    stored.insert(7, (0x00c6_b023, 4)); // ASM: sd a2, 0(a3)
+    let mut loaded = stored.clone();
+    loaded[7] = (0x0045_a603, 4); // ASM: lw a2, 4(a1)
+    let mut relative = vec![
+        (0x0020_0593, 4), // ASM: li a1, 2
+        (0x02a5_ec63, 4), // ASM: bltu a1, a0, 0x1003c
+        (0x0025_1513, 4), // ASM: slli a0, a0, 2
+        (0x0000_0597, 4), // ASM: auipc a1, 0
+        (0x3f45_8593, 4), // ASM: addi a1, a1, 0x3f4
+        (0x00b5_0533, 4), // ASM: add a0, a0, a1
+        (0x0005_2503, 4), // ASM: lw a0, 0(a0)
+        (0x00b5_0533, 4), // ASM: add a0, a0, a1
+        (0x0005_0067, 4), // ASM: jr a0          (0x10020)
+    ];
+    for value in [0x00a0_0513, 0x0140_0513, 0x01e0_0513, 0x0000_0513] {
+        relative.extend([(value, 4), (0x0000_8067, 4)]); // ASM: li a0, v; ret
+    }
+    for (name, code, cases, minus, jr) in [
+        ("-O2", &optimized, [0x14, 0x18, 0x1c], 0, 0x12),
+        ("taken check", &taken, [0x16, 0x1a, 0x1e], 0, 0x14),
+        ("-O0", &spilled, [0x34, 0x40, 0x4c], 0, 0x30),
+        (
+            "a store before the jump",
+            &stored,
+            [0x18, 0x1c, 0x20],
+            0,
+            0x16,
+        ),
+        (
+            "a load before the jump",
+            &loaded,
+            [0x18, 0x1c, 0x20],
+            0,
+            0x16,
+        ),
+        ("relative", &relative, [0x24, 0x2c, 0x34], TABLE, 0x20),
+    ] {
+        let (table, text) = switched(code, &entries(cases, minus), jr, Arch::RiscV64);
+        assert_eq!(
+            table,
+            Some(cases.map(|c| AT + c).to_vec()),
+            "{name}: {text}"
+        );
+        assert!(text.contains("switch ("), "{name}: {text}");
+        assert!(text.contains("return 20;"), "{name}: {text}");
+        assert!(!text.contains("goto *"), "{name}: {text}");
+    }
+}
+
+/// A jump no check bounds on every way to it resolves no table.
+///
+/// The cases: no check, a check of another register, entries outside the
+/// code, a byte reload of the index on RV32, an `ecall` between the check
+/// and the jump, and a second way into the dispatch with a wider check.
+#[test]
+fn a_switch_its_check_does_not_bound_resolves_none() {
+    let optimized = optimized();
+    let mut unchecked = optimized.clone();
+    unchecked[1] = (0x0000_0013, 4); // ASM: nop
+    let mut elsewhere = optimized.clone();
+    elsewhere[1] = (0x00c5_ef63, 4); // ASM: bltu a1, a2, 0x10020
+    let mut narrowed = spilled();
+    narrowed[1] = (0x00a1_2423, 4); // ASM: sw a0, 8(sp)
+    narrowed[2] = (0x0081_2583, 4); // ASM: lw a1, 8(sp)
+    narrowed[3] = (0x00b1_0823, 4); // ASM: sb a1, 16(sp)
+    narrowed[6] = (0x0101_0503, 4); // ASM: lb a0, 16(sp)
+    let narrow = entries([0x34, 0x40, 0x4c], 0);
+    let (found, text) = switched(&narrowed, &narrow, 0x30, Arch::RiscV32);
+    assert_eq!(found, None, "a byte reload on RV32: {text}");
+    let mut called = optimized.clone();
+    called[1] = (0x02a5_e163, 4); // ASM: bltu a1, a0, 0x10024
+    called.insert(2, (0x0000_0073, 4)); // ASM: ecall
+    let mut joined = optimized.clone();
+    joined.insert(0, (0xc21d, 2)); // ASM: beqz a2, 0x10026
+    joined.extend([(0x4591, 2), (0xfea5_ede3, 4), (0xbff1, 2)]); // ASM: li a1, 4; bltu a1, a0, 0x10022; j 0x10008
+    let near = entries([0x14, 0x18, 0x1c], 0);
+    for (name, code, table, jr) in [
+        ("no check", &unchecked, near.clone(), 0x12),
+        ("a check of another register", &elsewhere, near, 0x12),
+        (
+            "entries outside the code",
+            &optimized,
+            vec![0x9000_0000; 3],
+            0x12,
+        ),
+        (
+            "an ecall after the check",
+            &called,
+            entries([0x18, 0x1c, 0x20], 0),
+            0x16,
+        ),
+        (
+            "a second way in",
+            &joined,
+            entries([0x16, 0x1a, 0x1e], 0),
+            0x14,
+        ),
+    ] {
+        let (found, text) = switched(code, &table, jr, Arch::RiscV64);
+        assert_eq!(found, None, "{name}: {text}");
+    }
+}
+
+/// The `-O2` shape of a three-case switch: compressed, its table at
+/// [`TABLE`], its `jr` at `0x12` and its cases at `0x14`, `0x18`, `0x1c`.
+fn optimized() -> Vec<(u32, usize)> {
+    vec![
+        (0x4589, 2),      // ASM: li a1, 2
+        (0x00a5_ef63, 4), // ASM: bltu a1, a0, 0x10020
+        (0x050a, 2),      // ASM: slli a0, a0, 2
+        (0x65c1, 2),      // ASM: lui a1, 0x10
+        (0x4005_8593, 4), // ASM: addi a1, a1, 0x400
+        (0x952e, 2),      // ASM: add a0, a0, a1
+        (0x4108, 2),      // ASM: lw a0, 0(a0)
+        (0x8502, 2),      // ASM: jr a0          (0x10012)
+        (0x4529, 2),      // ASM: li a0, 10
+        (0x8082, 2),      // ASM: ret
+        (0x4551, 2),      // ASM: li a0, 20
+        (0x8082, 2),      // ASM: ret
+        (0x4579, 2),      // ASM: li a0, 30
+        (0x8082, 2),      // ASM: ret
+        (0x4501, 2),      // ASM: li a0, 0
+        (0x8082, 2),      // ASM: ret
+    ]
+}
+
+/// The `-O0` shape of the same switch: the index spilled to a frame slot
+/// across its check, its `jr` at `0x30` and its cases at `0x34`, `0x40`,
+/// `0x4c`.
+fn spilled() -> Vec<(u32, usize)> {
+    let mut code = vec![
+        (0xfe01_0113, 4), // ASM: addi sp, sp, -32
+        (0x00a1_3423, 4), // ASM: sd a0, 8(sp)
+        (0x0081_3583, 4), // ASM: ld a1, 8(sp)
+        (0x00b1_3823, 4), // ASM: sd a1, 16(sp)
+        (0x0020_0513, 4), // ASM: li a0, 2
+        (0x04b5_6263, 4), // ASM: bltu a0, a1, 0x10058
+        (0x0101_3503, 4), // ASM: ld a0, 16(sp)
+        (0x0025_1513, 4), // ASM: slli a0, a0, 2
+        (0x0001_05b7, 4), // ASM: lui a1, 0x10
+        (0x4005_8593, 4), // ASM: addi a1, a1, 0x400
+        (0x00b5_0533, 4), // ASM: add a0, a0, a1
+        (0x0005_2503, 4), // ASM: lw a0, 0(a0)
+        (0x0005_0067, 4), // ASM: jr a0          (0x10030)
+    ];
+    for value in [0x00a0_0513, 0x0140_0513, 0x01e0_0513, 0x0000_0513] {
+        code.extend([(value, 4), (0x0201_0113, 4), (0x0000_8067, 4)]); // ASM: li a0, v; addi sp, sp, 32; ret
+    }
+    code
+}
+
+/// A check admitting more entries than a table may hold resolves no
+/// table, rather than the first 4096 of its cases.
+#[test]
+fn a_switch_too_wide_for_a_table_resolves_none() {
+    let mut bytes = assemble(&[
+        (0x6585, 2),      // ASM: lui a1, 0x1
+        (0x3885_8593, 4), // ASM: addi a1, a1, 0x388  (5000)
+        (0x00a5_eb63, 4), // ASM: bltu a1, a0, 0x1001c
+        (0x050a, 2),      // ASM: slli a0, a0, 2
+        (0x65c1, 2),      // ASM: lui a1, 0x10
+        (0x4005_8593, 4), // ASM: addi a1, a1, 0x400
+        (0x952e, 2),      // ASM: add a0, a0, a1
+        (0x4108, 2),      // ASM: lw a0, 0(a0)
+        (0x8502, 2),      // ASM: jr a0          (0x10016)
+        (0x4529, 2),      // ASM: li a0, 10
+        (0x8082, 2),      // ASM: ret
+        (0x4501, 2),      // ASM: li a0, 0
+        (0x8082, 2),      // ASM: ret
+    ]);
+    bytes.resize(0x400, 0);
+    let case = u32::try_from(AT + 0x18).expect("32 bits");
+    bytes.extend((0..5001).flat_map(|_| case.to_le_bytes()));
+    bytes.resize(0x8000, 0);
+    let text = Section::mapped(".text", AT, 0, 0x8000, true, true);
+    let p = Program::raw(bytes, Arch::RiscV64, 0, Some(AT), vec![text]);
+    let a = Analysis::compute(&p);
+    let cases = a.jump_tables.get(&(AT + 0x16)).map(Vec::len);
+    assert_eq!(cases, None, "a table cut to its first cases");
 }

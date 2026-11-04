@@ -15,12 +15,15 @@
 //! Whether a function returns a value is read off its call sites
 //! ([`infer_returns`]).
 //!
-//! Not found yet: the cases of a jump table (a `jr` through a loaded case
-//! ends its path), and the functions only a pointer or nothing names.
+//! A `jr` through an entry of a bounded jump table goes to every case the
+//! table holds ([`switch`]).
+//!
+//! Not found yet: the functions only a pointer or nothing names.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 mod returns;
+mod switch;
 pub(crate) use returns::infer as infer_returns;
 
 use super::functions::helpers::is_noreturn_name;
@@ -134,7 +137,7 @@ fn paired(hi: &BTreeMap<Reg, u64>, i: &Insn, xlen: Xlen) -> Option<u64> {
 /// # Arguments
 ///
 /// * `op` - The operation.
-fn dest(op: Op) -> Option<Reg> {
+pub(in crate::analysis) fn dest(op: Op) -> Option<Reg> {
     match op {
         Op::Lui { rd, .. }
         | Op::Auipc { rd, .. }
@@ -216,6 +219,12 @@ struct Walked {
     /// The `jalr` instructions an `auipc` before them resolved, with their
     /// targets.
     resolved: BTreeMap<u64, u64>,
+    /// The jump tables its `jr` instructions dispatch through, by `jr`.
+    tables: BTreeMap<u64, switch::Table>,
+    /// Its branches and jumps targeting each address.
+    sources: BTreeMap<u64, Vec<u64>>,
+    /// The instructions decoded by every pass of the walk ([`walk`]).
+    spent: usize,
     /// Whether the walk stopped at [`WALK_MAX`] with paths left.
     capped: bool,
 }
@@ -251,6 +260,51 @@ impl Ctx<'_> {
 
 /// Walks one function from its entry.
 ///
+/// A jump table is resolved when the walk reaches its `jr`, before the
+/// walk has seen every way into the dispatch; each is checked again
+/// against the whole walk, and a table that no longer resolves the same
+/// is refused and the function walked again without it. A second round of
+/// refusals refuses every table, and refusing only shrinks the walk, so a
+/// function is walked at most three times, every pass charged to the fuel.
+///
+/// # Arguments
+///
+/// * `cx` - What the walks share.
+/// * `entry` - Where to start.
+fn walk(cx: &Ctx<'_>, entry: u64) -> Walked {
+    let mut refused = BTreeSet::new();
+    let mut spent = 0;
+    let mut first = true;
+    loop {
+        let mut w = walk_refusing(cx, entry, &refused);
+        spent += w.seen.len();
+        w.spent = spent;
+        let stale: Vec<u64> = w
+            .tables
+            .iter()
+            .filter(|(site, t)| {
+                w.seen
+                    .get(site)
+                    .and_then(|jr| switch::resolve(cx.program, &w.seen, &w.sources, jr, cx.xlen))
+                    .as_ref()
+                    != Some(*t)
+            })
+            .map(|(site, _)| *site)
+            .collect();
+        if stale.is_empty() {
+            return w;
+        }
+        if first {
+            refused.extend(stale);
+        } else {
+            refused.extend(w.tables.keys());
+        }
+        first = false;
+    }
+}
+
+/// [`walk`], taking no table at the `jr` instructions in `refused`.
+///
 /// A call falling through to a known start never returns: no function
 /// runs on into another's entry.
 ///
@@ -258,12 +312,16 @@ impl Ctx<'_> {
 ///
 /// * `cx` - What the walks share.
 /// * `entry` - Where to start.
-fn walk(cx: &Ctx<'_>, entry: u64) -> Walked {
+/// * `refused` - The `jr` instructions whose tables a full walk refuted.
+fn walk_refusing(cx: &Ctx<'_>, entry: u64, refused: &BTreeSet<u64>) -> Walked {
     let mut w = Walked {
         seen: BTreeMap::new(),
         callees: BTreeSet::new(),
         followed: BTreeSet::new(),
         resolved: BTreeMap::new(),
+        tables: BTreeMap::new(),
+        sources: BTreeMap::new(),
+        spent: 0,
         capped: false,
     };
     let mut pending: Vec<(u64, Option<(Reg, u64)>)> = vec![(entry, None)];
@@ -280,6 +338,11 @@ fn walk(cx: &Ctx<'_>, entry: u64) -> Walked {
             continue;
         };
         w.seen.insert(va, i);
+        if matches!(i.flow(), Flow::CondJump | Flow::Jump)
+            && let Some(t) = i.target()
+        {
+            w.sources.entry(t).or_default().push(va);
+        }
         let next = i.next();
         let built = if let (Op::Jalr { rs1, off, .. }, Some((r, v))) = (i.op, hi)
             && r == rs1
@@ -302,6 +365,21 @@ fn walk(cx: &Ctx<'_>, entry: u64) -> Walked {
                 }
                 if i.flow() == Flow::CondJump {
                     pending.push((next, None));
+                }
+            }
+            (Flow::Jump, None) if !refused.contains(&va) => {
+                if let Some(t) = switch::resolve(cx.program, &w.seen, &w.sources, &i, cx.xlen)
+                    .filter(|t| {
+                        !t.targets
+                            .iter()
+                            .any(|c| *c != entry && cx.starts.contains(c))
+                    })
+                {
+                    for &case in &t.targets {
+                        w.followed.insert(case);
+                        pending.push((case, None));
+                    }
+                    w.tables.insert(va, t);
                 }
             }
             (Flow::CondJump | Flow::Jump, None) | (Flow::Return | Flow::Invalid, _) => {}
@@ -401,7 +479,10 @@ fn close(i: &Insn, w: &Walked) -> (BlockTerm, Vec<u64>) {
         ),
         Flow::Jump => match i.target().or_else(|| w.resolved.get(&i.va).copied()) {
             Some(t) => (BlockTerm::Jmp, vec![t]),
-            None => (BlockTerm::Indirect, Vec::new()),
+            None => {
+                let cases = w.tables.get(&i.va).map(|t| t.targets.clone());
+                (BlockTerm::Indirect, cases.unwrap_or_default())
+            }
         },
         Flow::Call => (BlockTerm::Call, fall().into_iter().collect()),
         Flow::Return => (BlockTerm::Ret, Vec::new()),
@@ -432,6 +513,9 @@ fn assemble(
         if matches!(i.flow(), Flow::CondJump | Flow::Jump) {
             let target = i.target().or_else(|| w.resolved.get(&i.va).copied());
             leaders.extend(target.filter(|t| present(*t)));
+        }
+        if let Some(t) = w.tables.get(&i.va) {
+            leaders.extend(t.targets.iter().copied().filter(|t| present(*t)));
         }
         if i.flow() != Flow::Next {
             leaders.insert(i.next());
@@ -612,9 +696,7 @@ impl Walks {
             }
             let w = walk(cx, e);
             self.incomplete |= w.capped;
-            self.fuel = self
-                .fuel
-                .saturating_sub(crate::num::from_usize(w.seen.len()));
+            self.fuel = self.fuel.saturating_sub(crate::num::from_usize(w.spent));
             for &c in &w.callees {
                 if cx.starts.insert(c) || !self.walked.contains_key(&c) {
                     queue.push(c);
@@ -704,7 +786,7 @@ pub(crate) fn discover(program: &Program, xlen: Xlen) -> Analysis {
         (f, sites, data)
     });
     let mut functions = Vec::with_capacity(kept.len());
-    for ((entry, _), r) in kept.iter().zip(built) {
+    for ((entry, w), r) in kept.iter().zip(built) {
         let Some((f, sites, data)) = r else {
             analysis.incomplete = true;
             continue;
@@ -714,6 +796,16 @@ pub(crate) fn discover(program: &Program, xlen: Xlen) -> Analysis {
         }
         for (t, va) in data {
             push_site(&mut analysis.xrefs, t, va, RefKind::Data, Some(*entry));
+        }
+        for (site, t) in &w.tables {
+            push_site(
+                &mut analysis.xrefs,
+                t.at,
+                *site,
+                RefKind::Index,
+                Some(*entry),
+            );
+            analysis.jump_tables.insert(*site, t.targets.clone());
         }
         functions.push(f);
     }

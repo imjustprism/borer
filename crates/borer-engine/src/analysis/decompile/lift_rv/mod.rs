@@ -34,7 +34,7 @@ use super::expr::{Cc, Cond, Expr, Flags, Key, Op, fold};
 use super::lift::{BlockFacts, BlockOut, Branch, EffectKind, Env, Exec, LiveFn, Pass, PhiFn};
 use crate::analysis::Function;
 use crate::fxmap::FxHashMap;
-use crate::isa::rv::{self, BrCond, Flow, Insn, Op as ROp, Reg, SP, Xlen, ZERO};
+use crate::isa::rv::{self, Alu, BrCond, Flow, Insn, Op as ROp, Reg, SP, Xlen, ZERO};
 use crate::isa::x86::ConditionCode;
 use crate::program::Program;
 
@@ -125,9 +125,11 @@ pub(in crate::analysis::decompile) fn exec_block_rv(
 ) -> BlockOut {
     let start = instrs.first().map_or(0, |i| i.va);
     let xlen = xlen(ctx.program);
+    let table_load = table_load(ctx, instrs);
     let mut lift = Lift {
         ex: Exec::new(ctx, env, pass, &facts, start),
         xlen,
+        table_load,
     };
     let mut out = BlockOut::default();
     let mut jcc = None;
@@ -160,7 +162,7 @@ pub(in crate::analysis::decompile) fn exec_block_rv(
                 match transfer_target(prev, i, xlen) {
                     Some(t) if lift.ex.ctx.block_starts.contains(&t) => out.goto = Some(t),
                     Some(t) => lift.tail_call(t),
-                    None => lift.jump(i),
+                    None => lift.jump(i, &mut out),
                 }
                 if let ROp::Jal { rd, .. } | ROp::Jalr { rd, .. } = i.op {
                     lift.write(rd, Expr::Const(i.next()));
@@ -172,6 +174,59 @@ pub(in crate::analysis::decompile) fn exec_block_rv(
         }
     }
     lift.finish(out, jcc, phi, start)
+}
+
+/// The load of the entry a block's `jr` dispatches through, when the
+/// analysis resolved its table.
+///
+/// The jumped-to register is followed back through the block: an `add`
+/// (an entry plus its base) or a copy hands it on to its operands, and the
+/// load that writes one of them is the entry's; any other write ends the
+/// search.
+///
+/// # Arguments
+///
+/// * `ctx` - Per-function state: the analysis's jump tables.
+/// * `instrs` - The block's instructions.
+fn table_load(ctx: &Ctx<'_>, instrs: &[Insn]) -> Option<u64> {
+    let jr = instrs.last()?;
+    let ROp::Jalr { rs1, .. } = jr.op else {
+        return None;
+    };
+    if !ctx.analysis.jump_tables.contains_key(&jr.va) {
+        return None;
+    }
+    let mut wanted = vec![rs1];
+    for i in instrs.iter().rev().skip(1) {
+        if !crate::analysis::rv::dest(i.op).is_some_and(|rd| wanted.contains(&rd)) {
+            continue;
+        }
+        if let ROp::Load { .. } = i.op {
+            return Some(i.va);
+        }
+        if let ROp::Reg3 {
+            op: Alu::Add,
+            rs1,
+            rs2,
+            word: false,
+            ..
+        } = i.op
+        {
+            wanted = vec![rs1, rs2];
+        } else if let ROp::Imm {
+            op: Alu::Add,
+            rs1,
+            imm: 0,
+            word: false,
+            ..
+        } = i.op
+        {
+            wanted = vec![rs1];
+        } else {
+            return None;
+        }
+    }
+    None
 }
 
 /// The register an `auipc` sets and the address it holds, which a `jalr`
@@ -337,6 +392,9 @@ struct Lift<'c, 'a> {
     ex: Exec<'c, 'a>,
     /// The register width.
     xlen: Xlen,
+    /// The load of the entry of a jump table the block's `jr` dispatches
+    /// through, whose address names the switch's index ([`table_load`]).
+    table_load: Option<u64>,
 }
 
 impl Lift<'_, '_> {
@@ -459,17 +517,23 @@ impl Lift<'_, '_> {
         }
     }
 
-    /// Lifts a jump through a register no `auipc` built: a computed
-    /// `goto`.
+    /// Lifts a jump through a register no `auipc` built: a switch when
+    /// the analysis resolved its table and the entry's load named its index
+    /// ([`table_load`]), else a computed `goto`.
     ///
     /// # Arguments
     ///
     /// * `i` - The `jr`.
-    fn jump(&mut self, i: &Insn) {
+    /// * `out` - The block's facts, which take the switch's target.
+    fn jump(&mut self, i: &Insn, out: &mut BlockOut) {
         let ROp::Jalr { rs1, off, .. } = i.op else {
             return self.unmodeled(i);
         };
         let target = self.jalr_target(rs1, off);
+        if self.ex.ctx.analysis.jump_tables.contains_key(&i.va) && self.ex.switch_idx.is_some() {
+            out.switch_target = Some(target);
+            return;
+        }
         if self.ex.emit {
             let line = format!("goto *{};", target.render(&self.ex.names()));
             self.ex.lines.push(line);
@@ -516,7 +580,11 @@ impl Lift<'_, '_> {
             self.ex.record(EffectKind::Branch(cond.clone()));
             out.branch = Some(Branch { cond, target, fall });
         }
-        let ex = self.ex;
+        let mut ex = self.ex;
+        out.switch_idx = ex.switch_idx.take();
+        if let Some(idx) = out.switch_idx.as_ref().filter(|_| ex.emit) {
+            ex.record(EffectKind::Switch(idx.clone()));
+        }
         ex.env.flags = Flags::Unknown;
         ex.close(out, Some(start))
     }
