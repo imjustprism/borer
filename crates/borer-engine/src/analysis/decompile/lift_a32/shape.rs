@@ -74,8 +74,8 @@ fn arg_bits(r: Reg) -> u32 {
 /// registers read before being written on one that no call precedes.
 ///
 /// A call ends a path. When `follow` is set, it reads the registers its
-/// callee takes ([`forwarded`]), as a jump out of the function does; a
-/// register a call goes through is read either way.
+/// callee takes ([`forwarded`]), as a jump or a conditional branch out of
+/// the function does; a register a call goes through is read either way.
 ///
 /// # Arguments
 ///
@@ -115,8 +115,8 @@ fn walk(
         for i in instrs {
             let out = match i.flow() {
                 Flow::Call => true,
-                Flow::Jump => i.target().is_some_and(|t| !starts.contains(&t)),
-                Flow::Next | Flow::CondJump | Flow::Return | Flow::Invalid => false,
+                Flow::Jump | Flow::CondJump => i.target().is_some_and(|t| !starts.contains(&t)),
+                Flow::Next | Flow::Return | Flow::Invalid => false,
             };
             if out && follow {
                 for r in forwarded(ctx, i.target()) {

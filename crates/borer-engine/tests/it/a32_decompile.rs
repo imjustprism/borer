@@ -13,6 +13,7 @@
 
 use borer_engine::analysis::decompile::decompile;
 use borer_engine::analysis::decompile::replay::{replay_function, replay_tsv};
+use borer_engine::analysis::decompile::traces::{Structure, check_structure};
 use borer_engine::analysis::decompile::verify_a32::{verify, verify_tsv};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::isa::a32::{Mode, Modes};
@@ -297,7 +298,6 @@ fn a_stack_word_read_on_one_path_of_a_join_is_an_argument() {
 /// (37 of u-boot's 2015 functions).
 #[test]
 fn the_structure_check_reads_a_division_helper_as_its_operator() {
-    use borer_engine::analysis::decompile::traces::{Structure, check_structure};
     let p = image();
     let a = Analysis::compute(&p);
     let out = text(&p, &a, "a_divmod");
@@ -308,4 +308,166 @@ fn the_structure_check_reads_a_division_helper_as_its_operator() {
         Structure::Agrees,
         "{out}"
     );
+}
+
+/// A conditional branch into another function's entry is a conditional
+/// tail call: under its condition the text calls the function and returns
+/// what it hands back, and the text agrees with the machine.
+///
+/// Thumb at `-O2` writes `it eq; beq.w f`, which read as a jump out of
+/// the function, `goto *f;`, on every arm of a long `if`/`else if` chain.
+/// A register only the callee reads is the caller's parameter too. T32,
+/// hand-assembled.
+#[test]
+fn a_conditional_branch_to_a_function_is_a_tail_call() {
+    for (callee, name, call) in [
+        (0x3001, "inc", "return inc(a1);"),       // ASM: adds r0, #1
+        (0x1840, "add2", "return add2(a1, a2);"), // ASM: adds r0, r0, r1
+    ] {
+        let mut halves = vec![
+            0x2805, // ASM: cmp r0, #5
+            0xbf08, // ASM: it eq
+            0xf000, 0xb80b, // ASM: beq.w 0x4001e
+            0x2000, // ASM: movs r0, #0
+            0x4770, // ASM: bx lr
+        ];
+        halves.resize(15, 0);
+        halves.extend([callee, 0x4770]); // ASM: the callee; bx lr   (0x4001e)
+        let bytes: Vec<u8> = halves.iter().flat_map(|h: &u16| h.to_le_bytes()).collect();
+        let len = u64::try_from(bytes.len()).expect("a small image");
+        let text = Section::mapped(".text", BASE, 0, len, false, true);
+        let mut p = Program::raw(bytes, Arch::Arm, 0, Some(BASE), vec![text]);
+        p.symbols = [("caller", BASE), (name, BASE + 0x1e)]
+            .iter()
+            .map(|&(name, addr)| Symbol {
+                name: name.to_owned(),
+                addr,
+                kind: SymbolKind::Local,
+            })
+            .collect();
+        p.modes = Modes::from_marks(vec![(BASE, Mode::Thumb)]);
+        let a = Analysis::compute(&p);
+        let out = decompile(&p, &a, &Overlay::default(), BASE).expect("decompiles");
+        assert!(!out.contains("goto"), "{out}");
+        assert!(out.contains(call), "{out}");
+        let r = replay_function(&p, &a, BASE, 1);
+        assert!(r.wrong().is_empty(), "{}", replay_tsv(&r));
+        let structure = check_structure(&p, &a, &Overlay::default(), BASE, &out);
+        assert_eq!(structure, Structure::Agrees, "{out}");
+    }
+}
+
+/// A conditional tail call passes the value it is given, folded or pending.
+///
+/// One whose condition folds to taken is the call, and one whose argument
+/// a load left pending passes the loaded value, read before the store
+/// after it: the branch reads the callee's arguments as a call does. T32,
+/// hand-assembled.
+#[test]
+fn a_folded_or_pending_conditional_tail_call_passes_its_value() {
+    let mut halves = vec![
+        0x2005, // ASM: movs r0, #5               (folded)
+        0x2805, // ASM: cmp r0, #5
+        0xbf08, // ASM: it eq
+        0xf000, 0xb80d, // ASM: beq.w 0x40024
+        0x2000, // ASM: movs r0, #0
+        0x4770, // ASM: bx lr
+        0x6808, // ASM: ldr r0, [r1]             (pending, 0x4000e)
+        0x600a, // ASM: str r2, [r1]
+        0x2b00, // ASM: cmp r3, #0
+        0xbf08, // ASM: it eq
+        0xf000, 0xb805, // ASM: beq.w 0x40024
+        0x2000, // ASM: movs r0, #0
+        0x4770, // ASM: bx lr
+    ];
+    halves.resize(18, 0);
+    halves.extend([0x3001, 0x4770]); // ASM: adds r0, #1; bx lr   (inc, 0x40024)
+    let bytes: Vec<u8> = halves.iter().flat_map(|h: &u16| h.to_le_bytes()).collect();
+    let len = u64::try_from(bytes.len()).expect("a small image");
+    let text = Section::mapped(".text", BASE, 0, len, false, true);
+    let mut p = Program::raw(bytes, Arch::Arm, 0, Some(BASE), vec![text]);
+    p.symbols = [
+        ("folded", BASE),
+        ("pending", BASE + 0xe),
+        ("inc", BASE + 0x24),
+    ]
+    .iter()
+    .map(|&(name, addr)| Symbol {
+        name: name.to_owned(),
+        addr,
+        kind: SymbolKind::Local,
+    })
+    .collect();
+    p.modes = Modes::from_marks(vec![(BASE, Mode::Thumb)]);
+    let a = Analysis::compute(&p);
+    let folded = decompile(&p, &a, &Overlay::default(), BASE).expect("decompiles");
+    assert!(!folded.contains("goto"), "{folded}");
+    assert!(folded.contains("return inc(5);"), "{folded}");
+    let pending = decompile(&p, &a, &Overlay::default(), BASE + 0xe).expect("decompiles");
+    assert!(pending.contains("return inc("), "{pending}");
+    let loaded = pending.find("= *(uint32_t*)a2;");
+    let stored = pending.find("*(uint32_t*)a2 = a3;");
+    assert!(
+        loaded.is_some() && loaded < stored,
+        "the load before the store is kept: {pending}"
+    );
+    for (entry, text) in [(BASE, &folded), (BASE + 0xe, &pending)] {
+        let r = replay_function(&p, &a, entry, 1);
+        assert!(r.wrong().is_empty(), "{}", replay_tsv(&r));
+        let structure = check_structure(&p, &a, &Overlay::default(), entry, text);
+        assert_eq!(structure, Structure::Agrees, "{text}");
+    }
+}
+
+/// A conditional tail call after a join keeps what each path passes.
+///
+/// Two paths store different fifth arguments to the same stack slot and
+/// join before `it eq; beq.w f5`: each path writes its value before the
+/// call, and the path the emitter copies into an arm keeps the call too
+/// rather than returning past it. T32, hand-assembled.
+#[test]
+fn a_conditional_tail_call_after_a_join_keeps_each_paths_argument() {
+    let mut halves = vec![
+        0xb082, // ASM: sub sp, #8
+        0x2900, // ASM: cmp r1, #0
+        0xd102, // ASM: bne 0x4000c
+        0x2207, // ASM: movs r2, #7
+        0x9200, // ASM: str r2, [sp]
+        0xe001, // ASM: b 0x40010
+        0x2209, // ASM: movs r2, #9            (0x4000c)
+        0x9200, // ASM: str r2, [sp]
+        0x2805, // ASM: cmp r0, #5             (0x40010)
+        0xbf08, // ASM: it eq
+        0xf000, 0xb808, // ASM: beq.w 0x40028
+        0xb002, // ASM: add sp, #8
+        0x2000, // ASM: movs r0, #0
+        0x4770, // ASM: bx lr
+    ];
+    halves.resize(20, 0);
+    halves.extend([0x9800, 0x4770]); // ASM: ldr r0, [sp]; bx lr   (f5, 0x40028)
+    let bytes: Vec<u8> = halves.iter().flat_map(|h: &u16| h.to_le_bytes()).collect();
+    let len = u64::try_from(bytes.len()).expect("a small image");
+    let text = Section::mapped(".text", BASE, 0, len, false, true);
+    let mut p = Program::raw(bytes, Arch::Arm, 0, Some(BASE), vec![text]);
+    p.symbols = [("join", BASE), ("f5", BASE + 0x28)]
+        .iter()
+        .map(|&(name, addr)| Symbol {
+            name: name.to_owned(),
+            addr,
+            kind: SymbolKind::Local,
+        })
+        .collect();
+    p.modes = Modes::from_marks(vec![(BASE, Mode::Thumb)]);
+    let a = Analysis::compute(&p);
+    let out = decompile(&p, &a, &Overlay::default(), BASE).expect("decompiles");
+    assert!(!out.contains("goto *"), "{out}");
+    assert_eq!(out.matches("return f5(").count(), 2, "{out}");
+    for value in ["7;", "9;"] {
+        let written = out
+            .lines()
+            .any(|l| l.trim_start().starts_with("local_8 = ") && l.ends_with(value));
+        assert!(written, "the slot is written on each path: {out}");
+    }
+    let r = replay_function(&p, &a, BASE, 1);
+    assert!(r.wrong().is_empty(), "{}", replay_tsv(&r));
 }

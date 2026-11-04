@@ -95,7 +95,9 @@ pub(in crate::analysis::decompile) fn effects(ctx: &Ctx<'_>, i: &Insn) -> Effect
                 writes.push((Key::A32(r), lane(r)));
             }
         }
-        Flow::Jump if i.target().is_some_and(|t| !ctx.block_starts.contains(&t)) => {
+        Flow::Jump | Flow::CondJump
+            if i.target().is_some_and(|t| !ctx.block_starts.contains(&t)) =>
+        {
             arguments(&mut reads);
         }
         Flow::Jump

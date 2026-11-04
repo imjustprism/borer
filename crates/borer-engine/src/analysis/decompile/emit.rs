@@ -153,16 +153,12 @@ pub(super) fn emit_block<L: Lifter>(
     };
     if let Some(taken) = br.cond.eval() {
         let dest = if taken { br.target } else { br.fall };
-        let _ = writeln!(out, "{}", jump_to(st, dest));
+        let tail = block_out.branch_tail.as_deref().filter(|_| taken);
+        let _ = writeln!(out, "{}", tail_or_jump(st, dest, tail));
         return i + 1;
     }
     let (Some(t), Some(f)) = (st.index_of(br.target), st.index_of(br.fall)) else {
-        let _ = writeln!(
-            out,
-            "if ({}) {}",
-            br.cond.render(&names, false),
-            jump_to(st, br.target)
-        );
+        branch_out(out, st, &br, block_out.branch_tail.as_deref(), &names);
         let _ = writeln!(out, "{}", jump_to(st, br.fall));
         return i + 1;
     };
@@ -583,6 +579,51 @@ pub(super) fn runs_on<L: Lifter>(st: &Emit<'_, L>, b: usize) -> bool {
     }
 }
 
+/// Writes a branch one of whose ends is no block of the function: under
+/// its condition, the tail call the lifter read for it when the taken end
+/// is another function's entry, else a jump to the taken end.
+///
+/// # Arguments
+///
+/// * `out` - Where the text goes.
+/// * `st` - Emission state.
+/// * `br` - The branch.
+/// * `tail` - The statements the taken end runs ([`BlockOut::branch_tail`]).
+/// * `names` - How the condition's variables are named.
+fn branch_out<L: Lifter>(
+    out: &mut String,
+    st: &Emit<'_, L>,
+    br: &Branch,
+    tail: Option<&[String]>,
+    names: &Names<'_>,
+) {
+    let cond = br.cond.render(names, false);
+    match (tail, st.index_of(br.target)) {
+        (Some(tail), None) => {
+            let body: String = tail.iter().map(|l| format!("{l}\n")).collect();
+            push_if(out, &cond, &body, true);
+        }
+        _ => {
+            let _ = writeln!(out, "if ({cond}) {}", jump_to(st, br.target));
+        }
+    }
+}
+
+/// The text that leaves a block for `dest`: the tail call the lifter read
+/// for a branch into another function's entry, else a jump.
+///
+/// # Arguments
+///
+/// * `st` - Emission state.
+/// * `dest` - Where the block goes.
+/// * `tail` - The tail call's statements, when the branch is one.
+fn tail_or_jump<L: Lifter>(st: &Emit<'_, L>, dest: u64, tail: Option<&[String]>) -> String {
+    match tail.filter(|_| st.index_of(dest).is_none()) {
+        Some(tail) => tail.join("\n"),
+        None => jump_to(st, dest),
+    }
+}
+
 /// Where a block that runs on past its end leaves the function: the address
 /// after a block that falls through, or after a call the analysis saw return,
 /// when no block of the function starts there.
@@ -626,6 +667,31 @@ pub(super) fn falls_outside<L: Lifter>(ctx: &Ctx<'_>, st: &Emit<'_, L>, b: usize
     .filter(|t| st.index_of(*t).is_none())
 }
 
+/// The lines of a block written again where a path runs into it.
+///
+/// They are its statements, then its branch when the branch leaves the
+/// function, which [`runs_on`] does not count against the block's going on
+/// to its one successor in it.
+///
+/// # Arguments
+///
+/// * `ctx` - Per-function state.
+/// * `st` - Emission state.
+/// * `copy` - The block's lift.
+fn copied<L: Lifter>(ctx: &Ctx<'_>, st: &Emit<'_, L>, copy: &BlockOut) -> Vec<String> {
+    let mut lines = copy.lines.clone();
+    if let Some(br) = copy
+        .branch
+        .as_ref()
+        .filter(|br| st.index_of(br.target).is_none())
+    {
+        let mut out = String::new();
+        branch_out(&mut out, st, br, copy.branch_tail.as_deref(), &ctx.names());
+        lines.extend(out.lines().map(str::to_owned));
+    }
+    lines
+}
+
 /// The text of a copied tail: `start` and the one-way blocks after it that
 /// the innermost region copies too, ending with the transfer out of the
 /// last.
@@ -641,7 +707,7 @@ pub(super) fn copy_chain<L: Lifter>(ctx: &mut Ctx<'_>, st: &Emit<'_, L>, start: 
     let mut seen: BTreeSet<usize> = BTreeSet::new();
     while seen.insert(cur) {
         let copy = run_block(ctx, st, cur);
-        lines.extend(copy.lines.iter().cloned());
+        lines.extend(copied(ctx, st, &copy));
         let next = copy
             .goto
             .map(|t| st.index_of(t).map_or(t, |n| st.start(n)))
@@ -1581,7 +1647,7 @@ pub(super) fn emit_run<L: Lifter>(
                 kept.pop();
             }
             let copy = run_block(ctx, st, b);
-            kept.extend(copy.lines.iter().cloned());
+            kept.extend(copied(ctx, st, &copy));
             let target = if let Some(t) = copy.goto {
                 kept.push(jump_to(st, t));
                 st.index_of(t)

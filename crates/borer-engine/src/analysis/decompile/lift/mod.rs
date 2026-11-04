@@ -533,6 +533,10 @@ pub(super) struct BlockOut {
     pub effects: Vec<Effect>,
     /// The conditional branch ending the block, if any.
     pub branch: Option<Branch>,
+    /// The statements the branch runs when it is taken into another
+    /// function's entry, a conditional tail call: the call and its return,
+    /// written in place of a jump out of the function.
+    pub branch_tail: Option<Vec<String>>,
     /// Switch index expression when the block ends in a resolved jump table.
     pub switch_idx: Option<Expr>,
     /// Where that jump goes, as an expression: a register's value or the

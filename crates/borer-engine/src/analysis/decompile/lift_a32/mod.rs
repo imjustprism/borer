@@ -573,6 +573,42 @@ impl Lift<'_, '_> {
         }
     }
 
+    /// The statements a conditional branch into another function's entry
+    /// runs, Thumb's `it eq; beq.w f`: the tail call read where the branch
+    /// stands, with the state, lines and effects the fall-through path
+    /// sees put back as they were. The dataflow pass reads it too, for the
+    /// stack slots its arguments read, and keeps no text.
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - Where the branch goes.
+    ///
+    /// # Returns
+    ///
+    /// The statements, or `None` when the target is a block of this
+    /// function or no function's entry, or the call did not lift.
+    fn tail_text(&mut self, target: u64) -> Option<Vec<String>> {
+        let ctx = &*self.ex.ctx;
+        if ctx.block_starts.contains(&target) || ctx.analysis.function(target).is_none() {
+            return None;
+        }
+        let env = self.ex.env.clone();
+        let flags = self.ex.flags.clone();
+        let (lines, effects, unmodeled) = (
+            self.ex.lines.len(),
+            self.ex.effects.len(),
+            self.ex.unmodeled,
+        );
+        self.tail_call(target);
+        let tail = self.ex.lines.split_off(lines);
+        self.ex.effects.truncate(effects);
+        *self.ex.env = env;
+        self.ex.flags = flags;
+        let lifted = self.ex.unmodeled == unmodeled && self.ex.emit;
+        self.ex.unmodeled = unmodeled;
+        lifted.then_some(tail)
+    }
+
     /// Ends the block: drops dead flags, places the phis, captures the
     /// branch, hands the flags on to a successor that reads them and
     /// records what the block's statements do.
@@ -620,6 +656,7 @@ impl Lift<'_, '_> {
             out.branch_const = cond.eval().map(|taken| (taken, target, fall));
             self.ex.record(EffectKind::Branch(cond.clone()));
             out.branch = Some(Branch { cond, target, fall });
+            out.branch_tail = self.tail_text(target);
         }
         let mut ex = self.ex;
         out.switch_idx = ex.switch_idx.take();
