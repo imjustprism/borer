@@ -26,6 +26,7 @@ pub fn effects_line(body: &str) -> Option<String> {
     let mut writes: Vec<String> = Vec::new();
     let mut global_writes: Vec<String> = Vec::new();
     let mut global_reads: BTreeSet<String> = BTreeSet::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut other = 0usize;
     let field = |lhs: &str| -> Option<String> {
         let inner = lhs.strip_prefix("*(")?;
@@ -76,11 +77,11 @@ pub fn effects_line(body: &str) -> Option<String> {
             continue;
         }
         if is_global_name(lhs) {
-            if !global_writes.iter().any(|w| w == lhs) {
+            if seen.insert(lhs.to_owned()) {
                 global_writes.push(lhs.to_owned());
             }
         } else if let Some(f) = field(lhs) {
-            if !writes.contains(&f) {
+            if seen.insert(f.clone()) {
                 writes.push(f);
             }
         } else if lhs.starts_with("*(") {
