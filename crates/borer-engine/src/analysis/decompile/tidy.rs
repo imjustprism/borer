@@ -400,6 +400,12 @@ pub(super) fn move_single_use_blocks(lines: &mut Vec<String>) -> bool {
 /// tail that breaks or continues a loop around it is left alone, since the
 /// copies would land in other loops.
 ///
+/// A run that ends by jumping back to an earlier label is a loop's latch,
+/// and a jump into it from before that label is a second way into the
+/// loop: that jump alone takes the run, its own jump back included, so the
+/// loop keeps one entry and reads as one. A copy only lands among the same
+/// `try` blocks as its label, so every call in it keeps its handler.
+///
 /// # Arguments
 ///
 /// * `lines` - The body lines, rewritten in place.
@@ -413,7 +419,12 @@ pub(super) fn inline_terminal_tails(lines: &mut Vec<String>) -> bool {
     if !lines.iter().any(|l| l.contains("goto ")) {
         return false;
     }
-    let mut tails: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let labels: BTreeMap<&str, usize> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(k, l)| Some((label_name(l)?, k)))
+        .collect();
+    let mut tails: BTreeMap<String, (Vec<String>, usize)> = BTreeMap::new();
     for (i, line) in lines.iter().enumerate() {
         let Some(label) = label_name(line) else {
             continue;
@@ -423,6 +434,16 @@ pub(super) fn inline_terminal_tails(lines: &mut Vec<String>) -> bool {
         let mut depth = 0i32;
         for l in lines.iter().skip(i + 1).take(TAIL_MAX) {
             let t = l.trim();
+            if depth == 0 && indent_of(l) == ind && is_goto(t) {
+                let head = goto_target(t).and_then(|m| labels.get(m)).copied();
+                if let Some(head) = head.filter(|&h| h < i)
+                    && !carries_a_transfer(&run)
+                {
+                    run.push(t.to_owned());
+                    tails.insert(label.to_owned(), (run, head));
+                }
+                break;
+            }
             if t.is_empty()
                 || is_label(l)
                 || t.starts_with("case ")
@@ -442,7 +463,7 @@ pub(super) fn inline_terminal_tails(lines: &mut Vec<String>) -> bool {
             }
             if depth == 0 && is_return(t) {
                 if !carries_a_transfer(&run) {
-                    tails.insert(label.to_owned(), run);
+                    tails.insert(label.to_owned(), (run, lines.len()));
                 }
                 break;
             }
@@ -451,12 +472,17 @@ pub(super) fn inline_terminal_tails(lines: &mut Vec<String>) -> bool {
     if tails.is_empty() {
         return false;
     }
+    let frames = try_frames(lines);
     let mut out: Vec<String> = Vec::with_capacity(lines.len());
     let mut changed = false;
-    for line in lines.iter() {
+    for (k, line) in lines.iter().enumerate() {
         let t = line.trim();
         let pad = pad_of(line);
-        match goto_target(t).and_then(|l| tails.get(l)) {
+        let tail = goto_target(t)
+            .and_then(|l| Some((tails.get(l)?, labels.get(l)?)))
+            .filter(|((_, head), at)| k < *head && frames.get(k) == frames.get(**at))
+            .map(|((run, _), _)| run);
+        match tail {
             Some(tail) if is_goto(t) => {
                 out.extend(tail.iter().map(|s| format!("{pad}{s}")));
                 changed = true;
@@ -487,6 +513,31 @@ pub(super) fn inline_terminal_tails(lines: &mut Vec<String>) -> bool {
         *lines = out;
     }
     changed
+}
+
+/// The `try` and `__try` blocks around each line, innermost last, each by
+/// the line that opens it.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+fn try_frames(lines: &[String]) -> Vec<Vec<usize>> {
+    let mut open: Vec<Option<usize>> = Vec::new();
+    lines
+        .iter()
+        .enumerate()
+        .map(|(k, l)| {
+            let t = l.trim();
+            if closes_scope(t) {
+                open.pop();
+            }
+            let here: Vec<usize> = open.iter().flatten().copied().collect();
+            if opens_scope(t).is_some() {
+                open.push(matches!(t, "try {" | "__try {").then_some(k));
+            }
+            here
+        })
+        .collect()
 }
 
 /// Turns a long `if` whose body never falls out, followed by a short tail
@@ -633,6 +684,9 @@ pub fn cleanup(body: &str) -> String {
 /// removal only moves lines already handled and the precomputed closer
 /// indices stay valid. Once the passes settle, inverted and counted loops
 /// read as the `while` and `for` they were ([`super::loops::recover_loops`]).
+/// A jump back the passes leave goes through the tree again
+/// ([`super::cir::fold`]), which writes it as the loop it is, and the
+/// passes settle that text on what is left of the same budget.
 ///
 /// # Arguments
 ///
@@ -645,6 +699,23 @@ pub fn cleanup(body: &str) -> String {
 /// The cleaned body, newline-terminated.
 pub(super) fn cleanup_text(body: &str, live_out: Option<&str>) -> String {
     cleanup_settled(body, live_out, Passes::NONE).0
+}
+
+/// Tells whether a `goto` jumps back to a label above it: a loop the text
+/// passes made whole, by copying a latch to a second way in, that only the
+/// tree writes as one.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+fn jumps_back(lines: &[String]) -> bool {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    lines.iter().any(|l| {
+        if let Some(name) = label_name(l) {
+            seen.insert(name);
+        }
+        goto_target(l.trim()).is_some_and(|t| seen.contains(t))
+    })
 }
 
 /// [`cleanup_text`], with how its passes ended.
@@ -665,7 +736,18 @@ pub(super) fn cleanup_settled(
 ) -> (String, Settle) {
     let mut lines: Vec<String> = body.lines().map(str::to_owned).collect();
     let fuel = CLEANUP_PASSES.saturating_add(lines.len());
-    let settle = cleanup_passes(&mut lines, fuel, live_out, skip);
+    let mut settle = cleanup_passes(&mut lines, fuel, live_out, skip);
+    let left = fuel.saturating_sub(settle.passes);
+    if skip.runs(Pass::FoldJumps) && left > 0 && jumps_back(&lines) {
+        let folded = cir::fold(&rejoin(&lines, "\n"), &[], Some(&BTreeSet::new()));
+        lines = folded.lines().map(str::to_owned).collect();
+        let again = cleanup_passes(&mut lines, left, live_out, skip);
+        settle = Settle {
+            passes: settle.passes.saturating_add(again.passes),
+            fuel,
+            churn: again.churn,
+        };
+    }
     if skip.runs(Pass::RecoverLoops) {
         loops::recover_loops(&mut lines);
     }

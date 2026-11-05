@@ -1915,3 +1915,30 @@ fn the_structure_check_reads_arm32_predicated_calls() {
     let p = arm_image(code, Arch::Arm, Some(Mode::Thumb), &names);
     agrees_until_a_call_is_dropped(&p, "first_step");
 }
+
+/// A jump into a loop's latch from before its head takes a copy of it.
+///
+/// The loop then has one way in and reads as one, with no `goto`.
+///
+/// Unoptimized `if (a & 1) goto inner; top: n += 2; inner: n += 13; if (n <
+/// a) goto top;` enters its loop twice; the second entry is the latch, a
+/// run that jumps back to the head.
+#[test]
+fn a_second_way_into_a_latch_takes_a_copy() {
+    let body = "if ((a1 & 1) == 0) {\n  v = 0;\n  goto L_1020;\n}\nv = 0;\nL_1010:\nif (v + 13 >= a1) {\n  return v + 13;\n}\nv += 13;\nL_1020:\nv += 2;\ngoto L_1010;\n";
+    let out = cleanup(body);
+    assert!(!out.contains("goto"), "{out}");
+    assert!(out.contains("while (1) {"), "{out}");
+    assert_eq!(out.matches("v += 2;").count(), 2, "{out}");
+}
+
+/// A latch is copied only to a jump among the same `try` blocks.
+///
+/// A jump from inside `__try` to a latch outside it keeps its `goto`, so a
+/// call in the latch never runs under a handler that did not guard it.
+#[test]
+fn a_latch_is_not_copied_into_a_try() {
+    let body = "__try {\n  if (a1 == 0) goto L_1020;\n  g();\n}\nv = 0;\nL_1010:\nif (v >= a1) {\n  return v;\n}\nv += 13;\nL_1020:\nh();\ngoto L_1010;\n";
+    let out = cleanup(body);
+    assert_eq!(out.matches("h();").count(), 1, "{out}");
+}
