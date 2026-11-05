@@ -4204,7 +4204,10 @@ fn else_defaults_name_their_constant() {
 #[test]
 fn divisions_by_constants_come_back_from_their_magic() {
     let signed = dc(0x4aa0);
-    assert!(signed.contains("return (int64_t)a1 / 5;"), "{signed}");
+    assert!(
+        signed.contains("(int64_t a1)") && signed.contains("a1 / 5;"),
+        "{signed}"
+    );
     let unsigned = dc(0x4ac0);
     assert!(unsigned.contains("return a1 / 10;"), "{unsigned}");
     let remainder = dc(0x4ae0);
@@ -4334,12 +4337,15 @@ fn sign_extended_loads_render_as_signed_loads() {
 
 /// A signed compare casts an operand once.
 ///
-/// `SC` compares the sign-extended `a1` with `a2`: the left side already
-/// reads `(int64_t)(int32_t)a1`, so no `(int64_t)` stacks on it.
+/// `SC` compares the sign-extended `a1` with `a2`, now an `int64_t`: the
+/// left side reads `(int64_t)(int32_t)a1`, so no `(int64_t)` stacks on it.
 #[test]
 fn signed_compares_cast_once() {
     let out = dc(0x4c00);
-    assert!(out.contains("(int64_t)(int32_t)a1 > (int64_t)a2"), "{out}");
+    assert!(
+        out.contains("(int32_t)a1 > a2") && out.contains("int64_t a2)"),
+        "{out}"
+    );
     assert!(!out.contains("(int64_t)(int64_t)"), "{out}");
 }
 

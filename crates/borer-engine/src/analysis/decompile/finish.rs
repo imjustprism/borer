@@ -14,6 +14,7 @@ mod callfmt;
 mod selects;
 mod signs;
 mod truths;
+mod words;
 
 /// The text passes every decompile ends with.
 ///
@@ -118,6 +119,9 @@ pub(super) fn polish_skipping(
         type_parameters(&callfmt::noted(&t, callers), word)
     });
     let text = skip.apply(Pass::TypeLocals, text, type_locals);
+    let text = skip.apply(Pass::SignedWords, text, |t| {
+        words::signed_words(t, stated_types(callers))
+    });
     let text = skip.apply(Pass::ByteArithmetic, text, |t| byte_arithmetic(t, word));
     let text = skip.apply(Pass::NameVars, text, |t| {
         evidence::name_vars(
@@ -160,6 +164,44 @@ pub(super) fn polish_skipping(
     let text = skip.apply(Pass::FloatBitCopies, text, float_bit_copies);
     let text = skip.apply(Pass::RefoldJumps, text, refold_jumps);
     skip.apply(Pass::SpellFloatRelations, text, spell_float_relations)
+}
+
+/// What something other than the code typed in the function.
+///
+/// Parameters are typed by a prototype an agent stated, debug
+/// information, a type the user gave one of them, or a known signature;
+/// locals by debug information or a type the user gave a stack slot.
+/// Without the function in scope, nothing says otherwise, so the types
+/// stand.
+///
+/// # Arguments
+///
+/// * `callers` - The image, the analysis, the names in force and the
+///   function.
+fn stated_types(callers: Option<callee::Scope<'_>>) -> words::Stated {
+    use crate::analysis::protos::VarKey;
+    let Some((program, analysis, overlay, entry)) = callers else {
+        return words::Stated {
+            params: true,
+            locals: true,
+        };
+    };
+    let debug = program.debug_functions.iter().any(|d| d.low_pc == entry);
+    let typed = |slot: bool| {
+        overlay.vars.get(&entry).is_some_and(|vars| {
+            vars.iter()
+                .any(|(k, v)| matches!(k, VarKey::Slot(_)) == slot && v.ty.is_some())
+        })
+    };
+    words::Stated {
+        params: debug
+            || overlay.prototypes.contains_key(&entry)
+            || analysis
+                .function(entry)
+                .is_some_and(|f| f.signature.is_some())
+            || typed(false),
+        locals: debug || typed(true),
+    }
 }
 
 /// Finishes a body for the tools.

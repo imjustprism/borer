@@ -93,7 +93,8 @@ fn a_signed_branch_chooses_the_result() {
         (0x0000_8067, 4), // ASM: ret
     ];
     let text = decompiled(&code, Arch::RiscV64).concat();
-    assert!(text.contains("(int64_t)a1 >= (int64_t)a2"), "{text}");
+    assert!(text.contains("(int64_t a1, int64_t a2)"), "{text}");
+    assert!(text.contains("if (a1 >= a2) {"), "{text}");
     assert!(text.contains("return a2;"), "{text}");
 }
 
@@ -310,7 +311,8 @@ fn a_loop_of_registers_reading_each_other_keeps_its_test() {
         (0x0000_8067, 4), // ASM: ret
     ];
     let text = decompiled(&code, Arch::RiscV64).concat();
-    assert!(text.contains("while ((int64_t)"), "{text}");
+    assert!(text.contains("} while (var2 < a3);"), "{text}");
+    assert!(text.contains("int64_t a3)"), "{text}");
 }
 
 /// A function that reads all eight integer argument registers and `fa0`

@@ -90,6 +90,8 @@ pub enum Pass {
     TypeParameters,
     /// Types the locals.
     TypeLocals,
+    /// Declares the 64-bit variables the text reads as signed `int64_t`.
+    SignedWords,
     /// Undoes the byte arithmetic the types scale.
     ByteArithmetic,
     /// Names variables by the evidence of their uses.
@@ -147,7 +149,7 @@ pub enum Pass {
 
 impl Pass {
     /// Every pass, in the order the pipeline first runs it.
-    pub const ALL: [Self; 63] = [
+    pub const ALL: [Self; 64] = [
         Self::FoldJumps,
         Self::DropReturnedValues,
         Self::MergeChains,
@@ -186,6 +188,7 @@ impl Pass {
         Self::CalleeTypes,
         Self::TypeParameters,
         Self::TypeLocals,
+        Self::SignedWords,
         Self::ByteArithmetic,
         Self::NameVars,
         Self::NormalizeTemps,
@@ -255,6 +258,7 @@ impl Pass {
             Self::CalleeTypes => "callee::noted",
             Self::TypeParameters => "type_parameters",
             Self::TypeLocals => "type_locals",
+            Self::SignedWords => "words::signed_words",
             Self::ByteArithmetic => "byte_arithmetic",
             Self::NameVars => "name_vars",
             Self::NormalizeTemps => "normalize_temps",

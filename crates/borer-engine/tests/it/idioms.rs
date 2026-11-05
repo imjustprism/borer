@@ -412,3 +412,24 @@ fn a_compare_after_a_positive_test_reads_signed() {
     assert!(text.contains("if (a1 < 7) {"), "{text}");
     assert!(!text.contains("(uint32_t)"), "{text}");
 }
+
+/// A 64-bit value every ordered compare reads signed is an `int64_t`.
+///
+/// `cmp qword [rsp+8], 0; jle` printed `(int64_t)a1 <= 0` under a
+/// `uint64_t a1`; the declaration takes the sign, the compare drops the
+/// cast, and the text still runs as the binary does.
+#[test]
+fn a_word_compared_signed_is_declared_signed() {
+    let code = [
+        0x48, 0x89, 0x4c, 0x24, 0x08, // ASM: mov [rsp+8], rcx
+        0x48, 0x83, 0x7c, 0x24, 0x08, 0x00, // ASM: cmp qword [rsp+8], 0
+        0x7e, 0x06, // ASM: jle 0x140001013
+        0x48, 0x8b, 0x44, 0x24, 0x08, // ASM: mov rax, [rsp+8]
+        0xc3, // ASM: ret
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xc3, // ASM: ret
+    ];
+    let text = crate::decompiled::runs_agree(&program64(&code), 0x1_4000_1000);
+    assert!(text.contains("(int64_t a1)"), "{text}");
+    assert!(!text.contains("(int64_t)"), "{text}");
+}

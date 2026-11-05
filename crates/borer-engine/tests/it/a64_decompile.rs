@@ -899,7 +899,7 @@ fn an_integer_to_float_is_a_cast() {
         // ASM: scvtf d0, x0 / str d0, [x1] / ret
         (
             &[0x9e62_0000, 0xfd00_0020, 0xd65f_03c0],
-            &["(double)(int64_t)"],
+            &["(double)a1", "(int64_t a1"],
             &["16.0", " & "],
         ),
         // ASM: scvtf s0, w0 / str s0, [x1] / ret
@@ -923,7 +923,7 @@ fn an_integer_to_float_is_a_cast() {
         // ASM: scvtf d0, x0, #4 / str d0, [x1] / ret
         (
             &[0x9e42_f000, 0xfd00_0020, 0xd65f_03c0],
-            &["(double)(int64_t)", "16.0"],
+            &["(int64_t a1", "16.0"],
             &[" & "],
         ),
         // ASM: ucvtf s0, w0, #4 / str s0, [x1] / ret
@@ -947,7 +947,7 @@ fn an_integer_to_float_is_a_cast() {
         // ASM: scvtf s0, x0 / str s0, [x1] / ret
         (
             &[0x9e22_0000, 0xbd00_0020, 0xd65f_03c0],
-            &["(float)(int64_t)"],
+            &["(float)a1", "(int64_t a1"],
             &["int32_t a1", "(int32_t)", "16.0", " & "],
         ),
         // ASM: ucvtf s0, x0 / str s0, [x1] / ret
@@ -977,7 +977,7 @@ fn an_integer_to_float_is_a_cast() {
         // ASM: scvtf s0, x0, #4 / str s0, [x1] / ret
         (
             &[0x9e02_f000, 0xbd00_0020, 0xd65f_03c0],
-            &["(float)", "(double)(int64_t)", "16.0"],
+            &["(float)", "(int64_t a1", "16.0"],
             &[" & "],
         ),
         // ASM: ucvtf s0, x0, #4 / str s0, [x1] / ret
@@ -1030,7 +1030,7 @@ fn a_float_stored_at_another_width_keeps_its_bits() {
         // ASM: scvtf d0, x0 / str s0, [x1] / ret
         (
             &[0x9e62_0000, 0xbd00_0020, 0xd65f_03c0],
-            &["*(uint32_t*)", "((double)(int64_t)a1)", "0xffffffff"],
+            &["*(uint32_t*)", "((double)a1)", "0xffffffff"],
             &["*(float*)", "(float)"],
         ),
         // ASM: ucvtf d0, x0 / str s0, [x1] / ret
@@ -1186,11 +1186,7 @@ fn a_wider_float_read_keeps_the_encoding() {
                 0x5280_0020,
                 0xd65f_03c0,
             ],
-            &[
-                "(float)(((double)(int64_t)a1) & 0xffffffff)",
-                "0.0",
-                "(int64_t)",
-            ],
+            &["(float)(((double)a1) & 0xffffffff)", "0.0", "(int64_t a1"],
             &["(double)(int64_t)a1 <", "(double)(int64_t)a1 >"],
         ),
         // ASM: scvtf d0, x0 / fadd s0, s0, s0 / str d0, [x1] / ret
@@ -1198,8 +1194,8 @@ fn a_wider_float_read_keeps_the_encoding() {
             &[0x9e62_0000, 0x1e20_2800, 0xfd00_0020, 0xd65f_03c0],
             &[
                 "*(uint64_t*)",
-                "(float)(((double)(int64_t)a1) & 0xffffffff)",
-                "(int64_t)",
+                "(float)(((double)a1) & 0xffffffff)",
+                "(int64_t a1",
             ],
             &["*(double*)", "*(float*)"],
         ),
@@ -1414,7 +1410,7 @@ fn a_float_conversion_reads_the_source_width() {
                 "(double)",
                 "(float)",
                 "0xffffffff",
-                "(int64_t)",
+                "(int64_t a1",
             ],
             &["*(uint64_t*)", "*(float*)", "/* asm"],
         ),
