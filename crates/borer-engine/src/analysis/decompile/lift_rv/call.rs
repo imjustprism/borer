@@ -377,15 +377,34 @@ impl Lift<'_, '_> {
     ///
     /// # Arguments
     ///
-    /// * `target` - Where it goes.
-    pub(super) fn tail_call(&mut self, target: u64) {
-        let callee = Callee::Direct(target);
+    /// * `callee` - Where it goes: a function, or a value read from a table
+    ///   of them.
+    /// * `like` - The function it goes to, or one of the table's, whose
+    ///   signature they share.
+    pub(super) fn tail_call(&mut self, callee: Callee, like: u64) {
         let (text, reached) = self.callee_named(&callee);
-        let returns = self.returns(Some(target), reached);
-        let args = self.arguments(Some(target), reached, true);
+        let returns = self.returns(Some(like), reached);
+        let args = self.arguments(Some(like), reached, true);
         self.ex.emit_tail(&text, &args, reached, returns);
         self.ex
             .record_call(callee, args, None, None, false, Shown::Tail);
+    }
+
+    /// The registers a function takes its arguments in, as keys, and what it
+    /// returns, when its signature is known and takes its integers in
+    /// registers alone and returns no float: a call through a table prints
+    /// an integer function pointer
+    /// ([`super::super::lift::Exec::table_callee`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `entry` - The function.
+    pub(super) fn arg_keys(&self, entry: u64) -> Option<(Vec<Key>, Returns)> {
+        let (regs, stack) = self.callee_args(Some(entry), None)?;
+        let ints = regs.iter().all(|r| matches!(r, Reg::X(_)));
+        let returns = self.returns(Some(entry), None);
+        let plain = ints && stack == 0 && !matches!(returns, Returns::Float(_));
+        plain.then(|| (regs.into_iter().map(Key::Rv).collect(), returns))
     }
 
     /// Lifts a return: `return a0;` (or `fa0`) when the function hands a

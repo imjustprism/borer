@@ -31,7 +31,9 @@ pub(in crate::analysis::decompile) use shape::{
 
 use super::Ctx;
 use super::expr::{Cc, Cond, Expr, Flags, Key, Op, fold};
-use super::lift::{BlockFacts, BlockOut, Branch, EffectKind, Env, Exec, LiveFn, Pass, PhiFn};
+use super::lift::{
+    BlockFacts, BlockOut, Branch, Callee, EffectKind, Env, Exec, LiveFn, Pass, PhiFn,
+};
 use crate::analysis::Function;
 use crate::fxmap::FxHashMap;
 use crate::isa::rv::{self, Alu, BrCond, Flow, Insn, Op as ROp, Reg, SP, Xlen, ZERO};
@@ -161,7 +163,7 @@ pub(in crate::analysis::decompile) fn exec_block_rv(
             Flow::Jump => {
                 match transfer_target(prev, i, xlen) {
                     Some(t) if lift.ex.ctx.block_starts.contains(&t) => out.goto = Some(t),
-                    Some(t) => lift.tail_call(t),
+                    Some(t) => lift.tail_call(Callee::Direct(t), t),
                     None => lift.jump(i, &mut out),
                 }
                 if let ROp::Jal { rd, .. } | ROp::Jalr { rd, .. } = i.op {
@@ -519,7 +521,8 @@ impl Lift<'_, '_> {
 
     /// Lifts a jump through a register no `auipc` built: a switch when
     /// the analysis resolved its table and the entry's load named its index
-    /// ([`table_load`]), else a computed `goto`.
+    /// ([`table_load`]), a tail call through a table of functions, else a
+    /// computed `goto`.
     ///
     /// # Arguments
     ///
@@ -533,6 +536,10 @@ impl Lift<'_, '_> {
         if self.ex.ctx.analysis.jump_tables.contains_key(&i.va) && self.ex.switch_idx.is_some() {
             out.switch_target = Some(target);
             return;
+        }
+        let entries = self.ex.function_table(&target);
+        if let Some(like) = self.ex.table_callee(&entries, |e| self.arg_keys(e)) {
+            return self.tail_call(Callee::Through(target), like);
         }
         if self.ex.emit {
             let line = format!("goto *{};", target.render(&self.ex.names()));

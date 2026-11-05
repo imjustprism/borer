@@ -45,7 +45,9 @@ pub(in crate::analysis::decompile) use shape::{
 use super::Ctx;
 use super::abi::a64::callee_saved;
 use super::expr::{Cc, Cond, Expr, Flags, Key, Op, Ty, fold, known_bits, mask, sign_extend};
-use super::lift::{BlockFacts, BlockOut, Branch, EffectKind, Env, Exec, LiveFn, Pass, PhiFn};
+use super::lift::{
+    BlockFacts, BlockOut, Branch, Callee, EffectKind, Env, Exec, LiveFn, Pass, PhiFn,
+};
 use crate::fxmap::FxHashMap;
 use crate::isa::a64::{self, Flow, Insn, Mnemonic, Opnd, Reg, Shift};
 use crate::isa::x86::ConditionCode;
@@ -136,7 +138,7 @@ pub(in crate::analysis::decompile) fn exec_block_a64(
             },
             Flow::Jump => match i.target() {
                 Some(t) if lift.ex.ctx.block_starts.contains(&t) => out.goto = Some(t),
-                Some(t) => lift.tail_call(t),
+                Some(t) => lift.tail_call(Callee::Direct(t), t),
                 None => lift.jump(i, &mut out),
             },
             Flow::Call => lift.call(i),
@@ -561,7 +563,8 @@ impl Lift<'_, '_> {
     }
 
     /// Lifts a jump through a register: the dispatch of a jump table the
-    /// analysis resolved, else a computed `goto`.
+    /// analysis resolved, a tail call through a table of functions, else a
+    /// computed `goto`.
     ///
     /// # Arguments
     ///
@@ -575,6 +578,10 @@ impl Lift<'_, '_> {
         if self.ex.ctx.analysis.jump_tables.contains_key(&i.va) {
             out.switch_target = Some(target);
             return;
+        }
+        let entries = self.ex.function_table(&target);
+        if let Some(like) = self.ex.table_callee(&entries, |e| self.arg_keys(e)) {
+            return self.tail_call(Callee::Through(target), like);
         }
         if self.ex.emit {
             let line = format!("goto *{};", target.render(&self.ex.names()));

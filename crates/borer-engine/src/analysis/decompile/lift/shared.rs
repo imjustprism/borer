@@ -63,6 +63,13 @@ pub(in crate::analysis::decompile) fn need_with_reads(
     need
 }
 
+/// Fewest leading words of a table that must start functions for a jump
+/// read from it to be a tail call ([`Exec::function_table`]).
+const FN_TABLE_MIN: usize = 2;
+
+/// Most entries of a function table read ([`Exec::function_table`]).
+const FN_TABLE_MAX: u64 = 64;
+
 impl Exec<'_, '_> {
     /// Records the stack slots a call's callee may read, for slot
     /// liveness: a window from the lowest escaped slot up while the stack
@@ -78,6 +85,92 @@ impl Exec<'_, '_> {
             (Some(_), None) => {}
             (None, _) => self.call_uses.push((SlotUse::All, written)),
         }
+    }
+
+    /// The functions of the table an indirect jump's target is read from:
+    /// a load from an address built on a constant whose first
+    /// [`FN_TABLE_MIN`] words each start a function, and as many words after
+    /// them as start one, up to [`FN_TABLE_MAX`].
+    ///
+    /// Such a jump leaves the function for one of them, a tail call through
+    /// the table (`return ops[k](a, b);`), where a table of the function's
+    /// own code addresses would be a switch.
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - The jump's target value.
+    ///
+    /// # Returns
+    ///
+    /// The table's functions, in table order; empty when the target is no
+    /// read from such a table.
+    pub(in crate::analysis::decompile) fn function_table(&self, target: &Expr) -> Vec<u64> {
+        /// Deepest an address expression is searched for its base.
+        const DEPTH_MAX: u8 = 4;
+        fn bases(e: &Expr, depth: u8, out: &mut Vec<u64>) {
+            match e {
+                Expr::Const(c) => out.push(*c),
+                Expr::Bin(_, l, r) if depth > 0 => {
+                    bases(l, depth - 1, out);
+                    bases(r, depth - 1, out);
+                }
+                _ => {}
+            }
+        }
+        let Expr::Deref(addr, _) = target else {
+            return Vec::new();
+        };
+        let mut found = Vec::new();
+        bases(addr, DEPTH_MAX, &mut found);
+        let program = self.ctx.program;
+        let width = if program.is_64 { 8 } else { 4 };
+        let word = |base: u64, k: u64| {
+            crate::analysis::read_word(program, base.wrapping_add(k * width))
+                .filter(|&w| self.ctx.analysis.function(w).is_some())
+        };
+        found
+            .into_iter()
+            .map(|base| {
+                (0..FN_TABLE_MAX)
+                    .map_while(|k| word(base, k))
+                    .collect::<Vec<u64>>()
+            })
+            .find(|run| run.len() >= FN_TABLE_MIN)
+            .unwrap_or_default()
+    }
+
+    /// The function of a table a tail call through it takes its arguments
+    /// as: the one taking the most registers, when every function's are
+    /// known, its registers hold every other function's, they all return
+    /// alike, and each of the registers holds a value here. Only on a 64-bit
+    /// image, whose words the call's integer pointer passes one a register.
+    ///
+    /// # Arguments
+    ///
+    /// * `entries` - The table's functions ([`Self::function_table`]).
+    /// * `args` - A function's argument registers and what it returns,
+    ///   `None` when unknown or not a plain integer call.
+    ///
+    /// # Returns
+    ///
+    /// That function, or `None` to keep the jump a computed `goto`.
+    pub(in crate::analysis::decompile) fn table_callee(
+        &self,
+        entries: &[u64],
+        args: impl Fn(u64) -> Option<(Vec<Key>, Returns)>,
+    ) -> Option<u64> {
+        if !self.ctx.program.is_64 {
+            return None;
+        }
+        let shapes: Vec<(u64, Vec<Key>, Returns)> = entries
+            .iter()
+            .map(|&e| args(e).map(|(r, back)| (e, r, back)))
+            .collect::<Option<_>>()?;
+        let (like, regs, back) = shapes.iter().max_by_key(|(_, r, _)| r.len())?;
+        let alike = shapes
+            .iter()
+            .all(|(_, r, b)| b == back && r.iter().all(|k| regs.contains(k)));
+        (alike && regs.iter().all(|k| self.env.vals.contains_key(k))).then_some(*like)
     }
 
     /// Emits a tail call's line: `return f(args);` when the function hands

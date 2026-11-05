@@ -151,3 +151,117 @@ fn a_mid_function_address_and_a_bad_predicate_are_refused() {
     let bad = calls_tsv(&p, &a, &o, "VirtualProtect,a0=4").expect_err("a0");
     assert!(bad.contains("count from one"), "{bad}");
 }
+
+/// Decompiles an arm64 function at `0x401000` that jumps through a table
+/// of functions at `0x402000`, its entries `op0` at `0x401020` and `op1` at
+/// `0x401028`.
+///
+/// # Arguments
+///
+/// * `head` - The function's words up to its `br x3`, at most eight.
+/// * `ops` - The two table functions' words, two each.
+fn table_jump(head: &[u32], ops: [u32; 4]) -> String {
+    let mut words = head.to_vec();
+    words.resize(8, 0xd503_201f);
+    words.extend_from_slice(&ops);
+    let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let table: Vec<u8> = [0x0040_1020_u64, 0x0040_1028]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+    let mut p = crate::raw::image(Arch::Arm64, &code, &table);
+    p.symbols = [("op0", 0x40_1020), ("op1", 0x40_1028)]
+        .into_iter()
+        .map(|(name, addr)| Symbol {
+            name: name.to_owned(),
+            addr,
+            kind: SymbolKind::Local,
+        })
+        .collect();
+    let a = Analysis::compute(&p);
+    borer_engine::analysis::decompile::decompile(&p, &a, &Overlay::default(), 0x401000)
+        .unwrap_or_default()
+}
+
+/// `adrp x9, 0x402000; add x9, x9, #0; ldr x3, [x9, x0, lsl #3]`.
+const LOAD_ENTRY: [u32; 3] = [0xb000_0009, 0x9100_0129, 0xf860_7923];
+
+/// `br x3`.
+const BR_X3: u32 = 0xd61f_0060;
+
+/// A jump through a register read from a table of functions is a tail
+/// call through the table, not a computed `goto`.
+///
+/// `return ops[k](a, b);` on arm64 loads the entry and branches to it with
+/// `br`; the callee takes the arguments the table's functions take, the
+/// most any of them reads, and its result is the function's.
+#[test]
+fn a_jump_through_a_function_table_is_a_tail_call() {
+    let mut head = LOAD_ENTRY.to_vec();
+    head.extend_from_slice(&[
+        0xaa01_03e0, // ASM: mov x0, x1
+        0xaa02_03e1, // ASM: mov x1, x2
+        BR_X3,
+    ]);
+    let ops = [
+        0x9100_0400, // ASM: add x0, x0, #1
+        0xd65f_03c0, // ASM: ret
+        0xcb01_0000, // ASM: sub x0, x0, x1
+        0xd65f_03c0, // ASM: ret
+    ];
+    let text = table_jump(&head, ops);
+    assert!(!text.contains("goto"), "{text}");
+    assert!(
+        text.contains("return ((uint64_t (*)(uint64_t, uint64_t))"),
+        "{text}"
+    );
+    assert!(text.contains("(a2, a3);"), "{text}");
+}
+
+/// A table jump whose functions read a register the function never sets
+/// stays a computed `goto`: the call would pass a value nothing gave it.
+#[test]
+fn a_table_jump_with_an_unknown_argument_stays_a_goto() {
+    let mut head = LOAD_ENTRY.to_vec();
+    head.push(BR_X3);
+    let ops = [
+        0x8b01_0000, // ASM: add x0, x0, x1
+        0xd65f_03c0, // ASM: ret
+        0xcb01_0000, // ASM: sub x0, x0, x1
+        0xd65f_03c0, // ASM: ret
+    ];
+    let text = table_jump(&head, ops);
+    assert!(text.contains("goto *"), "{text}");
+}
+
+/// A table whose functions take their arguments in different registers
+/// stays a computed `goto`: no one call passes what each of them reads.
+#[test]
+fn a_table_of_unlike_functions_stays_a_goto() {
+    let mut head = LOAD_ENTRY.to_vec();
+    head.push(BR_X3);
+    let ops = [
+        0x9100_0400, // ASM: add x0, x0, #1
+        0xd65f_03c0, // ASM: ret
+        0x1e60_2800, // ASM: fadd d0, d0, d0
+        0xd65f_03c0, // ASM: ret
+    ];
+    let text = table_jump(&head, ops);
+    assert!(text.contains("goto *"), "{text}");
+}
+
+/// A table of float functions stays a computed `goto`: the call through it
+/// would print an integer function pointer and pass the wrong registers.
+#[test]
+fn a_table_of_float_functions_stays_a_goto() {
+    let mut head = LOAD_ENTRY.to_vec();
+    head.push(BR_X3);
+    let ops = [
+        0x1e60_2800, // ASM: fadd d0, d0, d0
+        0xd65f_03c0, // ASM: ret
+        0x1e60_0800, // ASM: fmul d0, d0, d0
+        0xd65f_03c0, // ASM: ret
+    ];
+    let text = table_jump(&head, ops);
+    assert!(text.contains("goto *"), "{text}");
+}
