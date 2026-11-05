@@ -3337,6 +3337,8 @@ fn dec_then_jl_reads_the_overflow() {
 /// the increment is above minus one, `INT_MAX` included, where the sign
 /// of `a1 + 1` says not.
 ///
+/// The `-1` is an `int` literal and takes no cast.
+///
 /// `mov eax,[esp+4]; inc eax; jg L; xor eax,eax; ret; L: mov eax,1; ret`.
 #[test]
 fn inc_then_jg_reads_the_overflow() {
@@ -3344,7 +3346,7 @@ fn inc_then_jg_reads_the_overflow() {
         0x8b, 0x44, 0x24, 0x04, 0x40, 0x7f, 0x03, 0x33, 0xc0, 0xc3, 0xb8, 0x01, 0x00, 0x00, 0x00,
         0xc3,
     ]);
-    assert!(text.contains("if (a1 > (int32_t)-1) {"), "{text}");
+    assert!(text.contains("if (a1 > -1) {"), "{text}");
     assert!(!text.contains("+ 1) > 0"), "{text}");
     for x in boundary_i32() {
         let (r, of) = x.overflowing_add(1);

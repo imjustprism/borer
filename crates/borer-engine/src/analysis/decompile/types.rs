@@ -2393,11 +2393,7 @@ fn strip_casts(line: &str, name: &str, casts: &[&str], mask: Option<u8>, wide: b
                     .is_some_and(|h| h.ends_with(*cast))
         });
         let found = wrapped.or_else(|| casts.iter().find(|cast| head.ends_with(*cast)));
-        let start = match (found, wrapped.is_some()) {
-            (Some(cast), true) => at - cast.len() - 1,
-            (Some(cast), false) => at - cast.len(),
-            (None, _) => at,
-        };
+        let start = found.map_or(at, |cast| at - cast.len() - usize::from(wrapped.is_some()));
         let mut end = at + name.len() + usize::from(wrapped.is_some());
         let mut masked = false;
         if let Some(bits) = mask_width(line.get(end..).unwrap_or(""))
@@ -2838,6 +2834,9 @@ fn balanced_end(text: &str) -> Option<usize> {
 
 /// The casts and mask a declared parameter type makes redundant.
 ///
+/// A type narrower than `int` promotes to it, so `(int32_t)` of one says
+/// nothing either.
+///
 /// # Arguments
 ///
 /// * `ty` - The type as the header spells it.
@@ -2847,14 +2846,17 @@ fn balanced_end(text: &str) -> Option<usize> {
 /// The cast prefixes to drop and the mask width to drop, or `None` for a
 /// type that is not a narrow integer (pointers, references, classes).
 pub(super) fn narrow_type(ty: &str) -> Option<(&'static [&'static str], Option<u8>)> {
+    const INT: &str = "(int32_t)";
     Some(match ty {
         "int32_t" | "int" | "long" | "INT" | "LONG" | "HRESULT" => {
-            (&["(int64_t)(int32_t)", "(int32_t)"][..], None)
+            (&["(int64_t)(int32_t)", INT][..], None)
         }
-        "int16_t" | "short" | "SHORT" => (&["(int64_t)(int16_t)", "(int16_t)"][..], None),
-        "int8_t" | "char" | "signed char" => (&["(int64_t)(int8_t)", "(int8_t)"][..], None),
-        "uint8_t" | "bool" | "unsigned char" | "BYTE" | "BOOLEAN" => (&["(uint8_t)"][..], Some(8)),
-        "uint16_t" | "unsigned short" | "WORD" | "wchar_t" => (&["(uint16_t)"][..], Some(16)),
+        "int16_t" | "short" | "SHORT" => (&["(int64_t)(int16_t)", "(int16_t)", INT][..], None),
+        "int8_t" | "char" | "signed char" => (&["(int64_t)(int8_t)", "(int8_t)", INT][..], None),
+        "uint8_t" | "bool" | "unsigned char" | "BYTE" | "BOOLEAN" => {
+            (&["(uint8_t)", INT][..], Some(8))
+        }
+        "uint16_t" | "unsigned short" | "WORD" | "wchar_t" => (&["(uint16_t)", INT][..], Some(16)),
         "uint32_t" | "unsigned int" | "unsigned" | "DWORD" | "unsigned long" | "ULONG" | "UINT" => {
             (&["(uint32_t)"][..], Some(32))
         }

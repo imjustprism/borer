@@ -22,7 +22,7 @@ pub(in crate::analysis::decompile) use locals::refine_locals;
 /// and masks go, as C promotes the declared type the same way. A parameter
 /// the header already declares narrow (`int a2` from an assert, `bool a3`)
 /// keeps its type and loses the casts and masks that agree with it
-/// ([`narrow_type`]), and so does one the debug information names
+/// ([`narrow_type`]), a stack of them (`(int32_t)(int64_t)(int8_t)a3`) too, and so does one the debug information names
 /// (`int total_stored`) when the type is a signed one, whose casts are
 /// all it drops. One the declared calls it is passed to agree is a pointer
 /// to a named type is that ([`api_pointer`]): `strlen(a1)` makes a word
@@ -108,10 +108,16 @@ pub(in crate::analysis::decompile) fn type_parameters(text: &str, word: &str) ->
             continue;
         };
         for line in lines.iter_mut().filter(|l| !l.starts_with("//")) {
-            *line = unwrap_parens(
-                &strip_casts(line, &param, casts, mask, word == "uint64_t"),
-                &param,
-            );
+            for _ in 0..casts.len() {
+                let stripped = unwrap_parens(
+                    &strip_casts(line, &param, casts, mask, word == "uint64_t"),
+                    &param,
+                );
+                if stripped == *line {
+                    break;
+                }
+                *line = stripped;
+            }
         }
         if declared == word || narrow_copy.is_some() || signed_word.is_some() || ty != declared {
             retype(&mut lines[sig], &declared, &param, ty);
@@ -2077,6 +2083,25 @@ f2 = gettext(a2);
 printf(f2, a3);",
         );
         assert_eq!(api_pointer(&text, "a3"), None);
+    }
+
+    /// A narrow parameter loses every cast of a stack the promotion makes
+    /// redundant and the mask to its width, not only the innermost.
+    #[test]
+    fn a_narrow_parameter_loses_a_stack_of_casts() {
+        let text = "// signature: uint32_t f(int8_t a1, uint8_t a2)
+if ((int32_t)(int64_t)(int8_t)a1 < 0 && (int32_t)(a2 & 0xff) > 200) {
+  return 1;
+}
+return 0;
+";
+        let typed = super::type_parameters(text, "uint32_t");
+        assert!(typed.contains("if (a1 < 0 && a2 > 200) {"), "{typed}");
+        let text = "// signature: uint32_t f(uint8_t a1)
+return (uint32_t)a1;
+";
+        let typed = super::type_parameters(text, "uint32_t");
+        assert!(typed.contains("return (uint32_t)a1;"), "{typed}");
     }
 
     /// A parameter only passed to `exit` and stored to a 32-bit global is
