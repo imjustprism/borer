@@ -257,6 +257,48 @@ fn an_upx_ebx_stub_names_upx_and_an_empty_section_prints_its_address() {
     );
 }
 
+/// UPX's stub names UPX under section names that hide it.
+///
+/// It does without its `pushad`, under the `nop; popad` a scrambler writes
+/// over it, and in the 3.x form that puts back a dword of the first section
+/// before it unpacks.
+#[test]
+fn a_reshaped_upx_stub_names_upx() {
+    let body = [
+        0xbe, 0x78, 0x56, 0x34, 0x12, 0x8d, 0xbe, 0x00, 0x00, 0xff, 0xff,
+    ];
+    let restore = [0xc7, 0x87, 0x40, 0x08, 0x04, 0x00, 0xc8, 0x96, 0x8d, 0x65];
+    let tail = [0x57, 0x83, 0xcd, 0xff, 0xeb];
+    for (lead, put) in [
+        (&[][..], false),
+        (&[0x90, 0x61][..], false),
+        (&[0x60][..], true),
+        (&[][..], true),
+        (&[0x90, 0x61][..], true),
+    ] {
+        let mut stub = lead.to_vec();
+        stub.extend_from_slice(&body);
+        if put {
+            stub.extend_from_slice(&restore);
+        }
+        stub.extend_from_slice(&tail);
+        let vsize = u32::try_from(stub.len()).expect("fits");
+        let bytes = pe32(
+            &[Sec {
+                name: "text",
+                rva: 0x3000,
+                data: stub,
+                vsize,
+                chars: WX,
+            }],
+            0x3000,
+        );
+        let out = report(bytes);
+        assert!(out.contains("# protected: UPX"), "{out}");
+        assert!(out.contains("entry stub at 0x403000"), "{out}");
+    }
+}
+
 /// A protector that only its section names give away: `VMProtect` with plain
 /// code at the entry, no stub, is named from `.vmp0` and `.vmp1` alone.
 #[test]

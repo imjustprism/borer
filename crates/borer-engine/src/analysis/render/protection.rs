@@ -1049,7 +1049,7 @@ pub(super) struct EntrySig {
 
 /// Entry stubs a packer writes, as `??`-wildcard patterns read at the entry
 /// point. Each entry's [`EntrySig::stub`] line is its documentation.
-pub(super) const PACKER_ENTRY_SIGS: [EntrySig; 10] = [
+pub(super) const PACKER_ENTRY_SIGS: [EntrySig; 15] = [
     EntrySig {
         packer: "SteamStub",
         pattern: "60 81 EC 00 10 00 00 BE ?? ?? ?? ?? B9 ?? ?? ?? ?? 8D BD ?? ?? ?? ?? F3 A5",
@@ -1072,6 +1072,31 @@ pub(super) const PACKER_ENTRY_SIGS: [EntrySig; 10] = [
         pattern: "60 BE ?? ?? ?? ?? 8D BE ?? ?? ?? ?? 57 EB",
         stub: "pushad; mov esi, imm32; lea edi, [esi+disp32]; push edi; jmp \
                short: UPX with ebx as the bit register",
+    },
+    EntrySig {
+        packer: "UPX",
+        pattern: "60 BE ?? ?? ?? ?? 8D BE ?? ?? ?? ?? C7 87 ?? ?? ?? ?? ?? ?? ?? ?? 57 83 CD FF EB",
+        stub: "pushad; mov esi, imm32; lea edi, [esi+disp32]; mov [edi+disp32],                imm32; push edi; or ebp, -1: UPX 3.x putting back a dword of the                first section",
+    },
+    EntrySig {
+        packer: "UPX",
+        pattern: "BE ?? ?? ?? ?? 8D BE ?? ?? ?? ?? 57 83 CD FF EB",
+        stub: "mov esi, imm32; lea edi, [esi+disp32]; push edi; or ebp, -1: UPX                with its pushad taken out",
+    },
+    EntrySig {
+        packer: "UPX",
+        pattern: "BE ?? ?? ?? ?? 8D BE ?? ?? ?? ?? C7 87 ?? ?? ?? ?? ?? ?? ?? ?? 57 83 CD FF EB",
+        stub: "mov esi, imm32; lea edi, [esi+disp32]; mov [edi+disp32], imm32;                push edi; or ebp, -1: UPX 3.x with its pushad taken out",
+    },
+    EntrySig {
+        packer: "UPX",
+        pattern: "90 61 BE ?? ?? ?? ?? 8D BE ?? ?? ?? ?? 57 83 CD FF EB",
+        stub: "nop; popad; mov esi, imm32; lea edi, [esi+disp32]; push edi; or                ebp, -1: UPX whose pushad a scrambler overwrote",
+    },
+    EntrySig {
+        packer: "UPX",
+        pattern: "90 61 BE ?? ?? ?? ?? 8D BE ?? ?? ?? ?? C7 87 ?? ?? ?? ?? ?? ?? ?? ?? 57 83 CD FF EB",
+        stub: "nop; popad; mov esi, imm32; lea edi, [esi+disp32]; mov                [edi+disp32], imm32; push edi; or ebp, -1: UPX 3.x whose pushad a                scrambler overwrote",
     },
     EntrySig {
         packer: "FSG",
@@ -1113,7 +1138,7 @@ pub(super) const PACKER_ENTRY_SIGS: [EntrySig; 10] = [
 
 /// Bytes read at the entry point when matching [`PACKER_ENTRY_SIGS`], enough
 /// for the longest stub and no more.
-pub(super) const ENTRY_STUB_MAX: usize = 25;
+pub(super) const ENTRY_STUB_MAX: usize = 28;
 
 /// Sections whose holding the entry point is itself a protector's mark, and
 /// the family that places one there.
