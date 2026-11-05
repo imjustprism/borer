@@ -232,7 +232,6 @@ fn finish_param_types(
 /// clobbered by a call.
 fn spilled_u32_params(ctx: &Ctx<'_>, code: &[Vec<Instruction>], entry: usize) -> BTreeSet<usize> {
     if ctx.bitness != 64
-        || ctx.conv.shadow != 0
         || (code.len() == 1
             && code
                 .first()

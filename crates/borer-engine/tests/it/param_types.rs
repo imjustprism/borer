@@ -145,3 +145,34 @@ fn a_callee_passed_an_integer_keeps_its_abi_declaration() {
         .unwrap_or_default();
     assert!(extern_g.contains("sub_140001020(uint64_t)"), "{text}");
 }
+
+/// A Windows x64 parameter that unoptimized code stores to its frame as a
+/// dword is an `int`-sized parameter, as on System V.
+///
+/// clang `-O0` for Windows writes `mov [rsp+4], ecx` and reads the slot
+/// from then on. The header said `uint64_t a1`, and where a use left the
+/// text no cast to narrow it by (a copy, a `switch`), every compare kept
+/// one: `case_ifchain` printed `(uint32_t)a1` 136 times.
+#[test]
+fn a_dword_spilled_windows_parameter_is_32_bits() {
+    let code = [
+        0x50, // ASM: push rax
+        0x89, 0x4c, 0x24, 0x04, // ASM: mov [rsp+4], ecx
+        0xc7, 0x04, 0x24, 0x00, 0x00, 0x00, 0x00, // ASM: mov dword [rsp], 0
+        0x83, 0x7c, 0x24, 0x04, 0x00, // ASM: cmp dword [rsp+4], 0
+        0x74, 0x1a, // ASM: je 0x14000102d
+        0x8b, 0x44, 0x24, 0x04, // ASM: mov eax, [rsp+4]
+        0x83, 0xe8, 0x01, // ASM: sub eax, 1
+        0x23, 0x44, 0x24, 0x04, // ASM: and eax, [rsp+4]
+        0x89, 0x44, 0x24, 0x04, // ASM: mov [rsp+4], eax
+        0x8b, 0x04, 0x24, // ASM: mov eax, [rsp]
+        0x83, 0xc0, 0x01, // ASM: add eax, 1
+        0x89, 0x04, 0x24, // ASM: mov [rsp], eax
+        0xeb, 0xdf, // ASM: jmp 0x14000100c
+        0x8b, 0x04, 0x24, // ASM: mov eax, [rsp]
+        0x59, // ASM: pop rcx
+        0xc3, // ASM: ret
+    ];
+    let text = decompiled::runs_agree(&program64(&code), 0x1_4000_1000);
+    assert!(text.contains("(uint32_t a1)"), "{text}");
+}
