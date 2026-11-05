@@ -1989,6 +1989,58 @@ fn select_idiom(op: Op, l: &Expr, r: &Expr) -> Option<Expr> {
     None
 }
 
+/// Reverses a value masked by its own complemented sign.
+///
+/// `x & ~(x >> (bits - 1))` keeps `x` where its sign at `bits` is clear
+/// and is zero where it is set: `x >= 0 ? x : 0`, the clamp a compiler
+/// writes for a loop's trip count (`bic w9, w9, w9, asr #31`). The
+/// complement is a `not` or an `xor` with all ones at the width, and the
+/// shift reads the sign of the same `x`. Only the low `bits` bits of the
+/// result are claimed, as every fold claims.
+///
+/// # Arguments
+///
+/// * `op` - The operator being folded.
+/// * `l` - Left operand.
+/// * `r` - Right operand.
+/// * `bits` - Width of the operation.
+///
+/// # Returns
+///
+/// The ternary, or `None` when the operands are not that shape.
+fn clamp_idiom(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
+    if op != Op::And || !(8..=64).contains(&bits) {
+        return None;
+    }
+    let m = mask_bits(bits);
+    for (mask, x) in [(l, r), (r, l)] {
+        let sign = match mask {
+            Expr::Un(UnOp::Not, s) => s.as_ref(),
+            Expr::Bin(Op::Xor, s, c) if matches!(**c, Expr::Const(k) if k & m == m) => s.as_ref(),
+            _ => continue,
+        };
+        let Expr::Bin(Op::Sar, v, by) = sign else {
+            continue;
+        };
+        let same = match v.as_ref() {
+            Expr::Sext(z, b) if *b == bits => **z == *x || **z == low_bits_read(x.clone(), bits),
+            other => bits == 64 && other == x,
+        };
+        if same && const_of(by) == Some(u64::from(bits - 1)) {
+            let cond = Cond {
+                cc: Cc(ConditionCode::ge),
+                flags: Flags::Cmp(x.clone(), Expr::Const(0), bits),
+            };
+            return Some(Expr::Ternary(
+                Box::new(cond),
+                Box::new(x.clone()),
+                Box::new(Expr::Const(0)),
+            ));
+        }
+    }
+    None
+}
+
 /// The note for a condition whose outcome never varied.
 ///
 /// A proven outcome names the dead branch: a condition that is always true
@@ -2901,7 +2953,7 @@ pub(super) fn fold(op: Op, l: Expr, r: Expr, bits: u8) -> Expr {
     if let Some(e) = division_idiom(op, &l, &r, bits) {
         return e;
     }
-    if let Some(e) = select_idiom(op, &l, &r) {
+    if let Some(e) = select_idiom(op, &l, &r).or_else(|| clamp_idiom(op, &l, &r, bits)) {
         return e;
     }
     if let Some(e) = sign_absolute(op, &l, &r, bits) {

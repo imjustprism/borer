@@ -342,3 +342,46 @@ fn a_proven_constant_select_folds_to_the_arm_that_runs() {
     ];
     reads_as(code, "return a2;");
 }
+
+/// A value masked by its own complemented sign, `x & ~(x >> 31)`, is the
+/// value clamped at zero.
+///
+/// `bic w9, w9, w9, asr #31` and `sar; not; and` are how a compiler
+/// spells a loop's trip count `n > 0 ? n : 0`. The text says that as a
+/// ternary on the sign, 32-bit or 64-bit, with the complement as `not` or
+/// as `xor` with all ones, and runs as the machine does. A shift of another
+/// register, a shift short of the sign, or an `xor` that leaves a bit stays
+/// the bitwise text.
+#[test]
+fn a_value_masked_by_its_complemented_sign_is_clamped_at_zero() {
+    for complement in [&[0xf7, 0xd0][..], &[0x83, 0xf0, 0xff][..]] {
+        let code: Vec<u8> = [
+            &[0x89, 0xc8, 0xc1, 0xf8, 0x1f][..],
+            complement,
+            &[0x21, 0xc8, 0xc3],
+        ]
+        .concat();
+        reads_as(&code, "(int32_t)a1 >= 0 ? a1 : 0");
+        let text = crate::decompiled::runs_agree(&program64(&code), 0x1_4000_1000);
+        assert!(!text.contains(">>"), "{text}");
+    }
+    let wide = [
+        0x48, 0x89, 0xc8, // ASM: mov rax,rcx
+        0x48, 0xc1, 0xf8, 0x3f, // ASM: sar rax,0x3f
+        0x48, 0xf7, 0xd0, // ASM: not rax
+        0x48, 0x21, 0xc8, // ASM: and rax,rcx
+        0xc3, // ASM: ret
+    ];
+    reads_as(&wide, "? a1 : 0");
+    crate::decompiled::runs_agree(&program64(&wide), 0x1_4000_1000);
+    for code in [
+        &[0x89, 0xd0, 0xc1, 0xf8, 0x1f, 0xf7, 0xd0, 0x21, 0xc8, 0xc3][..],
+        &[0x89, 0xc8, 0xc1, 0xf8, 0x1e, 0xf7, 0xd0, 0x21, 0xc8, 0xc3][..],
+        &[
+            0x89, 0xc8, 0xc1, 0xf8, 0x1f, 0x35, 0xff, 0xff, 0xff, 0x7f, 0x21, 0xc8, 0xc3,
+        ][..],
+    ] {
+        let text = decompiled(&program64(code), 0x1_4000_1000);
+        assert!(text.contains(">>") && !text.contains('?'), "{text}");
+    }
+}
