@@ -98,6 +98,9 @@ pub enum Pass {
     NormalizeTemps,
     /// Drops the `!= 0` of a test that reads a truth value.
     QuietZeroTests,
+    /// Drops the unsigned cast of a compare an earlier test proved
+    /// non-negative.
+    GuardedCompares,
     /// Drops an assignment an `if` block repeats.
     DropRepeatedAssignments,
     /// Writes conditional assignments as the statements a source spells.
@@ -144,7 +147,7 @@ pub enum Pass {
 
 impl Pass {
     /// Every pass, in the order the pipeline first runs it.
-    pub const ALL: [Self; 62] = [
+    pub const ALL: [Self; 63] = [
         Self::FoldJumps,
         Self::DropReturnedValues,
         Self::MergeChains,
@@ -187,6 +190,7 @@ impl Pass {
         Self::NameVars,
         Self::NormalizeTemps,
         Self::QuietZeroTests,
+        Self::GuardedCompares,
         Self::DropRepeatedAssignments,
         Self::SelectStatements,
         Self::CompoundAssign,
@@ -255,6 +259,7 @@ impl Pass {
             Self::NameVars => "name_vars",
             Self::NormalizeTemps => "normalize_temps",
             Self::QuietZeroTests => "quiet_zero_tests",
+            Self::GuardedCompares => "signs::guarded_compares",
             Self::DropRepeatedAssignments => "drop_repeated_assignments",
             Self::SelectStatements => "selects::select_statements",
             Self::CompoundAssign => "compound_assign",

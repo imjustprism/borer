@@ -385,3 +385,30 @@ fn a_value_masked_by_its_complemented_sign_is_clamped_at_zero() {
         assert!(text.contains(">>") && !text.contains('?'), "{text}");
     }
 }
+
+/// An `int` a test proved positive compares unsigned at `-O2`, which the
+/// text spells signed: `if (n <= 0) return 0; if (n < 4) ...` prints no
+/// `(uint32_t)n`, and the text still runs as the binary does.
+#[test]
+fn a_compare_after_a_positive_test_reads_signed() {
+    let code = [
+        0x85, 0xc9, // ASM: test ecx,ecx
+        0x7e, 0x1c, // ASM: jle 0x20
+        0x83, 0xf9, 0x04, // ASM: cmp ecx,4
+        0x72, 0x11, // ASM: jb 0x1a
+        0x83, 0xf9, 0x07, // ASM: cmp ecx,7
+        0x72, 0x06, // ASM: jb 0x14
+        0xb8, 3, 0, 0, 0,    // ASM: mov eax,3
+        0xc3, // ASM: ret
+        0xb8, 2, 0, 0, 0,    // ASM: mov eax,2
+        0xc3, // ASM: ret
+        0xb8, 1, 0, 0, 0,    // ASM: mov eax,1
+        0xc3, // ASM: ret
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xc3, // ASM: ret
+    ];
+    let text = crate::decompiled::runs_agree(&program64(&code), 0x1_4000_1000);
+    assert!(text.contains("if (a1 < 4) {"), "{text}");
+    assert!(text.contains("if (a1 < 7) {"), "{text}");
+    assert!(!text.contains("(uint32_t)"), "{text}");
+}

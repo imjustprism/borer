@@ -12,6 +12,7 @@ mod callee;
 pub(super) use callee::{CALLEE_INSTRUCTIONS_MAX, agreed_params};
 mod callfmt;
 mod selects;
+mod signs;
 mod truths;
 
 /// The text passes every decompile ends with.
@@ -132,6 +133,7 @@ pub(super) fn polish_skipping(
     });
     let text = skip.apply(Pass::NormalizeTemps, text, normalize_temps);
     let text = skip.apply(Pass::QuietZeroTests, text, quiet_zero_tests);
+    let text = skip.apply(Pass::GuardedCompares, text, signs::guarded_compares);
     let text = skip.apply(
         Pass::DropRepeatedAssignments,
         text,
