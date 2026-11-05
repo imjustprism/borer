@@ -634,6 +634,64 @@ fn a_latch_after_the_return_stays_in_its_function() {
     assert!(!f.callees.contains(&(TEXT + 0x11)), "{:?}", f.callees);
 }
 
+/// A loop head the compiler aligned with `nop`s is a block, not a function.
+///
+/// clang pads a loop's first block to sixteen bytes; jumped over, the
+/// `nop`s read as padding between functions, and a stripped `memcpy` split
+/// into one function per loop. Only the function a padding seed found holds
+/// the loop here, so both are guesses of the same round. A loop back to the
+/// function's own entry keeps that function, and a function another guess
+/// only jumps to, opening with a frame, stays one. No reference is left
+/// naming the loop head as its function.
+#[test]
+fn an_aligned_loop_head_stays_in_its_function() {
+    let mut code = LEAF.to_vec();
+    code.resize(0x10, 0xcc);
+    code.extend_from_slice(&[
+        0x31, 0xc9, // ASM: xor ecx, ecx
+        0xeb, 0x0c, // ASM: jmp short 0x401020
+    ]);
+    code.resize(0x20, 0x90);
+    code.extend_from_slice(&[
+        0xff, 0xc1, // ASM: inc ecx
+        0x83, 0xf9, 0x0a, // ASM: cmp ecx, 10
+        0x75, 0xf9, // ASM: jne 0x401020
+        0xc3, // ASM: ret
+    ]);
+    let analysis = Analysis::compute(&raw::image(Arch::X86_64, &code, &[]));
+    let found: Vec<u64> = analysis.functions.iter().map(|f| f.entry).collect();
+    assert_eq!(found, vec![TEXT, TEXT + 0x10]);
+    assert!(
+        analysis
+            .xrefs
+            .values()
+            .flatten()
+            .all(|s| s.from_entry != Some(TEXT + 0x20)),
+        "{:?}",
+        analysis.xrefs
+    );
+    if let Some(back) = code.get_mut(0x26) {
+        *back = 0xe9;
+    }
+    let found = entries(&code, &[]);
+    assert!(found.contains(&(TEXT + 0x10)), "{found:x?}");
+    let mut tail = LEAF.to_vec();
+    tail.resize(0x10, 0xcc);
+    tail.extend_from_slice(&[
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xe9, 0x09, 0x00, 0x00, 0x00, // ASM: jmp 0x401020
+    ]);
+    tail.resize(0x20, 0xcc);
+    tail.extend_from_slice(&[
+        0x55, // ASM: push rbp
+        0x48, 0x89, 0xe5, // ASM: mov rbp, rsp
+        0x31, 0xc0, // ASM: xor eax, eax
+        0x5d, // ASM: pop rbp
+        0xc3, // ASM: ret
+    ]);
+    assert_eq!(entries(&tail, &[]), vec![TEXT, TEXT + 0x10, TEXT + 0x20]);
+}
+
 /// A function behind a run of `nop` padding is found.
 ///
 /// A linker aligns with the multi-byte `nop` forms as well as with `int3`,

@@ -226,6 +226,9 @@ pub(super) struct WalkState<'a> {
     pub(super) relocatable: bool,
     /// Entries accepted from a guessed seed, in any batch so far.
     pub(super) accepted_guesses: FxHashSet<u64>,
+    /// Entries accepted from a padding or gap seed: only the bytes around
+    /// them vouch for them, so one inside another function is its block.
+    pub(super) padded: FxHashSet<u64>,
     /// Code a function owns that none of its instructions reaches, by the
     /// function's entry: where the runtime resumes it after a catch or an
     /// `__except` ([`crate::unwind::continuations`], [`catch_continuations`](super::catch_continuations)),
@@ -298,9 +301,15 @@ impl WalkState<'_> {
             return false;
         }
         self.guessed = Arc::new(seeds.iter().copied().collect());
+        let padded = matches!(kind, Seed::Padding | Seed::Gap).then(|| seeds.clone());
         self.queue = seeds;
         self.seed = kind;
         let incomplete = self.run();
+        for s in padded.into_iter().flatten() {
+            if self.accepted_guesses.contains(&s) {
+                self.padded.insert(s);
+            }
+        }
         self.seed = Seed::Fact;
         Arc::make_mut(&mut self.guessed).clear();
         incomplete
@@ -869,6 +878,63 @@ impl WalkState<'_> {
         self.covered
             .take()
             .unwrap_or_else(|| Covered::new(&self.functions))
+    }
+
+    /// Drops the guessed functions another function holds as its own code,
+    /// unless something calls them.
+    ///
+    /// A jump table's targets are the blocks of the function that jumps to
+    /// them. A padding or gap guess is a loop head the compiler aligned
+    /// with `nop`s when a function that stays branches back to it from
+    /// further on, and it does not open the way a function does: a guess a
+    /// walk only jumped into is another function. A compiler places a
+    /// function's entry before its loops, so guesses are weighed by address,
+    /// not by walk order, and a guess only a later guess holds stays: of
+    /// two guesses that hold each other the first is the function. Only a block of the
+    /// function's own counts, not a function it tail-calls backward, and the
+    /// references a dropped guess's walk recorded go with it.
+    pub(super) fn drop_held_guesses(&mut self) {
+        let case_blocks: FxHashSet<u64> = self.jump_tables.values().flatten().copied().collect();
+        let xrefs = &self.xrefs;
+        let called = |e: u64| {
+            xrefs
+                .get(&e)
+                .is_some_and(|sites| sites.iter().any(|s| s.kind == RefKind::Call))
+        };
+        let back_targets = |f: &Function| {
+            let own: BTreeSet<u64> = f.blocks.iter().map(|b| b.start).collect();
+            f.blocks
+                .iter()
+                .flat_map(|b| b.successors.iter().copied().filter(move |&t| t <= b.start))
+                .filter(|&t| t != f.entry && own.contains(&t))
+                .collect::<Vec<u64>>()
+        };
+        let mut order: Vec<&Function> = self.functions.iter().collect();
+        order.sort_by_key(|f| f.entry);
+        let mut heads: FxHashSet<u64> = order
+            .iter()
+            .filter(|f| !self.padded.contains(&f.entry))
+            .flat_map(|f| back_targets(f))
+            .collect();
+        let mut held: Vec<u64> = Vec::new();
+        for f in order {
+            if !self.padded.contains(&f.entry) {
+                continue;
+            }
+            if heads.contains(&f.entry) && !called(f.entry) {
+                held.push(f.entry);
+            } else {
+                heads.extend(back_targets(f));
+            }
+        }
+        held.retain(|&e| !opens_a_function(&mut self.worker.cursors, e));
+        held.extend(
+            self.functions
+                .iter()
+                .map(|f| f.entry)
+                .filter(|&e| case_blocks.contains(&e) && !called(e)),
+        );
+        self.forget(&held);
     }
 
     /// Drops functions and everything their walks recorded so they can be walked again.

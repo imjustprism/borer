@@ -8,7 +8,9 @@
 //! immediately followed by another function's start), and resolving bounded
 //! jump tables at indirect jumps. A jump table's own targets are case
 //! blocks of the function that jumps to them: one that a data pointer or
-//! padding seeded, and that nothing calls, is dropped at the end. Phase 2
+//! padding seeded, and that nothing calls, is dropped at the end, as is a
+//! padding or gap guess another function holds as a block (a loop head the
+//! compiler aligned with `nop`s, which reads as padding). Phase 2
 //! seeds from data pointers (vtables,
 //! callbacks) that point at executable code outside every function found so
 //! far. Phase 3 seeds from the code addresses instructions take but never
@@ -561,6 +563,7 @@ pub(crate) fn discover(program: &Program, bitness: u32) -> Analysis {
         reloc_sites: Arc::new(reloc_sites),
         relocatable: !relocated.is_empty(),
         accepted_guesses: FxHashSet::default(),
+        padded: FxHashSet::default(),
         seed: Seed::Fact,
         guessed: Arc::default(),
         rejected: AddrSet::new(program),
@@ -659,14 +662,7 @@ pub(crate) fn discover(program: &Program, bitness: u32) -> Analysis {
     }
     phases.mark("discover catch rerun");
 
-    let case_blocks: FxHashSet<u64> = st.jump_tables.values().flatten().copied().collect();
-    st.functions.retain(|f| {
-        !case_blocks.contains(&f.entry)
-            || st
-                .xrefs
-                .get(&f.entry)
-                .is_some_and(|sites| sites.iter().any(|s| s.kind == RefKind::Call))
-    });
+    st.drop_held_guesses();
     st.functions.retain(|f| f.instr_count > 0);
     st.functions.shrink_to_fit();
     let entries: BTreeSet<u64> = st.functions.iter().map(|f| f.entry).collect();
