@@ -3475,7 +3475,7 @@ fn saturating_sub(cond: &Cond, a: &Expr, b: &Expr) -> Option<Expr> {
 /// `g`, `ge`) spell `min` and `max`; unsigned ones (`b`, `be`, `a`, `ae`)
 /// spell `umin` and `umax`. A float compare is not one of those: `fcmovb`
 /// is below or unordered, which is neither `umax` nor `fmax`. The arguments stay in compare order. A compare
-/// narrower than 64 bits stays a ternary: a 32-bit signed minimum is not
+/// narrower than the machine word stays a ternary: a 32-bit signed minimum is not
 /// the signed minimum of the zero-extended values. An equality test, or a
 /// value that is not one of the two operands, stays a ternary.
 ///
@@ -3484,16 +3484,17 @@ fn saturating_sub(cond: &Cond, a: &Expr, b: &Expr) -> Option<Expr> {
 /// * `cond` - The select's condition.
 /// * `a` - Value when true.
 /// * `b` - Value when false.
+/// * `word` - The machine word in bits, the width the helpers compute at.
 ///
 /// # Returns
 ///
 /// The call, or `None` when the select is not that shape.
-fn extremum(cond: &Cond, a: &Expr, b: &Expr) -> Option<Expr> {
+pub(super) fn extremum(cond: &Cond, a: &Expr, b: &Expr, word: u8) -> Option<Expr> {
     use ConditionCode as C;
     let Flags::Cmp(l, r, bits) = &cond.flags else {
         return None;
     };
-    if *bits < 64 || l.is_float() || r.is_float() {
+    if *bits != word || l.is_float() || r.is_float() {
         return None;
     }
     let lesser = match cond.cc.0 {
@@ -3617,7 +3618,7 @@ pub(super) fn ternary(cond: Cond, a: Expr, b: Expr) -> Expr {
         return a;
     }
     if let Some(e) = saturating(&cond, &a, &b)
-        .or_else(|| extremum(&cond, &a, &b))
+        .or_else(|| extremum(&cond, &a, &b, 64))
         .or_else(|| absolute(&cond, &a, &b))
         .or_else(|| saturating_sub(&cond, &a, &b))
     {

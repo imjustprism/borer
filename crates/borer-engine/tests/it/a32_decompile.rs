@@ -175,7 +175,8 @@ fn arm32_functions_decompile_with_their_arguments_and_results() {
     assert!(divmod.contains("(int32_t)a1 % (int32_t)a2"), "{divmod}");
     let clamp = text(&p, &a, "a_clamp");
     assert!(
-        clamp.contains("((int32_t)a1 < 0 ? 0 : ((int32_t)a1 > 255 ? 255 : a1))"),
+        clamp.contains("((int32_t)a1 < 0 ? 0 : min(a1, 0xff))")
+            && clamp.contains("static inline uint32_t min(int32_t a, int32_t b)"),
         "{clamp}"
     );
 }

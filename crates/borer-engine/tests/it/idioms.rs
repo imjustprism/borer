@@ -9,6 +9,7 @@
 
 use borer_engine::analysis::Analysis;
 use borer_engine::analysis::decompile::verify::{Fact, verify, verify_tsv};
+use borer_engine::program::Arch;
 
 use crate::decompiled::{decompiled, program64};
 
@@ -267,7 +268,7 @@ fn a_helper_call_comes_with_its_definition() {
             &[
                 0x48, 0x89, 0xc8, 0x48, 0x39, 0xd1, 0x48, 0x0f, 0x4f, 0xc2, 0xc3,
             ],
-            "static inline int64_t min(int64_t a, int64_t b) { return a <= b ? a : b; }",
+            "static inline uint64_t min(int64_t a, int64_t b) { return a <= b ? a : b; }",
             "return min(a1, a2);",
         ),
     ];
@@ -279,7 +280,7 @@ fn a_helper_call_comes_with_its_definition() {
     }
     let text = decompiled(&program64(cases[1].0), 0x1_4000_1000);
     assert!(
-        text.contains("#undef min\nstatic inline int64_t min("),
+        text.contains("#undef min\nstatic inline uint64_t min("),
         "{text}"
     );
 }
@@ -324,6 +325,87 @@ fn a_full_width_compare_select_is_min_or_max() {
     }
 }
 
+/// A word compare that keeps one of its own operands is `max` on a 32-bit
+/// target too, where the helper computes at the 32-bit word.
+///
+/// The helper takes signed words and returns the unsigned word, so a
+/// logical shift of it shifts as `shr` does and an unsigned compare of it
+/// compares as `ja` does, uncast, and a
+/// 16-bit compare stays the ternary.
+#[test]
+fn a_word_compare_select_on_a_32_bit_target_is_max() {
+    let text = decompiled(
+        &crate::raw::image(
+            Arch::X86,
+            &[
+                0x8b, 0x44, 0x24, 0x04, // ASM: mov eax,[esp+4]
+                0x8b, 0x4c, 0x24, 0x08, // ASM: mov ecx,[esp+8]
+                0x39, 0xc8, // ASM: cmp eax,ecx
+                0x0f, 0x4c, 0xc1, // ASM: cmovl eax,ecx
+                0xc3, // ASM: ret
+            ],
+            &[],
+        ),
+        0x401000,
+    );
+    assert!(text.contains("return max(a1, a2);"), "{text}");
+    assert!(
+        text.contains("static inline uint32_t max(int32_t a, int32_t b)"),
+        "{text}"
+    );
+    let text = decompiled(
+        &crate::raw::image(
+            Arch::X86,
+            &[
+                0x8b, 0x44, 0x24, 0x04, // ASM: mov eax,[esp+4]
+                0x8b, 0x4c, 0x24, 0x08, // ASM: mov ecx,[esp+8]
+                0x39, 0xc8, // ASM: cmp eax,ecx
+                0x0f, 0x4c, 0xc1, // ASM: cmovl eax,ecx
+                0xd1, 0xe8, // ASM: shr eax,1
+                0xc3, // ASM: ret
+            ],
+            &[],
+        ),
+        0x401000,
+    );
+    assert!(text.contains("max(a1, a2) >> 1"), "{text}");
+    let text = decompiled(
+        &crate::raw::image(
+            Arch::X86,
+            &[
+                0x8b, 0x44, 0x24, 0x04, // ASM: mov eax,[esp+4]
+                0x8b, 0x4c, 0x24, 0x08, // ASM: mov ecx,[esp+8]
+                0x39, 0xc8, // ASM: cmp eax,ecx
+                0x0f, 0x4c, 0xc1, // ASM: cmovl eax,ecx
+                0x83, 0xf8, 0x01, // ASM: cmp eax,1
+                0x77, 0x03, // ASM: ja +3
+                0x31, 0xc0, // ASM: xor eax,eax
+                0xc3, // ASM: ret
+                0xb0, 0x01, // ASM: mov al,1
+                0xc3, // ASM: ret
+            ],
+            &[],
+        ),
+        0x401000,
+    );
+    assert!(text.contains("max(a1, a2) > 1"), "{text}");
+    let text = decompiled(
+        &crate::raw::image(
+            Arch::X86,
+            &[
+                0x8b, 0x44, 0x24, 0x04, // ASM: mov eax,[esp+4]
+                0x8b, 0x4c, 0x24, 0x08, // ASM: mov ecx,[esp+8]
+                0x66, 0x39, 0xc8, // ASM: cmp ax,cx
+                0x0f, 0x4c, 0xc1, // ASM: cmovl eax,ecx
+                0xc3, // ASM: ret
+            ],
+            &[],
+        ),
+        0x401000,
+    );
+    assert!(text.contains('?') && !text.contains("max("), "{text}");
+}
+
 /// A conditional move whose condition is proven constant by bit demand
 /// folds to the arm that runs.
 ///
@@ -348,8 +430,9 @@ fn a_proven_constant_select_folds_to_the_arm_that_runs() {
 ///
 /// `bic w9, w9, w9, asr #31` and `sar; not; and` are how a compiler
 /// spells a loop's trip count `n > 0 ? n : 0`. The text says that as a
-/// ternary on the sign, 32-bit or 64-bit, with the complement as `not` or
-/// as `xor` with all ones, and runs as the machine does. A shift of another
+/// ternary on the sign, 32-bit or 64-bit (`max` at the machine word), with
+/// the complement as `not` or as `xor` with all ones, and runs as the
+/// machine does. A shift of another
 /// register, a shift short of the sign, or an `xor` that leaves a bit stays
 /// the bitwise text.
 #[test]
@@ -372,7 +455,7 @@ fn a_value_masked_by_its_complemented_sign_is_clamped_at_zero() {
         0x48, 0x21, 0xc8, // ASM: and rax,rcx
         0xc3, // ASM: ret
     ];
-    reads_as(&wide, "? a1 : 0");
+    reads_as(&wide, "return max(a1, 0);");
     crate::decompiled::runs_agree(&program64(&wide), 0x1_4000_1000);
     for code in [
         &[0x89, 0xd0, 0xc1, 0xf8, 0x1f, 0xf7, 0xd0, 0x21, 0xc8, 0xc3][..],

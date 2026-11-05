@@ -75,9 +75,9 @@ pub(super) enum Helper {
     /// `cls(x)`: the leading sign bits of a 32- or 64-bit `x`, not counting
     /// the sign.
     Cls,
-    /// `min(a, b)`: the signed minimum at the machine word, `a` when equal.
+    /// `min(a, b)`: the signed minimum at the machine word, as its bits, `a` when equal.
     Min,
-    /// `max(a, b)`: the signed maximum at the machine word, `a` when equal.
+    /// `max(a, b)`: the signed maximum at the machine word, as its bits, `a` when equal.
     Max,
     /// `umin(a, b)`: the unsigned minimum at the machine word, `a` when equal.
     UMin,
@@ -539,8 +539,10 @@ impl Helper {
             | Helper::Sin
             | Helper::Cos
             | Helper::Tan => Yields::Arg,
-            Helper::Min | Helper::Max | Helper::Llabs => Yields::Word { signed: true },
-            Helper::Rbit
+            Helper::Llabs => Yields::Word { signed: true },
+            Helper::Min
+            | Helper::Max
+            | Helper::Rbit
             | Helper::Rev16
             | Helper::Rev32
             | Helper::Cls
@@ -863,7 +865,7 @@ impl Helper {
             Helper::Min | Helper::Max => {
                 let rel = if matches!(self, Helper::Min) { "<=" } else { ">=" };
                 let mut lines = vec![format!("#undef {self}")];
-                lines.extend(word_two(&ws, &ws, &format!("a {rel} b ? a : b")));
+                lines.extend(word_two(&wu, &ws, &format!("a {rel} b ? a : b")));
                 lines
             }
             Helper::UMin | Helper::UMax => {
@@ -1198,11 +1200,7 @@ fn called(text: &str) -> BTreeSet<Helper> {
 ///
 /// The text with its helpers defined.
 pub(super) fn declare(text: &str, program: &Program) -> String {
-    let word = program
-        .arch
-        .bitness()
-        .and_then(|b| u8::try_from(b).ok())
-        .unwrap_or(64);
+    let word = if program.is_64 { 64 } else { 32 };
     let defs: Vec<String> = called(text)
         .into_iter()
         .flat_map(|h| h.define(word))

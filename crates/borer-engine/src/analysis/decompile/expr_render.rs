@@ -1165,15 +1165,7 @@ impl Expr {
                     (text, prec)
                 }
             },
-            Expr::Ternary(c, a, b) => (
-                format!(
-                    "({} ? {} : {})",
-                    c.render(n, false),
-                    a.render(n),
-                    b.render(n)
-                ),
-                ATOM,
-            ),
+            Expr::Ternary(c, a, b) => ternary(c, a, b, n, (hex, address, wide)),
             Expr::Sext(e, bits) => {
                 if let Expr::Deref(a, ty) = e.as_ref()
                     && matches!(ty, Ty::U8 | Ty::U16 | Ty::U32)
@@ -2032,6 +2024,37 @@ fn global_element(a: &Expr, ty: Ty, name: &str, n: &Names<'_>) -> Option<(String
     } else {
         (format!("({name}){element}"), UNARY)
     })
+}
+
+/// Renders a select, as `min` or `max` when it picks between the two
+/// sides of its own compare at the machine word ([`super::expr::extremum`]).
+///
+/// The lift folds a 64-bit one already; a 32-bit target's word compare
+/// waits for the word, which only the names know.
+///
+/// # Arguments
+///
+/// * `c` - The condition.
+/// * `a` - Value when true.
+/// * `b` - Value when false.
+/// * `n` - The names.
+/// * `how` - The `hex`, `address` and `wide` flags of [`Expr::render_in`].
+///
+/// # Returns
+///
+/// The text and its precedence.
+fn ternary(c: &Cond, a: &Expr, b: &Expr, n: &Names<'_>, how: (bool, bool, bool)) -> (String, u8) {
+    let word = if n.program.is_64 { 64 } else { 32 };
+    if let Some(call) = super::expr::extremum(c, a, b, word) {
+        return call.render_in(n, how.0, how.1, how.2);
+    }
+    let text = format!(
+        "({} ? {} : {})",
+        c.render(n, false),
+        a.render(n),
+        b.render(n)
+    );
+    (text, ATOM)
 }
 
 /// Tells whether the text of an expression is of a signed C type and may
