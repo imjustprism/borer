@@ -177,6 +177,27 @@ pub(super) fn prologue_like(instr: &Instruction) -> bool {
     }
 }
 
+/// Tells whether `va` holds a jump back into the function at `entry`,
+/// between its entry and `va`.
+///
+/// Unoptimized code ends a loop on one shared `jmp` back to its head, laid
+/// out after the function's `ret`, and every arm jumps to it. That `jmp` opens
+/// the way a thunk does ([`opens_a_function`]), but a thunk jumps to another
+/// function, never back into the one that reached it.
+///
+/// # Arguments
+///
+/// * `cursors` - The walk's decoders.
+/// * `va` - The jump target.
+/// * `entry` - The entry of the function the jump to `va` is in.
+pub(super) fn jumps_back(cursors: &mut Cursors<'_>, va: u64, entry: u64) -> bool {
+    cursors.decode(va).is_some_and(|i| {
+        i.mnemonic() == Mnemonic::Jmp
+            && matches!(i.op0_kind(), OpKind::NearBranch32 | OpKind::NearBranch64)
+            && (entry..va).contains(&i.near_branch_target())
+    })
+}
+
 /// Names a mnemonic for the seed trace, as `decoded <mnemonic>`.
 ///
 /// A handful of names cover what the trace has ever shown; the rest share

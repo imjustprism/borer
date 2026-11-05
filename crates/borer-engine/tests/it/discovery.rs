@@ -601,6 +601,39 @@ fn a_jump_onto_a_short_jump_stays_in_its_function() {
     assert_eq!(entries(&code, &[]), vec![TEXT]);
 }
 
+/// A loop's shared `jmp` back to its head, laid out after the `ret`, is
+/// not a function.
+///
+/// Unoptimized clang for Windows ends every arm of a loop on one `jmp`
+/// placed past the function's `ret`; the near `jmp` there opens the way a
+/// thunk does, and `case_flattened` lost its loop to a phantom function
+/// holding the latch and the whole body it jumped back into. The latch
+/// stays a block of the function, with its edge back to the loop's head.
+#[test]
+fn a_latch_after_the_return_stays_in_its_function() {
+    let code = [
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp, 28h
+        0x85, 0xc9, // ASM: test ecx, ecx
+        0x74, 0x04, // ASM: je short 0x40100c
+        0xff, 0xc9, // ASM: dec ecx
+        0xeb, 0x05, // ASM: jmp short 0x401011
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp, 28h
+        0xc3, // ASM: ret
+        0xe9, 0xee, 0xff, 0xff, 0xff, // ASM: jmp 0x401004
+    ];
+    let analysis = Analysis::compute(&raw::image(Arch::X86_64, &code, &[]));
+    let entries: Vec<u64> = analysis.functions.iter().map(|f| f.entry).collect();
+    assert_eq!(entries, vec![TEXT]);
+    let f = analysis.function(TEXT).expect("the function");
+    let latch = f.blocks.iter().find(|b| b.start == TEXT + 0x11);
+    assert!(
+        latch.is_some_and(|b| b.successors.as_slice() == [TEXT + 4]),
+        "{:?}",
+        f.blocks
+    );
+    assert!(!f.callees.contains(&(TEXT + 0x11)), "{:?}", f.callees);
+}
+
 /// A function behind a run of `nop` padding is found.
 ///
 /// A linker aligns with the multi-byte `nop` forms as well as with `int3`,

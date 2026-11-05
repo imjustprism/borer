@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use super::frame::{FrameFacts, FrameStep, frame_step};
 use super::guess::{
-    after_padding, byte_add, declared_interior, int3_end, is_padding, misplaced_site,
+    after_padding, byte_add, declared_interior, int3_end, is_padding, jumps_back, misplaced_site,
     mnemonic_name, odd_instruction, opens_a_function, opens_on_frame, plausible_entry,
     prologue_like, slot_jump, thunk_slot,
 };
@@ -1651,7 +1651,8 @@ pub(super) fn walk_function(
                                 || t == next && instr.len() == 2)
                                 && (after_padding(program, bitness, t)
                                     || after_epilogue.contains(&addr)
-                                    || opens_a_function(cursors, t))) =>
+                                    || (opens_a_function(cursors, t)
+                                        && !jumps_back(cursors, t, entry)))) =>
                     {
                         callees.insert(t);
                         terminated = true;
