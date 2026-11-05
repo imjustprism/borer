@@ -514,7 +514,9 @@ impl Lift<'_, '_> {
             ),
             DpKind::Adc | DpKind::Sbc | DpKind::Rsc => return None,
         };
-        if i.sets {
+        if i.sets && self.ex.flags_needed == 0 {
+            self.ex.flags = Flags::Unknown;
+        } else if i.sets {
             let asked = next_reader(later);
             let old = self.ex.flags.clone();
             self.ex.flags = match kind {

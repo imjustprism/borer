@@ -137,6 +137,11 @@ pub(super) fn next_reader(later: &[Insn]) -> Option<Cond> {
 /// every bit where one reads them before they are set again, in the block
 /// or, when `flags_out`, after it.
 ///
+/// A logical instruction that sets the flags keeps the overflow it found,
+/// and the carry too unless its shifter sets one, so it reads them only for
+/// a reader of its own flags: a run of `movs` and `eors` nothing tests
+/// needs none of them. An `mrs` reads every flag as a word.
+///
 /// # Arguments
 ///
 /// * `instrs` - The block's instructions.
@@ -146,11 +151,13 @@ pub(super) fn live_after(instrs: &[Insn], flags_out: bool) -> Vec<u32> {
     let mut after = vec![0; instrs.len()];
     for (slot, i) in after.iter_mut().zip(instrs).rev() {
         *slot = live;
+        let passes = live != 0;
         if sets_flags(i) && !i.predicated() {
             live = 0;
         }
         if reads(i).is_some()
-            || (i.sets && !matches!(i.op, AOp::Dp { kind, .. } if kind.arithmetic()))
+            || matches!(i.op, AOp::Mrs { .. })
+            || (passes && i.sets && !matches!(i.op, AOp::Dp { kind, .. } if kind.arithmetic()))
         {
             live = u32::MAX;
         }
@@ -372,4 +379,61 @@ pub(super) fn with_carry(x: &Expr, y: &Expr, cin: &Expr, r: &Expr) -> Flags {
     );
     let (n, z) = nz(r);
     pack(n, z, carry, v)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::live_after;
+    use crate::isa::a32::{ItState, Mode, decode};
+
+    /// Decodes Thumb code laid out from `0x1000`.
+    fn thumb(bytes: &[u8]) -> Vec<crate::isa::a32::Insn> {
+        let mut it = ItState::default();
+        let mut out = Vec::new();
+        let mut at = 0usize;
+        while let Some(i) = bytes.get(at..).and_then(|b| {
+            decode(
+                b,
+                0x1000 + u64::try_from(at).unwrap_or_default(),
+                Mode::Thumb,
+                &mut it,
+            )
+        }) {
+            at += usize::from(i.len);
+            out.push(i);
+        }
+        out
+    }
+
+    /// A run of `movs` and `eors` that nothing tests leaves no flags live,
+    /// a test after the run keeps every flag it passes on live, and an
+    /// `mrs` keeps the flags of the compare before it.
+    ///
+    /// # Panics
+    ///
+    /// When the flags of the run read as live, or a test's as dead.
+    #[test]
+    fn a_logical_run_nothing_tests_needs_no_flags() {
+        let run = [
+            0x03, 0x21, // ASM: movs r1, #3
+            0x48, 0x40, // ASM: eors r0, r1
+            0x05, 0x21, // ASM: movs r1, #5
+            0x48, 0x40, // ASM: eors r0, r1
+        ];
+        assert_eq!(live_after(&thumb(&run), false), vec![0; 4]);
+        let tested = [
+            0x03, 0x21, // ASM: movs r1, #3
+            0x48, 0x40, // ASM: eors r0, r1
+            0x00, 0xd0, // ASM: beq .+4
+        ];
+        let live = live_after(&thumb(&tested), false);
+        assert!(live.first().is_some_and(|&l| l != 0), "{live:?}");
+        assert!(live.get(1).is_some_and(|&l| l != 0), "{live:?}");
+        let saved = [
+            0x80, 0x42, // ASM: cmp r0, r0
+            0xef, 0xf3, 0x00, 0x81, // ASM: mrs r1, apsr
+        ];
+        let live = live_after(&thumb(&saved), false);
+        assert!(live.first().is_some_and(|&l| l != 0), "{live:?}");
+    }
 }
