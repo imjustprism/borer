@@ -3477,7 +3477,9 @@ fn saturating_sub(cond: &Cond, a: &Expr, b: &Expr) -> Option<Expr> {
 /// is below or unordered, which is neither `umax` nor `fmax`. The arguments stay in compare order. A compare
 /// narrower than the machine word stays a ternary: a 32-bit signed minimum is not
 /// the signed minimum of the zero-extended values. An equality test, or a
-/// value that is not one of the two operands, stays a ternary.
+/// value that is not one of the two operands, stays a ternary. `test x, x`
+/// under a signed code compares `x` with zero, so `test eax, eax; cmovg
+/// edx, eax` over a zeroed `edx` is `max(x, 0)`.
 ///
 /// # Arguments
 ///
@@ -3491,8 +3493,13 @@ fn saturating_sub(cond: &Cond, a: &Expr, b: &Expr) -> Option<Expr> {
 /// The call, or `None` when the select is not that shape.
 pub(super) fn extremum(cond: &Cond, a: &Expr, b: &Expr, word: u8) -> Option<Expr> {
     use ConditionCode as C;
-    let Flags::Cmp(l, r, bits) = &cond.flags else {
-        return None;
+    let zero = Expr::Const(0);
+    let (l, r, bits) = match &cond.flags {
+        Flags::Cmp(l, r, bits) => (l, r, bits),
+        Flags::Test(x, y, bits) if x == y && matches!(cond.cc.0, C::l | C::le | C::g | C::ge) => {
+            (x, &zero, bits)
+        }
+        _ => return None,
     };
     if *bits != word || l.is_float() || r.is_float() {
         return None;

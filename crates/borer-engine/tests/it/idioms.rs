@@ -406,6 +406,39 @@ fn a_word_compare_select_on_a_32_bit_target_is_max() {
     assert!(text.contains('?') && !text.contains("max("), "{text}");
 }
 
+/// A value tested against itself and kept over zero is `max(x, 0)`.
+///
+/// `test` under a signed code compares it with zero: the trip count a
+/// closed-form loop computes. The 64-bit one folds in the lift.
+#[test]
+fn a_tested_value_kept_over_zero_is_max_with_zero() {
+    let text = decompiled(
+        &crate::raw::image(
+            Arch::X86,
+            &[
+                0x8b, 0x44, 0x24, 0x04, // ASM: mov eax,[esp+4]
+                0x31, 0xd2, // ASM: xor edx,edx
+                0x85, 0xc0, // ASM: test eax,eax
+                0x0f, 0x4f, 0xd0, // ASM: cmovg edx,eax
+                0x89, 0xd0, // ASM: mov eax,edx
+                0xc3, // ASM: ret
+            ],
+            &[],
+        ),
+        0x401000,
+    );
+    assert!(text.contains("return max(a1, 0);"), "{text}");
+    reads_as(
+        &[
+            0x31, 0xc0, // ASM: xor eax,eax
+            0x48, 0x85, 0xc9, // ASM: test rcx,rcx
+            0x48, 0x0f, 0x4f, 0xc1, // ASM: cmovg rax,rcx
+            0xc3, // ASM: ret
+        ],
+        "return max(a1, 0);",
+    );
+}
+
 /// A conditional move whose condition is proven constant by bit demand
 /// folds to the arm that runs.
 ///
