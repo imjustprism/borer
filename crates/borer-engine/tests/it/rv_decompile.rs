@@ -300,7 +300,8 @@ fn rv32_stack_arguments_follow_the_registers_in_recorded_calls() {
 }
 
 /// A loop whose two registers each take the other's value tests its
-/// condition at the loop's end.
+/// condition at the loop's end, and no register local named `a1` hides
+/// the parameter it copies.
 #[test]
 fn a_loop_of_registers_reading_each_other_keeps_its_test() {
     let code = [
@@ -311,7 +312,16 @@ fn a_loop_of_registers_reading_each_other_keeps_its_test() {
         (0x0000_8067, 4), // ASM: ret
     ];
     let text = decompiled(&code, Arch::RiscV64).concat();
-    assert!(text.contains("} while (var2 < a3);"), "{text}");
+    assert!(
+        text.contains("var1 = a1;") && text.contains(" < a3);"),
+        "{text}"
+    );
+    assert!(
+        !text
+            .lines()
+            .any(|l| l.starts_with("uint64_t") && l.contains(" a1")),
+        "{text}"
+    );
     assert!(text.contains("int64_t a3)"), "{text}");
 }
 
@@ -818,9 +828,9 @@ fn an_ecall_without_known_arguments_stays_asm() {
     }
 }
 
-/// A value loaded before a named syscall is what the call takes, not a
-/// read through it, and a second syscall's argument the first one's
-/// result is no parameter.
+/// A value loaded before a named syscall is what the call takes, one load
+/// and not a read through it, and a second syscall's argument the first
+/// one's result is no parameter.
 #[test]
 fn a_syscall_takes_what_was_loaded_and_its_result_is_no_parameter() {
     let loaded = [
@@ -830,7 +840,7 @@ fn a_syscall_takes_what_was_loaded_and_its_result_is_no_parameter() {
         (0x0000_8067, 4), // ASM: ret
     ];
     let text = decompiled_elf(&loaded);
-    assert!(!text.contains("close(*"), "{text}");
+    assert!(text.contains("return close(*(uint64_t*)a1);"), "{text}");
     let chained = [
         (0x0ac0_0893, 4), // ASM: li a7, 172
         (0x0000_0073, 4), // ASM: ecall

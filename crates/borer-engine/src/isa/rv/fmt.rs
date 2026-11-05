@@ -71,6 +71,28 @@ pub fn name(r: Reg) -> &'static str {
     table.get(usize::from(n)).copied().unwrap_or("?")
 }
 
+/// Returns a register's name as a decompiled variable.
+///
+/// The argument registers print by number, `x10` to `x17`: their ABI names
+/// `a0` to `a7` are the parameters' own names, so a register local `a1`
+/// would hide the parameter `a1` it was copied from. The rest keep their
+/// ABI names.
+///
+/// # Arguments
+///
+/// * `r` - The register.
+///
+/// # Returns
+///
+/// `x10` to `x17` for the argument registers, the ABI name otherwise.
+#[must_use]
+pub fn var_name(r: Reg) -> String {
+    match r {
+        Reg::X(n @ 10..=17) => format!("x{n}"),
+        _ => name(r).to_owned(),
+    }
+}
+
 /// Returns a memory operand, `off(base)`.
 ///
 /// # Arguments
