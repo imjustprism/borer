@@ -80,13 +80,25 @@ impl Passing {
     /// convention: a run passes floats in registers only.
     pub(crate) fn carries(&self, kinds: &[Kind]) -> Result<(), String> {
         let floats = float_mask(kinds.iter().map(|k| matches!(k, Kind::Float(_))));
-        match (0..kinds.len()).find(|&i| floats != 0 && self.conv.arg_reg(i, floats).is_none()) {
+        match self.stacked(kinds.len(), floats) {
             Some(i) => Err(format!(
                 "a{} is passed on the stack, and a run passes floating parameters only where every parameter has a register",
                 i + 1
             )),
             None => Ok(()),
         }
+    }
+
+    /// The first of a call's arguments the convention puts on the stack,
+    /// when one of them is floating: where [`Passing::place`] cannot put
+    /// it, since it lays the stack out for integers alone.
+    ///
+    /// # Arguments
+    ///
+    /// * `count` - How many arguments.
+    /// * `floats` - A bit per argument position that is floating.
+    pub(crate) fn stacked(&self, count: usize, floats: u8) -> Option<usize> {
+        (0..count).find(|&i| floats != 0 && self.conv.arg_reg(i, floats).is_none())
     }
 
     /// The frame offset of a stack-passed argument.

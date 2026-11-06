@@ -46,7 +46,7 @@ use super::expr::{Expr, Op, TEB_FIELDS, Ty, UnOp, abs_bits, fold, unary};
 use super::floats::integer_to_float;
 use super::helper::{Helper, Operands, Yields, defines};
 use super::line::is_param_name;
-use super::signature::{Passing, Signature, passing, poke_word, printed};
+use super::signature::{Passing, Signature, float_mask, passing, poke_word, printed};
 use super::traces::{INTRINSICS, Stmt, blank, statements};
 use crate::analysis::{Analysis, BlockTerm, Overlay, bare_name, name_of};
 use crate::emulate::{Emulator, Stop};
@@ -3062,9 +3062,9 @@ impl Running<'_, '_> {
             && !self.s.known.contains_key(n)
         {
             if let Some(base) = n.strip_suffix("__rdx").filter(|b| !b.is_empty()) {
-                let values = self.arg_values(args)?;
                 let callee = self.value(&Ast::Name(base.to_owned()))?;
                 let target = callee.bits & mask(self.word());
+                let (values, floats) = self.arg_values(args, target)?;
                 let rdx = if let Some((t, a, _, rdx)) = &self.call_memo
                     && *t == target
                     && *a == values
@@ -3072,7 +3072,7 @@ impl Running<'_, '_> {
                     *rdx
                 } else {
                     self.second_result = true;
-                    let out = self.run_callee(target, &values, base);
+                    let out = self.run_callee(target, &values, floats, base);
                     self.second_result = false;
                     out?
                 };
@@ -3093,12 +3093,12 @@ impl Running<'_, '_> {
             Ast::Un(Un::Deref, inner) => self.value(inner)?,
             other => self.value(other)?,
         };
-        let values = self.arg_values(args)?;
+        let target = callee.bits & mask(self.word());
+        let (values, floats) = self.arg_values(args, target)?;
         let name = match f {
             Ast::Name(n) => n.clone(),
             _ => format!("{:#x}", callee.bits),
         };
-        let target = callee.bits & mask(self.word());
         let code = self
             .s
             .program
@@ -3109,70 +3109,45 @@ impl Running<'_, '_> {
                 "a call to code no function starts at: an indirect jump the text prints as a call",
             );
         }
-        let rax = self.run_callee(target, &values, &name)?;
+        let rax = self.run_callee(target, &values, floats, &name)?;
         let [xmm0, ..] = self.emu.xmm();
         result::returned(self.s.analysis, target, self.word(), rax, xmm0)
     }
 
-    /// Evaluates a call's arguments to the machine's words.
+    /// Evaluates a call's arguments to the words its callee takes
+    /// ([`Running::passed`]).
     ///
     /// # Arguments
     ///
     /// * `args` - The argument expressions.
+    /// * `target` - The callee's entry.
     ///
     /// # Errors
     ///
-    /// When one does not evaluate, or is floating, which a call does not
-    /// pass.
-    fn arg_values(&mut self, args: &[Ast]) -> Eval<Vec<u64>> {
-        let mut values = Vec::with_capacity(args.len());
-        for a in args {
-            let v = self.value(a)?;
-            if v.ty.float().is_some() {
-                return unchecked("a call with a floating argument");
-            }
-            let wide = if v.ty.signed() {
-                sext(v.bits, v.ty.bits(self.word()).unwrap_or(64))
-            } else {
-                v.bits
-            };
-            values.push(wide);
-        }
-        Ok(values)
+    /// When one does not evaluate, or a float cannot be passed.
+    fn arg_values(&mut self, args: &[Ast], target: u64) -> Eval<(Vec<u64>, u8)> {
+        let vals = args
+            .iter()
+            .map(|a| self.value(a))
+            .collect::<Eval<Vec<Val>>>()?;
+        self.passed(target, vals)
     }
 
-    /// Runs a callee on the machine and hands back what it left in `rax`.
+    /// Sets the registers a callee the text calls is entered with.
     ///
-    /// The callee's argument registers hold the arguments the text passes
-    /// and nothing else; every other register holds what the text's
-    /// variable of its name holds, as the machine's does at the call, and
-    /// `rax` and `rdx` hold the last call's leftovers where the text has
-    /// no variable of their name, as the machine's do: a `void` callee
-    /// that leaves `rax` as it found it hands back the caller's `rax`,
-    /// and the bits above the `al` a `bool` callee sets are the caller's
-    /// too.
+    /// Every general register starts at zero. Run as the machine
+    /// ([`Mode::Machine`]), the caller's own argument registers keep its
+    /// arguments, every other register the text names keeps the text's
+    /// variable of its name, and `rax` and `rdx` keep the last call's
+    /// leftovers where the text has no variable of their name; run as ISO
+    /// C, none does.
     ///
     /// # Arguments
     ///
-    /// * `target` - Its address.
-    /// * `args` - The argument values.
-    /// * `name` - Its name, for a report.
-    ///
-    /// # Errors
-    ///
-    /// The budget, or the callee's stop when it does not return.
-    fn run_callee(&mut self, target: u64, args: &[u64], name: &str) -> Eval<u64> {
+    /// * `callee` - How the callee takes its arguments, whose registers
+    ///   the call sets itself.
+    fn call_registers(&mut self, callee: &Passing) {
         let s = self.s;
-        let callee = s
-            .callees
-            .get(&target)
-            .cloned()
-            .unwrap_or_else(|| passing(s.program, s.analysis, &Overlay::default(), target));
-        let sentinel = if s.word == 32 {
-            SENTINEL_32
-        } else {
-            SENTINEL_64
-        };
         let leftovers = [
             (Register::RAX, self.emu.register("rax").unwrap_or(0)),
             (Register::RDX, self.emu.register("rdx").unwrap_or(0)),
@@ -3210,9 +3185,50 @@ impl Running<'_, '_> {
                     .set_register(full_register_name(r).unwrap_or("rax"), left);
             }
         }
+    }
+
+    /// Runs a callee on the machine and hands back what it left in `rax`.
+    ///
+    /// The callee's argument registers hold the arguments the text passes
+    /// and nothing else; every other register holds what the text's
+    /// variable of its name holds, as the machine's does at the call, and
+    /// `rax` and `rdx` hold the last call's leftovers where the text has
+    /// no variable of their name, as the machine's do: a `void` callee
+    /// that leaves `rax` as it found it hands back the caller's `rax`,
+    /// and the bits above the `al` a `bool` callee sets are the caller's
+    /// too.
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - Its address.
+    /// * `args` - The argument values, a floating one as its bits.
+    /// * `floats` - A bit per argument position that is floating, which
+    ///   goes in the `xmm` register the callee's convention names.
+    /// * `name` - Its name, for a report.
+    ///
+    /// # Errors
+    ///
+    /// The budget, the callee's stop when it does not return, or unchecked
+    /// for a float its convention would put on the stack.
+    fn run_callee(&mut self, target: u64, args: &[u64], floats: u8, name: &str) -> Eval<u64> {
+        let s = self.s;
+        let callee = s
+            .callees
+            .get(&target)
+            .cloned()
+            .unwrap_or_else(|| passing(s.program, s.analysis, &Overlay::default(), target));
+        let sentinel = if s.word == 32 {
+            SENTINEL_32
+        } else {
+            SENTINEL_64
+        };
+        self.call_registers(&callee);
         self.emu.set_register("rsp", s.call_sp);
         poke_word(&mut self.emu, s.call_sp, sentinel, u64::from(s.word / 8));
-        callee.place(&mut self.emu, s.call_sp, args, 0);
+        if callee.stacked(args.len(), floats).is_some() {
+            return unchecked("a call passing a float where its convention uses the stack");
+        }
+        callee.place(&mut self.emu, s.call_sp, args, floats);
         self.emu.stop_at(Some(sentinel));
         self.emu.set_budget(self.fuel);
         let imports = self.emu.api_calls().len();

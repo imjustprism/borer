@@ -555,3 +555,25 @@ fn a_read_past_a_preserving_call_names_the_width() {
         Some(32)
     );
 }
+
+/// The text check passes a floating argument to a call the text makes, in
+/// the `xmm` register the callee's convention reads it from.
+///
+/// `return sub_140001020(a1 + a1) * ...` hands the callee a double; the
+/// run of the text puts it in `xmm0` and reads the callee's double back
+/// from there, so the inputs are checked instead of left unchecked.
+#[test]
+fn a_text_call_passes_a_floating_argument() {
+    let mut code = vec![
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp,0x28
+        0xf2, 0x0f, 0x58, 0xc0, // ASM: addsd xmm0,xmm0
+        0xe8, 0x13, 0x00, 0x00, 0x00, // ASM: call 0x140001020
+        0xf2, 0x0f, 0x59, 0xc0, // ASM: mulsd xmm0,xmm0
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp,0x28
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x20, 0xcc);
+    code.extend_from_slice(&[0xf2, 0x0f, 0x58, 0xc0, 0xc3]); // ASM: addsd xmm0,xmm0; ret
+    let text = crate::decompiled::runs_agree(&program64(&code), 0x1_4000_1000);
+    assert!(text.contains("sub_140001020("), "{text}");
+}

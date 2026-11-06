@@ -2,6 +2,69 @@
 //! callee ran.
 
 use super::*;
+use crate::analysis::decompile::abi::function::prototype;
+
+/// Most argument positions a call passing a float is checked with: the
+/// positions a float mask holds ([`float_mask`]).
+const FLOAT_POSITIONS: usize = 8;
+
+impl Running<'_, '_> {
+    /// Returns a call's argument values as the words its callee takes, a
+    /// floating one as its bits.
+    ///
+    /// A float is converted to the parameter type the callee's prototype
+    /// states, as C converts an argument to a declared parameter
+    /// (`INFINITY` handed to a `float` parameter is the single's bits). An
+    /// integer is sign-extended from its own width when signed.
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - The callee's entry.
+    /// * `vals` - The evaluated arguments.
+    ///
+    /// # Returns
+    ///
+    /// The words, and a bit per position that is floating ([`float_mask`]).
+    ///
+    /// # Errors
+    ///
+    /// Unchecked for a float among more than [`FLOAT_POSITIONS`]
+    /// arguments, or one handed to a parameter the prototype does not
+    /// declare floating.
+    pub(super) fn passed(&self, target: u64, vals: Vec<Val>) -> Eval<(Vec<u64>, u8)> {
+        let floating = vals.iter().any(|v| v.ty.float().is_some());
+        if floating && vals.len() > FLOAT_POSITIONS {
+            return unchecked("a call passing a float among more than eight arguments");
+        }
+        let proto = floating
+            .then(|| prototype(self.s.program, self.s.analysis, &Overlay::default(), target))
+            .flatten();
+        let mut out = Vec::with_capacity(vals.len());
+        for (i, v) in vals.into_iter().enumerate() {
+            let declared = proto.as_ref().and_then(|p| p.params.get(i)).copied();
+            out.push(match (v.ty.float(), declared) {
+                (None, _) => v,
+                (Some(_), Some("float")) => self.convert(v, CTy::of(Base::Float(32)))?,
+                (Some(_), Some("double")) => self.convert(v, CTy::of(Base::Float(64)))?,
+                (Some(_), _) => {
+                    return unchecked(
+                        "a call passing a float to a parameter not declared floating",
+                    );
+                }
+            });
+        }
+        let word = self.word();
+        let floats = float_mask(out.iter().map(|v| v.ty.float().is_some()));
+        let wide = |v: &Val| {
+            if v.ty.signed() {
+                sext(v.bits, v.ty.bits(word).unwrap_or(64))
+            } else {
+                v.bits
+            }
+        };
+        Ok((out.iter().map(wide).collect(), floats))
+    }
+}
 
 /// Returns what a call to a function hands back.
 ///
