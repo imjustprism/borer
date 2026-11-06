@@ -1400,6 +1400,15 @@ mod tests {
             out.contains("\ntext\t8 of 8 inputs agree") && out.contains("\ngrade\tagrees\t"),
             "{out}"
         );
+        let out = x64
+            .resource_text("borer://certify/*,count=4")
+            .expect("certifies a page");
+        assert!(
+            out.starts_with("# certify: 1 agrees, 0 unchecked, 0 differs of 1 functions")
+                && out.contains("\nsub_1000\t0x1000\tagrees\t4\t0\t0\t")
+                && out.ends_with("# showing 1 of 1 functions from 0\n"),
+            "{out}"
+        );
         let arm = server(vec![0xc0, 0x03, 0x5f, 0xd6], Arch::Arm64); // ASM: ret
         let refused = arm
             .resource_text("borer://blame/0x1000")

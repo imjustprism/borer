@@ -1180,3 +1180,54 @@ fn a_static_local_table_is_read_by_its_spelled_name() {
         "{text}\n{rows:?}"
     );
 }
+
+/// A page of certified functions keeps address order across pages: the
+/// filter picks the names, the offset skips the first ones, the limit cuts
+/// the page, and a page past the end is empty.
+///
+/// # Panics
+///
+/// When a page holds the wrong functions or counts.
+#[test]
+fn certify_pages_through_the_functions_a_filter_names() {
+    use borer_engine::analysis::render::certify_tsv;
+    use borer_engine::program::{Symbol, SymbolKind};
+    let mut code = vec![0x8d, 0x41, 0x01, 0xc3]; // ASM: lea eax,[rcx+1]; ret
+    code.resize(0x10, 0xcc);
+    code.extend_from_slice(&[0x8d, 0x41, 0x02, 0xc3]); // ASM: lea eax,[rcx+2]; ret
+    code.resize(0x20, 0xcc);
+    code.extend_from_slice(&[0x8d, 0x41, 0x03, 0xc3]); // ASM: lea eax,[rcx+3]; ret
+    let mut p = program(&code, &[]);
+    p.symbols = ["f_one", "g_two", "f_three"]
+        .iter()
+        .zip(0u64..)
+        .map(|(name, k)| Symbol {
+            name: (*name).to_owned(),
+            addr: TEXT + k * 0x10,
+            kind: SymbolKind::Local,
+        })
+        .collect();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let page = |spec: &str| certify_tsv(&p, &a, &o, spec).expect("a page");
+    let first = page("*f_,limit=1,count=2");
+    assert!(
+        first.contains("\nf_one\t0x1000\tagrees\t2\t0\t0\t")
+            && !first.contains("f_three")
+            && first.ends_with("# showing 1 of 2 functions from 0\n"),
+        "{first}"
+    );
+    let second = page("*f_,offset=1,limit=1,count=2");
+    assert!(
+        second.contains("\nf_three\t0x1020\tagrees\t2\t0\t0\t")
+            && !second.contains("f_one")
+            && second.ends_with("# showing 1 of 2 functions from 1\n"),
+        "{second}"
+    );
+    let past = page("*f_,offset=2,count=2");
+    assert!(
+        past.starts_with("# certify: 0 agrees, 0 unchecked, 0 differs of 0 functions")
+            && past.ends_with("# showing 0 of 2 functions from 2\n"),
+        "{past}"
+    );
+}

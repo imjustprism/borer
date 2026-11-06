@@ -14,7 +14,7 @@ use crate::text::one_line;
 const BLAME_INPUTS: usize = INPUTS_MAX;
 
 /// Steps each run of a blame is given when the spec names none.
-const BLAME_STEPS: usize = 20_000;
+pub(super) const BLAME_STEPS: usize = 20_000;
 
 /// Lines of the before-and-after diff a blame shows.
 const BLAME_DIFF_LINES: usize = 60;
@@ -100,26 +100,50 @@ pub(super) fn function_count_steps(
         .entry;
     let (mut count, mut budget) = (BLAME_INPUTS, BLAME_STEPS);
     for option in rest.map(str::trim) {
-        match option.split_once('=') {
-            Some(("count", n)) => {
-                count = parse_count(n)
-                    .filter(|n| (1..=INPUTS_MAX).contains(n))
-                    .ok_or_else(|| format!("count is 1 to {INPUTS_MAX}"))?;
-            }
-            Some(("steps", n)) => {
-                budget = parse_count(n)
-                    .filter(|n| (1..=BUDGET_MAX).contains(n))
-                    .ok_or_else(|| format!("steps is 1 to {BUDGET_MAX}"))?;
-            }
-            _ => {
-                return Err(format!(
-                    "{tool} takes <function>[,count=N][,steps=N]; cannot read {}",
-                    one_line(option)
-                ));
-            }
+        if !run_option(option, &mut count, &mut budget)? {
+            return Err(format!(
+                "{tool} takes <function>[,count=N][,steps=N]; cannot read {}",
+                one_line(option)
+            ));
         }
     }
     Ok((entry, count, budget))
+}
+
+/// Reads a `count=N` or `steps=N` option into what it sets.
+///
+/// # Arguments
+///
+/// * `option` - One option of a spec.
+/// * `count` - How many inputs, 1 to [`INPUTS_MAX`].
+/// * `budget` - The steps each run is given, 1 to [`BUDGET_MAX`].
+///
+/// # Returns
+///
+/// Whether the option was one of the two.
+///
+/// # Errors
+///
+/// When its value is out of range.
+pub(super) fn run_option(
+    option: &str,
+    count: &mut usize,
+    budget: &mut usize,
+) -> Result<bool, String> {
+    match option.split_once('=') {
+        Some(("count", n)) => {
+            *count = parse_count(n)
+                .filter(|n| (1..=INPUTS_MAX).contains(n))
+                .ok_or_else(|| format!("count is 1 to {INPUTS_MAX}"))?;
+        }
+        Some(("steps", n)) => {
+            *budget = parse_count(n)
+                .filter(|n| (1..=BUDGET_MAX).contains(n))
+                .ok_or_else(|| format!("steps is 1 to {BUDGET_MAX}"))?;
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
 }
 
 /// Writes the answer of [`blame_tsv`] for one bisection.
