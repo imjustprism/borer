@@ -397,8 +397,10 @@ fn drop_clobbered(
 ///
 /// A conversion names its source after `cvt` or `cvtt` (`cvtsd2ss` reads a
 /// double, `cvtsi2sd` an integer); any other scalar instruction names it
-/// as its suffix (`ucomisd`, `movss`). Packed and bit instructions name
-/// none.
+/// as its suffix (`ucomisd`, `movss`). A packed double instruction names a
+/// double too (`andpd`, `movapd`): no compiler picks one for singles. A
+/// packed single one names none, since compilers use `andps` and `movaps`
+/// on doubles as well, and an integer one names none.
 ///
 /// # Arguments
 ///
@@ -418,7 +420,7 @@ fn vector_read_bytes(instr: &Instruction) -> Option<usize> {
     };
     match lane {
         "ss" => Some(4),
-        "sd" => Some(8),
+        "sd" | "pd" => Some(8),
         _ => None,
     }
 }

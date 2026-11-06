@@ -195,3 +195,18 @@ fn a_parameter_copied_whole_is_typed_by_the_copy_reads() {
     let text = decompiled::runs_agree(&p, 0x1_4000_1000);
     assert!(text.contains("(double a1, double a2)"), "{text}");
 }
+
+/// A floating parameter read only by packed double instructions is a
+/// double: `andpd xmm0, xmm1` names both parameters' precision, where a
+/// parameter with no read naming one would print as `float`.
+#[test]
+fn a_parameter_read_by_a_packed_double_op_is_a_double() {
+    let code = [
+        0x66, 0x0f, 0x54, 0xc1, // ASM: andpd xmm0,xmm1
+        0xc3, // ASM: ret
+    ];
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1000).unwrap_or_default();
+    assert!(text.contains("(double a1, double a2)"), "{text}");
+}
