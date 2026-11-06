@@ -1189,8 +1189,8 @@ fn a_rel32_table_with_targets_below_it_resolves() {
     );
 }
 
-/// A synchronization wrapper that mentions a phrase and compares rwlock
-/// state bits is a mention, never a check.
+/// A synchronization wrapper that compares rwlock state bits is never a
+/// check, and its `is_unlocked` assertion says no phrase.
 ///
 /// `FX` in the fixture image references an `is_unlocked` assertion and
 /// compares against `0x40000000` and `0xc0000000`, the futex rwlock reader
@@ -1202,7 +1202,7 @@ fn a_sync_bitmask_compare_is_not_a_check() {
     let a = Analysis::compute(&p);
     let text = borer_engine::analysis::render::license_checks_tsv(&p, &a, &Overlay::default());
     assert!(text.starts_with("# 0 functions judge"), "{text}");
-    assert!(text.contains("sub_5c00 (unlock)"), "{text}");
+    assert!(!text.contains("(unlock)"), "{text}");
     assert!(!text.contains("0x40000000"), "{text}");
     assert!(!text.contains("0xc0000000"), "{text}");
 }

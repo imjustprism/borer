@@ -182,14 +182,18 @@ pub(super) fn anti_sites(p: &Program, a: &Analysis) -> Arc<BTreeMap<&'static str
 
 /// Phrases that mark a function as judging a key, serial or license.
 ///
-/// Each is distinctive enough not to fire on ordinary text; the generic
-/// `invalid` is left out because it is in every argument check.
-pub(super) const CHECK_PHRASES: [&str; 18] = [
+/// Each is distinctive enough not to fire on ordinary text, matched as a
+/// word ([`says_phrase`]); the generic `invalid` is left out because it
+/// is in every argument check.
+pub(super) const CHECK_PHRASES: [&str; 21] = [
     "serial",
     "license",
+    "licensed",
+    "unlicensed",
     "activation",
     "registration",
     "registered",
+    "unregistered",
     "incorrect",
     "wrong password",
     "access denied",
@@ -204,6 +208,32 @@ pub(super) const CHECK_PHRASES: [&str; 18] = [
     "invalid key",
     "invalid serial",
 ];
+
+/// Whether `text` says `phrase` as a word, or its plural.
+///
+/// `industrial` holds `trial`, and `serialization` holds `serial`, but
+/// neither says it: the phrase must start a word and end one, an `s`
+/// aside. The literal arrives escaped, so a `\n`, `\t` or `\r` before
+/// the phrase is a break between words, not the letter it ends in.
+///
+/// # Arguments
+///
+/// * `text` - The literal, lowercased.
+/// * `phrase` - A phrase of [`CHECK_PHRASES`].
+fn says_phrase(text: &str, phrase: &str) -> bool {
+    let word = |c: char| c.is_ascii_alphanumeric();
+    text.match_indices(phrase).any(|(at, _)| {
+        let head = text.get(..at).unwrap_or("");
+        let escaped = ["\\n", "\\t", "\\r"].iter().any(|e| head.ends_with(e));
+        let before = head.chars().next_back().filter(|_| !escaped);
+        let mut after = text.get(at + phrase.len()..).unwrap_or("").chars();
+        let next = match after.next() {
+            Some('s') => after.next(),
+            other => other,
+        };
+        !before.is_some_and(word) && !next.is_some_and(word)
+    })
+}
 
 /// Most check functions listed in one read.
 pub(super) const CHECKS_MAX: usize = 200;
@@ -278,7 +308,7 @@ fn checks_of(p: &Program, a: &Analysis, o: &Overlay) -> String {
         let matched: Vec<&str> = CHECK_PHRASES
             .iter()
             .copied()
-            .filter(|ph| low.contains(ph))
+            .filter(|ph| says_phrase(&low, ph))
             .collect();
         if matched.is_empty() {
             continue;
@@ -940,7 +970,26 @@ pub(super) fn function_name(name: &str) -> bool {
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::collect_resolved;
+    use super::{collect_resolved, says_phrase};
+
+    /// A phrase counts as a word or its plural, not inside another word.
+    ///
+    /// # Panics
+    ///
+    /// When a phrase inside another word counts, or a word does not.
+    #[test]
+    fn a_phrase_counts_as_a_word() {
+        assert!(says_phrase("invalid serial number", "serial"));
+        assert!(says_phrase("enter your serials", "serial"));
+        assert!(says_phrase("unregistered copy", "unregistered"));
+        assert!(says_phrase("unlicensed copy", "unlicensed"));
+        assert!(says_phrase("this copy is licensed", "licensed"));
+        assert!(says_phrase("trial expired.", "trial"));
+        assert!(says_phrase("\\nlicense: %s", "license"));
+        assert!(!says_phrase("industrial control", "trial"));
+        assert!(!says_phrase("serialization failed", "serial"));
+        assert!(!says_phrase("unregistered copy", "registered"));
+    }
     use crate::program::Program;
 
     /// A structure the decompiler printed as a wide literal is not taken
