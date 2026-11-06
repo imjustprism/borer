@@ -1715,8 +1715,10 @@ fn thread_block(program: &Program) -> Option<u64> {
 ///
 /// The image base, the functions (in address order, where several share a
 /// name), the vtables, the known tables and the symbols, in that order of
-/// precedence; an import's slot also answers to its linker name
-/// `__imp_name`, which a wrapper of the same name calls it by.
+/// precedence; a data symbol under the name the text spells it
+/// ([`data_name`](super::expr_render::data_name): `f.tab` is `f_tab`), and
+/// an import's slot also under its linker name `__imp_name`, which a
+/// wrapper of the same name calls it by.
 ///
 /// # Arguments
 ///
@@ -1756,7 +1758,9 @@ fn names(
                 out.entry(name).or_default().push(Known::Slot(s.addr));
             }
         } else {
-            out.entry(n).or_default().push(Known::Address(s.addr));
+            out.entry(super::expr_render::data_name(&s.name))
+                .or_default()
+                .push(Known::Address(s.addr));
         }
     }
     out

@@ -1148,3 +1148,35 @@ fn a_compare_reads_a_slot_at_the_width_it_was_stored() {
         runs_alike(&p, entry);
     }
 }
+
+/// The text check reads a static local's table under the name the text
+/// spells it: clang's `f.tab` is `f_tab` in the text.
+///
+/// # Panics
+///
+/// When the text does not name the table, or an input does not agree as
+/// ISO C.
+#[test]
+fn a_static_local_table_is_read_by_its_spelled_name() {
+    let code = [
+        0x83, 0xe1, 0x07, // ASM: and ecx,7
+        0x48, 0x8d, 0x05, 0xf6, 0x0f, 0x00, 0x00, // ASM: lea rax,[rip+0xff6]
+        0x0f, 0xb6, 0x04, 0x08, // ASM: movzx eax,byte [rax+rcx]
+        0xc3, // ASM: ret
+    ];
+    let mut p = program(&code, &[3, 1, 4, 1, 5, 9, 2, 6]);
+    p.symbols = vec![borer_engine::program::Symbol {
+        name: "f.tab".to_owned(),
+        addr: TEXT + 0x1000,
+        kind: borer_engine::program::SymbolKind::Data,
+    }];
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let text = decompile_named(&p, &a, &o, TEXT).unwrap_or_default();
+    assert!(text.contains("f_tab"), "{text}");
+    let rows = check_generated_iso(&p, &a, &o, TEXT, 8, 1, 20_000).expect("the text reads");
+    assert!(
+        rows.iter().all(|(_, v)| *v == Verdict::Agrees),
+        "{text}\n{rows:?}"
+    );
+}
