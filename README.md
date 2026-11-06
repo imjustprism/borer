@@ -90,7 +90,8 @@ borer is that tool, designed from the start for a reader that is a program:
 
 Formats: PE, ELF, Mach-O, raw code and memory dumps. Architectures: x86,
 x86-64 and arm64 for disassembly, decompilation and emulation. 32-bit ARM
-(A32 and Thumb-2) for disassembly and decompilation.
+(A32 and Thumb-2) and RISC-V (RV32 and RV64 GC) for disassembly and
+decompilation.
 
 ## Where it is going
 
@@ -116,8 +117,8 @@ step is to move that limit. Each step below moves borer toward that aim:
 4. **Scale.** Fleets of agents on huge codebases and sample feeds: shared
    analysis caches, incremental re-analysis when a binary changes, and
    results that diff cleanly between versions.
-5. **Every platform.** Wider architecture coverage (32-bit ARM emulation,
-   MIPS, RISC-V), managed code (.NET, Java) and firmware images.
+5. **Every platform.** Wider architecture coverage (32-bit ARM and RISC-V
+   emulation, MIPS), managed code (.NET, Java) and firmware images.
 6. **Runtime alongside static.** Debugging, tracing and live memory on every
    operating system, so a static claim can be confirmed against the running
    program.
@@ -354,8 +355,9 @@ reporting. Three things reach the network:
 
 ## Limits
 
-- No instruction sets beyond x86, x86-64, arm64 and 32-bit ARM.
-- 32-bit ARM code is not emulated, so the emulator-backed analyses refuse it.
+- No instruction sets beyond x86, x86-64, arm64, 32-bit ARM and RISC-V.
+- 32-bit ARM and RISC-V code is not emulated by the tools, so the
+  emulator-backed analyses refuse it.
 - On arm64, `taint`, `layout`, `solve`, `unpack` and `devirt` refuse to run.
 - Shapes the structurer cannot prove stay as labels and gotos. SIMD code
   prints as intrinsics (`paddd`, `__add_4s`), not as C.
