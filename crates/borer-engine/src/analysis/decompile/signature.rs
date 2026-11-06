@@ -226,12 +226,28 @@ pub(crate) struct Signature {
     pub(super) ret: Option<CTy>,
     /// The machine word in bits.
     word: u8,
+    /// The list ends in `...`: the function reads arguments past these.
+    variadic: bool,
 }
 
 impl Signature {
     /// How the parameters read, in order.
     pub(crate) fn parameter_kinds(&self) -> Vec<Kind> {
         self.params.iter().map(|(_, ty)| Kind::of(*ty)).collect()
+    }
+
+    /// How the parameters read, for a run that draws its inputs from them.
+    ///
+    /// # Errors
+    ///
+    /// When the function is variadic: a run passes only the listed
+    /// parameters, and the arguments past them, which the binary reads
+    /// from the registers its prologue saves, are none the text can read.
+    pub(crate) fn drawn_kinds(&self) -> Result<Vec<Kind>, String> {
+        if self.variadic {
+            return Err("its variable arguments are not passed by a run".to_owned());
+        }
+        Ok(self.parameter_kinds())
     }
 
     /// How the return type reads and its width, `None` for `void`.
@@ -307,7 +323,9 @@ pub(crate) fn printed(text: &str, word: u8) -> Result<Signature, String> {
         .map(|(_, ty)| ty)
         .filter(|ty| *ty != CTy::of(Base::Void));
     let mut params = Vec::new();
+    let mut variadic = false;
     for p in split_top(toks.get(open + 1..close).unwrap_or(&[]), ",") {
+        variadic |= p == [Tok::Punct("...")];
         if p.is_empty() || p == [Tok::Punct("...")] || p == [Tok::Name("void".to_owned())] {
             continue;
         }
@@ -318,5 +336,6 @@ pub(crate) fn printed(text: &str, word: u8) -> Result<Signature, String> {
         params,
         ret,
         word,
+        variadic,
     })
 }

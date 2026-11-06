@@ -1582,6 +1582,21 @@ mod tests {
         assert!(generated(&[Kind::Float], 1, 7, 0x1000).is_err());
     }
 
+    /// A variadic function draws no inputs: a run passes only the listed
+    /// parameters, never the variable ones its body reads.
+    ///
+    /// # Panics
+    ///
+    /// When a variadic signature yields inputs, or a fixed one does not.
+    #[test]
+    fn a_variadic_function_draws_no_inputs() {
+        let fixed = printed("// signature: uint64_t f(int32_t a1)\nreturn a1;\n", 64).unwrap();
+        assert!(fixed.drawn_kinds().is_ok());
+        let variadic = printed("// signature: uint64_t f(int32_t a1, ...)\nreturn a1;\n", 64).unwrap();
+        let why = variadic.drawn_kinds().unwrap_err();
+        assert!(why.contains("variable arguments"), "{why}");
+    }
+
     /// A run of a function that returns its argument tabulates each input,
     /// and the same request answers the same.
     ///

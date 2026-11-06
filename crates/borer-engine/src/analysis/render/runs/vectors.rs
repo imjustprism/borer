@@ -247,7 +247,7 @@ fn generated_in(
     let text = decompile_named(p, a, o, entry).ok_or("the function does not decompile")?;
     let word = u8::try_from(p.arch.bitness().unwrap_or(64)).unwrap_or(64);
     let sig = printed(&text, word)?;
-    let inputs = generated(&sig.parameter_kinds(), count, seed, entry)?;
+    let inputs = generated(&sig.drawn_kinds()?, count, seed, entry)?;
     let script = match mode {
         Mode::Machine => Script::read(p, a, o, entry, &text),
         Mode::Iso => Script::read_iso(p, a, o, entry, &text),
@@ -455,7 +455,7 @@ pub(super) fn draw(
     let text = decompile_named(p, a, o, entry).ok_or("the function does not decompile")?;
     let word = u8::try_from(p.arch.bitness().unwrap_or(64)).unwrap_or(64);
     let sig = printed(&text, word)?;
-    let inputs = generated(&sig.parameter_kinds(), count, seed, entry)?;
+    let inputs = generated(&sig.drawn_kinds()?, count, seed, entry)?;
     Ok(Drawn {
         sig,
         inputs,
@@ -855,7 +855,7 @@ pub fn vectors_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result
             .iter()
             .map(|c| c.value)
             .collect();
-    let inputs = vector_inputs(&sig.parameter_kinds(), &constants, count, entry)?;
+    let inputs = vector_inputs(&sig.drawn_kinds()?, &constants, count, entry)?;
     let seeded = constants.len().min(count.div_ceil(2));
     let shared = Shared {
         script: Script::read(p, a, o, entry, &text),
