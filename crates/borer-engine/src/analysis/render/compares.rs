@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::analysis::decompile::abi::Conv;
+use crate::isa::x86::ConditionCode;
 
 /// Most instructions [`flags_decide`] visits for one flag write.
 const FLAG_SCAN_MAX: usize = 4096;
@@ -108,8 +109,8 @@ fn flags_decide(instrs: &[Instruction], at: usize) -> bool {
         }
         let n = &instrs[cursor];
         let reads = n.rflags_read() & live != 0;
-        let decides =
-            n.flow_control() == FlowControl::ConditionalBranch || n.rflags_modified() == 0;
+        let decides = n.flow_control() == FlowControl::ConditionalBranch
+            || n.condition_code() != ConditionCode::None;
         if reads && decides {
             return true;
         }

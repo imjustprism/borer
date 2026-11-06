@@ -1326,6 +1326,34 @@ if (a1 != 0) {
         assert!(out.contains("0x1001"), "{out}");
     }
 
+    /// A flag result is a compare when a condition reads it (`sete`), and not
+    /// when the flags are only saved (`pushfq`).
+    #[test]
+    fn a_saved_flag_result_is_no_compare() {
+        for (code, want) in [
+            (
+                &[
+                    0x2d, 0x2b, 0x4a, 0x00, 0x00, // ASM: sub eax,0x4a2b
+                    0x0f, 0x94, 0xc0, // ASM: sete al
+                    0xc3, // ASM: ret
+                ][..],
+                vec![0x4a2b],
+            ),
+            (
+                &[
+                    0x2d, 0x2b, 0x4a, 0x00, 0x00, // ASM: sub eax,0x4a2b
+                    0x9c, // ASM: pushfq
+                    0xc3, // ASM: ret
+                ][..],
+                Vec::new(),
+            ),
+        ] {
+            let p = text(image(0x2000, &[(0x1000, code)]), 0x1000, false);
+            let a = crate::analysis::Analysis::compute(&p);
+            assert_eq!(super::check_constants(&p, &a, 0x1000, 64), want);
+        }
+    }
+
     /// A check's constants are listed once each, in the order first tested.
     ///
     /// The count orders the license-check table, so a constant compared
