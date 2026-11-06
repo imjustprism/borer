@@ -231,3 +231,40 @@ fn reads_rax(factory: &mut InstructionInfoFactory, i: &Instruction) -> bool {
             )
     })
 }
+
+/// Tells whether a path ends `pop rax; ret` in a function that opens with
+/// `push rax`.
+///
+/// Such a push only aligns the stack, and the pop puts back the slot's
+/// bytes, which the function may also have built a result in: the write
+/// says nothing alone, so its callers decide
+/// ([`handed_back`]).
+///
+/// # Arguments
+///
+/// * `program` - The image the entry block is decoded from.
+/// * `bitness` - 32 or 64.
+/// * `f` - The function.
+/// * `rest` - The block's instructions, after any skipped at its start.
+pub(super) fn undoes_alignment(
+    program: &Program,
+    bitness: u32,
+    f: &Function,
+    rest: &[Instruction],
+) -> bool {
+    let rax = |i: &Instruction, m: Mnemonic| {
+        i.mnemonic() == m
+            && i.op0_kind() == OpKind::Register
+            && i.op0_register().full_register() == Register::RAX
+    };
+    matches!(rest, [.., pop, ret] if rax(pop, Mnemonic::Pop)
+        && ret.flow_control() == FlowControl::Return)
+        && f.blocks
+            .iter()
+            .find(|blk| blk.start == f.entry)
+            .is_some_and(|blk| {
+                decode_block(program, bitness, blk)
+                    .first()
+                    .is_some_and(|i| rax(i, Mnemonic::Push))
+            })
+}

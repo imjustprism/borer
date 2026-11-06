@@ -658,7 +658,8 @@ fn handed_back(
             Scan::Wrote(Writer::Indirect, _) => out.unknown = true,
             Scan::Wrote(Writer::Own(bits), later) => {
                 out.own = true;
-                out.bare |= !(read || later);
+                let restores = exits::undoes_alignment(program, bitness, f, rest);
+                out.bare |= !(read || later || restores);
                 out.const_exit |= !(read || later)
                     && rest.len() <= 2
                     && rest

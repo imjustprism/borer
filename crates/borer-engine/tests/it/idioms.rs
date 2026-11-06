@@ -439,6 +439,50 @@ fn a_tested_value_kept_over_zero_is_max_with_zero() {
     );
 }
 
+/// An alignment `push rax` undone by `pop rax` returns what callers read.
+///
+/// When every caller drops the result the function returns nothing, not
+/// the bytes it stored in that slot. A caller that reads the result keeps
+/// the value the function built in the slot.
+#[test]
+fn an_alignment_push_of_rax_returns_what_its_callers_read() {
+    let mut code = vec![
+        0xe8, 0x1b, 0x00, 0x00, 0x00, // ASM: call 0x401020
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x20, 0xcc);
+    code.extend_from_slice(&[
+        0x50, // ASM: push rax
+        0xc7, 0x04, 0x24, 0x68, 0x65, 0x6c, 0x6c, // ASM: mov dword [rsp],'lleh'
+        0x48, 0x89, 0xe1, // ASM: mov rcx,rsp
+        0xe8, 0x10, 0x00, 0x00, 0x00, // ASM: call 0x401040
+        0x58, // ASM: pop rax
+        0xc3, // ASM: ret
+    ]);
+    code.resize(0x40, 0xcc);
+    code.extend_from_slice(&[0x31, 0xc0, 0xc3]); // ASM: xor eax,eax; ret
+    let mut p = crate::raw::image(Arch::X86_64, &code, &[]);
+    p.format = borer_engine::program::BinaryFormat::Pe;
+    let text = decompiled(&p, 0x401_020);
+    assert!(text.contains("// signature: void "), "{text}");
+    assert!(!text.contains("return *("), "{text}");
+    let mut code = vec![
+        0xe8, 0x1b, 0x00, 0x00, 0x00, // ASM: call 0x401020
+        0x83, 0xc0, 0x01, // ASM: add eax,1
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x20, 0xcc);
+    code.extend_from_slice(&[
+        0x50, // ASM: push rax
+        0x48, 0xc7, 0x04, 0x24, 0x07, 0x00, 0x00, 0x00, // ASM: mov qword [rsp],7
+        0x58, // ASM: pop rax
+        0xc3, // ASM: ret
+    ]);
+    let text = decompiled(&crate::raw::image(Arch::X86_64, &code, &[]), 0x401_020);
+    assert!(text.contains("return 7;"), "{text}");
+}
+
 /// A conditional move whose condition is proven constant by bit demand
 /// folds to the arm that runs.
 ///
