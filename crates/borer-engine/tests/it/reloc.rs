@@ -246,3 +246,111 @@ fn a_hostile_table_is_refused_cleanly() {
     assert_eq!(word(&absurd, SLOT), 0);
     Analysis::compute(&absurd);
 }
+
+/// A RISC-V PIE's functions that only a relocated table names are found.
+///
+/// A label the table names inside one leaves that one whole, and one that
+/// jumps on to another leaves the other its own function.
+#[test]
+fn riscv_functions_only_a_relocated_table_names_are_found() {
+    /// `ret`.
+    const RET: u32 = 0x0000_8067;
+    let mut text = vec![0u8; 0x30];
+    for (at, word) in [
+        (0x00, RET),
+        (0x10, 0x02a0_0513), // ASM: li a0, 42
+        (0x14, RET),
+        (0x20, 0x0070_0513), // ASM: li a0, 7
+        (0x24, RET),
+        (0x28, 0xfe9f_f06f), // ASM: j 0x1010
+    ] {
+        text[at..at + 4].copy_from_slice(&u32::to_le_bytes(word));
+    }
+    let table: Vec<u8> = [0x1010u64, 0x1020, 0x1024, 0x1028]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+    let relr: Vec<u8> = [0x2000u64, 0b1111]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+    let dynamic = elfgen::dynamic(&[(36, 0x3100), (35, 16), (37, 8)]);
+    let mut secs = vec![
+        Sec::new(".text", PROGBITS, AX, 0x1000, text),
+        Sec::new(".data.rel.ro", PROGBITS, WA, 0x2000, table),
+        Sec::new(".relr.dyn", RELR, A, 0x3100, relr),
+        Sec::new(".dynamic", DYNAMIC, WA, 0x3400, dynamic),
+    ];
+    secs[2].entsize = 8;
+    secs[3].entsize = 16;
+    let bytes = elfgen::build(ET_DYN, 243, ENTRY, &secs);
+    let p = Program::from_bytes(std::path::PathBuf::from("rv.so"), bytes).expect("the PIE loads");
+    assert_eq!(p.relocated_words(), vec![0x2000, 0x2008, 0x2010, 0x2018]);
+    let a = Analysis::compute(&p);
+    for entry in [0x1010, 0x1020, 0x1028] {
+        assert!(
+            a.function(entry).is_some(),
+            "{entry:#x}: {:#x?}",
+            a.functions.iter().map(|f| f.entry).collect::<Vec<_>>()
+        );
+    }
+    assert!(
+        a.function_at(0x1024).is_some_and(|f| f.entry == 0x1020),
+        "the label stays inside its callback"
+    );
+}
+
+/// A callback only a relocated table names keeps its switch: the cases its
+/// own relocated jump table names stay its blocks, not functions.
+#[test]
+fn a_riscv_callback_keeps_the_cases_of_its_relocated_switch() {
+    let mut text = vec![0u8; 0x30];
+    text[0..4].copy_from_slice(&u32::to_le_bytes(0x0000_8067)); // ASM: ret
+    for (at, half) in [
+        (0x10, 0x4589u16), // ASM: li a1, 2
+        (0x16, 0x050e),    // ASM: slli a0, a0, 3
+        (0x18, 0x6589),    // ASM: lui a1, 0x2
+        (0x1a, 0x952e),    // ASM: add a0, a0, a1
+        (0x1c, 0x6108),    // ASM: ld a0, 0(a0)
+        (0x1e, 0x8502),    // ASM: jr a0
+        (0x20, 0x4529),    // ASM: li a0, 10
+        (0x22, 0x8082),    // ASM: ret
+        (0x24, 0x4551),    // ASM: li a0, 20
+        (0x26, 0x8082),    // ASM: ret
+        (0x28, 0x4579),    // ASM: li a0, 30
+        (0x2a, 0x8082),    // ASM: ret
+        (0x2c, 0x4501),    // ASM: li a0, 0
+        (0x2e, 0x8082),    // ASM: ret
+    ] {
+        text[at..at + 2].copy_from_slice(&half.to_le_bytes());
+    }
+    text[0x12..0x16].copy_from_slice(&u32::to_le_bytes(0x00a5_ed63)); // ASM: bltu a1, a0, 0x102c
+    let table: Vec<u8> = [0x1020u64, 0x1024, 0x1028, 0x1010]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+    let relr: Vec<u8> = [0x2000u64, 0b1111]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+    let dynamic = elfgen::dynamic(&[(36, 0x3100), (35, 16), (37, 8)]);
+    let mut secs = vec![
+        Sec::new(".text", PROGBITS, AX, 0x1000, text),
+        Sec::new(".data.rel.ro", PROGBITS, WA, 0x2000, table),
+        Sec::new(".relr.dyn", RELR, A, 0x3100, relr),
+        Sec::new(".dynamic", DYNAMIC, WA, 0x3400, dynamic),
+    ];
+    secs[2].entsize = 8;
+    secs[3].entsize = 16;
+    let bytes = elfgen::build(ET_DYN, 243, ENTRY, &secs);
+    let p = Program::from_bytes(std::path::PathBuf::from("rv.so"), bytes).expect("the PIE loads");
+    let a = Analysis::compute(&p);
+    assert!(a.jump_tables.contains_key(&0x101e), "{:x?}", a.jump_tables);
+    for case in [0x1020, 0x1024, 0x1028] {
+        assert!(
+            a.function_at(case).is_some_and(|f| f.entry == 0x1010),
+            "{case:#x}: {:#x?}",
+            a.functions.iter().map(|f| f.entry).collect::<Vec<_>>()
+        );
+    }
+}

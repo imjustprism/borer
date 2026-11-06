@@ -18,7 +18,9 @@
 //! A `jr` through an entry of a bounded jump table goes to every case the
 //! table holds ([`switch`]).
 //!
-//! Not found yet: the functions only a pointer or nothing names.
+//! A function only a relocated data word names (a table of callbacks, an
+//! `.init_array` entry) is walked once the rest are ([`pointed`]). Not
+//! found yet: the functions nothing names.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -28,7 +30,10 @@ pub(crate) use returns::infer as infer_returns;
 
 use super::functions::helpers::is_noreturn_name;
 use super::functions::{build_callers_and_names, fuel_for, mix, push_site};
-use super::{Analysis, BasicBlock, BlockTerm, Function, NameSource, RefKind, bare_name, seeds};
+use super::{
+    Analysis, BasicBlock, BlockTerm, Function, NameSource, RefKind, bare_name, dedup_sorted,
+    read_word, seeds,
+};
 use crate::isa::rv::{self, Alu, FOp, Flow, Insn, Op, RA, Reg, T0, Xlen, ZERO};
 use crate::program::{Program, SymbolKind};
 
@@ -707,6 +712,97 @@ impl Walks {
     }
 }
 
+/// Walks the seeds, then the functions only a relocated table names
+/// ([`pointed`]), and makes the ones kept starts, so a jump into one
+/// becomes a tail call.
+///
+/// # Arguments
+///
+/// * `cx` - What the walks share.
+/// * `walks` - The walks, extended in place.
+/// * `seeds` - The facts' entries.
+fn walk_named(cx: &mut Ctx<'_>, walks: &mut Walks, seeds: Vec<u64>) {
+    walks.drain(cx, seeds);
+    let pointed = pointed(cx.program, walks);
+    walks.drain(cx, pointed.clone());
+    let named: BTreeSet<u64> = pointed.iter().copied().collect();
+    let named = &named;
+    let inner: BTreeSet<u64> = pointed
+        .iter()
+        .filter_map(|e| walks.walked.get(e).map(|w| (e, w)))
+        .flat_map(|(e, w)| {
+            w.seen
+                .keys()
+                .filter(move |&a| a != e && named.contains(a) && local_label(w, *a))
+        })
+        .copied()
+        .collect();
+    for e in pointed.iter().filter(|e| inner.contains(e)) {
+        walks.walked.remove(e);
+    }
+    cx.starts
+        .extend(pointed.into_iter().filter(|e| walks.walked.contains_key(e)));
+}
+
+/// Tells whether a walk reaches an address as one of its own labels.
+///
+/// It falls through into it, a conditional branch goes there, or a jump
+/// table of its own names it as a case. One reached only by unconditional
+/// jumps is a tail call's callee, as a callback that jumps on to another
+/// is.
+///
+/// # Arguments
+///
+/// * `w` - The walk.
+/// * `at` - The address it reaches.
+fn local_label(w: &Walked, at: u64) -> bool {
+    let falls = w
+        .seen
+        .values()
+        .any(|i| i.next() == at && matches!(i.flow(), Flow::Next | Flow::CondJump | Flow::Call));
+    let branched = w.sources.get(&at).is_some_and(|s| {
+        s.iter()
+            .any(|src| w.seen.get(src).is_some_and(|i| i.flow() == Flow::CondJump))
+    });
+    let cased = w.tables.values().any(|t| t.targets.contains(&at));
+    falls || branched || cased
+}
+
+/// The code addresses the relocated words of the data sections hold that
+/// no walk reached: the functions only a table names.
+///
+/// Only in an image that relocates, where such a word is surely a pointer,
+/// and only a target no walked instruction sits at and no walk jumps to: a
+/// label inside a function, a computed `goto`'s, is no function. The walk
+/// of one that is another target's own label ([`local_label`]) is dropped
+/// for the same reason.
+///
+/// # Arguments
+///
+/// * `program` - The image.
+/// * `walks` - The walks of the facts.
+///
+/// # Returns
+///
+/// The targets in address order.
+fn pointed(program: &Program, walks: &Walks) -> Vec<u64> {
+    let reached: BTreeSet<u64> = walks
+        .walked
+        .values()
+        .flat_map(|w| w.seen.keys().chain(&w.followed))
+        .copied()
+        .collect();
+    let mut out: Vec<u64> = program
+        .relocated_words()
+        .into_iter()
+        .filter(|&site| !super::is_executable_va(program, site))
+        .filter_map(|site| read_word(program, site))
+        .filter(|&t| t % 2 == 0 && super::is_executable_va(program, t) && !reached.contains(&t))
+        .collect();
+    dedup_sorted(&mut out);
+    out
+}
+
 /// Discovers a RISC-V program's functions, blocks and references.
 ///
 /// A function whose jumps reach a start another walk found later is
@@ -747,7 +843,7 @@ pub(crate) fn discover(program: &Program, xlen: Xlen) -> Analysis {
         fuel: fuel_for(program),
         incomplete: false,
     };
-    walks.drain(&mut cx, seeds);
+    walk_named(&mut cx, &mut walks, seeds);
     let redo: Vec<u64> = walks
         .walked
         .iter()
