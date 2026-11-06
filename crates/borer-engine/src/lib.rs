@@ -23,6 +23,7 @@
 //! ```
 
 pub mod analysis;
+pub mod authenticode;
 pub mod bundle;
 pub mod cancel;
 pub mod carve;

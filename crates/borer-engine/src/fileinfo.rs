@@ -11,7 +11,7 @@ use crate::text::hex;
 
 /// Largest file [`hashes_line`] hashes: a summary of a bigger one stays
 /// quick, and `borer://hashes` hashes it on request.
-const HASH_FILE_MAX: usize = 64 << 20;
+pub(crate) const HASH_FILE_MAX: usize = 64 << 20;
 
 /// The `hashes:` line of a file summary: MD5 and SHA-256 of the whole file,
 /// the import hash, and TLSH, the values a malware feed is searched by.
@@ -195,7 +195,9 @@ pub(crate) fn forward(mark: &[u8]) -> Vec<u8> {
     mark.iter().rev().copied().collect()
 }
 
-/// The lines a file summary adds after its headers: what built and wraps
+/// The lines a file summary ends with.
+///
+/// Its headers ([`crate::headers::Headers::render`]), what built and wraps
 /// it ([`crate::toolchain::lines`]), what each appended run is
 /// ([`appended_lines`]) and the hashes ([`hashes_line`]).
 ///
@@ -204,7 +206,7 @@ pub(crate) fn forward(mark: &[u8]) -> Vec<u8> {
 /// * `program` - The loaded file.
 #[must_use]
 pub fn summary_lines(program: &Program) -> String {
-    let mut out = String::new();
+    let mut out = program.headers.render(&program.bytes);
     for line in crate::toolchain::lines(program, false)
         .into_iter()
         .chain(appended_lines(program))

@@ -73,6 +73,9 @@ pub struct Headers {
     /// Whether an Authenticode certificate table is present (its signature
     /// is not verified); `None` for a format that has no such table.
     pub signed: Option<bool>,
+    /// The PE's first Authenticode signature borer reads; `None` when
+    /// unsigned or unread.
+    pub signature: Option<crate::authenticode::Signature>,
     /// Mach-O `FairPlay` encryption: `Some(true)` when an
     /// `LC_ENCRYPTION_INFO` or `LC_ENCRYPTION_INFO_64` command is present
     /// and its `cryptid` is nonzero, so the image ships encrypted;
@@ -297,6 +300,27 @@ pub fn sniff_file(bytes: &[u8]) -> Option<&'static str> {
 }
 
 impl Headers {
+    /// Renders what the signature says, `signed` when it was not read
+    /// ([`crate::authenticode::note`]).
+    ///
+    /// The file is hashed only for a SHA-256 digest and only up to the
+    /// size the summary hashes at all ([`crate::fileinfo::HASH_FILE_MAX`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The whole file as it is on disk.
+    fn signed_note(&self, bytes: &[u8]) -> String {
+        self.signature.as_ref().map_or_else(
+            || "signed".to_owned(),
+            |sig| {
+                let compared = sig.algorithm == Some("sha256")
+                    && bytes.len() <= crate::fileinfo::HASH_FILE_MAX;
+                let hash = compared.then(|| crate::hashing::file_hash(bytes)).flatten();
+                crate::authenticode::note(sig, hash.as_ref())
+            },
+        )
+    }
+
     /// Renders the facts as summary lines; empty for a raw file.
     ///
     /// Lines: `image:` (kind, link time, linker, subsystem, interpreter,
@@ -305,7 +329,12 @@ impl Headers {
     /// count, a refused import or export table) and
     /// `libraries (N):` capped at twelve names. Each appears only when it has
     /// something to say.
-    pub fn render(&self) -> String {
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The whole file as it is on disk, which a signature's
+    ///   digest is checked against.
+    pub fn render(&self, bytes: &[u8]) -> String {
         /// Most library names listed before `, ...`.
         const LIBS_SHOWN: usize = 12;
         /// Most Rich header entries listed before `, ... N more`.
@@ -359,7 +388,7 @@ impl Headers {
         }
         let mut notes: Vec<String> = Vec::new();
         match self.signed {
-            Some(true) => notes.push("signed".to_owned()),
+            Some(true) => notes.push(self.signed_note(bytes)),
             Some(false) => notes.push("unsigned".to_owned()),
             None => {}
         }
@@ -775,6 +804,10 @@ pub(crate) fn from_pe(
     let stamp = pe.header.coff_header.time_date_stamp;
     h.timestamp = (stamp != 0).then_some(stamp);
     h.signed = Some(!pe.certificates.is_empty());
+    h.signature = pe
+        .certificates
+        .iter()
+        .find_map(|c| crate::authenticode::read(c.certificate));
     let pe_pointer = usize::try_from(pe.header.dos_header.pe_pointer).unwrap_or(usize::MAX);
     h.rich = rich_header(bytes, pe_pointer);
     if let Some(res) = &pe.resource_data {

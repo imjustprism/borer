@@ -512,7 +512,19 @@ const SECURITY_DIR: usize = 4;
 /// The 32-byte authentihash, or `None` when the file carries no PE header.
 #[must_use]
 pub fn authentihash(program: &Program) -> Option<[u8; 32]> {
-    let bytes = &program.bytes;
+    file_hash(&program.bytes)
+}
+
+/// The Authenticode SHA-256 of a PE file's bytes, as [`authentihash`].
+///
+/// # Arguments
+///
+/// * `bytes` - The whole file.
+///
+/// # Returns
+///
+/// The hash, or `None` when the bytes carry no PE header.
+pub(crate) fn file_hash(bytes: &[u8]) -> Option<[u8; 32]> {
     let checksum = crate::program::pe::pe_signature(bytes)?
         .checked_add(24)?
         .checked_add(64)?;

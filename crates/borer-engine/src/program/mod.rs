@@ -2087,7 +2087,7 @@ impl Program {
         if let Some(outcome) = &self.pdb {
             out.push_str(&format!("pdb:     {}\n", outcome.render()));
         }
-        out + self.headers.render().as_str() + crate::fileinfo::summary_lines(self).as_str()
+        out + crate::fileinfo::summary_lines(self).as_str()
     }
 
     /// Computes a section's entropy for the summary.

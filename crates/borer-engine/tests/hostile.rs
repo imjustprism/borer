@@ -844,7 +844,7 @@ fn bytes_after_the_certificate_table_are_overlay() {
         [(cert - 0x10, 0x10), (cert + 0x18, 28)],
         "the overlay before the table and after it"
     );
-    let notes = p.headers.render();
+    let notes = p.headers.render(&p.bytes);
     assert!(
         notes.contains(&format!(
             "overlay 28 bytes @ {:#x} after the certificate table",

@@ -240,11 +240,11 @@ fn unresolved_section_names_are_noted() {
         unresolved_section_names: 9,
         ..borer_engine::headers::Headers::default()
     };
-    let out = h.render();
+    let out = h.render(&[]);
     assert!(out.contains("9 section names unresolved"), "{out}");
     assert!(
         borer_engine::headers::Headers::default()
-            .render()
+            .render(&[])
             .is_empty()
     );
 }

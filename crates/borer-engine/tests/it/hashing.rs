@@ -378,3 +378,117 @@ fn a_short_file_has_no_tlsh() {
         "{out}"
     );
 }
+
+/// Encodes one DER element.
+fn tlv(tag: u8, body: &[u8]) -> Vec<u8> {
+    let len = u16::try_from(body.len()).expect("fits");
+    let mut out = vec![tag];
+    if len < 0x80 {
+        out.push(u8::try_from(len).expect("fits"));
+    } else {
+        out.push(0x82);
+        out.extend_from_slice(&len.to_be_bytes());
+    }
+    out.extend_from_slice(body);
+    out
+}
+
+/// A DER name holding one common name.
+fn common_name(value: &str) -> Vec<u8> {
+    let pair = [tlv(0x06, &[0x55, 0x04, 0x03]), tlv(0x0c, value.as_bytes())].concat();
+    tlv(0x30, &tlv(0x31, &tlv(0x30, &pair)))
+}
+
+/// A certificate with `serial` whose subject is `cn`, valid 2020 to 2030.
+fn certificate(serial: u8, cn: &str) -> Vec<u8> {
+    let alg = tlv(0x30, &tlv(0x06, SHA256_OID));
+    let validity = [tlv(0x17, b"200101000000Z"), tlv(0x18, b"20301231235959Z")].concat();
+    let tbs = [
+        tlv(0xa0, &tlv(0x02, &[2])),
+        tlv(0x02, &[serial]),
+        alg.clone(),
+        common_name("CA"),
+        tlv(0x30, &validity),
+        common_name(cn),
+    ]
+    .concat();
+    tlv(0x30, &[tlv(0x30, &tbs), alg].concat())
+}
+
+/// SHA-256's object identifier.
+const SHA256_OID: &[u8] = &[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01];
+
+/// An Authenticode `SignedData` over `digest` whose signer names serial 7,
+/// the second of its two certificates.
+fn pkcs7(digest: &[u8]) -> Vec<u8> {
+    let spc = tlv(
+        0x06,
+        &[0x2b, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x01, 0x04],
+    );
+    let digest_info = [tlv(0x30, &tlv(0x06, SHA256_OID)), tlv(0x04, digest)].concat();
+    let indirect = tlv(0x30, &[tlv(0x30, &spc), tlv(0x30, &digest_info)].concat());
+    let content = tlv(0x30, &[spc, tlv(0xa0, &indirect)].concat());
+    let issuer_serial = [common_name("CA"), tlv(0x02, &[7])].concat();
+    let signer = tlv(0x30, &[tlv(0x02, &[1]), tlv(0x30, &issuer_serial)].concat());
+    let certs = [certificate(3, "Other"), certificate(7, "Example Corp")].concat();
+    let signed = tlv(
+        0x30,
+        &[
+            tlv(0x02, &[1]),
+            tlv(0x31, &tlv(0x30, &tlv(0x06, SHA256_OID))),
+            content,
+            tlv(0xa0, &certs),
+            tlv(0x31, &signer),
+        ]
+        .concat(),
+    );
+    let signed_data = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x02];
+    tlv(
+        0x30,
+        &[tlv(0x06, &signed_data), tlv(0xa0, &signed)].concat(),
+    )
+}
+
+/// The crafted image with its certificate table holding a signature over
+/// `digest`, cut to `keep` bytes of it.
+fn signed_image(digest: &[u8], keep: usize) -> Vec<u8> {
+    let mut bytes = image();
+    let mut sig = pkcs7(digest);
+    sig.truncate(keep);
+    let table = &mut bytes[CERT_AT..CERT_AT + CERT_LEN];
+    table.fill(0);
+    put32(table, 0, u32::try_from(CERT_LEN).expect("fits"));
+    put16(table, 4, 0x0200);
+    put16(table, 6, 0x0002);
+    table[8..8 + sig.len()].copy_from_slice(&sig);
+    bytes
+}
+
+/// A signed file names its signer and matches its signed digest; an edit
+/// after signing shows; a signature cut anywhere still loads as signed.
+#[test]
+fn a_signature_names_its_signer_and_judges_the_file() {
+    let digest = authentihash(&load(signed_image(&[0; 32], usize::MAX))).expect("a PE header");
+    let summary = load(signed_image(&digest, usize::MAX)).summary();
+    assert!(summary.contains("signed by \"Example Corp\""), "{summary}");
+    assert!(
+        summary.contains("certificate valid 2020-01-01 to 2030-12-31"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("matches its signed sha256 digest"),
+        "{summary}"
+    );
+    let mut edited = signed_image(&digest, usize::MAX);
+    edited[HEADERS + 1] ^= 0xff;
+    let summary = load(edited).summary();
+    assert!(summary.contains("changed after signing"), "{summary}");
+    let full = pkcs7(&digest).len();
+    for keep in 0..full {
+        let summary = load(signed_image(&digest, keep)).summary();
+        assert!(
+            summary.contains("signed") && !summary.contains("unsigned"),
+            "{keep}: {summary}"
+        );
+    }
+}
