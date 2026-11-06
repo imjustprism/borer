@@ -451,3 +451,72 @@ fn dyld_info_opcodes_rebase_and_bind() {
     let a = Analysis::compute(&p);
     assert!(a.function(TABLED).is_some());
 }
+
+/// An arm64 image's functions that only a rebased table names are found.
+///
+/// A table of callbacks no instruction reaches names each, an empty one's
+/// lone `ret` too, one in a slot four bytes off the word grid, and a label
+/// it names inside one leaves that one whole.
+#[test]
+fn arm64_functions_only_a_rebased_table_names_are_found() {
+    /// `ret`, the entry.
+    const RET: u32 = 0xd65f_03c0;
+    let mut text = x86_text();
+    text.bytes[0x400..0x404].copy_from_slice(&RET.to_le_bytes());
+    text.bytes[0x410..0x414].copy_from_slice(&0x5280_0540_u32.to_le_bytes()); // ASM: mov w0, #42
+    text.bytes[0x414..0x418].copy_from_slice(&RET.to_le_bytes());
+    text.bytes[0x418..0x41c].copy_from_slice(&0x5280_00e0_u32.to_le_bytes()); // ASM: mov w0, #7
+    text.bytes[0x41c..0x420].copy_from_slice(&RET.to_le_bytes());
+    text.bytes[0x40c..0x410].copy_from_slice(&RET.to_le_bytes());
+    let payload = machogen::chained(
+        3,
+        &[Starts {
+            segment: 1,
+            format: PTR_64_OFFSET,
+            offset: DATA - TEXT,
+            page_size: 0x4000,
+            pages: vec![0],
+        }],
+        &[],
+    );
+    let at = 0x1028;
+    let p = load(
+        ARM64,
+        &[
+            text,
+            data(
+                "__DATA_CONST",
+                0x28,
+                &[
+                    (0, rebase64(0x414, 2)),
+                    (8, rebase64(0x40c, 2)),
+                    (16, rebase64(0x410, 3)),
+                    (28, rebase64(0x418, 0)),
+                ],
+            ),
+            linkedit(at, payload.clone()),
+        ],
+        vec![machogen::linkedit(
+            LC_DYLD_CHAINED_FIXUPS,
+            at,
+            payload.len(),
+        )],
+    );
+    assert_eq!(
+        p.relocated_words(),
+        vec![DATA, DATA + 8, DATA + 16, DATA + 28]
+    );
+    let a = Analysis::compute(&p);
+    for entry in [TEXT + 0x40c, TEXT + 0x410, TEXT + 0x418] {
+        assert!(
+            a.function(entry).is_some_and(|f| f.entry == entry),
+            "{entry:#x}: {:#x?}",
+            a.functions.iter().map(|f| f.entry).collect::<Vec<_>>()
+        );
+    }
+    assert!(
+        a.function_at(TEXT + 0x414)
+            .is_some_and(|f| f.entry == TEXT + 0x410),
+        "the label stays inside its callback"
+    );
+}

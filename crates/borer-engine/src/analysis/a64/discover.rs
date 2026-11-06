@@ -44,7 +44,8 @@ use crate::analysis::functions::{
     mix, push_site,
 };
 use crate::analysis::{
-    Analysis, BasicBlock, BlockTerm, Function, NameSource, RefKind, bare_name, seeds, striped,
+    Analysis, BasicBlock, BlockTerm, Function, NameSource, RefKind, bare_name, dedup_sorted,
+    is_executable_va, read_word, seeds, striped,
 };
 use crate::fxmap::FxHashSet;
 use crate::isa::a64::{self, Flow, Insn, Mode, Op, Opnd};
@@ -999,13 +1000,15 @@ fn operand_kind(o: &Opnd) -> u64 {
 /// fact is; a guess must also decode nothing that is not code, reach a way
 /// out, run into no other function and no code a kept function covers,
 /// hold more than one instruction (or be one jump to another function, a
-/// thunk) and stay under its cap.
+/// thunk, or one a relocated pointer names, an empty callback's `ret`) and
+/// stay under its cap.
 ///
 /// # Arguments
 ///
 /// * `w` - The walk.
 /// * `guess` - Whether its entry was a guess.
-fn rejected(w: &Walked, guess: bool) -> bool {
+/// * `pointed` - Whether a relocated pointer names its entry.
+fn rejected(w: &Walked, guess: bool, pointed: bool) -> bool {
     let thunk = w.func.instr_count == 1
         && !w.func.callees.is_empty()
         && w.func
@@ -1019,7 +1022,7 @@ fn rejected(w: &Walked, guess: bool) -> bool {
                 || !w.terminated
                 || w.fell_into_start
                 || w.enters_covered
-                || (w.func.instr_count < GUESS_INSTRS_MIN && !thunk)))
+                || (w.func.instr_count < GUESS_INSTRS_MIN && !thunk && !pointed)))
 }
 
 /// The state of one discovery pass.
@@ -1057,6 +1060,8 @@ struct Discovery<'a> {
     rejected: FxHashSet<u64>,
     /// The entries of the guesses now being walked.
     guessed: FxHashSet<u64>,
+    /// The guesses a relocated pointer names ([`Discovery::pointer_guesses`]).
+    pointed: FxHashSet<u64>,
     /// The kept walks, by entry.
     walked: BTreeMap<u64, Kept>,
     /// The extents the file declares, merged: no guess is made inside one,
@@ -1198,7 +1203,7 @@ impl Discovery<'_> {
                 .range(..=entry)
                 .next_back()
                 .is_some_and(|(_, &end)| entry < end);
-        if rejected(&w, guess) || inside_guess {
+        if rejected(&w, guess, self.pointed.contains(&entry)) || inside_guess {
             self.rejected.insert(entry);
             return;
         }
@@ -1267,6 +1272,41 @@ impl Discovery<'_> {
                 })
                 .collect(),
         )
+    }
+
+    /// The functions the relocated words of the data sections point at,
+    /// which no instruction names: a table of callbacks, an operations
+    /// table read by index.
+    ///
+    /// Only in an image that relocates, where a relocated word is surely a
+    /// pointer, read at each relocation's own address, and only a
+    /// word-aligned target no kept block and no declared function covers:
+    /// a label inside a function is no function. A guess is no start until
+    /// its walk is kept, so a label a table names inside a callback (a
+    /// computed `goto`'s) leaves the callback whole.
+    ///
+    /// # Returns
+    ///
+    /// The guesses in address order.
+    fn pointer_guesses(&self) -> Vec<u64> {
+        let covered = self.covered();
+        let mut out: Vec<u64> = self
+            .program
+            .relocated_words()
+            .into_iter()
+            .filter(|&site| !is_executable_va(self.program, site))
+            .filter_map(|site| read_word(self.program, site))
+            .filter(|&va| {
+                va % STEP == 0
+                    && is_executable_va(self.program, va)
+                    && !self.done.contains(&va)
+                    && !self.rejected.contains(&va)
+                    && !inside(&covered, va)
+                    && !inside(&self.declared, va)
+            })
+            .collect();
+        dedup_sorted(&mut out);
+        out
     }
 
     /// Collects the guesses of one gap round.
@@ -1406,11 +1446,21 @@ pub(crate) fn discover(program: &Program) -> Analysis {
         done: FxHashSet::default(),
         rejected: FxHashSet::default(),
         guessed: FxHashSet::default(),
+        pointed: FxHashSet::default(),
         walked: BTreeMap::new(),
         declared: merged(program.function_ranges.clone()),
         guessed_blocks: BTreeMap::new(),
     };
     d.run(&text);
+    let pointed = d.pointer_guesses();
+    if !pointed.is_empty() {
+        d.guessed = pointed.iter().copied().collect();
+        d.pointed = d.guessed.clone();
+        d.queue = pointed;
+        d.run(&text);
+        d.guessed.clear();
+        d.guessed_blocks.clear();
+    }
     for _ in 0..GAP_ROUNDS_MAX {
         let guesses = d.gap_seeds(&text);
         if guesses.is_empty() {
