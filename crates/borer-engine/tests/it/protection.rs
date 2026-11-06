@@ -751,6 +751,25 @@ fn an_entry_in_writable_code_is_one_mark() {
     assert!(!out.contains("writable memory"), "{out}");
 }
 
+/// An entry in a writable data section is one fact too: that it sits in
+/// writable memory, and so outside the first code section, is said once.
+#[test]
+fn an_entry_in_writable_data_is_one_mark() {
+    let mut code = vec![0xcc; 0x200];
+    code[..6].copy_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]);
+    let bytes = pe(
+        &[
+            sec(".text", 0x1000, vec![0xc3; 0x200]),
+            data(".data", 0x2000, code),
+        ],
+        0x2000,
+    );
+    let out = report_with(bytes, |p| p.symbols = imports(&TWELVE_IMPORTS));
+    assert!(out.starts_with("# plain: one mark only"), "{out}");
+    assert!(out.contains("writable memory"), "{out}");
+    assert!(!out.contains("not the first code section"), "{out}");
+}
+
 /// A Visual Basic program's `.text` holds P-code and forms the runtime
 /// reads, so few functions in it, even at high entropy, say nothing of
 /// packing.

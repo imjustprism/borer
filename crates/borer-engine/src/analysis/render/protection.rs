@@ -1426,7 +1426,9 @@ fn packing_marks(
         strong.push(format!("writable and executable: {}", names.join(", ")));
     }
     let entry_section = p.entry.and_then(|e| p.section_at(e));
-    if entry_section.is_some_and(|s| s.writable && !backed.iter().any(|w| w.va == s.va)) {
+    let entry_writable =
+        entry_section.is_some_and(|s| s.writable && !backed.iter().any(|w| w.va == s.va));
+    if entry_writable {
         strong.push("the entry point sits in writable memory".to_owned());
     }
     let clr = p.headers.directories.contains(&"clr");
@@ -1465,6 +1467,7 @@ fn packing_marks(
     });
     if let (Some(sec), Some(first)) = (entry_section, first_code)
         && sec.va != first.va
+        && !entry_writable
     {
         weak.push(format!(
             "entry point in {}, not the first code section",
