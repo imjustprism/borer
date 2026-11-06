@@ -176,3 +176,22 @@ fn a_dword_spilled_windows_parameter_is_32_bits() {
     let text = decompiled::runs_agree(&program64(&code), 0x1_4000_1000);
     assert!(text.contains("(uint32_t a1)"), "{text}");
 }
+
+/// A floating parameter copied whole into another register is typed by
+/// the scalar instructions reading the copy.
+///
+/// `movapd xmm2, xmm0; addsd xmm2, xmm1` reads the first parameter as a
+/// double through its copy, so the text declares `double a1`, not the
+/// `float` a parameter with no width read defaults to.
+#[test]
+fn a_parameter_copied_whole_is_typed_by_the_copy_reads() {
+    let code = [
+        0x66, 0x0f, 0x28, 0xd0, // ASM: movapd xmm2,xmm0
+        0xf2, 0x0f, 0x58, 0xd1, // ASM: addsd xmm2,xmm1
+        0x66, 0x0f, 0x28, 0xc2, // ASM: movapd xmm0,xmm2
+        0xc3, // ASM: ret
+    ];
+    let p = program64(&code);
+    let text = decompiled::runs_agree(&p, 0x1_4000_1000);
+    assert!(text.contains("(double a1, double a2)"), "{text}");
+}

@@ -36,7 +36,10 @@ struct Seen {
 /// names the type; reads at both widths name none, and a parameter the
 /// function also dereferences stays a pointer. A parameter arriving in a
 /// vector register is typed the same way, by the precision the scalar
-/// instructions reading it name ([`vector_read_bytes`]).
+/// instructions reading it name ([`vector_read_bytes`]), through whole
+/// register copies (`movapd xmm2, xmm1`) as well, within the block that
+/// made the copy: blocks are read in address order, not along their
+/// edges, so a copy is not believed in a branch it may not reach.
 ///
 /// A parameter reaches a register in its argument register, or loaded from
 /// its stack slot: `mov eax, [ebp+8]` then `[eax+0x10]` is a field of the
@@ -93,6 +96,7 @@ pub(super) fn param_types(
     let mut frame: BTreeMap<Register, i64> = BTreeMap::new();
     for (instrs, depth) in code.iter().zip(&depths) {
         let mut sp = *depth;
+        let mut copies = Vec::new();
         for instr in instrs {
             let moved = sp_move(ctx, &mut factory, instr);
             if instr.mnemonic() == Mnemonic::Nop {
@@ -145,7 +149,17 @@ pub(super) fn param_types(
                         at.saturating_add(crate::disasm::displacement(instr, ctx.bitness)),
                     )
                 })
-            } else if instr.mnemonic() == Mnemonic::Mov && instr.op1_kind() == OpKind::Register {
+            } else if matches!(
+                instr.mnemonic(),
+                Mnemonic::Mov
+                    | Mnemonic::Movaps
+                    | Mnemonic::Movapd
+                    | Mnemonic::Movups
+                    | Mnemonic::Movupd
+                    | Mnemonic::Movdqa
+                    | Mnemonic::Movdqu
+            ) && instr.op1_kind() == OpKind::Register
+            {
                 holds
                     .get(&lift::canon(instr.op1_register(), ctx.bitness))
                     .copied()
@@ -188,12 +202,16 @@ pub(super) fn param_types(
             if let Some(d) = dst {
                 if let Some(moved) = carried.or(loaded.map(|p| (p, 0))) {
                     holds.insert(d, moved);
+                    copies.extend(d.is_vector_register().then_some(d));
                 }
                 if let Some(a) = to_frame {
                     frame.insert(d, a);
                 }
             }
             sp = sp.zip(moved).map(|(s, m)| s + m);
+        }
+        for r in copies {
+            holds.remove(&r);
         }
     }
     finish_param_types(ctx, code, entry, seen, floats)
