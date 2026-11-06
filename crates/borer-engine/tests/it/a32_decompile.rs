@@ -148,7 +148,7 @@ fn arm32_functions_decompile_with_their_arguments_and_results() {
     assert!(switch.contains("return 0;"), "{switch}");
     let pairs = text(&p, &a, "t_pairs");
     assert!(
-        pairs.contains("(int32_t)a2 < (int32_t)a4 || (a2 == a4 && a1 < a3)"),
+        pairs.contains("a2 < (int32_t)a4 || (a2 == a4 && a1 < a3)") && pairs.contains("int32_t a2"),
         "{pairs}"
     );
     let literal = text(&p, &a, "t_literal");

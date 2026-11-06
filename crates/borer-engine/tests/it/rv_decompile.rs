@@ -202,7 +202,7 @@ fn a_signed_division_by_minus_one_negates() {
     ];
     let text = decompiled(&code, Arch::RiscV64).concat();
     assert!(
-        text.contains("a2 == -1 ? -a1 : (int64_t)a1 / (int64_t)a2"),
+        text.contains("a2 == -1 ? -a1 : (int64_t)a1 / a2") && text.contains("int64_t a2)"),
         "{text}"
     );
 }

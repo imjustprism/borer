@@ -120,7 +120,7 @@ pub(super) fn polish_skipping(
     });
     let text = skip.apply(Pass::TypeLocals, text, type_locals);
     let text = skip.apply(Pass::SignedWords, text, |t| {
-        words::signed_words(t, stated_types(callers))
+        words::signed_words(t, stated_types(callers), word)
     });
     let text = skip.apply(Pass::ByteArithmetic, text, |t| byte_arithmetic(t, word));
     let text = skip.apply(Pass::NameVars, text, |t| {

@@ -1,4 +1,4 @@
-//! 64-bit variables the text reads as signed, declared signed.
+//! Machine-word variables the text reads as signed, declared signed.
 
 use super::*;
 
@@ -12,9 +12,6 @@ pub(super) struct Stated {
     /// Debug information or the user typed the locals.
     pub(super) locals: bool,
 }
-
-/// The cast a signed read of a 64-bit variable prints.
-const CAST: &str = "(int64_t)";
 
 /// Text that computes in the operand's type, where a signed type's
 /// overflow is undefined and an unsigned one's wraps.
@@ -45,8 +42,12 @@ const SIGNED_OPS: [&str; 10] = [
     " < ", " > ", " <= ", " >= ", " / ", " % ", " >> ", " /= ", " %= ", " >>= ",
 ];
 
-/// Declares a `uint64_t` parameter or local `int64_t` when the text casts
-/// it `(int64_t)` and reads it nowhere else in a way its sign changes.
+/// Declares signed a machine word the text reads only as signed.
+///
+/// A `uint64_t` parameter or local is `int64_t` when the text casts it
+/// `(int64_t)` and reads it nowhere else in a way its sign changes, and a
+/// `uint32_t` one `int32_t` the same way on a 32-bit target, where a
+/// function naming a 64-bit type keeps its words: there a copy widens.
 ///
 /// Unoptimized code compares a `long` loop counter signed, and the text
 /// prints each compare `(int64_t)i < (int64_t)n`. The bitwise operators,
@@ -69,18 +70,26 @@ const SIGNED_OPS: [&str; 10] = [
 /// * `text` - A decompiled function, types already applied.
 /// * `stated` - What something other than the code typed, which a read
 ///   does not overrule.
-pub(super) fn signed_words(text: &str, stated: Stated) -> String {
+/// * `word` - The machine word's type, `uint64_t` or `uint32_t`.
+pub(super) fn signed_words(text: &str, stated: Stated, word: &str) -> String {
+    let Some(int) = word.strip_prefix('u') else {
+        return text.to_owned();
+    };
+    if word != "uint64_t" && text.contains("int64_t") {
+        return text.to_owned();
+    }
+    let decl = format!("{word} ");
     let lines: Vec<&str> = text.lines().collect();
     let all = signature_params(text);
     let params: Vec<String> = all
         .iter()
-        .filter(|(_, ty)| !stated.params && ty == "uint64_t")
+        .filter(|(_, ty)| !stated.params && ty == word)
         .map(|(name, _)| name.clone())
         .collect();
     let locals: Vec<String> = lines
         .iter()
         .filter(|_| !stated.locals)
-        .filter_map(|l| declared(l, "uint64_t "))
+        .filter_map(|l| declared(l, &decl))
         .flatten()
         .collect();
     let floats: Vec<String> = lines
@@ -109,7 +118,7 @@ pub(super) fn signed_words(text: &str, stated: Stated) -> String {
     let signed: Vec<&String> = params
         .iter()
         .chain(&locals)
-        .filter(|n| reads_signed(&lines, n, &floats, float_result))
+        .filter(|n| reads_signed(&lines, n, (&decl, int), &floats, float_result))
         .collect();
     if signed.is_empty() {
         return text.to_owned();
@@ -120,14 +129,14 @@ pub(super) fn signed_words(text: &str, stated: Stated) -> String {
         if line.starts_with("// signature: ") {
             for name in &signed {
                 line = line
-                    .replace(&format!("uint64_t {name},"), &format!("int64_t {name},"))
-                    .replace(&format!("uint64_t {name})"), &format!("int64_t {name})"));
+                    .replace(&format!("{word} {name},"), &format!("{int} {name},"))
+                    .replace(&format!("{word} {name})"), &format!("{int} {name})"));
             }
-        } else if let Some(names) = declared(&line, "uint64_t ") {
+        } else if let Some(names) = declared(&line, &decl) {
             let (moved, kept): (Vec<String>, Vec<String>) =
                 names.into_iter().partition(|n| signed.contains(&n));
             let pad = pad_of(&line).to_owned();
-            line = [("uint64_t", kept), ("int64_t", moved)]
+            line = [(word, kept), (int, moved)]
                 .into_iter()
                 .filter(|(_, names)| !names.is_empty())
                 .map(|(ty, names)| format!("{pad}{ty} {};", names.join(", ")))
@@ -135,7 +144,7 @@ pub(super) fn signed_words(text: &str, stated: Stated) -> String {
                 .join("\n");
         } else if !line.starts_with("//") {
             for name in &signed {
-                line = uncast(&line, name);
+                line = uncast(&line, name, int);
             }
         }
         out.push_str(&line);
@@ -165,18 +174,27 @@ fn declared(line: &str, ty: &str) -> Option<Vec<String>> {
 /// * `name` - The variable.
 /// * `floats` - The float and 128-bit variables.
 /// * `float_result` - Whether the function returns a float or 128 bits.
-fn reads_signed(lines: &[&str], name: &str, floats: &[String], float_result: bool) -> bool {
-    let cast = format!("{CAST}{name}");
+fn reads_signed(
+    lines: &[&str],
+    name: &str,
+    (decl, int): (&str, &str),
+    floats: &[String],
+    float_result: bool,
+) -> bool {
+    let cast = format!("({int}){name}");
     let mut cast_seen = false;
-    for line in lines.iter().filter(|l| {
-        !l.starts_with("//") && declared(l, "uint64_t ").is_none() && mentions_ident(l, name)
-    }) {
+    for line in lines
+        .iter()
+        .filter(|l| !l.starts_with("//") && declared(l, decl).is_none() && mentions_ident(l, name))
+    {
         let t = line.trim();
         if t.contains(['"', '\'']) || t.contains("/*") {
             return false;
         }
         cast_seen |= cast_reads(t, &cast).next().is_some();
         let rest = without_casts(t, &cast);
+        let float_line =
+            floats.iter().any(|f| mentions_ident(t, f)) || wide_type(t) || float_literal(&rest);
         let mut read = false;
         for at in word_positions(&rest, name) {
             let head = rest.get(..at).unwrap_or("").trim_end();
@@ -199,6 +217,9 @@ fn reads_signed(lines: &[&str], name: &str, floats: &[String], float_result: boo
             if target && STEPS.iter().any(|op| tail.starts_with(op)) {
                 continue;
             }
+            if !float_line && equality_operand(head, tail) {
+                continue;
+            }
             read = true;
         }
         if !read {
@@ -217,6 +238,42 @@ fn reads_signed(lines: &[&str], name: &str, floats: &[String], float_result: boo
         }
     }
     cast_seen
+}
+
+/// Tells whether a read is a whole side of an equality, `a1 == 5` in a
+/// condition, a select or an argument, whose value is the same in either
+/// sign whatever the rest of its line computes.
+///
+/// An operator binding tighter than `==` in front of it (`x + a1 == 5`,
+/// `x <= a1 == 1`) makes it that operator's operand instead, and a decimal
+/// literal past `INT_MAX` on the other side (`a1 == 4294967295`) is of a
+/// wider type, which widens the word by its sign.
+///
+/// # Arguments
+///
+/// * `head` - The line before the read, trimmed at the end.
+/// * `tail` - The line after it.
+fn equality_operand(head: &str, tail: &str) -> bool {
+    let opens = head.is_empty()
+        || ["(", "&&", "||", "?", ":", ","]
+            .iter()
+            .any(|p| head.ends_with(p))
+        || (head.ends_with(" =") && !head.ends_with("==") && !head.ends_with("!="));
+    let Some(other) = tail
+        .strip_prefix(" == ")
+        .or_else(|| tail.strip_prefix(" != "))
+    else {
+        return false;
+    };
+    let digits = other.trim_start_matches('-');
+    let end = digits
+        .find(|c: char| !c.is_ascii_alphanumeric())
+        .unwrap_or(digits.len());
+    let literal = digits.get(..end).unwrap_or("");
+    let narrow = literal.starts_with("0x")
+        || !literal.starts_with(|c: char| c.is_ascii_digit())
+        || literal.parse::<u32>().is_ok_and(|v| v <= 0x7fff_ffff);
+    opens && narrow
 }
 
 /// Tells whether a line negates something: a `-` that no operand
@@ -312,8 +369,8 @@ fn without_casts(line: &str, cast: &str) -> String {
 ///
 /// * `line` - One line.
 /// * `name` - A variable now declared `int64_t`.
-fn uncast(line: &str, name: &str) -> String {
-    let cast = format!("{CAST}{name}");
+fn uncast(line: &str, name: &str, int: &str) -> String {
+    let cast = format!("({int}){name}");
     let mut out = String::with_capacity(line.len());
     let mut rest = line;
     while let Some(at) = rest.find(&cast) {
@@ -336,7 +393,44 @@ mod tests {
 
     /// Runs the pass on a body under `sig`, no type stated.
     fn run(sig: &str, body: &str) -> String {
-        signed_words(&format!("// signature: {sig}\n{body}"), Stated::default())
+        signed_words(
+            &format!("// signature: {sig}\n{body}"),
+            Stated::default(),
+            "uint64_t",
+        )
+    }
+
+    /// On a 32-bit target a word compared signed is `int32_t`.
+    ///
+    /// A whole side of an equality reads the same in either sign, whatever
+    /// its line adds; an operand of a sum compared, an equality with a
+    /// float, or a function naming a 64-bit type keeps the word.
+    ///
+    /// # Panics
+    ///
+    /// When a signed word keeps its cast, or a kept one loses it.
+    #[test]
+    fn a_32_bit_word_compared_signed_is_signed() {
+        let run32 = |body: &str| {
+            signed_words(
+                &format!("// signature: void f(uint32_t a1)\n{body}"),
+                Stated::default(),
+                "uint32_t",
+            )
+        };
+        let out = run32("if ((int32_t)a1 > 5) {\n  r0 = (a1 == 7 ? 3 : 4) + 1;\n}\n");
+        assert!(out.contains("void f(int32_t a1)"), "{out}");
+        assert!(out.contains("if (a1 > 5) {"), "{out}");
+        for body in [
+            "if ((int32_t)a1 > 5 && r0 + a1 == 9) {\n  return;\n}\n",
+            "uint64_t v;\n\nif ((int32_t)a1 > 5) {\n  v = a1;\n}\n",
+            "if ((int32_t)a1 > 5 || (a1 == 4294967295.0 ? 1 : 0) + 1) {\n  return;\n}\n",
+            "if ((int32_t)a1 > 5) {\n  r0 = (a1 == 4294967295 ? 1 : 0) + 1;\n}\n",
+        ] {
+            let out = run32(body);
+            assert!(out.contains("void f(uint32_t a1)"), "{out}");
+            assert!(out.contains("(int32_t)a1 > 5"), "{out}");
+        }
     }
 
     /// A loop counter and its bound compared signed are `int64_t`; their
@@ -374,7 +468,7 @@ mod tests {
             params: true,
             locals: false,
         };
-        let out = signed_words(text, params);
+        let out = signed_words(text, params, "uint64_t");
         assert!(out.contains("void f(uint64_t a1)"), "{out}");
         assert!(out.contains("int64_t local_8;"), "{out}");
         assert!(out.contains("(int64_t)a1 <= 0 || local_8 > 3"), "{out}");
@@ -382,7 +476,7 @@ mod tests {
             params: false,
             locals: true,
         };
-        let out = signed_words(text, locals);
+        let out = signed_words(text, locals, "uint64_t");
         assert!(out.contains("void f(int64_t a1)"), "{out}");
         assert!(out.contains("uint64_t local_8;"), "{out}");
     }
