@@ -58,6 +58,40 @@ fn bisect_runs() -> usize {
 /// whose text does not decompile or whose signature types no inputs.
 pub fn blame_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<String, String> {
     x86_only(p, "blame")?;
+    let (entry, count, budget) = function_count_steps(a, o, spec, "blame")?;
+    within_total(count.saturating_mul(bisect_runs()), budget).map_err(|_| {
+        format!(
+            "blame runs its {count} inputs up to {} times while it bisects, past the steps one request runs at {budget} steps each; lower steps= or count=",
+            bisect_runs()
+        )
+    })?;
+    let name = name_of(a, o, entry);
+    let found = bisect_iso(p, a, o, entry, count, VERIFY_SEED, budget)
+        .map_err(|why| format!("blame cannot check {name} ({entry:#x}): {why}"))?;
+    Ok(blame_report(&name, entry, count, budget, &found))
+}
+
+/// Reads a `<function>[,count=N][,steps=N]` spec: the function's entry,
+/// how many inputs (1 to [`INPUTS_MAX`], all of them by default) and the
+/// steps each run is given ([`BLAME_STEPS`] by default).
+///
+/// # Arguments
+///
+/// * `a` - The analysis.
+/// * `o` - User names.
+/// * `spec` - The spec.
+/// * `tool` - The answer's name, for a refusal.
+///
+/// # Errors
+///
+/// When the function names nothing, or an option does not read or is out
+/// of range.
+pub(super) fn function_count_steps(
+    a: &Analysis,
+    o: &Overlay,
+    spec: &str,
+    tool: &str,
+) -> Result<(u64, usize, usize), String> {
     let (target, rest) = spec_head(spec);
     let start = locate(a, o, target).ok_or_else(|| unresolved(target))?;
     let entry = a
@@ -79,22 +113,13 @@ pub fn blame_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
             }
             _ => {
                 return Err(format!(
-                    "blame takes <function>[,count=N][,steps=N]; cannot read {}",
+                    "{tool} takes <function>[,count=N][,steps=N]; cannot read {}",
                     one_line(option)
                 ));
             }
         }
     }
-    within_total(count.saturating_mul(bisect_runs()), budget).map_err(|_| {
-        format!(
-            "blame runs its {count} inputs up to {} times while it bisects, past the steps one request runs at {budget} steps each; lower steps= or count=",
-            bisect_runs()
-        )
-    })?;
-    let name = name_of(a, o, entry);
-    let found = bisect_iso(p, a, o, entry, count, VERIFY_SEED, budget)
-        .map_err(|why| format!("blame cannot check {name} ({entry:#x}): {why}"))?;
-    Ok(blame_report(&name, entry, count, budget, &found))
+    Ok((entry, count, budget))
 }
 
 /// Writes the answer of [`blame_tsv`] for one bisection.

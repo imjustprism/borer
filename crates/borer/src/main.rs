@@ -664,10 +664,9 @@ impl BorerServer {
         let Some(path) = uri.strip_prefix("borer://") else {
             return Err(resources::unknown_resource(uri));
         };
-        let (kind, arg) = match path.split_once('/') {
-            Some((k, a)) => (k, Some(percent_decode(a))),
-            None => (path, None),
-        };
+        let (kind, arg) = path
+            .split_once('/')
+            .map_or((path, None), |(k, a)| (k, Some(percent_decode(a))));
         let all = arg.clone().unwrap_or_default();
         let text = match (kind, arg) {
             ("info", None) => self.binary_info()?,
@@ -710,6 +709,7 @@ impl BorerServer {
             ("diverge", Some(spec)) => self.diverge_text(&spec)?,
             ("vectors", Some(spec)) => self.vectors_text(&spec)?,
             ("blame", Some(spec)) => self.blame_text(&spec)?,
+            ("certify", Some(spec)) => self.certify_text(&spec)?,
             ("diff", Some(other)) => self.diff_text(&other)?,
             ("difffn", Some(spec)) => self.diff_function_text(&spec)?,
             ("migrate", Some(spec)) => self.migrate_text(&spec)?,
@@ -1361,14 +1361,17 @@ mod tests {
         );
     }
 
-    /// `borer://blame` reaches the client: a text that agrees with the
-    /// binary blames no pass, and an arm64 function is refused with why.
+    /// `borer://blame` and `borer://certify` reach the client.
+    ///
+    /// A text that agrees with the binary blames no pass and grades
+    /// `agrees`; an arm64 function is refused by blame and graded
+    /// `unchecked`, its text not run, by certify.
     ///
     /// # Panics
     ///
     /// When the answer or the refusal is otherwise.
     #[test]
-    fn blame_answers_over_the_resource() {
+    fn blame_and_certify_answer_over_the_resource() {
         use borer_engine::program::{Arch, Program, Section};
         let server = |code: Vec<u8>, arch| {
             let len = u64::try_from(code.len()).expect("a short routine");
@@ -1390,6 +1393,13 @@ mod tests {
             out.starts_with("# blame for sub_1000 (0x1000)") && out.contains("\nagrees\t"),
             "{out}"
         );
+        let out = x64
+            .resource_text("borer://certify/0x1000,count=8")
+            .expect("certifies");
+        assert!(
+            out.contains("\ntext\t8 of 8 inputs agree") && out.contains("\ngrade\tagrees\t"),
+            "{out}"
+        );
         let arm = server(vec![0xc0, 0x03, 0x5f, 0xd6], Arch::Arm64); // ASM: ret
         let refused = arm
             .resource_text("borer://blame/0x1000")
@@ -1400,6 +1410,13 @@ mod tests {
                 .contains("blame runs x86 and x86-64 code only"),
             "{}",
             refused.message
+        );
+        let out = arm
+            .resource_text("borer://certify/0x1000")
+            .expect("certifies the lift alone");
+        assert!(
+            out.contains("\ntext\tnot run: ") && out.contains("\ngrade\tunchecked\t"),
+            "{out}"
         );
     }
 

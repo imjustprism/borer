@@ -13,12 +13,14 @@ use crate::emulate::calls::ApiCall;
 use crate::isa::Isa;
 
 mod blame;
+mod certify;
 mod diff;
 mod repair;
 mod spec;
 mod vectors;
 
 pub use blame::blame_tsv;
+pub use certify::certify_tsv;
 pub use diff::run_diff_tsv;
 pub use repair::{
     Budget, Evidence, Repair, Tried, answered, answered_flagged, repair_iso, repaired,
@@ -519,8 +521,8 @@ fn run_a64(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
     /// Both returned the same value and left the same bytes in every
-    /// buffer, calling the same imports in the same order; or both stopped
-    /// alike.
+    /// buffer, calling the same imports in the same order; or both faulted
+    /// on the same address, a value the text computed.
     Agrees,
     /// They differ: the text's line and what differs there.
     Differs(usize, String),
@@ -583,7 +585,10 @@ fn judge(m: &Machine, t: &TextRun<'_>, at: &[Option<u64>], ret: Option<(Kind, u8
     if m.value.is_none() {
         return match (&t.end, &m.stop) {
             (End::Fault(x), Stop::Fault(y)) if x == y => Verdict::Agrees,
-            (End::Budget, Stop::Budget) => Verdict::Agrees,
+            (End::Budget, Stop::Budget) => Verdict::Unchecked(
+                None,
+                "both ran out of steps before returning, so no result was compared".to_owned(),
+            ),
             _ => Verdict::Unchecked(None, format!("the binary did not return: {}", m.stop)),
         };
     }

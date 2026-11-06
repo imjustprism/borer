@@ -340,6 +340,22 @@ impl BorerServer {
         self.refusing(Feature::Emulate, |p, a, o| render::blame_tsv(p, a, o, spec))
     }
 
+    /// Says how far a function's decompilation was checked against the
+    /// binary, the CLI's `certify`.
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - `<function>[,count=N][,steps=N]`.
+    ///
+    /// # Errors
+    ///
+    /// When no binary is loaded, or the spec or the function is refused.
+    pub(crate) fn certify_text(&self, spec: &str) -> Result<String, ErrorData> {
+        self.refusing(Feature::Emulate, |p, a, o| {
+            render::certify_tsv(p, a, o, spec)
+        })
+    }
+
     /// Recovers the strings the program generates at run time, the CLI's
     /// `hidden`.
     ///

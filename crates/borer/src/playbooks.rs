@@ -162,8 +162,8 @@ const WORKFLOW: &str = "borer: agent-native binary analysis (x86/x64 and arm64 P
 /// in [`WORKFLOW`].
 const RESOURCES_LEAD: &str = "Resources are read by URI through resources/read or {query}; a \
      template read without its argument (borer://emulate) gives its grammar and an \
-     example, and borer://help lists every one. A listing pages with !offset=<n> and \
-     !limit=<n> on its URI, and borer://session says what this session loaded, \
+     example, and borer://help lists all. Lists page with !offset=<n> and \
+     !limit=<n> on the URI, and borer://session says what this session loaded, \
      annotated and was answered. By intent:";
 
 /// The instructions on the live tools, given only where they are listed.
@@ -190,6 +190,7 @@ const INTENTS: &[(&str, &[&str])] = &[
             "diverge",
             "vectors",
             "blame",
+            "certify",
             "solve",
             "partial",
             "scenario",

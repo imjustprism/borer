@@ -304,6 +304,11 @@ pub(crate) const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
         "borer://blame/{entry}",
     ),
     (
+        "borer://certify/{spec}",
+        "How far a function's decompilation was checked against the binary: <function>[,count=N][,steps=N]. `lift` is the decompile tool's checked line (blocks proved over every state, tested on a few, unknown, and any the machine contradicts); `text` runs the final pseudo-C as ISO C beside the binary on inputs drawn from its signature (64 by default, at most 64; 20000 steps each) and counts the inputs that agree, the ones left unchecked (with the commonest reasons) and the ones that differ (the first shown). `grade` is differs when either check is contradicted, agrees when at least one input was checked and nothing was contradicted, else unchecked. The text check runs x86 and x64 only, and says why when it does not run",
+        "borer://certify/{entry}",
+    ),
+    (
         "borer://diff/{path}",
         "Compare the loaded binary against another version at {path} and report which functions changed, were added or removed",
         "borer://diff/{path}",

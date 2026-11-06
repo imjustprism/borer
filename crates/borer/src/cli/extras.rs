@@ -36,6 +36,8 @@ pub(super) enum Extra {
     Fingerprint,
     /// `blame <function>[,count=N][,steps=N]`: the first text cleanup pass that breaks a function.
     Blame,
+    /// `certify <function>[,count=N][,steps=N]`: how far a function's decompilation was checked.
+    Certify,
 }
 
 impl Extra {
@@ -59,6 +61,7 @@ impl Extra {
             "encoded" => Self::Encoded,
             "fingerprint" => Self::Fingerprint,
             "blame" => Self::Blame,
+            "certify" => Self::Certify,
             _ => return None,
         })
     }
@@ -73,7 +76,8 @@ impl Extra {
             | Self::Addr
             | Self::Encoded
             | Self::Fingerprint
-            | Self::Blame => 1,
+            | Self::Blame
+            | Self::Certify => 1,
             Self::Names => 2,
         }
     }
@@ -213,6 +217,15 @@ pub(super) fn run(cmd: Extra, args: &[String], s: &Session) -> anyhow::Result<()
             print!(
                 "{}",
                 render::blame_tsv(&s.program, &a, &s.overlay, spec).map_err(anyhow::Error::msg)?
+            );
+        }
+        Extra::Certify => {
+            let a = s.analysis(Feature::Emulate)?;
+            let spec = arg(args, 2, "certify needs <function>[,count=N][,steps=N]")?;
+            print!(
+                "{}",
+                render::certify_tsv(&s.program, &a, &s.overlay, spec)
+                    .map_err(anyhow::Error::msg)?
             );
         }
         Extra::Encoded => {
