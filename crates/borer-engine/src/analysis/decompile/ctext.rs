@@ -554,7 +554,9 @@ pub(super) fn split_top<'t>(toks: &'t [Tok], p: &str) -> Vec<&'t [Tok]> {
 ///
 /// Qualifiers are skipped, the integer keywords combine as C combines them
 /// (`unsigned long long`), a single name is a known scalar or a type this
-/// does not know, and each `*` or `&` adds a pointer.
+/// does not know, and each `*` or `&` adds a pointer. A function pointer
+/// type (`uint64_t (*)(uint64_t, uint64_t)`) is a pointer to code, read as
+/// `void *`: a call through it is answered by the code it points at.
 ///
 /// # Arguments
 ///
@@ -604,6 +606,18 @@ fn read_type(toks: &[Tok], at: &mut usize, word: u8) -> Option<CTy> {
         while matches!(toks.get(*at), Some(Tok::Name(n)) if n == "const") {
             *at += 1;
         }
+    }
+    if matches!(
+        toks.get(*at..*at + 4),
+        Some([
+            Tok::Punct("("),
+            Tok::Punct("*"),
+            Tok::Punct(")"),
+            Tok::Punct("(")
+        ])
+    ) {
+        *at = closing(toks, *at + 3)? + 1;
+        return Some(CTy::of(Base::Void).to());
     }
     Some(ty)
 }

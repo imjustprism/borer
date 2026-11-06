@@ -1231,3 +1231,58 @@ fn certify_pages_through_the_functions_a_filter_names() {
         "{past}"
     );
 }
+
+/// A run reads calls through function pointers in the text.
+///
+/// A parameter declared `uint64_t (*a1)(uint64_t)` and called, and a
+/// pointer loaded from memory and called through a cast
+/// `((uint64_t (*)(uint64_t))...)`: the machine runs the code each points
+/// at as the binary does.
+///
+/// # Panics
+///
+/// When a run does not read the text to an agreement.
+#[test]
+fn a_call_through_a_function_pointer_is_read() {
+    use borer_engine::analysis::render::run_tsv;
+    use borer_engine::program::{Symbol, SymbolKind};
+    let agrees = |code: &[u8], input: &str, form: &str| {
+        let mut code = code.to_vec();
+        code.resize(0x20, 0xcc);
+        code.extend_from_slice(&[0x8d, 0x41, 0x01, 0xc3]); // ASM: lea eax,[rcx+1]; ret
+        let mut p = program(&code, &[]);
+        p.symbols = vec![Symbol {
+            name: "op_one".to_owned(),
+            addr: TEXT + 0x20,
+            kind: SymbolKind::Local,
+        }];
+        let a = Analysis::compute(&p);
+        let o = Overlay::default();
+        let text = decompile_named(&p, &a, &o, TEXT).unwrap_or_default();
+        assert!(text.contains(form), "{text}");
+        let out = run_tsv(&p, &a, &o, &format!("0x1000/{input}")).expect("runs");
+        let verdict = out
+            .lines()
+            .find(|l| !l.starts_with('#'))
+            .and_then(|l| l.split('\t').next_back());
+        assert_eq!(verdict, Some("agrees"), "{text}\n{out}");
+    };
+    agrees(
+        &[
+            0x48, 0x89, 0xc8, // ASM: mov rax,rcx
+            0x48, 0x89, 0xd1, // ASM: mov rcx,rdx
+            0xff, 0xe0, // ASM: jmp rax
+        ],
+        "0x1020,5",
+        "(*a1)(",
+    );
+    agrees(
+        &[
+            0x48, 0x8b, 0x41, 0x08, // ASM: mov rax,[rcx+8]
+            0x48, 0x89, 0xd1, // ASM: mov rcx,rdx
+            0xff, 0xe0, // ASM: jmp rax
+        ],
+        "hex:00000000000000002010000000000000,5",
+        "(*)(",
+    );
+}

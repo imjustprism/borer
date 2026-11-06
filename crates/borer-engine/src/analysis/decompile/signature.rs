@@ -230,11 +230,20 @@ impl Kind {
 
 /// Reads one parameter of a signature: its type and its name.
 ///
+/// A function pointer (`uint64_t (*a1)(uint64_t)`) is named inside its
+/// parentheses and read as `void *`, a pointer to the code it calls.
+///
 /// # Arguments
 ///
 /// * `toks` - The parameter's tokens.
 /// * `word` - The machine word in bits.
 fn parameter(toks: &[Tok], word: u8) -> Option<(String, CTy)> {
+    if let Some(k) = toks.iter().position(|t| *t == Tok::Punct("("))
+        && let (Some(Tok::Punct("*")), Some(Tok::Name(n)), Some(Tok::Punct(")"))) =
+            (toks.get(k + 1), toks.get(k + 2), toks.get(k + 3))
+    {
+        return Some((n.clone(), CTy::of(Base::Void).to()));
+    }
     let (name_at, name) = toks.iter().enumerate().rev().find_map(|(k, t)| match t {
         Tok::Name(n) => Some((k, n.clone())),
         _ => None,
