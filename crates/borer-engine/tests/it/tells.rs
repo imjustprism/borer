@@ -1424,9 +1424,13 @@ fn an_indirect_context_call_and_a_dr_read_is_a_hardware_breakpoint() {
     assert!(!bare.contains("hardware breakpoint"), "{bare}");
 }
 
-/// A loop over code bytes that exits when one is `0xCC` is a breakpoint
-/// scan. The compare alone is not, and a compare followed by a store into
-/// executable memory is a patch.
+/// A loop over code bytes that exits when one is `0xCC` is a breakpoint scan.
+///
+/// The compare alone is not, and a compare followed by a store into
+/// executable memory is a patch, the address in a base register a `mov`
+/// set just before too, a negative offset from a 32-bit one wrapped; a
+/// store to the stack, through `fs`, or through a register a call or
+/// another path may have set is none.
 #[test]
 fn a_breakpoint_scan_needs_a_loop_and_an_exit() {
     let scan = report_calls(
@@ -1457,6 +1461,61 @@ fn a_breakpoint_scan_needs_a_loop_and_an_exit() {
         0xc3, // ASM: ret
     ]);
     assert!(patch.contains("breakpoint patch"), "{patch}");
+    let through = report(&[
+        0xb8, 0x00, 0x10, 0x40, 0x00, // ASM: mov eax, 0x401000
+        0x3c, 0xcc, // ASM: cmp al, 0xcc
+        0x66, 0xc7, 0x00, 0x9a, 0xff, // ASM: mov word [rax], 0xff9a
+        0xc3, // ASM: ret
+    ]);
+    assert!(through.contains("breakpoint patch"), "{through}");
+    let stack = report(&[
+        0x3c, 0xcc, // ASM: cmp al, 0xcc
+        0xc6, 0x04, 0x24, 0x90, // ASM: mov byte [rsp], 0x90
+        0xc3, // ASM: ret
+    ]);
+    assert!(!stack.contains("breakpoint patch"), "{stack}");
+    let called = report(&[
+        0xb8, 0x00, 0x10, 0x40, 0x00, // ASM: mov eax, 0x401000
+        0xe8, 0x08, 0x00, 0x00, 0x00, // ASM: call 0x401012
+        0x3c, 0xcc, // ASM: cmp al, 0xcc
+        0xc6, 0x00, 0x90, // ASM: mov byte [rax], 0x90
+        0xc3, // ASM: ret
+        0xcc, 0xcc, // ASM: int3
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xc3, // ASM: ret
+    ]);
+    assert!(!called.contains("breakpoint patch"), "{called}");
+    let joined = report(&[
+        0x3c, 0xcc, // ASM: cmp al, 0xcc
+        0x84, 0xc9, // ASM: test cl, cl
+        0x74, 0x07, // ASM: je 0x40100d
+        0xb8, 0x00, 0x10, 0x40, 0x00, // ASM: mov eax, 0x401000
+        0xeb, 0x04, // ASM: jmp 0x401011
+        0xc6, 0x00, 0x90, // ASM: mov byte [rax], 0x90
+        0xc3, // ASM: ret
+        0xc3, // ASM: ret
+    ]);
+    assert!(!joined.contains("breakpoint patch"), "{joined}");
+    let segment = report(&[
+        0xb8, 0x00, 0x10, 0x40, 0x00, // ASM: mov eax, 0x401000
+        0x3c, 0xcc, // ASM: cmp al, 0xcc
+        0x64, 0xc6, 0x00, 0x90, // ASM: mov byte fs:[rax], 0x90
+        0xc3, // ASM: ret
+    ]);
+    assert!(!segment.contains("breakpoint patch"), "{segment}");
+    let p = image(
+        Arch::X86,
+        &[
+            0xb8, 0x01, 0x10, 0x40, 0x00, // ASM: mov eax, 0x401001
+            0x3c, 0xcc, // ASM: cmp al, 0xcc
+            0xc6, 0x40, 0xff, 0x90, // ASM: mov byte [eax-1], 0x90
+            0xc3, // ASM: ret
+        ],
+        &[],
+    );
+    let a = Analysis::compute(&p);
+    let wrapped = borer_engine::analysis::render::anti_analysis_tsv(&p, &a, &Overlay::default());
+    assert!(wrapped.contains("breakpoint patch"), "{wrapped}");
     let counter = report_calls(
         &[
             0xff, 0xc0, // ASM: inc eax

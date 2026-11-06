@@ -1197,16 +1197,75 @@ fn exits_at(instrs: &[Instruction], at: u64, exits: &[u64]) -> bool {
 }
 
 /// Whether a compare of `0xCC` is followed by a store into executable memory.
+///
+/// The store's target is its absolute or `rip`-relative address, or the
+/// code address a `mov` put in its base register just before
+/// ([`store_target`]): `mov eax, 0x40119d; mov word [eax], 0xff9a`.
 fn writes_executable(p: &Program, instrs: &[Instruction]) -> bool {
     let Some(at) = instrs.iter().position(|i| compares_byte(i, 0xcc)) else {
         return false;
     };
-    instrs.iter().skip(at + 1).any(|i| {
+    instrs.iter().enumerate().skip(at + 1).any(|(k, i)| {
         i.mnemonic() == Mnemonic::Mov
             && i.op0_kind() == OpKind::Memory
-            && p.section_at(i.memory_displacement64())
+            && store_target(i, instrs.get(..k).unwrap_or_default())
+                .and_then(|t| p.section_at(t))
                 .is_some_and(|s| s.executable)
     })
+}
+
+/// The address a store writes, when the instructions show it.
+///
+/// An absolute or `rip`-relative operand names it (iced resolves the
+/// latter); a base register names it when one of the few instructions
+/// before moved an immediate into it on the straight line into the store,
+/// each falling into the next with no call or branch between, the sum
+/// wrapped to a 32-bit register's width. An indexed store, one through `fs`
+/// or `gs` (an offset from a base the code does not show), or a base set
+/// any other way names nothing.
+///
+/// # Arguments
+///
+/// * `i` - The store.
+/// * `before` - The instructions before it, in order.
+fn store_target(i: &Instruction, before: &[Instruction]) -> Option<u64> {
+    /// Most instructions looked back for the base register's write.
+    const LOOK_BACK: usize = 4;
+    if i.memory_index() != Register::None
+        || matches!(i.segment_prefix(), Register::FS | Register::GS)
+    {
+        return None;
+    }
+    let disp = i.memory_displacement64();
+    let base = i.memory_base();
+    if matches!(base, Register::None | Register::RIP | Register::EIP) {
+        return Some(disp);
+    }
+    let mut at = i.ip();
+    let mut set = None;
+    for n in before.iter().rev().take(LOOK_BACK) {
+        if n.next_ip() != at || n.flow_control() != FlowControl::Next {
+            break;
+        }
+        if writes_register(n, base.full_register()) {
+            set = Some(n);
+            break;
+        }
+        at = n.ip();
+    }
+    let set = set?;
+    let immediate = set.mnemonic() == Mnemonic::Mov
+        && set.op0_kind() == OpKind::Register
+        && matches!(
+            set.op1_kind(),
+            OpKind::Immediate32 | OpKind::Immediate64 | OpKind::Immediate32to64
+        );
+    let width = if base.size() == 4 {
+        u64::from(u32::MAX)
+    } else {
+        u64::MAX
+    };
+    immediate.then(|| set.immediate(1).wrapping_add(disp) & width)
 }
 
 /// The instructions of `f`, in address order.
