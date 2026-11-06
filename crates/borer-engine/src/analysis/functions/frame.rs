@@ -172,31 +172,49 @@ impl FrameFacts {
     /// move nothing. The pops and cleanups of an epilogue, the run of them
     /// right before a `ret` or a tail jump, tear the frame down on that
     /// path alone and move nothing for the code after them in the image
-    /// ([`FrameFacts::epilogues`]).
+    /// ([`FrameFacts::epilogues`]). The pushes, pops and cleanups are sorted
+    /// once, so each read is placed by a search, not a pass over them all:
+    /// an obfuscator's body holds a hundred thousand of each.
     pub(super) fn stack_args(&self, shadow: i64, word: i64) -> u32 {
         if self.dynamic_frame && self.sub_rsp.is_none() {
             return 0;
         }
         let epilogue = self.epilogues();
+        let mut pushes = self.pushes.clone();
+        pushes.sort_unstable();
+        let mut pops: Vec<u64> = self
+            .pops
+            .iter()
+            .copied()
+            .filter(|a| !epilogue.contains(a))
+            .collect();
+        pops.sort_unstable();
+        let mut adds: Vec<(u64, i64)> = self
+            .adds
+            .iter()
+            .copied()
+            .filter(|(a, _)| !epilogue.contains(a))
+            .collect();
+        adds.sort_unstable_by_key(|&(a, _)| a);
+        let added: Vec<i64> = std::iter::once(0)
+            .chain(adds.iter().scan(0i64, |sum, &(_, k)| {
+                *sum = sum.saturating_add(k);
+                Some(*sum)
+            }))
+            .collect();
         let below_at = |addr: u64| -> i64 {
-            let pushes = count_i64(self.pushes.iter().filter(|a| **a < addr).count());
-            let pops = count_i64(
-                self.pops
-                    .iter()
-                    .filter(|a| **a < addr && !epilogue.contains(a))
-                    .count(),
-            );
+            let pushed = count_i64(pushes.partition_point(|&a| a < addr));
+            let popped = count_i64(pops.partition_point(|&a| a < addr));
             let sub = self
                 .sub_rsp
                 .filter(|(a, _)| *a < addr)
                 .map_or(0, |(_, imm)| imm.cast_signed());
-            let adds: i64 = self
-                .adds
-                .iter()
-                .filter(|(a, _)| *a < addr && !epilogue.contains(a))
-                .map(|(_, k)| *k)
-                .sum();
-            sub + (pushes - pops) * word - adds
+            let adds = added
+                .get(adds.partition_point(|&(a, _)| a < addr))
+                .copied()
+                .unwrap_or(0);
+            sub.saturating_add(pushed.saturating_sub(popped).saturating_mul(word))
+                .saturating_sub(adds)
         };
         let frame_pointer = if self.helper_frame {
             Some(word)
