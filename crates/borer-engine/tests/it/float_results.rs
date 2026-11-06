@@ -501,3 +501,57 @@ fn a_run_checks_floating_parameters_and_results() {
     let why = check_generated(&stacked, &a, &Overlay::default(), 0x401_000, 4, 1, 1000);
     assert!(why.is_err_and(|w| w.contains("on the stack")), "{text}");
 }
+
+/// A float result handed straight to a call that takes a floating first
+/// argument is read: `sink(f())` keeps `f`'s `double`.
+///
+/// The caller calls `f` (`addsd xmm0,xmm1; ret`) and then `sink`, whose
+/// entry reads xmm0 before writing it (`movq rax,xmm0; ret`), so the
+/// value in xmm0 at that call is `f`'s result.
+#[test]
+fn a_float_result_passed_to_a_float_argument_is_read() {
+    let mut code = vec![
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp,0x28
+        0xe8, 0x17, 0x00, 0x00, 0x00, // ASM: call 0x140001020
+        0xe8, 0x32, 0x00, 0x00, 0x00, // ASM: call 0x140001040
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp,0x28
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x20, 0xcc);
+    code.extend_from_slice(&[0xf2, 0x0f, 0x58, 0xc1, 0xc3]); // ASM: addsd xmm0,xmm1; ret
+    code.resize(0x40, 0xcc);
+    code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x7e, 0xc0, 0xc3]); // ASM: movq rax,xmm0; ret
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    assert_eq!(
+        a.function(0x1_4000_1020).and_then(|f| f.ret_float),
+        Some(64)
+    );
+    let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1020).unwrap_or_default();
+    assert!(text.contains("// signature: double "), "{text}");
+}
+
+/// A widthless read by a call that hands xmm0 back does not hide a later
+/// read that names the width: `f(); helper(); movss [rbx],xmm0` keeps
+/// `f`'s `float`.
+#[test]
+fn a_read_past_a_preserving_call_names_the_width() {
+    let mut code = vec![
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp,0x28
+        0xe8, 0x17, 0x00, 0x00, 0x00, // ASM: call 0x140001020
+        0xe8, 0x32, 0x00, 0x00, 0x00, // ASM: call 0x140001040
+        0xf3, 0x0f, 0x11, 0x03, // ASM: movss [rbx],xmm0
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp,0x28
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x20, 0xcc);
+    code.extend_from_slice(&[0x66, 0x0f, 0x6e, 0xc1, 0xc3]); // ASM: movd xmm0,ecx; ret
+    code.resize(0x40, 0xcc);
+    code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x7e, 0xc0, 0xc3]); // ASM: movq rax,xmm0; ret
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    assert_eq!(
+        a.function(0x1_4000_1020).and_then(|f| f.ret_float),
+        Some(32)
+    );
+}

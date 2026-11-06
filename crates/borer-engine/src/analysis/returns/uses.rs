@@ -137,9 +137,13 @@ impl Decoded {
 /// back untouched ([`preserves`]), [`SCAN_MAX`] instructions down each
 /// path. A read of xmm0 on any path takes the result: xmm0 is volatile
 /// across a call, so code reads it after one only for the result
-/// (`test ebx, ebx; je; xorps xmm0, xmm5` negates it on one path). With no
-/// read, a `ret` on some path hands it on; a write, another call or the
-/// end of the scan drops it.
+/// (`test ebx, ebx; je; xorps xmm0, xmm5` negates it on one path). A call
+/// to a function whose entry reads xmm0 before writing it takes the result
+/// as its floating first argument (`sink(f())`), a read too; past one
+/// that hands xmm0 back and names no width, the scan goes on for a read
+/// that does. With no read,
+/// a `ret` on some path hands it on; a write, another call or the end of
+/// the scan drops it.
 ///
 /// # Arguments
 ///
@@ -191,6 +195,17 @@ pub(super) fn float_use(
                 break;
             }
             let target = instr.near_branch_target();
+            if instr.flow_control() == FlowControl::Call
+                && let Some(bits) = entry_float_read(sites, factory, code, target)
+            {
+                if bits.is_some() {
+                    return FloatUse::Read(bits);
+                }
+                read.get_or_insert(None);
+                if !preserves(target) {
+                    break;
+                }
+            }
             va = match instr.flow_control() {
                 FlowControl::Next => instr.next_ip(),
                 FlowControl::UnconditionalBranch if within(target) => target,
@@ -218,6 +233,43 @@ pub(super) fn float_use(
         (None, true) => FloatUse::Tail(caller.entry),
         (None, false) => FloatUse::Dropped,
     }
+}
+
+/// The width a function's entry reads xmm0 at, when it reads it before
+/// anything writes it: the function takes a floating first argument.
+///
+/// The entry is read straight down, [`SCAN_MAX`] instructions at most, up
+/// to the first branch, call or return.
+///
+/// # Arguments
+///
+/// * `sites` - The image.
+/// * `factory` - Reused instruction-info factory.
+/// * `code` - What the site's other scans decoded.
+/// * `entry` - The called address.
+///
+/// # Returns
+///
+/// `Some` with the width the read names, `None` inside when it names none;
+/// `None` when the entry writes xmm0 first or reads it nowhere in reach.
+fn entry_float_read(
+    sites: &Sites<'_>,
+    factory: &mut InstructionInfoFactory,
+    code: &mut Decoded,
+    entry: u64,
+) -> Option<Option<u8>> {
+    let mut va = entry;
+    for _ in 0..SCAN_MAX {
+        let instr = code.at(sites, va)?;
+        if reads_vector(factory, &instr, Register::ZMM0) {
+            return Some(xmm0_read_bits(&instr));
+        }
+        if writes_xmm0(factory, &instr) || instr.flow_control() != FlowControl::Next {
+            return None;
+        }
+        va = instr.next_ip();
+    }
+    None
 }
 
 /// Tells whether blocks are in address order, none empty and none reaching
