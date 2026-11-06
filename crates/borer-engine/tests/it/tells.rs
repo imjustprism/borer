@@ -1424,6 +1424,26 @@ fn an_indirect_context_call_and_a_dr_read_is_a_hardware_breakpoint() {
     assert!(!bare.contains("hardware breakpoint"), "{bare}");
 }
 
+/// A loop that tests the bits of each code byte against `0xCC`, rather
+/// than comparing the byte, is no breakpoint scan.
+#[test]
+fn a_bit_test_of_code_bytes_is_no_breakpoint_scan() {
+    let masked = report_calls(
+        &[
+            0x48, 0x8d, 0x35, 0xf9, 0xff, 0xff, 0xff, // ASM: lea rsi, [rip-7]
+            0xf6, 0x06, 0xcc, // ASM: test byte [rsi], 0xcc
+            0x74, 0x05, // ASM: je 0x401011
+            0x48, 0xff, 0xc6, // ASM: inc rsi
+            0xeb, 0xf6, // ASM: jmp 0x401007
+            0xe8, 0xea, 0x0f, 0x00, 0x00, // ASM: call 0x402000
+            0xc3, // ASM: ret
+        ],
+        &[],
+        &[("ExitProcess", 0x402000)],
+    );
+    assert!(!masked.contains("breakpoint"), "{masked}");
+}
+
 /// A loop over code bytes that exits when one is `0xCC` is a breakpoint scan.
 ///
 /// The compare alone is not, and a compare followed by a store into
