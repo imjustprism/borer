@@ -151,7 +151,7 @@ pub fn solve_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
         emu.install_imports();
         emu.set_permissive(true);
         let sp = emu.register("rsp").unwrap_or(0);
-        pass.place_arg(&mut emu, sp, slot, c.value);
+        pass.place_arg(&mut emu, sp, slot, c.value, 0);
         let run = emu.run(entry);
         let answer = match run.stop {
             Stop::Returned => {
@@ -176,7 +176,7 @@ pub fn solve_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
         if let Some(hint) = partial::partial_hint(p, a, o, entry) {
             let _ = writeln!(out, "# next: {hint}");
         }
-        let register = pass.regs.get(slot).map(|r| r.full_register());
+        let register = pass.conv.args.get(slot).map(|r| r.full_register());
         let dereferenced = register.is_some_and(|r| {
             instrs.iter().any(|i| {
                 !matches!(i.mnemonic(), Mnemonic::Lea | Mnemonic::Nop)

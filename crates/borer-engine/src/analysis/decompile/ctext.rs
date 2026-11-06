@@ -1152,7 +1152,7 @@ pub(super) fn expression(
     clippy::cast_possible_truncation,
     reason = "rounding a double to a single is the conversion a float type makes"
 )]
-pub(super) fn float_bits(v: f64, bits: u8) -> u64 {
+pub(crate) fn float_bits(v: f64, bits: u8) -> u64 {
     if bits == 32 {
         u64::from((v as f32).to_bits())
     } else {

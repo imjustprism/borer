@@ -333,7 +333,7 @@ pub(super) fn convert_float(v: u64, from: Option<u8>, to: Ty) -> u64 {
 /// * `b` - The other.
 /// * `bits` - The width compared.
 /// * `float` - Whether the value is a float.
-pub(super) fn agree(a: u64, b: u64, bits: u8, float: bool) -> bool {
+pub(crate) fn agree(a: u64, b: u64, bits: u8, float: bool) -> bool {
     let nan = |v: u64| match bits {
         32 => f32::from_bits(lo32(v)).is_nan(),
         64 => f64::from_bits(v).is_nan(),

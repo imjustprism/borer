@@ -55,6 +55,7 @@ use crate::num::from_usize;
 use crate::program::{Program, SymbolKind};
 
 mod compile;
+mod result;
 
 use compile::Compiler;
 
@@ -206,30 +207,6 @@ fn named_register(name: &str) -> Option<Register> {
         "r15" => Register::R15,
         _ => return None,
     })
-}
-
-/// Returns the width of the byte or word a function hands back, as the
-/// lifter reads a call to it.
-///
-/// Its declared signature's, else the width its callers and its exits
-/// agree on ([`Function::ret_width`](crate::analysis::Function::ret_width)).
-///
-/// # Arguments
-///
-/// * `analysis` - The functions.
-/// * `target` - The callee's entry.
-///
-/// # Returns
-///
-/// 8 or 16, or `None` when the result fills the register or nothing is
-/// known of it.
-fn returned_bits(analysis: &Analysis, target: u64) -> Option<u8> {
-    let f = analysis.function(target).filter(|f| f.entry == target)?;
-    let bits = match &f.signature {
-        Some(sig) => super::lift::declared_bits(&sig.ret),
-        None => f.ret_width?,
-    };
-    (bits <= 16).then_some(bits)
 }
 
 /// The emulator's name of the full general register a register lives in.
@@ -975,8 +952,8 @@ impl<'p> Script<'p> {
         let mut frame_low = entry_sp;
         let wbytes = u64::from(word / 8);
         for (i, (name, ty)) in sig.params.iter().enumerate() {
-            let slot = if i < pass.regs.len() {
-                cells.push((name.clone(), pass.regs.get(i).copied(), *ty));
+            let slot = if let Some(r) = pass.conv.arg_reg(i, sig.floats()) {
+                cells.push((name.clone(), Some(r), *ty));
                 Slot::Var(cells.len() - 1)
             } else {
                 Slot::Mem(entry_sp.wrapping_add(pass.stack_offset(i)))
@@ -1165,7 +1142,8 @@ impl<'p> Script<'p> {
                 emu.poke(at.wrapping_add(from_usize(k)), *b);
             }
         }
-        self.passing.place(&mut emu, self.entry_sp, args);
+        let (regs, floats) = (self.passing.conv.args, self.sig.floats());
+        self.passing.place(&mut emu, self.entry_sp, args, floats);
         for at in &self.wide {
             for k in 0..WIDE_BYTES {
                 emu.poke(at.wrapping_add(k), 0);
@@ -1176,9 +1154,7 @@ impl<'p> Script<'p> {
             if r == Register::RSP {
                 return self.entry_sp;
             }
-            self.passing
-                .regs
-                .iter()
+            regs.iter()
                 .position(|p| p.full_register() == r)
                 .and_then(|i| args.get(i))
                 .copied()
@@ -2481,7 +2457,7 @@ impl Running<'_, '_> {
             )));
         }
         let word = CTy::int(self.word(), false);
-        if i < self.s.passing.regs.len() {
+        if i < self.s.passing.conv.args.len() {
             return Ok(self.int(self.args.get(i).copied().unwrap_or(0), word));
         }
         let at = self.s.entry_sp.wrapping_add(self.s.passing.stack_offset(i));
@@ -2624,7 +2600,7 @@ impl Running<'_, '_> {
                         .and_then(|d| d.parse::<usize>().ok())
                         .and_then(|k| k.checked_sub(1))
                     {
-                        Some(i) if i >= self.s.passing.regs.len() => Ok(Place::Mem(
+                        Some(i) if i >= self.s.passing.conv.args.len() => Ok(Place::Mem(
                             self.s.entry_sp.wrapping_add(self.s.passing.stack_offset(i)),
                             CTy::int(self.word(), false),
                         )),
@@ -3134,10 +3110,8 @@ impl Running<'_, '_> {
             );
         }
         let rax = self.run_callee(target, &values, &name)?;
-        Ok(match returned_bits(self.s.analysis, target) {
-            Some(bits) => self.int(rax, CTy::int(bits, false)),
-            None => self.int(rax, CTy::int(self.word(), false)),
-        })
+        let [xmm0, ..] = self.emu.xmm();
+        result::returned(self.s.analysis, target, self.word(), rax, xmm0)
     }
 
     /// Evaluates a call's arguments to the machine's words.
@@ -3213,7 +3187,7 @@ impl Running<'_, '_> {
             Mode::Machine => usize::MAX,
             Mode::Iso => 0,
         };
-        for (i, reg) in s.passing.regs.iter().enumerate().take(leaked) {
+        for (i, reg) in s.passing.conv.args.iter().enumerate().take(leaked) {
             if let (Some(v), Some(name)) = (self.args.get(i), full_register_name(*reg)) {
                 self.emu.set_register(name, *v);
             }
@@ -3221,7 +3195,7 @@ impl Running<'_, '_> {
         for ((_, reg, _), v) in s.cells.iter().zip(&self.vals).take(leaked) {
             if let Some(r) = reg
                 && *r != Register::RSP
-                && !callee.regs.iter().any(|a| a.full_register() == *r)
+                && !callee.conv.args.iter().any(|a| a.full_register() == *r)
                 && let Some(name) = full_register_name(*r)
             {
                 self.emu.set_register(name, *v);
@@ -3238,7 +3212,7 @@ impl Running<'_, '_> {
         }
         self.emu.set_register("rsp", s.call_sp);
         poke_word(&mut self.emu, s.call_sp, sentinel, u64::from(s.word / 8));
-        callee.place(&mut self.emu, s.call_sp, args);
+        callee.place(&mut self.emu, s.call_sp, args, 0);
         self.emu.stop_at(Some(sentinel));
         self.emu.set_budget(self.fuel);
         let imports = self.emu.api_calls().len();

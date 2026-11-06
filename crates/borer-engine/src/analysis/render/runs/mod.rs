@@ -2,8 +2,11 @@
 //! emulator, and its answer checked against the function's printed text.
 
 use super::*;
+use crate::analysis::decompile::floats::agree;
 use crate::analysis::decompile::interp::{End, Script, TextRun};
-use crate::analysis::decompile::signature::{Kind, Passing, Signature, passing, printed};
+use crate::analysis::decompile::signature::{
+    Kind, Passing, Signature, float_mask, passing, printed,
+};
 use crate::analysis::decompile::{decompile_named, traces, verify};
 use crate::emulate::a64::Machine as A64Machine;
 use crate::emulate::calls::ApiCall;
@@ -103,6 +106,8 @@ enum Arg {
     /// A zeroed buffer of this many bytes the function writes into:
     /// `out:<size>`.
     Out(usize),
+    /// A floating value: its bits, and its width (32 or 64).
+    Float(u64, u8),
 }
 
 impl Arg {
@@ -114,7 +119,7 @@ impl Arg {
     /// The buffer's bytes as the run starts.
     fn initial(&self) -> Vec<u8> {
         match self {
-            Self::Int(_) => Vec::new(),
+            Self::Int(_) | Self::Float(..) => Vec::new(),
             Self::Bytes(b) => b.clone(),
             Self::Out(n) => vec![0; *n],
         }
@@ -126,6 +131,7 @@ impl Arg {
             Self::Int(v) => small_hex(*v),
             Self::Bytes(b) => bytes_shown(b),
             Self::Out(n) => format!("out:{n}"),
+            Self::Float(bits, width) => float_shown(*bits, *width),
         }
     }
 }
@@ -285,7 +291,7 @@ fn lay_out(base: u64, input: &[Arg]) -> Layout {
     let mut pokes = Vec::new();
     for (k, arg) in input.iter().enumerate() {
         match arg {
-            Arg::Int(v) => {
+            Arg::Int(v) | Arg::Float(v, _) => {
                 values.push(*v);
                 at.push(None);
             }
@@ -312,6 +318,9 @@ struct Machine {
     /// What it returned at the declared width, or `rax` with no
     /// declaration; `None` when it did not return.
     value: Option<u64>,
+    /// The low 64 bits of `xmm0` after a 64-bit run returned, where a
+    /// floating result comes back; `None` otherwise.
+    float: Option<u64>,
     /// Each buffer argument's bytes after the run, guard included.
     buffers: Vec<Option<Vec<u8>>>,
     /// The names of the imports it called, in order.
@@ -341,6 +350,20 @@ fn returned_value(emu: &Emulator<'_>, bits: u8, word: u32) -> u64 {
         rax
     } else {
         rax & ((1u64 << bits) - 1)
+    }
+}
+
+/// A floating value as a report spells it, from its bits.
+///
+/// # Arguments
+///
+/// * `bits` - The value's bits, in the low 32 for a single.
+/// * `width` - 32 or 64.
+pub(super) fn float_shown(bits: u64, width: u8) -> String {
+    if width == 32 {
+        format!("{:?}f", f32::from_bits(crate::num::lo32(bits)))
+    } else {
+        format!("{:?}", f64::from_bits(bits))
     }
 }
 
@@ -399,11 +422,16 @@ fn run_machine(
         poke_all(&mut emu, *addr, bytes);
     }
     let sp = emu.register("rsp")?;
-    pass.place(&mut emu, sp, values);
+    let floats = float_mask(input.iter().map(|a| matches!(a, Arg::Float(..))));
+    pass.place(&mut emu, sp, values, floats);
     let run = emu.run(entry);
     let word = p.arch.bitness().unwrap_or(64);
     let value = matches!(run.stop, Stop::Returned)
         .then(|| returned_value(&emu, ret_bits.unwrap_or(64), word));
+    let float = (matches!(run.stop, Stop::Returned) && word == 64).then(|| {
+        let [xmm0, ..] = emu.xmm();
+        u64::try_from(xmm0 & u128::from(u64::MAX)).unwrap_or(0)
+    });
     let buffers = input
         .iter()
         .zip(at)
@@ -415,6 +443,7 @@ fn run_machine(
         stop: run.stop,
         steps: run.steps,
         value,
+        float,
         buffers,
         calls: emu.api_names().iter().map(|s| (*s).to_owned()).collect(),
         call_lines: emu.api_calls().iter().map(ApiCall::call_text).collect(),
@@ -478,6 +507,7 @@ fn run_a64(
         stop: run.stop,
         steps: run.steps,
         value,
+        float: None,
         buffers,
         calls: Vec::new(),
         call_lines: emu.api_calls().iter().map(ApiCall::call_text).collect(),
@@ -742,8 +772,41 @@ fn judge(m: &Machine, t: &TextRun<'_>, at: &[Option<u64>], ret: Option<(Kind, u8
             ),
         );
     }
-    match ret {
-        Some((Kind::Float | Kind::Other, _)) => Verdict::Unchecked(
+    floating_verdict(ret, returned, m.float, line)
+}
+
+/// The verdict on a run whose memory and calls agree, from its result: a
+/// floating one compared with what the binary left in `xmm0`.
+///
+/// # Arguments
+///
+/// * `ret` - The declared result's kind and width.
+/// * `returned` - What the text returned.
+/// * `machine` - The low bits of `xmm0` after the binary's run, `None`
+///   where a floating result does not come back there.
+/// * `line` - The text's line that returned.
+fn floating_verdict(
+    ret: Option<(Kind, u8)>,
+    returned: Option<u64>,
+    machine: Option<u64>,
+    line: usize,
+) -> Verdict {
+    match (ret, returned, machine) {
+        (Some((Kind::Float(_), bits)), Some(text), Some(machine)) => {
+            if agree(text, machine, bits, true) {
+                Verdict::Agrees
+            } else {
+                Verdict::Differs(
+                    line,
+                    format!(
+                        "the result is {} in the text, {} in the binary",
+                        float_shown(text, bits),
+                        float_shown(machine, bits)
+                    ),
+                )
+            }
+        }
+        (Some((Kind::Float(_) | Kind::Other, _)), ..) => Verdict::Unchecked(
             Some(line),
             "the result is not an integer, so only memory and calls were compared".to_owned(),
         ),
@@ -925,7 +988,7 @@ pub fn run_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<Str
             }
             for (k, (arg, kind)) in input.iter().zip(&kinds).enumerate() {
                 match (arg, kind) {
-                    (_, Kind::Float) => {
+                    (_, Kind::Float(_)) => {
                         return Err(format!(
                             "a{} is a floating parameter; a run passes integers and buffers",
                             k + 1
@@ -1579,7 +1642,14 @@ mod tests {
             assert!(matches!(b, Arg::Bytes(v) if v.len() == 64) || *b == Arg::Out(64));
             assert!(*c <= 0xffff_ffff);
         }
-        assert!(generated(&[Kind::Float], 1, 7, 0x1000).is_err());
+        let floats = generated(&[Kind::Float(32), Kind::Float(64)], 16, 7, 0x1000).unwrap();
+        for input in &floats {
+            let [Arg::Float(a, 32), Arg::Float(b, 64)] = input.as_slice() else {
+                panic!("{input:?}")
+            };
+            assert!(*a <= 0xffff_ffff && f32::from_bits(crate::num::lo32(*a)).is_finite());
+            assert!(f64::from_bits(*b).is_finite());
+        }
     }
 
     /// A variadic function draws no inputs: a run passes only the listed

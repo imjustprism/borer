@@ -945,7 +945,7 @@ pub fn emulate_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Resu
         let pass = passing(p, a, o, spec.entry);
         let sp = emu.register("rsp").unwrap_or(0);
         for &(i, v) in &spec.args {
-            pass.place_arg(&mut emu, sp, i, v);
+            pass.place_arg(&mut emu, sp, i, v, 0);
         }
     }
     for &(addr, ref bytes) in &spec.writes {

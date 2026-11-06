@@ -3,14 +3,16 @@
 //! them.
 
 use super::{
-    Arg, BUDGET, BUDGET_MAX, INPUTS_MAX, Outcome, Shared, Verdict, args_shown, run_one, small_hex,
-    writes_shown,
+    Arg, BUDGET, BUDGET_MAX, INPUTS_MAX, Outcome, Shared, Verdict, args_shown, float_shown,
+    run_one, small_hex, writes_shown,
 };
+use crate::analysis::decompile::ctext::float_bits;
 use crate::analysis::decompile::interp::{Mode, Script};
 use crate::analysis::decompile::signature::{Kind, Passing, Signature, passing, printed};
 use crate::analysis::decompile::{Pass, Passes, decompile_named};
 use crate::analysis::render::oracle::compared_constants;
 use crate::analysis::render::*;
+use crate::num::as_f64;
 use crate::text::one_line;
 
 /// The seed the lifter's check runs from when a run differs, fixed so the
@@ -33,6 +35,11 @@ const EDGES: [u64; 12] = [
     0xffff_ffff,
     u64::MAX,
 ];
+
+/// The values a generated floating argument is drawn from besides random
+/// ones: zero of both signs, units, a half and a value past any integer
+/// a single holds exactly.
+const FLOAT_EDGES: [f64; 8] = [0.0, -0.0, 1.0, -1.0, 0.5, 2.0, -3.25, 16_777_217.0];
 
 /// Bytes a generated buffer argument holds.
 const GENERATED_BUFFER: usize = 64;
@@ -65,7 +72,9 @@ pub(super) fn cut(v: u64, bits: u8, signed: bool) -> u64 {
 /// input's position: an integer is an edge value, a small number, a small
 /// negative one or a random word, cut to the parameter's width and extended
 /// as its sign says; a pointer is a buffer of [`GENERATED_BUFFER`] bytes
-/// holding a short text, random bytes, or zeros.
+/// holding a short text, random bytes, or zeros; a float is an edge value
+/// ([`FLOAT_EDGES`]), a whole number from -100 to 100, or a finite
+/// fraction.
 ///
 /// # Arguments
 ///
@@ -76,7 +85,7 @@ pub(super) fn cut(v: u64, bits: u8, signed: bool) -> u64 {
 ///
 /// # Errors
 ///
-/// When a parameter is floating, or of a type a run does not pass.
+/// When a parameter is of a type a run does not pass.
 pub(super) fn generated(
     kinds: &[Kind],
     count: usize,
@@ -130,8 +139,19 @@ pub(super) fn generated(
                     ),
                     _ => Arg::Out(GENERATED_BUFFER),
                 },
-                Kind::Float => {
-                    return Err(format!("a{} is floating, which a run does not pass", k + 1));
+                Kind::Float(bits) => {
+                    let v = match next() % 3 {
+                        0 => FLOAT_EDGES
+                            .get(
+                                usize::try_from(next() % from_usize(FLOAT_EDGES.len()))
+                                    .unwrap_or(0),
+                            )
+                            .copied()
+                            .unwrap_or(0.0),
+                        1 => as_f64(next() % 201) - 100.0,
+                        _ => as_f64(next() % (1 << 24)) / 4096.0 - 2048.0,
+                    };
+                    Arg::Float(float_bits(v, bits), bits)
                 }
                 Kind::Other => {
                     return Err(format!("a{} is of a type a run does not pass", k + 1));
@@ -247,7 +267,10 @@ fn generated_in(
     let text = decompile_named(p, a, o, entry).ok_or("the function does not decompile")?;
     let word = u8::try_from(p.arch.bitness().unwrap_or(64)).unwrap_or(64);
     let sig = printed(&text, word)?;
-    let inputs = generated(&sig.drawn_kinds()?, count, seed, entry)?;
+    let pass = passing(p, a, o, entry);
+    let kinds = sig.drawn_kinds()?;
+    pass.carries(&kinds)?;
+    let inputs = generated(&kinds, count, seed, entry)?;
     let script = match mode {
         Mode::Machine => Script::read(p, a, o, entry, &text),
         Mode::Iso => Script::read_iso(p, a, o, entry, &text),
@@ -255,7 +278,7 @@ fn generated_in(
     let shared = Shared {
         script,
         sig: Ok(sig),
-        pass: Some(passing(p, a, o, entry)),
+        pass: Some(pass),
     };
     Ok(inputs
         .iter()
@@ -455,12 +478,11 @@ pub(super) fn draw(
     let text = decompile_named(p, a, o, entry).ok_or("the function does not decompile")?;
     let word = u8::try_from(p.arch.bitness().unwrap_or(64)).unwrap_or(64);
     let sig = printed(&text, word)?;
-    let inputs = generated(&sig.drawn_kinds()?, count, seed, entry)?;
-    Ok(Drawn {
-        sig,
-        inputs,
-        pass: passing(p, a, o, entry),
-    })
+    let pass = passing(p, a, o, entry);
+    let kinds = sig.drawn_kinds()?;
+    pass.carries(&kinds)?;
+    let inputs = generated(&kinds, count, seed, entry)?;
+    Ok(Drawn { sig, inputs, pass })
 }
 
 /// What one text did on drawn inputs under the ISO check.
@@ -559,7 +581,7 @@ const HARNESS_MAX: usize = 16;
 ///
 /// # Errors
 ///
-/// When a parameter is floating, or of a type a run does not pass.
+/// When a parameter is of a type a run does not pass.
 pub(super) fn vector_inputs(
     kinds: &[Kind],
     constants: &[u64],
@@ -577,9 +599,7 @@ pub(super) fn vector_inputs(
                     b.resize(GENERATED_BUFFER, 0);
                     Arg::Bytes(b)
                 }
-                Kind::Float => {
-                    return Err(format!("a{} is floating, which a run does not pass", k + 1));
-                }
+                Kind::Float(bits) => Arg::Float(float_bits(as_f64(c), bits), bits),
                 Kind::Other => {
                     return Err(format!("a{} is of a type a run does not pass", k + 1));
                 }
@@ -613,7 +633,8 @@ fn c_type(kind: Kind) -> String {
             bits.clamp(8, 64).next_power_of_two()
         ),
         Kind::Pointer => "uint8_t *".to_owned(),
-        Kind::Float => "double".to_owned(),
+        Kind::Float(32) => "float".to_owned(),
+        Kind::Float(_) => "double".to_owned(),
         Kind::Other => "uint64_t".to_owned(),
     }
 }
@@ -703,7 +724,7 @@ pub(super) fn harness(
         .enumerate()
         .map(|(k, kind)| match kind {
             Kind::Pointer => format!("uint8_t *a{}", k + 1),
-            Kind::Int(..) | Kind::Float | Kind::Other => format!("{} a{}", c_type(*kind), k + 1),
+            Kind::Int(..) | Kind::Float(_) | Kind::Other => format!("{} a{}", c_type(*kind), k + 1),
         })
         .collect();
     let params = if params.is_empty() {
@@ -721,7 +742,7 @@ pub(super) fn harness(
                 "got".to_owned()
             }),
         ),
-        Some((kind @ (Kind::Pointer | Kind::Float | Kind::Other), _)) => (c_type(kind), None),
+        Some((kind @ (Kind::Pointer | Kind::Float(_) | Kind::Other), _)) => (c_type(kind), None),
     };
     let returned: Vec<usize> = (0..outcomes.len())
         .filter(|&n| outcomes.get(n).is_some_and(|x| x.value.is_some()))
@@ -745,6 +766,7 @@ pub(super) fn harness(
         for (k, arg) in input.iter().enumerate() {
             match arg {
                 Arg::Int(v) => args.push(format!("{v:#x}")),
+                Arg::Float(bits, width) => args.push(float_shown(*bits, *width)),
                 Arg::Bytes(_) | Arg::Out(_) => {
                     let initial = arg.initial();
                     let _ = write!(
@@ -855,11 +877,14 @@ pub fn vectors_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result
             .iter()
             .map(|c| c.value)
             .collect();
-    let inputs = vector_inputs(&sig.drawn_kinds()?, &constants, count, entry)?;
+    let pass = passing(p, a, o, entry);
+    let kinds = sig.drawn_kinds()?;
+    pass.carries(&kinds)?;
+    let inputs = vector_inputs(&kinds, &constants, count, entry)?;
     let seeded = constants.len().min(count.div_ceil(2));
     let shared = Shared {
         script: Script::read(p, a, o, entry, &text),
-        pass: Some(passing(p, a, o, entry)),
+        pass: Some(pass),
         sig: Ok(sig.clone()),
     };
     let names = o.fingerprint();

@@ -509,7 +509,8 @@ pub fn layout_fields(
     let param = (parsed.start == parsed.entry)
         .then(|| {
             crate::analysis::decompile::signature::passing(p, a, o, parsed.entry)
-                .regs
+                .conv
+                .args
                 .iter()
                 .position(|r| r.full_register() == parsed.seed.full_register())
         })

@@ -11,7 +11,7 @@ use crate::program::{BinaryFormat, Program};
 /// Two conventions are told apart by value, never by the address of the
 /// constant one came from: a `const` has no address of its own, and each
 /// use may promote it to a different one.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Conv {
     /// Argument registers in order.
     pub args: &'static [Register],

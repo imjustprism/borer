@@ -14,6 +14,7 @@
 use std::collections::BTreeMap;
 
 use borer_engine::analysis::decompile::decompile;
+use borer_engine::analysis::render::check_generated;
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::dwarf::Subprogram;
 use borer_engine::program::{Program, Symbol, SymbolKind};
@@ -442,4 +443,61 @@ fn a_float_copied_into_integer_bits_is_copied_as_its_bits() {
     let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1000).unwrap_or_default();
     assert!(text.contains("var1 = *(uint64_t*)&a1;"), "{text}");
     replays_clean(&p, &a, &[0x1_4000_1000]);
+}
+
+/// A run passes floating parameters where the convention puts them, and
+/// checks the floating result the text returns against `xmm0`.
+///
+/// On Microsoft x64 a float takes its position's `xmm` register; on
+/// System V the floats count apart from the integers, so the second
+/// parameter after an `int` arrives in `xmm0`. A call in the text to a
+/// function returning a float reads its result from `xmm0`.
+#[test]
+fn a_run_checks_floating_parameters_and_results() {
+    use crate::decompiled::{program64, runs_agree};
+    let pe = [
+        0xf3, 0x0f, 0x2a, 0xc1, // ASM: cvtsi2ss xmm0,ecx
+        0xf3, 0x0f, 0x59, 0xc1, // ASM: mulss xmm0,xmm1
+        0xc3, // ASM: ret
+    ];
+    let text = runs_agree(&program64(&pe), 0x1_4000_1000);
+    assert!(text.contains("float"), "{text}");
+    let sum = [
+        0xf2, 0x0f, 0x58, 0xc1, // ASM: addsd xmm0,xmm1
+        0xc3, // ASM: ret
+    ];
+    let text = runs_agree(&program64(&sum), 0x1_4000_1000);
+    assert!(text.contains("double"), "{text}");
+    let sysv = [
+        0xf3, 0x0f, 0x2a, 0xcf, // ASM: cvtsi2ss xmm1,edi
+        0xf3, 0x0f, 0x59, 0xc1, // ASM: mulss xmm0,xmm1
+        0xc3, // ASM: ret
+    ];
+    let mut p = program64(&sysv);
+    p.format = borer_engine::program::BinaryFormat::Elf;
+    let text = runs_agree(&p, 0x1_4000_1000);
+    assert!(text.contains("float"), "{text}");
+    let stacked = crate::raw::image(
+        borer_engine::program::Arch::X86,
+        &[
+            0xd9, 0x44, 0x24, 0x04, // ASM: fld dword [esp+4]
+            0xd8, 0xc0, // ASM: fadd st0,st0
+            0xc3, // ASM: ret
+        ],
+        &[],
+    );
+    let mut wrapper = vec![
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp,0x28
+        0xe8, 0x17, 0x00, 0x00, 0x00, // ASM: call 0x140001020
+        0xf2, 0x0f, 0x58, 0xc0, // ASM: addsd xmm0,xmm0
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp,0x28
+        0xc3, // ASM: ret
+    ];
+    wrapper.resize(0x20, 0xcc);
+    wrapper.extend_from_slice(&[0xf2, 0x0f, 0x2a, 0xc1, 0xc3]); // ASM: cvtsi2sd xmm0,ecx; ret
+    let text = runs_agree(&program64(&wrapper), 0x1_4000_1000);
+    assert!(text.contains("double"), "{text}");
+    let a = Analysis::compute(&stacked);
+    let why = check_generated(&stacked, &a, &Overlay::default(), 0x401_000, 4, 1, 1000);
+    assert!(why.is_err_and(|w| w.contains("on the stack")), "{text}");
 }

@@ -19,8 +19,8 @@ use crate::program::Program;
 /// stack from a frame offset.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Passing {
-    /// The argument registers, in convention order.
-    pub(crate) regs: Vec<Register>,
+    /// The convention: its integer and floating argument registers.
+    pub(crate) conv: abi::Conv,
     /// Frame offset of the first stack-passed argument, past the return
     /// address and any shadow space.
     pub(crate) first_stack: u64,
@@ -36,10 +36,12 @@ impl Passing {
     ///
     /// * `emu` - The machine.
     /// * `sp` - The stack pointer the callee is entered with.
-    /// * `args` - The argument values, in order.
-    pub(crate) fn place(&self, emu: &mut Emulator<'_>, sp: u64, args: &[u64]) {
+    /// * `args` - The argument values, in order; a floating one is its bits.
+    /// * `floats` - A bit per argument position that is floating
+    ///   ([`float_mask`]).
+    pub(crate) fn place(&self, emu: &mut Emulator<'_>, sp: u64, args: &[u64], floats: u8) {
         for (i, v) in args.iter().enumerate() {
-            self.place_arg(emu, sp, i, *v);
+            self.place_arg(emu, sp, i, *v, floats);
         }
     }
 
@@ -51,16 +53,39 @@ impl Passing {
     /// * `emu` - The machine.
     /// * `sp` - The stack pointer the callee is entered with.
     /// * `i` - The argument's position from zero: `a1` is 0.
-    /// * `v` - The value.
-    pub(crate) fn place_arg(&self, emu: &mut Emulator<'_>, sp: u64, i: usize, v: u64) {
-        match self.regs.get(i) {
+    /// * `v` - The value; a floating one is its bits.
+    /// * `floats` - A bit per argument position that is floating.
+    pub(crate) fn place_arg(&self, emu: &mut Emulator<'_>, sp: u64, i: usize, v: u64, floats: u8) {
+        match self.conv.arg_reg(i, floats) {
+            Some(r) if r.is_xmm() => emu.set_xmm(r.number(), u128::from(v)),
             Some(r) => {
-                emu.set_register(register_name(*r), v);
+                emu.set_register(register_name(r), v);
             }
             None => {
                 let at = sp.wrapping_add(self.stack_offset(i));
                 poke_word(emu, at, v, self.word);
             }
+        }
+    }
+
+    /// Checks that a run can pass parameters of these kinds.
+    ///
+    /// # Arguments
+    ///
+    /// * `kinds` - The parameters' kinds, in order.
+    ///
+    /// # Errors
+    ///
+    /// When one is floating and some parameter has no register of the
+    /// convention: a run passes floats in registers only.
+    pub(crate) fn carries(&self, kinds: &[Kind]) -> Result<(), String> {
+        let floats = float_mask(kinds.iter().map(|k| matches!(k, Kind::Float(_))));
+        match (0..kinds.len()).find(|&i| floats != 0 && self.conv.arg_reg(i, floats).is_none()) {
+            Some(i) => Err(format!(
+                "a{} is passed on the stack, and a run passes floating parameters only where every parameter has a register",
+                i + 1
+            )),
+            None => Ok(()),
         }
     }
 
@@ -70,7 +95,7 @@ impl Passing {
     ///
     /// * `i` - The argument's position from zero, past the registers.
     pub(super) fn stack_offset(&self, i: usize) -> u64 {
-        let past = from_usize(i.saturating_sub(self.regs.len()));
+        let past = from_usize(i.saturating_sub(self.conv.args.len()));
         self.first_stack.wrapping_add(past.wrapping_mul(self.word))
     }
 }
@@ -114,7 +139,7 @@ pub(crate) fn passing(
     };
     let word = conv.word.unsigned_abs();
     Passing {
-        regs: conv.args.to_vec(),
+        conv: *conv,
         first_stack: word.wrapping_add(conv.shadow.unsigned_abs()),
         word,
     }
@@ -167,8 +192,8 @@ pub(crate) enum Kind {
     Int(u8, bool),
     /// A pointer.
     Pointer,
-    /// A floating value.
-    Float,
+    /// A floating value of this many bits.
+    Float(u8),
     /// A type this does not compute with.
     Other,
 }
@@ -185,7 +210,7 @@ impl Kind {
         }
         match ty.base {
             Base::Int(bits, signed) => Self::Int(bits, signed),
-            Base::Float(_) => Self::Float,
+            Base::Float(bits) => Self::Float(bits),
             Base::Void | Base::Opaque | Base::Wide => Self::Other,
         }
     }
@@ -248,6 +273,15 @@ impl Signature {
             return Err("its variable arguments are not passed by a run".to_owned());
         }
         Ok(self.parameter_kinds())
+    }
+
+    /// A bit per parameter position that is floating ([`float_mask`]).
+    pub(crate) fn floats(&self) -> u8 {
+        float_mask(
+            self.parameter_kinds()
+                .iter()
+                .map(|k| matches!(k, Kind::Float(_))),
+        )
     }
 
     /// How the return type reads and its width, `None` for `void`.
@@ -338,4 +372,18 @@ pub(crate) fn printed(text: &str, word: u8) -> Result<Signature, String> {
         word,
         variadic,
     })
+}
+
+/// A bit per argument position that is floating, as
+/// [`Conv::arg_reg`](abi::Conv::arg_reg) reads them: the first eight.
+///
+/// # Arguments
+///
+/// * `floating` - Per position, in order, whether it is floating.
+pub(crate) fn float_mask(floating: impl Iterator<Item = bool>) -> u8 {
+    floating
+        .take(8)
+        .enumerate()
+        .filter(|(_, f)| *f)
+        .fold(0, |m, (i, _)| m | (1 << i))
 }

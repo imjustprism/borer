@@ -130,7 +130,7 @@ pub(super) fn argument(t: &str) -> Result<Arg, String> {
         })?)
     };
     let len = match &arg {
-        Arg::Int(_) => 0,
+        Arg::Int(_) | Arg::Float(..) => 0,
         Arg::Bytes(b) => b.len(),
         Arg::Out(n) => *n,
     };
