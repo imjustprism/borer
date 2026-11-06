@@ -1592,7 +1592,11 @@ mod tests {
     fn a_variadic_function_draws_no_inputs() {
         let fixed = printed("// signature: uint64_t f(int32_t a1)\nreturn a1;\n", 64).unwrap();
         assert!(fixed.drawn_kinds().is_ok());
-        let variadic = printed("// signature: uint64_t f(int32_t a1, ...)\nreturn a1;\n", 64).unwrap();
+        let variadic = printed(
+            "// signature: uint64_t f(int32_t a1, ...)\nreturn a1;\n",
+            64,
+        )
+        .unwrap();
         let why = variadic.drawn_kinds().unwrap_err();
         assert!(why.contains("variable arguments"), "{why}");
     }
