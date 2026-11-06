@@ -1,9 +1,9 @@
 //! Jump-table recovery: the bounded index, the table's base and stride, and
 //! the case targets an indirect jump reads.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use super::{InstrRec, Recorded, decode_at};
+use super::{Recorded, decode_at};
 use crate::analysis::switch_index::{
     TableBound, check_bound, flag_reader, index_bound, table_index,
 };
@@ -143,8 +143,6 @@ fn prev_instructions(
 /// * `bitness` - Decoder bitness.
 /// * `jmp_va` - Address of the indirect jump.
 /// * `recorded` - What the walk's records so far say.
-/// * `walked` - The walk's records so far, for a table base set before a
-///   loop the backward chain cannot leave ([`hoisted_base`]).
 /// * `within` - Whether a target of a loosely sized table may be this
 ///   function's.
 ///
@@ -158,7 +156,6 @@ pub(super) fn resolve_jump_table(
     bitness: u32,
     jmp_va: u64,
     recorded: &Recorded,
-    walked: &[(u64, InstrRec)],
     within: &dyn Fn(u64) -> bool,
 ) -> Option<TableRead> {
     /// Longest backward chain examined for the range check and table base.
@@ -179,7 +176,7 @@ pub(super) fn resolve_jump_table(
     if window.len() < 3 {
         window = prev_instructions(program, bitness, jmp_va, 6)?;
     }
-    if let Some(lea) = hoisted_base(program, bitness, jmp_va, &window, walked) {
+    if let Some(lea) = hoisted_base(program, bitness, jmp_va, &window, &recorded.decoded) {
         window.insert(0, lea);
     }
 
@@ -527,7 +524,9 @@ fn rip_targets_after(
 /// * `bitness` - Decoder bitness.
 /// * `jmp_va` - Address of the indirect jump.
 /// * `window` - The instructions before the jump, in order.
-/// * `walked` - The walk's records so far.
+/// * `walked` - The addresses the walk decoded so far, in order: the
+///   nearest below the jump are read first, and only until every base's
+///   writer turns up.
 ///
 /// # Returns
 ///
@@ -538,7 +537,7 @@ fn hoisted_base(
     bitness: u32,
     jmp_va: u64,
     window: &[Instruction],
-    walked: &[(u64, InstrRec)],
+    walked: &BTreeSet<u64>,
 ) -> Option<Instruction> {
     /// Most walked instructions decoded looking for the write.
     const DECODES_MAX: usize = 4096;
@@ -559,31 +558,37 @@ fn hoisted_base(
     if bases.is_empty() {
         return None;
     }
-    let mut below: Vec<u64> = walked
-        .iter()
-        .map(|&(va, _)| va)
-        .filter(|&va| va < jmp_va)
-        .collect();
-    below.sort_unstable_by(|l, r| r.cmp(l));
-    let decoded: Vec<Instruction> = below
-        .into_iter()
+    let writes = |i: &Instruction, base: Register| {
+        i.op_count() > 0
+            && i.op0_kind() == OpKind::Register
+            && i.op0_register().full_register() == base.full_register()
+            && !matches!(
+                i.mnemonic(),
+                Mnemonic::Cmp | Mnemonic::Test | Mnemonic::Push | Mnemonic::Bt
+            )
+    };
+    let mut nearest: Vec<Option<Instruction>> = vec![None; bases.len()];
+    for i in walked
+        .range(..jmp_va)
+        .rev()
         .take(DECODES_MAX)
-        .filter_map(|va| decode_at(program, bitness, va))
-        .collect();
-    bases.into_iter().find_map(|base| {
-        let write = decoded.iter().find(|i| {
-            i.op_count() > 0
-                && i.op0_kind() == OpKind::Register
-                && i.op0_register().full_register() == base.full_register()
-                && !matches!(
-                    i.mnemonic(),
-                    Mnemonic::Cmp | Mnemonic::Test | Mnemonic::Push | Mnemonic::Bt
-                )
-        })?;
+        .filter_map(|&va| decode_at(program, bitness, va))
+    {
+        for (slot, &base) in nearest.iter_mut().zip(&bases) {
+            if slot.is_none() && writes(&i, base) {
+                *slot = Some(i);
+            }
+        }
+        if nearest.iter().all(Option::is_some) {
+            break;
+        }
+    }
+    bases.into_iter().zip(nearest).find_map(|(base, write)| {
+        let write = write?;
         (write.mnemonic() == Mnemonic::Lea
             && write.memory_base() == Register::RIP
             && write.op0_register() == base)
-            .then_some(*write)
+            .then_some(write)
     })
 }
 

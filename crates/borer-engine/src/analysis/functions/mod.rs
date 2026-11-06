@@ -210,6 +210,9 @@ struct Recorded {
     /// held until the walk has all the function's branches
     /// ([`helpers::exits_with_status`]).
     status_ends: Vec<(u64, u64, Vec<u64>)>,
+    /// Every address decoded, in address order: the nearest code below a
+    /// jump is a range of it ([`tables::resolve_jump_table`]).
+    decoded: BTreeSet<u64>,
 }
 
 /// The records whose instruction falls through to one address.
@@ -233,6 +236,7 @@ impl Recorded {
     /// * `addr` - The instruction's address.
     /// * `rec` - Its record.
     fn push(&mut self, addr: u64, rec: &InstrRec) {
+        self.decoded.insert(addr);
         let call = rec.target.filter(|_| rec.flow == FlowControl::Call);
         self.by_next
             .entry(rec.next)
