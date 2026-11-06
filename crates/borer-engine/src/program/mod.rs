@@ -1578,11 +1578,14 @@ impl Program {
     ///
     /// # Returns
     ///
-    /// The offset, or `None` when [`Program::section_at`] finds no section
-    /// or the offset the address maps to does not fit one.
+    /// The offset, or `None` when [`Program::section_at`] finds no section,
+    /// the address lies in the zero-filled tail past the section's file
+    /// bytes (where the next offset is another section's, or past the end),
+    /// or the offset does not fit.
     pub fn va_to_offset(&self, va: u64) -> Option<u64> {
         let s = self.section_at(va)?;
-        s.file_off.0.checked_add(va - s.va.0)
+        let rel = va - s.va.0;
+        (rel < s.file_size).then(|| s.file_off.0.checked_add(rel))?
     }
 
     /// Converts a file offset to the virtual address it is mapped at.

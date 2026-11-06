@@ -13,7 +13,7 @@ use borer_engine::analysis::{Analysis, Overlay, render};
 use borer_engine::disasm;
 use borer_engine::isa::Isa;
 use borer_engine::layout::{Layout, REGIONS_MAX, parse_arch};
-use borer_engine::program::{Arch, BinaryFormat, Feature, Program};
+use borer_engine::program::{Arch, BinaryFormat, Feature, Program, Section};
 
 use crate::decompiled::decompiled;
 
@@ -347,4 +347,18 @@ fn hostile_layouts_are_refused_with_their_numbers() {
     assert!(format!("{both}").contains("give one"), "{both}");
     let empty = map("x64", None, None, None, &[]).expect_err("refused");
     assert!(empty.contains("the file is empty"), "{empty}");
+}
+
+/// An address in a section's zero-filled tail has no file offset: the
+/// offset it would map to holds the next section's bytes, or none.
+#[test]
+fn a_zero_filled_tail_has_no_file_offset() {
+    let data = Section {
+        vsize: 0x200,
+        ..Section::mapped(".data", 0x1000, 0, 0x100, true, false)
+    };
+    let p = Program::raw(vec![0; 0x200], Arch::X86_64, 0x1000, None, vec![data]);
+    assert_eq!(p.va_to_offset(0x10ff), Some(0xff));
+    assert!(p.section_at(0x1100).is_some(), "the tail is mapped");
+    assert_eq!(p.va_to_offset(0x1100), None);
 }

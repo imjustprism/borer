@@ -303,14 +303,10 @@ pub fn locate(
     let _ = writeln!(
         out,
         "offset:   {}",
-        program
-            .section_at(va)
-            .filter(|s| va - s.va.0 < s.file_size)
-            .and_then(|_| program.va_to_offset(va))
-            .map_or_else(
-                || "- (in no file bytes: uninitialized or unmapped)".to_owned(),
-                |o| format!("{o:#x}")
-            )
+        program.va_to_offset(va).map_or_else(
+            || "- (in no file bytes: uninitialized or unmapped)".to_owned(),
+            |o| format!("{o:#x}")
+        )
     );
     let _ = writeln!(
         out,
