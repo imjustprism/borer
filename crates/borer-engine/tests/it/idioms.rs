@@ -593,3 +593,53 @@ fn a_word_compared_signed_is_declared_signed() {
     assert!(text.contains("(int64_t a1)"), "{text}");
     assert!(!text.contains("(int64_t)"), "{text}");
 }
+
+/// A blend of two doubles under a scalar compare mask is a ternary, and
+/// the lift of it agrees with the emulator.
+///
+/// `cmpltsd` makes the mask, then `(m & a) | (~m & b)` picks `a` where
+/// `b < a` holds: `b < a ? a : b`, not the vector expression of the
+/// bitwise operations.
+#[test]
+fn a_compare_mask_blend_agrees_with_the_emulator() {
+    let code = [
+        0x66, 0x0f, 0x28, 0xd1, // ASM: movapd xmm2,xmm1
+        0xf2, 0x0f, 0xc2, 0xd0, 0x01, // ASM: cmpltsd xmm2,xmm0
+        0x66, 0x0f, 0x28, 0xda, // ASM: movapd xmm3,xmm2
+        0x66, 0x0f, 0x55, 0xd9, // ASM: andnpd xmm3,xmm1
+        0x66, 0x0f, 0x54, 0xd0, // ASM: andpd xmm2,xmm0
+        0x66, 0x0f, 0x56, 0xd3, // ASM: orpd xmm2,xmm3
+        0x66, 0x0f, 0x28, 0xc2, // ASM: movapd xmm0,xmm2
+        0xc3, // ASM: ret
+    ];
+    let p = program64(&code);
+    let text = crate::decompiled::runs_agree(&p, 0x1_4000_1000);
+    assert!(text.contains(" ? a1 : a2"), "{text}");
+    assert!(!text.contains("x2"), "{text}");
+    crate::decompiled::replays_clean(&p, &Analysis::compute(&p), &[0x1_4000_1000]);
+}
+
+/// A blend over an integer parameter's bits stays the bitwise vector
+/// expression, and its lift agrees with the emulator.
+///
+/// `movq xmm1, rdx` keeps the second parameter's bits in a vector
+/// register; a ternary would read `a2` as the integer it is declared, not
+/// as the double its bits are.
+#[test]
+fn a_compare_mask_blend_of_integer_bits_agrees_with_the_emulator() {
+    let code = [
+        0x66, 0x48, 0x0f, 0x6e, 0xca, // ASM: movq xmm1,rdx
+        0x66, 0x0f, 0x28, 0xd1, // ASM: movapd xmm2,xmm1
+        0xf2, 0x0f, 0xc2, 0xd0, 0x01, // ASM: cmpltsd xmm2,xmm0
+        0x66, 0x0f, 0x28, 0xda, // ASM: movapd xmm3,xmm2
+        0x66, 0x0f, 0x55, 0xd9, // ASM: andnpd xmm3,xmm1
+        0x66, 0x0f, 0x54, 0xd0, // ASM: andpd xmm2,xmm0
+        0x66, 0x0f, 0x56, 0xd3, // ASM: orpd xmm2,xmm3
+        0x66, 0x0f, 0x28, 0xc2, // ASM: movapd xmm0,xmm2
+        0xc3, // ASM: ret
+    ];
+    let p = program64(&code);
+    let text = decompiled(&p, 0x1_4000_1000);
+    assert!(!text.contains(" ? "), "{text}");
+    crate::decompiled::replays_clean(&p, &Analysis::compute(&p), &[0x1_4000_1000]);
+}

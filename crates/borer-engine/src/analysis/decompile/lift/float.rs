@@ -1117,6 +1117,17 @@ impl Exec<'_, '_> {
             .map(|i| self.val(instr, i))
             .collect();
         let name = format!("{:?}", instr.mnemonic()).to_lowercase();
+        if let (Some((select, ty)), Some(upper)) = (blend_select(&name, &args), args.first())
+            && (ty == Ty::F64 || self.single_lane(instr))
+            && let Expr::Ternary(_, b, a) = &select
+            && ![b, a]
+                .iter()
+                .any(|v| matches!(***v, Expr::Var(Key::Param(_))) && !self.float_param(v))
+        {
+            let upper = upper.clone();
+            self.write_scalar_lane(instr, select, ty, &upper);
+            return;
+        }
         self.write_op0(instr, Expr::Call(name, args));
     }
 

@@ -1880,6 +1880,86 @@ fn scalar_lane(v: Expr, ty: Ty) -> Expr {
     Expr::Cast(Box::new(bits), ty)
 }
 
+/// The scalar select a bitwise blend of two values under a compare mask
+/// is, and the lane type it selects.
+///
+/// `(~m & a) | (b & m)`, the `or` of an `andn` and an `and` sharing the
+/// mask `m`, in either order and with the `and`'s operands either way, is
+/// the compilers' branchless `c ? b : a` when the low lane of `m` is the
+/// all-ones-or-zero result of a scalar compare (`cmpltsd`): that lane is
+/// `b`'s where `c` holds and `a`'s where it does not. An arm held as
+/// integer bits (`movq xmm4, r8`) is read as the lane's float, not
+/// converted to one. The lanes above are left as a scalar write leaves
+/// them, which the caller allows only where nothing reads them.
+///
+/// # Arguments
+///
+/// * `name` - The `or`'s mnemonic, lowercased.
+/// * `args` - Its operands, the destination first.
+///
+/// # Returns
+///
+/// The select and the type of the compare's lane, `None` for any other
+/// shape.
+fn blend_select(name: &str, args: &[Expr]) -> Option<(Expr, Ty)> {
+    let is = |f: &str, ops: &[&str]| ops.contains(&f);
+    let ([Expr::Call(f, x), Expr::Call(g, y)], true) = (args, is(name, &["orps", "orpd"])) else {
+        return None;
+    };
+    let (andn, and) = match (is(f, &["andnps", "andnpd"]), is(g, &["andnps", "andnpd"])) {
+        (true, false) if is(g, &["andps", "andpd"]) => (x, y),
+        (false, true) if is(f, &["andps", "andpd"]) => (y, x),
+        _ => return None,
+    };
+    let ([m, a], [p, q]) = (andn.as_slice(), and.as_slice()) else {
+        return None;
+    };
+    let b = match (p == m, q == m) {
+        (true, false) => q,
+        (false, true) => p,
+        _ => return None,
+    };
+    let (cond, ty) = compare_mask(m)?;
+    let pick = |v: &Expr| {
+        let lane = scalar_lane(v.clone(), ty);
+        Box::new(if integer_bits(&lane) {
+            Expr::Bitcast(Box::new(lane), ty)
+        } else {
+            lane
+        })
+    };
+    Some((Expr::Ternary(Box::new(cond), pick(b), pick(a)), ty))
+}
+
+/// The scalar compare whose all-ones-or-zero result a value is, and the
+/// lane type it compared: `-(x < y)`, masked to the lane's width.
+///
+/// # Arguments
+///
+/// * `m` - The value.
+fn compare_mask(m: &Expr) -> Option<(Cond, Ty)> {
+    let (neg, width) = match m {
+        Expr::Bin(Op::And, e, k) => (&**e, Some(&**k)),
+        e => (e, None),
+    };
+    let Expr::Un(UnOp::Neg, truth) = neg else {
+        return None;
+    };
+    let Expr::Cond(c) = &**truth else {
+        return None;
+    };
+    let &Flags::FCmp(_, _, _, bits) = &c.flags else {
+        return None;
+    };
+    let ty = match bits {
+        32 => Ty::F32,
+        64 => Ty::F64,
+        _ => return None,
+    };
+    let whole = width.is_none_or(|k| *k == Expr::Const(mask_bits(bits)));
+    whole.then(|| ((**c).clone(), ty))
+}
+
 /// A `movss` or `movsd` into memory, as the bytes it copies.
 ///
 /// The same width is that float. A wider float contributes its low bits,
