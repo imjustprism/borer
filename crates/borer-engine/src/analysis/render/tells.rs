@@ -1114,7 +1114,11 @@ fn string_address(i: &Instruction) -> Option<u64> {
 
 /// Whether the ASCII or UTF-16 run at `va` is a known debugger window.
 fn debugger_name(p: &Program, va: u64) -> bool {
-    let named = |text: &str| DEBUGGER_WINDOWS.iter().any(|w| text.contains(w));
+    let named = |text: &str| {
+        DEBUGGER_WINDOWS
+            .iter()
+            .any(|w| text.eq_ignore_ascii_case(w))
+    };
     cstr_at(p, va, 4, 64).is_some_and(|(_, text)| named(&text))
         || wstr_at(p, va, 4, 64).is_some_and(|(_, text)| named(&text))
 }

@@ -1128,7 +1128,7 @@ fn a_compared_context_word_is_not_a_hardware_breakpoint() {
 }
 
 /// `FindWindow` of a debugger class, followed by an exit, is a tell.
-/// An ordinary class is not.
+/// An ordinary class is not, nor one that only holds a debugger's name.
 #[test]
 fn a_debugger_window_is_named_and_an_ordinary_class_is_not() {
     let mut olly = vec![0u8; 0x108];
@@ -1151,6 +1151,14 @@ fn a_debugger_window_is_named_and_an_ordinary_class_is_not() {
     let text = report_calls(
         &code,
         &ordinary,
+        &[("FindWindowA", 0x402000), ("ExitProcess", 0x402010)],
+    );
+    assert!(!text.contains("debugger window"), "{text}");
+    let mut longer = vec![0u8; 0x110];
+    longer[0x100..0x10e].copy_from_slice(b"OLLYDBG Helper");
+    let text = report_calls(
+        &code,
+        &longer,
         &[("FindWindowA", 0x402000), ("ExitProcess", 0x402010)],
     );
     assert!(!text.contains("debugger window"), "{text}");
