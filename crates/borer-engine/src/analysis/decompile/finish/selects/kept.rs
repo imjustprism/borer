@@ -45,11 +45,17 @@ const SIGNED_BOUND_MAX: u64 = 0x7fff_ffff;
 /// * `lines` - The body lines, rewritten in place.
 /// * `k` - The line.
 /// * `word` - The machine word's type, which the helpers compare at.
+/// * `taken` - The helpers' names a function of the image holds.
 ///
 /// # Returns
 ///
 /// How many lines the rewrite spans, or `None` when it made none.
-pub(super) fn unspell(lines: &mut Vec<String>, k: usize, word: &str) -> Option<usize> {
+pub(super) fn unspell(
+    lines: &mut Vec<String>,
+    k: usize,
+    word: &str,
+    taken: &[&str],
+) -> Option<usize> {
     let line = lines
         .get(k)
         .filter(|l| !l.trim_start().starts_with("//"))?
@@ -68,7 +74,7 @@ pub(super) fn unspell(lines: &mut Vec<String>, k: usize, word: &str) -> Option<u
             t.starts_with("extern ")
                 && (t.contains(&format!(" {name}(")) || t.contains(&format!("*{name}(")))
         });
-        if real {
+        if real || taken.contains(&name) {
             continue;
         }
         for at in word_positions(&line, name) {
@@ -217,7 +223,7 @@ mod tests {
             "a2 = umax(*(uint32_t*)a5, a2);\n",
             "return max(a3, a2) + a4;\n",
         );
-        assert_eq!(select_statements(text, "uint32_t"), want);
+        assert_eq!(select_statements(text, "uint32_t", &[]), want);
     }
 
     /// A helper that is no clamp keeps its name.
@@ -240,7 +246,7 @@ mod tests {
             "a5 = umin(a5, 9);\n",
             "a6 = umax(a6, 2);\n",
         );
-        assert_eq!(select_statements(text, "uint32_t"), text);
+        assert_eq!(select_statements(text, "uint32_t", &[]), text);
     }
 
     /// On a 64-bit target a 32-bit clamp inside a wider statement stays.
@@ -263,7 +269,7 @@ mod tests {
             "var3 = min(a5, 2) >> 1;\n",
             "return var1 + a2 + var2 + a4 + var3;\n",
         );
-        let out = select_statements(text, "uint64_t");
+        let out = select_statements(text, "uint64_t", &[]);
         assert!(out.contains("var1 = umax(a1, 2) << 0x1c;\n"), "{out}");
         assert!(out.contains("if (a2 < 3) {\n  a2 = 3;\n}\n"), "{out}");
         assert!(
@@ -279,7 +285,7 @@ mod tests {
             "var1 = umax(a1, 2) << 1;\n",
             "return var1;\n",
         );
-        assert_eq!(select_statements(fixed, "uint64_t"), fixed);
+        assert_eq!(select_statements(fixed, "uint64_t", &[]), fixed);
         let shared = concat!(
             "// signature: uint64_t f()\n",
             "uint64_t var1, g64_1000;\n",
@@ -287,6 +293,13 @@ mod tests {
             "var1 = umax(g64_1000, 2) << 1;\n",
             "return var1;\n",
         );
-        assert_eq!(select_statements(shared, "uint64_t"), shared);
+        assert_eq!(select_statements(shared, "uint64_t", &[]), shared);
+        let named = concat!(
+            "// signature: uint64_t f(uint64_t a1)\n",
+            "\n",
+            "a1 = umax(a1, 2);\n",
+            "return a1;\n",
+        );
+        assert_eq!(select_statements(named, "uint64_t", &["umax"]), named);
     }
 }

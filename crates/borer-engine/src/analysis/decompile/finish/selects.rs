@@ -32,16 +32,18 @@ mod kept;
 /// * `text` - A decompiled function.
 /// * `word` - The machine word's type, which the `min` and `max` helpers
 ///   compare at.
+/// * `taken` - The helpers' names a function of the image holds, whose
+///   calls are no helper's.
 ///
 /// # Returns
 ///
 /// The text with those assignments rewritten, or unchanged.
-pub(super) fn select_statements(text: &str, word: &str) -> String {
+pub(super) fn select_statements(text: &str, word: &str, taken: &[&str]) -> String {
     let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
     let mut changed = false;
     let mut k = 0;
     while k < lines.len() {
-        if let Some(n) = kept::unspell(&mut lines, k, word) {
+        if let Some(n) = kept::unspell(&mut lines, k, word, taken) {
             changed = true;
             k += n;
             continue;
@@ -1826,21 +1828,21 @@ mod tests {
     #[test]
     fn a_kept_select_is_an_if() {
         assert_eq!(
-            select_statements("  var2 = var3 == 0 ? 0 : var2;\n", "uint64_t"),
+            select_statements("  var2 = var3 == 0 ? 0 : var2;\n", "uint64_t", &[]),
             "  if (var3 == 0) {\n    var2 = 0;\n  }\n"
         );
         assert_eq!(
-            select_statements("x = (a1 < 2 ? x : 2);\n", "uint64_t"),
+            select_statements("x = (a1 < 2 ? x : 2);\n", "uint64_t", &[]),
             "if (a1 >= 2) {\n  x = 2;\n}\n"
         );
         assert_eq!(
-            select_statements("x = (a1 == 0 ? 0 : x) & 0xffffffff;\n", "uint64_t"),
+            select_statements("x = (a1 == 0 ? 0 : x) & 0xffffffff;\n", "uint64_t", &[]),
             "if (a1 == 0) {\n  x = 0;\n}\nx = x & 0xffffffff;\n"
         );
         let picked = "x = a1 < 2 ? a2 : 2;\n";
-        assert_eq!(select_statements(picked, "uint64_t"), picked);
+        assert_eq!(select_statements(picked, "uint64_t", &[]), picked);
         let nested = "x = (a1 < 2 ? 1 : 2) + x;\n";
-        assert_eq!(select_statements(nested, "uint64_t"), nested);
+        assert_eq!(select_statements(nested, "uint64_t", &[]), nested);
     }
 
     /// A clamp of a variable read only there is the `if` before its use;
@@ -1850,13 +1852,13 @@ mod tests {
         let text =
             "uint32_t arg_0, r3;\n\nr3 = a1 | ((arg_0 < 2 ? 2 : arg_0) << 0x1c);\nreturn r3;\n";
         assert_eq!(
-            select_statements(text, "uint64_t"),
+            select_statements(text, "uint64_t", &[]),
             "uint32_t arg_0, r3;\n\nif (arg_0 < 2) {\n  arg_0 = 2;\n}\nr3 = a1 | (arg_0 << 0x1c);\nreturn r3;\n"
         );
         let read = text.replace("return r3;", "return r3 + arg_0;");
-        assert_eq!(select_statements(&read, "uint64_t"), read);
+        assert_eq!(select_statements(&read, "uint64_t", &[]), read);
         let looped = "uint32_t arg_0, r3;\n\nwhile (a1 != 0) {\n  r3 = a1 | ((a2 < 2 ? 2 : arg_0) << 0x1c);\n}\nreturn r3;\n";
-        assert_eq!(select_statements(looped, "uint64_t"), looped);
+        assert_eq!(select_statements(looped, "uint64_t", &[]), looped);
     }
 
     /// An `if` nested alone in an `if`, behind values only its test reads,
@@ -1865,13 +1867,13 @@ mod tests {
     fn nested_tests_are_one_chain() {
         let text = "uint64_t var2, rbx;\n\nif (sub_1(rbx) == 0) {\n  var2 = rbx->field_0x0;\n  if (*(uint8_t*)(var2 + 8) == 61) {\n    sub_2(rbx);\n  }\n}\nreturn 0;\n";
         assert_eq!(
-            select_statements(text, "uint64_t"),
+            select_statements(text, "uint64_t", &[]),
             "uint64_t var2, rbx;\n\nif (sub_1(rbx) == 0 && *(uint8_t*)(rbx->field_0x0 + 8) == 61) {\n  sub_2(rbx);\n}\nreturn 0;\n"
         );
         let read = text.replace("return 0;", "return var2;");
-        assert_eq!(select_statements(&read, "uint64_t"), read);
+        assert_eq!(select_statements(&read, "uint64_t", &[]), read);
         let flag = text.replace("*(uint8_t*)(var2 + 8) == 61", "var2 != 0");
-        assert_eq!(select_statements(&flag, "uint64_t"), flag);
+        assert_eq!(select_statements(&flag, "uint64_t", &[]), flag);
     }
 
     /// A byte-wide flag compared with zero in a chain is the flag; a wider
@@ -1880,7 +1882,7 @@ mod tests {
     fn flags_in_a_chain_are_bare() {
         let text = "uint8_t local_11;\nuint64_t rax;\n\nwhile (rax != 0 && local_11 != 0) {\n  rax = sub_1(rax);\n}\nif (g8_71f3 == 0 || (local_11 != 0)) {\n  return local_11 != 0;\n}\nreturn 0;\n";
         assert_eq!(
-            select_statements(text, "uint64_t"),
+            select_statements(text, "uint64_t", &[]),
             "uint8_t local_11;\nuint64_t rax;\n\nwhile (rax != 0 && local_11) {\n  rax = sub_1(rax);\n}\nif (!g8_71f3 || (local_11 != 0)) {\n  return local_11 != 0;\n}\nreturn 0;\n"
         );
     }
@@ -1892,26 +1894,26 @@ mod tests {
     fn a_truth_diamond_is_a_truth_value() {
         let text = "if (a2 <= a1 || *(uint8_t*)(a2 - 1) != 10) {\n  local_18 = var1;\n  var1 = 0;\n} else {\n  local_18 = var1;\n  var1 = 1;\n}\nreturn var1;\n";
         assert_eq!(
-            select_statements(text, "uint64_t"),
+            select_statements(text, "uint64_t", &[]),
             "local_18 = var1;\nvar1 = a2 > a1 && *(uint8_t*)(a2 - 1) == 10;\nreturn var1;\n"
         );
         let lone = "if (a2 <= a1) {\n  var1 = 0;\n} else {\n  var1 = 1;\n}\nreturn var1;\n";
-        assert_eq!(select_statements(lone, "uint64_t"), lone);
+        assert_eq!(select_statements(lone, "uint64_t", &[]), lone);
         let read = text.replace("local_18 = var1;", "a1 = var1;");
-        assert_eq!(select_statements(&read, "uint64_t"), read);
+        assert_eq!(select_statements(&read, "uint64_t", &[]), read);
         let global = text.replace("local_18 = var1;", "g32_1000 = 1;");
-        assert_eq!(select_statements(&global, "uint64_t"), global);
+        assert_eq!(select_statements(&global, "uint64_t", &[]), global);
         let quoted = "uint8_t g8_1000;
 
 puts(\"a && g8_1000 == 0 || b\");
 return 0;
 ";
-        assert_eq!(select_statements(quoted, "uint64_t"), quoted);
+        assert_eq!(select_statements(quoted, "uint64_t", &[]), quoted);
         let pointed = format!(
             "sub_9(&local_18);
 {text}"
         );
-        assert_eq!(select_statements(&pointed, "uint64_t"), pointed);
+        assert_eq!(select_statements(&pointed, "uint64_t", &[]), pointed);
     }
 
     /// A store to a global between two tests stays a store: another
@@ -1926,7 +1928,7 @@ return 0;
 }
 return 0;
 ";
-        assert_eq!(select_statements(text, "uint64_t"), text);
+        assert_eq!(select_statements(text, "uint64_t", &[]), text);
         let called = "uint32_t var1;
 
 if (a2 != 0) {
@@ -1937,7 +1939,7 @@ if (a2 != 0) {
 }
 return 0;
 ";
-        assert_eq!(select_statements(called, "uint64_t"), called);
+        assert_eq!(select_statements(called, "uint64_t", &[]), called);
     }
 
     /// An `else` that stores a default and then the first arm's value under
@@ -1947,27 +1949,27 @@ return 0;
     fn an_or_of_two_stores_is_one_test() {
         let text = "uint32_t local_c;\n\nif (a1 == 0x40011000) {\n  local_c = g32_20000004;\n} else {\n  local_c = g32_20000000;\n  if (a1 == 0x40011400) {\n    local_c = g32_20000004;\n  }\n}\n*(uint32_t*)(a1 + 8) = local_c;\n";
         assert_eq!(
-            select_statements(text, "uint64_t"),
+            select_statements(text, "uint64_t", &[]),
             "uint32_t local_c;\n\nlocal_c = g32_20000000;\nif (a1 == 0x40011000 || a1 == 0x40011400) {\n  local_c = g32_20000004;\n}\n*(uint32_t*)(a1 + 8) = local_c;\n"
         );
         let called = text.replace("local_c = g32_20000000;", "local_c = sub_1();");
-        assert_eq!(select_statements(&called, "uint64_t"), called);
+        assert_eq!(select_statements(&called, "uint64_t", &[]), called);
         let global = text.replace("local_c", "g32_10");
-        assert_eq!(select_statements(&global, "uint64_t"), global);
+        assert_eq!(select_statements(&global, "uint64_t", &[]), global);
         let noted = format!(
             "// note: &local_c escapes; locals from there up are reloaded after calls\n{text}"
         );
         let noted_out = format!(
             "// note: &local_c escapes; locals from there up are reloaded after calls\n{}",
-            select_statements(text, "uint64_t")
+            select_statements(text, "uint64_t", &[])
         );
-        assert_eq!(select_statements(&noted, "uint64_t"), noted_out);
+        assert_eq!(select_statements(&noted, "uint64_t", &[]), noted_out);
         let aliased = text.replace("uint32_t local_c;", "uint32_t local_c;\nsub_9(&local_c);");
-        assert_eq!(select_statements(&aliased, "uint64_t"), aliased);
+        assert_eq!(select_statements(&aliased, "uint64_t", &[]), aliased);
         let guarded = "uint32_t local_c;\n\nif (a1 == 0) {\n  local_c = 1;\n} else {\n  local_c = *(uint32_t*)a1;\n  if (a2 != 0) {\n    local_c = 1;\n  }\n}\nreturn local_c;\n";
-        assert_eq!(select_statements(guarded, "uint64_t"), guarded);
+        assert_eq!(select_statements(guarded, "uint64_t", &[]), guarded);
         let alias = "uint32_t local_c;\nuint32_t local_58;\n\nif (((uint32_t*)&local_58)[a1] == 1) {\n  local_c = 2;\n} else {\n  local_c = 0;\n  if (a2 != 0) {\n    local_c = 2;\n  }\n}\nreturn local_c;\n";
-        assert_eq!(select_statements(alias, "uint64_t"), alias);
+        assert_eq!(select_statements(alias, "uint64_t", &[]), alias);
     }
 
     /// A global's address set before an `if` that sets another moves into
@@ -1976,11 +1978,11 @@ return 0;
     fn a_global_address_before_an_if_is_its_else() {
         let text = "uint64_t buf;\n\nbuf = &g64_c740;\nif (g32_c728 != 0) {\n  kill(-g32_c728, 9);\n  buf = &g64_c840;\n}\nwrite(2, buf, 1);\n";
         assert_eq!(
-            select_statements(text, "uint64_t"),
+            select_statements(text, "uint64_t", &[]),
             "uint64_t buf;\n\nif (g32_c728 != 0) {\n  kill(-g32_c728, 9);\n  buf = &g64_c840;\n} else {\n  buf = &g64_c740;\n}\nwrite(2, buf, 1);\n"
         );
         let local = text.replace("&g64_c740", "&local_8");
-        assert_eq!(select_statements(&local, "uint64_t"), local);
+        assert_eq!(select_statements(&local, "uint64_t", &[]), local);
     }
 
     /// Arms that store two different names of one type are a choice. An arm
@@ -1990,22 +1992,22 @@ return 0;
     fn two_names_in_an_if_are_a_choice() {
         let text = "uint64_t var1;\nFILE *stdout; // @ 0x7160\nFILE *stderr; // @ 0x71a0\n\nif (a1 == 0) {\n  var1 = stdout;\n} else {\n  var1 = stderr;\n}\nfprintf(var1, s);\n";
         assert_eq!(
-            select_statements(text, "uint64_t"),
+            select_statements(text, "uint64_t", &[]),
             "uint64_t var1;\nFILE *stdout; // @ 0x7160\nFILE *stderr; // @ 0x71a0\n\nvar1 = a1 == 0 ? stdout : stderr;\nfprintf(var1, s);\n"
         );
         let mixed = "uint64_t var1;\nint32_t narrow;\nuint32_t wide;\n\nif (c) {\n  var1 = narrow;\n} else {\n  var1 = wide;\n}\nreturn var1;\n";
-        assert_eq!(select_statements(mixed, "uint64_t"), mixed);
+        assert_eq!(select_statements(mixed, "uint64_t", &[]), mixed);
         let mixed_sig = "// signature: void f(int32_t narrow, uint32_t wide)\nuint64_t var1;\n\nif (c) {\n  var1 = narrow;\n} else {\n  var1 = wide;\n}\nreturn var1;\n";
-        assert_eq!(select_statements(mixed_sig, "uint64_t"), mixed_sig);
+        assert_eq!(select_statements(mixed_sig, "uint64_t", &[]), mixed_sig);
         let same_sig = "// signature: void f(FILE* stdout, FILE *stderr)\nuint64_t var1;\n\nif (a1 == 0) {\n  var1 = stdout;\n} else {\n  var1 = stderr;\n}\nreturn var1;\n";
         assert_eq!(
-            select_statements(same_sig, "uint64_t"),
+            select_statements(same_sig, "uint64_t", &[]),
             "// signature: void f(FILE* stdout, FILE *stderr)\nuint64_t var1;\n\nvar1 = a1 == 0 ? stdout : stderr;\nreturn var1;\n"
         );
         let bare = "\nif (a1 == 0) {\n  var1 = stdout;\n} else {\n  var1 = stderr;\n}\n";
-        assert_eq!(select_statements(bare, "uint64_t"), bare);
+        assert_eq!(select_statements(bare, "uint64_t", &[]), bare);
         let expr = "uint32_t r1;\n\nif (a1 == 0) {\n  r1 = a1 + a2;\n} else {\n  r1 = a1 + a3;\n}\nreturn r1;\n";
-        assert_eq!(select_statements(expr, "uint64_t"), expr);
+        assert_eq!(select_statements(expr, "uint64_t", &[]), expr);
     }
 
     /// A select between a field and that field with one bit updated, under
@@ -2015,29 +2017,29 @@ return 0;
     fn a_complementary_bit_is_an_if() {
         let text = "uint32_t r3;\n\nr3 = (a2 != 8 ? (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc) | 0x1000 : (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc));\na1->field_0xc = r3;\n";
         assert_eq!(
-            select_statements(text, "uint64_t"),
+            select_statements(text, "uint64_t", &[]),
             "uint32_t r3;\n\nif (a2 != 8) {\n  a1->field_0xc = (uint32_t)(a1->field_0xc | 0x1000);\n} else {\n  a1->field_0xc = (uint32_t)(a1->field_0xc & 0xffffefff);\n}\n"
         );
         let clear = "uint32_t r1;\n\nr1 = (a2 != 1 ? (a2 == 1 ? a1->field_0x4 | a4 : a1->field_0x4) & (a4 ^ 0xffffffff) : (a2 == 1 ? a1->field_0x4 | a4 : a1->field_0x4));\na1->field_0x4 = r1;\nr1 = 0;\n";
         assert_eq!(
-            select_statements(clear, "uint64_t"),
+            select_statements(clear, "uint64_t", &[]),
             "uint32_t r1;\n\nif (a2 != 1) {\n  a1->field_0x4 = (uint32_t)(a1->field_0x4 & (a4 ^ 0xffffffff));\n} else {\n  a1->field_0x4 = (uint32_t)(a1->field_0x4 | a4);\n}\nr1 = 0;\n"
         );
         let live = "uint32_t r3;\n\nr3 = (a2 != 8 ? (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc) | 0x1000 : (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc));\na1->field_0xc = r3;\nreturn r3;\n";
-        assert_eq!(select_statements(live, "uint64_t"), live);
+        assert_eq!(select_statements(live, "uint64_t", &[]), live);
         let branched = "uint32_t r3;\n\nr3 = (a2 != 8 ? (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc) | 0x1000 : (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc));\na1->field_0xc = r3;\nif (a3) {\n  r3 = a4;\n}\nreturn r3;\n";
-        assert_eq!(select_statements(branched, "uint64_t"), branched);
+        assert_eq!(select_statements(branched, "uint64_t", &[]), branched);
         let called = "uint32_t r3;\n\nr3 = (next() != 8 ? (next() == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc) | 0x1000 : (next() == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc));\na1->field_0xc = r3;\n";
-        assert_eq!(select_statements(called, "uint64_t"), called);
+        assert_eq!(select_statements(called, "uint64_t", &[]), called);
         let spun = "uint32_t r3;\n\nwhile (a3) {\n  consume(r3);\n  r3 = (a2 != 8 ? (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc) | 0x1000 : (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc));\n  a1->field_0xc = r3;\n}\n";
-        assert_eq!(select_statements(spun, "uint64_t"), spun);
+        assert_eq!(select_statements(spun, "uint64_t", &[]), spun);
         let indexed = "uint32_t r3;\n\nr3 = (a2 != 8 ? (a2 == 8 ? table[r3] & 0xffffefff : table[r3]) | 0x1000 : (a2 == 8 ? table[r3] & 0xffffefff : table[r3]));\ntable[r3] = r3;\n";
-        assert_eq!(select_statements(indexed, "uint64_t"), indexed);
+        assert_eq!(select_statements(indexed, "uint64_t", &[]), indexed);
         let escaped = "uint32_t local_c;\n\nescape(&local_c);\nlocal_c = (a2 != 8 ? (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc) | 0x1000 : (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc));\na1->field_0xc = local_c;\n";
-        assert_eq!(select_statements(escaped, "uint64_t"), escaped);
+        assert_eq!(select_statements(escaped, "uint64_t", &[]), escaped);
         let wide = "uint64_t r3;\n\nr3 = (a2 != 8 ? (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc) | 0x1000 : (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc));\na1->field_0xc = r3;\n";
         assert_eq!(
-            select_statements(wide, "uint64_t"),
+            select_statements(wide, "uint64_t", &[]),
             "uint64_t r3;\n\nif (a2 != 8) {\n  a1->field_0xc = (uint64_t)(a1->field_0xc | 0x1000);\n} else {\n  a1->field_0xc = (uint64_t)(a1->field_0xc & 0xffffefff);\n}\n"
         );
     }
@@ -2048,39 +2050,42 @@ return 0;
     fn break_copies_and_split_branches_fold() {
         let break_copy = "if (a1 == 0) {\n  var1 = a2;\n  break;\n}\nvar1 = a2;\n";
         assert_eq!(
-            select_statements(break_copy, "uint64_t"),
+            select_statements(break_copy, "uint64_t", &[]),
             "var1 = a2;\nif (a1 == 0) {\n  break;\n}\n"
         );
         let red_ret = "if (a1 != 0) {\n  sub_1(a1);\n  return 0;\n}\nreturn 0;\n";
         assert_eq!(
-            select_statements(red_ret, "uint64_t"),
+            select_statements(red_ret, "uint64_t", &[]),
             "if (a1 != 0) {\n  sub_1(a1);\n}\nreturn 0;\n"
         );
         let pre_if = "var1 = 0;\nif (a1 != 0) {\n  sub_1(a1);\n  var1 = a2;\n}\nreturn var1;\n";
         assert_eq!(
-            select_statements(pre_if, "uint64_t"),
+            select_statements(pre_if, "uint64_t", &[]),
             "if (a1 != 0) {\n  sub_1(a1);\n  var1 = a2;\n} else {\n  var1 = 0;\n}\nreturn var1;\n"
         );
         let pre_call = "// signature: uint64_t f(uint64_t a2)\nuint64_t var1;\n\nvar1 = a2;\nif (a2 != 0) {\n  var1 = sub_1(var1);\n}\nreturn var1;\n";
         assert_eq!(
-            select_statements(pre_call, "uint64_t"),
+            select_statements(pre_call, "uint64_t", &[]),
             "// signature: uint64_t f(uint64_t a2)\nuint64_t var1;\n\nif (a2 != 0) {\n  var1 = sub_1(a2);\n} else {\n  var1 = 0;\n}\nreturn var1;\n"
         );
         let narrow_call = "// signature: uint64_t f(uint64_t a2)\nuint8_t local_8;\n\nlocal_8 = a2;\nif (a2 != 0) {\n  local_8 = sub_1(local_8);\n}\nreturn local_8;\n";
-        assert_eq!(select_statements(narrow_call, "uint64_t"), narrow_call);
+        assert_eq!(select_statements(narrow_call, "uint64_t", &[]), narrow_call);
         let pointer_call = "// signature: uint64_t f(uint64_t a2)\nchar *var1;\n\nvar1 = a2;\nif (a2 != 0) {\n  var1 = sub_1(var1);\n}\nreturn var1;\n";
-        assert_eq!(select_statements(pointer_call, "uint64_t"), pointer_call);
+        assert_eq!(
+            select_statements(pointer_call, "uint64_t", &[]),
+            pointer_call
+        );
         let float_call = "// signature: double f(double a2)\ndouble var1;\n\nvar1 = a2;\nif (a2 != 0) {\n  var1 = sub_1(var1);\n}\nreturn var1;\n";
-        assert_eq!(select_statements(float_call, "uint64_t"), float_call);
+        assert_eq!(select_statements(float_call, "uint64_t", &[]), float_call);
         let shared_ret =
             "if (a1 == 0) {\n  sub_1(a2);\n  return var1;\n}\nsub_2(a2);\nreturn var1;\n";
         assert_eq!(
-            select_statements(shared_ret, "uint64_t"),
+            select_statements(shared_ret, "uint64_t", &[]),
             "if (a1 == 0) {\n  sub_1(a2);\n} else {\n  sub_2(a2);\n}\nreturn var1;\n"
         );
         let dup = "if (a1 != 0) {\n  if (a2 > 0 && a2 < 9) {\n    g32_1000 = a2;\n  } else {\n    sub_1(a1);\n  }\n} else {\n  sub_1(a1);\n}\n";
         assert_eq!(
-            select_statements(dup, "uint64_t"),
+            select_statements(dup, "uint64_t", &[]),
             "if ((a1 != 0) && (a2 > 0 && a2 < 9)) {\n  g32_1000 = a2;\n} else {\n  sub_1(a1);\n}\n"
         );
     }

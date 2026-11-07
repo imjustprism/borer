@@ -94,17 +94,17 @@ mod tests {
     fn a_chain_of_truth_returns_is_one_test() {
         let text = "r0 = sub_2(a1);\nif (sub_1(a1) == 0) {\n  return 0;\n}\nif (a2 < 3 || a3 != 0) return 0;\nreturn 1;\n";
         assert_eq!(
-            select_statements(text, "uint64_t"),
+            select_statements(text, "uint64_t", &[]),
             "r0 = sub_2(a1);\nreturn sub_1(a1) != 0 && (a2 >= 3 && a3 == 0);\n"
         );
         let any = "if (a1 == 0) {\n  return 1;\n}\nif (a2 == 0) {\n  return 1;\n}\nreturn 0;\n";
         assert_eq!(
-            select_statements(any, "uint64_t"),
+            select_statements(any, "uint64_t", &[]),
             "return a1 == 0 || a2 == 0;\n"
         );
         let one = "if (a1 == 0) {\n  return 0;\n}\nreturn 1;\n";
-        assert_eq!(select_statements(one, "uint64_t"), one);
+        assert_eq!(select_statements(one, "uint64_t", &[]), one);
         let other = "if (a1 == 0) {\n  return 0;\n}\nif (a2 == 0) {\n  return 0;\n}\nreturn 2;\n";
-        assert_eq!(select_statements(other, "uint64_t"), other);
+        assert_eq!(select_statements(other, "uint64_t", &[]), other);
     }
 }

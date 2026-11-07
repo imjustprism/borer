@@ -143,8 +143,9 @@ pub(super) fn polish_skipping(
         text,
         drop_repeated_assignments,
     );
+    let taken = helper_names_taken(callers);
     let text = skip.apply(Pass::SelectStatements, text, |t| {
-        selects::select_statements(t, word)
+        selects::select_statements(t, word, &taken)
     });
     let mut out = String::with_capacity(text.len() + 1);
     for (i, line) in text.lines().enumerate() {
@@ -168,6 +169,44 @@ pub(super) fn polish_skipping(
     let text = skip.apply(Pass::FloatBitCopies, text, float_bit_copies);
     let text = skip.apply(Pass::RefoldJumps, text, refold_jumps);
     skip.apply(Pass::SpellFloatRelations, text, spell_float_relations)
+}
+
+/// The `min` and `max` helpers' names the image already gives a function or
+/// an import, so a call spelled that way may be that function's and no
+/// helper's.
+///
+/// Without the image in scope every name may be, and all four are taken.
+/// The names are read once per analysis ([`Analysis::derived`]). A user's
+/// name is not read: each is filed by its address, and looking for one by
+/// its spelling would make the text read every name, so any rename would
+/// rebuild it. A user who names a function after a helper has its calls
+/// read as the helper's throughout the text, the checker's run included.
+///
+/// # Arguments
+///
+/// * `callers` - The image, the analysis, the names in force and the
+///   function.
+fn helper_names_taken(callers: Option<callee::Scope<'_>>) -> Vec<&'static str> {
+    const HELPERS: [&str; 4] = ["umax", "umin", "max", "min"];
+    let Some((program, analysis, _, _)) = callers else {
+        return HELPERS.to_vec();
+    };
+    let taken = analysis.derived.get_or_build("helper_names_taken", (), || {
+        HELPERS
+            .into_iter()
+            .filter(|h| {
+                analysis
+                    .functions
+                    .iter()
+                    .any(|f| f.name.as_deref() == Some(*h))
+                    || program
+                        .symbols
+                        .iter()
+                        .any(|s| crate::analysis::bare_name(&s.name) == *h)
+            })
+            .collect::<Vec<&'static str>>()
+    });
+    taken.to_vec()
 }
 
 /// What something other than the code typed in the function.
