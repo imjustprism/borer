@@ -1035,3 +1035,113 @@ fn a_switch_moved_to_pc_from_a_loaded_target_resolves() {
         a.jump_tables
     );
 }
+
+/// A guard on the index shifted down admits the cases the shift scales.
+///
+/// Clang checks `k <= 7` as `(k >> 1) <= 3` and indexes the table by `k`
+/// it reloaded, so all eight cases are the table's, not the four the
+/// immediate counts. A table indexed by the shifted value itself keeps
+/// the four.
+#[test]
+fn a_switch_guard_on_the_shifted_index_counts_every_case() {
+    let mut words: Vec<u32> = vec![
+        0xe92d_4800, // ASM: push {r11, lr}
+        0xe1a0_b00d, // ASM: mov r11, sp
+        0xe24d_d008, // ASM: sub sp, sp, #8
+        0xe58d_0004, // ASM: str r0, [sp, #4]
+        0xe59d_0004, // ASM: ldr r0, [sp, #4]
+        0xe58d_0000, // ASM: str r0, [sp]
+        0xe1a0_00a0, // ASM: lsr r0, r0, #1
+        0xe350_0003, // ASM: cmp r0, #3
+        0x8a00_0024, // ASM: bhi 0xb8
+        0xe59d_1000, // ASM: ldr r1, [sp]
+        0xe28f_0008, // ASM: add r0, pc, #8
+        0xe790_0101, // ASM: ldr r0, [r0, r1, lsl #2]
+        0xe1a0_f000, // ASM: mov pc, r0                (0x30)
+        0xe320_f000, // ASM: nop
+    ];
+    words.extend([0u32; 8]); // ASM: .word case 0..7 (0x38)
+    let cases: Vec<u64> = (0..8u64).map(|k| ELF_TEXT + 0x58 + k * 12).collect();
+    for k in 0..8u32 {
+        words.push(0xe3a0_0000 | (k + 1)); // ASM: mov r0, #k+1
+        words.push(0xe1a0_d00b); // ASM: mov sp, r11
+        words.push(0xe8bd_8800); // ASM: pop {r11, pc}
+    }
+    words.push(0xe3a0_0000); // ASM: mov r0, #0               (0xb8)
+    words.push(0xe1a0_d00b); // ASM: mov sp, r11
+    words.push(0xe8bd_8800); // ASM: pop {r11, pc}
+    for (slot, case) in words[14..22].iter_mut().zip(&cases) {
+        *slot = u32::try_from(*case).expect("a 32-bit address");
+    }
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let p = Program::from_bytes(PathBuf::from("lsr-guard.elf"), elf32(&bytes, &[], ELF_TEXT))
+        .expect("parses");
+    let a = Analysis::compute(&p);
+    assert_eq!(
+        a.jump_tables.get(&(ELF_TEXT + 0x30)),
+        Some(&cases),
+        "{:x?}",
+        a.jump_tables
+    );
+    words[9] = 0xe320_f000; // ASM: nop
+    words[10] = 0xe28f_1008; // ASM: add r1, pc, #8
+    words[11] = 0xe791_0100; // ASM: ldr r0, [r1, r0, lsl #2]: indexed by k >> 1
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let p = Program::from_bytes(PathBuf::from("lsr-index.elf"), elf32(&bytes, &[], ELF_TEXT))
+        .expect("parses");
+    let a = Analysis::compute(&p);
+    assert_eq!(
+        a.jump_tables.get(&(ELF_TEXT + 0x30)),
+        Some(&cases[..4].to_vec()),
+        "{:x?}",
+        a.jump_tables
+    );
+}
+
+/// A Thumb guard on the index shifted down admits the cases the shift
+/// scales.
+///
+/// `lsrs r0, r0, #1; cmp r0, #1; bhi` checks `k <= 3`, and the dispatch
+/// reloads `k` from the slot it was spilled to, so `tbb [pc, r1]` has four
+/// cases. A `tbb` by the shifted register itself has two.
+#[test]
+fn a_thumb_switch_guard_on_the_shifted_index_counts_every_case() {
+    let mut text: Vec<u16> = vec![
+        0xb580, // ASM: push {r7, lr}
+        0x466f, // ASM: mov r7, sp
+        0xb082, // ASM: sub sp, #8
+        0x9000, // ASM: str r0, [sp]
+        0x0840, // ASM: lsrs r0, r0, #1
+        0x2801, // ASM: cmp r0, #1
+        0xd810, // ASM: bhi 0x30
+        0x9900, // ASM: ldr r1, [sp]
+        0xe8df, 0xf001, // ASM: tbb [pc, r1]      (0x10)
+        0x0502, // ASM: .byte 2, 5
+        0x0b08, // ASM: .byte 8, 11
+    ];
+    for k in 0..5u16 {
+        text.push(0x2000 | ((k + 1) % 5)); // ASM: movs r0, #k+1 (#0 for the default at 0x30)
+        text.push(0xb002); // ASM: add sp, #8
+        text.push(0xbd80); // ASM: pop {r7, pc}
+    }
+    let cases: Vec<u64> = [0x18, 0x1e, 0x24, 0x2a]
+        .iter()
+        .map(|o| ELF_TEXT + o)
+        .collect();
+    let table = |text: &[u16]| {
+        let bytes: Vec<u8> = text.iter().flat_map(|h| h.to_le_bytes()).collect();
+        let p = Program::from_bytes(
+            PathBuf::from("tbb-lsr.elf"),
+            elf32(&bytes, &[], ELF_TEXT | 1),
+        )
+        .expect("parses");
+        Analysis::compute(&p)
+            .jump_tables
+            .get(&(ELF_TEXT + 0x10))
+            .cloned()
+    };
+    assert_eq!(table(&text), Some(cases.clone()));
+    text[7] = 0xbf00; // ASM: nop
+    text[9] = 0xf000; // ASM: tbb [pc, r0]: indexed by k >> 1
+    assert_eq!(table(&text), Some(cases[..2].to_vec()));
+}

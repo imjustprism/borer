@@ -209,15 +209,17 @@ fn before(seen: &BTreeMap<u64, Insn>, at: u64) -> Vec<&Insn> {
 ///
 /// The guard is a `cmp` with an immediate followed by a `bhi` to the
 /// default or a return under `hi` (one more than the immediate) or the
-/// same under `hs` (the immediate), or an `and` with a mask one short of a
-/// power of two. A dispatch under `ls` or `lo` is its own guard: it runs
+/// same under `hs` (the immediate), scaled when the compared value is the
+/// index shifted down ([`unshifted_index`]), or an `and` with a mask one
+/// short of a power of two. A dispatch under `ls` or `lo` is its own guard: it runs
 /// only when the `cmp` admits the case.
 ///
 /// # Arguments
 ///
 /// * `older` - The instructions before the dispatch, nearest first.
-/// * `own` - The dispatch's own condition.
-fn bound(older: &[&Insn], own: Cond) -> Option<u64> {
+/// * `j` - The dispatch, whose own condition may guard it.
+fn bound(older: &[&Insn], j: &Insn) -> Option<u64> {
+    let own = j.cond;
     let mut guard = if own == Cond::Ls {
         Some(Cond::Hi)
     } else if own == Cond::Lo {
@@ -225,19 +227,21 @@ fn bound(older: &[&Insn], own: Cond) -> Option<u64> {
     } else {
         None
     };
-    for i in older {
+    for (k, i) in older.iter().enumerate() {
         if matches!(i.flow(), Flow::CondJump | Flow::Jump | Flow::Return)
             && matches!(i.cond, Cond::Hi | Cond::Hs)
         {
             guard = Some(i.cond);
         } else if let Op::Dp {
             kind: DpKind::Cmp,
+            rn,
             src: Operand::Imm { value, .. },
             ..
         } = i.op
         {
             let more = u64::from(guard? == Cond::Hi);
-            return Some(u64::from(value) + more);
+            let scale = unshifted_index(older, j, k, rn).unwrap_or(0);
+            return Some((u64::from(value) + more) << scale);
         } else if let Op::Dp {
             kind: DpKind::And,
             src: Operand::Imm { value, .. },
@@ -250,6 +254,111 @@ fn bound(older: &[&Insn], own: Cond) -> Option<u64> {
         }
     }
     None
+}
+
+/// Returns the shift a guard compares its index after, when the dispatch
+/// still indexes by the unshifted value.
+///
+/// A compiler checks `k <= 299` as `(k >> 2) <= 74` when 299 is no
+/// encodable immediate, and the table is still indexed by `k`, so the
+/// guard admits `75 << 2` cases. The index is known to be `k` only in the
+/// shape Clang emits at `-O0`: `k` stored to a stack slot, shifted in its
+/// register, compared, and reloaded from that slot for the dispatch, with
+/// nothing between that moves the stack, writes the slot again or
+/// changes `k` before the shift. A table indexed by the shifted value
+/// itself (`switch (k / 4)`) keeps the count the immediate gives.
+///
+/// # Arguments
+///
+/// * `older` - The instructions before the dispatch, nearest first.
+/// * `j` - The dispatch.
+/// * `cmp` - Where the guard's `cmp` is in `older`.
+/// * `rn` - The register it compares.
+///
+/// # Returns
+///
+/// The shift amount, `None` for any other shape.
+fn unshifted_index(older: &[&Insn], j: &Insn, cmp: usize, rn: a32::Reg) -> Option<u64> {
+    let writes = |i: &Insn, r: a32::Reg| i.registers().writes.contains(&r);
+    let (at, shift) = older
+        .iter()
+        .enumerate()
+        .skip(cmp + 1)
+        .find(|(_, i)| writes(i, rn))?;
+    let Op::Dp {
+        kind: DpKind::Mov,
+        rd,
+        src:
+            Operand::Reg {
+                rm: src,
+                shift: a32::Shift::Lsr,
+                amount,
+            },
+        ..
+    } = shift.op
+    else {
+        return None;
+    };
+    let index = match j.op {
+        Op::Tb { rm, .. } => rm,
+        _ => [j]
+            .into_iter()
+            .chain(older.iter().copied())
+            .find_map(|i| match i.op {
+                Op::Load {
+                    addr:
+                        a32::Addr {
+                            offset:
+                                Offset::Reg {
+                                    rm,
+                                    amount: 2,
+                                    sub: false,
+                                    ..
+                                },
+                            ..
+                        },
+                    ..
+                } => Some(rm),
+                _ => None,
+            })?,
+    };
+    let stack = |i: &Insn| match i.op {
+        Op::Load {
+            width: a32::Width::Word,
+            rt,
+            addr:
+                a32::Addr {
+                    base: a32::SP,
+                    offset: Offset::Imm(o),
+                    index: Index::Offset,
+                },
+        }
+        | Op::Store {
+            width: a32::Width::Word,
+            rt,
+            addr:
+                a32::Addr {
+                    base: a32::SP,
+                    offset: Offset::Imm(o),
+                    index: Index::Offset,
+                },
+        } => Some((rt, o)),
+        _ => None,
+    };
+    let (reload, load) = older
+        .iter()
+        .enumerate()
+        .take(cmp)
+        .find(|(_, i)| writes(i, index))?;
+    let (rt, slot) = stack(load).filter(|_| matches!(load.op, Op::Load { .. }))?;
+    let (spill, store) = older.iter().enumerate().skip(reload + 1).find(|(_, i)| {
+        writes(i, a32::SP)
+            || matches!(i.op, Op::Store { .. }) && stack(i).is_some_and(|(_, o)| o == slot)
+    })?;
+    let spilled = matches!(store.op, Op::Store { .. }) && stack(store) == Some((src, slot));
+    let kept = !older.get(at + 1..spill)?.iter().any(|i| writes(i, src));
+    (rd == rn && rt == index && (1..32).contains(&amount) && spill > at && spilled && kept)
+        .then_some(u64::from(amount))
 }
 
 /// Resolves the jump table an indirect jump dispatches through.
@@ -265,7 +374,7 @@ fn bound(older: &[&Insn], own: Cond) -> Option<u64> {
 /// The table, or `None` when the jump is no dispatch the walk can bound.
 fn table(program: &Program, seen: &BTreeMap<u64, Insn>, j: &Insn) -> Option<Table> {
     let older = before(seen, j.va);
-    let count = bound(&older, j.cond)?.min(TABLE_MAX);
+    let count = bound(&older, j)?.min(TABLE_MAX);
     let word = |at: u64, n: usize| -> Option<u64> {
         let b = program.read_va(at, n)?;
         Some(
