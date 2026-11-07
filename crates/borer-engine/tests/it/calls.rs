@@ -10,6 +10,7 @@
 
 use borer_engine::analysis::render::calls_tsv;
 use borer_engine::analysis::{Analysis, Overlay};
+use borer_engine::num::from_usize;
 use borer_engine::program::{Arch, Program, Section, Symbol, SymbolKind};
 
 /// A raw x64 image whose one function calls an import four times.
@@ -153,27 +154,29 @@ fn a_mid_function_address_and_a_bad_predicate_are_refused() {
 }
 
 /// Decompiles an arm64 function at `0x401000` that jumps through a table
-/// of functions at `0x402000`, its entries `op0` at `0x401020` and `op1` at
-/// `0x401028`.
+/// of functions at `0x402000`, its entries `op0`, `op1`, ... after the
+/// head, from `0x401020` for a head of eight words or fewer.
 ///
 /// # Arguments
 ///
-/// * `head` - The function's words up to its `br x3`, at most eight.
-/// * `ops` - The two table functions' words, two each.
-fn table_jump(head: &[u32], ops: [u32; 4]) -> String {
+/// * `head` - The function's words up to its `br x3`, padded to eight.
+/// * `ops` - The table functions' words, two each.
+fn table_jump(head: &[u32], ops: &[u32]) -> String {
     let mut words = head.to_vec();
-    words.resize(8, 0xd503_201f);
-    words.extend_from_slice(&ops);
+    words.resize(head.len().max(8), 0xd503_201f);
+    let first = 0x40_1000 + 4 * from_usize(words.len());
+    words.extend_from_slice(ops);
     let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
-    let table: Vec<u8> = [0x0040_1020_u64, 0x0040_1028]
-        .iter()
-        .flat_map(|w| w.to_le_bytes())
+    let entries: Vec<u64> = (0..ops.len() / 2)
+        .map(|k| first + 8 * from_usize(k))
         .collect();
+    let table: Vec<u8> = entries.iter().flat_map(|w| w.to_le_bytes()).collect();
     let mut p = crate::raw::image(Arch::Arm64, &code, &table);
-    p.symbols = [("op0", 0x40_1020), ("op1", 0x40_1028)]
-        .into_iter()
-        .map(|(name, addr)| Symbol {
-            name: name.to_owned(),
+    p.symbols = entries
+        .iter()
+        .enumerate()
+        .map(|(k, &addr)| Symbol {
+            name: format!("op{k}"),
             addr,
             kind: SymbolKind::Local,
         })
@@ -209,13 +212,51 @@ fn a_jump_through_a_function_table_is_a_tail_call() {
         0xcb01_0000, // ASM: sub x0, x0, x1
         0xd65f_03c0, // ASM: ret
     ];
-    let text = table_jump(&head, ops);
+    let text = table_jump(&head, &ops);
     assert!(!text.contains("goto"), "{text}");
     assert!(
         text.contains("return ((uint64_t (*)(uint64_t, uint64_t))"),
         "{text}"
     );
     assert!(text.contains("(a2, a3);"), "{text}");
+}
+
+/// A jump through a table entry the lifter wrote out early, as an index
+/// too long to read inline makes it, is still a tail call through the table.
+///
+/// Windows on Arm's `return ops[k % 3](a, b);` computes `k % 3` with a
+/// multiply-high before the load, so the entry is written out as a variable
+/// and the jump reads only its name.
+#[test]
+fn a_jump_through_a_table_entry_written_out_early_is_a_tail_call() {
+    let head = [
+        0x5295_5568, // ASM: mov w8, #0xaaab
+        0xb000_0009, // ASM: adrp x9, 0x402000
+        0x9100_0129, // ASM: add x9, x9, #0
+        0x72b5_5548, // ASM: movk w8, #0xaaaa, lsl #16
+        0x9ba8_7c08, // ASM: umull x8, w0, w8
+        0xd361_fd08, // ASM: lsr x8, x8, #33
+        0x0b08_0508, // ASM: add w8, w8, w8, lsl #1
+        0x4b08_0008, // ASM: sub w8, w0, w8
+        0x2a01_03e0, // ASM: mov w0, w1
+        0x2a02_03e1, // ASM: mov w1, w2
+        0xf868_5923, // ASM: ldr x3, [x9, w8, uxtw #3]
+        BR_X3,
+    ];
+    let ops = [
+        0x9100_0400, // ASM: add x0, x0, #1
+        0xd65f_03c0, // ASM: ret
+        0xcb01_0000, // ASM: sub x0, x0, x1
+        0xd65f_03c0, // ASM: ret
+        0x9b01_7c00, // ASM: mul x0, x0, x1
+        0xd65f_03c0, // ASM: ret
+    ];
+    let text = table_jump(&head, &ops);
+    assert!(!text.contains("goto"), "{text}");
+    assert!(
+        text.contains("return ((uint64_t (*)(uint64_t, uint64_t))"),
+        "{text}"
+    );
 }
 
 /// A table jump whose functions read a register the function never sets
@@ -230,7 +271,7 @@ fn a_table_jump_with_an_unknown_argument_stays_a_goto() {
         0xcb01_0000, // ASM: sub x0, x0, x1
         0xd65f_03c0, // ASM: ret
     ];
-    let text = table_jump(&head, ops);
+    let text = table_jump(&head, &ops);
     assert!(text.contains("goto *"), "{text}");
 }
 
@@ -246,7 +287,7 @@ fn a_table_of_unlike_functions_stays_a_goto() {
         0x1e60_2800, // ASM: fadd d0, d0, d0
         0xd65f_03c0, // ASM: ret
     ];
-    let text = table_jump(&head, ops);
+    let text = table_jump(&head, &ops);
     assert!(text.contains("goto *"), "{text}");
 }
 
@@ -262,6 +303,6 @@ fn a_table_of_float_functions_stays_a_goto() {
         0x1e60_0800, // ASM: fmul d0, d0, d0
         0xd65f_03c0, // ASM: ret
     ];
-    let text = table_jump(&head, ops);
+    let text = table_jump(&head, &ops);
     assert!(text.contains("goto *"), "{text}");
 }

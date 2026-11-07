@@ -94,7 +94,10 @@ impl Exec<'_, '_> {
     ///
     /// Such a jump leaves the function for one of them, a tail call through
     /// the table (`return ops[k](a, b);`), where a table of the function's
-    /// own code addresses would be a switch.
+    /// own code addresses would be a switch. A target that is the name of a
+    /// register written out early ([`Self::early_value`]), as an entry read
+    /// at an index too long to read inline is, is the read it was written
+    /// out as.
     ///
     /// # Arguments
     ///
@@ -117,7 +120,11 @@ impl Exec<'_, '_> {
                 _ => {}
             }
         }
-        let Expr::Deref(addr, _) = target else {
+        let read = match target {
+            Expr::Var(k) => self.early_value(*k).unwrap_or(target),
+            other => other,
+        };
+        let Expr::Deref(addr, _) = read else {
             return Vec::new();
         };
         let mut found = Vec::new();
