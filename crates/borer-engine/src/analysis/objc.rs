@@ -174,8 +174,9 @@ pub(crate) enum Arg {
     Slot(u64),
     /// The result of the call at this address.
     Result(u64),
-    /// Not written since the function's entry: what its caller passed.
-    Entry,
+    /// Not written since the function's entry: the argument its caller
+    /// passed at this position, 0 the first.
+    Param(u8),
     /// Anything else.
     Unknown,
 }
@@ -569,8 +570,9 @@ fn x86_calls(p: &Program, f: &Function) -> Vec<Call> {
     /// `rax`, `rcx`, `rdx`, `rsi`, `rdi` and `r8` to `r11` by bank slot:
     /// what a System V callee may change.
     const CLOBBERS: [usize; 9] = [0, 1, 2, 6, 7, 8, 9, 10, 11];
-    /// `rdi`, `rsi` and `rdx` by bank slot: the first three arguments.
-    const ARGS: [usize; 3] = [7, 6, 2];
+    /// `rdi`, `rsi`, `rdx`, `rcx`, `r8` and `r9` by bank slot: the System V
+    /// argument registers in order, the first three a send's.
+    const ARGS: [usize; 6] = [7, 6, 2, 1, 8, 9];
     /// General-purpose registers banked.
     const GPRS: usize = 16;
     let gpr = |r: crate::isa::x86::Register| {
@@ -585,11 +587,14 @@ fn x86_calls(p: &Program, f: &Function) -> Vec<Call> {
     let mut regs = [Arg::Unknown; GPRS];
     for (b, carry) in f.blocks.iter().zip(carried) {
         if !carry {
-            regs = [if b.start == f.entry {
-                Arg::Entry
-            } else {
-                Arg::Unknown
-            }; GPRS];
+            regs = [Arg::Unknown; GPRS];
+            if b.start == f.entry {
+                for (n, k) in (0..).zip(ARGS) {
+                    if let Some(r) = regs.get_mut(k) {
+                        *r = Arg::Param(n);
+                    }
+                }
+            }
         }
         for i in decode_block(p, 64, b) {
             if matches!(
@@ -607,7 +612,8 @@ fn x86_calls(p: &Program, f: &Function) -> Vec<Call> {
                     out.push(Call {
                         site: i.ip(),
                         callee,
-                        args: ARGS.map(|k| regs.get(k).copied().unwrap_or(Arg::Unknown)),
+                        args: [ARGS[0], ARGS[1], ARGS[2]]
+                            .map(|k| regs.get(k).copied().unwrap_or(Arg::Unknown)),
                     });
                 }
                 for k in CLOBBERS {
@@ -885,7 +891,7 @@ fn messages(
                 Send::Plain | Send::Super | Send::Stret | Send::SuperStret => {
                     match selector.and_then(|k| c.args.get(k)) {
                         Some(Arg::Slot(slot)) => facts.selrefs.get(slot).cloned(),
-                        Some(Arg::Result(_) | Arg::Entry | Arg::Unknown) | None => None,
+                        Some(Arg::Result(_) | Arg::Param(_) | Arg::Unknown) | None => None,
                     }
                 }
             };
@@ -904,8 +910,8 @@ fn messages(
                     .map(Message::text)
                     .filter(|t| t.len() <= RECEIVER_MAX)
                     .unwrap_or_else(|| "?".to_owned()),
-                Some(Arg::Entry) if methods.contains(&f.entry) => "self".to_owned(),
-                Some(Arg::Entry) => "a1".to_owned(),
+                Some(Arg::Param(0)) if methods.contains(&f.entry) => "self".to_owned(),
+                Some(Arg::Param(n)) => format!("a{}", u32::from(n) + 1),
                 Some(Arg::Unknown) => "?".to_owned(),
             };
             out.insert(c.site, Message { receiver, selector });

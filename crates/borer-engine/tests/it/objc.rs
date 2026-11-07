@@ -145,7 +145,8 @@ fn rip(next: u64, target: u64) -> [u8; 4] {
 }
 
 /// The x86-64 code: `main` sends `shared` to `Foo` and `bar` to the
-/// result through `objc_msgSend`'s slot; the methods.
+/// result through `objc_msgSend`'s slot; the methods, `shout` sending `bar`
+/// to its third argument.
 fn x86_code() -> Vec<(u64, Vec<u8>)> {
     let mut main = vec![0x48, 0x8b, 0x3d]; // ASM: mov rdi, [rip+CLASSREF]
     main.extend(rip(MAIN + 7, CLASSREF));
@@ -159,10 +160,11 @@ fn x86_code() -> Vec<(u64, Vec<u8>)> {
     main.extend([0xff, 0x15]); // ASM: call [rip+GOT]
     main.extend(rip(MAIN + 36, GOT));
     main.push(0xc3); // ASM: ret
-    let mut shout = vec![0x48, 0x8b, 0x35]; // ASM: mov rsi, [rip+SELREF_BAR]
-    shout.extend(rip(SHOUT + 7, SELREF_BAR));
+    let mut shout = vec![0x48, 0x89, 0xd7]; // ASM: mov rdi, rdx
+    shout.extend([0x48, 0x8b, 0x35]); // ASM: mov rsi, [rip+SELREF_BAR]
+    shout.extend(rip(SHOUT + 10, SELREF_BAR));
     shout.extend([0xff, 0x15]); // ASM: call [rip+GOT]
-    shout.extend(rip(SHOUT + 13, GOT));
+    shout.extend(rip(SHOUT + 16, GOT));
     shout.push(0xc3); // ASM: ret
     vec![
         (MAIN, main),
@@ -496,8 +498,10 @@ fn arm64_methods_are_named_and_sends_read_as_messages() {
     }
 }
 
-/// On x86-64 the selector rides in `rsi`, loaded from its reference, and
-/// a receiver moved from `rax` is the message whose result it is.
+/// On x86-64 the selector rides in `rsi`, loaded from its reference.
+///
+/// A receiver moved from `rax` is the message whose result it is, and one
+/// moved from another argument register is that argument, not `self`.
 #[test]
 fn x86_64_sends_read_their_selector_from_rsi() {
     let starts = [MAIN - TEXT, BAR - TEXT, SHARED - TEXT, SHOUT - TEXT];
@@ -508,7 +512,7 @@ fn x86_64_sends_read_their_selector_from_rsi() {
     let sent: Vec<String> = a.objc.messages.values().map(|m| m.text()).collect();
     assert_eq!(
         sent,
-        ["[Foo shared]", "[[Foo shared] bar]", "[self bar]"],
+        ["[Foo shared]", "[[Foo shared] bar]", "[a3 bar]"],
         "{:#x?}",
         a.objc.messages
     );

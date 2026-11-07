@@ -830,11 +830,11 @@ pub(crate) fn calls(program: &Program, f: &Function) -> Vec<Call> {
     for ((b, start), carry) in f.blocks.iter().zip(&tracker.entry).zip(carried) {
         let mut regs = *start;
         if !carry {
-            last = [if b.start == f.entry {
-                Arg::Entry
+            last = if b.start == f.entry {
+                [Arg::Param(0), Arg::Param(1), Arg::Param(2)]
             } else {
-                Arg::Unknown
-            }; 3];
+                [Arg::Unknown; 3]
+            };
         }
         for i in block_insns(&insns, b) {
             let call = matches!(i.op, Op::Bl | Op::Blr);
