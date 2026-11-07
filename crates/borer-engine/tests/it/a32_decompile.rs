@@ -641,3 +641,76 @@ fn a_thumb_jump_through_a_table_of_import_thunks_stays_a_goto() {
     let out = decompile(&p, &a, &Overlay::default(), BASE).expect("decompiles");
     assert!(out.contains("goto *"), "{out}");
 }
+
+/// Decompiles a Thumb function made of `halves` at [`BASE`].
+///
+/// # Arguments
+///
+/// * `halves` - The function's halfwords.
+fn thumb_text(halves: &[u16]) -> String {
+    let bytes: Vec<u8> = halves.iter().flat_map(|h| h.to_le_bytes()).collect();
+    let len = u64::try_from(bytes.len()).expect("a small image");
+    let text = Section::mapped(".text", BASE, 0, len, false, true);
+    let mut p = Program::raw(bytes, Arch::Arm, 0, Some(BASE), vec![text]);
+    p.modes = Modes::from_marks(vec![(BASE, Mode::Thumb)]);
+    let a = Analysis::compute(&p);
+    decompile(&p, &a, &Overlay::default(), BASE).expect("decompiles")
+}
+
+/// An M-profile special register read is its value and no flags word: a
+/// test on it keeps both its ways, and a write to one stays in the text.
+///
+/// riot-os `irq_is_in` reads `ipsr`; read as the flags, the `cbz` on it
+/// folded away with the early return behind it, and an `msr basepri`
+/// ending a critical section vanished.
+#[test]
+fn a_special_register_read_keeps_its_test() {
+    let out = thumb_text(&[
+        0xf3ef, 0x8305, // ASM: mrs r3, ipsr
+        0xb10b, // ASM: cbz r3, 0xa
+        0x2001, // ASM: movs r0, #1
+        0x4770, // ASM: bx lr
+        0xf380, 0x8811, // ASM: msr basepri, r0
+        0x2000, // ASM: movs r0, #0
+        0x4770, // ASM: bx lr
+    ]);
+    for want in ["mrs r3, ipsr", "msr basepri, r0", "return 1;", "return 0;"] {
+        assert!(out.contains(want), "{want}: {out}");
+    }
+    assert!(!out.contains("apsr"), "{out}");
+}
+
+/// A special register write keeps the value it writes in the text before
+/// its line, and a read of `apsr`, whose `Q` and `GE` bits the lift does
+/// not track, is no constant, at the entry or after a compare.
+#[test]
+fn an_unmodeled_special_move_keeps_its_value() {
+    let out = thumb_text(&[
+        0xf04f, 0x0080, // ASM: mov.w r0, #0x80
+        0xf380, 0x8811, // ASM: msr basepri, r0
+        0x2000, // ASM: movs r0, #0
+        0x4770, // ASM: bx lr
+    ]);
+    let lines: Vec<&str> = out.lines().map(str::trim).collect();
+    let at = lines
+        .iter()
+        .position(|l| l.contains("msr basepri, r0"))
+        .expect("the write stays");
+    let before = lines[..at].iter().rev().find(|l| !l.is_empty());
+    assert!(
+        before.is_some_and(|l| l.starts_with("r0 = ") && (l.contains("128") || l.contains("0x80"))),
+        "{out}"
+    );
+    let flags = thumb_text(&[
+        0xf3ef, 0x8000, // ASM: mrs r0, apsr
+        0x4770, // ASM: bx lr
+    ]);
+    assert!(flags.contains("mrs r0, apsr"), "{flags}");
+    assert!(!flags.contains("return 0;"), "{flags}");
+    let compared = thumb_text(&[
+        0x2805, // ASM: cmp r0, #5
+        0xf3ef, 0x8000, // ASM: mrs r0, apsr
+        0x4770, // ASM: bx lr
+    ]);
+    assert!(compared.contains("mrs r0, apsr"), "{compared}");
+}

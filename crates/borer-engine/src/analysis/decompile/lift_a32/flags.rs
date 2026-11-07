@@ -93,7 +93,9 @@ pub(in crate::analysis::decompile) fn reads(i: &Insn) -> Option<Cond> {
 ///
 /// * `i` - The instruction.
 pub(in crate::analysis::decompile) fn sets_flags(i: &Insn) -> bool {
-    i.flow() == Flow::Call || i.sets || matches!(i.op, AOp::Msr { .. } | AOp::Vmrs { rt: PC })
+    i.flow() == Flow::Call
+        || i.sets
+        || matches!(i.op, AOp::Msr { sys: None, .. } | AOp::Vmrs { rt: PC })
 }
 
 /// The conditions every reader of the flags asks before anything sets
@@ -156,7 +158,7 @@ pub(super) fn live_after(instrs: &[Insn], flags_out: bool) -> Vec<u32> {
             live = 0;
         }
         if reads(i).is_some()
-            || matches!(i.op, AOp::Mrs { .. })
+            || matches!(i.op, AOp::Mrs { sys: None, .. })
             || (passes && i.sets && !matches!(i.op, AOp::Dp { kind, .. } if kind.arithmetic()))
         {
             live = u32::MAX;

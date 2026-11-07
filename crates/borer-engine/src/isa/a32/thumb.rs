@@ -803,8 +803,14 @@ fn branch(h1: u32, h2: u32, va: u64) -> (Op, bool, Cond) {
             let op = match op {
                 0x3a | 0x3b => Op::Nop,
                 0x7f if op1 == 2 => Op::Trap,
-                0x38 | 0x39 if (h2 >> 8) & 0xc == 0x8 => Op::Msr { rn: reg(h1, 0, 4) },
-                0x3e | 0x3f if !bit(h1, 4) => Op::Mrs { rd: reg(h2, 8, 4) },
+                0x38 | 0x39 if (h2 >> 8) & 0xc == 0x8 => Op::Msr {
+                    rn: reg(h1, 0, 4),
+                    sys: special(h2, 3),
+                },
+                0x3e | 0x3f if !bit(h1, 4) => Op::Mrs {
+                    rd: reg(h2, 8, 4),
+                    sys: special(h2, 0),
+                },
                 _ => Op::Unknown,
             };
             (op, false, al)
@@ -1083,4 +1089,20 @@ fn coprocessor(h1: u32, h2: u32) -> Op {
         return vfp::neon(w, false);
     }
     vfp::decode(w)
+}
+
+/// Returns the M-profile special register an `mrs` or `msr` names in its
+/// `SYSm` field, or `None` for one of the flags' views.
+///
+/// `SYSm` 0 is `apsr`; 1 to 3 are views of it holding the exception
+/// number too, which an `msr` writes only the flags of and an `mrs` reads
+/// whole. A-profile code leaves the field zero.
+///
+/// # Arguments
+///
+/// * `h2` - The second halfword.
+/// * `flags_upto` - The highest `SYSm` that moves only the flags.
+fn special(h2: u32, flags_upto: u32) -> Option<super::SysReg> {
+    let sysm = h2 & 0xff;
+    (sysm > flags_upto).then(|| super::SysReg(crate::num::lo8(u64::from(sysm))))
 }

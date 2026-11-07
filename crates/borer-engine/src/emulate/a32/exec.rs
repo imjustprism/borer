@@ -583,15 +583,13 @@ impl Machine<'_> {
                 transfer(i.pc().wrapping_add(entry * 2) & WORD)
             }
             Op::Svc { imm } => self.syscall(i, imm),
-            Op::Mrs { rd } => {
-                let v = self.nzcv();
-                self.write(rd, v, arm)
-            }
-            Op::Msr { rn } => {
+            Op::Mrs { rd, sys: None } => self.write(rd, self.nzcv(), arm),
+            Op::Msr { rn, sys: None } => {
                 let v = self.get(rn, i);
                 self.set_nzcv(v);
                 Ok(None)
             }
+            Op::Mrs { sys: Some(_), .. } | Op::Msr { sys: Some(_), .. } => Err(unmodeled(i)),
             Op::It { .. } | Op::Nop => Ok(None),
             Op::VLoad { .. }
             | Op::VStore { .. }

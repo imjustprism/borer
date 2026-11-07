@@ -897,6 +897,11 @@ const FORMS: &[(u64, Enc, &str)] = &[
     (0x2024c, Enc::T32(&[0xe8df, 0xf011]), "tbh [pc, r1, lsl #1]"),
     (0x20254, Enc::T32(&[0xd0fe]), "beq 0x20254"),
     (0x20256, Enc::T32(&[0xf7ff, 0xbf2d]), "b 0x200b4"),
+    (0x2025a, Enc::T32(&[0xf3ef, 0x8000]), "mrs r0, apsr"),
+    (0x2025e, Enc::T32(&[0xf380, 0x8800]), "msr apsr_nzcvq, r0"),
+    (0x20262, Enc::T32(&[0xf3ef, 0x8305]), "mrs r3, ipsr"),
+    (0x20266, Enc::T32(&[0xf3ef, 0x8010]), "mrs r0, primask"),
+    (0x2026a, Enc::T32(&[0xf380, 0x8811]), "msr basepri, r0"),
 ];
 
 /// Every modeled form decodes to its instruction and prints as LLVM reads

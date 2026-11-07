@@ -325,15 +325,12 @@ impl Lift<'_, '_> {
             | AOp::VmovPair { .. }
             | AOp::Vmrs { .. } => self.vfp(i),
             AOp::It { .. } | AOp::Nop => Some(()),
-            AOp::Mrs { rd } => {
-                let word = super::super::lift_a64::flags::nzcv_word(&self.ex.flags);
-                self.put(rd, word)
-            }
-            AOp::Msr { rn } => {
+            AOp::Msr { rn, sys: None } => {
                 let v = self.get(i, rn);
                 self.ex.flags = Flags::Carry(fold(Op::And, v, Expr::Const(0xf000_0000), 32));
                 Some(())
             }
+            AOp::Mrs { .. } | AOp::Msr { .. } => self.special(i),
             AOp::Vmsr { .. }
             | AOp::Svc { .. }
             | AOp::Trap
@@ -351,6 +348,27 @@ impl Lift<'_, '_> {
         if done.is_none() {
             self.unmodeled(i);
         }
+    }
+
+    /// Writes out what an `mrs` or `msr` left unmodeled reads, so its
+    /// assembly line names the value it moves.
+    ///
+    /// A special register's move is unmodeled, and so is every read of
+    /// `apsr`: beside the flags it holds the sticky `Q` and `GE` bits, which
+    /// the lift does not track, so no word of the flags alone is its value.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction.
+    ///
+    /// # Returns
+    ///
+    /// `None`: the move itself stays unmodeled.
+    fn special(&mut self, i: &Insn) -> Option<()> {
+        for r in i.registers().reads {
+            self.ex.materialize(Key::A32(r), &mut Vec::new(), None);
+        }
+        None
     }
 
     /// Writes a register an instruction computed, refusing `pc`, which

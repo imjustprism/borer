@@ -2,8 +2,19 @@
 
 use super::{
     Addr, Block, Cond, Cvt, DpKind, FpOp, FpUn, Index, Insn, Offset, Op, Operand, PC, Reg, Shift,
-    Width, cond_code,
+    SysReg, Width, cond_code,
 };
+
+/// Names the register an `mrs` or `msr` moves: the special register, or
+/// the flags' name when there is none.
+///
+/// # Arguments
+///
+/// * `sys` - The special register.
+/// * `flags` - How the flags are spelled for this instruction.
+fn special(sys: Option<SysReg>, flags: &str) -> String {
+    sys.map_or_else(|| flags.to_owned(), SysReg::name)
+}
 
 /// What a listing shows for a word that decodes to no instruction.
 const BAD: &str = "(bad)";
@@ -489,8 +500,8 @@ pub fn text(i: &Insn) -> String {
         Op::Svc { imm } => format!("svc{c} #{imm:#x}"),
         Op::Trap => format!("udf{c}"),
         Op::Nop => format!("nop{c}"),
-        Op::Mrs { rd } => format!("mrs{c} {}, apsr", name(rd)),
-        Op::Msr { rn } => format!("msr{c} apsr_nzcvq, {}", name(rn)),
+        Op::Mrs { rd, sys } => format!("mrs{c} {}, {}", name(rd), special(sys, "apsr")),
+        Op::Msr { rn, sys } => format!("msr{c} {}, {}", special(sys, "apsr_nzcvq"), name(rn)),
         Op::VLoad { vd, addr } => format!("vldr{c} {}, {}", name(vd), address(addr, lit)),
         Op::VStore { vd, addr } => format!("vstr{c} {}, {}", name(vd), address(addr, lit)),
         Op::VLdm {

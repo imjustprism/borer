@@ -470,8 +470,14 @@ fn special_imm(w: u32) -> Op {
 fn misc(w: u32) -> Op {
     let op = (w >> 21) & 3;
     match ((w >> 4) & 0xf, op) {
-        (0, 0) if !bit(w, 22) => Op::Mrs { rd: reg(w, 12) },
-        (0, 1) if (w >> 18) & 3 == 2 && !bit(w, 22) => Op::Msr { rn: reg(w, 0) },
+        (0, 0) if !bit(w, 22) => Op::Mrs {
+            rd: reg(w, 12),
+            sys: None,
+        },
+        (0, 1) if (w >> 18) & 3 == 2 && !bit(w, 22) => Op::Msr {
+            rn: reg(w, 0),
+            sys: None,
+        },
         (1, 1) => Op::Bx { rm: reg(w, 0) },
         (1, 3) => Op::Clz {
             rd: reg(w, 12),

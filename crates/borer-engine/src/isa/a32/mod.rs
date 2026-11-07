@@ -61,6 +61,42 @@ pub enum Reg {
     D(u8),
 }
 
+/// An M-profile special register by its `SYSm` number, as `mrs` and `msr`
+/// name it.
+///
+/// They are the exception number (`ipsr`), the interrupt masks (`primask`,
+/// `basepri`, `faultmask`), the stack pointers and `control`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SysReg(pub u8);
+
+impl SysReg {
+    /// Returns the register's name as LLVM prints it, or `sysm_<n>` for a
+    /// number no M-profile register has.
+    #[must_use]
+    pub fn name(self) -> String {
+        let known = match self.0 {
+            0 => "apsr",
+            1 => "iapsr",
+            2 => "eapsr",
+            3 => "xpsr",
+            5 => "ipsr",
+            6 => "epsr",
+            7 => "iepsr",
+            8 => "msp",
+            9 => "psp",
+            10 => "msplim",
+            11 => "psplim",
+            16 => "primask",
+            17 => "basepri",
+            18 => "basepri_max",
+            19 => "faultmask",
+            20 => "control",
+            n => return format!("sysm_{n}"),
+        };
+        known.to_owned()
+    }
+}
+
 /// The instruction set the code at an address is written in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Mode {
@@ -727,15 +763,21 @@ pub enum Op {
     Trap,
     /// `nop`, the hints, the barriers and the preloads: no effect on data.
     Nop,
-    /// `mrs rd, apsr`: the flags into a register.
+    /// `mrs rd, apsr`: the flags, `Q` and `GE` into a register; or, with
+    /// `sys`, an M-profile special register's value.
     Mrs {
         /// The destination.
         rd: Reg,
+        /// The special register read, `None` for the flags (`apsr`).
+        sys: Option<SysReg>,
     },
-    /// `msr apsr_nzcvq, rn`: the flags from a register.
+    /// `msr apsr_nzcvq, rn`: the flags from a register; or, with `sys`, an
+    /// M-profile special register written.
     Msr {
         /// The source.
         rn: Reg,
+        /// The special register written, `None` for the flags (`apsr`).
+        sys: Option<SysReg>,
     },
     /// `vldr`: one VFP register from memory.
     VLoad {
@@ -1483,8 +1525,8 @@ impl Insn {
             Op::BlxReg { rm } | Op::Bx { rm } => r.reads.push(rm),
             Op::Cbz { rn, .. } => r.reads.push(rn),
             Op::Tb { rn, rm, .. } => r.reads.extend([rn, rm]),
-            Op::Mrs { rd } => r.writes.push(rd),
-            Op::Msr { rn } => r.reads.push(rn),
+            Op::Mrs { rd, .. } => r.writes.push(rd),
+            Op::Msr { rn, .. } => r.reads.push(rn),
             Op::VLoad { vd, addr: a } => {
                 addr(&mut r, a);
                 r.writes.push(vd);

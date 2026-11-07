@@ -466,6 +466,7 @@ impl Lift<'_, '_> {
                 | AOp::VStore { .. }
                 | AOp::VStm { .. }
                 | AOp::Neon { stores: true, .. }
+                | AOp::Msr { sys: Some(_), .. }
                 | AOp::Unknown
         );
         if memory {
