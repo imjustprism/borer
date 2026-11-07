@@ -312,7 +312,7 @@ fn summary_of(p: &Program, a: &Analysis, o: &Overlay, entry: u64) -> Option<Stri
     } else {
         format!("virtual:  {} [{}]\n", virtuals.len(), names(&virtuals))
     };
-    let sent = crate::analysis::objc::sent_by(a, f);
+    let sent = crate::analysis::objc::sent_by(a, o, f);
     let msgs = if sent.is_empty() {
         String::new()
     } else {

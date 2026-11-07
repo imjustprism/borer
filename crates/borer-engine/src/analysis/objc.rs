@@ -27,7 +27,12 @@
 //! `rsi` on x86-64, the next one for a struct-return form), the message is
 //! recovered as `[recv sel]`: the receiver is the class a class reference
 //! names, `super`, the message whose result it is, `self` in a method that
-//! has not written it (`a1` elsewhere), or `?`. A summary, a listing and a
+//! has not written it (`a1` elsewhere), or `?`. Where the receiver's
+//! class is known (a class reference, `self` in a method, `super`, what
+//! `alloc` and an `init` method hand back), the message names the
+//! implementation the runtime's lookup reaches in the image's own classes
+//! and categories, `?` after it where a subclass or a second category
+//! could take it instead ([`Message::reaches`]). A summary, a listing and a
 //! decompile's `// messages:` header line show them ([`sent_by`]), and the
 //! decompiler reads a selector reference as `@selector(sel)` and a class
 //! reference as its class. A pointer that maps nothing, a list past the
@@ -38,12 +43,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use super::functions::decode_block;
-use super::{Analysis, Function, NameSource, RefKind, read_u32, read_word, unique_name};
+use super::{Analysis, Function, NameSource, Overlay, RefKind, read_u32, read_word, unique_name};
 use crate::isa::Isa;
 use crate::isa::a64::{self, Mnemonic as A64Mnemonic, Mode, Op, Opnd, Reg, Width};
 use crate::isa::x86::{FlowControl, InstructionInfoFactory, Mnemonic, OpAccess, OpKind};
 use crate::program::{BinaryFormat, Program, SymbolKind};
 use crate::table::Window;
+
+mod lookup;
+
+pub use lookup::Reach;
+use lookup::{Index, Receiver};
 
 /// The bits of a class's data word that hold its `class_ro_t`: the low
 /// three are the Swift and fast flags.
@@ -117,6 +127,9 @@ pub struct Message {
     pub receiver: String,
     /// The selector.
     pub selector: String,
+    /// The implementation it reaches, when the receiver's class is known
+    /// and the image defines the method.
+    pub reaches: Option<Reach>,
 }
 
 impl Message {
@@ -124,6 +137,25 @@ impl Message {
     #[must_use]
     pub fn text(&self) -> String {
         format!("[{} {}]", self.receiver, self.selector)
+    }
+
+    /// Renders the message with the implementation it reaches, `[recv sel]
+    /// -> -[Class sel]`, `?` after the name when it is not sure.
+    ///
+    /// # Arguments
+    ///
+    /// * `a` - The analysis, for the implementation's name.
+    /// * `o` - The names the agent gave, which win.
+    #[must_use]
+    pub fn shown(&self, a: &Analysis, o: &Overlay) -> String {
+        match self.reaches {
+            Some(r) => {
+                let name = super::name_of(a, o, r.imp);
+                let unsure = if r.sure { "" } else { "?" };
+                format!("{} -> {name}{unsure}", self.text())
+            }
+            None => self.text(),
+        }
     }
 }
 
@@ -152,18 +184,19 @@ pub struct ObjcFacts {
 /// # Arguments
 ///
 /// * `a` - The analysis.
+/// * `o` - The names the agent gave.
 /// * `f` - The function.
 ///
 /// # Returns
 ///
-/// Each message as `[recv sel]`, its call site inside one of the
-/// function's blocks.
-pub(crate) fn sent_by(a: &Analysis, f: &Function) -> Vec<String> {
+/// Each message as [`Message::shown`] writes it, its call site inside one
+/// of the function's blocks.
+pub(crate) fn sent_by(a: &Analysis, o: &Overlay, f: &Function) -> Vec<String> {
     a.objc
         .messages
         .range(f.start..f.end)
         .filter(|(site, _)| f.blocks.iter().any(|b| (b.start..b.end).contains(*site)))
-        .map(|(_, m)| m.text())
+        .map(|(_, m)| m.shown(a, o))
         .collect()
 }
 
@@ -878,6 +911,9 @@ fn messages(
         Some(Isa::X86 { .. } | Isa::A32 | Isa::Rv(_)) | None => Vec::new(),
     };
     let found = super::striped(&senders, calls_of);
+    let mut index = Index::new(facts);
+    let own = lookup::method_classes(facts);
+    let mut kinds: BTreeMap<u64, Receiver> = BTreeMap::new();
     let mut out = BTreeMap::new();
     for (f, calls) in senders.iter().zip(found) {
         for c in calls.unwrap_or_else(|| calls_of(f)) {
@@ -898,7 +934,9 @@ fn messages(
             let Some(selector) = selector else {
                 continue;
             };
-            let receiver = match receiver.map(|k| c.args.get(k).copied().unwrap_or(Arg::Unknown)) {
+            let arg = receiver.map(|k| c.args.get(k).copied().unwrap_or(Arg::Unknown));
+            let kind = Receiver::of(arg, own.get(&f.entry).copied(), facts, &kinds);
+            let receiver = match arg {
                 None => "super".to_owned(),
                 Some(Arg::Slot(slot)) => facts
                     .classrefs
@@ -914,7 +952,16 @@ fn messages(
                 Some(Arg::Param(n)) => format!("a{}", u32::from(n) + 1),
                 Some(Arg::Unknown) => "?".to_owned(),
             };
-            out.insert(c.site, Message { receiver, selector });
+            let reaches = index.reach(&kind, &selector);
+            kinds.insert(c.site, kind.result_of(&selector, reaches));
+            out.insert(
+                c.site,
+                Message {
+                    receiver,
+                    selector,
+                    reaches,
+                },
+            );
         }
     }
     out

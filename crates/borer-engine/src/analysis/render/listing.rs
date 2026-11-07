@@ -941,7 +941,7 @@ pub fn disasm_function_with(
                 }
             });
             if let Some(message) = a.objc.messages.get(&l.va) {
-                let _ = write!(text, "  ; {}", message.text());
+                let _ = write!(text, "  ; {}", message.shown(a, o));
             } else if let Some(target) = target
                 && (a.function(target).is_some() || o.names.contains_key(&target))
             {

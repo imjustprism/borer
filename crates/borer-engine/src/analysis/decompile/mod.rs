@@ -2159,7 +2159,7 @@ fn decompile_in<L: Lifter>(
     if let Some(effects) = effects_line(&body) {
         let _ = writeln!(out, "// effects: {effects}");
     }
-    let sent = crate::analysis::objc::sent_by(analysis, f);
+    let sent = crate::analysis::objc::sent_by(analysis, overlay, f);
     if !sent.is_empty() {
         /// Most messages written into the header line.
         const SENT_SHOWN: usize = 8;

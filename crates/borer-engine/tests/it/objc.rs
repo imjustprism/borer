@@ -18,7 +18,7 @@ use std::path::PathBuf;
 
 use crate::machogen::{self, ARM64, CODE, Fix, PIE, R, RW, RX, Sect, Seg, Starts, X86_64};
 use borer_engine::analysis::decompile::decompile;
-use borer_engine::analysis::objc::objc_tsv;
+use borer_engine::analysis::objc::{Reach, objc_tsv};
 use borer_engine::analysis::render::{disasm_function, function_summary};
 use borer_engine::analysis::{Analysis, NameSource, Overlay, name_of};
 use borer_engine::program::Program;
@@ -465,7 +465,7 @@ fn arm64_methods_are_named_and_sends_read_as_messages() {
     let summary = function_summary(&p, &a, &o, MAIN).expect("main summarizes");
     assert!(
         summary.contains(
-            "messages: 3 [[Foo shared], [[Foo shared] bar], [[[Foo shared] bar] shout]]\n"
+            "messages: 3 [[Foo shared] -> +[Foo shared], [[Foo shared] bar], [[[Foo shared] bar] shout]]\n"
         ),
         "{summary}"
     );
@@ -474,13 +474,20 @@ fn arm64_methods_are_named_and_sends_read_as_messages() {
     let text = decompile(&p, &a, &o, MAIN).expect("main decompiles");
     assert!(
         text.contains(
-            "\n// messages: [Foo shared], [[Foo shared] bar], [[[Foo shared] bar] shout]\n"
+            "\n// messages: [Foo shared] -> +[Foo shared], [[Foo shared] bar], [[[Foo shared] bar] shout]\n"
         ),
         "{text}"
     );
     assert!(
         text.contains("var1 = objc_msgSend(Foo, @selector(shared));\n"),
         "the class and selector references read by name: {text}"
+    );
+    let mut renamed = Overlay::default();
+    renamed.names.insert(SHARED, "make_shared".to_owned());
+    let text = decompile(&p, &a, &renamed, MAIN).expect("main decompiles");
+    assert!(
+        text.contains("\n// messages: [Foo shared] -> make_shared, "),
+        "a saved name names the implementation: {text}"
     );
     let objc = objc_tsv(&a, "", Window::first(50));
     assert!(
@@ -516,12 +523,25 @@ fn x86_64_sends_read_their_selector_from_rsi() {
         "{:#x?}",
         a.objc.messages
     );
+    let reached: Vec<Option<Reach>> = a.objc.messages.values().map(|m| m.reaches).collect();
+    assert_eq!(
+        reached,
+        [
+            Some(Reach {
+                imp: SHARED,
+                sure: true
+            }),
+            None,
+            None
+        ],
+        "a class message reaches the class method; the result of `shared` and an NSString instance reach nothing the image defines"
+    );
     let o = Overlay::default();
     let listing = disasm_function(&p, &a, &o, MAIN, 50, false).expect("main lists");
     assert!(listing.contains("  ; [[Foo shared] bar]\n"), "{listing}");
     let text = decompile(&p, &a, &o, MAIN).expect("main decompiles");
     assert!(
-        text.contains("\n// messages: [Foo shared], [[Foo shared] bar]\n"),
+        text.contains("\n// messages: [Foo shared] -> +[Foo shared], [[Foo shared] bar]\n"),
         "{text}"
     );
     assert!(
