@@ -1020,7 +1020,7 @@ fn close_bracket(text: &str) -> Option<usize> {
 /// # Arguments
 ///
 /// * `head` - The line up to some position.
-fn in_literal(head: &str) -> bool {
+pub(super) fn in_literal(head: &str) -> bool {
     let (mut inside, mut escaped) = (false, false);
     for c in head.chars() {
         match (inside, c) {

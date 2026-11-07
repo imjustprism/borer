@@ -12,6 +12,10 @@ const SPELLED: [(&str, &str, bool); 4] = [
     ("min", ">", false),
 ];
 
+/// The largest bound a signed helper's compare reads as its literal does:
+/// a positive `int`, whatever the width the helper compares at.
+const SIGNED_BOUND_MAX: u64 = 0x7fff_ffff;
+
 /// Reads a `min` or `max` of a variable back as the choice that keeps it,
 /// where the choice then is an `if` that sets the variable.
 ///
@@ -21,8 +25,10 @@ const SPELLED: [(&str, &str, bool); 4] = [
 /// either runs, which hides the choice from both. The variable is declared
 /// with the helper's signedness, so the compare reads as the helper does,
 /// and the bound is a constant, which a clamp is against and which the
-/// choice may name twice where it would read nothing twice; a `min` or
-/// `max` neither rule takes stays as it is.
+/// choice may name twice where it would read nothing twice; a signed
+/// helper's bound is a positive `int`, which compares the same signed or
+/// not. A name in a string literal is no call, and a `min` or `max`
+/// neither rule takes stays as it is.
 ///
 /// # Arguments
 ///
@@ -37,6 +43,9 @@ pub(super) fn unspell(lines: &mut Vec<String>, k: usize) -> Option<usize> {
         .get(k)
         .filter(|l| !l.trim_start().starts_with("//"))?
         .clone();
+    if !SPELLED.iter().any(|(name, ..)| line.contains(name)) {
+        return None;
+    }
     let declared: Vec<String> = lines
         .iter()
         .filter(|l| l.trim_start().starts_with("// signature:") || declares(l))
@@ -44,6 +53,9 @@ pub(super) fn unspell(lines: &mut Vec<String>, k: usize) -> Option<usize> {
         .collect();
     for (name, op, unsigned) in SPELLED {
         for at in word_positions(&line, name) {
+            if in_literal(line.get(..at).unwrap_or("")) {
+                continue;
+            }
             let open = at + name.len();
             let Some(close) = line
                 .get(open..)
@@ -65,7 +77,9 @@ pub(super) fn unspell(lines: &mut Vec<String>, k: usize) -> Option<usize> {
                         t.starts_with("int")
                     }
                 });
-                if !typed || !is_ident(v) || parse_const(other).is_none() {
+                let bound = parse_const(other);
+                if !typed || !is_ident(v) || bound.is_none_or(|b| !unsigned && b > SIGNED_BOUND_MAX)
+                {
                     continue;
                 }
                 let choice = format!("({v} {op} {other} ? {other} : {v})");
@@ -136,5 +150,20 @@ mod tests {
             "return max(a3, a2) + a4;\n",
         );
         assert_eq!(select_statements(text), want);
+    }
+
+    /// A helper's name in a string literal is no call, and a signed helper
+    /// whose bound reads negative keeps the helper: its literal compares
+    /// unsigned.
+    #[test]
+    fn a_quoted_helper_or_a_negative_bound_stays() {
+        let text = concat!(
+            "// signature: void f(uint32_t a1, int64_t a2)\n",
+            "uint64_t var1;\n",
+            "\n",
+            "var1 = \"umax(a1, 2)\";\n",
+            "a2 = max(a2, 0xffffffffffffffff);\n",
+        );
+        assert_eq!(select_statements(text), text);
     }
 }
