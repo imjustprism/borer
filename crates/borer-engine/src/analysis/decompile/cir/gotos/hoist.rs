@@ -16,9 +16,10 @@ use super::{Cx, Facts, RUN_MAX, idle, labelled, larger, meetings, negate, run_to
 /// always runs. The run is too long to copy into both arms ([`super::sinks`]
 /// copies shorter ones), holds no label, and `p` and `q` read only names
 /// and constants; `p` is read again after the arms, so its names are
-/// parameters or variables in registers (`aN`, `varN`), which no store or
-/// call can change, and no statement of the arms writes one, steps one,
-/// takes its address or is a line the tree could not read.
+/// parameters or variables in registers (`aN`, `varN`) whose address no
+/// statement of the function takes ([`taken`]), which no store or call can
+/// then change, and no statement of the arms writes one, steps one, takes
+/// its address or is a line the tree could not read.
 ///
 /// # Arguments
 ///
@@ -69,6 +70,7 @@ pub(super) fn lifts(list: &mut Vec<Stmt>, cx: &Cx, f: &Facts<'_>) -> bool {
         if !pure(p)
             || !pure(q)
             || !names.iter().all(register)
+            || names.iter().any(|n| f.taken.contains(n))
             || arms.into_iter().any(|s| touches(s, &names))
         {
             continue;
@@ -162,38 +164,87 @@ fn pure(e: &Expr) -> bool {
 fn touches(s: &Stmt, names: &BTreeSet<String>) -> bool {
     let mut hit = false;
     each(s, &mut |x| {
-        let own: Vec<&Expr> = match &x.kind {
-            StmtKind::Expr(e) | StmtKind::Return(Some(e)) => vec![e],
-            StmtKind::If { cond, .. }
-            | StmtKind::Guard { cond, .. }
-            | StmtKind::While { cond, .. }
-            | StmtKind::DoWhile { cond, .. } => vec![cond],
-            StmtKind::For {
-                init, cond, step, ..
-            } => vec![init, cond, step],
-            StmtKind::Switch { value, .. } => vec![value],
-            StmtKind::Raw(text) => {
-                hit |= names.iter().any(|n| raw_writes(text, n));
-                Vec::new()
-            }
-            StmtKind::Label(_) | StmtKind::Try { .. } => {
-                hit = true;
-                Vec::new()
-            }
-            StmtKind::Return(None)
-            | StmtKind::Asm(_)
-            | StmtKind::Goto(_)
-            | StmtKind::Break
-            | StmtKind::Continue
-            | StmtKind::Block(_)
-            | StmtKind::Comment(_)
-            | StmtKind::Blank => Vec::new(),
-        };
-        for e in own {
+        hit |= matches!(x.kind, StmtKind::Label(_) | StmtKind::Try { .. });
+        if let StmtKind::Raw(text) = &x.kind {
+            hit |= names.iter().any(|n| raw_writes(text, n));
+        }
+        for e in own(x) {
             visit(e, &mut |y| hit |= writes(y, names));
         }
     });
     hit
+}
+
+/// Adds to `out` the names a statement takes the address of: `&name` in
+/// its tree, and every word a lone `&` is followed by in a line the tree
+/// could not read ([`raw_taken`]).
+///
+/// # Arguments
+///
+/// * `x` - The statement; the statements inside it are not read.
+/// * `out` - The names.
+pub(super) fn taken(x: &Stmt, out: &mut BTreeSet<String>) {
+    if let StmtKind::Raw(text) = &x.kind {
+        raw_taken(text, out);
+    }
+    for e in own(x) {
+        visit(e, &mut |y| {
+            if let ExprKind::Raw(text) = &y.kind {
+                raw_taken(text, out);
+            } else if let ExprKind::Unary(UnOp::AddrOf, place) = &y.kind
+                && let Some(n) = bare(place)
+            {
+                out.insert(n.to_owned());
+            }
+        });
+    }
+}
+
+/// Returns the expressions a statement holds itself, not those of the
+/// statements inside it.
+///
+/// # Arguments
+///
+/// * `x` - The statement.
+fn own(x: &Stmt) -> Vec<&Expr> {
+    match &x.kind {
+        StmtKind::Expr(e) | StmtKind::Return(Some(e)) => vec![e],
+        StmtKind::If { cond, .. }
+        | StmtKind::Guard { cond, .. }
+        | StmtKind::While { cond, .. }
+        | StmtKind::DoWhile { cond, .. } => vec![cond],
+        StmtKind::For {
+            init, cond, step, ..
+        } => vec![init, cond, step],
+        StmtKind::Switch { value, .. } => vec![value],
+        StmtKind::Raw(_)
+        | StmtKind::Label(_)
+        | StmtKind::Try { .. }
+        | StmtKind::Return(None)
+        | StmtKind::Asm(_)
+        | StmtKind::Goto(_)
+        | StmtKind::Break
+        | StmtKind::Continue
+        | StmtKind::Block(_)
+        | StmtKind::Comment(_)
+        | StmtKind::Blank => Vec::new(),
+    }
+}
+
+/// Returns the name an expression is, inside any parentheses.
+///
+/// # Arguments
+///
+/// * `x` - The expression.
+fn bare(mut x: &Expr) -> Option<&str> {
+    while let ExprKind::Paren(inner) = &x.kind {
+        x = inner;
+    }
+    if let ExprKind::Name(n) = &x.kind {
+        Some(n.as_str())
+    } else {
+        None
+    }
 }
 
 /// Tells whether an expression changes a name of `names` itself: assigns
@@ -205,13 +256,7 @@ fn touches(s: &Stmt, names: &BTreeSet<String>) -> bool {
 /// * `e` - The expression.
 /// * `names` - The names.
 fn writes(e: &Expr, names: &BTreeSet<String>) -> bool {
-    let named = |x: &Expr| {
-        let mut x = x;
-        while let ExprKind::Paren(inner) = &x.kind {
-            x = inner;
-        }
-        matches!(&x.kind, ExprKind::Name(n) if names.contains(n.as_str()))
-    };
+    let named = |x: &Expr| bare(x).is_some_and(|n| names.contains(n));
     match &e.kind {
         ExprKind::Assign(_, place, _)
         | ExprKind::Postfix(_, place)
@@ -286,7 +331,7 @@ fn raw_writes(text: &str, name: &str) -> bool {
             return false;
         }
         let before = before_word(head);
-        let after = after_word(tail);
+        let after = after_word(tail, ')');
         let assigns = after.starts_with('=') && !after.starts_with("==");
         let compound = ["+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>="]
             .iter()
@@ -302,15 +347,44 @@ fn raw_writes(text: &str, name: &str) -> bool {
     })
 }
 
-/// Returns the text after a word past the spaces, closing parentheses and
-/// block comments that open it.
+/// Adds to `out` the names C text the tree could not read may take the
+/// address of.
+///
+/// That is every word a lone `&` is followed by, past spaces, opening
+/// parentheses and block comments. A bitwise `&` adds its right operand
+/// too, which only keeps more names from moving.
 ///
 /// # Arguments
 ///
-/// * `text` - The text that follows the word, on its line.
-fn after_word(mut text: &str) -> &str {
+/// * `text` - The text, one line.
+/// * `out` - The names.
+fn raw_taken(text: &str, out: &mut BTreeSet<String>) {
+    for (at, _) in text.match_indices('&') {
+        let (head, tail) = (&text[..at], &text[at + 1..]);
+        if head.ends_with('&') || tail.starts_with('&') {
+            continue;
+        }
+        let rest = after_word(tail, '(');
+        let end = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(rest.len());
+        if end > 0 {
+            out.insert(rest[..end].to_owned());
+        }
+    }
+}
+
+/// Returns the text after a word or an operator past the spaces, `paren`s
+/// and block comments that open it.
+///
+/// # Arguments
+///
+/// * `text` - The text that follows, on its line.
+/// * `paren` - The parenthesis passed over: `)` after a word, `(` after an
+///   operator.
+fn after_word(mut text: &str, paren: char) -> &str {
     loop {
-        let rest = text.trim_start_matches(|c: char| c.is_whitespace() || c == ')');
+        let rest = text.trim_start_matches(|c: char| c.is_whitespace() || c == paren);
         let Some(comment) = rest.strip_prefix("/*") else {
             return rest;
         };

@@ -66,9 +66,11 @@ pub(in crate::analysis::decompile) fn fold_jumps(body: &mut Body, ends: &BTreeSe
     for _ in 0..ROUNDS {
         let mut refs = BTreeMap::new();
         let mut notes = Vec::new();
+        let mut taken = BTreeSet::new();
         for s in &body.stmts {
             each(s, &mut |x| {
                 jumps(x, &mut refs);
+                hoist::taken(x, &mut taken);
                 if let StmtKind::Comment(text) = &x.kind {
                     notes.push(format!("//{text}"));
                 }
@@ -86,6 +88,7 @@ pub(in crate::analysis::decompile) fn fold_jumps(body: &mut Body, ends: &BTreeSe
             refs,
             ends,
             sets: &body.prov,
+            taken,
         };
         let stmts = &mut body.stmts;
         let changed = walk(stmts, &mut |list, cx| local(list, cx, &facts))
@@ -118,6 +121,9 @@ struct Facts<'f> {
     ends: &'f BTreeSet<u64>,
     /// The addresses each provenance id stands for.
     sets: &'f [Vec<u64>],
+    /// The names some statement takes the address of ([`hoist::taken`]),
+    /// which a store or a call may change.
+    taken: BTreeSet<String>,
 }
 
 /// What surrounds a statement list.
