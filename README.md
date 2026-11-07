@@ -37,9 +37,9 @@ or Binary Ninja underneath.
 
 - **Checked output.** Every block of decompiled C is run in an emulator from
   seeded states and compared with the machine code it came from, and the
-  output says how much was checked. `borer certify` grades a function's final
-  text against the binary. Instructions it cannot model stay as
-  `/* asm: ... */` instead of a guess.
+  output says how much was checked. On x86 and x86-64, `borer certify` also
+  runs a function's final text as C beside the binary and grades it.
+  Instructions it cannot model stay as `/* asm: ... */` instead of a guess.
 - **Sized for a context window.** Lists are filtered and paged on the server
   (`# showing N of M`), a repeated request with `since=<tag>` returns only
   what changed, and the same question always returns the same bytes.
@@ -201,8 +201,9 @@ agents are in [`borer.rules`](borer.rules), and the terms for contributions in
 
 borer is free software under the [GNU Affero General Public License
 v3.0](LICENSE) (AGPL-3.0-only). If you distribute borer or a modified version,
-or run one as a network service, you must publish its complete source under
-the same license. Versions 0.1.0 and 0.1.1 were released under MIT. A
+or let users interact with a modified version over a network, you must offer
+its complete source under the same license. Versions 0.1.0 and 0.1.1 were
+released under MIT. A
 commercial license is available for uses the AGPL does not fit: open an issue
 or reach out on GitHub.
 
