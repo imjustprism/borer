@@ -32,7 +32,10 @@ const SIGNED_BOUND_MAX: u64 = 0x7fff_ffff;
 /// not. A name in a string literal is no call, and a `min` or `max`
 /// neither rule takes stays as it is. Inside a larger statement the
 /// variable is as wide as the machine word, as the helper's result is, so
-/// the statement computes at the width it did, and the helper is unsigned:
+/// the statement computes at the width it did, the variable is the
+/// function's own (a value only its text holds, or a parameter whose
+/// address no line takes), so the `if` writes nothing another reader sees,
+/// and the helper is unsigned:
 /// a signed `min` or `max` hands back an unsigned word, which a signed
 /// variable in its place would shift or compare as signed.
 ///
@@ -106,7 +109,9 @@ pub(super) fn unspell(lines: &mut Vec<String>, k: usize, word: &str) -> Option<u
                     lines.splice(k..=k, rewritten);
                     return Some(n);
                 }
-                if bits != width(word) || !unsigned {
+                let own = private(lines, v)
+                    || (is_param_name(v) && !lines.iter().any(|l| l.contains(&format!("&{v}"))));
+                if bits != width(word) || !unsigned || !own {
                     continue;
                 }
                 let mut scratch = lines.clone();
@@ -269,5 +274,13 @@ mod tests {
             "return var1;\n",
         );
         assert_eq!(select_statements(fixed, "uint64_t"), fixed);
+        let shared = concat!(
+            "// signature: uint64_t f()\n",
+            "uint64_t var1, g64_1000;\n",
+            "\n",
+            "var1 = umax(g64_1000, 2) << 1;\n",
+            "return var1;\n",
+        );
+        assert_eq!(select_statements(shared, "uint64_t"), shared);
     }
 }
