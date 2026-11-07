@@ -668,7 +668,7 @@ fn has_effect(e: &Expr) -> bool {
 ///
 /// Whether the list changed.
 fn local(list: &mut Vec<Stmt>, cx: &Cx, f: &Facts<'_>) -> bool {
-    let mut changed = guards(list) | exits(list, cx);
+    let mut changed = guards(list) | ladders(list) | exits(list, cx);
     changed |= falls(list, cx);
     changed |= dead(list, f) | returns(list);
     changed || skips(list, cx, f) || flattens(list)
@@ -905,6 +905,50 @@ fn returns(list: &mut Vec<Stmt>) -> bool {
             changed = true;
         }
         k += 1;
+    }
+    changed
+}
+
+/// Writes an `if` whose body is one `if` as the `else if` ladder it is.
+///
+/// When its `else` is anything but one `if`, the test turns: `if (c) { if
+/// (d) A else B } else { E }` is `if (!c) { E } else if (d) A else B`.
+///
+/// A compiler at `-O0` tests each value of an `if`/`else if` chain and
+/// jumps on to the next test when it fails, which the structurer writes
+/// with the rest of the chain inside the `if` and the value's own code in
+/// the `else`: a chain of 200 values nests 200 deep. The lists are walked
+/// innermost first, so one walk lays the whole chain flat.
+///
+/// # Arguments
+///
+/// * `list` - The statements, rewritten in place.
+///
+/// # Returns
+///
+/// Whether any `if` was turned.
+fn ladders(list: &mut [Stmt]) -> bool {
+    let mut changed = false;
+    for s in list.iter_mut() {
+        let StmtKind::If {
+            cond,
+            then,
+            other: Some(Else::Block(e)),
+        } = &mut s.kind
+        else {
+            continue;
+        };
+        let lone_if = |b: &[Stmt]| matches!(b, [x] if matches!(x.kind, StmtKind::If { .. }));
+        if !lone_if(then) || lone_if(e) || !e.iter().any(|x| !idle(x)) {
+            continue;
+        }
+        let inner = then.pop().map(Box::new);
+        *then = std::mem::take(e);
+        *cond = negate(cond);
+        if let (StmtKind::If { other, .. }, Some(inner)) = (&mut s.kind, inner) {
+            *other = Some(Else::If(inner));
+            changed = true;
+        }
     }
     changed
 }

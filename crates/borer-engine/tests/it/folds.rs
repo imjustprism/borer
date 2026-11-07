@@ -121,3 +121,42 @@ fn a_switch_nothing_falls_out_of_ends_its_arm() {
     );
     assert_eq!(cleanup(text), want);
 }
+
+/// A chain nested once a test, the rest in each `if` and the value's code
+/// in its `else`, reads as the `else if` ladder it was written as.
+///
+/// That is the shape `-O0` code for `if (k == 11) f(1); else if (k == 48)
+/// ...` leaves: each test jumps on to the next when it fails. The last
+/// test, whose `if` holds no `if`, keeps its arms.
+#[test]
+fn a_chain_nested_in_its_ifs_reads_as_an_else_if_ladder() {
+    let text = concat!(
+        "if (a1 != 11) {\n",
+        "  if (a1 != 48) {\n",
+        "    if (a1 != 85) {\n",
+        "      f(4);\n",
+        "    } else {\n",
+        "      f(3);\n",
+        "    }\n",
+        "  } else {\n",
+        "    f(2);\n",
+        "  }\n",
+        "} else {\n",
+        "  f(1);\n",
+        "}\n",
+        "return;\n",
+    );
+    let want = concat!(
+        "if (a1 == 11) {\n",
+        "  f(1);\n",
+        "} else if (a1 == 48) {\n",
+        "  f(2);\n",
+        "} else if (a1 != 85) {\n",
+        "  f(4);\n",
+        "} else {\n",
+        "  f(3);\n",
+        "}\n",
+        "return;\n",
+    );
+    assert_eq!(cleanup(text), want);
+}
