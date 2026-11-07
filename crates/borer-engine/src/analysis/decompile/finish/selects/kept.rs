@@ -24,7 +24,8 @@ const SIGNED_BOUND_MAX: u64 = 0x7fff_ffff;
 /// from the choice; but a word compare is spelled as the helper before
 /// either runs, which hides the choice from both. The variable is declared
 /// with the helper's signedness and no wider than the machine word the
-/// helper compares at, so the compare reads as the helper does,
+/// helper compares at, so the compare reads as the helper does, and is no
+/// `const`, which the `if` would assign,
 /// and the bound is a constant, which a clamp is against and which the
 /// choice may name twice where it would read nothing twice; a signed
 /// helper's bound is a positive `int`, which compares the same signed or
@@ -86,7 +87,10 @@ pub(super) fn unspell(lines: &mut Vec<String>, k: usize, word: &str) -> Option<u
                 let ty = decl_type(&declared, v);
                 let typed = parse_const(other)
                     .is_some_and(|bound| ty.as_deref().is_some_and(|t| fits(t, bound, unsigned)));
-                let bits = ty.as_deref().and_then(width);
+                let bits = ty
+                    .as_deref()
+                    .filter(|t| !t.trim_start().starts_with("const "))
+                    .and_then(width);
                 if !typed || !is_ident(v) || bits.is_none_or(|b| width(word).is_none_or(|w| b > w))
                 {
                     continue;
@@ -257,5 +261,13 @@ mod tests {
         );
         assert!(out.contains("if (a4 < 5) {\n  a4 = 5;\n}\n"), "{out}");
         assert!(out.contains("var3 = min(a5, 2) >> 1;\n"), "{out}");
+        let fixed = concat!(
+            "// signature: uint64_t f(const uint64_t a1)\n",
+            "uint64_t var1;\n",
+            "\n",
+            "var1 = umax(a1, 2) << 1;\n",
+            "return var1;\n",
+        );
+        assert_eq!(select_statements(fixed, "uint64_t"), fixed);
     }
 }
