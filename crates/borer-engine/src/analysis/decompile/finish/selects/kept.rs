@@ -97,9 +97,9 @@ pub(super) fn unspell(lines: &mut Vec<String>, k: usize, word: &str) -> Option<u
                     lines.splice(k..=k, rewritten);
                     return Some(n);
                 }
-                let whole = ty.as_deref().is_some_and(|t| {
-                    integer_bits(t.trim_start_matches("const ")) == integer_bits(word)
-                });
+                let whole = ty
+                    .as_deref()
+                    .is_some_and(|t| width(t).is_some_and(|w| Some(w) == width(word)));
                 if !whole {
                     continue;
                 }
@@ -130,11 +130,10 @@ pub(super) fn unspell(lines: &mut Vec<String>, k: usize, word: &str) -> Option<u
 /// * `bound` - The constant bound.
 /// * `unsigned` - Whether the helper compares unsigned.
 fn fits(ty: &str, bound: u64, unsigned: bool) -> bool {
-    let ty = ty.trim_start_matches("const ");
-    let Some(bits) = integer_bits(ty) else {
+    let Some(width) = width(ty) else {
         return false;
     };
-    let width = u32::from(bits);
+    let ty = ty.trim_start_matches("const ");
     if unsigned {
         ty.starts_with("uint") && bound.checked_shr(width).is_none_or(|high| high == 0)
     } else {
@@ -144,6 +143,19 @@ fn fits(ty: &str, bound: u64, unsigned: bool) -> bool {
                 .checked_shr(width.saturating_sub(1))
                 .is_none_or(|high| high == 0)
     }
+}
+
+/// The width in bits of an integer type a declaration gives, the 64-bit
+/// ones ([`integer_bits`] stops at 32) included.
+///
+/// # Arguments
+///
+/// * `ty` - The declared type.
+fn width(ty: &str) -> Option<u32> {
+    let ty = ty.trim_start_matches("const ");
+    integer_bits(ty)
+        .map(u32::from)
+        .or_else(|| matches!(ty, "uint64_t" | "int64_t").then_some(64))
 }
 
 #[cfg(test)]
@@ -213,21 +225,30 @@ mod tests {
         assert_eq!(select_statements(text, "uint32_t"), text);
     }
 
-    /// On a 64-bit target a helper computes at 64 bits, so a 32-bit
-    /// variable keeps the helper inside a larger statement, where the
-    /// result's width shows; set back into the variable it is the `if`.
+    /// On a 64-bit target a 32-bit clamp inside a wider statement stays.
+    ///
+    /// A helper computes at 64 bits there, so the result's width shows in
+    /// the statement; set back into the variable it is the `if`, and a
+    /// 64-bit variable's clamp is the `if` either way.
     #[test]
     fn a_narrow_clamp_inside_a_wide_statement_stays() {
         let text = concat!(
-            "// signature: uint64_t f(uint32_t a1, uint32_t a2)\n",
-            "uint64_t var1;\n",
+            "// signature: uint64_t f(uint32_t a1, uint32_t a2, uint64_t a3, int64_t a4)\n",
+            "uint64_t var1, var2;\n",
             "\n",
             "var1 = umax(a1, 2) << 0x1c;\n",
             "a2 = umax(a2, 3);\n",
-            "return var1 + a2;\n",
+            "var2 = umax(a3, 4) << 0x1c;\n",
+            "a4 = max(a4, 5);\n",
+            "return var1 + a2 + var2 + a4;\n",
         );
         let out = select_statements(text, "uint64_t");
         assert!(out.contains("var1 = umax(a1, 2) << 0x1c;\n"), "{out}");
         assert!(out.contains("if (a2 < 3) {\n  a2 = 3;\n}\n"), "{out}");
+        assert!(
+            out.contains("if (a3 < 4) {\n  a3 = 4;\n}\nvar2 = a3 << 0x1c;\n"),
+            "{out}"
+        );
+        assert!(out.contains("if (a4 < 5) {\n  a4 = 5;\n}\n"), "{out}");
     }
 }
