@@ -210,3 +210,66 @@ fn a_parameter_read_by_a_packed_double_op_is_a_double() {
     let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1000).unwrap_or_default();
     assert!(text.contains("(double a1, double a2)"), "{text}");
 }
+
+/// A register a function hands on unset to a call of unknown arity is its
+/// parameter.
+///
+/// The call passes every argument slot up to the last register its block
+/// set, so `rcx` before a set `rdx` is the caller's own first argument,
+/// whether the call goes through the import's slot or a thunk to it. A
+/// register set in an earlier block, or the register the call goes
+/// through, passes nothing and makes no parameter.
+#[test]
+fn a_register_handed_to_an_undeclared_import_is_a_parameter() {
+    let signature = |code: &[u8]| {
+        let mut p = program64_with_data(code, &[0u8; 8]);
+        p.symbols = vec![Symbol {
+            name: "nolib.dll!UndeclaredApi".to_owned(),
+            addr: 0x1_4000_2000,
+            kind: SymbolKind::Import,
+        }];
+        let a = Analysis::compute(&p);
+        let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1000).unwrap_or_default();
+        let sig = text
+            .lines()
+            .find(|l| l.starts_with("// signature: "))
+            .unwrap_or_default()
+            .to_owned();
+        (sig, text)
+    };
+    let slot = [
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp,0x28
+        0x48, 0x8d, 0x54, 0x24, 0x30, // ASM: lea rdx,[rsp+0x30]
+        0xff, 0x15, 0xf1, 0x0f, 0x00, 0x00, // ASM: call [rip+0xff1]
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp,0x28
+        0xc3, // ASM: ret
+    ];
+    let mut thunk = vec![
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp,0x28
+        0x48, 0x8d, 0x54, 0x24, 0x30, // ASM: lea rdx,[rsp+0x30]
+        0xe8, 0x12, 0x00, 0x00, 0x00, // ASM: call 0x140001020
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp,0x28
+        0xc3, // ASM: ret
+    ];
+    thunk.resize(0x20, 0xcc);
+    thunk.extend_from_slice(&[0xff, 0x25, 0xda, 0x0f, 0x00, 0x00]); // ASM: jmp [rip+0xfda]
+    for code in [&slot[..], &*thunk] {
+        let (sig, text) = signature(code);
+        assert!(sig.contains("(uint64_t a1)"), "{text}");
+    }
+    let earlier = [
+        0xba, 0x01, 0x00, 0x00, 0x00, // ASM: mov edx,1
+        0xeb, 0x00, // ASM: jmp 0x140001007
+        0xff, 0x15, 0xf3, 0x0f, 0x00, 0x00, // ASM: call [rip+0xff3]
+        0xc3, // ASM: ret
+    ];
+    let through = [
+        0x48, 0x8b, 0x15, 0xf9, 0x0f, 0x00, 0x00, // ASM: mov rdx,[rip+0xff9]
+        0xff, 0xd2, // ASM: call rdx
+        0xc3, // ASM: ret
+    ];
+    for code in [&earlier[..], &through[..]] {
+        let (sig, text) = signature(code);
+        assert!(!sig.contains("a1"), "{text}");
+    }
+}

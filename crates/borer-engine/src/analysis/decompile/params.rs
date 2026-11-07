@@ -1366,6 +1366,7 @@ pub(super) fn detect_params(
             continue;
         };
         let mut stopped = false;
+        let mut here = BTreeSet::new();
         for instr in instrs {
             if instr.mnemonic() == Mnemonic::Push {
                 if instr.op0_kind() == OpKind::Memory {
@@ -1404,11 +1405,8 @@ pub(super) fn detect_params(
                 {
                     continue;
                 }
-                forward(
-                    &mut found,
-                    &written,
-                    lift::forwarded_reads(ctx, &mut factory, instr),
-                );
+                let reads = call_reads(ctx, &mut factory, instr, &here);
+                forward(&mut found, &written, reads);
                 stopped = true;
                 break;
             }
@@ -1452,6 +1450,7 @@ pub(super) fn detect_params(
                     OpAccess::CondWrite | OpAccess::None | OpAccess::NoMemAccess => {}
                 }
             }
+            here.extend(writes.iter().copied());
             written.extend(writes);
         }
         if !stopped {
@@ -1463,6 +1462,58 @@ pub(super) fn detect_params(
     found.sort_by_key(|r| (ctx.conv.slot(*r), ctx.conv.args.iter().all(|a| a != r)));
     found.dedup_by_key(|r| ctx.conv.slot(*r));
     found
+}
+
+/// The argument registers a call reads, as a call is rendered.
+///
+/// A callee whose body the scan reads, or whose prototype is declared,
+/// reads what [`lift::forwarded_reads`] finds. One with no body (an import
+/// no prototype declares, a thunk to one, a slot, a computed address) is
+/// rendered with every argument slot up to the last register the caller
+/// set in the call's own block, short of the register the call goes
+/// through, the ones it never set named as the registers they are; so it
+/// reads those, and a caller that hands its own `rcx` on that way takes
+/// it as a parameter.
+///
+/// # Arguments
+///
+/// * `ctx` - The rendering context, for the functions and prototypes.
+/// * `factory` - Reused instruction-info factory.
+/// * `instr` - The call.
+/// * `here` - The argument registers the call's block set before it.
+fn call_reads(
+    ctx: &Ctx<'_>,
+    factory: &mut InstructionInfoFactory,
+    instr: &Instruction,
+    here: &BTreeSet<Register>,
+) -> Vec<Register> {
+    let reads = lift::forwarded_reads(ctx, factory, instr);
+    let target = lift::static_target(instr);
+    let bodyless =
+        target.is_none_or(|t| ctx.analysis.function(t).is_none_or(|f| f.thunk.is_some()));
+    if !reads.is_empty() || !bodyless || lift::import_prototype(ctx, target).is_some() {
+        return reads;
+    }
+    let through = match instr.op0_kind() {
+        OpKind::Register => Some(instr.op0_register()),
+        OpKind::Memory => Some(instr.memory_base()),
+        _ => None,
+    }
+    .map(|r| lift::canon(r, ctx.bitness));
+    let top = ctx
+        .conv
+        .args
+        .iter()
+        .take_while(|r| through != Some(**r))
+        .enumerate()
+        .filter(|(_, r)| here.contains(r))
+        .map(|(j, _)| j)
+        .last();
+    ctx.conv
+        .args
+        .get(..top.unwrap_or(0))
+        .unwrap_or_default()
+        .to_vec()
 }
 
 /// Tells whether block `b` is where the prologue's register saves happen.
