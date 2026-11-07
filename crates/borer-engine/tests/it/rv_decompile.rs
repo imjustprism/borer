@@ -1134,3 +1134,27 @@ fn an_rv32_jump_through_a_function_table_stays_a_goto() {
     let text = decompile(&p, &a, &Overlay::default(), AT).expect("decompiles");
     assert!(text.contains("goto *"), "{text}");
 }
+
+/// A truth value RISC-V takes of one bit by shifting it to the top and back
+/// reads as the bit it tests.
+///
+/// `c & 0x40` as a value is `slli a0, a0, 57; srli a0, a0, 63` on RV64 and
+/// `slli a0, a0, 25; srli a0, a0, 31` on RV32, each `(a1 & 0x40) != 0`: the
+/// constant the source wrote, not two shifts.
+#[test]
+fn a_bit_shifted_to_the_top_and_back_reads_as_its_test() {
+    let code = [
+        (0x0395_1513, 4), // ASM: slli a0, a0, 57
+        (0x03f5_5513, 4), // ASM: srli a0, a0, 63
+        (0x0000_8067, 4), // ASM: ret
+    ];
+    let text = decompiled(&code, Arch::RiscV64).concat();
+    assert!(text.contains("return (a1 & 0x40) != 0;"), "{text}");
+    let word = [
+        (0x0195_1513, 4), // ASM: slli a0, a0, 25
+        (0x01f5_5513, 4), // ASM: srli a0, a0, 31
+        (0x0000_8067, 4), // ASM: ret
+    ];
+    let text = decompiled(&word, Arch::RiscV32).concat();
+    assert!(text.contains("return (a1 & 0x40) != 0;"), "{text}");
+}

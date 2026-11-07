@@ -2439,6 +2439,45 @@ fn align_up_idiom(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
     ))
 }
 
+/// Reads a logical shift of the top bit after a shift left as the bit it
+/// keeps, tested.
+///
+/// `(x << a) >> (w - 1)` at width `w` is bit `w - 1 - a` of `x`, `0` or `1`:
+/// RISC-V, which has no bit test, writes `c & 0x40` as a truth value
+/// `slli a0, a0, 57; srli a0, a0, 63`, which is `(x & 0x40) != 0`, the
+/// flag the source tested. Only a shift left the expression holds bare is
+/// read, at the width of the shift right: a narrower shift left is cut or
+/// extended first, and then it is no such shape.
+///
+/// # Arguments
+///
+/// * `op` - The operation being folded.
+/// * `l` - Left operand.
+/// * `r` - Right operand.
+/// * `bits` - Width of the operands.
+///
+/// # Returns
+///
+/// The bit test, or `None` when this is not that shape.
+fn bit_idiom(op: Op, l: &Expr, r: &Expr, bits: u8) -> Option<Expr> {
+    let top = u64::from(bits).checked_sub(1)?;
+    let (Op::Shr, Expr::Bin(Op::Shl, x, a)) = (op, l) else {
+        return None;
+    };
+    if const_of(r)? != top {
+        return None;
+    }
+    let bit = 1u64.checked_shl(u32::try_from(top.checked_sub(const_of(a)?)?).ok()?)?;
+    Some(Expr::Cond(Box::new(Cond {
+        cc: Cc(ConditionCode::ne),
+        flags: Flags::Cmp(
+            fold(Op::And, (**x).clone(), Expr::Const(bit), bits),
+            Expr::Const(0),
+            bits,
+        ),
+    })))
+}
+
 /// Reads the count-leading-zeros idiom a compiler writes with a bit scan.
 ///
 /// There is no `clz` instruction before `lzcnt`, so a compiler computes it as
@@ -2959,7 +2998,7 @@ pub(super) fn fold(op: Op, l: Expr, r: Expr, bits: u8) -> Expr {
     if let Some(e) = sign_absolute(op, &l, &r, bits) {
         return e;
     }
-    if let Some(e) = rotate_idiom(op, &l, &r, bits) {
+    if let Some(e) = rotate_idiom(op, &l, &r, bits).or_else(|| bit_idiom(op, &l, &r, bits)) {
         return e;
     }
     if let Some(e) = midpoint_idiom(op, &l, &r, bits) {
