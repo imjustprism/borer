@@ -146,7 +146,9 @@ fn merged_returns_split_into_the_arms() {
 /// above, or jumps on to `a2`, whose result is all of `rax`: C would
 /// sign-extend the `int32_t` HRESULT, so the text returns
 /// `(uint32_t)E_OUTOFMEMORY` and runs as the binary does. `g` returns
-/// `E_NOTIMPL` the same way and nothing wider, so the name stands.
+/// `E_NOTIMPL` the same way and nothing wider, so the name stands. `h`
+/// picks one of two such codes with a 64-bit `cmov`, and the choice is
+/// the word.
 #[test]
 fn a_code_a_64_bit_result_zero_extends_is_its_word() {
     let mut code = vec![
@@ -161,10 +163,23 @@ fn a_code_a_64_bit_result_zero_extends_is_its_word() {
         0xb8, 0x01, 0x40, 0x00, 0x80, // ASM: mov eax,0x80004001
         0xc3, // ASM: ret
     ]);
+    code.resize(0x40, 0xcc);
+    code.extend([
+        0xb8, 0x0e, 0x00, 0x07, 0x80, // ASM: mov eax,0x8007000e
+        0xba, 0x01, 0x40, 0x00, 0x80, // ASM: mov edx,0x80004001
+        0x85, 0xc9, // ASM: test ecx,ecx
+        0x48, 0x0f, 0x45, 0xc2, // ASM: cmovne rax,rdx
+        0xc3, // ASM: ret
+    ]);
     let p = program64(&code);
     let text = runs_agree(&p, 0x1_4000_1000);
     assert!(text.contains("return (uint32_t)E_OUTOFMEMORY;"), "{text}");
     let narrow = decompiled(&p, 0x1_4000_1020);
     assert!(narrow.contains("return E_NOTIMPL;"), "{narrow}");
     assert!(narrow.contains("uint32_t sub_140001020("), "{narrow}");
+    let chosen = runs_agree(&p, 0x1_4000_1040);
+    assert!(
+        chosen.contains("return (uint32_t)(") && chosen.contains("E_NOTIMPL"),
+        "{chosen}"
+    );
 }

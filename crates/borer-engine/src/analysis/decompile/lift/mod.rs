@@ -1041,14 +1041,16 @@ pub(super) fn exec_block(
     ex.close(out, instrs.first().map(Instruction::ip))
 }
 
-/// Renders a value a function returns, a code whose bits above its low
-/// word the result clears spelled as that word.
+/// Renders a value a function returns, one whose bits above its low word
+/// are clear and that names a negative code spelled as that word.
 ///
 /// `mov eax, 0x8007000e` (`mov w0` on arm64) zero-extends, but the code's
 /// name, `E_OUTOFMEMORY`, is an `int32_t` HRESULT, which C sign-extends
 /// where the function returns 64 bits: there the value reads
-/// `(uint32_t)E_OUTOFMEMORY`. A code below `0x80000000`, one a number
-/// spells, or a function returning 32 bits needs no cast.
+/// `(uint32_t)E_OUTOFMEMORY`, and a choice between codes (a `cmov`)
+/// `(uint32_t)(a1 != 0 ? E_NOTIMPL : E_OUTOFMEMORY)`. A code below
+/// `0x80000000`, one a number spells, or a function returning 32 bits
+/// needs no cast.
 ///
 /// # Arguments
 ///
@@ -1057,14 +1059,26 @@ pub(super) fn exec_block(
 /// * `wide` - The function returns all 64 bits of the register.
 pub(super) fn returned_text(v: &Expr, n: &Names<'_>, wide: bool) -> String {
     let text = v.render(n);
-    match v {
-        Expr::Const(c)
-            if wide && c >> 31 == 1 && crate::winconst::name(*c) == Some(text.as_str()) =>
-        {
-            format!("(uint32_t){text}")
-        }
-        _ => text,
+    if wide && known_bits(v) >> 32 == 0 && names_code(v, &text) {
+        format!("(uint32_t){text}")
+    } else {
+        text
     }
+}
+
+/// Tells whether a value is, or chooses between values that are, a code C
+/// reads as a negative `int32_t`, spelled by its name in `text`.
+///
+/// # Arguments
+///
+/// * `v` - The value: a constant or a choice, whose text is one atom.
+/// * `text` - The value's text.
+fn names_code(v: &Expr, text: &str) -> bool {
+    if let Expr::Ternary(_, a, b) = v {
+        return names_code(a, text) || names_code(b, text);
+    }
+    matches!(v, Expr::Const(c)
+        if c >> 31 == 1 && crate::winconst::name(*c).is_some_and(|name| text.contains(name)))
 }
 
 /// Strips the upper-bit merge from a byte or word write into the return register.
