@@ -35,11 +35,12 @@ or Binary Ninja underneath.
 
 ## Why borer
 
-- **Checked output.** Every block of decompiled C is run in an emulator from
-  seeded states and compared with the machine code it came from, and the
-  output says how much was checked. On x86 and x86-64, `borer certify` also
-  runs a function's final text as C beside the binary and grades it.
-  Instructions it cannot model stay as `/* asm: ... */` instead of a guess.
+- **Checked output.** Every block of decompiled C is run on a model of its
+  machine from seeded states and compared with the code it came from, on
+  every architecture below, and the output says how much was checked. On x86
+  and x86-64, `borer certify` also runs a function's final text as C beside
+  the binary and grades it. Instructions it cannot model stay as
+  `/* asm: ... */` instead of a guess.
 - **Sized for a context window.** Lists are filtered and paged on the server
   (`# showing N of M`), a repeated request with `since=<tag>` returns only
   what changed, and the same question always returns the same bytes.
@@ -58,7 +59,7 @@ classes, protocols and message formats.
 
 ## Platforms
 
-| Architecture | Disassemble | Decompile | Emulate |
+| Architecture | Disassemble | Decompile | Emulation tools |
 | --- | --- | --- | --- |
 | x86, x86-64 | yes | yes | yes |
 | arm64 | yes | yes | yes |
