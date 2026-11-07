@@ -153,6 +153,32 @@ fn a_mid_function_address_and_a_bad_predicate_are_refused() {
     assert!(bad.contains("count from one"), "{bad}");
 }
 
+/// A 32-bit image's call through a pointer passes its words.
+///
+/// `f(a, 3)` through a pointer in the first parameter's object pushes two
+/// 32-bit words, so the callee is cast to a function of two `uint32_t`s;
+/// `uint64_t`s would take two stack slots each and call it with four.
+#[test]
+fn a_32_bit_call_through_a_pointer_passes_32_bit_words() {
+    let code = [
+        0x8b, 0x44, 0x24, 0x04, // ASM: mov eax,[esp+4]
+        0x6a, 0x03, // ASM: push 3
+        0xff, 0x74, 0x24, 0x0c, // ASM: push dword [esp+0xc]
+        0xff, 0x50, 0x04, // ASM: call [eax+4]
+        0x83, 0xc4, 0x08, // ASM: add esp,8
+        0xc3, // ASM: ret
+    ];
+    let p = crate::raw::image(Arch::X86, &code, &[]);
+    let a = Analysis::compute(&p);
+    let text = borer_engine::analysis::decompile::decompile(&p, &a, &Overlay::default(), 0x401000)
+        .unwrap_or_default();
+    assert!(
+        text.contains("((uint32_t (*)(uint32_t, uint32_t))"),
+        "{text}"
+    );
+    assert!(!text.contains("uint64_t"), "{text}");
+}
+
 /// Decompiles an arm64 function at `0x401000` that jumps through a table
 /// of functions at `0x402000`, its entries `op0`, `op1`, ... after the
 /// head, from `0x401020` for a head of eight words or fewer.

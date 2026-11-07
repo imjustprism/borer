@@ -1420,13 +1420,14 @@ fn top_level_commas(args: &str) -> usize {
 ///
 /// * `count` - The arguments.
 /// * `name` - The declarator inside the `(*)`, empty for a cast.
-fn word_function(count: usize, name: &str) -> String {
+/// * `word` - The image's word type, `uint32_t` or `uint64_t`.
+fn word_function(count: usize, name: &str, word: &str) -> String {
     let params = if count == 0 {
         "void".to_owned()
     } else {
-        vec!["uint64_t"; count].join(", ")
+        vec![word; count].join(", ")
     };
-    format!("uint64_t (*{name})({params})")
+    format!("{word} (*{name})({params})")
 }
 
 /// Writes every call through a computed pointer as C can call it.
@@ -1437,7 +1438,8 @@ fn word_function(count: usize, name: &str) -> String {
 /// each time, is declared the function pointer it is and called by name:
 /// `uint64_t (*a1)(uint64_t)` and `a1(x)`. Any other callee is cast to a
 /// function pointer taking as many words as the call passes:
-/// `((uint64_t (*)(uint64_t))rax)(x)`.
+/// `((uint64_t (*)(uint64_t))rax)(x)`. A word is the image's: a 32-bit
+/// image passes `uint32_t` ones, each its own register or stack slot.
 ///
 /// # Arguments
 ///
@@ -1446,7 +1448,7 @@ fn word_function(count: usize, name: &str) -> String {
 /// # Returns
 ///
 /// The text with its pointer calls typed.
-pub(super) fn callable_pointers(text: &str) -> String {
+pub(super) fn callable_pointers(text: &str, word: &str) -> String {
     if !text.contains("(*") {
         return text.to_owned();
     }
@@ -1502,7 +1504,7 @@ pub(super) fn callable_pointers(text: &str) -> String {
         for n in names.split(", ").map(str::trim) {
             match called.get(n) {
                 Some(&count) => {
-                    declared.push((k, format!("{};{comment}", word_function(count, n))));
+                    declared.push((k, format!("{};{comment}", word_function(count, n, word))));
                 }
                 None => kept.push(n),
             }
@@ -1531,7 +1533,7 @@ pub(super) fn callable_pointers(text: &str) -> String {
                             .get(at + decl.len()..)
                             .is_some_and(|t| t.starts_with([',', ')']))
                     {
-                        sig.replace_range(at..at + decl.len(), &word_function(*count, name));
+                        sig.replace_range(at..at + decl.len(), &word_function(*count, name, word));
                         changed = true;
                         break;
                     }
@@ -1540,16 +1542,16 @@ pub(super) fn callable_pointers(text: &str) -> String {
             *line = format!("// signature: {sig}");
             continue;
         }
-        if line.starts_with("//") || uncommented(line).starts_with("uint64_t (*") {
+        if line.starts_with("//") || uncommented(line).starts_with(&format!("{word} (*")) {
             continue;
         }
         for (at, end, callee, count) in pointer_calls(line).into_iter().rev() {
             let with = if called.contains_key(&callee) {
                 callee.clone()
             } else if is_ident(&callee) {
-                format!("(({}){callee})", word_function(count, ""))
+                format!("(({}){callee})", word_function(count, "", word))
             } else {
-                format!("(({})({callee}))", word_function(count, ""))
+                format!("(({})({callee}))", word_function(count, "", word))
             };
             line.replace_range(at..end, &with);
             changed = true;
@@ -3437,7 +3439,7 @@ mod pointer_call_tests {
             "return (*(*(uint64_t*)(a2 + 8)))(var1, 3);",
         ]
         .join("\n");
-        let out = callable_pointers(&text);
+        let out = callable_pointers(&text, "uint64_t");
         assert!(
             out.contains("uint64_t f(uint64_t (*a1)(uint64_t), uint64_t a2)"),
             "{out}"
@@ -3458,14 +3460,14 @@ mod pointer_call_tests {
             "var2 = (*g64_1008)(var1, 2);",
         ]
         .join("\n");
-        let out = callable_pointers(&global);
+        let out = callable_pointers(&global, "uint64_t");
         assert!(
             out.contains("uint64_t (*g64_1008)(uint64_t, uint64_t); // @ 0x1008"),
             "{out}"
         );
         assert!(out.contains("var2 = g64_1008(var1, 2);"), "{out}");
         let named = "// signature: void f(uint64_t a1)\n\nmap_err<u8, u8 (*)(u32)>(a1);\n";
-        assert_eq!(callable_pointers(named), named);
+        assert_eq!(callable_pointers(named, "uint64_t"), named);
         assert!(out.contains("uint64_t var1, var2;"), "{out}");
     }
 
