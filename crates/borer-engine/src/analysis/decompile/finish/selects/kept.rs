@@ -34,7 +34,8 @@ const SIGNED_BOUND_MAX: u64 = 0x7fff_ffff;
 /// variable is as wide as the machine word, as the helper's result is, so
 /// the statement computes at the width it did, the variable is the
 /// function's own (a value only its text holds, or a parameter whose
-/// address no line takes), so the `if` writes nothing another reader sees,
+/// address no line of code takes, a header's note on the machine's frame
+/// being no such line), so the `if` writes nothing another reader sees,
 /// and the helper is unsigned:
 /// a signed `min` or `max` hands back an unsigned word, which a signed
 /// variable in its place would shift or compare as signed.
@@ -109,8 +110,11 @@ pub(super) fn unspell(lines: &mut Vec<String>, k: usize, word: &str) -> Option<u
                     lines.splice(k..=k, rewritten);
                     return Some(n);
                 }
-                let own = private(lines, v)
-                    || (is_param_name(v) && !lines.iter().any(|l| l.contains(&format!("&{v}"))));
+                let taken = lines
+                    .iter()
+                    .filter(|l| !l.trim_start().starts_with("//"))
+                    .any(|l| l.contains(&format!("&{v}")));
+                let own = private(lines, v) || (is_param_name(v) && !taken);
                 if bits != width(word) || !unsigned || !own {
                     continue;
                 }
@@ -186,6 +190,7 @@ mod tests {
     fn a_spelled_clamp_reads_as_the_if_it_was() {
         let text = concat!(
             "// signature: uint32_t f(uint32_t a1, uint32_t a2, int32_t a3, int32_t a4, uint32_t *a5, uint32_t a6)\n",
+            "// note: &a1 escapes; locals from there up are reloaded after calls\n",
             "*(uint32_t*)0x40023804 = a2 | ((umax(a1, 2) << 0x1c) & 0x70000000);\n",
             "a2 = umax(a2, 7);\n",
             "a3 = umax(a3, 4);\n",
@@ -196,6 +201,7 @@ mod tests {
         );
         let want = concat!(
             "// signature: uint32_t f(uint32_t a1, uint32_t a2, int32_t a3, int32_t a4, uint32_t *a5, uint32_t a6)\n",
+            "// note: &a1 escapes; locals from there up are reloaded after calls\n",
             "if (a1 < 2) {\n",
             "  a1 = 2;\n",
             "}\n",
