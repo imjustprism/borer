@@ -30,9 +30,11 @@ use super::{
 };
 use hoist::lifts;
 use moves::relocate;
+use rejoin::rejoins;
 
 mod hoist;
 mod moves;
+mod rejoin;
 
 /// Most rounds of the rules one body gets.
 const ROUNDS: usize = 256;
@@ -678,7 +680,7 @@ fn has_effect(e: &Expr) -> bool {
 ///
 /// Whether the list changed.
 fn local(list: &mut Vec<Stmt>, cx: &Cx, f: &Facts<'_>) -> bool {
-    let mut changed = guards(list) | ladders(list) | exits(list, cx);
+    let mut changed = guards(list) | ladders(list) | rejoins(list) | exits(list, cx);
     changed |= falls(list, cx);
     changed |= dead(list, f) | returns(list);
     changed || skips(list, cx, f) || flattens(list)

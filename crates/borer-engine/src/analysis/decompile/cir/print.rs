@@ -179,7 +179,7 @@ fn proto(p: &Proto, out: &mut String) {
 /// * `list` - The statements.
 /// * `depth` - The nesting depth, two spaces each.
 /// * `out` - Receives the text.
-fn stmts(list: &[Stmt], depth: usize, out: &mut String) {
+pub(super) fn stmts(list: &[Stmt], depth: usize, out: &mut String) {
     for s in list {
         stmt(s, depth, out);
     }

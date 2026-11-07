@@ -227,3 +227,84 @@ fn a_jump_an_arm_ends_with_is_lifted_past_the_run_it_skips() {
     let out = cleanup(&assembled);
     assert!(out.contains("if (a3 < 32 || (a3 & 0x18) != 0) {"), "{out}");
 }
+
+/// Arms of a chain that run one body rejoin as one test.
+///
+/// A short-circuit test whose two ways reach one block, `if ((v == MIN &&
+/// errno == ERANGE) || v < min) e = SMALL; else if ...`, reads back as the
+/// block in two arms: next to each other under their own tests, or first
+/// and last around another arm. Each pair is the one `||` it was.
+#[test]
+fn arms_that_run_one_body_rejoin_as_one_test() {
+    let text = concat!(
+        "if (a1 == 1 && a2 == 34) {\n",
+        "  f(2);\n",
+        "} else if (a3 >= a4) {\n",
+        "  if (a1 == 2 && a2 == 34) {\n",
+        "    f(3);\n",
+        "  } else if (a3 > a5) {\n",
+        "    f(3);\n",
+        "  }\n",
+        "} else {\n",
+        "  f(2);\n",
+        "}\n",
+        "return;\n",
+    );
+    let want = concat!(
+        "if ((a1 == 1 && a2 == 34) || a3 < a4) {\n",
+        "  f(2);\n",
+        "} else if ((a1 == 2 && a2 == 34) || a3 > a5) {\n",
+        "  f(3);\n",
+        "}\n",
+        "return;\n",
+    );
+    assert_eq!(cleanup(text), want);
+}
+
+/// A test that binds looser than `||`, or text the builder keeps as
+/// spelled, joins in parentheses, so the rejoined test runs the same arm.
+#[test]
+fn a_rejoined_test_keeps_each_side_whole() {
+    let text = concat!(
+        "if (a1 != 0) {\n",
+        "  f(1);\n",
+        "} else if (a2 /* note */ ? a3 : a4) {\n",
+        "  f(1);\n",
+        "} else if (a5 ? a6 : a7) {\n",
+        "  f(1);\n",
+        "}\n",
+        "return;\n",
+    );
+    let want = concat!(
+        "if (a1 != 0 || (a2 /* note */ ? a3 : a4) || (a5 ? a6 : a7)) {\n",
+        "  f(1);\n",
+        "}\n",
+        "return;\n",
+    );
+    assert_eq!(cleanup(text), want);
+}
+
+/// The middle test a rejoin negates is negated whole when it is a choice,
+/// so the joined test runs the arm the chain ran.
+#[test]
+fn a_rejoined_choice_is_negated_whole() {
+    let text = concat!(
+        "if (a1 != 0) {\n",
+        "  f(1);\n",
+        "} else if (a2 ? a3 < a4 : a5) {\n",
+        "  f(2);\n",
+        "} else {\n",
+        "  f(1);\n",
+        "}\n",
+        "return;\n",
+    );
+    let want = concat!(
+        "if (a1 != 0 || !(a2 ? a3 < a4 : a5)) {\n",
+        "  f(1);\n",
+        "} else {\n",
+        "  f(2);\n",
+        "}\n",
+        "return;\n",
+    );
+    assert_eq!(cleanup(text), want);
+}
