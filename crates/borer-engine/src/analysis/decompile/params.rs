@@ -784,6 +784,32 @@ pub(super) enum Declaration {
     Stated,
 }
 
+/// Tells whether a parameter passes an integer two 32-bit words wide,
+/// which a 32-bit procedure call standard puts in a pair of registers.
+///
+/// # Arguments
+///
+/// * `q` - How the parameter passes, `None` when its type is unknown.
+fn pair(q: Option<Pass>) -> bool {
+    !matches!(q, Some(Pass::Float(_))) && crate::analysis::typelib::words32(q) > 1
+}
+
+/// Tells whether a function's stated prototype passes an integer in a pair
+/// of 32-bit registers ([`pair`]), which a reading of one register a
+/// parameter cuts.
+///
+/// # Arguments
+///
+/// * `ctx` - The context: the overlay the prototype is stated in.
+/// * `entry` - The function.
+pub(super) fn stated_pair(ctx: &Ctx<'_>, entry: u64) -> bool {
+    ctx.overlay.prototypes.get(&entry).is_some_and(|p| {
+        p.params
+            .iter()
+            .any(|q| pair(q.ty.pass(&ctx.overlay.types, 32, ctx.program.format)))
+    })
+}
+
 /// Returns the arity a declaration states for a function, when one does.
 ///
 /// The declaration is the prototype an agent stated for the function,
@@ -827,10 +853,7 @@ pub(super) fn declared_arity(
             .iter()
             .map(|q| q.ty.pass(&ctx.overlay.types, word, ctx.program.format))
             .collect();
-        let pair = |q: &Option<Pass>| {
-            !matches!(q, Some(Pass::Float(_))) && crate::analysis::typelib::words32(*q) > 1
-        };
-        if ctx.program.arch == crate::program::Arch::RiscV32 && passes.iter().any(pair) {
+        if ctx.program.arch == crate::program::Arch::RiscV32 && passes.iter().any(|q| pair(*q)) {
             return None;
         }
         let floats = passes

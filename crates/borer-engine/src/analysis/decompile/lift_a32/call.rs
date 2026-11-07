@@ -477,15 +477,18 @@ impl Lift<'_, '_> {
 
     /// The registers a function takes its arguments in, as keys, and what it
     /// returns, when its body or a declaration says, it takes its integers
-    /// in registers alone and returns nothing or one word: a call through a
-    /// table prints a pointer to a function of words
-    /// ([`super::super::lift::Exec::table_callee`]), which would cut a
-    /// float or a 64-bit result.
+    /// in registers alone, one a parameter (no stated 64-bit one, which
+    /// takes a pair), and returns no float: a call through a table prints a
+    /// pointer to a function of words
+    /// ([`super::super::lift::Exec::table_callee`]).
     ///
     /// # Arguments
     ///
     /// * `entry` - The function.
     pub(super) fn arg_keys(&self, entry: u64) -> Option<(Vec<Key>, Returns)> {
+        if super::super::params::stated_pair(self.ex.ctx, entry) {
+            return None;
+        }
         let regs = self.callee_args(Some(entry), None)?;
         let stack =
             super::shape::callee_shape(self.ex.ctx, abi::reached(self.ex.ctx.analysis, entry))
@@ -493,7 +496,7 @@ impl Lift<'_, '_> {
         let returns = self.returns(Some(entry), None);
         let plain = stack == 0
             && regs.iter().all(|r| matches!(r, Reg::R(_)))
-            && matches!(returns, Returns::Nothing | Returns::Int(..=32));
+            && !matches!(returns, Returns::Float(_));
         plain.then(|| (regs.into_iter().map(Key::A32).collect(), returns))
     }
 

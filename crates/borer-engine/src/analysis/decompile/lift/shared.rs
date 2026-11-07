@@ -152,8 +152,9 @@ impl Exec<'_, '_> {
     /// The function of a table a tail call through it takes its arguments
     /// as: the one taking the most registers, when every function's are
     /// known, its registers hold every other function's, they all return
-    /// alike, and each of the registers holds a value here. The call's
-    /// integer pointer passes the image's words, one a register.
+    /// alike, returning no integer wider than the image's word, and each of
+    /// the registers holds a value here. The call's integer pointer passes
+    /// and returns the image's words, one a register.
     ///
     /// # Arguments
     ///
@@ -174,9 +175,11 @@ impl Exec<'_, '_> {
             .map(|&e| args(e).map(|(r, back)| (e, r, back)))
             .collect::<Option<_>>()?;
         let (like, regs, back) = shapes.iter().max_by_key(|(_, r, _)| r.len())?;
-        let alike = shapes
-            .iter()
-            .all(|(_, r, b)| b == back && r.iter().all(|k| regs.contains(k)));
+        let word = if self.ctx.program.is_64 { 64 } else { 32 };
+        let alike = !matches!(back, Returns::Int(bits) if *bits > word)
+            && shapes
+                .iter()
+                .all(|(_, r, b)| b == back && r.iter().all(|k| regs.contains(k)));
         (alike && regs.iter().all(|k| self.env.vals.contains_key(k))).then_some(*like)
     }
 
