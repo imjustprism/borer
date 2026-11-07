@@ -2172,6 +2172,9 @@ fn decompile_in<L: Lifter>(
         let shown: Vec<&str> = sent.iter().take(SENT_SHOWN).map(String::as_str).collect();
         let _ = writeln!(out, "// messages: {}{tail}", shown.join(", "));
     }
+    if let Some(signed) = signed_pointers(program, analysis, f.entry) {
+        let _ = writeln!(out, "// signed pointers: {signed}");
+    }
     if f.hands_back_rdx {
         let _ = writeln!(
             out,
@@ -2504,6 +2507,42 @@ fn indent(body: &str) -> String {
         out.push('\n');
     }
     out
+}
+
+/// Returns the header note on the signed pointers a function refers to.
+///
+/// Each address the function's code refers to whose word the loader signs
+/// (arm64e) is written with how: `0x4010 DA, address-diversified, 0x1234`,
+/// in address order, at most eight and then how many more.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image, whose fixups say which words are signed.
+/// * `analysis` - The analysis, for the function's references.
+/// * `entry` - The function's entry.
+///
+/// # Returns
+///
+/// The note, or `None` when the function refers to no signed word.
+fn signed_pointers(program: &Program, analysis: &Analysis, entry: u64) -> Option<String> {
+    /// Most addresses written into the header line.
+    const SHOWN: usize = 8;
+    let slots: BTreeMap<u64, crate::reloc::Signing> = analysis
+        .refs_from(entry)
+        .into_iter()
+        .filter(|(_, site)| site.kind == super::RefKind::Data)
+        .filter_map(|(at, _)| Some((at, program.signing(at)?)))
+        .collect();
+    if slots.is_empty() {
+        return None;
+    }
+    let shown: Vec<String> = slots
+        .iter()
+        .take(SHOWN)
+        .map(|(at, s)| format!("{at:#x} {s}"))
+        .collect();
+    let more = crate::analysis::render::plus_more(slots.len(), SHOWN);
+    Some(format!("{}{more}", shown.join("; ")))
 }
 
 #[cfg(test)]

@@ -247,6 +247,9 @@ impl BorerServer {
                 {
                     text.push_str(&format!(" -> {name}"));
                 }
+                if let Some(s) = p.signing(v.at).filter(|_| place.is_empty() && v.size == 8) {
+                    text.push_str(&format!(" signed {s}"));
+                }
                 out.push_str(&format!("{:<12} {text}\n", format!("{:#x}", v.at)));
             }
             Ok(out)

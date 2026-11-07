@@ -1394,6 +1394,30 @@ impl Program {
         self.clr.as_ref().and_then(|c| c.as_ref().ok())
     }
 
+    /// Returns how the loader signs the arm64e pointer at `va`, as the
+    /// image's fixups say.
+    ///
+    /// The pointer reads with its authentication bits stripped; this keeps
+    /// what they said: its key, whether its discriminator blends in the
+    /// slot's address, and the constant part.
+    ///
+    /// # Arguments
+    ///
+    /// * `va` - The slot's address.
+    ///
+    /// # Returns
+    ///
+    /// The signing, or `None` for a slot the loader does not sign.
+    #[must_use]
+    pub fn signing(&self, va: u64) -> Option<crate::reloc::Signing> {
+        let signed = &self.relocs.signed;
+        signed
+            .binary_search_by_key(&va, |(at, _)| *at)
+            .ok()
+            .and_then(|k| signed.get(k))
+            .map(|(_, s)| *s)
+    }
+
     /// The addresses of the pointer-sized words a PE's base relocation
     /// table, a position-independent ELF's dynamic relocations or a
     /// Mach-O's rebases fix up: every absolute address the image holds, as

@@ -20,6 +20,7 @@ use crate::machogen::{self, ARM64, CODE, PIE, R, RW, RX, Sect, Seg, Starts, X86_
 use borer_engine::analysis::render::xrefs_tsv;
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::program::{Program, SymbolKind};
+use borer_engine::reloc::{Key, Signing};
 
 /// Where `__TEXT` is mapped: the image base.
 const TEXT: u64 = 0x1_0000_0000;
@@ -246,19 +247,22 @@ fn a_chained_rebase_reads_as_its_target_and_a_bind_names_its_slot() {
     );
 }
 
-/// An arm64e chain: an authenticated rebase reads as the image base plus
-/// its offset with its key and diversity stripped, a plain rebase as the
-/// address it holds, and an authenticated bind names its slot.
-#[test]
-fn arm64e_pointers_read_with_their_authentication_stripped() {
-    /// A `ret`, the arm64 entry.
+/// Returns the arm64e image, whose `main` loads a signed word.
+///
+/// `main` at [`MAIN`] loads the word at [`DATA`], an authenticated rebase
+/// to `main` signed with `DA`, the slot's address and `0x1234`; a plain
+/// rebase to `main + 4` follows, then an authenticated bind of `free`
+/// signed with `IA` and `0x5678`.
+fn arm64e() -> Program {
+    /// A `ret`.
     const RET: u32 = 0xd65f_03c0;
     let auth_rebase = 0x400 | (0x1234 << 32) | (1 << 48) | (2 << 49) | (1 << 51) | (1 << 63);
     let rebase = (TEXT + 0x404) | (1 << 51);
     let auth_bind = (0x5678 << 32) | (1 << 62) | (1 << 63);
     let mut text = x86_text();
-    text.bytes[0x400..0x404].copy_from_slice(&RET.to_le_bytes());
-    text.bytes[0x404..0x408].copy_from_slice(&RET.to_le_bytes());
+    text.bytes[0x400..0x404].copy_from_slice(&0xb000_0000_u32.to_le_bytes()); // ASM: adrp x0, DATA
+    text.bytes[0x404..0x408].copy_from_slice(&0xf940_0000_u32.to_le_bytes()); // ASM: ldr x0, [x0]
+    text.bytes[0x408..0x40c].copy_from_slice(&RET.to_le_bytes());
     let payload = machogen::chained(
         3,
         &[Starts {
@@ -271,7 +275,7 @@ fn arm64e_pointers_read_with_their_authentication_stripped() {
         &[(1, false, "_free")],
     );
     let at = 0x1020;
-    let p = load(
+    load(
         ARM64,
         &[
             text,
@@ -287,7 +291,32 @@ fn arm64e_pointers_read_with_their_authentication_stripped() {
             at,
             payload.len(),
         )],
-    );
+    )
+}
+
+/// How [`arm64e`] signs its rebase.
+const REBASE_SIGNED: Signing = Signing {
+    key: Key::Da,
+    address: true,
+    diversity: 0x1234,
+};
+
+/// How [`arm64e`] signs its bind.
+const BIND_SIGNED: Signing = Signing {
+    key: Key::Ia,
+    address: false,
+    diversity: 0x5678,
+};
+
+/// An arm64e chain: an authenticated rebase reads as the image base plus
+/// its offset with its key and diversity stripped, a plain rebase as the
+/// address it holds, and an authenticated bind names its slot.
+///
+/// Each signed slot keeps its key, its address diversity and its
+/// discriminator.
+#[test]
+fn arm64e_pointers_read_with_their_authentication_stripped() {
+    let p = arm64e();
     assert_eq!(word(&p, DATA), TEXT + 0x400);
     assert_eq!(word(&p, DATA + 8), TEXT + 0x404);
     assert_eq!(word(&p, DATA + 16), 0);
@@ -299,6 +328,49 @@ fn arm64e_pointers_read_with_their_authentication_stripped() {
             "fixups:  2 rebase(s) and 1 bind(s) applied to the image (chained fixups, DYLD_CHAINED_PTR_ARM64E); 2 authenticated\n"
         ),
         "{summary}"
+    );
+    assert_eq!(p.signing(DATA), Some(REBASE_SIGNED));
+    assert_eq!(p.signing(DATA + 8), None);
+    assert_eq!(p.signing(DATA + 16), Some(BIND_SIGNED));
+    assert_eq!(REBASE_SIGNED.to_string(), "DA, address-diversified, 0x1234");
+    assert_eq!(BIND_SIGNED.to_string(), "IA, 0x5678");
+}
+
+/// The header of a function loading a signed slot says how the loader
+/// signs it, and a typed read over the slots says it of each signed one.
+#[test]
+fn a_signed_slot_says_how_it_is_signed() {
+    use borer_engine::analysis::decompile::decompile;
+    use borer_engine::analysis::render::typed_tsv;
+    use borer_engine::analysis::utypes::parse_type;
+
+    let p = arm64e();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let main = decompile(&p, &a, &o, MAIN).expect("main decompiles");
+    assert!(
+        main.contains(&format!(
+            "\n// signed pointers: {DATA:#x} DA, address-diversified, 0x1234\n"
+        )),
+        "{main}"
+    );
+    let ty = parse_type("u8 *[3]").expect("parses");
+    let slots = typed_tsv(&p, Some(&a), &o, DATA, &ty).expect("the slots read");
+    let row = |at: u64| {
+        slots
+            .lines()
+            .find(|l| l.starts_with(&format!("{at:#x}")))
+            .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+            .unwrap_or_default()
+    };
+    assert!(
+        row(DATA).ends_with(" signed DA, address-diversified, 0x1234"),
+        "{slots}"
+    );
+    assert!(!row(DATA + 8).contains("signed"), "{slots}");
+    assert!(
+        row(DATA + 16).ends_with(" 0x0 signed IA, 0x5678"),
+        "{slots}"
     );
 }
 

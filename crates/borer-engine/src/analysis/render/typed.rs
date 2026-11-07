@@ -195,7 +195,7 @@ impl Walk<'_> {
                     return;
                 };
                 let text = matches!(resolved(o, inner), TypeExpr::Char);
-                self.row(at, path, &shown, |w| w.pointer(raw, text));
+                self.row(at, path, &shown, |w| w.pointer(at, raw, text));
             }
             TypeExpr::Char => {
                 let Some(&b) = self.bytes_at(at, 1).and_then(<[u8]>::first) else {
@@ -282,22 +282,28 @@ impl Walk<'_> {
         }
     }
 
-    /// Renders a pointer: its value, then what it points at.
+    /// Renders a pointer: its value, then what it points at, then how the
+    /// loader signs it when it does (arm64e).
     ///
     /// # Arguments
     ///
+    /// * `at` - Where the pointer is.
     /// * `raw` - The address it holds.
     /// * `text` - It is a `char` pointer, whose target reads as text first.
-    fn pointer(&self, raw: u64, text: bool) -> String {
+    fn pointer(&self, at: u64, raw: u64, text: bool) -> String {
+        let signed = self
+            .p
+            .signing(at)
+            .map_or_else(String::new, |s| format!(" signed {s}"));
         if raw == 0 {
-            return "0x0".to_owned();
+            return format!("0x0{signed}");
         }
         if text && let Some((_, s)) = cstr_text_at(self.p, raw, 1, TEXT_MAX) {
-            return format!("{raw:#x} -> \"{}\"", escape_text(&s));
+            return format!("{raw:#x} -> \"{}\"{signed}", escape_text(&s));
         }
         match pointee_name(self.p, self.a, self.o, raw) {
-            Some(name) => format!("{raw:#x} -> {name}"),
-            None => format!("{raw:#x}"),
+            Some(name) => format!("{raw:#x} -> {name}{signed}"),
+            None => format!("{raw:#x}{signed}"),
         }
     }
 }

@@ -36,7 +36,7 @@ use crate::fxmap::FxHashSet;
 use crate::macho::uleb;
 use crate::num::{u16_le, u32_le, u64_le};
 use crate::program::{Program, Section, SectionRow};
-use crate::reloc::{Bind, Claim, ENTRIES_MAX, Import, Relocs, Table, file_range, settle};
+use crate::reloc::{Bind, Claim, ENTRIES_MAX, Import, Relocs, Signing, Table, file_range, settle};
 
 /// `DYLD_CHAINED_PTR_START_NONE`: a page no chain starts in.
 const START_NONE: u16 = 0xffff;
@@ -129,8 +129,8 @@ enum Fixup {
     Rebase {
         /// The address it holds once fixed up.
         target: u64,
-        /// The loader signs it.
-        auth: bool,
+        /// How the loader signs it, `None` for a plain pointer.
+        auth: Option<Signing>,
     },
     /// A slot bound to an import.
     Bind {
@@ -138,8 +138,8 @@ enum Fixup {
         ordinal: u64,
         /// What the word adds to the import's address.
         addend: i64,
-        /// The loader signs it.
-        auth: bool,
+        /// How the loader signs it, `None` for a plain pointer.
+        auth: Option<Signing>,
     },
     /// A word this does not read: a kernel cache level past the image's.
     Unread,
@@ -218,7 +218,7 @@ impl Format {
                     Fixup::Bind {
                         ordinal: bits(w, 0, 24),
                         addend: bits(w, 24, 8).cast_signed(),
-                        auth: false,
+                        auth: None,
                     }
                 } else {
                     let target = bits(w, 0, 36);
@@ -229,14 +229,14 @@ impl Format {
                     };
                     Fixup::Rebase {
                         target: target | (bits(w, 36, 8) << 56),
-                        auth: false,
+                        auth: None,
                     }
                 };
                 (fixup, bits(w, 51, 12))
             }
             Format::Arm64e { offset, wide, .. } => {
-                let auth = bits(w, 63, 1) == 1;
-                let fixup = match (bits(w, 62, 1) == 1, auth) {
+                let auth = (bits(w, 63, 1) == 1).then(|| Signing::of(w));
+                let fixup = match (bits(w, 62, 1) == 1, auth.is_some()) {
                     (false, false) => {
                         let target = bits(w, 0, 43);
                         let target = if offset {
@@ -255,7 +255,7 @@ impl Format {
                     },
                     (true, _) => Fixup::Bind {
                         ordinal: bits(w, 0, if wide { 24 } else { 16 }),
-                        addend: if auth {
+                        addend: if auth.is_some() {
                             0
                         } else {
                             (bits(w, 32, 19) << 45).cast_signed() >> 45
@@ -269,7 +269,7 @@ impl Format {
                 let fixup = if bits(w, 30, 2) == 0 {
                     Fixup::Rebase {
                         target: base.wrapping_add(bits(w, 0, 30)),
-                        auth: bits(w, 63, 1) == 1,
+                        auth: (bits(w, 63, 1) == 1).then(|| Signing::of(w)),
                     }
                 } else {
                     Fixup::Unread
@@ -417,8 +417,15 @@ impl Walk<'_> {
     /// * `value` - What the loader writes, `None` where the word already
     ///   holds it.
     /// * `bind` - The bind naming the slot, `None` for a rebase.
-    /// * `auth` - Whether the loader signs it.
-    fn claim(&mut self, va: u64, width: u64, value: Option<u64>, bind: Option<Bind>, auth: bool) {
+    /// * `auth` - How the loader signs it, `None` when it does not.
+    fn claim(
+        &mut self,
+        va: u64,
+        width: u64,
+        value: Option<u64>,
+        bind: Option<Bind>,
+        auth: Option<Signing>,
+    ) {
         match file_range(self.sections, &self.index, va, width) {
             Some(at) => self.claims.push(Claim {
                 va,
@@ -827,7 +834,7 @@ impl Walk<'_> {
                 match (segment, va) {
                     (Some(s), Some(va)) if s.file_off(va, word).is_some() => {
                         if kind == TYPE_POINTER && !self.taken.contains(&va) {
-                            self.claim(va, word, None, None, false);
+                            self.claim(va, word, None, None, None);
                         }
                     }
                     _ => self.refused += 1,
@@ -953,7 +960,7 @@ impl Walk<'_> {
                                 addend,
                                 lazy,
                             };
-                            self.claim(va, word, None, Some(bind), false);
+                            self.claim(va, word, None, Some(bind), None);
                         }
                     }
                     _ => self.refused += 1,

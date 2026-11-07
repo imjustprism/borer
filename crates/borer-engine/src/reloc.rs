@@ -154,9 +154,81 @@ pub struct Relocs {
     pub(crate) binds: Vec<Bind>,
     /// The symbols [`Relocs::binds`] name, in the table's order.
     pub(crate) imports: Vec<Import>,
-    /// Of the entries applied, the arm64e pointers the loader signs, read
-    /// with their authentication bits stripped.
-    pub(crate) authenticated: usize,
+    /// Of the entries applied, each arm64e pointer the loader signs and how,
+    /// sorted by its slot: the word reads with its authentication bits
+    /// stripped, and this keeps what they said.
+    pub(crate) signed: Vec<(u64, Signing)>,
+}
+
+/// The key an arm64e pointer is signed with: one of the two instruction
+/// keys or the two data keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Key {
+    /// `IA`, the instruction key A: return addresses and most code pointers.
+    Ia,
+    /// `IB`, the instruction key B.
+    Ib,
+    /// `DA`, the data key A.
+    Da,
+    /// `DB`, the data key B.
+    Db,
+}
+
+/// How the loader signs an arm64e pointer: its key and its discriminator,
+/// a constant blended, when the address bit is set, with the slot's own
+/// address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Signing {
+    /// The key.
+    pub key: Key,
+    /// Whether the slot's address is blended into the discriminator, so a
+    /// copy of the pointer elsewhere fails to authenticate.
+    pub address: bool,
+    /// The constant discriminator, 16 bits.
+    pub diversity: u16,
+}
+
+impl Signing {
+    /// Reads the signing of an authenticated chained pointer: the
+    /// discriminator in bits 32 to 47, the address bit 48 and the key in bits
+    /// 49 and 50, where every arm64e and kernel cache format puts them.
+    ///
+    /// # Arguments
+    ///
+    /// * `w` - The chained word as the file holds it.
+    #[must_use]
+    pub(crate) fn of(w: u64) -> Self {
+        let key = match (w >> 49) & 3 {
+            0 => Key::Ia,
+            1 => Key::Ib,
+            2 => Key::Da,
+            _ => Key::Db,
+        };
+        Signing {
+            key,
+            address: (w >> 48) & 1 == 1,
+            diversity: crate::num::lo16(w >> 32),
+        }
+    }
+}
+
+impl std::fmt::Display for Signing {
+    /// Writes the signing as `IA, address-diversified, 0x1234`, the middle
+    /// part only when the slot's address is blended in.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let key = match self.key {
+            Key::Ia => "IA",
+            Key::Ib => "IB",
+            Key::Da => "DA",
+            Key::Db => "DB",
+        };
+        let address = if self.address {
+            ", address-diversified"
+        } else {
+            ""
+        };
+        write!(f, "{key}{address}, {:#x}", self.diversity)
+    }
 }
 
 impl Relocs {
@@ -241,7 +313,7 @@ impl Relocs {
                     self.binds.len()
                 );
                 for (n, what) in [
-                    (self.authenticated, "authenticated"),
+                    (self.signed.len(), "authenticated"),
                     (weak, "weak"),
                     (lazy, "lazy"),
                 ] {
@@ -370,7 +442,7 @@ pub(crate) fn read_elf(elf: &goblin::elf::Elf<'_>, bytes: &[u8], sections: &[Sec
                 value,
                 site: matches!(kind, Kind::Relative | Kind::Absolute),
                 bind: None,
-                auth: false,
+                auth: None,
             });
         }
     }
@@ -403,8 +475,8 @@ pub(crate) struct Claim {
     pub(crate) site: bool,
     /// The Mach-O bind naming the slot, `None` for any other word.
     pub(crate) bind: Option<Bind>,
-    /// Whether the loader signs the pointer (arm64e).
-    pub(crate) auth: bool,
+    /// How the loader signs the pointer (arm64e), `None` for one it does not.
+    pub(crate) auth: Option<Signing>,
 }
 
 /// Settles the words the relocations or fixups claim into the relocated
@@ -435,7 +507,9 @@ pub(crate) fn settle(
         }
         last_end = c.va.saturating_add(word);
         relocs.applied += 1;
-        relocs.authenticated += usize::from(c.auth);
+        if let Some(s) = c.auth {
+            relocs.signed.push((c.va, s));
+        }
         if c.site && pic {
             relocs.sites.push(c.va);
         }
@@ -503,7 +577,7 @@ fn relr(
             value: None,
             site: true,
             bind: None,
-            auth: false,
+            auth: None,
         }),
         None => relocs.refused += 1,
     };
