@@ -1368,3 +1368,37 @@ fn a_read_of_the_return_address_agrees() {
         "{text}\n{rows:?}"
     );
 }
+
+/// The text check reads a call to a function named with template
+/// arguments: `return f<1>(a1);` calls `f<1>`.
+///
+/// # Panics
+///
+/// When the text does not call it by that name, or an input does not agree.
+#[test]
+fn a_call_to_a_template_named_function_is_read() {
+    use borer_engine::program::{Symbol, SymbolKind};
+    let mut code = vec![
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp,0x28
+        0xe8, 0x17, 0x00, 0x00, 0x00, // ASM: call 0x1020
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp,0x28
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x20, 0xcc);
+    code.extend_from_slice(&[0x8d, 0x41, 0x01, 0xc3]); // ASM: lea eax,[rcx+1]; ret
+    let mut p = program(&code, &[]);
+    p.symbols = vec![Symbol {
+        name: "f<1>".to_owned(),
+        addr: TEXT + 0x20,
+        kind: SymbolKind::Local,
+    }];
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let text = decompile_named(&p, &a, &o, TEXT).unwrap_or_default();
+    assert!(text.contains("f<1>(a1)"), "{text}");
+    let rows = check_generated_iso(&p, &a, &o, TEXT, 8, 1, 20_000).expect("the text reads");
+    assert!(
+        rows.iter().all(|(_, v)| *v == Verdict::Agrees),
+        "{text}\n{rows:?}"
+    );
+}

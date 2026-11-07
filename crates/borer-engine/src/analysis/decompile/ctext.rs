@@ -368,31 +368,7 @@ pub(super) fn tokens(text: &str) -> Result<Vec<Tok>, String> {
                 chars.next();
             }
         } else if c.is_alphabetic() || c == '_' {
-            let mut end = rest
-                .find(|d: char| !(d.is_alphanumeric() || d == '_'))
-                .unwrap_or(rest.len());
-            while rest[end..].starts_with("::")
-                && rest[end + 2..].starts_with(|d: char| d.is_alphabetic() || d == '_' || d == '~')
-            {
-                let tail = &rest[end + 2..];
-                let skip = usize::from(tail.starts_with('~'));
-                end += 2
-                    + skip
-                    + tail[skip..]
-                        .find(|d: char| !(d.is_alphanumeric() || d == '_'))
-                        .unwrap_or(tail.len() - skip);
-            }
-            for word in ["new", "delete"] {
-                let joined = rest[end..]
-                    .strip_prefix(' ')
-                    .and_then(|r| r.strip_prefix(word));
-                if rest[..end].ends_with("operator")
-                    && joined
-                        .is_some_and(|r| !r.starts_with(|d: char| d.is_alphanumeric() || d == '_'))
-                {
-                    end += 1 + word.len();
-                }
-            }
+            let end = name_end(rest);
             let word = &rest[..end];
             if word == "nullptr" {
                 out.push(Tok::Int(0, CTy::int(32, true)));
@@ -414,6 +390,87 @@ pub(super) fn tokens(text: &str) -> Result<Vec<Tok>, String> {
         }
     }
     Ok(out)
+}
+
+/// Returns the length of the name `rest` starts with: an identifier, its
+/// `::` scopes and template argument lists ([`template_end`]), and the
+/// word after `operator new` or `operator delete`.
+///
+/// # Arguments
+///
+/// * `rest` - The text from the name's first character.
+fn name_end(rest: &str) -> usize {
+    let mut end = rest
+        .find(|d: char| !(d.is_alphanumeric() || d == '_'))
+        .unwrap_or(rest.len());
+    loop {
+        if rest[end..].starts_with("::")
+            && rest[end + 2..].starts_with(|d: char| d.is_alphabetic() || d == '_' || d == '~')
+        {
+            let tail = &rest[end + 2..];
+            let skip = usize::from(tail.starts_with('~'));
+            end += 2
+                + skip
+                + tail[skip..]
+                    .find(|d: char| !(d.is_alphanumeric() || d == '_'))
+                    .unwrap_or(tail.len() - skip);
+        } else if let Some(close) = template_end(&rest[end..])
+            && (rest[end + close..].starts_with('(') || rest[end + close..].starts_with("::"))
+        {
+            end += close;
+        } else {
+            break;
+        }
+    }
+    for word in ["new", "delete"] {
+        let joined = rest[end..]
+            .strip_prefix(' ')
+            .and_then(|r| r.strip_prefix(word));
+        if rest[..end].ends_with("operator")
+            && joined.is_some_and(|r| !r.starts_with(|d: char| d.is_alphanumeric() || d == '_'))
+        {
+            end += 1 + word.len();
+        }
+    }
+    end
+}
+
+/// Returns the length of the template argument list a name continues
+/// with: `<1>` of `ReportFailure<1>(`, `<struct a::b>` of `Data<struct
+/// a::b>::Release`.
+///
+/// The list opens right after the name, with no space, and its `<` and
+/// `>` balance before the end of the statement; the text spaces every
+/// comparison and shift, so `a < 1` never reads as one.
+///
+/// # Arguments
+///
+/// * `s` - The text right after the name.
+///
+/// # Returns
+///
+/// The bytes through the closing `>`, or `None` when no list opens there.
+fn template_end(s: &str) -> Option<usize> {
+    /// Longest template argument list read.
+    const LIST_MAX: usize = 512;
+    if !s.starts_with('<') || s.starts_with("<<") || s.starts_with("<=") || s.starts_with("< ") {
+        return None;
+    }
+    let mut depth = 0usize;
+    for (k, c) in s.char_indices().take(LIST_MAX) {
+        match c {
+            '<' => depth += 1,
+            '>' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(k + 1);
+                }
+            }
+            ';' | '{' | '}' | '=' | '\n' => return None,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Reads a C99 hexadecimal floating literal from its parts: `1.8` and `-3`
