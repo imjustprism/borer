@@ -266,38 +266,27 @@ fn visit(e: &Expr, f: &mut dyn FnMut(&Expr)) {
 
 /// Tells whether C text the tree could not read may change `name`.
 ///
-/// The text, its comments taken out, writes the name when the word, past
-/// any spaces and closing parentheses, is followed by an assignment (`=`,
-/// not `==`, or a compound one) or a step, or, past spaces and opening
-/// parentheses, preceded by a step or by `&` that is no `&&`.
+/// The text writes the name when the word, past any spaces, closing
+/// parentheses and block comments, is followed by an assignment (`=`, not
+/// `==`, or a compound one) or a step, or, past spaces, opening parentheses
+/// and block comments, preceded by a step or by `&` that is no `&&`. Only
+/// comments next to the word are passed over, so a marker quoted in a
+/// string hides nothing.
 ///
 /// # Arguments
 ///
-/// * `text` - The text.
+/// * `text` - The text, one line.
 /// * `name` - The name, an identifier.
 fn raw_writes(text: &str, name: &str) -> bool {
     let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
-    let mut plain = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(at) = rest.find("/*").into_iter().chain(rest.find("//")).min() {
-        plain.push_str(&rest[..at]);
-        plain.push(' ');
-        rest = if rest[at..].starts_with("/*") {
-            rest[at..]
-                .find("*/")
-                .map_or("", |end| &rest[at + end + 2..])
-        } else {
-            ""
-        };
-    }
-    plain.push_str(rest);
-    plain.match_indices(name).any(|(at, _)| {
-        let before = plain[..at].trim_end_matches(|c: char| c.is_whitespace() || c == '(');
-        let tail = &plain[at + name.len()..];
-        let after = tail.trim_start_matches(|c: char| c.is_whitespace() || c == ')');
-        if plain[..at].ends_with(word) || tail.starts_with(word) {
+    text.match_indices(name).any(|(at, _)| {
+        let head = &text[..at];
+        let tail = &text[at + name.len()..];
+        if head.ends_with(word) || tail.starts_with(word) {
             return false;
         }
+        let before = before_word(head);
+        let after = after_word(tail);
         let assigns = after.starts_with('=') && !after.starts_with("==");
         let compound = ["+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>="]
             .iter()
@@ -311,4 +300,36 @@ fn raw_writes(text: &str, name: &str) -> bool {
             || before.ends_with("--")
             || address
     })
+}
+
+/// Returns the text after a word past the spaces, closing parentheses and
+/// block comments that open it.
+///
+/// # Arguments
+///
+/// * `text` - The text that follows the word, on its line.
+fn after_word(mut text: &str) -> &str {
+    loop {
+        let rest = text.trim_start_matches(|c: char| c.is_whitespace() || c == ')');
+        let Some(comment) = rest.strip_prefix("/*") else {
+            return rest;
+        };
+        text = comment.split_once("*/").map_or("", |(_, past)| past);
+    }
+}
+
+/// Returns the text before a word less the spaces, opening parentheses and
+/// block comments that end it.
+///
+/// # Arguments
+///
+/// * `text` - The text that precedes the word, on its line.
+fn before_word(mut text: &str) -> &str {
+    loop {
+        let rest = text.trim_end_matches(|c: char| c.is_whitespace() || c == '(');
+        let Some(comment) = rest.strip_suffix("*/") else {
+            return rest;
+        };
+        text = comment.rfind("/*").map_or("", |start| &comment[..start]);
+    }
 }

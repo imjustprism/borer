@@ -170,7 +170,9 @@ fn a_chain_nested_in_its_ifs_reads_as_an_else_if_ladder() {
 /// that writes a name `p` reads keeps the jump: `p` read again after the
 /// arms would no longer be the test that chose them; so does one written
 /// in a line the tree could not read, a comment between the name and the
-/// `=`, and an arm a jump enters by a label, past the test. An instruction
+/// `=` or the `&` that takes its address, even past a string that holds a
+/// comment's marker, and an arm a jump enters by a label, past the test. An
+/// instruction
 /// left as assembly in the arm, as arm64's `rev64` is, writes no such name.
 #[test]
 fn a_jump_an_arm_ends_with_is_lifted_past_the_run_it_skips() {
@@ -203,6 +205,12 @@ fn a_jump_an_arm_ends_with_is_lifted_past_the_run_it_skips() {
     assert!(!out.contains("a3 < 32 ||"), "{out}");
     let hidden = text.replace("  f(1);\n", "  a3 /* note */ = 0;\n");
     let out = cleanup(&hidden);
+    assert!(!out.contains("a3 < 32 ||"), "{out}");
+    let quoted = text.replace("  f(1);\n", "  f(\"//\", a3 /* note */ = 0);\n");
+    let out = cleanup(&quoted);
+    assert!(!out.contains("a3 < 32 ||"), "{out}");
+    let taken = text.replace("  f(1);\n", "  f(& /* note */ a3);\n");
+    let out = cleanup(&taken);
     assert!(!out.contains("a3 < 32 ||"), "{out}");
     let entered = text
         .replace("  f(1);\n", "  L_30:\n  f(1);\n")
