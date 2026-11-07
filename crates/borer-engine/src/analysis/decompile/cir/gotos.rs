@@ -25,7 +25,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::wrap::{count, each, jumps, lists, weighs};
-use super::{ArmBody, Body, Else, Expr, ExprKind, Label, LitKind, Stmt, StmtKind, UnOp};
+use super::{
+    Arm, ArmBody, Body, CaseLabel, Else, Expr, ExprKind, Label, LitKind, Stmt, StmtKind, UnOp,
+};
 use moves::relocate;
 
 mod moves;
@@ -499,8 +501,10 @@ fn target(s: &Stmt) -> Option<Label> {
     }
 }
 
-/// Tells whether control never runs past statement `k` of a list: it
-/// jumps, returns, loops forever or calls what never comes back.
+/// Tells whether control never runs past statement `k` of a list.
+///
+/// It jumps, returns, loops forever, calls what never comes back, or is a
+/// `switch` with a `default` that no arm breaks out of or falls out of.
 ///
 /// # Arguments
 ///
@@ -530,6 +534,17 @@ fn stops(list: &[Stmt], k: usize, f: &Facts<'_>) -> bool {
             level(body, true, &mut |x| breaks |= says(x, &StmtKind::Break));
             forever(s) && !breaks
         }
+        StmtKind::Switch { arms, .. } => {
+            let mut breaks = false;
+            for a in arms {
+                level(arm_body(a), true, &mut |x| {
+                    breaks |= says(x, &StmtKind::Break);
+                });
+            }
+            !breaks
+                && arms.iter().any(|a| a.labels.contains(&CaseLabel::Default))
+                && arms.last().is_some_and(|a| ends(arm_body(a), f))
+        }
         StmtKind::Expr(e) => {
             let block = usize::try_from(s.prov.0)
                 .ok()
@@ -548,7 +563,6 @@ fn stops(list: &[Stmt], k: usize, f: &Facts<'_>) -> bool {
         | StmtKind::Guard { .. }
         | StmtKind::DoWhile { .. }
         | StmtKind::For { .. }
-        | StmtKind::Switch { .. }
         | StmtKind::Try { .. }
         | StmtKind::Comment(_)
         | StmtKind::Asm(_)
@@ -1244,8 +1258,8 @@ fn skips(list: &mut Vec<Stmt>, cx: &Cx, f: &Facts<'_>) -> bool {
 }
 
 /// Counts the jumps to `l` that leave a structure where control would
-/// otherwise fall out of it: those that end an arm of an `if` or a block,
-/// or any at the level of a `while (1)`.
+/// otherwise fall out of it: those that end an arm of an `if`, a `switch`
+/// or a block, or any at the level of a `while (1)`.
 ///
 /// # Arguments
 ///
@@ -1263,6 +1277,7 @@ fn tails(s: &Stmt, l: Label) -> usize {
                 }
         }
         StmtKind::Block(b) => last(b),
+        StmtKind::Switch { arms, .. } => arms.iter().map(|a| last(arm_body(a))).sum(),
         StmtKind::While { body, .. } if forever(s) => {
             let mut n = 0;
             level(body, true, &mut |x| n += usize::from(target(x) == Some(l)));
@@ -1278,7 +1293,6 @@ fn tails(s: &Stmt, l: Label) -> usize {
         | StmtKind::While { .. }
         | StmtKind::DoWhile { .. }
         | StmtKind::For { .. }
-        | StmtKind::Switch { .. }
         | StmtKind::Try { .. }
         | StmtKind::Comment(_)
         | StmtKind::Asm(_)
@@ -1287,8 +1301,11 @@ fn tails(s: &Stmt, l: Label) -> usize {
     }
 }
 
-/// Counts the places control falls out of a structure: each arm whose end
-/// it reaches and a missing `else`, or each `break` of a `while (1)`.
+/// Counts the places control falls out of a structure.
+///
+/// Those are each arm whose end it reaches and a missing `else`, each
+/// `break` of a `while (1)`, or each `break` of a `switch` with a `default`
+/// and its last arm's end.
 ///
 /// # Arguments
 ///
@@ -1297,8 +1314,10 @@ fn tails(s: &Stmt, l: Label) -> usize {
 ///
 /// # Returns
 ///
-/// The count, `0` for a loop a raw line may break out of, where a copy in
-/// front of each `break` would miss that one.
+/// The count, `0` for a loop or `switch` a raw line may break out of, where
+/// a copy in front of each `break` would miss that one, and for a `switch`
+/// with no `default`, whose values no `case` takes fall out with no arm to
+/// hold a copy.
 fn fallouts(s: &Stmt, f: &Facts<'_>) -> usize {
     if forever(s)
         && let StmtKind::While { body, .. } = &s.kind
@@ -1309,6 +1328,22 @@ fn fallouts(s: &Stmt, f: &Facts<'_>) -> usize {
             hidden |= matches!(x.kind, StmtKind::Raw(_)) && says(x, &StmtKind::Break);
         });
         return if hidden { 0 } else { n };
+    }
+    if let StmtKind::Switch { arms, .. } = &s.kind {
+        let (mut n, mut hidden) = (0, false);
+        for a in arms {
+            level(arm_body(a), true, &mut |x| {
+                n += usize::from(word(x) == Some(&StmtKind::Break));
+                hidden |= matches!(x.kind, StmtKind::Raw(_)) && says(x, &StmtKind::Break);
+            });
+        }
+        let default = arms.iter().any(|a| a.labels.contains(&CaseLabel::Default));
+        let off = arms.last().is_some_and(|a| !ends(arm_body(a), f));
+        return if hidden || !default {
+            0
+        } else {
+            n + usize::from(off)
+        };
     }
     let open = |list: &[Stmt]| usize::from(!ends(list, f));
     match &s.kind {
@@ -1340,9 +1375,11 @@ fn fallouts(s: &Stmt, f: &Facts<'_>) -> usize {
     }
 }
 
-/// Appends a run to every arm of a structure control falls out of, and
-/// gives an `if` that has none an `else` holding it; in a `while (1)`, puts
-/// it in front of every `break`.
+/// Appends a run to every arm of a structure control falls out of.
+///
+/// An `if` that has no `else` gets one holding the run; in a `while (1)` or
+/// a `switch` the run goes in front of every `break`, and after a
+/// `switch`'s last arm that falls off its end.
 ///
 /// # Arguments
 ///
@@ -1366,6 +1403,33 @@ fn append(s: &mut Stmt, run: &[Stmt], f: &Facts<'_>) {
         }
         StmtKind::Block(b) => open(b),
         StmtKind::While { body, .. } => before_breaks(body, run),
+        StmtKind::Switch { arms, .. } => {
+            for a in arms.iter_mut() {
+                let mut breaks = false;
+                level(arm_body(a), true, &mut |x| {
+                    breaks |= word(x) == Some(&StmtKind::Break);
+                });
+                if breaks {
+                    let mut body = match std::mem::replace(&mut a.body, ArmBody::Block(Vec::new()))
+                    {
+                        ArmBody::Inline(x) => vec![*x],
+                        ArmBody::Block(b) => b,
+                    };
+                    before_breaks(&mut body, run);
+                    a.body = ArmBody::Block(body);
+                }
+            }
+            if let Some(a) = arms.last_mut()
+                && !ends(arm_body(a), f)
+            {
+                if let ArmBody::Inline(x) = &a.body {
+                    a.body = ArmBody::Block(vec![(**x).clone()]);
+                }
+                if let ArmBody::Block(b) = &mut a.body {
+                    b.extend_from_slice(run);
+                }
+            }
+        }
         StmtKind::Expr(_)
         | StmtKind::Return(_)
         | StmtKind::Goto(_)
@@ -1375,7 +1439,6 @@ fn append(s: &mut Stmt, run: &[Stmt], f: &Facts<'_>) {
         | StmtKind::Guard { .. }
         | StmtKind::DoWhile { .. }
         | StmtKind::For { .. }
-        | StmtKind::Switch { .. }
         | StmtKind::Try { .. }
         | StmtKind::Comment(_)
         | StmtKind::Asm(_)
@@ -1426,6 +1489,28 @@ fn breaks_in_try(list: &[Stmt]) -> bool {
         | StmtKind::Blank
         | StmtKind::Raw(_) => false,
     })
+}
+
+/// Tells whether an arm of a `switch` breaks out from inside a guarded
+/// region ([`breaks_in_try`]); `false` for any other statement.
+///
+/// # Arguments
+///
+/// * `s` - The statement.
+fn arms_break_in_try(s: &Stmt) -> bool {
+    matches!(&s.kind, StmtKind::Switch { arms, .. } if arms.iter().any(|a| breaks_in_try(arm_body(a))))
+}
+
+/// Returns the statements a `switch` arm runs.
+///
+/// # Arguments
+///
+/// * `a` - The arm.
+fn arm_body(a: &Arm) -> &[Stmt] {
+    match &a.body {
+        ArmBody::Inline(x) => std::slice::from_ref(x.as_ref()),
+        ArmBody::Block(b) => b,
+    }
 }
 
 /// Returns a `while` loop's body, and nothing for any other statement.
@@ -1490,7 +1575,10 @@ fn before_breaks(list: &mut Vec<Stmt>, run: &[Stmt]) {
 /// statements; one moved whole holds at most [`RUN_MAX`]. The run holds no label, and only arms that end in a
 /// jump to the label make the move worth it. After a `while (1)` the run
 /// moves in front of each `break`, and the loop's jumps to the label become
-/// `break`s in turn; such a run may not break or continue itself.
+/// `break`s in turn; such a run may not break or continue itself. After a
+/// `switch` with a `default` it moves in front of each `break` the same
+/// way: a compiler's compare tree written as a `switch` whose `default`
+/// skips the tail its cases share.
 ///
 /// # Arguments
 ///
@@ -1507,7 +1595,9 @@ fn sinks(list: &mut Vec<Stmt>, cx: &Cx, f: &Facts<'_>, copy: bool) -> bool {
     let mut met = None;
     for k in 0..list.len() {
         let looped = forever(&list[k]);
-        if !looped && !matches!(list[k].kind, StmtKind::If { .. } | StmtKind::Block(_)) {
+        let switched = matches!(list[k].kind, StmtKind::Switch { .. });
+        if !looped && !switched && !matches!(list[k].kind, StmtKind::If { .. } | StmtKind::Block(_))
+        {
             continue;
         }
         let mut wanted = BTreeSet::new();
@@ -1528,6 +1618,7 @@ fn sinks(list: &mut Vec<Stmt>, cx: &Cx, f: &Facts<'_>, copy: bool) -> bool {
                 || copies == 0
                 || labelled(run)
                 || (looped && (loose(run) || breaks_in_try(loop_body(&list[k]))))
+                || (switched && (loose(run) || arms_break_in_try(&list[k])))
                 || (copies > 1 && (!copy || n > SINK_MAX))
             {
                 continue;
