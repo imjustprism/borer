@@ -168,7 +168,9 @@ fn a_chain_nested_in_its_ifs_reads_as_an_else_if_ladder() {
 /// and then `q` held; the run here is too long to copy into both arms, and
 /// what follows the label (a loop) too long to copy to the jump. An arm
 /// that writes a name `p` reads keeps the jump: `p` read again after the
-/// arms would no longer be the test that chose them.
+/// arms would no longer be the test that chose them; so does one written
+/// in a line the tree could not read, a comment between the name and the
+/// `=`, and an arm a jump enters by a label, past the test.
 #[test]
 fn a_jump_an_arm_ends_with_is_lifted_past_the_run_it_skips() {
     let text = concat!(
@@ -197,5 +199,13 @@ fn a_jump_an_arm_ends_with_is_lifted_past_the_run_it_skips() {
     assert!(out.contains("if (a3 < 32 || (a3 & 0x18) != 0) {"), "{out}");
     let written = text.replace("  f(1);\n", "  a3 += 1;\n");
     let out = cleanup(&written);
+    assert!(!out.contains("a3 < 32 ||"), "{out}");
+    let hidden = text.replace("  f(1);\n", "  a3 /* note */ = 0;\n");
+    let out = cleanup(&hidden);
+    assert!(!out.contains("a3 < 32 ||"), "{out}");
+    let entered = text
+        .replace("  f(1);\n", "  L_30:\n  f(1);\n")
+        .replace("h(a3);\n", "h(a3);\nif (a4 != 0) goto L_30;\n");
+    let out = cleanup(&entered);
     assert!(!out.contains("a3 < 32 ||"), "{out}");
 }

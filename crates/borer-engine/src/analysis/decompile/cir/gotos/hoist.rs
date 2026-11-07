@@ -147,8 +147,11 @@ fn pure(e: &Expr) -> bool {
 }
 
 /// Tells whether a statement, or one it holds, may change a name of
-/// `names`: writes it, steps it, takes its address, or is a line the tree
-/// could not read that may ([`raw_writes`]), or inline assembly.
+/// `names`, or let control in past the test that chose its arm.
+///
+/// That is a statement that writes a name, steps it, takes its address, a
+/// line the tree could not read that may ([`raw_writes`]), inline
+/// assembly, a `try`, or a label, which a jump may enter by.
 ///
 /// # Arguments
 ///
@@ -171,13 +174,12 @@ fn touches(s: &Stmt, names: &BTreeSet<String>) -> bool {
                 hit |= names.iter().any(|n| raw_writes(text, n));
                 Vec::new()
             }
-            StmtKind::Asm(_) | StmtKind::Try { .. } => {
+            StmtKind::Asm(_) | StmtKind::Label(_) | StmtKind::Try { .. } => {
                 hit = true;
                 Vec::new()
             }
             StmtKind::Return(None)
             | StmtKind::Goto(_)
-            | StmtKind::Label(_)
             | StmtKind::Break
             | StmtKind::Continue
             | StmtKind::Block(_)
@@ -259,9 +261,12 @@ fn visit(e: &Expr, f: &mut dyn FnMut(&Expr)) {
     }
 }
 
-/// Tells whether C text the tree could not read may change `name`: the
-/// word followed by an assignment (`=`, not `==`, or a compound one) or a
-/// step, or preceded by a step or by `&` that is no `&&`.
+/// Tells whether C text the tree could not read may change `name`.
+///
+/// The text, its comments taken out, writes the name when the word, past
+/// any spaces and closing parentheses, is followed by an assignment (`=`,
+/// not `==`, or a compound one) or a step, or, past spaces and opening
+/// parentheses, preceded by a step or by `&` that is no `&&`.
 ///
 /// # Arguments
 ///
@@ -269,10 +274,25 @@ fn visit(e: &Expr, f: &mut dyn FnMut(&Expr)) {
 /// * `name` - The name, an identifier.
 fn raw_writes(text: &str, name: &str) -> bool {
     let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
-    text.match_indices(name).any(|(at, _)| {
-        let before = text[..at].trim_end();
-        let after = text[at + name.len()..].trim_start();
-        if before.ends_with(word) || text[at + name.len()..].starts_with(word) {
+    let mut plain = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("/*").into_iter().chain(rest.find("//")).min() {
+        plain.push_str(&rest[..at]);
+        plain.push(' ');
+        rest = if rest[at..].starts_with("/*") {
+            rest[at..]
+                .find("*/")
+                .map_or("", |end| &rest[at + end + 2..])
+        } else {
+            ""
+        };
+    }
+    plain.push_str(rest);
+    plain.match_indices(name).any(|(at, _)| {
+        let before = plain[..at].trim_end_matches(|c: char| c.is_whitespace() || c == '(');
+        let tail = &plain[at + name.len()..];
+        let after = tail.trim_start_matches(|c: char| c.is_whitespace() || c == ')');
+        if plain[..at].ends_with(word) || tail.starts_with(word) {
             return false;
         }
         let assigns = after.starts_with('=') && !after.starts_with("==");
