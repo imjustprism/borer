@@ -150,8 +150,10 @@ fn pure(e: &Expr) -> bool {
 /// `names`, or let control in past the test that chose its arm.
 ///
 /// That is a statement that writes a name, steps it, takes its address, a
-/// line the tree could not read that may ([`raw_writes`]), inline
-/// assembly, a `try`, or a label, which a jump may enter by.
+/// line the tree could not read that may ([`raw_writes`]), a `try`, whose
+/// handlers run at times the arms do not show, or a label, which a jump may
+/// enter by. An instruction the lifter left as assembly assigns no name the
+/// text gives a value.
 ///
 /// # Arguments
 ///
@@ -174,11 +176,12 @@ fn touches(s: &Stmt, names: &BTreeSet<String>) -> bool {
                 hit |= names.iter().any(|n| raw_writes(text, n));
                 Vec::new()
             }
-            StmtKind::Asm(_) | StmtKind::Label(_) | StmtKind::Try { .. } => {
+            StmtKind::Label(_) | StmtKind::Try { .. } => {
                 hit = true;
                 Vec::new()
             }
             StmtKind::Return(None)
+            | StmtKind::Asm(_)
             | StmtKind::Goto(_)
             | StmtKind::Break
             | StmtKind::Continue

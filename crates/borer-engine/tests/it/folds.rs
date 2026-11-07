@@ -170,7 +170,8 @@ fn a_chain_nested_in_its_ifs_reads_as_an_else_if_ladder() {
 /// that writes a name `p` reads keeps the jump: `p` read again after the
 /// arms would no longer be the test that chose them; so does one written
 /// in a line the tree could not read, a comment between the name and the
-/// `=`, and an arm a jump enters by a label, past the test.
+/// `=`, and an arm a jump enters by a label, past the test. An instruction
+/// left as assembly in the arm, as arm64's `rev64` is, writes no such name.
 #[test]
 fn a_jump_an_arm_ends_with_is_lifted_past_the_run_it_skips() {
     let text = concat!(
@@ -208,4 +209,7 @@ fn a_jump_an_arm_ends_with_is_lifted_past_the_run_it_skips() {
         .replace("h(a3);\n", "h(a3);\nif (a4 != 0) goto L_30;\n");
     let out = cleanup(&entered);
     assert!(!out.contains("a3 < 32 ||"), "{out}");
+    let assembled = text.replace("  f(1);\n", "  f(1);\n  /* asm: rev64 v0.16b, v0.16b */\n");
+    let out = cleanup(&assembled);
+    assert!(out.contains("if (a3 < 32 || (a3 & 0x18) != 0) {"), "{out}");
 }
