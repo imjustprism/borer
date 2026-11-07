@@ -261,3 +261,48 @@ fn an_emulated_argument_is_an_ioc() {
     assert!(out.contains("evil.test"), "{out}");
     assert!(out.contains("emulated:InternetOpenUrlW"), "{out}");
 }
+
+/// A modeled `memset` fills its destination, the first argument, with the
+/// byte its second argument holds, as many times as the third says.
+///
+/// `memset(0x2000, 'A', 8)` through an import slot: the eight bytes at
+/// `0x2000` read `A` and the ninth keeps its own byte. The model had the
+/// first two swapped and wrote the pointer's low byte at the address `A`.
+#[test]
+fn a_memset_fills_its_destination_with_its_byte() {
+    let mut bytes = vec![0xccu8; 0x4000];
+    let code: &[u8] = &[
+        0x48, 0xb9, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // ASM: movabs rcx,0x2000
+        0xba, 0x41, 0x00, 0x00, 0x00, // ASM: mov edx,0x41
+        0x41, 0xb8, 0x08, 0x00, 0x00, 0x00, // ASM: mov r8d,8
+        0x48, 0xb8, 0x00, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // ASM: movabs rax,0x3000
+        0x48, 0x8b, 0x00, // ASM: mov rax,[rax]
+        0xff, 0xd0, // ASM: call rax
+        0xc3, // ASM: ret
+    ];
+    bytes[0x1000..0x1000 + code.len()].copy_from_slice(code);
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0,
+        Some(0x1000),
+        vec![
+            Section::mapped(".text", 0x1000, 0x1000, 0x1000, false, true),
+            Section::mapped(".data", 0x2000, 0x2000, 0x2000, true, false),
+        ],
+    );
+    p.format = BinaryFormat::Pe;
+    p.symbols = vec![Symbol {
+        name: "msvcrt.dll!memset".to_owned(),
+        addr: 0x3000,
+        kind: SymbolKind::Import,
+    }];
+    let mut emu = Emulator::new(&p, 1000).expect("x64 emulates");
+    emu.install_imports();
+    let run = emu.run(0x1000);
+    assert_eq!(run.stop, Stop::Returned, "{run:?}");
+    let filled: Vec<Option<u8>> = (0x2000..0x2009).map(|a| emu.byte_stated(a)).collect();
+    let mut want = vec![Some(b'A'); 8];
+    want.push(Some(0xcc));
+    assert_eq!(filled, want);
+}

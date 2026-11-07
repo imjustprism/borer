@@ -347,11 +347,10 @@ impl Emulator<'_> {
             }
             rcx
         } else if api == "memset" {
-            let (dst, len) = (self.api_arg(1), self.api_arg(2));
+            let (fill, len) = (lo8(self.api_arg(1)), self.api_arg(2));
             let len = usize::try_from(len).unwrap_or(0).min(API_COPY_MAX);
-            let fill = lo8(rcx);
             for k in 0..len {
-                self.write(dst.wrapping_add(from_usize(k)), u64::from(fill), 1)?;
+                self.write(rcx.wrapping_add(from_usize(k)), u64::from(fill), 1)?;
             }
             rcx
         } else if api.starts_with("VirtualProtect")
