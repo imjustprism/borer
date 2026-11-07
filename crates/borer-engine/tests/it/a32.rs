@@ -1121,7 +1121,9 @@ fn a_switch_guard_on_the_shifted_index_counts_every_case() {
 /// `add pc, r2, r3` jumps by the entry `ldr r3, [r2, r1, lsl #2]` loads,
 /// indexed by `k` reloaded from its slot, so the guard `(k >> 1) <= 3`
 /// admits eight cases. When that load indexes by the shifted `r0` and only
-/// another load reads by the reloaded `r1`, the table has four.
+/// another load reads by the reloaded `r1`, the table has four, and so it
+/// has when a call between the reload and the load may change `r1`. An
+/// entry or base register written after the load leaves no table.
 #[test]
 fn a_shifted_guard_scales_only_the_load_the_dispatch_adds() {
     let mut words: Vec<u32> = vec![
@@ -1160,6 +1162,16 @@ fn a_shifted_guard_scales_only_the_load_the_dispatch_adds() {
     assert_eq!(table(&words), Some(cases.clone()));
     words[9] = 0xe792_3100; // ASM: ldr r3, [r2, r0, lsl #2]: indexed by k >> 1
     words[10] = 0xe792_4101; // ASM: ldr r4, [r2, r1, lsl #2]
+    assert_eq!(table(&words), Some(cases[..4].to_vec()));
+    words[9] = 0xe792_3101; // ASM: ldr r3, [r2, r1, lsl #2]
+    words[10] = 0xe1a0_3005; // ASM: mov r3, r5: the entry is gone
+    assert_eq!(table(&words), None);
+    words[10] = 0xe282_2004; // ASM: add r2, r2, #4: the base moved
+    assert_eq!(table(&words), None);
+    words[8] = 0xeb00_0025; // ASM: bl 0xbc
+    words[9] = 0xe28f_2004; // ASM: add r2, pc, #4
+    words[10] = 0xe792_3101; // ASM: ldr r3, [r2, r1, lsl #2]
+    words.push(0xe12f_ff1e); // ASM: bx lr                   (0xbc)
     assert_eq!(table(&words), Some(cases[..4].to_vec()));
 }
 

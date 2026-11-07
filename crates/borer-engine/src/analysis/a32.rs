@@ -267,8 +267,9 @@ fn bound(older: &[&Insn], j: &Insn) -> Option<u64> {
 /// dispatch's own table load ([`entry_load`]) indexes by, with nothing
 /// between that moves the stack, may write the slot (a store that
 /// overlaps it, one through another base, a call) or changes `k` before
-/// the shift. A table indexed by the shifted value itself (`switch (k /
-/// 4)`) keeps the count the immediate gives.
+/// the shift, and no call between the shift and the `cmp` or between the
+/// reload and the dispatch. A table indexed by the shifted value itself
+/// (`switch (k / 4)`) keeps the count the immediate gives.
 ///
 /// # Arguments
 ///
@@ -282,11 +283,14 @@ fn bound(older: &[&Insn], j: &Insn) -> Option<u64> {
 /// The shift amount, `None` for any other shape.
 fn unshifted_index(older: &[&Insn], j: &Insn, cmp: usize, rn: a32::Reg) -> Option<u64> {
     let writes = |i: &Insn, r: a32::Reg| i.registers().writes.contains(&r);
+    let opaque = |i: &Insn| {
+        matches!(i.flow(), Flow::Call) || matches!(i.op, Op::Svc { .. } | Op::Unknown | Op::Invalid)
+    };
     let (at, shift) = older
         .iter()
         .enumerate()
         .skip(cmp + 1)
-        .find(|(_, i)| writes(i, rn))?;
+        .find(|(_, i)| writes(i, rn) || opaque(i))?;
     let Op::Dp {
         kind: DpKind::Mov,
         rd,
@@ -333,7 +337,7 @@ fn unshifted_index(older: &[&Insn], j: &Insn, cmp: usize, rn: a32::Reg) -> Optio
         .enumerate()
         .take(cmp)
         .skip(from)
-        .find(|(_, i)| writes(i, index))?;
+        .find(|(_, i)| writes(i, index) || opaque(i))?;
     let (rt, slot) = stack(load).filter(|_| matches!(load.op, Op::Load { .. }))?;
     let apart = |i: &Insn| match i.op {
         Op::Store {
@@ -352,7 +356,7 @@ fn unshifted_index(older: &[&Insn], j: &Insn, cmp: usize, rn: a32::Reg) -> Optio
         _ => false,
     };
     let stores = |i: &Insn| {
-        matches!(i.flow(), Flow::Call)
+        opaque(i)
             || matches!(
                 i.op,
                 Op::Store { .. }
@@ -361,10 +365,7 @@ fn unshifted_index(older: &[&Insn], j: &Insn, cmp: usize, rn: a32::Reg) -> Optio
                     | Op::Stm { .. }
                     | Op::VStore { .. }
                     | Op::VStm { .. }
-                    | Op::Svc { .. }
                     | Op::Neon { .. }
-                    | Op::Unknown
-                    | Op::Invalid
             )
     };
     let (spill, store) = older
@@ -465,8 +466,8 @@ fn table(program: &Program, seen: &BTreeMap<u64, Insn>, j: &Insn) -> Option<Tabl
 ///
 /// That is the jump itself for `ldr pc, [rb, ri, lsl #2]`, the load just
 /// before a `mov pc, rt` for `ldr rt, [rb, ri, lsl #2]; mov pc, rt` as
-/// Clang emits at `-O0`, or the nearest load of `re` from `[rb, ri, lsl
-/// #2]` for `add pc, rb, re`.
+/// Clang emits at `-O0`, or for `add pc, rb, re` the last write of `re`,
+/// a load from `[rb, ri, lsl #2]` with nothing after it writing `rb`.
 ///
 /// # Arguments
 ///
@@ -513,11 +514,15 @@ fn entry_load<'a>(
                     shift: a32::Shift::Lsl,
                     amount: 0,
                 },
-        } => older.iter().enumerate().find_map(|(k, i)| {
-            scaled(i, re)
-                .filter(|(base, _)| *base == rb)
-                .map(|(base, index)| (k + 1, *i, base, index))
-        }),
+        } => {
+            let writes = |i: &Insn, r: a32::Reg| i.registers().writes.contains(&r);
+            let k = older.iter().position(|i| writes(i, re))?;
+            let load = *older.get(k)?;
+            let based = !older.get(..=k)?.iter().any(|i| writes(i, rb));
+            scaled(load, re)
+                .filter(|(base, _)| *base == rb && based)
+                .map(|(base, index)| (k + 1, load, base, index))
+        }
         Op::Dp {
             kind: DpKind::Mov,
             rd: PC,
