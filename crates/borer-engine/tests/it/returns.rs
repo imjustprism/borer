@@ -10,7 +10,7 @@
 use borer_engine::analysis::Analysis;
 use borer_engine::analysis::decompile::polish;
 
-use crate::decompiled::{decompiled, program64, replays_clean};
+use crate::decompiled::{decompiled, program64, replays_clean, runs_agree};
 
 /// A guard clause whose arm only fails writes that arm as the `if` body,
 /// the code after it as what follows, whichever side the branch jumps to.
@@ -137,4 +137,34 @@ fn merged_returns_split_into_the_arms() {
     );
     let out = polish(call, 64, &packs);
     assert_eq!(out.matches("h(a2);").count(), 1, "{out}");
+}
+
+/// A code the result zero-extends from its low word is that word where
+/// the function returns 64 bits, and the name alone where it returns 32.
+///
+/// `f` returns `E_OUTOFMEMORY` through `mov eax`, which clears the bits
+/// above, or jumps on to `a2`, whose result is all of `rax`: C would
+/// sign-extend the `int32_t` HRESULT, so the text returns
+/// `(uint32_t)E_OUTOFMEMORY` and runs as the binary does. `g` returns
+/// `E_NOTIMPL` the same way and nothing wider, so the name stands.
+#[test]
+fn a_code_a_64_bit_result_zero_extends_is_its_word() {
+    let mut code = vec![
+        0x85, 0xc9, // ASM: test ecx,ecx
+        0x74, 0x02, // ASM: je 0x140001006
+        0xff, 0xe2, // ASM: jmp rdx
+        0xb8, 0x0e, 0x00, 0x07, 0x80, // ASM: mov eax,0x8007000e
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x20, 0xcc);
+    code.extend([
+        0xb8, 0x01, 0x40, 0x00, 0x80, // ASM: mov eax,0x80004001
+        0xc3, // ASM: ret
+    ]);
+    let p = program64(&code);
+    let text = runs_agree(&p, 0x1_4000_1000);
+    assert!(text.contains("return (uint32_t)E_OUTOFMEMORY;"), "{text}");
+    let narrow = decompiled(&p, 0x1_4000_1020);
+    assert!(narrow.contains("return E_NOTIMPL;"), "{narrow}");
+    assert!(narrow.contains("uint32_t sub_140001020("), "{narrow}");
 }

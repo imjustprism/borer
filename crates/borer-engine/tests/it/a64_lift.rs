@@ -863,3 +863,37 @@ fn neon_structures_selects_shifts_and_tables_agree_with_the_emulator() {
         assert_eq!(compared(&v, Fact::Store), 5, "{}", verify_tsv(&v));
     }
 }
+
+/// A code an arm64 result zero-extends from its low word is that word
+/// where the function returns 64 bits, and the name alone where it
+/// returns 32.
+///
+/// `mov w0` clears the bits above, as `mov eax` does on x64: `f` returns
+/// `E_OUTOFMEMORY` that way or all of `x1`, so it returns 64 bits and the
+/// code reads `(uint32_t)E_OUTOFMEMORY`; `g` returns only the word, and
+/// `E_NOTIMPL` stands.
+#[test]
+fn a_code_a_64_bit_result_zero_extends_is_its_word() {
+    let words = [
+        0xb400_0060, // ASM: cbz x0, 0x1000c
+        0xaa01_03e0, // ASM: mov x0, x1
+        0xd65f_03c0, // ASM: ret
+        0x5280_01c0, // ASM: mov w0, #0xe
+        0x72b0_00e0, // ASM: movk w0, #0x8007, lsl #16
+        0xd65f_03c0, // ASM: ret
+        0x5288_0020, // ASM: mov w0, #0x4001
+        0x72b0_0000, // ASM: movk w0, #0x8000, lsl #16
+        0xd65f_03c0, // ASM: ret
+    ];
+    let text = |words: &[u32]| {
+        let p = image(words);
+        let a = Analysis::compute(&p);
+        let o = borer_engine::analysis::Overlay::default();
+        borer_engine::analysis::decompile::decompile(&p, &a, &o, BASE).unwrap_or_default()
+    };
+    let wide = text(&words[..6]);
+    assert!(wide.contains("return (uint32_t)E_OUTOFMEMORY;"), "{wide}");
+    let narrow = text(&words[6..]);
+    assert!(narrow.contains("return E_NOTIMPL;"), "{narrow}");
+    assert!(!narrow.contains("(uint32_t)E_NOTIMPL"), "{narrow}");
+}

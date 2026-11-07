@@ -22,7 +22,9 @@
 
 use super::super::abi::{self, a64 as a64_abi};
 use super::super::expr::{Expr, Key, Ty};
-use super::super::lift::{ArgAt, Callee, EffectKind, Returns, Shown, stated_returns};
+use super::super::lift::{
+    ArgAt, Callee, EffectKind, Returns, Shown, returned_text, stated_returns,
+};
 use super::Lift;
 use super::shape::{self, FLOAT_ARGS, INT_ARGS, RESULT_REG, arg_reg};
 use crate::isa::a64::{Insn, Opnd, Reg};
@@ -400,6 +402,7 @@ impl Lift<'_, '_> {
                 || ctx.ret_float
                 || self.ex.env.result_in_rax
                 || ctx.returns_value == Some(true));
+        let wide = ctx.ret_lane == 64 && !ctx.ret_float;
         let value = match self.ex.env.vals.get(&back).cloned() {
             _ if !hands_back => None,
             Some(v) => Some(self.ex.assumed(v)),
@@ -429,7 +432,7 @@ impl Lift<'_, '_> {
             Some(_) | None => value,
         };
         let line = match &value {
-            Some(v) => format!("return {};", v.render(&self.ex.names())),
+            Some(v) => format!("return {};", returned_text(v, &self.ex.names(), wide)),
             None => "return;".to_owned(),
         };
         self.ex.lines.push(line);

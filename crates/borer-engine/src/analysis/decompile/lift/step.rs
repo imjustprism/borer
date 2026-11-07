@@ -221,8 +221,10 @@ impl Exec<'_, '_> {
             Some(v) => {
                 let (v, bits) = strip_partial_result(v);
                 self.ctx.ret_bits = self.ctx.ret_bits.max(bits.min(self.ctx.ret_lane));
+                let wide = bits == 64 && self.ctx.ret_lane == 64 && self.bitness() == 64;
                 let v = self.returned(v, bits);
-                (format!("return {};", v.render(&self.names())), Some(v))
+                let text = returned_text(&v, &self.names(), wide);
+                (format!("return {text};"), Some(v))
             }
             None if (self.ctx.rax_written || self.env.result_in_rax || x87)
                 && !self.ctx.unused_result =>

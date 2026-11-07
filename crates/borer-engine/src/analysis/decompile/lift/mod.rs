@@ -1041,6 +1041,32 @@ pub(super) fn exec_block(
     ex.close(out, instrs.first().map(Instruction::ip))
 }
 
+/// Renders a value a function returns, a code whose bits above its low
+/// word the result clears spelled as that word.
+///
+/// `mov eax, 0x8007000e` (`mov w0` on arm64) zero-extends, but the code's
+/// name, `E_OUTOFMEMORY`, is an `int32_t` HRESULT, which C sign-extends
+/// where the function returns 64 bits: there the value reads
+/// `(uint32_t)E_OUTOFMEMORY`. A code below `0x80000000`, one a number
+/// spells, or a function returning 32 bits needs no cast.
+///
+/// # Arguments
+///
+/// * `v` - The value.
+/// * `n` - Name resolution.
+/// * `wide` - The function returns all 64 bits of the register.
+pub(super) fn returned_text(v: &Expr, n: &Names<'_>, wide: bool) -> String {
+    let text = v.render(n);
+    match v {
+        Expr::Const(c)
+            if wide && c >> 31 == 1 && crate::winconst::name(*c) == Some(text.as_str()) =>
+        {
+            format!("(uint32_t){text}")
+        }
+        _ => text,
+    }
+}
+
 /// Strips the upper-bit merge from a byte or word write into the return register.
 ///
 /// # Arguments
