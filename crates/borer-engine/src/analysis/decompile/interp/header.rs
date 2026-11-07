@@ -194,7 +194,7 @@ pub(super) fn placed(
     }
     let wanted = std::collections::BTreeSet::from([name]);
     match resolve_names(program, analysis, overlay, entry, &wanted).get(name)? {
-        Known::Address(addr) => Some(*addr),
+        Known::Address(addr) | Known::Data(addr) => Some(*addr),
         Known::Code(_) | Known::Slot(_) => None,
     }
 }

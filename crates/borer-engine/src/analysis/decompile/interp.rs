@@ -56,8 +56,10 @@ use crate::program::{Program, SymbolKind};
 
 mod compile;
 mod header;
+mod names;
 
 use header::global_name;
+use names::resolve_names;
 mod result;
 
 use compile::Compiler;
@@ -145,8 +147,12 @@ enum Known {
     /// A function: the name's value is its entry.
     Code(u64),
     /// A table or symbol named by its address (`crc_32_table`,
-    /// `__ImageBase`): the name's value is that address.
+    /// `__ImageBase`, a code label): the name's value is that address.
     Address(u64),
+    /// A data symbol of the binary, which the text names as the variable
+    /// it is: the name reads the word stored there, and `&name` or an
+    /// index (`name[i]`, the array it may be) takes its address.
+    Data(u64),
     /// An import the text calls by name: the name's value is what its
     /// slot holds, the stub the machine answers it with.
     Slot(u64),
@@ -968,7 +974,7 @@ impl<'p> Script<'p> {
             .values()
             .filter_map(|k| match k {
                 Known::Code(at) => Some((*at, passing(program, analysis, overlay, *at))),
-                Known::Address(_) | Known::Slot(_) => None,
+                Known::Address(_) | Known::Data(_) | Known::Slot(_) => None,
             })
             .collect();
         let call_sp = (frame_low.wrapping_sub(CALL_GAP) & !0xf).wrapping_sub(wbytes);
@@ -1608,125 +1614,6 @@ fn thread_block(program: &Program) -> Option<u64> {
     matches!(emu.run(at).stop, Stop::Returned).then(|| emu.register("rax"))?
 }
 
-/// Every name a text may give something of the binary, with everything it
-/// is.
-///
-/// The image base, the functions (in address order, where several share a
-/// name), the vtables, the known tables and the symbols, in that order of
-/// precedence; a data symbol under the name the text spells it
-/// ([`data_name`](super::expr_render::data_name): `f.tab` is `f_tab`), and
-/// an import's slot also under its linker name `__imp_name`, which a
-/// wrapper of the same name calls it by.
-///
-/// # Arguments
-///
-/// * `program` - The loaded image.
-/// * `analysis` - Its functions.
-/// * `overlay` - User names.
-fn names(
-    program: &Program,
-    analysis: &Analysis,
-    overlay: &Overlay,
-) -> FxHashMap<String, Vec<Known>> {
-    let mut out: FxHashMap<String, Vec<Known>> = FxHashMap::default();
-    out.insert(
-        "__ImageBase".to_owned(),
-        vec![Known::Address(program.image_base)],
-    );
-    for f in &analysis.functions {
-        let full = name_of(analysis, overlay, f.entry);
-        out.entry(bare_name(&full).to_owned())
-            .or_default()
-            .push(Known::Code(f.entry));
-    }
-    for (at, class) in &analysis.classes.vtables {
-        out.entry(format!("{class}::vftable"))
-            .or_default()
-            .push(Known::Address(*at));
-    }
-    for (at, n) in &analysis.crypto {
-        out.entry(crate::crypto::identifier(n))
-            .or_default()
-            .push(Known::Address(*at));
-    }
-    for s in program.symbols.iter().filter(|s| s.addr != 0) {
-        let n = crate::search::demangled_name(&s.name);
-        if s.kind == SymbolKind::Import {
-            for name in [bare_name(&n).to_owned(), format!("__imp_{}", bare_name(&n))] {
-                out.entry(name).or_default().push(Known::Slot(s.addr));
-            }
-        } else {
-            out.entry(super::expr_render::data_name(&s.name))
-                .or_default()
-                .push(Known::Address(s.addr));
-        }
-    }
-    out
-}
-
-/// Resolves the names the text uses that it does not declare, through the
-/// table of [`names`] built once per set of names in force.
-///
-/// The table reads the names alone, so it is keyed without the passes and
-/// choice points ([`Overlay::names_key`]): the texts a repair search builds
-/// under other passes and choices share it, where each of them built the
-/// whole table again.
-///
-/// Where several things share a name (overloads of one C++ name), the one
-/// the function refers to is meant, else the first. A name the text also
-/// gives an instruction (`memcpy` for a `rep movs`) is the function or the
-/// import only where the function refers to it; elsewhere it is the
-/// instruction, and left out to run as the builtin.
-///
-/// # Arguments
-///
-/// * `program` - The loaded image.
-/// * `analysis` - Its functions.
-/// * `overlay` - User names.
-/// * `entry` - The function whose text it is.
-/// * `wanted` - The names.
-///
-/// # Returns
-///
-/// Each name that is a function, a known table or a symbol, with what it
-/// is; a name left out is a parameter by position or an intrinsic.
-fn resolve_names(
-    program: &Program,
-    analysis: &Analysis,
-    overlay: &Overlay,
-    entry: u64,
-    wanted: &std::collections::BTreeSet<&str>,
-) -> FxHashMap<String, Known> {
-    if wanted.is_empty() {
-        return FxHashMap::default();
-    }
-    let table = analysis
-        .derived
-        .get_or_build_named("text_names", overlay.names_key(), (), || {
-            names(program, analysis, overlay)
-        });
-    let referred = |k: &Known| {
-        let (Known::Code(at) | Known::Address(at) | Known::Slot(at)) = *k;
-        analysis
-            .xrefs_to(at)
-            .iter()
-            .any(|r| r.from_entry == Some(entry))
-    };
-    wanted
-        .iter()
-        .filter_map(|n| {
-            let all = table.get(*n)?;
-            let mine = all.iter().copied().find(|k| referred(k));
-            let known = if INTRINSICS.contains(n) {
-                mine?
-            } else {
-                mine.or_else(|| all.first().copied())?
-            };
-            Some(((*n).to_owned(), known))
-        })
-        .collect()
-}
-
 /// Tells whether an expression is the call `NtCurrentTeb()`, whose fields
 /// the text names.
 ///
@@ -2205,6 +2092,9 @@ impl Running<'_, '_> {
                 if let Some(v) = self.encoding_cast(ty, a)? {
                     return Ok(v);
                 }
+                if let Some(v) = self.data_cast(*ty, a) {
+                    return v;
+                }
                 let v = self.value(a)?;
                 self.convert(v, *ty)
             }
@@ -2297,7 +2187,7 @@ impl Running<'_, '_> {
             Some(Known::Code(at) | Known::Address(at)) => {
                 return Ok(self.int(*at, CTy::of(Base::Void).to()));
             }
-            Some(Known::Slot(at)) => {
+            Some(Known::Slot(at) | Known::Data(at)) => {
                 let ty = CTy::int(self.word(), false);
                 return self.read(Place::Mem(*at, ty));
             }
@@ -2518,7 +2408,10 @@ impl Running<'_, '_> {
                 Ok(Place::Mem(p.bits, ty))
             }
             Ast::Index(a, i) => {
-                let base = self.value(a)?;
+                let base = match self.data_symbol(a) {
+                    Some(at) => self.int(at, CTy::of(Base::Void).to()),
+                    None => self.value(a)?,
+                };
                 let index = self.value(i)?;
                 let Some(ty) = base.ty.pointee() else {
                     return unchecked("an index into a value that is no pointer");
@@ -2713,8 +2606,9 @@ impl Running<'_, '_> {
             Un::Addr => {
                 if let Ast::Name(n) = a
                     && !self.s.vars.contains_key(n)
-                    && let Some(Known::Code(at) | Known::Address(at) | Known::Slot(at)) =
-                        self.s.known.get(n)
+                    && let Some(
+                        Known::Code(at) | Known::Address(at) | Known::Data(at) | Known::Slot(at),
+                    ) = self.s.known.get(n)
                 {
                     return Ok(self.int(*at, CTy::of(Base::Void).to()));
                 }

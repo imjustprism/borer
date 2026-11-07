@@ -1402,3 +1402,48 @@ fn a_call_to_a_template_named_function_is_read() {
         "{text}\n{rows:?}"
     );
 }
+
+/// The text check reads a data symbol the text names as the variable it
+/// is.
+///
+/// `if ((uint8_t)flag != 0)` tests the byte stored at `flag`, not its
+/// address, and reads only that byte, so a flag at the end of its section
+/// reads as the binary's byte load does.
+///
+/// # Panics
+///
+/// When the text does not name the flag, or an input does not agree.
+#[test]
+fn a_global_named_bare_reads_its_value() {
+    use borer_engine::program::{Symbol, SymbolKind};
+    let code = [
+        0x80, 0x3d, 0xf9, 0x0f, 0x00, 0x00, 0x00, // ASM: cmp byte [rip+0xff9],0
+        0x75, 0x06, // ASM: jne 0x100f
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax,1
+        0xc3, // ASM: ret
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xc3, // ASM: ret
+    ];
+    for (flag, at) in [(0u8, 0), (1, 0), (0, 0xfff), (1, 0xfff)] {
+        let mut data = vec![0xffu8; 0x1000];
+        data[at] = flag;
+        let mut code = code.to_vec();
+        let disp = 0xff9 + u32::try_from(at).expect("in the page");
+        code[2..6].copy_from_slice(&disp.to_le_bytes());
+        let mut p = program(&code, &data);
+        p.symbols = vec![Symbol {
+            name: "ns::flag".to_owned(),
+            addr: TEXT + 0x1000 + u64::try_from(at).expect("in the page"),
+            kind: SymbolKind::Data,
+        }];
+        let a = Analysis::compute(&p);
+        let o = Overlay::default();
+        let text = decompile_named(&p, &a, &o, TEXT).unwrap_or_default();
+        assert!(text.contains("ns::flag"), "{text}");
+        let rows = check_generated_iso(&p, &a, &o, TEXT, 4, 1, 20_000).expect("the text reads");
+        assert!(
+            rows.iter().all(|(_, v)| *v == Verdict::Agrees),
+            "{text}\n{rows:?}"
+        );
+    }
+}

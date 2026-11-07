@@ -31,7 +31,7 @@ crates/borer-engine/src/analysis/decompile/format.rs::arguments#1	115
 crates/borer-engine/src/analysis/decompile/guarded.rs::plan#1	130
 crates/borer-engine/src/analysis/decompile/helper.rs::define#1	171
 crates/borer-engine/src/analysis/decompile/helper.rs::eval#1	107
-crates/borer-engine/src/analysis/decompile/interp.rs	2850
+crates/borer-engine/src/analysis/decompile/interp.rs	2777
 crates/borer-engine/src/analysis/decompile/interp.rs::binary#1	111
 crates/borer-engine/src/analysis/decompile/interp.rs::read_as#1	178
 crates/borer-engine/src/analysis/decompile/interp.rs::solve_for#1	177
