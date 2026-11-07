@@ -2,9 +2,9 @@
 //! reach it ([`relocate`]), with the survey of where every label and jump
 //! stands that it reads.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use super::super::wrap::{lists, weighs};
+use super::super::wrap::{each, jumps, lists, weighs};
 use super::super::{ArmBody, Label, Stmt, StmtKind};
 use super::{
     Facts, Kind, TAIL_MAX, ends, idle, labelled, larger, loose, stops, target, walk, word,
@@ -32,6 +32,8 @@ struct Spot {
     /// call that never does), holds no label, does not break or continue,
     /// and holds at most [`TAIL_MAX`] statements.
     tail: bool,
+    /// The labels the block jumps to.
+    jumps: BTreeSet<Label>,
 }
 
 /// Records where every label and every jump stands.
@@ -67,6 +69,10 @@ fn survey(
                     .rfind(|x| !idle(x))
                     .is_some_and(|x| matches!(x.kind, StmtKind::Return(_) | StmtKind::Expr(_)));
                 let loose = loose(block);
+                let mut to = BTreeMap::new();
+                for x in block {
+                    each(x, &mut |y| jumps(y, &mut to));
+                }
                 let spot = Spot {
                     frames: frames.clone(),
                     len: block.len(),
@@ -74,6 +80,7 @@ fn survey(
                     whole: !back && ends(block, f),
                     loose,
                     tail: returns && !loose && !labelled(block) && !larger(block, TAIL_MAX),
+                    jumps: to.into_keys().collect(),
                 };
                 spots.insert(l, spot);
             }
@@ -123,6 +130,12 @@ fn same_guards(a: &[(usize, Kind)], b: &[(usize, Kind)]) -> bool {
 /// jump; the original stays for whatever falls into it. Neither crosses the edge of a guarded region, and a block
 /// that breaks or continues at its own level moves only within its loop.
 ///
+/// The blocks that may move all move in one call, the hundreds of arms of
+/// a `switch` written as jumps among them: one a call left a big `switch`
+/// half written when the rounds ran out. A block that holds a label moves
+/// alone, and one that holds another's jump or stands in a block that
+/// moved waits for the next call, so no move touches what another read.
+///
 /// # Arguments
 ///
 /// * `list` - The statements, rewritten in place.
@@ -134,6 +147,8 @@ fn same_guards(a: &[(usize, Kind)], b: &[(usize, Kind)]) -> bool {
 /// Whether a block moved or was copied.
 pub(super) fn relocate(list: &mut Vec<Stmt>, f: &Facts<'_>, copy: bool) -> bool {
     let (spots, sites) = survey(list, f);
+    let mut moved = BTreeSet::new();
+    let mut held = BTreeSet::new();
     for (l, spot) in &spots {
         let Some(at) = sites.get(l) else {
             continue;
@@ -148,14 +163,23 @@ pub(super) fn relocate(list: &mut Vec<Stmt>, f: &Facts<'_>, copy: bool) -> bool 
         if !(moves || copy && spot.tail) {
             continue;
         }
+        let tangled = || held.contains(l) || !spot.jumps.is_disjoint(&moved);
+        if !moved.is_empty() && (!moves || tangled()) {
+            continue;
+        }
         let Some(block) = block_of(list, *l, spot.len) else {
             continue;
         };
         if moves {
-            if place(list, *l, &block) {
-                take(list, *l, spot.len);
+            if (!moved.is_empty() && labelled(&block)) || !place(list, *l, &block) {
+                continue;
+            }
+            take(list, *l, spot.len);
+            if labelled(&block) {
                 return true;
             }
+            moved.insert(*l);
+            held.extend(spot.jumps.iter().copied());
             continue;
         }
         let mut copied = false;
@@ -166,7 +190,7 @@ pub(super) fn relocate(list: &mut Vec<Stmt>, f: &Facts<'_>, copy: bool) -> bool 
             return true;
         }
     }
-    false
+    !moved.is_empty()
 }
 
 /// Returns a copy of the block a label begins.

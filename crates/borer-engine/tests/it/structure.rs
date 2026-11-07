@@ -1942,3 +1942,35 @@ fn a_latch_is_not_copied_into_a_try() {
     let out = cleanup(body);
     assert_eq!(out.matches("h();").count(), 1, "{out}");
 }
+
+/// Every arm of a `switch` too big to write with arms takes its block.
+///
+/// A jump table with more bodies than a `switch` is written with is a
+/// `switch` whose every case is a `goto`, each to a block only it reaches,
+/// as the structurer writes Clang's `-O0` `case_big_switch`: 300 blocks in
+/// reverse order, the last one ending in its copy of the shared `return`.
+/// Moved one a round, the rounds ran out half way, and the block the
+/// remaining jumps left last fell into the shared `return` and kept its
+/// `goto`.
+#[test]
+fn every_arm_of_a_big_switch_takes_its_block() {
+    let mut text = String::from("if (0x12b >= a1) {\n  switch (a1) {\n");
+    for k in 0..300 {
+        text.push_str(&format!("  case {k}: goto L_{:x};\n", 0x1000 + k));
+    }
+    text.push_str("  }\n");
+    for k in (1..300).rev() {
+        let (at, value) = (0x1000 + k, 50000 + k);
+        text.push_str(&format!(
+            "  L_{at:x}:\n  local_18 = {value};\n  goto L_9000;\n"
+        ));
+    }
+    text.push_str("  L_1000:\n  local_18 = 50000;\n  return local_18;\n}\ngoto L_8000;\n");
+    text.push_str("L_8000:\nlocal_18 = -7;\ngoto L_9000;\nL_9000:\nreturn local_18;\n");
+    let out = cleanup(&text);
+    assert!(!out.contains("goto") && !out.contains("L_"), "{out}");
+    assert!(
+        out.contains("case 127:") && out.contains("return 50127;"),
+        "{out}"
+    );
+}
