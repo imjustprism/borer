@@ -209,8 +209,11 @@ fn regions(lines: &[String]) -> Vec<(i64, i64)> {
 
 /// Spells each use of a slot in one line as the place it is in its region.
 ///
-/// Its address is the region's name at offset 0, else `&region[off]`; with
-/// arithmetic after it, it keeps its own type (`(uint32_t*)&region[8] + 1`).
+/// The address of the region's own slot is the region's name; another
+/// slot's keeps its own type (`(uint32_t*)&region[8]`), so a call it is
+/// handed to still reads it as that, and so does any slot's with
+/// arithmetic after it, which steps by its type (`(uint32_t*)region + 1`).
+/// A byte's address is `&region[off]` as it stands.
 /// Its value is `region[off]` for a byte, else `*(T*)&region[off]`, in
 /// parentheses before an operator that binds tighter. The region's own
 /// slot is spelled first, before the parts' spellings name the region. A
@@ -243,7 +246,7 @@ fn respell(line: &str, slot: &Slot, region: &str, off: u64) -> String {
         let tail = line.get(end..).unwrap_or("").trim_start();
         let arithmetic = tail.starts_with(['+', '-']) && !tail.starts_with("->");
         if head.ends_with('&') && !head.ends_with("&&") {
-            let place = if arithmetic {
+            let place = if slot.pointer != "uint8_t*" && (arithmetic || off > 0) {
                 format!("({}){at}", slot.pointer)
             } else {
                 at.clone()
@@ -344,8 +347,8 @@ mod tests {
     }
 
     /// A copy's region keeps each part's type: a pointer slot read through,
-    /// an address with arithmetic after it, and a value stored; fills that
-    /// overlap are one region.
+    /// an address handed on or with arithmetic after it, and a value
+    /// stored; fills that overlap are one region.
     #[test]
     fn overlapping_fills_are_one_region_whose_parts_keep_their_types() {
         let text = [
@@ -356,13 +359,18 @@ mod tests {
             "memset(&local_38, 0, 16);",
             "local_30 = &local_38 + 1;",
             "local_40 = 7;",
+            "f(&local_38);",
             "return local_30[1];",
         ]
         .join("\n");
         let out = filled_regions(&text, "uint64_t");
         assert!(out.starts_with("uint8_t local_40[24];\n"), "{out}");
         assert!(out.contains("memcpy(local_40, a1, 16);"), "{out}");
-        assert!(out.contains("memset(&local_40[8], 0, 16);"), "{out}");
+        assert!(
+            out.contains("memset((uint32_t*)&local_40[8], 0, 16);"),
+            "{out}"
+        );
+        assert!(out.contains("f((uint32_t*)&local_40[8]);"), "{out}");
         assert!(
             out.contains("*(uint64_t**)&local_40[0x10] = (uint32_t*)&local_40[8] + 1;"),
             "{out}"
