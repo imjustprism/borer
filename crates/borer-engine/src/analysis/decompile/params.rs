@@ -1497,7 +1497,9 @@ pub(super) fn detect_params(
 /// set in the call's own block, short of the register the call goes
 /// through, the ones it never set named as the registers they are; so it
 /// reads those, and a caller that hands its own `rcx` on that way takes
-/// it as a parameter.
+/// it as a parameter. On a 32-bit x86 target such a call takes its
+/// arguments on the stack, as cdecl and stdcall do, so a register handed on
+/// passes nothing.
 ///
 /// # Arguments
 ///
@@ -1515,7 +1517,11 @@ fn call_reads(
     let target = lift::static_target(instr);
     let bodyless =
         target.is_none_or(|t| ctx.analysis.function(t).is_none_or(|f| f.thunk.is_some()));
-    if !reads.is_empty() || !bodyless || lift::import_prototype(ctx, target).is_some() {
+    if !reads.is_empty()
+        || !bodyless
+        || ctx.bitness == 32
+        || lift::import_prototype(ctx, target).is_some()
+    {
         return reads;
     }
     let through = match instr.op0_kind() {

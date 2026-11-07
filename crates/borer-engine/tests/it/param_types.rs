@@ -273,3 +273,31 @@ fn a_register_handed_to_an_undeclared_import_is_a_parameter() {
         assert!(!sig.contains("a1"), "{text}");
     }
 }
+
+/// On a 32-bit target a call of unknown arity takes its arguments on the
+/// stack, so a register it is handed unset is no parameter.
+///
+/// `mov edx, 1; call [UndeclaredApi]; ret`: `edx` set and `ecx` not, as
+/// MinGW's `xmemcmpi` calls `tolower`, which made `ecx` a `this` the
+/// source does not have.
+#[test]
+fn a_register_handed_to_a_32_bit_import_is_no_parameter() {
+    let code = [
+        0xba, 0x01, 0x00, 0x00, 0x00, // ASM: mov edx,1
+        0xff, 0x15, 0x00, 0x20, 0x40, 0x00, // ASM: call [0x402000]
+        0xc3, // ASM: ret
+    ];
+    let mut p = crate::raw::image(borer_engine::program::Arch::X86, &code, &[0u8; 8]);
+    p.symbols = vec![Symbol {
+        name: "nolib.dll!UndeclaredApi".to_owned(),
+        addr: 0x40_2000,
+        kind: SymbolKind::Import,
+    }];
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), 0x40_1000).unwrap_or_default();
+    let sig = text
+        .lines()
+        .find(|l| l.starts_with("// signature: "))
+        .unwrap_or_default();
+    assert!(!sig.contains("this") && !sig.contains("a1"), "{text}");
+}
