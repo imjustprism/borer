@@ -55,6 +55,7 @@ use crate::num::from_usize;
 use crate::program::{Program, SymbolKind};
 
 mod compile;
+mod header;
 mod result;
 
 use compile::Compiler;
@@ -622,93 +623,6 @@ fn pure(e: &Ast) -> bool {
     }
 }
 
-/// The pieces of a decompiled function's header the run needs beside its
-/// signature.
-#[derive(Debug, Default)]
-struct Header {
-    /// Declared names: type, and the address a global's `// @` gives.
-    declared: Vec<(String, CTy, Option<u64>)>,
-    /// The declared names that are arrays (`uint32_t local_28[8]`), whose
-    /// name reads as the address of their first element.
-    arrays: FxHashSet<String>,
-    /// Field widths by base and offset.
-    layouts: FxHashMap<String, FxHashMap<u64, CTy>>,
-}
-
-/// Reads the header of a decompiled function beside its signature: its
-/// layout lines and its declarations, the lines before the first blank.
-///
-/// # Arguments
-///
-/// * `lines` - The header's lines.
-/// * `word` - The machine word in bits.
-///
-/// # Errors
-///
-/// When a declaration does not tokenize.
-fn header(lines: &[&str], word: u8) -> Result<Header, String> {
-    let mut h = Header::default();
-    let mut layout_base: Option<String> = None;
-    for raw in lines {
-        let t = raw.trim();
-        let layout = t
-            .strip_prefix("// layout ")
-            .and_then(|l| l.split_once(':'))
-            .map(|(base, rest)| (Some(base.trim().to_owned()), rest))
-            .or_else(|| {
-                t.strip_prefix("//  ")
-                    .filter(|_| layout_base.is_some())
-                    .map(|rest| (None, rest))
-            });
-        if let Some((base, rest)) = layout {
-            if let Some(b) = base {
-                layout_base = Some(b);
-            }
-            let Some(b) = layout_base.clone() else {
-                continue;
-            };
-            for item in rest.split(',') {
-                let mut words = item.split_whitespace();
-                let (Some(off), Some(letter)) = (words.next(), words.next()) else {
-                    continue;
-                };
-                let Some(off) = crate::analysis::parse_addr(off) else {
-                    continue;
-                };
-                if let Some(ty) = layout_letter(letter) {
-                    h.layouts.entry(b.clone()).or_default().insert(off, ty);
-                }
-            }
-            continue;
-        }
-        layout_base = None;
-        if t.starts_with("//") || t.is_empty() {
-            continue;
-        }
-        let at = t
-            .split_once("// @ ")
-            .and_then(|(_, a)| crate::analysis::parse_addr(a.trim()));
-        let toks = tokens(t)?;
-        let Some((base, used)) = super::ctext::leading_type(&toks, word) else {
-            continue;
-        };
-        for decl in split_top(toks.get(used..).unwrap_or(&[]), ",") {
-            let stars = decl
-                .iter()
-                .take_while(|t| matches!(t, Tok::Punct("*")))
-                .count();
-            if let Some(Tok::Name(n)) = decl.get(stars) {
-                let ty = (0..stars).fold(base, |t, _| t.to());
-                if matches!(decl.get(stars + 1), Some(Tok::Punct("["))) {
-                    h.arrays.insert(n.clone());
-                }
-                h.declared.push((n.clone(), ty, at));
-            }
-        }
-    }
-    Ok(h)
-}
-
 /// Every name an expression reads, in order.
 ///
 /// # Arguments
@@ -935,16 +849,9 @@ impl<'p> Script<'p> {
         mode: Mode,
     ) -> Result<Self, String> {
         let word = u8::try_from(program.arch.bitness().unwrap_or(64)).unwrap_or(64);
-        let all: Vec<&str> = text
-            .lines()
-            .map(|l| if defines(l) { "//" } else { l })
-            .collect();
-        let base = all
-            .iter()
-            .position(|l| l.trim().is_empty())
-            .map_or(0, |i| i + 1);
+        let (all, base) = header::lines(text);
         let sig = printed(text, word)?;
-        let head = header(all.get(..base).unwrap_or(&[]), word)?;
+        let head = header::header(all.get(..base).unwrap_or(&[]), word)?;
         let pass = passing(program, analysis, overlay, entry);
         let entry_sp = Emulator::entry_sp(program).ok_or("this architecture is not emulated")?;
         let mut vars: FxHashMap<String, Variable> = FxHashMap::default();
@@ -973,8 +880,9 @@ impl<'p> Script<'p> {
         };
         let mut objects = (iso_base, iso_base);
         for (name, ty, at) in &head.declared {
+            let at = at.or_else(|| header::placed(program, analysis, overlay, entry, &head, name));
             let slot = if let Some(addr) = at {
-                Slot::Mem(*addr)
+                Slot::Mem(addr)
             } else if let Some(off) = slot_offset(name, wbytes, frame_base(program))
                 .or_else(|| stated_local(overlay, entry, name))
                 .or_else(|| debug_local(program, entry, name))

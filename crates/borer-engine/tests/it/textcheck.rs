@@ -1286,3 +1286,61 @@ fn a_call_through_a_function_pointer_is_read() {
         "(*)(",
     );
 }
+
+/// The text check reads a table of function pointers the text declares,
+/// at the table's address, and calls the entry it indexes.
+///
+/// The text declares `static uint32_t (*const name[2])(uint64_t) = {...}`
+/// and calls `((uint64_t*)name)[a1 & 1]` through a cast. The table is
+/// placed by its symbol (`ops`) or, unnamed, by the address its `g64_`
+/// name spells; the helpers the header defines are no variables, and the
+/// initializer declares nothing.
+///
+/// # Panics
+///
+/// When an input does not agree as ISO C.
+#[test]
+fn a_declared_table_of_function_pointers_is_read_where_it_lies() {
+    use borer_engine::program::{Symbol, SymbolKind};
+    let mut code = vec![
+        0x83, 0xe1, 0x01, // ASM: and ecx,1
+        0x48, 0x8d, 0x05, 0xf6, 0x0f, 0x00, 0x00, // ASM: lea rax,[rip+0xff6]
+        0x49, 0x89, 0xc8, // ASM: mov r8,rcx
+        0x48, 0x89, 0xd1, // ASM: mov rcx,rdx
+        0x42, 0xff, 0x24, 0xc0, // ASM: jmp qword [rax+r8*8]
+    ];
+    code.resize(0x20, 0xcc);
+    code.extend_from_slice(&[0x8d, 0x41, 0x01, 0xc3]); // ASM: lea eax,[rcx+1]; ret
+    code.resize(0x30, 0xcc);
+    code.extend_from_slice(&[0x8d, 0x41, 0x02, 0xc3]); // ASM: lea eax,[rcx+2]; ret
+    let table: Vec<u8> = [TEXT + 0x20, TEXT + 0x30]
+        .iter()
+        .flat_map(|t| t.to_le_bytes())
+        .collect();
+    for (table_name, spelled) in [(None, "g64_2000"), (Some("ops"), "ops")] {
+        let mut p = program(&code, &table);
+        let mut symbols = vec![("op_one", TEXT + 0x20), ("op_two", TEXT + 0x30)];
+        symbols.extend(table_name.map(|n| (n, TEXT + 0x1000)));
+        p.symbols = symbols
+            .iter()
+            .map(|(name, addr)| Symbol {
+                name: (*name).to_owned(),
+                addr: *addr,
+                kind: if name.starts_with("op_") {
+                    SymbolKind::Local
+                } else {
+                    SymbolKind::Data
+                },
+            })
+            .collect();
+        let a = Analysis::compute(&p);
+        let o = Overlay::default();
+        let text = decompile_named(&p, &a, &o, TEXT).unwrap_or_default();
+        assert!(text.contains(&format!("(*const {spelled}[2])")), "{text}");
+        let rows = check_generated_iso(&p, &a, &o, TEXT, 8, 1, 20_000).expect("the text reads");
+        assert!(
+            rows.iter().all(|(_, v)| *v == Verdict::Agrees),
+            "{text}\n{rows:?}"
+        );
+    }
+}
