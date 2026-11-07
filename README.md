@@ -35,13 +35,14 @@ or Binary Ninja underneath.
 
 ## Why borer
 
-- **Checked output.** On x86, x86-64, arm64 and 32-bit ARM, every block of
-  decompiled C is run on a model of its machine from seeded states and
-  compared with the code it came from, and the output says how much was
-  checked; RISC-V output is not checked yet. On x86 and x86-64,
-  `borer certify` also runs a function's final text as C beside the binary
-  and grades it. Instructions it cannot model stay as `/* asm: ... */`
-  instead of a guess.
+- **Checked output.** On x86, x86-64, arm64 and 32-bit ARM, the statements
+  the lifter writes for each block are run on a model of the machine from
+  seeded states and compared with the code they came from, and each
+  function's header says what that covered and what it did not (the later
+  text passes, the C spelling); RISC-V output is not checked yet. On x86 and
+  x86-64, `borer certify` also runs a function's final text as C beside the
+  binary and grades it. Instructions it cannot model stay as
+  `/* asm: ... */` instead of a guess.
 - **Sized for a context window.** Lists are filtered and paged on the server
   (`# showing N of M`), a repeated request with `since=<tag>` returns only
   what changed, and the same question always returns the same bytes.
