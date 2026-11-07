@@ -794,19 +794,20 @@ fn pair(q: Option<Pass>) -> bool {
     !matches!(q, Some(Pass::Float(_))) && crate::analysis::typelib::words32(q) > 1
 }
 
-/// Tells whether a function's stated prototype passes an integer in a pair
-/// of 32-bit registers ([`pair`]), which a reading of one register a
-/// parameter cuts.
+/// Tells whether a function's stated prototype passes what one register a
+/// parameter does not place: an integer in a pair of 32-bit registers
+/// ([`pair`]) or a variable list after its fixed parameters.
 ///
 /// # Arguments
 ///
 /// * `ctx` - The context: the overlay the prototype is stated in.
 /// * `entry` - The function.
-pub(super) fn stated_pair(ctx: &Ctx<'_>, entry: u64) -> bool {
+pub(super) fn stated_unplaced(ctx: &Ctx<'_>, entry: u64) -> bool {
     ctx.overlay.prototypes.get(&entry).is_some_and(|p| {
-        p.params
-            .iter()
-            .any(|q| pair(q.ty.pass(&ctx.overlay.types, 32, ctx.program.format)))
+        p.variadic
+            || p.params
+                .iter()
+                .any(|q| pair(q.ty.pass(&ctx.overlay.types, 32, ctx.program.format)))
     })
 }
 

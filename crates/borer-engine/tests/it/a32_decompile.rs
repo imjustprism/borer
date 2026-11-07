@@ -528,9 +528,9 @@ fn thumb_table(halves: &[u16], o: &Overlay) -> String {
 /// table's functions read and returns what they return, a 32-bit image's
 /// words. It stays a computed `goto` when a lane move overwrites the loaded
 /// entry before the jump, and when the functions are stated to return 64
-/// bits or to take a 64-bit parameter in a register pair, which a pointer
-/// to a function of words would cut. T32 from `case_indirect`, its table
-/// moved beside it.
+/// bits, to take a 64-bit parameter in a register pair or to take a
+/// variable list, which a pointer to a function of words would cut or drop.
+/// T32 from `case_indirect`, its table moved beside it.
 #[test]
 fn a_thumb_jump_through_a_function_table_is_a_tail_call() {
     let mut halves: [u16; 26] = [
@@ -573,6 +573,15 @@ fn a_thumb_jump_through_a_function_table_is_a_tail_call() {
             .insert(BASE + 0x28 + 4 * u64::try_from(k).expect("small"), p);
     }
     let out = thumb_table(&halves, &pair);
+    assert!(out.contains("goto *"), "{out}");
+    let mut listed = Overlay::default();
+    for (k, name) in ["op_add", "op_sub", "op_mul"].iter().enumerate() {
+        let p = Proto::parse(&format!("uint32_t {name}(uint32_t tag, ...)")).expect("parses");
+        listed
+            .prototypes
+            .insert(BASE + 0x28 + 4 * u64::try_from(k).expect("small"), p);
+    }
+    let out = thumb_table(&halves, &listed);
     assert!(out.contains("goto *"), "{out}");
     halves[17] = 0xee30; // ASM: vmov.32 r2, d16[1]
     halves[18] = 0x2b90;
