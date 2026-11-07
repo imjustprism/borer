@@ -45,7 +45,7 @@ or Binary Ninja underneath.
 - **Sized for a context window.** Lists are filtered and paged on the server
   (`# showing N of M`), a repeated request with `since=<tag>` returns only
   what changed, and the same question always returns the same bytes.
-- **Fast.** A whole binary loads and decompiles in seconds, so an agent can
+- **Fast.** A typical binary loads and decompiles in seconds, so an agent can
   read every function instead of guessing where to look.
 - **Safe on hostile input.** Reads are bounds-checked, scans capped and walks
   fuel-limited: a malformed or malicious file gets an error, never a crash.
@@ -112,9 +112,9 @@ clients (Claude Desktop, Cursor, Windsurf, Gemini CLI and others) read
 { "mcpServers": { "borer": { "command": "/path/to/borer", "args": [] } } }
 ```
 
-VS Code reads the same entry under `servers`, Zed under `context_servers`, and
-Codex CLI as `[mcp_servers.borer]` in its TOML; `borer setup` writes each of
-them.
+VS Code reads `servers` (with `"type": "stdio"`), Zed `context_servers`, and
+Codex CLI `[mcp_servers.borer]` in its TOML; `borer setup` writes each in its
+own format.
 
 To uninstall, run `borer setup --apply --remove`, then delete the binary and
 its cache (`%LOCALAPPDATA%\borer` or `~/.cache/borer`). The installers do all
@@ -153,7 +153,7 @@ From the command line:
 borer triage    sample.exe
 borer decompile sample.exe <address|name>
 borer xrefs     sample.exe <address|name>
-borer certify   sample.exe <address|name>   # check the decompiled text against the binary
+borer certify   sample.exe <address|name>   # how far the decompiled text was checked
 borer help                                  # every command
 ```
 
