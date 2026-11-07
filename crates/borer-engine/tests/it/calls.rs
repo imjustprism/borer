@@ -252,10 +252,12 @@ fn a_jump_through_a_function_table_is_a_tail_call() {
 ///
 /// Windows on Arm's `return ops[k % 3](a, b);` computes `k % 3` with a
 /// multiply-high before the load, so the entry is written out as a variable
-/// and the jump reads only its name.
+/// and the jump reads only its name. An instruction with no model that
+/// writes the register after the load leaves that name standing for
+/// something else, and the jump a computed `goto`.
 #[test]
 fn a_jump_through_a_table_entry_written_out_early_is_a_tail_call() {
-    let head = [
+    let mut head = vec![
         0x5295_5568, // ASM: mov w8, #0xaaab
         0xb000_0009, // ASM: adrp x9, 0x402000
         0x9100_0129, // ASM: add x9, x9, #0
@@ -283,6 +285,9 @@ fn a_jump_through_a_table_entry_written_out_early_is_a_tail_call() {
         text.contains("return ((uint64_t (*)(uint64_t, uint64_t))"),
         "{text}"
     );
+    head.insert(11, 0xd538_0003); // ASM: mrs x3, midr_el1
+    let text = table_jump(&head, &ops);
+    assert!(text.contains("goto *"), "{text}");
 }
 
 /// A table jump whose functions read a register the function never sets

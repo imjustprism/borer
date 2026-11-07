@@ -2245,7 +2245,9 @@ impl<'a> Exec<'_, 'a> {
     }
 
     /// Forgets `key` because it is about to change without a modeled value,
-    /// ending the block's equality assumption when it is about `key`.
+    /// ending the block's equality assumption when it is about `key`, and
+    /// the expression it was written out as ([`Self::early_value`]): its
+    /// name no longer stands for that value.
     ///
     /// # Arguments
     ///
@@ -2259,6 +2261,7 @@ impl<'a> Exec<'_, 'a> {
         self.env.vals.remove(&key);
         self.env.narrow.remove(&key);
         self.env.unset.remove(&key);
+        self.big_written.remove(&key);
         if let Key::Slot(o) = key {
             self.env.slot_bits.remove(&o);
         }
