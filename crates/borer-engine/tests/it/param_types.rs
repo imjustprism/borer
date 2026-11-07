@@ -299,5 +299,6 @@ fn a_register_handed_to_a_32_bit_import_is_no_parameter() {
         .lines()
         .find(|l| l.starts_with("// signature: "))
         .unwrap_or_default();
+    assert!(sig.starts_with("// signature: "), "{text}");
     assert!(!sig.contains("this") && !sig.contains("a1"), "{text}");
 }
