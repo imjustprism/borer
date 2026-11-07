@@ -28,8 +28,10 @@ use super::wrap::{count, each, jumps, lists, weighs};
 use super::{
     Arm, ArmBody, Body, CaseLabel, Else, Expr, ExprKind, Label, LitKind, Stmt, StmtKind, UnOp,
 };
+use hoist::lifts;
 use moves::relocate;
 
+mod hoist;
 mod moves;
 
 /// Most rounds of the rules one body gets.
@@ -50,7 +52,8 @@ const RUN_MAX: usize = 400;
 /// first. The rules that move code run when those find nothing, one change
 /// a round, so each sees the tree the last one left, the cheapest first:
 /// moving a block or a run whole, then copying a short tail or a run into
-/// several arms, then returning from a loop where it breaks to a `return`,
+/// several arms, then lifting a jump an arm ends with past the run it
+/// skips, then returning from a loop where it breaks to a `return`,
 /// then moving a statement both arms of an `if` end with after it, then
 /// writing a loop, then flipping a loop's last test.
 ///
@@ -92,6 +95,7 @@ pub(in crate::analysis::decompile) fn fold_jumps(body: &mut Body, ends: &BTreeSe
             || walk(stmts, &mut |list, cx| sinks(list, cx, &facts, false))
             || relocate(stmts, &facts, true)
             || walk(stmts, &mut |list, cx| sinks(list, cx, &facts, true))
+            || walk(stmts, &mut |list, cx| lifts(list, cx, &facts))
             || walk(stmts, &mut |list, _| leaves(list))
             || walk(stmts, &mut |list, _| hoists(list))
             || walk(stmts, &mut |list, _| loops(list, &facts))

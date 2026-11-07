@@ -160,3 +160,42 @@ fn a_chain_nested_in_its_ifs_reads_as_an_else_if_ladder() {
     );
     assert_eq!(cleanup(text), want);
 }
+
+/// The jump a vectorized loop's arm ends with, past the narrow loop the
+/// other arm always runs, is lifted out as the test of that loop.
+///
+/// `if (p) { A; if (q) goto L; } else { B } RUN L:` runs `RUN` unless `p`
+/// and then `q` held; the run here is too long to copy into both arms, and
+/// what follows the label (a loop) too long to copy to the jump. An arm
+/// that writes a name `p` reads keeps the jump: `p` read again after the
+/// arms would no longer be the test that chose them.
+#[test]
+fn a_jump_an_arm_ends_with_is_lifted_past_the_run_it_skips() {
+    let text = concat!(
+        "if (a3 >= 32) {\n",
+        "  f(1);\n",
+        "  if ((a3 & 0x18) == 0) goto L_10;\n",
+        "} else {\n",
+        "  f(2);\n",
+        "}\n",
+        "g(1);\n",
+        "g(2);\n",
+        "g(3);\n",
+        "g(4);\n",
+        "g(5);\n",
+        "L_10:\n",
+        "h(a3);\n",
+        "L_20:\n",
+        "h(1);\n",
+        "if (a3 == 7) goto L_20;\n",
+        "return;\n",
+    );
+    let out = cleanup(text);
+    assert!(!out.contains("goto"), "{out}");
+    assert_eq!(out.matches("g(1);").count(), 1, "{out}");
+    assert_eq!(out.matches("h(a3);").count(), 1, "{out}");
+    assert!(out.contains("if (a3 < 32 || (a3 & 0x18) != 0) {"), "{out}");
+    let written = text.replace("  f(1);\n", "  a3 += 1;\n");
+    let out = cleanup(&written);
+    assert!(!out.contains("a3 < 32 ||"), "{out}");
+}
