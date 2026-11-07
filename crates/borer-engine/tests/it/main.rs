@@ -49,6 +49,7 @@ mod engine;
 mod families;
 mod fixups;
 mod float_results;
+mod folds;
 mod go;
 mod groundtruth;
 mod hashing;
