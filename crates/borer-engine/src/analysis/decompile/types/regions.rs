@@ -39,9 +39,11 @@ struct Region<'s> {
 /// `local_70[0x3c]`, and `local_30`, a `uint16_t`, is
 /// `*(uint16_t*)&local_70[0x40]`. The size passed to `memset`, `memcpy` or
 /// `memmove` gives a region, and regions that overlap are one. A region is
-/// left alone when it would reach the frame base, or when a slot the text
+/// left alone when it would reach the frame base, when a slot the text
 /// names lies only partly inside it or has a type whose size the text does
-/// not say.
+/// not say, or when the text reads through a slot inside it at an offset
+/// it computes, which may reach past the fill: [`stack_arrays`] sizes that
+/// one.
 ///
 /// # Arguments
 ///
@@ -57,6 +59,7 @@ pub(in crate::analysis::decompile) fn filled_regions(text: &str, word: &str) -> 
     }
     let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
     let slots = slots(&lines, word);
+    let indexed = indexed_through(&lines);
     let named: BTreeSet<i64> = lines
         .iter()
         .filter(|l| !l.starts_with("//"))
@@ -79,7 +82,11 @@ pub(in crate::analysis::decompile) fn filled_regions(text: &str, word: &str) -> 
         for &depth in named.range(end + 1..).rev() {
             let slot = slots.get(&depth);
             match (slot, slot.and_then(|s| s.size)) {
-                (Some(slot), Some(size)) if depth <= start && depth - size >= end => {
+                (Some(slot), Some(size))
+                    if depth <= start
+                        && depth - size >= end
+                        && !indexed.contains(slot.name.as_str()) =>
+                {
                     parts.push((slot, start.abs_diff(depth)));
                 }
                 (_, Some(size)) if depth - size >= start => {}
@@ -206,7 +213,8 @@ fn regions(lines: &[String]) -> Vec<(i64, i64)> {
 /// arithmetic after it, it keeps its own type (`(uint32_t*)&region[8] + 1`).
 /// Its value is `region[off]` for a byte, else `*(T*)&region[off]`, in
 /// parentheses before an operator that binds tighter. The region's own
-/// slot is spelled first, before the parts' spellings name the region.
+/// slot is spelled first, before the parts' spellings name the region. A
+/// name in a string literal or in the line's comment is no use.
 ///
 /// # Arguments
 ///
@@ -221,9 +229,17 @@ fn respell(line: &str, slot: &Slot, region: &str, off: u64) -> String {
     } else {
         format!("&{region}[{}]", offset_text(off))
     };
+    let code = line
+        .match_indices("//")
+        .map(|(at, _)| at)
+        .find(|&at| !in_literal(line.get(..at).unwrap_or("")))
+        .unwrap_or(line.len());
     for pos in word_positions(line, &slot.name).into_iter().rev() {
         let end = pos + slot.name.len();
         let head = line.get(..pos).unwrap_or("");
+        if pos >= code || in_literal(head) {
+            continue;
+        }
         let tail = line.get(end..).unwrap_or("").trim_start();
         let arithmetic = tail.starts_with(['+', '-']) && !tail.starts_with("->");
         if head.ends_with('&') && !head.ends_with("&&") {
@@ -295,7 +311,8 @@ mod tests {
     use super::filled_regions;
 
     /// A fill past its slot makes the slots among its bytes parts of one
-    /// array, each read at its offset with its own type.
+    /// array, each read at its offset with its own type; a slot's name in a
+    /// string or a comment stays as it is.
     #[test]
     fn a_fill_past_its_slot_is_one_array_of_the_slots_it_covers() {
         let text = [
@@ -307,6 +324,7 @@ mod tests {
             "",
             "memset(&local_70, 0, 104);",
             "GetStartupInfoW(&local_70);",
+            "log(\"local_30 // local_34\", local_30); // local_34",
             "return ((local_34 & 1) != 0 ? local_30 : 10);",
         ]
         .join("\n");
@@ -317,6 +335,7 @@ mod tests {
             "",
             "memset(local_70, 0, 104);",
             "GetStartupInfoW(local_70);",
+            "log(\"local_30 // local_34\", *(uint16_t*)&local_70[0x40]); // local_34",
             "return ((local_70[0x3c] & 1) != 0 ? *(uint16_t*)&local_70[0x40] : 10);",
             "",
         ]
@@ -355,9 +374,12 @@ mod tests {
         );
     }
 
-    /// A region stays apart when a slot lies only partly inside it, when it
-    /// would reach the frame base, when a slot inside it has no size the
-    /// text says, or when the fill stays inside its own slot.
+    /// A region that cannot be one array stays apart.
+    ///
+    /// That is one a slot lies only partly inside, one that would reach the
+    /// frame base, one holding a slot with no size the text says, a fill
+    /// inside its own slot, and one holding a slot the text indexes, which
+    /// may reach past the fill.
     #[test]
     fn a_region_that_cannot_be_one_array_is_left_alone() {
         for text in [
@@ -365,6 +387,7 @@ mod tests {
             "uint64_t local_10;\n\nmemset(&local_10, 0, 32);\nreturn local_10;\n",
             "uint64_t local_70;\n\nmemset(&local_70, 0, 104);\nreturn local_30.x;\n",
             "uint128_t local_20;\n\nmemset(&local_20, 0, 16);\nreturn local_20;\n",
+            "uint64_t local_40;\n\nmemset(&local_40, 0, 16);\n((uint8_t*)&local_40)[a1 & 31] = 7;\n",
         ] {
             assert_eq!(filled_regions(text, "uint64_t"), text);
         }
