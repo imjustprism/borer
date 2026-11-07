@@ -5,8 +5,10 @@ use super::*;
 use crate::analysis::protos::{local_depth, local_name};
 
 mod infer;
+mod regions;
 
 pub(super) use infer::{Casts, inferred_type_on, scalar_width, signature_result, type_parameters};
+pub(super) use regions::filled_regions;
 
 /// Most singletons whose fields [`decompile_named`] names in one function.
 pub(super) const SINGLETONS_MAX: usize = 8;
@@ -1178,35 +1180,11 @@ pub(super) fn stack_arrays(text: &str) -> String {
         .iter()
         .flat_map(|(_, _, m, _)| m.iter().map(String::as_str))
         .collect();
-    let mut at = None;
-    for (k, line) in lines.iter_mut().enumerate() {
-        if !is_declaration(line) {
-            continue;
-        }
-        let Some((ty, names)) = line.trim_end_matches(';').split_once(' ') else {
-            continue;
-        };
-        let kept: Vec<&str> = names
-            .split(", ")
-            .filter(|n| !gone.contains(n.trim()))
-            .collect();
-        if kept.len() != names.split(", ").count() {
-            *line = if kept.is_empty() {
-                String::from("\u{0}")
-            } else {
-                format!("{ty} {};", kept.join(", "))
-            };
-            at = Some(k);
-        }
-    }
-    if let Some(k) = at {
-        let decls: Vec<String> = arrays
-            .iter()
-            .map(|(name, ty, _, len)| format!("{ty} {name}[{len}];"))
-            .collect();
-        lines.splice(k + 1..k + 1, decls);
-    }
-    lines.retain(|l| l != "\u{0}");
+    let decls = arrays
+        .iter()
+        .map(|(name, ty, _, len)| format!("{ty} {name}[{len}];"))
+        .collect();
+    regions::declare_arrays(&mut lines, &gone, decls);
     for (name, _, members, _) in &arrays {
         for line in lines
             .iter_mut()

@@ -1447,3 +1447,44 @@ fn a_global_named_bare_reads_its_value() {
         );
     }
 }
+
+/// A fill past the slot it starts at is one object in the text, so a read
+/// of a slot among its bytes sees the fill, run as ISO C.
+///
+/// `__scrt_get_show_window_mode`'s shape: `memset` zeroes 104 bytes of
+/// the frame, and the function tests a byte and reads a word inside them.
+/// The text declared the three slots apart, which C reads as a byte no
+/// line wrote; as one `uint8_t` array it agrees with the binary.
+#[test]
+fn a_read_inside_a_filled_region_sees_the_fill() {
+    use borer_engine::program::{Symbol, SymbolKind};
+    let code = [
+        0x48, 0x81, 0xec, 0x98, 0x00, 0x00, 0x00, // ASM: sub rsp,0x98
+        0x33, 0xd2, // ASM: xor edx,edx
+        0x48, 0x8d, 0x4c, 0x24, 0x20, // ASM: lea rcx,[rsp+0x20]
+        0x44, 0x8d, 0x42, 0x68, // ASM: lea r8d,[rdx+0x68]
+        0xff, 0x15, 0xe8, 0x0f, 0x00, 0x00, // ASM: call [rip+0xfe8]
+        0xf6, 0x44, 0x24, 0x5c, 0x01, // ASM: test byte [rsp+0x5c],1
+        0xb8, 0x0a, 0x00, 0x00, 0x00, // ASM: mov eax,10
+        0x74, 0x05, // ASM: je 0x1029
+        0x0f, 0xb7, 0x44, 0x24, 0x60, // ASM: movzx eax,word [rsp+0x60]
+        0x48, 0x81, 0xc4, 0x98, 0x00, 0x00, 0x00, // ASM: add rsp,0x98
+        0xc3, // ASM: ret
+    ];
+    let mut p = program(&code, &[]);
+    p.symbols = vec![Symbol {
+        name: "msvcrt.dll!memset".to_owned(),
+        addr: TEXT + 0x1000,
+        kind: SymbolKind::Import,
+    }];
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let text = decompile_named(&p, &a, &o, TEXT).unwrap_or_default();
+    assert!(text.contains("uint8_t local_70[104];"), "{text}");
+    assert!(text.contains("local_70[0x3c]"), "{text}");
+    let rows = check_generated_iso(&p, &a, &o, TEXT, 4, 1, 20_000).expect("the text reads");
+    assert!(
+        rows.iter().all(|(_, v)| *v == Verdict::Agrees),
+        "{text}\n{rows:?}"
+    );
+}

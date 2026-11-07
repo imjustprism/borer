@@ -158,7 +158,9 @@ pub(super) fn polish_skipping(
     let text = skip.apply(Pass::SpellNullptr, text, spell_nullptr);
     let text = skip.apply(Pass::StoreStrings, text, store_strings);
     let text = skip.apply(Pass::CopyRuns, text, copy_runs);
-    let text = skip.apply(Pass::StackArrays, text, stack_arrays);
+    let text = skip.apply(Pass::StackArrays, text, |t| {
+        stack_arrays(&filled_regions(t, word))
+    });
     let text = skip.apply(Pass::CallablePointers, text, |t| callable_pointers(t, word));
     let text = skip.apply(Pass::FloatBitReads, text, float_bit_reads);
     let text = skip.apply(Pass::FloatBitCopies, text, float_bit_copies);
