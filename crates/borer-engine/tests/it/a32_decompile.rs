@@ -18,7 +18,7 @@ use borer_engine::analysis::decompile::verify_a32::{verify, verify_tsv};
 use borer_engine::analysis::protos::Proto;
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::isa::a32::{Mode, Modes};
-use borer_engine::program::{Arch, Feature, Program, Section, Symbol, SymbolKind};
+use borer_engine::program::{Arch, BinaryFormat, Feature, Program, Section, Symbol, SymbolKind};
 
 /// Where the routines are placed.
 const BASE: u64 = 0x4_0000;
@@ -586,5 +586,58 @@ fn a_thumb_jump_through_a_function_table_is_a_tail_call() {
     halves[17] = 0xee30; // ASM: vmov.32 r2, d16[1]
     halves[18] = 0x2b90;
     let out = thumb_table(&halves, &Overlay::default());
+    assert!(out.contains("goto *"), "{out}");
+}
+
+/// A Thumb jump through a table of import thunks stays a computed `goto`.
+///
+/// Each entry is a Windows on ARM thunk to `ReadFile`, which takes a fifth
+/// argument on the stack; no body says what the jump leaves there, so a
+/// call through the table would pass the four registers set before it and
+/// drop the fifth.
+#[test]
+fn a_thumb_jump_through_a_table_of_import_thunks_stays_a_goto() {
+    let mut halves: Vec<u16> = vec![
+        0xf240, 0x2294, // ASM: movw r2, #0x294
+        0xf2c0, 0x0201, // ASM: movt r2, #0x1
+        0xf852, 0x2020, // ASM: ldr r2, [r2, r0, lsl #2]
+        0x4694, // ASM: mov r12, r2
+        0x2001, // ASM: movs r0, #1
+        0x2102, // ASM: movs r1, #2
+        0x2203, // ASM: movs r2, #3
+        0x2304, // ASM: movs r3, #4
+        0x4760, // ASM: bx r12
+    ];
+    for _ in 0..3 {
+        halves.extend([0xf242, 0x0c00]); // ASM: movw r12, #0x2000
+        halves.extend([0xf2c0, 0x0c05]); // ASM: movt r12, #0x5
+        halves.extend([0xf8dc, 0xf000]); // ASM: ldr.w pc, [r12]
+    }
+    let mut bytes: Vec<u8> = halves.iter().flat_map(|h| h.to_le_bytes()).collect();
+    let code = u64::try_from(bytes.len()).expect("a small image");
+    for k in 0..3u32 {
+        bytes.extend((0x4_0019 + 12 * k).to_le_bytes());
+    }
+    bytes.extend([0u8; 4]);
+    let text = Section::mapped(".text", BASE, 0, code, false, true);
+    let table = Section::mapped(".rodata", 0x1_0294, code, 12, false, false);
+    let slot = Section::mapped(".idata", 0x5_2000, code + 12, 4, false, false);
+    let mut p = Program::raw(bytes, Arch::Arm, 0, Some(BASE), vec![text, table, slot]);
+    p.format = BinaryFormat::Pe;
+    p.symbols = vec![
+        Symbol {
+            name: "KERNEL32.dll!ReadFile".to_owned(),
+            addr: 0x5_2000,
+            kind: SymbolKind::Import,
+        },
+        Symbol {
+            name: "ops".to_owned(),
+            addr: 0x1_0294,
+            kind: SymbolKind::Data,
+        },
+    ];
+    p.modes = Modes::from_marks(vec![(BASE, Mode::Thumb)]);
+    let a = Analysis::compute(&p);
+    let out = decompile(&p, &a, &Overlay::default(), BASE).expect("decompiles");
     assert!(out.contains("goto *"), "{out}");
 }

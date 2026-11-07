@@ -476,11 +476,13 @@ impl Lift<'_, '_> {
     }
 
     /// The registers a function takes its arguments in, as keys, and what it
-    /// returns, when its body or a declaration says, it takes its integers
-    /// in registers alone, one a parameter (no stated 64-bit one, which
-    /// takes a pair, and no variable list, whose arguments no parameter
-    /// names), and returns no float: a call through a table prints a pointer
-    /// to a function of words ([`super::super::lift::Exec::table_callee`]).
+    /// returns, when its body or a declaration says, it has a body of its
+    /// own that reads no stack argument (a thunk's import may take more than
+    /// four), it takes its integers in registers alone, one a parameter (no
+    /// stated 64-bit one, which takes a pair, and no variable list, whose
+    /// arguments no parameter names), and returns no float: a call through
+    /// a table prints a pointer to a function of words
+    /// ([`super::super::lift::Exec::table_callee`]).
     ///
     /// # Arguments
     ///
@@ -493,8 +495,8 @@ impl Lift<'_, '_> {
         }
         let regs = self.callee_args(Some(entry), None)?;
         let stack =
-            super::shape::callee_shape(self.ex.ctx, abi::reached(self.ex.ctx.analysis, entry))
-                .map_or(0, |s| s.stack);
+            super::shape::callee_shape(self.ex.ctx, abi::reached(self.ex.ctx.analysis, entry))?
+                .stack;
         let returns = self.returns(Some(entry), None);
         let plain = stack == 0
             && regs.iter().all(|r| matches!(r, Reg::R(_)))
