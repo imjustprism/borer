@@ -1344,3 +1344,27 @@ fn a_declared_table_of_function_pointers_is_read_where_it_lies() {
         );
     }
 }
+
+/// The text check reads `retaddr` as the binary's run does: a function
+/// that returns its own return address reads the same word in both runs.
+///
+/// # Panics
+///
+/// When the text does not read `retaddr`, or an input does not agree.
+#[test]
+fn a_read_of_the_return_address_agrees() {
+    let code = [
+        0x48, 0x8b, 0x04, 0x24, // ASM: mov rax,[rsp]
+        0xc3, // ASM: ret
+    ];
+    let p = program(&code, &[]);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let text = decompile_named(&p, &a, &o, TEXT).unwrap_or_default();
+    assert!(text.contains("return retaddr;"), "{text}");
+    let rows = check_generated_iso(&p, &a, &o, TEXT, 8, 1, 20_000).expect("the text reads");
+    assert!(
+        rows.iter().all(|(_, v)| *v == Verdict::Agrees),
+        "{text}\n{rows:?}"
+    );
+}

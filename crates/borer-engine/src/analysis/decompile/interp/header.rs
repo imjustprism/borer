@@ -138,6 +138,25 @@ pub(super) fn header(lines: &[&str], word: u8) -> Result<Header, String> {
     Ok(h)
 }
 
+/// The address and type a global's generated name spells: `g32_1800c1230`
+/// is the 32-bit value at `0x1800c1230`.
+///
+/// # Arguments
+///
+/// * `name` - The name.
+pub(super) fn global_name(name: &str) -> Option<(u64, CTy)> {
+    let (bits, hex) = name.strip_prefix('g')?.split_once('_')?;
+    let ty = match bits {
+        "8" => CTy::int(8, false),
+        "16" => CTy::int(16, false),
+        "32" => CTy::int(32, false),
+        "64" => CTy::int(64, false),
+        "128" => CTy::of(Base::Wide),
+        _ => return None,
+    };
+    Some((u64::from_str_radix(hex, 16).ok()?, ty))
+}
+
 /// Returns where a table the header declares lies, when its name is a
 /// data symbol of the binary.
 ///

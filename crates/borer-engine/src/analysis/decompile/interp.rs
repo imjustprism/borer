@@ -56,6 +56,8 @@ use crate::program::{Program, SymbolKind};
 
 mod compile;
 mod header;
+
+use header::global_name;
 mod result;
 
 use compile::Compiler;
@@ -578,25 +580,6 @@ fn layout_letter(letter: &str) -> Option<CTy> {
     })
 }
 
-/// The address and type a global's generated name spells: `g32_1800c1230`
-/// is the 32-bit value at `0x1800c1230`.
-///
-/// # Arguments
-///
-/// * `name` - The name.
-fn global_name(name: &str) -> Option<(u64, CTy)> {
-    let (bits, hex) = name.strip_prefix('g')?.split_once('_')?;
-    let ty = match bits {
-        "8" => CTy::int(8, false),
-        "16" => CTy::int(16, false),
-        "32" => CTy::int(32, false),
-        "64" => CTy::int(64, false),
-        "128" => CTy::of(Base::Wide),
-        _ => return None,
-    };
-    Some((u64::from_str_radix(hex, 16).ok()?, ty))
-}
-
 /// The bytes a 128-bit value takes.
 const WIDE_BYTES: u64 = 16;
 
@@ -1028,6 +1011,10 @@ impl<'p> Script<'p> {
 
     /// Runs the text on one input.
     ///
+    /// The return address slot at the entry stack pointer holds zeros, as
+    /// the binary's run reads it (the caller's frame it backs), so a text
+    /// that reads `retaddr` reads what the binary read.
+    ///
     /// # Arguments
     ///
     /// * `args` - The argument values, in order.
@@ -1052,6 +1039,9 @@ impl<'p> Script<'p> {
         }
         let (regs, floats) = (self.passing.conv.args, self.sig.floats());
         self.passing.place(&mut emu, self.entry_sp, args, floats);
+        for k in 0..u64::from(self.word / 8) {
+            emu.poke(self.entry_sp.wrapping_add(k), 0);
+        }
         for at in &self.wide {
             for k in 0..WIDE_BYTES {
                 emu.poke(at.wrapping_add(k), 0);
