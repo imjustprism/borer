@@ -263,10 +263,12 @@ fn bound(older: &[&Insn], j: &Insn) -> Option<u64> {
 /// encodable immediate, and the table is still indexed by `k`, so the
 /// guard admits `75 << 2` cases. The index is known to be `k` only in the
 /// shape Clang emits at `-O0`: `k` stored to a stack slot, shifted in its
-/// register, compared, and reloaded from that slot for the dispatch, with
-/// nothing between that moves the stack, writes the slot again or
-/// changes `k` before the shift. A table indexed by the shifted value
-/// itself (`switch (k / 4)`) keeps the count the immediate gives.
+/// register, compared, and reloaded from that slot into the register the
+/// dispatch's own table load ([`entry_load`]) indexes by, with nothing
+/// between that moves the stack, may write the slot (a store that
+/// overlaps it, one through another base, a call) or changes `k` before
+/// the shift. A table indexed by the shifted value itself (`switch (k /
+/// 4)`) keeps the count the immediate gives.
 ///
 /// # Arguments
 ///
@@ -299,28 +301,9 @@ fn unshifted_index(older: &[&Insn], j: &Insn, cmp: usize, rn: a32::Reg) -> Optio
     else {
         return None;
     };
-    let index = match j.op {
-        Op::Tb { rm, .. } => rm,
-        _ => [j]
-            .into_iter()
-            .chain(older.iter().copied())
-            .find_map(|i| match i.op {
-                Op::Load {
-                    addr:
-                        a32::Addr {
-                            offset:
-                                Offset::Reg {
-                                    rm,
-                                    amount: 2,
-                                    sub: false,
-                                    ..
-                                },
-                            ..
-                        },
-                    ..
-                } => Some(rm),
-                _ => None,
-            })?,
+    let (from, index) = match j.op {
+        Op::Tb { rm, .. } => (0, rm),
+        _ => entry_load(older, j).map(|(k, _, _, index)| (k, index))?,
     };
     let stack = |i: &Insn| match i.op {
         Op::Load {
@@ -349,12 +332,46 @@ fn unshifted_index(older: &[&Insn], j: &Insn, cmp: usize, rn: a32::Reg) -> Optio
         .iter()
         .enumerate()
         .take(cmp)
+        .skip(from)
         .find(|(_, i)| writes(i, index))?;
     let (rt, slot) = stack(load).filter(|_| matches!(load.op, Op::Load { .. }))?;
-    let (spill, store) = older.iter().enumerate().skip(reload + 1).find(|(_, i)| {
-        writes(i, a32::SP)
-            || matches!(i.op, Op::Store { .. }) && stack(i).is_some_and(|(_, o)| o == slot)
-    })?;
+    let apart = |i: &Insn| match i.op {
+        Op::Store {
+            width,
+            addr:
+                a32::Addr {
+                    base: a32::SP,
+                    offset: Offset::Imm(o),
+                    index: Index::Offset,
+                },
+            ..
+        } => {
+            let (o, slot) = (i64::from(o), i64::from(slot));
+            o + i64::from(width.bytes()) <= slot || o >= slot + 4
+        }
+        _ => false,
+    };
+    let stores = |i: &Insn| {
+        matches!(i.flow(), Flow::Call)
+            || matches!(
+                i.op,
+                Op::Store { .. }
+                    | Op::StoreEx { .. }
+                    | Op::StoreDual { .. }
+                    | Op::Stm { .. }
+                    | Op::VStore { .. }
+                    | Op::VStm { .. }
+                    | Op::Svc { .. }
+                    | Op::Neon { .. }
+                    | Op::Unknown
+                    | Op::Invalid
+            )
+    };
+    let (spill, store) = older
+        .iter()
+        .enumerate()
+        .skip(reload + 1)
+        .find(|(_, i)| writes(i, a32::SP) || stores(i) && !apart(i))?;
     let spilled = matches!(store.op, Op::Store { .. }) && stack(store) == Some((src, slot));
     let kept = !older.get(at + 1..spill)?.iter().any(|i| writes(i, src));
     (rd == rn && rt == index && (1..32).contains(&amount) && spill > at && spilled && kept)
@@ -404,33 +421,30 @@ fn table(program: &Program, seen: &BTreeMap<u64, Insn>, j: &Insn) -> Option<Tabl
             })
             .collect();
         (targets, base..base + count * size)
-    } else if let Op::Dp {
-        kind: DpKind::Add,
-        rd: PC,
-        rn: rb,
-        src:
-            Operand::Reg {
-                rm: re,
-                shift: a32::Shift::Lsl,
-                amount: 0,
-            },
-    } = j.op
-    {
-        older.iter().find(|i| {
-            matches!(i.op, Op::Load { rt, addr: a32::Addr { base, offset: Offset::Reg { amount: 2, .. }, .. }, .. } if rt == re && base == rb)
-        })?;
-        let base = adr(rb)?;
+    } else if let Some((_, load, rb, _)) = entry_load(&older, j) {
+        let add = matches!(
+            j.op,
+            Op::Dp {
+                kind: DpKind::Add,
+                ..
+            }
+        );
+        let base = if rb == PC && !add {
+            load.pc()
+        } else {
+            adr(rb)?
+        };
         let targets = (0..count)
             .map(|k| {
                 let e = word(base + k * 4, 4)?;
-                Some((base.wrapping_add(e) & 0xffff_ffff) & !1)
+                Some(
+                    if add {
+                        base.wrapping_add(e) & 0xffff_ffff
+                    } else {
+                        e
+                    } & !1,
+                )
             })
-            .collect();
-        (targets, base..base + count * 4)
-    } else if let Some((rb, pc)) = absolute_base(&older, j) {
-        let base = if rb == PC { pc } else { adr(rb)? };
-        let targets = (0..count)
-            .map(|k| word(base + k * 4, 4).map(|t| t & !1))
             .collect();
         (targets, base..base + count * 4)
     } else {
@@ -447,9 +461,12 @@ fn table(program: &Program, seen: &BTreeMap<u64, Insn>, j: &Insn) -> Option<Tabl
         })
 }
 
-/// The base register of a table of absolute targets a jump reads, with
-/// the index scaled by 4: `ldr pc, [rb, ri, lsl #2]`, or `ldr rt, [rb, ri,
-/// lsl #2]; mov pc, rt` as Clang emits at `-O0`.
+/// Returns the load that reads a dispatch's table entry.
+///
+/// That is the jump itself for `ldr pc, [rb, ri, lsl #2]`, the load just
+/// before a `mov pc, rt` for `ldr rt, [rb, ri, lsl #2]; mov pc, rt` as
+/// Clang emits at `-O0`, or the nearest load of `re` from `[rb, ri, lsl
+/// #2]` for `add pc, rb, re`.
 ///
 /// # Arguments
 ///
@@ -458,41 +475,65 @@ fn table(program: &Program, seen: &BTreeMap<u64, Insn>, j: &Insn) -> Option<Tabl
 ///
 /// # Returns
 ///
-/// The base register and the value `pc` reads as in the load, which is
-/// the table's address when the base is `pc`.
-fn absolute_base(older: &[&Insn], j: &Insn) -> Option<(a32::Reg, u64)> {
-    let table = |op: Op, rt: a32::Reg| match op {
+/// How many instructions stand between the load and the jump, the jump
+/// counting as one when the load is in `older` (0 when the load is the
+/// jump), the load, its base register `rb` and its index register `ri`;
+/// `None` for any other dispatch.
+fn entry_load<'a>(
+    older: &[&'a Insn],
+    j: &'a Insn,
+) -> Option<(usize, &'a Insn, a32::Reg, a32::Reg)> {
+    let scaled = |i: &Insn, rt: a32::Reg| match i.op {
         Op::Load {
             rt: r,
             addr:
                 a32::Addr {
                     base,
-                    offset: Offset::Reg { amount: 2, .. },
+                    offset:
+                        Offset::Reg {
+                            rm,
+                            sub: false,
+                            shift: a32::Shift::Lsl,
+                            amount: 2,
+                        },
                     index: Index::Offset,
                 },
             ..
-        } if r == rt => Some(base),
+        } if r == rt => Some((base, rm)),
         _ => None,
     };
-    if let Some(base) = table(j.op, PC) {
-        return Some((base, j.pc()));
+    match j.op {
+        Op::Dp {
+            kind: DpKind::Add,
+            rd: PC,
+            rn: rb,
+            src:
+                Operand::Reg {
+                    rm: re,
+                    shift: a32::Shift::Lsl,
+                    amount: 0,
+                },
+        } => older.iter().enumerate().find_map(|(k, i)| {
+            scaled(i, re)
+                .filter(|(base, _)| *base == rb)
+                .map(|(base, index)| (k + 1, *i, base, index))
+        }),
+        Op::Dp {
+            kind: DpKind::Mov,
+            rd: PC,
+            src:
+                Operand::Reg {
+                    rm,
+                    shift: a32::Shift::Lsl,
+                    amount: 0,
+                },
+            ..
+        } => {
+            let load = older.first()?;
+            scaled(load, rm).map(|(base, index)| (1, *load, base, index))
+        }
+        _ => scaled(j, PC).map(|(base, index)| (0, j, base, index)),
     }
-    let Op::Dp {
-        kind: DpKind::Mov,
-        rd: PC,
-        src:
-            Operand::Reg {
-                rm,
-                shift: a32::Shift::Lsl,
-                amount: 0,
-            },
-        ..
-    } = j.op
-    else {
-        return None;
-    };
-    let load = older.first()?;
-    table(load.op, rm).map(|base| (base, load.pc()))
 }
 
 /// What one walk found.

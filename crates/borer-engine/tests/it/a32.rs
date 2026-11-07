@@ -1041,7 +1041,8 @@ fn a_switch_moved_to_pc_from_a_loaded_target_resolves() {
 /// Clang checks `k <= 7` as `(k >> 1) <= 3` and indexes the table by `k`
 /// it reloaded, so all eight cases are the table's, not the four the
 /// immediate counts. A table indexed by the shifted value itself keeps
-/// the four.
+/// the four, and so does one whose slot a narrower store overwrote after
+/// the spill, since the reload no longer reads `k`.
 #[test]
 fn a_switch_guard_on_the_shifted_index_counts_every_case() {
     let mut words: Vec<u32> = vec![
@@ -1096,6 +1097,70 @@ fn a_switch_guard_on_the_shifted_index_counts_every_case() {
         "{:x?}",
         a.jump_tables
     );
+    words[3] = 0xe58d_0000; // ASM: str r0, [sp]
+    words[4] = 0xe1a0_00a0; // ASM: lsr r0, r0, #1
+    words[5] = 0xe5cd_0000; // ASM: strb r0, [sp]: the slot no longer holds k
+    words[6] = 0xe320_f000; // ASM: nop
+    words[9] = 0xe59d_1000; // ASM: ldr r1, [sp]
+    words[10] = 0xe28f_0008; // ASM: add r0, pc, #8
+    words[11] = 0xe790_0101; // ASM: ldr r0, [r0, r1, lsl #2]
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let p = Program::from_bytes(PathBuf::from("lsr-strb.elf"), elf32(&bytes, &[], ELF_TEXT))
+        .expect("parses");
+    let a = Analysis::compute(&p);
+    assert_eq!(
+        a.jump_tables.get(&(ELF_TEXT + 0x30)),
+        Some(&cases[..4].to_vec()),
+        "{:x?}",
+        a.jump_tables
+    );
+}
+
+/// A guard on the shifted index scales only the table the dispatch reads.
+///
+/// `add pc, r2, r3` jumps by the entry `ldr r3, [r2, r1, lsl #2]` loads,
+/// indexed by `k` reloaded from its slot, so the guard `(k >> 1) <= 3`
+/// admits eight cases. When that load indexes by the shifted `r0` and only
+/// another load reads by the reloaded `r1`, the table has four.
+#[test]
+fn a_shifted_guard_scales_only_the_load_the_dispatch_adds() {
+    let mut words: Vec<u32> = vec![
+        0xe92d_4800, // ASM: push {r11, lr}
+        0xe1a0_b00d, // ASM: mov r11, sp
+        0xe24d_d008, // ASM: sub sp, sp, #8
+        0xe58d_0000, // ASM: str r0, [sp]
+        0xe1a0_00a0, // ASM: lsr r0, r0, #1
+        0xe350_0003, // ASM: cmp r0, #3
+        0x8a00_0024, // ASM: bhi 0xb0
+        0xe59d_1000, // ASM: ldr r1, [sp]
+        0xe28f_2008, // ASM: add r2, pc, #8
+        0xe792_3101, // ASM: ldr r3, [r2, r1, lsl #2]
+        0xe792_4100, // ASM: ldr r4, [r2, r0, lsl #2]
+        0xe082_f003, // ASM: add pc, r2, r3              (0x2c)
+    ];
+    words.extend((0..8u32).map(|k| 0x20 + 12 * k)); // ASM: .word case k - table (0x30)
+    for k in 0..8u32 {
+        words.push(0xe3a0_0000 | (k + 1)); // ASM: mov r0, #k+1
+        words.push(0xe1a0_d00b); // ASM: mov sp, r11
+        words.push(0xe8bd_8800); // ASM: pop {r11, pc}
+    }
+    words.push(0xe3a0_0000); // ASM: mov r0, #0               (0xb0)
+    words.push(0xe1a0_d00b); // ASM: mov sp, r11
+    words.push(0xe8bd_8800); // ASM: pop {r11, pc}
+    let cases: Vec<u64> = (0..8u64).map(|k| ELF_TEXT + 0x50 + k * 12).collect();
+    let table = |words: &[u32]| {
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let p = Program::from_bytes(PathBuf::from("add-pc.elf"), elf32(&bytes, &[], ELF_TEXT))
+            .expect("parses");
+        Analysis::compute(&p)
+            .jump_tables
+            .get(&(ELF_TEXT + 0x2c))
+            .cloned()
+    };
+    assert_eq!(table(&words), Some(cases.clone()));
+    words[9] = 0xe792_3100; // ASM: ldr r3, [r2, r0, lsl #2]: indexed by k >> 1
+    words[10] = 0xe792_4101; // ASM: ldr r4, [r2, r1, lsl #2]
+    assert_eq!(table(&words), Some(cases[..4].to_vec()));
 }
 
 /// A Thumb guard on the index shifted down admits the cases the shift
