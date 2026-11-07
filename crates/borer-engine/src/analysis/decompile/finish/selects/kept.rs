@@ -23,7 +23,8 @@ const SIGNED_BOUND_MAX: u64 = 0x7fff_ffff;
 /// < 2) pllr = 2;`, and [`kept_select`] or [`clamp_hoist`] writes that `if`
 /// from the choice; but a word compare is spelled as the helper before
 /// either runs, which hides the choice from both. The variable is declared
-/// with the helper's signedness, so the compare reads as the helper does,
+/// with the helper's signedness and no wider than the machine word the
+/// helper compares at, so the compare reads as the helper does,
 /// and the bound is a constant, which a clamp is against and which the
 /// choice may name twice where it would read nothing twice; a signed
 /// helper's bound is a positive `int`, which compares the same signed or
@@ -85,7 +86,9 @@ pub(super) fn unspell(lines: &mut Vec<String>, k: usize, word: &str) -> Option<u
                 let ty = decl_type(&declared, v);
                 let typed = parse_const(other)
                     .is_some_and(|bound| ty.as_deref().is_some_and(|t| fits(t, bound, unsigned)));
-                if !typed || !is_ident(v) {
+                let bits = ty.as_deref().and_then(width);
+                if !typed || !is_ident(v) || bits.is_none_or(|b| width(word).is_none_or(|w| b > w))
+                {
                     continue;
                 }
                 let choice = format!("({v} {op} {other} ? {other} : {v})");
@@ -99,10 +102,7 @@ pub(super) fn unspell(lines: &mut Vec<String>, k: usize, word: &str) -> Option<u
                     lines.splice(k..=k, rewritten);
                     return Some(n);
                 }
-                let whole = ty
-                    .as_deref()
-                    .is_some_and(|t| width(t).is_some_and(|w| Some(w) == width(word)));
-                if !whole || !unsigned {
+                if bits != width(word) || !unsigned {
                     continue;
                 }
                 let mut scratch = lines.clone();
@@ -214,7 +214,7 @@ mod tests {
     #[test]
     fn a_quoted_helper_a_real_call_or_a_bound_out_of_reach_stays() {
         let text = concat!(
-            "// signature: void f(uint32_t a1, int64_t a2, uint32_t a3, int8_t a4, uint32_t a5)\n",
+            "// signature: void f(uint32_t a1, int64_t a2, uint32_t a3, int8_t a4, uint32_t a5, uint64_t a6)\n",
             "extern uint32_t umin(uint32_t, uint32_t);\n",
             "uint64_t var1, var2;\n",
             "\n",
@@ -223,6 +223,7 @@ mod tests {
             "var2 = umax(a3, 0x100000000);\n",
             "a4 = max(a4, 200);\n",
             "a5 = umin(a5, 9);\n",
+            "a6 = umax(a6, 2);\n",
         );
         assert_eq!(select_statements(text, "uint32_t"), text);
     }
