@@ -102,12 +102,17 @@ then `/plugin install borer@borer`. From source, with the toolchain
 `rust-toolchain.toml` pins: `cargo build --release`.
 
 Register an installed binary with `borer setup --apply` (`borer setup` alone
-shows each file and entry it would write). To add it to a client by hand, use
-the binary's absolute path:
+shows each file and entry it would write, in each client's own format). Most
+clients (Claude Desktop, Cursor, Windsurf, Gemini CLI and others) read
+`mcpServers`, with the binary's absolute path:
 
 ```json
 { "mcpServers": { "borer": { "command": "/path/to/borer", "args": [] } } }
 ```
+
+VS Code reads the same entry under `servers`, Zed under `context_servers`, and
+Codex CLI as `[mcp_servers.borer]` in its TOML; `borer setup` writes each of
+them.
 
 To uninstall, run `borer setup --apply --remove`, then delete the binary and
 its cache (`%LOCALAPPDATA%\borer` or `~/.cache/borer`). The installers do all
