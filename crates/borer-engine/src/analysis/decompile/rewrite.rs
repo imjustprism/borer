@@ -740,7 +740,9 @@ pub(super) fn falls_to_label(lines: &[String], from: usize, label: &str) -> bool
 /// or floats by `==` and `!=`, which flip exactly. A guard chain negates
 /// operand by operand
 /// ([`de_morgan`]) where each operand does; anything else (a template
-/// name's angle brackets, a bare value) is negated as a whole.
+/// name's angle brackets, a bare value) is negated as a whole, and so is a
+/// condition with a choice (`a ? b : c`), an assignment or a comma outside
+/// every bracket and literal, whose comparisons are no operands of it.
 ///
 /// # Arguments
 ///
@@ -754,25 +756,27 @@ pub(super) fn invert_condition(cond: &str) -> String {
         return format!("!{cond}");
     }
     let mut depth = 0i32;
-    let mut in_str = false;
+    let mut quote: Option<char> = None;
     let mut esc = false;
     let mut found: Option<(usize, usize)> = None;
     let mut count = 0usize;
     let mut logical = false;
+    let mut whole = false;
     for (i, c) in cond.char_indices() {
-        if in_str {
+        if let Some(q) = quote {
             match c {
                 _ if esc => esc = false,
                 '\\' => esc = true,
-                '"' => in_str = false,
+                _ if c == q => quote = None,
                 _ => {}
             }
             continue;
         }
         match c {
-            '"' => in_str = true,
+            '"' | '\'' => quote = Some(c),
             '(' | '[' => depth += 1,
             ')' | ']' => depth -= 1,
+            '?' | ',' if depth == 0 => whole = true,
             ' ' if depth == 0 => {
                 let tok = cond[i + 1..].split(' ').next().unwrap_or("");
                 match tok {
@@ -781,11 +785,17 @@ pub(super) fn invert_condition(cond: &str) -> String {
                         count += 1;
                         found = Some((i + 1, tok.len()));
                     }
+                    "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" => {
+                        whole = true;
+                    }
                     _ => {}
                 }
             }
             _ => {}
         }
+    }
+    if whole {
+        return format!("!({cond})");
     }
     let flip = |op: &str| match op {
         "==" => "!=",

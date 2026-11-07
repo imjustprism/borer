@@ -5221,6 +5221,16 @@ mod cond_tests {
             invert_condition("isless(xmm0, xmm1) && rax == 0"),
             "!isless(xmm0, xmm1) || rax != 0"
         );
+        for whole in [
+            "a2 ? a3 < a4 : a5",
+            "a1 ? a2 && a3 : a4",
+            "var1 = f(a1)",
+            "var1 += 1",
+        ] {
+            assert_eq!(invert_condition(whole), format!("!({whole})"));
+        }
+        assert_eq!(invert_condition("a1 == '?'"), "a1 != '?'");
+        assert_eq!(invert_condition("'\"' == a1"), "'\"' != a1");
     }
 
     /// A float compare means its predicate, NaN order included, through
