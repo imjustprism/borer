@@ -28,17 +28,20 @@ const SIGNED_BOUND_MAX: u64 = 0x7fff_ffff;
 /// choice may name twice where it would read nothing twice; a signed
 /// helper's bound is a positive `int`, which compares the same signed or
 /// not. A name in a string literal is no call, and a `min` or `max`
-/// neither rule takes stays as it is.
+/// neither rule takes stays as it is. Inside a larger statement the
+/// variable is as wide as the machine word, as the helper's result is, so
+/// the statement computes at the width it did.
 ///
 /// # Arguments
 ///
 /// * `lines` - The body lines, rewritten in place.
 /// * `k` - The line.
+/// * `word` - The machine word's type, which the helpers compare at.
 ///
 /// # Returns
 ///
 /// How many lines the rewrite spans, or `None` when it made none.
-pub(super) fn unspell(lines: &mut Vec<String>, k: usize) -> Option<usize> {
+pub(super) fn unspell(lines: &mut Vec<String>, k: usize, word: &str) -> Option<usize> {
     let line = lines
         .get(k)
         .filter(|l| !l.trim_start().starts_with("//"))?
@@ -77,9 +80,9 @@ pub(super) fn unspell(lines: &mut Vec<String>, k: usize) -> Option<usize> {
                 continue;
             };
             for (v, other) in [(a.trim(), b.trim()), (b.trim(), a.trim())] {
-                let typed = parse_const(other).is_some_and(|bound| {
-                    decl_type(&declared, v).is_some_and(|t| fits(&t, bound, unsigned))
-                });
+                let ty = decl_type(&declared, v);
+                let typed = parse_const(other)
+                    .is_some_and(|bound| ty.as_deref().is_some_and(|t| fits(t, bound, unsigned)));
                 if !typed || !is_ident(v) {
                     continue;
                 }
@@ -93,6 +96,12 @@ pub(super) fn unspell(lines: &mut Vec<String>, k: usize) -> Option<usize> {
                     let n = rewritten.len();
                     lines.splice(k..=k, rewritten);
                     return Some(n);
+                }
+                let whole = ty.as_deref().is_some_and(|t| {
+                    integer_bits(t.trim_start_matches("const ")) == integer_bits(word)
+                });
+                if !whole {
+                    continue;
                 }
                 let mut scratch = lines.clone();
                 if let Some(slot) = scratch.get_mut(k) {
@@ -179,7 +188,7 @@ mod tests {
             "a2 = umax(*(uint32_t*)a5, a2);\n",
             "return max(a3, a2) + a4;\n",
         );
-        assert_eq!(select_statements(text), want);
+        assert_eq!(select_statements(text, "uint32_t"), want);
     }
 
     /// A helper that is no clamp keeps its name.
@@ -201,6 +210,24 @@ mod tests {
             "a4 = max(a4, 200);\n",
             "a5 = umin(a5, 9);\n",
         );
-        assert_eq!(select_statements(text), text);
+        assert_eq!(select_statements(text, "uint32_t"), text);
+    }
+
+    /// On a 64-bit target a helper computes at 64 bits, so a 32-bit
+    /// variable keeps the helper inside a larger statement, where the
+    /// result's width shows; set back into the variable it is the `if`.
+    #[test]
+    fn a_narrow_clamp_inside_a_wide_statement_stays() {
+        let text = concat!(
+            "// signature: uint64_t f(uint32_t a1, uint32_t a2)\n",
+            "uint64_t var1;\n",
+            "\n",
+            "var1 = umax(a1, 2) << 0x1c;\n",
+            "a2 = umax(a2, 3);\n",
+            "return var1 + a2;\n",
+        );
+        let out = select_statements(text, "uint64_t");
+        assert!(out.contains("var1 = umax(a1, 2) << 0x1c;\n"), "{out}");
+        assert!(out.contains("if (a2 < 3) {\n  a2 = 3;\n}\n"), "{out}");
     }
 }

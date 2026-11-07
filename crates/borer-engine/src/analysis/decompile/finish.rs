@@ -143,7 +143,9 @@ pub(super) fn polish_skipping(
         text,
         drop_repeated_assignments,
     );
-    let text = skip.apply(Pass::SelectStatements, text, selects::select_statements);
+    let text = skip.apply(Pass::SelectStatements, text, |t| {
+        selects::select_statements(t, word)
+    });
     let mut out = String::with_capacity(text.len() + 1);
     for (i, line) in text.lines().enumerate() {
         if i > 0 {
