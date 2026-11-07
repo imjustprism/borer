@@ -52,6 +52,14 @@ pub(super) fn unspell(lines: &mut Vec<String>, k: usize) -> Option<usize> {
         .cloned()
         .collect();
     for (name, op, unsigned) in SPELLED {
+        let real = lines.iter().any(|l| {
+            let t = l.trim_start();
+            t.starts_with("extern ")
+                && (t.contains(&format!(" {name}(")) || t.contains(&format!("*{name}(")))
+        });
+        if real {
+            continue;
+        }
         for at in word_positions(&line, name) {
             if in_literal(line.get(..at).unwrap_or("")) {
                 continue;
@@ -69,17 +77,10 @@ pub(super) fn unspell(lines: &mut Vec<String>, k: usize) -> Option<usize> {
                 continue;
             };
             for (v, other) in [(a.trim(), b.trim()), (b.trim(), a.trim())] {
-                let typed = decl_type(&declared, v).is_some_and(|t| {
-                    let t = t.trim_start_matches("const ");
-                    if unsigned {
-                        t.starts_with("uint")
-                    } else {
-                        t.starts_with("int")
-                    }
+                let typed = parse_const(other).is_some_and(|bound| {
+                    decl_type(&declared, v).is_some_and(|t| fits(&t, bound, unsigned))
                 });
-                let bound = parse_const(other);
-                if !typed || !is_ident(v) || bound.is_none_or(|b| !unsigned && b > SIGNED_BOUND_MAX)
-                {
+                if !typed || !is_ident(v) {
                     continue;
                 }
                 let choice = format!("({v} {op} {other} ? {other} : {v})");
@@ -105,6 +106,35 @@ pub(super) fn unspell(lines: &mut Vec<String>, k: usize) -> Option<usize> {
         }
     }
     None
+}
+
+/// Tells whether a variable of type `ty` compares with `bound` as a helper
+/// of that signedness does.
+///
+/// That is an integer of the helper's signedness whose width holds the
+/// bound, so setting the variable to the bound keeps it, and a signed one
+/// whose bound is a positive `int`.
+///
+/// # Arguments
+///
+/// * `ty` - The variable's declared type.
+/// * `bound` - The constant bound.
+/// * `unsigned` - Whether the helper compares unsigned.
+fn fits(ty: &str, bound: u64, unsigned: bool) -> bool {
+    let ty = ty.trim_start_matches("const ");
+    let Some(bits) = integer_bits(ty) else {
+        return false;
+    };
+    let width = u32::from(bits);
+    if unsigned {
+        ty.starts_with("uint") && bound.checked_shr(width).is_none_or(|high| high == 0)
+    } else {
+        ty.starts_with("int")
+            && bound <= SIGNED_BOUND_MAX
+            && bound
+                .checked_shr(width.saturating_sub(1))
+                .is_none_or(|high| high == 0)
+    }
 }
 
 #[cfg(test)]
@@ -152,17 +182,24 @@ mod tests {
         assert_eq!(select_statements(text), want);
     }
 
-    /// A helper's name in a string literal is no call, and a signed helper
-    /// whose bound reads negative keeps the helper: its literal compares
-    /// unsigned.
+    /// A helper that is no clamp keeps its name.
+    ///
+    /// A helper's name in a string literal is no call, a function the text
+    /// declares by a helper's name is that function, and a bound the
+    /// variable cannot hold, or a signed helper's bound that reads
+    /// negative, keeps the helper.
     #[test]
-    fn a_quoted_helper_or_a_negative_bound_stays() {
+    fn a_quoted_helper_a_real_call_or_a_bound_out_of_reach_stays() {
         let text = concat!(
-            "// signature: void f(uint32_t a1, int64_t a2)\n",
-            "uint64_t var1;\n",
+            "// signature: void f(uint32_t a1, int64_t a2, uint32_t a3, int8_t a4, uint32_t a5)\n",
+            "extern uint32_t umin(uint32_t, uint32_t);\n",
+            "uint64_t var1, var2;\n",
             "\n",
             "var1 = \"umax(a1, 2)\";\n",
             "a2 = max(a2, 0xffffffffffffffff);\n",
+            "var2 = umax(a3, 0x100000000);\n",
+            "a4 = max(a4, 200);\n",
+            "a5 = umin(a5, 9);\n",
         );
         assert_eq!(select_statements(text), text);
     }
