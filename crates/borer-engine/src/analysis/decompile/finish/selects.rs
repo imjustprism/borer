@@ -9,6 +9,8 @@
 
 use super::*;
 
+mod kept;
+
 /// Rewrites the conditional assignments of a function as the statements
 /// their sources spell.
 ///
@@ -37,6 +39,11 @@ pub(super) fn select_statements(text: &str) -> String {
     let mut changed = false;
     let mut k = 0;
     while k < lines.len() {
+        if let Some(n) = kept::unspell(&mut lines, k) {
+            changed = true;
+            k += n;
+            continue;
+        }
         if let Some(rewritten) = lines.get(k).and_then(|l| kept_select(l)) {
             let n = rewritten.len();
             lines.splice(k..=k, rewritten);
