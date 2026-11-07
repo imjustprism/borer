@@ -97,7 +97,8 @@ impl Exec<'_, '_> {
     /// own code addresses would be a switch. A target that is the name of a
     /// register written out early ([`Self::early_value`]), as an entry read
     /// at an index too long to read inline is, is the read it was written
-    /// out as.
+    /// out as. On ARM an entry's Thumb bit is cleared, as a pointer to a
+    /// Thumb function carries one.
     ///
     /// # Arguments
     ///
@@ -131,8 +132,10 @@ impl Exec<'_, '_> {
         bases(addr, DEPTH_MAX, &mut found);
         let program = self.ctx.program;
         let width = if program.is_64 { 8 } else { 4 };
+        let thumb = program.arch == crate::program::Arch::Arm;
         let word = |base: u64, k: u64| {
             crate::analysis::read_word(program, base.wrapping_add(k * width))
+                .map(|w| if thumb { w & !1 } else { w })
                 .filter(|&w| self.ctx.analysis.function(w).is_some())
         };
         found
@@ -149,8 +152,8 @@ impl Exec<'_, '_> {
     /// The function of a table a tail call through it takes its arguments
     /// as: the one taking the most registers, when every function's are
     /// known, its registers hold every other function's, they all return
-    /// alike, and each of the registers holds a value here. Only on a 64-bit
-    /// image, whose words the call's integer pointer passes one a register.
+    /// alike, and each of the registers holds a value here. The call's
+    /// integer pointer passes the image's words, one a register.
     ///
     /// # Arguments
     ///
@@ -166,9 +169,6 @@ impl Exec<'_, '_> {
         entries: &[u64],
         args: impl Fn(u64) -> Option<(Vec<Key>, Returns)>,
     ) -> Option<u64> {
-        if !self.ctx.program.is_64 {
-            return None;
-        }
         let shapes: Vec<(u64, Vec<Key>, Returns)> = entries
             .iter()
             .map(|&e| args(e).map(|(r, back)| (e, r, back)))

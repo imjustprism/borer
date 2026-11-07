@@ -474,3 +474,67 @@ fn a_conditional_tail_call_after_a_join_keeps_each_paths_argument() {
     let r = replay_function(&p, &a, BASE, 1);
     assert!(r.wrong().is_empty(), "{}", replay_tsv(&r));
 }
+
+/// A Thumb jump through a table of functions is a tail call through it.
+///
+/// Clang's `-O2` `return ops[k % 3](a, b);` loads the entry, a pointer with
+/// its Thumb bit set, and jumps to it with `bx`: the call passes what the
+/// table's functions read and returns what they return, a 32-bit image's
+/// words. T32 from `case_indirect`, its table moved beside it.
+#[test]
+fn a_thumb_jump_through_a_function_table_is_a_tail_call() {
+    let halves: [u16; 26] = [
+        0xf64a, 0x23ab, // ASM: movw r3, #0xaaab
+        0x4694, // ASM: mov r12, r2
+        0xf6ca, 0x23aa, // ASM: movt r3, #0xaaaa
+        0xfba0, 0x3203, // ASM: umull r3, r2, r0, r3
+        0x0852, // ASM: lsrs r2, r2, #1
+        0xeb02, 0x0242, // ASM: add r2, r2, r2, lsl #1
+        0x1a80, // ASM: subs r0, r0, r2
+        0xf240, 0x2294, // ASM: movw r2, #0x294
+        0xf2c0, 0x0201, // ASM: movt r2, #0x1
+        0xf852, 0x2020, // ASM: ldr r2, [r2, r0, lsl #2]
+        0x4608, // ASM: mov r0, r1
+        0x4661, // ASM: mov r1, r12
+        0x4710, // ASM: bx r2
+        0x4408, 0x4770, // ASM: add r0, r0, r1; bx lr   (0x40028)
+        0x1a40, 0x4770, // ASM: subs r0, r0, r1; bx lr  (0x4002c)
+        0x4348, 0x4770, // ASM: muls r0, r1, r0; bx lr  (0x40030)
+    ];
+    let mut bytes: Vec<u8> = halves.iter().flat_map(|h| h.to_le_bytes()).collect();
+    let code = u64::try_from(bytes.len()).expect("a small image");
+    for entry in [0x4_0029_u32, 0x4_002d, 0x4_0031] {
+        bytes.extend(entry.to_le_bytes());
+    }
+    let text = Section::mapped(".text", BASE, 0, code, false, true);
+    let table = Section::mapped(".rodata", 0x1_0294, code, 12, false, false);
+    let mut p = Program::raw(bytes, Arch::Arm, 0, Some(BASE), vec![text, table]);
+    let names = [
+        ("case_indirect", BASE),
+        ("op_add", BASE + 0x28),
+        ("op_sub", BASE + 0x2c),
+        ("op_mul", BASE + 0x30),
+    ];
+    p.symbols = names
+        .iter()
+        .map(|&(name, addr)| Symbol {
+            name: name.to_owned(),
+            addr,
+            kind: SymbolKind::Local,
+        })
+        .chain([Symbol {
+            name: "ops".to_owned(),
+            addr: 0x1_0294,
+            kind: SymbolKind::Data,
+        }])
+        .collect();
+    p.modes = Modes::from_marks(vec![(BASE, Mode::Thumb)]);
+    let a = Analysis::compute(&p);
+    let out = decompile(&p, &a, &Overlay::default(), BASE).expect("decompiles");
+    assert!(!out.contains("goto"), "{out}");
+    assert!(
+        out.contains("return ((uint32_t (*)(uint32_t, uint32_t))"),
+        "{out}"
+    );
+    assert!(out.contains("(a2, a3);"), "{out}");
+}

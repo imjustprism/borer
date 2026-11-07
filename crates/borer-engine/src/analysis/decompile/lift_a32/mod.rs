@@ -39,7 +39,9 @@ pub(in crate::analysis::decompile) use shape::{
 
 use super::Ctx;
 use super::expr::{Expr, Flags, Key, Op, fold};
-use super::lift::{BlockFacts, BlockOut, Branch, EffectKind, Env, Exec, LiveFn, Pass, PhiFn};
+use super::lift::{
+    BlockFacts, BlockOut, Branch, Callee, EffectKind, Env, Exec, LiveFn, Pass, PhiFn,
+};
 use crate::analysis::a32::{decode as decode_at, guarded, skip};
 use crate::analysis::{BlockTerm, Function};
 use crate::fxmap::FxHashMap;
@@ -172,7 +174,7 @@ pub(in crate::analysis::decompile) fn exec_block_a32(
             },
             Flow::Jump => match i.target() {
                 Some(t) if lift.ex.ctx.block_starts.contains(&t) => out.goto = Some(t),
-                Some(t) => lift.tail_call(t),
+                Some(t) => lift.tail_call(Callee::Direct(t), t),
                 None => lift.jump(i, &mut out),
             },
             Flow::Call => lift.call(i),
@@ -499,7 +501,8 @@ impl Lift<'_, '_> {
     }
 
     /// Lifts an indirect jump: the dispatch of a jump table the analysis
-    /// resolved, a tail call through a register, else a computed `goto`.
+    /// resolved, a tail call through a table of functions, else a computed
+    /// `goto`.
     ///
     /// # Arguments
     ///
@@ -548,6 +551,10 @@ impl Lift<'_, '_> {
         let Some(target) = target else {
             return self.unmodeled(i);
         };
+        let entries = self.ex.function_table(&target);
+        if let Some(like) = self.ex.table_callee(&entries, |e| self.arg_keys(e)) {
+            return self.tail_call(Callee::Through(target), like);
+        }
         if self.ex.emit {
             let line = format!("goto *{};", target.render(&self.ex.names()));
             self.ex.lines.push(line);
@@ -599,7 +606,7 @@ impl Lift<'_, '_> {
             self.ex.effects.len(),
             self.ex.unmodeled,
         );
-        self.tail_call(target);
+        self.tail_call(Callee::Direct(target), target);
         let tail = self.ex.lines.split_off(lines);
         self.ex.effects.truncate(effects);
         *self.ex.env = env;

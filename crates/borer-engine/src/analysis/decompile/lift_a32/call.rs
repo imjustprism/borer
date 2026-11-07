@@ -462,15 +462,38 @@ impl Lift<'_, '_> {
     ///
     /// # Arguments
     ///
-    /// * `target` - Where it goes.
-    pub(super) fn tail_call(&mut self, target: u64) {
-        let callee = Callee::Direct(target);
+    /// * `callee` - Where it goes: a function, or a value read from a table
+    ///   of them.
+    /// * `like` - The function it goes to, or one of the table's, whose
+    ///   signature they share.
+    pub(super) fn tail_call(&mut self, callee: Callee, like: u64) {
         let (text, reached) = self.callee_named(&callee);
-        let returns = self.returns(Some(target), reached);
-        let args = self.arguments(Some(target), reached, true);
+        let returns = self.returns(Some(like), reached);
+        let args = self.arguments(Some(like), reached, true);
         self.ex.emit_tail(&text, &args, reached, returns);
         self.ex
             .record_call(callee, args, None, None, false, Shown::Tail);
+    }
+
+    /// The registers a function takes its arguments in, as keys, and what it
+    /// returns, when its body or a declaration says, it takes its integers
+    /// in registers alone and returns no float: a call through a table
+    /// prints an integer function pointer
+    /// ([`super::super::lift::Exec::table_callee`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `entry` - The function.
+    pub(super) fn arg_keys(&self, entry: u64) -> Option<(Vec<Key>, Returns)> {
+        let regs = self.callee_args(Some(entry), None)?;
+        let stack =
+            super::shape::callee_shape(self.ex.ctx, abi::reached(self.ex.ctx.analysis, entry))
+                .map_or(0, |s| s.stack);
+        let returns = self.returns(Some(entry), None);
+        let plain = stack == 0
+            && regs.iter().all(|r| matches!(r, Reg::R(_)))
+            && !matches!(returns, Returns::Float(_));
+        plain.then(|| (regs.into_iter().map(Key::A32).collect(), returns))
     }
 
     /// Lifts a return: the loads of a `pop` or load into `pc` first, then
