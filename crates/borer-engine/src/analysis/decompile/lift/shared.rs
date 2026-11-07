@@ -154,7 +154,9 @@ impl Exec<'_, '_> {
     /// known, its registers hold every other function's, they all return
     /// alike, returning no integer wider than the image's word, and each of
     /// the registers holds a value here. The call's integer pointer passes
-    /// and returns the image's words, one a register.
+    /// and returns the image's words, one a register. Of the 32-bit images
+    /// only ARM32 takes one, whose members' bodies are read for stack
+    /// arguments; an RV32 body's are not, and a call would drop them.
     ///
     /// # Arguments
     ///
@@ -170,6 +172,9 @@ impl Exec<'_, '_> {
         entries: &[u64],
         args: impl Fn(u64) -> Option<(Vec<Key>, Returns)>,
     ) -> Option<u64> {
+        if !self.ctx.program.is_64 && self.ctx.program.arch != crate::program::Arch::Arm {
+            return None;
+        }
         let shapes: Vec<(u64, Vec<Key>, Returns)> = entries
             .iter()
             .map(|&e| args(e).map(|(r, back)| (e, r, back)))

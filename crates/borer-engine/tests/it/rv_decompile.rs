@@ -1093,3 +1093,44 @@ fn a_switch_too_wide_for_a_table_resolves_none() {
     let cases = a.jump_tables.get(&(AT + 0x16)).map(Vec::len);
     assert_eq!(cases, None, "a table cut to its first cases");
 }
+
+/// An RV32 jump through a table of functions stays a computed `goto`.
+///
+/// The second member reads an argument from the stack, which nothing reads
+/// an RV32 body for, so a call through the table would pass the two
+/// registers and drop it.
+#[test]
+fn an_rv32_jump_through_a_function_table_stays_a_goto() {
+    let mut code = assemble(&[
+        (0x0000_0797, 4), // ASM: auipc a5, 0
+        (0x1007_8793, 4), // ASM: addi a5, a5, 0x100
+        (0x0025_1513, 4), // ASM: slli a0, a0, 2
+        (0x00a7_87b3, 4), // ASM: add a5, a5, a0
+        (0x0007_a783, 4), // ASM: lw a5, 0(a5)
+        (0x0005_8513, 4), // ASM: mv a0, a1
+        (0x0006_0593, 4), // ASM: mv a1, a2
+        (0x0007_8067, 4), // ASM: jr a5
+        (0x00b5_0533, 4), // ASM: add a0, a0, a1     (0x10020)
+        (0x0000_8067, 4), // ASM: ret
+        (0x0001_2603, 4), // ASM: lw a2, 0(sp)       (0x10028)
+        (0x00c5_0533, 4), // ASM: add a0, a0, a2
+        (0x0000_8067, 4), // ASM: ret
+    ]);
+    code.resize(0x100, 0);
+    code.extend(
+        [0x0001_0020_u32, 0x0001_0028]
+            .iter()
+            .flat_map(|w| w.to_le_bytes()),
+    );
+    let mut p = image(&code, Arch::RiscV32);
+    p.symbols = [("op0", AT + 0x20), ("op1", AT + 0x28)]
+        .map(|(name, addr)| Symbol {
+            name: name.to_owned(),
+            addr,
+            kind: SymbolKind::Local,
+        })
+        .to_vec();
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), AT).expect("decompiles");
+    assert!(text.contains("goto *"), "{text}");
+}
