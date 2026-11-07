@@ -477,9 +477,10 @@ impl Lift<'_, '_> {
 
     /// The registers a function takes its arguments in, as keys, and what it
     /// returns, when its body or a declaration says, it takes its integers
-    /// in registers alone and returns no float: a call through a table
-    /// prints an integer function pointer
-    /// ([`super::super::lift::Exec::table_callee`]).
+    /// in registers alone and returns nothing or one word: a call through a
+    /// table prints a pointer to a function of words
+    /// ([`super::super::lift::Exec::table_callee`]), which would cut a
+    /// float or a 64-bit result.
     ///
     /// # Arguments
     ///
@@ -492,7 +493,7 @@ impl Lift<'_, '_> {
         let returns = self.returns(Some(entry), None);
         let plain = stack == 0
             && regs.iter().all(|r| matches!(r, Reg::R(_)))
-            && !matches!(returns, Returns::Float(_));
+            && matches!(returns, Returns::Nothing | Returns::Int(..=32));
         plain.then(|| (regs.into_iter().map(Key::A32).collect(), returns))
     }
 

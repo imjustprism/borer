@@ -15,6 +15,7 @@ use borer_engine::analysis::decompile::decompile;
 use borer_engine::analysis::decompile::replay::{replay_function, replay_tsv};
 use borer_engine::analysis::decompile::traces::{Structure, check_structure};
 use borer_engine::analysis::decompile::verify_a32::{verify, verify_tsv};
+use borer_engine::analysis::protos::Proto;
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::isa::a32::{Mode, Modes};
 use borer_engine::program::{Arch, Feature, Program, Section, Symbol, SymbolKind};
@@ -475,15 +476,63 @@ fn a_conditional_tail_call_after_a_join_keeps_each_paths_argument() {
     assert!(r.wrong().is_empty(), "{}", replay_tsv(&r));
 }
 
+/// Decompiles a Thumb function at [`BASE`] whose table at `0x10294`, `ops`,
+/// holds the Thumb entries of `op_add`, `op_sub` and `op_mul` after it.
+///
+/// # Arguments
+///
+/// * `halves` - The function and its three two-halfword table functions.
+/// * `o` - The overlay the decompile reads.
+fn thumb_table(halves: &[u16], o: &Overlay) -> String {
+    let mut bytes: Vec<u8> = halves.iter().flat_map(|h| h.to_le_bytes()).collect();
+    let code = u64::try_from(bytes.len()).expect("a small image");
+    let ops = code - 12;
+    for k in 0..3 {
+        bytes.extend(
+            u32::try_from(BASE + ops + 4 * k + 1)
+                .expect("32-bit")
+                .to_le_bytes(),
+        );
+    }
+    let text = Section::mapped(".text", BASE, 0, code, false, true);
+    let table = Section::mapped(".rodata", 0x1_0294, code, 12, false, false);
+    let mut p = Program::raw(bytes, Arch::Arm, 0, Some(BASE), vec![text, table]);
+    let names = [
+        ("case_indirect", 0),
+        ("op_add", ops),
+        ("op_sub", ops + 4),
+        ("op_mul", ops + 8),
+    ];
+    p.symbols = names
+        .iter()
+        .map(|&(name, off)| Symbol {
+            name: name.to_owned(),
+            addr: BASE + off,
+            kind: SymbolKind::Local,
+        })
+        .chain([Symbol {
+            name: "ops".to_owned(),
+            addr: 0x1_0294,
+            kind: SymbolKind::Data,
+        }])
+        .collect();
+    p.modes = Modes::from_marks(vec![(BASE, Mode::Thumb)]);
+    let a = Analysis::compute(&p);
+    decompile(&p, &a, o, BASE).expect("decompiles")
+}
+
 /// A Thumb jump through a table of functions is a tail call through it.
 ///
 /// Clang's `-O2` `return ops[k % 3](a, b);` loads the entry, a pointer with
 /// its Thumb bit set, and jumps to it with `bx`: the call passes what the
 /// table's functions read and returns what they return, a 32-bit image's
-/// words. T32 from `case_indirect`, its table moved beside it.
+/// words. It stays a computed `goto` when a lane move overwrites the loaded
+/// entry before the jump, and when the functions are stated to return 64
+/// bits, which a pointer to a function of words would cut. T32 from
+/// `case_indirect`, its table moved beside it.
 #[test]
 fn a_thumb_jump_through_a_function_table_is_a_tail_call() {
-    let halves: [u16; 26] = [
+    let mut halves: [u16; 26] = [
         0xf64a, 0x23ab, // ASM: movw r3, #0xaaab
         0x4694, // ASM: mov r12, r2
         0xf6ca, 0x23aa, // ASM: movt r3, #0xaaaa
@@ -501,40 +550,23 @@ fn a_thumb_jump_through_a_function_table_is_a_tail_call() {
         0x1a40, 0x4770, // ASM: subs r0, r0, r1; bx lr  (0x4002c)
         0x4348, 0x4770, // ASM: muls r0, r1, r0; bx lr  (0x40030)
     ];
-    let mut bytes: Vec<u8> = halves.iter().flat_map(|h| h.to_le_bytes()).collect();
-    let code = u64::try_from(bytes.len()).expect("a small image");
-    for entry in [0x4_0029_u32, 0x4_002d, 0x4_0031] {
-        bytes.extend(entry.to_le_bytes());
-    }
-    let text = Section::mapped(".text", BASE, 0, code, false, true);
-    let table = Section::mapped(".rodata", 0x1_0294, code, 12, false, false);
-    let mut p = Program::raw(bytes, Arch::Arm, 0, Some(BASE), vec![text, table]);
-    let names = [
-        ("case_indirect", BASE),
-        ("op_add", BASE + 0x28),
-        ("op_sub", BASE + 0x2c),
-        ("op_mul", BASE + 0x30),
-    ];
-    p.symbols = names
-        .iter()
-        .map(|&(name, addr)| Symbol {
-            name: name.to_owned(),
-            addr,
-            kind: SymbolKind::Local,
-        })
-        .chain([Symbol {
-            name: "ops".to_owned(),
-            addr: 0x1_0294,
-            kind: SymbolKind::Data,
-        }])
-        .collect();
-    p.modes = Modes::from_marks(vec![(BASE, Mode::Thumb)]);
-    let a = Analysis::compute(&p);
-    let out = decompile(&p, &a, &Overlay::default(), BASE).expect("decompiles");
+    let out = thumb_table(&halves, &Overlay::default());
     assert!(!out.contains("goto"), "{out}");
     assert!(
         out.contains("return ((uint32_t (*)(uint32_t, uint32_t))"),
         "{out}"
     );
     assert!(out.contains("(a2, a3);"), "{out}");
+    let mut wide = Overlay::default();
+    for (k, name) in ["op_add", "op_sub", "op_mul"].iter().enumerate() {
+        let p = Proto::parse(&format!("uint64_t {name}(uint32_t a, uint32_t b)")).expect("parses");
+        wide.prototypes
+            .insert(BASE + 0x28 + 4 * u64::try_from(k).expect("small"), p);
+    }
+    let out = thumb_table(&halves, &wide);
+    assert!(out.contains("goto *"), "{out}");
+    halves[17] = 0xee30; // ASM: vmov.32 r2, d16[1]
+    halves[18] = 0x2b90;
+    let out = thumb_table(&halves, &Overlay::default());
+    assert!(out.contains("goto *"), "{out}");
 }
