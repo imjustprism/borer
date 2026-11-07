@@ -256,7 +256,7 @@ fn certify_many(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<St
                     let tally = Tally::of(runs);
                     let note = tally.first.map_or_else(
                         || tally.reasons.first().map_or("", |r| r.0).to_owned(),
-                        |(input, line, what)| format!("differs on {input} at line {line}: {what}"),
+                        |(input, line, what)| differs_note(input, line, what),
                     );
                     (tally, note)
                 }
@@ -296,4 +296,46 @@ fn certify_many(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<St
         matching.len()
     );
     Ok(out)
+}
+
+/// A page row's note for the first input that differs: the line and what
+/// differs first, the input last, so the cut at [`NOTE_MAX`] drops the
+/// input's bytes before the reason.
+///
+/// # Arguments
+///
+/// * `input` - The input's arguments as a row spells them, empty for none.
+/// * `line` - The text's line.
+/// * `what` - What differs there.
+fn differs_note(input: &str, line: usize, what: &str) -> String {
+    if input.is_empty() {
+        format!("line {line}: {what}")
+    } else {
+        format!("line {line}: {what}; on {input}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A row's note says where and what differs before the input, so a
+    /// long input is what the cut drops.
+    ///
+    /// # Panics
+    ///
+    /// When the note starts otherwise or keeps the input's tail.
+    #[test]
+    fn a_note_leads_with_the_reason() {
+        let long = format!("hex:{}", "ab".repeat(80));
+        let note: String = differs_note(&long, 7, "`rax` is read before any line sets it")
+            .chars()
+            .take(NOTE_MAX)
+            .collect();
+        assert!(
+            note.starts_with("line 7: `rax` is read before any line sets it; on hex:"),
+            "{note}"
+        );
+        assert_eq!(differs_note("", 3, "x"), "line 3: x");
+    }
 }
