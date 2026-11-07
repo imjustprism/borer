@@ -9,6 +9,7 @@
 
 use super::*;
 
+mod choices;
 mod kept;
 
 /// Rewrites the conditional assignments of a function as the statements
@@ -21,11 +22,13 @@ mod kept;
 /// an `if` behind values only its test reads is one `&&` chain
 /// ([`and_chain`]); an `else` that stores a default and then repeats the
 /// first arm under a second test is one `||` ([`or_default`]); an `if`
-/// whose arms store two different names is that choice ([`named_choice`]);
+/// whose arms store two different names is that choice
+/// ([`choices::named_choice`]);
 /// a select between a value and that value with one bit updated, under the
-/// opposite test, is the `if` of that bit ([`complement_bits`]); and a
-/// byte-wide flag a chain compares with zero is the flag itself
-/// ([`quiet_flags`]).
+/// opposite test, is the `if` of that bit ([`complement_bits`]); an
+/// `if`/`else` whose arms only set one register temp is that temp's
+/// choice ([`choices::register_choice`]); and a byte-wide flag a chain
+/// compares with zero is the flag itself ([`quiet_flags`]).
 ///
 /// # Arguments
 ///
@@ -66,7 +69,7 @@ pub(super) fn select_statements(text: &str, word: &str, taken: &[&str]) -> Strin
             || merge_shared_return(&mut lines, k)
             || preassigned_if_else(&mut lines, k)
             || or_default(&mut lines, k)
-            || named_choice(&mut lines, k)
+            || choices::named_choice(&mut lines, k)
             || complement_bits(&mut lines, k)
         {
             changed = true;
@@ -77,7 +80,9 @@ pub(super) fn select_statements(text: &str, word: &str, taken: &[&str]) -> Strin
             k = k.saturating_sub(1);
             continue;
         }
-        changed |= truth_diamond(&mut lines, k) || truths::return_chain(&mut lines, k);
+        changed |= truth_diamond(&mut lines, k)
+            || truths::return_chain(&mut lines, k)
+            || choices::register_choice(&mut lines, k);
         k += 1;
     }
     let flags = byte_names(&lines);
@@ -1115,72 +1120,6 @@ fn unaliased(lines: &[String], name: &str) -> bool {
         !t.starts_with("//") && l.contains(&needle)
     });
     vars::is_var_name(name) || is_register_name(name) || (slot && !taken)
-}
-
-/// Rewrites `if (c) { x = a; } else { x = b; }` at line `k`, when `a` and
-/// `b` are names, as `x = c ? a : b;`.
-///
-/// The arms store nothing but a name, and `x` is private ([`private`]), so
-/// the choice and the two `if` arms write the same name into `x`. The two
-/// names must be declared with one type: a `?:` converts its arms to a
-/// common type before the store, which is a different value when the arms
-/// differ. A test that calls something, or an arm that is not one name,
-/// stays an `if`: that is the shape a source wrote as a statement.
-///
-/// # Arguments
-///
-/// * `lines` - The body lines.
-/// * `k` - The line of the `if`.
-///
-/// # Returns
-///
-/// Whether the `if` became a choice.
-fn named_choice(lines: &mut Vec<String>, k: usize) -> bool {
-    let Some(open) = lines.get(k) else {
-        return false;
-    };
-    let pad = indent_of(open);
-    let Some(cond) = if_opener(open.trim()) else {
-        return false;
-    };
-    if cond.contains('?') || cond.contains(',') || impure(cond) {
-        return false;
-    }
-    let Some(mid) = loops::closing(lines, k, pad)
-        .filter(|&m| lines.get(m).is_some_and(|l| l.trim() == "} else {"))
-    else {
-        return false;
-    };
-    let Some(end) =
-        loops::closing(lines, mid, pad).filter(|&c| lines.get(c).is_some_and(|l| l.trim() == "}"))
-    else {
-        return false;
-    };
-    let Some((x, a)) = only_assign(lines, k + 1..mid, pad + 2) else {
-        return false;
-    };
-    let Some((y, b)) = only_assign(lines, mid + 1..end, pad + 2) else {
-        return false;
-    };
-    let name =
-        |w: &str| w.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') && is_ident(w);
-    let same_type =
-        decl_type(lines, &a).is_some_and(|ta| decl_type(lines, &b).as_ref() == Some(&ta));
-    if x != y
-        || !name(&a)
-        || !name(&b)
-        || a == b
-        || a == x
-        || b == x
-        || !same_type
-        || !private(lines, &x)
-        || mentions_ident(cond, &x)
-    {
-        return false;
-    }
-    let pad_s = " ".repeat(pad);
-    lines.splice(k..=end, [format!("{pad_s}{x} = {cond} ? {a} : {b};")]);
-    true
 }
 
 /// The one assignment at indentation `pad` in `span`, when the span holds

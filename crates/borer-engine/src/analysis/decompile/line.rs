@@ -240,6 +240,24 @@ pub(super) fn number(s: &str) -> Option<(u64, usize)> {
     Some((v, len))
 }
 
+/// Returns the value as one operand: a name, a constant, a call or a value
+/// already in parentheses stays as it is, anything else gains them.
+///
+/// # Arguments
+///
+/// * `value` - The value.
+pub(super) fn grouped(value: &str) -> String {
+    let call = value.find('(').is_some_and(|open| {
+        is_ident(&value[..open]) && matching_paren(value, open) == Some(value.len() - 1)
+    });
+    let wrapped = value.starts_with('(') && matching_paren(value, 0) == Some(value.len() - 1);
+    if is_ident(value) || parse_const(value).is_some() || call || wrapped {
+        value.to_owned()
+    } else {
+        format!("({value})")
+    }
+}
+
 /// Parses a token that is wholly a decimal or `0x` constant, as the code
 /// renders one.
 ///
