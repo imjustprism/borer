@@ -30,7 +30,9 @@ const SIGNED_BOUND_MAX: u64 = 0x7fff_ffff;
 /// not. A name in a string literal is no call, and a `min` or `max`
 /// neither rule takes stays as it is. Inside a larger statement the
 /// variable is as wide as the machine word, as the helper's result is, so
-/// the statement computes at the width it did.
+/// the statement computes at the width it did, and the helper is unsigned:
+/// a signed `min` or `max` hands back an unsigned word, which a signed
+/// variable in its place would shift or compare as signed.
 ///
 /// # Arguments
 ///
@@ -100,7 +102,7 @@ pub(super) fn unspell(lines: &mut Vec<String>, k: usize, word: &str) -> Option<u
                 let whole = ty
                     .as_deref()
                     .is_some_and(|t| width(t).is_some_and(|w| Some(w) == width(word)));
-                if !whole {
+                if !whole || !unsigned {
                     continue;
                 }
                 let mut scratch = lines.clone();
@@ -228,19 +230,22 @@ mod tests {
     /// On a 64-bit target a 32-bit clamp inside a wider statement stays.
     ///
     /// A helper computes at 64 bits there, so the result's width shows in
-    /// the statement; set back into the variable it is the `if`, and a
-    /// 64-bit variable's clamp is the `if` either way.
+    /// the statement; set back into the variable it is the `if`, and an
+    /// unsigned 64-bit variable's clamp is the `if` either way, a signed
+    /// one's only when set back: a signed helper hands back an unsigned
+    /// word.
     #[test]
     fn a_narrow_clamp_inside_a_wide_statement_stays() {
         let text = concat!(
-            "// signature: uint64_t f(uint32_t a1, uint32_t a2, uint64_t a3, int64_t a4)\n",
-            "uint64_t var1, var2;\n",
+            "// signature: uint64_t f(uint32_t a1, uint32_t a2, uint64_t a3, int64_t a4, int64_t a5)\n",
+            "uint64_t var1, var2, var3;\n",
             "\n",
             "var1 = umax(a1, 2) << 0x1c;\n",
             "a2 = umax(a2, 3);\n",
             "var2 = umax(a3, 4) << 0x1c;\n",
             "a4 = max(a4, 5);\n",
-            "return var1 + a2 + var2 + a4;\n",
+            "var3 = min(a5, 2) >> 1;\n",
+            "return var1 + a2 + var2 + a4 + var3;\n",
         );
         let out = select_statements(text, "uint64_t");
         assert!(out.contains("var1 = umax(a1, 2) << 0x1c;\n"), "{out}");
@@ -250,5 +255,6 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("if (a4 < 5) {\n  a4 = 5;\n}\n"), "{out}");
+        assert!(out.contains("var3 = min(a5, 2) >> 1;\n"), "{out}");
     }
 }
