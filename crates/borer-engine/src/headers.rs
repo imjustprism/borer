@@ -307,6 +307,21 @@ pub fn sniff_file(bytes: &[u8]) -> Option<&'static str> {
 }
 
 impl Headers {
+    /// Tells whether the image runs in user mode, where `hlt` faults
+    /// rather than waits for an interrupt: a PE for the Windows GUI,
+    /// console or POSIX subsystem, or an ELF with a program interpreter or
+    /// of type `ET_DYN` (a position-independent executable or a shared
+    /// object).
+    ///
+    /// A driver, firmware, a kernel and an image whose headers say neither
+    /// may run where `hlt` goes on to the next instruction once an
+    /// interrupt wakes the processor.
+    pub(crate) fn user_mode(&self) -> bool {
+        matches!(self.subsystem, Some("gui" | "console" | "posix"))
+            || self.interpreter.is_some()
+            || self.kind.is_some_and(|k| k.starts_with("ET_DYN"))
+    }
+
     /// Renders what the signature says, `signed` when it was not read
     /// ([`crate::authenticode::note`]).
     ///

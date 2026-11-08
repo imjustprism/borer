@@ -1567,6 +1567,36 @@ fn fall_rec(next: u64, print: u64, shape: u64) -> InstrRec {
     }
 }
 
+/// Returns the control flow the walk follows from `instr`.
+///
+/// It is the decoder's, except that a system call (`int 0x80`, `int 0x2d`)
+/// and a call to the very next instruction go on to that instruction, and
+/// that `hlt` ends the path in an image that runs in user mode, where it
+/// faults: glibc's `_start` puts one after its call to `__libc_start_main`
+/// to crash should that ever return, and the bytes past it are padding and
+/// the next function.
+///
+/// # Arguments
+///
+/// * `instr` - The decoded instruction.
+/// * `user_mode` - The image runs in user mode
+///   ([`crate::headers::Headers::user_mode`]).
+fn walk_flow(instr: &Instruction, user_mode: bool) -> FlowControl {
+    match instr.flow_control() {
+        FlowControl::Interrupt
+            if instr.mnemonic() == Mnemonic::Int
+                && matches!(instr.try_immediate(0).ok(), Some(0x80 | 0x2d)) =>
+        {
+            FlowControl::Next
+        }
+        FlowControl::Call if near_target(instr) == Some(instr.next_ip()) => FlowControl::Next,
+        FlowControl::Next if user_mode && instr.mnemonic() == Mnemonic::Hlt => {
+            FlowControl::Exception
+        }
+        other => other,
+    }
+}
+
 /// Whether `instr` is one undecoded instruction with a jump or a call after
 /// it. The transfer is queued; a second bad instruction is not skipped.
 ///
@@ -1610,9 +1640,11 @@ fn past_bad(cursors: &mut Cursors<'_>, instr: &Instruction, pending: &mut Vec<(u
 /// padding, a `ud2` trap or undecodable bytes) ends the path, and indirect jumps are
 /// resolved through [`resolve_jump_table`]
 /// using the walk's own decode chain (the last decoded instruction whose
-/// next address is the one asked for). The `call X; sub rsp, rax` idiom
-/// identifies the stack-probe helper `__chkstk`. The function's range is
-/// the lowest decoded address to the end of the highest one.
+/// next address is the one asked for). A trap ends the path, and so does
+/// `hlt` in an image that runs in user mode ([`walk_flow`]). The `call X;
+/// sub rsp, rax` idiom identifies the stack-probe helper `__chkstk`. The
+/// function's range is the lowest decoded address to the end of the
+/// highest one.
 ///
 /// The addresses right after an epilogue instruction (`pop ebp`, `leave`,
 /// `add esp, N`) are kept: a jump there has torn the frame down first, and
@@ -1668,6 +1700,7 @@ pub(super) fn walk_function(
     let program = cursors.program;
     let bitness = cursors.bitness;
     let pe = program.format == crate::program::BinaryFormat::Pe;
+    let user_mode = program.headers.user_mode();
     let mapped = cursors.mapped.clone();
     let mut recs: Vec<(u64, InstrRec)> = Vec::new();
     let mut recorded = Recorded::default();
@@ -1730,16 +1763,7 @@ pub(super) fn walk_function(
                 continue;
             }
             let next = instr.next_ip();
-            let flow = match instr.flow_control() {
-                FlowControl::Interrupt
-                    if instr.mnemonic() == Mnemonic::Int
-                        && matches!(instr.try_immediate(0).ok(), Some(0x80 | 0x2d)) =>
-                {
-                    FlowControl::Next
-                }
-                FlowControl::Call if near_target(&instr) == Some(next) => FlowControl::Next,
-                other => other,
-            };
+            let flow = walk_flow(&instr, user_mode);
             let target = near_target(&instr).filter(|&t| t != next || flow != FlowControl::Next);
             if odd_instruction(&instr, bitness, pe) && !in_handlers {
                 zero_bytes = true;

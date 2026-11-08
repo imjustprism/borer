@@ -1,5 +1,5 @@
-//! Where a function ends: a call that returns or does not, and the starts
-//! that say which.
+//! Where a function ends: a call that returns or does not, the starts
+//! that say which, and a `hlt`.
 //!
 //! A wrong end loses the code past it with no note, so each test states
 //! which bytes are the function's and which are not. Every fixture is a
@@ -15,7 +15,7 @@ use borer_engine::analysis::Analysis;
 use borer_engine::num::{from_usize, lo32, saturating_usize};
 use borer_engine::program::{Arch, BinaryFormat, Program, Section, Symbol, SymbolKind};
 
-use crate::decompiled::decompiled;
+use crate::decompiled::{decompiled, replays_clean};
 
 /// Where `.got` starts: import `k` fills the slot at `GOT + 8 * k`.
 const GOT: u64 = 0x2000;
@@ -282,4 +282,99 @@ fn calls_that_never_return_still_end_their_callers() {
         assert_eq!(f.end, end, "{caller:#x} ran past its call: {f:?}");
     }
     assert!(a.noreturn.contains(&0x1080), "{:?}", a.noreturn);
+}
+
+/// Builds glibc's `_start`, with headers that say nothing of the image's
+/// kind.
+///
+/// It passes `main` to `__libc_start_main`, which never returns, and a
+/// `hlt` after the call crashes the process should it ever do so; a
+/// ten-byte `nop` aligns the next function, which follows.
+fn glibc_start() -> Program {
+    let code = vec![
+        (
+            0x1000,
+            vec![
+                0xf3, 0x0f, 0x1e, 0xfa, // ASM: endbr64
+                0x31, 0xed, // ASM: xor ebp, ebp
+                0x49, 0x89, 0xd1, // ASM: mov r9, rdx
+                0x5e, // ASM: pop rsi
+                0x48, 0x89, 0xe2, // ASM: mov rdx, rsp
+                0x48, 0x83, 0xe4, 0xf0, // ASM: and rsp, -16
+                0x50, // ASM: push rax
+                0x54, // ASM: push rsp
+                0x45, 0x31, 0xc0, // ASM: xor r8d, r8d
+                0x31, 0xc9, // ASM: xor ecx, ecx
+            ],
+        ),
+        (0x1018, rel32(0x1018, &[0x48, 0x8d, 0x3d], 0x1100)), // ASM: lea rdi, [rip+main]
+        (0x101f, rel32(0x101f, &[0xff, 0x15], GOT)),          // ASM: call [rip+__libc_start_main]
+        (0x1025, vec![0xf4]),                                 // ASM: hlt
+        (0x1026, vec![0x66, 0x2e, 0x0f, 0x1f, 0x84, 0, 0, 0, 0, 0]), // ASM: nop word cs:[rax+rax]
+        (0x1030, vec![0x31, 0xc0, 0xc3]),                     // ASM: xor eax, eax; ret
+        (0x1100, vec![0x31, 0xc0, 0xc3]),                     // ASM: xor eax, eax; ret
+    ];
+    let mut p = image(&code, 0x1000, &["__libc_start_main"]);
+    p.symbols.push(Symbol {
+        name: "deregister_tm_clones".to_owned(),
+        addr: 0x1030,
+        kind: SymbolKind::Local,
+    });
+    p
+}
+
+/// `_start` ends at its `hlt` wherever the headers say the image runs in
+/// user mode, where the instruction faults and nothing after it runs.
+///
+/// That is a position-independent executable, one with a program
+/// interpreter, and a PE for a Windows subsystem. The walk read on through
+/// the alignment `nop` to the next function, and the text ended in
+/// `goto *0x1030;` after `__halt();`, as 203 `_start`s of the benchmark's
+/// x64 binaries did.
+#[test]
+fn start_ends_at_its_hlt() {
+    let user_modes: [fn(&mut Program); 3] = [
+        |p| p.headers.kind = Some("ET_DYN (pie)"),
+        |p| {
+            p.headers.kind = Some("ET_EXEC");
+            p.headers.interpreter = Some("/lib64/ld-linux-x86-64.so.2".to_owned());
+        },
+        |p| {
+            p.format = BinaryFormat::Pe;
+            p.headers.subsystem = Some("console");
+        },
+    ];
+    for (k, set) in user_modes.iter().enumerate() {
+        let mut p = glibc_start();
+        set(&mut p);
+        let a = Analysis::compute(&p);
+        let f = a.function(0x1000).unwrap();
+        assert_eq!(f.end, 0x1026, "headers {k}: {f:?}");
+        assert!(
+            a.function(0x1030).is_some(),
+            "headers {k}: {:?}",
+            a.functions
+        );
+        let text = decompiled(&p, 0x1000);
+        assert!(text.contains("__halt();"), "headers {k}: {text}");
+        assert!(!text.contains("goto"), "headers {k}: {text}");
+        replays_clean(&p, &a, &[0x1000]);
+    }
+}
+
+/// `hlt` runs on where no header says the image runs in user mode: a
+/// kernel or firmware waits there for an interrupt and then goes on, as
+/// the Linux kernel's idle loop returns after its `sti; hlt`.
+#[test]
+fn hlt_runs_on_where_no_header_says_user_mode() {
+    let code = vec![
+        (0x1000, [call(0x1000, 0x1100), returns(1)].concat()),
+        (0x1100, vec![0xf3, 0x0f, 0x1e, 0xfa, 0xfb, 0xf4, 0xc3]), // ASM: endbr64; sti; hlt; ret
+    ];
+    let mut p = image(&code, 0x1000, &[]);
+    p.headers.kind = Some("ET_EXEC");
+    let a = Analysis::compute(&p);
+    assert!(!a.noreturn.contains(&0x1100), "{:?}", a.noreturn);
+    assert_eq!(a.function(0x1100).unwrap().end, 0x1107);
+    assert_eq!(a.function(0x1000).unwrap().end, 0x100b);
 }
