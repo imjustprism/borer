@@ -823,6 +823,74 @@ pub fn literal_byte(b: u8) -> bool {
     printable(b) || matches!(b, b'\t' | b'\n' | b'\r')
 }
 
+/// Tells whether one character of a literal, a byte or a UTF-16LE unit,
+/// is text a literal holds: a [`literal_byte`] with any high byte zero.
+///
+/// # Arguments
+///
+/// * `unit` - The character's bytes, low byte first.
+pub(crate) fn literal_unit(unit: &[u8]) -> bool {
+    unit.split_first()
+        .is_some_and(|(&b, high)| literal_byte(b) && high.iter().all(|&h| h == 0))
+}
+
+/// Most characters [`literals`] joins into one literal.
+const LITERAL_MAX: u64 = 4096;
+
+/// Joins the runs of a walk that are lines of one literal into one span.
+///
+/// A literal holding line breaks walks as one run per line. Runs of one
+/// encoding with only literal characters between them ([`literal_unit`]:
+/// line breaks, tabs, lines shorter than the walk's minimum) are one
+/// literal, up to [`LITERAL_MAX`] characters.
+///
+/// # Arguments
+///
+/// * `bytes` - The bytes walked.
+/// * `spans` - The runs, in offset order.
+fn literals(bytes: &[u8], spans: Vec<RawStringSpan>) -> Vec<RawStringSpan> {
+    let mut out: Vec<RawStringSpan> = Vec::with_capacity(spans.len());
+    for s in spans {
+        let len = out.last().and_then(|last| joined(bytes, *last, s));
+        match (len, out.last_mut()) {
+            (Some(len), Some(last)) => last.len = len,
+            _ => out.push(s),
+        }
+    }
+    out
+}
+
+/// Returns the length, in characters, of `first` stretched to the end of
+/// `next` when the two are one literal: one encoding, only literal
+/// characters between them, and [`LITERAL_MAX`] characters at most.
+///
+/// # Arguments
+///
+/// * `bytes` - The bytes walked.
+/// * `first` - The literal so far.
+/// * `next` - The run after it.
+fn joined(bytes: &[u8], first: RawStringSpan, next: RawStringSpan) -> Option<u32> {
+    let unit: u64 = match (first.encoding, next.encoding) {
+        (Encoding::Ascii, Encoding::Ascii) => 1,
+        (Encoding::Utf16, Encoding::Utf16) => 2,
+        _ => return None,
+    };
+    let size = usize::try_from(unit).ok()?;
+    let end = first
+        .off
+        .checked_add(u64::from(first.len).checked_mul(unit)?)?;
+    let stop = next
+        .off
+        .checked_add(u64::from(next.len).checked_mul(unit)?)?;
+    let gap = bytes.get(saturating_usize(end)..saturating_usize(next.off))?;
+    let chars = stop.checked_sub(first.off)? / unit;
+    (gap.len().is_multiple_of(size)
+        && gap.chunks_exact(size).all(literal_unit)
+        && chars <= LITERAL_MAX)
+        .then(|| u32::try_from(chars).ok())
+        .flatten()
+}
+
 /// Reads the C string at `va` the way a literal is written, so a run holding
 /// a tab or a newline is still one string.
 ///
@@ -961,11 +1029,12 @@ pub const INJECTION_PAGE: usize = 200;
 /// it sits, the mark it carries, and its text with the tokens broken.
 ///
 /// The file's ASCII and UTF-16 strings of six characters or more are read
-/// whole, and one carrying a harness tag, a chat marker, a chat turn or an
-/// instruction to a model ([`crate::text::aimed`]) is a row, in file
-/// order. They are data the file holds, not instructions to follow. The
-/// walk keeps spans, not texts, and only the page's rows are written, so a
-/// file of many such strings costs no more than its spans.
+/// whole, the lines of one literal together ([`literals`]), and one
+/// carrying a harness tag, a chat marker, a chat turn or an instruction to
+/// a model ([`crate::text::aimed`]) is a row, in file order. They are data
+/// the file holds, not instructions to follow. The walk keeps spans, not
+/// texts, and only the page's rows are written, so a file of many such
+/// strings costs no more than its spans.
 ///
 /// # Arguments
 ///
@@ -1003,7 +1072,7 @@ pub fn injection_tsv(p: &Program, spec: &str) -> Result<String, String> {
     spans.extend(find_wide_spans(&p.bytes, 6));
     spans.sort_by_key(|s| s.off);
     let (mut total, mut page) = (0usize, Vec::new());
-    for s in spans {
+    for s in literals(&p.bytes, spans) {
         let text = s.whole_text(&p.bytes);
         let Some(mark) = crate::text::aimed(&text).map(crate::text::Aimed::word) else {
             continue;

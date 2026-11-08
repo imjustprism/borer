@@ -63,12 +63,7 @@ fn literal_start(p: &Program, off: u64, unit: usize) -> u64 {
         .get(floor..run)
         .unwrap_or_default()
         .rchunks_exact(unit)
-        .take_while(|c| {
-            c.split_first().is_some_and(|(&b, high)| {
-                (crate::strings::printable(b) || matches!(b, b'\t' | b'\n' | b'\r'))
-                    && high.iter().all(|&h| h == 0)
-            })
-        })
+        .take_while(|c| crate::strings::literal_unit(c))
         .count();
     off - from_usize(back.saturating_mul(unit))
 }
