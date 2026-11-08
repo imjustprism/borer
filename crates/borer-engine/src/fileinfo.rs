@@ -1,7 +1,8 @@
 //! Facts about a file an analyst reads before its code.
 //!
 //! They are the hashes to look it up by, what the bytes appended past its last section are, the
-//! language or packager that built it, and where an address sits in it.
+//! language or packager that built it, and where an address sits in it: which region of the file a
+//! byte lies in ([`region`]) says what a fact read from it is worth.
 
 use std::fmt::Write as _;
 
@@ -157,6 +158,50 @@ pub fn appended_lines(program: &Program) -> Vec<String> {
             )
         })
         .collect()
+}
+
+/// Where a byte of a file sits, the most trusted first: what a mark there
+/// proves depends on whether the program loads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Region {
+    /// A section that holds code.
+    Code,
+    /// A section the loader maps that holds data.
+    Loaded,
+    /// Bytes the headers place that the loader leaves unmapped: the
+    /// headers themselves, a gap between sections, a section such as
+    /// `.comment` or a symbol or debug table.
+    Unmapped,
+    /// Bytes past everything the headers place
+    /// ([`crate::headers::Headers::overlay`]): appended data, which nothing
+    /// loads and no instruction reaches.
+    Appended,
+}
+
+/// Returns where the byte at a file offset sits.
+///
+/// # Arguments
+///
+/// * `program` - The loaded file.
+/// * `off` - The file offset.
+#[must_use]
+pub fn region(program: &Program, off: u64) -> Region {
+    if program
+        .headers
+        .overlay
+        .iter()
+        .any(|&(at, len)| off.checked_sub(at).is_some_and(|d| d < len))
+    {
+        return Region::Appended;
+    }
+    match program
+        .offset_to_va(off)
+        .and_then(|va| program.section_at(va))
+    {
+        Some(s) if s.executable => Region::Code,
+        Some(s) if s.readable => Region::Loaded,
+        _ => Region::Unmapped,
+    }
 }
 
 /// A mark stored back to front: borer's own binary then carries only the

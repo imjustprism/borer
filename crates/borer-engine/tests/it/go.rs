@@ -14,7 +14,7 @@
     reason = "assertions are the point of a test"
 )]
 
-use crate::elfgen::{self, A, AX, EM_X86_64, ET_EXEC, PROGBITS, Sec};
+use crate::elfgen::{self, A, AX, EM_X86_64, ET_EXEC, PROGBITS, STRTAB, SYMTAB, Sec};
 use borer_engine::analysis::decompile::decompile;
 use borer_engine::analysis::render::{emulate_tsv, why_tsv};
 use borer_engine::analysis::{Analysis, Overlay};
@@ -493,6 +493,83 @@ fn the_stack_check_folds_into_one_comment() {
     assert!(text.contains("return 0;"), "{text}");
     assert!(!text.contains("if ("), "{text}");
     assert!(!text.contains("morestack_noctxt()"), "{text}");
+}
+
+/// Go's build information reads high only with a pclntab or Go symbols.
+///
+/// Alone it reads medium; with the pclntab or `runtime.*` symbols behind it,
+/// high; and a second language runtime read at high beside Go is said on
+/// both findings rather than one picked.
+#[test]
+fn go_build_information_needs_a_pclntab_or_go_symbols() {
+    let mut info = b"\xff Go buildinf:\x08\x02".to_vec();
+    info.resize(32, 0);
+    info.push(8);
+    info.extend_from_slice(b"go1.22.5\0");
+    let said = |table: bool, symbol: Option<&str>, data: &[u8]| {
+        let mut secs = vec![
+            Sec::new(".text", PROGBITS, AX, 0x1000, vec![0xc3; 0x31]),
+            Sec::new(".go.buildinfo", PROGBITS, A, 0x4000, data.to_vec()),
+        ];
+        if table {
+            secs.push(Sec::new(
+                ".gopclntab",
+                PROGBITS,
+                A,
+                0x2000,
+                pclntab(&FUNCS, 0x31),
+            ));
+        }
+        if let Some(name) = symbol {
+            let mut symtab = vec![0u8; 24];
+            symtab.extend(elfgen::sym_sized(1, 0x12, 1, MAIN, 1));
+            let mut strtab = vec![0u8];
+            strtab.extend_from_slice(name.as_bytes());
+            strtab.push(0);
+            let at = secs.len();
+            secs.push(Sec::new(".symtab", SYMTAB, 0, 0x5000, symtab));
+            secs.push(Sec::new(".strtab", STRTAB, 0, 0x5100, strtab));
+            secs[at].link = u32::try_from(at + 2).expect("fits");
+            secs[at].info = 1;
+            secs[at].entsize = 24;
+        }
+        let bytes = elfgen::build(ET_EXEC, EM_X86_64, MAIN, &secs);
+        let p = Program::from_bytes(std::path::PathBuf::from("go.elf"), bytes)
+            .expect("the image loads");
+        borer_engine::toolchain::lines(&p, false).join("\n")
+    };
+    let alone = said(false, None, &info);
+    assert!(
+        alone.contains("built:   Go, go1.22.5 (medium: build information at 0x4000)"),
+        "{alone}"
+    );
+    let tabled = said(true, None, &info);
+    assert!(
+        tabled.contains(
+            "built:   Go, go1.22.5 (high: pclntab at 0x2000; build information at 0x4000)"
+        ),
+        "{tabled}"
+    );
+    let named = said(false, Some("runtime.main"), &info);
+    assert!(
+        named.contains(
+            "built:   Go, go1.22.5 (high: build information at 0x4000; symbols named runtime.*)"
+        ),
+        "{named}"
+    );
+    let commit = "0123456789abcdef0123456789abcdef01234567";
+    let mut both = info;
+    both.extend_from_slice(
+        format!("/rustc/{commit}/library/core/src/a.rs\0/rustc/{commit}/library/alloc/src/b.rs\0")
+            .as_bytes(),
+    );
+    let mixed = said(true, None, &both);
+    assert!(
+        mixed.contains("; Rust also read at high: a program rarely links two language runtimes")
+            && mixed
+                .contains("; Go also read at high: a program rarely links two language runtimes"),
+        "{mixed}"
+    );
 }
 
 /// A Go 1.26 table at `at`, with the module data records pointing back at it.

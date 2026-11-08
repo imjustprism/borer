@@ -6,24 +6,30 @@
 //!
 //! Structure decides first: the MSVC Rich header, Go's pclntab, the CLR
 //! header, a `PyInstaller` cookie, an installer's own table. Marks a
-//! runtime leaves in its strings come next, and say less. A file nothing
-//! names is said to be unknown.
+//! runtime leaves in its strings come next, and say less: a compiler's mark
+//! in bytes appended past the image ([`Region::Appended`]) says nothing of
+//! what built the code, a Go or Rust mark is sure only with a second sign
+//! behind it, and marks that contradict each other say so in the finding
+//! rather than one being picked. A file nothing names is said to be unknown.
 //!
 //! Every mark is stored back to front ([`reversed`]) so borer's own binary,
 //! or a tool built with it, does not find every toolchain in its own
 //! tables; one pass over at most [`SCAN_MAX`] bytes finds them all.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use crate::bundle::{self, Bundle};
-use crate::fileinfo::{forward, reversed};
+use crate::fileinfo::{Region, forward, region, reversed};
+use crate::num::from_usize;
 use crate::program::{BinaryFormat, Program};
 
 /// Bytes of the file the mark scan reads.
 pub const SCAN_MAX: usize = 256 << 20;
 /// Longest compiler identification text quoted.
 const IDENT_MAX: usize = 96;
-/// Most places a mark is looked for before it counts as absent, when the
-/// first place it occurs is not the shape wanted.
-const TRIES_MAX: usize = 16;
+/// Most rustc source paths read: a build names a few thousand, and a file
+/// that holds more says nothing more by them.
+const RUST_PATHS_MAX: usize = 4096;
 
 /// What a finding says about the file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -39,11 +45,12 @@ pub enum Role {
 /// How sure a finding is, most sure first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Confidence {
-    /// Read from a structure only that toolchain writes.
+    /// Read from a structure only that toolchain writes, or from a mark a
+    /// second, independent sign agrees with.
     High,
     /// Read from marks the toolchain leaves, which another could copy.
     Medium,
-    /// A hint: one weak mark.
+    /// A hint: one weak mark, or marks that contradict each other.
     Low,
 }
 
@@ -228,6 +235,18 @@ const CLANG: [u8; 14] = reversed(b"clang version ");
 const RUSTC_PATH: [u8; 7] = reversed(b"/rustc/");
 /// The Go build information header, back to front.
 const GO_BUILDINFO: [u8; 14] = reversed(b"\xff Go buildinf:");
+/// The version text rustc's `llvm.ident` writes into an ELF's `.comment`,
+/// back to front.
+const RUSTC_VERSION: [u8; 14] = reversed(b"rustc version ");
+/// The language runtimes a program rarely links two of, by finding name.
+const RUNTIMES: [&str; 6] = [
+    "Go",
+    "Rust",
+    ".NET",
+    "Visual Basic 6",
+    "Visual Basic 5",
+    "Delphi or C++Builder",
+];
 
 /// Where each needle first occurs in `hay`, in one pass.
 ///
@@ -280,24 +299,188 @@ fn ident(bytes: &[u8], at: usize) -> String {
         .collect()
 }
 
-/// The rustc commit a Rust build's panic paths name, from the first
-/// `/rustc/<40 hex digits>/` in the file, starting the search at `from`.
+/// What a file's rustc source paths say.
+struct RustPaths<'a> {
+    /// Where the first path outside appended data starts, and its commit's
+    /// 40 hex digits.
+    first: (usize, &'a [u8]),
+    /// Under each commit, where its first path inside loaded sections
+    /// starts and the distinct paths under it there.
+    commits: BTreeMap<&'a [u8], (usize, BTreeSet<&'a [u8]>)>,
+}
+
+/// Reads the rustc source paths, `/rustc/<40 hex digits>/<path>`, from the
+/// first `/rustc/` on.
+///
+/// A path in appended data is passed over. Only the paths inside loaded
+/// sections are kept by commit: one in a debug table repeats one the code
+/// holds.
+///
+/// # Arguments
+///
+/// * `p` - The loaded file.
+/// * `from` - Where `/rustc/` first occurs.
+///
+/// # Returns
+///
+/// The paths; `None` when no path of that shape lies outside appended
+/// data among the first [`RUST_PATHS_MAX`] occurrences.
+fn rust_paths(p: &Program, from: usize) -> Option<RustPaths<'_>> {
+    let bytes = p
+        .bytes
+        .get(..p.bytes.len().min(SCAN_MAX))
+        .unwrap_or(&p.bytes);
+    let prefix = forward(&RUSTC_PATH);
+    let mut first = None;
+    let mut commits: BTreeMap<&[u8], (usize, BTreeSet<&[u8]>)> = BTreeMap::new();
+    let mut at = from;
+    for _ in 0..RUST_PATHS_MAX {
+        if let Some((hash, rest)) = bytes
+            .get(at + prefix.len()..)
+            .and_then(|b| b.split_at_checked(41))
+            && hash[..40].iter().all(u8::is_ascii_hexdigit)
+            && hash[40] == b'/'
+        {
+            let place = region(p, from_usize(at));
+            if place != Region::Appended {
+                first.get_or_insert((at, &hash[..40]));
+            }
+            if place <= Region::Loaded {
+                let path = rest
+                    .iter()
+                    .take(IDENT_MAX)
+                    .take_while(|b| b.is_ascii_graphic())
+                    .count();
+                commits
+                    .entry(&hash[..40])
+                    .or_insert_with(|| (at, BTreeSet::new()))
+                    .1
+                    .insert(&rest[..path]);
+            }
+        }
+        let Some(next) = bytes
+            .get(at + 1..)
+            .and_then(|rest| crate::fileinfo::find(rest, &prefix))
+        else {
+            break;
+        };
+        at += 1 + next;
+    }
+    first.map(|first| RustPaths { first, commits })
+}
+
+/// Tells whether the rustc version text at `at` names `commit`: rustc
+/// writes its own short hash in the parentheses after the version.
 ///
 /// # Arguments
 ///
 /// * `bytes` - The file.
-/// * `from` - Where `/rustc/` first occurs.
-fn rust_commit(bytes: &[u8], from: usize) -> Option<(usize, String)> {
-    let prefix = forward(&RUSTC_PATH);
-    let mut at = from;
-    for _ in 0..TRIES_MAX {
-        let hash = bytes.get(at + prefix.len()..at + prefix.len() + 41)?;
-        if hash[..40].iter().all(u8::is_ascii_hexdigit) && hash[40] == b'/' {
-            return Some((at, String::from_utf8_lossy(&hash[..12]).into_owned()));
-        }
-        at += 1 + crate::fileinfo::find(bytes.get(at + 1..)?, &prefix)?;
+/// * `at` - Where `rustc version ` starts.
+/// * `commit` - The 40 hex digits the source paths name.
+///
+/// # Returns
+///
+/// Whether the hash starts the commit; `None` when the text names no hash
+/// of seven digits or more, which is then no sign either way.
+fn version_names(bytes: &[u8], at: usize, commit: &[u8]) -> Option<bool> {
+    let text = ident(bytes, at);
+    let short: String = text
+        .split('(')
+        .nth(1)
+        .unwrap_or_default()
+        .chars()
+        .take_while(char::is_ascii_hexdigit)
+        .collect();
+    (short.len() >= 7).then(|| commit.starts_with(short.as_bytes()))
+}
+
+/// Whether a symbol's name is in Rust's mangling: the legacy form ends
+/// its path in `17h` and a sixteen-digit hash, the v0 form starts `_R`.
+///
+/// # Arguments
+///
+/// * `name` - The symbol's name as the file stores it.
+fn rust_mangled(name: &str) -> bool {
+    let legacy = name
+        .strip_prefix("_ZN")
+        .and_then(|n| n.strip_suffix('E'))
+        .map(str::as_bytes)
+        .and_then(|n| n.get(n.len().checked_sub(19)?..))
+        .is_some_and(|tail| {
+            tail.starts_with(b"17h") && tail[3..].iter().all(u8::is_ascii_hexdigit)
+        });
+    legacy || (name.starts_with("_R") && rustc_demangle::try_demangle(name).is_ok())
+}
+
+/// The Rust finding a file's rustc source paths give, as sure as the signs
+/// behind them.
+///
+/// The commit named is the one most paths in loaded sections name. A
+/// second path under it there, rustc's version text naming it, or a
+/// Rust-mangled symbol makes the finding high. Paths under several commits
+/// are said: several builds each name many, while one path to a commit is
+/// what no build writes, so such marks with no second sign read low.
+///
+/// # Arguments
+///
+/// * `p` - The loaded file.
+/// * `paths` - Its rustc source paths ([`rust_paths`]).
+/// * `version` - Where rustc's version text starts, outside appended data.
+fn rust(p: &Program, paths: &RustPaths<'_>, version: Option<usize>) -> Finding {
+    let main = paths
+        .commits
+        .iter()
+        .filter(|(_, (_, s))| s.len() > 1)
+        .max_by_key(|(_, (_, s))| s.len());
+    let (commit, at, shared) = main.map_or((paths.first.1, paths.first.0, 1), |(c, (at, s))| {
+        (*c, *at, s.len())
+    });
+    let mut evidence = vec![format!("rustc source path at {at:#x}")];
+    let mut doubts = Vec::new();
+    if shared > 1 {
+        evidence.push(format!("{shared} paths of that commit in loaded sections"));
     }
-    None
+    match version.map(|v| (v, version_names(&p.bytes, v, commit))) {
+        Some((v, Some(true))) => evidence.push(format!("rustc version text at {v:#x}")),
+        Some((v, Some(false))) => {
+            doubts.push(format!("rustc version text at {v:#x} names another commit"));
+        }
+        Some((_, None)) | None => {}
+    }
+    if p.symbols.iter().any(|s| rust_mangled(&s.name)) {
+        evidence.push("Rust-mangled symbols".to_owned());
+    }
+    let commits = paths.commits.len();
+    if commits > 1 {
+        doubts.push(if main.is_some() {
+            format!(
+                "paths under {commits} rustc commits: code from {commits} builds, or planted marks among them"
+            )
+        } else {
+            format!(
+                "paths under {commits} rustc commits, one path each: no build writes that, so they read as planted"
+            )
+        });
+    }
+    let confidence = if evidence.len() > 1 {
+        Confidence::High
+    } else if doubts.is_empty() {
+        Confidence::Medium
+    } else {
+        Confidence::Low
+    };
+    evidence.extend(doubts);
+    Finding {
+        role: Role::Compiler,
+        name: "Rust",
+        version: Some(format!(
+            "rustc commit {}",
+            String::from_utf8_lossy(commit.get(..12).unwrap_or(commit))
+        )),
+        confidence,
+        evidence,
+        hint: "monomorphized generics and inlined iterators: read the panic locations' file paths for the crate layout",
+    }
 }
 
 /// The Go release named after the build information header at `at`, `go1.22.3`.
@@ -367,12 +550,18 @@ fn plain(
 
 /// The findings the marks and the compiler texts give.
 ///
+/// A compiler's mark in appended data counts for nothing. Go's build
+/// information is high only with its `runtime.*` symbols behind it, or the
+/// pclntab [`by_structure`] reads; a rustc source path is as sure as
+/// [`rust`] finds it.
+///
 /// # Arguments
 ///
-/// * `bytes` - The file.
+/// * `p` - The loaded file.
 /// * `out` - The findings so far.
-fn by_marks(bytes: &[u8], out: &mut Vec<Finding>) {
-    let texts: [&[u8]; 4] = [&GCC, &CLANG, &RUSTC_PATH, &GO_BUILDINFO];
+fn by_marks(p: &Program, out: &mut Vec<Finding>) {
+    let bytes = &p.bytes;
+    let texts: [&[u8]; 5] = [&GCC, &CLANG, &RUSTC_PATH, &GO_BUILDINFO, &RUSTC_VERSION];
     let needles: Vec<Vec<u8>> = MARKED
         .iter()
         .flat_map(|m| m.marks.iter())
@@ -380,6 +569,7 @@ fn by_marks(bytes: &[u8], out: &mut Vec<Finding>) {
         .map(|m| forward(m))
         .collect();
     let found = first_offsets(bytes, &needles);
+    let image = |o: &usize| region(p, from_usize(*o)) != Region::Appended;
     let mut at = found.iter().copied();
     for m in &MARKED {
         let hits: Vec<String> = m
@@ -387,7 +577,8 @@ fn by_marks(bytes: &[u8], out: &mut Vec<Finding>) {
             .iter()
             .zip(at.by_ref())
             .filter_map(|(mark, off)| {
-                off.map(|o| format!("'{}' at {o:#x}", String::from_utf8_lossy(&forward(mark))))
+                off.filter(|o| m.role != Role::Compiler || image(o))
+                    .map(|o| format!("'{}' at {o:#x}", String::from_utf8_lossy(&forward(mark))))
             })
             .collect();
         if hits.len() >= m.need {
@@ -404,7 +595,8 @@ fn by_marks(bytes: &[u8], out: &mut Vec<Finding>) {
             );
         }
     }
-    let [gcc, clang, rustc, go] = [at.next(), at.next(), at.next(), at.next()].map(Option::flatten);
+    let [gcc, clang, rustc, go, version] =
+        [at.next(), at.next(), at.next(), at.next(), at.next()].map(|o| o.flatten().filter(image));
     if let Some(o) = gcc {
         let text = ident(bytes, o);
         add(
@@ -437,31 +629,55 @@ fn by_marks(bytes: &[u8], out: &mut Vec<Finding>) {
             },
         );
     }
-    if let Some((o, commit)) = rustc.and_then(|o| rust_commit(bytes, o)) {
-        add(
-            out,
-            Finding {
-                role: Role::Compiler,
-                name: "Rust",
-                version: Some(format!("rustc commit {commit}")),
-                confidence: Confidence::High,
-                evidence: vec![format!("rustc source path at {o:#x}")],
-                hint: "monomorphized generics and inlined iterators: read the panic locations' file paths for the crate layout",
-            },
-        );
+    if let Some(paths) = rustc.and_then(|o| rust_paths(p, o)) {
+        add(out, rust(p, &paths, version));
     }
     if let Some(o) = go {
+        let named = p.go.is_none() && p.symbols.iter().any(|s| s.name.starts_with("runtime."));
+        let mut evidence = vec![format!("build information at {o:#x}")];
+        if named {
+            evidence.push("symbols named runtime.*".to_owned());
+        }
         add(
             out,
             Finding {
                 role: Role::Compiler,
                 name: "Go",
                 version: go_version(bytes, o),
-                confidence: Confidence::High,
-                evidence: vec![format!("build information at {o:#x}")],
+                confidence: if named {
+                    Confidence::High
+                } else {
+                    Confidence::Medium
+                },
+                evidence,
                 hint: "names and types come from the pclntab and type links; expect a large runtime around little user code",
             },
         );
+    }
+}
+
+/// Says on each language runtime read at high which others are, rather
+/// than picking one: a program rarely links two, so the file mixes builds
+/// or a mark is planted.
+///
+/// # Arguments
+///
+/// * `out` - The findings.
+fn note_runtimes(out: &mut [Finding]) {
+    let high: Vec<&'static str> = out
+        .iter()
+        .filter(|f| f.confidence == Confidence::High && RUNTIMES.contains(&f.name))
+        .map(|f| f.name)
+        .collect();
+    if high.len() < 2 {
+        return;
+    }
+    for f in out.iter_mut().filter(|f| high.contains(&f.name)) {
+        let others: Vec<&str> = high.iter().copied().filter(|&n| n != f.name).collect();
+        f.evidence.push(format!(
+            "{} also read at high: a program rarely links two language runtimes, so the file mixes builds or a mark is planted",
+            others.join(" and ")
+        ));
     }
 }
 
@@ -867,6 +1083,9 @@ fn by_packer_marks(p: &Program, out: &mut Vec<Finding>) {
 /// Everything the file says about what built and wraps it, compilers
 /// first, then wrappers, then packers, each in the order found.
 ///
+/// Two language runtimes read at high each name the other
+/// ([`note_runtimes`]).
+///
 /// # Arguments
 ///
 /// * `p` - The loaded file.
@@ -877,8 +1096,9 @@ pub fn identify(p: &Program, bundles: &[Bundle]) -> Vec<Finding> {
     let mut out = Vec::new();
     by_structure(p, &res, &mut out);
     by_bundles(bundles, &mut out);
-    by_marks(&p.bytes, &mut out);
+    by_marks(p, &mut out);
     by_packer_marks(p, &mut out);
+    note_runtimes(&mut out);
     out.sort_by_key(|f| f.role);
     out
 }

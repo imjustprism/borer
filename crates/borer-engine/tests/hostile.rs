@@ -24,6 +24,13 @@ use borer_engine::analysis::Analysis;
 use borer_engine::num::from_usize;
 use borer_engine::program::{Program, SymbolKind};
 
+#[path = "common/elfgen.rs"]
+#[expect(
+    dead_code,
+    reason = "hostile builds one kind of ELF; the writer's other helpers serve the integration tests"
+)]
+mod elfgen;
+
 /// Live heap bytes, kept by [`Counting`].
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 /// Highest [`LIVE`] since the last [`measured`] began.
@@ -852,6 +859,106 @@ fn bytes_after_the_certificate_table_are_overlay() {
         )),
         "{notes}"
     );
+}
+
+/// Compiler marks a decoy plants: rustc source paths, each under a commit
+/// of its own, a Go build information header naming a release, a GCC
+/// identification and a Nim mark.
+fn planted_marks() -> Vec<u8> {
+    let mut b = Vec::new();
+    for k in 0..64u64 {
+        let hash = u128::from(k) * 0x9e37_79b9_7f4a_7c15;
+        b.extend_from_slice(
+            format!("/rustc/{k:08x}{hash:032x}/library/core/src/lib.rs\0").as_bytes(),
+        );
+    }
+    b.extend_from_slice(b"\xff Go buildinf:\x08\x02");
+    b.resize(b.len() + 16, 0);
+    b.extend_from_slice(b"\x08go1.22.5\0GCC: (GNU) 13.2.0\0@NimMain\0");
+    b
+}
+
+/// A PE and an ELF of one function of code and a data section, the planted
+/// marks in the data section when `inside`, else appended past the image
+/// with only a stray `/rustc/` in the data.
+///
+/// # Arguments
+///
+/// * `inside` - Whether the marks are loaded with the image.
+fn with_marks(inside: bool) -> [(&'static str, Vec<u8>); 2] {
+    let marks = planted_marks();
+    let data = if inside {
+        marks.clone()
+    } else {
+        b"see /rustc/ for the sources\0".to_vec()
+    };
+    let mut pe_bytes = pe(
+        &[
+            Sec::sound(".text", 0x1000, text(), CODE),
+            Sec::sound(".rdata", 0x2000, data.clone(), DATA),
+        ],
+        &[],
+    );
+    let elf_secs = [
+        elfgen::Sec::new(".text", elfgen::PROGBITS, elfgen::AX, 0x1000, text()),
+        elfgen::Sec::new(".rodata", elfgen::PROGBITS, elfgen::A, 0x2000, data),
+    ];
+    let mut elf_bytes = elfgen::build(elfgen::ET_EXEC, elfgen::EM_X86_64, 0x1000, &elf_secs);
+    if !inside {
+        pe_bytes.extend_from_slice(&marks);
+        elf_bytes.extend_from_slice(&marks);
+    }
+    [("decoy.exe", pe_bytes), ("decoy.elf", elf_bytes)]
+}
+
+/// Compiler marks appended past the image name no compiler.
+///
+/// A decoy appends rustc source paths, a Go build information header and a
+/// GCC identification past a clean image, and borer read them as Rust, Go
+/// and GCC, all high, from bytes the loader never maps and no instruction
+/// reaches. They say nothing of what built the code, on a PE or an ELF, and
+/// a stray `/rustc/` in the image does not lead the path search into them.
+#[test]
+fn compiler_marks_in_appended_data_name_no_compiler() {
+    let _serial = serial();
+    for (name, bytes) in with_marks(false) {
+        let p = Program::from_bytes(PathBuf::from(name), bytes).expect("the image loads");
+        assert!(
+            !p.headers.overlay.is_empty(),
+            "{name}: the marks are appended"
+        );
+        let lines = borer_engine::toolchain::lines(&p, false);
+        for compiler in ["Rust", "Go,", "GCC", "Nim"] {
+            assert!(
+                lines.iter().all(|l| !l.contains(compiler)),
+                "{name}: {lines:?}"
+            );
+        }
+    }
+}
+
+/// The same marks in a loaded section are named, never high.
+///
+/// The Go header has no pclntab or Go symbol behind it, and 64 paths under
+/// 64 commits, one each, are what no build writes, so Rust reads low and
+/// says why.
+#[test]
+fn planted_marks_in_a_loaded_section_read_below_high() {
+    let _serial = serial();
+    for (name, bytes) in with_marks(true) {
+        let p = Program::from_bytes(PathBuf::from(name), bytes).expect("the image loads");
+        let lines = borer_engine::toolchain::lines(&p, false).join("\n");
+        assert!(
+            lines
+                .contains("built:   Rust, rustc commit 000000000000 (low: rustc source path at 0x")
+                && lines.contains("; paths under 64 rustc commits, one path each"),
+            "{name}: {lines}"
+        );
+        assert!(
+            lines.contains("built:   Go, go1.22.5 (medium: build information at 0x"),
+            "{name}: {lines}"
+        );
+    }
 }
 
 /// Builds a PE32 image, entered at the first byte of the first section.
