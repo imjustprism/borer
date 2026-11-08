@@ -1,5 +1,5 @@
 //! Where a function ends: a call that returns or does not, the starts
-//! that say which, and a `hlt`.
+//! that say which, a `hlt`, and the extents the file declares.
 //!
 //! A wrong end loses the code past it with no note, so each test states
 //! which bytes are the function's and which are not. Every fixture is a
@@ -377,4 +377,118 @@ fn hlt_runs_on_where_no_header_says_user_mode() {
     assert!(!a.noreturn.contains(&0x1100), "{:?}", a.noreturn);
     assert_eq!(a.function(0x1100).unwrap().end, 0x1107);
     assert_eq!(a.function(0x1000).unwrap().end, 0x100b);
+}
+
+/// Builds functions whose unwind entries declare their extents, each with
+/// a jump inside it that reads as a tail call by its target's shape.
+///
+/// `F` (0x1100..0x114a) is `-O0` code for a loop around a switch: each
+/// case ends `jmp` to the switch's end, a block that is one `jmp` on to
+/// the loop's step, and a `jmp` there reads as a thunk. `G`
+/// (0x1200..0x1213) jumps to its `abort` call, `sub rsp, 8; call abort`,
+/// which opens the way a frame does. `H` (0x1300..0x1307) tail-calls `K`
+/// (0x1340..0x1344), a leaf whose start only its extent declares; `abort`
+/// fills the one slot, through the stub at [`STUB`].
+fn declared() -> Program {
+    let code = vec![
+        (STUB, ibt_stub(STUB, GOT)),
+        (
+            0x1100,
+            vec![
+                0x55, // ASM: push rbp
+                0x48, 0x89, 0xe5, // ASM: mov rbp, rsp
+                0xc7, 0x45, 0xfc, 0x00, 0x00, 0x00, 0x00, // ASM: mov dword [rbp-4], 0
+                0xc7, 0x45, 0xf8, 0x00, 0x00, 0x00, 0x00, // ASM: mov dword [rbp-8], 0
+            ],
+        ),
+        (0x1112, jmp(0x1112, 0x113f)),
+        (
+            0x1117,
+            vec![
+                0x8b, 0x45, 0xfc, // ASM: mov eax, [rbp-4]
+                0x83, 0xf8, 0x01, // ASM: cmp eax, 1
+                0x74, 0x0a, // ASM: je 0x1129
+                0x83, 0xf8, 0x02, // ASM: cmp eax, 2
+                0x74, 0x0e, // ASM: je 0x1132
+            ],
+        ),
+        (0x1124, jmp(0x1124, 0x113b)),
+        (0x1129, vec![0x83, 0x45, 0xf8, 0x01]), // ASM: add dword [rbp-8], 1
+        (0x112d, jmp(0x112d, 0x1124)),
+        (0x1132, vec![0x83, 0x6d, 0xf8, 0x01]), // ASM: sub dword [rbp-8], 1
+        (0x1136, jmp(0x1136, 0x1124)),
+        (
+            0x113b,
+            vec![
+                0x83, 0x45, 0xfc, 0x01, // ASM: add dword [rbp-4], 1
+                0x83, 0x7d, 0xfc, 0x09, // ASM: cmp dword [rbp-4], 9
+                0x7e, 0xd2, // ASM: jle 0x1117
+                0x8b, 0x45, 0xf8, // ASM: mov eax, [rbp-8]
+                0x5d, // ASM: pop rbp
+                0xc3, // ASM: ret
+            ],
+        ),
+        (
+            0x1200,
+            vec![
+                0x48, 0x85, 0xff, // ASM: test rdi, rdi
+                0x75, 0x02, // ASM: jne 0x1207
+                0xeb, 0x03, // ASM: jmp 0x120a
+                0x8b, 0x07, // ASM: mov eax, [rdi]
+                0xc3, // ASM: ret
+                0x48, 0x83, 0xec, 0x08, // ASM: sub rsp, 8
+            ],
+        ),
+        (0x120e, call(0x120e, STUB)),
+        (0x1300, [vec![0x89, 0xf8], jmp(0x1302, 0x1340)].concat()), // ASM: mov eax, edi
+        (0x1340, vec![0x83, 0xc0, 0x01, 0xc3]),                     // ASM: add eax, 1; ret
+    ];
+    let mut p = image(&code, 0x1100, &["abort"]);
+    p.function_ranges = vec![
+        (0x1100, 0x114a),
+        (0x1200, 0x1213),
+        (0x1300, 0x1307),
+        (0x1340, 0x1344),
+    ];
+    p
+}
+
+/// A jump inside the extent an unwind entry declares stays the function's
+/// own, whatever its target opens with.
+///
+/// `F`'s cases jumped to a `jmp` and `G` to its `abort` call; each was
+/// read as a tail call, so `F` ended its loop in `return sub_1124();` and
+/// `G` called a `sub_120a` that only aborts, as 914 x64 functions of the
+/// benchmark's tree split inside their own unwind entries.
+#[test]
+fn a_jump_inside_a_declared_extent_stays_the_functions_own() {
+    let p = declared();
+    let a = Analysis::compute(&p);
+    for (entry, end, piece) in [(0x1100, 0x114a, "sub_1124"), (0x1200, 0x1213, "sub_120a")] {
+        let f = a.function(entry).unwrap();
+        assert_eq!(f.end, end, "{entry:#x} split: {f:?}");
+        let inside: Vec<u64> = a
+            .functions
+            .iter()
+            .map(|g| g.entry)
+            .filter(|&g| g > entry && g < end)
+            .collect();
+        assert!(inside.is_empty(), "{entry:#x} split at {inside:x?}");
+        let text = decompiled(&p, entry);
+        assert!(!text.contains(piece), "{text}");
+    }
+    let text = decompiled(&p, 0x1200);
+    assert!(text.contains("abort()"), "{text}");
+}
+
+/// A jump to the start of another declared extent stays a tail call, though
+/// its target opens like no function: the extent says one starts there.
+#[test]
+fn a_jump_to_another_declared_start_stays_a_tail_call() {
+    let p = declared();
+    let a = Analysis::compute(&p);
+    let h = a.function(0x1300).unwrap();
+    assert_eq!(h.end, 0x1307, "{h:?}");
+    assert!(h.callees.contains(&0x1340), "{h:?}");
+    assert!(a.function(0x1340).is_some(), "{:?}", a.functions);
 }

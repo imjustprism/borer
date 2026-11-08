@@ -6,7 +6,7 @@ use super::helpers::frame_helper_name;
 use super::sets::AddrSet;
 use super::{Cursors, decode_at, near_target, seh_scope_roots, string_at};
 use crate::isa::x86::{Code, FlowControl, Instruction, Mnemonic, OpKind, Register};
-use crate::program::Program;
+use crate::program::{BinaryFormat, Program};
 
 /// Tells whether the code at `va` is padding a call never returns into.
 ///
@@ -464,9 +464,9 @@ pub(super) fn slot_jump(instr: &Instruction) -> Option<u64> {
 /// Pointer and padding seeds are guesses; one that lands on an `int3`, on
 /// bytes that do not decode, inside a procedure linkage table (the GOT's
 /// lazy-binding pointers aim at the `push` after each stub's jump), or
-/// inside a function an x64 exception table declares ([`declared_interior`]:
-/// a catch funclet returns its continuation there, `lea rax, [label]`) is
-/// not a function.
+/// inside a function the file declares ([`declared_interior`]: a catch
+/// funclet returns its continuation there, `lea rax, [label]`) is not a
+/// function.
 ///
 /// # Arguments
 ///
@@ -504,7 +504,7 @@ pub(super) fn plausible_entry(program: &Program, bitness: u32, va: u64) -> bool 
 pub(super) fn after_padding(program: &Program, bitness: u32, va: u64) -> bool {
     /// The alignment a compiler gives a function on x64.
     const FUNCTION_ALIGN: u64 = 16;
-    if program.format != crate::program::BinaryFormat::Pe || va < 2 {
+    if program.format != BinaryFormat::Pe || va < 2 {
         return false;
     }
     let two = program.read_va(va - 2, 2) == Some(&[0xcc, 0xcc][..]);
@@ -521,15 +521,20 @@ pub(super) fn after_padding(program: &Program, bitness: u32, va: u64) -> bool {
     }
 }
 
-/// Whether an x64 exception table puts `va` inside a function it declares,
-/// past its start, or in one of a function's separated chunks.
+/// Whether the file puts `va` inside a function it declares, past its
+/// start.
 ///
-/// No function starts there, so a jump there is the function's own: the
+/// The extents are an x64 exception table's, with the separated chunks it
+/// chains, and an ELF's unwind entries and sized function symbols. No
+/// function starts inside one, so a jump there is the function's own: the
 /// shapes that otherwise read as a tail call - a jump after the frame's
 /// release, to code that opens like a function, over padding - are only
-/// guesses the table overrules. MSVC threads jumps through shared `jmp`
+/// guesses the extents overrule. MSVC threads jumps through shared `jmp`
 /// blocks and stores to stack slots (`mov [rsp+0x30], eax`), and both read
-/// as a function's opening.
+/// as a function's opening; GCC's `-O0` code jumps to blocks that only
+/// jump on, and its `-O2` code to an `abort` call behind `sub rsp, 8`. The
+/// start of another declared function is no interior, so a jump there
+/// stays a tail call.
 ///
 /// # Arguments
 ///
@@ -545,10 +550,15 @@ pub(super) fn declared_interior(program: &Program, va: u64) -> bool {
             va < hi && (at_start || va > lo)
         }
     }
-    program.format == crate::program::BinaryFormat::Pe
-        && program.is_64
-        && (inside(&program.function_ranges, va, false)
-            || inside(&program.headers.chained_chunks, va, true))
+    match program.format {
+        BinaryFormat::Pe => {
+            program.is_64
+                && (inside(&program.function_ranges, va, false)
+                    || inside(&program.headers.chained_chunks, va, true))
+        }
+        BinaryFormat::Elf => inside(&program.function_ranges, va, false),
+        BinaryFormat::MachO | BinaryFormat::Archive | BinaryFormat::Raw => false,
+    }
 }
 
 /// Whether the instruction at `va` addresses memory through the frame
