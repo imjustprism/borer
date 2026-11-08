@@ -981,6 +981,20 @@ impl BorerServer {
         })
     }
 
+    /// Lists the strings of the program that address an AI model.
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - Text a row's mark or string contains, `offset=<n>` and
+    ///   `limit=<n>`, comma-separated; empty for every row.
+    ///
+    /// # Errors
+    ///
+    /// When no binary is loaded, or the offset or the limit does not read.
+    pub(crate) fn injection_text(&self, spec: &str) -> Result<String, ErrorData> {
+        self.with_program(|p| borer_engine::strings::injection_tsv(p, spec))
+    }
+
     /// Lists every call site of a function or import with its arguments.
     ///
     /// # Arguments

@@ -83,32 +83,15 @@ impl StringRow {
     ///
     /// A walked run holds only printable ASCII, which is UTF-8 as it
     /// stands, so a span's whole text borrows its bytes with no copy at
-    /// all - the zero-copy path a filter takes.
+    /// all - the zero-copy path a filter takes
+    /// ([`RawStringSpan::whole_text`]).
     ///
     /// # Arguments
     ///
     /// * `bytes` - The program's bytes, which a span indexes.
     pub(crate) fn full_text<'a>(&'a self, bytes: &'a [u8]) -> std::borrow::Cow<'a, str> {
         match self {
-            StringRow::Span(s) => match s.encoding {
-                borer_engine::strings::Encoding::Ascii => {
-                    let raw = s.raw_bytes(bytes);
-                    std::str::from_utf8(raw).map_or_else(
-                        |_| std::borrow::Cow::Owned(String::from_utf8_lossy(raw).into_owned()),
-                        std::borrow::Cow::Borrowed,
-                    )
-                }
-                _ => std::borrow::Cow::Owned(
-                    String::from_utf8_lossy(
-                        &s.raw_bytes(bytes)
-                            .iter()
-                            .step_by(2)
-                            .copied()
-                            .collect::<Vec<u8>>(),
-                    )
-                    .into_owned(),
-                ),
-            },
+            StringRow::Span(s) => s.whole_text(bytes),
             StringRow::Hit(h) => h.full_text(bytes),
         }
     }

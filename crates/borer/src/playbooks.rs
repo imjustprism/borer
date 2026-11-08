@@ -143,7 +143,7 @@ const WORKFLOW: &str = "borer: agent-native binary analysis (x86/x64 and arm64 P
      point at next (`# next: borer://solve/<addr>`); {find_function_by_string}, {strings}, \
      {symbols}, {search}, {find_crypto_constants} and {xrefs} locate code; {disassemble_function}, {cfg} and \
      {callgraph} go deeper; {read} and {hexdump} read data. Every `address` accepts \
-     0x-hex (always the address), a name (function, import, overlay name), or bare \
+     0x-hex (always the address), a name (function, import, overlay), or bare \
      decimal digits; a name wins over bare text that also reads as a number, and one \
      nothing matches is answered with the nearest names. {set_name}, {set_comment} \
      (one opening with ? is an open question) and {set_type} (user structs whose \
@@ -212,6 +212,7 @@ const INTENTS: &[(&str, &[&str])] = &[
             "capabilities",
             "dynimports",
             "iocs",
+            "injection",
             "hashes",
         ],
     ),

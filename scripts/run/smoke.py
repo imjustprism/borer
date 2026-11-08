@@ -443,6 +443,7 @@ assert uris == [
     "borer://hidden",
     "borer://index",
     "borer://info",
+    "borer://injection",
     "borer://iocs",
     "borer://map",
     "borer://messages",

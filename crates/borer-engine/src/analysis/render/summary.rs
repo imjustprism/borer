@@ -103,8 +103,9 @@ fn string_literal_in(p: &Program, va: u64, cap: usize, in_code: bool) -> Option<
     literal_text(wstr_text_at(p, start, 4, cap)).map(|t| (start, format!("L\"{t}\"")))
 }
 
-/// Returns a literal's text with its tabs and line ends escaped, when it
-/// holds at least four printable characters.
+/// Returns a literal's text with its tabs and line ends escaped and its
+/// model control tokens broken ([`crate::text::fenced`]), when it holds at
+/// least four printable characters.
 ///
 /// A literal runs over the control characters it can escape, so the words
 /// after a newline (`L"Not implemented.\nUse command line ..."`) are its
@@ -126,7 +127,8 @@ fn literal_text(read: Option<(usize, String)>) -> Option<String> {
     const PRINTABLE_MIN: usize = 4;
     let (_, t) = read?;
     (t.bytes().filter(|&b| crate::strings::printable(b)).count() >= PRINTABLE_MIN).then(|| {
-        t.replace('\t', "\\t")
+        crate::text::fenced(&t)
+            .replace('\t', "\\t")
             .replace('\r', "\\r")
             .replace('\n', "\\n")
     })
