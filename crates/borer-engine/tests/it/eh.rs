@@ -176,6 +176,45 @@ fn a_guarded_region_names_its_values_as_variables() {
     }
 }
 
+/// An `__except` body that loops on its own test waits only while the
+/// test holds: the runtime resumes it with whatever the registers hold,
+/// not only what its back edge brings.
+///
+/// The body is `L: cmp ecx, 5; je L; mov eax, -1`. Its one predecessor is
+/// its own back edge, and read as the only way in, `ecx == 5` held on
+/// entry and the `return` after the loop was dropped.
+///
+/// # Panics
+///
+/// When the loop's test or the `return` after it is missing.
+#[test]
+fn an_except_body_s_loop_is_entered_with_any_register() {
+    let code: &[(usize, &[u8])] = &[
+        (0x1000, &[0x48, 0x83, 0xec, 0x28]),       // ASM: sub rsp, 0x28
+        (0x1004, &[0xe8, 0xf7, 0x00, 0x00, 0x00]), // ASM: call 0x1100
+        (0x1009, &[0x48, 0x83, 0xc4, 0x28]),       // ASM: add rsp, 0x28
+        (0x100d, &[0xc3]),                         // ASM: ret
+        (0x1010, &[0x83, 0xf9, 0x05]),             // ASM: cmp ecx, 5
+        (0x1013, &[0x74, 0xfb]),                   // ASM: je 0x1010
+        (0x1015, &[0xb8, 0xff, 0xff, 0xff, 0xff]), // ASM: mov eax, -1
+        (0x101a, &[0x48, 0x83, 0xc4, 0x28]),       // ASM: add rsp, 0x28
+        (0x101e, &[0xc3]),                         // ASM: ret
+    ];
+    let text = decompiled(
+        &seh64(code, [0x1004, 0x1009, 0x1010], 0x101f),
+        BASE + 0x1000,
+    );
+    in_order(
+        &text,
+        &[
+            "} __except (EXCEPTION_EXECUTE_HANDLER) {\n",
+            "while (",
+            " == 5);\n",
+            "return 0xffffffff;\n",
+        ],
+    );
+}
+
 /// Builds a 32-bit image whose function registers `_except_handler4`
 /// inline, enters `__try` 0 around a call by storing its index at
 /// `[ebp-4]`, and leaves it by storing `-2`.

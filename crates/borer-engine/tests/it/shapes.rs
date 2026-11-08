@@ -1,8 +1,9 @@
 //! Control-flow shapes written as a source spells them.
 //!
 //! A jump table's bound check is the `switch`'s `default`, an endless
-//! loop's way out follows the loop, and a loop that only computes its own
-//! test is the empty `while (test);`.
+//! loop's way out follows the loop, a loop that only computes its own
+//! test is the empty `while (test);`, and a loop the function starts with
+//! is entered from the caller as well as from its back edge.
 
 #![expect(
     clippy::missing_panics_doc,
@@ -10,7 +11,9 @@
 )]
 
 use borer_engine::analysis::decompile::traces::{Structure, check_structure};
+use borer_engine::analysis::render::function_summary;
 use borer_engine::analysis::{Analysis, Overlay};
+use borer_engine::program::{Arch, BinaryFormat, Program, Section};
 
 use crate::decompiled::{decompiled, program64, program64_with_data, replays_clean, runs_agree};
 
@@ -206,4 +209,157 @@ fn an_endless_loop_s_way_out_follows_it() {
         "{text}"
     );
     replays_clean(&p, &a, &[F]);
+}
+
+/// A loop the function starts with waits only while its test holds: the
+/// caller enters it with any argument, not only the one its back edge
+/// brings.
+///
+/// `L: cmp ecx,5; je L; xor eax,eax; ret` returns 0 for every argument
+/// but 5, and `E: cmp ecx,5; jne R; add edx,1; cmp ecx,5; je E; R: mov
+/// eax,edx; ret` returns its second argument for every first but 5. Each
+/// entry's one predecessor is a back edge on `ecx == 5`: read as the only
+/// way in, it folded the entry's test, and neither text ever returned.
+#[test]
+fn a_loop_at_the_entry_is_entered_with_any_argument() {
+    let self_loop: &[u8] = &[
+        0x83, 0xf9, 0x05, // ASM: cmp ecx,5
+        0x74, 0xfb, // ASM: je 0x0
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xc3, // ASM: ret
+    ];
+    let text = runs_agree(&program64(self_loop), F);
+    assert!(
+        text.contains("uint32_t sub_140001000(uint32_t a1)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("\nwhile ((uint32_t)a1 == 5);\nreturn 0;\n"),
+        "{text}"
+    );
+    let two_blocks: &[u8] = &[
+        0x83, 0xf9, 0x05, // ASM: cmp ecx,5
+        0x75, 0x08, // ASM: jne 0xd
+        0x83, 0xc2, 0x01, // ASM: add edx,1
+        0x83, 0xf9, 0x05, // ASM: cmp ecx,5
+        0x74, 0xf3, // ASM: je 0x0
+        0x89, 0xd0, // ASM: mov eax,edx
+        0xc3, // ASM: ret
+    ];
+    let text = runs_agree(&program64(two_blocks), F);
+    assert!(
+        text.contains("\nwhile ((uint32_t)a1 == 5) {\n  var1 += 1;\n}\nreturn var1;\n"),
+        "{text}"
+    );
+}
+
+/// The way out of a loop at the entry reaches every answer read off the
+/// text: the header's effects, the summary, and a caller's copy of the
+/// body.
+///
+/// `g: sub rsp,0x28; call f; mov eax,7; add rsp,0x28; ret` calls `f: L:
+/// cmp ecx,5; je L; mov byte [rdx+8],1; xor eax,eax; ret`. With the exit
+/// dropped, `f` read `void`, wrote nothing, and `g` inlined it as a loop
+/// that never ends.
+#[test]
+fn a_loop_at_the_entry_keeps_its_way_out_in_every_answer() {
+    let mut code = vec![0xcc; 0x2c];
+    code[..0x13].copy_from_slice(&[
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp,0x28
+        0xe8, 0x17, 0x00, 0x00, 0x00, // ASM: call 0x20
+        0xb8, 0x07, 0x00, 0x00, 0x00, // ASM: mov eax,7
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp,0x28
+        0xc3, // ASM: ret
+    ]);
+    code[0x20..].copy_from_slice(&[
+        0x83, 0xf9, 0x05, // ASM: cmp ecx,5
+        0x74, 0xfb, // ASM: je 0x20
+        0xc6, 0x42, 0x08, 0x01, // ASM: mov byte [rdx+8],1
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xc3, // ASM: ret
+    ]);
+    let p = program64(&code);
+    let f = runs_agree(&p, F + 0x20);
+    assert!(f.contains("\n// effects: writes a2+8\n"), "{f}");
+    let a = Analysis::compute(&p);
+    let summary = function_summary(&p, &a, &Overlay::default(), F + 0x20).unwrap_or_default();
+    assert!(summary.contains("\neffects:  writes a2+8\n"), "{summary}");
+    let g = decompiled(&p, F);
+    assert!(
+        g.contains("{ while ((uint32_t)a1 == 5); *(uint8_t*)(a2 + 8) = 1; return 0; }"),
+        "{g}"
+    );
+    assert!(g.contains("\nreturn 7;\n"), "{g}");
+}
+
+/// A loop at an arm64 or A32 entry waits only while its test holds too:
+/// the lifters share the assumption a block reads under.
+///
+/// `L: cmp w0,#5; b.eq L; mov w0,#0; ret` and `L: cmp r0,#5; beq L; mov
+/// r0,#0; bx lr` each read `while (1) { }`, the return dropped.
+#[test]
+fn an_arm_loop_at_the_entry_is_entered_with_any_argument() {
+    let a64: [u32; 4] = [
+        0x7100_141f, // ASM: cmp w0, #0x5
+        0x54ff_ffe0, // ASM: b.eq 0x401000
+        0x5280_0000, // ASM: mov w0, #0x0
+        0xd65f_03c0, // ASM: ret
+    ];
+    let a32: [u32; 4] = [
+        0xe350_0005, // ASM: cmp r0, #0x5
+        0x0aff_fffd, // ASM: beq 0x401000
+        0xe3a0_0000, // ASM: mov r0, #0x0
+        0xe12f_ff1e, // ASM: bx lr
+    ];
+    for (arch, words, want) in [
+        (
+            Arch::Arm64,
+            a64,
+            "\nwhile ((uint32_t)a1 == 5);\nreturn 0;\n",
+        ),
+        (Arch::Arm, a32, "\nwhile (a1 == 5);\nreturn 0;\n"),
+    ] {
+        let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let text = decompiled(&crate::raw::image(arch, &code, &[]), 0x40_1000);
+        assert!(text.contains(want), "{text}");
+    }
+}
+
+/// A function that only waits on a global is the empty `while` of its
+/// test, entered with whatever the global holds.
+///
+/// `L: cmp byte [rip+G],0; je L; xor eax,eax; ret`, `G` a byte of a
+/// writable `.data`, is `while (!ready);`. The loop is the entry, so its
+/// back edge's `G == 0` is no fact on the way in: taken as one, the text
+/// read `while (1) { }`, never returned and never read `G`.
+#[test]
+fn a_wait_on_a_global_at_the_entry_is_an_empty_while() {
+    let mut bytes = vec![0u8; 0x2000];
+    bytes[..12].copy_from_slice(&[
+        0x80, 0x3d, 0xf9, 0x0f, 0x00, 0x00, 0x00, // ASM: cmp byte [rip+0xff9],0
+        0x74, 0xf7, // ASM: je 0x0
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xc3, // ASM: ret
+    ]);
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0x1_4000_0000,
+        Some(F),
+        vec![
+            Section::mapped(".text", F, 0, 0x1000, false, true),
+            Section::mapped(".data", F + 0x1000, 0x1000, 0x1000, true, false),
+        ],
+    );
+    p.format = BinaryFormat::Pe;
+    let text = decompiled(&p, F);
+    assert!(
+        text.contains("\n// effects: reads g8_140002000\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("\nwhile (g8_140002000 == 0);\nreturn 0;\n"),
+        "{text}"
+    );
+    replays_clean(&p, &Analysis::compute(&p), &[F]);
 }

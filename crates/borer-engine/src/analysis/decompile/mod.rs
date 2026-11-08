@@ -1696,7 +1696,7 @@ fn decompile_in<L: Lifter>(
         }
     }
     live.slots = Some(slot_liveness(&recorded, &succs_eh));
-    let assumes = block_assumptions::<L>(&code, &preds, &recorded);
+    let assumes = block_assumptions::<L>(&ctx, &code, &preds, &recorded);
     let (in_envs, processed, recorded) =
         dataflow::<L>(&mut ctx, &code, &succs, &preds, &live, &assumes);
     lap.end(crate::timing::Step::Lift);

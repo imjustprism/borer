@@ -115,16 +115,23 @@ pub(super) fn assumption(branch: &Branch, succ: u64) -> Option<(Key, u64)> {
 /// Computes the assumption each block may use while it executes.
 ///
 /// A block entered from exactly one predecessor through an equality branch
-/// knows the compared variable's value ([`assumption`]). The fact is applied
+/// knows the compared variable's value ([`assumption`]). The entry block is
+/// entered by its caller too, and a block the exception runtime resumes at
+/// by the runtime, neither of them an edge: such a block knows nothing from
+/// its one predecessor (`L: cmp ecx, 5; je L` at the entry is entered with
+/// any `ecx`, not only the 5 its back edge brings). The fact is applied
 /// when values are read inside the block, never stored in the environment:
 /// stored, it would look like a value to write out at the next join.
 ///
 /// # Arguments
 ///
+/// * `ctx` - Per-function state: the entry block and the blocks the
+///   exception runtime enters.
 /// * `code` - Decoded instructions per block (the first gives the start address).
 /// * `preds` - Predecessor block indices per block.
 /// * `recorded` - The previous dataflow round's block records (their branches).
 pub(super) fn block_assumptions<L: Lifter>(
+    ctx: &Ctx<'_>,
     code: &[Vec<L::Insn>],
     preds: &[Vec<usize>],
     recorded: &[SlotRec],
@@ -134,6 +141,9 @@ pub(super) fn block_assumptions<L: Lifter>(
             let [p] = preds[b].as_slice() else {
                 return None;
             };
+            if b == ctx.entry_block || ctx.eh_roots.iter().any(|r| r.0 == b) {
+                return None;
+            }
             let start = L::start(code[b].first()?);
             assumption(recorded[*p].branch.as_ref()?, start)
         })
