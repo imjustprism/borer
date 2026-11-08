@@ -1,9 +1,14 @@
 //! Loop recovery on the finished text: `while` and `for` from the guarded
 //! `do`/`while` a compiler's loop inversion leaves, and `for` from a
 //! counted `while`.
+//!
+//! A loop that only computes its own test reads as `while (test);`
+//! ([`spin`]).
 
 use super::ctext::{Ast, Bin, expression, named_type, tokens as c_tokens};
 use super::*;
+
+mod spin;
 
 /// Lines the scan for a later write of a moved variable reads before it
 /// gives up.
@@ -25,6 +30,8 @@ const DEAD_SCAN_MAX: usize = 200;
 /// that continues at its own level
 /// keeps its form when a `for` would run the step on the way to the test
 /// where the `do` did not, and no rewrite takes a loop that holds a label.
+/// A loop that only computes its own test is `while (test);`
+/// ([`spin::spins`]).
 ///
 /// # Arguments
 ///
@@ -44,6 +51,7 @@ pub(super) fn recover_loops(lines: &mut Vec<String>) -> bool {
             || returning_while(lines, k)
             || exit_arm(lines, k)
             || shared_return(lines, k)
+            || spin::spins(lines, k)
         {
             changed = true;
             continue;
@@ -925,7 +933,7 @@ mod tests {
     /// # Returns
     ///
     /// The text after the rewrites.
-    fn run(body: &str) -> String {
+    pub(super) fn run(body: &str) -> String {
         let mut lines: Vec<String> = body.lines().map(str::to_owned).collect();
         recover_loops(&mut lines);
         lines.join("\n") + "\n"

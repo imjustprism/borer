@@ -1,19 +1,41 @@
 //! Control-flow shapes written as a source spells them.
 //!
-//! A jump table's bound check is the `switch`'s `default`, and an endless
-//! loop's way out follows the loop.
+//! A jump table's bound check is the `switch`'s `default`, an endless
+//! loop's way out follows the loop, and a loop that only computes its own
+//! test is the empty `while (test);`.
 
 #![expect(
     clippy::missing_panics_doc,
     reason = "assertions are the point of a test"
 )]
 
-use borer_engine::analysis::Analysis;
+use borer_engine::analysis::decompile::traces::{Structure, check_structure};
+use borer_engine::analysis::{Analysis, Overlay};
 
-use crate::decompiled::{decompiled, program64, program64_with_data, replays_clean};
+use crate::decompiled::{decompiled, program64, program64_with_data, replays_clean, runs_agree};
 
 /// Where the hand-assembled functions start.
 const F: u64 = 0x1_4000_1000;
+
+/// Decompiles `code` as a 64-bit function, requires its text to hold
+/// `want`, and requires the structure check to read the text's paths as
+/// the binary's, the empty `while` a loop.
+///
+/// # Arguments
+///
+/// * `code` - The function's bytes, placed at [`F`].
+/// * `want` - Lines the text holds, their newlines included.
+fn spins_as(code: &[u8], want: &str) {
+    let p = program64(code);
+    let text = decompiled(&p, F);
+    assert!(text.contains(want), "{text}");
+    let a = Analysis::compute(&p);
+    assert_eq!(
+        check_structure(&p, &a, &Overlay::default(), F, &text),
+        Structure::Agrees,
+        "{text}"
+    );
+}
 
 /// The bound check in front of a jump table is the `switch`'s `default`.
 ///
@@ -51,6 +73,92 @@ fn a_jump_table_bound_is_the_switch_default() {
     assert!(text.contains("default:"), "{text}");
     assert!(!text.contains("if ("), "{text}");
     replays_clean(&p, &a, &[F]);
+}
+
+/// A loop that polls a load with nothing in its body is the empty `while`
+/// a source spells it as.
+///
+/// `L: mov eax,[0x40023808]; test al,2; je L; xor eax,eax; ret` waits for
+/// bit 1 of a device word: the structurer's empty `do` reads as `while
+/// (test);`.
+#[test]
+fn a_wait_on_a_load_is_an_empty_while() {
+    let code: &[u8] = &[
+        0x8b, 0x04, 0x25, 0x08, 0x38, 0x02, 0x40, // ASM: mov eax,[0x40023808]
+        0xa8, 0x02, // ASM: test al,2
+        0x74, 0xf5, // ASM: je 0x0
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xc3, // ASM: ret
+    ];
+    spins_as(
+        code,
+        "\nwhile ((*(uint32_t*)0x40023808 & 2) == 0);\nreturn 0;\n",
+    );
+}
+
+/// A loop that only calls for the value its test reads is the empty
+/// `while` with the call standing where its result did.
+///
+/// `sub rsp,0x28; L: call G; test al,1; je L; xor eax,eax; add rsp,0x28;
+/// ret`, `G` loading a device word: the test alone reads the register the
+/// call sets.
+#[test]
+fn a_wait_on_a_call_is_an_empty_while() {
+    let code: &[u8] = &[
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp,0x28
+        0xe8, 0x0b, 0x00, 0x00, 0x00, // ASM: call 0x14
+        0xa8, 0x01, // ASM: test al,1
+        0x74, 0xf7, // ASM: je 0x4
+        0x31, 0xc0, // ASM: xor eax,eax
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp,0x28
+        0xc3, // ASM: ret
+        0x8b, 0x04, 0x25, 0x08, 0x38, 0x02, 0x40, // ASM: mov eax,[0x40023808]
+        0xc3, // ASM: ret
+    ];
+    spins_as(code, "\nwhile ((sub_140001014() & 1) == 0);\nreturn 0;\n");
+}
+
+/// An endless loop whose one way out returns is the empty `while` of the
+/// negated exit test, the exit's statements after it.
+///
+/// `L: test ecx,ecx; je X; mov eax,[0x40000000]; cmp eax,[0x40000004]; je
+/// L; X: mov byte [0x40000008],1; ret` waits while its argument is set and
+/// two words agree, then stores once.
+#[test]
+fn a_wait_left_by_one_return_is_an_empty_while_then_the_exit() {
+    let code: &[u8] = &[
+        0x85, 0xc9, // ASM: test ecx,ecx
+        0x74, 0x10, // ASM: je 0x14
+        0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x40, // ASM: mov eax,[0x40000000]
+        0x3b, 0x04, 0x25, 0x04, 0x00, 0x00, 0x40, // ASM: cmp eax,[0x40000004]
+        0x74, 0xec, // ASM: je 0x0
+        0xc6, 0x04, 0x25, 0x08, 0x00, 0x00, 0x40, 0x01, // ASM: mov byte [0x40000008],1
+        0xc3, // ASM: ret
+    ];
+    spins_as(
+        code,
+        "\nwhile (a1 != 0 && *(uint32_t*)0x40000000 == *(uint32_t*)0x40000004);\n*(uint8_t*)0x40000008 = 1;\n",
+    );
+}
+
+/// The empty `while` runs as the loop it is: the final text of a wait on
+/// a byte the argument points at returns wherever the binary does.
+///
+/// `L: test byte [rcx],1; je L; xor eax,eax; ret` returns 0 once bit 0
+/// of the byte is set and waits for it forever otherwise.
+#[test]
+fn an_empty_while_runs_as_the_loop() {
+    let code: &[u8] = &[
+        0xf6, 0x01, 0x01, // ASM: test byte [rcx],1
+        0x74, 0xfb, // ASM: je 0x0
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xc3, // ASM: ret
+    ];
+    let text = runs_agree(&program64(code), F);
+    assert!(
+        text.contains("\nwhile ((*(uint8_t*)a1 & 1) == 0);\nreturn 0;\n"),
+        "{text}"
+    );
 }
 
 /// What an endless loop runs on its one way out is written after it.

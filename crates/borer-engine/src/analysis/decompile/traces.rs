@@ -788,7 +788,7 @@ pub(super) enum Stmt {
     If(usize, Vec<Stmt>, Vec<Stmt>),
     /// `while (1)`.
     Loop(Vec<Stmt>),
-    /// `while (c)` on this line.
+    /// `while (c)` on this line, its body empty for `while (c);`.
     While(usize, Vec<Stmt>),
     /// `for (init; c; step)` on this line.
     For(usize, Vec<Stmt>),
@@ -921,6 +921,11 @@ impl<'t> Parser<'t> {
             let body = self.block(depth + 1)?;
             self.closer();
             return Ok(Stmt::While(line, body));
+        }
+        if t.starts_with("while (")
+            && matching_paren(t, 6).is_some_and(|c| t.get(c + 1..) == Some(";"))
+        {
+            return Ok(Stmt::While(line, Vec::new()));
         }
         if t.starts_with("for (") && t.ends_with(") {") {
             let body = self.block(depth + 1)?;
