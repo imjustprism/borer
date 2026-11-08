@@ -7,11 +7,12 @@ use std::sync::Arc;
 use super::frame::{FrameFacts, FrameStep, frame_step};
 use super::guess::{
     after_padding, byte_add, declared_interior, int3_end, is_padding, jumps_back, misplaced_site,
-    mnemonic_name, odd_instruction, opens_a_function, opens_on_frame, plausible_entry,
+    mnemonic_name, odd_instruction, opens_a_function, opens_on_frame, past_endbr, plausible_entry,
     prologue_like, slot_jump, thunk_slot,
 };
 use super::helpers::{
     CHKSTK_X86, call_lands, call_slot, epilog_helper_name, exits_with_status, frame_helper_name,
+    sets_nonzero_status,
 };
 use super::seeds::{DataRef, record_data_refs};
 use super::sets::{AddrSet, Covered};
@@ -99,9 +100,10 @@ pub(super) struct Walked {
     /// [eax], al` or any of the rest. A byte add alone does not outweigh a
     /// pointer or relocation naming a start.
     pub(super) surely_data: bool,
-    /// Call targets found to never return: the call is followed by another
-    /// function's start, which no returning call can be.
-    pub(super) found_noreturn: BTreeSet<u64>,
+    /// Call targets found to never return, each with the start right after
+    /// its call: the call is followed by another function's start, which no
+    /// returning call can be.
+    pub(super) found_noreturn: BTreeSet<(u64, u64)>,
     /// Call targets that may never return: the call is followed by `int3`
     /// padding, by a `ud2` trap, or by bytes that do not decode, which a
     /// returning call in an unreachable path can be as well.
@@ -233,11 +235,16 @@ pub(super) struct WalkState<'a> {
     /// learned callee no walk ever followed, each unless its own code is
     /// seen to return, and every function whose own code never returns.
     pub(super) noreturn: Arc<AddrSet>,
-    /// Callees some walk found a function start right after, held until
-    /// the round ends and checked against their own code: the call site
-    /// never returns, and the callee may not either, or may be a dispatcher
-    /// that returns everywhere else ([`WalkState::can_return`]).
-    pub(super) claimed_noreturn: BTreeSet<u64>,
+    /// Callees some walk found a function start right after, each with that
+    /// start, held until the round ends and checked against their own code
+    /// and the start's evidence: the call site never returns, and the
+    /// callee may not either, or may be a dispatcher that returns everywhere
+    /// else ([`WalkState::can_return`]).
+    pub(super) claimed_noreturn: BTreeSet<(u64, u64)>,
+    /// The function starts the file declares, sorted: the entry point, the
+    /// symbols, the unwind and symbol extents and the funclets
+    /// ([`crate::analysis::seeds`]).
+    pub(super) declared: Vec<u64>,
     /// `__except` filters and handlers some function's scope table claims:
     /// the function's own code, never a seed.
     pub(super) handlers: FxHashSet<u64>,
@@ -520,18 +527,9 @@ impl WalkState<'_> {
     ///
     /// * `va` - The guessed entry.
     fn import_thunk(&self, va: u64) -> bool {
-        let program = self.worker.cursors.program;
-        let bitness = self.worker.cursors.bitness;
-        let Some(mut first) = decode_at(program, bitness, va) else {
-            return false;
-        };
-        if matches!(first.mnemonic(), Mnemonic::Endbr64 | Mnemonic::Endbr32) {
-            let Some(next) = decode_at(program, bitness, first.next_ip()) else {
-                return false;
-            };
-            first = next;
-        }
-        slot_jump(&first).is_some_and(|slot| self.import_slots.contains(&slot))
+        past_endbr(self.worker.cursors.program, self.worker.cursors.bitness, va)
+            .and_then(|i| slot_jump(&i))
+            .is_some_and(|slot| self.import_slots.contains(&slot))
     }
 
     /// Walks every queued entry, then re-walks functions whose walk followed
@@ -580,11 +578,22 @@ impl WalkState<'_> {
     /// found from padding seeds, one of them inside an instruction. A callee
     /// whose fall-through some walk followed returns; the rest, seen only
     /// ever followed by padding, do not.
+    ///
+    /// A start only a jump's shape names ([`WalkState::evidenced`]) is as
+    /// weak: an `-O0` block opening with a `jmp`, reached by a jump, read as
+    /// a tail call, and rsyslogd's `asyncWriterThread` then ended at its call
+    /// to `pthread_mutex_lock`, which every caller in turn ended at.
     pub(super) fn promote_noreturn(&mut self) {
-        let claimed: Vec<u64> = std::mem::take(&mut self.claimed_noreturn)
-            .into_iter()
-            .filter(|&t| !self.noreturn.contains(t) && !self.can_return(t))
-            .collect();
+        let mut claimed: Vec<u64> = Vec::new();
+        for (t, at) in std::mem::take(&mut self.claimed_noreturn) {
+            if self.evidenced(at) {
+                claimed.push(t);
+            } else {
+                *self.learned_noreturn.entry(t).or_default() += 1;
+            }
+        }
+        claimed.dedup();
+        claimed.retain(|&t| !self.noreturn.contains(t) && !self.can_return(t));
         self.mark_noreturn(claimed);
         let promoted: Vec<u64> = self
             .learned_noreturn
@@ -696,7 +705,8 @@ impl WalkState<'_> {
 
     /// Tells whether the call ending a block reaches a function known never
     /// to return, directly, through a linker's thunk, or through an import's
-    /// slot.
+    /// slot, or reaches glibc's `error` through its thunk with a nonzero
+    /// constant status the block sets ([`sets_nonzero_status`]).
     ///
     /// # Arguments
     ///
@@ -705,6 +715,7 @@ impl WalkState<'_> {
     fn calls_noreturn(&self, start: u64, end: u64) -> bool {
         let program = self.worker.cursors.program;
         let bitness = self.worker.cursors.bitness;
+        let mut before = Vec::new();
         let mut va = start;
         let call = loop {
             let Some(i) = decode_at(program, bitness, va) else {
@@ -716,6 +727,7 @@ impl WalkState<'_> {
             if i.next_ip() == end {
                 break i;
             }
+            before.push(i);
             va = i.next_ip();
         };
         if call.flow_control() != FlowControl::Call {
@@ -727,19 +739,14 @@ impl WalkState<'_> {
                 && self.noreturn_slots.contains(&call.memory_displacement64());
         }
         let t = call.near_branch_target();
-        if self.noreturn.contains(t) {
-            return true;
-        }
-        let Some(mut first) = decode_at(program, bitness, t) else {
-            return false;
-        };
-        if matches!(first.mnemonic(), Mnemonic::Endbr64 | Mnemonic::Endbr32) {
-            let Some(next) = decode_at(program, bitness, first.next_ip()) else {
-                return false;
-            };
-            first = next;
-        }
-        slot_jump(&first).is_some_and(|slot| self.noreturn_slots.contains(&slot))
+        self.noreturn.contains(t)
+            || past_endbr(program, bitness, t)
+                .and_then(|i| slot_jump(&i))
+                .is_some_and(|slot| {
+                    self.noreturn_slots.contains(&slot)
+                        || (self.status_exits.contains(&slot)
+                            && sets_nonzero_status(program, bitness, &before, |_| false))
+                })
     }
 
     /// Whether the code a call reaches can be seen to return.
@@ -748,8 +755,10 @@ impl WalkState<'_> {
     /// thunk chain it opens with, has a `ret`, or when the chain ends in an
     /// indirect jump that is not through a no-return import's slot: a
     /// dispatcher (`jmp rax`, a patched slot) returns as whatever it was
-    /// handed does. What cannot be seen, a callee not walked or one whose
-    /// every way out is another call, is left to the evidence.
+    /// handed does. Each link may open with an `endbr`, as a procedure
+    /// linkage table built for indirect-branch tracking does (`endbr64;
+    /// bnd jmp [slot]`). What cannot be seen, a callee not walked or one
+    /// whose every way out is another call, is left to the evidence.
     ///
     /// # Arguments
     ///
@@ -764,7 +773,7 @@ impl WalkState<'_> {
             if self.returning.contains(&va) {
                 return true;
             }
-            let Some(i) = decode_at(program, bitness, va) else {
+            let Some(i) = past_endbr(program, bitness, va) else {
                 return false;
             };
             match i.flow_control() {
@@ -781,6 +790,24 @@ impl WalkState<'_> {
             }
         }
         false
+    }
+
+    /// Whether something besides the shape of a jump to it says a function
+    /// starts at `va`: the file declares it, or a call reaches it.
+    ///
+    /// A jump is read as a tail call from what its target looks like, so a
+    /// start that only such a jump made is a guess, and the code after a
+    /// call that lands on one may well be the caller's own.
+    ///
+    /// # Arguments
+    ///
+    /// * `va` - A start right after a call.
+    fn evidenced(&self, va: u64) -> bool {
+        self.declared.binary_search(&va).is_ok()
+            || self
+                .xrefs
+                .get(&va)
+                .is_some_and(|sites| sites.iter().any(|s| s.kind == RefKind::Call))
     }
 
     /// Walks the executable addresses instructions mention that no block
@@ -1614,9 +1641,9 @@ fn past_bad(cursors: &mut Cursors<'_>, instr: &Instruction, pending: &mut Vec<(u
 ///   instruction budget, decremented per decoded instruction.
 /// * `entry` - Address to start at.
 /// * `known` - What every walk reads: the starts (a jump into one other
-///   than `entry` is a tail call, and one right after a call marks the
-///   callee noreturn), the functions and import slots that never return,
-///   and the relocation sites.
+///   than `entry` is a tail call, and one right after a call ends the path
+///   there and claims the callee never returns), the functions and import
+///   slots that never return, and the relocation sites.
 /// * `extra_roots` - Code this function owns that its instructions do not
 ///   reach.
 pub(super) fn walk_function(
@@ -1650,7 +1677,7 @@ pub(super) fn walk_function(
     let mut callees: BTreeSet<u64> = BTreeSet::new();
     let mut followed: BTreeSet<u64> = BTreeSet::new();
     let mut followed_calls: BTreeSet<u64> = BTreeSet::new();
-    let mut found_noreturn: BTreeSet<u64> = BTreeSet::new();
+    let mut found_noreturn: BTreeSet<(u64, u64)> = BTreeSet::new();
     let mut found_noreturn_weak: BTreeSet<u64> = BTreeSet::new();
     let mut far_handlers: BTreeSet<u64> = BTreeSet::new();
     let mut near_handlers: BTreeSet<u64> = BTreeSet::new();
@@ -1931,7 +1958,7 @@ pub(super) fn walk_function(
                             && (is_padding(cursors, at)
                                 || reloc_sites.is_some_and(|s| s.contains(at))));
                     if start_after {
-                        found_noreturn.insert(t);
+                        found_noreturn.insert((t, at));
                     } else if ends_here {
                         found_noreturn_weak.insert(t);
                     }

@@ -1,0 +1,285 @@
+//! Where a function ends: a call that returns or does not, and the starts
+//! that say which.
+//!
+//! A wrong end loses the code past it with no note, so each test states
+//! which bytes are the function's and which are not. Every fixture is a
+//! hand-assembled x64 ELF-shaped image: `.text` at 0x1000 and a `.got`
+//! page at 0x2000 whose slots the imports fill.
+
+#![expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test"
+)]
+
+use borer_engine::analysis::Analysis;
+use borer_engine::num::{from_usize, lo32, saturating_usize};
+use borer_engine::program::{Arch, BinaryFormat, Program, Section, Symbol, SymbolKind};
+
+use crate::decompiled::decompiled;
+
+/// Where `.got` starts: import `k` fills the slot at `GOT + 8 * k`.
+const GOT: u64 = 0x2000;
+
+/// Where the stub through the first slot sits in the fixtures that call
+/// one import.
+const STUB: u64 = 0x1000;
+
+/// Builds the image: each piece of `code` at its address in `.text`, the
+/// rest `int3`, entered at `entry`, with `imports` filling the `.got`
+/// slots in order.
+///
+/// # Arguments
+///
+/// * `code` - Each piece of code with the address it starts at.
+/// * `entry` - The entry point.
+/// * `imports` - The imports' names, one slot each from [`GOT`].
+fn image(code: &[(u64, Vec<u8>)], entry: u64, imports: &[&str]) -> Program {
+    let mut bytes = vec![0xccu8; 0x1000];
+    bytes.resize(0x2000, 0);
+    for (at, b) in code {
+        let off = saturating_usize(at - 0x1000);
+        bytes[off..off + b.len()].copy_from_slice(b);
+    }
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0,
+        Some(entry),
+        vec![
+            Section::mapped(".text", 0x1000, 0, 0x1000, false, true),
+            Section::mapped(".got", GOT, 0x1000, 0x1000, false, false),
+        ],
+    );
+    p.format = BinaryFormat::Elf;
+    for (k, name) in (0u64..).zip(imports) {
+        p.symbols.push(Symbol {
+            name: (*name).to_owned(),
+            addr: GOT + 8 * k,
+            kind: SymbolKind::Import,
+        });
+    }
+    p
+}
+
+/// Returns an instruction at `at` whose 32-bit displacement, its last four
+/// bytes, reaches `to` from its end.
+///
+/// # Arguments
+///
+/// * `at` - Where the instruction starts.
+/// * `op` - Its bytes before the displacement.
+/// * `to` - The address the displacement reaches.
+fn rel32(at: u64, op: &[u8], to: u64) -> Vec<u8> {
+    let end = at + from_usize(op.len()) + 4;
+    [op, &lo32(to.wrapping_sub(end)).to_le_bytes()].concat()
+}
+
+/// Returns `call to`, at `at`.
+///
+/// # Arguments
+///
+/// * `at` - Where the call starts.
+/// * `to` - The callee.
+fn call(at: u64, to: u64) -> Vec<u8> {
+    rel32(at, &[0xe8], to)
+}
+
+/// Returns `jmp to` with a 32-bit displacement, at `at`.
+///
+/// # Arguments
+///
+/// * `at` - Where the jump starts.
+/// * `to` - The target.
+fn jmp(at: u64, to: u64) -> Vec<u8> {
+    rel32(at, &[0xe9], to)
+}
+
+/// Returns `mov eax, n; ret`.
+///
+/// # Arguments
+///
+/// * `n` - The value returned.
+fn returns(n: u8) -> Vec<u8> {
+    vec![0xb8, n, 0x00, 0x00, 0x00, 0xc3]
+}
+
+/// Returns a procedure linkage table stub built for indirect-branch
+/// tracking, at `at`: `endbr64; bnd jmp [rip+slot]`, eleven bytes.
+///
+/// # Arguments
+///
+/// * `at` - Where the stub starts.
+/// * `slot` - The `.got` slot it jumps through.
+fn ibt_stub(at: u64, slot: u64) -> Vec<u8> {
+    let endbr64 = [0xf3, 0x0f, 0x1e, 0xfa];
+    [&endbr64[..], &rel32(at + 4, &[0xf2, 0xff, 0x25], slot)].concat()
+}
+
+/// Builds an image where two functions call `callee` and a start that
+/// only a jump's shape names lies right after one of the calls.
+///
+/// The entry `E` (0x1100) calls `H` (0x1200), `X` (0x1300) and `callee`,
+/// then returns 1. `H` jumps to 0x1405, which opens with a `jmp` forward
+/// and so reads as a thunk: the jump is taken as a tail call and 0x1405 as
+/// a start. `X` calls `A` (0x1400), so `A` is walked once that start is
+/// known: `A` calls `callee` and 0x1405 follows the call. `free` fills the
+/// one slot, through the stub at [`STUB`].
+///
+/// # Arguments
+///
+/// * `callee` - What `E` and `A` call: [`STUB`], or 0x1500, a function
+///   that saves a register and jumps to the stub, with no `ret` of its own.
+fn after_a_shaped_start(callee: u64) -> Program {
+    let mut code = vec![
+        (STUB, ibt_stub(STUB, GOT)),
+        (
+            0x1100,
+            [call(0x1100, 0x1200), call(0x1105, 0x1300)].concat(),
+        ),
+        (0x110a, [call(0x110a, callee), returns(1)].concat()),
+        (0x1200, jmp(0x1200, 0x1405)),
+        (0x1300, [call(0x1300, 0x1400), vec![0xc3]].concat()), // ASM: ret
+        (0x1400, call(0x1400, callee)),
+        (0x1405, jmp(0x1405, 0x1410)),
+        (0x1410, returns(7)),
+    ];
+    if callee != STUB {
+        code.push((callee, [vec![0x53, 0x5b], jmp(callee + 2, STUB)].concat())); // ASM: push rbx; pop rbx
+    }
+    image(&code, 0x1100, &["free"])
+}
+
+/// A start only a jump's shape names, right after a call to `free`'s IBT
+/// stub, leaves the stub returning, and the other caller keeps its code
+/// after its call.
+///
+/// rsyslogd's `asyncWriterThread` jumps to an `-O0` block that opens with
+/// a `jmp`, and that block was taken as a function; walked again, its call
+/// to `pthread_mutex_lock` landed on it, and the stub, `endbr64; bnd jmp
+/// [slot]`, was taken never to return, since the check stopped at the
+/// `endbr64`. 187 functions in twelve binaries ended at a call to `free`,
+/// `pthread_mutex_lock` or `error`, `hdlr_sighup` after its first line.
+#[test]
+fn a_start_a_jump_names_after_a_call_leaves_the_stub_returning() {
+    let p = after_a_shaped_start(STUB);
+    let a = Analysis::compute(&p);
+    let e = a.function(0x1100).unwrap();
+    assert_eq!(e.end, 0x1115, "the entry ended at its call: {e:?}");
+    assert!(!a.noreturn.contains(&STUB), "{:?}", a.noreturn);
+    let text = decompiled(&p, 0x1100);
+    assert!(text.contains("return 1;"), "{text}");
+}
+
+/// The same start is no evidence that a callee with no `ret` of its own
+/// never returns.
+///
+/// The callee returns through its tail call. Only a start the file
+/// declares or a call reaches says the call before it never returns.
+#[test]
+fn a_start_a_jump_names_after_a_call_is_no_evidence_it_never_returns() {
+    let p = after_a_shaped_start(0x1500);
+    let a = Analysis::compute(&p);
+    let e = a.function(0x1100).unwrap();
+    assert_eq!(e.end, 0x1115, "the entry ended at its call: {e:?}");
+    assert!(!a.noreturn.contains(&0x1500), "{:?}", a.noreturn);
+}
+
+/// glibc's `error` returns unless its status is a nonzero constant, behind
+/// an IBT stub too, even where a declared start follows a status-1 call.
+///
+/// `D` (0x1200) passes status 1 and the next function's symbol follows its
+/// call, the way GCC lays out a call it knows does not return; `C`
+/// (0x1300) passes the status it was handed and returns 5. `D` ends at its
+/// call, `C` keeps its code past it, and the stub is not taken never to
+/// return.
+#[test]
+fn error_returns_unless_its_status_is_a_nonzero_constant() {
+    let code = vec![
+        (STUB, ibt_stub(STUB, GOT)),
+        (
+            0x1100,
+            [call(0x1100, 0x1200), call(0x1105, 0x1300), vec![0xc3]].concat(), // ASM: ret
+        ),
+        (0x1200, vec![0xbf, 0x01, 0x00, 0x00, 0x00, 0x31, 0xf6]), // ASM: mov edi, 1; xor esi, esi
+        (0x1207, call(0x1207, STUB)),
+        (0x120c, vec![0x31, 0xc0, 0xc3]), // ASM: xor eax, eax; ret
+        (0x1300, vec![0x89, 0xf7]),       // ASM: mov edi, esi
+        (0x1302, [call(0x1302, STUB), returns(5)].concat()),
+    ];
+    let mut p = image(&code, 0x1100, &["error"]);
+    p.symbols.push(Symbol {
+        name: "after_error".to_owned(),
+        addr: 0x120c,
+        kind: SymbolKind::Local,
+    });
+    let a = Analysis::compute(&p);
+    let d = a.function(0x1200).unwrap();
+    assert_eq!(d.end, 0x120c, "the status-1 call returned: {d:?}");
+    let c = a.function(0x1300).unwrap();
+    assert_eq!(c.end, 0x130d, "the call with a handed status ended: {c:?}");
+    assert!(!a.noreturn.contains(&STUB), "{:?}", a.noreturn);
+    let text = decompiled(&p, 0x1300);
+    assert!(text.contains("return 5;"), "{text}");
+}
+
+/// A function whose one way out is glibc's `error` with status 1 never
+/// returns, so its callers end at their calls to it.
+///
+/// find's `fatal_nontarget_file_error` is this shape. It was taken never to
+/// return only from a start split off after some caller's call to it, and
+/// with no such start a caller ran on past its call into the padding.
+#[test]
+fn a_function_whose_way_out_is_a_status_1_error_never_returns() {
+    let code = vec![
+        (STUB, ibt_stub(STUB, GOT)),
+        (0x1100, [call(0x1100, 0x1300), vec![0xc3]].concat()), // ASM: ret
+        (0x1200, vec![0xbf, 0x01, 0x00, 0x00, 0x00, 0x31, 0xf6]), // ASM: mov edi, 1; xor esi, esi
+        (0x1207, call(0x1207, STUB)),
+        (0x1300, [call(0x1300, 0x1200), returns(5)].concat()),
+    ];
+    let p = image(&code, 0x1100, &["error"]);
+    let a = Analysis::compute(&p);
+    assert!(a.noreturn.contains(&0x1200), "{:?}", a.noreturn);
+    let c = a.function(0x1300).unwrap();
+    assert_eq!(c.end, 0x1305, "the caller ran past its call: {c:?}");
+}
+
+/// Calls that never return still end their callers' paths.
+///
+/// They reach `exit`, `abort` and `__stack_chk_fail` behind IBT stubs, and
+/// a function of the program whose one way out is a call to `exit`: the
+/// code after each call is not the caller's.
+#[test]
+fn calls_that_never_return_still_end_their_callers() {
+    let code = vec![
+        (0x1000, ibt_stub(0x1000, GOT)),
+        (0x1010, ibt_stub(0x1010, GOT + 8)),
+        (0x1020, ibt_stub(0x1020, GOT + 16)),
+        (0x1080, [vec![0x53], call(0x1081, 0x1000)].concat()), // ASM: push rbx
+        (
+            0x1100,
+            [call(0x1100, 0x1200), call(0x1105, 0x1300)].concat(),
+        ),
+        (
+            0x110a,
+            [call(0x110a, 0x1400), call(0x110f, 0x1500), vec![0xc3]].concat(), // ASM: ret
+        ),
+        (0x1200, vec![0x31, 0xff]), // ASM: xor edi, edi
+        (0x1202, [call(0x1202, 0x1000), returns(1)].concat()),
+        (0x1300, [call(0x1300, 0x1010), returns(2)].concat()),
+        (0x1400, [call(0x1400, 0x1020), returns(3)].concat()),
+        (0x1500, [call(0x1500, 0x1080), returns(4)].concat()),
+    ];
+    let p = image(&code, 0x1100, &["exit", "abort", "__stack_chk_fail"]);
+    let a = Analysis::compute(&p);
+    for (caller, end) in [
+        (0x1200, 0x1207),
+        (0x1300, 0x1305),
+        (0x1400, 0x1405),
+        (0x1500, 0x1505),
+    ] {
+        let f = a.function(caller).unwrap();
+        assert_eq!(f.end, end, "{caller:#x} ran past its call: {f:?}");
+    }
+    assert!(a.noreturn.contains(&0x1080), "{:?}", a.noreturn);
+}

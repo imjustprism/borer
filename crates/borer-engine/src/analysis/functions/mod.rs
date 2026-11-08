@@ -557,6 +557,7 @@ pub(crate) fn discover(program: &Program, bitness: u32) -> Analysis {
     let mut st = WalkState {
         worker: Worker::new(program, bitness, fuel_for(program)),
         starts,
+        declared: seeds.clone(),
         queue: seeds,
         done: AddrSet::new(program),
         functions: Vec::new(),

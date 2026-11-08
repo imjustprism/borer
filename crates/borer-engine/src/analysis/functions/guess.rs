@@ -419,6 +419,28 @@ pub(super) fn thunk_slot(cursors: &mut Cursors<'_>, va: u64) -> Option<u64> {
     slot_jump(&instr)
 }
 
+/// Decodes the instruction at `va`, or the one after it when that is an
+/// `endbr64` or `endbr32`: what a linker's thunk or an indirect-branch
+/// target does first.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `bitness` - Decoder bitness.
+/// * `va` - The address.
+///
+/// # Returns
+///
+/// The instruction, or `None` when `va` or the address after its `endbr`
+/// is not code the image maps.
+pub(super) fn past_endbr(program: &Program, bitness: u32, va: u64) -> Option<Instruction> {
+    let first = decode_at(program, bitness, va)?;
+    if matches!(first.mnemonic(), Mnemonic::Endbr64 | Mnemonic::Endbr32) {
+        return decode_at(program, bitness, first.next_ip());
+    }
+    Some(first)
+}
+
 /// The slot `instr` jumps through when it is `jmp [slot]` with a
 /// rip-relative or absolute operand.
 ///
