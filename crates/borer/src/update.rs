@@ -17,6 +17,10 @@
 //! only to the API's host, on `curl`'s stdin, never on its command line,
 //! and the daily check below never sends it.
 //!
+//! On a terminal each step runs under a loading line ([`crate::term`]),
+//! the download's showing how much of the archive has arrived, and leaves
+//! a line saying how it ended; elsewhere nothing more is printed.
+//!
 //! The notice is a once-a-day check that a command line run starts as a
 //! detached copy of this binary: its answer is kept in the cache, and a
 //! newer release the cache names is printed on stderr after the command's
@@ -187,6 +191,9 @@ struct Request<'a> {
     secs: u32,
     /// The `Accept` header, when `curl`'s own is not the one wanted.
     accept: Option<&'static str>,
+    /// The file `curl` writes the response headers to as they arrive, for
+    /// a download whose progress the loading line shows ([`watch`]).
+    meter: Option<&'a Path>,
 }
 
 /// The `curl` command for a request and, when the token goes with it, the
@@ -238,6 +245,9 @@ fn curl_command(req: &Request<'_>, token: Option<&Token>) -> (Command, Option<St
     if let Some(out) = req.out {
         cmd.arg("-o").arg(out).args(["-w", "%{redirect_url}"]);
     }
+    if let Some(headers) = req.meter {
+        cmd.arg("-D").arg(headers);
+    }
     cmd.arg(req.url)
         .stdin(if header.is_some() {
             Stdio::piped()
@@ -274,6 +284,9 @@ fn curl(req: &Request<'_>, token: Option<&Token>) -> anyhow::Result<String> {
         (Some(header), Some(mut stdin)) => stdin.write_all(header.as_bytes()),
         _ => Ok(()),
     };
+    if let (Some(file), Some(headers)) = (req.out, req.meter) {
+        watch(&mut child, file, headers);
+    }
     let out = child.wait_with_output().context("waiting for curl")?;
     if !out.status.success() {
         let said = String::from_utf8_lossy(&out.stderr);
@@ -294,6 +307,70 @@ fn curl(req: &Request<'_>, token: Option<&Token>) -> anyhow::Result<String> {
     }
     handed.context("handing curl the token")?;
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Shows a download's progress on the loading line until its `curl`
+/// exits: how much of `file` has arrived, of the size the response's
+/// headers give, with the newest bytes streaming past.
+///
+/// It reads the growing file, not `curl`'s own progress bar.
+///
+/// # Arguments
+///
+/// * `child` - The running `curl`.
+/// * `file` - The file it writes.
+/// * `headers` - The file it writes the response headers to.
+fn watch(child: &mut std::process::Child, file: &Path, headers: &Path) {
+    /// The newest bytes the line streams.
+    const NEWEST: u64 = 64;
+    while matches!(child.try_wait(), Ok(None)) {
+        let done = std::fs::metadata(file).map_or(0, |m| m.len());
+        let total = std::fs::read_to_string(headers)
+            .ok()
+            .and_then(|h| content_length(&h));
+        crate::term::progress(done, total, &newest(file, done, NEWEST));
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// The size the last response in a header dump gives its body, when that
+/// response is a success: a redirect's own headers say nothing of the file
+/// it points to.
+///
+/// # Arguments
+///
+/// * `headers` - The headers `curl -D` wrote, one response after another.
+fn content_length(headers: &str) -> Option<u64> {
+    let last = headers.rfind("\nHTTP/").map_or(0, |at| at + 1);
+    let mut lines = headers.get(last..)?.lines();
+    let status = lines.next()?.split_whitespace().nth(1)?;
+    if !status.starts_with('2') {
+        return None;
+    }
+    lines.find_map(|line| {
+        line.split_once(':')
+            .filter(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, value)| value.trim().parse().ok())
+    })
+}
+
+/// The last `n` bytes of the first `len` of `file`; none when it cannot be
+/// read.
+///
+/// # Arguments
+///
+/// * `file` - The file.
+/// * `len` - How much of it to look at.
+/// * `n` - How many bytes to read, at most.
+fn newest(file: &Path, len: u64, n: u64) -> Vec<u8> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let mut bytes = Vec::new();
+    if let Ok(mut f) = std::fs::File::open(file)
+        && f.seek(SeekFrom::Start(len.saturating_sub(n))).is_ok()
+    {
+        let _ = f.take(n).read_to_end(&mut bytes);
+    }
+    bytes
 }
 
 /// What a failed request says: what happened and what to do, with
@@ -349,6 +426,8 @@ fn failure(code: Option<i32>, said: &str, secs: u32, token: Option<&str>, carrie
 /// * `secs` - All one try may take, in seconds.
 /// * `accept` - The `Accept` header, when `curl`'s own is not the one wanted.
 /// * `token` - The token, when one is set.
+/// * `meter` - Where `curl` writes the response headers, when the loading
+///   line shows the download's progress ([`watch`]).
 ///
 /// # Errors
 ///
@@ -360,6 +439,7 @@ fn fetch(
     secs: u32,
     accept: Option<&'static str>,
     token: Option<&Token>,
+    meter: Option<&Path>,
 ) -> anyhow::Result<()> {
     let mut url = url.to_owned();
     for _ in 0..=REDIRECTS {
@@ -372,6 +452,7 @@ fn fetch(
             follow: true,
             secs,
             accept,
+            meter,
         };
         let next = curl(&req, token)?;
         if next.trim().is_empty() {
@@ -494,6 +575,7 @@ fn latest(token: Option<&Token>) -> anyhow::Result<Release> {
             follow: false,
             secs: ANSWER_SECS,
             accept: None,
+            meter: None,
         };
         let json = curl(&req, token)?;
         return release_of(&json).context("GitHub's API named no tag for the latest release");
@@ -505,6 +587,7 @@ fn latest(token: Option<&Token>) -> anyhow::Result<Release> {
         follow: false,
         secs: ANSWER_SECS,
         accept: None,
+        meter: None,
     };
     let to = curl(&req, None)?;
     let tag = tag_of(&to).with_context(|| match to.trim() {
@@ -766,7 +849,11 @@ pub(crate) fn update(check_only: bool) -> anyhow::Result<String> {
     let exe = std::env::current_exe().context("cannot tell where this binary runs from")?;
     let _ = std::fs::remove_file(aside(&exe));
     let token = token();
-    let release = latest(token.as_ref())?;
+    let release = step(
+        "finding the latest release",
+        || latest(token.as_ref()),
+        |r| format!("latest release {}", r.tag),
+    )?;
     let tag = release.tag.as_str();
     remember(tag);
     if !is_newer(tag) {
@@ -788,41 +875,119 @@ pub(crate) fn update(check_only: bool) -> anyhow::Result<String> {
     let name = format!("borer-{tag}-{triple}");
     let work = std::env::temp_dir().join(format!("borer-update-{}", std::process::id()));
     std::fs::create_dir_all(&work)?;
-    let result = (|| {
-        let archive = work.join(format!("{name}.{ext}"));
-        let (url, accept) = release.file(&format!("{name}.{ext}"))?;
-        fetch(&url, &archive, ARCHIVE_SECS, accept, token.as_ref())?;
+    let result = install(&release, &name, ext, &work, &exe, token.as_ref());
+    let _ = std::fs::remove_dir_all(&work);
+    result?;
+    Ok(format!(
+        "updated borer {VERSION} -> {shown} at {}\n",
+        exe.display()
+    ))
+}
+
+/// Runs one step of an update under a loading line that says what it
+/// does, then leaves a line that says how it ended; both only on a
+/// terminal, where [`crate::term::busy`] draws.
+///
+/// # Arguments
+///
+/// * `doing` - What the step does, e.g. `finding the latest release`; also
+///   what its line says when it fails.
+/// * `work` - The step.
+/// * `done` - What its line says when it succeeds.
+///
+/// # Errors
+///
+/// When the step fails, with its own error.
+fn step<T>(
+    doing: &str,
+    work: impl FnOnce() -> anyhow::Result<T>,
+    done: impl FnOnce(&T) -> String,
+) -> anyhow::Result<T> {
+    crate::term::busy(doing, &[]);
+    let result = work();
+    match &result {
+        Ok(value) => crate::term::finish(true, &done(value)),
+        Err(_) => crate::term::finish(false, doing),
+    }
+    result
+}
+
+/// Downloads the release's archive into `work`, checks it against the
+/// release's `SHA256SUMS`, unpacks it there and puts its binary where
+/// `exe` runs, each a [`step`] of its own.
+///
+/// # Arguments
+///
+/// * `release` - The release.
+/// * `name` - The archive's name without its extension: also the folder it
+///   unpacks to.
+/// * `ext` - The archive's extension.
+/// * `work` - The folder the download and unpacking go to.
+/// * `exe` - Where this binary runs from.
+/// * `token` - The token, when one is set.
+///
+/// # Errors
+///
+/// When a download fails, the archive does not match its listed sum, `tar`
+/// cannot unpack it, or the binary's folder cannot be written.
+fn install(
+    release: &Release,
+    name: &str,
+    ext: &str,
+    work: &Path,
+    exe: &Path,
+    token: Option<&Token>,
+) -> anyhow::Result<()> {
+    let file = format!("{name}.{ext}");
+    let archive = work.join(&file);
+    let downloading = format!("downloading {}", release.tag);
+    let download = || {
+        let (url, accept) = release.file(&file)?;
+        let headers = work.join("headers");
+        fetch(&url, &archive, ARCHIVE_SECS, accept, token, Some(&headers))
+    };
+    step(&downloading, download, |()| {
+        let size = std::fs::metadata(&archive).map_or(0, |m| m.len());
+        format!("downloaded {file}, {}", crate::term::megabytes(size))
+    })?;
+    let verify = || {
         let listed = work.join("SHA256SUMS");
         let (url, accept) = release.file("SHA256SUMS")?;
-        fetch(&url, &listed, ANSWER_SECS, accept, token.as_ref())?;
+        fetch(&url, &listed, ANSWER_SECS, accept, token, None)?;
         let sums = std::fs::read_to_string(&listed).context("reading SHA256SUMS")?;
-        let want = listed_sum(&sums, &format!("{name}.{ext}"))
-            .with_context(|| format!("SHA256SUMS lists no {name}.{ext}"))?;
+        let want =
+            listed_sum(&sums, &file).with_context(|| format!("SHA256SUMS lists no {file}"))?;
         let got = sha256_hex(&std::fs::read(&archive)?);
         if !got.eq_ignore_ascii_case(want) {
-            bail!("{name}.{ext} does not match its listed SHA-256; nothing was changed");
+            bail!("{file} does not match its listed SHA-256; nothing was changed");
         }
+        Ok(())
+    };
+    step("verifying its SHA-256", verify, |()| {
+        "SHA-256 matches SHA256SUMS".to_owned()
+    })?;
+    let unpack = || {
         let unpacked = Command::new("tar")
             .arg("-xf")
             .arg(&archive)
             .arg("-C")
-            .arg(&work)
+            .arg(work)
             .status()
             .context("tar does not run")?;
         if !unpacked.success() {
-            bail!("tar could not unpack {name}.{ext}");
+            bail!("tar could not unpack {file}");
         }
-        let new = work
-            .join(&name)
-            .join(if cfg!(windows) { "borer.exe" } else { "borer" });
-        replace(&new, &exe)?;
-        Ok(format!(
-            "updated borer {VERSION} -> {shown} at {}\n",
-            exe.display()
-        ))
-    })();
-    let _ = std::fs::remove_dir_all(&work);
-    result
+        Ok(())
+    };
+    step("unpacking", unpack, |()| format!("unpacked {name}"))?;
+    let new = work
+        .join(name)
+        .join(if cfg!(windows) { "borer.exe" } else { "borer" });
+    step(
+        "installing",
+        || replace(&new, exe),
+        |()| "installed".to_owned(),
+    )
 }
 
 /// Now, in seconds since the epoch: when the daily check ran.
@@ -1254,6 +1419,7 @@ mod tests {
             follow: true,
             secs: 9,
             accept: None,
+            meter: None,
         };
         for url in [
             "https://api.github.com/repos/a/b/releases/latest",
@@ -1478,9 +1644,57 @@ mod tests {
     /// When it is fetched.
     #[test]
     fn a_download_refuses_plain_http() {
-        let refused = fetch("http://github.com/x", Path::new(NULL), 1, None, None)
+        let refused = fetch("http://github.com/x", Path::new(NULL), 1, None, None, None)
             .expect_err("refused")
             .to_string();
         assert!(refused.contains("not an https URL"), "{refused}");
+    }
+
+    /// A download's size is the last response's `Content-Length`, read
+    /// while its headers are still arriving, and none while that response
+    /// is a redirect or is not yet a success.
+    ///
+    /// # Panics
+    ///
+    /// When another size is read.
+    #[test]
+    fn a_downloads_size_is_its_last_responses_length() {
+        let redirect = "HTTP/1.1 302 Found\r\nContent-Length: 0\r\nLocation: https://x/y\r\n\r\n";
+        let landed =
+            "HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\ncontent-length: 8123456\r\n\r\n";
+        assert_eq!(
+            content_length(&format!("{redirect}{landed}")),
+            Some(8_123_456)
+        );
+        assert_eq!(content_length(landed), Some(8_123_456));
+        assert_eq!(
+            content_length("HTTP/2 200\r\ncontent-length: 7\r\n"),
+            Some(7)
+        );
+        assert_eq!(content_length(redirect), None);
+        assert_eq!(
+            content_length(&format!("{redirect}HTTP/1.1 200 OK\r\n")),
+            None
+        );
+        assert_eq!(
+            content_length("HTTP/1.1 503 Busy\r\nContent-Length: 19\r\n\r\n"),
+            None
+        );
+        assert_eq!(content_length(""), None);
+        let req = |meter| Request {
+            url: "https://github.com/a/b/releases/download/v1.0.0/x.zip",
+            out: Some(Path::new("x.zip")),
+            follow: true,
+            secs: 600,
+            accept: None,
+            meter,
+        };
+        let watched = argv(&curl_command(&req(Some(Path::new("headers"))), None).0);
+        assert!(
+            watched.windows(2).any(|w| w == ["-D", "headers"]),
+            "{watched:?}"
+        );
+        let quiet = argv(&curl_command(&req(None), None).0);
+        assert!(!quiet.iter().any(|a| a == "-D"), "{quiet:?}");
     }
 }
