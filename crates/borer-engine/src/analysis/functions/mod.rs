@@ -56,7 +56,7 @@ use helpers::{
 use seeds::{got_base, mapped_range, pointer_seeds, record_table_refs, reloc_seeds};
 use sets::{AddrSet, Covered};
 use tables::ResolvedTable;
-use walk::{Known, SplitWatch, WalkState, Walked, Worker, walk_capped};
+use walk::{Known, SplitWatch, WalkState, Walked, Worker, agreed_values, walk_capped};
 
 /// Smallest instruction budget for one full analysis pass.
 const FUEL_MIN: u64 = 2_000_000;
@@ -205,6 +205,13 @@ struct Recorded {
     /// By the address a near branch names: the last decoded conditional or
     /// unconditional branch to it.
     last_branch_to: FxHashMap<u64, u64>,
+    /// Every other address the walk reached by anything but a fall from the
+    /// instruction before it ([`Recorded::arrive`]).
+    entered: FxHashSet<u64>,
+    /// The direct calls and tail jumps decoded, each with its target, read
+    /// for what they pass once the walk has every way in
+    /// ([`Recorded::read_calls`]).
+    calls: Vec<(u64, u64)>,
     /// Calls ended for the status they pass glibc's `error`, each with the
     /// address after it and the addresses between the status and the call,
     /// held until the walk has all the function's branches
@@ -316,6 +323,16 @@ impl Recorded {
             .get(&va)
             .filter(|f| f.count == 1)
             .map(|f| f.first)
+    }
+
+    /// Tells whether the walk reaches `va` other than by falling into it: a
+    /// branch lands there, or [`Recorded::entered`] holds it.
+    ///
+    /// # Arguments
+    ///
+    /// * `va` - Any address.
+    fn enters(&self, va: u64) -> bool {
+        self.last_branch_to.contains_key(&va) || self.entered.contains(&va)
     }
 }
 
@@ -546,7 +563,7 @@ pub(crate) fn discover(program: &Program, bitness: u32) -> Analysis {
         xrefs: FxHashMap::default(),
         jump_tables: BTreeMap::new(),
         indexed_tables: BTreeSet::new(),
-        param_values: BTreeMap::new(),
+        calls: BTreeMap::new(),
         class_ids: BTreeMap::new(),
         chkstk: BTreeSet::new(),
         frame_helpers: BTreeSet::new(),
@@ -684,20 +701,7 @@ pub(crate) fn discover(program: &Program, bitness: u32) -> Analysis {
     analysis.indexed_tables = st.indexed_tables;
     analysis.throw_sites = throw_sites;
     analysis.classes.ids = st.class_ids;
-    analysis.param_values = st
-        .param_values
-        .into_iter()
-        .map(|(k, slots)| {
-            (
-                k,
-                slots
-                    .into_iter()
-                    .filter(|(_, v)| v.len() <= PARAM_VALUES_MAX)
-                    .collect(),
-            )
-        })
-        .filter(|(_, slots): &(u64, BTreeMap<u8, BTreeSet<u64>>)| !slots.is_empty())
-        .collect();
+    analysis.param_values = agreed_values(program, &analysis.xrefs, st.calls);
     analysis.incomplete = incomplete;
     phases.mark("discover collect");
 
@@ -1236,7 +1240,10 @@ const ARG_SETUP_MAX: usize = 32;
 /// The straight-line instructions leading into `call_va`, in address order.
 ///
 /// At most [`ARG_SETUP_MAX`] of them, walked back through the records as
-/// long as each has exactly one predecessor that falls through.
+/// long as each has exactly one predecessor that falls through and nothing
+/// else reaches it ([`Recorded::enters`]): where a branch, a jump table, a
+/// handler or the caller comes in, the line starts, since the instructions
+/// before it do not run on that way in.
 ///
 /// # Arguments
 ///
@@ -1253,7 +1260,7 @@ fn straight_line_before(
 ) -> Vec<Instruction> {
     let mut window: Vec<Instruction> = Vec::new();
     let mut cur = call_va;
-    while window.len() < ARG_SETUP_MAX {
+    while window.len() < ARG_SETUP_MAX && !recorded.enters(cur) {
         let Some(prev) = recorded.only_before(cur) else {
             break;
         };

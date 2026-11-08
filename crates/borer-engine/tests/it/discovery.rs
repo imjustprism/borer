@@ -1013,6 +1013,61 @@ fn error_with_a_nonzero_status_ends_its_path() {
     assert!(f2.contains("return 3"), "{f2}");
 }
 
+/// A jump table's case that lands on a call to glibc's `error` past its
+/// `mov edi, 1` is a way in with any status, though the walk takes it
+/// after the call: the call returns.
+///
+/// Case 0 enters the call itself and case 1 sets the status first; the
+/// table lists case 0 first, so the walk reaches the call by falling from
+/// case 1 and ends the path there before case 0 comes in.
+#[test]
+fn a_jump_table_case_past_the_status_keeps_the_call_returning() {
+    use borer_engine::program::{BinaryFormat, Symbol, SymbolKind};
+    let code = [
+        0x83, 0xfe, 0x01, // ASM: cmp esi, 1
+        0x77, 0x24, // ASM: ja 0x401029
+        0x4c, 0x8d, 0x05, 0xf4, 0xff, 0xff, 0xff, // ASM: lea r8, [rip - 0xc]
+        0x41, 0x8b, 0x84, 0xb0, 0x10, 0x10, 0x00,
+        0x00, // ASM: mov eax, dword ptr [r8 + rsi*4 + 0x1010]
+        0x4c, 0x01, 0xc0, // ASM: add rax, r8
+        0xff, 0xe0, // ASM: jmp rax
+        0xbf, 0x01, 0x00, 0x00, 0x00, // ASM: mov edi, 1
+        0xe8, 0x1d, 0x00, 0x00, 0x00, // ASM: call 0x401040, error@plt
+        0xb8, 0x08, 0x00, 0x00, 0x00, // ASM: mov eax, 8
+        0xc3, // ASM: ret
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xc3, // ASM: ret
+        0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+        0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // ASM: int3 x20
+        0xff, 0x25, 0xba, 0x0f, 0x00, 0x00, // ASM: error@plt: jmp qword ptr [rip + 0xfba]
+    ];
+    let mut data = vec![0u8; 0x10];
+    for at in [0x1eu32, 0x19] {
+        data.extend_from_slice(&at.to_le_bytes());
+    }
+    let mut p = raw::image(Arch::X86_64, &code, &data);
+    p.format = BinaryFormat::Elf;
+    p.symbols.push(Symbol {
+        name: "error".to_owned(),
+        addr: 0x402000,
+        kind: SymbolKind::Import,
+    });
+    let a = Analysis::compute(&p);
+    assert_eq!(
+        a.jump_tables.get(&(TEXT + 0x17)),
+        Some(&vec![TEXT + 0x1e, TEXT + 0x19]),
+        "the table was not resolved"
+    );
+    let f = a.function(TEXT).expect("the switch function");
+    assert!(
+        f.blocks
+            .iter()
+            .any(|b| b.start <= TEXT + 0x23 && TEXT + 0x23 < b.end),
+        "the call to error ended its path: {:x?}",
+        f.blocks
+    );
+}
+
 /// A switch an unoptimized build compiles resolves as a table, its cases
 /// blocks of the function and no functions of their own.
 ///

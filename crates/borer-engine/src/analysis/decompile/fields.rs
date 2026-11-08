@@ -335,7 +335,9 @@ pub(super) const PARAM_VALUE_SITES: usize = 2;
 /// "What is this parameter ever called with" otherwise takes a script over
 /// every call site; the walk already passes every call, so the values come
 /// out of it for nothing. A parameter with one
-/// value is as useful as one with six: it says every caller agrees.
+/// value is as useful as one with six: it says every caller agrees, which
+/// is why a parameter one site leaves unknown, and a function some caller
+/// reaches through a pointer, has none ([`Analysis::param_values`]).
 ///
 /// # Arguments
 ///

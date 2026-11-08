@@ -19,14 +19,14 @@ use super::tables::{ResolvedTable, resolve_jump_table};
 use super::{
     ArgConst, Cursors, FINALLY_CALL_REACH, FINALLY_REACH, GAP_INSTRS_MIN, GUESS_WALK_MAX,
     HANDLER_REACH, InstrRec, Lanes, PARAM_VALUES_MAX, Recorded, Registration, SEEDS_MAX,
-    SPLIT_ROUNDS_MAX, Seed, Shared, WAVE_BATCH, WAVE_MIN, add_site, build_blocks, call_arg_consts,
-    class_registration, decode_at, fingerprint, handler_lands_near, mix, near_target, padding_end,
-    seh_scope_roots, tears_frame_down, trace_seeds, unwind_nop,
+    SPLIT_ROUNDS_MAX, Seed, Shared, WAVE_BATCH, WAVE_MIN, XREF_SITES_PER_TARGET, add_site,
+    build_blocks, call_arg_consts, class_registration, decode_at, fingerprint, handler_lands_near,
+    mix, near_target, padding_end, seh_scope_roots, tears_frame_down, trace_seeds, unwind_nop,
 };
 use crate::analysis::{BlockTerm, Function, NameSource, RefKind, RefSite, dedup_sorted, is_imm};
 use crate::fxmap::{FxHashMap, FxHashSet};
 use crate::isa::x86::{Code, FlowControl, Instruction, Mnemonic, OpKind, Register};
-use crate::program::Program;
+use crate::program::{Program, SymbolKind};
 use smallvec::SmallVec;
 
 /// Everything one [`walk_function`] produced.
@@ -42,10 +42,8 @@ pub(super) struct Walked {
     pub(super) tables: Vec<ResolvedTable>,
     /// The sites among `tables` a byte index table expanded.
     pub(super) indexed: BTreeSet<u64>,
-    /// Constants this function's call sites put in argument registers.
-    pub(super) arg_consts: Vec<ArgConst>,
-    /// Class names registered with their four-character code.
-    pub(super) registrations: Vec<Registration>,
+    /// What this function's calls and tail jumps pass and register.
+    pub(super) calls: Called,
     /// The `__chkstk` callee, when the `call X; sub rsp, rax` idiom appeared.
     pub(super) chkstk: Option<u64>,
     /// The frame-building prologue helper (`__SEH_prolog4`, `__EH_prolog3`)
@@ -127,6 +125,28 @@ pub(super) struct Walked {
     pub(super) slot_thunk: bool,
 }
 
+/// What one walk read off the direct calls and tail jumps it decoded.
+#[derive(Default)]
+pub(super) struct Called {
+    /// The target of each, once per site.
+    sites: Vec<u64>,
+    /// The constants the sites put in argument registers.
+    consts: Vec<ArgConst>,
+    /// Class names the sites registered with their four-character code.
+    registrations: Vec<Registration>,
+}
+
+/// What the walks saw passed to one function by its calls and tail jumps.
+#[derive(Default)]
+pub(super) struct Passed {
+    /// How many sites reach it.
+    sites: u32,
+    /// Per parameter index, how many of those sites set it to a constant,
+    /// and the constants, no more kept once they outnumber
+    /// [`PARAM_VALUES_MAX`].
+    slots: BTreeMap<u8, (u32, BTreeSet<u64>)>,
+}
+
 /// One walker's own state: what a walk writes and nothing else reads.
 pub(super) struct Worker<'a> {
     /// Decoders over the sections the walks touch; they hold the image.
@@ -173,8 +193,10 @@ pub(super) struct WalkState<'a> {
     pub(super) jump_tables: BTreeMap<u64, Vec<u64>>,
     /// Sites whose table a byte index table expanded.
     pub(super) indexed_tables: BTreeSet<u64>,
-    /// Callee to parameter index to the constants callers pass there.
-    pub(super) param_values: BTreeMap<u64, BTreeMap<u8, BTreeSet<u64>>>,
+    /// Per function committed, what its walk read off its calls and tail
+    /// jumps, counted only once discovery ends ([`agreed_values`]): a
+    /// function walked again replaces what its earlier walk read.
+    pub(super) calls: BTreeMap<u64, Called>,
     /// Class name to the four-character code it registered with.
     pub(super) class_ids: BTreeMap<String, u32>,
     /// Callees followed by `sub rsp, rax`: the stack-probe helper.
@@ -1156,8 +1178,7 @@ impl WalkState<'_> {
             data_refs,
             tables,
             indexed,
-            arg_consts,
-            registrations,
+            mut calls,
             chkstk,
             frame_helper,
             followed,
@@ -1244,15 +1265,10 @@ impl WalkState<'_> {
             self.jump_tables.insert(t.site, t.targets);
         }
         self.indexed_tables.extend(indexed);
+        let registrations = std::mem::take(&mut calls.registrations);
         self.class_ids
             .extend(registrations.into_iter().map(|r| (r.class, r.code)));
-        for c in arg_consts {
-            let slots = self.param_values.entry(c.callee).or_default();
-            let seen = slots.entry(c.slot).or_default();
-            if seen.len() <= PARAM_VALUES_MAX {
-                seen.insert(c.value);
-            }
-        }
+        self.calls.insert(entry, calls);
 
         self.queue.extend(func.callees.iter().copied());
         self.functions.push(func);
@@ -1380,6 +1396,126 @@ pub(super) enum Via {
     /// A branch: landing on bytes that do not decode is only a branch not
     /// taken.
     Branch,
+}
+
+impl Recorded {
+    /// Notes how the walk reaches `va`: by a branch, or with no decoded
+    /// instruction falling into it, it enters there.
+    ///
+    /// A branch's, a jump table's or a handler's target, a `__finally` a
+    /// call runs, and a landing pad come by [`Via::Branch`]; the entry and
+    /// a call's landing past bytes it skips come with nothing before them.
+    /// Either way the instructions before `va` do not run on that way in.
+    ///
+    /// # Arguments
+    ///
+    /// * `va` - The address the walk takes next.
+    /// * `via` - How it was reached.
+    fn arrive(&mut self, va: u64, via: Via) {
+        if via == Via::Branch || !self.by_next.contains_key(&va) {
+            self.entered.insert(va);
+        }
+    }
+
+    /// Reads what each call and tail jump the walk decoded passes and
+    /// registers, now that the walk has every way in.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The loaded image.
+    /// * `bitness` - Decode width.
+    fn read_calls(&self, program: &Program, bitness: u32) -> Called {
+        let mut called = Called {
+            sites: self.calls.iter().map(|&(_, callee)| callee).collect(),
+            ..Called::default()
+        };
+        for &(at, callee) in &self.calls {
+            called
+                .consts
+                .extend(call_arg_consts(program, bitness, at, callee, self));
+            called
+                .registrations
+                .extend(class_registration(program, bitness, at, self));
+        }
+        called
+    }
+}
+
+/// Keeps, for each function its calls and tail jumps are all the ways to,
+/// the parameters every one of them sets to a constant, with the constants.
+///
+/// Only each function's last walk counts: one walked again (a split round,
+/// a catch's continuation) may no longer reach a call its first walk read.
+/// An export or the entry point is called from outside the program, and a
+/// function whose address the program takes (an instruction loading it, a
+/// table holding it) is called through it; no call site shows those
+/// callers, so such a function keeps nothing. So does one whose references
+/// outgrew [`XREF_SITES_PER_TARGET`], which may have dropped such a
+/// reference. A parameter some site leaves unknown, or that more than
+/// [`PARAM_VALUES_MAX`] constants reach, is not kept either.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image, for its exports and entry point.
+/// * `xrefs` - Every reference site by target.
+/// * `calls` - Per function, what its last walk read off its calls.
+///
+/// # Returns
+///
+/// Function to parameter index to the constants its callers pass there.
+pub(super) fn agreed_values(
+    program: &Program,
+    xrefs: &BTreeMap<u64, Vec<RefSite>>,
+    calls: BTreeMap<u64, Called>,
+) -> BTreeMap<u64, BTreeMap<u8, BTreeSet<u64>>> {
+    let mut passed: BTreeMap<u64, Passed> = BTreeMap::new();
+    for called in calls.into_values() {
+        for callee in called.sites {
+            let p = passed.entry(callee).or_default();
+            p.sites = p.sites.saturating_add(1);
+        }
+        for c in called.consts {
+            let (sites, seen) = passed
+                .entry(c.callee)
+                .or_default()
+                .slots
+                .entry(c.slot)
+                .or_default();
+            *sites = sites.saturating_add(1);
+            if seen.len() <= PARAM_VALUES_MAX {
+                seen.insert(c.value);
+            }
+        }
+    }
+    let outside: BTreeSet<u64> = program
+        .symbols
+        .iter()
+        .filter(|s| s.kind == SymbolKind::Export)
+        .map(|s| s.addr)
+        .chain(program.entry)
+        .collect();
+    let only_called = |callee: &u64| {
+        !outside.contains(callee)
+            && xrefs.get(callee).is_none_or(|sites| {
+                sites.len() < XREF_SITES_PER_TARGET && sites.iter().all(RefSite::is_branch)
+            })
+    };
+    passed
+        .into_iter()
+        .filter(|(callee, _)| only_called(callee))
+        .map(|(callee, p)| {
+            let agreed: BTreeMap<u8, BTreeSet<u64>> = p
+                .slots
+                .into_iter()
+                .filter(|(_, (sites, values))| {
+                    *sites == p.sites && values.len() <= PARAM_VALUES_MAX
+                })
+                .map(|(slot, (_, values))| (slot, values))
+                .collect();
+            (callee, agreed)
+        })
+        .filter(|(_, agreed)| !agreed.is_empty())
+        .collect()
 }
 
 /// A recorded instruction that falls through and is not a call.
@@ -1511,8 +1647,6 @@ pub(super) fn walk_function(
     let mut data_refs: Vec<DataRef> = Vec::new();
     let mut tables: Vec<ResolvedTable> = Vec::new();
     let mut indexed: BTreeSet<u64> = BTreeSet::new();
-    let mut arg_consts: Vec<ArgConst> = Vec::new();
-    let mut registrations: Vec<Registration> = Vec::new();
     let mut callees: BTreeSet<u64> = BTreeSet::new();
     let mut followed: BTreeSet<u64> = BTreeSet::new();
     let mut followed_calls: BTreeSet<u64> = BTreeSet::new();
@@ -1547,6 +1681,7 @@ pub(super) fn walk_function(
 
     loop {
         while let Some((addr, via)) = pending.pop().or_else(|| recorded.reopen(&mut ended)) {
+            recorded.arrive(addr, via);
             if visited.contains(addr) || *fuel == 0 {
                 continue;
             }
@@ -1696,6 +1831,7 @@ pub(super) fn walk_function(
                         Some(t) if t == entry => pending.push((t, Via::Branch)),
                         Some(t) if starts.contains(t) || after_padding(program, bitness, t) => {
                             callees.insert(t);
+                            recorded.calls.push((addr, t));
                         }
                         Some(t) => {
                             followed.insert(t);
@@ -1709,6 +1845,7 @@ pub(super) fn walk_function(
                     Some(t) if t == entry => pending.push((t, Via::Branch)),
                     Some(t) if addr == entry && t == next && instr.len() == 2 => {
                         callees.insert(t);
+                        recorded.calls.push((addr, t));
                         terminated = true;
                     }
                     Some(t)
@@ -1721,6 +1858,7 @@ pub(super) fn walk_function(
                                         && !jumps_back(cursors, t, entry)))) =>
                     {
                         callees.insert(t);
+                        recorded.calls.push((addr, t));
                         terminated = true;
                     }
                     Some(t) => {
@@ -1785,8 +1923,7 @@ pub(super) fn walk_function(
                         frame.helper_frame = true;
                         frame_helper = Some(t);
                     }
-                    arg_consts.extend(call_arg_consts(program, bitness, addr, t, &recorded));
-                    registrations.extend(class_registration(program, bitness, addr, &recorded));
+                    recorded.calls.push((addr, t));
                     let at = call_lands(program, bitness, t, next);
                     let start_after = at != entry && starts.contains(at);
                     let ends_here = start_after
@@ -1936,8 +2073,7 @@ pub(super) fn walk_function(
         data_refs,
         tables,
         indexed,
-        arg_consts,
-        registrations,
+        calls: recorded.read_calls(program, bitness),
         chkstk,
         frame_helper,
         followed,

@@ -1305,8 +1305,11 @@ pub struct Analysis {
     /// binaries and plain C.
     pub throw_sites: BTreeMap<u64, Vec<ThrowSite>>,
     /// Function to parameter index to the constants its callers put in that
-    /// argument register: the values a parameter is actually called with,
-    /// kept only while there are few enough of them to be a set of cases.
+    /// argument register: the values a parameter is actually called with.
+    /// A parameter is kept only when every call and tail jump to the
+    /// function sets it to a constant, few enough to be a set of cases, and
+    /// a function only when those sites are all its callers: an export, the
+    /// entry point and a function whose address the program takes have none.
     pub param_values: BTreeMap<u64, BTreeMap<u8, BTreeSet<u64>>>,
     /// The packs the analysis ran with ([`crate::pack`]), in load order.
     pub packs: Arc<crate::pack::Packs>,

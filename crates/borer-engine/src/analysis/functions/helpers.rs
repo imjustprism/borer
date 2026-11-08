@@ -263,7 +263,8 @@ pub(super) fn sets_nonzero_status(
 ///
 /// That is a call to glibc's `error` or `error_at_line` with a nonzero
 /// status ([`sets_nonzero_status`]) over the run the walk recorded before
-/// it, where a branch decoded to an address inside the run is a way in.
+/// it, where a branch or anything else that enters an address inside the
+/// run ([`Recorded::enters`]) is a way in.
 /// The callee is the import a thunk it reaches jumps through, or the
 /// import slot it calls through, never a function the program defines.
 /// The answer is tentative: the call waits in [`Recorded::status_ends`]
@@ -298,7 +299,7 @@ pub(super) fn exits_with_status(
     let mut ways = Vec::new();
     let ends = sets_nonzero_status(program, bitness, &before, |va| {
         ways.push(va);
-        recorded.last_branch_to.contains_key(&va)
+        recorded.enters(va)
     });
     if ends {
         recorded.status_ends.push((call.ip(), call.next_ip(), ways));
@@ -307,8 +308,9 @@ pub(super) fn exits_with_status(
 }
 
 impl Recorded {
-    /// Takes back the first call ended for its status that a branch decoded
-    /// since now enters, between the status and the call.
+    /// Takes back the first call ended for its status that a way in found
+    /// since now enters, between the status and the call: a branch, a jump
+    /// table's case or a handler ([`Recorded::enters`]).
     ///
     /// The walk asks each time its queue runs dry, so the calls still ended
     /// when it finishes were checked against every branch of the function;
@@ -325,10 +327,8 @@ impl Recorded {
     /// `None` when every such call still holds.
     pub(super) fn reopen(&mut self, ended: &mut Vec<u64>) -> Option<(u64, Via)> {
         let at = self.status_ends.iter().position(|(_, _, ways)| {
-            ways.iter().any(|w| {
-                self.last_branch_to.contains_key(w)
-                    || self.by_next.get(w).is_some_and(|f| f.count > 1)
-            })
+            ways.iter()
+                .any(|w| self.enters(*w) || self.by_next.get(w).is_some_and(|f| f.count > 1))
         })?;
         let (call, next, _) = self.status_ends.remove(at);
         ended.retain(|&e| e != call);
