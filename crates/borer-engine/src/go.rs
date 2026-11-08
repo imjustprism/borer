@@ -401,20 +401,22 @@ struct Parsed<'a> {
     funcs: Vec<(u64, &'a str)>,
 }
 
-/// Reads a table whose header starts at `head` in a view.
+/// Reads the fixed fields of a table header that starts at `head` in a view.
+///
+/// They are checked as every layout writes them: the magic, zero padding,
+/// a pc quantum of 1, 2 or 4, the view's pointer width, and a function
+/// count from 1 to [`FUNCS_MAX`].
 ///
 /// # Arguments
 ///
 /// * `v` - The section's bytes.
 /// * `head` - The header's offset in them.
-/// * `code` - Whether an address is in an executable section.
 ///
 /// # Returns
 ///
-/// The layout, the file and line sub-tables it names and every
-/// function's `(entry, name)` in table order, or `None` when any field,
-/// entry or name does not hold.
-fn parse<'a>(v: View<'a>, head: usize, code: &dyn Fn(u64) -> bool) -> Option<Parsed<'a>> {
+/// The layout, the pc quantum and the function count, or `None` when a
+/// field does not hold.
+fn header(v: View<'_>, head: usize) -> Option<(GoVersion, u8, usize)> {
     let version = GoVersion::of(v.u32(head)?)?;
     let (pad, min_lc, ptr) = (
         v.bytes.get(head.checked_add(4)?..head.checked_add(6)?)?,
@@ -424,18 +426,45 @@ fn parse<'a>(v: View<'a>, head: usize, code: &dyn Fn(u64) -> bool) -> Option<Par
     if pad != [0, 0] || !matches!(min_lc, 1 | 2 | 4) || usize::from(ptr) != v.word {
         return None;
     }
+    let nfunc = v.offset(head.checked_add(8)?)?;
+    (1..=FUNCS_MAX)
+        .contains(&nfunc)
+        .then_some((version, min_lc, nfunc))
+}
+
+/// Reads a table whose header starts at `head` in a view.
+///
+/// # Arguments
+///
+/// * `v` - The section's bytes.
+/// * `head` - The header's offset in them.
+/// * `code` - Whether an address is in an executable section.
+/// * `text` - The text start [`module_text`] found, for a 1.18-or-later
+///   header that leaves its own zero.
+///
+/// # Returns
+///
+/// The layout, the file and line sub-tables it names and every
+/// function's `(entry, name)` in table order, or `None` when any field,
+/// entry or name does not hold.
+fn parse<'a>(
+    v: View<'a>,
+    head: usize,
+    code: &dyn Fn(u64) -> bool,
+    text: Option<u64>,
+) -> Option<Parsed<'a>> {
+    let (version, min_lc, nfunc) = header(v, head)?;
     let w = v.word;
     let field = |k: usize| head.checked_add(8)?.checked_add(k.checked_mul(w)?);
-    let nfunc = v.offset(field(0)?)?;
-    if nfunc == 0 || nfunc > FUNCS_MAX {
-        return None;
-    }
     let at = |k: usize| head.checked_add(v.offset(field(k)?)?);
     let (text, names, table, records, lines) = match version {
         GoVersion::V1_18 | GoVersion::V1_20 => {
             let functab = at(7)?;
             (
-                Some(v.word(field(2)?)?),
+                Some(match v.word(field(2)?)? {
+                    0 => text?,
+                    start => start,
+                }),
                 at(3)?,
                 functab,
                 functab,
@@ -504,11 +533,116 @@ fn parse<'a>(v: View<'a>, head: usize, code: &dyn Fn(u64) -> bool) -> Option<Par
     })
 }
 
+/// Most module data lookups one search makes: an image has one table, and
+/// each lookup reads every data section.
+const MODULE_LOOKUPS_MAX: usize = 4;
+
+/// Most records one lookup reads as module data: the one record points
+/// at the header, and a thousand pointers to it are no image.
+const MODULES_MAX: usize = 16;
+
+/// The module data words the text section map is looked for in: the
+/// fields before it move from release to release (word 41 in Go 1.23, 42
+/// in 1.26, 45 in 1.27).
+const TEXTSECTMAP_WORDS: std::ops::Range<usize> = 24..64;
+
+/// Most text sections a text section map may list to be read as one.
+const TEXTSECTS_MAX: u64 = 16;
+
+/// Returns where a module's text starts, from the module data that points
+/// back at its function table's header.
+///
+/// Go 1.26 and later write zero for the header's text start, and the
+/// runtime adds each entry's offset to the module data's `text` instead. A
+/// record whose first word is the header's address is that module data. It
+/// is trusted only when its `minpc` agrees with its `text`, and its text
+/// section map, found by its first entry `{0, size, text}`, lists one
+/// section: a split text's entries count from each section's start, which
+/// is not walked here. The section start is never guessed in its place: an
+/// externally linked build puts C code before the Go text.
+///
+/// # Arguments
+///
+/// * `sections` - The mapped sections.
+/// * `bytes` - Reads a section's bytes as the image holds them.
+/// * `word` - The pointer width in bytes, 4 or 8.
+/// * `header` - The function table header's address.
+///
+/// # Errors
+///
+/// Why no module data gives the text start, for the summary to say.
+fn module_text<'a>(
+    sections: &'a [Section],
+    bytes: &impl Fn(&'a Section) -> Option<&'a [u8]>,
+    word: usize,
+    header: u64,
+) -> Result<u64, String> {
+    let at_va = |va: u64| {
+        let s = sections
+            .iter()
+            .find(|s| va.checked_sub(s.va.0).is_some_and(|d| d < s.file_size))?;
+        Some(View {
+            bytes: bytes(s)?.get(saturating_usize(va - s.va.0)..)?,
+            word,
+        })
+    };
+    let records = sections
+        .iter()
+        .filter(|s| !s.executable)
+        .filter_map(|s| Some((s.va.0, bytes(s)?)))
+        .flat_map(|(va, data)| {
+            (0..data.len())
+                .step_by(word.max(1))
+                .filter(move |&at| word_le(data, at, word) == Some(header))
+                .map(move |at| (va.saturating_add(from_usize(at)), data, at))
+        })
+        .take(MODULES_MAX);
+    let mut why = "no module data points at it".to_owned();
+    for (va, data, at) in records {
+        let v = View { bytes: data, word };
+        let field = |k: usize| v.word(at.checked_add(k.checked_mul(word)?)?);
+        let (Some(minpc), Some(text)) = (field(20), field(22)) else {
+            continue;
+        };
+        if minpc != text {
+            why = format!("the module data at {va:#x} states text {text:#x} but minpc {minpc:#x}");
+            continue;
+        }
+        let mut words = TEXTSECTMAP_WORDS;
+        let map = words.find_map(|k| {
+            let (len, first) = (field(k + 1)?, at_va(field(k)?)?);
+            (len == field(k + 2)?
+                && (1..=TEXTSECTS_MAX).contains(&len)
+                && first.word(0)? == 0
+                && first.word(2 * word)? == text)
+                .then_some(len)
+        });
+        match map {
+            Some(1) => return Ok(text),
+            Some(n) => {
+                why = format!(
+                    "the module data at {va:#x} maps {n} text sections, which are not walked"
+                );
+            }
+            None => why = format!("the module data at {va:#x} names no text section map"),
+        }
+    }
+    Err(format!(
+        "the Go function table at {header:#x} leaves its text start to the module data, and {why}: its functions are not named"
+    ))
+}
+
+/// A function table found, with its functions as `(entry, name)` in
+/// address order.
+type Found<'a> = (Pclntab, Vec<(u64, &'a str)>);
+
 /// Finds and reads the Go function table of an image.
 ///
 /// A section the toolchain names is read first; the rest are searched for
 /// the magic at every four-byte boundary, the first table that validates
-/// whole winning, up to [`SCAN_MAX`] bytes.
+/// whole winning, up to [`SCAN_MAX`] bytes. A 1.18-or-later header whose
+/// text start is zero, as Go 1.26 and later write it, is read from the
+/// text start its module data states ([`module_text`]).
 ///
 /// # Arguments
 ///
@@ -518,13 +652,17 @@ fn parse<'a>(v: View<'a>, head: usize, code: &dyn Fn(u64) -> bool) -> Option<Par
 ///
 /// # Returns
 ///
-/// The table and its functions as `(entry, name)` in address order, or
-/// `None` when the image carries no table that validates.
+/// The table and its functions as `(entry, name)` in address order.
+///
+/// # Errors
+///
+/// When the image carries no table that validates: why one was refused
+/// for want of a text start, or `None` when there was none to refuse.
 pub(crate) fn find<'a>(
     sections: &'a [Section],
     bytes: impl Fn(&'a Section) -> Option<&'a [u8]>,
     word: usize,
-) -> Option<(Pclntab, Vec<(u64, &'a str)>)> {
+) -> Result<Found<'a>, Option<String>> {
     let spans = crate::program::Spans::of(
         sections
             .iter()
@@ -533,18 +671,32 @@ pub(crate) fn find<'a>(
     );
     let code = |va: u64| spans.holds(va);
     let named = |s: &Section| s.name == ".gopclntab" || s.name.ends_with("__gopclntab");
-    let read = |s: &'a Section, head: usize| {
-        let parsed = parse(
-            View {
-                bytes: bytes(s)?,
-                word,
-            },
-            head,
-            &code,
-        )?;
+    let (mut lookups, mut refused) = (MODULE_LOOKUPS_MAX, None);
+    let mut read = |s: &'a Section, head: usize| {
+        let v = View {
+            bytes: bytes(s)?,
+            word,
+        };
+        let at = s.va.0.checked_add(from_usize(head))?;
+        let zero = matches!(
+            header(v, head),
+            Some((GoVersion::V1_18 | GoVersion::V1_20, _, _))
+        ) && v.word(head.checked_add(8 + 2 * word)?) == Some(0);
+        let mut text = None;
+        if zero && lookups > 0 {
+            lookups -= 1;
+            match module_text(sections, &bytes, word, at) {
+                Ok(start) => text = Some(start),
+                Err(why) => {
+                    refused.get_or_insert(why);
+                    return None;
+                }
+            }
+        }
+        let parsed = parse(v, head, &code, text)?;
         let table = Pclntab {
             version: parsed.version,
-            at: s.va.0.checked_add(from_usize(head))?,
+            at,
             entries: parsed.funcs.iter().map(|f| f.0).collect(),
             lines: parsed.lines,
         };
@@ -555,7 +707,7 @@ pub(crate) fn find<'a>(
         .filter(|s| named(s))
         .find_map(|s| read(s, 0))
     {
-        return Some(found);
+        return Ok(found);
     }
     let mut budget = SCAN_MAX;
     for s in sections.iter().filter(|s| !named(s)) {
@@ -564,7 +716,7 @@ pub(crate) fn find<'a>(
         };
         for head in (0..data.len().saturating_sub(8)).step_by(4) {
             if budget == 0 {
-                return None;
+                return Err(refused);
             }
             budget -= 4;
             let Some(magic) = data.get(head..).and_then(<[u8]>::first_chunk::<4>) else {
@@ -573,11 +725,11 @@ pub(crate) fn find<'a>(
             if GoVersion::of(u32::from_le_bytes(*magic)).is_some()
                 && let Some(found) = read(s, head)
             {
-                return Some(found);
+                return Ok(found);
             }
         }
     }
-    None
+    Err(refused)
 }
 
 /// The symbols a table's names make: each function's name at its entry,

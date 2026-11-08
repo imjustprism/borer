@@ -1383,7 +1383,8 @@ impl Program {
     }
 
     /// Reads the Go function table and names the functions it lists where
-    /// nothing else in the file does ([`crate::go`]).
+    /// nothing else in the file does ([`crate::go`]); a table refused for
+    /// want of a text start says why among the summary's warnings.
     ///
     /// It runs on the image as loaded, its relocations applied, since a
     /// PIE's table states its text start through one.
@@ -1395,9 +1396,13 @@ impl Program {
         else {
             return;
         };
-        let Some((table, funcs)) = crate::go::find(&self.sections, |s| self.section_bytes(s), word)
-        else {
-            return;
+        let (table, funcs) = match crate::go::find(&self.sections, |s| self.section_bytes(s), word)
+        {
+            Ok(found) => found,
+            Err(why) => {
+                self.headers.lenient.extend(why);
+                return;
+            }
         };
         let named = crate::go::symbols(&funcs, &self.symbols);
         self.symbols.extend(named);

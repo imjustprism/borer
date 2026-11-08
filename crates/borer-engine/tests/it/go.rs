@@ -494,3 +494,135 @@ fn the_stack_check_folds_into_one_comment() {
     assert!(!text.contains("if ("), "{text}");
     assert!(!text.contains("morestack_noctxt()"), "{text}");
 }
+
+/// A Go 1.26 table at `at`, with the module data records pointing back at it.
+///
+/// The 1.20 layout with its header's text start left zero, then a record
+/// per `(minpc, sections)`, each stating its text at [`MAIN`] and a text
+/// section map of that many sections (none for zero) at word 42, the maps
+/// after the records.
+///
+/// # Arguments
+///
+/// * `at` - The address the table's header is loaded at.
+/// * `records` - Each record's `minpc` and its map's section count.
+fn zero_text_table(at: u64, records: &[(u64, u64)]) -> Vec<u8> {
+    let mut b = pclntab(&FUNCS, 0x31);
+    b[24..32].fill(0);
+    b.resize(b.len().next_multiple_of(8), 0);
+    let mut map = at + u64::try_from(b.len() + records.len() * 64 * 8).expect("fits");
+    for &(minpc, sections) in records {
+        let mut words = [0u64; 64];
+        words[0] = at;
+        words[20] = minpc;
+        words[22] = MAIN;
+        words[23] = MAIN + 0x31;
+        if sections > 0 {
+            words[42..45].copy_from_slice(&[map, sections, sections]);
+            map += sections * 24;
+        }
+        b.extend(words.iter().flat_map(|w| w.to_le_bytes()));
+    }
+    for &(_, sections) in records {
+        for k in 0..sections {
+            b.extend(
+                [k * 0x31, (k + 1) * 0x31, MAIN + k * 0x31]
+                    .iter()
+                    .flat_map(|w| w.to_le_bytes()),
+            );
+        }
+    }
+    b
+}
+
+/// A Go 1.26 table names its functions from the text its module data states.
+///
+/// The header leaves its text start zero, and the module data that points
+/// back at it states the text its entries count from, so the table names
+/// every function it lists, as a 1.20 header with its text start does.
+/// Every Go 1.26 and later binary read none: each entry counted from
+/// zero, outside the code, and the whole table was refused (gh.exe 1.26.4
+/// lists 42,955 functions).
+#[test]
+fn a_zero_text_start_is_read_from_the_module_data() {
+    let p = go_elf(".gopclntab", 0, &zero_text_table(0x2000, &[(MAIN, 1)]));
+    assert_eq!(
+        locals(&p),
+        vec![
+            (MAIN, "main.main"),
+            (ADD, "main.add"),
+            (MORESTACK, "runtime.morestack_noctxt")
+        ]
+    );
+    assert_eq!(p.go.as_ref().map(|g| g.at), Some(0x2000));
+    let mut decoys = Vec::new();
+    for _ in 0..4 {
+        let mut decoy = [0u8; 64];
+        decoy[..16].copy_from_slice(&[0xf1, 0xff, 0xff, 0xff, 1, 0, 1, 8, 3, 0, 0, 0, 0, 0, 0, 0]);
+        decoys.extend_from_slice(&decoy);
+    }
+    decoys.extend(zero_text_table(0x2100, &[(MAIN, 1)]));
+    let found = go_elf(".rodata", 0, &decoys);
+    assert_eq!(
+        found.go.as_ref().map(|g| g.at),
+        Some(0x2100),
+        "four words shaped like a header's start spend no module data lookup"
+    );
+}
+
+/// A zero text start no module data agrees on refuses the table and says why.
+///
+/// The entries are not counted from a guess when no record points back at
+/// the header, its `minpc` differs from its text, its text is split into
+/// sections, which are not walked, it names no text section map, or the
+/// map's first section starts elsewhere. At most sixteen records are read,
+/// and at most four headers looked up.
+#[test]
+fn a_zero_text_start_no_module_data_agrees_on_is_refused() {
+    let mut bare = pclntab(&FUNCS, 0x31);
+    bare[24..32].fill(0);
+    let mut moved = zero_text_table(0x2000, &[(MAIN, 1)]);
+    let base = moved.len() - 8;
+    moved[base..].copy_from_slice(&(MAIN + 8).to_le_bytes());
+    let mut crowded = vec![(ADD, 1); 16];
+    crowded.push((MAIN, 1));
+    let mut lookups: Vec<u8> = bare.repeat(4);
+    let good = 0x2000 + u64::try_from(lookups.len()).expect("fits");
+    lookups.extend(zero_text_table(good, &[(MAIN, 1)]));
+    for (section, table, why) in [
+        (".gopclntab", bare, "no module data points at it"),
+        (
+            ".gopclntab",
+            zero_text_table(0x2000, &[(ADD, 1)]),
+            "states text 0x1000 but minpc 0x1010",
+        ),
+        (
+            ".gopclntab",
+            zero_text_table(0x2000, &[(MAIN, 2)]),
+            "maps 2 text sections, which are not walked",
+        ),
+        (
+            ".gopclntab",
+            zero_text_table(0x2000, &[(MAIN, 0)]),
+            "names no text section map",
+        ),
+        (".gopclntab", moved, "names no text section map"),
+        (
+            ".gopclntab",
+            zero_text_table(0x2000, &crowded),
+            "but minpc 0x1010",
+        ),
+        (".rodata", lookups, "no module data points at it"),
+    ] {
+        let p = go_elf(section, 0, &table);
+        assert!(p.go.is_none(), "{why}: the table was read");
+        assert!(locals(&p).is_empty(), "{why}: {:?}", locals(&p));
+        let summary = p.summary();
+        assert!(
+            summary.contains(
+                "the Go function table at 0x2000 leaves its text start to the module data, and "
+            ) && summary.contains(why),
+            "{summary}"
+        );
+    }
+}
