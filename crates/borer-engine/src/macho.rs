@@ -219,15 +219,23 @@ pub(crate) fn load(file: &[u8], mach: &Mach<'_>) -> anyhow::Result<Loaded> {
 /// They are its header and load commands, every segment's file bytes, and
 /// the tables the other commands place, which an image may keep past its
 /// last segment: the symbol and string tables (an object file has no other
-/// home for them), the dynamic symbol tables, the dyld information and each
-/// `linkedit_data_command`'s data.
+/// home for them), the dynamic symbol tables, the dyld information, each
+/// `linkedit_data_command`'s data, and each section's relocation entries.
 ///
 /// # Arguments
 ///
 /// * `m` - The image.
 fn image_end(m: &MachO<'_>) -> u64 {
+    /// Bytes of one `relocation_info` entry, in 32- and 64-bit images alike.
+    const RELOCATION: u64 = 8;
     let (header, nlist, module) = if m.is_64 { (32, 16, 56) } else { (28, 12, 52) };
     let at = |off: u32, len: u64| u64::from(off) + len;
+    let relocations = m
+        .segments
+        .sections()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|(s, _)| at(s.reloff, u64::from(s.nreloc) * RELOCATION));
     m.load_commands
         .iter()
         .flat_map(|lc| match &lc.command {
@@ -269,6 +277,7 @@ fn image_end(m: &MachO<'_>) -> u64 {
             }
             _ => [0; 6],
         })
+        .chain(relocations)
         .fold(header + u64::from(m.header.sizeofcmds), u64::max)
 }
 

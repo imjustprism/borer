@@ -485,3 +485,38 @@ fn bytes_past_the_image_are_a_macho_overlay() {
         );
     }
 }
+/// A section's relocation entries are part of a Mach-O image.
+///
+/// An object file may keep them after its segment data and symbol tables;
+/// they end the image there, so only bytes past them are overlay.
+#[test]
+fn a_section_relocation_table_ends_a_macho_image() {
+    use crate::machogen::{self, CODE, RX, Sect, Seg, X86_64};
+    let text = Seg {
+        name: "__TEXT",
+        vmaddr: TEXT,
+        fileoff: 0,
+        bytes: vec![0xc3; 0x1000],
+        prot: RX,
+        sections: vec![Sect {
+            name: "__text",
+            addr: TEXT + 0x400,
+            size: 0x10,
+            flags: CODE,
+        }],
+    };
+    let mut bytes = machogen::build(X86_64, 0, &[text], &[]);
+    let section = 32 + 72;
+    bytes[section + 56..section + 60].copy_from_slice(&0x1000u32.to_le_bytes());
+    bytes[section + 60..section + 64].copy_from_slice(&2u32.to_le_bytes());
+    bytes.resize(0x1010, 0);
+    let clean = load(&bytes, "relocations-clean");
+    assert!(
+        clean.headers.overlay.is_empty(),
+        "{:?}",
+        clean.headers.overlay
+    );
+    bytes.extend_from_slice(&[0x41; 0x20]);
+    let p = load(&bytes, "relocations-appended");
+    assert_eq!(p.headers.overlay, [(0x1010, 0x20)]);
+}
