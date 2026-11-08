@@ -16,7 +16,7 @@ use goblin::elf::Elf;
 use goblin::pe::PE;
 use goblin::pe::data_directories::DataDirectoryType;
 
-use crate::num::{u16_le, u32_le, u64_le};
+use crate::num::{from_usize, u16_le, u32_le, u64_le};
 use crate::program::Section;
 
 /// A handler the x64 unwind tables register for one function.
@@ -100,11 +100,13 @@ pub struct Headers {
     /// requested execution level (does it ask for admin), UI access, DPI
     /// awareness.
     pub manifest: Vec<(&'static str, String)>,
-    /// `(file offset, length)` of each run of bytes after the last mapped
-    /// section that the certificate table does not hold, in file order:
-    /// appended payloads and installers, before the table and after it.
-    /// Bytes appended after the table sit outside what the signature covers,
-    /// so a signed file still verifies with them there.
+    /// `(file offset, length)` of each run of bytes past everything the
+    /// headers place, in file order: appended payloads and installers. A PE's
+    /// run follows its last section, less the certificate table, before the
+    /// table and after it (bytes after the table sit outside what the
+    /// signature covers, so a signed file still verifies with them there); an
+    /// ELF's follows its sections, segments and header tables; a Mach-O's its
+    /// segments and symbol tables, or a fat file's last slice.
     pub overlay: Vec<(u64, u64)>,
     /// `(file offset, length)` of the Authenticode certificate table that
     /// follows the sections, cut at the end of the file.
@@ -320,6 +322,19 @@ impl Headers {
         matches!(self.subsystem, Some("gui" | "console" | "posix"))
             || self.interpreter.is_some()
             || self.kind.is_some_and(|k| k.starts_with("ET_DYN"))
+    }
+
+    /// Adds the file's bytes from `start` to `end` to [`Headers::overlay`]
+    /// when there is at least one.
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - The file offset the run starts at.
+    /// * `end` - The file offset it ends before.
+    pub(crate) fn add_overlay(&mut self, start: u64, end: u64) {
+        if start < end {
+            self.overlay.push((start, end - start));
+        }
     }
 
     /// Renders what the signature says, `signed` when it was not read
@@ -992,13 +1007,9 @@ pub(crate) fn from_pe(
             }
         }
     }
-    if overlay_end > mapped_end {
-        h.overlay.push((mapped_end, overlay_end - mapped_end));
-    }
-    if let Some((cert, size)) = h.certificates
-        && cert + size < file_len
-    {
-        h.overlay.push((cert + size, file_len - cert - size));
+    h.add_overlay(mapped_end, overlay_end);
+    if let Some((cert, size)) = h.certificates {
+        h.add_overlay(cert + size, file_len);
     }
     h
 }
@@ -1264,17 +1275,55 @@ fn metadata_ranges(elf: &Elf<'_>) -> Vec<(u64, u64)> {
 /// scan of them all.
 const METADATA_MAX: usize = 32;
 
+/// Returns the file offset where the bytes an ELF's headers place end: the
+/// file header, the program and section header tables, every section's file
+/// bytes (`SHT_NOBITS` has none) and every segment's.
+///
+/// A header table no entry was read from places nothing: its offset may be
+/// the damage that made the loader drop it.
+///
+/// # Arguments
+///
+/// * `elf` - The parsed file.
+fn elf_end(elf: &Elf<'_>) -> u64 {
+    use goblin::elf::section_header::SHT_NOBITS;
+    let h = &elf.header;
+    let table = |at: u64, count: usize, entry: u16| {
+        if count == 0 {
+            0
+        } else {
+            at.saturating_add(from_usize(count).saturating_mul(u64::from(entry)))
+        }
+    };
+    elf.section_headers
+        .iter()
+        .filter(|s| s.sh_type != SHT_NOBITS)
+        .map(|s| s.sh_offset.saturating_add(s.sh_size))
+        .chain(
+            elf.program_headers
+                .iter()
+                .map(|p| p.p_offset.saturating_add(p.p_filesz)),
+        )
+        .fold(
+            table(h.e_phoff, elf.program_headers.len(), h.e_phentsize)
+                .max(table(h.e_shoff, elf.section_headers.len(), h.e_shentsize))
+                .max(u64::from(h.e_ehsize)),
+            u64::max,
+        )
+}
+
 /// Reads the ELF header facts.
 ///
 /// Mitigations: `nx` from a non-executable `PT_GNU_STACK`, `relro` from
 /// `PT_GNU_RELRO` (with `bind-now` when the dynamic flags request eager
 /// binding), `pie` for a position-independent executable, `canary` and
-/// `fortify` from the imports the compiler's hardening emits.
+/// `fortify` from the imports the compiler's hardening emits. The overlay
+/// is what follows the bytes the headers place ([`elf_end`]).
 ///
 /// # Arguments
 ///
 /// * `elf` - The parsed file.
-/// * `bytes` - The whole file, for the note segments.
+/// * `bytes` - The whole file, for the note segments and the overlay.
 pub(crate) fn from_elf(elf: &Elf<'_>, bytes: &[u8]) -> Headers {
     use goblin::elf::dynamic::{DF_1_NOW, DF_1_PIE, DF_BIND_NOW};
     use goblin::elf::header::{ET_CORE, ET_DYN, ET_EXEC, ET_REL};
@@ -1297,6 +1346,7 @@ pub(crate) fn from_elf(elf: &Elf<'_>, bytes: &[u8]) -> Headers {
     });
     h.interpreter = elf.interpreter.map(str::to_owned);
     h.metadata = metadata_ranges(elf);
+    h.add_overlay(elf_end(elf), from_usize(bytes.len()));
     h.libraries = elf.libraries.iter().map(|l| (*l).to_owned()).collect();
     h.stripped = Some(elf.syms.is_empty());
     let machine = elf.header.e_machine;

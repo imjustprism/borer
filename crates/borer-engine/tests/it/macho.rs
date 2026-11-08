@@ -11,6 +11,7 @@
 )]
 
 use borer_engine::analysis::{Analysis, Overlay, decompile::decompile};
+use borer_engine::num::{from_usize, lo32};
 use borer_engine::program::{Arch, BinaryFormat, Program, SymbolKind};
 
 /// Where `__TEXT` is mapped.
@@ -389,4 +390,98 @@ fn a_fat_slice_past_the_end_says_so() {
         ),
         "{said}"
     );
+}
+
+/// Bytes past everything a Mach-O image places are its overlay: past a
+/// thin file's segments and symbol tables, and past a fat file's last slice.
+///
+/// Each image here ends where its `__LINKEDIT` does, or where data a load
+/// command places past its one segment does (an object file's string table,
+/// the indirect symbols, rebase opcodes, the function starts), and shows no
+/// overlay, nor does a second slice after the one analyzed; with bytes
+/// appended each names their offset and size once, in the summary's notes
+/// and in one `overlay:` line. Mach-O reported none, so a trailer an agent
+/// read facts from was never said to be appended.
+#[test]
+fn bytes_past_the_image_are_a_macho_overlay() {
+    use crate::machogen::{self, CODE, RX, Sect, Seg, X86_64};
+    let one = thin();
+    let second = (0x1000 + one.len()).next_multiple_of(0x1000);
+    let mut two = fat();
+    two[4..8].copy_from_slice(&2u32.to_be_bytes());
+    two[28..32].copy_from_slice(&0x0100_000cu32.to_be_bytes());
+    two[36..40].copy_from_slice(&lo32(from_usize(second)).to_be_bytes());
+    two[40..44].copy_from_slice(&lo32(from_usize(one.len())).to_be_bytes());
+    two[44..48].copy_from_slice(&12u32.to_be_bytes());
+    two.resize(second, 0);
+    two.extend_from_slice(&one);
+    let words = |all: &[u32]| -> Vec<u8> { all.iter().flat_map(|w| w.to_le_bytes()).collect() };
+    let past = |command: Vec<u8>, data: usize| {
+        let text = Seg {
+            name: "__TEXT",
+            vmaddr: TEXT,
+            fileoff: 0,
+            bytes: vec![0xc3; 0x1000],
+            prot: RX,
+            sections: vec![Sect {
+                name: "__text",
+                addr: TEXT + 0x400,
+                size: 0x10,
+                flags: CODE,
+            }],
+        };
+        let mut b = machogen::build(X86_64, 0, &[text], &[command]);
+        b.resize(0x1000 + data, 0);
+        b
+    };
+    let mut object = past(words(&[2, 24, 0x1000, 1, 0x1010, 0x10]), 0);
+    object.extend_from_slice(&1u32.to_le_bytes());
+    object.extend_from_slice(&[0x0f, 1, 0, 0]);
+    object.extend_from_slice(&(TEXT + 0x400).to_le_bytes());
+    object.extend_from_slice(b"\0_f\0\0\0\0\0\0\0\0\0\0\0\0\0");
+    let mut indirect = [0u32; 20];
+    indirect[..2].copy_from_slice(&[0xb, 80]);
+    indirect[14..16].copy_from_slice(&[0x1000, 2]);
+    let cases = [
+        ("thin", one),
+        ("fat", fat()),
+        ("two-slices", two),
+        ("object", object),
+        ("indirect", past(words(&indirect), 8)),
+        (
+            "rebase",
+            past(machogen::dyld_info((0x1000, 8), (0, 0), (0, 0)), 8),
+        ),
+        ("starts", past(machogen::linkedit(0x26, 0x1000, 8), 8)),
+    ];
+    for (name, bytes) in cases {
+        let end = bytes.len();
+        let clean = load(&bytes, &format!("{name}-clean"));
+        assert!(
+            clean.headers.overlay.is_empty(),
+            "{name}: {:?}",
+            clean.headers.overlay
+        );
+        assert!(!clean.summary().contains("overlay"), "{}", clean.summary());
+        let mut appended = bytes;
+        appended.extend_from_slice(&[0x41; 0x123]);
+        let p = load(&appended, &format!("{name}-appended"));
+        assert_eq!(p.headers.overlay, [(from_usize(end), 0x123)], "{name}");
+        let summary = p.summary();
+        assert!(
+            summary.contains(&format!("overlay 291 bytes @ {end:#x}")),
+            "{summary}"
+        );
+        let lines: Vec<&str> = summary
+            .lines()
+            .filter(|l| l.starts_with("overlay:"))
+            .collect();
+        assert_eq!(
+            lines,
+            [format!(
+                "overlay: no known signature: data, a payload or padding at {end:#x} (0x123 bytes), entropy 0.00"
+            )],
+            "{summary}"
+        );
+    }
 }

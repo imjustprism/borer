@@ -147,7 +147,13 @@ struct RawSection {
 /// architecture, with nothing to say why.
 pub(crate) fn load(file: &[u8], mach: &Mach<'_>) -> anyhow::Result<Loaded> {
     match mach {
-        Mach::Binary(m) => Ok(image(file, m, 0)),
+        Mach::Binary(m) => {
+            let mut loaded = image(file, m, 0);
+            loaded
+                .headers
+                .add_overlay(image_end(m), from_usize(file.len()));
+            Ok(loaded)
+        }
         Mach::Fat(multi) => {
             let arches: Vec<goblin::mach::fat::FatArch> =
                 multi.iter_arches().map_while(Result::ok).collect();
@@ -198,9 +204,72 @@ pub(crate) fn load(file: &[u8], mach: &Mach<'_>) -> anyhow::Result<Loaded> {
             };
             let mut loaded = image(file, &m, crate::num::saturating_usize(start));
             loaded.lenient = lenient;
+            let slices = arches
+                .iter()
+                .map(|a| u64::from(a.offset) + u64::from(a.size));
+            let end = slices.fold(start.saturating_add(image_end(&m)), u64::max);
+            loaded.headers.add_overlay(end, from_usize(file.len()));
             Ok(loaded)
         }
     }
+}
+
+/// Returns where the bytes an image's load commands place end, from its start.
+///
+/// They are its header and load commands, every segment's file bytes, and
+/// the tables the other commands place, which an image may keep past its
+/// last segment: the symbol and string tables (an object file has no other
+/// home for them), the dynamic symbol tables, the dyld information and each
+/// `linkedit_data_command`'s data.
+///
+/// # Arguments
+///
+/// * `m` - The image.
+fn image_end(m: &MachO<'_>) -> u64 {
+    let (header, nlist, module) = if m.is_64 { (32, 16, 56) } else { (28, 12, 52) };
+    let at = |off: u32, len: u64| u64::from(off) + len;
+    m.load_commands
+        .iter()
+        .flat_map(|lc| match &lc.command {
+            CommandVariant::Segment64(s) => [s.fileoff.saturating_add(s.filesize), 0, 0, 0, 0, 0],
+            CommandVariant::Segment32(s) => [at(s.fileoff, u64::from(s.filesize)), 0, 0, 0, 0, 0],
+            CommandVariant::Symtab(t) => [
+                at(t.symoff, u64::from(t.nsyms) * nlist),
+                at(t.stroff, u64::from(t.strsize)),
+                0,
+                0,
+                0,
+                0,
+            ],
+            CommandVariant::Dysymtab(d) => [
+                at(d.tocoff, u64::from(d.ntoc) * 8),
+                at(d.modtaboff, u64::from(d.nmodtab) * module),
+                at(d.extrefsymoff, u64::from(d.nextrefsyms) * 4),
+                at(d.indirectsymoff, u64::from(d.nindirectsyms) * 4),
+                at(d.extreloff, u64::from(d.nextrel) * 8),
+                at(d.locreloff, u64::from(d.nlocrel) * 8),
+            ],
+            CommandVariant::DyldInfo(d) | CommandVariant::DyldInfoOnly(d) => [
+                at(d.rebase_off, u64::from(d.rebase_size)),
+                at(d.bind_off, u64::from(d.bind_size)),
+                at(d.weak_bind_off, u64::from(d.weak_bind_size)),
+                at(d.lazy_bind_off, u64::from(d.lazy_bind_size)),
+                at(d.export_off, u64::from(d.export_size)),
+                0,
+            ],
+            CommandVariant::CodeSignature(d)
+            | CommandVariant::SegmentSplitInfo(d)
+            | CommandVariant::FunctionStarts(d)
+            | CommandVariant::DataInCode(d)
+            | CommandVariant::DylibCodeSignDrs(d)
+            | CommandVariant::LinkerOptimizationHint(d)
+            | CommandVariant::DyldExportsTrie(d)
+            | CommandVariant::DyldChainedFixups(d) => {
+                [at(d.dataoff, u64::from(d.datasize)), 0, 0, 0, 0, 0]
+            }
+            _ => [0; 6],
+        })
+        .fold(header + u64::from(m.header.sizeofcmds), u64::max)
 }
 
 /// A NUL-padded 16-byte name.

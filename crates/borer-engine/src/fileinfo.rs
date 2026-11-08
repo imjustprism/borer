@@ -97,9 +97,9 @@ pub(crate) fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
     None
 }
 
-/// The runs of bytes appended past a PE file's last section, outside the
-/// certificate table ([`crate::headers::Headers::overlay`]), each with its
-/// entropy and what it is.
+/// The runs of bytes appended past everything a file's headers place
+/// ([`crate::headers::Headers::overlay`]), each with its entropy and what it
+/// is.
 ///
 /// # Arguments
 ///

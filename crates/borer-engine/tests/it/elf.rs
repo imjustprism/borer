@@ -955,3 +955,64 @@ fn taint_reads_calls_by_system_v_on_an_elf() {
     );
     assert!(!out.contains("# still held"), "{out}");
 }
+
+/// Bytes past everything an ELF's headers place are its overlay.
+///
+/// The writer puts the section names and the section header table after
+/// the last section, so an image without a trailer ends at that table and
+/// shows no overlay; the same image with bytes appended names their offset
+/// and size once, in the summary's notes and in one `overlay:` line. ELF
+/// reported none, so a trailer an agent read facts from was never said to
+/// be appended.
+#[test]
+fn bytes_past_the_headers_are_an_elf_overlay() {
+    use crate::elfgen::{self, AX, EM_X86_64, ET_EXEC, PROGBITS, Sec};
+    let plain = elfgen::build(
+        ET_EXEC,
+        EM_X86_64,
+        0x1000,
+        &[Sec::new(".text", PROGBITS, AX, 0x1000, vec![0xc3; 0x10])],
+    );
+    let load = |bytes: Vec<u8>| {
+        Program::from_bytes(std::path::PathBuf::from("plain.elf"), bytes).expect("loads")
+    };
+    let end = plain.len();
+    let mut appended = plain.clone();
+    appended.extend_from_slice(&[0x41; 0x123]);
+    let clean = load(plain);
+    assert!(
+        clean.headers.overlay.is_empty(),
+        "{:?}",
+        clean.headers.overlay
+    );
+    assert!(!clean.summary().contains("overlay"), "{}", clean.summary());
+    let p = load(appended);
+    assert_eq!(
+        p.headers.overlay,
+        [(borer_engine::num::from_usize(end), 0x123)]
+    );
+    let summary = p.summary();
+    assert!(
+        summary.contains(&format!("overlay 291 bytes @ {end:#x}")),
+        "{summary}"
+    );
+    let lines: Vec<&str> = summary
+        .lines()
+        .filter(|l| l.starts_with("overlay:"))
+        .collect();
+    assert_eq!(
+        lines,
+        [format!(
+            "overlay: no known signature: data, a payload or padding at {end:#x} (0x123 bytes), entropy 0.00"
+        )],
+        "{summary}"
+    );
+    let mut dropped = p.bytes;
+    let total = borer_engine::num::from_usize(dropped.len());
+    dropped[0x28..0x30].copy_from_slice(&0x7fff_ffffu64.to_le_bytes());
+    assert_eq!(
+        load(dropped).headers.overlay,
+        [(0x1010, total - 0x1010)],
+        "a section table the loader dropped places nothing past the segment"
+    );
+}
