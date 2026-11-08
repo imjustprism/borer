@@ -1763,6 +1763,8 @@ fn decompile_in<L: Lifter>(
         copy_targets: BTreeSet::new(),
         entry: entry_block,
         eh_roots: plan.root_blocks().collect(),
+        guards: BTreeMap::new(),
+        varying: BTreeSet::new(),
     };
     let mut reached = vec![false; n];
     let mut work: Vec<usize> = std::iter::once(entry_block)
@@ -1774,13 +1776,10 @@ fn decompile_in<L: Lifter>(
         }
         work.extend(st.succs[b].iter().copied());
     }
-    let unreachable = reached
-        .iter()
-        .enumerate()
-        .filter(|(b, r)| !**r && !st.twins.contains_key(b))
-        .count();
+    let mut unreachable = 0;
     for (b, r) in reached.iter().enumerate() {
         if !r {
+            unreachable += usize::from(!st.twins.contains_key(&b));
             st.emitted[b] = true;
             st.dead[b] = true;
             st.succs[b].clear();
@@ -1789,6 +1788,8 @@ fn decompile_in<L: Lifter>(
     for preds in &mut st.preds {
         preds.retain(|p| reached[*p]);
     }
+    st.varying = varying_exits(&ctx, &st);
+    st.guards = guard_checks(&ctx, &st);
     let handed = traces::LiveCfg {
         succs: st.succs.clone(),
     };

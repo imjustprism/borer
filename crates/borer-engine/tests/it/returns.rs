@@ -7,10 +7,15 @@
     reason = "assertions are the point of a test"
 )]
 
-use borer_engine::analysis::Analysis;
 use borer_engine::analysis::decompile::polish;
+use borer_engine::analysis::decompile::traces::{Structure, check_structure};
+use borer_engine::analysis::{Analysis, Overlay};
+use borer_engine::program::Program;
 
 use crate::decompiled::{decompiled, program64, replays_clean, runs_agree};
+
+/// Where the hand-assembled functions start.
+const F: u64 = 0x1_4000_1000;
 
 /// A guard clause whose arm only fails writes that arm as the `if` body,
 /// the code after it as what follows, whichever side the branch jumps to.
@@ -182,4 +187,199 @@ fn a_code_a_64_bit_result_zero_extends_is_its_word() {
         chosen.contains("return (uint32_t)(") && chosen.contains("E_NOTIMPL"),
         "{chosen}"
     );
+}
+
+/// The bytes of a function whose three returns share one exit behind a
+/// stack canary's check.
+///
+/// It returns `1` when `a1 & 8`, else `2` when `a1 & 4`, else `3`, each
+/// path setting `eax`. The prologue stores `fs:[0x28]` in a slot and passes
+/// a frame address to the helper at `+0x80`, so the slot escapes and the
+/// check at the exit survives the dataflow; the exit compares the slot with
+/// `fs:[0x28]` and calls `+0x90` on a mismatch.
+fn canary_exit() -> Vec<u8> {
+    let mut code = vec![
+        0x53, // ASM: push rbx
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp,0x28
+        0x48, 0x89, 0xcb, // ASM: mov rbx,rcx
+        0x64, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00, // ASM: mov rax,fs:[0x28]
+        0x48, 0x89, 0x44, 0x24, 0x18, // ASM: mov [rsp+0x18],rax
+        0x48, 0x8d, 0x7c, 0x24, 0x08, // ASM: lea rdi,[rsp+8]
+        0xe8, 0x60, 0x00, 0x00, 0x00, // ASM: call 0x80
+        0xf6, 0xc3, 0x08, // ASM: test bl,8
+        0x0f, 0x85, 0x28, 0x00, 0x00, 0x00, // ASM: jne 0x51
+        0xf6, 0xc3, 0x04, // ASM: test bl,4
+        0x0f, 0x85, 0x29, 0x00, 0x00, 0x00, // ASM: jne 0x5b
+        0xb8, 0x03, 0x00, 0x00, 0x00, // ASM: mov eax,3
+        0x48, 0x8b, 0x54, 0x24, 0x18, // ASM: exit: mov rdx,[rsp+0x18]
+        0x64, 0x48, 0x2b, 0x14, 0x25, 0x28, 0x00, 0x00, 0x00, // ASM: sub rdx,fs:[0x28]
+        0x0f, 0x85, 0x1a, 0x00, 0x00, 0x00, // ASM: jne 0x65
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp,0x28
+        0x5b, // ASM: pop rbx
+        0xc3, // ASM: ret
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: arm1: mov eax,1
+        0xe9, 0xdc, 0xff, 0xff, 0xff, // ASM: jmp exit
+        0xb8, 0x02, 0x00, 0x00, 0x00, // ASM: arm2: mov eax,2
+        0xe9, 0xd2, 0xff, 0xff, 0xff, // ASM: jmp exit
+        0xe8, 0x26, 0x00, 0x00, 0x00, // ASM: fail: call 0x90
+    ];
+    code.resize(0x80, 0xcc);
+    code.extend([0x31, 0xc0, 0xc3]); // ASM: helper: xor eax,eax; ret
+    code.resize(0x90, 0xcc);
+    code.extend([0x0f, 0x0b]); // ASM: fail: ud2
+    code
+}
+
+/// Builds a program of [`canary_exit`]-shaped `code` at [`F`] whose helper
+/// at `+0x80` is a plain function and whose failing call at `+0x90` is
+/// named `fail`.
+///
+/// # Arguments
+///
+/// * `code` - The bytes ([`canary_exit`] or a variant).
+/// * `fail` - The name of the function the check calls.
+fn named_fail(code: &[u8], fail: &str) -> Program {
+    use borer_engine::program::{Symbol, SymbolKind};
+    let mut p = program64(code);
+    p.symbols.push(Symbol {
+        name: fail.to_owned(),
+        addr: F + 0x90,
+        kind: SymbolKind::Local,
+    });
+    p
+}
+
+/// Each arm of a function whose returns share one exit behind a stack
+/// canary's check returns its own value.
+///
+/// The check makes the exit a fork, so it was the join and the text read
+/// `var1 = 1; ... return var1;`. Each arm now takes a copy of the check
+/// with the return, and the canary's fold takes all three checks out; the
+/// copies are the exit's own code, so the text runs as the binary on every
+/// path. The exit stays the join when its failing call is no
+/// `__stack_chk_fail` (named `abort`), and when every path returns the same
+/// value ([`canary_same`], `7` throughout): the check stays, one `return`.
+#[test]
+fn a_return_behind_a_canary_check_is_written_in_each_arm() {
+    let code = canary_exit();
+    let p = named_fail(&code, "__stack_chk_fail");
+    let text = decompiled(&p, F);
+    assert!(
+        text.contains("\n// folded: stack canary in local_10, 3 checks;"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "\nif ((a1 & 8) != 0) {\n  return 1;\n}\nif ((a1 & 4) != 0) {\n  return 2;\n}\nreturn 3;\n"
+        ),
+        "{text}"
+    );
+    let a = Analysis::compute(&p);
+    assert_eq!(
+        check_structure(&p, &a, &Overlay::default(), F, &text),
+        Structure::Agrees,
+        "{text}"
+    );
+    replays_clean(&p, &a, &[F]);
+    let joined = |code: &[u8]| {
+        let text = decompiled(&named_fail(code, "__stack_chk_fail"), F);
+        let returns = text
+            .lines()
+            .filter(|l| l.trim_start().starts_with("return "))
+            .count();
+        (returns, text)
+    };
+    let (n, text) = joined(&canary_same());
+    assert_eq!(n, 1, "{text}");
+    let abort = decompiled(&named_fail(&code, "abort"), F);
+    let returns = abort
+        .lines()
+        .filter(|l| l.trim_start().starts_with("return "))
+        .count();
+    assert_eq!(returns, 1, "{abort}");
+}
+
+/// The bytes of [`canary_exit`]'s shape where every path returns the same
+/// value.
+///
+/// The result slot at `[rsp+0x10]` is set to `7` once, after the escaping
+/// call, and the arms only store distinct dead values to `[rsp+0x20]`, so
+/// the exit returns `7` on every path and stays the shared join.
+fn canary_same() -> Vec<u8> {
+    let mut code = vec![
+        0x53, // ASM: push rbx
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp,0x28
+        0x48, 0x89, 0xcb, // ASM: mov rbx,rcx
+        0x64, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00, // ASM: mov rax,fs:[0x28]
+        0x48, 0x89, 0x44, 0x24, 0x18, // ASM: mov [rsp+0x18],rax
+        0x48, 0x8d, 0x7c, 0x24, 0x08, // ASM: lea rdi,[rsp+8]
+        0xe8, 0x60, 0x00, 0x00, 0x00, // ASM: call 0x80
+        0xc7, 0x44, 0x24, 0x10, 0x07, 0x00, 0x00, 0x00, // ASM: mov [rsp+0x10],7
+        0xf6, 0xc3, 0x08, // ASM: test bl,8
+        0x0f, 0x85, 0x2f, 0x00, 0x00, 0x00, // ASM: jne arm1
+        0xf6, 0xc3, 0x04, // ASM: test bl,4
+        0x0f, 0x85, 0x33, 0x00, 0x00, 0x00, // ASM: jne arm2
+        0xc7, 0x44, 0x24, 0x20, 0x03, 0x00, 0x00, 0x00, // ASM: mov [rsp+0x20],3
+        0x8b, 0x44, 0x24, 0x10, // ASM: exit: mov eax,[rsp+0x10]
+        0x48, 0x8b, 0x54, 0x24, 0x18, // ASM: mov rdx,[rsp+0x18]
+        0x64, 0x48, 0x2b, 0x14, 0x25, 0x28, 0x00, 0x00, 0x00, // ASM: sub rdx,fs:[0x28]
+        0x0f, 0x85, 0x20, 0x00, 0x00, 0x00, // ASM: jne fail
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp,0x28
+        0x5b, // ASM: pop rbx
+        0xc3, // ASM: ret
+        0xc7, 0x44, 0x24, 0x20, 0x01, 0x00, 0x00, 0x00, // ASM: arm1: mov [rsp+0x20],1
+        0xe9, 0xd5, 0xff, 0xff, 0xff, // ASM: jmp exit
+        0xc7, 0x44, 0x24, 0x20, 0x02, 0x00, 0x00, 0x00, // ASM: arm2: mov [rsp+0x20],2
+        0xe9, 0xc8, 0xff, 0xff, 0xff, // ASM: jmp exit
+        0xe8, 0x11, 0x00, 0x00, 0x00, // ASM: fail: call 0x90
+    ];
+    code.resize(0x80, 0xcc);
+    code.extend([0x31, 0xc0, 0xc3]); // ASM: helper: xor eax,eax; ret
+    code.resize(0x90, 0xcc);
+    code.extend([0x0f, 0x0b]); // ASM: fail: ud2
+    code
+}
+
+/// Each arm of a function whose returns share one epilogue that clears
+/// the registers it leaves, as `-fzero-call-used-regs` builds do, returns
+/// its own value.
+///
+/// `f` returns `-3` when `a1 == 0`, `-6` when `a2 > 5`, else `0`, through
+/// one exit that clears eight registers no result comes back in, and
+/// empties an x87 one, before its `ret`. Those render as nothing, so the exit is as small as a plain
+/// `return` and each arm takes a copy; `edx` may carry a second result,
+/// and its clearing still counts.
+#[test]
+fn a_return_behind_cleared_registers_is_written_in_each_arm() {
+    let code = [
+        0x53, // ASM: push rbx
+        0x85, 0xc9, // ASM: test ecx,ecx
+        0x74, 0x29, // ASM: je 0x2e
+        0x83, 0xfa, 0x05, // ASM: cmp edx,5
+        0x77, 0x2b, // ASM: ja 0x35
+        0x31, 0xc0, // ASM: xor eax,eax
+        0x5b, // ASM: pop rbx
+        0x31, 0xc9, // ASM: xor ecx,ecx
+        0x45, 0x31, 0xc0, // ASM: xor r8d,r8d
+        0x45, 0x31, 0xc9, // ASM: xor r9d,r9d
+        0x45, 0x31, 0xd2, // ASM: xor r10d,r10d
+        0x45, 0x31, 0xdb, // ASM: xor r11d,r11d
+        0x66, 0x0f, 0xef, 0xc9, // ASM: pxor xmm1,xmm1
+        0x66, 0x0f, 0xef, 0xd2, // ASM: pxor xmm2,xmm2
+        0x66, 0x0f, 0xef, 0xdb, // ASM: pxor xmm3,xmm3
+        0xd9, 0xee, // ASM: fldz
+        0xdd, 0xd8, // ASM: fstp st(0)
+        0x31, 0xd2, // ASM: xor edx,edx
+        0xc3, // ASM: ret
+        0xb8, 0xfd, 0xff, 0xff, 0xff, // ASM: mov eax,-3
+        0xeb, 0xd7, // ASM: jmp 0xc
+        0xb8, 0xfa, 0xff, 0xff, 0xff, // ASM: mov eax,-6
+        0xeb, 0xd0, // ASM: jmp 0xc
+    ];
+    let p = program64(&code);
+    let text = runs_agree(&p, F);
+    assert!(text.contains("\nif (a1 == 0) {\n  return "), "{text}");
+    assert_eq!(text.matches("return ").count(), 3, "{text}");
+    assert!(!text.contains("else"), "{text}");
+    replays_clean(&p, &Analysis::compute(&p), &[F]);
 }

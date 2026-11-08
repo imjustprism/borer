@@ -322,7 +322,10 @@ pub(super) fn emit_block<L: Lifter>(
                     .chain([i])
                     .collect();
                 let contained = |dups: &BTreeSet<usize>, d: usize| {
-                    dups.contains(&d) && st.succs[d].iter().all(|s| dups.contains(s))
+                    dups.contains(&d)
+                        && st.succs[d]
+                            .iter()
+                            .all(|s| dups.contains(s) || st.guards.get(&d) == Some(s))
                 };
                 let borrowed: Vec<usize> = then
                     .dups
@@ -559,24 +562,34 @@ fn target_first<L: Lifter>(
     then_ok && !(els_ok && fall_first)
 }
 
-/// Tells whether a copy of block `b` goes on to its one successor with no
-/// jump of its own.
+/// Returns the block a copy of block `b` goes on to with no jump of its
+/// own.
 ///
 /// It falls through or returns from a call, or it ends in a branch the
-/// lifter proved goes one way only: the copy's lines hold no branch, so
-/// unless the text says where it goes, it runs into whatever is written
-/// after it (the other side of an `if`, a `return` of someone else's).
+/// lifter proved goes one way only, or in a stack protector's check whose
+/// failing call the copy writes ([`copied`]): the copy's lines hold no
+/// jump, so unless the text says where it goes, it runs into whatever is
+/// written after it (the other side of an `if`, a `return` of someone
+/// else's).
 ///
 /// # Arguments
 ///
 /// * `st` - Emission state.
 /// * `b` - The copied block.
-pub(super) fn runs_on<L: Lifter>(st: &Emit<'_, L>, b: usize) -> bool {
-    match st.blocks[b].term {
+///
+/// # Returns
+///
+/// The successor ([`onward`]), or `None` for a block that ends in a jump,
+/// a return, a fork or nothing.
+pub(super) fn runs_on<L: Lifter>(st: &Emit<'_, L>, b: usize) -> Option<usize> {
+    let on = match st.blocks[b].term {
         BlockTerm::Fall | BlockTerm::Call => true,
-        BlockTerm::Cond | BlockTerm::Indirect => st.succs[b].len() == 1,
+        BlockTerm::Cond | BlockTerm::Indirect => {
+            st.succs[b].len() == 1 || st.guards.contains_key(&b)
+        }
         BlockTerm::Ret | BlockTerm::Jmp | BlockTerm::Invalid => false,
-    }
+    };
+    onward(st, b).filter(|_| on)
 }
 
 /// Writes a branch one of whose ends is no block of the function: under
@@ -670,24 +683,42 @@ pub(super) fn falls_outside<L: Lifter>(ctx: &Ctx<'_>, st: &Emit<'_, L>, b: usize
 /// The lines of a block written again where a path runs into it.
 ///
 /// They are its statements, then its branch when the branch leaves the
-/// function, which [`runs_on`] does not count against the block's going on
-/// to its one successor in it.
+/// function, or the failing call of a stack protector's check under the
+/// condition that fails ([`Emit::guards`]), neither of which [`runs_on`]
+/// counts against the block's going on to its one successor in it.
 ///
 /// # Arguments
 ///
 /// * `ctx` - Per-function state.
 /// * `st` - Emission state.
-/// * `copy` - The block's lift.
-fn copied<L: Lifter>(ctx: &Ctx<'_>, st: &Emit<'_, L>, copy: &BlockOut) -> Vec<String> {
+/// * `b` - The copied block.
+/// * `copy` - Its lift.
+fn copied<L: Lifter>(
+    ctx: &mut Ctx<'_>,
+    st: &Emit<'_, L>,
+    b: usize,
+    copy: &BlockOut,
+) -> Vec<String> {
     let mut lines = copy.lines.clone();
-    if let Some(br) = copy
-        .branch
-        .as_ref()
-        .filter(|br| st.index_of(br.target).is_none())
-    {
+    let Some(br) = copy.branch.as_ref() else {
+        return lines;
+    };
+    if st.index_of(br.target).is_none() {
         let mut out = String::new();
         branch_out(&mut out, st, br, copy.branch_tail.as_deref(), &ctx.names());
         lines.extend(out.lines().map(str::to_owned));
+    } else if let Some(&fail) = st.guards.get(&b) {
+        let cond = br
+            .cond
+            .render(&ctx.names(), st.index_of(br.target) != Some(fail));
+        lines.push(format!("if ({cond}) {{"));
+        lines.extend(
+            run_block(ctx, st, fail)
+                .lines
+                .iter()
+                .map(|l| format!("  {l}")),
+        );
+        lines.push("}".to_owned());
     }
     lines
 }
@@ -707,15 +738,11 @@ pub(super) fn copy_chain<L: Lifter>(ctx: &mut Ctx<'_>, st: &Emit<'_, L>, start: 
     let mut seen: BTreeSet<usize> = BTreeSet::new();
     while seen.insert(cur) {
         let copy = run_block(ctx, st, cur);
-        lines.extend(copied(ctx, st, &copy));
+        lines.extend(copied(ctx, st, cur, &copy));
         let next = copy
             .goto
             .map(|t| st.index_of(t).map_or(t, |n| st.start(n)))
-            .or_else(|| {
-                runs_on(st, cur)
-                    .then(|| st.succs[cur].first().map(|&s| st.start(s)))
-                    .flatten()
-            });
+            .or_else(|| runs_on(st, cur).map(|s| st.start(s)));
         let Some(va) = next else {
             if let Some(t) = falls_outside(ctx, st, cur) {
                 lines.push(jump_to(st, t));
@@ -1647,13 +1674,11 @@ pub(super) fn emit_run<L: Lifter>(
                 kept.pop();
             }
             let copy = run_block(ctx, st, b);
-            kept.extend(copied(ctx, st, &copy));
+            kept.extend(copied(ctx, st, b, &copy));
             let target = if let Some(t) = copy.goto {
                 kept.push(jump_to(st, t));
                 st.index_of(t)
-            } else if runs_on(st, b)
-                && let Some(&s) = st.succs[b].first()
-            {
+            } else if let Some(s) = runs_on(st, b) {
                 kept.push(goto(st.start(s)));
                 Some(s)
             } else if let Some(t) = falls_outside(ctx, st, b) {

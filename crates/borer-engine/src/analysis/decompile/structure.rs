@@ -78,6 +78,14 @@ pub(super) struct Emit<'e, L: Lifter> {
     /// with the position of the block currently being emitted. Top level is
     /// address order.
     pub(super) orders: Vec<(Vec<usize>, usize)>,
+    /// The stack protector's checks, each with the block it fails into
+    /// ([`guard_checks`]): a copy of one goes on one way ([`onward`]).
+    pub(super) guards: BTreeMap<usize, usize>,
+    /// Terminal blocks that return a register whose value differs by the
+    /// path in, their self-zeroing epilogue counted out ([`varying_exits`]):
+    /// copyable into each arm though their raw length is large, where a
+    /// shared return of one value stays shared.
+    pub(super) varying: BTreeSet<usize>,
 }
 
 impl<L: Lifter> Emit<'_, L> {
@@ -1434,6 +1442,57 @@ pub(super) fn body_len(instrs: &[Instruction]) -> usize {
         .count()
 }
 
+/// Counts the statements a block that ends in `ret` renders, its
+/// self-zeroing of registers that carry no result counted out ([`body_len`]
+/// otherwise).
+///
+/// `-fzero-call-used-regs` writes up to forty `xor`/`pxor`/`fldz` before the
+/// `ret`; none reads back as a statement, so an epilogue that only zeroes is
+/// as small as its `return`. A block that does not end in `ret` keeps every
+/// instruction, since a zeroed register there may be read on.
+///
+/// # Arguments
+///
+/// * `instrs` - The block's instructions.
+pub(super) fn return_len(instrs: &[Instruction]) -> usize {
+    if instrs.last().map(Instruction::mnemonic) != Some(Mnemonic::Ret) {
+        return body_len(instrs);
+    }
+    body_len(instrs) - instrs.iter().filter(|i| clears(i)).count()
+}
+
+/// Tells whether an instruction only zeroes a register no result comes
+/// back in.
+///
+/// That is `xor`, `pxor`, `xorps` or `xorpd` (or their VEX forms) of a
+/// register with itself other than `rax`, `rdx` or `xmm0`, and the x87
+/// `fldz` / `fstp st(0)` pair that empties a stack register.
+///
+/// # Arguments
+///
+/// * `i` - The instruction.
+fn clears(i: &Instruction) -> bool {
+    let reg = i.op0_register();
+    let itself = i.op_count() >= 2
+        && (0..i.op_count()).all(|n| i.op_kind(n) == OpKind::Register && i.op_register(n) == reg);
+    let result = matches!(
+        reg.full_register(),
+        Register::RAX | Register::RDX | Register::ZMM0
+    );
+    match i.mnemonic() {
+        Mnemonic::Fldz => true,
+        Mnemonic::Fstp => i.op_count() == 1 && reg == Register::ST0,
+        Mnemonic::Xor
+        | Mnemonic::Pxor
+        | Mnemonic::Xorps
+        | Mnemonic::Xorpd
+        | Mnemonic::Vpxor
+        | Mnemonic::Vxorps
+        | Mnemonic::Vxorpd => itself && !result,
+        _ => false,
+    }
+}
+
 /// Most instructions a block holds for [`twin_tests`] to pair it.
 pub(super) const TWIN_MAX_INSTRS: usize = 4;
 
@@ -1825,15 +1884,148 @@ pub(super) fn base_of<L: Lifter>(
     Base { members, closed }
 }
 
-/// Tells whether a block is small enough to copy
-/// ([`DUP_MAX_INSTRS`]).
+/// Finds the terminal blocks a shared differing return makes copyable
+/// though their self-zeroing epilogue is long ([`Emit::varying`]).
+///
+/// A block with no successor, ending in `ret`, whose statements without the
+/// zeroing render at most [`DUP_MAX_INSTRS`] ([`Lifter::return_len`]), and
+/// that returns a register the block's entry state knows no single value
+/// for, so each path reaches it with its own value. A shared return of one
+/// value, a frame slot or nothing stays shared, written once.
+///
+/// The blocks are read on a copy of the state, changing nothing the
+/// emission records later.
+///
+/// # Arguments
+///
+/// * `ctx` - Per-function state, for the blocks' text.
+/// * `st` - Emission state.
+pub(super) fn varying_exits<L: Lifter>(ctx: &Ctx<'_>, st: &Emit<'_, L>) -> BTreeSet<usize> {
+    let mut probe: Option<Ctx<'_>> = None;
+    let mut varying = BTreeSet::new();
+    for (b, succs) in st.succs.iter().enumerate() {
+        if !succs.is_empty()
+            || st.blocks[b].term != BlockTerm::Ret
+            || L::body_len(&st.code[b]) <= DUP_MAX_INSTRS
+            || L::return_len(&st.code[b]) > DUP_MAX_INSTRS
+        {
+            continue;
+        }
+        let probe = probe.get_or_insert_with(|| ctx.clone());
+        if returns_varying(probe, st, b) {
+            varying.insert(b);
+        }
+    }
+    varying
+}
+
+/// Tells whether block `b` returns a register whose value differs by the
+/// path into it, so each path reaches it with its own value.
+///
+/// Its last statement is `return k;` for a variable `k` the block's entry
+/// state knows no single value for (the paths in disagree). A return of one
+/// known value, a frame slot the paths agree on, or nothing is not varying,
+/// and a shared copy of it reads better written once.
+///
+/// # Arguments
+///
+/// * `ctx` - Per-function state (a copy, read only), for the block's text.
+/// * `st` - Emission state.
+/// * `b` - The block.
+fn returns_varying<L: Lifter>(ctx: &mut Ctx<'_>, st: &Emit<'_, L>, b: usize) -> bool {
+    run_block(ctx, st, b).effects.last().is_some_and(|e| {
+        matches!(&e.kind, lift::EffectKind::Return(Some(Expr::Var(k)))
+            if !st.in_envs[b].vals.contains_key(k))
+    })
+}
+
+/// Tells whether a block is small enough to copy ([`DUP_MAX_INSTRS`]), the
+/// long self-zeroing epilogue of a differing return counted out
+/// ([`Emit::varying`]).
 ///
 /// # Arguments
 ///
 /// * `st` - Emission state.
 /// * `b` - The block.
 fn small<L: Lifter>(st: &Emit<'_, L>, b: usize) -> bool {
-    L::body_len(&st.code[b]) <= DUP_MAX_INSTRS
+    L::body_len(&st.code[b]) <= DUP_MAX_INSTRS || st.varying.contains(&b)
+}
+
+/// Returns the one block a copy of block `b` goes on to.
+///
+/// Its only successor, or the side of a stack protector's check that does
+/// not fail ([`Emit::guards`]), the copy writing the failing call in its
+/// branch.
+///
+/// # Arguments
+///
+/// * `st` - Emission state.
+/// * `b` - The block.
+///
+/// # Returns
+///
+/// The successor, or `None` for a block with none or with two ways on.
+pub(super) fn onward<L: Lifter>(st: &Emit<'_, L>, b: usize) -> Option<usize> {
+    match (st.succs[b].as_slice(), st.guards.get(&b)) {
+        (&[s], _) => Some(s),
+        (&[x, y], Some(&fail)) if x != y && (x == fail || y == fail) => {
+            Some(if x == fail { y } else { x })
+        }
+        _ => None,
+    }
+}
+
+/// Finds the stack protector's checks a shared exit may be copied with.
+///
+/// A check ends in a branch whose failing side is a block that only calls
+/// `__stack_chk_fail` and has no way on, and whose condition on that side
+/// compares the guard with its slot as [`canary::fold`] reads one. Its copy
+/// writes the failing call under the condition and goes on one way
+/// ([`onward`]), and every copy leaves the text with the fold. Only a
+/// check whose other side returns a register the check's state knows no
+/// single value for, so the paths in disagree, is one: there each copy
+/// returns its own path's value, where a shared `return` of one value, of
+/// a frame slot or of nothing reads better written once.
+///
+/// The blocks are read on a copy of the state, so reading them here
+/// changes nothing the emission records later.
+///
+/// # Arguments
+///
+/// * `ctx` - Per-function state, for the blocks' text.
+/// * `st` - Emission state.
+///
+/// # Returns
+///
+/// Each check's block mapped to the block it fails into.
+pub(super) fn guard_checks<L: Lifter>(ctx: &Ctx<'_>, st: &Emit<'_, L>) -> BTreeMap<usize, usize> {
+    let mut probe: Option<Ctx<'_>> = None;
+    let mut guards = BTreeMap::new();
+    for (b, succs) in st.succs.iter().enumerate() {
+        let &[x, y] = succs.as_slice() else {
+            continue;
+        };
+        let ends = |f: usize| st.blocks[f].term == BlockTerm::Call && st.succs[f].is_empty();
+        let (fail, ok) = match (ends(x), ends(y)) {
+            (true, false) => (x, y),
+            (false, true) => (y, x),
+            _ => continue,
+        };
+        let probe = probe.get_or_insert_with(|| ctx.clone());
+        let fails = matches!(run_block(probe, st, fail).lines.as_slice(),
+            [l] if canary::fail_callee(l).is_some());
+        let differs = returns_varying(probe, st, ok);
+        let Some(br) = run_block(probe, st, b).branch.filter(|_| fails && differs) else {
+            continue;
+        };
+        let cond = br
+            .cond
+            .render(&probe.names(), st.index_of(br.target) != Some(fail));
+        if canary::compared(&cond, " != ").is_some() {
+            guards.insert(b, fail);
+        }
+    }
+    guards
 }
 
 /// Tells whether a block is a small one that goes on to one other block
@@ -1844,10 +2036,7 @@ fn small<L: Lifter>(st: &Emit<'_, L>, b: usize) -> bool {
 /// * `st` - Emission state.
 /// * `b` - The block.
 fn one_way<L: Lifter>(st: &Emit<'_, L>, b: usize) -> bool {
-    st.succs[b].len() == 1
-        && st.succs[b].first() != Some(&b)
-        && small(st, b)
-        && !st.no_dup.contains(&b)
+    onward(st, b).is_some_and(|s| s != b) && small(st, b) && !st.no_dup.contains(&b)
 }
 
 /// The blocks of a short one-way chain from `b` into a terminal block,
@@ -1870,10 +2059,18 @@ fn dup_chain<L: Lifter>(
     headers: &BTreeSet<usize>,
     stop_at: Option<usize>,
 ) -> Option<Vec<usize>> {
+    let len = |b: usize| {
+        if st.varying.contains(&b) {
+            L::return_len(&st.code[b])
+        } else {
+            L::body_len(&st.code[b])
+        }
+    };
     let mut order = vec![b];
-    let mut instrs = L::body_len(&st.code[b]);
+    let mut instrs = len(b);
     let mut cur = b;
     while let Some(&next) = st.succs[cur].first() {
+        let next = onward(st, cur).unwrap_or(next);
         if !one_way(st, cur)
             || (!st.copy_calls && st.blocks[cur].term == BlockTerm::Call)
             || order.len() >= DUP_CHAIN_MAX
@@ -1883,7 +2080,7 @@ fn dup_chain<L: Lifter>(
         {
             return None;
         }
-        instrs += L::body_len(&st.code[next]);
+        instrs += len(next);
         if instrs > DUP_MAX_INSTRS {
             return None;
         }
@@ -1930,7 +2127,7 @@ pub(super) fn closed_run_with<L: Lifter>(
     if shared && one_way(start) {
         return Region {
             order: vec![start],
-            exits: st.succs[start].iter().copied().collect(),
+            exits: onward(st, start).into_iter().collect(),
             closed: true,
             dups: [start].into_iter().collect(),
         };
@@ -2174,4 +2371,56 @@ pub(super) fn const_index(e: &Expr) -> Option<u64> {
 pub(super) fn table_target(analysis: &Analysis, block: &BasicBlock, k: u64) -> Option<u64> {
     let (_, targets) = analysis.jump_tables.range(block.start..block.end).next()?;
     targets.get(usize::try_from(k).ok()?).copied()
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test"
+)]
+mod tests {
+    use super::{body_len, return_len};
+    use crate::isa::x86::{Decoder, DecoderOptions, Instruction};
+
+    /// Decodes 64-bit code at address 0.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The code.
+    fn code(bytes: &[u8]) -> Vec<Instruction> {
+        Decoder::with_ip(64, bytes, 0, DecoderOptions::NONE)
+            .into_iter()
+            .collect()
+    }
+
+    /// A returning block's clearing of unused registers renders as nothing.
+    ///
+    /// [`return_len`] counts it out, though [`body_len`] counts it; the same
+    /// clearing in a block that goes on counts, and so do the result
+    /// registers' and an `xor` of two registers.
+    #[test]
+    fn only_a_return_drops_the_registers_it_clears() {
+        let clears: &[u8] = &[
+            0x31, 0xc9, // ASM: xor ecx,ecx
+            0x45, 0x31, 0xc0, // ASM: xor r8d,r8d
+            0x66, 0x0f, 0xef, 0xc9, // ASM: pxor xmm1,xmm1
+            0xc5, 0xf1, 0xef, 0xc9, // ASM: vpxor xmm1,xmm1,xmm1
+            0x0f, 0x57, 0xd2, // ASM: xorps xmm2,xmm2
+            0xd9, 0xee, // ASM: fldz
+            0xdd, 0xd8, // ASM: fstp st(0)
+        ];
+        let ret: &[u8] = &[0xc3]; // ASM: ret
+        let jmp: &[u8] = &[0xeb, 0x00]; // ASM: jmp $+2
+        assert_eq!(return_len(&code(&[clears, ret].concat())), 0);
+        assert_eq!(body_len(&code(&[clears, ret].concat())), 7);
+        assert_eq!(return_len(&code(&[clears, jmp].concat())), 8);
+        let kept: &[u8] = &[
+            0x31, 0xc0, // ASM: xor eax,eax
+            0x31, 0xd2, // ASM: xor edx,edx
+            0x66, 0x0f, 0xef, 0xc0, // ASM: pxor xmm0,xmm0
+            0x31, 0xd1, // ASM: xor ecx,edx
+            0xc3, // ASM: ret
+        ];
+        assert_eq!(return_len(&code(kept)), 4);
+    }
 }

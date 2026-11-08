@@ -162,6 +162,20 @@ pub(super) trait Lifter {
     /// * `instrs` - The block's instructions.
     fn body_len(instrs: &[Self::Insn]) -> usize;
 
+    /// Counts the statements a block ending in a return renders, its
+    /// self-zeroing of registers that carry no result counted out, so a
+    /// `-fzero-call-used-regs` epilogue is as small as its `return`.
+    ///
+    /// The default is [`Lifter::body_len`], for an instruction set with no
+    /// such zeroing.
+    ///
+    /// # Arguments
+    ///
+    /// * `instrs` - The block's instructions.
+    fn return_len(instrs: &[Self::Insn]) -> usize {
+        Self::body_len(instrs)
+    }
+
     /// Tells whether two blocks make the same test: the same instructions,
     /// ending in branches that send each outcome to the same block.
     ///
@@ -363,6 +377,10 @@ impl Lifter for X86 {
 
     fn body_len(instrs: &[Instruction]) -> usize {
         body_len(instrs)
+    }
+
+    fn return_len(instrs: &[Instruction]) -> usize {
+        return_len(instrs)
     }
 
     fn same_test(a: &[Instruction], b: &[Instruction]) -> bool {

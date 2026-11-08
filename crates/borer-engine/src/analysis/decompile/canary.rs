@@ -147,7 +147,7 @@ struct Check<'l> {
 /// The guard and the slot, `None` for the slot where the lifter forwarded
 /// its value and the guard is compared with itself; `None` when the
 /// condition compares no guard.
-fn compared<'l>(cond: &'l str, op: &str) -> Option<(&'l str, Option<&'l str>)> {
+pub(super) fn compared<'l>(cond: &'l str, op: &str) -> Option<(&'l str, Option<&'l str>)> {
     let (a, b) = cond.split_once(op)?;
     let (a, b) = match (b, a.split_once(" - ")) {
         ("0", Some(diff)) => diff,
@@ -519,6 +519,40 @@ mod tests {
         let (out, folded) = fold(body);
         assert_eq!(folded.map(|f| f.checks), Some(1));
         assert_eq!(out, "return 0;\n");
+    }
+
+    /// The copies of one check the structurer writes into each arm that
+    /// returns through it fold with the setup, and the header counts each.
+    #[test]
+    fn the_copies_of_one_check_fold() {
+        let body = concat!(
+            "local_10 = *(uint64_t*)(fs + 0x28);\n",
+            "if ((a1 & 8) != 0) {\n",
+            "  if (local_10 - *(uint64_t*)(fs + 0x28) != 0) {\n",
+            "    __stack_chk_fail();\n",
+            "  }\n",
+            "  return 1;\n",
+            "}\n",
+            "if ((a1 & 4) != 0) {\n",
+            "  if (local_10 - *(uint64_t*)(fs + 0x28) != 0) {\n",
+            "    __stack_chk_fail();\n",
+            "  }\n",
+            "  return 2;\n",
+            "}\n",
+            "if (local_10 - *(uint64_t*)(fs + 0x28) != 0) {\n",
+            "  __stack_chk_fail();\n",
+            "}\n",
+            "return a2;\n",
+        );
+        let (out, folded) = fold(body);
+        assert_eq!(
+            out,
+            "if ((a1 & 8) != 0) {\n  return 1;\n}\nif ((a1 & 4) != 0) {\n  return 2;\n}\nreturn a2;\n"
+        );
+        assert_eq!(
+            folded.map(|f| (f.slot, f.checks)),
+            Some((Some("local_10".to_owned()), 3))
+        );
     }
 
     /// An inverted check whose body may fall into the failing call is no
