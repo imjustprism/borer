@@ -341,7 +341,7 @@ fn rust_paths(p: &Program, from: usize) -> Option<RustPaths<'_>> {
             && hash[..40].iter().all(u8::is_ascii_hexdigit)
             && hash[40] == b'/'
         {
-            let place = region(p, from_usize(at));
+            let place = region(p, None, from_usize(at), 1);
             if place != Region::Appended {
                 first.get_or_insert((at, &hash[..40]));
             }
@@ -569,7 +569,7 @@ fn by_marks(p: &Program, out: &mut Vec<Finding>) {
         .map(|m| forward(m))
         .collect();
     let found = first_offsets(bytes, &needles);
-    let image = |o: &usize| region(p, from_usize(*o)) != Region::Appended;
+    let image = |o: &usize| region(p, None, from_usize(*o), 1) != Region::Appended;
     let mut at = found.iter().copied();
     for m in &MARKED {
         let hits: Vec<String> = m

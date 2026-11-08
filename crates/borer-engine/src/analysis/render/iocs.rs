@@ -1,13 +1,17 @@
 //! Indicators with provenance: each URL, host, address, key, path and
-//! object name the program holds, with where it was found and which pass
-//! read it.
+//! object name the program holds, with where it was found and how.
+//!
+//! A row names the pass that read it and the region its bytes sit in; an
+//! indicator no code references is listed low and counted apart from the
+//! ones the program uses.
 
 use super::calls::{Reach, gather, listed_args};
 use super::triage::call_sites;
 use super::*;
 use crate::analysis::decompile::CallArg;
 use crate::cancel::Cancel;
-use crate::ioc::{Indicator, Kind, classify, named};
+use crate::fileinfo::Region;
+use crate::ioc::{Confidence, Indicator, Kind, classify, named};
 
 /// Most rows one read lists; the rest page with `offset=`.
 pub const IOCS_PAGE: usize = 200;
@@ -27,6 +31,36 @@ const BASE64_MIN: usize = 16;
 
 /// Longest argument text read for an indicator, in characters.
 const ARG_TEXT_MAX: usize = 512;
+
+/// Most bytes walked back from a string's run to the start of the literal
+/// holding it.
+const LITERAL_BACK_MAX: usize = 4096;
+
+/// Returns the file offset of the NUL-ended text an ASCII or UTF-16 run at
+/// `off` is part of: a literal holding line breaks walks as one run per
+/// line, and code references its first.
+///
+/// # Arguments
+///
+/// * `bytes` - The file.
+/// * `off` - Where the run starts.
+/// * `unit` - Bytes per character: one for ASCII, two for UTF-16.
+fn literal_start(bytes: &[u8], off: u64, unit: usize) -> u64 {
+    let run = crate::num::saturating_usize(off);
+    let floor = run.saturating_sub(LITERAL_BACK_MAX);
+    let back = bytes
+        .get(floor..run)
+        .unwrap_or_default()
+        .rchunks_exact(unit)
+        .take_while(|c| {
+            c.split_first().is_some_and(|(&b, high)| {
+                (crate::strings::printable(b) || matches!(b, b'\t' | b'\n' | b'\r'))
+                    && high.iter().all(|&h| h == 0)
+            })
+        })
+        .count();
+    off - from_usize(back.saturating_mul(unit))
+}
 
 /// Openings of the compiler and linker identifications a toolchain leaves
 /// in the file outside the image (an ELF's `.comment`): each names the
@@ -167,6 +201,9 @@ struct Row {
     /// The function using it: referencing the string, building it, or
     /// making the call.
     function: Option<u64>,
+    /// Where its bytes sit ([`crate::fileinfo::region`]): a stored string's
+    /// region, [`Region::Code`] for one code builds or passes.
+    region: Region,
 }
 
 /// Where an indicator sits.
@@ -203,6 +240,111 @@ fn collected(p: &Program, a: &Analysis, o: &Overlay) -> Arc<Collected> {
         .get_or_build_named("iocs", o.fingerprint(), (), || collect(p, a, o))
 }
 
+/// Adds the indicators the strings stored in the file hold: its ASCII and
+/// UTF-16 strings outside code and a .NET assembly's user strings, with
+/// the base64 among them decoded.
+///
+/// A stored string's indicators are as sure as where its bytes sit
+/// ([`crate::fileinfo::region`]): one in data nothing references, in bytes
+/// the loader leaves unmapped, or in data appended past the image reads
+/// low and names its region, since nothing shows the program uses it. A
+/// .NET user string is one IL code loads. The literal a string's run is a
+/// line of ([`literal_start`]) is what code references: its region, and
+/// the first function whose reference lands in it, are the run's.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis: the references, and the functions using a string.
+/// * `rows` - Where the indicators go, until [`IOCS_MAX`] are.
+fn stored_rows(p: &Program, a: &Analysis, rows: &mut Vec<Row>) {
+    let user = |off: u64, len: u64| {
+        let va = p.offset_to_va(off)?;
+        a.xrefs
+            .range(va..va.saturating_add(len.max(1)))
+            .flat_map(|(_, sites)| sites)
+            .find_map(|s| s.from_entry)
+    };
+    let mut strings = crate::strings::find_strings(&p.bytes, STRING_MIN);
+    strings.extend(crate::strings::find_wide_strings(&p.bytes, STRING_MIN));
+    strings.sort_by_key(|h| h.off);
+    let clr = p.clr();
+    let user_strings = clr.map_or(&[][..], |c| c.user_strings.as_slice());
+    let stored = user_strings
+        .iter()
+        .map(|u| {
+            (
+                u.off,
+                (u.off, 1),
+                std::borrow::Cow::Borrowed(u.text.as_str()),
+                Source::DotnetUs,
+                Region::Referenced,
+            )
+        })
+        .chain(
+            strings
+                .iter()
+                .filter(|hit| !clr.is_some_and(|c| c.in_user_strings(hit.off)))
+                .map(|hit| {
+                    let unit = if hit.encoding == crate::strings::Encoding::Ascii {
+                        1
+                    } else {
+                        2
+                    };
+                    let start = literal_start(&p.bytes, hit.off, unit);
+                    let len =
+                        from_usize(hit.len.saturating_mul(unit)).saturating_add(hit.off - start);
+                    let place = crate::fileinfo::region(p, Some(a), start, len);
+                    (
+                        hit.off,
+                        (start, len),
+                        hit.full_text(&p.bytes),
+                        Source::Static,
+                        place,
+                    )
+                }),
+        );
+    for (off, (start, len), text, source, place) in stored {
+        let skipped = match place {
+            Region::Code => true,
+            Region::Unmapped | Region::Appended => {
+                TOOLCHAIN_IDENTS.iter().any(|t| text.starts_with(t))
+            }
+            Region::Referenced | Region::Loaded => false,
+        };
+        if source == Source::Static && skipped {
+            continue;
+        }
+        let site = p.offset_to_va(off).map_or(Site::Off(off), Site::Va);
+        let function = user(start, len);
+        let decoded = base64_text(&text);
+        let found = classify(&text)
+            .into_iter()
+            .map(|f| (f, source.clone()))
+            .chain(
+                decoded
+                    .iter()
+                    .flat_map(|d| classify(d))
+                    .map(|f| (f, Source::DecodedB64)),
+            );
+        for (mut found, source) in found {
+            if place > Region::Referenced {
+                found.confidence = Confidence::Low;
+            }
+            rows.push(Row {
+                found,
+                source,
+                site,
+                function,
+                region: place,
+            });
+        }
+        if rows.len() >= IOCS_MAX {
+            break;
+        }
+    }
+}
+
 /// Collects every indicator of a program with its provenance.
 ///
 /// Six passes: the strings stored in the file outside code and a .NET
@@ -226,61 +368,7 @@ fn collected(p: &Program, a: &Analysis, o: &Overlay) -> Arc<Collected> {
 /// * `o` - Names in force.
 fn collect(p: &Program, a: &Analysis, o: &Overlay) -> Collected {
     let mut rows: Vec<Row> = Vec::new();
-    let user = |va: u64| a.xrefs_to(va).iter().find_map(|s| s.from_entry);
-    let mut strings = crate::strings::find_strings(&p.bytes, STRING_MIN);
-    strings.extend(crate::strings::find_wide_strings(&p.bytes, STRING_MIN));
-    strings.sort_by_key(|h| h.off);
-    let clr = p.clr();
-    let user_strings = clr.map_or(&[][..], |c| c.user_strings.as_slice());
-    let stored = user_strings
-        .iter()
-        .map(|u| {
-            (
-                u.off,
-                std::borrow::Cow::Borrowed(u.text.as_str()),
-                Source::DotnetUs,
-            )
-        })
-        .chain(
-            strings
-                .iter()
-                .filter(|hit| !clr.is_some_and(|c| c.in_user_strings(hit.off)))
-                .map(|hit| (hit.off, hit.full_text(&p.bytes), Source::Static)),
-        );
-    for (off, text, source) in stored {
-        let va = p.offset_to_va(off);
-        if source == Source::Static
-            && match va {
-                Some(v) => p.section_at(v).is_some_and(|s| s.executable),
-                None => TOOLCHAIN_IDENTS.iter().any(|t| text.starts_with(t)),
-            }
-        {
-            continue;
-        }
-        let site = va.map_or(Site::Off(off), Site::Va);
-        let function = va.and_then(user);
-        let decoded = base64_text(&text);
-        let found = classify(&text)
-            .into_iter()
-            .map(|f| (f, source.clone()))
-            .chain(
-                decoded
-                    .iter()
-                    .flat_map(|d| classify(d))
-                    .map(|f| (f, Source::DecodedB64)),
-            );
-        for (found, source) in found {
-            rows.push(Row {
-                found,
-                source,
-                site,
-                function,
-            });
-        }
-        if rows.len() >= IOCS_MAX {
-            break;
-        }
-    }
+    stored_rows(p, a, &mut rows);
     for s in stack_strings(p, a, "") {
         for found in classify(&s.text) {
             rows.push(Row {
@@ -288,6 +376,7 @@ fn collect(p: &Program, a: &Analysis, o: &Overlay) -> Collected {
                 source: Source::Stack,
                 site: Site::Va(s.at),
                 function: Some(s.entry),
+                region: Region::Code,
             });
         }
     }
@@ -299,6 +388,7 @@ fn collect(p: &Program, a: &Analysis, o: &Overlay) -> Collected {
                 source: Source::Generated,
                 site: Site::Va(g.built_by),
                 function: Some(g.built_by),
+                region: Region::Code,
             });
         }
     }
@@ -309,6 +399,7 @@ fn collect(p: &Program, a: &Analysis, o: &Overlay) -> Collected {
                 source: Source::Emulated(arg.api.clone()),
                 site: Site::Va(arg.at),
                 function: Some(arg.built_by),
+                region: Region::Code,
             });
         }
     }
@@ -319,6 +410,7 @@ fn collect(p: &Program, a: &Analysis, o: &Overlay) -> Collected {
                 source: Source::Decoded,
                 site: Site::Va(r.at),
                 function: Some(r.caller),
+                region: Region::Code,
             });
         }
     }
@@ -413,6 +505,7 @@ fn call_arguments(p: &Program, a: &Analysis, o: &Overlay, rows: &mut Vec<Row>) -
                     source: Source::Call(api.to_owned(), pos),
                     site: Site::Va(f.at),
                     function: Some(f.caller),
+                    region: Region::Code,
                 });
             }
         }
@@ -579,17 +672,19 @@ impl Filter {
 }
 
 /// The count by kind of a set of rows, `2 url, 1 registry`, the benign
-/// ones apart.
+/// ones apart and so those no code references.
 ///
 /// # Arguments
 ///
 /// * `rows` - The rows.
 fn by_kind(rows: &[&Row]) -> String {
     let mut counts: BTreeMap<Kind, usize> = BTreeMap::new();
-    let mut benign = 0usize;
+    let (mut benign, mut unreached) = (0usize, 0usize);
     for r in rows {
         if r.found.benign {
             benign += 1;
+        } else if r.region > Region::Referenced {
+            unreached += 1;
         } else {
             *counts.entry(r.found.kind).or_default() += 1;
         }
@@ -601,11 +696,13 @@ fn by_kind(rows: &[&Row]) -> String {
     if parts.is_empty() {
         parts.push("none to act on".to_owned());
     }
-    let tail = if benign > 0 {
-        format!(" (+{benign} benign-common)")
-    } else {
-        String::new()
-    };
+    let mut tail = String::new();
+    if benign > 0 {
+        tail.push_str(&format!(" (+{benign} benign-common)"));
+    }
+    if unreached > 0 {
+        tail.push_str(&format!(" (+{unreached} no code references)"));
+    }
     format!("{}{tail}", parts.join(", "))
 }
 
@@ -644,7 +741,10 @@ pub(super) fn iocs_line(p: &Program, a: &Analysis, o: &Overlay) -> String {
 /// `decoded-b64`, `stack`, `generated`, `decoded`, `emulated:<api>`,
 /// `call:<api>,a<N>`), the site (the
 /// string's address or file offset, the store starting a stack string, the
-/// generator, the call), the function using it, and the value. Rows are
+/// generator, the call), the region its bytes sit in (`referenced`,
+/// `unreferenced`, `unmapped` or `appended` for a stored string, `code` for
+/// one code builds or passes: one no code references reads low and the
+/// header counts it apart), the function using it, and the value. Rows are
 /// sorted by kind and value, the benign ones last, [`IOCS_PAGE`] a page.
 ///
 /// # Arguments
@@ -712,7 +812,7 @@ pub fn iocs_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<St
         return Ok(out);
     }
     out.push_str(
-        "# type      confidence     source                    site            function                  value\n",
+        "# type      confidence     source                    site            region       function                  value\n",
     );
     for r in page {
         let confidence = if r.found.benign {
@@ -729,9 +829,10 @@ pub fn iocs_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<St
             .map_or_else(|| "-".to_owned(), |f| short_name(a, o, f));
         let _ = writeln!(
             out,
-            "{:<9} {confidence:<14} {:<25} {site:<15} {function:<25} {}",
+            "{:<9} {confidence:<14} {:<25} {site:<15} {:<12} {function:<25} {}",
             r.found.kind.word(),
             r.source.word(),
+            r.region.word(),
             r.found.value
         );
     }

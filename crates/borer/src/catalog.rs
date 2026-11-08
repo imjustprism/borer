@@ -113,7 +113,7 @@ pub(crate) const RESOURCES: &[(&str, &str)] = &[
     ),
     (
         "borer://iocs",
-        "Indicators to block or hunt: URLs, domains, IP and e-mail addresses, registry keys, file paths, pipe, mutex and kernel object names, user agents, each with where it came from (a stored string's address, a stack string, a generated string, decoded base64, an emulated API or syscall argument, an API call's argument), the function using it and a confidence, benign-common marking what every program carries; 200 rows a page, borer://iocs/<filter> narrows by type or text",
+        "Indicators to block or hunt: URLs, domains, IP and e-mail addresses, registry keys, file paths, pipe, mutex and kernel object names, user agents, each with where it came from (a stored string's address, a stack string, a generated string, decoded base64, an emulated API or syscall argument, an API call's argument), the function using it, the region its bytes sit in (referenced, unreferenced, unmapped, appended, or code for a string code builds or passes) and a confidence, an indicator no code references reading low and counted apart, benign-common marking what every program carries; 200 rows a page, borer://iocs/<filter> narrows by type or text",
     ),
     (
         "borer://fingerprint",

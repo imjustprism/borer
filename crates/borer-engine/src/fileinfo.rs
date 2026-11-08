@@ -166,7 +166,11 @@ pub fn appended_lines(program: &Program) -> Vec<String> {
 pub enum Region {
     /// A section that holds code.
     Code,
-    /// A section the loader maps that holds data.
+    /// Loaded data an instruction or a stored pointer the analysis found
+    /// references.
+    Referenced,
+    /// Loaded data no reference the analysis found reaches, or loaded data
+    /// read with no analysis to ask.
     Loaded,
     /// Bytes the headers place that the loader leaves unmapped: the
     /// headers themselves, a gap between sections, a section such as
@@ -178,14 +182,40 @@ pub enum Region {
     Appended,
 }
 
-/// Returns where the byte at a file offset sits.
+impl Region {
+    /// Returns the word a listing prints for the region: `unreferenced`
+    /// for loaded data, which a listing names only when it asked an
+    /// analysis.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Code => "code",
+            Self::Referenced => "referenced",
+            Self::Loaded => "unreferenced",
+            Self::Unmapped => "unmapped",
+            Self::Appended => "appended",
+        }
+    }
+}
+
+/// Returns where the bytes at a file offset sit.
+///
+/// Loaded data is [`Region::Referenced`] when an analysis is given and one
+/// of its references lands anywhere in the run.
 ///
 /// # Arguments
 ///
 /// * `program` - The loaded file.
-/// * `off` - The file offset.
+/// * `analysis` - Its references, when it was analyzed.
+/// * `off` - The run's file offset.
+/// * `len` - The run's length in bytes.
 #[must_use]
-pub fn region(program: &Program, off: u64) -> Region {
+pub fn region(
+    program: &Program,
+    analysis: Option<&crate::analysis::Analysis>,
+    off: u64,
+    len: u64,
+) -> Region {
     if program
         .headers
         .overlay
@@ -194,12 +224,19 @@ pub fn region(program: &Program, off: u64) -> Region {
     {
         return Region::Appended;
     }
-    match program
-        .offset_to_va(off)
-        .and_then(|va| program.section_at(va))
-    {
+    let Some(va) = program.offset_to_va(off) else {
+        return Region::Unmapped;
+    };
+    let end = va.saturating_add(len.max(1));
+    match program.section_at(va) {
         Some(s) if s.executable => Region::Code,
-        Some(s) if s.readable => Region::Loaded,
+        Some(s) if s.readable => {
+            if analysis.is_some_and(|a| a.xrefs.range(va..end).next().is_some()) {
+                Region::Referenced
+            } else {
+                Region::Loaded
+            }
+        }
         _ => Region::Unmapped,
     }
 }

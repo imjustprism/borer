@@ -175,3 +175,100 @@ fn the_classifier_reads_each_kind() {
     assert_eq!(kind("\\\\.\\pipe\\x"), Some(Kind::Pipe));
     assert_eq!(kind("C:\\Windows\\x.exe"), Some(Kind::Path));
 }
+
+/// An indicator is as sure as where its bytes sit.
+///
+/// A URL a function references counts, while one in data nothing
+/// references, or in bytes appended past the image, reads low with its
+/// region named and is counted apart, so planted URLs do not raise the
+/// indicators the listing calls ones to act on.
+#[test]
+fn an_indicator_no_code_references_reads_low_and_apart() {
+    use crate::elfgen::{self, A, AX, EM_X86_64, ET_EXEC, PROGBITS, Sec};
+    let mut rodata = b"http://gate.badhost.ru/a.php\0".to_vec();
+    rodata.extend_from_slice(b"http://idle.badhost.ru/b.php\0");
+    rodata.extend_from_slice(b"GET /a HTTP/1.1\r\nhttp://line.badhost.ru/c.php\r\n\0");
+    rodata.resize(0x70, 0);
+    for unit in "GET /w\r\nhttp://wide.badhost.ru/d.php\r\n\0".encode_utf16() {
+        rodata.extend_from_slice(&unit.to_le_bytes());
+    }
+    rodata.resize(0xc0, 0);
+    rodata.extend_from_slice(b"AAAAAAAA");
+    for unit in "\r\nhttp://tail.badhost.ru/e.php\0".encode_utf16() {
+        rodata.extend_from_slice(&unit.to_le_bytes());
+    }
+    let code = vec![
+        0x48, 0x8d, 0x3d, 0xf9, 0x0f, 0x00, 0x00, // ASM: lea rdi,[rip+0xff9]
+        0x48, 0x8d, 0x35, 0x2c, 0x10, 0x00, 0x00, // ASM: lea rsi,[rip+0x102c]
+        0x48, 0x8d, 0x15, 0x5b, 0x10, 0x00, 0x00, // ASM: lea rdx,[rip+0x105b]
+        0x48, 0x8d, 0x0d, 0xa4, 0x10, 0x00, 0x00, // ASM: lea rcx,[rip+0x10a4]
+        0xc3, // ASM: ret
+    ];
+    let mut bytes = elfgen::build(
+        ET_EXEC,
+        EM_X86_64,
+        0x1000,
+        &[
+            Sec::new(".text", PROGBITS, AX, 0x1000, code),
+            Sec::new(".rodata", PROGBITS, A, 0x2000, rodata),
+        ],
+    );
+    let appended = bytes.len() + 1;
+    bytes.extend_from_slice(b"\0http://decoy.badhost.ru/c.php\0");
+    let p = Program::from_bytes(std::path::PathBuf::from("iocs.elf"), bytes).expect("loads");
+    let a = Analysis::compute(&p);
+    let out = iocs_tsv(&p, &a, &Overlay::default(), "url").expect("iocs");
+    assert!(
+        out.lines()
+            .next()
+            .is_some_and(|l| l.ends_with(": 3 url (+3 no code references)")),
+        "{out}"
+    );
+    let row = |host: &str| -> Vec<String> {
+        out.lines()
+            .find(|l| l.contains(host))
+            .map(|l| l.split_whitespace().map(str::to_owned).collect())
+            .unwrap_or_default()
+    };
+    let gate = row("gate.badhost.ru");
+    assert_eq!(
+        gate[..5],
+        ["url", "high", "static", "0x2000", "referenced"],
+        "{out}"
+    );
+    assert_ne!(gate[5], "-", "{out}");
+    for (host, site) in [("line.badhost.ru", "0x204b"), ("wide.badhost.ru", "0x2080")] {
+        let line = row(host);
+        assert_eq!(
+            line[..6],
+            [
+                "url",
+                "high",
+                "static",
+                site,
+                "referenced",
+                gate[5].as_str()
+            ],
+            "a URL on a later line of a literal its function references: {out}"
+        );
+    }
+    let idle = row("idle.badhost.ru");
+    assert_eq!(
+        idle[..5],
+        ["url", "low", "static", "0x201d", "unreferenced"],
+        "{out}"
+    );
+    let tail = row("tail.badhost.ru");
+    assert_eq!(
+        tail[..5],
+        ["url", "low", "static", "0x20cc", "unreferenced"],
+        "a wide run is no line of the narrow string before it: {out}"
+    );
+    let decoy = row("decoy.badhost.ru");
+    let site = format!("off={appended:#x}");
+    assert_eq!(
+        decoy[..5],
+        ["url", "low", "static", site.as_str(), "appended"],
+        "{out}"
+    );
+}
