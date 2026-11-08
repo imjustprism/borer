@@ -13,7 +13,8 @@ use super::*;
 /// names must be declared with one type: a `?:` converts its arms to a
 /// common type before the store, which is a different value when the arms
 /// differ. A test that calls something, or an arm that is not one name,
-/// stays an `if`: that is the shape a source wrote as a statement.
+/// stays an `if`: that is the shape a source wrote as a statement. A test
+/// binding looser than the `?:` keeps its parentheses ([`choice_test`]).
 ///
 /// # Arguments
 ///
@@ -67,8 +68,28 @@ pub(super) fn named_choice(lines: &mut Vec<String>, k: usize) -> bool {
         return false;
     }
     let pad_s = " ".repeat(pad);
-    lines.splice(k..=end, [format!("{pad_s}{x} = {cond} ? {a} : {b};")]);
+    let test = choice_test(cond);
+    lines.splice(k..=end, [format!("{pad_s}{x} = {test} ? {a} : {b};")]);
     true
+}
+
+/// Returns an `if`'s test as the `?:` that replaces the `if` takes it: bare
+/// when it reads as one expression binding tighter than the `?:`, else in
+/// parentheses.
+///
+/// An assignment binds looser, and so does a comma, which the reader does
+/// not take as one expression; any other test it does not read keeps its
+/// parentheses too, since nothing says how it binds.
+///
+/// # Arguments
+///
+/// * `cond` - The test's text.
+fn choice_test(cond: &str) -> String {
+    if read(cond).is_some_and(|e| !matches!(e, Ast::Assign(..))) {
+        cond.to_owned()
+    } else {
+        format!("({cond})")
+    }
 }
 
 /// Rewrites `if (c) { t = a; } else { t = b; }` at line `k`, `t` a register
@@ -89,7 +110,7 @@ pub(super) fn named_choice(lines: &mut Vec<String>, k: usize) -> bool {
 /// arm positive before the store converts it. So does a temp wider than
 /// `int` whose arms are a negative literal and one C types `unsigned int`.
 /// A test that does not read as one expression binding tighter than the
-/// `?:` (a comma, an assignment) keeps its parentheses.
+/// `?:` (a comma, an assignment) keeps its parentheses ([`choice_test`]).
 ///
 /// # Arguments
 ///
@@ -161,11 +182,7 @@ pub(super) fn register_choice(lines: &mut Vec<String>, k: usize) -> bool {
     {
         return false;
     }
-    let test = if read(cond).is_some_and(|e| !matches!(e, Ast::Assign(..))) {
-        cond.to_owned()
-    } else {
-        format!("({cond})")
-    };
+    let test = choice_test(cond);
     let line = format!("{}{t} = {test} ? {a} : {b};", " ".repeat(pad));
     lines.splice(k..=end, [line]);
     true
@@ -713,6 +730,22 @@ mod tests {
                 "uint32_t var1;\nuint32_t local_10;\nif ({cond}) {{\n  var1 = -1;\n}} else {{\n  var1 = a3 + 1;\n}}\n"
             );
             let want = format!("var1 = {test} ? 0xffffffff : (uint32_t)(a3 + 1);\n");
+            assert!(run(&text).contains(&want), "{}", run(&text));
+        }
+    }
+
+    /// A choice of two names keeps a test that binds looser than the `?:`
+    /// in its parentheses too.
+    ///
+    /// C reads `x = a4 = a1 ? a : b;` as `x = (a4 = (a1 ? a : b));`, which
+    /// stores the choice in `a4` where the `if` stored `a1`.
+    #[test]
+    fn a_named_choice_keeps_a_loose_test_in_parentheses() {
+        for (cond, test) in [("a4 = a1", "(a4 = a1)"), ("a1 == 0", "a1 == 0")] {
+            let text = format!(
+                "uint64_t var1;\nFILE *stdout; // @ 0x7160\nFILE *stderr; // @ 0x71a0\n\nif ({cond}) {{\n  var1 = stdout;\n}} else {{\n  var1 = stderr;\n}}\nfprintf(var1, s);\n"
+            );
+            let want = format!("var1 = {test} ? stdout : stderr;\n");
             assert!(run(&text).contains(&want), "{}", run(&text));
         }
     }
