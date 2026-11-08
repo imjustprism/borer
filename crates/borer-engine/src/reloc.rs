@@ -43,10 +43,10 @@ pub(crate) const ENTRIES_MAX: usize = 1 << 20;
 const SITES_MAX: usize = 1 << 20;
 
 /// `DT_RELRSZ`: the size in bytes of the `DT_RELR` table.
-const DT_RELRSZ: u64 = 35;
+pub(crate) const DT_RELRSZ: u64 = 35;
 
 /// `DT_RELR`: the address of the packed relative relocations.
-const DT_RELR: u64 = 36;
+pub(crate) const DT_RELR: u64 = 36;
 
 /// `DT_RELRENT`: the size of one `DT_RELR` entry.
 const DT_RELRENT: u64 = 37;
@@ -523,6 +523,25 @@ pub(crate) fn settle(
     relocs.patched = patch(bytes, &writes, word);
 }
 
+/// Returns the value of the first dynamic entry with a tag: the address
+/// or the size the dynamic table states for it.
+///
+/// # Arguments
+///
+/// * `dynamic` - The parsed dynamic table.
+/// * `tag` - The `DT_*` tag.
+///
+/// # Returns
+///
+/// The entry's `d_val`, or `None` when no entry has the tag.
+pub(crate) fn dynamic_value(dynamic: &goblin::elf::Dynamic, tag: u64) -> Option<u64> {
+    dynamic
+        .dyns
+        .iter()
+        .find(|d| d.d_tag == tag)
+        .map(|d| d.d_val)
+}
+
 /// Decodes the packed `DT_RELR` table into the pointer words it relocates.
 ///
 /// Each entry is relative with its addend in the slot, so loaded at the
@@ -552,7 +571,7 @@ fn relr(
     let Some(dynamic) = &elf.dynamic else {
         return;
     };
-    let tag = |t: u64| dynamic.dyns.iter().find(|d| d.d_tag == t).map(|d| d.d_val);
+    let tag = |t: u64| dynamic_value(dynamic, t);
     let (Some(at), Some(size)) = (tag(DT_RELR), tag(DT_RELRSZ).filter(|s| *s > 0)) else {
         return;
     };

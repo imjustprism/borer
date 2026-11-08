@@ -143,6 +143,46 @@ impl Section {
         }
     }
 
+    /// Tells whether the section holds what the loader, the linker or an
+    /// unwinder reads about the image, never data its code addresses.
+    ///
+    /// The names are the ones the ELF gABI and the GNU tools reserve for
+    /// the symbol, string, hash and version tables, the relocations, the
+    /// notes, the interpreter path, the dynamic table and the unwind and
+    /// exception tables; a PE's relocation, exception, unwind, import and
+    /// export sections; and a Mach-O image's unwind sections (its load
+    /// commands and `__LINKEDIT` map no section). A constant that lands in
+    /// one is no string the program reads: `0x1000` in a PIE is the middle
+    /// of `.dynstr`.
+    #[must_use]
+    pub fn holds_metadata(&self) -> bool {
+        let name = self.name.as_str();
+        matches!(
+            name,
+            ".interp"
+                | ".dynamic"
+                | ".dynsym"
+                | ".dynstr"
+                | ".hash"
+                | ".gnu.hash"
+                | ".eh_frame"
+                | ".eh_frame_hdr"
+                | ".gcc_except_table"
+                | ".ARM.exidx"
+                | ".ARM.extab"
+                | ".reloc"
+                | ".pdata"
+                | ".xdata"
+                | ".edata"
+                | ".idata"
+                | "__TEXT,__unwind_info"
+                | "__TEXT,__eh_frame"
+                | "__TEXT,__gcc_except_tab"
+        ) || [".note", ".gnu.version", ".rel.", ".rela.", ".relr."]
+            .iter()
+            .any(|p| name.starts_with(p))
+    }
+
     /// Returns the permissions as a three-character `rwx` string (`-` for absent bits).
     pub fn perms(&self) -> String {
         format!(
@@ -1575,6 +1615,24 @@ impl Program {
             return Some(first);
         }
         section_in(&self.sections, &self.section_index, va)
+    }
+
+    /// Tells whether `va` holds loader metadata: it lies in a section
+    /// [`Section::holds_metadata`] names, or in a range an ELF's program
+    /// headers or dynamic table place ([`Headers::metadata`]), which an
+    /// image with no section table states alone.
+    ///
+    /// # Arguments
+    ///
+    /// * `va` - A virtual address.
+    #[must_use]
+    pub fn metadata_at(&self, va: u64) -> bool {
+        self.section_at(va).is_some_and(Section::holds_metadata)
+            || self
+                .headers
+                .metadata
+                .iter()
+                .any(|&(start, end)| (start..end).contains(&va))
     }
 
     /// Finds the zero-filled section containing `va`: one the loader maps

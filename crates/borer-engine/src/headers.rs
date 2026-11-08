@@ -135,6 +135,13 @@ pub struct Headers {
     pub implausible_exports: Option<u32>,
     /// ELF program interpreter (the dynamic loader path).
     pub interpreter: Option<String>,
+    /// ELF: the `[start, end)` address ranges of the loader metadata the
+    /// program headers and the dynamic table place: the program header
+    /// table, the interpreter path, the notes, the dynamic table, the unwind
+    /// index, the dynamic string table and the relocation tables. A section
+    /// table names the same bytes; an image without one states them only
+    /// here.
+    pub metadata: Vec<(u64, u64)>,
     /// ELF: the static symbol table is absent (`Some(true)` means stripped).
     pub stripped: Option<bool>,
     /// Section table rows the loader dropped because the file cannot hold
@@ -1188,6 +1195,60 @@ fn rich_header(bytes: &[u8], pe_pointer: usize) -> Vec<(u16, u16, u32)> {
     entries
 }
 
+/// Returns the address ranges of an ELF's loader metadata.
+///
+/// The program header table, the interpreter path, the notes, the dynamic
+/// table and the unwind index come from their segments; the dynamic string
+/// table and the relocation tables from their dynamic entries.
+///
+/// # Arguments
+///
+/// * `elf` - The parsed file.
+///
+/// # Returns
+///
+/// `[start, end)` address ranges, an end past the address space cut at its
+/// top; at most [`METADATA_MAX`] of them, the first in table order.
+fn metadata_ranges(elf: &Elf<'_>) -> Vec<(u64, u64)> {
+    use goblin::elf::dynamic::{
+        DT_JMPREL, DT_PLTRELSZ, DT_REL, DT_RELA, DT_RELASZ, DT_RELSZ, DT_STRSZ, DT_STRTAB,
+    };
+    use goblin::elf::program_header::{
+        PT_DYNAMIC, PT_GNU_EH_FRAME, PT_GNU_PROPERTY, PT_INTERP, PT_NOTE, PT_PHDR,
+    };
+    let segments = elf.program_headers.iter().filter(|p| {
+        matches!(
+            p.p_type,
+            PT_PHDR | PT_INTERP | PT_DYNAMIC | PT_NOTE | PT_GNU_EH_FRAME | PT_GNU_PROPERTY
+        )
+    });
+    let mut ranges: Vec<(u64, u64)> = segments
+        .map(|p| (p.p_vaddr, p.p_vaddr.saturating_add(p.p_memsz)))
+        .take(METADATA_MAX)
+        .collect();
+    if let Some(dynamic) = &elf.dynamic {
+        let tables = [
+            (DT_STRTAB, DT_STRSZ),
+            (DT_RELA, DT_RELASZ),
+            (DT_REL, DT_RELSZ),
+            (DT_JMPREL, DT_PLTRELSZ),
+            (crate::reloc::DT_RELR, crate::reloc::DT_RELRSZ),
+        ];
+        for (at, size) in tables {
+            let value = |tag| crate::reloc::dynamic_value(dynamic, tag);
+            if let (Some(start), Some(len)) = (value(at), value(size)) {
+                ranges.push((start, start.saturating_add(len)));
+            }
+        }
+    }
+    ranges
+}
+
+/// Most loader metadata segments kept: an image has about ten, and a
+/// hostile header table of thousands of notes would make every lookup a
+/// scan of them all.
+const METADATA_MAX: usize = 32;
+
 /// Reads the ELF header facts.
 ///
 /// Mitigations: `nx` from a non-executable `PT_GNU_STACK`, `relro` from
@@ -1220,6 +1281,7 @@ pub(crate) fn from_elf(elf: &Elf<'_>, bytes: &[u8]) -> Headers {
         _ => "other",
     });
     h.interpreter = elf.interpreter.map(str::to_owned);
+    h.metadata = metadata_ranges(elf);
     h.libraries = elf.libraries.iter().map(|l| (*l).to_owned()).collect();
     h.stripped = Some(elf.syms.is_empty());
     let machine = elf.header.e_machine;

@@ -61,6 +61,7 @@ mod libsig;
 mod lsda;
 mod macho;
 mod memo;
+mod metadata;
 mod negfields;
 mod next;
 mod noise;

@@ -14,7 +14,8 @@ use super::*;
 /// # Returns
 ///
 /// `(start of the string, `"text"` or `L"text"`)`, or `None` when `va` is
-/// unmapped, inside code, or holds no string of at least four characters.
+/// unmapped, inside code or loader metadata ([`Program::metadata_at`]), or
+/// holds no string of at least four characters.
 ///
 /// A reference into the middle of a literal resolves to the literal, not to
 /// the tail it points at: code comparing a long string in 16-byte chunks
@@ -70,7 +71,9 @@ pub(super) fn referenced_literal(
 fn string_literal_in(p: &Program, va: u64, cap: usize, in_code: bool) -> Option<(u64, String)> {
     /// Longest walk back to a literal's first byte.
     const WINDOW: u64 = 256;
-    let sec = p.section_at(va).filter(|s| in_code || !s.executable)?;
+    let sec = p
+        .section_at(va)
+        .filter(|s| (in_code || !s.executable) && !p.metadata_at(va))?;
     if literal_text(cstr_text_at(p, va, 4, cap)).is_some() {
         let floor = va.saturating_sub(WINDOW).max(sec.va.0);
         let mut start = va;

@@ -18,9 +18,7 @@ use crate::strings::{cstr_text_at, wide_run_start, wstr_text_at};
 pub(super) fn literal_at(program: &Program, addr: u64, own_name: &str) -> Option<String> {
     /// Longest signature or path read in full.
     const FULL: usize = 512;
-    if program.section_at(addr).is_none_or(|s| s.executable) {
-        return None;
-    }
+    literal_section(program, addr)?;
     if let Some(literal) = crate::analysis::qt::literal(program, addr) {
         return Some(literal);
     }
@@ -34,7 +32,22 @@ pub(super) fn literal_at(program: &Program, addr: u64, own_name: &str) -> Option
     string_at(program, addr)
 }
 
-/// Reads the quoted string literal at a mapped, non-executable address.
+/// Returns the section a literal at `addr` may be read from: a mapped one
+/// that holds no code, at an address that holds no loader metadata
+/// ([`Program::metadata_at`]).
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `addr` - The literal's address.
+fn literal_section(program: &Program, addr: u64) -> Option<&crate::program::Section> {
+    program
+        .section_at(addr)
+        .filter(|s| !s.executable && !program.metadata_at(addr))
+}
+
+/// Reads the quoted string literal at a mapped address outside code and
+/// loader metadata.
 ///
 /// # Arguments
 ///
@@ -46,7 +59,7 @@ pub(super) fn literal_at(program: &Program, addr: u64, own_name: &str) -> Option
 /// `"text"` or `L"text"` with backslashes and quotes escaped as C does,
 /// capped at 120 characters and at least four long, or shorter in read-only
 /// data when a terminator follows (`"%d"`, `";"`); `None` when no string
-/// lives there or the address is code.
+/// lives there or the address is code or loader metadata.
 ///
 /// A wide literal in read-only data reads as a one-character narrow string
 /// followed by its own high byte, so `L"SHA256"` renders as `"S"` unless the
@@ -73,10 +86,7 @@ fn string_at(program: &Program, addr: u64) -> Option<String> {
     const MIN_RODATA: usize = 1;
     /// Longest text rendered.
     const CAP: usize = 120;
-    let section = program.section_at(addr)?;
-    if section.executable {
-        return None;
-    }
+    let section = literal_section(program, addr)?;
     let terminated_at = |at: u64, len: usize| {
         len >= CAP
             || u64::try_from(len)
