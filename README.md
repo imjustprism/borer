@@ -171,7 +171,10 @@ borer has no telemetry or crash reporting. Only these reach the network:
 - `fetch_pdb`, only when asked, sends the PDB's name, GUID and age to the
   symbol server, and `borer doctor` checks that server is reachable unless
   run as `borer doctor offline`.
-- `borer update` and the installers download the release from GitHub.
+- `borer update` and the installers download the release from GitHub. With
+  `GH_TOKEN` or `GITHUB_TOKEN` set, `borer update` sends that token to
+  GitHub's API (api.github.com) and nowhere else; the daily check never
+  sends it.
 
 ## Limits
 

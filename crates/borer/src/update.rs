@@ -1,11 +1,21 @@
 //! `borer update` and the outdated-version notice.
 //!
-//! The latest release is the tag GitHub's `/releases/latest` redirects to.
-//! `update` downloads that release's archive for this machine, checks it
-//! against the release's `SHA256SUMS`, unpacks it with `tar` and puts the
-//! new binary where this one runs: on Windows by moving the running file
-//! aside first (Windows lets a running executable be renamed, not
-//! overwritten), elsewhere by renaming the new file over it.
+//! The latest release is the tag GitHub's `/releases/latest` redirects to,
+//! read from the redirect itself. `update` downloads that release's
+//! archive for this machine, checks it against the release's `SHA256SUMS`,
+//! unpacks it with `tar` and puts the new binary where this one runs: on
+//! Windows by moving the running file aside first (Windows lets a running
+//! executable be renamed, not overwritten), elsewhere by renaming the new
+//! file over it.
+//!
+//! Every request retries a timeout or a transient answer within a bounded
+//! time, and a timeout or a failed connection says what happened and what
+//! to do. With a token in `GH_TOKEN` or `GITHUB_TOKEN`, `update` reads and
+//! downloads the release through GitHub's API as that token's user, so
+//! trouble that slows only unauthenticated requests does not stop an
+//! update; github.com's own pages do not count a token. The token goes
+//! only to the API's host, on `curl`'s stdin, never on its command line,
+//! and the daily check below never sends it.
 //!
 //! The notice is a once-a-day check that a command line run starts as a
 //! detached copy of this binary: its answer is kept in the cache, and a
@@ -22,8 +32,9 @@
 //! Downloads are `curl` run as a process, as [`crate::symsrv`] fetches
 //! PDBs, and unpacking is `tar`; Windows 10 1803 and later ship both.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, bail};
@@ -94,59 +105,413 @@ fn is_newer(tag: &str) -> bool {
 /// The null device, where `curl` writes a body nobody reads.
 const NULL: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
 
-/// Runs `curl` with a user agent naming this build, bounded by `max_secs`.
+/// How long a request may wait to connect and for anything to arrive, in
+/// seconds; also all a small request's try may take.
+const ANSWER_SECS: u32 = 15;
+
+/// All one try of the archive's download may take, in seconds.
+const ARCHIVE_SECS: u32 = 600;
+
+/// The retries `curl --retry` makes of a request that timed out or that
+/// GitHub answered with a transient status (408, 429 or a 5xx).
+const RETRIES: u32 = 2;
+
+/// The seconds after a request's first try in which a retry may still
+/// start (`curl --retry-max-time`).
+const RETRY_WINDOW: u32 = 60;
+
+/// The redirects [`fetch`] follows itself, where a request carrying the
+/// token follows none.
+const REDIRECTS: usize = 4;
+
+/// The variables a GitHub token is read from, in the order `gh` reads them.
+const TOKEN_VARS: [&str; 2] = ["GH_TOKEN", "GITHUB_TOKEN"];
+
+/// The one host a token is sent to: github.com's own pages do not count
+/// one.
+const TOKEN_HOST: &str = "api.github.com";
+
+/// A GitHub token from the environment.
+struct Token {
+    /// The variable it was read from.
+    var: &'static str,
+    /// The token itself: never an argument, never printed.
+    value: String,
+}
+
+/// The token in `GH_TOKEN`, else in `GITHUB_TOKEN`.
+fn token() -> Option<Token> {
+    token_in(|var| std::env::var(var).ok())
+}
+
+/// The token in the first of [`TOKEN_VARS`] that holds one.
 ///
 /// # Arguments
 ///
-/// * `max_secs` - The total time allowed, in seconds.
-/// * `args` - What follows the common flags.
+/// * `var` - Reads a variable; `None` when it is unset.
 ///
 /// # Returns
 ///
-/// What `curl` wrote to stdout.
-///
-/// # Errors
-///
-/// When `curl` does not start or exits nonzero; the message carries its
-/// own error line.
-fn curl(max_secs: u32, args: &[&str]) -> anyhow::Result<String> {
-    let out = Command::new("curl")
-        .args(["-sSfL", "--connect-timeout", "10", "--max-time"])
-        .arg(max_secs.to_string())
-        .args(["-A", &format!("borer/{VERSION}")])
-        .args(args)
-        .output()
-        .context("curl does not run; Windows 10 1803 and later, macOS and Linux ship it")?;
-    if !out.status.success() {
-        let said = String::from_utf8_lossy(&out.stderr);
-        bail!(
-            "download failed: {}",
-            said.lines()
-                .find(|l| !l.trim().is_empty())
-                .unwrap_or("no error text")
-        );
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+/// `None` when none holds one: unset, empty, or holding a character no
+/// token has, which as a header line could add a header of its own.
+fn token_in(var: impl Fn(&str) -> Option<String>) -> Option<Token> {
+    TOKEN_VARS.into_iter().find_map(|name| {
+        let value = var(name)?.trim().to_owned();
+        (!value.is_empty() && value.bytes().all(|b| b.is_ascii_graphic()))
+            .then_some(Token { var: name, value })
+    })
 }
 
-/// The latest release's tag: the last path component `/releases/latest`
-/// redirects to.
+/// Whether `url` is an `https` URL on [`TOKEN_HOST`], the only requests a
+/// token goes with.
 ///
 /// # Arguments
 ///
-/// * `max_secs` - The time allowed for the request, in seconds.
+/// * `url` - The URL.
+fn to_api(url: &str) -> bool {
+    url.strip_prefix("https://")
+        .and_then(|rest| rest.split(['/', '?', '#']).next())
+        .is_some_and(|host| host == TOKEN_HOST)
+}
+
+/// One run of `curl`.
+struct Request<'a> {
+    /// The URL.
+    url: &'a str,
+    /// The file the body goes to, with the URL a redirect names written to
+    /// stdout; `None` sends the body to stdout.
+    out: Option<&'a Path>,
+    /// Whether `curl` follows redirects itself.
+    follow: bool,
+    /// All one try may take, in seconds.
+    secs: u32,
+    /// The `Accept` header, when `curl`'s own is not the one wanted.
+    accept: Option<&'static str>,
+}
+
+/// The `curl` command for a request and, when the token goes with it, the
+/// header `curl` reads from its stdin.
+///
+/// Every request is quiet but says why it failed, fails on an HTTP error
+/// status, and names this build as its client. It waits at most
+/// [`ANSWER_SECS`] to connect and for anything to arrive, and `curl`
+/// retries a timeout or a transient status [`RETRIES`] times while within
+/// [`RETRY_WINDOW`]. The token goes only to [`TOKEN_HOST`] ([`to_api`]),
+/// as an `Authorization` header read from stdin (`-H @-`), never as an
+/// argument another user of the machine could read in its process list;
+/// such a request follows no redirect itself, so the token never rides one
+/// to another host. A request that follows none says so (`--no-location`),
+/// so a `location` line in the user's curlrc cannot make it follow.
+///
+/// # Arguments
+///
+/// * `req` - The request.
+/// * `token` - The token, when one is set.
+///
+/// # Returns
+///
+/// The command, its standard handles piped, and the header line to write
+/// to its stdin.
+fn curl_command(req: &Request<'_>, token: Option<&Token>) -> (Command, Option<String>) {
+    let header = token
+        .filter(|_| to_api(req.url))
+        .map(|t| format!("Authorization: Bearer {}\n", t.value));
+    let answer = ANSWER_SECS.to_string();
+    let mut cmd = Command::new("curl");
+    cmd.args(["-sSf", "--connect-timeout", &answer])
+        .args(["--speed-limit", "1", "--speed-time", &answer])
+        .args(["--max-time", &req.secs.to_string()])
+        .args(["--retry", &RETRIES.to_string()])
+        .args(["--retry-max-time", &RETRY_WINDOW.to_string()])
+        .args(["-A", &format!("borer/{VERSION}")]);
+    cmd.arg(if req.follow && header.is_none() {
+        "-L"
+    } else {
+        "--no-location"
+    });
+    if let Some(accept) = req.accept {
+        cmd.arg("-H").arg(format!("Accept: {accept}"));
+    }
+    if header.is_some() {
+        cmd.args(["-H", "@-"]);
+    }
+    if let Some(out) = req.out {
+        cmd.arg("-o").arg(out).args(["-w", "%{redirect_url}"]);
+    }
+    cmd.arg(req.url)
+        .stdin(if header.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    (cmd, header)
+}
+
+/// Runs `curl` for one request.
+///
+/// # Arguments
+///
+/// * `req` - The request.
+/// * `token` - The token, when one is set.
+///
+/// # Returns
+///
+/// What `curl` wrote to stdout: the body, or with [`Request::out`] the URL
+/// a redirect named (empty when there was none).
 ///
 /// # Errors
 ///
-/// When GitHub cannot be reached, or no release is published.
-fn latest_tag(max_secs: u32) -> anyhow::Result<String> {
-    let url = format!("https://github.com/{REPO}/releases/latest");
-    let landed = curl(max_secs, &["-o", NULL, "-w", "%{url_effective}", &url])?;
-    let tag = landed.trim().rsplit('/').next().unwrap_or_default();
-    if tag.is_empty() || tag == "latest" || parse_version(tag).is_none() {
-        bail!("no release is published yet");
+/// When `curl` does not start or exits nonzero; the message says what
+/// happened ([`failure`]) with `curl`'s own error line.
+fn curl(req: &Request<'_>, token: Option<&Token>) -> anyhow::Result<String> {
+    let (mut cmd, header) = curl_command(req, token);
+    let mut child = cmd
+        .spawn()
+        .context("curl does not run; Windows 10 1803 and later, macOS and Linux ship it")?;
+    let handed = match (&header, child.stdin.take()) {
+        (Some(header), Some(mut stdin)) => stdin.write_all(header.as_bytes()),
+        _ => Ok(()),
+    };
+    let out = child.wait_with_output().context("waiting for curl")?;
+    if !out.status.success() {
+        let said = String::from_utf8_lossy(&out.stderr);
+        let line = said
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("no error text");
+        bail!(
+            "{}",
+            failure(
+                out.status.code(),
+                line,
+                req.secs,
+                token.map(|t| t.var),
+                header.is_some()
+            )
+        );
     }
-    Ok(tag.to_owned())
+    handed.context("handing curl the token")?;
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// What a failed request says: what happened and what to do, with
+/// `curl`'s own line.
+///
+/// A timeout says which limit it ran into: a small request's whole try is
+/// [`ANSWER_SECS`], while the archive's may stall that long or run past
+/// its own longer limit.
+///
+/// # Arguments
+///
+/// * `code` - `curl`'s exit status; `None` when a signal ended it.
+/// * `said` - `curl`'s error line.
+/// * `secs` - All one try of the request may take, in seconds.
+/// * `token` - The variable the token was read from, when one is set.
+/// * `carried` - Whether this request carried the token.
+fn failure(code: Option<i32>, said: &str, secs: u32, token: Option<&str>, carried: bool) -> String {
+    let what = match (code, token) {
+        (Some(22), Some(var)) if carried && said.contains("error: 401") => {
+            return format!(
+                "GitHub refused the token in {var} ({said}); renew it, or unset {var} to update without it"
+            );
+        }
+        (Some(28), _) if secs > ANSWER_SECS => format!(
+            "the download from GitHub stalled for {ANSWER_SECS} seconds or ran past {secs} ({said}); GitHub may be having trouble"
+        ),
+        (Some(28), _) => format!(
+            "GitHub did not answer within {secs} seconds ({said}); it may be having trouble"
+        ),
+        (Some(5 | 6 | 7 | 35 | 52 | 55 | 56), _) => format!(
+            "the connection to GitHub failed ({said}); check the network and any proxy, or GitHub may be having trouble"
+        ),
+        _ => return format!("download failed: {said}"),
+    };
+    let hint = if token.is_some() {
+        ""
+    } else {
+        ", and if GitHub is slowing requests made without a token, set GH_TOKEN to a GitHub token so borer asks as you"
+    };
+    format!("{what} (https://www.githubstatus.com): try again later{hint}")
+}
+
+/// Fetches `url` into the file `out`, following its redirects.
+///
+/// A request carrying the token follows none itself ([`curl_command`]), so
+/// each redirect it is answered with is fetched as a request of its own,
+/// which carries the token only while it stays on [`TOKEN_HOST`].
+///
+/// # Arguments
+///
+/// * `url` - The URL.
+/// * `out` - The file to write.
+/// * `secs` - All one try may take, in seconds.
+/// * `accept` - The `Accept` header, when `curl`'s own is not the one wanted.
+/// * `token` - The token, when one is set.
+///
+/// # Errors
+///
+/// When a request fails ([`curl`]), a redirect leaves `https`, or there are
+/// more than [`REDIRECTS`].
+fn fetch(
+    url: &str,
+    out: &Path,
+    secs: u32,
+    accept: Option<&'static str>,
+    token: Option<&Token>,
+) -> anyhow::Result<()> {
+    let mut url = url.to_owned();
+    for _ in 0..=REDIRECTS {
+        if !url.starts_with("https://") {
+            bail!("refusing to download {url}: not an https URL");
+        }
+        let req = Request {
+            url: &url,
+            out: Some(out),
+            follow: true,
+            secs,
+            accept,
+        };
+        let next = curl(&req, token)?;
+        if next.trim().is_empty() {
+            return Ok(());
+        }
+        url = next.trim().to_owned();
+    }
+    bail!("downloading {url} took more than {REDIRECTS} redirects")
+}
+
+/// A release file as GitHub's API lists it.
+#[derive(Debug, serde::Deserialize)]
+struct Asset {
+    /// The file name.
+    name: String,
+    /// Its API URL, which answers with the file when asked for
+    /// `application/octet-stream`.
+    url: String,
+}
+
+/// The latest release: its tag and, when read through GitHub's API, its
+/// files.
+#[derive(Debug, serde::Deserialize)]
+struct Release {
+    /// The tag, e.g. `v0.2.10`.
+    #[serde(rename = "tag_name")]
+    tag: String,
+    /// The files; `None` when the tag was read from github.com's redirect,
+    /// whose files download from `releases/download/<tag>/`.
+    assets: Option<Vec<Asset>>,
+}
+
+impl Release {
+    /// Where the release's file `name` downloads from, and the `Accept`
+    /// header that asks for its bytes.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The file name.
+    ///
+    /// # Errors
+    ///
+    /// When the API lists no such file.
+    fn file(&self, name: &str) -> anyhow::Result<(String, Option<&'static str>)> {
+        let Some(assets) = &self.assets else {
+            let tag = &self.tag;
+            return Ok((
+                format!("https://github.com/{REPO}/releases/download/{tag}/{name}"),
+                None,
+            ));
+        };
+        let asset = assets
+            .iter()
+            .find(|a| a.name == name)
+            .with_context(|| format!("release {} has no {name}", self.tag))?;
+        Ok((asset.url.clone(), Some("application/octet-stream")))
+    }
+}
+
+/// Whether `tag` reads as a version and holds only characters safe in a
+/// URL and a file name.
+///
+/// # Arguments
+///
+/// * `tag` - The tag.
+fn plain_tag(tag: &str) -> bool {
+    parse_version(tag).is_some()
+        && tag
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._+-".contains(c))
+}
+
+/// The tag a `/releases/latest` redirect names: the last path component
+/// of its `/releases/tag/<tag>` location.
+///
+/// # Arguments
+///
+/// * `location` - The URL the redirect names.
+///
+/// # Returns
+///
+/// `None` when the location names no release tag.
+fn tag_of(location: &str) -> Option<String> {
+    let path = location.trim().split(['?', '#']).next()?;
+    let (_, tag) = path.rsplit_once("/releases/tag/")?;
+    plain_tag(tag).then(|| tag.to_owned())
+}
+
+/// The release GitHub's API describes.
+///
+/// # Arguments
+///
+/// * `json` - The API's answer.
+///
+/// # Returns
+///
+/// `None` when it names no tag that reads as a version.
+fn release_of(json: &str) -> Option<Release> {
+    serde_json::from_str::<Release>(json)
+        .ok()
+        .filter(|r| plain_tag(&r.tag))
+}
+
+/// The latest release: read from the redirect github.com answers
+/// `/releases/latest` with, or, with a token, from GitHub's API.
+///
+/// # Arguments
+///
+/// * `token` - The token, when one is set.
+///
+/// # Errors
+///
+/// When GitHub cannot be reached ([`curl`]), or names no release.
+fn latest(token: Option<&Token>) -> anyhow::Result<Release> {
+    if token.is_some() {
+        let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
+        let req = Request {
+            url: &url,
+            out: None,
+            follow: false,
+            secs: ANSWER_SECS,
+            accept: None,
+        };
+        let json = curl(&req, token)?;
+        return release_of(&json).context("GitHub's API named no tag for the latest release");
+    }
+    let url = format!("https://github.com/{REPO}/releases/latest");
+    let req = Request {
+        url: &url,
+        out: Some(Path::new(NULL)),
+        follow: false,
+        secs: ANSWER_SECS,
+        accept: None,
+    };
+    let to = curl(&req, None)?;
+    let tag = tag_of(&to).with_context(|| match to.trim() {
+        "" => "no release is published yet".to_owned(),
+        place => format!("GitHub's latest release points to {place}, which names no tag"),
+    })?;
+    Ok(Release { tag, assets: None })
 }
 
 /// Lowercase hex of a SHA-256 digest.
@@ -400,9 +765,11 @@ fn running_exe() -> Option<PathBuf> {
 pub(crate) fn update(check_only: bool) -> anyhow::Result<String> {
     let exe = std::env::current_exe().context("cannot tell where this binary runs from")?;
     let _ = std::fs::remove_file(aside(&exe));
-    let tag = latest_tag(30)?;
-    remember(&tag);
-    if !is_newer(&tag) {
+    let token = token();
+    let release = latest(token.as_ref())?;
+    let tag = release.tag.as_str();
+    remember(tag);
+    if !is_newer(tag) {
         return Ok(format!("borer {VERSION} is the latest release\n"));
     }
     let shown = tag.trim_start_matches('v');
@@ -419,14 +786,16 @@ pub(crate) fn update(check_only: bool) -> anyhow::Result<String> {
     let (triple, ext) =
         target().context("no release is built for this machine; build from source")?;
     let name = format!("borer-{tag}-{triple}");
-    let base = format!("https://github.com/{REPO}/releases/download/{tag}");
     let work = std::env::temp_dir().join(format!("borer-update-{}", std::process::id()));
     std::fs::create_dir_all(&work)?;
     let result = (|| {
         let archive = work.join(format!("{name}.{ext}"));
-        let path = archive.to_string_lossy().into_owned();
-        curl(600, &["-o", &path, &format!("{base}/{name}.{ext}")])?;
-        let sums = curl(60, &[&format!("{base}/SHA256SUMS")])?;
+        let (url, accept) = release.file(&format!("{name}.{ext}"))?;
+        fetch(&url, &archive, ARCHIVE_SECS, accept, token.as_ref())?;
+        let listed = work.join("SHA256SUMS");
+        let (url, accept) = release.file("SHA256SUMS")?;
+        fetch(&url, &listed, ANSWER_SECS, accept, token.as_ref())?;
+        let sums = std::fs::read_to_string(&listed).context("reading SHA256SUMS")?;
         let want = listed_sum(&sums, &format!("{name}.{ext}"))
             .with_context(|| format!("SHA256SUMS lists no {name}.{ext}"))?;
         let got = sha256_hex(&std::fs::read(&archive)?);
@@ -570,9 +939,9 @@ fn spawn_refresh() {
     };
     let mut cmd = Command::new(exe);
     cmd.env(REFRESH, "1")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt as _;
@@ -619,12 +988,15 @@ fn claim(file: &Path) -> bool {
 /// The daily check itself, run by the detached copy [`spawn_refresh`]
 /// starts: asks GitHub for the latest tag and keeps it.
 ///
-/// A failed check keeps the last known tag with the new time, so an
-/// offline machine asks once a day, not on every command. The claims that
-/// started checks ([`claim_file`]) go once the answer is kept.
+/// It sends no token: it runs unasked, in the background, where a token
+/// GitHub refuses would fail it unseen. A failed check keeps the last
+/// known tag with the new time, so an offline machine asks once a day, not
+/// on every command. The claims that started checks ([`claim_file`]) go
+/// once the answer is kept.
 pub(crate) fn refresh() {
-    let tag = latest_tag(15)
+    let tag = latest(None)
         .ok()
+        .map(|release| release.tag)
         .or_else(|| recalled().map(|(tag, _)| tag))
         .unwrap_or_else(|| "none".to_owned());
     remember(&tag);
@@ -849,5 +1221,266 @@ mod tests {
             sha256_hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    /// A command's arguments as text.
+    ///
+    /// # Arguments
+    ///
+    /// * `cmd` - The command.
+    fn argv(cmd: &Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// The token goes to GitHub's API alone, as a header on stdin and
+    /// never as an argument, and such a request follows no redirect; every
+    /// request retries within its bounds.
+    ///
+    /// # Panics
+    ///
+    /// When the token is an argument, goes to another host, or rides a
+    /// redirect, or the retry bounds are missing.
+    #[test]
+    fn a_token_goes_on_stdin_to_the_api_alone() {
+        let token = Token {
+            var: "GH_TOKEN",
+            value: "ghp_s3cret".to_owned(),
+        };
+        let req = |url| Request {
+            url,
+            out: Some(Path::new("out.zip")),
+            follow: true,
+            secs: 9,
+            accept: None,
+        };
+        for url in [
+            "https://api.github.com/repos/a/b/releases/latest",
+            "https://api.github.com/repos/a/b/releases/assets/7",
+        ] {
+            let (cmd, header) = curl_command(&req(url), Some(&token));
+            let args = argv(&cmd);
+            assert_eq!(
+                header.as_deref(),
+                Some("Authorization: Bearer ghp_s3cret\n"),
+                "{url}"
+            );
+            assert!(args.windows(2).any(|w| w == ["-H", "@-"]), "{url}");
+            assert!(
+                !args.iter().any(|a| a.contains("s3cret")),
+                "{url}: {args:?}"
+            );
+            assert!(
+                !args.iter().any(|a| a == "-L") && args.iter().any(|a| a == "--no-location"),
+                "{url} follows with the token"
+            );
+        }
+        assert!(to_api("https://api.github.com?x=1"));
+        assert!(to_api("https://api.github.com#x"));
+        for url in [
+            "https://github.com/a/b/releases/latest",
+            "https://release-assets.githubusercontent.com/x?sig=1",
+            "http://api.github.com/x",
+            "https://api.github.com.evil.example/x",
+            "https://api.github.com@evil.example/x",
+            "https://evil.example/?api.github.com",
+            "https://github.com:8443/x",
+        ] {
+            let (cmd, header) = curl_command(&req(url), Some(&token));
+            let args = argv(&cmd);
+            assert_eq!(header, None, "{url}");
+            assert!(
+                !args.iter().any(|a| a == "@-" || a.contains("s3cret")),
+                "{url}"
+            );
+            assert!(args.iter().any(|a| a == "-L"), "{url}");
+        }
+        let lookup = Request {
+            follow: false,
+            ..req("https://github.com/a/b/releases/latest")
+        };
+        let held = argv(&curl_command(&lookup, None).0);
+        assert!(
+            held.iter().any(|a| a == "--no-location") && !held.iter().any(|a| a == "-L"),
+            "{held:?}"
+        );
+        let (cmd, header) = curl_command(&req("https://github.com/a/b/releases/latest"), None);
+        let args = argv(&cmd);
+        assert_eq!(header, None);
+        assert!(!args.iter().any(|a| a == "--no-location"), "{args:?}");
+        for pair in [
+            ["--max-time", "9"],
+            ["--retry", "2"],
+            ["--retry-max-time", "60"],
+            ["--speed-time", "15"],
+            ["--connect-timeout", "15"],
+        ] {
+            assert!(args.windows(2).any(|w| w == pair), "{pair:?} in {args:?}");
+        }
+    }
+
+    /// A token is read from `GH_TOKEN` first, trimmed, and one holding a
+    /// character no token has is no token.
+    ///
+    /// # Panics
+    ///
+    /// When another variable or value is read.
+    #[test]
+    fn a_token_is_read_from_gh_token_first() {
+        let read = |gh: Option<&str>, github: Option<&str>| {
+            token_in(|var| match var {
+                "GH_TOKEN" => gh.map(str::to_owned),
+                "GITHUB_TOKEN" => github.map(str::to_owned),
+                _ => None,
+            })
+            .map(|t| (t.var, t.value))
+        };
+        assert_eq!(
+            read(Some("a\n"), Some("b")),
+            Some(("GH_TOKEN", "a".to_owned()))
+        );
+        assert_eq!(
+            read(Some(" "), Some("b")),
+            Some(("GITHUB_TOKEN", "b".to_owned()))
+        );
+        assert_eq!(read(Some("a\nX-Other: 1"), None), None);
+        assert_eq!(read(Some("a b"), None), None);
+        assert_eq!(read(None, None), None);
+    }
+
+    /// A timeout and a failed connection say what happened and what to
+    /// do, with curl's own line; a refused token names its variable.
+    ///
+    /// # Panics
+    ///
+    /// When a message reads otherwise.
+    #[test]
+    fn a_timeout_says_what_happened_and_what_to_do() {
+        let line = "curl: (28) Operation timed out after 15002 milliseconds with 0 bytes received";
+        assert_eq!(
+            failure(Some(28), line, ANSWER_SECS, None, false),
+            format!(
+                "GitHub did not answer within 15 seconds ({line}); it may be having trouble \
+                 (https://www.githubstatus.com): try again later, and if GitHub is slowing \
+                 requests made without a token, set GH_TOKEN to a GitHub token so borer asks as you"
+            )
+        );
+        let stalled =
+            "curl: (28) Operation too slow. Less than 1 bytes/sec transferred the last 15 seconds";
+        let download = failure(Some(28), stalled, ARCHIVE_SECS, None, false);
+        assert!(
+            download.starts_with(&format!(
+                "the download from GitHub stalled for 15 seconds or ran past 600 ({stalled}); \
+                 GitHub may be having trouble (https://www.githubstatus.com): try again later"
+            )),
+            "{download}"
+        );
+        let carried = failure(Some(28), line, ANSWER_SECS, Some("GITHUB_TOKEN"), true);
+        assert!(carried.contains(line) && carried.contains("try again later"));
+        assert!(!carried.contains("set GH_TOKEN"), "{carried}");
+        let refused = "curl: (7) Failed to connect to github.com port 443";
+        let said = failure(Some(7), refused, ANSWER_SECS, None, false);
+        assert!(
+            said.starts_with("the connection to GitHub failed"),
+            "{said}"
+        );
+        assert!(said.contains(refused) && said.contains("https://www.githubstatus.com"));
+        let stale = "curl: (22) The requested URL returned error: 401";
+        assert_eq!(
+            failure(Some(22), stale, ANSWER_SECS, Some("GITHUB_TOKEN"), true),
+            format!(
+                "GitHub refused the token in GITHUB_TOKEN ({stale}); renew it, or unset \
+                 GITHUB_TOKEN to update without it"
+            )
+        );
+        let missing = "curl: (22) The requested URL returned error: 404";
+        assert_eq!(
+            failure(Some(22), missing, ANSWER_SECS, Some("GH_TOKEN"), true),
+            format!("download failed: {missing}")
+        );
+        assert_eq!(
+            failure(Some(22), stale, ANSWER_SECS, Some("GH_TOKEN"), false),
+            format!("download failed: {stale}")
+        );
+    }
+
+    /// The latest tag is the last path component of a `/releases/tag/`
+    /// location, and nothing else is a tag.
+    ///
+    /// # Panics
+    ///
+    /// When a location reads otherwise.
+    #[test]
+    fn the_latest_tag_is_read_from_the_redirect() {
+        let at = "https://github.com/imjustprism/borer/releases/tag/";
+        assert_eq!(tag_of(&format!("{at}v0.2.10")).as_deref(), Some("v0.2.10"));
+        assert_eq!(
+            tag_of(&format!("{at}v0.2.10\r\n")).as_deref(),
+            Some("v0.2.10")
+        );
+        assert_eq!(
+            tag_of(&format!("{at}v1.2.3?x=1#y")).as_deref(),
+            Some("v1.2.3")
+        );
+        for not in [
+            String::new(),
+            "https://github.com/imjustprism/borer/releases".to_owned(),
+            format!("{at}latest"),
+            format!("{at}v1.2.3/x"),
+            format!("{at}v1.2.3-..%2F..%2Fx"),
+            format!("{at}v1.2.3-a\\b"),
+        ] {
+            assert_eq!(tag_of(&not), None, "{not}");
+        }
+    }
+
+    /// The API's release names each file's API URL, asked for its bytes;
+    /// a release read from the redirect downloads from the tag's folder.
+    ///
+    /// # Panics
+    ///
+    /// When a file is found elsewhere or a bad tag is taken.
+    #[test]
+    fn a_release_names_where_each_file_downloads_from() {
+        let json = r#"{"tag_name":"v9.0.0","body":"notes","assets":[{"name":"SHA256SUMS",
+            "url":"https://api.github.com/repos/imjustprism/borer/releases/assets/7","size":90}]}"#;
+        let release = release_of(json).expect("a release");
+        assert_eq!(
+            release.file("SHA256SUMS").expect("listed"),
+            (
+                "https://api.github.com/repos/imjustprism/borer/releases/assets/7".to_owned(),
+                Some("application/octet-stream")
+            )
+        );
+        assert!(release.file("borer-v9.0.0-x.zip").is_err());
+        assert!(release_of(r#"{"tag_name":"v9.0.0/../x","assets":[]}"#).is_none());
+        assert!(release_of("<html>").is_none());
+        let web = Release {
+            tag: "v9.0.0".to_owned(),
+            assets: None,
+        };
+        assert_eq!(
+            web.file("SHA256SUMS").expect("a url"),
+            (
+                "https://github.com/imjustprism/borer/releases/download/v9.0.0/SHA256SUMS"
+                    .to_owned(),
+                None
+            )
+        );
+    }
+
+    /// A download refuses a URL that is not `https` before it runs
+    /// anything.
+    ///
+    /// # Panics
+    ///
+    /// When it is fetched.
+    #[test]
+    fn a_download_refuses_plain_http() {
+        let refused = fetch("http://github.com/x", Path::new(NULL), 1, None, None)
+            .expect_err("refused")
+            .to_string();
+        assert!(refused.contains("not an https URL"), "{refused}");
     }
 }
