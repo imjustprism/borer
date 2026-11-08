@@ -40,15 +40,26 @@ const LITERAL_BACK_MAX: usize = 4096;
 /// `off` is part of: a literal holding line breaks walks as one run per
 /// line, and code references its first.
 ///
+/// The walk stays inside the run's section, so code or another section's
+/// bytes never pass for the literal's start; a run no section maps is its
+/// own start.
+///
 /// # Arguments
 ///
-/// * `bytes` - The file.
+/// * `p` - The loaded file.
 /// * `off` - Where the run starts.
 /// * `unit` - Bytes per character: one for ASCII, two for UTF-16.
-fn literal_start(bytes: &[u8], off: u64, unit: usize) -> u64 {
+fn literal_start(p: &Program, off: u64, unit: usize) -> u64 {
     let run = crate::num::saturating_usize(off);
-    let floor = run.saturating_sub(LITERAL_BACK_MAX);
-    let back = bytes
+    let floor = p
+        .offset_to_va(off)
+        .and_then(|va| p.section_at(va))
+        .map_or(run, |s| {
+            run.saturating_sub(LITERAL_BACK_MAX)
+                .max(crate::num::saturating_usize(s.file_off.0))
+        });
+    let back = p
+        .bytes
         .get(floor..run)
         .unwrap_or_default()
         .rchunks_exact(unit)
@@ -291,7 +302,7 @@ fn stored_rows(p: &Program, a: &Analysis, rows: &mut Vec<Row>) {
                     } else {
                         2
                     };
-                    let start = literal_start(&p.bytes, hit.off, unit);
+                    let start = literal_start(p, hit.off, unit);
                     let len =
                         from_usize(hit.len.saturating_mul(unit)).saturating_add(hit.off - start);
                     let place = crate::fileinfo::region(p, Some(a), start, len);

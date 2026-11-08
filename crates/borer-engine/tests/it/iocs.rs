@@ -272,3 +272,49 @@ fn an_indicator_no_code_references_reads_low_and_apart() {
         "{out}"
     );
 }
+/// The walk back to a literal's start stays inside the run's section.
+///
+/// A URL whose section opens with a line break right after printable code
+/// bytes is still the referenced literal it is, not code, and a run in
+/// bytes no section maps is its own start, never a line of the referenced
+/// string the image ends with.
+#[test]
+fn a_literal_walk_stays_inside_its_section() {
+    let mut bytes = vec![
+        0x48, 0x8d, 0x3d, 0xf9, 0x0f, 0x00, 0x00, // ASM: lea rdi,[rip+0xff9]
+        0x48, 0x8d, 0x35, 0x10, 0x10, 0x00, 0x00, // ASM: lea rsi,[rip+0x1010]
+        0xc3, // ASM: ret
+    ];
+    bytes.resize(0x18, 0);
+    bytes.extend_from_slice(b"AAAAAAAA\nhttp://edge.badhost.ru/f.php\0BBBBBBBB");
+    bytes.extend_from_slice(b"\nhttp://trail.badhost.ru/g.php\0");
+    let sections = vec![
+        Section::mapped(".text", 0x1000, 0, 0x20, false, true),
+        Section::mapped(".data", 0x2000, 0x20, 0x26, false, false),
+    ];
+    let p = Program::raw(bytes, Arch::X86_64, 0x1000, Some(0x1000), sections);
+    let a = Analysis::compute(&p);
+    let out = iocs_tsv(&p, &a, &Overlay::default(), "url").expect("iocs");
+    assert!(
+        out.lines()
+            .next()
+            .is_some_and(|l| l.ends_with(": 1 url (+1 no code references)")),
+        "{out}"
+    );
+    let row = |host: &str| -> Vec<String> {
+        out.lines()
+            .find(|l| l.contains(host))
+            .map(|l| l.split_whitespace().map(str::to_owned).collect())
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        row("edge.badhost.ru")[..5],
+        ["url", "high", "static", "0x2001", "referenced"],
+        "{out}"
+    );
+    assert_eq!(
+        row("trail.badhost.ru")[..5],
+        ["url", "low", "static", "off=0x47", "unmapped"],
+        "{out}"
+    );
+}
