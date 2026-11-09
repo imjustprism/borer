@@ -154,11 +154,10 @@ const MAX_DEPTH: usize = 256;
 /// weaker but sound).
 const MAX_PASSES: usize = 64;
 
-/// Top level: continue the text at the target of an unconditional jump when
-/// that block is still unwritten (flow order), instead of address order.
-const FOLLOW_JUMPS: bool = true;
-
 /// Returns the block an emitted piece of text jumps to at its end.
+///
+/// The top level continues the text there when that block is still
+/// unwritten (flow order), instead of in address order.
 ///
 /// # Arguments
 ///
@@ -313,6 +312,10 @@ struct Ctx<'a> {
     /// (`call [__guard_dispatch_icall_fptr]`), which the header leaves
     /// unnamed: what [`replay`] follows a call through.
     pointer_dispatches: BTreeMap<u64, Register>,
+    /// Table jumps whose guard admits more cases than the table lists, by
+    /// the jump's address, each with the header's note saying the cases
+    /// past the list are not in the text (emission pass, [`ladder`]).
+    short_tables: BTreeMap<u64, String>,
     /// Per block: reads flags it did not set itself (a `jcc` at its start).
     flag_readers: Vec<bool>,
     /// Per block, how its out flags are re-expressed because a successor
@@ -841,6 +844,7 @@ fn new_ctx<'a>(
         read_in_place: BTreeSet::new(),
         dispatches: BTreeMap::new(),
         pointer_dispatches: BTreeMap::new(),
+        short_tables: BTreeMap::new(),
         flag_readers: Vec::new(),
         rebase_flags: Vec::new(),
         tmp_count: 0,
@@ -1827,9 +1831,7 @@ fn decompile_in<L: Lifter>(
         emit_block(&mut ctx, &mut st, i, &mut body, 0);
         st.emitted[i] = true;
         note_jumps(&body[at..], &mut named);
-        if FOLLOW_JUMPS {
-            follow = trailing_goto(&body[at..]).and_then(|va| st.index_of(va));
-        }
+        follow = trailing_goto(&body[at..]).and_then(|va| st.index_of(va));
     }
     let skip = overlay.passes;
     let body = cir::fold(&body, &plan.regions, st.ends(&ctx, cleanup, skip).as_ref());
@@ -2250,6 +2252,7 @@ fn decompile_in<L: Lifter>(
     if unreachable > 0 {
         let _ = writeln!(out, "// note: {unreachable} unreachable blocks omitted");
     }
+    out.extend(ctx.short_tables.values().map(|n| format!("// note: {n}\n")));
     if !ctx.empty_calls.is_empty() {
         let names: Vec<String> = ctx
             .empty_calls

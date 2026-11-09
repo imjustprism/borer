@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{Recorded, decode_at};
 use crate::analysis::switch_index::{
-    TableBound, check_bound, flag_reader, index_bound, table_index,
+    Cell, TableBound, check_bound, flag_reader, index_bound, table_index,
 };
 use crate::analysis::{read_u32, read_u64};
 use crate::fxmap::FxHashSet;
@@ -215,6 +215,12 @@ pub(super) fn resolve_jump_table(
 /// Reads the jump table a bounded index selects from, in whichever form
 /// the instructions before the jump name it (see [`resolve_jump_table`]).
 ///
+/// A byte read after the check picks the slot when the check bounds the
+/// index that byte table is read at. A load that reads again the memory
+/// operand the check compared is the value checked, not a pick: there the
+/// entries are the jump table's own, and only a byte read after that load
+/// can pick among them.
+///
 /// # Arguments
 ///
 /// * `program` - The loaded image.
@@ -237,13 +243,14 @@ fn read_jump_table(
     entries: u64,
 ) -> Option<TableRead> {
     let entries = usize::try_from(entries).ok()?;
+    let from = pick_from(window, cmp_at);
 
     if let Some(jmp) = decode_at(program, bitness, jmp_va)
         && let Some((table, index)) = absolute_table(window, &jmp)
     {
         let picker = window
             .iter()
-            .skip(cmp_at)
+            .skip(from)
             .rev()
             .find_map(|i| byte_index_load(program, i, index));
         let found = match picker.and_then(|n| index_bytes(program, n, entries).map(|b| (n, b))) {
@@ -287,7 +294,7 @@ fn read_jump_table(
     }
     let mut wide: Option<(u64, u64)> = None;
     let mut narrow: Option<u64> = None;
-    for (k, i) in window.iter().enumerate().skip(cmp_at) {
+    for (k, i) in window.iter().enumerate().skip(from) {
         match table_load(program, &bases, i) {
             Some((table, base, 4)) => {
                 let after = window.get(k + 1..).unwrap_or_default();
@@ -358,6 +365,24 @@ fn read_jump_table(
         targets,
         picker: None,
     })
+}
+
+/// Returns where the search for a byte-table pick starts: past the last
+/// load that reads again the memory operand the check compared, else at
+/// the check.
+///
+/// # Arguments
+///
+/// * `window` - The instructions before the jump, in order.
+/// * `at` - Position of the range check in `window`.
+fn pick_from(window: &[Instruction], at: usize) -> usize {
+    let compared = window.get(at).and_then(|c| Cell::of(c, 0));
+    let reread = |i: &Instruction| compared.is_some() && Cell::of(i, 1) == compared;
+    window
+        .iter()
+        .skip(at)
+        .rposition(reread)
+        .map_or(at, |r| at + r + 1)
 }
 
 /// The table of absolute targets a jump reads, and the register indexing

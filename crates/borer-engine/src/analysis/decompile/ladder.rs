@@ -277,7 +277,10 @@ pub(super) fn try_compare_switch<L: Lifter>(
 /// default is entered only from the guard and the table, the dispatch
 /// indexes with the value the guard compares, and the table has as many
 /// entries as the bound admits. A default other code jumps into is shared
-/// code, and folding it into the switch costs that code a label.
+/// code, and folding it into the switch costs that code a label. A table
+/// that lists fewer entries than its guard admits was cut short where it
+/// was read, so the cases past its list are code the text lacks: the
+/// header says so ([`Ctx::short_tables`]).
 ///
 /// # Arguments
 ///
@@ -325,12 +328,13 @@ fn try_guarded_switch<L: Lifter>(
         return None;
     }
     let block = &st.blocks[d];
-    let (_, targets) = ctx
+    let (&site, targets) = ctx
         .analysis
         .jump_tables
         .range(block.start..block.end)
         .next()?;
-    if u64::try_from(targets.len()).ok()? != len {
+    let listed = u64::try_from(targets.len()).ok()?;
+    if listed > len {
         return None;
     }
     let dispatch = run_block(ctx, st, d);
@@ -342,6 +346,15 @@ fn try_guarded_switch<L: Lifter>(
         e.clone()
     };
     if bare(&idx) != bare(v) {
+        return None;
+    }
+    if listed < len {
+        let guard = st.code[i].last().map_or(st.start(i), L::start);
+        let note = format!(
+            "the table jump at {site:#x} lists {listed} of the {len} cases its guard at \
+             {guard:#x} admits; the rest are not in this text"
+        );
+        ctx.short_tables.insert(site, note);
         return None;
     }
     st.emitted[d] = true;

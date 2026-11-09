@@ -15,6 +15,7 @@ use crate::raw;
 
 use borer_engine::analysis::decompile::decompile;
 use borer_engine::analysis::{Analysis, Overlay};
+use borer_engine::num::{from_usize, lo32};
 use borer_engine::program::{Arch, Program, Section};
 use std::path::PathBuf;
 
@@ -917,6 +918,186 @@ fn a_bound_check_in_the_block_before_the_dispatch_is_found() {
     assert!(
         f.blocks.iter().any(|b| b.start == TEXT + 0x50),
         "a case is not a block of the function"
+    );
+}
+
+/// Builds dash's `readtoken1` dispatch, entered at [`TEXT`].
+///
+/// An `eofmark` test at the top bounds another value; then `syntax[c]` is
+/// compared in memory against 12, `between` sits before the compare's
+/// `ja`, and the byte read again indexes a 13-entry rel32 table in
+/// `.rdata`, whose cases are `mov eax, k; ret`.
+///
+/// # Arguments
+///
+/// * `between` - Bytes between the byte compare and its jump, at most 10,
+///   so the code ends before the first case at 0x401040.
+///
+/// # Returns
+///
+/// The image, the table jump's address and the cases in table order.
+fn dash_dispatch(between: &[u8]) -> (Program, u64, Vec<u64>) {
+    let mut code = vec![
+        0x48, 0x83, 0xbd, 0x78, 0xff, 0xff, 0xff, 0x01, // ASM: cmp qword [rbp-0x88],1
+        0x0f, 0x87, // ASM: ja other
+    ];
+    code.extend_from_slice(&(0x24 + lo32(from_usize(between.len()))).to_le_bytes());
+    code.extend_from_slice(&[
+        0x4c, 0x8d, 0x35, 0xeb, 0x0f, 0x00, 0x00, // ASM: lea r14,[rip+0xfeb] = 0x402000
+        0x49, 0x8b, 0x17, // ASM: mov rdx,[r15]
+        0x49, 0x63, 0xc5, // ASM: movsxd rax,r13d
+        0x80, 0x3c, 0x02, 0x0c, // ASM: cmp byte [rdx+rax],0xc
+    ]);
+    code.extend_from_slice(between);
+    code.extend_from_slice(&[
+        0x77, 0x0e, // ASM: ja default
+        0x0f, 0xb6, 0x04, 0x02, // ASM: movzx eax,byte [rdx+rax]
+        0x49, 0x63, 0x04, 0x86, // ASM: movsxd rax,[r14+rax*4]
+        0x4c, 0x01, 0xf0, // ASM: add rax,r14
+        0x3e, 0xff, 0xe0, // ASM: notrack jmp rax
+        0x31, 0xc0, 0xc3, // ASM: default: xor eax,eax; ret
+        0x83, 0xc8, 0xff, 0xc3, // ASM: other: or eax,-1; ret
+    ]);
+    let jmp = TEXT + from_usize(code.len() - 10);
+    let mut cases = Vec::new();
+    let mut data = Vec::new();
+    for k in 0..13u8 {
+        let at = 0x40 + 0x10 * usize::from(k);
+        code.resize(at, 0xcc);
+        code.extend_from_slice(&[0xb8, k, 0, 0, 0, 0xc3]); // ASM: mov eax,k; ret
+        let case = TEXT + from_usize(at);
+        cases.push(case);
+        data.extend_from_slice(&lo32(case.wrapping_sub(0x402000)).to_le_bytes());
+    }
+    (raw::image(Arch::X86_64, &code, &data), jmp, cases)
+}
+
+/// A table bounded by a byte compared in memory and read again after the
+/// compare's jump lists every case.
+///
+/// dash's `readtoken1` checks `syntax[c]` with `cmp byte [rdx+rax], 0xc;
+/// ja` and indexes its table with the byte it reads back. The `eofmark`
+/// test at the top bounds another value, and taking it as a guess read 2
+/// of the 13 entries, so the other cases were no part of the function.
+#[test]
+fn a_byte_compared_in_memory_bounds_its_table() {
+    let (p, jmp, cases) = dash_dispatch(&[]);
+    let a = Analysis::compute(&p);
+    assert_eq!(
+        a.jump_tables.get(&jmp),
+        Some(&cases),
+        "{:x?}",
+        a.jump_tables
+    );
+    let f = a.function(TEXT).expect("the switch function");
+    assert!(
+        f.blocks.iter().any(|b| b.start == TEXT + 0x100),
+        "the last case is not a block of the function"
+    );
+}
+
+/// A table listing fewer cases than its guard admits says so in the
+/// decompiled text's header: the cases past its list are code the text
+/// lacks.
+///
+/// With `mov ecx, 1` between the byte compare and its `ja`, which the
+/// bound's trace does not follow, the table is read as far as the
+/// `eofmark` test allows: 2 of the 13 cases the guard lets through.
+#[test]
+fn a_table_shorter_than_its_guard_is_noted() {
+    let (p, jmp, cases) = dash_dispatch(&[0xb9, 0x01, 0x00, 0x00, 0x00]); // ASM: mov ecx,1
+    let a = Analysis::compute(&p);
+    assert_eq!(
+        a.jump_tables.get(&jmp).map(Vec::as_slice),
+        Some(&cases[..2])
+    );
+    let text = decompile(&p, &a, &Overlay::default(), TEXT).unwrap_or_default();
+    assert!(
+        text.contains(
+            "// note: the table jump at 0x401031 lists 2 of the 13 cases its guard at \
+             0x401024 admits; the rest are not in this text\n"
+        ),
+        "{text}"
+    );
+}
+
+/// A byte compared in memory and read again indexes the jump table itself:
+/// no byte table picks among its entries.
+///
+/// `cmp byte [rcx+B], 3; ja; movzx eax, byte [rcx+B]; jmp [rax*8+T]` reads
+/// the slot from `B` at any `rcx`, and the check bounds the byte, so all
+/// four slots of `T` are cases. Read as a pick of `B`'s first four bytes,
+/// all 2 here, the table named one case four times.
+#[test]
+fn a_byte_compared_and_read_again_is_no_pick() {
+    let mut code = vec![
+        0x80, 0x3c, 0x0d, 0x40, 0x20, 0x40, 0x00, 0x03, // ASM: cmp byte [rcx+0x402040],3
+        0x77, 0x16, // ASM: ja 0x401020
+        0x0f, 0xb6, 0x04, 0x0d, 0x40, 0x20, 0x40, 0x00, // ASM: movzx eax,byte [rcx+0x402040]
+        0xff, 0x24, 0xc5, 0x00, 0x20, 0x40,
+        0x00, // ASM: jmp qword [rax*8+0x402000]  (0x401012)
+    ];
+    code.resize(0x20, 0xcc);
+    code.extend_from_slice(&[0x31, 0xc0, 0xc3]); // ASM: xor eax,eax; ret
+    let mut cases = Vec::new();
+    let mut data = Vec::new();
+    for k in 0..4u8 {
+        let at = 0x40 + 0x10 * usize::from(k);
+        code.resize(at, 0xcc);
+        code.extend_from_slice(&[0xb8, k, 0, 0, 0, 0xc3]); // ASM: mov eax,k; ret
+        let case = TEXT + from_usize(at);
+        cases.push(case);
+        data.extend_from_slice(&case.to_le_bytes());
+    }
+    data.resize(0x40, 0);
+    data.extend_from_slice(&[2, 2, 2, 2]);
+    let a = Analysis::compute(&raw::image(Arch::X86_64, &code, &data));
+    assert_eq!(
+        a.jump_tables.get(&(TEXT + 0x12)),
+        Some(&cases),
+        "{:x?}",
+        a.jump_tables
+    );
+}
+
+/// The same holds for a table of offsets and a byte table a `lea` names.
+///
+/// `lea rdx, [B]; cmp byte [rdx+rax], 3; ja; movzx eax, byte [rdx+rax];
+/// movsxd rax, [r14+rax*4]` has the four slots of `r14`'s table as its
+/// cases, not the slots `B`'s first four bytes pick.
+#[test]
+fn a_byte_compared_in_a_static_table_and_read_again_is_no_pick() {
+    let mut code = vec![
+        0x48, 0x8d, 0x15, 0x39, 0x10, 0x00, 0x00, // ASM: lea rdx,[rip+0x1039] = 0x402040
+        0x4c, 0x8d, 0x35, 0xf2, 0x0f, 0x00, 0x00, // ASM: lea r14,[rip+0xff2] = 0x402000
+        0x48, 0x63, 0xc1, // ASM: movsxd rax,ecx
+        0x80, 0x3c, 0x02, 0x03, // ASM: cmp byte [rdx+rax],3
+        0x77, 0x19, // ASM: ja 0x401030
+        0x0f, 0xb6, 0x04, 0x02, // ASM: movzx eax,byte [rdx+rax]
+        0x49, 0x63, 0x04, 0x86, // ASM: movsxd rax,[r14+rax*4]
+        0x4c, 0x01, 0xf0, // ASM: add rax,r14
+        0xff, 0xe0, // ASM: jmp rax                  (0x401022)
+    ];
+    code.resize(0x30, 0xcc);
+    code.extend_from_slice(&[0x31, 0xc0, 0xc3]); // ASM: xor eax,eax; ret
+    let mut cases = Vec::new();
+    let mut data = Vec::new();
+    for k in 0..4u8 {
+        let at = 0x40 + 0x10 * usize::from(k);
+        code.resize(at, 0xcc);
+        code.extend_from_slice(&[0xb8, k, 0, 0, 0, 0xc3]); // ASM: mov eax,k; ret
+        let case = TEXT + from_usize(at);
+        cases.push(case);
+        data.extend_from_slice(&lo32(case.wrapping_sub(0x402000)).to_le_bytes());
+    }
+    data.resize(0x40, 0);
+    data.extend_from_slice(&[2, 2, 2, 2]);
+    let a = Analysis::compute(&raw::image(Arch::X86_64, &code, &data));
+    assert_eq!(
+        a.jump_tables.get(&(TEXT + 0x22)),
+        Some(&cases),
+        "{:x?}",
+        a.jump_tables
     );
 }
 

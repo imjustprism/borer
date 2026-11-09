@@ -246,6 +246,51 @@ impl Home {
     }
 }
 
+/// A memory operand no [`Home`] holds, one with an index register or an
+/// absolute or `rip`-relative address, by every part that says which bytes
+/// it reads.
+///
+/// gcc checks a byte in memory and then reads it again for the table:
+/// `cmp byte [rdx+rax], 0xc; ja default; movzx eax, byte [rdx+rax]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Cell {
+    /// The segment register the operand reads through.
+    segment: Register,
+    /// The base register, `None` for an absolute address.
+    base: Register,
+    /// The index register, `None` when the operand has none.
+    index: Register,
+    /// What the index is multiplied by: 1, 2, 4 or 8.
+    scale: u32,
+    /// The displacement, or the address a `rip`-relative operand names.
+    disp: u64,
+    /// The width read, in bytes.
+    width: usize,
+}
+
+impl Cell {
+    /// The memory operand `op` of `i`, when that operand is one.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction.
+    /// * `op` - The operand's position in `i`.
+    ///
+    /// # Returns
+    ///
+    /// The operand, or `None` when it is not in memory.
+    pub(super) fn of(i: &Instruction, op: u32) -> Option<Cell> {
+        (i.op_kind(op) == OpKind::Memory).then(|| Cell {
+            segment: i.memory_segment(),
+            base: i.memory_base(),
+            index: i.memory_index(),
+            scale: i.memory_index_scale(),
+            disp: i.memory_displacement64(),
+            width: i.memory_size().size(),
+        })
+    }
+}
+
 /// One check of a value the trace saw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Check {
@@ -257,6 +302,40 @@ struct Check {
     entries: u64,
     /// The check is a mask, which only bounds the value to its width.
     masked: bool,
+}
+
+impl Check {
+    /// The check `i` makes of `value`, when the path leaves its jump where
+    /// the value is small ([`below_on_path`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `at` - Position of `i` in the window.
+    /// * `value` - The value `i` compares.
+    /// * `i` - The candidate check.
+    /// * `jcc` - The jump that reads its flags.
+    /// * `next` - Address of the instruction the path reaches after `jcc`.
+    ///
+    /// # Returns
+    ///
+    /// The check, or `None` when `i` is no bound check ([`check_bound`])
+    /// or bounds the value only on the jump's other edge.
+    fn of(
+        at: usize,
+        value: Val,
+        i: &Instruction,
+        jcc: Option<&Instruction>,
+        next: u64,
+    ) -> Option<Check> {
+        let entries = check_bound(i, jcc)?;
+        jcc.is_some_and(|j| below_on_path(j, next))
+            .then_some(Check {
+                at,
+                value,
+                entries,
+                masked: false,
+            })
+    }
 }
 
 /// The values held along the instructions before a jump, and every check
@@ -271,6 +350,10 @@ struct Trace {
     held: FxHashMap<Home, Val>,
     /// Every check, in window order.
     bounds: Vec<Check>,
+    /// The memory operand the last instruction, or the jump after it,
+    /// compared, with the check that compare makes: a load of the same
+    /// operand next reads the value checked.
+    compared: Option<(Cell, Check)>,
     /// Incoming and opaque bases made so far, which keeps each one apart.
     fresh: u32,
 }
@@ -315,6 +398,10 @@ impl Trace {
     /// Applies one instruction; one the trace does not model leaves what it
     /// wrote unknown.
     ///
+    /// A compare of a memory operand no home holds checks the value a load
+    /// of the same operand reads right after the compare's jump, with
+    /// nothing in between ([`Cell`]); the check is recorded at that load.
+    ///
     /// # Arguments
     ///
     /// * `k` - Its position.
@@ -330,6 +417,8 @@ impl Trace {
         after: u64,
         info: &mut InstructionInfoFactory,
     ) {
+        let compared = self.compared.take();
+        self.compared = compared.filter(|_| i.is_jcc_short_or_near());
         if matches!(
             i.flow_control(),
             FlowControl::Call | FlowControl::IndirectCall
@@ -337,11 +426,7 @@ impl Trace {
             self.held.clear();
             return;
         }
-        let dst = if i.op_count() > 0 {
-            Home::of(i, 0)
-        } else {
-            None
-        };
+        let dst = (i.op_count() > 0).then(|| Home::of(i, 0)).flatten();
         let imm = (i.op_count() > 1 && is_imm(i.op1_kind())).then(|| {
             let bits = 8 * i.op0_register().size().max(i.memory_size().size()).max(1);
             let v = i.immediate(1);
@@ -358,14 +443,12 @@ impl Trace {
                     let off = v.off.wrapping_sub(imm.unwrap_or(0));
                     self.held.insert(h, Val { off, ..v });
                 }
-                if next.is_some_and(|j| below_on_path(j, after)) {
-                    self.bounds.push(Check {
-                        at: k,
-                        value: v,
-                        entries: check_bound(i, next).unwrap_or(0),
-                        masked: false,
-                    });
-                }
+                self.bounds.extend(Check::of(k, v, i, next, after));
+                return;
+            }
+            (Mnemonic::Cmp, None) => {
+                let v = self.unknown();
+                self.compared = Cell::of(i, 0).zip(Check::of(k, v, i, next, after));
                 return;
             }
             (
@@ -401,12 +484,16 @@ impl Trace {
                 return;
             }
             (Mnemonic::Mov | Mnemonic::Movzx | Mnemonic::Movsx | Mnemonic::Movsxd, Some(h)) => {
-                let v = match byte_table_index(i) {
-                    Some(at) => {
+                let v = match (compared, byte_table_index(i)) {
+                    (Some((cell, check)), _) if Cell::of(i, 1) == Some(cell) => {
+                        self.bounds.push(check);
+                        check.value
+                    }
+                    (_, Some(at)) => {
                         let at = self.read(Home::Reg(at));
                         self.intern(Base::Picked(at))
                     }
-                    None => match Home::of(i, 1) {
+                    _ => match Home::of(i, 1) {
                         Some(src) => self.read(src),
                         None => self.unknown(),
                     },
@@ -470,7 +557,10 @@ impl Trace {
 /// govern every path that joins it later, so the check nearest the load
 /// wins. A mask only bounds the index to its width, so it counts when no
 /// compare does: after `and cl, 0xf; cmp cl, 6; ja default; and eax, 0xf`
-/// the table has 7 entries, not 16.
+/// the table has 7 entries, not 16. A byte compared in memory and read
+/// again right after the jump is the value checked: after `cmp byte
+/// [rdx+rax], 0xc; ja default; movzx eax, byte [rdx+rax]` the table `eax`
+/// indexes has 13 entries.
 ///
 /// When nothing checks an index that came into the window from before it,
 /// the nearest compare of any value is taken as a loose guess: the two may
@@ -767,6 +857,56 @@ mod tests {
                 loose: true
             })
         );
+    }
+
+    /// A byte compared in memory and read again right after the compare's
+    /// jump is the value checked.
+    ///
+    /// dash's `readtoken1` checks `syntax[c]` against 12 and indexes its
+    /// 13-entry table with the byte it reads back; the `eofmark` test
+    /// further up bounds another value, and taking it as a guess read 2
+    /// entries.
+    #[test]
+    fn a_byte_compared_in_memory_bounds_its_reload() {
+        let code: &[u8] = &[
+            0x48, 0x83, 0xbd, 0x78, 0xff, 0xff, 0xff, 0x01, // ASM: cmp qword [rbp-0x88],1
+            0x0f, 0x87, 0x30, 0x04, 0x00, 0x00, // ASM: ja +0x430
+            0x4c, 0x8d, 0x35, 0x93, 0x78, 0x00, 0x00, // ASM: lea r14,[rip+X]
+            0x49, 0x8b, 0x17, // ASM: mov rdx,[r15]
+            0x49, 0x63, 0xc5, // ASM: movsxd rax,r13d
+            0x80, 0x3c, 0x02, 0x0c, // ASM: cmp byte [rdx+rax],0xc
+            0x77, 0x0e, // ASM: ja +0xe
+            0x0f, 0xb6, 0x04, 0x02, // ASM: movzx eax,byte [rdx+rax]
+            0x49, 0x63, 0x04, 0x86, // ASM: movsxd rax,[r14+rax*4]
+            0x4c, 0x01, 0xf0, // ASM: add rax,r14
+            0x3e, 0xff, 0xe0, // ASM: notrack jmp rax
+        ];
+        assert_eq!(bound(code), Some(13));
+    }
+
+    /// A reload of another width, or one after a write that may move the
+    /// operand, is not the byte compared, and bounds nothing.
+    #[test]
+    fn another_read_of_a_compared_operand_is_not_the_value_checked() {
+        let wide: &[u8] = &[
+            0x80, 0x3c, 0x02, 0x0c, // ASM: cmp byte [rdx+rax],0xc
+            0x77, 0x0d, // ASM: ja +0xd
+            0x8b, 0x04, 0x02, // ASM: mov eax,[rdx+rax]
+            0x49, 0x63, 0x04, 0x86, // ASM: movsxd rax,[r14+rax*4]
+            0x4c, 0x01, 0xf0, // ASM: add rax,r14
+            0xff, 0xe0, // ASM: jmp rax
+        ];
+        assert_eq!(bound(wide), None);
+        let moved: &[u8] = &[
+            0x80, 0x3c, 0x02, 0x0c, // ASM: cmp byte [rdx+rax],0xc
+            0x77, 0x12, // ASM: ja +0x12
+            0x49, 0x8b, 0x57, 0x08, // ASM: mov rdx,[r15+8]
+            0x0f, 0xb6, 0x04, 0x02, // ASM: movzx eax,byte [rdx+rax]
+            0x49, 0x63, 0x04, 0x86, // ASM: movsxd rax,[r14+rax*4]
+            0x4c, 0x01, 0xf0, // ASM: add rax,r14
+            0xff, 0xe0, // ASM: jmp rax
+        ];
+        assert_eq!(bound(moved), None);
     }
 
     /// A check of some other value bounds nothing: the index here is only
