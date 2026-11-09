@@ -290,7 +290,9 @@ impl Emulator<'_> {
     /// leans on to stage its payload are modeled with intent (a memory
     /// allocator hands out a fresh region, or the address a `VirtualAlloc`
     /// asks for, a module lookup returns the image base); the rest return
-    /// zero so the run continues and stops somewhere the output can name.
+    /// zero so the run continues and stops somewhere the output can name,
+    /// each recorded as answered by default ([`Emulator::defaulted`]) so a
+    /// report can say what it rests on.
     ///
     /// # Arguments
     ///
@@ -359,8 +361,11 @@ impl Emulator<'_> {
             || api == "RemoveVectoredExceptionHandler"
         {
             1
+        } else if let Some(rv) = self.neutralize(api) {
+            rv
         } else {
-            self.neutralize(api).unwrap_or_default()
+            self.defaulted.push(self.calls.len());
+            0
         };
         self.set_reg(Register::RAX, rv);
         self.calls.push(ApiCall {
@@ -561,7 +566,8 @@ impl Emulator<'_> {
     /// non-null hint, which the kernel is allowed to), `write` returns the
     /// count it was asked to write, and `exit`/`exit_group` end the program;
     /// every other number returns zero so the run continues, as an unlisted
-    /// Windows API does. Each serviced call is recorded in order with its
+    /// Windows API does, and is recorded as answered by default
+    /// ([`Emulator::defaulted`]). Each serviced call is recorded in order with its
     /// number, name and arguments ([`super::calls::decode_syscall_args`]), so a
     /// report names what the program asked the kernel for; it is not also
     /// one of the [`Emulator::neutralized`] answers, which a report lists
@@ -605,7 +611,10 @@ impl Emulator<'_> {
             }
             1 => rdx,
             60 | 231 => return Err(Stop::Exited),
-            _ => 0,
+            _ => {
+                self.defaulted.push(self.calls.len());
+                0
+            }
         };
         self.set_reg(Register::RAX, rv);
         self.calls.push(ApiCall {
@@ -648,5 +657,19 @@ impl Emulator<'_> {
     #[must_use]
     pub fn neutralized(&self) -> Vec<&str> {
         self.neutralized.iter().map(String::as_str).collect()
+    }
+
+    /// The APIs and syscalls this run answered with the default because
+    /// nothing models them, each returning zero, in name order.
+    #[must_use]
+    pub fn defaulted(&self) -> Vec<&str> {
+        super::calls::defaulted_names(&self.calls, &self.defaulted)
+    }
+
+    /// Which of the serviced calls ([`Emulator::api_calls`]) were answered
+    /// with the default, by index, in order.
+    #[must_use]
+    pub fn defaulted_calls(&self) -> &[usize] {
+        &self.defaulted
     }
 }

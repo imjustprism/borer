@@ -328,10 +328,38 @@ struct Machine {
     /// The names of the imports it called, in order.
     calls: Vec<String>,
     /// Each serviced call rendered as `api(args) -> ret`, in order: the
-    /// behavior trace the arguments decode to.
+    /// behavior trace the arguments decode to ([`call_lines`]).
     call_lines: Vec<String>,
+    /// The calls answered with the default because nothing models them,
+    /// by name, each once ([`Emulator::defaulted`]).
+    defaulted: Vec<String>,
+    /// The function's block starts the run executed, in address order.
+    reached: Vec<u64>,
     /// The traced instructions, empty when the run was not traced.
     trace: Vec<String>,
+}
+
+/// The serviced calls as a report lists them: `api(args) -> ret`, and
+/// `(not modeled)` after a call the machine answered with the default, so
+/// a result resting on it says so.
+///
+/// # Arguments
+///
+/// * `calls` - The serviced calls, in order.
+/// * `defaulted` - The indexes of those answered by default, in order.
+fn call_lines(calls: &[ApiCall], defaulted: &[usize]) -> Vec<String> {
+    calls
+        .iter()
+        .enumerate()
+        .map(|(k, c)| {
+            let line = c.call_text();
+            if defaulted.binary_search(&k).is_ok() {
+                format!("{line} (not modeled)")
+            } else {
+                line
+            }
+        })
+        .collect()
 }
 
 /// The register value a return of `bits` hands back: `rax`'s low bits,
@@ -426,6 +454,9 @@ fn run_machine(
     let sp = emu.register("rsp")?;
     let floats = float_mask(input.iter().map(|a| matches!(a, Arg::Float(..))));
     pass.place(&mut emu, sp, values, floats);
+    if let Some(f) = a.function(entry) {
+        emu.watch_starts(f.blocks.iter().map(|b| b.start));
+    }
     let run = emu.run(entry);
     let word = p.arch.bitness().unwrap_or(64);
     let value = matches!(run.stop, Stop::Returned)
@@ -448,7 +479,9 @@ fn run_machine(
         float,
         buffers,
         calls: emu.api_names().iter().map(|s| (*s).to_owned()).collect(),
-        call_lines: emu.api_calls().iter().map(ApiCall::call_text).collect(),
+        call_lines: call_lines(emu.api_calls(), emu.defaulted_calls()),
+        defaulted: emu.defaulted().into_iter().map(str::to_owned).collect(),
+        reached: emu.reached(),
         trace: emu.trace(),
     })
 }
@@ -512,7 +545,9 @@ fn run_a64(
         float: None,
         buffers,
         calls: Vec::new(),
-        call_lines: emu.api_calls().iter().map(ApiCall::call_text).collect(),
+        call_lines: call_lines(emu.api_calls(), emu.defaulted_calls()),
+        defaulted: emu.defaulted().into_iter().map(str::to_owned).collect(),
+        reached: Vec::new(),
         trace: emu.trace(),
     })
 }
@@ -549,12 +584,22 @@ struct Outcome {
     /// The imports and syscalls the binary's run serviced, each rendered
     /// `api(args) -> ret`, in order.
     call_lines: Vec<String>,
+    /// The calls the binary's run answered with the default, by name.
+    defaulted: Vec<String>,
+    /// The function's block starts the binary's run executed, in order.
+    reached: Vec<u64>,
 }
 
 impl Outcome {
     /// Bytes the outcome holds, for the memo's budget.
     fn bytes(&self) -> usize {
-        self.stop.capacity()
+        self.reached.capacity() * size_of::<u64>()
+            + self
+                .defaulted
+                .iter()
+                .map(|n| n.capacity() + size_of::<String>())
+                .sum::<usize>()
+            + self.stop.capacity()
             + self
                 .writes
                 .iter()
@@ -906,6 +951,8 @@ fn run_one(
             verdict: Verdict::Unchecked(None, "nothing ran".to_owned()),
             text_steps: 0,
             call_lines: Vec::new(),
+            defaulted: Vec::new(),
+            reached: Vec::new(),
         };
     };
     let writes = buffer_writes(input, &m.buffers);
@@ -924,6 +971,8 @@ fn run_one(
         verdict,
         text_steps,
         call_lines: m.call_lines,
+        defaulted: m.defaulted,
+        reached: m.reached,
     }
 }
 
@@ -968,7 +1017,10 @@ fn run_one(
 /// The table, a line per input that differs or could not be checked, when
 /// one differs what the structure check and the lifter's check say of the
 /// function, and the imported APIs and syscalls the runs serviced, each
-/// `api(args) -> ret` with its arguments decoded by the type library.
+/// `api(args) -> ret` with its arguments decoded by the type library. A
+/// call nothing models did nothing and answered zero: its line says `(not
+/// modeled)` and a note before the table names it, since a result past it
+/// may not be the program's.
 ///
 /// # Errors
 ///
@@ -1033,6 +1085,11 @@ pub fn run_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<Str
             )
         })
         .collect();
+    notes.extend(
+        not_modeled(outcomes.iter().map(|x| &**x), NOT_MODELED_SHOWN).map(|names| {
+            format!("not modeled: {names}: each did nothing and answered 0, so a result past such a call may not be the program's")
+        }),
+    );
     Ok(render_runs(
         p,
         a,
@@ -1043,6 +1100,39 @@ pub fn run_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<Str
         &outcomes,
         &notes,
     ))
+}
+
+/// Names a report gives the calls its runs answered with the default before
+/// the rest are counted.
+const NOT_MODELED_SHOWN: usize = 8;
+
+/// The calls a set of runs answered with the default because nothing
+/// models them, as a report spells them: each once, in name order, the
+/// first `shown` named and the rest counted.
+///
+/// # Arguments
+///
+/// * `runs` - The runs' outcomes ([`Outcome::defaulted`]).
+/// * `shown` - How many names to spell.
+///
+/// # Returns
+///
+/// The names joined with commas, or `None` when every call was modeled.
+fn not_modeled<'o>(runs: impl IntoIterator<Item = &'o Outcome>, shown: usize) -> Option<String> {
+    let names: BTreeSet<&str> = runs
+        .into_iter()
+        .flat_map(|x| x.defaulted.iter().map(String::as_str))
+        .collect();
+    if names.is_empty() {
+        return None;
+    }
+    let named: Vec<&str> = names.iter().copied().take(shown).collect();
+    let more = names.len() - named.len();
+    Some(if more > 0 {
+        format!("{} and {more} more", named.join(", "))
+    } else {
+        named.join(", ")
+    })
 }
 
 /// What each buffer argument holds after a run, only the ones the run

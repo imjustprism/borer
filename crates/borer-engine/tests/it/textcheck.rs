@@ -1645,3 +1645,111 @@ fn a_thread_block_field_runs_where_the_binary_reads_it() {
         "{text}"
     );
 }
+
+/// A function returning `GetTickCount() + 1` through an import slot at the
+/// data page, an import nothing models: it answers zero on both sides.
+fn tick_plus_one() -> Program {
+    use borer_engine::program::{Symbol, SymbolKind};
+    let code = [
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp,0x28
+        0xff, 0x15, 0xf6, 0x0f, 0x00, 0x00, // ASM: call [rip+0xff6]
+        0xff, 0xc0, // ASM: inc eax
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp,0x28
+        0xc3, // ASM: ret
+    ];
+    let mut p = program(&code, &[]);
+    p.symbols = vec![Symbol {
+        name: "KERNEL32.dll!GetTickCount".to_owned(),
+        addr: TEXT + 0x1000,
+        kind: SymbolKind::Import,
+    }];
+    p
+}
+
+/// A run says what its result rests on: the line of a call nothing models
+/// reads `(not modeled)`, and a note before the table names the call.
+///
+/// # Panics
+///
+/// When the call line or the note is missing.
+#[test]
+fn a_run_names_the_calls_nothing_models() {
+    use borer_engine::analysis::render::run_tsv;
+    let p = tick_plus_one();
+    let a = Analysis::compute(&p);
+    let out = run_tsv(&p, &a, &Overlay::default(), "0x1000/").expect("runs");
+    assert!(out.contains("GetTickCount() -> 0x0 (not modeled)"), "{out}");
+    assert!(
+        out.contains("\n# not modeled: GetTickCount: each did nothing and answered 0"),
+        "{out}"
+    );
+}
+
+/// certify names the calls its inputs rested on that nothing models, on
+/// its own line and in a page's last column, and says how far the inputs
+/// reached: here every block, which a page writes as `N/N`.
+///
+/// # Panics
+///
+/// When a line or a column is missing, or a block reads as unreached.
+#[test]
+fn certify_names_the_calls_nothing_models() {
+    use borer_engine::analysis::render::certify_tsv;
+    let p = tick_plus_one();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let one = certify_tsv(&p, &a, &o, "0x1000,count=2").expect("an answer");
+    assert!(
+        one.contains("\nnot modeled\tGetTickCount: each did nothing and answered 0"),
+        "{one}"
+    );
+    let reached = one
+        .lines()
+        .find_map(|l| l.strip_prefix("reached\t"))
+        .expect("a reached line");
+    let (got, of) = reached
+        .strip_suffix(" blocks")
+        .and_then(|r| r.split_once(" of "))
+        .expect("N of M blocks");
+    assert_eq!(got, of, "{one}");
+    let page = certify_tsv(&p, &a, &o, "*,count=2").expect("a page");
+    let row = page
+        .lines()
+        .find(|l| l.contains("\t0x1000\t"))
+        .expect("the function's row");
+    assert!(
+        row.ends_with(&format!("\t{got}/{of}\tGetTickCount")),
+        "{page}"
+    );
+}
+
+/// An agreement is only as wide as the inputs went: the branch no drawn
+/// input takes (`a1 == 0x12345678`) is named as never reached, and the
+/// grade says how many blocks the agreement covers.
+///
+/// # Panics
+///
+/// When the block is not named or the grade claims the whole function.
+#[test]
+fn certify_names_the_blocks_its_inputs_never_reach() {
+    use borer_engine::analysis::render::certify_tsv;
+    let code = [
+        0x81, 0xf9, 0x78, 0x56, 0x34, 0x12, // ASM: cmp ecx,0x12345678
+        0x75, 0x06, // ASM: jne 0x100e
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax,1
+        0xc3, // ASM: ret
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xc3, // ASM: ret
+    ];
+    let p = program(&code, &[]);
+    let a = Analysis::compute(&p);
+    let one = certify_tsv(&p, &a, &Overlay::default(), "0x1000,count=8").expect("an answer");
+    assert!(
+        one.contains("\nreached\t2 of 3 blocks; never reached: 0x1008\n"),
+        "{one}"
+    );
+    assert!(
+        one.contains("\ngrade\tagrees\tevery input checked agrees (they reached 2 of 3 blocks)"),
+        "{one}"
+    );
+}

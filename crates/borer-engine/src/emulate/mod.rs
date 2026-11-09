@@ -25,6 +25,7 @@ pub mod calls;
 mod fpu;
 mod loader;
 mod operands;
+mod reach;
 pub mod rv;
 mod sse;
 mod store;
@@ -368,6 +369,13 @@ pub struct Emulator<'a> {
     skipped: usize,
     /// Anti-analysis APIs answered benignly, by name.
     neutralized: BTreeSet<String>,
+    /// The serviced calls answered with the default, by their index in
+    /// `calls`: nothing models them, so each returned zero
+    /// ([`Emulator::defaulted`]).
+    defaulted: Vec<usize>,
+    /// The block starts a run is watched at, sorted, each with whether it
+    /// executed ([`Emulator::watch_starts`]); empty unless asked for.
+    watched: Vec<(u64, bool)>,
     /// Bytes written, in order, up to [`HISTORY_MAX`].
     history: Vec<Written>,
     /// The cycle counter `rdtsc` reads, advanced a little per read.
@@ -777,6 +785,8 @@ impl<'a> Emulator<'a> {
             fill: None,
             skipped: 0,
             neutralized: BTreeSet::new(),
+            defaulted: Vec::new(),
+            watched: Vec::new(),
             history: Vec::new(),
             ticks: 0,
             stop_at: None,
@@ -1495,9 +1505,7 @@ impl<'a> Emulator<'a> {
             }
             self.last_ip = ip;
             self.steps += 1;
-            if self.profiling && ip != self.fall_through {
-                *self.hits.entry(ip).or_insert(0) += 1;
-            }
+            self.note_step(ip);
             let watched = self.trace_cap > 0;
             let before = if watched { self.regs } else { [0; 16] };
             self.step_writes.clear();

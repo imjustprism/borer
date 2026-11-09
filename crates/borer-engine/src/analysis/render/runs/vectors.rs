@@ -199,7 +199,14 @@ pub fn check_generated(
     seed: u64,
     budget: usize,
 ) -> Result<Vec<(String, Verdict)>, String> {
-    generated_in(p, a, o, entry, (count, seed, budget), Mode::Machine)
+    verdicts(generated_in(
+        p,
+        a,
+        o,
+        entry,
+        (count, seed, budget),
+        Mode::Machine,
+    ))
 }
 
 /// Checks a function's printed text, read as ISO C, against the binary on
@@ -238,10 +245,39 @@ pub fn check_generated_iso(
     seed: u64,
     budget: usize,
 ) -> Result<Vec<(String, Verdict)>, String> {
-    generated_in(p, a, o, entry, (count, seed, budget), Mode::Iso)
+    verdicts(generated_in(
+        p,
+        a,
+        o,
+        entry,
+        (count, seed, budget),
+        Mode::Iso,
+    ))
 }
 
-/// [`check_generated`] with the text read in one [`Mode`].
+/// Each input's verdict alone, from the outcomes [`generated_in`] gives.
+///
+/// # Arguments
+///
+/// * `outcomes` - Each input as a row spells it, with its outcome, or why
+///   the check did not run.
+///
+/// # Errors
+///
+/// Why the check did not run, passed on from [`generated_in`].
+fn verdicts(
+    outcomes: Result<Vec<(String, Outcome)>, String>,
+) -> Result<Vec<(String, Verdict)>, String> {
+    outcomes.map(|rows| {
+        rows.into_iter()
+            .map(|(input, x)| (input, x.verdict))
+            .collect()
+    })
+}
+
+/// [`check_generated`] with the text read in one [`Mode`], each input's
+/// whole outcome kept: its verdict, the calls it rested on and the blocks
+/// it reached.
 ///
 /// # Arguments
 ///
@@ -256,14 +292,14 @@ pub fn check_generated_iso(
 /// # Errors
 ///
 /// As [`check_generated`].
-fn generated_in(
+pub(super) fn generated_in(
     p: &Program,
     a: &Analysis,
     o: &Overlay,
     entry: u64,
     (count, seed, budget): (usize, u64, usize),
     mode: Mode,
-) -> Result<Vec<(String, Verdict)>, String> {
+) -> Result<Vec<(String, Outcome)>, String> {
     let text = decompile_named(p, a, o, entry).ok_or("the function does not decompile")?;
     let word = u8::try_from(p.arch.bitness().unwrap_or(64)).unwrap_or(64);
     let sig = printed(&text, word)?;
@@ -284,8 +320,10 @@ fn generated_in(
         .iter()
         .map(|input| {
             let shown: Vec<String> = input.iter().map(Arg::shown).collect();
-            let outcome = run_one(p, a, &shared, entry, input, budget);
-            (shown.join(" "), outcome.verdict)
+            (
+                shown.join(" "),
+                run_one(p, a, &shared, entry, input, budget),
+            )
         })
         .collect())
 }

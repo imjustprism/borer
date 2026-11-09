@@ -7,14 +7,22 @@
 use std::fmt::Write as _;
 
 use super::blame::{BLAME_STEPS, function_count_steps, run_option};
-use super::vectors::VERIFY_SEED;
-use super::{Verdict, check_generated_iso, within_total};
+use super::vectors::{VERIFY_SEED, generated_in};
+use super::{NOT_MODELED_SHOWN, Outcome, Verdict, not_modeled, within_total};
+use crate::analysis::decompile::interp::Mode;
 use crate::analysis::decompile::text_check;
 use crate::analysis::render::*;
 use crate::text::one_line;
 
 /// Most reasons an input went unchecked the answer lists.
 const REASONS_SHOWN: usize = 3;
+
+/// Block starts the answer names as never reached before the rest are
+/// counted.
+const NEVER_SHOWN: usize = 6;
+
+/// Calls answered by default a page row names before the rest are counted.
+const ROW_NAMES: usize = 3;
 
 /// Functions a page of [`certify_many`] grades unless it says.
 const PAGE_LIMIT: usize = 32;
@@ -37,8 +45,12 @@ const NOTE_MAX: usize = 100;
 /// agreeing, differing, or unchecked with a reason, counted apart so an
 /// unchecked input never reads as agreement. The grade is `differs` when
 /// either check is contradicted, `agrees` when at least one input was
-/// checked and nothing was contradicted, else `unchecked`. A spec opening
-/// with `*` grades a page of functions instead ([`certify_many`]).
+/// checked and nothing was contradicted, else `unchecked`. An agreement is
+/// only as wide as the inputs went, so the answer says how many of the
+/// function's blocks they reached and which they never did, and names the
+/// calls the runs answered with the default because nothing models them:
+/// the text was checked against that answer only. A spec opening with `*`
+/// grades a page of functions instead ([`certify_many`]).
 ///
 /// # Arguments
 ///
@@ -53,7 +65,9 @@ const NOTE_MAX: usize = 100;
 /// # Returns
 ///
 /// A header, a `lift` and a `text` line, the commonest reasons inputs went
-/// unchecked, the first input that differs, and the `grade` line.
+/// unchecked, the first input that differs, the `reached` line, a `not
+/// modeled` line when a run rested on a call nothing models, and the
+/// `grade` line.
 ///
 /// # Errors
 ///
@@ -87,10 +101,10 @@ pub fn certify_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result
         }
     };
     let runs = x86_only(p, "the text check")
-        .and_then(|()| check_generated_iso(p, a, o, entry, count, VERIFY_SEED, budget));
+        .and_then(|()| generated_in(p, a, o, entry, (count, VERIFY_SEED, budget), Mode::Iso));
     let tally = match &runs {
         Ok(runs) => {
-            let tally = Tally::of(runs);
+            let tally = Tally::of(runs, &block_starts(a, entry));
             let _ = writeln!(
                 out,
                 "text\t{} of {} inputs agree as ISO C, {} unchecked, {} differ (seed {VERIFY_SEED}, {budget} steps each)",
@@ -104,6 +118,13 @@ pub fn certify_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result
             }
             if let Some((input, line, what)) = tally.first {
                 let _ = writeln!(out, "differs\t{input}\t{line}\t{what}");
+            }
+            let _ = writeln!(out, "reached\t{}", tally.reach());
+            if let Some(names) = not_modeled(runs.iter().map(|(_, x)| x), NOT_MODELED_SHOWN) {
+                let _ = writeln!(
+                    out,
+                    "not modeled\t{names}: each did nothing and answered 0 wherever the binary or the text called it, so what follows them was checked against that answer only"
+                );
             }
             tally
         }
@@ -131,19 +152,27 @@ struct Tally<'r> {
     /// The first input that differs: its arguments, the line and what
     /// differs.
     first: Option<(&'r str, usize, &'r str)>,
+    /// The function's blocks.
+    blocks: usize,
+    /// Its block starts no input's run of the binary executed, in address
+    /// order.
+    never: Vec<u64>,
 }
 
 impl<'r> Tally<'r> {
-    /// Counts each input's verdict.
+    /// Counts each input's verdict and the blocks the inputs reached.
     ///
     /// # Arguments
     ///
-    /// * `runs` - Each input's arguments and the text's verdict on it.
-    fn of(runs: &'r [(String, Verdict)]) -> Self {
+    /// * `runs` - Each input's arguments and its outcome.
+    /// * `starts` - The function's block starts, in address order.
+    fn of(runs: &'r [(String, Outcome)], starts: &[u64]) -> Self {
         let mut t = Tally::default();
         let mut why: BTreeMap<&str, usize> = BTreeMap::new();
-        for (input, v) in runs {
-            match v {
+        let mut reached = BTreeSet::new();
+        for (input, x) in runs {
+            reached.extend(x.reached.iter().copied());
+            match &x.verdict {
                 Verdict::Agrees => t.agree += 1,
                 Verdict::Unchecked(_, reason) => {
                     t.unchecked += 1;
@@ -158,33 +187,86 @@ impl<'r> Tally<'r> {
         }
         t.reasons = why.into_iter().collect();
         t.reasons.sort_by(|x, y| y.1.cmp(&x.1).then(x.0.cmp(y.0)));
+        t.blocks = starts.len();
+        t.never = starts
+            .iter()
+            .copied()
+            .filter(|s| !reached.contains(s))
+            .collect();
         t
+    }
+
+    /// How far the inputs reached: `N of M blocks`, and the first block
+    /// starts they never reached.
+    fn reach(&self) -> String {
+        let mut line = format!(
+            "{} of {} blocks",
+            self.blocks - self.never.len(),
+            self.blocks
+        );
+        if !self.never.is_empty() {
+            let named: Vec<String> = self
+                .never
+                .iter()
+                .take(NEVER_SHOWN)
+                .map(|s| format!("{s:#x}"))
+                .collect();
+            let _ = write!(line, "; never reached: {}", named.join(", "));
+            if self.never.len() > NEVER_SHOWN {
+                let _ = write!(line, " and {} more", self.never.len() - NEVER_SHOWN);
+            }
+        }
+        line
     }
 
     /// The grade and what it means: `differs` when the lift or an input is
     /// contradicted, `agrees` when an input was checked, else `unchecked`.
+    /// An agreement over inputs that left blocks unreached says how many
+    /// they reached.
     ///
     /// # Arguments
     ///
     /// * `lift_wrong` - Whether the binary contradicts a lifted block.
-    fn grade(&self, lift_wrong: bool) -> (&'static str, &'static str) {
+    fn grade(&self, lift_wrong: bool) -> (&'static str, String) {
         if lift_wrong || self.differ > 0 {
             (
                 "differs",
-                "the binary contradicts the decompilation where the lines above say",
+                "the binary contradicts the decompilation where the lines above say".to_owned(),
             )
         } else if self.agree > 0 {
+            let over = if self.never.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " (they reached {} of {} blocks)",
+                    self.blocks - self.never.len(),
+                    self.blocks
+                )
+            };
             (
                 "agrees",
-                "every input checked agrees and no lifted block is contradicted",
+                format!("every input checked agrees{over} and no lifted block is contradicted"),
             )
         } else {
             (
                 "unchecked",
-                "no input was checked, so nothing is claimed of the text",
+                "no input was checked, so nothing is claimed of the text".to_owned(),
             )
         }
     }
+}
+
+/// A function's block starts, in address order; empty when no function
+/// starts at `entry`.
+///
+/// # Arguments
+///
+/// * `a` - The analysis.
+/// * `entry` - The function's entry.
+fn block_starts(a: &Analysis, entry: u64) -> Vec<u64> {
+    a.function(entry)
+        .map(|f| f.blocks.iter().map(|b| b.start).collect())
+        .unwrap_or_default()
 }
 
 /// Grades a page of functions as [`certify_tsv`] grades one, a row each.
@@ -195,7 +277,8 @@ impl<'r> Tally<'r> {
 /// unless the spec says. A row's note is the first lifted statement the
 /// binary contradicts, then the first input that differs, else the
 /// commonest reason inputs went unchecked, else why the text check did not
-/// run.
+/// run. The two last columns say how far the inputs reached and what they
+/// rested on that nothing models ([`reach_columns`]).
 ///
 /// # Arguments
 ///
@@ -248,12 +331,12 @@ fn certify_many(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<St
         |(), (entry, name)| {
             let lift = text_check(p, a, o, *entry);
             let disagree = lift.as_ref().as_ref().and_then(|c| c.disagree.first());
-            let runs = x86
-                .clone()
-                .and_then(|()| check_generated_iso(p, a, o, *entry, count, VERIFY_SEED, budget));
+            let runs = x86.clone().and_then(|()| {
+                generated_in(p, a, o, *entry, (count, VERIFY_SEED, budget), Mode::Iso)
+            });
             let (tally, note) = match &runs {
                 Ok(runs) => {
-                    let tally = Tally::of(runs);
+                    let tally = Tally::of(runs, &block_starts(a, *entry));
                     let note = tally.first.map_or_else(
                         || tally.reasons.first().map_or("", |r| r.0).to_owned(),
                         |(input, line, what)| differs_note(input, line, what),
@@ -271,8 +354,11 @@ fn certify_many(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<St
             (
                 grade,
                 format!(
-                    "{name}\t{entry:#x}\t{grade}\t{}\t{}\t{}\t{note}\n",
-                    tally.agree, tally.unchecked, tally.differ
+                    "{name}\t{entry:#x}\t{grade}\t{}\t{}\t{}\t{note}\t{}\n",
+                    tally.agree,
+                    tally.unchecked,
+                    tally.differ,
+                    reach_columns(&runs, &tally)
                 ),
             )
         },
@@ -280,7 +366,7 @@ fn certify_many(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<St
     let rows: Vec<(&str, String)> = rows.into_iter().flatten().collect();
     let tally_of = |g: &str| rows.iter().filter(|(grade, _)| *grade == g).count();
     let mut out = format!(
-        "# certify: {} agrees, {} unchecked, {} differs of {} functions graded, {count} inputs each (seed {VERIFY_SEED}, {budget} steps each); agreement is evidence, not proof\n# function\tentry\tgrade\tagree\tunchecked\tdiffer\tnote\n",
+        "# certify: {} agrees, {} unchecked, {} differs of {} functions graded, {count} inputs each (seed {VERIFY_SEED}, {budget} steps each); agreement is evidence, not proof\n# function\tentry\tgrade\tagree\tunchecked\tdiffer\tnote\treached\tnot modeled\n",
         tally_of("agrees"),
         tally_of("unchecked"),
         tally_of("differs"),
@@ -296,6 +382,35 @@ fn certify_many(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<St
         matching.len()
     );
     Ok(out)
+}
+
+/// Returns a page row's last two columns, how far its inputs went.
+///
+/// The first is the function's blocks the inputs reached, as
+/// `reached/blocks`; the second the calls the binary's runs answered with
+/// the default because nothing models them, at most [`ROW_NAMES`] named.
+///
+/// # Arguments
+///
+/// * `runs` - Each input with its outcome, or why the text check did not
+///   run.
+/// * `tally` - What the inputs found.
+///
+/// # Returns
+///
+/// The two columns, tab-separated; `-` for each when the check did not
+/// run, and for the second when every call was modeled.
+fn reach_columns(runs: &Result<Vec<(String, Outcome)>, String>, tally: &Tally<'_>) -> String {
+    let Ok(runs) = runs else {
+        return "-\t-".to_owned();
+    };
+    let names =
+        not_modeled(runs.iter().map(|(_, x)| x), ROW_NAMES).unwrap_or_else(|| "-".to_owned());
+    format!(
+        "{}/{}\t{names}",
+        tally.blocks - tally.never.len(),
+        tally.blocks
+    )
 }
 
 /// A page row's note for the first input that differs: the line and what

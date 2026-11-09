@@ -204,6 +204,22 @@ pub(super) fn decode_api_args(
         .collect()
 }
 
+/// The names of the calls a run answered with the default, each once, in
+/// name order: what the run rested on that nothing models.
+///
+/// # Arguments
+///
+/// * `calls` - The serviced calls, in order.
+/// * `defaulted` - The indexes in `calls` of those answered by default.
+pub(super) fn defaulted_names<'c>(calls: &'c [ApiCall], defaulted: &[usize]) -> Vec<&'c str> {
+    let names: std::collections::BTreeSet<&str> = defaulted
+        .iter()
+        .filter_map(|&k| calls.get(k))
+        .map(|c| c.api.as_str())
+        .collect();
+    names.into_iter().collect()
+}
+
 /// Whether the type library declares a function to return nothing.
 ///
 /// # Arguments

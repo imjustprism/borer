@@ -298,6 +298,9 @@ pub struct Machine<'a> {
     /// The Linux syscalls the run serviced, in order, each with its decoded
     /// arguments and result: what an ELF asked the kernel for.
     calls: Vec<ApiCall>,
+    /// The syscalls answered with the default, by their index in `calls`:
+    /// nothing models them, so each returned zero ([`Machine::defaulted`]).
+    defaulted: Vec<usize>,
     /// The cancel flag in force where the machine was made, looked at
     /// every [`super::CANCEL_EVERY`] steps.
     cancel: Option<crate::cancel::Cancel>,
@@ -347,6 +350,7 @@ impl<'a> Machine<'a> {
             history: Vec::new(),
             last_ip: 0,
             calls: Vec::new(),
+            defaulted: Vec::new(),
             cancel: crate::cancel::Cancel::current(),
         })
     }
@@ -593,6 +597,20 @@ impl<'a> Machine<'a> {
     #[must_use]
     pub fn api_names(&self) -> Vec<&str> {
         self.calls.iter().map(|c| c.api.as_str()).collect()
+    }
+
+    /// The syscalls this run answered with the default because nothing
+    /// models them, each returning zero, in name order.
+    #[must_use]
+    pub fn defaulted(&self) -> Vec<&str> {
+        calls::defaulted_names(&self.calls, &self.defaulted)
+    }
+
+    /// Which of the serviced syscalls ([`Machine::api_calls`]) were
+    /// answered with the default, by index, in order.
+    #[must_use]
+    pub fn defaulted_calls(&self) -> &[usize] {
+        &self.defaulted
     }
 
     /// Runs from `entry` until it returns, exhausts the budget, or stops.
@@ -918,7 +936,8 @@ impl<'a> Machine<'a> {
     /// `svc #0`: a Linux system call, modeled the way the x86 emulator
     /// models one ([`super::Emulator::linux_syscall`]): the exit numbers end
     /// the run, `write` returns its count, and every other number returns
-    /// zero so the run continues. Each is recorded in order with its number,
+    /// zero so the run continues, recorded as answered by default
+    /// ([`Machine::defaulted`]). Each is recorded in order with its number,
     /// name and arguments ([`calls::decode_syscall_args`]), so an ELF's
     /// behavior trace names what it asked the kernel for.
     ///
@@ -952,6 +971,7 @@ impl<'a> Machine<'a> {
         let rv = if nr == 64 {
             self.x.get(2).copied().unwrap_or(0)
         } else {
+            self.defaulted.push(self.calls.len());
             0
         };
         if let Some(x0) = self.x.first_mut() {

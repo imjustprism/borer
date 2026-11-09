@@ -306,3 +306,73 @@ fn a_memset_fills_its_destination_with_its_byte() {
     want.push(Some(0xcc));
     assert_eq!(filled, want);
 }
+
+/// Where [`slot_image`]'s import slot sits.
+const SLOT: u64 = 0x3000;
+
+/// Where [`slot_image`]'s writable data starts.
+const DATA: u64 = 0x2000;
+
+/// A raw x64 image whose code at `0x1000` calls one import through its
+/// slot and returns what the import left in `rax`; a test sets the
+/// arguments in the registers the format's convention reads them from.
+///
+/// # Arguments
+///
+/// * `format` - The format, which picks the convention (PE: `rcx`, `rdx`,
+///   `r8`; ELF: `rdi`, `rsi`, `rdx`) and the type library's platform.
+/// * `name` - The import, as `dll!name`.
+fn slot_image(format: BinaryFormat, name: &str) -> Program {
+    let mut bytes = vec![0xccu8; 0x4000];
+    let code: &[u8] = &[
+        0x48, 0xb8, 0x00, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // ASM: movabs rax,0x3000
+        0x48, 0x8b, 0x00, // ASM: mov rax,[rax]
+        0xff, 0xd0, // ASM: call rax
+        0xc3, // ASM: ret
+    ];
+    bytes[0x1000..0x1000 + code.len()].copy_from_slice(code);
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0,
+        Some(0x1000),
+        vec![
+            Section::mapped(".text", 0x1000, 0x1000, 0x1000, false, true),
+            Section::mapped(".data", DATA, DATA, 0x2000, true, false),
+        ],
+    );
+    p.format = format;
+    p.symbols = vec![Symbol {
+        name: name.to_owned(),
+        addr: SLOT,
+        kind: SymbolKind::Import,
+    }];
+    p
+}
+
+/// A call nothing models is recorded as answered by default, by its index
+/// among the serviced calls, and a syscall nothing models the same way; a
+/// call the emulator models is not.
+#[test]
+fn calls_nothing_models_are_recorded_as_answered_by_default() {
+    let p = createfilew_image();
+    let mut emu = Emulator::new(&p, 1000).expect("x64 emulates");
+    emu.install_imports();
+    assert_eq!(emu.run(0x1000).stop, Stop::Returned);
+    assert_eq!(emu.defaulted(), ["CreateFileW"]);
+    assert_eq!(emu.defaulted_calls(), [0]);
+    let p = open_syscall_image();
+    let mut emu = Emulator::new(&p, 1000).expect("x64 emulates");
+    emu.install_imports();
+    assert_eq!(emu.run(0x1000).stop, Stop::Returned);
+    assert_eq!(emu.defaulted(), ["open"]);
+    let p = slot_image(BinaryFormat::Pe, "msvcrt.dll!memset");
+    let mut emu = Emulator::new(&p, 1000).expect("x64 emulates");
+    emu.install_imports();
+    assert!(emu.set_register("rcx", DATA));
+    assert!(emu.set_register("rdx", 0x41));
+    assert!(emu.set_register("r8", 4));
+    assert_eq!(emu.run(0x1000).stop, Stop::Returned);
+    assert_eq!(emu.api_names(), ["memset"]);
+    assert!(emu.defaulted().is_empty(), "{:?}", emu.defaulted());
+}
