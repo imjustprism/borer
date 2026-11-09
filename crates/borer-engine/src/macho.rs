@@ -221,6 +221,9 @@ pub(crate) fn load(file: &[u8], mach: &Mach<'_>) -> anyhow::Result<Loaded> {
 /// last segment: the symbol and string tables (an object file has no other
 /// home for them), the dynamic symbol tables, the dyld information, each
 /// `linkedit_data_command`'s data, and each section's relocation entries.
+/// A segment's sections stop at the first the file cannot hold: the reader
+/// counts `nsects`, a 32-bit count from the file, and fails every later
+/// one at the same place without stopping.
 ///
 /// # Arguments
 ///
@@ -233,8 +236,7 @@ fn image_end(m: &MachO<'_>) -> u64 {
     let relocations = m
         .segments
         .sections()
-        .flatten()
-        .filter_map(Result::ok)
+        .flat_map(|s| s.map_while(Result::ok))
         .map(|(s, _)| at(s.reloff, u64::from(s.nreloc) * RELOCATION));
     m.load_commands
         .iter()
