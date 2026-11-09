@@ -624,6 +624,62 @@ fn dwarf_local_names_reach_the_decompiled_text() {
     );
 }
 
+/// A function whose entry has no children takes no parameter of the
+/// entries after it, and its callers pass it none.
+///
+/// iproute2's `is_json_context` is `bool (void)`; the abstract instance of
+/// an inlined function that follows it in the unit states `t` and `key`
+/// (abbreviations: 1 a childless subprogram with a name and an address, 2
+/// a subprogram with children and a name only, 3 a named parameter). The
+/// reader kept the childless function open and gave it both, so a caller
+/// passed it `rdi` and `rsi`, which nothing set.
+#[test]
+fn a_function_with_no_children_takes_no_later_parameters() {
+    use crate::elfgen::{self, AX, EM_X86_64, ET_EXEC, PROGBITS, Sec};
+    let mut text = vec![0xccu8; 0x20];
+    text[..6].copy_from_slice(&[
+        0xe8, 0x0b, 0x00, 0x00, 0x00, // ASM: call 0x1010
+        0xc3, // ASM: ret
+    ]);
+    text[0x10..0x16].copy_from_slice(&[
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax,1
+        0xc3, // ASM: ret
+    ]);
+    let abbrev = vec![
+        0x01, 0x2e, 0x00, 0x03, 0x08, 0x11, 0x01, 0x00, 0x00, 0x02, 0x2e, 0x01, 0x03, 0x08, 0x00,
+        0x00, 0x03, 0x05, 0x00, 0x03, 0x08, 0x00, 0x00, 0x00,
+    ];
+    let mut dies = vec![0x01];
+    dies.extend_from_slice(b"is_json_context\0");
+    dies.extend_from_slice(&0x1010u64.to_le_bytes());
+    dies.push(0x02);
+    dies.extend_from_slice(b"print_color_u64\0");
+    for name in [b"t\0".as_slice(), b"key\0"] {
+        dies.push(0x03);
+        dies.extend_from_slice(name);
+    }
+    dies.push(0x00);
+    let unit_len = u32::try_from(dies.len() + 8).expect("fits");
+    let mut info = unit_len.to_le_bytes().to_vec();
+    info.extend_from_slice(&[0x05, 0x00, 0x01, 0x08, 0x00, 0x00, 0x00, 0x00]);
+    info.extend_from_slice(&dies);
+    let bytes = elfgen::build(
+        ET_EXEC,
+        EM_X86_64,
+        0x1000,
+        &[
+            Sec::new(".text", PROGBITS, AX, 0x1000, text),
+            Sec::new(".debug_info", PROGBITS, 0, 0x2000, info),
+            Sec::new(".debug_abbrev", PROGBITS, 0, 0x3000, abbrev),
+        ],
+    );
+    let p = Program::from_bytes(std::path::PathBuf::from("scope.elf"), bytes).expect("it loads");
+    let callee = p.debug_functions.iter().find(|d| d.low_pc == 0x1010);
+    assert_eq!(callee.map(|d| d.parameters.len()), Some(0), "{callee:?}");
+    let text = crate::decompiled::runs_agree(&p, 0x1000);
+    assert!(text.contains("is_json_context()"), "{text}");
+}
+
 /// The struct layouts and enum constants the debug information states
 /// land in the shape a user type takes, offered as proposals.
 ///

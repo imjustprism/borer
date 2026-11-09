@@ -1094,6 +1094,10 @@ fn unit_header(c: &mut Cursor<'_>) -> Option<(usize, usize, u64, usize)> {
 
 /// Reads the named functions out of a program's debug information.
 ///
+/// A function's parameters and locals are the entries under its own: one
+/// with no children opens no scope, so the parameters of the entries after
+/// it, such as an inlined function's abstract instance, stay theirs.
+///
 /// A unit that does not parse is skipped and the rest of the file still
 /// reads, which matters on a rebuilt image where one section may be damaged.
 /// The names and type text copied out are held to [`TEXT_MAX`] bytes
@@ -1256,8 +1260,8 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
                         if !text.copy(name.len()) {
                             break;
                         }
-                        open.push(out.len());
-                        open_level.push(depth.len());
+                        open.extend(abbreviation.children.then_some(out.len()));
+                        open_level.extend(abbreviation.children.then_some(depth.len()));
                         unresolved.push((out.len(), absolute(entry.type_ref)));
                         bases.push(
                             entry.frame_base.as_deref().and_then(|expr| {
