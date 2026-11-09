@@ -1753,3 +1753,91 @@ fn certify_names_the_blocks_its_inputs_never_reach() {
         "{one}"
     );
 }
+
+/// A check through imported `strlen` and `strcmp`: a key of fewer than four
+/// characters fails, a loop rejects any control character, and the key
+/// must equal `receipts`.
+///
+/// `check(char *s)` at [`TEXT`] in the Windows convention, its slots at the
+/// data page (`strlen` at `+0`, `strcmp` at `+8`) and the key after them.
+fn string_check() -> Program {
+    use borer_engine::program::{Symbol, SymbolKind};
+    let code = [
+        0x53, // ASM: push rbx
+        0x57, // ASM: push rdi
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp,0x28
+        0x48, 0x89, 0xcb, // ASM: mov rbx,rcx
+        0xff, 0x15, 0xf1, 0x0f, 0x00, 0x00, // ASM: call [rip+0xff1] (strlen)
+        0x48, 0x89, 0xc7, // ASM: mov rdi,rax
+        0x48, 0x83, 0xf8, 0x04, // ASM: cmp rax,4
+        0x72, 0x2b, // ASM: jb 0x1043
+        0x31, 0xc9, // ASM: xor ecx,ecx
+        0x80, 0x3c, 0x0b, 0x20, // ASM: cmp byte [rbx+rcx],0x20
+        0x72, 0x23, // ASM: jb 0x1043
+        0x48, 0xff, 0xc1, // ASM: inc rcx
+        0x48, 0x39, 0xf9, // ASM: cmp rcx,rdi
+        0x72, 0xf2, // ASM: jb 0x101a
+        0x48, 0x89, 0xd9, // ASM: mov rcx,rbx
+        0x48, 0x8d, 0x15, 0xde, 0x0f, 0x00, 0x00, // ASM: lea rdx,[rip+0xfde] (the key)
+        0xff, 0x15, 0xd0, 0x0f, 0x00, 0x00, // ASM: call [rip+0xfd0] (strcmp)
+        0x85, 0xc0, // ASM: test eax,eax
+        0x75, 0x07, // ASM: jne 0x1043
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax,1
+        0xeb, 0x02, // ASM: jmp 0x1045
+        0x31, 0xc0, // ASM: xor eax,eax
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp,0x28
+        0x5f, // ASM: pop rdi
+        0x5b, // ASM: pop rbx
+        0xc3, // ASM: ret
+    ];
+    let mut data = vec![0u8; 0x10];
+    data.extend_from_slice(b"receipts\0");
+    let mut p = program(&code, &data);
+    p.symbols = ["msvcrt.dll!strlen", "msvcrt.dll!strcmp"]
+        .iter()
+        .zip([TEXT + 0x1000, TEXT + 0x1008])
+        .map(|(name, addr)| Symbol {
+            name: (*name).to_owned(),
+            addr,
+            kind: SymbolKind::Import,
+        })
+        .collect();
+    p
+}
+
+/// A check through imported `strlen` and `strcmp` answers as the binary does.
+///
+/// The key returns 1, a wrong key of the same length 0, and the text agrees
+/// on both. With both answered zero the key returned 0 and every input left
+/// at the length test; certify's inputs now reach the loop.
+///
+/// # Panics
+///
+/// When a run answers otherwise, the text disagrees, or the loop reads as
+/// never reached.
+#[test]
+fn a_check_through_strlen_and_strcmp_answers_as_the_binary_does() {
+    use borer_engine::analysis::render::{certify_tsv, run_tsv};
+    let p = string_check();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let out = run_tsv(&p, &a, &o, "0x1000/\"receipts\";\"receiptz\"").expect("runs");
+    let rows: Vec<(&str, &str)> = out
+        .lines()
+        .filter(|l| l.starts_with('"'))
+        .take(2)
+        .filter_map(|l| {
+            let cells: Vec<&str> = l.split('\t').collect();
+            Some((*cells.get(1)?, *cells.last()?))
+        })
+        .collect();
+    assert_eq!(rows, [("1", "agrees"), ("0", "agrees")], "{out}");
+    assert!(!out.contains("not modeled"), "{out}");
+    let one = certify_tsv(&p, &a, &o, "0x1000,count=16").expect("an answer");
+    let reached = one
+        .lines()
+        .find_map(|l| l.strip_prefix("reached\t"))
+        .expect("a reached line");
+    assert!(!reached.contains("0x101a"), "{one}");
+    assert!(!one.contains("\nnot modeled\t"), "{one}");
+}

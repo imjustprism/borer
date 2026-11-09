@@ -317,6 +317,9 @@ const DATA: u64 = 0x2000;
 /// slot and returns what the import left in `rax`; a test sets the
 /// arguments in the registers the format's convention reads them from.
 ///
+/// The image is based at its first section, so no headers map the null
+/// page and a null pointer faults as it does in a real image.
+///
 /// # Arguments
 ///
 /// * `format` - The format, which picks the convention (PE: `rcx`, `rdx`,
@@ -334,7 +337,7 @@ fn slot_image(format: BinaryFormat, name: &str) -> Program {
     let mut p = Program::raw(
         bytes,
         Arch::X86_64,
-        0,
+        0x1000,
         Some(0x1000),
         vec![
             Section::mapped(".text", 0x1000, 0x1000, 0x1000, false, true),
@@ -375,4 +378,349 @@ fn calls_nothing_models_are_recorded_as_answered_by_default() {
     assert_eq!(emu.run(0x1000).stop, Stop::Returned);
     assert_eq!(emu.api_names(), ["memset"]);
     assert!(emu.defaulted().is_empty(), "{:?}", emu.defaulted());
+}
+
+/// Bytes placed before a [`call`]: where, and what.
+type Poke<'b> = (u64, &'b [u8]);
+
+/// Runs a [`slot_image`]'s call with `args` in the convention's argument
+/// registers and `memory` poked first, under `budget` steps.
+///
+/// # Arguments
+///
+/// * `p` - The image.
+/// * `args` - The first arguments, in order.
+/// * `memory` - Bytes to place before the run.
+/// * `budget` - The steps the run may take.
+///
+/// # Returns
+///
+/// How the run stopped, and the machine after it.
+fn call<'p>(
+    p: &'p Program,
+    args: &[u64],
+    memory: &[Poke<'_>],
+    budget: usize,
+) -> (Stop, Emulator<'p>) {
+    let mut emu = Emulator::new(p, budget).expect("x64 emulates");
+    emu.install_imports();
+    let regs = if p.format == BinaryFormat::Elf {
+        ["rdi", "rsi", "rdx"]
+    } else {
+        ["rcx", "rdx", "r8"]
+    };
+    for (r, v) in regs.iter().zip(args) {
+        assert!(emu.set_register(r, *v));
+    }
+    for (at, bytes) in memory {
+        for (k, b) in (0u64..).zip(bytes.iter()) {
+            emu.poke(at + k, *b);
+        }
+    }
+    let stop = emu.run(0x1000).stop;
+    (stop, emu)
+}
+
+/// Calls the import `name` of a PE [`slot_image`] and requires it to
+/// return.
+///
+/// # Returns
+///
+/// What it left in `eax`, and how many calls it answered by default.
+fn answer(name: &str, args: &[u64], memory: &[Poke<'_>]) -> (u64, usize) {
+    let p = slot_image(BinaryFormat::Pe, name);
+    let (stop, emu) = call(&p, args, memory, 100_000);
+    assert_eq!(stop, Stop::Returned, "{name}");
+    let eax = emu.register("rax").expect("rax") & 0xffff_ffff;
+    (eax, emu.defaulted().len())
+}
+
+/// `-1` as `eax` holds an `int`.
+const LESS: u64 = 0xffff_ffff;
+
+/// The length functions answer as C does.
+///
+/// They count the characters before the terminator, `strnlen` at most its
+/// count, `wcslen` in the target's `wchar_t` (two bytes on Windows, four on
+/// ELF). A null or unmapped string faults where `strlen` reads it, and
+/// `lstrlenA` answers zero for one; a string with no terminator within the
+/// cap stops the run as unmodeled.
+#[test]
+fn the_string_lengths_answer_as_c_does() {
+    let s = b"receipts\0";
+    assert_eq!(answer("msvcrt.dll!strlen", &[DATA], &[(DATA, s)]), (8, 0));
+    assert_eq!(
+        answer("msvcrt.dll!strnlen", &[DATA, 3], &[(DATA, s)]),
+        (3, 0)
+    );
+    assert_eq!(
+        answer("msvcrt.dll!strnlen", &[DATA, 20], &[(DATA, s)]),
+        (8, 0)
+    );
+    assert_eq!(
+        answer(
+            "msvcrt.dll!wcslen",
+            &[DATA],
+            &[(DATA, &[b'a', 0, b'b', 0, 0, 0])]
+        ),
+        (2, 0)
+    );
+    let elf = slot_image(BinaryFormat::Elf, "wcslen");
+    let four = [b'a', 0, 0, 0, b'b', 0, 0, 0, b'c', 0, 0, 0, 0, 0, 0, 0];
+    let (stop, emu) = call(&elf, &[DATA], &[(DATA, &four)], 1000);
+    assert_eq!((stop, emu.register("rax")), (Stop::Returned, Some(3)));
+    for wild in [0, 0xdead_0000] {
+        let p = slot_image(BinaryFormat::Pe, "msvcrt.dll!strlen");
+        assert_eq!(call(&p, &[wild], &[], 1000).0, Stop::Fault(wild));
+        assert_eq!(answer("KERNEL32.dll!lstrlenA", &[wild], &[]), (0, 0));
+    }
+    let p = slot_image(BinaryFormat::Pe, "msvcrt.dll!strlen");
+    let long = vec![b'A'; 0x1_0001];
+    let (stop, _) = call(&p, &[0x10_0000], &[(0x10_0000, &long)], 100_000);
+    assert!(
+        matches!(&stop, Stop::Unmodeled(what) if what.starts_with("strlen past 0x10000")),
+        "{stop:?}"
+    );
+}
+
+/// The compares answer the sign C promises.
+///
+/// The first differing `unsigned char` decides, bytes past a terminator are
+/// not compared (`strncmp` stops at its count too), `memcmp` compares past
+/// a zero, and `wcscmp` compares whole characters.
+#[test]
+fn the_string_compares_answer_as_c_does() {
+    let (x, y) = (DATA, DATA + 0x100);
+    let both = |a: &'static [u8], b: &'static [u8]| [(x, a), (y, b)];
+    let strcmp =
+        |a: &'static [u8], b: &'static [u8]| answer("msvcrt.dll!strcmp", &[x, y], &both(a, b)).0;
+    assert_eq!(strcmp(b"abc\0", b"abc\0"), 0);
+    assert_eq!(strcmp(b"abc\0", b"abz\0"), LESS);
+    assert_eq!(strcmp(b"abz\0", b"abc\0"), 1);
+    assert_eq!(strcmp(b"ab\0x", b"ab\0y"), 0);
+    assert_eq!(strcmp(b"\x80\0", b"\x7f\0"), 1);
+    let strncmp = |n: u64, a: &'static [u8], b: &'static [u8]| {
+        answer("msvcrt.dll!strncmp", &[x, y, n], &both(a, b)).0
+    };
+    assert_eq!(strncmp(2, b"abX\0", b"abY\0"), 0);
+    assert_eq!(strncmp(3, b"abX\0", b"abY\0"), LESS);
+    assert_eq!(
+        answer("msvcrt.dll!memcmp", &[x, y, 4], &both(b"ab\0X", b"ab\0Y")).0,
+        LESS
+    );
+    assert_eq!(
+        answer(
+            "msvcrt.dll!wcscmp",
+            &[x, y],
+            &both(&[b'a', 0, 0, 0], &[b'b', 0, 0, 0])
+        )
+        .0,
+        LESS
+    );
+}
+
+/// The case-folding calls answer only while every character is ASCII.
+///
+/// The compares and `tolower`/`toupper` fold `A`..`Z` alone, as the C
+/// locale does. At a character at or above `0x80` the locale decides, so
+/// the call answers zero as not modeled; a difference decided before such a
+/// byte still answers.
+#[test]
+fn the_case_folding_calls_answer_for_ascii_only() {
+    let (x, y) = (DATA, DATA + 0x100);
+    let stricmp = |a: &'static [u8], b: &'static [u8]| {
+        answer("msvcrt.dll!_stricmp", &[x, y], &[(x, a), (y, b)])
+    };
+    assert_eq!(stricmp(b"ReCeIpT\0", b"receipt\0"), (0, 0));
+    assert_eq!(stricmp(b"ab\xe9\0", b"ab\xe9\0"), (0, 1));
+    assert_eq!(stricmp(b"ab\xe9\0", b"ac\xe9\0"), (LESS, 0));
+    let case = |name, c| answer(name, &[c], &[]);
+    assert_eq!(
+        case("msvcrt.dll!tolower", u64::from(b'A')),
+        (u64::from(b'a'), 0)
+    );
+    assert_eq!(
+        case("msvcrt.dll!toupper", u64::from(b'q')),
+        (u64::from(b'Q'), 0)
+    );
+    assert_eq!(case("msvcrt.dll!tolower", 0xffff_ffff), (0xffff_ffff, 0));
+    assert_eq!(case("msvcrt.dll!tolower", 0xe9), (0, 1));
+}
+
+/// The copies answer as C does.
+///
+/// `strcpy` copies to and with the terminator and returns its destination,
+/// `strncpy` pads with zeros to its count and copies no terminator past it,
+/// `strcat` appends after the destination's terminator, `mempcpy` returns
+/// the end of what it copied, and `_strdup` copies into a fresh region.
+#[test]
+fn the_string_copies_answer_as_c_does() {
+    let (d, s) = (DATA, DATA + 0x100);
+    let copy = |name: &str, args: &[u64], dst: &'static [u8], n: u64| {
+        let p = slot_image(BinaryFormat::Pe, name);
+        let (stop, emu) = call(&p, args, &[(d, dst), (s, b"abc\0")], 1000);
+        assert_eq!(stop, Stop::Returned, "{name}");
+        let after: Vec<u8> = (d..d + n)
+            .map(|a| emu.byte_stated(a).unwrap_or(0))
+            .collect();
+        (emu.register("rax"), after)
+    };
+    let fill = &[0xaa; 8];
+    assert_eq!(
+        copy("msvcrt.dll!strcpy", &[d, s], fill, 6),
+        (Some(d), b"abc\0\xaa\xaa".to_vec())
+    );
+    assert_eq!(
+        copy("msvcrt.dll!strncpy", &[d, s, 6], fill, 8),
+        (Some(d), b"abc\0\0\0\xaa\xaa".to_vec())
+    );
+    assert_eq!(
+        copy("msvcrt.dll!strncpy", &[d, s, 2], fill, 4),
+        (Some(d), b"ab\xaa\xaa".to_vec())
+    );
+    assert_eq!(
+        copy("msvcrt.dll!strcat", &[d, s], b"xy\0\xaa\xaa\xaa\xaa\xaa", 6),
+        (Some(d), b"xyabc\0".to_vec())
+    );
+    assert_eq!(
+        copy("msvcrt.dll!mempcpy", &[d, s, 3], fill, 4),
+        (Some(d + 3), b"abc\xaa".to_vec())
+    );
+    let p = slot_image(BinaryFormat::Pe, "msvcrt.dll!_strdup");
+    let (stop, emu) = call(&p, &[s], &[(s, b"abc\0")], 1000);
+    assert_eq!(stop, Stop::Returned);
+    let at = emu.register("rax").expect("rax");
+    assert_ne!(at, 0);
+    let copied: Vec<Option<u8>> = (at..at + 4).map(|a| emu.byte_stated(a)).collect();
+    assert_eq!(copied, [Some(b'a'), Some(b'b'), Some(b'c'), Some(0)]);
+}
+
+/// The searches answer as C does.
+///
+/// `strchr` finds the terminator too, `strrchr` the last match, `memchr`
+/// only within its count, `strstr` an empty needle at the start, `strspn`
+/// and `strcspn` count a prefix in or out of a set, `strpbrk` and the wide
+/// `wcschr`/`wcsrchr` find as their narrow kin do, and a miss is `NULL`.
+#[test]
+fn the_string_searches_answer_as_c_does() {
+    let (s, t) = (DATA, DATA + 0x100);
+    let hay: &[Poke<'_>] = &[(s, b"abcabc\0")];
+    let find = |name, args: &[u64], memory: &[Poke<'_>]| answer(name, args, memory).0;
+    assert_eq!(find("msvcrt.dll!strchr", &[s, u64::from(b'c')], hay), s + 2);
+    assert_eq!(find("msvcrt.dll!strchr", &[s, 0], hay), s + 6);
+    assert_eq!(find("msvcrt.dll!strchr", &[s, u64::from(b'z')], hay), 0);
+    assert_eq!(
+        find("msvcrt.dll!strrchr", &[s, u64::from(b'c')], hay),
+        s + 5
+    );
+    assert_eq!(find("msvcrt.dll!memchr", &[s, u64::from(b'c'), 2], hay), 0);
+    assert_eq!(
+        find("msvcrt.dll!memchr", &[s, u64::from(b'c'), 3], hay),
+        s + 2
+    );
+    let with = |needle: &'static [u8]| [(s, b"abcabc\0".as_slice()), (t, needle)];
+    assert_eq!(find("msvcrt.dll!strstr", &[s, t], &with(b"ca\0")), s + 2);
+    assert_eq!(find("msvcrt.dll!strstr", &[s, t], &with(b"\0")), s);
+    assert_eq!(find("msvcrt.dll!strstr", &[s, t], &with(b"cb\0")), 0);
+    assert_eq!(find("msvcrt.dll!strspn", &[s, t], &with(b"ab\0")), 2);
+    assert_eq!(find("msvcrt.dll!strcspn", &[s, t], &with(b"c\0")), 2);
+    assert_eq!(find("msvcrt.dll!strpbrk", &[s, t], &with(b"cb\0")), s + 1);
+    assert_eq!(find("msvcrt.dll!strpbrk", &[s, t], &with(b"xyz\0")), 0);
+    let wide: &[Poke<'_>] = &[(s, &[b'a', 0, b'b', 0, b'c', 0, b'a', 0, 0, 0])];
+    assert_eq!(
+        find("msvcrt.dll!wcschr", &[s, u64::from(b'c')], wide),
+        s + 4
+    );
+    assert_eq!(
+        find("msvcrt.dll!wcsrchr", &[s, u64::from(b'a')], wide),
+        s + 6
+    );
+}
+
+/// A 32-bit image whose code at `0x1000` pushes [`DATA`] and calls one
+/// import through its slot, popping the argument itself when `cdecl`.
+///
+/// # Arguments
+///
+/// * `name` - The import, as `dll!name`.
+/// * `cdecl` - Whether the caller pops the argument.
+fn stack_image(name: &str, cdecl: bool) -> Program {
+    let mut bytes = vec![0xccu8; 0x4000];
+    let mut code = vec![
+        0x68, 0x00, 0x20, 0x00, 0x00, // ASM: push 0x2000
+        0xff, 0x15, 0x00, 0x30, 0x00, 0x00, // ASM: call [0x3000]
+    ];
+    if cdecl {
+        code.extend_from_slice(&[0x83, 0xc4, 0x04]); // ASM: add esp,4
+    }
+    code.push(0xc3); // ASM: ret
+    bytes[0x1000..0x1000 + code.len()].copy_from_slice(&code);
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86,
+        0,
+        Some(0x1000),
+        vec![
+            Section::mapped(".text", 0x1000, 0x1000, 0x1000, false, true),
+            Section::mapped(".data", DATA, DATA, 0x2000, true, false),
+        ],
+    );
+    p.format = BinaryFormat::Pe;
+    p.symbols = vec![Symbol {
+        name: name.to_owned(),
+        addr: SLOT,
+        kind: SymbolKind::Import,
+    }];
+    p
+}
+
+/// A 32-bit string call takes its argument by its convention.
+///
+/// The argument is on the stack, and the callee pops it only where its
+/// convention says: `msvcrt`'s `strlen` is `__cdecl` and `kernel32`'s
+/// `lstrlenA` `__stdcall`. A wrong pop leaves the stack off by a word, and
+/// the run does not return.
+#[test]
+fn a_32_bit_string_call_takes_its_argument_by_its_convention() {
+    for (name, cdecl) in [
+        ("msvcrt.dll!strlen", true),
+        ("KERNEL32.dll!lstrlenA", false),
+    ] {
+        let p = stack_image(name, cdecl);
+        let mut emu = Emulator::new(&p, 10_000).expect("x86 emulates");
+        emu.install_imports();
+        for (k, b) in (0u64..).zip(b"receipts\0") {
+            emu.poke(DATA + k, *b);
+        }
+        assert_eq!(emu.run(0x1000).stop, Stop::Returned, "{name}");
+        assert_eq!(emu.register("rax"), Some(8), "{name}");
+    }
+}
+
+/// A copy of as many bytes as one call is modeled for still copies, and
+/// one byte more stops the run, where it copied part and answered success.
+#[test]
+fn a_copy_past_the_cap_stops_instead_of_cutting_short() {
+    /// The most bytes one modeled call reads or writes.
+    const CAP: u64 = 0x1_0000;
+    for name in ["msvcrt.dll!memcpy", "msvcrt.dll!memset"] {
+        let p = slot_image(BinaryFormat::Pe, name);
+        let (stop, _) = call(&p, &[0x10_0000, 0x20_0000, CAP], &[], 1000);
+        assert_eq!(stop, Stop::Returned, "{name}");
+        let (stop, _) = call(&p, &[0x10_0000, 0x20_0000, CAP + 1], &[], 1000);
+        assert!(
+            matches!(&stop, Stop::Unmodeled(what) if what.contains("past 0x10000")),
+            "{name}: {stop:?}"
+        );
+    }
+}
+
+/// A scan spends a step of the budget per character, as a `rep` string
+/// instruction does, so one the budget cannot pay stops at the budget.
+#[test]
+fn a_string_scan_spends_the_budget() {
+    let p = slot_image(BinaryFormat::Pe, "msvcrt.dll!strlen");
+    let long = vec![b'A'; 0x400];
+    let (stop, _) = call(&p, &[0x10_0000], &[(0x10_0000, &long)], 100);
+    assert_eq!(stop, Stop::Budget);
 }

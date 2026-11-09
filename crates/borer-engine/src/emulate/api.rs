@@ -12,6 +12,8 @@ use crate::isa::x86::{Instruction, Register};
 use crate::num::{from_usize, lo8};
 use crate::program::Program;
 
+mod libc;
+
 /// Base of the synthetic addresses that stand in for imported functions.
 ///
 /// Distinct from image, stack and allocations so a call to one is recognized
@@ -31,8 +33,11 @@ pub(super) const ALLOC_BASE: u64 = 0x6000_0000_0000;
 /// a four-byte pointer holds all of it.
 pub(super) const ALLOC_BASE_32: u64 = 0x6000_0000;
 
-/// Most bytes one modeled `memcpy`, `memmove` or `memset` moves, so a
-/// wild length cannot fill the memory map.
+/// Most bytes one modeled call reads or writes.
+///
+/// It holds for `memcpy`, `memset` and a C string function's scan, so a wild
+/// length cannot fill the memory map; a call asking for more stops the run
+/// rather than doing part of it.
 const API_COPY_MAX: usize = 0x1_0000;
 
 /// Address space one modeled allocation takes, whatever size it asked for.
@@ -286,10 +291,12 @@ impl Emulator<'_> {
     ///
     /// The run transferred to a synthetic stub address, so the call already
     /// pushed its return address; this models the API's effect on `rax` and
-    /// hands back the address to resume at. Only the handful of APIs a packer
-    /// leans on to stage its payload are modeled with intent (a memory
-    /// allocator hands out a fresh region, or the address a `VirtualAlloc`
-    /// asks for, a module lookup returns the image base); the rest return
+    /// hands back the address to resume at. The APIs a packer leans on to
+    /// stage its payload are modeled with intent (a memory allocator hands
+    /// out a fresh region, or the address a `VirtualAlloc` asks for, a module
+    /// lookup returns the image base), and so are the C string and memory
+    /// functions a check decides on (`strlen`, `strcmp`, `memcmp` and their
+    /// kin, [`Emulator::c_library`]); the rest return
     /// zero so the run continues and stops somewhere the output can name,
     /// each recorded as answered by default ([`Emulator::defaulted`]) so a
     /// report can say what it rests on.
@@ -338,23 +345,29 @@ impl Emulator<'_> {
             } else {
                 requested
             }
-        } else if api == "memcpy" || api == "memmove" {
+        } else if api == "memcpy" || api == "memmove" || api == "mempcpy" {
             let (src, len) = (self.api_arg(1), self.api_arg(2));
-            let len = usize::try_from(len).unwrap_or(0).min(API_COPY_MAX);
+            let len = libc::within_cap(api, len, API_COPY_MAX)?;
             let bytes: Vec<u8> = (0..len)
                 .map(|k| self.byte(src.wrapping_add(from_usize(k))).unwrap_or(0))
                 .collect();
             for (k, b) in bytes.into_iter().enumerate() {
                 self.write(rcx.wrapping_add(from_usize(k)), u64::from(b), 1)?;
             }
-            rcx
+            if api == "mempcpy" {
+                rcx.wrapping_add(from_usize(len))
+            } else {
+                rcx
+            }
         } else if api == "memset" {
             let (fill, len) = (lo8(self.api_arg(1)), self.api_arg(2));
-            let len = usize::try_from(len).unwrap_or(0).min(API_COPY_MAX);
+            let len = libc::within_cap(api, len, API_COPY_MAX)?;
             for k in 0..len {
                 self.write(rcx.wrapping_add(from_usize(k)), u64::from(fill), 1)?;
             }
             rcx
+        } else if let Some(rv) = self.c_library(api)? {
+            rv
         } else if api.starts_with("VirtualProtect")
             || api.starts_with("VirtualFree")
             || api == "AddVectoredExceptionHandler"
