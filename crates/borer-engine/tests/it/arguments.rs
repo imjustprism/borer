@@ -294,3 +294,34 @@ fn a_parameter_handed_on_untouched_is_passed_by_its_name() {
     let text = iso_agrees(&p, 0x401000);
     assert!(text.contains("setup_exec_ignore(name)"), "{text}");
 }
+
+/// A callee whose arity nothing states takes no slot whose register
+/// nothing set, whatever the call's block set after it.
+///
+/// The block stores `rdx` for a copy of its own and sets `rdi`, then calls
+/// a callee whose body says nothing of its arity (one jump through a
+/// pointer, as an import's thunk is). `rdx` set in the block bridged the
+/// hole at `rsi`, and the call passed `rsi`, which nothing set (dpkg's
+/// `MD5Init(var1, rsi, var1)`).
+#[test]
+fn a_hole_ends_the_list_of_a_callee_of_unknown_arity() {
+    let mut code = vec![
+        0x48, 0x89, 0xf8, // ASM: mov rax,rdi
+        0x48, 0x8b, 0x17, // ASM: mov rdx,[rdi]
+        0x48, 0x89, 0x57, 0x08, // ASM: mov [rdi+8],rdx
+        0x48, 0x89, 0xc7, // ASM: mov rdi,rax
+        0xe8, 0x02, 0x00, 0x00, 0x00, // ASM: call 0x401014
+        0xc3, // ASM: ret
+        0xcc, // ASM: int3 (padding)
+        0xff, 0x25, 0xe6, 0x0f, 0x00, 0x00, // ASM: jmp qword [rip+0xfe6] (0x402000)
+    ];
+    code.resize(0x20, 0xcc);
+    code.extend_from_slice(&[
+        0xb8, 0x07, 0x00, 0x00, 0x00, // ASM: mov eax,7
+        0xc3, // ASM: ret
+    ]);
+    let mut p = crate::raw::image(Arch::X86_64, &code, &0x0040_1020u64.to_le_bytes());
+    p.format = BinaryFormat::Elf;
+    let text = iso_agrees(&p, 0x401000);
+    assert!(text.contains("sub_401014(a1)"), "{text}");
+}

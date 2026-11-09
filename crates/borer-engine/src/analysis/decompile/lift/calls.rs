@@ -271,24 +271,29 @@ impl Exec<'_, '_> {
     /// Tells whether an argument slot after `from` holds a register the
     /// caller wrote for the call being lifted, in its block since the last
     /// call, short of the register the call goes through: a callee of
-    /// unknown arity takes every slot up to it.
+    /// unknown arity takes every slot up to it, as long as the slot at
+    /// `from` holds something some line or call set. A register nothing
+    /// set is a hole no argument fills, and the list ends there: dpkg's
+    /// `MD5Init(var1, rsi, var1)` passed an `rsi` nothing set because the
+    /// block had set `rdx` for a store of its own.
     ///
     /// # Arguments
     ///
     /// * `from` - The slot the list is at.
     /// * `floats` - The callee's float slots, as [`Self::args_for`] read them.
     fn later_set_here(&self, from: usize, floats: u8) -> bool {
-        (from + 1..self.ctx.conv.reg_args())
-            .map_while(|j| {
-                self.ctx
-                    .conv
-                    .arg_reg(j, floats)
-                    .filter(|r| self.call_through != Some(*r))
-            })
-            .any(|r| {
-                let k = Key::Reg(r);
-                self.env.fresh.contains(&k) && self.written_here.contains(&k)
-            })
+        let slot = |j| {
+            self.ctx
+                .conv
+                .arg_reg(j, floats)
+                .filter(|r| self.call_through != Some(*r))
+                .map(Key::Reg)
+        };
+        let set = |k: &Key| self.env.vals.contains_key(k) || self.env.clobbered.contains(k);
+        slot(from).is_some_and(|k| set(&k) || self.names_register(k))
+            && (from + 1..self.ctx.conv.reg_args())
+                .map_while(slot)
+                .any(|k| self.env.fresh.contains(&k) && self.written_here.contains(&k))
     }
 
     /// Tells whether an argument register still holds the caller's own
