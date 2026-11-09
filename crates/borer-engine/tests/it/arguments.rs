@@ -128,3 +128,31 @@ fn a_tail_jump_to_a_variadic_function_hands_on_no_stack_word() {
     let text = iso_agrees(&sysv(&code), 0x401000);
     assert!(text.contains("sub_401010(5)"), "{text}");
 }
+
+/// A read far above the frame is no argument, not the 32nd one.
+///
+/// `or qword [rsp+0x1000], 0` over a 0x18-byte frame is a stack probe's
+/// touch, 509 words above the return address: the frame scan counted it
+/// as the last of 32 stack arguments, so the callee took 38 parameters and
+/// its caller passed `rsi` to `r9`, which nothing set.
+#[test]
+fn a_read_far_above_the_frame_is_no_argument() {
+    let code = [
+        0xbf, 0x05, 0x00, 0x00, 0x00, // ASM: mov edi,5
+        0xe8, 0x06, 0x00, 0x00, 0x00, // ASM: call 0x401010
+        0xc3, // ASM: ret
+        0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // ASM: int3 (padding)
+        0x48, 0x83, 0xec, 0x18, // ASM: sub rsp,0x18
+        0x85, 0xff, // ASM: test edi,edi
+        0x75, 0x09, // ASM: jne 0x401021
+        0x48, 0x83, 0x8c, 0x24, 0x00, 0x10, 0x00, 0x00, 0x00, // ASM: or qword [rsp+0x1000],0
+        0x89, 0xf8, // ASM: mov eax,edi
+        0x48, 0x83, 0xc4, 0x18, // ASM: add rsp,0x18
+        0xc3, // ASM: ret
+    ];
+    let p = sysv(&code);
+    let a = Analysis::compute(&p);
+    assert_eq!(a.function(0x401010).map(|f| f.stack_args), Some(0));
+    let text = iso_agrees(&p, 0x401000);
+    assert!(text.contains("sub_401010(5)"), "{text}");
+}

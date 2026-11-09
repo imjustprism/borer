@@ -7,6 +7,14 @@ use crate::analysis::is_imm;
 use crate::fxmap::FxHashMap;
 use crate::isa::x86::{FlowControl, Instruction, Mnemonic, OpKind, Register};
 
+/// Most stack-passed arguments a body is credited with.
+///
+/// A read further above the return address is a stack probe's, a table's
+/// indexed off the stack or a corrupt displacement, not an argument: one
+/// counted as the last argument made every caller pass 32 stack words and
+/// all six argument registers, which nothing set.
+const ARGS_MAX: i64 = 32;
+
 /// Prologue and stack-access facts gathered during the walk, enough to say
 /// how many stack-passed arguments the function reads.
 #[derive(Default)]
@@ -164,7 +172,8 @@ impl FrameFacts {
     /// # Returns
     ///
     /// The highest argument index read, counting from the first slot above
-    /// the return address and shadow space; capped at 32. Zero when the frame
+    /// the return address and shadow space, of those within [`ARGS_MAX`]: a
+    /// read past it is no argument. Zero when the frame
     /// is sized at runtime and its size is unknown, since a local read cannot
     /// then be told from an argument.
     ///
@@ -236,7 +245,8 @@ impl FrameFacts {
                 let entry_rel = disp - below;
                 let first = word + shadow;
                 (entry_rel >= first)
-                    .then(|| ((entry_rel - first) / word + 1).min(32))
+                    .then(|| (entry_rel - first) / word + 1)
+                    .filter(|n| *n <= ARGS_MAX)
                     .and_then(|n| u32::try_from(n).ok())
             })
             .max()
