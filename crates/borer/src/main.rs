@@ -163,13 +163,13 @@ impl ServerHandler for BorerServer {
     /// implementation name and version, and the agent-facing instructions,
     /// built from the routers and the resource tables
     /// ([`playbooks::instructions`]).
-    fn get_info(&self) -> rmcp::model::ServerInfo {
+    fn get_info(&self) -> rmcp::model::ServerConfig {
         let tools: Vec<String> = Self::tool_router()
             .list_all()
             .into_iter()
             .map(|t| t.name.into_owned())
             .collect();
-        rmcp::model::ServerInfo::new(
+        rmcp::model::ServerConfig::new(
             rmcp::model::ServerCapabilities::builder()
                 .enable_tools()
                 .enable_prompts()
