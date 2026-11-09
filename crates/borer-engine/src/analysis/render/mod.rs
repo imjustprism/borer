@@ -972,6 +972,39 @@ if (a1 != 0) {
         );
     }
 
+    /// An address in a function's range that none of its blocks holds is
+    /// said to be so, not credited to the block before it.
+    ///
+    /// `test edi, edi; je 0x1010; mov eax, 1; ret`, `int3` padding, then
+    /// `xor eax, eax; ret` at 0x1010: the padding lies between the
+    /// function's blocks, where no walk went. dash's `readtoken1` held 3 KB
+    /// of cases a short jump table left in no block, and `why` named the
+    /// block before each.
+    #[test]
+    fn why_says_when_no_block_holds_an_address() {
+        let code: &[u8] = &[
+            0x85, 0xff, // ASM: test edi,edi
+            0x74, 0x0c, // ASM: je 0x1010
+            0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax,1
+            0xc3, // ASM: ret
+            0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // ASM: int3 padding
+            0x31, 0xc0, // ASM: xor eax,eax
+            0xc3, // ASM: ret
+        ];
+        let p = text(image(0x2000, &[(0x1000, code)]), 0x1000, false);
+        let a = crate::analysis::Analysis::compute(&p);
+        let o = crate::analysis::Overlay::default();
+        let hole = super::why_tsv(&p, &a, &o, "0x100c").unwrap();
+        assert!(
+            hole.contains(
+                "# 0x100c is inside sub_1000, in none of its blocks: the walk did not reach it\n"
+            ),
+            "{hole}"
+        );
+        let held = super::why_tsv(&p, &a, &o, "0x1006").unwrap();
+        assert!(held.contains("in the block at 0x1004\n"), "{held}");
+    }
+
     /// An unnamed address says so, rather than implying a name it has not got.
     ///
     /// The point of the report is the difference between a name the compiler

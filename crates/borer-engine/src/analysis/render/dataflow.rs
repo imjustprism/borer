@@ -788,17 +788,16 @@ pub fn why_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Result<S
             );
         }
         (None, Some(f)) => {
-            let block = f
+            let name = short_name(a, o, f.entry);
+            let place = f
                 .blocks
                 .iter()
-                .filter(|b| b.start <= va)
-                .max_by_key(|b| b.start);
-            let _ = writeln!(
-                out,
-                "# {va:#x} is inside {}, in the block at {}",
-                short_name(a, o, f.entry),
-                block.map_or_else(|| String::from("?"), |b| format!("{:#x}", b.start))
-            );
+                .find(|b| b.start <= va && va < b.end)
+                .map_or_else(
+                    || "in none of its blocks: the walk did not reach it".to_owned(),
+                    |b| format!("in the block at {:#x}", b.start),
+                );
+            let _ = writeln!(out, "# {va:#x} is inside {name}, {place}");
         }
         (None, None) => {
             let _ = writeln!(
