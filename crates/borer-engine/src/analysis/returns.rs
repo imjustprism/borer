@@ -51,7 +51,12 @@ const CLASSIFY_MIN: usize = 256;
 /// Longest run of instructions scanned along one path after a call.
 const SCAN_MAX: usize = 12;
 /// Most paths a call site's scan follows through the caller's branches.
-const PATHS_MAX: usize = 8;
+///
+/// A switch the compiler lowered to a ladder of compares after the call
+/// branches once per case. Eight cut dash's `readtoken1` short four cases
+/// in, and the one site left unknown made `pungetc`, which returns nothing,
+/// read as returning its scratch `rax`.
+const PATHS_MAX: usize = 32;
 /// Most rounds of the pass-through rule: each round lets one more link of a
 /// chain of wrappers learn its callee returns nothing.
 const PASS_ROUNDS_MAX: usize = 64;

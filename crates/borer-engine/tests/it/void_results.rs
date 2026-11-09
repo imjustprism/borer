@@ -155,6 +155,61 @@ fn an_own_write_read_back_is_scratch_when_callers_discard() {
     replays_clean(&p, &a, &[X64, X64 + 0x40]);
 }
 
+/// A call followed by a compare ladder is scanned down every case, so a
+/// callee whose callers all discard its result returns nothing.
+///
+/// dash's `readtoken1` calls `pungetc` and then switches on a character
+/// with a ladder of compares; each case writes `eax` before reading it, but
+/// the scan of the site gave up after eight paths and read the site as
+/// unknown, so `pungetc`, a `void` function whose own `rax` is scratch,
+/// printed as returning `uint64_t` once that site was reached.
+#[test]
+fn a_ladder_after_a_call_is_scanned_to_its_cases() {
+    let mut code = vec![
+        0x53, // ASM: push rbx
+        0x48, 0x83, 0xec, 0x20, // ASM: sub rsp,0x20
+        0x89, 0xcb, // ASM: mov ebx,ecx
+        0xe8, 0x74, 0x00, 0x00, 0x00, // ASM: call 0x140001080
+        0x83, 0xfb, 0x01, // ASM: cmp ebx,1
+        0x74, 0x1c, // ASM: je 0x14000102d
+        0x83, 0xfb, 0x02, // ASM: cmp ebx,2
+        0x74, 0x1e, // ASM: je 0x140001034
+        0x83, 0xfb, 0x03, // ASM: cmp ebx,3
+        0x74, 0x20, // ASM: je 0x14000103b
+        0x83, 0xfb, 0x04, // ASM: cmp ebx,4
+        0x74, 0x22, // ASM: je 0x140001042
+        0x83, 0xfb, 0x05, // ASM: cmp ebx,5
+        0x74, 0x24, // ASM: je 0x140001049
+        0x31, 0xc0, // ASM: xor eax,eax
+        0x48, 0x83, 0xc4, 0x20, // ASM: add rsp,0x20
+        0x5b, // ASM: pop rbx
+        0xc3, // ASM: ret
+    ];
+    for (value, back) in [
+        (10u8, 0xf3u8),
+        (20, 0xec),
+        (30, 0xe5),
+        (40, 0xde),
+        (50, 0xd7),
+    ] {
+        code.extend_from_slice(&[
+            0xb8, value, 0x00, 0x00, 0x00, // ASM: mov eax,value
+            0xeb, back, // ASM: jmp 0x140001027
+        ]);
+    }
+    code.resize(0x80, 0xcc);
+    code.extend_from_slice(&[
+        0x48, 0x8b, 0x01, // ASM: mov rax,[rcx]
+        0x83, 0x00, 0x01, // ASM: add dword [rax],1
+        0xc3, // ASM: ret
+    ]);
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    assert_eq!(verdict(&a, X64 + 0x80), Some(false));
+    let text = decompile(&p, &a, &Overlay::default(), X64 + 0x80).unwrap_or_default();
+    assert!(text.contains("// signature: void "), "{text}");
+}
+
 /// Where the T32 code starts.
 const T32: u64 = 0x4_0000;
 
