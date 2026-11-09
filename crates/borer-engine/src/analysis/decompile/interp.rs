@@ -1098,6 +1098,7 @@ impl<'p> Script<'p> {
             line: 0,
             args: args.to_vec(),
             handed: None,
+            unfilled: Vec::new(),
             alloca: if self.program.is_64 {
                 ALLOCA_BASE_64
             } else {
@@ -1640,6 +1641,11 @@ struct Running<'s, 'p> {
     /// import was handed: the emulator answers an import without filling
     /// what it points at, so a read there that nothing set is no answer.
     handed: Option<u64>,
+    /// The ISO local objects, by index from the first, the text handed to a
+    /// call that reached an import nothing models, with that import's name:
+    /// it answered without writing them, so a read there that nothing set
+    /// is no answer either.
+    unfilled: Vec<(u64, String)>,
     /// The call being evaluated wants the callee's second result, the one
     /// in `rdx`: set while a `__rdx`-suffixed call name is unwound to the
     /// function it names.
@@ -1677,6 +1683,26 @@ fn unchecked<T>(why: impl Into<String>) -> Eval<T> {
 }
 
 impl Running<'_, '_> {
+    /// Says why reading `a` is no answer when a call nothing models was
+    /// handed the ISO local object holding it ([`Running::unfilled`]): that
+    /// call answered without writing there, so the byte stands unset.
+    ///
+    /// # Arguments
+    ///
+    /// * `a` - The address read.
+    ///
+    /// # Returns
+    ///
+    /// The reason, naming the call, or `None` when `a` is in no such object.
+    fn unfilled_by(&self, a: u64) -> Option<String> {
+        let (lo, hi) = self.s.objects;
+        let at = (a >= lo && a < hi).then(|| a.wrapping_sub(lo) / ISO_STRIDE)?;
+        let api = &self.unfilled.iter().find(|(k, _)| *k == at)?.1;
+        Some(format!(
+            "a local handed to {api}, whose call reached an import nothing models"
+        ))
+    }
+
     /// Runs the body from its first step.
     ///
     /// # Returns
@@ -2288,6 +2314,9 @@ impl Running<'_, '_> {
                     let b = match self.emu.byte_stated(a) {
                         Some(b) => b,
                         None => {
+                            if let Some(why) = self.unfilled_by(a) {
+                                return unchecked(format!("a read of {why}"));
+                            }
                             if a >= self.s.objects.0 && a < self.s.objects.1 {
                                 return Err(End::Refused(format!(
                                     "a byte of a local at {a:#x} is read before any line writes it"
@@ -3021,6 +3050,13 @@ impl Running<'_, '_> {
         {
             self.handed = Some(self.handed.map_or(low, |h| h.min(low)));
         }
+        if self.emu.defaulted_calls().iter().any(|&k| k >= imports) {
+            let (lo, hi) = s.objects;
+            for v in args.iter().filter(|v| (lo..hi).contains(*v)) {
+                self.unfilled
+                    .push((v.wrapping_sub(lo) / ISO_STRIDE, name.to_owned()));
+            }
+        }
         self.fuel = self.fuel.saturating_sub(run.steps);
         self.steps += run.steps;
         for w in &run.history {
@@ -3043,6 +3079,9 @@ impl Running<'_, '_> {
                 Ok(if self.second_result { rdx } else { rax })
             }
             Stop::Budget => Err(End::Budget),
+            Stop::Fault(x) if self.unfilled_by(x).is_some() => {
+                unchecked(self.unfilled_by(x).unwrap_or_default())
+            }
             stop if !can_return => Err(End::Callee(name.to_owned(), stop)),
             Stop::Fault(x) if x < s.call_sp && s.call_sp - x <= STACK_REACH => unchecked(format!(
                 "the call to {name} reads its own stack where nothing was set; in the binary, earlier calls leave values there"
