@@ -18,6 +18,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::analysis::render::UpxEntry;
 use crate::bundle::{self, Bundle};
 use crate::fileinfo::{Region, forward, region, reversed};
 use crate::num::from_usize;
@@ -1076,17 +1077,37 @@ fn by_bundles(bundles: &[Bundle], out: &mut Vec<Finding>) {
 ///
 /// A finding is sure when an entry stub or a header mark says so, less when
 /// only a section name, which anyone can write, or the section the entry
-/// point sits in does.
+/// point sits in does; what UPX's layout says of the entry rests on its
+/// section names, so it raises nothing. The hint follows that layout
+/// ([`UpxEntry`]): the code at the entry is the unpacker only where the
+/// image reads as packed.
 ///
 /// # Arguments
 ///
 /// * `p` - The loaded file.
 /// * `out` - The findings so far.
 fn by_packer_marks(p: &Program, out: &mut Vec<Finding>) {
+    let upx = crate::analysis::render::upx_entry(p);
     for (name, marks) in crate::analysis::render::packer_marks(p) {
         let named = |m: &&String| m.ends_with(" section") || m.starts_with("entry point in ");
         let by_name = marks.iter().filter(named).count();
         let renamed = name == "UPX" && !marks.iter().any(|m| m.ends_with(" section"));
+        let state = (name == "UPX").then_some(upx);
+        let layout = usize::from(matches!(
+            state,
+            Some(UpxEntry::Unpacked | UpxEntry::MaybeUnpacked)
+        ));
+        let hint = match state {
+            Some(UpxEntry::Unpacked) => {
+                "its entry is not the stub: it reads as already unpacked (a dump or an unpacked image), and its imports may be only the stub's few, the payload's resolved at run time"
+            }
+            Some(UpxEntry::MaybeUnpacked) => {
+                "it may already be unpacked: no known UPX stub starts its entry"
+            }
+            Some(UpxEntry::Packed) | None => {
+                "the code here is the unpacker: borer://unpack/<entry> runs it to the original entry point"
+            }
+        };
         add(
             out,
             Finding {
@@ -1094,13 +1115,13 @@ fn by_packer_marks(p: &Program, out: &mut Vec<Finding>) {
                 name,
                 version: renamed
                     .then(|| "sections renamed: a modified or hand-edited UPX".to_owned()),
-                confidence: if by_name < marks.len() {
+                confidence: if by_name < marks.len().saturating_sub(layout) {
                     Confidence::High
                 } else {
                     Confidence::Medium
                 },
                 evidence: marks,
-                hint: "the code here is the unpacker: borer://unpack/<entry> runs it to the original entry point",
+                hint,
             },
         );
     }

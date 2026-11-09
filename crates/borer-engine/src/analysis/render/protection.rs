@@ -1410,7 +1410,109 @@ pub fn packer_marks(p: &Program) -> BTreeMap<&'static str, Vec<String>> {
             }
         }
     }
+    let filled = match upx_entry(p) {
+        UpxEntry::Packed => None,
+        UpxEntry::Unpacked => Some(
+            "UPX0 holds file bytes a packed file leaves it without, and its entry lies there under no known UPX stub",
+        ),
+        UpxEntry::MaybeUnpacked => Some(
+            "UPX0 holds file bytes a packed file leaves it without, and no known UPX stub starts the entry",
+        ),
+    };
+    if let (Some(mark), Some(marks)) = (filled, names.get_mut("UPX")) {
+        marks.push(mark.to_owned());
+    }
     names
+}
+
+/// What a UPX image's layout says about its entry ([`upx_entry`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpxEntry {
+    /// A known UPX stub starts the entry, or the layout cannot tell (UPX0
+    /// empty, absent or not the first section): the file reads as packed.
+    Packed,
+    /// UPX0 holds file bytes a packed file leaves it without, no known UPX
+    /// stub starts the entry, and the entry lies in UPX0: a dump or an
+    /// image already unpacked.
+    Unpacked,
+    /// As [`UpxEntry::Unpacked`], but the entry lies outside UPX0, which
+    /// UPX's in-place layout allows: the file may already be unpacked.
+    MaybeUnpacked,
+}
+
+/// What the protection verdict and the triage say of a UPX image whose
+/// entry is no known stub and lies outside its filled UPX0.
+const MAYBE_UNPACKED: &str = "may already be unpacked";
+
+/// Reads what an image's UPX layout says about its entry.
+///
+/// A packed UPX image leaves its first section, UPX0, without file bytes
+/// for its stub to unpack into, and enters the stub; a dump, or the image
+/// `unpack` writes, fills UPX0 and enters the original code. The facts read
+/// are a known stub at the entry ([`entry_stubs`]), UPX0 first and holding
+/// file bytes, and the entry inside UPX0; where they do not settle it, the
+/// image reads as packed.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+pub(crate) fn upx_entry(p: &Program) -> UpxEntry {
+    let Some(upx0) = p
+        .sections
+        .first()
+        .filter(|s| s.name.eq_ignore_ascii_case("UPX0") && s.file_size > 0)
+    else {
+        return UpxEntry::Packed;
+    };
+    if entry_stubs(p).iter().any(|(sig, _)| sig.packer == "UPX") {
+        return UpxEntry::Packed;
+    }
+    let end = upx0.va.0.saturating_add(upx0.vsize.max(upx0.file_size));
+    if p.entry.is_some_and(|e| e >= upx0.va.0 && e < end) {
+        UpxEntry::Unpacked
+    } else {
+        UpxEntry::MaybeUnpacked
+    }
+}
+
+/// The blind spot a protection verdict raises about what the static report
+/// describes.
+///
+/// A packed or protected verdict means the strings, imports and
+/// capabilities describe the stub, not the payload; a UPX image that may
+/// already be unpacked says the same as unsure; an unpacked one, that its
+/// imports may be only the stub's few.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image, for its entry.
+/// * `verdict` - The protection report's headline ([`protection_tsv`]).
+///
+/// # Returns
+///
+/// The line without its `# blind spot: ` prefix, or `None` for a plain
+/// image.
+pub(super) fn stub_spot(p: &Program, verdict: &str) -> Option<String> {
+    if verdict.starts_with("unpacked") {
+        return Some(
+            "unpacked: the imports and capabilities above may be only the stub's few; the payload resolved its own at run time"
+                .to_owned(),
+        );
+    }
+    if !verdict.starts_with("packed") && !verdict.starts_with("protected") {
+        return None;
+    }
+    let head = verdict.split(':').next().unwrap_or(verdict);
+    let entry = hex_or_dash(p.entry);
+    Some(if verdict == format!("protected: UPX ({MAYBE_UNPACKED})") {
+        format!(
+            "{head}: the file {MAYBE_UNPACKED}; if a stub still runs at the entry, the strings, imports and capabilities above describe it, not the payload; borer://unpack/{entry} runs it"
+        )
+    } else {
+        format!(
+            "{head}: the strings, imports and capabilities above describe the stub, not the payload; borer://unpack/{entry} runs the stub"
+        )
+    })
 }
 
 /// Section names an ELF linker places before `.text`: stubs and init code,
@@ -1541,7 +1643,9 @@ fn packing_marks(
 /// import table too thin to run the program, a section that is both
 /// writable and executable, an entry point outside the code, an entry point
 /// in writable memory, and executable bytes with almost no code found in
-/// them.
+/// them. UPX's marks on an image its layout shows unpacked ([`upx_entry`])
+/// read as unpacked, or as protected but maybe already unpacked, not as
+/// packed.
 ///
 /// # Arguments
 ///
@@ -1581,11 +1685,23 @@ pub fn protection_tsv(p: &Program, a: &Analysis) -> String {
     }
     let share = (total_bytes > 0).then(|| packed_bytes * 100 / total_bytes);
     let (strong, weak) = packing_marks(p, a, share, &wx);
-    let verdict = if !names.is_empty() {
-        format!(
-            "protected: {}",
-            names.keys().copied().collect::<Vec<_>>().join(", ")
-        )
+    let upx = upx_entry(p);
+    let listed: Vec<String> = names
+        .keys()
+        .filter(|n| !(**n == "UPX" && upx == UpxEntry::Unpacked))
+        .map(|n| {
+            if *n == "UPX" && upx == UpxEntry::MaybeUnpacked {
+                format!("UPX ({MAYBE_UNPACKED})")
+            } else {
+                (*n).to_owned()
+            }
+        })
+        .collect();
+    let verdict = if !listed.is_empty() {
+        format!("protected: {}", listed.join(", "))
+    } else if !names.is_empty() {
+        "unpacked: UPX marks, but its entry is not the stub (a dump or an unpacked image)"
+            .to_owned()
     } else if !strong.is_empty() && strong.len() + weak.len() >= 2 {
         "packed: no name, but the marks are there".to_owned()
     } else if strong.is_empty() && weak.is_empty() {

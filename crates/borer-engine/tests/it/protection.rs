@@ -818,3 +818,198 @@ fn a_gcc_elf_entered_after_init_and_plt_is_plain() {
     let out = protection_tsv(&p, &a);
     assert!(out.starts_with("# plain: no packer marks"), "{out}");
 }
+
+/// Writes the `UPX!` mark and its version into an image's headers, where
+/// UPX writes it before the first section.
+///
+/// # Arguments
+///
+/// * `bytes` - The image.
+fn upx_marked(mut bytes: Vec<u8>) -> Vec<u8> {
+    bytes[0x3d0..0x3d9].copy_from_slice(b"3.96\0UPX!");
+    bytes
+}
+
+/// Code at an entry that is no stub, as a program's own entry starts:
+/// `push ebp; mov ebp,esp; xor eax,eax; pop ebp; ret`.
+const PLAIN: [u8; 7] = [0x55, 0x8b, 0xec, 0x31, 0xc0, 0x5d, 0xc3];
+
+/// `code` at the start of `len` bytes of `int3`.
+///
+/// # Arguments
+///
+/// * `code` - The leading bytes.
+/// * `len` - The length in all.
+fn padded(code: &[u8], len: usize) -> Vec<u8> {
+    let mut b = vec![0xcc; len];
+    b[..code.len()].copy_from_slice(code);
+    b
+}
+
+/// An x86 image laid out as UPX lays one out, `UPX0` first and `UPX1`
+/// after it, with the `UPX!` mark, entered at `entry_rva`.
+///
+/// # Arguments
+///
+/// * `upx0` - UPX0's file bytes: none in a packed file.
+/// * `upx1` - UPX1's file bytes.
+/// * `entry_rva` - The entry point, relative to the image base.
+fn upx_layout(upx0: Vec<u8>, upx1: Vec<u8>, entry_rva: u32) -> Vec<u8> {
+    upx_marked(upx_sections(upx0, upx1, entry_rva))
+}
+
+/// The sections of [`upx_layout`] without the `UPX!` mark, so only their
+/// names say UPX.
+///
+/// # Arguments
+///
+/// * `upx0` - UPX0's file bytes.
+/// * `upx1` - UPX1's file bytes.
+/// * `entry_rva` - The entry point, relative to the image base.
+fn upx_sections(upx0: Vec<u8>, upx1: Vec<u8>, entry_rva: u32) -> Vec<u8> {
+    let vsize = u32::try_from(upx1.len()).expect("fits");
+    pe32(
+        &[
+            Sec {
+                name: "UPX0",
+                rva: 0x1000,
+                data: upx0,
+                vsize: 0x2000,
+                chars: WX,
+            },
+            Sec {
+                name: "UPX1",
+                rva: 0x3000,
+                data: upx1,
+                vsize,
+                chars: WX,
+            },
+        ],
+        entry_rva,
+    )
+}
+
+/// Triages an image.
+///
+/// # Arguments
+///
+/// * `bytes` - The image.
+fn triaged(bytes: Vec<u8>) -> String {
+    use borer_engine::analysis::Overlay;
+    use borer_engine::analysis::render::triage_tsv;
+    let p = Program::from_bytes(PathBuf::from("upx.exe"), bytes).expect("a PE loads");
+    let a = Analysis::compute(&p);
+    triage_tsv(&p, &a, &Overlay::default())
+}
+
+/// A UPX image its stub starts reads as packed: the code at the entry is
+/// the unpacker, and the report describes the stub.
+#[test]
+fn a_upx_image_entered_at_its_stub_reads_as_packed() {
+    let out = triaged(upx_layout(Vec::new(), padded(&UPX_STUB, 0x200), 0x3000));
+    assert!(out.contains("# protection: protected: UPX\n"), "{out}");
+    assert!(out.contains("the code here is the unpacker"), "{out}");
+    assert!(out.contains("describe the stub, not the payload"), "{out}");
+}
+
+/// A UPX image whose UPX0, empty in a packed file, holds the code its
+/// entry starts reads as already unpacked.
+///
+/// It makes none of the packed claims; a stub at that entry still reads as
+/// packed.
+#[test]
+fn a_upx_image_entered_in_its_filled_upx0_reads_as_unpacked() {
+    let out = triaged(upx_layout(padded(&PLAIN, 0x200), vec![0x41; 0x200], 0x1000));
+    assert!(
+        out.contains("# protection: unpacked: UPX marks, but its entry is not the stub"),
+        "{out}"
+    );
+    assert!(
+        out.contains("it reads as already unpacked (a dump or an unpacked image)"),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "# blind spot: unpacked: the imports and capabilities above may be only the stub's few"
+        ),
+        "{out}"
+    );
+    for claim in [
+        "the code here is the unpacker",
+        "describe the stub",
+        "protected: UPX",
+    ] {
+        assert!(!out.contains(claim), "{claim}: {out}");
+    }
+    let stub = triaged(upx_layout(
+        padded(&UPX_STUB, 0x200),
+        vec![0x41; 0x200],
+        0x1000,
+    ));
+    assert!(stub.contains("# protection: protected: UPX\n"), "{stub}");
+    let named = triaged(upx_sections(
+        padded(&PLAIN, 0x200),
+        vec![0x41; 0x200],
+        0x1000,
+    ));
+    assert!(
+        named.contains("# packer: UPX (medium: UPX0 section; UPX1 section; UPX0 holds"),
+        "{named}"
+    );
+}
+
+/// A UPX image whose filled UPX0 lies before an entry no known stub starts
+/// says only what is shown: it may already be unpacked.
+#[test]
+fn a_upx_image_entered_past_its_filled_upx0_may_already_be_unpacked() {
+    let out = triaged(upx_layout(vec![0x41; 0x200], padded(&PLAIN, 0x200), 0x3000));
+    assert!(
+        out.contains("# protection: protected: UPX (may already be unpacked)\n"),
+        "{out}"
+    );
+    assert!(
+        out.contains("it may already be unpacked: no known UPX stub starts its entry"),
+        "{out}"
+    );
+    assert!(
+        out.contains("the file may already be unpacked; if a stub still runs at the entry"),
+        "{out}"
+    );
+    assert!(!out.contains("the code here is the unpacker"), "{out}");
+}
+
+/// Where the layout cannot tell, UPX's marks keep the packed wording.
+///
+/// That is an empty UPX0 under an entry no known stub starts (a stub borer
+/// does not know, here the opening of UPX's LZMA one), and a filled UPX0
+/// that is not the first section.
+#[test]
+fn a_upx_image_its_layout_cannot_tell_keeps_the_packed_wording() {
+    let lzma = [
+        0x60, 0xbe, 0x00, 0x30, 0x40, 0x00, 0x8d, 0xbe, 0x00, 0xe0, 0xff, 0xff, 0x57, 0x89, 0xe5,
+    ];
+    let out = triaged(upx_layout(Vec::new(), padded(&lzma, 0x200), 0x3000));
+    assert!(out.contains("# protection: protected: UPX\n"), "{out}");
+    assert!(out.contains("the code here is the unpacker"), "{out}");
+    let swapped = upx_marked(pe32(
+        &[
+            Sec {
+                name: "UPX1",
+                rva: 0x1000,
+                data: Vec::new(),
+                vsize: 0x2000,
+                chars: WX,
+            },
+            Sec {
+                name: "UPX0",
+                rva: 0x3000,
+                data: padded(&PLAIN, 0x200),
+                vsize: 0x200,
+                chars: WX,
+            },
+        ],
+        0x3000,
+    ));
+    let out = triaged(swapped);
+    assert!(out.contains("# protection: protected: UPX\n"), "{out}");
+}

@@ -1647,7 +1647,8 @@ const SPOT_SECTION_MIN: u64 = 0x200;
 /// a packed or thin sample is not read as a clean one.
 ///
 /// Each line fires on a signal already computed and names what it hides:
-/// a packed verdict (what the report describes is the stub), sections at
+/// a packed verdict (what the report describes is the stub, or for an
+/// image already unpacked the stub's few imports: [`stub_spot`]), sections at
 /// packed entropy (read as neither code nor text), executable sections with
 /// no function found in them, an import table too thin to run a program (or
 /// none, for a static image), `GetProcAddress` calls whose name argument
@@ -1666,14 +1667,7 @@ const SPOT_SECTION_MIN: u64 = 0x200;
 ///
 /// The lines, without their `# blind spot: ` prefix; none for a plain image.
 fn blind_spots(p: &Program, a: &Analysis, o: &Overlay, verdict: &str) -> Vec<String> {
-    let mut spots = Vec::new();
-    if verdict.starts_with("packed") || verdict.starts_with("protected") {
-        spots.push(format!(
-            "{}: the strings, imports and capabilities above describe the stub, not the payload; borer://unpack/{} runs the stub",
-            verdict.split(':').next().unwrap_or(verdict),
-            hex_or_dash(p.entry)
-        ));
-    }
+    let mut spots: Vec<String> = stub_spot(p, verdict).into_iter().collect();
     let sized = || {
         p.sections
             .iter()
