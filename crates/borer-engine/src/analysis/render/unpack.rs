@@ -1238,8 +1238,10 @@ pub(super) fn rebuild(p: &Program, emu: &Emulator<'_>, regions: &[(u64, u64)]) -
                 continue;
             };
             let Some(off) = p.section_at(va).and_then(|s| {
-                usize::try_from(s.file_off.0 + (va - s.va.0))
-                    .ok()
+                s.file_off
+                    .0
+                    .checked_add(va - s.va.0)
+                    .and_then(|o| usize::try_from(o).ok())
                     .filter(|o| *o < bytes.len())
             }) else {
                 continue;
@@ -1417,9 +1419,32 @@ pub(super) fn retarget_pe_to_memory_layout(buf: &mut [u8], base: u64, oep: Optio
 
 #[cfg(test)]
 mod tests {
-    use super::{UNPACK_BUDGET, UnpackSpec, devirtualize_tsv, unpack_start};
+    use super::{UNPACK_BUDGET, UnpackSpec, devirtualize_tsv, rebuild, unpack_start};
     use crate::analysis::{Analysis, Overlay};
+    use crate::emulate::Emulator;
     use crate::program::{Arch, Program, Section};
+
+    /// A byte the run wrote far into a range whose memory size runs past
+    /// what its file offset can add is not copied back, where adding the
+    /// two overflowed.
+    ///
+    /// A minidump range keeps the memory size it states, so one mapped
+    /// below its own file offset can reach past `u64::MAX` from there.
+    ///
+    /// # Panics
+    ///
+    /// When the byte lands in the file or the sum overflows.
+    #[test]
+    fn a_write_past_what_a_file_offset_can_reach_is_not_copied() {
+        let range = Section {
+            vsize: u64::MAX - 0x10,
+            ..Section::mapped("mem0", 0x10, 0x100, 0x10, true, false)
+        };
+        let p = Program::raw(vec![0; 0x200], Arch::X86_64, 0, None, vec![range]);
+        let mut emu = Emulator::new(&p, 0).expect("an emulator");
+        emu.poke(u64::MAX - 1, 0x90);
+        assert!(rebuild(&p, &emu, &[(u64::MAX - 1, 1)]).is_none());
+    }
 
     /// An unpack spec refuses a budget that is not a count, a directive
     /// with no value and a preset that does not read, naming each; the

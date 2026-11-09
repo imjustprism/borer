@@ -892,11 +892,13 @@ impl Program {
                         let rawoff = u64::from(s.pointer_to_raw_data);
                         let fits = rawoff + rawsz.min(file_len) <= file_len;
                         let cut = !fits && sound && rawoff < file_len;
+                        let vsize = u64::from(s.virtual_size);
                         let va = pe.image_base.checked_add(u64::from(s.virtual_address));
                         let sane = rawsz <= SANE_MAX
-                            && u64::from(s.virtual_size) <= SANE_MAX
+                            && vsize <= SANE_MAX
                             && rawoff <= file_len
-                            && (fits || cut);
+                            && (fits || cut)
+                            && va.and_then(|v| v.checked_add(vsize.max(rawsz))).is_some();
                         let Some(va) = va.filter(|_| sane) else {
                             fit.dropped += 1;
                             return None;
@@ -914,7 +916,7 @@ impl Program {
                                 str::to_owned,
                             ),
                             va: Va(va),
-                            vsize: u64::from(s.virtual_size),
+                            vsize,
                             file_off: FileOff(rawoff),
                             file_size: if cut { file_len - rawoff } else { rawsz },
                             readable: s.characteristics & READ != 0,
@@ -923,7 +925,11 @@ impl Program {
                         })
                     })
                     .collect();
-                if fit.dropped > 0 && sections.is_empty() && pe.entry != 0 {
+                if fit.dropped > 0
+                    && sections.is_empty()
+                    && pe.entry != 0
+                    && pe.image_base.checked_add(file_len).is_some()
+                {
                     sections.push(Section {
                         name: "<flat>".to_owned(),
                         va: Va(pe.image_base),

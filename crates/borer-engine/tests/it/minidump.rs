@@ -7,6 +7,7 @@
     reason = "assertions are the point of a test"
 )]
 
+use borer_engine::analysis::Analysis;
 use borer_engine::program::{Arch, Program};
 
 /// Writes a `u16` at `at`, little-endian.
@@ -418,6 +419,20 @@ fn a_range_whose_end_overflows_still_reads() {
         p.read_va_upto(u64::MAX - 0x10, 1).and_then(|b| b.first()),
         Some(&0xc3)
     );
+}
+
+/// A range that runs past the top of the address space maps what fits
+/// below it, so its end is an address: function discovery adds a
+/// section's size to its start, and overflowed on such a range.
+#[test]
+fn a_range_past_the_top_of_the_address_space_ends_at_an_address() {
+    let mut d = dump();
+    u64_at(&mut d, 0x84, u64::MAX - 0x10);
+    u32_at(&mut d, 0x8c, 0x20);
+    let p = Program::from_bytes("top.dmp".into(), d).expect("loads");
+    let s = p.section_at(u64::MAX - 0x10).expect("mapped");
+    assert_eq!((s.vsize, s.file_size), (0x10, 0x10));
+    Analysis::compute(&p);
 }
 
 /// A memory list claiming billions of ranges stays bounded: the entries

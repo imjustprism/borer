@@ -449,10 +449,11 @@ fn string_at(bytes: &[u8], at: usize) -> Option<String> {
 /// The first module the list names is the image base - a dump of one
 /// process names the executable first - and the exception stream's
 /// context supplies the entry. A range the file does not hold is clamped
-/// to what it does; the memory-info stream's protections set the section
-/// flags where it states them, and a range it does not stays readable,
-/// writable and executable, the way a snapshot answers for every page it
-/// caught.
+/// to what it does, and one that runs past the top of the address space
+/// to what fits below it, so a section's end is always an address; the
+/// memory-info stream's protections set the section flags where it states
+/// them, and a range it does not stays readable, writable and executable,
+/// the way a snapshot answers for every page it caught.
 ///
 /// # Arguments
 ///
@@ -486,15 +487,16 @@ pub(crate) fn program(path: std::path::PathBuf, bytes: Vec<u8>) -> Option<Progra
     let file_len = crate::num::from_usize(bytes.len());
     let mut sections: Vec<Section> = Vec::new();
     for (k, r) in ranges.iter().enumerate() {
-        if r.size == 0 || r.at >= file_len {
+        let room = u64::MAX - r.start;
+        if r.size == 0 || r.at >= file_len || room == 0 {
             continue;
         }
-        let held = r.size.min(file_len - r.at);
+        let held = r.size.min(file_len - r.at).min(room);
         let (exec, write) = protection_at(&protections, r.start).unwrap_or((true, true));
         sections.push(Section {
             name: format!("mem{k}"),
             va: crate::program::Va(r.start),
-            vsize: r.size,
+            vsize: r.size.min(room),
             file_off: crate::program::FileOff(r.at),
             file_size: held,
             readable: true,
