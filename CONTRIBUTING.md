@@ -2,6 +2,7 @@
 
 Thanks for helping. Before you open a pull request:
 
+- Open it against `dev`. `main` only moves when a release is cut.
 - Run `python scripts/gate.py`. It runs what CI runs, and CI must pass.
 - Follow [`borer.rules`](borer.rules): commit titles look like
   `type: summary`, one concern per commit.
