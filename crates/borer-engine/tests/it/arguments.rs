@@ -363,3 +363,37 @@ fn a_register_an_earlier_call_left_is_no_argument_of_an_unknown_callee() {
     let text = iso_agrees(&p, 0x401000);
     assert!(text.contains("sub_401020(a1)"), "{text}");
 }
+
+/// A frame taken in several steps places every read against all of them.
+///
+/// Under stack-clash probing a large frame is allocated a page at a time:
+/// `sub rsp, 0x1000; or qword [rsp], 0; sub rsp, 0xb0`. The frame scan kept
+/// only the first step, so the local at `[rsp+0x10a8]` (openssh's
+/// `sshbuf_load_fd` keeps its canary there) read as stack argument 20, the
+/// callee took 26 parameters, and its caller passed `rsi` to `r9`, which
+/// nothing set.
+#[test]
+fn a_frame_taken_in_steps_is_one_frame() {
+    let mut code = vec![
+        0xbf, 0x05, 0x00, 0x00, 0x00, // ASM: mov edi,5
+        0xe8, 0x06, 0x00, 0x00, 0x00, // ASM: call 0x401010
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x10, 0xcc);
+    code.extend_from_slice(&[
+        0x53, // ASM: push rbx
+        0x48, 0x81, 0xec, 0x00, 0x10, 0x00, 0x00, // ASM: sub rsp,0x1000
+        0x48, 0x83, 0x0c, 0x24, 0x00, // ASM: or qword [rsp],0
+        0x48, 0x81, 0xec, 0xb0, 0x00, 0x00, 0x00, // ASM: sub rsp,0xb0
+        0x48, 0x89, 0xbc, 0x24, 0xa8, 0x10, 0x00, 0x00, // ASM: mov [rsp+0x10a8],rdi
+        0x8b, 0x84, 0x24, 0xa8, 0x10, 0x00, 0x00, // ASM: mov eax,[rsp+0x10a8]
+        0x48, 0x81, 0xc4, 0xb0, 0x10, 0x00, 0x00, // ASM: add rsp,0x10b0
+        0x5b, // ASM: pop rbx
+        0xc3, // ASM: ret
+    ]);
+    let p = sysv(&code);
+    let a = Analysis::compute(&p);
+    assert_eq!(a.function(0x401010).map(|f| f.stack_args), Some(0));
+    let text = iso_agrees(&p, 0x401000);
+    assert!(text.contains("sub_401010(5)"), "{text}");
+}

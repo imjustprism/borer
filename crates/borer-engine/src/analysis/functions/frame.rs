@@ -26,7 +26,9 @@ pub(super) struct FrameFacts {
     /// Addresses of `pop` instructions.
     pub(super) pops: Vec<u64>,
     /// `(address, bytes)` of every `add rsp, imm`, the caller's cleanup
-    /// after a call.
+    /// after a call, and of every `sub rsp, imm` as a negative count: a
+    /// large frame under stack-clash probing is taken a page at a time
+    /// (`sub rsp, 0x1000; or qword [rsp], 0; sub rsp, 0xb0`).
     pub(super) adds: Vec<(u64, i64)>,
     /// `(address, offset)`: rsp-relative offset held by rbp after `mov rbp, rsp` / `lea rbp, [rsp+K]`.
     pub(super) rbp_off: Option<(u64, i64)>,
@@ -89,10 +91,12 @@ impl FrameFacts {
                 self.adds.push((addr, instr.immediate(1).cast_signed()));
                 self.links.push((addr, instr.next_ip()));
             }
-            Mnemonic::Sub
-                if moves_rsp_by_imm(instr) && self.sub_rsp.is_none_or(|(a, _)| addr < a) =>
-            {
-                self.sub_rsp = Some((addr, instr.immediate(1)));
+            Mnemonic::Sub if moves_rsp_by_imm(instr) => {
+                self.adds
+                    .push((addr, instr.immediate(1).cast_signed().saturating_neg()));
+                if self.sub_rsp.is_none_or(|(a, _)| addr < a) {
+                    self.sub_rsp = Some((addr, instr.immediate(1)));
+                }
             }
             Mnemonic::Sub
                 if instr.op0_kind() == OpKind::Register
@@ -178,8 +182,8 @@ impl FrameFacts {
     /// then be told from an argument.
     ///
     /// Each read is placed against the stack pointer as it stood at that
-    /// instruction: the pushes, pops and cleanups before it, and the frame
-    /// allocation once made. A frame-pointer read is placed against where
+    /// instruction: the pushes, pops and cleanups before it, and every
+    /// step of the frame's allocation. A frame-pointer read is placed against where
     /// the pointer was set, so the pushes the body makes for its own calls
     /// move nothing. The pops and cleanups of an epilogue, the run of them
     /// before a `ret` or a tail jump with nothing between that touches the
@@ -218,15 +222,13 @@ impl FrameFacts {
         let below_at = |addr: u64| -> i64 {
             let pushed = count_i64(pushes.partition_point(|&a| a < addr));
             let popped = count_i64(pops.partition_point(|&a| a < addr));
-            let sub = self
-                .sub_rsp
-                .filter(|(a, _)| *a < addr)
-                .map_or(0, |(_, imm)| imm.cast_signed());
             let adds = added
                 .get(adds.partition_point(|&(a, _)| a < addr))
                 .copied()
                 .unwrap_or(0);
-            sub.saturating_add(pushed.saturating_sub(popped).saturating_mul(word))
+            pushed
+                .saturating_sub(popped)
+                .saturating_mul(word)
                 .saturating_sub(adds)
         };
         let frame_pointer = if self.helper_frame {
