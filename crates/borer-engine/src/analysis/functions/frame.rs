@@ -32,7 +32,9 @@ pub(super) struct FrameFacts {
     /// memory operand.
     pub(super) refs: Vec<(Register, i64, u64)>,
     /// `(address, next address)` of every instruction an epilogue is made
-    /// of: a pop, an `add rsp, imm`, a `mov rsp, reg` or a `leave`.
+    /// of: a pop, an `add rsp, imm`, a `mov rsp, reg` or a `leave`, and
+    /// of every one that may sit among them because it leaves the stack
+    /// pointer alone ([`leaves_stack`]).
     pub(super) links: Vec<(u64, u64)>,
     /// Addresses of `ret` and of unconditional and indirect jumps: where
     /// an epilogue ends.
@@ -68,6 +70,7 @@ impl FrameFacts {
             && instr.op1_kind() == OpKind::Register;
         if matches!(instr.mnemonic(), Mnemonic::Pop | Mnemonic::Leave)
             || (instr.mnemonic() == Mnemonic::Mov && restores_rsp)
+            || leaves_stack(instr)
         {
             self.links.push((addr, instr.next_ip()));
         }
@@ -170,8 +173,9 @@ impl FrameFacts {
     /// allocation once made. A frame-pointer read is placed against where
     /// the pointer was set, so the pushes the body makes for its own calls
     /// move nothing. The pops and cleanups of an epilogue, the run of them
-    /// right before a `ret` or a tail jump, tear the frame down on that
-    /// path alone and move nothing for the code after them in the image
+    /// before a `ret` or a tail jump with nothing between that touches the
+    /// stack pointer, tear the frame down on that path alone and move
+    /// nothing for the code after them in the image
     /// ([`FrameFacts::epilogues`]). The pushes, pops and cleanups are sorted
     /// once, so each read is placed by a search, not a pass over them all:
     /// an obfuscator's body holds a hundred thousand of each.
@@ -249,11 +253,36 @@ fn count_i64(n: usize) -> i64 {
     i64::try_from(n).unwrap_or(i64::MAX)
 }
 
+/// Tells whether an instruction leaves the stack pointer alone and falls
+/// through to the next: it neither moves nor reads it, nor addresses
+/// memory through it.
+///
+/// An epilogue may hold such instructions between its pops and its exit:
+/// the result's `mov eax, r12d`, or the zeroing run a
+/// `-fzero-call-used-regs` build ends every function with.
+///
+/// # Arguments
+///
+/// * `instr` - The decoded instruction.
+fn leaves_stack(instr: &Instruction) -> bool {
+    let rsp = |r: Register| r.full_register() == Register::RSP;
+    instr.flow_control() == FlowControl::Next
+        && !instr.is_stack_instruction()
+        && !rsp(instr.memory_base())
+        && (0..instr.op_count())
+            .all(|k| instr.op_kind(k) != OpKind::Register || !rsp(instr.op_register(k)))
+}
+
 impl FrameFacts {
     /// Collects the addresses of the epilogues' instructions: from each
     /// exit, the pops, cleanups and frame restores that lead into it
     /// without a gap, walking back while each one's next address is the
-    /// one reached so far.
+    /// one reached so far, over the instructions between them that leave
+    /// the stack pointer alone ([`leaves_stack`]). `add rsp, 0x130; mov
+    /// eax, r12d; pop r12; ret` releases its frame for that path only: read
+    /// as stopping at the `mov`, the `add` moved every read after it in the
+    /// image 0x130 bytes up, and a local at `[rsp+0x20]` read as an
+    /// argument.
     ///
     /// A map from each link's next address to its own, built once with the
     /// first link encountered winning as a scan's first match would, answers
