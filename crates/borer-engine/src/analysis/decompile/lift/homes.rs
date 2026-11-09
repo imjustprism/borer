@@ -63,6 +63,10 @@ pub(super) struct Homes {
     /// The lowest slot whose address was taken: on System V, the first
     /// stack word, where `va_start` points the list's stack part.
     pub(super) va_start: Option<usize>,
+    /// The places a `lea` took the address of in the frame, in bytes from
+    /// the entry stack pointer: the register save area's, which `va_start`
+    /// keeps in the list.
+    taken: BTreeSet<i64>,
 }
 
 impl Homes {
@@ -86,6 +90,7 @@ impl Homes {
             args: conv.args.to_vec(),
             stored: BTreeMap::new(),
             va_start: None,
+            taken: BTreeSet::new(),
         }
     }
 
@@ -239,6 +244,14 @@ impl Homes {
             self.counts_vectors = true;
             return;
         }
+        if i.mnemonic() == Mnemonic::Lea
+            && i.memory_index() == Register::None
+            && let Some(base) = base_below_of(self.below, self.rax, self.rbp, i.memory_base())
+        {
+            self.taken
+                .insert(crate::disasm::displacement(i, bitness) - base);
+            return;
+        }
         if i.op0_kind() != OpKind::Memory
             || i.op1_kind() != OpKind::Register
             || i.memory_index() != Register::None
@@ -280,6 +293,10 @@ impl Homes {
     /// integer registers fixed the area holds the vector half alone:
     /// `xmm0` to `xmm7` sixteen bytes apart behind `test al, al`, the
     /// caller's count of them, which no parameter is (openssh's `sshlog`).
+    /// A function whose `va_start` follows a branch may save only the
+    /// registers its `va_arg` reads, short of `r9`: then the run at the
+    /// address `va_start` takes for the list's register part, with the
+    /// address of its stack part taken too, says where the list starts.
     /// A function that spills its own parameters for a debug build
     /// stores them in no such run and tests no `al`.
     fn save_area_fixed(&self) -> Option<usize> {
@@ -292,6 +309,19 @@ impl Homes {
         let vector_at =
             |base: i64, j: usize, o: i64| step(j, VECTOR).is_some_and(|s| o == base + s);
         let Some(r9) = self.saved.get(&last) else {
+            let partial = self.taken.iter().find_map(|&area| {
+                let run: Vec<usize> = self
+                    .saved
+                    .iter()
+                    .filter(|&(k, o)| step(*k, GPR).is_some_and(|s| *o == area + s))
+                    .map(|(k, _)| *k)
+                    .collect();
+                let (first, end) = (*run.first()?, *run.last()?);
+                (run.len() == end - first + 1).then_some(first)
+            });
+            if let Some(first) = partial.filter(|_| self.va_start.is_some()) {
+                return Some(first);
+            }
             let base = *self.saved_vectors.get(&0)?;
             let whole = (0..self.vectors.len()).all(|j| {
                 self.saved_vectors
@@ -335,4 +365,53 @@ pub(super) fn base_below_of(
         Register::RBP => rbp,
         _ => None,
     }
+}
+
+/// Returns the fixed argument count of a variadic function whose `va_start` follows its first call.
+///
+/// A prologue scan that stops at the call misses it: gnulib's
+/// `open_safer` saves only `rdx`, and takes the list's addresses in the
+/// branch that reads the mode, past `call open`.
+///
+/// The function's first instructions are read in address order on
+/// through its calls, each block after the entry's starting where the
+/// entry left the stack pointer, and the full shape is asked for
+/// ([`Homes::fixed`]): the stores into the save area and both addresses
+/// `va_start` takes, of the list's stack part and of its register part. A
+/// lone store or a lone `lea` past a call proves nothing. Nothing is read
+/// unless the scan before the call saw an argument register stored in the
+/// frame.
+///
+/// # Arguments
+///
+/// * `ctx` - The program, its analysis and the decoder.
+/// * `conv` - The convention whose argument registers are looked for.
+/// * `t` - The function's entry.
+/// * `early` - What the scan before the first call saw.
+///
+/// # Returns
+///
+/// The fixed count, or `None` when the function shows no such list.
+pub(super) fn late_fixed(ctx: &Ctx<'_>, conv: &Conv, t: u64, early: &Homes) -> Option<usize> {
+    /// Most instructions read from the entry, as the scan before the call reads.
+    const INSTRS_MAX: usize = 64;
+    if !early.save_area || early.saved.is_empty() {
+        return None;
+    }
+    let f = ctx.analysis.function(t)?;
+    let mut homes = Homes::new(ctx.bitness, conv);
+    let mut frame = None;
+    let mut seen = 0usize;
+    for b in &f.blocks {
+        homes.below = frame.unwrap_or(homes.below);
+        let mut va = b.start;
+        while va < b.end && seen < INSTRS_MAX {
+            let i = ctx.decode(va)?;
+            homes.step(&i, ctx.bitness);
+            seen += 1;
+            va = i.next_ip();
+        }
+        frame = frame.or(Some(homes.below));
+    }
+    homes.fixed()
 }

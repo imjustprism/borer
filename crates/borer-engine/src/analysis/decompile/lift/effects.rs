@@ -504,7 +504,7 @@ pub(in crate::analysis::decompile) fn leading_reads(
             va = i.next_ip();
         }
     }
-    let fixed = homes.fixed();
+    let fixed = homes.fixed().or_else(|| late_fixed(ctx, conv, t, &homes));
     if let Some(k) = fixed {
         read.retain(|r| conv.slot(*r).is_some_and(|s| s < k));
     }

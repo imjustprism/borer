@@ -397,3 +397,85 @@ fn a_frame_taken_in_steps_is_one_frame() {
     let text = iso_agrees(&p, 0x401000);
     assert!(text.contains("sub_401010(5)"), "{text}");
 }
+
+/// A variadic callee whose `va_start` follows its first call is still
+/// variadic, so its saved register is no parameter of its callers.
+///
+/// gnulib's `open_safer` saves only `rdx`, tests `O_CREAT` and calls
+/// `open`; `va_start` takes the list's two addresses only in the branch
+/// that reads the mode, past that call, where the prologue scan had
+/// stopped. The save of `rdx` read as handed on, so a function passing two
+/// arguments took three, and its own caller passed `rsi` and `rdx`, which
+/// nothing set (find's `save_cwd`).
+#[test]
+fn a_va_start_past_the_first_call_is_still_seen() {
+    let mut code = vec![
+        0xbf, 0x05, 0x00, 0x00, 0x00, // ASM: mov edi,5
+        0xe8, 0x06, 0x00, 0x00, 0x00, // ASM: call 0x401010
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x10, 0xcc);
+    code.extend_from_slice(&[
+        0x53, // ASM: push rbx
+        0xbe, 0x00, 0x00, 0x08, 0x00, // ASM: mov esi,0x80000
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xe8, 0x13, 0x00, 0x00, 0x00, // ASM: call 0x401030
+        0x5b, // ASM: pop rbx
+        0xc3, // ASM: ret
+    ]);
+    code.resize(0x30, 0xcc);
+    code.extend_from_slice(&[
+        0x48, 0x83, 0xec, 0x58, // ASM: sub rsp,0x58
+        0x48, 0x89, 0x54, 0x24, 0x30, // ASM: mov [rsp+0x30],rdx
+        0x31, 0xd2, // ASM: xor edx,edx
+        0x40, 0xf6, 0xc6, 0x40, // ASM: test sil,0x40
+        0x75, 0x0a, // ASM: jne 0x40104b
+        0xe8, 0x26, 0x00, 0x00, 0x00, // ASM: call 0x40106c
+        0x48, 0x83, 0xc4, 0x58, // ASM: add rsp,0x58
+        0xc3, // ASM: ret
+        0x48, 0x8d, 0x44, 0x24, 0x60, // ASM: lea rax,[rsp+0x60]
+        0xc7, 0x04, 0x24, 0x10, 0x00, 0x00, 0x00, // ASM: mov dword [rsp],0x10
+        0x8b, 0x54, 0x24, 0x30, // ASM: mov edx,[rsp+0x30]
+        0x48, 0x89, 0x44, 0x24, 0x08, // ASM: mov [rsp+8],rax
+        0x48, 0x8d, 0x44, 0x24, 0x20, // ASM: lea rax,[rsp+0x20]
+        0x48, 0x89, 0x44, 0x24, 0x10, // ASM: mov [rsp+0x10],rax
+        0xeb, 0xd5, // ASM: jmp 0x401041
+        0x89, 0xf8, // ASM: mov eax,edi
+        0xc3, // ASM: ret
+    ]);
+    let text = iso_agrees(&sysv(&code), 0x401000);
+    assert!(text.contains("sub_401010(5)"), "{text}");
+}
+
+/// A function that spills a parameter and takes a frame address after its
+/// first call is no variadic function: it has no address of a list's stack
+/// part, so the spilled `rdx` stays its third parameter.
+#[test]
+fn a_lone_lea_after_a_call_proves_no_variable_list() {
+    let code = [
+        0x48, 0x83, 0xec, 0x58, // ASM: sub rsp,0x58
+        0x48, 0x89, 0x54, 0x24, 0x30, // ASM: mov [rsp+0x30],rdx
+        0x31, 0xd2, // ASM: xor edx,edx
+        0x40, 0xf6, 0xc6, 0x40, // ASM: test sil,0x40
+        0x75, 0x0e, // ASM: jne 0x40101f
+        0xe8, 0x15, 0x00, 0x00, 0x00, // ASM: call 0x40102b
+        0x8b, 0x44, 0x24, 0x30, // ASM: mov eax,[rsp+0x30]
+        0x48, 0x83, 0xc4, 0x58, // ASM: add rsp,0x58
+        0xc3, // ASM: ret
+        0x48, 0x8d, 0x44, 0x24, 0x20, // ASM: lea rax,[rsp+0x20]
+        0x48, 0x89, 0x44, 0x24, 0x10, // ASM: mov [rsp+0x10],rax
+        0xeb, 0xe6, // ASM: jmp 0x401011
+        0x89, 0xf8, // ASM: mov eax,edi
+        0xc3, // ASM: ret
+    ];
+    let p = sysv(&code);
+    let text = crate::decompiled::decompiled(&p, 0x401000);
+    let signature = text
+        .lines()
+        .find(|l| l.starts_with("// signature:"))
+        .unwrap_or_default();
+    assert!(
+        signature.contains("a3)") && !signature.contains("..."),
+        "{text}"
+    );
+}
