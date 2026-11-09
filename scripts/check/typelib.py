@@ -17,8 +17,9 @@ documentation: the Win32 reference on learn.microsoft.com (the parameter
 names and types each function page lists, and the documented values of the
 constants those pages name), the C standard library, and the POSIX
 specification and Linux man-pages for the POSIX rows (the Linux Standard
-Base for glibc's `__*_chk` entry points), the zlib manual for zlib's stream
-functions, with the values glibc
+Base for glibc's `__*_chk` entry points and its large-file `*64` names,
+which take their twins' parameters with `off64_t`, `struct stat64` and so
+on), the zlib manual for zlib's stream functions, with the values glibc
 uses on Linux x86 and x86-64 (where the kernel and glibc agree; `O_*`,
 `MAP_*` and the signal numbers differ on other architectures). No header
 text is copied: each declaration is restated as a list of parameter types
@@ -100,6 +101,7 @@ CTYPES: dict[str, str] = {
     "uintptr_t": "word",
     "ptrdiff_t": "sword",
     "off_t": "i64",
+    "off64_t": "i64",
     "pid_t": "i32",
     "uid_t": "u32",
     "gid_t": "u32",
@@ -3272,6 +3274,268 @@ POSIX: list[tuple[str, str, str | None, list[Param]]] = [
             ("int *", "longindex", None),
         ],
     ),
+    # glibc's large-file names: a build with _FILE_OFFSET_BITS=64 calls these
+    # in place of their twins, which take the same parameters with off64_t,
+    # struct stat64, struct dirent64, struct rlimit64 and fpos64_t.
+    (
+        "open64",
+        "int",
+        None,
+        [("const char *", "pathname", None), ("int", "flags", "open_flags"), ("...", "", None)],
+    ),
+    (
+        "openat64",
+        "int",
+        None,
+        [
+            ("int", "dirfd", None),
+            ("const char *", "pathname", None),
+            ("int", "flags", "open_flags"),
+            ("...", "", None),
+        ],
+    ),
+    ("creat64", "int", None, [("const char *", "pathname", None), ("mode_t", "mode", None)]),
+    (
+        "fopen64",
+        "FILE *",
+        None,
+        [("const char *", "pathname", None), ("const char *", "mode", None)],
+    ),
+    (
+        "freopen64",
+        "FILE *",
+        None,
+        [
+            ("const char *", "pathname", None),
+            ("const char *", "mode", None),
+            ("FILE *", "stream", None),
+        ],
+    ),
+    (
+        "fseeko64",
+        "int",
+        None,
+        [("FILE *", "stream", None), ("off64_t", "offset", None), ("int", "whence", "seek")],
+    ),
+    ("ftello64", "off64_t", None, [("FILE *", "stream", None)]),
+    ("fgetpos64", "int", None, [("FILE *", "stream", None), ("fpos64_t *", "pos", None)]),
+    ("fsetpos64", "int", None, [("FILE *", "stream", None), ("const fpos64_t *", "pos", None)]),
+    (
+        "lseek64",
+        "off64_t",
+        None,
+        [("int", "fd", None), ("off64_t", "offset", None), ("int", "whence", "seek")],
+    ),
+    (
+        "pread64",
+        "ssize_t",
+        None,
+        [
+            ("int", "fd", None),
+            ("void *", "buf", None),
+            ("size_t", "count", None),
+            ("off64_t", "offset", None),
+        ],
+    ),
+    (
+        "pwrite64",
+        "ssize_t",
+        None,
+        [
+            ("int", "fd", None),
+            ("const void *", "buf", None),
+            ("size_t", "count", None),
+            ("off64_t", "offset", None),
+        ],
+    ),
+    (
+        "preadv64",
+        "ssize_t",
+        None,
+        [
+            ("int", "fd", None),
+            ("const struct iovec *", "iov", None),
+            ("int", "iovcnt", None),
+            ("off64_t", "offset", None),
+        ],
+    ),
+    (
+        "pwritev64",
+        "ssize_t",
+        None,
+        [
+            ("int", "fd", None),
+            ("const struct iovec *", "iov", None),
+            ("int", "iovcnt", None),
+            ("off64_t", "offset", None),
+        ],
+    ),
+    ("truncate64", "int", None, [("const char *", "path", None), ("off64_t", "length", None)]),
+    ("ftruncate64", "int", None, [("int", "fd", None), ("off64_t", "length", None)]),
+    (
+        "stat64",
+        "int",
+        None,
+        [("const char *", "pathname", None), ("struct stat64 *", "statbuf", None)],
+    ),
+    ("fstat64", "int", None, [("int", "fd", None), ("struct stat64 *", "statbuf", None)]),
+    (
+        "lstat64",
+        "int",
+        None,
+        [("const char *", "pathname", None), ("struct stat64 *", "statbuf", None)],
+    ),
+    (
+        "fstatat64",
+        "int",
+        None,
+        [
+            ("int", "dirfd", None),
+            ("const char *", "pathname", None),
+            ("struct stat64 *", "statbuf", None),
+            ("int", "flags", None),
+        ],
+    ),
+    ("statfs64", "int", None, [("const char *", "path", None), ("struct statfs64 *", "buf", None)]),
+    ("fstatfs64", "int", None, [("int", "fd", None), ("struct statfs64 *", "buf", None)]),
+    (
+        "statvfs64",
+        "int",
+        None,
+        [("const char *", "path", None), ("struct statvfs64 *", "buf", None)],
+    ),
+    ("fstatvfs64", "int", None, [("int", "fd", None), ("struct statvfs64 *", "buf", None)]),
+    ("readdir64", "struct dirent64 *", None, [("DIR *", "dirp", None)]),
+    (
+        "readdir64_r",
+        "int",
+        None,
+        [
+            ("DIR *", "dirp", None),
+            ("struct dirent64 *", "entry", None),
+            ("struct dirent64 **", "result", None),
+        ],
+    ),
+    (
+        "scandir64",
+        "int",
+        None,
+        [
+            ("const char *", "dirp", None),
+            ("struct dirent64 ***", "namelist", None),
+            ("void *", "filter", None),
+            ("void *", "compar", None),
+        ],
+    ),
+    (
+        "alphasort64",
+        "int",
+        None,
+        [("const struct dirent64 **", "a", None), ("const struct dirent64 **", "b", None)],
+    ),
+    ("getrlimit64", "int", None, [("int", "resource", None), ("struct rlimit64 *", "rlim", None)]),
+    (
+        "setrlimit64",
+        "int",
+        None,
+        [("int", "resource", None), ("const struct rlimit64 *", "rlim", None)],
+    ),
+    (
+        "prlimit64",
+        "int",
+        None,
+        [
+            ("pid_t", "pid", None),
+            ("int", "resource", None),
+            ("const struct rlimit64 *", "new_limit", None),
+            ("struct rlimit64 *", "old_limit", None),
+        ],
+    ),
+    (
+        "mmap64",
+        "void *",
+        "map_result",
+        [
+            ("void *", "addr", None),
+            ("size_t", "length", None),
+            ("int", "prot", "prot"),
+            ("int", "flags", "map_flags"),
+            ("int", "fd", None),
+            ("off64_t", "offset", None),
+        ],
+    ),
+    (
+        "posix_fadvise64",
+        "int",
+        None,
+        [
+            ("int", "fd", None),
+            ("off64_t", "offset", None),
+            ("off64_t", "len", None),
+            ("int", "advice", None),
+        ],
+    ),
+    (
+        "posix_fallocate64",
+        "int",
+        None,
+        [("int", "fd", None), ("off64_t", "offset", None), ("off64_t", "len", None)],
+    ),
+    (
+        "fallocate64",
+        "int",
+        None,
+        [
+            ("int", "fd", None),
+            ("int", "mode", None),
+            ("off64_t", "offset", None),
+            ("off64_t", "len", None),
+        ],
+    ),
+    (
+        "sendfile64",
+        "ssize_t",
+        None,
+        [
+            ("int", "out_fd", None),
+            ("int", "in_fd", None),
+            ("off64_t *", "offset", None),
+            ("size_t", "count", None),
+        ],
+    ),
+    ("mkstemp64", "int", None, [("char *", "template", None)]),
+    ("mkostemp64", "int", None, [("char *", "template", None), ("int", "flags", None)]),
+    ("tmpfile64", "FILE *", None, []),
+    (
+        "glob64",
+        "int",
+        None,
+        [
+            ("const char *", "pattern", None),
+            ("int", "flags", None),
+            ("void *", "errfunc", None),
+            ("glob64_t *", "pglob", None),
+        ],
+    ),
+    ("globfree64", "void", None, [("glob64_t *", "pglob", None)]),
+    (
+        "ftw64",
+        "int",
+        None,
+        [("const char *", "dirpath", None), ("void *", "fn", None), ("int", "nopenfd", None)],
+    ),
+    (
+        "nftw64",
+        "int",
+        None,
+        [
+            ("const char *", "dirpath", None),
+            ("void *", "fn", None),
+            ("int", "nopenfd", None),
+            ("int", "flags", None),
+        ],
+    ),
+    ("lockf64", "int", None, [("int", "fd", None), ("int", "cmd", None), ("off64_t", "len", None)]),
 ]
 
 # Pointer typedefs the declarations above use that `CTYPES` spells as plain

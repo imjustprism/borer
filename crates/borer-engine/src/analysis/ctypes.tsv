@@ -149,6 +149,7 @@ long int	long
 long long	i64
 mode_t	u32
 nfds_t	ulong
+off64_t	i64
 off_t	i64
 pid_t	i32
 pthread_t	word

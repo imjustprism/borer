@@ -800,6 +800,24 @@ mod tests {
         assert_eq!(open.conv, super::Conv::Cdecl);
     }
 
+    /// glibc's large-file names take their twins' parameters.
+    ///
+    /// A build with `_FILE_OFFSET_BITS=64` calls them in place of the twins,
+    /// with 64-bit offsets: `fopen64` takes the two `fopen` takes, so a call
+    /// to it passes no register past them.
+    #[test]
+    fn large_file_names_take_their_twins_parameters() {
+        let elf = BinaryFormat::Elf;
+        let types = |name: &str| {
+            declared(name, elf).map(|d| d.params.iter().map(|p| p.ty).collect::<Vec<_>>())
+        };
+        assert_eq!(types("fopen64"), types("fopen"));
+        assert_eq!(types("lseek64"), Some(vec!["int", "off64_t", "int"]));
+        assert_eq!(pass_of("off64_t", 64, elf), pass_of("off_t", 64, elf));
+        assert!(declared("open64", elf).is_some_and(|d| d.variadic && d.params.len() == 2));
+        assert!(declared("fopen64", BinaryFormat::Pe).is_none());
+    }
+
     /// A typedef only the SDK library spells passes as its representation.
     #[test]
     fn sdk_typedefs_pass_by_their_representation() {
