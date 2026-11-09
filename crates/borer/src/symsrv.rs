@@ -334,33 +334,7 @@ pub(crate) fn curl(address: &str, dest: &Path) -> Result<(), String> {
     let mut address = address.to_owned();
     for _ in 0..=REDIRECTS_MAX {
         let to = target(&address)?;
-        let ip = match to.ip {
-            std::net::IpAddr::V4(v4) => v4.to_string(),
-            std::net::IpAddr::V6(v6) => format!("[{v6}]"),
-        };
-        let out = std::process::Command::new("curl")
-            .args([
-                "-sS",
-                "--proto",
-                "=https",
-                "--max-redirs",
-                "0",
-                "--connect-timeout",
-                "15",
-                "--max-time",
-                "600",
-                "--max-filesize",
-                &DOWNLOAD_MAX.to_string(),
-                "--resolve",
-                &format!("{}:{}:{ip}", to.host, to.port),
-                "-A",
-                "Microsoft-Symbol-Server/10.0.0.0",
-                "-w",
-                "%{http_code} %{redirect_url}",
-                "-o",
-            ])
-            .arg(dest)
-            .arg(&address)
+        let out = curl_command(&to, &address, dest)
             .output()
             .map_err(|e| format!("curl does not run ({e}); Windows 10 1803+ ships it"))?;
         if !out.status.success() {
@@ -383,6 +357,51 @@ pub(crate) fn curl(address: &str, dest: &Path) -> Result<(), String> {
         }
     }
     Err(format!("fetch failed: more than {REDIRECTS_MAX} redirects"))
+}
+
+/// Returns the `curl` command that fetches one URL into `dest`, pinned to
+/// the address [`target`] checked.
+///
+/// It follows no redirect (`--no-location`), so a `location` line in the
+/// user's curlrc, which `curl` reads before its command line, cannot make
+/// it follow; under one, `--max-redirs 0` alone would end the first
+/// redirect as `curl`'s exit 47 instead of answering it.
+///
+/// # Arguments
+///
+/// * `to` - Where to connect.
+/// * `address` - The URL.
+/// * `dest` - The file to write.
+fn curl_command(to: &Target, address: &str, dest: &Path) -> std::process::Command {
+    let ip = match to.ip {
+        std::net::IpAddr::V4(v4) => v4.to_string(),
+        std::net::IpAddr::V6(v6) => format!("[{v6}]"),
+    };
+    let mut cmd = std::process::Command::new("curl");
+    cmd.args([
+        "-sS",
+        "--proto",
+        "=https",
+        "--no-location",
+        "--max-redirs",
+        "0",
+        "--connect-timeout",
+        "15",
+        "--max-time",
+        "600",
+        "--max-filesize",
+        &DOWNLOAD_MAX.to_string(),
+        "--resolve",
+        &format!("{}:{}:{ip}", to.host, to.port),
+        "-A",
+        "Microsoft-Symbol-Server/10.0.0.0",
+        "-w",
+        "%{http_code} %{redirect_url}",
+        "-o",
+    ])
+    .arg(dest)
+    .arg(address);
+    cmd
 }
 
 /// Fetches the companion PDB a record names into the cache, or says what
@@ -488,7 +507,10 @@ pub(crate) fn obtain(
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_SERVER, cache_path, is_public, obtain, sanitize_name, target, url};
+    use super::{
+        DEFAULT_SERVER, Target, cache_path, curl_command, is_public, obtain, sanitize_name, target,
+        url,
+    };
     use borer_engine::program::Program;
     use std::path::{Path, PathBuf};
 
@@ -566,6 +588,39 @@ mod tests {
         assert_eq!(ok.host, "8.8.8.8");
         assert!(is_public("2606:4700::1111".parse().expect("an address")));
         assert!(!is_public("224.0.0.1".parse().expect("an address")));
+    }
+
+    /// A fetch follows no redirect itself, whatever the user's curlrc says,
+    /// and connects only to the address that was checked.
+    ///
+    /// # Panics
+    ///
+    /// When the command could follow a redirect or is not pinned.
+    #[test]
+    fn a_fetch_follows_no_redirect_itself() {
+        let to = Target {
+            host: "msdl.microsoft.com".to_owned(),
+            port: 443,
+            ip: "2606:4700::1111".parse().expect("an address"),
+        };
+        let address = "https://msdl.microsoft.com/download/symbols/a.pdb/K/a.pdb";
+        let args: Vec<String> = curl_command(&to, address, Path::new("a.pdb.download"))
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.iter().any(|a| a == "--no-location"), "{args:?}");
+        assert!(
+            !args.iter().any(|a| a == "-L" || a == "--location"),
+            "{args:?}"
+        );
+        for pair in [
+            ["--max-redirs", "0"],
+            ["--resolve", "msdl.microsoft.com:443:[2606:4700::1111]"],
+            ["-o", "a.pdb.download"],
+        ] {
+            assert!(args.windows(2).any(|w| w == pair), "{pair:?} in {args:?}");
+        }
+        assert_eq!(args.last().map(String::as_str), Some(address));
     }
 
     /// A recorded path names only its final component, and a name that
