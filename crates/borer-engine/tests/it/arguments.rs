@@ -3,15 +3,17 @@
 //!
 //! Each fixture is a hand-assembled System V caller at 0x401000 and its
 //! callee after it in a raw image. The caller's text runs beside the binary
-//! ([`crate::decompiled::runs_agree`]), so an argument that reads a
-//! register no line sets fails the run as it fails certify.
+//! as ISO C, as certify reads it ([`iso_agrees`]), so an argument that
+//! reads a register no line sets fails the run as it fails certify.
 
 #![expect(
     clippy::missing_panics_doc,
     reason = "assertions are the point of a test"
 )]
 
-use borer_engine::analysis::Analysis;
+use borer_engine::analysis::decompile::decompile;
+use borer_engine::analysis::render::{Verdict, check_generated_iso};
+use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::program::{Arch, BinaryFormat, Program};
 
 /// Builds a System V image of `code` at 0x401000, entered there.
@@ -23,6 +25,33 @@ fn sysv(code: &[u8]) -> Program {
     let mut p = crate::raw::image(Arch::X86_64, code, &[]);
     p.format = BinaryFormat::Elf;
     p
+}
+
+/// Runs a function's text as ISO C beside the binary on eight inputs, as
+/// certify does, and requires every run to agree.
+///
+/// # Arguments
+///
+/// * `p` - The program.
+/// * `entry` - The function.
+///
+/// # Returns
+///
+/// The text, for the caller's own assertions.
+#[expect(
+    clippy::expect_used,
+    reason = "a text that does not read has no useful recovery"
+)]
+fn iso_agrees(p: &Program, entry: u64) -> String {
+    let a = Analysis::compute(p);
+    let o = Overlay::default();
+    let text = decompile(p, &a, &o, entry).unwrap_or_default();
+    let rows = check_generated_iso(p, &a, &o, entry, 8, 1, 20_000).expect("the text reads");
+    assert!(
+        !rows.is_empty() && rows.iter().all(|(_, v)| *v == Verdict::Agrees),
+        "{rows:?}\n{text}"
+    );
+    text
 }
 
 /// An epilogue releases its frame on its own path even when an
@@ -59,6 +88,7 @@ fn an_epilogue_steps_over_what_leaves_the_stack_alone() {
     let p = sysv(&code);
     let a = Analysis::compute(&p);
     assert_eq!(a.function(0x401010).map(|f| f.stack_args), Some(0));
-    let text = crate::decompiled::runs_agree(&p, 0x401000);
+    let text = iso_agrees(&p, 0x401000);
     assert!(text.contains("sub_401010(5)"), "{text}");
 }
+
