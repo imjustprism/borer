@@ -24,6 +24,7 @@ mod conv;
 mod dispatch;
 mod effects;
 mod float;
+mod homes;
 mod interfaces;
 mod kernel;
 mod pack;
@@ -37,6 +38,7 @@ mod switch;
 
 pub(in crate::analysis::decompile) use conv::*;
 pub(in crate::analysis::decompile) use effects::*;
+use homes::{Home, Homes};
 pub(in crate::analysis::decompile) use pack::*;
 pub(in crate::analysis::decompile) use record::*;
 pub(in crate::analysis::decompile) use shared::*;
