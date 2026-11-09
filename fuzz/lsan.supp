@@ -1,0 +1,15 @@
+# LeakSanitizer suppressions for the fuzz targets; the fuzz workflow passes
+# this file in LSAN_OPTIONS. Every other leak still fails the run.
+#
+# iced-x86 1.21.0 builds its decoder tables once per process, in the
+# lazy_static TABLES (src/decoder/handlers/tables.rs), and allocates each
+# handler with Box::into_raw so the tables hold &'static references that are
+# never freed. read_vex (src/decoder/table_de/mod.rs) deserializes the VEX
+# map0 table as well but returns it only with iced's mvex feature, which
+# borer does not enable, so once its deserializer drops, the handlers only
+# map0 points at are referenced by nothing. Fuzz run 42682336514 (analyze,
+# seed 3450009731) reported them at exit, 552 bytes in 12 allocations, and
+# run 42703831666 symbolized that report on the same build (BuildId
+# 38062a217ec2f3d7ce93cfa1128964ab4453d331): every allocation is under
+# read_vex. The tables are built once, so the leak cannot grow with inputs.
+leak:read_vex

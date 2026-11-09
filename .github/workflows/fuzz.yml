@@ -49,6 +49,9 @@ env:
   # offset into the binary.
   ASAN_OPTIONS: symbolize=1
   ASAN_SYMBOLIZER_PATH: /usr/bin/llvm-symbolizer
+  # LeakSanitizer passes over the one leak fuzz/lsan.supp names and explains
+  # (a dependency's tables, built once); every other leak fails the run.
+  LSAN_OPTIONS: suppressions=${{ github.workspace }}/fuzz/lsan.supp
 
 jobs:
   fuzz:
