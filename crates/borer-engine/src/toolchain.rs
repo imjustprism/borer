@@ -235,6 +235,12 @@ const CLANG: [u8; 14] = reversed(b"clang version ");
 const RUSTC_PATH: [u8; 7] = reversed(b"/rustc/");
 /// The Go build information header, back to front.
 const GO_BUILDINFO: [u8; 14] = reversed(b"\xff Go buildinf:");
+/// The Go build information header's size in bytes: its magic, pointer
+/// size and flags, then room for the older format's two pointers.
+const GO_HEADER: usize = 32;
+/// The build information flags bit saying the version and module strings
+/// follow the header inline (Go 1.18 and later).
+const GO_INLINE: u8 = 2;
 /// The version text rustc's `llvm.ident` writes into an ELF's `.comment`,
 /// back to front.
 const RUSTC_VERSION: [u8; 14] = reversed(b"rustc version ");
@@ -485,12 +491,32 @@ fn rust(p: &Program, paths: &RustPaths<'_>, version: Option<usize>) -> Finding {
 
 /// The Go release named after the build information header at `at`, `go1.22.3`.
 ///
+/// Go 1.18 and later (the flags byte's [`GO_INLINE`] bit) write the version
+/// after the [`GO_HEADER`]-byte header as a uvarint length and that many
+/// bytes, and the module information right after them, whose length byte
+/// can be printable; the release is read only within those bytes. The older
+/// header points at the version instead, and the bytes after it are
+/// searched for one.
+///
 /// # Arguments
 ///
 /// * `bytes` - The file.
 /// * `at` - Where the header starts.
+///
+/// # Returns
+///
+/// The `go1.` text's letters, digits and dots, or `None` when the header
+/// is cut short or names no release.
 fn go_version(bytes: &[u8], at: usize) -> Option<String> {
-    let window = bytes.get(at..bytes.len().min(at + 0x200))?;
+    let mut window = bytes.get(at..bytes.len().min(at + 0x200))?;
+    if window
+        .get(GO_BUILDINFO.len() + 1)
+        .is_some_and(|flags| flags & GO_INLINE != 0)
+    {
+        let mut from = GO_HEADER;
+        let len = usize::try_from(crate::macho::uleb(window, &mut from)?).ok()?;
+        window = window.get(from..from.checked_add(len)?)?;
+    }
     let start = crate::fileinfo::find(window, b"go1.")?;
     let text: String = window
         .get(start..)?

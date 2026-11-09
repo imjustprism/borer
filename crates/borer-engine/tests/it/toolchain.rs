@@ -109,7 +109,9 @@ fn a_upx_header_mark_names_a_renamed_upx() {
 fn a_raw_image_keeps_its_marks() {
     use borer_engine::program::{Arch, Program};
     let mut bytes = vec![0u8; 0x100];
-    bytes.extend_from_slice(b"\xff Go buildinf:\x08\x02go1.22.3\0");
+    bytes.extend_from_slice(b"\xff Go buildinf:\x08\x02");
+    bytes.resize(0x120, 0);
+    bytes.extend_from_slice(b"\x08go1.22.3\0");
     let raw = Program::raw(bytes, Arch::X86_64, 0, None, Vec::new());
     let out = lines(&raw, false).join("\n");
     assert!(
@@ -118,6 +120,48 @@ fn a_raw_image_keeps_its_marks() {
     );
     let empty = Program::raw(vec![0; 0x100], Arch::X86_64, 0, None, Vec::new());
     assert!(lines(&empty, false).is_empty());
+}
+
+/// A Go 1.18+ build information header's version is read by its length.
+///
+/// The module information after it, whose length byte can be printable, is
+/// no part of it, and a header that ends before its version field or cuts
+/// it short names no version. The older header, which points at its
+/// version, is still searched for one.
+#[test]
+fn a_go_version_ends_at_its_length() {
+    use borer_engine::program::{Arch, Program};
+    let built = |flags: u8, after: &[u8]| {
+        let mut bytes = vec![0u8; 0x100];
+        bytes.extend_from_slice(b"\xff Go buildinf:\x08");
+        bytes.push(flags);
+        bytes.resize(0x120, 0);
+        bytes.extend_from_slice(after);
+        let raw = Program::raw(bytes, Arch::X86_64, 0, None, Vec::new());
+        lines(&raw, false).join("\n")
+    };
+    let module = format!("path\t{}\n", "m".repeat(50));
+    let mut inline = b"\x08go1.22.5".to_vec();
+    inline.push(u8::try_from(module.len()).expect("one byte"));
+    inline.extend_from_slice(module.as_bytes());
+    assert_eq!(inline.get(9), Some(&b'8'), "the length byte is printable");
+    let out = built(2, &inline);
+    assert!(
+        out.contains("built:   Go, go1.22.5 (medium: build information at 0x100)"),
+        "{out}"
+    );
+    for cut in [&b""[..], b"\x08go1.22"] {
+        let out = built(2, cut);
+        assert!(
+            out.contains("built:   Go (medium: build information at 0x100)"),
+            "{out}"
+        );
+    }
+    let out = built(0, b"go1.16.15\0");
+    assert!(
+        out.contains("built:   Go, go1.16.15 (medium: build information at 0x100)"),
+        "{out}"
+    );
 }
 
 /// A rustc source path reads high only with a second sign behind it.
