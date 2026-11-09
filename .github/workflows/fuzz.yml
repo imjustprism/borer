@@ -26,7 +26,7 @@ env:
   CARGO_TERM_COLOR: always
   # cargo-fuzz needs nightly; a dated one keeps the build reproducible.
   NIGHTLY: nightly-2026-10-01
-  SECONDS_PER_TARGET: ${{ github.event_name == 'schedule' && 600 || 60 }}
+  SECONDS_PER_TARGET: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 600 || 60 }}
 
 jobs:
   fuzz:
