@@ -210,6 +210,46 @@ fn a_ladder_after_a_call_is_scanned_to_its_cases() {
     assert!(text.contains("// signature: void "), "{text}");
 }
 
+/// A byte a caller sets in a result register is its own value, so a later
+/// read of it, alone or merged into the whole register, uses nothing the
+/// callee left.
+///
+/// Unoptimized GCC code tests two conditions as `setne dl; sete al; xor
+/// eax, edx; test al, al`, and a single one as `seta dl; test dl, dl`.
+/// Read as uses of the call's results, such bytes made `memset`, `memcpy`
+/// and `fwrite` hand back `rdx`, and a `void` function return `uint32_t`.
+#[test]
+fn a_byte_set_after_a_call_reads_no_result_of_it() {
+    let mut code = vec![
+        0x53, // ASM: push rbx
+        0x89, 0xcb, // ASM: mov ebx,ecx
+        0xe8, 0x38, 0x00, 0x00, 0x00, // ASM: call 0x140001040
+        0x85, 0xdb, // ASM: test ebx,ebx
+        0x0f, 0x95, 0xc2, // ASM: setne dl
+        0x0f, 0x94, 0xc0, // ASM: sete al
+        0x31, 0xd0, // ASM: xor eax,edx
+        0x0f, 0xb6, 0xc0, // ASM: movzx eax,al
+        0x5b, // ASM: pop rbx
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x40, 0xcc);
+    code.extend_from_slice(&[
+        0x48, 0x8b, 0x01, // ASM: mov rax,[rcx]
+        0x48, 0x8b, 0x51, 0x08, // ASM: mov rdx,[rcx+8]
+        0x48, 0x01, 0x10, // ASM: add [rax],rdx
+        0xc3, // ASM: ret
+    ]);
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    assert_eq!(verdict(&a, X64 + 0x40), Some(false));
+    assert_eq!(
+        a.function(X64 + 0x40).map(|f| f.hands_back_rdx),
+        Some(false)
+    );
+    let text = decompile(&p, &a, &Overlay::default(), X64 + 0x40).unwrap_or_default();
+    assert!(text.contains("// signature: void "), "{text}");
+}
+
 /// Where the T32 code starts.
 const T32: u64 = 0x4_0000;
 

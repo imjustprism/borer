@@ -2026,13 +2026,16 @@ pub(super) fn lane_before(
 ///
 /// Every path from the return address is scanned, down both sides of each
 /// conditional branch and through each jump within the caller, until rax is
-/// read whole, fully written, clobbered by another call, or handed on by a
-/// `ret` (a narrower read goes on, so the widest read is the width);
-/// a path ending in `int3` or `ud2` reads nothing. A path that leaves the
-/// caller's blocks, branches indirectly, or runs past [`SCAN_MAX`]
-/// instructions is not followed, and nor are more than [`PATHS_MAX`]
-/// paths. An instruction is checked for a read of rax before anything
-/// else, so `call [rax+0x10]` and `jmp rax` use the value.
+/// read whole, written, clobbered by another call, or handed on by a `ret`
+/// (a narrower read goes on, so the widest read is the width); a path
+/// ending in `int3` or `ud2` reads nothing. A write of any part ends the
+/// path: the byte a caller sets is its own value, and what a wider read
+/// merges in around it the code does not use, so `seta dl; test dl, dl`
+/// and `setne dl; xor eax, edx; test al, al` use nothing the call left.
+/// A path that leaves the caller's blocks, branches indirectly, or runs
+/// past [`SCAN_MAX`] instructions is not followed, and nor are more than
+/// [`PATHS_MAX`] paths. An instruction is checked for a read of rax before
+/// anything else, so `call [rax+0x10]` and `jmp rax` use the value.
 ///
 /// # Arguments
 ///
@@ -2095,7 +2098,7 @@ fn classify(
                 break;
             };
             let mut read = None;
-            let mut full_write = false;
+            let mut written = false;
             for ur in factory.info(&instr).used_registers() {
                 if ur.register().full_register() != reg {
                     continue;
@@ -2107,9 +2110,7 @@ fn classify(
                     | OpAccess::ReadCondWrite => {
                         read = read.max(Some(read_bits(ur.register())));
                     }
-                    OpAccess::Write | OpAccess::CondWrite => {
-                        full_write |= full_names(reg).contains(&ur.register());
-                    }
+                    OpAccess::Write | OpAccess::CondWrite => written = true,
                     OpAccess::None | OpAccess::NoMemAccess => {}
                 }
             }
@@ -2120,7 +2121,7 @@ fn classify(
                     break;
                 }
             }
-            if full_write {
+            if written {
                 break;
             }
             let target = instr.near_branch_target();
