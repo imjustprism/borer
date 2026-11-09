@@ -250,6 +250,37 @@ fn a_byte_set_after_a_call_reads_no_result_of_it() {
     assert!(text.contains("// signature: void "), "{text}");
 }
 
+/// An idiom that sets rax whatever it held reads no result of the call
+/// before it.
+///
+/// `or rax, -1` reads rax as encoded and sets every bit of it; MSVC starts
+/// a length loop so, and a cmd.exe helper that fills memory with a 16-bit
+/// pattern, whose one caller does that after the call, printed as
+/// returning `uint64_t`.
+#[test]
+fn an_idiom_setting_rax_after_a_call_reads_no_result_of_it() {
+    let mut code = vec![
+        0x53, // ASM: push rbx
+        0x48, 0x89, 0xcb, // ASM: mov rbx,rcx
+        0xe8, 0x37, 0x00, 0x00, 0x00, // ASM: call 0x140001040
+        0x48, 0x83, 0xc8, 0xff, // ASM: or rax,-1
+        0x48, 0x89, 0x03, // ASM: mov [rbx],rax
+        0x5b, // ASM: pop rbx
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x40, 0xcc);
+    code.extend_from_slice(&[
+        0x48, 0x8b, 0x01, // ASM: mov rax,[rcx]
+        0x83, 0x00, 0x01, // ASM: add dword [rax],1
+        0xc3, // ASM: ret
+    ]);
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    assert_eq!(verdict(&a, X64 + 0x40), Some(false));
+    let text = decompile(&p, &a, &Overlay::default(), X64 + 0x40).unwrap_or_default();
+    assert!(text.contains("// signature: void "), "{text}");
+}
+
 /// Where the T32 code starts.
 const T32: u64 = 0x4_0000;
 

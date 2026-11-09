@@ -976,7 +976,7 @@ fn x87_body(ctx: &Ctx<'_>, target: u64) -> Option<x87::Effect> {
 /// # Arguments
 ///
 /// * `instr` - The instruction.
-pub(in crate::analysis::decompile) fn sets_without_reading(instr: &Instruction) -> bool {
+pub(crate) fn sets_without_reading(instr: &Instruction) -> bool {
     if instr.op_count() != 2 || instr.op0_kind() != OpKind::Register {
         return false;
     }

@@ -37,6 +37,7 @@ mod strings;
 mod switch;
 
 pub(in crate::analysis::decompile) use conv::*;
+pub(crate) use effects::sets_without_reading;
 pub(in crate::analysis::decompile) use effects::*;
 use homes::{Home, Homes, late_fixed};
 pub(in crate::analysis::decompile) use pack::*;

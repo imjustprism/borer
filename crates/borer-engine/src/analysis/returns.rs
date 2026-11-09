@@ -34,6 +34,7 @@ use crate::isa::x86::{
     Register,
 };
 
+use super::decompile::lift::sets_without_reading;
 use super::functions::{decode_at, decode_block};
 use super::typelib;
 use super::{
@@ -2031,7 +2032,9 @@ pub(super) fn lane_before(
 /// ending in `int3` or `ud2` reads nothing. A write of any part ends the
 /// path: the byte a caller sets is its own value, and what a wider read
 /// merges in around it the code does not use, so `seta dl; test dl, dl`
-/// and `setne dl; xor eax, edx; test al, al` use nothing the call left.
+/// and `setne dl; xor eax, edx; test al, al` use nothing the call left;
+/// nor does an idiom that sets the register whatever it held (`or rax,
+/// -1`, where MSVC starts a length loop).
 /// A path that leaves the caller's blocks, branches indirectly, or runs
 /// past [`SCAN_MAX`] instructions is not followed, and nor are more than
 /// [`PATHS_MAX`] paths. An instruction is checked for a read of rax before
@@ -2099,11 +2102,13 @@ fn classify(
             };
             let mut read = None;
             let mut written = false;
+            let set_only = sets_without_reading(&instr).then(|| instr.op0_register());
             for ur in factory.info(&instr).used_registers() {
                 if ur.register().full_register() != reg {
                     continue;
                 }
                 match ur.access() {
+                    _ if set_only == Some(ur.register()) => written = true,
                     OpAccess::Read
                     | OpAccess::CondRead
                     | OpAccess::ReadWrite
