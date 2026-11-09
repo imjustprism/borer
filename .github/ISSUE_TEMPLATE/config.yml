@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a vulnerability privately
+    url: https://github.com/imjustprism/borer/security/advisories/new
+    about: Anything that could hurt the person running borer (see SECURITY.md). Please do not open a public issue for it.
+  - name: Documentation
+    url: https://borer.lol
+    about: Install, tools and resources.

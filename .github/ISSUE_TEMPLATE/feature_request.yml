@@ -1,0 +1,24 @@
+name: Feature request
+description: Something borer should read, find or answer that it does not today.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: want
+    attributes:
+      label: What you want to do
+      description: The question you want answered about a binary, or the task an agent could not finish.
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: What borer does today
+      description: The command or MCP tool you tried and what it answered, trimmed to the part that matters.
+      render: text
+  - type: textarea
+    id: example
+    attributes:
+      label: An example
+      description: >
+        The file format, architecture, compiler or sample where it matters. For malware, give its
+        SHA-256 and a public source instead of attaching it.

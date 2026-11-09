@@ -31,7 +31,8 @@ body:
       description: >
         Format, architecture and compiler if you know them. Attach or link
         the file only if you are allowed to share it; a small program that
-        reproduces the problem is even better.
+        reproduces the problem is even better. For malware, give its SHA-256
+        and a public source instead of attaching it.
   - type: input
     id: version
     attributes:
