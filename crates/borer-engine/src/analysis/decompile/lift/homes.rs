@@ -60,7 +60,8 @@ pub(super) struct Homes {
     /// argument register for `va_start`, or any other, `xmm0` for a float
     /// argument parked to be read back as bits.
     pub(super) stored: BTreeMap<usize, Register>,
-    /// The lowest slot whose address was taken.
+    /// The lowest slot whose address was taken: on System V, the first
+    /// stack word, where `va_start` points the list's stack part.
     pub(super) va_start: Option<usize>,
 }
 
@@ -147,7 +148,7 @@ impl Homes {
                     self.stored.get(&k).copied().unwrap_or(self.args[k]),
                 ));
             }
-        } else if self.active
+        } else if (self.active || self.save_area)
             && i.mnemonic() == Mnemonic::Lea
             && i.op0_kind() == OpKind::Register
             && let Some(k) = arg_slot(self, i)
@@ -273,7 +274,13 @@ impl Homes {
     /// stored eight bytes apart in register order, the last two at least,
     /// and the vector half is there too: `al` was tested for it, or a
     /// vector register was stored where the area puts it, past the integer
-    /// ones. A function that spills its own parameters for a debug build
+    /// ones, or the address of the list's stack part was taken for
+    /// `va_start`: GCC leaves the vector half out when every variable
+    /// argument is an integer (gnulib's `rpl_fcntl`). With all six
+    /// integer registers fixed the area holds the vector half alone:
+    /// `xmm0` to `xmm7` sixteen bytes apart behind `test al, al`, the
+    /// caller's count of them, which no parameter is (openssh's `sshlog`).
+    /// A function that spills its own parameters for a debug build
     /// stores them in no such run and tests no `al`.
     fn save_area_fixed(&self) -> Option<usize> {
         /// Bytes of one integer register's place in the save area.
@@ -282,13 +289,28 @@ impl Homes {
         const VECTOR: i64 = 16;
         let step = |n: usize, size: i64| i64::try_from(n).ok().map(|n| n * size);
         let last = self.args.len().checked_sub(1)?;
-        let area = self.saved.get(&last)? - step(last, GPR)?;
+        let vector_at =
+            |base: i64, j: usize, o: i64| step(j, VECTOR).is_some_and(|s| o == base + s);
+        let Some(r9) = self.saved.get(&last) else {
+            let base = *self.saved_vectors.get(&0)?;
+            let whole = (0..self.vectors.len()).all(|j| {
+                self.saved_vectors
+                    .get(&j)
+                    .is_some_and(|o| vector_at(base, j, *o))
+            });
+            return (self.counts_vectors && whole).then_some(self.args.len());
+        };
+        let area = r9 - step(last, GPR)?;
         let at = |k: usize| step(k, GPR).is_some_and(|o| self.saved.get(&k) == Some(&(area + o)));
         let first = (0..=last).rev().take_while(|k| at(*k)).last()?;
         let vectors = step(self.args.len(), GPR)? + area;
-        let vector_at = |j: usize, o: i64| step(j, VECTOR).is_some_and(|s| o == vectors + s);
         (first < last
-            && (self.counts_vectors || self.saved_vectors.iter().any(|(j, o)| vector_at(*j, *o))))
+            && (self.counts_vectors
+                || self.va_start.is_some()
+                || self
+                    .saved_vectors
+                    .iter()
+                    .any(|(j, o)| vector_at(vectors, *j, *o))))
         .then_some(first)
     }
 }
