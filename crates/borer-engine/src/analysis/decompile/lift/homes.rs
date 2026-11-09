@@ -290,9 +290,12 @@ impl Homes {
     /// stored eight bytes apart in register order, the last two at least,
     /// and the vector half is there too: `al` was tested for it, or a
     /// vector register was stored where the area puts it, past the integer
-    /// ones, or the address of the list's stack part was taken for
-    /// `va_start`: GCC leaves the vector half out when every variable
-    /// argument is an integer (gnulib's `rpl_fcntl`). With all six
+    /// ones, or `va_start` took the addresses of both parts of the list,
+    /// its stack part and the area's start: GCC leaves the vector half
+    /// out when every variable argument is an integer (gnulib's
+    /// `rpl_fcntl`), and a function that spills `r8` and `r9` side by side
+    /// and takes the address of its seventh parameter shows one of the
+    /// two. With all six
     /// integer registers fixed the area holds the vector half alone:
     /// `xmm0` to `xmm7` sixteen bytes apart behind `test al, al`, the
     /// caller's count of them, which no parameter is (openssh's `sshlog`).
@@ -337,7 +340,7 @@ impl Homes {
         let vectors = step(self.args.len(), GPR)? + area;
         (first < last
             && (self.counts_vectors
-                || self.va_start.is_some()
+                || (self.va_start.is_some() && self.taken.contains(&area))
                 || self
                     .saved_vectors
                     .iter()

@@ -519,3 +519,34 @@ fn a_spill_in_order_and_a_test_of_al_prove_no_variable_list() {
         "{text}"
     );
 }
+
+/// A spill of `r8` and `r9` beside a parameter's address is no variable list.
+///
+/// The function spills both side by side and takes the address of its
+/// seventh parameter; `va_start` takes the address of the save area's
+/// start too, and nothing here does. Read as an integer save area behind
+/// the list's stack part, the two stores and the `lea` made a
+/// seven-parameter function `(a1, .., a4, ...)`.
+#[test]
+fn a_spill_beside_a_parameter_s_address_is_no_variable_list() {
+    let code = [
+        0x48, 0x83, 0xec, 0x38, // ASM: sub rsp,0x38
+        0x4c, 0x89, 0x44, 0x24, 0x10, // ASM: mov [rsp+0x10],r8
+        0x4c, 0x89, 0x4c, 0x24, 0x18, // ASM: mov [rsp+0x18],r9
+        0x48, 0x8d, 0x44, 0x24, 0x40, // ASM: lea rax,[rsp+0x40]
+        0x48, 0x89, 0x44, 0x24, 0x20, // ASM: mov [rsp+0x20],rax
+        0x48, 0x8b, 0x44, 0x24, 0x18, // ASM: mov rax,[rsp+0x18]
+        0x48, 0x83, 0xc4, 0x38, // ASM: add rsp,0x38
+        0xc3, // ASM: ret
+    ];
+    let p = sysv(&code);
+    let text = crate::decompiled::decompiled(&p, 0x401000);
+    let signature = text
+        .lines()
+        .find(|l| l.starts_with("// signature:"))
+        .unwrap_or_default();
+    assert!(
+        signature.contains("a7)") && !signature.contains("..."),
+        "{text}"
+    );
+}
