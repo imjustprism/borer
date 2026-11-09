@@ -1195,7 +1195,7 @@ fn repe_cmpsb_is_the_compare_it_expands() {
         0x5e, // ASM: pop rsi
         0xc3, // ASM: ret
     ]);
-    let p = program(&code, b"hello ");
+    let p = program(&code, b"hello\0");
     let a = Analysis::compute(&p);
     let o = Overlay::default();
     for (entry, call) in [
