@@ -272,10 +272,11 @@ impl Exec<'_, '_> {
     /// caller wrote for the call being lifted, in its block since the last
     /// call, short of the register the call goes through: a callee of
     /// unknown arity takes every slot up to it, as long as the slot at
-    /// `from` holds something some line or call set. A register nothing
-    /// set is a hole no argument fills, and the list ends there: dpkg's
-    /// `MD5Init(var1, rsi, var1)` passed an `rsi` nothing set because the
-    /// block had set `rdx` for a store of its own.
+    /// `from` holds a value or a name some line gave it. A register nothing
+    /// set, or one an earlier call only clobbered, is a hole no argument
+    /// fills, and the list ends there: dpkg's `MD5Init(var1, rsi, var1)`
+    /// passed the `rsi` its `m_malloc` call left because the block had
+    /// set `rdx` for a store of its own.
     ///
     /// # Arguments
     ///
@@ -289,8 +290,7 @@ impl Exec<'_, '_> {
                 .filter(|r| self.call_through != Some(*r))
                 .map(Key::Reg)
         };
-        let set = |k: &Key| self.env.vals.contains_key(k) || self.env.clobbered.contains(k);
-        slot(from).is_some_and(|k| set(&k) || self.names_register(k))
+        slot(from).is_some_and(|k| self.env.vals.contains_key(&k) || self.names_register(k))
             && (from + 1..self.ctx.conv.reg_args())
                 .map_while(slot)
                 .any(|k| self.env.fresh.contains(&k) && self.written_here.contains(&k))

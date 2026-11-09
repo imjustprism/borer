@@ -325,3 +325,41 @@ fn a_hole_ends_the_list_of_a_callee_of_unknown_arity() {
     let text = iso_agrees(&p, 0x401000);
     assert!(text.contains("sub_401014(a1)"), "{text}");
 }
+
+/// A register an earlier call only clobbered is no argument of a callee
+/// whose arity nothing states either.
+///
+/// dpkg's `buffer_md5_init` calls `m_malloc` first, so `rsi` holds what
+/// that call left, then stores `rdx` for a copy of its own and calls
+/// `MD5Init` through its import stub. The clobbered `rsi` counted as set,
+/// bridged to `rdx`, and the call read `MD5Init(var1, rsi, var1)`.
+#[test]
+fn a_register_an_earlier_call_left_is_no_argument_of_an_unknown_callee() {
+    let mut code = vec![
+        0x53, // ASM: push rbx
+        0x48, 0x89, 0xfb, // ASM: mov rbx,rdi
+        0xe8, 0x1f, 0x00, 0x00, 0x00, // ASM: call 0x401028
+        0x48, 0x8b, 0x13, // ASM: mov rdx,[rbx]
+        0x48, 0x89, 0x53, 0x08, // ASM: mov [rbx+8],rdx
+        0x48, 0x89, 0xdf, // ASM: mov rdi,rbx
+        0xe8, 0x08, 0x00, 0x00, 0x00, // ASM: call 0x401020
+        0x5b, // ASM: pop rbx
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x20, 0xcc);
+    code.extend_from_slice(&[
+        0xff, 0x25, 0xda, 0x0f, 0x00, 0x00, // ASM: jmp qword [rip+0xfda] (0x402000)
+        0xcc, 0xcc, // ASM: int3 (padding)
+        0x31, 0xf6, // ASM: xor esi,esi
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax,1
+        0xc3, // ASM: ret
+    ]);
+    code.extend_from_slice(&[
+        0xb8, 0x07, 0x00, 0x00, 0x00, // ASM: mov eax,7
+        0xc3, // ASM: ret
+    ]);
+    let mut p = crate::raw::image(Arch::X86_64, &code, &0x0040_1030u64.to_le_bytes());
+    p.format = BinaryFormat::Elf;
+    let text = iso_agrees(&p, 0x401000);
+    assert!(text.contains("sub_401020(a1)"), "{text}");
+}
