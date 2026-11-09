@@ -2,17 +2,26 @@
 //! and packed integer and float lanes, and the flags a block sets.
 
 use super::*;
+use crate::isa::x86::OpAccess;
 
-/// Tells whether the replay can check an instruction: general registers
-/// only, no `lock`, no access through `fs` or `gs`, memory no wider than
-/// a word.
+/// Tells whether the replay can check an instruction.
+///
+/// It touches general registers only, takes no `lock`, reads memory no
+/// wider than a word, and reaches through `fs` or `gs` only to read a field
+/// of the thread block the machine plants ([`reads_field`]).
 ///
 /// # Arguments
 ///
 /// * `i` - The instruction.
 /// * `info` - Register-access facts.
-fn integer(i: &Instruction, info: &mut InstructionInfoFactory) -> bool {
-    let segment = |r: Register| matches!(r, Register::FS | Register::GS);
+/// * `thread` - The thread block the machine plants.
+fn integer(
+    i: &Instruction,
+    info: &mut InstructionInfoFactory,
+    thread: Option<&ThreadBlock>,
+) -> bool {
+    let field = reads_field(i, info, thread);
+    let segment = |r: Register| !field && matches!(r, Register::FS | Register::GS);
     if i.has_lock_prefix() || segment(i.segment_prefix()) {
         return false;
     }
@@ -25,6 +34,38 @@ fn integer(i: &Instruction, info: &mut InstructionInfoFactory) -> bool {
         r.is_gpr()
             || matches!(r, Register::RIP | Register::EIP)
             || (r.is_segment_register() && !segment(r))
+    })
+}
+
+/// Tells whether an instruction reads one field of the thread block the
+/// machine plants ([`ThreadBlock::fields`]).
+///
+/// Its every memory access is a read through the block's segment at a
+/// constant offset, the field's width. A write, a computed offset or
+/// another field stays out, so its block is left unchecked as a thread
+/// block access.
+///
+/// # Arguments
+///
+/// * `i` - The instruction.
+/// * `info` - Register-access facts.
+/// * `thread` - The thread block the machine plants.
+fn reads_field(
+    i: &Instruction,
+    info: &mut InstructionInfoFactory,
+    thread: Option<&ThreadBlock>,
+) -> bool {
+    thread.is_some_and(|t| {
+        let used = info.info(i).used_memory();
+        !used.is_empty()
+            && used.iter().all(|m| {
+                m.segment() == t.segment
+                    && m.base() == Register::None
+                    && m.index() == Register::None
+                    && m.access() == OpAccess::Read
+                    && t.fields
+                        .contains(&(m.displacement(), from_usize(m.memory_size().size())))
+            })
     })
 }
 
@@ -299,13 +340,15 @@ fn packed_integer(i: &Instruction, info: &mut InstructionInfoFactory) -> bool {
 ///
 /// * `code` - The block's instructions.
 /// * `info` - Register-access facts.
+/// * `thread` - The thread block the machine plants.
 pub(super) fn integer_or_zero_fill(
     code: &[Instruction],
     info: &mut InstructionInfoFactory,
+    thread: Option<&ThreadBlock>,
 ) -> bool {
     let mut zeroed: Vec<Register> = Vec::new();
     code.iter().all(|i| {
-        if integer(i, info) || scalar_float(i, info) {
+        if integer(i, info, thread) || scalar_float(i, info) {
             return true;
         }
         let regs = i.op_count() == 2 && i.op1_kind() == OpKind::Register;
@@ -343,23 +386,26 @@ pub(super) fn integer_or_zero_fill(
 /// Why a block outside the checked subset ([`integer_or_zero_fill`]) is not
 /// checked, by its first instruction outside it.
 ///
-/// A memory access through `fs` or `gs` reads the thread block (the
-/// exception chain, the stack bounds, thread-local storage), which is no
-/// float; an instruction naming a floating-point or vector register, or an
-/// x87 one, is the float/vector form the replay leaves alone; anything
-/// else is an instruction no model covers.
+/// A memory access through `fs` or `gs` other than a read of a field the
+/// machine plants ([`reads_field`]) reaches the thread block (the
+/// exception chain, thread-local storage, the fields planted as zero),
+/// which is no float; an instruction naming a floating-point or vector
+/// register, or an x87 one, is the float/vector form the replay leaves
+/// alone; anything else is an instruction no model covers.
 ///
 /// # Arguments
 ///
 /// * `code` - The block's instructions.
 /// * `info` - Register-access facts.
+/// * `thread` - The thread block the machine plants.
 pub(super) fn outside_subset(
     code: &[Instruction],
     info: &mut InstructionInfoFactory,
+    thread: Option<&ThreadBlock>,
 ) -> &'static str {
     let Some(i) = code
         .iter()
-        .find(|i| !(integer(i, info) || scalar_float(i, info) || packed_integer(i, info)))
+        .find(|i| !(integer(i, info, thread) || scalar_float(i, info) || packed_integer(i, info)))
     else {
         return OUTSIDE_FLOAT;
     };

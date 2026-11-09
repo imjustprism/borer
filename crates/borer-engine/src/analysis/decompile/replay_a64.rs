@@ -18,6 +18,7 @@ use super::lift_a64::{flags_read, flags_set};
 use super::replay::{Code, OUTSIDE_FLOAT, Replay, Rig, Transfer, Witness, word_limits};
 use super::verify::Bench;
 use crate::analysis::Analysis;
+use crate::emulate::ThreadBlock;
 use crate::emulate::a64::Machine;
 use crate::isa::a64::{self, Flow, Insn, Mnemonic, Opnd, Reg};
 use crate::program::Program;
@@ -201,7 +202,7 @@ impl Replay for A64 {
         }
     }
 
-    fn subset(code: &[Insn]) -> Result<(), &'static str> {
+    fn subset(code: &[Insn], _thread: Option<&ThreadBlock>) -> Result<(), &'static str> {
         code.iter().try_for_each(checked)
     }
 

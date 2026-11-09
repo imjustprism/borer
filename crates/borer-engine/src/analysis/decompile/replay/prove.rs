@@ -46,7 +46,7 @@ use super::term::{
     self, EQ, GT, LT, Logic, Pred, Term, UN, float_rel, ite, narrow, not, truth, zero,
 };
 use super::{
-    Bench, Code, End, Function, Replay, Transfer, covering, floating, frame_base,
+    Bench, Code, End, Function, Replay, Rig, Transfer, covering, floating, frame_base,
     lose_frame_writes, op_width, overwritten_first, value_lane,
 };
 use crate::analysis::BasicBlock;
@@ -100,6 +100,9 @@ const FRESH_FIRST: u32 = u32::MAX - 1;
 /// Why a whole block's lifting cannot be read: it reads bytes it also
 /// writes, before or after the write.
 const STALE: &str = "a read of memory the block writes";
+/// Why a block is left to the samples: it reads through `fs` or `gs`
+/// where that segment reads no thread block the machine plants.
+const THREAD_SEGMENT: &str = "a segment that reads no thread block";
 /// Why a block is left to the samples: a compare's flags were set by a
 /// float compare and an integer one, and the lift does not say which a
 /// reader reads.
@@ -781,7 +784,8 @@ impl Sym<'_> {
         })
     }
 
-    /// Returns a variable's value.
+    /// Returns a variable's value; `fs` or `gs` is the thread block's base
+    /// the proof starts from, when it is the segment that reads the block.
     ///
     /// # Arguments
     ///
@@ -789,7 +793,8 @@ impl Sym<'_> {
     ///
     /// # Errors
     ///
-    /// What [`Sym::read`] refuses.
+    /// What [`Sym::read`] refuses, or [`THREAD_SEGMENT`] for a segment that
+    /// reads no thread block.
     fn var(&self, k: Key) -> Result<Term, Why> {
         if self.unknown.contains(&k) {
             return Ok(Term::Undef);
@@ -816,6 +821,9 @@ impl Sym<'_> {
             Key::A64(_) => Err("an arm64 register"),
             Key::A32(_) => Err("an arm32 register"),
             Key::Rv(_) => Err("a risc-v register"),
+            Key::Reg(Register::FS | Register::GS) => {
+                self.entry.get(&k).cloned().ok_or(THREAD_SEGMENT)
+            }
             Key::Reg(r) if !r.is_gpr() && !r.is_xmm() => Ok(Term::Undef),
             Key::Reg(_) | Key::Tmp(_) | Key::Param(_) => Ok(self
                 .vars
@@ -1719,6 +1727,11 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         {
             entry.insert(k, Term::Const(c & mask));
         }
+        let seg = self
+            .template
+            .thread_block()
+            .map(|t| (Key::Reg(t.segment), Term::Const(t.base)));
+        entry.extend(seg.clone());
         let mut text = Sym {
             width,
             sp0,
@@ -1762,6 +1775,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             };
             regs.insert(k, v);
         }
+        regs.extend(seg);
         let mut overlay = base.clone();
         let mut pending: BTreeSet<u64> = BTreeSet::new();
         for (k, e) in &inn.vals {

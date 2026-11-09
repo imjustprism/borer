@@ -6,10 +6,12 @@
     reason = "assertions are the point of a test"
 )]
 
-use borer_engine::analysis::decompile::decompile;
-use borer_engine::analysis::decompile::replay::{Claim, Replayed, replay, replay_tsv};
+use borer_engine::analysis::decompile::replay::{
+    Claim, Replayed, replay, replay_function, replay_tsv,
+};
+use borer_engine::analysis::decompile::{checked_header, decompile};
 use borer_engine::analysis::{Analysis, Overlay};
-use borer_engine::program::{Arch, BinaryFormat, Program, Section};
+use borer_engine::program::{Arch, BinaryFormat, Program, Section, Symbol, SymbolKind};
 
 use crate::decompiled::{program64, replays_clean, runs_agree};
 
@@ -388,4 +390,185 @@ fn a_block_writing_over_its_own_code_is_not_checked() {
         replay_tsv(&r)
     );
     assert!(r.wrong().is_empty(), "{}", replay_tsv(&r));
+}
+
+/// The lift line of the function at 0x401000 of `code`, decompiled as an
+/// image of `arch` and `format`.
+///
+/// # Arguments
+///
+/// * `code` - The function's bytes.
+/// * `arch` - The instruction set, which picks the block's width.
+/// * `format` - The image's format, whose system lays out the thread block.
+fn checked_as(code: &[u8], arch: Arch, format: BinaryFormat) -> String {
+    let mut bytes = code.to_vec();
+    bytes.resize(0x1000, 0xcc);
+    let text = Section::mapped(".text", 0x40_1000, 0, 0x1000, false, true);
+    let mut p = Program::raw(bytes, arch, 0x40_0000, Some(0x40_1000), vec![text]);
+    p.format = format;
+    let a = Analysis::compute(&p);
+    checked_header(&p, &a, &Overlay::default(), 0x40_1000).unwrap_or_default()
+}
+
+/// A function guarded with a Linux stack canary, at 0x140001000.
+///
+/// The prologue copies `fs:[0x28]` into a slot and the epilogue subtracts
+/// the word from the slot, calling `__stack_chk_fail` at 0x140001040 when
+/// they differ.
+fn canary_function() -> Program {
+    let mut code = vec![
+        0x48, 0x83, 0xec, 0x18, // ASM: sub rsp, 0x18
+        0x64, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00, // ASM: mov rax, fs:[0x28]
+        0x48, 0x89, 0x44, 0x24, 0x08, // ASM: mov [rsp + 0x8], rax
+        0x31, 0xc0, // ASM: xor eax, eax
+        0x8d, 0x41, 0x01, // ASM: lea eax, [rcx + 1]
+        0x48, 0x8b, 0x54, 0x24, 0x08, // ASM: mov rdx, [rsp + 0x8]
+        0x64, 0x48, 0x2b, 0x14, 0x25, 0x28, 0x00, 0x00, 0x00, // ASM: sub rdx, fs:[0x28]
+        0x75, 0x05, // ASM: jne fail
+        0x48, 0x83, 0xc4, 0x18, // ASM: add rsp, 0x18
+        0xc3, // ASM: ret
+        0xe8, 0x0f, 0x00, 0x00, 0x00, // ASM: fail: call __stack_chk_fail
+    ];
+    code.resize(0x40, 0xcc);
+    code.extend([0x0f, 0x0b]); // ASM: ud2 (__stack_chk_fail)
+    let mut p = program64(&code);
+    p.symbols.push(Symbol {
+        name: "__stack_chk_fail".to_owned(),
+        addr: 0x1_4000_1040,
+        kind: SymbolKind::Local,
+    });
+    p
+}
+
+/// A Linux stack canary is checked against the machine.
+///
+/// The replay plants glibc's canary word at `fs:[0x28]` and the text reads
+/// that word, so the prologue's copy and the epilogue's compare are
+/// compared and proved, not left unknown. As a Windows image, whose `fs`
+/// reads no thread block on x64, the same blocks stay unknown, and the
+/// return that the epilogue's `fs` read is pending into is tried, not
+/// proved: the proof states no value for that segment.
+#[test]
+fn a_canary_prologue_and_epilogue_are_checked() {
+    let mut p = canary_function();
+    p.format = BinaryFormat::Elf;
+    let a = Analysis::compute(&p);
+    let header = checked_header(&p, &a, &Overlay::default(), 0x1_4000_1000).expect("checked");
+    assert!(
+        header.contains("2/3 blocks: 2 proved, 1 unknown; unchecked: 1 not in text,"),
+        "{header}"
+    );
+    replays_clean(&p, &a, &[0x1_4000_1000]);
+    let r = replay_function(&p, &a, 0x1_4000_1000, 1);
+    assert!(r.unreadable.is_empty(), "{}", replay_tsv(&r));
+    assert_eq!(
+        r.compared.get(&Claim::Branch),
+        Some(&3),
+        "{}",
+        replay_tsv(&r)
+    );
+    p.format = BinaryFormat::Pe;
+    let a = Analysis::compute(&p);
+    let header = checked_header(&p, &a, &Overlay::default(), 0x1_4000_1000).expect("checked");
+    assert!(
+        header.contains(
+            "1/3 blocks: 0 proved, 1 tested x3 states, 2 unknown; unchecked: 1 fs/gs access, 1 not in text,"
+        ),
+        "{header}"
+    );
+}
+
+/// A thread block read is checked where the machine plants the field.
+///
+/// Those are Windows' stack bounds, the block's own address and the
+/// process block's, and glibc's canary. The process block's contents,
+/// planted as zero rather than as Windows fills them, read as unknown to
+/// the text, so no claim agrees on them by accident, while memory past the
+/// planted span reads as any memory nothing backs. A field planted as
+/// zero, a write, a computed offset and glibc's pointer guard leave their
+/// blocks unknown.
+#[test]
+fn a_thread_block_field_is_checked_where_the_machine_plants_it() {
+    let windows_64: [&[u8]; 4] = [
+        &[0x65, 0x48, 0x8b, 0x04, 0x25, 0x08, 0, 0, 0], // ASM: mov rax, gs:[0x8]
+        &[0x65, 0x48, 0x8b, 0x04, 0x25, 0x10, 0, 0, 0], // ASM: mov rax, gs:[0x10]
+        &[0x65, 0x48, 0x8b, 0x04, 0x25, 0x30, 0, 0, 0], // ASM: mov rax, gs:[0x30]
+        &[0x65, 0x48, 0x8b, 0x04, 0x25, 0x60, 0, 0, 0], // ASM: mov rax, gs:[0x60]
+    ];
+    let windows_32: [&[u8]; 4] = [
+        &[0x64, 0xa1, 0x04, 0, 0, 0], // ASM: mov eax, fs:[0x4]
+        &[0x64, 0xa1, 0x08, 0, 0, 0], // ASM: mov eax, fs:[0x8]
+        &[0x64, 0xa1, 0x18, 0, 0, 0], // ASM: mov eax, fs:[0x18]
+        &[0x64, 0xa1, 0x30, 0, 0, 0], // ASM: mov eax, fs:[0x30]
+    ];
+    let glibc_32: [&[u8]; 1] = [
+        &[0x65, 0xa1, 0x14, 0, 0, 0], // ASM: mov eax, gs:[0x14]
+    ];
+    let planted = windows_64
+        .iter()
+        .map(|c| (c, Arch::X86_64, BinaryFormat::Pe))
+        .chain(windows_32.iter().map(|c| (c, Arch::X86, BinaryFormat::Pe)))
+        .chain(glibc_32.iter().map(|c| (c, Arch::X86, BinaryFormat::Elf)));
+    for (code, arch, format) in planted {
+        let mut code = code.to_vec();
+        code.push(0xc3); // ASM: ret
+        let header = checked_as(&code, arch, format);
+        assert!(
+            header.contains("1/1 blocks: 1 proved;"),
+            "{code:x?}: {header}"
+        );
+    }
+    let read_through = |field: u8, offset: u32| {
+        let mut code = vec![
+            0x65, 0x48, 0x8b, 0x04, 0x25, field, 0, 0, 0, // ASM: mov rax, gs:[field]
+            0x48, 0x8b, 0x80, // ASM: mov rax, [rax + offset]
+        ];
+        code.extend(offset.to_le_bytes());
+        code.push(0xc3); // ASM: ret
+        let p = program64(&code);
+        let a = Analysis::compute(&p);
+        let header = checked_header(&p, &a, &Overlay::default(), 0x1_4000_1000);
+        (
+            header.unwrap_or_default(),
+            replay_function(&p, &a, 0x1_4000_1000, 1),
+        )
+    };
+    let (header, r) = read_through(0x60, 0x30);
+    assert!(header.contains("1/1 blocks: 1 proved;"), "{header}");
+    assert_eq!(
+        r.unreadable.get(&Claim::Return),
+        Some(&3),
+        "{}",
+        replay_tsv(&r)
+    );
+    let (_, r) = read_through(0x30, 0x2000);
+    assert!(r.unreadable.is_empty(), "{}", replay_tsv(&r));
+    assert_eq!(
+        r.compared.get(&Claim::Return),
+        Some(&3),
+        "{}",
+        replay_tsv(&r)
+    );
+    let windows_unknown: [&[u8]; 4] = [
+        &[0x65, 0x8b, 0x04, 0x25, 0x68, 0, 0, 0], // ASM: mov eax, gs:[0x68]
+        &[0x65, 0x48, 0x89, 0x04, 0x25, 0x30, 0, 0, 0], // ASM: mov gs:[0x30], rax
+        &[0x65, 0x48, 0x8b, 0x41, 0x30],          // ASM: mov rax, gs:[rcx + 0x30]
+        &[0x65, 0x48, 0x8b, 0x04, 0xcd, 0x30, 0, 0, 0], // ASM: mov rax, gs:[rcx*8 + 0x30]
+    ];
+    let glibc_unknown: [&[u8]; 1] = [
+        &[0x64, 0x48, 0x8b, 0x04, 0x25, 0x30, 0, 0, 0], // ASM: mov rax, fs:[0x30]
+    ];
+    let unknown = windows_unknown
+        .iter()
+        .map(|c| (c, BinaryFormat::Pe))
+        .chain(glibc_unknown.iter().map(|c| (c, BinaryFormat::Elf)));
+    for (code, format) in unknown {
+        let mut code = code.to_vec();
+        code.push(0xc3); // ASM: ret
+        let header = checked_as(&code, Arch::X86_64, format);
+        assert!(
+            header.contains("0/1 blocks: 0 proved, 1 unknown; unchecked: 1 fs/gs access,"),
+            "{code:x?}: {header}"
+        );
+    }
 }

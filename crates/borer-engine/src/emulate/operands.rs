@@ -230,6 +230,8 @@ impl Emulator<'_> {
     ///
     /// A 16-bit address ([`crate::disasm::addresses_16_bit`]) reads the
     /// 16-bit registers and wraps at 64 KiB before the segment base is added.
+    /// The image's thread segment ([`Emulator::thread_segment`]) is based at
+    /// the thread block the machine plants; every other segment at zero.
     ///
     /// # Errors
     ///
@@ -260,9 +262,10 @@ impl Emulator<'_> {
             .wrapping_add(index)
             .wrapping_add(i.memory_displacement64());
         let offset = if sixteen { offset & 0xffff } else { offset };
-        let segment = match (self.bitness, i.segment_prefix()) {
-            (32, Register::FS) | (64, Register::GS) => self.teb,
-            _ => 0,
+        let segment = if i.segment_prefix() == self.thread_segment() {
+            self.teb
+        } else {
+            0
         };
         Ok(self.narrow(offset.wrapping_add(segment)))
     }

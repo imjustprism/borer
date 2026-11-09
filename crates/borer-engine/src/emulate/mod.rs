@@ -13,7 +13,7 @@ use crate::isa::x86::{
     st_depth_mod8, xmm_slot,
 };
 use crate::num::{from_usize, lo8, lo32};
-use crate::program::Program;
+use crate::program::{BinaryFormat, Program};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub mod a32;
@@ -29,6 +29,9 @@ pub mod rv;
 mod sse;
 mod store;
 mod strops;
+mod thread;
+
+pub(crate) use thread::{CANARY_FS, CANARY_GS, ThreadBlock};
 
 use alu::{Alu, Shift};
 use api::{ALLOC_BASE, ALLOC_BASE_32, ArgSlot};
@@ -220,9 +223,11 @@ pub struct Emulator<'a> {
     stack_base: u64,
     /// Bytes on either side of the stack base treated as stack.
     stack_span: u64,
-    /// The synthetic thread block: what `fs` (32-bit) or `gs` (64-bit)
-    /// resolves to, so `fs:[0]` reads the exception chain head and
-    /// `gs:[0x60]` the process block rather than faulting on address zero.
+    /// The synthetic thread block: what the image's thread segment
+    /// ([`Emulator::thread_segment`]) resolves to, so on Windows `fs:[0]`
+    /// reads the exception chain head and `gs:[0x60]` the process block,
+    /// and on Linux `fs:[0x28]` the stack canary, rather than faulting on
+    /// address zero.
     teb: u64,
     /// The sixteen general-purpose registers, `rax` first.
     regs: [u64; 16],
@@ -791,12 +796,24 @@ impl<'a> Emulator<'a> {
     /// The exception chain head is empty, the stack bounds are the scratch
     /// stack's, the self pointer points back, the process block pointer
     /// leads to a zeroed page, and `BeingDebugged` in it is zero. The
-    /// offsets are Windows' own for each width. The bytes are planted as
-    /// pre-run memory, so they are neither dirty nor a fault.
+    /// offsets are Windows' own for each width. An ELF image's block is
+    /// glibc's instead: zeros but the stack canary at `fs:[0x28]`
+    /// (`gs:[0x14]` on i386), one fixed word ([`thread::CANARY`]). The
+    /// bytes are planted as pre-run memory, so they are neither dirty nor
+    /// a fault.
     fn plant_teb(&mut self) {
         let layout = self.teb_layout();
         self.mem.plant(self.teb, (0..TEB_SPAN).map(|_| 0));
         let (teb, word) = (self.teb, self.word);
+        if self.program.format == BinaryFormat::Elf {
+            let at = if self.bitness == 32 {
+                CANARY_GS
+            } else {
+                CANARY_FS
+            };
+            self.plant(teb + at, thread::CANARY, word);
+            return;
+        }
         self.plant(teb, u64::MAX, word);
         self.plant(teb + layout.stack_base, self.stack_base, word);
         self.plant(

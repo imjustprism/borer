@@ -20,8 +20,8 @@ use super::lift_a32::{flags_read, sets_flags};
 use super::replay::{Code, OUTSIDE_FLOAT, Replay, Rig, Transfer, Witness, word_limits};
 use super::verify_a32::GENERAL;
 use crate::analysis::Analysis;
-use crate::emulate::Stop;
 use crate::emulate::a32::Machine;
+use crate::emulate::{Stop, ThreadBlock};
 use crate::isa::a32::{DpKind, Flow, Insn, Op, Operand, Reg, SKIP, Shift};
 use crate::program::Program;
 
@@ -164,7 +164,7 @@ impl Replay for A32 {
         }
     }
 
-    fn subset(code: &[Insn]) -> Result<(), &'static str> {
+    fn subset(code: &[Insn], _thread: Option<&ThreadBlock>) -> Result<(), &'static str> {
         code.iter().try_for_each(checked)
     }
 

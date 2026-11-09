@@ -91,7 +91,7 @@ use super::verify::{
 };
 use super::{Ctx, decompile_with, table_target};
 use crate::analysis::{Analysis, BasicBlock, Overlay, striped_with};
-use crate::emulate::{Emulator, HISTORY_MAX, Run, Stop, fill_byte};
+use crate::emulate::{Emulator, HISTORY_MAX, Run, Stop, ThreadBlock, fill_byte};
 use crate::fxmap::{FxHashMap, FxHashSet};
 use crate::isa::Isa;
 use crate::num::{from_usize, lo8};
@@ -287,6 +287,13 @@ pub(super) trait Rig: Bench {
     /// * `v` - The value.
     fn set_vector(&mut self, n: usize, v: u128);
 
+    /// Returns the thread block the machine plants, which the text reads
+    /// through the same segment register, or `None` for a machine with
+    /// none.
+    fn thread_block(&self) -> Option<ThreadBlock> {
+        None
+    }
+
     /// Writes a run of bytes of memory before a run, as [`Rig::poke`]
     /// writes each one.
     ///
@@ -324,6 +331,10 @@ impl Rig for Emulator<'_> {
 
     fn set_vector(&mut self, n: usize, v: u128) {
         self.set_xmm(n, v);
+    }
+
+    fn thread_block(&self) -> Option<ThreadBlock> {
+        Some(Emulator::thread_block(self))
     }
 
     fn poke_run(&mut self, at: u64, bytes: &[u8]) {
@@ -419,11 +430,13 @@ pub(super) trait Replay: Lifter {
     /// # Arguments
     ///
     /// * `code` - The block's instructions.
+    /// * `thread` - The thread block the machine plants
+    ///   ([`Rig::thread_block`]), whose fields a block may read.
     ///
     /// # Errors
     ///
     /// Why it cannot.
-    fn subset(code: &[Self::Insn]) -> Result<(), &'static str>;
+    fn subset(code: &[Self::Insn], thread: Option<&ThreadBlock>) -> Result<(), &'static str>;
 
     /// Tells whether a block reads whole vector lanes, which its states
     /// then draw.
@@ -582,10 +595,10 @@ impl Replay for arch::X86 {
         }
     }
 
-    fn subset(code: &[Instruction]) -> Result<(), &'static str> {
+    fn subset(code: &[Instruction], thread: Option<&ThreadBlock>) -> Result<(), &'static str> {
         let mut info = InstructionInfoFactory::new();
-        if !integer_or_zero_fill(code, &mut info) {
-            return Err(outside_subset(code, &mut info));
+        if !integer_or_zero_fill(code, &mut info, thread) {
+            return Err(outside_subset(code, &mut info, thread));
         }
         if code.iter().any(aligns_stack) {
             return Err("a frame alignment");
@@ -1828,6 +1841,10 @@ struct Text<'t, M> {
     base: &'t Seeded,
     /// The image's memory before any run.
     template: &'t M,
+    /// The thread block the machine plants: the base its segment register
+    /// reads as, and the bytes of it planted as zero rather than as the
+    /// system's own value, which read as unknown ([`ThreadBlock::unmodeled`]).
+    thread: Option<ThreadBlock>,
     /// The seed of the bytes nothing backs ([`fill_byte`]).
     fill: u64,
     /// The stack pointer at the function's entry: where slot 0 is.
@@ -1902,6 +1919,10 @@ impl<M: Bench> Text<'_, M> {
 
     /// A byte as the text holds it, `None` when unknown.
     ///
+    /// Unknown are the bytes the text lost and the thread block's bytes the
+    /// machine planted as zero where the system keeps a value of its own,
+    /// which the binary's own run would not see.
+    ///
     /// # Arguments
     ///
     /// * `at` - The address.
@@ -1909,11 +1930,15 @@ impl<M: Bench> Text<'_, M> {
         if self.lost_all || self.lost.contains(&at) {
             return None;
         }
+        if let Some(&b) = self.mem.get(&at) {
+            return Some(b);
+        }
+        if self.thread.is_some_and(|t| t.unmodeled(at)) {
+            return None;
+        }
         Some(
-            self.mem
-                .get(&at)
-                .copied()
-                .or_else(|| self.base.get(at))
+            self.base
+                .get(at)
                 .or_else(|| self.template.byte_at(at))
                 .unwrap_or_else(|| fill_byte(self.fill, at)),
         )
@@ -2032,6 +2057,9 @@ impl<M: Bench> Text<'_, M> {
             | Key::A64(crate::isa::a64::Reg::Sp)
             | Key::A32(crate::isa::a32::SP)
             | Key::Rv(crate::isa::rv::SP) => self.rsp,
+            Key::Reg(r) if self.thread.is_some_and(|t| t.segment == r) => {
+                self.thread.map(|t| t.base)
+            }
             Key::Reg(r) if !r.is_gpr() && !r.is_xmm() => None,
             Key::Reg(_) | Key::Tmp(_) | Key::Param(_) | Key::A64(_) | Key::A32(_) | Key::Rv(_) => {
                 Some(self.vars.get(&k).copied().unwrap_or_else(|| self.drawn(k)))
@@ -3075,7 +3103,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         if w.result_read && effects.iter().any(|e| e.kind == EffectKind::Return(None)) {
             return Err(BARE_RETURN);
         }
-        L::subset(code)?;
+        L::subset(code, self.template.thread_block().as_ref())?;
         Ok((code, sp))
     }
 
@@ -3350,6 +3378,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             lost_all: false,
             base: &base,
             template: self.template,
+            thread: self.template.thread_block(),
             fill,
             sp0,
             width: self.width,

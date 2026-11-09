@@ -1626,3 +1626,22 @@ fn a_read_inside_a_filled_region_sees_the_fill() {
         "{text}\n{rows:?}"
     );
 }
+
+/// A text naming the thread block runs on the block the binary reads.
+///
+/// `return NtCurrentTeb()->NtTib.Self;` reads the field at the address the
+/// text's run gives `NtCurrentTeb()`, and `mov rax, gs:[0x30]` the one the
+/// machine's `gs` selects: the two agree only when both are the block the
+/// machine plants.
+#[test]
+fn a_thread_block_field_runs_where_the_binary_reads_it() {
+    let p = crate::decompiled::program64(&[
+        0x65, 0x48, 0x8b, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, // ASM: mov rax, gs:[0x30]
+        0xc3, // ASM: ret
+    ]);
+    let text = crate::decompiled::runs_agree(&p, 0x1_4000_1000);
+    assert!(
+        text.contains("return NtCurrentTeb()->NtTib.Self;"),
+        "{text}"
+    );
+}

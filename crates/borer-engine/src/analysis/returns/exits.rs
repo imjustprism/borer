@@ -3,6 +3,7 @@
 //! leaves no result at all.
 
 use super::*;
+use crate::emulate::{CANARY_FS, CANARY_GS};
 
 /// What a block's instructions, read back from its end, say about the
 /// result register a path hands back.
@@ -180,16 +181,9 @@ fn cookie_check(i: &Instruction) -> bool {
         && i.memory_index() == Register::None
         && matches!(
             (i.memory_segment(), i.memory_displacement64()),
-            (Register::FS, COOKIE_FS) | (Register::GS, COOKIE_GS)
+            (Register::FS, CANARY_FS) | (Register::GS, CANARY_GS)
         )
 }
-
-/// Where glibc keeps the stack cookie on x86-64, in the thread block `fs`
-/// points at.
-const COOKIE_FS: u64 = 0x28;
-
-/// Where glibc keeps it on i386, under `gs`.
-const COOKIE_GS: u64 = 0x14;
 
 /// The [`SCRATCH`] registers an instruction reads, one bit each in their
 /// order.

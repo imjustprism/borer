@@ -1583,35 +1583,17 @@ impl<'p> Script<'p> {
 }
 
 /// The address of the thread block a machine over the program plants,
-/// read the way code reads it: through the segment its self pointer is in.
+/// what its thread segment reads from ([`Emulator::thread_block`]).
 ///
 /// # Arguments
 ///
 /// * `program` - The loaded image.
+///
+/// # Returns
+///
+/// The address, or `None` when no machine runs the image.
 fn thread_block(program: &Program) -> Option<u64> {
-    let mut emu = Emulator::new(program, 2)?;
-    let (at, code): (u64, &[u8]) = if program.is_64 {
-        (
-            SENTINEL_64 - 0x1000,
-            &[
-                0x65, 0x48, 0x8b, 0x04, 0x25, 0x30, 0x00, 0x00,
-                0x00, // ASM: mov rax,gs:[0x30]
-                0xc3, // ASM: ret
-            ],
-        )
-    } else {
-        (
-            SENTINEL_32 - 0x1000,
-            &[
-                0x64, 0xa1, 0x18, 0x00, 0x00, 0x00, // ASM: mov eax,fs:[0x18]
-                0xc3, // ASM: ret
-            ],
-        )
-    };
-    for (k, b) in code.iter().enumerate() {
-        emu.poke(at.wrapping_add(from_usize(k)), *b);
-    }
-    matches!(emu.run(at).stop, Stop::Returned).then(|| emu.register("rax"))?
+    Some(Emulator::new(program, 0)?.thread_block().base)
 }
 
 /// Tells whether an expression is the call `NtCurrentTeb()`, whose fields

@@ -1215,3 +1215,51 @@ fn a_32_bit_allocation_returns_a_pointer_the_image_can_hold() {
     let written: Vec<Option<u8>> = (0..4).map(|k| emu.peek(block + k)).collect();
     assert_eq!(written, [Some(0x44), Some(0x33), Some(0x22), Some(0x11)]);
 }
+
+/// An image's thread segment reads the thread block its system lays out.
+///
+/// On x86-64 Linux `fs:[0x28]` reads glibc's stack canary, one fixed word
+/// with its low byte zero, and on i386 `gs:[0x14]` its low half; on 64-bit
+/// Windows `gs:[0x30]` reads the block's own address, which holds itself.
+#[test]
+fn the_thread_segment_reads_its_systems_block() {
+    use borer_engine::emulate::{Emulator, Stop};
+    use borer_engine::program::{Arch, BinaryFormat, Program, Section};
+    let ran = |arch: Arch, format: BinaryFormat, code: &[u8]| {
+        let mut bytes = code.to_vec();
+        bytes.resize(0x1000, 0xcc);
+        let mut p = Program::raw(
+            bytes,
+            arch,
+            0,
+            Some(0x1000),
+            vec![Section::mapped(".text", 0x1000, 0, 0x1000, false, true)],
+        );
+        p.format = format;
+        let mut emu = Emulator::new(&p, 16).expect("emulator");
+        let run = emu.run(0x1000);
+        assert_eq!(run.stop, Stop::Returned, "{run:?}");
+        (emu.register("rax"), emu.register("rdx"))
+    };
+    let elf64 = [
+        0x64, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00, // ASM: mov rax, fs:[0x28]
+        0xc3, // ASM: ret
+    ];
+    let (canary, _) = ran(Arch::X86_64, BinaryFormat::Elf, &elf64);
+    let canary = canary.expect("rax");
+    assert!(canary != 0 && canary & 0xff == 0, "{canary:#x}");
+    assert_eq!(ran(Arch::X86_64, BinaryFormat::Elf, &elf64).0, Some(canary));
+    let elf32 = [
+        0x65, 0xa1, 0x14, 0x00, 0x00, 0x00, // ASM: mov eax, gs:[0x14]
+        0xc3, // ASM: ret
+    ];
+    let (low, _) = ran(Arch::X86, BinaryFormat::Elf, &elf32);
+    assert_eq!(low, Some(canary & 0xffff_ffff));
+    let pe64 = [
+        0x65, 0x48, 0x8b, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, // ASM: mov rax, gs:[0x30]
+        0x48, 0x8b, 0x50, 0x30, // ASM: mov rdx, [rax+0x30]
+        0xc3, // ASM: ret
+    ];
+    let (teb, own) = ran(Arch::X86_64, BinaryFormat::Pe, &pe64);
+    assert!(teb.is_some_and(|t| t != 0) && teb == own, "{teb:?} {own:?}");
+}
