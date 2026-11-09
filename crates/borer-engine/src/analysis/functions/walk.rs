@@ -705,8 +705,9 @@ impl WalkState<'_> {
 
     /// Tells whether the call ending a block reaches a function known never
     /// to return, directly, through a linker's thunk, or through an import's
-    /// slot, or reaches glibc's `error` through its thunk with a nonzero
-    /// constant status the block sets ([`sets_nonzero_status`]).
+    /// slot (`call [slot]`, or a thunk's `jmp [slot]`), or reaches glibc's
+    /// `error` either way with a nonzero constant status the block sets
+    /// ([`sets_nonzero_status`]).
     ///
     /// # Arguments
     ///
@@ -730,23 +731,19 @@ impl WalkState<'_> {
             before.push(i);
             va = i.next_ip();
         };
-        if call.flow_control() != FlowControl::Call {
-            return false;
-        }
-        if call.op0_kind() == OpKind::Memory {
-            return call.memory_index() == Register::None
-                && matches!(call.memory_base(), Register::None | Register::RIP)
-                && self.noreturn_slots.contains(&call.memory_displacement64());
-        }
-        let t = call.near_branch_target();
-        self.noreturn.contains(t)
-            || past_endbr(program, bitness, t)
-                .and_then(|i| slot_jump(&i))
-                .is_some_and(|slot| {
-                    self.noreturn_slots.contains(&slot)
-                        || (self.status_exits.contains(&slot)
-                            && sets_nonzero_status(program, bitness, &before, |_| false))
-                })
+        let slot = match call.flow_control() {
+            FlowControl::IndirectCall => call_slot(&call),
+            FlowControl::Call if self.noreturn.contains(call.near_branch_target()) => return true,
+            FlowControl::Call => {
+                past_endbr(program, bitness, call.near_branch_target()).and_then(|i| slot_jump(&i))
+            }
+            _ => return false,
+        };
+        slot.is_some_and(|slot| {
+            self.noreturn_slots.contains(&slot)
+                || (self.status_exits.contains(&slot)
+                    && sets_nonzero_status(program, bitness, &before, |_| false))
+        })
     }
 
     /// Whether the code a call reaches can be seen to return.

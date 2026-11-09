@@ -317,6 +317,61 @@ fn calls_that_end_a_thread_or_fail_a_check_end_their_callers() {
     }
 }
 
+/// Returns `call [rip+slot]`, at `at`: a call through an import's slot, as
+/// a `-fno-plt` build or a PE's import table writes it.
+///
+/// # Arguments
+///
+/// * `at` - Where the call starts.
+/// * `slot` - The slot it calls through.
+fn call_through(at: u64, slot: u64) -> Vec<u8> {
+    rel32(at, &[0xff, 0x15], slot)
+}
+
+/// A function whose one way out is a call through an import's slot to a
+/// function that never returns never returns, so its callers end at their
+/// calls to it.
+///
+/// A `-fno-plt` build calls `exit` as `call [rip+exit@GOT]`, and glibc's
+/// `error` with a nonzero status the same way. The walk ended the path at
+/// each call, but the check that every path of a function ends never read
+/// a call through a slot, so the wrapper's callers ran on past their calls.
+/// One image each: a caller found never to return ends the entry's path.
+#[test]
+fn a_function_whose_way_out_is_a_call_through_a_slot_never_returns() {
+    for (name, status) in [
+        ("exit", vec![0xbf, 0x02, 0x00, 0x00, 0x00]), // ASM: mov edi, 2
+        ("error", vec![0xbf, 0x01, 0x00, 0x00, 0x00, 0x31, 0xf6]), // ASM: mov edi, 1; xor esi, esi
+    ] {
+        let at = 0x1200 + from_usize(status.len());
+        let code = vec![
+            (0x1100, [call(0x1100, 0x1300), vec![0xc3]].concat()), // ASM: ret
+            (0x1200, [status, call_through(at, GOT)].concat()),
+            (0x1300, [call(0x1300, 0x1200), returns(5)].concat()),
+        ];
+        let a = Analysis::compute(&image(&code, 0x1100, &[name]));
+        assert!(a.noreturn.contains(&0x1200), "{name}: {:?}", a.noreturn);
+        let c = a.function(0x1300).unwrap();
+        assert_eq!(c.end, 0x1305, "{name}: the caller ran past its call: {c:?}");
+    }
+}
+
+/// A call through `error`'s slot with a status the function was handed
+/// may return, so the function and its callers keep the code after it.
+#[test]
+fn a_call_through_the_error_slot_with_a_handed_status_returns() {
+    let code = vec![
+        (0x1100, [call(0x1100, 0x1300), vec![0xc3]].concat()), // ASM: ret
+        (0x1200, vec![0x89, 0xf7]),                            // ASM: mov edi, esi
+        (0x1202, [call_through(0x1202, GOT), vec![0xc3]].concat()), // ASM: ret
+        (0x1300, [call(0x1300, 0x1200), returns(5)].concat()),
+    ];
+    let a = Analysis::compute(&image(&code, 0x1100, &["error"]));
+    assert!(!a.noreturn.contains(&0x1200), "{:?}", a.noreturn);
+    let c = a.function(0x1300).unwrap();
+    assert_eq!(c.end, 0x130b, "the call with a handed status ended: {c:?}");
+}
+
 /// Builds glibc's `_start`, with headers that say nothing of the image's
 /// kind.
 ///
