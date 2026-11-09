@@ -463,14 +463,20 @@ pub(super) fn pointee_type(widths: &BTreeSet<usize>, offsets: &BTreeSet<i64>) ->
 /// signature lists below a parameter the body reads holds a parameter
 /// too, even when the body only passes it on: a thunk that hands `rdx`,
 /// `r8` and the `r9` it reads to its callee takes `a2` and `a3`, and its
-/// call passes them by those names, not as registers no line set.
+/// call passes them by those names, not as registers no line set. On
+/// System V the integer positions are the integer registers in order
+/// when the signature lists no float, so each one it lists holds its
+/// parameter (bash's `sv_execignore(name)` hands `name` on in `rdi`
+/// untouched); with a float among them, where it falls among the
+/// integers is unknown, and only the positions up to the last integer the
+/// body reads are filled.
 ///
 /// # Arguments
 ///
 /// * `ctx` - The convention, the parameters and the funclet, if any.
 pub(super) fn entry_env(ctx: &Ctx<'_>) -> Env {
     let mut env = Env::entry_with_params(ctx.conv, &ctx.params);
-    let ints = if ctx.conv.float_seq {
+    let ints = if ctx.conv.float_seq && ctx.arg_floats != 0 {
         ctx.conv.float_base(&ctx.params)
     } else {
         ctx.arg_count

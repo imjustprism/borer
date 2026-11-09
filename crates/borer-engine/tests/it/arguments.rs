@@ -249,3 +249,48 @@ fn an_integer_save_area_is_no_parameter() {
     let text = iso_agrees(&sysv(&code), 0x401000);
     assert!(text.contains("sub_401010(5)"), "{text}");
 }
+
+/// A parameter its function only hands on is still its parameter at the
+/// call: the register holds it, and the call passes it by its name.
+///
+/// bash's `sv_execignore(char *name)` jumps to `setup_exec_ignore` with
+/// `rdi` untouched, and neither body reads it. Both signatures list the
+/// parameter, as the debug information states it, but on System V the
+/// entry named only the positions the body reads, so the call passed
+/// `rdi`, which no line set, where `name` is.
+#[test]
+fn a_parameter_handed_on_untouched_is_passed_by_its_name() {
+    use borer_engine::dwarf::{Parameter, Subprogram};
+    use borer_engine::program::{Symbol, SymbolKind};
+    let mut code = vec![
+        0xe9, 0x0b, 0x00, 0x00, 0x00, // ASM: jmp 0x401010
+    ];
+    code.resize(0x10, 0xcc);
+    code.extend_from_slice(&[
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax,1
+        0xc3, // ASM: ret
+    ]);
+    let mut p = sysv(&code);
+    for (low_pc, name, param) in [
+        (0x401000, "sv_execignore", "name"),
+        (0x401010, "setup_exec_ignore", "varname"),
+    ] {
+        p.debug_functions.push(Subprogram {
+            low_pc,
+            name: name.to_owned(),
+            parameters: vec![Parameter {
+                name: param.to_owned(),
+                type_name: Some("char *".to_owned()),
+            }],
+            return_type: Some("int".to_owned()),
+            locals: std::collections::BTreeMap::new(),
+        });
+        p.symbols.push(Symbol {
+            name: name.to_owned(),
+            addr: low_pc,
+            kind: SymbolKind::Export,
+        });
+    }
+    let text = iso_agrees(&p, 0x401000);
+    assert!(text.contains("setup_exec_ignore(name)"), "{text}");
+}
