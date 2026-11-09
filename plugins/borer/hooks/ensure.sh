@@ -82,9 +82,6 @@ fetch() {
 
   mkdir -p "$data" || fail "cannot make $data"
   cp "$tmp/$name/$exe" "$bin.new" && chmod 755 "$bin.new" || fail "cannot write $bin.new"
-  if [ "$(uname -s)" = "Darwin" ]; then
-    xattr -d com.apple.quarantine "$bin.new" 2>/dev/null || true
-  fi
   if [ -f "$bin" ]; then
     mv -f "$bin" "$bin.old" 2>/dev/null || true
   fi
