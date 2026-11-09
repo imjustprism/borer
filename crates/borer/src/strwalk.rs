@@ -102,9 +102,12 @@ impl StringRow {
     /// # Arguments
     ///
     /// * `bytes` - The program's bytes, which a span indexes.
-    pub(crate) fn display_text(&self, bytes: &[u8]) -> String {
+    /// * `literals` - The literals the walk's runs are lines of
+    ///   ([`borer_engine::strings::literals`]), whose control tokens a
+    ///   span's text breaks too ([`RawStringSpan::text_in`]).
+    pub(crate) fn display_text(&self, bytes: &[u8], literals: &[RawStringSpan]) -> String {
         match self {
-            StringRow::Span(s) => s.text(bytes),
+            StringRow::Span(s) => s.text_in(bytes, literals),
             StringRow::Hit(h) => h.text.clone(),
         }
     }
@@ -340,7 +343,9 @@ pub(crate) fn row_matches(p: &Program, row: &StringRow, filter: &Filter) -> bool
 ///
 /// The filter tests a row's whole text ([`StringRow::full_text`]), not
 /// the display text a long string is cut to, and a span's text is tested
-/// in place: only the rows the page prints are materialized.
+/// in place: only the rows the page prints are materialized. A row is
+/// fenced where the literal it is a line of addresses a model, so an
+/// element opened and closed on lines of their own is broken on each.
 ///
 /// # Arguments
 ///
@@ -376,6 +381,11 @@ pub(crate) fn strings_page(
     let mut out = format!(
         "# showing {shown} of {total} matches (min_len={min}, encoding={encoding}; filter=/offset= to narrow)\n# va len enc text\n"
     );
+    let spans = rows.iter().filter_map(|row| match row {
+        StringRow::Span(s) => Some(*s),
+        StringRow::Hit(_) => None,
+    });
+    let literals = borer_engine::strings::literals(&p.bytes, spans.collect());
     for row in rows
         .into_iter()
         .filter(|row| row_matches(p, row, filter))
@@ -390,7 +400,7 @@ pub(crate) fn strings_page(
             "{va} {} {} \"{}\"",
             row.len(),
             row.encoding().name(),
-            row.display_text(&p.bytes)
+            row.display_text(&p.bytes, &literals)
         );
     }
     out
@@ -520,16 +530,16 @@ mod tests {
         assert_eq!(ascii.len(), 2, "{ascii:?}");
         let narrow = StringRow::Span(ascii[0]);
         assert_eq!(narrow.full_text(&p.bytes), "ascii run");
-        assert_eq!(narrow.display_text(&p.bytes), "ascii run");
+        assert_eq!(narrow.display_text(&p.bytes, &[]), "ascii run");
 
         let wide = find_wide_spans(&p.bytes, 5);
         assert_eq!(wide.len(), 1, "{wide:?}");
         let wide_row = StringRow::Span(wide[0]);
         assert_eq!(wide_row.full_text(&p.bytes), "wide run");
-        assert_eq!(wide_row.display_text(&p.bytes), "wide run");
+        assert_eq!(wide_row.display_text(&p.bytes, &[]), "wide run");
 
         let long = StringRow::Span(ascii[1]);
-        let shown = long.display_text(&p.bytes);
+        let shown = long.display_text(&p.bytes, &[]);
         assert_eq!(shown.chars().count(), 203);
         assert!(shown.ends_with("..."));
         assert_eq!(long.full_text(&p.bytes).chars().count(), 300);
@@ -558,14 +568,43 @@ mod tests {
             encoding: borer_engine::strings::Encoding::Ascii,
         });
         assert_eq!(gone.full_text(&p.bytes), "");
-        assert_eq!(gone.display_text(&p.bytes), "");
+        assert_eq!(gone.display_text(&p.bytes, &[]), "");
         let overrun = StringRow::Span(RawStringSpan {
             off: 0,
             len: 9,
             encoding: borer_engine::strings::Encoding::Utf16,
         });
         assert_eq!(overrun.full_text(&p.bytes), "");
-        assert_eq!(overrun.display_text(&p.bytes), "");
+        assert_eq!(overrun.display_text(&p.bytes, &[]), "");
+    }
+
+    /// A page fences an element's tag lines by the literal they are lines
+    /// of, a page that starts past the opening tag included, and the
+    /// answer counts them.
+    ///
+    /// # Panics
+    ///
+    /// When a tag line prints as it stands or goes uncounted.
+    #[test]
+    fn a_page_fences_an_element_s_tag_lines() {
+        let p = Program::raw(
+            b"\0<system>\nbe brief\n</system>\0".to_vec(),
+            borer_engine::program::Arch::X86_64,
+            0,
+            None,
+            Vec::new(),
+        );
+        let page = |offset| {
+            let rows = walk_rows(&p, &Analysis::default(), StringEncoding::Ascii, 5);
+            let walk = (5, StringEncoding::Ascii);
+            strings_page(&p, rows, &Filter::new(None), walk, (offset, 10), false)
+        };
+        let all = page(0);
+        assert!(all.contains("0x1 8 ascii \"<\\system>\""), "{all}");
+        assert!(all.contains("0x13 9 ascii \"<\\/system>\""), "{all}");
+        assert_eq!(borer_engine::text::aimed_lines(&all), 2, "{all}");
+        let last = page(2);
+        assert!(last.contains("0x13 9 ascii \"<\\/system>\""), "{last}");
     }
 
     /// The zero-copy span filter answers what the text filter answers for

@@ -253,14 +253,9 @@ fn scan(text: &str) -> (Option<Aimed>, Vec<usize>) {
             continue;
         }
         let (closing, name) = rest.strip_prefix(b"/").map_or((false, rest), |r| (true, r));
-        let ends = |tag: &str| {
-            name.strip_prefix(tag.as_bytes())
-                .and_then(|r| r.first())
-                .is_some_and(|x| *x == b'>' || x.is_ascii_whitespace())
-        };
-        if TAGS_ALONE.iter().any(|t| ends(t)) {
+        if TAGS_ALONE.iter().any(|t| names_tag(name, t)) {
             tags.push(k);
-        } else if let Some(i) = TAGS_PAIRED.iter().position(|t| ends(t)) {
+        } else if let Some(i) = TAGS_PAIRED.iter().position(|t| names_tag(name, t)) {
             paired.push((i, k, closing));
         }
     }
@@ -290,6 +285,19 @@ fn scan(text: &str) -> (Option<Aimed>, Vec<usize>) {
         .or((!markers.is_empty()).then_some(Aimed::Marker))
         .or((!turns.is_empty()).then_some(Aimed::Turn));
     (kind, breaks)
+}
+
+/// Tells whether the text after a tag's `<` (and its `/`) names `tag`: the
+/// name, then `>` or a blank.
+///
+/// # Arguments
+///
+/// * `name` - The bytes after the `<`, past a closing tag's `/`.
+/// * `tag` - The tag's name.
+fn names_tag(name: &[u8], tag: &str) -> bool {
+    name.strip_prefix(tag.as_bytes())
+        .and_then(|r| r.first())
+        .is_some_and(|x| *x == b'>' || x.is_ascii_whitespace())
 }
 
 /// Returns the colon of the chat turn a text opens with.
@@ -383,13 +391,24 @@ pub fn aimed(text: &str) -> Option<Aimed> {
 /// * `text` - The text, as the file holds it.
 #[must_use]
 pub fn fenced(text: &str) -> std::borrow::Cow<'_, str> {
-    let breaks = scan(text).1;
+    fence_at(text, &scan(text).1)
+}
+
+/// Breaks a text's control tokens at the given breaks, the way [`fenced`]
+/// breaks those the text holds itself.
+///
+/// # Arguments
+///
+/// * `text` - The text, as the file holds it.
+/// * `breaks` - Byte offsets of the characters to escape, ascending: the
+///   `<` or `[` of a tag or marker, the colon of a turn ([`token_breaks`]).
+pub(crate) fn fence_at<'a>(text: &'a str, breaks: &[usize]) -> std::borrow::Cow<'a, str> {
     if breaks.is_empty() {
         return std::borrow::Cow::Borrowed(text);
     }
     let mut out = String::with_capacity(text.len() + breaks.len());
     let mut from = 0;
-    for k in breaks {
+    for &k in breaks {
         let cut = if text.as_bytes().get(k) == Some(&b':') {
             k
         } else {
@@ -442,8 +461,10 @@ fn unfenced(line: &str) -> std::borrow::Cow<'_, str> {
 /// fenced or not.
 ///
 /// A line counts for a mark anywhere in it, a fenced chat turn anywhere
-/// (`Human\:`, which only a fence writes), or an unfenced one opening a
-/// quoted text in it.
+/// (`Human\:`, which only a fence writes), a fenced `system` or
+/// `instructions` tag anywhere (`<\system>`, which only a fence writes: the
+/// string walk breaks one standing alone on its line when the literal it
+/// is a line of pairs it), or an unfenced turn opening a quoted text in it.
 ///
 /// # Arguments
 ///
@@ -461,8 +482,14 @@ pub fn aimed_lines(answer: &str) -> usize {
                         .iter()
                         .any(|t| line.get(..i).is_some_and(|l| l.ends_with(t)))
                 });
+            let tagged = line.match_indices("<\\").any(|(i, _)| {
+                let rest = line.as_bytes().get(i + 2..).unwrap_or_default();
+                let name = rest.strip_prefix(b"/").unwrap_or(rest);
+                TAGS_PAIRED.iter().any(|t| names_tag(name, t))
+            });
             let line = unfenced(line);
             turned
+                || tagged
                 || aimed(&line).is_some()
                 || line.split('"').skip(1).any(|t| turn_colon(t).is_some())
         })

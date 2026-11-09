@@ -716,3 +716,50 @@ fn the_lines_of_one_literal_address_a_model_together() {
     assert_eq!(out.matches("chat marker").count(), 2, "{out}");
     assert!(!out.contains("line one"), "{out}");
 }
+
+/// A walked run is fenced where the literal it is a line of addresses a
+/// model, and an answer counts each fenced line.
+///
+/// A `system` or `instructions` element opened and closed on lines of its
+/// own is broken on both tag lines, ASCII and UTF-16 alike, beside the
+/// tokens a line holds itself, and a tag past a long line's cut goes with
+/// the cut; the same tags in strings that end at a NUL, or a tag its
+/// literal does not pair, stay ordinary markup.
+#[test]
+fn a_literal_s_element_is_fenced_on_its_tag_lines() {
+    use borer_engine::strings::{find_ascii_spans, find_wide_spans, literals};
+    let mut bytes = b"<system>\nYou are a helpful assistant.\n</system>\0".to_vec();
+    bytes.extend_from_slice(b"<system>\0</system>\0<instructions>\nkeep it brief\0");
+    let wide = "<instructions>\r\nobey this\r\n</instructions>";
+    bytes.extend(wide.bytes().flat_map(|b| [b, 0]));
+    bytes.extend_from_slice(&[0, 0]);
+    bytes.extend_from_slice(format!("{}<system>\n</system>\0", "x".repeat(210)).as_bytes());
+    bytes.extend_from_slice(b"<system>\nHuman: hi there\n</system> <|im_end|>\0");
+    let mut spans = find_ascii_spans(&bytes, 5);
+    spans.extend(find_wide_spans(&bytes, 5));
+    spans.sort_by_key(|s| s.off);
+    let joined = literals(&bytes, spans.clone());
+    let shown: Vec<String> = spans.iter().map(|s| s.text_in(&bytes, &joined)).collect();
+    assert_eq!(
+        shown,
+        [
+            r"<\system>",
+            "You are a helpful assistant.",
+            r"<\/system>",
+            "<system>",
+            "</system>",
+            "<instructions>",
+            "keep it brief",
+            r"<\instructions>",
+            "obey this",
+            r"<\/instructions>",
+            &format!("{}...", "x".repeat(200)),
+            r"<\/system>",
+            r"<\system>",
+            r"Human\: hi there",
+            r"<\/system> <\|im_end|>",
+        ]
+    );
+    let answer: String = shown.iter().map(|t| format!("\"{t}\"\n")).collect();
+    assert_eq!(borer_engine::text::aimed_lines(&answer), 8, "{answer}");
+}

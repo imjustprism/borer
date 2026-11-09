@@ -119,9 +119,52 @@ impl RawStringSpan {
                 )
                 .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
                 .collect();
-                cut_decoded(text)
+                cut_decoded(text, &[])
             }
         }
+    }
+
+    /// Decodes the span's display text from `bytes`, its control tokens
+    /// broken where the literal it is a line of breaks them.
+    ///
+    /// A walk finds a literal of several lines as a run a line, so a
+    /// harness element opened and closed on lines of their own reads as a
+    /// lone tag on each, ordinary markup to [`RawStringSpan::text`]. Read
+    /// with its literal ([`literals`]), the way `borer://injection` reads
+    /// it, each tag line is fenced; a lone tag no literal pairs stays as it
+    /// stands.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The bytes the span was walked from.
+    /// * `literals` - The literals of the walk the span is a run of
+    ///   ([`literals`]), in offset order, so the last one starting at or
+    ///   before it holds it; with none, it reads as [`RawStringSpan::text`]
+    ///   does.
+    ///
+    /// # Returns
+    ///
+    /// The text cut to [`DISPLAY_MAX`] characters, `...` appended when it
+    /// was cut, with its own tokens and its literal's broken.
+    #[must_use]
+    pub fn text_in(self, bytes: &[u8], literals: &[RawStringSpan]) -> String {
+        let unit = match self.encoding {
+            Encoding::Ascii => 1,
+            Encoding::Utf16 => 2,
+            Encoding::DotnetUs => return self.text(bytes),
+        };
+        let held = literals
+            .partition_point(|l| l.off <= self.off)
+            .checked_sub(1)
+            .and_then(|k| literals.get(k));
+        let breaks: Vec<usize> = held.map_or_else(Vec::new, |l| {
+            let skip = saturating_usize(self.off.saturating_sub(l.off) / unit);
+            crate::text::token_breaks(&l.whole_text(bytes))
+                .into_iter()
+                .filter_map(|b| b.checked_sub(skip))
+                .collect()
+        });
+        cut_decoded(self.whole_text(bytes).into_owned(), &breaks)
     }
 
     /// The span's bytes in `bytes`, empty when they no longer stand there.
@@ -715,7 +758,7 @@ pub fn wide_run_start(program: &Program, va: u64) -> bool {
 /// The text, with `...` appended when it was cut, so one monster string
 /// cannot fill a context window.
 fn display_text(raw: &[u8]) -> String {
-    cut_decoded(String::from_utf8_lossy(raw).into_owned())
+    cut_decoded(String::from_utf8_lossy(raw).into_owned(), &[])
 }
 
 /// Cuts decoded text to [`DISPLAY_MAX`] characters and breaks the control
@@ -724,22 +767,30 @@ fn display_text(raw: &[u8]) -> String {
 /// # Arguments
 ///
 /// * `text` - The decoded text.
+/// * `more` - Byte offsets of more characters to break, the ones the
+///   literal the text is a line of breaks there ([`RawStringSpan::text_in`]);
+///   those past the cut go with it.
 ///
 /// # Returns
 ///
 /// The text, with `...` appended when it was cut; multi-byte characters
 /// are counted, not split.
-fn cut_decoded(text: String) -> String {
+fn cut_decoded(text: String, more: &[usize]) -> String {
     let mut t = text;
+    let mut kept = t.len();
     if t.chars().count() > DISPLAY_MAX {
         t = t.chars().take(DISPLAY_MAX).collect();
+        kept = t.len();
         t.push_str("...");
     }
-    if crate::text::token_breaks(&t).is_empty() {
-        t
-    } else {
-        crate::text::fenced(&t).into_owned()
+    let mut breaks = crate::text::token_breaks(&t);
+    breaks.extend(more.iter().filter(|&&b| b < kept));
+    if breaks.is_empty() {
+        return t;
     }
+    breaks.sort_unstable();
+    breaks.dedup();
+    crate::text::fence_at(&t, &breaks).into_owned()
 }
 
 /// Escapes text for a double-quoted C literal.
@@ -848,7 +899,13 @@ const LITERAL_MAX: u64 = 4096;
 ///
 /// * `bytes` - The bytes walked.
 /// * `spans` - The runs, in offset order.
-fn literals(bytes: &[u8], spans: Vec<RawStringSpan>) -> Vec<RawStringSpan> {
+///
+/// # Returns
+///
+/// The literals in offset order, each run inside exactly one: a run no
+/// other joins is a literal of its own.
+#[must_use]
+pub fn literals(bytes: &[u8], spans: Vec<RawStringSpan>) -> Vec<RawStringSpan> {
     let mut out: Vec<RawStringSpan> = Vec::with_capacity(spans.len());
     for s in spans {
         let len = out.last().and_then(|last| joined(bytes, *last, s));
