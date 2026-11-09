@@ -80,16 +80,25 @@ const PANIC_MESSAGES: [(&str, &str); 15] = [
 /// runtime version.
 pub(super) const CHKSTK_X86: [u8; 7] = [0x51, 0x8d, 0x4c, 0x24, 0x04, 0x2b, 0xc8];
 
-/// Bare names of functions that never return to their caller (C runtime,
-/// C++ ABI, Windows API and MSVC runtime, Rust runtime, the kernel's bug
-/// check, and the Go runtime's ways of not coming back).
+/// Bare names of functions that never return to their caller.
+///
+/// They come from the C runtime, POSIX and C11 threads, the C++ ABI, the
+/// Windows API and MSVC runtime, the Rust runtime, the kernel's bug check,
+/// and the Go runtime's ways of not coming back.
 const NORETURN_NAMES: &[&str] = &[
     "abort",
     "exit",
     "_exit",
     "_Exit",
     "quick_exit",
+    "pthread_exit",
+    "thrd_exit",
+    "__assert",
     "__assert_fail",
+    "__assert_func",
+    "__assert_perror_fail",
+    "__chk_fail",
+    "__fortify_fail",
     "__stack_chk_fail",
     "longjmp",
     "_longjmp",
@@ -111,6 +120,8 @@ const NORETURN_NAMES: &[&str] = &[
     "ExitProcess",
     "ExitThread",
     "FreeLibraryAndExitThread",
+    "RtlExitUserProcess",
+    "RtlExitUserThread",
     "RtlRaiseException",
     "_CxxThrowException",
     "__report_gsfailure",

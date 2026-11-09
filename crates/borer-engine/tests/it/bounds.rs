@@ -284,6 +284,39 @@ fn calls_that_never_return_still_end_their_callers() {
     assert!(a.noreturn.contains(&0x1080), "{:?}", a.noreturn);
 }
 
+/// Calls that end a thread or fail a check end their callers' paths too,
+/// behind IBT stubs.
+///
+/// rsyslogd's `wtpWorker` and `thrdStarter` ran on past their calls to
+/// `pthread_exit`, which no name marked: since the walk skips a stub's
+/// `endbr64`, the stub was a jump through a slot that returns. newlib's
+/// `__assert` ran on past `__assert_func` into the next function, and
+/// `RtlExitUserThread` is the call kernel32's thread exits make.
+#[test]
+fn calls_that_end_a_thread_or_fail_a_check_end_their_callers() {
+    for name in [
+        "pthread_exit",
+        "thrd_exit",
+        "__chk_fail",
+        "__fortify_fail",
+        "__assert_perror_fail",
+        "__assert",
+        "__assert_func",
+        "RtlExitUserProcess",
+        "RtlExitUserThread",
+    ] {
+        let code = vec![
+            (STUB, ibt_stub(STUB, GOT)),
+            (0x1100, [call(0x1100, 0x1200), vec![0xc3]].concat()), // ASM: ret
+            (0x1200, vec![0x31, 0xff]),                            // ASM: xor edi, edi
+            (0x1202, [call(0x1202, STUB), returns(1)].concat()),
+        ];
+        let a = Analysis::compute(&image(&code, 0x1100, &[name]));
+        let f = a.function(0x1200).unwrap();
+        assert_eq!(f.end, 0x1207, "{name}: the caller ran past its call: {f:?}");
+    }
+}
+
 /// Builds glibc's `_start`, with headers that say nothing of the image's
 /// kind.
 ///
