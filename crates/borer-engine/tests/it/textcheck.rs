@@ -14,6 +14,7 @@ use borer_engine::analysis::render::{
     check_generated_iso, repair_iso,
 };
 use borer_engine::analysis::{Analysis, Overlay};
+use borer_engine::num::lo32;
 use borer_engine::program::{Arch, Program, Section};
 
 /// Where the hand-assembled code sits; the data page follows it.
@@ -77,6 +78,143 @@ fn runs_alike(p: &Program, entry: u64) {
         !rows.iter().any(|(_, v)| matches!(v, Verdict::Differs(..))),
         "{text}\n{rows:?}"
     );
+}
+
+/// Loads x86-64 code at [`TEXT`] with three imports and a jump table.
+///
+/// The imports `g`, `h` and `f` fill the data page's first three slots, so
+/// a call through one is a call no lift reads in place; the rel32 table of
+/// `cases` follows at 0x2020.
+///
+/// # Arguments
+///
+/// * `code` - The code.
+/// * `cases` - The table's targets, in case order.
+fn with_imports(code: &[u8], cases: &[u64]) -> Program {
+    use borer_engine::program::{Symbol, SymbolKind};
+    let table = cases
+        .iter()
+        .flat_map(|&t| lo32(t.wrapping_sub(TEXT + 0x1020)).to_le_bytes());
+    let mut p = program(
+        code,
+        &[0; 0x20].into_iter().chain(table).collect::<Vec<u8>>(),
+    );
+    for (k, name) in (0u64..).zip(["g", "h", "f"]) {
+        p.symbols.push(Symbol {
+            name: name.to_owned(),
+            addr: TEXT + 0x1000 + 8 * k,
+            kind: SymbolKind::Import,
+        });
+    }
+    p
+}
+
+/// A switch arm run into by another keeps the label its copy jumps to.
+///
+/// gnulib's `mbiter_multi_next` switches on `mbrtowc`'s result, and one
+/// case runs into another's body and on into the test of its call. Here
+/// case 0 is `if (f()) return 1; if (g()) return 2; return 0;` and case 1
+/// enters at the call to `g`. Writing case 0 first folded `g`'s test into
+/// the call and dropped its label, so case 1's copy of the call ended in
+/// `break` and the switch in `goto L_102c;` to a label no line held.
+#[test]
+fn a_switch_arm_run_into_by_another_keeps_its_label() {
+    let code = [
+        0x53, // ASM: push rbx
+        0x48, 0x83, 0xec, 0x20, // ASM: sub rsp,0x20
+        0x89, 0xc9, // ASM: mov ecx,ecx
+        0x83, 0xf9, 0x03, // ASM: cmp ecx,3
+        0x77, 0x3d, // ASM: ja 0x1049
+        0x48, 0x8d, 0x15, 0x0d, 0x10, 0x00, 0x00, // ASM: lea rdx,[rip+0x100d] = 0x2020
+        0x48, 0x63, 0x04, 0x8a, // ASM: movsxd rax,[rdx+rcx*4]
+        0x48, 0x01, 0xd0, // ASM: add rax,rdx
+        0xff, 0xe0, // ASM: jmp rax
+        0xff, 0x15, 0xee, 0x0f, 0x00, 0x00, // ASM: call [rip+f]   (0x101c)
+        0x85, 0xc0, // ASM: test eax,eax
+        0x75, 0x0e, // ASM: jne 0x1034
+        0xff, 0x15, 0xd4, 0x0f, 0x00, 0x00, // ASM: call [rip+g]   (0x1026)
+        0x85, 0xc0, // ASM: test eax,eax               (0x102c)
+        0x75, 0x0b, // ASM: jne 0x103b
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xeb, 0x22, // ASM: jmp 0x1056
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax,1      (0x1034)
+        0xeb, 0x1b, // ASM: jmp 0x1056
+        0xb8, 0x02, 0x00, 0x00, 0x00, // ASM: mov eax,2      (0x103b)
+        0xeb, 0x14, // ASM: jmp 0x1056
+        0xb8, 0x03, 0x00, 0x00, 0x00, // ASM: mov eax,3      (0x1042)
+        0xeb, 0x05, // ASM: jmp 0x104e
+        0xb8, 0x07, 0x00, 0x00, 0x00, // ASM: mov eax,7      (0x1049)
+        0x89, 0xc1, // ASM: mov ecx,eax                (0x104e)
+        0xff, 0x15, 0xb2, 0x0f, 0x00, 0x00, // ASM: call [rip+h]
+        0x48, 0x83, 0xc4, 0x20, // ASM: add rsp,0x20      (0x1056)
+        0x5b, 0xc3, // ASM: pop rbx; ret
+    ];
+    let p = with_imports(&code, &[0x101c, 0x1026, 0x1042, 0x1042]);
+    let (text, _) = text_of(&p, TEXT);
+    assert!(text.contains("switch ("), "{text}");
+    assert_eq!(
+        crate::gotos::dangling_gotos(&text),
+        Vec::<String>::new(),
+        "{text}"
+    );
+    crate::decompiled::runs_agree(&p, TEXT);
+}
+
+/// A switch arm entered at a call another arm makes first keeps the test
+/// of that call's result, where the switch goes on elsewhere.
+///
+/// betaflight's `accDetect` runs each detect in turn. Here case 0 is `if
+/// (f()) return 1; if (g()) return 2; return 0;`, case 1 enters at the call
+/// to `g`, and cases 2 and 3 and the default go on to a tail too long to
+/// copy, which calls `h`: the switch ends there. Writing case 0 first
+/// folded `g`'s test into the call, so case 1's copy of the call ended in
+/// `break` and ran into that tail: a failed `g` read as a success.
+#[test]
+fn a_switch_arm_entered_at_another_arms_call_keeps_its_test() {
+    let code = [
+        0x53, // ASM: push rbx
+        0x48, 0x83, 0xec, 0x20, // ASM: sub rsp,0x20
+        0x89, 0xc9, // ASM: mov ecx,ecx
+        0x83, 0xf9, 0x03, // ASM: cmp ecx,3
+        0x77, 0x44, // ASM: ja 0x1050
+        0x48, 0x8d, 0x15, 0x0d, 0x10, 0x00, 0x00, // ASM: lea rdx,[rip+0x100d] = 0x2020
+        0x48, 0x63, 0x04, 0x8a, // ASM: movsxd rax,[rdx+rcx*4]
+        0x48, 0x01, 0xd0, // ASM: add rax,rdx
+        0xff, 0xe0, // ASM: jmp rax
+        0xff, 0x15, 0xee, 0x0f, 0x00, 0x00, // ASM: call [rip+f]   (0x101c)
+        0x85, 0xc0, // ASM: test eax,eax
+        0x75, 0x0e, // ASM: jne 0x1034
+        0xff, 0x15, 0xd4, 0x0f, 0x00, 0x00, // ASM: call [rip+g]   (0x1026)
+        0x85, 0xc0, // ASM: test eax,eax
+        0x75, 0x0b, // ASM: jne 0x103b
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xeb, 0x48, // ASM: jmp 0x107c
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax,1      (0x1034)
+        0xeb, 0x41, // ASM: jmp 0x107c
+        0xb8, 0x02, 0x00, 0x00, 0x00, // ASM: mov eax,2      (0x103b)
+        0xeb, 0x3a, // ASM: jmp 0x107c
+        0xb8, 0x03, 0x00, 0x00, 0x00, // ASM: mov eax,3      (0x1042)
+        0xeb, 0x0c, // ASM: jmp 0x1055
+        0xb8, 0x04, 0x00, 0x00, 0x00, // ASM: mov eax,4      (0x1049)
+        0xeb, 0x05, // ASM: jmp 0x1055
+        0xb8, 0x07, 0x00, 0x00, 0x00, // ASM: mov eax,7      (0x1050)
+        0x89, 0x04, 0x24, // ASM: mov [rsp],eax            (0x1055)
+        0x89, 0x44, 0x24, 0x04, // ASM: mov [rsp+4],eax
+        0x89, 0x44, 0x24, 0x08, // ASM: mov [rsp+8],eax
+        0x89, 0x44, 0x24, 0x0c, // ASM: mov [rsp+0xc],eax
+        0x89, 0x44, 0x24, 0x10, // ASM: mov [rsp+0x10],eax
+        0x89, 0x44, 0x24, 0x14, // ASM: mov [rsp+0x14],eax
+        0x89, 0x44, 0x24, 0x18, // ASM: mov [rsp+0x18],eax
+        0x89, 0x44, 0x24, 0x1c, // ASM: mov [rsp+0x1c],eax
+        0x89, 0xc1, // ASM: mov ecx,eax
+        0xff, 0x15, 0x8c, 0x0f, 0x00, 0x00, // ASM: call [rip+h]
+        0x48, 0x83, 0xc4, 0x20, // ASM: add rsp,0x20      (0x107c)
+        0x5b, 0xc3, // ASM: pop rbx; ret
+    ];
+    let p = with_imports(&code, &[0x101c, 0x1026, 0x1042, 0x1049]);
+    let (text, _) = text_of(&p, TEXT);
+    assert!(text.contains("switch ("), "{text}");
+    crate::decompiled::runs_agree(&p, TEXT);
 }
 
 /// A text that reads a register no line sets is flagged at that line.

@@ -1485,6 +1485,13 @@ pub(super) fn try_switch<L: Lifter>(
 /// the switch, while an arm leaving elsewhere keeps its goto. A default
 /// body that is that exit is no arm: the switch falls out into it.
 ///
+/// Every arm's region is built before any arm is written, and an earlier
+/// arm may hold the block a later arm's copy goes on to. Each such block
+/// is a copy target ([`Emit::copy_targets`]) before the first arm is
+/// written, so writing that arm does not fold it into its predecessor's
+/// test: the copy, and the switch when the block is where it ends, jump to
+/// a label the text holds.
+///
 /// # Arguments
 ///
 /// * `ctx` - Per-function state.
@@ -1519,21 +1526,6 @@ pub(super) fn emit_switch<L: Lifter>(
         /// The closed region the body heads, when the switch writes it.
         region: Option<Region>,
     }
-    /// The region an arm's body is, and the exits it had before an open
-    /// one was cut down to its first block.
-    fn arm_region<L: Lifter>(
-        st: &Emit<'_, L>,
-        headers: &BTreeSet<usize>,
-        bi: usize,
-    ) -> (Region, BTreeSet<usize>) {
-        let mut region = closed_run_from(st, bi, headers, None);
-        let exits = region.exits.clone();
-        if !region.closed {
-            region.order = vec![bi];
-            region.dups.clear();
-        }
-        (region, exits)
-    }
     let i = headers.iter().next().copied().unwrap_or(0);
     let bodies: Vec<Arm> = arms
         .iter()
@@ -1559,6 +1551,7 @@ pub(super) fn emit_switch<L: Lifter>(
     };
     let mut votes: BTreeMap<usize, usize> = BTreeMap::new();
     let mut regions: Vec<SwitchArm> = Vec::new();
+    let mut onwards: Vec<usize> = Vec::new();
     for (arm, (region, exits)) in bodies.into_iter().zip(prelim) {
         if continuation(st, arm.body) {
             *votes.entry(arm.body).or_insert(0) += 1;
@@ -1568,6 +1561,7 @@ pub(super) fn emit_switch<L: Lifter>(
         for e in exits {
             *votes.entry(e).or_insert(0) += 1;
         }
+        onwards.extend(region.dups.iter().filter_map(|&d| onward(st, d)));
         regions.push(SwitchArm {
             arm,
             region: Some(region),
@@ -1585,6 +1579,7 @@ pub(super) fn emit_switch<L: Lifter>(
     {
         regions.pop();
     }
+    st.copy_targets.extend(onwards);
     let join_start = join.and_then(|j| st.start_of(j));
     let _ = writeln!(out, "switch ({switch_expr}) {{");
     for SwitchArm { arm, region } in &regions {
@@ -1614,6 +1609,28 @@ pub(super) fn emit_switch<L: Lifter>(
         let _ = writeln!(out, "{}", goto(js));
     }
     join.unwrap_or(i + 1)
+}
+
+/// Returns the region a switch arm's body heads, and the exits it had before
+/// an open one was cut down to its first block.
+///
+/// # Arguments
+///
+/// * `st` - Emission state.
+/// * `headers` - The switch's dispatching blocks, which may enter the arm.
+/// * `bi` - The arm's first block.
+fn arm_region<L: Lifter>(
+    st: &Emit<'_, L>,
+    headers: &BTreeSet<usize>,
+    bi: usize,
+) -> (Region, BTreeSet<usize>) {
+    let mut region = closed_run_from(st, bi, headers, None);
+    let exits = region.exits.clone();
+    if !region.closed {
+        region.order = vec![bi];
+        region.dups.clear();
+    }
+    (region, exits)
 }
 
 /// Emits a region's blocks in order, recursing into structured children.
