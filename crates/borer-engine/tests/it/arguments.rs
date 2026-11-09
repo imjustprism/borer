@@ -92,3 +92,39 @@ fn an_epilogue_steps_over_what_leaves_the_stack_alone() {
     assert!(text.contains("sub_401010(5)"), "{text}");
 }
 
+/// A tail jump to a variadic function hands on no stack word of the
+/// function jumping.
+///
+/// The variadic callee homes `rdx` to `r9` for `va_start` and takes the
+/// address of its list's stack part, `[rsp+0x60]` over its 0x58-byte
+/// frame, which its frame scan counts as one stack argument. The wrapper
+/// that sets `esi` and `edx` and jumps to it was read as handing that word
+/// on, so it took seven parameters and its caller passed `rsi` to `r9`,
+/// which nothing set.
+#[test]
+fn a_tail_jump_to_a_variadic_function_hands_on_no_stack_word() {
+    let code = [
+        0xbf, 0x05, 0x00, 0x00, 0x00, // ASM: mov edi,5
+        0xe8, 0x06, 0x00, 0x00, 0x00, // ASM: call 0x401010
+        0xc3, // ASM: ret
+        0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // ASM: int3 (padding)
+        0x89, 0xfe, // ASM: mov esi,edi
+        0xba, 0x07, 0x00, 0x00, 0x00, // ASM: mov edx,7
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xe9, 0x02, 0x00, 0x00, 0x00, // ASM: jmp 0x401020
+        0xcc, 0xcc, // ASM: int3 (padding)
+        0x48, 0x83, 0xec, 0x58, // ASM: sub rsp,0x58
+        0x48, 0x89, 0x54, 0x24, 0x30, // ASM: mov [rsp+0x30],rdx
+        0x48, 0x89, 0x4c, 0x24, 0x38, // ASM: mov [rsp+0x38],rcx
+        0x4c, 0x89, 0x44, 0x24, 0x40, // ASM: mov [rsp+0x40],r8
+        0x4c, 0x89, 0x4c, 0x24, 0x48, // ASM: mov [rsp+0x48],r9
+        0x84, 0xc0, // ASM: test al,al
+        0x48, 0x8d, 0x44, 0x24, 0x60, // ASM: lea rax,[rsp+0x60]
+        0x8b, 0x44, 0x24, 0x30, // ASM: mov eax,[rsp+0x30]
+        0x01, 0xf0, // ASM: add eax,esi
+        0x48, 0x83, 0xc4, 0x58, // ASM: add rsp,0x58
+        0xc3, // ASM: ret
+    ];
+    let text = iso_agrees(&sysv(&code), 0x401000);
+    assert!(text.contains("sub_401010(5)"), "{text}");
+}

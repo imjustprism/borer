@@ -954,6 +954,9 @@ fn variadic_fixed(ctx: &Ctx<'_>, entry: u64) -> Option<usize> {
 ///
 /// The most words any tail jump's target takes: an import's by its
 /// prototype, a function's by its frame scan; zero when none jumps out.
+/// A variadic target ([`variadic_fixed`]) takes none: what its frame scan
+/// finds above its return address is the list `va_start` points at, the
+/// variable arguments, which the function jumping to it never had.
 pub(super) fn forwarded_stack(ctx: &Ctx<'_>, code: &[Vec<Instruction>]) -> u32 {
     code.iter()
         .filter_map(|b| b.last())
@@ -974,7 +977,7 @@ pub(super) fn forwarded_stack(ctx: &Ctx<'_>, code: &[Vec<Instruction>]) -> u32 {
             None => ctx
                 .analysis
                 .function(t)
-                .filter(|g| g.instr_count > 1)
+                .filter(|g| g.instr_count > 1 && variadic_fixed(ctx, t).is_none())
                 .map(|g| g.stack_args),
         })
         .max()
