@@ -479,3 +479,43 @@ fn a_lone_lea_after_a_call_proves_no_variable_list() {
         "{text}"
     );
 }
+
+/// A function that spills its parameters in register order and tests `al`
+/// after its first call is no variadic function: it takes neither address
+/// `va_start` takes, so `rdx` to `r9` stay its parameters.
+///
+/// openssh's `process_server_config_line_depth` spills `rdx`, `rcx`, `r8`
+/// and `r9` side by side for want of registers and tests a character in
+/// `al` after a call; read as a save area behind the vector count, it
+/// took two fixed parameters and `...`, and its caller passed four.
+#[test]
+fn a_spill_in_order_and_a_test_of_al_prove_no_variable_list() {
+    let mut code = vec![
+        0x48, 0x83, 0xec, 0x38, // ASM: sub rsp,0x38
+        0x48, 0x89, 0x14, 0x24, // ASM: mov [rsp],rdx
+        0x48, 0x89, 0x4c, 0x24, 0x08, // ASM: mov [rsp+8],rcx
+        0x4c, 0x89, 0x44, 0x24, 0x10, // ASM: mov [rsp+0x10],r8
+        0x4c, 0x89, 0x4c, 0x24, 0x18, // ASM: mov [rsp+0x18],r9
+        0xe8, 0x24, 0x00, 0x00, 0x00, // ASM: call 0x401040
+        0x84, 0xc0, // ASM: test al,al
+        0x74, 0x05, // ASM: je 0x401025
+        0x48, 0x8b, 0x44, 0x24, 0x18, // ASM: mov rax,[rsp+0x18]
+        0x48, 0x83, 0xc4, 0x38, // ASM: add rsp,0x38
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x40, 0xcc);
+    code.extend_from_slice(&[
+        0x89, 0xf8, // ASM: mov eax,edi
+        0xc3, // ASM: ret
+    ]);
+    let p = sysv(&code);
+    let text = crate::decompiled::decompiled(&p, 0x401000);
+    let signature = text
+        .lines()
+        .find(|l| l.starts_with("// signature:"))
+        .unwrap_or_default();
+    assert!(
+        signature.contains("a6)") && !signature.contains("..."),
+        "{text}"
+    );
+}

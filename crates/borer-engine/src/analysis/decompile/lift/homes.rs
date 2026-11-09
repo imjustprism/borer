@@ -5,6 +5,9 @@
 
 use super::*;
 
+/// Bytes of one integer register's place in the System V save area.
+const GPR: i64 = 8;
+
 /// What one instruction does with the home slots of the argument registers.
 pub(super) enum Home {
     /// Stores an argument register into its own home slot.
@@ -300,8 +303,6 @@ impl Homes {
     /// A function that spills its own parameters for a debug build
     /// stores them in no such run and tests no `al`.
     fn save_area_fixed(&self) -> Option<usize> {
-        /// Bytes of one integer register's place in the save area.
-        const GPR: i64 = 8;
         /// Bytes of one vector register's place in the save area.
         const VECTOR: i64 = 16;
         let step = |n: usize, size: i64| i64::try_from(n).ok().map(|n| n * size);
@@ -375,12 +376,15 @@ pub(super) fn base_below_of(
 ///
 /// The function's first instructions are read in address order on
 /// through its calls, each block after the entry's starting where the
-/// entry left the stack pointer, and the full shape is asked for
-/// ([`Homes::fixed`]): the stores into the save area and both addresses
-/// `va_start` takes, of the list's stack part and of its register part. A
-/// lone store or a lone `lea` past a call proves nothing. Nothing is read
-/// unless the scan before the call saw an argument register stored in the
-/// frame.
+/// entry left the stack pointer, and the full shape is asked for: the
+/// stores into the save area ([`Homes::fixed`]) and both addresses
+/// `va_start` takes, of the list's stack part and of the area's start. A
+/// lone store or a lone `lea` past a call proves nothing, and neither does
+/// a `test al, al` there, which tests some byte rather than the caller's
+/// count of vector arguments: openssh's `process_server_config_line_depth`
+/// spills `rdx` to `r9` in order for want of registers and tests a
+/// character. Nothing is read unless the scan before the call saw an
+/// argument register stored in the frame.
 ///
 /// # Arguments
 ///
@@ -413,5 +417,7 @@ pub(super) fn late_fixed(ctx: &Ctx<'_>, conv: &Conv, t: u64, early: &Homes) -> O
         }
         frame = frame.or(Some(homes.below));
     }
-    homes.fixed()
+    let first = homes.fixed()?;
+    let area = homes.saved.get(&first)? - i64::try_from(first).ok()? * GPR;
+    (homes.va_start.is_some() && homes.taken.contains(&area)).then_some(first)
 }
