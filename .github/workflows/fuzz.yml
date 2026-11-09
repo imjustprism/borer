@@ -5,6 +5,10 @@ name: fuzz
 # main (its pull requests and pushes), ten minutes per target weekly. An input that panics,
 # runs past ten seconds or takes 2 GB fails the job and is uploaded; replay
 # it with `cargo +nightly fuzz run <target> <file>` and keep it as a test.
+# A manual run takes a target (all three when not given), libFuzzer's seed
+# and a run count (ten minutes when not given): the `INFO: Seed:` and
+# `Done N runs` a run printed replay it on the same build, as far as the
+# target is deterministic.
 
 on:
   push:
@@ -14,6 +18,20 @@ on:
   schedule:
     - cron: "41 4 * * 1"
   workflow_dispatch:
+    inputs:
+      target:
+        description: The target to fuzz; all fuzzes load, analyze and il in turn
+        type: choice
+        options: [all, load, analyze, il]
+        default: all
+      seed:
+        description: libFuzzer's -seed; empty lets libFuzzer pick one
+        type: string
+        default: ""
+      runs:
+        description: libFuzzer's -runs, the inputs to try with no time limit; empty fuzzes for ten minutes
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -27,6 +45,10 @@ env:
   # cargo-fuzz needs nightly; a dated one keeps the build reproducible.
   NIGHTLY: nightly-2026-10-01
   SECONDS_PER_TARGET: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 600 || 60 }}
+  # Sanitizer reports name each frame's function, file and line, not an
+  # offset into the binary.
+  ASAN_OPTIONS: symbolize=1
+  ASAN_SYMBOLIZER_PATH: /usr/bin/llvm-symbolizer
 
 jobs:
   fuzz:
@@ -41,16 +63,33 @@ jobs:
       - name: cargo-fuzz
         run: cargo +"$NIGHTLY" install cargo-fuzz --version 0.13.2 --locked
 
+      - name: llvm-symbolizer
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends llvm
+          "$ASAN_SYMBOLIZER_PATH" --version
+
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: fuzz
 
       - name: fuzz
         working-directory: fuzz
+        env:
+          TARGET: ${{ inputs.target }}
+          SEED: ${{ inputs.seed }}
+          RUNS: ${{ inputs.runs }}
         run: |
-          for target in load analyze il; do
+          [[ "$SEED$RUNS" =~ ^[0-9]*$ ]] || { echo "seed and runs take digits only"; exit 1; }
+          targets="load analyze il"
+          if [ "${TARGET:-all}" != all ]; then targets=$TARGET; fi
+          stop=(-max_total_time="$SECONDS_PER_TARGET")
+          if [ -n "$RUNS" ]; then stop=(-runs="$RUNS"); fi
+          seed=()
+          if [ -n "$SEED" ]; then seed=(-seed="$SEED"); fi
+          for target in $targets; do
             cargo +"$NIGHTLY" fuzz run "$target" -- \
-              -max_total_time="$SECONDS_PER_TARGET" -timeout=10 -rss_limit_mb=2048
+              "${stop[@]}" "${seed[@]}" -timeout=10 -rss_limit_mb=2048
           done
 
       - if: failure()
