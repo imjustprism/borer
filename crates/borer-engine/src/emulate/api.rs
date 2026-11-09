@@ -348,9 +348,9 @@ impl Emulator<'_> {
         } else if api == "memcpy" || api == "memmove" || api == "mempcpy" {
             let (src, len) = (self.api_arg(1), self.api_arg(2));
             let len = libc::within_cap(api, len, API_COPY_MAX)?;
-            let bytes: Vec<u8> = (0..len)
-                .map(|k| self.byte(src.wrapping_add(from_usize(k))).unwrap_or(0))
-                .collect();
+            let bytes = (0..len)
+                .map(|k| self.load(src.wrapping_add(from_usize(k)), 1).map(lo8))
+                .collect::<Result<Vec<u8>, Stop>>()?;
             for (k, b) in bytes.into_iter().enumerate() {
                 self.write(rcx.wrapping_add(from_usize(k)), u64::from(b), 1)?;
             }

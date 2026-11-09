@@ -703,15 +703,34 @@ fn a_32_bit_string_call_takes_its_argument_by_its_convention() {
 fn a_copy_past_the_cap_stops_instead_of_cutting_short() {
     /// The most bytes one modeled call reads or writes.
     const CAP: u64 = 0x1_0000;
+    let source = vec![0x41u8; 0x1_0001];
     for name in ["msvcrt.dll!memcpy", "msvcrt.dll!memset"] {
         let p = slot_image(BinaryFormat::Pe, name);
-        let (stop, _) = call(&p, &[0x10_0000, 0x20_0000, CAP], &[], 1000);
+        let memory = [(0x20_0000, source.as_slice())];
+        let (stop, _) = call(&p, &[0x10_0000, 0x20_0000, CAP], &memory, 1000);
         assert_eq!(stop, Stop::Returned, "{name}");
-        let (stop, _) = call(&p, &[0x10_0000, 0x20_0000, CAP + 1], &[], 1000);
+        let (stop, _) = call(&p, &[0x10_0000, 0x20_0000, CAP + 1], &memory, 1000);
         assert!(
             matches!(&stop, Stop::Unmodeled(what) if what.contains("past 0x10000")),
             "{name}: {stop:?}"
         );
+    }
+}
+
+/// A copy reads its source as a load does: a source nothing backs faults
+/// at its first byte, where it once read as zeros and the copy succeeded.
+#[test]
+fn a_copy_from_memory_nothing_backs_faults_there() {
+    let wild = 0xdead_0000;
+    for name in [
+        "msvcrt.dll!memcpy",
+        "msvcrt.dll!memmove",
+        "msvcrt.dll!mempcpy",
+    ] {
+        let p = slot_image(BinaryFormat::Pe, name);
+        let (stop, emu) = call(&p, &[0x10_0000, wild, 4], &[], 1000);
+        assert_eq!(stop, Stop::Fault(wild), "{name}");
+        assert_eq!(emu.byte_at(0x10_0000), None, "{name} wrote its destination");
     }
 }
 
