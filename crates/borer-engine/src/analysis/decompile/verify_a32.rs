@@ -6,11 +6,11 @@
 //! and through the ARM32 lifter ([`super::lift_a32`]), whose symbolic
 //! results are evaluated under that state by the shared evaluator
 //! ([`super::verify::eval`]) at 32 bits. Five kinds of fact must agree:
-//! every core register and the stack pointer; every single and double the
-//! lifter holds a value for; every stack slot the lifter holds a value
-//! for; every store and byte the block writes off the frame; and whether
-//! the block's conditional branch is taken, the test in front of a
-//! conditional return or call among them ([`crate::isa::a32::SKIP`]).
+//! every core register and the stack pointer; every single and double;
+//! every stack slot the lifter holds a value for; every store and byte
+//! the block writes off the frame; and whether the block's conditional
+//! branch is taken, the test in front of a conditional return or call
+//! among them ([`crate::isa::a32::SKIP`]).
 //!
 //! A block is checked up to its first control transfer. Memory nothing
 //! backs reads a hash of its address on both sides. The core registers are
@@ -486,25 +486,35 @@ fn registers(ran: &Ran<'_, Machine<'_>, ()>, out: &mut Verified) {
     check("sp", emulated, read, expr);
 }
 
-/// Compares every single and double the lifter holds a value for.
+/// Compares every single and double, each at its own width.
+///
+/// A register the lifter holds no value for still holds the value it
+/// started with: the lifter writes both views of a VFP register an
+/// instruction it models changes, a single's double and a double's
+/// singles, so a write a lift drops shows as a register the machine
+/// changed.
 ///
 /// # Arguments
 ///
 /// * `ran` - Both runs.
 /// * `out` - Where the counts and disagreements go.
 fn vfp(ran: &Ran<'_, Machine<'_>, ()>, out: &mut Verified) {
-    for (k, e) in &ran.env.vals {
-        let Key::A32(r @ (Reg::S(_) | Reg::D(_))) = *k else {
-            continue;
-        };
+    for r in (0..32).map(Reg::S).chain((0..32).map(Reg::D)) {
+        let key = Key::A32(r);
+        let value = ran.env.vals.get(&key);
+        let read = value.map_or_else(
+            || Read::Value(ran.st.regs.get(&key).copied().unwrap_or(0)),
+            |e| ran.read(e),
+        );
         let name = crate::isa::a32::name(r);
         let Some(emulated) = ran.emu.register(&name) else {
             continue;
         };
-        let Some(lifted) = out.count(Fact::Vector, ran.read(e)) else {
+        let Some(lifted) = out.count(Fact::Vector, read) else {
             continue;
         };
-        let lifted = if matches!(r, Reg::S(_)) {
+        let bits = if matches!(r, Reg::S(_)) { 32 } else { 64 };
+        let lifted = if bits == 32 {
             lifted & 0xffff_ffff
         } else {
             lifted
@@ -514,12 +524,8 @@ fn vfp(ran: &Ran<'_, Machine<'_>, ()>, out: &mut Verified) {
                 out,
                 Fact::Vector,
                 name,
-                (
-                    emulated,
-                    lifted,
-                    if matches!(r, Reg::S(_)) { 32 } else { 64 },
-                ),
-                format!("{e:?}"),
+                (emulated, lifted, bits),
+                value.map_or_else(|| "(unchanged)".to_owned(), |e| format!("{e:?}")),
             );
         }
     }
@@ -594,5 +600,23 @@ mod tests {
         let (taken, caught) = block(&code, equals(Expr::Const(1)));
         assert!((1..8).contains(&taken), "taken from {taken} of 8 seeds");
         assert!(caught > 0, "r0 == 1 agreed with tst r0, r0 on every seed");
+    }
+
+    /// A lift that drops the write of a VFP register is reported.
+    ///
+    /// `vmov s0, r0` writes `s0`, and with it `d0`. A lift holding a value
+    /// for neither leaves both as they started, which the machine's no
+    /// longer are.
+    #[test]
+    fn a_dropped_vfp_write_is_reported() {
+        let dropped = |ran: &mut Ran<'_, Machine<'_>, ()>| {
+            for r in [Reg::S(0), Reg::D(0)] {
+                let held = ran.env.vals.remove(&Key::A32(r));
+                assert!(held.is_some(), "the lift held no value for {r:?}");
+            }
+        };
+        // ASM: vmov s0, r0 ; bx lr
+        let (_, caught) = block(&[0xee00_0a10, 0xe12f_ff1e], dropped);
+        assert_eq!(caught, 8, "a dropped write agreed on a seed");
     }
 }
