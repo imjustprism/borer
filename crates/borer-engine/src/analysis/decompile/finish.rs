@@ -30,8 +30,8 @@ mod words;
 /// # Arguments
 ///
 /// * `text` - A decompiled function, header lines first.
-/// * `bitness` - Decoder bitness of the program (32 or 64), which is the
-///   width of a parameter nothing narrowed.
+/// * `bitness` - The image's word in bits (32 or 64), which is the width
+///   of a parameter nothing narrowed.
 /// * `packs` - The packs in force, for the stream classes a `// wire:`
 ///   line is read through.
 ///
@@ -82,7 +82,7 @@ pub(super) fn polish_at(
 /// # Arguments
 ///
 /// * `text` - A decompiled function, header lines first.
-/// * `bitness` - Decoder bitness of the program (32 or 64).
+/// * `bitness` - The image's word in bits (32 or 64).
 /// * `packs` - The packs in force.
 /// * `skip` - The passes left out ([`Passes`]).
 /// * `callers` - The image, the analysis, the names in force and the

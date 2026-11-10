@@ -55,7 +55,7 @@ pub(super) fn declare(text: &str, program: &Program) -> String {
     if types.is_empty() && program.debug_globals.is_empty() {
         return text.to_owned();
     }
-    let word = u64::from(program.arch.bitness().unwrap_or(64) / 8);
+    let word = crate::analysis::pointer_size(program);
     let code: Vec<&str> = text
         .lines()
         .filter(|l| !l.trim_start().starts_with("//") || l.starts_with("// signature: "))
@@ -509,5 +509,43 @@ mod tests {
             declare(indexed, &program).contains("extern struct pair table[4];"),
             "an indented return is no declaration"
         );
+    }
+
+    /// A pointer field is as wide as the image's pointers, whatever its
+    /// instruction set: on 32-bit ARM and RISC-V the field four bytes
+    /// after one keeps its place, where an eight-byte pointer covered it.
+    #[test]
+    fn a_pointer_field_is_as_wide_as_the_images_pointers() {
+        let node = UserStruct {
+            size: 8,
+            fields: [
+                (
+                    0,
+                    UserField {
+                        name: "next".to_owned(),
+                        ty: TypeExpr::Ptr(Box::new(TypeExpr::Named("node".to_owned()))),
+                    },
+                ),
+                (
+                    4,
+                    UserField {
+                        name: "value".to_owned(),
+                        ty: TypeExpr::I32,
+                    },
+                ),
+            ]
+            .into(),
+        };
+        for arch in [Arch::Arm, Arch::RiscV32] {
+            let mut p = Program::raw(vec![0; 16], arch, 0, None, Vec::new());
+            p.debug_types
+                .insert("node".to_owned(), UserType::Struct(node.clone()));
+            let text = "// signature: int f(struct node *n)\n\nreturn n->next->value;\n";
+            let out = declare(text, &p);
+            assert!(
+                out.contains("struct node { struct node *next; int32_t value; };"),
+                "{arch:?}: {out}"
+            );
+        }
     }
 }

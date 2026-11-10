@@ -466,6 +466,41 @@ fn a_result_no_caller_reads_is_void() {
     assert!(!callee.contains("return"), "{callee}");
 }
 
+/// A scenario's text is written in the image's own words, as the plain
+/// text is.
+///
+/// An RV32 function that calls its first parameter passes `uint32_t`
+/// words through it, in a scenario and in every exploded row, where both
+/// spelled the 64-bit words of no register it has.
+#[test]
+fn an_rv32_scenario_calls_through_a_pointer_in_32_bit_words() {
+    use borer_engine::analysis::decompile::{decompile_scenario, explode};
+    let code = [
+        (0xff01_0113, 4), // ASM: addi sp, sp, -16
+        (0x0011_2623, 4), // ASM: sw ra, 12(sp)
+        (0x0005_0613, 4), // ASM: mv a2, a0
+        (0x0005_8513, 4), // ASM: mv a0, a1
+        (0x0006_00e7, 4), // ASM: jalr a2
+        (0x00c1_2083, 4), // ASM: lw ra, 12(sp)
+        (0x0101_0113, 4), // ASM: addi sp, sp, 16
+        (0x0000_8067, 4), // ASM: ret
+    ];
+    let p = image(&assemble(&code), Arch::RiscV32);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let in_words = |t: &str| t.contains("(uint32_t (*)(uint32_t") && !t.contains("uint64_t");
+    let plain = decompile(&p, &a, &o, AT).expect("decompiles");
+    assert!(in_words(&plain), "{plain}");
+    let scenario = decompile_scenario(&p, &a, &o, AT, &[]).expect("decompiles");
+    assert!(in_words(&scenario), "{scenario}");
+    let rows = explode(&p, &a, &o, AT, 1, &[1, 2]);
+    let returns: Vec<&String> = rows.iter().flat_map(|r| &r.returns).collect();
+    assert!(
+        !returns.is_empty() && returns.iter().all(|r| in_words(r)),
+        "{rows:?}"
+    );
+}
+
 /// Decompiles a routine with functions named at `AT` offsets, each by its
 /// offset, in the order given.
 ///

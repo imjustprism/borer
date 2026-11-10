@@ -1308,7 +1308,7 @@ impl Program {
                     symsrv,
                     rec,
                     image_base,
-                    i64::from(arch.bitness().unwrap_or(64) / 8),
+                    if is_64 { 8 } else { 4 },
                     &sections,
                     &mut symbols,
                     &mut function_ranges,

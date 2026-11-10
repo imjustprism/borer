@@ -35,7 +35,8 @@ pub fn decompile_scenario(
     let bitness = program.arch.bitness().unwrap_or(64);
     let registers = abi::conv(program, bitness).args.len();
     let d = decompile_with(program, analysis, overlay, entry, true, assume, false)?;
-    let text = polish(&d.text, bitness, &analysis.packs);
+    let word = if program.is_64 { 64 } else { 32 };
+    let text = polish(&d.text, word, &analysis.packs);
     let said: Vec<String> = assume
         .iter()
         .map(|&(slot, v)| {
@@ -106,7 +107,7 @@ pub fn explode(
     slot: u8,
     values: &[u64],
 ) -> Vec<ScenarioCase> {
-    let bitness = program.arch.bitness().unwrap_or(64);
+    let word = if program.is_64 { 64 } else { 32 };
     let mut out: Vec<ScenarioCase> = Vec::new();
     for &value in values.iter().take(EXPLODE_MAX) {
         let Some(d) = decompile_with(
@@ -120,7 +121,7 @@ pub fn explode(
         ) else {
             continue;
         };
-        let text = polish(&d.text, bitness, &analysis.packs);
+        let text = polish(&d.text, word, &analysis.packs);
         let mut calls: Vec<String> = Vec::new();
         for c in crate::analysis::schema::calls_in_order(&blank_strings(&text)) {
             if !calls.contains(&c.callee) {

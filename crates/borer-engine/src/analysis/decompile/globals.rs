@@ -60,7 +60,7 @@ pub(super) fn stated(program: &Program, addr: u64, name: &str) -> Option<Stated>
                 .ok()
                 .and_then(|i| declared.get(i))
         });
-    let word = u64::from(program.arch.bitness().unwrap_or(64) / 8);
+    let word = crate::analysis::pointer_size(program);
     match debug {
         Some(g) => from_debug(g, word),
         None => {
@@ -129,7 +129,7 @@ fn stated_table(program: &Program, at: u64) -> Option<(Table, &TypeExpr)> {
     let (Some(start), Some(TypeExpr::Array(elem, len))) = (g.addr, &g.ty) else {
         return None;
     };
-    let word = u64::from(program.arch.bitness().unwrap_or(64) / 8);
+    let word = crate::analysis::pointer_size(program);
     let types = &program.debug_types;
     let size = width_of(types, elem, word).filter(|s| *s > 0)?;
     if at - start >= size.checked_mul(*len)? {
@@ -205,7 +205,7 @@ pub(super) fn table_holding(program: &Program, at: u64) -> Option<Table> {
 /// not one whole scalar of it.
 pub(super) fn table_at(program: &Program, at: u64, bytes: u64) -> Option<Element> {
     let (table, elem) = stated_table(program, at)?;
-    let word = u64::from(program.arch.bitness().unwrap_or(64) / 8);
+    let word = crate::analysis::pointer_size(program);
     let types = &program.debug_types;
     let off = at - table.start;
     let (index, within) = (off / table.size, off % table.size);
@@ -521,5 +521,58 @@ mod tests {
         };
         assert!(int.fits(Ty::U32, 8));
         assert!(!int.fits(Ty::U8, 8));
+    }
+
+    /// A 32-bit image's pointers and its `long` are four bytes wide,
+    /// whatever its instruction set.
+    ///
+    /// An array of pointers steps by four, a pointer field four bytes into
+    /// a struct element is read whole, and the C library's `long` object
+    /// is 32 bits.
+    #[test]
+    fn a_32_bit_image_sizes_pointers_and_long_at_four_bytes() {
+        use super::{stated, table_at, table_holding};
+        use crate::analysis::utypes::{UserField, UserStruct, UserType};
+        use crate::dwarf::Global;
+        use crate::program::{Arch, BinaryFormat, Program};
+        let mut p = Program::raw(vec![0; 16], Arch::RiscV32, 0, None, Vec::new());
+        p.format = BinaryFormat::Elf;
+        let chars = || TypeExpr::Ptr(Box::new(TypeExpr::Char));
+        let field = |name: &str, ty| UserField {
+            name: name.to_owned(),
+            ty,
+        };
+        p.debug_types.insert(
+            "pair".to_owned(),
+            UserType::Struct(UserStruct {
+                size: 8,
+                fields: [
+                    (0, field("key", TypeExpr::I16)),
+                    (4, field("name", chars())),
+                ]
+                .into(),
+            }),
+        );
+        let array = |name: &str, at, elem| Global {
+            name: name.to_owned(),
+            addr: Some(at),
+            type_name: None,
+            ty: Some(TypeExpr::Array(Box::new(elem), 4)),
+        };
+        p.debug_globals = vec![
+            array("names", 0x4000, chars()),
+            array("table", 0x5000, TypeExpr::Named("pair".to_owned())),
+        ];
+        let names = table_holding(&p, 0x4004).expect("the array of pointers");
+        assert_eq!((names.size, names.declared.as_str()), (4, "uint32_t"));
+        let name = table_at(&p, 0x5004, 4).expect("the pointer field, read whole");
+        assert_eq!(
+            (name.field.as_str(), name.reads.as_str()),
+            (".name", "uint32_t")
+        );
+        assert_eq!(
+            stated(&p, 0x6000, "timezone").map(|s| s.ty),
+            Some(TypeExpr::I32)
+        );
     }
 }

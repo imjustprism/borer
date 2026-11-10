@@ -738,7 +738,7 @@ fn pdb_sources(
     let Some((path, record)) = &program.pdb_source else {
         return std::sync::Arc::default();
     };
-    let word = i64::from(program.arch.bitness().unwrap_or(64) / 8);
+    let word = crate::analysis::pointer_size(program).cast_signed();
     analysis.derived.get_or_build("pdb_sources", (), || {
         crate::pdb::sources(path, record, None, program.image_base, word).unwrap_or_default()
     })
@@ -1083,11 +1083,7 @@ pub fn warnings(
     text: &str,
     differs: Option<&str>,
 ) -> Option<String> {
-    let word = program
-        .arch
-        .bitness()
-        .and_then(|b| u8::try_from(b).ok())
-        .unwrap_or(64);
+    let word = if program.is_64 { 64 } else { 32 };
     let in_binary: BTreeSet<String> = analysis
         .function(entry)
         .map(|f| f.callees.as_slice())
