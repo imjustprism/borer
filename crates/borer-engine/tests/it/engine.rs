@@ -701,6 +701,84 @@ fn a_diff_names_the_branch_and_each_sides_calls() {
     assert!(refused.contains("two inputs"), "{refused}");
 }
 
+/// An arm64 diff traces both runs: the branch that split them, the callee
+/// each side then visits, and what each returned.
+///
+/// `f` at 0x401000 keeps its link register, calls G at 0x40101c when `x0`
+/// is zero and H at 0x401024 otherwise, and returns what the callee left
+/// in `x0`, so input 0 takes G and input 9 H.
+#[test]
+fn an_arm64_diff_names_the_branch_and_each_sides_calls() {
+    use borer_engine::analysis::{Analysis, Overlay, render::run_diff_tsv};
+    let code: Vec<u8> = [
+        // ASM: stp x29, x30, [sp, #-16]!
+        0xa9bf_7bfd_u32,
+        // ASM: cbnz x0, 0x401010
+        0xb500_0060,
+        // ASM: bl 0x40101c
+        0x9400_0005,
+        // ASM: b 0x401014
+        0x1400_0002,
+        // ASM: bl 0x401024
+        0x9400_0005,
+        // ASM: ldp x29, x30, [sp], #16
+        0xa8c1_7bfd,
+        // ASM: ret
+        0xd65f_03c0,
+        // ASM: add x0, x0, #1
+        0x9100_0400,
+        // ASM: ret
+        0xd65f_03c0,
+        // ASM: add x0, x0, #2
+        0x9100_0800,
+        // ASM: ret
+        0xd65f_03c0,
+    ]
+    .iter()
+    .flat_map(|w| w.to_le_bytes())
+    .collect();
+    let p = crate::raw::image(borer_engine::program::Arch::Arm64, &code, &[]);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let out = run_diff_tsv(&p, &a, &o, "0x401000/0;9").expect("a diff");
+    assert!(
+        out.contains(
+            "# first divergence: step 3 at 0x401008 in sub_401000 vs 0x401010 in sub_401000"
+        ),
+        "{out}"
+    );
+    assert!(out.contains("# input 1 then called: sub_40101c"), "{out}");
+    assert!(out.contains("# input 2 then called: sub_401024"), "{out}");
+    assert!(
+        out.contains("returned 0x1,") && out.contains("returned 0xb,"),
+        "{out}"
+    );
+    let agree = run_diff_tsv(&p, &a, &o, "0x401000/9;9").expect("a diff");
+    assert!(
+        agree.contains("# the runs agree on every traced step"),
+        "{agree}"
+    );
+}
+
+/// Two runs that traced no step are not said to agree on every traced
+/// step: a deadline that passed before the first instruction leaves two
+/// empty traces, and nothing was compared.
+#[test]
+fn a_diff_of_two_untraced_runs_claims_no_agreement() {
+    use borer_engine::analysis::{Analysis, Overlay, render::run_diff_tsv};
+    let p = two_section_program(vec![0xc3], vec![0; 8]);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let flag = borer_engine::cancel::Cancel::new();
+    flag.raise();
+    let out = flag
+        .within(|| run_diff_tsv(&p, &a, &o, "0x1000/1;9"))
+        .expect("a diff");
+    assert_eq!(out.matches(", 0 steps").count(), 2, "{out}");
+    assert!(out.contains("# neither run traced a step"), "{out}");
+    assert!(!out.contains("agree"), "{out}");
+}
+
 /// The same table stored the other way round, xored with a constant and
 /// added one, is named with what was done to it; the plain form reports
 /// once and no delta form doubles it.

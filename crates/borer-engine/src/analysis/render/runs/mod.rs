@@ -512,6 +512,9 @@ fn run_a64(
 ) -> Option<Machine> {
     let Layout { values, at, pokes } = layout;
     let mut emu = A64Machine::new(p, budget)?;
+    if traced {
+        emu.set_trace(budget);
+    }
     for (addr, bytes) in pokes {
         for (k, b) in (0u64..).zip(bytes) {
             emu.poke(addr.wrapping_add(k), *b);
@@ -535,9 +538,6 @@ fn run_a64(
             addr.map(|a| read_back(|b| emu.byte_at(b), a, arg.initial().len() + GUARD))
         })
         .collect();
-    if traced {
-        emu.set_trace(budget);
-    }
     Some(Machine {
         stop: run.stop,
         steps: run.steps,

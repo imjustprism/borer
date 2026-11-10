@@ -162,7 +162,9 @@ fn short_hex(bytes: &[u8]) -> String {
 /// inputs. Both paths are
 /// traced whole, so the budget is held to what one trace holds
 /// ([`crate::emulate::TRACE_MAX`]); where the traces agree to the end the
-/// report says so, and the writes and calls still tell the two apart.
+/// report says so, and the writes and calls still tell the two apart. Two
+/// runs that stopped before their first step traced nothing, and the
+/// report says that instead of calling them agreed.
 ///
 /// # Arguments
 ///
@@ -218,10 +220,10 @@ pub fn run_diff_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Resul
         .take_while(|(l, r)| l == r)
         .count();
     if common == one.trace.len() && common == two.trace.len() {
-        out.push_str(
-            "# the runs agree on every traced step
-",
-        );
+        out.push_str(match common {
+            0 => "# neither run traced a step, so no path is compared\n",
+            _ => "# the runs agree on every traced step\n",
+        });
     } else {
         let side = |line: Option<&String>| line.and_then(|l| trace_at(l));
         let (at_one, at_two) = (side(one.trace.get(common)), side(two.trace.get(common)));
