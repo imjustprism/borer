@@ -94,6 +94,8 @@ pub mod verify_a32;
 pub mod verify_a64;
 mod verify_lanes;
 pub mod verify_rv;
+#[cfg(test)]
+mod verify_testing;
 mod warn;
 mod wire;
 

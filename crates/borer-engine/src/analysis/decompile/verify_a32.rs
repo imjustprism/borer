@@ -234,6 +234,9 @@ fn straight_line(instrs: &[Insn]) -> (Vec<Insn>, Option<Insn>, Option<u64>) {
 /// Reads the registers a block compares with a constant or with another
 /// register, which the seeds then start near.
 ///
+/// `cmp`, `cmn`, `tst`, `teq` and a `cbz` or `cbnz` compare; a register
+/// compared with itself starts near zero.
+///
 /// # Arguments
 ///
 /// * `instrs` - The block's instructions.
@@ -241,7 +244,7 @@ fn comparands(instrs: &[Insn]) -> BTreeMap<Key, Near> {
     let mut near = BTreeMap::new();
     for i in instrs {
         let (rn, src) = if let Op::Dp {
-            kind: kind @ (DpKind::Cmp | DpKind::Cmn),
+            kind: kind @ (DpKind::Cmp | DpKind::Cmn | DpKind::Tst | DpKind::Teq),
             rn,
             src,
             ..
@@ -275,6 +278,9 @@ fn comparands(instrs: &[Insn]) -> BTreeMap<Key, Near> {
             } if b != a => {
                 let (lo, hi) = if a < b { (rn, rm) } else { (rm, rn) };
                 near.insert(Key::A32(hi), Near::Register(Key::A32(lo)));
+            }
+            Operand::Reg { rm, amount: 0, .. } if rm == rn => {
+                near.insert(Key::A32(rn), Near::Constant(0));
             }
             Operand::Reg { .. } | Operand::RegShift { .. } => {}
         }
@@ -516,5 +522,77 @@ fn vfp(ran: &Ran<'_, Machine<'_>, ()>, out: &mut Verified) {
                 format!("{e:?}"),
             );
         }
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test"
+)]
+mod tests {
+    use super::{Machine, compare, function_ctx, run};
+    use crate::analysis::decompile::expr::{Cc, Cond, Expr, Flags, Key, Op};
+    use crate::analysis::decompile::lift_a32::decode_blocks;
+    use crate::analysis::decompile::verify::Ran;
+    use crate::analysis::decompile::verify_testing::{AT, image, tried};
+    use crate::analysis::{Analysis, Overlay};
+    use crate::isa::a32::Reg;
+    use crate::isa::x86::ConditionCode;
+    use crate::program::Arch;
+
+    /// `beq` over the next instruction, then `bx lr` twice.
+    const BEQ_OVER: [u32; 3] = [0x0a00_0000, 0xe12f_ff1e, 0xe12f_ff1e];
+
+    /// Checks the first block of an A32 routine from seeds 1 to 8
+    /// ([`tried`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `words` - The routine.
+    /// * `spoil` - Makes the lift wrong.
+    fn block(words: &[u32], spoil: impl Fn(&mut Ran<'_, Machine<'_>, ()>)) -> (usize, usize) {
+        let p = image(Arch::Arm, words);
+        let a = Analysis::compute(&p);
+        let overlay = Overlay::default();
+        let f = a.function(AT).expect("function");
+        let mut pristine = Machine::new(&p, 0).expect("machine");
+        pristine.set_forced(true);
+        let k = f.blocks.iter().position(|b| b.start == AT).expect("block");
+        let instrs = decode_blocks(&p, f).swap_remove(k);
+        let mut ctx = function_ctx(&p, &a, &overlay, f);
+        let run =
+            |seed, out: &mut _| run(&pristine, seed, &mut ctx, AT, AT, &instrs, out).expect("run");
+        tried(run, compare, spoil)
+    }
+
+    /// An equality test of two registers, or of one with itself, is tried
+    /// where it holds.
+    ///
+    /// `teq r0, r1` then `beq` goes both ways across the seeds, and a lift
+    /// of the branch as taken when `r0` is one above `r1` is caught; so is
+    /// `tst r0, r0` then `beq`, lifted as taken when `r0` is one.
+    #[test]
+    fn an_equality_test_is_tried_where_it_holds() {
+        let r = |n| Expr::Var(Key::A32(Reg::R(n)));
+        let equals = |other: Expr| {
+            move |ran: &mut Ran<'_, Machine<'_>, ()>| {
+                let (_, cond) = ran.branch.as_mut().expect("a branch");
+                let flags = Flags::Cmp(r(0), other.clone(), 32);
+                let cc = Cc(ConditionCode::e);
+                *cond = Cond { cc, flags };
+            }
+        };
+        let above = Expr::Bin(Op::Add, Box::new(r(1)), Box::new(Expr::Const(1)));
+        // ASM: teq r0, r1 ; beq 0x100c ; bx lr ; bx lr
+        let code = [&[0xe130_0001], &BEQ_OVER[..]].concat();
+        let (taken, caught) = block(&code, equals(above));
+        assert!((1..8).contains(&taken), "taken from {taken} of 8 seeds");
+        assert!(caught > 0, "r0 == r1 + 1 agreed with teq on every seed");
+        // ASM: tst r0, r0 ; beq 0x100c ; bx lr ; bx lr
+        let code = [&[0xe110_0000], &BEQ_OVER[..]].concat();
+        let (taken, caught) = block(&code, equals(Expr::Const(1)));
+        assert!((1..8).contains(&taken), "taken from {taken} of 8 seeds");
+        assert!(caught > 0, "r0 == 1 agreed with tst r0, r0 on every seed");
     }
 }

@@ -13,10 +13,12 @@
 //!
 //! A block is checked up to its first control transfer. Memory nothing
 //! backs reads a hash of its address on both sides. The integer registers
-//! are random, except that a register a branch compares with another
-//! mostly starts next to it; the float registers are random too, those
-//! the block reads as a single first boxed in ones, and compare at the
-//! width the lifter holds them at, any NaN agreeing with any NaN. A block
+//! are random, except that a register the block compares (a branch, `slt`
+//! and its kin) mostly starts next to what it is compared with: the other
+//! register, zero for `x0`, or the immediate. The float registers are
+//! random too, those the block reads as a single first boxed in ones, and
+//! compare at the width the lifter holds them at, any NaN agreeing with
+//! any NaN. A block
 //! holding an instruction either side does not model is
 //! not checked. A pass says the lifting agreed on the seeds tried, not
 //! that it is right.
@@ -36,7 +38,7 @@ use crate::analysis::{Analysis, Function, Overlay};
 use crate::emulate::rv::Machine;
 use crate::emulate::{Run, Stop};
 use crate::fxmap::FxHashSet;
-use crate::isa::rv::{self, Flow, Fmt, Insn, Op, Reg, SP};
+use crate::isa::rv::{self, Alu, Flow, Fmt, Insn, Op, Reg, SP};
 use crate::program::Program;
 
 /// The kinds of fact a RISC-V block's check compares, in report order.
@@ -251,21 +253,58 @@ fn singles(line: &[Insn]) -> BTreeSet<u8> {
     first
 }
 
-/// Reads the registers a branch compares with another, which the seeds
-/// then start near.
+/// Reads the registers a block compares, which the seeds then start near
+/// what each is compared with.
+///
+/// A conditional branch compares two registers, and so do `slt` and
+/// `sltu`; `slti` and `sltiu` compare one with an immediate. Two registers
+/// start near each other, a register compared with `x0` near zero, and one
+/// compared with an immediate near it: a random seed takes such a test one
+/// way, so a lift wrong only where the operands meet would agree on every
+/// seed.
 ///
 /// # Arguments
 ///
-/// * `jcc` - The block's conditional branch.
-fn comparands(jcc: Option<&Insn>) -> BTreeMap<Key, Near> {
+/// * `instrs` - The block's instructions, its branch included.
+fn comparands<'a>(instrs: impl Iterator<Item = &'a Insn>) -> BTreeMap<Key, Near> {
     let mut near = BTreeMap::new();
-    if let Some(Op::Branch { rs1, rs2, .. }) = jcc.map(|j| j.op)
-        && rs1 != rs2
-        && rs1 != rv::ZERO
-        && rs2 != rv::ZERO
-    {
-        let (lo, hi) = if rs1 < rs2 { (rs1, rs2) } else { (rs2, rs1) };
-        near.insert(Key::Rv(hi), Near::Register(Key::Rv(lo)));
+    for i in instrs {
+        let (rs1, with) = if let Op::Branch { rs1, rs2, .. }
+        | Op::Reg3 {
+            op: Alu::Slt | Alu::Sltu,
+            rs1,
+            rs2,
+            ..
+        } = i.op
+        {
+            (rs1, Ok(rs2))
+        } else if let Op::Imm {
+            op: Alu::Slt | Alu::Sltu,
+            rs1,
+            imm,
+            ..
+        } = i.op
+        {
+            (rs1, Err(imm.cast_unsigned()))
+        } else {
+            continue;
+        };
+        match with {
+            Err(k) => {
+                near.insert(Key::Rv(rs1), Near::Constant(k));
+            }
+            Ok(rs2) if rs1 == rs2 => {}
+            Ok(rv::ZERO) => {
+                near.insert(Key::Rv(rs1), Near::Constant(0));
+            }
+            Ok(rs2) if rs1 == rv::ZERO => {
+                near.insert(Key::Rv(rs2), Near::Constant(0));
+            }
+            Ok(rs2) => {
+                let (lo, hi) = if rs1 < rs2 { (rs1, rs2) } else { (rs2, rs1) };
+                near.insert(Key::Rv(hi), Near::Register(Key::Rv(lo)));
+            }
+        }
     }
     near
 }
@@ -316,7 +355,7 @@ fn run<'p>(
         tls_block: 0,
         mir: None,
     };
-    let near = comparands(jcc.as_ref());
+    let near = comparands(line.iter().chain(&jcc));
     plant(&mut emu, &mut st, &mut rng, (&near, &singles(&line)));
     emu.stop_at(Some(end));
     let begin = instrs.first().map_or(start, |i| i.va);
@@ -379,19 +418,19 @@ fn run<'p>(
 
 /// Seeds the machine and the evaluator's state alike.
 ///
-/// The integer registers are random, a register a branch compares mostly
-/// next to the other; the float registers are random, those the block
-/// reads as a single first boxed in ones; random words fill the stack
-/// around the stack pointer.
+/// The integer registers are random, a register the block compares mostly
+/// next to what it is compared with; the float registers are random, those
+/// the block reads as a single first boxed in ones; random words fill the
+/// stack around the stack pointer.
 ///
 /// # Arguments
 ///
 /// * `emu` - The machine.
 /// * `st` - The evaluator's state.
 /// * `rng` - The seeded generator.
-/// * `(near, singles)` - The registers to start near another
-///   ([`comparands`]) and the float registers read as singles
-///   ([`singles`]).
+/// * `(near, singles)` - The registers to start near what they are
+///   compared with ([`comparands`]) and the float registers read as
+///   singles ([`singles`]).
 fn plant(
     emu: &mut Machine<'_>,
     st: &mut State<'_, Machine<'_>>,
@@ -534,4 +573,91 @@ fn registers(ran: &Ran<'_, Machine<'_>, ()>, out: &mut Verified) {
         (None, None) => (Read::Unreadable, None),
     };
     check("sp", emulated, read, expr);
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test"
+)]
+mod tests {
+    use super::{Machine, compare, function_ctx, run};
+    use crate::analysis::decompile::expr::{Cc, Cond, Expr, Flags, Key};
+    use crate::analysis::decompile::lift_rv::decode_blocks;
+    use crate::analysis::decompile::verify::Ran;
+    use crate::analysis::decompile::verify_testing::{AT, image, tried};
+    use crate::analysis::{Analysis, Overlay};
+    use crate::isa::rv::Reg;
+    use crate::isa::x86::ConditionCode;
+    use crate::program::Arch;
+
+    /// `ret`.
+    const RET: u32 = 0x0000_8067;
+
+    /// Checks the first block of an RV64 routine from seeds 1 to 8
+    /// ([`tried`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `words` - The routine.
+    /// * `spoil` - Makes the lift wrong where a compare's operands meet.
+    fn block(words: &[u32], spoil: impl Fn(&mut Ran<'_, Machine<'_>, ()>)) -> (usize, usize) {
+        let p = image(Arch::RiscV64, words);
+        let a = Analysis::compute(&p);
+        let overlay = Overlay::default();
+        let f = a.function(AT).expect("function");
+        let k = f.blocks.iter().position(|b| b.start == AT).expect("block");
+        let instrs = decode_blocks(&p, f).swap_remove(k);
+        let pristine = Machine::new(&p, 0).expect("machine");
+        let mut ctx = function_ctx(&p, &a, &overlay, f);
+        let run = |seed, out: &mut _| {
+            run(&pristine, seed, &mut ctx, (AT, AT), &instrs, out).expect("run")
+        };
+        tried(run, compare, spoil)
+    }
+
+    /// A branch against `x0` is tried where its register meets zero.
+    ///
+    /// `bgez a0` goes both ways across the seeds, and a lift of it as
+    /// `a0 > 0`, wrong at zero alone, is caught; so is `blez a0`, whose
+    /// `x0` is the left operand, lifted as `0 > a0`.
+    #[test]
+    fn a_branch_against_zero_is_tried_at_zero() {
+        let strict = |ran: &mut Ran<'_, Machine<'_>, ()>| {
+            let (_, cond) = ran.branch.as_mut().expect("a branch");
+            cond.cc = Cc(ConditionCode::g);
+        };
+        // ASM: bgez a0, 0x1008 ; ret ; ret
+        let (taken, caught) = block(&[0x0005_5463, RET, RET], strict);
+        assert!((1..8).contains(&taken), "taken from {taken} of 8 seeds");
+        assert!(caught > 0, "a0 > 0 agreed with bgez a0 on every seed");
+        // ASM: blez a0, 0x1008 ; ret ; ret
+        let (taken, caught) = block(&[0x00a0_5463, RET, RET], strict);
+        assert!((1..8).contains(&taken), "taken from {taken} of 8 seeds");
+        assert!(caught > 0, "0 > a0 agreed with blez a0 on every seed");
+    }
+
+    /// A register `slti` or `slt` compares is tried where the operands
+    /// meet.
+    ///
+    /// A lift of either as less than or equal, wrong where the register
+    /// equals the immediate or the other register alone, is caught.
+    #[test]
+    fn a_set_less_than_is_tried_where_its_operands_meet() {
+        let (t0, a0, a1) = (Reg::X(5), Reg::X(10), Reg::X(11));
+        let or_equal = |with: Expr| {
+            move |ran: &mut Ran<'_, Machine<'_>, ()>| {
+                let flags = Flags::Cmp(Expr::Var(Key::Rv(a0)), with.clone(), 64);
+                let cc = Cc(ConditionCode::le);
+                let wrong = Expr::Cond(Box::new(Cond { cc, flags }));
+                ran.env.vals.insert(Key::Rv(t0), wrong);
+            }
+        };
+        // ASM: slti t0, a0, 5 ; ret
+        let (_, caught) = block(&[0x0055_2293, RET], or_equal(Expr::Const(5)));
+        assert!(caught > 0, "a0 <= 5 agreed with slti on every seed");
+        // ASM: slt t0, a0, a1 ; ret
+        let (_, caught) = block(&[0x00b5_22b3, RET], or_equal(Expr::Var(Key::Rv(a1))));
+        assert!(caught > 0, "a0 <= a1 agreed with slt on every seed");
+    }
 }
