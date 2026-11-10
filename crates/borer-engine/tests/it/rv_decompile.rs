@@ -1221,3 +1221,72 @@ fn a_loaded_register_nothing_reads_again_is_not_written_out() {
     assert!(text.contains("return t1;"), "{text}");
     assert!(!text.contains("t0"), "{text}");
 }
+
+/// Decompiles an RV64 function at [`AT`] that jumps through a table of the
+/// two functions after it, which add and subtract their two arguments.
+///
+/// # Arguments
+///
+/// * `names` - The two functions' names.
+/// * `o` - The overlay the decompile reads.
+fn rv64_table(names: [&str; 2], o: &Overlay) -> String {
+    let mut code = assemble(&[
+        (0x0000_0317, 4), // ASM: auipc t1, 0
+        (0x1003_0313, 4), // ASM: addi t1, t1, 0x100
+        (0x0035_1513, 4), // ASM: slli a0, a0, 3
+        (0x00a3_0333, 4), // ASM: add t1, t1, a0
+        (0x0003_3303, 4), // ASM: ld t1, 0(t1)
+        (0x0005_8513, 4), // ASM: mv a0, a1
+        (0x0006_0593, 4), // ASM: mv a1, a2
+        (0x0003_0067, 4), // ASM: jr t1
+        (0x00b5_0533, 4), // ASM: add a0, a0, a1     (0x10020)
+        (0x0000_8067, 4), // ASM: ret
+        (0x40b5_0533, 4), // ASM: sub a0, a0, a1     (0x10028)
+        (0x0000_8067, 4), // ASM: ret
+    ]);
+    code.resize(0x100, 0);
+    let entries = [AT + 0x20, AT + 0x28];
+    code.extend(entries.iter().flat_map(|w| w.to_le_bytes()));
+    let mut p = image(&code, Arch::RiscV64);
+    p.symbols = names
+        .iter()
+        .zip(entries)
+        .map(|(name, addr)| Symbol {
+            name: (*name).to_owned(),
+            addr,
+            kind: SymbolKind::Local,
+        })
+        .collect();
+    let a = Analysis::compute(&p);
+    decompile(&p, &a, o, AT).expect("decompiles")
+}
+
+/// An RV64 jump through a table of functions is a tail call through it,
+/// unless they take a variable list.
+///
+/// `return ops[k](a, b);` loads the entry and jumps to it with `jr`: the
+/// call passes what the table's functions read. It stays a computed `goto`
+/// when the functions are stated to take a variable list, or are named
+/// after library functions that do: no parameter names those arguments, and
+/// a call through the table would guess them from the registers set before
+/// it.
+#[test]
+fn an_rv64_jump_through_a_function_table_is_a_tail_call() {
+    let plain = ["op_add", "op_sub"];
+    let out = rv64_table(plain, &Overlay::default());
+    assert!(!out.contains("goto"), "{out}");
+    assert!(
+        out.contains("return ((uint64_t (*)(uint64_t, uint64_t))"),
+        "{out}"
+    );
+    assert!(out.contains("(a2, a3);"), "{out}");
+    let mut listed = Overlay::default();
+    for (name, at) in plain.iter().zip([AT + 0x20, AT + 0x28]) {
+        let p = Proto::parse(&format!("uint64_t {name}(uint64_t tag, ...)")).expect("parses");
+        listed.prototypes.insert(at, p);
+    }
+    let out = rv64_table(plain, &listed);
+    assert!(out.contains("goto *"), "{out}");
+    let out = rv64_table(["printf", "sprintf"], &Overlay::default());
+    assert!(out.contains("goto *"), "{out}");
+}

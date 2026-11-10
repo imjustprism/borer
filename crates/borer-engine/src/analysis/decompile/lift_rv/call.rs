@@ -131,15 +131,20 @@ impl Lift<'_, '_> {
         }
     }
 
-    /// The argument registers a callee takes and the stack words past
-    /// them, when its body or a declaration says; a variable list adds
-    /// the integer registers the caller set past the fixed ones.
+    /// The argument registers a callee takes, the stack words past them
+    /// and whether a variable list follows, when its body or a declaration
+    /// says; a variable list adds the integer registers the caller set
+    /// past the fixed ones.
     ///
     /// # Arguments
     ///
     /// * `target` - The callee's entry, when the call names one.
     /// * `reached` - The import slot a stub reaches, when it reaches one.
-    fn callee_args(&self, target: Option<u64>, reached: Option<u64>) -> Option<(Vec<Reg>, i64)> {
+    fn callee_args(
+        &self,
+        target: Option<u64>,
+        reached: Option<u64>,
+    ) -> Option<(Vec<Reg>, i64, bool)> {
         let ctx = &*self.ex.ctx;
         let (mut regs, stack, variadic) =
             if let Some(p) = lift::import_prototype(ctx, reached.or(target)) {
@@ -162,7 +167,7 @@ impl Lift<'_, '_> {
                     .filter(|r| matches!(r, Reg::X(_)) && !fixed.contains(r)),
             );
         }
-        Some((regs, i64::try_from(stack).unwrap_or(0)))
+        Some((regs, i64::try_from(stack).unwrap_or(0), variadic))
     }
 
     /// The argument registers the caller set since the last call: the
@@ -264,9 +269,9 @@ impl Lift<'_, '_> {
         reached: Option<u64>,
         tail: bool,
     ) -> Vec<(ArgAt, Expr)> {
-        let (regs, stack) = self
+        let (regs, stack, _) = self
             .callee_args(target, reached)
-            .unwrap_or_else(|| (self.written_since_call(tail), 0));
+            .unwrap_or_else(|| (self.written_since_call(tail), 0, false));
         let mut out: Vec<(ArgAt, Expr)> = regs
             .into_iter()
             .map(|r| (ArgAt::Rv(r), self.arg_value(r)))
@@ -391,19 +396,20 @@ impl Lift<'_, '_> {
     }
 
     /// The registers a function takes its arguments in, as keys, and what it
-    /// returns, when its signature is known and takes its integers in
-    /// registers alone and returns no float: a call through a table prints
-    /// an integer function pointer
+    /// returns, when its signature is known, takes its integers in
+    /// registers alone with no variable list, whose arguments no parameter
+    /// names, and returns no float: a call through a table prints an
+    /// integer function pointer
     /// ([`super::super::lift::Exec::table_callee`]).
     ///
     /// # Arguments
     ///
     /// * `entry` - The function.
     pub(super) fn arg_keys(&self, entry: u64) -> Option<(Vec<Key>, Returns)> {
-        let (regs, stack) = self.callee_args(Some(entry), None)?;
+        let (regs, stack, variadic) = self.callee_args(Some(entry), None)?;
         let ints = regs.iter().all(|r| matches!(r, Reg::X(_)));
         let returns = self.returns(Some(entry), None);
-        let plain = ints && stack == 0 && !matches!(returns, Returns::Float(_));
+        let plain = ints && stack == 0 && !variadic && !matches!(returns, Returns::Float(_));
         plain.then(|| (regs.into_iter().map(Key::Rv).collect(), returns))
     }
 
