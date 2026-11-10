@@ -1080,14 +1080,21 @@ impl Discovery<'_> {
     /// A function is walked again when a jump it followed entered what
     /// proved a start, a call whose fall-through it followed proved never
     /// to return, or the address after such a call proved a start. A
-    /// second walk is a fact, whatever made the first.
+    /// second walk is a fact, whatever made the first; when the fuel runs
+    /// out before it, the first walk stays.
     ///
     /// # Arguments
     ///
     /// * `text` - The code.
     fn run(&mut self, text: &Text<'_>) {
+        let mut stale: Vec<(u64, Kept)> = Vec::new();
         for round in 0..SPLIT_ROUNDS_MAX {
             self.drain(text);
+            for (e, k) in stale.drain(..) {
+                if self.done.insert(e) {
+                    self.walked.insert(e, k);
+                }
+            }
             self.promote_noreturn();
             if round + 1 == SPLIT_ROUNDS_MAX {
                 break;
@@ -1108,7 +1115,7 @@ impl Discovery<'_> {
                 break;
             }
             for e in &redo {
-                self.walked.remove(e);
+                stale.extend(self.walked.remove_entry(e));
                 self.done.remove(e);
                 self.guessed.remove(e);
             }

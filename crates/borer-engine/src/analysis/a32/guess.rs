@@ -313,10 +313,7 @@ fn drop_once(program: &Program, walks: &mut Walks<'_>) -> bool {
         walks.guessed.remove(&g);
         again.extend(owners.remove(&g).unwrap_or_default());
     }
-    for e in &again {
-        walks.walked.remove(e);
-    }
-    walks.drain(program, again);
+    walks.redo(program, again);
     dropped
 }
 

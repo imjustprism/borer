@@ -4,7 +4,9 @@
 //! Every fixture is a hand-assembled raw x64 image with nothing declared -
 //! no symbols, no unwind entries - so each test states exactly which bytes
 //! make a function and which do not; the one that needs an exception table
-//! to say where functions are builds a PE with one entry.
+//! to say where functions are builds a PE with one entry, and the ones that
+//! spend the walk's fuel in arm64 and ARM32 code name their starts with
+//! symbols.
 
 #![expect(
     clippy::missing_panics_doc,
@@ -1336,4 +1338,196 @@ fn an_unoptimized_switch_through_an_absolute_table_resolves() {
 /// Returns a code length as an address offset.
 fn raw_len(code: &[u8]) -> u64 {
     u64::try_from(code.len()).unwrap_or(u64::MAX)
+}
+
+/// Analyzes a raw image of `code` at [`TEXT`], entered at `entry`, with a
+/// function symbol at each of `starts`.
+///
+/// # Arguments
+///
+/// * `arch` - The instruction set of `code`.
+/// * `code` - The bytes of `.text`, of any length.
+/// * `entry` - The entry point.
+/// * `starts` - Where the function symbols point.
+fn symbolized(arch: Arch, code: Vec<u8>, entry: u64, starts: &[u64]) -> Analysis {
+    use borer_engine::program::{Symbol, SymbolKind};
+    let text = Section::mapped(".text", TEXT, 0, raw_len(&code), false, true);
+    let mut p = Program::raw(code, arch, 0x40_0000, Some(entry), vec![text]);
+    p.symbols = starts
+        .iter()
+        .map(|&addr| Symbol {
+            name: format!("f_{addr:x}"),
+            addr,
+            kind: SymbolKind::Local,
+        })
+        .collect();
+    Analysis::compute(&p)
+}
+
+/// Where [`fuel_cascade`] puts `m2`.
+const M2: u64 = TEXT + 0x40;
+
+/// Builds x86-64 code whose discovery spends its fuel in a second walk.
+///
+/// The function at [`TEXT`] calls `m2`, `m1`, `other` and `hub`. `m1`
+/// branches to a `ret` and jumps into a run of sixty thousand `nop`s, `m2`
+/// reaches the `ret` at 0x401058 by a jump, and `other` then calls both
+/// `ret`s, so `m1` and `m2` are due a second walk. `hub` calls thirty-two
+/// leaves that each jump into the run, which leaves twenty thousand
+/// instructions of the two million: the second walk of `m1` spends them
+/// inside the run, and the one of `m2` never starts.
+///
+/// # Arguments
+///
+/// * `m2` - The bytes of `m2`, at [`M2`].
+fn fuel_cascade(m2: &[u8]) -> Vec<u8> {
+    const NOPS: usize = 60_000;
+    let mut code = vec![0xcc_u8; 0x300];
+    let mut put = |at: usize, bytes: &[u8]| code[at..at + bytes.len()].copy_from_slice(bytes);
+    let mut rel32 = |op: u8, at: usize, to: usize| {
+        let rel = lo32(from_usize(to)).wrapping_sub(lo32(from_usize(at + 5)));
+        put(at, &[&[op][..], &rel.to_le_bytes()].concat());
+    };
+    for (k, to) in [0x40, 0x20, 0x60, 0x80].into_iter().enumerate() {
+        rel32(0xe8, 5 * k, to); // ASM: call m2, m1, other, hub
+    }
+    rel32(0xe9, 0x24, 0x340); // ASM: m1 + 4: jmp 0x401340
+    rel32(0xe8, 0x60, 0x50); // ASM: other: call 0x401050
+    rel32(0xe8, 0x65, 0x58); // ASM: call 0x401058
+    for k in 0..32 {
+        rel32(0xe8, 0x80 + 5 * k, 0x200 + 5 * k); // ASM: hub: call leaf k
+        rel32(0xe9, 0x200 + 5 * k, 0x300); // ASM: leaf k: jmp 0x401300
+    }
+    put(0x20, &[0x85, 0xc9, 0x75, 0x2c]); // ASM: m1: test ecx, ecx; jne 0x401050
+    put(0x40, m2);
+    for ret in [0x14, 0x50, 0x58, 0x6a, 0x120] {
+        put(ret, &[0xc3]); // ASM: ret
+    }
+    code.resize(0x300 + NOPS, 0x90); // ASM: nop
+    code.push(0xc3); // ASM: ret
+    code
+}
+
+/// An x86 function due a second walk keeps its first one, with its
+/// references, when the fuel runs out before the second
+/// ([`fuel_cascade`]).
+#[test]
+fn an_x86_walk_due_again_stays_when_the_fuel_runs_out() {
+    const T2: u64 = TEXT + 0x58;
+    let code = fuel_cascade(&[0xeb, 0x16]); // ASM: m2: jmp 0x401058
+    let a = symbolized(Arch::X86_64, code, TEXT, &[]);
+    assert!(a.incomplete, "the fuel ran out");
+    let m2 = a.function(M2).expect("m2 keeps its first walk");
+    assert_eq!((m2.entry, m2.instr_count), (M2, 2));
+    assert!(
+        a.xrefs_to(T2).iter().any(|s| s.va == M2),
+        "m2 keeps its jump's reference: {:?}",
+        a.xrefs_to(T2)
+    );
+}
+
+/// A function a guess once rejected keeps its first walk too.
+///
+/// `m2` falls from its branch into a byte that is no code, so the guess
+/// the entry's `lea` makes at it is rejected. A second stub's `lea` then
+/// names the caller of [`fuel_cascade`], whose call makes `m2` a function
+/// after all, and the fuel runs out before its second walk.
+#[test]
+fn a_function_once_rejected_as_a_guess_stays_when_the_fuel_runs_out() {
+    let mut code = fuel_cascade(&[0x74, 0x16, 0x06]); // ASM: m2: je 0x401058; (bad)
+    code[0x130..0x13f].copy_from_slice(&[
+        0x48, 0x8d, 0x05, 0x09, 0xff, 0xff, 0xff, // ASM: lea rax, [rip - 0xf7] = m2
+        0x48, 0x8d, 0x0d, 0x02, 0x00, 0x00, 0x00, // ASM: lea rcx, [rip + 2] = 0x401140
+        0xc3, // ASM: ret
+    ]);
+    code[0x140..0x148].copy_from_slice(&[
+        0x48, 0x8d, 0x05, 0xb9, 0xfe, 0xff, 0xff, // ASM: lea rax, [rip - 0x147] = 0x401000
+        0xc3, // ASM: ret
+    ]);
+    let a = symbolized(Arch::X86_64, code, TEXT + 0x130, &[]);
+    assert!(a.incomplete, "the fuel ran out");
+    let m2 = a.function(M2).expect("m2 keeps its first walk");
+    assert_eq!((m2.entry, m2.instr_count), (M2, 2));
+}
+
+/// A guess the guess rules reject on its second walk stays dropped: no
+/// fuel ran out, so its first walk is not put back.
+///
+/// `g` and `h` each follow padding. `g` branches to `x` and falls into
+/// `z`, and `h` calls both, which makes them starts: walked again, `g`
+/// falls into the start `z` and is no function.
+#[test]
+fn a_guess_rejected_on_its_second_walk_stays_dropped() {
+    let mut code = vec![0xcc_u8; 0x40];
+    code[0] = 0xc3; // ASM: ret
+    code[0x10..0x14].copy_from_slice(&[0x74, 0x19, 0x90, 0xc3]); // ASM: g: je x; nop; z: ret
+    code[0x20..0x2c].copy_from_slice(&[
+        0xe8, 0x06, 0x00, 0x00, 0x00, // ASM: h: call 0x40102b
+        0xe8, 0xe9, 0xff, 0xff, 0xff, // ASM: call 0x401013
+        0xc3, // ASM: ret
+        0xc3, // ASM: x: ret
+    ]);
+    let found = entries(&code, &[]);
+    assert!(found.contains(&(TEXT + 0x20)), "h is found: {found:x?}");
+    assert!(
+        !found.contains(&(TEXT + 0x10)),
+        "g is no function: {found:x?}"
+    );
+}
+
+/// An arm64 function due a second walk keeps its first one when the fuel
+/// runs out before the second.
+///
+/// `main` jumps to a `ret` that `other` calls, so `main` is due a second
+/// walk; 160 functions each jumping into one long run of `nop`s spend the
+/// fuel in the wave that walks all three.
+#[test]
+fn an_arm64_walk_due_again_stays_when_the_fuel_runs_out() {
+    const MAIN: u64 = TEXT + 0x320;
+    let mut words = vec![0_u32; 0x100];
+    for (k, w) in (0..160).zip(&mut words) {
+        *w = 0x1400_0101 - k; // ASM: b 0x401404
+    }
+    words[0xc0] = 0x9400_0009; // ASM: other: bl 0x401324
+    words[0xc1] = 0xd65f_03c0; // ASM: ret
+    words[0xc8] = 0x1400_0001; // ASM: main: b 0x401324
+    words[0xc9] = 0xd65f_03c0; // ASM: ret
+    words.resize(0x4100, 0xd503_201f); // ASM: nop
+    words.push(0xd65f_03c0); // ASM: ret
+    let code = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let starts: Vec<u64> = (0..160)
+        .map(|k| TEXT + 4 * k)
+        .chain([TEXT + 0x300, MAIN])
+        .collect();
+    let a = symbolized(Arch::Arm64, code, MAIN, &starts);
+    assert!(a.incomplete, "the fuel ran out");
+    assert!(a.function(MAIN).is_some(), "main keeps its first walk");
+}
+
+/// An ARM32 function due a second walk keeps its first one when the fuel
+/// runs out before the second.
+///
+/// `main` jumps to a `bx lr` that `other`, walked after it, then calls, so
+/// `main` is due a second walk; 160 symbols into one long run of `mov r0,
+/// r0`, walked after both, spend the fuel before it.
+#[test]
+fn an_arm32_walk_due_again_stays_when_the_fuel_runs_out() {
+    const RUN: usize = 0x4000;
+    const OTHER: u64 = TEXT + 0x1_0000;
+    const MAIN: u64 = OTHER + 0x20;
+    let mut words = vec![0xe1a0_0000_u32; RUN]; // ASM: mov r0, r0
+    words[RUN - 1] = 0xe12f_ff1e; // ASM: bx lr
+    words.resize(RUN + 13, 0);
+    words[RUN] = 0xeb00_000a; // ASM: other: bl 0x411030
+    words[RUN + 1] = 0xe12f_ff1e; // ASM: bx lr
+    words[RUN + 8] = 0xea00_0002; // ASM: main: b 0x411030
+    words[RUN + 12] = 0xe12f_ff1e; // ASM: bx lr
+    let code = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let starts: Vec<u64> = (0..160)
+        .map(|k| TEXT + 4 * k)
+        .chain([OTHER, MAIN])
+        .collect();
+    let a = symbolized(Arch::Arm, code, MAIN, &starts);
+    assert!(a.incomplete, "the fuel ran out");
+    assert!(a.function(MAIN).is_some(), "main keeps its first walk");
 }

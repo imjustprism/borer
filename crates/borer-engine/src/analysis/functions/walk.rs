@@ -176,6 +176,11 @@ impl<'a> Worker<'a> {
     }
 }
 
+/// What [`WalkState::forget`] took out: whether each function was an
+/// accepted guess and the function, and the reference sites their walks
+/// recorded, each with its target.
+pub(super) type Forgotten = (Vec<(bool, Function)>, Vec<(u64, RefSite)>);
+
 /// Mutable state of one discovery pass over a work queue of function entries.
 pub(super) struct WalkState<'a> {
     /// The pass's own walker, whose budget is the budget across all
@@ -183,6 +188,10 @@ pub(super) struct WalkState<'a> {
     pub(super) worker: Worker<'a>,
     /// Function entries still to walk.
     pub(super) queue: Vec<u64>,
+    /// The first walks of the functions queued to be walked again, until
+    /// the next drain: [`WalkState::recall`] puts back each one it did not
+    /// walk.
+    pub(super) held: Forgotten,
     /// Function entries already walked.
     pub(super) done: AddrSet,
     /// Functions found so far, in discovery order.
@@ -536,7 +545,8 @@ impl WalkState<'_> {
     /// a jump into an address that has since proven to be a function start
     /// (the jump was a tail call and the callee was absorbed) or followed the
     /// fall-through of a call whose target has since proven to never return,
-    /// until no function needs splitting.
+    /// until no function needs splitting. A function the fuel runs out
+    /// before the second walk of keeps its first ([`Self::recall`]).
     ///
     /// # Returns
     ///
@@ -545,6 +555,7 @@ impl WalkState<'_> {
         let mut incomplete = false;
         for round in 0..SPLIT_ROUNDS_MAX {
             incomplete |= self.drain();
+            self.recall();
             self.promote_noreturn();
             if round + 1 == SPLIT_ROUNDS_MAX {
                 break;
@@ -553,7 +564,7 @@ impl WalkState<'_> {
             if split.is_empty() {
                 break;
             }
-            self.forget(&split);
+            self.held = self.forget(&split);
             self.queue = split;
         }
         incomplete
@@ -985,12 +996,25 @@ impl WalkState<'_> {
 
     /// Drops functions and everything their walks recorded so they can be walked again.
     ///
+    /// A rejection one of them kept from a guess made before it was found
+    /// goes too: after this, an entry is rejected only by a later walk.
+    ///
     /// # Arguments
     ///
     /// * `entries` - Entries of the functions to drop.
-    pub(super) fn forget(&mut self, entries: &[u64]) {
+    ///
+    /// # Returns
+    ///
+    /// What was taken out, for a caller that walks the functions again to
+    /// hold ([`Self::held`]); one that drops them for good lets it go.
+    pub(super) fn forget(&mut self, entries: &[u64]) -> Forgotten {
         let set: FxHashSet<u64> = entries.iter().copied().collect();
-        self.functions.retain(|f| !set.contains(&f.entry));
+        let accepted = &self.accepted_guesses;
+        let functions = self
+            .functions
+            .extract_if(.., |f| set.contains(&f.entry))
+            .map(|f| (accepted.contains(&f.entry), f))
+            .collect();
         self.covered = None;
         #[expect(
             clippy::iter_over_hash_type,
@@ -998,26 +1022,58 @@ impl WalkState<'_> {
         )]
         for e in &set {
             self.done.remove(*e);
+            self.rejected.remove(*e);
             self.returning.remove(e);
             self.followed.remove(e);
             self.followed_calls.remove(e);
             self.accepted_guesses.remove(e);
         }
+        let mut sites = Vec::new();
         #[expect(
             clippy::iter_over_hash_type,
             reason = "each target's list is filtered on its own"
         )]
-        for sites in self.xrefs.values_mut() {
-            sites.retain(|s| !s.from_entry.is_some_and(|f| set.contains(&f)));
+        for (target, list) in &mut self.xrefs {
+            let gone = list.extract_if(.., |s| s.from_entry.is_some_and(|f| set.contains(&f)));
+            sites.extend(gone.map(|s| (*target, s)));
         }
         self.xrefs.retain(|_, sites| !sites.is_empty());
+        (functions, sites)
+    }
+
+    /// Puts back each function held for a second walk that the drain did
+    /// not walk again, with its references: the fuel ran out first, so its
+    /// first walk stays.
+    ///
+    /// One walked again is done, and one whose second walk was rejected
+    /// stays dropped.
+    pub(super) fn recall(&mut self) {
+        let (functions, sites) = std::mem::take(&mut self.held);
+        let lost = |s: &Self, e: u64| !s.done.contains(e) && !s.rejected.contains(e);
+        for (target, site) in sites {
+            if site.from_entry.is_some_and(|e| lost(self, e)) {
+                self.record_site(target, site.va, site.kind, site.from_entry);
+            }
+        }
+        for (guess, func) in functions {
+            if !lost(self, func.entry) {
+                continue;
+            }
+            self.done.insert(func.entry);
+            if guess {
+                self.accepted_guesses.insert(func.entry);
+            }
+            self.track(func.entry, &func, &BTreeSet::new(), &BTreeSet::new());
+            self.functions.push(func);
+        }
     }
 
     /// Walks every queued entry once, queueing the callees it finds.
     ///
     /// # Returns
     ///
-    /// `true` when the fuel ran out before the queue emptied.
+    /// `true` when the fuel ran out, before the queue emptied or inside a
+    /// wave, whose later walks it cut short or never let start.
     pub(super) fn drain(&mut self) -> bool {
         let mut incomplete = false;
         loop {
@@ -1058,6 +1114,7 @@ impl WalkState<'_> {
                 self.walk_wave(&wave, &known, &lanes);
                 lanes.stop();
             });
+            incomplete |= self.worker.fuel == 0;
         }
         incomplete
     }
@@ -1170,11 +1227,17 @@ impl WalkState<'_> {
     /// the function's own instructions: `jne other` is a conditional tail
     /// call, and the function it enters listed no reference from it.
     ///
+    /// A walk the spent fuel never let start decoded nothing and records
+    /// nothing: its entry is not done, so a first walk held for it stays.
+    ///
     /// # Arguments
     ///
     /// * `entry` - The function's entry.
     /// * `walked` - What its walk produced.
     pub(super) fn commit(&mut self, entry: u64, walked: Walked) {
+        if walked.func.instr_count == 0 && !walked.bad_entry {
+            return;
+        }
         if let Some(why) = self.why_rejected(&walked) {
             if trace_seeds() {
                 eprintln!("seed {entry:#x} rejected: {why}");

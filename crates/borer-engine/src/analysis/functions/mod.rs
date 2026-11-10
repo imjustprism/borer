@@ -493,11 +493,12 @@ pub(super) fn fuel_for(program: &Program) -> u64 {
 /// Under the older C++ runtime a catch funclet returns where its parent
 /// goes on (`lea rax, [label]; ret`), code of the parent that no
 /// instruction of the parent reaches: each parent is walked again with the
-/// labels its funclets return. A walk that decoded no instruction is not a
-/// function (a pointer or padding seed that landed on data or on a byte
-/// that does not decode, real in a decrypted image, where such seeds are
-/// many) and is dropped so the list holds only bodies; a thunk is one
-/// instruction, so this keeps thunks.
+/// labels its funclets return, and keeps its first walk when the fuel runs
+/// out before that. A walk that decoded no instruction is not a function,
+/// so the list holds only bodies: one whose entry is not code (a pointer or
+/// padding seed that landed on data, real in a decrypted image, where such
+/// seeds are many) is rejected, and one the spent fuel never let start is
+/// not recorded.
 ///
 /// # Arguments
 ///
@@ -559,6 +560,7 @@ pub(crate) fn discover(program: &Program, bitness: u32) -> Analysis {
         starts,
         declared: seeds.clone(),
         queue: seeds,
+        held: Default::default(),
         done: AddrSet::new(program),
         functions: Vec::new(),
         xrefs: FxHashMap::default(),
@@ -678,14 +680,13 @@ pub(crate) fn discover(program: &Program, bitness: u32) -> Analysis {
                 .or_default()
                 .extend(labels);
         }
-        st.forget(&parents);
+        st.held = st.forget(&parents);
         st.queue = parents;
         incomplete |= st.run();
     }
     phases.mark("discover catch rerun");
 
     st.drop_held_guesses();
-    st.functions.retain(|f| f.instr_count > 0);
     st.functions.shrink_to_fit();
     let entries: BTreeSet<u64> = st.functions.iter().map(|f| f.entry).collect();
     let mut xrefs: BTreeMap<u64, Vec<RefSite>> =

@@ -1421,6 +1421,24 @@ impl Walks<'_> {
         }
     }
 
+    /// Walks functions again, each keeping its first walk when the fuel
+    /// runs out before its second.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The image.
+    /// * `entries` - The walked functions to walk again.
+    fn redo(&mut self, program: &Program, entries: Vec<u64>) {
+        let stale: Vec<(u64, Walked)> = entries
+            .iter()
+            .filter_map(|e| self.walked.remove_entry(e))
+            .collect();
+        self.drain(program, entries);
+        for (e, w) in stale {
+            self.walked.entry(e).or_insert(w);
+        }
+    }
+
     /// Records a walk: spends its fuel, marks its bytes covered and queues
     /// the functions it calls.
     ///
@@ -1562,10 +1580,7 @@ pub(crate) fn discover(program: &Program) -> Analysis {
         })
         .map(|(e, _)| *e)
         .collect();
-    for e in &redo {
-        walks.walked.remove(e);
-    }
-    walks.drain(program, redo);
+    walks.redo(program, redo);
     let Walks {
         walked, incomplete, ..
     } = walks;
