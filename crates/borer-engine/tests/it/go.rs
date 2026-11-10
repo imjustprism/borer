@@ -404,6 +404,40 @@ fn a_table_in_an_unnamed_section_is_found_by_its_magic() {
     assert_eq!(locals(&p).len(), 3, "{:?}", locals(&p));
 }
 
+/// A table is read whatever the image's instruction set: an arm64
+/// executable's functions are named from it, with the four-byte pc quantum
+/// its header states.
+#[test]
+fn an_arm64_table_names_its_functions() {
+    /// `EM_AARCH64`.
+    const EM_AARCH64: u16 = 183;
+    let mut table = pclntab(&FUNCS, 0x34);
+    table[6] = 4;
+    // ASM: ret
+    let text = [0xd65f_03c0_u32; 13].iter().flat_map(|w| w.to_le_bytes());
+    let bytes = elfgen::build(
+        ET_EXEC,
+        EM_AARCH64,
+        MAIN,
+        &[
+            Sec::new(".text", PROGBITS, AX, 0x1000, text.collect()),
+            Sec::new(".gopclntab", PROGBITS, A, 0x2000, table),
+        ],
+    );
+    let p = Program::from_bytes(std::path::PathBuf::from("go-arm64.elf"), bytes)
+        .expect("the image loads");
+    assert_eq!(p.arch, borer_engine::program::Arch::Arm64);
+    assert_eq!(
+        locals(&p),
+        vec![
+            (MAIN, "main.main"),
+            (ADD, "main.add"),
+            (MORESTACK, "runtime.morestack_noctxt")
+        ]
+    );
+    assert_eq!(p.go.as_ref().map(|g| g.version), Some(GoVersion::V1_20));
+}
+
 /// A corrupt table names nothing: a record that disagrees with its entry,
 /// entries out of order, a name past the table, or a count past the end
 /// each refuse the whole table.

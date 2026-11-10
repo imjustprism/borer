@@ -1393,15 +1393,11 @@ impl Program {
     /// want of a text start says why among the summary's warnings.
     ///
     /// It runs on the image as loaded, its relocations applied, since a
-    /// PIE's table states its text start through one.
+    /// PIE's table states its text start through one. The table is read
+    /// whatever the instruction set: its pointers are as wide as the
+    /// image's ([`crate::analysis::pointer_size`]).
     fn read_go(&mut self) {
-        let Some(word) = self
-            .arch
-            .bitness()
-            .map(|b| saturating_usize(u64::from(b / 8)))
-        else {
-            return;
-        };
+        let word = saturating_usize(crate::analysis::pointer_size(self));
         let (table, funcs) = match crate::go::find(&self.sections, |s| self.section_bytes(s), word)
         {
             Ok(found) => found,
