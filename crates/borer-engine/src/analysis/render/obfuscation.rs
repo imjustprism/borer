@@ -60,7 +60,9 @@ pub(super) struct Dispatcher {
 ///
 /// When the filter names nothing, or no dispatcher is at or in what it
 /// names; a filter that resolved to nothing listed every dispatcher, an
-/// answer to a question nobody asked.
+/// answer to a question nobody asked. A dispatcher in code of no
+/// instruction set the engine decodes answers [`Program::isa_for`]'s
+/// refusal.
 pub fn flattening_tsv(
     p: &Program,
     a: &Analysis,
@@ -73,6 +75,8 @@ pub fn flattening_tsv(
     const DISPATCHERS_MAX: usize = 400;
     /// Steps of the recovered order shown before the rest are counted.
     const ORDER_MAX: usize = 64;
+    /// Instructions decoded in one case; a longer case counts this many.
+    const CASE_INSTRS_MAX: usize = 64;
     let filter = filter.trim();
     let wanted = if filter.is_empty() {
         None
@@ -135,16 +139,13 @@ pub fn flattening_tsv(
         return Ok(out);
     };
     let leads = reaching(f, head);
+    let isa = p.isa_for(Feature::Disasm)?;
     for (n, t) in targets.iter().enumerate().take(CASES_MAX) {
         let block = f.blocks.iter().find(|b| b.start == *t);
         let instrs = block.map_or(0, |b| {
             let len = usize::try_from(b.end.saturating_sub(b.start)).unwrap_or(0);
             p.read_va_upto(b.start, len.max(1)).map_or(0, |code| {
-                if p.arch.isa() == Some(crate::isa::Isa::A64) {
-                    disasm::disassemble_isa(code, b.start, crate::isa::Isa::A64, 64).len()
-                } else {
-                    disasm::disassemble(code, b.start, 64, 64).len()
-                }
+                disasm::disassemble_program(p, code, b.start, isa, CASE_INSTRS_MAX).len()
             })
         });
         let ends = block.map_or("unknown", |b| match b.term {

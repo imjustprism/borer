@@ -779,6 +779,60 @@ fn a_diff_of_two_untraced_runs_claims_no_agreement() {
     assert!(!out.contains("agree"), "{out}");
 }
 
+/// A flattened function's cases are counted in the program's own
+/// instruction set.
+///
+/// Each dispatcher has seven cases, all coming back to it. A 32-bit x86
+/// case is `inc eax; dec eax; inc ecx; jmp head`: read as x86-64 its three
+/// one-byte instructions are prefixes of the jump, and it counted one. An
+/// A32 case is `add r1, r1, #1; mov r0, r0; b head`.
+#[test]
+fn a_flattened_case_is_counted_in_the_programs_instruction_set() {
+    use borer_engine::analysis::{Analysis, Overlay, render::flattening_tsv};
+    use borer_engine::program::Arch;
+    const TEXT: u32 = 0x40_1000;
+    let mut x86 = vec![
+        0x8b, 0x4c, 0x24, 0x04, // ASM: mov ecx, [esp + 4]
+        0x83, 0xf9, 0x06, // ASM: cmp ecx, 6
+        0x77, 0x07, // ASM: ja 0x401010
+        0xff, 0x24, 0x8d, 0x00, 0x20, 0x40, 0x00, // ASM: jmp [ecx*4 + 0x402000]
+        0xc3, // ASM: ret
+    ];
+    let mut table = Vec::new();
+    for k in 0..7u8 {
+        x86.resize(0x18 + 8 * usize::from(k), 0xcc);
+        table.extend_from_slice(&(TEXT + 0x18 + 8 * u32::from(k)).to_le_bytes());
+        // ASM: inc eax; dec eax; inc ecx; jmp 0x401004
+        x86.extend_from_slice(&[0x40, 0x48, 0x41, 0xeb, 0xe7 - 8 * k]);
+    }
+    let mut arm = vec![
+        0xe351_0006, // ASM: cmp r1, #6
+        0x979f_f101, // ASM: ldrls pc, [pc, r1, lsl #2]
+        0xe12f_ff1e, // ASM: bx lr
+    ];
+    arm.extend((0..7).map(|k| TEXT + 0x28 + 12 * k));
+    for k in 0..7 {
+        arm.push(0xe281_1001); // ASM: add r1, r1, #1
+        arm.push(0xe1a0_0000); // ASM: mov r0, r0
+        arm.push(0xeaff_fff2 - 3 * k); // ASM: b 0x401000
+    }
+    let arm: Vec<u8> = arm.iter().flat_map(|w| w.to_le_bytes()).collect();
+    for (arch, code, data, count) in [
+        (Arch::X86, &x86, &table, "4"),
+        (Arch::Arm, &arm, &Vec::new(), "3"),
+    ] {
+        let p = crate::raw::image(arch, code, data);
+        let a = Analysis::compute(&p);
+        let out = flattening_tsv(&p, &a, &Overlay::default(), "0x401000").expect("a dispatcher");
+        let counts: Vec<&str> = out
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .filter_map(|l| l.split_whitespace().nth(2))
+            .collect();
+        assert_eq!(counts, [count; 7], "{arch:?}: {out}");
+    }
+}
+
 /// The same table stored the other way round, xored with a constant and
 /// added one, is named with what was done to it; the plain form reports
 /// once and no delta form doubles it.
