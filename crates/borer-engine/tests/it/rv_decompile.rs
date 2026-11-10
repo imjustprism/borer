@@ -1193,3 +1193,31 @@ fn a_bit_shifted_to_the_top_and_back_reads_as_its_test() {
     let text = decompiled(&word, Arch::RiscV32).concat();
     assert!(text.contains("return (a1 & 0x40) != 0;"), "{text}");
 }
+
+/// A load into a register nothing reads again is not written out.
+///
+/// The store after it would otherwise write the load out first, and does
+/// on no other instruction set; a load a later instruction reads is still
+/// written out before the store.
+#[test]
+fn a_loaded_register_nothing_reads_again_is_not_written_out() {
+    let dead = [
+        (0x0005_3283, 4), // ASM: ld t0, 0(a0)
+        (0x00b5_3423, 4), // ASM: sd a1, 8(a0)
+        (0x0000_8067, 4), // ASM: ret
+    ];
+    let text = decompiled(&dead, Arch::RiscV64).concat();
+    assert!(text.contains("*(uint64_t*)(a1 + 8) = a2;"), "{text}");
+    assert!(!text.contains("t0"), "{text}");
+    let read = [
+        (0x0005_3283, 4), // ASM: ld t0, 0(a0)
+        (0x0085_3303, 4), // ASM: ld t1, 8(a0)
+        (0x00b5_3823, 4), // ASM: sd a1, 16(a0)
+        (0x0003_0513, 4), // ASM: mv a0, t1
+        (0x0000_8067, 4), // ASM: ret
+    ];
+    let text = decompiled(&read, Arch::RiscV64).concat();
+    assert!(text.contains("t1 = *(uint64_t*)(a1 + 8);"), "{text}");
+    assert!(text.contains("return t1;"), "{text}");
+    assert!(!text.contains("t0"), "{text}");
+}

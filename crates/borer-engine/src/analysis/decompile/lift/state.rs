@@ -5,17 +5,28 @@ use super::*;
 use crate::analysis::decompile::frame::Access;
 
 /// Tells whether a variable is a machine register whose pending value
-/// liveness may drop: an x86 register, or an arm64 general or `v`
-/// register (the stack pointer is tracked as an offset, not a value).
+/// liveness may drop.
+///
+/// One is an x86 register, an arm64 general or `v` register, or an ARM32
+/// or RISC-V register other than the stack pointer, which is tracked as an
+/// offset, not a value. Every variant is named, so a new kind of variable
+/// is decided here and not left out.
 ///
 /// # Arguments
 ///
 /// * `k` - The variable.
 fn is_register(k: Key) -> bool {
-    matches!(
-        k,
-        Key::Reg(_) | Key::A64(crate::isa::a64::Reg::X(_) | crate::isa::a64::Reg::V(_))
-    ) || matches!(k, Key::A32(r) if r != crate::isa::a32::SP)
+    use crate::isa::{a32, a64, rv};
+    match k {
+        Key::Reg(_) | Key::A64(a64::Reg::X(_) | a64::Reg::V(_)) => true,
+        Key::A32(r) => r != a32::SP,
+        Key::Rv(r) => r != rv::SP,
+        Key::A64(a64::Reg::Sp | a64::Reg::Zr)
+        | Key::Slot(_)
+        | Key::Global(..)
+        | Key::Tmp(_)
+        | Key::Param(_) => false,
+    }
 }
 
 impl<'a> Exec<'_, 'a> {
