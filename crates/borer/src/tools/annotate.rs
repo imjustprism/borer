@@ -419,9 +419,10 @@ impl BorerServer {
     ///
     /// # Errors
     ///
-    /// When no binary is loaded, `replace` comes without `fields`, a
-    /// definition, a field, an application, a prototype or a variable is
-    /// refused, or the address does not resolve or no section holds it.
+    /// When no binary is loaded, `replace` comes without `name` and
+    /// `fields`, a definition, a field, an application, a prototype or a
+    /// variable is refused, or the address does not resolve or no section
+    /// holds it.
     #[tool(
         description = "Define a struct, enum or typedef, name fields of a struct or class_layout class, or apply a type at an address so decompile names its fields; at a function, type sets the prototype. Checked first; dry run until dry_run=false.",
         meta = effects(&[Effect::ChangesSession]),
@@ -448,7 +449,7 @@ impl BorerServer {
         }): Parameters<SetTypeParams>,
     ) -> Result<String, ErrorData> {
         let dry = dry_run.unwrap_or(true);
-        if replace == Some(true) && (fields.is_none() || var.is_some()) {
+        if replace == Some(true) && (name.is_none() || fields.is_none() || var.is_some()) {
             return Err(err_params(
                 "`replace` drops the fields `fields` does not restate, so it goes with `name` and `fields`",
             ));

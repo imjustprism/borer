@@ -506,6 +506,10 @@ fn a_field_keeps_its_width_and_a_conflicting_type_is_refused() {
             "address": "0x1040", "var": "field_0x10", "name": "m_count",
             "fields": ["0x10:m_count"], "replace": true
         }),
+        serde_json::json!({
+            "address": "0x1040", "type": "uint32_t (class_2800 *)",
+            "fields": ["0x10:m_count"], "replace": true
+        }),
     ] {
         assert_eq!(
             set_type(&mut client, &misplaced),
