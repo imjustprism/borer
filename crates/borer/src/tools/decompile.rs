@@ -269,6 +269,12 @@ impl BorerServer {
     /// Returns the pseudo-C of several functions, decompiled in parallel and
     /// emitted in discovery order.
     ///
+    /// The filter selects what `functions` lists under it
+    /// ([`render::select_functions`]): import thunks and exception funclets
+    /// are left out unless the filter names them, and the header says how
+    /// many were. The batch kept a filter of its own, which matched a thunk
+    /// by its import's name and spent its slots on `jmp [slot]`.
+    ///
     /// # Arguments
     ///
     /// * `DecompileBatchParams` - Destructured tool parameters (see its field docs).
@@ -310,28 +316,14 @@ impl BorerServer {
         const TOTAL: usize = 40_000;
         let cap = count_param(max_functions, 10, 50, "max_functions")?;
         let max = cap.n;
-        let filter = Filter::new(filter.as_deref());
         self.with_program(|p| {
             if let Some(why) = p.refuses(Feature::Decompile) {
                 return Err(why);
             }
             let a = self.ensure_analysis()?;
             let o = self.overlay();
-            let matches = |f: &&borer_engine::analysis::Function| match filter.needle() {
-                Some(q) => {
-                    borer_engine::analysis::name_of(&a, &o, f.entry)
-                        .to_lowercase()
-                        .contains(q)
-                        || format!("{:x}", f.entry).contains(q.strip_prefix("0x").unwrap_or(q))
-                }
-                None => true,
-            };
-            let all: Vec<u64> = a
-                .functions
-                .iter()
-                .filter(matches)
-                .map(|f| f.entry)
-                .collect();
+            let picked = render::select_functions(&a, &o, filter.as_deref());
+            let all: Vec<u64> = picked.functions.iter().map(|f| f.entry).collect();
             let total_matching = all.len();
             let classes: Vec<(u64, Vec<u64>)> =
                 a.dedupe_clones(&all).into_iter().take(max).collect();
@@ -399,13 +391,15 @@ impl BorerServer {
                 folded += same.map_or(0, Vec::len);
             }
             let mut out = format!(
-                "# decompiled {shown} of {total_matching} matching functions (max {max}){}
+                "# decompiled {shown} of {total_matching} matching {} (max {max}){}{}
 ",
+                picked.noun,
                 if folded > 0 {
                     format!("; {folded} more are clones of these")
                 } else {
                     String::new()
-                }
+                },
+                picked.left_out
             );
             out.push_str(&body);
             let cut = texts.len().saturating_sub(shown);
@@ -758,6 +752,100 @@ mod tests {
             ),
             "{page}"
         );
+    }
+
+    /// A filter selects the same functions in `decompile_batch` as in
+    /// `functions`, and both say what it left out.
+    ///
+    /// The batch read its filter by a rule of its own: it kept the import
+    /// thunks `functions` leaves out unless the filter is `thunk`, matched
+    /// one by its import's name, and counted it among the matching.
+    ///
+    /// 0x401000: `call 0x401010; ret`; 0x401010: `jmp [0x402100]` through
+    /// `QString::QString`.
+    ///
+    /// # Panics
+    ///
+    /// When a filter selects other entries in the two, or the batch's
+    /// header counts another total or says something else was left out.
+    #[test]
+    fn a_filter_selects_the_same_functions_in_a_batch_as_in_the_listing() {
+        use crate::params::{DecompileBatchParams, FunctionsParams};
+        use borer_engine::program::{Arch, Program, Section, Symbol, SymbolKind};
+        use rmcp::handler::server::wrapper::Parameters;
+        let mut bytes = vec![0u8; 0x2000];
+        bytes[..6].copy_from_slice(&[
+            0xe8, 0x0b, 0x00, 0x00, 0x00, // ASM: call 0x401010
+            0xc3, // ASM: ret
+        ]);
+        bytes[0x10..0x16].copy_from_slice(&[
+            0xff, 0x25, 0x00, 0x21, 0x40, 0x00, // ASM: jmp [0x402100]
+        ]);
+        let sections = vec![
+            Section::mapped(".text", 0x40_1000, 0, 0x1000, false, true),
+            Section::mapped(".rdata", 0x40_2000, 0x1000, 0x1000, false, false),
+        ];
+        let mut program = Program::raw(bytes, Arch::X86, 0x40_0000, Some(0x40_1000), sections);
+        program.symbols = vec![Symbol {
+            name: "Qt5Core.dll!??0QString@@QAE@XZ".to_owned(),
+            addr: 0x40_2100,
+            kind: SymbolKind::Import,
+        }];
+        let server = crate::testing::server_with(program);
+        for (filter, selected) in [
+            (None, vec!["0x401000"]),
+            (Some("sub_"), vec!["0x401000"]),
+            (Some("401010"), vec![]),
+            (Some("qstring"), vec![]),
+            (Some("thunk"), vec!["0x401010"]),
+        ] {
+            let listed = server
+                .functions(Parameters(FunctionsParams {
+                    filter: filter.map(str::to_owned),
+                    sort: None,
+                    offset: None,
+                    limit: None,
+                    count_only: None,
+                }))
+                .expect("lists");
+            let batch = server
+                .decompile_batch(Parameters(DecompileBatchParams {
+                    filter: filter.map(str::to_owned),
+                    max_functions: None,
+                    out: None,
+                    library: None,
+                    overwrite: None,
+                }))
+                .expect("decompiles");
+            let in_listing: Vec<&str> = listed
+                .lines()
+                .filter(|l| l.starts_with("0x"))
+                .filter_map(|l| l.split(' ').next())
+                .collect();
+            let in_batch: Vec<&str> = batch
+                .lines()
+                .filter_map(|l| {
+                    l.strip_prefix("==== ")?
+                        .split(" @ ")
+                        .nth(1)?
+                        .split(' ')
+                        .next()
+                })
+                .collect();
+            assert_eq!(in_listing, selected, "{filter:?}: {listed}");
+            assert_eq!(in_batch, selected, "{filter:?}: {batch}");
+            let (head, said) = (
+                listed.lines().next().unwrap_or_default(),
+                batch.lines().next().unwrap_or_default(),
+            );
+            let n = selected.len();
+            let counted = head.strip_prefix(&format!("# showing {n} of {n} "));
+            assert_eq!(
+                counted.map(|rest| format!("# decompiled {n} of {n} matching {rest}")),
+                Some(said.replacen(" (max 10)", "", 1)),
+                "{filter:?}: {head} against {said}"
+            );
+        }
     }
 
     /// A filter keeps the lines carrying the text, numbered where they were.

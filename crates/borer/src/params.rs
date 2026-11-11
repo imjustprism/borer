@@ -559,7 +559,7 @@ pub(crate) struct ScriptParams {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DecompileBatchParams {
-    /// Case-insensitive filter on function name or entry hex.
+    /// Filter on name or entry hex, as `functions` reads it.
     pub(crate) filter: Option<String>,
     /// Maximum functions to decompile (default 10, max 50).
     pub(crate) max_functions: Option<u32>,

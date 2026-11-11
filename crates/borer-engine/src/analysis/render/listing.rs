@@ -19,39 +19,39 @@ pub enum FunctionOrder {
     Size,
 }
 
-/// Renders the paged function table.
+/// The functions a listing's filter selects, and what it left out.
+#[derive(Debug, Clone)]
+pub struct Selection<'a> {
+    /// The functions selected, in address order.
+    pub functions: Vec<&'a Function>,
+    /// What the selected are, for a header: `functions`, or `import
+    /// thunks` or `exception funclets` under the filter that lists only
+    /// them.
+    pub noun: &'static str,
+    /// The import thunks and exception funclets left out, as a header
+    /// says it after its counts; empty when none were.
+    pub left_out: String,
+}
+
+/// Selects the functions a filter names, for every listing and batch that
+/// takes one.
 ///
 /// An import thunk, `jmp [slot]` under an address of the program's own, is
-/// left out unless the filter is `thunk`, which lists only them: 272 of
+/// left out unless the filter is `thunk`, which selects only them: 272 of
 /// one Qt launcher's 2,233 discovered functions are thunks, and a count or
-/// a filtered page that holds them says less about the program's code.
-/// The header says how many were left out.
+/// a filtered page that holds them says less about the program's code. An
+/// exception funclet is left out the same way, and `funclet` selects only
+/// them.
 ///
 /// # Arguments
 ///
 /// * `a` - The analysis.
-/// * `o` - User names, applied to the `name` column and the filter.
+/// * `o` - User names, which the filter matches ahead of a symbol's.
 /// * `filter` - Case-insensitive substring matched against the name or the
-///   entry hex, which is also matched with a leading `0x` stripped.
-/// * `order` - By entry, or the largest first.
-/// * `offset` - Matches to skip first (paging).
-/// * `limit` - Maximum rows to render.
-///
-/// # Returns
-///
-/// `(shown, total, text)`: the text starts with `# showing N of M functions`
-/// (`, largest first` under [`FunctionOrder::Size`]), a `# warning:` line
-/// when the analysis ran out of instruction budget, and a column header,
-/// then one `entry size blocks instrs callers callees name` row per
-/// function.
-pub fn functions_tsv(
-    a: &Analysis,
-    o: &Overlay,
-    filter: Option<&str>,
-    order: FunctionOrder,
-    offset: usize,
-    limit: usize,
-) -> (usize, usize, String) {
+///   entry hex, which is also matched with a leading `0x` stripped; `None`
+///   for every function that is neither a thunk nor a funclet.
+#[must_use]
+pub fn select_functions<'a>(a: &'a Analysis, o: &Overlay, filter: Option<&str>) -> Selection<'a> {
     let q = filter.map(str::to_lowercase);
     let only_thunks = q.as_deref() == Some("thunk");
     let only_funclets = q.as_deref() == Some("funclet");
@@ -60,7 +60,7 @@ pub fn functions_tsv(
         .map_or("", |q| q.strip_prefix("0x").unwrap_or(q));
     let mut thunks = 0usize;
     let mut funclets = 0usize;
-    let mut matched: Vec<&Function> = a
+    let functions: Vec<&Function> = a
         .functions
         .iter()
         .filter(|f| {
@@ -84,15 +84,6 @@ pub fn functions_tsv(
             }
         })
         .collect();
-    let order_note = match order {
-        FunctionOrder::Address => "",
-        FunctionOrder::Size => {
-            matched.sort_by_cached_key(|f| (std::cmp::Reverse(f.size()), f.entry));
-            ", largest first"
-        }
-    };
-    let total = matched.len();
-    let shown = total.saturating_sub(offset).min(limit);
     let mut left_out = String::new();
     if thunks > 0 {
         let _ = write!(
@@ -113,6 +104,55 @@ pub fn functions_tsv(
     } else {
         "functions"
     };
+    Selection {
+        functions,
+        noun,
+        left_out,
+    }
+}
+
+/// Renders the paged function table of what a filter selects
+/// ([`select_functions`]); the header says how many import thunks and
+/// exception funclets were left out.
+///
+/// # Arguments
+///
+/// * `a` - The analysis.
+/// * `o` - User names, applied to the `name` column and the filter.
+/// * `filter` - The filter, as [`select_functions`] reads it.
+/// * `order` - By entry, or the largest first.
+/// * `offset` - Matches to skip first (paging).
+/// * `limit` - Maximum rows to render.
+///
+/// # Returns
+///
+/// `(shown, total, text)`: the text starts with `# showing N of M functions`
+/// (`, largest first` under [`FunctionOrder::Size`]), a `# warning:` line
+/// when the analysis ran out of instruction budget, and a column header,
+/// then one `entry size blocks instrs callers callees name` row per
+/// function.
+pub fn functions_tsv(
+    a: &Analysis,
+    o: &Overlay,
+    filter: Option<&str>,
+    order: FunctionOrder,
+    offset: usize,
+    limit: usize,
+) -> (usize, usize, String) {
+    let Selection {
+        functions: mut matched,
+        noun,
+        left_out,
+    } = select_functions(a, o, filter);
+    let order_note = match order {
+        FunctionOrder::Address => "",
+        FunctionOrder::Size => {
+            matched.sort_by_cached_key(|f| (std::cmp::Reverse(f.size()), f.entry));
+            ", largest first"
+        }
+    };
+    let total = matched.len();
+    let shown = total.saturating_sub(offset).min(limit);
     let mut out = format!("# showing {shown} of {total} {noun}{order_note}{left_out}\n");
     if a.incomplete {
         out.push_str(INCOMPLETE_NOTE);
@@ -143,8 +183,8 @@ pub fn functions_tsv(
 /// The digits `{:x}` spells a value with.
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
-/// Whether one function passes [`functions_tsv`]'s lowered filter, testing
-/// nothing a row would have to build.
+/// Whether one function passes [`select_functions`]'s lowered filter,
+/// testing nothing a row would have to build.
 ///
 /// A filtered listing tests every function, so the test borrows the overlay
 /// or symbol name where it lies and folds case in place, and spells the
