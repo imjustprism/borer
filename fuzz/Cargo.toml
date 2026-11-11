@@ -1,5 +1,7 @@
 # Fuzz targets for the loaders and the analysis, run by cargo-fuzz:
 #   cargo +nightly fuzz run load -- -max_total_time=60
+#   cargo +nightly fuzz run carve corpus/carve seeds/carve -- -max_total_time=60
+# seeds/<target> holds a target's first inputs, small and built by hand.
 # Outside the main workspace: libFuzzer needs a nightly toolchain and its
 # own instrumented build, which the gate's builds must not share.
 [package]
@@ -33,6 +35,27 @@ bench = false
 [[bin]]
 name = "il"
 path = "fuzz_targets/il.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "carve"
+path = "fuzz_targets/carve.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nested"
+path = "fuzz_targets/nested.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pdb"
+path = "fuzz_targets/pdb.rs"
 test = false
 doc = false
 bench = false

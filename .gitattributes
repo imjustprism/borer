@@ -17,3 +17,6 @@
 *.bin binary
 *.png binary
 *.bsig binary
+
+# Fuzz seeds are bytes, whatever they look like.
+fuzz/seeds/** binary

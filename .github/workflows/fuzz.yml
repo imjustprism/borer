@@ -1,11 +1,16 @@
 name: fuzz
 
-# libFuzzer over the loaders (PE, ELF, Mach-O with DWARF, minidump, raw)
-# and over load, analyze and decompile: a minute per target on the way to
-# main (its pull requests and pushes), ten minutes per target weekly. An input that panics,
-# runs past ten seconds or takes 2 GB fails the job and is uploaded; replay
-# it with `cargo +nightly fuzz run <target> <file>` and keep it as a test.
-# A manual run takes a target (all three when not given), libFuzzer's seed
+# libFuzzer over the loaders (PE, ELF, Mach-O with DWARF, minidump, raw),
+# over load, analyze and decompile, and over the carver, the
+# `<file>@<offset>` loads and a companion PDB: a minute per target on the
+# way to main (its pull requests and pushes), ten minutes per target weekly.
+# A target with a folder under fuzz/seeds starts from the inputs in it. An
+# input that panics, runs past ten seconds or takes 2 GB fails the job and
+# is uploaded; replay it with `cargo +nightly fuzz run <target> <file>` and
+# keep it as a test. `pdb` runs only when asked for by name: from its seeds
+# it finds within seconds a module whose line-program size passes its
+# stream, which panics in the pdb crate, and it joins `all` with that fix.
+# A manual run takes a target (every other one when not given), libFuzzer's seed
 # and a run count (ten minutes when not given): the `INFO: Seed:` and
 # `Done N runs` a run printed replay it on the same build, as far as the
 # target is deterministic.
@@ -20,9 +25,9 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: The target to fuzz; all fuzzes load, analyze and il in turn
+        description: The target to fuzz; all fuzzes load, analyze, il, carve and nested in turn
         type: choice
-        options: [all, load, analyze, il]
+        options: [all, load, analyze, il, carve, nested, pdb]
         default: all
       seed:
         description: libFuzzer's -seed; empty lets libFuzzer pick one
@@ -56,7 +61,7 @@ env:
 jobs:
   fuzz:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -84,14 +89,17 @@ jobs:
           RUNS: ${{ inputs.runs }}
         run: |
           [[ "$SEED$RUNS" =~ ^[0-9]*$ ]] || { echo "seed and runs take digits only"; exit 1; }
-          targets="load analyze il"
+          targets="load analyze il carve nested"
           if [ "${TARGET:-all}" != all ]; then targets=$TARGET; fi
           stop=(-max_total_time="$SECONDS_PER_TARGET")
           if [ -n "$RUNS" ]; then stop=(-runs="$RUNS"); fi
           seed=()
           if [ -n "$SEED" ]; then seed=(-seed="$SEED"); fi
           for target in $targets; do
-            cargo +"$NIGHTLY" fuzz run "$target" -- \
+            mkdir -p "corpus/$target"
+            corpus=("corpus/$target")
+            if [ -d "seeds/$target" ]; then corpus+=("seeds/$target"); fi
+            cargo +"$NIGHTLY" fuzz run "$target" "${corpus[@]}" -- \
               "${stop[@]}" "${seed[@]}" -timeout=10 -rss_limit_mb=2048
           done
 
