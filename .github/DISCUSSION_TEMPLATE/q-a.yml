@@ -1,0 +1,19 @@
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: What you are trying to do
+      description: The binary (format, architecture) and the answer you are after.
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you tried
+      description: The CLI command or MCP tool call and the part of the answer that matters.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: borer version
+      description: The first line of `borer doctor offline`.

@@ -1,8 +1,11 @@
 blank_issues_enabled: true
 contact_links:
+  - name: Ask a question
+    url: https://github.com/imjustprism/borer/discussions/categories/q-a
+    about: How to do something with borer, or why an answer looks the way it does. Questions get answered in Discussions.
   - name: Report a vulnerability privately
     url: https://github.com/imjustprism/borer/security/advisories/new
     about: Anything that could hurt the person running borer (see SECURITY.md). Please do not open a public issue for it.
   - name: Documentation
-    url: https://borer.lol
+    url: https://borer.lol/docs
     about: Install, tools and resources.

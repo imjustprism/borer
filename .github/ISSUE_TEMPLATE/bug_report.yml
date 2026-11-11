@@ -33,6 +33,18 @@ body:
         the file only if you are allowed to share it; a small program that
         reproduces the problem is even better. For malware, give its SHA-256
         and a public source instead of attaching it.
+  - type: dropdown
+    id: front
+    attributes:
+      label: How you ran it
+      options:
+        - Command line
+        - MCP server, driven by an agent
+  - type: input
+    id: host
+    attributes:
+      label: Host
+      description: Operating system and architecture, and the agent client if it ran over MCP.
   - type: input
     id: version
     attributes:

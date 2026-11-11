@@ -1,0 +1,13 @@
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: The idea
+      description: What borer should read, find or answer. An idea ready to be built belongs in a feature request issue.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Where it would have helped
+      description: The task, the kind of binary, and what you or your agent did instead.

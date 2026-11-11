@@ -1,0 +1,14 @@
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What you did with borer
+      description: A write-up, a pack, a script, an agent workflow. Share only files you are allowed to share; for malware give a SHA-256 and a public source.
+    validations:
+      required: true
+  - type: textarea
+    id: how
+    attributes:
+      label: The calls that mattered
+      description: The commands or MCP tool calls someone else could repeat.
+      render: text
