@@ -589,6 +589,43 @@ fn a_thumb_jump_through_a_function_table_is_a_tail_call() {
     assert!(out.contains("goto *"), "{out}");
 }
 
+/// A Thumb jump through a table of functions named for library functions
+/// that take a variable list stays a computed `goto`.
+///
+/// The same jump is a tail call while the functions keep their own names.
+/// Named `printf`, `sprintf` and `fprintf`, they take what those are
+/// declared with: one or two fixed parameters and a list no parameter
+/// names, which a call through the table would drop.
+#[test]
+fn a_thumb_jump_through_a_table_of_library_variable_lists_stays_a_goto() {
+    let halves: [u16; 15] = [
+        0xf240, 0x2294, // ASM: movw r2, #0x294
+        0xf2c0, 0x0201, // ASM: movt r2, #0x1
+        0xf852, 0xc020, // ASM: ldr r12, [r2, r0, lsl #2]
+        0x4608, // ASM: mov r0, r1
+        0x4619, // ASM: mov r1, r3
+        0x4760, // ASM: bx r12
+        0x4408, 0x4770, // ASM: add r0, r0, r1; bx lr   (0x40012)
+        0x1a40, 0x4770, // ASM: subs r0, r0, r1; bx lr  (0x40016)
+        0x4348, 0x4770, // ASM: muls r0, r1, r0; bx lr  (0x4001a)
+    ];
+    let out = thumb_table(&halves, &Overlay::default());
+    assert!(!out.contains("goto"), "{out}");
+    assert!(
+        out.contains("return ((uint32_t (*)(uint32_t, uint32_t))"),
+        "{out}"
+    );
+    let mut named = Overlay::default();
+    for (name, at) in ["printf", "sprintf", "fprintf"]
+        .iter()
+        .zip([0x12, 0x16, 0x1a])
+    {
+        named.names.insert(BASE + at, (*name).to_owned());
+    }
+    let out = thumb_table(&halves, &named);
+    assert!(out.contains("goto *"), "{out}");
+}
+
 /// A Thumb jump through a table of import thunks stays a computed `goto`.
 ///
 /// Each entry is a Windows on ARM thunk to `ReadFile`, which takes a fifth

@@ -479,17 +479,25 @@ impl Lift<'_, '_> {
     /// returns, when its body or a declaration says, it has a body of its
     /// own that reads no stack argument (a thunk's import may take more than
     /// four), it takes its integers in registers alone, one a parameter (no
-    /// stated 64-bit one, which takes a pair, and no variable list, whose
-    /// arguments no parameter names), and returns no float: a call through
-    /// a table prints a pointer to a function of words
+    /// stated 64-bit one, which takes a pair, and no variable list, stated
+    /// or declared for its name or its import, whose arguments no parameter
+    /// names), and returns no float: a call through a table prints a
+    /// pointer to a function of words
     /// ([`super::super::lift::Exec::table_callee`]).
     ///
     /// # Arguments
     ///
     /// * `entry` - The function.
     pub(super) fn arg_keys(&self, entry: u64) -> Option<(Vec<Key>, Returns)> {
-        if super::super::params::stated_unplaced(self.ex.ctx, entry)
-            || lift::import_prototype(self.ex.ctx, Some(entry)).is_some_and(|p| p.variadic)
+        let ctx = &*self.ex.ctx;
+        let listed = ctx
+            .analysis
+            .function(entry)
+            .and_then(|f| super::super::params::declared_arity(ctx, f, 0))
+            .is_some_and(|(_, _, variadic, _)| variadic);
+        if listed
+            || super::super::params::stated_pair(ctx, entry)
+            || lift::import_prototype(ctx, Some(entry)).is_some_and(|p| p.variadic)
         {
             return None;
         }
