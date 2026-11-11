@@ -326,34 +326,11 @@ borer help                                  # every command
 `--pack <file>` loads target knowledge, `--no-pdb` skips the companion PDB, and
 `--arch x86|x64|arm64` with `--base` and `--entry` maps raw code or a dump.
 
-## Network access
+## More
 
-borer has no telemetry or crash reporting. Only these reach the network:
-
-- A command line run at a terminal checks once a day for a newer release on
-  GitHub. It never runs for the MCP server or under `CI`, and
-  `BORER_NO_UPDATE_CHECK=1` turns it off.
-- `fetch_pdb`, only when asked, sends the PDB's name, GUID and age to the
-  symbol server, and `borer doctor` checks that server is reachable unless
-  run as `borer doctor offline`.
-- `borer update` and the installers download the release from GitHub. With
-  `GH_TOKEN` or `GITHUB_TOKEN` set, `borer update` sends that token to
-  GitHub's API (api.github.com) and nowhere else; the daily check never
-  sends it.
-
-## Limits
-
-- 32-bit ARM and RISC-V are not emulated, so the emulator-backed analyses
-  refuse them. On arm64, `taint`, `layout`, `solve`, `unpack` and `devirt`
-  refuse to run.
-- Shapes the structurer cannot prove stay as labels and gotos; SIMD code
-  prints as intrinsics.
-- No debugger: no breakpoints and no writes. Live access is Windows only.
-- .NET IL and Swift are not decompiled, and DWARF supplies names and types,
-  not line tables.
-- Library signatures ship for LLVM compiler-rt, the Microsoft C++ standard
-  library and the Rust standard library; build a pack for any other with
-  `borer sigmake`.
+What borer does not do yet is in [docs/limits.md](docs/limits.md). It has no
+telemetry; the few things that reach the network are listed in
+[docs/network.md](docs/network.md).
 
 ## Contributing
 
