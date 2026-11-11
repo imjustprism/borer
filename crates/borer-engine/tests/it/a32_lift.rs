@@ -13,8 +13,7 @@
 )]
 
 use borer_engine::analysis::Analysis;
-use borer_engine::analysis::decompile::verify::{Fact, Verified};
-use borer_engine::analysis::decompile::verify_a32::{verify, verify_tsv};
+use borer_engine::analysis::decompile::verify::{Fact, Verified, verify, verify_tsv};
 
 use crate::a32_emulate::{CASES, Code, image};
 

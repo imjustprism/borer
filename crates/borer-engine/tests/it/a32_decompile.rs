@@ -14,7 +14,7 @@
 use borer_engine::analysis::decompile::decompile;
 use borer_engine::analysis::decompile::replay::{replay_function, replay_tsv};
 use borer_engine::analysis::decompile::traces::{Structure, check_structure};
-use borer_engine::analysis::decompile::verify_a32::{verify, verify_tsv};
+use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
 use borer_engine::analysis::protos::Proto;
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::isa::a32::{Mode, Modes};

@@ -1128,34 +1128,6 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 }
                 return Ok(());
             }
-            if a32 || rv {
-                let (v, table) = if rv {
-                    let v = decompile::verify_rv::verify(&s.program, &a, &entries, seed);
-                    let table = decompile::verify_rv::verify_tsv(&v);
-                    (v, table)
-                } else {
-                    let v = decompile::verify_a32::verify(&s.program, &a, &entries, seed);
-                    let table = decompile::verify_a32::verify_tsv(&v);
-                    (v, table)
-                };
-                print!("{table}");
-                if !v.mismatches.is_empty() {
-                    bail!("the lifter and the emulator disagree; see the table above");
-                }
-                return Ok(());
-            }
-            if a64 {
-                let v = if mir {
-                    decompile::verify_a64::verify_mir(&s.program, &a, &entries, seed)
-                } else {
-                    decompile::verify_a64::verify(&s.program, &a, &entries, seed)
-                };
-                print!("{}", decompile::verify_a64::verify_tsv(&v));
-                if !v.mismatches.is_empty() {
-                    bail!("the lifter and the emulator disagree; see the table above");
-                }
-                return Ok(());
-            }
             let v = if mir {
                 decompile::verify::verify_mir(&s.program, &a, &entries, seed)
             } else {

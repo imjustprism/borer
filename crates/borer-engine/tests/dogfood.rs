@@ -641,7 +641,7 @@ first: {first:#?}",
 #[test]
 #[ignore = "set BORER_DOGFOOD_A32 to an ARM32 binary path to run this sweep"]
 fn the_arm32_lifter_agrees_with_the_emulator_on_every_block() {
-    use borer_engine::analysis::decompile::verify_a32::{verify, verify_tsv};
+    use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
     let path = std::env::var("BORER_DOGFOOD_A32").expect("BORER_DOGFOOD_A32 env var");
     let p = Program::load(std::path::Path::new(&path)).expect("load");
     let a = Analysis::compute(&p);
@@ -870,7 +870,7 @@ fn the_lifter_agrees_with_the_emulator_on_every_block() {
 #[test]
 #[ignore = "set BORER_DOGFOOD_A64 to an arm64 binary path to run this sweep"]
 fn the_arm64_lifter_agrees_with_the_emulator_on_every_block() {
-    use borer_engine::analysis::decompile::verify_a64::{verify, verify_tsv};
+    use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
     let path = std::env::var("BORER_DOGFOOD_A64").expect("BORER_DOGFOOD_A64 env var");
     let p = Program::load(std::path::Path::new(&path)).expect("load");
     let a = Analysis::compute(&p);
@@ -905,17 +905,10 @@ fn the_arm64_lifter_agrees_with_the_emulator_on_every_block() {
 #[test]
 #[ignore = "set BORER_DOGFOOD to a binary path to run this sweep"]
 fn the_mir_agrees_with_the_emulator_as_the_expressions_do() {
-    use borer_engine::analysis::decompile::{verify, verify_a64};
-    use borer_engine::isa::Isa;
+    use borer_engine::analysis::decompile::verify;
     let c = &*CORPUS;
     let (p, a, entries) = (&c.program, &c.analysis, c.entries());
-    let a64;
-    let (expr, mir) = if p.arch.isa() == Some(Isa::A64) {
-        a64 = verify_a64::verify(p, a, &entries, 1);
-        (&a64, verify_a64::verify_mir(p, a, &entries, 1))
-    } else {
-        (c.verified(), verify::verify_mir(p, a, &entries, 1))
-    };
+    let (expr, mir) = (c.verified(), verify::verify_mir(p, a, &entries, 1));
     let text = verify::verify_tsv(&mir);
     for line in text.lines().take_while(|l| l.starts_with('#')) {
         eprintln!("{line}");

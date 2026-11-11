@@ -32,22 +32,12 @@ use super::arch::A64;
 use super::expr::Key;
 use super::lift_a64::decode;
 use super::verify::{
-    Fact, Jcc, Near, Ran, Rng, Seeded, Verified, bench, functions, in_parts, registers, report,
-    run_block,
+    Fact, Jcc, Near, Ran, Rng, Seeded, Verified, bench, functions, registers, run_block,
 };
 use crate::analysis::{Analysis, BasicBlock};
 use crate::emulate::a64::Machine;
 use crate::isa::a64::{self, Flow, Insn, Mnemonic, Opnd, Reg};
 use crate::program::Program;
-
-/// The kinds of fact an arm64 block's check compares, in report order.
-const FACTS: [Fact; 5] = [
-    Fact::Register,
-    Fact::Vector,
-    Fact::Slot,
-    Fact::Store,
-    Fact::Branch,
-];
 
 /// The general registers compared and seeded, `x0` to `x30`, as the
 /// machine names them.
@@ -68,7 +58,7 @@ fn general() -> impl Iterator<Item = (&'static str, Key)> {
 }
 
 /// Checks the blocks of some functions of an arm64 program against the
-/// arm64 machine.
+/// arm64 machine, on the calling thread.
 ///
 /// # Arguments
 ///
@@ -77,82 +67,13 @@ fn general() -> impl Iterator<Item = (&'static str, Key)> {
 /// * `entries` - The functions to check.
 /// * `seed` - The starting state's seed; the same seed checks the same
 ///   way every time.
+/// * `mir` - Read the lifted values through MIR.
 ///
 /// # Returns
 ///
 /// What was compared and every disagreement; nothing when the program is
 /// not arm64 code.
-///
-/// # Examples
-///
-/// ```
-/// use borer_engine::analysis::Analysis;
-/// use borer_engine::analysis::decompile::verify_a64::verify;
-/// use borer_engine::program::{Arch, Program, Section};
-///
-/// // ASM: add x0, x0, #1 ; ret
-/// let code = [0x00, 0x04, 0x00, 0x91, 0xc0, 0x03, 0x5f, 0xd6];
-/// let section = Section::mapped(".text", 0x1000, 0, 0x1000, false, true);
-/// let mut bytes = code.to_vec();
-/// bytes.resize(0x1000, 0);
-/// let p = Program::raw(bytes, Arch::Arm64, 0, Some(0x1000), vec![section]);
-/// let a = Analysis::compute(&p);
-/// let v = verify(&p, &a, &[0x1000], 1);
-/// assert_eq!(v.checked, 1);
-/// assert!(v.mismatches.is_empty());
-/// ```
-#[must_use]
-pub fn verify(program: &Program, analysis: &Analysis, entries: &[u64], seed: u64) -> Verified {
-    in_parts(entries, |part| {
-        verify_some(program, analysis, part, seed, false)
-    })
-}
-
-/// Checks the arm64 lifter against the arm64 machine as [`verify`] does,
-/// reading every lifted value through MIR ([`super::mir`]).
-///
-/// # Arguments
-///
-/// * `program` - The loaded image.
-/// * `analysis` - The functions and their blocks.
-/// * `entries` - The functions to check.
-/// * `seed` - The starting state's seed.
-///
-/// # Returns
-///
-/// What was compared and every disagreement.
-#[must_use]
-pub fn verify_mir(program: &Program, analysis: &Analysis, entries: &[u64], seed: u64) -> Verified {
-    in_parts(entries, |part| {
-        verify_some(program, analysis, part, seed, true)
-    })
-}
-
-/// Renders an arm64 verification as a report.
-///
-/// A `#` summary, a line per kind of fact an arm64 block's check compares,
-/// the reasons blocks were not compared, the instructions the machine
-/// lacks, then a row per disagreement, at most
-/// [`super::verify::LISTED_MAX`].
-///
-/// # Arguments
-///
-/// * `v` - What [`verify`] found.
-#[must_use]
-pub fn verify_tsv(v: &Verified) -> String {
-    report(v, &FACTS)
-}
-
-/// [`verify`] over some functions on the calling thread.
-///
-/// # Arguments
-///
-/// * `program` - The loaded image.
-/// * `analysis` - The functions and their blocks.
-/// * `entries` - The functions to check.
-/// * `seed` - The starting state's seed.
-/// * `mir` - Read the lifted values through MIR.
-fn verify_some(
+pub(super) fn sweep(
     program: &Program,
     analysis: &Analysis,
     entries: &[u64],

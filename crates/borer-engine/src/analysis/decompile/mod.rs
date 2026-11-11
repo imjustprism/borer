@@ -90,10 +90,10 @@ mod unit;
 mod vars;
 mod vector;
 pub mod verify;
-pub mod verify_a32;
-pub mod verify_a64;
+mod verify_a32;
+mod verify_a64;
 mod verify_lanes;
-pub mod verify_rv;
+mod verify_rv;
 #[cfg(test)]
 mod verify_testing;
 mod warn;

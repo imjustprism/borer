@@ -28,22 +28,12 @@ use super::arch::A32;
 use super::expr::{Key, Ty};
 use super::lift_a32::decode_blocks;
 use super::verify::{
-    Fact, Jcc, Near, Ran, Rng, Seeded, State, Verified, bench, functions, in_parts, registers,
-    report, run_block,
+    Fact, Jcc, Near, Ran, Rng, Seeded, State, Verified, bench, functions, registers, run_block,
 };
 use crate::analysis::Analysis;
 use crate::emulate::a32::Machine;
 use crate::isa::a32::{DpKind, Flow, Insn, Op, Operand, Reg, SKIP, SP};
 use crate::program::Program;
-
-/// The kinds of fact an ARM32 block's check compares, in report order.
-const FACTS: [Fact; 5] = [
-    Fact::Register,
-    Fact::Vector,
-    Fact::Slot,
-    Fact::Store,
-    Fact::Branch,
-];
 
 /// The core registers compared and seeded, `r0` to `r12` and the link
 /// register, as the machine names them.
@@ -75,7 +65,7 @@ fn general() -> impl Iterator<Item = (&'static str, Key)> {
 }
 
 /// Checks the blocks of some functions of an ARM32 program against the
-/// ARM32 machine.
+/// ARM32 machine, on the calling thread.
 ///
 /// # Arguments
 ///
@@ -89,50 +79,12 @@ fn general() -> impl Iterator<Item = (&'static str, Key)> {
 ///
 /// What was compared and every disagreement; nothing when the program is
 /// not ARM32 code.
-///
-/// # Examples
-///
-/// ```
-/// use borer_engine::analysis::Analysis;
-/// use borer_engine::analysis::decompile::verify_a32::verify;
-/// use borer_engine::program::{Arch, Program, Section};
-///
-/// // ASM: add r0, r0, #1 ; bx lr
-/// let code = [0x01, 0x00, 0x80, 0xe2, 0x1e, 0xff, 0x2f, 0xe1];
-/// let section = Section::mapped(".text", 0x1000, 0, 0x1000, false, true);
-/// let mut bytes = code.to_vec();
-/// bytes.resize(0x1000, 0);
-/// let p = Program::raw(bytes, Arch::Arm, 0, Some(0x1000), vec![section]);
-/// let a = Analysis::compute(&p);
-/// let v = verify(&p, &a, &[0x1000], 1);
-/// assert_eq!(v.checked, 1);
-/// assert!(v.mismatches.is_empty());
-/// ```
-#[must_use]
-pub fn verify(program: &Program, analysis: &Analysis, entries: &[u64], seed: u64) -> Verified {
-    in_parts(entries, |part| verify_some(program, analysis, part, seed))
-}
-
-/// Renders an ARM32 verification as a report, as [`super::verify_a64`]
-/// renders an arm64 one.
-///
-/// # Arguments
-///
-/// * `v` - What [`verify`] found.
-#[must_use]
-pub fn verify_tsv(v: &Verified) -> String {
-    report(v, &FACTS)
-}
-
-/// [`verify`] over some functions on the calling thread.
-///
-/// # Arguments
-///
-/// * `program` - The loaded image.
-/// * `analysis` - The functions and their blocks.
-/// * `entries` - The functions to check.
-/// * `seed` - The starting state's seed.
-fn verify_some(program: &Program, analysis: &Analysis, entries: &[u64], seed: u64) -> Verified {
+pub(super) fn sweep(
+    program: &Program,
+    analysis: &Analysis,
+    entries: &[u64],
+    seed: u64,
+) -> Verified {
     let Some(mut pristine) = Machine::new(program, 0) else {
         return Verified::default();
     };

@@ -31,6 +31,11 @@
 //! ([`State::resolve_tls`]); the walk's own registers name the segment
 //! selector, no value the entry state holds, and stay counted. A pass
 //! says the lifting agreed on the seeds tried, not that it is right.
+//!
+//! [`verify`] is the one entry point: it picks the check by the program's
+//! instruction set. This module is x86's; arm64, ARM32 and RISC-V code is
+//! checked by the modules beside it, and what every check does alike is
+//! the driver's ([`driver`]).
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -170,16 +175,31 @@ pub enum Fact {
 }
 
 impl Fact {
-    /// Every kind, in report order.
-    const ALL: [Self; 7] = [
-        Self::Register,
-        Self::X87,
-        Self::Xmm,
-        Self::Segment,
-        Self::Slot,
-        Self::Store,
-        Self::Branch,
-    ];
+    /// Returns the kinds a block's check compares, in report order.
+    ///
+    /// # Arguments
+    ///
+    /// * `isa` - The instruction set checked; `None` answers x86's kinds.
+    fn kinds(isa: Option<Isa>) -> &'static [Self] {
+        match isa {
+            Some(Isa::A64 | Isa::A32 | Isa::Rv(_)) => &[
+                Self::Register,
+                Self::Vector,
+                Self::Slot,
+                Self::Store,
+                Self::Branch,
+            ],
+            Some(Isa::X86 { .. }) | None => &[
+                Self::Register,
+                Self::X87,
+                Self::Xmm,
+                Self::Segment,
+                Self::Slot,
+                Self::Store,
+                Self::Branch,
+            ],
+        }
+    }
 }
 
 impl std::fmt::Display for Fact {
@@ -257,6 +277,10 @@ pub struct Verified {
     pub undecided: usize,
     /// The disagreements.
     pub mismatches: Vec<Mismatch>,
+    /// The instruction set checked, whose kinds of fact a report lists
+    /// ([`verify_tsv`]); `None`, as a tally built by hand has it, lists
+    /// x86's.
+    pub isa: Option<Isa>,
 }
 
 /// What was compared of one kind of fact.
@@ -1014,7 +1038,13 @@ pub(super) fn statement_only(i: &Instruction) -> bool {
             && (i.op0_kind() == OpKind::Memory || i.op1_kind() == OpKind::Memory))
 }
 
-/// Checks the blocks of some functions against the emulator.
+/// Checks the blocks of some functions against the machine of the
+/// program's instruction set.
+///
+/// x86 code is checked against the emulator as this module describes;
+/// arm64, ARM32 and RISC-V code each against its own machine, by the
+/// module beside this one that is the instruction set's. A program of no
+/// known instruction set has nothing checked.
 ///
 /// # Arguments
 ///
@@ -1027,17 +1057,80 @@ pub(super) fn statement_only(i: &Instruction) -> bool {
 /// # Returns
 ///
 /// What was compared and every disagreement.
+///
+/// # Examples
+///
+/// An arm64 routine, checked against the arm64 machine:
+///
+/// ```
+/// use borer_engine::analysis::Analysis;
+/// use borer_engine::analysis::decompile::verify::verify;
+/// use borer_engine::program::{Arch, Program, Section};
+///
+/// // ASM: add x0, x0, #1 ; ret
+/// let code = [0x00, 0x04, 0x00, 0x91, 0xc0, 0x03, 0x5f, 0xd6];
+/// let section = Section::mapped(".text", 0x1000, 0, 0x1000, false, true);
+/// let mut bytes = code.to_vec();
+/// bytes.resize(0x1000, 0);
+/// let p = Program::raw(bytes, Arch::Arm64, 0, Some(0x1000), vec![section]);
+/// let a = Analysis::compute(&p);
+/// let v = verify(&p, &a, &[0x1000], 1);
+/// assert_eq!(v.checked, 1);
+/// assert!(v.mismatches.is_empty());
+/// ```
+///
+/// An ARM32 routine, against the ARM32 machine:
+///
+/// ```
+/// use borer_engine::analysis::Analysis;
+/// use borer_engine::analysis::decompile::verify::verify;
+/// use borer_engine::program::{Arch, Program, Section};
+///
+/// // ASM: add r0, r0, #1 ; bx lr
+/// let code = [0x01, 0x00, 0x80, 0xe2, 0x1e, 0xff, 0x2f, 0xe1];
+/// let section = Section::mapped(".text", 0x1000, 0, 0x1000, false, true);
+/// let mut bytes = code.to_vec();
+/// bytes.resize(0x1000, 0);
+/// let p = Program::raw(bytes, Arch::Arm, 0, Some(0x1000), vec![section]);
+/// let a = Analysis::compute(&p);
+/// let v = verify(&p, &a, &[0x1000], 1);
+/// assert_eq!(v.checked, 1);
+/// assert!(v.mismatches.is_empty());
+/// ```
+///
+/// A RISC-V routine, against the RISC-V machine:
+///
+/// ```
+/// use borer_engine::analysis::Analysis;
+/// use borer_engine::analysis::decompile::verify::verify;
+/// use borer_engine::program::{Arch, Program, Section};
+///
+/// // ASM: addi a0, a0, 1 ; ret
+/// let code = [0x05, 0x05, 0x82, 0x80];
+/// let section = Section::mapped(".text", 0x1000, 0, 0x1000, false, true);
+/// let mut bytes = code.to_vec();
+/// bytes.resize(0x1000, 0);
+/// let p = Program::raw(bytes, Arch::RiscV64, 0, Some(0x1000), vec![section]);
+/// let a = Analysis::compute(&p);
+/// let v = verify(&p, &a, &[0x1000], 1);
+/// assert_eq!(v.checked, 1);
+/// assert!(v.mismatches.is_empty());
+/// ```
 #[must_use]
 pub fn verify(program: &Program, analysis: &Analysis, entries: &[u64], seed: u64) -> Verified {
-    in_parts(entries, |part| {
+    let mut v = in_parts(entries, |part| {
         verify_some(program, analysis, part, seed, false)
-    })
+    });
+    v.isa = program.arch.isa();
+    v
 }
 
-/// Checks the lifter against the emulator as [`verify`] does, through MIR.
+/// Checks the lifter against the machine as [`verify`] does, through MIR.
 ///
 /// Every lifted value is lowered to width-explicit ops ([`super::mir`])
-/// and run by the MIR evaluator rather than read as an expression.
+/// and run by the MIR evaluator rather than read as an expression. ARM32
+/// and RISC-V code has no such reading yet, and is checked as [`verify`]
+/// checks it.
 ///
 /// # Arguments
 ///
@@ -1051,9 +1144,11 @@ pub fn verify(program: &Program, analysis: &Analysis, entries: &[u64], seed: u64
 /// What was compared and every disagreement.
 #[must_use]
 pub fn verify_mir(program: &Program, analysis: &Analysis, entries: &[u64], seed: u64) -> Verified {
-    in_parts(entries, |part| {
+    let mut v = in_parts(entries, |part| {
         verify_some(program, analysis, part, seed, true)
-    })
+    });
+    v.isa = program.arch.isa();
+    v
 }
 
 /// Checks some functions in parts, one thread per part, and adds up what
@@ -2137,7 +2232,8 @@ impl<M: Bench, R> Ran<'_, M, R> {
     }
 }
 
-/// [`verify`] over some functions on the calling thread.
+/// [`verify`] over some functions on the calling thread, by the check of
+/// the program's instruction set.
 ///
 /// # Arguments
 ///
@@ -2145,7 +2241,8 @@ impl<M: Bench, R> Ran<'_, M, R> {
 /// * `analysis` - The functions and their blocks.
 /// * `entries` - The functions to check.
 /// * `seed` - The starting state's seed.
-/// * `mir` - Read the lifted values through MIR.
+/// * `mir` - Read the lifted values through MIR, where the instruction
+///   set's check can: x86 and arm64.
 fn verify_some(
     program: &Program,
     analysis: &Analysis,
@@ -2153,40 +2250,37 @@ fn verify_some(
     seed: u64,
     mir: bool,
 ) -> Verified {
-    let Some(sweep) = Sweep::new(program, seed, mir) else {
-        return Verified::default();
-    };
-    functions(program, analysis, entries, |ctx, f, out| {
-        for block in &f.blocks {
-            let ran = sweep.run(ctx, f.entry, block, out);
-            out.block(ran, |ran, out| ran.compare(out));
+    match program.arch.isa() {
+        Some(Isa::X86 { .. }) => {
+            let Some(sweep) = Sweep::new(program, seed, mir) else {
+                return Verified::default();
+            };
+            functions(program, analysis, entries, |ctx, f, out| {
+                for block in &f.blocks {
+                    let ran = sweep.run(ctx, f.entry, block, out);
+                    out.block(ran, |ran, out| ran.compare(out));
+                }
+            })
         }
-    })
+        Some(Isa::A64) => super::verify_a64::sweep(program, analysis, entries, seed, mir),
+        Some(Isa::A32) => super::verify_a32::sweep(program, analysis, entries, seed),
+        Some(Isa::Rv(_)) => super::verify_rv::sweep(program, analysis, entries, seed),
+        None => Verified::default(),
+    }
 }
 
 /// Renders a verification as a report.
 ///
-/// A `#` summary, a line per kind of fact with what was compared, the
-/// reasons blocks were not compared, the instructions the emulator lacks
-/// by how often they stopped it, then a row per disagreement, at most
-/// [`LISTED_MAX`].
+/// A `#` summary, a line per kind of fact the instruction set's check
+/// compares with what was compared, the reasons blocks were not compared,
+/// the instructions the machine lacks by how often they stopped it, then
+/// a row per disagreement, at most [`LISTED_MAX`].
 ///
 /// # Arguments
 ///
 /// * `v` - What [`verify`] found.
 #[must_use]
 pub fn verify_tsv(v: &Verified) -> String {
-    report(v, &Fact::ALL)
-}
-
-/// Renders a verification as a report with a line for each of `kinds`.
-///
-/// # Arguments
-///
-/// * `v` - What a verification found.
-/// * `kinds` - The kinds of fact the instruction set's check compares, in
-///   report order.
-pub(super) fn report(v: &Verified, kinds: &[Fact]) -> String {
     let skipped: usize = v.skipped.values().sum();
     let mut out = format!(
         "# verified {} functions, {} blocks: {} checked against the emulator, {skipped} not checked, {} disagreements\n",
@@ -2195,7 +2289,7 @@ pub(super) fn report(v: &Verified, kinds: &[Fact]) -> String {
         v.checked,
         v.mismatches.len()
     );
-    for &fact in kinds {
+    for &fact in Fact::kinds(v.isa) {
         let t = v.facts.get(&fact).copied().unwrap_or_default();
         let _ = write!(
             out,

@@ -12,7 +12,7 @@
 
 use borer_engine::analysis::decompile::decompile;
 use borer_engine::analysis::decompile::replay::{Claim, replay_function, replay_tsv};
-use borer_engine::analysis::decompile::verify_a64::{verify, verify_tsv};
+use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::program::{Arch, Feature, Program, Section, Symbol, SymbolKind};
 

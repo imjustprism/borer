@@ -15,7 +15,7 @@
 )]
 
 use borer_engine::analysis::Analysis;
-use borer_engine::analysis::decompile::verify_rv::{verify, verify_tsv};
+use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
 use borer_engine::isa::rv::{Xlen, decode, text};
 use borer_engine::program::Arch;
 

@@ -33,22 +33,13 @@ use super::expr::Key;
 use super::floats::agree;
 use super::lift_rv::{decode_blocks, float_ty};
 use super::verify::{
-    Fact, Jcc, Near, Ran, Rng, Seeded, State, Verified, bench, float_bits, functions, in_parts,
-    low, registers, report, run_block,
+    Fact, Jcc, Near, Ran, Rng, Seeded, State, Verified, bench, float_bits, functions, low,
+    registers, run_block,
 };
 use crate::analysis::Analysis;
 use crate::emulate::rv::Machine;
 use crate::isa::rv::{self, Alu, Flow, Fmt, Insn, Op, Reg, SP};
 use crate::program::Program;
-
-/// The kinds of fact a RISC-V block's check compares, in report order.
-const FACTS: [Fact; 5] = [
-    Fact::Register,
-    Fact::Vector,
-    Fact::Slot,
-    Fact::Store,
-    Fact::Branch,
-];
 
 /// The integer registers compared and seeded: every one but `x0` and the
 /// stack pointer, each as the machine names it and as the lifter keys it.
@@ -61,7 +52,7 @@ fn general() -> impl Iterator<Item = (&'static str, Key)> {
 bench!(Machine<'_>, "sp");
 
 /// Checks the blocks of some functions of a RISC-V program against the
-/// RISC-V machine.
+/// RISC-V machine, on the calling thread.
 ///
 /// # Arguments
 ///
@@ -75,50 +66,12 @@ bench!(Machine<'_>, "sp");
 ///
 /// What was compared and every disagreement; nothing when the program is
 /// not RISC-V code.
-///
-/// # Examples
-///
-/// ```
-/// use borer_engine::analysis::Analysis;
-/// use borer_engine::analysis::decompile::verify_rv::verify;
-/// use borer_engine::program::{Arch, Program, Section};
-///
-/// // ASM: addi a0, a0, 1 ; ret
-/// let code = [0x05, 0x05, 0x82, 0x80];
-/// let section = Section::mapped(".text", 0x1000, 0, 0x1000, false, true);
-/// let mut bytes = code.to_vec();
-/// bytes.resize(0x1000, 0);
-/// let p = Program::raw(bytes, Arch::RiscV64, 0, Some(0x1000), vec![section]);
-/// let a = Analysis::compute(&p);
-/// let v = verify(&p, &a, &[0x1000], 1);
-/// assert_eq!(v.checked, 1);
-/// assert!(v.mismatches.is_empty());
-/// ```
-#[must_use]
-pub fn verify(program: &Program, analysis: &Analysis, entries: &[u64], seed: u64) -> Verified {
-    in_parts(entries, |part| verify_some(program, analysis, part, seed))
-}
-
-/// Renders a RISC-V verification as a report, as [`super::verify_a32`]
-/// renders an ARM32 one.
-///
-/// # Arguments
-///
-/// * `v` - What [`verify`] found.
-#[must_use]
-pub fn verify_tsv(v: &Verified) -> String {
-    report(v, &FACTS)
-}
-
-/// [`verify`] over some functions on the calling thread.
-///
-/// # Arguments
-///
-/// * `program` - The loaded image.
-/// * `analysis` - The functions and their blocks.
-/// * `entries` - The functions to check.
-/// * `seed` - The starting state's seed.
-fn verify_some(program: &Program, analysis: &Analysis, entries: &[u64], seed: u64) -> Verified {
+pub(super) fn sweep(
+    program: &Program,
+    analysis: &Analysis,
+    entries: &[u64],
+    seed: u64,
+) -> Verified {
     let Some(pristine) = Machine::new(program, 0) else {
         return Verified::default();
     };
