@@ -18,7 +18,9 @@
 //! register, zero for `x0`, or the immediate. The float registers are
 //! random too, those the block reads as a single first boxed in ones, and
 //! compare at the width the lifter holds them at, any NaN agreeing with
-//! any NaN. A block
+//! any NaN. A register's bare name in a lifted value is the float the
+//! block first reads it as, whatever width another block declared it at.
+//! A block
 //! holding an instruction either side does not model is
 //! not checked. A pass says the lifting agreed on the seeds tried, not
 //! that it is right.
@@ -28,7 +30,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::expr::Key;
 use super::floats::agree;
 use super::lift::{BlockFacts, Env, Pass};
-use super::lift_rv::{decode_blocks, exec_block_rv};
+use super::lift_rv::{decode_blocks, exec_block_rv, float_ty};
 use super::verify::{
     Bench, Fact, GOLDEN, Jcc, Near, Probe, Ran, Read, Rng, STACK_WORDS, State, Verified,
     float_bits, in_parts, low, report,
@@ -220,15 +222,22 @@ fn straight_line(instrs: &[Insn]) -> (Vec<Insn>, Option<Insn>, Option<u64>) {
     (line, None, end)
 }
 
-/// Returns the float registers a block reads as a single before it
-/// writes them, which the seeds then box in ones: a single not boxed reads
-/// as the canonical NaN on the machine.
+/// Returns the format a block first reads each float register in, before
+/// it writes it: the float the register holds as the block begins.
+///
+/// The seeds box a single in ones, since a single not boxed reads as the
+/// canonical NaN on the machine, and the evaluator reads the register's
+/// name as that float ([`State::reg_ty`]). The lifter leaves the name bare
+/// and declares the register once for the whole function, at the width its
+/// first read anywhere has, which is not the float every block finds in it:
+/// a call's single result arrives in a register an earlier block read as a
+/// double.
 ///
 /// # Arguments
 ///
 /// * `line` - The block's instructions.
-fn singles(line: &[Insn]) -> BTreeSet<u8> {
-    let mut first = BTreeSet::new();
+fn first_reads(line: &[Insn]) -> BTreeMap<u8, Fmt> {
+    let mut first = BTreeMap::new();
     let mut seen = BTreeSet::new();
     for i in line {
         let Op::Float(f) = i.op else {
@@ -239,9 +248,9 @@ fn singles(line: &[Insn]) -> BTreeSet<u8> {
         for r in regs.reads {
             if let Reg::F(n) = r
                 && seen.insert(n)
-                && fmt == Some(Fmt::S)
+                && let Some(fmt) = fmt
             {
-                first.insert(n);
+                first.insert(n, fmt);
             }
         }
         for r in regs.writes {
@@ -357,7 +366,7 @@ fn run<'p>(
         mir: None,
     };
     let near = comparands(line.iter().chain(&jcc));
-    plant(&mut emu, &mut st, &mut rng, (&near, &singles(&line)));
+    plant(&mut emu, &mut st, &mut rng, (&near, &first_reads(&line)));
     emu.stop_at(Some(end));
     let begin = instrs.first().map_or(start, |i| i.va);
     let run = emu.run(begin);
@@ -421,22 +430,23 @@ fn run<'p>(
 ///
 /// The integer registers are random, a register the block compares mostly
 /// next to what it is compared with; the float registers are random, those
-/// the block reads as a single first boxed in ones; random words fill the
-/// stack around the stack pointer.
+/// the block reads as a single first boxed in ones, and each one the block
+/// reads is the float of its first read to the evaluator; random words
+/// fill the stack around the stack pointer.
 ///
 /// # Arguments
 ///
 /// * `emu` - The machine.
 /// * `st` - The evaluator's state.
 /// * `rng` - The seeded generator.
-/// * `(near, singles)` - The registers to start near what they are
-///   compared with ([`comparands`]) and the float registers read as
-///   singles ([`singles`]).
+/// * `(near, held)` - The registers to start near what they are compared
+///   with ([`comparands`]) and the format each float register is first
+///   read in ([`first_reads`]).
 fn plant(
     emu: &mut Machine<'_>,
     st: &mut State<'_, Machine<'_>>,
     rng: &mut Rng,
-    (near, singles): (&BTreeMap<Key, Near>, &BTreeSet<u8>),
+    (near, held): (&BTreeMap<Key, Near>, &BTreeMap<u8, Fmt>),
 ) {
     let wide = st.width == 64;
     let word = if wide { u64::MAX } else { 0xffff_ffff };
@@ -451,14 +461,19 @@ fn plant(
         st.regs.insert(key, v);
     }
     for n in 0..32 {
+        let key = Key::Rv(Reg::F(n));
+        let fmt = held.get(&n).copied();
         let v = rng.next();
-        let v = if singles.contains(&n) {
+        let v = if fmt == Some(Fmt::S) {
             0xffff_ffff_0000_0000 | (v & 0xffff_ffff)
         } else {
             v
         };
         emu.set_register(rv::name(Reg::F(n)), v);
-        st.regs.insert(Key::Rv(Reg::F(n)), v);
+        st.regs.insert(key, v);
+        if let Some(fmt) = fmt {
+            st.reg_ty.insert(key, float_ty(fmt));
+        }
     }
     let step: i64 = if wide { 8 } else { 4 };
     for w in -STACK_WORDS..STACK_WORDS {

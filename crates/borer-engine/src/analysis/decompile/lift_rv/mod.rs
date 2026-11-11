@@ -23,6 +23,7 @@ mod live;
 mod shape;
 mod step;
 
+pub(in crate::analysis::decompile) use float::ty as float_ty;
 pub(in crate::analysis::decompile) use live::effects;
 pub(in crate::analysis::decompile) use shape::{
     arg_reg, built as built_shape, callee_shape, entry_env, param_types, ret_lane, shape,

@@ -45,7 +45,7 @@ const DYN: u8 = 7;
 /// # Arguments
 ///
 /// * `fmt` - The format.
-fn ty(fmt: Fmt) -> Ty {
+pub(in crate::analysis::decompile) fn ty(fmt: Fmt) -> Ty {
     match fmt {
         Fmt::S => Ty::F32,
         Fmt::D => Ty::F64,

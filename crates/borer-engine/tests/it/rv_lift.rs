@@ -277,6 +277,34 @@ const ROUNDED_ONCE: &[(u32, &str)] = &[
     (0xe005_05d3, "fmv.x.w a1, fa0"),
 ];
 
+/// A float converted in the register it arrived in agrees with the
+/// emulator.
+///
+/// The register is only its name in the lifted value, and the width it was
+/// read at is what says the cast converts a float: a double narrowed, a
+/// single widened, not the integer its bits happen to be.
+#[test]
+fn a_float_converted_where_it_arrived_agrees_with_the_emulator() {
+    agrees(&[(0x4015_7553, "fcvt.s.d fa0, fa0")]);
+    agrees(&[(0x4205_0553, "fcvt.d.s fa0, fa0")]);
+}
+
+/// A single widened in a register an earlier block read as a double
+/// agrees with the emulator.
+///
+/// The first block declares `fa0` a double for the whole function. The
+/// last finds a single in it, as after a call that returns one: its name
+/// there is the single that block reads, not the declared double.
+#[test]
+fn a_single_in_a_register_declared_a_double_agrees_with_the_emulator() {
+    agrees(&[
+        (0x02b5_7653, "fadd.d fa2, fa0, fa1"),
+        (0x00b5_1463, "bne a0, a1, 0x10008"),
+        (0x0010_0513, "li a0, 1"),
+        (0x4205_0553, "fcvt.d.s fa0, fa0"),
+    ]);
+}
+
 /// A 64-bit integer converted to a single rounds once, as the machine
 /// does.
 #[test]
