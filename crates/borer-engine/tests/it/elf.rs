@@ -915,6 +915,49 @@ fn a_relocatable_object_says_why_nothing_is_mapped() {
     );
 }
 
+/// An image linked at address 0 keeps the section that starts there.
+///
+/// Flash or RAM begins at 0 on many microcontrollers and in a boot ROM, so
+/// the linker places `.text` at address 0. The loader took a section
+/// address of 0 for "no segment maps it" and left the section out: the
+/// image loaded with no code. The ALLOC flag says what is mapped, so
+/// `.text` at 0 stays and a `.comment` no segment maps does not join it,
+/// whatever address its header states.
+#[test]
+fn a_section_at_address_zero_is_mapped() {
+    use crate::elfgen::{self, AX, EM_X86_64, ET_EXEC, PROGBITS, Sec, WA};
+    let mut text = vec![0xccu8; 0x20];
+    text[0x10..0x16].copy_from_slice(&[
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax,1
+        0xc3, // ASM: ret
+    ]);
+    let mut bytes = elfgen::build(
+        ET_EXEC,
+        EM_X86_64,
+        0x10,
+        &[
+            Sec::new(".text", PROGBITS, AX, 0x1000, text),
+            Sec::new(".data", PROGBITS, WA, 0x2000, vec![7; 8]),
+            Sec::new(".comment", PROGBITS, 0, 0x3000, b"cc 1.0\0".to_vec()),
+        ],
+    );
+    let shoff = bytes[0x28..0x30].try_into().map(u64::from_le_bytes);
+    let text_addr = usize::try_from(shoff.expect("eight bytes")).expect("fits") + 64 + 16;
+    bytes[text_addr..text_addr + 8].fill(0);
+    let p = Program::from_bytes(std::path::PathBuf::from("zero.elf"), bytes).expect("loads");
+    let mapped: Vec<(&str, u64, bool)> = p
+        .sections
+        .iter()
+        .map(|s| (s.name.as_str(), s.va.0, s.executable))
+        .collect();
+    assert_eq!(mapped, [(".text", 0, true), (".data", 0x2000, false)]);
+    assert_eq!(p.read_va(0x10, 1), Some(&[0xb8][..]));
+    let a = Analysis::compute(&p);
+    assert!(a.function(0x10).is_some(), "{:x?}", a.functions);
+    let text = decompile(&p, &a, &Overlay::default(), 0x10).expect("the function decompiles");
+    assert!(text.contains("return 1;"), "{text}");
+}
+
 /// A symbol running past the top of the address space adds no range.
 ///
 /// A fuzzed file's local function at `u64::MAX - 1` with a size overflowed

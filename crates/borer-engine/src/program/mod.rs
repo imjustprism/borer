@@ -747,9 +747,13 @@ impl Program {
     /// [`SymbolKind::Data`] symbols where a non-executable section maps
     /// them ([`crate::pdb::apply`]); the record itself is kept as
     /// [`Program::pdb_record`]. ELF:
-    /// non-allocated sections (no virtual address) are skipped, `SHT_NOBITS`
-    /// sections get a zero file size, and the ALLOC flag stands in for
-    /// readability since ELF has no explicit read bit; imports take the GOT
+    /// a section maps when its flags say it occupies memory (`SHF_ALLOC`),
+    /// at the address it states, address 0 included, where an image linked
+    /// at 0 keeps its first section; one without the flag is skipped
+    /// whatever address it states, and so is every section of a relocatable
+    /// object, none of which has a load address. `SHT_NOBITS` sections get a
+    /// zero file size, and a mapped section is readable, since ELF has no
+    /// explicit read bit; imports take the GOT
     /// slot their PLT or `GLOB_DAT` relocation fills, `.symtab` functions
     /// become [`SymbolKind::Local`] symbols and, when sized, function ranges,
     /// and every `.eh_frame` FDE whose start lies in executable code outside
@@ -1076,14 +1080,12 @@ impl Program {
 
                 /// `SHF_WRITE`.
                 const WRITE: u64 = 0x1;
-                /// `SHF_ALLOC`: mapped, hence readable (ELF has no read bit).
-                const ALLOC: u64 = 0x2;
                 /// `SHF_EXECINSTR`.
                 const EXEC: u64 = 0x4;
                 for sh in &elf.section_headers {
                     let name = elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("");
                     let nobits = sh.sh_type == goblin::elf::section_header::SHT_NOBITS;
-                    if sh.sh_addr == 0 {
+                    if !sh.is_alloc() || elf.header.e_type == goblin::elf::header::ET_REL {
                         if name.starts_with(".debug_") && !nobits {
                             unmapped.push(Section {
                                 name: name.to_owned(),
@@ -1104,7 +1106,7 @@ impl Program {
                         vsize: sh.sh_size,
                         file_off: FileOff(sh.sh_offset),
                         file_size: if nobits { 0 } else { sh.sh_size },
-                        readable: sh.sh_flags & ALLOC != 0,
+                        readable: true,
                         writable: sh.sh_flags & WRITE != 0,
                         executable: sh.sh_flags & EXEC != 0,
                     });

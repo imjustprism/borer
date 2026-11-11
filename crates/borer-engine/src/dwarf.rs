@@ -1545,10 +1545,10 @@ pub struct Debug {
 
 /// Reads what a program's debug information states.
 ///
-/// An ELF's `.debug_*` sections carry no address (no segment maps them),
+/// An ELF's `.debug_*` sections occupy no memory (no segment maps them),
 /// so the loader keeps them out of the mapped table and hands them over as
-/// `unmapped`: a `-g` build's DWARF lives there, and only a few producers
-/// give it an address.
+/// `unmapped`, whether or not their headers state an address: a `-g`
+/// build's DWARF lives there.
 ///
 /// # Arguments
 ///
