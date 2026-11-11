@@ -4,7 +4,7 @@
     python scripts/gate.py             format, then verify everything
     python scripts/gate.py --check     verify only (what CI runs; formatting must already be clean,
                                        a missing tool fails instead of skipping, nothing is cached)
-    python scripts/gate.py --fast      skip the slow tail (smoke, deny, doc, dogfood)
+    python scripts/gate.py --fast      skip the slow tail (smoke, deny, doc, dogfood, bench)
     python scripts/gate.py --no-cache  rerun every step, passed before or not
 
 Helpers are grouped under this directory. `check` fails when a generated
@@ -21,7 +21,8 @@ seconds (typos, the comment check, ruff check and format, the type library
 the duplicate scan (scripts/check/dupes.py) and cargo deny (offline subset)); cargo clippy -D
 warnings and then cargo doc with warnings as errors (private items
 included); the debug build, cargo test and the doctests; the corpus and
-sweep builds, then the dogfood sweeps over real binaries; and, once the
+sweep builds, then the dogfood sweeps over real binaries and, after every
+heavy step, the decompile time bars (`timings` in tests/bench.rs); and, once the
 builds they drive are done, the readability benchmark against its baseline
 (scripts/run/readability.py), the golden diff of the `index` output
 (scripts/run/golden.py), scripts/run/smoke.py and scripts/run/agent_eval.py.
@@ -543,7 +544,7 @@ def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[St
             ["cargo", "build", "-p", "borer", "--profile", "corpus"],
             {"CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER": "link.exe"},
         ),
-        Step("build sweep", [*sweep, "--no-run"]),
+        Step("build sweep", [*sweep, "--test", "bench", "--no-run"]),
         Step(
             "dogfood",
             [*sweep, "--", "--ignored"]
@@ -595,7 +596,8 @@ def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[St
     # The corpus is x86-64 only. A 32-bit binary with x87 math catches what
     # it cannot: an fxch fix landed green here and broke 63 blocks of
     # d3dx9_43, which every 32-bit Windows carries the like of in msvcrt.
-    x86 = os.path.join(os.environ.get("SYSTEMROOT", r"C:\Windows"), "SysWOW64", "msvcrt.dll")
+    system = os.environ.get("SYSTEMROOT", r"C:\Windows")
+    x86 = os.path.join(system, "SysWOW64", "msvcrt.dll")
     if os.path.isfile(x86):
         rest.append(
             Step(
@@ -674,6 +676,26 @@ def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[St
             needs=("examples", "build"),
         ),
     ]
+    # The decompile time bars (`timings` in tests/bench.rs: the p95 and the
+    # slowest function) on the notepad every Windows carries, in the sweep's
+    # optimized build. It waits for every heavy step: beside one, the time
+    # it reads is the machine's load, not the engine's speed.
+    notepad = os.path.join(system, "System32", "notepad.exe")
+    if os.path.isfile(notepad):
+        bench = ["cargo", "test", "-p", "borer-engine", "--profile", "sweep", "--test", "bench"]
+        rest.append(
+            Step(
+                "bench",
+                [*bench, "--", "--ignored", "--exact", "timings", "--nocapture"],
+                {"BORER_BENCH": notepad},
+                inputs=RUST,
+                extra=(notepad,),
+                needs=("build sweep", "test", "dogfood text", "dogfood x86", "smoke"),
+                heavy=True,
+            )
+        )
+    else:
+        print(f"[skip] bench: no {notepad} on this machine")
     return first, rest
 
 

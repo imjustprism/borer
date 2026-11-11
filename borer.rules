@@ -63,7 +63,7 @@ important:
   performance:
   - Borrow; never clone to calm the borrow checker. Iterators over index loops, no needless collect, with_capacity when the size is known.
   - 'Cap scans by design: sample, window, page.'
-  - 'Bars: a load takes at most 8 bytes of heap per file byte (tests/hostile.rs, gate); a cold decompile is at most 25 ms at p95 and 5 s at worst per function on notepad.exe (tests/bench.rs timings); cleanup never spends its pass budget (dogfood sweep); a request stops at its deadline (BORER_DEADLINE_SECS, 300 s). A perf change shows bench.rs before and after.'
+  - 'Bars: a load takes at most 8 bytes of heap per file byte (tests/hostile.rs, gate); a cold decompile is at most 25 ms at p95 and 5 s at worst per function on notepad.exe (tests/bench.rs timings, gate); cleanup never spends its pass budget (dogfood sweep); a request stops at its deadline (BORER_DEADLINE_SECS, 300 s). A perf change shows bench.rs before and after.'
   portability:
   - Windows, Linux and macOS on x64 and arm64 hosts build and pass CI. No host-endian byte conversions (host_endian_bytes); paths go through Path.
   testing:
