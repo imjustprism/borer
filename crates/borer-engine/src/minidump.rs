@@ -255,19 +255,19 @@ impl<'a> Streams<'a> {
         // exception record, then the context location.
         let (size, rva) = (u32_le(bytes, at + 160)?, u32_le(bytes, at + 164)?);
         let rva = usize::try_from(rva).ok()?;
-        let rip = match arch {
-            Arch::X86_64 => X64_RIP,
-            Arch::X86 => X86_EIP,
+        let (rip, width) = match arch {
+            Arch::X86_64 => (X64_RIP, 8),
+            Arch::X86 => (X86_EIP, 4),
             _ => return None,
         };
-        let size = usize::try_from(size).ok()?;
-        if size < rip + 8 {
+        if usize::try_from(size).ok()? < rip + width {
             return None;
         }
-        let end = rva.checked_add(rip)?.checked_add(8)?;
-        (end <= bytes.len())
-            .then(|| u64_le(bytes, rva + rip))
-            .flatten()
+        let at = rva.checked_add(rip)?;
+        match arch {
+            Arch::X86 => u32_le(bytes, at).map(u64::from),
+            _ => u64_le(bytes, at),
+        }
     }
 
     /// The protections the `MemoryInfoListStream` states, read once and

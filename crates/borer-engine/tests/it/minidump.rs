@@ -623,6 +623,18 @@ fn a_context_past_the_files_end_leaves_no_entry() {
     assert_eq!(p.entry, None);
 }
 
+/// An x86 dump stops at the context's 32-bit `Eip`: the four bytes after
+/// it are `SegCs`, no part of the address.
+#[test]
+fn an_x86_dump_stops_at_eip() {
+    let mut d = dump();
+    u16_at(&mut d, 0xd0, 0);
+    u32_at(&mut d, 0x200 + 0xb8, 0x7ff0_0010);
+    u32_at(&mut d, 0x200 + 0xbc, 0x23);
+    let p = Program::from_bytes("x86.dmp".into(), d).expect("loads");
+    assert_eq!(p.entry, Some(0x7ff0_0010));
+}
+
 /// An exception context too small to hold the architecture's stop
 /// register leaves no entry: it states nothing readable.
 #[test]
