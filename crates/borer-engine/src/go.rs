@@ -127,9 +127,10 @@ impl Pclntab {
     ///
     /// # Returns
     ///
-    /// The `(file, line)` the runs at the entry state, or `None` when
-    /// the table does not list `entry`, predates the file table, or its
-    /// runs do not decode.
+    /// The `(file, line)` the runs at the entry state, the file made safe
+    /// for a line ([`crate::text::one_line`]), or `None` when the table
+    /// does not list `entry`, predates the file table, or its runs do not
+    /// decode.
     #[must_use]
     pub fn source_of(&self, bytes: &[u8], entry: u64) -> Option<(String, u32)> {
         let l = self.lines?;
@@ -184,7 +185,7 @@ impl Pclntab {
             l.filetab
                 .checked_add(saturating_usize(u64::from(file_off)))?,
         )?;
-        Some((path.to_owned(), u32::try_from(line).ok()?))
+        Some((crate::text::one_line(path), u32::try_from(line).ok()?))
     }
 
     /// Renders the table as a summary line.

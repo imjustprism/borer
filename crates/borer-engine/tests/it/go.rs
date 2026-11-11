@@ -375,6 +375,28 @@ fn a_table_states_the_source_its_functions_start_at() {
     assert!(text.contains("// source: main.go:20\n"), "{text}");
 }
 
+/// The file a table names cannot reorder the line that cites it.
+///
+/// A function's name is escaped as the table is read, but the file its
+/// runs name is read at the first decompile and was cited as the table
+/// spells it. The table's reader refuses a control character, so no line
+/// break gets through; a right-to-left override did, and printed the rest
+/// of the line backwards. The table is the sound one with `main.go`
+/// rewritten in place.
+#[test]
+fn a_source_file_s_name_cannot_reorder_its_line() {
+    let mut table = sourced([0xf1, 0xff, 0xff, 0xff], false, &SRCS, 0x31);
+    let at = table
+        .windows(8)
+        .position(|w| w == b"main.go\0")
+        .expect("the file is named");
+    table[at..at + 7].copy_from_slice("\u{202e}a.go".as_bytes());
+    let p = go_elf(".gopclntab", 0, &table);
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), MAIN).expect("main.main decompiles");
+    assert!(text.contains("// source: \\x202ea.go:20\n"), "{text}");
+}
+
 /// The 1.16 layout states sources too, from its pointer-width rows and
 /// records, and still names every function it lists.
 #[test]
