@@ -887,28 +887,26 @@ impl BorerServer {
     }
 
     /// Proposes a structure from a pointer's accesses, or with `apply=Name`
-    /// defines it as a user struct and types the parameter the pointer
-    /// arrives in ([`borer_engine::analysis::apply::from_pointer`]): a dry
-    /// run unless the spec also says `dry_run=false`, and then the session
-    /// ledger lists the read among its changes when it left the overlay
-    /// other than it found it, as it lists a tool's.
+    /// plans it as a user struct typing the parameter the pointer arrives
+    /// in ([`borer_engine::analysis::apply::from_pointer`]).
+    ///
+    /// A read applies nothing, whatever `dry_run` the spec says: the plan
+    /// names the `set_type` calls that state it ([`plan_calls`]).
     ///
     /// # Arguments
     ///
-    /// * `spec` - `<address>[,<register>][,apply=<Name>][,dry_run=false]`.
+    /// * `spec` - `<address>[,<register>][,apply=<Name>]`.
     ///
     /// # Errors
     ///
     /// When no binary is loaded, it has no code analysis, or the spec or
-    /// the struct to apply is refused.
+    /// the struct to plan is refused.
     pub(crate) fn layout_text(&self, spec: &str) -> Result<String, ErrorData> {
         let mut apply: Option<&str> = None;
-        let mut dry = true;
         let mut kept: Vec<&str> = Vec::new();
         for part in spec.split(',') {
             match part.trim() {
-                "dry_run=false" => dry = false,
-                "dry_run=true" => dry = true,
+                "dry_run=false" | "dry_run=true" => {}
                 t => match t.strip_prefix("apply=") {
                     Some(name) => apply = Some(name),
                     None => kept.push(part),
@@ -920,15 +918,16 @@ impl BorerServer {
             None => render::layout_tsv(p, a, o, &spec),
             Some(name) => {
                 let plan = borer_engine::analysis::apply::from_pointer(p, a, o, &spec, name)?;
-                let before = (!dry).then(|| read_lock(&self.overlay).fingerprint());
-                let said = self.answer_plan(plan, a, o, dry);
-                if before.is_some_and(|was| read_lock(&self.overlay).fingerprint() != was) {
-                    lock(&self.ledger).changed(
-                        "resources/read",
-                        &format!("borer://layout/{spec},apply={name},dry_run=false"),
-                    );
+                let mut out = format!(
+                    "plan: struct {} and {} prototype(s), nothing applied by a read; send the set_type calls below and decompile names the fields:\n",
+                    plan.name,
+                    plan.prototypes.len()
+                );
+                for line in plan.describe(a, o).into_iter().chain(plan_calls(&plan)) {
+                    out.push_str(&line);
+                    out.push('\n');
                 }
-                Ok(said)
+                Ok(out)
             }
         })
     }
@@ -2032,6 +2031,36 @@ impl BorerServer {
     }
 }
 
+/// Spells the `set_type` calls that state a layout's plan, ready to send.
+///
+/// # Arguments
+///
+/// * `plan` - The plan a `borer://layout/...,apply=<Name>` read made.
+///
+/// # Returns
+///
+/// One line per call, `set_type` and its arguments as JSON with
+/// `dry_run` false: the struct first, then each prototype.
+fn plan_calls(plan: &borer_engine::analysis::apply::Plan) -> Vec<String> {
+    let mut calls = Vec::new();
+    if let borer_engine::analysis::utypes::UserType::Struct(s) = &plan.ty {
+        let fields: Vec<String> = s
+            .fields
+            .iter()
+            .map(|(off, f)| format!("{off:#x}:{}:{}", f.name, f.ty.spell()))
+            .collect();
+        calls.push(serde_json::json!({
+            "name": plan.name, "fields": fields, "size": s.size, "dry_run": false,
+        }));
+    }
+    calls.extend(plan.prototypes.iter().map(|(entry, proto)| {
+        serde_json::json!({
+            "address": format!("{entry:#x}"), "type": proto.spell(), "dry_run": false,
+        })
+    }));
+    calls.iter().map(|c| format!("set_type {c}")).collect()
+}
+
 /// One `borer://enums` row: the function, its entry, `enum` and the
 /// table's name, then its members.
 ///
@@ -2410,7 +2439,9 @@ mod tests {
                     .iter()
                     .map(|t| super::example(t.2, Some(&program))),
             )
-            .chain(["borer://layout/0x1000,apply=Rec".to_owned()]);
+            .chain(
+                ["", ",dry_run=false"].map(|told| format!("borer://layout/0x1000,apply=Rec{told}")),
+            );
         for uri in uris {
             let (first, second) = (server.read_uri(&uri), server.read_uri(&uri));
             assert_eq!(first.is_ok(), second.is_ok(), "{uri}");

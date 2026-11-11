@@ -19,7 +19,7 @@ impl BorerServer {
     /// or, applied, what it did.
     ///
     /// The struct and the prototypes are written to the overlay unless
-    /// `dry`, as `class_layout` and `borer://layout/...,apply=<Name>` do.
+    /// `dry`, as `class_layout` does.
     ///
     /// # Arguments
     ///

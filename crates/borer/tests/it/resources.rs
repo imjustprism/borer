@@ -177,10 +177,10 @@ fn the_session_ledger_lists_what_the_session_did() {
 /// left it as it was.
 ///
 /// The ledger went by the tool's name and its `dry_run` alone: an applied
-/// `class_layout` was not among the names, a layout applied by reading
-/// `borer://layout` is no tool call, and a script told `dry_run=false`
-/// that proposed nothing was listed as a change. A layout read a second
-/// time applies what is already there, and is no change either.
+/// `class_layout` was not among the names, and a script told
+/// `dry_run=false` that proposed nothing was listed as a change. A layout
+/// read with `apply=` only plans, so it is no change however often it is
+/// read; the `set_type` call its plan names is one.
 #[test]
 fn the_session_ledger_lists_what_changed_the_overlay() {
     let file = std::env::temp_dir().join(format!("borer_ledger_{}.exe", std::process::id()));
@@ -205,16 +205,28 @@ fn the_session_ledger_lists_what_changed_the_overlay() {
     let read_applied = read(&mut client, applying);
     let read_again = read(&mut client, applying);
     let session = read(&mut client, "borer://session").expect("answers");
+    let read_applied = read_applied.expect("the layout plans");
+    let call = read_applied
+        .lines()
+        .find_map(|l| l.strip_prefix("set_type "))
+        .expect("the plan names a set_type call");
+    let stated = client.text("set_type", call);
+    let after = read(&mut client, "borer://session").expect("answers");
     client.finish();
     std::fs::remove_file(&file).ok();
-    let read_applied = read_applied.expect("the layout applies");
     assert!(
-        read_applied.starts_with("defined struct Seen"),
+        read_applied.starts_with("plan: struct Seen"),
         "{read_applied}"
+    );
+    assert!(stated.starts_with("defined struct Seen"), "{stated}");
+    assert_eq!(
+        after.matches(&format!("\nset_type {call}\n")).count(),
+        1,
+        "the call the plan names is the change: {after}"
     );
     assert!(applied.starts_with("defined struct Fields"), "{applied}");
     assert!(
-        session.contains("\n# 4 changes this session, the last 4 here, oldest first\n"),
+        session.contains("\n# 3 changes this session, the last 3 here, oldest first\n"),
         "{session}"
     );
     assert!(read_again.is_ok(), "{read_again:?}");
@@ -222,8 +234,8 @@ fn the_session_ledger_lists_what_changed_the_overlay() {
         session
             .matches(&format!("\nresources/read {applying}\n"))
             .count(),
-        1,
-        "the second read changed nothing: {session}"
+        0,
+        "a read changed nothing: {session}"
     );
     assert!(
         session.contains(

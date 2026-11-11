@@ -266,9 +266,8 @@ impl Ledger {
     ///
     /// # Arguments
     ///
-    /// * `tool` - The tool's name, or `resources/read` for a resource read
-    ///   that applied a layout.
-    /// * `args` - Its arguments as JSON, or the URI read.
+    /// * `tool` - The tool's name.
+    /// * `args` - Its arguments as JSON.
     pub(crate) fn changed(&mut self, tool: &str, args: &str) {
         self.changed += 1;
         if self.changes.len() == KEPT {

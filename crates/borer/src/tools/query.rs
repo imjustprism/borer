@@ -56,7 +56,7 @@ impl BorerServer {
     /// holds no lock while it runs, so each `query` takes the locks any
     /// request does. A `query` of `borer://script/...` is refused, since a
     /// script that ran scripts could recurse without end, and so is one
-    /// saying `dry_run=false` (a layout applied), since a script only
+    /// saying `dry_run=false`, which no read obeys, since a script only
     /// proposes and `dry_run` here decides what is applied; the URI is
     /// read as the resource reads it, percent-decoded, so an escaped
     /// `dry_run%3Dfalse` is refused too. A failed script

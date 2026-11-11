@@ -1126,25 +1126,10 @@ mod tests {
         );
     }
 
-    /// `borer://layout/...,apply=Name` and `class_layout(apply=)` define a
-    /// struct and type the parameter, dry-run by default.
-    ///
-    /// The dry run names the struct and the prototype and writes nothing;
-    /// `dry_run=false` writes both and the re-decompiled function reads
-    /// `a1->f_10`; a script cannot apply through `query`.
-    ///
-    /// # Panics
-    ///
-    /// When the dry run writes, the applied text misses a field, or a
-    /// refusal accepts.
-    #[test]
-    fn a_layout_applies_as_a_struct_on_request() {
-        use crate::params::ClassLayoutParams;
-        use crate::params::DecompileParams;
-        use crate::params::ScriptParams;
-        use crate::params::TypesParams;
+    /// A server holding one x64 function that reads and writes three fields
+    /// through `rcx`, at 0x401000.
+    fn record_server() -> crate::BorerServer {
         use borer_engine::program::{Arch, Program, Section};
-        use rmcp::handler::server::wrapper::Parameters;
         let mut bytes = vec![0xccu8; 0x1000];
         bytes[..12].copy_from_slice(&[
             0x8b, 0x41, 0x10, // ASM: mov eax, [rcx+0x10]
@@ -1154,13 +1139,36 @@ mod tests {
         ]);
         let text = Section::mapped(".text", 0x401_000, 0, 0x1000, false, true);
         let program = Program::raw(bytes, Arch::X86_64, 0x400_000, Some(0x401_000), vec![text]);
-        let server = crate::BorerServer {
+        crate::BorerServer {
             program: std::sync::Arc::new(std::sync::RwLock::new(Some(std::sync::Arc::new(
                 program,
             )))),
             pdb_applied: std::sync::Arc::new(std::sync::RwLock::new(true)),
             ..crate::BorerServer::default()
-        };
+        }
+    }
+
+    /// `borer://layout/...,apply=Name` plans a struct and the parameter typed
+    /// with it, and applies nothing.
+    ///
+    /// The read names the struct, the prototype and the `set_type` calls
+    /// that state them, and writes nothing whatever `dry_run` it is told;
+    /// those calls sent as they are state what the plan holds, and the
+    /// re-decompiled function reads `a1->f_10`; a script cannot apply
+    /// through `query`.
+    ///
+    /// # Panics
+    ///
+    /// When a read writes, the calls state another struct than the plan's,
+    /// the applied text misses a field, or a refusal accepts.
+    #[test]
+    fn a_layout_applies_as_a_struct_on_request() {
+        use crate::params::ClassLayoutParams;
+        use crate::params::DecompileParams;
+        use crate::params::ScriptParams;
+        use crate::params::TypesParams;
+        use rmcp::handler::server::wrapper::Parameters;
+        let server = record_server();
         let types = || {
             server
                 .types(Parameters(TypesParams {
@@ -1171,12 +1179,13 @@ mod tests {
                 }))
                 .expect("lists")
         };
+        let before = server.overlay_plain();
         let dry = server
             .resource_text("borer://layout/0x401000,rcx,apply=Rec")
-            .expect("a dry run");
+            .expect("a plan");
         assert_eq!(
             dry,
-            "dry-run: would define struct Rec and state 1 prototype(s); decompile then names the fields:\nstruct Rec (0x21 bytes): 0x10 f_10 u32, 0x18 f_18 u64, 0x20 f_20 u8\nprototype sub_401000 (0x401000): uint64_t (Rec *)\npass dry_run=false to apply.\n"
+            "plan: struct Rec and 1 prototype(s), nothing applied by a read; send the set_type calls below and decompile names the fields:\nstruct Rec (0x21 bytes): 0x10 f_10 u32, 0x18 f_18 u64, 0x20 f_20 u8\nprototype sub_401000 (0x401000): uint64_t (Rec *)\nset_type {\"dry_run\":false,\"fields\":[\"0x10:f_10:u32\",\"0x18:f_18:u64\",\"0x20:f_20:u8\"],\"name\":\"Rec\",\"size\":33}\nset_type {\"address\":\"0x401000\",\"dry_run\":false,\"type\":\"uint64_t (Rec *)\"}\n"
         );
         assert!(types().starts_with("# 0 rows"), "{}", types());
         let scripted = server
@@ -1193,10 +1202,26 @@ mod tests {
         assert!(types().starts_with("# 0 rows"), "{}", types());
         let done = server
             .resource_text("borer://layout/0x401000,apply=Rec,dry_run=false")
-            .expect("applies");
-        assert!(
-            done.starts_with("defined struct Rec and stated 1 prototype(s)"),
-            "{done}"
+            .expect("plans");
+        assert_eq!(done, dry);
+        assert_eq!(server.overlay_plain().fingerprint(), before.fingerprint());
+        let program = server.loaded().expect("a program is loaded");
+        let analysis = server.ensure_analysis().expect("analyzes");
+        let mut planned = before.clone();
+        borer_engine::analysis::apply::from_pointer(
+            &program, &analysis, &before, "0x401000", "Rec",
+        )
+        .expect("plans")
+        .apply(&mut planned);
+        for call in done.lines().filter_map(|l| l.strip_prefix("set_type ")) {
+            let params = serde_json::from_str(call).expect("the call's arguments");
+            server.set_type(Parameters(params)).expect("applies");
+        }
+        let stated = server.overlay_plain();
+        assert_eq!(
+            (&stated.types, &stated.prototypes),
+            (&planned.types, &planned.prototypes),
+            "the calls state what the read used to apply"
         );
         assert!(
             types().starts_with("# 2 rows (1 type(s), 0 applied)"),
