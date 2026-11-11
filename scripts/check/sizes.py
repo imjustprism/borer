@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Hold every Rust function and file to a size budget, with a ratchet.
 
-    python scripts/check/sizes.py           fail when a function or file grew past its budget
-    python scripts/check/sizes.py --record  rewrite the baseline to today's sizes
+    python scripts/check/sizes.py           fail when a size is not the one the baseline allows
+    python scripts/check/sizes.py --record  lower the baseline to today's sizes
 
 A size is code lines: lines with something other than whitespace, comments
 and rustdoc. A function may have `FN_MAX` and a file `FILE_MAX`. The
-functions and files already over budget are listed in `sizes.tsv` with
-their size that day; each may shrink, never grow, and anything new must fit
-the budget. A split or shrink can be recorded with `--record`, which only
-ever lowers the list.
+functions and files over budget are listed in `sizes.tsv` with their size;
+each may shrink, never grow, and anything new must fit the budget
+(ratchet.py). A row above today's size fails too, until `--record` lowers
+it, so a split cannot be undone later, and `--record` adds a row only for
+one that was renamed or moved.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from check import ratchet  # noqa: E402
 from check.strip_comments import _block_end, _char_end, _string_end  # noqa: E402
 from harness.root import ROOT  # noqa: E402
 
@@ -100,32 +102,9 @@ def measure() -> dict[str, int]:
     return over
 
 
-def main(argv: list[str]) -> int:
-    over = measure()
-    base: dict[str, int] = {}
-    if BASELINE.exists():
-        for line in BASELINE.read_text(encoding="utf-8").splitlines():
-            if line and not line.startswith("#"):
-                key, n = line.split("\t")
-                base[key] = int(n)
-    if "--record" in argv:
-        kept = {k: n if k not in base else min(n, base[k]) for k, n in over.items()}
-        rows = [f"{k}\t{n}" for k, n in sorted(kept.items())]
-        head = f"# over budget (fn {FN_MAX}, file {FILE_MAX} code lines): may shrink, never grow"
-        BASELINE.write_text("\n".join([head, *rows]) + "\n", encoding="utf-8", newline="\n")
-        print(f"recorded {len(rows)} items over budget")
-        return 0
-    bad = [
-        f"{k}: {n} code lines, budget {base.get(k, FILE_MAX if '::' not in k else FN_MAX)}"
-        for k, n in sorted(over.items())
-        if n > base.get(k, 0)
-    ]
-    for line in bad:
-        print(line)
-    if bad:
-        print("split the function or file; `--record` only when one was renamed or split")
-    return 1 if bad else 0
+HEAD = f"# over budget (fn {FN_MAX}, file {FILE_MAX} code lines): may shrink, never grow"
+"""The baseline's first line."""
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(ratchet.run(BASELINE, HEAD, measure(), sys.argv[1:], "code lines"))
