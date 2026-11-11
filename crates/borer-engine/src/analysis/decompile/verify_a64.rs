@@ -27,18 +27,15 @@
 
 use std::collections::BTreeMap;
 
+use super::arch::A64;
 use super::expr::Key;
-use super::lift::{BlockFacts, Env, Pass};
-use super::lift_a64::{decode, exec_block_a64};
+use super::lift_a64::decode;
 use super::verify::{
-    Fact, GOLDEN, Jcc, Near, Probe, Ran, Read, Rng, STACK_WORDS, State, Verified, bench, in_parts,
-    report,
+    Fact, Jcc, Near, Ran, Read, Rng, Seeded, Verified, bench, in_parts, report, run_block,
 };
 use super::{Ctx, new_ctx};
 use crate::analysis::{Analysis, BasicBlock, Function, Overlay};
-use crate::emulate::Stop;
 use crate::emulate::a64::Machine;
-use crate::fxmap::FxHashSet;
 use crate::isa::a64::{self, Flow, Insn, Mnemonic, Opnd, Reg};
 use crate::program::Program;
 
@@ -60,6 +57,14 @@ const GENERAL: [&str; 31] = [
 ];
 
 bench!(Machine<'_>, "sp");
+
+/// The general registers compared and seeded, each as the machine names
+/// it and as the lifter keys it.
+fn general() -> impl Iterator<Item = (&'static str, Key)> {
+    (0u8..)
+        .zip(GENERAL)
+        .map(|(n, name)| (name, Key::A64(Reg::X(n))))
+}
 
 /// Checks the blocks of some functions of an arm64 program against the
 /// arm64 machine.
@@ -414,103 +419,21 @@ impl<'p> Sweep<'p> {
         if instrs.iter().any(statement_only) {
             return Err("a system instruction the lifter writes as a statement");
         }
-        let mut rng = Rng(self.seed ^ block.start.rotate_left(17) ^ GOLDEN);
-        rng.next();
-        let fill = rng.next();
-        let mut emu = self.pristine.clone();
-        emu.set_budget(instrs.len() + 1);
-        emu.set_fill(Some(fill));
-        let mut st = State {
-            pristine: &self.pristine,
-            fill,
-            regs: BTreeMap::new(),
-            rsp: emu.register("sp").unwrap_or(0),
-            stack: BTreeMap::new(),
-            width: 64,
-            temps: BTreeMap::new(),
-            reg_ty: BTreeMap::new(),
-            tls_block: 0,
-            mir: None,
-        };
+        let at = (entry, block.start);
+        let mut seeded = Seeded::new(&self.pristine, self.seed, at, 64, instrs.len() + 1);
         let mut all = instrs;
         all.extend(jcc);
         if self.mir {
-            st.mir = Some(all.iter().map(|i| i.va).collect());
+            seeded.st.mir = Some(all.iter().map(|i| i.va).collect());
         }
-        let near = comparands(&all);
-        for (n, name) in (0u8..).zip(GENERAL) {
-            let key = Key::A64(Reg::X(n));
-            let r = rng.next();
-            let v = match near.get(&key) {
-                Some(c) if r & 3 != 0 => c.seed(&st.regs, r),
-                _ => r,
-            };
-            emu.set_register(name, v);
-            st.regs.insert(key, v);
-        }
-        for word in -STACK_WORDS..STACK_WORDS {
-            let at = st.rsp.wrapping_add_signed(word * 8);
-            for (i, b) in (0u64..).zip(rng.next().to_le_bytes()) {
-                emu.poke(at.wrapping_add(i), b);
-                st.stack.insert(at.wrapping_add(i), b);
-            }
-        }
-        seed_vectors(&mut emu, &mut st.regs, &mut rng);
-        emu.stop_at(Some(end));
-        let run = emu.run(block.start);
-        match run.stop {
-            Stop::Stopped(at) if at == end => {}
-            Stop::Unmodeled(ref what) => {
-                let kind = what.split(" at 0x").next().unwrap_or(what);
-                *out.unmodeled.entry(kind.to_owned()).or_default() += 1;
-                return Err("an instruction the emulator does not model");
-            }
-            Stop::Fault(_) => return Err("a fault on the emulator"),
-            Stop::Budget => return Err("a repeat count past the regions compared"),
-            Stop::Returned
-            | Stop::MemoryFull(_)
-            | Stop::Stopped(_)
-            | Stop::Derailed(_)
-            | Stop::Exited
-            | Stop::Limit(_) => return Err("the emulator stopped early"),
-        }
-        let stored: FxHashSet<u64> = run.history.iter().map(|w| w.addr).collect();
-        ctx.probe = Some(Probe::default());
-        let mut env = Env::entry();
-        let lifted = exec_block_a64(
-            ctx,
-            &all,
-            &mut env,
-            Pass::Dataflow,
-            None,
-            BlockFacts::default(),
-        );
-        let probe = ctx.probe.take().unwrap_or_default();
-        if lifted.unmodeled > 0 {
-            return Err(
-                "an instruction the lifter leaves as asm, whose result the expressions after it name but do not compute",
-            );
-        }
-        st.temps = probe.temps;
-        st.reg_ty.clone_from(&ctx.reg_ty);
-        Ok(Ran {
-            function: entry,
-            block: block.start,
-            st,
-            emu,
-            stored,
-            regs: (),
-            env,
-            effects: probe.effects,
-            branch: jcc
-                .and_then(|j| {
-                    Some(Jcc {
-                        ip: j.va,
-                        target: j.target()?,
-                    })
-                })
-                .zip(lifted.branch.map(|b| b.cond)),
-        })
+        seeded.registers(general(), &comparands(&all));
+        seeded.stack();
+        seed_vectors(&mut seeded.emu, &mut seeded.st.regs, &mut seeded.rng);
+        let jcc = jcc.and_then(|j| j.target().map(|target| Jcc { ip: j.va, target }));
+        let line = (block.start, end);
+        let mut ran = run_block::<A64, _, _>(seeded, ctx, line, &all, jcc, (), out)?;
+        ran.st.reg_ty.clone_from(&ctx.reg_ty);
+        Ok(ran)
     }
 }
 
