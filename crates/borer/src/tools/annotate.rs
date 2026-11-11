@@ -13,24 +13,10 @@ use crate::errors::err_params;
 use crate::params::{
     Annotation, AnnotationsParams, Filter, Page, SetCommentParams, SetNameParams, SetTypeParams,
     TypesParams, frame_words, must_be_a_name, must_be_in_a_section, must_fit_a_row, plan_var,
+    stated_fields, stated_values,
 };
 use crate::safety::{Effect, effects};
 use crate::state::{read_lock, write_lock};
-
-/// Splits one `offset:name:type` field statement.
-///
-/// # Arguments
-///
-/// * `f` - The statement, colons separating its three parts.
-///
-/// # Errors
-///
-/// When the statement is not three parts.
-pub(crate) fn field_of(f: &str) -> Result<(&str, &str, &str), String> {
-    f.split_once(':')
-        .and_then(|(off, rest)| rest.split_once(':').map(|(name, ty)| (off, name, ty)))
-        .ok_or_else(|| format!("field {f} is not offset:name:type"))
-}
 
 /// Tells whether `text` holds `word` as a whole identifier, not inside a
 /// longer one (`a1` is not in `a12` or `data1`).
@@ -443,23 +429,7 @@ impl BorerServer {
                             "type {n} states both fields and values; a struct takes fields, an enum values"
                         ));
                     }
-                    let mut stated: Vec<(u64, String, borer_engine::analysis::utypes::TypeExpr)> =
-                        Vec::with_capacity(fs.len());
-                    for f in fs {
-                        let (off, stated_name, ty) = field_of(f)?;
-                        let ty = borer_engine::analysis::utypes::parse_type(ty)
-                            .map_err(|e| format!("field {stated_name}: {e}"))?;
-                        let off = off
-                            .strip_prefix("0x")
-                            .map_or_else(
-                                || off.parse::<u64>().ok(),
-                                |h| u64::from_str_radix(h, 16).ok(),
-                            )
-                            .ok_or_else(|| {
-                                format!("field {stated_name}: offset {off} is not a number")
-                            })?;
-                        stated.push((off, stated_name.to_owned(), ty));
-                    }
+                    let stated = stated_fields(fs)?;
                     Some((
                         n.clone(),
                         borer_engine::analysis::utypes::build_struct(n, size, &stated, &o.types, word)
@@ -472,22 +442,7 @@ impl BorerServer {
                     ));
                 }
                 (Some(n), _, Some(vs)) if !vs.is_empty() => {
-                    let mut stated: Vec<(u64, String)> = Vec::with_capacity(vs.len());
-                    for v in vs {
-                        let Some((stated_name, value)) = v.split_once(':') else {
-                            return Err(format!("value {v} is not name:value"));
-                        };
-                        let value = value
-                            .strip_prefix("0x")
-                            .map_or_else(
-                                || value.parse::<u64>().ok(),
-                                |h| u64::from_str_radix(h, 16).ok(),
-                            )
-                            .ok_or_else(|| {
-                                format!("value {stated_name}: {value} is not a number")
-                            })?;
-                        stated.push((value, stated_name.to_owned()));
-                    }
+                    let stated = stated_values(vs)?;
                     Some((
                         n.clone(),
                         borer_engine::analysis::utypes::build_enum(

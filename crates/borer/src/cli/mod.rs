@@ -8,7 +8,7 @@ use std::sync::Arc;
 use anyhow::{Context as _, anyhow, bail};
 use borer_engine::analysis::{
     Overlay, about, anchors, attributes, classes, decompile, fieldrefs, map, messages, name_of,
-    parse_addr, parse_off, ports, render, sigs, snapshot, utypes, vtables,
+    parse_off, ports, render, sigs, snapshot, utypes, vtables,
 };
 use borer_engine::isa::Isa;
 use borer_engine::pack::Pack;
@@ -17,8 +17,8 @@ use borer_engine::table::Window;
 use borer_engine::text::{one_line, quoted, short_path};
 use borer_engine::{disasm, entropy, hexdump as hexfmt, memory, num, script, search};
 
-use crate::params::parse_field_offset;
 use crate::params::{Filter, SearchKind, StringEncoding};
+use crate::params::{parse_field_offset, parse_unsigned, stated_fields, stated_values};
 use crate::resources::ABOUT_NEEDS_A_NAME;
 use crate::strwalk::{strings_page, walk_rows};
 use crate::tools::bytes::entropy_threshold;
@@ -975,29 +975,12 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                     let size = args
                         .get(at)
                         .filter(|a| !a.contains(':'))
-                        .and_then(|a| parse_addr(a));
+                        .and_then(|a| parse_unsigned(a));
                     if size.is_some() {
                         at += 1;
                     }
-                    let mut stated: Vec<(u64, String, utypes::TypeExpr)> = Vec::new();
-                    for spec in args.iter().skip(at) {
-                        let mut parts = spec.splitn(3, ':');
-                        let (Some(off), Some(field), Some(ty)) =
-                            (parts.next(), parts.next(), parts.next())
-                        else {
-                            bail!("field {} is not off:name:type", one_line(spec));
-                        };
-                        let off = parse_addr(off).with_context(|| {
-                            format!(
-                                "field {}'s offset {} is not a number",
-                                one_line(field),
-                                one_line(off)
-                            )
-                        })?;
-                        let ty = utypes::parse_type(ty)
-                            .with_context(|| format!("field {}'s type", one_line(field)))?;
-                        stated.push((off, field.to_owned(), ty));
-                    }
+                    let stated = stated_fields(args.get(at..).unwrap_or_default())
+                        .map_err(anyhow::Error::msg)?;
                     if stated.is_empty() {
                         bail!(
                             "struct {} states no fields; give them as off:name:type",
@@ -1022,24 +1005,12 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                     let size = args
                         .get(at)
                         .filter(|a| !a.contains(':'))
-                        .and_then(|a| parse_addr(a));
+                        .and_then(|a| parse_unsigned(a));
                     if size.is_some() {
                         at += 1;
                     }
-                    let mut stated: Vec<(u64, String)> = Vec::new();
-                    for spec in args.iter().skip(at) {
-                        let Some((value_name, value)) = spec.split_once(':') else {
-                            bail!("value {} is not name:value", one_line(spec));
-                        };
-                        let value = parse_addr(value).with_context(|| {
-                            format!(
-                                "value {}: {} is not a number",
-                                one_line(value_name),
-                                one_line(value)
-                            )
-                        })?;
-                        stated.push((value, value_name.to_owned()));
-                    }
+                    let stated = stated_values(args.get(at..).unwrap_or_default())
+                        .map_err(anyhow::Error::msg)?;
                     if stated.is_empty() {
                         bail!(
                             "enum {} states no values; give them as name:value",

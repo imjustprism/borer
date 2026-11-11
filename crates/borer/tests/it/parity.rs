@@ -12,7 +12,7 @@
 )]
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 
 use crate::contract::tiny_pe;
 use crate::reload::Client;
@@ -67,23 +67,48 @@ fn shown(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+/// Runs a CLI command to its end.
+///
+/// # Arguments
+///
+/// * `args` - Command-line arguments after the program name.
+fn borer(args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_borer"))
+        .arg("--no-pdb")
+        .args(args)
+        .output()
+        .expect("spawn borer")
+}
+
 /// Runs a CLI command that answers and returns what it printed.
 ///
 /// # Arguments
 ///
 /// * `args` - Command-line arguments after the program name.
 fn cli(args: &[&str]) -> String {
-    let out = Command::new(env!("CARGO_BIN_EXE_borer"))
-        .arg("--no-pdb")
-        .args(args)
-        .output()
-        .expect("spawn borer");
+    let out = borer(args);
     assert!(
         out.status.success(),
         "{args:?}: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// Runs a CLI command that refuses and returns what it said on stderr.
+///
+/// # Arguments
+///
+/// * `args` - Command-line arguments after the program name.
+fn refused(args: &[&str]) -> String {
+    let out = borer(args);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
 /// A diff against a fingerprint sidecar reads the sidecar as the earlier
@@ -273,4 +298,42 @@ fn a_listing_inside_an_instruction_reads_the_same_at_the_cli_and_over_mcp() {
         )),
         "{at_cli}"
     );
+}
+
+/// `set-type` reads a struct's fields at the CLI as `set_type` does over
+/// MCP: an offset is hex with its `0x` or decimal, and refused otherwise.
+///
+/// Each front end had its own copy of the statement parser, and the CLI's
+/// read `1c` as `0x1c` and defined the field there, where the tool
+/// refused it.
+#[test]
+fn a_struct_field_reads_the_same_at_the_cli_and_over_mcp() {
+    let file = fixture("typed.exe", &[0xc3]);
+    let project = file.with_extension("json");
+    let (binary, saved) = (shown(&file), shown(&project));
+    let bare = refused(&["set-type", &binary, &saved, "struct", "S", "1c:hp:u32"]);
+    let written = project.exists();
+    let defined = cli(&["set-type", &binary, &saved, "struct", "S", "0x1c:hp:u32"]);
+    let mut client = Client::start(&binary);
+    let bare_over_mcp = client.text("set_type", r#"{"name":"S","fields":["1c:hp:u32"]}"#);
+    let defined_over_mcp = client.text(
+        "set_type",
+        r#"{"name":"S","fields":["0x1c:hp:u32"],"dry_run":false}"#,
+    );
+    client.finish();
+    for made in [&file, &project] {
+        std::fs::remove_file(made).ok();
+    }
+    assert_eq!(bare_over_mcp, "field hp: offset 1c is not a number");
+    assert!(
+        bare.contains(&format!("Error: {bare_over_mcp}\n")),
+        "{bare}"
+    );
+    assert!(!written, "a refused struct was written");
+    let said = "defined struct S: 1 field(s), 0x20 byte(s)";
+    assert!(
+        defined.starts_with(&format!("{said}; written to ")),
+        "{defined}"
+    );
+    assert_eq!(without_evidence(&defined_over_mcp), format!("{said}\n"));
 }

@@ -1387,20 +1387,106 @@ fn admits(
 pub(crate) fn parse_field_offset(text: &str) -> anyhow::Result<i64> {
     use anyhow::Context as _;
     let (negative, digits) = text.strip_prefix('-').map_or((false, text), |d| (true, d));
-    let (radix, digits) = match digits
-        .strip_prefix("0x")
-        .or_else(|| digits.strip_prefix("0X"))
-    {
-        Some(hex) => (16, hex),
-        None => (10, digits),
-    };
-    let magnitude = Some(digits)
-        .filter(|d| !d.is_empty() && d.chars().all(|c| c.is_digit(radix)))
-        .and_then(|d| u64::from_str_radix(d, radix).ok())
+    let magnitude = parse_unsigned(digits)
         .with_context(|| format!("bad offset {}", borer_engine::text::quoted(text)))?;
     let value = i64::try_from(magnitude)
         .with_context(|| format!("offset {text} does not fit a signed displacement"))?;
     Ok(if negative { -value } else { value })
+}
+
+/// Parses an unsigned number an agent states: `0x` and hex digits, or
+/// decimal digits alone.
+///
+/// # Arguments
+///
+/// * `text` - The number as typed.
+///
+/// # Returns
+///
+/// The number, or `None` when the text is neither form or past 64 bits.
+pub(crate) fn parse_unsigned(text: &str) -> Option<u64> {
+    let (radix, digits) = match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        Some(hex) => (16, hex),
+        None => (10, text),
+    };
+    (!digits.is_empty() && digits.chars().all(|c| c.is_digit(radix)))
+        .then(|| u64::from_str_radix(digits, radix).ok())
+        .flatten()
+}
+
+/// Reads the fields a struct states, each `offset:name:type`
+/// (`0x1c:mp:u32`).
+///
+/// The `set_type` tool and the CLI's `set-type` both read them here, so
+/// an offset is a number by one rule ([`parse_unsigned`]): the CLI read
+/// `1c` as `0x1c` where the tool refused it.
+///
+/// # Arguments
+///
+/// * `fields` - The statements.
+///
+/// # Returns
+///
+/// Each field's offset, name and type, in the order stated.
+///
+/// # Errors
+///
+/// When a statement is not three parts, its type does not parse, or its
+/// offset is not a number; the message names the field.
+pub(crate) fn stated_fields(
+    fields: &[String],
+) -> Result<Vec<(u64, String, borer_engine::analysis::utypes::TypeExpr)>, String> {
+    use borer_engine::text::one_line;
+    fields
+        .iter()
+        .map(|f| {
+            let (off, name, ty) = f
+                .split_once(':')
+                .and_then(|(off, rest)| rest.split_once(':').map(|(name, ty)| (off, name, ty)))
+                .ok_or_else(|| format!("field {} is not offset:name:type", one_line(f)))?;
+            let shown = one_line(name);
+            let ty = borer_engine::analysis::utypes::parse_type(ty)
+                .map_err(|e| format!("field {shown}: {e}"))?;
+            let off = parse_unsigned(off).ok_or_else(|| {
+                format!("field {shown}: offset {} is not a number", one_line(off))
+            })?;
+            Ok((off, name.to_owned(), ty))
+        })
+        .collect()
+}
+
+/// Reads the values an enum states, each `name:value` (`Run:1`), by the
+/// rule [`stated_fields`] reads an offset by.
+///
+/// # Arguments
+///
+/// * `values` - The statements.
+///
+/// # Returns
+///
+/// Each value and its name, in the order stated.
+///
+/// # Errors
+///
+/// When a statement is not two parts or its value is not a number.
+pub(crate) fn stated_values(values: &[String]) -> Result<Vec<(u64, String)>, String> {
+    use borer_engine::text::one_line;
+    values
+        .iter()
+        .map(|v| {
+            let (name, value) = v
+                .split_once(':')
+                .ok_or_else(|| format!("value {} is not name:value", one_line(v)))?;
+            let value = parse_unsigned(value).ok_or_else(|| {
+                format!(
+                    "value {}: {} is not a number",
+                    one_line(name),
+                    one_line(value)
+                )
+            })?;
+            Ok((value, name.to_owned()))
+        })
+        .collect()
 }
 
 #[cfg(test)]
