@@ -96,4 +96,5 @@ mod types;
 mod unchecked;
 mod unit;
 mod void_results;
+mod wire_tables;
 mod x86;

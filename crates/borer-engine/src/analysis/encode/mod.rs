@@ -525,6 +525,11 @@ pub(crate) fn packed_components(lines: &[&str], buffer: &str, bits: u64) -> Vec<
 }
 
 /// One recovery's inputs and the helpers it has followed.
+///
+/// It answers one question, an encoder's or a class's: what it keeps of a
+/// helper is cut where that question's depth ran out ([`DEPTH_MAX`]), so a
+/// second question read from the same context would be answered from the
+/// first one's cuts.
 struct Ctx<'a> {
     /// The loaded image.
     program: &'a Program,
@@ -549,12 +554,19 @@ impl<'a> Ctx<'a> {
     /// * `program` - The loaded image.
     /// * `analysis` - Discovery results.
     /// * `overlay` - Names in force.
-    fn new(program: &'a Program, analysis: &'a Analysis, overlay: &'a Overlay) -> Self {
+    /// * `overlay_key` - [`Overlay::fingerprint`] of `overlay`, computed
+    ///   once by the caller.
+    fn new(
+        program: &'a Program,
+        analysis: &'a Analysis,
+        overlay: &'a Overlay,
+        overlay_key: u64,
+    ) -> Self {
         Ctx {
             program,
             analysis,
             overlay,
-            overlay_key: overlay.fingerprint(),
+            overlay_key,
             memo: RefCell::new(FxHashMap::default()),
             seeded: false,
         }
@@ -1048,7 +1060,7 @@ pub fn encoding_of(
     overlay: &Overlay,
     entry: u64,
 ) -> Option<Encoding> {
-    Ctx::new(program, analysis, overlay).encoding(entry, None, None)
+    Ctx::new(program, analysis, overlay, overlay.fingerprint()).encoding(entry, None, None)
 }
 
 /// Returns what `entry` writes onto `stream`, an identifier its text hands
@@ -1077,7 +1089,7 @@ pub fn encoding_through(
 ) -> Option<Encoding> {
     let ctx = Ctx {
         seeded: true,
-        ..Ctx::new(program, analysis, overlay)
+        ..Ctx::new(program, analysis, overlay, overlay.fingerprint())
     };
     ctx.encoding(entry, None, Some(stream))
 }
@@ -1098,7 +1110,7 @@ pub fn encoding_for_class(
     overlay: &Overlay,
     class: &str,
 ) -> Option<(u64, Encoding)> {
-    Ctx::new(program, analysis, overlay).class_encoding(class)
+    Ctx::new(program, analysis, overlay, overlay.fingerprint()).class_encoding(class)
 }
 
 /// The source of a write as the compact form spells it: `+0x20` for an
@@ -1291,14 +1303,10 @@ pub fn encodings_tsv(
     filter: &str,
     limit: usize,
 ) -> String {
-    let rows = super::vtables::slot_rows(
-        program,
-        analysis,
-        slot,
-        filter,
-        || Ctx::new(program, analysis, overlay),
-        |ctx, c| ctx.class_encoding(&c.class),
-    );
+    let key = overlay.fingerprint();
+    let rows = super::vtables::slot_rows(program, analysis, slot, filter, |c| {
+        Ctx::new(program, analysis, overlay, key).class_encoding(&c.class)
+    });
     let total = rows.len();
     let written = rows.iter().filter(|r| r.found.is_some()).count();
     let shown = total.min(limit);

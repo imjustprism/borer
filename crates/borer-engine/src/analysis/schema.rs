@@ -852,6 +852,11 @@ enum ObjectNames {
 type SchemaKey = (u64, Option<String>);
 
 /// One recovery's inputs, and the readers it has already followed.
+///
+/// It answers one question, a decoder's or a class's: what it keeps of a
+/// reader is cut where that question's depth ran out ([`DEPTH_MAX`]), so a
+/// second question read from the same context would be answered from the
+/// first one's cuts.
 struct Ctx<'a> {
     /// The loaded image.
     program: &'a Program,
@@ -878,14 +883,21 @@ impl<'a> Ctx<'a> {
     /// * `program` - The loaded image.
     /// * `analysis` - Discovery results.
     /// * `overlay` - Names in force.
-    fn new(program: &'a Program, analysis: &'a Analysis, overlay: &'a Overlay) -> Self {
+    /// * `overlay_key` - [`Overlay::fingerprint`] of `overlay`, computed
+    ///   once by the caller.
+    fn new(
+        program: &'a Program,
+        analysis: &'a Analysis,
+        overlay: &'a Overlay,
+        overlay_key: u64,
+    ) -> Self {
         Ctx {
             program,
             analysis,
             overlay,
             memo: RefCell::new(FxHashMap::default()),
             schemas: RefCell::new(FxHashMap::default()),
-            overlay_key: overlay.fingerprint(),
+            overlay_key,
         }
     }
 
@@ -1250,7 +1262,7 @@ pub fn schema_of(
     overlay: &Overlay,
     entry: u64,
 ) -> Option<Schema> {
-    Ctx::new(program, analysis, overlay).schema(entry, None)
+    Ctx::new(program, analysis, overlay, overlay.fingerprint()).schema(entry, None)
 }
 
 /// Returns every read `calls` of a fragment of pseudo-C make off `stream`,
@@ -1279,7 +1291,7 @@ pub(crate) fn reads_in(
     calls: &[Call],
     stream: &str,
 ) -> Vec<Field> {
-    let ctx = Ctx::new(program, analysis, overlay);
+    let ctx = Ctx::new(program, analysis, overlay, overlay.fingerprint());
     let lines: Vec<&str> = text.lines().map(str::trim).collect();
     let returned = |c: &Call| {
         let [arg] = c.args.as_slice() else {
@@ -1450,7 +1462,7 @@ pub fn schema_for_class(
     overlay: &Overlay,
     class: &str,
 ) -> Option<(u64, Schema)> {
-    Ctx::new(program, analysis, overlay).class_schema(class)
+    Ctx::new(program, analysis, overlay, overlay.fingerprint()).class_schema(class)
 }
 
 /// A record's top-level fields on one line: `kind@dest` each, a nested
@@ -1521,14 +1533,10 @@ pub fn schemas_tsv(
     filter: &str,
     limit: usize,
 ) -> String {
-    let rows = super::vtables::slot_rows(
-        program,
-        analysis,
-        slot,
-        filter,
-        || Ctx::new(program, analysis, overlay),
-        |ctx, c| ctx.class_schema(&c.class),
-    );
+    let key = overlay.fingerprint();
+    let rows = super::vtables::slot_rows(program, analysis, slot, filter, |c| {
+        Ctx::new(program, analysis, overlay, key).class_schema(&c.class)
+    });
     let total = rows.len();
     let read = rows.iter().filter(|r| r.found.is_some()).count();
     let shown = total.min(limit);
@@ -1722,7 +1730,7 @@ pub fn named_field_offset(
     class: &str,
     name: &str,
 ) -> Option<u64> {
-    let ctx = Ctx::new(program, analysis, overlay);
+    let ctx = Ctx::new(program, analysis, overlay, overlay.fingerprint());
     match ctx.object_names(class) {
         ObjectNames::None => None,
         ObjectNames::Own(by_offset) => by_offset

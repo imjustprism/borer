@@ -194,28 +194,30 @@ pub(crate) struct SlotRow<T> {
 /// `filter`, each with what `per` finds for it, worked out across the
 /// cores and ordered by value, then class.
 ///
+/// `per` is handed one class and nothing a class before it left behind,
+/// so a class's row is the same whichever classes the table holds beside
+/// it and however many cores work it out.
+///
 /// # Arguments
 ///
 /// * `program` - The loaded image.
 /// * `analysis` - Discovery results with the recovered classes.
 /// * `slot` - The vtable index the constant sits in, zero-based.
 /// * `filter` - Case-insensitive substring of the class name; empty for all.
-/// * `init` - Makes one worker's state.
-/// * `per` - What the table shows for one class, over the worker's state.
-pub(crate) fn slot_rows<S, T: Send>(
+/// * `per` - What the table shows for one class.
+pub(crate) fn slot_rows<T: Send>(
     program: &Program,
     analysis: &Analysis,
     slot: usize,
     filter: &str,
-    init: impl Fn() -> S + Sync,
-    per: impl Fn(&S, &SlotConstant) -> Option<T> + Sync,
+    per: impl Fn(&SlotConstant) -> Option<T> + Sync,
 ) -> Vec<SlotRow<T>> {
     let q = filter.to_lowercase();
     let picked: Vec<SlotConstant> = slot_constants(program, analysis, slot)
         .into_iter()
         .filter(|c| q.is_empty() || c.class.to_lowercase().contains(&q))
         .collect();
-    let found = striped_with(&picked, SLOT_ROWS_MIN, init, per);
+    let found = striped_with(&picked, SLOT_ROWS_MIN, || (), |(), c| per(c));
     let mut rows: Vec<SlotRow<T>> = picked
         .into_iter()
         .zip(found)
