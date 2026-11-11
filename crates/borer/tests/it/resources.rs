@@ -245,7 +245,7 @@ fn padded(mut b: Vec<u8>) -> Vec<u8> {
 /// `Ns.Program::MessageBox` a P/Invoke of `user32.dll!MessageBoxW`; one
 /// user string holds a URL. The CLR header is at 0x1010 and the metadata
 /// at 0x1080, in [`tiny_pe`]'s `.text` grown to 0x400 bytes.
-fn dotnet_pe() -> Vec<u8> {
+pub(crate) fn dotnet_pe() -> Vec<u8> {
     let mut s = vec![0u8];
     let mut t: Vec<u8> = Vec::new();
     let lone = name(&mut s, "<Module>");

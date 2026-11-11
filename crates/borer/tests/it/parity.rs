@@ -16,7 +16,7 @@ use std::process::Command;
 
 use crate::contract::tiny_pe;
 use crate::reload::Client;
-use crate::resources::read;
+use crate::resources::{dotnet_pe, read};
 use crate::without_evidence;
 
 /// The file offset of [`tiny_pe`]'s code, mapped at [`ENTRY`].
@@ -39,6 +39,20 @@ const ENTRY: &str = "0x140001000";
 fn fixture(name: &str, code: &[u8]) -> PathBuf {
     let mut image = tiny_pe();
     image[CODE_AT..CODE_AT + code.len()].copy_from_slice(code);
+    written(name, &image)
+}
+
+/// Writes an image to a file of this process's own in the temp directory.
+///
+/// # Arguments
+///
+/// * `name` - The file's name after the process id.
+/// * `image` - The file's bytes.
+///
+/// # Returns
+///
+/// The file's path.
+fn written(name: &str, image: &[u8]) -> PathBuf {
     let path = std::env::temp_dir().join(format!("borer_parity_{}_{name}", std::process::id()));
     std::fs::write(&path, image).expect("the fixture is writable");
     path
@@ -192,4 +206,33 @@ fn a_script_reads_a_project_s_names_at_the_cli_and_over_mcp() {
     }
     assert_eq!(at_cli, without_evidence(&over_mcp));
     assert!(at_cli.starts_with("checks_serial\n"), "{at_cli}");
+}
+
+/// `fstrings` lists the user strings a .NET method loads at the CLI, as
+/// `function_strings` does over MCP.
+///
+/// The CLI's `function`, `disasmfn` and `xrefs` read a method's CIL, and
+/// the refusal of an IL body names `function_strings` among what reads
+/// it; `fstrings` alone refused the method.
+#[test]
+fn a_dotnet_method_s_strings_read_the_same_at_the_cli_and_over_mcp() {
+    let mut image = dotnet_pe();
+    image[0x250..0x258].copy_from_slice(&[
+        0x1e, // ASM: a tiny IL header, 7 bytes of code
+        0x72, 0x01, 0x00, 0x00, 0x70, // ASM: ldstr 0x70000001
+        0x26, // ASM: pop
+        0x2a, // ASM: ret
+    ]);
+    let file = written("managed.exe", &image);
+    let binary = shown(&file);
+    let at_cli = cli(&["fstrings", &binary, "Ns.Program::Main"]);
+    let mut client = Client::start(&binary);
+    let over_mcp = client.text("function_strings", r#"{"address":"Ns.Program::Main"}"#);
+    client.finish();
+    std::fs::remove_file(&file).ok();
+    assert_eq!(at_cli, without_evidence(&over_mcp));
+    assert!(
+        at_cli.contains("\nIL_0000\t0x70000001\t") && at_cli.contains("c2.example.test"),
+        "{at_cli}"
+    );
 }

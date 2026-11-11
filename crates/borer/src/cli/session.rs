@@ -276,15 +276,60 @@ impl Session {
     ///
     /// When the argument is missing, does not resolve, or names no function.
     pub(super) fn function_text(&self, args: &[String]) -> anyhow::Result<String> {
-        let text = arg(args, 2, "function needs an address or name")?;
+        self.function_answer(
+            arg(args, 2, "function needs an address or name")?,
+            |a, token| managed::detail(&self.program, a, token, 0),
+            |a, entry| render::function_detail(a, &self.overlay, entry, 0),
+        )
+    }
+
+    /// Answers a command about one function: a .NET method with an IL
+    /// body by `il`, any other function by `native`.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The function, by address or name.
+    /// * `il` - Answers for the method's `MethodDef` token.
+    /// * `native` - Answers for a discovered function's entry; `None`
+    ///   when no function is there.
+    ///
+    /// # Errors
+    ///
+    /// When the text does not resolve or names no function, borer does
+    /// not discover the architecture's functions, or `il` refuses.
+    fn function_answer(
+        &self,
+        text: &str,
+        il: impl FnOnce(&Analysis, u32) -> Result<String, String>,
+        native: impl FnOnce(&Analysis, u64) -> Option<String>,
+    ) -> anyhow::Result<String> {
         let a = self.analysis_or_empty();
         let va = self.resolve(&a, text).ok();
         if let Some(token) = managed::il_method_named(&self.program, text, va) {
-            return managed::detail(&self.program, &a, token, 0).map_err(anyhow::Error::msg);
+            return il(&a, token).map_err(anyhow::Error::msg);
         }
         self.discovers()?;
         let entry = entry_at(&self.program, &a, self.resolve(&a, text)?)?;
-        render::function_detail(&a, &self.overlay, entry, 0).context("no function at address")
+        native(&a, entry).context("no function at address")
+    }
+
+    /// Answers `fstrings <binary> <address|name>`: the string literals a
+    /// function references, or the user strings a .NET method loads
+    /// ([`managed::strings_tsv`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `args` - The command line, the command first and the binary second.
+    ///
+    /// # Errors
+    ///
+    /// When the argument is missing, does not resolve, or names no function.
+    pub(super) fn fstrings_text(&self, args: &[String]) -> anyhow::Result<String> {
+        self.function_answer(
+            arg(args, 2, "fstrings needs an address or name")?,
+            |a, token| managed::strings_tsv(&self.program, a, token),
+            |a, entry| render::function_strings_tsv(&self.program, a, &self.overlay, entry),
+        )
     }
 
     /// Answers `disasmfn <binary> <address|name>`: a function by blocks,
@@ -298,16 +343,11 @@ impl Session {
     ///
     /// When the argument is missing, does not resolve, or names no function.
     pub(super) fn disasmfn_text(&self, args: &[String]) -> anyhow::Result<String> {
-        let text = arg(args, 2, "disasmfn needs an address or name")?;
-        let a = self.analysis_or_empty();
-        let va = self.resolve(&a, text).ok();
-        if let Some(token) = managed::il_method_named(&self.program, text, va) {
-            return managed::listing(&self.program, token, 400).map_err(anyhow::Error::msg);
-        }
-        self.discovers()?;
-        let entry = entry_at(&self.program, &a, self.resolve(&a, text)?)?;
-        render::disasm_function(&self.program, &a, &self.overlay, entry, 400, false)
-            .context("no function at address")
+        self.function_answer(
+            arg(args, 2, "disasmfn needs an address or name")?,
+            |_, token| managed::listing(&self.program, token, 400),
+            |a, entry| render::disasm_function(&self.program, a, &self.overlay, entry, 400, false),
+        )
     }
 
     /// Answers `xrefs <binary> <address|name>`: the references to an

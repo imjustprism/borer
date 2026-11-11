@@ -22,7 +22,7 @@ commands:
   hexdump <binary> <address|name> [length]  bytes at a virtual address or name, or at off:<n> in the file (default 64, max 4096)
   entropy <binary> [threshold]             high-entropy regions (default 7.2)
   search <binary> <pattern> [text] [offset]  AOB hex with ?? wildcards, or a substring; 500 a page
-  fstrings <binary> <address|name>         string literals one function references
+  fstrings <binary> <address|name>         string literals one function references, or the user strings a .NET method loads
   findstr <binary> <filter>                functions referencing a matching string
   disasm <binary> <address|name> [count]   disassemble at a virtual address or name (default 32, max 256)
   disasmfn <binary> <address|name>         a whole function, block by block

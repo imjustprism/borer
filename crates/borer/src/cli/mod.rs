@@ -381,19 +381,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             let a = s.analysis_or_empty();
             print!("{}", render_hits(&hits, offset, false, (&a, &s.overlay)));
         }
-        Query::Fstrings => {
-            let (a, entry) = s.function_arg(
-                args,
-                2,
-                "fstrings needs an address or name",
-                Feature::Discover,
-            )?;
-            print!(
-                "{}",
-                render::function_strings_tsv(&s.program, &a, &s.overlay, entry)
-                    .context("no function at address")?
-            );
-        }
+        Query::Fstrings => print!("{}", s.fstrings_text(args)?),
         Query::Findstr => {
             let a = s.analysis(Feature::Discover)?;
             let filter = arg(args, 2, "findstr needs a filter")?;
