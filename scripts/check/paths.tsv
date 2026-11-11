@@ -1,0 +1,3 @@
+# uses outside the module that owns them (rule: file): may shrink, never grow
+iced_x86 outside isa: crates/borer-engine/src/analysis/decompile/globals.rs	9
+yaxpeax outside isa/a64/decode.rs: crates/borer-engine/src/isa/a64/fmt.rs	2

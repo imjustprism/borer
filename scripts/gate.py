@@ -18,6 +18,7 @@ what the rest reads. Every other step then starts as soon as the steps it
 needs have passed, side by side with the rest: the checks that take
 seconds (typos, the comment check, ruff check and format, the type library
 (scripts/check/typelib.py --check), the size budgets (scripts/check/sizes.py),
+the modules that may name a decoder crate or a seeded map (scripts/check/paths.py),
 the duplicate scan (scripts/check/dupes.py) and cargo deny (offline subset)); cargo clippy -D
 warnings and then cargo doc with warnings as errors (private items
 included); the debug build, cargo test and the doctests; the corpus and
@@ -490,6 +491,7 @@ def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[St
             inputs=RUST + SCRIPTS,
         ),
         Step("sizes", [py, os.path.join("scripts", "check", "sizes.py")], inputs=RUST + SCRIPTS),
+        Step("paths", [py, os.path.join("scripts", "check", "paths.py")], inputs=RUST + SCRIPTS),
         # More duplicated Rust lines than scripts/check/dupes.tsv records fail.
         Step(
             "dupes",

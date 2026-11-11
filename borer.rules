@@ -15,7 +15,7 @@ critical:
   - Functions stay within 100 code lines and files within 1500 (scripts/check/sizes.py; entries in sizes.tsv may shrink, never grow). Duplicated lines may shrink, never grow (scripts/check/dupes.py runs jscpd over every tracked Rust file against the count in dupes.tsv).
   correctness:
   - Never claim more than the engine shows. A heuristic answer names its evidence and says when it is unsure; a missed finding beats a false one. Rough output says it is rough.
-  - 'Determinism is a contract: same binary, same query, same bytes, at any thread count. No clock (clippy.toml disallowed-methods), seed, hash order (iter_over_hash_type) or environment in an answer.'
+  - 'Determinism is a contract: same binary, same query, same bytes, at any thread count. No clock (clippy.toml disallowed-methods), seed (scripts/check/paths.py keeps the std hash map and set in fxmap.rs), hash order (iter_over_hash_type) or environment in an answer.'
   - Never guess a crate API; read docs.rs or ~/.cargo/registry first.
   - Done means a command says done. Check the command's own exit status, never a pipe's (`gate.py > log 2>&1 && git commit`).
   - 'Never edit a test or a benchmark to pass; report the wrong one. Every fix comes with a test: a decompiler fix in tests/it/decompile.rs, a lifter fix as an *_agrees_with_the_emulator test.'
@@ -31,7 +31,7 @@ critical:
   - 'Commit titles: `type: summary`, lowercase, imperative, plain ASCII, at most 72 characters, no scope, no period; only Co-Authored-By trailers below. Types: add, fix, improve, refactor, perf, docs, test, chore, revert (scripts/check/commits.py).'
   - One commit, one concern, green at every commit. Never commit build output, packs or ignored files.
   gate:
-  - '`python scripts/gate.py` is the termination test; green before every commit, or say gate not run. CI on dev runs only the quick checks (format, commits, comments, typos, ruff, sizes, dupes, clippy); the full `--check` gate, the Linux/macOS/arm64 tests and fuzzing run on a pull request into main, a push to main and a manual run; `--fast` skips the slow tail; passed steps are cached; one gate runs per machine.'
+  - '`python scripts/gate.py` is the termination test; green before every commit, or say gate not run. CI on dev runs only the quick checks (format, commits, comments, typos, ruff, sizes, paths, dupes, clippy); the full `--check` gate, the Linux/macOS/arm64 tests and fuzzing run on a pull request into main, a push to main and a manual run; `--fast` skips the slow tail; passed steps are cached; one gate runs per machine.'
   - Never silence a lint. Fix it, or put `#[expect(lint, reason = "...")]` on the one site; `#[allow]` is denied (allow_attributes).
   - 'Lint levels live in Cargo.toml [workspace.lints]: lints that flag a bug deny, style warn (an error under the gate''s -D warnings). Tool settings live in clippy.toml, rustfmt.toml, deny.toml, typos.toml, ruff.toml, .jscpd.json and .editorconfig.'
   - 'Builds and borer processes are heavy: at most two borer processes per task, many functions through one process (decompile_batch), one build at a time.'
@@ -41,7 +41,7 @@ important:
   - Program holds only facts from the file and is immutable; user names, comments and types live in an Overlay, identified by its fingerprint.
   - 'Analysis::compute runs once per Program. Every later result is memoized in Analysis::derived, keyed by its inputs; Derived::moved keeps what an edit''s read-set missed, and build threads read through reads::Handle. One memo store: no second Mutex map, no global state.'
   - Per-function parallel work uses std::thread::scope over stripes (analysis::striped), results in address order; rayon stays in the server.
-  - 'Decoders sit behind the isa module: iced-x86 (x86/x64), yaxpeax-arm (arm64, only in isa/a64/decode.rs), isa::a32 (A32/T32). decompile::verify checks the lift against the emulator; keep it green.'
+  - 'Decoders sit behind the isa module: iced-x86 (x86/x64), yaxpeax-arm (arm64, only in isa/a64/decode.rs), isa::a32 (A32/T32); scripts/check/paths.py holds both, and the uses outside in paths.tsv may shrink, never grow. decompile::verify checks the lift against the emulator; keep it green.'
   - Target knowledge lives in gitignored packs/*.borer, never as names in engine code.
   server:
   - 'A thin adapter: main.rs holds the tool router and resource dispatch; handlers live per area under tools/; state, params, resources, recall and the CLI have their own modules. Logic belongs in the engine behind a test.'
