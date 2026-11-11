@@ -466,6 +466,34 @@ pub fn build_struct(
     known: &BTreeMap<String, UserType>,
     word: u64,
 ) -> anyhow::Result<UserType> {
+    laid_out(name, size, fields, known, word).map(UserType::Struct)
+}
+
+/// Lays a struct out from its stated fields, as [`build_struct`] checks
+/// them, for a caller that goes on to change the struct it built.
+///
+/// # Arguments
+///
+/// * `name` - The struct's name.
+/// * `size` - The stated size, when the agent stated one.
+/// * `fields` - `(offset, field name, type)` per field, in any order.
+/// * `known` - The types already defined, for named references.
+/// * `word` - The image's pointer width in bytes (4 or 8).
+///
+/// # Returns
+///
+/// The struct.
+///
+/// # Errors
+///
+/// As [`build_struct`].
+pub(crate) fn laid_out(
+    name: &str,
+    size: Option<u64>,
+    fields: &[(u64, String, TypeExpr)],
+    known: &BTreeMap<String, UserType>,
+    word: u64,
+) -> anyhow::Result<UserStruct> {
     check_type_name(name)?;
     if fields.len() > FIELDS_MAX {
         return Err(anyhow::anyhow!(
@@ -528,10 +556,10 @@ pub fn build_struct(
         Some(s) => s,
         None => end,
     };
-    Ok(UserType::Struct(UserStruct {
+    Ok(UserStruct {
         size,
         fields: by_offset,
-    }))
+    })
 }
 
 /// Builds a name for another type.
