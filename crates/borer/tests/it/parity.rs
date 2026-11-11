@@ -150,3 +150,46 @@ fn a_decompilation_reads_the_same_at_the_cli_and_over_mcp() {
         "{at_cli}"
     );
 }
+
+/// A script run at the CLI under `--project` reads the project's names,
+/// as one run over MCP after `load_project` does.
+///
+/// `--project` applies a project to every query; `script` ran over an
+/// empty overlay, so `name()` answered `sub_...` for a function the
+/// project names.
+#[test]
+fn a_script_reads_a_project_s_names_at_the_cli_and_over_mcp() {
+    let file = fixture("named.exe", &[0xc3]);
+    let image = std::fs::read(&file).expect("the fixture reads back");
+    let project = file.with_extension("json");
+    let saved = serde_json::json!({
+        "program": shown(&file),
+        "sha256": borer::project::identity(&image),
+        "names": {ENTRY: "checks_serial"},
+        "comments": {}
+    });
+    std::fs::write(&project, saved.to_string()).expect("the project is writable");
+    let script = file.with_extension("rhai");
+    let code = format!("print(name({ENTRY}));");
+    std::fs::write(&script, &code).expect("the script is writable");
+    let (binary, project_path) = (shown(&file), shown(&project));
+    let at_cli = cli(&[
+        "--project",
+        &project_path,
+        "script",
+        &binary,
+        &shown(&script),
+    ]);
+    let mut client = Client::start(&binary);
+    client.text(
+        "load_project",
+        &serde_json::json!({ "path": project_path }).to_string(),
+    );
+    let over_mcp = client.text("script", &serde_json::json!({ "code": code }).to_string());
+    client.finish();
+    for written in [&file, &project, &script] {
+        std::fs::remove_file(written).ok();
+    }
+    assert_eq!(at_cli, without_evidence(&over_mcp));
+    assert!(at_cli.starts_with("checks_serial\n"), "{at_cli}");
+}

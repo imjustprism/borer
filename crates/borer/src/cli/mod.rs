@@ -886,7 +886,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             let run = script::run(
                 Arc::clone(&s.program),
                 Arc::new(a),
-                Arc::default(),
+                Arc::new(s.overlay.clone()),
                 &code,
                 &words,
             )
