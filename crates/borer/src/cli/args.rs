@@ -24,7 +24,7 @@ commands:
   search <binary> <pattern> [text] [offset]  AOB hex with ?? wildcards, or a substring; 500 a page
   fstrings <binary> <address|name>         string literals one function references, or the user strings a .NET method loads
   findstr <binary> <filter>                functions referencing a matching string
-  disasm <binary> <address|name> [count]   disassemble at a virtual address or name (default 32, max 256)
+  disasm <binary> <address|name> [count]   disassemble at a virtual address or name, from the start of the instruction it is inside (default 32, max 256)
   disasmfn <binary> <address|name>         a whole function, block by block
   decompile <binary> <address|name> [skeleton|full] [offset] [limit]  structured pseudo-C (skeleton: flow and calls only); 300 lines a page, a limit past the last line for all
   class <binary> <class|method address>    class layout from its methods' field accesses

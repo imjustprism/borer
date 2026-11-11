@@ -236,3 +236,41 @@ fn a_dotnet_method_s_strings_read_the_same_at_the_cli_and_over_mcp() {
         "{at_cli}"
     );
 }
+
+/// `disasm` lists from the start of the instruction an address is inside
+/// at the CLI, as `disassemble` does over MCP, and says so.
+///
+/// Decoding from an operand's bytes lists instructions that are not
+/// there; the CLI did, with nothing to say the address was inside one.
+#[test]
+fn a_listing_inside_an_instruction_reads_the_same_at_the_cli_and_over_mcp() {
+    let file = fixture(
+        "listed.exe",
+        &[
+            0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+            0xc3, // ASM: ret
+        ],
+    );
+    let binary = shown(&file);
+    let at_cli = cli(&["disasm", &binary, "0x140001002", "2"]);
+    let mut client = Client::start(&binary);
+    let over_mcp = client.text(
+        "disassemble",
+        r#"{"address":"0x140001002","count":2,"bytes":true}"#,
+    );
+    client.finish();
+    std::fs::remove_file(&file).ok();
+    let rows = |text: &str| -> Vec<String> {
+        text.lines()
+            .filter(|l| !l.starts_with('#'))
+            .map(str::to_owned)
+            .collect()
+    };
+    assert_eq!(rows(&at_cli), rows(&over_mcp));
+    assert!(
+        at_cli.starts_with(&format!(
+            "# 0x140001002 is inside an instruction, listing from {ENTRY}\n{ENTRY}  b8 01 00 00 00"
+        )),
+        "{at_cli}"
+    );
+}

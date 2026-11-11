@@ -391,7 +391,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Disasm => {
-            let va = s.address(arg(args, 2, "disasm needs an address")?)?;
+            let asked = s.address(arg(args, 2, "disasm needs an address")?)?;
             let count: usize = num_arg(args, 3, 32, "disasm count")?;
             if count == 0 {
                 bail!("disasm count must be at least 1");
@@ -401,11 +401,15 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 .program
                 .isa_for(Feature::Disasm)
                 .map_err(anyhow::Error::msg)?;
+            let a = s.analysis_or_empty();
+            let va = render::instruction_at_or_before(&s.program, &a, asked).unwrap_or(asked);
             let code = s
                 .program
                 .read_va_upto(va, 16 * 1024)
                 .with_context(|| format!("address {va:#x} not mapped"))?;
-            let a = s.analysis_or_empty();
+            if va != asked {
+                println!("# {asked:#x} is inside an instruction, listing from {va:#x}");
+            }
             let window = render::sweep_limit(&s.program, &a, va)
                 .and_then(|end| usize::try_from(end - va).ok())
                 .and_then(|n| code.get(..n.min(code.len())))
