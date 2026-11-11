@@ -13,7 +13,7 @@ use crate::isa::x86::{
     Code, FlowControl, Instruction, InstructionInfoFactory, Mnemonic, OpKind, Register,
 };
 use crate::num::from_usize;
-use crate::program::Program;
+use crate::program::{Program, pe::rva_to_va};
 
 /// Largest jump table accepted (bound immediate).
 pub(crate) const TABLE_ENTRIES_MAX: u64 = 4096;
@@ -787,7 +787,8 @@ pub(super) fn table_load(
 /// In order: absolute qword entries; dword entries relative to the table
 /// base (`table + (i32)entry`, LLVM and MSVC); dword entries relative to
 /// their own slot (`slot + (i32)entry`); and, for PE images, dword RVAs
-/// (`image_base + entry`). The first encoding whose targets pass
+/// (`image_base + entry`), none of which may pass the top of the address
+/// space ([`rva_to_va`]). The first encoding whose targets pass
 /// [`accept_table`] wins.
 ///
 /// # Arguments
@@ -847,7 +848,7 @@ fn table_targets(program: &Program, table: u64, entries: usize) -> Option<Vec<u6
         let rva: Option<Vec<u64>> = (0..entries)
             .map(|i| {
                 read_u32(program, table + from_usize(i) * 4)
-                    .map(|e| program.image_base + u64::from(e))
+                    .and_then(|e| rva_to_va(program.image_base, e))
             })
             .collect();
         if let Some(t) = rva

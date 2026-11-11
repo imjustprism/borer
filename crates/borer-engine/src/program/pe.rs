@@ -284,6 +284,27 @@ fn file_offset(sections: &[RawSection], rva: u64) -> Option<usize> {
     })
 }
 
+/// Returns the virtual address an RVA names in an image at its preferred
+/// base.
+///
+/// A PE32+ states its base in 64 bits the file chooses, so the base plus an
+/// RVA can pass the top of the address space. An RVA that does names an
+/// address there is not: its reader skips what it names, where a sum that
+/// wraps answers a low address the image does not map and an unchecked one
+/// overflows.
+///
+/// # Arguments
+///
+/// * `image_base` - The image's preferred load base.
+/// * `rva` - An address relative to the base.
+///
+/// # Returns
+///
+/// The address, or `None` when it does not fit 64 bits.
+pub(crate) fn rva_to_va(image_base: u64, rva: u32) -> Option<u64> {
+    image_base.checked_add(u64::from(rva))
+}
+
 /// The entries a PE's import directory reaches before it is refused.
 ///
 /// The parser synthesizes one import per non-zero word of each descriptor's

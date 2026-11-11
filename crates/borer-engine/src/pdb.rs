@@ -26,7 +26,7 @@
 //! slots, so `alpha` renders where `local_8` otherwise would.
 
 use crate::dwarf::{frame_slot, local_name_ok};
-use crate::program::{Section, Symbol, SymbolKind};
+use crate::program::{Section, Symbol, SymbolKind, pe::rva_to_va};
 use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -399,7 +399,9 @@ pub fn identifies(bytes: &[u8], record: &Record) -> Option<bool> {
 ///   the image holds whole.
 /// * `subs` - The program's debug functions, appended to by the signatures
 ///   the type stream states, for the decompiler's headers, each with the
-///   frame-relative locals its module states naming its stack slots.
+///   frame-relative locals its module states naming its stack slots; a
+///   function whose address would pass the top of the address space
+///   ([`rva_to_va`]) adds none.
 ///
 /// # Returns
 ///
@@ -477,11 +479,11 @@ pub(crate) fn apply(
     let sigs = signatures(&mut db, &gathered.types);
     phases.mark("pdb signatures");
     for (rva, name) in &gathered.found {
-        let Some(sig) = sigs.get(rva) else {
+        let (Some(sig), Some(low_pc)) = (sigs.get(rva), rva_to_va(image_base, *rva)) else {
             continue;
         };
         subs.push(crate::dwarf::Subprogram {
-            low_pc: image_base + u64::from(*rva),
+            low_pc,
             name: name.clone(),
             parameters: sig
                 .params
@@ -548,7 +550,8 @@ pub fn resolved(binary: &Path, record: &Record, symsrv: Option<&Path>) -> Option
 ///
 /// # Returns
 ///
-/// Function entry to the `(file, line)` its first row states, or `None`
+/// Function entry to the `(file, line)` its first row states, a row whose
+/// address would pass the top of the address space left out, or `None`
 /// when no PDB is on disk or the one there no longer matches the record.
 pub(crate) fn sources(
     binary: &Path,
@@ -575,7 +578,7 @@ pub(crate) fn sources(
     let rows = resolve_lines(&mut db, &gathered.lines);
     Some(
         rows.into_iter()
-            .map(|(rva, fl)| (image_base + u64::from(rva), fl))
+            .filter_map(|(rva, fl)| Some((rva_to_va(image_base, rva)?, fl)))
             .collect(),
     )
 }
@@ -1465,7 +1468,8 @@ fn primitive_text(kind: pdb::PrimitiveKind) -> Option<String> {
 ///
 /// An address that already holds a symbol (an import's slot, an export's
 /// entry) keeps the image's own name, the same precedence the DWARF names
-/// are applied with.
+/// are applied with, and an RVA whose address would pass the top of the
+/// address space ([`rva_to_va`]) names nothing.
 ///
 /// # Arguments
 ///
@@ -1480,15 +1484,15 @@ fn insert(image_base: u64, found: &BTreeMap<u32, String>, symbols: &mut Vec<Symb
     let taken: std::collections::BTreeSet<u64> = symbols.iter().map(|s| s.addr).collect();
     let mut named = 0usize;
     for (rva, name) in found {
-        let addr = image_base + u64::from(*rva);
-        if !taken.contains(&addr) {
-            symbols.push(Symbol {
-                name: name.clone(),
-                addr,
-                kind: SymbolKind::Local,
-            });
-            named += 1;
-        }
+        let Some(addr) = rva_to_va(image_base, *rva).filter(|a| !taken.contains(a)) else {
+            continue;
+        };
+        symbols.push(Symbol {
+            name: name.clone(),
+            addr,
+            kind: SymbolKind::Local,
+        });
+        named += 1;
     }
     named
 }

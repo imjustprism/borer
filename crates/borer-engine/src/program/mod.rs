@@ -26,7 +26,7 @@ pub use file::{Parent, read_regular, unusable_path};
 use file::{Take, magic_name, parse_object, read_program_bytes};
 use pe::{
     DIRECTORY_ENTRY, SANE_MAX, arm64_pdata, delay_imports, directory_entry, disarm_exports,
-    implausible_imports, loosen_pe, name_ordinal_imports, ordinal_exports, restore,
+    implausible_imports, loosen_pe, name_ordinal_imports, ordinal_exports, restore, rva_to_va,
     sound_section_table,
 };
 
@@ -738,7 +738,9 @@ impl Program {
     /// Imports record their IAT
     /// slot address, exports their entry; x64 exception-table entries whose
     /// unwind info is not chained, and ARM64 `.pdata` entries that are not
-    /// fragments, become [`Program::function_ranges`] ([`arm64_pdata`]). The
+    /// fragments, become [`Program::function_ranges`] ([`arm64_pdata`]), save
+    /// an entry or a handler whose address would pass the top of the address
+    /// space ([`rva_to_va`]). The
     /// debug directory's `CodeView` record names a PDB, applied when it is on
     /// disk at the recorded path, beside the loaded file or in the symbol
     /// cache and states the record's GUID and age (the DBI age): its function
@@ -996,25 +998,21 @@ impl Program {
                         let mut handlers = Vec::new();
                         let mut chunks = Vec::new();
                         for rf in ex.functions().flatten() {
-                            if rf.begin_address >= rf.end_address {
+                            let Some((function, end)) = rva_to_va(image_base, rf.begin_address)
+                                .zip(rva_to_va(image_base, rf.end_address))
+                                .filter(|(function, end)| function < end)
+                            else {
                                 continue;
-                            }
+                            };
                             let Ok(u) = ex.get_unwind_info(rf, &pe.sections) else {
-                                out.push((
-                                    image_base + u64::from(rf.begin_address),
-                                    image_base + u64::from(rf.end_address),
-                                ));
+                                out.push((function, end));
                                 continue;
                             };
                             if u.chained_info.is_some() {
-                                chunks.push((
-                                    image_base + u64::from(rf.begin_address),
-                                    image_base + u64::from(rf.end_address),
-                                ));
+                                chunks.push((function, end));
                                 continue;
                             }
-                            let function = image_base + u64::from(rf.begin_address);
-                            out.push((function, image_base + u64::from(rf.end_address)));
+                            out.push((function, end));
                             let Some(
                                 goblin::pe::exception::UnwindHandler::ExceptionHandler(
                                     handler,
@@ -1030,10 +1028,12 @@ impl Program {
                             };
                             let off =
                                 (data.as_ptr() as usize).wrapping_sub(bytes.as_ptr() as usize);
-                            if off < bytes.len() {
+                            if off < bytes.len()
+                                && let Some(handler) = rva_to_va(image_base, handler)
+                            {
                                 handlers.push(crate::headers::ExceptionHandler {
                                     function,
-                                    handler: image_base + u64::from(handler),
+                                    handler,
                                     data: va_of_off(from_usize(off)),
                                 });
                             }
@@ -1487,7 +1487,8 @@ impl Program {
     ///
     /// The fixed-up words' addresses, in table order for a PE and address
     /// order for an ELF or a Mach-O, at most a million; empty for any other
-    /// file or one with no relocations.
+    /// file or one with no relocations. A PE word whose address would pass
+    /// the top of the address space ([`rva_to_va`]) is left out.
     #[must_use]
     pub fn relocated_words(&self) -> Vec<u64> {
         /// Most relocated words read, whatever the table claims.
@@ -1510,10 +1511,9 @@ impl Program {
         let (Some(rva), Some(size)) = (u32_le(bytes, entry), u32_le(bytes, entry + 4)) else {
             return out;
         };
-        let Some(table) = self.read_va(
-            self.image_base + u64::from(rva),
-            saturating_usize(u64::from(size)),
-        ) else {
+        let Some(table) = rva_to_va(self.image_base, rva)
+            .and_then(|va| self.read_va(va, saturating_usize(u64::from(size))))
+        else {
             return out;
         };
         let wanted = if self.is_64 { DIR64 } else { HIGHLOW };
@@ -1527,10 +1527,13 @@ impl Program {
                 break;
             }
             let end = (at + block).min(table.len());
+            let page = rva_to_va(self.image_base, page);
             for e in table[at + 8..end].chunks_exact(2) {
                 let entry = u16::from_le_bytes([e[0], e[1]]);
-                if entry >> 12 == wanted {
-                    out.push(self.image_base + u64::from(page) + u64::from(entry & 0xfff));
+                if entry >> 12 == wanted
+                    && let Some(va) = page.and_then(|p| p.checked_add(u64::from(entry & 0xfff)))
+                {
+                    out.push(va);
                 }
             }
             at += block;

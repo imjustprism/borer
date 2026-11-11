@@ -1660,3 +1660,176 @@ fn a_read_at_the_top_of_a_minidump_range_is_refused() {
     assert_eq!(p.read_va_upto(u64::MAX - 2, 256), None);
     Analysis::compute(&p);
 }
+
+/// An image base 64 KiB below the top of the address space: an RVA past
+/// `0xffff` names an address there is not.
+const TOP_BASE: u64 = u64::MAX - 0xffff;
+
+/// The exception directory's slot.
+const EXCEPTION_DIR: usize = 3;
+
+/// The base relocation directory's slot.
+const BASE_RELOC_DIR: usize = 5;
+
+/// Builds [`pe`]'s image with its base moved to [`TOP_BASE`] and loads it.
+fn load_at_the_top(secs: &[Sec], dirs: &[(usize, u32, u32)]) -> Program {
+    let mut bytes = pe(secs, dirs);
+    put64(&mut bytes, IMAGE_BASE_AT, TOP_BASE);
+    load(bytes)
+}
+
+/// An exception table in an image based at the top of the address space
+/// keeps the functions whose addresses exist.
+///
+/// The loader added each entry's RVAs to the base unchecked: a build that
+/// traps overflow lost the whole table to the fault, and one that wraps
+/// kept ranges and handlers at low addresses the image does not map. The
+/// first entry's unwind record (version 1, an exception handler) names a
+/// handler past the top, so its range stays without one; the second ends
+/// past the top and the third begins there, and both are skipped; the
+/// fourth, whose record no section holds, keeps its range.
+#[test]
+fn an_exception_table_at_the_top_of_the_address_space_keeps_what_fits() {
+    const PDATA: u32 = 0x2000;
+    let mut code = text();
+    code.copy_within(..6, 0x20);
+    let mut pdata = vec![0u8; 0x200];
+    let rows = [
+        [0x1000, 0x1006, PDATA + 0x100],
+        [0x1010, 0x2_0000, PDATA + 0x100],
+        [0x2_0000, 0x2_0006, PDATA + 0x100],
+        [0x1020, 0x1026, 0x7000_0000],
+    ];
+    for (k, v) in rows.as_flattened().iter().enumerate() {
+        put32(&mut pdata, k * 4, *v);
+    }
+    pdata[0x100] = 0x09;
+    put32(&mut pdata, 0x104, 0x2_0000);
+    let p = load_at_the_top(
+        &[
+            Sec::sound(".text", 0x1000, code, CODE),
+            Sec::sound(".pdata", PDATA, pdata, DATA),
+        ],
+        &[(EXCEPTION_DIR, PDATA, 48)],
+    );
+    let kept = [0x1000, 0x1020].map(|f| (TOP_BASE + f, TOP_BASE + f + 6));
+    assert_eq!(p.function_ranges, kept);
+    assert!(p.headers.exception_handlers.is_empty());
+    let a = Analysis::compute(&p);
+    assert!(
+        a.function(TOP_BASE + 0x1020).is_some(),
+        "{:x?}",
+        a.functions
+    );
+}
+
+/// The base relocations of an image based at the top of the address space
+/// name only the words whose addresses exist.
+///
+/// The table's address and each block's page were added to the base
+/// unchecked, which overflowed in every function discovery. The second
+/// block's page lies past the top, the third's entry does from a page
+/// below it, and so does the second image's table.
+#[test]
+fn base_relocations_past_the_top_of_the_address_space_are_skipped() {
+    const RELOC: u32 = 0x2000;
+    let mut reloc = vec![0u8; 0x200];
+    for (at, page, entry) in [
+        (0, 0x1000, 0xa008),
+        (12, 0xffff_f000, 0xa008),
+        (24, 0xf800, 0xafff),
+    ] {
+        put32(&mut reloc, at, page);
+        put32(&mut reloc, at + 4, 12);
+        put16(&mut reloc, at + 8, entry);
+    }
+    let image = |table: u32| {
+        load_at_the_top(
+            &[
+                Sec::sound(".text", 0x1000, text(), CODE),
+                Sec::sound(".reloc", RELOC, reloc.clone(), DATA),
+            ],
+            &[(BASE_RELOC_DIR, table, 36)],
+        )
+    };
+    let p = image(RELOC);
+    assert_eq!(p.relocated_words(), vec![TOP_BASE + 0x1008]);
+    Analysis::compute(&p);
+    assert!(image(0x2_0000).relocated_words().is_empty());
+}
+
+/// A jump table of RVAs in an image based at the top of the address space
+/// reads no case whose address does not exist.
+///
+/// The cases are tried as addresses, as offsets from the table and from
+/// each slot, then as RVAs, which were added to the base unchecked: the
+/// walk of the function overflowed. Every entry here is an RVA past the
+/// top, so the jump stays unresolved and the function is still found.
+#[test]
+fn a_jump_table_of_rvas_past_the_top_of_the_address_space_is_not_read() {
+    let mut code = vec![0xcc_u8; 0x200];
+    code[..2].copy_from_slice(&[0x89, 0xc8]); // ASM: mov eax, ecx
+    code[2..5].copy_from_slice(&[0x83, 0xf8, 0x03]); // ASM: cmp eax, 3
+    code[5..7].copy_from_slice(&[0x77, 0x07]); // ASM: ja 0x100e
+    code[7..14].copy_from_slice(&[0xff, 0x24, 0xc5, 0x00, 0x20, 0xff, 0xff]); // ASM: jmp [rax*8-0xe000]
+    code[14] = 0xc3; // ASM: ret
+    let mut table = vec![0u8; 0x200];
+    for slot in 0..8 {
+        put32(&mut table, slot * 4, 0x2_0000);
+    }
+    let p = load_at_the_top(
+        &[
+            Sec::sound(".text", 0x1000, code, CODE),
+            Sec::sound(".rdata", 0x2000, table, DATA),
+        ],
+        &[],
+    );
+    let a = Analysis::compute(&p);
+    assert!(
+        a.function(TOP_BASE + 0x1000).is_some(),
+        "{:x?}",
+        a.functions
+    );
+}
+
+/// A PDB applied to an image based at the top of the address space names
+/// only the addresses that exist, and so do its source lines.
+///
+/// The image is this test binary with its base moved to [`TOP_BASE`], so
+/// the PDB the build wrote for it still matches. Every symbol's and every
+/// signature's RVA was added to the base unchecked, and so was every
+/// source row's when a function's header first asks for one, here a
+/// function of a second image holding the same PDB. A host that writes no
+/// PDB has none to apply, and then nothing is asserted.
+#[test]
+fn a_pdb_applied_at_the_top_of_the_address_space_names_what_fits() {
+    let _serial = serial();
+    let exe = std::env::current_exe().expect("the test binary has a path");
+    let mut bytes = std::fs::read(&exe).expect("the test binary is readable");
+    let Some(pe_at) = bytes.get(0x3c..0x40).filter(|_| bytes.starts_with(b"MZ")) else {
+        return;
+    };
+    let pe_at = u32::from_le_bytes(pe_at.try_into().expect("four bytes"));
+    let base_at = usize::try_from(pe_at).expect("fits") + 4 + 20 + 24;
+    put64(&mut bytes, base_at, TOP_BASE);
+    let p = Program::from_bytes_with(exe, bytes, true, None).expect("the image loads");
+    if p.pdb_source.is_none() {
+        return;
+    }
+    let named = p.symbols.iter().filter(|s| s.kind == SymbolKind::Local);
+    let wrapped: Vec<u64> = named.map(|s| s.addr).filter(|a| *a < TOP_BASE).collect();
+    assert!(wrapped.is_empty(), "{wrapped:x?}");
+    assert!(p.debug_functions.iter().all(|d| d.low_pc >= TOP_BASE));
+    let entry = TOP_BASE + 0x1000;
+    let code = Section::mapped(".text", entry, 0, 0x200, false, true);
+    let x64 = borer_engine::program::Arch::X86_64;
+    let mut q = Program::raw(text(), x64, TOP_BASE, Some(entry), vec![code]);
+    q.pdb_source = p.pdb_source;
+    let a = Analysis::compute(&q);
+    let o = borer_engine::analysis::Overlay::default();
+    let text = borer_engine::analysis::decompile::decompile(&q, &a, &o, entry);
+    assert!(
+        text.is_some_and(|t| t.contains("return 1;")),
+        "the entry does not decompile"
+    );
+}
