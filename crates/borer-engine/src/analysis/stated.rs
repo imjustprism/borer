@@ -204,6 +204,23 @@ pub enum Mode {
     Replace,
 }
 
+impl Mode {
+    /// Reads the mode from a statement's `replace` flag.
+    ///
+    /// # Arguments
+    ///
+    /// * `replace` - Whether the statement asks to replace.
+    ///
+    /// # Returns
+    ///
+    /// [`Mode::Replace`] when asked, else [`Mode::Merge`]: a statement that
+    /// says nothing merges.
+    #[must_use]
+    pub fn asked(replace: bool) -> Self {
+        if replace { Self::Replace } else { Self::Merge }
+    }
+}
+
 /// The fields an agent states of one name.
 #[derive(Debug, Clone, Copy)]
 pub struct Statement<'a> {
@@ -463,12 +480,8 @@ fn structure(
     if let (Some(k), None) = (kept, s.size) {
         built.size = built.size.max(k.size);
     }
-    let mut what = format!(
-        "struct {}: {} field(s), {:#x} byte(s)",
-        s.name,
-        built.fields.len(),
-        built.size
-    );
+    let built = UserType::Struct(built);
+    let mut what = built.describe(s.name);
     match (kept, old) {
         (Some(k), _) => {
             what.push_str(&format!("; {}", tally.says(k.fields.len() - tally.changed)));
@@ -479,7 +492,7 @@ fn structure(
         (None, None) => {}
     }
     Ok(Plan {
-        edit: Edit::Struct(s.name.to_owned(), UserType::Struct(built)),
+        edit: Edit::Struct(s.name.to_owned(), built),
         what,
     })
 }

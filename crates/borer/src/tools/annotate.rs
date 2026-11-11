@@ -3,8 +3,8 @@
 
 use std::fmt::Write as _;
 
-use borer_engine::analysis::parse_addr;
-use borer_engine::program::Feature;
+use borer_engine::analysis::{Analysis, Overlay, parse_addr, stated};
+use borer_engine::program::{Feature, Program};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ErrorData, tool, tool_router};
 
@@ -12,8 +12,8 @@ use crate::BorerServer;
 use crate::errors::err_params;
 use crate::params::{
     Annotation, AnnotationsParams, Filter, Page, SetCommentParams, SetNameParams, SetTypeParams,
-    TypesParams, must_be_a_name, must_be_in_a_section, must_fit_a_row, plan_var, stated_fields,
-    stated_values,
+    TypesParams, field_var, must_be_a_name, must_be_in_a_section, must_fit_a_row, plan_var,
+    stated_fields, stated_key, stated_values,
 };
 use crate::safety::{Effect, effects};
 use crate::state::{read_lock, write_lock};
@@ -95,6 +95,89 @@ impl BorerServer {
             self.names_changed(&before);
             Ok(out)
         })
+    }
+
+    /// States a variable of a function, or a field of the class the
+    /// function's object is of: `set_type` with `var`.
+    ///
+    /// `var` is a parameter or a stack slot as the function's text shows
+    /// it, or a name stated before ([`plan_var`]). Any other `var` that
+    /// spells an unnamed field as the text prints one (`field_0x270`) is
+    /// that field of the function's class, stated there as `name` and
+    /// `fields` state it by the class's name ([`stated::plan_at`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `(p, a, o)` - The loaded program, its analysis and the overlay.
+    /// * `entry` - The function `address` is in, when it is in one.
+    /// * `var` - The variable or the field.
+    /// * `(name, ty)` - Its new name, and its type if one is stated.
+    /// * `dry` - Say what would be stated and write nothing.
+    ///
+    /// # Errors
+    ///
+    /// When `address` is in no function, the variable, the field or the
+    /// name is refused, or the function's text names no such variable.
+    fn state_var(
+        &self,
+        (p, a, o): (&Program, &Analysis, &Overlay),
+        entry: Option<u64>,
+        var: &str,
+        (name, ty): (Option<&str>, Option<&str>),
+        dry: bool,
+    ) -> Result<String, String> {
+        let entry = entry.ok_or_else(|| {
+            "`var` names a variable of a function: give the function's `address`".to_owned()
+        })?;
+        if let Some(off) = field_var(var).filter(|_| stated_key(o, entry, var).is_none()) {
+            let name =
+                name.ok_or("naming a field needs `name`, its new name (`type` is optional)")?;
+            let ty = ty
+                .map(borer_engine::analysis::utypes::parse_type)
+                .transpose()
+                .map_err(|e| e.to_string())?;
+            let name = name.to_owned();
+            let plan = stated::plan_at(p, a, o, entry, off, stated::Field { name, ty })?;
+            if dry {
+                return Ok(format!(
+                    "dry-run: would {}. pass dry_run=false to apply.",
+                    plan.would()
+                ));
+            }
+            let said = plan.done();
+            let before = self.overlay_plain();
+            plan.apply(&mut write_lock(&self.overlay));
+            self.names_changed(&before);
+            return Ok(said);
+        }
+        let (key, named) = plan_var(p, o, entry, var, name, ty)?;
+        let (stack, shadow, frame) = borer_engine::analysis::protos::slot_words(p, entry);
+        let spelled = key.spell(stack, shadow, frame);
+        let fname = borer_engine::analysis::name_of(a, o, entry);
+        let renamed = o.vars.get(&entry).is_some_and(|v| v.contains_key(&key));
+        if !renamed
+            && let Some(text) = borer_engine::analysis::decompile::decompile_named(p, a, o, entry)
+            && !names_word(&text, var)
+            && !names_word(&text, &spelled)
+        {
+            return Err(format!(
+                "{fname} has no variable {spelled}: its text never names it, so a type there would invent a parameter the code does not take; decompile it for the variables it has"
+            ));
+        }
+        let what = format!("{spelled} of {fname} ({entry:#x}) {}", named.spell());
+        if dry {
+            return Ok(format!(
+                "dry-run: would name {what}; decompile then renders it so. pass dry_run=false to apply."
+            ));
+        }
+        let before = self.overlay_plain();
+        write_lock(&self.overlay)
+            .vars
+            .entry(entry)
+            .or_default()
+            .insert(key, named);
+        self.names_changed(&before);
+        Ok(format!("named {what}"))
     }
 }
 
@@ -300,10 +383,18 @@ impl BorerServer {
         })
     }
 
-    /// Defines a user type, applies one at an address, states a function's
-    /// prototype or one of its variables.
+    /// Defines a user type, states fields of a struct or a class, applies a
+    /// type at an address, states a function's prototype or one of its
+    /// variables.
     ///
-    /// `name` with `fields` defines a struct; `name` with `values` defines
+    /// `name` with `fields` states fields by offset ([`stated::plan`]): of
+    /// the user struct of that name, else of the class of exactly that name
+    /// borer recovered, else of a struct it defines. The fields merge into
+    /// what the name states, a field without a type keeping the type or the
+    /// width it had, and the answer counts the fields kept, changed and
+    /// new; `replace` drops every field the call does not restate. A type
+    /// of a size the class's code never reads the field at is refused
+    /// ([`stated::plan_class`]). `name` with `values` defines
     /// an enum; `name` with `type` alone defines a typedef. `address` with
     /// `type` applies the type at that data global: the decompiler types the
     /// variable it renders there, so a `Player *` names every field read
@@ -313,12 +404,14 @@ impl BorerServer {
     /// ([`borer_engine::analysis::protos::Proto`]), which its signature,
     /// its body and every call to it follow; with `var` (`a1`, `local_58`,
     /// or a name stated before), `name` and an optional `type` name and
-    /// type that variable. `type` alone is C declarations, laid out by the
-    /// binary's ABI ([`BorerServer::declare_c`]). Everything is validated
-    /// before anything is written: types the language does not spell,
-    /// references to names nothing defines, fields that overlap, a size
-    /// that does not cover the last field and an offset assertion that
-    /// fails are refused with a message naming the offender.
+    /// type that variable, and a `var` spelling an unnamed field
+    /// (`field_0x270`) states that field of the function's class
+    /// ([`BorerServer::state_var`]). `type` alone is C declarations, laid
+    /// out by the binary's ABI ([`BorerServer::declare_c`]). Everything is
+    /// validated before anything is written: types the language does not
+    /// spell, references to names nothing defines, fields that overlap, a
+    /// size that does not cover the last field and an offset assertion
+    /// that fails are refused with a message naming the offender.
     ///
     /// # Arguments
     ///
@@ -326,11 +419,11 @@ impl BorerServer {
     ///
     /// # Errors
     ///
-    /// When no binary is loaded, a definition, an application, a prototype
-    /// or a variable is refused, or the address does not resolve or no
-    /// section holds it.
+    /// When no binary is loaded, `replace` comes without `fields`, a
+    /// definition, a field, an application, a prototype or a variable is
+    /// refused, or the address does not resolve or no section holds it.
     #[tool(
-        description = "Define a struct, enum or typedef, or apply a type at an address so decompile names its fields; at a function, type sets the prototype. To infer a class use class_layout. Checked first; dry run until dry_run=false.",
+        description = "Define a struct, enum or typedef, name fields of a struct or class_layout class, or apply a type at an address so decompile names its fields; at a function, type sets the prototype. Checked first; dry run until dry_run=false.",
         meta = effects(&[Effect::ChangesSession]),
         annotations(
             read_only_hint = false,
@@ -345,6 +438,7 @@ impl BorerServer {
         Parameters(SetTypeParams {
             name,
             fields,
+            replace,
             values,
             size,
             address,
@@ -354,6 +448,11 @@ impl BorerServer {
         }): Parameters<SetTypeParams>,
     ) -> Result<String, ErrorData> {
         let dry = dry_run.unwrap_or(true);
+        if replace == Some(true) && (fields.is_none() || var.is_some()) {
+            return Err(err_params(
+                "`replace` drops the fields `fields` does not restate, so it goes with `name` and `fields`",
+            ));
+        }
         if let (None, None, None, None, None, None, Some(decl)) =
             (&name, &address, &var, &fields, &values, size, &ty)
         {
@@ -384,45 +483,10 @@ impl BorerServer {
                 None => None,
             };
             if let Some(var) = &var {
-                let entry = function.ok_or_else(|| {
-                    "`var` names a variable of a function: give the function's `address`".to_owned()
-                })?;
-                let (key, stated) = plan_var(p, o, entry, var, name.as_deref(), ty.as_deref())?;
-                let (stack, shadow, frame) =
-                    borer_engine::analysis::protos::slot_words(p, entry);
-                let spelled = key.spell(stack, shadow, frame);
-                let renamed = o.vars.get(&entry).is_some_and(|v| v.contains_key(&key));
-                if !renamed
-                    && let Some(text) =
-                        borer_engine::analysis::decompile::decompile_named(p, a, o, entry)
-                    && !names_word(&text, var)
-                    && !names_word(&text, &spelled)
-                {
-                    return Err(format!(
-                        "{} has no variable {spelled}: its text never names it, so a type there would invent a parameter the code does not take; decompile it for the variables it has",
-                        borer_engine::analysis::name_of(a, o, entry)
-                    ));
-                }
-                let what = format!(
-                    "{} of {} ({entry:#x}) {}",
-                    key.spell(stack, shadow, frame),
-                    borer_engine::analysis::name_of(a, o, entry),
-                    stated.spell()
-                );
-                if dry {
-                    return Ok(format!(
-                        "dry-run: would name {what}; decompile then renders it so. pass dry_run=false to apply."
-                    ));
-                }
-                let before = self.overlay_plain();
-                write_lock(&self.overlay)
-                    .vars
-                    .entry(entry)
-                    .or_default()
-                    .insert(key, stated);
-                self.names_changed(&before);
-                return Ok(format!("named {what}"));
+                let named = (name.as_deref(), ty.as_deref());
+                return self.state_var((p, a, o), function, var, named, dry);
             }
+            let mut fielded = None;
             let defined = match (&name, &fields, &values) {
                 (Some(n), Some(fs), vs) if !fs.is_empty() => {
                     if vs.is_some() {
@@ -430,12 +494,14 @@ impl BorerServer {
                             "type {n} states both fields and values; a struct takes fields, an enum values"
                         ));
                     }
-                    let stated = stated_fields(fs)?;
-                    Some((
-                        n.clone(),
-                        borer_engine::analysis::utypes::build_struct(n, size, &stated, &o.types, word)
-                            .map_err(|e| e.to_string())?,
-                    ))
+                    let statement = stated::Statement {
+                        name: n,
+                        size,
+                        fields: &stated_fields(fs)?,
+                        mode: stated::Mode::asked(replace.unwrap_or(false)),
+                    };
+                    fielded = Some(stated::plan(p, a, o, &statement)?);
+                    None
                 }
                 (Some(n), Some(_), _) => {
                     return Err(format!(
@@ -520,8 +586,9 @@ impl BorerServer {
                 None => None,
             };
             let mut types = o.types.clone();
-            if let Some((n, ty)) = &defined {
-                types.insert(n.clone(), ty.clone());
+            let fresh = fielded.as_ref().and_then(stated::Plan::defined);
+            if let Some((n, ty)) = fresh.or(defined.as_ref().map(|(n, ty)| (n.as_str(), ty))) {
+                types.insert(n.to_owned(), ty.clone());
             }
             let applied = applied
                 .map(|(va, ty)| {
@@ -535,37 +602,13 @@ impl BorerServer {
                 .transpose()?;
             let mut done: Vec<String> = Vec::new();
             let mut would: Vec<String> = Vec::new();
+            if let Some(plan) = &fielded {
+                done.push(plan.done());
+                would.push(plan.would());
+            }
             if let Some((n, ty)) = &defined {
-                match ty {
-                    borer_engine::analysis::utypes::UserType::Struct(s) => {
-                        done.push(format!(
-                            "defined struct {n}: {} field(s), {:#x} byte(s)",
-                            s.fields.len(),
-                            s.size
-                        ));
-                        would.push(format!(
-                            "define struct {n}: {} field(s), {:#x} byte(s)",
-                            s.fields.len(),
-                            s.size
-                        ));
-                    }
-                    borer_engine::analysis::utypes::UserType::Enum(e) => {
-                        done.push(format!(
-                            "defined enum {n}: {} value(s), {:#x} byte(s)",
-                            e.values.len(),
-                            e.size
-                        ));
-                        would.push(format!(
-                            "define enum {n}: {} value(s), {:#x} byte(s)",
-                            e.values.len(),
-                            e.size
-                        ));
-                    }
-                    borer_engine::analysis::utypes::UserType::Alias(inner) => {
-                        done.push(format!("defined typedef {n}: {}", inner.spell()));
-                        would.push(format!("define typedef {n}: {}", inner.spell()));
-                    }
-                }
+                done.push(format!("defined {}", ty.describe(n)));
+                would.push(format!("define {}", ty.describe(n)));
             }
             if let Some((va, ty, width)) = &applied {
                 let renders = if borer_engine::analysis::utypes::named_enum(&types, ty).is_some() {
@@ -613,6 +656,9 @@ impl BorerServer {
             }
             let before = self.overlay_plain();
             let mut overlay = write_lock(&self.overlay);
+            if let Some(plan) = fielded {
+                plan.apply(&mut overlay);
+            }
             if let Some((n, ty)) = defined {
                 overlay.types.insert(n, ty);
             }
@@ -663,11 +709,11 @@ impl BorerServer {
             borer_engine::analysis::utypes::TYPES_ROWS_MAX,
         )?;
         let o = read_lock(&self.overlay);
-        let stated = borer_engine::analysis::stated::rows(&o);
+        let rows = stated::rows(&o);
         let (_, total, table) = borer_engine::analysis::utypes::list_tsv(
             &o.types,
             &o.applied,
-            &stated,
+            &rows,
             filter.as_deref(),
             page.offset,
             page.limit.n,

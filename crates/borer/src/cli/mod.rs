@@ -8,7 +8,7 @@ use std::sync::Arc;
 use anyhow::{Context as _, anyhow, bail};
 use borer_engine::analysis::{
     Overlay, about, anchors, attributes, classes, decompile, fieldrefs, map, messages, name_of,
-    parse_off, ports, render, sigs, snapshot, utypes, vtables,
+    parse_off, ports, render, sigs, snapshot, stated, utypes, vtables,
 };
 use borer_engine::isa::Isa;
 use borer_engine::pack::Pack;
@@ -942,11 +942,11 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 .map(|f| f.to_lowercase())
                 .filter(|f| !f.is_empty());
             let (offset, limit) = cli_page(args, 4, 50, utypes::TYPES_ROWS_MAX)?;
-            let stated = borer_engine::analysis::stated::rows(&overlay);
+            let rows = stated::rows(&overlay);
             let (_, _, table) = utypes::list_tsv(
                 &overlay.types,
                 &overlay.applied,
-                &stated,
+                &rows,
                 filter.as_deref(),
                 offset,
                 limit,
@@ -971,7 +971,8 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             match arg(args, 3, "set-type needs struct, enum, typedef or apply")? {
                 "struct" => {
                     let name = arg(args, 4, "set-type struct needs a name")?;
-                    let mut at = 5;
+                    let replace = args.get(5).is_some_and(|w| w == "replace");
+                    let mut at = 5 + usize::from(replace);
                     let size = args
                         .get(at)
                         .filter(|a| !a.contains(':'))
@@ -979,25 +980,26 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                     if size.is_some() {
                         at += 1;
                     }
-                    let stated = stated_fields(args.get(at..).unwrap_or_default())
+                    let fields = stated_fields(args.get(at..).unwrap_or_default())
                         .map_err(anyhow::Error::msg)?;
-                    if stated.is_empty() {
+                    if fields.is_empty() {
                         bail!(
-                            "struct {} states no fields; give them as off:name:type",
+                            "struct {} states no fields; give them as off:name[:type]",
                             one_line(name)
                         );
                     }
-                    let built = utypes::build_struct(name, size, &stated, &overlay.types, word)
+                    let mode = stated::Mode::asked(replace);
+                    let statement = stated::Statement {
+                        name,
+                        size,
+                        fields: &fields,
+                        mode,
+                    };
+                    let a = s.analysis_or_empty();
+                    let plan = stated::plan(&s.program, &a, &overlay, &statement)
                         .map_err(anyhow::Error::msg)?;
-                    if let utypes::UserType::Struct(s) = &built {
-                        let _ = write!(
-                            say,
-                            "defined struct {name}: {} field(s), {:#x} byte(s)",
-                            s.fields.len(),
-                            s.size
-                        );
-                    }
-                    overlay.types.insert(name.to_owned(), built);
+                    say = plan.done();
+                    plan.apply(&mut overlay);
                 }
                 "enum" => {
                     let name = arg(args, 4, "set-type enum needs a name")?;
@@ -1019,14 +1021,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                     }
                     let built = utypes::build_enum(name, size.unwrap_or(4), &stated)
                         .map_err(anyhow::Error::msg)?;
-                    if let utypes::UserType::Enum(e) = &built {
-                        let _ = write!(
-                            say,
-                            "defined enum {name}: {} value(s), {:#x} byte(s)",
-                            e.values.len(),
-                            e.size
-                        );
-                    }
+                    say = format!("defined {}", built.describe(name));
                     overlay.types.insert(name.to_owned(), built);
                 }
                 "typedef" => {
@@ -1035,7 +1030,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                     let ty = utypes::parse_type(spelled).map_err(anyhow::Error::msg)?;
                     let built = utypes::build_alias(name, &ty, &overlay.types, word)
                         .map_err(anyhow::Error::msg)?;
-                    let _ = write!(say, "defined typedef {name}: {}", ty.spell());
+                    say = format!("defined {}", built.describe(name));
                     overlay.types.insert(name.to_owned(), built);
                 }
                 "apply" => {

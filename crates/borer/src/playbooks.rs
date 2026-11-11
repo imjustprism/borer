@@ -146,7 +146,7 @@ const WORKFLOW: &str = "borer: agent-native binary analysis (x86/x64 and arm64 P
      0x-hex (always the address), a name (function, import, overlay), or bare \
      decimal digits; a name wins over bare text that also reads as a number, and one \
      nothing matches is answered with the nearest names. {set_name}, {set_comment} \
-     (one opening with ? is an open question) and {set_type} (user structs whose \
+     (one opening with ? is an open question) and {set_type} (struct and class \
      fields decompile then names) annotate, dry-run by default; {save_project} \
      persists them. For anything no single tool answers, {script} runs a sandboxed \
      Rhai script over the program in one call; its query(uri) reads any resource, \

@@ -616,13 +616,15 @@ pub(crate) struct SetCommentParams {
 }
 
 /// Parameters for `set_type`.
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SetTypeParams {
-    /// Struct, enum or typedef to define, or `var`'s new name.
+    /// Struct, enum, typedef or class, or `var`'s new name.
     pub(crate) name: Option<String>,
-    /// Struct fields, each `offset:name:type` (`0x1c:mp:u32`).
+    /// Each `offset:name[:type]` (`0x1c:mp:u32`), merged by offset.
     pub(crate) fields: Option<Vec<String>>,
+    /// Drop fields not restated.
+    pub(crate) replace: Option<bool>,
     /// Enum values, each `name:value` (`Run:1`).
     pub(crate) values: Option<Vec<String>>,
     /// Size past the last field, or an enum's width (4 or 8).
@@ -631,9 +633,9 @@ pub(crate) struct SetTypeParams {
     pub(crate) address: Option<String>,
     /// Type to apply or typedef (`Player *`), a prototype, or alone C declarations.
     pub(crate) r#type: Option<String>,
-    /// Function variable to name/type (`a1`, `local_58`).
+    /// Variable or field to name/type (`a1`, `local_58`, `field_0x10`).
     pub(crate) var: Option<String>,
-    /// Preview only; false applies.
+    /// False applies.
     pub(crate) dry_run: Option<bool>,
 }
 
@@ -1185,6 +1187,36 @@ pub(crate) fn must_be_in_a_section(
     ))
 }
 
+/// Finds the variable of a function that a name was stated for: one a
+/// statement named before, else a parameter the function's prototype names.
+///
+/// # Arguments
+///
+/// * `o` - The overlay.
+/// * `entry` - The function.
+/// * `var` - The name.
+///
+/// # Returns
+///
+/// The variable, or `None` when nothing stated of the function gives it
+/// that name.
+pub(crate) fn stated_key(
+    o: &borer_engine::analysis::Overlay,
+    entry: u64,
+    var: &str,
+) -> Option<borer_engine::analysis::protos::VarKey> {
+    o.vars
+        .get(&entry)
+        .and_then(|vs| vs.iter().find(|(_, v)| v.name == var).map(|(k, _)| *k))
+        .or_else(|| {
+            let params = &o.prototypes.get(&entry)?.params;
+            let i = params.iter().position(|q| q.name == var)?;
+            u8::try_from(i)
+                .ok()
+                .map(borer_engine::analysis::protos::VarKey::Param)
+        })
+}
+
 /// Reads what `set_type` states of a function's variable: which variable
 /// `var` names, and the name and type it takes.
 ///
@@ -1227,21 +1259,10 @@ pub(crate) fn plan_var(
     use borer_engine::analysis::protos::{VARS_MAX, Var, VarKey, slot_words};
     let (stack, shadow, frame) = slot_words(p, entry);
     let stated = o.vars.get(&entry);
-    let key = stated
-        .and_then(|vs| vs.iter().find(|(_, v)| v.name == var).map(|(k, _)| *k))
-        .or_else(|| {
-            let i = o
-                .prototypes
-                .get(&entry)?
-                .params
-                .iter()
-                .position(|q| q.name == var)?;
-            u8::try_from(i).ok().map(VarKey::Param)
-        })
-        .map_or_else(
-            || VarKey::parse(var, stack, frame).map_err(|e| e.to_string()),
-            Ok,
-        )?;
+    let key = stated_key(o, entry, var).map_or_else(
+        || VarKey::parse(var, stack, frame).map_err(|e| e.to_string()),
+        Ok,
+    )?;
     let name = name.ok_or("naming a variable needs `name`, its new name (`type` is optional)")?;
     let decl = ty.map_or_else(|| name.to_owned(), |t| format!("{t} {name}"));
     let var = Var::parse(&decl).map_err(|e| e.to_string())?;
@@ -1393,8 +1414,8 @@ pub(crate) fn parse_unsigned(text: &str) -> Option<u64> {
         .flatten()
 }
 
-/// Reads the fields a struct states, each `offset:name:type`
-/// (`0x1c:mp:u32`).
+/// Reads the fields a struct or a class states, each `offset:name:type`
+/// (`0x1c:mp:u32`) or, to name a field and keep its type, `offset:name`.
 ///
 /// The `set_type` tool and the CLI's `set-type` both read them here, so
 /// an offset is a number by one rule ([`parse_unsigned`]): the CLI read
@@ -1406,32 +1427,54 @@ pub(crate) fn parse_unsigned(text: &str) -> Option<u64> {
 ///
 /// # Returns
 ///
-/// Each field's offset, name and type, in the order stated.
+/// Each field's offset, with its name and the type it states if any, in
+/// the order stated.
 ///
 /// # Errors
 ///
-/// When a statement is not three parts, its type does not parse, or its
-/// offset is not a number; the message names the field.
+/// When a statement has no name, its type does not parse, or its offset
+/// is not a number; the message names the field.
 pub(crate) fn stated_fields(
     fields: &[String],
-) -> Result<Vec<(u64, String, borer_engine::analysis::utypes::TypeExpr)>, String> {
+) -> Result<Vec<(u64, borer_engine::analysis::stated::Field)>, String> {
     use borer_engine::text::one_line;
     fields
         .iter()
         .map(|f| {
-            let (off, name, ty) = f
+            let (off, rest) = f
                 .split_once(':')
-                .and_then(|(off, rest)| rest.split_once(':').map(|(name, ty)| (off, name, ty)))
-                .ok_or_else(|| format!("field {} is not offset:name:type", one_line(f)))?;
+                .ok_or_else(|| format!("field {} is not offset:name[:type]", one_line(f)))?;
+            let (name, ty) = rest
+                .split_once(':')
+                .map_or((rest, None), |(name, ty)| (name, Some(ty)));
             let shown = one_line(name);
-            let ty = borer_engine::analysis::utypes::parse_type(ty)
+            let ty = ty
+                .map(borer_engine::analysis::utypes::parse_type)
+                .transpose()
                 .map_err(|e| format!("field {shown}: {e}"))?;
             let off = parse_unsigned(off).ok_or_else(|| {
                 format!("field {shown}: offset {} is not a number", one_line(off))
             })?;
-            Ok((off, name.to_owned(), ty))
+            let name = name.to_owned();
+            Ok((off, borer_engine::analysis::stated::Field { name, ty }))
         })
         .collect()
+}
+
+/// Reads the offset a `var` names when it spells an unnamed field as a
+/// decompile prints one, `field_0x270`.
+///
+/// # Arguments
+///
+/// * `var` - The `var` argument.
+///
+/// # Returns
+///
+/// The byte offset, or `None` for anything else, a variable among them.
+pub(crate) fn field_var(var: &str) -> Option<u64> {
+    var.strip_prefix("field_")
+        .filter(|offset| offset.starts_with("0x"))
+        .and_then(parse_unsigned)
 }
 
 /// Reads the values an enum states, each `name:value` (`Run:1`), by the
@@ -1746,6 +1789,7 @@ mod tests {
                     r#type: Some(ty.to_owned()),
                     var: Some(shown.to_owned()),
                     dry_run: Some(false),
+                    ..SetTypeParams::default()
                 }))
                 .unwrap_or_else(|e| e.message.into_owned());
             assert_eq!(

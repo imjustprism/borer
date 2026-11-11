@@ -251,8 +251,8 @@ fn set_type_defines_applies_and_refuses() {
             size: None,
             address: Some("0x2000".to_owned()),
             r#type: Some("Player *".to_owned()),
-            var: None,
             dry_run: None,
+            ..SetTypeParams::default()
         }))
         .expect("dry-runs");
     assert!(
@@ -276,8 +276,8 @@ fn set_type_defines_applies_and_refuses() {
             size: None,
             address: Some("0x2000".to_owned()),
             r#type: Some("Player *".to_owned()),
-            var: None,
             dry_run: Some(false),
+            ..SetTypeParams::default()
         }))
         .expect("defines and applies");
     assert!(
@@ -306,8 +306,8 @@ fn set_type_defines_applies_and_refuses() {
             size: None,
             address: Some("0x2000".to_owned()),
             r#type: Some("three of them".to_owned()),
-            var: None,
             dry_run: Some(false),
+            ..SetTypeParams::default()
         }))
         .expect_err("garbage refused");
     assert!(bad.message.contains("'three of them'"), "{}", bad.message);
@@ -321,8 +321,8 @@ fn set_type_defines_applies_and_refuses() {
             size: None,
             address: None,
             r#type: None,
-            var: None,
             dry_run: Some(false),
+            ..SetTypeParams::default()
         }))
         .expect_err("unknown name refused");
     assert!(
@@ -338,8 +338,8 @@ fn set_type_defines_applies_and_refuses() {
             size: None,
             address: Some("0x1000".to_owned()),
             r#type: Some("u32".to_owned()),
-            var: None,
             dry_run: Some(false),
+            ..SetTypeParams::default()
         }))
         .expect_err("code refused");
     assert!(
@@ -503,8 +503,8 @@ fn set_type_reads_c_declarations() {
             size: None,
             address: None,
             r#type: Some(text.to_owned()),
-            var: None,
             dry_run,
+            ..SetTypeParams::default()
         }))
     };
     let server_for = |arch: Arch| {
@@ -604,8 +604,8 @@ fn read_lays_a_user_type_over_the_bytes() {
             size: None,
             address: None,
             r#type: None,
-            var: None,
             dry_run: Some(false),
+            ..SetTypeParams::default()
         }))
         .expect("defines");
     let read = |kind: Option<ReadKind>, ty: &str, address: &str, count: Option<u32>| {
@@ -676,8 +676,8 @@ fn set_type_defines_enums_and_refuses() {
             size: None,
             address: Some("0x2000".to_owned()),
             r#type: Some("State".to_owned()),
-            var: None,
             dry_run: Some(false),
+            ..SetTypeParams::default()
         }))
         .expect("defines and applies");
     assert!(
@@ -709,8 +709,8 @@ fn set_type_defines_enums_and_refuses() {
             size: None,
             address: None,
             r#type: None,
-            var: None,
             dry_run: Some(false),
+            ..SetTypeParams::default()
         }))
         .expect_err("a duplicate value refused");
     assert!(
@@ -726,8 +726,8 @@ fn set_type_defines_enums_and_refuses() {
             size: None,
             address: None,
             r#type: None,
-            var: None,
             dry_run: Some(false),
+            ..SetTypeParams::default()
         }))
         .expect_err("fields beside values refused");
     assert!(
@@ -765,8 +765,8 @@ fn set_type_refuses_a_type_too_deep_to_walk() {
                 size: None,
                 address: address.map(str::to_owned),
                 r#type: Some(ty.to_owned()),
-                var: None,
                 dry_run: None,
+                ..SetTypeParams::default()
             }))
             .expect_err("a type too deep to walk was accepted")
             .message
@@ -826,6 +826,7 @@ fn set_type_states_prototypes_and_variables() {
             r#type: ty.map(str::to_owned),
             var: var.map(str::to_owned),
             dry_run: dry,
+            ..SetTypeParams::default()
         }))
     };
     let before = server.overlay_plain().fingerprint();

@@ -1,6 +1,9 @@
 //! Fields stated of a class, over JSON-RPC stdio on the real binary
-//! (`CARGO_BIN_EXE_borer`): a project keeps them, and every answer that
-//! lists a class's fields shows them.
+//! (`CARGO_BIN_EXE_borer`).
+//!
+//! `set_type` states one by the class's name or at a method and keeps the
+//! rest, a project keeps them, and every answer that lists a class's
+//! fields shows them.
 
 #![expect(
     clippy::missing_panics_doc,
@@ -338,5 +341,251 @@ fn a_loaded_project_s_stated_fields_show_in_every_listing() {
         serde_json::from_str(&std::fs::read_to_string(&saved).expect("the project reads back"))
             .expect("a project is JSON");
     assert_eq!(written["fields"], stated["fields"]);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Calls `set_type` and returns what it answered, a refusal's message
+/// included, without the evidence line.
+///
+/// # Arguments
+///
+/// * `client` - The session.
+/// * `arguments` - The call's arguments.
+fn set_type(client: &mut Client, arguments: &serde_json::Value) -> String {
+    without_evidence(&client.text("set_type", &arguments.to_string()))
+        .trim_end()
+        .to_owned()
+}
+
+/// One field of a class is stated by the class's name or at one of its
+/// methods, and nothing else changes.
+///
+/// The dry run says what it keeps, the layout's other rows and another
+/// class's text stay byte for byte, and the session lists the call that
+/// applied it once.
+#[test]
+fn one_field_is_stated_by_class_or_at_a_method_and_the_rest_stays() {
+    let (mut client, dir, _) = session("stated");
+    let before = rows(&mut client, "class_2800");
+    let other = text_of(&mut client, "0x1140");
+    let by_class = serde_json::json!({
+        "name": "class_2800", "fields": ["0x270:m_currentPipeline:u32"], "size": 856
+    });
+    assert_eq!(
+        set_type(&mut client, &by_class),
+        "dry-run: would state 1 field(s) of class class_2800: 5 kept, 1 changed, 0 new: +0x270 field_0x270 -> m_currentPipeline u32; a class keeps no stated size. pass dry_run=false to apply."
+    );
+    let at_method = serde_json::json!({
+        "address": "0x1040", "var": "field_0x270", "name": "m_currentPipeline", "type": "u32"
+    });
+    assert_eq!(
+        set_type(&mut client, &at_method),
+        "dry-run: would state 1 field(s) of class class_2800: 5 kept, 1 changed, 0 new: +0x270 field_0x270 -> m_currentPipeline u32; class_2800 is the class of class_2800::vfunc_0 (0x1040). pass dry_run=false to apply."
+    );
+    assert_eq!(
+        rows(&mut client, "class_2800"),
+        before,
+        "a dry run writes nothing"
+    );
+    let apply = |call: &serde_json::Value| {
+        let mut call = call.clone();
+        call["dry_run"] = false.into();
+        call
+    };
+    assert_eq!(
+        set_type(&mut client, &apply(&at_method)),
+        "stated 1 field(s) of class class_2800: 5 kept, 1 changed, 0 new: +0x270 field_0x270 -> m_currentPipeline u32; class_2800 is the class of class_2800::vfunc_0 (0x1040)"
+    );
+    assert_eq!(
+        set_type(&mut client, &apply(&by_class)),
+        "stated 1 field(s) of class class_2800: 6 kept, 0 changed, 0 new; a class keeps no stated size",
+        "the class's name states the field the method's did"
+    );
+    let after = rows(&mut client, "class_2800");
+    let changed: Vec<&String> = after.iter().filter(|row| !before.contains(row)).collect();
+    assert_eq!(
+        changed,
+        [
+            "+0x270  u32 m_currentPipeline  1/2   ctor_or_dtor, vfunc_0, vfunc_1  [stated u32; = 0xffffffff]"
+        ]
+    );
+    assert_eq!(after.len(), before.len());
+    for method in ["0x1040", "0x1080"] {
+        let text = text_of(&mut client, method);
+        assert!(
+            text.contains("this->m_currentPipeline") && !text.contains("field_0x270"),
+            "{text}"
+        );
+    }
+    assert_eq!(
+        text_of(&mut client, "0x1140"),
+        other,
+        "another class's text"
+    );
+    let ledger = read(&mut client, "borer://session").expect("answers");
+    client.finish();
+    std::fs::remove_dir_all(&dir).ok();
+    let applied: Vec<&str> = ledger
+        .lines()
+        .filter(|l| l.starts_with("set_type {"))
+        .collect();
+    assert_eq!(
+        applied,
+        [
+            r#"set_type {"address":"0x1040","dry_run":false,"name":"m_currentPipeline","type":"u32","var":"field_0x270"}"#
+        ],
+        "the call that changed the overlay, once: {ledger}"
+    );
+}
+
+/// A field stated without a type keeps the width the class's code uses.
+///
+/// A type of another size is refused on the dry run with both widths and
+/// the instructions, a type of that size is taken, replacing is asked for,
+/// `var` is a variable before it is a field, and a field at a function of
+/// no class says how to state it by the class's name.
+#[test]
+fn a_field_keeps_its_width_and_a_conflicting_type_is_refused() {
+    let (mut client, dir, _) = session("widths");
+    let untyped = serde_json::json!({
+        "name": "class_2800", "fields": ["0x270:m_currentPipeline", "0x18:m_next"], "dry_run": false
+    });
+    assert_eq!(
+        set_type(&mut client, &untyped),
+        "stated 2 field(s) of class class_2800: 4 kept, 2 changed, 0 new: +0x18 field_0x18 -> m_next (accessed 8 byte(s) wide), +0x270 field_0x270 -> m_currentPipeline (accessed 4 byte(s) wide)"
+    );
+    let typed = |ty: &str| serde_json::json!({"name": "class_2800", "fields": [format!("0x270:m_currentPipeline:{ty}")]});
+    assert_eq!(
+        set_type(&mut client, &typed("u64")),
+        "field m_currentPipeline at +0x270 of class class_2800 is stated u64, 8 byte(s) wide, but the class's code accesses it 4 byte(s) wide at 0x100a (class_2800::ctor_or_dtor), 0x1040 (class_2800::vfunc_0), 0x1080 (class_2800::vfunc_1); state a type of that width, or leave the type out (0x270:m_currentPipeline) to keep the width the code uses"
+    );
+    assert_eq!(
+        set_type(&mut client, &typed("i32")),
+        "dry-run: would state 1 field(s) of class class_2800: 5 kept, 1 changed, 0 new: +0x270 m_currentPipeline -> m_currentPipeline i32. pass dry_run=false to apply.",
+        "a type of the width the code uses is no conflict"
+    );
+    let replacing = serde_json::json!({
+        "name": "class_2800", "fields": ["0x20:m_bound"], "replace": true, "dry_run": false
+    });
+    assert_eq!(
+        set_type(&mut client, &replacing),
+        "stated 1 field(s) of class class_2800: 3 kept, 1 changed, 0 new, 2 dropped: +0x20 field_0x20 -> m_bound (accessed 1 byte(s) wide), +0x18 m_next (dropped), +0x270 m_currentPipeline (dropped)"
+    );
+    let text = text_of(&mut client, "0x1080");
+    assert!(
+        text.contains("this->m_bound = 1;") && text.contains("this->field_0x270 = "),
+        "{text}"
+    );
+    let nowhere = serde_json::json!({"address": "0x11c0", "var": "field_0x10", "name": "m_count"});
+    assert_eq!(
+        set_type(&mut client, &nowhere),
+        "sub_11c0 belongs to no class borer knows, so a field at 0x10 has no class to be stated of; state it by its class, set_type(name=<class>, fields=[\"0x10:m_count\"]), or type the pointer it is read through (borer://layout/0x11c0,apply=<Name> plans that)"
+    );
+    let unnamed = serde_json::json!({"address": "0x1040", "var": "field_0x10"});
+    assert_eq!(
+        set_type(&mut client, &unnamed),
+        "naming a field needs `name`, its new name (`type` is optional)"
+    );
+    let decimal = serde_json::json!({"address": "0x1040", "var": "field_16", "name": "m_count"});
+    assert!(
+        set_type(&mut client, &decimal).starts_with("'field_16' is no parameter or stack slot"),
+        "a field is named as the text prints it, its offset in hex"
+    );
+    for misplaced in [
+        serde_json::json!({"name": "State", "values": ["Run:1"], "replace": true}),
+        serde_json::json!({
+            "address": "0x1040", "var": "field_0x10", "name": "m_count",
+            "fields": ["0x10:m_count"], "replace": true
+        }),
+    ] {
+        assert_eq!(
+            set_type(&mut client, &misplaced),
+            "`replace` drops the fields `fields` does not restate, so it goes with `name` and `fields`"
+        );
+    }
+    let variable = serde_json::json!({
+        "address": "0x1080", "var": "a2", "name": "field_0x10", "dry_run": false
+    });
+    assert_eq!(
+        set_type(&mut client, &variable),
+        "named a2 of class_2800::vfunc_1 (0x1080) field_0x10"
+    );
+    let renamed = serde_json::json!({"address": "0x1080", "var": "field_0x10", "name": "pipeline"});
+    assert_eq!(
+        set_type(&mut client, &renamed),
+        "dry-run: would name a2 of class_2800::vfunc_1 (0x1080) pipeline; decompile then renders it so. pass dry_run=false to apply.",
+        "a variable an agent named so is the variable still"
+    );
+    client.finish();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A stated field survives `save_project` and `load_project`, and a user
+/// struct takes a stated field by offset as a class does, at the CLI as
+/// over MCP.
+#[test]
+fn a_stated_field_is_saved_and_a_struct_merges_at_the_cli_too() {
+    let (mut client, dir, _) = session("saved");
+    let stated = serde_json::json!({
+        "address": "0x1080", "var": "field_0x270", "name": "m_currentPipeline", "dry_run": false
+    });
+    set_type(&mut client, &stated);
+    let project = dir.join("kept.json").to_string_lossy().into_owned();
+    let path = serde_json::json!({"path": project}).to_string();
+    let saved = client.text("save_project", &path);
+    assert!(saved.contains(" + 1 stated fields to "), "{saved}");
+    let wiped = serde_json::json!({
+        "name": "class_2800", "fields": ["0x18:m_next"], "replace": true, "dry_run": false
+    });
+    set_type(&mut client, &wiped);
+    assert!(!text_of(&mut client, "0x1040").contains("m_currentPipeline"));
+    let loaded = client.text("load_project", &path);
+    assert!(loaded.contains(" + 1 stated fields\n"), "{loaded}");
+    assert!(text_of(&mut client, "0x1040").contains("this->m_currentPipeline"));
+    let define = serde_json::json!({
+        "name": "Player", "fields": ["0x18:hp:u32", "0x1c:mp:u32"], "dry_run": false
+    });
+    assert_eq!(
+        set_type(&mut client, &define),
+        "defined struct Player: 2 field(s), 0x20 byte(s)"
+    );
+    let merge = serde_json::json!({"name": "Player", "fields": ["0x18:health"], "dry_run": false});
+    let merged = "defined struct Player: 2 field(s), 0x20 byte(s); 1 kept, 1 changed, 0 new: +0x18 hp u32 -> health u32";
+    assert_eq!(set_type(&mut client, &merge), merged);
+    let replace = serde_json::json!({
+        "name": "Player", "fields": ["0x0:id:u64"], "replace": true, "dry_run": false
+    });
+    let replaced = "defined struct Player: 1 field(s), 0x8 byte(s), in place of the 2 it stated";
+    assert_eq!(set_type(&mut client, &replace), replaced);
+    client.finish();
+    let start = dir.join("start.exe").to_string_lossy().into_owned();
+    let cli_project = dir.join("cli.json").to_string_lossy().into_owned();
+    let cli = |fields: &[&str]| {
+        let mut args = vec![
+            "--no-pdb",
+            "set-type",
+            &start,
+            &cli_project,
+            "struct",
+            "Player",
+        ];
+        args.extend(fields);
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_borer"))
+            .args(&args)
+            .output()
+            .expect("spawn borer");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    cli(&["0x18:hp:u32", "0x1c:mp:u32"]);
+    let said = cli(&["0x18:health"]);
+    assert!(
+        said.starts_with(&format!("{merged}; written to ")),
+        "{said}"
+    );
+    let said = cli(&["replace", "0x0:id:u64"]);
+    assert!(
+        said.starts_with(&format!("{replaced}; written to ")),
+        "{said}"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }

@@ -98,7 +98,7 @@ commands:
   scenario <binary> <function> <a2=5,...>    decompile under assumptions: branches and switches on the fixed parameters fold and only the code that can run is written
   scenarios <binary> <function> <a2=0..32>   a scenario per value of one parameter (a range, or values joined by |), the ones that behave alike grouped with their calls and returns
   types <binary> [project] [filter] [offset] [limit]  user-defined types a project states and where each is applied (50 a page, max 500; \"\" for no filter)
-  set-type <binary> <project> struct <name> [size] <off:name:type>...  define a struct in the project; or set-type <binary> <project> enum <name> [size] <name:value>...; or set-type <binary> <project> typedef <name> <type>; or set-type <binary> <project> apply <address|name> <type>, so decompile names that global's fields or constants; an offset, a size and a value are 0x-hex or decimal
+  set-type <binary> <project> struct <name> [replace] [size] <off:name[:type]>...  define a struct in the project, or merge the fields by offset into the struct or the recovered class of that name (replace drops its other fields; a field without a type keeps the one it had); or set-type <binary> <project> enum <name> [size] <name:value>...; or set-type <binary> <project> typedef <name> <type>; or set-type <binary> <project> apply <address|name> <type>, so decompile names that global's fields or constants; an offset, a size and a value are 0x-hex or decimal
   verify <binary> [function|all] [limit] [seed]check the lifter against the emulator (arm64 code against the arm64 machine) block by block from seeded states; lists every register, stack slot, store and branch they disagree on and fails if any (default all, 2000 functions)
   verify <binary> <function|all> <limit> <seed> text  check the text's statements instead (x86 and x64 only): each block's, replayed under the lifter's witness, against the emulator from three seeded states; lists every claim the machine does not bear out and fails on any but lane roughness
   verify <binary> <function|all> <limit> <seed> mir  the same check as the first form, every lifted value read through MIR: lowered to width-explicit ops and run by the MIR evaluator
@@ -315,7 +315,7 @@ pub(super) enum Query {
     Scenarios,
     /// `types [project] [filter] [offset] [limit]`: the user types a project states, and where each is applied.
     Types,
-    /// `set-type <project> struct <name> [size] <off:name:type>... | enum <name> [size] <name:value>... | typedef <name> <type> | apply <address|name> <type>`: define or apply a user type, written to the project.
+    /// `set-type <project> struct <name> [replace] [size] <off:name[:type]>... | enum <name> [size] <name:value>... | typedef <name> <type> | apply <address|name> <type>`: define or apply a user type, or state fields of a struct or a class, written to the project.
     SetType,
     /// The commands [`super::extras`] runs: `hashes`, `sig`, `yara`,
     /// `names`, `diff`, `addr` and `encoded`.

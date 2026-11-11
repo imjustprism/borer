@@ -386,6 +386,34 @@ impl UserType {
         }
     }
 
+    /// Describes the type in the words that answer its definition.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The type's name.
+    ///
+    /// # Returns
+    ///
+    /// `struct S: 2 field(s), 0x20 byte(s)`, `enum E: 3 value(s), 0x4
+    /// byte(s)` or `typedef T: u32 *`.
+    #[must_use]
+    pub fn describe(&self, name: &str) -> String {
+        let kind = self.kind();
+        match self {
+            Self::Struct(s) => format!(
+                "{kind} {name}: {} field(s), {:#x} byte(s)",
+                s.fields.len(),
+                s.size
+            ),
+            Self::Enum(e) => format!(
+                "{kind} {name}: {} value(s), {:#x} byte(s)",
+                e.values.len(),
+                e.size
+            ),
+            Self::Alias(inner) => format!("{kind} {name}: {}", inner.spell()),
+        }
+    }
+
     /// Folds everything the type states into a fingerprint, each kind of
     /// type its own bytes ([`crate::analysis::Overlay::fingerprint`]).
     ///
