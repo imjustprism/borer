@@ -529,6 +529,71 @@ fn the_stack_check_folds_into_one_comment() {
     assert!(!text.contains("morestack_noctxt()"), "{text}");
 }
 
+/// The caller of [`two_conventions_elf`] its table does not list.
+const UNLISTED: u64 = 0x1010;
+
+/// A Go function and a function the table does not list, both calling one
+/// callee that writes `rax` alone.
+///
+/// The Go caller at [`MAIN`] keeps its first argument in `rbx` across the
+/// call and adds it to what the callee returns; the other caller, the
+/// image's entry at [`UNLISTED`], only calls it. The callee at `0x1020` is
+/// `mov eax, 7; ret`.
+fn two_conventions_elf() -> Program {
+    let mut text = vec![0xccu8; 0x26];
+    let code: [(usize, &[u8]); 5] = [
+        (0x00, &[0x48, 0x89, 0xc3]),             // ASM: mov rbx,rax
+        (0x03, &[0xe8, 0x18, 0, 0, 0]),          // ASM: call 0x1020
+        (0x08, &[0x48, 0x8d, 0x04, 0x18, 0xc3]), // ASM: lea rax,[rax+rbx]; ret
+        (0x10, &[0xe8, 0x0b, 0, 0, 0, 0xc3]),    // ASM: call 0x1020; ret
+        (0x20, &[0xb8, 7, 0, 0, 0, 0xc3]),       // ASM: mov eax,7; ret
+    ];
+    for (at, bytes) in code {
+        text[at..at + bytes.len()].copy_from_slice(bytes);
+    }
+    let bytes = elfgen::build(
+        ET_EXEC,
+        EM_X86_64,
+        UNLISTED,
+        &[
+            Sec::new(".text", PROGBITS, AX, 0x1000, text),
+            Sec::new(
+                ".gopclntab",
+                PROGBITS,
+                A,
+                0x2000,
+                pclntab(&[(0x00, "main.sum")], 0x26),
+            ),
+        ],
+    );
+    Program::from_bytes(std::path::PathBuf::from("go.elf"), bytes).expect("the image loads")
+}
+
+/// A call clobbers what its caller's own convention lets it, less what the
+/// callee keeps, whichever of the callee's callers was read first.
+///
+/// Go's convention lets a call clobber `rbx` and System V's does not. The
+/// callee writes `rax` alone, so the Go caller's `rbx` survives it and the
+/// caller returns the callee's result plus its own argument. What a
+/// callee keeps was filed once, as the first caller to ask saw it: read
+/// after the System V caller, whose convention never lists `rbx`, the Go
+/// caller lost it at the call and returned `var1 + rbx`, a register
+/// nothing set.
+#[test]
+fn a_callee_keeps_the_same_registers_whichever_caller_is_read_first() {
+    let p = two_conventions_elf();
+    let o = Overlay::default();
+    let read = |order: [u64; 2]| {
+        let a = Analysis::compute(&p);
+        order.map(|e| decompile(&p, &a, &o, e).expect("the caller decompiles"))
+    };
+    let [go, unlisted] = read([MAIN, UNLISTED]);
+    let [unlisted_first, go_second] = read([UNLISTED, MAIN]);
+    assert!(go.contains(" + a1;") && !go.contains("rbx"), "{go}");
+    assert_eq!(go_second, go);
+    assert_eq!(unlisted_first, unlisted);
+}
+
 /// Go's build information reads high only with a pclntab or Go symbols.
 ///
 /// Alone it reads medium; with the pclntab or `runtime.*` symbols behind it,

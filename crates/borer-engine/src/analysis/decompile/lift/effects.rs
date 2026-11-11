@@ -627,9 +627,8 @@ pub(in crate::analysis::decompile) fn forwarded_reads(
     out.into_iter().collect()
 }
 
-/// Most functions [`preserved_volatiles`] reads under one callee, the
-/// callee included: past them it gives up and takes every volatile as
-/// clobbered.
+/// Most functions [`call_writes`] reads under one callee, the callee
+/// included: past them it gives up and takes every register as written.
 const PRESERVED_REACH: usize = 32;
 
 /// What one function's own instructions do to the registers, read once per
@@ -746,25 +745,12 @@ fn own_writes(ctx: &Ctx<'_>, target: u64) -> std::sync::Arc<OwnWrites> {
     )
 }
 
-/// Returns the volatile registers a direct callee leaves as it found them.
+/// Returns what a call to a direct callee may write, whoever makes it.
 ///
-/// A leaf function that never writes `r8` hands the caller's `r8` back, and
-/// a compiler that sees the leaf (link-time code generation) keeps using
-/// it: `mov r8, rcx; xor edx, edx; call leaf; mov [r8+0C0h], dl`. The same
-/// compiler sees through a callee whose callees leave a register alone
-/// too, so the callee is read with every function it calls or tail-jumps
-/// to, each once ([`own_writes`]), up to [`PRESERVED_REACH`] of them:
-/// whoami's `mov r10d,eax; ...; call sub_14000d5bc; ...; sub edx,r10d`
-/// keeps `r10` across a callee that calls another, and neither writes it.
-/// A call (but a stack probe or a cookie check) or jump to no function of
-/// the image, a jump through a register that is no jump table, or a trap
-/// anywhere among them clobbers every volatile; otherwise the volatile
-/// registers no instruction among them writes survive. `rax` is left to
-/// [`crate::analysis::Function::preserves_rax`]. `xmm0` also survives a
-/// callee that hands it back untouched on every path to a `ret`
-/// ([`keeps_float`]): a stack-cookie check jumps out to a function that
-/// never returns when the cookie is wrong, and the double the caller
-/// computed is still in `xmm0` when it does return.
+/// The callee is read with every function it calls or tail-jumps to, each
+/// once ([`own_writes`]), up to [`PRESERVED_REACH`] of them. Nothing here
+/// is read from the caller, so the result is the callee's alone and each
+/// caller holds it against its own convention ([`preserved_volatiles`]).
 ///
 /// # Arguments
 ///
@@ -773,14 +759,16 @@ fn own_writes(ctx: &Ctx<'_>, target: u64) -> std::sync::Arc<OwnWrites> {
 ///
 /// # Returns
 ///
-/// The preserved registers as canonical keys; empty for an unknown callee,
-/// an import thunk or a callee that may clobber them all.
-pub(in crate::analysis::decompile) fn preserved_volatiles(
-    ctx: &Ctx<'_>,
-    target: u64,
-) -> std::sync::Arc<Vec<Key>> {
+/// The registers written among those functions as canonical keys, then
+/// whether the callee hands `xmm0` back untouched on every path to a `ret`
+/// of 64-bit code ([`keeps_float`]). The registers are `None` when any may
+/// be written: an unknown callee or an import thunk; a call (but a stack
+/// probe or a cookie check) or jump to no function of the image, a jump
+/// through a register that is no jump table, or a trap among the functions
+/// read; or more of them than the reach.
+fn call_writes(ctx: &Ctx<'_>, target: u64) -> std::sync::Arc<(Option<BTreeSet<Key>>, bool)> {
     ctx.analysis.derived.get_or_build_item(
-        "preserved_volatiles",
+        "call_writes",
         ctx.overlay_key,
         target,
         || {
@@ -789,41 +777,81 @@ pub(in crate::analysis::decompile) fn preserved_volatiles(
                 .function(target)
                 .is_none_or(|f| f.entry != target)
             {
-                return Vec::new();
+                return (None, false);
             }
-            let xmm0 = Key::Reg(Register::XMM0);
-            let float = (ctx.bitness == 64
-                && ctx.conv.volatile.contains(&Register::XMM0)
-                && keeps_float(ctx, target))
-            .then_some(xmm0);
+            let float = ctx.bitness == 64 && keeps_float(ctx, target);
             let mut written: BTreeSet<Key> = BTreeSet::new();
             let mut seen: BTreeSet<u64> = BTreeSet::from([target]);
             let mut todo = vec![target];
             while let Some(t) = todo.pop() {
                 let own = own_writes(ctx, t);
                 if own.leaves {
-                    return float.into_iter().collect();
+                    return (None, float);
                 }
                 written.extend(own.written.iter().copied());
                 for &c in &own.callees {
                     if seen.insert(c) {
                         if seen.len() > PRESERVED_REACH {
-                            return float.into_iter().collect();
+                            return (None, float);
                         }
                         todo.push(c);
                     }
                 }
             }
-            let rax = Key::Reg(canon(Register::RAX, ctx.bitness));
-            ctx.conv
-                .volatile
-                .iter()
-                .map(|r| Key::Reg(canon(*r, ctx.bitness)))
-                .filter(|k| *k != rax && (!written.contains(k) || Some(*k) == float))
-                .collect()
+            (Some(written), float)
         },
-        |keys| keys.capacity() * size_of::<Key>(),
+        |(written, _)| written.as_ref().map_or(0, |w| w.len() * size_of::<Key>()),
     )
+}
+
+/// Returns the volatile registers of the caller's convention a direct
+/// callee leaves as it found them.
+///
+/// A leaf function that never writes `r8` hands the caller's `r8` back, and
+/// a compiler that sees the leaf (link-time code generation) keeps using
+/// it: `mov r8, rcx; xor edx, edx; call leaf; mov [r8+0C0h], dl`. The same
+/// compiler sees through a callee whose callees leave a register alone
+/// too: whoami's `mov r10d,eax; ...; call sub_14000d5bc; ...; sub edx,r10d`
+/// keeps `r10` across a callee that calls another, and neither writes it.
+/// So the volatile registers no instruction under the callee writes
+/// survive, and none when any may be written ([`call_writes`]). `rax` is
+/// left to [`crate::analysis::Function::preserves_rax`]. `xmm0` also
+/// survives a callee that hands it back untouched on every path to a `ret`
+/// ([`keeps_float`]): a stack-cookie check jumps out to a function that
+/// never returns when the cookie is wrong, and the double the caller
+/// computed is still in `xmm0` when it does return.
+///
+/// Which registers a call may clobber is the caller's convention to say:
+/// Go's lists `rbx`, System V's does not, and one callee has callers of
+/// both kinds. So the convention is read here, at each call, and no part
+/// of what is kept of the callee depends on it.
+///
+/// # Arguments
+///
+/// * `ctx` - The caller's convention, with the program, its analysis and
+///   the decoder.
+/// * `target` - The callee's entry.
+///
+/// # Returns
+///
+/// The preserved registers as canonical keys, in the order the convention
+/// lists them; empty for an unknown callee, an import thunk or a callee
+/// that may clobber them all.
+pub(in crate::analysis::decompile) fn preserved_volatiles(ctx: &Ctx<'_>, target: u64) -> Vec<Key> {
+    let writes = call_writes(ctx, target);
+    let (written, keeps_float) = writes.as_ref();
+    let xmm0 = Key::Reg(Register::XMM0);
+    let float = (*keeps_float && ctx.conv.volatile.contains(&Register::XMM0)).then_some(xmm0);
+    let Some(written) = written else {
+        return float.into_iter().collect();
+    };
+    let rax = Key::Reg(canon(Register::RAX, ctx.bitness));
+    ctx.conv
+        .volatile
+        .iter()
+        .map(|r| Key::Reg(canon(*r, ctx.bitness)))
+        .filter(|k| *k != rax && (!written.contains(k) || Some(*k) == float))
+        .collect()
 }
 
 /// What a 32-bit callee does with the vector registers ([`Sse`]).

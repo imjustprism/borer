@@ -1999,9 +1999,7 @@ impl Exec<'_, '_> {
         if x87 == x87::Call::Plain {
             self.empty_x87();
         }
-        self.preserved = direct.map_or_else(Vec::new, |t| {
-            preserved_volatiles(self.ctx, t).as_ref().clone()
-        });
+        self.preserved = direct.map_or_else(Vec::new, |t| preserved_volatiles(self.ctx, t));
         self.protect_operands(instr, self.callee_preserves_rax(direct), &operands);
         let virt = if direct.is_none() {
             self.virtual_target(instr)
