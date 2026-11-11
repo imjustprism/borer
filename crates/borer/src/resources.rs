@@ -889,7 +889,9 @@ impl BorerServer {
     /// Proposes a structure from a pointer's accesses, or with `apply=Name`
     /// defines it as a user struct and types the parameter the pointer
     /// arrives in ([`borer_engine::analysis::apply::from_pointer`]): a dry
-    /// run unless the spec also says `dry_run=false`.
+    /// run unless the spec also says `dry_run=false`, and then the session
+    /// ledger lists the read among its changes when it left the overlay
+    /// other than it found it, as it lists a tool's.
     ///
     /// # Arguments
     ///
@@ -918,7 +920,15 @@ impl BorerServer {
             None => render::layout_tsv(p, a, o, &spec),
             Some(name) => {
                 let plan = borer_engine::analysis::apply::from_pointer(p, a, o, &spec, name)?;
-                Ok(self.answer_plan(plan, a, o, dry))
+                let before = (!dry).then(|| read_lock(&self.overlay).fingerprint());
+                let said = self.answer_plan(plan, a, o, dry);
+                if before.is_some_and(|was| read_lock(&self.overlay).fingerprint() != was) {
+                    lock(&self.ledger).changed(
+                        "resources/read",
+                        &format!("borer://layout/{spec},apply={name},dry_run=false"),
+                    );
+                }
+                Ok(said)
             }
         })
     }
@@ -2291,6 +2301,51 @@ mod tests {
 
     /// A resource handler, as `read_resource` calls it with the URI's argument.
     type Handler = fn(&BorerServer, &str) -> Result<String, ErrorData>;
+
+    /// A layout's plan read while another request edits the overlay is no
+    /// change of the session: only a read told to apply can be one.
+    ///
+    /// A read tells whether it applied by the overlay's fingerprint before
+    /// and after, which an edit landing beside a plan moves as well. A
+    /// thread rewrites a comment for as long as the plans are read, so
+    /// with nothing keeping a plan apart from an apply, one of them meets
+    /// an edit and is listed.
+    ///
+    /// # Panics
+    ///
+    /// When a plan does not read, or is listed among the session's changes.
+    #[test]
+    fn a_layout_plan_read_beside_an_edit_is_no_change() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let server = crate::testing::code_server(
+            Arch::X86_64,
+            &[
+                0x8b, 0x41, 0x10, // ASM: mov eax, [rcx+0x10]
+                0xc3, // ASM: ret
+            ],
+        );
+        let done = AtomicBool::new(false);
+        let plans: Vec<Result<String, ErrorData>> = std::thread::scope(|s| {
+            s.spawn(|| {
+                let mut n = 0u64;
+                while !done.load(Ordering::Relaxed) {
+                    crate::state::write_lock(&server.overlay)
+                        .comments
+                        .insert(0x1000, n.to_string());
+                    n = n.wrapping_add(1);
+                    std::thread::yield_now();
+                }
+            });
+            let plans = (0..400)
+                .map(|_| server.resource_text("borer://layout/0x1000,apply=Rec"))
+                .collect();
+            done.store(true, Ordering::Relaxed);
+            plans
+        });
+        assert!(plans.iter().all(Result::is_ok), "{plans:?}");
+        let session = server.session_text();
+        assert!(session.contains("\n# 0 changes this session"), "{session}");
+    }
 
     /// A field offset most code touches lists one page of 200 sites and
     /// says where the next starts.

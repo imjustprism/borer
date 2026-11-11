@@ -21,16 +21,21 @@ const KEPT: usize = 64;
 /// Longest line the ledger keeps for one change or request, in characters.
 const LINE_MAX: usize = 200;
 
-/// The tools whose applied call changes what the session holds. A
-/// dry-run call (every one but the loads and the save, unless
-/// `dry_run=false`) changes nothing and is not a change.
-const CHANGING: [&str; 7] = [
+/// The tools whose applied call can change what the session holds.
+///
+/// A dry-run call (every one but the loads and the save, unless
+/// `dry_run=false`) changes nothing and is not a change; nor is an
+/// applied one that leaves the overlay as it was, a script that proposed
+/// nothing or a `class_layout` given no `apply`
+/// ([`BorerServer::note_change`]).
+const CHANGING: [&str; 8] = [
     "load_binary",
     "load_project",
     "save_project",
     "set_name",
     "set_comment",
     "set_type",
+    "class_layout",
     "script",
 ];
 
@@ -207,7 +212,8 @@ pub(crate) struct Ledger {
     saved: Option<u64>,
 }
 
-/// Whether a tool call with these arguments changes what the session holds.
+/// Whether a tool call with these arguments may change what the session
+/// holds.
 ///
 /// # Arguments
 ///
@@ -255,13 +261,14 @@ fn kept(line: &str) -> String {
 }
 
 impl Ledger {
-    /// Records a change: a load, a save, or an applied name, comment, type
-    /// or script.
+    /// Records a change: a load, a save, or an applied name, comment,
+    /// type, layout or script.
     ///
     /// # Arguments
     ///
-    /// * `tool` - The tool's name.
-    /// * `args` - Its arguments as JSON.
+    /// * `tool` - The tool's name, or `resources/read` for a resource read
+    ///   that applied a layout.
+    /// * `args` - Its arguments as JSON, or the URI read.
     pub(crate) fn changed(&mut self, tool: &str, args: &str) {
         self.changed += 1;
         if self.changes.len() == KEPT {
@@ -429,30 +436,60 @@ impl BorerServer {
         text
     }
 
-    /// Records in the ledger a tool call that changed what the session
-    /// holds: a load or a save, or a name, comment, type or script applied
-    /// with `dry_run=false` ([`session::changes`]), and what a save or a
-    /// load leaves saved.
+    /// Returns the overlay's fingerprint ahead of a tool call that may
+    /// change what the session holds ([`session::changes`]), for
+    /// [`Self::note_change`] to tell afterwards whether it did.
+    ///
+    /// It is read as the call starts to run, past any wait for its turn:
+    /// read before the wait, it made a change by a call that ran in the
+    /// meantime look like this one's.
     ///
     /// # Arguments
     ///
     /// * `tool` - The tool's name.
     /// * `arguments` - Its arguments, `None` for none.
-    /// * `args` - The same as JSON, as the ledger lists them.
-    pub(crate) fn note_change(
+    ///
+    /// # Returns
+    ///
+    /// The fingerprint, or `None` for a call that changes nothing: a tool
+    /// that only reads, or a dry run.
+    pub(crate) fn overlay_before(
         &self,
         tool: &str,
         arguments: Option<&serde_json::Map<String, serde_json::Value>>,
-        args: &str,
-    ) {
+    ) -> Option<u64> {
         let dry_run = arguments
             .and_then(|a| a.get("dry_run"))
             .and_then(serde_json::Value::as_bool);
-        if !changes(tool, dry_run) {
+        changes(tool, dry_run).then(|| read_lock(&self.overlay).fingerprint())
+    }
+
+    /// Records in the ledger a tool call that changed what the session
+    /// holds: a load or a save, or a name, comment, type, layout or script
+    /// applied with `dry_run=false` that left the overlay other than it
+    /// found it, and what a save or a load leaves saved.
+    ///
+    /// The tool's name and `dry_run` alone listed a script that proposed
+    /// nothing as a change. Of two applied calls running at the same time,
+    /// one that changed nothing is listed too when the other's change
+    /// lands while it runs: only the write itself knows whose it is.
+    ///
+    /// # Arguments
+    ///
+    /// * `tool` - The tool's name.
+    /// * `args` - Its arguments as JSON, as the ledger lists them.
+    /// * `before` - What [`Self::overlay_before`] returned ahead of the
+    ///   call.
+    pub(crate) fn note_change(&self, tool: &str, args: &str, before: Option<u64>) {
+        let Some(before) = before else {
+            return;
+        };
+        let now = read_lock(&self.overlay).fingerprint();
+        if before == now && !ALWAYS_APPLIED.contains(&tool) {
             return;
         }
         let saved = match tool {
-            "save_project" | "load_project" => Some(Some(read_lock(&self.overlay).fingerprint())),
+            "save_project" | "load_project" => Some(Some(now)),
             "load_binary" => Some(None),
             _ => None,
         };

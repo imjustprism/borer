@@ -56,6 +56,7 @@ use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::pack::Packs;
 use borer_engine::program::Program;
 use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, CompleteRequestParams, CompleteResult,
@@ -66,6 +67,7 @@ use rmcp::model::{
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt, prompt_handler, tool_handler};
+use tokio::runtime::Handle;
 
 use crate::catalog::{RESOURCE_TEMPLATES, RESOURCES, TEXT_PLAIN, resource_name};
 use crate::errors::{err_internal, err_params};
@@ -278,14 +280,15 @@ impl ServerHandler for BorerServer {
         let ran = self
             .gate
             .run(context.ct.clone().cancelled_owned(), move || {
-                let call =
-                    rmcp::handler::server::tool::ToolCallContext::new(&server, request, context);
-                tokio::runtime::Handle::current().block_on(Self::tool_router().call(call))
+                let before = server.overlay_before(&request.name, request.arguments.as_ref());
+                let call = ToolCallContext::new(&server, request, context);
+                let router = Self::tool_router();
+                (before, Handle::current().block_on(router.call(call)))
             })
             .await;
         ticker.iter().for_each(tokio::task::JoinHandle::abort);
         let ran = ran?;
-        let response = ran.answer;
+        let (before, response) = ran.answer;
         self.hand_over
             .refresh(|| self.resume_state(peer_info.as_deref()));
         let mut response = match response {
@@ -303,7 +306,7 @@ impl ServerHandler for BorerServer {
             CallToolResponse::Complete(mut result)
                 if remembered && result.is_error != Some(true) =>
             {
-                self.note_change(&named.0, named.1.as_ref(), &args);
+                self.note_change(&named.0, &args, before);
                 if let [ContentBlock::Text(t)] = result.content.as_mut_slice() {
                     let full = std::mem::take(&mut t.text);
                     let paged = named

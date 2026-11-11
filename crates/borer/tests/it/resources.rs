@@ -173,6 +173,70 @@ fn the_session_ledger_lists_what_the_session_did() {
     assert!(!session.contains("borer://session"), "{session}");
 }
 
+/// `borer://session` lists a call that changed the overlay, and none that
+/// left it as it was.
+///
+/// The ledger went by the tool's name and its `dry_run` alone: an applied
+/// `class_layout` was not among the names, a layout applied by reading
+/// `borer://layout` is no tool call, and a script told `dry_run=false`
+/// that proposed nothing was listed as a change. A layout read a second
+/// time applies what is already there, and is no change either.
+#[test]
+fn the_session_ledger_lists_what_changed_the_overlay() {
+    let file = std::env::temp_dir().join(format!("borer_ledger_{}.exe", std::process::id()));
+    let mut image = tiny_pe();
+    image[0x200..0x204].copy_from_slice(&[
+        0x8b, 0x41, 0x10, // ASM: mov eax, [rcx+0x10]
+        0xc3, // ASM: ret
+    ]);
+    std::fs::write(&file, image).expect("the fixture is writable");
+    let mut client = Client::start(&file.to_string_lossy());
+    client.text(
+        "set_name",
+        r#"{"address":"0x140001000","dry_run":false,"name":"Rec::Get"}"#,
+    );
+    client.text("class_layout", r#"{"class":"Rec","dry_run":false}"#);
+    let applied = client.text(
+        "class_layout",
+        r#"{"apply":"Fields","class":"Rec","dry_run":false}"#,
+    );
+    client.text("script", r#"{"code":"print(1);","dry_run":false}"#);
+    let applying = "borer://layout/0x140001000,apply=Seen,dry_run=false";
+    let read_applied = read(&mut client, applying);
+    let read_again = read(&mut client, applying);
+    let session = read(&mut client, "borer://session").expect("answers");
+    client.finish();
+    std::fs::remove_file(&file).ok();
+    let read_applied = read_applied.expect("the layout applies");
+    assert!(
+        read_applied.starts_with("defined struct Seen"),
+        "{read_applied}"
+    );
+    assert!(applied.starts_with("defined struct Fields"), "{applied}");
+    assert!(
+        session.contains("\n# 4 changes this session, the last 4 here, oldest first\n"),
+        "{session}"
+    );
+    assert!(read_again.is_ok(), "{read_again:?}");
+    assert_eq!(
+        session
+            .matches(&format!("\nresources/read {applying}\n"))
+            .count(),
+        1,
+        "the second read changed nothing: {session}"
+    );
+    assert!(
+        session.contains(
+            "\nclass_layout {\"apply\":\"Fields\",\"class\":\"Rec\",\"dry_run\":false}\n"
+        ),
+        "{session}"
+    );
+    assert!(
+        !session.contains("\nclass_layout {\"class\"") && !session.contains("\nscript {"),
+        "a call that changed nothing: {session}"
+    );
+}
+
 /// A program embedded in a file is listed by `borer://children`, opens
 /// with `load_binary` on `<file>@<offset>` as a program of its own, and
 /// `binary_info` then names the file and offset it came from.
