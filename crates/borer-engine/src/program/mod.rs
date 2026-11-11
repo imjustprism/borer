@@ -549,8 +549,9 @@ pub(crate) fn caught<T>(parse: impl FnOnce() -> T) -> anyhow::Result<T> {
 ///
 /// The one scan behind [`Program::offset_to_va`] and the PE reader's
 /// file-offset lookups: the first section declared whose file extent
-/// covers the offset wins, and the extent saturates rather than
-/// overflows on a hostile row.
+/// covers the offset and places it at an address wins. The extent
+/// saturates rather than overflows on a hostile row, and a row that would
+/// place the offset past the top of the address space places it nowhere.
 ///
 /// # Arguments
 ///
@@ -559,11 +560,12 @@ pub(crate) fn caught<T>(parse: impl FnOnce() -> T) -> anyhow::Result<T> {
 ///
 /// # Returns
 ///
-/// The address, or `None` when no section's file extent covers `off`.
+/// The address, or `None` when no section's file extent covers `off` at
+/// an address there is.
 fn offset_to_va_in(sections: &[Section], off: u64) -> Option<u64> {
     sections.iter().find_map(|s| {
         (s.file_size > 0 && off >= s.file_off.0 && off < s.file_off.0.saturating_add(s.file_size))
-            .then(|| s.va.0 + (off - s.file_off.0))
+            .then(|| s.va.0.checked_add(off - s.file_off.0))?
     })
 }
 
@@ -1687,7 +1689,8 @@ impl Program {
     ///
     /// # Returns
     ///
-    /// The address, or `None` when no section's file extent covers `off`.
+    /// The address, or `None` when no section's file extent covers `off`
+    /// at an address there is.
     pub fn offset_to_va(&self, off: u64) -> Option<u64> {
         offset_to_va_in(&self.sections, off)
     }
@@ -1805,8 +1808,8 @@ impl Program {
             return self.header_slice(va, max.min(saturating_usize(room)));
         };
         let off = s.file_off.0.checked_add(va - s.va.0)?;
-        let limit = (s.file_off.0 + s.file_size).min(from_usize(self.bytes.len()));
-        let end = (off + from_usize(max)).min(limit);
+        let limit = from_usize(self.bytes.len()).min(s.file_off.0.saturating_add(s.file_size));
+        let end = off.saturating_add(from_usize(max)).min(limit);
         self.image_bytes(off, end).filter(|b| !b.is_empty())
     }
 
@@ -1830,7 +1833,7 @@ impl Program {
         };
         let off = s.file_off.0.checked_add(va - s.va.0)?;
         let end = off.checked_add(from_usize(len))?;
-        if end > s.file_off.0 + s.file_size {
+        if end > s.file_off.0.saturating_add(s.file_size) {
             return None;
         }
         self.image_bytes(off, end)

@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use borer_engine::analysis::Analysis;
 use borer_engine::num::from_usize;
-use borer_engine::program::{Program, SymbolKind};
+use borer_engine::program::{FileOff, Program, Section, SymbolKind};
 
 #[path = "common/elfgen.rs"]
 #[expect(
@@ -1566,4 +1566,68 @@ fn a_flat_image_past_the_top_of_the_address_space_is_not_mapped() {
     let p = load(bytes);
     assert!(p.sections.is_empty(), "{:x?}", p.sections);
     assert!(Analysis::compute(&p).functions.is_empty());
+}
+
+/// A hand-built section whose file extent wraps the 64-bit space reads as
+/// what the file holds of it, or as nothing, and so does the address of a
+/// file offset in a section at the last addresses there are.
+///
+/// [`Program::raw`] fits no section to its bytes, so a section may state a
+/// file offset and a size whose sum passes `u64::MAX`. The reads by address
+/// and the decoder discovery opens added the two unchecked, and the address
+/// of a file offset added past the top: each overflowed, or wrapped to
+/// refuse bytes the file holds and to answer address 0.
+#[test]
+fn a_raw_section_whose_extent_wraps_reads_without_overflow() {
+    let x64 = borer_engine::program::Arch::X86_64;
+    let raw = |s: Section| Program::raw(vec![0x5a; 0x40], x64, 0, Some(0x1000), vec![s]);
+    let stated = |va: u64, file_off: u64, file_size: u64| Section {
+        file_off: FileOff(file_off),
+        file_size,
+        ..Section::mapped("s", va, 0, 0x100, false, true)
+    };
+    let past = raw(stated(0x1000, u64::MAX - 0x20, 0x40));
+    assert_eq!(past.read_va(0x1000, 8), None);
+    assert_eq!(past.read_va_upto(0x1000, 8), None);
+    Analysis::compute(&past);
+    let long = raw(stated(8, 0x20, u64::MAX - 0x10));
+    assert_eq!(long.read_va(0x10, 8), Some(&[0x5a; 8][..]));
+    assert_eq!(long.read_va_upto(0x10, 0x100).map(<[u8]>::len), Some(0x18));
+    let top = raw(Section::mapped("s", u64::MAX - 1, 0x10, 0x10, false, false));
+    assert_eq!(top.offset_to_va(0x11), Some(u64::MAX));
+    assert_eq!(top.offset_to_va(0x12), None);
+}
+
+/// A read at the top of a minidump range as long as the address space is
+/// refused, where it added the bytes asked for past `u64::MAX`.
+///
+/// A `Memory64ListStream` range states its size in 64 bits, so one mapped
+/// low holds the last addresses there are, and such an address maps to a
+/// file offset a few bytes below `u64::MAX`. The exception context here
+/// stops at one, the address a listing of the entry reads first. The
+/// stream's count and the file offset its ranges are packed from are both
+/// 1, so the list reads the same in either order of the two.
+#[test]
+fn a_read_at_the_top_of_a_minidump_range_is_refused() {
+    let mut d = vec![0u8; 0x300];
+    d[..4].copy_from_slice(b"MDMP");
+    put32(&mut d, 8, 3);
+    put32(&mut d, 12, 0x20);
+    let streams = [[7, 4, 0x60], [9, 32, 0x70], [6, 168, 0x100]];
+    for (k, v) in streams.as_flattened().iter().enumerate() {
+        put32(&mut d, 0x20 + k * 4, *v);
+    }
+    put16(&mut d, 0x60, 9);
+    put64(&mut d, 0x70, 1);
+    put64(&mut d, 0x78, 1);
+    put64(&mut d, 0x80, 0x10);
+    put64(&mut d, 0x88, u64::MAX);
+    put32(&mut d, 0x1a0, 0x100);
+    put32(&mut d, 0x1a4, 0x200);
+    put64(&mut d, 0x2f8, u64::MAX - 2);
+    let p = Program::from_bytes(PathBuf::from("top.dmp"), d).expect("a minidump loads");
+    assert_eq!(p.entry, Some(u64::MAX - 2));
+    assert!(p.section_at(u64::MAX - 2).is_some(), "{:x?}", p.sections);
+    assert_eq!(p.read_va_upto(u64::MAX - 2, 256), None);
+    Analysis::compute(&p);
 }

@@ -914,7 +914,7 @@ impl<'a> Cursors<'a> {
         if (!s.executable && !entry_here) || self.open.iter().any(|c| c.va == s.va.0) {
             return None;
         }
-        let limit = (s.file_off.0 + s.file_size).min(from_usize(program.bytes.len()));
+        let limit = from_usize(program.bytes.len()).min(s.file_off.0.saturating_add(s.file_size));
         let bytes = program
             .bytes
             .get(usize::try_from(s.file_off.0).ok()?..usize::try_from(limit).ok()?)
