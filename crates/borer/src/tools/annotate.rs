@@ -735,7 +735,8 @@ impl BorerServer {
     /// agent can return to: a conclusion it proved is worth building on,
     /// and one it guessed at is worth checking before it does. The ledger
     /// grows with the session, so it pages like every list: the header
-    /// says `showing N of M` of the rows the filter keeps.
+    /// says `showing N of M` of the rows the filter keeps, and only the
+    /// page asked for is held while the rows are counted.
     ///
     /// # Arguments
     ///
@@ -780,7 +781,7 @@ impl BorerServer {
             })
         });
         let stated: usize = o.fields.values().map(std::collections::BTreeMap::len).sum();
-        let rows: Vec<String> = o
+        let rows = o
             .names
             .iter()
             .map(|(va, name)| format!("{:<12} name: {name}", format!("{va:#x}")))
@@ -794,8 +795,14 @@ impl BorerServer {
                 let claim = c.trim_start().trim_start_matches('?').trim_start();
                 format!("{:<12} open:  {claim}", format!("{va:#x}"))
             }))
-            .filter(|row| filter.accepts(row))
-            .collect();
+            .filter(|row| filter.accepts(row));
+        let (mut total, mut shown) = (0usize, Vec::new());
+        for row in rows {
+            if total >= page.offset && shown.len() < page.limit.n {
+                shown.push(row);
+            }
+            total += 1;
+        }
         let counts = format!(
             "{} names, {} findings, {} open question(s){}",
             o.names.len(),
@@ -806,11 +813,9 @@ impl BorerServer {
                 n => format!(", {n} stated field(s)"),
             }
         );
-        let total = rows.len();
         if page.count_only {
             return Ok(format!("# {total} annotations ({counts})\n"));
         }
-        let shown: Vec<&String> = rows.iter().skip(page.offset).take(page.limit.n).collect();
         let mut out = format!(
             "# showing {} of {total} annotations ({counts})\n# addr annotation\n",
             shown.len()
