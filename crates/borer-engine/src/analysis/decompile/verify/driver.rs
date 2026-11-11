@@ -1,15 +1,17 @@
 //! The lift check's driver, written once for every instruction set.
 //!
 //! [`verify`](super) checks x86 code, and the modules beside it arm64,
-//! ARM32 and RISC-V code, each against its own machine. What every
-//! one of them does the same way is here: the state a block's two runs
-//! start from, seeded on the machine and for the evaluator alike
-//! ([`Seeded`]); the two runs themselves ([`run_block`]); why a run that
-//! stopped elsewhere than meant leaves its block unchecked ([`stopped`]);
-//! and the compare of the general registers where each is one whole word
-//! ([`registers`]). An instruction set's check adds what is its own: how
-//! it reads a block's straight line, the registers it names, the float or
-//! vector registers it seeds, and how it compares them.
+//! ARM32 and RISC-V code, each against its own machine. What every one of
+//! them does the same way is here: the walk over the functions asked for,
+//! each block counted as checked or by why it was not ([`functions`]);
+//! the state a block's two runs start from, seeded on the machine and for
+//! the evaluator alike ([`Seeded`]); the two runs themselves
+//! ([`run_block`]); why a run that stopped elsewhere than meant leaves its
+//! block unchecked ([`stopped`]); and the compare of the general
+//! registers where each is one whole word ([`registers`]). An instruction
+//! set's check adds what is its own: how it reads a block's straight
+//! line, the registers it names, the float or vector registers it seeds,
+//! and how it compares them.
 
 use std::collections::BTreeMap;
 
@@ -18,9 +20,12 @@ use super::super::arch::Lifter;
 use super::super::expr::Key;
 use super::super::lift::{BlockFacts, Env, Pass};
 use super::{
-    Bench, Fact, GOLDEN, Jcc, Near, Probe, Ran, Read, Rng, STACK_WORDS, State, Verified, low,
+    Bench, Fact, GOLDEN, Jcc, Near, Probe, Ran, Read, Rng, STACK_WORDS, State, Verified,
+    function_ctx, low,
 };
+use crate::analysis::{Analysis, Function, Overlay};
 use crate::emulate::Stop;
+use crate::program::Program;
 
 /// A block's two runs before they start: the machine and the state the
 /// evaluator reads, seeded alike from one generator.
@@ -303,4 +308,61 @@ pub(in crate::analysis::decompile) fn registers<M: Bench, R>(
         (None, None) => (Read::Unreadable, None),
     };
     check(M::SP, emulated, read, expr);
+}
+
+/// Checks some functions on the calling thread, each in a decompilation
+/// state of its own ([`function_ctx`]).
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `analysis` - The functions and their blocks.
+/// * `entries` - The functions to check.
+/// * `blocks` - Checks every block of one function in its state, and
+///   counts each ([`Verified::block`]).
+///
+/// # Returns
+///
+/// What was compared and every disagreement.
+pub(in crate::analysis::decompile) fn functions(
+    program: &Program,
+    analysis: &Analysis,
+    entries: &[u64],
+    mut blocks: impl FnMut(&mut Ctx<'_>, &Function, &mut Verified),
+) -> Verified {
+    let mut out = Verified::default();
+    let overlay = Overlay::default();
+    for &entry in entries {
+        let Some(f) = analysis.function(entry) else {
+            continue;
+        };
+        out.functions += 1;
+        let mut ctx = function_ctx(program, analysis, &overlay, f);
+        blocks(&mut ctx, f, &mut out);
+    }
+    out
+}
+
+impl Verified {
+    /// Counts one block: as checked, with its two runs compared, or under
+    /// the reason it was not.
+    ///
+    /// # Arguments
+    ///
+    /// * `ran` - Both runs, or why the block cannot be checked.
+    /// * `compare` - Compares every fact of the two runs.
+    pub(in crate::analysis::decompile) fn block<T>(
+        &mut self,
+        ran: Result<T, &'static str>,
+        compare: impl FnOnce(T, &mut Self),
+    ) {
+        self.blocks += 1;
+        match ran {
+            Ok(ran) => {
+                self.checked += 1;
+                compare(ran, self);
+            }
+            Err(reason) => *self.skipped.entry(reason).or_default() += 1,
+        }
+    }
 }

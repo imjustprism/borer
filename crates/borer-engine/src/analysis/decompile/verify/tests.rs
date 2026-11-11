@@ -1,5 +1,6 @@
 use super::{
-    Effect, Fact, Read, Sweep, Verified, in_parts, st_register, verify, verify_mir, verify_tsv,
+    Effect, Fact, Read, Sweep, Verified, function_ctx, in_parts, st_register, verify, verify_mir,
+    verify_tsv,
 };
 use crate::analysis::decompile::expr::{Expr, Key, Op, Ty, UnOp};
 use crate::analysis::{Analysis, Overlay};
@@ -117,7 +118,7 @@ fn an_unreadable_value_stays_unreadable_whatever_it_read() {
     let sum = |l: &Expr, r: &Expr| Expr::Bin(Op::Add, Box::new(l.clone()), Box::new(r.clone()));
     for mir in [false, true] {
         let sweep = Sweep::new(&p, 1, mir).expect("sweep");
-        let mut ctx = sweep.ctx(&p, &a, &overlay, f);
+        let mut ctx = function_ctx(&p, &a, &overlay, f);
         let mut out = Verified::default();
         let ran = sweep.run(&mut ctx, 0x1000, block, &mut out).expect("run");
         assert_eq!(ran.read(&stored), Read::Stale, "mir {mir}");
@@ -150,7 +151,7 @@ fn a_wrong_store_or_a_flipped_branch_is_flagged() {
     let block = f.blocks.iter().find(|b| b.start == 0x1000).expect("block");
     for seed in 1..=8 {
         let sweep = Sweep::new(&p, seed, false).expect("sweep");
-        let mut ctx = sweep.ctx(&p, &a, &overlay, f);
+        let mut ctx = function_ctx(&p, &a, &overlay, f);
         let mut out = Verified::default();
         let ran = sweep.run(&mut ctx, 0x1000, block, &mut out).expect("run");
         ran.compare(&mut out);
@@ -209,7 +210,7 @@ fn the_x87_stack_is_compared() {
     let block = f.blocks.iter().find(|b| b.start == 0x1000).expect("block");
     for seed in 1..=8 {
         let sweep = Sweep::new(&p, seed, false).expect("sweep");
-        let mut ctx = sweep.ctx(&p, &a, &overlay, f);
+        let mut ctx = function_ctx(&p, &a, &overlay, f);
         let mut out = Verified::default();
         sweep
             .run(&mut ctx, 0x1000, block, &mut out)
@@ -261,7 +262,7 @@ fn the_xmm_registers_are_compared() {
     let block = f.blocks.iter().find(|b| b.start == 0x1000).expect("block");
     for seed in 1..=8 {
         let sweep = Sweep::new(&p, seed, false).expect("sweep");
-        let mut ctx = sweep.ctx(&p, &a, &overlay, f);
+        let mut ctx = function_ctx(&p, &a, &overlay, f);
         let mut out = Verified::default();
         sweep
             .run(&mut ctx, 0x1000, block, &mut out)
@@ -317,7 +318,7 @@ fn a_movd_lane_is_lifted_as_the_32_bits_the_machine_writes() {
     let block = f.blocks.iter().find(|b| b.start == 0x1000).expect("block");
     for seed in 1..=8 {
         let sweep = Sweep::new(&p, seed, false).expect("sweep");
-        let mut ctx = sweep.ctx(&p, &a, &overlay, f);
+        let mut ctx = function_ctx(&p, &a, &overlay, f);
         let mut out = Verified::default();
         sweep
             .run(&mut ctx, 0x1000, block, &mut out)
@@ -351,7 +352,7 @@ fn the_segment_registers_are_compared() {
     let block = f.blocks.iter().find(|b| b.start == 0x1000).expect("block");
     for seed in 1..=8 {
         let sweep = Sweep::new(&p, seed, false).expect("sweep");
-        let mut ctx = sweep.ctx(&p, &a, &overlay, f);
+        let mut ctx = function_ctx(&p, &a, &overlay, f);
         let mut out = Verified::default();
         sweep
             .run(&mut ctx, 0x1000, block, &mut out)
@@ -431,7 +432,7 @@ fn tls_slot_reads_compare_through_the_walked_block() {
         .expect("block");
     for seed in 1..=8 {
         let sweep = Sweep::new(&p, seed, false).expect("sweep");
-        let mut ctx = sweep.ctx(&p, &a, &overlay, read);
+        let mut ctx = function_ctx(&p, &a, &overlay, read);
         let mut out = Verified::default();
         sweep
             .run(&mut ctx, 0x1017, block, &mut out)
@@ -507,7 +508,7 @@ fn a_tls_slot_store_compares_at_the_walked_block() {
     let block = f.blocks.iter().find(|b| b.start == 0x1000).expect("block");
     for seed in 1..=8 {
         let sweep = Sweep::new(&p, seed, false).expect("sweep");
-        let mut ctx = sweep.ctx(&p, &a, &overlay, f);
+        let mut ctx = function_ctx(&p, &a, &overlay, f);
         let mut out = Verified::default();
         sweep
             .run(&mut ctx, 0x1000, block, &mut out)
@@ -561,7 +562,7 @@ fn an_aligned_entry_block_compares_its_stores() {
     let block = f.blocks.iter().find(|b| b.start == 0x1000).expect("block");
     for seed in 1..=8 {
         let sweep = Sweep::new(&p, seed, false).expect("sweep");
-        let mut ctx = sweep.ctx(&p, &a, &overlay, f);
+        let mut ctx = function_ctx(&p, &a, &overlay, f);
         let mut out = Verified::default();
         sweep
             .run(&mut ctx, 0x1000, block, &mut out)
@@ -647,7 +648,7 @@ fn shl_by_one_then_jl_reads_the_overflow() {
     let block = f.blocks.iter().find(|b| b.start == 0x1000).expect("block");
     for seed in 1..=8 {
         let sweep = Sweep::new(&p, seed, false).expect("sweep");
-        let mut ctx = sweep.ctx(&p, &a, &overlay, f);
+        let mut ctx = function_ctx(&p, &a, &overlay, f);
         let mut out = Verified::default();
         sweep
             .run(&mut ctx, 0x1000, block, &mut out)
@@ -694,7 +695,7 @@ fn a_float_binary_operation_is_compared() {
     let block = f.blocks.iter().find(|b| b.start == 0x1000).expect("block");
     for seed in 1..=8 {
         let sweep = Sweep::new(&p, seed, false).expect("sweep");
-        let mut ctx = sweep.ctx(&p, &a, &overlay, f);
+        let mut ctx = function_ctx(&p, &a, &overlay, f);
         let mut out = Verified::default();
         sweep
             .run(&mut ctx, 0x1000, block, &mut out)
@@ -751,7 +752,7 @@ fn a_single_rounds_at_the_operation() {
     let block = f.blocks.iter().find(|b| b.start == 0x1000).expect("block");
     for seed in 1..=8 {
         let sweep = Sweep::new(&p, seed, false).expect("sweep");
-        let mut ctx = sweep.ctx(&p, &a, &overlay, f);
+        let mut ctx = function_ctx(&p, &a, &overlay, f);
         let mut out = Verified::default();
         sweep
             .run(&mut ctx, 0x1000, block, &mut out)

@@ -27,16 +27,16 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::Ctx;
 use super::arch::Rv;
 use super::expr::Key;
 use super::floats::agree;
 use super::lift_rv::{decode_blocks, float_ty};
 use super::verify::{
-    Fact, Jcc, Near, Ran, Rng, Seeded, State, Verified, bench, float_bits, in_parts, low,
-    registers, report, run_block,
+    Fact, Jcc, Near, Ran, Rng, Seeded, State, Verified, bench, float_bits, functions, in_parts,
+    low, registers, report, run_block,
 };
-use super::{Ctx, new_ctx};
-use crate::analysis::{Analysis, Function, Overlay};
+use crate::analysis::Analysis;
 use crate::emulate::rv::Machine;
 use crate::isa::rv::{self, Alu, Flow, Fmt, Insn, Op, Reg, SP};
 use crate::program::Program;
@@ -119,60 +119,15 @@ pub fn verify_tsv(v: &Verified) -> String {
 /// * `entries` - The functions to check.
 /// * `seed` - The starting state's seed.
 fn verify_some(program: &Program, analysis: &Analysis, entries: &[u64], seed: u64) -> Verified {
-    let mut out = Verified::default();
     let Some(pristine) = Machine::new(program, 0) else {
-        return out;
+        return Verified::default();
     };
-    let overlay = Overlay::default();
-    for &entry in entries {
-        let Some(f) = analysis.function(entry) else {
-            continue;
-        };
-        out.functions += 1;
-        let mut ctx = function_ctx(program, analysis, &overlay, f);
-        let code = decode_blocks(program, f);
-        for (block, instrs) in f.blocks.iter().zip(&code) {
-            out.blocks += 1;
-            match run(
-                &pristine,
-                seed,
-                &mut ctx,
-                (entry, block.start),
-                instrs,
-                &mut out,
-            ) {
-                Ok(ran) => {
-                    out.checked += 1;
-                    compare(ran, &mut out);
-                }
-                Err(reason) => *out.skipped.entry(reason).or_default() += 1,
-            }
+    functions(program, analysis, entries, |ctx, f, out| {
+        for (block, instrs) in f.blocks.iter().zip(&decode_blocks(program, f)) {
+            let ran = run(&pristine, seed, ctx, (f.entry, block.start), instrs, out);
+            out.block(ran, compare);
         }
-    }
-    out
-}
-
-/// Builds the decompilation state a function's blocks are lifted in.
-///
-/// # Arguments
-///
-/// * `program` - The image.
-/// * `analysis` - The functions and their blocks.
-/// * `overlay` - The names in force (none).
-/// * `f` - The function.
-fn function_ctx<'a>(
-    program: &'a Program,
-    analysis: &'a Analysis,
-    overlay: &'a Overlay,
-    f: &Function,
-) -> Ctx<'a> {
-    let starts = f.blocks.iter().map(|b| b.start).collect();
-    let bits = super::lift_rv::xlen(program).bits();
-    let mut ctx = new_ctx(program, analysis, overlay, f, bits, starts, &[]);
-    ctx.symbolic_only = true;
-    ctx.flag_readers = vec![false; f.blocks.len()];
-    ctx.rebase_flags = vec![None; f.blocks.len()];
-    ctx
+    })
 }
 
 /// Splits a block's instructions at its first control transfer.
@@ -427,10 +382,10 @@ fn floats(ran: &Ran<'_, Machine<'_>, ()>, out: &mut Verified) {
     reason = "assertions are the point of a test"
 )]
 mod tests {
-    use super::{Machine, compare, function_ctx, run};
+    use super::{Machine, compare, run};
     use crate::analysis::decompile::expr::{Cc, Cond, Expr, Flags, Key};
     use crate::analysis::decompile::lift_rv::decode_blocks;
-    use crate::analysis::decompile::verify::Ran;
+    use crate::analysis::decompile::verify::{Ran, function_ctx};
     use crate::analysis::decompile::verify_testing::{AT, image, tried};
     use crate::analysis::{Analysis, Overlay};
     use crate::isa::rv::Reg;

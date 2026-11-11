@@ -27,14 +27,15 @@
 
 use std::collections::BTreeMap;
 
+use super::Ctx;
 use super::arch::A64;
 use super::expr::Key;
 use super::lift_a64::decode;
 use super::verify::{
-    Fact, Jcc, Near, Ran, Rng, Seeded, Verified, bench, in_parts, registers, report, run_block,
+    Fact, Jcc, Near, Ran, Rng, Seeded, Verified, bench, functions, in_parts, registers, report,
+    run_block,
 };
-use super::{Ctx, new_ctx};
-use crate::analysis::{Analysis, BasicBlock, Function, Overlay};
+use crate::analysis::{Analysis, BasicBlock};
 use crate::emulate::a64::Machine;
 use crate::isa::a64::{self, Flow, Insn, Mnemonic, Opnd, Reg};
 use crate::program::Program;
@@ -158,25 +159,15 @@ fn verify_some(
     seed: u64,
     mir: bool,
 ) -> Verified {
-    let mut out = Verified::default();
     let Some(sweep) = Sweep::new(program, seed, mir) else {
-        return out;
+        return Verified::default();
     };
-    let overlay = Overlay::default();
-    for &entry in entries {
-        let Some(f) = analysis.function(entry) else {
-            continue;
-        };
-        out.functions += 1;
-        let mut ctx = function_ctx(program, analysis, &overlay, f);
+    functions(program, analysis, entries, |ctx, f, out| {
         for block in &f.blocks {
-            out.blocks += 1;
-            if let Err(reason) = sweep.check(&mut ctx, entry, block, &mut out) {
-                *out.skipped.entry(reason).or_default() += 1;
-            }
+            let ran = sweep.run(ctx, f.entry, block, out);
+            out.block(ran, |ran, out| ran.compare(out));
         }
-    }
-    out
+    })
 }
 
 /// Decodes a block up to its first control transfer.
@@ -310,29 +301,6 @@ fn seed_vectors(emu: &mut Machine<'_>, regs: &mut BTreeMap<Key, u64>, rng: &mut 
     }
 }
 
-/// Builds the decompilation state a function's blocks are lifted in:
-/// nothing written out, and no flags carried between blocks.
-///
-/// # Arguments
-///
-/// * `program` - The image.
-/// * `analysis` - The functions and their blocks.
-/// * `overlay` - The names in force (none).
-/// * `f` - The function.
-fn function_ctx<'a>(
-    program: &'a Program,
-    analysis: &'a Analysis,
-    overlay: &'a Overlay,
-    f: &Function,
-) -> Ctx<'a> {
-    let starts = f.blocks.iter().map(|b| b.start).collect();
-    let mut ctx = new_ctx(program, analysis, overlay, f, 64, starts, &[]);
-    ctx.symbolic_only = true;
-    ctx.flag_readers = vec![false; f.blocks.len()];
-    ctx.rebase_flags = vec![None; f.blocks.len()];
-    ctx
-}
-
 /// What every block of one verification shares.
 struct Sweep<'p> {
     /// The image's machine before any run, cloned for each block.
@@ -361,31 +329,6 @@ impl<'p> Sweep<'p> {
             seed,
             mir,
         })
-    }
-
-    /// Runs one block both ways and compares every fact.
-    ///
-    /// # Arguments
-    ///
-    /// * `ctx` - The function's decompilation state, symbolic only.
-    /// * `entry` - The function's entry.
-    /// * `block` - The block.
-    /// * `out` - Where the counts and disagreements go.
-    ///
-    /// # Errors
-    ///
-    /// Why the block was not checked.
-    fn check(
-        &self,
-        ctx: &mut Ctx<'_>,
-        entry: u64,
-        block: &BasicBlock,
-        out: &mut Verified,
-    ) -> Result<(), &'static str> {
-        let ran = self.run(ctx, entry, block, out)?;
-        out.checked += 1;
-        ran.compare(out);
-        Ok(())
     }
 
     /// Runs one block on the machine and through the lifter from one
@@ -490,9 +433,9 @@ impl Ran<'_, Machine<'_>, ()> {
     reason = "assertions are the point of a test"
 )]
 mod tests {
-    use super::{Machine, Sweep, function_ctx};
+    use super::{Machine, Sweep};
     use crate::analysis::decompile::expr::{Expr, Flags, Key, Op, Ty};
-    use crate::analysis::decompile::verify::Ran;
+    use crate::analysis::decompile::verify::{Ran, function_ctx};
     use crate::analysis::decompile::verify_testing::{AT, image, tried};
     use crate::analysis::{Analysis, Overlay};
     use crate::isa::a64::Reg;

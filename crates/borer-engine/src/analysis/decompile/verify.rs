@@ -57,12 +57,13 @@ use super::{Ctx, new_ctx};
 use crate::analysis::{Analysis, BasicBlock, Function, Overlay, striped_on};
 use crate::emulate::{Emulator, Run, Stop, fill_byte};
 use crate::fxmap::FxHashSet;
+use crate::isa::Isa;
 use crate::num::{from_usize, lo8};
 use crate::program::Program;
 
 mod driver;
 
-pub(super) use driver::{Seeded, registers, run_block, stopped};
+pub(super) use driver::{Seeded, functions, registers, run_block, stopped};
 
 /// The general registers compared, as the emulator names them.
 pub(super) const REGS: [(&str, Register); 15] = [
@@ -1234,6 +1235,31 @@ fn comparands(instrs: &[Instruction], regs: &[(&str, Register)], width: u8) -> B
     near
 }
 
+/// Builds the decompilation state a function's blocks are lifted in:
+/// nothing written out, and no flags carried between blocks, since each
+/// block starts from a state of its own.
+///
+/// # Arguments
+///
+/// * `program` - The image.
+/// * `analysis` - The functions and their blocks.
+/// * `overlay` - The names in force (none).
+/// * `f` - The function.
+pub(super) fn function_ctx<'a>(
+    program: &'a Program,
+    analysis: &'a Analysis,
+    overlay: &'a Overlay,
+    f: &Function,
+) -> Ctx<'a> {
+    let starts = f.blocks.iter().map(|b| b.start).collect();
+    let bitness = program.arch.isa().map_or(64, Isa::bits);
+    let mut ctx = new_ctx(program, analysis, overlay, f, bitness, starts, &[]);
+    ctx.symbolic_only = true;
+    ctx.flag_readers = vec![false; f.blocks.len()];
+    ctx.rebase_flags = vec![None; f.blocks.len()];
+    ctx
+}
+
 /// What every block of one verification shares.
 struct Sweep<'p> {
     /// The image's emulator before any run, cloned for each block: building
@@ -1275,57 +1301,6 @@ impl<'p> Sweep<'p> {
             seed,
             mir,
         })
-    }
-
-    /// Builds the decompilation state a function's blocks are lifted in:
-    /// nothing written out, and no flags carried between blocks, since
-    /// each block starts from a state of its own.
-    ///
-    /// # Arguments
-    ///
-    /// * `program` - The image.
-    /// * `analysis` - The functions and their blocks.
-    /// * `overlay` - The names in force (none).
-    /// * `f` - The function.
-    fn ctx<'a>(
-        &self,
-        program: &'a Program,
-        analysis: &'a Analysis,
-        overlay: &'a Overlay,
-        f: &Function,
-    ) -> Ctx<'a> {
-        let starts = f.blocks.iter().map(|b| b.start).collect();
-        let bitness = u32::from(self.width);
-        let mut ctx = new_ctx(program, analysis, overlay, f, bitness, starts, &[]);
-        ctx.symbolic_only = true;
-        ctx.flag_readers = vec![false; f.blocks.len()];
-        ctx.rebase_flags = vec![None; f.blocks.len()];
-        ctx
-    }
-
-    /// Runs one block both ways and compares every fact.
-    ///
-    /// # Arguments
-    ///
-    /// * `ctx` - The function's decompilation state, symbolic only.
-    /// * `entry` - The function's entry.
-    /// * `block` - The block.
-    /// * `out` - Where the counts and disagreements go.
-    ///
-    /// # Errors
-    ///
-    /// Why the block was not checked.
-    fn check(
-        &self,
-        ctx: &mut Ctx<'_>,
-        entry: u64,
-        block: &BasicBlock,
-        out: &mut Verified,
-    ) -> Result<(), &'static str> {
-        let ran = self.run(ctx, entry, block, out)?;
-        out.checked += 1;
-        ran.compare(out);
-        Ok(())
     }
 
     /// Runs one block on the emulator and through the lifter from one
@@ -2178,25 +2153,15 @@ fn verify_some(
     seed: u64,
     mir: bool,
 ) -> Verified {
-    let mut out = Verified::default();
     let Some(sweep) = Sweep::new(program, seed, mir) else {
-        return out;
+        return Verified::default();
     };
-    let overlay = Overlay::default();
-    for &entry in entries {
-        let Some(f) = analysis.function(entry) else {
-            continue;
-        };
-        out.functions += 1;
-        let mut ctx = sweep.ctx(program, analysis, &overlay, f);
+    functions(program, analysis, entries, |ctx, f, out| {
         for block in &f.blocks {
-            out.blocks += 1;
-            if let Err(reason) = sweep.check(&mut ctx, entry, block, &mut out) {
-                *out.skipped.entry(reason).or_default() += 1;
-            }
+            let ran = sweep.run(ctx, f.entry, block, out);
+            out.block(ran, |ran, out| ran.compare(out));
         }
-    }
-    out
+    })
 }
 
 /// Renders a verification as a report.
