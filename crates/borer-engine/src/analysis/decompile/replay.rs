@@ -239,34 +239,6 @@ pub(super) enum Code {
 /// A machine the replay runs blocks on: what the replay asks of it beyond
 /// what the verifier does ([`Bench`]).
 pub(super) trait Rig: Bench {
-    /// Writes a byte of memory before a run.
-    ///
-    /// # Arguments
-    ///
-    /// * `at` - The address.
-    /// * `byte` - The byte.
-    fn poke(&mut self, at: u64, byte: u8);
-
-    /// Sets a register named as text.
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - The register's name, as [`Replay::regs`] names it.
-    /// * `value` - The value.
-    ///
-    /// # Returns
-    ///
-    /// Whether the name was a register.
-    fn set_register(&mut self, name: &str, value: u64) -> bool;
-
-    /// Fills memory nothing backs with bytes drawn from a seed
-    /// ([`fill_byte`]), as the text's state reads it.
-    ///
-    /// # Arguments
-    ///
-    /// * `seed` - The seed, or `None` for a fault there.
-    fn set_fill(&mut self, seed: Option<u64>);
-
     /// Lets a run go on past what the machine models where it can, as the
     /// replay wants of the x86 emulator; a machine without the setting
     /// does nothing.
@@ -294,7 +266,7 @@ pub(super) trait Rig: Bench {
         None
     }
 
-    /// Writes a run of bytes of memory before a run, as [`Rig::poke`]
+    /// Writes a run of bytes of memory before a run, as [`Bench::poke`]
     /// writes each one.
     ///
     /// # Arguments
@@ -309,18 +281,6 @@ pub(super) trait Rig: Bench {
 }
 
 impl Rig for Emulator<'_> {
-    fn poke(&mut self, at: u64, byte: u8) {
-        Emulator::poke(self, at, byte);
-    }
-
-    fn set_register(&mut self, name: &str, value: u64) -> bool {
-        Emulator::set_register(self, name, value)
-    }
-
-    fn set_fill(&mut self, seed: Option<u64>) {
-        Emulator::set_fill(self, seed);
-    }
-
     fn set_permissive(&mut self) {
         Emulator::set_permissive(self, true);
     }

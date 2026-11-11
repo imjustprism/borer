@@ -458,7 +458,7 @@ impl Rng {
 }
 
 /// A machine a block runs on for the check: the x86 [`Emulator`], or the
-/// arm64 [`crate::emulate::a64::Machine`], which share these methods.
+/// arm64, ARM32 or RISC-V machine, which share these methods.
 pub(super) trait Bench: Clone {
     /// The name the machine reads its stack pointer by, as a report names
     /// a slot from it.
@@ -471,6 +471,14 @@ pub(super) trait Bench: Clone {
     /// * `at` - The address.
     fn byte_at(&self, at: u64) -> Option<u8>;
 
+    /// Writes a byte of memory before a run.
+    ///
+    /// # Arguments
+    ///
+    /// * `at` - The address.
+    /// * `byte` - The byte.
+    fn poke(&mut self, at: u64, byte: u8);
+
     /// Reads a register named as text, or `None` for a name that is no
     /// register.
     ///
@@ -478,6 +486,26 @@ pub(super) trait Bench: Clone {
     ///
     /// * `name` - The register's name.
     fn register(&self, name: &str) -> Option<u64>;
+
+    /// Sets a register named as text.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The register's name, as the machine names it.
+    /// * `value` - The value.
+    ///
+    /// # Returns
+    ///
+    /// Whether the name was a register.
+    fn set_register(&mut self, name: &str, value: u64) -> bool;
+
+    /// Fills memory nothing backs with bytes drawn from a seed
+    /// ([`fill_byte`]), as the check's state reads it.
+    ///
+    /// # Arguments
+    ///
+    /// * `seed` - The seed, or `None` for a fault there.
+    fn set_fill(&mut self, seed: Option<u64>);
 
     /// Sets the step budget of the next run.
     ///
@@ -515,8 +543,20 @@ macro_rules! bench {
                 <$machine>::byte_at(self, at)
             }
 
+            fn poke(&mut self, at: u64, byte: u8) {
+                <$machine>::poke(self, at, byte);
+            }
+
             fn register(&self, name: &str) -> Option<u64> {
                 <$machine>::register(self, name)
+            }
+
+            fn set_register(&mut self, name: &str, value: u64) -> bool {
+                <$machine>::set_register(self, name, value)
+            }
+
+            fn set_fill(&mut self, seed: Option<u64>) {
+                <$machine>::set_fill(self, seed);
             }
 
             fn set_budget(&mut self, budget: usize) {

@@ -63,18 +63,6 @@ const REGS: [(&str, Key); 31] = [
 const VECTORS: u8 = 32;
 
 impl Rig for Machine<'_> {
-    fn poke(&mut self, at: u64, byte: u8) {
-        Machine::poke(self, at, byte);
-    }
-
-    fn set_register(&mut self, name: &str, value: u64) -> bool {
-        Machine::set_register(self, name, value)
-    }
-
-    fn set_fill(&mut self, seed: Option<u64>) {
-        Machine::set_fill(self, seed);
-    }
-
     fn set_permissive(&mut self) {}
 
     fn vector(&self, n: usize) -> u128 {
