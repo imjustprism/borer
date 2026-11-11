@@ -479,10 +479,11 @@ fn collect_call_types(
     }
 }
 
-/// Returns what the code of `class` calls its fields, by offset: the one
+/// Returns what the fields of `class` are called, by offset: the one
 /// source every reader of a field's name takes it from.
 ///
-/// A member name wins wherever a source gives one: the name most of the
+/// A name the overlay states comes first ([`super::stated::labels`]). Then
+/// a member name wins wherever a source gives one: the name most of the
 /// member names the class's guarded asserts tie to the field agree on
 /// ([`majority_member`]), else the one its template's other
 /// instantiations agree on ([`sibling_votes`]), else an inlined setter's
@@ -518,7 +519,7 @@ pub fn field_labels(
                 let methods = methods_of(analysis, overlay, class);
                 let own = method_votes(program, analysis, overlay, &methods);
                 let siblings = sibling_votes(program, analysis, overlay, class);
-                let mut labels: BTreeMap<u64, FieldLabel> = BTreeMap::new();
+                let mut labels = super::stated::labels(overlay, class);
                 for (off, u) in own.iter().chain(&siblings) {
                     if let Some(name) = majority_member(u) {
                         labels.entry(*off).or_insert(FieldLabel::Member(name));
@@ -2133,11 +2134,14 @@ pub fn typed_field_uses_tsv(
 /// Renders a layout as compact text: one line per field with offset, width,
 /// reads/writes, address-takens, stored constants and up to three methods.
 ///
+/// A field whose name the overlay states says so first among its notes
+/// ([`super::stated::notes`]).
+///
 /// # Arguments
 ///
 /// * `layout` - The recovered layout.
 /// * `analysis` - For method and constant names.
-/// * `overlay` - User names.
+/// * `overlay` - User names, and the fields stated of the class.
 pub fn render_layout(layout: &ClassLayout, analysis: &Analysis, overlay: &Overlay) -> String {
     let mut out = String::new();
     let size = layout
@@ -2277,7 +2281,7 @@ pub fn render_layout(layout: &ClassLayout, analysis: &Analysis, overlay: &Overla
         if f.methods.len() > METHODS_SHOWN {
             names.push(format!("+{}", f.methods.len() - METHODS_SHOWN));
         }
-        let mut notes = Vec::new();
+        let mut notes = super::stated::notes(overlay, &layout.name, *off);
         if f.address_taken > 0 {
             notes.push(format!("&x{}", f.address_taken));
         }

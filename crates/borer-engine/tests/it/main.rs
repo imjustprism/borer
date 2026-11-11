@@ -86,6 +86,7 @@ mod rv_emulate;
 mod rv_lift;
 mod search;
 mod shapes;
+mod stated;
 mod strings;
 mod structure;
 mod syscalls;

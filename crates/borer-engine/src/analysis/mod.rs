@@ -50,6 +50,7 @@ mod seh32;
 pub mod senders;
 pub mod sigs;
 pub mod snapshot;
+pub mod stated;
 mod switch_index;
 pub mod syscalls;
 pub mod typelib;
@@ -1807,6 +1808,13 @@ pub struct Overlay {
     /// [`Overlay::fingerprint`]; saved with a project like the prototypes.
     #[serde(default, skip)]
     pub vars: reads::Tracked<u64, BTreeMap<protos::VarKey, protos::Var>, reads::VarsTag>,
+    /// Class to the fields an agent stated of it, by offset: each a name,
+    /// and a type when one was stated ([`stated::Field`]), laid over the
+    /// layout the class's methods show, so every other field stays as
+    /// recovered. Part of [`Overlay::fingerprint`]; saved with a project
+    /// like the prototypes.
+    #[serde(default, skip)]
+    pub fields: reads::Tracked<String, BTreeMap<u64, stated::Field>, reads::FieldsTag>,
     /// Name tables by the display name of the function encoding each
     /// ([`decompile::enum_tables`]); a caller comparing that function's
     /// result, or passing a constant to it, renders the constant by its
@@ -1946,9 +1954,9 @@ pub fn plain_text_cached(
 impl Overlay {
     /// A fingerprint of everything that changes a decompilation's text: the
     /// names and the comments, folded in address order, the user types,
-    /// their applications, the stated prototypes and variables, then the name
-    /// tables, folded by the function each is keyed under, then where the
-    /// tables come from.
+    /// their applications, the stated prototypes, variables and class
+    /// fields, then the name tables, folded by the function each is keyed
+    /// under, then where the tables come from.
     ///
     /// The tables are in it because a decompilation renders constants by
     /// their member names ([`decompile::apply_enums`]): the memo keyed by
@@ -2009,6 +2017,16 @@ impl Overlay {
                 fold(&[0]);
             }
         }
+        for (class, fields) in self.fields.raw() {
+            for (off, field) in fields {
+                fold(&[9]);
+                fold(class.as_bytes());
+                fold(&[0]);
+                fold(&off.to_le_bytes());
+                fold(field.spell().as_bytes());
+                fold(&[0]);
+            }
+        }
         for (function, table) in self.enums.raw() {
             fold(function.as_bytes());
             fold(&[0]);
@@ -2062,9 +2080,10 @@ impl Overlay {
         .fingerprint()
     }
 
-    /// Returns the names, comments, types, applications, prototypes and
-    /// variables alone, without name tables: the overlay the binary's own
-    /// tables are read under, so reading one table never needs another.
+    /// Returns the names, comments, types, applications, prototypes,
+    /// variables and class fields alone, without name tables: the overlay
+    /// the binary's own tables are read under, so reading one table never
+    /// needs another.
     #[must_use]
     pub(crate) fn without_tables(&self) -> Self {
         Self {
@@ -2074,6 +2093,7 @@ impl Overlay {
             applied: self.applied.clone(),
             prototypes: self.prototypes.clone(),
             vars: self.vars.clone(),
+            fields: self.fields.clone(),
             ..Self::default()
         }
     }

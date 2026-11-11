@@ -70,12 +70,14 @@ pub enum Field {
     /// The functions a name qualifies with a class
     /// ([`super::classes::class_of`]), by the class.
     Class,
+    /// [`Overlay::fields`], by the class's name.
+    Fields,
 }
 
 impl Field {
     /// Every field, in order; a field's place is its code in
     /// [`Reads::keys`].
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Names,
         Self::Comments,
         Self::Types,
@@ -84,10 +86,11 @@ impl Field {
         Self::Vars,
         Self::Enums,
         Self::Class,
+        Self::Fields,
     ];
 
     /// The field's bit in a mask of fields, by its [`Field::code`].
-    const fn bit(self) -> u8 {
+    const fn bit(self) -> u16 {
         1 << self.code()
     }
 
@@ -102,6 +105,7 @@ impl Field {
             Self::Vars => 5,
             Self::Enums => 6,
             Self::Class => 7,
+            Self::Fields => 8,
         }
     }
 }
@@ -140,6 +144,8 @@ tags! {
     VarsTag => Vars;
     /// The tag of [`Overlay::enums`].
     EnumsTag => Enums;
+    /// The tag of [`Overlay::fields`].
+    FieldsTag => Fields;
 }
 
 /// A map key folded to the 64 bits a read-set holds.
@@ -364,7 +370,7 @@ const SHARED_KEYS_MIN: usize = 256;
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Reads {
     /// Fields read whole, as [`Field::bit`]s.
-    whole: u8,
+    whole: u16,
     /// How many keys [`Reads::keys`] holds.
     len: usize,
     /// The keys read, sorted by field then key: for each field read by key,
@@ -495,7 +501,7 @@ impl ReadStats {
 #[derive(Debug, Default)]
 struct Frame {
     /// Fields read whole, as [`Field::bit`]s.
-    whole: u8,
+    whole: u16,
     /// Keys read.
     keys: FxHashSet<(Field, u64)>,
     /// Bodies looked names up by, each once.
@@ -758,7 +764,7 @@ impl Handle {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Edit {
     /// Fields with any key changed, as [`Field::bit`]s.
-    fields: u8,
+    fields: u16,
     /// Keys whose entries were added, removed or changed, and the classes
     /// a renamed address went by before and after.
     keys: FxHashSet<(Field, u64)>,
@@ -798,6 +804,7 @@ impl Edit {
         edit.diff(&before.prototypes, &after.prototypes);
         edit.diff(&before.vars, &after.vars);
         edit.diff(&before.enums, &after.enums);
+        edit.diff(&before.fields, &after.fields);
         Some(edit)
     }
 
