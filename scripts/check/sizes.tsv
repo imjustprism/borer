@@ -173,7 +173,6 @@ crates/borer-engine/tests/it/a64_decompile.rs::an_integer_to_float_is_a_cast#1	1
 crates/borer-engine/tests/it/a64_decompile.rs::scalar_casts_and_moves_match_the_machine#1	136
 crates/borer-engine/tests/it/a64_decompile.rs::scalar_float_conditions_match_the_machine#1	179
 crates/borer-engine/tests/it/a64_emulate.rs	1660
-crates/borer-engine/tests/it/analysis.rs	4570
 crates/borer-engine/tests/it/carve.rs::firmware_containers_are_identified#1	114
 crates/borer-engine/tests/it/clr.rs::meta#1	107
 crates/borer-engine/tests/it/decompile/lanes.rs::a_broadcast_sign_mask_keeps_the_high_bit#1	227
