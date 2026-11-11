@@ -290,7 +290,8 @@ impl ProjectFile {
     /// a form the language does not spell, is refused here with a message
     /// naming it rather than silently naming no fields. The fields stated
     /// of classes are read by offset and checked the same way
-    /// ([`borer_engine::analysis::stated::validate`]).
+    /// ([`borer_engine::analysis::stated::validate`]); a class the file
+    /// states no field of is left out.
     ///
     /// # Returns
     ///
@@ -351,11 +352,10 @@ impl ProjectFile {
         let mut fields: BTreeMap<String, BTreeMap<u64, Field>> = BTreeMap::new();
         for (class, table) in &self.fields {
             let class = borer_engine::text::one_line(class);
-            let into = fields.entry(class.clone()).or_default();
             for (off, (_, text)) in keyed(&format!("fields of {class}"), table)? {
                 let field = Field::parse(text)
                     .map_err(|e| format!("the field of {class} at {off:#x}: {e}"))?;
-                into.insert(off, field);
+                fields.entry(class.clone()).or_default().insert(off, field);
             }
         }
         let o = Overlay {

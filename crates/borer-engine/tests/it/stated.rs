@@ -484,7 +484,8 @@ fn a_stated_type_conflicts_only_by_a_size_the_code_never_uses() {
 }
 
 /// Replacing, asked for, leaves the class stating the new fields alone
-/// and says which it dropped; the layout its methods show stays.
+/// and says which it dropped; the layout its methods show stays, and a
+/// class left stating nothing leaves the overlay.
 #[test]
 fn a_replacing_statement_drops_what_the_class_stated_before() {
     let p = two_classes();
@@ -510,6 +511,16 @@ fn a_replacing_statement_drops_what_the_class_stated_before() {
         stating(&[stated[0], stated[1], (0x18, "m_next", None)]).fields,
         "merged, the same statement drops nothing"
     );
+    let (said, cleared) = state((&p, &a), &before, CLASS, &[], Mode::Replace).expect("plans");
+    assert_eq!(
+        said,
+        "state 0 field(s) of class class_2800: 4 kept, 0 changed, 0 new, 2 dropped: +0x18 m_next (dropped), +0x270 m_currentPipeline u32 (dropped)"
+    );
+    assert!(
+        cleared.fields.is_empty(),
+        "a class left stating nothing is no entry of the overlay"
+    );
+    assert_eq!(cleared.fingerprint(), Overlay::default().fingerprint());
 }
 
 /// A user struct takes stated fields by offset too: a field restated

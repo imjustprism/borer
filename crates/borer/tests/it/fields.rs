@@ -266,6 +266,12 @@ fn a_hostile_project_refuses_its_stated_fields() {
     let refused = project(classes.into()).expect_err("4097 classes");
     assert!(refused.contains("4097 classes"), "{refused}");
     assert!(project(serde_json::json!({"C": {"0x10": "m_a u32", "0x14": "m_b"}})).is_ok());
+    let sparse = project(serde_json::json!({"C": {}, "D": {"0x8": "m_a"}})).expect("loads");
+    assert_eq!(
+        sparse.fields.keys().collect::<Vec<_>>(),
+        ["D"],
+        "a class the file states no field of is left out"
+    );
 }
 
 /// A project's stated fields show wherever the class's fields do.

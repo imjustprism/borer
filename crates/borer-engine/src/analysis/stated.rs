@@ -297,6 +297,9 @@ impl Plan {
 
     /// Writes the plan into an overlay.
     ///
+    /// A class left stating no field leaves the overlay: an entry without
+    /// fields would list a class nothing is stated of.
+    ///
     /// # Arguments
     ///
     /// * `o` - The overlay.
@@ -304,6 +307,9 @@ impl Plan {
         match self.edit {
             Edit::Struct(name, ty) => {
                 o.types.insert(name, ty);
+            }
+            Edit::Class(class, fields) if fields.is_empty() => {
+                o.fields.remove(&class);
             }
             Edit::Class(class, fields) => {
                 o.fields.insert(class, fields);
