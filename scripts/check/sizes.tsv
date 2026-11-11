@@ -131,7 +131,6 @@ crates/borer-engine/src/carve.rs::elf#1	105
 crates/borer-engine/src/clr.rs::clr_tsv#1	134
 crates/borer-engine/src/clr.rs::read#2	280
 crates/borer-engine/src/crypto.rs::scan#1	152
-crates/borer-engine/src/dwarf.rs	1670
 crates/borer-engine/src/dwarf.rs::read_in#1	375
 crates/borer-engine/src/dyld.rs::binds#1	117
 crates/borer-engine/src/emulate/a32/exec.rs::step#1	351
