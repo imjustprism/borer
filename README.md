@@ -17,47 +17,212 @@
 <p align="center">
   <a href="https://borer.lol"><b>borer.lol</b></a> &nbsp;·&nbsp;
   <a href="https://borer.lol/docs">Docs</a> &nbsp;·&nbsp;
+  <a href="#what-it-does">Cases</a> &nbsp;·&nbsp;
   <a href="#install">Install</a> &nbsp;·&nbsp;
   <a href="https://borer.lol/docs/tools">Tools</a> &nbsp;·&nbsp;
   <a href="https://borer.lol/llms.txt">llms.txt</a>
 </p>
 
-borer is a reverse-engineering engine built for AI agents. It loads a binary,
-finds the code that matters, decompiles it to C, follows data through it and
-keeps what it learns. It is one Rust binary: an MCP server when run with no
-arguments, a command-line tool with them. There is no GUI, and no Ghidra, IDA
-or Binary Ninja underneath.
+borer is a reverse-engineering engine whose user is an AI agent. One Rust
+binary: an MCP server when run with no arguments, a command-line tool with
+them. It owns its loader, lifters, emulator and decompiler, and it has no GUI.
+
+Everything below is real output of borer 0.2.12 (release build, commit
+`7d9bb42c`) on two files of Windows 11: `notepad.exe` 10.0.26100.8457 (sha256
+`2d0b3948...2efb158f`) and `ntdll.dll` 10.0.26100.9549 (sha256
+`b072efae...ce5aed21`). Lines cut for length are marked `...`. Addresses
+differ on another build: `borer symbols ntdll.dll RtlComputeCrc32` finds the
+export, and its decompile names the two functions it forwards to.
 
 > [!WARNING]
-> borer is early-stage. Expect rough edges, and expect tool names, output and
-> resource URIs to change between releases. Please report anything that looks
-> wrong.
+> borer is early-stage. Tool names, output and resource URIs still change
+> between releases. Please report anything that looks wrong.
 
-## Why borer
+## What it does
 
-- **Checked output.** On x86, x86-64, arm64 and 32-bit ARM, the statements
-  the lifter writes for each block are run on a model of the machine from
-  seeded states and compared with the code they came from, and each
-  function's header says what that covered and what it did not (the later
-  text passes, the C spelling); RISC-V output is not checked yet. On x86 and
-  x86-64, `borer certify` also runs a function's final text as C beside the
-  binary and grades it. Instructions it cannot model stay as
-  `/* asm: ... */` instead of a guess.
-- **Sized for a context window.** Lists are filtered and paged on the server
-  (`# showing N of M`), a repeated request with `since=<tag>` returns only
-  what changed, and the same question always returns the same bytes.
-- **Fast.** A typical binary loads and decompiles in seconds, so an agent can
-  read every function instead of guessing where to look.
-- **Safe on hostile input.** Reads are bounds-checked, scans capped and walks
-  fuel-limited: a malformed or malicious file gets an error, never a crash.
-  The binary is never modified, and annotations are dry runs by default.
-- **Its own engine.** Loader, lifters, emulator, structurer and decompiler
-  are written in Rust for this purpose. Only instruction decoding and file
-  parsing come from standard crates.
+### One call says what a file is and where to read
 
-Typical uses: malware triage and unpacking, vulnerability research with taint
-and input solving, auditing closed libraries and firmware, and recovering
-classes, protocols and message formats.
+```console
+$ borer triage notepad.exe
+# PE x86-64, 360448 bytes, entry 0x1400019c0, 8 sections, 340 imports, 0 exports, 523 functions
+# built: MSVC, cl 19.38 build 33145, Visual Studio 2022 17.8 (high: Rich header linker entry 0x102.33145; ...)
+# protection: plain: no packer marks
+# dynamic imports: 13 functions resolved at runtime, 1 library loaded, from 16 call site groups
+# capabilities: 6 of 16 capabilities present across 340 imports
+#   filesystem                CreateFileW, DeleteFileW, FindFirstFileW, ReadFile, WriteFile
+#   persistence               RegCreateKeyExW, RegCreateKeyW, RegSetKeyValueW, RegSetValueExW
+...
+# blind spot: 4 of 18 GetProcAddress calls pass a name the decompiler cannot read (computed, hashed or decrypted): the imports resolved there stay unseen
+# read first: no protection signal fired, so the ranking is by the strings and imports each function references
+0x140013150  sub_140013150                references 13 strings and 47 imports
+0x140012a28  sub_140012a28                references 38 strings and 3 imports
+...
+# next: function_summary(addr), then decompile(addr); emulate/<addr> runs one
+```
+
+The whole answer is 2,408 bytes. It ends with what to call next, and it names
+its own blind spot instead of hiding it.
+
+### The decompiler checks its own work
+
+Every function's header says how much of the text was checked against the
+machine code it came from:
+
+```console
+$ borer decompile ntdll.dll 0x180102184
+// sub_180102184 @ 0x180102184: 6 instructions, 3 blocks
+// checked vs binary: statements as emitted, 3/3 blocks: 3 proved; unchecked: C spelling, later text passes
+// signature: uint64_t sub_180102184(uint64_t a1, uint8_t *a2, uint32_t a3)
+...
+if (a2 == nullptr) {
+  return 0;
+}
+return sub_1800ed890(a1, a2, a3);
+```
+
+`certify` goes one step further: it runs the final text as C beside the
+binary on the same inputs and grades the result.
+
+```console
+$ borer certify ntdll.dll 0x180102184
+# certify for sub_180102184 (0x180102184): what of its decompilation was checked against the binary; agreement is evidence, not proof
+lift	statements as emitted, 3/3 blocks: 3 proved; unchecked: C spelling, later text passes
+text	20 of 64 inputs agree as ISO C, 44 unchecked, 0 differ (seed 1, 20000 steps each)
+unchecked	44	the binary did not return: fault at 0x500000010050
+reached	2 of 3 blocks; never reached: 0x180102191
+grade	agrees	every input checked agrees (they reached 2 of 3 blocks) and no lifted block is contradicted
+```
+
+The block check covers x86, x86-64, arm64 and 32-bit ARM; RISC-V output has
+no check header yet. `certify` runs on x86 and x86-64. The header always says
+what was not checked (here the C spelling and the later text passes). An
+instruction borer cannot model stays in the text as `/* asm: ... */`. It is
+never replaced by a guess.
+
+### It runs code without running the file
+
+borer has its own emulator, so an agent can call a function on typed inputs
+and read the result. Here the function `RtlComputeCrc32` forwards to gets the
+standard CRC-32 test string, and answers the published check value
+`0xcbf43926`. The last column says the decompiled text, run on the same
+inputs, gave the same results:
+
+```console
+$ borer run ntdll.dll '0x1800ed890/0,"123456789",9;0,"",0;0,"a",1'
+# run uint32_t sub_1800ed890(uint32_t a1, uint8_t *a2, uint64_t a3): 3 inputs, at most 1000000 steps each; the text agrees on 3, differs on 0, unchecked on 0
+# args	returns	stop	steps	writes	text
+0 "123456789" 9	0xcbf43926	returned	126	-	agrees
+0 "" 0	0	returned	38	-	agrees
+0 "a" 1	0xe8b7be43	returned	47	-	agrees
+```
+
+The same emulator drives input solving (`solve`), unpacking (`unpack`),
+devirtualization (`devirt`), taint (`taint`) and struct recovery (`layout`).
+The file itself is never executed and never modified.
+
+### It says what it does not know
+
+Ask the exported wrapper the same question and borer does not round its
+answer up:
+
+```console
+$ borer run ntdll.dll 'RtlComputeCrc32/0,"123456789",9'
+# run uint64_t RtlComputeCrc32(uint64_t a1, uint64_t a2, uint64_t a3): 1 input, at most 1000000 steps each; the text agrees on 0, differs on 0, unchecked on 1
+...
+0 "123456789" 9	0xcbf43926	returned	131	-	unchecked
+# input 1 unchecked at line 6 `return sub_180102184(a1, a2, a3);`: the text states only the low 8 bits of the result; the bits above are the machine's own
+```
+
+A heuristic answer names its evidence. `borer why <address>` lists where
+each fact about an address came from:
+
+```console
+$ borer why ntdll.dll 0x1800ed890
+# 0x1800ed890 is the entry of sub_1800ed890: 864 bytes, 36 blocks, 215 instructions
+# section .text at 0x180001000, r-x and code
+# name: nothing names it, so the name is the address
+# discovered by: an entry in the exception or symbol table, then 1 call site(s)
+# referenced from 1 site(s): 0x18010218c in sub_180102184
+```
+
+### It finds code by what it is
+
+```console
+$ borer crypto ntdll.dll
+# 17 crypto/hash constant hits: 6 algorithm(s) across 16 function(s)
+# algorithm        sites  functions  where
+CRC-32            8      3          data in .rdata, read by sub_18015431c, sub_180154538, crc32_fn
+MD5               3      9          data in .rdata, read by sha1_or_ripemd160_fn, MD5Init, MD5Final, ...
+SHA-256           2      2          data in .rdata, read by sha256_fn, sha256_or_blake2s_fn
+...
+```
+
+```console
+$ borer sig ntdll.dll 0x180102184
+# signature of sub_180102184 at 0x180102184: 8 bytes, 1 wildcarded, unique in the image
+pattern  48 85 D2 74 ?? 45 8B C0
+...
+```
+
+Classes, vtables, message formats, opcode dispatchers, decoded and generated
+strings, IOCs and YARA rules come from the same engine: `borer help` lists
+every command, and `borer://help` every resource.
+
+### Answers sized for a context window
+
+Every list is filtered and paged on the server, and says how much it left
+out:
+
+```console
+$ borer functions notepad.exe "" 0 3
+# showing 3 of 481 functions; 39 import thunks left out, filter=thunk lists them; 3 exception funclets left out, filter=funclet lists them
+# entry size blocks instrs callers callees src name
+0x140001008 133 3 26 5 2 - sub_140001008
+0x140001094 288 12 67 2 2 - sub_140001094
+0x1400011bc 149 3 27 5 2 - sub_1400011bc
+```
+
+Over MCP, an answer of 512 bytes or more carries a `since` tag. Send the same
+request with that tag after renaming a function or setting a type, and borer
+answers with only the lines that changed, or one line saying nothing did.
+Every answer ends with an evidence id; the session keeps the text behind the
+last 256 ids, so a recent answer can be fetched again exactly.
+
+### Same question, same bytes
+
+The same binary and the same query give the same bytes, on one core or all of
+them, in any order. That is a tested contract, not a habit: the gate decompiles
+a corpus twice and in parallel and compares.
+
+```console
+$ borer decompile notepad.exe 0x140013150 full 0 100000 | sha256sum
+b45d12089ef2280f...
+$ borer decompile notepad.exe 0x140013150 full 0 100000 | sha256sum
+b45d12089ef2280f...
+```
+
+### A hostile file gets an error, not a crash
+
+Reads are bounds-checked, scans capped and walks fuel-limited, and the
+loaders are fuzzed in CI. The first 300 bytes of notepad.exe:
+
+```console
+$ borer triage cut.exe
+Error: loading cut.exe
+
+Caused by:
+    the file starts like a PE but its headers do not parse, even leniently: it is truncated or damaged (300 bytes; ...)
+```
+
+### Fast enough to read everything
+
+On notepad.exe (523 functions), `borer triage` loads, discovers and ranks the
+whole file in about 2.3 seconds (release build `7d9bb42c`, three runs: 2.24,
+2.41, 2.29 s). A cold decompile takes under 7 ms per function at the 95th
+percentile (`tests/bench.rs`, release build `70b5db2c`, three runs: 6.64,
+6.48, 6.49 ms). Both on one desktop machine. The time bars, 25 ms at p95 and
+5 s at worst per function, are part of the gate. An agent can read every
+function instead of guessing where to look.
 
 ## Platforms
 
