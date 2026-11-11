@@ -1668,6 +1668,34 @@ fn a_read_at_the_top_of_a_minidump_range_is_refused() {
     Analysis::compute(&p);
 }
 
+/// A `Memory64ListStream` counting every range there could be reads only
+/// the entries the file holds.
+///
+/// The count is stated before the file offset the ranges are packed from:
+/// the one range with a size maps at that offset, and the empty ones after
+/// it map nothing.
+#[test]
+fn a_memory64_list_counting_every_range_maps_what_the_file_holds() {
+    let mut d = vec![0u8; 0x80];
+    d[..4].copy_from_slice(b"MDMP");
+    put32(&mut d, 8, 1);
+    put32(&mut d, 12, 0x20);
+    for (k, v) in [9, 0x50, 0x30].iter().enumerate() {
+        put32(&mut d, 0x20 + k * 4, *v);
+    }
+    put64(&mut d, 0x30, u64::MAX);
+    put64(&mut d, 0x38, 0x70);
+    put64(&mut d, 0x40, 0x1000);
+    put64(&mut d, 0x48, 0x10);
+    let p = Program::from_bytes(PathBuf::from("every.dmp"), d).expect("a minidump loads");
+    let mapped = p
+        .sections
+        .iter()
+        .map(|s| (s.va.0, s.file_off.0, s.file_size));
+    assert_eq!(mapped.collect::<Vec<_>>(), vec![(0x1000, 0x70, 0x10)]);
+    Analysis::compute(&p);
+}
+
 /// An image base 64 KiB below the top of the address space: an RVA past
 /// `0xffff` names an address there is not.
 const TOP_BASE: u64 = u64::MAX - 0xffff;

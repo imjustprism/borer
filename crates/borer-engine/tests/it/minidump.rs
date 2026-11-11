@@ -151,8 +151,8 @@ fn threads(stacks: &[(u64, u32, u32)]) -> Vec<u8> {
 /// The stream's bytes.
 fn memory64(base: u64, ranges: &[(u64, u64)]) -> Vec<u8> {
     let mut s = vec![0u8; 16 + 16 * ranges.len()];
-    u64_at(&mut s, 0, base);
-    u64_at(&mut s, 8, u64::try_from(ranges.len()).expect("fits"));
+    u64_at(&mut s, 0, u64::try_from(ranges.len()).expect("fits"));
+    u64_at(&mut s, 8, base);
     for (k, &(start, size)) in ranges.iter().enumerate() {
         let e = 16 + 16 * k;
         u64_at(&mut s, e, start);

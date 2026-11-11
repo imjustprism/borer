@@ -121,8 +121,8 @@ impl<'a> Streams<'a> {
         out
     }
 
-    /// Reads the memory ranges of the `Memory64ListStream`: a file offset
-    /// the ranges are packed at from, a count, then each range's start
+    /// Reads the memory ranges of the `Memory64ListStream`: a count, the
+    /// file offset the ranges are packed from, then each range's start
     /// and size.
     fn memory64(&self) -> Vec<Range> {
         let Some((_, at)) = self.first(MEMORY64) else {
@@ -130,7 +130,7 @@ impl<'a> Streams<'a> {
         };
         let bytes = self.bytes;
         let at = usize::try_from(at).ok().unwrap_or(usize::MAX);
-        let (Some(base), Some(count)) = (u64_le(bytes, at), u64_le(bytes, at + 8)) else {
+        let (Some(count), Some(base)) = (u64_le(bytes, at), u64_le(bytes, at + 8)) else {
             return Vec::new();
         };
         let count = usize::try_from(count)
