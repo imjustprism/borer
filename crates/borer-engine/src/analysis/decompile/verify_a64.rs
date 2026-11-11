@@ -444,14 +444,10 @@ impl Ran<'_, Machine<'_>, ()> {
     /// # Arguments
     ///
     /// * `out` - Where the counts and disagreements go.
-    fn compare(mut self, out: &mut Verified) {
+    fn compare(self, out: &mut Verified) {
         registers(&self, general(), Key::A64(Reg::Sp), out);
         self.vectors(out);
-        let held = self.slots(out);
-        self.stores(&held, out);
-        if let Some((jcc, cond)) = self.branch.take() {
-            self.step_branch(jcc, &cond, out);
-        }
+        self.finish(out);
     }
 
     /// Compares the low 64 bits of every `v` register: the lane a scalar

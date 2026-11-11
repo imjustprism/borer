@@ -353,14 +353,10 @@ fn run<'p>(
 ///
 /// * `ran` - Both runs.
 /// * `out` - Where the counts and disagreements go.
-fn compare(mut ran: Ran<'_, Machine<'_>, ()>, out: &mut Verified) {
+fn compare(ran: Ran<'_, Machine<'_>, ()>, out: &mut Verified) {
     registers(&ran, general(), Key::A32(SP), out);
     vfp(&ran, out);
-    let held = ran.slots(out);
-    ran.stores(&held, out);
-    if let Some((jcc, cond)) = ran.branch.take() {
-        ran.step_branch(jcc, &cond, out);
-    }
+    ran.finish(out);
 }
 
 /// Compares every single and double, each at its own width.

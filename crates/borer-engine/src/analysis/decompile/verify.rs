@@ -1515,16 +1515,12 @@ impl Ran<'_, Emulator<'_>, X86Regs> {
     /// # Arguments
     ///
     /// * `out` - Where the counts and disagreements go.
-    fn compare(mut self, out: &mut Verified) {
+    fn compare(self, out: &mut Verified) {
         self.registers(out);
         self.x87(out);
         self.xmm(out);
         self.segments(out);
-        let held = self.slots(out);
-        self.stores(&held, out);
-        if let Some((jcc, cond)) = self.branch.take() {
-            self.step_branch(jcc, &cond, out);
-        }
+        self.finish(out);
     }
 }
 
@@ -2148,6 +2144,20 @@ impl<M: Bench, R> Ran<'_, M, R> {
                 values,
                 format!("{cond:?}"),
             );
+        }
+    }
+
+    /// Compares the facts every instruction set's check compares alike,
+    /// after its registers: slots, stores, then the branch.
+    ///
+    /// # Arguments
+    ///
+    /// * `out` - Where the counts and disagreements go.
+    pub(super) fn finish(mut self, out: &mut Verified) {
+        let held = self.slots(out);
+        self.stores(&held, out);
+        if let Some((jcc, cond)) = self.branch.take() {
+            self.step_branch(jcc, &cond, out);
         }
     }
 }

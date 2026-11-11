@@ -383,14 +383,10 @@ fn seed_floats(
 ///
 /// * `ran` - Both runs.
 /// * `out` - Where the counts and disagreements go.
-fn compare(mut ran: Ran<'_, Machine<'_>, ()>, out: &mut Verified) {
+fn compare(ran: Ran<'_, Machine<'_>, ()>, out: &mut Verified) {
     registers(&ran, general(), Key::Rv(SP), out);
     floats(&ran, out);
-    let held = ran.slots(out);
-    ran.stores(&held, out);
-    if let Some((jcc, cond)) = ran.branch.take() {
-        ran.step_branch(jcc, &cond, out);
-    }
+    ran.finish(out);
 }
 
 /// Compares every float register: a single in its low 32 bits, its
