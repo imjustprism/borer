@@ -625,12 +625,18 @@ pub fn object_class(a: &Analysis, o: &Overlay, f: &Function) -> Option<String> {
         .or_else(|| f.param_hints.get(&0).cloned())
 }
 
-/// Plans a statement of one field of the class a function's object is of
-/// ([`object_class`]): the field a method's text prints through `this`,
-/// stated at the method.
+/// Plans a statement of one field of the class a function takes its object
+/// as: the field a method's text prints through its object, stated at the
+/// method.
 ///
-/// The field is merged into what the class states ([`plan_class`]), as
-/// stating it by the class's name does.
+/// The class is the one the function's text names its object's fields by:
+/// the class of its `this` ([`object_class`]) when its signature takes one,
+/// else the class its first parameter is hinted as (a method renamed out
+/// of its class still takes `Cls *a1`). A function that takes its object
+/// untyped (a constructor's `void *a1`) states the field of the class its
+/// name is qualified by, and the plan says its own text will not print the
+/// name. The field is merged into what the class states ([`plan_class`]),
+/// as stating it by the class's name does.
 ///
 /// # Arguments
 ///
@@ -643,8 +649,8 @@ pub fn object_class(a: &Analysis, o: &Overlay, f: &Function) -> Option<String> {
 ///
 /// # Returns
 ///
-/// The plan, which ends by naming the class and the function it was found
-/// at.
+/// The plan, which ends by naming the function and the class it takes its
+/// object as.
 ///
 /// # Errors
 ///
@@ -660,25 +666,38 @@ pub fn plan_at(
     field: Field,
 ) -> Result<Plan, String> {
     let fname = name_of(a, o, entry);
-    let class = a
-        .function(entry)
-        .and_then(|f| object_class(a, o, f))
-        .ok_or_else(|| {
-            format!(
+    let f = a.function(entry);
+    let own = f.and_then(|f| object_class(a, o, f));
+    let this = own.as_ref().filter(|class| {
+        super::decompile::decompile_named(p, a, o, entry)
+            .is_some_and(|text| text.contains(&format!("{class} *this")))
+    });
+    let hinted = f.and_then(|f| f.param_hints.get(&0));
+    let (class, typed) = match (this.or(hinted), &own) {
+        (Some(class), _) => (class, true),
+        (None, Some(class)) => (class, false),
+        (None, None) => {
+            return Err(format!(
                 "{fname} belongs to no class borer knows, so a field at {off:#x} has no class to be stated of; state it by its class, set_type(name=<class>, fields=[\"{off:#x}:{}\"]), or type the pointer it is read through (borer://layout/{entry:#x},apply=<Name> plans that)",
                 field.name
-            )
-        })?;
+            ));
+        }
+    };
     let fields = [(off, field)];
     let statement = Statement {
-        name: &class,
+        name: class,
         size: None,
         fields: &fields,
         mode: Mode::Merge,
     };
     let mut plan = plan_class(p, a, o, &statement)?;
-    plan.what
-        .push_str(&format!("; {class} is the class of {fname} ({entry:#x})"));
+    plan.what.push_str(&if typed {
+        format!("; {fname} ({entry:#x}) takes its object as {class}")
+    } else {
+        format!(
+            "; {fname} ({entry:#x}) is named after {class} and takes its object untyped, so its own text will not print the name: the class's other methods do"
+        )
+    });
     Ok(plan)
 }
 

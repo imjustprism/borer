@@ -9,7 +9,7 @@
 )]
 
 use borer_engine::analysis::apply::from_pointer;
-use borer_engine::analysis::classes::{class_layout, render_layout};
+use borer_engine::analysis::classes::{class_layout, methods_of, render_layout};
 use borer_engine::analysis::decompile::decompile_named;
 use borer_engine::analysis::stated::{Field, Mode, Statement, plan, plan_at, plan_class};
 use borer_engine::analysis::utypes::{list_tsv, parse_type};
@@ -731,8 +731,12 @@ fn a_name_is_a_struct_before_it_is_a_class() {
 }
 
 /// A field stated at a method lands where stating it by the class's name
-/// does, the plan naming the class it found; a function of no class says
-/// how to state the field by its class.
+/// does, the plan naming the class the method takes its object as.
+///
+/// That is the class of its `this`, else the class its first parameter is
+/// hinted as, else the class its name is qualified by, whose field its own
+/// text will not print; a function of no class says how to state the field
+/// by its class.
 #[test]
 fn a_field_stated_at_a_method_is_stated_of_the_method_s_class() {
     let p = two_classes();
@@ -741,16 +745,22 @@ fn a_field_stated_at_a_method_is_stated_of_the_method_s_class() {
     let fields = [(0x270, "m_currentPipeline", Some("u32"))];
     let (by_name, named) = state((&p, &a), &plain, CLASS, &fields, Mode::Merge).expect("plans");
     let stated = || field("m_currentPipeline", Some("u32"));
-    for (entry, method) in [
-        (0x1000, "ctor_or_dtor"),
-        (0x1040, "vfunc_0"),
-        (0x1080, "vfunc_1"),
+    for (entry, found) in [
+        (
+            0x1000,
+            "class_2800::ctor_or_dtor (0x1000) is named after class_2800 and takes its object untyped, so its own text will not print the name: the class's other methods do",
+        ),
+        (
+            0x1040,
+            "class_2800::vfunc_0 (0x1040) takes its object as class_2800",
+        ),
+        (
+            0x1080,
+            "class_2800::vfunc_1 (0x1080) takes its object as class_2800",
+        ),
     ] {
         let at = plan_at(&p, &a, &plain, entry, 0x270, stated()).expect("plans");
-        assert_eq!(
-            at.would(),
-            format!("{by_name}; class_2800 is the class of class_2800::{method} ({entry:#x})")
-        );
+        assert_eq!(at.would(), format!("{by_name}; {found}"));
         let mut o = plain.clone();
         at.apply(&mut o);
         assert_eq!(o.fields, named.fields);
@@ -759,7 +769,7 @@ fn a_field_stated_at_a_method_is_stated_of_the_method_s_class() {
     let other = plan_at(&p, &a, &plain, OTHER_METHOD, 0x270, stated()).expect("plans");
     assert_eq!(
         other.would(),
-        "state 1 field(s) of class class_2900: 3 kept, 1 changed, 0 new: +0x270 field_0x270 -> m_currentPipeline u32; class_2900 is the class of class_2900::vfunc_0 (0x1140)"
+        "state 1 field(s) of class class_2900: 3 kept, 1 changed, 0 new: +0x270 field_0x270 -> m_currentPipeline u32; class_2900::vfunc_0 (0x1140) takes its object as class_2900"
     );
     assert_eq!(
         plan_at(&p, &a, &plain, 0x1f00, 0x10, field("m_count", None))
@@ -780,17 +790,41 @@ fn a_field_stated_at_a_method_is_stated_of_the_method_s_class() {
         .expect("plans")
         .would();
     assert!(
-        hinted.ends_with("; class_2800 is the class of draw (0x1040)"),
+        hinted.ends_with("; draw (0x1040) takes its object as class_2800"),
         "a method of no class by its name is of the class its object is hinted as: {hinted}"
     );
     renamed.names.insert(0x1040, "Renderer::draw".to_owned());
     let moved = plan_at(&p, &a, &renamed, 0x1040, 0x270, stated())
         .expect("plans")
         .would();
+    assert_eq!(
+        moved,
+        "state 1 field(s) of class class_2800: 5 kept, 1 changed, 0 new: +0x270 field_0x270 -> m_currentPipeline u32; Renderer::draw (0x1040) takes its object as class_2800",
+        "a method renamed out of its class still prints its object's fields by that class"
+    );
+    let (fixture, none) = (crate::common::fixture(), Overlay::default());
+    let analysis = Analysis::compute(&fixture);
+    let method = methods_of(&analysis, &none, "Arr<int>")
+        .into_iter()
+        .find(|&entry| {
+            decompile_named(&fixture, &analysis, &none, entry)
+                .is_some_and(|text| text.contains("Arr<int> *this"))
+        })
+        .expect("a method of Arr<int> that takes `this`");
+    let through_this = plan_at(
+        &fixture,
+        &analysis,
+        &none,
+        method,
+        0x8,
+        field("m_size", None),
+    )
+    .expect("plans")
+    .would();
     assert!(
-        moved.starts_with("state 1 field(s) of class Renderer: ")
-            && moved.ends_with("; Renderer is the class of Renderer::draw (0x1040)"),
-        "the class a method's own name is qualified by comes first: {moved}"
+        through_this.contains(" of class Arr<int>: ")
+            && through_this.ends_with(" takes its object as Arr<int>"),
+        "a method no table hints is of the class its `this` is typed as: {through_this}"
     );
 }
 

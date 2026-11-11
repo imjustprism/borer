@@ -380,7 +380,15 @@ fn one_field_is_stated_by_class_or_at_a_method_and_the_rest_stays() {
     });
     assert_eq!(
         set_type(&mut client, &at_method),
-        "dry-run: would state 1 field(s) of class class_2800: 5 kept, 1 changed, 0 new: +0x270 field_0x270 -> m_currentPipeline u32; class_2800 is the class of class_2800::vfunc_0 (0x1040). pass dry_run=false to apply."
+        "dry-run: would state 1 field(s) of class class_2800: 5 kept, 1 changed, 0 new: +0x270 field_0x270 -> m_currentPipeline u32; class_2800::vfunc_0 (0x1040) takes its object as class_2800. pass dry_run=false to apply."
+    );
+    let at_constructor = serde_json::json!({
+        "address": "0x1000", "var": "field_0x270", "name": "m_currentPipeline"
+    });
+    assert_eq!(
+        set_type(&mut client, &at_constructor),
+        "dry-run: would state 1 field(s) of class class_2800: 5 kept, 1 changed, 0 new: +0x270 field_0x270 -> m_currentPipeline (accessed 4 byte(s) wide); class_2800::ctor_or_dtor (0x1000) is named after class_2800 and takes its object untyped, so its own text will not print the name: the class's other methods do. pass dry_run=false to apply.",
+        "a constructor's text takes the object untyped"
     );
     assert_eq!(
         rows(&mut client, "class_2800"),
@@ -394,7 +402,7 @@ fn one_field_is_stated_by_class_or_at_a_method_and_the_rest_stays() {
     };
     assert_eq!(
         set_type(&mut client, &apply(&at_method)),
-        "stated 1 field(s) of class class_2800: 5 kept, 1 changed, 0 new: +0x270 field_0x270 -> m_currentPipeline u32; class_2800 is the class of class_2800::vfunc_0 (0x1040)"
+        "stated 1 field(s) of class class_2800: 5 kept, 1 changed, 0 new: +0x270 field_0x270 -> m_currentPipeline u32; class_2800::vfunc_0 (0x1040) takes its object as class_2800"
     );
     assert_eq!(
         set_type(&mut client, &apply(&by_class)),
