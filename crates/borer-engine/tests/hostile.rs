@@ -31,6 +31,13 @@ use borer_engine::program::{FileOff, Program, Section, SymbolKind};
 )]
 mod elfgen;
 
+#[path = "common/machogen.rs"]
+#[expect(
+    dead_code,
+    reason = "hostile builds one Mach-O; the writer's other helpers serve the integration tests"
+)]
+mod machogen;
+
 /// Live heap bytes, kept by [`Counting`].
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 /// Highest [`LIVE`] since the last [`measured`] began.
@@ -1832,4 +1839,71 @@ fn a_pdb_applied_at_the_top_of_the_address_space_names_what_fits() {
         text.is_some_and(|t| t.contains("return 1;")),
         "the entry does not decompile"
     );
+}
+
+/// A chained fixup in a segment whose file offset the fixup's own offset
+/// carries past `u64::MAX` is refused, where it was read from wherever the
+/// sum wrapped to.
+///
+/// The fixup walker finds a slot's file bytes through the segment's load
+/// command, a 64-bit offset the lossy parse keeps when no file could hold
+/// it. Here `__DATA` states a file offset eight bytes below `u64::MAX` and
+/// its chain starts sixteen bytes in: the sum wrapped to the file's eighth
+/// byte, in the Mach-O header, and those bytes were decoded as a rebase
+/// and written over the slot the section table maps.
+#[test]
+fn a_fixup_whose_file_offset_wraps_is_refused() {
+    use machogen::{Fix, Sect, Seg, Starts};
+    /// Where `__TEXT` is mapped: the image base.
+    const TEXT: u64 = 0x1_0000_0000;
+    /// `LC_DYLD_CHAINED_FIXUPS`.
+    const LC_DYLD_CHAINED_FIXUPS: u32 = 0x8000_0034;
+    /// Where the `__DATA` segment command states its file offset: past the
+    /// header and the `__TEXT` command with its one section.
+    const DATA_FILEOFF_AT: usize = 32 + 72 + 80 + 40;
+    let mut slots = vec![0u8; 0x20];
+    machogen::chain(&mut slots, &[(0x10, Fix::Rebase(0x400))]);
+    let text = Seg {
+        name: "__TEXT",
+        vmaddr: TEXT,
+        fileoff: 0,
+        bytes: vec![0u8; 0x1000],
+        prot: machogen::RX,
+        sections: vec![Sect {
+            name: "__text",
+            addr: TEXT + 0x400,
+            size: 0x20,
+            flags: machogen::CODE,
+        }],
+    };
+    let data = Seg {
+        name: "__DATA",
+        vmaddr: TEXT + 0x1000,
+        fileoff: 0x1000,
+        bytes: slots.clone(),
+        prot: machogen::RW,
+        sections: vec![Sect {
+            name: "__const",
+            addr: TEXT + 0x1000,
+            size: 0x20,
+            flags: 0,
+        }],
+    };
+    let starts = Starts {
+        segment: 1,
+        format: 6,
+        offset: 0x1000,
+        page_size: 0x1000,
+        pages: vec![0x10],
+    };
+    let payload = machogen::chained(2, &[starts], &[]);
+    let fixups = machogen::linkedit(LC_DYLD_CHAINED_FIXUPS, 0x1020, payload.len());
+    let mut bytes = machogen::build(machogen::X86_64, machogen::PIE, &[text, data], &[fixups]);
+    bytes.extend_from_slice(&payload);
+    put64(&mut bytes, DATA_FILEOFF_AT, u64::MAX - 7);
+    let p = Program::from_bytes(PathBuf::from("wrap.macho"), bytes).expect("a lossy Mach-O loads");
+    assert_eq!(p.read_va(TEXT + 0x1000, 0x20), Some(slots.as_slice()));
+    assert!(p.relocated_words().is_empty(), "{:x?}", p.relocated_words());
+    let summary = p.summary();
+    assert!(summary.contains("; 1 refused ("), "{summary}");
 }

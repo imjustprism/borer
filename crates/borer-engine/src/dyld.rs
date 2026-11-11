@@ -77,10 +77,13 @@ impl Segment {
     /// # Returns
     ///
     /// The first byte's offset in the whole file, or `None` when the
-    /// segment's file bytes do not hold them all.
+    /// segment's file bytes do not hold them all or the load command
+    /// states an offset the sum passes `u64::MAX` from, which the lossy
+    /// parse keeps though no file holds it.
     fn file_off(&self, va: u64, len: u64) -> Option<u64> {
         let rel = va.checked_sub(self.vmaddr)?;
-        (rel.checked_add(len)? <= self.filesize.min(self.vmsize)).then(|| self.fileoff + rel)
+        (rel.checked_add(len)? <= self.filesize.min(self.vmsize))
+            .then(|| self.fileoff.checked_add(rel))?
     }
 
     /// Tells whether the segment maps `va`.
