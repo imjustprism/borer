@@ -1173,13 +1173,6 @@ impl Discovery<'_> {
                     }
                 };
                 let walks = striped(batch, |&e| walk(&known, e, cap(e), guessed.contains(&e)));
-                let walks: Vec<Walked> = batch
-                    .iter()
-                    .zip(walks)
-                    .map(|(&e, w)| {
-                        w.unwrap_or_else(|| walk(&known, e, cap(e), guessed.contains(&e)))
-                    })
-                    .collect();
                 for (&e, w) in batch.iter().zip(walks) {
                     self.fuel = self.fuel.saturating_sub(w.spent);
                     self.commit(e, w);

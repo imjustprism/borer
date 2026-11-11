@@ -786,7 +786,7 @@ pub fn dynamic_imports_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
         || (),
         |(), &entry| crate::analysis::decompile::decompile(p, a, o, entry),
     );
-    for text in texts.into_iter().flatten().flatten() {
+    for text in texts.into_iter().flatten() {
         for line in text.lines() {
             for (api, is_lib) in RESOLVERS {
                 collect_resolved(p, line, api, is_lib, &mut apis, &mut dlls);

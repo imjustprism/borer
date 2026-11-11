@@ -337,7 +337,6 @@ pub fn routes(program: &Program, analysis: &Analysis, overlay: &Overlay) -> Vec<
     )
     .into_iter()
     .flatten()
-    .flatten()
     .collect();
     let wanted: BTreeSet<u64> = declared
         .iter()
@@ -420,7 +419,7 @@ pub fn routes(program: &Program, analysis: &Analysis, overlay: &Overlay) -> Vec<
             Some(rows)
         },
     );
-    let mut out: Vec<Route> = found.into_iter().flatten().flatten().flatten().collect();
+    let mut out: Vec<Route> = found.into_iter().flatten().flatten().collect();
     out.sort_by(|a, b| a.class.cmp(&b.class).then(a.message.cmp(&b.message)));
     out.dedup_by(|a, b| a.class == b.class && a.id == b.id);
     out

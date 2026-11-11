@@ -512,8 +512,8 @@ const STRIPE_MIN: usize = 256;
 ///
 /// # Returns
 ///
-/// One result per item, in order, each `Some`.
-pub(crate) fn striped<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<Option<R>> {
+/// One result per item, in order.
+pub(crate) fn striped<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
     striped_with(items, STRIPE_MIN, || (), |(), x| f(x))
 }
 
@@ -534,17 +534,16 @@ pub(crate) fn striped<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync)
 ///
 /// # Returns
 ///
-/// One result per item, in order, each `Some`.
+/// One result per item, in order.
 pub(crate) fn striped_with<T: Sync, S, R: Send>(
     items: &[T],
     min: usize,
     init: impl Fn() -> S + Sync,
     f: impl Fn(&S, &T) -> R + Sync,
-) -> Vec<Option<R>> {
+) -> Vec<R> {
     let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
     let threads = if items.len() < min { 1 } else { cores };
-    let mapped = striped_on(threads, items, init, f);
-    mapped.into_iter().map(Some).collect()
+    striped_on(threads, items, init, f)
 }
 
 /// Maps `f` over `items` on up to `threads` threads with a state per

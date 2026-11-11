@@ -1954,9 +1954,6 @@ pub fn check_all(
     striped(&items, |(e, t)| {
         t.map(|(text, live)| check(program, analysis, overlay, *e, text, live))
     })
-    .into_iter()
-    .map(Option::flatten)
-    .collect()
 }
 
 #[cfg(test)]

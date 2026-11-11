@@ -72,7 +72,7 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
     });
     let mut setters: BTreeMap<String, Vec<(u64, String)>> = BTreeMap::new();
     for (target, sig) in targets.iter().zip(parsed) {
-        let (Some(sig), Some(sites)) = (sig.flatten(), analysis.xrefs.get(target)) else {
+        let (Some(sig), Some(sites)) = (sig, analysis.xrefs.get(target)) else {
             continue;
         };
         if let Some(class) = class_of(&sig.name)

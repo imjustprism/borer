@@ -107,8 +107,7 @@ pub fn protocol_tsv(
             )
         },
     );
-    for (r, record) in shown.into_iter().zip(records) {
-        let (encodes, decodes) = record.unwrap_or_else(|| ("-".to_owned(), "-".to_owned()));
+    for (r, (encodes, decodes)) in shown.into_iter().zip(records) {
         let names: Vec<String> = r
             .senders
             .iter()
@@ -219,8 +218,7 @@ pub fn hooks_tsv(
     let hex = |e: Option<u64>| e.map_or_else(|| "-".to_owned(), |e| format!("{e:#x}"));
     let mut lines: Vec<String> = Vec::with_capacity(shown.len());
     let (mut encoders, mut decoders, mut handled, mut sending) = (0usize, 0usize, 0usize, 0usize);
-    for (r, found) in shown.into_iter().zip(entries) {
-        let (encoder, decoder) = found.unwrap_or((None, None));
+    for (r, (encoder, decoder)) in shown.into_iter().zip(entries) {
         let short = r.class.rsplit("::").next().unwrap_or(&r.class);
         let handler = handlers
             .get(&format!("Handle{short}"))

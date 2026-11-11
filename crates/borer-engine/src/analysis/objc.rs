@@ -916,7 +916,7 @@ fn messages(
     let mut kinds: BTreeMap<u64, Receiver> = BTreeMap::new();
     let mut out = BTreeMap::new();
     for (f, calls) in senders.iter().zip(found) {
-        for c in calls.unwrap_or_else(|| calls_of(f)) {
+        for c in calls {
             let (Callee::Direct(target) | Callee::Slot(target)) = c.callee;
             let Some(send) = sends.get(&target) else {
                 continue;

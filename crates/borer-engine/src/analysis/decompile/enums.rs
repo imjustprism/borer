@@ -123,7 +123,7 @@ pub fn enum_tables(
     shaped
         .into_iter()
         .zip(tables)
-        .filter_map(|(entry, table)| Some((entry, table?.as_ref().clone()?)))
+        .filter_map(|(entry, table)| Some((entry, table.as_ref().clone()?)))
         .collect()
 }
 

@@ -394,8 +394,7 @@ fn scan(
             break;
         }
         let measured = crate::analysis::striped(&batch, |&(_, chunk)| shannon(chunk));
-        for (&(len, chunk), e) in batch.iter().zip(measured) {
-            let e = e.unwrap_or_else(|| shannon(chunk));
+        for (&(len, _), e) in batch.iter().zip(measured) {
             let len = from_usize(len);
             if e >= threshold {
                 match open.as_mut() {

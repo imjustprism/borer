@@ -879,7 +879,7 @@ fn replay_in<L: Replay>(
         },
     );
     let mut out = Replayed::default();
-    for part in parts.into_iter().flatten().flatten() {
+    for part in parts.into_iter().flatten() {
         out.merge(part);
     }
     out

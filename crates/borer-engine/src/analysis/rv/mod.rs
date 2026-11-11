@@ -882,11 +882,7 @@ pub(crate) fn discover(program: &Program, xlen: Xlen) -> Analysis {
         (f, sites, data)
     });
     let mut functions = Vec::with_capacity(kept.len());
-    for ((entry, w), r) in kept.iter().zip(built) {
-        let Some((f, sites, data)) = r else {
-            analysis.incomplete = true;
-            continue;
-        };
+    for ((entry, w), (f, sites, data)) in kept.iter().zip(built) {
         for (t, va, kind) in sites {
             push_site(&mut analysis.xrefs, t, va, kind, Some(*entry));
         }

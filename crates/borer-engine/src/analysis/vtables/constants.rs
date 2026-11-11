@@ -224,7 +224,7 @@ pub(crate) fn slot_rows<T: Send>(
         .map(|(c, found)| SlotRow {
             value: c.value,
             class: c.class,
-            found: found.flatten(),
+            found,
         })
         .collect();
     rows.sort_by(|a, b| a.value.cmp(&b.value).then_with(|| a.class.cmp(&b.class)));

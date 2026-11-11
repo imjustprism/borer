@@ -113,20 +113,6 @@ struct Facts {
     float_last: bool,
 }
 
-impl Facts {
-    /// What is known of a function nobody classified: no sites, the whole
-    /// register returned.
-    const NONE: Facts = Facts {
-        sites: Vec::new(),
-        sites_rdx: Vec::new(),
-        body_lane: 64,
-        body_write: 64,
-        preserves: false,
-        preserves_rdx: false,
-        float_last: false,
-    };
-}
-
 /// The register a function hands its result back in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ResultReg {
@@ -201,14 +187,8 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
         CLASSIFY_MIN,
         || RefCell::new(InstructionInfoFactory::new()),
         |factory, f| reads_rdx_arg(program, &mut factory.borrow_mut(), bitness, f),
-    )
-    .into_iter()
-    .map(|r| r.unwrap_or(false))
-    .collect();
-    let ordered: Vec<bool> = striped(&shared.functions, |f| blocks_ordered(&f.blocks))
-        .into_iter()
-        .map(|o| o.unwrap_or(false))
-        .collect();
+    );
+    let ordered: Vec<bool> = striped(&shared.functions, |f| blocks_ordered(&f.blocks));
     let callers = Sites {
         program,
         analysis: shared,
@@ -228,10 +208,7 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
                 ResultReg::Xmm0,
             )
         },
-    )
-    .into_iter()
-    .map(|p| p.unwrap_or(false))
-    .collect();
+    );
     let (facts, uses): (Vec<Facts>, Vec<Vec<FloatUse>>) = striped_with(
         &shared.functions,
         CLASSIFY_MIN,
@@ -253,7 +230,6 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
         },
     )
     .into_iter()
-    .map(|f| f.unwrap_or((Facts::NONE, Vec::new())))
     .unzip();
     let hand_back = |preserving: &[bool], reg: ResultReg| -> Vec<Handed> {
         striped_with(
@@ -272,9 +248,6 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
                 )
             },
         )
-        .into_iter()
-        .map(|h| h.unwrap_or(Handed::UNKNOWN))
-        .collect()
     };
     let preserving_rax: Vec<bool> = facts.iter().map(|f| f.preserves).collect();
     let handed = hand_back(&preserving_rax, ResultReg::Rax);
@@ -1197,10 +1170,7 @@ fn x87_results(program: &Program, analysis: &Analysis, kept: &BTreeSet<u64>) -> 
         CLASSIFY_MIN,
         || RefCell::new(InstructionInfoFactory::new()),
         |factory, f| x87::leaf_helper(program, analysis, &mut factory.borrow_mut(), f),
-    )
-    .into_iter()
-    .map(Option::flatten)
-    .collect();
+    );
     let kind = |t: u64| {
         let name = analysis
             .function(t)
@@ -1227,10 +1197,7 @@ fn x87_results(program: &Program, analysis: &Analysis, kept: &BTreeSet<u64>) -> 
             x87::flow(program, 32, &mut factory.borrow_mut(), f, &callee)
                 .filter(|flow| flow.takes <= x87::OPERANDS_MAX)
         },
-    )
-    .into_iter()
-    .map(Option::flatten)
-    .collect();
+    );
     let mut net: Vec<Option<i32>> = vec![None; flows.len()];
     for _ in 0..PASS_ROUNDS_MAX {
         let mut changed = false;
@@ -1519,7 +1486,6 @@ pub(crate) fn x87_kept(program: &Program, analysis: &Analysis) -> Arc<BTreeSet<u
             },
         )
         .into_iter()
-        .flatten()
         .flatten()
         .collect();
         let mut kept = BTreeSet::new();

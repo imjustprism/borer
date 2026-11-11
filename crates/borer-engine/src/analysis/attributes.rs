@@ -480,7 +480,7 @@ pub fn catalog(program: &Program, analysis: &Analysis, overlay: &Overlay) -> Att
     );
     let mut attrs: Vec<AttrDef> = Vec::new();
     for (&site, found) in sites.iter().zip(parsed) {
-        for row in found.unwrap_or_default() {
+        for row in found {
             let users: Vec<u64> = analysis
                 .xrefs
                 .get(&row.definition)
@@ -714,7 +714,6 @@ pub fn catalog_tsv(
         out.push_str("function\taccess\tcall\n");
         for (&user, found) in listed.iter().zip(accesses) {
             let (kind, call) = found
-                .flatten()
                 .flatten()
                 .map_or(("ref", String::new()), |(a, call)| (a.word(), call));
             let _ = writeln!(out, "{}\t{kind}\t{call}", name_of(analysis, overlay, user));

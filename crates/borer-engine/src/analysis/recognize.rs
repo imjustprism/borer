@@ -689,7 +689,7 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
         inline_evidence(program, &lookup, f)
     });
     for (f, ev) in analysis.functions.iter().zip(inline) {
-        if let Some(ev) = ev.filter(|e| !e.is_empty()) {
+        if !ev.is_empty() {
             found.entry(f.entry).or_default().extend(ev);
         }
     }

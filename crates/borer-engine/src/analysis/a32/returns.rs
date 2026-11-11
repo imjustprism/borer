@@ -375,10 +375,7 @@ fn facts(program: &Program, analysis: &Analysis, f: &Function) -> Facts {
 ///   written in place.
 pub(super) fn infer(program: &Program, analysis: &mut Analysis) {
     let shared: &Analysis = analysis;
-    let facts: Vec<Facts> = striped(&shared.functions, |f| facts(program, shared, f))
-        .into_iter()
-        .map(Option::unwrap_or_default)
-        .collect();
+    let facts: Vec<Facts> = striped(&shared.functions, |f| facts(program, shared, f));
     let read: Vec<bool> = facts
         .iter()
         .map(|f| f.sites.contains(&Site::Used))

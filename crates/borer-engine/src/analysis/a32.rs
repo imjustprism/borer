@@ -1600,11 +1600,7 @@ pub(crate) fn discover(program: &Program) -> Analysis {
         (f, sites, data)
     });
     let mut functions = Vec::with_capacity(kept.len());
-    for ((entry, w), r) in kept.iter().zip(built) {
-        let Some((f, sites, data)) = r else {
-            analysis.incomplete = true;
-            continue;
-        };
+    for ((entry, w), (f, sites, data)) in kept.iter().zip(built) {
         for (t, va, kind) in sites {
             push_site(&mut analysis.xrefs, t, va, kind, Some(*entry));
         }
@@ -1846,19 +1842,13 @@ pub(crate) fn infer_returns(program: &Program, analysis: &mut Analysis) {
     returns::infer(program, analysis);
     let found = super::striped(&analysis.functions, |f| float_result(program, f));
     let mut onward: Vec<(usize, u64)> = Vec::new();
-    let mut missing = false;
-    for (k, (f, r)) in analysis.functions.iter_mut().zip(found).enumerate() {
-        let Some((float, tail)) = r else {
-            missing = true;
-            continue;
-        };
+    for (k, (f, (float, tail))) in analysis.functions.iter_mut().zip(found).enumerate() {
         onward.extend(tail.map(|t| (k, t)));
         if float.is_some() {
             f.ret_float = float;
             f.returns_value = Some(true);
         }
     }
-    analysis.incomplete |= missing;
     for _ in 0..TAIL_LINKS {
         for &(k, t) in &onward {
             let float = analysis

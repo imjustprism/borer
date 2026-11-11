@@ -363,7 +363,6 @@ fn certify_many(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<St
             )
         },
     );
-    let rows: Vec<(&str, String)> = rows.into_iter().flatten().collect();
     let tally_of = |g: &str| rows.iter().filter(|(grade, _)| *grade == g).count();
     let mut out = format!(
         "# certify: {} agrees, {} unchecked, {} differs of {} functions graded, {count} inputs each (seed {VERIFY_SEED}, {budget} steps each); agreement is evidence, not proof\n# function\tentry\tgrade\tagree\tunchecked\tdiffer\tnote\treached\tnot modeled\n",

@@ -1000,7 +1000,7 @@ pub(super) fn index(
     };
     let found = striped(functions, refs_of);
     for (f, sites) in functions.iter().zip(found) {
-        for (target, va, kind) in sites.unwrap_or_else(|| refs_of(f)) {
+        for (target, va, kind) in sites {
             push_site(xrefs, target, va, kind, Some(f.entry));
         }
     }

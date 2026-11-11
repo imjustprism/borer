@@ -247,14 +247,7 @@ pub fn build(program: &Program, analysis: &Analysis, overlay: &Overlay) -> Sdk {
     let mut classes: BTreeMap<String, Class> = BTreeMap::new();
     for (name, layout) in names.iter().zip(layouts) {
         let info = analysis.classes.by_name.get(*name);
-        let class = recovered(
-            name,
-            layout.flatten().as_ref(),
-            info,
-            analysis,
-            overlay,
-            word,
-        );
+        let class = recovered(name, layout.as_ref(), info, analysis, overlay, word);
         classes.insert((*name).clone(), class);
     }
     for (name, ty) in &overlay.types {

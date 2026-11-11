@@ -782,7 +782,6 @@ fn scan<R: Send>(candidates: &[u64], read: impl Fn(u64) -> Option<R> + Sync) -> 
     super::striped_with(scanned, PAR_MIN, || (), |(), &e| read(e))
         .into_iter()
         .flatten()
-        .flatten()
         .collect()
 }
 

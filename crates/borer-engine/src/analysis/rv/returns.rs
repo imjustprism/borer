@@ -363,10 +363,7 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis, xlen: Xlen) {
         call_returns::facts(shared, f, [A0, FA0, A1], |va, from, r| {
             classify(program, shared, xlen, (va, from), r)
         })
-    })
-    .into_iter()
-    .map(Option::unwrap_or_default)
-    .collect();
+    });
     call_returns::settle(
         analysis,
         facts,

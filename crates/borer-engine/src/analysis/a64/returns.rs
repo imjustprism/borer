@@ -307,10 +307,7 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
         call_returns::facts(shared, f, regs, |va, from, r| {
             classify(program, shared, va, from, r)
         })
-    })
-    .into_iter()
-    .map(Option::unwrap_or_default)
-    .collect();
+    });
     call_returns::settle(
         analysis,
         facts,

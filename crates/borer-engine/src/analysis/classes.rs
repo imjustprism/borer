@@ -613,7 +613,7 @@ pub(crate) fn setter_names(
         Some(setter_writes(&text, class, &marker, WINDOW))
     });
     let mut votes: BTreeMap<(String, u64), usize> = BTreeMap::new();
-    for ((member, _), offs) in sites.iter().zip(writes).filter_map(|(s, w)| Some((s, w??))) {
+    for ((member, _), offs) in sites.iter().zip(writes).filter_map(|(s, w)| Some((s, w?))) {
         for off in offs {
             *votes.entry(((*member).to_owned(), off)).or_insert(0) += 1;
         }
@@ -729,12 +729,9 @@ fn method_votes(
 ) -> BTreeMap<u64, FieldUse> {
     let mut fields: BTreeMap<u64, FieldUse> = BTreeMap::new();
     let read: Vec<u64> = methods.iter().copied().take(METHODS_MAX).collect();
-    for votes in striped(&read, |&entry| {
+    for votes in &striped(&read, |&entry| {
         assert_votes(program, analysis, overlay, entry)
-    })
-    .iter()
-    .flatten()
-    {
+    }) {
         add_votes(&mut fields, votes);
     }
     fields
@@ -785,12 +782,9 @@ fn sibling_votes(
         .take(SIBLING_METHODS_MAX)
         .map(|(entry, _)| *entry)
         .collect();
-    for votes in striped(&siblings, |&entry| {
+    for votes in &striped(&siblings, |&entry| {
         assert_votes(program, analysis, overlay, entry)
-    })
-    .iter()
-    .flatten()
-    {
+    }) {
         add_votes(&mut fields, votes);
     }
     fields
@@ -1791,7 +1785,6 @@ pub fn typed_field_uses(
                     typed_use_in(program, analysis, overlay, &family, (entry, method), offset)
                 })
                 .into_iter()
-                .flatten()
                 .flatten()
                 .collect();
                 uses.sort_by_key(|u| u.entry);

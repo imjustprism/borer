@@ -818,8 +818,8 @@ fn striped_counts<const N: usize>(
     };
     let counted = crate::analysis::striped_with(&stripes, 2, || (), |(), s| one(s));
     let mut total = [0u64; N];
-    for (from, hist) in stripes.iter().zip(counted) {
-        for (t, h) in total.iter_mut().zip(hist.unwrap_or_else(|| one(from))) {
+    for hist in counted {
+        for (t, h) in total.iter_mut().zip(hist) {
             *t = t.saturating_add(h);
         }
     }

@@ -163,7 +163,7 @@ pub fn field_refs(program: &Program, analysis: &Analysis, offset: i64) -> Vec<Fi
     let per_function = striped(&analysis.functions, |f| {
         refs_in(program, f, bitness, offset)
     });
-    let mut out: Vec<FieldRef> = per_function.into_iter().flatten().flatten().collect();
+    let mut out: Vec<FieldRef> = per_function.into_iter().flatten().collect();
     out.sort_by_key(|r| r.va);
     out.dedup_by_key(|r| r.va);
     out

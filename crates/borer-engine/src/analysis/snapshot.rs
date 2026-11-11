@@ -102,8 +102,7 @@ pub fn facts(program: &Program, analysis: &Analysis, overlay: &Overlay) -> Vec<F
                 )
             },
         );
-        for (c, found) in rows.into_iter().zip(layouts) {
-            let (encodes, decodes) = found.unwrap_or_else(|| ("-".to_owned(), "-".to_owned()));
+        for (c, (encodes, decodes)) in rows.into_iter().zip(layouts) {
             out.push(Fact {
                 kind: "cmd".to_owned(),
                 key: c.class,

@@ -269,9 +269,6 @@ pub fn catalog(
             }
         },
     )
-    .into_iter()
-    .flatten()
-    .collect()
 }
 
 /// Every registered class's id home, by class; a class that inherits its

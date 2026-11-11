@@ -231,7 +231,7 @@ pub(super) fn gather(
     );
     let mut found: Vec<Found> = Vec::new();
     for (&caller, sites) in read_list.iter().zip(decompiled) {
-        for site in sites.unwrap_or_default() {
+        for site in sites {
             if site.target.is_some_and(|t| reach.reaches(t)) {
                 branches.remove(&site.at);
                 found.push(Found {

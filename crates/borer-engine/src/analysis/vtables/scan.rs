@@ -356,9 +356,6 @@ pub(super) fn scan_all(
     striped(functions, |f| {
         (f.entry, scan_function(program, f, bitness, conv))
     })
-    .into_iter()
-    .flatten()
-    .collect()
 }
 
 /// The register `r` stands for at `bitness`: its 64-bit self on 64-bit
