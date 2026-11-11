@@ -17,13 +17,15 @@
 //! stay unless the statement asks to replace them ([`Mode`]), and the plan
 //! says how many fields it keeps, changes and adds. A type stated of a
 //! class's field is held to the widths the class's code accesses the
-//! field at ([`check`]).
+//! field at ([`check`]). A field a method's text prints through `this` is
+//! stated at the method too, of the class the method's object is of
+//! ([`plan_at`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::classes::{self, FieldLabel, FieldUse};
 use super::utypes::{self, TypeExpr, UserStruct, UserType};
-use super::{Analysis, Overlay, name_of};
+use super::{Analysis, Function, Overlay, bare_name, name_of};
 use crate::program::Program;
 
 /// One field an agent stated of a class.
@@ -586,6 +588,85 @@ pub fn plan_class(
         edit: Edit::Class(s.name.to_owned(), fields),
         what,
     })
+}
+
+/// Returns the class a function's object is of: the class its name is
+/// qualified by, else the class its first parameter is hinted as.
+///
+/// This is the class a decompile names the function's `this` by, so a
+/// field its text prints through `this` is a field of that class.
+///
+/// # Arguments
+///
+/// * `a` - The analysis.
+/// * `o` - The overlay, whose name for the function comes first.
+/// * `f` - The function.
+///
+/// # Returns
+///
+/// The class, or `None` for a function of no class.
+#[must_use]
+pub fn object_class(a: &Analysis, o: &Overlay, f: &Function) -> Option<String> {
+    classes::class_of(bare_name(&name_of(a, o, f.entry)))
+        .map(str::to_owned)
+        .or_else(|| f.param_hints.get(&0).cloned())
+}
+
+/// Plans a statement of one field of the class a function's object is of
+/// ([`object_class`]): the field a method's text prints through `this`,
+/// stated at the method.
+///
+/// The field is merged into what the class states ([`plan_class`]), as
+/// stating it by the class's name does.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - The overlay.
+/// * `entry` - The function's entry address.
+/// * `off` - The field's byte offset.
+/// * `field` - The field.
+///
+/// # Returns
+///
+/// The plan, which ends by naming the class and the function it was found
+/// at.
+///
+/// # Errors
+///
+/// When no function of a class starts at `entry`, the message saying how
+/// to state the field by its class's name, or the field is refused
+/// ([`plan_class`]).
+pub fn plan_at(
+    p: &Program,
+    a: &Analysis,
+    o: &Overlay,
+    entry: u64,
+    off: u64,
+    field: Field,
+) -> Result<Plan, String> {
+    let fname = name_of(a, o, entry);
+    let class = a
+        .function(entry)
+        .and_then(|f| object_class(a, o, f))
+        .ok_or_else(|| {
+            format!(
+                "{fname} belongs to no class borer knows, so a field at {off:#x} has no class to be stated of; state it by its class, set_type(name=<class>, fields=[\"{off:#x}:{}\"]), or type the pointer it is read through (borer://layout/{entry:#x},apply=<Name> plans that)",
+                field.name
+            )
+        })?;
+    let fields = [(off, field)];
+    let statement = Statement {
+        name: &class,
+        size: None,
+        fields: &fields,
+        mode: Mode::Merge,
+    };
+    let mut plan = plan_class(p, a, o, &statement)?;
+    plan.what
+        .push_str(&format!("; {class} is the class of {fname} ({entry:#x})"));
+    Ok(plan)
 }
 
 /// Returns the widths a class's code accesses a field at, as a plan says

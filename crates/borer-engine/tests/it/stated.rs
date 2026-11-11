@@ -10,7 +10,7 @@
 
 use borer_engine::analysis::classes::{class_layout, render_layout};
 use borer_engine::analysis::decompile::decompile_named;
-use borer_engine::analysis::stated::{Field, Mode, Statement, plan, plan_class};
+use borer_engine::analysis::stated::{Field, Mode, Statement, plan, plan_at, plan_class};
 use borer_engine::analysis::utypes::{list_tsv, parse_type};
 use borer_engine::analysis::{Analysis, EnumSource, Overlay};
 use borer_engine::program::{Arch, Program, Section};
@@ -726,6 +726,70 @@ fn a_name_is_a_struct_before_it_is_a_class() {
         )
         .expect_err("a class's name in another case is not its name"),
         "no function belongs to a class named exactly 'CLASS_2800'"
+    );
+}
+
+/// A field stated at a method lands where stating it by the class's name
+/// does, the plan naming the class it found; a function of no class says
+/// how to state the field by its class.
+#[test]
+fn a_field_stated_at_a_method_is_stated_of_the_method_s_class() {
+    let p = two_classes();
+    let a = Analysis::compute(&p);
+    let plain = Overlay::default();
+    let fields = [(0x270, "m_currentPipeline", Some("u32"))];
+    let (by_name, named) = state((&p, &a), &plain, CLASS, &fields, Mode::Merge).expect("plans");
+    let stated = || field("m_currentPipeline", Some("u32"));
+    for (entry, method) in [
+        (0x1000, "ctor_or_dtor"),
+        (0x1040, "vfunc_0"),
+        (0x1080, "vfunc_1"),
+    ] {
+        let at = plan_at(&p, &a, &plain, entry, 0x270, stated()).expect("plans");
+        assert_eq!(
+            at.would(),
+            format!("{by_name}; class_2800 is the class of class_2800::{method} ({entry:#x})")
+        );
+        let mut o = plain.clone();
+        at.apply(&mut o);
+        assert_eq!(o.fields, named.fields);
+        assert_eq!(o.fingerprint(), named.fingerprint());
+    }
+    let other = plan_at(&p, &a, &plain, OTHER_METHOD, 0x270, stated()).expect("plans");
+    assert_eq!(
+        other.would(),
+        "state 1 field(s) of class class_2900: 3 kept, 1 changed, 0 new: +0x270 field_0x270 -> m_currentPipeline u32; class_2900 is the class of class_2900::vfunc_0 (0x1140)"
+    );
+    assert_eq!(
+        plan_at(&p, &a, &plain, 0x1f00, 0x10, field("m_count", None))
+            .expect_err("no function, so no class"),
+        "sub_1f00 belongs to no class borer knows, so a field at 0x10 has no class to be stated of; state it by its class, set_type(name=<class>, fields=[\"0x10:m_count\"]), or type the pointer it is read through (borer://layout/0x1f00,apply=<Name> plans that)"
+    );
+    let mut earlier = stating(&[(0x18, "m_next", None)]);
+    let merging = plan_at(&p, &a, &earlier, 0x1080, 0x270, stated()).expect("plans");
+    merging.apply(&mut earlier);
+    assert_eq!(
+        earlier.fields,
+        stating(&[(0x18, "m_next", None), fields[0]]).fields,
+        "a field stated at a method merges into what the class states"
+    );
+    let mut renamed = plain;
+    renamed.names.insert(0x1040, "draw".to_owned());
+    let hinted = plan_at(&p, &a, &renamed, 0x1040, 0x270, stated())
+        .expect("plans")
+        .would();
+    assert!(
+        hinted.ends_with("; class_2800 is the class of draw (0x1040)"),
+        "a method of no class by its name is of the class its object is hinted as: {hinted}"
+    );
+    renamed.names.insert(0x1040, "Renderer::draw".to_owned());
+    let moved = plan_at(&p, &a, &renamed, 0x1040, 0x270, stated())
+        .expect("plans")
+        .would();
+    assert!(
+        moved.starts_with("state 1 field(s) of class Renderer: ")
+            && moved.ends_with("; Renderer is the class of Renderer::draw (0x1040)"),
+        "the class a method's own name is qualified by comes first: {moved}"
     );
 }
 

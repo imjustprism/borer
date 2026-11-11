@@ -1192,13 +1192,13 @@ fn name_fields(
 ) -> Option<String> {
     let mut lap = crate::timing::Lap::new();
     let f = analysis.function(entry)?;
-    let name = name_of(analysis, overlay, entry);
-    let own = classes::class_of(crate::analysis::bare_name(&name))
-        .or_else(|| f.param_hints.get(&0).map(String::as_str));
-    let has_this = own.is_some_and(|c| text.contains(&format!("{c} *this")));
+    let own = crate::analysis::stated::object_class(analysis, overlay, f);
+    let has_this = own
+        .as_ref()
+        .is_some_and(|c| text.contains(&format!("{c} *this")));
     let mut objects: Vec<(String, String)> = Vec::new();
     if let (true, Some(c)) = (has_this, own) {
-        objects.push(("this".to_owned(), c.to_owned()));
+        objects.push(("this".to_owned(), c));
     }
     if let Some(sig) = &f.signature {
         if sig.by_pointer {
