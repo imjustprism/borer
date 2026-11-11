@@ -4,10 +4,11 @@
 //! ARM32 and RISC-V code, each against its own machine. What every
 //! one of them does the same way is here: the state a block's two runs
 //! start from, seeded on the machine and for the evaluator alike
-//! ([`Seeded`]); the two runs themselves ([`run_block`]); and why a run
-//! that stopped elsewhere than meant leaves its block unchecked
-//! ([`stopped`]). An instruction set's check adds what is its own: how it
-//! reads a block's straight line, the registers it names, the float or
+//! ([`Seeded`]); the two runs themselves ([`run_block`]); why a run that
+//! stopped elsewhere than meant leaves its block unchecked ([`stopped`]);
+//! and the compare of the general registers where each is one whole word
+//! ([`registers`]). An instruction set's check adds what is its own: how
+//! it reads a block's straight line, the registers it names, the float or
 //! vector registers it seeds, and how it compares them.
 
 use std::collections::BTreeMap;
@@ -16,7 +17,9 @@ use super::super::Ctx;
 use super::super::arch::Lifter;
 use super::super::expr::Key;
 use super::super::lift::{BlockFacts, Env, Pass};
-use super::{Bench, GOLDEN, Jcc, Near, Probe, Ran, Rng, STACK_WORDS, State, Verified, low};
+use super::{
+    Bench, Fact, GOLDEN, Jcc, Near, Probe, Ran, Read, Rng, STACK_WORDS, State, Verified, low,
+};
 use crate::emulate::Stop;
 
 /// A block's two runs before they start: the machine and the state the
@@ -236,4 +239,68 @@ pub(in crate::analysis::decompile) fn stopped(
         | Stop::Exited
         | Stop::Limit(_) => Err("the emulator stopped early"),
     }
+}
+
+/// Compares every general register and the stack pointer, each whole.
+///
+/// A register the lifter holds no value for still holds the value it
+/// started with: the lifter writes every register an instruction it models
+/// changes, and a block holding one it does not model is not checked. A
+/// register a 32-bit write left narrow holds its value uncut, the
+/// machine's upper half being zero ([`Env::narrow`]), so it compares with
+/// that half cleared. The stack pointer compares as the tracked offset
+/// from the starting one, or as the value the lifter holds when it lost
+/// the offset.
+///
+/// # Arguments
+///
+/// * `ran` - Both runs.
+/// * `regs` - The general registers, each as the machine names it and as
+///   the lifter keys it.
+/// * `sp` - The stack pointer, as the lifter keys it.
+/// * `out` - Where the counts and disagreements go.
+pub(in crate::analysis::decompile) fn registers<M: Bench, R>(
+    ran: &Ran<'_, M, R>,
+    regs: impl IntoIterator<Item = (&'static str, Key)>,
+    sp: Key,
+    out: &mut Verified,
+) {
+    let (bits, word) = (ran.st.width, low(ran.st.width));
+    let mut check = |name: &str, emulated: u64, read: Read, expr: Option<String>| {
+        let Some(lifted) = out.count(Fact::Register, read) else {
+            return;
+        };
+        if lifted & word != emulated {
+            ran.disagree(
+                out,
+                Fact::Register,
+                name.to_owned(),
+                (emulated, lifted & word, bits),
+                expr.unwrap_or_else(|| "(unchanged)".to_owned()),
+            );
+        }
+    };
+    for (name, key) in regs {
+        let Some(emulated) = ran.emu.register(name) else {
+            continue;
+        };
+        let read = match ran.lifted(key) {
+            Read::Value(v) if ran.env.narrow.get(&key) == Some(&32) => Read::Value(v & low(32)),
+            other => other,
+        };
+        let value = ran.env.vals.get(&key);
+        check(name, emulated, read, value.map(|e| format!("{e:?}")));
+    }
+    let Some(emulated) = ran.emu.register(M::SP) else {
+        return;
+    };
+    let (read, expr) = match (ran.env.sp, ran.env.vals.get(&sp)) {
+        (Some(k), _) => (
+            Read::Value(ran.st.rsp.wrapping_add_signed(k) & word),
+            Some(format!("{} {k:+}", M::SP)),
+        ),
+        (None, Some(e)) => (ran.read(e), Some(format!("{e:?}"))),
+        (None, None) => (Read::Unreadable, None),
+    };
+    check(M::SP, emulated, read, expr);
 }

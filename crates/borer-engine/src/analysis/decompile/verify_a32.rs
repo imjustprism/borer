@@ -27,7 +27,8 @@ use super::arch::A32;
 use super::expr::{Key, Ty};
 use super::lift_a32::decode_blocks;
 use super::verify::{
-    Fact, Jcc, Near, Ran, Read, Rng, Seeded, State, Verified, bench, in_parts, report, run_block,
+    Fact, Jcc, Near, Ran, Rng, Seeded, State, Verified, bench, in_parts, registers, report,
+    run_block,
 };
 use super::{Ctx, new_ctx};
 use crate::analysis::{Analysis, Function, Overlay};
@@ -353,64 +354,13 @@ fn run<'p>(
 /// * `ran` - Both runs.
 /// * `out` - Where the counts and disagreements go.
 fn compare(mut ran: Ran<'_, Machine<'_>, ()>, out: &mut Verified) {
-    registers(&ran, out);
+    registers(&ran, general(), Key::A32(SP), out);
     vfp(&ran, out);
     let held = ran.slots(out);
     ran.stores(&held, out);
     if let Some((jcc, cond)) = ran.branch.take() {
         ran.step_branch(jcc, &cond, out);
     }
-}
-
-/// Compares `r0` to `r12`, the link register and the stack pointer.
-///
-/// A register the lifter holds no value for still holds the value it
-/// started with. The stack pointer compares as the tracked offset from the
-/// starting one, or as the value the lifter holds when it lost the offset.
-///
-/// # Arguments
-///
-/// * `ran` - Both runs.
-/// * `out` - Where the counts and disagreements go.
-fn registers(ran: &Ran<'_, Machine<'_>, ()>, out: &mut Verified) {
-    let mut check = |name: &str, emulated: u64, read: Read, expr: Option<String>| {
-        let Some(lifted) = out.count(Fact::Register, read) else {
-            return;
-        };
-        if lifted & 0xffff_ffff != emulated {
-            ran.disagree(
-                out,
-                Fact::Register,
-                name.to_owned(),
-                (emulated, lifted & 0xffff_ffff, 32),
-                expr.unwrap_or_else(|| "(unchanged)".to_owned()),
-            );
-        }
-    };
-    for (name, n) in GENERAL {
-        let key = Key::A32(Reg::R(n));
-        let Some(emulated) = ran.emu.register(name) else {
-            continue;
-        };
-        let value = ran.env.vals.get(&key);
-        let read = value.map_or_else(
-            || Read::Value(ran.st.regs.get(&key).copied().unwrap_or(0)),
-            |e| ran.read(e),
-        );
-        check(name, emulated, read, value.map(|e| format!("{e:?}")));
-    }
-    let Some(emulated) = ran.emu.register("sp") else {
-        return;
-    };
-    let (read, expr) = match (ran.env.sp, ran.env.vals.get(&Key::A32(SP))) {
-        (Some(k), _) => (
-            Read::Value(ran.st.rsp.wrapping_add_signed(k) & 0xffff_ffff),
-            Some(format!("sp {k:+}")),
-        ),
-        (None, Some(e)) => (ran.read(e), Some(format!("{e:?}"))),
-        (None, None) => (Read::Unreadable, None),
-    };
-    check("sp", emulated, read, expr);
 }
 
 /// Compares every single and double, each at its own width.
@@ -429,15 +379,11 @@ fn vfp(ran: &Ran<'_, Machine<'_>, ()>, out: &mut Verified) {
     for r in (0..32).map(Reg::S).chain((0..32).map(Reg::D)) {
         let key = Key::A32(r);
         let value = ran.env.vals.get(&key);
-        let read = value.map_or_else(
-            || Read::Value(ran.st.regs.get(&key).copied().unwrap_or(0)),
-            |e| ran.read(e),
-        );
         let name = crate::isa::a32::name(r);
         let Some(emulated) = ran.emu.register(&name) else {
             continue;
         };
-        let Some(lifted) = out.count(Fact::Vector, read) else {
+        let Some(lifted) = out.count(Fact::Vector, ran.lifted(key)) else {
             continue;
         };
         let bits = if matches!(r, Reg::S(_)) { 32 } else { 64 };

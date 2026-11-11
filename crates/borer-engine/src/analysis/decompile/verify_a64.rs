@@ -31,7 +31,7 @@ use super::arch::A64;
 use super::expr::Key;
 use super::lift_a64::decode;
 use super::verify::{
-    Fact, Jcc, Near, Ran, Read, Rng, Seeded, Verified, bench, in_parts, report, run_block,
+    Fact, Jcc, Near, Ran, Rng, Seeded, Verified, bench, in_parts, registers, report, run_block,
 };
 use super::{Ctx, new_ctx};
 use crate::analysis::{Analysis, BasicBlock, Function, Overlay};
@@ -445,91 +445,12 @@ impl Ran<'_, Machine<'_>, ()> {
     ///
     /// * `out` - Where the counts and disagreements go.
     fn compare(mut self, out: &mut Verified) {
-        self.registers(out);
+        registers(&self, general(), Key::A64(Reg::Sp), out);
         self.vectors(out);
         let held = self.slots(out);
         self.stores(&held, out);
         if let Some((jcc, cond)) = self.branch.take() {
             self.step_branch(jcc, &cond, out);
-        }
-    }
-
-    /// Compares `x0` to `x30` and the stack pointer, all 64 bits of each.
-    ///
-    /// A register the lifter holds no value for still holds the value it
-    /// started with: the lifter writes every register an instruction it
-    /// models changes, and a block holding one it does not model is not
-    /// checked. A register a `w` write left narrow holds its value uncut,
-    /// the machine's upper half being zero ([`super::lift::Env::narrow`]),
-    /// so it compares with that half cleared. The stack pointer compares
-    /// as the tracked offset from the starting one, or as the value the
-    /// lifter holds when it lost the offset.
-    ///
-    /// # Arguments
-    ///
-    /// * `out` - Where the counts and disagreements go.
-    fn registers(&self, out: &mut Verified) {
-        for (n, name) in (0u8..).zip(GENERAL) {
-            let key = Key::A64(Reg::X(n));
-            let Some(emulated) = self.emu.register(name) else {
-                continue;
-            };
-            let value = self.env.vals.get(&key);
-            let read = value.map_or_else(
-                || Read::Value(self.st.regs.get(&key).copied().unwrap_or(0)),
-                |e| self.read(e),
-            );
-            let read = match read {
-                Read::Value(v) if self.env.narrow.get(&key) == Some(&32) => {
-                    Read::Value(v & 0xffff_ffff)
-                }
-                other => other,
-            };
-            self.compare_register(out, name, emulated, read, value.map(|e| format!("{e:?}")));
-        }
-        let Some(emulated) = self.emu.register("sp") else {
-            return;
-        };
-        let (read, expr) = match (self.env.sp, self.env.vals.get(&Key::A64(Reg::Sp))) {
-            (Some(k), _) => (
-                Read::Value(self.st.rsp.wrapping_add_signed(k)),
-                Some(format!("sp {k:+}")),
-            ),
-            (None, Some(e)) => (self.read(e), Some(format!("{e:?}"))),
-            (None, None) => (Read::Unreadable, None),
-        };
-        self.compare_register(out, "sp", emulated, read, expr);
-    }
-
-    /// Counts one register and records it when it disagrees.
-    ///
-    /// # Arguments
-    ///
-    /// * `out` - Where the count and disagreement go.
-    /// * `name` - The register as the machine names it.
-    /// * `emulated` - What the machine left in it.
-    /// * `read` - How the lifted value read.
-    /// * `expr` - The lifted expression, `None` for a register the lifter
-    ///   wrote nothing to.
-    fn compare_register(
-        &self,
-        out: &mut Verified,
-        name: &str,
-        emulated: u64,
-        read: Read,
-        expr: Option<String>,
-    ) {
-        let Some(lifted) = out.count(Fact::Register, read) else {
-            return;
-        };
-        if lifted != emulated {
-            self.disagree(
-                out,
-                Fact::Register,
-                name.to_owned(),
-                (emulated, lifted, 64),
-                expr.unwrap_or_else(|| "(unchanged)".to_owned()),
-            );
         }
     }
 
@@ -549,9 +470,7 @@ impl Ran<'_, Machine<'_>, ()> {
         for (n, lane) in (0u8..).zip(lanes) {
             let key = Key::A64(Reg::V(n));
             let held = self.env.vals.get(&key);
-            let start = self.st.regs.get(&key).copied().unwrap_or(0);
-            let read = held.map_or(Read::Value(start), |e| self.read(e));
-            let Some(lifted) = out.count(Fact::Vector, read) else {
+            let Some(lifted) = out.count(Fact::Vector, self.lifted(key)) else {
                 continue;
             };
             let emulated = u64::try_from(lane & u128::from(u64::MAX)).unwrap_or_default();

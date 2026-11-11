@@ -32,8 +32,8 @@ use super::expr::Key;
 use super::floats::agree;
 use super::lift_rv::{decode_blocks, float_ty};
 use super::verify::{
-    Fact, Jcc, Near, Ran, Read, Rng, Seeded, State, Verified, bench, float_bits, in_parts, low,
-    report, run_block,
+    Fact, Jcc, Near, Ran, Rng, Seeded, State, Verified, bench, float_bits, in_parts, low,
+    registers, report, run_block,
 };
 use super::{Ctx, new_ctx};
 use crate::analysis::{Analysis, Function, Overlay};
@@ -51,9 +51,11 @@ const FACTS: [Fact; 5] = [
 ];
 
 /// The integer registers compared and seeded: every one but `x0` and the
-/// stack pointer, by number.
-fn general() -> impl Iterator<Item = Reg> {
-    (1u8..32).filter(|&n| n != 2).map(Reg::X)
+/// stack pointer, each as the machine names it and as the lifter keys it.
+fn general() -> impl Iterator<Item = (&'static str, Key)> {
+    (1u8..32)
+        .filter(|&n| n != 2)
+        .map(|n| (rv::name(Reg::X(n)), Key::Rv(Reg::X(n))))
 }
 
 bench!(Machine<'_>, "sp");
@@ -327,8 +329,7 @@ fn run<'p>(
         64
     };
     let mut seeded = Seeded::new(pristine, seed, at, width, line.len() + 1);
-    let named = general().map(|r| (rv::name(r), Key::Rv(r)));
-    seeded.registers(named, &comparands(line.iter().chain(&jcc)));
+    seeded.registers(general(), &comparands(line.iter().chain(&jcc)));
     let held = first_reads(&line);
     seed_floats(&mut seeded.emu, &mut seeded.st, &mut seeded.rng, &held);
     seeded.stack();
@@ -383,7 +384,7 @@ fn seed_floats(
 /// * `ran` - Both runs.
 /// * `out` - Where the counts and disagreements go.
 fn compare(mut ran: Ran<'_, Machine<'_>, ()>, out: &mut Verified) {
-    registers(&ran, out);
+    registers(&ran, general(), Key::Rv(SP), out);
     floats(&ran, out);
     let held = ran.slots(out);
     ran.stores(&held, out);
@@ -408,11 +409,7 @@ fn floats(ran: &Ran<'_, Machine<'_>, ()>, out: &mut Verified) {
             continue;
         };
         let value = ran.env.vals.get(&key);
-        let read = value.map_or_else(
-            || Read::Value(ran.st.regs.get(&key).copied().unwrap_or(0)),
-            |e| ran.read(e),
-        );
-        let Some(lifted) = out.count(Fact::Vector, read) else {
+        let Some(lifted) = out.count(Fact::Vector, ran.lifted(key)) else {
             continue;
         };
         let bits = value.and_then(|e| float_bits(e, &ran.st)).unwrap_or(64);
@@ -426,59 +423,6 @@ fn floats(ran: &Ran<'_, Machine<'_>, ()>, out: &mut Verified) {
             );
         }
     }
-}
-
-/// Compares every integer register and the stack pointer.
-///
-/// A register the lifter holds no value for still holds the value it
-/// started with. The stack pointer compares as the tracked offset from the
-/// starting one, or as the value the lifter holds when it lost the offset.
-///
-/// # Arguments
-///
-/// * `ran` - Both runs.
-/// * `out` - Where the counts and disagreements go.
-fn registers(ran: &Ran<'_, Machine<'_>, ()>, out: &mut Verified) {
-    let bits = ran.st.width;
-    let word = if bits == 32 { 0xffff_ffff } else { u64::MAX };
-    let mut check = |name: &str, emulated: u64, read: Read, expr: Option<String>| {
-        let Some(lifted) = out.count(Fact::Register, read) else {
-            return;
-        };
-        if lifted & word != emulated {
-            ran.disagree(
-                out,
-                Fact::Register,
-                name.to_owned(),
-                (emulated, lifted & word, bits),
-                expr.unwrap_or_else(|| "(unchanged)".to_owned()),
-            );
-        }
-    };
-    for r in general() {
-        let key = Key::Rv(r);
-        let Some(emulated) = ran.emu.register(rv::name(r)) else {
-            continue;
-        };
-        let value = ran.env.vals.get(&key);
-        let read = value.map_or_else(
-            || Read::Value(ran.st.regs.get(&key).copied().unwrap_or(0)),
-            |e| ran.read(e),
-        );
-        check(rv::name(r), emulated, read, value.map(|e| format!("{e:?}")));
-    }
-    let Some(emulated) = ran.emu.register("sp") else {
-        return;
-    };
-    let (read, expr) = match (ran.env.sp, ran.env.vals.get(&Key::Rv(SP))) {
-        (Some(k), _) => (
-            Read::Value(ran.st.rsp.wrapping_add_signed(k) & word),
-            Some(format!("sp {k:+}")),
-        ),
-        (None, Some(e)) => (ran.read(e), Some(format!("{e:?}"))),
-        (None, None) => (Read::Unreadable, None),
-    };
-    check("sp", emulated, read, expr);
 }
 
 #[cfg(test)]

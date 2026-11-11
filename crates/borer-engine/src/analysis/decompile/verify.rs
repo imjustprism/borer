@@ -62,7 +62,7 @@ use crate::program::Program;
 
 mod driver;
 
-pub(super) use driver::{Seeded, run_block, stopped};
+pub(super) use driver::{Seeded, registers, run_block, stopped};
 
 /// The general registers compared, as the emulator names them.
 pub(super) const REGS: [(&str, Register); 15] = [
@@ -1552,6 +1552,19 @@ impl<M: Bench, R> Ran<'_, M, R> {
             Some(_) if self.touches(&reads) => Read::Stale,
             Some(v) => Read::Value(v),
         }
+    }
+
+    /// Reads the value a register holds where the straight line ends: the
+    /// lifted one, or, the lifter holding none, the one it started with.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The register, as the lifter keys it.
+    pub(super) fn lifted(&self, key: Key) -> Read {
+        self.env.vals.get(&key).map_or_else(
+            || Read::Value(self.st.regs.get(&key).copied().unwrap_or(0)),
+            |e| self.read(e),
+        )
     }
 
     /// Tells whether memory ranges overlap a byte the emulator wrote.
