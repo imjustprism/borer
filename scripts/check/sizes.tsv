@@ -176,12 +176,11 @@ crates/borer-engine/tests/it/a64_emulate.rs	1660
 crates/borer-engine/tests/it/analysis.rs	4570
 crates/borer-engine/tests/it/carve.rs::firmware_containers_are_identified#1	114
 crates/borer-engine/tests/it/clr.rs::meta#1	107
-crates/borer-engine/tests/it/decompile.rs	7223
-crates/borer-engine/tests/it/decompile.rs::a_broadcast_sign_mask_keeps_the_high_bit#1	227
-crates/borer-engine/tests/it/decompile.rs::a_nearest_float_to_int_rounds_ties_to_even#1	120
-crates/borer-engine/tests/it/decompile.rs::a_scalar_float_read_at_another_width_keeps_the_bits#1	144
-crates/borer-engine/tests/it/decompile.rs::a_scalar_float_store_at_another_width_keeps_the_bits#1	131
-crates/borer-engine/tests/it/decompile.rs::a_scalar_lane_move_and_round_keeps_the_bits#1	103
+crates/borer-engine/tests/it/decompile/lanes.rs::a_broadcast_sign_mask_keeps_the_high_bit#1	227
+crates/borer-engine/tests/it/decompile/lanes.rs::a_scalar_float_read_at_another_width_keeps_the_bits#1	144
+crates/borer-engine/tests/it/decompile/lanes.rs::a_scalar_float_store_at_another_width_keeps_the_bits#1	131
+crates/borer-engine/tests/it/decompile/rounding.rs::a_nearest_float_to_int_rounds_ties_to_even#1	120
+crates/borer-engine/tests/it/decompile/rounding.rs::a_scalar_lane_move_and_round_keeps_the_bits#1	103
 crates/borer-engine/tests/it/elf.rs::elf_bytes#1	254
 crates/borer-engine/tests/it/objc.rs::image#1	182
 crates/borer-engine/tests/it/x86.rs	3378

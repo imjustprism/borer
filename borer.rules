@@ -18,7 +18,7 @@ critical:
   - 'Determinism is a contract: same binary, same query, same bytes, at any thread count. No clock (clippy.toml disallowed-methods), seed (scripts/check/paths.py keeps the std hash map and set in fxmap.rs), hash order (iter_over_hash_type) or environment in an answer.'
   - Never guess a crate API; read docs.rs or ~/.cargo/registry first.
   - Done means a command says done. Check the command's own exit status, never a pipe's (`gate.py > log 2>&1 && git commit`).
-  - 'Never edit a test or a benchmark to pass; report the wrong one. Every fix comes with a test: a decompiler fix in tests/it/decompile.rs, a lifter fix as an *_agrees_with_the_emulator test.'
+  - 'Never edit a test or a benchmark to pass; report the wrong one. Every fix comes with a test: a decompiler fix under tests/it/decompile/, a lifter fix as an *_agrees_with_the_emulator test.'
   - 'Push back on a wrong idea, whoever it comes from: say why, then do the right thing or ask.'
   untrusted_input:
   - Bytes may be malformed, packed or hostile. Every read is bounds-checked, every scan capped, every walk fuel-limited. Fed garbage, borer answers or errors; it never panics, hangs or balloons.
