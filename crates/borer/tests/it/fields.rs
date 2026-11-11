@@ -248,6 +248,10 @@ fn a_hostile_project_refuses_its_stated_fields() {
             serde_json::json!({"C": {"0xffffffffffffffff": "m_a u32"}}),
             "resolves to no size at 0xffffffffffffffff",
         ),
+        (
+            serde_json::json!({"C": {"0x10": "m_buf char[16]", "0x14": "m_in u32"}}),
+            "class C: field m_in at 0x14 overlaps m_buf, which ends at 0x20",
+        ),
     ] {
         let refused = project(fields.clone()).expect_err("the hostile project loaded");
         assert!(refused.contains(says), "{fields}: {refused}");
@@ -266,6 +270,10 @@ fn a_hostile_project_refuses_its_stated_fields() {
     let refused = project(classes.into()).expect_err("4097 classes");
     assert!(refused.contains("4097 classes"), "{refused}");
     assert!(project(serde_json::json!({"C": {"0x10": "m_a u32", "0x14": "m_b"}})).is_ok());
+    assert!(
+        project(serde_json::json!({"C": {"0x10": "m_a u8 *", "0x14": "m_b u8 *"}})).is_ok(),
+        "pointers four bytes apart are a 32-bit image's fields"
+    );
     let sparse = project(serde_json::json!({"C": {}, "D": {"0x8": "m_a"}})).expect("loads");
     assert_eq!(
         sparse.fields.keys().collect::<Vec<_>>(),

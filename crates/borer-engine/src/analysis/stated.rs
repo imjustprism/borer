@@ -114,9 +114,13 @@ pub fn rows(overlay: &Overlay) -> Vec<String> {
 /// hands them over.
 ///
 /// Each field is checked by itself ([`sound`]) and each class's fields
-/// together ([`coherent`]), under the caps a statement is held to. Fields
-/// that overlap are refused only where they are stated, against the
-/// loaded binary's pointer width, which a project file does not say.
+/// together ([`coherent`], [`apart`]), under the caps a statement is held
+/// to. A project file does not say its binary's pointer width, so typed
+/// fields are held apart at the narrowest one: two that share a byte with
+/// 4-byte pointers share it with any, and an overlap only wider pointers
+/// make is refused where a field of the class is next stated. Nor does a
+/// project know the names the class's code gives its other fields, which a
+/// statement is checked against.
 ///
 /// # Arguments
 ///
@@ -131,6 +135,8 @@ pub fn validate(overlay: &Overlay) -> Result<(), String> {
     /// The pointer width a project's types are sized by, as its user
     /// types are ([`utypes::validate`]).
     const WORD: u64 = 8;
+    /// The narrowest pointer an image has, in bytes.
+    const NARROW: u64 = 4;
     if overlay.fields.len() > utypes::TYPES_MAX {
         return Err(format!(
             "the project states fields of {} classes; {} are the most",
@@ -143,6 +149,7 @@ pub fn validate(overlay: &Overlay) -> Result<(), String> {
             sound(&overlay.types, off, field, WORD)?;
         }
         coherent(overlay, class, fields, &BTreeMap::new())?;
+        apart(&overlay.types, fields, NARROW).map_err(|why| format!("class {class}: {why}"))?;
     }
     Ok(())
 }
