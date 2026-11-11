@@ -44,8 +44,7 @@ use super::expr::{
     Cond, Expr, Flags, Key, TLS_BASE, Ty, UnOp, either_width, fold, tls_slot, unary,
 };
 use super::floats::{
-    agree, cast_integer, convert_float, float_arith, float_carried, float_of, float_scale_at,
-    float_to_int, float_un, integer_to_float, reinterpret_float,
+    agree, cast_float, convert_float, float_arith, float_of, float_scale_at, float_to_int, float_un,
 };
 use super::helper::{Helper, eval_call};
 use super::lift::{BlockFacts, Env, Pass, exec_block};
@@ -549,6 +548,9 @@ pub(super) struct State<'p, M> {
     pub(super) width: u8,
     /// The temporaries the lifter made, by id, with the value each copied.
     pub(super) temps: BTreeMap<u32, Expr>,
+    /// The type the lift declared each variable with, which a float cast
+    /// of a bare variable reads it as ([`cast_float`]).
+    pub(super) reg_ty: BTreeMap<Key, Ty>,
     /// The address the entry state walks the TLS block to, resolved once
     /// per run ([`State::resolve_tls`]); zero where no walk applies.
     pub(super) tls_block: u64,
@@ -605,7 +607,7 @@ fn mir_read<M: Bench>(
     reads: &mut Vec<(u64, u64)>,
     lower: impl FnOnce(&mut Builder<'_>) -> Val,
 ) -> Option<u64> {
-    let mut b = Builder::new(st.width, &st.temps, vas);
+    let mut b = Builder::new(st.width, &st.temps, vas).declared(&st.reg_ty);
     let v = lower(&mut b);
     mir_eval(&b.body, v, &mut Entry { st, reads })
 }
@@ -803,18 +805,8 @@ pub(super) fn eval<M: Bench>(
             Some(v & low(ty.bits()))
         }
         Expr::Cast(inner, ty @ (Ty::F32 | Ty::F64)) => {
-            if let Some(fb) = float_bits(inner, st) {
-                let v = eval(inner, st, reads, d)?;
-                return Some(convert_float(v, Some(fb), *ty));
-            }
-            if let Some(v) = float_carried(inner, ty.bits(), |e| eval(e, st, reads, d)) {
-                return Some(v);
-            }
-            if let Some(v) = reinterpret_float(inner, *ty, |e| eval(e, st, reads, d)) {
-                return Some(v);
-            }
-            let (v, signed) = cast_integer(inner, |e| eval(e, st, reads, d))?;
-            Some(integer_to_float(v, signed, *ty))
+            let width = |e: &Expr| float_bits(e, st);
+            cast_float(inner, *ty, width, &st.reg_ty, |e| eval(e, st, reads, d))
         }
         Expr::Helper(h, args) => {
             if let Helper::RoundToInt(round) = h {
@@ -1366,6 +1358,7 @@ impl<'p> Sweep<'p> {
             stack: BTreeMap::new(),
             width: self.width,
             temps: BTreeMap::new(),
+            reg_ty: BTreeMap::new(),
             tls_block: 0,
             mir: self
                 .mir
@@ -1408,7 +1401,6 @@ impl<'p> Sweep<'p> {
             Stop::Budget => return Err("a repeat count past the regions compared"),
             _ => return Err("the emulator stopped early"),
         }
-        let stored: FxHashSet<u64> = run.history.iter().map(|w| w.addr).collect();
         let written = written_registers(&instrs, self.width);
         let mut lifted_instrs = instrs;
         lifted_instrs.extend(jcc);
@@ -1438,7 +1430,7 @@ impl<'p> Sweep<'p> {
             block: block.start,
             st,
             emu,
-            stored,
+            stored: run.history.iter().map(|w| w.addr).collect(),
             regs: X86Regs {
                 names: self.regs,
                 written,

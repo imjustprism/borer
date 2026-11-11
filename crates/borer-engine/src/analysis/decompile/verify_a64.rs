@@ -17,8 +17,9 @@
 //! its address on both
 //! sides ([`crate::emulate::fill_byte`]). The general registers are
 //! random, except that a register the block compares with a constant, or
-//! with another register, mostly starts next to it; the `v` registers and
-//! the flags start clear on both sides. A block holding an instruction the
+//! with another register, mostly starts next to it; the low 64 bits of
+//! each `v` register are random too, the rest clear, and the flags start
+//! clear on both sides. A block holding an instruction the
 //! lifter writes as a statement (an `mrs` or `msr` of a system register
 //! other than `TPIDR_EL0` and `NZCV`, a supervisor call) is not checked,
 //! nor one holding an instruction either side does not model. A pass says
@@ -306,6 +307,26 @@ fn comparands(instrs: &[Insn]) -> BTreeMap<Key, Near> {
     near
 }
 
+/// Seeds the `v` registers on the machine and in the evaluator's state
+/// alike: the low 64 bits of each at random, the rest clear, which is all
+/// of a register the evaluator holds.
+///
+/// They are drawn after every other seed, so the general registers and the
+/// stack start as they did while these started clear.
+///
+/// # Arguments
+///
+/// * `emu` - The machine.
+/// * `regs` - The evaluator's registers.
+/// * `rng` - The seeded generator.
+fn seed_vectors(emu: &mut Machine<'_>, regs: &mut BTreeMap<Key, u64>, rng: &mut Rng) {
+    for n in 0..32 {
+        let v = rng.next();
+        emu.set_vreg(n, u128::from(v));
+        regs.insert(Key::A64(Reg::V(n)), v);
+    }
+}
+
 /// Builds the decompilation state a function's blocks are lifted in:
 /// nothing written out, and no flags carried between blocks.
 ///
@@ -429,6 +450,7 @@ impl<'p> Sweep<'p> {
             stack: BTreeMap::new(),
             width: 64,
             temps: BTreeMap::new(),
+            reg_ty: BTreeMap::new(),
             tls_block: 0,
             mir: None,
         };
@@ -448,9 +470,6 @@ impl<'p> Sweep<'p> {
             emu.set_register(name, v);
             st.regs.insert(key, v);
         }
-        for n in 0..32 {
-            st.regs.insert(Key::A64(Reg::V(n)), 0);
-        }
         for word in -STACK_WORDS..STACK_WORDS {
             let at = st.rsp.wrapping_add_signed(word * 8);
             for (i, b) in (0u64..).zip(rng.next().to_le_bytes()) {
@@ -458,6 +477,7 @@ impl<'p> Sweep<'p> {
                 st.stack.insert(at.wrapping_add(i), b);
             }
         }
+        seed_vectors(&mut emu, &mut st.regs, &mut rng);
         emu.stop_at(Some(end));
         let run = emu.run(block.start);
         match run.stop {
@@ -494,6 +514,7 @@ impl<'p> Sweep<'p> {
             );
         }
         st.temps = probe.temps;
+        st.reg_ty.clone_from(&ctx.reg_ty);
         Ok(Ran {
             function: entry,
             block: block.start,
@@ -615,9 +636,9 @@ impl Ran<'_, Machine<'_>, ()> {
     /// float or integer occupies, as [`super::verify`] compares an xmm
     /// register's.
     ///
-    /// Both sides start the block with the registers clear, so a register
-    /// the lifter wrote nothing to still holds zero. A value the evaluator
-    /// cannot read (a 128-bit load) is counted, not compared.
+    /// A register the lifter wrote nothing to still holds the value it
+    /// started with. A value the evaluator cannot read (a 128-bit load) is
+    /// counted, not compared.
     ///
     /// # Arguments
     ///
@@ -625,8 +646,10 @@ impl Ran<'_, Machine<'_>, ()> {
     fn vectors(&self, out: &mut Verified) {
         let lanes = self.emu.vregs();
         for (n, lane) in (0u8..).zip(lanes) {
-            let held = self.env.vals.get(&Key::A64(Reg::V(n)));
-            let read = held.map_or(Read::Value(0), |e| self.read(e));
+            let key = Key::A64(Reg::V(n));
+            let held = self.env.vals.get(&key);
+            let start = self.st.regs.get(&key).copied().unwrap_or(0);
+            let read = held.map_or(Read::Value(start), |e| self.read(e));
             let Some(lifted) = out.count(Fact::Vector, read) else {
                 continue;
             };
@@ -642,5 +665,86 @@ impl Ran<'_, Machine<'_>, ()> {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test"
+)]
+mod tests {
+    use super::{Machine, Sweep, function_ctx};
+    use crate::analysis::decompile::expr::{Expr, Flags, Key, Op, Ty};
+    use crate::analysis::decompile::verify::Ran;
+    use crate::analysis::decompile::verify_testing::{AT, image, tried};
+    use crate::analysis::{Analysis, Overlay};
+    use crate::isa::a64::Reg;
+    use crate::program::Arch;
+
+    /// `ret`.
+    const RET: u32 = 0xd65f_03c0;
+
+    /// Checks the first block of an arm64 routine from seeds 1 to 8
+    /// ([`tried`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `words` - The routine.
+    /// * `spoil` - Makes the lift wrong.
+    fn block(words: &[u32], spoil: impl Fn(&mut Ran<'_, Machine<'_>, ()>)) -> (usize, usize) {
+        let p = image(Arch::Arm64, words);
+        let a = Analysis::compute(&p);
+        let overlay = Overlay::default();
+        let f = a.function(AT).expect("function");
+        let first = f.blocks.iter().find(|b| b.start == AT).expect("block");
+        let sweeps: Vec<Sweep<'_>> = (1..=8)
+            .map(|seed| Sweep::new(&p, seed, false).expect("sweep"))
+            .collect();
+        let mut ctx = function_ctx(&p, &a, &overlay, f);
+        let run = |seed, out: &mut _| {
+            let sweep = sweeps.iter().find(|s| s.seed == seed).expect("a seed");
+            sweep.run(&mut ctx, AT, first, out).expect("run")
+        };
+        tried(run, |ran, out| ran.compare(out), spoil)
+    }
+
+    /// A float operation is tried on registers that differ.
+    ///
+    /// `fsub d0, d1, d2` lifted with its operands the other way round is
+    /// caught on every seed; from registers that start alike, as they did
+    /// when every one started clear, both orders give the same zero.
+    #[test]
+    fn a_float_difference_the_other_way_round_is_caught() {
+        let v = |n| Box::new(Expr::Var(Key::A64(Reg::V(n))));
+        let swapped = |ran: &mut Ran<'_, Machine<'_>, ()>| {
+            let wrong = Expr::Cast(Box::new(Expr::Bin(Op::FSub, v(2), v(1))), Ty::F64);
+            ran.env.vals.insert(Key::A64(Reg::V(0)), wrong);
+        };
+        // ASM: fsub d0, d1, d2 ; ret
+        let (_, caught) = block(&[0x1e62_3820, RET], swapped);
+        assert_eq!(caught, 8, "d2 - d1 agreed with fsub d0, d1, d2 on a seed");
+    }
+
+    /// A float compare is tried on registers that differ, so its branch
+    /// goes both ways.
+    ///
+    /// `fcmp d0, d1` then `b.gt` is taken from a seed and not from
+    /// another, and a lift comparing the two the other way round is caught
+    /// on every seed.
+    #[test]
+    fn a_float_compare_goes_both_ways() {
+        let swapped = |ran: &mut Ran<'_, Machine<'_>, ()>| {
+            let (_, cond) = ran.branch.as_mut().expect("a branch");
+            cond.flags = match std::mem::replace(&mut cond.flags, Flags::Unknown) {
+                Flags::Float(a, b, w) => Flags::Float(b, a, w),
+                Flags::FCmp(p, a, b, w) => Flags::FCmp(p, b, a, w),
+                other => other,
+            };
+        };
+        // ASM: fcmp d0, d1 ; b.gt 0x100c ; ret ; ret
+        let (taken, caught) = block(&[0x1e61_2000, 0x5400_004c, RET, RET], swapped);
+        assert!((1..8).contains(&taken), "taken from {taken} of 8 seeds");
+        assert_eq!(caught, 8, "d1 > d0 agreed with d0 > d1 on a seed");
     }
 }

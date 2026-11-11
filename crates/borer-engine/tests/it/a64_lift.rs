@@ -19,7 +19,7 @@
 
 use borer_engine::analysis::Analysis;
 use borer_engine::analysis::decompile::verify::{Fact, Verified};
-use borer_engine::analysis::decompile::verify_a64::{verify, verify_tsv};
+use borer_engine::analysis::decompile::verify_a64::{verify, verify_mir, verify_tsv};
 use borer_engine::program::{Arch, Program, Section};
 
 /// Where every routine is placed.
@@ -399,6 +399,39 @@ fn float_arithmetic_agrees_with_the_emulator() {
     for v in agrees(&words, 1) {
         assert_eq!(compared(&v, Fact::Vector), 32, "{}", verify_tsv(&v));
         assert_eq!(compared(&v, Fact::Store), 2, "{}", verify_tsv(&v));
+    }
+}
+
+/// A float a register holds by its declaration alone agrees with the
+/// machine read through MIR, as it does read as expressions.
+///
+/// `fcvt d0, s0` converts a register that is only its name, and `fadd s3,
+/// s1, s1` reads again as a single the register `fadd d2, d1, d1` declared
+/// a double.
+#[test]
+fn a_declared_float_through_mir_agrees_with_the_emulator() {
+    let words = [
+        // ASM: fcvt d0, s0
+        0x1e22_c000,
+        // ASM: fadd d2, d1, d1
+        0x1e61_2822,
+        // ASM: fadd s3, s1, s1
+        0x1e21_2823,
+        // ASM: ret
+        0xd65f_03c0,
+    ];
+    let p = image(&words);
+    let a = Analysis::compute(&p);
+    for seed in 1..=SEEDS {
+        let mir = verify_mir(&p, &a, &[BASE], seed);
+        assert_eq!(mir.checked, 1, "seed {seed}: {}", verify_tsv(&mir));
+        assert_eq!(mir, verify(&p, &a, &[BASE], seed), "seed {seed}");
+        assert_eq!(mir.unreadable, 0, "seed {seed}: {}", verify_tsv(&mir));
+        assert!(
+            mir.mismatches.is_empty(),
+            "seed {seed}: {}",
+            verify_tsv(&mir)
+        );
     }
 }
 

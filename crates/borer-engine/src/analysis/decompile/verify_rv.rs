@@ -352,6 +352,7 @@ fn run<'p>(
         stack: BTreeMap::new(),
         width: if xlen == rv::Xlen::X32 { 32 } else { 64 },
         temps: BTreeMap::new(),
+        reg_ty: BTreeMap::new(),
         tls_block: 0,
         mir: None,
     };

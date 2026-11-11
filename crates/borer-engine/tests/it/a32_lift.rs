@@ -105,6 +105,51 @@ fn a_negation_of_a_double_flips_its_sign_bit() {
     }
 }
 
+/// A float converted in the register it arrived in agrees with the
+/// emulator, and so does an unsigned word a single's register holds.
+///
+/// The register is only its name in the lifted value: a double's converts
+/// a double and a single's a single, while `vcvt.f32.u32` reads the bits of
+/// its single's register as the integer they are. Every VFP register is
+/// compared but the one view of the result the evaluator cannot read.
+#[test]
+fn a_conversion_of_an_incoming_register_agrees_with_the_emulator() {
+    for (at, code) in [
+        (0x2_0100, A_NARROW),
+        (0x2_0110, A_WIDEN),
+        (0x2_0120, A_UNSIGNED),
+    ] {
+        for v in agrees(at, Code::Arm(code)) {
+            assert_eq!(v.checked, 1, "{}", verify_tsv(&v));
+            assert_eq!(compared(&v, Fact::Vector), 63, "{}", verify_tsv(&v));
+        }
+    }
+}
+
+/// A double narrowed where it arrived, in A32.
+const A_NARROW: &[u32] = &[
+    // ASM: vcvt.f32.f64 s0, d0
+    0xeeb7_0bc0,
+    // ASM: bx lr
+    0xe12f_ff1e,
+];
+
+/// A single widened where it arrived, in A32.
+const A_WIDEN: &[u32] = &[
+    // ASM: vcvt.f64.f32 d0, s0
+    0xeeb7_0ac0,
+    // ASM: bx lr
+    0xe12f_ff1e,
+];
+
+/// An unsigned word in a single's register converted, in A32.
+const A_UNSIGNED: &[u32] = &[
+    // ASM: vcvt.f32.u32 s15, s16
+    0xeef8_7a48,
+    // ASM: bx lr
+    0xe12f_ff1e,
+];
+
 /// The routine `t_compare_pairs`, in T32.
 const T_COMPARE_PAIRS: &[u16] = &[
     // ASM: subs.w r4, r0, r2

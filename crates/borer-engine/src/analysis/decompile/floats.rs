@@ -4,7 +4,9 @@
 //! conversions to and from integers, shared by every evaluator that
 //! compares with the machine.
 
-use super::expr::{Expr, Op, Ty, UnOp};
+use std::collections::BTreeMap;
+
+use super::expr::{Expr, Key, Op, Ty, UnOp};
 use super::verify::{low, sext};
 use crate::num::lo32;
 
@@ -87,12 +89,30 @@ pub(super) fn float_carried(
 pub(super) fn reinterpret_float(
     e: &Expr,
     to: Ty,
+    leaf: impl FnMut(&Expr) -> Option<u64>,
+) -> Option<u64> {
+    cut(e, to, Expr::is_float, leaf)
+}
+
+/// A float cast of a bitwise cut, as the bits, when `float` says one of the
+/// cut's operands is a float ([`reinterpret_float`]).
+///
+/// # Arguments
+///
+/// * `e` - The cast's operand.
+/// * `to` - The float the cast names.
+/// * `float` - Tells whether an operand is a float.
+/// * `leaf` - The bits of one operand.
+fn cut(
+    e: &Expr,
+    to: Ty,
+    float: impl Fn(&Expr) -> bool,
     mut leaf: impl FnMut(&Expr) -> Option<u64>,
 ) -> Option<u64> {
     let Expr::Bin(op @ (Op::And | Op::Or | Op::Xor), l, r) = e else {
         return None;
     };
-    if !l.is_float() && !r.is_float() {
+    if !float(l) && !float(r) {
         return None;
     }
     let (a, b) = (leaf(l)?, leaf(r)?);
@@ -300,6 +320,71 @@ pub(super) fn integer_to_float(v: u64, signed: bool, to: Ty) -> u64 {
         Ty::F64 => (v as f64).to_bits(),
         Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::U128 => v,
     }
+}
+
+/// The float width a bare variable was declared at, or `None` for any
+/// other expression or an integer declaration.
+///
+/// # Arguments
+///
+/// * `declared` - The type each variable was declared with.
+/// * `e` - The expression.
+pub(super) fn declared_float(declared: &BTreeMap<Key, Ty>, e: &Expr) -> Option<u8> {
+    let Expr::Var(k) = e else { return None };
+    let ty = declared.get(k)?;
+    matches!(ty, Ty::F32 | Ty::F64).then(|| ty.bits())
+}
+
+/// A value cast to a float, as the machine converts it.
+///
+/// A float converts between the widths. A float operation the cast names a
+/// width for computes at that width ([`float_carried`]), and a bitwise cut
+/// of a float keeps its bits ([`reinterpret_float`]).
+///
+/// A bare variable is the float the lift declared it: the lifter leaves a
+/// register its name and records its float type beside the tree, where the
+/// text declares the variable with it. The name converts as that float
+/// (`fcvt d0, s0`), and the cut of a name declared wider than the cast
+/// keeps the bits (a double's register read again as a single); the cut of
+/// any other name is an integer's (`vcvt.f32.u32` of a single's register).
+/// Anything else is an integer too, which rounds once
+/// ([`integer_to_float`]).
+///
+/// # Arguments
+///
+/// * `x` - The cast's operand.
+/// * `to` - The float written.
+/// * `width` - The float width an expression carries, `None` for an
+///   integer.
+/// * `declared` - The type each variable was declared with.
+/// * `leaf` - The bits of one operand.
+///
+/// # Returns
+///
+/// The float's bits, or `None` where `leaf` cannot read an operand.
+pub(super) fn cast_float(
+    x: &Expr,
+    to: Ty,
+    width: impl Fn(&Expr) -> Option<u8>,
+    declared: &BTreeMap<Key, Ty>,
+    mut leaf: impl FnMut(&Expr) -> Option<u64>,
+) -> Option<u64> {
+    let named = |e: &Expr| declared_float(declared, e);
+    if let Some(from) = width(x) {
+        return Some(convert_float(leaf(x)?, Some(from), to));
+    }
+    if let Some(v) = float_carried(x, to.bits(), &mut leaf) {
+        return Some(v);
+    }
+    let wider = |e: &Expr| named(e).is_some_and(|w| w > to.bits());
+    if let Some(v) = cut(x, to, |e| e.is_float() || wider(e), &mut leaf) {
+        return Some(v);
+    }
+    if let Some(from) = named(x) {
+        return Some(convert_float(leaf(x)?, Some(from), to));
+    }
+    let (v, signed) = cast_integer(x, &mut leaf)?;
+    Some(integer_to_float(v, signed, to))
 }
 
 /// Converts a float's bits to the width a store gives it, rounding a

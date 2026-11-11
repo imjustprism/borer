@@ -17,6 +17,7 @@ use crate::isa::x86::ConditionCode;
 
 use super::super::expr::{Cc, Cond, Expr, Flags, Key, Op, Ty, UnOp as EUn, tls_slot};
 use super::super::fcmp::FPred;
+use super::super::floats::declared_float;
 use super::super::helper::{Helper, Operands, arg_bits};
 use super::super::round_to_int::fcvt_float_width;
 use super::super::verify::EVAL_DEPTH;
@@ -30,6 +31,9 @@ pub(in super::super) struct Builder<'a> {
     pub(in super::super) body: Body,
     /// The temporaries the lifter made, by id, with the value each copied.
     temps: &'a BTreeMap<u32, Expr>,
+    /// The type the lift declared each variable with, once named
+    /// ([`Builder::declared`]).
+    declared: Option<&'a BTreeMap<Key, Ty>>,
     /// The provenance every value built gets.
     prov: Prov,
 }
@@ -45,7 +49,25 @@ impl<'a> Builder<'a> {
     pub(in super::super) fn new(word: u8, temps: &'a BTreeMap<u32, Expr>, vas: &[u64]) -> Self {
         let mut body = Body::new(word);
         let prov = body.prov(vas);
-        Self { body, temps, prov }
+        Self {
+            body,
+            temps,
+            declared: None,
+            prov,
+        }
+    }
+
+    /// Names the type the lift declared each variable with, which a float
+    /// cast reads a bare variable as, the way the expression evaluator
+    /// does ([`super::super::floats::cast_float`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `types` - The type of each declared variable.
+    #[must_use]
+    pub(in super::super) fn declared(mut self, types: &'a BTreeMap<Key, Ty>) -> Self {
+        self.declared = Some(types);
+        self
     }
 
     /// Lowers a lifted value.
@@ -468,9 +490,11 @@ impl<'a> Builder<'a> {
     }
 
     /// Lowers a float cast of `inner` the way the expression evaluator
-    /// reads it: a float converted, a float operation its own type does not
-    /// say computed at the cast's width, a bitwise cut of a float's
-    /// encoding reinterpreted, else an integer converted.
+    /// reads it: a float converted, a bare variable as the float it is
+    /// declared, a float operation its own type does not say computed at
+    /// the cast's width, a bitwise cut of a float's encoding or of a
+    /// variable declared wider than the cast reinterpreted, else an
+    /// integer converted.
     ///
     /// # Arguments
     ///
@@ -480,7 +504,9 @@ impl<'a> Builder<'a> {
     fn float_cast(&mut self, inner: &Expr, to: Ty, d: u8) -> Val {
         let tb = to.bits();
         let ty = if tb == 32 { MTy::F32 } else { MTy::F64 };
-        if let Some(fb) = self.float_width(inner) {
+        let declared = self.declared;
+        let named = |e: &Expr| declared.and_then(|types| declared_float(types, e));
+        if let Some(fb) = self.float_width(inner).or_else(|| named(inner)) {
             let x = self.lower(inner, d);
             return if fb == tb {
                 self.reread(x, fb)
@@ -504,7 +530,11 @@ impl<'a> Builder<'a> {
                 let x = self.lower(x, d);
                 return self.fun(FUnOp::Neg, x, tb);
             }
-            Expr::Bin(op @ (Op::And | Op::Or | Op::Xor), l, r) if l.is_float() || r.is_float() => {
+            Expr::Bin(op @ (Op::And | Op::Or | Op::Xor), l, r)
+                if [l, r]
+                    .iter()
+                    .any(|e| e.is_float() || named(e).is_some_and(|w| w > tb)) =>
+            {
                 let (a, b) = (self.lower(l, d), self.lower(r, d));
                 let (a, b) = (self.int(a, 64), self.int(b, 64));
                 let v = self.int_bin(*op, a, b);

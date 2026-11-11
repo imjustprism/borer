@@ -15,14 +15,15 @@
 //! A block is checked up to its first control transfer. Memory nothing
 //! backs reads a hash of its address on both sides. The core registers are
 //! random, except that a register the block compares with a constant, or
-//! with another register, mostly starts next to it; the VFP registers and
-//! the flags start clear on both sides. A block holding an instruction
-//! either side does not model is not checked. A pass says the lifting
-//! agreed on the seeds tried, not that it is right.
+//! with another register, mostly starts next to it; the doubles are random
+//! too, a single the half of its double, and the flags start clear on both
+//! sides. A block holding an instruction either side does not model is not
+//! checked. A pass says the lifting agreed on the seeds tried, not that it
+//! is right.
 
 use std::collections::BTreeMap;
 
-use super::expr::Key;
+use super::expr::{Key, Ty};
 use super::lift::{BlockFacts, Env, Pass};
 use super::lift_a32::{decode_blocks, exec_block_a32};
 use super::verify::{
@@ -288,6 +289,36 @@ fn comparands(instrs: &[Insn]) -> BTreeMap<Key, Near> {
     near
 }
 
+/// Seeds the VFP registers on the machine and in the evaluator's state
+/// alike: each double at random, and each single of `d0` to `d15` as the
+/// half of its double it is.
+///
+/// They are drawn after every other seed, so the core registers and the
+/// stack start as they did while these started clear. Each is declared
+/// the float its kind is, a single or a double, as the text declares the
+/// variable: the evaluator reads a bare one under a float cast as that.
+///
+/// # Arguments
+///
+/// * `emu` - The machine.
+/// * `st` - The evaluator's state.
+/// * `rng` - The seeded generator.
+fn seed_vfp(emu: &mut Machine<'_>, st: &mut State<'_, Machine<'_>>, rng: &mut Rng) {
+    for n in 0..32 {
+        let v = rng.next();
+        emu.set_register(&crate::isa::a32::name(Reg::D(n)), v);
+        let mut set = |r: Reg, v: u64, ty: Ty| {
+            st.regs.insert(Key::A32(r), v);
+            st.reg_ty.insert(Key::A32(r), ty);
+        };
+        set(Reg::D(n), v, Ty::F64);
+        if n < 16 {
+            set(Reg::S(2 * n), v & 0xffff_ffff, Ty::F32);
+            set(Reg::S(2 * n + 1), v >> 32, Ty::F32);
+        }
+    }
+}
+
 /// Runs one block on the machine and through the lifter from one seeded
 /// state.
 ///
@@ -334,6 +365,7 @@ fn run<'p>(
         stack: BTreeMap::new(),
         width: 32,
         temps: BTreeMap::new(),
+        reg_ty: BTreeMap::new(),
         tls_block: 0,
         mir: None,
     };
@@ -350,10 +382,6 @@ fn run<'p>(
         emu.set_register(name, v);
         st.regs.insert(key, v);
     }
-    for n in 0..32 {
-        st.regs.insert(Key::A32(Reg::S(n)), 0);
-        st.regs.insert(Key::A32(Reg::D(n)), 0);
-    }
     for word in -STACK_WORDS..STACK_WORDS {
         let at = st.rsp.wrapping_add_signed(word * 4);
         for (i, b) in (0u64..).zip(rng.next().to_le_bytes().into_iter().take(4)) {
@@ -361,6 +389,7 @@ fn run<'p>(
             st.stack.insert(at.wrapping_add(i), b);
         }
     }
+    seed_vfp(&mut emu, &mut st, &mut rng);
     emu.stop_at(Some(end));
     let begin = instrs.first().map_or(start, |i| i.va);
     let run = emu.run(begin);
@@ -538,7 +567,7 @@ fn vfp(ran: &Ran<'_, Machine<'_>, ()>, out: &mut Verified) {
 )]
 mod tests {
     use super::{Machine, compare, function_ctx, run};
-    use crate::analysis::decompile::expr::{Cc, Cond, Expr, Flags, Key, Op};
+    use crate::analysis::decompile::expr::{Cc, Cond, Expr, Flags, Key, Op, Ty};
     use crate::analysis::decompile::lift_a32::decode_blocks;
     use crate::analysis::decompile::verify::Ran;
     use crate::analysis::decompile::verify_testing::{AT, image, tried};
@@ -618,5 +647,25 @@ mod tests {
         // ASM: vmov s0, r0 ; bx lr
         let (_, caught) = block(&[0xee00_0a10, 0xe12f_ff1e], dropped);
         assert_eq!(caught, 8, "a dropped write agreed on a seed");
+    }
+
+    /// A VFP operation is tried on registers that differ.
+    ///
+    /// `vsub.f64 d0, d1, d2` lifted with its operands the other way round
+    /// is caught on every seed, and `vmov r0, s1` reads the upper half of
+    /// `d0` on both sides.
+    #[test]
+    fn a_vfp_difference_the_other_way_round_is_caught() {
+        let d = |n| Box::new(Expr::Var(Key::A32(Reg::D(n))));
+        let swapped = |ran: &mut Ran<'_, Machine<'_>, ()>| {
+            let wrong = Expr::Cast(Box::new(Expr::Bin(Op::FSub, d(2), d(1))), Ty::F64);
+            ran.env.vals.insert(Key::A32(Reg::D(0)), wrong);
+        };
+        // ASM: vsub.f64 d0, d1, d2 ; bx lr
+        let (_, caught) = block(&[0xee31_0b42, 0xe12f_ff1e], swapped);
+        assert_eq!(caught, 8, "d2 - d1 agreed with vsub d0, d1, d2 on a seed");
+        // ASM: vmov r0, s1 ; bx lr
+        let (_, caught) = block(&[0xee10_0a90, 0xe12f_ff1e], |_| {});
+        assert_eq!(caught, 0, "the lift as it is disagreed on a seed");
     }
 }
