@@ -27,19 +27,17 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::arch::Rv;
 use super::expr::Key;
 use super::floats::agree;
-use super::lift::{BlockFacts, Env, Pass};
-use super::lift_rv::{decode_blocks, exec_block_rv, float_ty};
+use super::lift_rv::{decode_blocks, float_ty};
 use super::verify::{
-    Fact, GOLDEN, Jcc, Near, Probe, Ran, Read, Rng, STACK_WORDS, State, Verified, bench,
-    float_bits, in_parts, low, report,
+    Fact, Jcc, Near, Ran, Read, Rng, Seeded, State, Verified, bench, float_bits, in_parts, low,
+    report, run_block,
 };
 use super::{Ctx, new_ctx};
 use crate::analysis::{Analysis, Function, Overlay};
-use crate::emulate::Stop;
 use crate::emulate::rv::Machine;
-use crate::fxmap::FxHashSet;
 use crate::isa::rv::{self, Alu, Flow, Fmt, Insn, Op, Reg, SP};
 use crate::program::Program;
 
@@ -319,125 +317,48 @@ fn run<'p>(
     instrs: &[Insn],
     out: &mut Verified,
 ) -> Result<Ran<'p, Machine<'p>, ()>, &'static str> {
-    let (entry, start) = at;
     let (line, jcc, end) = straight_line(instrs);
     let Some(end) = end.filter(|_| !line.is_empty() || jcc.is_some()) else {
         return Err("no straight-line code");
     };
-    let xlen = super::lift_rv::xlen(ctx.program);
-    let mut rng = Rng(seed ^ start.rotate_left(17) ^ GOLDEN);
-    rng.next();
-    let fill = rng.next();
-    let mut emu = pristine.clone();
-    emu.set_budget(line.len() + 1);
-    emu.set_fill(Some(fill));
-    let mut st = State {
-        pristine,
-        fill,
-        regs: BTreeMap::new(),
-        rsp: emu.register("sp").unwrap_or(0),
-        stack: BTreeMap::new(),
-        width: if xlen == rv::Xlen::X32 { 32 } else { 64 },
-        temps: BTreeMap::new(),
-        reg_ty: BTreeMap::new(),
-        tls_block: 0,
-        mir: None,
+    let width = if super::lift_rv::xlen(ctx.program) == rv::Xlen::X32 {
+        32
+    } else {
+        64
     };
-    let near = comparands(line.iter().chain(&jcc));
-    plant(&mut emu, &mut st, &mut rng, (&near, &first_reads(&line)));
-    emu.stop_at(Some(end));
-    let begin = instrs.first().map_or(start, |i| i.va);
-    let run = emu.run(begin);
-    match run.stop {
-        Stop::Stopped(at) if at == end => {}
-        Stop::Unmodeled(ref what) => {
-            let kind = what.split(" at 0x").next().unwrap_or(what);
-            *out.unmodeled.entry(kind.to_owned()).or_default() += 1;
-            return Err("an instruction the emulator does not model");
-        }
-        Stop::Fault(_) => return Err("a fault on the emulator"),
-        Stop::Budget => return Err("a repeat count past the regions compared"),
-        Stop::Returned
-        | Stop::MemoryFull(_)
-        | Stop::Stopped(_)
-        | Stop::Derailed(_)
-        | Stop::Exited
-        | Stop::Limit(_) => return Err("the emulator stopped early"),
-    }
-    let stored: FxHashSet<u64> = run.history.iter().map(|w| w.addr).collect();
-    ctx.probe = Some(Probe::default());
-    let mut env = Env::entry();
+    let mut seeded = Seeded::new(pristine, seed, at, width, line.len() + 1);
+    let named = general().map(|r| (rv::name(r), Key::Rv(r)));
+    seeded.registers(named, &comparands(line.iter().chain(&jcc)));
+    let held = first_reads(&line);
+    seed_floats(&mut seeded.emu, &mut seeded.st, &mut seeded.rng, &held);
+    seeded.stack();
+    let begin = instrs.first().map_or(at.1, |i| i.va);
     let mut all = line;
     all.extend(jcc);
-    let lifted = exec_block_rv(
-        ctx,
-        &all,
-        &mut env,
-        Pass::Dataflow,
-        None,
-        BlockFacts::default(),
-    );
-    let probe = ctx.probe.take().unwrap_or_default();
-    if lifted.unmodeled > 0 {
-        return Err(
-            "an instruction the lifter leaves as asm, whose result the expressions after it name but do not compute",
-        );
-    }
-    st.temps = probe.temps;
-    Ok(Ran {
-        function: entry,
-        block: start,
-        st,
-        emu,
-        stored,
-        regs: (),
-        env,
-        effects: probe.effects,
-        branch: jcc
-            .and_then(|j| {
-                Some(Jcc {
-                    ip: j.va,
-                    target: j.target()?,
-                })
-            })
-            .zip(lifted.branch.map(|b| b.cond)),
-    })
+    let jcc = jcc.and_then(|j| j.target().map(|target| Jcc { ip: j.va, target }));
+    run_block::<Rv, _, _>(seeded, ctx, (begin, end), &all, jcc, (), out)
 }
 
-/// Seeds the machine and the evaluator's state alike.
+/// Seeds the float registers on the machine and in the evaluator's state
+/// alike.
 ///
-/// The integer registers are random, a register the block compares mostly
-/// next to what it is compared with; the float registers are random, those
-/// the block reads as a single first boxed in ones, and each one the block
-/// reads is the float of its first read to the evaluator; random words
-/// fill the stack around the stack pointer.
+/// Each is random, those the block reads as a single first boxed in ones,
+/// and each one the block reads is the float of its first read to the
+/// evaluator.
 ///
 /// # Arguments
 ///
 /// * `emu` - The machine.
 /// * `st` - The evaluator's state.
 /// * `rng` - The seeded generator.
-/// * `(near, held)` - The registers to start near what they are compared
-///   with ([`comparands`]) and the format each float register is first
-///   read in ([`first_reads`]).
-fn plant(
+/// * `held` - The format each float register is first read in
+///   ([`first_reads`]).
+fn seed_floats(
     emu: &mut Machine<'_>,
     st: &mut State<'_, Machine<'_>>,
     rng: &mut Rng,
-    (near, held): (&BTreeMap<Key, Near>, &BTreeMap<u8, Fmt>),
+    held: &BTreeMap<u8, Fmt>,
 ) {
-    let wide = st.width == 64;
-    let word = if wide { u64::MAX } else { 0xffff_ffff };
-    for r in general() {
-        let key = Key::Rv(r);
-        let v = rng.next() & word;
-        let v = match near.get(&key) {
-            Some(c) if v & 3 != 0 => c.seed(&st.regs, v) & word,
-            _ => v,
-        };
-        emu.set_register(rv::name(r), v);
-        st.regs.insert(key, v);
-    }
     for n in 0..32 {
         let key = Key::Rv(Reg::F(n));
         let fmt = held.get(&n).copied();
@@ -451,15 +372,6 @@ fn plant(
         st.regs.insert(key, v);
         if let Some(fmt) = fmt {
             st.reg_ty.insert(key, float_ty(fmt));
-        }
-    }
-    let step: i64 = if wide { 8 } else { 4 };
-    for w in -STACK_WORDS..STACK_WORDS {
-        let slot = st.rsp.wrapping_add_signed(w * step);
-        let bytes = rng.next().to_le_bytes();
-        for (i, b) in (0u64..).zip(bytes.into_iter().take(if wide { 8 } else { 4 })) {
-            emu.poke(slot.wrapping_add(i), b);
-            st.stack.insert(slot.wrapping_add(i), b);
         }
     }
 }
