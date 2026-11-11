@@ -16,13 +16,13 @@ crates/borer-engine/src/analysis/decompile/ctext.rs::tokens#1	102
 crates/borer-engine/src/analysis/decompile/emit.rs::emit_block#1	445
 crates/borer-engine/src/analysis/decompile/emit.rs::try_loop#1	228
 crates/borer-engine/src/analysis/decompile/enums.rs::enum_table#1	141
-crates/borer-engine/src/analysis/decompile/expr.rs	5469
-crates/borer-engine/src/analysis/decompile/expr.rs::builders#1	623
+crates/borer-engine/src/analysis/decompile/expr.rs	2615
 crates/borer-engine/src/analysis/decompile/expr.rs::division_idiom#1	130
 crates/borer-engine/src/analysis/decompile/expr.rs::eval#1	109
 crates/borer-engine/src/analysis/decompile/expr.rs::fold#1	159
-crates/borer-engine/src/analysis/decompile/expr.rs::local#1	288
 crates/borer-engine/src/analysis/decompile/expr.rs::mba_linear#1	237
+crates/borer-engine/src/analysis/decompile/expr/fold_tests/builders.rs::builders#1	623
+crates/borer-engine/src/analysis/decompile/expr/fold_tests/mod.rs::local#1	288
 crates/borer-engine/src/analysis/decompile/expr_render.rs::render_in#1	275
 crates/borer-engine/src/analysis/decompile/expr_render.rs::render_plain#1	207
 crates/borer-engine/src/analysis/decompile/fields.rs::apply_layouts#1	110
