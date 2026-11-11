@@ -158,9 +158,9 @@ crates/borer-engine/src/program/mod.rs::from_bytes_with#1	558
 crates/borer-engine/src/program/mod.rs::summary#1	164
 crates/borer-engine/src/script.rs::register#1	297
 crates/borer-engine/src/unwind.rs::cxx4#1	109
+crates/borer-engine/tests/common/code.rs	2230
+crates/borer-engine/tests/common/code.rs::code_bytes#1	2229
 crates/borer-engine/tests/common/elfgen.rs::build#1	115
-crates/borer-engine/tests/common/mod.rs	2961
-crates/borer-engine/tests/common/mod.rs::code_bytes#1	2229
 crates/borer-engine/tests/common/mod.rs::data_bytes#1	420
 crates/borer-engine/tests/common/mod.rs::fixture#1	248
 crates/borer-engine/tests/dogfood.rs::the_final_text_agrees_with_the_emulator_on_small_functions#1	143
