@@ -1343,16 +1343,6 @@ impl Program {
                 });
             }
         }
-        for s in &mut sections {
-            s.name = crate::text::one_line(&s.name);
-        }
-        for s in &mut symbols {
-            s.name = crate::text::one_line(&s.name);
-        }
-        for f in &mut named {
-            f.name = crate::text::one_line(&f.name);
-        }
-
         function_ranges.sort_unstable();
         function_ranges.dedup();
         phases.mark("load finish");
@@ -1385,6 +1375,7 @@ impl Program {
             parent: None,
             modes,
         };
+        crate::text::adopt(&mut program);
         program.read_go();
         phases.mark("load go");
         program.read_clr(clr_dir);

@@ -102,7 +102,8 @@ pub(crate) enum Table {
 /// A symbol a Mach-O's binds name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Import {
-    /// Its name as the table spells it, the C underscore kept.
+    /// Its name as the table spells it, the C underscore kept, made safe
+    /// for a line once its program is adopted ([`crate::text::adopt`]).
     pub(crate) name: String,
     /// The library ordinal it binds from: `1` on for the linked libraries
     /// in load-command order, `0` the image itself, `-1` the main

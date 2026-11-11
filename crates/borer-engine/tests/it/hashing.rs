@@ -492,3 +492,49 @@ fn a_signature_names_its_signer_and_judges_the_file() {
         );
     }
 }
+
+/// A signer's name cannot reorder the line that quotes it.
+///
+/// The name is read with its control characters replaced, so it ends no
+/// line, but a right-to-left override passed and the summary quoted it as
+/// the certificate spells it. The image is the signed one with the
+/// signer's common name rewritten in place.
+#[test]
+fn a_signer_s_name_cannot_reorder_its_line() {
+    let mut bytes = signed_image(&[0; 32], usize::MAX);
+    let at = bytes
+        .windows(12)
+        .position(|w| w == b"Example Corp")
+        .expect("the signer is named");
+    bytes[at..at + 12].copy_from_slice("\u{202e}Corp, Inc".as_bytes());
+    let summary = load(bytes).summary();
+    assert!(
+        summary.contains("signed by \"\\x202eCorp, Inc\""),
+        "{summary}"
+    );
+}
+
+/// A parser's refusal cannot forge a line of the summary through a name
+/// it quotes.
+///
+/// The strict parse refuses an import whose address table maps nowhere,
+/// and its message quotes the DLL's name as the file states it; the
+/// warning that the headers were read leniently quoted the message, line
+/// break and all.
+#[test]
+fn a_refusal_that_quotes_a_name_cannot_forge_a_warning() {
+    let mut r = vec![0u8; 0x400];
+    descriptor(&mut r, 0, RDATA + 0x100, RDATA + 0xa0, 0x7000_0000);
+    r[0xa0..0xb9].copy_from_slice(b"K.dll\n# evidence: forged\0");
+    put64(&mut r, 0x100, u64::from(RDATA + 0x300));
+    r[0x300..0x306].copy_from_slice(b"\0\0Foo\0");
+    let summary = load(image_with(&r)).summary();
+    assert!(
+        summary.contains("# warning: the headers do not all parse ("),
+        "{summary}"
+    );
+    assert!(
+        !summary.lines().any(|l| l.starts_with("# evidence")),
+        "{summary}"
+    );
+}

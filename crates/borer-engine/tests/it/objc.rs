@@ -566,3 +566,37 @@ fn corrupt_metadata_is_refused_cleanly() {
     let objc = objc_tsv(&a, "", Window::first(50));
     assert!(objc.contains(" entries refused ("), "{objc}");
 }
+
+/// A class an import names cannot forge a row, a function's name or a
+/// line of its text.
+///
+/// The class a category extends, a superclass and a class reference bound
+/// to another image's class are named by the symbol the bind states, and
+/// that name reached the methods' names, the listing's rows and the
+/// decompiled text as the fixups spell it. The image is the sound one
+/// with the class in `NSString`'s symbol rewritten in place, so the
+/// category extends a class whose name holds a line break.
+#[test]
+fn a_class_an_import_names_cannot_forge_a_row() {
+    let symbol = b"_OBJC_CLASS_$_NSString\0";
+    let mut bytes = image(ARM64, &arm64_code(), &A64_STARTS, false).bytes;
+    let at = bytes
+        .windows(symbol.len())
+        .position(|w| w == symbol)
+        .expect("the import is named");
+    let class = at + symbol.len() - b"NSString\0".len();
+    bytes[class..class + 8].copy_from_slice(b"NS\n# end");
+    let p = Program::from_bytes(PathBuf::from("forged.macho"), bytes).expect("the image loads");
+    let a = Analysis::compute(&p);
+    assert_eq!(named(&a, SHOUT).0, r"-[NS\x0a# end(Shout) shout]");
+    let objc = objc_tsv(&a, "", Window::first(50));
+    assert!(
+        objc.contains(&format!("NS\\x0a# end(Shout)\t\t-\tshout\t{SHOUT:#x}\n")),
+        "{objc}"
+    );
+    let text = decompile(&p, &a, &Overlay::default(), SHOUT).expect("shout decompiles");
+    assert!(text.contains(r"-[NS\x0a# end(Shout) shout]"), "{text}");
+    for answer in [&objc, &text] {
+        assert!(!answer.lines().any(|l| l.starts_with("# end")), "{answer}");
+    }
+}

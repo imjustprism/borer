@@ -775,3 +775,28 @@ fn a_core_segment_whose_end_overflows_is_refused() {
     assert!(p.sections.is_empty());
     assert_eq!(p.headers.dropped_sections, 1);
 }
+
+/// A module name cannot forge a row of the symbols listing.
+///
+/// The name is UTF-16 the dump chooses freely, and a dump's program was
+/// handed out before the step that escapes an image's names: a line break
+/// in one read as a second row, written by the file.
+#[test]
+fn a_module_name_cannot_forge_a_row() {
+    let mut d = dump();
+    let name: Vec<u8> = "a.dll\n# evidence: forged"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    u32_at(&mut d, 0x118, u32::try_from(name.len()).expect("fits"));
+    d[0x11c..0x11c + name.len()].copy_from_slice(&name);
+    let p = Program::from_bytes("forge.dmp".into(), d).expect("loads");
+    assert_eq!(p.symbols[0].name, "a.dll\\x0a# evidence: forged");
+    let a = Analysis::compute(&p);
+    let (_, _, listed) = borer_engine::analysis::render::symbols_tsv(&p, &a, None, None, 0, 10);
+    assert!(listed.contains("a.dll\\x0a# evidence: forged"), "{listed}");
+    assert!(
+        !listed.lines().any(|l| l.starts_with("# evidence")),
+        "{listed}"
+    );
+}

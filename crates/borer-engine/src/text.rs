@@ -9,7 +9,9 @@
 //! the same text colour or erase what surrounds them.
 //!
 //! So text from outside is escaped before it is rendered, at the point it is
-//! adopted rather than at each of the places that print it.
+//! adopted rather than at each of the places that print it. A loaded
+//! program's names are adopted in one place, [`adopt`], which every
+//! loader's program passes before it is handed out.
 //!
 //! Text from a file may also address the AI model reading borer's answer:
 //! a harness's tag, a chat template's marker, a chat turn, an instruction
@@ -23,6 +25,8 @@
 //! listing to find it.
 
 use std::fmt::Write as _;
+
+use crate::program::Program;
 
 /// Longest run of outside text any single row or message keeps.
 ///
@@ -59,6 +63,66 @@ pub const PATH_MAX: usize = 512;
 #[must_use]
 pub fn one_line(text: &str) -> String {
     escaped(text, OUTSIDE_MAX)
+}
+
+/// Escapes the text a program holds out of its file, so that each piece
+/// renders as one bounded line ([`one_line`]).
+///
+/// The one place a loader's program passes before anything prints it.
+/// Where each reader escaped the fields it remembered, section, symbol
+/// and debug function names were escaped, while a library's name, the
+/// interpreter's path, a manifest's values, a warning quoting what a
+/// parser said of the file, a debug parameter's name and every type
+/// spelled out of a type's name were not, and a minidump's module names
+/// passed no such step at all. Named here: the section and symbol names;
+/// among the header facts the linked libraries, the interpreter, the
+/// manifest's values, the loader's warnings and a signature's signer;
+/// the imports a Mach-O's binds name, which the Objective-C metadata
+/// reads its classes from; and of the debug information the function
+/// names, the parameter names, the parameter and return types, the
+/// typedef targets and the global types. A type the debug information
+/// spells is escaped whole and never cut: the decompiler reads the
+/// pointer marker at its end and the struct named in it, and its reader
+/// already bounds each name it is spelled from. What a reader holds to an
+/// identifier as it reads it (a debug global, typedef, struct, member,
+/// enumerator or local) and text a reader escapes as it reads it (a
+/// version string, the debug id's path, a Go or .NET name) are not named
+/// again.
+///
+/// # Arguments
+///
+/// * `program` - The program a loader built from a file, before the names
+///   it escapes itself are added.
+pub(crate) fn adopt(program: &mut Program) {
+    let line = |text: &mut String| *text = one_line(text);
+    let spelling = |text: &mut String| *text = escaped(text, usize::MAX);
+    program.sections.iter_mut().for_each(|s| line(&mut s.name));
+    program.symbols.iter_mut().for_each(|s| line(&mut s.name));
+    let headers = &mut program.headers;
+    headers.libraries.iter_mut().for_each(line);
+    headers.interpreter.iter_mut().for_each(line);
+    headers.lenient.iter_mut().for_each(line);
+    for (_, value) in &mut headers.manifest {
+        line(value);
+    }
+    if let Some(signature) = &mut headers.signature {
+        signature.signer.iter_mut().for_each(line);
+    }
+    for import in &mut program.relocs.imports {
+        line(&mut import.name);
+    }
+    program.debug_typedefs.values_mut().for_each(spelling);
+    for global in &mut program.debug_globals {
+        global.type_name.iter_mut().for_each(spelling);
+    }
+    for function in &mut program.debug_functions {
+        line(&mut function.name);
+        function.return_type.iter_mut().for_each(spelling);
+        for parameter in &mut function.parameters {
+            line(&mut parameter.name);
+            parameter.type_name.iter_mut().for_each(spelling);
+        }
+    }
 }
 
 /// Bounds a path for a message, keeping both of its ends.

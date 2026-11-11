@@ -1115,3 +1115,228 @@ fn bytes_past_the_headers_are_an_elf_overlay() {
         "a section table the loader dropped places nothing past the segment"
     );
 }
+
+/// A library name or an interpreter path cannot forge a line of the summary.
+///
+/// Both are strings the file states (`DT_NEEDED`, `PT_INTERP`), and the
+/// header facts kept them as they read: a line break in one began a line
+/// of the file's own writing in the first answer an agent reads. The
+/// interpreter's segment is laid after the two the writer lays.
+#[test]
+fn a_library_or_an_interpreter_name_cannot_forge_a_line() {
+    use crate::elfgen::{self, A, AX, DYNAMIC, EM_X86_64, ET_DYN, PROGBITS, STRTAB, Sec, WA};
+    let dynstr = b"\0libc.so.6\n# evidence: forged\0".to_vec();
+    let interp = b"/lib/ld.so\n# evidence: forged\0".to_vec();
+    let len = |b: &[u8]| u64::try_from(b.len()).expect("fits");
+    let (strsz, interp_len) = (len(&dynstr), len(&interp));
+    let dynamic = elfgen::dynamic(&[(1, 1), (5, 0x2000), (10, strsz)]);
+    let mut im = Image(elfgen::build(
+        ET_DYN,
+        EM_X86_64,
+        0x1000,
+        &[
+            Sec::new(".text", PROGBITS, AX, 0x1000, vec![0xc3]),
+            Sec::new(".dynstr", STRTAB, A, 0x2000, dynstr),
+            Sec::new(".dynamic", DYNAMIC, WA, 0x3000, dynamic),
+            Sec::new(".interp", PROGBITS, A, 0x4000, interp),
+        ],
+    ));
+    im.phdr(0xb0, 3, 4, 0x4000, 0x4000, interp_len);
+    im.u16(0x38, 3);
+    let p = Program::from_bytes(std::path::PathBuf::from("forge.elf"), im.0).expect("loads");
+    assert_eq!(p.headers.libraries, ["libc.so.6\\x0a# evidence: forged"]);
+    assert_eq!(
+        p.headers.interpreter.as_deref(),
+        Some("/lib/ld.so\\x0a# evidence: forged")
+    );
+    let summary = p.summary();
+    assert_eq!(
+        summary.matches("# evidence: forged").count(),
+        2,
+        "{summary}"
+    );
+    assert!(
+        !summary.lines().any(|l| l.starts_with("# evidence")),
+        "{summary}"
+    );
+}
+
+/// What a forged name goes on with: a line break, a line of an answer's
+/// own kind, and the NUL that ends the name.
+const FORGED: &[u8] = b"\n# evidence: forged\0";
+
+/// Builds one debug entry's abbreviation code and `DW_FORM_string` name.
+///
+/// # Arguments
+///
+/// * `code` - The abbreviation code.
+/// * `name` - The name.
+/// * `forged` - Whether the name goes on over a line break ([`FORGED`]).
+fn named_die(code: u8, name: &[u8], forged: bool) -> Vec<u8> {
+    let mut die = vec![code];
+    die.extend_from_slice(name);
+    die.extend_from_slice(if forged { FORGED } else { b"\0" });
+    die
+}
+
+/// Loads an ELF of one function and one DWARF 5 unit.
+///
+/// # Arguments
+///
+/// * `code` - The function's bytes, at `0x1000`.
+/// * `abbrev` - The unit's abbreviation table.
+/// * `dies` - The unit's entries, the first at offset 12.
+#[expect(
+    clippy::expect_used,
+    reason = "a fixture that does not parse has no useful recovery"
+)]
+fn debug_elf(code: Vec<u8>, abbrev: Vec<u8>, dies: &[u8]) -> Program {
+    use crate::elfgen::{self, AX, EM_X86_64, ET_EXEC, PROGBITS, Sec};
+    let unit_len = u32::try_from(dies.len() + 8).expect("fits");
+    let mut info = unit_len.to_le_bytes().to_vec();
+    info.extend_from_slice(&[0x05, 0x00, 0x01, 0x08, 0x00, 0x00, 0x00, 0x00]);
+    info.extend_from_slice(dies);
+    let bytes = elfgen::build(
+        ET_EXEC,
+        EM_X86_64,
+        0x1000,
+        &[
+            Sec::new(".text", PROGBITS, AX, 0x1000, code),
+            Sec::new(".debug_info", PROGBITS, 0, 0x2000, info),
+            Sec::new(".debug_abbrev", PROGBITS, 0, 0x3000, abbrev),
+        ],
+    );
+    Program::from_bytes(std::path::PathBuf::from("forge.elf"), bytes).expect("it loads")
+}
+
+/// What the debug information names cannot forge a line of a function's
+/// text or of its summary, and a type it spells keeps its whole spelling.
+///
+/// A function's name was escaped, but its parameters' names and every type
+/// spelled out of a type's name (a parameter's, the return's, a typedef's
+/// target, a global's) reached the signature line and the decompiled text
+/// as the file wrote them. A spelling is escaped whole, not cut to a
+/// name's length: the decompiler reads the pointer marker at its end, and
+/// the struct named here is 250 characters long before the line break.
+/// Abbreviations: 1 a struct, 2 a pointer, 3 a typedef, 4 a variable, 5 a
+/// subprogram with children, 6 a parameter; the struct is the unit's first
+/// entry, at offset 12, and every typed entry refers to the pointer to it.
+#[test]
+fn debug_names_cannot_forge_a_line() {
+    use borer_engine::analysis::render::why_tsv;
+    const ESCAPED: &str = "\\x0a# evidence: forged";
+    let abbrev = vec![
+        0x01, 0x13, 0x00, 0x03, 0x08, 0x00, 0x00, 0x02, 0x0f, 0x00, 0x49, 0x13, 0x00, 0x00, 0x03,
+        0x16, 0x00, 0x03, 0x08, 0x49, 0x13, 0x00, 0x00, 0x04, 0x34, 0x00, 0x03, 0x08, 0x49, 0x13,
+        0x00, 0x00, 0x05, 0x2e, 0x01, 0x03, 0x08, 0x11, 0x01, 0x49, 0x13, 0x00, 0x00, 0x06, 0x05,
+        0x00, 0x03, 0x08, 0x49, 0x13, 0x00, 0x00, 0x00,
+    ];
+    let long = "n".repeat(250);
+    let mut dies = named_die(0x01, long.as_bytes(), true);
+    let pointer = u32::try_from(12 + dies.len()).expect("fits").to_le_bytes();
+    dies.push(0x02);
+    dies.extend_from_slice(&12u32.to_le_bytes());
+    for (code, name, forged) in [(0x03, b"T", false), (0x04, b"g", false), (0x05, b"f", true)] {
+        dies.extend(named_die(code, name, forged));
+        if code == 0x05 {
+            dies.extend_from_slice(&0x1000u64.to_le_bytes());
+        }
+        dies.extend_from_slice(&pointer);
+    }
+    dies.extend(named_die(0x06, b"x", true));
+    dies.extend_from_slice(&pointer);
+    dies.push(0x00);
+    let p = debug_elf(vec![0x8d, 0x47, 0x01, 0xc3], abbrev, &dies);
+    let spelled = format!("struct {long}{ESCAPED} *");
+    let f = p.debug_functions.first().expect("the function is stated");
+    assert_eq!(f.name, format!("f{ESCAPED}"));
+    assert_eq!(f.return_type.as_ref(), Some(&spelled));
+    let x = f.parameters.first().expect("the parameter is stated");
+    assert_eq!(
+        (&x.name, x.type_name.as_ref()),
+        (&format!("x{ESCAPED}"), Some(&spelled))
+    );
+    assert_eq!(p.debug_typedefs.get("T"), Some(&spelled));
+    assert_eq!(
+        p.debug_globals.first().and_then(|g| g.type_name.as_ref()),
+        Some(&spelled)
+    );
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let text = decompile(&p, &a, &o, 0x1000).expect("the function decompiles");
+    let why = why_tsv(&p, &a, &o, "0x1000").expect("the function is found");
+    assert!(why.contains(&format!("({spelled}x{ESCAPED})")), "{why}");
+    for answer in [text, why] {
+        assert!(
+            !answer.lines().any(|l| l.starts_with("# evidence")),
+            "{answer}"
+        );
+    }
+}
+
+/// A debug name the text could not carry as an identifier names nothing.
+///
+/// The loader escapes the names [`debug_names_cannot_forge_a_line`]
+/// forges. A global, a typedef, a struct, a member and an enumerator are
+/// held to an identifier as they are read instead, so each one named over
+/// a line break is left out while the sound one beside it lands.
+/// Abbreviations: 1 a base type, 2 a typedef, 3 a typed variable, 4 a
+/// struct, 5 a member, 6 an enumeration, 7 an enumerator, 8 a subprogram;
+/// the base type is the unit's first entry, at offset 12.
+#[test]
+fn a_debug_name_that_is_no_identifier_names_nothing() {
+    use borer_engine::analysis::utypes::UserType;
+    let abbrev = vec![
+        0x01, 0x24, 0x00, 0x03, 0x08, 0x3e, 0x0b, 0x0b, 0x0b, 0x00, 0x00, 0x02, 0x16, 0x00, 0x03,
+        0x08, 0x49, 0x13, 0x00, 0x00, 0x03, 0x34, 0x00, 0x03, 0x08, 0x49, 0x13, 0x00, 0x00, 0x04,
+        0x13, 0x01, 0x03, 0x08, 0x0b, 0x0b, 0x00, 0x00, 0x05, 0x0d, 0x00, 0x03, 0x08, 0x38, 0x0b,
+        0x49, 0x13, 0x00, 0x00, 0x06, 0x04, 0x01, 0x03, 0x08, 0x0b, 0x0b, 0x00, 0x00, 0x07, 0x28,
+        0x00, 0x03, 0x08, 0x1c, 0x0b, 0x00, 0x00, 0x08, 0x2e, 0x00, 0x03, 0x08, 0x11, 0x01, 0x00,
+        0x00, 0x00,
+    ];
+    let int = 12u32.to_le_bytes();
+    let mut dies = named_die(0x01, b"int", false);
+    dies.extend_from_slice(&[0x05, 0x04]);
+    for (code, name) in [(0x02, b"T"), (0x03, b"g")] {
+        for forged in [true, false] {
+            dies.extend(named_die(code, name, forged));
+            dies.extend_from_slice(&int);
+        }
+    }
+    for forged in [true, false] {
+        dies.extend(named_die(0x04, b"S", forged));
+        dies.push(8);
+        for (offset, forged) in [(0, true), (4, false)] {
+            dies.extend(named_die(0x05, b"m", forged));
+            dies.push(offset);
+            dies.extend_from_slice(&int);
+        }
+        dies.push(0x00);
+    }
+    dies.extend(named_die(0x06, b"E", false));
+    dies.push(4);
+    for (value, forged) in [(0, true), (1, false)] {
+        dies.extend(named_die(0x07, b"A", forged));
+        dies.push(value);
+    }
+    dies.push(0x00);
+    dies.extend(named_die(0x08, b"f", false));
+    dies.extend_from_slice(&0x1000u64.to_le_bytes());
+    let p = debug_elf(vec![0xc3], abbrev, &dies);
+    assert_eq!(p.debug_typedefs.keys().collect::<Vec<_>>(), ["T"]);
+    let globals: Vec<&str> = p.debug_globals.iter().map(|g| g.name.as_str()).collect();
+    assert_eq!(globals, ["g"]);
+    assert_eq!(p.debug_types.keys().collect::<Vec<_>>(), ["E", "S"]);
+    let Some(UserType::Struct(s)) = p.debug_types.get("S") else {
+        panic!("S is not a struct: {:?}", p.debug_types);
+    };
+    let members: Vec<&str> = s.fields.values().map(|f| f.name.as_str()).collect();
+    assert_eq!(members, ["m"]);
+    let Some(UserType::Enum(e)) = p.debug_types.get("E") else {
+        panic!("E is not an enum: {:?}", p.debug_types);
+    };
+    assert_eq!(e.values, [(1, "A".to_owned())]);
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), 0x1000).expect("the function decompiles");
+    assert!(!text.contains("forged"), "{text}");
+}

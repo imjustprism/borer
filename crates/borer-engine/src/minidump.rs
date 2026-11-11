@@ -453,7 +453,8 @@ fn string_at(bytes: &[u8], at: usize) -> Option<String> {
 /// to what fits below it, so a section's end is always an address; the
 /// memory-info stream's protections set the section flags where it states
 /// them, and a range it does not stays readable, writable and executable,
-/// the way a snapshot answers for every page it caught.
+/// the way a snapshot answers for every page it caught. The module names
+/// are escaped as an image's names are ([`crate::text::adopt`]).
 ///
 /// # Arguments
 ///
@@ -529,5 +530,6 @@ pub(crate) fn program(path: std::path::PathBuf, bytes: Vec<u8>) -> Option<Progra
         Arch::RiscV32 => "riscv32".to_owned(),
         Arch::Unknown => "unknown".to_owned(),
     });
+    crate::text::adopt(&mut p);
     Some(p)
 }

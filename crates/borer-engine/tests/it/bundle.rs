@@ -315,3 +315,39 @@ fn an_autoit_script_resource_is_a_payload() {
 fn a_plain_image_has_no_payload() {
     assert!(bundles(&load(image(vec![0; 0x200], &[]))).is_empty());
 }
+
+/// A manifest's values cannot forge a line of the summary.
+///
+/// The manifest is XML out of the file's resources, and what stands
+/// between an attribute's quotes or an element's tags was kept as it read:
+/// a line break there began a line of the file's own writing. The tree is
+/// [`with_resources`]'s with its one type entry renamed from `RCDATA` to
+/// `RT_MANIFEST`, in the `.rsrc` section two file-aligned blocks past the
+/// headers.
+#[test]
+fn a_manifest_value_cannot_forge_a_line() {
+    /// Where the resource directory's first entry states its type id.
+    const TYPE_ID_AT: usize = 0x400 + 0x200 + 0x200 + 16;
+    let xml = b"<assembly><requestedExecutionLevel level=\"asInvoker\n# evidence: forged\"/>\
+        <dpiAware>true\n# evidence: forged</dpiAware></assembly>";
+    let mut bytes = with_resources(&[("M", xml)]);
+    bytes[TYPE_ID_AT] = 24;
+    let p = load(bytes);
+    let values: Vec<&str> = p.headers.manifest.iter().map(|(_, v)| v.as_str()).collect();
+    assert_eq!(
+        values,
+        [
+            "asInvoker\\x0a# evidence: forged",
+            "true\\x0a# evidence: forged"
+        ]
+    );
+    let summary = p.summary();
+    assert!(
+        summary.contains("manifest: requestedExecutionLevel=asInvoker\\x0a"),
+        "{summary}"
+    );
+    assert!(
+        !summary.lines().any(|l| l.starts_with("# evidence")),
+        "{summary}"
+    );
+}
