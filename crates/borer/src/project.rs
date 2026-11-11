@@ -5,6 +5,7 @@ use std::path::Path;
 
 use borer_engine::analysis::Overlay;
 use borer_engine::analysis::protos::{PROTOTYPES_MAX, Proto, VARS_MAX, Var, VarKey};
+use borer_engine::analysis::stated::Field;
 use borer_engine::analysis::utypes::UserType;
 use borer_engine::program::Program;
 
@@ -48,6 +49,12 @@ pub struct ProjectFile {
     /// load like the prototypes. Absent when none is stated.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub vars: BTreeMap<String, BTreeMap<String, String>>,
+    /// Class -> "0x..." field offset -> the field stated there: its name,
+    /// then a space and its type when one was stated (`m_count u32`);
+    /// parsed and checked on load like the prototypes. Absent when none is
+    /// stated.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fields: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 /// How a project file's binary compares with the loaded one
@@ -259,6 +266,17 @@ impl ProjectFile {
                     (format!("{k:#x}"), vars)
                 })
                 .collect(),
+            fields: o
+                .fields
+                .iter()
+                .map(|(class, fields)| {
+                    let fields = fields
+                        .iter()
+                        .map(|(off, field)| (format!("{off:#x}"), field.spell()))
+                        .collect();
+                    (class.clone(), fields)
+                })
+                .collect(),
         }
     }
 
@@ -270,7 +288,9 @@ impl ProjectFile {
     /// types checked ([`borer_engine::analysis::utypes::validate`]), so a
     /// hand-edited file that names a type nothing states, or states one in
     /// a form the language does not spell, is refused here with a message
-    /// naming it rather than silently naming no fields.
+    /// naming it rather than silently naming no fields. The fields stated
+    /// of classes are read by offset and checked the same way
+    /// ([`borer_engine::analysis::stated::validate`]).
     ///
     /// # Returns
     ///
@@ -279,8 +299,8 @@ impl ProjectFile {
     /// # Errors
     ///
     /// When a key is not an address or two keys name one, an applied type,
-    /// a prototype or a variable does not parse, or a defined type's
-    /// references do not resolve.
+    /// a prototype, a variable or a class's field does not parse, or a
+    /// defined type's or a field's references do not resolve.
     pub fn to_overlay(&self) -> Result<Overlay, String> {
         let mut applied: BTreeMap<u64, borer_engine::analysis::utypes::TypeExpr> = BTreeMap::new();
         for (va, (_, v)) in keyed("applied", &self.applied)? {
@@ -328,6 +348,16 @@ impl ProjectFile {
                 prototypes.len()
             ));
         }
+        let mut fields: BTreeMap<String, BTreeMap<u64, Field>> = BTreeMap::new();
+        for (class, table) in &self.fields {
+            let class = borer_engine::text::one_line(class);
+            let into = fields.entry(class.clone()).or_default();
+            for (off, (_, text)) in keyed(&format!("fields of {class}"), table)? {
+                let field = Field::parse(text)
+                    .map_err(|e| format!("the field of {class} at {off:#x}: {e}"))?;
+                into.insert(off, field);
+            }
+        }
         let o = Overlay {
             names: by_address("names", &self.names)?.into(),
             comments: by_address("comments", &self.comments)?.into(),
@@ -335,11 +365,13 @@ impl ProjectFile {
             applied: applied.into(),
             prototypes: prototypes.into(),
             vars: vars.into(),
+            fields: fields.into(),
             ..Overlay::default()
         };
         borer_engine::analysis::utypes::validate(&o.types, &o.applied)
-            .map_err(|e| e.to_string())
-            .map(|()| o)
+            .map_err(|e| e.to_string())?;
+        borer_engine::analysis::stated::validate(&o)?;
+        Ok(o)
     }
 
     /// Judges whether the project was saved for the loaded binary.

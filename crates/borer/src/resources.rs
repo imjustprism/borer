@@ -1944,15 +1944,21 @@ impl BorerServer {
                 .values()
                 .filter(|c| c.trim_start().starts_with('?'))
                 .count();
+            let fields: usize = o.fields.values().map(std::collections::BTreeMap::len).sum();
             let empty = o.names.is_empty()
                 && o.comments.is_empty()
                 && o.types.is_empty()
                 && o.applied.is_empty()
                 && o.prototypes.is_empty()
-                && o.vars.is_empty();
+                && o.vars.is_empty()
+                && fields == 0;
+            let stated = match fields {
+                0 => String::new(),
+                n => format!(", {n} stated fields"),
+            };
             (
                 format!(
-                    "{} names, {} comments ({open} open questions), {} types, {} typed globals, {} prototypes",
+                    "{} names, {} comments ({open} open questions), {} types, {} typed globals, {} prototypes{stated}",
                     o.names.len(),
                     o.comments.len(),
                     o.types.len(),

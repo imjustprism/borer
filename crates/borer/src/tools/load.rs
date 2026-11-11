@@ -1,6 +1,7 @@
 //! The tools that load a binary, its PDB or a saved project, and the one
 //! that restarts the server in place.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -117,6 +118,30 @@ pub(crate) fn relative_note(path: &Path, cwd: Option<&Path>) -> String {
             )
         },
     )
+}
+
+/// Words what a project states beyond its names, comments and types, for
+/// the answers of `save_project` and `load_project`.
+///
+/// # Arguments
+///
+/// * `prototypes` - Prototypes stated.
+/// * `vars` - Variables stated, over every function.
+/// * `fields` - Fields stated, over every class.
+///
+/// # Returns
+///
+/// ` + 2 prototypes + 3 variables` when there is either, then
+/// ` + 1 stated fields` when there are any; empty when there is none.
+fn stated_counts(prototypes: usize, vars: usize, fields: usize) -> String {
+    let mut out = String::new();
+    if prototypes + vars > 0 {
+        let _ = write!(out, " + {prototypes} prototypes + {vars} variables");
+    }
+    if fields > 0 {
+        let _ = write!(out, " + {fields} stated fields");
+    }
+    out
 }
 
 #[tool_router(router = load_tools, vis = "pub(crate)")]
@@ -437,12 +462,11 @@ impl BorerServer {
             &read_lock(&self.overlay),
         );
         pf.save(&path, existing).map_err(err_internal)?;
-        let vars: usize = pf.vars.values().map(std::collections::BTreeMap::len).sum();
-        let stated = if pf.prototypes.is_empty() && vars == 0 {
-            String::new()
-        } else {
-            format!(" + {} prototypes + {vars} variables", pf.prototypes.len())
-        };
+        let stated = stated_counts(
+            pf.prototypes.len(),
+            pf.vars.values().map(BTreeMap::len).sum(),
+            pf.fields.values().map(BTreeMap::len).sum(),
+        );
         Ok(format!(
             "saved {} names + {} comments + {} types{stated} to {path}",
             pf.names.len(),
@@ -517,19 +541,11 @@ impl BorerServer {
         }
         let mut loaded = pf.to_overlay().map_err(err_params)?;
         let left_out = borer::project::keep_placeable(&mut loaded, &program);
-        let vars: usize = loaded
-            .vars
-            .values()
-            .map(std::collections::BTreeMap::len)
-            .sum();
-        let stated = if loaded.prototypes.is_empty() && vars == 0 {
-            String::new()
-        } else {
-            format!(
-                " + {} prototypes + {vars} variables",
-                loaded.prototypes.len()
-            )
-        };
+        let stated = stated_counts(
+            loaded.prototypes.len(),
+            loaded.vars.values().map(BTreeMap::len).sum(),
+            loaded.fields.values().map(BTreeMap::len).sum(),
+        );
         let mut said = format!(
             "loaded {} names + {} comments + {} types + {} applied{stated}\n",
             loaded.names.len(),

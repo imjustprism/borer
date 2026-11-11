@@ -50,6 +50,99 @@ impl Field {
             None => self.name.clone(),
         }
     }
+
+    /// Reads a field back from its spelling ([`Field::spell`]), as a
+    /// project file holds it.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The name, or the name, a space and the type.
+    ///
+    /// # Returns
+    ///
+    /// The field; its name is checked with the others its class states
+    /// ([`validate`]).
+    ///
+    /// # Errors
+    ///
+    /// When the type after the name is not one the language spells.
+    pub fn parse(text: &str) -> anyhow::Result<Field> {
+        let (name, ty) = text
+            .split_once(' ')
+            .map_or((text, None), |(name, ty)| (name, Some(ty)));
+        Ok(Field {
+            name: name.to_owned(),
+            ty: ty.map(utypes::parse_type).transpose()?,
+        })
+    }
+}
+
+/// Lists what an overlay states beyond its types and their applications,
+/// as rows of the `types` listing ([`utypes::list_tsv`]).
+///
+/// A `class` row holds the class, `-` and the fields stated of it, each
+/// `off name type` with the type left out where none was stated; then the
+/// prototypes and the variables ([`super::protos::rows`]).
+///
+/// # Arguments
+///
+/// * `overlay` - The overlay.
+///
+/// # Returns
+///
+/// The rows: classes in name order, then functions in address order.
+#[must_use]
+pub fn rows(overlay: &Overlay) -> Vec<String> {
+    let mut out: Vec<String> = overlay
+        .fields
+        .iter()
+        .map(|(class, fields)| {
+            let stated: Vec<String> = fields
+                .iter()
+                .map(|(off, field)| format!("{off:#x} {}", field.spell()))
+                .collect();
+            format!("class\t{class}\t-\t{}", stated.join(", "))
+        })
+        .collect();
+    out.extend(super::protos::rows(&overlay.prototypes, &overlay.vars));
+    out
+}
+
+/// Checks the fields an overlay states of classes, as a project file
+/// hands them over.
+///
+/// Each field is checked by itself ([`sound`]) and each class's fields
+/// together ([`coherent`]), under the caps a statement is held to. Fields
+/// that overlap are refused only where they are stated, against the
+/// loaded binary's pointer width, which a project file does not say.
+///
+/// # Arguments
+///
+/// * `overlay` - The overlay a project file rebuilt.
+///
+/// # Errors
+///
+/// When the overlay states fields of more than [`utypes::TYPES_MAX`]
+/// classes, or a field or a class's fields are refused; the message names
+/// the offender.
+pub fn validate(overlay: &Overlay) -> Result<(), String> {
+    /// The pointer width a project's types are sized by, as its user
+    /// types are ([`utypes::validate`]).
+    const WORD: u64 = 8;
+    if overlay.fields.len() > utypes::TYPES_MAX {
+        return Err(format!(
+            "the project states fields of {} classes; {} are the most",
+            overlay.fields.len(),
+            utypes::TYPES_MAX
+        ));
+    }
+    for (class, fields) in &overlay.fields {
+        for (&off, field) in fields {
+            sound(&overlay.types, off, field, WORD)?;
+        }
+        coherent(overlay, class, fields, &BTreeMap::new())?;
+    }
+    Ok(())
 }
 
 /// Returns the names the overlay states of a class's fields, as the labels

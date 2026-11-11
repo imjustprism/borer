@@ -942,7 +942,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 .map(|f| f.to_lowercase())
                 .filter(|f| !f.is_empty());
             let (offset, limit) = cli_page(args, 4, 50, utypes::TYPES_ROWS_MAX)?;
-            let stated = borer_engine::analysis::protos::rows(&overlay.prototypes, &overlay.vars);
+            let stated = borer_engine::analysis::stated::rows(&overlay);
             let (_, _, table) = utypes::list_tsv(
                 &overlay.types,
                 &overlay.applied,

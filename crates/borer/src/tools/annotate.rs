@@ -663,7 +663,7 @@ impl BorerServer {
             borer_engine::analysis::utypes::TYPES_ROWS_MAX,
         )?;
         let o = read_lock(&self.overlay);
-        let stated = borer_engine::analysis::protos::rows(&o.prototypes, &o.vars);
+        let stated = borer_engine::analysis::stated::rows(&o);
         let (_, total, table) = borer_engine::analysis::utypes::list_tsv(
             &o.types,
             &o.applied,
@@ -682,8 +682,8 @@ impl BorerServer {
         Ok(page.limit.noted(table))
     }
 
-    /// Lists the overlay's entries: names, then findings, then open
-    /// questions, a page at a time.
+    /// Lists the overlay's entries: names, then the fields stated of
+    /// classes, then findings, then open questions, a page at a time.
     ///
     /// A comment opening with a question mark is a hypothesis, not a
     /// finding. Separating the two is what makes the overlay a ledger an
@@ -728,10 +728,18 @@ impl BorerServer {
             .comments
             .iter()
             .partition(|(_, c)| c.trim_start().starts_with('?'));
+        let fields = o.fields.iter().flat_map(|(class, fields)| {
+            fields.iter().map(move |(off, field)| {
+                let at = format!("{class}+{off:#x}");
+                format!("{at:<12} field: {}", field.spell())
+            })
+        });
+        let stated: usize = o.fields.values().map(std::collections::BTreeMap::len).sum();
         let rows: Vec<String> = o
             .names
             .iter()
             .map(|(va, name)| format!("{:<12} name: {name}", format!("{va:#x}")))
+            .chain(fields)
             .chain(
                 settled
                     .iter()
@@ -744,10 +752,14 @@ impl BorerServer {
             .filter(|row| filter.accepts(row))
             .collect();
         let counts = format!(
-            "{} names, {} findings, {} open question(s)",
+            "{} names, {} findings, {} open question(s){}",
             o.names.len(),
             settled.len(),
-            open.len()
+            open.len(),
+            match stated {
+                0 => String::new(),
+                n => format!(", {n} stated field(s)"),
+            }
         );
         let total = rows.len();
         if page.count_only {

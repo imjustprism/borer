@@ -4,6 +4,7 @@ mod cancel;
 mod cli;
 mod contract;
 mod evidence;
+mod fields;
 mod index;
 mod parity;
 mod project;
