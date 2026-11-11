@@ -562,7 +562,7 @@ pub fn plan_class(
     let mut tally = Tally::default();
     for (off, field) in by_offset(s.fields)? {
         let recovered = layout.fields.get(&off);
-        check(p, a, o, s.name, (off, field), recovered, word)?;
+        check((p, a, o), &o.types, s.name, (off, field), recovered)?;
         fields.insert(off, field.clone());
         if before(off) == Some(field) {
             continue;
@@ -626,6 +626,140 @@ pub fn plan_class(
         edit: Edit::Class(s.name.to_owned(), fields),
         what,
     })
+}
+
+/// Holds the fields stated of one class to its code and to each other,
+/// under a set of types: each to the widths the class's code accesses it at
+/// ([`check`]), and the typed ones apart ([`apart`]).
+///
+/// # Arguments
+///
+/// * `(p, a, o)` - The loaded image, its analysis and the overlay.
+/// * `types` - The user types the fields' types are read by.
+/// * `class` - The class.
+/// * `fields` - Everything the class states, by offset.
+/// * `layout` - The class's recovered layout, when it has methods here.
+///
+/// # Errors
+///
+/// When a field is refused or two typed fields share a byte; the message
+/// names the class and the field.
+fn fit(
+    (p, a, o): (&Program, &Analysis, &Overlay),
+    types: &BTreeMap<String, UserType>,
+    class: &str,
+    fields: &BTreeMap<u64, Field>,
+    layout: Option<&classes::ClassLayout>,
+) -> Result<(), String> {
+    for (&off, field) in fields {
+        let recovered = layout.and_then(|layout| layout.fields.get(&off));
+        check((p, a, o), types, class, (off, field), recovered)?;
+    }
+    let word: u64 = if p.is_64 { 8 } else { 4 };
+    apart(types, fields, word).map_err(|why| format!("class {class}: {why}"))
+}
+
+/// Checks that the fields stated with a type still stand once the
+/// overlay's types become `types`.
+///
+/// A type that changes takes the fields stated with it along: a class's
+/// field of that type, and a struct's that holds it by value, change size
+/// with it. Every such field whose size or kind (an array or a struct, or
+/// not: [`aggregate`]) the change moves is held again to what it was
+/// checked against when it was stated: a struct must still lay out
+/// ([`utypes::laid_out`]), and a class's fields must still fit its code
+/// and each other ([`fit`]). A name the overlay did not define changes
+/// nothing: no field was stated with it.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - The overlay, with its types as they are.
+/// * `types` - The types as the change would leave them.
+///
+/// # Errors
+///
+/// When a struct or a class's field would no longer stand; the message
+/// names it and how to restate it first.
+pub fn standing(
+    p: &Program,
+    a: &Analysis,
+    o: &Overlay,
+    types: &BTreeMap<String, UserType>,
+) -> Result<(), String> {
+    if o.types
+        .iter()
+        .all(|(name, was)| types.get(name) == Some(was))
+    {
+        return Ok(());
+    }
+    let word: u64 = if p.is_64 { 8 } else { 4 };
+    let moved = |ty: &TypeExpr| {
+        utypes::width_of(&o.types, ty, word) != utypes::width_of(types, ty, word)
+            || aggregate(&o.types, ty) != aggregate(types, ty)
+    };
+    for (name, ty) in types {
+        let UserType::Struct(held) = ty else {
+            continue;
+        };
+        if o.types.get(name) != Some(ty) || !held.fields.values().any(|f| moved(&f.ty)) {
+            continue;
+        }
+        let fields: Vec<(u64, String, TypeExpr)> = held
+            .fields
+            .iter()
+            .map(|(off, f)| (*off, f.name.clone(), f.ty.clone()))
+            .collect();
+        utypes::laid_out(name, Some(held.size), &fields, types, word).map_err(|why| {
+            format!(
+                "the type cannot change so: struct {name} holds it by value and would no longer lay out ({why}); restate struct {name} first"
+            )
+        })?;
+    }
+    for (class, fields) in &o.fields {
+        if fields.values().any(|f| f.ty.as_ref().is_some_and(&moved)) {
+            let layout = classes::class_layout(p, a, o, class).filter(|l| l.name == *class);
+            fit((p, a, o), types, class, fields, layout.as_ref()).map_err(|why| {
+                format!(
+                    "the type cannot change so: a field stated with it would no longer stand ({why}); restate that field first"
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Returns the overlay's types with one more defined, as a definition is
+/// checked before it is written.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - The overlay.
+/// * `fresh` - The type a call defines and its name, if it defines one.
+///
+/// # Returns
+///
+/// The types the call would leave.
+///
+/// # Errors
+///
+/// When the definition changes a type, and a field stated with it would
+/// no longer stand ([`standing`]).
+pub fn retyped(
+    p: &Program,
+    a: &Analysis,
+    o: &Overlay,
+    fresh: Option<(&str, &UserType)>,
+) -> Result<BTreeMap<String, UserType>, String> {
+    let mut types = BTreeMap::clone(&o.types);
+    if let Some((name, ty)) = fresh {
+        types.insert(name.to_owned(), ty.clone());
+        standing(p, a, o, &types)?;
+    }
+    Ok(types)
 }
 
 /// Says why a type that sizes to nothing cannot be applied or read, and
@@ -908,13 +1042,12 @@ fn sound(
 ///
 /// # Arguments
 ///
-/// * `p` - The loaded image.
-/// * `a` - The analysis.
-/// * `o` - The overlay.
+/// * `(p, a, o)` - The loaded image, its analysis and the overlay.
+/// * `types` - The user types the field's type is read by: the overlay's,
+///   or those a type change would leave.
 /// * `class` - The class the field is stated of.
 /// * `(off, field)` - The field and its byte offset.
 /// * `recovered` - The field as the class's methods use it, if they do.
-/// * `word` - The image's pointer width in bytes (4 or 8).
 ///
 /// # Errors
 ///
@@ -922,18 +1055,17 @@ fn sound(
 /// code accesses the field at: that message names both widths, the
 /// instructions, and the statement without a type that keeps the width.
 fn check(
-    p: &Program,
-    a: &Analysis,
-    o: &Overlay,
+    (p, a, o): (&Program, &Analysis, &Overlay),
+    types: &BTreeMap<String, UserType>,
     class: &str,
     (off, field): (u64, &Field),
     recovered: Option<&FieldUse>,
-    word: u64,
 ) -> Result<(), String> {
-    let (Some(size), Some(ty)) = (sound(&o.types, off, field, word)?, &field.ty) else {
+    let word: u64 = if p.is_64 { 8 } else { 4 };
+    let (Some(size), Some(ty)) = (sound(types, off, field, word)?, &field.ty) else {
         return Ok(());
     };
-    let whole = aggregate(&o.types, ty);
+    let whole = aggregate(types, ty);
     let Some(wide) = recovered
         .filter(|used| {
             let bits = size.saturating_mul(8);

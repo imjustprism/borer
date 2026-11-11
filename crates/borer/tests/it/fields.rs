@@ -622,3 +622,58 @@ fn a_stated_field_is_saved_and_a_struct_merges_at_the_cli_too() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A type a class's field was stated with changes only so far as the
+/// field still stands, on the dry run as when applied.
+///
+/// What the session holds after the calls it took saves and loads back
+/// field for field, at the CLI as over MCP.
+#[test]
+fn a_type_change_keeps_stated_fields_standing_and_the_project_loads_back() {
+    let (mut client, dir, image) = session("retyped");
+    let applied = |client: &mut Client, mut call: serde_json::Value| {
+        call["dry_run"] = false.into();
+        set_type(client, &call)
+    };
+    let narrow = serde_json::json!({"name": "T", "type": "u32"});
+    assert_eq!(applied(&mut client, narrow), "defined typedef T: u32");
+    let stated = serde_json::json!({
+        "name": "class_2800", "fields": ["0x270:m_t:T", "0x274:m_n:u32"]
+    });
+    let said = applied(&mut client, stated);
+    assert!(
+        said.starts_with("stated 2 field(s) of class class_2800: "),
+        "{said}"
+    );
+    let wide = serde_json::json!({"name": "T", "type": "u64"});
+    let refusal = "the type cannot change so: a field stated with it would no longer stand (field m_t at +0x270 of class class_2800 is stated T, 8 byte(s) wide, but the class's code accesses it 4 byte(s) wide at 0x100a (class_2800::ctor_or_dtor), 0x1040 (class_2800::vfunc_0), 0x1080 (class_2800::vfunc_1); state a type of that width, or leave the type out (0x270:m_t) to keep the width the code uses); restate that field first";
+    assert_eq!(set_type(&mut client, &wide), refusal, "on the dry run");
+    assert_eq!(applied(&mut client, wide), refusal);
+    let declared = serde_json::json!({"type": "typedef unsigned long long T;"});
+    assert_eq!(applied(&mut client, declared), refusal, "as C too");
+    let signed = serde_json::json!({"name": "T", "type": "i32"});
+    assert_eq!(applied(&mut client, signed), "defined typedef T: i32");
+    let before = rows(&mut client, "class_2800");
+    let project = dir.join("kept.json").to_string_lossy().into_owned();
+    let path = serde_json::json!({"path": project}).to_string();
+    client.text("save_project", &path);
+    let loaded = client.text("load_project", &path);
+    assert!(
+        loaded.starts_with("loaded 0 names + 0 comments + 1 types + 0 applied + 2 stated fields\n"),
+        "{loaded}"
+    );
+    assert_eq!(rows(&mut client, "class_2800"), before);
+    client.finish();
+    let cli = std::process::Command::new(env!("CARGO_BIN_EXE_borer"))
+        .args(["--no-pdb", "set-type", &image, "--arch", "x64"])
+        .args(["--regions", REGIONS, &project, "typedef", "T", "u64"])
+        .output()
+        .expect("spawn borer");
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&cli.stdout),
+        String::from_utf8_lossy(&cli.stderr)
+    );
+    assert!(said.contains(refusal), "{said}");
+    std::fs::remove_dir_all(&dir).ok();
+}

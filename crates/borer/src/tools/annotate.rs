@@ -63,6 +63,13 @@ impl BorerServer {
             }
             borer_engine::analysis::utypes::validate(&types, &o.applied)
                 .map_err(|e| e.to_string())?;
+            if declared
+                .types
+                .iter()
+                .any(|(name, ..)| o.types.contains_key(name))
+            {
+                stated::standing(p, &self.analysis_or_empty(), &o, &types)?;
+            }
             let lines = borer_engine::analysis::cdecl::describe(&declared);
             let mut out = format!(
                 "{} {} type(s) from C, laid out for {}:\n",
@@ -586,11 +593,9 @@ impl BorerServer {
                 }
                 None => None,
             };
-            let mut types = o.types.clone();
             let fresh = fielded.as_ref().and_then(stated::Plan::defined);
-            if let Some((n, ty)) = fresh.or(defined.as_ref().map(|(n, ty)| (n.as_str(), ty))) {
-                types.insert(n.to_owned(), ty.clone());
-            }
+            let fresh = fresh.or(defined.as_ref().map(|(n, ty)| (n.as_str(), ty)));
+            let types = stated::retyped(p, a, o, fresh)?;
             let applied = applied
                 .map(|(va, ty)| {
                     borer_engine::analysis::utypes::width_of(&types, &ty, word).ok_or_else(|| {

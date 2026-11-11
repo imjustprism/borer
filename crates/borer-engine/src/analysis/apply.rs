@@ -124,8 +124,9 @@ impl Plan {
 /// fields the `set_type` call a plan names would state instead of
 /// defining the struct ([`super::stated::plan`]); when the spec is refused,
 /// the register is no parameter at the entry, no field has a width, the
-/// struct does not build, or the prototype cannot be read or holds no such
-/// parameter.
+/// struct does not build or takes the place of a type whose stated fields
+/// would no longer stand ([`super::stated::standing`]), or the prototype
+/// cannot be read or holds no such parameter.
 pub fn from_pointer(
     p: &Program,
     a: &Analysis,
@@ -185,6 +186,7 @@ pub fn from_pointer(
     }
     let word: u64 = if p.is_64 { 8 } else { 4 };
     let ty = build_struct(name, None, &stated, &o.types, word).map_err(|e| e.to_string())?;
+    super::stated::retyped(p, a, o, Some((name, &ty)))?;
     let proto = typed(p, a, o, found.entry, param, name)?;
     check_room(o, 1)?;
     Ok(Plan {
@@ -215,7 +217,9 @@ pub fn from_pointer(
 ///
 /// # Errors
 ///
-/// When no field has a width, or the struct does not build.
+/// When no field has a width, or the struct does not build or takes the
+/// place of a type whose stated fields would no longer stand
+/// ([`super::stated::standing`]).
 pub fn from_class(
     p: &Program,
     a: &Analysis,
@@ -232,6 +236,7 @@ pub fn from_class(
     }
     let word: u64 = if p.is_64 { 8 } else { 4 };
     let ty = build_struct(name, None, &stated, &o.types, word).map_err(|e| e.to_string())?;
+    super::stated::retyped(p, a, o, Some((name, &ty)))?;
     let mut prototypes: Vec<(u64, Proto)> = Vec::new();
     for &entry in layout.methods.iter().take(super::classes::METHODS_MAX) {
         match typed(p, a, o, entry, 0, name) {

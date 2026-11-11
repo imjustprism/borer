@@ -1074,7 +1074,7 @@ fn defined(
     overlay: &mut Overlay,
 ) -> anyhow::Result<String> {
     let word: u64 = if s.program.is_64 { 8 } else { 4 };
-    match kind {
+    let (name, built) = match kind {
         "struct" => {
             let name = arg(args, 4, "set-type struct needs a name")?;
             let replace = args.get(5).is_some_and(|w| w == "replace");
@@ -1104,9 +1104,10 @@ fn defined(
             let a = s.analysis_or_empty();
             let plan =
                 stated::plan(&s.program, &a, overlay, &statement).map_err(anyhow::Error::msg)?;
+            stated::retyped(&s.program, &a, overlay, plan.defined()).map_err(anyhow::Error::msg)?;
             let say = plan.done();
             plan.apply(overlay);
-            Ok(say)
+            return Ok(say);
         }
         "enum" => {
             let name = arg(args, 4, "set-type enum needs a name")?;
@@ -1128,9 +1129,7 @@ fn defined(
             }
             let built =
                 utypes::build_enum(name, size.unwrap_or(4), &stated).map_err(anyhow::Error::msg)?;
-            let say = format!("defined {}", built.describe(name));
-            overlay.types.insert(name.to_owned(), built);
-            Ok(say)
+            (name, built)
         }
         "typedef" => {
             let name = arg(args, 4, "set-type typedef needs a name")?;
@@ -1138,15 +1137,25 @@ fn defined(
             let ty = utypes::parse_type(spelled).map_err(anyhow::Error::msg)?;
             let built =
                 utypes::build_alias(name, &ty, &overlay.types, word).map_err(anyhow::Error::msg)?;
-            let say = format!("defined {}", built.describe(name));
-            overlay.types.insert(name.to_owned(), built);
-            Ok(say)
+            (name, built)
         }
         other => bail!(
             "set-type takes struct, enum, typedef or apply, not {}",
             one_line(other)
         ),
+    };
+    if overlay.types.contains_key(name) {
+        stated::retyped(
+            &s.program,
+            &s.analysis_or_empty(),
+            overlay,
+            Some((name, &built)),
+        )
+        .map_err(anyhow::Error::msg)?;
     }
+    let say = format!("defined {}", built.describe(name));
+    overlay.types.insert(name.to_owned(), built);
+    Ok(say)
 }
 
 /// Applies a type at a data global in a project's overlay, as `set-type

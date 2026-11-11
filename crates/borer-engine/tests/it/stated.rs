@@ -12,7 +12,7 @@ use borer_engine::analysis::apply::from_pointer;
 use borer_engine::analysis::classes::{class_layout, render_layout};
 use borer_engine::analysis::decompile::decompile_named;
 use borer_engine::analysis::stated::{
-    Field, Mode, Statement, object_class, plan, plan_at, plan_class, undefined,
+    Field, Mode, Statement, object_class, plan, plan_at, plan_class, retyped, undefined, validate,
 };
 use borer_engine::analysis::utypes::{UserType, build_enum, list_tsv, parse_type};
 use borer_engine::analysis::{Analysis, EnumSource, Overlay};
@@ -1070,6 +1070,60 @@ fn an_undefined_type_named_after_a_class_says_why_it_is_no_struct() {
             said(ty, analysis),
             format!("the type {ty} names nothing defined; define it first")
         );
+    }
+}
+
+/// A type that fields were stated with changes only so far as they still
+/// stand.
+///
+/// A class's field keeps a size its code reads and stays clear of its
+/// neighbour, and a struct that holds the type by value still lays out.
+#[test]
+fn a_type_change_that_would_break_a_stated_field_is_refused() {
+    let p = two_classes();
+    let a = Analysis::compute(&p);
+    let alias = |ty: &str| UserType::Alias(parse_type(ty).expect("a type the language spells"));
+    let mut o = Overlay::default();
+    o.types.insert("T".to_owned(), alias("u32"));
+    let inner = [(0, "a", Some("u32"))];
+    let (_, with_inner) = state((&p, &a), &o, "Inner", &inner, Mode::Merge).expect("defines");
+    let outer = [(0, "held", Some("Inner")), (4, "x", Some("u32"))];
+    let (_, with_outer) =
+        state((&p, &a), &with_inner, "Outer", &outer, Mode::Merge).expect("defines");
+    let stated = [
+        (0x270, "m_t", Some("T")),
+        (0x274, "m_n", Some("u32")),
+        (0x10, "m_v", Some("Inner")),
+        (0x14, "m_w", Some("u32")),
+    ];
+    let (_, o) = state((&p, &a), &with_outer, CLASS, &stated, Mode::Merge).expect("states");
+    assert_eq!(
+        retyped(&p, &a, &o, Some(("T", &alias("u64")))).expect_err("eight bytes at a dword"),
+        "the type cannot change so: a field stated with it would no longer stand (field m_t at +0x270 of class class_2800 is stated T, 8 byte(s) wide, but the class's code accesses it 4 byte(s) wide at 0x100a (class_2800::ctor_or_dtor), 0x1040 (class_2800::vfunc_0), 0x1080 (class_2800::vfunc_1); state a type of that width, or leave the type out (0x270:m_t) to keep the width the code uses); restate that field first"
+    );
+    let grown = [(0, "a", Some("u32")), (4, "b", Some("u32"))];
+    let (_, redefined) = state((&p, &a), &o, "Inner", &grown, Mode::Replace).expect("plans");
+    let wide = redefined.types.get("Inner").expect("defined");
+    assert_eq!(
+        retyped(&p, &a, &o, Some(("Inner", wide)))
+            .expect_err("Outer holds Inner by value ahead of another field"),
+        "the type cannot change so: struct Outer holds it by value and would no longer lay out (field x at 0x4 overlaps held at 0x0); restate struct Outer first"
+    );
+    let mut loose = o.clone();
+    loose.types.remove("Outer");
+    assert_eq!(
+        retyped(&p, &a, &loose, Some(("Inner", wide))).expect_err("m_v would run into m_w"),
+        "the type cannot change so: a field stated with it would no longer stand (class class_2800: field m_w at 0x14 overlaps m_v, which ends at 0x18); restate that field first"
+    );
+    for (name, ty) in [
+        ("T", alias("i32")),
+        ("Fresh", alias("u64")),
+        ("T", alias("f32")),
+    ] {
+        let types = retyped(&p, &a, &o, Some((name, &ty))).expect("the fields still stand");
+        let mut after = o.clone();
+        after.types = types.into();
+        assert_eq!(validate(&after), Ok(()), "{name} as {ty:?}");
     }
 }
 
