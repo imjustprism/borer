@@ -339,7 +339,7 @@ impl BorerServer {
         let program = self.loaded();
         let overlay = self.overlay();
         self.with_live(|s| {
-            let target = self.live_addr(s, &spec.address)?;
+            let target = self.live_addr(s.tls_block, &s.rebase, &spec.address)?;
             let modules = s.process.modules();
             let to_base = |m: &borer_engine::live::Module| Base {
                 name: m.name.clone(),

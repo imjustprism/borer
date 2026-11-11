@@ -367,6 +367,41 @@ impl Rebase {
     }
 }
 
+/// Moves an address an agent gave, already resolved in the file, into the
+/// process.
+///
+/// A name is an address of the file, so it needs the image mapped in the
+/// process. A number in the image's static range moves with the image,
+/// and any other is a process address as it stands, mapped or not. The
+/// text is a number when it reads as the address it resolved to
+/// ([`crate::analysis::parse_addr`]): a function named `add` resolves to
+/// its entry and not to `0xadd`, so it is a name. A name that sits at the
+/// very number it spells reads as that number, since resolving does not
+/// say which of the two matched and both are that one address of the file.
+///
+/// # Arguments
+///
+/// * `rebase` - Where the image sits in the process, or why it does not.
+/// * `text` - The address or name as given.
+/// * `va` - What it resolved to in the file ([`crate::analysis::resolve`]).
+///
+/// # Returns
+///
+/// The process address.
+///
+/// # Errors
+///
+/// When the text is a name and the image is not mapped onto the process.
+pub fn process_address(rebase: Result<&Rebase, &str>, text: &str, va: u64) -> Result<u64, String> {
+    match rebase {
+        Ok(r) => Ok(r.live_of(va)),
+        Err(_) if crate::analysis::parse_addr(text) == Some(va) => Ok(va),
+        Err(why) => Err(format!(
+            "{text} is {va:#x} in the loaded binary, which is not mapped onto the process ({why}), so it has no live address"
+        )),
+    }
+}
+
 /// Finds a thread's block of the image's thread-local storage.
 ///
 /// The thread's TEB holds the TLS array (at `0x58` on x64), the module's
@@ -1506,6 +1541,34 @@ mod tests {
         assert_eq!(r.to_live(0x1_4010_0000), None);
         assert_eq!(r.live_of(0x7ff6_0000_1234), 0x7ff6_0000_1234);
         assert_eq!(r.live_of(0x1_4000_1234), 0x7ff6_0000_1234);
+    }
+
+    /// A resolved address moves into the process as a name or as a number.
+    ///
+    /// A name and a number of the image both move with a mapped image, and
+    /// a number outside it stays; with no image mapped a number is a
+    /// process address as it stands and a name is refused, `add` included,
+    /// which also reads as `0xadd`.
+    #[test]
+    fn a_resolved_address_moves_as_a_name_or_a_number() {
+        let r = Rebase {
+            static_base: 0x40_0000,
+            static_end: 0x50_0000,
+            live_base: 0x7ff6_0000_0000,
+        };
+        let entry = 0x40_1000;
+        let mapped = |text, va| process_address(Ok(&r), text, va);
+        assert_eq!(mapped("add", entry), Ok(0x7ff6_0000_1000));
+        assert_eq!(mapped("0x401000", entry), Ok(0x7ff6_0000_1000));
+        assert_eq!(mapped("add", 0xadd), Ok(0xadd));
+        let unmapped = |text, va| process_address(Err("no module"), text, va);
+        assert_eq!(unmapped("0x401000", entry), Ok(entry));
+        assert_eq!(unmapped("add", 0xadd), Ok(0xadd));
+        assert_eq!(unmapped("4096", 0x1000), Ok(0x1000));
+        assert_eq!(
+            unmapped("add", entry),
+            Err("add is 0x401000 in the loaded binary, which is not mapped onto the process (no module), so it has no live address".to_owned())
+        );
     }
 
     /// A pointer into the image is named as the file's reader names it.

@@ -280,20 +280,34 @@ impl BorerServer {
     /// even inside the image's static range (a heap the process placed
     /// there).
     ///
-    /// A singleton the analysis placed in thread-local storage has no
-    /// static address: its slot is at the offset in the thread's block.
+    /// The text is read as every static tool reads an address
+    /// ([`Self::addr`]): `0x` text is a number, anything else a name first
+    /// and a number only when no name matches. The number reading came
+    /// first here, so a function named `add` or `dead` was read at `0xadd`
+    /// or `0xdead`. A singleton the analysis placed in thread-local
+    /// storage has no static address: its slot is at the offset in the
+    /// thread's block.
     ///
     /// # Arguments
     ///
-    /// * `session` - The attached process.
+    /// * `tls_block` - The main thread's block of the image's thread-local
+    ///   storage in the process ([`LiveSession::tls_block`]).
+    /// * `rebase` - Where the loaded binary sits in the process, or why it
+    ///   is not mapped there ([`LiveSession::rebase`]).
     /// * `text` - The argument as the agent passed it.
     ///
     /// # Errors
     ///
-    /// When the text is neither an address nor a known name.
-    pub(crate) fn live_addr(&self, session: &LiveSession, text: &str) -> Result<u64, String> {
+    /// When the text is neither an address nor a known name, names several
+    /// addresses, or names one of a binary the process does not hold.
+    pub(crate) fn live_addr(
+        &self,
+        tls_block: Option<u64>,
+        rebase: &Result<Rebase, String>,
+        text: &str,
+    ) -> Result<u64, String> {
         let program = self.loaded();
-        if let (Some(_), Some(block)) = (&program, session.tls_block)
+        if let (Some(_), Some(block)) = (&program, tls_block)
             && let Some(class) = text.trim().to_lowercase().strip_suffix("::instance")
             && let Ok(a) = self.ensure_analysis()
             && let Some((off, _)) = a
@@ -311,19 +325,13 @@ impl BorerServer {
                 format!("{text}: after {LIVE_PREFIX} comes a number (0x-hex or decimal)")
             });
         }
-        if let Some(va) = parse_addr(text) {
-            return Ok(session.rebase.as_ref().map_or(va, |r| r.live_of(va)));
-        }
         let Some(p) = program else {
-            return Err(format!(
-                "{text} is not an address, and no binary is loaded to look the name up in"
-            ));
+            return parse_addr(text).ok_or_else(|| {
+                format!("{text} is not an address, and no binary is loaded to look the name up in")
+            });
         };
         let va = self.addr(&p, text)?;
-        let r = session.rebase.as_ref().map_err(|why| {
-            format!("{text} is {va:#x} in the loaded binary, which is not mapped onto the process ({why}), so it has no live address")
-        })?;
-        Ok(r.live_of(va))
+        live::process_address(rebase.as_ref().map_err(String::as_str), text, va)
     }
 
     /// Follows a singleton's slot to its object: `Class::instance` names
@@ -575,7 +583,7 @@ impl BorerServer {
         let program = self.loaded();
         let overlay = self.overlay();
         self.with_live(|s| {
-            let va = self.live_addr(s, &address)?;
+            let va = self.live_addr(s.tls_block, &s.rebase, &address)?;
             let word = s.word;
             let values = live::read_values(&s.process, va, kind, n, word)?;
             let rebase = s.rebase.as_ref().ok().copied();
@@ -646,7 +654,7 @@ impl BorerServer {
         self.with_analysis(Feature::Decompile, |p, a, o| {
             self.with_live(|s| {
                 let r = s.mapped()?;
-                let va = self.live_addr(s, &address)?;
+                let va = self.live_addr(s.tls_block, &s.rebase, &address)?;
                 let (va, via) = Self::through_singleton(s, &address, va, s.word)?;
                 let text = live::object(&s.process, p, a, o, &r, va, class.as_deref())?;
                 Ok(format!("{via}{text}"))
@@ -767,7 +775,7 @@ impl BorerServer {
                 }
                 return Ok(out);
             };
-            let va = self.live_addr(s, &address)?;
+            let va = self.live_addr(s.tls_block, &s.rebase, &address)?;
             let analysis = match (&program, &class) {
                 (Some(_), Some(_)) => Some(self.ensure_analysis()?),
                 (Some(_), None) if s.rebase.is_ok() => self.ensure_analysis().ok(),
@@ -1010,6 +1018,62 @@ mod tests {
         assert!(by_copy.is_ok(), "{by_copy:?}");
         assert!(by_change.is_err(), "another file's bytes");
         assert!(by_share.is_err(), "a share is never opened");
+    }
+
+    /// A live address that is a name is read as the name, whatever number
+    /// it also spells.
+    ///
+    /// `live_read`, `live_object`, `live_watch` and `live_scan`'s path all
+    /// resolve their address here. The number reading came before the
+    /// lookup, so `add`, a function, and `dead`, an overlay name, were read
+    /// at `0xadd` and `0xdead`, where every static tool reads the name.
+    ///
+    /// # Panics
+    ///
+    /// When a name resolves to the number it spells, a number or a `live:`
+    /// address is read as a name, or a name of an unmapped binary resolves.
+    #[test]
+    fn a_live_address_that_is_a_name_resolves_to_the_name() {
+        use borer_engine::live::Rebase;
+        use borer_engine::program::{Arch, Program, Section, Symbol, SymbolKind};
+        let text = Section::mapped(".text", 0x40_1000, 0, 0x100, false, true);
+        let mut program = Program::raw(
+            vec![0xc3; 0x100],
+            Arch::X86_64,
+            0x40_0000,
+            Some(0x40_1000),
+            vec![text],
+        );
+        program.symbols = vec![Symbol {
+            name: "add".to_owned(),
+            addr: 0x40_1010,
+            kind: SymbolKind::Local,
+        }];
+        let server = crate::testing::server_with(program);
+        crate::state::write_lock(&server.overlay)
+            .names
+            .insert(0x40_1020, "dead".to_owned());
+        let mapped = Ok(Rebase {
+            static_base: 0x40_0000,
+            static_end: 0x50_0000,
+            live_base: 0x7ff6_0000_0000,
+        });
+        let live = |text: &str| server.live_addr(None, &mapped, text);
+        assert_eq!(live("add"), Ok(0x7ff6_0000_1010));
+        assert_eq!(live("dead"), Ok(0x7ff6_0000_1020));
+        assert_eq!(live("0xadd"), Ok(0xadd));
+        assert_eq!(live("beef"), Ok(0xbeef), "no name spells it");
+        assert_eq!(live("0x401010"), Ok(0x7ff6_0000_1010));
+        assert_eq!(live("live:0x401010"), Ok(0x40_1010));
+        let unmapped = Err("no module of the process is named x.exe".to_owned());
+        assert_eq!(server.live_addr(None, &unmapped, "0xdead"), Ok(0xdead));
+        let refused = server
+            .live_addr(None, &unmapped, "dead")
+            .expect_err("a name of a binary the process does not hold");
+        assert!(
+            refused.starts_with("dead is 0x401020 in the loaded binary, which is not mapped"),
+            "{refused}"
+        );
     }
 
     /// Every live refusal is invalid params, as a static one is, so one code
