@@ -503,7 +503,9 @@ fn structure(
 /// Each stated field takes its offset among the fields stated of the
 /// class before, all of which stay under [`Mode::Merge`]; the layout the
 /// class's methods show is not touched, so a field no statement names
-/// stays as recovered.
+/// stays as recovered. A field whose statement a replacing one drops goes
+/// by the name the class's code gives it again, so the names are checked
+/// against the class's labels with its statements taken away.
 ///
 /// # Arguments
 ///
@@ -573,8 +575,6 @@ pub fn plan_class(
             .lines
             .push(format!("+{off:#x} {was} -> {}{width}", field.spell()));
     }
-    coherent(o, s.name, &fields, &labels)?;
-    apart(&o.types, &fields, word)?;
     for (off, f) in prior.into_iter().flatten() {
         if !fields.contains_key(off) {
             tally.dropped += 1;
@@ -583,6 +583,17 @@ pub fn plan_class(
                 .push(format!("+{off:#x} {} (dropped)", f.spell()));
         }
     }
+    let bare;
+    let others = if tally.dropped > 0 {
+        let mut unstated = o.clone();
+        unstated.fields.remove(s.name);
+        bare = classes::field_labels(p, a, &unstated, s.name);
+        &bare
+    } else {
+        &labels
+    };
+    coherent(o, s.name, &fields, others)?;
+    apart(&o.types, &fields, word)?;
     let known: BTreeSet<&u64> = layout
         .fields
         .keys()
@@ -908,7 +919,9 @@ fn sites(p: &Program, a: &Analysis, o: &Overlay, class: &str, off: u64) -> Strin
 /// * `o` - The overlay, for the classes stated so far.
 /// * `class` - The class.
 /// * `fields` - Everything the class would state, by offset.
-/// * `labels` - What the class's fields are called now.
+/// * `labels` - What the class's fields are called where the statement
+///   does not name them: by the class's code alone at an offset whose
+///   earlier statement it drops, since that name comes back.
 ///
 /// # Errors
 ///
@@ -934,7 +947,7 @@ fn coherent(
     }
     let mut names: BTreeMap<&str, u64> = labels
         .iter()
-        .filter(|(off, _)| !fields.contains_key(off) && !prior.is_some_and(|p| p.contains_key(off)))
+        .filter(|(off, _)| !fields.contains_key(off))
         .filter_map(|(off, label)| match label {
             FieldLabel::Member(name) => Some((name.as_str(), *off)),
             FieldLabel::ReadBy(_) => None,

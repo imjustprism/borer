@@ -672,11 +672,31 @@ fn a_statement_that_would_not_read_true_is_refused() {
         of_arr(&[(0x10, "size", None)]).expect_err("the asserts name +0x8 size"),
         "size already names +0x8 of class Arr<int>; pick another name for +0x10"
     );
-    let (said, _) = of_arr(&[(0x8, "m_size", None)]).expect("the field itself is renamed");
+    let (said, renamed) = of_arr(&[(0x8, "m_size", None)]).expect("the field itself is renamed");
     assert!(said.contains(": +0x8 size -> m_size (accessed "), "{said}");
     assert!(
         of_arr(&[(0x8, "size", None)]).is_ok(),
         "the name the asserts give a field may be stated of that field"
+    );
+    let over = |fields: &[(u64, &str, Option<&str>)], mode: Mode| {
+        state((&fixture, &analysis), &renamed, "Arr<int>", fields, mode)
+    };
+    assert!(
+        over(&[(0x10, "size", None)], Mode::Merge).is_ok(),
+        "the name is free while the statement that took its place stays"
+    );
+    assert_eq!(
+        over(&[(0x10, "size", None)], Mode::Replace)
+            .expect_err("+0x8 goes by size again once its statement is dropped"),
+        "size already names +0x8 of class Arr<int>; pick another name for +0x10"
+    );
+    assert!(
+        over(
+            &[(0x8, "m_size", None), (0x10, "size", None)],
+            Mode::Replace
+        )
+        .is_ok(),
+        "a replacing statement that restates the field keeps the name free"
     );
     let named = stating(&[(0x18, "m_next", None)]);
     let moved = state(
