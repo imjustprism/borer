@@ -127,7 +127,7 @@ const AT_MEMBER_LOCATION: u64 = 0x38;
 const AT_ENCODING: u64 = 0x3e;
 /// `DW_AT_frame_base`: the base a subprogram's `DW_OP_fbreg` offsets
 /// count from.
-const AT_FRAME_BASE: u64 = 0x70;
+const AT_FRAME_BASE: u64 = 0x40;
 /// `DW_OP_fbreg`, the one location opcode that places a variable in its
 /// function's frame: a signed offset from the frame base.
 const OP_FBREG: u8 = 0x91;
@@ -139,7 +139,7 @@ const OP_REG0: u8 = 0x50;
 /// `DW_OP_reg31`, the last of the one-byte register opcodes.
 const OP_REG_LAST: u8 = 0x6f;
 /// `DW_OP_regx`, naming a register by a `ULEB128` that follows it.
-const OP_REGX: u8 = 0x9e;
+const OP_REGX: u8 = 0x90;
 /// Most locals one function states, whatever its debug information.
 ///
 /// No real function declares more than a few dozen named locals; past this
@@ -1781,7 +1781,7 @@ mod tests {
     /// frame base, variables that state a location, and a lexical block.
     fn locals_abbrev() -> Vec<u8> {
         vec![
-            0x01, 0x2e, 0x01, 0x03, 0x08, 0x11, 0x01, 0x70, 0x09, 0x00, 0x00, 0x02, 0x34, 0x00,
+            0x01, 0x2e, 0x01, 0x03, 0x08, 0x11, 0x01, 0x40, 0x09, 0x00, 0x00, 0x02, 0x34, 0x00,
             0x03, 0x08, 0x02, 0x09, 0x00, 0x00, 0x03, 0x0b, 0x01, 0x00, 0x00, 0x00,
         ]
     }
@@ -1872,7 +1872,7 @@ mod tests {
     #[test]
     fn a_32_bit_frame_pointer_is_ebp() {
         let abbrev: Vec<u8> = vec![
-            0x01, 0x2e, 0x01, 0x03, 0x08, 0x11, 0x01, 0x70, 0x09, 0x00, 0x00, 0x02, 0x34, 0x00,
+            0x01, 0x2e, 0x01, 0x03, 0x08, 0x11, 0x01, 0x40, 0x09, 0x00, 0x00, 0x02, 0x34, 0x00,
             0x03, 0x08, 0x02, 0x09, 0x00, 0x00, 0x00,
         ];
         let mut body: Vec<u8> = Vec::new();

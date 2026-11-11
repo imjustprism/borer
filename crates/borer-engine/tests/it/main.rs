@@ -43,6 +43,7 @@ mod cpuid;
 mod decoded;
 mod decompile;
 mod discovery;
+mod dwarf;
 mod eh;
 mod elf;
 mod emptystr;
