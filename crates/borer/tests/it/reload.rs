@@ -44,9 +44,22 @@ impl Client {
     ///
     /// * `load` - The file the session loads.
     pub(crate) fn start(load: &str) -> Client {
+        Self::start_in(load, &[])
+    }
+
+    /// Starts the server with directories of its own named in its
+    /// environment, initializes the session and loads `load`.
+    ///
+    /// # Arguments
+    ///
+    /// * `load` - The file the session loads.
+    /// * `dirs` - Environment variables and the directory each names, over
+    ///   the output root [`Client::start`] gives the server.
+    pub(crate) fn start_in(load: &str, dirs: &[(&str, &std::path::Path)]) -> Client {
         let exe = env!("CARGO_BIN_EXE_borer");
         let mut child = Command::new(exe)
             .env("BORER_OUTPUT_DIR", std::env::temp_dir())
+            .envs(dirs.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

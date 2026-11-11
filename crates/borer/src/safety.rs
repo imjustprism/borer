@@ -23,7 +23,9 @@ const SCHEMA: &str = "borer.tool-safety.v1";
 pub(crate) enum Effect {
     /// Reads a file at a path the caller names.
     ReadsFiles,
-    /// Writes a file: under the output root, or the symbol cache.
+    /// Writes a file: under the output root, or the symbol cache. The
+    /// decompilation index a read of `borer://index` or `borer://grep`
+    /// builds is borer's own cache of what it derived and is not one.
     WritesFiles,
     /// Connects to a server over the network.
     Network,
@@ -62,7 +64,9 @@ impl Effect {
     const fn meaning(self) -> &'static str {
         match self {
             Self::ReadsFiles => "reads a file at a path the caller names",
-            Self::WritesFiles => "writes a file under the output root or into the symbol cache",
+            Self::WritesFiles => {
+                "writes a file under the output root or into the symbol cache; not counted: the decompilation index a read of borer://index or borer://grep builds in borer's own cache directory"
+            }
             Self::Network => "connects to a server over the network (https only)",
             Self::ReadsProcessMemory => {
                 "reads the memory of another running process (Windows), never writing it"
@@ -216,6 +220,29 @@ mod tests {
         };
         assert_eq!(named(Effect::ReadsProcessMemory), live);
         assert_eq!(named(Effect::RestartsServer), ["reload"]);
+    }
+
+    /// The legend says which write no effect counts: the index a read of
+    /// `borer://index` or `borer://grep` builds in borer's own cache, which
+    /// no tool that reads a resource states as a file it writes.
+    ///
+    /// # Panics
+    ///
+    /// When the legend is silent on the cache.
+    #[test]
+    fn the_legend_names_the_cache_write_no_effect_counts() {
+        let tools = crate::BorerServer::tool_router().list_all();
+        let text = super::manifest(&tools).expect("written");
+        let doc: serde_json::Value = serde_json::from_str(&text).expect("parses");
+        let legend = doc["effects"][Effect::WritesFiles.word()]
+            .as_str()
+            .expect("a meaning");
+        assert!(
+            legend.contains("not counted: the decompilation index")
+                && legend.contains("borer://index")
+                && legend.contains("borer://grep"),
+            "{legend}"
+        );
     }
 
     /// The manifest lists every tool once, in name order, with its hints

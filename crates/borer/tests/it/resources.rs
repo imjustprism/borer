@@ -237,6 +237,62 @@ fn the_session_ledger_lists_what_changed_the_overlay() {
     );
 }
 
+/// Reading `borer://index` and `borer://grep` writes the index into
+/// borer's cache directory and nothing else: no file under the output
+/// root, and nothing the session holds.
+///
+/// That cache is the one write the tools' stated effects leave out, so
+/// this is what stays true of a read that builds it.
+#[test]
+fn reading_the_index_writes_its_cache_and_nothing_else() {
+    let dir = std::env::temp_dir().join(format!("borer_index_read_{}", std::process::id()));
+    let (cache, out) = (dir.join("cache"), dir.join("out"));
+    std::fs::create_dir_all(&out).expect("the output root is creatable");
+    let file = dir.join("a.exe");
+    std::fs::write(&file, tiny_pe()).expect("the fixture is writable");
+    let mut client = Client::start_in(
+        &file.to_string_lossy(),
+        &[("BORER_CACHE_DIR", &cache), ("BORER_OUTPUT_DIR", &out)],
+    );
+    let built = read(&mut client, "borer://index");
+    let again = read(&mut client, "borer://index");
+    let hits = read(&mut client, "borer://grep/return");
+    let session = read(&mut client, "borer://session").expect("answers");
+    client.finish();
+    let names = |at: &std::path::Path| -> Vec<String> {
+        std::fs::read_dir(at)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let (cached, written) = (names(&cache), names(&out));
+    std::fs::remove_dir_all(&dir).ok();
+    let (built, again) = (built.expect("builds"), again.expect("reads"));
+    assert!(built.starts_with("# indexed 1 functions, "), "{built}");
+    assert!(
+        again.starts_with("# already indexed 1 functions, "),
+        "{again}"
+    );
+    assert!(hits.is_ok(), "{hits:?}");
+    assert!(
+        matches!(cached.as_slice(), [one] if one.ends_with(".pcidx")),
+        "{cached:?}"
+    );
+    assert!(written.is_empty(), "under the output root: {written:?}");
+    assert!(
+        session.contains("\n# overlay: 0 names, 0 comments (0 open questions), 0 types, 0 typed globals, 0 prototypes; nothing to save\n"),
+        "{session}"
+    );
+    assert!(
+        session.contains("\n# 1 change this session, the last 1 here, oldest first\n"),
+        "{session}"
+    );
+}
+
 /// A program embedded in a file is listed by `borer://children`, opens
 /// with `load_binary` on `<file>@<offset>` as a program of its own, and
 /// `binary_info` then names the file and offset it came from.
