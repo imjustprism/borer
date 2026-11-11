@@ -40,6 +40,7 @@ use crate::isa::x86::{
     st_register,
 };
 
+use super::arch::X86;
 use super::expr::{
     Cond, Expr, Flags, Key, TLS_BASE, Ty, UnOp, either_width, fold, tls_slot, unary,
 };
@@ -47,7 +48,7 @@ use super::floats::{
     agree, cast_float, convert_float, float_arith, float_of, float_scale_at, float_to_int, float_un,
 };
 use super::helper::{Helper, eval_call};
-use super::lift::{BlockFacts, Env, Pass, exec_block};
+use super::lift::Env;
 use super::mir::Val;
 use super::mir::build::Builder;
 use super::mir::eval::{Inputs, eval as mir_eval};
@@ -58,6 +59,10 @@ use crate::emulate::{Emulator, Run, Stop, fill_byte};
 use crate::fxmap::FxHashSet;
 use crate::num::{from_usize, lo8};
 use crate::program::Program;
+
+mod driver;
+
+pub(super) use driver::{Seeded, run_block, stopped};
 
 /// The general registers compared, as the emulator names them.
 pub(super) const REGS: [(&str, Register); 15] = [
@@ -1193,11 +1198,7 @@ impl Near {
 /// * `instrs` - The block's instructions.
 /// * `regs` - The registers seeded, in seeding order.
 /// * `width` - The register width, 32 or 64.
-fn comparands(
-    instrs: &[Instruction],
-    regs: &[(&str, Register)],
-    width: u8,
-) -> BTreeMap<Register, Near> {
+fn comparands(instrs: &[Instruction], regs: &[(&str, Register)], width: u8) -> BTreeMap<Key, Near> {
     let full = |r: Register| {
         if width == 32 {
             r.full_register32()
@@ -1216,16 +1217,16 @@ fn comparands(
             OpKind::Register => {
                 let r1 = full(i.op1_register());
                 if r0 == r1 {
-                    near.insert(r0, Near::Constant(0));
+                    near.insert(Key::Reg(r0), Near::Constant(0));
                 } else if let (Some(a), Some(b)) = (rank(r0), rank(r1)) {
                     let (first, second) = if a < b { (r0, r1) } else { (r1, r0) };
-                    near.insert(second, Near::Register(Key::Reg(first)));
+                    near.insert(Key::Reg(second), Near::Register(Key::Reg(first)));
                 }
             }
             OpKind::Memory => {}
             _ => {
                 if let Ok(k) = i.try_immediate(1) {
-                    near.insert(r0, Near::Constant(k));
+                    near.insert(Key::Reg(r0), Near::Constant(k));
                 }
             }
         }
@@ -1360,21 +1361,18 @@ impl<'p> Sweep<'p> {
         }
         let mut aligns = instrs.iter().filter(|i| aligns_stack(i));
         let align = aligns.next();
-        let aligned = align.is_some();
         if align.is_some_and(|_| aligns.next().is_some()) {
             return Err("a frame alignment whose slack the seed cannot zero");
         }
-        let mut rng = Rng(self.seed ^ block.start.rotate_left(17) ^ GOLDEN);
-        let _ = rng.next();
-        let fill = rng.next();
         let reps = instrs
             .iter()
             .filter(|i| i.has_rep_prefix() || i.has_repe_prefix() || i.has_repne_prefix())
             .count();
-        let mut emu = self.pristine.clone();
-        emu.set_budget(instrs.len() + 1 + reps * REGION_MAX);
-        emu.set_permissive(true);
-        emu.set_fill(Some(fill));
+        let budget = instrs.len() + 1 + reps * REGION_MAX;
+        let at = (entry, block.start);
+        let mut seeded = Seeded::new(&self.pristine, self.seed, at, self.width, budget);
+        seeded.drawn = 64;
+        seeded.emu.set_permissive(true);
         if let Some(i) = align {
             let Some(to) = i
                 .try_immediate(1)
@@ -1384,104 +1382,41 @@ impl<'p> Sweep<'p> {
             else {
                 return Err("a frame alignment whose slack the seed cannot zero");
             };
-            let slack = self.slack(&instrs, i, to, fill, reps, out)?;
-            let seeded = emu.register("rsp").unwrap_or(0).wrapping_sub(slack);
-            emu.set_register("rsp", seeded);
+            let slack = self.slack(&instrs, i, to, seeded.st.fill, reps, out)?;
+            let back = seeded.st.rsp.wrapping_sub(slack);
+            seeded.emu.set_register("rsp", back);
+            seeded.st.rsp = seeded.emu.register("rsp").unwrap_or(0);
         }
-        let mut st = State {
-            pristine: &self.pristine,
-            fill,
-            regs: BTreeMap::new(),
-            rsp: emu.register("rsp").unwrap_or(0),
-            stack: BTreeMap::new(),
-            width: self.width,
-            temps: BTreeMap::new(),
-            reg_ty: BTreeMap::new(),
-            tls_block: 0,
-            mir: self
-                .mir
-                .then(|| instrs.iter().chain(&jcc).map(Instruction::ip).collect()),
-        };
-        let near = comparands(&instrs, self.regs, self.width);
-        for &(name, reg) in self.regs {
-            let r = rng.next();
-            let v = match near.get(&reg) {
-                Some(n) if r & 3 != 0 => n.seed(&st.regs, r),
-                _ => r,
-            } & low(self.width);
-            emu.set_register(name, v);
-            st.regs.insert(Key::Reg(reg), v);
-        }
+        let named = self.regs.iter().map(|&(name, reg)| (name, Key::Reg(reg)));
+        seeded.registers(named, &comparands(&instrs, self.regs, self.width));
         for &(_, seg) in SEGS
             .iter()
             .filter(|&&(_, s)| !matches!(s, Register::FS | Register::GS))
         {
-            st.regs.insert(Key::Reg(seg), 0);
+            seeded.st.regs.insert(Key::Reg(seg), 0);
         }
-        for word in -STACK_WORDS..STACK_WORDS {
-            let at = st.rsp.wrapping_add_signed(word * 8);
-            for (i, b) in (0u64..).zip(rng.next().to_le_bytes()) {
-                emu.poke(at.wrapping_add(i), b);
-                st.stack.insert(at.wrapping_add(i), b);
-            }
+        seeded.stack();
+        seeded.st.tls_block = seeded.st.resolve_tls();
+        let regs = X86Regs {
+            names: self.regs,
+            written: written_registers(&instrs, self.width),
+        };
+        let aligned = align.is_some();
+        let mut all = instrs;
+        all.extend(jcc);
+        if self.mir {
+            seeded.st.mir = Some(all.iter().map(Instruction::ip).collect());
         }
-        st.tls_block = st.resolve_tls();
-        emu.stop_at(Some(end));
-        let run = emu.run(block.start);
-        match run.stop {
-            Stop::Stopped(at) if at == end => {}
-            Stop::Unmodeled(ref what) => {
-                let kind = what.split(" at 0x").next().unwrap_or(what);
-                *out.unmodeled.entry(kind.to_owned()).or_default() += 1;
-                return Err("an instruction the emulator does not model");
-            }
-            Stop::Fault(_) => return Err("a fault on the emulator"),
-            Stop::Budget => return Err("a repeat count past the regions compared"),
-            _ => return Err("the emulator stopped early"),
-        }
-        let written = written_registers(&instrs, self.width);
-        let mut lifted_instrs = instrs;
-        lifted_instrs.extend(jcc);
-        ctx.probe = Some(Probe::default());
-        let mut env = Env::entry();
-        let lifted = exec_block(
-            ctx,
-            &lifted_instrs,
-            None,
-            &mut env,
-            Pass::Dataflow,
-            None,
-            BlockFacts::default(),
-        );
-        let probe = ctx.probe.take().unwrap_or_default();
-        if lifted.unmodeled > 0 {
-            return Err(
-                "an instruction the lifter leaves as asm, whose result the expressions after it name but do not compute",
-            );
-        }
-        if aligned && env.sp.is_none() {
+        let jcc = jcc.map(|j| Jcc {
+            ip: j.ip(),
+            target: j.near_branch_target(),
+        });
+        let line = (block.start, end);
+        let ran = run_block::<X86, _, _>(seeded, ctx, line, &all, jcc, regs, out)?;
+        if aligned && ran.env.sp.is_none() {
             return Err("a frame alignment whose slack the seed cannot zero");
         }
-        st.temps = probe.temps;
-        Ok(Ran {
-            function: entry,
-            block: block.start,
-            st,
-            emu,
-            stored: run.history.iter().map(|w| w.addr).collect(),
-            regs: X86Regs {
-                names: self.regs,
-                written,
-            },
-            env,
-            effects: probe.effects,
-            branch: jcc
-                .map(|j| Jcc {
-                    ip: j.ip(),
-                    target: j.near_branch_target(),
-                })
-                .zip(lifted.branch.map(|b| b.cond)),
-        })
+        Ok(ran)
     }
 
     /// Measures the slack a block's stack alignment drops, on the machine.
@@ -1527,19 +1462,8 @@ impl<'p> Sweep<'p> {
         emu.set_fill(Some(fill));
         emu.stop_at(Some(align.ip()));
         let start = instrs.first().map_or(align.ip(), Instruction::ip);
-        match emu.run(start).stop {
-            Stop::Stopped(at) if at == align.ip() => {
-                Ok(emu.register("rsp").unwrap_or(0) & to.wrapping_sub(1))
-            }
-            Stop::Unmodeled(ref what) => {
-                let kind = what.split(" at 0x").next().unwrap_or(what);
-                *out.unmodeled.entry(kind.to_owned()).or_default() += 1;
-                Err("an instruction the emulator does not model")
-            }
-            Stop::Fault(_) => Err("a fault on the emulator"),
-            Stop::Budget => Err("a repeat count past the regions compared"),
-            _ => Err("the emulator stopped early"),
-        }
+        stopped(&emu.run(start).stop, align.ip(), out)?;
+        Ok(emu.register("rsp").unwrap_or(0) & to.wrapping_sub(1))
     }
 }
 

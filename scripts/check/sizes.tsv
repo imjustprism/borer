@@ -85,7 +85,6 @@ crates/borer-engine/src/analysis/decompile/vars.rs::plan#1	104
 crates/borer-engine/src/analysis/decompile/vars.rs::read#1	115
 crates/borer-engine/src/analysis/decompile/vector.rs::neon#1	258
 crates/borer-engine/src/analysis/decompile/vector.rs::sse#1	162
-crates/borer-engine/src/analysis/decompile/verify.rs::run#2	133
 crates/borer-engine/src/analysis/decompile/verify.rs::stores#1	118
 crates/borer-engine/src/analysis/decompile/verify_a32.rs::run#1	103
 crates/borer-engine/src/analysis/decompile/verify_a64.rs::run#1	106
