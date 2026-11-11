@@ -57,7 +57,9 @@ impl BorerServer {
     /// request does. A `query` of `borer://script/...` is refused, since a
     /// script that ran scripts could recurse without end, and so is one
     /// saying `dry_run=false` (a layout applied), since a script only
-    /// proposes and `dry_run` here decides what is applied. A failed script
+    /// proposes and `dry_run` here decides what is applied; the URI is
+    /// read as the resource reads it, percent-decoded, so an escaped
+    /// `dry_run%3Dfalse` is refused too. A failed script
     /// still answers what it printed and proposed before its error, and
     /// applies nothing; a proposal the listings could not show, or at an
     /// address no section holds, is skipped and counted.
@@ -97,7 +99,7 @@ impl BorerServer {
                         .to_owned(),
                 );
             }
-            if uri.contains("dry_run=false") {
+            if paging::percent_decode(uri).contains("dry_run=false") {
                 return Err(
                     "a script proposes and applies nothing through query: drop dry_run=false"
                         .to_owned(),
@@ -236,6 +238,43 @@ mod tests {
         assert_eq!(
             overlay.comments.get(&0x1001).map(String::as_str),
             Some("here")
+        );
+    }
+
+    /// A script's `query` applies no layout, however the URI spells
+    /// `dry_run=false`.
+    ///
+    /// The guard read the URI as the script wrote it and the resource reads
+    /// it percent-decoded, so `dry_run%3Dfalse` passed the one and applied
+    /// through the other, with the script's own `dry_run` at its default.
+    ///
+    /// # Panics
+    ///
+    /// When the escaped form is not refused, or the overlay changed.
+    #[test]
+    fn a_script_applies_no_layout_through_an_escaped_query() {
+        use crate::params::ScriptParams;
+        use rmcp::handler::server::wrapper::Parameters;
+        let server = crate::testing::code_server(
+            borer_engine::program::Arch::X86_64,
+            &[
+                0x8b, 0x41, 0x10, // ASM: mov eax, [rcx+0x10]
+                0xc3, // ASM: ret
+            ],
+        );
+        let before = crate::state::read_lock(&server.overlay).fingerprint();
+        let out = server
+            .script(Parameters(ScriptParams {
+                code: r#"print(query("borer://layout/0x1000,apply=Rec,dry_run%3Dfalse"));"#
+                    .to_owned(),
+                dry_run: None,
+            }))
+            .expect("a script answers");
+        assert!(out.contains("applies nothing through query"), "{out}");
+        assert_eq!(
+            crate::state::read_lock(&server.overlay).fingerprint(),
+            before,
+            "{out}"
         );
     }
 

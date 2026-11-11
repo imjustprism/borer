@@ -17,18 +17,45 @@ pub(crate) fn without_evidence(sent: &str) -> &str {
     }
 }
 
-/// A server with a small raw image loaded: 0x100 bytes of `ret` mapped
-/// as `.text` at 0x1000, enough for the tools that read bytes and quick
-/// to analyze.
-pub(crate) fn raw_server() -> crate::BorerServer {
-    use borer_engine::program::{Arch, Program, Section};
-    let text = Section::mapped(".text", 0x1000, 0, 0x100, false, true);
-    let program = Program::raw(vec![0xc3; 0x100], Arch::X86_64, 0, Some(0x1000), vec![text]);
+/// A server with a program loaded, as `load_binary` leaves one that has
+/// no PDB to look for.
+///
+/// # Arguments
+///
+/// * `program` - The program.
+pub(crate) fn server_with(program: borer_engine::program::Program) -> crate::BorerServer {
     crate::BorerServer {
         program: std::sync::Arc::new(std::sync::RwLock::new(Some(std::sync::Arc::new(program)))),
         pdb_applied: std::sync::Arc::new(std::sync::RwLock::new(true)),
         ..crate::BorerServer::default()
     }
+}
+
+/// A server with machine code loaded as a raw image: one executable
+/// section `.text` at 0x1000 holding `code`, entered at its first byte.
+///
+/// # Arguments
+///
+/// * `arch` - The instruction set the code is written in.
+/// * `code` - The section's bytes.
+pub(crate) fn code_server(arch: borer_engine::program::Arch, code: &[u8]) -> crate::BorerServer {
+    use borer_engine::program::{Program, Section};
+    let size = borer_engine::num::from_usize(code.len());
+    let text = Section::mapped(".text", 0x1000, 0, size, false, true);
+    server_with(Program::raw(
+        code.to_vec(),
+        arch,
+        0,
+        Some(0x1000),
+        vec![text],
+    ))
+}
+
+/// A server with a small raw image loaded: 0x100 bytes of `ret` mapped
+/// as `.text` at 0x1000, enough for the tools that read bytes and quick
+/// to analyze.
+pub(crate) fn raw_server() -> crate::BorerServer {
+    code_server(borer_engine::program::Arch::X86_64, &[0xc3; 0x100])
 }
 
 /// The rows of a listing's URI read whole, its page suffixes taken off.
@@ -77,12 +104,5 @@ pub(crate) fn load_raw(
 /// A server with a one-instruction program loaded, for a handler test
 /// that needs an analysis but not a real binary.
 pub(crate) fn tiny_server() -> crate::BorerServer {
-    use borer_engine::program::{Arch, Program, Section};
-    let text = Section::mapped(".text", 0x1000, 0, 1, false, true);
-    let program = Program::raw(vec![0xc3], Arch::X86_64, 0, Some(0x1000), vec![text]);
-    crate::BorerServer {
-        program: std::sync::Arc::new(std::sync::RwLock::new(Some(std::sync::Arc::new(program)))),
-        pdb_applied: std::sync::Arc::new(std::sync::RwLock::new(true)),
-        ..crate::BorerServer::default()
-    }
+    code_server(borer_engine::program::Arch::X86_64, &[0xc3])
 }
