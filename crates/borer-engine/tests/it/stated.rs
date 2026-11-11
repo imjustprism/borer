@@ -8,6 +8,7 @@
     reason = "assertions are the point of a test"
 )]
 
+use borer_engine::analysis::apply::from_pointer;
 use borer_engine::analysis::classes::{class_layout, render_layout};
 use borer_engine::analysis::decompile::decompile_named;
 use borer_engine::analysis::stated::{Field, Mode, Statement, plan, plan_at, plan_class};
@@ -791,6 +792,27 @@ fn a_field_stated_at_a_method_is_stated_of_the_method_s_class() {
             && moved.ends_with("; Renderer is the class of Renderer::draw (0x1040)"),
         "the class a method's own name is qualified by comes first: {moved}"
     );
+}
+
+/// A layout is planned as a struct under any name but a recovered class's.
+///
+/// The call such a plan names would state that class's fields; once a
+/// user struct goes by the name, the call lands in the struct and the plan
+/// stands.
+#[test]
+fn a_layout_plan_takes_no_recovered_class_s_name() {
+    let p = two_classes();
+    let a = Analysis::compute(&p);
+    let mut o = Overlay::default();
+    assert_eq!(
+        from_pointer(&p, &a, &o, "0x1040,rcx", CLASS).expect_err("a class's own name"),
+        "class_2800 is a class borer recovered: set_type states that class's fields under its name, so give the struct another name (apply=<Other>)"
+    );
+    assert!(from_pointer(&p, &a, &o, "0x1040,rcx", "class_2900").is_err());
+    let seen = from_pointer(&p, &a, &o, "0x1040,rcx", "Seen").expect("another name plans");
+    o.types.insert(CLASS.to_owned(), seen.ty);
+    let again = from_pointer(&p, &a, &o, "0x1040,rcx", CLASS);
+    assert!(again.is_ok(), "a user struct of the name: {again:?}");
 }
 
 /// The same statements made in another order leave the same overlay, and

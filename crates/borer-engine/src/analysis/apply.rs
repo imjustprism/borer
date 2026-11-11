@@ -120,9 +120,12 @@ impl Plan {
 ///
 /// # Errors
 ///
-/// When the spec is refused, the register is no parameter at the entry,
-/// no field has a width, the struct does not build, or the prototype
-/// cannot be read or holds no such parameter.
+/// When the name is a class borer recovered and no user struct, whose
+/// fields the `set_type` call a plan names would state instead of
+/// defining the struct ([`super::stated::plan`]); when the spec is refused,
+/// the register is no parameter at the entry, no field has a width, the
+/// struct does not build, or the prototype cannot be read or holds no such
+/// parameter.
 pub fn from_pointer(
     p: &Program,
     a: &Analysis,
@@ -130,6 +133,11 @@ pub fn from_pointer(
     spec: &str,
     name: &str,
 ) -> Result<Plan, String> {
+    if !o.types.contains_key(name) && !super::classes::methods_of(a, o, name).is_empty() {
+        return Err(format!(
+            "{name} is a class borer recovered: set_type states that class's fields under its name, so give the struct another name (apply=<Other>)"
+        ));
+    }
     let found = super::render::layout_fields(p, a, o, spec)?;
     let fname = name_of(a, o, found.entry);
     let param = found.param.ok_or_else(|| {
