@@ -493,6 +493,35 @@ fn a_stated_type_conflicts_only_by_a_size_the_code_never_uses() {
     );
 }
 
+/// An array or a struct is read an element at a time, so it conflicts
+/// only when every access of the field is wider than all of it.
+#[test]
+fn an_array_conflicts_only_when_every_access_is_wider_than_it() {
+    let p = two_classes();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let typed = |off: u64, ty: &'static str| {
+        let fields = [(off, "m_field", Some(ty))];
+        state((&p, &a), &o, CLASS, &fields, Mode::Merge)
+    };
+    for (off, ty, read) in [(0x18, "u8[1]", "4/8"), (0x270, "u8[2]", "4")] {
+        let refused = typed(off, ty).expect_err("every access is wider than the whole array");
+        assert!(
+            refused.contains(&format!("is stated {ty}, "))
+                && refused.contains(&format!(
+                    " byte(s) wide, but the class's code accesses it {read} byte(s) wide"
+                )),
+            "{refused}"
+        );
+    }
+    for (off, ty) in [(0x270, "u8[4]"), (0x10, "char[16]"), (0x18, "u8[6]")] {
+        assert!(
+            typed(off, ty).is_ok(),
+            "{ty} holds an access of {off:#x} whole"
+        );
+    }
+}
+
 /// Replacing, asked for, leaves the class stating the new fields alone
 /// and says which it dropped; the layout its methods show stays, and a
 /// class left stating nothing leaves the overlay.

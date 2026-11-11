@@ -901,9 +901,10 @@ fn sound(
 /// own. A type as wide as an access is accepted whatever else it says (a
 /// pointer for a 64-bit word, a signed for an unsigned, a float for an
 /// integer), and a field accessed at two widths takes either. An array or
-/// a struct is not held to the accesses ([`aggregate`]): it starts at the
-/// offset, and the width its first element is read at says nothing of the
-/// whole.
+/// a struct ([`aggregate`]) starts at the offset and is read an element at
+/// a time, so the width of an access says nothing of the whole: it is
+/// refused only when every access is wider than all of it, which no
+/// element of it can be.
 ///
 /// # Arguments
 ///
@@ -932,11 +933,12 @@ fn check(
     let (Some(size), Some(ty)) = (sound(&o.types, off, field, word)?, &field.ty) else {
         return Ok(());
     };
+    let whole = aggregate(&o.types, ty);
     let Some(wide) = recovered
-        .filter(|_| !aggregate(&o.types, ty))
         .filter(|used| {
             let bits = size.saturating_mul(8);
-            !used.widths.iter().any(|w| u64::from(*w) == bits)
+            let fits = |wide: u64| if whole { wide <= bits } else { wide == bits };
+            !used.widths.iter().any(|w| fits(u64::from(*w)))
         })
         .and_then(accessed)
     else {
