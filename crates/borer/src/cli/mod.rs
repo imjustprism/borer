@@ -2,7 +2,6 @@
 //! query against the same engine the MCP server uses and prints a
 //! context-window-sized answer.
 
-use std::fmt::Write as _;
 use std::sync::Arc;
 
 use anyhow::{Context as _, anyhow, bail};
@@ -953,130 +952,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
             print!("{table}");
         }
-        Query::SetType => {
-            let project = path_arg(args, 2, "set-type needs a project file")?;
-            let word: u64 = if s.program.is_64 { 8 } else { 4 };
-            let (program, sha256, mut overlay) = if std::path::Path::new(project).exists() {
-                let pf = borer::project::ProjectFile::load(project).map_err(anyhow::Error::msg)?;
-                let overlay = pf.to_overlay().map_err(anyhow::Error::msg)?;
-                (pf.program, pf.sha256, overlay)
-            } else {
-                (
-                    s.program.path.display().to_string(),
-                    Some(borer::project::identity(&s.program.bytes)),
-                    Overlay::default(),
-                )
-            };
-            let mut say = String::new();
-            match arg(args, 3, "set-type needs struct, enum, typedef or apply")? {
-                "struct" => {
-                    let name = arg(args, 4, "set-type struct needs a name")?;
-                    let replace = args.get(5).is_some_and(|w| w == "replace");
-                    let mut at = 5 + usize::from(replace);
-                    let size = args
-                        .get(at)
-                        .filter(|a| !a.contains(':'))
-                        .and_then(|a| parse_unsigned(a));
-                    if size.is_some() {
-                        at += 1;
-                    }
-                    let fields = stated_fields(args.get(at..).unwrap_or_default())
-                        .map_err(anyhow::Error::msg)?;
-                    if fields.is_empty() {
-                        bail!(
-                            "struct {} states no fields; give them as off:name[:type]",
-                            one_line(name)
-                        );
-                    }
-                    let mode = stated::Mode::asked(replace);
-                    let statement = stated::Statement {
-                        name,
-                        size,
-                        fields: &fields,
-                        mode,
-                    };
-                    let a = s.analysis_or_empty();
-                    let plan = stated::plan(&s.program, &a, &overlay, &statement)
-                        .map_err(anyhow::Error::msg)?;
-                    say = plan.done();
-                    plan.apply(&mut overlay);
-                }
-                "enum" => {
-                    let name = arg(args, 4, "set-type enum needs a name")?;
-                    let mut at = 5;
-                    let size = args
-                        .get(at)
-                        .filter(|a| !a.contains(':'))
-                        .and_then(|a| parse_unsigned(a));
-                    if size.is_some() {
-                        at += 1;
-                    }
-                    let stated = stated_values(args.get(at..).unwrap_or_default())
-                        .map_err(anyhow::Error::msg)?;
-                    if stated.is_empty() {
-                        bail!(
-                            "enum {} states no values; give them as name:value",
-                            one_line(name)
-                        );
-                    }
-                    let built = utypes::build_enum(name, size.unwrap_or(4), &stated)
-                        .map_err(anyhow::Error::msg)?;
-                    say = format!("defined {}", built.describe(name));
-                    overlay.types.insert(name.to_owned(), built);
-                }
-                "typedef" => {
-                    let name = arg(args, 4, "set-type typedef needs a name")?;
-                    let spelled = arg(args, 5, "set-type typedef needs the type it stands for")?;
-                    let ty = utypes::parse_type(spelled).map_err(anyhow::Error::msg)?;
-                    let built = utypes::build_alias(name, &ty, &overlay.types, word)
-                        .map_err(anyhow::Error::msg)?;
-                    say = format!("defined {}", built.describe(name));
-                    overlay.types.insert(name.to_owned(), built);
-                }
-                "apply" => {
-                    let text = arg(args, 4, "set-type apply needs an address or name")?;
-                    let spelled = arg(args, 5, "set-type apply needs the type to apply")?;
-                    let ty = utypes::parse_type(spelled).map_err(anyhow::Error::msg)?;
-                    let a = s.analysis(Feature::Discover)?;
-                    let va = s.resolve(&a, text)?;
-                    crate::params::must_be_in_a_section(
-                        &s.program,
-                        va,
-                        crate::params::Annotation::Type,
-                    )
-                    .map_err(anyhow::Error::msg)?;
-                    if let Some(f) = a.function_at(va) {
-                        bail!(
-                            "{va:#x} is inside {}; types apply to data globals",
-                            name_of(&a, &s.overlay, f.entry)
-                        );
-                    }
-                    let width = utypes::width_of(&overlay.types, &ty, word).ok_or_else(|| {
-                        let first = "set-type struct or enum first";
-                        anyhow!(stated::undefined(Some(&a), &overlay, &ty, first))
-                    })?;
-                    let renders = if utypes::named_enum(&overlay.types, &ty).is_some() {
-                        "names its values"
-                    } else {
-                        "names its fields"
-                    };
-                    let _ = write!(
-                        say,
-                        "applied {} at {va:#x} ({width} byte(s)); decompile {renders}",
-                        ty.spell()
-                    );
-                    overlay.applied.insert(va, ty);
-                }
-                other => bail!(
-                    "set-type takes struct, enum, typedef or apply, not {}",
-                    one_line(other)
-                ),
-            }
-            borer::project::ProjectFile::from_overlay(&program, sha256, &overlay)
-                .save(project, borer::output::Existing::Replace)
-                .map_err(anyhow::Error::msg)?;
-            println!("{say}; written to {}", short_path(project));
-        }
+        Query::SetType => set_type(args, s)?,
         Query::Verify => {
             let text = args.get(5).is_some_and(|m| m == "text");
             let mir = args.get(5).is_some_and(|m| m == "mir");
@@ -1133,6 +1009,195 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Runs `set-type`: defines a struct, an enum or a typedef in a project
+/// file, states fields of a struct or a class there, or applies a type at
+/// a data global, and writes the project.
+///
+/// # Arguments
+///
+/// * `args` - The command line: `set-type`, the binary, the project, then
+///   what to define or apply.
+/// * `s` - The session over the binary.
+///
+/// # Errors
+///
+/// When the project does not load or save, or what is asked is refused
+/// ([`defined`], [`applied`]).
+fn set_type(args: &[String], s: &Session) -> anyhow::Result<()> {
+    let project = path_arg(args, 2, "set-type needs a project file")?;
+    let (program, sha256, mut overlay) = if std::path::Path::new(project).exists() {
+        let pf = borer::project::ProjectFile::load(project).map_err(anyhow::Error::msg)?;
+        let overlay = pf.to_overlay().map_err(anyhow::Error::msg)?;
+        (pf.program, pf.sha256, overlay)
+    } else {
+        (
+            s.program.path.display().to_string(),
+            Some(borer::project::identity(&s.program.bytes)),
+            Overlay::default(),
+        )
+    };
+    let say = match arg(args, 3, "set-type needs struct, enum, typedef or apply")? {
+        "apply" => applied(args, s, &mut overlay)?,
+        kind => defined(kind, args, s, &mut overlay)?,
+    };
+    borer::project::ProjectFile::from_overlay(&program, sha256, &overlay)
+        .save(project, borer::output::Existing::Replace)
+        .map_err(anyhow::Error::msg)?;
+    println!("{say}; written to {}", short_path(project));
+    Ok(())
+}
+
+/// Defines a struct, an enum or a typedef in a project's overlay, or
+/// states fields of the struct or the class a `struct` names.
+///
+/// # Arguments
+///
+/// * `kind` - `struct`, `enum` or `typedef`.
+/// * `args` - The command line; the type's name is its fifth word.
+/// * `s` - The session over the binary.
+/// * `overlay` - The project's overlay, which takes the type.
+///
+/// # Returns
+///
+/// What was defined or stated, as the answer says it.
+///
+/// # Errors
+///
+/// When the kind is none of the three, a word is missing, or the type or
+/// a field is refused.
+fn defined(
+    kind: &str,
+    args: &[String],
+    s: &Session,
+    overlay: &mut Overlay,
+) -> anyhow::Result<String> {
+    let word: u64 = if s.program.is_64 { 8 } else { 4 };
+    match kind {
+        "struct" => {
+            let name = arg(args, 4, "set-type struct needs a name")?;
+            let replace = args.get(5).is_some_and(|w| w == "replace");
+            let mut at = 5 + usize::from(replace);
+            let size = args
+                .get(at)
+                .filter(|a| !a.contains(':'))
+                .and_then(|a| parse_unsigned(a));
+            if size.is_some() {
+                at += 1;
+            }
+            let fields =
+                stated_fields(args.get(at..).unwrap_or_default()).map_err(anyhow::Error::msg)?;
+            if fields.is_empty() {
+                bail!(
+                    "struct {} states no fields; give them as off:name[:type]",
+                    one_line(name)
+                );
+            }
+            let mode = stated::Mode::asked(replace);
+            let statement = stated::Statement {
+                name,
+                size,
+                fields: &fields,
+                mode,
+            };
+            let a = s.analysis_or_empty();
+            let plan =
+                stated::plan(&s.program, &a, overlay, &statement).map_err(anyhow::Error::msg)?;
+            let say = plan.done();
+            plan.apply(overlay);
+            Ok(say)
+        }
+        "enum" => {
+            let name = arg(args, 4, "set-type enum needs a name")?;
+            let mut at = 5;
+            let size = args
+                .get(at)
+                .filter(|a| !a.contains(':'))
+                .and_then(|a| parse_unsigned(a));
+            if size.is_some() {
+                at += 1;
+            }
+            let stated =
+                stated_values(args.get(at..).unwrap_or_default()).map_err(anyhow::Error::msg)?;
+            if stated.is_empty() {
+                bail!(
+                    "enum {} states no values; give them as name:value",
+                    one_line(name)
+                );
+            }
+            let built =
+                utypes::build_enum(name, size.unwrap_or(4), &stated).map_err(anyhow::Error::msg)?;
+            let say = format!("defined {}", built.describe(name));
+            overlay.types.insert(name.to_owned(), built);
+            Ok(say)
+        }
+        "typedef" => {
+            let name = arg(args, 4, "set-type typedef needs a name")?;
+            let spelled = arg(args, 5, "set-type typedef needs the type it stands for")?;
+            let ty = utypes::parse_type(spelled).map_err(anyhow::Error::msg)?;
+            let built =
+                utypes::build_alias(name, &ty, &overlay.types, word).map_err(anyhow::Error::msg)?;
+            let say = format!("defined {}", built.describe(name));
+            overlay.types.insert(name.to_owned(), built);
+            Ok(say)
+        }
+        other => bail!(
+            "set-type takes struct, enum, typedef or apply, not {}",
+            one_line(other)
+        ),
+    }
+}
+
+/// Applies a type at a data global in a project's overlay, as `set-type
+/// apply` states it.
+///
+/// # Arguments
+///
+/// * `args` - The command line; the address or name is its fifth word and
+///   the type its sixth.
+/// * `s` - The session over the binary.
+/// * `overlay` - The project's overlay, which takes the application.
+///
+/// # Returns
+///
+/// What was applied, as the answer says it.
+///
+/// # Errors
+///
+/// When a word is missing, the type does not parse or names nothing
+/// defined, or the address does not resolve, is in no section or is
+/// inside a function.
+fn applied(args: &[String], s: &Session, overlay: &mut Overlay) -> anyhow::Result<String> {
+    let word: u64 = if s.program.is_64 { 8 } else { 4 };
+    let text = arg(args, 4, "set-type apply needs an address or name")?;
+    let spelled = arg(args, 5, "set-type apply needs the type to apply")?;
+    let ty = utypes::parse_type(spelled).map_err(anyhow::Error::msg)?;
+    let a = s.analysis(Feature::Discover)?;
+    let va = s.resolve(&a, text)?;
+    crate::params::must_be_in_a_section(&s.program, va, crate::params::Annotation::Type)
+        .map_err(anyhow::Error::msg)?;
+    if let Some(f) = a.function_at(va) {
+        bail!(
+            "{va:#x} is inside {}; types apply to data globals",
+            name_of(&a, &s.overlay, f.entry)
+        );
+    }
+    let width = utypes::width_of(&overlay.types, &ty, word).ok_or_else(|| {
+        let first = "set-type struct or enum first";
+        anyhow!(stated::undefined(Some(&a), overlay, &ty, first))
+    })?;
+    let renders = if utypes::named_enum(&overlay.types, &ty).is_some() {
+        "names its values"
+    } else {
+        "names its fields"
+    };
+    let say = format!(
+        "applied {} at {va:#x} ({width} byte(s)); decompile {renders}",
+        ty.spell()
+    );
+    overlay.applied.insert(va, ty);
+    Ok(say)
 }
 
 #[cfg(test)]
