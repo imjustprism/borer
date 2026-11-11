@@ -17,7 +17,7 @@ use super::USAGE;
 use super::args::{arg, command_usage, decompile_args, entry_at};
 use crate::params::Detail;
 use crate::state::read_packs;
-use crate::tools::decompile::window;
+use crate::tools::decompile::{decompile_header, window};
 
 /// The refusal of a command given no binary: what it needs, then its own
 /// usage lines rather than every command's.
@@ -406,12 +406,15 @@ impl Session {
 }
 
 /// Answers `decompile <binary> <address|name> [skeleton|full] [offset]
-/// [limit]`: the function's pseudo-C, paged by line as the `decompile`
-/// tool pages it ([`window`]).
+/// [limit]`: the function's pseudo-C as the `decompile` tool answers it.
 ///
-/// The CLI printed every line, 6,610 of them for one function of a
-/// system program, where the tool shows 300 under a `// showing N of M`
-/// line saying how to read the rest.
+/// It is paged by line as the tool pages it ([`window`]), under the lines
+/// the tool puts below the first ([`decompile_header`]). The CLI printed
+/// every line, 6,610 of them for one function of a system program, where
+/// the tool shows 300 under a `// showing N of M` line saying how to read
+/// the rest. It also wrote a header of its own, the check and the warning
+/// without the `// next:` lines, so a line number `grep` gave, which
+/// counts the tool's lines, named another line here.
 ///
 /// # Arguments
 ///
@@ -445,7 +448,7 @@ pub(super) fn decompiled(args: &[String], s: &Session) -> anyhow::Result<String>
         render::answered_flagged(&s.program, &a, &s.overlay, entry)
     };
     let header = (!raw)
-        .then(|| decompile::checked_header(&s.program, &a, &o, entry))
+        .then(|| decompile_header(&s.program, &a, &o, entry, differs.as_deref()))
         .flatten();
     let text = if raw {
         decompile::decompile_raw(&s.program, &a, &o, entry)
@@ -453,13 +456,6 @@ pub(super) fn decompiled(args: &[String], s: &Session) -> anyhow::Result<String>
         decompile::decompile_named(&s.program, &a, &o, entry)
     }
     .with_context(|| format!("decompilation failed at {entry:#x}"))?;
-    let warn = (!raw)
-        .then(|| decompile::warnings(&s.program, &a, &o, entry, &text, differs.as_deref()))
-        .flatten();
-    let header = match (header, warn) {
-        (Some(h), Some(w)) => Some(format!("{h}\n{w}")),
-        (h, w) => h.or(w),
-    };
     let text = match detail {
         Detail::Skeleton => decompile::skeleton(&text),
         Detail::Full => text,

@@ -19,8 +19,11 @@ use crate::reload::Client;
 use crate::resources::read;
 use crate::without_evidence;
 
-/// The file offset of [`tiny_pe`]'s code, mapped at `0x140001000`.
+/// The file offset of [`tiny_pe`]'s code, mapped at [`ENTRY`].
 const CODE_AT: usize = 0x200;
+
+/// Where [`tiny_pe`]'s code is mapped and entered.
+const ENTRY: &str = "0x140001000";
 
 /// Writes [`tiny_pe`] with `code` over its lone `ret` to a file of this
 /// process's own in the temp directory.
@@ -28,7 +31,7 @@ const CODE_AT: usize = 0x200;
 /// # Arguments
 ///
 /// * `name` - The file's name after the process id.
-/// * `code` - The bytes at the image's entry, `0x140001000`.
+/// * `code` - The bytes at the image's entry, [`ENTRY`].
 ///
 /// # Returns
 ///
@@ -115,6 +118,35 @@ fn a_sidecar_diff_reads_the_same_at_the_cli_and_over_mcp() {
     );
     assert!(
         at_cli.contains(&format!("# added (only in {}):\n", names[1])),
+        "{at_cli}"
+    );
+}
+
+/// `decompile` prints at the CLI the text the `decompile` tool answers,
+/// line for line.
+///
+/// The index `grep` reads stores the tool's text, so a line number it
+/// gives is a line of that text. The CLI left out the `// next:` lines,
+/// so every line under them had another number there.
+#[test]
+fn a_decompilation_reads_the_same_at_the_cli_and_over_mcp() {
+    let file = fixture(
+        "check.exe",
+        &[
+            0x81, 0xf9, 0xcd, 0xab, 0x37, 0x13, // ASM: cmp ecx, 0x1337abcd
+            0x0f, 0x94, 0xc0, // ASM: sete al
+            0x0f, 0xb6, 0xc0, // ASM: movzx eax, al
+            0xc3, // ASM: ret
+        ],
+    );
+    let at_cli = cli(&["decompile", &shown(&file), ENTRY]);
+    let mut client = Client::start(&shown(&file));
+    let over_mcp = client.text("decompile", &format!(r#"{{"address":"{ENTRY}"}}"#));
+    client.finish();
+    std::fs::remove_file(&file).ok();
+    assert_eq!(at_cli, without_evidence(&over_mcp));
+    assert!(
+        at_cli.contains(&format!("\n// next: borer://solve/{ENTRY},a1 ")),
         "{at_cli}"
     );
 }
