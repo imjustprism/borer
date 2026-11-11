@@ -24,6 +24,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::classes::{self, FieldLabel, FieldUse};
+use super::protos::VarKey;
 use super::utypes::{self, TypeExpr, UserStruct, UserType};
 use super::{Analysis, Function, Overlay, bare_name, name_of};
 use crate::program::Program;
@@ -696,9 +697,10 @@ pub fn object_class(a: &Analysis, o: &Overlay, f: &Function) -> Option<String> {
 /// untyped (a constructor's `void *a1`) states the field of the class its
 /// name is qualified by, and the plan says its own text will not print the
 /// name. The field is merged into what the class states ([`plan_class`]),
-/// as stating it by the class's name does. The function's text must print
-/// the field unnamed (`field_0x270`): an offset it does not show is a slip
-/// of the hand there, and is stated by the class's name instead.
+/// as stating it by the class's name does. The function must access the
+/// offset through its own object ([`through`]): an offset it reads through
+/// another pointer is a field of what that points at, and one it does not
+/// touch is a slip of the hand there; both are refused.
 ///
 /// # Arguments
 ///
@@ -716,9 +718,10 @@ pub fn object_class(a: &Analysis, o: &Overlay, f: &Function) -> Option<String> {
 ///
 /// # Errors
 ///
-/// When no function of a class starts at `entry` or its text prints no
-/// unnamed field at the offset, each message saying how to state the field
-/// by its class's name, or the field is refused ([`plan_class`]).
+/// When no function of a class starts at `entry`, or it accesses the
+/// offset through another object or not at all, each message saying how to
+/// state the field by a class's name, or the field is refused
+/// ([`plan_class`]).
 pub fn plan_at(
     p: &Program,
     a: &Analysis,
@@ -729,10 +732,9 @@ pub fn plan_at(
 ) -> Result<Plan, String> {
     let fname = name_of(a, o, entry);
     let f = a.function(entry);
-    let text = super::decompile::decompile_named(p, a, o, entry);
     let own = f.and_then(|f| object_class(a, o, f));
     let this = own.as_ref().filter(|class| {
-        text.as_ref()
+        super::decompile::decompile_named(p, a, o, entry)
             .is_some_and(|text| text.contains(&format!("{class} *this")))
     });
     let hinted = f.and_then(|f| f.param_hints.get(&0));
@@ -746,12 +748,19 @@ pub fn plan_at(
             ));
         }
     };
-    let shown = format!("field_{off:#x}");
-    if !text.is_some_and(|text| super::schema::has_word(&text, &shown)) {
-        return Err(format!(
-            "{fname} ({entry:#x}) names no {shown} in its text, so there is no such field to state there; a field the function does not show is stated by its class, set_type(name={class}, fields=[\"{off:#x}:{}\"])",
-            field.name
-        ));
+    let (bases, on_object) = through(p, a, o, entry, off);
+    if !on_object {
+        return Err(match bases.as_slice() {
+            [] => format!(
+                "{fname} ({entry:#x}) accesses nothing at +{off:#x}, so there is no such field to state there; a field the function does not touch is stated by its class, set_type(name={class}, fields=[\"{off:#x}:{}\"])",
+                field.name
+            ),
+            others => format!(
+                "{fname} ({entry:#x}) accesses +{off:#x} through {}, not through its own object, so it is a field of what that points at and not one to state of {class} there; state it by that object's class or struct, set_type(name=<its class or struct>, fields=[\"{off:#x}:{}\"])",
+                others.join(" and "),
+                field.name
+            ),
+        });
     }
     let fields = [(off, field)];
     let statement = Statement {
@@ -769,6 +778,44 @@ pub fn plan_at(
         )
     });
     Ok(plan)
+}
+
+/// Lists the pointers a function accesses one offset through
+/// ([`classes::field_accesses`]), and tells whether its own object is one.
+///
+/// The object is `this`, else the first parameter, by the name the text
+/// gives it: `a1`, or the name a variable statement or a prototype stated.
+/// A class's layout reads a method's accesses off the same object.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - The overlay.
+/// * `entry` - The function's entry address.
+/// * `off` - The byte offset.
+///
+/// # Returns
+///
+/// Each variable the function dereferences at the offset, as its text
+/// spells it, and whether the function's object is among them.
+fn through(p: &Program, a: &Analysis, o: &Overlay, entry: u64, off: u64) -> (Vec<String>, bool) {
+    let accesses = classes::field_accesses(p, a, o, entry).unwrap_or_default();
+    let vars = o.vars.get(&entry);
+    let named = vars.and_then(|vars| vars.get(&VarKey::Param(0)));
+    let declared = o.prototypes.get(&entry).and_then(|d| d.params.first());
+    let object = |base: &str| {
+        matches!(base, "this" | "a1")
+            || named.is_some_and(|var| var.name == base)
+            || declared.is_some_and(|param| param.name == base)
+    };
+    let bases: Vec<String> = accesses
+        .into_keys()
+        .filter(|(_, at)| *at == off)
+        .map(|(base, _)| base)
+        .collect();
+    let on_object = bases.iter().any(|base| object(base));
+    (bases, on_object)
 }
 
 /// Returns the widths a class's code accesses a field at, as a plan says

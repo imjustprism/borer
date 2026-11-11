@@ -103,6 +103,16 @@ fn two_classes() -> Program {
             put(table + 8 * k, &slot.to_le_bytes());
         }
     }
+    mapped(bytes)
+}
+
+/// Maps the bytes of a test's raw x86-64 image: code at 0x1000, entered
+/// there, and read-only data at 0x2000.
+///
+/// # Arguments
+///
+/// * `bytes` - The image's 0x2000 bytes.
+fn mapped(bytes: Vec<u8>) -> Program {
     Program::raw(
         bytes,
         Arch::X86_64,
@@ -846,8 +856,8 @@ fn a_field_stated_at_a_method_is_stated_of_the_method_s_class() {
     );
     assert_eq!(
         plan_at(&p, &a, &plain, 0x1040, 0x300, stated())
-            .expect_err("the method's text shows no field at 0x300"),
-        "class_2800::vfunc_0 (0x1040) names no field_0x300 in its text, so there is no such field to state there; a field the function does not show is stated by its class, set_type(name=class_2800, fields=[\"0x300:m_currentPipeline\"])"
+            .expect_err("the method accesses nothing at 0x300"),
+        "class_2800::vfunc_0 (0x1040) accesses nothing at +0x300, so there is no such field to state there; a field the function does not touch is stated by its class, set_type(name=class_2800, fields=[\"0x300:m_currentPipeline\"])"
     );
     let mut earlier = stating(&[(0x18, "m_next", None)]);
     let merging = plan_at(&p, &a, &earlier, 0x1080, 0x270, stated()).expect("plans");
@@ -874,6 +884,74 @@ fn a_field_stated_at_a_method_is_stated_of_the_method_s_class() {
         moved,
         "state 1 field(s) of class class_2800: 5 kept, 1 changed, 0 new: +0x270 field_0x270 -> m_currentPipeline u32; Renderer::draw (0x1040) takes its object as class_2800",
         "a method renamed out of its class still prints its object's fields by that class"
+    );
+}
+
+/// A raw x86-64 image of one class whose methods read another object.
+///
+/// `class_2800` (table at 0x2800) has a constructor at 0x1000 and two
+/// methods taking a second pointer in `rdx`: 0x1040 reads 0x30 and 0x34
+/// and writes 0x38 through it, and its own object's 0x270; 0x1080 reads
+/// 0x30 through it and through its own object both.
+fn a_class_reading_another_object() -> Program {
+    let constructor = [
+        0x48, 0x8d, 0x05, 0xf9, 0x17, 0x00, 0x00, // ASM: lea rax, [rip+0x17f9]
+        0x48, 0x89, 0x01, // ASM: mov [rcx], rax
+        0xc3, // ASM: ret
+    ];
+    let other_alone = [
+        0x8b, 0x42, 0x30, // ASM: mov eax, [rdx+0x30]
+        0x03, 0x42, 0x34, // ASM: add eax, [rdx+0x34]
+        0x89, 0x42, 0x38, // ASM: mov [rdx+0x38], eax
+        0x03, 0x81, 0x70, 0x02, 0x00, 0x00, // ASM: add eax, [rcx+0x270]
+        0xc3, // ASM: ret
+    ];
+    let both = [
+        0x8b, 0x42, 0x30, // ASM: mov eax, [rdx+0x30]
+        0x03, 0x41, 0x30, // ASM: add eax, [rcx+0x30]
+        0xc3, // ASM: ret
+    ];
+    let table: Vec<u8> = [0x1040u64, 0x1080, 0, 0x1000]
+        .iter()
+        .flat_map(|slot| slot.to_le_bytes())
+        .collect();
+    let mut bytes = vec![0xccu8; 0x2000];
+    for (va, piece) in [
+        (0x1000, constructor.as_slice()),
+        (0x1040, other_alone.as_slice()),
+        (0x1080, both.as_slice()),
+        (0x2800, table.as_slice()),
+    ] {
+        bytes[va - 0x1000..va - 0x1000 + piece.len()].copy_from_slice(piece);
+    }
+    mapped(bytes)
+}
+
+/// A field a method reads through another pointer alone is not stated of
+/// the method's class there; one it also reads through its own object is.
+#[test]
+fn a_field_read_through_another_object_is_not_the_class_s() {
+    let p = a_class_reading_another_object();
+    let a = Analysis::compute(&p);
+    let plain = Overlay::default();
+    assert_eq!(
+        plan_at(&p, &a, &plain, 0x1040, 0x30, field("m_other", None))
+            .expect_err("0x30 is read through the second pointer alone"),
+        "class_2800::vfunc_0 (0x1040) accesses +0x30 through a2, not through its own object, so it is a field of what that points at and not one to state of class_2800 there; state it by that object's class or struct, set_type(name=<its class or struct>, fields=[\"0x30:m_other\"])"
+    );
+    let own = plan_at(&p, &a, &plain, 0x1040, 0x270, field("m_own", None))
+        .expect("0x270 is read through the object")
+        .would();
+    assert!(
+        own.contains(": +0x270 field_0x270 -> m_own (accessed 4 byte(s) wide); "),
+        "{own}"
+    );
+    let shared = plan_at(&p, &a, &plain, 0x1080, 0x30, field("m_shared", None))
+        .expect("0x30 is read through the object and through the other pointer")
+        .would();
+    assert!(
+        shared.contains(": +0x30 field_0x30 -> m_shared (accessed 4 byte(s) wide); class_2800::vfunc_1 (0x1080) takes its object as class_2800"),
+        "{shared}"
     );
 }
 
