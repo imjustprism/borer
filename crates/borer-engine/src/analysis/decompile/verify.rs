@@ -505,29 +505,37 @@ pub(super) trait Bench: Clone {
     fn run(&mut self, entry: u64) -> Run;
 }
 
-impl Bench for Emulator<'_> {
-    const SP: &'static str = "rsp";
+/// Implements [`Bench`] for a machine by its own methods of the same names.
+macro_rules! bench {
+    ($machine:ty, $sp:literal) => {
+        impl $crate::analysis::decompile::verify::Bench for $machine {
+            const SP: &'static str = $sp;
 
-    fn byte_at(&self, at: u64) -> Option<u8> {
-        Emulator::byte_at(self, at)
-    }
+            fn byte_at(&self, at: u64) -> Option<u8> {
+                <$machine>::byte_at(self, at)
+            }
 
-    fn register(&self, name: &str) -> Option<u64> {
-        Emulator::register(self, name)
-    }
+            fn register(&self, name: &str) -> Option<u64> {
+                <$machine>::register(self, name)
+            }
 
-    fn set_budget(&mut self, budget: usize) {
-        Emulator::set_budget(self, budget);
-    }
+            fn set_budget(&mut self, budget: usize) {
+                <$machine>::set_budget(self, budget);
+            }
 
-    fn stop_at(&mut self, at: Option<u64>) {
-        Emulator::stop_at(self, at);
-    }
+            fn stop_at(&mut self, at: Option<u64>) {
+                <$machine>::stop_at(self, at);
+            }
 
-    fn run(&mut self, entry: u64) -> Run {
-        Emulator::run(self, entry)
-    }
+            fn run(&mut self, entry: u64) -> $crate::emulate::Run {
+                <$machine>::run(self, entry)
+            }
+        }
+    };
 }
+pub(super) use bench;
+
+bench!(Emulator<'_>, "rsp");
 
 /// The state a block starts from, shared by the machine and the
 /// evaluator.

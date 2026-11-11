@@ -27,13 +27,13 @@ use super::expr::{Key, Ty};
 use super::lift::{BlockFacts, Env, Pass};
 use super::lift_a32::{decode_blocks, exec_block_a32};
 use super::verify::{
-    Bench, Fact, GOLDEN, Jcc, Near, Probe, Ran, Read, Rng, STACK_WORDS, State, Verified, in_parts,
+    Fact, GOLDEN, Jcc, Near, Probe, Ran, Read, Rng, STACK_WORDS, State, Verified, bench, in_parts,
     report,
 };
 use super::{Ctx, new_ctx};
 use crate::analysis::{Analysis, Function, Overlay};
+use crate::emulate::Stop;
 use crate::emulate::a32::Machine;
-use crate::emulate::{Run, Stop};
 use crate::fxmap::FxHashSet;
 use crate::isa::a32::{DpKind, Flow, Insn, Op, Operand, Reg, SKIP, SP};
 use crate::program::Program;
@@ -66,29 +66,7 @@ pub(super) const GENERAL: [(&str, u8); 14] = [
     ("lr", 14),
 ];
 
-impl Bench for Machine<'_> {
-    const SP: &'static str = "sp";
-
-    fn byte_at(&self, at: u64) -> Option<u8> {
-        Machine::byte_at(self, at)
-    }
-
-    fn register(&self, name: &str) -> Option<u64> {
-        Machine::register(self, name)
-    }
-
-    fn set_budget(&mut self, budget: usize) {
-        Machine::set_budget(self, budget);
-    }
-
-    fn stop_at(&mut self, at: Option<u64>) {
-        Machine::stop_at(self, at);
-    }
-
-    fn run(&mut self, entry: u64) -> Run {
-        Machine::run(self, entry)
-    }
-}
+bench!(Machine<'_>, "sp");
 
 /// Checks the blocks of some functions of an ARM32 program against the
 /// ARM32 machine.

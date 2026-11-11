@@ -32,13 +32,13 @@ use super::floats::agree;
 use super::lift::{BlockFacts, Env, Pass};
 use super::lift_rv::{decode_blocks, exec_block_rv, float_ty};
 use super::verify::{
-    Bench, Fact, GOLDEN, Jcc, Near, Probe, Ran, Read, Rng, STACK_WORDS, State, Verified,
+    Fact, GOLDEN, Jcc, Near, Probe, Ran, Read, Rng, STACK_WORDS, State, Verified, bench,
     float_bits, in_parts, low, report,
 };
 use super::{Ctx, new_ctx};
 use crate::analysis::{Analysis, Function, Overlay};
+use crate::emulate::Stop;
 use crate::emulate::rv::Machine;
-use crate::emulate::{Run, Stop};
 use crate::fxmap::FxHashSet;
 use crate::isa::rv::{self, Alu, Flow, Fmt, Insn, Op, Reg, SP};
 use crate::program::Program;
@@ -58,29 +58,7 @@ fn general() -> impl Iterator<Item = Reg> {
     (1u8..32).filter(|&n| n != 2).map(Reg::X)
 }
 
-impl Bench for Machine<'_> {
-    const SP: &'static str = "sp";
-
-    fn byte_at(&self, at: u64) -> Option<u8> {
-        Machine::byte_at(self, at)
-    }
-
-    fn register(&self, name: &str) -> Option<u64> {
-        Machine::register(self, name)
-    }
-
-    fn set_budget(&mut self, budget: usize) {
-        Machine::set_budget(self, budget);
-    }
-
-    fn stop_at(&mut self, at: Option<u64>) {
-        Machine::stop_at(self, at);
-    }
-
-    fn run(&mut self, entry: u64) -> Run {
-        Machine::run(self, entry)
-    }
-}
+bench!(Machine<'_>, "sp");
 
 /// Checks the blocks of some functions of a RISC-V program against the
 /// RISC-V machine.
