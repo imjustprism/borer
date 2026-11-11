@@ -12,7 +12,7 @@ use borer_engine::analysis::apply::from_pointer;
 use borer_engine::analysis::classes::{class_layout, methods_of, render_layout};
 use borer_engine::analysis::decompile::decompile_named;
 use borer_engine::analysis::stated::{Field, Mode, Statement, plan, plan_at, plan_class};
-use borer_engine::analysis::utypes::{list_tsv, parse_type};
+use borer_engine::analysis::utypes::{UserType, build_enum, list_tsv, parse_type};
 use borer_engine::analysis::{Analysis, EnumSource, Overlay};
 use borer_engine::program::{Arch, Program, Section};
 
@@ -384,7 +384,7 @@ fn a_plan_names_one_field_and_keeps_every_other() {
 /// accessed at two widths takes either, an array or a struct is not held
 /// to its first element's width, and a size the code never uses is refused
 /// with both widths, the instructions and the statement that keeps the
-/// width.
+/// width; a typedef and an enum are held by the size they stand for.
 #[test]
 fn a_stated_type_conflicts_only_by_a_size_the_code_never_uses() {
     let p = two_classes();
@@ -436,6 +436,41 @@ fn a_stated_type_conflicts_only_by_a_size_the_code_never_uses() {
         typed(u64::MAX - 1, "u32").expect_err("a field that ends past every address"),
         "field m_field's type u32 resolves to no size at 0xfffffffffffffffe"
     );
+    let mut named = o.clone();
+    for (name, stands_for) in [
+        ("Wide", "u64"),
+        ("Wider", "Wide"),
+        ("Label", "char[16]"),
+        ("Pair", "Vec"),
+    ] {
+        let alias = UserType::Alias(parse_type(stands_for).expect("a type the language spells"));
+        named.types.insert(name.to_owned(), alias);
+    }
+    let state_enum = build_enum("State", 8, &[(1, "Run".to_owned())]).expect("an enum");
+    named.types.insert("State".to_owned(), state_enum);
+    let aliased = |off: u64, ty: &'static str| {
+        state(
+            (&p, &a),
+            &named,
+            CLASS,
+            &[(off, "m_field", Some(ty))],
+            Mode::Merge,
+        )
+    };
+    for ty in ["Wide", "Wider", "State"] {
+        let refused =
+            aliased(0x270, ty).expect_err("a name for eight bytes where the code reads four");
+        assert!(
+            refused.contains(&format!(
+                "is stated {ty}, 8 byte(s) wide, but the class's code accesses it 4 byte(s) wide"
+            )),
+            "{refused}"
+        );
+        assert!(aliased(0x18, ty).is_ok(), "{ty} where the code reads eight");
+    }
+    for ty in ["Label", "Pair"] {
+        assert!(aliased(0x10, ty).is_ok(), "{ty} names an array or a struct");
+    }
     let many = [(0x30, "m_field", Some("u64"))];
     let refused = state((&p, &a), &o, "class_2900", &many, Mode::Merge)
         .expect_err("eight instructions read four bytes");

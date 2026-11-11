@@ -778,14 +778,15 @@ fn sound(
 /// of its type against the widths the class's code accesses the offset
 /// at.
 ///
-/// A type conflicts only by its size: a scalar or a pointer as wide as no
-/// access the class's code makes at the offset states a width the code
-/// disproves, and is refused. A type as wide as an access is accepted
-/// whatever else it says (a pointer for a 64-bit word, a signed for an
-/// unsigned, a float for an integer), and a field accessed at two widths
-/// takes either. An array or a struct is not held to the accesses: it
-/// starts at the offset, and the width its first element is read at says
-/// nothing of the whole.
+/// A type conflicts only by its size: a scalar, a pointer or an enum as
+/// wide as no access the class's code makes at the offset states a width
+/// the code disproves, and is refused, under a typedef's name as under its
+/// own. A type as wide as an access is accepted whatever else it says (a
+/// pointer for a 64-bit word, a signed for an unsigned, a float for an
+/// integer), and a field accessed at two widths takes either. An array or
+/// a struct is not held to the accesses ([`aggregate`]): it starts at the
+/// offset, and the width its first element is read at says nothing of the
+/// whole.
 ///
 /// # Arguments
 ///
@@ -815,7 +816,7 @@ fn check(
         return Ok(());
     };
     let Some(wide) = recovered
-        .filter(|_| ty.c_name(word).is_some())
+        .filter(|_| !aggregate(&o.types, ty))
         .filter(|used| {
             let bits = size.saturating_mul(8);
             !used.widths.iter().any(|w| u64::from(*w) == bits)
@@ -831,6 +832,31 @@ fn check(
         sites(p, a, o, class, off),
         field.name
     ))
+}
+
+/// Tells whether a type is an array or a struct, by its own spelling or
+/// through the typedefs that name it: a type no single access reads whole.
+///
+/// # Arguments
+///
+/// * `types` - The user types a name may stand for.
+/// * `ty` - The type.
+///
+/// # Returns
+///
+/// `false` for a scalar, a pointer and an enum, and for a name nothing
+/// defines or a chain of typedefs that loops.
+fn aggregate(types: &BTreeMap<String, UserType>, ty: &TypeExpr) -> bool {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut current = ty;
+    while let TypeExpr::Named(name) = current {
+        match types.get(name).filter(|_| seen.insert(name.as_str())) {
+            Some(UserType::Alias(inner)) => current = inner,
+            Some(UserType::Struct(_)) => return true,
+            Some(UserType::Enum(_)) | None => return false,
+        }
+    }
+    matches!(current, TypeExpr::Array(..))
 }
 
 /// Most instructions a refused type lists before it counts the rest.
