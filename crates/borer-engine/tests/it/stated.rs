@@ -11,7 +11,9 @@
 use borer_engine::analysis::apply::from_pointer;
 use borer_engine::analysis::classes::{class_layout, methods_of, render_layout};
 use borer_engine::analysis::decompile::decompile_named;
-use borer_engine::analysis::stated::{Field, Mode, Statement, plan, plan_at, plan_class};
+use borer_engine::analysis::stated::{
+    Field, Mode, Statement, plan, plan_at, plan_class, undefined,
+};
 use borer_engine::analysis::utypes::{UserType, build_enum, list_tsv, parse_type};
 use borer_engine::analysis::{Analysis, EnumSource, Overlay};
 use borer_engine::program::{Arch, Program, Section};
@@ -902,6 +904,33 @@ fn a_layout_plan_takes_no_recovered_class_s_name() {
     o.types.insert(CLASS.to_owned(), seen.ty);
     let again = from_pointer(&p, &a, &o, "0x1040,rcx", CLASS);
     assert!(again.is_ok(), "a user struct of the name: {again:?}");
+}
+
+/// A type nothing defines is refused with what defines one, and a type
+/// named after a recovered class with why stating fields under that name
+/// defines no struct.
+#[test]
+fn an_undefined_type_named_after_a_class_says_why_it_is_no_struct() {
+    let p = two_classes();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let said = |ty: &str, a: Option<&Analysis>| {
+        let ty = parse_type(ty).expect("a type the language spells");
+        undefined(a, &o, &ty, "define it first")
+    };
+    let of_class = ": class_2800 is a class borer recovered, and fields stated under that name are the class's, not a struct's; define the struct under another name and apply that";
+    for ty in ["class_2800 *", "class_2800[4]", "class_2800"] {
+        assert_eq!(
+            said(ty, Some(&a)),
+            format!("the type {ty} names nothing defined{of_class}")
+        );
+    }
+    for (ty, analysis) in [("Missing *", Some(&a)), ("class_2800 *", None)] {
+        assert_eq!(
+            said(ty, analysis),
+            format!("the type {ty} names nothing defined; define it first")
+        );
+    }
 }
 
 /// The same statements made in another order leave the same overlay, and

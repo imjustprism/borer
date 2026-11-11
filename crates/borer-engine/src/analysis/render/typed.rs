@@ -436,10 +436,7 @@ pub fn typed_tsv(
 ) -> Result<String, String> {
     let word: u64 = if p.is_64 { 8 } else { 4 };
     let size = width_of(&o.types, ty, word).ok_or_else(|| {
-        format!(
-            "the type {} names nothing defined; set_type(name=..., fields=[...]) first",
-            ty.spell()
-        )
+        crate::analysis::stated::undefined(a, o, ty, "set_type(name=..., fields=[...]) first")
     })?;
     let want = size.min(TYPED_BYTES_MAX);
     let bytes = p

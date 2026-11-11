@@ -174,7 +174,7 @@ crates/borer-engine/tests/it/decompile/rounding.rs::a_scalar_lane_move_and_round
 crates/borer-engine/tests/it/elf.rs::elf_bytes#1	254
 crates/borer-engine/tests/it/objc.rs::image#1	182
 crates/borer/src/cli/mod.rs::cli#1	171
-crates/borer/src/cli/mod.rs::query#1	853
+crates/borer/src/cli/mod.rs::query#1	851
 crates/borer/src/index.rs	1581
 crates/borer/src/main.rs::call_tool#1	112
 crates/borer/src/main.rs::listing#1	132
@@ -182,7 +182,7 @@ crates/borer/src/recall.rs::line_delta#1	101
 crates/borer/src/resources.rs::an_argument_naming_nothing_is_an_invalid_params_error#1	115
 crates/borer/src/setup/mod.rs::register_file#1	104
 crates/borer/src/tools/annotate.rs::set_name#1	114
-crates/borer/src/tools/annotate.rs::set_type#1	227
+crates/borer/src/tools/annotate.rs::set_type#1	225
 crates/borer/src/tools/annotate/tests.rs::set_type_defines_applies_and_refuses#1	125
 crates/borer/src/tools/decompile.rs::decompile_batch#1	111
 crates/borer/src/tools/load.rs::load_binary_maps_raw_code_at_a_stated_layout#1	107

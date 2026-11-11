@@ -450,8 +450,9 @@ fn one_field_is_stated_by_class_or_at_a_method_and_the_rest_stays() {
 ///
 /// A type of another size is refused on the dry run with both widths and
 /// the instructions, a type of that size is taken, replacing is asked for,
-/// `var` is a variable before it is a field, and a field at a function of
-/// no class says how to state it by the class's name.
+/// `var` is a variable before it is a field, a field at a function of no
+/// class says how to state it by the class's name, and a type named after
+/// the class says why no struct goes by it.
 #[test]
 fn a_field_keeps_its_width_and_a_conflicting_type_is_refused() {
     let (mut client, dir, _) = session("widths");
@@ -523,6 +524,12 @@ fn a_field_keeps_its_width_and_a_conflicting_type_is_refused() {
         set_type(&mut client, &renamed),
         "dry-run: would name a2 of class_2800::vfunc_1 (0x1080) pipeline; decompile then renders it so. pass dry_run=false to apply.",
         "a variable an agent named so is the variable still"
+    );
+    let pointer = serde_json::json!({"address": "0x2a00", "type": "class_2800 *"});
+    assert_eq!(
+        set_type(&mut client, &pointer),
+        "the type class_2800 * names nothing defined: class_2800 is a class borer recovered, and fields stated under that name are the class's, not a struct's; define the struct under another name and apply that",
+        "stating fields under a class's name defines no struct to apply"
     );
     client.finish();
     std::fs::remove_dir_all(&dir).ok();

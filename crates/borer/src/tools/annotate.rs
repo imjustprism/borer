@@ -593,10 +593,8 @@ impl BorerServer {
             let applied = applied
                 .map(|(va, ty)| {
                     borer_engine::analysis::utypes::width_of(&types, &ty, word).ok_or_else(|| {
-                        format!(
-                            "the type {} names nothing defined; set_type(name=..., fields=[...]) first",
-                            ty.spell()
-                        )
+                        let first = "set_type(name=..., fields=[...]) first";
+                        stated::undefined(Some(a), o, &ty, first)
                     }).map(|w| (va, ty, w))
                 })
                 .transpose()?;

@@ -614,6 +614,42 @@ pub fn plan_class(
     })
 }
 
+/// Says why a type that sizes to nothing cannot be applied or read, and
+/// what to do first.
+///
+/// Stating fields under the name of a class borer recovered states that
+/// class's fields ([`plan`]) and defines no struct, so the advice that
+/// fits any other name would send an agent in a circle there: the message
+/// for such a name says to define the struct under another one.
+///
+/// # Arguments
+///
+/// * `a` - The analysis, when there is one, for the classes.
+/// * `o` - The overlay.
+/// * `ty` - The type.
+/// * `first` - What defines a type, as the caller's front end spells it.
+///
+/// # Returns
+///
+/// That the type names nothing defined, then `first`, or for a class's
+/// name why stating its fields defines no struct.
+#[must_use]
+pub fn undefined(a: Option<&Analysis>, o: &Overlay, ty: &TypeExpr, first: &str) -> String {
+    let mut base = ty;
+    while let TypeExpr::Ptr(inner) | TypeExpr::Array(inner, _) = base {
+        base = inner.as_ref();
+    }
+    if let (Some(a), TypeExpr::Named(name)) = (a, base)
+        && !classes::methods_of(a, o, name).is_empty()
+    {
+        return format!(
+            "the type {} names nothing defined: {name} is a class borer recovered, and fields stated under that name are the class's, not a struct's; define the struct under another name and apply that",
+            ty.spell()
+        );
+    }
+    format!("the type {} names nothing defined; {first}", ty.spell())
+}
+
 /// Returns the class a function's object is of: the class its name is
 /// qualified by, else the class its first parameter is hinted as.
 ///

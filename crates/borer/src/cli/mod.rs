@@ -1052,10 +1052,8 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                         );
                     }
                     let width = utypes::width_of(&overlay.types, &ty, word).ok_or_else(|| {
-                        anyhow!(
-                            "the type {} names nothing defined; set-type struct or enum first",
-                            ty.spell()
-                        )
+                        let first = "set-type struct or enum first";
+                        anyhow!(stated::undefined(Some(&a), &overlay, &ty, first))
                     })?;
                     let renders = if utypes::named_enum(&overlay.types, &ty).is_some() {
                         "names its values"
