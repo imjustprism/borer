@@ -71,10 +71,22 @@ jobs:
       - name: cargo-fuzz
         run: cargo +"$NIGHTLY" install cargo-fuzz --version 0.13.2 --locked
 
+      # The runner image carries a versioned llvm-symbolizer with its clang;
+      # the package index is asked only when it does not, three times, since
+      # a mirror that does not resolve failed this step before any fuzzing.
       - name: llvm-symbolizer
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends llvm
+          if [ ! -x "$ASAN_SYMBOLIZER_PATH" ]; then
+            have=$(ls /usr/bin/llvm-symbolizer-* /usr/lib/llvm-*/bin/llvm-symbolizer 2>/dev/null | sort -V | tail -n 1)
+            if [ -n "$have" ]; then
+              sudo ln -sf "$have" "$ASAN_SYMBOLIZER_PATH"
+            else
+              for attempt in 1 2 3; do
+                sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends llvm && break
+                sleep 30
+              done
+            fi
+          fi
           "$ASAN_SYMBOLIZER_PATH" --version
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
