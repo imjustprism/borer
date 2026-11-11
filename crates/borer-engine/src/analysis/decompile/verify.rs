@@ -53,7 +53,7 @@ use super::mir::build::Builder;
 use super::mir::eval::{Inputs, eval as mir_eval};
 use super::round_to_int::fcvt_float_width;
 use super::{Ctx, new_ctx};
-use crate::analysis::{Analysis, BasicBlock, Function, Overlay};
+use crate::analysis::{Analysis, BasicBlock, Function, Overlay, striped_on};
 use crate::emulate::{Emulator, Run, Stop, fill_byte};
 use crate::fxmap::FxHashSet;
 use crate::num::{from_usize, lo8};
@@ -1005,6 +1005,9 @@ pub fn verify_mir(program: &Program, analysis: &Analysis, entries: &[u64], seed:
 /// Checks some functions in parts, one thread per part, and adds up what
 /// the parts found in the order of `entries`.
 ///
+/// A part that panics fails the whole check ([`striped_on`]): no sum comes
+/// back with a part of the functions left out of it.
+///
 /// # Arguments
 ///
 /// * `entries` - The functions to check.
@@ -1013,24 +1016,11 @@ pub(super) fn in_parts(entries: &[u64], some: impl Fn(&[u64]) -> Verified + Sync
     let threads = std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
         .min(entries.len().div_ceil(PAR_MIN).max(1));
-    if threads <= 1 {
-        return some(entries);
-    }
-    let chunk = entries.len().div_ceil(threads);
-    let some = &some;
-    let here = crate::analysis::reads::Handle::here();
-    let parts: Vec<Verified> = std::thread::scope(|scope| {
-        let handles: Vec<_> = entries
-            .chunks(chunk)
-            .map(|part| {
-                let here = here.clone();
-                scope.spawn(move || here.enter(|| some(part)))
-            })
-            .collect();
-        handles.into_iter().filter_map(|h| h.join().ok()).collect()
-    });
+    let parts: Vec<&[u64]> = entries
+        .chunks(entries.len().div_ceil(threads).max(1))
+        .collect();
     let mut out = Verified::default();
-    for part in parts {
+    for part in striped_on(threads, &parts, || (), |(), part| some(part)) {
         out.merge(part);
     }
     out
@@ -2302,7 +2292,9 @@ pub(super) fn report(v: &Verified, kinds: &[Fact]) -> String {
     reason = "assertions are the point of a test"
 )]
 mod tests {
-    use super::{Effect, Fact, Read, Sweep, Verified, st_register, verify, verify_mir, verify_tsv};
+    use super::{
+        Effect, Fact, Read, Sweep, Verified, in_parts, st_register, verify, verify_mir, verify_tsv,
+    };
     use crate::analysis::decompile::expr::{Expr, Key, Op, Ty, UnOp};
     use crate::analysis::{Analysis, Overlay};
     use crate::isa::x86::Register;
@@ -2337,6 +2329,30 @@ mod tests {
                 Section::mapped(".data", 0x2000, 0x1000, 0x1000, true, false),
             ],
         )
+    }
+
+    /// A part that panics fails the whole check, in one part and in eight
+    /// alike, and a check that ends counted every function it was handed.
+    ///
+    /// A part whose thread panicked was once left out of the sum, which
+    /// then read as a check of fewer functions with nothing wrong.
+    #[test]
+    fn a_part_that_panics_fails_the_whole_check() {
+        let count = |part: &[u64]| Verified {
+            functions: part.len(),
+            ..Verified::default()
+        };
+        for n in [64, 512] {
+            let entries: Vec<u64> = (0..n).collect();
+            assert_eq!(in_parts(&entries, count).functions, entries.len());
+            let failed = std::panic::catch_unwind(|| {
+                in_parts(&entries, |part| {
+                    assert!(!part.contains(&40), "function 40 does not check");
+                    count(part)
+                })
+            });
+            assert!(failed.is_err(), "{n} functions summed with a part missing");
+        }
     }
 
     /// Reading the lifted values through MIR compares what reading them

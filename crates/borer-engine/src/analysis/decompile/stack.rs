@@ -84,3 +84,48 @@ pub(super) fn worker<'scope, T: Send + 'scope>(
         })
         .ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::analysis::{Analysis, Overlay};
+    use crate::program::{Arch, Program};
+
+    /// Renders an entry as itself: every fifth has no text, and 7 panics.
+    ///
+    /// # Arguments
+    ///
+    /// * `entry` - The function's entry.
+    ///
+    /// # Panics
+    ///
+    /// For entry 7.
+    fn render(_: &Program, _: &Analysis, _: &Overlay, entry: u64) -> Option<u64> {
+        assert_ne!(entry, 7, "function 7 does not render");
+        (!entry.is_multiple_of(5)).then_some(entry)
+    }
+
+    /// A render that panics costs a sweep that one function's text and no
+    /// other's, on the calling thread (a batch of one) and on workers
+    /// alike.
+    ///
+    /// The worker it panicked on was once left out, with every text that
+    /// worker had rendered, while a batch of one raised.
+    ///
+    /// # Panics
+    ///
+    /// When a batch raises, or lacks a text other than the one function's.
+    #[test]
+    fn a_render_that_panics_costs_a_sweep_that_function_alone() {
+        let p = Program::raw(Vec::new(), Arch::X86_64, 0, None, Vec::new());
+        let (a, o) = (Analysis::default(), Overlay::default());
+        for entries in [6..7, 7..8, 6..8, 0..8, 0..64] {
+            let batch: Vec<u64> = entries.collect();
+            let want: Vec<Option<u64>> = batch
+                .iter()
+                .map(|&e| (e != 7 && !e.is_multiple_of(5)).then_some(e))
+                .collect();
+            let got = super::super::render_all(&p, &a, &o, &batch, render);
+            assert_eq!(got, want, "a batch of {}", batch.len());
+        }
+    }
+}

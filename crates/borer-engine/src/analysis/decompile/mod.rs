@@ -443,8 +443,8 @@ impl<'a> Ctx<'a> {
 ///
 /// Each function comes out exactly as [`decompile`] renders it alone: the
 /// workers share nothing but the read-only program, analysis and overlay,
-/// and the results come back in the order of `entries`. A worker that
-/// fails leaves its entries `None`.
+/// and the results come back in the order of `entries`. A function whose
+/// decompile panics comes out `None` and costs no other function its text.
 ///
 /// # Arguments
 ///
@@ -559,7 +559,12 @@ pub fn decompile_named_all(
 /// its stripe, and the sweep waited the whole stripe longer.
 ///
 /// Each worker has a decompile's stack and runs its decompiles in place
-/// ([`stack::worker`]).
+/// ([`stack::worker`]). What no worker took is rendered on this thread:
+/// all of it with one core, one function, or no thread to be had.
+///
+/// A sweep outlives one bad function: a render that panics leaves that
+/// function without a text, as one that does not decompile does, and
+/// costs no other function its own, on this thread or on many workers.
 ///
 /// The renderers a batch takes build their text afresh instead of through
 /// the memo of [`Analysis::derived`]: a sweep over a binary would fill it
@@ -583,40 +588,32 @@ fn render_all<T: Send + Clone>(
 ) -> Vec<Option<T>> {
     let threads = std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
-        .min(entries.len().max(1));
-    let mut out: Vec<Option<T>> = vec![None; entries.len()];
-    if threads <= 1 {
-        for (slot, &entry) in out.iter_mut().zip(entries) {
-            *slot = render(program, analysis, overlay, entry);
-        }
-        return out;
-    }
+        .min(entries.len());
+    let workers = if threads > 1 { threads } else { 0 };
     let mut order: Vec<usize> = (0..entries.len()).collect();
     order.sort_by_key(|&i| {
         std::cmp::Reverse(analysis.function(entries[i]).map_or(0, Function::size))
     });
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let (order, next) = (&order, &next);
+    let take = || {
+        let mut done = Vec::new();
+        while let Some(&i) = order.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) {
+            let one = || render(program, analysis, overlay, entries[i]);
+            let text = std::panic::catch_unwind(std::panic::AssertUnwindSafe(one));
+            done.push((i, text.ok().flatten()));
+        }
+        done
+    };
     let here = super::reads::Handle::here();
-    let stripes: Vec<Vec<(usize, Option<T>)>> = std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..threads)
-            .filter_map(|_| {
-                let here = here.clone();
-                stack::worker(scope, move || {
-                    here.enter(|| {
-                        let mut done = Vec::new();
-                        while let Some(&i) =
-                            order.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
-                        {
-                            done.push((i, render(program, analysis, overlay, entries[i])));
-                        }
-                        done
-                    })
-                })
-            })
-            .collect();
-        handles.into_iter().filter_map(|h| h.join().ok()).collect()
+    let mut stripes: Vec<Vec<(usize, Option<T>)>> = std::thread::scope(|scope| {
+        let made = (0..workers).filter_map(|_| {
+            let (here, take) = (here.clone(), &take);
+            stack::worker(scope, move || here.enter(take))
+        });
+        super::joined(made.collect())
     });
+    stripes.push(take());
+    let mut out: Vec<Option<T>> = vec![None; entries.len()];
     for (i, text) in stripes.into_iter().flatten() {
         if let Some(slot) = out.get_mut(i) {
             *slot = text;

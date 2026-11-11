@@ -576,6 +576,11 @@ fn the_arm64_text_agrees_with_the_machine_on_every_block() {
         "# {share:.1}% of blocks checked, {} disagreements; replay took {took:.1?}",
         r.wrong().len()
     );
+    assert_eq!(
+        r.functions,
+        entries.len(),
+        "functions left out of the replay"
+    );
     assert!(r.checked > 0, "{text}");
     assert!(r.wrong().is_empty(), "{} disagreements", r.wrong().len());
 }
@@ -649,6 +654,11 @@ fn the_arm32_lifter_agrees_with_the_emulator_on_every_block() {
     let share = borer_engine::num::usize_f64(v.checked) * 100.0
         / borer_engine::num::usize_f64(v.blocks.max(1));
     eprintln!("# {share:.1}% of blocks checked");
+    assert_eq!(
+        v.functions,
+        entries.len(),
+        "functions left out of the check"
+    );
     assert!(v.checked > 0, "{text}");
     assert!(v.mismatches.is_empty(), "{text}");
 }
@@ -676,6 +686,11 @@ fn the_arm32_text_agrees_with_the_machine_on_every_block() {
     for line in text.lines().take_while(|l| l.starts_with('#')) {
         eprintln!("{line}");
     }
+    assert_eq!(
+        r.functions,
+        entries.len(),
+        "functions left out of the replay"
+    );
     assert!(r.checked > 0, "{text}");
     assert!(r.wrong().is_empty(), "{} disagreements", r.wrong().len());
 }
@@ -839,6 +854,8 @@ fn the_lifter_agrees_with_the_emulator_on_every_block() {
         eprintln!("{line}");
     }
     eprintln!("# verify took {took:.1?}");
+    let functions = CORPUS.analysis.functions.len();
+    assert_eq!(v.functions, functions, "functions left out of the check");
     assert!(v.checked > 0, "{text}");
     assert!(v.mismatches.is_empty(), "{text}");
 }
@@ -868,6 +885,11 @@ fn the_arm64_lifter_agrees_with_the_emulator_on_every_block() {
     let share = borer_engine::num::usize_f64(v.checked) * 100.0
         / borer_engine::num::usize_f64(v.blocks.max(1));
     eprintln!("# {share:.1}% of blocks checked; verify took {took:.1?}");
+    assert_eq!(
+        v.functions,
+        entries.len(),
+        "functions left out of the check"
+    );
     assert!(v.checked > 0, "{text}");
     assert!(v.mismatches.is_empty(), "{text}");
 }

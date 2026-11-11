@@ -502,8 +502,8 @@ const STRIPE_MIN: usize = 256;
 /// Maps `f` over `items` across the cores, results in the items' order.
 ///
 /// Workers take every `threads`-th item, so the work spreads without a
-/// queue; a worker that fails leaves `None` in its places. With one core,
-/// or fewer than 256 items, the map runs inline.
+/// queue. With one core, or fewer than 256 items, the map runs inline. A
+/// panic in `f` fails the call either way ([`striped_on`]).
 ///
 /// # Arguments
 ///
@@ -512,7 +512,7 @@ const STRIPE_MIN: usize = 256;
 ///
 /// # Returns
 ///
-/// One result per item, in order.
+/// One result per item, in order, each `Some`.
 pub(crate) fn striped<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<Option<R>> {
     striped_with(items, STRIPE_MIN, || (), |(), x| f(x))
 }
@@ -521,9 +521,9 @@ pub(crate) fn striped<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync)
 /// context carrying memos), results in the items' order.
 ///
 /// Workers take every `threads`-th item; each makes its own state with
-/// `init` first, so a memo need not be shared. A worker that fails leaves
-/// `None` in its places. With one core, or fewer than `min` items, the map
-/// runs inline over one state.
+/// `init` first, so a memo need not be shared. With one core, or fewer
+/// than `min` items, the map runs inline over one state. A panic in `f`
+/// fails the call either way ([`striped_on`]).
 ///
 /// # Arguments
 ///
@@ -534,50 +534,89 @@ pub(crate) fn striped<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync)
 ///
 /// # Returns
 ///
-/// One result per item, in order.
+/// One result per item, in order, each `Some`.
 pub(crate) fn striped_with<T: Sync, S, R: Send>(
     items: &[T],
     min: usize,
     init: impl Fn() -> S + Sync,
     f: impl Fn(&S, &T) -> R + Sync,
 ) -> Vec<Option<R>> {
-    let threads = std::thread::available_parallelism()
-        .map_or(1, std::num::NonZeroUsize::get)
-        .min(items.len().max(1));
-    if threads <= 1 || items.len() < min {
+    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    let threads = if items.len() < min { 1 } else { cores };
+    let mapped = striped_on(threads, items, init, f);
+    mapped.into_iter().map(Some).collect()
+}
+
+/// Maps `f` over `items` on up to `threads` threads with a state per
+/// thread, results in the items' order: [`striped_with`] told how many
+/// threads rather than reading the machine's.
+///
+/// A panic in `init` or `f` fails the whole call, at any thread count
+/// ([`joined`]): no caller is handed results with a worker's share
+/// missing, and no result built from them is kept ([`Derived`] lets go of a
+/// build that unwinds).
+///
+/// # Arguments
+///
+/// * `threads` - Most threads to map on; with one, or one item, the map
+///   runs inline.
+/// * `items` - The inputs.
+/// * `init` - Makes one worker's state.
+/// * `f` - The per-item function over the worker's state.
+///
+/// # Returns
+///
+/// One result per item, in order.
+pub(crate) fn striped_on<T: Sync, S, R: Send>(
+    threads: usize,
+    items: &[T],
+    init: impl Fn() -> S + Sync,
+    f: impl Fn(&S, &T) -> R + Sync,
+) -> Vec<R> {
+    let threads = threads.min(items.len());
+    if threads <= 1 {
         let state = init();
-        return items.iter().map(|x| Some(f(&state, x))).collect();
+        return items.iter().map(|x| f(&state, x)).collect();
     }
-    let init = &init;
-    let f = &f;
+    let (init, f) = (&init, &f);
     let here = reads::Handle::here();
-    let stripes: Vec<Vec<(usize, R)>> = std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..threads)
-            .map(|t| {
-                let here = here.clone();
-                scope.spawn(move || {
-                    here.enter(|| {
-                        let state = init();
-                        items
-                            .iter()
-                            .enumerate()
-                            .skip(t)
-                            .step_by(threads)
-                            .map(|(i, x)| (i, f(&state, x)))
-                            .collect::<Vec<_>>()
-                    })
+    let mut stripes: Vec<std::vec::IntoIter<R>> = std::thread::scope(|scope| {
+        let workers = (0..threads).map(|t| {
+            let here = here.clone();
+            scope.spawn(move || {
+                here.enter(|| {
+                    let state = init();
+                    let stripe = items.iter().skip(t).step_by(threads);
+                    stripe.map(|x| f(&state, x)).collect::<Vec<_>>()
                 })
             })
-            .collect();
-        handles.into_iter().filter_map(|h| h.join().ok()).collect()
+        });
+        let stripes = joined(workers.collect());
+        stripes.into_iter().map(Vec::into_iter).collect()
     });
-    let mut out: Vec<Option<R>> = (0..items.len()).map(|_| None).collect();
-    for (i, r) in stripes.into_iter().flatten() {
-        if let Some(slot) = out.get_mut(i) {
-            *slot = Some(r);
-        }
-    }
-    out
+    (0..items.len())
+        .filter_map(|i| stripes.get_mut(i % threads)?.next())
+        .collect()
+}
+
+/// Waits for a scope's workers in order and returns what each returned,
+/// raising a worker's panic again on the calling thread.
+///
+/// A worker that panicked is never read as one that found nothing: its
+/// panic ends the caller's work as it would have on one thread.
+///
+/// # Arguments
+///
+/// * `workers` - The workers.
+///
+/// # Returns
+///
+/// What the workers returned, in their order.
+pub(crate) fn joined<T>(workers: Vec<std::thread::ScopedJoinHandle<'_, T>>) -> Vec<T> {
+    let ended = workers.into_iter().map(std::thread::ScopedJoinHandle::join);
+    ended
+        .map(|worker| worker.unwrap_or_else(|panic| std::panic::resume_unwind(panic)))
+        .collect()
 }
 
 /// Runs `side` on a thread of its own while `main` runs on this one.
@@ -2852,3 +2891,6 @@ pub(crate) fn unique_name(taken: &mut BTreeSet<String>, base: &str) -> String {
     }
     name
 }
+
+#[cfg(test)]
+mod tests;
