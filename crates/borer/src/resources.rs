@@ -2376,6 +2376,56 @@ mod tests {
         assert!(out.contains("offset=200"), "{out}");
     }
 
+    /// Reading a resource leaves the names, comments and types the session
+    /// holds as they were, and the program it has loaded.
+    ///
+    /// Every fixed resource, every template's example and a layout's plan
+    /// are read twice, as `resources/read` and `query` read them; a second
+    /// read answers or refuses as the first did. The tools' hints were
+    /// held against the effects they state, never against what a read does.
+    ///
+    /// # Panics
+    ///
+    /// When a read changes the overlay, the loaded program or the ledger's
+    /// changes, or a second read does not go the first one's way.
+    #[test]
+    fn reading_a_resource_leaves_the_session_as_it_was() {
+        let server = crate::testing::code_server(
+            Arch::X86_64,
+            &[
+                0x8b, 0x41, 0x10, // ASM: mov eax, [rcx+0x10]
+                0xc3, // ASM: ret
+            ],
+        );
+        crate::state::write_lock(&server.overlay)
+            .names
+            .insert(0x1000, "probe".to_owned());
+        let program = server.loaded().expect("a program is loaded");
+        let before = server.overlay_plain().fingerprint();
+        let uris = super::RESOURCES
+            .iter()
+            .map(|r| r.0.to_owned())
+            .chain(
+                super::RESOURCE_TEMPLATES
+                    .iter()
+                    .map(|t| super::example(t.2, Some(&program))),
+            )
+            .chain(["borer://layout/0x1000,apply=Rec".to_owned()]);
+        for uri in uris {
+            let (first, second) = (server.read_uri(&uri), server.read_uri(&uri));
+            assert_eq!(first.is_ok(), second.is_ok(), "{uri}");
+            assert_eq!(server.overlay_plain().fingerprint(), before, "{uri}");
+            assert!(
+                server
+                    .loaded()
+                    .is_some_and(|now| Arc::ptr_eq(&now, &program)),
+                "{uri}"
+            );
+        }
+        let session = server.session_text();
+        assert!(session.contains("\n# 0 changes this session"), "{session}");
+    }
+
     /// A binary given where a snapshot or a manifest goes is refused as not
     /// text, with what the file should be, where the error was the reader's
     /// `stream did not contain valid UTF-8`.
