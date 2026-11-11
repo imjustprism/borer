@@ -28,9 +28,8 @@ binary: an MCP server when run with no arguments, a command-line tool with
 them. It owns its loader, lifters, emulator and decompiler, and it has no GUI.
 
 Everything below is real output of borer 0.2.12 (release build, commit
-`7d9bb42c`) on two files of Windows 11: `notepad.exe` 10.0.26100.8457 (sha256
-`2d0b3948...2efb158f`) and `ntdll.dll` 10.0.26100.9549 (sha256
-`b072efae...ce5aed21`). Lines cut for length are marked `...`. Addresses
+`7d9bb42c`) on two files of Windows 11: `notepad.exe` (sha256
+`2d0b3948...2efb158f`) and `ntdll.dll` (sha256 `b072efae...ce5aed21`). Lines cut for length are marked `...`. Addresses
 differ on another build: `borer symbols ntdll.dll RtlComputeCrc32` finds the
 export, and its decompile names the two functions it forwards to.
 
@@ -65,8 +64,8 @@ its own blind spot instead of hiding it.
 
 ### The decompiler checks its own work
 
-Every function's header says how much of the text was checked against the
-machine code it came from:
+On x86, x86-64, arm64 and 32-bit ARM, every function's header says how much
+of the text was checked against the machine code it came from:
 
 ```console
 $ borer decompile ntdll.dll 0x180102184
@@ -182,11 +181,10 @@ $ borer functions notepad.exe "" 0 3
 0x1400011bc 149 3 27 5 2 - sub_1400011bc
 ```
 
-Over MCP, an answer of 512 bytes or more carries a `since` tag. Send the same
-request with that tag after renaming a function or setting a type, and borer
-answers with only the lines that changed, or one line saying nothing did.
-Every answer ends with an evidence id; the session keeps the text behind the
-last 256 ids, so a recent answer can be fetched again exactly.
+Over MCP an answer can also be asked again as a diff: see "Ask again, get
+only what changed" below. Every answer ends with an evidence id; the session
+keeps the text behind the last 256 ids, so a recent answer can be fetched
+again exactly.
 
 ### Same question, same bytes
 
@@ -326,11 +324,95 @@ borer help                                  # every command
 `--pack <file>` loads target knowledge, `--no-pdb` skips the companion PDB, and
 `--arch x86|x64|arm64` with `--base` and `--entry` maps raw code or a dump.
 
-## More
+## More of what only borer does
 
-What borer does not do yet is in [docs/limits.md](docs/limits.md). It has no
-telemetry; the few things that reach the network are listed in
-[docs/network.md](docs/network.md).
+### Ask again, get only what changed
+
+An agent renames a function and asks for the same decompile again. Instead of
+the whole text a second time, borer sends the lines that differ. These three
+calls are one MCP session on borer 0.2.12:
+
+```console
+> query borer://decompile/0x1800ed890!limit=12
+# showing 12 of 113 from 0
+// sub_1800ed890 @ 0x1800ed890: 215 instructions, 36 blocks
+...
+extern uint64_t sub_1800eddf4(uint64_t, uint64_t, uint64_t);
+...
+# since=8704869d
+# evidence: 5-c9635f3d
+
+> set_name address=0x1800eddf4 name=crc32_fold_wide dry_run=false
+renamed function 0x1800eddf4: sub_1800eddf4 -> crc32_fold_wide
+
+> query borer://decompile/0x1800ed890!limit=12!since=8704869d
+# changed since the answer tagged 8704869d: 15 lines, 1141 bytes now; the lines that differ from that answer follow, ...
+@@ -13,1 +13,1 @@
+-extern uint64_t sub_1800eddf4(uint64_t, uint64_t, uint64_t);
++extern uint64_t crc32_fold_wide(uint64_t, uint64_t, uint64_t);
+# since=0a3dc285
+```
+
+Ask once more with the new tag and the answer is one line:
+
+```console
+> query borer://decompile/0x1800ed890!limit=12!since=0a3dc285
+# unchanged since the answer tagged 0a3dc285: 15 lines, 1141 bytes; this note stands in for that text, ...
+```
+
+Names, comments and types live in a session overlay, never in the binary, and
+every change is a dry run until `dry_run=false`.
+
+### A struct from what the code does through a pointer
+
+`RtlInitUnicodeString` fills a `UNICODE_STRING`. borer recovers the three
+fields from the accesses alone, and the decompile carries the layout and the
+function's effects in its header:
+
+```console
+$ borer layout ntdll.dll RtlInitUnicodeString
+# structure through rcx of RtlInitUnicodeString, from 4 access site(s)
+# 3 field(s) over 0x10 bytes
+# offset  size  access        seen
+0x0      2/8   written       2x
+0x2      2     written       1x
+0x8      8     written       1x
+
+$ borer decompile ntdll.dll RtlInitUnicodeString
+// RtlInitUnicodeString @ 0x1800993c0: 19 instructions, 4 blocks
+// checked vs binary: statements as emitted, 4/4 blocks: 2 proved, 2 tested x3 states; unchecked: C spelling, later text passes
+// signature: void RtlInitUnicodeString(PUNICODE_STRING a1, PCWSTR a2)
+// effects: writes a1, a1+8, a1+2
+// layout a1: 0x2 u16, 0x8 u64
+uint64_t var1;
+
+*(uint64_t*)a1 = 0;
+a1->field_0x8 = a2;
+if (a2 != 0) {
+  var1 = wcslen(a2);
+  *(uint16_t*)a1 = (var1 * 2 >= 0xfffe ? 0xfffc : var1 * 2);
+  a1->field_0x2 = (var1 * 2 >= 0xfffe ? 0xfffc : var1 * 2) + 2;
+}
+```
+
+Reading `borer://layout/<fn>,apply=<Name>` plans the struct and names the
+`set_type` calls that state it; after them every decompile names the fields.
+
+### One function, any inputs, no process
+
+```console
+$ borer emulate ntdll.dll iswdigit,a1=0x35
+# ran iswdigit from 0x18012aa90 with a1=0x35: returned after 11 steps, 0 bytes written
+# registers: rax=0x4 rcx=0x4 rdx=0x4 r8=0x0 r9=0x0 ...
+```
+
+The same spec takes registers, memory writes, a stop address, a step budget,
+a trace and a dump (`borer help` shows the grammar). `borer://diverge` runs a
+function on two inputs and names the first instruction where the paths part.
+
+What borer does not do yet is in [docs/limits.md](https://github.com/imjustprism/borer/blob/main/docs/limits.md). It has no
+telemetry; the few things that reach the network are in
+[docs/network.md](https://github.com/imjustprism/borer/blob/main/docs/network.md).
 
 ## Contributing
 
