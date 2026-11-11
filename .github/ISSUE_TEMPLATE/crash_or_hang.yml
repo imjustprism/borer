@@ -1,0 +1,48 @@
+name: Crash, hang or runaway memory
+description: borer panicked, never answered, or ate memory on some input. Hostile files count.
+labels: [bug, crash or hang]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        If the file makes code from it run on your machine, or makes borer write outside the path
+        you asked for, report it privately instead (see SECURITY.md).
+  - type: textarea
+    id: ran
+    attributes:
+      label: What you ran
+      description: The CLI command or MCP tool call, with its arguments.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened
+      description: The panic message and its location, or how long it ran and how much memory it took before you stopped it.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: target
+    attributes:
+      label: The binary
+      description: >
+        Format, architecture and compiler if you know them. Attach or link
+        the file only if you are allowed to share it; a small program that
+        reproduces the problem is even better. For malware, give its SHA-256
+        and a public source instead of attaching it.
+  - type: dropdown
+    id: front
+    attributes:
+      label: How you ran it
+      options:
+        - Command line
+        - MCP server, driven by an agent
+  - type: input
+    id: version
+    attributes:
+      label: borer version
+      description: The first line of `borer doctor offline`.
+    validations:
+      required: true
