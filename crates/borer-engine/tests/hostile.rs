@@ -700,6 +700,35 @@ fn a_section_the_file_ends_inside_keeps_the_bytes_it_holds() {
     }
 }
 
+/// A section stated at file offset 0 with more bytes than the file holds
+/// is cut to the file like one at any other offset.
+///
+/// The row was measured by the smaller of its size and the file's, which
+/// at offset 0 is the file's own length, so it passed for a row the file
+/// holds whole and kept a file size past the end of the file: no walk over
+/// the section's bytes found any, and nothing said the file was cut.
+#[test]
+fn a_section_at_file_offset_zero_past_the_file_is_cut_to_it() {
+    let _serial = serial();
+    let mut bytes = pe(
+        &[
+            Sec::sound(".text", 0x1000, text(), CODE),
+            Sec::sound(".tail", 0x2000, vec![0u8; 0x200], DATA),
+        ],
+        &[],
+    );
+    let row = PE_AT + 4 + 20 + OPTIONAL + 40;
+    put32(&mut bytes, row + 16, 0x10_0000);
+    put32(&mut bytes, row + 20, 0);
+    let len = bytes.len();
+    let p = load(bytes);
+    let tail = p.sections.iter().find(|s| s.name == ".tail");
+    let tail = tail.expect("the cut section is kept");
+    assert_eq!((tail.file_off.0, tail.file_size), (0, from_usize(len)));
+    assert_eq!(p.headers.truncated, Some(0x10_0000));
+    assert_eq!(p.section_bytes(tail).map(<[u8]>::len), Some(len));
+}
+
 /// A damaged section count still drops the rows it runs into.
 ///
 /// `NumberOfSections = 0xfff` runs the table out of the headers and over

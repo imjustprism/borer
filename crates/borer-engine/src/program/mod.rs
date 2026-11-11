@@ -896,7 +896,7 @@ impl Program {
                     .filter_map(|s| {
                         let rawsz = u64::from(s.size_of_raw_data);
                         let rawoff = u64::from(s.pointer_to_raw_data);
-                        let fits = rawoff + rawsz.min(file_len) <= file_len;
+                        let fits = rawoff + rawsz <= file_len;
                         let cut = !fits && sound && rawoff < file_len;
                         let vsize = u64::from(s.virtual_size);
                         let va = pe.image_base.checked_add(u64::from(s.virtual_address));
