@@ -9,10 +9,10 @@
 )]
 
 use borer_engine::analysis::apply::from_pointer;
-use borer_engine::analysis::classes::{class_layout, methods_of, render_layout};
+use borer_engine::analysis::classes::{class_layout, render_layout};
 use borer_engine::analysis::decompile::decompile_named;
 use borer_engine::analysis::stated::{
-    Field, Mode, Statement, plan, plan_at, plan_class, undefined,
+    Field, Mode, Statement, object_class, plan, plan_at, plan_class, undefined,
 };
 use borer_engine::analysis::utypes::{UserType, build_enum, list_tsv, parse_type};
 use borer_engine::analysis::{Analysis, EnumSource, Overlay};
@@ -803,8 +803,8 @@ fn a_name_is_a_struct_before_it_is_a_class() {
 ///
 /// That is the class of its `this`, else the class its first parameter is
 /// hinted as, else the class its name is qualified by, whose field its own
-/// text will not print; a function of no class says how to state the field
-/// by its class.
+/// text will not print; a function of no class, and one whose text shows
+/// no unnamed field at the offset, say how to state the field by its class.
 #[test]
 fn a_field_stated_at_a_method_is_stated_of_the_method_s_class() {
     let p = two_classes();
@@ -844,6 +844,11 @@ fn a_field_stated_at_a_method_is_stated_of_the_method_s_class() {
             .expect_err("no function, so no class"),
         "sub_1f00 belongs to no class borer knows, so a field at 0x10 has no class to be stated of; state it by its class, set_type(name=<class>, fields=[\"0x10:m_count\"]), or type the pointer it is read through (borer://layout/0x1f00,apply=<Name> plans that)"
     );
+    assert_eq!(
+        plan_at(&p, &a, &plain, 0x1040, 0x300, stated())
+            .expect_err("the method's text shows no field at 0x300"),
+        "class_2800::vfunc_0 (0x1040) names no field_0x300 in its text, so there is no such field to state there; a field the function does not show is stated by its class, set_type(name=class_2800, fields=[\"0x300:m_currentPipeline\"])"
+    );
     let mut earlier = stating(&[(0x18, "m_next", None)]);
     let merging = plan_at(&p, &a, &earlier, 0x1080, 0x270, stated()).expect("plans");
     merging.apply(&mut earlier);
@@ -870,28 +875,45 @@ fn a_field_stated_at_a_method_is_stated_of_the_method_s_class() {
         "state 1 field(s) of class class_2800: 5 kept, 1 changed, 0 new: +0x270 field_0x270 -> m_currentPipeline u32; Renderer::draw (0x1040) takes its object as class_2800",
         "a method renamed out of its class still prints its object's fields by that class"
     );
+}
+
+/// A method no table hints states a field of the class its `this` is
+/// typed as: the class its symbol is qualified by.
+#[test]
+fn a_field_stated_through_this_is_of_the_class_this_is_typed_as() {
     let (fixture, none) = (crate::common::fixture(), Overlay::default());
     let analysis = Analysis::compute(&fixture);
-    let method = methods_of(&analysis, &none, "Arr<int>")
-        .into_iter()
-        .find(|&entry| {
-            decompile_named(&fixture, &analysis, &none, entry)
-                .is_some_and(|text| text.contains("Arr<int> *this"))
+    let (method, class, unnamed) = analysis
+        .functions
+        .iter()
+        .filter(|f| !f.param_hints.contains_key(&0))
+        .find_map(|f| {
+            let class = object_class(&analysis, &none, f)?;
+            let text = decompile_named(&fixture, &analysis, &none, f.entry)?;
+            let shown = "this->field_0x";
+            let at = text
+                .contains(&format!("{class} *this"))
+                .then(|| text.find(shown))??;
+            let digits: String = text[at + shown.len()..]
+                .chars()
+                .take_while(char::is_ascii_hexdigit)
+                .collect();
+            Some((f.entry, class, u64::from_str_radix(&digits, 16).ok()?))
         })
-        .expect("a method of Arr<int> that takes `this`");
+        .expect("a method no table hints that prints an unnamed field through `this`");
     let through_this = plan_at(
         &fixture,
         &analysis,
         &none,
         method,
-        0x8,
-        field("m_size", None),
+        unnamed,
+        field("m_stated", None),
     )
     .expect("plans")
     .would();
     assert!(
-        through_this.contains(" of class Arr<int>: ")
-            && through_this.ends_with(" takes its object as Arr<int>"),
+        through_this.contains(&format!(" of class {class}: "))
+            && through_this.ends_with(&format!(" takes its object as {class}")),
         "a method no table hints is of the class its `this` is typed as: {through_this}"
     );
 }

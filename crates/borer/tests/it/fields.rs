@@ -393,8 +393,8 @@ fn one_field_is_stated_by_class_or_at_a_method_and_the_rest_stays() {
     });
     assert_eq!(
         set_type(&mut client, &at_constructor),
-        "dry-run: would state 1 field(s) of class class_2800: 5 kept, 1 changed, 0 new: +0x270 field_0x270 -> m_currentPipeline (accessed 4 byte(s) wide); class_2800::ctor_or_dtor (0x1000) is named after class_2800 and takes its object untyped, so its own text will not print the name: the class's other methods do. pass dry_run=false to apply.",
-        "a constructor's text takes the object untyped"
+        "class_2800::ctor_or_dtor (0x1000) names no field_0x270 in its text, so there is no such field to state there; a field the function does not show is stated by its class, set_type(name=class_2800, fields=[\"0x270:m_currentPipeline\"])",
+        "a constructor's text takes the object untyped and prints no field of it"
     );
     assert_eq!(
         rows(&mut client, "class_2800"),

@@ -689,7 +689,9 @@ pub fn object_class(a: &Analysis, o: &Overlay, f: &Function) -> Option<String> {
 /// untyped (a constructor's `void *a1`) states the field of the class its
 /// name is qualified by, and the plan says its own text will not print the
 /// name. The field is merged into what the class states ([`plan_class`]),
-/// as stating it by the class's name does.
+/// as stating it by the class's name does. The function's text must print
+/// the field unnamed (`field_0x270`): an offset it does not show is a slip
+/// of the hand there, and is stated by the class's name instead.
 ///
 /// # Arguments
 ///
@@ -707,9 +709,9 @@ pub fn object_class(a: &Analysis, o: &Overlay, f: &Function) -> Option<String> {
 ///
 /// # Errors
 ///
-/// When no function of a class starts at `entry`, the message saying how
-/// to state the field by its class's name, or the field is refused
-/// ([`plan_class`]).
+/// When no function of a class starts at `entry` or its text prints no
+/// unnamed field at the offset, each message saying how to state the field
+/// by its class's name, or the field is refused ([`plan_class`]).
 pub fn plan_at(
     p: &Program,
     a: &Analysis,
@@ -720,9 +722,10 @@ pub fn plan_at(
 ) -> Result<Plan, String> {
     let fname = name_of(a, o, entry);
     let f = a.function(entry);
+    let text = super::decompile::decompile_named(p, a, o, entry);
     let own = f.and_then(|f| object_class(a, o, f));
     let this = own.as_ref().filter(|class| {
-        super::decompile::decompile_named(p, a, o, entry)
+        text.as_ref()
             .is_some_and(|text| text.contains(&format!("{class} *this")))
     });
     let hinted = f.and_then(|f| f.param_hints.get(&0));
@@ -736,6 +739,13 @@ pub fn plan_at(
             ));
         }
     };
+    let shown = format!("field_{off:#x}");
+    if !text.is_some_and(|text| super::schema::has_word(&text, &shown)) {
+        return Err(format!(
+            "{fname} ({entry:#x}) names no {shown} in its text, so there is no such field to state there; a field the function does not show is stated by its class, set_type(name={class}, fields=[\"{off:#x}:{}\"])",
+            field.name
+        ));
+    }
     let fields = [(off, field)];
     let statement = Statement {
         name: class,
