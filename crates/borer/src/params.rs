@@ -1185,41 +1185,20 @@ pub(crate) fn must_be_in_a_section(
     ))
 }
 
-/// Returns the stack word, the callee-owned home space above the return
-/// address and the frame base's distance below the entry stack pointer,
-/// in bytes.
-///
-/// The decompiled text numbers a function's slots by them: 32 bytes of
-/// home space under the Microsoft x64 convention, none elsewhere; locals
-/// count down from the frame base
-/// ([`frame_base`](borer_engine::analysis::protos::frame_base)).
-///
-/// # Arguments
-///
-/// * `p` - The loaded program.
-pub(crate) fn frame_words(p: &program::Program) -> (i64, i64, i64) {
-    let windows = !matches!(
-        p.format,
-        program::BinaryFormat::Elf | program::BinaryFormat::MachO
-    );
-    let frame = borer_engine::analysis::protos::frame_base(p);
-    match (p.is_64, windows) {
-        (true, true) => (8, 32, frame),
-        (true, false) => (8, 0, frame),
-        (false, _) => (4, 0, frame),
-    }
-}
-
 /// Reads what `set_type` states of a function's variable: which variable
 /// `var` names, and the name and type it takes.
 ///
-/// `var` is the name the text shows (`a1`, `local_58`) or one stated
-/// before, the variable's or the prototype's parameter's; `name` is the
-/// new name and `type` an optional C type.
+/// `var` is the name the text shows (`a1`, `local_58`, `arg_8`) or one
+/// stated before, the variable's or the prototype's parameter's; `name`
+/// is the new name and `type` an optional C type. A slot's name is read
+/// by the distances the engine says the function's text numbers its
+/// slots by ([`slot_words`](borer_engine::analysis::protos::slot_words)):
+/// worked out here from the file's format and width, `arg_8` named the
+/// slot an arm64, ARM32 or RISC-V text calls `arg_10`.
 ///
 /// # Arguments
 ///
-/// * `p` - The loaded program, for its word.
+/// * `p` - The loaded program, for the function's convention.
 /// * `o` - The overlay.
 /// * `entry` - The function.
 /// * `var` - The variable.
@@ -1245,8 +1224,8 @@ pub(crate) fn plan_var(
     ),
     String,
 > {
-    use borer_engine::analysis::protos::{VARS_MAX, Var, VarKey};
-    let (stack, shadow, frame) = frame_words(p);
+    use borer_engine::analysis::protos::{VARS_MAX, Var, VarKey, slot_words};
+    let (stack, shadow, frame) = slot_words(p, entry);
     let stated = o.vars.get(&entry);
     let key = stated
         .and_then(|vs| vs.iter().find(|(_, v)| v.name == var).map(|(k, _)| *k))
@@ -1689,5 +1668,104 @@ mod tests {
             );
         }
         assert!(parse("0xffffffffffffffff").is_err_and(|e| e.contains("signed displacement")));
+    }
+
+    /// `set_type` names and types the stack slot the text shows by a name,
+    /// on arm64, ARM32 and RISC-V as on x86, and says so by that name.
+    ///
+    /// The server worked the slot out from the file's format and width, by
+    /// x86's rule: on arm64 `arg_8` named the slot the text calls `arg_10`,
+    /// so the text kept `arg_8`, and the answer said `home_8`.
+    ///
+    /// # Panics
+    ///
+    /// When an answer spells another name, or a text keeps the old one or
+    /// does not declare the slot of the stated type.
+    #[test]
+    fn set_type_names_the_slot_the_text_shows() {
+        use crate::params::{DecompileParams, SetTypeParams};
+        use borer_engine::program::Arch;
+        use rmcp::handler::server::wrapper::Parameters;
+        let words = |ws: &[u32]| -> Vec<u8> { ws.iter().flat_map(|w| w.to_le_bytes()).collect() };
+        let cases = [
+            (
+                Arch::X86_64,
+                vec![
+                    0x48, 0x8b, 0x44, 0x24, 0x08, // ASM: mov rax, [rsp+8]
+                    0xc3, // ASM: ret
+                ],
+                "home_0",
+                "int64_t",
+            ),
+            (
+                Arch::Arm64,
+                words(&[
+                    0xf940_07e0, // ASM: ldr x0, [sp, #8]
+                    0xd65f_03c0, // ASM: ret
+                ]),
+                "arg_8",
+                "int64_t",
+            ),
+            (
+                Arch::Arm,
+                words(&[
+                    0xe59d_0006, // ASM: ldr r0, [sp, #6]
+                    0xe12f_ff1e, // ASM: bx lr
+                ]),
+                "arg_6",
+                "int32_t",
+            ),
+            (
+                Arch::RiscV64,
+                words(&[
+                    0x0081_3503, // ASM: ld a0, 8(sp)
+                    0x0000_8067, // ASM: ret
+                ]),
+                "arg_8",
+                "int64_t",
+            ),
+            (
+                Arch::RiscV32,
+                words(&[
+                    0x0041_2503, // ASM: lw a0, 4(sp)
+                    0x0000_8067, // ASM: ret
+                ]),
+                "arg_4",
+                "int32_t",
+            ),
+        ];
+        for (arch, code, shown, ty) in cases {
+            let server = crate::testing::code_server(arch, &code);
+            let said = server
+                .set_type(Parameters(SetTypeParams {
+                    name: Some("kept".to_owned()),
+                    fields: None,
+                    values: None,
+                    size: None,
+                    address: Some("0x1000".to_owned()),
+                    r#type: Some(ty.to_owned()),
+                    var: Some(shown.to_owned()),
+                    dry_run: Some(false),
+                }))
+                .unwrap_or_else(|e| e.message.into_owned());
+            assert_eq!(
+                said,
+                format!("named {shown} of sub_1000 (0x1000) {ty} kept"),
+                "{arch:?}"
+            );
+            let text = server
+                .decompile(Parameters(DecompileParams {
+                    address: "0x1000".to_owned(),
+                    detail: None,
+                    filter: None,
+                    offset: None,
+                    limit: None,
+                }))
+                .unwrap_or_else(|e| e.message.into_owned());
+            assert!(
+                text.contains(&format!("\n{ty} kept;\n")) && !text.contains(shown),
+                "{arch:?}: {text}"
+            );
+        }
     }
 }

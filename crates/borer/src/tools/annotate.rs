@@ -12,8 +12,8 @@ use crate::BorerServer;
 use crate::errors::err_params;
 use crate::params::{
     Annotation, AnnotationsParams, Filter, Page, SetCommentParams, SetNameParams, SetTypeParams,
-    TypesParams, frame_words, must_be_a_name, must_be_in_a_section, must_fit_a_row, plan_var,
-    stated_fields, stated_values,
+    TypesParams, must_be_a_name, must_be_in_a_section, must_fit_a_row, plan_var, stated_fields,
+    stated_values,
 };
 use crate::safety::{Effect, effects};
 use crate::state::{read_lock, write_lock};
@@ -388,7 +388,8 @@ impl BorerServer {
                     "`var` names a variable of a function: give the function's `address`".to_owned()
                 })?;
                 let (key, stated) = plan_var(p, o, entry, var, name.as_deref(), ty.as_deref())?;
-                let (stack, shadow, frame) = frame_words(p);
+                let (stack, shadow, frame) =
+                    borer_engine::analysis::protos::slot_words(p, entry);
                 let spelled = key.spell(stack, shadow, frame);
                 let renamed = o.vars.get(&entry).is_some_and(|v| v.contains_key(&key));
                 if !renamed

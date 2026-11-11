@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 
 use borer_engine::analysis::decompile::{checked_header, decompile};
-use borer_engine::analysis::protos::{Proto, Var, VarKey};
+use borer_engine::analysis::protos::{Proto, Var, VarKey, slot_words};
 use borer_engine::analysis::utypes::{TypeExpr, build_struct};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::program::{Arch, BinaryFormat, Program, Section};
@@ -252,6 +252,109 @@ fn a_stated_variable_renames_every_use() {
         callee_text.contains("return *(uint64_t*)cell;"),
         "{callee_text}"
     );
+}
+
+/// A stack slot is stated by the name its text shows, on every
+/// instruction set and convention.
+///
+/// [`slot_words`] gives the distances a function's text numbers its slots
+/// by; the name parses to a slot by them and spells back from it, and the
+/// decompilation then declares that slot by the stated name. On arm64,
+/// ARM32 and RISC-V the slot `N` bytes above the entry stack pointer reads
+/// `arg_N`, with no return address below it: read by x86's rule, `arg_8`
+/// named the slot those texts call `arg_10`.
+#[test]
+fn a_slot_is_stated_by_the_name_its_text_shows() {
+    let words = |ws: &[u32]| -> Vec<u8> { ws.iter().flat_map(|w| w.to_le_bytes()).collect() };
+    let arm64 = words(&[
+        0xf940_07e0, // ASM: ldr x0, [sp, #8]
+        0xd65f_03c0, // ASM: ret
+    ]);
+    let cases: [(Arch, BinaryFormat, Vec<u8>, &str); 8] = [
+        (
+            Arch::X86,
+            BinaryFormat::Pe,
+            vec![
+                0x8d, 0x44, 0x24, 0xf8, // ASM: lea eax, [esp-8]
+                0xc3, // ASM: ret
+            ],
+            "local_4",
+        ),
+        (
+            Arch::X86_64,
+            BinaryFormat::Elf,
+            vec![
+                0x48, 0x8d, 0x44, 0x24, 0xf0, // ASM: lea rax, [rsp-0x10]
+                0xc3, // ASM: ret
+            ],
+            "local_8",
+        ),
+        (
+            Arch::X86_64,
+            BinaryFormat::Pe,
+            vec![
+                0x48, 0x8b, 0x44, 0x24, 0x08, // ASM: mov rax, [rsp+8]
+                0xc3, // ASM: ret
+            ],
+            "home_0",
+        ),
+        (Arch::Arm64, BinaryFormat::Elf, arm64.clone(), "arg_8"),
+        (Arch::Arm64, BinaryFormat::Pe, arm64, "arg_8"),
+        (
+            Arch::Arm,
+            BinaryFormat::Elf,
+            words(&[
+                0xe28d_0004, // ASM: add r0, sp, #4
+                0xe12f_ff1e, // ASM: bx lr
+            ]),
+            "arg_4",
+        ),
+        (
+            Arch::RiscV64,
+            BinaryFormat::Elf,
+            words(&[
+                0x0081_3503, // ASM: ld a0, 8(sp)
+                0x0000_8067, // ASM: ret
+            ]),
+            "arg_8",
+        ),
+        (
+            Arch::RiscV32,
+            BinaryFormat::Elf,
+            words(&[
+                0x0041_2503, // ASM: lw a0, 4(sp)
+                0x0000_8067, // ASM: ret
+            ]),
+            "arg_4",
+        ),
+    ];
+    for (arch, format, code, shown) in cases {
+        let size = u64::try_from(code.len()).expect("a few bytes");
+        let text = Section::mapped(".text", 0x1000, 0, size, false, true);
+        let mut p = Program::raw(code, arch, 0, Some(0x1000), vec![text]);
+        p.format = format;
+        let a = Analysis::compute(&p);
+        let before = decompile(&p, &a, &Overlay::default(), 0x1000).unwrap_or_default();
+        let declared = before
+            .lines()
+            .find_map(|l| l.strip_suffix(&format!(" {shown};")))
+            .unwrap_or_default();
+        assert!(
+            !declared.is_empty(),
+            "{arch:?} {format:?} declares no {shown}: {before}"
+        );
+        let (word, shadow, frame) = slot_words(&p, 0x1000);
+        let key = VarKey::parse(shown, word, frame).expect("a slot");
+        assert_eq!(key.spell(word, shadow, frame), shown, "{arch:?} {format:?}");
+        let mut o = Overlay::default();
+        let var = Var::parse("kept").expect("a name");
+        o.vars.insert(0x1000, BTreeMap::from([(key, var)]));
+        let after = decompile(&p, &a, &o, 0x1000).unwrap_or_default();
+        assert!(
+            after.contains(&format!("\n{declared} kept;\n")) && !after.contains(shown),
+            "{arch:?} {format:?}: {after}"
+        );
+    }
 }
 
 /// A prototype or a variable changes the overlay's fingerprint, so no

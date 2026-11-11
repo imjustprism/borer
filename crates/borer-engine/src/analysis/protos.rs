@@ -419,7 +419,9 @@ impl VarKey {
     ///
     /// * `text` - The name.
     /// * `word` - The stack word in bytes (4 or 8), which the slots above
-    ///   the return address count from.
+    ///   the return address count from; 0 where the text counts them from
+    ///   the entry stack pointer itself ([`slot_words`] gives it for a
+    ///   function).
     /// * `frame` - The bytes between the entry stack pointer and the frame
     ///   base the `local_N` slots count from ([`frame_base`]).
     ///
@@ -499,7 +501,7 @@ impl VarKey {
     ///
     /// # Arguments
     ///
-    /// * `word` - The stack word in bytes.
+    /// * `word` - The stack word in bytes, as [`VarKey::parse`] takes it.
     /// * `shadow` - The callee-owned home space above the return address
     ///   in bytes: 32 under the Microsoft x64 convention, else 0.
     /// * `frame` - The bytes between the entry stack pointer and the frame
@@ -530,6 +532,41 @@ pub fn frame_base(program: &crate::program::Program) -> i64 {
     match program.arch.isa() {
         Some(crate::isa::Isa::X86 { bits }) => i64::from(bits / 8),
         Some(crate::isa::Isa::A64 | crate::isa::Isa::A32 | crate::isa::Isa::Rv(_)) | None => 0,
+    }
+}
+
+/// Returns the stack word, the home space and the frame base's distance
+/// one function's text numbers its stack slots by, as [`VarKey::parse`]
+/// and [`VarKey::spell`] take them.
+///
+/// An x86 function's slots above its return address count from the word
+/// past it: `home_N` inside the home space of the function's own
+/// convention (the program's, or Go's register one), `arg_N` beyond. An
+/// arm64, ARM32 or RISC-V function is entered with no return address on
+/// its stack, and the slot `N` bytes above its entry stack pointer is
+/// `arg_N`: there the word and the home space are none. A caller that
+/// read `arg_8` by x86's rule everywhere named the slot those texts call
+/// `arg_10`.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `entry` - The function's entry.
+///
+/// # Returns
+///
+/// `(word, shadow, frame)` in bytes, `frame` as [`frame_base`] gives it.
+#[must_use]
+pub fn slot_words(program: &crate::program::Program, entry: u64) -> (i64, i64, i64) {
+    let frame = frame_base(program);
+    match program.arch.isa() {
+        Some(crate::isa::Isa::X86 { bits }) => {
+            let conv = super::decompile::abi::conv_at(program, entry, bits);
+            (conv.word, conv.shadow, frame)
+        }
+        Some(crate::isa::Isa::A64 | crate::isa::Isa::A32 | crate::isa::Isa::Rv(_)) | None => {
+            (0, 0, frame)
+        }
     }
 }
 
