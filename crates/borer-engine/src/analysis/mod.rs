@@ -1980,31 +1980,7 @@ impl Overlay {
         for (name, ty) in self.types.raw() {
             fold(name.as_bytes());
             fold(&[0]);
-            match ty {
-                utypes::UserType::Struct(s) => {
-                    fold(&s.size.to_le_bytes());
-                    for (off, f) in &s.fields {
-                        fold(&off.to_le_bytes());
-                        fold(f.name.as_bytes());
-                        fold(&[0]);
-                        fold(f.ty.spell().as_bytes());
-                        fold(&[0]);
-                    }
-                }
-                utypes::UserType::Alias(inner) => {
-                    fold(&[1]);
-                    fold(inner.spell().as_bytes());
-                }
-                utypes::UserType::Enum(e) => {
-                    fold(&[2]);
-                    fold(&e.size.to_le_bytes());
-                    for (value, value_name) in &e.values {
-                        fold(&value.to_le_bytes());
-                        fold(value_name.as_bytes());
-                        fold(&[0]);
-                    }
-                }
-            }
+            ty.fold(&mut fold);
             fold(&[0]);
         }
         for (addr, ty) in self.applied.raw() {

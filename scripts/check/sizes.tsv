@@ -94,7 +94,6 @@ crates/borer-engine/src/analysis/functions/tables.rs::read_jump_table#1	121
 crates/borer-engine/src/analysis/functions/walk.rs::commit#1	124
 crates/borer-engine/src/analysis/functions/walk.rs::walk_function#1	461
 crates/borer-engine/src/analysis/libnames.rs::find_with#1	179
-crates/borer-engine/src/analysis/mod.rs::fingerprint#1	101
 crates/borer-engine/src/analysis/naming.rs::infer#1	125
 crates/borer-engine/src/analysis/ports.rs::routes#1	124
 crates/borer-engine/src/analysis/qt.rs::infer#1	122

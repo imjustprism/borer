@@ -385,6 +385,40 @@ impl UserType {
             Self::Alias(_) => "typedef",
         }
     }
+
+    /// Folds everything the type states into a fingerprint, each kind of
+    /// type its own bytes ([`crate::analysis::Overlay::fingerprint`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `fold` - Takes the bytes, in order.
+    pub(crate) fn fold(&self, fold: &mut impl FnMut(&[u8])) {
+        match self {
+            Self::Struct(s) => {
+                fold(&s.size.to_le_bytes());
+                for (off, f) in &s.fields {
+                    fold(&off.to_le_bytes());
+                    fold(f.name.as_bytes());
+                    fold(&[0]);
+                    fold(f.ty.spell().as_bytes());
+                    fold(&[0]);
+                }
+            }
+            Self::Alias(inner) => {
+                fold(&[1]);
+                fold(inner.spell().as_bytes());
+            }
+            Self::Enum(e) => {
+                fold(&[2]);
+                fold(&e.size.to_le_bytes());
+                for (value, value_name) in &e.values {
+                    fold(&value.to_le_bytes());
+                    fold(value_name.as_bytes());
+                    fold(&[0]);
+                }
+            }
+        }
+    }
 }
 
 /// Most user types one overlay holds; a type per name is plenty for a
