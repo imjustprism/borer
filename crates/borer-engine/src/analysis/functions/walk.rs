@@ -186,6 +186,9 @@ pub(super) struct WalkState<'a> {
     /// The pass's own walker, whose budget is the budget across all
     /// functions.
     pub(super) worker: Worker<'a>,
+    /// Most threads a wave's batches are walked on. What the pass finds
+    /// does not depend on it ([`WalkState::land`]).
+    pub(super) lanes: usize,
     /// Function entries still to walk.
     pub(super) queue: Vec<u64>,
     /// The first walks of the functions queued to be walked again, until
@@ -1102,13 +1105,7 @@ impl WalkState<'_> {
             let known = shared.known(&starts);
             let program = self.worker.cursors.program;
             let bitness = self.worker.cursors.bitness;
-            let threads = if wave.len() < WAVE_MIN {
-                1
-            } else {
-                std::thread::available_parallelism()
-                    .map_or(1, std::num::NonZeroUsize::get)
-                    .min(WAVE_BATCH)
-            };
+            let threads = if wave.len() < WAVE_MIN { 1 } else { self.lanes };
             std::thread::scope(|scope| {
                 let lanes = Lanes::start(scope, threads, program, bitness, &known);
                 self.walk_wave(&wave, &known, &lanes);
@@ -1143,7 +1140,6 @@ impl WalkState<'_> {
             let sent = (batch.len() >= WAVE_MIN && threads > 1).then(|| Ahead {
                 batch,
                 threads,
-                budget: self.worker.fuel,
                 sent: lanes.send(batch, threads, self.worker.fuel),
             });
             if let Some(prev) = ahead.take() {
@@ -1163,16 +1159,20 @@ impl WalkState<'_> {
         }
     }
 
-    /// Takes a batch's walks back from the lanes, charges what they spent
-    /// and commits them in order.
+    /// Takes a batch's walks back from the lanes and commits them in order,
+    /// each charged to the pass's one budget as a single walker would have
+    /// spent it.
     ///
-    /// Every lane spends from the budget left when the batch's turn came,
-    /// the earlier batches charged. A batch handed out while the one before
-    /// was still walking took the budget as it stood then, which is no less;
-    /// a walk sees its budget only when it runs out, so a lane that spent
-    /// less than its due walked as it would have, and one that did not is
-    /// walked again here from its due. A walk a lane did not return is
-    /// walked again here after the charge.
+    /// A lane walks its share of a batch from the budget left when the
+    /// batch was handed out, which is never less than what is left when a
+    /// walk's turn comes here: the batches before it, and the walks before
+    /// it in its own batch, are charged first. A walk sees its budget only
+    /// when it runs out, so one that spent less than what is left is the
+    /// walk this walker would have made, and is kept and charged. Any other
+    /// (it reached what is left, or its lane did not return it) is walked
+    /// again here from what is left: the walk the budget cuts short, and
+    /// after it the walks that never start, are a single walker's own. So
+    /// what the pass finds does not depend on how many lanes walked.
     ///
     /// # Arguments
     ///
@@ -1180,37 +1180,16 @@ impl WalkState<'_> {
     /// * `known` - What the wave's walks read.
     /// * `lanes` - The wave's walker threads.
     fn land(&mut self, ahead: &Ahead<'_>, known: &Known<'_>, lanes: &Lanes<'_>) {
-        let (mut slots, mut spent) = lanes.recv(ahead.batch.len(), ahead.threads, &ahead.sent);
-        let due = self.worker.fuel;
-        if ahead.budget != due && spent.iter().flatten().any(|&s| s >= due) {
-            for (t, used) in spent.iter_mut().enumerate() {
-                if used.is_none() {
-                    continue;
+        let walks = lanes.recv(ahead.batch.len(), ahead.threads, &ahead.sent);
+        for (walk, &entry) in walks.into_iter().zip(ahead.batch) {
+            let walked = match walk {
+                Some((walked, spent)) if spent < self.worker.fuel => {
+                    self.worker.fuel -= spent;
+                    walked
                 }
-                self.worker.fuel = due;
-                for (slot, &entry) in slots
-                    .iter_mut()
-                    .zip(ahead.batch)
-                    .skip(t)
-                    .step_by(ahead.threads)
-                {
-                    *slot = Some(walk_capped(&mut self.worker, entry, known));
-                }
-                *used = Some(due - self.worker.fuel);
-            }
-        }
-        let charged = spent
-            .iter()
-            .flatten()
-            .fold(0u64, |a, &s| a.saturating_add(s));
-        self.worker.fuel = due.saturating_sub(charged);
-        let walked: Vec<Walked> = slots
-            .into_iter()
-            .zip(ahead.batch)
-            .map(|(w, &entry)| w.unwrap_or_else(|| walk_capped(&mut self.worker, entry, known)))
-            .collect();
-        for (&entry, w) in ahead.batch.iter().zip(walked) {
-            self.commit(entry, w);
+                Some(_) | None => walk_capped(&mut self.worker, entry, known),
+            };
+            self.commit(entry, walked);
         }
     }
 
@@ -1422,8 +1401,6 @@ pub(super) struct Ahead<'b> {
     batch: &'b [u64],
     /// How many lanes walk it.
     threads: usize,
-    /// The budget each lane was handed.
-    budget: u64,
     /// Per lane, whether it took its stripe.
     sent: Vec<bool>,
 }

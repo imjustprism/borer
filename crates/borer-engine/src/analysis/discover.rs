@@ -18,7 +18,10 @@ use crate::program::Program;
 /// decode.
 pub(super) fn discover(program: &Program) -> Analysis {
     match program.arch.isa() {
-        Some(Isa::X86 { bits }) => functions::discover(program, bits),
+        Some(Isa::X86 { bits }) => {
+            let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+            functions::discover(program, bits, cores)
+        }
         Some(Isa::A64) => a64::discover(program),
         Some(Isa::A32) => a32::discover(program),
         Some(Isa::Rv(xlen)) => rv::discover(program, xlen),

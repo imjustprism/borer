@@ -504,11 +504,13 @@ pub(super) fn fuel_for(program: &Program) -> u64 {
 ///
 /// * `program` - The loaded image, x86 or x86-64.
 /// * `bitness` - The decoder bitness, `32` or `64`.
+/// * `lanes` - Most threads a wave is walked on, the machine's cores; it
+///   decides how long discovery takes, never what it finds.
 ///
 /// # Returns
 ///
 /// The analysis, indexed ([`Analysis::finish_index`]).
-pub(crate) fn discover(program: &Program, bitness: u32) -> Analysis {
+pub(crate) fn discover(program: &Program, bitness: u32, lanes: usize) -> Analysis {
     let mut phases = crate::timing::Phases::new();
     let mut analysis = Analysis::default();
 
@@ -557,6 +559,7 @@ pub(crate) fn discover(program: &Program, bitness: u32) -> Analysis {
     }
     let mut st = WalkState {
         worker: Worker::new(program, bitness, fuel_for(program)),
+        lanes: lanes.min(WAVE_BATCH),
         starts,
         declared: seeds.clone(),
         queue: seeds,
@@ -988,8 +991,8 @@ struct Lanes<'scope> {
 struct Lane {
     /// The entries of its stripe of a batch and the budget to walk them on.
     stripe: Sender<(Vec<u64>, u64)>,
-    /// Its walks of that stripe, in order, and the budget they spent.
-    walked: Receiver<(Vec<Walked>, u64)>,
+    /// Its walks of that stripe, in order, each with the budget it spent.
+    walked: Receiver<Vec<(Walked, u64)>>,
 }
 
 impl<'scope> Lanes<'scope> {
@@ -1024,11 +1027,13 @@ impl<'scope> Lanes<'scope> {
                 let mut worker = Worker::new(program, bitness, 0);
                 for (entries, budget) in stripes {
                     worker.fuel = budget;
-                    let out: Vec<Walked> = entries
-                        .iter()
-                        .map(|&entry| walk_capped(&mut worker, entry, known))
-                        .collect();
-                    if done.send((out, budget - worker.fuel)).is_err() {
+                    let walk = |&entry: &u64| {
+                        let left = worker.fuel;
+                        let walked = walk_capped(&mut worker, entry, known);
+                        (walked, left - worker.fuel)
+                    };
+                    let out: Vec<(Walked, u64)> = entries.iter().map(walk).collect();
+                    if done.send(out).is_err() {
                         break;
                     }
                 }
@@ -1046,7 +1051,8 @@ impl<'scope> Lanes<'scope> {
     ///
     /// * `batch` - The entries.
     /// * `threads` - How many lanes walk it; at most the lanes there are.
-    /// * `budget` - What each lane may spend.
+    /// * `budget` - What each lane may spend on its stripe: what the pass
+    ///   has left now, of which [`WalkState::land`] charges each walk.
     ///
     /// # Returns
     ///
@@ -1074,26 +1080,19 @@ impl<'scope> Lanes<'scope> {
     ///
     /// # Returns
     ///
-    /// One walk per entry, `None` where a lane failed, and per lane the
-    /// budget it spent, `None` for one that failed.
-    fn recv(
-        &self,
-        len: usize,
-        threads: usize,
-        sent: &[bool],
-    ) -> (Vec<Option<Walked>>, Vec<Option<u64>>) {
-        let mut slots: Vec<Option<Walked>> = (0..len).map(|_| None).collect();
-        let mut spent = vec![None; sent.len()];
+    /// Per entry, its walk and the budget the walk spent on its lane, or
+    /// `None` where a lane failed.
+    fn recv(&self, len: usize, threads: usize, sent: &[bool]) -> Vec<Option<(Walked, u64)>> {
+        let mut slots: Vec<Option<(Walked, u64)>> = (0..len).map(|_| None).collect();
         for ((t, lane), &sent) in self.lanes.iter().enumerate().zip(sent) {
-            let Some(Ok((walked, used))) = sent.then(|| lane.walked.recv()) else {
+            let Some(Ok(walked)) = sent.then(|| lane.walked.recv()) else {
                 continue;
             };
-            spent[t] = Some(used);
             for (slot, w) in slots.iter_mut().skip(t).step_by(threads).zip(walked) {
                 *slot = Some(w);
             }
         }
-        (slots, spent)
+        slots
     }
 
     /// Ends the threads and waits for them. A thread that failed is not an
@@ -2103,6 +2102,9 @@ pub(super) fn add_site(sites: &mut Vec<RefSite>, va: u64, kind: RefKind, from_en
 }
 
 #[cfg(test)]
+mod fuel_tests;
+
+#[cfg(test)]
 mod tests {
     use super::{prints_assert_banner, seh_scope_roots, string_at};
     use crate::analysis::Analysis;
@@ -2344,10 +2346,10 @@ mod tests {
     ///
     /// Three hundred leaves each jump into one shared run of thirty
     /// thousand `nop`s, so every walk decodes it again and the first batch
-    /// spends all but eighty thousand of the two million instructions: each
-    /// lane of the second batch then walks two leaves whole and a third in
-    /// part, and the batches after it nothing. A lane that spent the budget
-    /// it was handed would walk its whole stripe.
+    /// spends all but eighty thousand of the two million instructions: the
+    /// second batch then walks two leaves whole and a third in part,
+    /// however many lanes walk it, and the batches after it nothing. A lane
+    /// that spent the budget it was handed would walk its whole stripe.
     ///
     /// # Panics
     ///
@@ -2362,10 +2364,6 @@ mod tests {
         const SLED: u32 = 0x2000;
         /// `nop`s in the run.
         const NOPS: usize = 30_000;
-        let lanes = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
-        if !(2..=21).contains(&lanes) {
-            return;
-        }
         let mut code = Vec::new();
         for i in 0..LEAVES {
             let next = 0x1000 + 5 * (i + 1);
@@ -2405,7 +2403,7 @@ mod tests {
             .iter()
             .filter(leaf)
             .filter(|f| f.instr_count < NOPS + 2);
-        assert_eq!((whole.count(), part.count()), (64 + 2 * lanes, lanes));
+        assert_eq!((whole.count(), part.count()), (66, 1));
     }
 
     /// Discovery's lists hold what they hold and no spare room.
