@@ -5,6 +5,7 @@ mod cli;
 mod contract;
 mod evidence;
 mod index;
+mod parity;
 mod project;
 mod reload;
 mod resources;

@@ -26,7 +26,8 @@ pub(super) enum Extra {
     Yara,
     /// `names <ida|ghidra|binja|x64dbg> [out]`: names and comments as a script or database for another tool.
     Names,
-    /// `diff <other>`: which functions changed, appeared or went away in another build.
+    /// `diff <other>`: which functions changed, appeared or went away in
+    /// another build, or since a fingerprint sidecar.
     Diff,
     /// `addr <va|rva:<n>|off:<n>>`: one place as a virtual address, relative address, file offset, section and function.
     Addr,
@@ -239,8 +240,13 @@ pub(super) fn run(cmd: Extra, args: &[String], s: &Session) -> anyhow::Result<()
     Ok(())
 }
 
-/// `diff <other>`: the functions another build, or a fingerprint sidecar,
-/// changed, added or removed against this one.
+/// `diff <other>`: the functions another build changed, added or removed
+/// against this one, or the ones this one did against a fingerprint
+/// sidecar.
+///
+/// A sidecar is the earlier build's (`fingerprint <binary> <out>` saves it
+/// beside a build for a later diff), so it is the baseline and the binary
+/// the newer version, as `borer://diff` reads one.
 ///
 /// # Arguments
 ///
@@ -265,10 +271,10 @@ fn diff(args: &[String], s: &Session) -> anyhow::Result<()> {
         .filter(|t| t.starts_with("# borer fingerprint"));
     let text = match sidecar {
         Some(prints) => render::diff_prints_tsv(
-            &render::prints_of(&a),
             &render::parse_prints(&prints),
-            &label(&s.program.path),
+            &render::prints_of(&a),
             &label(path),
+            &label(&s.program.path),
         ),
         None => {
             let (named, program) = open(&["diff".to_owned(), other.to_owned()], &s.loading)?;

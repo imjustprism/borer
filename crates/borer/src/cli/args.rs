@@ -60,7 +60,7 @@ commands:
   sig <binary> <address|name>              the shortest byte signature matching the code once, its moving bytes wildcarded: pattern, code and mask
   yara <binary> <function>[,<function>...]  a YARA rule from the functions' signatures and the strings they reference
   names <binary> <ida|ghidra|binja|x64dbg> [out]  borer's names and comments as an IDAPython, Ghidra or Binary Ninja script or an x64dbg database
-  diff <binary> <other>                    the functions another build changed, added or removed (other may be a fingerprint sidecar)
+  diff <binary> <other>                    the functions another build changed, added or removed; a fingerprint sidecar as other is the earlier build, so the diff is what <binary> changed since
   addr <binary> <va|rva:<n>|off:<n>>       one place as virtual address, relative address, file offset, section and function
   encoded <binary> [filter]                base64 and hex strings that decode to text or a known file
   qt <binary>                              Qt classes from moc metadata: signals, slots, properties
