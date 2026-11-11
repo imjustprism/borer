@@ -31,7 +31,8 @@ env:
 
 jobs:
   # The fast checks every change on its way into dev passes: format, the
-  # comment and spelling checks, Python lint, clippy and the commit messages.
+  # comment and spelling checks, Python lint, the size and duplicate
+  # ratchets, clippy and the commit messages.
   quick:
     if: github.event_name != 'schedule' && !(github.base_ref == 'main' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
@@ -67,6 +68,13 @@ jobs:
 
       - name: ruff
         run: pipx run ruff==0.16.10 check scripts && pipx run ruff==0.16.10 format --check scripts
+
+      - name: sizes
+        run: python3 scripts/check/sizes.py
+
+      # jscpd@4.0.5, the version the script pins, through the runner's npx.
+      - name: dupes
+        run: python3 scripts/check/dupes.py
 
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
