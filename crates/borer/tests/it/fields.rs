@@ -252,6 +252,10 @@ fn a_hostile_project_refuses_its_stated_fields() {
             serde_json::json!({"C": {"0x10": "m_buf char[16]", "0x14": "m_in u32"}}),
             "class C: field m_in at 0x14 overlaps m_buf, which ends at 0x20",
         ),
+        (
+            serde_json::json!({"A\u{1}": {"0x8": "m_a"}, "A\\x01": {"0x10": "m_b"}}),
+            "fields names class 'A\\x01' under two keys; keep one",
+        ),
     ] {
         let refused = project(fields.clone()).expect_err("the hostile project loaded");
         assert!(refused.contains(says), "{fields}: {refused}");

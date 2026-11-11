@@ -1,6 +1,6 @@
 //! Project persistence: overlay annotations saved as an editable JSON file.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use borer_engine::analysis::Overlay;
@@ -291,7 +291,9 @@ impl ProjectFile {
     /// naming it rather than silently naming no fields. The fields stated
     /// of classes are read by offset and checked the same way
     /// ([`borer_engine::analysis::stated::validate`]); a class the file
-    /// states no field of is left out.
+    /// states no field of is left out, and two keys that read as one class
+    /// once escaped to a line refuse the file, as two keys of one address
+    /// do.
     ///
     /// # Returns
     ///
@@ -299,9 +301,10 @@ impl ProjectFile {
     ///
     /// # Errors
     ///
-    /// When a key is not an address or two keys name one, an applied type,
-    /// a prototype, a variable or a class's field does not parse, or a
-    /// defined type's or a field's references do not resolve.
+    /// When a key is not an address or two keys name one address or one
+    /// class, an applied type, a prototype, a variable or a class's field
+    /// does not parse, or a defined type's or a field's references do not
+    /// resolve.
     pub fn to_overlay(&self) -> Result<Overlay, String> {
         let mut applied: BTreeMap<u64, borer_engine::analysis::utypes::TypeExpr> = BTreeMap::new();
         for (va, (_, v)) in keyed("applied", &self.applied)? {
@@ -350,8 +353,15 @@ impl ProjectFile {
             ));
         }
         let mut fields: BTreeMap<String, BTreeMap<u64, Field>> = BTreeMap::new();
+        let mut classes: BTreeSet<String> = BTreeSet::new();
         for (class, table) in &self.fields {
             let class = borer_engine::text::one_line(class);
+            if !classes.insert(class.clone()) {
+                return Err(format!(
+                    "fields names class {} under two keys; keep one",
+                    borer_engine::text::quoted(&class)
+                ));
+            }
             for (off, (_, text)) in keyed(&format!("fields of {class}"), table)? {
                 let field = Field::parse(text)
                     .map_err(|e| format!("the field of {class} at {off:#x}: {e}"))?;
