@@ -3,7 +3,9 @@
   "pattern": "crates/**/*.rs",
   "minTokens": 70,
   "minLines": 6,
-  "threshold": 1.1,
+  "maxLines": 100000,
+  "maxSize": "10mb",
+  "threshold": 0,
   "reporters": ["console"],
   "gitignore": true,
   "silent": false

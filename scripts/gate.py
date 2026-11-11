@@ -18,7 +18,7 @@ what the rest reads. Every other step then starts as soon as the steps it
 needs have passed, side by side with the rest: the checks that take
 seconds (typos, the comment check, ruff check and format, the type library
 (scripts/check/typelib.py --check), the size budgets (scripts/check/sizes.py),
-the duplicate scan (jscpd) and cargo deny (offline subset)); cargo clippy -D
+the duplicate scan (scripts/check/dupes.py) and cargo deny (offline subset)); cargo clippy -D
 warnings and then cargo doc with warnings as errors (private items
 included); the debug build, cargo test and the doctests; the corpus and
 sweep builds, then the dogfood sweeps over real binaries; and, once the
@@ -489,12 +489,18 @@ def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[St
             inputs=RUST + SCRIPTS,
         ),
         Step("sizes", [py, os.path.join("scripts", "check", "sizes.py")], inputs=RUST + SCRIPTS),
-        # Duplicated Rust over the threshold in .jscpd.json fails.
+        # More duplicated Rust lines than scripts/check/dupes.tsv records fail.
         Step(
             "dupes",
-            [shutil.which("npx") or "npx", "--yes", "jscpd@4.0.5", "."],
+            [py, os.path.join("scripts", "check", "dupes.py")],
             tool="npx",
-            inputs=("crates/", ".jscpd.json"),
+            inputs=(
+                "crates/",
+                ".jscpd.json",
+                "scripts/check/dupes",
+                "scripts/check/ratchet.py",
+                "scripts/harness/",
+            ),
         ),
         Step(
             "clippy",

@@ -12,7 +12,7 @@ critical:
   - Search before writing (rg for the name and the shape). Use std or the existing helper; the second copy of any logic becomes a shared helper in the module that owns that concern.
   - Smallest change that solves the problem. No drive-by refactors, no speculative options.
   - Delete dead code. No commented-out code, compatibility shims or dead feature flags.
-  - Functions stay within 100 code lines and files within 1500 (scripts/check/sizes.py; entries in sizes.tsv may shrink, never grow). Duplication stays under the .jscpd.json threshold.
+  - Functions stay within 100 code lines and files within 1500 (scripts/check/sizes.py; entries in sizes.tsv may shrink, never grow). Duplicated lines may shrink, never grow (scripts/check/dupes.py runs jscpd over every tracked Rust file against the count in dupes.tsv).
   correctness:
   - Never claim more than the engine shows. A heuristic answer names its evidence and says when it is unsure; a missed finding beats a false one. Rough output says it is rough.
   - 'Determinism is a contract: same binary, same query, same bytes, at any thread count. No clock (clippy.toml disallowed-methods), seed, hash order (iter_over_hash_type) or environment in an answer.'
