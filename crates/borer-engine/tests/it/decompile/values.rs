@@ -1522,3 +1522,34 @@ fn a_lea_into_a_low_half_reads_its_registers_that_far() {
     let text = runs_agree(&program64(&carried), 0x1_4000_1000);
     assert!(text.contains("\nreturn 7;\n"), "{text}");
 }
+
+/// An address folds no wider than the machine sums it.
+///
+/// 32-bit code wraps an address at 4 GiB: `xor ecx,ecx; mov eax,[ecx-4]`
+/// reads `0xfffffffc`, where the sum taken at 64 bits read as a thread
+/// slot. `lea rax,[ecx+8]` of 64-bit code wraps there too, which neither
+/// the lift nor the emulator models, so under `ecx == -1` it stays the sum
+/// of the variable: folded, it read `0x100000007` for the machine's 7.
+#[test]
+fn a_folded_address_is_no_wider_than_it_is_addressed() {
+    let wrapped = [
+        0x31, 0xc9, // ASM: xor ecx,ecx
+        0x8b, 0x41, 0xfc, // ASM: mov eax,[ecx-4]
+        0xc3, // ASM: ret
+    ];
+    let text = decompiled(&program32(&wrapped), 0x40_1000);
+    assert!(
+        text.contains("\nreturn *(uint32_t*)0xfffffffc;\n"),
+        "{text}"
+    );
+    let prefixed = [
+        0x83, 0xf9, 0xff, // ASM: cmp ecx,-1
+        0x75, 0x06, // ASM: jne 0x14000100b
+        0x67, 0x48, 0x8d, 0x41, 0x08, // ASM: lea rax,[ecx+8]
+        0xc3, // ASM: ret
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xc3, // ASM: ret
+    ];
+    let text = runs_agree(&program64(&prefixed), 0x1_4000_1000);
+    assert!(!text.contains("0x100000007"), "{text}");
+}

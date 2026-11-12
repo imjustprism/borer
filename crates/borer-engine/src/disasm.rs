@@ -68,6 +68,26 @@ pub fn addresses_16_bit(instr: &Instruction) -> bool {
         || instr.memory_displ_size() == 2
 }
 
+/// Tells whether a memory operand of 64-bit code is addressed with 32-bit
+/// registers: an address-size prefix (`67 48 8d 41 08` is `lea rax,
+/// [ecx+8]`).
+///
+/// SPEC: Intel SDM Vol. 1, 3.3.7: with a 32-bit address size in 64-bit
+/// mode the effective address is computed modulo 2^32 and zero-extended.
+/// iced names the 32-bit registers and reports a full displacement of that
+/// address size as four bytes wide.
+///
+/// # Arguments
+///
+/// * `instr` - An instruction with a memory operand.
+/// * `bitness` - Decoder bitness (32 or 64).
+pub fn wraps_at_32(instr: &Instruction, bitness: u32) -> bool {
+    bitness == 64
+        && (instr.memory_base().size() == 4
+            || instr.memory_index().size() == 4
+            || instr.memory_displ_size() == 4)
+}
+
 /// Disassembles up to `max_instrs` instructions from `code`.
 ///
 /// Undecodable bytes render as `(bad)` instead of stopping the sweep, so an

@@ -186,13 +186,15 @@ impl<'a> Exec<'_, 'a> {
     /// # Arguments
     ///
     /// * `e` - The value as the environment holds it.
-    /// * `bits` - How many of its low bits the read uses.
+    /// * `bits` - How many of its low bits the read uses; none for a read
+    ///   that takes nothing the block assumes.
     ///
     /// # Returns
     ///
     /// `e` with the assumed variable replaced by its constant, or `e` itself.
     pub(in crate::analysis::decompile) fn assumed(&self, e: Expr, bits: u8) -> Expr {
         match self.assume {
+            _ if bits == 0 => e,
             Some((k, c, WHOLE)) if e.mentions(k) => e.subst(&Expr::Var(k), &Expr::Const(c)),
             Some((k, c, known)) if bits <= known && e.is_var(k) => Expr::Const(c),
             _ => e,
@@ -276,11 +278,9 @@ impl<'a> Exec<'_, 'a> {
     /// * `instr` - The `lea`, its destination a register.
     pub(super) fn lea(&self, instr: &Instruction) -> Expr {
         let kept = u8::try_from(8 * instr.op0_register().size()).unwrap_or(WHOLE);
-        let a = self.addr_low(instr, kept);
-        if let Expr::Const(c) = a {
-            Expr::Const(c & mask_bits(kept))
-        } else {
-            a
+        match self.addr_low(instr, kept) {
+            Expr::Const(c) => Expr::Const(c & mask_bits(kept)),
+            a => a,
         }
     }
 
@@ -289,11 +289,21 @@ impl<'a> Exec<'_, 'a> {
     /// of the sum, which the low halves of its registers decide
     /// ([`Exec::reg_low`]).
     ///
+    /// The sum is taken at 64 bits. In 32-bit code the machine wraps it at
+    /// 4 GiB, so one that folds to a constant is cut there: `[ecx+8]` with
+    /// `ecx` 0xffffffff is 7. A 32-bit address in 64-bit code wraps as
+    /// well ([`crate::disasm::wraps_at_32`]), which the sum here does not,
+    /// so nothing the block assumes of a register is read into it: under
+    /// `ecx == 0xffffffff`, `lea rax, [ecx+8]` stays the sum of the
+    /// variable, where the constant read `0x100000007` for the machine's 7.
+    ///
     /// # Arguments
     ///
     /// * `instr` - The instruction.
     /// * `bits` - How many low bits of the address the reader keeps.
     fn addr_low(&self, instr: &Instruction, bits: u8) -> Expr {
+        let wraps = crate::disasm::wraps_at_32(instr, self.bitness());
+        let bits = if wraps { 0 } else { bits };
         let sixteen = crate::disasm::addresses_16_bit(instr);
         let disp = if sixteen {
             i64::from(crate::num::lo16(instr.memory_displacement64()).cast_signed()).cast_unsigned()
@@ -318,6 +328,8 @@ impl<'a> Exec<'_, 'a> {
         }
         if sixteen {
             e = fold(Op::And, e, Expr::Const(0xffff), 64);
+        } else if let (32, Expr::Const(c)) = (self.bitness(), &e) {
+            e = Expr::Const(c & 0xffff_ffff);
         }
         let seg = instr.segment_prefix();
         if matches!(seg, Register::FS | Register::GS) {
