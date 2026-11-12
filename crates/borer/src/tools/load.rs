@@ -71,7 +71,10 @@ pub(crate) fn max_file_size(value: Option<&str>) -> u64 {
 /// Refuses a file larger than borer loads, before it is read.
 ///
 /// A path that names no file (or a `<file>@<offset>` slice) passes, so
-/// the load says what is wrong with it.
+/// the load says what is wrong with it. One the loader never opens (a
+/// share, a device; [`borer_engine::program::unusable_path`]) is refused
+/// first, with the loader's reason: reading only its size asks the host of
+/// a share whether the file is there.
 ///
 /// # Arguments
 ///
@@ -80,9 +83,13 @@ pub(crate) fn max_file_size(value: Option<&str>) -> u64 {
 ///
 /// # Errors
 ///
-/// When the file is larger than `max`, naming both sizes, the variable
-/// that raises the limit and the ways to load a part.
+/// When the path is one the loader never opens, or the file is larger
+/// than `max`, naming both sizes, the variable that raises the limit and
+/// the ways to load a part.
 pub(crate) fn file_fits(path: &Path, max: u64) -> Result<(), String> {
+    if let Some(why) = borer_engine::program::unusable_path(path) {
+        return Err(why);
+    }
     match std::fs::metadata(path) {
         Ok(meta) if meta.is_file() && meta.len() > max => Err(format!(
             "{} is {} bytes, past the {max}-byte limit: borer reads a file into memory whole and its analysis takes several times that. Set {MAX_FILE_ENV} (bytes, or 4G; 0 for no limit) to load it anyway, or load a part: <file>@<offset> for an embedded program, or arch with regions for raw ranges",
@@ -677,6 +684,23 @@ mod tests {
         assert!(refused.contains("16-byte limit"), "{refused}");
         assert!(file_fits(&exe, u64::MAX).is_ok());
         assert!(file_fits(std::path::Path::new("no/such/file"), 16).is_ok());
+    }
+
+    /// A share is refused before its size is read, for every caller.
+    ///
+    /// The size check read the metadata first, which asked the host whether
+    /// the file was there, and only the load refused the path after it.
+    ///
+    /// # Panics
+    ///
+    /// When a share passes the size check.
+    #[test]
+    fn a_share_is_refused_before_its_size_is_read() {
+        if cfg!(windows) {
+            let share = std::path::Path::new(r"\\host.invalid\share\a.exe");
+            let refused = super::file_fits(share, 16).expect_err("a share is never stated");
+            assert!(refused.contains("names a network share"), "{refused}");
+        }
     }
 
     /// A relative path that does not load says the directory it was
