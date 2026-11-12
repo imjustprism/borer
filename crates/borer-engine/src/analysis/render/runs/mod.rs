@@ -28,7 +28,8 @@ pub use repair::{
 use spec::{RunSpec, parse_run};
 use vectors::VERIFY_SEED;
 pub use vectors::{
-    Bisected, Counterexample, bisect_iso, check_generated, check_generated_iso, vectors_tsv,
+    Bisected, Checked, Counterexample, bisect_iso, check_generated, check_generated_iso,
+    vectors_tsv,
 };
 
 /// Most input sets one request runs.
@@ -570,7 +571,7 @@ pub enum Verdict {
 /// An input left unchecked says nothing, so a text no input checked is not
 /// one that agrees.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Grade {
+pub enum Grade {
     /// Some input differs, or something else contradicts the text.
     Differs,
     /// Nothing contradicts the text and at least one input agrees.

@@ -19,7 +19,7 @@
 use std::cell::Cell;
 use std::sync::Arc;
 
-use super::vectors::{Checked, Counterexample, draw, first_breaking, first_difference};
+use super::vectors::{Checked, Counterexample, Placed, draw, first_breaking, first_difference};
 use crate::analysis::decompile::{Pass, Passes, Site, choice_points, text_check};
 use crate::analysis::{Analysis, Overlay};
 use crate::program::Program;
@@ -298,9 +298,7 @@ pub fn repair_iso(p: &Program, a: &Analysis, o: &Overlay, entry: u64, budget: Bu
             passes: skip,
             ..o.clone()
         };
-        let bare = probe(&without(Passes::after(0)));
-        if bare.differs.is_none() && bare.agreed > 0 {
-            let (good, _, _) = first_breaking(&|skip| probe(&without(skip)).differs);
+        if let Placed::At(good, _) = first_breaking(&|skip| probe(&without(skip))) {
             order.extend(Pass::ALL.get(good).map(|p| Site::Pass(*p)));
         }
     }

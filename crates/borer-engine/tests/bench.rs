@@ -38,7 +38,7 @@ use borer_engine::analysis::decompile::{
     with_header,
 };
 use borer_engine::analysis::render::{
-    Bisected, Budget, Evidence, INCOMPLETE_NOTE, Repair, Verdict, answered, bisect_iso,
+    Bisected, Budget, Evidence, Grade, INCOMPLETE_NOTE, Repair, Verdict, answered, bisect_iso,
     check_generated, check_generated_iso, next_steps, repair_iso,
 };
 use borer_engine::analysis::{Analysis, Overlay, name_of};
@@ -393,6 +393,13 @@ fn bisect_passes() {
                         c.input, c.line, c.why
                     );
                 }
+                Ok(Bisected::Unplaced { at, .. }) => {
+                    table.entry("(unplaced)".to_owned()).or_default().0 += 1;
+                    println!(
+                        "{bin}\t{name}\tunplaced\t-\t{}\t{}\t{}",
+                        at.input, at.line, at.why
+                    );
+                }
                 Ok(Bisected::Broke {
                     pass,
                     at,
@@ -403,6 +410,7 @@ fn bisect_passes() {
                         println!("--- before {}\n{}", pass.name(), texts.0);
                         println!("--- after {}\n{}", pass.name(), texts.1);
                     }
+                    let alone = alone.grade() == Grade::Agrees;
                     let row = table.entry(pass.name().to_owned()).or_default();
                     row.0 += 1;
                     row.1 += usize::from(alone);

@@ -341,6 +341,19 @@ pub enum Bisected {
     /// The text with every pass left out differs already: what the passes
     /// were handed was wrong, so no pass broke it.
     Unbisected(Counterexample),
+    /// The full text differs, and a text the bisection needed left every
+    /// input unchecked: that text neither agrees nor differs, so no pass
+    /// is named.
+    Unplaced {
+        /// The input the full text differs on, and where.
+        at: Counterexample,
+        /// How many passes, from the start of [`Pass::ALL`], ran in the
+        /// text no input checked.
+        ran: usize,
+        /// Why its inputs went unchecked, each reason with how many
+        /// inputs, the commonest first.
+        unchecked: Vec<(String, usize)>,
+    },
     /// The text with the passes before `pass` agrees and the text with
     /// `pass` too differs.
     Broke {
@@ -348,9 +361,10 @@ pub enum Bisected {
         pass: Pass,
         /// The input it differs on, and where.
         at: Counterexample,
-        /// Whether the full pipeline with only this pass left out agrees,
-        /// so leaving it out alone repairs the function.
-        alone: bool,
+        /// What the full pipeline with only this pass left out did: when
+        /// it agrees ([`Checked::grade`]), leaving the pass out alone
+        /// repairs the function.
+        alone: Checked,
         /// The text with the passes before `pass`, and with `pass` too.
         texts: (String, String),
     },
@@ -375,11 +389,12 @@ pub struct Counterexample {
 /// passes of [`Pass::ALL`] are bisected: the text built with only the
 /// first `k` of them ([`Passes::after`]) is checked for each `k` a binary
 /// search asks for, from none (which must agree, or no pass is to blame)
-/// to all. A probe of the bisection that does not read, or leaves an
-/// input unchecked, differs on nothing: the bisection looks for a
-/// difference. The full text is graded as every answer grades one
-/// ([`Grade`]): it agrees when an input does, and is unchecked when none
-/// was checked.
+/// to all. Every text is graded as every answer grades one
+/// ([`Checked::grade`]): it agrees when an input does and none differs,
+/// and is unchecked when none was checked. A text of the bisection no
+/// input checked places nothing, so no pass is named
+/// ([`Bisected::Unplaced`]), and the full text with the blamed pass alone
+/// left out repairs the function only when it agrees.
 ///
 /// # Arguments
 ///
@@ -412,76 +427,108 @@ pub fn bisect_iso(
         ..o.clone()
     };
     let drawn = draw(p, a, &full, entry, count, seed)?;
-    let check = |skip: Passes| {
-        let under = Overlay {
-            passes: skip,
-            ..full.clone()
-        };
-        first_difference(p, a, &under, entry, &drawn, budget)
+    let under = |skip: Passes| Overlay {
+        passes: skip,
+        ..full.clone()
     };
-    let differs = |skip: Passes| check(skip).differs;
-    let whole = check(Passes::NONE);
-    let Some(mut at) = whole.differs else {
-        return Ok(match Grade::of(whole.agreed, 0) {
-            Grade::Unchecked => Bisected::Unchecked(commonest(whole.unchecked)),
-            Grade::Agrees | Grade::Differs => Bisected::Agrees,
-        });
-    };
-    if let Some(before) = differs(Passes::after(0)) {
-        return Ok(Bisected::Unbisected(before));
-    }
-    let (good, bad, c) = first_breaking(&differs);
-    if let Some(c) = c {
-        at = c;
-    }
-    let Some(&pass) = Pass::ALL.get(good) else {
-        return Ok(Bisected::Unbisected(at));
-    };
-    let alone = differs(Passes::NONE.without(pass)).is_none();
-    let text_of = |k: usize| {
-        let under = Overlay {
-            passes: Passes::after(k),
-            ..full.clone()
-        };
-        decompile_named(p, a, &under, entry).unwrap_or_default()
-    };
-    Ok(Bisected::Broke {
-        pass,
-        at,
-        alone,
-        texts: (text_of(good), text_of(bad)),
-    })
+    Ok(bisected(
+        &|skip| first_difference(p, a, &under(skip), entry, &drawn, budget),
+        &|k| decompile_named(p, a, &under(Passes::after(k)), entry).unwrap_or_default(),
+    ))
 }
 
-/// Bisects [`Pass::ALL`] for the first pass whose text differs, given that
-/// the text with none of them agrees and the text with all of them does
-/// not.
+/// [`bisect_iso`] over any check of a text and any texts.
 ///
 /// # Arguments
 ///
-/// * `differs` - Checks the text built without a set of passes: the input
-///   it differs on, or `None` when it agrees.
+/// * `check` - Checks the text built without a set of passes.
+/// * `text_of` - The text built with only so many passes, from the start
+///   of [`Pass::ALL`].
+pub(super) fn bisected(
+    check: &impl Fn(Passes) -> Checked,
+    text_of: &impl Fn(usize) -> String,
+) -> Bisected {
+    let whole = check(Passes::NONE);
+    let Some(at) = whole.differs.clone() else {
+        return match whole.grade() {
+            Grade::Unchecked => Bisected::Unchecked(commonest(whole.unchecked)),
+            Grade::Agrees | Grade::Differs => Bisected::Agrees,
+        };
+    };
+    let (good, narrowest) = match first_breaking(check) {
+        Placed::Before(before) => return Bisected::Unbisected(before),
+        Placed::Unchecked(ran, probe) => {
+            let unchecked = commonest(probe.unchecked);
+            return Bisected::Unplaced { at, ran, unchecked };
+        }
+        Placed::At(good, narrowest) => (good, narrowest),
+    };
+    let Some(&pass) = Pass::ALL.get(good) else {
+        return Bisected::Unbisected(at);
+    };
+    Bisected::Broke {
+        pass,
+        at: narrowest.unwrap_or(at),
+        alone: check(Passes::NONE.without(pass)),
+        texts: (text_of(good), text_of(good + 1)),
+    }
+}
+
+/// Where a bisection of the passes ([`first_breaking`]) ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Placed {
+    /// The text with every pass left out differs already, on this input.
+    Before(Counterexample),
+    /// A text the bisection needed left every input unchecked: how many
+    /// passes ran in it, and what its runs said.
+    Unchecked(usize, Checked),
+    /// How many passes run in the last text that agreed, the next pass
+    /// being the first whose text differs, and the counterexample of the
+    /// narrowest text that differed, `None` when the bisection probed none.
+    At(usize, Option<Counterexample>),
+}
+
+/// Bisects [`Pass::ALL`] for the first pass whose text differs, given that
+/// the text with all of them does.
+///
+/// The text with none of them is checked first, then the text a binary
+/// search asks for. A text that agrees moves the search up and one that
+/// differs moves it down; a text no input checked does neither
+/// ([`Checked::grade`]), and the search ends there.
+///
+/// # Arguments
+///
+/// * `check` - Checks the text built without a set of passes.
 ///
 /// # Returns
 ///
-/// How many passes run in the last text that agreed and in the first that
-/// differed, and the counterexample of the narrowest text that differed,
-/// `None` when the bisection probed none.
-pub(super) fn first_breaking(
-    differs: &impl Fn(Passes) -> Option<Counterexample>,
-) -> (usize, usize, Option<Counterexample>) {
+/// Where the search ended ([`Placed`]).
+pub(super) fn first_breaking(check: &impl Fn(Passes) -> Checked) -> Placed {
     let (mut good, mut bad, mut at) = (0, Pass::ALL.len(), None);
-    while bad - good > 1 {
+    let mut probe = check(Passes::after(0));
+    if let Some(before) = probe.differs.take() {
+        return Placed::Before(before);
+    }
+    loop {
+        if probe.grade() == Grade::Unchecked {
+            return Placed::Unchecked(good, probe);
+        }
+        if bad - good <= 1 {
+            return Placed::At(good, at);
+        }
         let mid = good + (bad - good) / 2;
-        match differs(Passes::after(mid)) {
+        let mut next = check(Passes::after(mid));
+        match next.differs.take() {
             Some(c) => {
                 bad = mid;
                 at = Some(c);
             }
-            None => good = mid,
+            None => {
+                good = mid;
+                probe = next;
+            }
         }
     }
-    (good, bad, at)
 }
 
 /// The inputs a function's texts are checked on, drawn once from the
@@ -536,22 +583,32 @@ pub(super) fn draw(
 
 /// What one text did on drawn inputs under the ISO check.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct Checked {
+pub struct Checked {
     /// The first input the text differs on, and where; `None` when none.
-    pub(super) differs: Option<Counterexample>,
+    pub differs: Option<Counterexample>,
     /// Inputs the text agreed on before it differed, or in all.
-    pub(super) agreed: usize,
+    pub agreed: usize,
     /// Why inputs were left unchecked before it differed, or in all, each
     /// reason with how many.
-    pub(super) unchecked: BTreeMap<String, usize>,
+    pub unchecked: BTreeMap<String, usize>,
+}
+
+impl Checked {
+    /// What the runs say of the text: it differs when an input does, agrees
+    /// when one agrees and none differs, and is unchecked when no input was
+    /// checked ([`Grade`]).
+    #[must_use]
+    pub fn grade(&self) -> Grade {
+        Grade::of(self.agreed, usize::from(self.differs.is_some()))
+    }
 }
 
 /// Runs a function's text, read as ISO C, beside the binary on drawn
 /// inputs, until the first input it differs on.
 ///
-/// A text that does not decompile or read, or an input it leaves
-/// unchecked, differs on nothing: the check looks for a difference, not
-/// for a claim.
+/// A text that does not decompile or read leaves every input unchecked,
+/// and an input left unchecked neither agrees nor differs
+/// ([`Checked::grade`]).
 ///
 /// # Arguments
 ///
@@ -575,6 +632,8 @@ pub(super) fn first_difference(
 ) -> Checked {
     let mut out = Checked::default();
     let Some(text) = decompile_named(p, a, u, entry) else {
+        let why = "the text does not decompile".to_owned();
+        out.unchecked.insert(why, drawn.inputs.len());
         return out;
     };
     let shared = Shared {
