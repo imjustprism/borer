@@ -864,6 +864,41 @@ impl<'c, 'a> Exec<'c, 'a> {
     }
 }
 
+impl Exec<'_, '_> {
+    /// Reads the conditional branch ending a block.
+    ///
+    /// `loop`, `loope`, `loopne` and `jrcxz` branch on the count register,
+    /// which no condition code over the flags says (`loopne` carries `ne`
+    /// for the half of its test that reads them), and the first three
+    /// count it down as well. None of them has a model: each stays in the
+    /// text as a comment, what it leaves in the count register is forgotten
+    /// as after any instruction without one ([`Exec::unmodeled`]), and the
+    /// branch it makes is kept on flags the text spells as unknown.
+    ///
+    /// # Arguments
+    ///
+    /// * `instr` - The branch.
+    ///
+    /// # Returns
+    ///
+    /// The condition code, the target and the fall-through; `None` for a
+    /// branch whose target the instruction does not name.
+    fn branch(&mut self, instr: &Instruction) -> Option<(Cc, u64, u64)> {
+        use Mnemonic::{Jcxz, Jecxz, Jrcxz, Loop, Loope, Loopne};
+        let target = near_target(instr);
+        if target.is_none()
+            || matches!(
+                instr.mnemonic(),
+                Loop | Loope | Loopne | Jcxz | Jecxz | Jrcxz
+            )
+        {
+            self.unmodeled(instr);
+            self.flags = Flags::Unknown;
+        }
+        target.map(|t| (Cc(instr.condition_code()), t, instr.next_ip()))
+    }
+}
+
 /// Executes one block from `env`, returning its lines and control-flow facts.
 ///
 /// Flags inherited from the predecessors seed the executor. Flag liveness is
@@ -940,16 +975,9 @@ pub(super) fn exec_block(
         let next = instrs.get(idx + 1);
         match instr.flow_control() {
             FlowControl::ConditionalBranch => {
-                if let Some(t) = near_target(instr) {
-                    jcc = Some((Cc(instr.condition_code()), t, instr.next_ip()));
-                    go_folded = ex
-                        .ctx
-                        .go_check
-                        .as_ref()
-                        .is_some_and(|(at, _)| *at == instr.ip());
-                } else {
-                    ex.unmodeled(instr);
-                }
+                jcc = ex.branch(instr);
+                let checked = ex.ctx.go_check.as_ref();
+                go_folded = jcc.is_some() && checked.is_some_and(|(at, _)| *at == instr.ip());
             }
             FlowControl::UnconditionalBranch => match near_target(instr) {
                 Some(t) if ex.ctx.block_starts.contains(&t) => out.goto = Some(t),
