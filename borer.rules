@@ -4,7 +4,7 @@
 # .github/copilot-instructions.md) only point here: edit this file. Valid YAML.
 # Sections run most critical first. A rule naming a tool is enforced by it.
 
-about: 'borer is an agent-native reverse-engineering engine: borer-engine, a pure, sync, wasm-buildable Rust library that owns its loader, IR and analysis, and borer, a thin MCP server and CLI over it. The agent is the user, so token economy is a feature. No GUI, web UI or TUI, ever; never bridge to another reverse-engineering tool as a backend.'
+about: 'borer is a reverse-engineering engine for agents and people: borer-engine, a pure, sync, wasm-buildable Rust library that owns its loader, IR and analysis; borer, a thin MCP server and CLI over it for agents, where token economy is a feature; and borer-app, a GPUI app built from Zed''s crates over the same engine and session for people, on the desktop and in the browser. Never bridge to another reverse-engineering tool as a backend.'
 critical:
   simplicity:
   - Fewest lines that work. Same behavior in less code wins; nothing clever, nothing cute.
@@ -51,6 +51,14 @@ important:
   - 'Descriptions are for an agent that never saw the project: what it returns, its caps, its defaults.'
   - A parameter that takes one of a few words is a schema enum (params::ReadKind, SymbolKind, SearchKind); no handler matches on strings.
   - Addresses accept 0x-hex, decimal or a name at the boundary (parse_addr, resolve); inside they are u64 virtual addresses.
+  ui:
+  - 'borer-app is its own cargo workspace under app/, licensed AGPL-3.0 only. It builds on Zed''s crates (gpui and its platform crates, ui, theme, settings, editor, rope and the rest; Apache-2.0 and GPL-3.0-or-later) pinned to one Zed revision, and reuses what Zed has (workspace, panes, docks, editor, picker, command palette, settings, keymaps, themes) instead of rebuilding it.'
+  - 'The main workspace (engine, server, live, fixtures) never depends on a GPL crate, so it stays commercially licensable; each workspace''s deny.toml enforces its own license list.'
+  - 'An adapter like the server: logic lives in the engine or the session behind a test. The app formats the engine''s tokens and never derives a fact of its own.'
+  - No engine call on the UI thread. Engine work runs as a background task, cancelled when the user navigates away.
+  - Every edit goes through the edit path agents use, so people and agents see one overlay and one change feed.
+  - 'Keyboard first: every action is in the command palette.'
+  - 'Bars: a frame under 8.3 ms at p99 while scrolling a million-line view, input to paint under 16 ms, first frame under 300 ms, notepad.exe open to its function list under 1 s, and the app''s memory beyond the engine''s under 150 MB.'
   types:
   - An address is a u64 virtual address. A file offset or size says so (`off`, `len`, `size`) and converts only through Program::offset_to_va and va_to_offset. Functions and blocks are named by start address and found by Analysis::function or function_at, never by a held index.
   - Parse at the boundary into typed structs, then trust them. Enums over bools, Option over sentinels, usize lengths.
