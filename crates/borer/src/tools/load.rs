@@ -607,7 +607,7 @@ impl BorerServer {
                     borer_engine::text::short_path(&loaded_path.replace('\\', "/"))
                 ),
                 None => format!(
-                    "the project was saved for {saved_for}, but {} is loaded; nothing was loaded. Its addresses belong to that binary: load it first, or pass force=true to load the project anyway",
+                    "the project was saved for {saved_for}, but {} is loaded, another path as text: the project records no sha-256, so its path names its binary; nothing was loaded. Load that binary first, or pass force=true to load the project anyway and save_project to record the hash",
                     borer_engine::text::short_path(&loaded_path)
                 ),
             }));
@@ -969,6 +969,37 @@ mod tests {
                 && said.contains("name at 0x1020 ('1st' opens with a digit")
                 && said.contains(&cut),
             "{said}"
+        );
+    }
+
+    /// A project with no hash saved for another path is refused as another
+    /// path as text, saying how to load it anyway and record its hash.
+    ///
+    /// # Panics
+    ///
+    /// When the project loads or the refusal misses the way out.
+    #[test]
+    fn a_hashless_project_for_another_path_says_how_to_load_it() {
+        use crate::params::LoadProjectParams;
+        use rmcp::handler::server::wrapper::Parameters;
+        let server = crate::testing::raw_server();
+        let dir = std::env::temp_dir().join(format!("borer-load-path-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        let path = dir.join("old.json");
+        std::fs::write(
+            &path,
+            r#"{"program":"elsewhere.exe","names":{},"comments":{}}"#,
+        )
+        .expect("the project is written");
+        let refused = server.load_project(Parameters(LoadProjectParams {
+            path: path.display().to_string(),
+            force: None,
+        }));
+        std::fs::remove_dir_all(&dir).expect("cleans up");
+        let refused = refused.expect_err("another path").message;
+        assert!(
+            refused.contains("another path as text") && refused.contains("save_project"),
+            "{refused}"
         );
     }
 

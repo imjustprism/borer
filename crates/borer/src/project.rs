@@ -1,6 +1,6 @@
 //! Project persistence: overlay annotations saved as an editable JSON file.
 
-use std::path::{Component, Path};
+use std::path::{Component, Path, Prefix};
 
 use borer_engine::analysis::Overlay;
 use borer_engine::analysis::project::Project;
@@ -154,8 +154,7 @@ pub fn keep_placeable(o: &mut Overlay, program: &Program) -> Vec<String> {
 /// # Returns
 ///
 /// [`Path::components`] with `.` dropped and each `..` folded into the
-/// component before it (at a root, into the root). Names keep their letter
-/// case; only a drive letter compares in either case, as std parses it.
+/// component before it (at a root, into the root).
 fn lexical(path: &Path) -> Vec<Component<'_>> {
     let mut out = Vec::new();
     for part in path.components() {
@@ -169,6 +168,31 @@ fn lexical(path: &Path) -> Vec<Component<'_>> {
         }
     }
     out
+}
+
+/// Tells whether two components name one thing as text: on Windows a name
+/// in either ASCII case, and a drive in its long `\\?\` form, as Windows
+/// reads them; elsewhere only the same text.
+///
+/// # Arguments
+///
+/// * `a` - A component of one path.
+/// * `b` - The component of the other path at the same place.
+fn alike(a: &Component<'_>, b: &Component<'_>) -> bool {
+    let drive = |c: &Component<'_>| {
+        if let Component::Prefix(p) = c
+            && let Prefix::Disk(d) | Prefix::VerbatimDisk(d) = p.kind()
+        {
+            Some(d)
+        } else {
+            None
+        }
+    };
+    match (a, b) {
+        (Component::Normal(x), Component::Normal(y)) if cfg!(windows) => x.eq_ignore_ascii_case(y),
+        _ if cfg!(windows) && drive(a).is_some() => drive(a) == drive(b),
+        _ => a == b,
+    }
 }
 
 impl ProjectFile {
@@ -210,18 +234,22 @@ impl ProjectFile {
     ///
     /// A project with its binary's SHA-256 is matched by the hash alone
     /// ([`ProjectFile::identify`]); one without is matched here, by the path
-    /// it records and the loaded one compared as text ([`lexical`]), never
-    /// on disk, so a project file never makes borer open a path. Two
-    /// spellings only the disk shows to be one file (a link, an 8.3 name, a
-    /// name in another letter case) are two paths, so `load_project`
-    /// refuses the project unless forced.
+    /// it records and the loaded one compared as text ([`lexical`],
+    /// [`alike`]), never on disk, so a project file never makes borer open
+    /// a path. On Windows a name matches in either ASCII case and a drive in
+    /// its long `\\?\` form, as Windows reads them. `..` folds as the text
+    /// says on every system, though off Windows the kernel resolves it
+    /// through a link. Two spellings only the disk shows to be one file (a
+    /// link, an 8.3 name) are two paths, so `load_project` refuses the
+    /// project unless forced.
     ///
     /// # Arguments
     ///
     /// * `path` - Where the loaded binary was loaded from.
     #[must_use]
     pub fn is_for(&self, path: &Path) -> bool {
-        lexical(Path::new(&self.program)) == lexical(path)
+        let (saved, loaded) = (lexical(Path::new(&self.program)), lexical(path));
+        saved.len() == loaded.len() && saved.iter().zip(&loaded).all(|(a, b)| alike(a, b))
     }
 
     /// Writes the file as pretty-printed JSON, or unindented when only the
@@ -362,7 +390,7 @@ mod tests {
         super::ProjectFile::from_overlay("b", None, &super::Overlay::default())
             .save(&shown, crate::output::Existing::Replace)
             .expect("seed project");
-        let before = std::fs::read(&path).expect("seed bytes");
+        let before = borer_engine::program::read_regular(&path, PROJECT_MAX).expect("seed bytes");
         let mut crowded = super::Overlay::default();
         for va in 0..=borer_engine::num::from_usize(borer_engine::analysis::project::NAMES_MAX) {
             crowded.names.insert(va, "n".to_owned());
@@ -370,7 +398,8 @@ mod tests {
         let err = super::ProjectFile::from_overlay("b", None, &crowded)
             .save(&shown, crate::output::Existing::Replace)
             .expect_err("over-cap save must fail");
-        let after = std::fs::read(&path).expect("seed bytes preserved");
+        let after =
+            borer_engine::program::read_regular(&path, PROJECT_MAX).expect("seed bytes preserved");
         std::fs::remove_dir_all(&dir).ok();
         assert!(err.contains("262145 names"), "{err}");
         assert_eq!(before, after);

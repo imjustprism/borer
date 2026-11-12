@@ -204,8 +204,8 @@ fn a_project_refuses_keys_that_are_not_addresses() {
     assert!(twice.contains("both name 0x140001064"), "{twice}");
 }
 
-/// A project is for the binary at the path it records, however that path
-/// is spelled, and for no other.
+/// A project is for the binary at the path it records, with its `..`
+/// folded as the text says, and for no other.
 #[test]
 fn a_project_is_for_the_file_it_was_saved_for() {
     let dir = std::env::temp_dir().join(format!("borer-project-test-{}", std::process::id()));
@@ -223,9 +223,11 @@ fn a_project_is_for_the_file_it_was_saved_for() {
 /// out of a project file is opened.
 ///
 /// The NT spelling of the loaded file, which the disk resolves to it, is
-/// another path, as the path in other case is; `.` and `..` fold as the
-/// text says. Both paths were canonicalized, which opened the saved one:
-/// `\??\UNC\host\share\x` authenticated to the host as the user.
+/// another path, as one with a trailing dot is; the path in other case and
+/// in its long `\\?\` form is the same, as Windows reads them, and `.` and
+/// `..` fold as the text says. Both paths were canonicalized, which opened
+/// the saved one: `\??\UNC\host\share\x` authenticated to the host as the
+/// user.
 #[cfg(windows)]
 #[test]
 fn a_project_is_matched_by_its_path_text_alone() {
@@ -235,7 +237,9 @@ fn a_project_is_matched_by_its_path_text_alone() {
     std::fs::write(&bin, b"MZ").unwrap();
     let saved = |program: &str| ProjectFile::from_overlay(program, None, &Overlay::default());
     assert!(!saved(&format!(r"\??\{}", bin.display())).is_for(&bin));
-    assert!(!saved(&bin.display().to_string().to_uppercase()).is_for(&bin));
+    assert!(!saved(&format!("{}.", bin.display())).is_for(&bin));
+    assert!(saved(&bin.display().to_string().to_uppercase()).is_for(&bin));
+    assert!(saved(&format!(r"\\?\{}", bin.display())).is_for(&bin));
     assert!(saved(&format!(r"{}\x\.\..\bin.exe", dir.display())).is_for(&bin));
     assert!(saved(r".\a.exe").is_for(std::path::Path::new("a.exe")));
     std::fs::remove_dir_all(&dir).ok();

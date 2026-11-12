@@ -188,9 +188,10 @@ pub(super) fn load_for_program(
 /// Reads a project file into the overlay a query applies.
 ///
 /// As the `load_project` tool does, a project saved for another build is
-/// refused, and the annotations no section of the binary can hold, and the
-/// names and comments the tools would not set, are left out and counted on
-/// stderr.
+/// refused, and so is one with no hash whose path is another path as text
+/// ([`borer::project::ProjectFile::is_for`]); the annotations no section of
+/// the binary can hold, and the names and comments the tools would not set,
+/// are left out and counted on stderr.
 ///
 /// # Arguments
 ///
@@ -209,13 +210,19 @@ pub(super) fn load_for_program(
 pub(super) fn project_overlay(path: &str, program: &Program) -> anyhow::Result<Overlay> {
     use borer::project::{Identity, ProjectFile};
     let pf = ProjectFile::load(path).map_err(anyhow::Error::msg)?;
+    let (saved, loaded) = (
+        short_path(&pf.program),
+        short_path(&program.path.display().to_string()),
+    );
     match pf.identify(program) {
         Identity::Same | Identity::PathOnly => {}
-        Identity::Other | Identity::OtherPath => bail!(
-            "the project {} was saved for another build ({}), not {}; nothing was loaded. borer://carry moves its names to a rebuild",
-            short_path(path),
-            short_path(&pf.program),
-            short_path(&program.path.display().to_string())
+        Identity::Other => bail!(
+            "the project {} was saved for another build ({saved}), not {loaded}; nothing was loaded. borer://carry moves its names to a rebuild",
+            short_path(path)
+        ),
+        Identity::OtherPath => bail!(
+            "the project {} records no sha-256, so its path names its binary, and {saved} is not {loaded} as text; nothing was loaded. Give that binary, or load the project with load_project force=true and save_project to record the hash",
+            short_path(path)
         ),
     }
     let mut overlay = overlay_at_width(&pf, program)?;
@@ -676,6 +683,29 @@ mod tests {
         assert!(s.ready.borrow().is_some() && s.overlay.fields.is_empty());
         let first = s.analysis(Feature::Discover).expect("x86-64 is analyzed");
         assert!(first.function(0x1000).is_some() && s.ready.borrow().is_none());
+    }
+
+    /// A project with no hash saved for another path is refused as another
+    /// path as text, not as another build, which it need not be.
+    ///
+    /// # Panics
+    ///
+    /// When the project loads or the refusal says another build.
+    #[test]
+    fn a_hashless_project_for_another_path_says_so() {
+        let dir = std::env::temp_dir().join(format!("borer-cli-path-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        let path = dir.join("old.json").display().to_string();
+        borer::project::ProjectFile::from_overlay("elsewhere.exe", None, &Overlay::default())
+            .save(&path, borer::output::Existing::Replace)
+            .expect("the project is saved");
+        let refused = super::project_overlay(&path, &checked(0).program);
+        std::fs::remove_dir_all(&dir).expect("cleans up");
+        let refused = refused.expect_err("another path").to_string();
+        assert!(
+            refused.contains("as text") && !refused.contains("another build"),
+            "{refused}"
+        );
     }
 
     /// The loading line's first bytes never open a pipe, which blocks until
