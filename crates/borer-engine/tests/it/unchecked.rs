@@ -1,6 +1,9 @@
 //! A function the checker cannot cover is not the first read and gets no
 //! solve hint, and a local a call nothing models was handed is unchecked,
 //! not a disagreement, when it is read back unset.
+//!
+//! A text every run of which stops at a vector store is unchecked too, not
+//! agreeing, while a difference beside float code the check reads is found.
 
 #![expect(
     clippy::missing_panics_doc,
@@ -8,7 +11,9 @@
 )]
 
 use borer_engine::analysis::decompile::decompile_named;
-use borer_engine::analysis::render::{Verdict, check_generated_iso, next_steps, triage_tsv};
+use borer_engine::analysis::render::{
+    Verdict, blame_tsv, check_generated_iso, next_steps, triage_tsv,
+};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::program::{Arch, Symbol, SymbolKind};
 
@@ -158,5 +163,56 @@ fn a_local_a_modeled_call_fills_in_part_still_differs() {
             Verdict::Differs(_, why) if why.contains("is read before any line writes it")
         )),
         "{text}\n{verdicts:?}"
+    );
+}
+
+/// Blame answers a difference in an integer result that stands beside
+/// float code, and `unchecked` where the code beside it is a vector store
+/// the check does not compute.
+///
+/// `mov eax,ecx; mov ecx,-5; cdq; idiv ecx; ret` returns a quotient the
+/// text states at 64 bits where the machine cleared the upper half. After
+/// `movsd xmm0,[rdx]; addsd xmm0,xmm0; movsd [rdx],xmm0` the check runs the
+/// float lines and reports that difference. After `movdqu xmm0,[rdx]; paddd
+/// xmm0,xmm0; movdqu [rdx],xmm0` every run stops at the vector store, so
+/// the quotient is never compared: the answer is `unchecked` with that
+/// reason and the count, not `agrees`.
+#[test]
+fn blame_reads_an_integer_result_beside_float_code() {
+    const QUOTIENT: [u8; 11] = [
+        0x89, 0xc8, // ASM: mov eax,ecx
+        0xb9, 0xfb, 0xff, 0xff, 0xff, // ASM: mov ecx,0xfffffffb
+        0x99, // ASM: cdq
+        0xf7, 0xf9, // ASM: idiv ecx
+        0xc3, // ASM: ret
+    ];
+    let float: [u8; 12] = [
+        0xf2, 0x0f, 0x10, 0x02, // ASM: movsd xmm0,[rdx]
+        0xf2, 0x0f, 0x58, 0xc0, // ASM: addsd xmm0,xmm0
+        0xf2, 0x0f, 0x11, 0x02, // ASM: movsd [rdx],xmm0
+    ];
+    let vector: [u8; 12] = [
+        0xf3, 0x0f, 0x6f, 0x02, // ASM: movdqu xmm0,[rdx]
+        0x66, 0x0f, 0xfe, 0xc0, // ASM: paddd xmm0,xmm0
+        0xf3, 0x0f, 0x7f, 0x02, // ASM: movdqu [rdx],xmm0
+    ];
+    let blamed = |beside: &[u8]| {
+        let p = image(Arch::X86_64, &[beside, &QUOTIENT[..]].concat(), &[]);
+        let a = Analysis::compute(&p);
+        blame_tsv(&p, &a, &Overlay::default(), "0x401000,count=16").expect("blames")
+    };
+    let out = blamed(&float);
+    assert!(
+        out.contains("\ndiffers\t") && out.contains("the low 32 bits agree"),
+        "{out}"
+    );
+    let out = blamed(&vector);
+    assert!(
+        out.contains("\nunchecked\t16\ta 128-bit value this does not compute\n"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("\nagrees\t") && !out.contains("\ndiffers\t"),
+        "{out}"
     );
 }
