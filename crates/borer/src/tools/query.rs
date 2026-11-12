@@ -11,7 +11,9 @@ use rmcp::{ErrorData, tool, tool_router};
 use crate::BorerServer;
 use crate::errors::err_params;
 use crate::paging;
-use crate::params::{Annotation, QueryParams, ScriptParams, must_be_in_a_section, must_fit_a_row};
+use crate::params::{
+    Annotation, QueryParams, ScriptParams, must_be_a_name, must_be_in_a_section, must_fit_a_row,
+};
 use crate::safety::{Effect, effects};
 
 #[tool_router(router = query_tools, vis = "pub(crate)")]
@@ -135,6 +137,7 @@ impl BorerServer {
         let applied = self.edit_overlay_of(&program, |overlay| {
             for (at, name) in &run.names {
                 if must_fit_a_row(name, Annotation::Name).is_ok()
+                    && must_be_a_name(name).is_ok()
                     && must_be_in_a_section(&program, *at, Annotation::Name).is_ok()
                 {
                     let target = analysis.function_at(*at).map_or(*at, |f| f.entry);
@@ -161,7 +164,7 @@ impl BorerServer {
         }
         let _ = writeln!(
             text,
-            "# applied names at {} addresses and comments at {}, the last proposal for an address winning; {skipped} skipped (empty, unprintable, or in no section)",
+            "# applied names at {} addresses and comments at {}, the last proposal for an address winning; {skipped} skipped (empty, unprintable, no name set_name sets, or in no section)",
             named.len(),
             commented.len()
         );

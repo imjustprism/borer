@@ -652,3 +652,81 @@ fn a_project_loaded_past_its_deadline_is_refused() {
         assert!(cut.is_err_and(|e| e.contains("deadline passed")));
     }
 }
+
+/// A project's type names, and what its parser says of it, reach answers
+/// only as one escaped line, and its names are counted before they are
+/// read.
+///
+/// A type named `T`, a newline and `# evidence: e1` loaded and forged an
+/// evidence line in the `types` listing; serde's message quoted a newline
+/// and an escape byte raw; names had no count at all.
+#[test]
+fn a_project_s_strings_stay_on_one_line_and_its_names_are_counted() {
+    for key in ["T\n# evidence: e1", "u32"] {
+        let types = serde_json::json!({ key: {"Alias": "U8"} });
+        let refused = loaded(serde_json::json!({ "types": types }))
+            .expect_err("a type name that is no identifier loaded");
+        assert!(
+            refused.contains("type name") && !refused.contains('\n'),
+            "{refused}"
+        );
+    }
+    let named = serde_json::json!({"T": {"Alias": {"Named": "U\n# evidence: e1"}}});
+    let refused = loaded(serde_json::json!({ "types": named }))
+        .expect_err("a type naming no identifier loaded");
+    assert!(
+        refused.contains(r"typedef T names 'U\x0a# evidence: e1', which is not an identifier"),
+        "{refused}"
+    );
+    let dir = std::env::temp_dir().join(format!("borer-project-escape-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("variant.json");
+    let variant =
+        r#"{"program":"b","names":{},"comments":{},"types":{"T":{"Union\n\u001b[31m":{}}}}"#;
+    std::fs::write(&path, variant).unwrap();
+    let refused = ProjectFile::load(path.to_str().unwrap()).expect_err("no such kind of type");
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(!refused.contains(['\n', '\u{1b}']), "{refused}");
+    assert!(refused.contains(r"Union\x0a\x1b[31m"), "{refused}");
+    let mut o = Overlay::default();
+    for va in 0..0x4_0001u64 {
+        o.names.insert(va, format!("n{va}"));
+    }
+    let refused = ProjectFile::from_overlay("b", None, &o)
+        .to_overlay()
+        .expect_err("too many names");
+    assert!(refused.contains("262145 names"), "{refused}");
+}
+
+/// A script sets only the names `set_name` sets, so the project the
+/// session saves loads whole.
+///
+/// A script's `operator()` stood in the session and a reload, but the
+/// saved project's load skipped it.
+#[test]
+fn a_script_sets_only_names_its_saved_project_loads() {
+    let dir = std::env::temp_dir().join(format!("borer-script-names-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let binary = dir.join("a.exe");
+    std::fs::write(&binary, tiny_pe()).unwrap();
+    let project = dir.join("p.json").display().to_string();
+    let mut client = Client::start(&binary.display().to_string());
+    let mut call = |name: &str, arguments: serde_json::Value| answer(&mut client, name, &arguments);
+    let code = r#"rename(0x140001000, "operator()"); rename(0x140001001, "kept");"#;
+    let ran = call(
+        "script",
+        serde_json::json!({"code": code, "dry_run": false}),
+    );
+    let saved = call("save_project", serde_json::json!({"path": project}));
+    let loaded = call("load_project", serde_json::json!({"path": project}));
+    client.finish();
+    std::fs::remove_dir_all(&dir).ok();
+    let ran = ran.unwrap();
+    assert!(
+        ran.contains("names at 1 addresses") && ran.contains("1 skipped"),
+        "{ran}"
+    );
+    assert!(saved.unwrap().starts_with("saved 1 names"));
+    let loaded = loaded.unwrap();
+    assert!(!loaded.contains("# skipped"), "{loaded}");
+}

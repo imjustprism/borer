@@ -549,8 +549,10 @@ impl BorerServer {
     /// annotations `set_name`, `set_comment` and
     /// `set_type` would refuse of the loaded binary, at an address no
     /// section holds or with blank text, are skipped and listed
-    /// ([`borer::project::keep_placeable`]), and the counts said are of what
-    /// the overlay then holds. The fields the file states of classes are
+    /// ([`borer::project::keep_placeable`]), as are the names and comments
+    /// they would refuse of any binary ([`crate::params::keep_settable`]),
+    /// and the counts said are of what the overlay then holds. The fields
+    /// the file states of classes are
     /// held to the binary's code as `set_type` holds a statement
     /// ([`stated::settled`]): those of a class the code contradicts, or
     /// that no function of the binary belongs to, are skipped with the
@@ -609,7 +611,14 @@ impl BorerServer {
             }));
         }
         let mut loaded = pf.to_overlay().map_err(err_params)?;
-        let left_out = borer::project::keep_placeable(&mut loaded, &program);
+        let mut left_out = borer::project::keep_placeable(&mut loaded, &program);
+        let placed = left_out.len();
+        let room = LEFT_OUT_SHOWN.saturating_sub(placed);
+        let skipped = placed.saturating_add(crate::params::keep_settable(
+            &mut loaded,
+            room,
+            &mut left_out,
+        ));
         let mut unsettled = stated::Unsettled::default();
         if !loaded.fields.is_empty() {
             let tabled = Overlay {
@@ -634,13 +643,12 @@ impl BorerServer {
             loaded.types.len(),
             loaded.applied.len()
         );
-        if !left_out.is_empty() {
+        if skipped > 0 {
             let shown = left_out.len().min(LEFT_OUT_SHOWN);
             let _ = writeln!(
                 said,
-                "# skipped {total} (showing {shown} of {total}): {}",
-                left_out[..shown].join(", "),
-                total = left_out.len()
+                "# skipped {skipped} (showing {shown} of {skipped}): {}",
+                left_out[..shown].join(", ")
             );
         }
         said.push_str(&skipped_classes(&unsettled, gone));
@@ -909,6 +917,50 @@ mod tests {
             "{forced}"
         );
         assert_eq!(held(), (vec![0x1010], vec![0x2000], 0));
+    }
+
+    /// `load_project` skips and lists the names and comments `set_name` and
+    /// `set_comment` would not set, and loads the rest of the project.
+    ///
+    /// A name holding a space or opening with a digit loaded, and printed
+    /// where C expects an identifier. A comment past a row is cut to one,
+    /// and marked `...`, as the file is read, so the length the check
+    /// counts is the cut one.
+    ///
+    /// # Panics
+    ///
+    /// When such a name or comment loads, or one the tools set is skipped.
+    #[test]
+    fn load_project_skips_the_names_the_tools_would_not_set() {
+        use crate::params::LoadProjectParams;
+        use borer_engine::text::OUTSIDE_MAX;
+        use rmcp::handler::server::wrapper::Parameters;
+        let server = crate::testing::raw_server();
+        let dir = std::env::temp_dir().join(format!("borer-settable-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        let path = dir.join("names.json");
+        let long = "c".repeat(OUTSIDE_MAX + 1);
+        let project = serde_json::json!({
+            "program": "", "names": {"0x1000": "kept", "0x1010": "two words", "0x1020": "1st"},
+            "comments": {"0x1030": "seen", "0x1040": long}
+        });
+        std::fs::write(&path, project.to_string()).expect("the project is written");
+        let path = path.display().to_string();
+        let said = server
+            .load_project(Parameters(LoadProjectParams { path, force: None }))
+            .expect("loads");
+        std::fs::remove_dir_all(&dir).expect("cleans up");
+        assert!(said.starts_with("loaded 1 names + 1 comments"), "{said}");
+        let cut = format!(
+            "comment at 0x1040 (the comment is {} characters; {OUTSIDE_MAX} is the most",
+            OUTSIDE_MAX + "...".len()
+        );
+        assert!(
+            said.contains("name at 0x1010 ('two words' holds ' '")
+                && said.contains("name at 0x1020 ('1st' opens with a digit")
+                && said.contains(&cut),
+            "{said}"
+        );
     }
 
     /// `load_binary` ends by naming the call that answers a whole triage,

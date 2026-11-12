@@ -99,6 +99,14 @@ fn by_hex(map: &BTreeMap<u64, String>) -> BTreeMap<String, String> {
 /// Most keys a refusal of unreadable keys names before it counts the rest.
 const BAD_KEYS_SHOWN: usize = 8;
 
+/// Most names one project states: a name for every function and global of
+/// a large binary, and few enough that the copy of the overlay each edit
+/// keeps stays small.
+pub const NAMES_MAX: usize = 1 << 18;
+
+/// Most comments one project states, as many as it states names.
+pub const COMMENTS_MAX: usize = 1 << 18;
+
 /// Largest project file read, in bytes: past any overlay the caps on names,
 /// comments, types and prototypes let a session hold.
 const PROJECT_MAX: u64 = 1 << 26;
@@ -409,7 +417,7 @@ impl ProjectFile {
     /// Refuses a file whose tables state more than an overlay holds, by
     /// their counts alone, before any entry is parsed or sized.
     ///
-    /// The types are counted as an overlay's are
+    /// The names and comments are counted, the types as an overlay's are
     /// ([`borer_engine::analysis::utypes::counted`]), then the prototypes,
     /// the variables, and each class's stated fields
     /// ([`borer_engine::analysis::stated::crowded`]). A count is of the
@@ -420,6 +428,13 @@ impl ProjectFile {
     ///
     /// When a count passes its cap; the message names the table.
     fn counted(&self) -> Result<(), String> {
+        if self.names.len() > NAMES_MAX || self.comments.len() > COMMENTS_MAX {
+            return Err(format!(
+                "the project states {} names and {} comments; {NAMES_MAX} and {COMMENTS_MAX} are the most",
+                self.names.len(),
+                self.comments.len()
+            ));
+        }
         borer_engine::analysis::utypes::counted(&self.types, self.applied.len())
             .map_err(|e| e.to_string())?;
         let held: usize = self.vars.values().map(|table| table.len().max(1)).sum();
@@ -513,11 +528,17 @@ impl ProjectFile {
     ///
     /// When the path is a device, a share or not a regular file, the file
     /// is past [`PROJECT_MAX`] bytes or cannot be read, or it is not a valid
-    /// project file.
+    /// project file: what the parser says of it, escaped to one line, since
+    /// it quotes the file.
     pub fn load(path: &str) -> Result<ProjectFile, String> {
         let shown = borer_engine::text::short_path(path);
         let bytes = borer_engine::program::read_regular(Path::new(path), PROJECT_MAX)
             .map_err(|e| format!("{e:#}"))?;
-        serde_json::from_slice(&bytes).map_err(|e| format!("parse {shown}: {e}"))
+        serde_json::from_slice(&bytes).map_err(|e| {
+            format!(
+                "parse {shown}: {}",
+                borer_engine::text::one_line(&e.to_string())
+            )
+        })
     }
 }

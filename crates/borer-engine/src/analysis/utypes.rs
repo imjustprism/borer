@@ -1239,8 +1239,14 @@ pub fn validate(
     Ok(())
 }
 
-/// Checks what one type states of itself: its fields' names and how deep
-/// their types stack, an enum's width and values, a typedef's depth.
+/// Checks what one type states of itself: its name, its fields' names and
+/// how deep their types stack, an enum's width and values, a typedef's
+/// depth.
+///
+/// The name is held to what `set_type` holds a name to
+/// ([`check_type_name`]) before any message prints it: a listing prints a
+/// type a row, and a project's name holding a line break forged the rows
+/// after it.
 ///
 /// # Arguments
 ///
@@ -1249,10 +1255,11 @@ pub fn validate(
 ///
 /// # Errors
 ///
-/// When a field or value name is not an identifier or is stated twice, a
-/// type is too deep, or an enum's width or a value does not fit; the
-/// message names the offender.
+/// When the type's name, or a field or value name, is not an identifier
+/// or is stated twice, a type is too deep, or an enum's width or a value
+/// does not fit; the message names the offender.
 fn shaped(name: &str, ty: &UserType) -> anyhow::Result<()> {
+    check_type_name(name)?;
     match ty {
         UserType::Struct(s) => {
             for (off, f) in &s.fields {
@@ -1495,9 +1502,12 @@ fn held<'t>(types: &'t BTreeMap<String, UserType>, name: &str) -> Vec<&'t str> {
     names
 }
 
-/// Refuses a type that stacks more pointers and arrays than
-/// [`PTR_DEPTH_MAX`], or holds an array of a count [`parse_type`] refuses,
-/// so a hand-edited project cannot state a type a tool call cannot.
+/// Refuses a type a tool call could not state.
+///
+/// That is one stacking more pointers and arrays than [`PTR_DEPTH_MAX`],
+/// holding an array of a count [`parse_type`] refuses, or naming a type by
+/// text no identifier spells, whose spelling would break the row a listing
+/// prints it in.
 ///
 /// # Arguments
 ///
@@ -1506,8 +1516,9 @@ fn held<'t>(types: &'t BTreeMap<String, UserType>, name: &str) -> Vec<&'t str> {
 ///
 /// # Errors
 ///
-/// When the type is deeper than the cap or an array's count is zero or
-/// past [`ARRAY_LEN_MAX`]; the message names `what`.
+/// When the type is deeper than the cap, an array's count is zero or past
+/// [`ARRAY_LEN_MAX`], or the name it ends at is not an identifier; the
+/// message names `what`.
 fn check_depth(ty: &TypeExpr, what: &str) -> anyhow::Result<()> {
     let mut depth = 0usize;
     let mut current = ty;
@@ -1532,8 +1543,14 @@ fn check_depth(ty: &TypeExpr, what: &str) -> anyhow::Result<()> {
             | TypeExpr::I64
             | TypeExpr::F32
             | TypeExpr::F64
-            | TypeExpr::Char
-            | TypeExpr::Named(_) => break,
+            | TypeExpr::Char => break,
+            TypeExpr::Named(n) if is_ident(n) => break,
+            TypeExpr::Named(n) => {
+                return Err(anyhow::anyhow!(
+                    "{what} names {}, which is not an identifier",
+                    crate::text::quoted(n)
+                ));
+            }
         };
         depth += 1;
     }

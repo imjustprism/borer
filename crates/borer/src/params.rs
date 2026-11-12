@@ -1107,6 +1107,32 @@ impl std::fmt::Display for Annotation {
 /// When the text is empty, blank, longer than a row can show, or holds
 /// anything that would end its line or move what is printed around it.
 pub(crate) fn must_fit_a_row(text: &str, what: Annotation) -> Result<(), ErrorData> {
+    must_fit_an_escaped_row(text, what)?;
+    if borer_engine::text::one_line(text) != text {
+        return Err(err_params(format!(
+            "the {what} holds text that reorders what is printed around it"
+        )));
+    }
+    Ok(())
+}
+
+/// Refuses a name or comment escaped to one line that a row still cannot
+/// show.
+///
+/// It is what [`must_fit_a_row`] refuses but for the text escaping takes
+/// out ([`borer_engine::text::one_line`]), so text read from a file is not
+/// escaped a second time to be checked.
+///
+/// # Arguments
+///
+/// * `text` - The annotation.
+/// * `what` - Which annotation it is, for the message.
+///
+/// # Errors
+///
+/// When the text is empty, blank, holds a control character, or is longer
+/// than a row can show.
+pub(crate) fn must_fit_an_escaped_row(text: &str, what: Annotation) -> Result<(), ErrorData> {
     if text.trim().is_empty() {
         return Err(err_params(format!("the {what} is empty")));
     }
@@ -1120,11 +1146,6 @@ pub(crate) fn must_fit_a_row(text: &str, what: Annotation) -> Result<(), ErrorDa
         return Err(err_params(format!(
             "the {what} is {width} characters; {} is the most a listing row shows",
             borer_engine::text::OUTSIDE_MAX
-        )));
-    }
-    if borer_engine::text::one_line(text) != text {
-        return Err(err_params(format!(
-            "the {what} holds text that reorders what is printed around it"
         )));
     }
     Ok(())
@@ -1165,6 +1186,54 @@ pub(crate) fn must_be_a_name(name: &str) -> Result<(), ErrorData> {
         ))),
         None => Ok(()),
     }
+}
+
+/// Leaves out of a loaded overlay the names and comments `set_name` and
+/// `set_comment` would not set ([`must_fit_a_row`], [`must_be_a_name`]).
+///
+/// A project file is text from outside, edited by hand and passed around,
+/// so its annotations are held to the rule an agent's are. Each was escaped
+/// to a line as the file was read ([`borer_engine::text::one_line`]), so
+/// it is held to what the rule refuses of escaped text
+/// ([`must_fit_an_escaped_row`]). One the rule refuses is left out, as one
+/// at an address no section holds is ([`borer::project::keep_placeable`]);
+/// the file's other annotations load.
+///
+/// # Arguments
+///
+/// * `o` - The overlay a project file rebuilt; left holding what passes.
+/// * `room` - How many of those left out to say.
+/// * `said` - Takes a `name at 0x0 (why)` entry for each of the first
+///   `room` left out: names, then comments, each in address order.
+///
+/// # Returns
+///
+/// How many were left out, said or not.
+pub(crate) fn keep_settable(
+    o: &mut borer_engine::analysis::Overlay,
+    room: usize,
+    said: &mut Vec<String>,
+) -> usize {
+    let mut left_out = 0usize;
+    let mut held = |what: Annotation, va: u64, text: &str| {
+        let refused = must_fit_an_escaped_row(text, what).and_then(|()| match what {
+            Annotation::Name => must_be_a_name(text),
+            Annotation::Comment | Annotation::Type => Ok(()),
+        });
+        let Err(e) = refused else {
+            return true;
+        };
+        if left_out < room {
+            said.push(format!("{what} at {va:#x} ({})", e.message));
+        }
+        left_out = left_out.saturating_add(1);
+        false
+    };
+    o.names
+        .retain(|&va, n| held(Annotation::Name, va, n.as_str()));
+    o.comments
+        .retain(|&va, c| held(Annotation::Comment, va, c.as_str()));
+    left_out
 }
 
 /// Refuses an annotation at an address no section maps.

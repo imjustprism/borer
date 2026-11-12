@@ -138,8 +138,9 @@ pub(super) struct Session {
 /// Reads a project file into the overlay a query applies.
 ///
 /// As the `load_project` tool does, a project saved for another build is
-/// refused, and the annotations no section of the binary can hold are
-/// left out and counted on stderr.
+/// refused, and the annotations no section of the binary can hold, and the
+/// names and comments the tools would not set, are left out and counted on
+/// stderr.
 ///
 /// # Arguments
 ///
@@ -167,11 +168,15 @@ pub(super) fn project_overlay(path: &str, program: &Program) -> anyhow::Result<O
         ),
     }
     let mut overlay = pf.to_overlay().map_err(anyhow::Error::msg)?;
-    let left_out = borer::project::keep_placeable(&mut overlay, program);
-    if !left_out.is_empty() {
+    let placed = borer::project::keep_placeable(&mut overlay, program).len();
+    let skipped = placed.saturating_add(crate::params::keep_settable(
+        &mut overlay,
+        0,
+        &mut Vec::new(),
+    ));
+    if skipped > 0 {
         eprintln!(
-            "borer: {} annotations of {} name no address of the binary and were skipped",
-            left_out.len(),
+            "borer: {skipped} annotations of {} name no address of the binary or are no name or comment the tools set, and were skipped",
             short_path(path)
         );
     }
