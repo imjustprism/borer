@@ -11,6 +11,7 @@
 use borer_engine::analysis::apply::from_pointer;
 use borer_engine::analysis::classes::{class_layout, render_layout};
 use borer_engine::analysis::decompile::decompile_named;
+use borer_engine::analysis::protos::{Proto, Var, VarKey};
 use borer_engine::analysis::stated::{
     Field, Mode, Statement, Unsettled, object_class, plan, plan_at, plan_class, retyped, settled,
     undefined, validate,
@@ -983,6 +984,39 @@ fn a_field_read_through_another_object_is_not_the_class_s() {
     assert!(
         shared.contains(": +0x30 field_0x30 -> m_shared (accessed 4 byte(s) wide); class_2800::vfunc_1 (0x1080) takes its object as class_2800"),
         "{shared}"
+    );
+}
+
+/// A function's object is its first parameter under the name a statement
+/// gave it, a variable's or a prototype's; its second parameter is another
+/// object under any name.
+#[test]
+fn a_field_is_stated_through_an_object_a_statement_renamed() {
+    let stated = ": +0x270 field_0x270 -> m_own (accessed 4 byte(s) wide); ";
+    let p = two_classes();
+    let a = Analysis::compute(&p);
+    let mut named = Overlay::default();
+    let var = Var::parse("obj").expect("a name");
+    let vars = named.vars.entry(0x1000).or_default();
+    vars.insert(VarKey::Param(0), var);
+    let through_var = plan_at(&p, &a, &named, 0x1000, 0x270, field("m_own", None))
+        .expect("the constructor writes 0x270 through the parameter named obj")
+        .would();
+    assert!(through_var.contains(stated), "{through_var}");
+    let proto = Proto::parse("uint32_t read(void *self, void *other)").expect("a prototype");
+    let mut declared = Overlay::default();
+    declared.prototypes.insert(0x1040, proto);
+    let through_proto = plan_at(&p, &a, &declared, 0x1040, 0x270, field("m_own", None))
+        .expect("0x270 is read through the parameter declared self")
+        .would();
+    assert!(through_proto.contains(stated), "{through_proto}");
+    let p = a_class_reading_another_object();
+    let a = Analysis::compute(&p);
+    let other = plan_at(&p, &a, &declared, 0x1040, 0x30, field("m_other", None))
+        .expect_err("0x30 is read through the second parameter alone");
+    assert!(
+        other.contains(" accesses +0x30 through other, not through its own object, "),
+        "{other}"
     );
 }
 
