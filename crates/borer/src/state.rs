@@ -833,10 +833,14 @@ pub(crate) fn env_pack_files() -> Vec<String> {
 ///
 /// # Errors
 ///
-/// When a file cannot be read or is not a pack.
+/// When a file's path is a share or a device (refused before it is
+/// opened), a file cannot be read or is not a pack.
 pub(crate) fn read_packs(files: &[String]) -> anyhow::Result<Arc<Packs>> {
     let mut packs = Vec::with_capacity(files.len());
     for file in files {
+        if let Some(why) = borer_engine::program::unusable_path(Path::new(file)) {
+            anyhow::bail!("{why}; give a path to a pack");
+        }
         let shown = borer_engine::text::short_path(file);
         let text = std::fs::read_to_string(file)
             .map_err(|e| anyhow::anyhow!("reading pack {shown}: {e}"))?;
@@ -1097,5 +1101,47 @@ mod tests {
             borer_engine::analysis::EnumSource::Binary,
             "a fresh session renders constants as one that has decompiled"
         );
+    }
+
+    /// A pack file, and every script a pack names, is refused before it is
+    /// read when its path names a share or a device.
+    ///
+    /// A script's path is the pack's own directory joined to the line's
+    /// words, so one climbing with `..` from a `\\.\` pack path reached the
+    /// share it named, and a `nul` line read the device as a script.
+    ///
+    /// # Panics
+    ///
+    /// When such a path is read.
+    #[test]
+    fn a_pack_and_its_scripts_are_checked_before_they_are_read() {
+        if !cfg!(windows) {
+            return;
+        }
+        let share = super::read_packs(&[r"\\host.invalid\share\p.borer".to_owned()])
+            .expect_err("a share is never read");
+        assert!(
+            share.to_string().contains("names a network share"),
+            "{share}"
+        );
+        let dir = std::env::temp_dir().join(format!("borer-pack-paths-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let climb = format!("{}UNC/host.invalid/share/x.rhai", "../".repeat(32));
+        let mut refused = Vec::new();
+        for (name, script, why) in [
+            ("climb", climb.as_str(), "`..`"),
+            ("device", "nul", "device"),
+        ] {
+            let pack = dir.join(format!("{name}.borer"));
+            std::fs::write(&pack, format!("pack {name} 1\n[scripts]\nrun {script}\n"))
+                .expect("written");
+            let read = super::read_packs(&[format!(r"\\.\{}", pack.display())]);
+            refused.push((why, read.map(|_| ()).map_err(|e| e.to_string())));
+        }
+        std::fs::remove_dir_all(&dir).expect("cleans up");
+        for (why, read) in refused {
+            let said = read.expect_err("a script path is checked before it is read");
+            assert!(said.contains(why), "{said}");
+        }
     }
 }

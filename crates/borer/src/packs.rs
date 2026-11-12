@@ -87,6 +87,10 @@ pub fn dirs() -> Vec<PathBuf> {
 /// Reads the scripts a pack's `[scripts] run` lines name, relative to the
 /// pack's own file, into the pack.
 ///
+/// A line's words are joined to the pack's directory, so its `..` climbs
+/// from there, and a script's path is refused before it is opened when it
+/// names a share or a device ([`borer_engine::program::unusable_path`]).
+///
 /// # Arguments
 ///
 /// * `pack` - The pack, its scripts filled in place.
@@ -94,7 +98,7 @@ pub fn dirs() -> Vec<PathBuf> {
 ///
 /// # Errors
 ///
-/// When a script file does not read.
+/// When a script's path is a share or a device, or the file does not read.
 pub fn load_scripts(pack: &mut Pack, file: &Path) -> Result<(), String> {
     let dir = file.parent().unwrap_or_else(|| Path::new("."));
     let mut scripts = Vec::new();
@@ -103,6 +107,9 @@ pub fn load_scripts(pack: &mut Pack, file: &Path) -> Result<(), String> {
             .split(['/', '\\'])
             .filter(|part| !part.is_empty())
             .fold(dir.to_path_buf(), |p, part| p.join(part));
+        if let Some(why) = borer_engine::program::unusable_path(&path) {
+            return Err(format!("{}: script {why}", pack.source));
+        }
         let shown = borer_engine::text::short_path(&path.to_string_lossy());
         let code = std::fs::read_to_string(&path)
             .map_err(|e| format!("{}: reading script {shown}: {e}", pack.source))?;
