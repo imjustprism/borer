@@ -71,9 +71,7 @@ pub(super) fn referenced_literal(
 fn string_literal_in(p: &Program, va: u64, cap: usize, in_code: bool) -> Option<(u64, String)> {
     /// Longest walk back to a literal's first byte.
     const WINDOW: u64 = 256;
-    let sec = p
-        .section_at(va)
-        .filter(|s| (in_code || !s.executable) && !p.metadata_at(va))?;
+    let sec = literal_section(p, va, in_code)?;
     if literal_text(cstr_text_at(p, va, 4, cap)).is_some() {
         let floor = va.saturating_sub(WINDOW).max(sec.va.0);
         let mut start = va;
@@ -103,9 +101,31 @@ fn string_literal_in(p: &Program, va: u64, cap: usize, in_code: bool) -> Option<
     literal_text(wstr_text_at(p, start, 4, cap)).map(|t| (start, format!("L\"{t}\"")))
 }
 
+/// Returns the section a literal at `va` may be read from: a mapped one,
+/// executable only when `in_code` is set, at an address that holds no
+/// loader metadata ([`Program::metadata_at`]).
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `va` - Address of the candidate string.
+/// * `in_code` - Whether a literal inside an executable section counts.
+///
+/// # Returns
+///
+/// The section, or `None` when `va` is unmapped, holds loader metadata, or
+/// is code while `in_code` is unset.
+pub(super) fn literal_section(p: &Program, va: u64, in_code: bool) -> Option<&Section> {
+    p.section_at(va)
+        .filter(|s| (in_code || !s.executable) && !p.metadata_at(va))
+}
+
+/// Fewest printable characters in a literal [`string_literal`] reads.
+pub(super) const PRINTABLE_MIN: usize = 4;
+
 /// Returns a literal's text with its tabs and line ends escaped and its
 /// model control tokens broken ([`crate::text::fenced`]), when it holds at
-/// least four printable characters.
+/// least [`PRINTABLE_MIN`] printable characters.
 ///
 /// A literal runs over the control characters it can escape, so the words
 /// after a newline (`L"Not implemented.\nUse command line ..."`) are its
@@ -123,15 +143,23 @@ fn string_literal_in(p: &Program, va: u64, cap: usize, in_code: bool) -> Option<
 /// The escaped text, or `None` when nothing was read or too little of it
 /// is printable.
 fn literal_text(read: Option<(usize, String)>) -> Option<String> {
-    /// Fewest printable characters a literal holds.
-    const PRINTABLE_MIN: usize = 4;
     let (_, t) = read?;
-    (t.bytes().filter(|&b| crate::strings::printable(b)).count() >= PRINTABLE_MIN).then(|| {
-        crate::text::fenced(&t)
-            .replace('\t', "\\t")
-            .replace('\r', "\\r")
-            .replace('\n', "\\n")
-    })
+    (t.bytes().filter(|&b| crate::strings::printable(b)).count() >= PRINTABLE_MIN)
+        .then(|| escaped_literal(&t))
+}
+
+/// Returns a literal's text as a row prints it and a filter is matched
+/// against it: tabs and line ends escaped, model control tokens broken
+/// ([`crate::text::fenced`]).
+///
+/// # Arguments
+///
+/// * `t` - The text as read, control characters still in it.
+pub(super) fn escaped_literal(t: &str) -> String {
+    crate::text::fenced(t)
+        .replace('\t', "\\t")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n")
 }
 
 /// Whether a function's code is scattered far across its address span.

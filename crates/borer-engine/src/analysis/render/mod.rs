@@ -68,7 +68,9 @@ use crate::isa::x86::{
 };
 use crate::num::from_usize;
 use crate::program::{BinaryFormat, Feature, FileOff, Program, Section, Symbol, SymbolKind};
-use crate::strings::{cstr_at, cstr_text_at, literal_byte, wstr_at, wstr_text_at};
+use crate::strings::{
+    cstr_at, cstr_text_at, cstr_text_in, literal_byte, wstr_at, wstr_text_at, wstr_text_in,
+};
 use crate::text::plural;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;

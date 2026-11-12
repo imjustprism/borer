@@ -763,3 +763,87 @@ fn a_literal_s_element_is_fenced_on_its_tag_lines() {
     let answer: String = shown.iter().map(|t| format!("\"{t}\"\n")).collect();
     assert_eq!(borer_engine::text::aimed_lines(&answer), 8, "{answer}");
 }
+
+/// A string search for a text under four printable characters finds the
+/// functions that reference it whole, and says what it read when none does.
+///
+/// The index of referenced literals holds no text that short, so the search
+/// reads each referenced address outside code for the filter's text ended
+/// by its terminator: `"#c"` and `L"#C"` join the `"#color"` the index
+/// holds, while `#c` opening the number `23 63 07 00` and the longer
+/// `"#cA"` stay out, and so does the one-character narrow reading of
+/// `L"#C"` for `#`. A filter's escapes read as the index prints them, so
+/// `%s\n` finds `"%s\n"`.
+#[test]
+fn a_text_under_the_literal_floor_matches_only_whole() {
+    use borer_engine::analysis::render::functions_by_string_tsv;
+    use borer_engine::analysis::{Analysis, Overlay};
+    let mut code = vec![0xccu8; 0x78];
+    code[..0x1f].copy_from_slice(&[
+        0xe8, 0x1b, 0x00, 0x00, 0x00, // ASM: call 0x401020
+        0xe8, 0x26, 0x00, 0x00, 0x00, // ASM: call 0x401030
+        0xe8, 0x31, 0x00, 0x00, 0x00, // ASM: call 0x401040
+        0xe8, 0x3c, 0x00, 0x00, 0x00, // ASM: call 0x401050
+        0xe8, 0x47, 0x00, 0x00, 0x00, // ASM: call 0x401060
+        0xe8, 0x52, 0x00, 0x00, 0x00, // ASM: call 0x401070
+        0xc3, // ASM: ret
+    ]);
+    for (k, disp) in [0xd9, 0xd1, 0xc9, 0xc1, 0xb9, 0xb1].into_iter().enumerate() {
+        let at = 0x20 + 0x10 * k;
+        // ASM: lea rcx, [rip+0xf00+disp], the data at 0x402000 + 8 * k; ret
+        code[at..at + 8].copy_from_slice(&[0x48, 0x8d, 0x0d, disp, 0x0f, 0x00, 0x00, 0xc3]);
+    }
+    let mut data = vec![0u8; 0x2c];
+    data[..3].copy_from_slice(b"#c\0");
+    data[0x08..0x0f].copy_from_slice(b"#color\0");
+    data[0x10..0x14].copy_from_slice(&[0x23, 0x63, 0x07, 0x00]);
+    data[0x18..0x1e].copy_from_slice(&[0x23, 0x00, 0x43, 0x00, 0x00, 0x00]);
+    data[0x20..0x24].copy_from_slice(b"%s\n\0");
+    data[0x28..0x2c].copy_from_slice(b"#cA\0");
+    let p = crate::raw::image(borer_engine::program::Arch::X86_64, &code, &data);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let answer = |filter: &str| functions_by_string_tsv(&p, &a, &o, filter, 0, 50);
+    let rows = |out: &str| -> Vec<String> {
+        out.lines()
+            .filter(|l| l.starts_with("0x"))
+            .map(str::to_owned)
+            .collect()
+    };
+    let short = answer("#c");
+    assert_eq!(
+        rows(&short),
+        [
+            "0x401020 sub_401020: 1",
+            "0x401030 sub_401030: 2",
+            "0x401050 sub_401050: 3"
+        ],
+        "{short}"
+    );
+    assert!(
+        short.contains("# strings: 1=\"#c\" 2=\"#color\" 3=L\"#C\"\n"),
+        "{short}"
+    );
+    assert!(!short.contains("addresses read"), "{short}");
+    for (filter, row) in [
+        ("#co", "0x401030 sub_401030: 1"),
+        ("#", "0x401030 sub_401030: 1"),
+        ("%s\\n", "0x401060 sub_401060: 1"),
+    ] {
+        let out = answer(filter);
+        assert_eq!(rows(&out), [row], "{filter}: {out}");
+    }
+    assert!(
+        answer("%s\\n").contains("# strings: 1=\"%s\\n\"\n"),
+        "the text is shown as the index prints it"
+    );
+    let none = answer("#q");
+    assert!(
+        none.starts_with(
+            "# showing 0 of 0 rows: 0 function/string pairs match '#q' across 0 strings in 0 functions; texts under 4 printable characters match only whole (6 referenced addresses read)\n"
+        ),
+        "{none}"
+    );
+    let long = answer("#qqq");
+    assert!(!long.contains("addresses read"), "{long}");
+}

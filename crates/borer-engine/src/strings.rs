@@ -968,7 +968,24 @@ fn joined(bytes: &[u8], first: RawStringSpan, next: RawStringSpan) -> Option<u32
 /// `(run length, text with the control bytes still in it)`, or `None` when
 /// `va` is unmapped or the run is shorter than `min`.
 pub fn cstr_text_at(program: &Program, va: u64, min: usize, cap: usize) -> Option<(usize, String)> {
-    let raw = program.read_va_upto(va, SCAN_MAX)?;
+    cstr_text_in(program.read_va_upto(va, SCAN_MAX)?, min, cap)
+}
+
+/// [`cstr_text_at`] over bytes already read: the literal that starts at the
+/// first byte of `raw`, as far as `raw` reaches.
+///
+/// # Arguments
+///
+/// * `raw` - The bytes from the literal's first on.
+/// * `min` - Shortest run accepted, in bytes.
+/// * `cap` - Longest text returned in full; longer runs end with `...`.
+///
+/// # Returns
+///
+/// `(run length, text with the control bytes still in it)`, the length
+/// counted no further than `raw` reaches, or `None` when the run is shorter
+/// than `min`.
+pub(crate) fn cstr_text_in(raw: &[u8], min: usize, cap: usize) -> Option<(usize, String)> {
     let len = raw
         .iter()
         .position(|&b| !literal_byte(b))
@@ -1043,7 +1060,24 @@ pub(crate) fn wstr_in(raw: &[u8], min: usize, cap: usize) -> Option<(usize, Stri
 /// `(run length in code units, text with the control characters still in
 /// it)`, or `None` when `va` is unmapped or the run is shorter than `min`.
 pub fn wstr_text_at(program: &Program, va: u64, min: usize, cap: usize) -> Option<(usize, String)> {
-    let raw = program.read_va_upto(va, SCAN_MAX * 2)?;
+    wstr_text_in(program.read_va_upto(va, SCAN_MAX * 2)?, min, cap)
+}
+
+/// [`wstr_text_at`] over bytes already read: the wide literal that starts
+/// at the first byte of `raw`, as far as `raw` reaches.
+///
+/// # Arguments
+///
+/// * `raw` - The bytes from the literal's first code unit on.
+/// * `min` - Shortest run accepted, in code units.
+/// * `cap` - Longest text returned in full; longer runs end with `...`.
+///
+/// # Returns
+///
+/// `(run length in code units, text with the control characters still in
+/// it)`, the length counted no further than `raw` reaches, or `None` when
+/// the run is shorter than `min`.
+pub(crate) fn wstr_text_in(raw: &[u8], min: usize, cap: usize) -> Option<(usize, String)> {
     let len = raw
         .chunks_exact(2)
         .position(|u| u.get(1) != Some(&0) || u.first().is_none_or(|b| !literal_byte(*b)))

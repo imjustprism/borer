@@ -102,7 +102,7 @@ crates/borer-engine/src/analysis/render/dataflow.rs::accesses#1	121
 crates/borer-engine/src/analysis/render/dataflow.rs::taint_tsv#1	162
 crates/borer-engine/src/analysis/render/dataflow.rs::why_tsv#1	203
 crates/borer-engine/src/analysis/render/graph.rs::callgraph#1	108
-crates/borer-engine/src/analysis/render/literals.rs::functions_by_string_tsv#1	111
+crates/borer-engine/src/analysis/render/literals.rs::functions_by_string_tsv#1	107
 crates/borer-engine/src/analysis/render/obfuscation.rs::decode_shape#1	186
 crates/borer-engine/src/analysis/render/obfuscation.rs::flattening_tsv#1	124
 crates/borer-engine/src/analysis/render/oracle.rs::solve_tsv#1	138

@@ -28,7 +28,9 @@ const STRINGS_PER_FUNCTION: usize = 20;
 /// first that many and counts the rest.
 ///
 /// The filter matches a string's text, not the quoted form it is printed
-/// in: `L"` matched every wide string and `"` every string.
+/// in: `L"` matched every wide string and `"` every string. A text under
+/// [`PRINTABLE_MIN`] printable characters matches only whole
+/// ([`matching`]).
 ///
 /// A protected binary does not store the strings that matter, it computes
 /// them, so when nothing in the table matches the generators are asked
@@ -51,7 +53,9 @@ const STRINGS_PER_FUNCTION: usize = 20;
 /// strings in F functions` header, the `# strings: 1="..." 2="..."` legend
 /// of the page, a column header, then one `entry name: 1 2 5` row per
 /// function in entry order with its strings' numbers in address order, and
-/// a `# N more rows; offset=K for the next page` line when rows remain.
+/// a `# N more rows; offset=K for the next page` line when rows remain. A
+/// filter under [`PRINTABLE_MIN`] that nothing matches ends the header
+/// with how many referenced addresses were read for it whole.
 pub fn functions_by_string_tsv(
     p: &Program,
     a: &Analysis,
@@ -62,18 +66,8 @@ pub fn functions_by_string_tsv(
 ) -> String {
     let q = filter.to_lowercase();
     let shown_filter = crate::text::quoted(filter);
-    let mut texts: BTreeMap<u64, String> = BTreeMap::new();
-    let mut by_function: BTreeMap<u64, BTreeSet<u64>> = BTreeMap::new();
-    for r in referenced_strings(p, a).iter() {
-        if !r.folded.contains(&q) {
-            continue;
-        }
-        for e in a.xrefs_to(r.target).iter().filter_map(|s| s.from_entry) {
-            by_function.entry(e).or_default().insert(r.start);
-            texts.entry(r.start).or_insert_with(|| shown_text(&r.lit));
-        }
-    }
-    let pairs: usize = by_function.values().map(BTreeSet::len).sum();
+    let m = matching(p, a, &q);
+    let pairs: usize = m.by_function.values().map(BTreeSet::len).sum();
     if pairs == 0 && !q.is_empty() {
         let found = recovered_matching(p, a, filter).found;
         if !found.is_empty() {
@@ -98,7 +92,7 @@ pub fn functions_by_string_tsv(
         }
     }
     let mut families: BTreeMap<(u64, &BTreeSet<u64>), Vec<u64>> = BTreeMap::new();
-    for (&e, strings) in &by_function {
+    for (&e, strings) in &m.by_function {
         let shape = a.function(e).map_or(0, |f| f.shape_hash);
         families.entry((shape, strings)).or_default().push(e);
     }
@@ -148,21 +142,27 @@ pub fn functions_by_string_tsv(
         body.push_str(&same_code(a, o, others));
         body.push('\n');
     }
+    let note = match m.read {
+        Some(n) if pairs == 0 => format!(
+            "; texts under {PRINTABLE_MIN} printable characters match only whole ({n} referenced addresses read)"
+        ),
+        _ => String::new(),
+    };
     let mut out = format!(
-        "# showing {listed} of {} row{}: {pairs} function/string pairs match {shown_filter} across {} string{} in {} function{}\n# strings:",
+        "# showing {listed} of {} row{}: {pairs} function/string pairs match {shown_filter} across {} string{} in {} function{}{note}\n# strings:",
         rows.len(),
         plural(rows.len()),
-        texts.len(),
-        plural(texts.len()),
-        by_function.len(),
-        plural(by_function.len())
+        m.texts.len(),
+        plural(m.texts.len()),
+        m.by_function.len(),
+        plural(m.by_function.len())
     );
     for (i, start) in legend.iter().enumerate() {
         let _ = write!(
             out,
             " {}={}",
             i + 1,
-            texts.get(start).map_or("", String::as_str)
+            m.texts.get(start).map_or("", String::as_str)
         );
     }
     out.push_str("\n# entry name: string numbers\n");
@@ -182,6 +182,152 @@ fn unquoted(lit: &str) -> &str {
         .or_else(|| lit.strip_prefix('"'))
         .and_then(|body| body.strip_suffix('"'))
         .unwrap_or(lit)
+}
+
+/// The strings a filter matches, and the functions that reference them.
+struct Matching {
+    /// Each matched string's first byte, to its text as a row shows it.
+    texts: BTreeMap<u64, String>,
+    /// Each referencing function's entry, to the first bytes of the
+    /// matched strings it references.
+    by_function: BTreeMap<u64, BTreeSet<u64>>,
+    /// How many referenced addresses were read for the filter whole, when
+    /// it is under [`PRINTABLE_MIN`] ([`whole_matches`]).
+    read: Option<usize>,
+}
+
+/// Returns the strings a filter matches and the functions referencing each.
+///
+/// A literal the index holds ([`referenced_strings`]) matches when its
+/// text holds the filter. The index holds none under [`PRINTABLE_MIN`]
+/// printable characters, whose bytes are as often a number as a string, so
+/// for a filter that short the texts that are it whole match too
+/// ([`whole_matches`]).
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis, whose references are read.
+/// * `q` - The filter, lower-cased.
+fn matching(p: &Program, a: &Analysis, q: &str) -> Matching {
+    let indexed = referenced_strings(p, a);
+    let short = whole_matches(p, a, q);
+    let held = indexed
+        .iter()
+        .filter(|r| r.folded.contains(q))
+        .map(|r| (r.target, r.start, r.lit.as_str()));
+    let whole = short
+        .iter()
+        .flat_map(|(_, found)| found.iter().map(|(t, lit)| (*t, *t, lit.as_str())));
+    let mut m = Matching {
+        texts: BTreeMap::new(),
+        by_function: BTreeMap::new(),
+        read: short.as_ref().map(|(read, _)| *read),
+    };
+    for (target, start, lit) in held.chain(whole) {
+        for e in a.xrefs_to(target).iter().filter_map(|s| s.from_entry) {
+            m.by_function.entry(e).or_default().insert(start);
+            m.texts.entry(start).or_insert_with(|| shown_text(lit));
+        }
+    }
+    m
+}
+
+/// Returns the referenced addresses outside code whose whole text is a
+/// filter under [`PRINTABLE_MIN`] printable characters, each read once.
+///
+/// Two printable bytes at a referenced address are as often a number as a
+/// string, which is why the index holds no text that short; the filter's
+/// text ended by its terminator is the evidence a number's bytes do not
+/// give ([`whole_text`]). The places read are those the index reads
+/// ([`literal_section`]), and a text is compared as the index's are.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis, whose references and code are read.
+/// * `q` - The filter, lower-cased.
+///
+/// # Returns
+///
+/// How many referenced addresses had bytes to read, and `(address, quoted
+/// literal)` for each whose text is `q`, in address order; `None` when `q`
+/// is empty or spells [`PRINTABLE_MIN`] printable characters or more
+/// ([`least_printable`]), since a text holding it is then one the index
+/// reads.
+fn whole_matches(p: &Program, a: &Analysis, q: &str) -> Option<(usize, Vec<(u64, String)>)> {
+    if q.is_empty() || least_printable(q) >= PRINTABLE_MIN {
+        return None;
+    }
+    let n = q.chars().count().min(STRING_MATCH_CAP);
+    let mut read = 0usize;
+    let mut found = Vec::new();
+    for &t in a.xrefs.keys() {
+        let Some(raw) = literal_section(p, t, a.function_at(t).is_none())
+            .and_then(|_| p.read_va_upto(t, 2 * (n + 1)))
+        else {
+            continue;
+        };
+        read += 1;
+        if let Some(lit) = whole_text(raw, n)
+            && unquoted(&lit).to_lowercase() == q
+        {
+            found.push((t, lit));
+        }
+    }
+    Some((read, found))
+}
+
+/// Returns the fewest printable characters of a text whose literal, as
+/// [`escaped_literal`] writes it, is `q`: each `\t`, `\r` or `\n` in it may
+/// be the control character a literal escapes that way.
+///
+/// # Arguments
+///
+/// * `q` - The filter, lower-cased.
+fn least_printable(q: &str) -> usize {
+    let escapes = q
+        .split('\\')
+        .skip(1)
+        .filter(|s| s.starts_with(['t', 'r', 'n']))
+        .count();
+    q.chars().count().saturating_sub(2 * escapes)
+}
+
+/// Returns the string at the first byte of `raw`, quoted as the index
+/// quotes one, when it ends at its terminator inside `raw`.
+///
+/// The terminator is a NUL byte, or a NUL unit for UTF-16LE text: the
+/// evidence that the bytes are a whole string and not the start of a
+/// number or of a longer run.
+///
+/// Bytes that read as UTF-16LE for two characters or more are wide or
+/// nothing: their narrow reading is the first character and the zero high
+/// byte after it, which every wide string opening with that character
+/// holds.
+///
+/// # Arguments
+///
+/// * `raw` - The bytes at a referenced address, `2 * (n + 1)` of them or
+///   as many as its section holds.
+/// * `n` - Most characters shown; a longer text ends in `...`.
+///
+/// # Returns
+///
+/// `"text"` or `L"text"`, escaped as [`escaped_literal`] writes it, or
+/// `None` when no text there ends at its terminator inside `raw`.
+fn whole_text(raw: &[u8], n: usize) -> Option<String> {
+    let ends = |len: usize, unit: usize| {
+        raw.get(len * unit..(len + 1) * unit)
+            .is_some_and(|end| end.iter().all(|&b| b == 0))
+    };
+    match wstr_text_in(raw, 2, n) {
+        Some((len, t)) => ends(len, 2).then(|| format!("L\"{}\"", escaped_literal(&t))),
+        None => {
+            let (len, t) = cstr_text_in(raw, 1, n)?;
+            ends(len, 1).then(|| format!("\"{}\"", escaped_literal(&t)))
+        }
+    }
 }
 
 /// Returns every referenced address outside code that holds a string
