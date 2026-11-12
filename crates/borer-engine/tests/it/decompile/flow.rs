@@ -1563,18 +1563,10 @@ fn a_fact_lost_alone_lifts_its_block_again() {
     assert!(text.contains("return rsi + 8;\n"), "{text}");
 }
 
-/// A branch on the count register stays the instruction it is.
-///
 /// `xor eax,eax; L: add rax,[rdx]; add rdx,8; <branch> L; lea r10d,[rcx+8];
-/// mov [r8],r10d; ret`. `loop` and `loopne` count `rcx` down and branch on
-/// it, `jrcxz` branches on it, and the lifter has a model for none of
-/// them: read as a branch on the flags, `loopne` after `cmp rax,5` looped
-/// `while (var1 != 5)`, and the two that count left `rcx` what it was, so
-/// the `lea` after them read `a1 + 8`. Each stays in the text as a
-/// comment, on flags spelled as unknown, and its block is not counted as
-/// checked.
-#[test]
-fn a_branch_on_the_count_register_stays_an_instruction() {
+/// mov [r8],r10d; ret` with each branch on the count register, by the
+/// branch's name: `loop`, `cmp rax,5; loopne` and `jrcxz`.
+fn counted_branches() -> [(&'static str, borer_engine::program::Program); 3] {
     const HEAD: [u8; 9] = [
         0x31, 0xc0, // ASM: xor eax,eax
         0x48, 0x03, 0x02, // ASM: add rax,[rdx]
@@ -1590,8 +1582,21 @@ fn a_branch_on_the_count_register_stays_an_instruction() {
         ("loopne", &[0x48, 0x83, 0xf8, 0x05, 0xe0, 0xf3]), // ASM: cmp rax,5; loopne 0x140001002
         ("jrcxz", &[0xe3, 0xf7]),                          // ASM: jrcxz 0x140001002
     ];
-    for (name, branch) in branches {
-        let p = program64(&[&HEAD[..], branch, &TAIL[..]].concat());
+    branches.map(|(name, branch)| (name, program64(&[&HEAD[..], branch, &TAIL[..]].concat())))
+}
+
+/// A branch on the count register stays the instruction it is.
+///
+/// `loop` and `loopne` count `rcx` down and branch on it, `jrcxz` branches
+/// on it, and the lifter has a model for none of them
+/// ([`counted_branches`]): read as a branch on the flags, `loopne` after
+/// `cmp rax,5` looped `while (var1 != 5)`, and the two that count left
+/// `rcx` what it was, so the `lea` after them read `a1 + 8`. Each stays in
+/// the text as a comment, on flags spelled as unknown, and its block is
+/// not counted as checked.
+#[test]
+fn a_branch_on_the_count_register_stays_an_instruction() {
+    for (name, p) in counted_branches() {
         let a = Analysis::compute(&p);
         let o = Overlay::default();
         let text = decompile(&p, &a, &o, 0x1_4000_1000).unwrap_or_default();
@@ -1605,5 +1610,39 @@ fn a_branch_on_the_count_register_stays_an_instruction() {
                 .is_some_and(|h| h.contains("unchecked: 1 unmodeled,")),
             "{name}: {header:?}"
         );
+    }
+}
+
+/// The lifter agrees with the emulator at a branch on the count register,
+/// where it claims no branch.
+///
+/// Read as a `jne`, the `loopne` of [`counted_branches`] was a branch the
+/// lift check compared with the machine's, which also leaves the loop when
+/// `rcx` runs out: the two agreed wherever `rcx` was not 1, and the check
+/// counted that as a branch borne out. Now the blocks that count `rcx`
+/// down are not checked, since no expression says what they leave in it,
+/// and the `jrcxz` block, which changes no register, is checked with its
+/// branch counted as one the check cannot read. Nothing disagrees and
+/// nothing is left undecided, on any seed.
+#[test]
+fn the_lifter_agrees_with_the_emulator_at_a_branch_on_the_count_register() {
+    use borer_engine::analysis::decompile::verify::{Fact, verify, verify_tsv};
+    for (name, p) in counted_branches() {
+        let a = Analysis::compute(&p);
+        let jrcxz = name == "jrcxz";
+        for seed in 1..=16 {
+            let v = verify(&p, &a, &[0x1_4000_1000], seed);
+            let branch = v.facts.get(&Fact::Branch);
+            let read = branch.map_or((0, 0), |t| (t.compared, t.unreadable));
+            let said = verify_tsv(&v);
+            assert!(v.mismatches.is_empty(), "{name}, seed {seed}: {said}");
+            assert_eq!(v.undecided, 0, "{name}, seed {seed}: {said}");
+            assert_eq!(read, (0, usize::from(jrcxz)), "{name}, seed {seed}: {said}");
+            assert_eq!(
+                v.checked,
+                2 + usize::from(jrcxz),
+                "{name}, seed {seed}: {said}"
+            );
+        }
     }
 }
