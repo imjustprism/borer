@@ -20,7 +20,7 @@ use super::{Overlay, parse_addr};
 /// address keys them (editable by hand).
 ///
 /// A key may also be decimal; one that is not an address refuses the file.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Project {
     /// Path of the binary the annotations belong to, for the reader: the
     /// binary is identified by [`Project::sha256`] when the file has it.

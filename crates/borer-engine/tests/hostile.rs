@@ -7,7 +7,8 @@
 //! analysis began; an export directory landing on garbage sized three
 //! tables by its counts; a section whose memory size was two gigabytes was
 //! thrown away with the code it held. Each case here is the header that
-//! did it, rebuilt from scratch, with the bound it must now hold.
+//! did it, rebuilt from scratch, with the bound it must now hold. A
+//! hand-edited project file is held the same way ([`projects`]).
 
 #![expect(
     clippy::missing_panics_doc,
@@ -17,12 +18,10 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use borer_engine::analysis::Analysis;
-use borer_engine::num::from_usize;
 use borer_engine::program::{FileOff, Program, Section, SymbolKind};
+use borer_engine::{analysis::Analysis, num::from_usize};
 
 #[path = "common/elfgen.rs"]
 #[expect(
@@ -38,12 +37,15 @@ mod elfgen;
 )]
 mod machogen;
 
+#[path = "hostile/projects.rs"]
+mod projects;
+
 /// Live heap bytes, kept by [`Counting`].
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 /// Highest [`LIVE`] since the last [`measured`] began.
 static PEAK: AtomicUsize = AtomicUsize::new(0);
 /// One test at a time, since the counters are process-wide.
-static SERIAL: Mutex<()> = Mutex::new(());
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// The system allocator with a live-bytes counter and a high-water mark.
 struct Counting;
