@@ -860,6 +860,47 @@ fn a_stated_field_is_saved_and_a_struct_merges_at_the_cli_too() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// `set-type struct` tells a class from a struct name by the binary's
+/// functions, so it answers from no analysis that is not there.
+///
+/// Over a file borer reads no code of, a class's name is refused with the
+/// reason and no project is written, where it defined a struct by that
+/// name; with the code mapped the same words state the class's field.
+#[test]
+fn set_type_struct_reads_the_code_that_tells_a_class_from_a_struct() {
+    let dir = std::env::temp_dir().join(format!("borer-fields-unread-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a directory of the test's own");
+    let image = dir.join("classes.bin").to_string_lossy().into_owned();
+    std::fs::write(&image, two_classes()).expect("the fixture is writable");
+    let project = dir.join("stated.json");
+    let run = |mapped: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_borer"))
+            .args(["--no-pdb", "set-type", &image])
+            .args(mapped)
+            .arg(&project)
+            .args(["struct", "class_2800", "0x270:m_currentPipeline:u32"])
+            .output()
+            .expect("spawn borer");
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    };
+    let said = run(&[]);
+    assert!(said.contains("so no code analysis applies"), "{said}");
+    assert!(
+        !said.contains("defined struct") && !project.exists(),
+        "{said}"
+    );
+    let said = run(&["--arch", "x64", "--regions", REGIONS]);
+    assert!(
+        said.starts_with("stated 1 field(s) of class class_2800: 5 kept, 1 changed, 0 new: +0x270 field_0x270 -> m_currentPipeline u32; written to "),
+        "{said}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// A type a class's field was stated with changes only so far as the
 /// field still stands, on the dry run as when applied.
 ///

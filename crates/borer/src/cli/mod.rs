@@ -1052,6 +1052,11 @@ fn set_type(args: &[String], s: &Session) -> anyhow::Result<()> {
 /// Defines a struct, an enum or a typedef in a project's overlay, or
 /// states fields of the struct or the class a `struct` names.
 ///
+/// Whether a name is a class is read off the binary's functions, so
+/// `struct` needs them discovered: over a file borer reads no code of it
+/// is refused with the reason, where an empty analysis would have every
+/// class's name define a struct.
+///
 /// # Arguments
 ///
 /// * `kind` - `struct`, `enum` or `typedef`.
@@ -1065,8 +1070,9 @@ fn set_type(args: &[String], s: &Session) -> anyhow::Result<()> {
 ///
 /// # Errors
 ///
-/// When the kind is none of the three, a word is missing, or the type or
-/// a field is refused.
+/// When the kind is none of the three, a word is missing, the type or a
+/// field is refused, or `struct` is asked of a binary whose functions
+/// borer does not discover.
 fn defined(
     kind: &str,
     args: &[String],
@@ -1101,7 +1107,7 @@ fn defined(
                 fields: &fields,
                 mode,
             };
-            let a = s.analysis_or_empty();
+            let a = s.analysis(Feature::Discover)?;
             let plan =
                 stated::plan(&s.program, &a, overlay, &statement).map_err(anyhow::Error::msg)?;
             stated::retyped(&s.program, &a, overlay, plan.defined()).map_err(anyhow::Error::msg)?;
