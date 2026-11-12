@@ -249,8 +249,8 @@ impl<'a> Exec<'_, 'a> {
 
     /// Builds the address expression of the instruction's memory operand.
     ///
-    /// iced pre-computes rip-relative displacements into absolute targets,
-    /// so a missing or `rip` base yields a constant. `fs`/`gs`
+    /// A missing base yields a constant, and so does a `rip` or `eip` one,
+    /// as iced sums it with the next instruction's address. `fs`/`gs`
     /// segment prefixes add the segment register as a variable. A 16-bit
     /// address ([`crate::disasm::addresses_16_bit`]) reads the 16-bit
     /// registers and takes its displacement as the signed word it is. The
@@ -308,7 +308,9 @@ impl<'a> Exec<'_, 'a> {
             crate::disasm::displacement(instr, self.bitness()).cast_unsigned()
         };
         let base = instr.memory_base();
-        let mut e = if base == Register::None || base == Register::RIP {
+        let mut e = if instr.is_ip_rel_memory_operand() {
+            Expr::Const(instr.ip_rel_memory_address())
+        } else if base == Register::None {
             Expr::Const(disp)
         } else {
             fold(Op::Add, self.reg_low(base, bits), Expr::Const(disp), 64)

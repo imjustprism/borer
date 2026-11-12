@@ -1638,3 +1638,20 @@ fn a_kernel_call_ends_the_equality_of_its_result() {
         assert!(text.contains(&store), "{text}");
     }
 }
+
+/// An address relative to `eip` is the constant it sums to.
+///
+/// `mov eax,[eip+0x1000]` of 64-bit code reads at the 32-bit sum of the
+/// next instruction's address and the displacement, zero-extended:
+/// `0x40002007` at `0x140001000`. The lift read `eip` as a register and
+/// printed `*(uint32_t*)((eip + 0x2007) & 0xffffffff)`.
+#[test]
+fn an_eip_relative_address_is_its_constant() {
+    let code = [
+        0x67, 0x8b, 0x05, 0x00, 0x10, 0x00, 0x00, // ASM: mov eax,[eip+0x1000]
+        0xc3, // ASM: ret
+    ];
+    let text = decompiled(&program64(&code), 0x1_4000_1000);
+    assert!(text.contains("*(uint32_t*)0x40002007"), "{text}");
+    assert!(!text.contains("eip"), "{text}");
+}
