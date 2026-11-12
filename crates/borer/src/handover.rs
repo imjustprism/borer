@@ -70,6 +70,10 @@ impl Resume {
     ///
     /// When the file cannot be read or does not parse.
     pub(crate) fn take(file: &Path) -> Result<Resume, String> {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the state file the relay made in its own directory"
+        )]
         let json = std::fs::read(file).map_err(|e| format!("read {}: {e}", file.display()))?;
         if let Err(e) = std::fs::remove_file(file) {
             eprintln!("borer: remove {}: {e}", file.display());
@@ -283,6 +287,7 @@ pub(crate) fn end_quietly_when_stdout_closes() {
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "the tests read their own files")]
 mod tests {
     use super::write_fresh;
     use crate::relay::state_dir;

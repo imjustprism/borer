@@ -773,7 +773,7 @@ pub fn save_to(index: &CodeIndex, path: &Path) -> Result<(), String> {
 pub fn load_from(path: &Path) -> Option<CodeIndex> {
     /// Bytes read from the file at a time.
     const CHUNK: usize = 1 << 20;
-    let file = std::fs::File::open(path).ok()?;
+    let file = borer_engine::program::open_regular(path, u64::MAX).ok()?;
     let len = file.metadata().ok()?.len();
     read(BufReader::with_capacity(CHUNK, file), len)
 }

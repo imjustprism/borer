@@ -3,6 +3,8 @@
 //! per file. `dogfood` and `bench` stay binaries of their own, since the
 //! gate and the benchmark run them by name, and so does `hostile`, whose
 //! counting allocator measures a process's whole heap.
+
+#![expect(clippy::disallowed_methods, reason = "the tests read their own files")]
 #[path = "../common/mod.rs"]
 mod common;
 #[path = "../common/decompiled.rs"]

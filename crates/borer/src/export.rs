@@ -207,11 +207,16 @@ fn write_with_set(
     );
     file.write_all(hoisted.head(&binary).as_bytes())
         .with_context(|| format!("writing {shown}"))?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the part file this export just wrote"
+    )]
     let mut from = std::fs::File::open(part).with_context(|| format!("reading {shown}.part"))?;
     std::io::copy(&mut from, &mut file).with_context(|| format!("writing {shown}"))?;
     file.flush().with_context(|| format!("writing {shown}"))?;
     drop(from);
     std::fs::remove_file(part).with_context(|| format!("removing {shown}.part"))?;
+    #[expect(clippy::disallowed_methods, reason = "the file this export just wrote")]
     let bytes = std::fs::metadata(path)
         .with_context(|| format!("reading {shown}"))?
         .len();
@@ -371,6 +376,7 @@ pub fn write_mod_files(
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "the tests read their own files")]
 mod tests {
     use super::{Existing, Library, write_c, write_entries};
     use borer_engine::analysis::{Analysis, Overlay};

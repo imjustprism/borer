@@ -1,3 +1,4 @@
+#![expect(clippy::disallowed_methods, reason = "the tests read their own files")]
 use super::{Arch, Program, caught, unusable_path};
 
 /// The summary of a file with no code says why code tools have nothing

@@ -144,7 +144,7 @@ crates/borer-engine/src/isa/a64/decode.rs::mnemonic#1	233
 crates/borer-engine/src/isa/a64/roles.rs::data#1	142
 crates/borer-engine/src/layout.rs::program#1	120
 crates/borer-engine/src/macho.rs::image#1	184
-crates/borer-engine/src/pdb.rs	1565
+crates/borer-engine/src/pdb.rs	1558
 crates/borer-engine/src/pdb.rs::gather#1	163
 crates/borer-engine/src/program/mod.rs::from_bytes_with#1	558
 crates/borer-engine/src/program/mod.rs::summary#1	164

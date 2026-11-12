@@ -240,7 +240,10 @@ fn read_program_file(path: &Path) -> anyhow::Result<Vec<u8>> {
 /// Reads a file whole when it is a regular one no larger than a cap.
 ///
 /// The file is opened by [`open_regular`]; the read itself stops one byte
-/// past the cap.
+/// past the cap. A path borer is given (in an argument, a file, a pack or
+/// the environment) is read here, opened by [`open_regular`] or stated by
+/// [`checked_metadata`]: clippy bars the standard readers elsewhere, and a
+/// path borer builds itself says why where it reads one.
 ///
 /// # Arguments
 ///
@@ -315,8 +318,16 @@ pub fn open_regular(path: &Path, max: u64) -> anyhow::Result<std::fs::File> {
             Ok(())
         }
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the checked reader, past unusable_path"
+    )]
     let meta = std::fs::metadata(path).with_context(|| format!("reading {shown}"))?;
     judge(&meta)?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the checked reader, on a regular file"
+    )]
     let file = std::fs::File::open(path).with_context(|| format!("reading {shown}"))?;
     judge(
         &file
@@ -345,7 +356,12 @@ pub fn checked_metadata(path: &Path) -> Result<Option<std::fs::Metadata>, String
     if let Some(why) = unusable_path(path) {
         return Err(why);
     }
-    Ok(std::fs::metadata(path).ok())
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the checked stat, past unusable_path"
+    )]
+    let meta = std::fs::metadata(path).ok();
+    Ok(meta)
 }
 
 /// How much of a file a `<file>@<offset>` load takes.

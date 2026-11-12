@@ -320,6 +320,10 @@ fn curl(req: &Request<'_>, token: Option<&Token>) -> anyhow::Result<String> {
 /// * `child` - The running `curl`.
 /// * `file` - The file it writes.
 /// * `headers` - The file it writes the response headers to.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the updater reads the files it downloads and keeps"
+)]
 fn watch(child: &mut std::process::Child, file: &Path, headers: &Path) {
     /// The newest bytes the line streams.
     const NEWEST: u64 = 64;
@@ -362,6 +366,10 @@ fn content_length(headers: &str) -> Option<u64> {
 /// * `file` - The file.
 /// * `len` - How much of it to look at.
 /// * `n` - How many bytes to read, at most.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the updater reads the files it downloads and keeps"
+)]
 fn newest(file: &Path, len: u64, n: u64) -> Vec<u8> {
     use std::io::{Read as _, Seek as _, SeekFrom};
     let mut bytes = Vec::new();
@@ -930,6 +938,10 @@ fn step<T>(
 ///
 /// When a download fails, the archive does not match its listed sum, `tar`
 /// cannot unpack it, or the binary's folder cannot be written.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the updater reads the files it downloads and keeps"
+)]
 fn install(
     release: &Release,
     name: &str,
@@ -1027,6 +1039,10 @@ fn remember(tag: &str) {
 }
 
 /// The last checked tag, and whether that check is still fresh.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the updater reads the files it downloads and keeps"
+)]
 fn recalled() -> Option<(String, bool)> {
     let text = std::fs::read_to_string(check_file()?).ok()?;
     let (when, tag) = text.trim().split_once(' ')?;

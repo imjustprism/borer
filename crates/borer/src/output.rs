@@ -279,6 +279,7 @@ pub fn create(path: &Path, existing: Existing) -> std::io::Result<std::fs::File>
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "the tests read their own files")]
 mod tests {
     use super::{Existing, confine, create};
     use std::path::{Path, PathBuf};

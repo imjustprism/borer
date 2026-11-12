@@ -71,6 +71,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a development tool reads its input"
+    )]
     let targets: Vec<u64> = if mode == Some("--sample") {
         let file = args.get(2).ok_or("--sample needs a file")?;
         std::fs::read_to_string(file)?

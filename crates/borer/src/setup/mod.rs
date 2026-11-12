@@ -151,6 +151,10 @@ fn stale(command: &str) -> bool {
 /// The report's text for the client, after its name; whether the client
 /// failed (a file that could not be read, edited or written); and whether
 /// the file changed, or would.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a client's own configuration file"
+)]
 fn register_file(target: &Target, command: &str, mode: Mode, apply: bool) -> (String, bool, bool) {
     let file = target.file.display();
     let existed = target.file.is_file();
@@ -413,6 +417,7 @@ fn changed_text(change: Result<Change, String>) -> String {
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "the tests read their own files")]
 mod tests {
     use super::codex::Codex;
     use super::cursor::Cursor;

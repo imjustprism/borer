@@ -19,6 +19,7 @@ impl Client for LmStudio {
 
     fn place(&self, _: Os, env: &Env) -> Option<(PathBuf, PathBuf)> {
         let pointer = env.home(".lmstudio-home-pointer")?;
+        #[expect(clippy::disallowed_methods, reason = "LM Studio's own pointer file")]
         let named = std::fs::read_to_string(&pointer)
             .ok()
             .map(|t| PathBuf::from(t.trim()))

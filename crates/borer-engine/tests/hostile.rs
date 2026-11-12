@@ -22,7 +22,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use borer_engine::program::{FileOff, Program, Section, SymbolKind};
+use borer_engine::program::{FileOff, Program, Section, SymbolKind, read_regular};
 use borer_engine::{analysis::Analysis, num::from_usize};
 
 #[path = "common/elfgen.rs"]
@@ -1310,7 +1310,7 @@ const LOAD_HEAP_PER_BYTE: usize = 8;
 fn loading_a_real_binary_takes_heap_bounded_by_its_size() {
     let _one = serial();
     let path = std::env::current_exe().expect("the test binary has a path");
-    let bytes = std::fs::read(&path).expect("the test binary is readable");
+    let bytes = read_regular(&path, u64::MAX).expect("the test binary is readable");
     let size = bytes.len();
     let (program, extra) = measured(|| Program::from_bytes_with(path, bytes, false, None));
     assert!(program.is_ok(), "the test binary loads");
@@ -1840,7 +1840,7 @@ fn a_jump_table_of_rvas_past_the_top_of_the_address_space_is_not_read() {
 fn a_pdb_applied_at_the_top_of_the_address_space_names_what_fits() {
     let _serial = serial();
     let exe = std::env::current_exe().expect("the test binary has a path");
-    let mut bytes = std::fs::read(&exe).expect("the test binary is readable");
+    let mut bytes = read_regular(&exe, u64::MAX).expect("the test binary is readable");
     let Some(pe_at) = bytes.get(0x3c..0x40).filter(|_| bytes.starts_with(b"MZ")) else {
         return;
     };

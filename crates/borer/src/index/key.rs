@@ -30,6 +30,10 @@ use super::{FNV_SEED, FORMAT, IndexKey, fnv1a, program_key};
 /// * `program` - The loaded image.
 /// * `packs` - The packs the analysis ran with.
 #[must_use]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the key reads the size and time of borer's own executable"
+)]
 pub fn index_key(program: &Program, packs: &Packs) -> IndexKey {
     let mut h = fnv1a(FNV_SEED, &FORMAT.to_le_bytes());
     for pack in &packs.packs {

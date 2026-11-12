@@ -17,7 +17,15 @@ doc-valid-idents = ["SysV", "AArch64", "MinGW", "WinDbg", "GitHub", "ChaCha", ".
 # Determinism is a contract, so no answer may depend on the time.
 # The engine budgets work in steps; only the server's own timing line, the
 # benchmarks and the timing tests read the clock, each saying why.
+# A path borer is given is read, opened or stated only by the checked reader
+# (borer_engine::program), which refuses shares, devices and anything that is
+# not a regular file before it touches the path; a read of a path borer builds
+# itself says why.
 disallowed-methods = [
   { path = "std::time::Instant::now", reason = "the engine is deterministic: bound work in steps, not time" },
   { path = "std::time::SystemTime::now", reason = "the engine is deterministic: no answer depends on the time" },
+  { path = "std::fs::read", reason = "read a path borer is given with borer_engine::program::read_regular" },
+  { path = "std::fs::read_to_string", reason = "read a path borer is given with borer_engine::program::read_regular" },
+  { path = "std::fs::File::open", reason = "open a path borer is given with borer_engine::program::open_regular" },
+  { path = "std::fs::metadata", reason = "stat a path borer is given with borer_engine::program::checked_metadata" },
 ]

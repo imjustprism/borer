@@ -1,5 +1,7 @@
 //! The server's integration tests as one binary: every file here is a
 //! module, so the server is linked once for all of them.
+
+#![expect(clippy::disallowed_methods, reason = "the tests read their own files")]
 mod cancel;
 mod cli;
 mod contract;

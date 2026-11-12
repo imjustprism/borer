@@ -165,6 +165,10 @@ fn fetch_pdb(program: &Program) -> Option<PathBuf> {
 ///
 /// When the PDB cannot be read.
 fn truth(path: &Path) -> Result<BTreeMap<u32, Truth>, pdb::Error> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a development tool reads its input"
+    )]
     let mut pdb = pdb::PDB::open(std::fs::File::open(path)?)?;
     let map = pdb.address_map()?;
     let mut out: BTreeMap<u32, Truth> = BTreeMap::new();
@@ -365,7 +369,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let started = std::time::Instant::now();
     let a = match &opts.pack {
         Some(file) => {
-            let text = std::fs::read_to_string(file)?;
+            let text = String::from_utf8(borer_engine::program::read_regular(file, u64::MAX)?)?;
             let (pack, _) = Pack::parse(&text, &file.display().to_string())?;
             Analysis::compute_with(&program, Arc::new(Packs { packs: vec![pack] }))
         }

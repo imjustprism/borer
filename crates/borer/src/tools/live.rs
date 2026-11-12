@@ -846,6 +846,7 @@ impl BorerServer {
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "the tests read their own files")]
 mod tests {
     #[cfg(windows)]
     use crate::testing::raw_server;

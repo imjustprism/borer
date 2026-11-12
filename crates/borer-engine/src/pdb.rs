@@ -307,42 +307,8 @@ fn same_build<'s, S: pdb::Source<'s> + 's>(
 ///
 /// As [`same_build`], `None` also when the file does not open as a PDB.
 fn file_names_build(path: &Path, record: &Record) -> Option<bool> {
-    let mut db = pdb::PDB::open(open_capped(path)?).ok()?;
+    let mut db = pdb::PDB::open(crate::program::open_regular(path, PDB_LEN_MAX).ok()?).ok()?;
     same_build(&mut db, record)
-}
-
-/// Opens a candidate PDB when it is a regular file no larger than
-/// [`PDB_LEN_MAX`].
-///
-/// # Arguments
-///
-/// * `path` - The candidate file.
-///
-/// # Returns
-///
-/// The open file, or `None` when it does not open, is not a regular file
-/// (a directory, a pipe, a device) or is larger than the cap.
-fn open_capped(path: &Path) -> Option<std::fs::File> {
-    let file = std::fs::File::open(path).ok()?;
-    let meta = file.metadata().ok()?;
-    (meta.is_file() && meta.len() <= PDB_LEN_MAX).then_some(file)
-}
-
-/// Reads a candidate PDB whole, within [`open_capped`]'s limits.
-///
-/// # Arguments
-///
-/// * `path` - The candidate file.
-///
-/// # Returns
-///
-/// The file's bytes, or `None` when [`open_capped`] refuses it or the read
-/// fails.
-fn read_capped(path: &Path) -> Option<Vec<u8>> {
-    let mut file = open_capped(path)?;
-    let mut bytes = Vec::new();
-    std::io::Read::read_to_end(&mut file, &mut bytes).ok()?;
-    Some(bytes)
 }
 
 /// Whether a PDB's bytes name the build a record does, without applying it.
@@ -444,7 +410,7 @@ pub(crate) fn apply(
         return skip.map(Outcome::Skipped);
     };
     let unreadable = || Some(Outcome::Skipped(Skip::Unreadable));
-    let Some(bytes) = read_capped(&path) else {
+    let Ok(bytes) = crate::program::read_regular(&path, PDB_LEN_MAX) else {
         return unreadable();
     };
     phases.mark("pdb read");
@@ -562,7 +528,7 @@ pub(crate) fn sources(
 ) -> Option<BTreeMap<u64, (String, u32)>> {
     let path = resolved(binary, record, symsrv)?;
     let unreadable = || None;
-    let Some(bytes) = read_capped(&path) else {
+    let Ok(bytes) = crate::program::read_regular(&path, PDB_LEN_MAX) else {
         return unreadable();
     };
     let Ok(mut db) = pdb::PDB::open(Cursor::new(bytes.as_slice())) else {
@@ -1550,6 +1516,10 @@ fn insert_data(
 #[expect(
     clippy::missing_panics_doc,
     reason = "assertions are the point of a test"
+)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the tests read the binary they run as"
 )]
 mod tests {
     use super::{

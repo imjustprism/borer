@@ -485,6 +485,10 @@ pub(crate) fn obtain(
         discard();
         return Err(why);
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the download borer just wrote in its cache"
+    )]
     let bytes = std::fs::read(&partial)
         .map_err(|e| format!("reading the download {}: {e}", partial.display()))?;
     let why = match pdb::identifies(&bytes, record) {
@@ -506,6 +510,7 @@ pub(crate) fn obtain(
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "the tests read their own files")]
 mod tests {
     use super::{
         DEFAULT_SERVER, Target, cache_path, curl_command, is_public, obtain, sanitize_name, target,

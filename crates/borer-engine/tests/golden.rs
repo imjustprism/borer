@@ -102,6 +102,10 @@ fn every_function_decompiles_to_the_recorded_bytes() {
     let Ok(base) = std::env::var("BORER_GOLDEN_BASE") else {
         return;
     };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the sweep reads the rows its caller names"
+    )]
     let base = std::fs::read_to_string(base).expect("read the base rows");
     let differ: Vec<String> = base
         .lines()

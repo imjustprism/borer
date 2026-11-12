@@ -31,6 +31,10 @@ fn output(program: &str, args: &[&str]) -> Option<String> {
 ///
 /// The commit's first twelve hex digits, or `None` outside a package.
 fn packaged_commit() -> Option<String> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the package's own file, at build time"
+    )]
     let info = std::fs::read_to_string(".cargo_vcs_info.json").ok()?;
     let after = info.split_once("\"sha1\"")?.1;
     let sha: String = after
@@ -69,6 +73,10 @@ fn main() {
     }
     let pins = Path::new("../../rust-toolchain.toml");
     println!("cargo:rerun-if-changed={}", pins.display());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the source tree's own file, at build time"
+    )]
     let pinned = std::fs::read_to_string(pins)
         .ok()
         .and_then(|t| {
