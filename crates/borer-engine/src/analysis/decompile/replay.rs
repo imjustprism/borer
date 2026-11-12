@@ -12,7 +12,9 @@
 //! statements ([`Effect`]) replayed on the text state. Then the
 //! relation must hold again at every successor (each register it reads,
 //! each stack slot the text names, memory off the frame, the stack
-//! pointer), the branch must go the machine's way, a call must pass what
+//! pointer, and from a state that takes the edge the register an equality
+//! branch fixes there, [`edge`]), the branch must go the machine's way, a
+//! call must pass what
 //! the machine passes, and a return must hand back what it hands back: an
 //! inductive check, block by block and edge by edge, that needs no
 //! compiler and names the statement's instruction when it fails.
@@ -99,6 +101,7 @@ use crate::program::Program;
 use subset::{integer_or_zero_fill, outside_subset, reads_whole_lanes};
 
 mod answer;
+mod edge;
 mod prove;
 mod report;
 mod subset;
@@ -2959,6 +2962,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         let mut tried = 0;
         let mut wrote = None;
         let mut early = None;
+        self.edges(b, block, code, sp, end, &mut seen, out);
         for trial in 0..TRIALS + RULED_OUT_RETRIES {
             if tried == TRIALS {
                 break;
@@ -3480,11 +3484,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         if !t.called && !t.settled {
             self.memory(&mut t, start, last, Some(b), out);
         }
-        for &s in self.succs.get(b).map_or(&[][..], Vec::as_slice) {
-            if w.processed.get(s).copied().unwrap_or(false) {
-                self.successor(&mut t, start, last, s, out);
-            }
-        }
+        self.successors(&mut t, start, last, end, out);
         *seen = t.seen;
         Ok(t.written)
     }

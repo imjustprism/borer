@@ -65,12 +65,12 @@ crates/borer-engine/src/analysis/decompile/mod.rs::name_fields#1	109
 crates/borer-engine/src/analysis/decompile/params.rs::detect_params#1	118
 crates/borer-engine/src/analysis/decompile/params.rs::param_types#1	145
 crates/borer-engine/src/analysis/decompile/params.rs::shape_of#1	135
-crates/borer-engine/src/analysis/decompile/replay.rs	2947
+crates/borer-engine/src/analysis/decompile/replay.rs	2945
 crates/borer-engine/src/analysis/decompile/replay.rs::eval_at#1	108
 crates/borer-engine/src/analysis/decompile/replay.rs::packed_op#1	136
 crates/borer-engine/src/analysis/decompile/replay.rs::replay_effect#1	193
 crates/borer-engine/src/analysis/decompile/replay.rs::successor#1	320
-crates/borer-engine/src/analysis/decompile/replay.rs::trial#1	190
+crates/borer-engine/src/analysis/decompile/replay.rs::trial#1	186
 crates/borer-engine/src/analysis/decompile/replay/prove.rs	2013
 crates/borer-engine/src/analysis/decompile/replay/prove.rs::prove_or#1	313
 crates/borer-engine/src/analysis/decompile/replay/prove.rs::step#1	254

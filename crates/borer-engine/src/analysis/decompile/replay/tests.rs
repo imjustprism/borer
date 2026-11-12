@@ -1,7 +1,9 @@
 use crate::isa::x86::Register;
 
-use super::{Claim, Replayed, Sampling, TextCheck, replay_effects, replay_function, replay_tsv};
-use crate::analysis::decompile::expr::{Expr, Flags, Op, UnOp};
+use super::{
+    Claim, Replayed, Sampling, TextCheck, Witness, replay_effects, replay_function, replay_tsv,
+};
+use crate::analysis::decompile::expr::{Expr, Flags, Key, Op, UnOp};
 use crate::analysis::decompile::lift::{ArgAt, Effect, EffectKind};
 use crate::analysis::decompile::{decompile, decompile_with};
 use crate::analysis::{Analysis, Overlay};
@@ -23,6 +25,26 @@ fn claims(r: &Replayed) -> Vec<Claim> {
 /// * `seed` - The states' seed.
 /// * `change` - Rewrites one effect.
 fn replayed_with(p: &Program, entry: u64, seed: u64, change: impl Fn(&mut Effect)) -> Replayed {
+    replayed_under(p, entry, seed, change, |_| {})
+}
+
+/// Replays a function's effects after `change` rewrote them, under the
+/// lifter's witness after `told` rewrote it.
+///
+/// # Arguments
+///
+/// * `p` - The image.
+/// * `entry` - The function.
+/// * `seed` - The states' seed.
+/// * `change` - Rewrites one effect.
+/// * `told` - Rewrites the witness.
+fn replayed_under(
+    p: &Program,
+    entry: u64,
+    seed: u64,
+    change: impl Fn(&mut Effect),
+    told: impl FnOnce(&mut Witness),
+) -> Replayed {
     let a = Analysis::compute(p);
     let f = a.function(entry).expect("function");
     let d = decompile_with(p, &a, &Overlay::default(), entry, true, &[], true).expect("text");
@@ -34,7 +56,8 @@ fn replayed_with(p: &Program, entry: u64, seed: u64, change: impl Fn(&mut Effect
         .collect();
     effects.iter_mut().flatten().for_each(change);
     let template = Emulator::new(p, 0).expect("emulator");
-    let w = d.take_witness().expect("witness");
+    let mut w = d.take_witness().expect("witness");
+    told(&mut w);
     replay_effects::<crate::analysis::decompile::arch::X86>(
         p,
         &a,
@@ -708,6 +731,157 @@ fn a_block_runs_under_the_branch_into_it() {
         assert_eq!(claims(&r), [], "seed {seed}: {}", replay_tsv(&r));
         assert_eq!(r.checked, 3, "seed {seed}: {}", replay_tsv(&r));
     }
+}
+
+/// A loop that counts `r9` down to zero, summing what `rdx` walks.
+const COUNTED: [u8; 18] = [
+    0x49, 0x89, 0xc9, // ASM: mov r9, rcx
+    0x31, 0xc0, // ASM: xor eax, eax
+    0x48, 0x03, 0x02, // ASM: add rax, [rdx]
+    0x48, 0x83, 0xc2, 0x08, // ASM: add rdx, 8
+    0x49, 0x83, 0xe9, 0x01, // ASM: sub r9, 1
+    0x75, 0xf3, // ASM: jne 0x1005
+];
+
+/// A read of `r9` to follow [`COUNTED`].
+const READ: [u8; 8] = [
+    0x45, 0x8d, 0x51, 0x08, // ASM: lea r10d, [r9+8]
+    0x45, 0x89, 0x10, // ASM: mov [r8], r10d
+    0xc3, // ASM: ret
+];
+
+/// Replays the function at 0x1000 told that its third block starts with
+/// `r9` holding `c`.
+///
+/// # Arguments
+///
+/// * `p` - The image.
+/// * `seed` - The states' seed.
+/// * `c` - The constant.
+fn told_r9(p: &Program, seed: u64, c: u64) -> Replayed {
+    let told = |w: &mut Witness| w.assumes[2] = Some((Key::Reg(Register::R9), c));
+    replayed_under(p, 0x1000, seed, |_| {}, told)
+}
+
+/// The disagreements, but for those of a lane only: claim, block, place,
+/// text and machine.
+fn rows(r: &Replayed) -> Vec<(Claim, u64, u64, u64, u64)> {
+    r.wrong()
+        .iter()
+        .map(|d| (d.claim, d.block, d.at, d.text, d.machine))
+        .collect()
+}
+
+/// The equality a block is said to start under is checked where the
+/// machine takes the branch into it.
+///
+/// The loop is left with `r9` zero. Told that the block after it starts
+/// with `r9` one, the value the loop's last test compared, the replay
+/// tries the loop from that 1, sees the machine leave it and finds its
+/// `r9` zero there: the equality is flagged at the loop's branch, the 1
+/// the block is started from against the machine's 0, and nowhere else.
+/// Told nothing, every claim holds; told a 5 the loop does not leave from,
+/// nothing is claimed of an edge the machine did not take.
+#[test]
+fn an_equality_the_branch_does_not_leave_is_flagged() {
+    let p = Program::raw_x64(&[&COUNTED[..], &READ].concat());
+    agrees(&p, 0x1000);
+    let r = told_r9(&p, 1, 1);
+    let stale = [(Claim::Branch, 0x1005, 0x1010, 1, 0)];
+    assert_eq!(rows(&r), stale, "{}", replay_tsv(&r));
+    let r = told_r9(&p, 1, 5);
+    assert!(
+        r.disagreements.iter().all(|d| d.block != 0x1005),
+        "{}",
+        replay_tsv(&r)
+    );
+    for seed in 1..=8 {
+        let told = told_r9(&p, seed, 0);
+        let plain = replayed_with(&p, 0x1000, seed, |_| {});
+        assert_eq!(
+            told.compared.get(&Claim::Branch),
+            plain.compared.get(&Claim::Branch),
+            "seed {seed}: the loop's own states compare its claims, and no equality"
+        );
+    }
+}
+
+/// An equality is the machine's to bear out only of a register the
+/// block it is given to reads by its own name.
+///
+/// After `sub rsi,3; jne L` the next block reads `rsi` as the pending
+/// `rsi - 3` under `rsi == 3` and returns 8: the register holds 0 there
+/// and the variable 3, and both are right. After `mov rcx,rsi; mov
+/// rsi,[rcx+8]; mov [rdx],rsi; test rcx,rcx; jne L` the equality is of the
+/// `rsi` the test read, which the load then replaced in a register nothing
+/// reads again. Neither is a disagreement.
+#[test]
+fn an_equality_of_a_variable_alone_claims_nothing_of_its_register() {
+    let pending = [
+        0x48, 0x83, 0xee, 0x03, // ASM: sub rsi, 3
+        0x75, 0x04, // ASM: jne 0x100a
+        0x8d, 0x46, 0x08, // ASM: lea eax, [rsi+8]
+        0xc3, // ASM: ret
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xc3, // ASM: ret
+    ];
+    let p = Program::raw_x64(&pending);
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), 0x1000).expect("text");
+    assert!(text.contains("\nreturn 8;\n"), "{text}");
+    agrees(&p, 0x1000);
+    let unread = [
+        0x48, 0x89, 0xf1, // ASM: mov rcx, rsi
+        0x48, 0x8b, 0x71, 0x08, // ASM: mov rsi, [rcx+8]
+        0x48, 0x89, 0x32, // ASM: mov [rdx], rsi
+        0x48, 0x85, 0xc9, // ASM: test rcx, rcx
+        0x75, 0x06, // ASM: jne 0x1015
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+        0xc3, // ASM: ret
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xc3, // ASM: ret
+    ];
+    agrees(&Program::raw_x64(&unread), 0x1000);
+}
+
+/// An equality given to a block that only jumps on is checked at the
+/// branch into it, of the register the block behind the jump reads; and
+/// no equality is given to the block behind the jump.
+///
+/// The loop falls into `jmp`, and the block the jump lands on reads `r9`.
+/// Told that the jump starts with `r9` one, the replay finds the machine's
+/// zero at the loop's branch. After `cmp rcx,5; jne` the block falling out
+/// of the branch starts under `rcx == 5` and the block its jump lands on
+/// under nothing: an equality handed on through a jump would be one no
+/// branch into its block bears out here.
+#[test]
+fn an_equality_is_checked_at_a_block_that_only_jumps_on() {
+    let jump = [
+        0xeb, 0x01, // ASM: jmp 0x1015
+        0xcc, // ASM: int3
+    ];
+    let p = Program::raw_x64(&[&COUNTED[..], &jump, &READ].concat());
+    let plain = replayed_with(&p, 0x1000, 1, |_| {});
+    assert_eq!(claims(&plain), [], "{}", replay_tsv(&plain));
+    let r = told_r9(&p, 1, 1);
+    let stale = [(Claim::Branch, 0x1005, 0x1010, 1, 0)];
+    assert_eq!(rows(&r), stale, "{}", replay_tsv(&r));
+    let passed = [
+        0x48, 0x83, 0xf9, 0x05, // ASM: cmp rcx, 5
+        0x75, 0x07, // ASM: jne 0x100d
+        0xeb, 0x01, // ASM: jmp 0x1009
+        0xcc, // ASM: int3
+        0x8d, 0x41, 0x08, // ASM: lea eax, [rcx+8]
+        0xc3, // ASM: ret
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xc3, // ASM: ret
+    ];
+    let p = Program::raw_x64(&passed);
+    let mut given = Vec::new();
+    let r = replayed_under(&p, 0x1000, 1, |_| {}, |w| given.clone_from(&w.assumes));
+    assert_eq!(claims(&r), [], "{}", replay_tsv(&r));
+    let five = Some((Key::Param(0), 5));
+    assert_eq!(given, [None, five, None, None]);
 }
 
 /// The branch a block runs under is found through a block that only
