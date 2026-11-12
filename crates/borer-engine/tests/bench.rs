@@ -346,9 +346,11 @@ const BISECT_INPUTS: usize = 64;
 /// are skipped); `BORER_BISECT_SHOW`, when set, prints the texts before
 /// and after each breaking pass. One row per function the check rejects: the binary, the
 /// name, then `pass <name>` and whether leaving it out alone repairs the
-/// function, with the counterexample input, the line and what differs; or
-/// `before-passes` when the text differs with every pass left out. The
-/// table after the rows counts functions per first breaking pass.
+/// function (`alone`, `with-others`, or `unchecked` where the text without
+/// it left every input unchecked), with the counterexample input, the line
+/// and what differs; or `before-passes` when the text differs with every
+/// pass left out. The table after the rows counts functions per first
+/// breaking pass.
 #[test]
 #[ignore = "set BORER_BISECT to binary paths separated by ';' to run this harness"]
 fn bisect_passes() {
@@ -411,14 +413,18 @@ fn bisect_passes() {
                         println!("--- before {}\n{}", pass.name(), texts.0);
                         println!("--- after {}\n{}", pass.name(), texts.1);
                     }
-                    let alone = alone.grade() == Grade::Agrees;
+                    let repairs = alone.grade();
                     let row = table.entry(pass.name().to_owned()).or_default();
                     row.0 += 1;
-                    row.1 += usize::from(alone);
+                    row.1 += usize::from(repairs == Grade::Agrees);
                     println!(
                         "{bin}\t{name}\tpass {}\t{}\t{}\t{}\t{}",
                         pass.name(),
-                        if alone { "alone" } else { "with-others" },
+                        match repairs {
+                            Grade::Agrees => "alone",
+                            Grade::Differs => "with-others",
+                            Grade::Unchecked => "unchecked",
+                        },
                         at.input,
                         at.line,
                         at.why
