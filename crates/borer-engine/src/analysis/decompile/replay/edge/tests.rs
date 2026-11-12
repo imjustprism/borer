@@ -61,12 +61,22 @@ fn unborne(r: &Replayed) -> usize {
     r.skipped.get(ASSUMED).copied().unwrap_or(0)
 }
 
-/// An image of code at 0x1000 and a page of zeroed data at 0x2000.
+/// A 64-bit image of code at 0x1000 and a page of zeroed data at 0x2000.
 ///
 /// # Arguments
 ///
 /// * `code` - The code.
 fn with_data(code: &[u8]) -> Program {
+    image(Arch::X86_64, code)
+}
+
+/// An image of code at 0x1000 and a page of zeroed data at 0x2000.
+///
+/// # Arguments
+///
+/// * `arch` - The instruction set.
+/// * `code` - The code.
+fn image(arch: Arch, code: &[u8]) -> Program {
     let mut bytes = vec![0xcc; 0x1000];
     bytes[..code.len()].copy_from_slice(code);
     bytes.resize(0x2000, 0);
@@ -74,7 +84,7 @@ fn with_data(code: &[u8]) -> Program {
         Section::mapped(".text", 0x1000, 0, 0x1000, false, true),
         Section::mapped(".data", 0x2000, 0x1000, 0x1000, true, false),
     ];
-    Program::raw(bytes, Arch::X86_64, 0, Some(0x1000), sections)
+    Program::raw(bytes, arch, 0, Some(0x1000), sections)
 }
 
 /// The equality a block is said to start under is checked where the
@@ -332,6 +342,48 @@ fn an_equality_of_a_global_is_tried_from_memory() {
     let r = replayed_under(&p, 0x1000, 1, |_| {}, seven);
     assert_eq!(rows(&r), [], "{}", replay_tsv(&r));
     assert_eq!((r.checked, unborne(&r)), (2, 1), "{}", replay_tsv(&r));
+}
+
+/// An equality holds its constant at the width of its variable.
+///
+/// `cmp dword [g],-1; jne X; mov eax,[g]; ret` compares four bytes with
+/// all ones, and the decoder hands the immediate over extended to 64 bits.
+/// Kept so, the equality was compared at the branch against the four
+/// bytes the text reads there, `0xffffffff`: a right text was flagged and
+/// its block left unchecked. The same of two bytes in 32-bit code, `cmp
+/// word [g],-1`, which `movzx eax, word [g]` reads as `0xffff`.
+#[test]
+fn an_equality_holds_its_constant_at_the_variables_width() {
+    let dword = [
+        0x83, 0x3d, 0xf9, 0x0f, 0x00, 0x00, 0xff, // ASM: cmp dword [rip+0xff9], -1
+        0x75, 0x07, // ASM: jne 0x1010
+        0x8b, 0x05, 0xf1, 0x0f, 0x00, 0x00, // ASM: mov eax, [rip+0xff1]
+        0xc3, // ASM: ret
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xc3, // ASM: ret
+    ];
+    let word = [
+        0x66, 0x83, 0x3d, 0x00, 0x20, 0x00, 0x00, 0xff, // ASM: cmp word [0x2000], -1
+        0x75, 0x08, // ASM: jne 0x1012
+        0x0f, 0xb7, 0x05, 0x00, 0x20, 0x00, 0x00, // ASM: movzx eax, word [0x2000]
+        0xc3, // ASM: ret
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xc3, // ASM: ret
+    ];
+    let cases = [
+        (
+            image(Arch::X86_64, &dword),
+            Key::Global(0x2000, 32),
+            0xffff_ffff,
+        ),
+        (image(Arch::X86, &word), Key::Global(0x2000, 16), 0xffff),
+    ];
+    for (p, g, ones) in cases {
+        agrees(&p, 0x1000);
+        let mut given = Vec::new();
+        replayed_under(&p, 0x1000, 1, |_| {}, |w| given.clone_from(&w.assumes));
+        assert_eq!(given, [None, Some((g, ones, WHOLE)), None]);
+    }
 }
 
 /// A run the text of the branch's block does not follow bears no equality

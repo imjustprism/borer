@@ -1523,6 +1523,29 @@ fn a_lea_into_a_low_half_reads_its_registers_that_far() {
     assert!(text.contains("\nreturn 7;\n"), "{text}");
 }
 
+/// A read under an equality reads the constant at the width of what was
+/// compared.
+///
+/// `cmp word [g],-1; jne X; movzx eax, word [g]; ret` returns `0xffff`
+/// where the two bytes are all ones. The decoder extends the immediate to
+/// 64 bits, and read so the text returned `0xffffffffffffffff`.
+#[test]
+fn a_fact_of_a_narrow_global_reads_at_its_width() {
+    let code = [
+        0x66, 0x83, 0x3d, 0xf8, 0x1f, 0x00, 0x00, 0xff, // ASM: cmp word [rip+0x1ff8],-1
+        0x75, 0x08, // ASM: jne 0x140001012
+        0x0f, 0xb7, 0x05, 0xef, 0x1f, 0x00, 0x00, // ASM: movzx eax,word [rip+0x1fef]
+        0xc3, // ASM: ret
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xc3, // ASM: ret
+    ];
+    let p = program64_with_globals(&code, false, &[]);
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1000).unwrap_or_default();
+    assert!(text.contains("\nreturn 0xffff;\n"), "{text}");
+    replays_clean(&p, &a, &[0x1_4000_1000]);
+}
+
 /// An address folds no wider than the machine sums it.
 ///
 /// 32-bit code wraps an address at 4 GiB: `xor ecx,ecx; mov eax,[ecx-4]`

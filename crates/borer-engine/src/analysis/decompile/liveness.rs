@@ -101,7 +101,10 @@ fn block_tmp(k: Key) -> bool {
 /// its fall-through edge; `test k, k` compares with zero. Other conditions
 /// establish nothing usable. A compare narrower than the variable (`cmp
 /// ecx, 5` of a 64-bit `rcx`) establishes only the bits it compared: the
-/// rest of the variable is whatever it was. A compare of a temporary of
+/// rest of the variable is whatever it was. The constant is cut to the
+/// bits compared whichever it is: the decoder extends an immediate to 64
+/// bits, and `cmp dword [g], -1` makes the four bytes `0xffffffff`, which
+/// is what a read of them gives. A compare of a temporary of
 /// the block's own run ([`block_tmp`], the copy `cmp qword [g], 0; mov
 /// [h], rcx; je` keeps of `g` across the store) establishes nothing the
 /// next block can read: there the number names that block's own copies.
@@ -143,11 +146,8 @@ pub(super) fn assumption(branch: &Branch, succ: u64, word: u32) -> Option<Fact> 
     }
     let whole =
         u32::from(bits) >= word || expr::known_bits(&Expr::Var(k)) & !expr::mask_bits(bits) == 0;
-    Some(if whole {
-        (k, c, WHOLE)
-    } else {
-        (k, c & expr::mask_bits(bits), bits)
-    })
+    let c = c & expr::mask_bits(bits);
+    Some((k, c, if whole { WHOLE } else { bits }))
 }
 
 /// Computes the assumption each block may use while it executes
