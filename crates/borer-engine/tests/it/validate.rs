@@ -327,3 +327,38 @@ fn an_enum_stating_no_values_is_refused() {
     let says = "enum E states no values";
     assert!(err.to_string().contains(says), "{err}");
 }
+
+/// A struct `set_type` would not lay out is refused.
+///
+/// That is one naming two fields alike, holding two that share a byte or
+/// one ending past every address, or sized short of its last field. The
+/// fields are held at the narrowest pointer, so a layout with 4-byte
+/// pointers validates.
+#[test]
+fn a_struct_set_type_would_not_lay_out_is_refused() {
+    let laid = |fields: &[(u64, &str, &str)], size: u64| {
+        let fields = fields
+            .iter()
+            .map(|&(off, name, ty)| {
+                let ty = parse_type(ty).expect("a type");
+                let name = name.to_owned();
+                (off, UserField { name, ty })
+            })
+            .collect();
+        let s = UserType::Struct(UserStruct { size, fields });
+        validate(&[("S".to_owned(), s)].into(), &BTreeMap::new()).map_err(|e| e.to_string())
+    };
+    let refused = |fields: &[(u64, &str, &str)], size: u64, says: &str| {
+        let err = laid(fields, size).expect_err(says);
+        assert!(err.contains(says), "{err}");
+    };
+    let twice = "struct S states two fields named a";
+    refused(&[(0, "a", "u32"), (4, "a", "u32")], 8, twice);
+    let shared = "struct S: field b at 0x4 overlaps a, which ends at 0x8";
+    refused(&[(0, "a", "u64"), (4, "b", "u32")], 8, shared);
+    let short = "struct S: size 0x4 does not cover the last field, which ends at 0x8";
+    refused(&[(0, "a", "u64")], 4, short);
+    let past = "struct S: field a at 0xfffffffffffffffe ends past every address";
+    refused(&[(u64::MAX - 1, "a", "u32")], u64::MAX, past);
+    assert!(laid(&[(0, "p", "u8 *"), (4, "n", "u32")], 8).is_ok());
+}

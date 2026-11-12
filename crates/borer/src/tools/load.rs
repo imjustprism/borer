@@ -567,9 +567,11 @@ impl BorerServer {
     /// # Errors
     ///
     /// Invalid params when no binary is loaded, the file does not parse or
-    /// states something the overlay cannot hold, it was saved for another
-    /// binary and `force` is not set, or the request's deadline passes
-    /// before its class fields are held to the code.
+    /// states something the overlay cannot hold or a struct that does not
+    /// lay out with the binary's pointers
+    /// ([`borer_engine::analysis::utypes::laid_at`]), it was
+    /// saved for another binary and `force` is not set, or the request's
+    /// deadline passes before its class fields are held to the code.
     #[tool(
         description = "Replace the session's names, comments and types with a saved .json project. Another binary's project (by SHA-256) is refused unless force=true; for a rebuild use borer://carry.",
         meta = effects(&[Effect::ReadsFiles, Effect::ChangesSession]),
@@ -611,6 +613,13 @@ impl BorerServer {
             }));
         }
         let mut loaded = pf.to_overlay().map_err(err_params)?;
+        let word: u64 = if program.is_64 { 8 } else { 4 };
+        borer_engine::analysis::utypes::laid_at(&loaded.types, word).map_err(|e| {
+            err_params(format!(
+                "{e} with the {word}-byte pointers of {}; nothing was loaded",
+                borer_engine::text::short_path(&loaded_path)
+            ))
+        })?;
         let mut left_out = borer::project::keep_placeable(&mut loaded, &program);
         let placed = left_out.len();
         let room = LEFT_OUT_SHOWN.saturating_sub(placed);

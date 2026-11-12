@@ -638,6 +638,39 @@ fn a_struct_holding_itself_by_value_is_refused() {
     );
 }
 
+/// A project's struct that lays out only with 4-byte pointers is refused
+/// on an x64 binary, as `set_type` there refuses it.
+///
+/// Read with the narrowest pointer alone, a size-8 struct of `p u8 *` at 0
+/// and `n u32` at 4 loaded, though here the pointer covers `n`.
+#[test]
+fn a_struct_laid_out_for_4_byte_pointers_is_refused_on_x64() {
+    let dir = std::env::temp_dir().join(format!("borer-narrow-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let binary = dir.join("a.exe");
+    std::fs::write(&binary, tiny_pe()).unwrap();
+    let project = dir.join("p.json");
+    let fields = serde_json::json!({
+        "0": {"name": "p", "ty": {"Ptr": "U8"}},
+        "4": {"name": "n", "ty": "U32"}
+    });
+    let types = serde_json::json!({"S": {"Struct": {"size": 8, "fields": fields}}});
+    let file = serde_json::json!({"program": "", "names": {}, "comments": {}, "types": types});
+    std::fs::write(&project, file.to_string()).unwrap();
+    let mut client = Client::start(&binary.display().to_string());
+    let asked = serde_json::json!({"path": project.display().to_string(), "force": true});
+    let refused = answer(&mut client, "load_project", &asked);
+    client.finish();
+    std::fs::remove_dir_all(&dir).ok();
+    let refused = refused.expect_err("a struct whose pointer covers its next field loaded");
+    assert!(
+        refused.contains(
+            "struct S: field n at 0x4 overlaps p, which ends at 0x8 with the 8-byte pointers"
+        ),
+        "{refused}"
+    );
+}
+
 /// A project loaded past the request's deadline is refused, saying so,
 /// whether it states types or only the fields of classes.
 #[test]

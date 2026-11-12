@@ -1194,11 +1194,12 @@ pub(crate) fn counted(types: &BTreeMap<String, UserType>, applied: usize) -> any
 /// The counts come first ([`counted`]). Then every name a type or an
 /// application references must be defined, no chain of aliases may loop
 /// or hold more than [`ALIAS_DEPTH_MAX`] typedefs ([`chained`]), no type
-/// may hold itself by value ([`acyclic`]), and no type may stack more
-/// pointers than [`PTR_DEPTH_MAX`]; a project file is edited by hand and
-/// passed around, so this is where garbage in it is refused rather than
-/// silently dropping a rendering. Each named type is sized once
-/// ([`Widths`]), and the deadline in force is read once per type
+/// may hold itself by value ([`acyclic`]), no type may stack more pointers
+/// than [`PTR_DEPTH_MAX`], and each struct must lay out as
+/// [`build_struct`] lays one out ([`laid_at`]); a project file is edited by
+/// hand and passed around, so this is where garbage in it is refused
+/// rather than silently dropping a rendering. Each named type is sized
+/// once ([`Widths`]), and the deadline in force is read once per type
 /// ([`crate::cancel::Cancel::whole`]).
 ///
 /// # Arguments
@@ -1209,13 +1210,16 @@ pub(crate) fn counted(types: &BTreeMap<String, UserType>, applied: usize) -> any
 /// # Errors
 ///
 /// When a count passes its cap, a reference is undefined, a chain loops or
-/// runs too long, a type holds itself by value or is too deep, or the
-/// request's deadline passed; the message names the type and the name that
-/// failed.
+/// runs too long, a type holds itself by value or is too deep, a struct
+/// does not lay out, or the request's deadline passed; the message names
+/// the type and the name that failed.
 pub fn validate(
     types: &BTreeMap<String, UserType>,
     applied: &BTreeMap<u64, TypeExpr>,
 ) -> anyhow::Result<()> {
+    /// The narrowest pointer an image has, in bytes, which a project's
+    /// structs are laid out by ([`laid_at`]).
+    const NARROW: u64 = 4;
     counted(types, applied.len())?;
     for (name, ty) in types {
         crate::cancel::Cancel::whole(()).map_err(anyhow::Error::msg)?;
@@ -1227,6 +1231,7 @@ pub fn validate(
     for (name, ty) in types {
         sized(&mut widths, name, ty)?;
     }
+    laid_at(types, NARROW)?;
     for (addr, ty) in applied {
         check_depth(ty, &format!("the type applied at {addr:#x}"))?;
         if widths.of(ty).is_none() {
@@ -1262,11 +1267,18 @@ fn shaped(name: &str, ty: &UserType) -> anyhow::Result<()> {
     check_type_name(name)?;
     match ty {
         UserType::Struct(s) => {
+            let mut names: BTreeSet<&str> = BTreeSet::new();
             for (off, f) in &s.fields {
                 if !is_ident(&f.name) {
                     return Err(anyhow::anyhow!(
                         "field name {} is not an identifier",
                         crate::text::quoted(&f.name)
+                    ));
+                }
+                if !names.insert(f.name.as_str()) {
+                    return Err(anyhow::anyhow!(
+                        "struct {name} states two fields named {}",
+                        f.name
                     ));
                 }
                 check_depth(&f.ty, &format!("field {} at {off:#x}", f.name))?;
@@ -1351,6 +1363,103 @@ fn sized(widths: &mut Widths<'_>, name: &str, ty: &UserType) -> anyhow::Result<(
         UserType::Enum(_) => {}
     }
     Ok(())
+}
+
+/// Refuses a set of types holding a struct whose fields share a byte or
+/// run past its size at one pointer width, as [`build_struct`] refuses one
+/// for an image of that width.
+///
+/// A project does not say its binary's pointer width, so it is read at the
+/// narrowest ([`validate`]): two fields that share a byte with 4-byte
+/// pointers share it with any. Where it meets its binary it is held to
+/// that binary's width, at which wider pointers may meet the fields after
+/// them.
+///
+/// # Arguments
+///
+/// * `types` - The types.
+/// * `word` - The pointer width in bytes (4 or 8).
+///
+/// # Errors
+///
+/// When a struct does not lay out ([`laid`]); the message names it and
+/// the fields.
+pub fn laid_at(types: &BTreeMap<String, UserType>, word: u64) -> anyhow::Result<()> {
+    let mut widths = Widths::new(types, word);
+    for (name, ty) in types {
+        if let UserType::Struct(s) = ty {
+            laid(&mut widths, name, s)?;
+        }
+    }
+    Ok(())
+}
+
+/// Refuses a struct whose fields share a byte or run past its size, as
+/// [`build_struct`] refuses one.
+///
+/// # Arguments
+///
+/// * `widths` - The set's widths at one pointer width.
+/// * `name` - The struct's name.
+/// * `s` - The struct.
+///
+/// # Errors
+///
+/// When a field starts before the field ahead of it ends or ends past
+/// every address ([`apart`]), or the size does not cover the last field.
+fn laid(widths: &mut Widths<'_>, name: &str, s: &UserStruct) -> anyhow::Result<()> {
+    let fields = s
+        .fields
+        .iter()
+        .map(|(&off, f)| (off, f.name.as_str(), Some(&f.ty)));
+    let end = apart(widths, fields).map_err(|why| anyhow::anyhow!("struct {name}: {why}"))?;
+    if end > s.size {
+        return Err(anyhow::anyhow!(
+            "struct {name}: size {:#x} does not cover the last field, which ends at {end:#x}",
+            s.size
+        ));
+    }
+    Ok(())
+}
+
+/// Returns where a run of fields ends, refusing two that share a byte.
+///
+/// A field without a type has no width of its own and is passed over, as
+/// is one whose type has no size: its width is refused where it is sized.
+///
+/// # Arguments
+///
+/// * `widths` - The types the fields may name, sized at one pointer width.
+/// * `fields` - Each field's offset, name and type, in offset order.
+///
+/// # Returns
+///
+/// Where the last field with a width ends, 0 when none has one.
+///
+/// # Errors
+///
+/// When a field starts before the field ahead of it ends, or ends past
+/// every address.
+pub(crate) fn apart<'f>(
+    widths: &mut Widths<'_>,
+    fields: impl IntoIterator<Item = (u64, &'f str, Option<&'f TypeExpr>)>,
+) -> Result<u64, String> {
+    let mut end: Option<(u64, &str)> = None;
+    for (off, name, ty) in fields {
+        let Some(size) = ty.and_then(|ty| widths.of(ty)) else {
+            continue;
+        };
+        if let Some((until, earlier)) = end.filter(|&(until, _)| until > off) {
+            return Err(format!(
+                "field {name} at {off:#x} overlaps {earlier}, which ends at {until:#x}"
+            ));
+        }
+        let until = off
+            .checked_add(size)
+            .ok_or_else(|| format!("field {name} at {off:#x} ends past every address"))?;
+        end = Some((until, name));
+    }
+    Ok(end.map_or(0, |(until, _)| until))
 }
 
 /// Refuses a chain of typedefs longer than [`ALIAS_DEPTH_MAX`], naming the

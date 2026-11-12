@@ -154,7 +154,8 @@ pub(super) struct Session {
 /// # Errors
 ///
 /// When the file cannot be read or parsed, states something an overlay
-/// cannot hold, or was saved for another binary.
+/// cannot hold or a struct that does not lay out with the binary's
+/// pointers, or was saved for another binary.
 pub(super) fn project_overlay(path: &str, program: &Program) -> anyhow::Result<Overlay> {
     use borer::project::{Identity, ProjectFile};
     let pf = ProjectFile::load(path).map_err(anyhow::Error::msg)?;
@@ -168,6 +169,13 @@ pub(super) fn project_overlay(path: &str, program: &Program) -> anyhow::Result<O
         ),
     }
     let mut overlay = pf.to_overlay().map_err(anyhow::Error::msg)?;
+    let word: u64 = if program.is_64 { 8 } else { 4 };
+    borer_engine::analysis::utypes::laid_at(&overlay.types, word).map_err(|e| {
+        anyhow::anyhow!(
+            "{e} with the {word}-byte pointers of {}; nothing was loaded",
+            short_path(&program.path.display().to_string())
+        )
+    })?;
     let placed = borer::project::keep_placeable(&mut overlay, program).len();
     let skipped = placed.saturating_add(crate::params::keep_settable(
         &mut overlay,

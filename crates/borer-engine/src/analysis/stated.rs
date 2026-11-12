@@ -848,10 +848,11 @@ pub fn standing(
 /// Returns the overlay's types with one more defined, as a definition is
 /// checked before it is written.
 ///
-/// The types it leaves are held to what a project's are on load
-/// ([`utypes::validate`]), so a session never holds a type it could not
-/// load again: one holding itself by value, or a chain of typedefs past
-/// the cap.
+/// The fields stated with a type it changes must still stand
+/// ([`standing`]), which says how to restate them; then the types it
+/// leaves are held to what a project's are on load ([`utypes::validate`]),
+/// so a session never holds a type it could not load again: one holding
+/// itself by value, or a chain of typedefs past the cap.
 ///
 /// # Arguments
 ///
@@ -866,8 +867,8 @@ pub fn standing(
 ///
 /// # Errors
 ///
-/// When the types it leaves do not validate, or the definition changes a
-/// type and a field stated with it would no longer stand ([`standing`]).
+/// When the definition changes a type and a field stated with it would no
+/// longer stand, or the types it leaves do not validate.
 pub fn retyped(
     p: &Program,
     a: &Analysis,
@@ -877,8 +878,8 @@ pub fn retyped(
     let mut types = BTreeMap::clone(&o.types);
     if let Some((name, ty)) = fresh {
         types.insert(name.to_owned(), ty.clone());
-        utypes::validate(&types, &o.applied).map_err(|e| e.to_string())?;
         standing(p, a, o, &types)?;
+        utypes::validate(&types, &o.applied).map_err(|e| e.to_string())?;
     }
     Ok(types)
 }
@@ -1340,7 +1341,8 @@ pub(crate) fn crowded(class: &str, fields: usize, classes: usize) -> Result<(), 
 ///
 /// A field stated without a type has no size of its own, so it is not
 /// held against the others: the class's code may well read one word at
-/// two widths.
+/// two widths. A struct's fields are held apart the same way
+/// ([`utypes::apart`]).
 ///
 /// # Arguments
 ///
@@ -1352,20 +1354,10 @@ pub(crate) fn crowded(class: &str, fields: usize, classes: usize) -> Result<(), 
 ///
 /// When a typed field starts before the typed field ahead of it ends.
 fn apart(widths: &mut utypes::Widths<'_>, fields: &BTreeMap<u64, Field>) -> Result<(), String> {
-    let mut end: Option<(u64, &str)> = None;
-    for (&off, field) in fields {
-        let Some(size) = field.ty.as_ref().and_then(|ty| widths.of(ty)) else {
-            continue;
-        };
-        if let Some((until, earlier)) = end.filter(|(until, _)| *until > off) {
-            return Err(format!(
-                "field {} at {off:#x} overlaps {earlier}, which ends at {until:#x}",
-                field.name
-            ));
-        }
-        end = Some((off.saturating_add(size), &field.name));
-    }
-    Ok(())
+    let fields = fields
+        .iter()
+        .map(|(&off, field)| (off, field.name.as_str(), field.ty.as_ref()));
+    utypes::apart(widths, fields).map(|_| ())
 }
 
 #[cfg(test)]
