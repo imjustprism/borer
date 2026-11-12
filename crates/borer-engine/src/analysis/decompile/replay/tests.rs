@@ -1564,3 +1564,39 @@ fn a_false_statement_is_flagged_where_it_stands() {
         assert_eq!(r.disagreements[0].at, 0x1007);
     }
 }
+
+/// A call through a 32-bit address of 64-bit code is held to the target
+/// at the address the machine wraps at 4 GiB.
+///
+/// `mov ecx,0xfffffffc; call [ecx+0x100c]` reads its target at 0x1008.
+/// The replay summed the address at 64 bits, read nothing at
+/// 0x100001008, and left the target unread. The proof summed it so too:
+/// `call [ecx+8]` of any `rcx` was neither proved nor refuted.
+#[test]
+fn a_call_through_a_32_bit_address_reads_the_wrapped_target() {
+    let code = [
+        0xb9, 0xfc, 0xff, 0xff, 0xff, // ASM: mov ecx, 0xfffffffc
+        0x67, 0xff, 0x91, 0x0c, 0x10, 0x00, 0x00, // ASM: call [ecx+0x100c]
+        0xc3, // ASM: ret
+    ];
+    let p = Program::raw_x64(&code);
+    let a = Analysis::compute(&p);
+    let r = replay_function(&p, &a, 0x1000, 1);
+    let read = |m: &std::collections::BTreeMap<Claim, usize>| m.get(&Claim::Target).copied();
+    assert_eq!(
+        (
+            read(&r.compared).is_some_and(|n| n > 0),
+            read(&r.unreadable)
+        ),
+        (true, None),
+        "{}",
+        replay_tsv(&r)
+    );
+    assert_eq!(claims(&r), [], "{}", replay_tsv(&r));
+    let any = Program::raw_x64(&[
+        0x67, 0xff, 0x51, 0x08, // ASM: call [ecx+8]
+        0xc3, // ASM: ret
+    ]);
+    let r = replay_function(&any, &Analysis::compute(&any), 0x1000, 1);
+    assert_eq!((r.proved, r.checked), (2, 2), "{}", replay_tsv(&r));
+}

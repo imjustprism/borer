@@ -1657,8 +1657,10 @@ fn reg_value(emu: &Emulator<'_>, r: Register, width: u8) -> Option<u64> {
     Some(if high { v >> 8 } else { v } & low(bits))
 }
 
-/// The value of an instruction's first operand on the emulator: a
-/// register's, a branch's target, or the word its memory operand reads.
+/// The value of an instruction's first operand on the emulator.
+///
+/// A register's, a branch's target, or the word its memory operand reads,
+/// at the address the machine computes for it ([`Emulator::mem_addr`]).
 ///
 /// # Arguments
 ///
@@ -1675,17 +1677,7 @@ fn operand(emu: &Emulator<'_>, i: &Instruction, width: u8) -> Option<u64> {
             if matches!(i.memory_segment(), Register::FS | Register::GS) {
                 return None;
             }
-            let base = i.memory_base();
-            let mut at = i.memory_displacement64();
-            if !matches!(base, Register::RIP | Register::EIP) {
-                if base != Register::None {
-                    at = at.wrapping_add(reg_value(emu, base, width)?);
-                }
-                if i.memory_index() != Register::None {
-                    let index = reg_value(emu, i.memory_index(), width)?;
-                    at = at.wrapping_add(index.wrapping_mul(u64::from(i.memory_index_scale())));
-                }
-            }
+            let at = emu.mem_addr(i).ok()?;
             machine_word(emu, at, from_usize(i.memory_size().size()), width)
         }
         _ => None,

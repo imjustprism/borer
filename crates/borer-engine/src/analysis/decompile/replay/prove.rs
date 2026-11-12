@@ -1474,7 +1474,9 @@ impl Machine {
         Ok(narrow(&v, bits))
     }
 
-    /// The value of an instruction's first operand ([`super::operand`]).
+    /// The value of an instruction's first operand ([`super::operand`]), its
+    /// address cut to the bits it is addressed with
+    /// ([`crate::disasm::address_bits`]).
     ///
     /// # Arguments
     ///
@@ -1506,11 +1508,11 @@ impl Machine {
                     }
                     if i.memory_index() != Register::None {
                         let index = self.reg(i.memory_index(), width)?;
-                        let scaled =
-                            term::mul(64, &index, &Term::Const(u64::from(i.memory_index_scale())));
-                        at = term::add(64, &at, &scaled);
+                        let scale = Term::Const(u64::from(i.memory_index_scale()));
+                        at = term::add(64, &at, &term::mul(64, &index, &scale));
                     }
                 }
+                let at = narrow(&at, crate::disasm::address_bits(i, u32::from(width)));
                 self.word(&at, from_usize(i.memory_size().size()), width)?
             }
             OpKind::FarBranch16

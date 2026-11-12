@@ -238,7 +238,7 @@ impl Emulator<'_> {
     /// # Errors
     ///
     /// Never; kept fallible for symmetry with the operand readers.
-    pub(super) fn mem_addr(&self, i: &Instruction) -> Result<u64, Stop> {
+    pub(crate) fn mem_addr(&self, i: &Instruction) -> Result<u64, Stop> {
         if i.memory_base() == Register::RIP || i.memory_base() == Register::EIP {
             return Ok(i.ip_rel_memory_address());
         }

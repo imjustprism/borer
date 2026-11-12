@@ -88,6 +88,26 @@ pub fn wraps_at_32(instr: &Instruction, bitness: u32) -> bool {
             || instr.memory_displ_size() == 4)
 }
 
+/// Returns how many bits a memory operand's effective address keeps.
+///
+/// 16 under a 16-bit address ([`addresses_16_bit`]), 32 in 32-bit code
+/// and under a 32-bit address of 64-bit code ([`wraps_at_32`]), else 64.
+///
+/// # Arguments
+///
+/// * `instr` - An instruction with a memory operand.
+/// * `bitness` - Decoder bitness (32 or 64).
+#[must_use]
+pub fn address_bits(instr: &Instruction, bitness: u32) -> u8 {
+    if addresses_16_bit(instr) {
+        16
+    } else if bitness == 32 || wraps_at_32(instr, bitness) {
+        32
+    } else {
+        64
+    }
+}
+
 /// Disassembles up to `max_instrs` instructions from `code`.
 ///
 /// Undecodable bytes render as `(bad)` instead of stopping the sweep, so an
