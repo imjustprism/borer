@@ -363,3 +363,10 @@ fn told(out: &Replayed, place: &str) -> bool {
     let given = |d: &&super::Disagreement| d.expr == GIVEN && d.place == place;
     out.disagreements.iter().any(|d| given(&d))
 }
+
+#[cfg(test)]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test"
+)]
+mod tests;
