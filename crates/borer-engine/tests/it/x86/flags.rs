@@ -141,6 +141,19 @@ fn a_rotate_keeps_the_zero_flag_before_it() {
     assert!(!text.contains("rotl32(a1, 5) == 0"), "{text}");
 }
 
+/// A rotate keeps the zero flag of the compare before it, in the emulator
+/// as in the lifter: `sete` after `cmp ecx, 7; rol ecx, 5` reads
+/// `ecx == 7`. The emulator once set the flag from the rotated value.
+#[test]
+fn a_rotate_keeps_zf_agrees_with_the_emulator() {
+    agrees_with_the_emulator(&[
+        0x83, 0xf9, 0x07, // ASM: cmp ecx, 7
+        0xc1, 0xc1, 0x05, // ASM: rol ecx, 5
+        0x0f, 0x94, 0xc0, // ASM: sete al
+        0xc3, // ASM: ret
+    ]);
+}
+
 /// `tzcnt` sets CF when its source is zero and ZF when the count is: `jb`
 /// after it tests the source, `je` the count.
 ///

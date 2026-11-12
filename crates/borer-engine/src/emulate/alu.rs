@@ -148,6 +148,11 @@ impl Emulator<'_> {
 
     /// A shift or rotate of operand 0 by operand 1.
     ///
+    /// SPEC: Intel SDM Vol. 2, SAL/SAR/SHL/SHR and RCL/RCR/ROL/ROR: a count
+    /// that masks to 0 affects no flag; otherwise a shift sets CF, ZF, SF
+    /// and PF, and a rotate only CF, leaving ZF, SF and PF as they were. OF
+    /// is defined for a count of 1 alone.
+    ///
     /// # Arguments
     ///
     /// * `i` - The instruction.
@@ -200,7 +205,9 @@ impl Emulator<'_> {
         };
         let r = mask(r, bits);
         self.flags_carry = carry;
-        self.set_flags(r, bits);
+        if matches!(op, Shift::Shl | Shift::Shr | Shift::Sar) {
+            self.set_flags(r, bits);
+        }
         let msb = |x: u64| x >> top & 1 == 1;
         self.flags_over = (count == 1).then(|| match op {
             Shift::Shl | Shift::Rol | Shift::Rcl => msb(r) != carry,

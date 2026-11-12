@@ -683,6 +683,28 @@ fn a_rotate_through_carry_reads_the_flag() {
     assert_eq!(emu.register("rax"), Some(1));
 }
 
+/// A rotate writes only the carry and the overflow: the zero flag after
+/// `rol` is the one from before it.
+///
+/// `xor eax, eax` sets it and `rol ecx, 1` turns 1 into 2, so `sete`
+/// still reads 1; setting the zero flag from the rotated value read 0.
+///
+/// # Panics
+///
+/// When the run does not return, or the rotate changed the zero flag.
+#[test]
+fn a_rotate_keeps_the_zero_flag() {
+    let code: &[u8] = &[
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xb9, 0x01, 0x00, 0x00, 0x00, // ASM: mov ecx, 1
+        0xd1, 0xc1, // ASM: rol ecx, 1
+        0x0f, 0x94, 0xc0, // ASM: sete al
+        0xc3, // ASM: ret
+    ];
+    let emu = returned(image(code, &[]));
+    assert_eq!(emu.register("rax"), Some(1));
+}
+
 /// The x87 stack loads, divides and stores an integer.
 ///
 /// A run that met a floating-point divide used to stop there. The
