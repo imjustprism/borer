@@ -148,13 +148,13 @@ impl Emulator<'_> {
                 StringOp::Scas => {
                     let a = mask(self.reg(Register::RAX), bits);
                     let b = self.load(di, bytes)?;
-                    self.set_flags(a.wrapping_sub(b), bits);
+                    self.compare(a, b, bits);
                     self.set_reg(Register::RDI, next_di);
                 }
                 StringOp::Cmps => {
                     let a = self.load(si, bytes)?;
                     let b = self.load(di, bytes)?;
-                    self.set_flags(a.wrapping_sub(b), bits);
+                    self.compare(a, b, bits);
                     self.set_reg(Register::RSI, next_si);
                     self.set_reg(Register::RDI, next_di);
                 }
@@ -171,5 +171,22 @@ impl Emulator<'_> {
             }
         }
         Ok(None)
+    }
+
+    /// Sets the flags a `scas` or a `cmps` leaves: those of `cmp a, b`.
+    ///
+    /// SPEC: Intel SDM Vol. 2, CMPS and SCAS: the status flags are set from
+    /// the subtraction of the second element from the first, as `cmp`
+    /// sets them; CF is its borrow. OF goes unknown ([`Emulator::set_flags`]),
+    /// so a signed condition after the compare stops the run.
+    ///
+    /// # Arguments
+    ///
+    /// * `a` - The first element, at most `bits` wide.
+    /// * `b` - The second element, at most `bits` wide.
+    /// * `bits` - The element width.
+    fn compare(&mut self, a: u64, b: u64, bits: u32) {
+        self.set_flags(a.wrapping_sub(b), bits);
+        self.flags_carry = a < b;
     }
 }

@@ -1668,6 +1668,40 @@ fn a_32_bit_string_pointer_wraps() {
     assert_eq!(emu.peek(0x1_0000_0000), None);
 }
 
+/// `cmps` and `scas` set the carry as `cmp` does: the borrow of the
+/// subtraction.
+///
+/// After `stc`, comparing `b` with `a` clears it, so `seta` holds; the
+/// compares once left the carry the `stc` set, and `seta` read 0.
+///
+/// # Panics
+///
+/// When a run does not return, or `seta` reads a stale carry.
+#[test]
+fn a_string_compare_sets_the_carry_of_its_subtraction() {
+    let cmps: &[u8] = &[
+        0xbe, 0x00, 0x20, 0x00, 0x00, // ASM: mov esi, 0x2000
+        0xbf, 0x01, 0x20, 0x00, 0x00, // ASM: mov edi, 0x2001
+        0xb9, 0x01, 0x00, 0x00, 0x00, // ASM: mov ecx, 1
+        0xf9, // ASM: stc
+        0xf3, 0xa6, // ASM: repe cmpsb
+        0x0f, 0x97, 0xc0, // ASM: seta al
+        0xc3, // ASM: ret
+    ];
+    let scas: &[u8] = &[
+        0xb0, 0x62, // ASM: mov al, 'b'
+        0xbf, 0x01, 0x20, 0x00, 0x00, // ASM: mov edi, 0x2001
+        0xf9, // ASM: stc
+        0xae, // ASM: scasb
+        0x0f, 0x97, 0xc0, // ASM: seta al
+        0xc3, // ASM: ret
+    ];
+    for code in [cmps, scas] {
+        let emu = returned(image(code, &[b'b', b'a']));
+        assert_eq!(emu.register("rax"), Some(1), "{code:02x?}");
+    }
+}
+
 /// A run that would hold more distinct bytes than its cap stops at the
 /// first byte past it, budget or not.
 #[test]
