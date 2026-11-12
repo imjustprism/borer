@@ -275,6 +275,10 @@ pub struct Verified {
     /// Branches the emulator could not decide: a signed jump on an overflow
     /// flag the instruction before it does not compute in the emulator.
     pub undecided: usize,
+    /// Checked blocks that touch the x87 stack: the lifter and the emulator
+    /// both hold its values as doubles, so an agreement there is at f64,
+    /// not at the CPU's 80 bits.
+    pub x87: usize,
     /// The disagreements.
     pub mismatches: Vec<Mismatch>,
     /// The instruction set checked, whose kinds of fact a report lists
@@ -352,6 +356,7 @@ impl Verified {
         self.store_loads += part.store_loads;
         self.lane += part.lane;
         self.undecided += part.undecided;
+        self.x87 += part.x87;
         for (fact, t) in part.facts {
             let into = self.facts.entry(fact).or_default();
             into.compared += t.compared;
@@ -1467,9 +1472,13 @@ impl<'p> Sweep<'p> {
         }
         seeded.stack();
         seeded.st.tls_block = seeded.st.resolve_tls();
+        let mut info = InstructionInfoFactory::new();
         let regs = X86Regs {
             names: self.regs,
             written: written_registers(&instrs, self.width),
+            x87: instrs
+                .iter()
+                .any(|i| crate::analysis::x87::touches(&mut info, i)),
         };
         let aligned = align.is_some();
         let mut all = instrs;
@@ -1553,6 +1562,9 @@ pub(super) struct X86Regs {
     names: &'static [(&'static str, Register)],
     /// The registers some instruction of the block writes.
     written: Vec<Register>,
+    /// Whether some instruction of the block touches the x87 stack
+    /// ([`crate::analysis::x87::touches`]).
+    x87: bool,
 }
 
 /// One block run both ways, ready to compare.
@@ -1580,12 +1592,14 @@ pub(super) struct Ran<'p, M, R> {
 
 impl Ran<'_, Emulator<'_>, X86Regs> {
     /// Compares every fact: registers, the x87 stack, the xmm lanes, slots,
-    /// stores, then the branch.
+    /// stores, then the branch; a block touching the x87 stack is counted
+    /// ([`Verified::x87`]).
     ///
     /// # Arguments
     ///
     /// * `out` - Where the counts and disagreements go.
     fn compare(self, out: &mut Verified) {
+        out.x87 += usize::from(self.regs.x87);
         self.registers(out);
         self.x87(out);
         self.xmm(out);
@@ -2272,7 +2286,9 @@ fn verify_some(
 /// Renders a verification as a report.
 ///
 /// A `#` summary, a line per kind of fact the instruction set's check
-/// compares with what was compared, the reasons blocks were not compared,
+/// compares with what was compared (the x87 line also counts the checked
+/// blocks touching the x87 stack, whose agreement is at f64,
+/// [`Verified::x87`]), the reasons blocks were not compared,
 /// the instructions the machine lacks by how often they stopped it, then
 /// a row per disagreement, at most [`LISTED_MAX`].
 ///
@@ -2304,6 +2320,14 @@ pub fn verify_tsv(v: &Verified) -> String {
         }
         if fact == Fact::Branch {
             let _ = write!(out, ", {} the emulator could not decide", v.undecided);
+        }
+        if fact == Fact::X87 && v.x87 > 0 {
+            let _ = write!(
+                out,
+                ", {} checked block{} at f64, not the CPU's 80 bits",
+                v.x87,
+                crate::text::plural(v.x87)
+            );
         }
         out.push('\n');
     }

@@ -1136,6 +1136,12 @@ pub fn run_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<Str
             }
         }
     }
+    if matches!(p.arch.isa(), Some(Isa::X86 { .. }))
+        && a.function(entry)
+            .is_some_and(|f| crate::analysis::x87::in_function(p, f))
+    {
+        notes.push("the binary and the text both run x87 values as f64, not the CPU's 80 bits, so an agreement there is at f64".to_owned());
+    }
     let names = o.fingerprint();
     let outcomes: Vec<Arc<Outcome>> = req
         .inputs
@@ -1393,10 +1399,7 @@ fn render_runs(
         let _ = writeln!(out, "# structure check: {structure}");
         let v = verify::verify(p, a, &[req.entry], VERIFY_SEED);
         let lifter = match v.mismatches.first() {
-            None => format!(
-                "agrees on {} of {} blocks ({} facts)",
-                v.checked, v.blocks, v.compared
-            ),
+            None => agreement(&v),
             Some(m) => format!(
                 "{} mismatch{}, first in block {:#x}: {} {} is {:#x} lifted, {:#x} emulated",
                 v.mismatches.len(),
@@ -1412,6 +1415,26 @@ fn render_runs(
     }
     api_calls_section(&mut out, req, outcomes);
     out
+}
+
+/// Returns the lifter check's agreement: the blocks and facts it compared,
+/// and, when a block it checked touches the x87 stack
+/// ([`verify::Verified::x87`]), that both sides keep those values as
+/// doubles, not the CPU's 80 bits.
+///
+/// # Arguments
+///
+/// * `v` - The lifter check, which found no disagreement.
+fn agreement(v: &verify::Verified) -> String {
+    let x87 = if v.x87 > 0 {
+        "; x87 at f64, not the CPU's 80 bits"
+    } else {
+        ""
+    };
+    format!(
+        "agrees on {} of {} blocks ({} facts{x87})",
+        v.checked, v.blocks, v.compared
+    )
 }
 
 /// An input's arguments as a row spells them, `-` for none.
@@ -1829,6 +1852,70 @@ mod tests {
         .unwrap();
         let why = variadic.drawn_kinds().unwrap_err();
         assert!(why.contains("variable arguments"), "{why}");
+    }
+
+    /// The lifter check's agreement says what it holds x87 to: one over a
+    /// block touching the x87 stack is at f64, not the CPU's 80 bits, and
+    /// one over no such block says nothing of it.
+    ///
+    /// A stated `uint8_t` parameter makes the text read the argument's low
+    /// byte where the binary reads all of `ecx`, so the input 300 differs
+    /// and the answer runs the lifter check.
+    ///
+    /// # Panics
+    ///
+    /// When the check is not run, or the qualifier is missing or out of
+    /// place.
+    #[test]
+    fn the_lifter_check_holds_x87_at_f64() {
+        use crate::analysis::protos::Proto;
+        let sum: &[u8] = &[
+            0x8d, 0x81, 0xe8, 0x03, 0x00, 0x00, // ASM: lea eax, [rcx+1000]
+            0xc3, // ASM: ret
+        ];
+        let x87: &[u8] = &[
+            0xd9, 0xe8, // ASM: fld1
+            0xdd, 0xd8, // ASM: fstp st0
+        ];
+        for (code, qualified) in [(sum.to_vec(), false), ([x87, sum].concat(), true)] {
+            let p = Program::raw_x64(&code);
+            let a = Analysis::compute(&p);
+            let mut o = Overlay::default();
+            o.prototypes
+                .insert(0x1000, Proto::parse("uint32_t f(uint8_t a1)").unwrap());
+            let out = run_tsv(&p, &a, &o, "0x1000/300").unwrap();
+            assert!(out.contains("\n# lifter check: agrees on "), "{out}");
+            let note = out.contains("x87 at f64, not the CPU's 80 bits");
+            assert_eq!(note, qualified, "{out}");
+        }
+    }
+
+    /// A run says what its agreement holds x87 to when the function
+    /// touches the x87 stack, where the text agrees on every input and no
+    /// lifter check is run, and says nothing of x87 otherwise.
+    ///
+    /// # Panics
+    ///
+    /// When an input does not agree, or the note is missing or out of
+    /// place.
+    #[test]
+    fn a_run_over_x87_says_it_agrees_at_f64() {
+        let sum: &[u8] = &[
+            0x8d, 0x81, 0xe8, 0x03, 0x00, 0x00, // ASM: lea eax, [rcx+1000]
+            0xc3, // ASM: ret
+        ];
+        let x87: &[u8] = &[
+            0xd9, 0xe8, // ASM: fld1
+            0xdd, 0xd8, // ASM: fstp st0
+        ];
+        for (code, noted) in [(sum.to_vec(), false), ([x87, sum].concat(), true)] {
+            let p = Program::raw_x64(&code);
+            let a = Analysis::compute(&p);
+            let out = run_tsv(&p, &a, &Overlay::default(), "0x1000/300").unwrap();
+            assert!(out.contains("the text agrees on 1,"), "{out}");
+            let note = out.contains("run x87 values as f64, not the CPU's 80 bits");
+            assert_eq!(note, noted, "{out}");
+        }
     }
 
     /// A run of a function that returns its argument tabulates each input,

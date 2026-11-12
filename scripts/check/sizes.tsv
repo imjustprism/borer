@@ -108,7 +108,7 @@ crates/borer-engine/src/analysis/render/oracle.rs::solve_tsv#1	138
 crates/borer-engine/src/analysis/render/protection.rs::checks_of#1	106
 crates/borer-engine/src/analysis/render/runs/diff.rs::run_diff_tsv#1	126
 crates/borer-engine/src/analysis/render/runs/mod.rs::judge#1	199
-crates/borer-engine/src/analysis/render/runs/mod.rs::render_runs#1	120
+crates/borer-engine/src/analysis/render/runs/mod.rs::render_runs#1	117
 crates/borer-engine/src/analysis/render/summary.rs::summary_of#1	226
 crates/borer-engine/src/analysis/render/triage.rs::crypto_tsv#1	101
 crates/borer-engine/src/analysis/render/triage.rs::triage_of#1	179

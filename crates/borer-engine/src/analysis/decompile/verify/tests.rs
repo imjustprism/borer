@@ -791,3 +791,27 @@ fn a_32_bit_shift_chain_is_evaluated_at_32_bits() {
         assert_eq!(kinds(&v), [], "seed {seed}: {}", verify_tsv(&v));
     }
 }
+
+/// A report says an agreement over the x87 stack is at f64: the x87 line
+/// counts the checked blocks that touch it, and a check over none says
+/// nothing of it.
+#[test]
+fn a_report_says_an_x87_agreement_is_at_f64() {
+    let x87: &[u8] = &[
+        0xd9, 0xe8, // ASM: fld1
+        0xdd, 0xd8, // ASM: fstp st0
+        0xc3, // ASM: ret
+    ];
+    let plain: &[u8] = &[
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xc3, // ASM: ret
+    ];
+    for (code, noted) in [(x87, true), (plain, false)] {
+        let p = Program::raw_x64(code);
+        let a = Analysis::compute(&p);
+        let v = verify(&p, &a, &[0x1000], 1);
+        let tsv = verify_tsv(&v);
+        assert_eq!(v.checked, 1, "{tsv}");
+        assert_eq!(tsv.contains("1 checked block at f64"), noted, "{tsv}");
+    }
+}

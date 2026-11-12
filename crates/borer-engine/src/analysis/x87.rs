@@ -190,6 +190,23 @@ pub(crate) fn touches(factory: &mut InstructionInfoFactory, i: &Instruction) -> 
             .any(|u| depth_of(u.register()).is_some())
 }
 
+/// Tells whether an instruction of an x86 function reads, writes or moves
+/// the x87 stack ([`touches`]).
+///
+/// # Arguments
+///
+/// * `program` - The image, x86 or x64.
+/// * `f` - The function.
+pub(crate) fn in_function(program: &Program, f: &Function) -> bool {
+    let bitness = program.arch.bitness().unwrap_or(64);
+    let mut factory = InstructionInfoFactory::new();
+    f.blocks.iter().any(|b| {
+        decode_block(program, bitness, b)
+            .iter()
+            .any(|i| touches(&mut factory, i))
+    })
+}
+
 /// What the code after a call does with what the call left on the x87
 /// stack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
