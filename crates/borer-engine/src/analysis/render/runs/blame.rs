@@ -389,6 +389,30 @@ mod tests {
         );
     }
 
+    /// An answer that lists fewer reasons than inputs went unchecked for
+    /// says how many it shows of how many; one that lists them all gives no
+    /// count.
+    ///
+    /// # Panics
+    ///
+    /// When reasons are cut uncounted, or a whole list is counted.
+    #[test]
+    fn reasons_cut_from_an_answer_are_counted() {
+        let reasons = |n: usize| -> Vec<(String, usize)> {
+            (0..n).map(|i| (format!("reason {i}"), 9 - i)).collect()
+        };
+        let cut = blame_report("f", 0x1000, 30, 100, &Bisected::Unchecked(reasons(4)));
+        assert!(
+            cut.ends_with(
+                "\n# unchecked: showing 3 of 4 reasons, the commonest first\nunchecked\t9\treason 0\nunchecked\t8\treason 1\nunchecked\t7\treason 2\n"
+            ),
+            "{cut}"
+        );
+        let whole = blame_report("f", 0x1000, 24, 100, &Bisected::Unchecked(reasons(3)));
+        assert!(!whole.contains("showing"), "{whole}");
+        assert!(whole.ends_with("\nunchecked\t7\treason 2\n"), "{whole}");
+    }
+
     /// Wherever the answer says a text agrees it says on how many of the
     /// inputs, how many it left unchecked and the commonest reason: the
     /// full text, the text before the blamed pass and the text without it.

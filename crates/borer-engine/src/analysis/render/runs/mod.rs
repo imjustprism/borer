@@ -614,11 +614,17 @@ fn commonest<K: Ord>(counts: BTreeMap<K, usize>) -> Vec<(K, usize)> {
 /// Writes an `unchecked` row for each of the commonest reasons inputs went
 /// unchecked, at most [`REASONS_SHOWN`]: how many inputs, and why.
 ///
+/// A line before the rows counts the reasons where some are left out.
+///
 /// # Arguments
 ///
 /// * `out` - The answer.
 /// * `reasons` - The reasons, the commonest first ([`commonest`]).
 fn unchecked_rows<K: std::fmt::Display>(out: &mut String, reasons: &[(K, usize)]) {
+    if reasons.len() > REASONS_SHOWN {
+        let shown = showing(REASONS_SHOWN, reasons.len());
+        let _ = writeln!(out, "# unchecked: {shown} reasons, the commonest first");
+    }
     for (reason, n) in reasons.iter().take(REASONS_SHOWN) {
         let _ = writeln!(out, "unchecked\t{n}\t{reason}");
     }
