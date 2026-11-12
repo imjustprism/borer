@@ -625,7 +625,8 @@ pub(in crate::analysis) fn pointee_class(ty: &str) -> Option<&str> {
 }
 
 /// Tells whether a block reads a flag before writing it, that is, depends on
-/// flags a predecessor left (`cmp; jae A; ... A: jne B`).
+/// flags a predecessor left (`cmp; jae A; ... A: jne B`); a shift or rotate
+/// by `cl` writes none for sure ([`lift::flags_always_written`]).
 ///
 /// # Arguments
 ///
@@ -636,7 +637,7 @@ pub(super) fn reads_inherited_flags(instrs: &[Instruction]) -> bool {
         if i.rflags_read() & !written != 0 {
             return true;
         }
-        written |= i.rflags_modified();
+        written |= lift::flags_always_written(i);
     }
     false
 }
@@ -664,7 +665,7 @@ pub(super) fn join_reader_cc(instrs: &[Instruction]) -> Option<Cc> {
             };
             return (cc.0 != ConditionCode::None).then_some(cc);
         }
-        written |= i.rflags_modified();
+        written |= lift::flags_always_written(i);
     }
     None
 }

@@ -905,7 +905,8 @@ impl Exec<'_, '_> {
 ///
 /// Flags inherited from the predecessors seed the executor. Flag liveness is
 /// computed backwards inside the block (a flag is dead after its last reader
-/// before the next writer), so dead flags are never protected in temporaries;
+/// before the next instruction that always writes it,
+/// [`flags_always_written`]), so dead flags are never protected in temporaries;
 /// the block's own branch always counts as a reader, and `flags_out` keeps
 /// them live to the end. After the phi writes the branch condition is
 /// captured, and the flags are handed on to the environment only when a
@@ -952,7 +953,7 @@ pub(super) fn exec_block(
     let mut live_flags: u32 = if flags_out { u32::MAX } else { 0 };
     for (idx, instr) in instrs.iter().enumerate().rev() {
         flags_live_after[idx] = live_flags;
-        live_flags = (live_flags & !instr.rflags_modified()) | instr.rflags_read();
+        live_flags = (live_flags & !flags_always_written(instr)) | instr.rflags_read();
     }
     let mut out = BlockOut::default();
     let mut jcc: Option<(Cc, u64, u64)> = None;
@@ -1214,6 +1215,73 @@ fn src_bits(instr: &Instruction, op: u32) -> u8 {
 fn stack_value(instr: &Instruction) -> Option<(i64, Ty)> {
     let bits = crate::disasm::stack_operand_bits(instr)?;
     Some((i64::from(bits / 8), Ty::from_bits(bits)))
+}
+
+/// Returns the flags a shift leaves.
+///
+/// SPEC: Intel SDM Vol. 2, SAL/SAR/SHL/SHR: the count is masked to five
+/// bits, six for a 64-bit operand, and a masked count of 0 affects no
+/// flag. A constant count masking to 0 (`shl eax, 32`) leaves the flags
+/// from before; one below the width sets CF to the last bit shifted out
+/// and ZF, SF and PF from the result, a wider one those three alone. A
+/// count that is no constant may mask to 0, so what it leaves is unknown.
+///
+/// # Arguments
+///
+/// * `mn` - `shl`, `sal`, `shr` or `sar`.
+/// * `l` - The shifted operand, as the shift reads it.
+/// * `count` - The count, as the shift reads it.
+/// * `v` - The shifted value.
+/// * `bits` - Operand width.
+/// * `before` - The flags before the shift.
+fn shift_flags(mn: Mnemonic, l: Expr, count: &Expr, v: &Expr, bits: u8, before: &Flags) -> Flags {
+    let count_mask = if bits == 64 { 0x3f } else { 0x1f };
+    let Expr::Const(n) = count else {
+        return Flags::Unknown;
+    };
+    match n & count_mask {
+        0 => before.clone(),
+        n if n < u64::from(bits) => {
+            let pos = if matches!(mn, Mnemonic::Shr | Mnemonic::Sar) {
+                n - 1
+            } else {
+                u64::from(bits) - n
+            };
+            let out = fold(Op::Shr, l, Expr::Const(pos), bits);
+            Flags::Shift(v.clone(), bits, fold(Op::And, out, Expr::Const(1), bits))
+        }
+        _ => Flags::Result(v.clone(), bits),
+    }
+}
+
+/// Returns the flags an instruction writes on every run: those a reader
+/// after it never has from before it.
+///
+/// SPEC: Intel SDM Vol. 2, SAL/SAR/SHL/SHR and RCL/RCR/ROL/ROR: a count
+/// that masks to 0 affects no flag. iced counts a shift or rotate
+/// by `cl` as writing every flag it may ([`Instruction::rflags_modified`]),
+/// and `cl` may hold 0, so such an instruction writes none for sure and
+/// the flags before it stay live across it; an immediate count iced
+/// already reads by its masked value.
+///
+/// # Arguments
+///
+/// * `instr` - The instruction.
+pub(super) fn flags_always_written(instr: &Instruction) -> u32 {
+    let count = instr.op_count().saturating_sub(1);
+    let by_cl = matches!(
+        instr.mnemonic(),
+        Mnemonic::Shl
+            | Mnemonic::Sal
+            | Mnemonic::Shr
+            | Mnemonic::Sar
+            | Mnemonic::Rol
+            | Mnemonic::Ror
+            | Mnemonic::Rcl
+            | Mnemonic::Rcr
+    ) && instr.op_kind(count) == OpKind::Register
+        && instr.op_register(count) == Register::CL;
+    if by_cl { 0 } else { instr.rflags_modified() }
 }
 
 /// Renders a call through a computed pointer as `(*p)`.

@@ -791,19 +791,10 @@ impl Exec<'_, '_> {
                     (Mnemonic::And | Mnemonic::Or | Mnemonic::Xor, _) => {
                         Flags::Test(v.clone(), v.clone(), bits)
                     }
-                    (
-                        Mnemonic::Shl | Mnemonic::Sal | Mnemonic::Shr | Mnemonic::Sar,
-                        Expr::Const(n),
-                    ) if *n >= 1 && *n < u64::from(bits) => {
-                        let pos = if matches!(mn, Mnemonic::Shr | Mnemonic::Sar) {
-                            *n - 1
-                        } else {
-                            u64::from(bits) - *n
-                        };
-                        let out = fold(Op::Shr, l, Expr::Const(pos), bits);
-                        Flags::Shift(v.clone(), bits, fold(Op::And, out, Expr::Const(1), bits))
+                    (Mnemonic::Shl | Mnemonic::Sal | Mnemonic::Shr | Mnemonic::Sar, _) => {
+                        shift_flags(mn, l, &r, &v, bits, &self.flags)
                     }
-                    _ => Flags::Result(v.clone(), bits),
+                    _ => Flags::Unknown,
                 };
                 self.write_op0(instr, v);
             }

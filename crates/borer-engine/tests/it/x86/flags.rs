@@ -201,6 +201,132 @@ fn pop_es_agrees_with_the_emulator() {
     ]);
 }
 
+/// A shift whose count masks to 0 leaves every flag as it was, in the
+/// lifter as in the emulator.
+///
+/// `shl eax, cl` with `cl` cleared shifts by nothing, so `sete` after it
+/// reads the zero flag of `cmp edx, 1`, not the shifted value: the lifter
+/// once set the flags from `eax` and read `al` as `eax == 0`.
+#[test]
+fn a_zero_count_shift_agrees_with_the_emulator() {
+    agrees_with_the_emulator(&[
+        0x33, 0xc9, // ASM: xor ecx, ecx
+        0x83, 0xfa, 0x01, // ASM: cmp edx, 1
+        0xd3, 0xe0, // ASM: shl eax, cl
+        0x0f, 0x94, 0xc0, // ASM: sete al
+        0xc3, // ASM: ret
+    ]);
+}
+
+/// A constant count masking to 0 leaves the flags too: `shl eax, 32` is
+/// a shift by nothing, and `sete` reads the compare before it.
+#[test]
+fn a_shift_by_the_width_agrees_with_the_emulator() {
+    agrees_with_the_emulator(&[
+        0x83, 0xfa, 0x01, // ASM: cmp edx, 1
+        0xc1, 0xe0, 0x20, // ASM: shl eax, 32
+        0x0f, 0x94, 0xc0, // ASM: sete al
+        0xc3, // ASM: ret
+    ]);
+}
+
+/// A count no constant gives may mask to 0 and leave every flag, so the
+/// lifter states none for it: the `je` after `shl eax, cl` is read
+/// neither as the shifted value being zero nor as the compare before.
+///
+/// The check seeds `ecx` next to the 32 it is compared with, where the
+/// count masks to 0 and the machine branches on the compare.
+#[test]
+fn a_variable_count_shift_agrees_with_the_emulator() {
+    use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
+    let p = image(&[
+        0x83, 0xf9, 0x20, // ASM: cmp ecx, 32
+        0xd3, 0xe0, // ASM: shl eax, cl
+        0x74, 0x03, // ASM: je 0x40100a
+        0x33, 0xc0, // ASM: xor eax, eax
+        0xc3, // ASM: ret
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+        0xc3, // ASM: ret
+    ]);
+    let a = Analysis::compute(&p);
+    for seed in 1..=16 {
+        let v = verify(&p, &a, &[0x401000], seed);
+        assert!(
+            v.checked == 3 && v.mismatches.is_empty(),
+            "seed {seed}: {}",
+            verify_tsv(&v)
+        );
+    }
+}
+
+/// A shift by `cl` that masks to 0 keeps the overflow of the `sub` before
+/// it, in the lifter as in the emulator: `setl` after `sub edx, 1; shl
+/// eax, cl` with `cl` cleared reads the subtraction's SF != OF.
+///
+/// The lifter once took the shift for a writer of every flag, lifted the
+/// `sub` as if its sign alone were read, and at `edx = 0x80000000` printed
+/// a sign test that is 0 where the machine's overflow makes `al` 1.
+#[test]
+fn a_zero_count_shift_keeps_the_overflow_agrees_with_the_emulator() {
+    agrees_with_the_emulator(&[
+        0x33, 0xc9, // ASM: xor ecx, ecx
+        0xba, 0x00, 0x00, 0x00, 0x80, // ASM: mov edx, 0x80000000
+        0x83, 0xea, 0x01, // ASM: sub edx, 1
+        0xd3, 0xe0, // ASM: shl eax, cl
+        0x0f, 0x9c, 0xc0, // ASM: setl al
+        0xc3, // ASM: ret
+    ]);
+}
+
+/// A rotate by `cl` that masks to 0 keeps every flag too: `setl` after
+/// `sub edx, 1; rol eax, cl` reads the subtraction's SF != OF, where the
+/// lifter once read its sign alone.
+#[test]
+fn a_zero_count_rotate_keeps_the_overflow_agrees_with_the_emulator() {
+    agrees_with_the_emulator(&[
+        0x33, 0xc9, // ASM: xor ecx, ecx
+        0xba, 0x00, 0x00, 0x00, 0x80, // ASM: mov edx, 0x80000000
+        0x83, 0xea, 0x01, // ASM: sub edx, 1
+        0xd3, 0xc0, // ASM: rol eax, cl
+        0x0f, 0x9c, 0xc0, // ASM: setl al
+        0xc3, // ASM: ret
+    ]);
+}
+
+/// A 64-bit shift masks its count to six bits, not five: `shl rax, 32`
+/// shifts by 32 and sets the zero flag from the result, so `sete` after
+/// `cmp edx, 1; shl rax, 32` reads the low half of `rax`, while `shl rax,
+/// 64` masks to 0 and leaves the compare's flags.
+#[test]
+fn a_64_bit_shift_count_masks_to_six_bits_agrees_with_the_emulator() {
+    for count in [0x20, 0x40] {
+        agrees_with_the_emulator_64(&[
+            0x83, 0xfa, 0x01, // ASM: cmp edx, 1
+            0x48, 0xc1, 0xe0, count, // ASM: shl rax, count
+            0x0f, 0x94, 0xc0, // ASM: sete al
+            0xc3, // ASM: ret
+        ]);
+    }
+}
+
+/// A block that opens with a shift by `cl` still reads the flags the block
+/// before it left: `jl` after `sub edx, 1; jmp B; B: shl eax, cl` with
+/// `cl` cleared is the compare of the argument with 1. Across the blocks
+/// the shift once counted as a writer of every flag, so the first block
+/// handed none on and the condition read as unknown.
+///
+/// `mov edx,[esp+4]; xor ecx,ecx; sub edx,1; jmp B; B: shl eax,cl; jl L;
+/// xor eax,eax; ret; L: mov eax,1; ret`.
+#[test]
+fn a_shift_by_cl_opening_a_block_reads_the_flags_before_it() {
+    let text = dc(&[
+        0x8b, 0x54, 0x24, 0x04, 0x33, 0xc9, 0x83, 0xea, 0x01, 0xeb, 0x00, 0xd3, 0xe0, 0x7c, 0x03,
+        0x33, 0xc0, 0xc3, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3,
+    ]);
+    assert!(!text.contains("FLAGS_UNKNOWN"), "{text}");
+    assert!(text.contains("a1 < 1"), "{text}");
+}
+
 /// A 16-bit address reads the 16-bit registers and wraps at 64 KiB, in the
 /// lifter as in the emulator.
 ///
