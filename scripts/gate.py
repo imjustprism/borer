@@ -108,6 +108,16 @@ RUST = (
 """What a Rust build reads: the crates and every file that configures them."""
 
 SCRIPTS = ("scripts/", "ruff.toml")
+
+STAGE = (
+    "import os, shutil, sys; "
+    "src, dst = (os.path.dirname(a) for a in sys.argv[1:3]); "
+    "os.makedirs(dst, exist_ok=True); "
+    "shutil.copy2(sys.argv[1], sys.argv[2]); "
+    "shutil.copytree(os.path.join(src, 'examples'), os.path.join(dst, 'examples'), dirs_exist_ok=True)"
+)
+"""Copies the built server, and the examples built beside it, to where the steps
+that run them load them from."""
 """What the Python checks read."""
 
 EVERYTHING = ("",)
@@ -523,7 +533,8 @@ def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[St
             "test",
             ["cargo", "test", "--workspace", "--lib", "--bins", "--tests"],
             inputs=RUST,
-            needs=("build",),
+            # After the copy, so the binary it may link again is not the one copied.
+            needs=("build", "stage"),
             heavy=True,
         ),
         # Beside the tests, not after them: cargo holds the profile's lock
@@ -535,10 +546,15 @@ def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[St
     # Named by platform, not by presence: the build step before the sweep
     # makes it, so it does not exist yet when this list is built.
     exe = "borer.exe" if sys.platform == "win32" else "borer"
-    server = os.path.join(target, "debug", exe)
+    built = os.path.join(target, "debug", exe)
+    server = os.path.join(target, "gate", exe)
     dogfood = os.path.join(target, "corpus", exe)
     sweep = ["cargo", "test", "-p", "borer-engine", "--profile", "sweep", "--test", "dogfood"]
     rest += [
+        # The steps that drive the server run a copy of it: `cargo test
+        # --workspace` may link debug/borer.exe again under the workspace's
+        # features, and Windows refuses to replace an executable that runs.
+        Step("stage", [py, "-c", STAGE, built, server], needs=("examples", "build")),
         # link.exe, not the rust-lld .cargo/config.toml names: the binary
         # the sweep reads stays linked as it always was.
         Step(
@@ -637,7 +653,7 @@ def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[St
                 "--quiet",
             ],
             inputs=RUST + SCRIPTS,
-            needs=("build",),
+            needs=("stage",),
         ),
         # Every function's `index` text over the notepad, msvcrt32 and
         # sqlite3 corpus against the hashes in scripts/run/golden.tsv
@@ -648,7 +664,7 @@ def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[St
             "golden",
             [py, os.path.join("scripts", "run", "golden.py"), "check", server, "--quiet"],
             inputs=RUST + SCRIPTS,
-            needs=("build",),
+            needs=("stage",),
         ),
         Step(
             "doc",
@@ -667,7 +683,7 @@ def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[St
             "smoke",
             [py, os.path.join("scripts", "run", "smoke.py"), server, dogfood],
             inputs=RUST + SCRIPTS,
-            needs=("build", "build corpus"),
+            needs=("stage", "build corpus"),
             heavy=True,
         ),
         # Seconds: the tasks replay on the crackme the examples step built.
@@ -675,7 +691,7 @@ def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[St
             "agent eval",
             [py, os.path.join("scripts", "run", "agent_eval.py"), server],
             inputs=RUST + SCRIPTS,
-            needs=("examples", "build"),
+            needs=("examples", "stage"),
         ),
     ]
     # The decompile time bars (`timings` in tests/bench.rs: the p95 and the
