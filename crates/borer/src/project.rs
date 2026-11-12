@@ -1,7 +1,7 @@
 //! Project persistence: overlay annotations saved as an editable JSON file.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Component, Path};
 
 use borer_engine::analysis::Overlay;
 use borer_engine::analysis::protos::{PROTOTYPES_MAX, Proto, VARS_MAX, Var, VarKey};
@@ -228,6 +228,32 @@ pub fn keep_placeable(o: &mut Overlay, program: &Program) -> Vec<String> {
     left_out
 }
 
+/// Returns a path's components as its text names them, read off no disk.
+///
+/// # Arguments
+///
+/// * `path` - The path.
+///
+/// # Returns
+///
+/// [`Path::components`] with `.` dropped and each `..` folded into the
+/// component before it (at a root, into the root). Names keep their letter
+/// case; only a drive letter compares in either case, as std parses it.
+fn lexical(path: &Path) -> Vec<Component<'_>> {
+    let mut out = Vec::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir if matches!(out.last(), Some(Component::Normal(_))) => {
+                out.pop();
+            }
+            Component::ParentDir if matches!(out.last(), Some(Component::RootDir)) => {}
+            part => out.push(part),
+        }
+    }
+    out
+}
+
 impl ProjectFile {
     /// Builds the file contents from an overlay.
     ///
@@ -407,22 +433,20 @@ impl ProjectFile {
 
     /// Tells whether the project was saved for the binary at `path`.
     ///
-    /// The file records the path its binary was loaded from, so the two
-    /// match when the text is the same or both name one file on disk (one
-    /// path spelled two ways). A device in the file is never opened.
+    /// A project with its binary's SHA-256 is matched by the hash alone
+    /// ([`ProjectFile::identify`]); one without is matched here, by the path
+    /// it records and the loaded one compared as text ([`lexical`]), never
+    /// on disk, so a project file never makes borer open a path. Two
+    /// spellings only the disk shows to be one file (a link, an 8.3 name, a
+    /// name in another letter case) are two paths, so `load_project`
+    /// refuses the project unless forced.
     ///
     /// # Arguments
     ///
     /// * `path` - Where the loaded binary was loaded from.
     #[must_use]
     pub fn is_for(&self, path: &Path) -> bool {
-        let saved = Path::new(&self.program);
-        saved == path
-            || (borer_engine::program::unusable_path(saved).is_none()
-                && matches!(
-                    (std::fs::canonicalize(saved), std::fs::canonicalize(path)),
-                    (Ok(a), Ok(b)) if a == b
-                ))
+        lexical(Path::new(&self.program)) == lexical(path)
     }
 
     /// Writes the file as pretty-printed JSON.

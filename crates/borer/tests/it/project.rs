@@ -218,6 +218,28 @@ fn a_project_is_for_the_file_it_was_saved_for() {
     assert!(!ProjectFile::from_overlay("con", None, &Overlay::default()).is_for(&bin));
 }
 
+/// A project without a hash is matched by its path's text alone, so no path
+/// out of a project file is opened.
+///
+/// The NT spelling of the loaded file, which the disk resolves to it, is
+/// another path, as the path in other case is; `.` and `..` fold as the
+/// text says. Both paths were canonicalized, which opened the saved one:
+/// `\??\UNC\host\share\x` authenticated to the host as the user.
+#[cfg(windows)]
+#[test]
+fn a_project_is_matched_by_its_path_text_alone() {
+    let dir = std::env::temp_dir().join(format!("borer-project-text-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = dir.join("bin.exe");
+    std::fs::write(&bin, b"MZ").unwrap();
+    let saved = |program: &str| ProjectFile::from_overlay(program, None, &Overlay::default());
+    assert!(!saved(&format!(r"\??\{}", bin.display())).is_for(&bin));
+    assert!(!saved(&bin.display().to_string().to_uppercase()).is_for(&bin));
+    assert!(saved(&format!(r"{}\x\.\..\bin.exe", dir.display())).is_for(&bin));
+    assert!(saved(r".\a.exe").is_for(std::path::Path::new("a.exe")));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// A binary is identified by the SHA-256 of its bytes, FIPS 180-4's
 /// vector for `abc`.
 #[test]
