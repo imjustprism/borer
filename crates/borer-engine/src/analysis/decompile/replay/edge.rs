@@ -168,7 +168,13 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                 match step.run(L::start(&jcc)).stop {
                     Stop::Stopped(_) => Some(true),
                     Stop::Budget => Some(false),
-                    _ => None,
+                    Stop::Returned
+                    | Stop::Unmodeled(_)
+                    | Stop::Fault(_)
+                    | Stop::MemoryFull(_)
+                    | Stop::Derailed(_)
+                    | Stop::Exited
+                    | Stop::Limit(_) => None,
                 }
             }
             Some(_) | None => None,
