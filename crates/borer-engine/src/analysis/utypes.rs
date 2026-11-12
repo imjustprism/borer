@@ -78,6 +78,16 @@ const SCALARS: [(&str, u64); 11] = [
 /// program declares.
 pub const PTR_DEPTH_MAX: usize = 16;
 
+/// Most typedefs one chain of them holds before the type it ends at.
+///
+/// A width and a reference check walk a chain to its end, through the
+/// pointers and arrays each typedef states, so a project of thousands of
+/// typedefs each naming the next made every field typed by the first cost
+/// thousands of steps. Sixteen is as deep as [`PTR_DEPTH_MAX`] lets one
+/// type stack, as far as the mod SDK follows a typedef, and past any chain
+/// a header declares.
+pub const ALIAS_DEPTH_MAX: usize = 16;
+
 /// Most values one array type holds: sixteen million, far past any table a
 /// program lays out statically, and small enough that no width computed
 /// from one overflows.
@@ -253,6 +263,28 @@ fn scalar(word: &str) -> TypeExpr {
 }
 
 impl TypeExpr {
+    /// Returns the name a named type is, `None` for a scalar, a pointer or
+    /// an array.
+    #[must_use]
+    pub(crate) fn name(&self) -> Option<&str> {
+        match self {
+            TypeExpr::Named(n) => Some(n),
+            TypeExpr::U8
+            | TypeExpr::U16
+            | TypeExpr::U32
+            | TypeExpr::U64
+            | TypeExpr::I8
+            | TypeExpr::I16
+            | TypeExpr::I32
+            | TypeExpr::I64
+            | TypeExpr::F32
+            | TypeExpr::F64
+            | TypeExpr::Char
+            | TypeExpr::Ptr(_)
+            | TypeExpr::Array(..) => None,
+        }
+    }
+
     /// Spells the type as the tools and the project file write it.
     ///
     /// `parse_type` of the spelling is the type again, so a project saved
@@ -459,6 +491,11 @@ pub const FIELDS_MAX: usize = 256;
 
 /// Most values one user enum holds.
 pub const ENUM_VALUES_MAX: usize = 256;
+
+/// Most types one overlay applies at addresses, as many as it states
+/// prototypes ([`super::protos::PROTOTYPES_MAX`]): past the globals a
+/// binary has worth typing.
+pub const APPLIED_MAX: usize = 1 << 16;
 
 /// Builds a struct type from its stated fields, refusing what could not be
 /// rendered honestly.
@@ -873,6 +910,166 @@ pub fn width_of(known: &BTreeMap<String, UserType>, ty: &TypeExpr, word: u64) ->
     named_width(known, ty, "", word)
 }
 
+/// The widths of one set of types at one pointer width, each named type
+/// walked once however many types name it: what a check sizing every field
+/// of a project sizes them by.
+#[derive(Debug)]
+pub(crate) struct Widths<'t> {
+    /// The types.
+    pub(crate) known: &'t BTreeMap<String, UserType>,
+    /// The image's pointer width in bytes (4 or 8).
+    word: u64,
+    /// For each named type walked so far, the width of the type its
+    /// typedefs end at and how many of it their arrays make ([`ended`]),
+    /// `None` where [`width_of`] sizes nothing.
+    named: BTreeMap<&'t str, Option<(u64, u64)>>,
+    /// Whether each named type walked so far resolves ([`resolves`]).
+    resolved: BTreeMap<&'t str, bool>,
+}
+
+impl<'t> Widths<'t> {
+    /// Starts sizing the types of a set, none walked yet.
+    ///
+    /// # Arguments
+    ///
+    /// * `known` - The types.
+    /// * `word` - The image's pointer width in bytes (4 or 8).
+    pub(crate) fn new(known: &'t BTreeMap<String, UserType>, word: u64) -> Self {
+        Self {
+            known,
+            word,
+            named: BTreeMap::new(),
+            resolved: BTreeMap::new(),
+        }
+    }
+
+    /// Returns the width of a type, as [`width_of`] sizes it.
+    ///
+    /// A named type's arrays count with the arrays naming it before its
+    /// width is taken, as [`width_of`] counts them: a count past every
+    /// count is no size even where the type it ends at is no bytes wide.
+    ///
+    /// # Arguments
+    ///
+    /// * `ty` - The type.
+    ///
+    /// # Returns
+    ///
+    /// The width in bytes, or `None` when a name does not resolve, a chain
+    /// loops or a count passes every count.
+    pub(crate) fn of(&mut self, ty: &TypeExpr) -> Option<u64> {
+        let known = self.known;
+        let mut count: u64 = 1;
+        let mut current = ty;
+        loop {
+            current = match current {
+                TypeExpr::Ptr(inner) => {
+                    return self
+                        .resolves(inner)
+                        .then_some(self.word)?
+                        .checked_mul(count);
+                }
+                TypeExpr::Array(inner, n) => {
+                    count = count.checked_mul(*n)?;
+                    inner
+                }
+                TypeExpr::Named(n) => {
+                    let (name, _) = known.get_key_value(n)?;
+                    let word = self.word;
+                    let ends = *self.named.entry(name).or_insert_with(|| {
+                        let (end, times) = ended(known, current)?;
+                        Some((width_of(known, end, word)?, times?))
+                    });
+                    let (base, times) = ends?;
+                    return base.checked_mul(count.checked_mul(times)?);
+                }
+                TypeExpr::U8
+                | TypeExpr::U16
+                | TypeExpr::U32
+                | TypeExpr::U64
+                | TypeExpr::I8
+                | TypeExpr::I16
+                | TypeExpr::I32
+                | TypeExpr::I64
+                | TypeExpr::F32
+                | TypeExpr::F64
+                | TypeExpr::Char => return scalar_width(current)?.checked_mul(count),
+            };
+        }
+    }
+
+    /// Tells whether every name a type references resolves, as
+    /// [`resolves`] does.
+    ///
+    /// # Arguments
+    ///
+    /// * `ty` - The type.
+    fn resolves(&mut self, ty: &TypeExpr) -> bool {
+        let known = self.known;
+        let mut base = ty;
+        while let TypeExpr::Ptr(inner) | TypeExpr::Array(inner, _) = base {
+            base = inner;
+        }
+        let Some(n) = base.name() else {
+            return true;
+        };
+        let Some((name, _)) = known.get_key_value(n) else {
+            return false;
+        };
+        *self
+            .resolved
+            .entry(name)
+            .or_insert_with(|| resolves(known, base, ""))
+    }
+}
+
+/// Returns the type a named type's typedefs end at, through the arrays
+/// they state, and how many of it those arrays make.
+///
+/// # Arguments
+///
+/// * `known` - The types.
+/// * `ty` - The named type.
+///
+/// # Returns
+///
+/// The struct, enum, scalar or pointer the typedefs end at, and the
+/// product of their arrays' counts, `None` past every count; `None` when
+/// a name resolves to nothing or the typedefs loop.
+fn ended<'k>(
+    known: &'k BTreeMap<String, UserType>,
+    ty: &'k TypeExpr,
+) -> Option<(&'k TypeExpr, Option<u64>)> {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut times = Some(1u64);
+    let mut current = ty;
+    loop {
+        current = match current {
+            TypeExpr::Array(inner, n) => {
+                times = times.and_then(|t| t.checked_mul(*n));
+                inner
+            }
+            TypeExpr::Named(n) => match known.get(n) {
+                Some(UserType::Alias(inner)) if seen.insert(n) => inner,
+                Some(UserType::Alias(_)) | None => return None,
+                Some(UserType::Struct(_) | UserType::Enum(_)) => return Some((current, times)),
+            },
+            TypeExpr::U8
+            | TypeExpr::U16
+            | TypeExpr::U32
+            | TypeExpr::U64
+            | TypeExpr::I8
+            | TypeExpr::I16
+            | TypeExpr::I32
+            | TypeExpr::I64
+            | TypeExpr::F32
+            | TypeExpr::F64
+            | TypeExpr::Char
+            | TypeExpr::Ptr(_) => return Some((current, times)),
+        };
+    }
+}
+
 /// The struct a type points at, through pointers and aliases.
 ///
 /// # Arguments
@@ -946,13 +1143,62 @@ pub fn named_enum<'t>(
     }
 }
 
+/// Refuses a set of types, or of applications, larger than an overlay
+/// holds, by the counts alone.
+///
+/// A struct holds at most [`FIELDS_MAX`] fields, an enum
+/// [`ENUM_VALUES_MAX`] values, an overlay [`TYPES_MAX`] types and
+/// [`APPLIED_MAX`] applications. It is the first check a project's types
+/// get, so a file stating millions of entries is refused before any of
+/// them is parsed or sized.
+///
+/// # Arguments
+///
+/// * `types` - The defined types.
+/// * `applied` - How many types are applied at addresses.
+///
+/// # Errors
+///
+/// When a count passes its cap; the message names the type.
+pub fn counted(types: &BTreeMap<String, UserType>, applied: usize) -> anyhow::Result<()> {
+    if types.len() > TYPES_MAX {
+        return Err(anyhow::anyhow!(
+            "the project states {} types; {TYPES_MAX} is the most",
+            types.len()
+        ));
+    }
+    if applied > APPLIED_MAX {
+        return Err(anyhow::anyhow!(
+            "the project applies {applied} types; {APPLIED_MAX} is the most"
+        ));
+    }
+    for (name, ty) in types {
+        let (n, most, what) = match ty {
+            UserType::Struct(s) => (s.fields.len(), FIELDS_MAX, "fields"),
+            UserType::Enum(e) => (e.values.len(), ENUM_VALUES_MAX, "values"),
+            UserType::Alias(_) => continue,
+        };
+        if n > most {
+            return Err(anyhow::anyhow!(
+                "{} {} states {n} {what}; {most} is the most",
+                ty.kind(),
+                crate::text::quoted(name)
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Checks a whole overlay's types and applications.
 ///
-/// Every name a type or an application references must be defined, no
-/// chain of aliases may loop, and no type may stack more pointers than
-/// [`PTR_DEPTH_MAX`]; a project file is edited by hand and passed around,
-/// so this is where garbage in it is refused rather than silently dropping
-/// a rendering.
+/// The counts come first ([`counted`]). Then every name a type or an
+/// application references must be defined, no chain of aliases may loop
+/// or hold more than [`ALIAS_DEPTH_MAX`] typedefs ([`chained`]), and no
+/// type may stack more pointers than [`PTR_DEPTH_MAX`]; a project file is
+/// edited by hand and passed around, so this is where garbage in it is
+/// refused rather than silently dropping a rendering. Each named type is
+/// sized once ([`Widths`]), and the deadline in force is read once per
+/// type ([`crate::cancel::Cancel::whole`]).
 ///
 /// # Arguments
 ///
@@ -961,101 +1207,26 @@ pub fn named_enum<'t>(
 ///
 /// # Errors
 ///
-/// When a reference is undefined, a chain loops or a type is too deep; the
-/// message names the type and the name that failed.
+/// When a count passes its cap, a reference is undefined, a chain loops or
+/// runs too long, a type is too deep, or the request's deadline passed;
+/// the message names the type and the name that failed.
 pub fn validate(
     types: &BTreeMap<String, UserType>,
     applied: &BTreeMap<u64, TypeExpr>,
 ) -> anyhow::Result<()> {
-    if types.len() > TYPES_MAX {
-        return Err(anyhow::anyhow!(
-            "the project states {} types; {TYPES_MAX} is the most",
-            types.len()
-        ));
-    }
+    counted(types, applied.len())?;
     for (name, ty) in types {
-        match ty {
-            UserType::Struct(s) => {
-                if s.fields.len() > FIELDS_MAX {
-                    return Err(anyhow::anyhow!(
-                        "struct {name} states {} fields; {FIELDS_MAX} is the most",
-                        s.fields.len()
-                    ));
-                }
-                for (off, f) in &s.fields {
-                    if !is_ident(&f.name) {
-                        return Err(anyhow::anyhow!(
-                            "field name {} is not an identifier",
-                            crate::text::quoted(&f.name)
-                        ));
-                    }
-                    check_depth(&f.ty, &format!("field {} at {off:#x}", f.name))?;
-                    if width_of(types, &f.ty, 8).is_none() {
-                        return Err(anyhow::anyhow!(
-                            "field {} at {off:#x} has type {}, which resolves to no size",
-                            f.name,
-                            f.ty.spell()
-                        ));
-                    }
-                }
-            }
-            UserType::Enum(e) => {
-                if !matches!(e.size, 4 | 8) {
-                    return Err(anyhow::anyhow!(
-                        "enum {name}'s width is {} byte(s); an enum is 4 or 8 wide",
-                        e.size
-                    ));
-                }
-                if e.values.len() > ENUM_VALUES_MAX {
-                    return Err(anyhow::anyhow!(
-                        "enum {name} states {} values; {ENUM_VALUES_MAX} is the most",
-                        e.values.len()
-                    ));
-                }
-                let mut names: BTreeSet<&str> = BTreeSet::new();
-                for &(value, ref value_name) in &e.values {
-                    if !is_ident(value_name) {
-                        return Err(anyhow::anyhow!(
-                            "value name {} is not an identifier",
-                            crate::text::quoted(value_name)
-                        ));
-                    }
-                    if !names.insert(value_name.as_str()) {
-                        return Err(anyhow::anyhow!(
-                            "enum {name} states two values named {value_name}"
-                        ));
-                    }
-                    if e.size == 4 && u32::try_from(value).is_err() {
-                        return Err(anyhow::anyhow!(
-                            "value {value_name} = {value:#x} does not fit a 4-byte enum"
-                        ));
-                    }
-                }
-                for pair in e.values.windows(2) {
-                    if pair[0].0 == pair[1].0 {
-                        return Err(anyhow::anyhow!(
-                            "enum {name} names value {} twice, as {} and {}",
-                            pair[0].0,
-                            pair[0].1,
-                            pair[1].1
-                        ));
-                    }
-                }
-            }
-            UserType::Alias(inner) => {
-                check_depth(inner, &format!("typedef {name}"))?;
-                if width_of(types, inner, 8).is_none() {
-                    return Err(anyhow::anyhow!(
-                        "typedef {name} is {}, which resolves to no size",
-                        inner.spell()
-                    ));
-                }
-            }
-        }
+        crate::cancel::Cancel::whole(()).map_err(anyhow::Error::msg)?;
+        shaped(name, ty)?;
+    }
+    chained(types)?;
+    let mut widths = Widths::new(types, 8);
+    for (name, ty) in types {
+        sized(&mut widths, name, ty)?;
     }
     for (addr, ty) in applied {
         check_depth(ty, &format!("the type applied at {addr:#x}"))?;
-        if width_of(types, ty, 8).is_none() {
+        if widths.of(ty).is_none() {
             return Err(anyhow::anyhow!(
                 "the type applied at {addr:#x}, {}, resolves to no size",
                 ty.spell()
@@ -1063,6 +1234,166 @@ pub fn validate(
         }
     }
     Ok(())
+}
+
+/// Checks what one type states of itself: its fields' names and how deep
+/// their types stack, an enum's width and values, a typedef's depth.
+///
+/// # Arguments
+///
+/// * `name` - The type's name.
+/// * `ty` - The type.
+///
+/// # Errors
+///
+/// When a field or value name is not an identifier or is stated twice, a
+/// type is too deep, or an enum's width or a value does not fit; the
+/// message names the offender.
+fn shaped(name: &str, ty: &UserType) -> anyhow::Result<()> {
+    match ty {
+        UserType::Struct(s) => {
+            for (off, f) in &s.fields {
+                if !is_ident(&f.name) {
+                    return Err(anyhow::anyhow!(
+                        "field name {} is not an identifier",
+                        crate::text::quoted(&f.name)
+                    ));
+                }
+                check_depth(&f.ty, &format!("field {} at {off:#x}", f.name))?;
+            }
+        }
+        UserType::Enum(e) => {
+            if !matches!(e.size, 4 | 8) {
+                return Err(anyhow::anyhow!(
+                    "enum {name}'s width is {} byte(s); an enum is 4 or 8 wide",
+                    e.size
+                ));
+            }
+            let mut names: BTreeSet<&str> = BTreeSet::new();
+            for &(value, ref value_name) in &e.values {
+                if !is_ident(value_name) {
+                    return Err(anyhow::anyhow!(
+                        "value name {} is not an identifier",
+                        crate::text::quoted(value_name)
+                    ));
+                }
+                if !names.insert(value_name.as_str()) {
+                    return Err(anyhow::anyhow!(
+                        "enum {name} states two values named {value_name}"
+                    ));
+                }
+                if e.size == 4 && u32::try_from(value).is_err() {
+                    return Err(anyhow::anyhow!(
+                        "value {value_name} = {value:#x} does not fit a 4-byte enum"
+                    ));
+                }
+            }
+            for pair in e.values.windows(2) {
+                if pair[0].0 == pair[1].0 {
+                    return Err(anyhow::anyhow!(
+                        "enum {name} names value {} twice, as {} and {}",
+                        pair[0].0,
+                        pair[0].1,
+                        pair[1].1
+                    ));
+                }
+            }
+        }
+        UserType::Alias(inner) => check_depth(inner, &format!("typedef {name}"))?,
+    }
+    Ok(())
+}
+
+/// Checks that every type one type names has a size.
+///
+/// # Arguments
+///
+/// * `widths` - The set's widths, each named type walked once.
+/// * `name` - The type's name.
+/// * `ty` - The type.
+///
+/// # Errors
+///
+/// When a field's type or a typedef's target resolves to no size; the
+/// message names it.
+fn sized(widths: &mut Widths<'_>, name: &str, ty: &UserType) -> anyhow::Result<()> {
+    match ty {
+        UserType::Struct(s) => {
+            for (off, f) in &s.fields {
+                if widths.of(&f.ty).is_none() {
+                    return Err(anyhow::anyhow!(
+                        "field {} at {off:#x} has type {}, which resolves to no size",
+                        f.name,
+                        f.ty.spell()
+                    ));
+                }
+            }
+        }
+        UserType::Alias(inner) => {
+            if widths.of(inner).is_none() {
+                return Err(anyhow::anyhow!(
+                    "typedef {name} is {}, which resolves to no size",
+                    inner.spell()
+                ));
+            }
+        }
+        UserType::Enum(_) => {}
+    }
+    Ok(())
+}
+
+/// Refuses a chain of typedefs longer than [`ALIAS_DEPTH_MAX`], naming the
+/// typedef with the longest.
+///
+/// A chain runs through the pointers and arrays each typedef states, as
+/// [`width_of`] and [`resolves`] follow it. Each typedef's length is
+/// counted once and read back by every chain that runs through it, so the
+/// check takes a step per typedef however long the chains are; a chain
+/// that loops stops where it meets itself, and its width refuses it.
+///
+/// # Arguments
+///
+/// * `types` - The defined types.
+///
+/// # Errors
+///
+/// When a chain holds more typedefs than the cap.
+fn chained(types: &BTreeMap<String, UserType>) -> anyhow::Result<()> {
+    let mut length: BTreeMap<&str, usize> = BTreeMap::new();
+    for start in types.keys() {
+        let mut path: Vec<&str> = Vec::new();
+        let mut at = start.as_str();
+        let mut tail = 0;
+        while let Some(UserType::Alias(inner)) = types.get(at) {
+            if let Some(&known) = length.get(at) {
+                tail = known;
+                break;
+            }
+            length.insert(at, 0);
+            path.push(at);
+            let mut base = inner;
+            while let TypeExpr::Ptr(next) | TypeExpr::Array(next, _) = base {
+                base = next;
+            }
+            let Some(next) = base.name() else {
+                break;
+            };
+            at = next;
+        }
+        for (i, name) in path.into_iter().rev().enumerate() {
+            length.insert(name, tail + i + 1);
+        }
+    }
+    let longest = length
+        .iter()
+        .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)));
+    match longest {
+        Some((head, &n)) if n > ALIAS_DEPTH_MAX => Err(anyhow::anyhow!(
+            "typedef {} starts a chain of {n} typedefs; {ALIAS_DEPTH_MAX} is the most, so state the type it ends at",
+            crate::text::quoted(head)
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// Refuses a type that stacks more pointers and arrays than
@@ -1555,5 +1886,47 @@ mod tests {
             .unwrap_or_else(|e| panic!("{e}")),
         );
         assert_ne!(o.fingerprint(), other.fingerprint());
+    }
+
+    /// The widths of a set, each named type walked once, are the widths
+    /// [`width_of`] gives: through pointers, arrays and typedefs, with an
+    /// unresolved pointer, a loop and an overflow.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn widths_walked_once_are_the_widths_of_each_type() {
+        let mut known = BTreeMap::new();
+        for (name, ty) in [
+            ("P0", "P1 *"),
+            ("P1", "u32 *"),
+            ("R0", "R1[3]"),
+            ("R1", "u32"),
+            ("Loop", "Loop[2]"),
+            ("Lost", "Gone *"),
+        ] {
+            let alias = super::UserType::Alias(parse_type(ty).unwrap());
+            known.insert(name.to_owned(), alias);
+        }
+        let fields = vec![(0, "r".to_owned(), parse_type("R0").unwrap())];
+        let rec = build_struct("Rec", None, &fields, &known, 8).unwrap();
+        known.insert("Rec".to_owned(), rec);
+        let huge = (0..super::PTR_DEPTH_MAX).fold(parse_type("Rec").unwrap(), |t, _| {
+            TypeExpr::Array(Box::new(t), super::ARRAY_LEN_MAX)
+        });
+        let types = [
+            "P0", "P1 *", "R0[2]", "R1", "Rec", "Rec *[4]", "Loop", "Lost", "Lost *", "Gone",
+            "u16[3]",
+        ]
+        .map(|t| parse_type(t).unwrap());
+        for word in [4, 8] {
+            let mut widths = super::Widths::new(&known, word);
+            for ty in types.iter().chain([&huge]) {
+                for _ in 0..2 {
+                    assert_eq!(widths.of(ty), width_of(&known, ty, word), "{}", ty.spell());
+                }
+            }
+        }
     }
 }

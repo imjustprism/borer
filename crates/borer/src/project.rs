@@ -308,7 +308,9 @@ impl ProjectFile {
 
     /// Rebuilds the overlay.
     ///
-    /// Every address key must read as an address and no two may name one
+    /// Every table is counted first ([`ProjectFile::counted`]), so a file
+    /// stating millions of entries is refused before any is read. Every
+    /// address key must read as an address and no two may name one
     /// ([`keyed`]), and the annotation text is escaped to one line
     /// ([`by_address`]); the applied types are parsed and the whole set of
     /// types checked ([`borer_engine::analysis::utypes::validate`]), so a
@@ -327,11 +329,13 @@ impl ProjectFile {
     ///
     /// # Errors
     ///
-    /// When a key is not an address or two keys name one address or one
-    /// class, an applied type, a prototype, a variable or a class's field
-    /// does not parse, or a defined type's or a field's references do not
-    /// resolve.
+    /// When a table states more than an overlay holds, a key is not an
+    /// address or two keys name one address or one class, an applied type,
+    /// a prototype, a variable or a class's field does not parse, a defined
+    /// type's or a field's references do not resolve, or the request's
+    /// deadline passed.
     pub fn to_overlay(&self) -> Result<Overlay, String> {
+        self.counted()?;
         let mut applied: BTreeMap<u64, borer_engine::analysis::utypes::TypeExpr> = BTreeMap::new();
         for (va, (_, v)) in keyed("applied", &self.applied)? {
             let ty = borer_engine::analysis::utypes::parse_type(v).map_err(|e| {
@@ -349,7 +353,6 @@ impl ProjectFile {
             prototypes.insert(va, proto);
         }
         let mut vars: BTreeMap<u64, BTreeMap<VarKey, Var>> = BTreeMap::new();
-        let mut held = 0usize;
         for (k, table) in &self.vars {
             let va = borer_engine::analysis::parse_addr(k).ok_or_else(|| {
                 format!(
@@ -369,14 +372,7 @@ impl ProjectFile {
                         key.spell_saved()
                     ));
                 }
-                held += 1;
             }
-        }
-        if prototypes.len() > PROTOTYPES_MAX || held > VARS_MAX {
-            return Err(format!(
-                "the project states {} prototypes and {held} variables; {PROTOTYPES_MAX} and {VARS_MAX} are the most",
-                prototypes.len()
-            ));
         }
         let mut fields: BTreeMap<String, BTreeMap<u64, Field>> = BTreeMap::new();
         let mut classes: BTreeSet<String> = BTreeSet::new();
@@ -408,6 +404,36 @@ impl ProjectFile {
             .map_err(|e| e.to_string())?;
         borer_engine::analysis::stated::validate(&o)?;
         Ok(o)
+    }
+
+    /// Refuses a file whose tables state more than an overlay holds, by
+    /// their counts alone, before any entry is parsed or sized.
+    ///
+    /// The types are counted as an overlay's are
+    /// ([`borer_engine::analysis::utypes::counted`]), then the prototypes,
+    /// the variables, and each class's stated fields
+    /// ([`borer_engine::analysis::stated::crowded`]). A count is of the
+    /// entries the file holds, so it is never under what loads, and a
+    /// function stating no variable counts as one.
+    ///
+    /// # Errors
+    ///
+    /// When a count passes its cap; the message names the table.
+    fn counted(&self) -> Result<(), String> {
+        borer_engine::analysis::utypes::counted(&self.types, self.applied.len())
+            .map_err(|e| e.to_string())?;
+        let held: usize = self.vars.values().map(|table| table.len().max(1)).sum();
+        if self.prototypes.len() > PROTOTYPES_MAX || held > VARS_MAX {
+            return Err(format!(
+                "the project states {} prototypes and {held} variables; {PROTOTYPES_MAX} and {VARS_MAX} are the most",
+                self.prototypes.len()
+            ));
+        }
+        for (class, table) in &self.fields {
+            let class = borer_engine::text::one_line(class);
+            borer_engine::analysis::stated::crowded(&class, table.len(), self.fields.len())?;
+        }
+        Ok(())
     }
 
     /// Judges whether the project was saved for the loaded binary.

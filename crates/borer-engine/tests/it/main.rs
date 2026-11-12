@@ -98,6 +98,7 @@ mod typelib;
 mod types;
 mod unchecked;
 mod unit;
+mod validate;
 mod void_results;
 mod wire_tables;
 mod x86;

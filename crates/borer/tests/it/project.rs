@@ -7,7 +7,8 @@
 
 use borer::project::{Identity, ProjectFile, identity};
 use borer_engine::analysis::Overlay;
-use borer_engine::analysis::utypes::{build_enum, build_struct, parse_type};
+use borer_engine::analysis::stated::Field;
+use borer_engine::analysis::utypes::{TypeExpr, UserType, build_enum, build_struct, parse_type};
 use borer_engine::program::{Arch, Program};
 
 use crate::contract::tiny_pe;
@@ -500,4 +501,137 @@ fn prototypes_and_variables_round_trip_through_json() {
         err.contains("0x401000") && err.contains("parameter list"),
         "{err}"
     );
+}
+
+/// Loads a project on a thread of its own, so a load that does not end
+/// fails the test instead of hanging it.
+///
+/// # Arguments
+///
+/// * `pf` - The project.
+///
+/// # Returns
+///
+/// What the load answered, or `None` when it took over ten seconds.
+fn loaded_in_time(pf: ProjectFile) -> Option<Result<Overlay, String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || tx.send(pf.to_overlay()).is_ok());
+    rx.recv_timeout(std::time::Duration::from_secs(10)).ok()
+}
+
+/// Returns a project of classes `C0` on, each stating `fields` fields
+/// typed by `A0`, the first of `chain` typedefs that each name the next,
+/// the last a `u32`.
+///
+/// # Arguments
+///
+/// * `classes` - How many classes.
+/// * `fields` - Fields stated of each, four bytes apart.
+/// * `chain` - Typedefs in the chain.
+fn typed_through_a_chain(classes: usize, fields: u64, chain: usize) -> ProjectFile {
+    let mut o = Overlay::default();
+    for k in 0..chain {
+        let next = if k + 1 == chain {
+            TypeExpr::U32
+        } else {
+            TypeExpr::Named(format!("A{}", k + 1))
+        };
+        o.types.insert(format!("A{k}"), UserType::Alias(next));
+    }
+    for c in 0..classes {
+        let stated = o.fields.entry(format!("C{c}")).or_default();
+        for k in 0..fields {
+            let ty = Some(TypeExpr::Named("A0".to_owned()));
+            stated.insert(
+                k * 4,
+                Field {
+                    name: format!("m_{k}"),
+                    ty,
+                },
+            );
+        }
+    }
+    ProjectFile::from_overlay("bin", None, &o)
+}
+
+/// A project file whose typedefs chain past the cap, or whose tables
+/// pass their counts, is refused, and the refusal the agent reads names
+/// the typedef or the count. A chain at the cap loads.
+///
+/// The million fields and the long chains a load took hours over are
+/// held to their bounds by the engine's own tests.
+#[test]
+fn a_hostile_project_is_refused_by_its_counts_and_its_chains() {
+    let crowded = loaded_in_time(typed_through_a_chain(1, 257, 2))
+        .expect("the load answers within ten seconds")
+        .expect_err("257 fields of one class loaded");
+    assert!(
+        crowded.contains("class C0 would state 257 fields"),
+        "{crowded}"
+    );
+    let chained = loaded_in_time(typed_through_a_chain(1, 1, 17))
+        .expect("the load answers within ten seconds")
+        .expect_err("a chain of 17 typedefs loaded");
+    assert!(
+        chained.contains("typedef 'A0' starts a chain of 17 typedefs; 16 is the most"),
+        "{chained}"
+    );
+    assert!(loaded_in_time(typed_through_a_chain(2, 2, 16)).is_some_and(|o| o.is_ok()));
+    let applied: serde_json::Map<String, serde_json::Value> = (0..0x1_0001u64)
+        .map(|k| (format!("{k:#x}"), "u32".into()))
+        .collect();
+    let refused = loaded(serde_json::json!({ "applied": applied }))
+        .expect_err("65537 applied types loaded");
+    assert!(refused.contains("applies 65537 types"), "{refused}");
+    let prototypes: serde_json::Map<String, serde_json::Value> = (0..0x1_0001u64)
+        .map(|k| (format!("{k:#x}"), "unread".into()))
+        .collect();
+    let refused = loaded(serde_json::json!({ "prototypes": prototypes }))
+        .expect_err("65537 prototypes loaded");
+    assert!(refused.contains("65537 prototypes"), "{refused}");
+    let types: serde_json::Map<String, serde_json::Value> = (0..0x1001)
+        .map(|k| (format!("T{k}"), serde_json::json!({"Alias": "U8"})))
+        .collect();
+    let counted_first = serde_json::json!({ "types": types, "applied": {"0x10": "no type"} });
+    let refused = loaded(counted_first).expect_err("4097 types loaded");
+    assert!(refused.contains("states 4097 types"), "{refused}");
+}
+
+/// Loads a project file of these tables, with no names or comments
+/// unless it states them.
+///
+/// # Arguments
+///
+/// * `tables` - The file's tables, as JSON.
+///
+/// # Returns
+///
+/// The overlay.
+///
+/// # Errors
+///
+/// Why the file does not parse or load.
+fn loaded(tables: serde_json::Value) -> Result<Overlay, String> {
+    let mut file = serde_json::json!({"program": "b", "names": {}, "comments": {}});
+    if let (Some(file), serde_json::Value::Object(tables)) = (file.as_object_mut(), tables) {
+        file.extend(tables);
+    }
+    serde_json::from_value::<ProjectFile>(file)
+        .map_err(|e| e.to_string())
+        .and_then(|pf| pf.to_overlay())
+}
+
+/// A project loaded past the request's deadline is refused, saying so,
+/// whether it states types or only the fields of classes.
+#[test]
+fn a_project_loaded_past_its_deadline_is_refused() {
+    let flag = borer_engine::cancel::Cancel::new();
+    flag.raise();
+    for pf in [
+        typed_through_a_chain(0, 0, 2),
+        typed_through_a_chain(2, 1, 0),
+    ] {
+        let cut = flag.within(|| pf.to_overlay());
+        assert!(cut.is_err_and(|e| e.contains("deadline passed")));
+    }
 }

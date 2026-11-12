@@ -116,12 +116,15 @@ pub fn rows(overlay: &Overlay) -> Vec<String> {
 ///
 /// Each field is checked by itself ([`sound`]) and each class's fields
 /// together ([`coherent`], [`apart`]), under the caps a statement is held
-/// to. A project file does not say its binary's pointer width, so typed
-/// fields are held apart at the narrowest one: two that share a byte with
-/// 4-byte pointers share it with any, and an overlap only wider pointers
-/// make is found where the file meets its binary ([`settled`]), with what
-/// only the binary's code can tell: the widths a field is accessed at and
-/// the names the class's code gives its other fields.
+/// to, each named type sized once ([`utypes::Widths`]) and the deadline in
+/// force read once per class ([`crate::cancel::Cancel::whole`]); the
+/// caller counts a project file's tables before it reads them. A project
+/// file does not say its binary's pointer width, so typed fields are held
+/// apart at the narrowest one: two that share a byte with 4-byte pointers
+/// share it with any, and an overlap only wider pointers make is found
+/// where the file meets its binary ([`settled`]), with what only the
+/// binary's code can tell: the widths a field is accessed at and the names
+/// the class's code gives its other fields.
 ///
 /// # Arguments
 ///
@@ -130,8 +133,8 @@ pub fn rows(overlay: &Overlay) -> Vec<String> {
 /// # Errors
 ///
 /// When the overlay states fields of more than [`utypes::TYPES_MAX`]
-/// classes, or a field or a class's fields are refused; the message names
-/// the offender.
+/// classes, a field or a class's fields are refused, or the request's
+/// deadline passed; the message names the offender.
 pub fn validate(overlay: &Overlay) -> Result<(), String> {
     /// The pointer width a project's types are sized by, as its user
     /// types are ([`utypes::validate`]).
@@ -145,12 +148,15 @@ pub fn validate(overlay: &Overlay) -> Result<(), String> {
             utypes::TYPES_MAX
         ));
     }
+    let mut wide = utypes::Widths::new(&overlay.types, WORD);
+    let mut narrow = utypes::Widths::new(&overlay.types, NARROW);
     for (class, fields) in &overlay.fields {
+        crate::cancel::Cancel::whole(())?;
         for (&off, field) in fields {
-            sound(&overlay.types, off, field, WORD)?;
+            sound(&mut wide, off, field)?;
         }
         coherent(overlay, class, fields, &BTreeMap::new())?;
-        apart(&overlay.types, fields, NARROW).map_err(|why| format!("class {class}: {why}"))?;
+        apart(&mut narrow, fields).map_err(|why| format!("class {class}: {why}"))?;
     }
     Ok(())
 }
@@ -668,9 +674,10 @@ pub fn plan_class(
         Mode::Replace => BTreeMap::new(),
     };
     let mut tally = Tally::default();
+    let mut widths = utypes::Widths::new(&o.types, word);
     for (off, field) in by_offset(s.fields)? {
         let recovered = layout.fields.get(&off);
-        check((p, a, o), &o.types, s.name, (off, field), recovered)?;
+        check((p, a, o), &mut widths, s.name, (off, field), recovered)?;
         fields.insert(off, field.clone());
         if before(off) == Some(field) {
             continue;
@@ -715,7 +722,7 @@ pub fn plan_class(
         &labels
     };
     coherent(o, s.name, &fields, others)?;
-    apart(&o.types, &fields, word)?;
+    apart(&mut widths, &fields)?;
     let known: BTreeSet<&u64> = layout
         .fields
         .keys()
@@ -759,12 +766,12 @@ fn fit(
     fields: &BTreeMap<u64, Field>,
     layout: Option<&classes::ClassLayout>,
 ) -> Result<(), String> {
+    let mut widths = utypes::Widths::new(types, if p.is_64 { 8 } else { 4 });
     for (&off, field) in fields {
         let recovered = layout.and_then(|layout| layout.fields.get(&off));
-        check((p, a, o), types, class, (off, field), recovered)?;
+        check((p, a, o), &mut widths, class, (off, field), recovered)?;
     }
-    let word: u64 = if p.is_64 { 8 } else { 4 };
-    apart(types, fields, word).map_err(|why| format!("class {class}: {why}"))
+    apart(&mut widths, fields).map_err(|why| format!("class {class}: {why}"))
 }
 
 /// Checks that the fields stated with a type still stand once the
@@ -1086,10 +1093,10 @@ fn accessed(field: &FieldUse) -> Option<String> {
 ///
 /// # Arguments
 ///
-/// * `types` - The user types a field's type may name.
+/// * `widths` - The user types a field's type may name, sized at the
+///   image's pointer width.
 /// * `off` - The field's byte offset.
 /// * `field` - The field.
-/// * `word` - The image's pointer width in bytes (4 or 8).
 ///
 /// # Returns
 ///
@@ -1100,12 +1107,7 @@ fn accessed(field: &FieldUse) -> Option<String> {
 ///
 /// When the name is not an identifier or reads as an unnamed field, or
 /// the type resolves to no size or ends past every address.
-fn sound(
-    types: &BTreeMap<String, UserType>,
-    off: u64,
-    field: &Field,
-    word: u64,
-) -> Result<Option<u64>, String> {
+fn sound(widths: &mut utypes::Widths<'_>, off: u64, field: &Field) -> Result<Option<u64>, String> {
     if !utypes::is_ident(&field.name) {
         return Err(format!(
             "field name {} is not an identifier",
@@ -1121,7 +1123,8 @@ fn sound(
     let Some(ty) = &field.ty else {
         return Ok(None);
     };
-    utypes::width_of(types, ty, word)
+    widths
+        .of(ty)
         .filter(|size| off.checked_add(*size).is_some())
         .map(Some)
         .ok_or_else(|| {
@@ -1151,8 +1154,9 @@ fn sound(
 /// # Arguments
 ///
 /// * `(p, a, o)` - The loaded image, its analysis and the overlay.
-/// * `types` - The user types the field's type is read by: the overlay's,
-///   or those a type change would leave.
+/// * `widths` - The user types the field's type is read by, the
+///   overlay's or those a type change would leave, sized at the image's
+///   pointer width.
 /// * `class` - The class the field is stated of.
 /// * `(off, field)` - The field and its byte offset.
 /// * `recovered` - The field as the class's methods use it, if they do.
@@ -1164,16 +1168,15 @@ fn sound(
 /// instructions, and the statement without a type that keeps the width.
 fn check(
     (p, a, o): (&Program, &Analysis, &Overlay),
-    types: &BTreeMap<String, UserType>,
+    widths: &mut utypes::Widths<'_>,
     class: &str,
     (off, field): (u64, &Field),
     recovered: Option<&FieldUse>,
 ) -> Result<(), String> {
-    let word: u64 = if p.is_64 { 8 } else { 4 };
-    let (Some(size), Some(ty)) = (sound(types, off, field, word)?, &field.ty) else {
+    let (Some(size), Some(ty)) = (sound(widths, off, field)?, &field.ty) else {
         return Ok(());
     };
-    let whole = aggregate(types, ty);
+    let whole = aggregate(widths.known, ty);
     let Some(wide) = recovered
         .filter(|used| {
             let bits = size.saturating_mul(8);
@@ -1282,17 +1285,8 @@ fn coherent(
     fields: &BTreeMap<u64, Field>,
     labels: &BTreeMap<u64, FieldLabel>,
 ) -> Result<(), String> {
-    let prior = o.fields.get(class);
-    if fields.len() > utypes::FIELDS_MAX || (prior.is_none() && o.fields.len() >= utypes::TYPES_MAX)
-    {
-        return Err(format!(
-            "class {class} would state {} fields, the overlay those of {} classes; {} fields of each of {} classes are the most",
-            fields.len(),
-            o.fields.len() + usize::from(prior.is_none()),
-            utypes::FIELDS_MAX,
-            utypes::TYPES_MAX
-        ));
-    }
+    let classes = o.fields.len() + usize::from(!o.fields.contains_key(class));
+    crowded(class, fields.len(), classes)?;
     let mut names: BTreeMap<&str, u64> = labels
         .iter()
         .filter(|(off, _)| !fields.contains_key(off))
@@ -1312,6 +1306,30 @@ fn coherent(
     Ok(())
 }
 
+/// Refuses a class stating more fields than a struct holds, or an overlay
+/// stating those of more classes than it holds types.
+///
+/// # Arguments
+///
+/// * `class` - The class, escaped to a line.
+/// * `fields` - How many fields the class would state.
+/// * `classes` - How many classes the overlay would state fields of.
+///
+/// # Errors
+///
+/// When the class would state more than [`utypes::FIELDS_MAX`] fields or
+/// the overlay those of more than [`utypes::TYPES_MAX`] classes.
+pub fn crowded(class: &str, fields: usize, classes: usize) -> Result<(), String> {
+    if fields <= utypes::FIELDS_MAX && classes <= utypes::TYPES_MAX {
+        return Ok(());
+    }
+    Err(format!(
+        "class {class} would state {fields} fields, the overlay those of {classes} classes; {} fields of each of {} classes are the most",
+        utypes::FIELDS_MAX,
+        utypes::TYPES_MAX
+    ))
+}
+
 /// Checks that no two typed fields a class would state share a byte.
 ///
 /// A field stated without a type has no size of its own, so it is not
@@ -1320,25 +1338,17 @@ fn coherent(
 ///
 /// # Arguments
 ///
-/// * `types` - The user types a field's type may name.
+/// * `widths` - The user types a field's type may name, sized at the
+///   image's pointer width.
 /// * `fields` - Everything the class would state, by offset.
-/// * `word` - The image's pointer width in bytes (4 or 8).
 ///
 /// # Errors
 ///
 /// When a typed field starts before the typed field ahead of it ends.
-fn apart(
-    types: &BTreeMap<String, UserType>,
-    fields: &BTreeMap<u64, Field>,
-    word: u64,
-) -> Result<(), String> {
+fn apart(widths: &mut utypes::Widths<'_>, fields: &BTreeMap<u64, Field>) -> Result<(), String> {
     let mut end: Option<(u64, &str)> = None;
     for (&off, field) in fields {
-        let Some(size) = field
-            .ty
-            .as_ref()
-            .and_then(|ty| utypes::width_of(types, ty, word))
-        else {
+        let Some(size) = field.ty.as_ref().and_then(|ty| widths.of(ty)) else {
             continue;
         };
         if let Some((until, earlier)) = end.filter(|(until, _)| *until > off) {
