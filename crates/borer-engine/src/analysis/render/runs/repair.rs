@@ -267,7 +267,7 @@ pub fn repair_iso(p: &Program, a: &Analysis, o: &Overlay, entry: u64, budget: Bu
     };
     let base = iso(o);
     let live = base.grade() != Grade::Unchecked;
-    let Some(at) = base.differs.clone().or(refuted) else {
+    let Some(at) = base.differs.clone().map(|(_, c)| c).or(refuted) else {
         return Repair::Agrees;
     };
     let probe = |u: &Overlay| {
@@ -283,7 +283,7 @@ pub fn repair_iso(p: &Program, a: &Analysis, o: &Overlay, entry: u64, budget: Bu
             Checked::default()
         };
         let grade = c.grade();
-        match c.differs.or(refuted) {
+        match c.differs.map(|(_, c)| c).or(refuted) {
             Some(c) => Evidence::Refuted(c),
             None if live && grade == Grade::Unchecked => Evidence::Unchecked,
             None => Evidence::Tested(c.agreed),

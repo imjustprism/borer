@@ -456,13 +456,13 @@ pub(super) fn bisected(
     text_of: &impl Fn(usize) -> String,
 ) -> Bisected {
     let whole = check(Passes::NONE, None);
-    let Some(at) = whole.differs.clone() else {
+    let Some((index, at)) = whole.differs.clone() else {
         return match whole.grade() {
             Grade::Unchecked => Bisected::Unchecked(commonest(whole.unchecked)),
             Grade::Agrees | Grade::Differs => Bisected::Agrees(whole),
         };
     };
-    let held = |skip: Passes| check(skip, whole.differed);
+    let held = |skip: Passes| check(skip, Some(index));
     let (good, before, narrowest) = match first_breaking(&held) {
         Placed::Before(before) => return Bisected::Unbisected(before),
         Placed::Unchecked(ran, probe) => {
@@ -522,7 +522,7 @@ pub(super) enum Placed {
 pub(super) fn first_breaking(check: &impl Fn(Passes) -> Checked) -> Placed {
     let (mut good, mut bad, mut at) = (0, Pass::ALL.len(), None);
     let mut probe = check(Passes::after(0));
-    if let Some(before) = probe.differs.take() {
+    if let Some((_, before)) = probe.differs.take() {
         return Placed::Before(before);
     }
     loop {
@@ -535,7 +535,7 @@ pub(super) fn first_breaking(check: &impl Fn(Passes) -> Checked) -> Placed {
         let mid = good + (bad - good) / 2;
         let mut next = check(Passes::after(mid));
         match next.differs.take() {
-            Some(c) => {
+            Some((_, c)) => {
                 bad = mid;
                 at = Some(c);
             }
@@ -600,10 +600,9 @@ pub(super) fn draw(
 /// What one text did on drawn inputs under the ISO check.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Checked {
-    /// The first input the text differs on, and where; `None` when none.
-    pub differs: Option<Counterexample>,
-    /// That input's index among the drawn ones.
-    pub differed: Option<usize>,
+    /// The first input the text differs on, by its index among the drawn
+    /// ones, and where; `None` when none.
+    pub differs: Option<(usize, Counterexample)>,
     /// Inputs the text agreed on before it differed, or in all.
     pub agreed: usize,
     /// Why inputs were left unchecked before it differed, or in all, each
@@ -670,15 +669,12 @@ pub(super) fn first_difference(
     for (n, input) in drawn.inputs.iter().enumerate() {
         match run_one(p, a, &shared, entry, input, budget).verdict {
             Verdict::Differs(line, why) => {
-                out.differed = Some(n);
-                out.differs = Some(Counterexample {
-                    input: args_shown(input),
-                    line: line
-                        .checked_sub(1)
-                        .and_then(|k| text.lines().nth(k))
-                        .map_or_else(String::new, |l| l.trim().to_owned()),
-                    why,
-                });
+                let line = line
+                    .checked_sub(1)
+                    .and_then(|k| text.lines().nth(k))
+                    .map_or_else(String::new, |l| l.trim().to_owned());
+                let input = args_shown(input);
+                out.differs = Some((n, Counterexample { input, line, why }));
                 return out;
             }
             Verdict::Agrees => out.agreed += 1,

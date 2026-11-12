@@ -295,8 +295,7 @@ mod tests {
     /// * `differs` - Whether it differs on [`at`].
     fn ran(agreed: usize, spun: usize, differs: bool) -> Checked {
         Checked {
-            differs: differs.then(at),
-            differed: differs.then_some(5),
+            differs: differs.then(|| (5, at())),
             agreed,
             unchecked: (spun > 0)
                 .then(|| ("it spins".to_owned(), spun))
