@@ -1,7 +1,7 @@
 //! Reading a program's file: paths that cannot be read, archives and the
 //! members nested in them, and the parse of each object found.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, anyhow};
 
@@ -126,7 +126,7 @@ pub(super) fn parse_object(
 /// same with `/`) is refused whole unless it spells a drive path, and so is
 /// an unparsed `\\?\` path that is not a drive path. Windows folds `..` in a
 /// `\\.\` path with `\\.\` as the root, so `\\.\C:\..\UNC\host\share` is
-/// the share: one holding `..` is refused too.
+/// the share: one with a `..` component is refused too.
 ///
 /// A network share (`\\host\share\x`, `//host/share/x`,
 /// `\\?\UNC\host\share\x`) is refused too: opening one, or only asking
@@ -175,7 +175,7 @@ pub fn unusable_path(path: &Path) -> Option<String> {
             "{spelled} names a network share; borer reads local files only"
         ));
     }
-    if spelled.starts_with("\\\\.\\") && spelled.contains("..") {
+    if spelled.starts_with("\\\\.\\") && path.components().any(|c| c == Component::ParentDir) {
         return Some(format!(
             "{spelled} holds `..` in a device path, which Windows folds past the drive to any device or share"
         ));

@@ -177,10 +177,11 @@ fn an_nt_path_is_never_a_file() {
 ///
 /// The check took both for drive paths, and a PE whose debug record names
 /// the first had every load of it ask the host whether the PDB was there.
+/// Only a `..` component climbs: a name holding two dots is a name.
 ///
 /// # Panics
 ///
-/// When such a path is let through.
+/// When such a path is let through, or a name with two dots refused.
 #[test]
 fn a_device_path_climbing_out_of_its_drive_is_refused() {
     if cfg!(windows) {
@@ -188,11 +189,14 @@ fn a_device_path_climbing_out_of_its_drive_is_refused() {
             r"\\.\C:\..\UNC\host.invalid\s\x",
             "//./C:/x/../../UNC/host.invalid/s",
             r"\\.\C:\..\pipe\x",
+            r"\\.\C:\..\x",
         ]
         .into_iter()
         .filter(|p| unusable_path(std::path::Path::new(p)).is_none())
         .collect();
         assert!(let_through.is_empty(), "{let_through:?}");
+        let named = unusable_path(std::path::Path::new(r"\\.\C:\d\a..b.exe"));
+        assert_eq!(named, None, "a name with two dots");
     }
 }
 
