@@ -661,6 +661,34 @@ pub(super) fn path_arg<'a>(
     Ok(path)
 }
 
+/// Returns a positional argument that names a file a command reads,
+/// refusing what [`path_arg`] refuses and a share or a device
+/// ([`borer_engine::program::unusable_path`]).
+///
+/// Each command read such a path, or asked whether it existed, before
+/// anything refused it, and reading a share authenticates to its host as
+/// the user.
+///
+/// # Arguments
+///
+/// As [`path_arg`].
+///
+/// # Errors
+///
+/// With `missing` and the reason, when [`path_arg`] refuses the argument
+/// or it is a path no command reads.
+pub(super) fn read_path_arg<'a>(
+    args: &'a [String],
+    i: usize,
+    missing: &'static str,
+) -> anyhow::Result<&'a str> {
+    let path = path_arg(args, i, missing)?;
+    if let Some(why) = borer_engine::program::unusable_path(std::path::Path::new(path)) {
+        bail!("{missing}; {why}");
+    }
+    Ok(path)
+}
+
 /// What `export` was asked to write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ExportArgs<'a> {

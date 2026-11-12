@@ -57,7 +57,8 @@ pub(super) fn writable(path: &str) -> anyhow::Result<()> {
 ///
 /// # Errors
 ///
-/// When an argument is missing, a library cannot be read, is neither an
+/// When an argument is missing, a library's path is a share or a device
+/// (refused before it is opened), a library cannot be read, is neither an
 /// archive, an object nor an IDA `.pat` file, or gives no function while
 /// members of it are damaged (each is named on stderr), or the pack cannot
 /// be written.
@@ -74,6 +75,9 @@ pub(super) fn sigmake(args: &[String]) -> anyhow::Result<()> {
     let mut functions = Vec::new();
     let mut files = Vec::new();
     for library in libraries {
+        if let Some(why) = borer_engine::program::unusable_path(std::path::Path::new(library)) {
+            bail!("{why}; give a library or an object");
+        }
         let bytes =
             std::fs::read(library).with_context(|| format!("reading {}", short_path(library)))?;
         let (found, damaged) = libsig::read(&bytes).with_context(|| short_path(library))?;

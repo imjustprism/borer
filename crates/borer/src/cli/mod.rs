@@ -57,8 +57,8 @@ mod wire;
 
 use args::{
     COMMAND_FLAGS, Command, Direction, Query, RawFlags, SlotQuery, USAGE, arg, cli_limit, cli_page,
-    command_usage, entry_at, filter_limit, num_arg, path_arg, search_args, split_pack_args,
-    unknown_word,
+    command_usage, entry_at, filter_limit, num_arg, path_arg, read_path_arg, search_args,
+    split_pack_args, unknown_word,
 };
 use packs::{pack_report, packs_report, sigmake, writable, write_file};
 use session::{Session, decompiled, needs_a_binary, open, project_overlay};
@@ -179,7 +179,7 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
             crate::safety::manifest(&crate::BorerServer::tool_router().list_all())?
         ),
         Command::Pack => {
-            let file = arg(args, 1, "pack needs a file")?;
+            let file = read_path_arg(args, 1, "pack needs a file")?;
             let text = std::fs::read_to_string(file)
                 .with_context(|| format!("reading {}", short_path(file)))?;
             let (pack, warnings) =
@@ -569,7 +569,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
         }
         Query::Changes => {
             let a = s.analysis(Feature::Decompile)?;
-            let path = path_arg(args, 2, "changes needs a snapshot file")?;
+            let path = read_path_arg(args, 2, "changes needs a snapshot file")?;
             let text = std::fs::read_to_string(path)
                 .with_context(|| format!("reading {}", short_path(path)))?;
             let before = snapshot::read(&text).map_err(anyhow::Error::msg)?;
@@ -599,7 +599,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
         }
         Query::Anchors => {
             let a = s.analysis(Feature::Decompile)?;
-            let manifest = path_arg(args, 2, "anchors needs a manifest file")?;
+            let manifest = read_path_arg(args, 2, "anchors needs a manifest file")?;
             let text = std::fs::read_to_string(manifest)
                 .with_context(|| format!("reading {}", short_path(manifest)))?;
             let pinned = anchors::parse_manifest(&text).map_err(anyhow::Error::msg)?;
@@ -857,7 +857,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             print!("{}", sigs::export_pack(&s.program, &a, &overlay, name, all));
         }
         Query::Script => {
-            let file = path_arg(args, 2, "script needs a script file")?;
+            let file = read_path_arg(args, 2, "script needs a script file")?;
             let code = std::fs::read_to_string(file)
                 .with_context(|| format!("reading {}", short_path(file)))?;
             let mut words = Vec::new();
@@ -1026,7 +1026,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
 /// When the project does not load or save, or what is asked is refused
 /// ([`defined`], [`applied`]).
 fn set_type(args: &[String], s: &Session) -> anyhow::Result<()> {
-    let project = path_arg(args, 2, "set-type needs a project file")?;
+    let project = read_path_arg(args, 2, "set-type needs a project file")?;
     let (program, sha256, mut overlay) = if std::path::Path::new(project).exists() {
         let pf = borer::project::ProjectFile::load(project).map_err(anyhow::Error::msg)?;
         let overlay = pf.to_overlay().map_err(anyhow::Error::msg)?;

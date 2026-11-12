@@ -11,7 +11,7 @@ use borer_engine::analysis::render;
 use borer_engine::program::Feature;
 use borer_engine::text::{quoted, short_path};
 
-use super::args::arg;
+use super::args::{arg, read_path_arg};
 use super::packs::write_file;
 use super::session::{Session, open};
 
@@ -255,10 +255,11 @@ pub(super) fn run(cmd: Extra, args: &[String], s: &Session) -> anyhow::Result<()
 ///
 /// # Errors
 ///
-/// When the other build is missing or cannot be loaded.
+/// When the other build is missing, its path is a share or a device, or it
+/// cannot be loaded.
 fn diff(args: &[String], s: &Session) -> anyhow::Result<()> {
     let a = s.analysis(Feature::Discover)?;
-    let other = arg(args, 2, "diff needs another build or a fingerprint sidecar")?;
+    let other = read_path_arg(args, 2, "diff needs another build or a fingerprint sidecar")?;
     let path = std::path::Path::new(other);
     let label = |p: &std::path::Path| {
         p.file_name().map_or_else(
