@@ -116,7 +116,28 @@ pub(super) fn assumption(branch: &Branch, succ: u64) -> Option<Fact> {
     }
 }
 
-/// Computes the assumption each block may use while it executes.
+/// Computes the assumption each block may use while it executes
+/// ([`block_assumption`]).
+///
+/// # Arguments
+///
+/// * `ctx` - Per-function state: the entry block and the blocks the
+///   exception runtime enters.
+/// * `code` - Decoded instructions per block (the first gives the start address).
+/// * `preds` - Predecessor block indices per block.
+/// * `recorded` - The previous dataflow round's block records (their branches).
+pub(super) fn block_assumptions<L: Lifter>(
+    ctx: &Ctx<'_>,
+    code: &[Vec<L::Insn>],
+    preds: &[Vec<usize>],
+    recorded: &[SlotRec],
+) -> Vec<Option<Fact>> {
+    (0..code.len())
+        .map(|b| block_assumption::<L>(ctx, code, preds, recorded, b))
+        .collect()
+}
+
+/// Computes the assumption one block may use while it executes.
 ///
 /// A block entered from exactly one predecessor through an equality branch
 /// knows the compared variable's value ([`assumption`]). The entry block is
@@ -136,25 +157,55 @@ pub(super) fn assumption(branch: &Branch, succ: u64) -> Option<Fact> {
 ///   exception runtime enters.
 /// * `code` - Decoded instructions per block (the first gives the start address).
 /// * `preds` - Predecessor block indices per block.
-/// * `recorded` - The previous dataflow round's block records (their branches).
-pub(super) fn block_assumptions<L: Lifter>(
+/// * `recorded` - Block records of a dataflow round (their branches).
+/// * `b` - The block.
+fn block_assumption<L: Lifter>(
     ctx: &Ctx<'_>,
     code: &[Vec<L::Insn>],
     preds: &[Vec<usize>],
     recorded: &[SlotRec],
-) -> Vec<Option<Fact>> {
-    (0..code.len())
-        .map(|b| {
-            let [p] = preds[b].as_slice() else {
-                return None;
-            };
-            if b == ctx.entry_block || ctx.eh_roots.iter().any(|r| r.0 == b) {
-                return None;
-            }
-            let start = L::start(code[b].first()?);
-            assumption(recorded[*p].branch.as_ref()?, start)
-        })
-        .collect()
+    b: usize,
+) -> Option<Fact> {
+    let [p] = preds[b].as_slice() else {
+        return None;
+    };
+    if b == ctx.entry_block || ctx.eh_roots.iter().any(|r| r.0 == b) {
+        return None;
+    }
+    let start = L::start(code[b].first()?);
+    assumption(recorded[*p].branch.as_ref()?, start)
+}
+
+/// The fact a block holds in a round of the dataflow: the one the round
+/// before found on its edge, where the branch as this round lifts it gives
+/// it too.
+///
+/// A fact names a variable as the round that found it read it. After `mov
+/// rdi, rbx` on both sides of a join that also leave `rbx` 5 or a variable
+/// known to be 5, the first round compares the join's variable `rbx` with
+/// 5; the second carries the constant, assigns no `rbx`, and `rdi` still
+/// reads the `rbx` the function was entered with. The name then stands for
+/// another value, and the branch, a compare of two constants, says nothing
+/// of it.
+///
+/// # Arguments
+///
+/// * `ctx` - Per-function state.
+/// * `code` - Decoded instructions per block.
+/// * `preds` - Predecessor block indices per block.
+/// * `recorded` - This round's block records so far.
+/// * `edges` - The facts the round before found, per block.
+/// * `b` - The block.
+fn held_fact<L: Lifter>(
+    ctx: &Ctx<'_>,
+    code: &[Vec<L::Insn>],
+    preds: &[Vec<usize>],
+    recorded: &[SlotRec],
+    edges: &[Option<Fact>],
+    b: usize,
+) -> Option<Fact> {
+    let was = edges.get(b).copied().flatten()?;
+    (block_assumption::<L>(ctx, code, preds, recorded, b) == Some(was)).then_some(was)
 }
 
 /// Widens each block's slot uses and definitions from offsets to the bytes
@@ -750,9 +801,10 @@ thread_local! {
 /// # Returns
 ///
 /// `(IN environments, processed flags, slot records, equality facts)` per
-/// block. A block's fact is its edge's, and none where its predecessor
-/// assigns the compared variable at its end: the branch read the value the
-/// variable held before, and says nothing of the one it holds in the block.
+/// block. A block's fact is its edge's where this round's branch gives it
+/// too ([`held_fact`]), and none where its predecessor assigns the compared
+/// variable at its end: the branch read the value the variable held before,
+/// and says nothing of the one it holds in the block.
 pub(super) fn dataflow<L: Lifter>(
     ctx: &mut Ctx<'_>,
     code: &[Vec<L::Insn>],
@@ -835,7 +887,7 @@ pub(super) fn dataflow<L: Lifter>(
                     }
                 }
                 met[b] = Some(clock);
-                let mut held = edges.get(b).copied().flatten();
+                let mut held = held_fact::<L>(ctx, code, preds, &recorded, edges, b);
                 for &p in &preds[b] {
                     if !processed[p] {
                         continue;

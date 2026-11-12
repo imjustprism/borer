@@ -1703,3 +1703,36 @@ fn a_loope_and_a_loopne_are_not_one_test() {
     assert!(text.contains("/* asm: loopne "), "{text}");
     assert!(text.contains("if (a2 != 0) {"), "{text}");
 }
+
+/// A fact is read only in the round whose branch gives it.
+///
+/// Both ways into `P: cmp rbx,5; jne U; mov rax,rdi; ret` copy the `rbx`
+/// the function was entered with into `rdi` and leave `rbx` 5: one writes
+/// the constant, the other `rcx`, which its branch found to be 5. The
+/// first round of the dataflow met a join's variable `rbx` at `P` and read
+/// the test as `rbx == 5`. The second carried 5 from both sides, assigned
+/// no `rbx`, and the fact, read on the old name, turned the entry's `rbx`
+/// that `rdi` holds into 5 as well: both paths printed `return 5`.
+#[test]
+fn a_fact_is_read_only_in_the_round_whose_branch_gives_it() {
+    let code = [
+        0x48, 0x83, 0xf9, 0x05, // ASM: cmp rcx,5
+        0x74, 0x0a, // ASM: je 0x140001010
+        0x48, 0x89, 0xdf, // ASM: mov rdi,rbx
+        0xbb, 0x05, 0x00, 0x00, 0x00, // ASM: mov ebx,5
+        0xeb, 0x06, // ASM: jmp 0x140001016
+        0x48, 0x89, 0xdf, // ASM: mov rdi,rbx
+        0x48, 0x89, 0xcb, // ASM: mov rbx,rcx
+        0x48, 0x83, 0xfb, 0x05, // ASM: cmp rbx,5
+        0x75, 0x04, // ASM: jne 0x140001020
+        0x48, 0x89, 0xf8, // ASM: mov rax,rdi
+        0xc3, // ASM: ret
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xc3, // ASM: ret
+    ];
+    let p = program64(&code);
+    let text = decompiled(&p, 0x1_4000_1000);
+    assert_eq!(text.matches("return rbx;").count(), 2, "{text}");
+    assert!(!text.contains("return 5;"), "{text}");
+    replays_clean(&p, &Analysis::compute(&p), &[0x1_4000_1000]);
+}
