@@ -118,7 +118,11 @@ pub(super) fn parse_object(
 ///
 /// Windows resolves a handful of names to character devices in every
 /// directory and under any extension, so `con`, `C:/tmp/con` and `con.exe`
-/// are all the console, and `CONIN$`/`CONOUT$` its two halves. Reading one
+/// are all the console, and `CONIN$`/`CONOUT$` its two halves. A name is
+/// read as Windows reads it: cut at its first `.` or `:`, trailing spaces
+/// and dots dropped, in any case, and a superscript one, two or three is a
+/// port number too, so `con `, `con:` and `COM` with a superscript one are
+/// devices as well. Reading one
 /// is not reading a file: `con` blocks on console input, and inside the MCP
 /// server - whose stdin carries the protocol - that took the session's own
 /// stream and ended it silently, with no reply to the call that asked. A
@@ -194,16 +198,24 @@ pub fn unusable_path(path: &Path) -> Option<String> {
     const DEVICES: [&str; 9] = [
         "con", "prn", "aux", "nul", "com", "lpt", "conin$", "conout$", "clock$",
     ];
-    let stem = path.file_stem()?.to_str()?;
-    let lower = stem.to_lowercase();
+    let name = path.file_name()?.to_str()?;
+    let base = name
+        .split(['.', ':'])
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches([' ', '.'])
+        .to_ascii_lowercase();
+    let port = |digit: &str| {
+        let mut chars = digit.chars();
+        matches!(
+            (chars.next(), chars.next()),
+            (Some('1'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}'), None)
+        )
+    };
     let named = DEVICES.iter().any(|d| {
-        lower == *d
-            || (matches!(*d, "com" | "lpt")
-                && lower.len() == 4
-                && lower.starts_with(d)
-                && lower.ends_with(|c: char| c.is_ascii_digit() && c != '0'))
+        base == *d || (matches!(*d, "com" | "lpt") && base.strip_prefix(d).is_some_and(port))
     });
-    named.then(|| format!("{stem} is a device, not a file"))
+    named.then(|| format!("{name} is a device, not a file"))
 }
 
 /// Reads a program file whole, refusing what is not a regular file.

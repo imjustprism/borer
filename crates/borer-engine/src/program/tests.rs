@@ -206,6 +206,37 @@ fn a_device_path_climbing_out_of_its_drive_is_refused() {
     }
 }
 
+/// A device name is refused however Windows spells it: Windows 11 reads a
+/// trailing space or dot, a `:` and a superscript port digit as the device
+/// (probed with `RtlIsDosDeviceName_U`), and the stem the check compared
+/// kept each of them.
+///
+/// # Panics
+///
+/// When one is let through, or a file named like one refused.
+#[test]
+fn a_device_name_is_refused_however_windows_spells_it() {
+    if cfg!(windows) {
+        let let_through: Vec<&str> = [
+            "con ",
+            "con  .",
+            "con:",
+            "conin$:",
+            "aux:",
+            "COM1:",
+            "COM\u{b9}",
+            "lpt\u{b3}",
+        ]
+        .into_iter()
+        .filter(|p| unusable_path(std::path::Path::new(p)).is_none())
+        .collect();
+        assert!(let_through.is_empty(), "{let_through:?}");
+    }
+    for file in ["com\u{b9}0", "comet.exe", "nul_x.bin"] {
+        assert_eq!(unusable_path(std::path::Path::new(file)), None, "{file}");
+    }
+}
+
 /// A PE whose `CodeView` record climbs through `//?/` loads without that
 /// path being tried.
 ///
