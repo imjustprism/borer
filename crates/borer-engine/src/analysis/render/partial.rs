@@ -1438,7 +1438,8 @@ fn move_source(env: &Env<'_>, i: &Instruction, facts: &Facts) -> Option<Know> {
     None
 }
 
-/// What a `lea` computes, when that is a static address or a known base.
+/// What a `lea` computes, when that is a static address or a known base:
+/// the address ([`mem_addr`]) as far as its destination keeps it.
 ///
 /// # Arguments
 ///
@@ -1450,16 +1451,7 @@ fn move_source(env: &Env<'_>, i: &Instruction, facts: &Facts) -> Option<Know> {
 ///
 /// The address, or `None` when an index or an unknown base takes part.
 fn lea_source(env: &Env<'_>, i: &Instruction, facts: &Facts) -> Option<Know> {
-    if i.memory_index() != Register::None {
-        return None;
-    }
-    let disp = disasm::displacement(i, env.bitness);
-    if i.is_ip_rel_memory_operand() {
-        return Some(Know::Val(i.ip_rel_memory_address()));
-    }
-    let base = canonical(i.memory_base(), env.bitness);
-    let b = facts.concrete(base)?;
-    Some(Know::Val(b.wrapping_add(disp.cast_unsigned())))
+    Some(Know::Val(masked(i, env.bitness, mem_addr(env, i, facts)?)))
 }
 
 /// The integer a memory operand names, when its address is known.
@@ -1482,7 +1474,8 @@ fn mem_concrete(env: &Env<'_>, i: &Instruction, facts: &Facts) -> Option<u64> {
     facts.load_static(env.p, addr, size)
 }
 
-/// The address of a memory operand with no index.
+/// The address of a memory operand with no index, cut to the bits it is
+/// addressed with ([`disasm::address_bits`]).
 ///
 /// # Arguments
 ///
@@ -1502,7 +1495,8 @@ fn mem_addr(env: &Env<'_>, i: &Instruction, facts: &Facts) -> Option<u64> {
         return Some(i.ip_rel_memory_address());
     }
     let base = facts.concrete(canonical(i.memory_base(), env.bitness))?;
-    Some(base.wrapping_add(disp.cast_unsigned()))
+    let kept = u32::from(disasm::address_bits(i, env.bitness));
+    Some(base.wrapping_add(disp.cast_unsigned()) & (u64::MAX >> (64 - kept)))
 }
 
 /// Records a store, so a later load of that static or slot still sees it.
@@ -1762,4 +1756,46 @@ fn imm_op(i: &Instruction) -> Option<u64> {
 /// The name.
 fn reg_name(reg: Register) -> String {
     format!("{reg:?}").to_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Env, Facts, apply, canonical};
+    use crate::analysis::Analysis;
+    use crate::isa::x86::{Decoder, DecoderOptions, Register};
+    use crate::program::{Arch, Program};
+    use std::collections::BTreeMap;
+
+    /// A `lea` folds to an address no wider than the machine sums it.
+    ///
+    /// 32-bit `xor ecx,ecx; lea eax,[ecx-4]` leaves `eax` 0xfffffffc,
+    /// where the sum at 64 bits read 0xfffffffffffffffc.
+    ///
+    /// # Panics
+    ///
+    /// When the folded value is wider.
+    #[test]
+    fn a_lea_folds_no_wider_than_it_is_addressed() {
+        let code = [
+            0x31, 0xc9, // ASM: xor ecx, ecx
+            0x8d, 0x41, 0xfc, // ASM: lea eax, [ecx-4]
+        ];
+        let mut p = Program::raw_x64(&code);
+        p.arch = Arch::X86;
+        p.is_64 = false;
+        let a = Analysis::compute(&p);
+        let env = Env {
+            p: &p,
+            a: &a,
+            bitness: 32,
+            volatile: &[],
+            counters: &[],
+        };
+        let mut facts = Facts::new();
+        for i in Decoder::with_ip(32, &code, 0x1000, DecoderOptions::NONE) {
+            apply(&env, &i, &mut facts, &mut BTreeMap::new(), false);
+        }
+        let eax = facts.concrete(canonical(Register::EAX, 32));
+        assert_eq!(eax, Some(0xffff_fffc));
+    }
 }
