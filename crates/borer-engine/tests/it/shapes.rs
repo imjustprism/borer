@@ -332,7 +332,8 @@ fn an_arm_loop_at_the_entry_is_entered_with_any_argument() {
 /// `mov x9,x0; mov x0,#0; L: ldr x10,[x1],#8; add x0,x0,x10; subs x9,x9,#1;
 /// b.ne L; add w11,w9,#8; str w11,[x2]; ret` and its A32 twin leave the
 /// loop when the counter was 1 where `subs` read it, and `subs` leaves it
-/// zero: the store after the loop is the counter plus 8, which read 9.
+/// zero: the store after the loop is the counter the loop counted down
+/// plus 8, which read 9, and is not the copy of it the loop's test reads.
 #[test]
 fn a_register_read_after_an_arm_loop_holds_what_the_loop_left() {
     let a64: [u32; 9] = [
@@ -357,11 +358,17 @@ fn a_register_read_after_an_arm_loop_holds_what_the_loop_left() {
         0xe582_c000, // ASM: str ip, [r2]
         0xe12f_ff1e, // ASM: bx lr
     ];
-    for (arch, words) in [(Arch::Arm64, a64), (Arch::Arm, a32)] {
+    let cases = [
+        (Arch::Arm64, a64, "var3", "var4"),
+        (Arch::Arm, a32, "r3", "var1"),
+    ];
+    for (arch, words, counter, read) in cases {
         let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
         let text = decompiled(&crate::raw::image(arch, &code, &[]), 0x40_1000);
-        assert!(text.contains(" + 8;\n"), "{text}");
-        assert!(!text.contains(" = 9;\n"), "{text}");
+        let store = format!(
+            "  {counter} -= 1;\n}} while ({read} != 1);\n*(uint32_t*)a3 = {counter} + 8;\n"
+        );
+        assert!(text.contains(&store), "{text}");
     }
 }
 
