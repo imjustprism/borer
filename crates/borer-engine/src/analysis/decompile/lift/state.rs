@@ -249,11 +249,13 @@ impl<'a> Exec<'_, 'a> {
 
     /// Builds the address expression of the instruction's memory operand.
     ///
-    /// iced pre-computes rip-relative displacements into absolute targets, so
-    /// a missing or `rip` base yields a constant. `fs`/`gs` segment prefixes
-    /// add the segment register as a variable. A 16-bit address
-    /// ([`crate::disasm::addresses_16_bit`]) reads the 16-bit registers, takes
-    /// its displacement as the signed word it is, and wraps at 64 KiB.
+    /// iced pre-computes rip-relative displacements into absolute targets,
+    /// so a missing or `rip` base yields a constant. `fs`/`gs`
+    /// segment prefixes add the segment register as a variable. A 16-bit
+    /// address ([`crate::disasm::addresses_16_bit`]) reads the 16-bit
+    /// registers and takes its displacement as the signed word it is. The
+    /// sum wraps at the bits the operand is addressed with
+    /// ([`crate::disasm::address_bits`]).
     ///
     /// # Arguments
     ///
@@ -321,12 +323,9 @@ impl<'a> Exec<'_, 'a> {
             );
             e = fold(Op::Add, e, scaled, 64);
         }
-        if sixteen {
-            e = fold(Op::And, e, Expr::Const(0xffff), 64);
-        } else if crate::disasm::wraps_at_32(instr, self.bitness()) {
-            e = fold(Op::And, e, Expr::Const(0xffff_ffff), 64);
-        } else if let (32, Expr::Const(c)) = (self.bitness(), &e) {
-            e = Expr::Const(c & 0xffff_ffff);
+        let kept = crate::disasm::address_bits(instr, self.bitness());
+        if kept < 64 && (kept == 16 || self.bitness() == 64 || matches!(e, Expr::Const(_))) {
+            e = fold(Op::And, e, Expr::Const(mask_bits(kept)), 64);
         }
         let seg = instr.segment_prefix();
         if matches!(seg, Register::FS | Register::GS) {
