@@ -1325,7 +1325,7 @@ fn coherent(
 ///
 /// When the class would state more than [`utypes::FIELDS_MAX`] fields or
 /// the overlay those of more than [`utypes::TYPES_MAX`] classes.
-pub fn crowded(class: &str, fields: usize, classes: usize) -> Result<(), String> {
+pub(crate) fn crowded(class: &str, fields: usize, classes: usize) -> Result<(), String> {
     if fields <= utypes::FIELDS_MAX && classes <= utypes::TYPES_MAX {
         return Ok(());
     }

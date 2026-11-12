@@ -1160,7 +1160,7 @@ pub fn named_enum<'t>(
 /// # Errors
 ///
 /// When a count passes its cap; the message names the type.
-pub fn counted(types: &BTreeMap<String, UserType>, applied: usize) -> anyhow::Result<()> {
+pub(crate) fn counted(types: &BTreeMap<String, UserType>, applied: usize) -> anyhow::Result<()> {
     if types.len() > TYPES_MAX {
         return Err(anyhow::anyhow!(
             "the project states {} types; {TYPES_MAX} is the most",

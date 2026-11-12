@@ -1030,7 +1030,7 @@ fn set_type(args: &[String], s: &Session) -> anyhow::Result<()> {
     let (program, sha256, mut overlay) = if std::path::Path::new(project).exists() {
         let pf = borer::project::ProjectFile::load(project).map_err(anyhow::Error::msg)?;
         let overlay = pf.to_overlay().map_err(anyhow::Error::msg)?;
-        (pf.program, pf.sha256, overlay)
+        (pf.0.program, pf.0.sha256, overlay)
     } else {
         (
             s.program.path.display().to_string(),

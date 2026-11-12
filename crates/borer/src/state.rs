@@ -792,7 +792,7 @@ impl BorerServer {
         if let Some(project) = project {
             let overlay = project.to_overlay();
             let reloaded = self.load_binary(Parameters(LoadBinaryParams {
-                path: project.program,
+                path: project.0.program,
                 entry_file_offset,
                 pdb,
                 arch: raw.arch,

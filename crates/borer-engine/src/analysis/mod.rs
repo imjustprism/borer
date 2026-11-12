@@ -33,6 +33,7 @@ mod naming;
 pub mod objc;
 pub mod opcodes;
 pub mod ports;
+pub mod project;
 pub mod protocol;
 pub mod protos;
 pub mod prototypes;
