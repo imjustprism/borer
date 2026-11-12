@@ -685,7 +685,7 @@ impl Exec<'_, '_> {
                 self.write_op0(instr, v);
             }
             Mnemonic::Lea if instr.op_count() == 2 && instr.op0_kind() == OpKind::Register => {
-                let a = self.addr(instr, 1);
+                let a = self.lea(instr);
                 let v = match a {
                     Expr::Const(t) if !self.ctx.overlay.names.contains_key(&t) => {
                         literal_at(self.ctx.program, t, &self.ctx.own_name).map_or(a, Expr::Str)

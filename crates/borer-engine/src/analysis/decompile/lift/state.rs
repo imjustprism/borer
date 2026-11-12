@@ -112,6 +112,22 @@ impl<'a> Exec<'_, 'a> {
     ///
     /// * `r` - The register as written in the instruction.
     pub(super) fn reg_read(&self, r: Register) -> Expr {
+        self.reg_low(r, WHOLE)
+    }
+
+    /// Reads a register as [`Exec::reg_read`] does, for a reader that keeps
+    /// only the low bits of what it computes from it.
+    ///
+    /// The block's equality assumption reaches such a read as far as the
+    /// reader keeps the value ([`Exec::assumed`]): under `ecx == 5`, the
+    /// `rcx` in `lea eax, [rcx+8]` is 5, since the sum's low half is all
+    /// the `lea` keeps.
+    ///
+    /// # Arguments
+    ///
+    /// * `r` - The register as written in the instruction.
+    /// * `bits` - How many low bits of the value the reader keeps.
+    pub(super) fn reg_low(&self, r: Register, bits: u8) -> Expr {
         if r == self.rsp() {
             return match self.env.sp {
                 Some(k) => Expr::Sp(k),
@@ -130,7 +146,7 @@ impl<'a> Exec<'_, 'a> {
             8 if narrow == 32 && self.ctx.bitness == 64 => 32,
             n => u8::try_from(8 * n).unwrap_or(WHOLE),
         };
-        let full = self.assumed(self.env.get(key), read);
+        let full = self.assumed(self.env.get(key), read.min(bits));
         match r.size() {
             1 if is_high_byte(r) => mask(fold(Op::Shr, full, Expr::Const(8), 64), 0xff),
             1 if narrow <= 8 => full,
@@ -245,6 +261,30 @@ impl<'a> Exec<'_, 'a> {
     /// * `op` - Operand index (iced exposes one memory operand per instruction).
     pub(super) fn addr(&self, instr: &Instruction, op: u32) -> Expr {
         let _ = op;
+        self.addr_low(instr, WHOLE)
+    }
+
+    /// Builds the address a `lea` computes, read as far as its destination
+    /// keeps it ([`Exec::addr_low`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `instr` - The `lea`, its destination a register.
+    pub(super) fn lea(&self, instr: &Instruction) -> Expr {
+        let kept = u8::try_from(8 * instr.op0_register().size()).unwrap_or(WHOLE);
+        self.addr_low(instr, kept)
+    }
+
+    /// Builds the address [`Exec::addr`] builds, for a reader that keeps
+    /// only its low bits: a `lea` into a 32-bit register keeps the low half
+    /// of the sum, which the low halves of its registers decide
+    /// ([`Exec::reg_low`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `instr` - The instruction.
+    /// * `bits` - How many low bits of the address the reader keeps.
+    fn addr_low(&self, instr: &Instruction, bits: u8) -> Expr {
         let sixteen = crate::disasm::addresses_16_bit(instr);
         let disp = if sixteen {
             i64::from(crate::num::lo16(instr.memory_displacement64()).cast_signed()).cast_unsigned()
@@ -255,13 +295,13 @@ impl<'a> Exec<'_, 'a> {
         let mut e = if base == Register::None || base == Register::RIP {
             Expr::Const(disp)
         } else {
-            fold(Op::Add, self.reg_read(base), Expr::Const(disp), 64)
+            fold(Op::Add, self.reg_low(base, bits), Expr::Const(disp), 64)
         };
         let index = instr.memory_index();
         if index != Register::None {
             let scaled = fold(
                 Op::Mul,
-                self.reg_read(index),
+                self.reg_low(index, bits),
                 Expr::Const(u64::from(instr.memory_index_scale())),
                 64,
             );
