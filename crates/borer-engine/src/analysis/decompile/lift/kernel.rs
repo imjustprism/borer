@@ -16,7 +16,8 @@ impl Exec<'_, '_> {
     /// syscall` is `rax = write(rdi, rsi, rdx);`. A number no table names,
     /// or one the block does not set, is the C library's `syscall(nr,
     /// ...)` with the registers set since the last call. The result is in
-    /// `rax`. The kernel leaves the argument registers as they were, so
+    /// `rax`, so an equality the block starts under of `rax` ends here
+    /// ([`Exec::clobber`]). The kernel leaves the argument registers as they were, so
     /// they are the call's preserved registers ([`Exec::preserved`]); any
     /// other volatile value is forgotten, as after any call.
     ///
@@ -83,6 +84,7 @@ impl Exec<'_, '_> {
         self.preserved = regs.iter().map(|r| self.canon(*r)).collect();
         self.before_call(Some(0), false, 0, &values, &[]);
         self.enter_call(false, &[]);
+        self.clobber(raxk);
         self.declare(raxk, self.word_ty());
         let callee = name.unwrap_or("syscall");
         let shown = n.key(raxk);

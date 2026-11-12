@@ -1582,3 +1582,59 @@ return 7;
         "{text}"
     );
 }
+
+/// A call into the kernel ends the equality its block starts under of the
+/// register its result comes back in.
+///
+/// `call f; test eax,eax; jne X; mov eax,20; int 0x80; mov [ebx],eax`
+/// enters the block of the kernel call under `eax == 0`, and the kernel
+/// hands its result back in `eax`: the store writes that result, where the
+/// text stored the 0 of the equality. `syscall` under `rax == 0`, after
+/// `mov rax,20`, ends its block, so its result was read as itself before.
+#[test]
+fn a_kernel_call_ends_the_equality_of_its_result() {
+    let mut int80 = vec![
+        0xe8, 0x1b, 0x00, 0x00, 0x00, // ASM: call 0x401020
+        0x85, 0xc0, // ASM: test eax,eax
+        0x75, 0x0b, // ASM: jne 0x401014
+        0xb8, 0x14, 0x00, 0x00, 0x00, // ASM: mov eax,20
+        0xcd, 0x80, // ASM: int 0x80
+        0x89, 0x03, // ASM: mov [ebx],eax
+        0xc3, // ASM: ret
+        0x90, // ASM: nop
+        0xc3, // ASM: ret
+    ];
+    int80.resize(0x20, 0xcc);
+    int80.extend([
+        0x8b, 0x44, 0x24, 0x04, // ASM: mov eax,[esp+4]
+        0xc3, // ASM: ret
+    ]);
+    let mut syscall = vec![
+        0xe8, 0x1b, 0x00, 0x00, 0x00, // ASM: call 0x140001020
+        0x48, 0x85, 0xc0, // ASM: test rax,rax
+        0x75, 0x0d, // ASM: jne 0x140001017
+        0x48, 0xc7, 0xc0, 0x14, 0x00, 0x00, 0x00, // ASM: mov rax,20
+        0x0f, 0x05, // ASM: syscall
+        0x89, 0x03, // ASM: mov [rbx],eax
+        0xc3, // ASM: ret
+        0x90, // ASM: nop
+        0xc3, // ASM: ret
+    ];
+    syscall.resize(0x20, 0xcc);
+    syscall.extend([
+        0x48, 0x8b, 0x01, // ASM: mov rax,[rcx]
+        0xc3, // ASM: ret
+    ]);
+    let cases = [
+        (decompiled(&program32(&int80), 0x40_1000), "ebx"),
+        (decompiled(&program64(&syscall), 0x1_4000_1000), "rbx"),
+    ];
+    for (text, base) in cases {
+        let result = text
+            .lines()
+            .find_map(|l| l.strip_suffix(" = syscall(20);"))
+            .unwrap_or_else(|| panic!("{text}"));
+        let store = format!("\n*(uint32_t*){base} = {};\n", result.trim());
+        assert!(text.contains(&store), "{text}");
+    }
+}
