@@ -90,7 +90,9 @@ pub(super) fn file_name(file: &std::path::Path) -> String {
 }
 
 /// The first bytes of a file, for the loading line to stream; none when it
-/// cannot be read.
+/// cannot be read, or is not a regular file
+/// ([`borer_engine::program::open_regular`]), so a pipe or a device is
+/// never opened for it.
 ///
 /// # Arguments
 ///
@@ -98,7 +100,7 @@ pub(super) fn file_name(file: &std::path::Path) -> String {
 fn head_bytes(file: &std::path::Path) -> Vec<u8> {
     use std::io::Read as _;
     let mut head = Vec::with_capacity(256);
-    if let Ok(f) = std::fs::File::open(file) {
+    if let Ok(f) = borer_engine::program::open_regular(file, u64::MAX) {
         let _ = f.take(256).read_to_end(&mut head);
     }
     head
@@ -674,5 +676,26 @@ mod tests {
         assert!(s.ready.borrow().is_some() && s.overlay.fields.is_empty());
         let first = s.analysis(Feature::Discover).expect("x86-64 is analyzed");
         assert!(first.function(0x1000).is_some() && s.ready.borrow().is_none());
+    }
+
+    /// The loading line's first bytes never open a pipe, which blocks until
+    /// a writer comes: only a regular file is read for them.
+    ///
+    /// # Panics
+    ///
+    /// When the pipe is read.
+    #[cfg(unix)]
+    #[test]
+    fn the_head_bytes_never_open_a_pipe() {
+        let dir = std::env::temp_dir().join(format!("borer-head-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        let fifo = dir.join("pipe");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .is_ok_and(|s| s.success());
+        let head = made.then(|| super::head_bytes(&fifo));
+        std::fs::remove_dir_all(&dir).expect("cleans up");
+        assert!(head.is_none_or(|h| h.is_empty()), "the pipe was read");
     }
 }

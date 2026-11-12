@@ -73,8 +73,9 @@ pub(crate) fn max_file_size(value: Option<&str>) -> u64 {
 /// A path that names no file (or a `<file>@<offset>` slice) passes, so
 /// the load says what is wrong with it. One the loader never opens (a
 /// share, a device; [`borer_engine::program::unusable_path`]) is refused
-/// first, with the loader's reason: reading only its size asks the host of
-/// a share whether the file is there.
+/// first, with the loader's reason, by the checked stat
+/// ([`borer_engine::program::checked_metadata`]): reading only its size
+/// asks the host of a share whether the file is there.
 ///
 /// # Arguments
 ///
@@ -87,16 +88,13 @@ pub(crate) fn max_file_size(value: Option<&str>) -> u64 {
 /// than `max`, naming both sizes, the variable that raises the limit and
 /// the ways to load a part.
 pub(crate) fn file_fits(path: &Path, max: u64) -> Result<(), String> {
-    if let Some(why) = borer_engine::program::unusable_path(path) {
-        return Err(why);
-    }
-    match std::fs::metadata(path) {
-        Ok(meta) if meta.is_file() && meta.len() > max => Err(format!(
+    match borer_engine::program::checked_metadata(path)? {
+        Some(meta) if meta.is_file() && meta.len() > max => Err(format!(
             "{} is {} bytes, past the {max}-byte limit: borer reads a file into memory whole and its analysis takes several times that. Set {MAX_FILE_ENV} (bytes, or 4G; 0 for no limit) to load it anyway, or load a part: <file>@<offset> for an embedded program, or arch with regions for raw ranges",
             borer_engine::text::short_path(&path.display().to_string()),
             meta.len()
         )),
-        Ok(_) | Err(_) => Ok(()),
+        Some(_) | None => Ok(()),
     }
 }
 

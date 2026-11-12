@@ -57,10 +57,10 @@ mod wire;
 
 use args::{
     COMMAND_FLAGS, Command, Direction, Query, RawFlags, SlotQuery, USAGE, arg, cli_limit, cli_page,
-    command_usage, entry_at, filter_limit, num_arg, path_arg, read_path_arg, search_args,
-    split_pack_args, unknown_word,
+    command_usage, entry_at, filter_limit, num_arg, path_arg, search_args, split_pack_args,
+    unknown_word,
 };
-use packs::{pack_report, packs_report, sigmake, writable, write_file};
+use packs::{pack_report, packs_report, read_text, sigmake, writable, write_file};
 use session::{Session, decompiled, needs_a_binary, open, project_overlay};
 
 /// The cap on rows that list classes: every class a program has fits.
@@ -179,9 +179,8 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
             crate::safety::manifest(&crate::BorerServer::tool_router().list_all())?
         ),
         Command::Pack => {
-            let file = read_path_arg(args, 1, "pack needs a file")?;
-            let text = std::fs::read_to_string(file)
-                .with_context(|| format!("reading {}", short_path(file)))?;
+            let file = path_arg(args, 1, "pack needs a file")?;
+            let text = read_text(file)?;
             let (pack, warnings) =
                 Pack::parse(&text, &short_path(file)).map_err(anyhow::Error::msg)?;
             print!("{}", pack_report(&pack, &warnings));
@@ -569,9 +568,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
         }
         Query::Changes => {
             let a = s.analysis(Feature::Decompile)?;
-            let path = read_path_arg(args, 2, "changes needs a snapshot file")?;
-            let text = std::fs::read_to_string(path)
-                .with_context(|| format!("reading {}", short_path(path)))?;
+            let text = read_text(path_arg(args, 2, "changes needs a snapshot file")?)?;
             let before = snapshot::read(&text).map_err(anyhow::Error::msg)?;
             let after = snapshot::facts(&s.program, &a, &s.overlay);
             print!("{}", snapshot::changes_tsv(&before, &after));
@@ -599,9 +596,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
         }
         Query::Anchors => {
             let a = s.analysis(Feature::Decompile)?;
-            let manifest = read_path_arg(args, 2, "anchors needs a manifest file")?;
-            let text = std::fs::read_to_string(manifest)
-                .with_context(|| format!("reading {}", short_path(manifest)))?;
+            let text = read_text(path_arg(args, 2, "anchors needs a manifest file")?)?;
             let pinned = anchors::parse_manifest(&text).map_err(anyhow::Error::msg)?;
             let (table, all_held) =
                 anchors::verify_tsv(&s.program, &a, &s.overlay, &pinned, pinned.len());
@@ -855,9 +850,8 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             print!("{}", sigs::export_pack(&s.program, &a, &overlay, name, all));
         }
         Query::Script => {
-            let file = read_path_arg(args, 2, "script needs a script file")?;
-            let code = std::fs::read_to_string(file)
-                .with_context(|| format!("reading {}", short_path(file)))?;
+            let file = path_arg(args, 2, "script needs a script file")?;
+            let code = read_text(file)?;
             let mut words = Vec::new();
             let mut save = None;
             let mut rest = args.iter().skip(3);
@@ -1022,8 +1016,10 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
 /// When the project does not load or save, or what is asked is refused
 /// ([`defined`], [`applied`]).
 fn set_type(args: &[String], s: &Session) -> anyhow::Result<()> {
-    let project = read_path_arg(args, 2, "set-type needs a project file")?;
-    let (program, sha256, mut overlay) = if std::path::Path::new(project).exists() {
+    let project = path_arg(args, 2, "set-type needs a project file")?;
+    let there = borer_engine::program::checked_metadata(std::path::Path::new(project))
+        .map_err(anyhow::Error::msg)?;
+    let (program, sha256, mut overlay) = if there.is_some() {
         let (pf, overlay) = session::load_for_program(project, &s.program)?;
         (pf.0.program, pf.0.sha256, overlay)
     } else {

@@ -32,6 +32,10 @@ pub(crate) const LIVE_ANY_ENV: &str = "BORER_LIVE_ANY";
 /// talked into reading a browser's or a password manager's memory. The
 /// image is the loaded binary when both paths name one file, or when the
 /// image's file holds the loaded bytes exactly (a copy run from elsewhere).
+/// The image's path is the target process's to rewrite, so it is held to
+/// [`borer_engine::program::unusable_path`] before anything opens it, and
+/// its bytes are read through the checked reader, no more than the loaded
+/// binary holds.
 ///
 /// # Arguments
 ///
@@ -61,9 +65,8 @@ pub(crate) fn runs_loaded(
             (Ok(a), Ok(b)) if a == b
         );
         let same_bytes = || {
-            std::fs::metadata(path)
-                .is_ok_and(|m| m.is_file() && num::from_usize(program.bytes.len()) == m.len())
-                && std::fs::read(path).is_ok_and(|b| b == program.bytes)
+            borer_engine::program::read_regular(path, num::from_usize(program.bytes.len()))
+                .is_ok_and(|b| b == program.bytes)
         };
         if same_file || same_bytes() {
             return Ok(());

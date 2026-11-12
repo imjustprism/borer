@@ -172,8 +172,8 @@ crates/borer-engine/tests/it/decompile/rounding.rs::a_nearest_float_to_int_round
 crates/borer-engine/tests/it/decompile/rounding.rs::a_scalar_lane_move_and_round_keeps_the_bits#1	103
 crates/borer-engine/tests/it/elf.rs::elf_bytes#1	254
 crates/borer-engine/tests/it/objc.rs::image#1	182
-crates/borer/src/cli/mod.rs::cli#1	171
-crates/borer/src/cli/mod.rs::query#1	724
+crates/borer/src/cli/mod.rs::cli#1	170
+crates/borer/src/cli/mod.rs::query#1	719
 crates/borer/src/index.rs	1581
 crates/borer/src/main.rs::call_tool#1	112
 crates/borer/src/main.rs::listing#1	132

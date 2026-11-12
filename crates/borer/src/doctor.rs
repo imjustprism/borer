@@ -284,9 +284,9 @@ fn mcp_line(start: &Path, exe: &Path) -> String {
     else {
         return format!("mcp        no {MCP_FILE} in {} or above", start.display());
     };
-    let config = std::fs::read_to_string(&file)
-        .map_err(|e| e.to_string())
-        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).map_err(|e| e.to_string()));
+    let config = borer_engine::program::read_regular(&file, u64::MAX)
+        .map_err(|e| format!("{e:#}"))
+        .and_then(|t| serde_json::from_slice::<serde_json::Value>(&t).map_err(|e| e.to_string()));
     let config = match config {
         Ok(c) => c,
         Err(why) => return format!("mcp        {} does not read: {why}", file.display()),

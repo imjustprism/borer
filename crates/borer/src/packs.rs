@@ -24,6 +24,8 @@ pub const DIRS_ENV: &str = "BORER_PACK_DIRS";
 pub const AUTO_ENV: &str = "BORER_AUTO_PACKS";
 /// The extension of a pack file.
 pub const EXTENSION: &str = "borer";
+/// Largest pack file read, in bytes: 64 MiB.
+pub const PACK_MAX: u64 = 1 << 26;
 /// Most scripts one pack runs.
 pub const SCRIPTS_MAX: usize = 64;
 /// Most bytes the scripts one pack runs hold together: 4 MiB.
@@ -159,8 +161,9 @@ pub fn discovered(notes: &mut Vec<String>) -> Vec<Pack> {
         files.sort();
         for path in files {
             let shown = borer_engine::text::short_path(&path.to_string_lossy());
-            let parsed = std::fs::read_to_string(&path)
-                .map_err(|e| e.to_string())
+            let parsed = borer_engine::program::read_regular(&path, PACK_MAX)
+                .map_err(|e| format!("{e:#}"))
+                .and_then(|bytes| String::from_utf8(bytes).map_err(|_| "not text".to_owned()))
                 .and_then(|text| Pack::parse(&text, &shown))
                 .and_then(|(mut pack, _)| {
                     load_scripts(&mut pack, &path)?;

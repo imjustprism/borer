@@ -870,16 +870,16 @@ pub(crate) fn env_pack_files() -> Vec<String> {
 /// # Errors
 ///
 /// When a file's path is a share or a device (refused before it is
-/// opened), a file cannot be read or is not a pack.
+/// opened), a file is not a regular one, holds more than
+/// [`borer::packs::PACK_MAX`] bytes, cannot be read or is not a pack.
 pub(crate) fn read_packs(files: &[String]) -> anyhow::Result<Arc<Packs>> {
     let mut packs = Vec::with_capacity(files.len());
     for file in files {
-        if let Some(why) = borer_engine::program::unusable_path(Path::new(file)) {
-            anyhow::bail!("{why}; give a path to a pack");
-        }
         let shown = borer_engine::text::short_path(file);
-        let text = std::fs::read_to_string(file)
-            .map_err(|e| anyhow::anyhow!("reading pack {shown}: {e}"))?;
+        let bytes = borer_engine::program::read_regular(Path::new(file), borer::packs::PACK_MAX)
+            .map_err(|e| anyhow::anyhow!("{e:#}; give a path to a pack"))?;
+        let text = String::from_utf8(bytes)
+            .map_err(|_| anyhow::anyhow!("pack {shown} is not a text file"))?;
         let (mut pack, warnings) = Pack::parse(&text, &shown).map_err(anyhow::Error::msg)?;
         for w in warnings {
             eprintln!("borer: {w}");
@@ -1179,5 +1179,19 @@ mod tests {
             let said = read.expect_err("a script path is checked before it is read");
             assert!(said.contains(why), "{said}");
         }
+    }
+
+    /// A pack is read through the checked reader, which judges the file
+    /// before it opens it: a directory is refused by its metadata, where
+    /// the read failed with whatever the system said.
+    ///
+    /// # Panics
+    ///
+    /// When the directory is read as a pack.
+    #[test]
+    fn a_pack_that_is_a_directory_is_refused_by_its_metadata() {
+        let dir = std::env::temp_dir().display().to_string();
+        let refused = super::read_packs(&[dir]).expect_err("a directory is no pack");
+        assert!(refused.to_string().contains("is a directory"), "{refused}");
     }
 }

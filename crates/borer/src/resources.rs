@@ -103,7 +103,7 @@ fn file_label(path: &Path) -> String {
 /// Largest text file a resource reads, in bytes: a script, a manifest or
 /// a fingerprint sidecar is text an agent wrote or borer did, and a large
 /// binary's sidecar runs to tens of megabytes.
-const SPEC_FILE_MAX: u64 = 1 << 26;
+pub(crate) const SPEC_FILE_MAX: u64 = 1 << 26;
 
 /// Reads a file a resource names, refusing a device and naming the file in
 /// any failure.
@@ -1874,12 +1874,9 @@ impl BorerServer {
         /// Most rows one read lists.
         const PAGE: usize = 500;
         let short = borer_engine::text::short_path(path);
-        if let Some(why) = borer_engine::program::unusable_path(Path::new(path)) {
-            return Err(err_params(format!(
-                "{why}; give a path to an anchors manifest"
-            )));
-        }
-        if let Ok(meta) = std::fs::metadata(path)
+        let meta = borer_engine::program::checked_metadata(Path::new(path))
+            .map_err(|why| err_params(format!("{why}; give a path to an anchors manifest")))?;
+        if let Some(meta) = meta
             && meta.is_file()
             && meta.len() > MANIFEST_MAX
         {

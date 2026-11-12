@@ -11,7 +11,7 @@ use borer_engine::analysis::render;
 use borer_engine::program::Feature;
 use borer_engine::text::{quoted, short_path};
 
-use super::args::{arg, read_path_arg};
+use super::args::{arg, path_arg};
 use super::packs::write_file;
 use super::session::{Session, open};
 
@@ -259,7 +259,7 @@ pub(super) fn run(cmd: Extra, args: &[String], s: &Session) -> anyhow::Result<()
 /// cannot be loaded.
 fn diff(args: &[String], s: &Session) -> anyhow::Result<()> {
     let a = s.analysis(Feature::Discover)?;
-    let other = read_path_arg(args, 2, "diff needs another build or a fingerprint sidecar")?;
+    let other = path_arg(args, 2, "diff needs another build or a fingerprint sidecar")?;
     let path = std::path::Path::new(other);
     let label = |p: &std::path::Path| {
         p.file_name().map_or_else(
@@ -267,8 +267,9 @@ fn diff(args: &[String], s: &Session) -> anyhow::Result<()> {
             |n| n.to_string_lossy().into_owned(),
         )
     };
-    let sidecar = std::fs::read_to_string(path)
+    let sidecar = borer_engine::program::read_regular(path, crate::resources::SPEC_FILE_MAX)
         .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
         .filter(|t| t.starts_with("# borer fingerprint"));
     let text = match sidecar {
         Some(prints) => render::diff_prints_tsv(

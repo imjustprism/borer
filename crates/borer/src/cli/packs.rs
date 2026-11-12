@@ -27,6 +27,50 @@ pub(super) fn write_file(path: &str, bytes: &[u8]) -> anyhow::Result<()> {
     std::fs::write(path, bytes).with_context(|| format!("writing {}", short_path(path)))
 }
 
+/// Reads a file a command was given whole, through the checked reader
+/// ([`borer_engine::program::read_regular`]), within the size a load takes
+/// ([`crate::tools::load::max_file_size`]).
+///
+/// # Arguments
+///
+/// * `path` - The file, as the caller gave it.
+///
+/// # Returns
+///
+/// The file's bytes.
+///
+/// # Errors
+///
+/// When the path is a share or a device (refused before it is opened), is
+/// not a regular file, holds more than the size a load takes, or does not
+/// read.
+pub(super) fn read_given(path: &str) -> anyhow::Result<Vec<u8>> {
+    let max = crate::tools::load::max_file_size(
+        std::env::var(crate::tools::load::MAX_FILE_ENV)
+            .ok()
+            .as_deref(),
+    );
+    borer_engine::program::read_regular(std::path::Path::new(path), max)
+}
+
+/// Reads a text file a command was given ([`read_given`]).
+///
+/// # Arguments
+///
+/// * `path` - The file, as the caller gave it.
+///
+/// # Returns
+///
+/// The file's text.
+///
+/// # Errors
+///
+/// As [`read_given`], and when the file is not text.
+pub(super) fn read_text(path: &str) -> anyhow::Result<String> {
+    String::from_utf8(read_given(path)?)
+        .map_err(|_| anyhow::anyhow!("{} is not a text file", short_path(path)))
+}
+
 /// Refuses a path that names a device rather than a file, before a
 /// command spends an analysis on what it would write there.
 ///
@@ -75,11 +119,7 @@ pub(super) fn sigmake(args: &[String]) -> anyhow::Result<()> {
     let mut functions = Vec::new();
     let mut files = Vec::new();
     for library in libraries {
-        if let Some(why) = borer_engine::program::unusable_path(std::path::Path::new(library)) {
-            bail!("{why}; give a library or an object");
-        }
-        let bytes =
-            std::fs::read(library).with_context(|| format!("reading {}", short_path(library)))?;
+        let bytes = read_given(library)?;
         let (found, damaged) = libsig::read(&bytes).with_context(|| short_path(library))?;
         for why in &damaged {
             eprintln!("borer: {}: {why}", short_path(library));

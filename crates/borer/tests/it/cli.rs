@@ -401,7 +401,8 @@ fn cli_counts_and_devices_are_refused_alike() {
 }
 
 /// A file a command reads is refused before it is opened when its path names
-/// a share, as the loader refuses one.
+/// a share, as the loader refuses one: the refusal is the checked reader's
+/// own, not the error of a read that reached the network.
 ///
 /// Each of these read the file, or asked whether it existed, first, and
 /// either authenticates to the share's host as the user.
@@ -417,35 +418,19 @@ fn cli_refuses_a_share_before_reading_it() {
     let out = dir.join(format!("borer_share_{}.bsig", std::process::id()));
     let out = out.to_string_lossy().to_string();
     let share = r"\\host.invalid\share\x";
-    let refused = format!("{share} names a network share");
-    let cases = [
-        (vec!["pack", share], "pack needs a file; "),
-        (
-            vec!["changes", &pe, share],
-            "changes needs a snapshot file; ",
-        ),
-        (
-            vec!["anchors", &pe, share],
-            "anchors needs a manifest file; ",
-        ),
-        (vec!["script", &pe, share], "script needs a script file; "),
-        (
-            vec!["set-type", &pe, share],
-            "set-type needs a project file; ",
-        ),
-        (
-            vec!["diff", &pe, share],
-            "diff needs another build or a fingerprint sidecar; ",
-        ),
-        (vec!["sigmake", &out, "lib", share], ""),
-    ];
-    for (args, needs) in cases {
+    let refused = format!("Error: {share} names a network share");
+    for args in [
+        vec!["pack", share],
+        vec!["changes", &pe, share],
+        vec!["anchors", &pe, share],
+        vec!["script", &pe, share],
+        vec!["set-type", &pe, share],
+        vec!["diff", &pe, share],
+        vec!["sigmake", &out, "lib", share],
+    ] {
         let (ok, said) = run_all(&args);
         assert!(!ok, "{args:?} succeeded: {said}");
-        assert!(
-            said.contains(&format!("Error: {needs}{refused}")),
-            "{args:?}: {said}"
-        );
+        assert!(said.contains(&refused), "{args:?}: {said}");
     }
     std::fs::remove_file(&file).expect("the fixture is removed");
 }
