@@ -1279,7 +1279,13 @@ fn shaped(name: &str, ty: &UserType) -> anyhow::Result<()> {
                     e.size
                 ));
             }
+            if e.values.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "enum {name} states no values; give them as name:value"
+                ));
+            }
             let mut names: BTreeSet<&str> = BTreeSet::new();
+            let mut named: BTreeMap<u64, &str> = BTreeMap::new();
             for &(value, ref value_name) in &e.values {
                 if !is_ident(value_name) {
                     return Err(anyhow::anyhow!(
@@ -1297,14 +1303,9 @@ fn shaped(name: &str, ty: &UserType) -> anyhow::Result<()> {
                         "value {value_name} = {value:#x} does not fit a 4-byte enum"
                     ));
                 }
-            }
-            for pair in e.values.windows(2) {
-                if pair[0].0 == pair[1].0 {
+                if let Some(first) = named.insert(value, value_name) {
                     return Err(anyhow::anyhow!(
-                        "enum {name} names value {} twice, as {} and {}",
-                        pair[0].0,
-                        pair[0].1,
-                        pair[1].1
+                        "enum {name} names value {value} twice, as {first} and {value_name}"
                     ));
                 }
             }

@@ -300,3 +300,30 @@ fn a_typedef_over_a_known_struct_aligns_as_the_type_it_names() {
     let s = read.types.iter().find(|(name, ..)| name == "S");
     assert_eq!(s.map(|(_, _, align)| *align), Some(1));
 }
+
+/// An enum naming one value twice is refused wherever in its list the two
+/// stand: a hand-edited list need not be in order, and only neighbours
+/// were compared.
+#[test]
+fn an_enum_naming_a_value_twice_anywhere_is_refused() {
+    let values = vec![
+        (0, "A".to_owned()),
+        (1, "B".to_owned()),
+        (0, "C".to_owned()),
+    ];
+    let types = [("E".to_owned(), UserType::Enum(UserEnum { size: 4, values }))].into();
+    let err = validate(&types, &BTreeMap::new()).expect_err("a value named twice validated");
+    let says = "enum E names value 0 twice, as A and C";
+    assert!(err.to_string().contains(says), "{err}");
+}
+
+/// An enum stating no values is refused, as `set_type` refuses one: it
+/// names no value a comparison could print.
+#[test]
+fn an_enum_stating_no_values_is_refused() {
+    let values = Vec::new();
+    let types = [("E".to_owned(), UserType::Enum(UserEnum { size: 4, values }))].into();
+    let err = validate(&types, &BTreeMap::new()).expect_err("an empty enum validated");
+    let says = "enum E states no values";
+    assert!(err.to_string().contains(says), "{err}");
+}
