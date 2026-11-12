@@ -133,6 +133,11 @@ pub(super) fn parse_object(
 /// hand the user's credentials to whoever named the host. borer reads local
 /// files only.
 ///
+/// A path in the NT object namespace (`\??\C:\x`, `\??\UNC\host\share\x`)
+/// is refused whatever it names: Windows hands it to the kernel unparsed,
+/// where `\??\UNC` is the network redirector and any device can be named,
+/// and no file borer reads needs that spelling.
+///
 /// # Arguments
 ///
 /// * `path` - The path as given.
@@ -151,6 +156,11 @@ pub fn unusable_path(path: &Path) -> Option<String> {
         return None;
     }
     let spelled = path.as_os_str().to_string_lossy().replace('/', "\\");
+    if spelled.starts_with("\\??\\") {
+        return Some(format!(
+            "{spelled} names the NT object namespace, not a file"
+        ));
+    }
     let drive = |rest: &str| {
         let b = rest.as_bytes();
         b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\'

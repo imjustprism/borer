@@ -140,6 +140,37 @@ fn a_device_name_is_not_a_file() {
     assert!(unusable_path(std::path::Path::new("")).is_some());
 }
 
+/// A path in the NT object namespace is refused in every spelling, as
+/// every spelling of a share is.
+///
+/// Windows hands a `\??\` path to the kernel unparsed, and `\??\UNC` is the
+/// network redirector: the check took `\??\UNC\host\share\x` for a rooted
+/// local path, so opening it, or asking whether it existed, connected to the
+/// host and authenticated as the user.
+///
+/// # Panics
+///
+/// When such a path is let through, or a drive path refused.
+#[test]
+fn an_nt_path_is_never_a_file() {
+    if cfg!(windows) {
+        let let_through: Vec<&str> = [
+            r"\??\UNC\host.invalid\s\x",
+            r"\??\C:\x",
+            r"\??\unc\host.invalid\s",
+            "//?/UNC/host.invalid/s",
+            r"\\.\UNC\host.invalid\s",
+            r"\\?\GLOBALROOT\Device\Mup\host.invalid\s",
+            r"\\;LanmanRedirector\host.invalid\s",
+        ]
+        .into_iter()
+        .filter(|p| unusable_path(std::path::Path::new(p)).is_none())
+        .collect();
+        assert!(let_through.is_empty(), "{let_through:?}");
+    }
+    assert_eq!(unusable_path(std::path::Path::new(r"C:\x")), None);
+}
+
 /// The section index answers what a scan of the table in file order does.
 ///
 /// However the sections nest or overlap, its rows do not overlap: a
