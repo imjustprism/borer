@@ -532,7 +532,10 @@ impl Tally {
 /// or the stated fields merged into the one there is.
 ///
 /// The fields are laid out in offset order whatever order they were
-/// stated in, so an overlap is found between any two of them.
+/// stated in, so an overlap is found between any two of them. A
+/// statement that would leave the struct no field is refused: stating
+/// none drops what a class states ([`plan_class`]), and a struct of no
+/// field is no type to apply.
 ///
 /// # Arguments
 ///
@@ -543,8 +546,9 @@ impl Tally {
 ///
 /// # Errors
 ///
-/// When an offset is stated twice, a field states no type and has none
-/// to keep, or the struct does not build ([`utypes::laid_out`]).
+/// When the struct would hold no field, an offset is stated twice, a
+/// field states no type and has none to keep, or the struct does not
+/// build ([`utypes::laid_out`]).
 fn structure(
     o: &Overlay,
     s: &Statement<'_>,
@@ -587,6 +591,12 @@ fn structure(
         .into_iter()
         .map(|(off, (name, ty))| (off, name, ty))
         .collect();
+    if list.is_empty() {
+        return Err(format!(
+            "{} is no class borer recovered, so it states no fields to drop; a struct keeps at least one field",
+            crate::text::quoted(s.name)
+        ));
+    }
     let mut built =
         utypes::laid_out(s.name, s.size, &list, &o.types, word).map_err(|e| e.to_string())?;
     if let (Some(k), None) = (kept, s.size) {

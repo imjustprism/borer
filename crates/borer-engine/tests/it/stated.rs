@@ -565,6 +565,28 @@ fn a_replacing_statement_drops_what_the_class_stated_before() {
     assert_eq!(cleared.fingerprint(), Overlay::default().fingerprint());
 }
 
+/// A statement of no fields drops what a class states and is no struct:
+/// under a name that is no class it is refused, whether or not a struct
+/// goes by the name, and the struct stays as it was.
+#[test]
+fn a_statement_of_no_fields_defines_no_struct() {
+    let p = two_classes();
+    let a = Analysis::compute(&p);
+    let plain = Overlay::default();
+    let hp = [(0, "hp", Some("u32"))];
+    let (_, defined) = state((&p, &a), &plain, "Player", &hp, Mode::Merge).expect("defines");
+    for (o, mode) in [
+        (&plain, Mode::Merge),
+        (&plain, Mode::Replace),
+        (&defined, Mode::Replace),
+    ] {
+        assert_eq!(
+            state((&p, &a), o, "Player", &[], mode).expect_err("no field is stated"),
+            "'Player' is no class borer recovered, so it states no fields to drop; a struct keeps at least one field"
+        );
+    }
+}
+
 /// A user struct takes stated fields by offset too: a field restated
 /// without a type keeps the one it had, the others stay, the size never
 /// shrinks, and replacing leaves the stated fields alone.

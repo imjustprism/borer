@@ -399,7 +399,8 @@ impl BorerServer {
     /// borer recovered, else of a struct it defines. The fields merge into
     /// what the name states, a field without a type keeping the type or the
     /// width it had, and the answer counts the fields kept, changed and
-    /// new; `replace` drops every field the call does not restate. A type
+    /// new; `replace` drops every field the call does not restate, which
+    /// with no fields is every field stated of a class. A type
     /// of a size the class's code never reads the field at is refused
     /// ([`stated::plan_class`]). `name` with `values` defines
     /// an enum; `name` with `type` alone defines a typedef. `address` with
@@ -496,7 +497,7 @@ impl BorerServer {
             }
             let mut fielded = None;
             let defined = match (&name, &fields, &values) {
-                (Some(n), Some(fs), vs) if !fs.is_empty() => {
+                (Some(n), Some(fs), vs) if !fs.is_empty() || replace == Some(true) => {
                     if vs.is_some() {
                         return Err(format!(
                             "type {n} states both fields and values; a struct takes fields, an enum values"

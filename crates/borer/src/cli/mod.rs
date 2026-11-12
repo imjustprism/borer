@@ -1094,7 +1094,7 @@ fn defined(
             }
             let fields =
                 stated_fields(args.get(at..).unwrap_or_default()).map_err(anyhow::Error::msg)?;
-            if fields.is_empty() {
+            if fields.is_empty() && !replace {
                 bail!(
                     "struct {} states no fields; give them as off:name[:type]",
                     one_line(name)

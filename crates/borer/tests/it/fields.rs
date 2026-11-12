@@ -945,6 +945,60 @@ fn a_struct_restated_at_the_cli_is_held_to_the_fields_stated_with_it() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// `replace` with no fields drops every field stated of a class, by the
+/// tool and at the command line.
+///
+/// Without `replace` an empty statement is refused as before, and of a
+/// name that is no class it is refused with the reason.
+#[test]
+fn an_empty_replace_drops_every_field_stated_of_a_class() {
+    let (mut client, dir, image) = session("cleared");
+    let before = rows(&mut client, "class_2800");
+    let stated = serde_json::json!({
+        "name": "class_2800", "fields": ["0x270:m_currentPipeline", "0x18:m_next"], "dry_run": false
+    });
+    set_type(&mut client, &stated);
+    let empty = |name: &str, replace: bool, dry_run: bool| serde_json::json!({"name": name, "fields": [], "replace": replace, "dry_run": dry_run});
+    assert_eq!(
+        set_type(&mut client, &empty("class_2800", false, false)),
+        "struct class_2800 states no fields; give fields, `values` for an enum, or a `type` for a typedef"
+    );
+    assert_eq!(
+        set_type(&mut client, &empty("Player", true, false)),
+        "'Player' is no class borer recovered, so it states no fields to drop; a struct keeps at least one field"
+    );
+    let dropped = "0 field(s) of class class_2800: 4 kept, 0 changed, 0 new, 2 dropped: +0x18 m_next (dropped), +0x270 m_currentPipeline (dropped)";
+    assert_eq!(
+        set_type(&mut client, &empty("class_2800", true, true)),
+        format!("dry-run: would state {dropped}. pass dry_run=false to apply.")
+    );
+    let project = dir.join("kept.json").to_string_lossy().into_owned();
+    client.text(
+        "save_project",
+        &serde_json::json!({"path": project}).to_string(),
+    );
+    assert_eq!(
+        set_type(&mut client, &empty("class_2800", true, false)),
+        format!("stated {dropped}")
+    );
+    assert_eq!(rows(&mut client, "class_2800"), before);
+    client.finish();
+    let cli = std::process::Command::new(env!("CARGO_BIN_EXE_borer"))
+        .args(["--no-pdb", "set-type", &image, "--arch", "x64"])
+        .args(["--regions", REGIONS, &project, "struct", "class_2800"])
+        .arg("replace")
+        .output()
+        .expect("spawn borer");
+    let said = String::from_utf8_lossy(&cli.stdout);
+    assert!(
+        said.starts_with(&format!("stated {dropped}; written to ")),
+        "{said}"
+    );
+    let written = std::fs::read_to_string(&project).expect("the project reads back");
+    assert!(!written.contains("\"fields\""), "{written}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// A type a class's field was stated with changes only so far as the
 /// field still stands, on the dry run as when applied.
 ///
