@@ -27,7 +27,7 @@ use super::classes::{self, FieldLabel, FieldUse};
 use super::protos::VarKey;
 use super::utypes::{self, TypeExpr, UserStruct, UserType};
 use super::{Analysis, Function, Overlay, bare_name, name_of};
-use crate::program::Program;
+use crate::program::{Feature, Program};
 
 /// One field an agent stated of a class.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,9 +119,9 @@ pub fn rows(overlay: &Overlay) -> Vec<String> {
 /// to. A project file does not say its binary's pointer width, so typed
 /// fields are held apart at the narrowest one: two that share a byte with
 /// 4-byte pointers share it with any, and an overlap only wider pointers
-/// make is refused where a field of the class is next stated. Nor does a
-/// project know the names the class's code gives its other fields, which a
-/// statement is checked against.
+/// make is found where the file meets its binary ([`settled`]), with what
+/// only the binary's code can tell: the widths a field is accessed at and
+/// the names the class's code gives its other fields.
 ///
 /// # Arguments
 ///
@@ -153,6 +153,104 @@ pub fn validate(overlay: &Overlay) -> Result<(), String> {
         apart(&overlay.types, fields, NARROW).map_err(|why| format!("class {class}: {why}"))?;
     }
     Ok(())
+}
+
+/// The classes whose stated fields an overlay cannot keep over a binary
+/// ([`settled`]), each list in name order.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Unsettled {
+    /// The classes no function of the binary belongs to.
+    pub absent: Vec<String>,
+    /// The classes the binary's code contradicts a stated field of, each
+    /// with the refusal a statement of that field would get.
+    pub contradicted: Vec<(String, String)>,
+    /// Why no class was held to anything, and every field stays as
+    /// stated: the engine discovers no function of the binary
+    /// ([`Program::refuses`]).
+    pub unread: Option<String>,
+}
+
+impl Unsettled {
+    /// Takes the fields stated of these classes out of an overlay.
+    ///
+    /// # Arguments
+    ///
+    /// * `o` - The overlay [`settled`] was asked of.
+    ///
+    /// # Returns
+    ///
+    /// How many fields went: those of the classes no function belongs to,
+    /// then those of the classes the code contradicts.
+    pub fn leave_out(&self, o: &mut Overlay) -> (usize, usize) {
+        let mut gone = |class: &String| o.fields.remove(class).map_or(0, |fields| fields.len());
+        let absent = self.absent.iter().map(&mut gone).sum();
+        let contradicted = self.contradicted.iter().map(|(class, _)| gone(class)).sum();
+        (absent, contradicted)
+    }
+}
+
+/// Holds the fields an overlay states of classes to the binary's code.
+///
+/// It is the check a project file's fields get once its binary is at
+/// hand, as a statement is held when it is made ([`plan_class`]): the
+/// file is written by hand as well as by `save_project`, and
+/// [`validate`] cannot see the code. Each class of the binary has its
+/// stated fields held to the widths its code accesses them at and apart at
+/// the binary's pointer width ([`fit`]), and to the names its code gives
+/// its other fields ([`coherent`]). A class no function of the binary
+/// belongs to has nothing to be held to, and a function named into it
+/// later would take its fields unchecked.
+///
+/// Neither kind refuses the overlay. What a class's code is changes with
+/// the names in force, so a project a session saved may state a field
+/// that a function named into the class since reads at another width:
+/// the classes are handed back for the caller to leave out and say why
+/// ([`Unsettled::leave_out`]), as an annotation in no section is, and the
+/// rest of the project loads. A check the caller's deadline cut short
+/// held nothing, so it fails ([`crate::cancel::Cancel::whole`]).
+///
+/// A binary the engine discovers no function of has no class at all, by
+/// what the engine reads and not by what the file holds: its analysis is
+/// empty, and every class would come back as one of no function. There
+/// the fields stay as stated and the reason is handed back
+/// ([`Unsettled::unread`]); nothing reads them until the binary is loaded
+/// so that its code is read, and the project loaded with it.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - The overlay a project file rebuilt.
+///
+/// # Returns
+///
+/// The classes whose stated fields cannot stay, or why none was held.
+///
+/// # Errors
+///
+/// When the request's deadline passed meanwhile.
+pub fn settled(p: &Program, a: &Analysis, o: &Overlay) -> Result<Unsettled, String> {
+    let mut out = Unsettled::default();
+    if let Some(why) = p
+        .refuses(Feature::Discover)
+        .filter(|_| !o.fields.is_empty())
+    {
+        out.unread = Some(why);
+        return Ok(out);
+    }
+    for (class, fields) in &o.fields {
+        let layout = classes::class_layout(p, a, o, class).filter(|l| l.name == *class);
+        let Some(layout) = layout else {
+            out.absent.push(class.clone());
+            continue;
+        };
+        let held = fit((p, a, o), &o.types, class, fields, Some(&layout))
+            .and_then(|()| coherent(o, class, fields, &layout.labels));
+        if let Err(why) = held {
+            out.contradicted.push((class.clone(), why));
+        }
+    }
+    crate::cancel::Cancel::whole(out)
 }
 
 /// Returns the names the overlay states of a class's fields, as the labels

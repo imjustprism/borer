@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use borer::project::Identity;
+use borer_engine::analysis::{EnumSource, Overlay, stated};
 use borer_engine::layout::Layout;
 use borer_engine::num;
 use borer_engine::program::{Feature, Program};
@@ -140,6 +141,60 @@ fn stated_counts(prototypes: usize, vars: usize, fields: usize) -> String {
     }
     if fields > 0 {
         let _ = write!(out, " + {fields} stated fields");
+    }
+    out
+}
+
+/// Words the stated fields a loaded project could not keep, a line per
+/// reason, for the answer of `load_project` and a command's stderr.
+///
+/// # Arguments
+///
+/// * `unsettled` - The classes whose fields were left out, and why.
+/// * `gone` - How many fields went with the classes of no function, then
+///   with the classes the code contradicts
+///   ([`stated::Unsettled::leave_out`]).
+///
+/// # Returns
+///
+/// `# skipped 2 stated field(s) of 1 class(es) that name no class of this
+/// binary (showing 1 of 1): Ghost`, and the like for the classes the code
+/// contradicts, each with the refusal that names the field; at most eight
+/// classes are named on a line and the rest counted. Where borer reads no
+/// code of the binary, one line says the fields were kept unheld and why.
+/// Empty when every class was held and kept its fields.
+pub(crate) fn skipped_classes(unsettled: &stated::Unsettled, gone: (usize, usize)) -> String {
+    /// Most classes a line names before it counts the rest.
+    const SHOWN: usize = 8;
+    let refused: Vec<String> = unsettled
+        .contradicted
+        .iter()
+        .map(|(class, why)| format!("{class} ({why})"))
+        .collect();
+    let mut out = String::new();
+    for (fields, why, classes) in [
+        (
+            gone.0,
+            "that name no class of this binary",
+            &unsettled.absent,
+        ),
+        (gone.1, "the binary's code contradicts", &refused),
+    ] {
+        if !classes.is_empty() {
+            let shown = classes.len().min(SHOWN);
+            let _ = writeln!(
+                out,
+                "# skipped {fields} stated field(s) of {total} class(es) {why} (showing {shown} of {total}): {}",
+                classes[..shown].join(", "),
+                total = classes.len()
+            );
+        }
+    }
+    if let Some(why) = &unsettled.unread {
+        let _ = writeln!(
+            out,
+            "# kept the stated fields as stated, held to no code: {why}"
+        );
     }
     out
 }
@@ -488,7 +543,13 @@ impl BorerServer {
     /// `set_type` would refuse of the loaded binary, at an address no
     /// section holds or with blank text, are skipped and listed
     /// ([`borer::project::keep_placeable`]), and the counts said are of what
-    /// the overlay then holds.
+    /// the overlay then holds. The fields the file states of classes are
+    /// held to the binary's code as `set_type` holds a statement
+    /// ([`stated::settled`]): those of a class the code contradicts, or
+    /// that no function of the binary belongs to, are skipped with the
+    /// reason ([`skipped_classes`]) and the rest of the project loads.
+    /// Loaded so that borer reads no code of it, a binary has no class to
+    /// hold them to: they stay as stated, and the answer says so.
     ///
     /// # Arguments
     ///
@@ -497,8 +558,9 @@ impl BorerServer {
     /// # Errors
     ///
     /// Invalid params when no binary is loaded, the file does not parse or
-    /// states something the overlay cannot hold, or it was saved for
-    /// another binary and `force` is not set.
+    /// states something the overlay cannot hold, it was saved for another
+    /// binary and `force` is not set, or the request's deadline passes
+    /// before its class fields are held to the code.
     #[tool(
         description = "Replace the session's names, comments and types with a saved .json project. Another binary's project (by SHA-256) is refused unless force=true; for a rebuild use borer://carry.",
         meta = effects(&[Effect::ReadsFiles, Effect::ChangesSession]),
@@ -541,6 +603,18 @@ impl BorerServer {
         }
         let mut loaded = pf.to_overlay().map_err(err_params)?;
         let left_out = borer::project::keep_placeable(&mut loaded, &program);
+        let mut unsettled = stated::Unsettled::default();
+        if !loaded.fields.is_empty() {
+            let tabled = Overlay {
+                enum_source: EnumSource::Binary,
+                ..loaded.clone()
+            };
+            self.with_program(|p| {
+                unsettled = stated::settled(p, &self.analysis_or_empty(), &tabled)?;
+                Ok(String::new())
+            })?;
+        }
+        let gone = unsettled.leave_out(&mut loaded);
         let stated = stated_counts(
             loaded.prototypes.len(),
             loaded.vars.values().map(BTreeMap::len).sum(),
@@ -562,6 +636,7 @@ impl BorerServer {
                 total = left_out.len()
             );
         }
+        said.push_str(&skipped_classes(&unsettled, gone));
         if foreign {
             let _ = writeln!(
                 said,

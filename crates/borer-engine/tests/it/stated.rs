@@ -12,10 +12,12 @@ use borer_engine::analysis::apply::from_pointer;
 use borer_engine::analysis::classes::{class_layout, render_layout};
 use borer_engine::analysis::decompile::decompile_named;
 use borer_engine::analysis::stated::{
-    Field, Mode, Statement, object_class, plan, plan_at, plan_class, retyped, undefined, validate,
+    Field, Mode, Statement, Unsettled, object_class, plan, plan_at, plan_class, retyped, settled,
+    undefined, validate,
 };
 use borer_engine::analysis::utypes::{UserType, build_enum, list_tsv, parse_type};
 use borer_engine::analysis::{Analysis, EnumSource, Overlay};
+use borer_engine::cancel::Cancel;
 use borer_engine::program::{Arch, Program, Section};
 
 /// The class the tests state fields of: its table is at 0x2800.
@@ -1125,6 +1127,110 @@ fn a_type_change_that_would_break_a_stated_field_is_refused() {
         after.types = types.into();
         assert_eq!(validate(&after), Ok(()), "{name} as {ty:?}");
     }
+}
+
+/// The fields a project states of classes are held to the binary's code
+/// once it is at hand, as a statement is when it is made.
+///
+/// A type of a width the code never uses, two pointers only this image's
+/// width makes share a byte and the name the class's asserts give another
+/// field pass the file's own check; here each names its class as one the
+/// code contradicts, with the refusal a statement would get. A class no
+/// function belongs to, or spelled in another case, is named apart, both
+/// kinds leave the overlay counted, and a check cut short holds nothing.
+#[test]
+fn a_project_s_fields_are_held_to_the_binary_s_code() {
+    let p = two_classes();
+    let a = Analysis::compute(&p);
+    let contradicted = |class: &str, why: &str| {
+        let contradicted = vec![(class.to_owned(), why.to_owned())];
+        let none = Unsettled::default();
+        Ok(Unsettled {
+            contradicted,
+            ..none
+        })
+    };
+    let wide = stating(&[(0x270, "m_wide", Some("u64")), (0x18, "m_next", None)]);
+    assert_eq!(validate(&wide), Ok(()), "the file alone cannot tell");
+    assert_eq!(
+        settled(&p, &a, &wide),
+        contradicted(
+            CLASS,
+            "field m_wide at +0x270 of class class_2800 is stated u64, 8 byte(s) wide, but the class's code accesses it 4 byte(s) wide at 0x100a (class_2800::ctor_or_dtor), 0x1040 (class_2800::vfunc_0), 0x1080 (class_2800::vfunc_1); state a type of that width, or leave the type out (0x270:m_wide) to keep the width the code uses"
+        )
+    );
+    let close = stating(&[(0x100, "m_a", Some("u8 *")), (0x104, "m_b", Some("u8 *"))]);
+    assert_eq!(validate(&close), Ok(()), "a 32-bit image's pointers fit");
+    assert_eq!(
+        settled(&p, &a, &close),
+        contradicted(
+            CLASS,
+            "class class_2800: field m_b at 0x104 overlaps m_a, which ends at 0x108"
+        )
+    );
+    let fixture = crate::common::fixture();
+    let analysis = Analysis::compute(&fixture);
+    let mut named = Overlay::default();
+    let of_arr = named.fields.entry("Arr<int>".to_owned()).or_default();
+    of_arr.insert(0x10, field("size", None));
+    assert_eq!(validate(&named), Ok(()), "the file alone cannot tell");
+    assert_eq!(
+        settled(&fixture, &analysis, &named),
+        contradicted(
+            "Arr<int>",
+            "size already names +0x8 of class Arr<int>; pick another name for +0x10"
+        )
+    );
+    let mut mixed = wide;
+    for class in ["Ghost", "CLASS_2800", "class_2900"] {
+        let fields = mixed.fields.entry(class.to_owned()).or_default();
+        fields.insert(0x30, field("m_kept", Some("u32")));
+    }
+    let ghost = mixed.fields.entry("Ghost".to_owned()).or_default();
+    ghost.insert(0x38, field("m_more", None));
+    let unsettled = settled(&p, &a, &mixed).expect("no deadline cuts it short");
+    assert_eq!(unsettled.absent, ["CLASS_2800", "Ghost"]);
+    assert_eq!(unsettled.contradicted.len(), 1, "{unsettled:?}");
+    assert_eq!(unsettled.leave_out(&mut mixed), (3, 2));
+    assert_eq!(mixed.fields.keys().collect::<Vec<_>>(), ["class_2900"]);
+    assert_eq!(settled(&p, &a, &mixed), Ok(Unsettled::default()));
+    let cut = Cancel::new();
+    cut.raise();
+    assert_eq!(
+        cut.within(|| settled(&p, &a, &mixed)),
+        Err("the request's deadline passed before the result was whole, so it was not kept".into())
+    );
+}
+
+/// Where borer reads no code of the binary, no class is held to anything.
+///
+/// The stated fields stay as they are and the reason is handed back, where
+/// an analysis of no function would name every class one of none and the
+/// load would drop them all.
+#[test]
+fn a_project_s_fields_stay_where_borer_reads_no_code() {
+    let unread = Program::raw(vec![0xc3], Arch::Unknown, 0, None, Vec::new());
+    let stated = stating(&[(0x270, "m_wide", Some("u64")), (0x18, "m_next", None)]);
+    let held = settled(&unread, &Analysis::default(), &stated).expect("no deadline");
+    assert!(
+        held.unread
+            .as_deref()
+            .is_some_and(|why| why.contains("so no code analysis applies")),
+        "{held:?}"
+    );
+    assert!(
+        held.absent.is_empty() && held.contradicted.is_empty(),
+        "{held:?}"
+    );
+    let mut kept = stated.clone();
+    assert_eq!(held.leave_out(&mut kept), (0, 0));
+    assert_eq!(kept.fields, stated.fields);
+    let none = settled(&unread, &Analysis::default(), &Overlay::default());
+    assert_eq!(
+        none,
+        Ok(Unsettled::default()),
+        "nothing stated, nothing said"
+    );
 }
 
 /// The same statements made in another order leave the same overlay, and

@@ -258,7 +258,7 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
                 Some(path) => project_overlay(path, &program)?,
                 None => Overlay::default(),
             };
-            query(q, args, &Session::fit(program, &named, overlay, load))?;
+            query(q, args, &Session::checked(program, &named, overlay, load)?)?;
         }
     }
     Ok(())

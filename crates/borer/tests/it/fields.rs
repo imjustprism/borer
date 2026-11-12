@@ -362,6 +362,239 @@ fn a_loaded_project_s_stated_fields_show_in_every_listing() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Writes a project saved for the session's image and loads it.
+///
+/// # Arguments
+///
+/// * `client` - The session, with the image loaded.
+/// * `image` - The image's path.
+/// * `path` - Where the project goes.
+/// * `stated` - The project's `names` and its `fields`.
+///
+/// # Returns
+///
+/// What `load_project` answered, without the evidence line.
+fn load(
+    client: &mut Client,
+    image: &str,
+    path: &str,
+    stated: (&serde_json::Value, &serde_json::Value),
+) -> String {
+    let sha256 = identity(&std::fs::read(image).expect("the image reads back"));
+    let project = serde_json::json!({
+        "program": image, "sha256": sha256, "names": stated.0, "comments": {}, "fields": stated.1
+    });
+    std::fs::write(path, project.to_string()).expect("the project is writable");
+    let path = serde_json::json!({"path": path}).to_string();
+    without_evidence(&client.text("load_project", &path))
+        .trim_end()
+        .to_owned()
+}
+
+/// A project's class fields are held to the binary's code when the file
+/// is loaded, by the server and at the command line.
+///
+/// The fields of a class the code contradicts are skipped with the
+/// refusal that names the field while the rest loads, a project the code
+/// bears out loads and prints, and `set-type` keeps what a load skips, so
+/// the field is restated there and the project loads whole again.
+#[test]
+fn a_project_s_class_fields_are_held_to_the_code_when_it_loads() {
+    let (mut client, dir, image) = session("settled");
+    let before = rows(&mut client, "class_2800");
+    let file = |name: &str| dir.join(name).to_string_lossy().into_owned();
+    let (wide, fits, none) = (file("wide.json"), file("fits.json"), serde_json::json!({}));
+    let skipped = "skipped 2 stated field(s) of 1 class(es) the binary's code contradicts (showing 1 of 1): class_2800 (field m_wide at +0x270 of class class_2800 is stated u64, 8 byte(s) wide, but the class's code accesses it 4 byte(s) wide at 0x100a (class_2800::ctor_or_dtor), 0x1040 (class_2800::vfunc_0), 0x1080 (class_2800::vfunc_1); state a type of that width, or leave the type out (0x270:m_wide) to keep the width the code uses)";
+    let contradicted = serde_json::json!({"class_2800": {"0x270": "m_wide u64", "0x18": "m_next"}});
+    assert_eq!(
+        load(&mut client, &image, &wide, (&none, &contradicted)),
+        format!("loaded 0 names + 0 comments + 0 types + 0 applied\n# {skipped}")
+    );
+    assert_eq!(rows(&mut client, "class_2800"), before, "none was loaded");
+    let borne_out = serde_json::json!({"class_2800": {"0x270": "m_wide u32"}});
+    assert_eq!(
+        load(&mut client, &image, &fits, (&none, &borne_out)),
+        "loaded 0 names + 0 comments + 0 types + 0 applied + 1 stated fields"
+    );
+    client.finish();
+    let cli = |words: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_borer"))
+            .args(["--no-pdb", words[0], &image, "--arch", "x64"])
+            .args(["--regions", REGIONS])
+            .args(&words[1..])
+            .output()
+            .expect("spawn borer");
+        String::from_utf8_lossy(&[out.stdout, out.stderr].concat()).into_owned()
+    };
+    let unnamed = before.iter().find(|row| row.starts_with("+0x270 "));
+    let said = cli(&["class", "class_2800", "--project", &wide]);
+    assert!(
+        said.contains(unnamed.expect("the field has a row").as_str())
+            && said.contains(&format!("borer: {skipped}\n"))
+            && !said.contains("m_next"),
+        "{said}"
+    );
+    let said = cli(&["class", "class_2800", "--project", &fits]);
+    assert!(
+        said.contains("+0x270  u32 m_wide ") && said.contains("[stated u32"),
+        "{said}"
+    );
+    let said = cli(&[
+        "set-type",
+        &wide,
+        "struct",
+        "class_2800",
+        "0x270:m_wide:u32",
+    ]);
+    assert!(
+        said.starts_with("stated 1 field(s) of class class_2800: "),
+        "{said}"
+    );
+    let said = cli(&["class", "class_2800", "--project", &wide]);
+    assert!(
+        said.contains("+0x270  u32 m_wide ")
+            && said.contains(" m_next ")
+            && !said.contains("skipped"),
+        "restated, the project loads whole: {said}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The fields a project states of a class no function of the binary
+/// belongs to are left out of the session and counted apart.
+///
+/// The load's count is of the fields that apply, the listings and a save
+/// hold only those, more classes than a line names are counted, and a
+/// class the project's own names make is a class of the binary, held to
+/// its code.
+#[test]
+fn fields_of_no_class_of_the_binary_are_skipped_and_counted_apart() {
+    let (mut client, dir, image) = session("absent");
+    let file = |name: &str| dir.join(name).to_string_lossy().into_owned();
+    let (path, none) = (file("stated.json"), serde_json::json!({}));
+    let mixed = serde_json::json!({
+        "Ghost": {"0x10": "m_count", "0x18": "m_b u64"}, "class_2800": {"0x18": "m_next"}
+    });
+    assert_eq!(
+        load(&mut client, &image, &path, (&none, &mixed)),
+        "loaded 0 names + 0 comments + 0 types + 0 applied + 1 stated fields\n# skipped 2 stated field(s) of 1 class(es) that name no class of this binary (showing 1 of 1): Ghost"
+    );
+    let annotations = client.text("annotations", "{}");
+    assert!(
+        annotations.contains(", 1 stated field(s))\n") && !annotations.contains("Ghost"),
+        "{annotations}"
+    );
+    let saved = serde_json::json!({"path": file("saved.json")}).to_string();
+    let saved = client.text("save_project", &saved);
+    assert!(saved.contains(" + 1 stated fields to "), "{saved}");
+    let many: serde_json::Map<String, serde_json::Value> = (0..9)
+        .map(|k| (format!("Ghost{k}"), serde_json::json!({"0x8": "m_a"})))
+        .collect();
+    assert_eq!(
+        load(&mut client, &image, &path, (&none, &many.into())),
+        "loaded 0 names + 0 comments + 0 types + 0 applied\n# skipped 9 stated field(s) of 9 class(es) that name no class of this binary (showing 8 of 9): Ghost0, Ghost1, Ghost2, Ghost3, Ghost4, Ghost5, Ghost6, Ghost7"
+    );
+    let named = serde_json::json!({"0x11c0": "Ghost::update"});
+    let held = load(&mut client, &image, &path, (&named, &mixed));
+    assert!(
+        held.starts_with("loaded 1 names + 0 comments + 0 types + 0 applied + 1 stated fields\n# skipped 2 stated field(s) of 1 class(es) the binary's code contradicts (showing 1 of 1): Ghost (field m_b at +0x18 of class Ghost is stated u64, 8 byte(s) wide, but the class's code accesses it 4 byte(s) wide"),
+        "the project's own names make the class, and its code is read: {held}"
+    );
+    let fits = serde_json::json!({"Ghost": {"0x10": "m_count", "0x18": "m_b u32"}});
+    assert_eq!(
+        load(&mut client, &image, &path, (&named, &fits)),
+        "loaded 1 names + 0 comments + 0 types + 0 applied + 2 stated fields"
+    );
+    let ghost = rows(&mut client, "Ghost");
+    assert!(
+        ghost.iter().any(|row| row.contains(" m_count ")),
+        "{ghost:#?}"
+    );
+    client.finish();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Loaded so that borer reads no code of it, a binary keeps the fields its
+/// project states, by the server and at the command line.
+///
+/// No class is held to anything there, so none is skipped as one of no
+/// function: the answer says why, and a save writes the fields back.
+#[test]
+fn a_project_s_fields_stay_where_the_binary_s_code_is_not_read() {
+    let (mut client, dir, image) = session("nocode");
+    let unmapped = serde_json::json!({"path": image}).to_string();
+    let loaded = client.text("load_binary", &unmapped);
+    assert!(!loaded.contains("kind stated layout"), "{loaded}");
+    let path = dir.join("stated.json").to_string_lossy().into_owned();
+    let fields =
+        serde_json::json!({"class_2800": {"0x270": "m_wide u64"}, "Ghost": {"0x8": "m_a"}});
+    let said = load(
+        &mut client,
+        &image,
+        &path,
+        (&serde_json::json!({}), &fields),
+    );
+    let kept = "kept the stated fields as stated, held to no code: ";
+    assert!(
+        said.starts_with(&format!(
+            "loaded 0 names + 0 comments + 0 types + 0 applied + 2 stated fields\n# {kept}"
+        )) && said.contains("so no code analysis applies")
+            && !said.contains("skipped"),
+        "{said}"
+    );
+    let saved = serde_json::json!({"path": path, "overwrite": true}).to_string();
+    let saved = client.text("save_project", &saved);
+    assert!(saved.contains(" + 2 stated fields to "), "{saved}");
+    client.finish();
+    let cli = std::process::Command::new(env!("CARGO_BIN_EXE_borer"))
+        .args(["--no-pdb", "types", &image, "--project", &path])
+        .output()
+        .expect("spawn borer");
+    let (out, err) = (
+        String::from_utf8_lossy(&cli.stdout),
+        String::from_utf8_lossy(&cli.stderr),
+    );
+    assert!(
+        out.contains("class\tGhost\t-\t0x8 m_a\n")
+            && out.contains("class\tclass_2800\t-\t0x270 m_wide u64\n"),
+        "{out}"
+    );
+    assert!(err.contains(&format!("borer: {kept}")), "{err}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A session that names a function into a class after stating a field of
+/// it saves a project that still loads.
+///
+/// The load holds the field to the code the names now give the class and
+/// skips it with the reason; the name and the rest of the project are
+/// kept, so no accepted call leaves a project that cannot load.
+#[test]
+fn a_session_a_later_name_contradicted_still_loads_back() {
+    let (mut client, dir, _) = session("renamed");
+    let stated = serde_json::json!({
+        "name": "class_2800", "fields": ["0x30:m_x:u64"], "dry_run": false
+    });
+    let said = set_type(&mut client, &stated);
+    assert!(said.ends_with(": +0x30 m_x u64 (new)"), "{said}");
+    let named = serde_json::json!({
+        "address": "0x1180", "name": "class_2800::peek", "dry_run": false
+    });
+    client.text("set_name", &named.to_string());
+    let project = dir.join("kept.json").to_string_lossy().into_owned();
+    let path = serde_json::json!({"path": project}).to_string();
+    client.text("save_project", &path);
+    let loaded = client.text("load_project", &path);
+    assert!(
+        loaded.starts_with("loaded 1 names + 0 comments + 0 types + 0 applied\n# skipped 1 stated field(s) of 1 class(es) the binary's code contradicts (showing 1 of 1): class_2800 (field m_x at +0x30 of class class_2800 is stated u64, 8 byte(s) wide, but the class's code accesses it 4 byte(s) wide"),
+        "{loaded}"
+    );
+    let text = text_of(&mut client, "0x1180");
+    assert!(text.contains("class_2800::peek"), "{text}");
+    client.finish();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// Calls `set_type` and returns what it answered, a refusal's message
 /// included, without the evidence line.
 ///

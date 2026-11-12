@@ -1,11 +1,12 @@
 //! The binary a command opens: its program, analysis and names, read once
 //! per command.
 
+use std::cell::RefCell;
 use std::sync::Arc;
 
 use anyhow::{Context as _, bail};
 use borer_engine::analysis::{
-    Analysis, Overlay, decompile, parse_addr, render, resolve_suggesting,
+    Analysis, Overlay, decompile, parse_addr, render, resolve_suggesting, stated,
 };
 use borer_engine::clr::managed;
 use borer_engine::layout::Layout;
@@ -18,6 +19,7 @@ use super::args::{arg, command_usage, decompile_args, entry_at};
 use crate::params::Detail;
 use crate::state::read_packs;
 use crate::tools::decompile::{decompile_header, window};
+use crate::tools::load::skipped_classes;
 
 /// The refusal of a command given no binary: what it needs, then its own
 /// usage lines rather than every command's.
@@ -128,6 +130,9 @@ pub(super) struct Session {
     pub(super) overlay: Overlay,
     /// How the binary was loaded.
     pub(super) loading: Loading,
+    /// The analysis the project's class fields were held to the code with
+    /// ([`Session::checked`]), until a command asks for one.
+    pub(super) ready: RefCell<Option<Analysis>>,
 }
 
 /// Reads a project file into the overlay a query applies.
@@ -194,11 +199,51 @@ impl Session {
             packs,
             overlay,
             loading,
+            ready: RefCell::new(None),
         }
     }
 
+    /// Fits a session ([`Session::fit`]) whose project's class fields are
+    /// held to the binary's code, as the `load_project` tool holds them
+    /// ([`stated::settled`]): what a query runs against.
+    ///
+    /// The fields of a class the code contradicts, or that no function
+    /// belongs to, are left out and said on stderr as the tool's answer
+    /// says them ([`skipped_classes`]). A project that states none costs
+    /// nothing, and the analysis the check reads is kept for the command's
+    /// first use of one, so no command analyzes the binary twice for its
+    /// project.
+    ///
+    /// # Arguments
+    ///
+    /// As [`Session::fit`].
+    ///
+    /// # Errors
+    ///
+    /// When the check is cut short, which only a caller's deadline does.
+    pub(super) fn checked(
+        program: Program,
+        named: &Packs,
+        overlay: Overlay,
+        loading: Loading,
+    ) -> anyhow::Result<Self> {
+        let mut s = Self::fit(program, named, overlay, loading);
+        if s.overlay.fields.is_empty() {
+            return Ok(s);
+        }
+        let a = s.analysis_or_empty();
+        let unsettled = stated::settled(&s.program, &a, &s.overlay).map_err(anyhow::Error::msg)?;
+        let gone = unsettled.leave_out(&mut s.overlay);
+        for line in skipped_classes(&unsettled, gone).lines() {
+            eprintln!("borer: {}", line.trim_start_matches("# "));
+        }
+        s.ready = RefCell::new(Some(a));
+        Ok(s)
+    }
+
     /// Computes the analysis for a command that reads `feature` of the
-    /// program's code.
+    /// program's code, or hands over the one the project was held to the
+    /// code with ([`Session::checked`]).
     ///
     /// # Arguments
     ///
@@ -214,6 +259,9 @@ impl Session {
     pub(super) fn analysis(&self, feature: Feature) -> anyhow::Result<Analysis> {
         if let Some(why) = self.program.refuses(feature) {
             bail!("{why}");
+        }
+        if let Some(ready) = self.ready.take() {
+            return Ok(ready);
         }
         crate::term::busy(&format!("analyzing {}", file_name(&self.program.path)), &[]);
         Ok(Analysis::compute_with(
@@ -522,4 +570,61 @@ pub(super) fn cli_hint(message: &str) -> String {
         borer_engine::analysis::LIST_HINT,
         "; list them with `borer functions <binary> <filter>` or `borer symbols <binary> <filter>`",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use borer_engine::analysis::Overlay;
+    use borer_engine::analysis::stated::Field;
+    use borer_engine::pack::Packs;
+    use borer_engine::program::{Arch, Feature, Program, Section};
+
+    use super::{Loading, Session};
+
+    /// A session over one `ret`, with a project stating `fields` fields of
+    /// a class no function belongs to.
+    ///
+    /// # Arguments
+    ///
+    /// * `fields` - How many fields the project states.
+    ///
+    /// # Panics
+    ///
+    /// When the check is cut short.
+    fn checked(fields: u64) -> Session {
+        let text = Section::mapped(".text", 0x1000, 0, 1, false, true);
+        let code = vec![0xc3]; // ASM: ret
+        let program = Program::raw(code, Arch::X86_64, 0, Some(0x1000), vec![text]);
+        let mut overlay = Overlay::default();
+        for off in 0..fields {
+            let field = Field {
+                name: format!("m_{off}"),
+                ty: None,
+            };
+            let stated = overlay.fields.entry("Ghost".to_owned()).or_default();
+            stated.insert(off, field);
+        }
+        Session::checked(program, &Packs::default(), overlay, Loading::default())
+            .expect("no deadline cuts a command's check short")
+    }
+
+    /// The analysis a project was held to the code with goes to the
+    /// command's first use of one.
+    ///
+    /// No command analyzes the binary twice for its project, a project
+    /// that states no field has no analysis computed for it, and the
+    /// fields of a class no function belongs to are left out.
+    ///
+    /// # Panics
+    ///
+    /// When the analysis is not kept, is handed out twice, or is computed
+    /// for a project that states no field, or the fields stay.
+    #[test]
+    fn the_analysis_a_project_was_checked_with_goes_to_the_command() {
+        assert!(checked(0).ready.borrow().is_none());
+        let s = checked(2);
+        assert!(s.ready.borrow().is_some() && s.overlay.fields.is_empty());
+        let first = s.analysis(Feature::Discover).expect("x86-64 is analyzed");
+        assert!(first.function(0x1000).is_some() && s.ready.borrow().is_none());
+    }
 }
