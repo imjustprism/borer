@@ -25,6 +25,7 @@ use std::collections::BTreeSet;
 
 use super::super::expr::{Flags, Key};
 use super::super::lift::EffectKind;
+use super::super::liveness::WHOLE;
 use super::term::{self, Term};
 use super::{Bench, Claim, End, Function, Replay, Replayed, Transfer, Trial, low, mix};
 use crate::emulate::Stop;
@@ -86,15 +87,20 @@ pub(super) fn start_term(k: Key, c: u64, n: u8, width: u8) -> Term {
 impl<'p, L: Replay> Function<'_, 'p, L> {
     /// The bytes of memory an equality of a variable fixes where block `b`
     /// starts, each by its address and its index in the constant: those of
-    /// a slot or a global, and none for a variable held in the state
-    /// ([`in_register`]).
+    /// a slot or a global, as far as the equality reaches, and none for a
+    /// variable held in the state ([`in_register`]).
+    ///
+    /// An equality of the low half of an eight-byte slot fixes four bytes:
+    /// the rest are what the state has there, as the upper half of a
+    /// register is ([`under`]).
     ///
     /// # Arguments
     ///
     /// * `b` - The block's index.
     /// * `k` - The variable.
+    /// * `n` - How many low bits of it the equality fixes.
     /// * `sp0` - The stack pointer at the function's entry.
-    pub(super) fn fact_bytes(&self, b: usize, k: Key, sp0: u64) -> Vec<(u64, u8)> {
+    pub(super) fn fact_bytes(&self, b: usize, k: Key, n: u8, sp0: u64) -> Vec<(u64, u8)> {
         let (at, len) = match k {
             Key::Slot(o) => {
                 let bits = self.w.ins.get(b).and_then(|e| e.slot_bits.get(&o));
@@ -107,7 +113,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             Key::Reg(_) | Key::A64(_) | Key::A32(_) | Key::Rv(_) => (0, 0),
             Key::Tmp(_) | Key::Param(_) => (0, 0),
         };
-        (0..len.min(8))
+        (0..len.min(n / 8).min(8))
             .map(|i| (at.wrapping_add(u64::from(i)) & low(self.width), i))
             .collect()
     }
@@ -131,14 +137,13 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         let fact = |s: usize| self.w.assumes.get(s).copied().flatten();
         let fed = self.succs.get(b).into_iter().flatten().filter_map(|&s| {
             let (k, ..) = fact(s)?;
-            Some((k, *forced.get(&k)?))
+            Some((k, *forced.get(&k)?, WHOLE))
         });
         fact(b)
-            .map(|(k, c, _)| (k, c))
             .into_iter()
             .chain(fed)
-            .flat_map(|(k, c)| {
-                let bytes = self.fact_bytes(b, k, sp0).into_iter();
+            .flat_map(|(k, c, n)| {
+                let bytes = self.fact_bytes(b, k, n, sp0).into_iter();
                 bytes.map(move |(at, i)| (at, lo8(c >> (8 * i))))
             })
             .collect()

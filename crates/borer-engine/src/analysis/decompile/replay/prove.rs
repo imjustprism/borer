@@ -1675,7 +1675,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         let assumed = w.assumes.get(b).copied().flatten();
         for (at, i) in assumed
             .into_iter()
-            .flat_map(|f| self.fact_bytes(b, f.0, sp0))
+            .flat_map(|f| self.fact_bytes(b, f.0, f.2, sp0))
         {
             base.insert(at, Byte::Of(Term::Const(assumed.map_or(0, |f| f.1)), i));
         }

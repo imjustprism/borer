@@ -326,6 +326,67 @@ fn an_equality_of_a_global_is_tried_from_memory() {
     assert_eq!((r.checked, unborne(&r)), (2, 1), "{}", replay_tsv(&r));
 }
 
+/// An equality of the low half of a slot leaves the slot's upper half to
+/// the state.
+///
+/// After `cmp dword [rsp+8],5; jne`, `mov rax,[rsp+8]; mov [rdx],rax`
+/// stores the slot whole. Told that the block starts with the slot's low
+/// half 5, the replay fixes four of its bytes: a text made to store 5
+/// differs from the machine in the other four, which a slot fixed whole at
+/// the constant never showed. The run into the block holds the equality,
+/// so the block is checked.
+///
+/// The proof fixes as many. `cmp [rsp+8],r8; sete al` against
+/// `0x100000005` is true in one state of the slot's upper half, which no
+/// state tried holds: a text made to store 0 agrees in each, and is not
+/// proved, as it was with the slot fixed whole at 5.
+#[test]
+fn an_equality_of_a_slots_low_half_fixes_four_bytes() {
+    let stores = [
+        0x83, 0x7c, 0x24, 0x08, 0x05, // ASM: cmp dword [rsp+8], 5
+        0x75, 0x09, // ASM: jne 0x1010
+        0x48, 0x8b, 0x44, 0x24, 0x08, // ASM: mov rax, [rsp+8]
+        0x48, 0x89, 0x02, // ASM: mov [rdx], rax
+        0xc3, // ASM: ret
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xc3, // ASM: ret
+    ];
+    let tests = [
+        0x83, 0x7c, 0x24, 0x08, 0x05, // ASM: cmp dword [rsp+8], 5
+        0x75, 0x16, // ASM: jne 0x101d
+        0x49, 0xb8, 0x05, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+        0x00, // ASM: mov r8, 0x100000005
+        0x4c, 0x39, 0x44, 0x24, 0x08, // ASM: cmp [rsp+8], r8
+        0x0f, 0x94, 0xc0, // ASM: sete al
+        0x0f, 0xb6, 0xc0, // ASM: movzx eax, al
+        0xc3, // ASM: ret
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xc3, // ASM: ret
+    ];
+    let low = |w: &mut Witness| w.assumes[1] = Some((Key::Slot(8), 5, 32));
+    let p = Program::raw_x64(&stores);
+    agrees(&p, 0x1000);
+    let five = |e: &mut crate::analysis::decompile::lift::Effect| {
+        if let EffectKind::Store(s) = &mut e.kind {
+            s.2 = Expr::Const(5);
+        }
+    };
+    let r = replayed_under(&p, 0x1000, 1, five, low);
+    let upper: Vec<_> = r.disagreements.iter().map(|d| (d.claim, d.lane)).collect();
+    assert_eq!(upper, [(Claim::Memory, true)], "{}", replay_tsv(&r));
+    assert_eq!(unborne(&r), 0, "{}", replay_tsv(&r));
+    let p = Program::raw_x64(&tests);
+    agrees(&p, 0x1000);
+    let zero = |e: &mut crate::analysis::decompile::lift::Effect| {
+        if let EffectKind::Return(Some(v)) = &mut e.kind {
+            *v = Expr::Const(0);
+        }
+    };
+    let r = replayed_under(&p, 0x1000, 1, zero, low);
+    assert_eq!(claims(&r), [], "{}", replay_tsv(&r));
+    assert_eq!((r.checked, r.proved), (3, 2), "{}", replay_tsv(&r));
+}
+
 /// The header counts a block whose entry equality no run bore out as
 /// unknown, by that name.
 ///
