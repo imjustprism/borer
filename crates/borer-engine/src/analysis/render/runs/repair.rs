@@ -19,6 +19,7 @@
 use std::cell::Cell;
 use std::sync::Arc;
 
+use super::Grade;
 use super::vectors::{Checked, Counterexample, Placed, draw, first_breaking, first_difference};
 use crate::analysis::decompile::{Pass, Passes, Site, choice_points, text_check};
 use crate::analysis::{Analysis, Overlay};
@@ -265,7 +266,7 @@ pub fn repair_iso(p: &Program, a: &Analysis, o: &Overlay, entry: u64, budget: Bu
         })
     };
     let base = iso(o);
-    let live = base.differs.is_some() || base.agreed > 0;
+    let live = base.grade() != Grade::Unchecked;
     let Some(at) = base.differs.clone().or(refuted) else {
         return Repair::Agrees;
     };
@@ -281,9 +282,10 @@ pub fn repair_iso(p: &Program, a: &Analysis, o: &Overlay, entry: u64, budget: Bu
             checks.set(checks.get() + 1);
             Checked::default()
         };
+        let grade = c.grade();
         match c.differs.or(refuted) {
             Some(c) => Evidence::Refuted(c),
-            None if live && c.agreed == 0 => Evidence::Unchecked,
+            None if live && grade == Grade::Unchecked => Evidence::Unchecked,
             None => Evidence::Tested(c.agreed),
         }
     };
