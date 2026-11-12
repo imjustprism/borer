@@ -190,6 +190,10 @@ fn a_device_path_climbing_out_of_its_drive_is_refused() {
             "//./C:/x/../../UNC/host.invalid/s",
             r"\\.\C:\..\pipe\x",
             r"\\.\C:\..\x",
+            "//?/C:/../UNC/host.invalid/s/x.pdb",
+            r"\\?/C:/../UNC/host.invalid/s",
+            r"/\?\C:\..\UNC\host.invalid\s",
+            "//?/C:/../pipe/x",
         ]
         .into_iter()
         .filter(|p| unusable_path(std::path::Path::new(p)).is_none())
@@ -197,7 +201,55 @@ fn a_device_path_climbing_out_of_its_drive_is_refused() {
         assert!(let_through.is_empty(), "{let_through:?}");
         let named = unusable_path(std::path::Path::new(r"\\.\C:\d\a..b.exe"));
         assert_eq!(named, None, "a name with two dots");
+        let unparsed = unusable_path(std::path::Path::new(r"\\?\C:\x"));
+        assert_eq!(unparsed, None, "an exact long drive path");
     }
+}
+
+/// A PE whose `CodeView` record climbs through `//?/` loads without that
+/// path being tried.
+///
+/// Windows leaves only an exact `\\?\` unparsed, so it folded the `..` and
+/// the record reached any file, share or device it named: here a local file
+/// that is no PDB, which the lookup found and reported unreadable.
+///
+/// # Panics
+///
+/// When the record's path is tried.
+#[test]
+fn a_record_climbing_through_a_device_path_is_never_tried() {
+    let exe = std::env::current_exe().expect("the test binary has a path");
+    let record = Program::load_with(&exe, false)
+        .ok()
+        .and_then(|p| p.pdb_record);
+    let Some(record) = record.filter(|_| cfg!(windows)) else {
+        return;
+    };
+    let dir = std::env::temp_dir().join(format!("borer-cv-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a temp dir");
+    let decoy = dir.join("cv.pdb");
+    std::fs::write(&decoy, b"no pdb").expect("written");
+    let climb = format!("//?/X:/../{}", decoy.display()).replace('\\', "/");
+    let mut bytes = std::fs::read(&exe).expect("the test binary is readable");
+    let old = record.path.as_bytes();
+    let at = bytes.windows(old.len()).position(|w| w == old);
+    let patched = at.filter(|_| climb.len() < old.len()).and_then(|at| {
+        let region = bytes.get_mut(at..at + old.len())?;
+        region.fill(0);
+        region
+            .get_mut(..climb.len())?
+            .copy_from_slice(climb.as_bytes());
+        Some(())
+    });
+    let loaded = patched
+        .map(|()| Program::from_bytes_with(dir.join("bin").join("x.exe"), bytes, true, None));
+    std::fs::remove_dir_all(&dir).expect("cleans up");
+    let Some(loaded) = loaded else {
+        return;
+    };
+    let loaded = loaded.expect("the patched copy loads");
+    assert_eq!(loaded.pdb_record.map(|r| r.path), Some(climb.clone()));
+    assert!(loaded.pdb.is_none(), "{climb} was tried: {:?}", loaded.pdb);
 }
 
 /// The section index answers what a scan of the table in file order does.
