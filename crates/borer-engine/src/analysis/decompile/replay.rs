@@ -1055,6 +1055,7 @@ fn unchecked_label(reason: &str) -> &'static str {
         | "an instruction outside every checked form"
         | "a trap or a branch with no model" => "unmodeled",
         "flags set in another block" => "flags across blocks",
+        edge::ASSUMED => "entry equality",
         "the stack pointer unknown at its start" | "a frame alignment" => "stack unknown",
         _ => "other",
     }
@@ -2954,6 +2955,9 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         let (code, sp) = self.admit(b)?;
         let end = End::of::<L>(code)?;
         *room = room.checked_sub(1).ok_or(OVER_BUDGET)?;
+        if !self.borne(b, out) {
+            return Err(edge::ASSUMED);
+        }
         let pool = L::comparands(code, self.width);
         let none = FxHashMap::default();
         let mut seen = BTreeSet::new();
@@ -2962,14 +2966,13 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         let mut tried = 0;
         let mut wrote = None;
         let mut early = None;
-        self.edges(b, block, code, sp, end, &mut seen, out);
         for trial in 0..TRIALS + RULED_OUT_RETRIES {
             if tried == TRIALS {
                 break;
             }
             let pool: &[u64] = if trial == 0 { &[] } else { &pool };
             match self.trial(b, block, code, sp, end, pool, trial, &none, &mut seen, out) {
-                Ok(w) => {
+                Ok((w, _)) => {
                     compared += 1;
                     if wrote.is_none() && self.sampling == Sampling::UntilProved && seen.is_empty()
                     {
@@ -3281,7 +3284,8 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
     ///
     /// # Returns
     ///
-    /// The bytes the machine wrote.
+    /// The bytes the machine wrote, and whether it took the block's branch
+    /// ([`Function::taken`]).
     ///
     /// # Errors
     ///
@@ -3302,7 +3306,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         forced: &FxHashMap<Key, u64>,
         seen: &mut BTreeSet<(Claim, String)>,
         out: &mut Replayed,
-    ) -> Result<FxHashSet<u64>, &'static str> {
+    ) -> Result<(FxHashSet<u64>, Option<bool>), &'static str> {
         let w = self.w;
         let inn = &w.ins[b];
         let mask = low(self.width);
@@ -3319,8 +3323,8 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         let sp0 = rsp.wrapping_sub(sp.cast_unsigned()) & mask;
         let mut base = Seeded::stack(&mut emu, &mut rng, rsp, mask);
         let own = w.assumes.get(b).copied().flatten();
-        for (at, i) in own.into_iter().flat_map(|f| self.fact_bytes(b, f.0, sp0)) {
-            base.fix(&mut emu, at, lo8(own.map_or(0, |f| f.1) >> (8 * i)));
+        for (at, byte) in self.planted(b, forced, sp0) {
+            base.fix(&mut emu, at, byte);
         }
         let mut text = Text {
             vars: FxHashMap::default(),
@@ -3472,33 +3476,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         }
         self.successors(&mut t, start, last, end, out);
         *seen = t.seen;
-        Ok(t.written)
-    }
-
-    /// Whether the machine takes the branch ending a block, run one step
-    /// from where the block stopped; `None` when the block ends in no
-    /// branch or the step does not tell.
-    ///
-    /// # Arguments
-    ///
-    /// * `emu` - The machine, stopped before the branch.
-    /// * `end` - How the block ends.
-    fn taken(emu: &L::Rig<'p>, end: End<L::Insn>) -> Option<bool> {
-        match end.last().map(|jcc| (jcc, L::transfer(&jcc))) {
-            Some((jcc, Transfer::Branch { target, next }))
-                if matches!(end, End::Branch(_)) && target != next =>
-            {
-                let mut step = emu.clone();
-                step.set_budget(1);
-                step.stop_at(Some(target));
-                match step.run(L::start(&jcc)).stop {
-                    Stop::Stopped(_) => Some(true),
-                    Stop::Budget => Some(false),
-                    _ => None,
-                }
-            }
-            Some(_) | None => None,
-        }
+        Ok((t.written, t.taken))
     }
 
     /// Replays one effect, comparing what it claims at its point.
