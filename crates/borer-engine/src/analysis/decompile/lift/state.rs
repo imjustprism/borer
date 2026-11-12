@@ -1382,9 +1382,7 @@ impl<'a> Exec<'_, 'a> {
         if self.ctx.symbolic_only {
             return;
         }
-        if self.assume.is_some_and(|(k, _)| k == key) {
-            self.assume = None;
-        }
+        self.end_fact(&|e: &Expr| e.is_var(key));
         self.declare(key, self.ty_of(key));
         self.big_written.entry(key).or_insert_with(|| val.clone());
         self.env.vals.remove(&key);
@@ -1978,8 +1976,28 @@ impl<'a> Exec<'_, 'a> {
         self.env.clobbered.insert(k);
     }
 
+    /// Ends the block's equality assumption when it is about a variable
+    /// going stale: the branch that gave it read the value the variable
+    /// held before.
+    ///
+    /// A global is one wherever memory is about to change: after `cmp dword
+    /// [g], 5; jne` the block starts under `g == 5`, and past its `mov
+    /// dword [g], 7`, or a store through a pointer that may be `&g`, a
+    /// read of `g` is the read it is, not 5.
+    ///
+    /// # Arguments
+    ///
+    /// * `stale` - Selects the values about to become stale.
+    fn end_fact(&mut self, stale: &dyn Fn(&Expr) -> bool) {
+        if self.assume.is_some_and(|(k, _)| stale(&Expr::Var(k))) {
+            self.assume = None;
+        }
+    }
+
     /// Copies pending flag operands matching `pred` into temporaries so the
-    /// eventual condition still reads the values the compare saw.
+    /// eventual condition still reads the values the compare saw, and ends
+    /// the block's equality assumption when it is about such a value
+    /// ([`Self::end_fact`]).
     ///
     /// Dead flags are dropped instead of protected.
     ///
@@ -1987,6 +2005,7 @@ impl<'a> Exec<'_, 'a> {
     ///
     /// * `pred` - Selects the operands about to become stale.
     pub(super) fn protect_flags(&mut self, pred: &dyn Fn(&Expr) -> bool) {
+        self.end_fact(pred);
         if let Some((held, saved)) = self.status_ah.take() {
             let ah = self.canon(Register::AH);
             let read_later = self
@@ -2264,9 +2283,7 @@ impl<'a> Exec<'_, 'a> {
     ///
     /// * `key` - The variable being clobbered.
     pub(in crate::analysis::decompile) fn clobber(&mut self, key: Key) {
-        if self.assume.is_some_and(|(k, _)| k == key) {
-            self.assume = None;
-        }
+        self.end_fact(&|e: &Expr| e.is_var(key));
         self.protect_readers(key, &mut Vec::new(), None);
         self.protect_flags(&|e: &Expr| e.mentions(key));
         self.env.vals.remove(&key);

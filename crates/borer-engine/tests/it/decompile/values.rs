@@ -1361,3 +1361,39 @@ fn a_stated_array_global_is_declared_whole() {
     assert!(text.contains("uint32_t fds[2];"), "{text}");
     assert!(text.contains("fds[1]") && text.contains("fds[0]"), "{text}");
 }
+
+/// A global's equality ends where memory changes.
+///
+/// After `cmp dword [g],5; jne` the block starts under `g == 5`. Its `mov
+/// dword [g],7` changes `g`, and so may its `mov [rdx],eax`, whose pointer
+/// can be `&g`: a read of `g` after either is the read it is, where the
+/// text returned 5.
+#[test]
+fn a_global_read_after_a_store_is_not_what_the_branch_compared() {
+    let own: &[u8] = &[
+        0x83, 0x3d, 0xf9, 0x1f, 0x00, 0x00, 0x05, // ASM: cmp dword [rip+0x1ff9],5
+        0x75, 0x11, // ASM: jne 0x14000101a
+        0xc7, 0x05, 0xed, 0x1f, 0x00, 0x00, // ASM: mov dword [rip+0x1fed],7
+        0x07, 0x00, 0x00, 0x00, // ASM: (the 7)
+        0x8b, 0x05, 0xe7, 0x1f, 0x00, 0x00, // ASM: mov eax,[rip+0x1fe7]
+        0xc3, // ASM: ret
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xc3, // ASM: ret
+    ];
+    let through: &[u8] = &[
+        0x83, 0x3d, 0xf9, 0x1f, 0x00, 0x00, 0x05, // ASM: cmp dword [rip+0x1ff9],5
+        0x75, 0x09, // ASM: jne 0x140001012
+        0x89, 0x02, // ASM: mov [rdx],eax
+        0x8b, 0x05, 0xef, 0x1f, 0x00, 0x00, // ASM: mov eax,[rip+0x1fef]
+        0xc3, // ASM: ret
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xc3, // ASM: ret
+    ];
+    for code in [own, through] {
+        let p = program64_with_globals(code, false, &[]);
+        let a = Analysis::compute(&p);
+        let text = decompile(&p, &a, &Overlay::default(), 0x1_4000_1000).unwrap_or_default();
+        assert!(text.contains("\nreturn g32_140003000;\n"), "{text}");
+        replays_clean(&p, &a, &[0x1_4000_1000]);
+    }
+}
