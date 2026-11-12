@@ -228,11 +228,30 @@ fn boundary_i32() -> [i32; 11] {
 ///
 /// * `code` - The bytes of `.text`, one block ending in `ret`.
 fn agrees_with_the_emulator(code: &[u8]) {
+    image_agrees_with_the_emulator(&image(code));
+}
+
+/// The lifter and the emulator agree on every block of 64-bit `code` at
+/// 0x401000, as [`agrees_with_the_emulator`] checks 32-bit code.
+///
+/// # Arguments
+///
+/// * `code` - The bytes of `.text`, one block ending in `ret`.
+fn agrees_with_the_emulator_64(code: &[u8]) {
+    image_agrees_with_the_emulator(&raw::image(Arch::X86_64, code, &[]));
+}
+
+/// The lifter and the emulator agree on the one block at 0x401000 of `p`,
+/// which is checked, for sixteen seeds of random registers and memory.
+///
+/// # Arguments
+///
+/// * `p` - The image.
+fn image_agrees_with_the_emulator(p: &Program) {
     use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
-    let p = image(code);
-    let a = Analysis::compute(&p);
+    let a = Analysis::compute(p);
     for seed in 1..=16 {
-        let v = verify(&p, &a, &[0x401000], seed);
+        let v = verify(p, &a, &[0x401000], seed);
         assert_eq!(v.checked, 1, "seed {seed}: {}", verify_tsv(&v));
         assert!(v.mismatches.is_empty(), "seed {seed}: {}", verify_tsv(&v));
     }

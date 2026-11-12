@@ -1219,9 +1219,8 @@ impl Exec<'_, '_> {
                     None => self.write_op0(instr, result),
                 }
             }
-            Mnemonic::Push if instr.op_count() == 1 => {
+            Mnemonic::Push if let Some((word, ty)) = stack_value(instr) => {
                 let v = self.val(instr, 0);
-                let word = self.ctx.conv.word;
                 if let Some(sp) = self.env.sp {
                     let sp = sp - word;
                     self.env.sp = Some(sp);
@@ -1230,32 +1229,29 @@ impl Exec<'_, '_> {
                         self.env.slot_bits.remove(&sp);
                         self.env.fresh.insert(Key::Slot(sp));
                     } else {
-                        if self.seh_registered && !self.is_register_save(self.word_ty(), &v) {
+                        if self.seh_registered && !self.is_register_save(ty, &v) {
                             self.args_pushed += 1;
                         }
-                        self.slot_write(sp, self.word_ty(), v);
+                        self.slot_write(sp, ty, v);
                     }
                 }
             }
-            Mnemonic::Pop if instr.op_count() == 1 => {
-                let word = self.ctx.conv.word;
-                match self.env.sp {
-                    Some(sp) => {
-                        let v = self.slot_read(sp, self.word_ty());
-                        self.env.sp = Some(sp + word);
-                        self.args_pushed = self.args_pushed.saturating_sub(1);
-                        self.write_op0(instr, v);
-                    }
-                    None if instr.op0_kind() == OpKind::Register
-                        && self.dead_reg(self.canon(instr.op0_register())) =>
-                    {
-                        let k = self.canon(instr.op0_register());
-                        self.clobber(k);
-                    }
-                    None => self.unmodeled(instr),
+            Mnemonic::Pop if let Some((word, ty)) = stack_value(instr) => match self.env.sp {
+                Some(sp) => {
+                    let v = self.slot_read(sp, ty);
+                    self.env.sp = Some(sp + word);
+                    self.args_pushed = self.args_pushed.saturating_sub(1);
+                    self.write_op0(instr, v);
                 }
-            }
-            Mnemonic::Leave => {
+                None if instr.op0_kind() == OpKind::Register
+                    && self.dead_reg(self.canon(instr.op0_register())) =>
+                {
+                    let k = self.canon(instr.op0_register());
+                    self.clobber(k);
+                }
+                None => self.unmodeled(instr),
+            },
+            Mnemonic::Leave if let Some((word, ty)) = stack_value(instr) => {
                 let rbp = if self.bitness() == 32 {
                     Register::EBP
                 } else {
@@ -1266,12 +1262,11 @@ impl Exec<'_, '_> {
                     Expr::Sp(k) => Some(k),
                     _ => None,
                 };
-                let word = self.ctx.conv.word;
                 match self.env.sp {
                     Some(sp) => {
-                        let v = self.slot_read(sp, self.word_ty());
+                        let v = self.slot_read(sp, ty);
                         self.env.sp = Some(sp + word);
-                        self.reg_write(rbp, v);
+                        self.reg_write(sized_register(rbp, ty.bits()), v);
                     }
                     None if self.dead_reg(self.canon(rbp)) => {
                         let k = self.canon(rbp);

@@ -919,6 +919,131 @@ fn pushfd_and_popfd_round_trip_the_flags() {
     );
 }
 
+/// A push under a 66h prefix moves the stack two bytes, not the mode's
+/// word.
+///
+/// Four word pushes, 7 first, fill the eight bytes `pop rax` takes, the 7
+/// in the top word, and the stack pointer is back at its start for the
+/// `ret`. Moving eight bytes a push, the pop read the last 0 and the
+/// `ret` took a pushed word for its return address.
+///
+/// # Panics
+///
+/// When the run does not return, or `rax` is not the four words.
+#[test]
+fn a_word_push_moves_the_stack_two_bytes() {
+    let code = [
+        0x66, 0x6a, 0x07, // ASM: push word 7
+        0x66, 0x6a, 0x00, // ASM: push word 0
+        0x66, 0x6a, 0x00, // ASM: push word 0
+        0x66, 0x6a, 0x00, // ASM: push word 0
+        0x58, // ASM: pop rax
+        0xc3, // ASM: ret
+    ];
+    let emu = returned(image(&code, &[]));
+    assert_eq!(emu.register("rax"), Some(0x0007_0000_0000_0000));
+    assert_eq!(emu.register("rsp"), Some(super::STACK_BASE));
+}
+
+/// A pop under a 66h prefix takes two bytes and writes only the low word
+/// of its register, and so does the pop of a word `leave`.
+///
+/// The eight bytes of `push 7` come back a word at a time: `pop ax` takes
+/// the 7 and leaves the rest of `rax`, three `pop dx` the zeros, and the
+/// stack pointer is back at its start. `66 c9` sets the stack pointer
+/// from `rbp` whole, then pops `bp` alone: `rbp` keeps the upper bits of
+/// the frame address and takes the pushed 7 below them.
+///
+/// # Panics
+///
+/// When a run does not return, a register holds more than its word took,
+/// or the stack pointer is not back at its start.
+#[test]
+fn a_word_pop_writes_only_its_word() {
+    let code = [
+        0x48, 0xc7, 0xc0, 0xff, 0xff, 0xff, 0xff, // ASM: mov rax, -1
+        0x6a, 0x07, // ASM: push 7
+        0x66, 0x58, // ASM: pop ax
+        0x66, 0x5a, // ASM: pop dx
+        0x66, 0x5a, // ASM: pop dx
+        0x66, 0x5a, // ASM: pop dx
+        0xc3, // ASM: ret
+    ];
+    let emu = returned(image(&code, &[]));
+    assert_eq!(emu.register("rax"), Some(0xffff_ffff_ffff_0007));
+    assert_eq!(emu.register("rsp"), Some(super::STACK_BASE));
+    let code = [
+        0x66, 0x6a, 0x07, // ASM: push word 7
+        0x48, 0x89, 0xe5, // ASM: mov rbp, rsp
+        0x66, 0xc9, // ASM: leave (word)
+        0xc3, // ASM: ret
+    ];
+    let emu = returned(image(&code, &[]));
+    let frame = super::STACK_BASE - 2;
+    assert_eq!(emu.register("rbp"), Some((frame & !0xffff) | 7));
+    assert_eq!(emu.register("rsp"), Some(super::STACK_BASE));
+}
+
+/// `pushf` and `popf` under a 66h prefix move the low word of the flags.
+///
+/// `xor eax, eax` leaves 0x46 (zero, parity and the reserved bit): two
+/// word pushes of it fill the dword `pop eax` takes. A dword of zero
+/// comes back as two word pops, the first clearing the zero flag, and the
+/// stack pointer is back at its start.
+///
+/// # Panics
+///
+/// When a run does not return, a value is not the flags' words, or the
+/// stack pointer is not back at its start.
+#[test]
+fn a_word_pushf_and_popf_move_a_word() {
+    let code = [
+        0x31, 0xc0, // ASM: xor eax, eax
+        0x66, 0x9c, // ASM: pushfw
+        0x66, 0x9c, // ASM: pushfw
+        0x58, // ASM: pop eax
+        0xc3, // ASM: ret
+    ];
+    let emu = returned(image32(&code, &[]));
+    assert_eq!(emu.register("eax"), Some(0x0046_0046));
+    let code = [
+        0x31, 0xc0, // ASM: xor eax, eax
+        0x6a, 0x00, // ASM: push 0
+        0x66, 0x9d, // ASM: popfw
+        0x66, 0x9d, // ASM: popfw
+        0x0f, 0x94, 0xc0, // ASM: sete al
+        0xc3, // ASM: ret
+    ];
+    let emu = returned(image32(&code, &[]));
+    assert_eq!(emu.register("eax"), Some(0), "the pop did not clear ZF");
+    assert_eq!(emu.register("esp"), Some(super::STACK_BASE_32));
+}
+
+/// `pusha` and `popa` under a 66h prefix move eight words, and `popa`
+/// writes only the low word of each register.
+///
+/// `ax` comes back as the word pushed while the upper half of `eax` keeps
+/// what was written between the two, and the stack pointer is back at
+/// its start.
+///
+/// # Panics
+///
+/// When the run does not return, `eax` is not the merged value, or the
+/// stack pointer is not back at its start.
+#[test]
+fn a_word_pusha_and_popa_move_eight_words() {
+    let code = [
+        0xb8, 0x78, 0x56, 0x34, 0x12, // ASM: mov eax, 0x12345678
+        0x66, 0x60, // ASM: pushaw
+        0xb8, 0xbb, 0xbb, 0xaa, 0xaa, // ASM: mov eax, 0xaaaabbbb
+        0x66, 0x61, // ASM: popaw
+        0xc3, // ASM: ret
+    ];
+    let emu = returned(image32(&code, &[]));
+    assert_eq!(emu.register("eax"), Some(0xaaaa_5678));
+    assert_eq!(emu.register("esp"), Some(super::STACK_BASE_32));
+}
+
 /// `fisttp` stores the truncated integer of `st(0)` and pops the stack.
 ///
 /// `fld qword [2.9]; fisttp qword [out]; ret` leaves 2 at `out`: the SSE3

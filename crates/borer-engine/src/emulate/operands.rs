@@ -6,7 +6,9 @@ use super::{
     Emulator, HISTORY_MAX, PAGE, Stop, Written, branch_target, canon, lane_shift, lo64, mask,
     mem_bytes, reg_bits, seg_slot,
 };
-use crate::isa::x86::{Instruction, Mnemonic, OpKind, Register, gpr_bank_index, xmm_slot};
+use crate::isa::x86::{
+    Instruction, Mnemonic, OpKind, Register, gpr_bank_index, sized_register, xmm_slot,
+};
 use crate::num::{from_usize, lo8};
 
 impl Emulator<'_> {
@@ -409,30 +411,121 @@ impl Emulator<'_> {
             && addr < self.stack_base.wrapping_add(self.stack_span)
     }
 
-    /// Pushes a word onto the scratch stack.
+    /// Pushes a value onto the scratch stack.
+    ///
+    /// # Arguments
+    ///
+    /// * `v` - The value; its low `bytes` bytes are written.
+    /// * `bytes` - How far the stack pointer moves: a stack instruction's
+    ///   operand size ([`Emulator::stack_op`]), or the word a call pushes
+    ///   its return address as.
     ///
     /// # Errors
     ///
-    /// [`Stop::MemoryFull`] when the word would take memory past its cap.
-    pub(super) fn push(&mut self, v: u64) -> Result<(), Stop> {
-        let sp = self.narrow(self.reg(Register::RSP).wrapping_sub(from_usize(self.word)));
+    /// [`Stop::MemoryFull`] when the value would take memory past its cap.
+    pub(super) fn push(&mut self, v: u64, bytes: usize) -> Result<(), Stop> {
+        let sp = self.narrow(self.reg(Register::RSP).wrapping_sub(from_usize(bytes)));
         self.set_reg(Register::RSP, sp);
-        self.write(sp, v, self.word)
+        self.write(sp, v, bytes)
     }
 
-    /// Pops a word from the scratch stack.
+    /// Pops a value from the scratch stack.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - How far the stack pointer moves, as [`Emulator::push`]
+    ///   takes it.
     ///
     /// # Errors
     ///
-    /// A fault when the stack word was never written.
-    pub(super) fn pop(&mut self) -> Result<u64, Stop> {
+    /// A fault when the stack value was never written.
+    pub(super) fn pop(&mut self, bytes: usize) -> Result<u64, Stop> {
         let sp = self.reg(Register::RSP);
-        let v = self.load(sp, self.word)?;
+        let v = self.load(sp, bytes)?;
         self.set_reg(
             Register::RSP,
-            self.narrow(sp.wrapping_add(from_usize(self.word))),
+            self.narrow(sp.wrapping_add(from_usize(bytes))),
         );
         Ok(v)
+    }
+
+    /// Runs a stack instruction, `push`, `pop`, `pushf`, `popf`, `pusha`,
+    /// `popa` or `leave`, at its operand size.
+    ///
+    /// SPEC: Intel SDM Vol. 2, PUSH, POP, PUSHA, POPA, PUSHF, POPF and
+    /// LEAVE: the operand size ([`crate::disasm::stack_operand_bits`]), not
+    /// the mode's word, sets how wide each value is and how far the stack
+    /// pointer moves for it, and a value popped as a word writes only the
+    /// low word of its register (`66 58` is `pop ax`, `66 c9` pops `bp`).
+    /// `leave` first sets the stack pointer from the frame pointer whole;
+    /// `pusha` pushes the stack pointer as it was before the first push,
+    /// and `popa` drops that value.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction.
+    ///
+    /// # Errors
+    ///
+    /// A fault when a popped value was never written,
+    /// [`Stop::MemoryFull`] when a pushed one would take memory past its
+    /// cap, and [`Stop::Unmodeled`] for an instruction that is none of
+    /// these.
+    pub(super) fn stack_op(&mut self, i: &Instruction) -> Result<Option<u64>, Stop> {
+        /// The registers `pusha` pushes, in its order; `popa` pops them in
+        /// the reverse one.
+        const PUSHA: [Register; 8] = [
+            Register::RAX,
+            Register::RCX,
+            Register::RDX,
+            Register::RBX,
+            Register::RSP,
+            Register::RBP,
+            Register::RSI,
+            Register::RDI,
+        ];
+        let Some(bits) = crate::disasm::stack_operand_bits(i) else {
+            return Err(Stop::Unmodeled(format!("stack {:?}", i.mnemonic())));
+        };
+        let bytes = usize::from(bits / 8);
+        match i.mnemonic() {
+            Mnemonic::Push => {
+                let v = self.source(i)?;
+                self.push(v, bytes)?;
+            }
+            Mnemonic::Pop => {
+                let v = self.pop(bytes)?;
+                self.store(i, v)?;
+            }
+            Mnemonic::Pushf | Mnemonic::Pushfd | Mnemonic::Pushfq => {
+                self.push(self.rflags(), bytes)?;
+            }
+            Mnemonic::Popf | Mnemonic::Popfd | Mnemonic::Popfq => {
+                let v = self.pop(bytes)?;
+                self.set_rflags(v);
+            }
+            Mnemonic::Pusha | Mnemonic::Pushad => {
+                for v in PUSHA.map(|r| self.reg(r)) {
+                    self.push(v, bytes)?;
+                }
+            }
+            Mnemonic::Popa | Mnemonic::Popad => {
+                for r in PUSHA.into_iter().rev() {
+                    let v = self.pop(bytes)?;
+                    if r != Register::RSP {
+                        self.set_reg_sized(sized_register(r, bits), v);
+                    }
+                }
+            }
+            Mnemonic::Leave => {
+                let frame = self.reg(Register::RBP);
+                self.set_reg(Register::RSP, frame);
+                let saved = self.pop(bytes)?;
+                self.set_reg_sized(sized_register(Register::RBP, bits), saved);
+            }
+            other => return Err(Stop::Unmodeled(format!("stack {other:?}"))),
+        }
+        Ok(None)
     }
 
     /// Writes `v` into register `r` honoring its named width.

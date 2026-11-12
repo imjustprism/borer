@@ -576,3 +576,51 @@ fn an_unwinder_restoring_the_chain_head_registers_no_handler() {
         "{text}"
     );
 }
+
+/// A push, a pop and a `leave` under a 66h prefix move the stack two
+/// bytes, in the lifter as in the emulator.
+///
+/// Two word pushes fill the dword `pop eax` takes, 7 in its upper word, so
+/// the function returns 0x70000; `pop dx` takes the low word of a pushed
+/// dword, and `leave` pops `bp` alone from its high word, which puts the
+/// stack pointer back at the entry for the `ret`. Moving the mode's word
+/// each, both sides read 0 for `eax` and agreed on it.
+#[test]
+fn push_word_agrees_with_the_emulator() {
+    let code = [
+        0x66, 0x6a, 0x07, // ASM: push word 7
+        0x66, 0x6a, 0x00, // ASM: push word 0
+        0x58, // ASM: pop eax
+        0x6a, 0x05, // ASM: push 5
+        0x66, 0x5a, // ASM: pop dx
+        0x8b, 0xec, // ASM: mov ebp, esp
+        0x66, 0xc9, // ASM: leave (word)
+        0xc3, // ASM: ret
+    ];
+    let text = dc(&code);
+    assert!(text.contains("return 0x70000;"), "{text}");
+    agrees_with_the_emulator(&code);
+}
+
+/// A push, a pop and a `leave` under a 66h prefix move the stack two
+/// bytes in 64-bit code too, in the lifter as in the emulator.
+///
+/// `push ax` and a word push of 7 come back as `pop ax` and `pop cx`, a
+/// word each; a word push of 9 is then the `bp` that `leave` pops after
+/// setting `rsp` from `rbp` whole, which puts the stack pointer back at
+/// the entry for the `ret`. Moving the mode's eight bytes each, the lifter
+/// held quadword slots the machine never wrote and `leave` set all of
+/// `rbp`.
+#[test]
+fn push_word_agrees_with_the_emulator_in_64_bit_code() {
+    agrees_with_the_emulator_64(&[
+        0x66, 0x50, // ASM: push ax
+        0x66, 0x6a, 0x07, // ASM: push word 7
+        0x66, 0x58, // ASM: pop ax
+        0x66, 0x59, // ASM: pop cx
+        0x66, 0x6a, 0x09, // ASM: push word 9
+        0x48, 0x89, 0xe5, // ASM: mov rbp, rsp
+        0x66, 0xc9, // ASM: leave (word)
+        0xc3, // ASM: ret
+    ]);
+}

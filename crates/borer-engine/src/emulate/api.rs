@@ -388,7 +388,7 @@ impl Emulator<'_> {
             ret: (!void).then_some(rv),
             caller,
         });
-        let ret = self.pop()?;
+        let ret = self.pop(self.word)?;
         if self.bitness == 32 {
             use crate::analysis::prototypes::{arity, is_c_runtime, msvc_prototype};
             let dll = full.split_once('!').map_or("", |(d, _)| d);

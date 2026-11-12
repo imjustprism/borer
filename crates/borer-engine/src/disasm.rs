@@ -6,7 +6,9 @@
 //! [`disassemble`] is the x86 sweep the x86-only passes call directly.
 
 use crate::isa::Isa;
-use crate::isa::x86::{Code, Decoder, DecoderOptions, Formatter, Instruction, NasmFormatter};
+use crate::isa::x86::{
+    Code, Decoder, DecoderOptions, Formatter, Instruction, Mnemonic, NasmFormatter,
+};
 use crate::isa::{a32, a64, rv};
 use crate::program::Program;
 
@@ -46,6 +48,50 @@ pub fn displacement(instr: &Instruction, bitness: u32) -> i64 {
         i64::from(instr.memory_displacement32().cast_signed())
     } else {
         instr.memory_displacement64().cast_signed()
+    }
+}
+
+/// Returns the operand size of a stack instruction in bits: how wide each
+/// value a `push`, `pop`, `pushf`, `popf`, `pusha`, `popa` or `leave`
+/// moves is, and so how far it moves the stack pointer per value.
+///
+/// SPEC: Intel SDM Vol. 2, PUSH, POP, PUSHA, POPA, PUSHF, POPF and LEAVE:
+/// the operand size, not the mode's word, sets the move, so a 66h prefix
+/// makes it a word (`66 6a 07` in 64-bit code pushes two bytes). iced
+/// counts a push or a pop's whole move
+/// ([`Instruction::stack_pointer_increment`]), eight values for `pusha`,
+/// and nothing for `leave`, whose size its code names.
+///
+/// # Arguments
+///
+/// * `instr` - The instruction.
+///
+/// # Returns
+///
+/// 16, 32 or 64, or `None` for any other instruction: iced counts the
+/// moves of `ret 4` and `enter 8, 0` too, which are no value's size.
+#[must_use]
+pub(crate) fn stack_operand_bits(instr: &Instruction) -> Option<u8> {
+    match instr.code() {
+        Code::Leavew | Code::Pushaw | Code::Popaw => Some(16),
+        Code::Leaved | Code::Pushad | Code::Popad => Some(32),
+        Code::Leaveq => Some(64),
+        _ if matches!(
+            instr.mnemonic(),
+            Mnemonic::Push
+                | Mnemonic::Pop
+                | Mnemonic::Pushf
+                | Mnemonic::Pushfd
+                | Mnemonic::Pushfq
+                | Mnemonic::Popf
+                | Mnemonic::Popfd
+                | Mnemonic::Popfq
+        ) =>
+        {
+            let bytes = instr.stack_pointer_increment().unsigned_abs();
+            bytes.checked_mul(8).and_then(|b| u8::try_from(b).ok())
+        }
+        _ => None,
     }
 }
 
@@ -332,4 +378,31 @@ pub fn render(lines: &[DisasmLine], with_bytes: bool) -> String {
         }
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stack_operand_bits;
+    use crate::isa::x86::{Decoder, DecoderOptions};
+
+    /// A stack instruction's operand size is its own, a word under a 66h
+    /// prefix, and an instruction that moves no value has none: in 32-bit
+    /// code iced counts the eight bytes `ret 4` moves the stack and the
+    /// twelve of `enter 8, 0`, which once read as widths of 64 and 96 bits.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn only_a_stack_instruction_has_a_stack_operand_size() {
+        let bits = |code: &[u8]| {
+            stack_operand_bits(&Decoder::with_ip(32, code, 0, DecoderOptions::NONE).decode())
+        };
+        assert_eq!(bits(&[0x50]), Some(32));
+        assert_eq!(bits(&[0x66, 0x50]), Some(16));
+        assert_eq!(bits(&[0x66, 0x9c]), Some(16));
+        assert_eq!(bits(&[0x66, 0xc9]), Some(16));
+        assert_eq!(bits(&[0xc2, 0x04, 0x00]), None);
+        assert_eq!(bits(&[0xc8, 0x08, 0x00, 0x00]), None);
+    }
 }

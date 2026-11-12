@@ -1483,7 +1483,7 @@ impl<'a> Emulator<'a> {
                 if self.permissive && self.reg(Register::RSP) < self.stack_base {
                     self.steps += 1;
                     self.skipped += 1;
-                    match self.pop() {
+                    match self.pop(self.word) {
                         Ok(ra) => {
                             ip = ra;
                             continue;
@@ -1630,73 +1630,21 @@ impl<'a> Emulator<'a> {
                 self.write_reg_op(i, addr);
                 Ok(None)
             }
-            Mnemonic::Push => {
-                let v = self.source(i)?;
-                self.push(v)?;
-                Ok(None)
-            }
-            Mnemonic::Pusha | Mnemonic::Pushad => {
-                let order = [
-                    Register::EAX,
-                    Register::ECX,
-                    Register::EDX,
-                    Register::EBX,
-                    Register::ESP,
-                    Register::EBP,
-                    Register::ESI,
-                    Register::EDI,
-                ];
-                let saved: Vec<u64> = order.iter().map(|&r| self.reg(r)).collect();
-                for v in saved {
-                    self.push(v)?;
-                }
-                Ok(None)
-            }
-            Mnemonic::Popa | Mnemonic::Popad => {
-                let mut restored: Vec<u64> = Vec::with_capacity(8);
-                for _ in 0..8 {
-                    restored.push(self.pop()?);
-                }
-                let order = [
-                    Register::EDI,
-                    Register::ESI,
-                    Register::EBP,
-                    Register::ESP,
-                    Register::EBX,
-                    Register::EDX,
-                    Register::ECX,
-                    Register::EAX,
-                ];
-                for (k, &r) in order.iter().enumerate() {
-                    if r != Register::ESP {
-                        self.set_reg(r, restored[k]);
-                    }
-                }
-                Ok(None)
-            }
-            Mnemonic::Pop => {
-                let v = self.pop()?;
-                self.store(i, v)?;
-                Ok(None)
-            }
-            Mnemonic::Leave => {
-                let frame = self.reg(Register::RBP);
-                self.set_reg(Register::RSP, frame);
-                let saved = self.pop()?;
-                self.set_reg(Register::RBP, saved);
-                Ok(None)
-            }
+            Mnemonic::Push
+            | Mnemonic::Pop
+            | Mnemonic::Pushf
+            | Mnemonic::Pushfd
+            | Mnemonic::Pushfq
+            | Mnemonic::Popf
+            | Mnemonic::Popfd
+            | Mnemonic::Popfq
+            | Mnemonic::Pusha
+            | Mnemonic::Pushad
+            | Mnemonic::Popa
+            | Mnemonic::Popad
+            | Mnemonic::Leave => self.stack_op(i),
             Mnemonic::Cld | Mnemonic::Std => {
                 self.flags_df = m == Mnemonic::Std;
-                Ok(None)
-            }
-            Mnemonic::Pushf | Mnemonic::Pushfd | Mnemonic::Pushfq => {
-                self.push(self.rflags())?;
-                Ok(None)
-            }
-            Mnemonic::Popf | Mnemonic::Popfd | Mnemonic::Popfq => {
-                let v = self.pop()?;
-                self.set_rflags(v);
                 Ok(None)
             }
             _ if let Some((op, bytes)) = StringOp::of(m)
@@ -1763,7 +1711,7 @@ impl<'a> Emulator<'a> {
                 }
                 if self.unresolved(to) {
                     self.skipped += 1;
-                    return self.pop().map(Some);
+                    return self.pop(self.word).map(Some);
                 }
                 Ok(Some(to))
             }
@@ -1774,14 +1722,14 @@ impl<'a> Emulator<'a> {
                     self.set_reg(Register::RAX, 0);
                     return Ok(None);
                 }
-                self.push(i.next_ip())?;
+                self.push(i.next_ip(), self.word)?;
                 Ok(Some(to))
             }
             Mnemonic::Ret => {
                 if self.reg(Register::RSP) >= self.stack_base {
                     return Err(Stop::Returned);
                 }
-                let ra = self.pop()?;
+                let ra = self.pop(self.word)?;
                 if i.op_count() == 1 {
                     let sp = self.narrow(
                         self.reg(Register::RSP)

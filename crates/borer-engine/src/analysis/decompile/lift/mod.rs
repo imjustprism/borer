@@ -1198,6 +1198,24 @@ fn src_bits(instr: &Instruction, op: u32) -> u8 {
     }
 }
 
+/// Returns how far a `push`, `pop` or `leave` moves the stack pointer and
+/// the type of the value it moves: its operand size
+/// ([`crate::disasm::stack_operand_bits`]), a word under a 66h prefix, not
+/// the mode's word.
+///
+/// # Arguments
+///
+/// * `instr` - The instruction.
+///
+/// # Returns
+///
+/// The move in bytes and the type, or `None` for an instruction that moves
+/// no value.
+fn stack_value(instr: &Instruction) -> Option<(i64, Ty)> {
+    let bits = crate::disasm::stack_operand_bits(instr)?;
+    Some((i64::from(bits / 8), Ty::from_bits(bits)))
+}
+
 /// Renders a call through a computed pointer as `(*p)`.
 ///
 /// # Arguments
