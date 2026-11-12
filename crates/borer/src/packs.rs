@@ -24,6 +24,10 @@ pub const DIRS_ENV: &str = "BORER_PACK_DIRS";
 pub const AUTO_ENV: &str = "BORER_AUTO_PACKS";
 /// The extension of a pack file.
 pub const EXTENSION: &str = "borer";
+/// Most scripts one pack runs.
+pub const SCRIPTS_MAX: usize = 64;
+/// Most bytes the scripts one pack runs hold together: 4 MiB.
+pub const SCRIPT_BYTES_MAX: u64 = 1 << 22;
 
 /// Tells whether packs in the pack directories may load by themselves.
 #[must_use]
@@ -88,8 +92,11 @@ pub fn dirs() -> Vec<PathBuf> {
 /// pack's own file, into the pack.
 ///
 /// A line's words are joined to the pack's directory, so its `..` climbs
-/// from there, and a script's path is refused before it is opened when it
-/// names a share or a device ([`borer_engine::program::unusable_path`]).
+/// from there, and each script is read by
+/// [`borer_engine::program::read_regular`], which refuses a share, a device
+/// and anything else that is not a regular file before it is opened. A pack
+/// runs at most [`SCRIPTS_MAX`] scripts holding [`SCRIPT_BYTES_MAX`] bytes
+/// together: one that ran itself 100,000 times read its own file as often.
 ///
 /// # Arguments
 ///
@@ -98,21 +105,32 @@ pub fn dirs() -> Vec<PathBuf> {
 ///
 /// # Errors
 ///
-/// When a script's path is a share or a device, or the file does not read.
+/// When the pack names more than [`SCRIPTS_MAX`] scripts, a script's path
+/// is refused or the file does not read as text, or the scripts hold more
+/// than [`SCRIPT_BYTES_MAX`] bytes.
 pub fn load_scripts(pack: &mut Pack, file: &Path) -> Result<(), String> {
     let dir = file.parent().unwrap_or_else(|| Path::new("."));
-    let mut scripts = Vec::new();
-    for rel in pack.script_files() {
+    let files = pack.script_files();
+    if files.len() > SCRIPTS_MAX {
+        return Err(format!(
+            "{}: {} scripts, past the {SCRIPTS_MAX} a pack may run",
+            pack.source,
+            files.len()
+        ));
+    }
+    let mut left = SCRIPT_BYTES_MAX;
+    let mut scripts = Vec::with_capacity(files.len());
+    for rel in files {
         let path = rel
             .split(['/', '\\'])
             .filter(|part| !part.is_empty())
             .fold(dir.to_path_buf(), |p, part| p.join(part));
-        if let Some(why) = borer_engine::program::unusable_path(&path) {
-            return Err(format!("{}: script {why}", pack.source));
-        }
         let shown = borer_engine::text::short_path(&path.to_string_lossy());
-        let code = std::fs::read_to_string(&path)
-            .map_err(|e| format!("{}: reading script {shown}: {e}", pack.source))?;
+        let bytes = borer_engine::program::read_regular(&path, left)
+            .map_err(|e| format!("{}: script {e:#}", pack.source))?;
+        left = left.saturating_sub(borer_engine::num::from_usize(bytes.len()));
+        let code = String::from_utf8(bytes)
+            .map_err(|_| format!("{}: script {shown} is not text", pack.source))?;
         scripts.push((shown, code));
     }
     pack.scripts = scripts;

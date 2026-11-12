@@ -5,6 +5,7 @@ mod cli;
 mod contract;
 mod evidence;
 mod fields;
+mod hostile;
 mod index;
 mod parity;
 mod project;
