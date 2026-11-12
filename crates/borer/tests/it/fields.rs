@@ -901,6 +901,50 @@ fn set_type_struct_reads_the_code_that_tells_a_class_from_a_struct() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// `set-type struct` holds a struct it restates to the class fields stated
+/// with it, as the tool does, and leaves a refused project as it was.
+#[test]
+fn a_struct_restated_at_the_cli_is_held_to_the_fields_stated_with_it() {
+    let dir = std::env::temp_dir().join(format!("borer-fields-held-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a directory of the test's own");
+    let image = dir.join("classes.bin").to_string_lossy().into_owned();
+    std::fs::write(&image, two_classes()).expect("the fixture is writable");
+    let project = dir.join("stated.json");
+    let run = |name: &str, fields: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_borer"))
+            .args(["--no-pdb", "set-type", &image, "--arch", "x64"])
+            .args(["--regions", REGIONS])
+            .arg(&project)
+            .args(["struct", name])
+            .args(fields)
+            .output()
+            .expect("spawn borer");
+        String::from_utf8_lossy(&[out.stdout, out.stderr].concat()).into_owned()
+    };
+    let said = run("Seen", &["0x0:a:u32"]);
+    assert!(
+        said.starts_with("defined struct Seen: 1 field(s), "),
+        "{said}"
+    );
+    let said = run("class_2800", &["0x10:m_v:Seen", "0x14:m_w:u32"]);
+    assert!(
+        said.starts_with("stated 2 field(s) of class class_2800: "),
+        "{said}"
+    );
+    let written = std::fs::read(&project).expect("the project reads back");
+    let said = run("Seen", &["0x4:b:u32"]);
+    assert!(
+        said.contains("the type cannot change so: a field stated with it would no longer stand (class class_2800: field m_w at 0x14 overlaps m_v, which ends at 0x18); restate that field first"),
+        "{said}"
+    );
+    assert_eq!(
+        std::fs::read(&project).expect("the project reads back"),
+        written,
+        "a refused statement writes nothing"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// A type a class's field was stated with changes only so far as the
 /// field still stands, on the dry run as when applied.
 ///

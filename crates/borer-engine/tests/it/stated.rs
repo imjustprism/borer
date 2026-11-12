@@ -8,7 +8,7 @@
     reason = "assertions are the point of a test"
 )]
 
-use borer_engine::analysis::apply::from_pointer;
+use borer_engine::analysis::apply::{from_class, from_pointer};
 use borer_engine::analysis::classes::{class_layout, render_layout};
 use borer_engine::analysis::decompile::decompile_named;
 use borer_engine::analysis::protos::{Proto, Var, VarKey};
@@ -1161,6 +1161,42 @@ fn a_type_change_that_would_break_a_stated_field_is_refused() {
         after.types = types.into();
         assert_eq!(validate(&after), Ok(()), "{name} as {ty:?}");
     }
+}
+
+/// A type is held to the fields stated with it however it changes.
+///
+/// An array that becomes a scalar of its size is no longer read an
+/// element at a time, and a struct a layout plan would define over one of
+/// the name, from a pointer or from a class, is the type changing too.
+#[test]
+fn a_type_is_held_to_its_fields_whatever_changes_it() {
+    let p = two_classes();
+    let a = Analysis::compute(&p);
+    let alias = |ty: &str| UserType::Alias(parse_type(ty).expect("a type the language spells"));
+    let mut o = Overlay::default();
+    o.types.insert("Flags".to_owned(), alias("u8[4]"));
+    let seen = [(0, "a", Some("u32"))];
+    let (_, o) = state((&p, &a), &o, "Seen", &seen, Mode::Merge).expect("defines");
+    let stated = [
+        (0x20, "m_flags", Some("Flags")),
+        (0x10, "m_v", Some("Seen")),
+        (0x14, "m_w", Some("u32")),
+    ];
+    let (_, o) = state((&p, &a), &o, CLASS, &stated, Mode::Merge).expect("states");
+    assert_eq!(
+        retyped(&p, &a, &o, Some(("Flags", &alias("u32")))).expect_err("four bytes at a byte"),
+        "the type cannot change so: a field stated with it would no longer stand (field m_flags at +0x20 of class class_2800 is stated Flags, 4 byte(s) wide, but the class's code accesses it 1 byte(s) wide at 0x101c (class_2800::ctor_or_dtor), 0x108a (class_2800::vfunc_1); state a type of that width, or leave the type out (0x20:m_flags) to keep the width the code uses); restate that field first"
+    );
+    let wider = "the type cannot change so: a field stated with it would no longer stand (class class_2800: field m_w at 0x14 overlaps m_v, which ends at 0x284); restate that field first";
+    assert_eq!(
+        from_pointer(&p, &a, &o, "0x1140,rcx", "Seen").expect_err("0x274 bytes of Seen"),
+        wider
+    );
+    let layout = class_layout(&p, &a, &o, "class_2900").expect("the class has methods");
+    assert_eq!(
+        from_class(&p, &a, &o, &layout, "Seen").expect_err("0x274 bytes of Seen"),
+        wider
+    );
 }
 
 /// The fields a project states of classes are held to the binary's code
