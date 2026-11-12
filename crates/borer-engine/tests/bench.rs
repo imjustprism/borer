@@ -385,7 +385,7 @@ fn bisect_passes() {
                 ISO_STEPS,
             ) {
                 Err(_) | Ok(Bisected::Unchecked(_)) => skipped += 1,
-                Ok(Bisected::Agrees) => agree += 1,
+                Ok(Bisected::Agrees(_)) => agree += 1,
                 Ok(Bisected::Unbisected(c)) => {
                     table.entry("(before passes)".to_owned()).or_default().0 += 1;
                     println!(
@@ -405,6 +405,7 @@ fn bisect_passes() {
                     at,
                     alone,
                     texts,
+                    ..
                 }) => {
                     if show {
                         println!("--- before {}\n{}", pass.name(), texts.0);

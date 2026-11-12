@@ -333,8 +333,8 @@ pub(super) fn generated_in(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Bisected {
     /// No input differs on the full text and at least one agrees: nothing
-    /// to bisect.
-    Agrees,
+    /// to bisect. What its runs said.
+    Agrees(Checked),
     /// The full text left every input unchecked, so nothing is claimed of
     /// it: why, each reason with how many inputs, the commonest first.
     Unchecked(Vec<(String, usize)>),
@@ -361,10 +361,12 @@ pub enum Bisected {
         pass: Pass,
         /// The input it differs on, and where.
         at: Counterexample,
+        /// What the text with the passes before `pass` did.
+        before: Box<Checked>,
         /// What the full pipeline with only this pass left out did: when
         /// it agrees ([`Checked::grade`]), leaving the pass out alone
         /// repairs the function.
-        alone: Checked,
+        alone: Box<Checked>,
         /// The text with the passes before `pass`, and with `pass` too.
         texts: (String, String),
     },
@@ -452,16 +454,16 @@ pub(super) fn bisected(
     let Some(at) = whole.differs.clone() else {
         return match whole.grade() {
             Grade::Unchecked => Bisected::Unchecked(commonest(whole.unchecked)),
-            Grade::Agrees | Grade::Differs => Bisected::Agrees,
+            Grade::Agrees | Grade::Differs => Bisected::Agrees(whole),
         };
     };
-    let (good, narrowest) = match first_breaking(check) {
+    let (good, before, narrowest) = match first_breaking(check) {
         Placed::Before(before) => return Bisected::Unbisected(before),
         Placed::Unchecked(ran, probe) => {
             let unchecked = commonest(probe.unchecked);
             return Bisected::Unplaced { at, ran, unchecked };
         }
-        Placed::At(good, narrowest) => (good, narrowest),
+        Placed::At(good, before, narrowest) => (good, before, narrowest),
     };
     let Some(&pass) = Pass::ALL.get(good) else {
         return Bisected::Unbisected(at);
@@ -469,7 +471,8 @@ pub(super) fn bisected(
     Bisected::Broke {
         pass,
         at: narrowest.unwrap_or(at),
-        alone: check(Passes::NONE.without(pass)),
+        before: Box::new(before),
+        alone: Box::new(check(Passes::NONE.without(pass))),
         texts: (text_of(good), text_of(good + 1)),
     }
 }
@@ -483,9 +486,10 @@ pub(super) enum Placed {
     /// passes ran in it, and what its runs said.
     Unchecked(usize, Checked),
     /// How many passes run in the last text that agreed, the next pass
-    /// being the first whose text differs, and the counterexample of the
-    /// narrowest text that differed, `None` when the bisection probed none.
-    At(usize, Option<Counterexample>),
+    /// being the first whose text differs; what that text's runs said; and
+    /// the counterexample of the narrowest text that differed, `None` when
+    /// the bisection probed none.
+    At(usize, Checked, Option<Counterexample>),
 }
 
 /// Bisects [`Pass::ALL`] for the first pass whose text differs, given that
@@ -514,7 +518,7 @@ pub(super) fn first_breaking(check: &impl Fn(Passes) -> Checked) -> Placed {
             return Placed::Unchecked(good, probe);
         }
         if bad - good <= 1 {
-            return Placed::At(good, at);
+            return Placed::At(good, probe, at);
         }
         let mid = good + (bad - good) / 2;
         let mut next = check(Passes::after(mid));

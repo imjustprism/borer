@@ -216,3 +216,24 @@ fn blame_reads_an_integer_result_beside_float_code() {
         "{out}"
     );
 }
+
+/// Blame says how many of the inputs a text that agrees was checked on.
+///
+/// `L: test cl,1; jne L; xor eax,eax; ret` returns on an even argument and
+/// spins on an odd one, where no result is compared. The answer counts the
+/// inputs that agree apart from the ones left unchecked, with why, so the
+/// ten that ran do not read as all sixteen.
+#[test]
+fn blame_counts_the_inputs_that_agree_apart_from_the_ones_left_unchecked() {
+    let code = [
+        0xf6, 0xc1, 0x01, // ASM: test cl,1
+        0x75, 0xfb, // ASM: jne 0x401000
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xc3, // ASM: ret
+    ];
+    let p = image(Arch::X86_64, &code, &[]);
+    let a = Analysis::compute(&p);
+    let out = blame_tsv(&p, &a, &Overlay::default(), "0x401000,count=16").expect("blames");
+    let counted = "; the text agrees on 10 of 16 inputs, 6 left unchecked (6: both ran out of steps before returning, so no result was compared); ";
+    assert!(out.contains(counted), "{out}");
+}

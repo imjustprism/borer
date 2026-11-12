@@ -298,7 +298,7 @@ pub fn repair_iso(p: &Program, a: &Analysis, o: &Overlay, entry: u64, budget: Bu
             passes: skip,
             ..o.clone()
         };
-        if let Placed::At(good, _) = first_breaking(&|skip| probe(&without(skip))) {
+        if let Placed::At(good, ..) = first_breaking(&|skip| probe(&without(skip))) {
             order.extend(Pass::ALL.get(good).map(|p| Site::Pass(*p)));
         }
     }

@@ -4,7 +4,10 @@
 use std::fmt::Write as _;
 
 use super::vectors::VERIFY_SEED;
-use super::{BUDGET_MAX, Bisected, Grade, INPUTS_MAX, bisect_iso, unchecked_rows, within_total};
+use super::{
+    BUDGET_MAX, Bisected, Checked, Grade, INPUTS_MAX, bisect_iso, commonest, unchecked_rows,
+    within_total,
+};
 use crate::analysis::decompile::Pass;
 use crate::analysis::render::diff::{DIFF_FN_MAX_LINES, line_diff, render_collapsed};
 use crate::analysis::render::*;
@@ -149,6 +152,23 @@ pub(super) fn run_option(
     Ok(true)
 }
 
+/// How many of the inputs drawn a text agrees on and, when it left any
+/// unchecked, how many and the commonest reason with its count: one input
+/// that agrees beside 63 left unchecked is not 64 that agree.
+///
+/// # Arguments
+///
+/// * `c` - What the text's runs said.
+/// * `count` - How many inputs were drawn.
+fn agreed_on(c: &Checked, count: usize) -> String {
+    let mut out = format!("{} of {count} inputs", c.agreed);
+    let left: usize = c.unchecked.values().sum();
+    if let Some((why, n)) = commonest(c.unchecked.clone()).first() {
+        let _ = write!(out, ", {left} left unchecked ({n}: {why})");
+    }
+    out
+}
+
 /// Writes the answer of [`blame_tsv`] for one bisection.
 ///
 /// # Arguments
@@ -167,9 +187,13 @@ fn blame_report(name: &str, entry: u64, count: usize, budget: usize, found: &Bis
         "# blame for {name} ({entry:#x}): its text run as ISO C beside the binary on {count} inputs drawn from its signature (seed {VERIFY_SEED}, {budget} steps each); an input the text leaves unchecked says nothing\n"
     );
     match found {
-        Bisected::Agrees => out.push_str(
-            "agrees\tno input differs, so no pass is to blame; agreement on drawn inputs is evidence, not proof\n",
-        ),
+        Bisected::Agrees(whole) => {
+            let _ = writeln!(
+                out,
+                "agrees\tno input differs, so no pass is to blame; the text agrees on {}; agreement on drawn inputs is evidence, not proof",
+                agreed_on(whole, count)
+            );
+        }
         Bisected::Unchecked(reasons) => {
             out.push_str("unchecked\tno input was checked, so nothing is claimed of the text and no pass is blamed\n");
             unchecked_rows(&mut out, reasons);
@@ -193,20 +217,23 @@ fn blame_report(name: &str, entry: u64, count: usize, budget: usize, found: &Bis
         Bisected::Broke {
             pass,
             at,
+            before,
             alone,
             texts,
         } => {
             let _ = writeln!(
                 out,
-                "pass\t{}\tthe first cleanup pass whose text differs; the text with the passes before it agrees",
-                pass.name()
+                "pass\t{}\tthe first cleanup pass whose text differs; the text with the passes before it agrees on {}",
+                pass.name(),
+                agreed_on(before, count)
             );
             let _ = writeln!(out, "differs\t{}\t{}\t{}", at.input, at.line, at.why);
-            out.push_str(match alone.grade() {
-                Grade::Agrees => "repairs\tyes: the full text with only this pass left out agrees\n",
-                Grade::Differs => "repairs\tno: the full text with only this pass left out still differs, so a later pass breaks it too\n",
-                Grade::Unchecked => "repairs\tunchecked: the full text with only this pass left out left every input unchecked, so nothing is claimed of it\n",
-            });
+            let repairs = match alone.grade() {
+                Grade::Agrees => format!("yes: the full text with only this pass left out agrees on {}", agreed_on(alone, count)),
+                Grade::Differs => "no: the full text with only this pass left out still differs, so a later pass breaks it too".to_owned(),
+                Grade::Unchecked => "unchecked: the full text with only this pass left out left every input unchecked, so nothing is claimed of it".to_owned(),
+            };
+            let _ = writeln!(out, "repairs\t{repairs}");
             let before: Vec<&str> = texts.0.lines().take(DIFF_FN_MAX_LINES).collect();
             let after: Vec<&str> = texts.1.lines().take(DIFF_FN_MAX_LINES).collect();
             if texts.0.lines().count().max(texts.1.lines().count()) > DIFF_FN_MAX_LINES {
@@ -318,7 +345,8 @@ mod tests {
             let broke = Bisected::Broke {
                 pass: Pass::ALL[9],
                 at: at(),
-                alone: alone.clone(),
+                before: Box::new(ran(8, 0, false)),
+                alone: Box::new(alone.clone()),
                 texts: ("9 passes".to_owned(), "10 passes".to_owned()),
             };
             assert_eq!(found(10, 10, &alone), broke);
@@ -361,6 +389,51 @@ mod tests {
         );
     }
 
+    /// Wherever the answer says a text agrees it says on how many of the
+    /// inputs, how many it left unchecked and the commonest reason: the
+    /// full text, the text before the blamed pass and the text without it.
+    ///
+    /// # Panics
+    ///
+    /// When a line that says a text agrees gives no counts.
+    #[test]
+    fn agreement_says_how_many_inputs_agree_and_how_many_were_left() {
+        let few = ran(1, 63, false);
+        let counted = "agrees on 1 of 64 inputs, 63 left unchecked (63: it spins)";
+        let whole = blame_report("f", 0x1000, 64, 100, &Bisected::Agrees(few.clone()));
+        assert!(
+            whole.contains(&format!("; the text {counted}; ")),
+            "{whole}"
+        );
+        let found = Bisected::Broke {
+            pass: Pass::FoldJumps,
+            at: at(),
+            before: Box::new(few.clone()),
+            alone: Box::new(few),
+            texts: (String::new(), String::new()),
+        };
+        let broke = blame_report("f", 0x1000, 64, 100, &found);
+        assert!(
+            broke.contains(&format!("the passes before it {counted}\n")),
+            "{broke}"
+        );
+        assert!(
+            broke.contains(&format!(
+                "\nrepairs\tyes: the full text with only this pass left out {counted}\n"
+            )),
+            "{broke}"
+        );
+        let all = blame_report("f", 0x1000, 8, 100, &Bisected::Agrees(ran(8, 0, false)));
+        assert!(
+            all.contains("; the text agrees on 8 of 8 inputs; "),
+            "{all}"
+        );
+        let over = |c: &Checked| bisected(&|_| c.clone(), &|_| String::new());
+        assert_eq!(over(&ran(1, 7, false)), Bisected::Agrees(ran(1, 7, false)));
+        let spun = vec![("it spins".to_owned(), 8)];
+        assert_eq!(over(&ran(0, 8, false)), Bisected::Unchecked(spun));
+    }
+
     /// Leaving the blamed pass out repairs the text only when that text
     /// agrees: one that checked no input is said to be unchecked.
     ///
@@ -372,7 +445,8 @@ mod tests {
         let found = Bisected::Broke {
             pass: Pass::FoldJumps,
             at: at(),
-            alone: ran(0, 8, false),
+            before: Box::new(ran(8, 0, false)),
+            alone: Box::new(ran(0, 8, false)),
             texts: (String::new(), String::new()),
         };
         let text = blame_report("f", 0x1000, 8, 100, &found);
@@ -394,7 +468,8 @@ mod tests {
         let found = Bisected::Broke {
             pass: Pass::FoldTempCopies,
             at: at(),
-            alone: ran(8, 0, false),
+            before: Box::new(ran(8, 0, false)),
+            alone: Box::new(ran(8, 0, false)),
             texts: (
                 "a;
 b;
@@ -431,7 +506,7 @@ c;
     /// When the answer says otherwise.
     #[test]
     fn agreement_and_a_broken_start_blame_no_pass() {
-        let agrees = blame_report("f", 0x1000, 8, 100, &Bisected::Agrees);
+        let agrees = blame_report("f", 0x1000, 8, 100, &Bisected::Agrees(ran(8, 0, false)));
         assert!(agrees.contains("agrees	no input differs"), "{agrees}");
         assert!(agrees.contains("not proof"), "{agrees}");
         assert!(!agrees.contains("pass	"), "{agrees}");
@@ -467,7 +542,8 @@ c;
         let found = Bisected::Broke {
             pass: Pass::FoldJumps,
             at: at(),
-            alone: ran(2, 0, true),
+            before: Box::new(ran(8, 0, false)),
+            alone: Box::new(ran(2, 0, true)),
             texts: (before, after),
         };
         let text = blame_report("f", 0x1000, 8, 100, &found);
@@ -495,7 +571,8 @@ c;
         let found = Bisected::Broke {
             pass: Pass::FoldJumps,
             at: at(),
-            alone: ran(8, 0, false),
+            before: Box::new(ran(8, 0, false)),
+            alone: Box::new(ran(8, 0, false)),
             texts: (
                 long.clone(),
                 format!(
