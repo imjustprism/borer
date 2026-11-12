@@ -63,7 +63,8 @@ pub const TEXT_MAX: usize = 1 << 16;
 /// The packings `#pragma pack` takes.
 const PACKS: [u64; 5] = [1, 2, 4, 8, 16];
 
-/// Deepest chain of typedefs and nested structs an alignment follows.
+/// Deepest chain of typedefs and arrays an alignment follows to the type
+/// they end at.
 const ALIGN_DEPTH_MAX: usize = 32;
 
 /// The ABI a layout follows: the pointer width and the platform.
@@ -388,7 +389,9 @@ struct Reader<'t> {
     /// defined, with a placeholder for each struct the text defines further
     /// down, so a pointer may name it.
     known: BTreeMap<String, UserType>,
-    /// The alignment of each type the text defined.
+    /// The alignment of each struct known before the text is read
+    /// ([`Reader::fill`]) and not since restated as a typedef, and of each
+    /// struct and enum the text defined.
     aligns: BTreeMap<String, u64>,
     /// Struct names the text defines further down and has not yet.
     later: BTreeSet<String>,
@@ -1133,10 +1136,15 @@ impl<'t> Reader<'t> {
 
     /// The alignment a type takes under the ABI, before any packing.
     ///
+    /// A struct's is read from [`Reader::aligns`] and never walked here:
+    /// [`Reader::fill`] recorded every struct known before the text, and
+    /// the text records each it defines, so a struct missing there is one
+    /// met again while it is walked, which aligns as 1.
+    ///
     /// # Arguments
     ///
     /// * `ty` - The type.
-    /// * `depth` - Typedefs and nested structs followed so far.
+    /// * `depth` - Typedefs and arrays followed so far.
     fn align_of(&self, ty: &TypeExpr, depth: usize) -> u64 {
         if depth > ALIGN_DEPTH_MAX {
             return 1;
@@ -1153,15 +1161,6 @@ impl<'t> Reader<'t> {
                     return *a;
                 }
                 match self.known.get(n) {
-                    Some(UserType::Struct(s)) => {
-                        let natural = s
-                            .fields
-                            .values()
-                            .map(|f| self.align_of(&f.ty, depth + 1))
-                            .max()
-                            .unwrap_or(1);
-                        natural.min(largest_power_dividing(s.size))
-                    }
                     Some(UserType::Enum(e)) => {
                         if e.size == 8 {
                             self.abi.wide_align()
@@ -1170,10 +1169,93 @@ impl<'t> Reader<'t> {
                         }
                     }
                     Some(UserType::Alias(inner)) => self.align_of(inner, depth + 1),
-                    None => 1,
+                    Some(UserType::Struct(_)) | None => 1,
                 }
             }
         }
+    }
+
+    /// Records the alignment of every struct known before the text is read,
+    /// each walked once with the structs it holds by value walked first.
+    ///
+    /// A struct aligns as its widest field does, capped by the largest power
+    /// of two dividing its size; a field holding another struct reads that
+    /// one's alignment back rather than walking its fields again. Walked
+    /// field by field, a chain of 32 structs each holding the next 256 times
+    /// took `256^32` steps to align the first; walked once, one step a
+    /// field. A struct met again while it is walked, which only one holding
+    /// itself can be, aligns as 1 there ([`Reader::align_of`]). Each keeps
+    /// the alignment its stated fields gave it when the text began, the
+    /// one its offsets were laid out by, though the text may state anew a
+    /// type it holds.
+    fn fill(&mut self) {
+        let mut open: BTreeSet<String> = BTreeSet::new();
+        let mut stack: Vec<(String, bool)> = self
+            .known
+            .iter()
+            .rev()
+            .filter(|(_, ty)| matches!(ty, UserType::Struct(_)))
+            .map(|(name, _)| (name.clone(), false))
+            .collect();
+        while let Some((name, ready)) = stack.pop() {
+            if self.aligns.contains_key(&name) {
+                continue;
+            }
+            let Some(UserType::Struct(s)) = self.known.get(&name) else {
+                continue;
+            };
+            if !ready {
+                if open.insert(name.clone()) {
+                    let held: Vec<String> = s
+                        .fields
+                        .values()
+                        .filter_map(|f| self.by_value(&f.ty))
+                        .filter(|n| !self.aligns.contains_key(*n) && !open.contains(*n))
+                        .map(str::to_owned)
+                        .collect();
+                    stack.push((name, true));
+                    stack.extend(held.into_iter().map(|n| (n, false)));
+                }
+                continue;
+            }
+            let natural = s
+                .fields
+                .values()
+                .map(|f| self.align_of(&f.ty, 0))
+                .max()
+                .unwrap_or(1);
+            let align = natural.min(largest_power_dividing(s.size));
+            self.aligns.insert(name, align);
+        }
+    }
+
+    /// The struct a field of a type lays out in place: the type itself,
+    /// through any arrays and typedefs, as far as [`Reader::align_of`]
+    /// follows them.
+    ///
+    /// # Arguments
+    ///
+    /// * `ty` - The field's type.
+    ///
+    /// # Returns
+    ///
+    /// The struct's name, or `None` for a scalar, a pointer, an enum or a
+    /// name nothing defines.
+    fn by_value<'k>(&'k self, ty: &'k TypeExpr) -> Option<&'k str> {
+        let mut ty = ty;
+        for _ in 0..=ALIGN_DEPTH_MAX {
+            if let TypeExpr::Array(inner, _) = ty {
+                ty = inner;
+                continue;
+            }
+            let name = ty.name()?;
+            match self.known.get(name) {
+                Some(UserType::Alias(inner)) => ty = inner,
+                Some(UserType::Struct(_)) => return Some(name),
+                Some(UserType::Enum(_)) | None => return None,
+            }
+        }
+        None
     }
 
     /// Reads an enum's `[Tag] [: T] { A, B = 5 }`, `enum` already read.
@@ -1412,6 +1494,9 @@ impl<'t> Reader<'t> {
 
     /// Records a type the text defined.
     ///
+    /// A typedef over a struct known before the text drops the alignment
+    /// [`Reader::fill`] recorded for it, so it aligns as the type it names.
+    ///
     /// # Arguments
     ///
     /// * `name` - Its name.
@@ -1433,6 +1518,9 @@ impl<'t> Reader<'t> {
             ));
         }
         self.later.remove(name);
+        if matches!(ty, UserType::Alias(_)) {
+            self.aligns.remove(name);
+        }
         self.known.insert(name.to_owned(), ty.clone());
         let align = self.align_of(&TypeExpr::Named(name.to_owned()), 0);
         self.out.types.push((name.to_owned(), ty, align));
@@ -1625,6 +1713,7 @@ pub fn parse(text: &str, known: &BTreeMap<String, UserType>, abi: Abi) -> anyhow
             notes: Vec::new(),
         },
     };
+    reader.fill();
     reader.statements()?;
     if reader.out.types.is_empty() {
         return Err(anyhow::anyhow!(

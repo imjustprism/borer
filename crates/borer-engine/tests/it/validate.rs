@@ -1,6 +1,8 @@
 //! User types held to what an overlay holds, as a hand-edited project
 //! states them: the counts, the chains of typedefs, the types holding
 //! themselves and the deadline.
+//!
+//! C declarations are read over types that nest deep in bounded time.
 
 #![expect(
     clippy::missing_panics_doc,
@@ -8,7 +10,9 @@
 )]
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
+use borer_engine::analysis::cdecl::{Abi, parse};
 use borer_engine::analysis::utypes::{
     ALIAS_DEPTH_MAX, TYPES_MAX, TypeExpr, UserEnum, UserField, UserStruct, UserType, parse_type,
     validate,
@@ -214,4 +218,85 @@ fn a_long_ring_of_types_is_refused_in_a_short_message() {
         "{err}"
     );
     assert!(err.len() < 4096, "{} bytes", err.len());
+}
+
+/// A declaration embedding the first of seven structs, each holding the
+/// next 256 times, is read in bounded time.
+///
+/// Its alignment walked every field of every level below it, `256^7`
+/// steps; a chain of structs holds no cycle, so it validates.
+#[test]
+fn a_declaration_over_structs_nested_deep_is_read_in_bounded_time() {
+    let known: BTreeMap<String, UserType> = (0..7u32)
+        .map(|k| {
+            let ty = if k == 6 {
+                TypeExpr::U8
+            } else {
+                TypeExpr::Named(format!("S{}", k + 1))
+            };
+            let stride = 256u64.pow(6 - k);
+            let fields = (0..256u64)
+                .map(|f| {
+                    (
+                        f * stride,
+                        UserField {
+                            name: format!("f{f}"),
+                            ty: ty.clone(),
+                        },
+                    )
+                })
+                .collect();
+            let size = 256 * stride;
+            (
+                format!("S{k}"),
+                UserType::Struct(UserStruct { size, fields }),
+            )
+        })
+        .collect();
+    assert!(validate(&known, &BTreeMap::new()).is_ok());
+    let abi = Abi {
+        word: 8,
+        windows: true,
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        tx.send(parse("struct B { S0 x; };", &known, abi).map(|d| d.types.len()))
+    });
+    let read = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the declaration is read within ten seconds");
+    assert_eq!(read.ok(), Some(1));
+}
+
+/// A typedef a declaration text states over a struct the overlay holds
+/// lays out the structs after it by the type it names.
+///
+/// The struct's alignment, recorded before the text was read, was read
+/// back for the typedef, so a byte after it moved to the struct's
+/// alignment.
+#[test]
+fn a_typedef_over_a_known_struct_aligns_as_the_type_it_names() {
+    let q = UserField {
+        name: "q".to_owned(),
+        ty: TypeExpr::U64,
+    };
+    let wide = UserStruct {
+        size: 8,
+        fields: [(0, q)].into(),
+    };
+    let known = [("S".to_owned(), UserType::Struct(wide))].into();
+    let abi = Abi {
+        word: 8,
+        windows: true,
+    };
+    let text = "typedef unsigned char S; struct T { char a; S b; };";
+    let read = parse(text, &known, abi).expect("the text reads");
+    let t = read.types.iter().find(|(name, ..)| name == "T");
+    let Some((_, UserType::Struct(t), align)) = t else {
+        panic!("T is no struct: {:?}", read.types);
+    };
+    assert_eq!(t.fields.keys().copied().collect::<Vec<_>>(), [0, 1]);
+    assert_eq!((t.size, *align), (2, 1));
+    let s = read.types.iter().find(|(name, ..)| name == "S");
+    assert_eq!(s.map(|(_, _, align)| *align), Some(1));
 }
