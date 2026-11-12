@@ -1484,7 +1484,9 @@ fn a_fact_of_a_blocks_own_temporary_stays_in_its_block() {
 ///
 /// Under `ecx == 5`, `lea eax,[rcx+8]` is 13 whatever the upper half of
 /// `rcx` holds: the low half of the sum is all `eax` takes. `lea
-/// rax,[rcx+8]` keeps the whole sum, so it keeps the variable.
+/// rax,[rcx+8]` keeps the whole sum, so it keeps the variable. Under `ecx
+/// == -1` the sum carries out of the low half, which `eax` does not take:
+/// 7, where the folded sum read `0x100000007`.
 #[test]
 fn a_lea_into_a_low_half_reads_its_registers_that_far() {
     let half = [
@@ -1509,4 +1511,14 @@ fn a_lea_into_a_low_half_reads_its_registers_that_far() {
     ];
     let text = runs_agree(&program64(&whole), 0x1_4000_1000);
     assert!(text.contains("\n*(uint64_t*)a2 = a1 + 8;\n"), "{text}");
+    let carried = [
+        0x83, 0xf9, 0xff, // ASM: cmp ecx,-1
+        0x75, 0x04, // ASM: jne 0x140001009
+        0x8d, 0x41, 0x08, // ASM: lea eax,[rcx+8]
+        0xc3, // ASM: ret
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xc3, // ASM: ret
+    ];
+    let text = runs_agree(&program64(&carried), 0x1_4000_1000);
+    assert!(text.contains("\nreturn 7;\n"), "{text}");
 }

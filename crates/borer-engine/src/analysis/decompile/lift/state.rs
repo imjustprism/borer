@@ -267,12 +267,21 @@ impl<'a> Exec<'_, 'a> {
     /// Builds the address a `lea` computes, read as far as its destination
     /// keeps it ([`Exec::addr_low`]).
     ///
+    /// The sum is taken at 64 bits, so one that folds to a constant is cut
+    /// to what the destination keeps: under `ecx == 0xffffffff`, `lea eax,
+    /// [rcx+8]` is 7, not `0x100000007`.
+    ///
     /// # Arguments
     ///
     /// * `instr` - The `lea`, its destination a register.
     pub(super) fn lea(&self, instr: &Instruction) -> Expr {
         let kept = u8::try_from(8 * instr.op0_register().size()).unwrap_or(WHOLE);
-        self.addr_low(instr, kept)
+        let a = self.addr_low(instr, kept);
+        if let Expr::Const(c) = a {
+            Expr::Const(c & mask_bits(kept))
+        } else {
+            a
+        }
     }
 
     /// Builds the address [`Exec::addr`] builds, for a reader that keeps
