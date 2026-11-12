@@ -3,8 +3,8 @@
 //! them.
 
 use super::{
-    Arg, BUDGET, BUDGET_MAX, INPUTS_MAX, Outcome, Shared, Verdict, args_shown, float_shown,
-    run_one, small_hex, writes_shown,
+    Arg, BUDGET, BUDGET_MAX, Grade, INPUTS_MAX, Outcome, Shared, Verdict, args_shown, commonest,
+    float_shown, run_one, small_hex, writes_shown,
 };
 use crate::analysis::decompile::ctext::float_bits;
 use crate::analysis::decompile::interp::{Mode, Script};
@@ -332,8 +332,12 @@ pub(super) fn generated_in(
 /// ([`bisect_iso`]) found the text to break.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Bisected {
-    /// No input differs on the full text: nothing to bisect.
+    /// No input differs on the full text and at least one agrees: nothing
+    /// to bisect.
     Agrees,
+    /// The full text left every input unchecked, so nothing is claimed of
+    /// it: why, each reason with how many inputs, the commonest first.
+    Unchecked(Vec<(String, usize)>),
     /// The text with every pass left out differs already: what the passes
     /// were handed was wrong, so no pass broke it.
     Unbisected(Counterexample),
@@ -371,9 +375,11 @@ pub struct Counterexample {
 /// passes of [`Pass::ALL`] are bisected: the text built with only the
 /// first `k` of them ([`Passes::after`]) is checked for each `k` a binary
 /// search asks for, from none (which must agree, or no pass is to blame)
-/// to all. A text that does not read, or an input it leaves unchecked,
-/// counts as agreeing: the bisection looks for a difference, not for a
-/// claim.
+/// to all. A probe of the bisection that does not read, or leaves an
+/// input unchecked, differs on nothing: the bisection looks for a
+/// difference. The full text is graded as every answer grades one
+/// ([`Grade`]): it agrees when an input does, and is unchecked when none
+/// was checked.
 ///
 /// # Arguments
 ///
@@ -406,15 +412,20 @@ pub fn bisect_iso(
         ..o.clone()
     };
     let drawn = draw(p, a, &full, entry, count, seed)?;
-    let differs = |skip: Passes| -> Option<Counterexample> {
+    let check = |skip: Passes| {
         let under = Overlay {
             passes: skip,
             ..full.clone()
         };
-        first_difference(p, a, &under, entry, &drawn, budget).differs
+        first_difference(p, a, &under, entry, &drawn, budget)
     };
-    let Some(mut at) = differs(Passes::NONE) else {
-        return Ok(Bisected::Agrees);
+    let differs = |skip: Passes| check(skip).differs;
+    let whole = check(Passes::NONE);
+    let Some(mut at) = whole.differs else {
+        return Ok(match Grade::of(whole.agreed, 0) {
+            Grade::Unchecked => Bisected::Unchecked(commonest(whole.unchecked)),
+            Grade::Agrees | Grade::Differs => Bisected::Agrees,
+        });
     };
     if let Some(before) = differs(Passes::after(0)) {
         return Ok(Bisected::Unbisected(before));
@@ -524,12 +535,15 @@ pub(super) fn draw(
 }
 
 /// What one text did on drawn inputs under the ISO check.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct Checked {
     /// The first input the text differs on, and where; `None` when none.
     pub(super) differs: Option<Counterexample>,
     /// Inputs the text agreed on before it differed, or in all.
     pub(super) agreed: usize,
+    /// Why inputs were left unchecked before it differed, or in all, each
+    /// reason with how many.
+    pub(super) unchecked: BTreeMap<String, usize>,
 }
 
 /// Runs a function's text, read as ISO C, beside the binary on drawn
@@ -559,10 +573,7 @@ pub(super) fn first_difference(
     drawn: &Drawn,
     budget: usize,
 ) -> Checked {
-    let mut out = Checked {
-        differs: None,
-        agreed: 0,
-    };
+    let mut out = Checked::default();
     let Some(text) = decompile_named(p, a, u, entry) else {
         return out;
     };
@@ -585,7 +596,7 @@ pub(super) fn first_difference(
                 return out;
             }
             Verdict::Agrees => out.agreed += 1,
-            Verdict::Unchecked(..) => {}
+            Verdict::Unchecked(_, why) => *out.unchecked.entry(why).or_default() += 1,
         }
     }
     out

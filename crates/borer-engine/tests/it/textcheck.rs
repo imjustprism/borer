@@ -827,6 +827,23 @@ fn the_repair_search_masks_a_signed_quotient_to_its_lane() {
     );
 }
 
+/// Blame answers `unchecked`, with the reason and how many inputs it left
+/// so, for a text no input checked, and never `agrees`.
+///
+/// `L: jmp L` returns on no input, so no run compares a result: nothing
+/// differs, and nothing was checked either.
+#[test]
+fn blame_says_unchecked_when_no_input_was_checked() {
+    let p = program(&[0xeb, 0xfe], &[]); // ASM: jmp 0x1000
+    let a = Analysis::compute(&p);
+    let out = blame_tsv(&p, &a, &Overlay::default(), "0x1000,count=8").expect("blames");
+    assert!(
+        out.contains("\nunchecked\t8\tboth ran out of steps before returning"),
+        "{out}"
+    );
+    assert!(!out.contains("\nagrees\t"), "{out}");
+}
+
 /// Blame lays a text that differs to a pass, or to what the passes were
 /// handed, and blames nothing in a text that agrees.
 ///

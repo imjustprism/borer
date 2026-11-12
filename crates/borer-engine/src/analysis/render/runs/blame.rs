@@ -4,7 +4,7 @@
 use std::fmt::Write as _;
 
 use super::vectors::VERIFY_SEED;
-use super::{BUDGET_MAX, Bisected, INPUTS_MAX, bisect_iso, within_total};
+use super::{BUDGET_MAX, Bisected, INPUTS_MAX, bisect_iso, unchecked_rows, within_total};
 use crate::analysis::decompile::Pass;
 use crate::analysis::render::diff::{DIFF_FN_MAX_LINES, line_diff, render_collapsed};
 use crate::analysis::render::*;
@@ -32,8 +32,9 @@ fn bisect_runs() -> usize {
 ///
 /// The function's text is run as ISO C beside the binary on inputs drawn
 /// from its signature ([`bisect_iso`]); the answer says when the text
-/// agrees on every input, when it differs before any pass ran, and when
-/// the check cannot run (an error).
+/// agrees on every input it was checked on, when no input was checked and
+/// why, when it differs before any pass ran, and when the check cannot run
+/// (an error).
 ///
 /// # Arguments
 ///
@@ -48,8 +49,9 @@ fn bisect_runs() -> usize {
 ///
 /// # Returns
 ///
-/// The answer: a header, then the verdict lines and the capped diff of
-/// the text before and after the pass.
+/// The answer: a header, then the verdict lines (for a text no input
+/// checked, `unchecked` and how many inputs each reason left so) and the
+/// capped diff of the text before and after the pass.
 ///
 /// # Errors
 ///
@@ -161,12 +163,16 @@ pub(super) fn run_option(
 /// The header, the verdict and, for a pass to blame, the capped diff.
 fn blame_report(name: &str, entry: u64, count: usize, budget: usize, found: &Bisected) -> String {
     let mut out = format!(
-        "# blame for {name} ({entry:#x}): its text run as ISO C beside the binary on {count} inputs drawn from its signature (seed {VERIFY_SEED}, {budget} steps each); an input the text leaves unchecked counts as agreeing\n"
+        "# blame for {name} ({entry:#x}): its text run as ISO C beside the binary on {count} inputs drawn from its signature (seed {VERIFY_SEED}, {budget} steps each); an input the text leaves unchecked says nothing\n"
     );
     match found {
         Bisected::Agrees => out.push_str(
             "agrees\tno input differs, so no pass is to blame; agreement on drawn inputs is evidence, not proof\n",
         ),
+        Bisected::Unchecked(reasons) => {
+            out.push_str("unchecked\tno input was checked, so nothing is claimed of the text and no pass is blamed\n");
+            unchecked_rows(&mut out, reasons);
+        }
         Bisected::Unbisected(c) => {
             out.push_str("before-passes\tthe text differs with every cleanup pass left out, so the lift or the structure the passes start from is wrong, not a pass\n");
             let _ = writeln!(out, "differs\t{}\t{}\t{}", c.input, c.line, c.why);
@@ -352,5 +358,23 @@ c;
         };
         let text = blame_report("f", 0x1000, 8, 100, &found);
         assert!(text.contains("# the texts run past 1500 lines"), "{text}");
+    }
+
+    /// A text no input checked is unchecked, with how many inputs each
+    /// reason left so, and is nowhere said to agree.
+    ///
+    /// # Panics
+    ///
+    /// When the answer says otherwise.
+    #[test]
+    fn a_text_no_input_checked_is_unchecked() {
+        let reasons = vec![("it spins".to_owned(), 7), ("it faults".to_owned(), 1)];
+        let text = blame_report("f", 0x1000, 8, 100, &Bisected::Unchecked(reasons));
+        assert!(text.contains("\nunchecked\tno input was checked"), "{text}");
+        assert!(
+            text.ends_with("\nunchecked\t7\tit spins\nunchecked\t1\tit faults\n"),
+            "{text}"
+        );
+        assert!(!text.contains("agree"), "{text}");
     }
 }

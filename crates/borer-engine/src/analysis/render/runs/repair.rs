@@ -260,13 +260,9 @@ pub fn repair_iso(p: &Program, a: &Analysis, o: &Overlay, entry: u64, budget: Bu
     let drawn = draw(p, a, o, entry, budget.inputs, budget.seed).ok();
     let checks = Cell::new(1usize);
     let iso = |u: &Overlay| {
-        drawn.as_ref().map_or(
-            Checked {
-                differs: None,
-                agreed: 0,
-            },
-            |d| first_difference(p, a, u, entry, d, budget.steps),
-        )
+        drawn.as_ref().map_or_else(Checked::default, |d| {
+            first_difference(p, a, u, entry, d, budget.steps)
+        })
     };
     let base = iso(o);
     let live = base.differs.is_some() || base.agreed > 0;
@@ -283,10 +279,7 @@ pub fn repair_iso(p: &Program, a: &Analysis, o: &Overlay, entry: u64, budget: Bu
             probe(u)
         } else {
             checks.set(checks.get() + 1);
-            Checked {
-                differs: None,
-                agreed: 0,
-            }
+            Checked::default()
         };
         match c.differs.or(refuted) {
             Some(c) => Evidence::Refuted(c),

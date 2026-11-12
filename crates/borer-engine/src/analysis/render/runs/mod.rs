@@ -565,6 +565,64 @@ pub enum Verdict {
     Unchecked(Option<usize>, String),
 }
 
+/// What a text's runs on a set of inputs say of it.
+///
+/// An input left unchecked says nothing, so a text no input checked is not
+/// one that agrees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Grade {
+    /// Some input differs, or something else contradicts the text.
+    Differs,
+    /// Nothing contradicts the text and at least one input agrees.
+    Agrees,
+    /// Nothing contradicts the text and no input was checked.
+    Unchecked,
+}
+
+impl Grade {
+    /// The grade of a text by how many inputs agree and how many differ.
+    ///
+    /// # Arguments
+    ///
+    /// * `agree` - Inputs that agree.
+    /// * `differ` - Inputs that differ, and whatever else contradicts it.
+    fn of(agree: usize, differ: usize) -> Self {
+        match (differ, agree) {
+            (0, 0) => Self::Unchecked,
+            (0, _) => Self::Agrees,
+            _ => Self::Differs,
+        }
+    }
+}
+
+/// Most reasons inputs went unchecked an answer lists.
+const REASONS_SHOWN: usize = 3;
+
+/// The reasons inputs went unchecked with how many each, the commonest
+/// first and equal counts in the reasons' own order.
+///
+/// # Arguments
+///
+/// * `counts` - How many inputs each reason left unchecked.
+fn commonest<K: Ord>(counts: BTreeMap<K, usize>) -> Vec<(K, usize)> {
+    let mut rows: Vec<(K, usize)> = counts.into_iter().collect();
+    rows.sort_by_key(|row| std::cmp::Reverse(row.1));
+    rows
+}
+
+/// Writes an `unchecked` row for each of the commonest reasons inputs went
+/// unchecked, at most [`REASONS_SHOWN`]: how many inputs, and why.
+///
+/// # Arguments
+///
+/// * `out` - The answer.
+/// * `reasons` - The reasons, the commonest first ([`commonest`]).
+fn unchecked_rows<K: std::fmt::Display>(out: &mut String, reasons: &[(K, usize)]) {
+    for (reason, n) in reasons.iter().take(REASONS_SHOWN) {
+        let _ = writeln!(out, "unchecked\t{n}\t{reason}");
+    }
+}
+
 /// One input's answer: the binary's run and the text's verdict.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Outcome {

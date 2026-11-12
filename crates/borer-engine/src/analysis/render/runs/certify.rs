@@ -8,14 +8,14 @@ use std::fmt::Write as _;
 
 use super::blame::{BLAME_STEPS, function_count_steps, run_option};
 use super::vectors::{VERIFY_SEED, generated_in};
-use super::{NOT_MODELED_SHOWN, Outcome, Verdict, not_modeled, within_total};
+use super::{
+    Grade, NOT_MODELED_SHOWN, Outcome, Verdict, commonest, not_modeled, unchecked_rows,
+    within_total,
+};
 use crate::analysis::decompile::interp::Mode;
 use crate::analysis::decompile::text_check;
 use crate::analysis::render::*;
 use crate::text::one_line;
-
-/// Most reasons an input went unchecked the answer lists.
-const REASONS_SHOWN: usize = 3;
 
 /// Block starts the answer names as never reached before the rest are
 /// counted.
@@ -113,9 +113,7 @@ pub fn certify_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result
                 tally.unchecked,
                 tally.differ
             );
-            for (reason, n) in tally.reasons.iter().take(REASONS_SHOWN) {
-                let _ = writeln!(out, "unchecked\t{n}\t{reason}");
-            }
+            unchecked_rows(&mut out, &tally.reasons);
             if let Some((input, line, what)) = tally.first {
                 let _ = writeln!(out, "differs\t{input}\t{line}\t{what}");
             }
@@ -185,8 +183,7 @@ impl<'r> Tally<'r> {
                 }
             }
         }
-        t.reasons = why.into_iter().collect();
-        t.reasons.sort_by(|x, y| y.1.cmp(&x.1).then(x.0.cmp(y.0)));
+        t.reasons = commonest(why);
         t.blocks = starts.len();
         t.never = starts
             .iter()
@@ -228,30 +225,30 @@ impl<'r> Tally<'r> {
     ///
     /// * `lift_wrong` - Whether the binary contradicts a lifted block.
     fn grade(&self, lift_wrong: bool) -> (&'static str, String) {
-        if lift_wrong || self.differ > 0 {
-            (
+        match Grade::of(self.agree, self.differ + usize::from(lift_wrong)) {
+            Grade::Differs => (
                 "differs",
                 "the binary contradicts the decompilation where the lines above say".to_owned(),
-            )
-        } else if self.agree > 0 {
-            let over = if self.never.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    " (they reached {} of {} blocks)",
-                    self.blocks - self.never.len(),
-                    self.blocks
+            ),
+            Grade::Agrees => {
+                let over = if self.never.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        " (they reached {} of {} blocks)",
+                        self.blocks - self.never.len(),
+                        self.blocks
+                    )
+                };
+                (
+                    "agrees",
+                    format!("every input checked agrees{over} and no lifted block is contradicted"),
                 )
-            };
-            (
-                "agrees",
-                format!("every input checked agrees{over} and no lifted block is contradicted"),
-            )
-        } else {
-            (
+            }
+            Grade::Unchecked => (
                 "unchecked",
                 "no input was checked, so nothing is claimed of the text".to_owned(),
-            )
+            ),
         }
     }
 }

@@ -384,7 +384,7 @@ fn bisect_passes() {
                 ISO_SEED,
                 ISO_STEPS,
             ) {
-                Err(_) => skipped += 1,
+                Err(_) | Ok(Bisected::Unchecked(_)) => skipped += 1,
                 Ok(Bisected::Agrees) => agree += 1,
                 Ok(Bisected::Unbisected(c)) => {
                     table.entry("(before passes)".to_owned()).or_default().0 += 1;
