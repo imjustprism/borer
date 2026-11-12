@@ -1,0 +1,1 @@
+{"program":"fuzz","names":{},"comments":{},"types":{"Big":{"Struct":{"size":196608,"fields":{"0":{"name":"f0","ty":{"Array":["U8",65536]}},"65536":{"name":"f1","ty":{"Array":["U8",65535]}},"131072":{"name":"f2","ty":{"Array":["U8",65535]}}}}}},"applied":{"0x3000":"Big"}}

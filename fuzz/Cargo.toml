@@ -17,6 +17,8 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4.13"
 borer-engine = { path = "../crates/borer-engine" }
+# The `project` target reads its input as the JSON a project file holds.
+serde_json = "1.0.151"
 
 [[bin]]
 name = "load"
@@ -56,6 +58,13 @@ bench = false
 [[bin]]
 name = "pdb"
 path = "fuzz_targets/pdb.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "project"
+path = "fuzz_targets/project.rs"
 test = false
 doc = false
 bench = false

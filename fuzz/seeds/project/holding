@@ -1,0 +1,1 @@
+{"program":"fuzz","names":{},"comments":{},"types":{"A":{"Struct":{"size":24,"fields":{"0":{"name":"f0","ty":{"Named":"A"}},"8":{"name":"f1","ty":{"Named":"A"}},"16":{"name":"f2","ty":{"Named":"A"}}}}}}}
