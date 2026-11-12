@@ -177,6 +177,13 @@ fn a_local_a_modeled_call_fills_in_part_still_differs() {
 /// xmm0,xmm0; movdqu [rdx],xmm0` every run stops at the vector store, so
 /// the quotient is never compared: the answer is `unchecked` with that
 /// reason and the count, not `agrees`.
+///
+/// The difference is a defect of the decompiler this test borrows, not
+/// one it is about: the text declares `uint64_t f(int32_t a1)` and returns
+/// `a1 / -5`, an `int` that C sign-extends to the return type, where the
+/// `idiv` left the quotient in `eax` and `rax` zero above it. When that is
+/// fixed the first assertion fails, since nothing differs any more: give
+/// the test another text whose integer result differs, do not drop it.
 #[test]
 fn blame_reads_an_integer_result_beside_float_code() {
     const QUOTIENT: [u8; 11] = [
