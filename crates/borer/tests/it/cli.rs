@@ -435,6 +435,31 @@ fn cli_refuses_a_share_before_reading_it() {
     std::fs::remove_file(&file).expect("the fixture is removed");
 }
 
+/// A pack directory that names a share is listed and never read, and the
+/// listing says why: every load read each directory `BORER_PACK_DIRS`
+/// named, a share as well, and said nothing.
+#[test]
+fn a_pack_directory_that_names_a_share_is_never_read() {
+    if !cfg!(windows) {
+        return;
+    }
+    let file = std::env::temp_dir().join(format!("borer_packdir_{}.exe", std::process::id()));
+    std::fs::write(&file, crate::contract::tiny_pe()).expect("the fixture is writable");
+    let pe = file.to_string_lossy().to_string();
+    let out = Command::new(env!("CARGO_BIN_EXE_borer"))
+        .env("BORER_PACK_DIRS", r"\\host.invalid\share")
+        .env("BORER_AUTO_PACKS", "1")
+        .args(["--no-pdb", "packs", &pe])
+        .output()
+        .expect("spawn borer.exe");
+    std::fs::remove_file(&file).expect("the fixture is removed");
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        said.contains(r"# skipped a pack directory: \\host.invalid\share names a network share"),
+        "{said}"
+    );
+}
+
 /// An error quotes a 30 KB argument cut short on one row, where it came
 /// back whole.
 ///

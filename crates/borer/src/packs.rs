@@ -58,6 +58,10 @@ pub fn env_paths(var: &str) -> Option<Vec<PathBuf>> {
 }
 
 /// The pack directories, in search order, each once.
+///
+/// One that names a share or a device
+/// ([`borer_engine::program::unusable_path`]) is listed as given and never
+/// touched: [`discovered`] skips it with a note.
 #[must_use]
 pub fn dirs() -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
@@ -82,7 +86,11 @@ pub fn dirs() -> Vec<PathBuf> {
     }
     let mut seen: Vec<PathBuf> = Vec::new();
     out.retain(|d| {
-        let key = std::fs::canonicalize(d).unwrap_or_else(|_| d.clone());
+        let key = if borer_engine::program::unusable_path(d).is_some() {
+            d.clone()
+        } else {
+            std::fs::canonicalize(d).unwrap_or_else(|_| d.clone())
+        };
         let fresh = !seen.contains(&key);
         seen.push(key);
         fresh
@@ -141,15 +149,20 @@ pub fn load_scripts(pack: &mut Pack, file: &Path) -> Result<(), String> {
 
 /// Every pack in the pack directories, in directory then file-name order,
 /// each with the file it came from as its `source`; a file that does not
-/// read as a pack is skipped with a note.
+/// read as a pack is skipped with a note, and so is a directory that names
+/// a share or a device, unread.
 ///
 /// # Arguments
 ///
-/// * `notes` - Where a skipped file's reason goes.
+/// * `notes` - Where a skipped file's or directory's reason goes.
 #[must_use]
 pub fn discovered(notes: &mut Vec<String>) -> Vec<Pack> {
     let mut out = Vec::new();
     for dir in dirs() {
+        if let Some(why) = borer_engine::program::unusable_path(&dir) {
+            notes.push(format!("skipped a pack directory: {why}"));
+            continue;
+        }
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
