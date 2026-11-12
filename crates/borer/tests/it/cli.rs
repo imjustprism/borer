@@ -435,6 +435,26 @@ fn cli_refuses_a_share_before_reading_it() {
     std::fs::remove_file(&file).expect("the fixture is removed");
 }
 
+/// `changes`, `anchors` and `diff` refuse a share before they analyze the
+/// binary: given a file borer cannot analyze, they answer the share's
+/// refusal, where the analysis ran first and answered for itself.
+#[test]
+fn cli_refuses_a_share_before_its_analysis() {
+    if !cfg!(windows) {
+        return;
+    }
+    let file = std::env::temp_dir().join(format!("borer_first_{}.bin", std::process::id()));
+    std::fs::write(&file, b"no code here").expect("the fixture is writable");
+    let bin = file.to_string_lossy().to_string();
+    let share = r"\\host.invalid\share\x";
+    let refused = format!("Error: {share} names a network share");
+    for command in ["changes", "anchors", "diff"] {
+        let (ok, said) = run_all(&[command, &bin, share]);
+        assert!(!ok && said.contains(&refused), "{command}: {said}");
+    }
+    std::fs::remove_file(&file).expect("the fixture is removed");
+}
+
 /// A pack directory that names a share is listed and never read, and the
 /// listing says why: every load read each directory `BORER_PACK_DIRS`
 /// named, a share as well, and said nothing.

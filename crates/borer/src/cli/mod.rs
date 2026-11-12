@@ -567,8 +567,8 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Changes => {
-            let a = s.analysis(Feature::Decompile)?;
             let text = read_text(path_arg(args, 2, "changes needs a snapshot file")?)?;
+            let a = s.analysis(Feature::Decompile)?;
             let before = snapshot::read(&text).map_err(anyhow::Error::msg)?;
             let after = snapshot::facts(&s.program, &a, &s.overlay);
             print!("{}", snapshot::changes_tsv(&before, &after));
@@ -595,8 +595,8 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Anchors => {
-            let a = s.analysis(Feature::Decompile)?;
             let text = read_text(path_arg(args, 2, "anchors needs a manifest file")?)?;
+            let a = s.analysis(Feature::Decompile)?;
             let pinned = anchors::parse_manifest(&text).map_err(anyhow::Error::msg)?;
             let (table, all_held) =
                 anchors::verify_tsv(&s.program, &a, &s.overlay, &pinned, pinned.len());

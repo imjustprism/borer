@@ -255,10 +255,9 @@ pub(super) fn run(cmd: Extra, args: &[String], s: &Session) -> anyhow::Result<()
 ///
 /// # Errors
 ///
-/// When the other build is missing, its path is a share or a device, or it
-/// cannot be loaded.
+/// When the other build is missing, its path is a share or a device (said
+/// before the binary is analyzed), or it cannot be loaded.
 fn diff(args: &[String], s: &Session) -> anyhow::Result<()> {
-    let a = s.analysis(Feature::Discover)?;
     let other = path_arg(args, 2, "diff needs another build or a fingerprint sidecar")?;
     let path = std::path::Path::new(other);
     let label = |p: &std::path::Path| {
@@ -274,12 +273,13 @@ fn diff(args: &[String], s: &Session) -> anyhow::Result<()> {
     let text = match sidecar {
         Some(prints) => render::diff_prints_tsv(
             &render::parse_prints(&prints),
-            &render::prints_of(&a),
+            &render::prints_of(&s.analysis(Feature::Discover)?),
             &label(path),
             &label(&s.program.path),
         ),
         None => {
             let (named, program) = open(&["diff".to_owned(), other.to_owned()], &s.loading)?;
+            let a = s.analysis(Feature::Discover)?;
             let theirs = Session::fit(program, &named, Overlay::default(), s.loading.clone())
                 .analysis(Feature::Discover)?;
             render::diff_tsv(&a, &theirs, &label(&s.program.path), &label(path))
