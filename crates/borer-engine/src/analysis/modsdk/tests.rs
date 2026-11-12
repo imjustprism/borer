@@ -582,3 +582,187 @@ fn xml_text_keeps_a_unicode_module_name() {
     sdk.module = "café.exe".to_owned();
     assert!(cheat_table(&sdk).contains("<Address>\"café.exe\"+200000</Address>"));
 }
+
+/// Returns the sample SDK with its weapon class stating 256 runs of
+/// 0xffff bytes, just under the longest run a class spells.
+fn wide_runs() -> Sdk {
+    let mut sdk = sample();
+    if let Some(wide) = sdk.classes.get_mut(1) {
+        let bytes = || Ty::Bytes(0xffff, "u8[65535]".to_owned());
+        wide.fields = (0..256u64)
+            .map(|k| field(k << 16, &format!("f{k}"), bytes(), Evidence::Stated))
+            .collect();
+        wide.size = Size::Stated(256 << 16);
+    }
+    sdk
+}
+
+/// A class's runs of hex nodes stop where its budget is spent, and say
+/// so: 256 runs just under the longest a class spells were two million
+/// nodes for the one class.
+///
+/// # Panics
+///
+/// When the nodes run past the budget or the class does not say where
+/// they stop.
+#[test]
+fn a_reclass_project_spends_at_most_its_hex_nodes() {
+    let x = data_xml(&wide_runs());
+    let hex = x.matches("<node type=\"Hex").count();
+    assert!(hex <= 1 << 16, "{hex} hex nodes");
+    assert!(
+        x.contains(
+            "the nodes stop at +0x70000, where the 0x10000 hex nodes a class spells are spent"
+        ),
+        "{}",
+        x.get(..4096).unwrap_or(&x)
+    );
+}
+
+/// Each class of a ReClass.NET project spends its own hex nodes, so the
+/// last of 1,100 classes keeps the field after its first gap.
+///
+/// The budget was the project's: past about the 1,024th class of 0x200
+/// unknown bytes, a class lost every field after its first gap, while the
+/// export still counted them.
+///
+/// # Panics
+///
+/// When the last class's field is missing.
+#[test]
+fn each_reclass_class_spends_its_own_hex_nodes() {
+    let mut sdk = sample();
+    let int = Ty::Int {
+        bytes: 8,
+        signed: false,
+    };
+    let template = sdk.classes.get(1).cloned().expect("the weapon");
+    sdk.classes = (0..1100)
+        .map(|k| Class {
+            name: format!("C{k:04}"),
+            size: Size::Stated(0x208),
+            fields: vec![field(0x200, "q", int.clone(), Evidence::Stated)],
+            ..template.clone()
+        })
+        .collect();
+    let x = data_xml(&sdk);
+    let last = x.rsplit("<class ").next().unwrap_or_default();
+    assert!(last.contains("name=\"C1099\""), "{last}");
+    assert!(
+        last.contains("<node type=\"UInt64Node\" name=\"q\""),
+        "{last}"
+    );
+}
+
+/// A ReClass.NET project whose XML passes the bytes a mod file holds is
+/// refused before it is zipped: the cut XML was zipped and checksummed,
+/// and only the zip's size refused it.
+///
+/// # Panics
+///
+/// When the project is zipped, or the refusal does not name the cap.
+#[test]
+fn a_reclass_project_past_the_cap_is_refused_before_it_is_zipped() {
+    let mut sdk = wide_runs();
+    let template = sdk.classes.get(1).cloned().expect("the weapon");
+    sdk.classes = (0..24)
+        .map(|k| Class {
+            name: format!("W{k:02}"),
+            ..template.clone()
+        })
+        .collect();
+    let refused = reclass(&sdk).expect_err("a project past the cap was zipped");
+    assert!(
+        refused
+            .to_string()
+            .starts_with("the ReClass.NET project passes the 67108864 bytes a mod file holds"),
+        "{refused}"
+    );
+}
+
+/// A Cheat Engine table past the bytes a mod file holds stops at the
+/// global that took it past them, and is refused rather than written.
+///
+/// Two thousand globals of a class of 256 fields were a hundred MiB of
+/// entries.
+///
+/// # Panics
+///
+/// When the table runs on past the cap, or one past it is accepted.
+#[test]
+fn a_mod_file_past_its_cap_is_cut_and_refused() {
+    let mut sdk = sample();
+    let weapon = sdk.classes.get_mut(1).expect("the weapon");
+    let int = || Ty::Int {
+        bytes: 4,
+        signed: false,
+    };
+    weapon.fields = (0..256u64)
+        .map(|k| field(k * 4, &format!("f{k}"), int(), Evidence::Stated))
+        .collect();
+    weapon.size = Size::Stated(0x400);
+    sdk.globals = (0..2000u64)
+        .map(|k| Global {
+            va: 0x1_4020_0000 + k * 0x400,
+            name: format!("g{k}"),
+            ty: Ty::Bytes(0x400, "Demo::Weapon".to_owned()),
+            evidence: Evidence::Stated,
+        })
+        .collect();
+    let table = cheat_table(&sdk);
+    assert!(
+        table.len() <= super::FILE_MAX + (1 << 17),
+        "{} bytes",
+        table.len()
+    );
+    let refused = super::fits(&sdk, "Cheat Engine table", table.into_bytes())
+        .expect_err("a table past the cap");
+    assert!(
+        refused
+            .to_string()
+            .starts_with("the Cheat Engine table passes the 67108864 bytes a mod file holds"),
+        "{refused}"
+    );
+    assert!(super::fits(&sdk, "header", header(&sample()).into_bytes()).is_ok());
+}
+
+/// Each renderer stops before its next class or global once the caller's
+/// flag is raised, so a request past its deadline renders nothing more.
+///
+/// # Panics
+///
+/// When a renderer goes on under the raised flag, or stops without it.
+#[test]
+fn the_mod_files_stop_rendering_once_the_flag_is_raised() {
+    let sdk = sample();
+    let flag = crate::cancel::Cancel::new();
+    flag.raise();
+    let (h, t, x) = flag.within(|| (header(&sdk), cheat_table(&sdk), data_xml(&sdk)));
+    assert!(!h.contains("struct Demo_Player {"), "{h}");
+    assert!(!t.contains("<CheatEntry>"), "{t}");
+    assert!(!x.contains("<class "), "{x}");
+    assert!(header(&sdk).contains("struct Demo_Player {"));
+}
+
+/// The rows after the classes stop once the caller's flag is raised too.
+///
+/// They are the header's forward declarations and address rows, and the
+/// table's thread-local singletons: a binary naming functions by the
+/// million rendered their rows on past the cap after its last class.
+///
+/// # Panics
+///
+/// When a row renders under the raised flag, or none renders without it.
+#[test]
+fn the_rows_after_the_classes_stop_once_the_flag_is_raised() {
+    let sdk = sample();
+    let flag = crate::cancel::Cancel::new();
+    flag.raise();
+    let (h, t) = flag.within(|| (header(&sdk), cheat_table(&sdk)));
+    let rows = ["struct Demo_Player;", "constexpr std::uintptr_t"];
+    assert!(rows.iter().all(|row| !h.contains(row)), "{h}");
+    assert!(!t.contains("Thread-local singleton"), "{t}");
+    let (h, t) = (header(&sdk), cheat_table(&sdk));
+    assert!(rows.iter().all(|row| h.contains(row)), "{h}");
+    assert!(t.contains("Thread-local singleton"), "{t}");
+}

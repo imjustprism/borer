@@ -26,6 +26,50 @@ use super::vtables::ClassInfo;
 use super::{Analysis, NameSource, Overlay, name_of, slot_name_of, striped};
 use crate::program::Program;
 
+/// Most bytes one mod file holds, sixty-four MiB.
+///
+/// As many as the project its stated types come from, and past any header
+/// or table a modding tool loads. Each renderer stops at the class that
+/// takes its file past it.
+pub const FILE_MAX: usize = 1 << 26;
+
+/// Tells whether a renderer stops before its next class or global: its
+/// file has passed [`FILE_MAX`], or the caller's flag was raised
+/// ([`crate::cancel::Cancel::raised`]).
+///
+/// # Arguments
+///
+/// * `out` - The file so far.
+fn full(out: &str) -> bool {
+    out.len() > FILE_MAX || crate::cancel::Cancel::raised()
+}
+
+/// Hands back a mod file's bytes when they fit [`FILE_MAX`].
+///
+/// A renderer stops at the class that takes its file past the cap, so a
+/// file that long was cut there: it is refused rather than written.
+///
+/// # Arguments
+///
+/// * `sdk` - What the file was rendered from.
+/// * `what` - The kind of file, for the message (`ReClass.NET project`).
+/// * `bytes` - The file.
+///
+/// # Errors
+///
+/// When the file passes the cap; the message names the cap, what the SDK
+/// lays out and what to narrow.
+pub fn fits(sdk: &Sdk, what: &str, bytes: Vec<u8>) -> anyhow::Result<Vec<u8>> {
+    if bytes.len() <= FILE_MAX {
+        return Ok(bytes);
+    }
+    Err(anyhow::anyhow!(
+        "the {what} passes the {FILE_MAX} bytes a mod file holds, laying out {} classes and {} globals, so nothing was written; state fewer or smaller structs, apply fewer types, or write another of the files",
+        sdk.classes.len(),
+        sdk.globals.len()
+    ))
+}
+
 /// What a mod SDK is made of: a program's classes, globals and functions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sdk {

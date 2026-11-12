@@ -273,7 +273,9 @@ impl ModFile {
 /// Writes the program's mod SDK as each file asked for.
 ///
 /// The SDK is gathered once and every file rendered before any is
-/// written, so a request whose deadline passes writes nothing.
+/// written, so a request whose deadline passes, or a file past the bytes
+/// a mod file holds ([`borer_engine::analysis::modsdk::fits`]), writes
+/// nothing.
 ///
 /// # Arguments
 ///
@@ -291,9 +293,10 @@ impl ModFile {
 /// # Errors
 ///
 /// When a path is unusable, a file is there and `existing` keeps it, a
-/// write fails, or the request's deadline passed while the classes were
-/// read ([`borer_engine::cancel::Cancel`]); the files written before a
-/// failed write stay.
+/// file passes the bytes a mod file holds, a write fails, or the request's
+/// deadline passed while the classes were read or rendered
+/// ([`borer_engine::cancel::Cancel`]); the files written before a failed
+/// write stay.
 pub fn write_mod_files(
     program: &Program,
     analysis: &Analysis,
@@ -328,7 +331,7 @@ pub fn write_mod_files(
             ModFile::CheatTable => modsdk::cheat::cheat_table(&sdk).into_bytes(),
             ModFile::ReClass => modsdk::reclass::reclass(&sdk)?,
         };
-        rendered.push((kind, out, bytes));
+        rendered.push((kind, out, modsdk::fits(&sdk, kind.what(), bytes)?));
     }
     if let Some(why) = cut() {
         return Err(why);
@@ -521,6 +524,48 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("cleans up");
         let why = format!("{:#}", cut.expect_err("a cut export is refused"));
         assert!(why.contains("BORER_DEADLINE_SECS"), "{why}");
+        assert!(!written);
+    }
+
+    /// A mod file past the bytes one holds is refused, naming the cap, and
+    /// nothing is written.
+    ///
+    /// Two thousand globals typed by a struct of 256 fields made a Cheat
+    /// Engine table of a hundred MiB, and 4096 such structs of 64 KiB arrays
+    /// a ReClass.NET project of half a terabyte.
+    ///
+    /// # Panics
+    ///
+    /// When the table is written or the refusal does not name the cap.
+    #[test]
+    fn a_mod_file_past_its_cap_is_refused_and_not_written() {
+        use super::{ModFile, write_mod_files};
+        use borer_engine::analysis::utypes::{TypeExpr, build_struct};
+        let text = Section::mapped(".text", 0x1000, 0, 0x10, false, true);
+        let p = Program::raw(vec![0xc3; 0x10], Arch::X86_64, 0, Some(0x1000), vec![text]);
+        let a = Analysis::compute(&p);
+        let fields: Vec<(u64, String, TypeExpr)> = (0..256u64)
+            .map(|k| (k * 4, format!("f{k}"), TypeExpr::U32))
+            .collect();
+        let mut o = Overlay::default();
+        let big = build_struct("Big", None, &fields, &o.types, 8).expect("builds");
+        o.types.insert("Big".to_owned(), big);
+        for k in 0..2000u64 {
+            o.applied
+                .insert(0x10_0000 + k * 0x400, TypeExpr::Named("Big".to_owned()));
+        }
+        let dir = std::env::temp_dir().join(format!("borer-mod-cap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        let ct = dir.join("big.ct").display().to_string();
+        let files = [(ModFile::CheatTable, ct.as_str())];
+        let refused = write_mod_files(&p, &a, &o, &files, Existing::Replace);
+        let written = std::path::Path::new(&ct).exists();
+        std::fs::remove_dir_all(&dir).expect("cleans up");
+        let why = format!("{:#}", refused.expect_err("a table past the cap"));
+        assert!(
+            why.contains("passes the 67108864 bytes a mod file holds"),
+            "{why}"
+        );
         assert!(!written);
     }
 

@@ -3,16 +3,19 @@
 //! A record type stated once reads every record of a table with its fields
 //! named, a nested struct's fields under a dotted path, an enum by its
 //! member, a `char` array and a `char` pointer as quoted text, under the
-//! caps every listing keeps.
+//! caps every listing keeps. A struct of large arrays writes a ReClass.NET
+//! project under the caps it keeps.
 
 #![expect(
     clippy::missing_panics_doc,
     reason = "assertions are the point of a test"
 )]
 
-use borer_engine::analysis::Overlay;
+use borer_engine::analysis::modsdk::build;
+use borer_engine::analysis::modsdk::reclass::data_xml;
 use borer_engine::analysis::render::typed_tsv;
-use borer_engine::analysis::utypes::{build_enum, build_struct, parse_type};
+use borer_engine::analysis::utypes::{TypeExpr, build_enum, build_struct, parse_type};
+use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::program::{Arch, Program, Section};
 
 /// A 64-bit image whose `.rdata` at 0x403000 holds two 0x28-byte records,
@@ -162,4 +165,34 @@ fn a_typed_read_keeps_its_caps() {
     assert!(err.contains("names nothing defined"), "{err}");
     let err = typed_tsv(&p, None, &o, 0x9000, &parse_type("Rec").unwrap()).unwrap_err();
     assert!(err.contains("not mapped"), "{err}");
+}
+
+/// A struct of 256 arrays of 64 KiB each is a ReClass.NET project of a few
+/// nodes: a run of exactly the bytes a project spells in hex nodes stops
+/// the class's nodes, as a longer run does.
+///
+/// Each array was 8192 hex nodes, 128 MiB of XML for the one struct and
+/// half a terabyte for a project stating 4096 of them.
+#[test]
+fn a_struct_of_large_arrays_is_a_small_reclass_project() {
+    let fields: Vec<(u64, String, TypeExpr)> = (0..256u64)
+        .map(|k| {
+            (
+                k << 16,
+                format!("f{k}"),
+                TypeExpr::Array(Box::new(TypeExpr::U8), 0x1_0000),
+            )
+        })
+        .collect();
+    let mut o = Overlay::default();
+    let big = build_struct("Big", None, &fields, &o.types, 8).unwrap();
+    o.types.insert("Big".to_owned(), big);
+    let p = table();
+    let xml = data_xml(&build(&p, &Analysis::compute(&p), &o));
+    assert!(xml.len() < 1 << 24, "{} bytes", xml.len());
+    assert!(
+        xml.contains("the nodes stop at +0x0, where 0x10000 bytes run past the 0x10000"),
+        "{}",
+        xml.get(..2048).unwrap_or(&xml)
+    );
 }

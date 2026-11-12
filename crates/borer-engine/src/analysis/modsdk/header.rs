@@ -29,12 +29,17 @@ struct Names {
 ///
 /// # Returns
 ///
-/// The header's text, the same bytes for the same SDK.
+/// The header's text, the same bytes for the same SDK; past
+/// [`super::FILE_MAX`] bytes, or under a raised [`crate::cancel::Cancel`],
+/// cut at the next class or row, which [`super::fits`] refuses.
 #[must_use]
 pub fn header(sdk: &Sdk) -> String {
     let names = names(sdk);
     let mut out = prelude(sdk);
     for c in &sdk.classes {
+        if super::full(&out) {
+            break;
+        }
         let _ = writeln!(out, "struct {};", names.structs[&c.name]);
         if c.vtable.is_some() {
             let _ = writeln!(out, "struct {};", names.vtables[&c.name]);
@@ -42,12 +47,15 @@ pub fn header(sdk: &Sdk) -> String {
     }
     out.push_str("\n#pragma pack(push, 1)\n");
     for c in &sdk.classes {
+        if super::full(&out) {
+            break;
+        }
         out.push('\n');
         out.push_str(&vtable_struct(sdk, c, &names));
         out.push_str(&class_struct(sdk, c, &names));
     }
     out.push_str("\n#pragma pack(pop)\n");
-    out.push_str(&addresses(sdk, &names));
+    addresses(&mut out, sdk, &names);
     out.push_str("\n} // namespace sdk\n");
     out
 }
@@ -266,23 +274,34 @@ fn evidence(e: &Evidence) -> String {
     }
 }
 
-/// Returns the address tables: vtables and functions, globals, and the
+/// Writes the address tables: vtables and functions, globals, and the
 /// thread-local singletons' offsets.
+///
+/// Each table stops at the row that takes the header past
+/// [`super::FILE_MAX`], or once the caller's flag is raised, as the
+/// classes do: a binary names functions by the million.
 ///
 /// # Arguments
 ///
+/// * `out` - The header so far.
 /// * `sdk` - The addresses.
 /// * `names` - The vtable structs' identifiers, which name their tables.
-fn addresses(sdk: &Sdk, names: &Names) -> String {
-    let mut out = String::from("\n/* Addresses relative to the image base. */\nnamespace rva {\n");
+fn addresses(out: &mut String, sdk: &Sdk, names: &Names) {
+    out.push_str("\n/* Addresses relative to the image base. */\nnamespace rva {\n");
     let mut taken = BTreeSet::new();
     for c in &sdk.classes {
+        if super::full(out) {
+            break;
+        }
         if let Some(v) = c.vtable {
             let id = unique(&mut taken, &names.vtables[&c.name]);
             let _ = writeln!(out, "constexpr std::uintptr_t {id} = {:#x};", sdk.rva(v));
         }
     }
     for (entry, name) in &sdk.functions {
+        if super::full(out) {
+            break;
+        }
         let id = unique(&mut taken, &ident(name));
         let _ = writeln!(
             out,
@@ -294,6 +313,9 @@ fn addresses(sdk: &Sdk, names: &Names) -> String {
     out.push_str("} // namespace rva\n\nnamespace global {\n");
     let mut taken = BTreeSet::new();
     for g in &sdk.globals {
+        if super::full(out) {
+            break;
+        }
         let id = unique(&mut taken, &ident(&g.name));
         let ty = match &g.ty {
             Ty::Ptr(Some(n)) => format!("{n} *"),
@@ -316,6 +338,9 @@ fn addresses(sdk: &Sdk, names: &Names) -> String {
     );
     let mut taken = BTreeSet::new();
     for (off, class) in &sdk.tls {
+        if super::full(out) {
+            break;
+        }
         let id = unique(&mut taken, &ident(class));
         let _ = writeln!(
             out,
@@ -324,7 +349,6 @@ fn addresses(sdk: &Sdk, names: &Names) -> String {
         );
     }
     out.push_str("} // namespace tls\n");
-    out
 }
 
 /// Returns text safe inside a `/* */` comment.

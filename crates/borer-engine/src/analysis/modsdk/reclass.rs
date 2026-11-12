@@ -4,9 +4,10 @@
 //! (`DataExchange/ReClass/ReClassNetFile.*.cs` at ReClassNET/ReClass.NET
 //! `a02fcb9b`). ReClass.NET stores no offsets: a node sits where the nodes
 //! before it end, so every gap between known fields is a run of hex nodes,
-//! up to 64 KiB a run, where the class's nodes stop. A class's
-//! uuid is derived from its name, so the same SDK writes the same bytes. A
-//! class a global singleton points at takes that global as its address.
+//! under 64 KiB a run and 64 Ki nodes a class, past which the class's
+//! nodes stop. A class's uuid is derived from its name, so the same SDK
+//! writes the same bytes. A class a global singleton points at takes that
+//! global as its address.
 
 use std::fmt::Write as _;
 
@@ -27,10 +28,20 @@ const END: u32 = 0x0605_4b50;
 /// Bytes of the three headers of a one-entry zip, besides the name twice.
 const HEADERS: usize = 30 + 46 + 22;
 
-/// Longest run of bytes a class spells in hex nodes, one per 8 bytes:
-/// past it a class's nodes stop, so a stated struct of a gigabyte does not
-/// become a hundred million nodes.
+/// Bytes of a run no class spells in hex nodes, one per 8 bytes: at a run
+/// this long or longer a class's nodes stop, so a stated struct of a
+/// gigabyte does not become a hundred million nodes.
 const HEX_MAX: u64 = 0x1_0000;
+
+/// Most hex nodes one class spells.
+///
+/// Seven runs of the longest a class spells, a run of 0xffff bytes being
+/// 8,194 nodes. Where a run would take the class past it, its nodes stop
+/// as at a run of [`HEX_MAX`], so a struct of 256 arrays just under it
+/// does not spell two million nodes; the classes together stop at the
+/// bytes a mod file holds ([`super::FILE_MAX`]). Each class has its own,
+/// so a project's thousandth class keeps its fields as its first does.
+const HEX_NODES_MAX: u64 = 1 << 16;
 
 /// Returns the classes of the SDK as a ReClass.NET project.
 ///
@@ -44,9 +55,14 @@ const HEX_MAX: u64 = 0x1_0000;
 ///
 /// # Errors
 ///
-/// When the XML is too big for a zip without its 64-bit extension.
+/// When the XML passes the bytes a mod file holds ([`super::fits`]), the
+/// caller's deadline passed while it was rendered
+/// ([`crate::cancel::Cancel::whole`]), or it is too big for a zip without
+/// its 64-bit extension; a cut XML is refused before it is zipped.
 pub fn reclass(sdk: &Sdk) -> anyhow::Result<Vec<u8>> {
-    stored_zip(ENTRY, data_xml(sdk).as_bytes())
+    let xml = super::fits(sdk, "ReClass.NET project", data_xml(sdk).into_bytes())?;
+    crate::cancel::Cancel::whole(()).map_err(anyhow::Error::msg)?;
+    stored_zip(ENTRY, &xml)
 }
 
 /// Returns the project's `Data.xml`.
@@ -54,6 +70,12 @@ pub fn reclass(sdk: &Sdk) -> anyhow::Result<Vec<u8>> {
 /// # Arguments
 ///
 /// * `sdk` - The classes.
+///
+/// # Returns
+///
+/// The XML; past [`super::FILE_MAX`] bytes, or under a raised
+/// [`crate::cancel::Cancel`], cut at the next class, which [`super::fits`]
+/// refuses.
 #[must_use]
 pub fn data_xml(sdk: &Sdk) -> String {
     let platform = if sdk.word == 8 { "x64" } else { "x86" };
@@ -61,6 +83,10 @@ pub fn data_xml(sdk: &Sdk) -> String {
         "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<reclass version=\"{FILE_VERSION}\" type=\"{platform}\">\n  <classes>\n"
     );
     for c in &sdk.classes {
+        if super::full(&out) {
+            break;
+        }
+        let mut spent = 0u64;
         let mut comment = c.parent.as_ref().map_or_else(String::new, |p| {
             format!("parent {p} (its fields are flattened in); ")
         });
@@ -80,14 +106,25 @@ pub fn data_xml(sdk: &Sdk) -> String {
             },
             Part::Skipped(_) => None,
         };
-        let stop = parts
-            .iter()
-            .position(|p| run(p).is_some_and(|(_, len)| len > HEX_MAX));
+        let mut stop = None;
+        for (i, part) in parts.iter().enumerate() {
+            let Some((_, len)) = run(part) else {
+                continue;
+            };
+            let nodes = len / 8 + u64::from((len % 8).count_ones());
+            if len >= HEX_MAX || spent.saturating_add(nodes) > HEX_NODES_MAX {
+                stop = Some(i);
+                break;
+            }
+            spent = spent.saturating_add(nodes);
+        }
         if let Some((off, len)) = stop.and_then(|i| parts.get(i)).and_then(run) {
-            let _ = write!(
-                comment,
-                "; the nodes stop at +{off:#x}, where {len:#x} bytes run past the {HEX_MAX:#x} a project spells in hex nodes"
-            );
+            let why = if len >= HEX_MAX {
+                format!("{len:#x} bytes run past the {HEX_MAX:#x} a project spells in hex nodes")
+            } else {
+                format!("the {HEX_NODES_MAX:#x} hex nodes a class spells are spent")
+            };
+            let _ = write!(comment, "; the nodes stop at +{off:#x}, where {why}");
         }
         let _ = writeln!(
             out,
