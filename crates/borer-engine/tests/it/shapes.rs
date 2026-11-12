@@ -325,6 +325,46 @@ fn an_arm_loop_at_the_entry_is_entered_with_any_argument() {
     }
 }
 
+/// A register read after an arm64 or A32 count-down loop holds what the
+/// loop left in it: the lifters share the fact a block reads under, and
+/// what ends it.
+///
+/// `mov x9,x0; mov x0,#0; L: ldr x10,[x1],#8; add x0,x0,x10; subs x9,x9,#1;
+/// b.ne L; add w11,w9,#8; str w11,[x2]; ret` and its A32 twin leave the
+/// loop when the counter was 1 where `subs` read it, and `subs` leaves it
+/// zero: the store after the loop is the counter plus 8, which read 9.
+#[test]
+fn a_register_read_after_an_arm_loop_holds_what_the_loop_left() {
+    let a64: [u32; 9] = [
+        0xaa00_03e9, // ASM: mov x9, x0
+        0xd280_0000, // ASM: mov x0, #0
+        0xf840_842a, // ASM: ldr x10, [x1], #8
+        0x8b0a_0000, // ASM: add x0, x0, x10
+        0xf100_0529, // ASM: subs x9, x9, #1
+        0x54ff_ffa1, // ASM: b.ne 0x401008
+        0x1100_212b, // ASM: add w11, w9, #8
+        0xb900_004b, // ASM: str w11, [x2]
+        0xd65f_03c0, // ASM: ret
+    ];
+    let a32: [u32; 9] = [
+        0xe1a0_3000, // ASM: mov r3, r0
+        0xe3a0_0000, // ASM: mov r0, #0
+        0xe491_c004, // ASM: ldr ip, [r1], #4
+        0xe080_000c, // ASM: add r0, r0, ip
+        0xe253_3001, // ASM: subs r3, r3, #1
+        0x1aff_fffb, // ASM: bne 0x401008
+        0xe283_c008, // ASM: add ip, r3, #8
+        0xe582_c000, // ASM: str ip, [r2]
+        0xe12f_ff1e, // ASM: bx lr
+    ];
+    for (arch, words) in [(Arch::Arm64, a64), (Arch::Arm, a32)] {
+        let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let text = decompiled(&crate::raw::image(arch, &code, &[]), 0x40_1000);
+        assert!(text.contains(" + 8;\n"), "{text}");
+        assert!(!text.contains(" = 9;\n"), "{text}");
+    }
+}
+
 /// A function that only waits on a global is the empty `while` of its
 /// test, entered with whatever the global holds.
 ///

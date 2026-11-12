@@ -1683,7 +1683,7 @@ fn decompile_in<L: Lifter>(
         slots: None,
     };
     lap.end(crate::timing::Step::Decode);
-    let (_, _, mut recorded) = dataflow::<L>(&mut ctx, &code, &succs, &preds, &live, &[]);
+    let (_, _, mut recorded, _) = dataflow::<L>(&mut ctx, &code, &succs, &preds, &live, &[]);
     ctx.frame.solve(&ctx.overlay.choices);
     let floats: Vec<i64> = ctx.frame.floats().collect();
     ctx.sites.extend(floats.into_iter().map(Site::Slot));
@@ -1695,9 +1695,9 @@ fn decompile_in<L: Lifter>(
         }
     }
     live.slots = Some(slot_liveness(&recorded, &succs_eh));
-    let assumes = block_assumptions::<L>(&ctx, &code, &preds, &recorded);
-    let (in_envs, processed, recorded) =
-        dataflow::<L>(&mut ctx, &code, &succs, &preds, &live, &assumes);
+    let edges = block_assumptions::<L>(&ctx, &code, &preds, &recorded);
+    let (in_envs, processed, recorded, assumes) =
+        dataflow::<L>(&mut ctx, &code, &succs, &preds, &live, &edges);
     lap.end(crate::timing::Step::Lift);
 
     let mut succs_live = succs.clone();

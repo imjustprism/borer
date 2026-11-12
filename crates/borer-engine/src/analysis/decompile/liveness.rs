@@ -74,6 +74,10 @@ pub(super) struct SlotRec {
     pub(super) flag_src: Option<Instruction>,
 }
 
+/// What an equality branch establishes on one of its edges: a variable and
+/// the constant it holds there.
+pub(super) type Fact = (Key, u64);
+
 /// Returns what an equality branch establishes on the edge to `succ`.
 ///
 /// `if (k == c)` makes `k` equal to `c` on its taken edge, `if (k != c)` on
@@ -88,7 +92,7 @@ pub(super) struct SlotRec {
 /// # Returns
 ///
 /// `(variable, constant)` to assume, or `None`.
-pub(super) fn assumption(branch: &Branch, succ: u64) -> Option<(Key, u64)> {
+pub(super) fn assumption(branch: &Branch, succ: u64) -> Option<Fact> {
     if branch.target == branch.fall || (succ != branch.target && succ != branch.fall) {
         return None;
     }
@@ -121,7 +125,10 @@ pub(super) fn assumption(branch: &Branch, succ: u64) -> Option<(Key, u64)> {
 /// its one predecessor (`L: cmp ecx, 5; je L` at the entry is entered with
 /// any `ecx`, not only the 5 its back edge brings). The fact is applied
 /// when values are read inside the block, never stored in the environment:
-/// stored, it would look like a value to write out at the next join.
+/// stored, it would look like a value to write out at the next join. It is
+/// a fact of the value the branch read: where the predecessor assigns the
+/// variable at its end (`sub r9, 1; jne L` leaves a loop with `r9` zero,
+/// not the one the branch compared it with), [`dataflow`] takes it away.
 ///
 /// # Arguments
 ///
@@ -135,7 +142,7 @@ pub(super) fn block_assumptions<L: Lifter>(
     code: &[Vec<L::Insn>],
     preds: &[Vec<usize>],
     recorded: &[SlotRec],
-) -> Vec<Option<(Key, u64)>> {
+) -> Vec<Option<Fact>> {
     (0..code.len())
         .map(|b| {
             let [p] = preds[b].as_slice() else {
@@ -332,7 +339,7 @@ pub(super) fn block_facts<'n, L: Lifter>(
     code: &[Vec<L::Insn>],
     succs: &[Vec<usize>],
     need: &'n [Vec<FxHashMap<Key, u8>>],
-    assumes: &[Option<(Key, u64)>],
+    assumes: &[Option<Fact>],
     b: usize,
 ) -> BlockFacts<'n> {
     BlockFacts {
@@ -399,6 +406,63 @@ pub(super) fn drop_key(env: &mut Env, k: Key) {
     if env.flags.mentions(k) {
         env.flags = Flags::Unknown;
     }
+}
+
+/// Forgets from a block's IN what one predecessor assigns at its end.
+///
+/// A variable the predecessor writes out as a phi holds its own text value
+/// in the block from then on, unless the value written is a stable constant
+/// the block carries as well. The predecessor writes out before such a
+/// variable every value of its own that reads it, and before those every
+/// value that reads one of them; every value of the block that reads any
+/// variable written out is unknown too, and so is every value that reads
+/// one of those.
+///
+/// # Arguments
+///
+/// * `m` - The block's IN as met so far.
+/// * `out` - The predecessor's OUT environment.
+/// * `phis` - The variables the predecessor writes out ([`phi_keys`]).
+///
+/// # Returns
+///
+/// Every variable the predecessor assigns at its end: the phis and the
+/// values of its own it writes out before them.
+fn forget_assigned(m: &mut Env, out: &Env, phis: Vec<Key>) -> BTreeSet<Key> {
+    for &k in &phis {
+        let v = out.vals.get(&k);
+        let stable = v.is_some_and(|v| !v.any_var(&|_| true));
+        if !(stable && m.vals.get(&k) == v) {
+            drop_key(m, k);
+        }
+    }
+    let mut written = phis;
+    let mut marked: BTreeSet<Key> = written.iter().copied().collect();
+    let mut at = 0;
+    while let Some(&k) = written.get(at) {
+        at += 1;
+        let readers: Vec<Key> = out
+            .vals
+            .iter()
+            .filter(|(x, e)| **x != k && !marked.contains(*x) && e.may_read(k))
+            .map(|(x, _)| *x)
+            .collect();
+        marked.extend(readers.iter().copied());
+        written.extend(readers);
+    }
+    while let Some(k) = written.pop() {
+        let readers: Vec<Key> = m
+            .vals
+            .iter()
+            .filter(|(x, e)| **x != k && e.may_read(k))
+            .map(|(x, _)| *x)
+            .collect();
+        for x in readers {
+            drop_key(m, x);
+            written.push(x);
+        }
+    }
+    marked
 }
 
 /// Folds `v = X;` directly followed by `return v;` into `return X;` when
@@ -645,8 +709,8 @@ thread_local! {
 /// of them; every value of `b` that reads any variable written out is unknown
 /// too, and so is every value that reads one of those (`ecx = *eax` pending while
 /// the `eax` it reads is written out for reading a slot written out; `edx = a2`
-/// pending while `a2 = ebx` is written out for `ebx`). A block reruns only when its IN or
-/// the escape floor it last ran under changed; a floor change restarts the
+/// pending while `a2 = ebx` is written out for `ebx`). A block reruns only when its IN, the
+/// equality fact it reads under or the escape floor it last ran under changed; a floor change restarts the
 /// pass budget. `ran_under` holds that per block: `None` before it has run
 /// and once a flag rebase it must lift under lands, `Some(None)` when it
 /// last ran with the escape floor unknown, and `Some(Some(k))` when it last
@@ -680,27 +744,32 @@ thread_local! {
 /// * `succs` - Successor block indices per block.
 /// * `preds` - Predecessor block indices per block.
 /// * `live` - Liveness oracle for phi placement.
-/// * `assumes` - Per block, the equality fact it may read under ([`block_assumptions`]).
+/// * `edges` - Per block, what the equality branch into it establishes
+///   ([`block_assumptions`]).
 ///
 /// # Returns
 ///
-/// `(IN environments, processed flags, slot records)` per block.
+/// `(IN environments, processed flags, slot records, equality facts)` per
+/// block. A block's fact is its edge's, and none where its predecessor
+/// assigns the compared variable at its end: the branch read the value the
+/// variable held before, and says nothing of the one it holds in the block.
 pub(super) fn dataflow<L: Lifter>(
     ctx: &mut Ctx<'_>,
     code: &[Vec<L::Insn>],
     succs: &[Vec<usize>],
     preds: &[Vec<usize>],
     live: &Live,
-    assumes: &[Option<(Key, u64)>],
-) -> (Vec<Env>, Vec<bool>, Vec<SlotRec>) {
+    edges: &[Option<Fact>],
+) -> (Vec<Env>, Vec<bool>, Vec<SlotRec>, Vec<Option<Fact>>) {
     let n = code.len();
     let mut ins: Vec<Env> = vec![Env::unknown(); n];
     let mut outs: Vec<Env> = vec![Env::unknown(); n];
     let mut processed = vec![false; n];
     let mut recorded: Vec<SlotRec> = vec![SlotRec::default(); n];
     let mut ran_under: Vec<Option<Option<i64>>> = vec![None; n];
+    let mut assumes = vec![None; n];
     if n == 0 {
-        return (ins, processed, recorded);
+        return (ins, processed, recorded, assumes);
     }
     let mut passes = 0usize;
     let mut escapes_seen = ctx.escape_floor;
@@ -766,44 +835,14 @@ pub(super) fn dataflow<L: Lifter>(
                     }
                 }
                 met[b] = Some(clock);
+                let mut held = edges.get(b).copied().flatten();
                 for &p in &preds[b] {
                     if !processed[p] {
                         continue;
                     }
                     let phis = phi_keys(&outs[p], &succs[p], &ins, live, &processed, Some((b, &m)));
-                    for &k in &phis {
-                        let v = outs[p].vals.get(&k);
-                        let stable = v.is_some_and(|v| !v.any_var(&|_| true));
-                        if !(stable && m.vals.get(&k) == v) {
-                            drop_key(&mut m, k);
-                        }
-                    }
-                    let mut written = phis;
-                    let mut marked: BTreeSet<Key> = written.iter().copied().collect();
-                    let mut at = 0;
-                    while let Some(&k) = written.get(at) {
-                        at += 1;
-                        let readers: Vec<Key> = outs[p]
-                            .vals
-                            .iter()
-                            .filter(|(x, e)| **x != k && !marked.contains(*x) && e.may_read(k))
-                            .map(|(x, _)| *x)
-                            .collect();
-                        marked.extend(readers.iter().copied());
-                        written.extend(readers);
-                    }
-                    while let Some(k) = written.pop() {
-                        let readers: Vec<Key> = m
-                            .vals
-                            .iter()
-                            .filter(|(x, e)| **x != k && e.may_read(k))
-                            .map(|(x, _)| *x)
-                            .collect();
-                        for x in readers {
-                            drop_key(&mut m, x);
-                            written.push(x);
-                        }
-                    }
+                    let assigned = forget_assigned(&mut m, &outs[p], phis);
+                    held = held.filter(|(k, _)| !assigned.contains(k));
                 }
                 if m.flags == Flags::Unknown && ctx.flag_readers[b] {
                     let active: Vec<usize> =
@@ -833,9 +872,10 @@ pub(super) fn dataflow<L: Lifter>(
                         }
                     }
                 }
-                let differs = ins[b] != m;
+                let differs = ins[b] != m || assumes[b] != held;
                 if differs {
                     ins[b] = m;
+                    assumes[b] = held;
                     changed = true;
                     clock += 1;
                     stamp[b] = clock;
@@ -853,7 +893,7 @@ pub(super) fn dataflow<L: Lifter>(
             }
             ran_under[b] = Some(floor);
             let mut env = ins[b].clone();
-            let facts = block_facts::<L>(ctx, code, succs, &live.need, assumes, b);
+            let facts = block_facts::<L>(ctx, code, succs, &live.need, &assumes, b);
             let out = L::exec_block(
                 ctx,
                 &code[b],
@@ -906,7 +946,7 @@ pub(super) fn dataflow<L: Lifter>(
             break;
         }
     }
-    (ins, processed, recorded)
+    (ins, processed, recorded, assumes)
 }
 
 #[cfg(test)]

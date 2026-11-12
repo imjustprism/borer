@@ -1490,3 +1490,75 @@ fn an_unwrapped_catch_keeps_the_code_it_runs() {
     assert!(out.contains("L_1010:\ng();"), "{out}");
     assert!(!out.contains("h();"), "{out}");
 }
+
+/// A register read after a loop holds what the loop left in it, not what
+/// the loop's last test compared it with.
+///
+/// `mov r9,rcx; mov r10d,1; xor eax,eax; L: add rax,[rdx]; add rdx,8;
+/// <latch>; lea r10d,[r9+8]; lea r11d,[r9+0x20]; mov [r8],r10d; mov
+/// [r8+4],r11d; ret`. Each latch but the last leaves on an equality, which
+/// says what `r9` held where the latch tested it, and each then leaves
+/// another value there: `sub r9,r10` with `r10` one leaves zero where its
+/// test compared `r9` with 1, so the two `lea`s read 9 and 33 where the
+/// machine stores 8 and 32. The text reads the variable instead, and run as
+/// C it stores what the binary does.
+#[test]
+fn a_register_read_after_a_loop_holds_what_the_loop_left() {
+    const HEAD: [u8; 18] = [
+        0x49, 0x89, 0xc9, // ASM: mov r9,rcx
+        0x41, 0xba, 0x01, 0x00, 0x00, 0x00, // ASM: mov r10d,1
+        0x31, 0xc0, // ASM: xor eax,eax
+        0x48, 0x03, 0x02, // ASM: add rax,[rdx]
+        0x48, 0x83, 0xc2, 0x08, // ASM: add rdx,8
+    ];
+    const TAIL: [u8; 16] = [
+        0x45, 0x8d, 0x51, 0x08, // ASM: lea r10d,[r9+8]
+        0x45, 0x8d, 0x59, 0x20, // ASM: lea r11d,[r9+0x20]
+        0x45, 0x89, 0x10, // ASM: mov [r8],r10d
+        0x45, 0x89, 0x58, 0x04, // ASM: mov [r8+4],r11d
+        0xc3, // ASM: ret
+    ];
+    let latches: [&[u8]; 6] = [
+        &[0x4d, 0x29, 0xd1, 0x75],                         // ASM: sub r9,r10; jne L
+        &[0x49, 0xff, 0xc9, 0x75],                         // ASM: dec r9; jne L
+        &[0x49, 0xff, 0xc1, 0x75],                         // ASM: inc r9; jne L
+        &[0x49, 0xff, 0xc1, 0x49, 0x83, 0xf9, 0x05, 0x75], // ASM: inc r9; cmp r9,5; jne L
+        &[0x49, 0x83, 0xf9, 0x05, 0x4d, 0x8d, 0x49, 0x01, 0x75], // ASM: cmp r9,5; lea r9,[r9+1]; jne L
+        &[0x49, 0xff, 0xc1, 0x49, 0x39, 0xc9, 0x72],             // ASM: inc r9; cmp r9,rcx; jb L
+    ];
+    for latch in latches {
+        let back = u8::try_from(latch.len() + 8).expect("a short latch");
+        let mut code = HEAD.to_vec();
+        code.extend_from_slice(latch);
+        code.push(back.wrapping_neg());
+        code.extend_from_slice(&TAIL);
+        let text = runs_agree(&program64(&code), 0x1_4000_1000);
+        assert!(text.contains(" + 8;\n"), "{latch:02x?}\n{text}");
+        assert!(text.contains(" + 32;\n"), "{latch:02x?}\n{text}");
+    }
+}
+
+/// The fact a loop's exit reads under ends when the latch turns out to
+/// assign its variable, though nothing else the exit starts from changed.
+///
+/// `mov r11,rsi; L: cmp rsi,5; mov rsi,r11; lea r11,[r11+1]; jne L; lea
+/// eax,[rsi+8]; ret`: while the latch knows `r11` as `rsi`, its `mov`
+/// leaves `rsi` what it was and the exit may read it as the 5 the branch
+/// compared. Once `r11` is a variable of its own the latch assigns `rsi`
+/// at its end, and the exit, whose state is otherwise what it was, is
+/// lifted again without the fact: it returned 13 where the machine, started
+/// with `rsi` zero, returns 14.
+#[test]
+fn a_fact_lost_alone_lifts_its_block_again() {
+    let code = [
+        0x49, 0x89, 0xf3, // ASM: mov r11,rsi
+        0x48, 0x83, 0xfe, 0x05, // ASM: cmp rsi,5
+        0x4c, 0x89, 0xde, // ASM: mov rsi,r11
+        0x4d, 0x8d, 0x5b, 0x01, // ASM: lea r11,[r11+1]
+        0x75, 0xf3, // ASM: jne 0x140001003
+        0x8d, 0x46, 0x08, // ASM: lea eax,[rsi+8]
+        0xc3, // ASM: ret
+    ];
+    let text = runs_agree(&program64(&code), 0x1_4000_1000);
+    assert!(text.contains("return rsi + 8;\n"), "{text}");
+}
