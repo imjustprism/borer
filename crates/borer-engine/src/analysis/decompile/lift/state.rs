@@ -186,15 +186,13 @@ impl<'a> Exec<'_, 'a> {
     /// # Arguments
     ///
     /// * `e` - The value as the environment holds it.
-    /// * `bits` - How many of its low bits the read uses; none for a read
-    ///   that takes nothing the block assumes.
+    /// * `bits` - How many of its low bits the read uses.
     ///
     /// # Returns
     ///
     /// `e` with the assumed variable replaced by its constant, or `e` itself.
     pub(in crate::analysis::decompile) fn assumed(&self, e: Expr, bits: u8) -> Expr {
         match self.assume {
-            _ if bits == 0 => e,
             Some((k, c, WHOLE)) if e.mentions(k) => e.subst(&Expr::Var(k), &Expr::Const(c)),
             Some((k, c, known)) if bits <= known && e.is_var(k) => Expr::Const(c),
             _ => e,
@@ -291,19 +289,16 @@ impl<'a> Exec<'_, 'a> {
     ///
     /// The sum is taken at 64 bits. In 32-bit code the machine wraps it at
     /// 4 GiB, so one that folds to a constant is cut there: `[ecx+8]` with
-    /// `ecx` 0xffffffff is 7. A 32-bit address in 64-bit code wraps as
-    /// well ([`crate::disasm::wraps_at_32`]), which the sum here does not,
-    /// so nothing the block assumes of a register is read into it: under
-    /// `ecx == 0xffffffff`, `lea rax, [ecx+8]` stays the sum of the
-    /// variable, where the constant read `0x100000007` for the machine's 7.
+    /// `ecx` 0xffffffff is 7. A 32-bit address in 64-bit code
+    /// ([`crate::disasm::wraps_at_32`]) wraps there too, folded or not:
+    /// under `ecx == 0xffffffff`, `lea rax, [ecx+8]` is 7, not
+    /// `0x100000007`.
     ///
     /// # Arguments
     ///
     /// * `instr` - The instruction.
     /// * `bits` - How many low bits of the address the reader keeps.
     fn addr_low(&self, instr: &Instruction, bits: u8) -> Expr {
-        let wraps = crate::disasm::wraps_at_32(instr, self.bitness());
-        let bits = if wraps { 0 } else { bits };
         let sixteen = crate::disasm::addresses_16_bit(instr);
         let disp = if sixteen {
             i64::from(crate::num::lo16(instr.memory_displacement64()).cast_signed()).cast_unsigned()
@@ -328,6 +323,8 @@ impl<'a> Exec<'_, 'a> {
         }
         if sixteen {
             e = fold(Op::And, e, Expr::Const(0xffff), 64);
+        } else if crate::disasm::wraps_at_32(instr, self.bitness()) {
+            e = fold(Op::And, e, Expr::Const(0xffff_ffff), 64);
         } else if let (32, Expr::Const(c)) = (self.bitness(), &e) {
             e = Expr::Const(c & 0xffff_ffff);
         }

@@ -113,6 +113,28 @@ fn a_high_byte_register_is_bits_8_to_15() {
     assert_eq!(emu.register("rbx").map(|v| v & 0xffff), Some(0x5678));
 }
 
+/// A 32-bit address of 64-bit code wraps at 4 GiB, as the machine sums
+/// it.
+///
+/// `lea rax, [ecx+8]` with `rcx` 0xffffffff is 7; summed at 64 bits it
+/// read `0x100000007`.
+///
+/// # Panics
+///
+/// When the sum is not cut at 32 bits.
+#[test]
+fn a_32_bit_address_of_64_bit_code_wraps_at_4_gib() {
+    let code: &[u8] = &[
+        0x67, 0x48, 0x8d, 0x41, 0x08, // ASM: lea rax, [ecx+8]
+        0xc3, // ASM: ret
+    ];
+    let p = image(code, &[]);
+    let mut emu = Emulator::new(&p, 10).expect("emulator");
+    assert!(emu.set_register("rcx", 0xffff_ffff));
+    assert_eq!(emu.run(0x1000).stop, Stop::Returned);
+    assert_eq!(emu.register("rax"), Some(7));
+}
+
 /// A stop reason reads as words with its address in hex, not as the
 /// enum's syntax or a decimal.
 ///

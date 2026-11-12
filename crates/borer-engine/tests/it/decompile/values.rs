@@ -1550,11 +1550,10 @@ fn a_fact_of_a_narrow_global_reads_at_its_width() {
 ///
 /// 32-bit code wraps an address at 4 GiB: `xor ecx,ecx; mov eax,[ecx-4]`
 /// reads `0xfffffffc`, where the sum taken at 64 bits read as a thread
-/// slot. `lea rax,[ecx+8]` of 64-bit code wraps there too, which neither
-/// the lift nor the emulator models, so under `ecx == -1` it stays the sum
-/// of the variable: folded, it read `0x100000007` for the machine's 7.
+/// slot. `lea rax,[ecx+8]` of 64-bit code wraps there too: under `ecx ==
+/// -1` it is 7, where the sum read `0x100000007`.
 #[test]
-fn a_folded_address_is_no_wider_than_it_is_addressed() {
+fn a_32_bit_address_agrees_with_the_emulator() {
     let wrapped = [
         0x31, 0xc9, // ASM: xor ecx,ecx
         0x8b, 0x41, 0xfc, // ASM: mov eax,[ecx-4]
@@ -1574,5 +1573,12 @@ fn a_folded_address_is_no_wider_than_it_is_addressed() {
         0xc3, // ASM: ret
     ];
     let text = runs_agree(&program64(&prefixed), 0x1_4000_1000);
-    assert!(!text.contains("0x100000007"), "{text}");
+    assert!(
+        text.contains(
+            "
+return 7;
+"
+        ),
+        "{text}"
+    );
 }

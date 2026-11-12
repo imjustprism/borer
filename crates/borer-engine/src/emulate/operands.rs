@@ -229,7 +229,9 @@ impl Emulator<'_> {
     /// The effective address of a memory operand.
     ///
     /// A 16-bit address ([`crate::disasm::addresses_16_bit`]) reads the
-    /// 16-bit registers and wraps at 64 KiB before the segment base is added.
+    /// 16-bit registers and wraps at 64 KiB before the segment base is added,
+    /// and a 32-bit address of 64-bit code ([`crate::disasm::wraps_at_32`])
+    /// wraps at 4 GiB.
     /// The image's thread segment ([`Emulator::thread_segment`]) is based at
     /// the thread block the machine plants; every other segment at zero.
     ///
@@ -261,7 +263,13 @@ impl Emulator<'_> {
         let offset = base
             .wrapping_add(index)
             .wrapping_add(i.memory_displacement64());
-        let offset = if sixteen { offset & 0xffff } else { offset };
+        let offset = if sixteen {
+            offset & 0xffff
+        } else if crate::disasm::wraps_at_32(i, self.bitness) {
+            offset & 0xffff_ffff
+        } else {
+            offset
+        };
         let segment = if i.segment_prefix() == self.thread_segment() {
             self.teb
         } else {
