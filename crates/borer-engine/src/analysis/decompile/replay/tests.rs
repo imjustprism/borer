@@ -50,9 +50,30 @@ pub(super) fn replayed_under(
     change: impl Fn(&mut Effect),
     told: impl FnOnce(&mut Witness),
 ) -> Replayed {
-    let a = Analysis::compute(p);
+    replayed_in(p, &Analysis::compute(p), entry, seed, change, told)
+}
+
+/// Replays a function's effects as [`replayed_under`] does, over an
+/// analysis the caller computed.
+///
+/// # Arguments
+///
+/// * `p` - The image.
+/// * `a` - Its analysis.
+/// * `entry` - The function.
+/// * `seed` - The states' seed.
+/// * `change` - Rewrites one effect.
+/// * `told` - Rewrites the witness.
+pub(super) fn replayed_in(
+    p: &Program,
+    a: &Analysis,
+    entry: u64,
+    seed: u64,
+    change: impl Fn(&mut Effect),
+    told: impl FnOnce(&mut Witness),
+) -> Replayed {
     let f = a.function(entry).expect("function");
-    let d = decompile_with(p, &a, &Overlay::default(), entry, true, &[], true).expect("text");
+    let d = decompile_with(p, a, &Overlay::default(), entry, true, &[], true).expect("text");
     let mut effects: Vec<Vec<Effect>> = f
         .blocks
         .iter()
@@ -65,7 +86,7 @@ pub(super) fn replayed_under(
     told(&mut w);
     replay_effects::<crate::analysis::decompile::arch::X86>(
         p,
-        &a,
+        a,
         &Overlay::default(),
         &template,
         entry,

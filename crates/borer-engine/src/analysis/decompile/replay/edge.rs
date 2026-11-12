@@ -342,7 +342,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                 continue;
             };
             let succ = self.code.get(s).and_then(|c| c.first()).map_or(0, L::start);
-            let place = format!("{} at {succ:#x}", spelled(k, &self.regs));
+            let place = format!("{} at {succ:#x}", spelled(k, &self.regs, &w.param_names));
             if !self.enters(end, t.taken, s) || told(out, &place) {
                 continue;
             }
@@ -370,20 +370,24 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
 /// Returns how the row of an equality names its variable.
 ///
 /// A register goes by its name, a global by its address as a row of
-/// memory gives it, a parameter as the text calls it by default (`a1` the
-/// first), a slot by its offset from the stack pointer at the entry, and
-/// a temporary as the text does.
+/// memory gives it, a parameter and a temporary as the text calls them
+/// (`this`, `a1`), and a slot by its offset from the stack pointer at the
+/// entry.
 ///
 /// # Arguments
 ///
 /// * `k` - The variable.
 /// * `regs` - The registers the replay reads, each with its name.
-fn spelled(k: Key, regs: &[(&str, Key)]) -> String {
+/// * `params` - The text's name of each parameter ([`super::Witness::param_names`]).
+fn spelled(k: Key, regs: &[(&str, Key)], params: &[String]) -> String {
     match k {
         Key::Global(a, _) => format!("{a:#x}"),
-        Key::Param(i) => format!("a{}", u32::from(i) + 1),
+        Key::Param(i) => params
+            .get(usize::from(i))
+            .cloned()
+            .unwrap_or_else(|| format!("{k:?}")),
         Key::Slot(o) => format!("sp{}{:#x}", if o < 0 { '-' } else { '+' }, o.unsigned_abs()),
-        Key::Tmp(n) => format!("tmp_{n}"),
+        Key::Tmp(n) => super::super::expr_render::tmp_name(n),
         Key::Reg(_) | Key::A64(_) | Key::A32(_) | Key::Rv(_) => regs
             .iter()
             .find(|&&(_, r)| r == k)

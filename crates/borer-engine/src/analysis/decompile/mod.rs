@@ -2433,6 +2433,7 @@ fn decompile_in<L: Lifter>(
             processed,
             assumes,
             live,
+            param_names: names.params(params.len()),
             emitted,
             flag_readers: std::mem::take(&mut ctx.flag_readers),
             conv: ctx.conv,
@@ -2465,10 +2466,8 @@ fn decompile_in<L: Lifter>(
                 .reg_ty
                 .iter()
                 .chain(&ctx.declared)
-                .filter_map(|(k, ty)| match ty {
-                    Ty::F32 | Ty::F64 => Some((*k, *ty)),
-                    _ => None,
-                })
+                .filter(|(_, ty)| matches!(ty, Ty::F32 | Ty::F64))
+                .map(|(k, ty)| (*k, *ty))
                 .chain(params.iter().enumerate().filter_map(|(i, p)| {
                     let floats = [("float ", Ty::F32), ("double ", Ty::F64)];
                     let (_, ty) = floats.into_iter().find(|(t, _)| p.starts_with(t))?;

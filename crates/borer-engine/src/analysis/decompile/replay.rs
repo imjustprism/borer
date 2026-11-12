@@ -174,6 +174,9 @@ pub(super) struct Witness {
     pub(super) assumes: Vec<Option<super::liveness::Fact>>,
     /// Which registers and slots each block reads.
     pub(super) live: Live,
+    /// The text's name of each parameter, the first first: `this`,
+    /// `result`, a debug name or `aN`.
+    pub(super) param_names: Vec<String>,
     /// The blocks the text writes.
     pub(super) emitted: Vec<bool>,
     /// The blocks that read flags another block set.
@@ -3867,10 +3870,9 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             );
         }
         for (n, &k) in self.vectors.iter().enumerate() {
-            if w.live.regs.get(s).and_then(|m| m.get(&k)).is_none() {
-                continue;
-            }
-            if t.called && self.volatile.contains(&k) {
+            if w.live.regs.get(s).and_then(|m| m.get(&k)).is_none()
+                || (t.called && self.volatile.contains(&k))
+            {
                 continue;
             }
             let held = sin.vals.get(&k);

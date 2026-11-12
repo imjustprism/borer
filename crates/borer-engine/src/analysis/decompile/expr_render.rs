@@ -308,7 +308,7 @@ impl Names<'_> {
                 }
                 format!("g{bits}_{addr:x}")
             }
-            Key::Tmp(n) => format!("tmp_{n}"),
+            Key::Tmp(n) => tmp_name(n),
             Key::A64(r) => a64_name(r),
             Key::A32(r) => crate::isa::a32::name(r),
             Key::Rv(r) => crate::isa::rv::var_name(r),
@@ -322,6 +322,30 @@ impl Names<'_> {
                 .unwrap_or_else(|| format!("a{}", u32::from(i) + 1)),
         }
     }
+}
+
+impl Names<'_> {
+    /// Returns the text's names of the first `n` parameters
+    /// ([`Names::key`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `n` - How many parameters.
+    pub(super) fn params(&self, n: usize) -> Vec<String> {
+        (0..=u8::MAX)
+            .take(n)
+            .map(|i| self.key(Key::Param(i)))
+            .collect()
+    }
+}
+
+/// Returns the text's name of a temporary: `tmp_N`.
+///
+/// # Arguments
+///
+/// * `n` - The temporary's number.
+pub(super) fn tmp_name(n: u32) -> String {
+    format!("tmp_{n}")
 }
 
 /// The code of the stack pointer in [`a64_code`], after `x30`.

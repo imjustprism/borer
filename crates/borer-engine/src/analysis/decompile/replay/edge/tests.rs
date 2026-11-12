@@ -4,7 +4,7 @@
 //! variable it is of, and a block no run bears it out for is not checked.
 
 use super::super::term::{Term, narrow};
-use super::super::tests::{agrees, claims, replayed_under, replayed_with};
+use super::super::tests::{agrees, claims, replayed_in, replayed_under, replayed_with};
 use super::super::{Claim, Replayed, Witness, replay_tsv};
 use super::{ASSUMED, start_term};
 use crate::analysis::decompile::decompile;
@@ -266,6 +266,43 @@ fn an_equality_of_more_bits_than_the_branch_compared_is_flagged() {
         assert_eq!(d.place, format!("{name} at 0x1005"));
         assert_eq!((r.checked, unborne(&r)), (2, 1), "{k:?}");
     }
+}
+
+/// The row of an equality names a parameter as the text does: the first
+/// parameter of a member function is `this`, not `a1`.
+///
+/// # Panics
+///
+/// When the row names the parameter otherwise.
+#[test]
+fn an_equality_row_names_this_as_the_text_does() {
+    let argument = [
+        0x83, 0xf9, 0xff, // ASM: cmp ecx, -1
+        0x75, 0x06, // ASM: jne 0x100b
+        0x48, 0x89, 0x0a, // ASM: mov [rdx], rcx
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xc3, // ASM: ret
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+        0xc3, // ASM: ret
+    ];
+    let p = Program::raw_x64(&argument);
+    let mut a = Analysis::compute(&p);
+    let f = a
+        .functions
+        .iter_mut()
+        .find(|f| f.entry == 0x1000)
+        .expect("function");
+    f.signature = Some(crate::analysis::Signature {
+        ret: "int".to_owned(),
+        name: "C::f".to_owned(),
+        params: vec!["int *".to_owned()],
+        is_const: true,
+        by_pointer: false,
+    });
+    let whole = |w: &mut Witness| w.assumes[1] = Some((Key::Param(0), u64::MAX, WHOLE));
+    let r = replayed_in(&p, &a, 0x1000, 1, |_| {}, whole);
+    let places: Vec<_> = r.wrong().iter().map(|d| d.place.clone()).collect();
+    assert_eq!(places, ["this at 0x1005"], "{}", replay_tsv(&r));
 }
 
 /// An equality of a value the branch did not compare is flagged from the

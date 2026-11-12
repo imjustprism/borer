@@ -59,8 +59,8 @@ crates/borer-engine/src/analysis/decompile/mir/egraph/rules.rs::boolean#1	102
 crates/borer-engine/src/analysis/decompile/mir/egraph/rules.rs::mba#1	152
 crates/borer-engine/src/analysis/decompile/mir/egraph/rules.rs::ufloor_node#1	101
 crates/borer-engine/src/analysis/decompile/mir/eval.rs::value#1	116
-crates/borer-engine/src/analysis/decompile/mod.rs	2548
-crates/borer-engine/src/analysis/decompile/mod.rs::decompile_in#1	957
+crates/borer-engine/src/analysis/decompile/mod.rs	2547
+crates/borer-engine/src/analysis/decompile/mod.rs::decompile_in#1	956
 crates/borer-engine/src/analysis/decompile/mod.rs::name_fields#1	109
 crates/borer-engine/src/analysis/decompile/params.rs::detect_params#1	118
 crates/borer-engine/src/analysis/decompile/params.rs::param_types#1	145
@@ -69,7 +69,7 @@ crates/borer-engine/src/analysis/decompile/replay.rs	2907
 crates/borer-engine/src/analysis/decompile/replay.rs::eval_at#1	108
 crates/borer-engine/src/analysis/decompile/replay.rs::packed_op#1	136
 crates/borer-engine/src/analysis/decompile/replay.rs::replay_effect#1	193
-crates/borer-engine/src/analysis/decompile/replay.rs::successor#1	320
+crates/borer-engine/src/analysis/decompile/replay.rs::successor#1	319
 crates/borer-engine/src/analysis/decompile/replay.rs::trial#1	172
 crates/borer-engine/src/analysis/decompile/replay/prove.rs	1998
 crates/borer-engine/src/analysis/decompile/replay/prove.rs::prove_or#1	298
