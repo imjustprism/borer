@@ -124,7 +124,9 @@ pub(super) fn parse_object(
 /// stream and ended it silently, with no reply to the call that asked. A
 /// path in the device namespace (`\\.\pipe\x`, `\\.\PhysicalDrive0`, the
 /// same with `/`) is refused whole unless it spells a drive path, and so is
-/// an unparsed `\\?\` path that is not a drive path.
+/// an unparsed `\\?\` path that is not a drive path. Windows folds `..` in a
+/// `\\.\` path with `\\.\` as the root, so `\\.\C:\..\UNC\host\share` is
+/// the share: one holding `..` is refused too.
 ///
 /// A network share (`\\host\share\x`, `//host/share/x`,
 /// `\\?\UNC\host\share\x`) is refused too: opening one, or only asking
@@ -171,6 +173,11 @@ pub fn unusable_path(path: &Path) -> Option<String> {
     if share {
         return Some(format!(
             "{spelled} names a network share; borer reads local files only"
+        ));
+    }
+    if spelled.starts_with("\\\\.\\") && spelled.contains("..") {
+        return Some(format!(
+            "{spelled} holds `..` in a device path, which Windows folds past the drive to any device or share"
         ));
     }
     let device = spelled

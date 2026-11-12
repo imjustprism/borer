@@ -171,6 +171,31 @@ fn an_nt_path_is_never_a_file() {
     assert_eq!(unusable_path(std::path::Path::new(r"C:\x")), None);
 }
 
+/// A `\\.\` path that climbs with `..` is refused: Windows folds `..` there
+/// with `\\.\` as the root, so `\\.\C:\..\UNC\host\share\x` opens the share
+/// and `\\.\C:\..\pipe\x` a named pipe.
+///
+/// The check took both for drive paths, and a PE whose debug record names
+/// the first had every load of it ask the host whether the PDB was there.
+///
+/// # Panics
+///
+/// When such a path is let through.
+#[test]
+fn a_device_path_climbing_out_of_its_drive_is_refused() {
+    if cfg!(windows) {
+        let let_through: Vec<&str> = [
+            r"\\.\C:\..\UNC\host.invalid\s\x",
+            "//./C:/x/../../UNC/host.invalid/s",
+            r"\\.\C:\..\pipe\x",
+        ]
+        .into_iter()
+        .filter(|p| unusable_path(std::path::Path::new(p)).is_none())
+        .collect();
+        assert!(let_through.is_empty(), "{let_through:?}");
+    }
+}
+
 /// The section index answers what a scan of the table in file order does.
 ///
 /// However the sections nest or overlap, its rows do not overlap: a
