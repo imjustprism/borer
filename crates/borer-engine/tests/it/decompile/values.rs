@@ -1446,3 +1446,35 @@ fn a_compare_of_a_registers_low_half_says_nothing_of_the_rest() {
     let text = runs_agree(&program64(&above), 0x1_4000_1000);
     assert!(text.contains("\n*(uint32_t*)a2 = a1 >> 32;\n"), "{text}");
 }
+
+/// A fact of a block's own temporary stays in its block.
+///
+/// `cmp qword [g],0; mov [h],rcx; je S` keeps `g` in a temporary across the
+/// store, and its `je` compares that temporary with 0. `S: cmp qword
+/// [i],7; mov [j],rdx; sete al; movzx eax,al; jmp T` keeps `i` in a
+/// temporary of its own, which the dataflow numbers as it numbered the
+/// first block's. Read on that number, the fact made `i` zero in `S`, and
+/// `T` stored and returned `0 == 7` where the binary, run with `i` 7,
+/// returns 1.
+#[test]
+fn a_fact_of_a_blocks_own_temporary_stays_in_its_block() {
+    let code = [
+        0x48, 0x83, 0x3d, 0xf8, 0x1f, 0x00, 0x00, 0x00, // ASM: cmp qword [rip+0x1ff8],0
+        0x48, 0x89, 0x0d, 0xf9, 0x1f, 0x00, 0x00, // ASM: mov [rip+0x1ff9],rcx
+        0x74, 0x03, // ASM: je 0x140001014
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xc3, // ASM: ret
+        0x48, 0x83, 0x3d, 0xf4, 0x1f, 0x00, 0x00, 0x07, // ASM: cmp qword [rip+0x1ff4],7
+        0x48, 0x89, 0x15, 0xf5, 0x1f, 0x00, 0x00, // ASM: mov [rip+0x1ff5],rdx
+        0x0f, 0x94, 0xc0, // ASM: sete al
+        0x0f, 0xb6, 0xc0, // ASM: movzx eax,al
+        0xeb, 0x01, // ASM: jmp 0x14000102c
+        0xcc, // ASM: int3
+        0x89, 0x05, 0xee, 0x1f, 0x00, 0x00, // ASM: mov [rip+0x1fee],eax
+        0xc3, // ASM: ret
+    ];
+    let mut p = program64_with_globals(&code, false, &[]);
+    p.bytes[0x1010] = 7;
+    let text = runs_agree(&p, 0x1_4000_1000);
+    assert!(!text.contains("0 == 7"), "{text}");
+}

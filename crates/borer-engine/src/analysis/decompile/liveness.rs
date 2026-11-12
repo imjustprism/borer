@@ -82,13 +82,29 @@ pub(super) type Fact = (Key, u64, u8);
 /// The bits of a [`Fact`] whose constant is its variable's whole value.
 pub(super) const WHOLE: u8 = 64;
 
+/// Tells whether a variable is a temporary of one block's dataflow run.
+///
+/// The dataflow pass numbers such temporaries within one run of a block
+/// ([`lift::BLOCK_TMP`]), so the name means nothing in another block,
+/// whose own temporaries take the same numbers.
+///
+/// # Arguments
+///
+/// * `k` - The variable.
+fn block_tmp(k: Key) -> bool {
+    matches!(k, Key::Tmp(id) if id >= lift::BLOCK_TMP)
+}
+
 /// Returns what an equality branch establishes on the edge to `succ`.
 ///
 /// `if (k == c)` makes `k` equal to `c` on its taken edge, `if (k != c)` on
 /// its fall-through edge; `test k, k` compares with zero. Other conditions
 /// establish nothing usable. A compare narrower than the variable (`cmp
 /// ecx, 5` of a 64-bit `rcx`) establishes only the bits it compared: the
-/// rest of the variable is whatever it was.
+/// rest of the variable is whatever it was. A compare of a temporary of
+/// the block's own run ([`block_tmp`], the copy `cmp qword [g], 0; mov
+/// [h], rcx; je` keeps of `g` across the store) establishes nothing the
+/// next block can read: there the number names that block's own copies.
 ///
 /// # Arguments
 ///
@@ -122,6 +138,9 @@ pub(super) fn assumption(branch: &Branch, succ: u64, word: u32) -> Option<Fact> 
         Flags::Test(Expr::Var(k), Expr::Var(k2), bits) if k == k2 => (*k, 0, *bits),
         _ => return None,
     };
+    if block_tmp(k) {
+        return None;
+    }
     let whole =
         u32::from(bits) >= word || expr::known_bits(&Expr::Var(k)) & !expr::mask_bits(bits) == 0;
     Some(if whole {
@@ -882,9 +901,7 @@ pub(super) fn dataflow<L: Lifter>(
                 let parked: Vec<Key> = m
                     .vals
                     .iter()
-                    .filter(|(_, v)| {
-                        v.any_var(&|k| matches!(k, Key::Tmp(id) if id >= lift::BLOCK_TMP))
-                    })
+                    .filter(|(_, v)| v.any_var(&block_tmp))
                     .map(|(k, _)| *k)
                     .collect();
                 for k in parked {
