@@ -1091,7 +1091,7 @@ pub fn vectors_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::{Arg, Grade, draw, first_difference};
+    use super::{Arg, Grade, args_shown, draw, first_difference};
     use crate::analysis::{Analysis, Overlay};
     use crate::program::Program;
 
@@ -1135,5 +1135,39 @@ mod tests {
         let missed = run(Some(odd));
         assert!(missed.agreed > 0 && missed.missed(), "{missed:?}");
         assert_eq!(missed.grade(), Grade::Unchecked);
+    }
+
+    /// A text is held to an input by its index, not by its spelling: two
+    /// buffers alike in their first 48 bytes, the most a row shows, read
+    /// the same.
+    ///
+    /// `L: test byte [rcx+60],1; jne L; xor eax,eax; ret` spins on the
+    /// buffer whose byte 60 is odd and returns on the other. Held to the
+    /// one it returns on, it missed nothing; held by its spelling, the
+    /// spinning one read as the input held to.
+    ///
+    /// # Panics
+    ///
+    /// When the returning input reads as missed.
+    #[test]
+    fn a_text_is_held_to_an_input_by_index_not_spelling() {
+        let code = [
+            0xf6, 0x41, 0x3c, 0x01, // ASM: test byte [rcx+0x3c], 1
+            0x75, 0xfa, // ASM: jne 0x1000
+            0x31, 0xc0, // ASM: xor eax, eax
+            0xc3, // ASM: ret
+        ];
+        let p = Program::raw_x64(&code);
+        let (a, o) = (Analysis::compute(&p), Overlay::default());
+        let mut drawn = draw(&p, &a, &o, 0x1000, 1, 1).expect("inputs");
+        let buffer = |last| {
+            let mut b = vec![2u8; 64];
+            b[60] = last;
+            vec![Arg::Bytes(b)]
+        };
+        drawn.inputs = vec![buffer(3), buffer(2)];
+        assert_eq!(args_shown(&drawn.inputs[0]), args_shown(&drawn.inputs[1]));
+        let held = first_difference(&p, &a, &o, 0x1000, &drawn, 2000, Some(1));
+        assert!(held.agreed == 1 && !held.missed(), "{held:?}");
     }
 }
