@@ -452,7 +452,7 @@ pub fn bisect_iso(
 /// * `text_of` - The text built with only so many passes, from the start
 ///   of [`Pass::ALL`].
 pub(super) fn bisected(
-    check: &impl Fn(Passes, Option<&str>) -> Checked,
+    check: &impl Fn(Passes, Option<usize>) -> Checked,
     text_of: &impl Fn(usize) -> String,
 ) -> Bisected {
     let whole = check(Passes::NONE, None);
@@ -462,8 +462,7 @@ pub(super) fn bisected(
             Grade::Agrees | Grade::Differs => Bisected::Agrees(whole),
         };
     };
-    let input = at.input.clone();
-    let held = |skip: Passes| check(skip, Some(&input));
+    let held = |skip: Passes| check(skip, whole.differed);
     let (good, before, narrowest) = match first_breaking(&held) {
         Placed::Before(before) => return Bisected::Unbisected(before),
         Placed::Unchecked(ran, probe) => {
@@ -603,6 +602,8 @@ pub(super) fn draw(
 pub struct Checked {
     /// The first input the text differs on, and where; `None` when none.
     pub differs: Option<Counterexample>,
+    /// That input's index among the drawn ones.
+    pub differed: Option<usize>,
     /// Inputs the text agreed on before it differed, or in all.
     pub agreed: usize,
     /// Why inputs were left unchecked before it differed, or in all, each
@@ -640,7 +641,7 @@ impl Checked {
 /// * `entry` - The function's entry.
 /// * `drawn` - The inputs.
 /// * `budget` - Steps each run is given, on either side.
-/// * `held` - The input the text is held to, as a row spells it: the one
+/// * `held` - The index of the drawn input the text is held to: the one
 ///   another text differs on ([`Checked::missed`]).
 ///
 /// # Returns
@@ -653,7 +654,7 @@ pub(super) fn first_difference(
     entry: u64,
     drawn: &Drawn,
     budget: usize,
-    held: Option<&str>,
+    held: Option<usize>,
 ) -> Checked {
     let mut out = Checked::default();
     let Some(text) = decompile_named(p, a, u, entry) else {
@@ -666,12 +667,12 @@ pub(super) fn first_difference(
         sig: Ok(drawn.sig.clone()),
         pass: Some(drawn.pass.clone()),
     };
-    for input in &drawn.inputs {
-        let shown = args_shown(input);
+    for (n, input) in drawn.inputs.iter().enumerate() {
         match run_one(p, a, &shared, entry, input, budget).verdict {
             Verdict::Differs(line, why) => {
+                out.differed = Some(n);
                 out.differs = Some(Counterexample {
-                    input: shown,
+                    input: args_shown(input),
                     line: line
                         .checked_sub(1)
                         .and_then(|k| text.lines().nth(k))
@@ -683,7 +684,7 @@ pub(super) fn first_difference(
             Verdict::Agrees => out.agreed += 1,
             Verdict::Unchecked(_, why) => {
                 *out.unchecked.entry(why).or_default() += 1;
-                out.missed |= held == Some(shown.as_str());
+                out.missed |= held == Some(n);
             }
         }
     }
@@ -1071,7 +1072,7 @@ pub fn vectors_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::{Arg, Grade, args_shown, draw, first_difference};
+    use super::{Arg, Grade, draw, first_difference};
     use crate::analysis::{Analysis, Overlay};
     use crate::program::Program;
 
@@ -1099,12 +1100,12 @@ mod tests {
         let (a, o) = (Analysis::compute(&p), Overlay::default());
         let drawn = draw(&p, &a, &o, 0x1000, 16, 1).expect("inputs");
         let one = |odd: bool| {
-            let is = |i: &&Vec<Arg>| matches!(i.first(), Some(Arg::Int(v)) if (v & 1 == 1) == odd);
-            drawn.inputs.iter().find(is).map(|i| args_shown(i))
+            let is = |i: &Vec<Arg>| matches!(i.first(), Some(Arg::Int(v)) if (v & 1 == 1) == odd);
+            drawn.inputs.iter().position(is)
         };
         let (odd, even) = (one(true).expect("odd"), one(false).expect("even"));
-        let run = |held: Option<&str>| first_difference(&p, &a, &o, 0x1000, &drawn, 2000, held);
-        for held in [None, Some(even.as_str())] {
+        let run = |held: Option<usize>| first_difference(&p, &a, &o, 0x1000, &drawn, 2000, held);
+        for held in [None, Some(even)] {
             let free = run(held);
             assert_eq!(
                 (free.grade(), free.missed),
@@ -1112,7 +1113,7 @@ mod tests {
                 "{held:?}"
             );
         }
-        let missed = run(Some(&odd));
+        let missed = run(Some(odd));
         assert!(missed.agreed > 0 && missed.missed, "{missed:?}");
         assert_eq!(missed.grade(), Grade::Unchecked);
     }

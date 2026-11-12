@@ -296,6 +296,7 @@ mod tests {
     fn ran(agreed: usize, spun: usize, differs: bool) -> Checked {
         Checked {
             differs: differs.then(at),
+            differed: differs.then_some(5),
             agreed,
             unchecked: (spun > 0)
                 .then(|| ("it spins".to_owned(), spun))
@@ -318,7 +319,7 @@ mod tests {
     /// * `unchecked` - Passes run in the first text that differs.
     /// * `alone` - What the full text with one pass left out does.
     fn found(agree: usize, unchecked: usize, alone: &Checked) -> Bisected {
-        let check = |skip: Passes, _: Option<&str>| match Pass::ALL
+        let check = |skip: Passes, _: Option<usize>| match Pass::ALL
             .iter()
             .filter(|p| skip.runs(**p))
             .count()
@@ -447,8 +448,8 @@ mod tests {
     /// When a pass is named or a repair claimed on such a text.
     #[test]
     fn a_text_that_skips_the_differing_input_places_and_repairs_nothing() {
-        let skips = |held: Option<&str>| Checked {
-            missed: held == Some("5"),
+        let skips = |held: Option<usize>| Checked {
+            missed: held == Some(5),
             ..ran(1, 63, false)
         };
         let runs = |skip: Passes| Pass::ALL.iter().filter(|p| skip.runs(**p)).count();
