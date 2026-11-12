@@ -82,6 +82,14 @@ const CALLS_MAX: usize = 64;
 const STRING_MAX: usize = 1 << 26;
 /// Most elements in one array or blob a script may build.
 const ARRAY_MAX: usize = 1 << 21;
+/// Most entries the maps of one value may hold together.
+///
+/// Rhai counts every map inside an array together, so this also bounds a
+/// whole listing such as `functions()`, a map a function: at an array's
+/// bound it held 349,525 functions of six entries each, which borer's own
+/// build passed. Eight entries a row leave the rows the bound a listing
+/// meets.
+const MAP_MAX: usize = ARRAY_MAX * 8;
 /// Most bytes one `bytes` call reads.
 const BYTES_MAX: usize = 1 << 20;
 /// Most instructions one `disasm` call decodes.
@@ -544,7 +552,7 @@ pub fn run_with(
         .set_max_call_levels(CALLS_MAX)
         .set_max_string_size(STRING_MAX)
         .set_max_array_size(ARRAY_MAX)
-        .set_max_map_size(ARRAY_MAX);
+        .set_max_map_size(MAP_MAX);
     engine.disable_symbol("eval");
     let h = Rc::clone(&host);
     engine.on_print(move |s| h.printed(s));
@@ -1191,6 +1199,32 @@ mod tests {
             let err = go(call).expect_err("a script has no clock");
             assert!(err.contains("a script has no clock"), "{call}: {err}");
         }
+    }
+
+    /// A listing of functions is bounded by its rows, not by the entries
+    /// of the maps they are.
+    ///
+    /// Rhai counts the entries of every map in an array together: with
+    /// the maps' budget at the array's, `functions()` failed past 349,525
+    /// functions (`Size of object map too large`), which borer's own build
+    /// has. The widest function map, with its callers and callees, fits
+    /// the budget on every row of the longest array.
+    ///
+    /// # Panics
+    ///
+    /// When a function's map has more entries than the budget leaves a row.
+    #[test]
+    fn a_function_listing_is_bounded_by_its_rows() {
+        let run = go(r#"
+            print(functions()[0].keys().len());
+            print(function("sub_1000").keys().len());
+        "#)
+        .expect("the script runs");
+        for entries in &run.output {
+            let entries: usize = entries.parse().expect("a count");
+            assert!(entries * ARRAY_MAX <= MAP_MAX, "{entries} entries a row");
+        }
+        assert_eq!(run.output, ["6", "8"]);
     }
 
     /// What a run keeps is bounded whatever the script does: a long line is
