@@ -224,7 +224,8 @@ fn no_equality_is_handed_on_through_a_jump() {
 /// the machine goes on into the block, and the variable is not what the
 /// block is started from. The difference is above bit 32 and no lane's,
 /// since the equality says what those bits hold; the block is left
-/// unchecked.
+/// unchecked. The row names the register, and the parameter as the text
+/// does.
 #[test]
 fn an_equality_of_more_bits_than_the_branch_compared_is_flagged() {
     let register = [
@@ -246,10 +247,10 @@ fn an_equality_of_more_bits_than_the_branch_compared_is_flagged() {
         0xc3, // ASM: ret
     ];
     let cases = [
-        (&register, Key::Reg(Register::RSI), 5),
-        (&argument, Key::Param(0), u64::MAX),
+        (&register, Key::Reg(Register::RSI), 5, "rsi"),
+        (&argument, Key::Param(0), u64::MAX, "a1"),
     ];
-    for (code, k, c) in cases {
+    for (code, k, c, name) in cases {
         let p = Program::raw_x64(code);
         agrees(&p, 0x1000);
         let whole = |w: &mut Witness| w.assumes[1] = Some((k, c, WHOLE));
@@ -262,6 +263,7 @@ fn an_equality_of_more_bits_than_the_branch_compared_is_flagged() {
         assert_eq!(at, (Claim::Branch, 0x1000, 0x1003, c), "{k:?}");
         assert_eq!(lo32(d.machine), lo32(c), "{k:?}: {}", replay_tsv(&r));
         assert_ne!(d.machine, c, "{k:?}: {}", replay_tsv(&r));
+        assert_eq!(d.place, format!("{name} at 0x1005"));
         assert_eq!((r.checked, unborne(&r)), (2, 1), "{k:?}");
     }
 }
@@ -351,7 +353,9 @@ fn an_equality_of_a_global_is_tried_from_memory() {
 /// Kept so, the equality was compared at the branch against the four
 /// bytes the text reads there, `0xffffffff`: a right text was flagged and
 /// its block left unchecked. The same of two bytes in 32-bit code, `cmp
-/// word [g],-1`, which `movzx eax, word [g]` reads as `0xffff`.
+/// word [g],-1`, which `movzx eax, word [g]` reads as `0xffff`. Told the
+/// equality so, the row names the global by its address, as a row of
+/// memory does.
 #[test]
 fn an_equality_holds_its_constant_at_the_variables_width() {
     let dword = [
@@ -384,6 +388,11 @@ fn an_equality_holds_its_constant_at_the_variables_width() {
         replayed_under(&p, 0x1000, 1, |_| {}, |w| given.clone_from(&w.assumes));
         assert_eq!(given, [None, Some((g, ones, WHOLE)), None]);
     }
+    let g = Key::Global(0x2000, 32);
+    let wide = |w: &mut Witness| w.assumes[1] = Some((g, u64::MAX, WHOLE));
+    let r = replayed_under(&image(Arch::X86_64, &dword), 0x1000, 1, |_| {}, wide);
+    let places: Vec<_> = r.wrong().iter().map(|d| d.place.clone()).collect();
+    assert_eq!(places, ["0x2000 at 0x1009"], "{}", replay_tsv(&r));
 }
 
 /// A run the text of the branch's block does not follow bears no equality
