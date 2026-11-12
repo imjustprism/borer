@@ -1,10 +1,12 @@
 use crate::isa::x86::Register;
 
+use super::term::{Term, narrow};
 use super::{
     Claim, Replayed, Sampling, TextCheck, Witness, replay_effects, replay_function, replay_tsv,
 };
 use crate::analysis::decompile::expr::{Expr, Flags, Key, Op, UnOp};
 use crate::analysis::decompile::lift::{ArgAt, Effect, EffectKind};
+use crate::analysis::decompile::liveness::WHOLE;
 use crate::analysis::decompile::{decompile, decompile_with};
 use crate::analysis::{Analysis, Overlay};
 use crate::emulate::Emulator;
@@ -759,7 +761,7 @@ const READ: [u8; 8] = [
 /// * `seed` - The states' seed.
 /// * `c` - The constant.
 fn told_r9(p: &Program, seed: u64, c: u64) -> Replayed {
-    let told = |w: &mut Witness| w.assumes[2] = Some((Key::Reg(Register::R9), c));
+    let told = |w: &mut Witness| w.assumes[2] = Some((Key::Reg(Register::R9), c, WHOLE));
     replayed_under(p, 0x1000, seed, |_| {}, told)
 }
 
@@ -880,8 +882,50 @@ fn an_equality_is_checked_at_a_block_that_only_jumps_on() {
     let mut given = Vec::new();
     let r = replayed_under(&p, 0x1000, 1, |_| {}, |w| given.clone_from(&w.assumes));
     assert_eq!(claims(&r), [], "{}", replay_tsv(&r));
-    let five = Some((Key::Param(0), 5));
+    let five = Some((Key::Param(0), 5, WHOLE));
     assert_eq!(given, [None, five, None, None]);
+}
+
+/// A block under an equality of a register's low half is tried, and
+/// proved, with the upper half free.
+///
+/// After `cmp esi,5; jne` the block knows the low half of `rsi`. Its text
+/// is right to store `rsi` whole; made to store 5, it differs from the
+/// machine in the upper four bytes wherever the state's upper half is not
+/// zero, which a start from the constant alone never showed. The replay
+/// counts a difference above bit 32 as a lane's, so it is no disagreement
+/// of the header's, but the block is no longer proved. The proof starts
+/// such a variable as the constant under a value no state fixes, and as
+/// the constant alone only where the equality is of the whole variable.
+#[test]
+fn an_equality_of_a_low_half_leaves_the_upper_half_free() {
+    let stores = [
+        0x83, 0xfe, 0x05, // ASM: cmp esi, 5
+        0x75, 0x06, // ASM: jne 0x100b
+        0x48, 0x89, 0x32, // ASM: mov [rdx], rsi
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xc3, // ASM: ret
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+        0xc3, // ASM: ret
+    ];
+    let p = Program::raw_x64(&stores);
+    agrees(&p, 0x1000);
+    let mut given = Vec::new();
+    replayed_under(&p, 0x1000, 1, |_| {}, |w| given.clone_from(&w.assumes));
+    let low = (Key::Reg(Register::RSI), 5, 32);
+    assert_eq!(given, [None, Some(low), None]);
+    let five = replayed_with(&p, 0x1000, 1, |e| {
+        if let EffectKind::Store(s) = &mut e.kind {
+            s.2 = Expr::Const(5);
+        }
+    });
+    let upper: Vec<_> = five.disagreements.iter().map(|d| d.claim).collect();
+    assert_eq!(upper, [Claim::Memory], "{}", replay_tsv(&five));
+    assert_eq!(five.proved, 2, "{}", replay_tsv(&five));
+    let start = |n| super::edge::start_term(low.0, 0xffff_ffff_0000_0005, n, 64);
+    assert_eq!(start(WHOLE), Term::Const(0xffff_ffff_0000_0005));
+    assert_eq!(narrow(&start(32), 32), Term::Const(5));
+    assert!(!matches!(start(32), Term::Const(_)), "{:?}", start(32));
 }
 
 /// The branch a block runs under is found through a block that only

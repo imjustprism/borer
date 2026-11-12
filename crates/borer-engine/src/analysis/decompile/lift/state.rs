@@ -124,8 +124,13 @@ impl<'a> Exec<'_, 'a> {
             };
         }
         let key = self.canon(r);
-        let full = self.assumed(self.env.get(key));
         let narrow = self.env.narrow.get(&key).copied().unwrap_or(64);
+        let read = match r.size() {
+            1 if is_high_byte(r) => 16,
+            8 if narrow == 32 && self.ctx.bitness == 64 => 32,
+            n => u8::try_from(8 * n).unwrap_or(WHOLE),
+        };
+        let full = self.assumed(self.env.get(key), read);
         match r.size() {
             1 if is_high_byte(r) => mask(fold(Op::Shr, full, Expr::Const(8), 64), 0xff),
             1 if narrow <= 8 => full,
@@ -156,16 +161,24 @@ impl<'a> Exec<'_, 'a> {
 
     /// Applies the block's equality assumption to a value being read.
     ///
+    /// A fact of the whole variable replaces it wherever the value reads
+    /// it. A fact of its low bits (`cmp ecx, 5` of a 64-bit `rcx`) says
+    /// nothing of the rest, so it replaces only a read that is the variable
+    /// itself and no wider than the compare: `mov eax, ecx` reads 5, and
+    /// `mov [rdx], rcx` stores the variable.
+    ///
     /// # Arguments
     ///
     /// * `e` - The value as the environment holds it.
+    /// * `bits` - How many of its low bits the read uses.
     ///
     /// # Returns
     ///
     /// `e` with the assumed variable replaced by its constant, or `e` itself.
-    pub(in crate::analysis::decompile) fn assumed(&self, e: Expr) -> Expr {
+    pub(in crate::analysis::decompile) fn assumed(&self, e: Expr, bits: u8) -> Expr {
         match self.assume {
-            Some((k, c)) if e.mentions(k) => e.subst(&Expr::Var(k), &Expr::Const(c)),
+            Some((k, c, WHOLE)) if e.mentions(k) => e.subst(&Expr::Var(k), &Expr::Const(c)),
+            Some((k, c, known)) if bits <= known && e.is_var(k) => Expr::Const(c),
             _ => e,
         }
     }
@@ -353,7 +366,7 @@ impl<'a> Exec<'_, 'a> {
             Expr::Const(a) if self.is_data(a) => {
                 let key = Key::Global(a, ty.bits());
                 self.note_global(a, ty);
-                self.assumed(Expr::Var(key))
+                self.assumed(Expr::Var(key), ty.bits())
             }
             other => {
                 let pending = self.pending(Self::frame_base(&other).is_some());
@@ -462,7 +475,7 @@ impl<'a> Exec<'_, 'a> {
         self.ctx.frame.note(k, Access::Load(ty));
         self.note_slot(k, ty);
         if let Some(v) = self.slot_view(k, ty) {
-            return self.assumed(v);
+            return self.assumed(v, ty.bits());
         }
         let overlapping: Vec<i64> = self
             .env
@@ -493,7 +506,7 @@ impl<'a> Exec<'_, 'a> {
                 Ty::F32 | Ty::F64 if matches!(v, Expr::Bitcast(..)) => bitcast(v.clone(), ty),
                 Ty::U8 | Ty::U16 | Ty::U32 | Ty::U64 | Ty::U128 | Ty::F32 | Ty::F64 => v.clone(),
             };
-            return self.assumed(v);
+            return self.assumed(v, ty.bits());
         }
         if let Some(&stored) = self.env.slot_bits.get(&k)
             && stored > ty.bits()
@@ -501,9 +514,9 @@ impl<'a> Exec<'_, 'a> {
             && !matches!(ty, Ty::F32 | Ty::F64)
         {
             let whole = Expr::deref(Expr::Sp(k), Ty::from_bits(stored));
-            return self.assumed(mask(whole, (1u64 << ty.bits()) - 1));
+            return self.assumed(mask(whole, (1u64 << ty.bits()) - 1), ty.bits());
         }
-        self.assumed(Expr::deref(Expr::Sp(k), ty))
+        self.assumed(Expr::deref(Expr::Sp(k), ty), ty.bits())
     }
 
     /// Reads a slot as a view of the stores this block made around it: the
@@ -1989,7 +2002,7 @@ impl<'a> Exec<'_, 'a> {
     ///
     /// * `stale` - Selects the values about to become stale.
     fn end_fact(&mut self, stale: &dyn Fn(&Expr) -> bool) {
-        if self.assume.is_some_and(|(k, _)| stale(&Expr::Var(k))) {
+        if self.assume.is_some_and(|(k, ..)| stale(&Expr::Var(k))) {
             self.assume = None;
         }
     }

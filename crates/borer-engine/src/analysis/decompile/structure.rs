@@ -24,7 +24,7 @@ pub(super) struct Emit<'e, L: Lifter> {
     /// Which blocks the dataflow processed.
     pub(super) processed: &'e [bool],
     /// Per block, the equality fact it may read under.
-    pub(super) assumes: &'e [Option<(Key, u64)>],
+    pub(super) assumes: &'e [Option<Fact>],
     /// Blocks whose text has been written (or that must never be written).
     pub(super) emitted: Vec<bool>,
     /// Blocks that make the same test as an earlier block, each with that

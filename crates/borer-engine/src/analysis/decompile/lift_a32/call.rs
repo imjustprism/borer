@@ -183,7 +183,7 @@ impl Lift<'_, '_> {
     /// * `r` - The register.
     fn arg_value(&mut self, r: Reg) -> Expr {
         let v = self.ex.env.get(Key::A32(r));
-        let v = self.ex.assumed(v);
+        let v = self.ex.assumed(v, 64);
         if v == Expr::Var(Key::A32(r)) {
             let ty = match r {
                 Reg::S(_) => Ty::F32,
@@ -550,7 +550,7 @@ impl Lift<'_, '_> {
                 || ctx.returns_value == Some(true));
         let value = match self.ex.env.vals.get(&back).cloned() {
             _ if !hands_back => None,
-            Some(v) => Some(self.ex.assumed(v)),
+            Some(v) => Some(self.ex.assumed(v, 64)),
             None => {
                 let ty = if back == Key::A32(Reg::S(0)) {
                     Ty::F32

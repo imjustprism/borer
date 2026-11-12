@@ -405,7 +405,7 @@ impl Lift<'_, '_> {
         let wide = ctx.ret_lane == 64 && !ctx.ret_float;
         let value = match self.ex.env.vals.get(&back).cloned() {
             _ if !hands_back => None,
-            Some(v) => Some(self.ex.assumed(v)),
+            Some(v) => Some(self.ex.assumed(v, 64)),
             None => {
                 let ty = if ctx.ret_float { Ty::F64 } else { Ty::U64 };
                 self.ex.declare(back, ty);

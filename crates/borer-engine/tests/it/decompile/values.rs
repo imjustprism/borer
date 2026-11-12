@@ -1397,3 +1397,52 @@ fn a_global_read_after_a_store_is_not_what_the_branch_compared() {
         replays_clean(&p, &a, &[0x1_4000_1000]);
     }
 }
+
+/// A compare of a register's low half says nothing of the rest of it.
+///
+/// `cmp ecx,-1; jne X; mov [rdx],rcx` stores `rcx` whole, its upper half
+/// whatever the caller left there. Read as a fact of the whole register,
+/// the compare made the store `-1` at 64 bits, which the binary writes
+/// only when it was handed all ones. A read no wider than the compare is
+/// still the constant: after `mov eax,ecx; cmp eax,5`, `mov [rdx],rax`
+/// stores the 5 the 32-bit move left in `rax`, its upper half clear. A
+/// value that reads the bits above the compare, the `rcx >> 32` kept in
+/// `rax`, keeps the variable.
+#[test]
+fn a_compare_of_a_registers_low_half_says_nothing_of_the_rest() {
+    let whole = [
+        0x83, 0xf9, 0xff, // ASM: cmp ecx,-1
+        0x75, 0x06, // ASM: jne 0x14000100b
+        0x48, 0x89, 0x0a, // ASM: mov [rdx],rcx
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xc3, // ASM: ret
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax,1
+        0xc3, // ASM: ret
+    ];
+    let text = runs_agree(&program64(&whole), 0x1_4000_1000);
+    assert!(text.contains("\n*(uint64_t*)a2 = a1;\n"), "{text}");
+    let low = [
+        0x89, 0xc8, // ASM: mov eax,ecx
+        0x83, 0xf8, 0x05, // ASM: cmp eax,5
+        0x75, 0x04, // ASM: jne 0x14000100b
+        0x48, 0x89, 0x02, // ASM: mov [rdx],rax
+        0xc3, // ASM: ret
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xc3, // ASM: ret
+    ];
+    let text = runs_agree(&program64(&low), 0x1_4000_1000);
+    assert!(text.contains("\n*(uint64_t*)a2 = 5;\n"), "{text}");
+    let above = [
+        0x48, 0x89, 0xc8, // ASM: mov rax,rcx
+        0x48, 0xc1, 0xe8, 0x20, // ASM: shr rax,32
+        0x83, 0xf9, 0x05, // ASM: cmp ecx,5
+        0x75, 0x05, // ASM: jne 0x140001011
+        0x89, 0x02, // ASM: mov [rdx],eax
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xc3, // ASM: ret
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax,1
+        0xc3, // ASM: ret
+    ];
+    let text = runs_agree(&program64(&above), 0x1_4000_1000);
+    assert!(text.contains("\n*(uint32_t*)a2 = a1 >> 32;\n"), "{text}");
+}

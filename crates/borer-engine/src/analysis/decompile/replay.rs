@@ -171,7 +171,7 @@ pub(super) struct Witness {
     /// The blocks the dataflow ran.
     pub(super) processed: Vec<bool>,
     /// The equality each block runs under, if any.
-    pub(super) assumes: Vec<Option<(Key, u64)>>,
+    pub(super) assumes: Vec<Option<super::liveness::Fact>>,
     /// Which registers and slots each block reads.
     pub(super) live: Live,
     /// The blocks the text writes.
@@ -3318,20 +3318,9 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             .ok_or("no stack pointer")?;
         let sp0 = rsp.wrapping_sub(sp.cast_unsigned()) & mask;
         let mut base = Seeded::stack(&mut emu, &mut rng, rsp, mask);
-        if let Some((k @ (Key::Slot(_) | Key::Global(..)), c)) = w.assumes.get(b).copied().flatten()
-        {
-            let (at, n) = match k {
-                Key::Slot(o) => (
-                    sp0.wrapping_add_signed(o),
-                    u64::from(inn.slot_bits.get(&o).copied().unwrap_or(self.width) / 8),
-                ),
-                Key::Global(a, bits) => (a, u64::from(bits / 8).max(1)),
-                Key::Reg(_) | Key::A64(_) | Key::A32(_) | Key::Rv(_) => (0, 0),
-                Key::Tmp(_) | Key::Param(_) => (0, 0),
-            };
-            for i in 0..n.min(8) {
-                base.fix(&mut emu, at.wrapping_add(i) & mask, lo8(c >> (8 * i)));
-            }
+        let own = w.assumes.get(b).copied().flatten();
+        for (at, i) in own.into_iter().flat_map(|f| self.fact_bytes(b, f.0, sp0)) {
+            base.fix(&mut emu, at, lo8(own.map_or(0, |f| f.1) >> (8 * i)));
         }
         let mut text = Text {
             vars: FxHashMap::default(),
@@ -3380,12 +3369,9 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                 text.vars.insert(*src, v & low(*nb));
             }
         }
-        if let Some((
-            k @ (Key::Reg(_) | Key::A64(_) | Key::A32(_) | Key::Tmp(_) | Key::Param(_)),
-            c,
-        )) = w.assumes.get(b).copied().flatten()
-        {
-            text.vars.insert(k, c & mask);
+        if let Some((k, c, n)) = own.filter(|f| edge::in_register(f.0)) {
+            let v = text.var(k).unwrap_or(0);
+            text.vars.insert(k, edge::under(v, c, n) & mask);
         }
         if L::scans(code)
             && let Some((c, taken)) = self.guard(b)

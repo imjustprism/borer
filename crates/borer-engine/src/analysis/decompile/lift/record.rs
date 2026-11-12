@@ -211,10 +211,10 @@ impl Exec<'_, '_> {
                 let ty = Self::mem_ty(instr);
                 match self.addr(instr, 0) {
                     Expr::Sp(k) if self.env.slot_bits.get(&k) == Some(&ty.bits()) => {
-                        self.assumed(self.env.get(Key::Slot(k)))
+                        self.assumed(self.env.get(Key::Slot(k)), ty.bits())
                     }
                     Expr::Const(a) if self.is_data(a) => Expr::Var(Key::Global(a, ty.bits())),
-                    a => self.assumed(Expr::deref(a, ty)),
+                    a => self.assumed(Expr::deref(a, ty), ty.bits()),
                 }
             }
             _ => Expr::Const(instr.near_branch_target()),

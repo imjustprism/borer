@@ -398,9 +398,15 @@ impl Lift<'_, '_> {
                 .sp
                 .map_or_else(|| self.ex.env.get(Key::A64(Reg::Sp)), Expr::Sp),
             Reg::X(_) if bits > 32 && self.ex.env.narrow.get(&Key::A64(r)).copied() == Some(32) => {
-                mask(self.ex.assumed(self.ex.env.get(Key::A64(r))), 0xffff_ffff)
+                mask(
+                    self.ex.assumed(self.ex.env.get(Key::A64(r)), 32),
+                    0xffff_ffff,
+                )
             }
-            Reg::X(_) | Reg::V(_) => self.ex.assumed(self.ex.env.get(Key::A64(r))),
+            Reg::X(_) | Reg::V(_) => {
+                let read = u8::try_from(bits.min(64)).unwrap_or(64);
+                self.ex.assumed(self.ex.env.get(Key::A64(r)), read)
+            }
         }
     }
 

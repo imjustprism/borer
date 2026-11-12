@@ -61,6 +61,7 @@ use super::expr::{
 };
 use super::fcmp::FPred;
 use super::helper::Helper;
+use super::liveness::{Fact, WHOLE};
 use super::{Ctx, callee_shape, literal_at};
 use crate::analysis::name_of;
 use crate::analysis::returns::{RET_LANE_DEPTH, lane_before, last_rax_write};
@@ -463,7 +464,7 @@ pub(super) struct BlockFacts<'n> {
     pub need: Option<&'n [FxHashMap<Key, u8>]>,
     /// A variable known to hold a constant throughout the block (the edge
     /// into it was an equality branch).
-    pub assume: Option<(Key, u64)>,
+    pub assume: Option<Fact>,
     /// First instruction of the block that follows a block-ending call, so
     /// the call can see what reads its result.
     pub after: Option<Instruction>,
@@ -701,8 +702,9 @@ pub(super) struct Exec<'c, 'a> {
     /// reader is out of sight.
     pub(super) flags_needed: u32,
     /// A variable known to hold a constant throughout this block (the edge
-    /// into it was an equality branch); substituted into every value read.
-    assume: Option<(Key, u64)>,
+    /// into it was an equality branch); substituted into the values read,
+    /// as far as the constant reaches ([`Exec::assumed`]).
+    assume: Option<Fact>,
     /// The block is the function's entry block.
     entry: bool,
     /// The handler registration is behind us: false only in the entry block

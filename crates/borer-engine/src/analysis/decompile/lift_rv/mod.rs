@@ -420,7 +420,7 @@ impl Lift<'_, '_> {
                 .env
                 .sp
                 .map_or_else(|| self.ex.env.get(Key::Rv(SP)), Expr::Sp),
-            Reg::X(_) | Reg::F(_) => self.ex.assumed(self.ex.env.get(Key::Rv(r))),
+            Reg::X(_) | Reg::F(_) => self.ex.assumed(self.ex.env.get(Key::Rv(r)), 64),
         }
     }
 

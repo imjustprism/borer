@@ -74,25 +74,33 @@ pub(super) struct SlotRec {
     pub(super) flag_src: Option<Instruction>,
 }
 
-/// What an equality branch establishes on one of its edges: a variable and
-/// the constant it holds there.
-pub(super) type Fact = (Key, u64);
+/// What an equality branch establishes on one of its edges: a variable,
+/// the constant its low bits hold there, and how many of them, [`WHOLE`]
+/// when they are all the variable has.
+pub(super) type Fact = (Key, u64, u8);
+
+/// The bits of a [`Fact`] whose constant is its variable's whole value.
+pub(super) const WHOLE: u8 = 64;
 
 /// Returns what an equality branch establishes on the edge to `succ`.
 ///
 /// `if (k == c)` makes `k` equal to `c` on its taken edge, `if (k != c)` on
 /// its fall-through edge; `test k, k` compares with zero. Other conditions
-/// establish nothing usable.
+/// establish nothing usable. A compare narrower than the variable (`cmp
+/// ecx, 5` of a 64-bit `rcx`) establishes only the bits it compared: the
+/// rest of the variable is whatever it was.
 ///
 /// # Arguments
 ///
 /// * `branch` - The branch ending the predecessor.
 /// * `succ` - Start address of the successor being entered.
+/// * `word` - The register width, 32 or 64: a compare that wide covers
+///   any variable.
 ///
 /// # Returns
 ///
-/// `(variable, constant)` to assume, or `None`.
-pub(super) fn assumption(branch: &Branch, succ: u64) -> Option<Fact> {
+/// The fact to assume, or `None`.
+pub(super) fn assumption(branch: &Branch, succ: u64, word: u32) -> Option<Fact> {
     if branch.target == branch.fall || (succ != branch.target && succ != branch.fall) {
         return None;
     }
@@ -109,11 +117,18 @@ pub(super) fn assumption(branch: &Branch, succ: u64) -> Option<Fact> {
         .cond
         .simplify()
         .unwrap_or_else(|| branch.cond.clone());
-    match &cond.flags {
-        Flags::Cmp(Expr::Var(k), Expr::Const(c), _) => Some((*k, *c)),
-        Flags::Test(Expr::Var(k), Expr::Var(k2), _) if k == k2 => Some((*k, 0)),
-        _ => None,
-    }
+    let (k, c, bits) = match &cond.flags {
+        Flags::Cmp(Expr::Var(k), Expr::Const(c), bits) => (*k, *c, *bits),
+        Flags::Test(Expr::Var(k), Expr::Var(k2), bits) if k == k2 => (*k, 0, *bits),
+        _ => return None,
+    };
+    let whole =
+        u32::from(bits) >= word || expr::known_bits(&Expr::Var(k)) & !expr::mask_bits(bits) == 0;
+    Some(if whole {
+        (k, c, WHOLE)
+    } else {
+        (k, c & expr::mask_bits(bits), bits)
+    })
 }
 
 /// Computes the assumption each block may use while it executes
@@ -173,7 +188,7 @@ fn block_assumption<L: Lifter>(
         return None;
     }
     let start = L::start(code[b].first()?);
-    assumption(recorded[*p].branch.as_ref()?, start)
+    assumption(recorded[*p].branch.as_ref()?, start, ctx.bitness)
 }
 
 /// The fact a block holds in a round of the dataflow: the one the round
@@ -894,7 +909,7 @@ pub(super) fn dataflow<L: Lifter>(
                     }
                     let phis = phi_keys(&outs[p], &succs[p], &ins, live, &processed, Some((b, &m)));
                     let assigned = forget_assigned(&mut m, &outs[p], phis);
-                    held = held.filter(|(k, _)| !assigned.contains(k));
+                    held = held.filter(|(k, ..)| !assigned.contains(k));
                 }
                 if m.flags == Flags::Unknown && ctx.flag_readers[b] {
                     let active: Vec<usize> =

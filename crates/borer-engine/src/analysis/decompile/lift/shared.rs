@@ -249,7 +249,7 @@ impl Exec<'_, '_> {
                     .get(&k)
                     .cloned()
                     .unwrap_or_else(|| self.env.get(k));
-                (ArgAt::Stack(word * n, bits), self.assumed(v))
+                (ArgAt::Stack(word * n, bits), self.assumed(v, bits))
             })
             .collect()
     }

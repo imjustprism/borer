@@ -403,3 +403,35 @@ fn a_wait_on_a_global_at_the_entry_is_an_empty_while() {
     );
     replays_clean(&p, &Analysis::compute(&p), &[F]);
 }
+
+/// An arm64 compare of a `w` register says nothing of the upper half of
+/// its `x` register.
+///
+/// `cbz w0,L; .. L: str x0,[x1]` and `cmp w0,#5; b.ne X; str x0,[x1]` store
+/// `x0` whole: read as a fact of the whole register, each compare made the
+/// store its constant at 64 bits.
+#[test]
+fn an_arm_compare_of_a_registers_low_half_says_nothing_of_the_rest() {
+    let zero: [u32; 6] = [
+        0x3400_0060, // ASM: cbz w0, 0x40100c
+        0x5280_0020, // ASM: mov w0, #1
+        0xd65f_03c0, // ASM: ret
+        0xf900_0020, // ASM: str x0, [x1]
+        0x5280_0000, // ASM: mov w0, #0
+        0xd65f_03c0, // ASM: ret
+    ];
+    let five: [u32; 7] = [
+        0x7100_141f, // ASM: cmp w0, #5
+        0x5400_0081, // ASM: b.ne 0x401014
+        0xf900_0020, // ASM: str x0, [x1]
+        0x5280_0000, // ASM: mov w0, #0
+        0xd65f_03c0, // ASM: ret
+        0x5280_0020, // ASM: mov w0, #1
+        0xd65f_03c0, // ASM: ret
+    ];
+    for words in [&zero[..], &five] {
+        let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let text = decompiled(&crate::raw::image(Arch::Arm64, &code, &[]), 0x40_1000);
+        assert!(text.contains("*(uint64_t*)a2 = a1;\n"), "{text}");
+    }
+}

@@ -46,7 +46,7 @@ use super::term::{
     self, EQ, GT, LT, Logic, Pred, Term, UN, float_rel, ite, narrow, not, truth, zero,
 };
 use super::{
-    Bench, Code, End, Function, Replay, Rig, Transfer, covering, floating, frame_base,
+    Bench, Code, End, Function, Replay, Rig, Transfer, covering, edge, floating, frame_base,
     lose_frame_writes, op_width, overwritten_first, value_lane,
 };
 use crate::analysis::BasicBlock;
@@ -1673,22 +1673,11 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
 
         let mut base: BTreeMap<u64, Byte> = BTreeMap::new();
         let assumed = w.assumes.get(b).copied().flatten();
-        if let Some((k @ (Key::Slot(_) | Key::Global(..)), c)) = assumed {
-            let (at, n) = match k {
-                Key::Slot(o) => (
-                    sp0.wrapping_add_signed(o),
-                    u64::from(inn.slot_bits.get(&o).copied().unwrap_or(width) / 8),
-                ),
-                Key::Global(a, bits) => (a, u64::from(bits / 8).max(1)),
-                Key::Reg(_) | Key::A64(_) | Key::A32(_) | Key::Rv(_) => (0, 0),
-                Key::Tmp(_) | Key::Param(_) => (0, 0),
-            };
-            for i in 0..n.min(8) {
-                base.insert(
-                    at.wrapping_add(i) & mask,
-                    Byte::Of(Term::Const(c), u8::try_from(i).unwrap_or(0)),
-                );
-            }
+        for (at, i) in assumed
+            .into_iter()
+            .flat_map(|f| self.fact_bytes(b, f.0, sp0))
+        {
+            base.insert(at, Byte::Of(Term::Const(assumed.map_or(0, |f| f.1)), i));
         }
         let mut entry: FxHashMap<Key, Term> = FxHashMap::default();
         let narrowed = |entry: &mut FxHashMap<Key, Term>, k: Key, nb: u8| {
@@ -1720,12 +1709,8 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                 narrowed(&mut entry, *src, *nb);
             }
         }
-        if let Some((
-            k @ (Key::Reg(_) | Key::A64(_) | Key::A32(_) | Key::Tmp(_) | Key::Param(_)),
-            c,
-        )) = assumed
-        {
-            entry.insert(k, Term::Const(c & mask));
+        if let Some((k, c, n)) = assumed.filter(|f| edge::in_register(f.0)) {
+            entry.insert(k, edge::start_term(k, c, n, width));
         }
         let seg = self
             .template

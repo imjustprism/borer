@@ -369,7 +369,7 @@ impl Lift<'_, '_> {
                 .env
                 .sp
                 .map_or_else(|| self.ex.env.get(Key::A32(SP)), Expr::Sp),
-            Reg::R(_) | Reg::S(_) | Reg::D(_) => self.ex.assumed(self.ex.env.get(Key::A32(r))),
+            Reg::R(_) | Reg::S(_) | Reg::D(_) => self.ex.assumed(self.ex.env.get(Key::A32(r)), 64),
         }
     }
 

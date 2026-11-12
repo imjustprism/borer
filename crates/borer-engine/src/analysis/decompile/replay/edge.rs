@@ -20,6 +20,7 @@
 use std::collections::BTreeSet;
 
 use super::super::expr::Key;
+use super::term::{self, Term};
 use super::{Bench, Claim, End, Function, Replay, Replayed, Transfer, Trial, low};
 use crate::analysis::BasicBlock;
 use crate::fxmap::FxHashMap;
@@ -28,7 +29,79 @@ use crate::fxmap::FxHashMap;
 /// expression.
 const GIVEN: &str = "the value the branch into the block gives it";
 
+/// Tells whether a fact's variable is held in the state and not in memory:
+/// a register, a parameter or a temporary.
+///
+/// # Arguments
+///
+/// * `k` - The variable.
+pub(super) fn in_register(k: Key) -> bool {
+    matches!(
+        k,
+        Key::Reg(_) | Key::A64(_) | Key::A32(_) | Key::Tmp(_) | Key::Param(_)
+    )
+}
+
+/// The value a variable starts a block with under an equality of its low
+/// bits: the constant in those bits, what it held above them.
+///
+/// # Arguments
+///
+/// * `v` - What the variable holds without the equality.
+/// * `c` - The constant.
+/// * `n` - How many low bits the equality fixes.
+pub(super) fn under(v: u64, c: u64, n: u8) -> u64 {
+    (v & !low(n)) | (c & low(n))
+}
+
+/// The term a variable starts a proof as under an equality of its low
+/// bits: the constant, and above it, where the equality stops short of the
+/// register width, a value no state fixes.
+///
+/// # Arguments
+///
+/// * `k` - The variable.
+/// * `c` - The constant.
+/// * `n` - How many low bits the equality fixes.
+/// * `width` - The register width.
+pub(super) fn start_term(k: Key, c: u64, n: u8, width: u8) -> Term {
+    let known = Term::Const(c & low(n.min(width)));
+    if n >= width {
+        return known;
+    }
+    let above = term::mul(64, &Term::In(k, width - n), &Term::Const(1u64 << n));
+    term::add(64, &known, &above)
+}
+
 impl<'p, L: Replay> Function<'_, 'p, L> {
+    /// The bytes of memory an equality of a variable fixes where block `b`
+    /// starts, each by its address and its index in the constant: those of
+    /// a slot or a global, and none for a variable held in the state
+    /// ([`in_register`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `b` - The block's index.
+    /// * `k` - The variable.
+    /// * `sp0` - The stack pointer at the function's entry.
+    pub(super) fn fact_bytes(&self, b: usize, k: Key, sp0: u64) -> Vec<(u64, u8)> {
+        let (at, len) = match k {
+            Key::Slot(o) => {
+                let bits = self.w.ins.get(b).and_then(|e| e.slot_bits.get(&o));
+                (
+                    sp0.wrapping_add_signed(o),
+                    bits.copied().unwrap_or(self.width) / 8,
+                )
+            }
+            Key::Global(a, bits) => (a, (bits / 8).max(1)),
+            Key::Reg(_) | Key::A64(_) | Key::A32(_) | Key::Rv(_) => (0, 0),
+            Key::Tmp(_) | Key::Param(_) => (0, 0),
+        };
+        (0..len.min(8))
+            .map(|i| (at.wrapping_add(u64::from(i)) & low(self.width), i))
+            .collect()
+    }
+
     /// The equality a block starts under, where it is one the machine can
     /// bear out: of a general register read from the block's start on by
     /// its own name.
@@ -54,7 +127,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
     /// The register as the machine names it, its variable, the constant,
     /// and the bits compared: as many as the block reads of the register.
     fn given(&self, s: usize) -> Option<(&'static str, Key, u64, u8)> {
-        let (k, c) = self.w.assumes.get(s).copied().flatten()?;
+        let (k, c, _) = self.w.assumes.get(s).copied().flatten()?;
         let name = self.regs.iter().find(|&&(_, r)| r == k)?.0;
         let bits = *self.w.live.regs.get(s)?.get(&k)?;
         let pending = self.w.ins.get(s)?.vals.contains_key(&k);
