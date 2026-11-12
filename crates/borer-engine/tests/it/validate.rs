@@ -1,8 +1,9 @@
 //! User types held to what an overlay holds, as a hand-edited project
 //! states them: the counts, the chains of typedefs, the types holding
-//! themselves and the deadline.
+//! themselves, the layouts and the deadline.
 //!
-//! C declarations are read over types that nest deep in bounded time.
+//! A project's enum loads in the order an overlay holds it, and C
+//! declarations are read over types that nest deep in bounded time.
 
 #![expect(
     clippy::missing_panics_doc,
@@ -13,6 +14,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use borer_engine::analysis::cdecl::{Abi, parse};
+use borer_engine::analysis::project::Project;
 use borer_engine::analysis::utypes::{
     ALIAS_DEPTH_MAX, TYPES_MAX, TypeExpr, UserEnum, UserField, UserStruct, UserType, parse_type,
     validate,
@@ -361,4 +363,27 @@ fn a_struct_set_type_would_not_lay_out_is_refused() {
     let past = "struct S: field a at 0xfffffffffffffffe ends past every address";
     refused(&[(u64::MAX - 1, "a", "u32")], u64::MAX, past);
     assert!(laid(&[(0, "p", "u8 *"), (4, "n", "u32")], 8).is_ok());
+}
+
+/// A project's enum loads its values in value order, however the file
+/// lists them, as an overlay holds an enum: loaded as listed, `types`
+/// printed them out of order.
+#[test]
+fn a_project_s_enum_loads_its_values_in_value_order() {
+    let values = vec![
+        (2, "Done".to_owned()),
+        (0, "Idle".to_owned()),
+        (1, "Run".to_owned()),
+    ];
+    let state = UserType::Enum(UserEnum { size: 4, values });
+    let project = Project {
+        types: [("State".to_owned(), state)].into(),
+        ..Project::default()
+    };
+    let overlay = project.to_overlay().expect("the enum loads");
+    let Some(UserType::Enum(e)) = overlay.types.get("State") else {
+        panic!("State is no enum");
+    };
+    let names: Vec<&str> = e.values.iter().map(|(_, name)| name.as_str()).collect();
+    assert_eq!(names, ["Idle", "Run", "Done"]);
 }

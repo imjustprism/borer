@@ -233,11 +233,13 @@ impl Project {
     /// types checked ([`super::utypes::validate`]), so a hand-edited file
     /// that names a type nothing states, or states one in a form the
     /// language does not spell, is refused here with a message naming it
-    /// rather than silently naming no fields. The fields stated of classes
-    /// are read by offset and checked the same way
-    /// ([`super::stated::validate`]); a class the file states no field of
-    /// is left out, and two keys that read as one class once escaped to a
-    /// line refuse the file, as two keys of one address do.
+    /// rather than silently naming no fields. An enum's values are put in
+    /// value order, as an overlay holds them
+    /// ([`super::utypes::UserEnum::values`]), however the file lists them.
+    /// The fields stated of classes are read by offset and checked the
+    /// same way ([`super::stated::validate`]); a class the file states no
+    /// field of is left out, and two keys that read as one class once
+    /// escaped to a line refuse the file, as two keys of one address do.
     ///
     /// # Returns
     ///
@@ -300,10 +302,16 @@ impl Project {
                 fields.entry(class.clone()).or_default().insert(off, field);
             }
         }
+        let mut types = self.types.clone();
+        for ty in types.values_mut() {
+            if let UserType::Enum(e) = ty {
+                e.values.sort_by_key(|&(value, _)| value);
+            }
+        }
         let o = Overlay {
             names: by_address("names", &self.names)?.into(),
             comments: by_address("comments", &self.comments)?.into(),
-            types: self.types.clone().into(),
+            types: types.into(),
             applied: applied.into(),
             prototypes: prototypes.into(),
             vars: vars.into(),
