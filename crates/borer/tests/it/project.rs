@@ -730,3 +730,18 @@ fn a_script_sets_only_names_its_saved_project_loads() {
     let loaded = loaded.unwrap();
     assert!(!loaded.contains("# skipped"), "{loaded}");
 }
+
+/// The variables of one function stated under two spellings of its address
+/// refuse the file, as two keys of one address do in every other table.
+///
+/// Each spelling was read by itself and the two merged.
+#[test]
+fn a_function_s_variables_under_two_keys_refuse_the_project() {
+    let vars = serde_json::json!({"0x1000": {"a1": "first"}, "4096": {"a2": "second"}});
+    let refused =
+        loaded(serde_json::json!({ "vars": vars })).expect_err("two keys of one function loaded");
+    assert!(
+        refused.contains("vars keys '0x1000' and '4096' both name 0x1000; keep one"),
+        "{refused}"
+    );
+}

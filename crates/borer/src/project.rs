@@ -123,7 +123,8 @@ const PROJECT_MAX: u64 = 1 << 26;
 /// # Arguments
 ///
 /// * `table` - Which table the keys key (`names`), for the message.
-/// * `map` - Entries by address text.
+/// * `map` - Entries by address text: annotations, or a function's
+///   variables.
 ///
 /// # Returns
 ///
@@ -133,11 +134,11 @@ const PROJECT_MAX: u64 = 1 << 26;
 ///
 /// Naming the keys that are not addresses, or the two keys that name one
 /// address.
-fn keyed<'m>(
+fn keyed<'m, V>(
     table: &str,
-    map: &'m BTreeMap<String, String>,
-) -> Result<BTreeMap<u64, (&'m str, &'m str)>, String> {
-    let mut out: BTreeMap<u64, (&str, &str)> = BTreeMap::new();
+    map: &'m BTreeMap<String, V>,
+) -> Result<BTreeMap<u64, (&'m str, &'m V)>, String> {
+    let mut out: BTreeMap<u64, (&str, &V)> = BTreeMap::new();
     let mut bad: Vec<String> = Vec::new();
     for (k, v) in map {
         let Some(va) = borer_engine::analysis::parse_addr(k) else {
@@ -361,13 +362,7 @@ impl ProjectFile {
             prototypes.insert(va, proto);
         }
         let mut vars: BTreeMap<u64, BTreeMap<VarKey, Var>> = BTreeMap::new();
-        for (k, table) in &self.vars {
-            let va = borer_engine::analysis::parse_addr(k).ok_or_else(|| {
-                format!(
-                    "vars key {} is not an address; a key is 0x-hex as save_project writes it",
-                    borer_engine::text::quoted(k)
-                )
-            })?;
+        for (va, (_, table)) in keyed("vars", &self.vars)? {
             let into = vars.entry(va).or_default();
             for (key, decl) in table {
                 let key = VarKey::parse_saved(key)
