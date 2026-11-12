@@ -848,6 +848,11 @@ pub fn standing(
 /// Returns the overlay's types with one more defined, as a definition is
 /// checked before it is written.
 ///
+/// The types it leaves are held to what a project's are on load
+/// ([`utypes::validate`]), so a session never holds a type it could not
+/// load again: one holding itself by value, or a chain of typedefs past
+/// the cap.
+///
 /// # Arguments
 ///
 /// * `p` - The loaded image.
@@ -861,8 +866,8 @@ pub fn standing(
 ///
 /// # Errors
 ///
-/// When the definition changes a type, and a field stated with it would
-/// no longer stand ([`standing`]).
+/// When the types it leaves do not validate, or the definition changes a
+/// type and a field stated with it would no longer stand ([`standing`]).
 pub fn retyped(
     p: &Program,
     a: &Analysis,
@@ -872,6 +877,7 @@ pub fn retyped(
     let mut types = BTreeMap::clone(&o.types);
     if let Some((name, ty)) = fresh {
         types.insert(name.to_owned(), ty.clone());
+        utypes::validate(&types, &o.applied).map_err(|e| e.to_string())?;
         standing(p, a, o, &types)?;
     }
     Ok(types)

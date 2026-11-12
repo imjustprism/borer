@@ -580,8 +580,8 @@ fn a_hostile_project_is_refused_by_its_counts_and_its_chains() {
     let applied: serde_json::Map<String, serde_json::Value> = (0..0x1_0001u64)
         .map(|k| (format!("{k:#x}"), "u32".into()))
         .collect();
-    let refused = loaded(serde_json::json!({ "applied": applied }))
-        .expect_err("65537 applied types loaded");
+    let refused =
+        loaded(serde_json::json!({ "applied": applied })).expect_err("65537 applied types loaded");
     assert!(refused.contains("applies 65537 types"), "{refused}");
     let prototypes: serde_json::Map<String, serde_json::Value> = (0..0x1_0001u64)
         .map(|k| (format!("{k:#x}"), "unread".into()))
@@ -619,6 +619,23 @@ fn loaded(tables: serde_json::Value) -> Result<Overlay, String> {
     serde_json::from_value::<ProjectFile>(file)
         .map_err(|e| e.to_string())
         .and_then(|pf| pf.to_overlay())
+}
+
+/// A project whose struct holds itself by value is refused, naming the
+/// cycle.
+///
+/// It loaded, and an alignment of it walked each of its three fields of
+/// its own type to a depth cap: `3^33` steps.
+#[test]
+fn a_struct_holding_itself_by_value_is_refused() {
+    let field = |name: &str| serde_json::json!({"name": name, "ty": {"Named": "A"}});
+    let fields = serde_json::json!({"0": field("a"), "8": field("b"), "16": field("c")});
+    let types = serde_json::json!({"A": {"Struct": {"size": 24, "fields": fields}}});
+    let refused = loaded(serde_json::json!({ "types": types })).expect_err("A holds itself");
+    assert!(
+        refused.contains("type 'A' holds itself by value (A -> A)"),
+        "{refused}"
+    );
 }
 
 /// A project loaded past the request's deadline is refused, saying so,

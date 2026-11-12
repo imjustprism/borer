@@ -1,5 +1,6 @@
 //! User types held to what an overlay holds, as a hand-edited project
-//! states them: the counts, the chains of typedefs and the deadline.
+//! states them: the counts, the chains of typedefs, the types holding
+//! themselves and the deadline.
 
 #![expect(
     clippy::missing_panics_doc,
@@ -9,7 +10,8 @@
 use std::collections::BTreeMap;
 
 use borer_engine::analysis::utypes::{
-    ALIAS_DEPTH_MAX, TYPES_MAX, TypeExpr, UserEnum, UserField, UserStruct, UserType, validate,
+    ALIAS_DEPTH_MAX, TYPES_MAX, TypeExpr, UserEnum, UserField, UserStruct, UserType, parse_type,
+    validate,
 };
 use borer_engine::cancel::Cancel;
 
@@ -147,4 +149,69 @@ fn types_checked_past_the_deadline_are_refused() {
         .expect_err("a cut check passed");
     assert!(err.to_string().contains("deadline passed"), "{err}");
     assert!(validate(&types, &BTreeMap::new()).is_ok());
+}
+
+/// A type holding itself by value is refused naming the cycle: through its
+/// own field, an array of itself, another struct or a typedef; two holding
+/// each other through pointers validate.
+#[test]
+fn a_type_holding_itself_by_value_is_refused() {
+    let holding = |name: &str, ty: &str| {
+        let x = UserField {
+            name: "x".to_owned(),
+            ty: parse_type(ty).expect("a type"),
+        };
+        let fields = [(0, x)].into_iter().collect();
+        (
+            name.to_owned(),
+            UserType::Struct(UserStruct { size: 8, fields }),
+        )
+    };
+    let alias = |name: &str, ty: &str| {
+        (
+            name.to_owned(),
+            UserType::Alias(parse_type(ty).expect("a type")),
+        )
+    };
+    let none = BTreeMap::new();
+    for (types, cycle) in [
+        (vec![holding("A", "A")], "(A -> A)"),
+        (vec![holding("A", "A[3]")], "(A -> A)"),
+        (vec![holding("A", "B"), holding("B", "A")], "(A -> B -> A)"),
+        (vec![holding("A", "T"), alias("T", "A[2]")], "(A -> T -> A)"),
+    ] {
+        let types: BTreeMap<_, _> = types.into_iter().collect();
+        let err = validate(&types, &none).expect_err("a type holding itself validated");
+        let says = format!("holds itself by value {cycle}");
+        assert!(err.to_string().contains(&says), "{err}");
+    }
+    let linked = [holding("A", "B *"), holding("B", "A *")].into();
+    assert!(validate(&linked, &none).is_ok());
+}
+
+/// A ring of 4096 structs of long names, each holding the next by value,
+/// is refused in a line: the refusal named every type around the ring, a
+/// megabyte of text.
+#[test]
+fn a_long_ring_of_types_is_refused_in_a_short_message() {
+    let name = |k: usize| format!("S{k:04}{}", "x".repeat(251));
+    let types: BTreeMap<String, UserType> = (0..TYPES_MAX)
+        .map(|k| {
+            let ty = TypeExpr::Named(name((k + 1) % TYPES_MAX));
+            let f = UserField {
+                name: "f".to_owned(),
+                ty,
+            };
+            let fields = [(0, f)].into();
+            (name(k), UserType::Struct(UserStruct { size: 8, fields }))
+        })
+        .collect();
+    let err = validate(&types, &BTreeMap::new())
+        .expect_err("a ring holds itself")
+        .to_string();
+    assert!(
+        err.contains("holds itself by value") && err.contains("... 4088 more ->"),
+        "{err}"
+    );
+    assert!(err.len() < 4096, "{} bytes", err.len());
 }

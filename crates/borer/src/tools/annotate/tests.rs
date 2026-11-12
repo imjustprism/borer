@@ -934,3 +934,39 @@ fn a_comment_outside_every_section_is_refused_as_a_name_is() {
     );
     assert!(crate::state::read_lock(&server.overlay).comments.is_empty());
 }
+
+/// `set_type` refuses a struct that would hold itself by value through
+/// another, stated field by field or in C, as a project holding it is
+/// refused on load.
+///
+/// The structured form took it, the sizes agreeing, and left the session a
+/// type no layout sizes and its saved project could not load.
+///
+/// # Panics
+///
+/// When the cycle is accepted either way, or the refusal does not name
+/// it.
+#[test]
+fn set_type_refuses_a_struct_holding_itself_by_value() {
+    use crate::params::SetTypeParams;
+    use rmcp::handler::server::wrapper::Parameters;
+    let server = raw_server();
+    let state = |name: Option<&str>, field: Option<&str>, ty: Option<&str>| {
+        server.set_type(Parameters(SetTypeParams {
+            name: name.map(str::to_owned),
+            fields: field.map(|f| vec![f.to_owned()]),
+            r#type: ty.map(str::to_owned),
+            dry_run: Some(false),
+            ..SetTypeParams::default()
+        }))
+    };
+    state(Some("S"), Some("0x0:a:u32"), None).expect("S is a u32");
+    state(Some("B"), Some("0x0:s:S"), None).expect("B holds S");
+    for refused in [
+        state(Some("S"), Some("0x0:b:B"), None),
+        state(None, None, Some("struct S { B b; };")),
+    ] {
+        let why = refused.expect_err("S holds itself through B").message;
+        assert!(why.contains("holds itself by value (B -> S -> B)"), "{why}");
+    }
+}

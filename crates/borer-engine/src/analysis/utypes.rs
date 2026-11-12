@@ -1193,12 +1193,13 @@ pub fn counted(types: &BTreeMap<String, UserType>, applied: usize) -> anyhow::Re
 ///
 /// The counts come first ([`counted`]). Then every name a type or an
 /// application references must be defined, no chain of aliases may loop
-/// or hold more than [`ALIAS_DEPTH_MAX`] typedefs ([`chained`]), and no
-/// type may stack more pointers than [`PTR_DEPTH_MAX`]; a project file is
-/// edited by hand and passed around, so this is where garbage in it is
-/// refused rather than silently dropping a rendering. Each named type is
-/// sized once ([`Widths`]), and the deadline in force is read once per
-/// type ([`crate::cancel::Cancel::whole`]).
+/// or hold more than [`ALIAS_DEPTH_MAX`] typedefs ([`chained`]), no type
+/// may hold itself by value ([`acyclic`]), and no type may stack more
+/// pointers than [`PTR_DEPTH_MAX`]; a project file is edited by hand and
+/// passed around, so this is where garbage in it is refused rather than
+/// silently dropping a rendering. Each named type is sized once
+/// ([`Widths`]), and the deadline in force is read once per type
+/// ([`crate::cancel::Cancel::whole`]).
 ///
 /// # Arguments
 ///
@@ -1208,8 +1209,9 @@ pub fn counted(types: &BTreeMap<String, UserType>, applied: usize) -> anyhow::Re
 /// # Errors
 ///
 /// When a count passes its cap, a reference is undefined, a chain loops or
-/// runs too long, a type is too deep, or the request's deadline passed;
-/// the message names the type and the name that failed.
+/// runs too long, a type holds itself by value or is too deep, or the
+/// request's deadline passed; the message names the type and the name that
+/// failed.
 pub fn validate(
     types: &BTreeMap<String, UserType>,
     applied: &BTreeMap<u64, TypeExpr>,
@@ -1220,6 +1222,7 @@ pub fn validate(
         shaped(name, ty)?;
     }
     chained(types)?;
+    acyclic(types)?;
     let mut widths = Widths::new(types, 8);
     for (name, ty) in types {
         sized(&mut widths, name, ty)?;
@@ -1394,6 +1397,102 @@ fn chained(types: &BTreeMap<String, UserType>) -> anyhow::Result<()> {
         )),
         _ => Ok(()),
     }
+}
+
+/// Refuses a type that holds itself by value, naming the cycle.
+///
+/// A struct holds its fields' types by value, through any arrays of them,
+/// and a typedef the type it names; a pointer holds what it points at by
+/// reference, which is how a type may reach itself. One holding itself
+/// has no size a layout can give it, and the walks into its fields ran
+/// until a depth cap stopped them: a struct of three fields of its own
+/// type took `3^33` steps to align. Each type is walked once.
+///
+/// # Arguments
+///
+/// * `types` - The defined types.
+///
+/// # Errors
+///
+/// When a type reaches itself by value; the message names the first types
+/// around the cycle and counts the rest, so a ring of thousands of long
+/// names is a line, not a megabyte.
+fn acyclic(types: &BTreeMap<String, UserType>) -> anyhow::Result<()> {
+    /// Most types a refusal names around a cycle before it counts the rest.
+    const CYCLE_SHOWN: usize = 8;
+    let mut done: BTreeSet<&str> = BTreeSet::new();
+    for root in types.keys() {
+        if done.contains(root.as_str()) {
+            continue;
+        }
+        let mut open: BTreeSet<&str> = BTreeSet::from([root.as_str()]);
+        let mut path: Vec<(&str, Vec<&str>)> = vec![(root.as_str(), held(types, root))];
+        while let Some((name, next)) = path.last_mut() {
+            let name = *name;
+            let Some(to) = next.pop() else {
+                done.insert(name);
+                open.remove(name);
+                path.pop();
+                continue;
+            };
+            if open.contains(to) {
+                let from = path.iter().position(|(n, _)| *n == to).unwrap_or(0);
+                let around = path.len().saturating_sub(from);
+                let mut cycle: Vec<String> = path
+                    .iter()
+                    .skip(from)
+                    .take(CYCLE_SHOWN)
+                    .map(|(n, _)| crate::text::one_line(n))
+                    .collect();
+                if around > CYCLE_SHOWN {
+                    cycle.push(format!("... {} more", around.saturating_sub(CYCLE_SHOWN)));
+                }
+                cycle.push(crate::text::one_line(to));
+                return Err(anyhow::anyhow!(
+                    "type {} holds itself by value ({}); hold one of them through a pointer",
+                    crate::text::quoted(to),
+                    cycle.join(" -> ")
+                ));
+            }
+            if !done.contains(to) && types.contains_key(to) {
+                open.insert(to);
+                path.push((to, held(types, to)));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Returns the types one type holds by value: those its fields or its
+/// target name, through any arrays, each once.
+///
+/// # Arguments
+///
+/// * `types` - The defined types.
+/// * `name` - The type.
+///
+/// # Returns
+///
+/// The names in name order, none for an enum or a name nothing defines.
+fn held<'t>(types: &'t BTreeMap<String, UserType>, name: &str) -> Vec<&'t str> {
+    let parts: Vec<&TypeExpr> = match types.get(name) {
+        Some(UserType::Struct(s)) => s.fields.values().map(|f| &f.ty).collect(),
+        Some(UserType::Alias(inner)) => vec![inner],
+        Some(UserType::Enum(_)) | None => Vec::new(),
+    };
+    let mut names: Vec<&str> = parts
+        .into_iter()
+        .filter_map(|ty| {
+            let mut base = ty;
+            while let TypeExpr::Array(inner, _) = base {
+                base = inner;
+            }
+            base.name()
+        })
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
 }
 
 /// Refuses a type that stacks more pointers and arrays than

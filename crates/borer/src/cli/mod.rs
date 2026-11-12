@@ -1057,6 +1057,11 @@ fn set_type(args: &[String], s: &Session) -> anyhow::Result<()> {
 /// is refused with the reason, where an empty analysis would have every
 /// class's name define a struct.
 ///
+/// Every definition leaves types the project loads again
+/// ([`stated::retyped`]): a typedef past the chain cap is refused, not
+/// written. Only a type already defined can have fields stated with it,
+/// so only its change reads the binary's code.
+///
 /// # Arguments
 ///
 /// * `kind` - `struct`, `enum` or `typedef`.
@@ -1150,15 +1155,18 @@ fn defined(
             one_line(other)
         ),
     };
-    if overlay.types.contains_key(name) {
-        stated::retyped(
-            &s.program,
-            &s.analysis_or_empty(),
-            overlay,
-            Some((name, &built)),
-        )
-        .map_err(anyhow::Error::msg)?;
-    }
+    let fields_stated_with_it = if overlay.types.contains_key(name) {
+        s.analysis_or_empty()
+    } else {
+        borer_engine::analysis::Analysis::default()
+    };
+    stated::retyped(
+        &s.program,
+        &fields_stated_with_it,
+        overlay,
+        Some((name, &built)),
+    )
+    .map_err(anyhow::Error::msg)?;
     let say = format!("defined {}", built.describe(name));
     overlay.types.insert(name.to_owned(), built);
     Ok(say)
