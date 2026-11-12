@@ -231,6 +231,29 @@ fn replay_refutes(p: &Program, a: &Analysis, u: &Overlay, entry: u64) -> Option<
     })
 }
 
+/// Grades a moved rendering by its runs and its replay.
+///
+/// A difference on an input or a statement the replay does not bear out
+/// refutes it. Where the ISO check ran at all, a rendering that left
+/// unchecked every input, or the one the base text differs on
+/// ([`Checked::grade`]), is unchecked: agreement elsewhere says nothing of
+/// the input it was moved to mend.
+///
+/// # Arguments
+///
+/// * `c` - What the rendering's runs said, held to the base's differing
+///   input.
+/// * `refuted` - The statement its replay does not bear out, if any.
+/// * `live` - Whether the ISO check checked any input of the base text.
+fn evidence(c: Checked, refuted: Option<Counterexample>, live: bool) -> Evidence {
+    let grade = c.grade();
+    match c.differs.map(|(_, c)| c).or(refuted) {
+        Some(c) => Evidence::Refuted(c),
+        None if live && grade == Grade::Unchecked => Evidence::Unchecked,
+        None => Evidence::Tested(c.agreed),
+    }
+}
+
 /// Searches the renderings of a function's choice points for a text that
 /// agrees with the binary.
 ///
@@ -260,19 +283,20 @@ pub fn repair_iso(p: &Program, a: &Analysis, o: &Overlay, entry: u64, budget: Bu
     let refuted = replay_refutes(p, a, o, entry);
     let drawn = draw(p, a, o, entry, budget.inputs, budget.seed).ok();
     let checks = Cell::new(1usize);
-    let iso = |u: &Overlay| {
+    let iso = |u: &Overlay, held| {
         drawn.as_ref().map_or_else(Checked::default, |d| {
-            first_difference(p, a, u, entry, d, budget.steps, None)
+            first_difference(p, a, u, entry, d, budget.steps, held)
         })
     };
-    let base = iso(o);
+    let base = iso(o, None);
     let live = base.grade() != Grade::Unchecked;
+    let held = base.differs.as_ref().map(|(n, _)| *n);
     let Some(at) = base.differs.clone().map(|(_, c)| c).or(refuted) else {
         return Repair::Agrees;
     };
     let probe = |u: &Overlay| {
         checks.set(checks.get() + 1);
-        iso(u)
+        iso(u, held)
     };
     let judge = |u: &Overlay| {
         let refuted = replay_refutes(p, a, u, entry);
@@ -282,12 +306,7 @@ pub fn repair_iso(p: &Program, a: &Analysis, o: &Overlay, entry: u64, budget: Bu
             checks.set(checks.get() + 1);
             Checked::default()
         };
-        let grade = c.grade();
-        match c.differs.map(|(_, c)| c).or(refuted) {
-            Some(c) => Evidence::Refuted(c),
-            None if live && grade == Grade::Unchecked => Evidence::Unchecked,
-            None => Evidence::Tested(c.agreed),
-        }
+        evidence(c, refuted, live)
     };
     let points = choice_points(p, a, o, entry);
     let mut order: Vec<Site> = points
@@ -423,7 +442,30 @@ pub fn answered_flagged(
 
 #[cfg(test)]
 mod tests {
-    use super::{Counterexample, Repair, Site, implicated};
+    use super::{Checked, Counterexample, Evidence, Repair, Site, evidence, implicated};
+
+    /// A rendering that agrees on every input but the one the base text
+    /// differs on, which it leaves unchecked, is unchecked, not tested.
+    ///
+    /// It agreed on 7 inputs and its replay was clean: read as `Tested(7)`,
+    /// the search kept it as a repair and the answer dropped its warning.
+    ///
+    /// # Panics
+    ///
+    /// When such a rendering is graded tested.
+    #[test]
+    fn a_rendering_that_skips_the_base_input_is_unchecked() {
+        let skips = |held| Checked {
+            agreed: 7,
+            unchecked: [("it spins".to_owned(), 1)].into(),
+            skipped: [2].into(),
+            held,
+            ..Checked::default()
+        };
+        assert_eq!(evidence(skips(Some(2)), None, true), Evidence::Unchecked);
+        assert_eq!(evidence(skips(Some(5)), None, true), Evidence::Tested(7));
+        assert_eq!(evidence(skips(None), None, true), Evidence::Tested(7));
+    }
 
     /// A line implicates the sites it reads, by whole names only.
     ///
