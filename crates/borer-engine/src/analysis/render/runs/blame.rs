@@ -37,8 +37,8 @@ fn bisect_runs() -> usize {
 /// from its signature ([`bisect_iso`]); the answer says when the text
 /// agrees on every input it was checked on, when no input was checked and
 /// why, when it differs before any pass ran, when a text the bisection
-/// needed left every input unchecked so that no pass can be named, and
-/// when the check cannot run (an error).
+/// needed left the differing input unchecked so that no pass can be named,
+/// and when the check cannot run (an error).
 ///
 /// # Arguments
 ///
@@ -202,14 +202,23 @@ fn blame_report(name: &str, entry: u64, count: usize, budget: usize, found: &Bis
             out.push_str("before-passes\tthe text differs with every cleanup pass left out, so the lift or the structure the passes start from is wrong, not a pass\n");
             let _ = writeln!(out, "differs\t{}\t{}\t{}", c.input, c.line, c.why);
         }
-        Bisected::Unplaced { at, ran, unchecked } => {
+        Bisected::Unplaced {
+            at,
+            ran,
+            agreed,
+            unchecked,
+        } => {
             let which = match ran {
                 0 => "every cleanup pass left out".to_owned(),
                 n => format!("only its first {n} cleanup passes run"),
             };
+            let left = match agreed {
+                0 => "every input".to_owned(),
+                n => format!("the input it differs on (agreeing on {n} of {count})"),
+            };
             let _ = writeln!(
                 out,
-                "unplaced\tthe text differs, and with {which} it left every input unchecked, which is neither agreement nor a difference, so no pass is named"
+                "unplaced\tthe text differs, and with {which} it left {left} unchecked, which is neither agreement nor a difference, so no pass is named"
             );
             let _ = writeln!(out, "differs\t{}\t{}\t{}", at.input, at.line, at.why);
             unchecked_rows(&mut out, unchecked);
@@ -231,7 +240,8 @@ fn blame_report(name: &str, entry: u64, count: usize, budget: usize, found: &Bis
             let repairs = match alone.grade() {
                 Grade::Agrees => format!("yes: the full text with only this pass left out agrees on {}", agreed_on(alone, count)),
                 Grade::Differs => "no: the full text with only this pass left out still differs, so a later pass breaks it too".to_owned(),
-                Grade::Unchecked => "unchecked: the full text with only this pass left out left every input unchecked, so nothing is claimed of it".to_owned(),
+                Grade::Unchecked if alone.agreed == 0 => "unchecked: the full text with only this pass left out left every input unchecked, so nothing is claimed of it".to_owned(),
+                Grade::Unchecked => format!("unchecked: the full text with only this pass left out left the input the text differs on unchecked, so nothing is claimed of it; it agrees on {}", agreed_on(alone, count)),
             };
             let _ = writeln!(out, "repairs\t{repairs}");
             let before: Vec<&str> = texts.0.lines().take(DIFF_FN_MAX_LINES).collect();
@@ -291,6 +301,7 @@ mod tests {
                 .then(|| ("it spins".to_owned(), spun))
                 .into_iter()
                 .collect(),
+            missed: false,
         }
     }
 
@@ -307,7 +318,11 @@ mod tests {
     /// * `unchecked` - Passes run in the first text that differs.
     /// * `alone` - What the full text with one pass left out does.
     fn found(agree: usize, unchecked: usize, alone: &Checked) -> Bisected {
-        let check = |skip: Passes| match Pass::ALL.iter().filter(|p| skip.runs(**p)).count() {
+        let check = |skip: Passes, _: Option<&str>| match Pass::ALL
+            .iter()
+            .filter(|p| skip.runs(**p))
+            .count()
+        {
             k if k + 1 == Pass::ALL.len() => alone.clone(),
             k if k < agree => ran(8, 0, false),
             k if k < unchecked => ran(0, 8, false),
@@ -335,6 +350,7 @@ mod tests {
         let unplaced = |ran| Bisected::Unplaced {
             at: at(),
             ran,
+            agreed: 0,
             unchecked: vec![("it spins".to_owned(), 8)],
         };
         let spun = ran(0, 8, false);
@@ -364,6 +380,7 @@ mod tests {
         let found = |ran| Bisected::Unplaced {
             at: at(),
             ran,
+            agreed: 0,
             unchecked: vec![("it spins".to_owned(), 8)],
         };
         let bare = blame_report("f", 0x1000, 8, 100, &found(0));
@@ -413,6 +430,69 @@ mod tests {
         assert!(whole.ends_with("\nunchecked\t7\treason 2\n"), "{whole}");
     }
 
+    /// A text that left the input the full text differs on unchecked
+    /// places no pass and repairs nothing, however many others it agrees
+    /// on.
+    ///
+    /// The full text differs on input 5. A text of the bisection that
+    /// agrees on one input and leaves 63 unchecked, 5 among them, read as
+    /// agreeing: it put the blame on the pass after it, and as the text
+    /// without the blamed pass it read `repairs yes`. Held to input 5 it
+    /// is unchecked: the search ends there with its counts, and the
+    /// repair is said to be unchecked. The full text itself is held to no
+    /// input.
+    ///
+    /// # Panics
+    ///
+    /// When a pass is named or a repair claimed on such a text.
+    #[test]
+    fn a_text_that_skips_the_differing_input_places_and_repairs_nothing() {
+        let skips = |held: Option<&str>| Checked {
+            missed: held == Some("5"),
+            ..ran(1, 63, false)
+        };
+        let runs = |skip: Passes| Pass::ALL.iter().filter(|p| skip.runs(**p)).count();
+        let placed = bisected(
+            &|skip, held| match runs(skip) {
+                k if k == Pass::ALL.len() => {
+                    assert_eq!(held, None, "the full text is held to no input");
+                    ran(3, 0, true)
+                }
+                k if k < 4 => ran(8, 0, false),
+                k if k < 40 => skips(held),
+                _ => ran(3, 0, true),
+            },
+            &|k| format!("{k} passes"),
+        );
+        let unplaced = Bisected::Unplaced {
+            at: at(),
+            ran: 32,
+            agreed: 1,
+            unchecked: vec![("it spins".to_owned(), 63)],
+        };
+        assert_eq!(placed, unplaced);
+        let text = blame_report("f", 0x1000, 64, 100, &placed);
+        assert!(
+            text.contains("\nunplaced\tthe text differs, and with only its first 32 cleanup passes run it left the input it differs on (agreeing on 1 of 64) unchecked, "),
+            "{text}"
+        );
+        assert!(!text.contains("\npass\t"), "{text}");
+        let repaired = bisected(
+            &|skip, held| match runs(skip) {
+                k if k + 1 == Pass::ALL.len() => skips(held),
+                k if k < 10 => ran(8, 0, false),
+                _ => ran(3, 0, true),
+            },
+            &|k| format!("{k} passes"),
+        );
+        let text = blame_report("f", 0x1000, 64, 100, &repaired);
+        assert!(
+            text.contains("\nrepairs\tunchecked: the full text with only this pass left out left the input the text differs on unchecked, so nothing is claimed of it; it agrees on 1 of 64 inputs, 63 left unchecked (63: it spins)\n"),
+            "{text}"
+        );
+        assert!(!text.contains("repairs\tyes"), "{text}");
+    }
+
     /// Wherever the answer says a text agrees it says on how many of the
     /// inputs, how many it left unchecked and the commonest reason: the
     /// full text, the text before the blamed pass and the text without it.
@@ -452,7 +532,7 @@ mod tests {
             all.contains("; the text agrees on 8 of 8 inputs; "),
             "{all}"
         );
-        let over = |c: &Checked| bisected(&|_| c.clone(), &|_| String::new());
+        let over = |c: &Checked| bisected(&|_, _| c.clone(), &|_| String::new());
         assert_eq!(over(&ran(1, 7, false)), Bisected::Agrees(ran(1, 7, false)));
         let spun = vec![("it spins".to_owned(), 8)];
         assert_eq!(over(&ran(0, 8, false)), Bisected::Unchecked(spun));

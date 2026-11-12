@@ -262,7 +262,7 @@ pub fn repair_iso(p: &Program, a: &Analysis, o: &Overlay, entry: u64, budget: Bu
     let checks = Cell::new(1usize);
     let iso = |u: &Overlay| {
         drawn.as_ref().map_or_else(Checked::default, |d| {
-            first_difference(p, a, u, entry, d, budget.steps)
+            first_difference(p, a, u, entry, d, budget.steps, None)
         })
     };
     let base = iso(o);
