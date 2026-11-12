@@ -301,7 +301,7 @@ mod tests {
                 .then(|| ("it spins".to_owned(), spun))
                 .into_iter()
                 .collect(),
-            missed: false,
+            ..Checked::default()
         }
     }
 
@@ -448,7 +448,8 @@ mod tests {
     #[test]
     fn a_text_that_skips_the_differing_input_places_and_repairs_nothing() {
         let skips = |held: Option<usize>| Checked {
-            missed: held == Some(5),
+            held,
+            skipped: [5].into(),
             ..ran(1, 63, false)
         };
         let runs = |skip: Passes| Pass::ALL.iter().filter(|p| skip.runs(**p)).count();
@@ -491,6 +492,55 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("repairs\tyes"), "{text}");
+    }
+
+    /// A pass is named only where the text before it was checked on the
+    /// input the narrowest differing text differs on.
+    ///
+    /// The full text differs on input 5; the texts with 4 to 39 passes
+    /// agree on it but leave input 3 unchecked, and those with 40 or more
+    /// differ first on input 3. Held to input 5 alone, the search blamed
+    /// the fortieth pass on input 3, which the text before it never
+    /// checked; the answer is the unplaced form with that text's counts.
+    ///
+    /// # Panics
+    ///
+    /// When a pass is named.
+    #[test]
+    fn a_pass_is_placed_only_on_an_input_the_text_before_it_checked() {
+        let three = Counterexample {
+            input: "3".to_owned(),
+            ..at()
+        };
+        let runs = |skip: Passes| Pass::ALL.iter().filter(|p| skip.runs(**p)).count();
+        let found = bisected(
+            &|skip, held| match runs(skip) {
+                k if k == Pass::ALL.len() => ran(3, 0, true),
+                k if k < 4 => ran(8, 0, false),
+                k if k < 40 => Checked {
+                    held,
+                    skipped: [3].into(),
+                    ..ran(7, 1, false)
+                },
+                _ => Checked {
+                    differs: Some((3, three.clone())),
+                    ..ran(2, 0, false)
+                },
+            },
+            &|k| format!("{k} passes"),
+        );
+        let Bisected::Unplaced { at, agreed, .. } = &found else {
+            panic!("{found:?}");
+        };
+        assert_eq!((at, *agreed), (&three, 7));
+        let text = blame_report("f", 0x1000, 8, 100, &found);
+        assert!(
+            !text.contains(
+                "
+pass	"
+            ),
+            "{text}"
+        );
     }
 
     /// Wherever the answer says a text agrees it says on how many of the

@@ -341,11 +341,13 @@ pub enum Bisected {
     /// The text with every pass left out differs already: what the passes
     /// were handed was wrong, so no pass broke it.
     Unbisected(Counterexample),
-    /// The full text differs, and a text the bisection needed left the
-    /// input it differs on unchecked: there that text neither agrees nor
-    /// differs, whatever it did on other inputs, so no pass is named.
+    /// The full text differs, and a text the bisection needed left
+    /// unchecked an input a later text differs on: there that text neither
+    /// agrees nor differs, whatever it did on other inputs, so no pass is
+    /// named.
     Unplaced {
-        /// The input the full text differs on, and where.
+        /// The input a later text differs on, and where: the full text's,
+        /// or the narrowest differing text's.
         at: Counterexample,
         /// How many passes, from the start of [`Pass::ALL`], ran in the
         /// text that left the input unchecked.
@@ -476,12 +478,21 @@ pub(super) fn bisected(
         }
         Placed::At(good, before, narrowest) => (good, before, narrowest),
     };
+    let (n, at) = narrowest.unwrap_or((index, at));
+    if before.skipped.contains(&n) {
+        return Bisected::Unplaced {
+            at,
+            ran: good,
+            agreed: before.agreed,
+            unchecked: commonest(before.unchecked),
+        };
+    }
     let Some(&pass) = Pass::ALL.get(good) else {
         return Bisected::Unbisected(at);
     };
     Bisected::Broke {
         pass,
-        at: narrowest.unwrap_or(at),
+        at,
         before: Box::new(before),
         alone: Box::new(held(Passes::NONE.without(pass))),
         texts: (text_of(good), text_of(good + 1)),
@@ -498,9 +509,9 @@ pub(super) enum Placed {
     Unchecked(usize, Checked),
     /// How many passes run in the last text that agreed, the next pass
     /// being the first whose text differs; what that text's runs said; and
-    /// the counterexample of the narrowest text that differed, `None` when
-    /// the bisection probed none.
-    At(usize, Checked, Option<Counterexample>),
+    /// the narrowest text that differed, by the index of its input and its
+    /// counterexample, `None` when the bisection probed none.
+    At(usize, Checked, Option<(usize, Counterexample)>),
 }
 
 /// Bisects [`Pass::ALL`] for the first pass whose text differs, given that
@@ -535,7 +546,7 @@ pub(super) fn first_breaking(check: &impl Fn(Passes) -> Checked) -> Placed {
         let mid = good + (bad - good) / 2;
         let mut next = check(Passes::after(mid));
         match next.differs.take() {
-            Some((_, c)) => {
+            Some(c) => {
                 bad = mid;
                 at = Some(c);
             }
@@ -608,19 +619,27 @@ pub struct Checked {
     /// Why inputs were left unchecked before it differed, or in all, each
     /// reason with how many.
     pub unchecked: BTreeMap<String, usize>,
-    /// Whether a run left unchecked the input the text was held to, the
-    /// one another text differs on.
-    pub missed: bool,
+    /// The indices of the drawn inputs it left unchecked.
+    pub skipped: BTreeSet<usize>,
+    /// The index of the input the text is held to: the one another text
+    /// differs on.
+    pub held: Option<usize>,
 }
 
 impl Checked {
+    /// Tells whether a run left unchecked the input the text is held to.
+    #[must_use]
+    pub fn missed(&self) -> bool {
+        self.held.is_some_and(|h| self.skipped.contains(&h))
+    }
+
     /// What the runs say of the text: it differs when an input does, agrees
     /// when one agrees and none differs, and is unchecked when no input was
     /// checked, or not the one it was held to ([`Grade`]): agreement on
     /// other inputs says nothing of the one a text is asked about.
     #[must_use]
     pub fn grade(&self) -> Grade {
-        let agreed = if self.missed { 0 } else { self.agreed };
+        let agreed = if self.missed() { 0 } else { self.agreed };
         Grade::of(agreed, usize::from(self.differs.is_some()))
     }
 }
@@ -655,10 +674,14 @@ pub(super) fn first_difference(
     budget: usize,
     held: Option<usize>,
 ) -> Checked {
-    let mut out = Checked::default();
+    let mut out = Checked {
+        held,
+        ..Checked::default()
+    };
     let Some(text) = decompile_named(p, a, u, entry) else {
         let why = "the text does not decompile".to_owned();
         out.unchecked.insert(why, drawn.inputs.len());
+        out.skipped = (0..drawn.inputs.len()).collect();
         return out;
     };
     let shared = Shared {
@@ -680,7 +703,7 @@ pub(super) fn first_difference(
             Verdict::Agrees => out.agreed += 1,
             Verdict::Unchecked(_, why) => {
                 *out.unchecked.entry(why).or_default() += 1;
-                out.missed |= held == Some(n);
+                out.skipped.insert(n);
             }
         }
     }
@@ -1104,13 +1127,13 @@ mod tests {
         for held in [None, Some(even)] {
             let free = run(held);
             assert_eq!(
-                (free.grade(), free.missed),
+                (free.grade(), free.missed()),
                 (Grade::Agrees, false),
                 "{held:?}"
             );
         }
         let missed = run(Some(odd));
-        assert!(missed.agreed > 0 && missed.missed, "{missed:?}");
+        assert!(missed.agreed > 0 && missed.missed(), "{missed:?}");
         assert_eq!(missed.grade(), Grade::Unchecked);
     }
 }
