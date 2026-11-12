@@ -401,10 +401,12 @@ Reading `borer://layout/<fn>,apply=<Name>` plans the struct and names the
 A class borer recovered takes one field at a time, and keeps the rest of its
 layout as recovered: `set_type(name=<class>, fields=["0x270:m_pipeline"])`, or
 `set_type(address=<method>, var="field_0x270", name="m_pipeline")` at a method
-whose text prints the field. Every method that takes the class as `this` then
-prints `this->m_pipeline`, and `class_layout` marks the row `stated`. Fields
-merge by offset into a user struct too; `replace=true` drops the ones not
-restated.
+that reads the field through its own object. Every method that takes the class
+as `this` then prints `this->m_pipeline`, and `class_layout` marks the row
+`stated`. Fields merge by offset into a user struct too; `replace=true` drops
+the ones not restated, and with no fields every field stated of a class. A
+project's stated fields are held to the code again when it loads: those of a
+class the code contradicts are skipped, with the reason.
 
 ### One function, any inputs, no process
 
