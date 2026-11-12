@@ -22,7 +22,7 @@ pub(crate) mod file;
 pub(crate) mod pe;
 
 pub use arch::{Arch, Feature};
-pub use file::{Parent, read_regular, unusable_path};
+pub use file::{Parent, checked_metadata, open_regular, read_regular, unusable_path};
 use file::{Take, magic_name, parse_object, read_program_bytes};
 use pe::{
     DIRECTORY_ENTRY, SANE_MAX, arm64_pdata, delay_imports, directory_entry, disarm_exports,

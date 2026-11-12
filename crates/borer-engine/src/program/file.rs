@@ -239,11 +239,8 @@ fn read_program_file(path: &Path) -> anyhow::Result<Vec<u8>> {
 
 /// Reads a file whole when it is a regular one no larger than a cap.
 ///
-/// The path is judged before it is opened: on Linux and macOS opening a
-/// pipe blocks until a writer comes and a device such as `/dev/zero`
-/// reads forever, so what is not a regular file is refused by its
-/// metadata, and the open file is judged again in case the name changed
-/// in between. The read itself stops one byte past the cap.
+/// The file is opened by [`open_regular`]; the read itself stops one byte
+/// past the cap.
 ///
 /// # Arguments
 ///
@@ -256,10 +253,46 @@ fn read_program_file(path: &Path) -> anyhow::Result<Vec<u8>> {
 ///
 /// # Errors
 ///
+/// As [`open_regular`], and when the read fails or the file grew past
+/// `max` meanwhile.
+pub fn read_regular(path: &Path, max: u64) -> anyhow::Result<Vec<u8>> {
+    let file = open_regular(path, max)?;
+    let shown = crate::text::short_path(&path.display().to_string());
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(file, max.saturating_add(1)),
+        &mut bytes,
+    )
+    .with_context(|| format!("reading {shown}"))?;
+    if from_usize(bytes.len()) > max {
+        return Err(anyhow!("{shown} grew past the {max} bytes it may hold"));
+    }
+    Ok(bytes)
+}
+
+/// Opens a file when it is a regular one no larger than a cap.
+///
+/// The path is judged before it is opened: on Linux and macOS opening a
+/// pipe blocks until a writer comes and a device such as `/dev/zero`
+/// reads forever, so what is not a regular file is refused by its
+/// metadata, and the open file is judged again in case the name changed
+/// in between.
+///
+/// # Arguments
+///
+/// * `path` - The file.
+/// * `max` - Most bytes it may hold.
+///
+/// # Returns
+///
+/// The open file.
+///
+/// # Errors
+///
 /// When the path is unusable ([`unusable_path`]), is a directory, a
 /// device, a pipe or anything else that is not a regular file, holds more
-/// than `max` bytes, or does not read.
-pub fn read_regular(path: &Path, max: u64) -> anyhow::Result<Vec<u8>> {
+/// than `max` bytes, or does not open.
+pub fn open_regular(path: &Path, max: u64) -> anyhow::Result<std::fs::File> {
     if let Some(why) = unusable_path(path) {
         return Err(anyhow!("{why}"));
     }
@@ -282,23 +315,37 @@ pub fn read_regular(path: &Path, max: u64) -> anyhow::Result<Vec<u8>> {
             Ok(())
         }
     };
-    judge(&std::fs::metadata(path).with_context(|| format!("reading {shown}"))?)?;
+    let meta = std::fs::metadata(path).with_context(|| format!("reading {shown}"))?;
+    judge(&meta)?;
     let file = std::fs::File::open(path).with_context(|| format!("reading {shown}"))?;
     judge(
         &file
             .metadata()
             .with_context(|| format!("reading {shown}"))?,
     )?;
-    let mut bytes = Vec::new();
-    std::io::Read::read_to_end(
-        &mut std::io::Read::take(file, max.saturating_add(1)),
-        &mut bytes,
-    )
-    .with_context(|| format!("reading {shown}"))?;
-    if from_usize(bytes.len()) > max {
-        return Err(anyhow!("{shown} grew past the {max} bytes it may hold"));
+    Ok(file)
+}
+
+/// Returns a path's metadata, once [`unusable_path`] lets the path through:
+/// the one stat of a path borer is given that is not a read.
+///
+/// # Arguments
+///
+/// * `path` - The path.
+///
+/// # Returns
+///
+/// The metadata, or `None` when it does not read: nothing is there, or it
+/// cannot be reached.
+///
+/// # Errors
+///
+/// When the path is unusable, with the reason.
+pub fn checked_metadata(path: &Path) -> Result<Option<std::fs::Metadata>, String> {
+    if let Some(why) = unusable_path(path) {
+        return Err(why);
     }
-    Ok(bytes)
+    Ok(std::fs::metadata(path).ok())
 }
 
 /// How much of a file a `<file>@<offset>` load takes.

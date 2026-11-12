@@ -375,6 +375,27 @@ fn a_read_takes_only_a_regular_file_within_its_cap() {
     std::fs::remove_dir_all(&dir).expect("cleans up");
 }
 
+/// The checked open and stat refuse what the checked read refuses: a share
+/// before any call, a directory by its metadata; a path that names nothing
+/// stats as `None`, where the read is an error.
+///
+/// # Panics
+///
+/// When a share or a directory is let through, or a missing file errs.
+#[test]
+fn the_checked_open_and_stat_refuse_as_the_read_does() {
+    use super::{checked_metadata, open_regular};
+    let dir = std::env::temp_dir();
+    let isdir = open_regular(&dir, u64::MAX).expect_err("a directory");
+    assert!(isdir.to_string().contains("is a directory"), "{isdir}");
+    let missing = checked_metadata(&dir.join("borer-no-such-file")).map(|m| m.is_some());
+    assert_eq!(missing, Ok(false));
+    if cfg!(windows) {
+        let share = std::path::Path::new(r"\\host.invalid\share\x");
+        assert!(checked_metadata(share).is_err() && open_regular(share, u64::MAX).is_err());
+    }
+}
+
 /// A name out of the file cannot forge a row in a listing.
 ///
 /// Section names are eight raw bytes the file chooses freely, and every
