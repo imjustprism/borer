@@ -1844,7 +1844,8 @@ fn decoded<'a>(
 ///
 /// The block must end `test eax, eax` (or `cmp eax, 0`, either width)
 /// followed by `je target`, or by `jne` elsewhere falling through into
-/// `target`.
+/// `target`. A `loope` or `loopne` there is neither: it leaves on the
+/// count register too, with any rax.
 ///
 /// # Arguments
 ///
@@ -1870,7 +1871,7 @@ fn zero_edge(instrs: &[Instruction], target: u64) -> bool {
         }
         _ => false,
     };
-    if !tests_rax || jump.flow_control() != FlowControl::ConditionalBranch {
+    if !tests_rax || !jump.is_jcc_short_or_near() {
         return false;
     }
     match jump.condition_code() {

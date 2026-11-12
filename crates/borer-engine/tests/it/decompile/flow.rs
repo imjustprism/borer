@@ -1646,3 +1646,60 @@ fn the_lifter_agrees_with_the_emulator_at_a_branch_on_the_count_register() {
         }
     }
 }
+
+/// A `loopne` after a test of `rax` is no `jne`: what it falls into is
+/// entered with any `rax` once the count runs out.
+///
+/// `g` calls `f: mov eax,[rdx]; test eax,eax; loopne O; ret; O: mov eax,1;
+/// ret`, which returns the dword it loaded, zero or not, when `rcx` counts
+/// down to zero. Read by its condition code as a `jne`, the `loopne` made
+/// the first `ret` one reached with `rax` zero only, `f` a function that
+/// returns a byte, and `g`, which hands that result on, a `uint8_t`.
+#[test]
+fn a_loopne_after_a_zero_test_leaves_with_any_result() {
+    let code = [
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp,0x28
+        0xe8, 0x07, 0x00, 0x00, 0x00, // ASM: call 0x140001010
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp,0x28
+        0xc3, // ASM: ret
+        0xcc, 0xcc, // ASM: int3; int3
+        0x8b, 0x02, // ASM: mov eax,[rdx]
+        0x85, 0xc0, // ASM: test eax,eax
+        0xe0, 0x01, // ASM: loopne 0x140001017
+        0xc3, // ASM: ret
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax,1
+        0xc3, // ASM: ret
+    ];
+    let text = decompiled(&program64(&code), 0x1_4000_1000);
+    assert!(text.contains("\nreturn sub_140001010(a1, a2);\n"), "{text}");
+    assert!(!text.contains("uint8_t sub_140001000("), "{text}");
+}
+
+/// A `loope` and a `loopne` to swapped targets are not one test.
+///
+/// One path runs `cmp rax,5; loope T` and falls into `F`, the other `cmp
+/// rax,5; loopne F` and falls into `T`. With the count run out both fall
+/// through, to different blocks, so neither is the other with its sides
+/// swapped as a `je` and a `jne` are: paired by their condition codes, the
+/// second block left the text and both paths ran the first.
+#[test]
+fn a_loope_and_a_loopne_are_not_one_test() {
+    let code = [
+        0x85, 0xd2, // ASM: test edx,edx
+        0x75, 0x0c, // ASM: jne 0x140001010
+        0x48, 0x83, 0xf8, 0x05, // ASM: cmp rax,5
+        0xe1, 0x12, // ASM: loope 0x14000101c
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax,1
+        0xc3, // ASM: ret
+        0x49, 0x83, 0xc0, 0x01, // ASM: add r8,1
+        0xeb, 0x00, // ASM: jmp 0x140001016
+        0x48, 0x83, 0xf8, 0x05, // ASM: cmp rax,5
+        0xe0, 0xee, // ASM: loopne 0x14000100a
+        0xb8, 0x02, 0x00, 0x00, 0x00, // ASM: mov eax,2
+        0xc3, // ASM: ret
+    ];
+    let text = decompiled(&program64(&code), 0x1_4000_1000);
+    assert!(text.contains("/* asm: loope "), "{text}");
+    assert!(text.contains("/* asm: loopne "), "{text}");
+    assert!(text.contains("if (a2 != 0) {"), "{text}");
+}

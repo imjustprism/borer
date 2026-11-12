@@ -1573,10 +1573,12 @@ fn runs_forward(preds: &[Vec<usize>], from: usize, to: usize) -> bool {
 
 /// Tells whether two x86 blocks make the same test.
 ///
-/// They hold the same instructions up to a conditional branch at the end
-/// of each, the branches sending each outcome to the same address (the
-/// same condition and targets, or the opposite condition with the taken
-/// and fall-through sides swapped).
+/// They hold the same instructions up to a `jcc` at the end of each, the
+/// branches sending each outcome to the same address (the same condition
+/// and targets, or the opposite condition with the taken and fall-through
+/// sides swapped). A branch on the count register is no such test:
+/// `loope` and `loopne` carry opposite condition codes and are not each
+/// other's opposite, since both fall through when the count runs out.
 ///
 /// # Arguments
 ///
@@ -1586,11 +1588,7 @@ pub(super) fn same_test(a: &[Instruction], b: &[Instruction]) -> bool {
     let (Some((ja, ha)), Some((jb, hb))) = (a.split_last(), b.split_last()) else {
         return false;
     };
-    if ha != hb
-        || ja.flow_control() != FlowControl::ConditionalBranch
-        || jb.flow_control() != FlowControl::ConditionalBranch
-        || ja.condition_code() == ConditionCode::None
-    {
+    if ha != hb || !ja.is_jcc_short_or_near() || !jb.is_jcc_short_or_near() {
         return false;
     }
     let (ta, fa) = (ja.near_branch_target(), ja.next_ip());
