@@ -238,9 +238,13 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
     /// edge: the variable holds the constant in the bits the predecessor's
     /// branch compares ([`Function::compared`]) and a value of the trial's
     /// above them, so an equality that claims more bits than the branch
-    /// compared is one this state refutes. Only the equality is kept of
-    /// such a state ([`Function::successors`]); the predecessor's other
-    /// claims are the ones its own states compare.
+    /// compared is one this state refutes. Only the equality's row is kept
+    /// of such a state ([`Function::successors`]); the predecessor's other
+    /// claims are the ones its own states report. A run that differs from
+    /// the predecessor's text in one of them bears nothing out all the
+    /// same: the equality it ends with is one of a text the machine did
+    /// not follow. A lane's difference is none, here as in the
+    /// predecessor's own states.
     ///
     /// # Arguments
     ///
@@ -252,8 +256,8 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
     /// `true` for a block that starts under no equality, and for one whose
     /// equality the machine was seen to enter the block under; `false`
     /// where the predecessor cannot be tried, the machine does not take
-    /// the edge, the variable cannot be read there, or it holds another
-    /// value.
+    /// the edge, the variable cannot be read there, it holds another
+    /// value, or the run differs from the predecessor's text elsewhere.
     pub(super) fn borne(&self, s: usize, out: &mut Replayed) -> bool {
         let Some((k, c, _)) = self.w.assumes.get(s).copied().flatten() else {
             return true;
@@ -285,9 +289,10 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             &mut found,
         );
         let entered = ran.is_ok_and(|(_, taken)| self.enters(end, taken, s));
-        let mut held = entered && !found.unreadable.contains_key(&Claim::Branch);
+        let held = entered
+            && !found.unreadable.contains_key(&Claim::Branch)
+            && found.disagreements.iter().all(|d| d.lane);
         for d in found.disagreements.into_iter().filter(|d| d.expr == GIVEN) {
-            held = false;
             if !told(out, &d.place) {
                 out.disagreements.push(d);
             }

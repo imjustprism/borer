@@ -8,13 +8,13 @@ use super::super::tests::{agrees, claims, replayed_under, replayed_with};
 use super::super::{Claim, Replayed, Witness, replay_tsv};
 use super::{ASSUMED, start_term};
 use crate::analysis::decompile::decompile;
-use crate::analysis::decompile::expr::{Expr, Key};
+use crate::analysis::decompile::expr::{Expr, Key, Op};
 use crate::analysis::decompile::lift::EffectKind;
 use crate::analysis::decompile::liveness::WHOLE;
 use crate::analysis::{Analysis, Overlay};
 use crate::isa::x86::Register;
 use crate::num::lo32;
-use crate::program::{Arch, Program};
+use crate::program::{Arch, Program, Section};
 
 /// A loop that counts `r9` down to zero, summing what `rdx` walks.
 const COUNTED: [u8; 18] = [
@@ -59,6 +59,22 @@ fn rows(r: &Replayed) -> Vec<(Claim, u64, u64, u64, u64)> {
 /// that no run bore out.
 fn unborne(r: &Replayed) -> usize {
     r.skipped.get(ASSUMED).copied().unwrap_or(0)
+}
+
+/// An image of code at 0x1000 and a page of zeroed data at 0x2000.
+///
+/// # Arguments
+///
+/// * `code` - The code.
+fn with_data(code: &[u8]) -> Program {
+    let mut bytes = vec![0xcc; 0x1000];
+    bytes[..code.len()].copy_from_slice(code);
+    bytes.resize(0x2000, 0);
+    let sections = vec![
+        Section::mapped(".text", 0x1000, 0, 0x1000, false, true),
+        Section::mapped(".data", 0x2000, 0x1000, 0x1000, true, false),
+    ];
+    Program::raw(bytes, Arch::X86_64, 0, Some(0x1000), sections)
 }
 
 /// The equality a block is said to start under is checked where the
@@ -298,7 +314,6 @@ fn an_equality_of_a_value_the_branch_did_not_compare_is_flagged() {
 /// nothing bears the equality out.
 #[test]
 fn an_equality_of_a_global_is_tried_from_memory() {
-    use crate::program::Section;
     let code = [
         0x83, 0x3d, 0xf9, 0x0f, 0x00, 0x00, 0x05, // ASM: cmp dword [rip+0xff9], 5
         0x75, 0x07, // ASM: jne 0x1010
@@ -307,14 +322,7 @@ fn an_equality_of_a_global_is_tried_from_memory() {
         0x31, 0xc0, // ASM: xor eax, eax
         0xc3, // ASM: ret
     ];
-    let mut bytes = vec![0xcc; 0x1000];
-    bytes[..code.len()].copy_from_slice(&code);
-    bytes.resize(0x2000, 0);
-    let sections = vec![
-        Section::mapped(".text", 0x1000, 0, 0x1000, false, true),
-        Section::mapped(".data", 0x2000, 0x1000, 0x1000, true, false),
-    ];
-    let p = Program::raw(bytes, Arch::X86_64, 0, Some(0x1000), sections);
+    let p = with_data(&code);
     agrees(&p, 0x1000);
     let g = Key::Global(0x2000, 32);
     let mut given = Vec::new();
@@ -324,6 +332,50 @@ fn an_equality_of_a_global_is_tried_from_memory() {
     let r = replayed_under(&p, 0x1000, 1, |_| {}, seven);
     assert_eq!(rows(&r), [], "{}", replay_tsv(&r));
     assert_eq!((r.checked, unborne(&r)), (2, 1), "{}", replay_tsv(&r));
+}
+
+/// A run the text of the branch's block does not follow bears no equality
+/// out.
+///
+/// `mov [h],rcx; cmp dword [g],5; jne X; mov eax,[g]; ret`, with the store
+/// made to store 0 in the text. The run that takes the branch with `g` 5
+/// leaves in `h` what the text does not, so the equality the next block
+/// starts under is one of a text the machine did not follow: the block is
+/// left unchecked. The store itself is flagged from the states its own
+/// block is tried from. Made to store the low half of `rcx`, the text
+/// differs in a lane only, which is no disagreement in any state: the
+/// block is checked.
+#[test]
+fn an_equality_is_not_borne_out_by_a_run_the_text_gets_wrong() {
+    let code = [
+        0x48, 0x89, 0x0d, 0x01, 0x10, 0x00, 0x00, // ASM: mov [rip+0x1001], rcx
+        0x83, 0x3d, 0xf2, 0x0f, 0x00, 0x00, 0x05, // ASM: cmp dword [rip+0xff2], 5
+        0x75, 0x07, // ASM: jne 0x1017
+        0x8b, 0x05, 0xea, 0x0f, 0x00, 0x00, // ASM: mov eax, [rip+0xfea]
+        0xc3, // ASM: ret
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xc3, // ASM: ret
+    ];
+    let p = with_data(&code);
+    agrees(&p, 0x1000);
+    let zero = |e: &mut crate::analysis::decompile::lift::Effect| {
+        if let EffectKind::Store(s) = &mut e.kind {
+            s.2 = Expr::Const(0);
+        }
+    };
+    let r = replayed_with(&p, 0x1000, 1, zero);
+    assert_eq!(claims(&r), [Claim::Memory], "{}", replay_tsv(&r));
+    assert_eq!((r.checked, unborne(&r)), (2, 1), "{}", replay_tsv(&r));
+    let half = |e: &mut crate::analysis::decompile::lift::Effect| {
+        if let EffectKind::Store(s) = &mut e.kind {
+            let low = Expr::Const(0xffff_ffff);
+            s.2 = Expr::Bin(Op::And, Box::new(s.2.clone()), Box::new(low));
+        }
+    };
+    let r = replayed_with(&p, 0x1000, 1, half);
+    let lanes: Vec<_> = r.disagreements.iter().map(|d| (d.claim, d.lane)).collect();
+    assert_eq!(lanes, [(Claim::Memory, true)], "{}", replay_tsv(&r));
+    assert_eq!((r.checked, unborne(&r)), (3, 0), "{}", replay_tsv(&r));
 }
 
 /// An equality of the low half of a slot leaves the slot's upper half to
