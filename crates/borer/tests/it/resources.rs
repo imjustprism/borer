@@ -82,6 +82,7 @@ fn every_template_example_reads() {
         ("script", "scan.rhai"),
         ("anchors", "client.anchors"),
         ("changes", "before.snapshot"),
+        ("yara", "nothing to match on"),
     ];
     let file = std::env::temp_dir().join(format!("borer_examples_{}.exe", std::process::id()));
     std::fs::write(&file, tiny_pe()).expect("the fixture is writable");
