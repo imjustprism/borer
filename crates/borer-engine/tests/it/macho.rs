@@ -520,3 +520,80 @@ fn a_section_relocation_table_ends_a_macho_image() {
     let p = load(&bytes, "relocations-appended");
     assert_eq!(p.headers.overlay, [(0x1010, 0x20)]);
 }
+
+/// Pointer sections sharing `reserved1 = 0` walk at most `nindirectsyms`
+/// slots in total, and a repeated `nlist` index is named at most 16 times.
+#[test]
+fn indirect_pointer_sections_cap_walked_slots_and_per_nlist_copies() {
+    use crate::machogen::{self, CODE, RW, RX, Sect, Seg, X86_64};
+    /// Lazy-pointer sections sharing `reserved1 = 0`.
+    const SECTIONS: usize = 16;
+    /// Slots per lazy-pointer section, and entries in the indirect table.
+    const SLOTS: usize = 256;
+    let text = Seg {
+        name: "__TEXT",
+        vmaddr: TEXT,
+        fileoff: 0,
+        bytes: vec![0xc3; 0x1000],
+        prot: RX,
+        sections: vec![Sect {
+            name: "__text",
+            addr: TEXT + 0x900,
+            size: 0x100,
+            flags: CODE,
+        }],
+    };
+    let ptr_sects: Vec<Sect> = (0..SECTIONS)
+        .map(|k| Sect {
+            name: "__la_symbol_ptr",
+            addr: TEXT + 0x1000 + from_usize(k * SLOTS * 8),
+            size: from_usize(SLOTS * 8),
+            flags: 0x7,
+        })
+        .collect();
+    let data = Seg {
+        name: "__DATA",
+        vmaddr: TEXT + 0x1000,
+        fileoff: 0x1000,
+        bytes: vec![0u8; SECTIONS * SLOTS * 8],
+        prot: RW,
+        sections: ptr_sects,
+    };
+    let symoff = 0x9000u32;
+    let stroff = symoff + lo32(from_usize(SLOTS * 16));
+    let indoff = stroff + 4;
+    let n = lo32(from_usize(SLOTS));
+    let words = |all: &[u32]| -> Vec<u8> { all.iter().flat_map(|w| w.to_le_bytes()).collect() };
+    let symtab = words(&[0x2, 24, symoff, n, stroff, 4]);
+    let mut dysym = [0u32; 20];
+    dysym[..2].copy_from_slice(&[0xb, 80]);
+    dysym[14..16].copy_from_slice(&[indoff, n]);
+    let mut bytes = machogen::build(X86_64, 0, &[text, data], &[symtab, words(&dysym)]);
+    for _ in 0..SLOTS {
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&[0x01, 0, 0, 0]);
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+    }
+    bytes.extend_from_slice(b"\0_a\0");
+    let ind_at = usize::try_from(indoff).unwrap_or(0);
+    for k in 0..n {
+        bytes.extend_from_slice(&k.to_le_bytes());
+    }
+    let distinct = load(&bytes, "indirect-total-cap");
+    let imports: Vec<&str> = distinct
+        .symbols
+        .iter()
+        .filter(|s| s.kind == SymbolKind::Import)
+        .map(|s| s.name.as_str())
+        .collect();
+    assert_eq!(imports.len(), SLOTS);
+    assert!(imports.iter().all(|&s| s == "a"));
+    bytes[ind_at..ind_at + SLOTS * 4].fill(0);
+    let shared = load(&bytes, "indirect-per-nlist-cap");
+    let shared_count = shared
+        .symbols
+        .iter()
+        .filter(|s| s.kind == SymbolKind::Import)
+        .count();
+    assert_eq!(shared_count, 16);
+}

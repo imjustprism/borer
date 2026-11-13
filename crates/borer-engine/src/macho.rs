@@ -558,6 +558,98 @@ fn plain(name: &str) -> &str {
 /// header states.
 const NLIST_MIN: usize = 12;
 
+/// Names a Mach-O's pointer-section slots through its indirect symbol table,
+/// walking at most the indirect table's entry count across all sections and
+/// naming each `nlist` index at most [`SLOTS_PER_IMPORT`] times.
+///
+/// # Arguments
+///
+/// * `file` - The whole file.
+/// * `m` - The parsed Mach-O image.
+/// * `base` - Byte offset of the Mach-O slice within `file`.
+/// * `word` - Pointer width in bytes (`4` or `8`).
+/// * `raw` - Raw section headers in load-command order.
+/// * `seen` - Already-recorded `(address, plain_name)` pairs.
+/// * `names` - Per-load name budget.
+///
+/// # Returns
+///
+/// Import slot symbols in section and slot order.
+fn indirect_imports<'a, 's>(
+    file: &'a [u8],
+    m: &MachO<'a>,
+    base: usize,
+    word: u64,
+    raw: &[RawSection],
+    seen: &mut BTreeSet<(u64, &'s str)>,
+    names: &mut Names,
+) -> Vec<Symbol>
+where
+    'a: 's,
+{
+    let mut out = Vec::new();
+    let Some(table) = &m.symbols else {
+        return out;
+    };
+    let Some((off, stated)) = m.load_commands.iter().find_map(|lc| match &lc.command {
+        CommandVariant::Dysymtab(d) => Some((
+            usize::try_from(d.indirectsymoff).ok()?,
+            usize::try_from(d.nindirectsyms).unwrap_or(usize::MAX),
+        )),
+        _ => None,
+    }) else {
+        return out;
+    };
+    let Some(table_at) = base.checked_add(off) else {
+        return out;
+    };
+    let count = stated.min(file.len().saturating_sub(table_at) / 4);
+    let mut slots_left = count;
+    let mut per_sym: BTreeMap<u32, usize> = BTreeMap::new();
+    for s in raw
+        .iter()
+        .filter(|s| matches!(s.flags & SECTION_TYPE, NON_LAZY_POINTERS | LAZY_POINTERS))
+    {
+        if slots_left == 0 {
+            break;
+        }
+        let slots = usize::try_from(s.size / word).unwrap_or(0).min(slots_left);
+        for i in 0..slots {
+            let Some(index) = usize::try_from(s.reserved1)
+                .ok()
+                .and_then(|r| r.checked_add(i))
+                .filter(|&k| k < count)
+                .and_then(|k| table_at.checked_add(k.checked_mul(4)?))
+                .and_then(|p| u32_le(file, p))
+            else {
+                break;
+            };
+            slots_left -= 1;
+            if index & INDIRECT_NONE != 0 {
+                continue;
+            }
+            let used = per_sym.entry(index).or_default();
+            if *used >= SLOTS_PER_IMPORT {
+                continue;
+            }
+            *used += 1;
+            let Ok((name, _)) = table.get(usize::try_from(index).unwrap_or(usize::MAX)) else {
+                continue;
+            };
+            let slot = s.addr.wrapping_add(from_usize(i) * word);
+            let shown = plain(name);
+            if !name.is_empty() && seen.insert((slot, shown)) {
+                out.push(Symbol {
+                    name: names.take(shown),
+                    addr: slot,
+                    kind: SymbolKind::Import,
+                });
+            }
+        }
+    }
+    out
+}
+
 /// Reads one image.
 ///
 /// # Arguments
@@ -566,7 +658,7 @@ const NLIST_MIN: usize = 12;
 /// * `m` - The image.
 /// * `base` - Where the image begins in the file: zero for a thin file.
 /// * `names` - The load's name budget.
-fn image(file: &[u8], m: &MachO<'_>, base: usize, names: &mut Names) -> Loaded {
+fn image<'a>(file: &'a [u8], m: &MachO<'a>, base: usize, names: &mut Names) -> Loaded {
     let arch = match m.header.cputype {
         CPU_X86_64 => Arch::X86_64,
         CPU_X86 => Arch::X86,
@@ -634,50 +726,9 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize, names: &mut Names) -> Loaded {
                 });
             }
         }
-        let indirect = m.load_commands.iter().find_map(|lc| match &lc.command {
-            CommandVariant::Dysymtab(d) => Some((
-                usize::try_from(d.indirectsymoff).unwrap_or(usize::MAX),
-                usize::try_from(d.nindirectsyms).unwrap_or(usize::MAX),
-            )),
-            _ => None,
-        });
-        if let Some((off, count)) = indirect {
-            let at = |i: usize| -> Option<u32> {
-                (i < count)
-                    .then(|| u32_le(file, base.checked_add(off)?.checked_add(i.checked_mul(4)?)?))?
-            };
-            for s in raw
-                .iter()
-                .filter(|s| matches!(s.flags & SECTION_TYPE, NON_LAZY_POINTERS | LAZY_POINTERS))
-            {
-                let slots = usize::try_from(s.size / word).unwrap_or(0).min(1 << 20);
-                for i in 0..slots {
-                    let Some(index) = usize::try_from(s.reserved1)
-                        .unwrap_or(usize::MAX)
-                        .checked_add(i)
-                        .and_then(at)
-                    else {
-                        break;
-                    };
-                    if index & INDIRECT_NONE != 0 {
-                        continue;
-                    }
-                    let Ok((name, _)) = table.get(usize::try_from(index).unwrap_or(usize::MAX))
-                    else {
-                        continue;
-                    };
-                    let slot = s.addr.wrapping_add(from_usize(i) * word);
-                    let shown = plain(name);
-                    if !name.is_empty() && seen.insert((slot, shown)) {
-                        symbols.push(Symbol {
-                            name: names.take(shown),
-                            addr: slot,
-                            kind: SymbolKind::Import,
-                        });
-                    }
-                }
-            }
-        }
+        symbols.extend(indirect_imports(
+            file, m, base, word, &raw, &mut seen, names,
+        ));
     }
 
     let mut named_slots: BTreeMap<usize, usize> = BTreeMap::new();
