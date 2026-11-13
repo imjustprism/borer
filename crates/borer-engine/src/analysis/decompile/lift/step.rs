@@ -750,7 +750,7 @@ impl Exec<'_, '_> {
                         .contains_key(&self.canon(instr.op1_register()))
                 {
                     if let Some(sp) = self.env.sp {
-                        self.env.sp = Some(sp.wrapping_sub_unsigned(c));
+                        self.env.sp = super::super::frame::reach(sp.checked_sub_unsigned(c));
                     }
                     return;
                 }
@@ -1212,9 +1212,8 @@ impl Exec<'_, '_> {
             }
             Mnemonic::Push if let Some((word, ty)) = stack_value(instr) => {
                 let v = self.val(instr, 0);
+                self.env.sp = self.env.sp.and_then(|sp| sp.checked_sub(word));
                 if let Some(sp) = self.env.sp {
-                    let sp = sp - word;
-                    self.env.sp = Some(sp);
                     if self.makes_room(&v) {
                         self.env.vals.remove(&Key::Slot(sp));
                         self.env.slot_bits.remove(&sp);
@@ -1230,7 +1229,7 @@ impl Exec<'_, '_> {
             Mnemonic::Pop if let Some((word, ty)) = stack_value(instr) => match self.env.sp {
                 Some(sp) => {
                     let v = self.slot_read(sp, ty);
-                    self.env.sp = Some(sp + word);
+                    self.env.sp = sp.checked_add(word);
                     self.args_pushed = self.args_pushed.saturating_sub(1);
                     self.write_op0(instr, v);
                 }
@@ -1256,7 +1255,7 @@ impl Exec<'_, '_> {
                 match self.env.sp {
                     Some(sp) => {
                         let v = self.slot_read(sp, ty);
-                        self.env.sp = Some(sp + word);
+                        self.env.sp = sp.checked_add(word);
                         self.reg_write(sized_register(rbp, ty.bits()), v);
                     }
                     None if self.dead_reg(self.canon(rbp)) => {

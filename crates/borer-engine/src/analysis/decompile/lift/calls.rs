@@ -1502,16 +1502,14 @@ impl Exec<'_, '_> {
                     pushed.push(u64::from(crate::num::lo32(i.immediate(0))));
                 }
             }
-            for (k, v) in (0i64..).zip(pushed.into_iter().rev()) {
-                let at = sp + k * word;
+            let slots = (0i64..).map_while(|k| sp.checked_add(k.checked_mul(word)?));
+            for (at, v) in slots.zip(pushed.into_iter().rev()) {
                 self.env.vals.insert(Key::Slot(at), Expr::Const(v));
                 self.env.slot_bits.insert(at, 32);
                 seeded.push(at);
             }
         }
-        if let Some(sp) = self.env.sp {
-            self.env.sp = Some(sp - word);
-        }
+        self.env.sp = self.env.sp.and_then(|sp| sp.checked_sub(word));
         let mut va = block.start;
         while va < block.end {
             let Some(i) = self.ctx.decode(va) else {
@@ -1522,7 +1520,7 @@ impl Exec<'_, '_> {
                 if let Some(sp) = self.env.sp {
                     self.env.vals.remove(&Key::Slot(sp));
                     self.env.slot_bits.remove(&sp);
-                    self.env.sp = Some(sp + word);
+                    self.env.sp = sp.checked_add(word);
                 }
                 break;
             }
@@ -2372,13 +2370,13 @@ impl Exec<'_, '_> {
                 .slot_bits
                 .keys()
                 .copied()
-                .filter(|o| *o >= sp && *o < sp + popped)
+                .filter(|o| *o >= sp && *o < sp.saturating_add(popped))
                 .collect();
             for o in gone {
                 self.env.vals.remove(&Key::Slot(o));
                 self.env.slot_bits.remove(&o);
             }
-            self.env.sp = Some(sp + popped);
+            self.env.sp = sp.checked_add(popped);
         }
     }
 

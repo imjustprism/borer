@@ -36,7 +36,7 @@ crates/borer-engine/src/analysis/decompile/interp.rs::solve_for#1	177
 crates/borer-engine/src/analysis/decompile/interp.rs::unset_reads#1	140
 crates/borer-engine/src/analysis/decompile/ladder.rs::try_ladder#1	103
 crates/borer-engine/src/analysis/decompile/lanes.rs::uses#1	167
-crates/borer-engine/src/analysis/decompile/lift/calls.rs	2059
+crates/borer-engine/src/analysis/decompile/lift/calls.rs	2057
 crates/borer-engine/src/analysis/decompile/lift/calls.rs::args_for#1	156
 crates/borer-engine/src/analysis/decompile/lift/calls.rs::call#1	519
 crates/borer-engine/src/analysis/decompile/lift/effects.rs::leading_reads#1	126
@@ -44,8 +44,8 @@ crates/borer-engine/src/analysis/decompile/lift/float.rs::x87#1	257
 crates/borer-engine/src/analysis/decompile/lift/homes.rs::step#1	101
 crates/borer-engine/src/analysis/decompile/lift/mod.rs::exec_block#1	138
 crates/borer-engine/src/analysis/decompile/lift/pack.rs::effects_unpack_as_they_were#1	120
-crates/borer-engine/src/analysis/decompile/lift/step.rs	1675
-crates/borer-engine/src/analysis/decompile/lift/step.rs::step#1	1138
+crates/borer-engine/src/analysis/decompile/lift/step.rs	1674
+crates/borer-engine/src/analysis/decompile/lift/step.rs::step#1	1137
 crates/borer-engine/src/analysis/decompile/lift_a32/float.rs::vfp#1	230
 crates/borer-engine/src/analysis/decompile/lift_a32/mem.rs::memory#1	150
 crates/borer-engine/src/analysis/decompile/lift_a32/step.rs::step#1	255

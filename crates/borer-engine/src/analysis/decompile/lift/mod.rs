@@ -1331,8 +1331,8 @@ fn is_register_cmp(i: &Instruction) -> bool {
 /// * `b` - Offset of the second access.
 /// * `b_bits` - Its width in bits.
 fn ranges_overlap(a: i64, a_bits: u8, b: i64, b_bits: u8) -> bool {
-    let a_end = a + i64::from(a_bits / 8).max(1);
-    let b_end = b + i64::from(b_bits / 8).max(1);
+    let a_end = a.saturating_add(i64::from(a_bits / 8).max(1));
+    let b_end = b.saturating_add(i64::from(b_bits / 8).max(1));
     a < b_end && b < a_end
 }
 

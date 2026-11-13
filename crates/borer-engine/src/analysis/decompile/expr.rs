@@ -3111,10 +3111,10 @@ pub(super) fn fold(op: Op, l: Expr, r: Expr, bits: u8) -> Expr {
         }
         (Op::And, _, Expr::Const(c)) => return mask(l, *c),
         (Op::Add, Expr::Sp(k), Expr::Const(c)) | (Op::Add, Expr::Const(c), Expr::Sp(k)) => {
-            return Expr::Sp(k.wrapping_add(sext(*c, bits).cast_signed()));
+            return super::frame::moved(k.checked_add(sext(*c, bits).cast_signed()), op, l, r);
         }
         (Op::Sub, Expr::Sp(k), Expr::Const(c)) => {
-            return Expr::Sp(k.wrapping_sub(sext(*c, bits).cast_signed()));
+            return super::frame::moved(k.checked_sub(sext(*c, bits).cast_signed()), op, l, r);
         }
         (Op::Add, Expr::Bin(Op::Add, x, c1), Expr::Const(c2)) => {
             if let Expr::Const(c1) = **c1 {

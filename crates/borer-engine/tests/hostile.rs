@@ -7,8 +7,9 @@
 //! analysis began; an export directory landing on garbage sized three
 //! tables by its counts; a section whose memory size was two gigabytes was
 //! thrown away with the code it held. Each case here is the header that
-//! did it, rebuilt from scratch, with the bound it must now hold. A
-//! hand-edited project file is held the same way ([`projects`]).
+//! did it, rebuilt from scratch, with the bound it must now hold. Hand-edited
+//! project files ([`projects`]) and code moving the stack pointer to the far
+//! end of the 64-bit range ([`lift`]) are held the same way.
 
 #![expect(
     clippy::missing_panics_doc,
@@ -24,19 +25,15 @@ use borer_engine::program::{FileOff, Program, Section, SymbolKind};
 use borer_engine::{analysis::Analysis, num::from_usize};
 
 #[path = "common/elfgen.rs"]
-#[expect(
-    dead_code,
-    reason = "hostile builds one kind of ELF; the writer's other helpers serve the integration tests"
-)]
+#[expect(dead_code, reason = "writer helpers serve integration tests")]
 mod elfgen;
 
 #[path = "common/machogen.rs"]
-#[expect(
-    dead_code,
-    reason = "hostile builds one Mach-O; the writer's other helpers serve the integration tests"
-)]
+#[expect(dead_code, reason = "writer helpers serve integration tests")]
 mod machogen;
 
+#[path = "hostile/lift.rs"]
+mod lift;
 #[path = "hostile/projects.rs"]
 mod projects;
 

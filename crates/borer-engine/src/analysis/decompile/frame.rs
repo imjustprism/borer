@@ -27,7 +27,44 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::choice::{Choices, Site};
-use super::expr::{Expr, Ty};
+use super::expr::{Expr, Op, Ty};
+
+/// Farthest a stack offset folds from the entry's, in bytes. A file can
+/// move the stack pointer by any amount (`add rsp, rax` with `rax` loaded
+/// from it): past this the sum stays unfolded ([`moved`]), and the
+/// `__chkstk` probe's move leaves the offset untracked ([`reach`]). A push,
+/// a pop, a `leave` and a callee's pop move a tracked offset without this
+/// check, by a word or by the callee's arguments, so an offset passes the
+/// reach only by such small steps and every sum over one (a word, a
+/// slot's width, a call's argument area) stays far inside `i64`.
+const REACH: u64 = 1 << 40;
+
+/// Returns a stack offset the lifter tracks: `k` when it is within
+/// [`REACH`] of the entry's.
+///
+/// # Arguments
+///
+/// * `k` - The offset, `None` where computing it overflowed.
+pub(super) fn reach(k: Option<i64>) -> Option<i64> {
+    k.filter(|k| k.unsigned_abs() <= REACH)
+}
+
+/// Returns the address a stack offset moved by a constant folds to: the
+/// offset ([`Expr::Sp`]) within [`REACH`], else the sum `l op r` unfolded,
+/// which names no slot.
+///
+/// # Arguments
+///
+/// * `k` - The moved offset, `None` where the move overflowed.
+/// * `op` - The move, `Add` or `Sub`.
+/// * `l` - Its left operand.
+/// * `r` - Its right operand.
+pub(super) fn moved(k: Option<i64>, op: Op, l: Expr, r: Expr) -> Expr {
+    match reach(k) {
+        Some(k) => Expr::Sp(k),
+        None => Expr::Bin(op, Box::new(l), Box::new(r)),
+    }
+}
 
 /// How one access uses a slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
