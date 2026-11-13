@@ -207,20 +207,28 @@ fn blame_report(name: &str, entry: u64, count: usize, budget: usize, found: &Bis
             ran,
             agreed,
             unchecked,
+            later,
         } => {
             let which = match ran {
                 0 => "every cleanup pass left out".to_owned(),
                 n => format!("only its first {n} cleanup passes run"),
             };
+            let whose = later.as_ref().map_or_else(
+                || "it".to_owned(),
+                |(k, _)| format!("the text with its first {k} cleanup passes run"),
+            );
             let left = match agreed {
                 0 => "every input".to_owned(),
-                n => format!("the input it differs on (agreeing on {n} of {count})"),
+                n => format!("the input {whose} differs on (agreeing on {n} of {count})"),
             };
             let _ = writeln!(
                 out,
                 "unplaced\tthe text differs, and with {which} it left {left} unchecked, which is neither agreement nor a difference, so no pass is named"
             );
             let _ = writeln!(out, "differs\t{}\t{}\t{}", at.input, at.line, at.why);
+            if let Some((k, c)) = later {
+                let _ = writeln!(out, "narrowest\t{k}\t{}\t{}\t{}", c.input, c.line, c.why);
+            }
             unchecked_rows(&mut out, unchecked);
         }
         Bisected::Broke {
@@ -352,6 +360,7 @@ mod tests {
             ran,
             agreed: 0,
             unchecked: vec![("it spins".to_owned(), 8)],
+            later: None,
         };
         let spun = ran(0, 8, false);
         assert_eq!(found(0, 10, &spun), unplaced(0));
@@ -382,6 +391,7 @@ mod tests {
             ran,
             agreed: 0,
             unchecked: vec![("it spins".to_owned(), 8)],
+            later: None,
         };
         let bare = blame_report("f", 0x1000, 8, 100, &found(0));
         assert!(
@@ -470,6 +480,7 @@ mod tests {
             ran: 32,
             agreed: 1,
             unchecked: vec![("it spins".to_owned(), 63)],
+            later: None,
         };
         assert_eq!(placed, unplaced);
         let text = blame_report("f", 0x1000, 64, 100, &placed);
@@ -501,11 +512,14 @@ mod tests {
     /// agree on it but leave input 3 unchecked, and those with 40 or more
     /// differ first on input 3. Held to input 5 alone, the search blamed
     /// the fortieth pass on input 3, which the text before it never
-    /// checked; the answer is the unplaced form with that text's counts.
+    /// checked; the answer is the unplaced form with that text's counts,
+    /// the full text's own difference, and the fortieth text's on its own
+    /// row, where it had printed the fortieth text's as the function's.
     ///
     /// # Panics
     ///
-    /// When a pass is named.
+    /// When a pass is named, or another text's difference is shown as the
+    /// function's.
     #[test]
     fn a_pass_is_placed_only_on_an_input_the_text_before_it_checked() {
         let three = Counterexample {
@@ -529,11 +543,20 @@ mod tests {
             },
             &|k| format!("{k} passes"),
         );
-        let Bisected::Unplaced { at, agreed, .. } = &found else {
+        let Bisected::Unplaced {
+            at: own,
+            agreed,
+            later,
+            ..
+        } = &found
+        else {
             panic!("{found:?}");
         };
-        assert_eq!((at, *agreed), (&three, 7));
+        assert_eq!((own, *agreed), (&at(), 7));
+        assert_eq!(later, &Some((40, three)));
         let text = blame_report("f", 0x1000, 8, 100, &found);
+        assert!(text.contains("\ndiffers\t5\t"), "{text}");
+        assert!(text.contains("\nnarrowest\t40\t3\t"), "{text}");
         assert!(
             !text.contains(
                 "

@@ -346,8 +346,7 @@ pub enum Bisected {
     /// agrees nor differs, whatever it did on other inputs, so no pass is
     /// named.
     Unplaced {
-        /// The input a later text differs on, and where: the full text's,
-        /// or the narrowest differing text's.
+        /// The input the full text differs on, and where.
         at: Counterexample,
         /// How many passes, from the start of [`Pass::ALL`], ran in the
         /// text that left the input unchecked.
@@ -357,6 +356,10 @@ pub enum Bisected {
         /// Why its inputs went unchecked, each reason with how many
         /// inputs, the commonest first.
         unchecked: Vec<(String, usize)>,
+        /// The text with one more pass, when the input left unchecked is the
+        /// one it differs on rather than the full text's: how many passes
+        /// ran in it, the input and where.
+        later: Option<(usize, Counterexample)>,
     },
     /// The text with the passes before `pass` agrees and the text with
     /// `pass` too differs.
@@ -470,10 +473,11 @@ pub(super) fn bisected(
         Placed::Unchecked(ran, probe, later) => {
             let (agreed, unchecked) = (probe.agreed, commonest(probe.unchecked));
             return Bisected::Unplaced {
-                at: later.map_or(at, |(_, c)| c),
+                at,
                 ran,
                 agreed,
                 unchecked,
+                later: later.map(|(_, c)| (ran + 1, c)),
             };
         }
         Placed::At(good, before, narrowest) => (good, before, narrowest),
