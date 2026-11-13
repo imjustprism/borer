@@ -280,14 +280,49 @@ fn evidence(c: Checked, refuted: Option<Counterexample>, live: bool) -> Evidence
 /// What the search ended with ([`Repair`]).
 #[must_use]
 pub fn repair_iso(p: &Program, a: &Analysis, o: &Overlay, entry: u64, budget: Budget) -> Repair {
-    let refuted = replay_refutes(p, a, o, entry);
+    let refutes = |u: &Overlay| replay_refutes(p, a, u, entry);
+    let refuted = refutes(o);
     let drawn = draw(p, a, o, entry, budget.inputs, budget.seed).ok();
-    let checks = Cell::new(1usize);
     let iso = |u: &Overlay, held| {
         drawn.as_ref().map_or_else(Checked::default, |d| {
             first_difference(p, a, u, entry, d, budget.steps, held)
         })
     };
+    let points = || choice_points(p, a, o, entry);
+    let frame = crate::analysis::protos::frame_base(p);
+    searched(o, refuted, &iso, &refutes, &points, frame, budget.moves)
+}
+
+/// Searches a function's renderings as [`repair_iso`] does, over any check
+/// of a rendering.
+///
+/// # Arguments
+///
+/// * `o` - Where the search starts.
+/// * `refuted` - The statement the replay of the text as `o` builds it
+///   does not bear out, if any.
+/// * `iso` - Runs a rendering's text as ISO C on the drawn inputs, held to
+///   an input when one is given ([`first_difference`]).
+/// * `refutes` - Replays a rendering's statements ([`replay_refutes`]).
+/// * `points` - The function's choice points, asked for once the text is
+///   known to disagree.
+/// * `frame` - Bytes from the entry stack pointer down to the frame base
+///   the `local_N` names count from ([`implicated`]).
+/// * `most` - Most renderings tried after the text as it is.
+///
+/// # Returns
+///
+/// What the search ended with ([`Repair`]).
+fn searched(
+    o: &Overlay,
+    refuted: Option<Counterexample>,
+    iso: &impl Fn(&Overlay, Option<usize>) -> Checked,
+    refutes: &impl Fn(&Overlay) -> Option<Counterexample>,
+    points: &impl Fn() -> Vec<Site>,
+    frame: i64,
+    most: usize,
+) -> Repair {
+    let checks = Cell::new(1usize);
     let base = iso(o, None);
     let live = base.grade() != Grade::Unchecked;
     let held = base.differs.as_ref().map(|(n, _)| *n);
@@ -299,7 +334,7 @@ pub fn repair_iso(p: &Program, a: &Analysis, o: &Overlay, entry: u64, budget: Bu
         iso(u, held)
     };
     let judge = |u: &Overlay| {
-        let refuted = replay_refutes(p, a, u, entry);
+        let refuted = refutes(u);
         let c = if live {
             probe(u)
         } else {
@@ -308,10 +343,10 @@ pub fn repair_iso(p: &Program, a: &Analysis, o: &Overlay, entry: u64, budget: Bu
         };
         evidence(c, refuted, live)
     };
-    let points = choice_points(p, a, o, entry);
+    let points = points();
     let mut order: Vec<Site> = points
         .iter()
-        .filter(|s| implicated(**s, &at.line, crate::analysis::protos::frame_base(p)))
+        .filter(|s| implicated(**s, &at.line, frame))
         .copied()
         .collect();
     if base.differs.is_some() {
@@ -329,9 +364,9 @@ pub fn repair_iso(p: &Program, a: &Analysis, o: &Overlay, entry: u64, budget: Bu
         }
     }
     let mut tried: Vec<Tried> = Vec::new();
-    let singles = order.len().min(budget.moves);
+    let singles = order.len().min(most);
     let mut moves: Vec<Vec<Site>> = order.iter().take(singles).map(|s| vec![*s]).collect();
-    if order.len() > 1 && singles < budget.moves {
+    if order.len() > 1 && singles < most {
         moves.push(order.iter().take(singles).copied().collect());
     }
     for sites in moves {
