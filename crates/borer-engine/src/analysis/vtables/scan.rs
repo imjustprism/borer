@@ -1162,7 +1162,7 @@ fn memory_offset(instr: &Instruction, vals: &BTreeMap<Register, Tracked>) -> Opt
             _ => None,
         }
     }?;
-    (off <= u64::from(u32::MAX)).then_some(off)
+    u32::try_from(off).is_ok().then_some(off)
 }
 
 /// Returns the address a global-addressing memory operand names.

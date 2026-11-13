@@ -29,13 +29,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::choice::{Choices, Site};
 use super::expr::{Expr, Op, Ty};
 
-/// Farthest a stack offset folds from the entry's, in bytes. A file can
-/// move the stack pointer by any amount (`add rsp, rax` with `rax` loaded
-/// from it): past this the sum stays unfolded ([`moved`]), and the
-/// `__chkstk` probe's move leaves the offset untracked ([`reach`]). A push,
-/// a pop, a `leave` and a callee's pop move a tracked offset without this
-/// check, by a word or by the callee's arguments, so an offset passes the
-/// reach only by such small steps and every sum over one (a word, a
+/// Farthest a stack offset folds from the entry's, in bytes.
+///
+/// A file can move the stack pointer by any amount (`add rsp, rax` with
+/// `rax` loaded from it): past this the sum stays unfolded ([`moved`]), and
+/// the `__chkstk` probe's move leaves the offset untracked ([`reach`]). A
+/// push, a pop, a `leave` and a callee's pop move a tracked offset without
+/// this check, by a word or by the callee's arguments, so an offset passes
+/// the reach only by such small steps and every sum over one (a word, a
 /// slot's width, a call's argument area) stays far inside `i64`.
 const REACH: u64 = 1 << 40;
 

@@ -1417,10 +1417,11 @@ fn render_runs(
     out
 }
 
-/// Returns the lifter check's agreement: the blocks and facts it compared,
-/// and, when a block it checked touches the x87 stack
-/// ([`verify::Verified::x87`]), that both sides keep those values as
-/// doubles, not the CPU's 80 bits.
+/// Formats the lifter check's agreement summary.
+///
+/// Reports the blocks and facts compared and, when a checked block touches the
+/// x87 stack ([`verify::Verified::x87`]), notes that both sides keep those
+/// values as doubles rather than the CPU's 80 bits.
 ///
 /// # Arguments
 ///

@@ -51,9 +51,10 @@ pub fn displacement(instr: &Instruction, bitness: u32) -> i64 {
     }
 }
 
-/// Returns the operand size of a stack instruction in bits: how wide each
-/// value a `push`, `pop`, `pushf`, `popf`, `pusha`, `popa` or `leave`
-/// moves is, and so how far it moves the stack pointer per value.
+/// Returns the operand size of a stack instruction in bits.
+///
+/// Gives how wide each value a `push`, `pop`, `pushf`, `popf`, `pusha`, `popa`
+/// or `leave` moves is, and so how far it moves the stack pointer per value.
 ///
 /// SPEC: Intel SDM Vol. 2, PUSH, POP, PUSHA, POPA, PUSHF, POPF and LEAVE:
 /// the operand size, not the mode's word, sets the move, so a 66h prefix
@@ -385,6 +386,8 @@ mod tests {
     use super::stack_operand_bits;
     use crate::isa::x86::{Decoder, DecoderOptions};
 
+    /// Only value-moving stack instructions report a stack operand size.
+    ///
     /// A stack instruction's operand size is its own, a word under a 66h
     /// prefix, and an instruction that moves no value has none: in 32-bit
     /// code iced counts the eight bytes `ret 4` moves the stack and the

@@ -243,9 +243,10 @@ fn a_shift_by_the_width_agrees_with_the_emulator() {
     ]);
 }
 
-/// The flags of a result decide only its zero and sign tests: `sar al, 8`
-/// leaves the sign bit in CF, so `jc` after it is taken at `al = 0x81`
-/// and the function returns 1. The decompiler once read the result's
+/// The flags of a result decide only its zero and sign tests.
+///
+/// `sar al, 8` leaves the sign bit in CF, so `jc` after it is taken at `al =
+/// 0x81` and the function returns 1. The decompiler once read the result's
 /// carry as 0, decided the branch untaken and dropped the arm.
 ///
 /// `mov eax,0x81; sar al,8; jc L; xor eax,eax; ret; L: mov eax,1; ret`.
@@ -321,10 +322,11 @@ fn a_zero_count_rotate_keeps_the_overflow_agrees_with_the_emulator() {
     ]);
 }
 
-/// A 64-bit shift masks its count to six bits, not five: `shl rax, 32`
-/// shifts by 32 and sets the zero flag from the result, so `sete` after
-/// `cmp edx, 1; shl rax, 32` reads the low half of `rax`, while `shl rax,
-/// 64` masks to 0 and leaves the compare's flags.
+/// A 64-bit shift masks its count to six bits, not five.
+///
+/// `shl rax, 32` shifts by 32 and sets the zero flag from the result, so
+/// `sete` after `cmp edx, 1; shl rax, 32` reads the low half of `rax`, while
+/// `shl rax, 64` masks to 0 and leaves the compare's flags.
 #[test]
 fn a_64_bit_shift_count_masks_to_six_bits_agrees_with_the_emulator() {
     for count in [0x20, 0x40] {
@@ -337,11 +339,12 @@ fn a_64_bit_shift_count_masks_to_six_bits_agrees_with_the_emulator() {
     }
 }
 
-/// A block that opens with a shift by `cl` still reads the flags the block
-/// before it left: `jl` after `sub edx, 1; jmp B; B: shl eax, cl` with
-/// `cl` cleared is the compare of the argument with 1. Across the blocks
-/// the shift once counted as a writer of every flag, so the first block
-/// handed none on and the condition read as unknown.
+/// A block that opens with a shift by `cl` still reads inherited flags.
+///
+/// `jl` after `sub edx, 1; jmp B; B: shl eax, cl` with `cl` cleared is the
+/// compare of the argument with 1. Across the blocks the shift once counted as
+/// a writer of every flag, so the first block handed none on and the condition
+/// read as unknown.
 ///
 /// `mov edx,[esp+4]; xor ecx,ecx; sub edx,1; jmp B; B: shl eax,cl; jl L;
 /// xor eax,eax; ret; L: mov eax,1; ret`.
@@ -377,8 +380,9 @@ fn a_16_bit_address_wraps_in_the_lifter_and_the_emulator() {
     agrees_with_the_emulator(&code);
 }
 
-/// A double shift whose count masks to 0 leaves every flag as it was, in
-/// the lifter as in the emulator: `shld eax, ebx, 32` shifts by nothing,
+/// A double shift whose count masks to 0 leaves every flag as it was.
+///
+/// In the lifter as in the emulator, `shld eax, ebx, 32` shifts by nothing,
 /// so `sete` after it reads the zero flag of `cmp edx, 1`. The lifter once
 /// set the flags from the shifted value and read `al` as `eax == 0`.
 #[test]
@@ -391,10 +395,10 @@ fn a_zero_count_double_shift_agrees_with_the_emulator() {
     ]);
 }
 
-/// A double shift by `cl` that masks to 0 keeps the overflow of the `sub`
-/// before it: `setl` after `sub edx, 1; shrd eax, ebx, cl` with `cl`
-/// cleared reads the subtraction's SF != OF, which overflows at `edx =
-/// 0x80000000`.
+/// A double shift by `cl` that masks to 0 keeps the prior `sub`'s overflow.
+///
+/// `setl` after `sub edx, 1; shrd eax, ebx, cl` with `cl` cleared reads the
+/// subtraction's SF != OF, which overflows at `edx = 0x80000000`.
 #[test]
 fn a_zero_count_double_shift_by_cl_keeps_the_overflow_agrees_with_the_emulator() {
     agrees_with_the_emulator(&[
@@ -407,11 +411,11 @@ fn a_zero_count_double_shift_by_cl_keeps_the_overflow_agrees_with_the_emulator()
     ]);
 }
 
-/// A 64-bit shift masks a constant count past the width before its flags
-/// are read too: `shl rax, 65` shifts by one, so `setl` after it reads the
-/// overflow, which makes it the top bit of `rax` before the shift. The
-/// lifter once matched the one-bit form against the unmasked 65, missed
-/// it, and read bit 62.
+/// A 64-bit shift masks a constant count past the width before reading flags.
+///
+/// `shl rax, 65` shifts by one, so `setl` after it reads the overflow, which
+/// makes it the top bit of `rax` before the shift. The lifter once matched the
+/// one-bit form against the unmasked 65, missed it, and read bit 62.
 #[test]
 fn a_64_bit_shift_by_65_reads_the_overflow_agrees_with_the_emulator() {
     agrees_with_the_emulator_64(&[
@@ -421,11 +425,11 @@ fn a_64_bit_shift_by_65_reads_the_overflow_agrees_with_the_emulator() {
     ]);
 }
 
-/// `shr rax, 65` shifts by one as well, whose overflow is the top bit of
-/// `rax` before it. A one-bit `shr` lifts to no flags wherever OF may be
-/// read, so its `setl` stays asm and the block is not checked, where the
-/// lift once read the flags of a wider shift and printed 0 for a top bit
-/// of 1.
+/// `shr rax, 65` shifts by one and lifts to no flags where OF may be read.
+///
+/// Its overflow is the top bit of `rax` before it, so its `setl` stays asm and
+/// the block is not checked, where the lift once read the flags of a wider
+/// shift and printed 0 for a top bit of 1.
 #[test]
 fn a_64_bit_shr_by_65_never_disagrees_with_the_emulator() {
     let code = [
@@ -436,9 +440,10 @@ fn a_64_bit_shr_by_65_never_disagrees_with_the_emulator() {
     never_disagrees_with_the_emulator(&raw::image(Arch::X86_64, &code, &[]));
 }
 
-/// A one-bit double shift lifts to no flags where OF may be read: `setl`
-/// after `shld eax, ebx, 1` reads the change of sign, which the lift once
-/// took as 0, so the text took the branch the CPU does not at `eax =
+/// A one-bit double shift lifts to no flags where OF may be read.
+///
+/// `setl` after `shld eax, ebx, 1` reads the change of sign, which the lift
+/// once took as 0, so the text took the branch the CPU does not at `eax =
 /// 0x40000000`. The emulator, which sets that OF too, checks the lift.
 #[test]
 fn a_one_bit_double_shift_never_disagrees_with_the_emulator() {
@@ -449,11 +454,12 @@ fn a_one_bit_double_shift_never_disagrees_with_the_emulator() {
     ]));
 }
 
-/// A one-bit `shr` whose flags leave the block lifts to no flags either:
-/// `jl` after `shr eax, 1` is taken when the top bit of `eax` was set (SF
-/// is clear and OF is that bit), and with a `je` in the next block reading
-/// the same flags the lift once read OF as 0 there, so the text returned
-/// 0 where the binary returns 1.
+/// A one-bit `shr` whose flags leave the block lifts to no flags either.
+///
+/// `jl` after `shr eax, 1` is taken when the top bit of `eax` was set (SF is
+/// clear and OF is that bit), and with a `je` in the next block reading the
+/// same flags the lift once read OF as 0 there, so the text returned 0 where
+/// the binary returns 1.
 ///
 /// `mov eax,[esp+4]; shr eax,1; jl L1; je L2; xor eax,eax; ret; L1: mov
 /// eax,1; ret; L2: mov eax,2; ret`.

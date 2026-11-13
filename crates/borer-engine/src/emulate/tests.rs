@@ -705,9 +705,10 @@ fn a_rotate_keeps_the_zero_flag() {
     assert_eq!(emu.register("rax"), Some(1));
 }
 
-/// A one-bit double shift sets the overflow on a change of sign: `shld
-/// eax, ebx, 1` turns 0x40000000 into 0x80000000, so `seto` reads 1. The
-/// emulator once left the overflow the `xor` before it had cleared.
+/// A one-bit double shift sets the overflow on a change of sign.
+///
+/// `shld eax, ebx, 1` turns 0x40000000 into 0x80000000, so `seto` reads 1;
+/// the emulator once left the overflow the `xor` before it had cleared.
 ///
 /// # Panics
 ///
@@ -1717,7 +1718,7 @@ fn a_string_compare_sets_the_carry_of_its_subtraction() {
         0xc3, // ASM: ret
     ];
     for code in [cmps, scas] {
-        let emu = returned(image(code, &[b'b', b'a']));
+        let emu = returned(image(code, &[0x62, 0x61]));
         assert_eq!(emu.register("rax"), Some(1), "{code:02x?}");
     }
 }

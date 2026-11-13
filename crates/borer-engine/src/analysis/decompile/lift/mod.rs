@@ -1202,10 +1202,10 @@ fn src_bits(instr: &Instruction, op: u32) -> u8 {
     }
 }
 
-/// Returns how far a `push`, `pop` or `leave` moves the stack pointer and
-/// the type of the value it moves: its operand size
-/// ([`crate::disasm::stack_operand_bits`]), a word under a 66h prefix, not
-/// the mode's word.
+/// Returns the byte step and value type of a `push`, `pop` or `leave`.
+///
+/// Uses the instruction's operand size ([`crate::disasm::stack_operand_bits`]),
+/// a word under a 66h prefix, not the mode's word.
 ///
 /// # Arguments
 ///

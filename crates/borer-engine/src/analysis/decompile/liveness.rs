@@ -624,9 +624,10 @@ pub(in crate::analysis) fn pointee_class(ty: &str) -> Option<&str> {
     Some(core)
 }
 
-/// Tells whether a block reads a flag before writing it, that is, depends on
-/// flags a predecessor left (`cmp; jae A; ... A: jne B`); a shift or rotate
-/// by `cl` writes none for sure ([`lift::flags_always_written`]).
+/// Tells whether a block reads a flag before writing it.
+///
+/// Such a block depends on flags a predecessor left (`cmp; jae A; ... A: jne B`);
+/// a shift or rotate by `cl` writes none for sure ([`lift::flags_always_written`]).
 ///
 /// # Arguments
 ///
