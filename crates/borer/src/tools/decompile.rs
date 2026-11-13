@@ -200,7 +200,7 @@ pub(crate) fn decompile_header(
     entry: u64,
     differs: Option<&str>,
 ) -> Option<String> {
-    borer::index::answer_header(p, a, o, entry, differs)
+    borer_engine::analysis::decompile::answer_header(p, a, o, entry, differs)
 }
 
 #[tool_router(router = decompile_tools, vis = "pub(crate)")]

@@ -27,6 +27,7 @@
 //! arm64 both answer.
 
 pub(crate) mod abi;
+mod answer;
 mod arch;
 mod asserts;
 mod canary;
@@ -100,6 +101,7 @@ mod warn;
 mod wire;
 
 pub use crate::timing::step_times;
+pub use answer::{answer_header, shown, warnings, with_header};
 use arch::Lifter;
 pub use asserts::*;
 pub use checked::{checked_header, decompile_checked_all, text_check};
@@ -1023,83 +1025,6 @@ pub fn choice_points(
         .as_ref()
         .as_ref()
         .map_or_else(Vec::new, |d| d.sites.clone())
-}
-
-/// Puts the header line of [`checked_header`] under a text's first line.
-///
-/// # Arguments
-///
-/// * `text` - The answer's text.
-/// * `header` - The line, or `None` to leave the text as it is.
-#[must_use]
-pub fn with_header(text: &str, header: Option<&str>) -> String {
-    let Some(header) = header else {
-        return text.to_owned();
-    };
-    match text.split_once('\n') {
-        Some((first, rest)) => format!("{first}\n{header}\n{rest}"),
-        None => format!("{text}\n{header}\n"),
-    }
-}
-
-/// Returns the `// warn:` line a `decompile` answer prints under its check
-/// line: what keeps the text from being the C it claims.
-///
-/// Each item says what it means in a few words: a computed `goto`, a
-/// callee of the binary with no prototype, a helper with no definition, a
-/// name nothing declares, an operator C refuses on a float, a pointer or
-/// an integer, a missing label, an instruction left as asm.
-///
-/// The decompile answer and the index carry it, like [`checked_header`]. Each
-/// warning is a fact of the text, never a guess, so it flags no right
-/// text; a text with no line may still be wrong in ways no fact of the
-/// text shows. The input a run of the text still differs on after the
-/// repair search ([`crate::analysis::render::Repair::note`]) is the last
-/// item.
-///
-/// The text is read on a decompile's stack ([`stack::roomy`]): its
-/// statements nest as deep as the function's, and a caller's thread may
-/// have too little room for that.
-///
-/// # Arguments
-///
-/// * `program` - The loaded image.
-/// * `analysis` - Discovery results, which say what the function calls.
-/// * `overlay` - The names the text was written under.
-/// * `entry` - The function's entry.
-/// * `text` - Its text as [`decompile_named`] wrote it.
-/// * `differs` - The repair search's note, when the text still differs.
-///
-/// # Returns
-///
-/// The line without its newline, `None` when nothing is known wrong.
-#[must_use]
-pub fn warnings(
-    program: &Program,
-    analysis: &Analysis,
-    overlay: &Overlay,
-    entry: u64,
-    text: &str,
-    differs: Option<&str>,
-) -> Option<String> {
-    let word = if program.is_64 { 64 } else { 32 };
-    let in_binary: BTreeSet<String> = analysis
-        .function(entry)
-        .map(|f| f.callees.as_slice())
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|&c| {
-            let g = analysis.function(c)?;
-            let target = g.bound.unwrap_or(c);
-            (g.thunk.is_none() && target != entry).then(|| name_of(analysis, overlay, target))
-        })
-        .collect();
-    let line = stack::roomy(|| warn::line(text, &in_binary, word));
-    match (line, differs) {
-        (Some(line), Some(d)) => Some(format!("{line}; {d}")),
-        (None, Some(d)) => Some(format!("{} {d}", warn::WARN)),
-        (line, None) => line,
-    }
 }
 
 /// The closure check of a function's text: each line that reads a

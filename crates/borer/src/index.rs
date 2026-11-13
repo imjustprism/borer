@@ -19,7 +19,7 @@ use std::io::{BufReader, BufWriter, Read, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use borer_engine::analysis::decompile::decompile_checked_all;
+use borer_engine::analysis::decompile::{decompile_checked_all, shown};
 use borer_engine::analysis::{Analysis, Overlay, name_of, render};
 use borer_engine::pack::Packs;
 use borer_engine::program::Program;
@@ -28,7 +28,7 @@ use rayon::prelude::*;
 
 mod key;
 mod memo;
-pub use key::{answer_header, index_key};
+pub use key::index_key;
 
 /// Magic bytes opening an index file.
 const MAGIC: &[u8; 8] = b"BORERIDX";
@@ -451,7 +451,7 @@ pub fn build(program: &Program, analysis: &Analysis, overlay: &Overlay) -> CodeI
         .map(|(&entry, text)| IndexedFunction {
             entry,
             name: name_of(analysis, overlay, entry),
-            text: key::shown(program, analysis, overlay, entry, text),
+            text: shown(program, analysis, overlay, entry, text.as_deref()).unwrap_or_default(),
         })
         .collect();
     let postings = trigram_postings(&functions);
