@@ -8,10 +8,8 @@ name: fuzz
 # A target with a folder under fuzz/seeds starts from the inputs in it. An
 # input that panics, runs past ten seconds or takes 2 GB fails the job and
 # is uploaded; replay it with `cargo +nightly fuzz run <target> <file>` and
-# keep it as a test. `pdb` runs only when asked for by name: from its seeds
-# it finds within seconds a module whose line-program size passes its
-# stream, which panics in the pdb crate, and it joins `all` with that fix.
-# A manual run takes a target (every other one when not given), libFuzzer's seed
+# keep it as a test.
+# A manual run takes a target (every one when not given), libFuzzer's seed
 # and a run count (ten minutes when not given): the `INFO: Seed:` and
 # `Done N runs` a run printed replay it on the same build, as far as the
 # target is deterministic.
@@ -26,7 +24,7 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: The target to fuzz; all fuzzes load, analyze, il, carve, nested and project in turn
+        description: The target to fuzz; all fuzzes load, analyze, il, carve, nested, project and pdb in turn
         type: choice
         options: [all, load, analyze, il, carve, nested, project, pdb]
         default: all
@@ -102,7 +100,7 @@ jobs:
           RUNS: ${{ inputs.runs }}
         run: |
           [[ "$SEED$RUNS" =~ ^[0-9]*$ ]] || { echo "seed and runs take digits only"; exit 1; }
-          targets="load analyze il carve nested project"
+          targets="load analyze il carve nested project pdb"
           if [ "${TARGET:-all}" != all ]; then targets=$TARGET; fi
           stop=(-max_total_time="$SECONDS_PER_TARGET")
           if [ -n "$RUNS" ]; then stop=(-runs="$RUNS"); fi
