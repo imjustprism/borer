@@ -1883,7 +1883,7 @@ mod tests {
             let a = Analysis::compute(&p);
             let mut o = Overlay::default();
             o.prototypes
-                .insert(0x1000, Proto::parse("uint32_t f(uint8_t a1)").unwrap());
+                .insert(0x1000, Proto::parse("uint32_t f(uint8_t x)").unwrap());
             let out = run_tsv(&p, &a, &o, "0x1000/300").unwrap();
             assert!(out.contains("\n# lifter check: agrees on "), "{out}");
             let note = out.contains("x87 at f64, not the CPU's 80 bits");

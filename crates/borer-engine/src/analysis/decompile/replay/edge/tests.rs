@@ -560,7 +560,7 @@ fn a_block_whose_entry_equality_is_unchecked_is_unknown() {
     let header = checked_header(&p, &a, &Overlay::default(), 0x1000).expect("checked");
     assert_eq!(
         header,
-        "// checked vs binary: statements as emitted, 1/3 blocks: 1 proved, 2 unknown; unchecked: 1 entry equality, 1 unmodeled, C spelling, later text passes"
+        "// checked vs binary: statements as emitted, 1/3 blocks: 1 proved vs lift, 2 unknown; unchecked: 1 entry equality, 1 unmodeled, C spelling, later text passes"
     );
 }
 
