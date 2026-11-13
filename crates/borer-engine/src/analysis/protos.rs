@@ -928,8 +928,10 @@ fn param_of(piece: &str, i: usize, text: &str) -> anyhow::Result<Param> {
     } else {
         String::new()
     };
-    let mut ty = type_of(&toks, text)?;
-    ty.stars += usize::from(array);
+    if array {
+        toks.push(Tok::Star);
+    }
+    let ty = type_of(&toks, text)?;
     Ok(Param { name, ty })
 }
 
@@ -1155,5 +1157,22 @@ mod tests {
             let parsed = Proto::parse(s).expect(s);
             assert_eq!(Proto::parse(&parsed.spell()).expect(s), parsed);
         }
+    }
+
+    /// A trailing `[]` on a parameter counts toward
+    /// [`crate::analysis::utypes::PTR_DEPTH_MAX`] as it is parsed, matching
+    /// what reloading the spelled `*` enforces.
+    #[test]
+    fn an_array_parameter_counts_toward_the_pointer_depth_cap() {
+        let at_cap = Proto::parse("void f(int ***************x[])").expect("16 pointers");
+        assert_eq!(at_cap.params[0].ty.stars, 16);
+        assert_eq!(at_cap.params[0].name, "x");
+        let refused = Proto::parse("void f(int ****************x[])")
+            .expect_err("17 pointers")
+            .to_string();
+        assert!(
+            refused.contains("stacks 17 pointers; 16 is the most"),
+            "{refused}"
+        );
     }
 }
