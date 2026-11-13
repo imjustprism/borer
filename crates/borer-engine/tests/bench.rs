@@ -16,7 +16,8 @@
 //!
 //! `BORER_LATENCY=bin1;bin2 cargo test -p borer-engine --release --test bench latency -- --ignored --nocapture`
 //! times one cold `decompile` answer per sampled function as the MCP tool
-//! builds it, and hashes every answer ([`mcp_latency`]).
+//! gives it, under the binary's name tables, and hashes every answer
+//! ([`mcp_latency`]).
 //! `timings` also holds each function's cold decompile to a p95 and a
 //! maximum ([`DECOMPILE_P95_MS`], [`DECOMPILE_MAX_MS`]), the bars the
 //! notepad of the golden corpus is measured against.
@@ -34,14 +35,13 @@
 )]
 
 use borer_engine::analysis::decompile::{
-    checked_header, decompile, decompile_all, decompile_named, step_times, text_check, warnings,
-    with_header,
+    Detail, answer, decompile, decompile_all, decompile_named, step_times, text_check,
 };
 use borer_engine::analysis::render::{
-    Bisected, Budget, Evidence, Grade, INCOMPLETE_NOTE, Repair, Verdict, answered, bisect_iso,
-    check_generated, check_generated_iso, next_steps, repair_iso,
+    Bisected, Budget, Evidence, Grade, Repair, Verdict, bisect_iso, check_generated,
+    check_generated_iso, repair_iso,
 };
-use borer_engine::analysis::{Analysis, Overlay, name_of};
+use borer_engine::analysis::{Analysis, EnumSource, Overlay, name_of};
 use borer_engine::num::usize_f64;
 use borer_engine::program::Program;
 use std::collections::BTreeMap;
@@ -546,50 +546,13 @@ fn repair_search() {
 /// `BORER_LATENCY_SAMPLE` names another count.
 const LATENCY_SAMPLE: usize = 150;
 
-/// Builds one `decompile` answer the way the MCP tool does.
+/// Times one cold `decompile` answer per sampled function, the one the MCP
+/// tool gives ([`answer`]), and hashes every answer so a speedup can be
+/// shown to change no byte.
 ///
-/// That is the names the repair search renders it under ([`answered`]),
-/// then the check line, the incomplete note, the warnings and the next
-/// steps over the text, then the text.
-///
-/// # Arguments
-///
-/// * `program` - The image.
-/// * `a` - Its analysis.
-/// * `user` - Names in force.
-/// * `entry` - The function's entry.
-///
-/// # Returns
-///
-/// The answer, empty when the function does not decompile.
-fn mcp_answer(program: &Program, a: &Analysis, user: &Overlay, entry: u64) -> String {
-    let (o, differs) = answered(program, a, user, entry);
-    let o = &o;
-    let mut lines: Vec<String> = checked_header(program, a, o, entry)
-        .into_iter()
-        .chain(
-            a.incomplete
-                .then(|| format!("//{}", INCOMPLETE_NOTE.trim_start_matches('#'))),
-        )
-        .collect();
-    lines.extend(
-        decompile_named(program, a, o, entry)
-            .and_then(|text| warnings(program, a, o, entry, &text, differs.as_deref())),
-    );
-    lines.extend(
-        next_steps(program, a, o, entry)
-            .iter()
-            .map(|step| format!("// next: {step}")),
-    );
-    let header = (!lines.is_empty()).then(|| lines.join("\n"));
-    decompile_named(program, a, o, entry)
-        .map(|text| with_header(&text, header.as_deref()))
-        .unwrap_or_default()
-}
-
-/// Times one cold `decompile` answer per sampled function, as the MCP tool
-/// builds it, and hashes every answer so a speedup can be shown to change
-/// no byte.
+/// The answer is asked under the names the tool reads, the binary's own
+/// name tables among them ([`EnumSource::Binary`]), before the tool pages
+/// it.
 ///
 /// `BORER_LATENCY` names the binaries, separated by `;`, and
 /// `BORER_LATENCY_SAMPLE` how many functions to sample from each
@@ -609,7 +572,10 @@ fn mcp_latency() {
     for path in paths.split(';').filter(|p| !p.is_empty()) {
         let program = Program::load(std::path::Path::new(path)).expect("load");
         let a = Analysis::compute(&program);
-        let o = Overlay::default();
+        let o = Overlay {
+            enum_source: EnumSource::Binary,
+            ..Overlay::default()
+        };
         let all: Vec<u64> = a
             .functions
             .iter()
@@ -628,11 +594,11 @@ fn mcp_latency() {
         let mut rows = String::new();
         for &e in &entries {
             let t = Instant::now();
-            let answer = mcp_answer(&program, &a, &o, e);
+            let text = answer(&program, &a, &o, e, Detail::Full).unwrap_or_default();
             times.push(t.elapsed());
             let mut h = DefaultHasher::new();
-            answer.hash(&mut h);
-            answer.hash(&mut whole);
+            text.hash(&mut h);
+            text.hash(&mut whole);
             writeln!(rows, "{e:#x}\t{:016x}", h.finish()).expect("write");
         }
         if let Some(dir) = &out_dir {
