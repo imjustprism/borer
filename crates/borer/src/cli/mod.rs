@@ -60,7 +60,7 @@ use args::{
     command_usage, entry_at, filter_limit, num_arg, path_arg, search_args, split_pack_args,
     unknown_word,
 };
-use packs::{pack_report, packs_report, read_text, sigmake, writable, write_file};
+use packs::{pack_report, packs_report, read_spec_arg, read_text, sigmake, writable, write_file};
 use session::{Session, decompiled, needs_a_binary, open, project_overlay};
 
 /// The cap on rows that list classes: every class a program has fits.
@@ -180,7 +180,7 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
         ),
         Command::Pack => {
             let file = path_arg(args, 1, "pack needs a file")?;
-            let text = read_text(file)?;
+            let text = read_text(file, "pack needs a file", borer::packs::PACK_MAX)?;
             let (pack, warnings) =
                 Pack::parse(&text, &short_path(file)).map_err(anyhow::Error::msg)?;
             print!("{}", pack_report(&pack, &warnings));
@@ -582,7 +582,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Changes => {
-            let text = read_text(path_arg(args, 2, "changes needs a snapshot file")?)?;
+            let (_, text) = read_spec_arg(args, 2, "changes needs a snapshot file")?;
             let a = s.analysis(Feature::Decompile)?;
             let before = snapshot::read(&text).map_err(anyhow::Error::msg)?;
             let after = snapshot::facts(&s.program, &a, &s.overlay);
@@ -610,7 +610,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Anchors => {
-            let text = read_text(path_arg(args, 2, "anchors needs a manifest file")?)?;
+            let (_, text) = read_spec_arg(args, 2, "anchors needs a manifest file")?;
             let a = s.analysis(Feature::Decompile)?;
             let pinned = anchors::parse_manifest(&text).map_err(anyhow::Error::msg)?;
             let (table, all_held) =
@@ -865,8 +865,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             print!("{}", sigs::export_pack(&s.program, &a, &overlay, name, all));
         }
         Query::Script => {
-            let file = path_arg(args, 2, "script needs a script file")?;
-            let code = read_text(file)?;
+            let (file, code) = read_spec_arg(args, 2, "script needs a script file")?;
             let mut words = Vec::new();
             let mut save = None;
             let mut rest = args.iter().skip(3);
@@ -1031,9 +1030,10 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
 /// When the project does not load or save, or what is asked is refused
 /// ([`defined`], [`applied`]).
 fn set_type(args: &[String], s: &Session) -> anyhow::Result<()> {
-    let project = path_arg(args, 2, "set-type needs a project file")?;
+    let needs = "set-type needs a project file";
+    let project = path_arg(args, 2, needs)?;
     let there = borer_engine::program::checked_metadata(std::path::Path::new(project))
-        .map_err(anyhow::Error::msg)?;
+        .map_err(|why| anyhow!("{needs}; {why}"))?;
     let (program, sha256, mut overlay) = if there.is_some() {
         let (pf, overlay) = session::load_for_program(project, &s.program)?;
         (pf.0.program, pf.0.sha256, overlay)

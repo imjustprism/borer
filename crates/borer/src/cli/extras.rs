@@ -258,8 +258,12 @@ pub(super) fn run(cmd: Extra, args: &[String], s: &Session) -> anyhow::Result<()
 /// When the other build is missing, its path is a share or a device (said
 /// before the binary is analyzed), or it cannot be loaded.
 fn diff(args: &[String], s: &Session) -> anyhow::Result<()> {
-    let other = path_arg(args, 2, "diff needs another build or a fingerprint sidecar")?;
+    let needs = "diff needs another build or a fingerprint sidecar";
+    let other = path_arg(args, 2, needs)?;
     let path = std::path::Path::new(other);
+    if let Some(why) = borer_engine::program::unusable_path(path) {
+        anyhow::bail!("{needs}; {why}");
+    }
     let label = |p: &std::path::Path| {
         p.file_name().map_or_else(
             || p.display().to_string(),

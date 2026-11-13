@@ -10,7 +10,7 @@ use borer_engine::program::{Feature, Program};
 use borer_engine::text::short_path;
 use borer_engine::{libsets, libsig, script};
 
-use super::args::arg;
+use super::args::{arg, path_arg};
 
 /// Writes a file for a command that was asked to produce one.
 ///
@@ -28,12 +28,15 @@ pub(super) fn write_file(path: &str, bytes: &[u8]) -> anyhow::Result<()> {
 }
 
 /// Reads a file a command was given whole, through the checked reader
-/// ([`borer_engine::program::read_regular`]), within the size a load takes
-/// ([`crate::tools::load::max_file_size`]).
+/// ([`borer_engine::program::read_regular`]), bounded by `max` bytes and
+/// framing any refusal with `kind`.
 ///
 /// # Arguments
 ///
 /// * `path` - The file, as the caller gave it.
+/// * `kind` - Either `<command> needs a <kind>` (placed before the reason) or
+///   `give a <kind>` (placed after it).
+/// * `max` - Most bytes the file may hold.
 ///
 /// # Returns
 ///
@@ -42,11 +45,15 @@ pub(super) fn write_file(path: &str, bytes: &[u8]) -> anyhow::Result<()> {
 /// # Errors
 ///
 /// When the path is a share or a device (refused before it is opened), is
-/// not a regular file, holds more than the size a load takes, or does not
-/// read.
-pub(super) fn read_given(path: &str) -> anyhow::Result<Vec<u8>> {
-    let max = crate::tools::load::configured_max_file();
-    borer_engine::program::read_regular(std::path::Path::new(path), max)
+/// not a regular file, holds more than `max` bytes, or does not read.
+pub(super) fn read_given(path: &str, kind: &str, max: u64) -> anyhow::Result<Vec<u8>> {
+    borer_engine::program::read_regular(std::path::Path::new(path), max).map_err(|e| {
+        if kind.starts_with("give ") {
+            anyhow::anyhow!("{e:#}; {kind}")
+        } else {
+            anyhow::anyhow!("{kind}; {e:#}")
+        }
+    })
 }
 
 /// Reads a text file a command was given ([`read_given`]).
@@ -54,6 +61,8 @@ pub(super) fn read_given(path: &str) -> anyhow::Result<Vec<u8>> {
 /// # Arguments
 ///
 /// * `path` - The file, as the caller gave it.
+/// * `kind` - What the command needed (`<command> needs a <kind>`).
+/// * `max` - Most bytes the file may hold.
 ///
 /// # Returns
 ///
@@ -61,10 +70,32 @@ pub(super) fn read_given(path: &str) -> anyhow::Result<Vec<u8>> {
 ///
 /// # Errors
 ///
-/// As [`read_given`], and when the file is not text.
-pub(super) fn read_text(path: &str) -> anyhow::Result<String> {
-    String::from_utf8(read_given(path)?)
-        .map_err(|_| anyhow::anyhow!("{} is not a text file", short_path(path)))
+/// As [`read_given`], and when the file is not UTF-8 text.
+pub(super) fn read_text(path: &str, kind: &str, max: u64) -> anyhow::Result<String> {
+    String::from_utf8(read_given(path, kind, max)?)
+        .map_err(|_| anyhow::anyhow!("{kind}; {} is not a text file", short_path(path)))
+}
+
+/// Reads the positional path argument at `idx` and its UTF-8 contents within
+/// [`crate::resources::SPEC_FILE_MAX`] bytes ([`read_text`]).
+///
+/// # Arguments
+///
+/// * `args` - The CLI words.
+/// * `idx` - Index of the path argument.
+/// * `kind` - Missing/refusal prefix (`<command> needs a <kind>`).
+///
+/// # Errors
+///
+/// When the argument is missing or [`read_text`] refuses the file.
+pub(super) fn read_spec_arg<'a>(
+    args: &'a [String],
+    idx: usize,
+    kind: &str,
+) -> anyhow::Result<(&'a str, String)> {
+    let file = path_arg(args, idx, kind)?;
+    let text = read_text(file, kind, crate::resources::SPEC_FILE_MAX)?;
+    Ok((file, text))
 }
 
 /// Refuses a path that names a device rather than a file, before a
@@ -114,8 +145,9 @@ pub(super) fn sigmake(args: &[String]) -> anyhow::Result<()> {
         .context("sigmake needs at least one library or object")?;
     let mut functions = Vec::new();
     let mut files = Vec::new();
+    let max = crate::tools::load::configured_max_file();
     for library in libraries {
-        let bytes = read_given(library)?;
+        let bytes = read_given(library, "give a library or an object", max)?;
         let (found, damaged) = libsig::read(&bytes).with_context(|| short_path(library))?;
         for why in &damaged {
             eprintln!("borer: {}: {why}", short_path(library));

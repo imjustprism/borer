@@ -421,19 +421,47 @@ fn cli_refuses_a_share_before_reading_it() {
     let out = dir.join(format!("borer_share_{}.bsig", std::process::id()));
     let out = out.to_string_lossy().to_string();
     let share = r"\\host.invalid\share\x";
-    let refused = format!("Error: {share} names a network share");
-    for args in [
-        vec!["pack", share],
-        vec!["changes", &pe, share],
-        vec!["anchors", &pe, share],
-        vec!["script", &pe, share],
-        vec!["set-type", &pe, share],
-        vec!["diff", &pe, share],
-        vec!["sigmake", &out, "lib", share],
-    ] {
+    let refused = format!("{share} names a network share");
+    let cases = [
+        (vec!["pack", share], "pack needs a file; ", ""),
+        (
+            vec!["changes", &pe, share],
+            "changes needs a snapshot file; ",
+            "",
+        ),
+        (
+            vec!["anchors", &pe, share],
+            "anchors needs a manifest file; ",
+            "",
+        ),
+        (
+            vec!["script", &pe, share],
+            "script needs a script file; ",
+            "",
+        ),
+        (
+            vec!["set-type", &pe, share],
+            "set-type needs a project file; ",
+            "",
+        ),
+        (
+            vec!["diff", &pe, share],
+            "diff needs another build or a fingerprint sidecar; ",
+            "",
+        ),
+        (
+            vec!["sigmake", &out, "lib", share],
+            "",
+            "give a library or an object",
+        ),
+    ];
+    for (args, needs, tail) in cases {
         let (ok, said) = run_all(&args);
         assert!(!ok, "{args:?} succeeded: {said}");
-        assert!(said.contains(&refused), "{args:?}: {said}");
+        assert!(
+            said.contains(&format!("Error: {needs}{refused}")) && said.contains(tail),
+            "{args:?}: {said}"
+        );
     }
     std::fs::remove_file(&file).expect("the fixture is removed");
 }
@@ -450,10 +478,17 @@ fn cli_refuses_a_share_before_its_analysis() {
     std::fs::write(&file, b"no code here").expect("the fixture is writable");
     let bin = file.to_string_lossy().to_string();
     let share = r"\\host.invalid\share\x";
-    let refused = format!("Error: {share} names a network share");
-    for command in ["changes", "anchors", "diff"] {
+    let refused = format!("{share} names a network share");
+    for (command, needs) in [
+        ("changes", "changes needs a snapshot file"),
+        ("anchors", "anchors needs a manifest file"),
+        ("diff", "diff needs another build or a fingerprint sidecar"),
+    ] {
         let (ok, said) = run_all(&[command, &bin, share]);
-        assert!(!ok && said.contains(&refused), "{command}: {said}");
+        assert!(
+            !ok && said.contains(&format!("Error: {needs}; {refused}")),
+            "{command}: {said}"
+        );
     }
     std::fs::remove_file(&file).expect("the fixture is removed");
 }
@@ -1736,4 +1771,25 @@ fn cli_doctor_refuses_a_share_command_in_mcp_json() {
     let (ok, said) = crate::contract::run_env(Some(&dir), &[], &["doctor", "offline"]);
     std::fs::remove_dir_all(&dir).ok();
     assert!(ok && said.contains("names a network share"), "{said}");
+}
+
+/// `borer pack` caps a pack file at 64 MiB (`PACK_MAX`), refusing a 65 MiB
+/// file with the same size limit `--pack` enforces.
+#[test]
+fn cli_pack_refuses_a_65_mib_file_like_the_pack_flag() {
+    let pid = std::process::id();
+    let pe = std::env::temp_dir().join(format!("borer_packcap_{pid}.exe"));
+    let big = std::env::temp_dir().join(format!("borer_packcap_{pid}.borer"));
+    std::fs::write(&pe, crate::contract::tiny_pe()).expect("pe");
+    std::fs::File::create(&big)
+        .and_then(|f| f.set_len(65 << 20))
+        .expect("65 mib pack");
+    let (pe_s, big_s) = (pe.to_string_lossy(), big.to_string_lossy());
+    let (ok_cmd, said_cmd) = run_all(&["pack", &big_s]);
+    let (ok_flag, said_flag) = run_all(&["info", &pe_s, "--pack", &big_s]);
+    std::fs::remove_file(&pe).ok();
+    std::fs::remove_file(&big).ok();
+    let cap = "is 68157440 bytes, past the 67108864 it may hold";
+    assert!(!ok_cmd && said_cmd.contains(cap), "{said_cmd}");
+    assert!(!ok_flag && said_flag.contains(cap), "{said_flag}");
 }
