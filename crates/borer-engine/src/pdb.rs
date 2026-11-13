@@ -393,7 +393,7 @@ pub(crate) fn apply(
     let mut chosen = None;
     for p in candidates(record, binary, symsrv)
         .into_iter()
-        .filter(|p| p.is_file())
+        .filter(|p| matches!(crate::program::checked_metadata(p), Ok(Some(m)) if m.is_file()))
     {
         match file_names_build(&p, record) {
             Some(true) => {
@@ -401,9 +401,7 @@ pub(crate) fn apply(
                 break;
             }
             Some(false) => skip = Some(Skip::Mismatch),
-            None => {
-                skip.get_or_insert(Skip::Unreadable);
-            }
+            None => _ = skip.get_or_insert(Skip::Unreadable),
         }
     }
     let Some(path) = chosen else {
@@ -490,7 +488,7 @@ pub(crate) fn apply(
 pub fn resolved(binary: &Path, record: &Record, symsrv: Option<&Path>) -> Option<PathBuf> {
     candidates(record, binary, symsrv)
         .into_iter()
-        .find(|p| p.is_file() && file_names_build(p, record) == Some(true))
+        .find(|p| file_names_build(p, record) == Some(true))
 }
 
 /// Reads the source file and line each named procedure starts at, the

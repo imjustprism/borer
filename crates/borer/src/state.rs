@@ -117,7 +117,7 @@ impl BorerServer {
         let prog = Program::load_with_symsrv_max(
             &PathBuf::from(other),
             *read_lock(&self.pdb_applied),
-            symsrv::cache_dir().as_deref(),
+            symsrv::cache_dir().ok().flatten().as_deref(),
             crate::tools::load::configured_max_file(),
         )
         .map_err(|e| err_params(format!("load failed: {e:#}")))?;

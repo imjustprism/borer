@@ -270,12 +270,7 @@ fn fetch_pdb(word: &str, args: &[String]) -> anyhow::Result<()> {
             short_path(path)
         )
     })?;
-    let root = crate::symsrv::cache_dir().with_context(|| {
-        format!(
-            "no cache directory: set {}, LOCALAPPDATA, XDG_CACHE_HOME or HOME",
-            crate::symsrv::CACHE_ENV
-        )
-    })?;
+    let root = crate::symsrv::require_cache_dir().map_err(anyhow::Error::msg)?;
     let server = args.get(2).cloned().unwrap_or_else(crate::symsrv::server);
     let said = crate::symsrv::obtain(record, &root, &server, false, crate::symsrv::curl)
         .map_err(|e| anyhow!("{e}"))?;

@@ -67,6 +67,70 @@ pub(crate) fn tiny_pe() -> Vec<u8> {
     b
 }
 
+/// Builds a [`tiny_pe`] fixture carrying a `CodeView` PDB70 record for `pdb_name`.
+///
+/// # Arguments
+///
+/// * `pdb_name` - Path text written into the RSDS debug record.
+///
+/// # Panics
+///
+/// When `pdb_name` does not fit inside the `.text` page.
+pub(crate) fn tiny_pe_with_pdb(pdb_name: &str) -> Vec<u8> {
+    /// The optional header's file offset.
+    const OPT: usize = 0x80 + 24;
+    /// File offset of the single `IMAGE_DEBUG_DIRECTORY` entry in `.text`.
+    const DBG: usize = 0x220;
+    /// File offset of the `RSDS` record in `.text`.
+    const RSDS: usize = 0x240;
+    let mut b = tiny_pe();
+    let end = RSDS + 24 + pdb_name.len() + 1;
+    assert!(end <= b.len(), "CodeView path fits in the .text page");
+    b[DBG..end].fill(0);
+    let rsds_len = u32::try_from(24 + pdb_name.len() + 1).expect("rsds size");
+    put(&mut b, OPT + 160, &0x1020u32.to_le_bytes());
+    put(&mut b, OPT + 164, &28u32.to_le_bytes());
+    put(&mut b, DBG + 12, &2u32.to_le_bytes());
+    put(&mut b, DBG + 16, &rsds_len.to_le_bytes());
+    put(&mut b, DBG + 20, &0x1040u32.to_le_bytes());
+    put(&mut b, DBG + 24, &0x240u32.to_le_bytes());
+    put(&mut b, RSDS, b"RSDS");
+    b[RSDS + 4..RSDS + 20].fill(1);
+    put(&mut b, RSDS + 20, &1u32.to_le_bytes());
+    put(&mut b, RSDS + 24, pdb_name.as_bytes());
+    b
+}
+
+/// Spawns `borer` with environment overrides and optional working directory,
+/// returning `(success, stdout + stderr)`.
+///
+/// # Arguments
+///
+/// * `cwd` - Working directory for the child, or `None` for the test runner's.
+/// * `envs` - `(key, value)` environment overrides passed to the child.
+/// * `args` - Command-line arguments after the program name.
+///
+/// # Panics
+///
+/// When the process cannot be spawned.
+pub(crate) fn run_env(
+    cwd: Option<&std::path::Path>,
+    envs: &[(&str, &str)],
+    args: &[&str],
+) -> (bool, String) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_borer"));
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    for &(k, v) in envs {
+        cmd.env(k, v);
+    }
+    let out = cmd.args(args).output().expect("spawn borer");
+    let mut said = String::from_utf8_lossy(&out.stdout).into_owned();
+    said.push_str(&String::from_utf8_lossy(&out.stderr));
+    (out.status.success(), said)
+}
+
 /// Runs the borer binary to completion.
 ///
 /// # Arguments

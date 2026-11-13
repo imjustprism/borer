@@ -185,15 +185,26 @@ fn toolchain_line(pinned: &str, rustc: &str) -> String {
 /// # Arguments
 ///
 /// * `cache` - The cache directory a fetch lands in
-///   ([`crate::symsrv::cache_dir`]), and whether the environment named
-///   it; `None` when no variable names a base at all.
+///   ([`crate::symsrv::cache_dir`]) and whether the environment named it,
+///   or the refusal when the configured directory is unusable.
 /// * `reach` - What the reachability check found.
-fn symbols_line(cache: Option<(&Path, bool)>, reach: Reach) -> String {
-    let Some((dir, named)) = cache else {
-        return format!(
-            "symbols    no cache directory: set {}, LOCALAPPDATA, XDG_CACHE_HOME or HOME",
-            crate::symsrv::CACHE_ENV
-        );
+fn symbols_line(cache: Result<Option<(&Path, bool)>, &str>, reach: Reach) -> String {
+    let server = match reach {
+        Reach::Reachable => "reachable",
+        Reach::Unreachable => "unreachable",
+        Reach::NotChecked => "not checked (offline)",
+    };
+    let (dir, named) = match cache {
+        Err(why) => {
+            return format!("symbols    {why}; server {SYMBOL_HOST}:{SYMBOL_PORT} {server}");
+        }
+        Ok(None) => {
+            return format!(
+                "symbols    no cache directory: set {}, LOCALAPPDATA, XDG_CACHE_HOME or HOME",
+                crate::symsrv::CACHE_ENV
+            );
+        }
+        Ok(Some(pair)) => pair,
     };
     let source = if named {
         format!("from {}", crate::symsrv::CACHE_ENV)
@@ -203,11 +214,6 @@ fn symbols_line(cache: Option<(&Path, bool)>, reach: Reach) -> String {
     let held = match tally(dir, None) {
         Some((n, _)) => format!("{n} PDB name{}", if n == 1 { "" } else { "s" }),
         None => "missing".to_owned(),
-    };
-    let server = match reach {
-        Reach::Reachable => "reachable",
-        Reach::Unreachable => "unreachable",
-        Reach::NotChecked => "not checked (offline)",
     };
     format!(
         "symbols    cache {} ({source}): {held}; server {SYMBOL_HOST}:{SYMBOL_PORT} {server}",
@@ -219,11 +225,15 @@ fn symbols_line(cache: Option<(&Path, bool)>, reach: Reach) -> String {
 ///
 /// # Arguments
 ///
-/// * `dir` - The cache directory, `None` when no environment variable
-///   names a base for it.
-fn index_line(dir: Option<&Path>) -> String {
-    let Some(dir) = dir else {
-        return "index      no cache directory: set BORER_CACHE_DIR, LOCALAPPDATA, XDG_CACHE_HOME or HOME".to_owned();
+/// * `dir` - The cache directory, `Ok(None)` when no environment variable
+///   names a base, or `Err` when the configured directory is unusable.
+fn index_line(dir: Result<Option<&Path>, &str>) -> String {
+    let dir = match dir {
+        Err(why) => return format!("index      {why}"),
+        Ok(None) => {
+            return "index      no cache directory: set BORER_CACHE_DIR, LOCALAPPDATA, XDG_CACHE_HOME or HOME".to_owned();
+        }
+        Ok(Some(dir)) => dir,
     };
     let held = match tally(dir, Some(borer::index::EXTENSION)) {
         Some((n, bytes)) => format!(
@@ -332,14 +342,16 @@ fn mcp_line(start: &Path, exe: &Path) -> String {
 /// * `cwd` - The working directory, where the search for `.mcp.json`
 ///   starts.
 /// * `symcache` - The symbol-server cache and whether the environment
-///   named it, `None` when no variable names a base.
-/// * `index` - The index cache directory, if one is named.
+///   named it, `Ok(None)` when no variable names a base, or `Err` when the
+///   configured directory is unusable.
+/// * `index` - The index cache directory, `Ok(None)` when none is named, or
+///   `Err` when the configured directory is unusable.
 /// * `reach` - Checks the symbol server.
 pub(crate) fn report(
     exe: &Path,
     cwd: &Path,
-    symcache: Option<(&Path, bool)>,
-    index: Option<&Path>,
+    symcache: Result<Option<(&Path, bool)>, &str>,
+    index: Result<Option<&Path>, &str>,
     reach: impl FnOnce() -> Reach,
 ) -> String {
     let mut out = String::new();
@@ -373,8 +385,11 @@ pub(crate) fn doctor(offline: bool) -> anyhow::Result<String> {
     Ok(report(
         &exe,
         &cwd,
-        symcache.as_ref().map(|dir| (dir.as_path(), named)),
-        index.as_deref(),
+        symcache
+            .as_ref()
+            .map_err(String::as_str)
+            .map(|opt| opt.as_deref().map(|dir| (dir, named))),
+        index.as_ref().map_err(String::as_str).map(Option::as_deref),
         || {
             if offline {
                 Reach::NotChecked
@@ -451,8 +466,8 @@ mod tests {
         let out = report(
             Path::new("borer.exe"),
             &dir,
-            Some((&cache, false)),
-            Some(&dir),
+            Ok(Some((&cache, false))),
+            Ok(Some(&dir)),
             || {
                 asked += 1;
                 Reach::NotChecked
@@ -470,9 +485,13 @@ mod tests {
         );
         assert!(out.contains("not checked (offline)"), "{out}");
         assert!(out.contains(": 0 indexes, 0 B"), "{out}");
-        let no_cache = report(Path::new("borer.exe"), &dir, None, Some(&dir), || {
-            Reach::NotChecked
-        });
+        let no_cache = report(
+            Path::new("borer.exe"),
+            &dir,
+            Ok(None),
+            Ok(Some(&dir)),
+            || Reach::NotChecked,
+        );
         assert!(
             no_cache.contains("symbols    no cache directory: set BORER_SYMCACHE"),
             "{no_cache}"
@@ -490,7 +509,7 @@ mod tests {
     fn the_cache_and_the_toolchain_say_what_they_are() {
         let dir = scratch("symbols");
         std::fs::create_dir_all(dir.join("kernel32.pdb")).expect("a cached name");
-        let named = symbols_line(Some((&dir, true)), Reach::Reachable);
+        let named = symbols_line(Ok(Some((&dir, true))), Reach::Reachable);
         assert!(
             named.contains("(from BORER_SYMCACHE): 1 PDB name;"),
             "{named}"
@@ -499,11 +518,13 @@ mod tests {
             named.ends_with("msdl.microsoft.com:443 reachable"),
             "{named}"
         );
-        let missing = symbols_line(Some((&dir.join("none"), false)), Reach::Unreachable);
+        let missing = symbols_line(Ok(Some((&dir.join("none"), false))), Reach::Unreachable);
         assert!(
             missing.contains("(the default; BORER_SYMCACHE sets it): missing;"),
             "{missing}"
         );
+        let refused = symbols_line(Err("BORER_SYMCACHE: bad path"), Reach::NotChecked);
+        assert!(refused.contains("BORER_SYMCACHE: bad path;"), "{refused}");
         assert!(
             !toolchain_line("1.96.1", "rustc 1.96.1 (abc 2026-01-01)").contains("not the pinned")
         );

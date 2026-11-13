@@ -1,7 +1,5 @@
 //! CLI path, layout and size-cap tests.
 
-use std::process::Command;
-
 use super::{run, run_all};
 
 /// `--arch` with `--regions` maps a two-part dump where the command line
@@ -66,21 +64,39 @@ fn cli_max_file_caps_carved_slices_and_diff_loads() {
         vec!["--no-pdb", "triage", carved.as_str()],
         vec!["--arch", "x86_64", "diff", raw_s.as_ref(), pe_s.as_ref()],
     ] {
-        let out = Command::new(env!("CARGO_BIN_EXE_borer"))
-            .env("BORER_MAX_FILE", "16")
-            .args(&args)
-            .output()
-            .expect("spawn borer");
-        let said = format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
+        let (ok, said) = crate::contract::run_env(None, &[("BORER_MAX_FILE", "16")], &args);
+        assert!(
+            !ok && said.contains("past the 16-byte limit"),
+            "{args:?}: {said}"
         );
-        assert!(!out.status.success(), "{args:?}: {said}");
-        assert!(said.contains("past the 16-byte limit"), "{args:?}: {said}");
     }
     std::fs::remove_file(&pe).ok();
     std::fs::remove_file(&raw).ok();
+}
+
+/// `fetch-pdb` and `grep` refuse a share root in `BORER_SYMCACHE` or
+/// `BORER_CACHE_DIR` before touching the network or claiming the next load
+/// applies a cached symbol file.
+#[test]
+fn cli_refuses_a_share_in_symbol_and_index_caches() {
+    if !cfg!(windows) {
+        return;
+    }
+    let pe = std::env::temp_dir().join(format!("borer_symshare_{}.exe", std::process::id()));
+    std::fs::write(&pe, crate::contract::tiny_pe_with_pdb("app.pdb")).expect("writable");
+    let pe_s = pe.to_string_lossy();
+    let share = r"\\host.invalid\s";
+    let (ok, said) =
+        crate::contract::run_env(None, &[("BORER_SYMCACHE", share)], &["fetch-pdb", &pe_s]);
+    assert!(!ok && said.contains("names a network share"), "{said}");
+    assert!(!said.contains("next load applies it"), "{said}");
+    let (ok, said) = crate::contract::run_env(
+        None,
+        &[("BORER_CACHE_DIR", share)],
+        &["--no-pdb", "grep", &pe_s, "return"],
+    );
+    std::fs::remove_file(&pe).ok();
+    assert!(!ok && said.contains("names a network share"), "{said}");
 }
 
 /// Keeps `run` referenced by the submodule before more path tests land.

@@ -64,11 +64,7 @@ pub(super) fn held(
         .derived
         .get_or_build("code_index", path.clone(), || Mutex::new(None));
     let mut slot = slot.lock().unwrap_or_else(PoisonError::into_inner);
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "an index borer wrote in its cache"
-    )]
-    let Ok(meta) = std::fs::metadata(&path) else {
+    let Ok(Some(meta)) = borer_engine::program::checked_metadata(&path) else {
         *slot = None;
         return None;
     };

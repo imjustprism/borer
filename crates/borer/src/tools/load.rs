@@ -255,7 +255,7 @@ impl BorerServer {
                 None => Program::load_with_symsrv_max(
                     &path,
                     apply_pdb,
-                    symsrv::cache_dir().as_deref(),
+                    symsrv::cache_dir().ok().flatten().as_deref(),
                     max_file,
                 ),
             }
@@ -369,12 +369,7 @@ impl BorerServer {
             let Some(record) = p.pdb_record.as_ref() else {
                 return Err("the loaded binary names no companion pdb (no codeview record: not a PE, or a build without debug info)".to_owned());
             };
-            let Some(root) = symsrv::cache_dir() else {
-                return Err(format!(
-                    "no cache directory: set {}, LOCALAPPDATA, XDG_CACHE_HOME or HOME",
-                    symsrv::CACHE_ENV
-                ));
-            };
+            let root = symsrv::require_cache_dir()?;
             if let Some(found) = borer_engine::pdb::resolved(&p.path, record, Some(&root)) {
                 return Ok(format!(
                     "{} is this build's pdb and did not apply to this load (load_binary passed pdb=false, or it landed since): load_binary with pdb=true applies it; nothing to fetch",

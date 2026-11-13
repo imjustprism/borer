@@ -28,7 +28,8 @@ use rayon::prelude::*;
 
 mod key;
 mod memo;
-pub use key::index_key;
+use key::require_cache_dir;
+pub use key::{cache_base, cache_dir, index_key};
 
 /// Magic bytes opening an index file.
 const MAGIC: &[u8; 8] = b"BORERIDX";
@@ -391,48 +392,6 @@ pub fn program_key(bytes: &[u8]) -> u64 {
         .map_or(0, u64::from_le_bytes)
 }
 
-/// Where indexes live: `$BORER_CACHE_DIR`, else the platform cache directory
-/// (`%LOCALAPPDATA%\borer\index`, `$XDG_CACHE_HOME/borer/index`,
-/// `~/.cache/borer/index`).
-///
-/// # Returns
-///
-/// The directory, or `None` when no environment variable names a base.
-#[must_use]
-pub fn cache_dir() -> Option<PathBuf> {
-    if let Ok(dir) = std::env::var(CACHE_ENV)
-        && !dir.is_empty()
-    {
-        return Some(PathBuf::from(dir));
-    }
-    Some(cache_base()?.join("borer").join("index"))
-}
-
-/// The platform cache directory every borer cache hangs from:
-/// `%LOCALAPPDATA%`, `$XDG_CACHE_HOME`, else `~/.cache`.
-///
-/// # Returns
-///
-/// The directory, or `None` when no environment variable names a base.
-#[must_use]
-pub fn cache_base() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA")
-        .or_else(|| std::env::var_os("XDG_CACHE_HOME"))
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-}
-
-/// The cache directory, for a call that has to write there.
-///
-/// # Errors
-///
-/// When no environment variable names a base ([`cache_dir`]).
-fn require_cache_dir() -> Result<PathBuf, String> {
-    cache_dir().ok_or_else(|| {
-        format!("no cache directory: set {CACHE_ENV}, LOCALAPPDATA, XDG_CACHE_HOME or HOME")
-    })
-}
-
 /// Decompiles every function of `program` into an index, one stripe per core.
 ///
 /// # Arguments
@@ -746,8 +705,12 @@ pub fn decode(bytes: &[u8]) -> Option<CodeIndex> {
 ///
 /// # Errors
 ///
-/// When the directory cannot be created or the file cannot be written.
+/// When `path` names a share or a device, the directory cannot be created,
+/// or the file cannot be written.
 pub fn save_to(index: &CodeIndex, path: &Path) -> Result<(), String> {
+    if let Some(why) = borer_engine::program::unusable_path(path) {
+        return Err(why);
+    }
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     }
@@ -802,7 +765,7 @@ fn load_in(dir: &Path, key: IndexKey) -> Option<CodeIndex> {
 /// program, engine and packs.
 #[must_use]
 pub fn load_cached(program: &Program, packs: &Packs) -> Option<(CodeIndex, PathBuf)> {
-    let dir = cache_dir()?;
+    let dir = cache_dir().ok()??;
     let key = index_key(program, packs);
     load_in(&dir, key).map(|index| (index, dir.join(key.file_name())))
 }

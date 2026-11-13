@@ -196,7 +196,7 @@ fn target(address: &str) -> Result<Target, String> {
 /// widest a path component is on the filesystems the cache lives on.
 const NAME_MAX: usize = 255;
 
-/// Where fetched PDBs are cached.
+/// Returns the directory where fetched PDBs are cached.
 ///
 /// `$BORER_SYMCACHE`, else the platform cache directory beside the
 /// decompile index (`%LOCALAPPDATA%\borer\symsrv`,
@@ -205,13 +205,37 @@ const NAME_MAX: usize = 255;
 /// # Returns
 ///
 /// The directory, or `None` when no environment variable names a base.
-pub(crate) fn cache_dir() -> Option<PathBuf> {
-    if let Ok(dir) = std::env::var(CACHE_ENV)
+///
+/// # Errors
+///
+/// When the configured directory names a share or a device.
+pub(crate) fn cache_dir() -> Result<Option<PathBuf>, String> {
+    let found = if let Ok(dir) = std::env::var(CACHE_ENV)
         && !dir.is_empty()
     {
-        return Some(PathBuf::from(dir));
+        Some((PathBuf::from(dir), CACHE_ENV))
+    } else {
+        borer::index::cache_base().map(|b| (b.join("borer").join("symsrv"), "the symbol cache"))
+    };
+    let Some((dir, from)) = found else {
+        return Ok(None);
+    };
+    if let Some(why) = borer_engine::program::unusable_path(&dir) {
+        return Err(format!("{from}: {why}"));
     }
-    Some(borer::index::cache_base()?.join("borer").join("symsrv"))
+    Ok(Some(dir))
+}
+
+/// Returns the symbol cache directory for a caller that writes to it.
+///
+/// # Errors
+///
+/// When no environment variable names a base, or the configured directory
+/// names a share or a device.
+pub(crate) fn require_cache_dir() -> Result<PathBuf, String> {
+    cache_dir()?.ok_or_else(|| {
+        format!("no cache directory: set {CACHE_ENV}, LOCALAPPDATA, XDG_CACHE_HOME or HOME")
+    })
 }
 
 /// The file name a record's PDB is cached and asked for.
@@ -455,7 +479,10 @@ pub(crate) fn obtain(
         )
     })?;
     let dest = cache_path(root, name, &key);
-    if dest.is_file() {
+    if let Some(why) = borer_engine::program::unusable_path(root) {
+        return Err(why);
+    }
+    if borer_engine::program::checked_metadata(&dest)?.is_some_and(|m| m.is_file()) {
         return Ok(format!(
             "already cached at {}; the next load applies it",
             dest.display()
