@@ -1219,17 +1219,19 @@ fn stack_value(instr: &Instruction) -> Option<(i64, Ty)> {
 
 /// Returns the flags a shift leaves.
 ///
-/// SPEC: Intel SDM Vol. 2, SAL/SAR/SHL/SHR: the count is masked to five
-/// bits, six for a 64-bit operand, and a masked count of 0 affects no
-/// flag. A constant count masking to 0 (`shl eax, 32`) leaves the flags
-/// from before; one below the width sets CF to the last bit shifted out
-/// and ZF, SF and PF from the result, a wider one those three alone. A
-/// count that is no constant may mask to 0, so what it leaves is unknown.
+/// SPEC: Intel SDM Vol. 2, SAL/SAR/SHL/SHR and SHLD/SHRD: the count is
+/// masked to five bits, six for a 64-bit operand, and a masked count of 0
+/// affects no flag. A constant count masking to 0 (`shl eax, 32`, `shld
+/// eax, ebx, 32`) leaves the flags from before; one below the width sets
+/// CF to the last bit shifted out of the destination and ZF, SF and PF
+/// from the result, a wider one those three alone. A count that is no
+/// constant may mask to 0, so what it leaves is unknown.
 ///
 /// # Arguments
 ///
-/// * `mn` - `shl`, `sal`, `shr` or `sar`.
-/// * `l` - The shifted operand, as the shift reads it.
+/// * `mn` - `shl`, `sal`, `shr`, `sar`, `shld` or `shrd`.
+/// * `l` - The shifted operand, as the shift reads it: the destination of
+///   a `shld` or `shrd`.
 /// * `count` - The count, as the shift reads it.
 /// * `v` - The shifted value.
 /// * `bits` - Operand width.
@@ -1242,7 +1244,7 @@ fn shift_flags(mn: Mnemonic, l: Expr, count: &Expr, v: &Expr, bits: u8, before: 
     match n & count_mask {
         0 => before.clone(),
         n if n < u64::from(bits) => {
-            let pos = if matches!(mn, Mnemonic::Shr | Mnemonic::Sar) {
+            let pos = if matches!(mn, Mnemonic::Shr | Mnemonic::Sar | Mnemonic::Shrd) {
                 n - 1
             } else {
                 u64::from(bits) - n
@@ -1257,8 +1259,8 @@ fn shift_flags(mn: Mnemonic, l: Expr, count: &Expr, v: &Expr, bits: u8, before: 
 /// Returns the flags an instruction writes on every run: those a reader
 /// after it never has from before it.
 ///
-/// SPEC: Intel SDM Vol. 2, SAL/SAR/SHL/SHR and RCL/RCR/ROL/ROR: a count
-/// that masks to 0 affects no flag. iced counts a shift or rotate
+/// SPEC: Intel SDM Vol. 2, SAL/SAR/SHL/SHR, RCL/RCR/ROL/ROR and SHLD/SHRD:
+/// a count that masks to 0 affects no flag. iced counts a shift or rotate
 /// by `cl` as writing every flag it may ([`Instruction::rflags_modified`]),
 /// and `cl` may hold 0, so such an instruction writes none for sure and
 /// the flags before it stay live across it; an immediate count iced
@@ -1279,6 +1281,8 @@ pub(super) fn flags_always_written(instr: &Instruction) -> u32 {
             | Mnemonic::Ror
             | Mnemonic::Rcl
             | Mnemonic::Rcr
+            | Mnemonic::Shld
+            | Mnemonic::Shrd
     ) && instr.op_kind(count) == OpKind::Register
         && instr.op_register(count) == Register::CL;
     if by_cl { 0 } else { instr.rflags_modified() }

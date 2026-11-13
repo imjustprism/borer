@@ -361,3 +361,33 @@ fn a_16_bit_address_wraps_in_the_lifter_and_the_emulator() {
     assert!(text.contains("- 1) & 0xffff"), "{text}");
     agrees_with_the_emulator(&code);
 }
+
+/// A double shift whose count masks to 0 leaves every flag as it was, in
+/// the lifter as in the emulator: `shld eax, ebx, 32` shifts by nothing,
+/// so `sete` after it reads the zero flag of `cmp edx, 1`. The lifter once
+/// set the flags from the shifted value and read `al` as `eax == 0`.
+#[test]
+fn a_zero_count_double_shift_agrees_with_the_emulator() {
+    agrees_with_the_emulator(&[
+        0x83, 0xfa, 0x01, // ASM: cmp edx, 1
+        0x0f, 0xa4, 0xd8, 0x20, // ASM: shld eax, ebx, 32
+        0x0f, 0x94, 0xc0, // ASM: sete al
+        0xc3, // ASM: ret
+    ]);
+}
+
+/// A double shift by `cl` that masks to 0 keeps the overflow of the `sub`
+/// before it: `setl` after `sub edx, 1; shrd eax, ebx, cl` with `cl`
+/// cleared reads the subtraction's SF != OF, which overflows at `edx =
+/// 0x80000000`.
+#[test]
+fn a_zero_count_double_shift_by_cl_keeps_the_overflow_agrees_with_the_emulator() {
+    agrees_with_the_emulator(&[
+        0x33, 0xc9, // ASM: xor ecx, ecx
+        0xba, 0x00, 0x00, 0x00, 0x80, // ASM: mov edx, 0x80000000
+        0x83, 0xea, 0x01, // ASM: sub edx, 1
+        0x0f, 0xad, 0xd8, // ASM: shrd eax, ebx, cl
+        0x0f, 0x9c, 0xc0, // ASM: setl al
+        0xc3, // ASM: ret
+    ]);
+}

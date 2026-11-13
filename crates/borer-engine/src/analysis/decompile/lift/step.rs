@@ -814,11 +814,11 @@ impl Exec<'_, '_> {
                 };
                 let v = fold(
                     Op::Or,
-                    fold(near, dst, cnt, bits),
+                    fold(near, dst.clone(), cnt.clone(), bits),
                     fold(far, fold(far, src, Expr::Const(1), bits), rest, bits),
                     bits,
                 );
-                self.flags = Flags::Result(v.clone(), bits);
+                self.flags = shift_flags(mn, dst, &cnt, &v, bits, &self.flags);
                 self.write_op0(instr, v);
             }
             Mnemonic::Xorps | Mnemonic::Xorpd | Mnemonic::Pxor | Mnemonic::Pandn
