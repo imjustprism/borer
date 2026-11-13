@@ -18,6 +18,7 @@ use goblin::pe::data_directories::DataDirectoryType;
 
 use crate::num::{from_usize, u16_le, u32_le, u64_le};
 use crate::program::Section;
+use crate::text::Names;
 
 /// A handler the x64 unwind tables register for one function.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -799,15 +800,18 @@ fn file_slice<'a>(
 /// # Arguments
 ///
 /// * `pe` - The parsed file.
+/// * `bytes` - The whole file, for the Rich header, TLS and checksum.
 /// * `file_len` - Length of the whole file.
 /// * `sections` - The loader's sanity-checked sections.
 /// * `unwind_functions` - Number of function extents in the exception table.
+/// * `names` - The load's name budget.
 pub(crate) fn from_pe(
     pe: &PE<'_>,
     bytes: &[u8],
     file_len: u64,
     sections: &[Section],
     unwind_functions: usize,
+    names: &mut Names,
 ) -> Headers {
     use goblin::pe::dll_characteristic as dc;
     use goblin::pe::load_config::IMAGE_GUARD_CF_INSTRUMENTED;
@@ -880,7 +884,7 @@ pub(crate) fn from_pe(
             h.manifest = manifest_facts(m.data);
         }
     }
-    h.libraries = pe.libraries.iter().map(|l| (*l).to_owned()).collect();
+    h.libraries = pe.libraries.iter().map(|l| names.take(l)).collect();
     h.tls_callbacks = tls_callbacks(pe, bytes, sections);
     h.tls_index = pe
         .tls_data
@@ -1324,7 +1328,8 @@ fn elf_end(elf: &Elf<'_>) -> u64 {
 ///
 /// * `elf` - The parsed file.
 /// * `bytes` - The whole file, for the note segments and the overlay.
-pub(crate) fn from_elf(elf: &Elf<'_>, bytes: &[u8]) -> Headers {
+/// * `names` - The load's name budget.
+pub(crate) fn from_elf(elf: &Elf<'_>, bytes: &[u8], names: &mut Names) -> Headers {
     use goblin::elf::dynamic::{DF_1_NOW, DF_1_PIE, DF_BIND_NOW};
     use goblin::elf::header::{ET_CORE, ET_DYN, ET_EXEC, ET_REL};
     use goblin::elf::note::NT_GNU_BUILD_ID;
@@ -1344,10 +1349,10 @@ pub(crate) fn from_elf(elf: &Elf<'_>, bytes: &[u8]) -> Headers {
         ET_CORE => "ET_CORE",
         _ => "other",
     });
-    h.interpreter = elf.interpreter.map(str::to_owned);
+    h.interpreter = elf.interpreter.map(|i| names.take(i));
     h.metadata = metadata_ranges(elf);
     h.add_overlay(elf_end(elf), from_usize(bytes.len()));
-    h.libraries = elf.libraries.iter().map(|l| (*l).to_owned()).collect();
+    h.libraries = elf.libraries.iter().map(|l| names.take(l)).collect();
     h.stripped = Some(elf.syms.is_empty());
     let machine = elf.header.e_machine;
     if !matches!(machine, 3 | 62 | 183) {

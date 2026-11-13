@@ -35,6 +35,8 @@ mod machogen;
 
 #[path = "hostile/lift.rs"]
 mod lift;
+#[path = "hostile/names.rs"]
+mod names;
 #[path = "hostile/pdb.rs"]
 mod pdb;
 #[path = "hostile/projects.rs"]

@@ -1,4 +1,9 @@
-use super::{Strings, read_in};
+use super::Strings;
+
+/// Runs [`super::read_in`] with a fresh [`super::Text`] budget for a test.
+fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> super::Debug {
+    super::read_in(info, abbrev, strings, &mut super::Text::new(strings))
+}
 
 /// Builds an abbreviation table declaring a function and a parameter.
 fn abbrev() -> Vec<u8> {

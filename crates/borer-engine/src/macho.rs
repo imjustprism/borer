@@ -26,6 +26,7 @@ use goblin::mach::{Mach, MachO};
 use crate::headers::Headers;
 use crate::num::{from_usize, u16_le, u32_le, u64_le};
 use crate::program::{Arch, FileOff, Fit, Section, Symbol, SymbolKind, Va, fit_sections};
+use crate::text::{Names, head};
 
 /// `CPU_TYPE_X86`.
 const CPU_X86: u32 = 7;
@@ -134,6 +135,7 @@ struct RawSection {
 ///
 /// * `file` - The whole file.
 /// * `mach` - The file parsed.
+/// * `names` - The load's name budget.
 ///
 /// # Returns
 ///
@@ -145,10 +147,10 @@ struct RawSection {
 /// runs past the end of the file, or it does not parse even lossily, each
 /// said in words: a slice past the end loaded as an image of no
 /// architecture, with nothing to say why.
-pub(crate) fn load(file: &[u8], mach: &Mach<'_>) -> anyhow::Result<Loaded> {
+pub(crate) fn load(file: &[u8], mach: &Mach<'_>, names: &mut Names) -> anyhow::Result<Loaded> {
     match mach {
         Mach::Binary(m) => {
-            let mut loaded = image(file, m, 0);
+            let mut loaded = image(file, m, 0, names);
             loaded
                 .headers
                 .add_overlay(image_end(m), from_usize(file.len()));
@@ -202,7 +204,7 @@ pub(crate) fn load(file: &[u8], mach: &Mach<'_>) -> anyhow::Result<Loaded> {
                     )
                 }
             };
-            let mut loaded = image(file, &m, crate::num::saturating_usize(start));
+            let mut loaded = image(file, &m, crate::num::saturating_usize(start), names);
             loaded.lenient = lenient;
             let slices = arches
                 .iter()
@@ -541,13 +543,14 @@ fn unwind_starts(file: &[u8], raw: &[RawSection], text: u64) -> Vec<u64> {
 }
 
 /// A symbol's name as borer shows it: the C underscore dropped, which
-/// leaves a C++ name demanglable.
+/// leaves a C++ name demanglable, and cut to its [`head`], since many
+/// entries may name one string.
 ///
 /// # Arguments
 ///
 /// * `name` - The name as the table has it.
 fn plain(name: &str) -> &str {
-    name.strip_prefix('_').unwrap_or(name)
+    head(name.strip_prefix('_').unwrap_or(name))
 }
 
 /// Bytes of the smallest symbol table entry (a 32-bit `nlist`): a file
@@ -562,7 +565,8 @@ const NLIST_MIN: usize = 12;
 /// * `file` - The whole file.
 /// * `m` - The image.
 /// * `base` - Where the image begins in the file: zero for a thin file.
-fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
+/// * `names` - The load's name budget.
+fn image(file: &[u8], m: &MachO<'_>, base: usize, names: &mut Names) -> Loaded {
     let arch = match m.header.cputype {
         CPU_X86_64 => Arch::X86_64,
         CPU_X86 => Arch::X86,
@@ -591,8 +595,16 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
     }
     let fit = fit_sections(&mut sections, from_usize(file.len()));
 
+    let chain_starts = raw
+        .iter()
+        .find(|s| s.name == "__TEXT,__chain_starts")
+        .and_then(|s| {
+            let at = usize::try_from(s.offset).ok()?;
+            file.get(at..at.checked_add(usize::try_from(s.size).ok()?)?)
+        });
+    let relocs = crate::dyld::read(file, m, base, text, &sections, chain_starts, names);
     let mut symbols: Vec<Symbol> = Vec::new();
-    let mut seen: BTreeSet<(u64, String)> = BTreeSet::new();
+    let mut seen: BTreeSet<(u64, &str)> = BTreeSet::new();
     let mut named = 0usize;
     if let Some(table) = &m.symbols {
         for (name, nlist) in table
@@ -612,10 +624,11 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
             } else {
                 SymbolKind::Local
             };
-            if seen.insert((nlist.n_value, plain(name).to_owned())) {
+            let shown = plain(name);
+            if seen.insert((nlist.n_value, shown)) {
                 let thumb = arch == Arch::Arm && nlist.n_desc & N_ARM_THUMB_DEF != 0;
                 symbols.push(Symbol {
-                    name: plain(name).to_owned(),
+                    name: names.take(shown),
                     addr: nlist.n_value | u64::from(thumb),
                     kind,
                 });
@@ -654,9 +667,10 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
                         continue;
                     };
                     let slot = s.addr.wrapping_add(from_usize(i) * word);
-                    if !name.is_empty() && seen.insert((slot, plain(name).to_owned())) {
+                    let shown = plain(name);
+                    if !name.is_empty() && seen.insert((slot, shown)) {
                         symbols.push(Symbol {
-                            name: plain(name).to_owned(),
+                            name: names.take(shown),
                             addr: slot,
                             kind: SymbolKind::Import,
                         });
@@ -666,22 +680,6 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
         }
     }
 
-    let chain_starts = raw
-        .iter()
-        .find(|s| s.name == "__TEXT,__chain_starts")
-        .and_then(|s| {
-            let at = usize::try_from(s.offset).ok()?;
-            file.get(at..at.checked_add(usize::try_from(s.size).ok()?)?)
-        });
-    let relocs = crate::dyld::read(
-        file,
-        m,
-        base,
-        text,
-        &sections,
-        chain_starts,
-        m.libs.len().saturating_sub(1),
-    );
     let mut named_slots: BTreeMap<usize, usize> = BTreeMap::new();
     for b in &relocs.binds {
         let (Some(import), slots) = (
@@ -691,15 +689,16 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
             continue;
         };
         let name = plain(&import.name);
-        if *slots < SLOTS_PER_IMPORT && seen.insert((b.slot, name.to_owned())) {
+        if *slots < SLOTS_PER_IMPORT && seen.insert((b.slot, name)) {
             *slots += 1;
             symbols.push(Symbol {
-                name: name.to_owned(),
+                name: names.take(name),
                 addr: b.slot,
                 kind: SymbolKind::Import,
             });
         }
     }
+    drop(seen);
 
     let code = |va: u64| {
         sections
@@ -736,7 +735,7 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
         })
         .or_else(|| (m.entry != 0).then_some(m.entry));
 
-    let headers = headers(file, m, base, named == 0, function_ranges.len());
+    let headers = headers(file, m, base, named == 0, function_ranges.len(), names);
     Loaded {
         arch,
         is_64,
@@ -763,7 +762,15 @@ fn image(file: &[u8], m: &MachO<'_>, base: usize) -> Loaded {
 /// * `base` - Where the image begins in the file: zero for a thin file.
 /// * `stripped` - Whether its symbol table names nothing.
 /// * `functions` - How many functions its unwind and start tables give.
-fn headers(file: &[u8], m: &MachO<'_>, base: usize, stripped: bool, functions: usize) -> Headers {
+/// * `names` - The load's name budget.
+fn headers(
+    file: &[u8],
+    m: &MachO<'_>,
+    base: usize,
+    stripped: bool,
+    functions: usize,
+    names: &mut Names,
+) -> Headers {
     let kind = match m.header.filetype {
         0x1 => "object",
         0x2 => "executable",
@@ -786,7 +793,7 @@ fn headers(file: &[u8], m: &MachO<'_>, base: usize, stripped: bool, functions: u
     if m.header.flags & MH_NO_HEAP_EXECUTION != 0 {
         headers.mitigations.push("nx");
     }
-    headers.libraries = m.libs.iter().skip(1).map(|l| (*l).to_owned()).collect();
+    headers.libraries = m.libs.iter().skip(1).map(|l| names.take(l)).collect();
     headers.stripped = Some(stripped);
     headers.unwind_functions = functions;
     for lc in &m.load_commands {
@@ -815,7 +822,7 @@ fn headers(file: &[u8], m: &MachO<'_>, base: usize, stripped: bool, functions: u
                 if let Some(rest) = file.get(at..) {
                     let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
                     headers.interpreter =
-                        Some(String::from_utf8_lossy(&rest[..end.min(256)]).into_owned());
+                        Some(names.take(&String::from_utf8_lossy(&rest[..end.min(256)])));
                 }
             }
             CommandVariant::BuildVersion(b) => {
@@ -855,7 +862,7 @@ fn headers(file: &[u8], m: &MachO<'_>, base: usize, stripped: bool, functions: u
 mod tests {
     use goblin::mach::MachO;
 
-    use super::{SymbolKind, image};
+    use super::{Names, SymbolKind, image};
 
     /// Builds a 64-bit Mach-O image whose one `__DATA,__got` section sits
     /// at the top of the address space and names its slots through the
@@ -940,7 +947,7 @@ mod tests {
     fn a_got_at_the_top_of_the_space_names_its_slots() {
         let file = got_image(u64::MAX);
         let m = MachO::parse(&file, 0).expect("the image parses");
-        let loaded = image(&file, &m, 0);
+        let loaded = image(&file, &m, 0, &mut Names::for_file(file.len()));
         let slots: Vec<u64> = loaded
             .symbols
             .iter()
@@ -959,7 +966,7 @@ mod tests {
     fn a_got_away_from_the_top_names_its_slots() {
         let file = got_image(0x1000);
         let m = MachO::parse(&file, 0).expect("the image parses");
-        let loaded = image(&file, &m, 0);
+        let loaded = image(&file, &m, 0, &mut Names::for_file(file.len()));
         let slots: Vec<u64> = loaded
             .symbols
             .iter()

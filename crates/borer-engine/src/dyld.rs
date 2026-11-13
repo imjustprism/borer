@@ -28,15 +28,17 @@
 //! panic or a hang.
 
 use std::collections::BTreeMap;
+use std::hash::{Hash as _, Hasher as _};
 
 use goblin::mach::MachO;
 use goblin::mach::load_command::CommandVariant;
 
-use crate::fxmap::FxHashSet;
+use crate::fxmap::{FxHashSet, FxHasher};
 use crate::macho::uleb;
 use crate::num::{u16_le, u32_le, u64_le};
 use crate::program::{Program, Section, SectionRow};
 use crate::reloc::{Bind, Claim, ENTRIES_MAX, Import, Relocs, Signing, Table, file_range, settle};
+use crate::text::{Names, OUTSIDE_MAX, head};
 
 /// `DYLD_CHAINED_PTR_START_NONE`: a page no chain starts in.
 const START_NONE: u16 = 0xffff;
@@ -317,17 +319,25 @@ fn sleb(data: &[u8], at: &mut usize) -> Option<i64> {
 ///
 /// # Returns
 ///
-/// The name and its length without the NUL, or `None` when no NUL ends it
+/// The name, cut to its [`head`] since many entries may name one string,
+/// and the bytes it takes before its NUL, or `None` when no NUL ends it
 /// within [`NAME_MAX`] bytes or it is empty.
 fn name_at(data: &[u8], at: usize) -> Option<(String, usize)> {
+    /// Bytes covering [`OUTSIDE_MAX`] + 3 four-byte UTF-8 scalars, including a C `_`.
+    const HEAD_BYTES: usize = (OUTSIDE_MAX + 3) * 4;
     let rest = data.get(at..)?;
     let len = rest.iter().take(NAME_MAX).position(|&b| b == 0)?;
     let name = rest.get(..len).filter(|n| !n.is_empty())?;
-    Some((String::from_utf8_lossy(name).into_owned(), len))
+    let decoded = String::from_utf8_lossy(&name[..name.len().min(HEAD_BYTES)]);
+    let cut = match decoded.strip_prefix('_') {
+        Some(tail) => &decoded[..1 + head(tail).len()],
+        None => head(&decoded),
+    };
+    Some((cut.to_owned(), len))
 }
 
 /// The fixups one image claims, gathered before they settle.
-struct Walk<'a> {
+struct Walk<'a, 'n> {
     /// The whole file.
     file: &'a [u8],
     /// The image's mapped sections.
@@ -340,6 +350,8 @@ struct Walk<'a> {
     base: u64,
     /// The linked libraries, which a bind's ordinal counts into.
     libraries: usize,
+    /// The load's name budget, charged once per distinct import.
+    names: &'n mut Names,
     /// The words claimed.
     claims: Vec<Claim>,
     /// Every word a chain walked or an opcode bind named: a chain running
@@ -349,16 +361,16 @@ struct Walk<'a> {
     taken: FxHashSet<u64>,
     /// The imports named so far.
     imports: Vec<Import>,
-    /// Each import's index in [`Walk::imports`], by name, ordinal and weak
-    /// flag, for the opcode binds that name one symbol many times.
-    interned: BTreeMap<(String, i64, bool), usize>,
+    /// Each import's index in [`Walk::imports`], keyed by name hash, ordinal
+    /// and weak flag and verified against the stored name.
+    interned: BTreeMap<(u64, i64, bool), usize>,
     /// Entries refused.
     refused: usize,
     /// Fixups left to read, claimed or refused, before the cap.
     fuel: usize,
 }
 
-impl Walk<'_> {
+impl Walk<'_, '_> {
     /// Spends one unit of fuel.
     ///
     /// # Returns
@@ -396,18 +408,22 @@ impl Walk<'_> {
     ///
     /// Its index in [`Walk::imports`].
     fn intern(&mut self, name: &str, ordinal: i64, weak: bool) -> usize {
-        let next = self.imports.len();
-        let k = *self
-            .interned
-            .entry((name.to_owned(), ordinal, weak))
-            .or_insert(next);
-        if k == next {
-            self.imports.push(Import {
-                name: name.to_owned(),
-                ordinal,
-                weak,
-            });
+        let mut hasher = FxHasher::default();
+        name.hash(&mut hasher);
+        let key = (hasher.finish(), ordinal, weak);
+        if let Some(&k) = self.interned.get(&key)
+            && self.imports.get(k).is_some_and(|i| i.name == name)
+        {
+            return k;
         }
+        let k = self.imports.len();
+        let kept = self.names.take(name);
+        self.interned.insert(key, k);
+        self.imports.push(Import {
+            name: kept,
+            ordinal,
+            weak,
+        });
         k
     }
 
@@ -1024,8 +1040,7 @@ fn linkedit(file: &[u8], base: usize, off: u32, size: u32) -> Option<&[u8]> {
 /// * `sections` - The image's sections, fit to the file.
 /// * `chain_starts` - The `__TEXT,__chain_starts` section's bytes, when
 ///   the image has one.
-/// * `libraries` - How many libraries the image links, which a bind's
-///   ordinal counts into.
+/// * `names` - The load's name budget.
 ///
 /// # Returns
 ///
@@ -1037,7 +1052,7 @@ pub(crate) fn read(
     image_base: u64,
     sections: &[Section],
     chain_starts: Option<&[u8]>,
-    libraries: usize,
+    names: &mut Names,
 ) -> Relocs {
     let segments: Vec<Segment> = m
         .load_commands
@@ -1067,7 +1082,8 @@ pub(crate) fn read(
         index: Program::index_sections(sections),
         segments: &segments,
         base: image_base,
-        libraries,
+        libraries: m.libs.len().saturating_sub(1),
+        names,
         claims: Vec::new(),
         taken: FxHashSet::default(),
         imports: Vec::new(),

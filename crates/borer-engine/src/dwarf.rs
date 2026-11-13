@@ -1100,24 +1100,24 @@ fn unit_header(c: &mut Cursor<'_>) -> Option<(usize, usize, u64, usize)> {
 ///
 /// A unit that does not parse is skipped and the rest of the file still
 /// reads, which matters on a rebuilt image where one section may be damaged.
-/// The names and type text copied out are held to [`TEXT_MAX`] bytes
-/// ([`Text`]): the walk stops at the unit that spends it.
+/// The names and type text copied out are held to `text`'s copy budget: the
+/// walk stops at the unit that spends it.
 ///
 /// # Arguments
 ///
 /// * `info` - `.debug_info`.
 /// * `abbrev` - `.debug_abbrev`.
 /// * `strings` - The string sections.
+/// * `text` - The interned-string and copy budgets for this read.
 ///
 /// # Returns
 ///
 /// The named functions, and the stated types by name.
-fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> Debug {
+fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>, text: &mut Text) -> Debug {
     let mut out: Vec<Subprogram> = Vec::new();
     let mut types: BTreeMap<String, UserType> = BTreeMap::new();
     let mut typedefs: BTreeMap<String, String> = BTreeMap::new();
     let mut globals: Vec<Global> = Vec::new();
-    let mut text = Text::new(strings);
     let mut tables = Abbrevs::new(abbrev);
     let mut at = 0usize;
     let mut units = 0usize;
@@ -1562,6 +1562,32 @@ pub struct Debug {
 /// carries no debug information.
 #[must_use]
 pub fn read(sections: &[Section], unmapped: &[Section], bytes: &[u8]) -> Debug {
+    read_budgeted(
+        sections,
+        unmapped,
+        bytes,
+        &mut crate::text::Names::with_budget(TEXT_MAX),
+    )
+}
+
+/// Reads what a program's debug information states within `names`'s budget.
+///
+/// # Arguments
+///
+/// * `sections` - The image's mapped sections, named or stripped.
+/// * `unmapped` - Sections the file holds that no segment maps.
+/// * `bytes` - The whole file.
+/// * `names` - The load's remaining name budget, charged with what DWARF copies.
+///
+/// # Returns
+///
+/// The named functions and the stated types, or empty when no debug sections exist.
+pub(crate) fn read_budgeted(
+    sections: &[Section],
+    unmapped: &[Section],
+    bytes: &[u8],
+    names: &mut crate::text::Names,
+) -> Debug {
     let all: Vec<&Section> = sections.iter().chain(unmapped).collect();
     let info = debug_section(&all, bytes, ".debug_info");
     let abbrev = debug_section(&all, bytes, ".debug_abbrev");
@@ -1572,7 +1598,12 @@ pub fn read(sections: &[Section], unmapped: &[Section], bytes: &[u8]) -> Debug {
         text: debug_section(&all, bytes, ".debug_str"),
         lines: debug_section(&all, bytes, ".debug_line_str"),
     };
-    read_in(info, abbrev, &strings)
+    let mut text = Text::new(&strings);
+    let cap = names.left().min(TEXT_MAX);
+    text.copy_left = cap;
+    let out = read_in(info, abbrev, &strings, &mut text);
+    names.spend(cap - text.copy_left);
+    out
 }
 
 #[cfg(test)]

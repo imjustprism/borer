@@ -65,6 +65,196 @@ pub fn one_line(text: &str) -> String {
     escaped(text, OUTSIDE_MAX)
 }
 
+/// Returns the head of a name from a file's table: its first
+/// [`OUTSIDE_MAX`] + 1 characters, all a row can show of it and one more.
+///
+/// A loader copies this head where it would copy the whole name, because
+/// many entries may name one string: 21,800 symbols of a 1 MiB file that
+/// all named one 512 KiB string made 11 GB of copies before [`adopt`] cut
+/// each one. A name of at most `OUTSIDE_MAX` + 1 characters comes back
+/// whole, so [`one_line`] shows it as before, and the one character past
+/// what a row can show keeps a longer one shown cut, ending in `...`.
+/// Fencing ([`fenced`]) is decided on the head rather than the tail cut
+/// off: a paired tag that opens in the head and closes only past it stays
+/// unfenced, its closing tag already cut away.
+///
+/// # Arguments
+///
+/// * `name` - The name as the table spells it.
+///
+/// # Returns
+///
+/// A prefix of `name` at most [`OUTSIDE_MAX`] + 1 characters long.
+#[must_use]
+pub(crate) fn head(name: &str) -> &str {
+    if name.len() <= OUTSIDE_MAX + 1 {
+        return name;
+    }
+    match name.char_indices().nth(OUTSIDE_MAX + 1) {
+        Some((cut, _)) => &name[..cut],
+        None => name,
+    }
+}
+
+/// Load-time budget for names copied out of one file's tables.
+///
+/// [`head`] bounds each copy to what a row can show; `Names` bounds all
+/// copies across a load to twice the file's byte length, so thousands of
+/// small table entries naming one string stay within the per-byte heap bar.
+/// Past the budget, each further non-empty name becomes `name_<n>` in read
+/// order and [`Names::note`] reports how many were replaced.
+pub(crate) struct Names {
+    /// Bytes of name text the load may still copy verbatim.
+    left: usize,
+    /// Names replaced once [`Names::left`] could not hold one.
+    cut: usize,
+}
+
+impl Names {
+    /// Creates the name budget for a file of `file_len` bytes.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_len` - Byte length of the loaded file.
+    ///
+    /// # Returns
+    ///
+    /// A budget allowing up to `2 * file_len` bytes of copied name heads.
+    #[must_use]
+    pub(crate) fn for_file(file_len: usize) -> Self {
+        Self::with_budget(file_len.saturating_mul(2))
+    }
+
+    /// Creates a name budget with an explicit byte allowance.
+    ///
+    /// # Arguments
+    ///
+    /// * `left` - Maximum bytes of name text to copy verbatim.
+    ///
+    /// # Returns
+    ///
+    /// A fresh budget with `left` bytes available and zero replacements.
+    #[must_use]
+    pub(crate) fn with_budget(left: usize) -> Self {
+        Self { left, cut: 0 }
+    }
+
+    /// Returns how many verbatim bytes remain in the budget.
+    ///
+    /// # Returns
+    ///
+    /// Remaining byte allowance.
+    #[must_use]
+    pub(crate) fn left(&self) -> usize {
+        self.left
+    }
+
+    /// Reports whether the verbatim byte allowance has reached zero.
+    ///
+    /// # Returns
+    ///
+    /// `true` when no further non-empty name can be copied verbatim.
+    #[must_use]
+    pub(crate) fn is_spent(&self) -> bool {
+        self.left == 0
+    }
+
+    /// Deducts `bytes` already copied under a sub-budget such as DWARF's.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - Bytes copied into the program's debug text.
+    pub(crate) fn spend(&mut self, bytes: usize) {
+        self.left = self.left.saturating_sub(bytes);
+    }
+
+    /// Copies the [`head`] of `raw` within the budget, or synthesizes a
+    /// short placeholder once the budget cannot hold it.
+    ///
+    /// An empty name stays empty without spending budget or counting as
+    /// replaced, since `String::new` allocates nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - The name as the file's table spells it.
+    ///
+    /// # Returns
+    ///
+    /// The owned head of `raw`, or `name_<n>` when the budget is spent.
+    pub(crate) fn take(&mut self, raw: &str) -> String {
+        if raw.is_empty() {
+            return String::new();
+        }
+        let h = head(raw);
+        match self.left.checked_sub(h.len()) {
+            Some(left) => {
+                self.left = left;
+                h.to_owned()
+            }
+            None => self.placeholder(),
+        }
+    }
+
+    /// Joins `left` and `right` around `sep` and copies the [`head`] within
+    /// the budget, or returns a placeholder without formatting when spent.
+    ///
+    /// # Arguments
+    ///
+    /// * `left` - Prefix before `sep`, such as a DLL name.
+    /// * `sep` - Separator character between `left` and `right`.
+    /// * `right` - Suffix after `sep`, such as an imported symbol name.
+    ///
+    /// # Returns
+    ///
+    /// The owned head of `"{left}{sep}{right}"`, or `name_<n>` when spent.
+    pub(crate) fn joined(&mut self, left: &str, sep: char, right: &str) -> String {
+        if self.left == 0 {
+            return self.placeholder();
+        }
+        self.take(&format!("{}{sep}{}", head(left), head(right)))
+    }
+
+    /// Synthesizes the next replacement name (`name_1`, `name_2`, ...).
+    ///
+    /// # Returns
+    ///
+    /// A short deterministic placeholder allocated to its exact length.
+    pub(crate) fn placeholder(&mut self) -> String {
+        self.left = 0;
+        self.cut = self.cut.saturating_add(1);
+        let mut buf = [0u8; 25];
+        buf[..5].copy_from_slice(b"name_");
+        let mut n = self.cut;
+        let mut at = buf.len();
+        while n > 0 || at == buf.len() {
+            at -= 1;
+            buf[at] = b'0' + u8::try_from(n % 10).unwrap_or(0);
+            n /= 10;
+        }
+        let digits = buf.len() - at;
+        buf.copy_within(at.., 5);
+        std::str::from_utf8(&buf[..5 + digits])
+            .unwrap_or("name")
+            .to_owned()
+    }
+
+    /// Formats a load warning when any names exceeded the budget.
+    ///
+    /// # Returns
+    ///
+    /// The warning line for `Headers::lenient`, or `None` when every name fit.
+    #[must_use]
+    pub(crate) fn note(&self) -> Option<String> {
+        (self.cut > 0).then(|| {
+            format!(
+                "{} name{} past the load name budget replaced",
+                self.cut,
+                plural(self.cut)
+            )
+        })
+    }
+}
+
 /// Escapes the text a program holds out of its file, so that each piece
 /// renders as one bounded line ([`one_line`]).
 ///
@@ -786,8 +976,8 @@ pub fn parse_hex_bytes(text: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Aimed, OUTSIDE_MAX, PATH_MAX, aimed, aimed_lines, edits_within, fenced, nearest, one_line,
-        plural, quoted, short_path,
+        Aimed, OUTSIDE_MAX, PATH_MAX, aimed, aimed_lines, edits_within, fenced, head, nearest,
+        one_line, plural, quoted, short_path,
     };
 
     /// A count's noun takes its plural from either width a count is held in.
@@ -875,6 +1065,43 @@ mod tests {
         let out = one_line(&"é".repeat(10_000));
         assert_eq!(out.chars().count(), OUTSIDE_MAX + 3);
         assert!(out.starts_with("éé"), "{out}");
+    }
+
+    /// A name's head is shown as the whole name is unless a paired tag opens
+    /// in the head and closes only past it, where the closing tag is cut off
+    /// either way.
+    ///
+    /// # Panics
+    ///
+    /// When a head exceeds `OUTSIDE_MAX + 1` characters, differs on an
+    /// unsplit name, or [`Names`] fails to replace names past its budget.
+    #[test]
+    fn a_names_head_is_shown_as_the_name_is() {
+        let whole = "é".repeat(OUTSIDE_MAX + 1);
+        assert_eq!(head(&whole), whole);
+        for name in [
+            "n".repeat(OUTSIDE_MAX),
+            whole,
+            "é".repeat(10_000),
+            "\u{1b}[2J".repeat(OUTSIDE_MAX),
+            format!("<system>hi</system>{}", "x".repeat(OUTSIDE_MAX)),
+        ] {
+            assert!(head(&name).chars().count() <= OUTSIDE_MAX + 1);
+            assert_eq!(one_line(head(&name)), one_line(&name));
+        }
+        let split = format!("<system>{}</system>", "x".repeat(300));
+        let shown = one_line(head(&split));
+        assert!(shown.starts_with("<system>x") && shown.ends_with("..."));
+        assert!(!shown.contains("</system>"));
+        let mut budget = super::Names::with_budget(8);
+        assert_eq!(budget.take(""), "");
+        assert_eq!(budget.take("alpha"), "alpha");
+        assert_eq!(budget.take("beta"), "name_1");
+        assert_eq!(budget.joined("a.dll", '!', "f"), "name_2");
+        assert_eq!(
+            budget.note().as_deref(),
+            Some("2 names past the load name budget replaced")
+        );
     }
 
     /// A path keeps both ends, because its name is at the far one.

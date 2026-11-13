@@ -15,6 +15,7 @@ use crate::entropy::shannon;
 use crate::headers::Headers;
 use crate::isa::Isa;
 use crate::num::{from_usize, saturating_usize, u32_le};
+use crate::text::{Names, head};
 
 mod arch;
 mod arm;
@@ -25,9 +26,8 @@ pub use arch::{Arch, Feature};
 pub use file::{Parent, checked_metadata, open_regular, read_regular, unusable_path};
 use file::{Take, magic_name, parse_object, read_program_bytes};
 use pe::{
-    DIRECTORY_ENTRY, SANE_MAX, arm64_pdata, delay_imports, directory_entry, disarm_exports,
-    implausible_imports, loosen_pe, name_ordinal_imports, ordinal_exports, restore, rva_to_va,
-    sound_section_table,
+    DIRECTORY_ENTRY, SANE_MAX, arm64_pdata, directory_entry, disarm_exports, implausible_imports,
+    loosen_pe, name_ordinal_imports, pe_symbols, restore, rva_to_va, sound_section_table,
 };
 
 /// Container format of the loaded file.
@@ -893,6 +893,7 @@ impl Program {
         let mut headers = Headers::default();
         let mut flat_fallback = false;
         let file_len = from_usize(bytes.len());
+        let mut names = Names::for_file(bytes.len());
         let mut fit = Fit::default();
         let mut pdb_record: Option<crate::pdb::Record> = None;
         let mut relocs = crate::reloc::Relocs::default();
@@ -958,11 +959,11 @@ impl Program {
                         Some(Section {
                             name: s.name().map_or_else(
                                 |_| {
-                                    String::from_utf8_lossy(&s.name)
-                                        .trim_end_matches('\0')
-                                        .to_owned()
+                                    names.take(
+                                        String::from_utf8_lossy(&s.name).trim_end_matches('\0'),
+                                    )
                                 },
-                                str::to_owned,
+                                |n| names.take(n),
                             ),
                             va: Va(va),
                             vsize,
@@ -993,44 +994,13 @@ impl Program {
                 }
 
                 let va_of_off = |off: u64| -> u64 { offset_to_va_in(&sections, off).unwrap_or(0) };
-                for imp in &pe.imports {
-                    let name = if imp.name.is_empty() {
-                        "(unnamed)".to_owned()
-                    } else {
-                        imp.name.to_string()
-                    };
-                    let dll = imp.dll.trim_end_matches('\0');
-                    let rva = if imp.offset != 0 { imp.offset } else { imp.rva };
-                    let addr = pe.image_base.wrapping_add(from_usize(rva));
-                    symbols.push(Symbol {
-                        name: format!("{dll}!{name}"),
-                        addr,
-                        kind: SymbolKind::Import,
-                    });
-                }
-                for exp in &pe.exports {
-                    let name = exp
-                        .name
-                        .map_or_else(|| format!("sub_{:x}", exp.rva), |n| n.to_owned());
-                    symbols.push(Symbol {
-                        name,
-                        addr: pe.image_base.wrapping_add(from_usize(exp.rva)),
-                        kind: if exp.reexport.is_some() {
-                            SymbolKind::Forwarder
-                        } else {
-                            SymbolKind::Export
-                        },
-                    });
-                }
-                symbols.extend(ordinal_exports(pe));
-                let delayed = if refused_imports.is_none() {
-                    delay_imports(&bytes, pe.image_base, pe.is_64)
-                } else {
-                    Vec::new()
-                };
-                let mut delay_slots: Vec<u64> = delayed.iter().map(|s| s.addr).collect();
-                delay_slots.sort_unstable();
-                symbols.extend(delayed);
+                let delay_slots = pe_symbols(
+                    pe,
+                    &bytes,
+                    refused_imports.is_none(),
+                    &mut names,
+                    &mut symbols,
+                );
                 if arch == Arch::X86_64
                     && let Some(ex) = &pe.exception_data
                 {
@@ -1096,7 +1066,14 @@ impl Program {
                     chained_chunks = fragments;
                 }
                 headers = caught(|| {
-                    crate::headers::from_pe(pe, &bytes, file_len, &sections, function_ranges.len())
+                    crate::headers::from_pe(
+                        pe,
+                        &bytes,
+                        file_len,
+                        &sections,
+                        function_ranges.len(),
+                        &mut names,
+                    )
                 })
                 .unwrap_or_default();
                 headers.exception_handlers = exception_handlers;
@@ -1126,12 +1103,12 @@ impl Program {
                 /// `SHF_EXECINSTR`.
                 const EXEC: u64 = 0x4;
                 for sh in &elf.section_headers {
-                    let name = elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("");
+                    let raw = elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("");
                     let nobits = sh.sh_type == goblin::elf::section_header::SHT_NOBITS;
                     if !sh.is_alloc() || elf.header.e_type == goblin::elf::header::ET_REL {
-                        if name.starts_with(".debug_") && !nobits {
+                        if raw.starts_with(".debug_") && !nobits {
                             unmapped.push(Section {
-                                name: name.to_owned(),
+                                name: names.take(raw),
                                 va: Va(0),
                                 vsize: 0,
                                 file_off: FileOff(sh.sh_offset),
@@ -1144,7 +1121,7 @@ impl Program {
                         continue;
                     }
                     sections.push(Section {
-                        name: name.to_owned(),
+                        name: names.take(raw),
                         va: Va(sh.sh_addr),
                         vsize: sh.sh_size,
                         file_off: FileOff(sh.sh_offset),
@@ -1210,24 +1187,21 @@ impl Program {
                 relocs = applied.relocs;
                 let strs = &elf.dynstrtab;
                 for (i, sym) in elf.dynsyms.iter().enumerate() {
-                    let Some(name) = strs.get_at(sym.st_name) else {
+                    let Some(raw) = strs.get_at(sym.st_name).filter(|n| !n.is_empty()) else {
                         continue;
                     };
-                    if name.is_empty() {
-                        continue;
-                    }
                     if sym.st_shndx == 0 {
                         let slots = slots_of.get(&i).map_or(&[0][..], Vec::as_slice);
                         for &addr in slots {
                             symbols.push(Symbol {
-                                name: name.to_owned(),
+                                name: names.take(raw),
                                 addr,
                                 kind: SymbolKind::Import,
                             });
                         }
                     } else if sym.st_value != 0 {
                         symbols.push(Symbol {
-                            name: name.to_owned(),
+                            name: names.take(raw),
                             addr: sym.st_value,
                             kind: SymbolKind::Export,
                         });
@@ -1244,16 +1218,14 @@ impl Program {
                     if !(is_code || is_data) || sym.st_value == 0 {
                         continue;
                     }
-                    let Some(name) = elf.strtab.get_at(sym.st_name) else {
+                    let Some(raw) = elf.strtab.get_at(sym.st_name).filter(|n| !n.is_empty()) else {
                         continue;
                     };
-                    if name.is_empty() {
-                        continue;
-                    }
+                    let shown = head(raw);
                     if is_data {
-                        if !exported.contains(&(sym.st_value, name)) {
+                        if !exported.contains(&(sym.st_value, shown)) {
                             locals.push(Symbol {
-                                name: name.to_owned(),
+                                name: names.take(raw),
                                 addr: sym.st_value,
                                 kind: SymbolKind::Data,
                             });
@@ -1265,15 +1237,20 @@ impl Program {
                     {
                         function_ranges.push((sym.st_value, end));
                     }
-                    if !exported.contains(&(sym.st_value, name)) {
+                    if !exported.contains(&(sym.st_value, shown)) {
                         locals.push(Symbol {
-                            name: name.to_owned(),
+                            name: names.take(raw),
                             addr: sym.st_value,
                             kind: SymbolKind::Local,
                         });
                     }
                 }
-                symbols.extend(locals);
+                drop(exported);
+                if symbols.is_empty() {
+                    symbols = locals;
+                } else {
+                    symbols.extend(locals);
+                }
                 let mut unwind = 0usize;
                 if let Some(sec) = sections.iter().find(|s| s.name == ".eh_frame")
                     && let (Ok(off), Ok(size)) = (
@@ -1295,12 +1272,12 @@ impl Program {
                         }
                     }
                 }
-                headers = crate::headers::from_elf(elf, &bytes);
+                headers = crate::headers::from_elf(elf, &bytes, &mut names);
                 headers.unwind_functions = unwind;
             }
             goblin::Object::Mach(mach) => {
                 format = BinaryFormat::MachO;
-                let loaded = crate::macho::load(&bytes, mach)?;
+                let loaded = crate::macho::load(&bytes, mach, &mut names)?;
                 arch = loaded.arch;
                 arm_default = crate::isa::a32::Mode::Thumb;
                 is_64 = loaded.is_64;
@@ -1343,7 +1320,7 @@ impl Program {
         headers.truncated = fit.cut;
         headers.implausible_imports = refused_imports;
         headers.implausible_exports = disarmed.map(|d| d.count);
-        let debug = crate::dwarf::read(&sections, &unmapped, &bytes);
+        let debug = crate::dwarf::read_budgeted(&sections, &unmapped, &bytes, &mut names);
         let mut named = debug.subprograms;
         phases.mark("load dwarf");
         let pdb = if apply_pdb {
@@ -1378,7 +1355,7 @@ impl Program {
         for sub in &named {
             if sub.low_pc != 0 && !already.contains(&sub.low_pc) {
                 symbols.push(Symbol {
-                    name: sub.name.clone(),
+                    name: names.take(&sub.name),
                     addr: sub.low_pc,
                     kind: SymbolKind::Local,
                 });
@@ -1416,6 +1393,7 @@ impl Program {
             parent: None,
             modes,
         };
+        program.headers.lenient.extend(names.note());
         crate::text::adopt(&mut program);
         program.read_go();
         phases.mark("load go");

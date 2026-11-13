@@ -126,7 +126,7 @@ crates/borer-engine/src/carve.rs::elf#1	105
 crates/borer-engine/src/clr.rs::clr_tsv#1	134
 crates/borer-engine/src/clr.rs::read#2	280
 crates/borer-engine/src/crypto.rs::scan#1	152
-crates/borer-engine/src/dwarf.rs::read_in#1	375
+crates/borer-engine/src/dwarf.rs::read_in#1	374
 crates/borer-engine/src/dyld.rs::binds#1	117
 crates/borer-engine/src/emulate/a32/exec.rs::step#1	351
 crates/borer-engine/src/emulate/a32/fpu.rs::vfp#1	201
@@ -143,9 +143,9 @@ crates/borer-engine/src/isa/a32/thumb.rs::narrow#1	254
 crates/borer-engine/src/isa/a64/decode.rs::mnemonic#1	233
 crates/borer-engine/src/isa/a64/roles.rs::data#1	142
 crates/borer-engine/src/layout.rs::program#1	120
-crates/borer-engine/src/macho.rs::image#1	184
+crates/borer-engine/src/macho.rs::image#1	179
 crates/borer-engine/src/pdb.rs::gather#1	145
-crates/borer-engine/src/program/mod.rs::from_bytes_with#1	558
+crates/borer-engine/src/program/mod.rs::from_bytes_with#1	536
 crates/borer-engine/src/program/mod.rs::summary#1	164
 crates/borer-engine/src/script.rs::register#1	297
 crates/borer-engine/src/unwind.rs::cxx4#1	109
