@@ -302,7 +302,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
         Query::Functions => {
             let a = s.analysis(Feature::Discover)?;
             let (offset, limit) = cli_page(args, 3, 100, 300)?;
-            let (_, _, text) = render::functions_tsv(
+            let rows = render::function_rows(
                 &a,
                 &s.overlay,
                 args.get(2).map(String::as_str).filter(|f| !f.is_empty()),
@@ -310,7 +310,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 offset,
                 limit,
             );
-            print!("{text}");
+            print!("{}", rows.spell());
         }
         Query::Function => print!("{}", s.function_text(args)?),
         Query::Summary => {

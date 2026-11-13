@@ -444,7 +444,7 @@ fn an_import_is_a_leaf_of_the_callgraph() {
 /// `QString::QString`.
 #[test]
 fn an_import_thunk_is_listed_apart_from_the_functions() {
-    use borer_engine::analysis::render::{FunctionOrder, function_detail, functions_tsv};
+    use borer_engine::analysis::render::{FunctionOrder, function_detail, function_rows};
     let mut code = vec![0xe8, 0x0b, 0x00, 0x00, 0x00, 0xc3];
     code.resize(0x10, 0xcc);
     code.extend_from_slice(&[0xff, 0x25, 0x00, 0x21, 0x40, 0x00]);
@@ -457,11 +457,13 @@ fn an_import_thunk_is_listed_apart_from_the_functions() {
     let a = Analysis::compute(&p);
     let o = Overlay::default();
     assert_eq!(a.function(0x401010).and_then(|f| f.thunk), Some(0x402100));
-    let (_, total, all) = functions_tsv(&a, &o, None, FunctionOrder::Address, 0, 50);
+    let listed = function_rows(&a, &o, None, FunctionOrder::Address, 0, 50);
+    let (total, all) = (listed.total, listed.spell());
     assert_eq!(total, 1, "{all}");
     assert!(all.contains("1 import thunks left out"), "{all}");
     assert!(!all.contains("0x401010"), "{all}");
-    let (_, only, page) = functions_tsv(&a, &o, Some("thunk"), FunctionOrder::Address, 0, 50);
+    let thunks = function_rows(&a, &o, Some("thunk"), FunctionOrder::Address, 0, 50);
+    let (only, page) = (thunks.total, thunks.spell());
     assert_eq!(only, 1, "{page}");
     assert!(page.contains("0x401010"), "{page}");
     let detail = function_detail(&a, &o, 0x401010, 0).unwrap_or_default();

@@ -162,7 +162,7 @@ fn a_call_to_the_stack_probe_keeps_this_a_parameter() {
 /// and one try block with one catch clause at 0x401070.
 #[test]
 fn an_exception_funclet_belongs_to_its_parent() {
-    use borer_engine::analysis::render::{FunctionOrder, functions_tsv};
+    use borer_engine::analysis::render::{FunctionOrder, function_rows};
     use borer_engine::analysis::{Funclet, FuncletRole};
     let mut p = funclet_image(&[0xff, 0x25, 0x00, 0x21, 0x40, 0x00]);
     p.symbols = vec![Symbol {
@@ -191,7 +191,7 @@ fn an_exception_funclet_belongs_to_its_parent() {
     assert_eq!(name(0x401050).as_deref(), Some("sub_401000::__unwind_0"));
     assert_eq!(name(0x401060).as_deref(), Some("sub_401000::__unwind_1"));
     assert_eq!(name(0x401070).as_deref(), Some("sub_401000::__catch_0_0"));
-    let listing = functions_tsv(
+    let listing = function_rows(
         &a,
         &Overlay::default(),
         None,
@@ -199,7 +199,7 @@ fn an_exception_funclet_belongs_to_its_parent() {
         0,
         100,
     )
-    .2;
+    .spell();
     assert!(
         listing.contains("4 exception funclets left out, filter=funclet lists them"),
         "{listing}"

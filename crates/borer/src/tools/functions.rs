@@ -166,8 +166,9 @@ impl BorerServer {
         let page = Page::new(offset, limit, count_only, 50, 300)?;
         let order = sort.unwrap_or_default().into();
         self.with_analysis(Feature::Discover, |_, a, o| {
-            let (shown, _, text) =
-                render::functions_tsv(a, o, filter.as_deref(), order, page.offset, page.limit.n);
+            let rows =
+                render::function_rows(a, o, filter.as_deref(), order, page.offset, page.limit.n);
+            let (shown, text) = (rows.rows.len(), rows.spell());
             if page.count_only {
                 let head = text.lines().next().unwrap_or_default();
                 let counted = head

@@ -111,9 +111,91 @@ pub fn select_functions<'a>(a: &'a Analysis, o: &Overlay, filter: Option<&str>) 
     }
 }
 
-/// Renders the paged function table of what a filter selects
-/// ([`select_functions`]); the header says how many import thunks and
-/// exception funclets were left out.
+/// One row of the function table: the facts its line spells.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionRow {
+    /// Entry address.
+    pub entry: u64,
+    /// Bytes of code its blocks hold ([`Function::size`]).
+    pub size: u64,
+    /// Basic blocks.
+    pub blocks: usize,
+    /// Decoded instructions.
+    pub instrs: usize,
+    /// Functions that call it.
+    pub callers: usize,
+    /// Distinct near call targets it calls.
+    pub callees: usize,
+    /// Where the name came from: `usr` for a user name, else the code of
+    /// [`Function::name_source`].
+    pub src: &'static str,
+    /// The name in force ([`name_of`]).
+    pub name: String,
+}
+
+/// One page of the function table, with what its header counts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionRows {
+    /// Functions the filter selected, on every page.
+    pub total: usize,
+    /// What the selected are ([`Selection::noun`]).
+    pub noun: &'static str,
+    /// The order the rows are in.
+    pub order: FunctionOrder,
+    /// Every import thunk and exception funclet left out, counted whether or
+    /// not the filter matches it, as the header says it
+    /// ([`Selection::left_out`]); empty under `thunk` and `funclet`.
+    pub left_out: String,
+    /// The walk ran out of instruction budget ([`Analysis::incomplete`]), so
+    /// the table may be short.
+    pub incomplete: bool,
+    /// The page's rows, in [`FunctionRows::order`].
+    pub rows: Vec<FunctionRow>,
+}
+
+impl FunctionRows {
+    /// Returns the page as the `functions` tool and the CLI print it.
+    ///
+    /// # Returns
+    ///
+    /// A `# showing N of M functions` line (`import thunks` or
+    /// `exception funclets` in place of `functions` under the filter that
+    /// lists only them, then `, largest first` under
+    /// [`FunctionOrder::Size`] and what was left out), the
+    /// [`INCOMPLETE_NOTE`] line when the walk ran out of budget, a column
+    /// header, then one `entry size blocks instrs callers callees src name`
+    /// line per row.
+    #[must_use]
+    pub fn spell(&self) -> String {
+        let order = match self.order {
+            FunctionOrder::Address => "",
+            FunctionOrder::Size => ", largest first",
+        };
+        let mut out = format!(
+            "# showing {} of {} {}{order}{}\n",
+            self.rows.len(),
+            self.total,
+            self.noun,
+            self.left_out
+        );
+        if self.incomplete {
+            out.push_str(INCOMPLETE_NOTE);
+            out.push('\n');
+        }
+        out.push_str("# entry size blocks instrs callers callees src name\n");
+        for r in &self.rows {
+            let _ = writeln!(
+                out,
+                "{:#x} {} {} {} {} {} {} {}",
+                r.entry, r.size, r.blocks, r.instrs, r.callers, r.callees, r.src, r.name
+            );
+        }
+        out
+    }
+}
+
+/// Returns one page of the function table as rows: the functions a filter
+/// selects ([`select_functions`]), in an order.
 ///
 /// # Arguments
 ///
@@ -122,62 +204,59 @@ pub fn select_functions<'a>(a: &'a Analysis, o: &Overlay, filter: Option<&str>) 
 /// * `filter` - The filter, as [`select_functions`] reads it.
 /// * `order` - By entry, or the largest first.
 /// * `offset` - Matches to skip first (paging).
-/// * `limit` - Maximum rows to render.
+/// * `limit` - Maximum rows.
 ///
 /// # Returns
 ///
-/// `(shown, total, text)`: the text starts with `# showing N of M functions`
-/// (`, largest first` under [`FunctionOrder::Size`]), a `# warning:` line
-/// when the analysis ran out of instruction budget, and a column header,
-/// then one `entry size blocks instrs callers callees name` row per
-/// function.
-pub fn functions_tsv(
+/// The page's rows, with the total the filter selected and what the header
+/// says of it.
+#[must_use]
+pub fn function_rows(
     a: &Analysis,
     o: &Overlay,
     filter: Option<&str>,
     order: FunctionOrder,
     offset: usize,
     limit: usize,
-) -> (usize, usize, String) {
+) -> FunctionRows {
     let Selection {
         functions: mut matched,
         noun,
         left_out,
     } = select_functions(a, o, filter);
-    let order_note = match order {
-        FunctionOrder::Address => "",
+    match order {
         FunctionOrder::Size => {
             matched.sort_by_cached_key(|f| (std::cmp::Reverse(f.size()), f.entry));
-            ", largest first"
         }
-    };
-    let total = matched.len();
-    let shown = total.saturating_sub(offset).min(limit);
-    let mut out = format!("# showing {shown} of {total} {noun}{order_note}{left_out}\n");
-    if a.incomplete {
-        out.push_str(INCOMPLETE_NOTE);
-        out.push('\n');
+        FunctionOrder::Address => {}
     }
-    out.push_str("# entry size blocks instrs callers callees src name\n");
-    for f in matched.iter().skip(offset).take(limit) {
-        let src = if o.names.contains_key(&f.entry) {
-            "usr"
-        } else {
-            f.name_source.code()
-        };
-        let _ = writeln!(
-            out,
-            "{:#x} {} {} {} {} {} {src} {}",
-            f.entry,
-            f.size(),
-            f.blocks.len(),
-            f.instr_count,
-            f.callers.len(),
-            f.callees.len(),
-            name_of(a, o, f.entry)
-        );
+    let rows = matched
+        .iter()
+        .skip(offset)
+        .take(limit)
+        .map(|f| FunctionRow {
+            entry: f.entry,
+            size: f.size(),
+            blocks: f.blocks.len(),
+            instrs: f.instr_count,
+            callers: f.callers.len(),
+            callees: f.callees.len(),
+            src: if o.names.contains_key(&f.entry) {
+                "usr"
+            } else {
+                f.name_source.code()
+            },
+            name: name_of(a, o, f.entry),
+        })
+        .collect();
+    FunctionRows {
+        total: matched.len(),
+        noun,
+        order,
+        left_out,
+        incomplete: a.incomplete,
+        rows,
     }
-    (shown, total, out)
 }
 
 /// The digits `{:x}` spells a value with.
@@ -1502,5 +1581,168 @@ mod tests {
         assert_eq!(forwards, 1);
         let summary = p.summary();
         assert!(summary.contains("exports: 2 (1 forwarded)"), "{summary}");
+    }
+
+    /// Builds the function table's fixture: three functions, an import
+    /// thunk and an exception funclet.
+    ///
+    /// `sub_1000` calls the next two; the symbol `helper` is as large as
+    /// `sub_1000` and a user renamed it `parse_header`; `big` is the
+    /// largest.
+    ///
+    /// # Returns
+    ///
+    /// The analysis, its walk finished, and the overlay with the rename.
+    fn listed() -> (Analysis, Overlay) {
+        let block = |start: u64, end: u64| BasicBlock {
+            start,
+            end,
+            term: BlockTerm::Ret,
+            successors: smallvec::SmallVec::new(),
+        };
+        let mut caller = bare(0x1000, None);
+        caller.blocks = vec![block(0x1000, 0x1010), block(0x1010, 0x1020)];
+        caller.instr_count = 9;
+        caller.callees = vec![0x1040, 0x1080];
+        let mut helper = bare(0x1040, Some("helper"));
+        helper.name_source = NameSource::Symbol;
+        helper.blocks = vec![block(0x1040, 0x1060)];
+        helper.instr_count = 7;
+        helper.callers = vec![0x1000];
+        let mut big = bare(0x1080, Some("big"));
+        big.name_source = NameSource::Helper;
+        big.blocks = vec![block(0x1080, 0x10c0)];
+        big.instr_count = 20;
+        big.callers = vec![0x1000];
+        let mut thunk = bare(0x10c0, Some("KERNEL32.dll!ExitProcess"));
+        thunk.name_source = NameSource::Symbol;
+        thunk.blocks = vec![block(0x10c0, 0x10c6)];
+        thunk.instr_count = 1;
+        thunk.thunk = Some(0x2000);
+        let mut funclet = bare(0x10d0, Some("sub_1000::__unwind_0"));
+        funclet.funclet = Some(crate::analysis::Funclet {
+            parent: 0x1000,
+            role: crate::analysis::FuncletRole::Unwind(0),
+        });
+        let mut a = Analysis {
+            functions: vec![caller, helper, big, thunk, funclet],
+            ..Analysis::default()
+        };
+        let p = Program::raw(
+            Vec::new(),
+            crate::program::Arch::X86_64,
+            0,
+            None,
+            Vec::new(),
+        );
+        a.finish_index(&p);
+        let mut o = Overlay::default();
+        o.names.insert(0x1040, "parse_header".to_owned());
+        (a, o)
+    }
+
+    /// The rows are the functions the filter selected, in address order,
+    /// with their total.
+    ///
+    /// A user's name reads `usr`, the size order puts the largest first
+    /// with a tie by entry, and an offset past the end gives no rows and
+    /// the whole total.
+    ///
+    /// # Panics
+    ///
+    /// When a row, the order or the total differs.
+    #[test]
+    fn function_rows_page_the_selected_functions_in_order() {
+        let (a, o) = listed();
+        let entries = |page: &FunctionRows| page.rows.iter().map(|r| r.entry).collect::<Vec<_>>();
+        let by_entry = function_rows(&a, &o, None, FunctionOrder::Address, 0, 50);
+        assert_eq!(entries(&by_entry), [0x1000, 0x1040, 0x1080]);
+        assert_eq!(by_entry.total, 3);
+        assert_eq!(
+            by_entry.rows[0],
+            FunctionRow {
+                entry: 0x1000,
+                size: 0x20,
+                blocks: 2,
+                instrs: 9,
+                callers: 0,
+                callees: 2,
+                src: "-",
+                name: "sub_1000".to_owned(),
+            }
+        );
+        assert_eq!(
+            (by_entry.rows[1].src, by_entry.rows[1].name.as_str()),
+            ("usr", "parse_header")
+        );
+        assert_eq!(by_entry.rows[2].src, "hlp");
+        let by_size = function_rows(&a, &o, None, FunctionOrder::Size, 0, 50);
+        assert_eq!(entries(&by_size), [0x1080, 0x1000, 0x1040]);
+        let past = function_rows(&a, &o, None, FunctionOrder::Address, 10, 50);
+        assert!(past.rows.is_empty(), "{past:?}");
+        assert_eq!(past.total, 3);
+    }
+
+    /// A page of rows spells, byte for byte, the text the function table
+    /// printed before it had rows.
+    ///
+    /// The text pinned holds the header with its order and what was left
+    /// out, the warning of a walk out of budget, the column header and the
+    /// rows, a user's name among them.
+    ///
+    /// # Panics
+    ///
+    /// When the text differs from the table's.
+    #[test]
+    fn spelled_rows_are_the_text_the_table_printed() {
+        let (mut a, o) = listed();
+        a.incomplete = true;
+        assert_eq!(
+            function_rows(&a, &o, None, FunctionOrder::Size, 1, 2).spell(),
+            "# showing 2 of 3 functions, largest first; 1 import thunks left out, filter=thunk lists them; 1 exception funclets left out, filter=funclet lists them
+# warning: analysis incomplete, instruction budget exhausted: functions past it were not discovered, so lists, callers and xrefs may be short
+# entry size blocks instrs callers callees src name
+0x1000 32 2 9 0 2 - sub_1000
+0x1040 32 1 7 1 0 usr parse_header
+"
+        );
+    }
+
+    /// `thunk` lists the import thunks alone, under their own noun and with
+    /// nothing left out; a header in address order names no order.
+    ///
+    /// # Panics
+    ///
+    /// When the text differs from the table's.
+    #[test]
+    fn the_thunk_filter_lists_the_import_thunks_alone() {
+        let (a, o) = listed();
+        let thunks = function_rows(&a, &o, Some("thunk"), FunctionOrder::Address, 0, 50);
+        assert_eq!(
+            thunks.spell(),
+            "# showing 1 of 1 import thunks
+# entry size blocks instrs callers callees src name
+0x10c0 6 1 1 0 0 sym KERNEL32.dll!ExitProcess
+"
+        );
+    }
+
+    /// `funclet` lists the exception funclets alone, under their own noun
+    /// and with nothing left out.
+    ///
+    /// # Panics
+    ///
+    /// When the text differs from the table's.
+    #[test]
+    fn the_funclet_filter_lists_the_exception_funclets_alone() {
+        let (a, o) = listed();
+        let funclets = function_rows(&a, &o, Some("funclet"), FunctionOrder::Address, 0, 50);
+        assert_eq!(
+            funclets.spell(),
+            "# showing 1 of 1 exception funclets
+# entry size blocks instrs callers callees src name
+0x10d0 0 0 0 0 0 - sub_1000::__unwind_0
+"
+        );
     }
 }

@@ -123,11 +123,11 @@ fn a_function_in_a_gap_between_blocks_is_still_found() {
 fn function_filters_accept_an_0x_prefixed_address() {
     let a = Analysis::compute(&fixture());
     let o = Overlay::default();
-    use borer_engine::analysis::render::{FunctionOrder, functions_tsv};
-    let bare = functions_tsv(&a, &o, Some("1230"), FunctionOrder::Address, 0, 50);
-    let prefixed = functions_tsv(&a, &o, Some("0x1230"), FunctionOrder::Address, 0, 50);
-    assert_eq!(bare.2, prefixed.2);
-    assert!(prefixed.2.contains("0x1230"), "{}", prefixed.2);
+    use borer_engine::analysis::render::{FunctionOrder, function_rows};
+    let bare = function_rows(&a, &o, Some("1230"), FunctionOrder::Address, 0, 50);
+    let prefixed = function_rows(&a, &o, Some("0x1230"), FunctionOrder::Address, 0, 50);
+    assert_eq!(bare.spell(), prefixed.spell());
+    assert!(prefixed.spell().contains("0x1230"), "{}", prefixed.spell());
 }
 
 /// A function's size counts the bytes of its blocks, not the span it covers.

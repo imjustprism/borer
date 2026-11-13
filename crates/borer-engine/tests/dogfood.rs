@@ -344,8 +344,8 @@ fn the_same_binary_answers_the_same_bytes_twice() {
         ("binary_info", p.summary(), p.summary()),
         (
             "functions",
-            render::functions_tsv(first, &o, None, render::FunctionOrder::Address, 0, 100).2,
-            render::functions_tsv(second, &o, None, render::FunctionOrder::Address, 0, 100).2,
+            render::function_rows(first, &o, None, render::FunctionOrder::Address, 0, 100).spell(),
+            render::function_rows(second, &o, None, render::FunctionOrder::Address, 0, 100).spell(),
         ),
         (
             "crypto",
