@@ -1858,3 +1858,20 @@ fn a_check_through_strlen_and_strcmp_answers_as_the_binary_does() {
     assert!(!reached.contains("0x101a"), "{one}");
     assert!(!one.contains("\nnot modeled\t"), "{one}");
 }
+
+/// The header names what a proved block is measured against: the lift,
+/// whose reading of each instruction the proof shares, so a block it
+/// proves is `proved vs lift`, never proved of the machine.
+#[test]
+fn the_header_says_a_block_is_proved_against_the_lift() {
+    let p = program(
+        &[
+            0x48, 0x8d, 0x41, 0x01, // ASM: lea rax, [rcx+1]
+            0xc3, // ASM: ret
+        ],
+        &[],
+    );
+    let a = Analysis::compute(&p);
+    let header = checked_header(&p, &a, &Overlay::default(), TEXT).unwrap_or_default();
+    assert!(header.contains("1/1 blocks: 1 proved vs lift;"), "{header}");
+}

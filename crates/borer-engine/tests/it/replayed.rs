@@ -455,7 +455,7 @@ fn a_canary_prologue_and_epilogue_are_checked() {
     let a = Analysis::compute(&p);
     let header = checked_header(&p, &a, &Overlay::default(), 0x1_4000_1000).expect("checked");
     assert!(
-        header.contains("2/3 blocks: 2 proved, 1 unknown; unchecked: 1 not in text,"),
+        header.contains("2/3 blocks: 2 proved vs lift, 1 unknown; unchecked: 1 not in text,"),
         "{header}"
     );
     replays_clean(&p, &a, &[0x1_4000_1000]);
@@ -472,7 +472,7 @@ fn a_canary_prologue_and_epilogue_are_checked() {
     let header = checked_header(&p, &a, &Overlay::default(), 0x1_4000_1000).expect("checked");
     assert!(
         header.contains(
-            "1/3 blocks: 0 proved, 1 tested x3 states, 2 unknown; unchecked: 1 fs/gs access, 1 not in text,"
+            "1/3 blocks: 0 proved vs lift, 1 tested x3 states, 2 unknown; unchecked: 1 fs/gs access, 1 not in text,"
         ),
         "{header}"
     );
@@ -514,7 +514,7 @@ fn a_thread_block_field_is_checked_where_the_machine_plants_it() {
         code.push(0xc3); // ASM: ret
         let header = checked_as(&code, arch, format);
         assert!(
-            header.contains("1/1 blocks: 1 proved;"),
+            header.contains("1/1 blocks: 1 proved vs lift;"),
             "{code:x?}: {header}"
         );
     }
@@ -534,7 +534,7 @@ fn a_thread_block_field_is_checked_where_the_machine_plants_it() {
         )
     };
     let (header, r) = read_through(0x60, 0x30);
-    assert!(header.contains("1/1 blocks: 1 proved;"), "{header}");
+    assert!(header.contains("1/1 blocks: 1 proved vs lift;"), "{header}");
     assert_eq!(
         r.unreadable.get(&Claim::Return),
         Some(&3),
@@ -567,8 +567,25 @@ fn a_thread_block_field_is_checked_where_the_machine_plants_it() {
         code.push(0xc3); // ASM: ret
         let header = checked_as(&code, Arch::X86_64, format);
         assert!(
-            header.contains("0/1 blocks: 0 proved, 1 unknown; unchecked: 1 fs/gs access,"),
+            header.contains("0/1 blocks: 0 proved vs lift, 1 unknown; unchecked: 1 fs/gs access,"),
             "{code:x?}: {header}"
         );
     }
+}
+
+/// The replay's report names what a proved block is measured against, the
+/// lift, as the decompile header does: the proof shares the lifter's
+/// reading of each instruction.
+#[test]
+fn the_replay_report_says_proved_vs_lift() {
+    let p = program64(&[
+        0x48, 0x8d, 0x41, 0x01, // ASM: lea rax, [rcx+1]
+        0xc3, // ASM: ret
+    ]);
+    let a = Analysis::compute(&p);
+    let report = replay_tsv(&replay_function(&p, &a, 0x1_4000_1000, 1));
+    assert!(
+        report.contains("\n# proved vs lift over every state: "),
+        "{report}"
+    );
 }

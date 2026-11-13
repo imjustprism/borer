@@ -125,17 +125,17 @@ fn scalar_float_blocks_are_checked_not_counted() {
     let header = |entry: u64| checked_header(&p, &a, &o, entry).unwrap_or_default();
     assert_eq!(
         header(0x1300),
-        "// checked vs binary: statements as emitted, 1/1 blocks: 1 proved; unchecked: C spelling, later text passes",
+        "// checked vs binary: statements as emitted, 1/1 blocks: 1 proved vs lift; unchecked: C spelling, later text passes",
         "FL"
     );
     assert_eq!(
         header(0x1320),
-        "// checked vs binary: statements as emitted, 1/1 blocks: 0 proved, 1 tested x3 states; unchecked: C spelling, later text passes",
+        "// checked vs binary: statements as emitted, 1/1 blocks: 0 proved vs lift, 1 tested x3 states; unchecked: C spelling, later text passes",
         "FL2"
     );
     assert_eq!(
         header(0x13f0),
-        "// checked vs binary: statements as emitted, 2/2 blocks: 1 proved, 1 tested x3 states; unchecked: C spelling, later text passes",
+        "// checked vs binary: statements as emitted, 2/2 blocks: 1 proved vs lift, 1 tested x3 states; unchecked: C spelling, later text passes",
         "FR"
     );
     let fl3 = header(0x1340);

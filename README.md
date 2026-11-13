@@ -70,7 +70,7 @@ of the text was checked against the machine code it came from:
 ```console
 $ borer decompile ntdll.dll 0x180102184
 // sub_180102184 @ 0x180102184: 6 instructions, 3 blocks
-// checked vs binary: statements as emitted, 3/3 blocks: 3 proved; unchecked: C spelling, later text passes
+// checked vs binary: statements as emitted, 3/3 blocks: 3 proved vs lift; unchecked: C spelling, later text passes
 // signature: uint64_t sub_180102184(uint64_t a1, uint8_t *a2, uint32_t a3)
 ...
 if (a2 == nullptr) {
@@ -85,7 +85,7 @@ binary on the same inputs and grades the result.
 ```console
 $ borer certify ntdll.dll 0x180102184
 # certify for sub_180102184 (0x180102184): what of its decompilation was checked against the binary; agreement is evidence, not proof
-lift	statements as emitted, 3/3 blocks: 3 proved; unchecked: C spelling, later text passes
+lift	statements as emitted, 3/3 blocks: 3 proved vs lift; unchecked: C spelling, later text passes
 text	20 of 64 inputs agree as ISO C, 44 unchecked, 0 differ (seed 1, 20000 steps each)
 unchecked	44	the binary did not return: fault at 0x500000010050
 reached	2 of 3 blocks; never reached: 0x180102191
@@ -380,7 +380,7 @@ $ borer layout ntdll.dll RtlInitUnicodeString
 
 $ borer decompile ntdll.dll RtlInitUnicodeString
 // RtlInitUnicodeString @ 0x1800993c0: 19 instructions, 4 blocks
-// checked vs binary: statements as emitted, 4/4 blocks: 2 proved, 2 tested x3 states; unchecked: C spelling, later text passes
+// checked vs binary: statements as emitted, 4/4 blocks: 2 proved vs lift, 2 tested x3 states; unchecked: C spelling, later text passes
 // signature: void RtlInitUnicodeString(PUNICODE_STRING a1, PCWSTR a2)
 // effects: writes a1, a1+8, a1+2
 // layout a1: 0x2 u16, 0x8 u64

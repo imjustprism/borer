@@ -46,7 +46,7 @@ pub fn replay_tsv(r: &Replayed) -> String {
     let refuted: BTreeSet<(u64, u64)> = r.refuted.iter().map(|d| (d.function, d.block)).collect();
     let _ = writeln!(
         out,
-        "# proved over every state: {} of {} checked blocks; {} refuted by a state the proof chose",
+        "# proved vs lift over every state: {} of {} checked blocks; {} refuted by a state the proof chose",
         r.proved,
         r.checked,
         refuted.len()

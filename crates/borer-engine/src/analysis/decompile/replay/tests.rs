@@ -1107,7 +1107,7 @@ fn an_answer_says_what_of_it_was_checked() {
     let header = checked_header(&p, &a, &o, 0x1000).expect("checked");
     assert_eq!(
         header,
-        "// checked vs binary: statements as emitted, 3/3 blocks: 3 proved; unchecked: C spelling, later text passes"
+        "// checked vs binary: statements as emitted, 3/3 blocks: 3 proved vs lift; unchecked: C spelling, later text passes"
     );
     let text = decompile_named(&p, &a, &o, 0x1000).expect("text");
     assert!(!text.contains("checked vs binary"), "{text}");
@@ -1186,7 +1186,7 @@ fn the_header_names_the_statements_the_binary_contradicts() {
     };
     assert_eq!(
         check.header(),
-        "// checked vs binary: statements as emitted, 8/8 blocks: 5 proved, 3 tested x3 states; disagree at 0x404171; unchecked: C spelling, later text passes"
+        "// checked vs binary: statements as emitted, 8/8 blocks: 5 proved vs lift, 3 tested x3 states; disagree at 0x404171; unchecked: C spelling, later text passes"
     );
     let many = TextCheck {
         blocks: 9,
@@ -1196,7 +1196,7 @@ fn the_header_names_the_statements_the_binary_contradicts() {
     };
     assert_eq!(
         many.header(),
-        "// checked vs binary: statements as emitted, 8/9 blocks: 5 proved, 3 tested x3 states, 1 unknown; disagree at 0x401000, 0x401001, 0x401002, 0x401003 (+2 more); unchecked: 1 float/vector, C spelling, later text passes"
+        "// checked vs binary: statements as emitted, 8/9 blocks: 5 proved vs lift, 3 tested x3 states, 1 unknown; disagree at 0x401000, 0x401001, 0x401002, 0x401003 (+2 more); unchecked: 1 float/vector, C spelling, later text passes"
     );
 }
 
@@ -1316,7 +1316,7 @@ fn the_header_grades_blocks_proved_tested_and_unknown() {
     };
     assert_eq!(
         all.header(),
-        "// checked vs binary: statements as emitted, 4/4 blocks: 4 proved; unchecked: C spelling, later text passes"
+        "// checked vs binary: statements as emitted, 4/4 blocks: 4 proved vs lift; unchecked: C spelling, later text passes"
     );
     let none = TextCheck {
         checked: 3,
@@ -1326,7 +1326,7 @@ fn the_header_grades_blocks_proved_tested_and_unknown() {
     };
     assert_eq!(
         none.header(),
-        "// checked vs binary: statements as emitted, 3/4 blocks: 0 proved, 3 tested x3 states, 1 unknown; unchecked: 1 over budget, C spelling, later text passes"
+        "// checked vs binary: statements as emitted, 3/4 blocks: 0 proved vs lift, 3 tested x3 states, 1 unknown; unchecked: 1 over budget, C spelling, later text passes"
     );
 }
 
@@ -1375,7 +1375,7 @@ fn blocks_past_the_budget_are_counted_unchecked() {
     );
     assert_eq!(
         TextCheck::of(&r).header(),
-        "// checked vs binary: statements as emitted, 1/3 blocks: 1 proved, 2 unknown; unchecked: 2 over budget, C spelling, later text passes"
+        "// checked vs binary: statements as emitted, 1/3 blocks: 1 proved vs lift, 2 unknown; unchecked: 2 over budget, C spelling, later text passes"
     );
 }
 

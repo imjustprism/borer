@@ -986,24 +986,30 @@ impl TextCheck {
     /// compared with the emulator. Each checked block is graded: proved
     /// when its claims hold over every state, symbolically against the
     /// lifter's semantics of its instructions, tested when only the states
-    /// tried agree; blocks not checked are unknown. A statement the
-    /// machine does not bear out, on a state tried or on one the proof
-    /// chose to tell a claim's sides apart, is named by its instruction,
-    /// the first [`DISAGREE_SHOWN`] of them, so a block that was compared
-    /// and found wrong never reads as agreement; the blocks left out are
-    /// counted by why. What a statement computes is checked, not how its C
-    /// is spelled (a cast that makes C's `>>` the signed one, a constant
-    /// written as a literal), and the text passes after the emission are
-    /// not checked either, which the line says too. One line on every
-    /// answer costs tokens, so it is terse, and a grade no block has is
-    /// left out: `// checked vs binary: statements as emitted, 41/44
-    /// blocks: 30 proved, 11 tested x3 states, 3 unknown; disagree at
-    /// 0x401a2c; unchecked: 2 float/vector, 1 over budget, C spelling,
-    /// later text passes`.
+    /// tried agree; blocks not checked are unknown. The proof's machine is
+    /// the lifter itself ([`prove`]), so the line says `proved vs lift`:
+    /// the text equals the lift on every state, and met the emulator on
+    /// the one state tried before the proof, not on every state.
+    /// A misreading of an instruction the lifter makes is proved, and only
+    /// the states tried and [`super::verify`] hold the lift to the
+    /// emulator, which may share it. A statement the machine does not bear
+    /// out, on a state tried or on one the proof chose to tell a claim's
+    /// sides apart, is named by its instruction, the first
+    /// [`DISAGREE_SHOWN`] of them, so a block that was compared and found
+    /// wrong never reads as agreement; the blocks left out are counted by
+    /// why. What a statement computes is checked, not how its C is spelled
+    /// (a cast that makes C's `>>` the signed one, a constant written as a
+    /// literal), and the text passes after the emission are not checked
+    /// either, which the line says too. One line on every answer costs
+    /// tokens, so it is terse, and a grade no block has is left out: `//
+    /// checked vs binary: statements as emitted, 41/44 blocks: 30 proved
+    /// vs lift, 11 tested x3 states, 3 unknown; disagree at 0x401a2c;
+    /// unchecked: 2 float/vector, 1 over budget, C spelling, later text
+    /// passes`.
     #[must_use]
     pub fn header(&self) -> String {
         let mut out = format!(
-            "// checked vs binary: statements as emitted, {}/{} blocks: {} proved",
+            "// checked vs binary: statements as emitted, {}/{} blocks: {} proved vs lift",
             self.checked, self.blocks, self.proved
         );
         let tested = self.checked.saturating_sub(self.proved);
