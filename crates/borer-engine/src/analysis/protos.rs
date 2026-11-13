@@ -303,10 +303,7 @@ impl Proto {
                 Tok::Star => toks.push(tok),
             }
         }
-        if toks.len() > 1
-            && let Some(Tok::Word(last)) = toks.last()
-            && !is_type_word(last)
-        {
+        if names_fn(&toks) {
             toks.pop();
         }
         if toks.is_empty() {
@@ -875,6 +872,27 @@ fn is_type_word(word: &str) -> bool {
     ) || typelib::pass_of(word, 64, BinaryFormat::Pe).is_some()
 }
 
+/// Tells whether the last token before `(` is the function's optional name
+/// rather than the return type's own word.
+///
+/// # Arguments
+///
+/// * `toks` - The return type's tokens, plus the function name when stated.
+fn names_fn(toks: &[Tok]) -> bool {
+    let [before @ .., Tok::Word(last)] = toks else {
+        return false;
+    };
+    !before.is_empty()
+        && !is_type_word(last)
+        && !matches!(
+            before.last(),
+            Some(Tok::Word(w)) if matches!(w.as_str(), "struct" | "union" | "enum")
+        )
+        && !before
+            .iter()
+            .all(|t| matches!(t, Tok::Word(w) if matches!(w.as_str(), "const" | "volatile")))
+}
+
 /// Reads one parameter: `Player *p`, `int`, `char buf[]`.
 ///
 /// # Arguments
@@ -948,7 +966,7 @@ mod tests {
 
     use super::{CType, CallConv, Proto, Var, VarKey};
     use crate::analysis::typelib::Pass;
-    use crate::analysis::utypes::{TypeExpr, UserType, build_struct};
+    use crate::analysis::utypes::{TypeExpr, UserType, build_enum, build_struct};
     use crate::program::BinaryFormat;
 
     /// Prototypes parse with and without names, conventions and `...`, and
@@ -1085,5 +1103,57 @@ mod tests {
                 .pass(&types, 64, pe),
             None
         );
+    }
+
+    /// Return types with tags (`enum State`), leading qualifiers
+    /// (`const Player`) and east-const (`int const`) survive `spell` and
+    /// [`Proto::parse`] with their base words and passes intact.
+    #[test]
+    fn tagged_and_qualified_return_types_round_trip() {
+        let mut types: BTreeMap<String, UserType> = BTreeMap::new();
+        let state = build_enum("State", 4, &[(0, "Idle".to_owned())]).expect("enum");
+        types.insert("State".to_owned(), state);
+        let pe = BinaryFormat::Pe;
+        let tagged = Proto::parse("enum State f(int a)").expect("tagged");
+        assert_eq!(
+            tagged.ret.as_ref().map(|t| t.base.as_str()),
+            Some("enum State")
+        );
+        assert_eq!(
+            tagged.ret.as_ref().and_then(|t| t.pass(&types, 64, pe)),
+            Some(Pass::Int {
+                bits: 32,
+                signed: false
+            })
+        );
+        let west = Proto::parse("const Player f(int a)").expect("west-const");
+        assert_eq!(
+            west.ret.as_ref().map(|t| t.base.as_str()),
+            Some("const Player")
+        );
+        let east = Proto::parse("int const f(int a)").expect("east-const");
+        assert_eq!(
+            east.ret.as_ref().map(|t| t.base.as_str()),
+            Some("int const")
+        );
+        assert_eq!(
+            crate::analysis::typelib::base_of(&east.ret.as_ref().expect("ret").base),
+            ("int".to_owned(), 0)
+        );
+        assert_eq!(
+            east.ret.as_ref().and_then(|t| t.pass(&types, 64, pe)),
+            Some(Pass::Int {
+                bits: 32,
+                signed: true
+            })
+        );
+        for s in [
+            "enum State f(int a)",
+            "const Player f(int a)",
+            "int const f(int a)",
+        ] {
+            let parsed = Proto::parse(s).expect(s);
+            assert_eq!(Proto::parse(&parsed.spell()).expect(s), parsed);
+        }
     }
 }
