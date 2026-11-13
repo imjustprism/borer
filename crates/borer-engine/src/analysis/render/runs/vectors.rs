@@ -370,9 +370,10 @@ pub enum Bisected {
         at: Counterexample,
         /// What the text with the passes before `pass` did.
         before: Box<Checked>,
-        /// What the full pipeline with only this pass left out did: when
-        /// it agrees ([`Checked::grade`]), leaving the pass out alone
-        /// repairs the function.
+        /// What the full pipeline with only this pass left out did, held
+        /// to the input the full text differs on and to the one `at`
+        /// names: when it agrees ([`Checked::grade`]), leaving the pass out
+        /// alone repairs the function.
         alone: Box<Checked>,
         /// The text with the passes before `pass`, and with `pass` too.
         texts: (String, String),
@@ -405,7 +406,7 @@ pub struct Counterexample {
 /// input unchecked places nothing, however many others it agreed on, so
 /// no pass is named ([`Bisected::Unplaced`]), and the full text with the
 /// blamed pass alone left out repairs the function only when it agrees
-/// on that input.
+/// on that input and on the one the blamed pass's text differs on.
 ///
 /// # Arguments
 ///
@@ -482,15 +483,19 @@ pub(super) fn bisected(
         }
         Placed::At(good, before, narrowest) => (good, before, narrowest),
     };
-    let (_, at) = narrowest.unwrap_or((index, at));
+    let (n, at) = narrowest.unwrap_or((index, at));
     let Some(&pass) = Pass::ALL.get(good) else {
         return Bisected::Unbisected(at);
     };
+    let mut alone = held(Passes::NONE.without(pass));
+    if alone.skipped.contains(&n) {
+        alone.held = Some(n);
+    }
     Bisected::Broke {
         pass,
         at,
         before: Box::new(before),
-        alone: Box::new(held(Passes::NONE.without(pass))),
+        alone: Box::new(alone),
         texts: (text_of(good), text_of(good + 1)),
     }
 }

@@ -566,6 +566,52 @@ pass	"
         );
     }
 
+    /// Leaving the blamed pass out alone repairs the function only where
+    /// that text was checked on the input the answer's row shows and on
+    /// the one the full text differs on.
+    ///
+    /// The full text differs on input 5; the texts with fewer than 40
+    /// passes agree, and those with 40 or more differ first on input 3,
+    /// the row the answer shows. The full text without the fortieth pass
+    /// agrees on 7 inputs and leaves 3, or else 5, unchecked. Held to input
+    /// 5 alone, the first read `repairs yes` beside the row of input 3,
+    /// which it never checked; held to input 3 alone, the second would,
+    /// though it never checked the input the function differs on.
+    ///
+    /// # Panics
+    ///
+    /// When a repair is claimed on such a text.
+    #[test]
+    fn a_pass_left_out_repairs_only_where_both_inputs_were_checked() {
+        let three = Counterexample {
+            input: "3".to_owned(),
+            ..at()
+        };
+        let runs = |skip: Passes| Pass::ALL.iter().filter(|p| skip.runs(**p)).count();
+        let all = Pass::ALL.len();
+        for left in [3, 5] {
+            let found = bisected(
+                &|skip, held| match runs(skip) {
+                    k if k == all => ran(3, 0, true),
+                    k if k + 1 == all => Checked {
+                        held,
+                        skipped: [left].into(),
+                        ..ran(7, 1, false)
+                    },
+                    k if k < 40 => ran(8, 0, false),
+                    _ => Checked {
+                        differs: Some((3, three.clone())),
+                        ..ran(1, 0, false)
+                    },
+                },
+                &|k| format!("{k} passes"),
+            );
+            let text = blame_report("f", 0x1000, 8, 100, &found);
+            assert!(text.contains("\ndiffers\t3\t"), "{left}: {text}");
+            assert!(text.contains("\nrepairs\tunchecked: "), "{left}: {text}");
+        }
+    }
+
     /// Wherever the answer says a text agrees it says on how many of the
     /// inputs, how many it left unchecked and the commonest reason: the
     /// full text, the text before the blamed pass and the text without it.
