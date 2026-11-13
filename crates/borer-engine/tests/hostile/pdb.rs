@@ -445,7 +445,12 @@ fn duplicate_module_streams_and_deep_block_scopes_stay_linear() {
     let u32_le = |at: usize| {
         usize::try_from(u32::from_le_bytes(seed[at..at + 4].try_into().expect("4"))).expect("usize")
     };
-    let s1 = seed[0x600..0x600 + u32_le(0x1208)].to_vec();
+    let mut s1 = seed[0x600..0x61c].to_vec();
+    s1.extend_from_slice(&7u32.to_le_bytes());
+    s1.extend_from_slice(b"/names\0");
+    for w in [1u32, 8, 1, 1, 0, 0, 8] {
+        s1.extend_from_slice(&w.to_le_bytes());
+    }
     let s2 = seed[0x800..0x800 + u32_le(0x120c)].to_vec();
     let sym_len = u32_le(0xa64);
     let c13_len = u32_le(0xa6c);
@@ -454,6 +459,8 @@ fn duplicate_module_streams_and_deep_block_scopes_stay_linear() {
         mod_syms.extend_from_slice(&[2, 0, 0x03, 0x11]);
     }
     let mut c13 = seed[0xc00 + sym_len..0xc00 + sym_len + c13_len].to_vec();
+    put32(&mut c13, 24, 0x14);
+    put32(&mut c13, 32, 0x1c);
     c13.extend_from_slice(&0xf2u32.to_le_bytes());
     c13.extend_from_slice(&32u32.to_le_bytes());
     c13.extend_from_slice(&0u32.to_le_bytes());
@@ -484,7 +491,13 @@ fn duplicate_module_streams_and_deep_block_scopes_stay_linear() {
     s3.extend_from_slice(&dbg);
     let s6 = seed[0xe00..0xe00 + u32_le(0x121c)].to_vec();
     let s7 = seed[0x1000..0x1000 + u32_le(0x1220)].to_vec();
-    let pdb = pack_msf(&[Vec::new(), s1, s2, s3, Vec::new(), s5, s6, s7]);
+    let mut s8 = Vec::new();
+    for w in [0xeffe_effeu32, 1, 12] {
+        s8.extend_from_slice(&w.to_le_bytes());
+    }
+    s8.extend_from_slice(b"\0src/late.c\0");
+    s8.extend_from_slice(&[0u8; 12]);
+    let pdb = pack_msf(&[Vec::new(), s1, s2, s3, Vec::new(), s5, s6, s7, s8]);
     let dir = ScratchDir::with_pdb(&pdb);
     #[expect(
         clippy::disallowed_methods,
@@ -509,4 +522,5 @@ fn duplicate_module_streams_and_deep_block_scopes_stay_linear() {
         pdb.len()
     );
     assert!(text.contains("pick("), "{text}");
+    assert!(text.contains("// source: src/late.c:12"), "{text}");
 }

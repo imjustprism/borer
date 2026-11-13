@@ -2,7 +2,7 @@
 //! naming its file from the string table.
 
 use super::Gathered;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io::Cursor;
 
 /// Tracks module-stream uniqueness and line eligibility across [`super::gather`]'s DBI walk.
@@ -91,10 +91,10 @@ impl Gathered {
 
     /// Takes the first line row each stated procedure starts at.
     ///
-    /// Each `DEBUG_S_LINES` subsection is queried through `lines_for_symbol`
-    /// so `pdb`'s iterator stays inside one subsection at a time, and each
-    /// binary-search slot in `sections` is walked at most once across all
-    /// procedures in the module before indexing rows by translated RVA.
+    /// Each validated `DEBUG_S_LINES` subsection key in `sections` is queried
+    /// once through `lines_for_symbol` so `pdb`'s iterator stays inside one
+    /// subsection at a time while still reaching subsections that begin past a
+    /// procedure's entry, before indexing rows by translated RVA.
     ///
     /// # Arguments
     ///
@@ -129,18 +129,10 @@ impl Gathered {
         if lo >= hi {
             return;
         }
-        let mut walked: BTreeSet<(bool, usize)> = BTreeSet::new();
         let mut by_rva: BTreeMap<u32, (pdb::StringRef, u32)> = BTreeMap::new();
-        for &(_, offset) in procs {
-            let slot = match sections.binary_search(&(offset.section, offset.offset)) {
-                Ok(i) => (true, i),
-                Err(i) if i > 0 && sections[i - 1].0 == offset.section => (false, i),
-                Err(_) => continue,
-            };
-            if !walked.insert(slot) {
-                continue;
-            }
-            let mut rows = program.lines_for_symbol(offset);
+        for &(section, offset) in sections {
+            let mut rows =
+                program.lines_for_symbol(pdb::PdbInternalSectionOffset { section, offset });
             while let Ok(Some(row)) = rows.next() {
                 if row.line_start == 0 {
                     continue;
