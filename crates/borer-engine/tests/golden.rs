@@ -1,5 +1,6 @@
-//! Golden sweep: hashes every function's decompile across a set of binaries,
-//! to prove a refactor of the emitter leaves the text byte-identical.
+//! Golden sweep: hashes every function's decompile and listing across a set
+//! of binaries, to prove a refactor of the emitter leaves the text
+//! byte-identical.
 //!
 //! ```text
 //! BORER_GOLDEN="a.exe;b.dll" BORER_GOLDEN_OUT=after.tsv \
@@ -7,8 +8,9 @@
 //! ```
 //!
 //! Each row of the output is `binary`, `entry`, the hash of the
-//! [`decompile_all`] text and the hash of the [`decompile_named_all`] text,
-//! tab-separated, in address order. With `BORER_GOLDEN_BASE` set, the sweep
+//! [`decompile_all`] text, the hash of the [`decompile_named_all`] text and
+//! the hash of the [`disasm_function`] text, tab-separated, in address order.
+//! With `BORER_GOLDEN_BASE` set, the sweep
 //! compares its rows with that file and fails on the first rows that
 //! differ. `BORER_GOLDEN_DUMP` names a directory that receives every text,
 //! one file per binary, to diff a function the hashes flag.
@@ -26,6 +28,7 @@
 use borer_engine::analysis::{
     Analysis, Overlay,
     decompile::{decompile_all, decompile_named_all},
+    render::disasm_function,
 };
 use borer_engine::program::Program;
 use std::fmt::Write as _;
@@ -34,7 +37,7 @@ use std::fmt::Write as _;
 ///
 /// # Arguments
 ///
-/// * `text` - A decompile result.
+/// * `text` - A rendered function text.
 fn fnv(text: Option<&str>) -> u64 {
     /// The FNV-1a 64-bit offset basis.
     const BASIS: u64 = 0xcbf2_9ce4_8422_2325;
@@ -65,28 +68,36 @@ fn every_function_decompiles_to_the_recorded_bytes() {
         let t1 = std::time::Instant::now();
         let named = decompile_named_all(&p, &a, &o, &entries);
         let named_t = t1.elapsed();
+        let t2 = std::time::Instant::now();
+        let listed: Vec<Option<String>> = entries
+            .iter()
+            .map(|&e| disasm_function(&p, &a, &o, e, usize::MAX, false))
+            .collect();
+        let listed_t = t2.elapsed();
         let name = std::path::Path::new(path)
             .file_name()
             .map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned());
         println!(
-            "{name}: {} functions, decompile-all {plain_t:?}, named {named_t:?}",
+            "{name}: {} functions, decompile-all {plain_t:?}, named {named_t:?}, listing {listed_t:?}",
             entries.len()
         );
         let mut texts = String::new();
-        for ((entry, one), two) in entries.iter().zip(&plain).zip(&named) {
+        for (((entry, one), two), three) in entries.iter().zip(&plain).zip(&named).zip(&listed) {
             writeln!(
                 rows,
-                "{name}\t{entry:#x}\t{:016x}\t{:016x}",
+                "{name}\t{entry:#x}\t{:016x}\t{:016x}\t{:016x}",
                 fnv(one.as_deref()),
-                fnv(two.as_deref())
+                fnv(two.as_deref()),
+                fnv(three.as_deref()),
             )
             .expect("write to a string");
             if dump.is_some() {
                 writeln!(
                     texts,
-                    "===== {entry:#x}\n{}\n===== named\n{}",
+                    "===== {entry:#x}\n{}\n===== named\n{}\n===== listing\n{}",
                     one.as_deref().unwrap_or(""),
-                    two.as_deref().unwrap_or("")
+                    two.as_deref().unwrap_or(""),
+                    three.as_deref().unwrap_or(""),
                 )
                 .expect("write to a string");
             }
