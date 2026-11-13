@@ -167,17 +167,7 @@ impl FunctionRows {
     /// line per row.
     #[must_use]
     pub fn spell(&self) -> String {
-        let order = match self.order {
-            FunctionOrder::Address => "",
-            FunctionOrder::Size => ", largest first",
-        };
-        let mut out = format!(
-            "# showing {} of {} {}{order}{}\n",
-            self.rows.len(),
-            self.total,
-            self.noun,
-            self.left_out
-        );
+        let mut out = format!("# showing {} of {}\n", self.rows.len(), self.counts());
         if self.incomplete {
             out.push_str(INCOMPLETE_NOTE);
             out.push('\n');
@@ -191,6 +181,34 @@ impl FunctionRows {
             );
         }
         out
+    }
+
+    /// Returns the `count_only` answer: the page's header without its page.
+    ///
+    /// # Returns
+    ///
+    /// One `# M functions` line (`import thunks` or `exception funclets` in
+    /// place of `functions` under the filter that lists only them), with the
+    /// order and what was left out as [`FunctionRows::spell`] says them.
+    #[must_use]
+    pub fn counted(&self) -> String {
+        format!("# {}\n", self.counts())
+    }
+
+    /// Returns what both headers count: the total, what the selected are,
+    /// the order and the thunks and funclets left out.
+    ///
+    /// # Returns
+    ///
+    /// `M functions`, `M import thunks` or `M exception funclets`
+    /// ([`FunctionRows::noun`]), then `, largest first` under
+    /// [`FunctionOrder::Size`], then [`FunctionRows::left_out`].
+    fn counts(&self) -> String {
+        let order = match self.order {
+            FunctionOrder::Address => "",
+            FunctionOrder::Size => ", largest first",
+        };
+        format!("{} {}{order}{}", self.total, self.noun, self.left_out)
     }
 }
 
@@ -1709,11 +1727,12 @@ mod tests {
     }
 
     /// `thunk` lists the import thunks alone, under their own noun and with
-    /// nothing left out; a header in address order names no order.
+    /// nothing left out; a header in address order names no order, and
+    /// neither does the count.
     ///
     /// # Panics
     ///
-    /// When the text differs from the table's.
+    /// When the text or the count differs from the table's.
     #[test]
     fn the_thunk_filter_lists_the_import_thunks_alone() {
         let (a, o) = listed();
@@ -1725,14 +1744,15 @@ mod tests {
 0x10c0 6 1 1 0 0 sym KERNEL32.dll!ExitProcess
 "
         );
+        assert_eq!(thunks.counted(), "# 1 import thunks\n");
     }
 
     /// `funclet` lists the exception funclets alone, under their own noun
-    /// and with nothing left out.
+    /// and with nothing left out, in the text and in the count.
     ///
     /// # Panics
     ///
-    /// When the text differs from the table's.
+    /// When the text or the count differs from the table's.
     #[test]
     fn the_funclet_filter_lists_the_exception_funclets_alone() {
         let (a, o) = listed();
@@ -1742,6 +1762,25 @@ mod tests {
             "# showing 1 of 1 exception funclets
 # entry size blocks instrs callers callees src name
 0x10d0 0 0 0 0 0 - sub_1000::__unwind_0
+"
+        );
+        assert_eq!(funclets.counted(), "# 1 exception funclets\n");
+    }
+
+    /// The count is the table's header without its page.
+    ///
+    /// It holds the total the filter selected, not the rows shown, with the
+    /// order and the import thunks and exception funclets left out.
+    ///
+    /// # Panics
+    ///
+    /// When the count differs from the header's.
+    #[test]
+    fn the_count_is_the_header_without_its_page() {
+        let (a, o) = listed();
+        assert_eq!(
+            function_rows(&a, &o, Some("s"), FunctionOrder::Size, 0, 1).counted(),
+            "# 2 functions, largest first; 1 import thunks left out, filter=thunk lists them; 1 exception funclets left out, filter=funclet lists them
 "
         );
     }

@@ -168,15 +168,11 @@ impl BorerServer {
         self.with_analysis(Feature::Discover, |_, a, o| {
             let rows =
                 render::function_rows(a, o, filter.as_deref(), order, page.offset, page.limit.n);
-            let (shown, text) = (rows.rows.len(), rows.spell());
-            if page.count_only {
-                let head = text.lines().next().unwrap_or_default();
-                let counted = head
-                    .strip_prefix(&format!("# showing {shown} of "))
-                    .unwrap_or(head);
-                return Ok(format!("# {counted}\n"));
-            }
-            Ok(text)
+            Ok(if page.count_only {
+                rows.counted()
+            } else {
+                rows.spell()
+            })
         })
         .map(|text| page.limit.noted(text))
     }
