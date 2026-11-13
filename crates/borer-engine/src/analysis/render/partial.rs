@@ -1330,7 +1330,7 @@ fn produced(env: &Env<'_>, i: &Instruction, facts: &Facts) -> Option<Vec<(Regist
             return Some(vec![(dest, Know::Counter)]);
         }
         let value = facts.concrete(dest)?.wrapping_add(1);
-        return Some(vec![(dest, Know::Val(masked(i, bitness, value)))]);
+        return Some(vec![(dest, Know::Val(masked(i, value)))]);
     }
     match i.mnemonic() {
         Mnemonic::Mov | Mnemonic::Movzx | Mnemonic::Movsx | Mnemonic::Movsxd if full_reg(i) => {
@@ -1351,25 +1351,25 @@ fn produced(env: &Env<'_>, i: &Instruction, facts: &Facts) -> Option<Vec<(Regist
             } else {
                 left.wrapping_sub(right)
             };
-            Some(vec![(dest, Know::Val(masked(i, bitness, value)))])
+            Some(vec![(dest, Know::Val(masked(i, value)))])
         }
         _ => None,
     }
 }
 
-/// Keeps the low half of a 32-bit result and the whole of a 64-bit one.
+/// Keeps the low half of a 32-bit result, of 32-bit code as of 64-bit,
+/// and the whole of a 64-bit one.
 ///
 /// # Arguments
 ///
 /// * `i` - The instruction.
-/// * `bitness` - Decoder bitness.
 /// * `value` - The computed result.
 ///
 /// # Returns
 ///
 /// The value the register holds.
-fn masked(i: &Instruction, bitness: u32, value: u64) -> u64 {
-    if bitness == 64 && i.op0_kind() == OpKind::Register && i.op0_register().size() == 4 {
+fn masked(i: &Instruction, value: u64) -> u64 {
+    if i.op0_kind() == OpKind::Register && i.op0_register().size() == 4 {
         u64::from(lo32(value))
     } else {
         value
@@ -1451,7 +1451,7 @@ fn move_source(env: &Env<'_>, i: &Instruction, facts: &Facts) -> Option<Know> {
 ///
 /// The address, or `None` when an index or an unknown base takes part.
 fn lea_source(env: &Env<'_>, i: &Instruction, facts: &Facts) -> Option<Know> {
-    Some(Know::Val(masked(i, env.bitness, mem_addr(env, i, facts)?)))
+    Some(Know::Val(masked(i, mem_addr(env, i, facts)?)))
 }
 
 /// The integer a memory operand names, when its address is known.
@@ -1796,5 +1796,51 @@ mod tests {
         }
         let eax = facts.concrete(canonical(Register::EAX, 32));
         assert_eq!(eax, Some(0xffff_fffc));
+    }
+
+    /// Returns what the scan knows after `code` runs from `0x1000`.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - The instructions.
+    /// * `bitness` - Decoder bitness (32 or 64).
+    fn scanned(code: &[u8], bitness: u32) -> Facts {
+        let mut p = Program::raw_x64(code);
+        if bitness == 32 {
+            p.arch = Arch::X86;
+            p.is_64 = false;
+        }
+        let a = Analysis::compute(&p);
+        let env = Env {
+            p: &p,
+            a: &a,
+            bitness,
+            volatile: &[],
+            counters: &[],
+        };
+        let mut facts = Facts::new();
+        for i in Decoder::with_ip(bitness, code, 0x1000, DecoderOptions::NONE) {
+            apply(&env, &i, &mut facts, &mut BTreeMap::new(), false);
+        }
+        facts
+    }
+
+    /// A 32-bit result of 32-bit code is cut to 32 bits, as one of 64-bit
+    /// code is.
+    ///
+    /// `xor ecx,ecx; sub ecx,1` leaves `ecx` 0xffffffff, where the
+    /// difference taken at 64 bits read 0xffffffffffffffff.
+    ///
+    /// # Panics
+    ///
+    /// When the result is wider.
+    #[test]
+    fn a_32_bit_result_of_32_bit_code_is_cut_to_32_bits() {
+        let code = [
+            0x31, 0xc9, // ASM: xor ecx, ecx
+            0x83, 0xe9, 0x01, // ASM: sub ecx, 1
+        ];
+        let ecx = scanned(&code, 32).concrete(canonical(Register::ECX, 32));
+        assert_eq!(ecx, Some(0xffff_ffff));
     }
 }
