@@ -399,6 +399,56 @@ pub const NAMES_MAX: usize = 1 << 18;
 /// Most comments one project states, as many as it states names.
 pub const COMMENTS_MAX: usize = 1 << 18;
 
+/// Refuses `count` entries of a table a project file holds at most `most`
+/// of ([`held`]).
+///
+/// # Arguments
+///
+/// * `what` - The table, for the message (`names`).
+/// * `count` - How many entries the table would hold.
+/// * `most` - Its cap.
+///
+/// # Errors
+///
+/// When `count` passes `most`; the message names the table and the cap.
+pub fn room(what: &str, count: usize, most: usize) -> Result<(), String> {
+    if count <= most {
+        return Ok(());
+    }
+    Err(format!(
+        "the session would hold {count} {what}, past the {most} a project file holds, so nothing was applied"
+    ))
+}
+
+/// Refuses an overlay whose tables count more entries than a project file
+/// may state; the file's bytes are bounded where it is saved.
+///
+/// It counts what [`Project::counted`] counts of a file: the names and the
+/// comments, the prototypes, the variables (a function stating none counts
+/// as one), the types and their applications ([`super::utypes::counted`])
+/// and the fields stated of each class ([`super::stated::crowded`]), so a
+/// session held to it saves no project that [`Project::to_overlay`]
+/// refuses for those counts.
+///
+/// # Arguments
+///
+/// * `o` - The overlay an edit would leave.
+///
+/// # Errors
+///
+/// When a table passes its cap; the message names the table and the cap.
+pub fn held(o: &Overlay) -> Result<(), String> {
+    room("names", o.names.len(), NAMES_MAX)?;
+    room("comments", o.comments.len(), COMMENTS_MAX)?;
+    room("prototypes", o.prototypes.len(), PROTOTYPES_MAX)?;
+    let variables = o.vars.values().map(|table| table.len().max(1)).sum();
+    room("variables", variables, VARS_MAX)?;
+    super::utypes::counted(&o.types, o.applied.len()).map_err(|e| e.to_string())?;
+    o.fields.iter().try_for_each(|(class, fields)| {
+        super::stated::crowded(&crate::text::one_line(class), fields.len(), o.fields.len())
+    })
+}
+
 /// Reads a table's address keys, refusing any key that is not an address.
 ///
 /// A key reads as an address argument does ([`parse_addr`]): `0x`-hex as

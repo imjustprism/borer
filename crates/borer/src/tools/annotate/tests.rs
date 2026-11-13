@@ -970,3 +970,69 @@ fn set_type_refuses_a_struct_holding_itself_by_value() {
         assert!(why.contains("holds itself by value (B -> S -> B)"), "{why}");
     }
 }
+
+/// `set_name`, `set_comment` and `set_type` refuse an edit that would take
+/// the session past what a project file holds.
+///
+/// So `save_project` never writes a file `load_project` refuses; a dry run
+/// is refused alike.
+///
+/// # Panics
+///
+/// When such an edit is applied, or the refusal does not name the cap.
+#[test]
+fn an_edit_past_what_a_project_holds_is_refused() {
+    use crate::params::{SetCommentParams, SetNameParams, SetTypeParams};
+    use borer_engine::analysis::project::{COMMENTS_MAX, NAMES_MAX};
+    use borer_engine::analysis::utypes::{APPLIED_MAX, TypeExpr};
+    use rmcp::handler::server::wrapper::Parameters;
+    use std::collections::BTreeMap;
+    let server = raw_server();
+    {
+        let mut o = crate::state::write_lock(&server.overlay);
+        let far = |k: usize| 0x10_0000 + borer_engine::num::from_usize(k);
+        let names: BTreeMap<u64, String> =
+            (0..NAMES_MAX).map(|k| (far(k), format!("n{k}"))).collect();
+        let comments: BTreeMap<u64, String> = (0..COMMENTS_MAX)
+            .map(|k| (far(k), "c".to_owned()))
+            .collect();
+        let applied: BTreeMap<u64, TypeExpr> =
+            (0..APPLIED_MAX).map(|k| (far(k), TypeExpr::U32)).collect();
+        o.names = names.into();
+        o.comments = comments.into();
+        o.applied = applied.into();
+    }
+    for dry_run in [Some(false), None] {
+        let named = server.set_name(Parameters(SetNameParams {
+            address: Some("0x1000".to_owned()),
+            name: Some("fresh".to_owned()),
+            names: None,
+            force: None,
+            dry_run,
+        }));
+        let commented = server.set_comment(Parameters(SetCommentParams {
+            address: "0x1000".to_owned(),
+            comment: "fresh".to_owned(),
+            dry_run,
+        }));
+        let typed = server.set_type(Parameters(SetTypeParams {
+            address: Some("0x10f0".to_owned()),
+            r#type: Some("u32".to_owned()),
+            dry_run,
+            ..SetTypeParams::default()
+        }));
+        for (refused, says) in [
+            (named, "262145 names, past the 262144"),
+            (commented, "262145 comments, past the 262144"),
+            (typed, "65537 applied types, past the 65536"),
+        ] {
+            let why = refused.expect_err("an edit past the cap passed").message;
+            assert!(why.contains(says), "{dry_run:?}: {why}");
+        }
+    }
+    let o = crate::state::read_lock(&server.overlay);
+    assert_eq!(
+        (o.names.len(), o.comments.len(), o.applied.len()),
+        (NAMES_MAX, COMMENTS_MAX, APPLIED_MAX)
+    );
+}

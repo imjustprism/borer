@@ -12,7 +12,6 @@ use crate::params::{
     FunctionsParams, Page, ReachesParams, XrefsParams, count_param, to_usize,
 };
 use crate::safety::{Effect, effects};
-use crate::state::write_lock;
 
 impl BorerServer {
     /// Answers a recovered layout's plan: what it would define and state,
@@ -31,13 +30,18 @@ impl BorerServer {
     /// # Returns
     ///
     /// A line saying what was (or would be) done, then the plan's lines.
+    ///
+    /// # Errors
+    ///
+    /// When applying the plan would take the session past what a project
+    /// file holds ([`BorerServer::edit_overlay`]); nothing was applied.
     pub(crate) fn answer_plan(
         &self,
         plan: borer_engine::analysis::apply::Plan,
         a: &Analysis,
         o: &Overlay,
         dry: bool,
-    ) -> String {
+    ) -> Result<String, String> {
         let head = format!(
             "{} struct {} and {} {} prototype(s); decompile then names the fields:\n",
             if dry {
@@ -56,12 +60,10 @@ impl BorerServer {
         }
         if dry {
             out.push_str("pass dry_run=false to apply.\n");
-            return out;
+            return Ok(out);
         }
-        let before = self.overlay_plain();
-        plan.apply(&mut write_lock(&self.overlay));
-        self.names_changed(&before);
-        out
+        self.edit_overlay(|o| plan.apply(o))?;
+        Ok(out)
     }
 }
 
@@ -361,7 +363,7 @@ impl BorerServer {
                 ));
             };
             let plan = borer_engine::analysis::apply::from_class(p, a, o, &layout, apply)?;
-            Ok(self.answer_plan(plan, a, o, dry_run.unwrap_or(true)))
+            self.answer_plan(plan, a, o, dry_run.unwrap_or(true))
         })
     }
 

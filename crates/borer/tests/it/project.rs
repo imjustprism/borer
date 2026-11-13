@@ -706,6 +706,100 @@ fn a_type_past_its_entries_is_refused_as_the_file_is_read() {
     }
 }
 
+/// A session is held to every count a project file is: its types, its
+/// prototypes, its variables and the classes it states fields of, not
+/// only its names, comments and applied types.
+///
+/// A session past one of them saved a project its load refused.
+#[test]
+fn a_session_is_held_to_every_count_a_project_is() {
+    use borer_engine::analysis::project::held;
+    use borer_engine::analysis::protos::{Proto, VARS_MAX};
+    let proto = Proto::parse("int (void)").expect("a prototype");
+    let mut types = Overlay::default();
+    for k in 0..4097 {
+        types
+            .types
+            .insert(format!("T{k}"), UserType::Alias(TypeExpr::U8));
+    }
+    let mut prototypes = Overlay::default();
+    for k in 0..0x1_0001u64 {
+        prototypes.prototypes.insert(k, proto.clone());
+    }
+    let mut vars = Overlay::default();
+    for k in 0..=borer_engine::num::from_usize(VARS_MAX) {
+        vars.vars.insert(k, std::collections::BTreeMap::new());
+    }
+    let mut classes = Overlay::default();
+    for k in 0..4097 {
+        let field = Field {
+            name: "m_a".to_owned(),
+            ty: None,
+        };
+        classes.fields.insert(format!("C{k}"), [(0, field)].into());
+    }
+    for (o, says) in [
+        (types, "4097 types"),
+        (prototypes, "65537 prototypes"),
+        (vars, "65537 variables"),
+        (classes, "4097 classes"),
+    ] {
+        let refused = held(&o).expect_err("a session past a count was held");
+        assert!(refused.contains(says), "{refused}");
+    }
+}
+
+/// A project whose indented text passes the bytes a project file holds is
+/// saved unindented, and loads back.
+///
+/// 4,096 structs of 256 fields loaded from a 30 MB file, and their save was
+/// refused at 84 MB of indented text, blaming names and comments the
+/// project did not state.
+#[test]
+fn a_project_too_long_indented_is_saved_unindented() {
+    let dir = std::env::temp_dir().join(format!("borer-unindented-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("p.json").display().to_string();
+    let mut o = Overlay::default();
+    let fields: Vec<(u64, String, TypeExpr)> = (0..256u64)
+        .map(|k| (k, format!("f{k}"), TypeExpr::U8))
+        .collect();
+    let one = build_struct("S", None, &fields, &o.types, 8).expect("a struct");
+    for k in 0..4096 {
+        o.types.insert(format!("S{k}"), one.clone());
+    }
+    let saved =
+        ProjectFile::from_overlay("b", None, &o).save(&path, borer::output::Existing::Replace);
+    let loaded = ProjectFile::load(&path).and_then(|pf| pf.to_overlay());
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(saved, Ok(()));
+    assert_eq!(loaded.map(|o| o.types.len()), Ok(4096));
+}
+
+/// A project longer than a project file holds is refused as it is saved,
+/// naming its size and the cap, and nothing is written.
+///
+/// 262,144 comments of 256 characters made a 73 MB file that its load
+/// refused.
+#[test]
+fn a_project_past_the_size_a_file_holds_is_not_saved() {
+    let dir = std::env::temp_dir().join(format!("borer-too-long-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("p.json");
+    let mut o = Overlay::default();
+    for k in 0..(1u64 << 18) {
+        o.comments.insert(k, "a".repeat(256));
+    }
+    let shown = path.display().to_string();
+    let refused = ProjectFile::from_overlay("b", None, &o)
+        .save(&shown, borer::output::Existing::Replace)
+        .expect_err("a 73 MB project was saved");
+    let written = path.exists();
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(refused.contains("past the 67108864"), "{refused}");
+    assert!(!written, "a file past the cap was written");
+}
+
 /// A project loaded past the request's deadline is refused, saying so,
 /// whether it states types or only the fields of classes.
 #[test]

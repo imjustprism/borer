@@ -73,7 +73,11 @@ impl BorerServer {
     /// # Errors
     ///
     /// When no binary is loaded or borer does not disassemble its
-    /// architecture; a failing script is an answer, not an error.
+    /// architecture; a failing script, or one whose names or comments
+    /// would take the session past what a project file holds
+    /// ([`borer_engine::analysis::project::NAMES_MAX`],
+    /// [`borer_engine::analysis::project::COMMENTS_MAX`]), is an answer
+    /// that applies nothing, not an error.
     #[tool(
         description = "Run a sandboxed Rhai script on a snapshot of the program: query(uri) and rows(uri) read any resource. Use it when no single tool answers. Proposed names apply only with dry_run=false; a failed script applies nothing.",
         meta = effects(&[Effect::ReadsFiles, Effect::ChangesSession]),

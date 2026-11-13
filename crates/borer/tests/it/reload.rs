@@ -538,3 +538,54 @@ fn an_edit_answered_before_the_hand_over_survives_the_reload() {
         "the comment the script applied before the hand-over is gone: {notes}"
     );
 }
+
+/// A script that would take the session past the names a project file
+/// holds is refused whole, and the names before it survive a reload.
+///
+/// Three runs of 100,000 names took the session past 262,144; the reload's
+/// worker, loading what the session saved, refused it and served none.
+#[test]
+fn names_past_what_a_project_holds_are_refused_and_the_rest_survive_a_reload() {
+    let mut code = vec![0xc3];
+    code.resize(0x50000, 0xcc);
+    let path = std::env::temp_dir().join(format!("borer-many-names-{}.bin", std::process::id()));
+    std::fs::write(&path, &code).expect("the file is written");
+    let shown = path.display().to_string();
+    let mut client = Client::start(&shown);
+    let loaded = client.text(
+        "load_binary",
+        &format!(r#"{{"path":{shown:?},"arch":"x64","base":"0x10000"}}"#),
+    );
+    assert!(loaded.contains("entry: 0x10000"), "{loaded}");
+    let mut ran = Vec::new();
+    for run in 0..3u64 {
+        let (from, to) = (0x10001 + run * 100_000, 0x10001 + (run + 1) * 100_000);
+        let script =
+            format!(r#"let a = {from}; while a < {to} {{ rename(a, \"n\" + a); a += 1; }}"#);
+        ran.push(client.text(
+            "script",
+            &format!(r#"{{"code":"{script}","dry_run":false}}"#),
+        ));
+    }
+    let before = client.text("annotations", r#"{"count_only":true}"#);
+    client.passed.clear();
+    client.text("reload", "{}");
+    client.next_with(
+        "notifications/tools/list_changed",
+        "tool list announced after the reload",
+    );
+    let after = client.text("annotations", r#"{"count_only":true}"#);
+    client.finish();
+    std::fs::remove_file(&path).expect("the file is removed");
+    assert!(ran[1].contains("names at 100000 addresses"), "{}", ran[1]);
+    assert!(
+        ran[2].contains("# nothing applied: the session would hold 300000 names, past the 262144"),
+        "{}",
+        ran[2]
+    );
+    assert!(before.contains("(200000 names,"), "{before}");
+    assert!(
+        after.contains("(200000 names,"),
+        "the names did not survive the reload: {after}"
+    );
+}

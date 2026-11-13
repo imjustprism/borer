@@ -3,6 +3,8 @@
 
 use std::fmt::Write as _;
 
+use borer_engine::analysis::project::{COMMENTS_MAX, room};
+use borer_engine::analysis::utypes::APPLIED_MAX;
 use borer_engine::analysis::{Analysis, Overlay, parse_addr, stated};
 use borer_engine::program::{Feature, Program};
 use rmcp::handler::server::wrapper::Parameters;
@@ -16,7 +18,7 @@ use crate::params::{
     stated_fields, stated_key, stated_values,
 };
 use crate::safety::{Effect, effects};
-use crate::state::{read_lock, write_lock};
+use crate::state::read_lock;
 
 /// Tells whether `text` holds `word` as a whole identifier, not inside a
 /// longer one (`a1` is not in `a12` or `data1`).
@@ -95,11 +97,10 @@ impl BorerServer {
                 out.push_str("pass dry_run=false to apply.\n");
                 return Ok(out);
             }
-            let before = self.overlay_plain();
-            write_lock(&self.overlay)
-                .types
-                .extend(declared.types.into_iter().map(|(name, ty, _)| (name, ty)));
-            self.names_changed(&before);
+            self.edit_overlay(|o| {
+                o.types
+                    .extend(declared.types.into_iter().map(|(name, ty, _)| (name, ty)));
+            })?;
             Ok(out)
         })
     }
@@ -152,9 +153,7 @@ impl BorerServer {
                 ));
             }
             let said = plan.done();
-            let before = self.overlay_plain();
-            plan.apply(&mut write_lock(&self.overlay));
-            self.names_changed(&before);
+            self.edit_overlay(|o| plan.apply(o))?;
             return Ok(said);
         }
         let (key, named) = plan_var(p, o, entry, var, name, ty)?;
@@ -177,13 +176,9 @@ impl BorerServer {
                 "dry-run: would name {what}; decompile then renders it so. pass dry_run=false to apply."
             ));
         }
-        let before = self.overlay_plain();
-        write_lock(&self.overlay)
-            .vars
-            .entry(entry)
-            .or_default()
-            .insert(key, named);
-        self.names_changed(&before);
+        self.edit_overlay(|o| {
+            o.vars.entry(entry).or_default().insert(key, named);
+        })?;
         Ok(format!("named {what}"))
     }
 }
@@ -206,7 +201,9 @@ impl BorerServer {
     ///
     /// When no binary is loaded, neither `address` and `name` nor `names`
     /// is given, a name is not an identifier or is taken, an address does
-    /// not resolve, or no section holds it.
+    /// not resolve, no section holds it, or the session would hold more
+    /// names than a project file holds
+    /// ([`borer_engine::analysis::project::NAMES_MAX`]).
     #[tool(
         description = "Name a function or data global in the session overlay, never the binary; names=[addr=name,...] renames many, checked first. A taken name needs force=true. Dry run until dry_run=false.",
         meta = effects(&[Effect::ChangesSession]),
@@ -317,6 +314,7 @@ impl BorerServer {
                 lines.push((line, numeric));
                 renamed.push((target, name.clone()));
             }
+            borer_engine::analysis::project::held(&working)?;
             let joined = || {
                 lines
                     .iter()
@@ -336,9 +334,7 @@ impl BorerServer {
                     ),
                 });
             }
-            let before = self.overlay_plain();
-            write_lock(&self.overlay).names.extend(renamed);
-            self.names_changed(&before);
+            self.edit_overlay(|o| o.names.extend(renamed))?;
             Ok(joined())
         })
     }
@@ -351,8 +347,9 @@ impl BorerServer {
     ///
     /// # Errors
     ///
-    /// When no binary is loaded, the address does not resolve, or no section
-    /// holds it.
+    /// When no binary is loaded, the address does not resolve, no section
+    /// holds it, or the session would hold more comments than a project
+    /// file holds ([`borer_engine::analysis::project::COMMENTS_MAX`]).
     #[tool(
         description = "Comment an address in the session overlay, never the binary; a comment opening with ? is an open question. To name it use set_name. Dry run until dry_run=false; save_project keeps it.",
         meta = effects(&[Effect::ChangesSession]),
@@ -376,16 +373,20 @@ impl BorerServer {
         self.with_program(|p| {
             let va = self.addr(p, &address)?;
             must_be_in_a_section(p, va, Annotation::Comment)?;
+            adding(
+                &read_lock(&self.overlay).comments,
+                Some(va),
+                "comments",
+                COMMENTS_MAX,
+            )?;
             if dry {
                 return Ok(format!(
                     "dry-run: would set comment at {va:#x}. pass dry_run=false to apply."
                 ));
             }
-            let before = self.overlay_plain();
-            write_lock(&self.overlay)
-                .comments
-                .insert(va, comment.clone());
-            self.names_changed(&before);
+            self.edit_overlay(|o| {
+                o.comments.insert(va, comment.clone());
+            })?;
             Ok(format!("comment set at {va:#x}"))
         })
     }
@@ -429,8 +430,9 @@ impl BorerServer {
     ///
     /// When no binary is loaded, `replace` comes without `name` and
     /// `fields`, a definition, a field, an application, a prototype or a
-    /// variable is refused, or the address does not resolve or no section
-    /// holds it.
+    /// variable is refused, the address does not resolve or no section
+    /// holds it, or the session would apply more types than a project file
+    /// holds ([`borer_engine::analysis::utypes::APPLIED_MAX`]).
     #[tool(
         description = "Define a struct, enum or typedef, name fields of a struct or class_layout class, or apply a type at an address so decompile names its fields; at a function, type sets the prototype. Checked first; dry run until dry_run=false.",
         meta = effects(&[Effect::ChangesSession]),
@@ -605,6 +607,7 @@ impl BorerServer {
                     }).map(|w| (va, ty, w))
                 })
                 .transpose()?;
+            adding(&o.applied, applied.as_ref().map(|a| a.0), "applied types", APPLIED_MAX)?;
             let mut done: Vec<String> = Vec::new();
             let mut would: Vec<String> = Vec::new();
             if let Some(plan) = &fielded {
@@ -659,22 +662,20 @@ impl BorerServer {
                     would.join("; ")
                 ));
             }
-            let before = self.overlay_plain();
-            let mut overlay = write_lock(&self.overlay);
-            if let Some(plan) = fielded {
-                plan.apply(&mut overlay);
-            }
-            if let Some((n, ty)) = defined {
-                overlay.types.insert(n, ty);
-            }
-            if let Some((va, ty, _)) = applied {
-                overlay.applied.insert(va, ty);
-            }
-            if let Some((entry, proto)) = stated {
-                overlay.prototypes.insert(entry, proto);
-            }
-            drop(overlay);
-            self.names_changed(&before);
+            self.edit_overlay(|overlay| {
+                if let Some(plan) = fielded {
+                    plan.apply(overlay);
+                }
+                if let Some((n, ty)) = defined {
+                    overlay.types.insert(n, ty);
+                }
+                if let Some((va, ty, _)) = applied {
+                    overlay.applied.insert(va, ty);
+                }
+                if let Some((entry, proto)) = stated {
+                    overlay.prototypes.insert(entry, proto);
+                }
+            })?;
             Ok(format!("{}{note}", done.join("; ")))
         })
     }
@@ -836,6 +837,35 @@ impl BorerServer {
         }
         Ok(page.limit.noted(out))
     }
+}
+
+/// Refuses an edit that would add an entry at `va` to a table past what a
+/// project file holds, by the count the edit would leave ([`room`]), so a
+/// dry run answers as its apply will.
+///
+/// # Arguments
+///
+/// * `table` - The table as it is.
+/// * `va` - Where the edit adds an entry, if it adds one.
+/// * `what` - The table, for the message (`comments`).
+/// * `most` - Its cap.
+///
+/// # Errors
+///
+/// When the entry would take the table past its cap.
+fn adding<V>(
+    table: &std::collections::BTreeMap<u64, V>,
+    va: Option<u64>,
+    what: &str,
+    most: usize,
+) -> Result<(), String> {
+    let Some(va) = va else {
+        return Ok(());
+    };
+    let count = table
+        .len()
+        .saturating_add(usize::from(!table.contains_key(&va)));
+    room(what, count, most)
 }
 
 #[cfg(test)]

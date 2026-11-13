@@ -1220,6 +1220,7 @@ fn applied(args: &[String], s: &Session, overlay: &mut Overlay) -> anyhow::Resul
         ty.spell()
     );
     overlay.applied.insert(va, ty);
+    borer_engine::analysis::project::held(overlay).map_err(anyhow::Error::msg)?;
     Ok(say)
 }
 

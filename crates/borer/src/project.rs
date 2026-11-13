@@ -53,8 +53,8 @@ pub fn identity(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// Largest project file read, in bytes: past any overlay the caps on names,
-/// comments, types and prototypes let a session hold.
+/// Largest project file read or written, in bytes ([`ProjectFile::load`],
+/// [`ProjectFile::save`]).
 const PROJECT_MAX: u64 = 1 << 26;
 
 /// Leaves out of an overlay what `set_name`, `set_comment` and `set_type`
@@ -191,9 +191,21 @@ impl ProjectFile {
     /// # Errors
     ///
     /// When the path is a device, a file is there and `existing` keeps it,
-    /// or serialization or the write fails.
+    /// the file would be longer than [`PROJECT_MAX`] even unindented, which
+    /// [`Self::load`] refuses, or serialization or the write fails; nothing
+    /// is written unless the write itself fails.
     pub fn save(&self, path: &str, existing: crate::output::Existing) -> Result<(), String> {
-        let json = serde_json::to_string_pretty(self).map_err(|e| format!("serialize: {e}"))?;
+        let fits = |json: &str| borer_engine::num::from_usize(json.len()) <= PROJECT_MAX;
+        let mut json = serde_json::to_string_pretty(self).map_err(|e| format!("serialize: {e}"))?;
+        if !fits(&json) {
+            json = serde_json::to_string(self).map_err(|e| format!("serialize: {e}"))?;
+        }
+        if !fits(&json) {
+            return Err(format!(
+                "the project is {} bytes even unindented, past the {PROJECT_MAX} a project file holds, so nothing was written",
+                json.len()
+            ));
+        }
         if let Some(why) = borer_engine::program::unusable_path(Path::new(path)) {
             return Err(format!("{why}; nothing was written"));
         }

@@ -451,8 +451,7 @@ impl BorerServer {
     }
 
     /// Edits the overlay with `edit` when `program` is still the program
-    /// loaded, then carries the analysis over to the names it leaves
-    /// ([`Self::names_changed`]).
+    /// loaded ([`Self::edit_overlay`]).
     ///
     /// A tool that read the program outside its lock (a script's run, a
     /// project's identity check) must not land what it found on another
@@ -467,7 +466,8 @@ impl BorerServer {
     ///
     /// # Errors
     ///
-    /// When another program is loaded now; nothing was edited.
+    /// When another program is loaded now, or the edit would pass a cap;
+    /// nothing was edited.
     pub(crate) fn edit_overlay_of(
         &self,
         program: &Arc<Program>,
@@ -480,8 +480,36 @@ impl BorerServer {
                 program.path.display()
             ));
         }
-        let before = self.overlay_plain();
-        edit(&mut write_lock(&self.overlay));
+        self.edit_overlay(edit)
+    }
+
+    /// Edits the overlay under its write lock, then carries the analysis
+    /// over to the names it leaves ([`Self::names_changed`]).
+    ///
+    /// An edit that leaves the session holding more than a project file
+    /// holds ([`borer_engine::analysis::project::held`]) is undone. The
+    /// copy it is undone to is taken under the lock the edit and the check
+    /// hold, so the undo takes back this edit alone, and two edits cannot
+    /// together pass a cap.
+    ///
+    /// # Arguments
+    ///
+    /// * `edit` - The edit.
+    ///
+    /// # Errors
+    ///
+    /// When the edit would pass a cap; nothing was edited.
+    pub(crate) fn edit_overlay(&self, edit: impl FnOnce(&mut Overlay)) -> Result<(), String> {
+        let before = {
+            let mut overlay = write_lock(&self.overlay);
+            let before = Overlay::clone(&overlay);
+            edit(&mut overlay);
+            if let Err(why) = borer_engine::analysis::project::held(&overlay) {
+                *overlay = before;
+                return Err(why);
+            }
+            before
+        };
         self.names_changed(&before);
         Ok(())
     }

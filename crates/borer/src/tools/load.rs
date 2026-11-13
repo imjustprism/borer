@@ -497,9 +497,11 @@ impl BorerServer {
     ///
     /// Invalid params when no binary is loaded or the path is refused (outside
     /// the output root, not `.json`, or an existing file without
-    /// `overwrite`); internal error when the file cannot be written.
+    /// `overwrite`); internal error when the file cannot be written, or
+    /// would pass the 64 MiB a project file holds even unindented, in
+    /// which case nothing is written.
     #[tool(
-        description = "Save the session's names, comments and types to a .json project under the output root, keyed by SHA-256. Restore with load_project; an existing file is kept unless overwrite=true.",
+        description = "Save the names, comments and types to a .json project of at most 64 MiB under the output root, keyed by SHA-256. Restore with load_project; overwrite=true replaces a file there.",
         meta = effects(&[Effect::WritesFiles]),
         annotations(
             read_only_hint = false,
