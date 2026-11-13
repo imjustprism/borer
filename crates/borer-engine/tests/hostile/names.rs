@@ -365,3 +365,40 @@ fn pe_indirect_section_names_stay_within_the_heap_bar() {
     let sec_names: Vec<&str> = p.sections.iter().map(|s| s.name.as_str()).collect();
     assert_budgeted(&p, &sec_names, SYMBOLS, &shown);
 }
+
+/// An ELF64 whose `e_shstrndx` names a `256 KiB` non-UTF-8 string table
+/// without a NUL is refused without running goblin's quadratic permissive
+/// `Strtab` rescan.
+#[test]
+fn elf_non_utf8_shstrtab_is_refused_without_quadratic_rescan() {
+    /// Bytes of `0xff` in the malformed `.shstrtab` replacement.
+    const BAD_LEN: usize = 256 << 10;
+    let mut bytes = elfgen::build(
+        elfgen::ET_EXEC,
+        elfgen::EM_X86_64,
+        0x1000,
+        &[
+            elfgen::Sec::new(
+                ".text",
+                elfgen::PROGBITS,
+                elfgen::AX,
+                0x1000,
+                vec![0xc3; 16],
+            ),
+            elfgen::Sec::new(".bad", elfgen::STRTAB, 0, 0x2000, vec![0xff; BAD_LEN]),
+        ],
+    );
+    put16(&mut bytes, 62, 2);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test bounds the time a hostile string table takes"
+    )]
+    let started = std::time::Instant::now();
+    let loaded = Program::from_bytes(PathBuf::from("bad_shstr.elf"), bytes);
+    let took = started.elapsed();
+    assert!(loaded.is_err(), "quadratic permissive retry was skipped");
+    assert!(
+        took < std::time::Duration::from_secs(2),
+        "{BAD_LEN} bytes of 0xff took {took:?}"
+    );
+}

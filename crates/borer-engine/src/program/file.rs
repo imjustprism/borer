@@ -92,6 +92,9 @@ pub(super) fn parse_object(
         Err(e) => e,
     };
     let lenient = match bytes.first_chunk::<4>().map(|b| u32::from_be_bytes(*b)) {
+        Some(0x7f45_4c46) if !permissive_elf_affordable(bytes)? => {
+            return Err(anyhow!("{strict_err}"));
+        }
         Some(0x7f45_4c46) => caught(|| {
             goblin::elf::Elf::parse_with_opts(bytes, &goblin::options::ParseOptions::permissive())
         })?
@@ -105,6 +108,129 @@ pub(super) fn parse_object(
     lenient
         .map(|obj| (obj, Some(strict_err.to_string())))
         .map_err(|lenient| anyhow!("{strict_err}; lenient: {lenient}"))
+}
+
+/// Most scan steps goblin's permissive ELF string-table preparse may take.
+const PERMISSIVE_STRTAB_STEPS_MAX: u128 = 64 << 20;
+/// Most `(offset, &str)` entries goblin's permissive ELF preparses may hold.
+const PERMISSIVE_STRTAB_ENTRIES_MAX: u128 = 2 << 20;
+
+/// Exact byte-scan steps and entry count goblin's permissive `Strtab` loop
+/// takes on `bytes[offset..offset + len]`, bounded by the permissive caps.
+///
+/// On invalid UTF-8 goblin records `""` and advances by one byte, rescanning
+/// to the same NUL on every invalid prefix of a chunk. The first starting
+/// offset whose remainder to the NUL is valid UTF-8 jumps past the NUL, so
+/// one linear UTF-8 chunk pass gives the exact quadratic step sum.
+///
+/// # Arguments
+///
+/// * `bytes` - Whole ELF file image.
+/// * `offset` - String table file offset.
+/// * `len` - Stated string table byte length.
+fn strtab_cost(bytes: &[u8], offset: usize, len: usize) -> (u128, u128) {
+    let Some(avail) = bytes.get(offset..) else {
+        return (0, 0);
+    };
+    let slice = &avail[..avail.len().min(len)];
+    let mut pos = 0usize;
+    let mut steps: u128 = 0;
+    let mut entries: u128 = 0;
+    while pos < slice.len() {
+        let rest = &slice[pos..];
+        let nul = rest.iter().position(|&b| b == 0);
+        let chunk_len = nul.unwrap_or(rest.len());
+        let has_nul = nul.is_some();
+        let chunk = &rest[..chunk_len];
+        let valid_tail = chunk.utf8_chunks().last().map_or(0, |c| c.valid().len());
+        let bad = chunk_len - valid_tail;
+        let runs = bad + usize::from(valid_tail > 0 || has_nul);
+        let top = u128::try_from(chunk_len + usize::from(has_nul)).unwrap_or(0);
+        let r = u128::try_from(runs).unwrap_or(0);
+        steps += r * top - r * r.saturating_sub(1) / 2;
+        entries += r;
+        if steps > PERMISSIVE_STRTAB_STEPS_MAX || entries > PERMISSIVE_STRTAB_ENTRIES_MAX {
+            return (steps, entries);
+        }
+        pos = pos.saturating_add(chunk_len).saturating_add(1);
+    }
+    (steps, entries)
+}
+
+/// Checks whether goblin's permissive ELF retry stays within the string-table
+/// scan and entry budgets across `e_shstrndx`, `.symtab`'s linked table, and
+/// `DT_STRTAB`.
+///
+/// # Arguments
+///
+/// * `bytes` - Whole ELF file image.
+///
+/// # Errors
+///
+/// When inspecting the ELF headers panics inside the underlying parser.
+fn permissive_elf_affordable(bytes: &[u8]) -> anyhow::Result<bool> {
+    use goblin::container::{Container, Ctx, Endian};
+    use goblin::elf::section_header::{SHN_XINDEX, SHT_SYMTAB, SectionHeader};
+    use goblin::elf::{Dynamic, Elf, ProgramHeader};
+    caught(|| {
+        let Ok(header) = Elf::parse_header(bytes) else {
+            return true;
+        };
+        let Ok(lazy) = Elf::lazy_parse(header) else {
+            return true;
+        };
+        let container = if lazy.is_64 {
+            Container::Big
+        } else {
+            Container::Little
+        };
+        let ctx = Ctx::new(container, Endian::from(lazy.little_endian));
+        let Ok(phdrs) = ProgramHeader::parse(
+            bytes,
+            saturating_usize(header.e_phoff),
+            usize::from(header.e_phnum),
+            ctx,
+        ) else {
+            return true;
+        };
+        let shdrs = SectionHeader::parse(
+            bytes,
+            saturating_usize(header.e_shoff),
+            usize::from(header.e_shnum),
+            ctx,
+        )
+        .unwrap_or_default();
+        let sec_range = |mut idx: usize| -> Option<(usize, usize)> {
+            if idx == usize::try_from(SHN_XINDEX).unwrap_or(usize::MAX) {
+                idx = usize::try_from(shdrs.first()?.sh_link).ok()?;
+            }
+            let sh = shdrs.get(idx)?;
+            Some((saturating_usize(sh.sh_offset), saturating_usize(sh.sh_size)))
+        };
+        let sym_str = shdrs
+            .iter()
+            .rfind(|s| s.sh_type == SHT_SYMTAB)
+            .and_then(|s| usize::try_from(s.sh_link).ok())
+            .and_then(sec_range);
+        let dyn_str = Dynamic::parse(bytes, &phdrs, ctx)
+            .ok()
+            .flatten()
+            .map(|d| (d.info.strtab, d.info.strsz));
+        let mut steps: u128 = 0;
+        let mut entries: u128 = 0;
+        for (off, len) in [sec_range(usize::from(header.e_shstrndx)), sym_str, dyn_str]
+            .into_iter()
+            .flatten()
+        {
+            let (s, e) = strtab_cost(bytes, off, len);
+            steps = steps.saturating_add(s);
+            entries = entries.saturating_add(e);
+            if steps > PERMISSIVE_STRTAB_STEPS_MAX || entries > PERMISSIVE_STRTAB_ENTRIES_MAX {
+                return false;
+            }
+        }
+        true
+    })
 }
 
 /// Why a path cannot be a file, when it cannot.
