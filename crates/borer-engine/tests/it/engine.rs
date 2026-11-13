@@ -1395,3 +1395,20 @@ fn the_thread_segment_reads_its_systems_block() {
     let (teb, own) = ran(Arch::X86_64, BinaryFormat::Pe, &pe64);
     assert!(teb.is_some_and(|t| t != 0) && teb == own, "{teb:?} {own:?}");
 }
+
+/// `read_regular` sizes its buffer to the file's stated length up front, so
+/// reading through `Take` does not double the allocation past the file's end.
+///
+/// # Panics
+///
+/// When the returned vector's capacity differs from its length.
+#[test]
+fn read_regular_allocates_exact_capacity_for_the_stated_size() {
+    let file = std::env::temp_dir().join(format!("borer_exact_cap_{}.bin", std::process::id()));
+    std::fs::write(&file, vec![0xa5u8; 100_001]).expect("the fixture is writable");
+    let read = borer_engine::program::read_regular(&file, u64::MAX);
+    std::fs::remove_file(&file).expect("the fixture is removed");
+    let bytes = read.expect("the regular file reads");
+    assert_eq!(bytes.len(), 100_001);
+    assert_eq!(bytes.capacity(), bytes.len());
+}

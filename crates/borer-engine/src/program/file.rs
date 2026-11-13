@@ -268,9 +268,10 @@ fn read_program_file(path: &Path) -> anyhow::Result<Vec<u8>> {
 /// As [`open_regular`], and when the read fails or the file grew past
 /// `max` meanwhile.
 pub fn read_regular(path: &Path, max: u64) -> anyhow::Result<Vec<u8>> {
-    let file = open_regular(path, max)?;
+    let (file, len) = open_regular_sized(path, max)?;
     let shown = crate::text::short_path(&path.display().to_string());
-    let mut bytes = Vec::new();
+    let cap = saturating_usize(len.min(max.saturating_add(1)));
+    let mut bytes = Vec::with_capacity(cap);
     std::io::Read::read_to_end(
         &mut std::io::Read::take(file, max.saturating_add(1)),
         &mut bytes,
@@ -305,6 +306,24 @@ pub fn read_regular(path: &Path, max: u64) -> anyhow::Result<Vec<u8>> {
 /// device, a pipe or anything else that is not a regular file, holds more
 /// than `max` bytes, or does not open.
 pub fn open_regular(path: &Path, max: u64) -> anyhow::Result<std::fs::File> {
+    open_regular_sized(path, max).map(|(file, _)| file)
+}
+
+/// Opens a regular file no larger than `max` and returns its stated length.
+///
+/// # Arguments
+///
+/// * `path` - The file.
+/// * `max` - Most bytes it may hold.
+///
+/// # Returns
+///
+/// The open file and the length reported by its open handle's metadata.
+///
+/// # Errors
+///
+/// As [`open_regular`].
+fn open_regular_sized(path: &Path, max: u64) -> anyhow::Result<(std::fs::File, u64)> {
     if let Some(why) = unusable_path(path) {
         return Err(anyhow!("{why}"));
     }
@@ -338,12 +357,11 @@ pub fn open_regular(path: &Path, max: u64) -> anyhow::Result<std::fs::File> {
         reason = "the checked reader, on a regular file"
     )]
     let file = std::fs::File::open(path).with_context(|| format!("reading {shown}"))?;
-    judge(
-        &file
-            .metadata()
-            .with_context(|| format!("reading {shown}"))?,
-    )?;
-    Ok(file)
+    let open_meta = file
+        .metadata()
+        .with_context(|| format!("reading {shown}"))?;
+    judge(&open_meta)?;
+    Ok((file, open_meta.len()))
 }
 
 /// Returns a path's metadata, once [`unusable_path`] lets the path through:
