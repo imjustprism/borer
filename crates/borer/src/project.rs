@@ -57,6 +57,51 @@ pub fn identity(bytes: &[u8]) -> String {
 /// [`ProjectFile::save`]).
 const PROJECT_MAX: u64 = 1 << 26;
 
+/// Buffers serialized JSON up to `cap` bytes, either aborting once the
+/// stream passes `cap` or counting the remaining bytes in constant space.
+struct BoundedJson {
+    /// Stored prefix of the stream, at most `cap` bytes.
+    bytes: Vec<u8>,
+    /// Total bytes written to the stream so far.
+    total: u64,
+    /// Maximum bytes `bytes` stores and allocates for.
+    cap: usize,
+    /// Whether passing `cap` returns an [`std::io::Error`] immediately.
+    abort_past_cap: bool,
+}
+
+impl std::io::Write for BoundedJson {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.total = self
+            .total
+            .saturating_add(borer_engine::num::from_usize(buf.len()));
+        let keep = buf.len().min(self.cap.saturating_sub(self.bytes.len()));
+        if keep > 0 {
+            let needed = self.bytes.len().saturating_add(keep);
+            if needed > self.bytes.capacity() {
+                let target = self
+                    .bytes
+                    .capacity()
+                    .saturating_mul(2)
+                    .max(1024)
+                    .min(self.cap)
+                    .max(needed);
+                self.bytes
+                    .reserve_exact(target.saturating_sub(self.bytes.len()));
+            }
+            self.bytes.extend_from_slice(&buf[..keep]);
+        }
+        if self.abort_past_cap && self.total > borer_engine::num::from_usize(self.cap) {
+            return Err(std::io::Error::other("past PROJECT_MAX"));
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Leaves out of an overlay what `set_name`, `set_comment` and `set_type`
 /// refuse of the loaded binary: an annotation at an address no section
 /// holds, and a blank name or comment.
@@ -176,11 +221,13 @@ impl ProjectFile {
         lexical(Path::new(&self.program)) == lexical(path)
     }
 
-    /// Writes the file as pretty-printed JSON.
+    /// Writes the file as pretty-printed JSON, or unindented when only the
+    /// unindented form fits [`PROJECT_MAX`].
     ///
-    /// A device is refused: a project is written so it can be loaded again,
-    /// and [`Self::load`] refuses a device, so saving to one reported success
-    /// and put the overlay on the console.
+    /// An unusable path is refused before serializing: a project is written
+    /// so it can be loaded again, and [`Self::load`] refuses a device or a
+    /// share, so saving to a device reported success and put the overlay on
+    /// the console.
     ///
     /// # Arguments
     ///
@@ -190,30 +237,41 @@ impl ProjectFile {
     ///
     /// # Errors
     ///
-    /// When the path is a device, a file is there and `existing` keeps it,
-    /// the file would be longer than [`PROJECT_MAX`] even unindented, which
-    /// [`Self::load`] refuses, or serialization or the write fails; nothing
-    /// is written unless the write itself fails.
+    /// When `path` is unusable ([`borer_engine::program::unusable_path`]:
+    /// empty, a device, an NT object path or a network share), a file or
+    /// link is there and `existing` refuses it, the file would be longer
+    /// than [`PROJECT_MAX`] even unindented, which [`Self::load`] refuses,
+    /// or serialization or the write fails; nothing is written unless the
+    /// write itself fails.
     pub fn save(&self, path: &str, existing: crate::output::Existing) -> Result<(), String> {
-        let fits = |json: &str| borer_engine::num::from_usize(json.len()) <= PROJECT_MAX;
-        let mut json = serde_json::to_string_pretty(self).map_err(|e| format!("serialize: {e}"))?;
-        if !fits(&json) {
-            json = serde_json::to_string(self).map_err(|e| format!("serialize: {e}"))?;
-        }
-        if !fits(&json) {
-            return Err(format!(
-                "the project is {} bytes even unindented, past the {PROJECT_MAX} a project file holds, so nothing was written",
-                json.len()
-            ));
-        }
         if let Some(why) = borer_engine::program::unusable_path(Path::new(path)) {
             return Err(format!("{why}; nothing was written"));
+        }
+        let mut out = BoundedJson {
+            bytes: Vec::new(),
+            total: 0,
+            cap: borer_engine::num::saturating_usize(PROJECT_MAX),
+            abort_past_cap: true,
+        };
+        if let Err(e) = serde_json::to_writer_pretty(&mut out, self) {
+            if out.total <= PROJECT_MAX {
+                return Err(format!("serialize: {e}"));
+            }
+            out.bytes.clear();
+            out.total = 0;
+            out.abort_past_cap = false;
+            serde_json::to_writer(&mut out, self).map_err(|e| format!("serialize: {e}"))?;
+        }
+        if out.total > PROJECT_MAX {
+            return Err(format!(
+                "the project is {} bytes even unindented, past the {PROJECT_MAX} a project file holds, so nothing was written",
+                out.total
+            ));
         }
         let shown = borer_engine::text::short_path(path);
         let mut file = crate::output::create(Path::new(path), existing)
             .map_err(|e| format!("write {shown}: {e}"))?;
-        std::io::Write::write_all(&mut file, json.as_bytes())
-            .map_err(|e| format!("write {shown}: {e}"))
+        std::io::Write::write_all(&mut file, &out.bytes).map_err(|e| format!("write {shown}: {e}"))
     }
 
     /// Reads and parses a project file.
@@ -238,5 +296,52 @@ impl ProjectFile {
                 borer_engine::text::one_line(&e.to_string())
             )
         })
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test"
+)]
+mod tests {
+    use std::io::Write as _;
+
+    use super::{BoundedJson, PROJECT_MAX};
+
+    /// [`BoundedJson`] aborts past `cap` when asked, never allocates past
+    /// `cap`, and counts the full stream length on reuse.
+    #[test]
+    fn bounded_json_caps_allocation_and_counts_exact_bytes() {
+        let cap = borer_engine::num::saturating_usize(PROJECT_MAX);
+        let mut out = BoundedJson {
+            bytes: Vec::new(),
+            total: 0,
+            cap,
+            abort_past_cap: true,
+        };
+        let chunk = vec![b'x'; 4093];
+        let mut written = 0usize;
+        while written <= cap {
+            let res = out.write(&chunk);
+            written += chunk.len();
+            if written > cap {
+                assert!(res.is_err());
+                break;
+            }
+            assert_eq!(res.ok(), Some(chunk.len()));
+        }
+        assert_eq!(out.bytes.len(), cap);
+        assert_eq!(out.bytes.capacity(), cap);
+        out.bytes.clear();
+        out.total = 0;
+        out.abort_past_cap = false;
+        let big = vec![b'y'; 1 << 20];
+        for _ in 0..100 {
+            out.write_all(&big).expect("counting pass");
+        }
+        assert_eq!(out.total, 100 << 20);
+        assert_eq!(out.bytes.len(), cap);
+        assert_eq!(out.bytes.capacity(), cap);
     }
 }

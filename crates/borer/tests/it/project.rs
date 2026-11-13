@@ -919,3 +919,46 @@ fn a_function_s_variables_under_two_keys_refuse_the_project() {
         "{refused}"
     );
 }
+
+/// Saving to an unusable path refuses it before serializing, and saving a
+/// project past 64 MiB names its exact unindented byte count without
+/// writing a file.
+#[test]
+fn save_checks_path_before_serializing_and_counts_exact_overflow_bytes() {
+    use borer_engine::analysis::project::Project;
+    let empty_len =
+        serde_json::to_string(&ProjectFile::from_overlay("", None, &Overlay::default()))
+            .unwrap()
+            .len();
+    let program_len = 70 << 20;
+    let pf = ProjectFile(Project {
+        program: "a".repeat(program_len),
+        ..Project::default()
+    });
+    for bad in std::iter::once("").chain(cfg!(windows).then_some("con")) {
+        let unusable = pf
+            .save(bad, borer::output::Existing::Replace)
+            .expect_err("saving to an unusable path was accepted");
+        assert!(
+            !unusable.contains("even unindented") && unusable.contains("nothing was written"),
+            "{bad}: {unusable}"
+        );
+    }
+    let dir = std::env::temp_dir().join(format!("borer-save-exact-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dest = dir.join("huge.json");
+    let refused = pf
+        .save(
+            &dest.display().to_string(),
+            borer::output::Existing::Replace,
+        )
+        .expect_err("a 70 MiB project was saved");
+    let exists = dest.exists();
+    std::fs::remove_dir_all(&dir).ok();
+    let expected = format!(
+        "the project is {} bytes even unindented, past the 67108864 a project file holds",
+        empty_len + program_len
+    );
+    assert!(refused.contains(&expected), "{refused}");
+    assert!(!exists);
+}
