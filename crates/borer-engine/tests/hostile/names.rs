@@ -10,8 +10,8 @@ use borer_engine::program::{Program, SymbolKind};
 use borer_engine::text::OUTSIDE_MAX;
 
 use super::{
-    CODE, DATA, IMPORT_DIR, LOAD_HEAP_PER_BYTE, Sec, descriptor, elfgen, machogen, measured, pe,
-    put32, put64, serial, text,
+    CODE, DATA, FILE_ALIGN, IMPORT_DIR, LOAD_HEAP_PER_BYTE, OPTIONAL, PE_AT, Sec, descriptor,
+    elfgen, machogen, measured, pe, put16, put32, put64, serial, text,
 };
 
 /// Function or local symbols that all name one string.
@@ -299,4 +299,69 @@ fn macho_nlists_naming_one_long_string_load_within_the_heap_bar() {
         .map(|s| s.name.as_str())
         .collect();
     assert_budgeted(&p, &names, SYMBOLS, &shown);
+}
+
+/// A PE with [`SYMBOLS`] `/0` and `//` indirect section headers naming one
+/// [`NAME_LEN`]-byte COFF string loads within the heap bar and restores its
+/// header bytes intact.
+#[test]
+fn pe_indirect_section_names_stay_within_the_heap_bar() {
+    let _one = serial();
+    let mut b = pe(&[Sec::sound(".text", 0x1000, text(), CODE)], &[]);
+    let table = PE_AT + 24 + OPTIONAL;
+    let headers_end = (table + SYMBOLS * 40).div_ceil(FILE_ALIGN) * FILE_ALIGN;
+    b.resize(headers_end, 0);
+    put16(
+        &mut b,
+        PE_AT + 6,
+        u16::try_from(SYMBOLS).expect("fits in u16"),
+    );
+    let opt = PE_AT + 24;
+    let image_end = u32::try_from((SYMBOLS + 1) * 0x1000).expect("fits in u32");
+    put32(&mut b, opt + 56, image_end);
+    put32(
+        &mut b,
+        opt + 60,
+        u32::try_from(headers_end).expect("fits in u32"),
+    );
+    for k in 0..SYMBOLS {
+        let row = table + k * 40;
+        let label: &[u8] = if k == 1 { b"//AAAAAA" } else { b"/0" };
+        b[row..row + label.len()].copy_from_slice(label);
+        put32(&mut b, row + 8, 0x200);
+        put32(
+            &mut b,
+            row + 12,
+            u32::try_from((k + 1) * 0x1000).expect("fits in u32"),
+        );
+        if k == 0 {
+            put32(&mut b, row + 16, 0x200);
+            put32(
+                &mut b,
+                row + 20,
+                u32::try_from(headers_end).expect("fits in u32"),
+            );
+            put32(&mut b, row + 36, CODE);
+        } else {
+            put32(&mut b, row + 36, DATA);
+        }
+    }
+    b.extend_from_slice(&text());
+    let strtab_at = u32::try_from(b.len()).expect("fits in u32");
+    put32(&mut b, PE_AT + 12, strtab_at);
+    put32(&mut b, PE_AT + 16, 0);
+    b.resize(b.len() + NAME_LEN, b'A');
+    b.push(0);
+    let expected_bytes = b.clone();
+    let size = b.len();
+    let (loaded, extra) = measured(|| Program::from_bytes(PathBuf::from("secs.exe"), b));
+    let p = loaded.expect("the image loads");
+    assert!(
+        extra <= LOAD_HEAP_PER_BYTE * size,
+        "a {size} byte file took {extra} bytes of heap to load"
+    );
+    assert_eq!(p.bytes, expected_bytes);
+    let shown = format!("{}...", "A".repeat(OUTSIDE_MAX));
+    let sec_names: Vec<&str> = p.sections.iter().map(|s| s.name.as_str()).collect();
+    assert_budgeted(&p, &sec_names, SYMBOLS, &shown);
 }

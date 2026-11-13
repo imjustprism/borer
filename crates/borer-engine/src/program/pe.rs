@@ -7,15 +7,16 @@ use std::collections::BTreeSet;
 use super::{Symbol, SymbolKind, caught};
 use crate::num::{from_usize, u16_le, u32_le};
 
-/// Loosens the PE header fields the Windows loader ignores and the parser
-/// refuses outright, for the length of a parse.
+/// Loosens PE header fields the Windows loader ignores or goblin copies
+/// unboundedly, for the length of a parse.
 ///
 /// The loader never reads the DOS stub, where a linker leaves its Rich
 /// header, and reads at most sixteen data directories whatever
 /// `NumberOfRvaAndSizes` states; the parser refused a whole file for one
 /// flipped bit in the Rich header's `DanS` marker or a count of seventeen.
-/// The Rich marker is hidden and the count capped at sixteen in place;
-/// [`restore`] puts both back after the parse.
+/// Section names starting with `/` are also hidden from goblin's unbounded
+/// COFF string-table copy and resolved boundedly by [`section_name`];
+/// [`restore`] puts every patched byte back after the parse.
 ///
 /// # Arguments
 ///
@@ -23,7 +24,8 @@ use crate::num::{from_usize, u16_le, u32_le};
 ///
 /// # Returns
 ///
-/// What was patched, and a note for each change.
+/// What was patched, in ascending file-offset order, and a note for each
+/// damaged header field.
 pub(super) fn loosen_pe(bytes: &mut [u8]) -> (Vec<Patch>, Vec<String>) {
     /// The data directories a PE optional header has room for.
     const DIRECTORIES_MAX: u32 = 16;
@@ -48,12 +50,15 @@ pub(super) fn loosen_pe(bytes: &mut [u8]) -> (Vec<Patch>, Vec<String>) {
         notes.push("the Rich header in the DOS stub is damaged; it is not read".to_owned());
     }
     let opt = pe + 24;
+    let optional = usize::from(u16_le(bytes, pe + 20).unwrap_or(0));
+    let table = opt.saturating_add(optional);
     let count_at = match u16_le(bytes, opt) {
-        Some(0x10b) => opt + 92,
-        Some(0x20b) => opt + 108,
-        _ => return (patches, notes),
+        Some(0x10b) => Some(opt + 92),
+        Some(0x20b) => Some(opt + 108),
+        _ => None,
     };
-    if let Some(count) = u32_le(bytes, count_at).filter(|&c| c > DIRECTORIES_MAX)
+    if let Some(count_at) = count_at.filter(|&at| at + 4 <= table)
+        && let Some(count) = u32_le(bytes, count_at).filter(|&c| c > DIRECTORIES_MAX)
         && let Some(slot) = bytes.get_mut(count_at..count_at + 4)
     {
         let saved = Patch::zeroed(count_at, slot);
@@ -62,6 +67,16 @@ pub(super) fn loosen_pe(bytes: &mut [u8]) -> (Vec<Patch>, Vec<String>) {
         notes.push(format!(
             "the header states {count} data directories; the loader reads {DIRECTORIES_MAX}"
         ));
+    }
+    let count = usize::from(u16_le(bytes, pe + 6).unwrap_or(0));
+    let rows = count.min(bytes.len().saturating_sub(table) / SECTION_ROW);
+    for i in 0..rows {
+        let row_at = table + i * SECTION_ROW;
+        if bytes.get(row_at) == Some(&b'/')
+            && let Some(slot) = bytes.get_mut(row_at..row_at + 4)
+        {
+            patches.push(Patch::zeroed(row_at, slot));
+        }
     }
     (patches, notes)
 }
@@ -742,4 +757,118 @@ pub(super) fn arm64_pdata(
     }
     fragments.sort_unstable();
     (functions, fragments)
+}
+
+/// Resolves one PE section's name under `names`, reading `/N` and `//` COFF
+/// string-table entries boundedly without scanning past the row cap.
+///
+/// # Arguments
+///
+/// * `pe` - The parsed PE object.
+/// * `bytes` - The file image (with `/` section headers zeroed by [`loosen_pe`]).
+/// * `patches` - Saved 4-byte patches from [`loosen_pe`], sorted by offset.
+/// * `idx` - Index of `s` in `pe.sections`.
+/// * `s` - The parsed section row.
+/// * `names` - Per-load name budget.
+///
+/// # Returns
+///
+/// The budgeted section name, or the raw 8-byte header text when an indirect
+/// offset cannot be resolved.
+pub(super) fn section_name(
+    pe: &goblin::pe::PE<'_>,
+    bytes: &[u8],
+    patches: &[Patch],
+    idx: usize,
+    s: &goblin::pe::section_table::SectionTable,
+    names: &mut crate::text::Names,
+) -> String {
+    let mut raw = s.name;
+    if let Some(sig) = pe_signature(bytes) {
+        let table = sig + 24 + usize::from(pe.header.coff_header.size_of_optional_header);
+        if let Some(row_at) = idx
+            .checked_mul(SECTION_ROW)
+            .and_then(|off| table.checked_add(off))
+            && let Ok(k) = patches.binary_search_by_key(&row_at, |p| p.at)
+        {
+            raw[..4].copy_from_slice(&patches[k].saved);
+        }
+    }
+    let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+    let inline = &raw[..end];
+    if inline.first() == Some(&b'/')
+        && let Some(resolved) = coff_section_name(pe, bytes, inline)
+    {
+        return names.take(resolved);
+    }
+    match std::str::from_utf8(inline) {
+        Ok(valid) => names.take(valid),
+        Err(_) => names.take(&String::from_utf8_lossy(inline)),
+    }
+}
+
+/// Reads the bounded UTF-8 prefix a `/N` or `//` COFF section header names.
+///
+/// # Arguments
+///
+/// * `pe` - The parsed PE object.
+/// * `bytes` - The file image.
+/// * `inline` - Raw section header bytes up to its first NUL, starting with `/`.
+///
+/// # Returns
+///
+/// A slice of `bytes` long enough for [`crate::text::head`], or `None` when
+/// the offset or target string is invalid or out of range.
+fn coff_section_name<'a>(
+    pe: &goblin::pe::PE<'_>,
+    bytes: &'a [u8],
+    inline: &[u8],
+) -> Option<&'a str> {
+    /// Most UTF-8 bytes needed to cover `OUTSIDE_MAX + 1` code points.
+    const SCAN_MAX: usize = (crate::text::OUTSIDE_MAX + 2) * 4;
+    let str_off = if let Some(b64) = inline.strip_prefix(b"//") {
+        if b64.is_empty() || b64.len() > 6 {
+            return None;
+        }
+        let mut val = 0u64;
+        for &c in b64 {
+            let digit = match c {
+                b'A'..=b'Z' => c - b'A',
+                b'a'..=b'z' => c - b'a' + 26,
+                b'0'..=b'9' => c - b'0' + 52,
+                b'+' => 62,
+                b'/' => 63,
+                _ => return None,
+            };
+            val = val * 64 + u64::from(digit);
+        }
+        usize::try_from(val).ok()?
+    } else {
+        let dec = inline.strip_prefix(b"/")?;
+        if dec.is_empty() || !dec.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        std::str::from_utf8(dec).ok()?.parse::<usize>().ok()?
+    };
+    let sym_at = usize::try_from(pe.header.coff_header.pointer_to_symbol_table).ok()?;
+    if sym_at == 0 {
+        return None;
+    }
+    let sym_bytes = usize::try_from(pe.header.coff_header.number_of_symbol_table)
+        .ok()?
+        .checked_mul(18)?;
+    let start = sym_at.checked_add(sym_bytes)?.checked_add(str_off)?;
+    let tail = bytes.get(start..)?;
+    let window = &tail[..tail.len().min(SCAN_MAX)];
+    if let Some(nul) = window.iter().position(|&b| b == 0) {
+        return std::str::from_utf8(&window[..nul]).ok();
+    }
+    if tail.len() < SCAN_MAX {
+        return None;
+    }
+    match std::str::from_utf8(window) {
+        Ok(s) => Some(s),
+        Err(e) if e.error_len().is_none() => std::str::from_utf8(&window[..e.valid_up_to()]).ok(),
+        Err(_) => None,
+    }
 }

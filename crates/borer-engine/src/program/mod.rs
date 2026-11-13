@@ -937,7 +937,8 @@ impl Program {
                 sections = pe
                     .sections
                     .iter()
-                    .filter_map(|s| {
+                    .enumerate()
+                    .filter_map(|(idx, s)| {
                         let rawsz = u64::from(s.size_of_raw_data);
                         let rawoff = u64::from(s.pointer_to_raw_data);
                         let fits = rawoff + rawsz <= file_len;
@@ -957,14 +958,7 @@ impl Program {
                             fit.note_cut(rawoff + rawsz);
                         }
                         Some(Section {
-                            name: s.name().map_or_else(
-                                |_| {
-                                    names.take(
-                                        String::from_utf8_lossy(&s.name).trim_end_matches('\0'),
-                                    )
-                                },
-                                |n| names.take(n),
-                            ),
+                            name: pe::section_name(pe, &bytes, &patches, idx, s, &mut names),
                             va: Va(va),
                             vsize,
                             file_off: FileOff(rawoff),
