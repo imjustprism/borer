@@ -705,6 +705,26 @@ fn a_rotate_keeps_the_zero_flag() {
     assert_eq!(emu.register("rax"), Some(1));
 }
 
+/// A one-bit double shift sets the overflow on a change of sign: `shld
+/// eax, ebx, 1` turns 0x40000000 into 0x80000000, so `seto` reads 1. The
+/// emulator once left the overflow the `xor` before it had cleared.
+///
+/// # Panics
+///
+/// When the run does not return, or `seto` reads no overflow.
+#[test]
+fn a_one_bit_double_shift_sets_the_overflow_on_a_sign_change() {
+    let code: &[u8] = &[
+        0xb8, 0x00, 0x00, 0x00, 0x40, // ASM: mov eax, 0x40000000
+        0x31, 0xdb, // ASM: xor ebx, ebx
+        0x0f, 0xa4, 0xd8, 0x01, // ASM: shld eax, ebx, 1
+        0x0f, 0x90, 0xc0, // ASM: seto al
+        0xc3, // ASM: ret
+    ];
+    let emu = returned(image(code, &[]));
+    assert_eq!(emu.register("rax"), Some(0x8000_0001));
+}
+
 /// The x87 stack loads, divides and stores an integer.
 ///
 /// A run that met a floating-point divide used to stop there. The

@@ -142,6 +142,11 @@ impl Emulator<'_> {
     /// operand 1, by an immediate or `cl`. A compiler builds a 128-bit shift
     /// from these, and a 32-bit target every 64-bit one.
     ///
+    /// SPEC: Intel SDM Vol. 2, SHLD/SHRD: a count of 0 affects no flag;
+    /// otherwise CF is the last bit shifted out of operand 0, ZF, SF and PF
+    /// follow the result, and OF is set on a change of sign for a count of
+    /// 1 and undefined past it, which leaves it unknown here.
+    ///
     /// # Errors
     ///
     /// When an operand cannot be read or written, or unmodeled for a 16-bit
@@ -173,6 +178,7 @@ impl Emulator<'_> {
         let r = mask(r, bits);
         self.flags_carry = carry;
         self.set_flags(r, bits);
+        self.flags_over = (count == 1).then(|| (r ^ a) >> (bits - 1) & 1 == 1);
         self.store(i, r)?;
         Ok(None)
     }

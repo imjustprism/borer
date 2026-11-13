@@ -784,15 +784,12 @@ impl Exec<'_, '_> {
                     (Mnemonic::Shl | Mnemonic::Sal, Expr::Const(1)) if reads_overflow => {
                         Flags::Add(l.clone(), l, bits)
                     }
-                    (Mnemonic::Shr, Expr::Const(1)) if reads_overflow && needed != u32::MAX => {
-                        Flags::Unknown
-                    }
                     (Mnemonic::Rol | Mnemonic::Ror, _) => self.rotate_flags(mn, &r, &v, bits),
                     (Mnemonic::And | Mnemonic::Or | Mnemonic::Xor, _) => {
                         Flags::Test(v.clone(), v.clone(), bits)
                     }
                     (Mnemonic::Shl | Mnemonic::Sal | Mnemonic::Shr | Mnemonic::Sar, _) => {
-                        shift_flags(mn, l, &r, &v, bits, &self.flags)
+                        shift_flags(mn, l, &r, &v, bits, &self.flags, needed)
                     }
                     _ => Flags::Unknown,
                 };
@@ -818,7 +815,7 @@ impl Exec<'_, '_> {
                     fold(far, fold(far, src, Expr::Const(1), bits), rest, bits),
                     bits,
                 );
-                self.flags = shift_flags(mn, dst, &cnt, &v, bits, &self.flags);
+                self.flags = shift_flags(mn, dst, &cnt, &v, bits, &self.flags, self.flags_needed);
                 self.write_op0(instr, v);
             }
             Mnemonic::Xorps | Mnemonic::Xorpd | Mnemonic::Pxor | Mnemonic::Pandn
@@ -1046,33 +1043,19 @@ impl Exec<'_, '_> {
                 let a = self.val(instr, 0);
                 let b = self.val(instr, 1);
                 let rest = Expr::Const(u64::from(bits) - n);
-                let (v, out) = if mn == Mnemonic::Shld {
-                    (
-                        fold(
-                            Op::Or,
-                            fold(Op::Shl, a.clone(), Expr::Const(n), bits),
-                            fold(Op::Shr, b, rest.clone(), bits),
-                            bits,
-                        ),
-                        fold(Op::And, fold(Op::Shr, a, rest, bits), Expr::Const(1), bits),
-                    )
+                let (near, far) = if mn == Mnemonic::Shld {
+                    (Op::Shl, Op::Shr)
                 } else {
-                    (
-                        fold(
-                            Op::Or,
-                            fold(Op::Shr, a.clone(), Expr::Const(n), bits),
-                            fold(Op::Shl, b, rest, bits),
-                            bits,
-                        ),
-                        fold(
-                            Op::And,
-                            fold(Op::Shr, a, Expr::Const(n - 1), bits),
-                            Expr::Const(1),
-                            bits,
-                        ),
-                    )
+                    (Op::Shr, Op::Shl)
                 };
-                self.flags = Flags::Shift(v.clone(), bits, out);
+                let v = fold(
+                    Op::Or,
+                    fold(near, a.clone(), Expr::Const(n), bits),
+                    fold(far, b, rest, bits),
+                    bits,
+                );
+                let needed = self.flags_needed;
+                self.flags = shift_flags(mn, a, &Expr::Const(n), &v, bits, &self.flags, needed);
                 self.write_op0(instr, v);
             }
             Mnemonic::Rcr | Mnemonic::Rcl

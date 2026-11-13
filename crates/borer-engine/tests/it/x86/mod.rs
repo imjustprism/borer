@@ -241,6 +241,22 @@ fn agrees_with_the_emulator_64(code: &[u8]) {
     image_agrees_with_the_emulator(&raw::image(Arch::X86_64, code, &[]));
 }
 
+/// The lifter and the emulator never disagree on the block at 0x401000 of
+/// `p`, for sixteen seeds: the block may go unchecked, as one whose lift
+/// states no flag a reader of it needs does.
+///
+/// # Arguments
+///
+/// * `p` - The image.
+fn never_disagrees_with_the_emulator(p: &Program) {
+    use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
+    let a = Analysis::compute(p);
+    for seed in 1..=16 {
+        let v = verify(p, &a, &[0x401000], seed);
+        assert!(v.mismatches.is_empty(), "seed {seed}: {}", verify_tsv(&v));
+    }
+}
+
 /// The lifter and the emulator agree on the one block at 0x401000 of `p`,
 /// which is checked, for sixteen seeds of random registers and memory.
 ///

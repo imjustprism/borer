@@ -1221,11 +1221,18 @@ fn stack_value(instr: &Instruction) -> Option<(i64, Ty)> {
 ///
 /// SPEC: Intel SDM Vol. 2, SAL/SAR/SHL/SHR and SHLD/SHRD: the count is
 /// masked to five bits, six for a 64-bit operand, and a masked count of 0
-/// affects no flag. A constant count masking to 0 (`shl eax, 32`, `shld
-/// eax, ebx, 32`) leaves the flags from before; one below the width sets
-/// CF to the last bit shifted out of the destination and ZF, SF and PF
-/// from the result, a wider one those three alone. A count that is no
-/// constant may mask to 0, so what it leaves is unknown.
+/// affects no flag, so a constant count masking to 0 (`shl eax, 32`, `shld
+/// eax, ebx, 32`) leaves the flags from before. A count below the width
+/// sets CF to the last bit shifted out of the destination and ZF, SF and
+/// PF from the result. At a count of 1, OF is the change of sign for SHL,
+/// SHLD and SHRD, the original top bit for SHR and 0 for SAR; past 1 it is
+/// undefined. [`Flags::Shift`] reads OF as 0, so a one-bit shift other than
+/// SAR leaves the flags unknown wherever OF may be read (a one-bit SHL is
+/// lifted as `x + x` before it gets here). At the width or past it, which
+/// only an 8- or 16-bit operand reaches, ZF, SF and PF follow the lifted
+/// result and CF is not stated: SHL and SHR leave it undefined, and SAR's
+/// is the sign bit. A count that is no constant may mask to 0, so what it
+/// leaves is unknown.
 ///
 /// # Arguments
 ///
@@ -1236,13 +1243,24 @@ fn stack_value(instr: &Instruction) -> Option<(i64, Ty)> {
 /// * `v` - The shifted value.
 /// * `bits` - Operand width.
 /// * `before` - The flags before the shift.
-fn shift_flags(mn: Mnemonic, l: Expr, count: &Expr, v: &Expr, bits: u8, before: &Flags) -> Flags {
+/// * `needed` - The flags read after the shift ([`RflagsBits`]), all of
+///   them where they leave the block.
+fn shift_flags(
+    mn: Mnemonic,
+    l: Expr,
+    count: &Expr,
+    v: &Expr,
+    bits: u8,
+    before: &Flags,
+    needed: u32,
+) -> Flags {
     let count_mask = if bits == 64 { 0x3f } else { 0x1f };
     let Expr::Const(n) = count else {
         return Flags::Unknown;
     };
     match n & count_mask {
         0 => before.clone(),
+        1 if needed & RflagsBits::OF != 0 && mn != Mnemonic::Sar => Flags::Unknown,
         n if n < u64::from(bits) => {
             let pos = if matches!(mn, Mnemonic::Shr | Mnemonic::Sar | Mnemonic::Shrd) {
                 n - 1

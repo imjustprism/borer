@@ -422,22 +422,52 @@ fn a_64_bit_shift_by_65_reads_the_overflow_agrees_with_the_emulator() {
 }
 
 /// `shr rax, 65` shifts by one as well, whose overflow is the top bit of
-/// `rax` before it. A one-bit `shr` whose block reads OF lifts to no
-/// flags, so its `setl` stays asm and the block is not checked, where the
+/// `rax` before it. A one-bit `shr` lifts to no flags wherever OF may be
+/// read, so its `setl` stays asm and the block is not checked, where the
 /// lift once read the flags of a wider shift and printed 0 for a top bit
 /// of 1.
 #[test]
 fn a_64_bit_shr_by_65_never_disagrees_with_the_emulator() {
-    use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
     let code = [
         0x48, 0xc1, 0xe8, 0x41, // ASM: shr rax, 65
         0x0f, 0x9c, 0xc0, // ASM: setl al
         0xc3, // ASM: ret
     ];
-    let p = raw::image(Arch::X86_64, &code, &[]);
+    never_disagrees_with_the_emulator(&raw::image(Arch::X86_64, &code, &[]));
+}
+
+/// A one-bit double shift lifts to no flags where OF may be read: `setl`
+/// after `shld eax, ebx, 1` reads the change of sign, which the lift once
+/// took as 0, so the text took the branch the CPU does not at `eax =
+/// 0x40000000`. The emulator, which sets that OF too, checks the lift.
+#[test]
+fn a_one_bit_double_shift_never_disagrees_with_the_emulator() {
+    never_disagrees_with_the_emulator(&image(&[
+        0x0f, 0xa4, 0xd8, 0x01, // ASM: shld eax, ebx, 1
+        0x0f, 0x9c, 0xc0, // ASM: setl al
+        0xc3, // ASM: ret
+    ]));
+}
+
+/// A one-bit `shr` whose flags leave the block lifts to no flags either:
+/// `jl` after `shr eax, 1` is taken when the top bit of `eax` was set (SF
+/// is clear and OF is that bit), and with a `je` in the next block reading
+/// the same flags the lift once read OF as 0 there, so the text returned
+/// 0 where the binary returns 1.
+///
+/// `mov eax,[esp+4]; shr eax,1; jl L1; je L2; xor eax,eax; ret; L1: mov
+/// eax,1; ret; L2: mov eax,2; ret`.
+#[test]
+fn a_one_bit_shr_whose_flags_leave_the_block_never_differs() {
+    use borer_engine::analysis::render::{Verdict, check_generated};
+    let p = image(&[
+        0x8b, 0x44, 0x24, 0x04, 0xd1, 0xe8, 0x7c, 0x05, 0x74, 0x09, 0x33, 0xc0, 0xc3, 0xb8, 0x01,
+        0x00, 0x00, 0x00, 0xc3, 0xb8, 0x02, 0x00, 0x00, 0x00, 0xc3,
+    ]);
     let a = Analysis::compute(&p);
-    for seed in 1..=16 {
-        let v = verify(&p, &a, &[0x401000], seed);
-        assert!(v.mismatches.is_empty(), "seed {seed}: {}", verify_tsv(&v));
-    }
+    let o = Overlay::default();
+    let runs = check_generated(&p, &a, &o, 0x401000, 64, 1, 20_000).unwrap_or_default();
+    assert!(!runs.is_empty(), "no input ran");
+    let differ = runs.iter().any(|(_, v)| matches!(v, Verdict::Differs(..)));
+    assert!(!differ, "{runs:?}");
 }
