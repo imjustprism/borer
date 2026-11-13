@@ -1,11 +1,12 @@
-//! Loads arbitrary bytes, lists the code at its entry, analyzes what loads
-//! and decompiles its first functions, and for a .NET assembly lists its
-//! first IL methods and its obfuscator markers: the path every agent
-//! request takes after a load.
+//! Loads arbitrary bytes, lists the code at its entry, analyzes what loads,
+//! decompiles its first functions and reads each text as a view, and for a
+//! .NET assembly lists its first IL methods and its obfuscator markers: the
+//! path every agent request takes after a load.
 
 #![no_main]
 
 use borer_engine::analysis::decompile::decompile;
+use borer_engine::analysis::decompile::view::view_of;
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::clr::managed::{self, Managed};
 use borer_engine::clr::markers::markers_tsv;
@@ -30,7 +31,9 @@ fuzz_target!(|data: &[u8]| {
     let analysis = Analysis::compute(&program);
     let overlay = Overlay::default();
     for f in analysis.functions.iter().take(DECOMPILED) {
-        _ = decompile(&program, &analysis, &overlay, f.entry);
+        if let Some(text) = decompile(&program, &analysis, &overlay, f.entry) {
+            _ = view_of(&program, &analysis, &overlay, f.entry, &text);
+        }
     }
     for m in Managed::of(&program, &analysis).methods.iter().take(DECOMPILED) {
         _ = managed::listing(&program, m.token, usize::MAX);

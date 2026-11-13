@@ -20,7 +20,8 @@
 //! ([`mcp_latency`]).
 //! `timings` also holds each function's cold decompile to a p95 and a
 //! maximum ([`DECOMPILE_P95_MS`], [`DECOMPILE_MAX_MS`]), the bars the
-//! notepad of the golden corpus is measured against.
+//! notepad of the golden corpus is measured against, and reading that text
+//! as a view to its own ([`VIEW_P95_US`], [`VIEW_MAX_MS`]).
 //!
 //! The dogfood sweep reports a wall time, but its spread across identical
 //! runs is wide enough to hide a small change: 6.7s to 9.4s on one machine
@@ -34,6 +35,7 @@
     reason = "assertions are the point of a test"
 )]
 
+use borer_engine::analysis::decompile::view::view_of;
 use borer_engine::analysis::decompile::{
     Detail, answer, decompile, decompile_all, decompile_named, step_times, text_check,
 };
@@ -82,9 +84,25 @@ const DECOMPILE_P95_MS: u128 = 25;
 /// Notepad's slowest measured 1.7 s, at 0x140013154.
 const DECOMPILE_MAX_MS: u128 = 5000;
 
+/// The p95 of reading one function's text as a view ([`view_of`]), in
+/// microseconds, that [`timings`] holds an optimized build to.
+///
+/// It times `view_of` alone, on the plain `decompile` text and outside any
+/// memo build: what the kept view
+/// ([`view`](borer_engine::analysis::decompile::view::view)) adds, the
+/// answer's header lines and the noting of the reads of the build that
+/// keeps it, is not in it.
+const VIEW_P95_US: u128 = 2000;
+
+/// The slowest one function's view may take to read, in milliseconds.
+const VIEW_MAX_MS: u128 = 100;
+
 /// Reports the best time for analysis and for decompiling a fixed slice,
 /// then each function of the slice cold and alone: its p50, p95 and
 /// slowest, held to [`DECOMPILE_P95_MS`] and [`DECOMPILE_MAX_MS`].
+///
+/// Also times reading each text so made as a view, held to
+/// [`VIEW_P95_US`] and [`VIEW_MAX_MS`].
 #[test]
 #[ignore = "set BORER_BENCH to a binary path to run this harness"]
 fn timings() {
@@ -113,12 +131,15 @@ fn timings() {
         per
     );
     let cold = Analysis::compute(&program);
+    let mut texts = Vec::with_capacity(entries.len());
     let mut each: Vec<(Duration, u64)> = entries
         .iter()
         .map(|&e| {
             let t = Instant::now();
-            _ = decompile(&program, &cold, &o, e);
-            (t.elapsed(), e)
+            let text = decompile(&program, &cold, &o, e);
+            let took = t.elapsed();
+            texts.extend(text.map(|text| (e, text)));
+            (took, e)
         })
         .collect();
     each.sort_unstable();
@@ -131,10 +152,35 @@ fn timings() {
         "each:       p50 {:?}, p95 {p95:?}, max {max:?} at {slowest:#x}",
         percentile(&times, 50)
     );
+    let mut views: Vec<(Duration, u64)> = texts
+        .iter()
+        .map(|(e, text)| {
+            let t = Instant::now();
+            let v = view_of(&program, &cold, &o, *e, text);
+            let took = t.elapsed();
+            drop(v);
+            (took, *e)
+        })
+        .collect();
+    views.sort_unstable();
+    let view_times: Vec<Duration> = views.iter().map(|&(t, _)| t).collect();
+    let (view_p95, (view_max, view_slowest)) = (
+        percentile(&view_times, 95),
+        views.last().copied().unwrap_or_default(),
+    );
+    println!(
+        "view:       p50 {:?}, p95 {view_p95:?}, max {view_max:?} at {view_slowest:#x}",
+        percentile(&view_times, 50)
+    );
     assert!(p95.as_millis() <= DECOMPILE_P95_MS, "decompile p95 {p95:?}");
     assert!(
         max.as_millis() <= DECOMPILE_MAX_MS,
         "decompiling {slowest:#x} took {max:?}"
+    );
+    assert!(view_p95.as_micros() <= VIEW_P95_US, "view p95 {view_p95:?}");
+    assert!(
+        view_max.as_millis() <= VIEW_MAX_MS,
+        "reading {view_slowest:#x} as a view took {view_max:?}"
     );
 }
 
