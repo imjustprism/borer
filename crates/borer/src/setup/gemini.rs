@@ -21,7 +21,12 @@ impl Client for Gemini {
         let _ = os;
         let dir = env.home(".gemini")?;
         let settings = dir.join("settings.json");
-        if !settings.is_file() && dir.join("antigravity").is_dir() {
+        let has_settings = matches!(borer_engine::program::checked_metadata(&settings), Ok(Some(m)) if m.is_file());
+        let has_agy = matches!(
+            borer_engine::program::checked_metadata(&dir.join("antigravity")),
+            Ok(Some(m)) if m.is_dir()
+        );
+        if !has_settings && has_agy {
             return None;
         }
         Some((dir, settings))

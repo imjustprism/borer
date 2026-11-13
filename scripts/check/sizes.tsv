@@ -179,7 +179,6 @@ crates/borer/src/main.rs::call_tool#1	112
 crates/borer/src/main.rs::listing#1	132
 crates/borer/src/recall.rs::line_delta#1	101
 crates/borer/src/resources.rs::an_argument_naming_nothing_is_an_invalid_params_error#1	115
-crates/borer/src/setup/mod.rs::register_file#1	104
 crates/borer/src/tools/annotate.rs::set_name#1	113
 crates/borer/src/tools/annotate.rs::set_type#1	222
 crates/borer/src/tools/annotate/tests.rs::set_type_defines_applies_and_refuses#1	125

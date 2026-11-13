@@ -135,7 +135,7 @@ fn fetch_pdb(program: &Program) -> Option<PathBuf> {
         .map_or_else(|| PathBuf::from("target/symcache"), PathBuf::from);
     let dir = cache.join(&name).join(guid_age);
     let out = dir.join(&name);
-    if out.exists() {
+    if matches!(borer_engine::program::checked_metadata(&out), Ok(Some(m)) if m.is_file()) {
         return Some(out);
     }
     std::fs::create_dir_all(&dir).ok()?;

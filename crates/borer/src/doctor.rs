@@ -91,6 +91,10 @@ fn reach_symbol_server() -> Reach {
 ///
 /// The count and the bytes, or `None` when the directory does not read.
 fn tally(dir: &Path, extension: Option<&str>) -> Option<(usize, u64)> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the caller already refused an unusable cache directory"
+    )]
     let entries = std::fs::read_dir(dir).ok()?;
     let mut count = 0;
     let mut bytes = 0u64;
@@ -269,10 +273,11 @@ fn probe_program(p: PathBuf) -> Result<Option<PathBuf>, String> {
 
 /// Resolves `path` to its canonical local path when `path` is usable.
 fn canonical_local(path: &Path) -> Option<PathBuf> {
-    borer_engine::program::unusable_path(path)
-        .is_none()
-        .then(|| std::fs::canonicalize(path).ok())
-        .flatten()
+    if borer_engine::program::unusable_path(path).is_some() {
+        return None;
+    }
+    #[expect(clippy::disallowed_methods, reason = "unusable_path just cleared path")]
+    std::fs::canonicalize(path).ok()
 }
 
 /// Finds a program the way a host starts a command: a path as it stands,

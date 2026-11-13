@@ -87,10 +87,10 @@ pub(super) fn file_name(file: &std::path::Path) -> String {
         .into_owned()
 }
 
-/// The first bytes of a file, for the loading line to stream; none when it
-/// cannot be read, exceeds `max`, or is not a regular file
-/// ([`borer_engine::program::open_regular`]), so a pipe or a device is
-/// never opened for it.
+/// The first bytes of a file, for the loading line to stream.
+///
+/// Empty when it cannot be read, exceeds `max`, or is not a regular file
+/// ([`borer_engine::program::open_regular`]), so no pipe or device opens.
 ///
 /// # Arguments
 ///

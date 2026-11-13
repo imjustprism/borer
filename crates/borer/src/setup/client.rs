@@ -207,7 +207,10 @@ pub(super) fn targets(os: Os, env: &Env) -> (Vec<Target>, Vec<&'static str>) {
     let mut found = Vec::new();
     let mut missing = Vec::new();
     for client in CLIENTS {
-        match client.place(os, env).filter(|(dir, _)| dir.is_dir()) {
+        let installed = client.place(os, env).filter(|(dir, _)| {
+            matches!(borer_engine::program::checked_metadata(dir), Ok(Some(m)) if m.is_dir())
+        });
+        match installed {
             Some((_, file)) => found.push(Target { client, file }),
             None => missing.push(client.name()),
         }
@@ -226,7 +229,8 @@ pub(super) fn json_or_jsonc(dir: Option<PathBuf>, stem: &str) -> Option<(PathBuf
     let dir = dir?;
     let jsonc = dir.join(format!("{stem}.jsonc"));
     let json = dir.join(format!("{stem}.json"));
-    let file = if jsonc.is_file() && !json.is_file() {
+    let is_file = |p: &PathBuf| matches!(borer_engine::program::checked_metadata(p), Ok(Some(m)) if m.is_file());
+    let file = if is_file(&jsonc) && !is_file(&json) {
         jsonc
     } else {
         json

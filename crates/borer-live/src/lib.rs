@@ -1048,7 +1048,12 @@ mod tests {
     #[test]
     fn a_wow64_process_lists_each_module_once() {
         let cmd32 = std::path::Path::new(r"C:\Windows\SysWOW64\cmd.exe");
-        if !cmd32.exists() {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "checks for the local WOW64 shell"
+        )]
+        let present = cmd32.exists();
+        if !present {
             return;
         }
         let mut child = Command::new(cmd32)

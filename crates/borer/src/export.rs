@@ -180,7 +180,9 @@ fn write_with_set(
     let part_name = format!("{out}.part");
     let part = Path::new(&part_name);
     let shown = short_path(out);
-    if existing == Existing::Keep && std::fs::symlink_metadata(path).is_ok() {
+    #[expect(clippy::disallowed_methods, reason = "unusable_path cleared path")]
+    let occupied = existing == Existing::Keep && std::fs::symlink_metadata(path).is_ok();
+    if occupied {
         anyhow::bail!("{shown} exists; nothing was written");
     }
     let mut bodies = std::io::BufWriter::new(
@@ -314,7 +316,9 @@ pub fn write_mod_files(
         if let Some(why) = borer_engine::program::unusable_path(Path::new(out)) {
             anyhow::bail!("{why}; nothing was written");
         }
-        if existing == Existing::Keep && std::fs::symlink_metadata(out).is_ok() {
+        #[expect(clippy::disallowed_methods, reason = "unusable_path cleared out")]
+        let occupied = existing == Existing::Keep && std::fs::symlink_metadata(out).is_ok();
+        if occupied {
             anyhow::bail!("{} exists; nothing was written", short_path(out));
         }
     }

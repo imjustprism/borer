@@ -812,6 +812,7 @@ fn save_in(dir: &Path, index: CodeIndex, cap: u64) -> Result<(CodeIndex, PathBuf
 /// * `program` - The program half of its key.
 /// * `cap` - Most bytes the directory keeps.
 fn prune(dir: &Path, kept: &str, program: u64, cap: u64) {
+    #[expect(clippy::disallowed_methods, reason = "cache_dir cleared dir")]
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -820,11 +821,9 @@ fn prune(dir: &Path, kept: &str, program: u64, cap: u64) {
     let mut others: Vec<(SystemTime, u64, PathBuf)> = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
         let Some(stem) = name
-            .strip_suffix(EXTENSION)
+            .to_str()
+            .and_then(|n| n.strip_suffix(EXTENSION))
             .and_then(|n| n.strip_suffix('.'))
         else {
             continue;
@@ -1126,6 +1125,7 @@ pub fn grep_tsv(
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "the tests read their own files")]
 mod tests {
     use super::*;
 

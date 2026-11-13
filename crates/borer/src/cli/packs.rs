@@ -91,7 +91,7 @@ pub(super) fn read_text(path: &str, kind: &str, max: u64) -> anyhow::Result<Stri
 pub(super) fn read_spec_arg<'a>(
     args: &'a [String],
     idx: usize,
-    kind: &str,
+    kind: &'static str,
 ) -> anyhow::Result<(&'a str, String)> {
     let file = path_arg(args, idx, kind)?;
     let text = read_text(file, kind, crate::resources::SPEC_FILE_MAX)?;

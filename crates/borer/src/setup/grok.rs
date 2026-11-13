@@ -21,9 +21,17 @@ impl Client for Grok {
     }
 
     fn place(&self, _: Os, env: &Env) -> Option<(PathBuf, PathBuf)> {
-        let dir = env.var("GROK_HOME").or_else(|| env.home(".grok"))?;
-        let community = dir.join("user-settings.json").is_file();
-        if community && !dir.join("config.toml").is_file() {
+        let dir = env
+            .var("GROK_HOME")
+            .filter(|d| borer_engine::program::unusable_path(d).is_none())
+            .or_else(|| env.home(".grok"))?;
+        let is_file = |name: &str| {
+            matches!(
+                borer_engine::program::checked_metadata(&dir.join(name)),
+                Ok(Some(m)) if m.is_file()
+            )
+        };
+        if is_file("user-settings.json") && !is_file("config.toml") {
             return None;
         }
         at(Some(dir), "config.toml")

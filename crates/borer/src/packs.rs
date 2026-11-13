@@ -89,6 +89,7 @@ pub fn dirs() -> Vec<PathBuf> {
         let key = if borer_engine::program::unusable_path(d).is_some() {
             d.clone()
         } else {
+            #[expect(clippy::disallowed_methods, reason = "unusable_path just cleared d")]
             std::fs::canonicalize(d).unwrap_or_else(|_| d.clone())
         };
         let fresh = !seen.contains(&key);
@@ -154,9 +155,10 @@ pub fn load_scripts(pack: &mut Pack, file: &Path) -> Result<(), String> {
 }
 
 /// Every pack in the pack directories, in directory then file-name order,
-/// each with the file it came from as its `source`; a file that does not
-/// read as a pack is skipped with a note, and so is a directory that names
-/// a share or a device, unread.
+/// each with the file it came from as its `source`.
+///
+/// A file that does not read as a pack is skipped with a note, and so is a
+/// directory that names a share or a device, unread.
 ///
 /// # Arguments
 ///
@@ -169,6 +171,7 @@ pub fn discovered(notes: &mut Vec<String>) -> Vec<Pack> {
             notes.push(format!("skipped a pack directory: {why}"));
             continue;
         }
+        #[expect(clippy::disallowed_methods, reason = "unusable_path just cleared dir")]
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };

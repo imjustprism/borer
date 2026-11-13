@@ -76,17 +76,24 @@ impl Client for ClaudeDesktop {
 ///
 /// The directory, or `None` when neither base is known.
 fn claude_desktop_windows(env: &Env) -> Option<PathBuf> {
-    let packaged = env.local.as_ref().and_then(|local| {
-        let mut dirs: Vec<PathBuf> = std::fs::read_dir(local.join("Packages"))
-            .ok()?
-            .flatten()
-            .filter(|e| e.file_name().to_string_lossy().starts_with("Claude_"))
-            .map(|e| e.path().join("LocalCache").join("Roaming").join("Claude"))
-            .filter(|d| d.is_dir())
-            .collect();
-        dirs.sort();
-        dirs.into_iter().next()
-    });
+    let packaged = env
+        .local
+        .as_ref()
+        .filter(|local| borer_engine::program::unusable_path(local).is_none())
+        .and_then(|local| {
+            #[expect(clippy::disallowed_methods, reason = "unusable_path cleared local")]
+            let rd = std::fs::read_dir(local.join("Packages")).ok()?;
+            let mut dirs: Vec<PathBuf> = rd
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().starts_with("Claude_"))
+                .map(|e| e.path().join("LocalCache").join("Roaming").join("Claude"))
+                .filter(|d| {
+                    matches!(borer_engine::program::checked_metadata(d), Ok(Some(m)) if m.is_dir())
+                })
+                .collect();
+            dirs.sort();
+            dirs.into_iter().next()
+        });
     packaged.or_else(|| env.appdata.as_ref().map(|a| a.join("Claude")))
 }
 
@@ -102,8 +109,11 @@ pub(super) fn cli() -> Option<PathBuf> {
     } else {
         &["claude"]
     };
-    std::env::split_paths(&std::env::var_os("PATH")?)
-        .find_map(|dir| names.iter().map(|n| dir.join(n)).find(|p| p.is_file()))
+    std::env::split_paths(&std::env::var_os("PATH")?).find_map(|dir| {
+        names.iter().map(|n| dir.join(n)).find(
+            |p| matches!(borer_engine::program::checked_metadata(p), Ok(Some(m)) if m.is_file()),
+        )
+    })
 }
 
 /// Reads the program a `claude mcp get` report says a server runs.

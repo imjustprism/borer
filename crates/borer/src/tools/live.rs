@@ -59,7 +59,13 @@ pub(crate) fn runs_loaded(
     })?;
     let image = image.ok_or_else(|| format!("{who} lists no main module; {anyway}"))?;
     let path = std::path::Path::new(&image.path);
-    if borer_engine::program::unusable_path(path).is_none() {
+    if borer_engine::program::unusable_path(path).is_none()
+        && borer_engine::program::unusable_path(&program.path).is_none()
+    {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "unusable_path cleared both paths"
+        )]
         let same_file = matches!(
             (std::fs::canonicalize(path), std::fs::canonicalize(&program.path)),
             (Ok(a), Ok(b)) if a == b

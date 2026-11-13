@@ -2,6 +2,11 @@
 //! `Error: <message>`, the same message the MCP resource refuses with, and
 //! never a `#` line on a successful exit.
 
+#![expect(
+    clippy::expect_used,
+    reason = "test helpers assert preconditions on fixtures and child spawns"
+)]
+
 use std::process::{Command, Output};
 
 /// Where the fixture is loaded.

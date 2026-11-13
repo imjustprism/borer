@@ -320,15 +320,13 @@ fn curl(req: &Request<'_>, token: Option<&Token>) -> anyhow::Result<String> {
 /// * `child` - The running `curl`.
 /// * `file` - The file it writes.
 /// * `headers` - The file it writes the response headers to.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the updater reads the files it downloads and keeps"
-)]
 fn watch(child: &mut std::process::Child, file: &Path, headers: &Path) {
     /// The newest bytes the line streams.
     const NEWEST: u64 = 64;
     while matches!(child.try_wait(), Ok(None)) {
+        #[expect(clippy::disallowed_methods, reason = "stats the file curl writes")]
         let done = std::fs::metadata(file).map_or(0, |m| m.len());
+        #[expect(clippy::disallowed_methods, reason = "reads the headers curl writes")]
         let total = std::fs::read_to_string(headers)
             .ok()
             .and_then(|h| content_length(&h));
@@ -366,14 +364,12 @@ fn content_length(headers: &str) -> Option<u64> {
 /// * `file` - The file.
 /// * `len` - How much of it to look at.
 /// * `n` - How many bytes to read, at most.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the updater reads the files it downloads and keeps"
-)]
 fn newest(file: &Path, len: u64, n: u64) -> Vec<u8> {
     use std::io::{Read as _, Seek as _, SeekFrom};
     let mut bytes = Vec::new();
-    if let Ok(mut f) = std::fs::File::open(file)
+    #[expect(clippy::disallowed_methods, reason = "tails the file curl writes")]
+    let opened = std::fs::File::open(file);
+    if let Ok(mut f) = opened
         && f.seek(SeekFrom::Start(len.saturating_sub(n))).is_ok()
     {
         let _ = f.take(n).read_to_end(&mut bytes);
@@ -684,7 +680,11 @@ fn replace(new: &Path, exe: &Path) -> anyhow::Result<()> {
 fn aside(exe: &Path) -> PathBuf {
     /// Set-aside names tried before giving up on finding a free one.
     const TRIES: u32 = 64;
-    let free = |p: &Path| !p.exists() || std::fs::remove_file(p).is_ok();
+    let free = |p: &Path| {
+        #[expect(clippy::disallowed_methods, reason = "beside borer's own executable")]
+        let absent = !p.exists();
+        absent || std::fs::remove_file(p).is_ok()
+    };
     let first = exe.with_extension("old");
     if free(&first) {
         return first;
@@ -748,7 +748,9 @@ fn manager(exe: &Path, cargo_home: Option<&Path>) -> Option<String> {
         } else {
             "python"
         });
-        if python.exists() {
+        #[expect(clippy::disallowed_methods, reason = "beside borer's own executable")]
+        let has_python = python.exists();
+        if has_python {
             return Some(format!("{} -m pip install -U borer", program(&python)));
         }
         "pip install -U borer"
@@ -803,7 +805,11 @@ fn from_wheel(exe: &Path) -> bool {
     let Some(root) = exe.parent().and_then(Path::parent) else {
         return false;
     };
-    let lib = |name: &str| root.join(name).read_dir().into_iter().flatten().flatten();
+    let lib = |name: &str| {
+        #[expect(clippy::disallowed_methods, reason = "beside borer's own executable")]
+        let rd = root.join(name).read_dir();
+        rd.into_iter().flatten().flatten()
+    };
     let mut sites = vec![
         root.join("site-packages"),
         root.join("Lib").join("site-packages"),
@@ -812,7 +818,9 @@ fn from_wheel(exe: &Path) -> bool {
         sites.extend(["site-packages", "dist-packages"].map(|s| dir.path().join(s)));
     }
     sites.iter().any(|site| {
-        site.read_dir().into_iter().flatten().flatten().any(|e| {
+        #[expect(clippy::disallowed_methods, reason = "beside borer's own executable")]
+        let rd = site.read_dir();
+        rd.into_iter().flatten().flatten().any(|e| {
             let name = e.file_name();
             let name = name.to_string_lossy();
             name.starts_with("borer-") && name.ends_with(".dist-info")
@@ -824,6 +832,10 @@ fn from_wheel(exe: &Path) -> bool {
 /// links resolved as the running binary's are.
 fn cargo_home() -> Option<PathBuf> {
     let home = PathBuf::from(std::env::var_os("CARGO_HOME")?);
+    if borer_engine::program::unusable_path(&home).is_some() {
+        return Some(home);
+    }
+    #[expect(clippy::disallowed_methods, reason = "unusable_path cleared home")]
     Some(std::fs::canonicalize(&home).unwrap_or(home))
 }
 
@@ -831,6 +843,7 @@ fn cargo_home() -> Option<PathBuf> {
 /// link (`/opt/homebrew/bin/borer`) reads as the file it points at.
 fn running_exe() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
+    #[expect(clippy::disallowed_methods, reason = "borer's own running executable")]
     Some(std::fs::canonicalize(&exe).unwrap_or(exe))
 }
 
@@ -938,10 +951,6 @@ fn step<T>(
 ///
 /// When a download fails, the archive does not match its listed sum, `tar`
 /// cannot unpack it, or the binary's folder cannot be written.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the updater reads the files it downloads and keeps"
-)]
 fn install(
     release: &Release,
     name: &str,
@@ -959,6 +968,7 @@ fn install(
         fetch(&url, &archive, ARCHIVE_SECS, accept, token, Some(&headers))
     };
     step(&downloading, download, |()| {
+        #[expect(clippy::disallowed_methods, reason = "stats the downloaded archive")]
         let size = std::fs::metadata(&archive).map_or(0, |m| m.len());
         format!("downloaded {file}, {}", crate::term::megabytes(size))
     })?;
@@ -966,10 +976,13 @@ fn install(
         let listed = work.join("SHA256SUMS");
         let (url, accept) = release.file("SHA256SUMS")?;
         fetch(&url, &listed, ANSWER_SECS, accept, token, None)?;
+        #[expect(clippy::disallowed_methods, reason = "reads the downloaded sums")]
         let sums = std::fs::read_to_string(&listed).context("reading SHA256SUMS")?;
         let want =
             listed_sum(&sums, &file).with_context(|| format!("SHA256SUMS lists no {file}"))?;
-        let got = sha256_hex(&std::fs::read(&archive)?);
+        #[expect(clippy::disallowed_methods, reason = "hashes the downloaded archive")]
+        let bytes = std::fs::read(&archive)?;
+        let got = sha256_hex(&bytes);
         if !got.eq_ignore_ascii_case(want) {
             bail!("{file} does not match its listed SHA-256; nothing was changed");
         }
@@ -1039,11 +1052,11 @@ fn remember(tag: &str) {
 }
 
 /// The last checked tag, and whether that check is still fresh.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the updater reads the files it downloads and keeps"
-)]
 fn recalled() -> Option<(String, bool)> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "reads borer's cached release check"
+    )]
     let text = std::fs::read_to_string(check_file()?).ok()?;
     let (when, tag) = text.trim().split_once(' ')?;
     let when: u64 = when.parse().ok()?;
@@ -1159,6 +1172,10 @@ fn claim(file: &Path) -> bool {
     if let Some(dir) = file.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "claims borer's daily update file"
+    )]
     std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -1181,7 +1198,14 @@ pub(crate) fn refresh() {
         .or_else(|| recalled().map(|(tag, _)| tag))
         .unwrap_or_else(|| "none".to_owned());
     remember(&tag);
-    let claims = check_file().and_then(|f| Some(f.parent()?.read_dir().ok()?.flatten()));
+    let claims = check_file().and_then(|f| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "cleans borer's daily update claims"
+        )]
+        let rd = f.parent()?.read_dir().ok()?;
+        Some(rd.flatten())
+    });
     for found in claims.into_iter().flatten() {
         let name = found.file_name();
         let name = name.to_string_lossy();
@@ -1192,6 +1216,7 @@ pub(crate) fn refresh() {
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "the tests read their own files")]
 mod tests {
     /// The check runs for a person at a terminal, and not when opted out,
     /// under CI or with stderr redirected.

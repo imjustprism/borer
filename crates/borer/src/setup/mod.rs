@@ -109,9 +109,11 @@ fn backup_path(file: &Path) -> PathBuf {
 ///
 /// * `command` - The program the entry runs.
 fn stale(command: &str) -> bool {
+    let is_file =
+        |p: &Path| matches!(borer_engine::program::checked_metadata(p), Ok(Some(m)) if m.is_file());
     let path = Path::new(command);
     if path.is_absolute() || path.components().count() > 1 {
-        return !path.exists();
+        return borer_engine::program::unusable_path(path).is_none() && !is_file(path);
     }
     let endings: Vec<String> = if cfg!(windows) {
         let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".EXE;.CMD;.BAT".to_owned());
@@ -130,10 +132,27 @@ fn stale(command: &str) -> bool {
         std::env::split_paths(&dirs).any(|dir| {
             endings
                 .iter()
-                .any(|end| dir.join(format!("{command}{end}")).is_file())
+                .any(|end| is_file(&dir.join(format!("{command}{end}"))))
         })
     });
     !found
+}
+
+/// Reads an existing local client configuration file, or returns `Ok(None)`
+/// when no file is there yet.
+///
+/// # Errors
+///
+/// When `path` is refused, unreadable, past the size limit, or not UTF-8.
+fn read_existing(path: &Path) -> Result<Option<String>, String> {
+    match borer_engine::program::checked_metadata(path)? {
+        Some(m) if m.is_file() => {}
+        Some(_) | None => return Ok(None),
+    }
+    borer_engine::program::read_regular(path, 16 * 1024 * 1024)
+        .map_err(|e| format!("{e:#}"))
+        .and_then(|b| String::from_utf8(b).map_err(|e| e.to_string()))
+        .map(Some)
 }
 
 /// Adds, replaces or removes the entry in one client's file, or says what
@@ -151,20 +170,12 @@ fn stale(command: &str) -> bool {
 /// The report's text for the client, after its name; whether the client
 /// failed (a file that could not be read, edited or written); and whether
 /// the file changed, or would.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "a client's own configuration file"
-)]
 fn register_file(target: &Target, command: &str, mode: Mode, apply: bool) -> (String, bool, bool) {
     let file = target.file.display();
-    let existed = target.file.is_file();
-    let text = if existed {
-        match std::fs::read_to_string(&target.file) {
-            Ok(text) => text,
-            Err(e) => return (format!("{file}: cannot read it: {e}"), true, false),
-        }
-    } else {
-        String::new()
+    let (existed, text) = match read_existing(&target.file) {
+        Ok(Some(text)) => (true, text),
+        Ok(None) => (false, String::new()),
+        Err(e) => return (format!("{file}: cannot read it: {e}"), true, false),
     };
     let format = target.client.format();
     let entry = target.client.entry(command);

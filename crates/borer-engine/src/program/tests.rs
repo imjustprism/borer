@@ -207,10 +207,11 @@ fn a_device_path_climbing_out_of_its_drive_is_refused() {
     }
 }
 
-/// A device name is refused however Windows spells it: Windows 11 reads a
-/// trailing space or dot, a `:`, a non-drive character before `:` and a
-/// superscript port digit as the device (probed with `RtlIsDosDeviceName_U`),
-/// and the stem the check compared kept each of them.
+/// A device name is refused however Windows spells it.
+///
+/// Windows 11 reads a trailing space or dot, a `:`, a non-drive character
+/// before `:` and a superscript port digit as the device (probed with
+/// `RtlIsDosDeviceName_U`), and the stem the check compared kept each of them.
 ///
 /// # Panics
 ///

@@ -404,11 +404,11 @@ fn cli_counts_and_devices_are_refused_alike() {
 }
 
 /// A file a command reads is refused before it is opened when its path names
-/// a share, as the loader refuses one: the refusal is the checked reader's
-/// own, not the error of a read that reached the network.
+/// a share, as the loader refuses one.
 ///
-/// Each of these read the file, or asked whether it existed, first, and
-/// either authenticates to the share's host as the user.
+/// The refusal is the checked reader's own, not the error of a read that
+/// reached the network; each of these read the file, or asked whether it
+/// existed, first, and either authenticates to the share's host as the user.
 #[test]
 fn cli_refuses_a_share_before_reading_it() {
     if !cfg!(windows) {
@@ -1794,9 +1794,11 @@ fn cli_pack_refuses_a_65_mib_file_like_the_pack_flag() {
     assert!(!ok_flag && said_flag.contains(cap), "{said_flag}");
 }
 
-/// `borer diff` surfaces the size refusal of a 65 MiB `# borer fingerprint`
-/// sidecar rather than falling back to loading it as a binary, and a hashless
-/// `--project` path mismatch words a CLI remedy without naming MCP tools.
+/// `borer diff` surfaces the size refusal of an oversized fingerprint sidecar,
+/// and `--project` words a path mismatch for the CLI.
+///
+/// A 65 MiB `# borer fingerprint` file errors rather than falling back to
+/// loading as a binary, and a hashless mismatch names no MCP tools.
 #[test]
 fn cli_diff_and_project_surface_sidecar_and_path_refusals() {
     use std::io::Write as _;

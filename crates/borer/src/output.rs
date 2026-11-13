@@ -84,7 +84,11 @@ fn data_base() -> Option<PathBuf> {
 /// directory.
 pub fn root(binary: &Path, sha256: &str) -> Result<PathBuf, String> {
     if let Some(dir) = std::env::var_os(OUTPUT_ENV).filter(|d| !d.is_empty()) {
-        return Ok(PathBuf::from(dir));
+        let out = PathBuf::from(dir);
+        if let Some(why) = borer_engine::program::unusable_path(&out) {
+            return Err(format!("{OUTPUT_ENV}: {why}"));
+        }
+        return Ok(out);
     }
     let stem: String = binary
         .file_stem()
@@ -145,6 +149,9 @@ pub fn confine(
 ) -> Result<PathBuf, String> {
     let path = Path::new(requested);
     let shown = borer_engine::text::short_path(requested);
+    if let Some(why) = borer_engine::program::unusable_path(root) {
+        return Err(format!("output root {why}; nothing was written"));
+    }
     if let Some(why) = borer_engine::program::unusable_path(path) {
         return Err(format!("{why}; nothing was written"));
     }
@@ -165,6 +172,7 @@ pub fn confine(
     }
     std::fs::create_dir_all(root)
         .map_err(|e| format!("making the output root {}: {e}", root.display()))?;
+    #[expect(clippy::disallowed_methods, reason = "unusable_path cleared root")]
     let base = std::fs::canonicalize(root)
         .map_err(|e| format!("reading the output root {}: {e}", root.display()))?;
     let joined = if path.is_absolute() {
@@ -182,20 +190,41 @@ pub fn confine(
         return Err(outside());
     };
     let mut made = parent;
-    while !made.exists() {
+    while {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "unusable_path cleared root and path"
+        )]
+        let absent = !made.exists();
+        absent
+    } {
         made = made.parent().ok_or_else(outside)?;
     }
-    if !std::fs::canonicalize(made).is_ok_and(|p| p.starts_with(&base)) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "unusable_path cleared root and path"
+    )]
+    let under_base = std::fs::canonicalize(made).is_ok_and(|p| p.starts_with(&base));
+    if !under_base {
         return Err(outside());
     }
     std::fs::create_dir_all(parent).map_err(|e| format!("making {}: {e}", parent.display()))?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "unusable_path cleared root and path"
+    )]
     let dir =
         std::fs::canonicalize(parent).map_err(|e| format!("reading {}: {e}", parent.display()))?;
     if !dir.starts_with(&base) {
         return Err(outside());
     }
     let dest = dir.join(name);
-    match std::fs::symlink_metadata(&dest) {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "dest is inside the canonical output root"
+    )]
+    let dest_meta = std::fs::symlink_metadata(&dest);
+    match dest_meta {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(dest),
         Err(e) => Err(format!("reading {}: {e}", dest.display())),
         Ok(m) if m.file_type().is_symlink() || !m.is_file() => Err(format!(
@@ -254,9 +283,14 @@ pub fn for_program(
 /// When something other than a regular file is there, a file is there
 /// and `existing` is [`Existing::Keep`], or the open fails.
 pub fn create(path: &Path, existing: Existing) -> std::io::Result<std::fs::File> {
+    if let Some(why) = borer_engine::program::unusable_path(path) {
+        return Err(std::io::Error::other(why));
+    }
     let mut options = std::fs::OpenOptions::new();
     options.write(true);
-    match std::fs::symlink_metadata(path) {
+    #[expect(clippy::disallowed_methods, reason = "unusable_path cleared path")]
+    let meta = std::fs::symlink_metadata(path);
+    match meta {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             options.create_new(true);
         }
@@ -275,6 +309,10 @@ pub fn create(path: &Path, existing: Existing) -> std::io::Result<std::fs::File>
             }
         },
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "unusable_path and symlink_metadata cleared path"
+    )]
     options.open(path)
 }
 

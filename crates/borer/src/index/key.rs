@@ -87,10 +87,6 @@ pub(super) fn require_cache_dir() -> Result<PathBuf, String> {
 /// * `program` - The loaded image.
 /// * `packs` - The packs the analysis ran with.
 #[must_use]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the key reads the size and time of borer's own executable"
-)]
 pub fn index_key(program: &Program, packs: &Packs) -> IndexKey {
     let mut h = fnv1a(FNV_SEED, &FORMAT.to_le_bytes());
     for pack in &packs.packs {
@@ -119,9 +115,14 @@ pub fn index_key(program: &Program, packs: &Packs) -> IndexKey {
         program.debug_types
     );
     let mut h = load.0;
-    if let Ok(exe) = std::env::current_exe()
-        && let Ok(meta) = std::fs::metadata(exe)
-    {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the key reads the size and time of borer's own executable"
+    )]
+    let exe_meta = std::env::current_exe()
+        .ok()
+        .and_then(|exe| std::fs::metadata(exe).ok());
+    if let Some(meta) = exe_meta {
         h = fnv1a(h, &meta.len().to_le_bytes());
         let modified = meta
             .modified()

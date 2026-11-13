@@ -19,12 +19,16 @@ impl Client for LmStudio {
 
     fn place(&self, _: Os, env: &Env) -> Option<(PathBuf, PathBuf)> {
         let pointer = env.home(".lmstudio-home-pointer")?;
-        #[expect(clippy::disallowed_methods, reason = "LM Studio's own pointer file")]
-        let named = std::fs::read_to_string(&pointer)
+        let named = borer_engine::program::read_regular(&pointer, 4096)
             .ok()
+            .and_then(|b| String::from_utf8(b).ok())
             .map(|t| PathBuf::from(t.trim()))
-            .filter(|p| !p.as_os_str().is_empty());
-        let cache = env.home(".cache/lm-studio").filter(|d| d.is_dir());
+            .filter(|p| {
+                !p.as_os_str().is_empty() && borer_engine::program::unusable_path(p).is_none()
+            });
+        let cache = env.home(".cache/lm-studio").filter(
+            |d| matches!(borer_engine::program::checked_metadata(d), Ok(Some(m)) if m.is_dir()),
+        );
         at(
             named.or(cache).or_else(|| env.home(".lmstudio")),
             "mcp.json",

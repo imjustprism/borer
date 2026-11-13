@@ -97,6 +97,10 @@ impl Resume {
 ///
 /// When anything is already at `file`, or the write fails.
 fn write_fresh(file: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a fresh state file in the relay's own directory"
+    )]
     let mut out = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
