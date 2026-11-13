@@ -65,8 +65,12 @@ pub(crate) fn runs_loaded(
             (Ok(a), Ok(b)) if a == b
         );
         let same_bytes = || {
-            borer_engine::program::read_regular(path, num::from_usize(program.bytes.len()))
-                .is_ok_and(|b| b == program.bytes)
+            let want = num::from_usize(program.bytes.len());
+            borer_engine::program::checked_metadata(path)
+                .ok()
+                .flatten()
+                .is_some_and(|m| m.is_file() && m.len() == want)
+                && borer_engine::program::read_regular(path, want).is_ok_and(|b| b == program.bytes)
         };
         if same_file || same_bytes() {
             return Ok(());

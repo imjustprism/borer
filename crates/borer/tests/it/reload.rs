@@ -589,3 +589,29 @@ fn names_past_what_a_project_holds_are_refused_and_the_rest_survive_a_reload() {
         "the names did not survive the reload: {after}"
     );
 }
+
+/// `load_binary` reports a skipped share in `BORER_PACK_DIRS` in its answer.
+#[test]
+fn load_binary_names_a_skipped_pack_directory_share() {
+    if !cfg!(windows) {
+        return;
+    }
+    let path = std::env::temp_dir().join(format!("borer-pack-share-{}.exe", std::process::id()));
+    std::fs::write(&path, crate::contract::tiny_pe()).expect("the fixture is writable");
+    let shown = path.display().to_string();
+    let share = std::path::Path::new(r"\\host.invalid\share");
+    let mut client = Client::start_in(
+        &shown,
+        &[
+            ("BORER_PACK_DIRS", share),
+            ("BORER_AUTO_PACKS", std::path::Path::new("1")),
+        ],
+    );
+    let loaded = client.text("load_binary", &format!(r#"{{"path":{shown:?}}}"#));
+    client.finish();
+    std::fs::remove_file(&path).ok();
+    assert!(
+        loaded.contains(r"skipped a pack directory: \\host.invalid\share names a network share"),
+        "{loaded}"
+    );
+}

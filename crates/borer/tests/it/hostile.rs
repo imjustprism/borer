@@ -64,7 +64,7 @@ fn the_scripts_of_a_pack_hold_a_bounded_total() {
     let read = load_scripts(&mut pack, &file);
     std::fs::remove_dir_all(&dir).expect("cleans up");
     let refused = read.expect_err("6.4 MB of scripts loaded");
-    assert!(refused.contains("bytes, past the"), "{refused}");
+    assert!(refused.contains("bytes, past the 4194304"), "{refused}");
 }
 
 /// A script that is a device is refused by its metadata, where reading

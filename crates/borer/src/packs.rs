@@ -128,7 +128,7 @@ pub fn load_scripts(pack: &mut Pack, file: &Path) -> Result<(), String> {
             files.len()
         ));
     }
-    let mut left = SCRIPT_BYTES_MAX;
+    let mut total = 0u64;
     let mut scripts = Vec::with_capacity(files.len());
     for rel in files {
         let path = rel
@@ -136,9 +136,15 @@ pub fn load_scripts(pack: &mut Pack, file: &Path) -> Result<(), String> {
             .filter(|part| !part.is_empty())
             .fold(dir.to_path_buf(), |p, part| p.join(part));
         let shown = borer_engine::text::short_path(&path.to_string_lossy());
-        let bytes = borer_engine::program::read_regular(&path, left)
+        let bytes = borer_engine::program::read_regular(&path, SCRIPT_BYTES_MAX)
             .map_err(|e| format!("{}: script {e:#}", pack.source))?;
-        left = left.saturating_sub(borer_engine::num::from_usize(bytes.len()));
+        total = total.saturating_add(borer_engine::num::from_usize(bytes.len()));
+        if total > SCRIPT_BYTES_MAX {
+            return Err(format!(
+                "{}: scripts hold {total} bytes, past the {SCRIPT_BYTES_MAX} a pack's scripts may hold",
+                pack.source
+            ));
+        }
         let code = String::from_utf8(bytes)
             .map_err(|_| format!("{}: script {shown} is not text", pack.source))?;
         scripts.push((shown, code));
@@ -206,7 +212,8 @@ pub fn discovered(notes: &mut Vec<String>) -> Vec<Pack> {
 ///
 /// # Returns
 ///
-/// The packs, and one line per pack that loaded by itself saying why.
+/// The packs, and one line per skipped pack directory or pack and per pack
+/// that loaded by itself saying why.
 #[must_use]
 pub fn for_program(program: &Program, named: &Packs, auto: bool) -> (Arc<Packs>, Vec<String>) {
     let mut notes = Vec::new();
@@ -214,7 +221,7 @@ pub fn for_program(program: &Program, named: &Packs, auto: bool) -> (Arc<Packs>,
         return (Arc::new(named.clone()), notes);
     }
     let mut packs: Vec<Pack> = Vec::new();
-    for found in discovered(&mut Vec::new()) {
+    for found in discovered(&mut notes) {
         if named.packs.iter().any(|p| p.name == found.name)
             || packs.iter().any(|p| p.name == found.name)
         {
