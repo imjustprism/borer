@@ -202,3 +202,36 @@ fn a_project_of_large_arrays_writes_a_small_reclass_project() {
     assert!(file.is_ok_and(|f| f.len() < 1 << 16));
     assert!(peak < 1 << 24, "{peak} bytes at the peak");
 }
+
+/// A project's prototype, applied type or variable of four million stars
+/// is refused before it is split into tokens, holding little heap.
+///
+/// Each star was a 24-byte token, and a prototype's copied again, before
+/// the depth cap was read: about 200 MB for this one.
+#[test]
+fn a_text_of_millions_of_stars_is_refused_in_little_memory() {
+    let _guard = super::serial();
+    let stars = "*".repeat(1 << 22);
+    let at = || "0x1000".to_owned();
+    let declared = [("a1".to_owned(), format!("int {stars}p"))].into();
+    let cases = [
+        Project {
+            prototypes: [(at(), format!("int {stars}(void)"))].into(),
+            ..Project::default()
+        },
+        Project {
+            applied: [(at(), format!("u8 {stars}"))].into(),
+            ..Project::default()
+        },
+        Project {
+            vars: [(at(), declared)].into(),
+            ..Project::default()
+        },
+    ];
+    for project in cases {
+        let (refused, peak) = super::measured(|| project.to_overlay());
+        let refused = refused.expect_err("four million stars loaded");
+        assert!(refused.contains("65536 is the most read"), "{refused}");
+        assert!(peak < 1 << 20, "{peak} bytes at the peak");
+    }
+}

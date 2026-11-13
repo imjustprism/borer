@@ -461,3 +461,25 @@ fn an_applied_layout_names_the_fields_read_through_its_pointer() {
     let unused = from_pointer(&p, &a, &plain, "0x401000,rdx", "Rec").expect_err("no access");
     assert!(unused.contains("no struct to apply"), "{unused}");
 }
+
+/// A prototype or a declaration whose spelling passes the length a text is
+/// read from is refused as it is parsed, as its spelling would be when the
+/// saved project loads.
+///
+/// Read within the cap, both spelled past it, so the save succeeded and the
+/// next load refused the whole file.
+#[test]
+fn a_spelling_past_the_cap_is_refused_as_it_is_parsed() {
+    let proto = format!("{}int({})", "const ".repeat(10_900), ["int"; 32].join(","));
+    let refused = Proto::parse(&proto).expect_err("a prototype spelled past the cap");
+    assert!(
+        refused.to_string().contains("a prototype as spelled is"),
+        "{refused}"
+    );
+    let var = format!("{}TT*x", "const ".repeat(10_922));
+    let refused = Var::parse(&var).expect_err("a declaration spelled past the cap");
+    assert!(
+        refused.to_string().contains("a declaration as spelled is"),
+        "{refused}"
+    );
+}

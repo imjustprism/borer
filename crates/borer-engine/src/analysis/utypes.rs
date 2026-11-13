@@ -93,6 +93,35 @@ pub const ALIAS_DEPTH_MAX: usize = 16;
 /// from one overflows.
 pub const ARRAY_LEN_MAX: u64 = 1 << 24;
 
+/// Longest text a type, a prototype or a variable's declaration is read
+/// from, in bytes: as long as a text of C declarations
+/// ([`super::cdecl::TEXT_MAX`]), past any C a tool states.
+///
+/// Each is split into tokens before its depth or its count is read, a
+/// token a character, so a prototype of 67 million stars held 3 GB before
+/// its pointers were counted; a longer text is refused before it is read.
+pub const SPELLING_MAX: usize = 1 << 16;
+
+/// Refuses a text longer than [`SPELLING_MAX`] before it is read.
+///
+/// # Arguments
+///
+/// * `what` - What the text states (`a type`), for the message.
+/// * `text` - The text.
+///
+/// # Errors
+///
+/// When the text is longer; the message gives its length, not the text.
+pub(crate) fn short_enough(what: &str, text: &str) -> anyhow::Result<()> {
+    if text.len() <= SPELLING_MAX {
+        return Ok(());
+    }
+    Err(anyhow::anyhow!(
+        "{what} is {} bytes; {SPELLING_MAX} is the most read",
+        text.len()
+    ))
+}
+
 /// Tells whether `text` is an identifier a name may take: a letter or `_`
 /// first, then letters, digits or `_`, at most [`crate::text::OUTSIDE_MAX`]
 /// of them.
@@ -133,10 +162,12 @@ pub(crate) fn is_ident(text: &str) -> bool {
 ///
 /// # Errors
 ///
-/// When the text is empty, is not a type the language spells, or stacks
-/// more pointers and arrays than [`PTR_DEPTH_MAX`]; the message names the
-/// offending word so the caller can retry.
+/// When the text is empty or longer than [`SPELLING_MAX`], is not a type
+/// the language spells, or stacks more pointers and arrays than
+/// [`PTR_DEPTH_MAX`]; the message names the offending word so the caller
+/// can retry.
 pub fn parse_type(text: &str) -> anyhow::Result<TypeExpr> {
+    short_enough("a type", text)?;
     let one_word = || {
         anyhow::anyhow!(
             "a type is one word under pointers; {} is not one",

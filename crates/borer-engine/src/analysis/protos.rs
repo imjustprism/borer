@@ -269,9 +269,10 @@ impl Proto {
     /// grammar does not read, a function-pointer parameter, a
     /// register-level convention, two parameters of one name, a name a
     /// decompiled text cannot carry, `...` before the last parameter, or
-    /// more than [`PARAMS_MAX`] parameters; the message names what was
-    /// refused.
+    /// more than [`PARAMS_MAX`] parameters, or the text is longer than
+    /// [`utypes::SPELLING_MAX`]; the message names what was refused.
     pub fn parse(text: &str) -> anyhow::Result<Self> {
+        utypes::short_enough("a prototype", text)?;
         let t = text.trim().trim_end_matches(';').trim_end();
         let shown = crate::text::quoted(text);
         if t.contains("@<") || t.contains("__usercall") || t.contains("__userpurge") {
@@ -345,12 +346,14 @@ impl Proto {
                 return Err(anyhow::anyhow!("{shown} names two parameters {}", p.name));
             }
         }
-        Ok(Self {
+        let proto = Self {
             ret,
             conv,
             params,
             variadic,
-        })
+        };
+        utypes::short_enough("a prototype as spelled", &proto.spell())?;
+        Ok(proto)
     }
 
     /// Spells the prototype without a function name, as the project file
@@ -658,8 +661,10 @@ impl Var {
     /// # Errors
     ///
     /// When the text names nothing, or names something a decompiled text
-    /// cannot carry, or its type does not parse.
+    /// cannot carry, or its type does not parse, or it is longer than
+    /// [`utypes::SPELLING_MAX`].
     pub fn parse(text: &str) -> anyhow::Result<Self> {
+        utypes::short_enough("a declaration", text)?;
         let toks = tokens(text)?;
         match toks.as_slice() {
             [Tok::Word(name)] => {
@@ -671,10 +676,12 @@ impl Var {
             }
             [.., Tok::Word(name)] => {
                 check_name(name, text)?;
-                Ok(Self {
+                let var = Self {
                     name: name.clone(),
                     ty: Some(type_of(toks.get(..toks.len() - 1).unwrap_or(&[]), text)?),
-                })
+                };
+                utypes::short_enough("a declaration as spelled", &var.spell())?;
+                Ok(var)
             }
             _ => Err(anyhow::anyhow!(
                 "{} names no variable: write `name` or `type name`",
