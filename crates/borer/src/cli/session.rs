@@ -18,7 +18,7 @@ use super::USAGE;
 use super::args::{arg, command_usage, decompile_args, entry_at};
 use crate::params::Detail;
 use crate::state::read_packs;
-use crate::tools::decompile::{decompile_header, window};
+use crate::tools::decompile::window;
 use crate::tools::load::skipped_classes;
 
 /// The refusal of a command given no binary: what it needs, then its own
@@ -494,15 +494,20 @@ impl Session {
 }
 
 /// Answers `decompile <binary> <address|name> [skeleton|full] [offset]
-/// [limit]`: the function's pseudo-C as the `decompile` tool answers it.
+/// [limit]`: the function's pseudo-C as the `decompile` tool answers it
+/// ([`decompile::answer()`]).
 ///
-/// It is paged by line as the tool pages it ([`window`]), under the lines
-/// the tool puts below the first ([`decompile_header`]). The CLI printed
+/// The binary's name tables are not read here, where the tool reads them,
+/// so a constant one of them spells for the tool stays a number here.
+///
+/// It is paged by line as the tool pages it ([`window`]). The CLI printed
 /// every line, 6,610 of them for one function of a system program, where
 /// the tool shows 300 under a `// showing N of M` line saying how to read
 /// the rest. It also wrote a header of its own, the check and the warning
-/// without the `// next:` lines, so a line number `grep` gave, which
-/// counts the tool's lines, named another line here.
+/// without the `// next:` lines, so a line number `grep` gave named another
+/// line here. `grep` counts the index's lines ([`decompile::shown`]), which
+/// are these only where nothing the index leaves out shows: a comment, name
+/// or type the project gave, or the repair search's note and rendering.
 ///
 /// # Arguments
 ///
@@ -529,26 +534,15 @@ pub(super) fn decompiled(args: &[String], s: &Session) -> anyhow::Result<String>
     let va = s.resolve(&a, arg(args, 2, "decompile needs an address or name")?)?;
     let entry =
         borer_engine::analysis::entry_or_gap(&s.program, &mut a, va).map_err(anyhow::Error::msg)?;
-    let raw = std::env::var_os("BORER_RAW").is_some();
-    let (o, differs) = if raw {
-        (s.overlay.clone(), None)
+    let text = if std::env::var_os("BORER_RAW").is_some() {
+        decompile::decompile_raw(&s.program, &a, &s.overlay, entry).map(|text| match detail {
+            Detail::Skeleton => decompile::skeleton(&text),
+            Detail::Full => text,
+        })
     } else {
-        render::answered_flagged(&s.program, &a, &s.overlay, entry)
-    };
-    let header = (!raw)
-        .then(|| decompile_header(&s.program, &a, &o, entry, differs.as_deref()))
-        .flatten();
-    let text = if raw {
-        decompile::decompile_raw(&s.program, &a, &o, entry)
-    } else {
-        decompile::decompile_named(&s.program, &a, &o, entry)
+        decompile::answer(&s.program, &a, &s.overlay, entry, detail.into())
     }
     .with_context(|| format!("decompilation failed at {entry:#x}"))?;
-    let text = match detail {
-        Detail::Skeleton => decompile::skeleton(&text),
-        Detail::Full => text,
-    };
-    let text = decompile::with_header(&text, header.as_deref());
     Ok(window(&text, None, offset, limit))
 }
 

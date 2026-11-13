@@ -101,7 +101,7 @@ mod warn;
 mod wire;
 
 pub use crate::timing::step_times;
-pub use answer::{answer_header, shown, warnings, with_header};
+pub use answer::{Detail, answer, answer_header, shown, warnings, with_header};
 use arch::Lifter;
 pub use asserts::*;
 pub use checked::{checked_header, decompile_checked_all, text_check};

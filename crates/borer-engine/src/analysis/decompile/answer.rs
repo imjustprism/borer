@@ -1,14 +1,88 @@
-//! The lines a `decompile` answer carries under its text's first line:
-//! what of the text was checked against the binary, what is known wrong in
-//! it and what to read next ([`answer_header`]).
+//! The answer `decompile` gives: a function's text with the lines under
+//! its first line that say what of it was checked against the binary, what
+//! is known wrong in it and what to read next.
 //!
-//! The index stores the form of the answer [`shown`] makes.
+//! The tool, the `borer://decompile` resource and the command line answer
+//! with [`answer`]; the index stores the form [`shown`] makes, without the
+//! repair search, and the batch counts the lines of [`answer_header`].
 
 use std::collections::BTreeSet;
 
-use super::{checked_header, decompile_named, stack, warn};
+use super::{checked_header, decompile_named, skeleton, stack, warn};
 use crate::analysis::{Analysis, Overlay, name_of, render};
 use crate::program::Program;
+
+/// How much of a function's text an answer shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Detail {
+    /// The whole text.
+    Full,
+    /// The control flow and the calls only ([`skeleton`]).
+    Skeleton,
+}
+
+/// Returns the answer `decompile` gives for one function: its text at the
+/// detail asked for, with [`answer_header`]'s lines under its first line.
+///
+/// The text is rendered under the names the repair search picks, which
+/// runs only where the text check flags the function
+/// ([`render::answered_flagged`]). When the search ends with the text still
+/// differing in a value its run leaves behind (a result, a byte of a
+/// buffer, an import called), its note ([`render::Repair::note`]) ends the
+/// `// warn:` line; a disagreement only the replay finds gets none. The
+/// header is read before the text, so the check memoizes the decompilation
+/// with the lifter's witness and the text reads the same cell.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `analysis` - Its analysis.
+/// * `overlay` - Names in force.
+/// * `entry` - The function's entry.
+/// * `detail` - The whole text or its skeleton.
+///
+/// # Returns
+///
+/// The answer, or `None` when the function does not decompile
+/// ([`decompile_named`]).
+///
+/// # Examples
+///
+/// ```
+/// use borer_engine::analysis::decompile::{Detail, answer};
+/// use borer_engine::analysis::{Analysis, Overlay};
+/// use borer_engine::program::{Arch, Program, Section};
+///
+/// // ASM: cmp ecx, 0x1337abcd ; sete al ; movzx eax, al ; ret
+/// let code = vec![0x81, 0xf9, 0xcd, 0xab, 0x37, 0x13, 0x0f, 0x94, 0xc0, 0x0f, 0xb6, 0xc0, 0xc3];
+/// let section = Section::mapped(".text", 0x1000, 0, 13, false, true);
+/// let p = Program::raw(code, Arch::X86_64, 0, Some(0x1000), vec![section]);
+/// let a = Analysis::compute(&p);
+/// let text = answer(&p, &a, &Overlay::default(), 0x1000, Detail::Full).expect("decompiles");
+/// let mut lines = text.lines().skip(1);
+/// assert!(lines.next().is_some_and(|l| l.starts_with("// checked vs binary")));
+/// assert_eq!(
+///     lines.next(),
+///     Some("// next: borer://solve/0x1000,a1 (compares against 0x1337abcd: solve tries it as a1)")
+/// );
+/// ```
+#[must_use]
+pub fn answer(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    entry: u64,
+    detail: Detail,
+) -> Option<String> {
+    let (overlay, differs) = render::answered_flagged(program, analysis, overlay, entry);
+    let header = answer_header(program, analysis, &overlay, entry, differs.as_deref());
+    let text = decompile_named(program, analysis, &overlay, entry)?;
+    let text = match detail {
+        Detail::Full => text,
+        Detail::Skeleton => skeleton(&text),
+    };
+    Some(with_header(&text, header.as_deref()))
+}
 
 /// Returns the lines a `decompile` answer puts under its first line.
 ///
@@ -24,8 +98,9 @@ use crate::program::Program;
 /// * `analysis` - Its analysis.
 /// * `overlay` - Names in force.
 /// * `entry` - The function's entry.
-/// * `differs` - The repair search's note, when the text still differs
-///   ([`render::answered_flagged`]).
+/// * `differs` - The repair search's note ([`render::answered_flagged`]),
+///   which it gives only when its run of the text still leaves a value
+///   differing ([`render::Repair::note`]).
 ///
 /// # Returns
 ///
@@ -50,7 +125,7 @@ pub fn answer_header(
 /// * `analysis` - Its analysis.
 /// * `overlay` - Names in force.
 /// * `entry` - The function's entry.
-/// * `differs` - The repair search's note, when the text still differs.
+/// * `differs` - The repair search's note, as [`answer_header`] takes it.
 /// * `body` - The rendered text, or `None` to decompile it.
 ///
 /// # Returns
@@ -92,7 +167,7 @@ fn header_lines(
 /// * `analysis` - Its analysis.
 /// * `overlay` - Names in force.
 /// * `entry` - The function's entry.
-/// * `differs` - The repair search's note, when the text still differs.
+/// * `differs` - The repair search's note, as [`answer_header`] takes it.
 /// * `body` - The rendered text, or `None` to decompile it.
 ///
 /// # Returns
@@ -186,9 +261,9 @@ pub fn with_header(text: &str, header: Option<&str>) -> String {
 /// The decompile answer and the index carry it, like [`checked_header`]. Each
 /// warning is a fact of the text, never a guess, so it flags no right
 /// text; a text with no line may still be wrong in ways no fact of the
-/// text shows. The input a run of the text still differs on after the
-/// repair search ([`crate::analysis::render::Repair::note`]) is the last
-/// item.
+/// text shows. In the answer, never the index, the last item can be the
+/// repair search's note: the input a run of the text still leaves a value
+/// differing on ([`crate::analysis::render::Repair::note`]).
 ///
 /// The text is read on a decompile's stack ([`stack::roomy`]): its
 /// statements nest as deep as the function's, and a caller's thread may
@@ -201,7 +276,7 @@ pub fn with_header(text: &str, header: Option<&str>) -> String {
 /// * `overlay` - The names the text was written under.
 /// * `entry` - The function's entry.
 /// * `text` - Its text as [`decompile_named`] wrote it.
-/// * `differs` - The repair search's note, when the text still differs.
+/// * `differs` - The repair search's note, as [`answer_header`] takes it.
 ///
 /// # Returns
 ///

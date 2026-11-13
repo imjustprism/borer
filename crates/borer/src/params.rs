@@ -202,6 +202,15 @@ pub(crate) enum Detail {
     Skeleton,
 }
 
+impl From<Detail> for borer_engine::analysis::decompile::Detail {
+    fn from(d: Detail) -> Self {
+        match d {
+            Detail::Full => Self::Full,
+            Detail::Skeleton => Self::Skeleton,
+        }
+    }
+}
+
 /// What `search` looks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]

@@ -3,14 +3,15 @@
 
 use std::fmt::Write as _;
 
-use borer_engine::analysis::{Analysis, Overlay, render};
-use borer_engine::program::{Feature, Program};
+use borer_engine::analysis::decompile::answer_header;
+use borer_engine::analysis::render;
+use borer_engine::program::Feature;
 use rayon::prelude::*;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ErrorData, tool, tool_router};
 
 use crate::BorerServer;
-use crate::params::{DecompileBatchParams, DecompileParams, Detail, Filter, count_param, to_usize};
+use crate::params::{DecompileBatchParams, DecompileParams, Filter, count_param, to_usize};
 use crate::safety::{Effect, effects};
 
 /// Lines of pseudo-C one `decompile` answer holds unless a limit says
@@ -138,7 +139,7 @@ pub(crate) fn window(
 /// up to `cap` bytes, then a note naming where `decompile` picks it up.
 ///
 /// The note counts lines as `decompile` numbers them, its header lines
-/// ([`decompile_header`]) included, so the offset it gives continues from
+/// ([`answer_header`]) included, so the offset it gives continues from
 /// the last line shown; it also names the line the declarations end on,
 /// since the share of a function with hundreds of locals can be all
 /// declarations.
@@ -170,39 +171,6 @@ pub(crate) fn truncated(text: &str, cap: usize, entry: u64, header: usize) -> St
     )
 }
 
-/// Returns the lines a `decompile` answer puts under its first line.
-///
-/// They are what of the text was checked against the binary, the
-/// `// warn:` line naming what is known wrong in the text
-/// ([`borer_engine::analysis::decompile::warnings`]), then a `// next:`
-/// line per resource the function's facts point at
-/// ([`render::next_steps`]).
-///
-/// The check is read first, so the decompilation it memoizes keeps the
-/// lifter's witness, and the text the answer shows reads the same cell.
-///
-/// # Arguments
-///
-/// * `p` - The loaded program.
-/// * `a` - Its analysis.
-/// * `o` - Names in force.
-/// * `entry` - The function's entry.
-/// * `differs` - The repair search's note, when the text still differs
-///   ([`render::answered_flagged`]).
-///
-/// # Returns
-///
-/// The lines without a final newline, or `None` when there are none.
-pub(crate) fn decompile_header(
-    p: &Program,
-    a: &Analysis,
-    o: &Overlay,
-    entry: u64,
-    differs: Option<&str>,
-) -> Option<String> {
-    borer_engine::analysis::decompile::answer_header(p, a, o, entry, differs)
-}
-
 #[tool_router(router = decompile_tools, vis = "pub(crate)")]
 impl BorerServer {
     /// Returns the pseudo-C of one function.
@@ -213,9 +181,18 @@ impl BorerServer {
     /// otherwise. Every other choice of words in these tools refuses one it
     /// does not know.
     ///
-    /// The answer's second line says what of it was checked against the
-    /// binary ([`borer_engine::analysis::decompile::checked_header`]). The
-    /// index stores this same text, so a `grep` line is a line of this answer.
+    /// The answer is the engine's ([`borer_engine::analysis::decompile::answer()`]),
+    /// paged ([`window`]). Its second line says what of it was checked
+    /// against the binary ([`borer_engine::analysis::decompile::checked_header`]).
+    /// The index stores another form of it
+    /// ([`borer_engine::analysis::decompile::shown`]), made without the
+    /// repair search and under the empty overlay: none of the session's
+    /// names, comments, types, prototypes or fields, and no name tables. Its
+    /// lines can differ from these: each comment is a line of its own, so
+    /// the lines after one are numbered otherwise there; a function the
+    /// check flags has no note and no repaired rendering there; and what the
+    /// session named or typed, or a constant a name table spells, reads as
+    /// the binary alone gives it.
     ///
     /// # Arguments
     ///
@@ -253,15 +230,9 @@ impl BorerServer {
                 return Err(why);
             }
             let (a, entry) = self.decompile_entry(p, self.ensure_analysis()?, &address)?;
-            let (o, differs) = render::answered_flagged(p, &a, &self.overlay(), entry);
-            let header = decompile_header(p, &a, &o, entry, differs.as_deref());
-            let text = decompile::decompile_named(p, &a, &o, entry)
+            let detail = detail.unwrap_or_default().into();
+            let text = decompile::answer(p, &a, &self.overlay(), entry, detail)
                 .ok_or_else(|| format!("decompilation failed at {entry:#x}"))?;
-            let text = match detail.unwrap_or_default() {
-                Detail::Full => text,
-                Detail::Skeleton => decompile::skeleton(&text),
-            };
-            let text = decompile::with_header(&text, header.as_deref());
             Ok(window(&text, filter.as_deref(), offset, limit))
         })
     }
@@ -352,7 +323,7 @@ impl BorerServer {
                 .par_iter()
                 .filter(|(_, text)| text.len() > PER_FN)
                 .map(|(entry, _)| {
-                    let lines = decompile_header(p, &a, &o, *entry, None).map_or(0, |h| h.lines().count());
+                    let lines = answer_header(p, &a, &o, *entry, None).map_or(0, |h| h.lines().count());
                     (*entry, lines)
                 })
                 .collect();
@@ -1044,6 +1015,56 @@ mod tests {
             })
             .expect("text");
         assert!(!plain.contains("checked vs binary"), "{plain}");
+    }
+
+    /// The `decompile` answer is the engine's answer, paged, at either
+    /// detail.
+    ///
+    /// The tool and the command line each put the answer together by hand,
+    /// so one could drift from the other; both call the engine's `answer`
+    /// now, and this holds the tool to it.
+    ///
+    /// # Panics
+    ///
+    /// When the tool answers other text than the engine's answer paged.
+    #[test]
+    fn a_decompile_answer_is_the_engine_answer_paged() {
+        use crate::params::{DecompileParams, Detail};
+        use borer_engine::analysis::decompile;
+        use borer_engine::program::{Arch, Feature};
+        use rmcp::handler::server::wrapper::Parameters;
+        let mut code = vec![
+            0x81, 0xf9, 0xcd, 0xab, 0x37, 0x13, // ASM: cmp ecx, 0x1337abcd
+            0x0f, 0x94, 0xc0, // ASM: sete al
+            0x0f, 0xb6, 0xc0, // ASM: movzx eax, al
+            0xc3, // ASM: ret
+        ];
+        code.resize(0x10, 0xcc);
+        let server = crate::testing::code_server(Arch::X86_64, &code);
+        for detail in [None, Some(Detail::Skeleton)] {
+            let tool = server
+                .decompile(Parameters(DecompileParams {
+                    address: "0x1000".to_owned(),
+                    detail,
+                    filter: None,
+                    offset: None,
+                    limit: None,
+                }))
+                .expect("decompiles");
+            let a = server.analysis(Feature::Decompile).expect("analyzed");
+            let engine = server
+                .with_program(|p| {
+                    let detail = detail.unwrap_or_default().into();
+                    decompile::answer(p, &a, &server.overlay(), 0x1000, detail)
+                        .ok_or_else(|| "no answer".to_owned())
+                })
+                .expect("an answer");
+            assert!(
+                engine.contains("// next: borer://solve/0x1000,a1"),
+                "{engine}"
+            );
+            assert_eq!(tool, super::window(&engine, None, None, None), "{detail:?}");
+        }
     }
 
     /// The `decompile` answer lists, under the line saying what was
