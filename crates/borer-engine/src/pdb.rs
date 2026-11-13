@@ -26,6 +26,7 @@
 //! slots, so `alpha` renders where `local_8` otherwise would.
 
 mod lines;
+mod streams;
 
 use crate::dwarf::{frame_slot, local_name_ok};
 use crate::program::{Section, Symbol, SymbolKind, pe::rva_to_va};
@@ -61,13 +62,6 @@ const S_DEFRANGE_FRAMEPOINTER_REL: u16 = 0x1142;
 /// `S_DEFRANGE_REGISTER_REL`: the live range of an `S_LOCAL` at an offset
 /// from a named register.
 const S_DEFRANGE_REGISTER_REL: u16 = 0x1145;
-
-/// The frame pointer register of an Intel frame, either width: `CV_REG_EBP`
-/// and `CV_AMD64_RBP` as the crate hands them back, plain numbers.
-const FRAME_PTR: [u16; 2] = [22, 334];
-/// The stack pointer register of an Intel frame, either width:
-/// `CV_REG_ESP` and `CV_AMD64_RSP`.
-const STACK_PTR: [u16; 2] = [21, 335];
 
 /// The `CodeView` PDB70 record a PE's debug directory states, owned.
 #[derive(Debug, Clone)]
@@ -310,7 +304,12 @@ fn same_build<'s, S: pdb::Source<'s> + 's>(
 ///
 /// As [`same_build`], `None` also when the file does not open as a PDB.
 fn file_names_build(path: &Path, record: &Record) -> Option<bool> {
-    let mut db = pdb::PDB::open(crate::program::open_regular(path, PDB_LEN_MAX).ok()?).ok()?;
+    let mut file = crate::program::open_regular(path, PDB_LEN_MAX).ok()?;
+    let len = file.metadata().ok()?.len();
+    if !streams::msf_ok(&mut file, len) {
+        return None;
+    }
+    let mut db = pdb::PDB::open(file).ok()?;
     same_build(&mut db, record)
 }
 
@@ -333,6 +332,9 @@ fn file_names_build(path: &Path, record: &Record) -> Option<bool> {
 /// age, `Some(false)` when it states another build's, `None` when the file
 /// is no PDB a parser can read.
 pub fn identifies(bytes: &[u8], record: &Record) -> Option<bool> {
+    if !streams::msf_bytes_ok(bytes) {
+        return None;
+    }
     let mut db = pdb::PDB::open(Cursor::new(bytes)).ok()?;
     same_build(&mut db, record)
 }
@@ -415,6 +417,9 @@ pub(crate) fn apply(
         return unreadable();
     };
     phases.mark("pdb read");
+    if !streams::msf_bytes_ok(&bytes) {
+        return unreadable();
+    }
     let Ok(mut db) = pdb::PDB::open(Cursor::new(bytes.as_slice())) else {
         return unreadable();
     };
@@ -423,6 +428,9 @@ pub(crate) fn apply(
         Some(true) => {}
         Some(false) => return Some(Outcome::Skipped(Skip::Mismatch)),
         None => return unreadable(),
+    }
+    if !streams::dbi_extra_ok(&mut db) {
+        return unreadable();
     }
     let Ok(map) = db.address_map() else {
         return unreadable();
@@ -528,19 +536,15 @@ pub(crate) fn sources(
     word: i64,
 ) -> Option<BTreeMap<u64, (String, u32)>> {
     let path = resolved(binary, record, symsrv)?;
-    let unreadable = || None;
-    let Ok(bytes) = crate::program::read_regular(&path, PDB_LEN_MAX) else {
-        return unreadable();
-    };
-    let Ok(mut db) = pdb::PDB::open(Cursor::new(bytes.as_slice())) else {
-        return unreadable();
-    };
-    if same_build(&mut db, record) != Some(true) {
-        return unreadable();
+    let bytes = crate::program::read_regular(&path, PDB_LEN_MAX).ok()?;
+    if !streams::msf_bytes_ok(&bytes) {
+        return None;
     }
-    let Ok(map) = db.address_map() else {
-        return unreadable();
-    };
+    let mut db = pdb::PDB::open(Cursor::new(bytes.as_slice())).ok()?;
+    if same_build(&mut db, record) != Some(true) || !streams::dbi_extra_ok(&mut db) {
+        return None;
+    }
+    let map = db.address_map().ok()?;
     let gathered = gather(&mut db, &map, word, true);
     let rows = resolve_lines(&mut db, &gathered.lines);
     Some(
@@ -739,83 +743,6 @@ impl Gathered {
     }
 }
 
-/// Reads how far a procedure's frame reaches below the entry stack
-/// pointer, from its frame record.
-///
-/// The record states the frame's size in bytes and, a field later, the
-/// bytes its prologue pushed to save callee registers: the writer of both
-/// counts the pushes in the frame's size only to leave them out of the
-/// field, so the distance the frame reaches is the two added. A local a
-/// stack-pointer-relative record names sits that far below entry.
-///
-/// # Arguments
-///
-/// * `raw` - The `S_FRAMEPROC` record's raw bytes, kind included.
-///
-/// # Returns
-///
-/// The frame's reach in bytes, or `None` when the record is too short to
-/// state it.
-fn frame_size(raw: &[u8]) -> Option<i64> {
-    let word = |at: usize| -> Option<i64> {
-        Some(i64::from(u32::from_le_bytes(
-            raw.get(at..at.checked_add(4)?)?.try_into().ok()?,
-        )))
-    };
-    word(2)?.checked_add(word(14)?)
-}
-
-/// Reads the offset a frame-pointer-relative live range states.
-///
-/// # Arguments
-///
-/// * `raw` - The `S_DEFRANGE_FRAMEPOINTER_REL` record's raw bytes, kind
-///   included.
-///
-/// # Returns
-///
-/// The offset from the frame's base, or `None` when the record is too
-/// short to state one.
-fn defrange_offset(raw: &[u8]) -> Option<i32> {
-    let four = raw.get(2..6)?;
-    Some(i32::from_le_bytes(four.try_into().ok()?))
-}
-
-/// Reads the register and offset a register-relative live range states.
-///
-/// # Arguments
-///
-/// * `raw` - The `S_DEFRANGE_REGISTER_REL` record's raw bytes, kind
-///   included.
-///
-/// # Returns
-///
-/// The register and the offset from it, or `None` when the record is too
-/// short to state them.
-fn defrange_register(raw: &[u8]) -> Option<(u16, i32)> {
-    let reg = u16::from_le_bytes(raw.get(2..4)?.try_into().ok()?);
-    let off = i32::from_le_bytes(raw.get(6..10)?.try_into().ok()?);
-    Some((reg, off))
-}
-
-/// Reads the offset and name a frame-pointer-relative local states.
-///
-/// # Arguments
-///
-/// * `raw` - The `S_BPREL32` record's raw bytes, kind included.
-///
-/// # Returns
-///
-/// The offset from the frame pointer register and the name, or `None`
-/// when the record is too short to state them or names nothing.
-fn bprel32(raw: &[u8]) -> Option<(i32, &str)> {
-    let off = i32::from_le_bytes(raw.get(2..6)?.try_into().ok()?);
-    let name = raw.get(10..)?;
-    let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
-    let name = std::str::from_utf8(&name[..end]).ok()?;
-    (!name.is_empty()).then_some((off, name))
-}
-
 /// A scope the module's symbol stream is inside, for the locals walk.
 #[derive(Debug)]
 enum Scope {
@@ -869,6 +796,9 @@ fn gather<'s>(
         max: SYMBOLS_MAX,
         ..Gathered::default()
     };
+    let Some(guard) = streams::AddrGuard::open(db) else {
+        return out;
+    };
     let mut line_reader = lines::LineReader::new(db, want_lines);
     if let Ok(dbi) = db.debug_information()
         && let Ok(mut modules) = dbi.modules()
@@ -906,7 +836,7 @@ fn gather<'s>(
                 if s.starts_scope() {
                     match s.parse() {
                         Ok(pdb::SymbolData::Procedure(p)) => {
-                            let rva = p.offset.to_rva(map).map(|rva| rva.0);
+                            let rva = guard.rva_of(map, p.offset);
                             if let Some(rva) = rva {
                                 procs.push((rva, p.offset));
                             }
@@ -922,7 +852,7 @@ fn gather<'s>(
                         }
                         Ok(pdb::SymbolData::Thunk(t)) => {
                             out.take(
-                                t.offset.to_rva(map).map(|rva| rva.0),
+                                guard.rva_of(map, t.offset),
                                 t.name,
                                 Some(u32::from(t.len)),
                                 None,
@@ -937,10 +867,10 @@ fn gather<'s>(
                     scopes.pop();
                     pending = None;
                 } else if !inlined && kind == S_FRAMEPROC {
-                    frame = frame_size(s.raw_bytes()).unwrap_or(frame);
+                    frame = streams::frame_size(s.raw_bytes()).unwrap_or(frame);
                     pending = None;
                 } else if !inlined && kind == S_BPREL32 {
-                    if let Some((off, name)) = bprel32(s.raw_bytes())
+                    if let Some((off, name)) = streams::bprel32(s.raw_bytes())
                         && local_name_ok(name)
                         && let Some(rva) = current_proc(&scopes)
                     {
@@ -956,10 +886,10 @@ fn gather<'s>(
                 } else if !inlined && let Some(name) = &pending {
                     let range = match kind {
                         S_DEFRANGE_FRAMEPOINTER_REL => {
-                            defrange_offset(s.raw_bytes()).map(|off| (off < 0, off))
+                            streams::defrange_offset(s.raw_bytes()).map(|off| (off < 0, off))
                         }
-                        S_DEFRANGE_REGISTER_REL => defrange_register(s.raw_bytes())
-                            .and_then(|(reg, off)| base_kind(reg).map(|b| (b, off))),
+                        S_DEFRANGE_REGISTER_REL => streams::defrange_register(s.raw_bytes())
+                            .and_then(|(reg, off)| streams::base_kind(reg).map(|b| (b, off))),
                         _ => None,
                     };
                     if let (Some(rva), Some((base_bp, off))) = (current_proc(&scopes), range) {
@@ -974,13 +904,13 @@ fn gather<'s>(
                     if !matches!(kind, S_DEFRANGE_FRAMEPOINTER_REL | S_DEFRANGE_REGISTER_REL) {
                         pending = None;
                     }
-                } else if !inlined {
+                } else if !inlined && streams::is_body_symbol(kind) {
                     let relative = s.parse().ok().and_then(|d| match d {
                         pdb::SymbolData::Data(d) => {
-                            out.take_data(d.offset.to_rva(map).map(|rva| rva.0), d.name);
+                            out.take_data(guard.rva_of(map, d.offset), d.name);
                             None
                         }
-                        pdb::SymbolData::RegisterRelative(r) => base_kind(r.register.0)
+                        pdb::SymbolData::RegisterRelative(r) => streams::base_kind(r.register.0)
                             .filter(|_| local_name_ok(r.name.to_string().as_ref()))
                             .map(|base_bp| (base_bp, r.offset, r.name.to_string().into_owned())),
                         pdb::SymbolData::Local(l) => {
@@ -1004,45 +934,11 @@ fn gather<'s>(
                     }
                 }
             }
-            out.collect_module_lines(&info, lines_ok, map, &procs);
+            out.collect_module_lines(&info, lines_ok, map, &guard, &procs);
         }
     }
-    if let Ok(globals) = db.global_symbols() {
-        let mut it = globals.iter();
-        while let Ok(Some(s)) = it.next() {
-            if let Ok(pdb::SymbolData::Public(p)) = s.parse() {
-                let rva = p.offset.to_rva(map).map(|rva| rva.0);
-                if p.function || p.code {
-                    out.take(rva, p.name, None, None);
-                } else {
-                    out.take_data(rva, p.name);
-                }
-            }
-        }
-    }
+    streams::collect_globals(db, map, &guard, &mut out);
     out
-}
-
-/// Which frame base a register names, when it names one the locals read.
-///
-/// # Arguments
-///
-/// * `reg` - The register number the record states, as the crate hands it
-///   back.
-///
-/// # Returns
-///
-/// `Some(true)` for the frame pointer register, `Some(false)` for the
-/// stack pointer one, `None` for every other: a local held anywhere else
-/// states no slot the decompiler's frame knows.
-fn base_kind(reg: u16) -> Option<bool> {
-    if FRAME_PTR.contains(&reg) {
-        Some(true)
-    } else if STACK_PTR.contains(&reg) {
-        Some(false)
-    } else {
-        None
-    }
 }
 
 /// Most parameters one signature lists, whatever the type stream claims.
@@ -1093,6 +989,9 @@ fn signatures<'s>(
     if types.is_empty() {
         return out;
     }
+    let Some(tpi) = streams::TpiGuard::open(db) else {
+        return out;
+    };
     let Ok(info) = db.type_information() else {
         return out;
     };
@@ -1102,7 +1001,7 @@ fn signatures<'s>(
         finder.update(&iter);
     }
     for (&rva, &index) in types {
-        let sig = resolve(&finder, index);
+        let sig = resolve(&finder, &tpi, index);
         if sig.ret.is_some() || !sig.params.is_empty() {
             out.insert(rva, sig);
         }
@@ -1115,6 +1014,7 @@ fn signatures<'s>(
 /// # Arguments
 ///
 /// * `finder` - The type stream, walked to its end.
+/// * `tpi` - Validated TPI record filter.
 /// * `index` - The type index the procedure record names.
 ///
 /// # Returns
@@ -1122,27 +1022,33 @@ fn signatures<'s>(
 /// The signature, empty when the index names no procedure or member type
 /// the stream holds: a record that is missing, damaged or of another kind
 /// states no signature.
-fn resolve(finder: &pdb::TypeFinder<'_>, index: pdb::TypeIndex) -> Signature {
-    let Ok(data) = finder.find(index).and_then(|t| t.parse()) else {
+fn resolve(
+    finder: &pdb::TypeFinder<'_>,
+    tpi: &streams::TpiGuard,
+    index: pdb::TypeIndex,
+) -> Signature {
+    let Some(data) = finder.find(index).ok().and_then(|t| tpi.parse_type(&t)) else {
         return Signature::default();
     };
     match data {
         pdb::TypeData::Procedure(p) => Signature {
-            ret: p.return_type.and_then(|i| type_text(finder, i, TYPE_DEPTH)),
-            params: arguments(finder, p.argument_list),
+            ret: p
+                .return_type
+                .and_then(|i| type_text(finder, tpi, i, TYPE_DEPTH)),
+            params: arguments(finder, tpi, p.argument_list),
         },
         pdb::TypeData::MemberFunction(m) => {
             let this = m
                 .this_pointer_type
-                .and_then(|i| type_text(finder, i, TYPE_DEPTH))
-                .or_else(|| type_text(finder, m.class_type, TYPE_DEPTH).map(|c| pointer(&c)));
-            let mut params = arguments(finder, m.argument_list);
+                .and_then(|i| type_text(finder, tpi, i, TYPE_DEPTH))
+                .or_else(|| type_text(finder, tpi, m.class_type, TYPE_DEPTH).map(|c| pointer(&c)));
+            let mut params = arguments(finder, tpi, m.argument_list);
             if let Some(this) = this {
                 params.insert(0, this);
             }
             Signature {
                 ret: (!matches!(m.return_type.0, 0 | 0xffff))
-                    .then(|| type_text(finder, m.return_type, TYPE_DEPTH))
+                    .then(|| type_text(finder, tpi, m.return_type, TYPE_DEPTH))
                     .flatten(),
                 params,
             }
@@ -1156,6 +1062,7 @@ fn resolve(finder: &pdb::TypeFinder<'_>, index: pdb::TypeIndex) -> Signature {
 /// # Arguments
 ///
 /// * `finder` - The type stream, walked to its end.
+/// * `tpi` - Validated TPI record filter.
 /// * `list` - The argument-list type index a procedure record states.
 ///
 /// # Returns
@@ -1163,19 +1070,25 @@ fn resolve(finder: &pdb::TypeFinder<'_>, index: pdb::TypeIndex) -> Signature {
 /// The parameter types as C source, cut at [`PARAMS_MAX`]; a single `void`
 /// is `CodeView`'s spelling of an empty list, a damaged list is none, and a
 /// parameter that does not resolve is dropped where it stands.
-fn arguments(finder: &pdb::TypeFinder<'_>, list: pdb::TypeIndex) -> Vec<String> {
-    let Ok(pdb::TypeData::ArgumentList(args)) = finder.find(list).and_then(|t| t.parse()) else {
+fn arguments(
+    finder: &pdb::TypeFinder<'_>,
+    tpi: &streams::TpiGuard,
+    list: pdb::TypeIndex,
+) -> Vec<String> {
+    let Some(pdb::TypeData::ArgumentList(args)) =
+        finder.find(list).ok().and_then(|t| tpi.parse_type(&t))
+    else {
         return Vec::new();
     };
     if let [only] = args.arguments.as_slice()
-        && is_void(finder, *only)
+        && is_void(finder, tpi, *only)
     {
         return Vec::new();
     }
     args.arguments
         .iter()
         .take(PARAMS_MAX)
-        .filter_map(|&i| type_text(finder, i, TYPE_DEPTH))
+        .filter_map(|&i| type_text(finder, tpi, i, TYPE_DEPTH))
         .collect()
 }
 
@@ -1184,11 +1097,12 @@ fn arguments(finder: &pdb::TypeFinder<'_>, list: pdb::TypeIndex) -> Vec<String> 
 /// # Arguments
 ///
 /// * `finder` - The type stream, walked to its end.
+/// * `tpi` - Validated TPI record filter.
 /// * `index` - The type index to ask about.
-fn is_void(finder: &pdb::TypeFinder<'_>, index: pdb::TypeIndex) -> bool {
+fn is_void(finder: &pdb::TypeFinder<'_>, tpi: &streams::TpiGuard, index: pdb::TypeIndex) -> bool {
     matches!(
-        finder.find(index).and_then(|t| t.parse()),
-        Ok(pdb::TypeData::Primitive(p)) if p.kind == pdb::PrimitiveKind::Void
+        finder.find(index).ok().and_then(|t| tpi.parse_type(&t)),
+        Some(pdb::TypeData::Primitive(p)) if p.kind == pdb::PrimitiveKind::Void
     )
 }
 
@@ -1197,6 +1111,7 @@ fn is_void(finder: &pdb::TypeFinder<'_>, index: pdb::TypeIndex) -> bool {
 /// # Arguments
 ///
 /// * `finder` - The type stream, walked to its end.
+/// * `tpi` - Validated TPI record filter.
 /// * `index` - The type index to resolve.
 /// * `depth` - Remaining links to follow, against a circular chain.
 ///
@@ -1204,12 +1119,17 @@ fn is_void(finder: &pdb::TypeFinder<'_>, index: pdb::TypeIndex) -> bool {
 ///
 /// The type as C source, or `None` when the chain does not resolve within
 /// its depth or is of a kind no parameter or return renders as.
-fn type_text(finder: &pdb::TypeFinder<'_>, index: pdb::TypeIndex, depth: u32) -> Option<String> {
+fn type_text(
+    finder: &pdb::TypeFinder<'_>,
+    tpi: &streams::TpiGuard,
+    index: pdb::TypeIndex,
+    depth: u32,
+) -> Option<String> {
     if depth == 0 {
         return None;
     }
-    let data = finder.find(index).ok()?.parse().ok()?;
-    let inner = |i| type_text(finder, i, depth - 1);
+    let data = finder.find(index).ok().and_then(|t| tpi.parse_type(&t))?;
+    let inner = |i| type_text(finder, tpi, i, depth - 1);
     Some(match data {
         pdb::TypeData::Primitive(p) => {
             let base = primitive_text(p.kind)?;

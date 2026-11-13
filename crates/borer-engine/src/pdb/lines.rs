@@ -10,6 +10,10 @@ use std::io::Cursor;
 pub(super) struct LineReader {
     /// Whether the caller asked for line programs (`sources` vs `apply`).
     want: bool,
+    /// Per-module `module_line_flags` result aligned with `dbi.modules()`.
+    flags: Vec<bool>,
+    /// Index of the next module yielded by `dbi.modules()`.
+    next: usize,
 }
 
 impl LineReader {
@@ -17,14 +21,23 @@ impl LineReader {
     ///
     /// # Arguments
     ///
-    /// * `_db` - The opened PDB.
+    /// * `db` - The opened PDB.
     /// * `want` - Whether to read module line programs.
     ///
     /// # Returns
     ///
     /// A reader aligned with the first module of `db.debug_information()`.
-    pub(super) fn new(_db: &mut pdb::PDB<'_, Cursor<&[u8]>>, want: bool) -> Self {
-        Self { want }
+    pub(super) fn new<'s>(db: &mut pdb::PDB<'s, Cursor<&'s [u8]>>, want: bool) -> Self {
+        let flags = if want {
+            super::streams::module_line_flags(db)
+        } else {
+            Vec::new()
+        };
+        Self {
+            want,
+            flags,
+            next: 0,
+        }
     }
 
     /// Opens `m`'s module stream and reports whether its line program may be read.
@@ -37,14 +50,17 @@ impl LineReader {
     /// # Returns
     ///
     /// The module's symbol and line stream paired with whether `line_program()`
-    /// is wanted, or `None` when `m` carries no readable module stream.
+    /// is wanted and within bounds, or `None` when `m` carries no readable stream.
     pub(super) fn open<'s>(
         &mut self,
         db: &mut pdb::PDB<'s, Cursor<&'s [u8]>>,
         m: &pdb::Module<'_>,
     ) -> Option<(pdb::ModuleInfo<'s>, bool)> {
+        let idx = self.next;
+        self.next += 1;
         let info = db.module_info(m).ok()??;
-        Some((info, self.want))
+        let ok = self.want && self.flags.get(idx).copied().unwrap_or(false);
+        Some((info, ok))
     }
 }
 
@@ -56,19 +72,21 @@ impl Gathered {
     /// * `info` - The module's symbol and line stream.
     /// * `lines_ok` - Whether line programs are requested and readable for this module.
     /// * `map` - Address map translating internal section offsets to RVAs.
+    /// * `guard` - Checked RVA translation guard.
     /// * `procs` - Procedures gathered from this module.
     pub(super) fn collect_module_lines(
         &mut self,
         info: &pdb::ModuleInfo<'_>,
         lines_ok: bool,
         map: &pdb::AddressMap<'_>,
+        guard: &super::streams::AddrGuard,
         procs: &[(u32, pdb::PdbInternalSectionOffset)],
     ) {
         if lines_ok
             && !procs.is_empty()
             && let Ok(program) = info.line_program()
         {
-            self.take_lines(&program, map, procs);
+            self.take_lines(&program, map, guard, procs);
         }
     }
 
@@ -86,12 +104,14 @@ impl Gathered {
     /// * `program` - The module's line program.
     /// * `map` - The address map, translating the internal offsets the
     ///   rows state into image RVAs.
+    /// * `guard` - Checked RVA translation guard.
     /// * `procs` - The procedures this module states, RVA and record
     ///   offset.
     fn take_lines(
         &mut self,
         program: &pdb::LineProgram<'_>,
         map: &pdb::AddressMap<'_>,
+        guard: &super::streams::AddrGuard,
         procs: &[(u32, pdb::PdbInternalSectionOffset)],
     ) {
         use pdb::FallibleIterator as _;
@@ -101,7 +121,7 @@ impl Gathered {
             };
             let mut rows = program.lines_for_symbol(offset);
             while let Ok(Some(row)) = rows.next() {
-                let Some(at) = row.offset.to_rva(map).map(|rva| rva.0) else {
+                let Some(at) = guard.rva_of(map, row.offset) else {
                     continue;
                 };
                 if at < rva || at >= end || row.line_start == 0 {
@@ -144,7 +164,7 @@ pub(super) fn resolve_lines<'s>(
     lines: &BTreeMap<u32, (u32, pdb::StringRef, u32)>,
 ) -> BTreeMap<u32, (String, u32)> {
     let mut out = BTreeMap::new();
-    if lines.is_empty() {
+    if lines.is_empty() || !super::streams::names_table_ok(db) {
         return out;
     }
     let Ok(table) = db.string_table() else {
