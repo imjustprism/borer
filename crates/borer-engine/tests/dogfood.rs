@@ -1074,9 +1074,12 @@ impl Census {
                     Kind::Space
                     | Kind::Comment
                     | Kind::Keyword
+                    | Kind::Mnemonic
+                    | Kind::Register
                     | Kind::Type
                     | Kind::Function
                     | Kind::Field
+                    | Kind::Address
                     | Kind::String
                     | Kind::Number
                     | Kind::Punct

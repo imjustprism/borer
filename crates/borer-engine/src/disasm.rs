@@ -7,10 +7,12 @@
 
 use crate::isa::Isa;
 use crate::isa::x86::{
-    Code, Decoder, DecoderOptions, Formatter, Instruction, Mnemonic, NasmFormatter,
+    Code, Decoder, DecoderOptions, Formatter, FormatterOutput, FormatterTextKind, Instruction,
+    Mnemonic, NasmFormatter, NumberKind, OpKind, PrefixKind, Register,
 };
 use crate::isa::{a32, a64, rv};
 use crate::program::Program;
+use crate::view::{Kind, Ref, Sink};
 
 /// One decoded instruction as text.
 #[derive(Debug, Clone)]
@@ -19,12 +21,12 @@ pub struct DisasmLine {
     pub va: u64,
     /// The encoded bytes (empty when the decoder ran past the buffer).
     pub bytes: Vec<u8>,
-    /// NASM-syntax text for x86, the decoder's syntax for AArch64, or
-    /// `(bad)` for undecodable bytes.
+    /// NASM-syntax text for x86, the decoder's syntax for AArch64, ARM32 and
+    /// RISC-V, or `(bad)` for undecodable bytes.
     pub text: String,
-    /// Where a direct branch or call goes, for AArch64; `None` for every
-    /// other instruction and for all x86, whose listings read the target
-    /// out of the text.
+    /// Direct branch or call target reported by the AArch64, ARM32 or RISC-V
+    /// decoder; `None` for other instructions and on x86, whose function
+    /// listings decode through [`decode_x86`].
     pub target: Option<u64>,
 }
 
@@ -183,29 +185,24 @@ pub(crate) fn address_mask(instr: &Instruction, bitness: u32) -> u64 {
 ///
 /// The decoded lines in address order.
 pub fn disassemble(code: &[u8], va: u64, bitness: u32, max_instrs: usize) -> Vec<DisasmLine> {
-    let mut decoder = Decoder::with_ip(bitness, code, va, DecoderOptions::NONE);
     let mut fmt = NasmFormatter::new();
     let mut out = Vec::with_capacity(max_instrs.min(code.len() / 4 + 1));
     let mut text = String::new();
-    while out.len() < max_instrs && decoder.can_decode() {
-        let mut instr = Instruction::default();
-        let start = decoder.position();
-        decoder.decode_out(&mut instr);
-        let end = decoder.position();
-        let line_text = if instr.code() == Code::INVALID {
+    decode_x86(code, va, bitness, max_instrs, |d| {
+        let line_text = if d.instr.code() == Code::INVALID {
             "(bad)".to_owned()
         } else {
             text.clear();
-            fmt.format(&instr, &mut text);
+            fmt.format(&d.instr, &mut text);
             text.clone()
         };
         out.push(DisasmLine {
-            va: instr.ip(),
-            bytes: code.get(start..end).map(<[u8]>::to_vec).unwrap_or_default(),
+            va: d.va,
+            bytes: d.bytes.to_vec(),
             text: line_text,
             target: None,
         });
-    }
+    });
     out
 }
 
@@ -379,6 +376,291 @@ pub fn render(lines: &[DisasmLine], with_bytes: bool) -> String {
         }
     }
     s
+}
+
+/// One decoded x86 instruction and the slice it occupied.
+pub(crate) struct X86Decoded<'c> {
+    /// Virtual address of the first byte.
+    pub(crate) va: u64,
+    /// The encoded bytes.
+    pub(crate) bytes: &'c [u8],
+    /// The decoded instruction.
+    instr: Instruction,
+}
+
+/// Targets the x86 formatter saw on one instruction, read from the decoder
+/// and operand stream rather than parsed back from text.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct X86Targets {
+    /// Direct `call` or `jmp` target when the first operand is the
+    /// unprefixed, unsized target number.
+    pub(crate) branch: Option<u64>,
+    /// Bare `[rel addr]` or `[addr]` memory operand's target address, for
+    /// import-slot lookup.
+    pub(crate) memory: Option<u64>,
+}
+
+/// Decodes up to `max_instrs` x86 instructions from `code`, handing each to
+/// `visit` without formatting into an intermediate string.
+///
+/// # Arguments
+///
+/// * `code` - The bytes to decode.
+/// * `va` - Virtual address of `code[0]`.
+/// * `bitness` - `32` or `64`.
+/// * `max_instrs` - Hard cap on instructions decoded.
+/// * `visit` - Called once per decoded instruction in address order.
+///
+/// # Returns
+///
+/// How many instructions were decoded.
+pub(crate) fn decode_x86<'c>(
+    code: &'c [u8],
+    va: u64,
+    bitness: u32,
+    max_instrs: usize,
+    mut visit: impl FnMut(X86Decoded<'c>),
+) -> usize {
+    let mut decoder = Decoder::with_ip(bitness, code, va, DecoderOptions::NONE);
+    let mut count = 0usize;
+    while count < max_instrs && decoder.can_decode() {
+        let mut instr = Instruction::default();
+        let start = decoder.position();
+        decoder.decode_out(&mut instr);
+        let end = decoder.position();
+        visit(X86Decoded {
+            va: instr.ip(),
+            bytes: code.get(start..end).unwrap_or_default(),
+            instr,
+        });
+        count += 1;
+    }
+    count
+}
+
+/// Formats decoded x86 instructions directly into a [`Sink`], keeping one
+/// [`NasmFormatter`] across a function's blocks.
+pub(crate) struct X86Format {
+    /// The NASM formatter.
+    fmt: NasmFormatter,
+}
+
+impl X86Format {
+    /// Creates a reusable x86 instruction formatter.
+    pub(crate) fn new() -> Self {
+        Self {
+            fmt: NasmFormatter::new(),
+        }
+    }
+
+    /// Formats `decoded` into `out` and returns the targets its operands
+    /// named.
+    ///
+    /// # Arguments
+    ///
+    /// * `decoded` - The decoded instruction.
+    /// * `out` - Where each token is written.
+    /// * `is_fn` - Tells whether a branch target starts a discovered function.
+    ///
+    /// # Returns
+    ///
+    /// The branch and bare-memory targets the instruction named.
+    pub(crate) fn write<S: Sink>(
+        &mut self,
+        decoded: &X86Decoded<'_>,
+        out: &mut S,
+        is_fn: impl Fn(u64) -> bool,
+    ) -> X86Targets {
+        if decoded.instr.code() == Code::INVALID {
+            out.put("(bad)", Kind::Text, None);
+            return X86Targets::default();
+        }
+        let mut adapter = X86Adapter {
+            out,
+            is_fn,
+            prefixed: false,
+            branch_kw: false,
+            saw_operand_tok: false,
+            bracket: Bracket::Before,
+        };
+        self.fmt.format(&decoded.instr, &mut adapter);
+        adapter.targets(&decoded.instr)
+    }
+}
+
+/// How far through the first `[...]` memory operand formatting has walked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Bracket {
+    /// No `[` seen yet.
+    Before,
+    /// Inside the first `[...]`, with only whitespace or `rel` so far.
+    Open,
+    /// Inside the first `[...]`, after one hex address number.
+    Addr(u64),
+    /// Inside the first `[...]`, with a register, operator or size keyword.
+    Complex,
+    /// Past the first `]`, holding the bare address if that was all it held.
+    Closed(Option<u64>),
+}
+
+/// Maps iced's [`FormatterTextKind`] to [`Kind`].
+///
+/// # Arguments
+///
+/// * `text` - The piece's text, used to separate whitespace from words.
+/// * `kind` - The formatter's classification.
+fn map_kind(text: &str, kind: FormatterTextKind) -> Kind {
+    match kind {
+        FormatterTextKind::Text if text.bytes().all(|b| b.is_ascii_whitespace()) => Kind::Space,
+        FormatterTextKind::Mnemonic => Kind::Mnemonic,
+        FormatterTextKind::Prefix
+        | FormatterTextKind::Keyword
+        | FormatterTextKind::Directive
+        | FormatterTextKind::Decorator => Kind::Keyword,
+        FormatterTextKind::Register => Kind::Register,
+        FormatterTextKind::Number | FormatterTextKind::SelectorValue => Kind::Number,
+        FormatterTextKind::FunctionAddress | FormatterTextKind::LabelAddress => Kind::Address,
+        FormatterTextKind::Function => Kind::Function,
+        FormatterTextKind::Label => Kind::Label,
+        FormatterTextKind::Data => Kind::Global,
+        FormatterTextKind::Operator | FormatterTextKind::Punctuation => Kind::Punct,
+        _ => Kind::Text,
+    }
+}
+
+/// Streams [`NasmFormatter`] pieces into a [`Sink`] while noting branch and
+/// bare-memory operand targets from the instruction.
+struct X86Adapter<'s, S, F> {
+    /// Destination sink.
+    out: &'s mut S,
+    /// Tells whether a target address starts a function.
+    is_fn: F,
+    /// Whether `write_prefix` ran before the mnemonic.
+    prefixed: bool,
+    /// Whether a keyword (`short`, `near`, `word`, `dword`) preceded the first operand.
+    branch_kw: bool,
+    /// Whether an operand token has started.
+    saw_operand_tok: bool,
+    /// State of the first `[...]` memory operand.
+    bracket: Bracket,
+}
+
+impl<S, F> X86Adapter<'_, S, F> {
+    /// Builds [`X86Targets`] after formatting `instr`.
+    ///
+    /// # Arguments
+    ///
+    /// * `instr` - The formatted instruction.
+    fn targets(&self, instr: &Instruction) -> X86Targets {
+        let is_near = matches!(
+            instr.op0_kind(),
+            OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64
+        );
+        let branch = (matches!(instr.mnemonic(), Mnemonic::Call | Mnemonic::Jmp)
+            && is_near
+            && !self.prefixed
+            && !self.branch_kw)
+            .then(|| instr.near_branch_target());
+        let memory = match self.bracket {
+            Bracket::Closed(addr) => addr,
+            Bracket::Before | Bracket::Open | Bracket::Addr(_) | Bracket::Complex => None,
+        };
+        X86Targets { branch, memory }
+    }
+}
+
+impl<S: Sink, F: Fn(u64) -> bool> FormatterOutput for X86Adapter<'_, S, F> {
+    fn write(&mut self, text: &str, kind: FormatterTextKind) {
+        if kind == FormatterTextKind::Keyword && !self.saw_operand_tok {
+            self.branch_kw = true;
+        }
+        if matches!(
+            kind,
+            FormatterTextKind::Register
+                | FormatterTextKind::Number
+                | FormatterTextKind::FunctionAddress
+                | FormatterTextKind::LabelAddress
+                | FormatterTextKind::SelectorValue
+        ) || (kind == FormatterTextKind::Punctuation && matches!(text, "[" | ","))
+        {
+            self.saw_operand_tok = true;
+        }
+        match (self.bracket, kind, text) {
+            (Bracket::Before, FormatterTextKind::Punctuation, "[") => {
+                self.bracket = Bracket::Open;
+            }
+            (Bracket::Open, FormatterTextKind::Punctuation, "]") => {
+                self.bracket = Bracket::Closed(None);
+            }
+            (Bracket::Addr(a), FormatterTextKind::Punctuation, "]") => {
+                self.bracket = Bracket::Closed(Some(a));
+            }
+            (Bracket::Open | Bracket::Addr(_), FormatterTextKind::Text, t)
+                if t.bytes().all(|b| b.is_ascii_whitespace()) => {}
+            (Bracket::Open, FormatterTextKind::Keyword, "rel") => {}
+            (Bracket::Open | Bracket::Addr(_), _, _) => {
+                self.bracket = Bracket::Complex;
+            }
+            (Bracket::Before | Bracket::Complex | Bracket::Closed(_), _, _) => {}
+        }
+        self.out.put(text, map_kind(text, kind), None);
+    }
+
+    fn write_prefix(&mut self, _instruction: &Instruction, text: &str, _prefix: PrefixKind) {
+        self.prefixed = true;
+        self.out.put(text, Kind::Keyword, None);
+    }
+
+    fn write_number(
+        &mut self,
+        instruction: &Instruction,
+        _operand: u32,
+        instruction_operand: Option<u32>,
+        text: &str,
+        value: u64,
+        _number_kind: NumberKind,
+        kind: FormatterTextKind,
+    ) {
+        self.saw_operand_tok = true;
+        let is_near = matches!(
+            instruction.op0_kind(),
+            OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64
+        );
+        let ip_rel_mem = instruction.is_ip_rel_memory_operand()
+            && !matches!(instruction.segment_prefix(), Register::FS | Register::GS)
+            && instruction_operand.is_some_and(|op| instruction.op_kind(op) == OpKind::Memory);
+        let (mapped, link) = match kind {
+            FormatterTextKind::FunctionAddress | FormatterTextKind::LabelAddress if is_near => {
+                let r = if (self.is_fn)(value) {
+                    Ref::Function(value)
+                } else {
+                    Ref::Address(value)
+                };
+                (Kind::Address, Some(r))
+            }
+            FormatterTextKind::Number if ip_rel_mem => (
+                Kind::Number,
+                Some(Ref::Address(instruction.ip_rel_memory_address())),
+            ),
+            _ => (map_kind(text, kind), None),
+        };
+        if matches!(self.bracket, Bracket::Open | Bracket::Addr(_)) {
+            self.bracket = if self.bracket == Bracket::Open
+                && kind == FormatterTextKind::Number
+                && text.ends_with('h')
+            {
+                let addr = if ip_rel_mem {
+                    instruction.ip_rel_memory_address()
+                } else {
+                    value
+                };
+                Bracket::Addr(addr)
+            } else {
+                Bracket::Complex
+            };
+        }
+        self.out.put(text, mapped, link);
+    }
 }
 
 #[cfg(test)]

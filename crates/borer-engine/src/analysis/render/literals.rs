@@ -484,32 +484,6 @@ fn next_page_line(out: &mut String, total: usize, offset: usize, shown: usize, w
     }
 }
 
-/// Returns the import an instruction's memory operand names, if it names one.
-///
-/// `call qword [rel 14029dd20h]` is how a PE reaches an import without a
-/// thunk, and the slot address is the only thing that says which import it
-/// is. Left as a number, every such call and tail jump reads as a branch
-/// into data.
-///
-/// # Arguments
-///
-/// * `p` - The loaded image, for its symbol table.
-/// * `text` - The rendered instruction.
-///
-/// # Returns
-///
-/// The import's full `dll!name`, or `None` when the operand is not a bare
-/// absolute or rip-relative address with an import slot at it.
-pub(super) fn memory_import<'a>(p: &'a Program, text: &str) -> Option<&'a str> {
-    let inside = text.split_once('[')?.1.split_once(']')?.0;
-    let hex = inside.strip_prefix("rel ").unwrap_or(inside).trim();
-    let addr = u64::from_str_radix(hex.strip_suffix('h')?, 16).ok()?;
-    p.symbols
-        .iter()
-        .find(|s| matches!(s.kind, SymbolKind::Import) && s.addr == addr && s.addr != 0)
-        .map(|s| s.name.as_str())
-}
-
 /// Gathers the runs of printable text among bytes placed in order.
 ///
 /// A run is bytes at consecutive positions that are all printable ASCII; a

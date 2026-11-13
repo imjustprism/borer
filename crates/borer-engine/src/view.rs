@@ -7,7 +7,9 @@
 //! ([`Ref`]). The tokens of a line spell it in order, so a view spells its
 //! text byte for byte ([`View::spell`]). The decompile view
 //! ([`crate::analysis::decompile::view`]) is read back out of the text a
-//! function decompiles to.
+//! function decompiles to; the function listing view
+//! ([`crate::analysis::render::disasm_view`]) is written straight into a
+//! [`Sink`] alongside its text.
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
@@ -22,8 +24,12 @@ pub enum Kind {
     /// A comment: `//` to the end of the line, or `/*` to its `*/`.
     Comment,
     /// A C keyword, a preprocessor directive's name, `nullptr`, `true` or
-    /// `false`.
+    /// `false`, or an assembly prefix or operand keyword.
     Keyword,
+    /// An instruction's mnemonic.
+    Mnemonic,
+    /// A machine register.
+    Register,
     /// A type's name.
     Type,
     /// A function's name: one of the binary's, an import's, or one the text
@@ -38,6 +44,8 @@ pub enum Kind {
     Field,
     /// A block label, `L_<hex>`.
     Label,
+    /// A code or target address.
+    Address,
     /// A string or character literal.
     String,
     /// A numeric literal.
@@ -267,6 +275,36 @@ impl View {
     }
 }
 
+/// Where a renderer that produces both plain text and a [`View`] writes
+/// each piece of a line.
+pub(crate) trait Sink {
+    /// Appends `piece` to the open line with its kind and optional link.
+    ///
+    /// # Arguments
+    ///
+    /// * `piece` - The text to append.
+    /// * `kind` - What the token is.
+    /// * `link` - What the token links to, when known.
+    fn put(&mut self, piece: &str, kind: Kind, link: Option<Ref>);
+
+    /// Marks the referent of the last token put as defined on the open
+    /// line, when the sink records definitions.
+    fn define(&mut self) {}
+
+    /// Ends the open line and starts the next.
+    fn end_line(&mut self);
+}
+
+impl Sink for String {
+    fn put(&mut self, piece: &str, _: Kind, _: Option<Ref>) {
+        self.push_str(piece);
+    }
+
+    fn end_line(&mut self) {
+        self.push('\n');
+    }
+}
+
 /// Puts a [`View`] together a piece of text at a time, line by line.
 #[derive(Debug, Default)]
 pub(crate) struct Builder {
@@ -282,12 +320,29 @@ pub(crate) struct Builder {
     places: BTreeMap<Ref, NonZeroU32>,
     /// The line each referent is defined on, by its place plus one.
     defs: BTreeMap<NonZeroU32, u32>,
+    /// The referent and first line of the most recent non-empty [`Builder::put`].
+    last_put: Option<(NonZeroU32, u32)>,
     /// Whether the text outgrew the 32-bit offsets, which refuses the view.
     over: bool,
 }
 
+impl Sink for Builder {
+    fn put(&mut self, piece: &str, kind: Kind, link: Option<Ref>) {
+        Builder::put(self, piece, kind, link);
+    }
+
+    fn define(&mut self) {
+        Builder::define(self);
+    }
+
+    fn end_line(&mut self) {
+        Builder::end_line(self);
+    }
+}
+
 impl Builder {
-    /// Adds a piece of text to the open line as one token.
+    /// Adds a piece of text to the open line as one token, splitting on
+    /// any embedded newline so no line holds one.
     ///
     /// # Arguments
     ///
@@ -295,6 +350,27 @@ impl Builder {
     /// * `kind` - What it is.
     /// * `link` - What it links to.
     pub(crate) fn put(&mut self, piece: &str, kind: Kind, link: Option<Ref>) {
+        self.last_put = None;
+        if !piece.contains('\n') {
+            self.put_span(piece, kind, link);
+            return;
+        }
+        for (i, part) in piece.split('\n').enumerate() {
+            if i > 0 {
+                self.finish_line();
+            }
+            self.put_span(part, kind, link.clone());
+        }
+    }
+
+    /// Adds a newline-free span to the open line as one token.
+    ///
+    /// # Arguments
+    ///
+    /// * `piece` - The span; an empty one adds nothing.
+    /// * `kind` - What it is.
+    /// * `link` - What it links to.
+    fn put_span(&mut self, piece: &str, kind: Kind, link: Option<Ref>) {
         if piece.is_empty() {
             return;
         }
@@ -315,20 +391,31 @@ impl Builder {
                 .and_then(NonZeroU32::new)?;
             Some(*self.places.entry(r).or_insert(next))
         });
+        if self.last_put.is_none()
+            && let (Some(k), Ok(line)) = (link, u32::try_from(self.starts.len()))
+        {
+            self.last_put = Some((k, line));
+        }
         self.tokens.push(Token { end, kind, link });
     }
 
-    /// Marks the referent of the token put last as defined on the open
-    /// line, unless an earlier line defines it.
+    /// Marks the referent of the token put last as defined on the line it
+    /// opened on, unless an earlier line defines it.
     pub(crate) fn define(&mut self) {
-        let line = u32::try_from(self.starts.len()).ok();
-        if let (Some(k), Some(line)) = (self.tokens.last().and_then(|t| t.link), line) {
+        if let Some((k, line)) = self.last_put {
             self.defs.entry(k).or_insert(line);
         }
     }
 
     /// Ends the open line and opens the next.
     pub(crate) fn end_line(&mut self) {
+        self.last_put = None;
+        self.finish_line();
+    }
+
+    /// Appends a newline and records the open line's start without clearing
+    /// [`Builder::last_put`].
+    fn finish_line(&mut self) {
         self.text.push('\n');
         self.starts.push(self.open);
         match (
@@ -423,5 +510,29 @@ mod tests {
             .finish(Unlinked::default())
             .expect("an empty view");
         assert_eq!((empty.lines(), empty.spell()), (1, String::new()));
+    }
+
+    /// Defining a referent after a trailing-newline or empty piece attaches
+    /// it only to the line that put the non-empty token.
+    ///
+    /// # Panics
+    ///
+    /// When [`Builder::define`] attributes a definition to the wrong line.
+    #[test]
+    fn define_tracks_the_line_that_put_the_token() {
+        let mut b = Builder::default();
+        let first = Ref::Address(0x1000);
+        let second = Ref::Address(0x1004);
+        let unplaced = Ref::Address(0x1008);
+        b.put("L_1000\n", Kind::Label, Some(first.clone()));
+        b.define();
+        b.put("fn_a", Kind::Function, Some(second.clone()));
+        b.end_line();
+        b.put("", Kind::Label, Some(unplaced.clone()));
+        b.define();
+        let v = b.finish(Unlinked::default()).expect("a small view");
+        assert_eq!(v.definition(&first), Some(0));
+        assert_eq!(v.definition(&second), None);
+        assert_eq!(v.definition(&unplaced), None);
     }
 }

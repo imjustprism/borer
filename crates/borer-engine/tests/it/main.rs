@@ -45,6 +45,7 @@ mod com;
 mod cpuid;
 mod decoded;
 mod decompile;
+mod disasm_view;
 mod discovery;
 mod dwarf;
 mod eh;

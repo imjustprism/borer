@@ -27,9 +27,10 @@
 //!   branch distance vs constant;
 //! * memory decomposition: `memory_base`, `memory_index`, `memory_size`
 //!   ([`MemorySize`]), `memory_displacement64`/`32`, `memory_displ_size`,
-//!   `segment`, `is_ip_rel_memory_operand`;
-//! * branch resolution: `near_branch64` and the `NearBranchNN` operand kinds
-//!   it pairs with;
+//!   `segment`, `segment_prefix`, `is_ip_rel_memory_operand`,
+//!   `ip_rel_memory_address`;
+//! * branch resolution: `near_branch64`, `near_branch_target` and the
+//!   `NearBranchNN` operand kinds they pair with;
 //! * prefixes: `has_lock_prefix`, `has_rep_prefix`, `has_repe_prefix`,
 //!   `has_repne_prefix`;
 //! * flags: `rflags_modified` against [`RflagsBits`] (CF/ZF/SF/OF/PF/DF) in
@@ -39,8 +40,9 @@
 //!   `constant_offsets` ([`ConstantOffsets`]: where the displacement and
 //!   immediate sit inside the encoding) for in-place byte patching;
 //! * text: [`NasmFormatter`] through the [`Formatter`] trait renders one
-//!   instruction as NASM syntax ([`crate::disasm`] owns the `(bad)` and
-//!   paging rules around it);
+//!   instruction as NASM syntax into a `String` or a [`FormatterOutput`]
+//!   adapter ([`FormatterTextKind`], [`NumberKind`], [`PrefixKind`];
+//!   [`crate::disasm`] owns the `(bad)` and paging rules around it);
 //! * register identity: [`Register`] is compared against variants (`RAX`,
 //!   `RSP`, `XMM0`, `ST0`, `RIP`, `None`), widened by `full_register` and
 //!   `full_register32`, sized by `size`, and grouped by `is_gpr`/`is_xmm`/
@@ -63,8 +65,9 @@ mod regbank;
 
 pub use iced_x86::{
     BlockEncoder, BlockEncoderOptions, Code, ConditionCode, ConstantOffsets, Decoder,
-    DecoderOptions, FlowControl, Formatter, Instruction, InstructionBlock, InstructionInfoFactory,
-    MemorySize, Mnemonic, NasmFormatter, OpAccess, OpKind, Register, RflagsBits,
+    DecoderOptions, FlowControl, Formatter, FormatterOutput, FormatterTextKind, Instruction,
+    InstructionBlock, InstructionInfoFactory, MemorySize, Mnemonic, NasmFormatter, NumberKind,
+    OpAccess, OpKind, PrefixKind, Register, RflagsBits,
 };
 pub(crate) use regbank::{
     as_xmm, gpr_bank_index, sized_register, st_depth, st_depth_mod8, st_register, xmm_slot,

@@ -7,6 +7,7 @@
 
 use borer_engine::analysis::decompile::decompile;
 use borer_engine::analysis::decompile::view::view_of;
+use borer_engine::analysis::render::{Bytes, disasm_function_with, disasm_view};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::clr::managed::{self, Managed};
 use borer_engine::clr::markers::markers_tsv;
@@ -31,11 +32,28 @@ fuzz_target!(|data: &[u8]| {
     let analysis = Analysis::compute(&program);
     let overlay = Overlay::default();
     for f in analysis.functions.iter().take(DECOMPILED) {
+        for bytes in [Bytes::Hidden, Bytes::Shown] {
+            let text = disasm_function_with(&program, &analysis, &overlay, f.entry, LISTED, bytes);
+            if let Some(v) = disasm_view(&program, &analysis, &overlay, f.entry, LISTED, bytes) {
+                assert_eq!(Some(v.spell()), text);
+                for i in 0..v.lines() {
+                    if let Some(line) = v.line(i) {
+                        for (span, _, _) in v.tokens(i) {
+                            _ = &line[span];
+                        }
+                    }
+                }
+            }
+        }
         if let Some(text) = decompile(&program, &analysis, &overlay, f.entry) {
             _ = view_of(&program, &analysis, &overlay, f.entry, &text);
         }
     }
-    for m in Managed::of(&program, &analysis).methods.iter().take(DECOMPILED) {
+    for m in Managed::of(&program, &analysis)
+        .methods
+        .iter()
+        .take(DECOMPILED)
+    {
         _ = managed::listing(&program, m.token, usize::MAX);
         _ = managed::detail(&program, &analysis, m.token, 0);
     }
