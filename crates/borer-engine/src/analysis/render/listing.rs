@@ -167,11 +167,12 @@ impl FunctionRows {
     /// line per row.
     #[must_use]
     pub fn spell(&self) -> String {
-        let mut out = format!("# showing {} of {}\n", self.rows.len(), self.counts());
-        if self.incomplete {
-            out.push_str(INCOMPLETE_NOTE);
-            out.push('\n');
-        }
+        let mut out = format!(
+            "# showing {} of {}\n{}",
+            self.rows.len(),
+            self.counts(),
+            incomplete_line(self.incomplete)
+        );
         out.push_str("# entry size blocks instrs callers callees src name\n");
         for r in &self.rows {
             let _ = writeln!(
@@ -189,10 +190,11 @@ impl FunctionRows {
     ///
     /// One `# M functions` line (`import thunks` or `exception funclets` in
     /// place of `functions` under the filter that lists only them), with the
-    /// order and what was left out as [`FunctionRows::spell`] says them.
+    /// order and what was left out as [`FunctionRows::spell`] says them,
+    /// followed by [`INCOMPLETE_NOTE`] when the walk ran out of budget.
     #[must_use]
     pub fn counted(&self) -> String {
-        format!("# {}\n", self.counts())
+        format!("# {}\n{}", self.counts(), incomplete_line(self.incomplete))
     }
 
     /// Returns what both headers count: the total, what the selected are,
@@ -1782,6 +1784,24 @@ mod tests {
             function_rows(&a, &o, Some("s"), FunctionOrder::Size, 0, 1).counted(),
             "# 2 functions, largest first; 1 import thunks left out, filter=thunk lists them; 1 exception funclets left out, filter=funclet lists them
 "
+        );
+    }
+
+    /// The `count_only` answer carries [`INCOMPLETE_NOTE`] when the function
+    /// walk ran out of instruction budget.
+    ///
+    /// # Panics
+    ///
+    /// When the incomplete count drops the warning line.
+    #[test]
+    fn an_incomplete_count_carries_the_budget_warning() {
+        let (mut a, o) = listed();
+        a.incomplete = true;
+        assert_eq!(
+            function_rows(&a, &o, None, FunctionOrder::Address, 0, 50).counted(),
+            format!(
+                "# 3 functions; 1 import thunks left out, filter=thunk lists them; 1 exception funclets left out, filter=funclet lists them\n{INCOMPLETE_NOTE}\n"
+            )
         );
     }
 }

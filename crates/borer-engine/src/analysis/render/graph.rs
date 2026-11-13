@@ -93,10 +93,11 @@ pub fn call_path(
     }
     if !found {
         return format!(
-            "# {} does not reach {} within {levels} call(s); {} function(s) looked at\n{}",
+            "# {} does not reach {} within {levels} call(s); {} function(s) looked at\n{}{}",
             label(from),
             label(to),
             seen.len(),
+            incomplete_line(a.incomplete),
             unseen_line(p, a, Reach::Walked(&seen), "#").unwrap_or_default()
         );
     }

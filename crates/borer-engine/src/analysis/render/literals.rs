@@ -142,13 +142,14 @@ pub fn functions_by_string_tsv(
         body.push('\n');
     }
     let mut out = format!(
-        "# showing {listed} of {} row{}: {pairs} function/string pairs match {shown_filter} across {} string{} in {} function{}{note}\n# strings:",
+        "# showing {listed} of {} row{}: {pairs} function/string pairs match {shown_filter} across {} string{} in {} function{}{note}\n{}# strings:",
         rows.len(),
         plural(rows.len()),
         m.texts.len(),
         plural(m.texts.len()),
         m.by_function.len(),
-        plural(m.by_function.len())
+        plural(m.by_function.len()),
+        incomplete_line(a.incomplete)
     );
     for (i, start) in legend.iter().enumerate() {
         let _ = write!(
@@ -181,7 +182,9 @@ pub fn functions_by_string_tsv(
 /// * `found` - The texts, in the order the runs found them.
 /// * `offset` - Texts to skip first (paging).
 /// * `limit` - Most texts listed.
-/// * `head` - What the first line says before the count.
+/// * `head` - What the first line says before the count; when non-empty,
+///   this table stands alone and carries [`INCOMPLETE_NOTE`] on an
+///   incomplete walk.
 /// * `tail` - What it says at its end.
 fn generated_rows(
     a: &Analysis,
@@ -193,8 +196,13 @@ fn generated_rows(
     tail: &str,
 ) -> String {
     let shown = found.len().saturating_sub(offset).min(limit);
+    let warn = if head.is_empty() {
+        String::new()
+    } else {
+        incomplete_line(a.incomplete)
+    };
     let mut out = format!(
-        "# showing {shown} of {}: {head}{} generate it at run time{tail}\n# built_by                     written_at      text\n",
+        "# showing {shown} of {}: {head}{} generate it at run time{tail}\n{warn}# built_by                     written_at      text\n",
         found.len(),
         found.len()
     );
@@ -833,10 +841,11 @@ pub fn hidden_strings_tsv(p: &Program, a: &Analysis, o: &Overlay, filter: &str) 
     } = recovered_matching(p, a, filter);
     let total = found.len();
     let mut out = format!(
-        "# {total} generated string{} from {runs} start point{} in {generators} function{} that mix a keystream\n",
+        "# {total} generated string{} from {runs} start point{} in {generators} function{} that mix a keystream\n{}",
         plural(total),
         plural(runs),
-        plural(generators)
+        plural(generators),
+        incomplete_line(a.incomplete)
     );
     if total > 0 {
         out.push_str("# written_at     built_by                     text\n");

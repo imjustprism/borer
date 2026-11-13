@@ -393,6 +393,20 @@ pub(super) fn each_instruction(
 /// or an xref may be short.
 pub const INCOMPLETE_NOTE: &str = "# warning: analysis incomplete, instruction budget exhausted: functions past it were not discovered, so lists, callers and xrefs may be short";
 
+/// Returns [`INCOMPLETE_NOTE`] followed by a newline when `incomplete` is set,
+/// or an empty string when the walk finished within its budget.
+///
+/// # Arguments
+///
+/// * `incomplete` - Whether [`Analysis::incomplete`] is set.
+pub(super) fn incomplete_line(incomplete: bool) -> String {
+    if incomplete {
+        format!("{INCOMPLETE_NOTE}\n")
+    } else {
+        String::new()
+    }
+}
+
 /// The tail of a fragment answer's header line when it shows the scope
 /// headers ([`scope_headers`]) of its lines, numbered `^N`.
 pub const SCOPE_NOTE: &str = "; ^N marks context: the signature and the if/else/loop/switch/case headers enclosing the lines shown";

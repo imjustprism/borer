@@ -228,17 +228,17 @@ pub fn unseen_line(p: &Program, a: &Analysis, reach: Reach<'_>, lead: &str) -> O
     })
 }
 
-/// Appends what a call graph could not see ([`unseen_line`]) as a
-/// mermaid comment.
+/// Appends the incomplete-walk warning and what a call graph could not see
+/// ([`unseen_line`]) as mermaid comments.
 ///
-/// A graph of callees misses what the unresolved calls of its drawn
-/// functions reach; a graph of callers misses the callers that reach the
-/// root through an unresolved call anywhere, said when the root has few
-/// callers.
+/// An incomplete walk writes [`INCOMPLETE_NOTE`] under `%%`. A graph of
+/// callees also notes what the unresolved calls of its drawn functions
+/// reach; a graph of callers notes the callers that reach the root through
+/// an unresolved call anywhere, said when the root has few callers.
 ///
 /// # Arguments
 ///
-/// * `out` - The graph's text, which the `%%` line is appended to.
+/// * `out` - The graph's text, which any `%%` lines are appended to.
 /// * `p` - The loaded image.
 /// * `a` - The analysis.
 /// * `walk` - Which way the graph was walked.
@@ -252,6 +252,9 @@ pub(super) fn graph_line(
     root_callers: usize,
     drawn: &BTreeSet<u64>,
 ) {
+    if a.incomplete {
+        let _ = writeln!(out, "%%{}", INCOMPLETE_NOTE.trim_start_matches('#'));
+    }
     let reach = match walk {
         Walk::Callers => (root_callers < SHORT_CALLERS).then_some(Reach::Program),
         Walk::Callees => Some(Reach::Walked(drawn)),
@@ -429,5 +432,33 @@ mod tests {
             line.starts_with("# not seen: 2 indirect calls or jumps in 1 function in"),
             "{line}"
         );
+    }
+
+    /// Call graphs, unreached call paths, and string-to-function reports carry
+    /// [`super::super::INCOMPLETE_NOTE`] when [`Analysis::incomplete`] is set.
+    ///
+    /// # Panics
+    ///
+    /// When a complete answer warns or an incomplete answer drops the warning.
+    #[test]
+    fn incomplete_walks_warn_in_graphs_paths_and_strings() {
+        use crate::analysis::Overlay;
+        use crate::analysis::render::{
+            INCOMPLETE_NOTE, Walk, call_path, callgraph, functions_by_string_tsv,
+            hidden_strings_tsv,
+        };
+        let p = calls();
+        let mut a = Analysis::compute(&p);
+        let o = Overlay::default();
+        let mermaid_note = format!("%%{}", INCOMPLETE_NOTE.trim_start_matches('#'));
+        assert!(!callgraph(&p, &a, &o, 0x1000, 20, Walk::Callees).contains(&mermaid_note));
+        assert!(!call_path(&p, &a, &o, 0x1014, 0x1000, 8).contains(INCOMPLETE_NOTE));
+        assert!(!functions_by_string_tsv(&p, &a, &o, "none", 0, 20).contains(INCOMPLETE_NOTE));
+        assert!(!hidden_strings_tsv(&p, &a, &o, "").contains(INCOMPLETE_NOTE));
+        a.incomplete = true;
+        assert!(callgraph(&p, &a, &o, 0x1000, 20, Walk::Callees).contains(&mermaid_note));
+        assert!(call_path(&p, &a, &o, 0x1014, 0x1000, 8).contains(INCOMPLETE_NOTE));
+        assert!(functions_by_string_tsv(&p, &a, &o, "none", 0, 20).contains(INCOMPLETE_NOTE));
+        assert!(hidden_strings_tsv(&p, &a, &o, "").contains(INCOMPLETE_NOTE));
     }
 }
