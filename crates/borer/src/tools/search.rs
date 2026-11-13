@@ -68,7 +68,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded or the analysis is unavailable.
     #[tool(
-        description = "Find the functions whose strings contain a text, case-insensitively: a numbered legend, then `entry name: 1 2` rows, paged. Not for one function's strings (use function_strings).",
+        description = "Find the functions whose strings contain a text, case-insensitively: a numbered legend, `entry name: 1 2` rows, and, on a miss, texts built at run time as `built_by written_at text` rows.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -387,5 +387,22 @@ mod tests {
             doc.contains(&format!("under {PRINTABLE_MIN} printable characters")),
             "{doc}"
         );
+    }
+
+    /// The string search's description names the table of texts built at
+    /// run time, which follows its rows or stands in for them.
+    ///
+    /// # Panics
+    ///
+    /// When the description leaves the table out.
+    #[test]
+    fn the_string_search_names_its_table_of_built_texts() {
+        let tools = crate::BorerServer::tool_router().list_all();
+        let said = tools
+            .iter()
+            .find(|t| t.name == "find_function_by_string")
+            .and_then(|t| t.description.as_deref())
+            .unwrap_or_default();
+        assert!(said.contains("`built_by written_at text` rows"), "{said}");
     }
 }

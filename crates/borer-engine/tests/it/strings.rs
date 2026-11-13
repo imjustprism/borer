@@ -770,9 +770,10 @@ fn a_literal_s_element_is_fenced_on_its_tag_lines() {
 ///
 /// The index of referenced literals holds no text that short, so the search
 /// reads each referenced address outside code for the filter's text ended
-/// by its terminator: `"#c"` and `L"#C"` join the `"#color"` the index
-/// holds, while `#c` opening the number `23 63 07 00` and the longer
-/// `"#cA"` stay out, and so does the one-character narrow reading of
+/// by its terminator: `"#c"`, `L"#C"` and the number `23 63 00 00` join the
+/// `"#color"` the index holds, each marked `?` since a number's bytes may
+/// spell it, while the `#c` a control byte follows in `23 63 07 00` and the
+/// longer `"#cA"` stay out, and so does the one-character narrow reading of
 /// `L"#C"` for `#`. A filter's escapes read as the index prints them, so
 /// `%s\n` finds `"%s\n"`.
 #[test]
@@ -794,13 +795,16 @@ fn a_text_under_the_literal_floor_matches_only_whole() {
         // ASM: lea rcx, [rip+0xf00+disp], the data at 0x402000 + 8 * k; ret
         code[at..at + 8].copy_from_slice(&[0x48, 0x8d, 0x0d, disp, 0x0f, 0x00, 0x00, 0xc3]);
     }
-    let mut data = vec![0u8; 0x2c];
+    // ASM: lea rdx, [rip+0xfe2], the data at 0x402030; ret
+    code[0x47..0x4f].copy_from_slice(&[0x48, 0x8d, 0x15, 0xe2, 0x0f, 0x00, 0x00, 0xc3]);
+    let mut data = vec![0u8; 0x34];
     data[..3].copy_from_slice(b"#c\0");
     data[0x08..0x0f].copy_from_slice(b"#color\0");
     data[0x10..0x14].copy_from_slice(&[0x23, 0x63, 0x07, 0x00]);
     data[0x18..0x1e].copy_from_slice(&[0x23, 0x00, 0x43, 0x00, 0x00, 0x00]);
     data[0x20..0x24].copy_from_slice(b"%s\n\0");
     data[0x28..0x2c].copy_from_slice(b"#cA\0");
+    data[0x30..0x34].copy_from_slice(&[0x23, 0x63, 0x00, 0x00]);
     let p = crate::raw::image(borer_engine::program::Arch::X86_64, &code, &data);
     let a = Analysis::compute(&p);
     let o = Overlay::default();
@@ -817,12 +821,13 @@ fn a_text_under_the_literal_floor_matches_only_whole() {
         [
             "0x401020 sub_401020: 1",
             "0x401030 sub_401030: 2",
-            "0x401050 sub_401050: 3"
+            "0x401040 sub_401040: 3",
+            "0x401050 sub_401050: 4"
         ],
         "{short}"
     );
     assert!(
-        short.contains("# strings: 1=\"#c\" 2=\"#color\" 3=L\"#C\"\n"),
+        short.contains("# strings: 1=\"#c\"? 2=\"#color\" 3=\"#c\"? 4=L\"#C\"?\n"),
         "{short}"
     );
     assert!(short.contains("match only whole"), "{short}");
@@ -835,13 +840,13 @@ fn a_text_under_the_literal_floor_matches_only_whole() {
         assert_eq!(rows(&out), [row], "{filter}: {out}");
     }
     assert!(
-        answer("%s\\n").contains("# strings: 1=\"%s\\n\"\n"),
+        answer("%s\\n").contains("# strings: 1=\"%s\\n\"?\n"),
         "the text is shown as the index prints it"
     );
     let none = answer("#q");
     assert!(
         none.starts_with(
-            "# showing 0 of 0 rows: 0 function/string pairs match '#q' across 0 strings in 0 functions; texts under 4 printable characters match only whole (6 reference targets read)\n"
+            "# showing 0 of 0 rows: 0 function/string pairs match '#q' across 0 strings in 0 functions; texts under 4 printable characters match only whole and may be numbers, marked ? (7 reference targets read)\n"
         ),
         "{none}"
     );
@@ -851,6 +856,9 @@ fn a_text_under_the_literal_floor_matches_only_whole() {
 
 /// A short filter's note counts the reference targets it read whole, in the
 /// singular when there is one: the four bytes at `0x402000` a function loads.
+///
+/// They are the number 100, which spells `"d"`, so `d` lists the function
+/// with its string marked `?` as one a number may be.
 #[test]
 fn a_short_filter_reads_a_loaded_number_whole() {
     use borer_engine::analysis::render::functions_by_string_tsv;
@@ -863,8 +871,67 @@ fn a_short_filter_reads_a_loaded_number_whole() {
     let none = answer("q");
     assert!(
         none.starts_with(
-            "# showing 0 of 0 rows: 0 function/string pairs match 'q' across 0 strings in 0 functions; texts under 4 printable characters match only whole (1 reference target read)\n"
+            "# showing 0 of 0 rows: 0 function/string pairs match 'q' across 0 strings in 0 functions; texts under 4 printable characters match only whole and may be numbers, marked ? (1 reference target read)\n"
         ),
         "{none}"
     );
+    let d = answer("d");
+    assert!(
+        d.starts_with(
+            "# showing 1 of 1 row: 1 function/string pairs match 'd' across 1 string in 1 function; texts under 4 printable characters match only whole and may be numbers, marked ? (1 reference target read)\n# strings: 1=\"d\"?\n"
+        ),
+        "{d}"
+    );
+    assert!(d.contains("\n0x401000 sub_401000: 1\n"), "{d}");
+}
+
+/// A text matched whole keeps its row when a string generator builds the
+/// filter too, since it may be a string as much as a number.
+///
+/// The four bytes at `0x402000` spell `"d"` whether a `mov` loads them or a
+/// `lea` takes their address, and the `"abcdef"` a generator builds on the
+/// stack follows the row. With nothing matched whole, as for `bc`, the
+/// generated text is the answer, and its header still states the rule.
+#[test]
+fn a_generated_text_follows_the_texts_read_whole() {
+    use borer_engine::analysis::render::functions_by_string_tsv;
+    use borer_engine::analysis::{Analysis, Overlay};
+    let generator: &[u8] = &[
+        0xe8, 0x04, 0x00, 0x00, 0x00, // ASM: call 0x401010
+        0xc3, 0xcc, 0xcc, 0xcc, // ASM: ret, then int3 up to 0x401010
+        0x48, 0xb8, // ASM: movabs rax, 0x9e3779b97f4a7c15, the splitmix64 golden gamma
+        0x15, 0x7c, 0x4a, 0x7f, 0xb9, 0x79, 0x37, 0x9e, // ASM: its immediate
+        0xc7, 0x44, 0x24, 0xf0, 0x61, 0x62, 0x63, 0x64, // ASM: mov dword [rsp-0x10], "abcd"
+        0x66, 0xc7, 0x44, 0x24, 0xf4, 0x65, 0x66, // ASM: mov word [rsp-0xc], "ef"
+        0xc3, // ASM: ret
+    ];
+    for first in [
+        [0x8b, 0x05, 0xfa, 0x0f, 0x00, 0x00, 0x90], // ASM: mov eax, [rip+0xffa]; nop
+        [0x48, 0x8d, 0x0d, 0xf9, 0x0f, 0x00, 0x00], // ASM: lea rcx, [rip+0xff9]
+    ] {
+        let code = [&first[..], generator].concat();
+        let p = crate::raw::image(borer_engine::program::Arch::X86_64, &code, &[0x64, 0, 0, 0]);
+        let a = Analysis::compute(&p);
+        let o = Overlay::default();
+        let d = functions_by_string_tsv(&p, &a, &o, "d", 0, 50);
+        assert!(
+            d.starts_with(
+                "# showing 1 of 1 row: 1 function/string pairs match 'd' across 1 string in 1 function; texts under 4 printable characters match only whole and may be numbers, marked ? (1 reference target read)\n# strings: 1=\"d\"?\n"
+            ),
+            "{d}"
+        );
+        assert!(
+            d.contains("\n0x401000 sub_401000: 1\n# showing 1 of 1: 1 generate it at run time\n"),
+            "{d}"
+        );
+        assert!(d.contains(" \"abcdef\"\n"), "{d}");
+        assert!(!d.contains("no function references"), "{d}");
+        let bc = functions_by_string_tsv(&p, &a, &o, "bc", 0, 50);
+        assert!(
+            bc.starts_with(
+                "# showing 1 of 1: no function references 'bc' directly; 1 generate it at run time; texts under 4 printable characters match only whole and may be numbers, marked ? (1 reference target read)\n"
+            ),
+            "{bc}"
+        );
+    }
 }

@@ -29,14 +29,17 @@ const STRINGS_PER_FUNCTION: usize = 20;
 ///
 /// The filter matches a string's text, not the quoted form it is printed
 /// in: `L"` matched every wide string and `"` every string. A text under
-/// [`PRINTABLE_MIN`] printable characters matches only whole
-/// ([`matching`]).
+/// [`PRINTABLE_MIN`] printable characters matches only whole, marked `?`
+/// since a number's bytes may spell it ([`matching`]).
 ///
 /// A protected binary does not store the strings that matter, it computes
-/// them, so when nothing in the table matches the generators are asked
-/// before reporting that the string is not in the program. Only on a miss:
-/// running them costs more than a table lookup, and a hit there means the
-/// answer could not have come from the table.
+/// them, so when no string the index holds matches the generators are
+/// asked before the answer says the string is not in the program: only
+/// then, since running them costs more than a table lookup. A text matched
+/// whole may be a number, so the texts they build follow its rows rather
+/// than replace them, and the answer says that no function references the
+/// filter directly only when no function references a text matched whole
+/// either.
 ///
 /// # Arguments
 ///
@@ -55,8 +58,11 @@ const STRINGS_PER_FUNCTION: usize = 20;
 /// of the page, a column header, then one `entry name: 1 2 5` row per
 /// function in entry order with its strings' numbers in address order, and
 /// a `# N more rows; offset=K for the next page` line when rows remain. A
-/// filter under [`PRINTABLE_MIN`] ends the header with that rule and how
-/// many reference targets were read for it whole, whatever it matched.
+/// filter under [`PRINTABLE_MIN`] ends the header with that rule, the `?`
+/// that marks a text it matched whole, and how many reference targets were
+/// read for it, whatever it matched. The texts the generators build follow
+/// as rows of their own ([`generated_rows`]), paged by the same `offset` and
+/// `limit`, and are the whole answer when no row matched.
 pub fn functions_by_string_tsv(
     p: &Program,
     a: &Analysis,
@@ -69,28 +75,20 @@ pub fn functions_by_string_tsv(
     let shown_filter = crate::text::quoted(filter);
     let m = matching(p, a, &q);
     let pairs: usize = m.by_function.values().map(BTreeSet::len).sum();
-    if pairs == 0 && !q.is_empty() {
-        let found = recovered_matching(p, a, filter).found;
-        if !found.is_empty() {
-            let shown = found.len().saturating_sub(offset).min(limit);
-            let mut out = format!(
-                "# showing {shown} of {}: no function references {shown_filter} directly; {} generate it at run time\n",
-                found.len(),
-                found.len()
-            );
-            out.push_str("# built_by                     written_at      text\n");
-            for g in found.iter().skip(offset).take(limit) {
-                let _ = writeln!(
-                    out,
-                    "{:<28} {:<#15x} {:?}",
-                    short_name(a, o, g.built_by),
-                    g.written_at,
-                    g.text
-                );
-            }
-            next_page_line(&mut out, found.len(), offset, shown, "texts");
-            return out;
-        }
+    let note = m.read.map_or_else(String::new, |n| {
+        format!(
+            "; texts under {PRINTABLE_MIN} printable characters match only whole and may be numbers, marked ? ({n} reference target{} read)",
+            plural(n)
+        )
+    });
+    let found = if m.indexed || q.is_empty() {
+        Vec::new()
+    } else {
+        recovered_matching(p, a, filter).found
+    };
+    if m.by_function.is_empty() && !found.is_empty() {
+        let head = format!("no function references {shown_filter} directly; ");
+        return generated_rows(a, o, &found, offset, limit, &head, &note);
     }
     let mut families: BTreeMap<(u64, &BTreeSet<u64>), Vec<u64>> = BTreeMap::new();
     for (&e, strings) in &m.by_function {
@@ -143,12 +141,6 @@ pub fn functions_by_string_tsv(
         body.push_str(&same_code(a, o, others));
         body.push('\n');
     }
-    let note = m.read.map_or_else(String::new, |n| {
-        format!(
-            "; texts under {PRINTABLE_MIN} printable characters match only whole ({n} reference target{} read)",
-            plural(n)
-        )
-    });
     let mut out = format!(
         "# showing {listed} of {} row{}: {pairs} function/string pairs match {shown_filter} across {} string{} in {} function{}{note}\n# strings:",
         rows.len(),
@@ -169,6 +161,53 @@ pub fn functions_by_string_tsv(
     out.push_str("\n# entry name: string numbers\n");
     out.push_str(&body);
     next_page_line(&mut out, rows.len(), offset, listed, "rows");
+    if !found.is_empty() {
+        out.push_str(&generated_rows(a, o, &found, offset, limit, "", ""));
+    }
+    out
+}
+
+/// Returns the texts a program generates that hold a filter, as rows under
+/// a header line.
+///
+/// The line is `# showing K of N: {head}N generate it at run time{tail}`;
+/// a column header and one `built_by written_at text` row per text follow
+/// it, and a `# N more texts` line when texts remain.
+///
+/// # Arguments
+///
+/// * `a` - The analysis, for the builders' names.
+/// * `o` - User names.
+/// * `found` - The texts, in the order the runs found them.
+/// * `offset` - Texts to skip first (paging).
+/// * `limit` - Most texts listed.
+/// * `head` - What the first line says before the count.
+/// * `tail` - What it says at its end.
+fn generated_rows(
+    a: &Analysis,
+    o: &Overlay,
+    found: &[Generated],
+    offset: usize,
+    limit: usize,
+    head: &str,
+    tail: &str,
+) -> String {
+    let shown = found.len().saturating_sub(offset).min(limit);
+    let mut out = format!(
+        "# showing {shown} of {}: {head}{} generate it at run time{tail}\n# built_by                     written_at      text\n",
+        found.len(),
+        found.len()
+    );
+    for g in found.iter().skip(offset).take(limit) {
+        let _ = writeln!(
+            out,
+            "{:<28} {:<#15x} {:?}",
+            short_name(a, o, g.built_by),
+            g.written_at,
+            g.text
+        );
+    }
+    next_page_line(&mut out, found.len(), offset, shown, "texts");
     out
 }
 
@@ -187,11 +226,14 @@ fn unquoted(lit: &str) -> &str {
 
 /// The strings a filter matches, and the functions that reference them.
 struct Matching {
-    /// Each matched string's first byte, to its text as a row shows it.
+    /// Each matched string's first byte, to its text as a row shows it, `?`
+    /// after a text read whole ([`whole_matches`]), which may be a number.
     texts: BTreeMap<u64, String>,
     /// Each referencing function's entry, to the first bytes of the
     /// matched strings it references.
     by_function: BTreeMap<u64, BTreeSet<u64>>,
+    /// Whether a function references a matched string the index holds.
+    indexed: bool,
     /// How many referenced addresses were read for the filter whole, when
     /// it is under [`PRINTABLE_MIN`] ([`whole_matches`]).
     read: Option<usize>,
@@ -203,7 +245,7 @@ struct Matching {
 /// text holds the filter. The index holds none under [`PRINTABLE_MIN`]
 /// printable characters, whose bytes are as often a number as a string, so
 /// for a filter that short the texts that are it whole match too
-/// ([`whole_matches`]).
+/// ([`whole_matches`]), each marked `?` as one a number may be.
 ///
 /// # Arguments
 ///
@@ -211,24 +253,29 @@ struct Matching {
 /// * `a` - The analysis, whose references are read.
 /// * `q` - The filter, lower-cased.
 fn matching(p: &Program, a: &Analysis, q: &str) -> Matching {
-    let indexed = referenced_strings(p, a);
+    let index = referenced_strings(p, a);
     let short = whole_matches(p, a, q);
-    let held = indexed
+    let held = index
         .iter()
         .filter(|r| r.folded.contains(q))
-        .map(|r| (r.target, r.start, r.lit.as_str()));
+        .map(|r| (r.target, r.start, r.lit.as_str(), true));
     let whole = short
         .iter()
-        .flat_map(|(_, found)| found.iter().map(|(t, lit)| (*t, *t, lit.as_str())));
+        .flat_map(|(_, found)| found.iter().map(|(t, lit)| (*t, *t, lit.as_str(), false)));
     let mut m = Matching {
         texts: BTreeMap::new(),
         by_function: BTreeMap::new(),
+        indexed: false,
         read: short.as_ref().map(|(read, _)| *read),
     };
-    for (target, start, lit) in held.chain(whole) {
+    for (target, start, lit, in_index) in held.chain(whole) {
+        let mark = if in_index { "" } else { "?" };
         for e in a.xrefs_to(target).iter().filter_map(|s| s.from_entry) {
+            m.indexed |= in_index;
             m.by_function.entry(e).or_default().insert(start);
-            m.texts.entry(start).or_insert_with(|| shown_text(lit));
+            m.texts
+                .entry(start)
+                .or_insert_with(|| shown_text(lit) + mark);
         }
     }
     m
@@ -238,9 +285,11 @@ fn matching(p: &Program, a: &Analysis, q: &str) -> Matching {
 /// filter under [`PRINTABLE_MIN`] printable characters, each read once.
 ///
 /// Two printable bytes at a referenced address are as often a number as a
-/// string, which is why the index holds no text that short; the filter's
-/// text ended by its terminator is the evidence a number's bytes do not
-/// give ([`whole_text`]). The places read are those the index reads
+/// string, which is why the index holds no text that short. The filter's
+/// text ended by its terminator ([`whole_text`]) rules out the start of a
+/// longer run, not a number: a value below 2^24 in a 4- or 8-byte slot is
+/// its low bytes and a zero, so the number 100 reads as `"d"`, and a match
+/// may be a number. The places read are those the index reads
 /// ([`literal_section`]), and a text is compared as the index's are.
 ///
 /// # Arguments
@@ -299,8 +348,8 @@ fn least_printable(q: &str) -> usize {
 /// quotes one, when it ends at its terminator inside `raw`.
 ///
 /// The terminator is a NUL byte, or a NUL unit for UTF-16LE text: the
-/// evidence that the bytes are a whole string and not the start of a
-/// number or of a longer run.
+/// evidence that the bytes are not the start of a longer run, though a
+/// small number's bytes end the same way.
 ///
 /// Bytes that read as UTF-16LE for two characters or more are wide or
 /// nothing: their narrow reading is the first character and the zero high
