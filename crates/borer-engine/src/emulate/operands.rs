@@ -263,8 +263,7 @@ impl Emulator<'_> {
         let offset = base
             .wrapping_add(index)
             .wrapping_add(i.memory_displacement64());
-        let offset =
-            offset & (u64::MAX >> (64 - u32::from(crate::disasm::address_bits(i, self.bitness))));
+        let offset = offset & crate::disasm::address_mask(i, self.bitness);
         let segment = if i.segment_prefix() == self.thread_segment() {
             self.teb
         } else {

@@ -108,6 +108,18 @@ pub fn address_bits(instr: &Instruction, bitness: u32) -> u8 {
     }
 }
 
+/// Returns the mask of the bits a memory operand's effective address
+/// keeps ([`address_bits`]).
+///
+/// # Arguments
+///
+/// * `instr` - An instruction with a memory operand.
+/// * `bitness` - Decoder bitness (32 or 64).
+#[must_use]
+pub(crate) fn address_mask(instr: &Instruction, bitness: u32) -> u64 {
+    u64::MAX >> (64 - u32::from(address_bits(instr, bitness)))
+}
+
 /// Disassembles up to `max_instrs` instructions from `code`.
 ///
 /// Undecodable bytes render as `(bad)` instead of stopping the sweep, so an

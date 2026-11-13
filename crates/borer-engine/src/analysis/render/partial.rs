@@ -1475,7 +1475,7 @@ fn mem_concrete(env: &Env<'_>, i: &Instruction, facts: &Facts) -> Option<u64> {
 }
 
 /// The address of a memory operand with no index, cut to the bits it is
-/// addressed with ([`disasm::address_bits`]).
+/// addressed with ([`disasm::address_mask`]).
 ///
 /// # Arguments
 ///
@@ -1495,8 +1495,7 @@ fn mem_addr(env: &Env<'_>, i: &Instruction, facts: &Facts) -> Option<u64> {
         return Some(i.ip_rel_memory_address());
     }
     let base = facts.concrete(canonical(i.memory_base(), env.bitness))?;
-    let kept = u32::from(disasm::address_bits(i, env.bitness));
-    Some(base.wrapping_add(disp.cast_unsigned()) & (u64::MAX >> (64 - kept)))
+    Some(base.wrapping_add(disp.cast_unsigned()) & disasm::address_mask(i, env.bitness))
 }
 
 /// Records a store, so a later load of that static or slot still sees it.
