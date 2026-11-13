@@ -133,6 +133,37 @@ pub struct FunctionRow {
     pub name: String,
 }
 
+impl FunctionRow {
+    /// Builds one row of the function table from `f` under `a` and `o`.
+    ///
+    /// # Arguments
+    ///
+    /// * `a` - The analysis, for resolving `f`'s name.
+    /// * `o` - User names, which override symbol names and mark `src` as `usr`.
+    /// * `f` - The discovered function.
+    ///
+    /// # Returns
+    ///
+    /// The function's table row, with `size` summed over its blocks.
+    #[must_use]
+    pub fn of(a: &Analysis, o: &Overlay, f: &Function) -> Self {
+        Self {
+            entry: f.entry,
+            size: f.size(),
+            blocks: f.blocks.len(),
+            instrs: f.instr_count,
+            callers: f.callers.len(),
+            callees: f.callees.len(),
+            src: if o.names.contains_key(&f.entry) {
+                "usr"
+            } else {
+                f.name_source.code()
+            },
+            name: name_of(a, o, f.entry),
+        }
+    }
+}
+
 /// One page of the function table, with what its header counts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionRows {
@@ -254,20 +285,7 @@ pub fn function_rows(
         .iter()
         .skip(offset)
         .take(limit)
-        .map(|f| FunctionRow {
-            entry: f.entry,
-            size: f.size(),
-            blocks: f.blocks.len(),
-            instrs: f.instr_count,
-            callers: f.callers.len(),
-            callees: f.callees.len(),
-            src: if o.names.contains_key(&f.entry) {
-                "usr"
-            } else {
-                f.name_source.code()
-            },
-            name: name_of(a, o, f.entry),
-        })
+        .map(|f| FunctionRow::of(a, o, f))
         .collect();
     FunctionRows {
         total: matched.len(),

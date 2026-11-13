@@ -300,19 +300,14 @@ impl Host {
     /// * `f` - The function.
     /// * `edges` - Whether `callers` and `callees` are in the map.
     fn function_map(&self, f: &Function, edges: Edges) -> Dynamic {
+        let row = render::FunctionRow::of(&self.analysis, &self.overlay, f);
         let mut pairs = vec![
-            ("entry", Dynamic::from_int(int(f.entry))),
-            (
-                "name",
-                name_of(&self.analysis, &self.overlay, f.entry).into(),
-            ),
-            (
-                "size",
-                Dynamic::from_int(int(f.end.saturating_sub(f.start))),
-            ),
-            ("instrs", Dynamic::from_int(count(f.instr_count))),
-            ("blocks", Dynamic::from_int(count(f.blocks.len()))),
-            ("source", f.name_source.code().into()),
+            ("entry", Dynamic::from_int(int(row.entry))),
+            ("name", row.name.into()),
+            ("size", Dynamic::from_int(int(row.size))),
+            ("instrs", Dynamic::from_int(count(row.instrs))),
+            ("blocks", Dynamic::from_int(count(row.blocks))),
+            ("source", row.src.into()),
         ];
         if edges == Edges::Included {
             pairs.push(("callers", Dynamic::from_array(addrs(f.callers.clone()))));
@@ -1418,5 +1413,40 @@ mod tests {
         );
         assert!(text.contains("# script failed: "), "{text}");
         assert!(text.contains("# showing 500 of 505 proposals"), "{text}");
+    }
+
+    /// `functions()` and `function()` build their maps from
+    /// [`render::FunctionRow::of`], reporting summed block bytes as `size`
+    /// and `usr` as `source` when renamed in the overlay.
+    ///
+    /// # Panics
+    ///
+    /// When `size` reports the `start..end` span or `source` ignores the overlay.
+    #[test]
+    fn function_maps_share_the_table_row_builder() {
+        use crate::analysis::{BasicBlock, BlockTerm};
+        let p = Arc::new(Program::raw_x64(&[0xc3]));
+        let mut a = Analysis::compute(&p);
+        let block = |start: u64, end: u64| BasicBlock {
+            start,
+            end,
+            term: BlockTerm::Ret,
+            successors: smallvec::SmallVec::new(),
+        };
+        let f = &mut a.functions[0];
+        f.start = 0x1000;
+        f.end = 0xcb006;
+        f.blocks = vec![block(0x1000, 0x1006), block(0xcb000, 0xcb006)];
+        f.name = Some("sym_fn".to_owned());
+        f.name_source = NameSource::Symbol;
+        a.finish_index(&p);
+        let mut o = Overlay::default();
+        o.names.insert(0x1000, "renamed".to_owned());
+        let code = "
+            print(`${functions()[0].size} ${functions()[0].source}`);
+            print(`${function(0x1000).size} ${function(0x1000).source}`);
+        ";
+        let got = run(p, Arc::new(a), Arc::new(o), code, &[]).expect("runs");
+        assert_eq!(got.output, ["12 usr", "12 usr"]);
     }
 }
