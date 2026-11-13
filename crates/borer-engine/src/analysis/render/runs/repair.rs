@@ -477,7 +477,8 @@ pub fn answered_flagged(
 
 #[cfg(test)]
 mod tests {
-    use super::{Checked, Counterexample, Evidence, Repair, Site, evidence, implicated};
+    use super::{Checked, Counterexample, Evidence, Repair, Site, evidence, implicated, searched};
+    use crate::analysis::Overlay;
 
     /// A rendering that agrees on every input but the one the base text
     /// differs on, which it leaves unchecked, is unchecked, not tested.
@@ -555,5 +556,49 @@ mod tests {
             .is_none()
         );
         assert!(Repair::Agrees.note().is_none());
+    }
+
+    /// The search holds every move to the input the base text differs on.
+    ///
+    /// The base text differs on input 2, and every other rendering agrees
+    /// on 7 inputs and leaves input 2 unchecked: the one move, the `return`
+    /// at its literal rung, is unchecked and the search ends disagreeing.
+    /// Held to no input, the move read as `Tested(7)` and the search
+    /// answered `Repaired`.
+    ///
+    /// # Panics
+    ///
+    /// When a move is graded otherwise or the search repairs.
+    #[test]
+    fn the_search_holds_every_move_to_the_base_input() {
+        let o = Overlay::default();
+        let base = o.fingerprint();
+        let at = Counterexample {
+            input: "2".to_owned(),
+            line: "return a1;".to_owned(),
+            why: "returned 1, the binary 0".to_owned(),
+        };
+        let iso = |u: &Overlay, held| {
+            if u.fingerprint() == base {
+                return Checked {
+                    differs: Some((2, at.clone())),
+                    agreed: 2,
+                    ..Checked::default()
+                };
+            }
+            Checked {
+                agreed: 7,
+                unchecked: [("it spins".to_owned(), 1)].into(),
+                skipped: [2].into(),
+                held,
+                ..Checked::default()
+            }
+        };
+        let r = searched(&o, None, &iso, &|_| None, &|| vec![Site::Return], 0, 8);
+        let Repair::Disagrees { tried, .. } = &r else {
+            panic!("{r:?}");
+        };
+        let graded: Vec<_> = tried.iter().map(|t| t.evidence.clone()).collect();
+        assert_eq!(graded, [Evidence::Unchecked], "{r:?}");
     }
 }
