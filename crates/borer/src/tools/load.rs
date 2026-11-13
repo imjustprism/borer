@@ -576,8 +576,11 @@ impl BorerServer {
                     borer_engine::text::short_path(&loaded_path.replace('\\', "/"))
                 ),
                 None => format!(
-                    "the project was saved for {saved_for}, but {} is loaded, another path as text: the project records no sha-256, so its path names its binary; nothing was loaded. Load that binary first, or pass force=true to load the project anyway and save_project to record the hash",
-                    borer_engine::text::short_path(&loaded_path)
+                    "{}. Load that binary first, or pass force=true to load the project anyway and save_project to record the hash",
+                    borer::project::other_path_verdict(
+                        &saved_for,
+                        &borer_engine::text::short_path(&loaded_path)
+                    )
                 ),
             }));
         }
@@ -637,7 +640,7 @@ impl BorerServer {
             );
         }
         if matches!(identity, Identity::PathOnly | Identity::OtherPath) {
-            said.push_str("# the project names its binary by path alone (saved before projects recorded its sha-256), so a rebuild at that path loads it too; save_project records the hash\n");
+            said.push_str("# the project names its binary by path alone (saved before projects recorded its sha-256; matched ignoring ASCII case on Windows), so a rebuild or case twin at that path loads it too; save_project records the hash\n");
         }
         self.edit_overlay_of(&program, |o| *o = loaded)
             .map_err(err_params)?;

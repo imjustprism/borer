@@ -1942,7 +1942,8 @@ mod tests {
                 .expect("the manifest is written");
             path
         };
-        let huge = write("huge", 60_000);
+        let huge = dir.join(format!("borer-anchors-{id}-huge.txt"));
+        std::fs::write(&huge, vec![b'a'; (1 << 20) + 1]).expect("1 MiB + 1 manifest is written");
         let many = write("many", 5001);
         let page = write("page", 600);
         let answers: Vec<_> = [&huge, &many, &page]
@@ -1954,7 +1955,11 @@ mod tests {
         }
         let [huge, many, page] = <[_; 3]>::try_from(answers).expect("three answers");
         let huge = huge.expect_err("past the size cap");
-        assert!(huge.message.contains("bytes, past the"), "{}", huge.message);
+        assert!(
+            huge.message.contains("is 1048577 bytes, past the 1048576"),
+            "{}",
+            huge.message
+        );
         let many = many.expect_err("past the anchor cap");
         assert!(
             many.message.contains("has 5001 anchors, past the 5000"),

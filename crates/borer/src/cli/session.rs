@@ -220,8 +220,9 @@ pub(super) fn project_overlay(path: &str, program: &Program) -> anyhow::Result<O
             short_path(path)
         ),
         Identity::OtherPath => bail!(
-            "the project {} records no sha-256, so its path names its binary, and {saved} is not {loaded} as text; nothing was loaded. Give that binary, or load the project with load_project force=true and save_project to record the hash",
-            short_path(path)
+            "{}: {}. Give that binary, or edit \"program\" in the project file to match {loaded}",
+            short_path(path),
+            borer::project::other_path_verdict(&saved, &loaded)
         ),
     }
     let mut overlay = overlay_at_width(&pf, program)?;

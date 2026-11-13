@@ -1793,3 +1793,42 @@ fn cli_pack_refuses_a_65_mib_file_like_the_pack_flag() {
     assert!(!ok_cmd && said_cmd.contains(cap), "{said_cmd}");
     assert!(!ok_flag && said_flag.contains(cap), "{said_flag}");
 }
+
+/// `borer diff` surfaces the size refusal of a 65 MiB `# borer fingerprint`
+/// sidecar rather than falling back to loading it as a binary, and a hashless
+/// `--project` path mismatch words a CLI remedy without naming MCP tools.
+#[test]
+fn cli_diff_and_project_surface_sidecar_and_path_refusals() {
+    use std::io::Write as _;
+    let pid = std::process::id();
+    let pe = std::env::temp_dir().join(format!("borer_sidecar_{pid}.exe"));
+    let side = std::env::temp_dir().join(format!("borer_sidecar_{pid}.fp"));
+    let proj = std::env::temp_dir().join(format!("borer_sidecar_{pid}.json"));
+    std::fs::write(&pe, crate::contract::tiny_pe()).expect("pe");
+    {
+        let mut f = std::fs::File::create(&side).expect("sidecar");
+        f.write_all(b"# borer fingerprint\n").expect("header");
+        f.set_len(65 << 20).expect("65 mib");
+    }
+    std::fs::write(&proj, r#"{"program":"elsewhere.exe","names":{}}"#).expect("proj");
+    let (pe_s, side_s, proj_s) = (
+        pe.to_string_lossy(),
+        side.to_string_lossy(),
+        proj.to_string_lossy(),
+    );
+    let (ok_diff, said_diff) = run_all(&["diff", &pe_s, &side_s]);
+    let (ok_proj, said_proj) = run_all(&["info", &pe_s, "--project", &proj_s]);
+    std::fs::remove_file(&pe).ok();
+    std::fs::remove_file(&side).ok();
+    std::fs::remove_file(&proj).ok();
+    assert!(
+        !ok_diff && said_diff.contains("is 68157440 bytes, past the 67108864 it may hold"),
+        "{said_diff}"
+    );
+    assert!(
+        !ok_proj
+            && said_proj.contains("another path as text")
+            && !said_proj.contains("load_project"),
+        "{said_proj}"
+    );
+}

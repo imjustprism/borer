@@ -261,19 +261,14 @@ fn diff(args: &[String], s: &Session) -> anyhow::Result<()> {
     let needs = "diff needs another build or a fingerprint sidecar";
     let other = path_arg(args, 2, needs)?;
     let path = std::path::Path::new(other);
-    if let Some(why) = borer_engine::program::unusable_path(path) {
-        anyhow::bail!("{needs}; {why}");
-    }
     let label = |p: &std::path::Path| {
         p.file_name().map_or_else(
             || p.display().to_string(),
             |n| n.to_string_lossy().into_owned(),
         )
     };
-    let sidecar = borer_engine::program::read_regular(path, crate::resources::SPEC_FILE_MAX)
-        .ok()
-        .and_then(|bytes| String::from_utf8(bytes).ok())
-        .filter(|t| t.starts_with("# borer fingerprint"));
+    let sidecar =
+        crate::resources::fingerprint_sidecar(path).map_err(|e| anyhow::anyhow!("{needs}; {e}"))?;
     let text = match sidecar {
         Some(prints) => render::diff_prints_tsv(
             &render::parse_prints(&prints),

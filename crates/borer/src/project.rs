@@ -56,6 +56,19 @@ pub fn identity(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// Explains why a hashless project saved for `saved` was refused on `loaded`.
+///
+/// # Arguments
+///
+/// * `saved` - Shortened path recorded in the project file.
+/// * `loaded` - Shortened path of the loaded binary.
+#[must_use]
+pub fn other_path_verdict(saved: &str, loaded: &str) -> String {
+    format!(
+        "the project was saved for {saved}, but {loaded} is loaded, another path as text: the project records no sha-256, so its path names its binary; nothing was loaded"
+    )
+}
+
 /// Largest project file read or written, in bytes ([`ProjectFile::load`],
 /// [`ProjectFile::save`]).
 const PROJECT_MAX: u64 = 1 << 26;
@@ -236,10 +249,11 @@ impl ProjectFile {
     /// ([`ProjectFile::identify`]); one without is matched here, by the path
     /// it records and the loaded one compared as text ([`lexical`],
     /// [`alike`]), never on disk, so a project file never makes borer open
-    /// a path. On Windows a name matches in either ASCII case and a drive in
-    /// its long `\\?\` form, as Windows reads them. `..` folds as the text
-    /// says on every system, though off Windows the kernel resolves it
-    /// through a link. Two spellings only the disk shows to be one file (a
+    /// a path. On Windows a name matches in either ASCII case (even inside a
+    /// case-sensitive directory, so `A.exe` matches `a.exe`) and a drive in
+    /// its long `\\?\` form, as Windows ordinarily reads them. `..` folds as
+    /// the text says on every system, though off Windows the kernel resolves
+    /// it through a link. Two spellings only the disk shows to be one file (a
     /// link, an 8.3 name) are two paths, so `load_project` refuses the
     /// project unless forced.
     ///

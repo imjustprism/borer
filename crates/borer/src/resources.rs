@@ -118,7 +118,23 @@ pub(crate) const SPEC_FILE_MAX: u64 = 1 << 26;
 /// When the path is a device, a share or not a regular file, the file is
 /// past [`SPEC_FILE_MAX`] bytes, does not read, or is not text.
 fn read_spec_file(path: &str, kind: &str) -> Result<String, ErrorData> {
-    let bytes = borer_engine::program::read_regular(Path::new(path), SPEC_FILE_MAX)
+    read_spec_file_max(path, kind, SPEC_FILE_MAX)
+}
+
+/// Reads a text file a resource names within `max` bytes.
+///
+/// # Arguments
+///
+/// * `path` - The file, as the URI carried it.
+/// * `kind` - What the file is meant to be, for the message.
+/// * `max` - Largest byte count accepted.
+///
+/// # Errors
+///
+/// When `path` is refused or not a regular file, exceeds `max` bytes, fails
+/// to read, or is not UTF-8 text.
+fn read_spec_file_max(path: &str, kind: &str, max: u64) -> Result<String, ErrorData> {
+    let bytes = borer_engine::program::read_regular(Path::new(path), max)
         .map_err(|e| err_params(format!("{e:#}; give a path to {kind}")))?;
     String::from_utf8(bytes).map_err(|_| {
         err_params(format!(
@@ -126,6 +142,37 @@ fn read_spec_file(path: &str, kind: &str) -> Result<String, ErrorData> {
             borer_engine::text::short_path(path)
         ))
     })
+}
+
+/// Reads a `# borer fingerprint` sidecar within [`SPEC_FILE_MAX`] bytes, or
+/// returns `Ok(None)` when `path` is a regular file with another header.
+///
+/// # Arguments
+///
+/// * `path` - Candidate sidecar or comparison binary path.
+///
+/// # Errors
+///
+/// When `path` cannot be opened as a regular file, or opens with
+/// `# borer fingerprint` and exceeds [`SPEC_FILE_MAX`] or is not UTF-8.
+pub(crate) fn fingerprint_sidecar(path: &Path) -> Result<Option<String>, String> {
+    use std::io::Read as _;
+    /// Magic prefix opening every fingerprint sidecar.
+    const HEAD: &[u8] = b"# borer fingerprint";
+    let f = borer_engine::program::open_regular(path, u64::MAX).map_err(|e| format!("{e:#}"))?;
+    let shown = borer_engine::text::short_path(&path.to_string_lossy());
+    let mut head = Vec::with_capacity(HEAD.len());
+    f.take(borer_engine::num::from_usize(HEAD.len()))
+        .read_to_end(&mut head)
+        .map_err(|e| format!("reading {shown}: {e}"))?;
+    if head != HEAD {
+        return Ok(None);
+    }
+    let bytes =
+        borer_engine::program::read_regular(path, SPEC_FILE_MAX).map_err(|e| format!("{e:#}"))?;
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| format!("{shown} is not a text file"))
 }
 
 impl BorerServer {
@@ -691,15 +738,11 @@ impl BorerServer {
     /// When no binary is loaded, or the other file cannot be loaded or has no
     /// code analysis.
     pub(crate) fn diff_text(&self, other: &str) -> Result<String, ErrorData> {
-        if let Some(why) = borer_engine::program::unusable_path(Path::new(other)) {
-            return Err(err_params(format!(
-                "{why}; give a path to a program or a fingerprint sidecar"
-            )));
-        }
-        if let Ok(bytes) = borer_engine::program::read_regular(Path::new(other), SPEC_FILE_MAX)
-            && let Ok(text) = String::from_utf8(bytes)
-            && text.starts_with("# borer fingerprint")
-        {
+        if let Some(text) = fingerprint_sidecar(Path::new(other)).map_err(|e| {
+            err_params(format!(
+                "{e}; give a path to a program or a fingerprint sidecar"
+            ))
+        })? {
             let old_prints = render::parse_prints(&text);
             let base = file_label(Path::new(other));
             return self.with_analysis(Feature::Discover, |p, a, _| {
@@ -1874,20 +1917,10 @@ impl BorerServer {
         /// Most rows one read lists.
         const PAGE: usize = 500;
         let short = borer_engine::text::short_path(path);
-        let meta = borer_engine::program::checked_metadata(Path::new(path))
-            .map_err(|why| err_params(format!("{why}; give a path to an anchors manifest")))?;
-        if let Some(meta) = meta
-            && meta.is_file()
-            && meta.len() > MANIFEST_MAX
-        {
-            return Err(err_params(format!(
-                "{short} is {} bytes, past the {MANIFEST_MAX} one read takes; split the manifest or judge it with the CLI's anchors",
-                meta.len()
-            )));
-        }
-        let text = read_spec_file(
+        let text = read_spec_file_max(
             path,
-            "an anchors manifest (field, vconst, function, encode and decode lines)",
+            "an anchors manifest (field, vconst, function, encode and decode lines); split a larger manifest or judge it with the CLI's anchors",
+            MANIFEST_MAX,
         )?;
         let anchors = borer_engine::analysis::anchors::parse_manifest(&text).map_err(err_params)?;
         if anchors.len() > ANCHORS_MAX {
