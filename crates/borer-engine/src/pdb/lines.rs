@@ -2,22 +2,20 @@
 //! naming its file from the string table.
 
 use super::Gathered;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
 
-/// Tracks module-stream line eligibility across [`super::gather`]'s DBI walk.
+/// Tracks module-stream uniqueness and line eligibility across [`super::gather`]'s DBI walk.
 #[derive(Debug, Default)]
 pub(super) struct LineReader {
-    /// Whether the caller asked for line programs (`sources` vs `apply`).
-    want: bool,
-    /// Per-module `module_line_flags` result aligned with `dbi.modules()`.
-    flags: Vec<bool>,
+    /// Per-module `(open_ok, sections)` gates aligned with `dbi.modules()`.
+    gates: Vec<(bool, Option<super::streams::LineSections>)>,
     /// Index of the next module yielded by `dbi.modules()`.
     next: usize,
 }
 
 impl LineReader {
-    /// Prepares line-program tracking for one [`super::gather`] pass.
+    /// Prepares module and line-program tracking for one [`super::gather`] pass.
     ///
     /// # Arguments
     ///
@@ -28,19 +26,13 @@ impl LineReader {
     ///
     /// A reader aligned with the first module of `db.debug_information()`.
     pub(super) fn new<'s>(db: &mut pdb::PDB<'s, Cursor<&'s [u8]>>, want: bool) -> Self {
-        let flags = if want {
-            super::streams::module_line_flags(db)
-        } else {
-            Vec::new()
-        };
         Self {
-            want,
-            flags,
+            gates: super::streams::module_gates(db, want),
             next: 0,
         }
     }
 
-    /// Opens `m`'s module stream and reports whether its line program may be read.
+    /// Opens `m`'s module stream and reports its validated C13 line subsections.
     ///
     /// # Arguments
     ///
@@ -49,92 +41,139 @@ impl LineReader {
     ///
     /// # Returns
     ///
-    /// The module's symbol and line stream paired with whether `line_program()`
-    /// is wanted and within bounds, or `None` when `m` carries no readable stream.
+    /// The module's symbol and line stream paired with its validated C13
+    /// `(section, offset)` headers when `line_program()` is wanted and within
+    /// bounds, or `None` when `m` carries no unique readable stream.
     pub(super) fn open<'s>(
         &mut self,
         db: &mut pdb::PDB<'s, Cursor<&'s [u8]>>,
         m: &pdb::Module<'_>,
-    ) -> Option<(pdb::ModuleInfo<'s>, bool)> {
+    ) -> Option<(pdb::ModuleInfo<'s>, Option<super::streams::LineSections>)> {
         let idx = self.next;
         self.next += 1;
+        let (open_ok, sections) = self
+            .gates
+            .get_mut(idx)
+            .map_or((false, None), |(ok, s)| (*ok, s.take()));
+        if !open_ok {
+            return None;
+        }
         let info = db.module_info(m).ok()??;
-        let ok = self.want && self.flags.get(idx).copied().unwrap_or(false);
-        Some((info, ok))
+        Some((info, sections))
     }
 }
 
 impl Gathered {
-    /// Reads `info`'s line program when `lines_ok` holds and records each procedure's first row.
+    /// Reads `info`'s line program when `sections` is `Some` and records each procedure's first row.
     ///
     /// # Arguments
     ///
     /// * `info` - The module's symbol and line stream.
-    /// * `lines_ok` - Whether line programs are requested and readable for this module.
+    /// * `sections` - Sorted `(section, offset)` headers of validated C13 line subsections.
     /// * `map` - Address map translating internal section offsets to RVAs.
     /// * `guard` - Checked RVA translation guard.
-    /// * `procs` - Procedures gathered from this module.
+    /// * `procs` - Procedures sized in this module, `(rva, offset)`.
     pub(super) fn collect_module_lines(
         &mut self,
         info: &pdb::ModuleInfo<'_>,
-        lines_ok: bool,
+        sections: Option<&[(u16, u32)]>,
         map: &pdb::AddressMap<'_>,
         guard: &super::streams::AddrGuard,
         procs: &[(u32, pdb::PdbInternalSectionOffset)],
     ) {
-        if lines_ok
+        if let Some(sections) = sections
             && !procs.is_empty()
             && let Ok(program) = info.line_program()
         {
-            self.take_lines(&program, map, guard, procs);
+            self.take_lines(&program, sections, map, guard, procs);
         }
     }
 
     /// Takes the first line row each stated procedure starts at.
     ///
-    /// Rows are asked of the module's own program by the offset its
-    /// records state, and are not promised to be in offset order, so the
-    /// winner is the row with the least offset inside the procedure's
-    /// extent, ties by the lesser line. Only a procedure the gather sized
-    /// has an extent to place rows in; a row outside it, a zero line, or a
-    /// file the program does not name contributes nothing.
+    /// Each `DEBUG_S_LINES` subsection is queried through `lines_for_symbol`
+    /// so `pdb`'s iterator stays inside one subsection at a time, and each
+    /// binary-search slot in `sections` is walked at most once across all
+    /// procedures in the module before indexing rows by translated RVA.
     ///
     /// # Arguments
     ///
     /// * `program` - The module's line program.
+    /// * `sections` - Sorted `(section, offset)` headers of C13 line subsections.
     /// * `map` - The address map, translating the internal offsets the
     ///   rows state into image RVAs.
     /// * `guard` - Checked RVA translation guard.
-    /// * `procs` - The procedures this module states, RVA and record
-    ///   offset.
+    /// * `procs` - Procedures sized in this module, `(rva, offset)`.
     fn take_lines(
         &mut self,
         program: &pdb::LineProgram<'_>,
+        sections: &[(u16, u32)],
         map: &pdb::AddressMap<'_>,
         guard: &super::streams::AddrGuard,
         procs: &[(u32, pdb::PdbInternalSectionOffset)],
     ) {
         use pdb::FallibleIterator as _;
-        for &(rva, offset) in procs {
-            let Some(&end) = self.extents.get(&rva) else {
-                continue;
+        if sections.is_empty() {
+            return;
+        }
+        let mut lo = u32::MAX;
+        let mut hi = 0u32;
+        for &(rva, _) in procs {
+            if let Some(&end) = self.extents.get(&rva)
+                && rva < end
+            {
+                lo = lo.min(rva);
+                hi = hi.max(end);
+            }
+        }
+        if lo >= hi {
+            return;
+        }
+        let mut walked: BTreeSet<(bool, usize)> = BTreeSet::new();
+        let mut by_rva: BTreeMap<u32, (pdb::StringRef, u32)> = BTreeMap::new();
+        for &(_, offset) in procs {
+            let slot = match sections.binary_search(&(offset.section, offset.offset)) {
+                Ok(i) => (true, i),
+                Err(i) if i > 0 && sections[i - 1].0 == offset.section => (false, i),
+                Err(_) => continue,
             };
+            if !walked.insert(slot) {
+                continue;
+            }
             let mut rows = program.lines_for_symbol(offset);
             while let Ok(Some(row)) = rows.next() {
+                if row.line_start == 0 {
+                    continue;
+                }
                 let Some(at) = guard.rva_of(map, row.offset) else {
                     continue;
                 };
-                if at < rva || at >= end || row.line_start == 0 {
-                    continue;
-                }
-                if self.lines.get(&rva).is_some_and(|&(best, _, line)| {
-                    best < at || (best == at && line <= row.line_start)
-                }) {
+                if at < lo
+                    || at >= hi
+                    || by_rva
+                        .get(&at)
+                        .is_some_and(|&(_, best_line)| best_line <= row.line_start)
+                {
                     continue;
                 }
                 if let Ok(file) = program.get_file_info(row.file_index) {
-                    self.lines.insert(rva, (at, file.name, row.line_start));
+                    by_rva.insert(at, (file.name, row.line_start));
                 }
+            }
+        }
+        for &(rva, _) in procs {
+            let Some(&end) = self.extents.get(&rva) else {
+                continue;
+            };
+            let Some((&at, &(file, line))) = by_rva.range(rva..end).next() else {
+                continue;
+            };
+            if !self
+                .lines
+                .get(&rva)
+                .is_some_and(|&(best, _, best_line)| best < at || (best == at && best_line <= line))
+            {
+                self.lines.insert(rva, (at, file, line));
             }
         }
     }

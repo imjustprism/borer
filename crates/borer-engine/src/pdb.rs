@@ -31,7 +31,7 @@ mod streams;
 use crate::dwarf::{frame_slot, local_name_ok};
 use crate::program::{Section, Symbol, SymbolKind, pe::rva_to_va};
 use lines::resolve_lines;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
@@ -743,18 +743,9 @@ impl Gathered {
     }
 }
 
-/// A scope the module's symbol stream is inside, for the locals walk.
-#[derive(Debug)]
-enum Scope {
-    /// The procedure being walked, at its RVA, whose locals are gathered.
-    Proc(u32),
-    /// A nested scope of the procedure's own - a block or a thunk - whose
-    /// locals still live in its frame.
-    Nested,
-    /// An inline site: the locals inside belong to the inlinee's frame,
-    /// not the procedure's.
-    Inline,
-}
+/// Cumulative `(proc_rva, inlined)` scope state at one nesting level of a module's symbol stream.
+#[derive(Debug, Clone, Copy, Default)]
+struct Scope(Option<u32>, bool);
 
 /// Reads the named symbols a PDB states, by RVA.
 ///
@@ -804,23 +795,14 @@ fn gather<'s>(
         && let Ok(mut modules) = dbi.modules()
     {
         while let Ok(Some(m)) = modules.next() {
-            let Some((info, lines_ok)) = line_reader.open(db, &m) else {
+            let Some((info, sections)) = line_reader.open(db, &m) else {
                 continue;
             };
             let Ok(mut syms) = info.symbols() else {
                 continue;
             };
-            let mut procs: Vec<(u32, pdb::PdbInternalSectionOffset)> = Vec::new();
-            let mut scopes: Vec<Scope> = Vec::new();
-            let mut frame = 0i64;
-            let mut pending: Option<String> = None;
-            let mut taken = 0usize;
-            let current_proc = |scopes: &[Scope]| {
-                scopes.iter().rev().find_map(|s| match s {
-                    Scope::Proc(rva) => Some(*rva),
-                    Scope::Nested | Scope::Inline => None,
-                })
-            };
+            let (mut procs, mut scopes) = (Vec::new(), Vec::<Scope>::new());
+            let (mut frame, mut pending, mut taken) = (0i64, None::<String>, 0usize);
             let take =
                 |out: &mut Gathered, rva: u32, slot: Option<i64>, name: &str, taken: &mut usize| {
                     if *taken >= SYMBOLS_MAX {
@@ -832,22 +814,24 @@ fn gather<'s>(
                 };
             while let Ok(Some(s)) = syms.next() {
                 let kind = s.raw_kind();
-                let inlined = scopes.iter().any(|s| matches!(s, Scope::Inline));
+                let cur = scopes.last().copied().unwrap_or_default();
                 if s.starts_scope() {
                     match s.parse() {
                         Ok(pdb::SymbolData::Procedure(p)) => {
                             let rva = guard.rva_of(map, p.offset);
-                            if let Some(rva) = rva {
+                            out.take(rva, p.name, Some(p.len), Some(p.type_index));
+                            if sections.is_some()
+                                && let Some(rva) = rva.filter(|r| out.extents.contains_key(r))
+                            {
                                 procs.push((rva, p.offset));
                             }
-                            out.take(rva, p.name, Some(p.len), Some(p.type_index));
                             frame = 0;
                             match rva.filter(|r| *r != 0 && out.found.contains_key(r)) {
                                 Some(rva) => {
                                     out.locals.entry(rva).or_default();
-                                    scopes.push(Scope::Proc(rva));
+                                    scopes.push(Scope(Some(rva), cur.1));
                                 }
-                                None => scopes.push(Scope::Nested),
+                                None => scopes.push(cur),
                             }
                         }
                         Ok(pdb::SymbolData::Thunk(t)) => {
@@ -857,22 +841,22 @@ fn gather<'s>(
                                 Some(u32::from(t.len)),
                                 None,
                             );
-                            scopes.push(Scope::Nested);
+                            scopes.push(cur);
                         }
-                        Ok(pdb::SymbolData::InlineSite(_)) => scopes.push(Scope::Inline),
-                        _ => scopes.push(Scope::Nested),
+                        Ok(pdb::SymbolData::InlineSite(_)) => scopes.push(Scope(cur.0, true)),
+                        _ => scopes.push(cur),
                     }
                     pending = None;
                 } else if s.ends_scope() {
                     scopes.pop();
                     pending = None;
-                } else if !inlined && kind == S_FRAMEPROC {
+                } else if !cur.1 && kind == S_FRAMEPROC {
                     frame = streams::frame_size(s.raw_bytes()).unwrap_or(frame);
                     pending = None;
-                } else if !inlined && kind == S_BPREL32 {
+                } else if !cur.1 && kind == S_BPREL32 {
                     if let Some((off, name)) = streams::bprel32(s.raw_bytes())
                         && local_name_ok(name)
-                        && let Some(rva) = current_proc(&scopes)
+                        && let Some(rva) = cur.0
                     {
                         take(
                             &mut out,
@@ -883,7 +867,9 @@ fn gather<'s>(
                         );
                     }
                     pending = None;
-                } else if !inlined && let Some(name) = &pending {
+                } else if !cur.1
+                    && let Some(name) = &pending
+                {
                     let range = match kind {
                         S_DEFRANGE_FRAMEPOINTER_REL => {
                             streams::defrange_offset(s.raw_bytes()).map(|off| (off < 0, off))
@@ -892,7 +878,7 @@ fn gather<'s>(
                             .and_then(|(reg, off)| streams::base_kind(reg).map(|b| (b, off))),
                         _ => None,
                     };
-                    if let (Some(rva), Some((base_bp, off))) = (current_proc(&scopes), range) {
+                    if let (Some(rva), Some((base_bp, off))) = (cur.0, range) {
                         take(
                             &mut out,
                             rva,
@@ -904,7 +890,7 @@ fn gather<'s>(
                     if !matches!(kind, S_DEFRANGE_FRAMEPOINTER_REL | S_DEFRANGE_REGISTER_REL) {
                         pending = None;
                     }
-                } else if !inlined && streams::is_body_symbol(kind) {
+                } else if !cur.1 && streams::is_body_symbol(kind) {
                     let relative = s.parse().ok().and_then(|d| match d {
                         pdb::SymbolData::Data(d) => {
                             out.take_data(guard.rva_of(map, d.offset), d.name);
@@ -922,7 +908,7 @@ fn gather<'s>(
                         _ => None,
                     });
                     if let Some((base_bp, off, name)) = relative
-                        && let Some(rva) = current_proc(&scopes)
+                        && let Some(rva) = cur.0
                     {
                         take(
                             &mut out,
@@ -934,7 +920,7 @@ fn gather<'s>(
                     }
                 }
             }
-            out.collect_module_lines(&info, lines_ok, map, &guard, &procs);
+            out.collect_module_lines(&info, sections.as_deref(), map, &guard, &procs);
         }
     }
     streams::collect_globals(db, map, &guard, &mut out);
@@ -1278,7 +1264,7 @@ fn primitive_text(kind: pdb::PrimitiveKind) -> Option<String> {
 ///
 /// How many symbols were inserted.
 fn insert(image_base: u64, found: &BTreeMap<u32, String>, symbols: &mut Vec<Symbol>) -> usize {
-    let taken: std::collections::BTreeSet<u64> = symbols.iter().map(|s| s.addr).collect();
+    let taken: BTreeSet<u64> = symbols.iter().map(|s| s.addr).collect();
     let mut named = 0usize;
     for (rva, name) in found {
         let Some(addr) = rva_to_va(image_base, *rva).filter(|a| !taken.contains(a)) else {
@@ -1323,7 +1309,7 @@ fn insert_data(
     sections: &[Section],
     symbols: &mut Vec<Symbol>,
 ) -> usize {
-    let taken: std::collections::BTreeSet<u64> = symbols.iter().map(|s| s.addr).collect();
+    let taken: BTreeSet<u64> = symbols.iter().map(|s| s.addr).collect();
     let mut named = 0usize;
     for (rva, name) in data {
         if found.contains_key(rva) {

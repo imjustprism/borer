@@ -64,19 +64,25 @@ fn read_pages<R: Read + Seek>(
     byte_len: usize,
 ) -> Option<Vec<u8>> {
     let count = table.len() / 4;
-    let mut out = vec![0u8; count.checked_mul(page_size)?];
-    let ps64 = u64::try_from(page_size).ok()?;
-    for i in 0..count {
-        let pg = u32_at(table, i * 4)?;
+    if count != byte_len.div_ceil(page_size) {
+        return None;
+    }
+    for chunk in table.chunks_exact(4) {
+        let pg = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         if pg == 0 || pg > pages_used || pg >= file_pages {
             return None;
         }
+    }
+    let mut out = vec![0u8; byte_len];
+    let ps64 = u64::try_from(page_size).ok()?;
+    for i in 0..count {
+        let pg = u32_at(table, i * 4)?;
         r.seek(SeekFrom::Start(u64::from(pg).checked_mul(ps64)?))
             .ok()?;
-        let dst = out.get_mut(i * page_size..(i + 1) * page_size)?;
-        r.read_exact(dst).ok()?;
+        let start = i * page_size;
+        let end = start.saturating_add(page_size).min(byte_len);
+        r.read_exact(out.get_mut(start..end)?).ok()?;
     }
-    out.truncate(byte_len);
     Some(out)
 }
 
@@ -134,6 +140,7 @@ fn msf_check<R: Read + Seek>(r: &mut R, file_len: u64) -> Option<()> {
     let dir_size = u32_at(&p0, 44)?;
     if !page_size.is_power_of_two()
         || !(0x100..=0x80_0000).contains(&page_size)
+        || u64::from(page_size) > file_len
         || pages_used == 0
         || dir_size > MSF_DIR_MAX
         || u64::from(dir_size) > file_len
@@ -369,29 +376,43 @@ fn read_omap<'s>(
     Some(out)
 }
 
-/// Evaluates per-module line-program bounds in lockstep with `dbi.modules()`.
+/// Sorted `(section, offset)` headers of a module's C13 `DEBUG_S_LINES` subsections.
+pub(super) type LineSections = Vec<(u16, u32)>;
+
+/// Evaluates per-module stream uniqueness and line-program bounds in lockstep
+/// with `dbi.modules()`.
 ///
 /// # Arguments
 ///
 /// * `db` - The opened PDB.
+/// * `want_lines` - Whether line subsections should also be verified.
 ///
 /// # Returns
 ///
-/// One boolean per module yielded by `dbi.modules()`, `true` only when the module's stream
-/// holds `symbols_size + line_size` whole and every C13 `DEBUG_S_LINES` block is sound.
-pub(super) fn module_line_flags<'s>(db: &mut pdb::PDB<'s, Cursor<&'s [u8]>>) -> Vec<bool> {
-    let Some(mod_bytes) = ({
-        let s3 = db.raw_stream(pdb::StreamIndex(3)).ok().flatten();
-        s3.and_then(|s| {
+/// `(open_ok, sections)` per module yielded by `dbi.modules()`: `open_ok`
+/// refuses duplicate module stream indices so a small Stream 3 cannot re-parse
+/// one large module stream thousands of times, and `sections` holds the sorted
+/// `(section, offset)` keys of sound C13 `DEBUG_S_LINES` subsections when
+/// `want_lines` is set.
+pub(super) fn module_gates<'s>(
+    db: &mut pdb::PDB<'s, Cursor<&'s [u8]>>,
+    want_lines: bool,
+) -> Vec<(bool, Option<LineSections>)> {
+    let mod_bytes = db
+        .raw_stream(pdb::StreamIndex(3))
+        .ok()
+        .flatten()
+        .and_then(|s| {
             let (mod_len, _) = dbi_parts(s.as_slice())?;
             s.as_slice()
                 .get(64..64usize.checked_add(mod_len)?)
                 .map(<[u8]>::to_vec)
-        })
-    }) else {
+        });
+    let Some(mod_bytes) = mod_bytes else {
         return Vec::new();
     };
-    let mut flags = Vec::new();
+    let mut gates = Vec::new();
+    let mut seen = BTreeSet::new();
     let mut pos = 0usize;
     while pos < mod_bytes.len() {
         let Some(hdr) = pos.checked_add(64).and_then(|end| mod_bytes.get(pos..end)) else {
@@ -412,15 +433,21 @@ pub(super) fn module_line_flags<'s>(db: &mut pdb::PDB<'s, Cursor<&'s [u8]>>) -> 
             break;
         }
         pos = next;
-        let ok = match (sym_sz, lines_sz, c13_sz) {
-            (Some(s), Some(l), Some(c)) if stream_id != 0xffff => {
-                module_line_ok(db, stream_id, s, l, c).is_some()
+        if stream_id == 0xffff || !seen.insert(stream_id) {
+            gates.push((false, None));
+            continue;
+        }
+        let sections = if want_lines {
+            match (sym_sz, lines_sz, c13_sz) {
+                (Some(s), Some(l), Some(c)) => module_line_ok(db, stream_id, s, l, c),
+                _ => None,
             }
-            _ => false,
+        } else {
+            None
         };
-        flags.push(ok);
+        gates.push((true, sections));
     }
-    flags
+    gates
 }
 
 /// Advances past one NUL-terminated byte string starting at `at`.
@@ -450,23 +477,24 @@ fn skip_cstr(b: &[u8], at: usize) -> Option<usize> {
 ///
 /// # Returns
 ///
-/// `Some(())` when `sym_sz + line_sz` fits inside the module stream and any C13 line
-/// subsections obey block-size and monotonic-offset invariants.
+/// Sorted, deduplicated `(section, offset)` headers of the module's C13 line
+/// subsections when `sym_sz + line_sz` fits inside the module stream and every
+/// C13 line subsection obeys block-size and monotonic-offset invariants.
 fn module_line_ok<'s>(
     db: &mut pdb::PDB<'s, Cursor<&'s [u8]>>,
     stream_id: u16,
     sym_sz: usize,
     lines_sz: usize,
     c13_sz: usize,
-) -> Option<()> {
+) -> Option<Vec<(u16, u32)>> {
     let line_sz = if lines_sz > 0 { lines_sz } else { c13_sz };
     let end = sym_sz.checked_add(line_sz)?;
     let stream = db.raw_stream(pdb::StreamIndex(stream_id)).ok()??;
     let line_bytes = stream.as_slice().get(sym_sz..end)?;
-    if lines_sz == 0 && !c13_lines_ok(line_bytes) {
-        return None;
+    if lines_sz > 0 {
+        return Some(Vec::new());
     }
-    Some(())
+    c13_lines_ok(line_bytes)
 }
 
 /// Checks every `DEBUG_S_LINES` (`0xf2`) subsection in `data` against `pdb` 0.8.0's assertions.
@@ -477,29 +505,38 @@ fn module_line_ok<'s>(
 ///
 /// # Returns
 ///
-/// `true` when every `0xf2` subsection has well-sized blocks and non-decreasing offsets
-/// within `code_size` that do not overflow `u32` when added to the contribution's offset.
-fn c13_lines_ok(data: &[u8]) -> bool {
+/// Sorted, deduplicated `(section, offset)` headers when every `0xf2` subsection has
+/// well-sized blocks and non-decreasing offsets within `code_size` that do not overflow
+/// `u32` when added to the contribution's offset.
+fn c13_lines_ok(data: &[u8]) -> Option<Vec<(u16, u32)>> {
+    let mut keys = Vec::new();
     let mut pos = 0usize;
     while pos < data.len() {
         let (Some(kind), Some(len)) = (
             u32_at(data, pos),
             u32_at(data, pos + 4).and_then(|n| usize::try_from(n).ok()),
         ) else {
-            return true;
+            break;
         };
-        let Some(body_end) = pos.checked_add(8).and_then(|p| p.checked_add(len)) else {
-            return false;
-        };
+        let body_end = pos.checked_add(8).and_then(|p| p.checked_add(len))?;
         let Some(body) = data.get(pos + 8..body_end) else {
-            return true;
+            break;
         };
-        if kind == 0xf2 && !lines_subsection_ok(body) {
-            return false;
+        if kind == 0xf2 {
+            if !lines_subsection_ok(body) {
+                return None;
+            }
+            if u32_at(body, 8).is_some()
+                && let (Some(sec_off), Some(sec)) = (u32_at(body, 0), u16_at(body, 4))
+            {
+                keys.push((sec, sec_off));
+            }
         }
         pos = body_end;
     }
-    true
+    keys.sort_unstable();
+    keys.dedup();
+    Some(keys)
 }
 
 /// Validates a single `DEBUG_S_LINES` (`0xf2`) subsection body.
@@ -586,9 +623,15 @@ pub(super) fn names_table_ok<'s>(db: &mut pdb::PDB<'s, Cursor<&'s [u8]>>) -> boo
     let Some(map_at) = 32usize.checked_add(names_sz) else {
         return false;
     };
+    if map_at > b.len() {
+        return true;
+    }
     let (Some(count), Some(ok_words)) = (
         u32_at(b, map_at).and_then(|n| usize::try_from(n).ok()),
-        u32_at(b, map_at + 8).and_then(|n| usize::try_from(n).ok()),
+        map_at
+            .checked_add(8)
+            .and_then(|at| u32_at(b, at))
+            .and_then(|n| usize::try_from(n).ok()),
     ) else {
         return true;
     };
@@ -611,15 +654,18 @@ pub(super) fn names_table_ok<'s>(db: &mut pdb::PDB<'s, Cursor<&'s [u8]>>) -> boo
     for _ in 0..count {
         let (Some(name_off), Some(stream_id)) = (
             u32_at(b, cur).and_then(|n| usize::try_from(n).ok()),
-            u16_at(b, cur + 4),
+            cur.checked_add(4)
+                .filter(|&at| u32_at(b, at).is_some())
+                .and_then(|at| u16_at(b, at)),
         ) else {
             break;
         };
         if name_off > names_sz {
             return false;
         }
-        if b.get(32 + name_off..32 + names_sz)
-            .is_some_and(|s| s.starts_with(b"/names\0"))
+        if names_id.is_none()
+            && b.get(32 + name_off..32 + names_sz)
+                .is_some_and(|s| s.starts_with(b"/names\0"))
         {
             names_id = Some(stream_id);
         }
@@ -644,6 +690,8 @@ pub(super) fn names_table_ok<'s>(db: &mut pdb::PDB<'s, Cursor<&'s [u8]>>) -> boo
 pub(super) struct TpiGuard {
     /// Type indices whose raw record fails leaf-specific invariants.
     bad: BTreeSet<u32>,
+    /// Exclusive upper `TypeIndex` bound validated before any short or truncated record.
+    limit: u32,
 }
 
 impl TpiGuard {
@@ -697,7 +745,7 @@ impl TpiGuard {
             pos += 2 + rec_len;
             idx += 1;
         }
-        Some(Self { bad })
+        Some(Self { bad, limit: idx })
     }
 
     /// Parses `item` only when its leaf is one `pdb.rs` consumes and its record passed checks.
@@ -711,7 +759,11 @@ impl TpiGuard {
     /// The parsed `TypeData`, or `None` when skipped or malformed.
     pub(super) fn parse_type<'t>(&self, item: &pdb::Type<'t>) -> Option<pdb::TypeData<'t>> {
         let raw_idx = item.index().0;
-        if raw_idx >= 0x1000 && (!is_signature_leaf(item.raw_kind()) || self.bad.contains(&raw_idx))
+        if raw_idx >= 0x1000
+            && (raw_idx >= self.limit
+                || item.len() < 2
+                || !is_signature_leaf(item.raw_kind())
+                || self.bad.contains(&raw_idx))
         {
             return None;
         }
@@ -767,10 +819,13 @@ fn tpi_record_ok(rec: &[u8]) -> bool {
         return false;
     };
     match leaf {
-        0x1201 => u32_at(rec, 2)
-            .and_then(|c| usize::try_from(c).ok())
-            .and_then(|c| c.checked_mul(4)?.checked_add(6))
-            .is_none_or(|need| need <= rec.len()),
+        0x1002 => u32_at(rec, 6).is_none_or(|a| ((a >> 5) & 0x7) <= 4),
+        0x1201 => u32_at(rec, 2).is_none_or(|c| {
+            usize::try_from(c)
+                .ok()
+                .and_then(|c| c.checked_mul(4)?.checked_add(6))
+                .is_some_and(|need| need <= rec.len())
+        }),
         0x1003 | 0x1503 | 0x1516 => array_record_ok(rec, leaf == 0x1516),
         0x1004 | 0x1504 | 0x1005 | 0x1505 | 0x1519 => unsigned_prefix_ok(rec, 18),
         0x1609 => unsigned_prefix_ok(rec, 20),
