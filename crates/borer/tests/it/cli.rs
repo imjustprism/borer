@@ -392,6 +392,7 @@ fn cli_counts_and_devices_are_refused_alike() {
     ];
     if cfg!(windows) {
         cases.push((vec!["snapshot", exe.as_str(), "NUL"], "nothing was written"));
+        cases.push((vec!["snapshot", exe.as_str(), "1:nul"], "names a device"));
     }
     for (args, reason) in cases {
         let (ok, out) = run_all(&args);

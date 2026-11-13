@@ -198,13 +198,6 @@ pub fn unusable_path(path: &Path) -> Option<String> {
     const DEVICES: [&str; 9] = [
         "con", "prn", "aux", "nul", "com", "lpt", "conin$", "conout$", "clock$",
     ];
-    let name = path.file_name()?.to_str()?;
-    let base = name
-        .split(['.', ':'])
-        .next()
-        .unwrap_or_default()
-        .trim_end_matches([' ', '.'])
-        .to_ascii_lowercase();
     let port = |digit: &str| {
         let mut chars = digit.chars();
         matches!(
@@ -212,10 +205,26 @@ pub fn unusable_path(path: &Path) -> Option<String> {
             (Some('1'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}'), None)
         )
     };
-    let named = DEVICES.iter().any(|d| {
-        base == *d || (matches!(*d, "com" | "lpt") && base.strip_prefix(d).is_some_and(port))
-    });
-    named.then(|| format!("{name} is a device, not a file"))
+    let named_device = |part: &str| {
+        let base = part
+            .split(['.', ':'])
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches([' ', '.'])
+            .to_ascii_lowercase();
+        DEVICES.iter().any(|d| {
+            base == *d || (matches!(*d, "com" | "lpt") && base.strip_prefix(d).is_some_and(port))
+        })
+    };
+    let mut chars = raw.chars();
+    if !matches!(path.components().next(), Some(Component::Prefix(_)))
+        && matches!((chars.next(), chars.next()), (Some(_), Some(':')))
+        && named_device(chars.as_str())
+    {
+        return Some(format!("{raw} names a device, not a file"));
+    }
+    let name = path.file_name()?.to_str()?;
+    named_device(name).then(|| format!("{name} names a device, not a file"))
 }
 
 /// Reads a program file whole, refusing what is not a regular file.
