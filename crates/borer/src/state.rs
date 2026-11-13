@@ -114,10 +114,11 @@ impl BorerServer {
     /// 64-bit one pairs functions that share nothing and reports it as a
     /// change.
     pub(crate) fn load_other(&self, other: &str) -> Result<Program, ErrorData> {
-        let prog = Program::load_with_symsrv(
+        let prog = Program::load_with_symsrv_max(
             &PathBuf::from(other),
             *read_lock(&self.pdb_applied),
             symsrv::cache_dir().as_deref(),
+            crate::tools::load::configured_max_file(),
         )
         .map_err(|e| err_params(format!("load failed: {e:#}")))?;
         if !prog.arch.supports(Feature::Discover) {

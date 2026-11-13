@@ -690,7 +690,28 @@ impl Program {
         apply_pdb: bool,
         symsrv: Option<&Path>,
     ) -> anyhow::Result<Program> {
-        let (bytes, parent) = read_program_bytes(path, Take::Program, 0)?;
+        Self::load_with_symsrv_max(path, apply_pdb, symsrv, u64::MAX)
+    }
+
+    /// Loads a file within `max` bytes, with an optional symbol-server cache.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The file to read, or `<file>@<offset>`.
+    /// * `apply_pdb` - Whether a companion PDB's symbols apply.
+    /// * `symsrv` - The root of a symbol-server cache, if any.
+    /// * `max` - Most bytes the underlying file on disk may hold.
+    ///
+    /// # Errors
+    ///
+    /// As [`Program::load`], and when the file exceeds `max` bytes.
+    pub fn load_with_symsrv_max(
+        path: &Path,
+        apply_pdb: bool,
+        symsrv: Option<&Path>,
+        max: u64,
+    ) -> anyhow::Result<Program> {
+        let (bytes, parent) = read_program_bytes(path, Take::Program, max, 0)?;
         let mut program = Self::from_bytes_with(path.to_path_buf(), bytes, apply_pdb, symsrv)?;
         program.parent = parent;
         Ok(program)
@@ -714,7 +735,27 @@ impl Program {
     /// [`crate::layout::Layout::program`] for a layout the file cannot
     /// hold.
     pub fn load_layout(path: &Path, layout: &crate::layout::Layout) -> anyhow::Result<Program> {
-        let (bytes, parent) = read_program_bytes(path, Take::Rest, 0)?;
+        Self::load_layout_max(path, layout, u64::MAX)
+    }
+
+    /// Loads the file at `path` within `max` bytes as raw bytes mapped where
+    /// `layout` says.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The file to read, or `<file>@<offset>`.
+    /// * `layout` - Where its bytes go.
+    /// * `max` - Most bytes the underlying file on disk may hold.
+    ///
+    /// # Errors
+    ///
+    /// As [`Program::load_layout`], and when the file exceeds `max` bytes.
+    pub fn load_layout_max(
+        path: &Path,
+        layout: &crate::layout::Layout,
+        max: u64,
+    ) -> anyhow::Result<Program> {
+        let (bytes, parent) = read_program_bytes(path, Take::Rest, max, 0)?;
         let mut program = layout.program(path.to_path_buf(), bytes)?;
         program.parent = parent;
         Ok(program)

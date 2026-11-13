@@ -57,21 +57,16 @@ pub(super) fn open(args: &[String], load: &Loading) -> anyhow::Result<(Arc<Packs
         .get(1)
         .with_context(|| needs_a_binary(args.first().map_or("", String::as_str)))?;
     let file = std::path::Path::new(path);
-    crate::tools::load::file_fits(
-        file,
-        crate::tools::load::max_file_size(
-            std::env::var(crate::tools::load::MAX_FILE_ENV)
-                .ok()
-                .as_deref(),
-        ),
-    )
-    .map_err(anyhow::Error::msg)?;
-    crate::term::busy(&format!("loading {}", file_name(file)), &head_bytes(file));
+    let max_file = crate::tools::load::configured_max_file();
+    crate::term::busy(
+        &format!("loading {}", file_name(file)),
+        &head_bytes(file, max_file),
+    );
     let program = match layout {
-        Some(layout) => Program::load_layout(file, layout),
+        Some(layout) => Program::load_layout_max(file, layout, max_file),
         None => {
             let symsrv = crate::symsrv::cache_dir().filter(|_| apply_pdb);
-            Program::load_with_symsrv(file, apply_pdb, symsrv.as_deref())
+            Program::load_with_symsrv_max(file, apply_pdb, symsrv.as_deref(), max_file)
         }
     }
     .with_context(|| format!("loading {}", short_path(path)))?;
@@ -90,17 +85,18 @@ pub(super) fn file_name(file: &std::path::Path) -> String {
 }
 
 /// The first bytes of a file, for the loading line to stream; none when it
-/// cannot be read, or is not a regular file
+/// cannot be read, exceeds `max`, or is not a regular file
 /// ([`borer_engine::program::open_regular`]), so a pipe or a device is
 /// never opened for it.
 ///
 /// # Arguments
 ///
 /// * `file` - The binary.
-fn head_bytes(file: &std::path::Path) -> Vec<u8> {
+/// * `max` - Most bytes the file may hold.
+fn head_bytes(file: &std::path::Path, max: u64) -> Vec<u8> {
     use std::io::Read as _;
     let mut head = Vec::with_capacity(256);
-    if let Ok(f) = borer_engine::program::open_regular(file, u64::MAX) {
+    if let Ok(f) = borer_engine::program::open_regular(file, max) {
         let _ = f.take(256).read_to_end(&mut head);
     }
     head
@@ -724,7 +720,7 @@ mod tests {
             .arg(&fifo)
             .status()
             .is_ok_and(|s| s.success());
-        let head = made.then(|| super::head_bytes(&fifo));
+        let head = made.then(|| super::head_bytes(&fifo, u64::MAX));
         std::fs::remove_dir_all(&dir).expect("cleans up");
         assert!(head.is_none_or(|h| h.is_empty()), "the pipe was read");
     }

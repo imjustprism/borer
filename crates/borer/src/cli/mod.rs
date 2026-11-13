@@ -230,27 +230,7 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
                 crate::update::update(check_only)?
             );
         }
-        Command::FetchPdb => {
-            let path = args.get(1).with_context(|| needs_a_binary(word))?;
-            let program = Program::load_with(std::path::Path::new(path), false)
-                .with_context(|| format!("loading {}", short_path(path)))?;
-            let record = program.pdb_record.as_ref().with_context(|| {
-                format!(
-                    "{} names no companion pdb (no codeview record)",
-                    short_path(path)
-                )
-            })?;
-            let root = crate::symsrv::cache_dir().with_context(|| {
-                format!(
-                    "no cache directory: set {}, LOCALAPPDATA, XDG_CACHE_HOME or HOME",
-                    crate::symsrv::CACHE_ENV
-                )
-            })?;
-            let server = args.get(2).cloned().unwrap_or_else(crate::symsrv::server);
-            let said = crate::symsrv::obtain(record, &root, &server, false, crate::symsrv::curl)
-                .map_err(|e| anyhow!("{e}"))?;
-            println!("{said}");
-        }
+        Command::FetchPdb => fetch_pdb(word, args)?,
         Command::Query(q) => {
             let (named, program) = open(args, &load)?;
             let overlay = match &raw.project {
@@ -260,6 +240,46 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
             query(q, args, &Session::checked(program, &named, overlay, load)?)?;
         }
     }
+    Ok(())
+}
+
+/// Runs `fetch-pdb`: downloads a binary's companion PDB into the symbol cache.
+///
+/// # Arguments
+///
+/// * `word` - The subcommand word, for missing-argument diagnostics.
+/// * `args` - The command line after flag splitting.
+///
+/// # Errors
+///
+/// When no binary is given, the binary fails to load or exceeds the file size
+/// cap, has no `CodeView` record, no cache directory is configured, or the
+/// download fails.
+fn fetch_pdb(word: &str, args: &[String]) -> anyhow::Result<()> {
+    let path = args.get(1).with_context(|| needs_a_binary(word))?;
+    let program = Program::load_with_symsrv_max(
+        std::path::Path::new(path),
+        false,
+        None,
+        crate::tools::load::configured_max_file(),
+    )
+    .with_context(|| format!("loading {}", short_path(path)))?;
+    let record = program.pdb_record.as_ref().with_context(|| {
+        format!(
+            "{} names no companion pdb (no codeview record)",
+            short_path(path)
+        )
+    })?;
+    let root = crate::symsrv::cache_dir().with_context(|| {
+        format!(
+            "no cache directory: set {}, LOCALAPPDATA, XDG_CACHE_HOME or HOME",
+            crate::symsrv::CACHE_ENV
+        )
+    })?;
+    let server = args.get(2).cloned().unwrap_or_else(crate::symsrv::server);
+    let said = crate::symsrv::obtain(record, &root, &server, false, crate::symsrv::curl)
+        .map_err(|e| anyhow!("{e}"))?;
+    println!("{said}");
     Ok(())
 }
 

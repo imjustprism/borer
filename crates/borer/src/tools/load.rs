@@ -68,34 +68,9 @@ pub(crate) fn max_file_size(value: Option<&str>) -> u64 {
     }
 }
 
-/// Refuses a file larger than borer loads, before it is read.
-///
-/// A path that names no file (or a `<file>@<offset>` slice) passes, so
-/// the load says what is wrong with it. One the loader never opens (a
-/// share, a device; [`borer_engine::program::unusable_path`]) is refused
-/// first, with the loader's reason, by the checked stat
-/// ([`borer_engine::program::checked_metadata`]): reading only its size
-/// asks the host of a share whether the file is there.
-///
-/// # Arguments
-///
-/// * `path` - The file asked for.
-/// * `max` - The largest size loaded, in bytes ([`max_file_size`]).
-///
-/// # Errors
-///
-/// When the path is one the loader never opens, or the file is larger
-/// than `max`, naming both sizes, the variable that raises the limit and
-/// the ways to load a part.
-pub(crate) fn file_fits(path: &Path, max: u64) -> Result<(), String> {
-    match borer_engine::program::checked_metadata(path)? {
-        Some(meta) if meta.is_file() && meta.len() > max => Err(format!(
-            "{} is {} bytes, past the {max}-byte limit: borer reads a file into memory whole and its analysis takes several times that. Set {MAX_FILE_ENV} (bytes, or 4G; 0 for no limit) to load it anyway, or load a part: <file>@<offset> for an embedded program, or arch with regions for raw ranges",
-            borer_engine::text::short_path(&path.display().to_string()),
-            meta.len()
-        )),
-        Some(_) | None => Ok(()),
-    }
+/// Reads the configured `BORER_MAX_FILE` limit from the environment.
+pub(crate) fn configured_max_file() -> u64 {
+    max_file_size(std::env::var(MAX_FILE_ENV).ok().as_deref())
 }
 
 /// Says where a relative path was looked for, when it was relative.
@@ -272,18 +247,17 @@ impl BorerServer {
             raw.regions.as_deref(),
         )
         .map_err(|e| err_params(format!("load failed: {e:#}")))?;
-        file_fits(
-            Path::new(&path),
-            max_file_size(std::env::var(MAX_FILE_ENV).ok().as_deref()),
-        )
-        .map_err(err_params)?;
+        let max_file = configured_max_file();
         let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let path = PathBuf::from(&path);
             match &layout {
-                Some(layout) => Program::load_layout(&path, layout),
-                None => {
-                    Program::load_with_symsrv(&path, apply_pdb, symsrv::cache_dir().as_deref())
-                }
+                Some(layout) => Program::load_layout_max(&path, layout, max_file),
+                None => Program::load_with_symsrv_max(
+                    &path,
+                    apply_pdb,
+                    symsrv::cache_dir().as_deref(),
+                    max_file,
+                ),
             }
         }))
         .map_err(|e| {
@@ -687,7 +661,7 @@ mod tests {
     /// When a value reads otherwise or the refusal is missing.
     #[test]
     fn a_file_past_the_size_limit_is_refused_by_name() {
-        use super::{MAX_FILE_DEFAULT, MAX_FILE_ENV, file_fits, max_file_size};
+        use super::{MAX_FILE_DEFAULT, MAX_FILE_ENV, Program, max_file_size};
         assert_eq!(max_file_size(None), MAX_FILE_DEFAULT);
         assert_eq!(max_file_size(Some("4096")), 4096);
         assert_eq!(max_file_size(Some("2k")), 2048);
@@ -696,11 +670,12 @@ mod tests {
         assert_eq!(max_file_size(Some("lots")), MAX_FILE_DEFAULT);
         assert_eq!(max_file_size(Some("99999999999999G")), u64::MAX);
         let exe = std::env::current_exe().expect("the test binary");
-        let refused = file_fits(&exe, 16).expect_err("past the limit");
+        let refused = Program::load_with_symsrv_max(&exe, false, None, 16)
+            .expect_err("past the limit")
+            .to_string();
         assert!(refused.contains(MAX_FILE_ENV), "{refused}");
         assert!(refused.contains("16-byte limit"), "{refused}");
-        assert!(file_fits(&exe, u64::MAX).is_ok());
-        assert!(file_fits(std::path::Path::new("no/such/file"), 16).is_ok());
+        assert!(Program::load_with_symsrv_max(&exe, false, None, u64::MAX).is_ok());
     }
 
     /// A share is refused before its size is read, for every caller.
@@ -715,7 +690,9 @@ mod tests {
     fn a_share_is_refused_before_its_size_is_read() {
         if cfg!(windows) {
             let share = std::path::Path::new(r"\\host.invalid\share\a.exe");
-            let refused = super::file_fits(share, 16).expect_err("a share is never stated");
+            let refused = super::Program::load_with_symsrv_max(share, false, None, 16)
+                .expect_err("a share is never stated")
+                .to_string();
             assert!(refused.contains("names a network share"), "{refused}");
         }
     }

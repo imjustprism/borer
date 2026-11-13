@@ -227,11 +227,23 @@ pub fn unusable_path(path: &Path) -> Option<String> {
     named_device(name).then(|| format!("{name} names a device, not a file"))
 }
 
-/// Reads a program file whole, refusing what is not a regular file.
+/// How a capped read failed.
+enum ReadFail {
+    /// The file's metadata stated a size past the cap.
+    Over(String, u64),
+    /// The file grew past the cap while it was read.
+    Grew(String),
+    /// Any other refusal or I/O failure.
+    Other(anyhow::Error),
+}
+
+/// Reads a program file whole within `max` bytes, refusing what is not a
+/// regular file.
 ///
 /// # Arguments
 ///
 /// * `path` - The file to read.
+/// * `max` - Most bytes the file may hold.
 ///
 /// # Returns
 ///
@@ -239,11 +251,20 @@ pub fn unusable_path(path: &Path) -> Option<String> {
 ///
 /// # Errors
 ///
-/// Returns the I/O error of reading the file, or the refusal of a name
-/// that is a device, a directory or anything else that is not a regular
-/// file.
-fn read_program_file(path: &Path) -> anyhow::Result<Vec<u8>> {
-    read_regular(path, u64::MAX).map_err(|e| anyhow!("{e:#}; give a path to a program to analyze"))
+/// Returns the I/O error of reading the file, the refusal of a file past
+/// `max` bytes (naming `BORER_MAX_FILE`), or the refusal of a name that is
+/// a device, a directory or anything else that is not a regular file.
+fn read_program_file(path: &Path, max: u64) -> anyhow::Result<Vec<u8>> {
+    match read_regular_raw(path, max) {
+        Ok(bytes) => Ok(bytes),
+        Err(ReadFail::Over(shown, len)) => Err(anyhow!(
+            "{shown} is {len} bytes, past the {max}-byte limit: borer reads a file into memory whole and its analysis takes several times that. Set BORER_MAX_FILE (bytes, or 4G; 0 for no limit) to load it anyway, or load raw ranges with arch and regions"
+        )),
+        Err(ReadFail::Grew(shown)) => Err(anyhow!(
+            "{shown} grew past the {max}-byte limit: set BORER_MAX_FILE (bytes, or 4G; 0 for no limit) to load it anyway"
+        )),
+        Err(ReadFail::Other(e)) => Err(anyhow!("{e:#}; give a path to a program to analyze")),
+    }
 }
 
 /// Reads a file whole when it is a regular one no larger than a cap.
@@ -268,6 +289,29 @@ fn read_program_file(path: &Path) -> anyhow::Result<Vec<u8>> {
 /// As [`open_regular`], and when the read fails or the file grew past
 /// `max` meanwhile.
 pub fn read_regular(path: &Path, max: u64) -> anyhow::Result<Vec<u8>> {
+    match read_regular_raw(path, max) {
+        Ok(bytes) => Ok(bytes),
+        Err(ReadFail::Over(shown, len)) => Err(anyhow!(
+            "{shown} is {len} bytes, past the {max} it may hold"
+        )),
+        Err(ReadFail::Grew(shown)) => Err(anyhow!("{shown} grew past the {max} bytes it may hold")),
+        Err(ReadFail::Other(e)) => Err(e),
+    }
+}
+
+/// Reads a regular file within `max` bytes, distinguishing size-cap refusals.
+///
+/// # Arguments
+///
+/// * `path` - The file.
+/// * `max` - Most bytes it may hold.
+///
+/// # Errors
+///
+/// Returns [`ReadFail::Over`] when the stated size exceeds `max`,
+/// [`ReadFail::Grew`] when the read passes `max`, and [`ReadFail::Other`]
+/// otherwise.
+fn read_regular_raw(path: &Path, max: u64) -> Result<Vec<u8>, ReadFail> {
     let (file, len) = open_regular_sized(path, max)?;
     let shown = crate::text::short_path(&path.display().to_string());
     let cap = saturating_usize(len.min(max.saturating_add(1)));
@@ -276,9 +320,10 @@ pub fn read_regular(path: &Path, max: u64) -> anyhow::Result<Vec<u8>> {
         &mut std::io::Read::take(file, max.saturating_add(1)),
         &mut bytes,
     )
-    .with_context(|| format!("reading {shown}"))?;
+    .with_context(|| format!("reading {shown}"))
+    .map_err(ReadFail::Other)?;
     if from_usize(bytes.len()) > max {
-        return Err(anyhow!("{shown} grew past the {max} bytes it may hold"));
+        return Err(ReadFail::Grew(shown));
     }
     Ok(bytes)
 }
@@ -306,7 +351,14 @@ pub fn read_regular(path: &Path, max: u64) -> anyhow::Result<Vec<u8>> {
 /// device, a pipe or anything else that is not a regular file, holds more
 /// than `max` bytes, or does not open.
 pub fn open_regular(path: &Path, max: u64) -> anyhow::Result<std::fs::File> {
-    open_regular_sized(path, max).map(|(file, _)| file)
+    match open_regular_sized(path, max) {
+        Ok((file, _)) => Ok(file),
+        Err(ReadFail::Over(shown, len)) => Err(anyhow!(
+            "{shown} is {len} bytes, past the {max} it may hold"
+        )),
+        Err(ReadFail::Grew(shown)) => Err(anyhow!("{shown} grew past the {max} bytes it may hold")),
+        Err(ReadFail::Other(e)) => Err(e),
+    }
 }
 
 /// Opens a regular file no larger than `max` and returns its stated length.
@@ -322,26 +374,24 @@ pub fn open_regular(path: &Path, max: u64) -> anyhow::Result<std::fs::File> {
 ///
 /// # Errors
 ///
-/// As [`open_regular`].
-fn open_regular_sized(path: &Path, max: u64) -> anyhow::Result<(std::fs::File, u64)> {
+/// Returns [`ReadFail::Over`] when the file is larger than `max` and
+/// [`ReadFail::Other`] for any other refusal or open error.
+fn open_regular_sized(path: &Path, max: u64) -> Result<(std::fs::File, u64), ReadFail> {
     if let Some(why) = unusable_path(path) {
-        return Err(anyhow!("{why}"));
+        return Err(ReadFail::Other(anyhow!("{why}")));
     }
     let shown = crate::text::short_path(&path.display().to_string());
     let judge = |meta: &std::fs::Metadata| {
         if meta.is_dir() {
-            Err(anyhow!(
+            Err(ReadFail::Other(anyhow!(
                 "{shown} is a directory; give the path of a file inside it"
-            ))
+            )))
         } else if !meta.is_file() {
-            Err(anyhow!(
+            Err(ReadFail::Other(anyhow!(
                 "{shown} is not a regular file (a device or a pipe)"
-            ))
+            )))
         } else if meta.len() > max {
-            Err(anyhow!(
-                "{shown} is {} bytes, past the {max} it may hold",
-                meta.len()
-            ))
+            Err(ReadFail::Over(shown.clone(), meta.len()))
         } else {
             Ok(())
         }
@@ -350,16 +400,21 @@ fn open_regular_sized(path: &Path, max: u64) -> anyhow::Result<(std::fs::File, u
         clippy::disallowed_methods,
         reason = "the checked reader, past unusable_path"
     )]
-    let meta = std::fs::metadata(path).with_context(|| format!("reading {shown}"))?;
+    let meta = std::fs::metadata(path)
+        .with_context(|| format!("reading {shown}"))
+        .map_err(ReadFail::Other)?;
     judge(&meta)?;
     #[expect(
         clippy::disallowed_methods,
         reason = "the checked reader, on a regular file"
     )]
-    let file = std::fs::File::open(path).with_context(|| format!("reading {shown}"))?;
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("reading {shown}"))
+        .map_err(ReadFail::Other)?;
     let open_meta = file
         .metadata()
-        .with_context(|| format!("reading {shown}"))?;
+        .with_context(|| format!("reading {shown}"))
+        .map_err(ReadFail::Other)?;
     judge(&open_meta)?;
     Ok((file, open_meta.len()))
 }
@@ -416,7 +471,7 @@ const NESTING_MAX: usize = 4;
 /// The file part and the offset (`0x` hex or decimal), or `None` when the
 /// path names a file of its own or has no such suffix.
 fn child_path(path: &Path) -> Option<(PathBuf, u64)> {
-    if path.exists() {
+    if checked_metadata(path).ok().flatten().is_some() {
         return None;
     }
     let (file, off) = path.to_str()?.rsplit_once('@')?;
@@ -439,6 +494,7 @@ fn child_path(path: &Path) -> Option<(PathBuf, u64)> {
 ///
 /// * `path` - The path as given.
 /// * `take` - How much a `@<offset>` path takes.
+/// * `max` - Most bytes the underlying file on disk may hold.
 /// * `depth` - How many `@<offset>` suffixes were read off already.
 ///
 /// # Returns
@@ -453,15 +509,16 @@ fn child_path(path: &Path) -> Option<(PathBuf, u64)> {
 pub(super) fn read_program_bytes(
     path: &Path,
     take: Take,
+    max: u64,
     depth: usize,
 ) -> anyhow::Result<(Vec<u8>, Option<Parent>)> {
     if let Some(why) = unusable_path(path) {
         return Err(anyhow!("{why}; give a path to a program to analyze"));
     }
     let Some((file, off)) = child_path(path).filter(|_| depth < NESTING_MAX) else {
-        return Ok((read_program_file(path)?, None));
+        return Ok((read_program_file(path, max)?, None));
     };
-    let (outer, _) = read_program_bytes(&file, Take::Program, depth + 1)?;
+    let (outer, _) = read_program_bytes(&file, Take::Program, max, depth + 1)?;
     let shown = crate::text::short_path(&file.display().to_string());
     let rest = usize::try_from(off)
         .ok()

@@ -45,11 +45,7 @@ pub(super) fn write_file(path: &str, bytes: &[u8]) -> anyhow::Result<()> {
 /// not a regular file, holds more than the size a load takes, or does not
 /// read.
 pub(super) fn read_given(path: &str) -> anyhow::Result<Vec<u8>> {
-    let max = crate::tools::load::max_file_size(
-        std::env::var(crate::tools::load::MAX_FILE_ENV)
-            .ok()
-            .as_deref(),
-    );
+    let max = crate::tools::load::configured_max_file();
     borer_engine::program::read_regular(std::path::Path::new(path), max)
 }
 
