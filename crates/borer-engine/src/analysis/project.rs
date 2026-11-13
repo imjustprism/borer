@@ -101,8 +101,20 @@ fn passed<E: serde::de::Error>((verb, what, most): Cap) -> E {
     ))
 }
 
-/// Reads one table of a project file, refusing the file at the entry past
-/// the table's cap.
+/// Says that a table of a project file states one key twice.
+///
+/// # Arguments
+///
+/// * `key` - The repeated key.
+fn duplicate_key<E: serde::de::Error, K: std::fmt::Display + ?Sized>(key: &K) -> E {
+    E::custom(format!(
+        "duplicate key {}",
+        crate::text::quoted(&format!("{key}"))
+    ))
+}
+
+/// Reads one table of a project file, refusing the file when a key is
+/// stated twice or at the entry past the table's cap.
 ///
 /// serde builds a map an entry at a time, so a table counted only once it
 /// was whole had cost every entry first: a 64 MiB file of four million
@@ -122,7 +134,7 @@ struct Capped<'r, K, V> {
 
 impl<'de, K, V> Visitor<'de> for Capped<'_, K, V>
 where
-    K: serde::Deserialize<'de> + Ord,
+    K: serde::Deserialize<'de> + Ord + std::fmt::Display,
     V: serde::Deserialize<'de>,
 {
     type Value = BTreeMap<K, V>;
@@ -133,7 +145,10 @@ where
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         let mut out = BTreeMap::new();
-        while let Some((key, value)) = map.next_entry()? {
+        while let Some(key) = map.next_key::<K>()? {
+            if out.contains_key(&key) {
+                return Err(duplicate_key(&key));
+            }
             *self.room = self.room.checked_sub(1).ok_or_else(|| match self.class {
                 Some((class, classes)) => {
                     let fields = self.cap.2.saturating_add(1);
@@ -146,7 +161,7 @@ where
                 }
                 None => passed::<A::Error>(self.cap),
             })?;
-            out.insert(key, value);
+            out.insert(key, map.next_value::<V>()?);
         }
         Ok(out)
     }
@@ -154,7 +169,7 @@ where
 
 impl<'de, K, V> DeserializeSeed<'de> for Capped<'_, K, V>
 where
-    K: serde::Deserialize<'de> + Ord,
+    K: serde::Deserialize<'de> + Ord + std::fmt::Display,
     V: serde::Deserialize<'de>,
 {
     type Value = BTreeMap<K, V>;
@@ -173,11 +188,12 @@ where
 ///
 /// # Errors
 ///
-/// When the table is not a map of the entries it holds, or passes its cap.
+/// When the table is not a map of the entries it holds, states a key twice,
+/// or passes its cap.
 fn capped<'de, D, K, V>(d: D, cap: Cap) -> Result<BTreeMap<K, V>, D::Error>
 where
     D: Deserializer<'de>,
-    K: serde::Deserialize<'de> + Ord,
+    K: serde::Deserialize<'de> + Ord + std::fmt::Display,
     V: serde::Deserialize<'de>,
 {
     let mut room = cap.2;
@@ -318,6 +334,9 @@ impl<'de> Visitor<'de> for Tables {
         let (mut outer, mut shared) = (self.outer.2, self.inner.2);
         let mut out = BTreeMap::new();
         while let Some(key) = map.next_key::<String>()? {
+            if out.contains_key(&key) {
+                return Err(duplicate_key(key.as_str()));
+            }
             outer = outer
                 .checked_sub(1)
                 .ok_or_else(|| passed::<A::Error>(self.outer))?;
@@ -349,7 +368,8 @@ impl<'de> Visitor<'de> for Tables {
 ///
 /// # Errors
 ///
-/// When the table is not a map of functions' variables, or passes its cap.
+/// When the table is not a map of functions' variables, states a key twice,
+/// or passes its cap.
 fn capped_vars<'de, D: Deserializer<'de>>(
     d: D,
 ) -> Result<BTreeMap<String, BTreeMap<String, String>>, D::Error> {
@@ -366,7 +386,8 @@ fn capped_vars<'de, D: Deserializer<'de>>(
 ///
 /// # Errors
 ///
-/// When the table is not a map of classes' fields, or passes a cap.
+/// When the table is not a map of classes' fields, states a key twice, or
+/// passes a cap.
 fn capped_fields<'de, D: Deserializer<'de>>(
     d: D,
 ) -> Result<BTreeMap<String, BTreeMap<String, String>>, D::Error> {
@@ -753,5 +774,29 @@ mod tests {
             .within(|| project.to_overlay())
             .expect_err("a cancelled load returned an overlay");
         assert!(refused.contains("deadline passed"), "{refused}");
+    }
+
+    /// Any table of a project file that repeats a JSON key is refused as it
+    /// is read rather than letting the later value overwrite the earlier one.
+    #[test]
+    fn duplicate_keys_in_any_table_are_refused() {
+        for tail in [
+            r#""names":{"0x1000":"a","0x1000":"b"},"comments":{}"#,
+            r#""names":{},"comments":{"0x1000":"a","0x1000":"b"}"#,
+            r#""names":{},"comments":{},"types":{"T":{"Alias":"U8"},"T":{"Alias":"U16"}}"#,
+            r#""names":{},"comments":{},"types":{"S":{"Struct":{"size":2,"fields":{"0":{"name":"a","ty":"U8"},"0":{"name":"b","ty":"U8"}}}}}"#,
+            r#""names":{},"comments":{},"applied":{"0x1000":"u8","0x1000":"u16"}"#,
+            r#""names":{},"comments":{},"prototypes":{"0x1000":"void (void)","0x1000":"int (void)"}"#,
+            r#""names":{},"comments":{},"vars":{"0x1000":{"a1":"x"},"0x1000":{"a1":"y"}}"#,
+            r#""names":{},"comments":{},"vars":{"0x1000":{"a1":"x","a1":"y"}}"#,
+            r#""names":{},"comments":{},"fields":{"C":{"0x0":"a"},"C":{"0x0":"b"}}"#,
+            r#""names":{},"comments":{},"fields":{"C":{"0x0":"a","0x0":"b"}}"#,
+        ] {
+            let json = format!(r#"{{"program":"b",{tail}}}"#);
+            let refused = serde_json::from_str::<Project>(&json)
+                .expect_err("a duplicate JSON key was accepted")
+                .to_string();
+            assert!(refused.contains("duplicate key"), "{tail}: {refused}");
+        }
     }
 }
