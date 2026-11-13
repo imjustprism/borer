@@ -1655,3 +1655,31 @@ fn an_eip_relative_address_is_its_constant() {
     assert!(text.contains("*(uint32_t*)0x40002007"), "{text}");
     assert!(!text.contains("eip"), "{text}");
 }
+
+/// An `eip`-relative read agrees with the emulator.
+///
+/// `mov eax,[eip+0x1000]` at `0x140001000` reads at `0x40002007`, and the
+/// lift reads the constant the machine sums: the block is checked, every
+/// fact reads, and nothing disagrees on any seed. With `eip` read as a
+/// register, `eax` was a value the check cannot read, so the block passed
+/// with it left uncompared.
+///
+/// # Panics
+///
+/// When the block is left unchecked, a fact unread or a seed disagrees,
+/// with the table.
+#[test]
+fn an_eip_relative_read_agrees_with_the_emulator() {
+    use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
+    let code = [
+        0x67, 0x8b, 0x05, 0x00, 0x10, 0x00, 0x00, // ASM: mov eax,[eip+0x1000]
+        0xc3, // ASM: ret
+    ];
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    for seed in 1..=16 {
+        let v = verify(&p, &a, &[0x1_4000_1000], seed);
+        let clean = v.checked == 1 && v.unreadable == 0 && v.mismatches.is_empty();
+        assert!(clean, "seed {seed}: {}", verify_tsv(&v));
+    }
+}
