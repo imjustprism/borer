@@ -26,3 +26,6 @@ serde = { version = "1.0.229", features = ["derive"] }
 smallvec = { version = "1.15.2", features = ["union"] }
 yaxpeax-arch = { version = "0.3.2", default-features = false }
 yaxpeax-arm = { version = "0.5.0", default-features = false }
+
+[dev-dependencies]
+serde_json = "1.0.151"

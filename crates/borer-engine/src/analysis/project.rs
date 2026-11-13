@@ -3,16 +3,23 @@
 //! read back into.
 //!
 //! A project file is edited by hand and passed around, so reading one is
-//! reading hostile input: every table is counted before any entry is read
+//! reading hostile input: each table of a file is refused at the entry
+//! past its cap as it is read ([`Capped`]), every table of a project
+//! however it was built is counted before any entry is parsed
 //! ([`Project::to_overlay`]), and every type and field is held to what the
 //! annotating tools hold a statement to. Reading the file from disk,
 //! writing it, and judging which binary it was saved for are the server's.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::marker::PhantomData;
+
+use serde::de::{DeserializeSeed, Deserializer, Error as _, MapAccess, SeqAccess, Visitor};
 
 use super::protos::{PROTOTYPES_MAX, Proto, VARS_MAX, Var, VarKey};
 use super::stated::Field;
-use super::utypes::{TypeExpr, UserType};
+use super::utypes::{
+    APPLIED_MAX, ENUM_VALUES_MAX, FIELDS_MAX, TYPES_MAX, TypeExpr, UserField, UserType,
+};
 use super::{Overlay, parse_addr};
 
 /// A saved annotation overlay: the binary it belongs to, its names,
@@ -32,35 +39,342 @@ pub struct Project {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
     /// "0x..." address -> function name.
+    #[serde(deserialize_with = "capped_names")]
     pub names: BTreeMap<String, String>,
     /// "0x..." address -> comment.
+    #[serde(deserialize_with = "capped_comments")]
     pub comments: BTreeMap<String, String>,
     /// User-defined types by name: a struct's fields at their offsets, or a
     /// typedef's target, as [`Overlay::types`] holds them. Absent in a
     /// project older than user types, which loads as having none.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "capped_types")]
     pub types: BTreeMap<String, UserType>,
     /// "0x..." address -> the type applied there, as its spelling
     /// (`Player *`, `u32`); parsed on load, where one that is not a type
     /// refuses the file.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "capped_applied")]
     pub applied: BTreeMap<String, String>,
     /// "0x..." function entry -> the prototype stated for it, as C without
     /// the function's name (`int (Player *p)`); parsed on load, where one
     /// that does not parse refuses the file. Absent when none is stated.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "capped_prototypes"
+    )]
     pub prototypes: BTreeMap<String, String>,
     /// "0x..." function entry -> variable (`a1`, `local_58`, `sp+0x30`) ->
     /// its stated declaration (`wchar_t *path`, or a name alone); parsed on
     /// load like the prototypes. Absent when none is stated.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "capped_vars"
+    )]
     pub vars: BTreeMap<String, BTreeMap<String, String>>,
     /// Class -> "0x..." field offset -> the field stated there: its name,
     /// then a space and its type when one was stated (`m_count u32`);
     /// parsed and checked on load like the prototypes. Absent when none is
     /// stated.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "capped_fields"
+    )]
     pub fields: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+/// What a table's cap says when a file passes it: the verb and the entries
+/// (`states`, `names`) and the most the table holds.
+type Cap = (&'static str, &'static str, usize);
+
+/// Says that a table passed its cap as it was read, as
+/// [`Project::counted`] says it of a whole table.
+///
+/// # Arguments
+///
+/// * `(verb, what, most)` - The table's cap.
+fn passed<E: serde::de::Error>((verb, what, most): Cap) -> E {
+    E::custom(format!(
+        "the project {verb} {} {what}; {most} is the most",
+        most.saturating_add(1)
+    ))
+}
+
+/// Reads one table of a project file, refusing the file at the entry past
+/// the table's cap.
+///
+/// serde builds a map an entry at a time, so a table counted only once it
+/// was whole had cost every entry first: a 64 MiB file of four million
+/// one-entry tables of variables held 2.7 GB before its count refused it.
+struct Capped<'r, K, V> {
+    /// The table's cap, for the message ([`passed`]).
+    cap: Cap,
+    /// Entries the table, or the tables sharing its cap, may still take.
+    room: &'r mut usize,
+    /// The class a table of stated fields is of, and how many classes the
+    /// file has stated fields of so far, which its refusal names as
+    /// [`super::stated::crowded`] does; `None` for any other table.
+    class: Option<(&'r str, usize)>,
+    /// The entries' keys and values.
+    entries: PhantomData<(K, V)>,
+}
+
+impl<'de, K, V> Visitor<'de> for Capped<'_, K, V>
+where
+    K: serde::Deserialize<'de> + Ord,
+    V: serde::Deserialize<'de>,
+{
+    type Value = BTreeMap<K, V>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "a map of at most {} {}", self.cap.2, self.cap.1)
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut out = BTreeMap::new();
+        while let Some((key, value)) = map.next_entry()? {
+            *self.room = self.room.checked_sub(1).ok_or_else(|| match self.class {
+                Some((class, classes)) => {
+                    let fields = self.cap.2.saturating_add(1);
+                    let class = crate::text::one_line(class);
+                    A::Error::custom(
+                        super::stated::crowded(&class, fields, classes)
+                            .err()
+                            .unwrap_or_default(),
+                    )
+                }
+                None => passed::<A::Error>(self.cap),
+            })?;
+            out.insert(key, value);
+        }
+        Ok(out)
+    }
+}
+
+impl<'de, K, V> DeserializeSeed<'de> for Capped<'_, K, V>
+where
+    K: serde::Deserialize<'de> + Ord,
+    V: serde::Deserialize<'de>,
+{
+    type Value = BTreeMap<K, V>;
+
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+        d.deserialize_map(self)
+    }
+}
+
+/// Reads one table of a project file under its own cap ([`Capped`]).
+///
+/// # Arguments
+///
+/// * `d` - The table.
+/// * `cap` - Its cap.
+///
+/// # Errors
+///
+/// When the table is not a map of the entries it holds, or passes its cap.
+fn capped<'de, D, K, V>(d: D, cap: Cap) -> Result<BTreeMap<K, V>, D::Error>
+where
+    D: Deserializer<'de>,
+    K: serde::Deserialize<'de> + Ord,
+    V: serde::Deserialize<'de>,
+{
+    let mut room = cap.2;
+    Capped {
+        cap,
+        room: &mut room,
+        class: None,
+        entries: PhantomData,
+    }
+    .deserialize(d)
+}
+
+/// Reads one list of a project file, refusing the file at the entry past
+/// the list's cap, as [`Capped`] reads a table.
+struct Listed<V> {
+    /// The list's cap, for the message ([`passed`]).
+    cap: Cap,
+    /// The entries' type.
+    entries: PhantomData<V>,
+}
+
+impl<'de, V: serde::Deserialize<'de>> Visitor<'de> for Listed<V> {
+    type Value = Vec<V>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "a list of at most {} {}", self.cap.2, self.cap.1)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut out = Vec::new();
+        while let Some(value) = seq.next_element()? {
+            if out.len() == self.cap.2 {
+                return Err(passed(self.cap));
+            }
+            out.push(value);
+        }
+        Ok(out)
+    }
+}
+
+/// Reads a struct's fields from a project file, at most [`FIELDS_MAX`]
+/// ([`capped`]), so a struct stating millions is refused as it is read.
+///
+/// # Errors
+///
+/// As [`capped`].
+pub(crate) fn capped_struct_fields<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<BTreeMap<u64, UserField>, D::Error> {
+    capped(d, ("states", "fields of one struct", FIELDS_MAX))
+}
+
+/// Reads an enum's values from a project file, at most
+/// [`ENUM_VALUES_MAX`] ([`Listed`]), so an enum stating millions is
+/// refused as it is read.
+///
+/// # Errors
+///
+/// When the list is not one of values, or passes its cap.
+pub(crate) fn capped_enum_values<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<(u64, String)>, D::Error> {
+    d.deserialize_seq(Listed {
+        cap: ("states", "values of one enum", ENUM_VALUES_MAX),
+        entries: PhantomData,
+    })
+}
+
+/// Reads [`Project::names`], at most [`NAMES_MAX`].
+///
+/// # Errors
+///
+/// As [`capped`].
+fn capped_names<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<String, String>, D::Error> {
+    capped(d, ("states", "names", NAMES_MAX))
+}
+
+/// Reads [`Project::comments`], at most [`COMMENTS_MAX`].
+///
+/// # Errors
+///
+/// As [`capped`].
+fn capped_comments<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<String, String>, D::Error> {
+    capped(d, ("states", "comments", COMMENTS_MAX))
+}
+
+/// Reads [`Project::types`], at most [`TYPES_MAX`].
+///
+/// # Errors
+///
+/// As [`capped`].
+fn capped_types<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<String, UserType>, D::Error> {
+    capped(d, ("states", "types", TYPES_MAX))
+}
+
+/// Reads [`Project::applied`], at most [`APPLIED_MAX`].
+///
+/// # Errors
+///
+/// As [`capped`].
+fn capped_applied<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<String, String>, D::Error> {
+    capped(d, ("applies", "types", APPLIED_MAX))
+}
+
+/// Reads [`Project::prototypes`], at most [`PROTOTYPES_MAX`].
+///
+/// # Errors
+///
+/// As [`capped`].
+fn capped_prototypes<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<BTreeMap<String, String>, D::Error> {
+    capped(d, ("states", "prototypes", PROTOTYPES_MAX))
+}
+
+/// Reads a table of tables of a project file: each function's variables
+/// under one cap for all of them, or each class's fields under a cap for
+/// each class.
+struct Tables {
+    /// The outer table's cap.
+    outer: Cap,
+    /// The inner tables' cap: one for all of them, or each one's.
+    inner: Cap,
+    /// Whether the inner tables share their cap, one stating nothing
+    /// taking an entry of it, as [`Project::counted`] counts a function
+    /// stating no variable.
+    shared: bool,
+}
+
+impl<'de> Visitor<'de> for Tables {
+    type Value = BTreeMap<String, BTreeMap<String, String>>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "a map of at most {} {}", self.outer.2, self.outer.1)
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let (mut outer, mut shared) = (self.outer.2, self.inner.2);
+        let mut out = BTreeMap::new();
+        while let Some(key) = map.next_key::<String>()? {
+            outer = outer
+                .checked_sub(1)
+                .ok_or_else(|| passed::<A::Error>(self.outer))?;
+            let mut own = self.inner.2;
+            let (room, class) = if self.shared {
+                (&mut shared, None)
+            } else {
+                (&mut own, Some((key.as_str(), out.len().saturating_add(1))))
+            };
+            let table: BTreeMap<String, String> = map.next_value_seed(Capped {
+                cap: self.inner,
+                room,
+                class,
+                entries: PhantomData,
+            })?;
+            if self.shared && table.is_empty() {
+                shared = shared
+                    .checked_sub(1)
+                    .ok_or_else(|| passed::<A::Error>(self.inner))?;
+            }
+            out.insert(key, table);
+        }
+        Ok(out)
+    }
+}
+
+/// Reads [`Project::vars`]: at most [`VARS_MAX`] variables in all, a
+/// function stating none counted as one ([`Tables`]).
+///
+/// # Errors
+///
+/// When the table is not a map of functions' variables, or passes its cap.
+fn capped_vars<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<BTreeMap<String, BTreeMap<String, String>>, D::Error> {
+    let cap = ("states", "variables", VARS_MAX);
+    d.deserialize_map(Tables {
+        outer: cap,
+        inner: cap,
+        shared: true,
+    })
+}
+
+/// Reads [`Project::fields`]: at most [`TYPES_MAX`] classes, each stating
+/// at most [`FIELDS_MAX`] fields ([`Tables`]).
+///
+/// # Errors
+///
+/// When the table is not a map of classes' fields, or passes a cap.
+fn capped_fields<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<BTreeMap<String, BTreeMap<String, String>>, D::Error> {
+    d.deserialize_map(Tables {
+        outer: ("states fields of", "classes", TYPES_MAX),
+        inner: ("states", "fields of one class", FIELDS_MAX),
+        shared: false,
+    })
 }
 
 /// Keys annotations by `0x`-hex address text, the form the file holds.
@@ -225,8 +539,8 @@ impl Project {
 
     /// Rebuilds the overlay.
     ///
-    /// Every table is counted first ([`Project::counted`]), so a file
-    /// stating millions of entries is refused before any is read. Every
+    /// Every table is counted first ([`Project::counted`]), so a project
+    /// stating millions of entries is refused before any is parsed. Every
     /// address key must read as an address and no two may name one
     /// ([`keyed`]), and the annotation text is escaped to one line
     /// ([`by_address`]); the applied types are parsed and the whole set of

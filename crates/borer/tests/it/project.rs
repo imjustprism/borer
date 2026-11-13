@@ -671,6 +671,41 @@ fn a_struct_laid_out_for_4_byte_pointers_is_refused_on_x64() {
     );
 }
 
+/// A project's struct of 257 fields, or enum of 257 values, is refused as
+/// the file is read, naming the cap.
+///
+/// Both were read whole, and refused only once counted.
+#[test]
+fn a_type_past_its_entries_is_refused_as_the_file_is_read() {
+    let fields: serde_json::Map<String, serde_json::Value> = (0..257u64)
+        .map(|k| {
+            let field = serde_json::json!({"name": format!("f{k}"), "ty": "U8"});
+            (k.to_string(), field)
+        })
+        .collect();
+    let values: Vec<serde_json::Value> = (0..257u64)
+        .map(|k| serde_json::json!([k, format!("V{k}")]))
+        .collect();
+    for (ty, says) in [
+        (
+            serde_json::json!({"Struct": {"size": 257, "fields": fields}}),
+            "the project states 257 fields of one struct; 256 is the most",
+        ),
+        (
+            serde_json::json!({"Enum": {"size": 4, "values": values}}),
+            "the project states 257 values of one enum; 256 is the most",
+        ),
+    ] {
+        let file =
+            serde_json::json!({"program": "b", "names": {}, "comments": {}, "types": {"T": ty}});
+        let refused = serde_json::from_str::<ProjectFile>(&file.to_string())
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(refused.contains(says), "{refused}");
+    }
+}
+
 /// A project loaded past the request's deadline is refused, saying so,
 /// whether it states types or only the fields of classes.
 #[test]

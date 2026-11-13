@@ -44,7 +44,7 @@ fn results_keep_the_items_order_at_any_thread_count() {
         let got = striped_on(threads, &items, || 7, |seven, x| x * 2 + seven);
         assert_eq!(got, want, "{threads} threads");
     }
-    assert_eq!(striped_on(8, &[], || (), |(), x: &usize| *x), []);
+    assert_eq!(striped_on(8, &[], || (), |(), x: &usize| *x), [0usize; 0]);
 }
 
 /// A panic on one item fails the whole call with the item's own message,

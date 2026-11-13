@@ -1,5 +1,7 @@
-//! Project files built in memory, as a hand-edited one arrives: each is
-//! refused, or loads and is read, in bounded time and memory.
+//! Project files built in memory or read from JSON, as a hand-edited one
+//! arrives: each is refused, or loads and is read, in bounded time.
+//!
+//! Those held to a bound on heap measure it (`measured`).
 
 use std::collections::BTreeMap;
 use std::sync::mpsc;
@@ -232,6 +234,85 @@ fn a_text_of_millions_of_stars_is_refused_in_little_memory() {
         let (refused, peak) = super::measured(|| project.to_overlay());
         let refused = refused.expect_err("four million stars loaded");
         assert!(refused.contains("65536 is the most read"), "{refused}");
+        assert!(peak < 1 << 20, "{peak} bytes at the peak");
+    }
+}
+
+/// A file of 8 MiB of one-entry tables of variables is refused as it is
+/// read, at the table past the cap, holding what the tables before it
+/// hold: under 48 MiB.
+///
+/// serde built every table before any was counted, a 544-byte tree node
+/// a one-entry table: 300 MB for this file.
+#[test]
+fn a_file_of_half_a_million_tables_of_variables_is_refused_as_it_is_read() {
+    let _guard = super::serial();
+    let mut text = String::from(r#"{"program":"","names":{},"comments":{},"vars":{"#);
+    let mut k = 0u64;
+    while text.len() < 8 << 20 {
+        if k > 0 {
+            text.push(',');
+        }
+        text.push_str(&format!(r#""{k:#x}":{{"a":""}}"#));
+        k += 1;
+    }
+    text.push_str("}}");
+    let (read, peak) = super::measured(|| serde_json::from_str::<Project>(&text));
+    let refused = read
+        .expect_err("half a million tables of variables were read")
+        .to_string();
+    assert!(
+        refused.contains("the project states 65537 variables; 65536 is the most"),
+        "{refused}"
+    );
+    assert!(peak < 48 << 20, "{peak} bytes at the peak");
+    let many = |f: u64| {
+        let vars: Vec<String> = (0..40_000).map(|v| format!(r#""a{v}":"""#)).collect();
+        format!(r#""{f:#x}":{{{}}}"#, vars.join(","))
+    };
+    let two = format!(
+        r#"{{"program":"","names":{{}},"comments":{{}},"vars":{{{},{}}}}}"#,
+        many(1),
+        many(2)
+    );
+    let refused = serde_json::from_str::<Project>(&two)
+        .expect_err("80,000 variables of two functions were read")
+        .to_string();
+    assert!(
+        refused.contains("the project states 65537 variables; 65536 is the most"),
+        "the variables of two functions share one cap: {refused}"
+    );
+}
+
+/// A file of an enum of a million values, or a struct of a million
+/// fields, is refused as it is read, holding under a MiB of heap.
+///
+/// The values and the fields were read whole before any was counted: the
+/// list of values doubled to two million slots, 64 MiB for this file.
+#[test]
+fn a_type_of_a_million_entries_is_refused_as_it_is_read() {
+    let _guard = super::serial();
+    let values = vec![r#"[0,""]"#; (1 << 20) + 1].join(",");
+    let fields: Vec<String> = (0..=1u64 << 20)
+        .map(|k| format!(r#""{k}":{{"name":"f","ty":"U8"}}"#))
+        .collect();
+    let fields = fields.join(",");
+    for (ty, says) in [
+        (
+            format!(r#"{{"Enum":{{"size":4,"values":[{values}]}}}}"#),
+            "the project states 257 values of one enum; 256 is the most",
+        ),
+        (
+            format!(r#"{{"Struct":{{"size":1048577,"fields":{{{fields}}}}}}}"#),
+            "the project states 257 fields of one struct; 256 is the most",
+        ),
+    ] {
+        let text = format!(r#"{{"program":"","names":{{}},"comments":{{}},"types":{{"T":{ty}}}}}"#);
+        let (read, peak) = super::measured(|| serde_json::from_str::<Project>(&text));
+        let refused = read
+            .expect_err("a type of a million entries was read")
+            .to_string();
+        assert!(refused.contains(says), "{refused}");
         assert!(peak < 1 << 20, "{peak} bytes at the peak");
     }
 }

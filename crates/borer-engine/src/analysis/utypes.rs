@@ -409,7 +409,9 @@ pub struct UserField {
 pub struct UserStruct {
     /// The struct's size in bytes, at least the end of its last field.
     pub size: u64,
-    /// The fields by their byte offsets, which do not overlap.
+    /// The fields by their byte offsets, which do not overlap; at most
+    /// [`FIELDS_MAX`] read from a file.
+    #[serde(deserialize_with = "super::project::capped_struct_fields")]
     pub fields: BTreeMap<u64, UserField>,
 }
 
@@ -419,7 +421,9 @@ pub struct UserEnum {
     /// The enum's width in bytes, always 4 or 8.
     pub size: u64,
     /// `(value, name)` pairs by ascending value, so listing and rendering
-    /// are deterministic whatever order the values were stated in.
+    /// are deterministic whatever order the values were stated in; at most
+    /// [`ENUM_VALUES_MAX`] read from a file.
+    #[serde(deserialize_with = "super::project::capped_enum_values")]
     pub values: Vec<(u64, String)>,
 }
 
