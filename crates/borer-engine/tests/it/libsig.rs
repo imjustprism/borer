@@ -345,3 +345,60 @@ fn a_pat_file_names_a_static_function() {
     let a = with_pack(&p, &text);
     assert_eq!(library_name(&a, 0x1000).as_deref(), Some("pat_func"));
 }
+
+/// Oversized ELF `STT_FUNC` symbol names are refused without copying or
+/// truncating them, while sound functions stay and `damaged` counts the skips.
+#[test]
+fn oversized_elf_symbol_names_are_refused_with_a_damaged_note() {
+    const COUNT: usize = 21_845;
+    let mut text = LIB_MIX.to_vec();
+    text.extend(std::iter::repeat_n(0xc3u8, COUNT));
+    let mut strtab = b"\0lib_mix\0".to_vec();
+    let huge_at = u32::try_from(strtab.len()).expect("strtab offset fits u32");
+    strtab.extend(std::iter::repeat_n(b'a', 512 << 10));
+    strtab.push(0);
+    let mut symtab = vec![0u8; 24];
+    symtab.extend(elfgen::sym_sized(1, 0x12, 1, 0, 24));
+    for k in 0..COUNT {
+        let off = u64::try_from(24 + k).expect("offset fits u64");
+        symtab.extend(elfgen::sym_sized(huge_at, 0x12, 1, off, 1));
+    }
+    let mut secs = vec![
+        Sec::new(".text", PROGBITS, AX, 0x1000, text),
+        Sec::new(".symtab", SYMTAB, 0, 0x10_000, symtab),
+        Sec::new(".strtab", STRTAB, 0, 0xa0_000, strtab),
+    ];
+    secs[1].link = 3;
+    secs[1].info = 1;
+    secs[1].entsize = 24;
+    let evil = elfgen::build(ET_REL, EM_X86_64, 0, &secs);
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test asserts a wall-time bound on sigmake reading"
+    )]
+    let started = std::time::Instant::now();
+    let (found, damaged) = read(&evil).expect("the object reads");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].name, "lib_mix");
+    assert_eq!(
+        damaged,
+        vec!["skipped 21845 symbol(s) with names past 4096 bytes"]
+    );
+
+    let archive = ar(&[("evil_member_name.o", &evil)]);
+    let (found, damaged) = read(&archive).expect("the archive reads");
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].name, "lib_mix");
+    assert!(
+        damaged.len() == 1
+            && damaged[0].starts_with("member evil_member_name.o at ")
+            && damaged[0].ends_with(": skipped 21845 symbol(s) with names past 4096 bytes"),
+        "{damaged:?}"
+    );
+}

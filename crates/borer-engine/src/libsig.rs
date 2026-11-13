@@ -29,6 +29,7 @@
 //! the relocations themselves, no byte is guessed: what the linker did not
 //! touch matches exactly.
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 
 use crate::analysis::sigs::{SIG_MAX, format_signature, parse_signature};
@@ -52,6 +53,16 @@ const TAIL_MAX: usize = 255;
 const PAT_SIG_BYTES: usize = 16;
 /// The characters those bytes span, two per byte, `??` a wildcarded one.
 const PAT_SIG_CHARS: usize = PAT_SIG_BYTES * 2;
+/// Longest symbol name [`read`] copies into a signature, in bytes.
+///
+/// No compiler writes a symbol name past this, and cutting a longer one
+/// would ship a prefix into packs as a real symbol; longer names are
+/// skipped and counted in `damaged`.
+const SYMBOL_NAME_MAX: usize = 4096;
+/// Symbol-name bytes one object's emitted signatures may copy per file byte.
+const NAME_BYTES_PER_FILE_BYTE: usize = 8;
+/// Smallest per-object symbol-name copy budget, in bytes.
+const NAME_BYTES_MIN: usize = 1 << 20;
 
 /// The fixed bytes right after a signature: their count and a hash of
 /// them.
@@ -180,14 +191,20 @@ pub fn read(bytes: &[u8]) -> anyhow::Result<(Vec<LibFunction>, Vec<String>)> {
             if name.starts_with("__.SYMDEF") || name.ends_with(".rmeta") {
                 continue;
             }
-            if let Err(why) = member_functions(data, &mut out) {
-                damaged.push(format!("member {} at {at:#x}: {why}", one_line(name)));
+            match member_functions(data, &mut out) {
+                Ok(Some(note)) => {
+                    damaged.push(format!("member {} at {at:#x}: {note}", one_line(name)));
+                }
+                Ok(None) => {}
+                Err(why) => damaged.push(format!("member {} at {at:#x}: {why}", one_line(name))),
             }
         }
         return Ok((out, damaged));
     }
     if bytes.starts_with(b"\x7fELF") {
-        elf_functions(bytes, &mut out).map_err(anyhow::Error::msg)?;
+        if let Some(note) = elf_functions(bytes, &mut out).map_err(anyhow::Error::msg)? {
+            damaged.push(note);
+        }
         return Ok((out, damaged));
     }
     if goblin::pe::Coff::parse(bytes).is_err() {
@@ -198,7 +215,9 @@ pub fn read(bytes: &[u8]) -> anyhow::Result<(Vec<LibFunction>, Vec<String>)> {
             "neither an archive (.lib, .a, .rlib), an object (a COFF .obj or an ELF .o) nor an IDA .pat file"
         );
     }
-    object_functions(bytes, &mut out).map_err(anyhow::Error::msg)?;
+    if let Some(note) = object_functions(bytes, &mut out).map_err(anyhow::Error::msg)? {
+        damaged.push(note);
+    }
     Ok((out, damaged))
 }
 
@@ -300,12 +319,74 @@ fn long_name(table: &[u8], at: usize) -> Option<&str> {
 /// # Errors
 ///
 /// When the member is not an object, as the reader for its kind says.
-fn member_functions(data: &[u8], out: &mut Vec<LibFunction>) -> Result<(), &'static str> {
+fn member_functions(
+    data: &[u8],
+    out: &mut Vec<LibFunction>,
+) -> Result<Option<String>, &'static str> {
     if data.starts_with(b"\x7fELF") {
         elf_functions(data, out)
     } else {
         object_functions(data, out)
     }
+}
+
+/// Total symbol-name bytes one object of `len` bytes may copy into emitted
+/// [`LibFunction`]s.
+///
+/// # Arguments
+///
+/// * `len` - The object's byte length.
+fn name_budget(len: usize) -> usize {
+    len.saturating_mul(NAME_BYTES_PER_FILE_BYTE)
+        .max(NAME_BYTES_MIN)
+}
+
+/// Formats the `damaged` note when oversized or over-budget symbol names
+/// were skipped in an object.
+///
+/// # Arguments
+///
+/// * `over_cap` - Symbols skipped because their name exceeded [`SYMBOL_NAME_MAX`].
+/// * `over_budget` - Functions skipped once the object's symbol-name budget ran out.
+fn skipped_names_note(over_cap: usize, over_budget: usize) -> Option<String> {
+    match (over_cap > 0, over_budget > 0) {
+        (false, false) => None,
+        (true, false) => Some(format!(
+            "skipped {over_cap} symbol(s) with names past {SYMBOL_NAME_MAX} bytes"
+        )),
+        (false, true) => Some(format!(
+            "skipped {over_budget} function(s) past the symbol-name budget"
+        )),
+        (true, true) => Some(format!(
+            "skipped {over_cap} symbol(s) with names past {SYMBOL_NAME_MAX} bytes and {over_budget} function(s) past the symbol-name budget"
+        )),
+    }
+}
+
+/// Reads a COFF symbol's name without wrapping on string-table offsets
+/// below 4 or allocating for string-table entries.
+///
+/// # Arguments
+///
+/// * `sym` - The COFF symbol entry.
+/// * `strings` - The COFF string table.
+fn coff_symbol_name<'a>(
+    sym: &goblin::pe::symbol::Symbol,
+    strings: &'a goblin::strtab::Strtab<'a>,
+) -> Option<Cow<'a, str>> {
+    if sym.name[..4] == [0; 4] {
+        let raw = u32::from_le_bytes([sym.name[4], sym.name[5], sym.name[6], sym.name[7]]);
+        let at = usize::try_from(raw.checked_sub(4)?).ok()?;
+        return strings.get_at(at).map(Cow::Borrowed);
+    }
+    let end = sym
+        .name
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(sym.name.len());
+    std::str::from_utf8(&sym.name[..end])
+        .ok()
+        .map(|s| Cow::Owned(s.to_owned()))
 }
 
 /// How many bytes a COFF relocation of `kind` rewrites.
@@ -359,40 +440,57 @@ fn elf_reloc_width(machine: u16, kind: u32) -> usize {
 ///
 /// When the bytes are not a COFF object; an import object, a big object
 /// and an object of another machine are passed over without one.
-fn object_functions(bytes: &[u8], out: &mut Vec<LibFunction>) -> Result<(), &'static str> {
+fn object_functions(
+    bytes: &[u8],
+    out: &mut Vec<LibFunction>,
+) -> Result<Option<String>, &'static str> {
     if bytes.get(..4) == Some(&[0, 0, 0xff, 0xff][..]) {
-        return Ok(());
+        return Ok(None);
     }
     let coff = goblin::pe::Coff::parse(bytes).map_err(|_| "not a COFF object")?;
     let machine = coff.header.machine;
     if !matches!(machine, I386 | AMD64) {
-        return Ok(());
+        return Ok(None);
     }
     let (Some(symbols), Some(strings)) = (&coff.symbols, &coff.strings) else {
-        return Ok(());
+        return Ok(None);
     };
-    let mut names: Vec<(usize, String, bool)> = Vec::new();
-    let mut functions: Vec<(usize, u32, String)> = Vec::new();
+    let mut over_cap = 0usize;
+    let mut names: Vec<(usize, Cow<'_, str>)> = Vec::new();
+    let mut functions: Vec<(usize, u32, Option<Cow<'_, str>>)> = Vec::new();
     for (index, _, sym) in symbols.iter() {
-        let Ok(name) = sym.name(strings) else {
+        let function = (sym.typ >> 4) & 3 == DTYPE_FUNCTION;
+        if !(sym.storage_class == CLASS_EXTERNAL || function) {
+            continue;
+        }
+        let Some(name) = coff_symbol_name(&sym, strings).filter(|n| !n.is_empty()) else {
             continue;
         };
-        let function = (sym.typ >> 4) & 3 == DTYPE_FUNCTION;
-        names.push((
-            index,
-            name.to_owned(),
-            sym.storage_class == CLASS_EXTERNAL || function,
-        ));
-        if function
+        let in_sec = function
             && matches!(sym.storage_class, CLASS_EXTERNAL | CLASS_STATIC)
-            && let Ok(section) = usize::try_from(sym.section_number)
-            && section > 0
-        {
-            functions.push((section, sym.value, name.to_owned()));
+            && usize::try_from(sym.section_number).is_ok_and(|s| s > 0);
+        if name.len() > SYMBOL_NAME_MAX {
+            over_cap += 1;
+            if let Ok(section) = usize::try_from(sym.section_number)
+                && in_sec
+            {
+                functions.push((section, sym.value, None));
+            }
+            continue;
         }
+        if let Ok(section) = usize::try_from(sym.section_number)
+            && in_sec
+        {
+            functions.push((section, sym.value, Some(name.clone())));
+        }
+        names.push((index, name));
     }
-    functions.sort_unstable();
+    functions.sort_unstable_by(|a, b| {
+        (a.0, a.1, a.2.is_none(), &a.2).cmp(&(b.0, b.1, b.2.is_none(), &b.2))
+    });
     functions.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+    let mut budget = name_budget(bytes.len());
+    let mut over_budget = 0usize;
     let mut at = 0;
     while at < functions.len() {
         let section = functions[at].0;
@@ -400,46 +498,56 @@ fn object_functions(bytes: &[u8], out: &mut Vec<LibFunction>) -> Result<(), &'st
             .iter()
             .position(|f| f.0 != section)
             .map_or(functions.len(), |n| at + n);
-        section_functions(bytes, &coff, machine, &names, &functions[at..end], out);
+        over_budget += section_functions(
+            bytes,
+            &coff,
+            machine,
+            &names,
+            &functions[at..end],
+            &mut budget,
+            out,
+        );
         at = end;
     }
-    Ok(())
+    Ok(skipped_names_note(over_cap, over_budget))
 }
 
-/// Adds the functions of one COFF section to `out`.
+/// Adds the functions of one COFF section to `out`, returning how many were
+/// skipped past `budget`.
 ///
 /// # Arguments
 ///
 /// * `bytes` - The object.
 /// * `coff` - The object parsed.
 /// * `machine` - Its machine.
-/// * `names` - Symbol names by index, with whether a reference to each is
-///   worth keeping.
+/// * `names` - Kept symbol names by index, sorted.
 /// * `functions` - The section's function symbols: section, offset, name,
-///   sorted by offset.
+///   sorted by offset (`None` when the name exceeded [`SYMBOL_NAME_MAX`]).
+/// * `budget` - Remaining symbol-name byte budget for this object.
 /// * `out` - Where the functions go.
 fn section_functions(
     bytes: &[u8],
     coff: &goblin::pe::Coff<'_>,
     machine: u16,
-    names: &[(usize, String, bool)],
-    functions: &[(usize, u32, String)],
+    names: &[(usize, Cow<'_, str>)],
+    functions: &[(usize, u32, Option<Cow<'_, str>>)],
+    budget: &mut usize,
     out: &mut Vec<LibFunction>,
-) {
+) -> usize {
     let Some(section) = functions
         .first()
         .and_then(|f| f.0.checked_sub(1))
         .and_then(|i| coff.sections.get(i))
     else {
-        return;
+        return 0;
     };
     if section.characteristics & SCN_CODE == 0 || section.pointer_to_raw_data == 0 {
-        return;
+        return 0;
     }
     let start = usize::try_from(section.pointer_to_raw_data).unwrap_or(usize::MAX);
     let size = usize::try_from(section.size_of_raw_data).unwrap_or(usize::MAX);
     let Some(data) = bytes.get(start..start.saturating_add(size)) else {
-        return;
+        return 0;
     };
     let mut masked: Vec<Option<u8>> = data.iter().copied().map(Some).collect();
     let mut refs: Vec<(usize, &str)> = Vec::new();
@@ -452,27 +560,24 @@ fn section_functions(
             }
             let index = usize::try_from(r.symbol_table_index).unwrap_or(usize::MAX);
             if let Ok(i) = names.binary_search_by_key(&index, |n| n.0)
-                && let Some((_, name, true)) = names.get(i)
+                && let Some((_, name)) = names.get(i)
             {
-                refs.push((at, name));
+                refs.push((at, name.as_ref()));
             }
         }
     }
     let spans: Vec<(usize, usize, &str)> = functions
         .iter()
         .enumerate()
-        .map(|(i, (_, offset, name))| {
+        .filter_map(|(i, (_, offset, name))| {
+            let name = name.as_deref()?;
             let to = functions
                 .get(i + 1)
                 .map_or(size, |f| usize::try_from(f.1).unwrap_or(usize::MAX));
-            (
-                usize::try_from(*offset).unwrap_or(usize::MAX),
-                to,
-                name.as_str(),
-            )
+            Some((usize::try_from(*offset).unwrap_or(usize::MAX), to, name))
         })
         .collect();
-    emit(&masked, &refs, &spans, out);
+    emit(&masked, &refs, &spans, budget, out)
 }
 
 /// Adds the functions one ELF relocatable object defines to `out`.
@@ -493,9 +598,8 @@ fn section_functions(
 ///
 /// When the headers do not parse or the file is not a relocatable object;
 /// an object of another machine is passed over without one.
-fn elf_functions(bytes: &[u8], out: &mut Vec<LibFunction>) -> Result<(), &'static str> {
+fn elf_functions(bytes: &[u8], out: &mut Vec<LibFunction>) -> Result<Option<String>, &'static str> {
     use goblin::elf::header::{EM_386, EM_AARCH64, EM_X86_64, ET_REL};
-    use goblin::elf::section_header::{SHF_EXECINSTR, SHT_NOBITS};
     use goblin::elf::sym::{STB_GLOBAL, STB_WEAK, STT_FUNC, STT_SECTION};
     /// `SHN_LORESERVE`: section indexes from here up are special.
     const SHN_LORESERVE: usize = 0xff00;
@@ -506,25 +610,35 @@ fn elf_functions(bytes: &[u8], out: &mut Vec<LibFunction>) -> Result<(), &'stati
     if elf.header.e_type != ET_REL {
         return Err("an ELF file that is not a relocatable object (.o)");
     }
-    let machine = elf.header.e_machine;
-    if !matches!(machine, EM_X86_64 | EM_386 | EM_AARCH64) {
-        return Ok(());
+    if !matches!(elf.header.e_machine, EM_X86_64 | EM_386 | EM_AARCH64) {
+        return Ok(None);
     }
-    let mut names: Vec<Option<String>> = Vec::with_capacity(elf.syms.len());
-    let mut functions: Vec<(usize, u64, u64, String)> = Vec::new();
+    let mut over_cap = 0usize;
+    let mut names: Vec<Option<&str>> = Vec::with_capacity(elf.syms.len());
+    let mut functions: Vec<(usize, u64, u64, Option<&str>)> = Vec::new();
     for sym in &elf.syms {
         let name = elf.strtab.get_at(sym.st_name).unwrap_or("");
         let (bind, typ) = (sym.st_bind(), sym.st_type());
         let kept = !name.is_empty()
             && typ != STT_SECTION
             && (bind == STB_GLOBAL || bind == STB_WEAK || typ == STT_FUNC);
-        names.push(kept.then(|| name.to_owned()));
+        let allowed = if kept && name.len() > SYMBOL_NAME_MAX {
+            over_cap += 1;
+            None
+        } else {
+            Some(name)
+        };
+        names.push(kept.then_some(allowed).flatten());
         if typ == STT_FUNC && !name.is_empty() && (1..SHN_LORESERVE).contains(&sym.st_shndx) {
-            functions.push((sym.st_shndx, sym.st_value, sym.st_size, name.to_owned()));
+            functions.push((sym.st_shndx, sym.st_value, sym.st_size, allowed));
         }
     }
-    functions.sort_unstable();
+    functions.sort_unstable_by(|a, b| {
+        (a.0, a.1, a.3.is_none(), a.2, a.3).cmp(&(b.0, b.1, b.3.is_none(), b.2, b.3))
+    });
     functions.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+    let mut budget = name_budget(bytes.len());
+    let mut over_budget = 0usize;
     let mut at = 0;
     while at < functions.len() {
         let section = functions[at].0;
@@ -532,66 +646,98 @@ fn elf_functions(bytes: &[u8], out: &mut Vec<LibFunction>) -> Result<(), &'stati
             .iter()
             .position(|f| f.0 != section)
             .map_or(functions.len(), |n| at + n);
-        let group = &functions[at..end];
+        over_budget += elf_section_functions(
+            bytes,
+            &elf,
+            section,
+            &names,
+            &functions[at..end],
+            &mut budget,
+            out,
+        );
         at = end;
-        let Some(sh) = elf.section_headers.get(section) else {
-            continue;
-        };
-        if sh.sh_flags & u64::from(SHF_EXECINSTR) == 0 || sh.sh_type == SHT_NOBITS {
-            continue;
-        }
-        let (Ok(start), Ok(size)) = (usize::try_from(sh.sh_offset), usize::try_from(sh.sh_size))
-        else {
-            continue;
-        };
-        let Some(data) = bytes.get(start..start.saturating_add(size)) else {
-            continue;
-        };
-        let mut masked: Vec<Option<u8>> = data.iter().copied().map(Some).collect();
-        let mut refs: Vec<(usize, &str)> = Vec::new();
-        for (index, relocations) in &elf.shdr_relocs {
-            if elf
-                .section_headers
-                .get(*index)
-                .is_none_or(|r| usize::try_from(r.sh_info).ok() != Some(section))
-            {
-                continue;
-            }
-            for r in relocations {
-                let Ok(at) = usize::try_from(r.r_offset) else {
-                    continue;
-                };
-                for b in masked
-                    .iter_mut()
-                    .skip(at)
-                    .take(elf_reloc_width(machine, r.r_type))
-                {
-                    *b = None;
-                }
-                if let Some(Some(name)) = names.get(r.r_sym) {
-                    refs.push((at, name));
-                }
-            }
-        }
-        let spans: Vec<(usize, usize, &str)> = group
-            .iter()
-            .enumerate()
-            .filter_map(|(i, (_, value, length, name))| {
-                let from = usize::try_from(*value).ok()?;
-                let to = if *length > 0 {
-                    from.saturating_add(usize::try_from(*length).ok()?)
-                } else {
-                    group
-                        .get(i + 1)
-                        .and_then(|f| usize::try_from(f.1).ok())
-                        .unwrap_or(size)
-                };
-                Some((from, to, name.as_str()))
-            })
-            .collect();
-        emit(&masked, &refs, &spans, out);
     }
-    Ok(())
+    Ok(skipped_names_note(over_cap, over_budget))
+}
+
+/// Adds the functions of one ELF section to `out`, returning how many were
+/// skipped past `budget`.
+///
+/// # Arguments
+///
+/// * `bytes` - The object.
+/// * `elf` - The object parsed.
+/// * `section` - The section index.
+/// * `names` - Kept symbol names by symbol index.
+/// * `group` - Function symbols in `section`, sorted by offset.
+/// * `budget` - Remaining symbol-name byte budget for this object.
+/// * `out` - Where the functions go.
+fn elf_section_functions(
+    bytes: &[u8],
+    elf: &goblin::elf::Elf<'_>,
+    section: usize,
+    names: &[Option<&str>],
+    group: &[(usize, u64, u64, Option<&str>)],
+    budget: &mut usize,
+    out: &mut Vec<LibFunction>,
+) -> usize {
+    use goblin::elf::section_header::{SHF_EXECINSTR, SHT_NOBITS};
+    let Some(sh) = elf.section_headers.get(section) else {
+        return 0;
+    };
+    if sh.sh_flags & u64::from(SHF_EXECINSTR) == 0 || sh.sh_type == SHT_NOBITS {
+        return 0;
+    }
+    let (Ok(start), Ok(size)) = (usize::try_from(sh.sh_offset), usize::try_from(sh.sh_size)) else {
+        return 0;
+    };
+    let Some(data) = bytes.get(start..start.saturating_add(size)) else {
+        return 0;
+    };
+    let mut masked: Vec<Option<u8>> = data.iter().copied().map(Some).collect();
+    let mut refs: Vec<(usize, &str)> = Vec::new();
+    for (index, relocations) in &elf.shdr_relocs {
+        if elf
+            .section_headers
+            .get(*index)
+            .is_none_or(|r| usize::try_from(r.sh_info).ok() != Some(section))
+        {
+            continue;
+        }
+        for r in relocations {
+            let Ok(at) = usize::try_from(r.r_offset) else {
+                continue;
+            };
+            for b in masked
+                .iter_mut()
+                .skip(at)
+                .take(elf_reloc_width(elf.header.e_machine, r.r_type))
+            {
+                *b = None;
+            }
+            if let Some(Some(name)) = names.get(r.r_sym) {
+                refs.push((at, name));
+            }
+        }
+    }
+    let spans: Vec<(usize, usize, &str)> = group
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (_, value, length, name))| {
+            let name = (*name)?;
+            let from = usize::try_from(*value).ok()?;
+            let to = if *length > 0 {
+                from.saturating_add(usize::try_from(*length).ok()?)
+            } else {
+                group
+                    .get(i + 1)
+                    .and_then(|f| usize::try_from(f.1).ok())
+                    .unwrap_or(size)
+            };
+            Some((from, to, name))
+        })
+        .collect();
+    emit(&masked, &refs, &spans, budget, out)
 }
 
 /// Adds the functions of one section's masked bytes to `out`: each span's
@@ -605,13 +751,16 @@ fn elf_functions(bytes: &[u8], out: &mut Vec<LibFunction>) -> Result<(), &'stati
 /// * `spans` - Each function's start and end in the section, and its name;
 ///   an end past the section stops at it, and `int3` padding before the
 ///   end is not the function's.
+/// * `budget` - Remaining symbol-name byte budget for this object.
 /// * `out` - Where the functions go.
 fn emit(
     masked: &[Option<u8>],
     refs: &[(usize, &str)],
     spans: &[(usize, usize, &str)],
+    budget: &mut usize,
     out: &mut Vec<LibFunction>,
-) {
+) -> usize {
+    let mut skipped = 0usize;
     for (from, to, name) in spans {
         let Some(body) = masked.get(*from..(*to).min(masked.len())) else {
             continue;
@@ -621,6 +770,19 @@ fn emit(
             continue;
         }
         let cut = len.min(SIG_MAX);
+        let kept_refs: Vec<(u32, &str)> = refs
+            .iter()
+            .filter(|(at, _)| *at >= *from && *at < from.saturating_add(cut))
+            .filter_map(|(at, n)| Some((u32::try_from(at - from).ok()?, *n)))
+            .collect();
+        let cost = kept_refs
+            .iter()
+            .fold(name.len(), |sum, (_, n)| sum.saturating_add(n.len()));
+        if cost > *budget {
+            skipped += 1;
+            continue;
+        }
+        *budget -= cost;
         let tail: Vec<u8> = body[cut..len]
             .iter()
             .take(TAIL_MAX)
@@ -636,13 +798,13 @@ fn emit(
                     len,
                     hash: tail_hash(&tail),
                 }),
-            refs: refs
-                .iter()
-                .filter(|(at, _)| *at >= *from && *at < from.saturating_add(cut))
-                .filter_map(|(at, n)| Some((u32::try_from(at - from).ok()?, (*n).to_owned())))
+            refs: kept_refs
+                .into_iter()
+                .map(|(at, n)| (at, n.to_owned()))
                 .collect(),
         });
     }
+    skipped
 }
 
 /// Writes library functions as a pack: `pack`, `about`, then a `[names]`
@@ -964,5 +1126,35 @@ mod tests {
         assert!(read_pat(b"not a pattern file").is_none());
         assert!(read_pat(b"").is_none());
         assert!(read_pat("558BEC83EC0C535657E8000000005DC3EXTRA name".as_bytes()).is_none());
+    }
+
+    /// A COFF object whose function symbol names exceed `SYMBOL_NAME_MAX`
+    /// skips them without cutting their names, keeps sound functions and
+    /// their boundaries, and notes the count in `damaged`.
+    ///
+    /// # Panics
+    ///
+    /// When an oversized name is returned or its earlier neighbor overruns.
+    #[test]
+    fn a_coff_object_skips_oversized_symbol_names() {
+        let huge = "x".repeat(4097);
+        let obj = object(
+            0x8664,
+            &[0x48, 0x89, 0xc8, 0xc3, 0x90, 0xc3],
+            &[],
+            &[("keep", 1, 0, 0x20, 2), (&huge, 1, 4, 0x20, 2)],
+        );
+        let (found, damaged) = read(&obj).expect("reads");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].name, "keep");
+        assert_eq!(
+            found[0].sig.len(),
+            4,
+            "the skipped symbol still bounds keep"
+        );
+        assert_eq!(
+            damaged,
+            vec!["skipped 1 symbol(s) with names past 4096 bytes"]
+        );
     }
 }
