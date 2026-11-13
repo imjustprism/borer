@@ -328,10 +328,10 @@ pub(crate) struct EntropyParams {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct FindFunctionByStringParams {
-    /// Case-insensitive substring of the referenced string.
+    /// Case-insensitive; a string under 4 printable characters must equal it.
     #[serde(alias = "query")]
     pub(crate) filter: String,
-    /// Function rows to skip first (paging).
+    /// Rows to skip (paging).
     pub(crate) offset: Option<u32>,
     /// Max rows and legend strings (default 50, max 300).
     pub(crate) limit: Option<u32>,

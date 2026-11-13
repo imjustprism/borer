@@ -765,7 +765,8 @@ fn a_literal_s_element_is_fenced_on_its_tag_lines() {
 }
 
 /// A string search for a text under four printable characters finds the
-/// functions that reference it whole, and says what it read when none does.
+/// functions that reference it whole, and says so, with what it read, on
+/// every answer.
 ///
 /// The index of referenced literals holds no text that short, so the search
 /// reads each referenced address outside code for the filter's text ended
@@ -824,7 +825,7 @@ fn a_text_under_the_literal_floor_matches_only_whole() {
         short.contains("# strings: 1=\"#c\" 2=\"#color\" 3=L\"#C\"\n"),
         "{short}"
     );
-    assert!(!short.contains("addresses read"), "{short}");
+    assert!(short.contains("match only whole"), "{short}");
     for (filter, row) in [
         ("#co", "0x401030 sub_401030: 1"),
         ("#", "0x401030 sub_401030: 1"),
@@ -840,10 +841,30 @@ fn a_text_under_the_literal_floor_matches_only_whole() {
     let none = answer("#q");
     assert!(
         none.starts_with(
-            "# showing 0 of 0 rows: 0 function/string pairs match '#q' across 0 strings in 0 functions; texts under 4 printable characters match only whole (6 referenced addresses read)\n"
+            "# showing 0 of 0 rows: 0 function/string pairs match '#q' across 0 strings in 0 functions; texts under 4 printable characters match only whole (6 reference targets read)\n"
         ),
         "{none}"
     );
     let long = answer("#qqq");
-    assert!(!long.contains("addresses read"), "{long}");
+    assert!(!long.contains("match only whole"), "{long}");
+}
+
+/// A short filter's note counts the reference targets it read whole, in the
+/// singular when there is one: the four bytes at `0x402000` a function loads.
+#[test]
+fn a_short_filter_reads_a_loaded_number_whole() {
+    use borer_engine::analysis::render::functions_by_string_tsv;
+    use borer_engine::analysis::{Analysis, Overlay};
+    // ASM: mov eax, [rip+0xffa], the four bytes at 0x402000; ret
+    let code = [0x8b, 0x05, 0xfa, 0x0f, 0x00, 0x00, 0xc3];
+    let p = crate::raw::image(borer_engine::program::Arch::X86_64, &code, &[0x64, 0, 0, 0]);
+    let a = Analysis::compute(&p);
+    let answer = |filter: &str| functions_by_string_tsv(&p, &a, &Overlay::default(), filter, 0, 50);
+    let none = answer("q");
+    assert!(
+        none.starts_with(
+            "# showing 0 of 0 rows: 0 function/string pairs match 'q' across 0 strings in 0 functions; texts under 4 printable characters match only whole (1 reference target read)\n"
+        ),
+        "{none}"
+    );
 }

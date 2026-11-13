@@ -43,7 +43,8 @@ const STRINGS_PER_FUNCTION: usize = 20;
 /// * `p` - The loaded image, for reading the strings.
 /// * `a` - Cross-references, functions and their shapes.
 /// * `o` - User names.
-/// * `filter` - Case-insensitive substring of the string.
+/// * `filter` - Case-insensitive substring of the string; a string under
+///   [`PRINTABLE_MIN`] printable characters must equal it.
 /// * `offset` - Rows to skip first (paging).
 /// * `limit` - Most rows listed, and most strings numbered.
 ///
@@ -54,8 +55,8 @@ const STRINGS_PER_FUNCTION: usize = 20;
 /// of the page, a column header, then one `entry name: 1 2 5` row per
 /// function in entry order with its strings' numbers in address order, and
 /// a `# N more rows; offset=K for the next page` line when rows remain. A
-/// filter under [`PRINTABLE_MIN`] that nothing matches ends the header
-/// with how many referenced addresses were read for it whole.
+/// filter under [`PRINTABLE_MIN`] ends the header with that rule and how
+/// many reference targets were read for it whole, whatever it matched.
 pub fn functions_by_string_tsv(
     p: &Program,
     a: &Analysis,
@@ -142,12 +143,12 @@ pub fn functions_by_string_tsv(
         body.push_str(&same_code(a, o, others));
         body.push('\n');
     }
-    let note = match m.read {
-        Some(n) if pairs == 0 => format!(
-            "; texts under {PRINTABLE_MIN} printable characters match only whole ({n} referenced addresses read)"
-        ),
-        _ => String::new(),
-    };
+    let note = m.read.map_or_else(String::new, |n| {
+        format!(
+            "; texts under {PRINTABLE_MIN} printable characters match only whole ({n} reference target{} read)",
+            plural(n)
+        )
+    });
     let mut out = format!(
         "# showing {listed} of {} row{}: {pairs} function/string pairs match {shown_filter} across {} string{} in {} function{}{note}\n# strings:",
         rows.len(),

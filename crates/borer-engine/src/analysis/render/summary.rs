@@ -120,8 +120,9 @@ pub(super) fn literal_section(p: &Program, va: u64, in_code: bool) -> Option<&Se
         .filter(|s| (in_code || !s.executable) && !p.metadata_at(va))
 }
 
-/// Fewest printable characters in a literal [`string_literal`] reads.
-pub(super) const PRINTABLE_MIN: usize = 4;
+/// Fewest printable characters in a literal [`string_literal`] reads; a
+/// string search matches a shorter text only whole.
+pub const PRINTABLE_MIN: usize = 4;
 
 /// Returns a literal's text with its tabs and line ends escaped and its
 /// model control tokens broken ([`crate::text::fenced`]), when it holds at

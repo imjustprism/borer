@@ -68,7 +68,7 @@ impl BorerServer {
     ///
     /// When no binary is loaded or the analysis is unavailable.
     #[tool(
-        description = "Find the functions whose strings contain a text, case-insensitively: a numbered string legend, then `entry name: 1 2` rows, paged. Not for one function's strings (use function_strings).",
+        description = "Find the functions whose strings contain a text, case-insensitively: a numbered legend, then `entry name: 1 2` rows, paged. Not for one function's strings (use function_strings).",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -360,5 +360,32 @@ mod tests {
             "{page}"
         );
         assert_eq!(search(true), "# 256 hits\n");
+    }
+
+    /// The string search's `filter` doc gives the engine's literal floor,
+    /// under which a string matches only whole.
+    ///
+    /// # Panics
+    ///
+    /// When the doc names another floor or none.
+    #[test]
+    fn the_string_search_documents_the_engines_floor() {
+        use borer_engine::analysis::render::PRINTABLE_MIN;
+        let tools = crate::BorerServer::tool_router().list_all();
+        let doc = tools
+            .iter()
+            .find(|t| t.name == "find_function_by_string")
+            .and_then(|t| {
+                t.input_schema
+                    .get("properties")?
+                    .get("filter")?
+                    .get("description")
+            })
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        assert!(
+            doc.contains(&format!("under {PRINTABLE_MIN} printable characters")),
+            "{doc}"
+        );
     }
 }
