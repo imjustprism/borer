@@ -467,10 +467,10 @@ pub(super) fn bisected(
     let held = |skip: Passes| check(skip, Some(index));
     let (good, before, narrowest) = match first_breaking(&held) {
         Placed::Before(before) => return Bisected::Unbisected(before),
-        Placed::Unchecked(ran, probe) => {
+        Placed::Unchecked(ran, probe, later) => {
             let (agreed, unchecked) = (probe.agreed, commonest(probe.unchecked));
             return Bisected::Unplaced {
-                at,
+                at: later.map_or(at, |(_, c)| c),
                 ran,
                 agreed,
                 unchecked,
@@ -478,15 +478,7 @@ pub(super) fn bisected(
         }
         Placed::At(good, before, narrowest) => (good, before, narrowest),
     };
-    let (n, at) = narrowest.unwrap_or((index, at));
-    if before.skipped.contains(&n) {
-        return Bisected::Unplaced {
-            at,
-            ran: good,
-            agreed: before.agreed,
-            unchecked: commonest(before.unchecked),
-        };
-    }
+    let (_, at) = narrowest.unwrap_or((index, at));
     let Some(&pass) = Pass::ALL.get(good) else {
         return Bisected::Unbisected(at);
     };
@@ -504,9 +496,11 @@ pub(super) fn bisected(
 pub(super) enum Placed {
     /// The text with every pass left out differs already, on this input.
     Before(Counterexample),
-    /// A text the bisection needed left every input unchecked, or the one
-    /// it was held to: how many passes ran in it, and what its runs said.
-    Unchecked(usize, Checked),
+    /// A text the bisection needed left unchecked every input, the one it
+    /// was held to, or the one the text with one more pass differs on: how
+    /// many passes ran in it, what its runs said, and in the last case that
+    /// input's index and the counterexample there.
+    Unchecked(usize, Checked, Option<(usize, Counterexample)>),
     /// How many passes run in the last text that agreed, the next pass
     /// being the first whose text differs; what that text's runs said; and
     /// the narrowest text that differed, by the index of its input and its
@@ -521,7 +515,9 @@ pub(super) enum Placed {
 /// search asks for. A text that agrees moves the search up and one that
 /// differs moves it down; a text no input checked, or that left unchecked
 /// the input it was held to, does neither ([`Checked::grade`]), and the
-/// search ends there.
+/// search ends there. It ends there too where it closes on a text that
+/// differs on an input the text before it left unchecked: neither says
+/// what the pass between them did to that input.
 ///
 /// # Arguments
 ///
@@ -538,10 +534,15 @@ pub(super) fn first_breaking(check: &impl Fn(Passes) -> Checked) -> Placed {
     }
     loop {
         if probe.grade() == Grade::Unchecked {
-            return Placed::Unchecked(good, probe);
+            return Placed::Unchecked(good, probe, None);
         }
         if bad - good <= 1 {
-            return Placed::At(good, probe, at);
+            let unread = at.as_ref().is_some_and(|(n, _)| probe.skipped.contains(n));
+            return if unread {
+                Placed::Unchecked(good, probe, at)
+            } else {
+                Placed::At(good, probe, at)
+            };
         }
         let mid = good + (bad - good) / 2;
         let mut next = check(Passes::after(mid));
@@ -1091,7 +1092,11 @@ pub fn vectors_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::{Arg, Grade, args_shown, draw, first_difference};
+    use super::{
+        Arg, Checked, Counterexample, Grade, Placed, args_shown, draw, first_breaking,
+        first_difference,
+    };
+    use crate::analysis::decompile::{Pass, Passes};
     use crate::analysis::{Analysis, Overlay};
     use crate::program::Program;
 
@@ -1169,5 +1174,39 @@ mod tests {
         assert_eq!(args_shown(&drawn.inputs[0]), args_shown(&drawn.inputs[1]));
         let held = first_difference(&p, &a, &o, 0x1000, &drawn, 2000, Some(1));
         assert!(held.agreed == 1 && !held.missed(), "{held:?}");
+    }
+
+    /// The bisection ends unplaced where the last text that agreed left
+    /// unchecked the input the narrowest differing text differs on.
+    ///
+    /// The texts with fewer than 40 passes agree but leave input 3
+    /// unchecked, and those with 40 or more differ on input 3. Closing on
+    /// the fortieth pass, the search placed it, though the text before it
+    /// never checked the input it was blamed on, and the repair search
+    /// then tried that pass before the function's other sites.
+    ///
+    /// # Panics
+    ///
+    /// When the search places a pass.
+    #[test]
+    fn a_bisection_ends_unplaced_on_an_input_the_agreeing_text_skipped() {
+        let three = Counterexample {
+            input: "3".to_owned(),
+            line: "return y;".to_owned(),
+            why: "returned 1, the binary 0".to_owned(),
+        };
+        let runs = |skip: Passes| Pass::ALL.iter().filter(|p| skip.runs(**p)).count();
+        let placed = first_breaking(&|skip| match runs(skip) {
+            k if k < 40 => Checked {
+                agreed: 7,
+                skipped: [3].into(),
+                ..Checked::default()
+            },
+            _ => Checked {
+                differs: Some((3, three.clone())),
+                ..Checked::default()
+            },
+        });
+        assert!(matches!(placed, Placed::Unchecked(39, ..)), "{placed:?}");
     }
 }
