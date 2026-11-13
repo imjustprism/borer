@@ -31,6 +31,9 @@ const MCP_FILE: &str = ".mcp.json";
 /// directory.
 const CLIMB_MAX: usize = 32;
 
+/// Largest [`MCP_FILE`] `doctor` reads (1 MiB).
+const MCP_MAX: u64 = 1 << 20;
+
 /// Most entries of a cache directory counted.
 const COUNT_MAX: usize = 100_000;
 
@@ -246,6 +249,32 @@ fn index_line(dir: Result<Option<&Path>, &str>) -> String {
     format!("index      {}: {held}", dir.display())
 }
 
+/// Checks whether `p`, or `p` with `.exe` on Windows, is a regular local file.
+///
+/// # Errors
+///
+/// When `p` names a share or a device ([`borer_engine::program::checked_metadata`]).
+fn probe_program(p: PathBuf) -> Result<Option<PathBuf>, String> {
+    if borer_engine::program::checked_metadata(&p)?.is_some_and(|m| m.is_file()) {
+        return Ok(Some(p));
+    }
+    if cfg!(windows) && p.extension().is_none() {
+        let exe = p.with_extension("exe");
+        if borer_engine::program::checked_metadata(&exe)?.is_some_and(|m| m.is_file()) {
+            return Ok(Some(exe));
+        }
+    }
+    Ok(None)
+}
+
+/// Resolves `path` to its canonical local path when `path` is usable.
+fn canonical_local(path: &Path) -> Option<PathBuf> {
+    borer_engine::program::unusable_path(path)
+        .is_none()
+        .then(|| std::fs::canonicalize(path).ok())
+        .flatten()
+}
+
 /// Finds a program the way a host starts a command: a path as it stands,
 /// relative to the configuration's directory, or a bare name on `PATH`,
 /// with `.exe` added on Windows.
@@ -258,27 +287,28 @@ fn index_line(dir: Result<Option<&Path>, &str>) -> String {
 /// # Returns
 ///
 /// The program, or `None` when nothing by that name exists.
-fn find_program(command: &str, base: &Path) -> Option<PathBuf> {
-    let with_exe = |p: PathBuf| {
-        if p.is_file() {
-            Some(p)
-        } else if cfg!(windows) && p.extension().is_none() {
-            Some(p.with_extension("exe")).filter(|q| q.is_file())
-        } else {
-            None
-        }
-    };
+///
+/// # Errors
+///
+/// When `command`, as given or joined onto `base`, names a share or a device.
+fn find_program(command: &str, base: &Path) -> Result<Option<PathBuf>, String> {
     let path = Path::new(command);
+    if let Some(why) = borer_engine::program::unusable_path(path) {
+        return Err(why);
+    }
     if path.is_absolute() {
-        return with_exe(path.to_path_buf());
+        return probe_program(path.to_path_buf());
     }
     if path.components().count() > 1 {
-        return with_exe(base.join(path));
+        return probe_program(base.join(path));
     }
-    std::env::split_paths(&std::env::var_os("PATH")?).find_map(|d| with_exe(d.join(path)))
+    let Some(paths) = std::env::var_os("PATH") else {
+        return Ok(None);
+    };
+    Ok(std::env::split_paths(&paths).find_map(|d| probe_program(d.join(path)).ok().flatten()))
 }
 
-/// The line naming the `.mcp.json` above `start` and where its borer
+/// Returns the line naming the `.mcp.json` above `start` and where its borer
 /// servers point.
 ///
 /// # Arguments
@@ -286,15 +316,18 @@ fn find_program(command: &str, base: &Path) -> Option<PathBuf> {
 /// * `start` - Where the search starts: the working directory.
 /// * `exe` - This binary, to say when a server is it.
 fn mcp_line(start: &Path, exe: &Path) -> String {
+    if let Some(why) = borer_engine::program::unusable_path(start) {
+        return format!("mcp        {why}");
+    }
     let Some(file) = start
         .ancestors()
         .take(CLIMB_MAX)
         .map(|d| d.join(MCP_FILE))
-        .find(|f| f.is_file())
+        .find(|f| matches!(borer_engine::program::checked_metadata(f), Ok(Some(m)) if m.is_file()))
     else {
         return format!("mcp        no {MCP_FILE} in {} or above", start.display());
     };
-    let config = borer_engine::program::read_regular(&file, u64::MAX)
+    let config = borer_engine::program::read_regular(&file, MCP_MAX)
         .map_err(|e| format!("{e:#}"))
         .and_then(|t| serde_json::from_slice::<serde_json::Value>(&t).map_err(|e| e.to_string()));
     let config = match config {
@@ -302,7 +335,7 @@ fn mcp_line(start: &Path, exe: &Path) -> String {
         Err(why) => return format!("mcp        {} does not read: {why}", file.display()),
     };
     let base = file.parent().unwrap_or(start);
-    let me = std::fs::canonicalize(exe).ok();
+    let me = canonical_local(exe);
     let mut servers: Vec<String> = Vec::new();
     for (name, server) in config
         .get("mcpServers")
@@ -320,11 +353,12 @@ fn mcp_line(start: &Path, exe: &Path) -> String {
             continue;
         }
         let state = match find_program(command, base) {
-            None => "missing".to_owned(),
-            Some(p) if std::fs::canonicalize(&p).ok() == me && me.is_some() => {
+            Err(why) => why,
+            Ok(None) => "missing".to_owned(),
+            Ok(Some(p)) if canonical_local(&p) == me && me.is_some() => {
                 "exists, this binary".to_owned()
             }
-            Some(_) => "exists".to_owned(),
+            Ok(Some(_)) => "exists".to_owned(),
         };
         servers.push(format!("{name} runs {command} ({state})"));
     }

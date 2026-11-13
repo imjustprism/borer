@@ -1718,3 +1718,22 @@ fn cli_refuses_a_share_in_symbol_and_index_caches() {
     std::fs::remove_file(&pe).ok();
     assert!(!ok && said.contains("names a network share"), "{said}");
 }
+
+/// `doctor offline` refuses a share `command` inside `.mcp.json` before any
+/// filesystem stat or canonicalization touches the remote host.
+#[test]
+fn cli_doctor_refuses_a_share_command_in_mcp_json() {
+    if !cfg!(windows) {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("borer_doc_mcp_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    std::fs::write(
+        dir.join(".mcp.json"),
+        r#"{"mcpServers":{"borer":{"command":"\\\\host.invalid\\s\\borer.exe"}}}"#,
+    )
+    .expect("mcp json");
+    let (ok, said) = crate::contract::run_env(Some(&dir), &[], &["doctor", "offline"]);
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(ok && said.contains("names a network share"), "{said}");
+}
