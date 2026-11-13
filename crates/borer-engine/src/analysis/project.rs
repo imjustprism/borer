@@ -470,7 +470,7 @@ pub fn held(o: &Overlay) -> Result<(), String> {
 /// # Errors
 ///
 /// Naming the keys that are not addresses, or the two keys that name one
-/// address.
+/// address, or when the request's deadline passed.
 fn keyed<'m, V>(
     table: &str,
     map: &'m BTreeMap<String, V>,
@@ -478,6 +478,7 @@ fn keyed<'m, V>(
     let mut out: BTreeMap<u64, (&str, &V)> = BTreeMap::new();
     let mut bad: Vec<String> = Vec::new();
     for (k, v) in map {
+        crate::cancel::Cancel::whole(())?;
         let Some(va) = parse_addr(k) else {
             bad.push(crate::text::quoted(k));
             continue;
@@ -643,6 +644,7 @@ impl Project {
             }
             let into = vars.entry(va).or_default();
             for (key, decl) in table {
+                crate::cancel::Cancel::whole(())?;
                 let key = VarKey::parse_saved(key)
                     .map_err(|e| format!("a variable of the function at {va:#x}: {e}"))?;
                 let var = Var::parse(decl)
@@ -689,7 +691,7 @@ impl Project {
         };
         super::utypes::validate(&o.types, &o.applied).map_err(|e| e.to_string())?;
         super::stated::validate(&o)?;
-        Ok(o)
+        crate::cancel::Cancel::whole(o)
     }
 
     /// Refuses a file whose tables state more than an overlay holds, by
@@ -725,5 +727,31 @@ impl Project {
             super::stated::crowded(&class, table.len(), self.fields.len())?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test"
+)]
+mod tests {
+    use super::Project;
+    use crate::cancel::Cancel;
+
+    /// Rebuilding an overlay under a raised [`Cancel`] refuses the result
+    /// even when the project states only names and no types or fields.
+    #[test]
+    fn to_overlay_stops_when_the_deadline_passed() {
+        let project = Project {
+            names: [("0x1000".to_owned(), "main".to_owned())].into(),
+            ..Project::default()
+        };
+        let flag = Cancel::new();
+        flag.raise();
+        let refused = flag
+            .within(|| project.to_overlay())
+            .expect_err("a cancelled load returned an overlay");
+        assert!(refused.contains("deadline passed"), "{refused}");
     }
 }
