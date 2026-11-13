@@ -624,3 +624,19 @@ fn push_word_agrees_with_the_emulator_in_64_bit_code() {
         0xc3, // ASM: ret
     ]);
 }
+
+/// Two 16-bit pushes fill one 32-bit calling-convention word, so an unknown
+/// indirect callee takes one stack argument rather than reading past the
+/// pushed bytes or popping eight bytes from `esp`.
+#[test]
+fn two_word_pushes_count_as_one_stack_word_for_an_unknown_callee() {
+    let text = dc(&[
+        0x66, 0x6a, 0x07, // ASM: push word 7
+        0x66, 0x6a, 0x03, // ASM: push word 3
+        0xff, 0xd2, // ASM: call edx
+        0x8b, 0x44, 0x24, 0x04, // ASM: mov eax, [esp + 4]
+        0xc3, // ASM: ret
+    ]);
+    assert!(text.contains("edx(0x70003);"), "{text}");
+    assert!(text.contains("return arg_0;"), "{text}");
+}

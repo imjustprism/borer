@@ -715,10 +715,11 @@ pub(super) struct Exec<'c, 'a> {
     /// helper has run, so the prologue's pushes of the try level, the
     /// handler and the chain's head render as nothing.
     seh_registered: bool,
-    /// Words pushed since the last call, register saves and the handler
-    /// record left out: the arguments an indirect call to an unknown callee
-    /// takes, and what it pops when no `add esp` follows.
-    args_pushed: u32,
+    /// Bytes pushed since the last call, register saves and the handler
+    /// record left out: full calling-convention words here are the arguments
+    /// an indirect call to an unknown callee takes, and what it pops when no
+    /// `add esp` follows.
+    pub(super) push_bytes: u32,
     /// Words the caller cleans up right after the `__cdecl` call being
     /// lifted ([`Exec::stack_after`]): the arguments it passes, which may
     /// be more than the callee's body reads by name (a variable list past
@@ -848,7 +849,7 @@ impl<'c, 'a> Exec<'c, 'a> {
             assume: facts.assume,
             entry: facts.entry,
             seh_registered: !facts.unregistered,
-            args_pushed: 0,
+            push_bytes: 0,
             cleaned: None,
             args_short: false,
             stated_contradicted: false,
@@ -870,6 +871,47 @@ impl<'c, 'a> Exec<'c, 'a> {
 }
 
 impl Exec<'_, '_> {
+    /// Full calling-convention stack words pushed since the last call.
+    pub(super) fn args_pushed(&self) -> u32 {
+        self.push_bytes / u32::try_from(self.ctx.conv.word).unwrap_or(4)
+    }
+
+    /// Sets [`Self::push_bytes`] to `words` calling-convention stack words.
+    pub(super) fn set_args_pushed(&mut self, words: u32) {
+        self.push_bytes = words.saturating_mul(u32::try_from(self.ctx.conv.word).unwrap_or(4));
+    }
+
+    /// Records `bytes` pushed onto the stack since the last call.
+    pub(super) fn push_arg(&mut self, bytes: i64) {
+        self.push_bytes = self
+            .push_bytes
+            .saturating_add(u32::try_from(bytes).unwrap_or(0));
+    }
+
+    /// Subtracts `bytes` popped from the stack since the last call.
+    pub(super) fn pop_arg(&mut self, bytes: i64) {
+        self.push_bytes = self
+            .push_bytes
+            .saturating_sub(u32::try_from(bytes).unwrap_or(0));
+    }
+
+    /// Pushed stack-word fallback arity for an unknown 32-bit callee.
+    pub(super) fn fallback_stack_args(&self, target: Option<u64>) -> Option<u32> {
+        (self.bitness() == 32 && self.bodyless(target)).then_some(self.args_pushed())
+    }
+
+    /// Reads the stack-word argument at `o`, combining two half-word stores
+    /// when both halves were written in this block.
+    pub(super) fn slot_arg(&mut self, o: i64) -> Option<Expr> {
+        let word = self.word_ty();
+        if self.slot_def.get(&o).is_some_and(|&b| b < word.bits())
+            && let Some(v) = self.slot_view(o, word)
+        {
+            return Some(v);
+        }
+        self.env.vals.get(&Key::Slot(o)).cloned()
+    }
+
     /// Reads the conditional branch ending a block.
     ///
     /// `loop`, `loope`, `loopne` and `jrcxz` branch on the count register,

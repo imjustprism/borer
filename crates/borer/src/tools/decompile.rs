@@ -203,7 +203,7 @@ impl BorerServer {
     /// When no binary is loaded, the address is not inside a discovered function,
     /// or the decompiler produces nothing.
     #[tool(
-        description = "Decompile one function to pseudo-C. Locals are local_N/arg_N (local_N is N hex bytes below frame base: x86 entry sp - word, i.e. rbp-N; arm entry sp; higher N, lower address; local_mN is N bytes above); /* asm */ marks unmodeled code. Line 2 says what was checked (proved vs lift: equal to lift, 1 emulator sample), `// warn:` what is wrong. Use function_summary first.",
+        description = "Decompile one function to pseudo-C. Locals are local_N/arg_N (local_N is N hex bytes below frame base: x86 entry sp - word, i.e. rbp-N; arm entry sp; higher N, lower address; local_mN is N bytes above); /* asm */ marks unmodeled code. Header says what was checked (proved vs lift: equal to lift, 1 emulator sample), `// warn:` what is wrong. Use function_summary first.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,

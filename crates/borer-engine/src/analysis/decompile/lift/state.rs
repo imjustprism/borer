@@ -603,7 +603,7 @@ impl<'a> Exec<'_, 'a> {
     /// The value, or `None` when the read is no such view: it starts a
     /// store, another store of this block overlaps it, or a store's bits
     /// spell no integer ([`Exec::slot_bits_of`]).
-    fn slot_view(&mut self, k: i64, ty: Ty) -> Option<Expr> {
+    pub(super) fn slot_view(&mut self, k: i64, ty: Ty) -> Option<Expr> {
         if matches!(ty, Ty::F32 | Ty::F64 | Ty::U128) {
             return None;
         }
@@ -796,11 +796,11 @@ impl<'a> Exec<'_, 'a> {
                 && !self.entry
                 && (b - a).abs() <= ARGS_ROOM_MAX
             {
-                let words = u32::try_from((b - a).abs() / self.ctx.conv.word).unwrap_or(0);
-                self.args_pushed = if a < b {
-                    self.args_pushed + words
+                let bytes = u32::try_from((b - a).abs()).unwrap_or(0);
+                self.push_bytes = if a < b {
+                    self.push_bytes.saturating_add(bytes)
                 } else {
-                    self.args_pushed.saturating_sub(words)
+                    self.push_bytes.saturating_sub(bytes)
                 };
             }
             return;

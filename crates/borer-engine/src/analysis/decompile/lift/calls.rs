@@ -401,7 +401,7 @@ impl Exec<'_, '_> {
         let base = if self.forwarding { sp + word } else { sp } + self.ctx.conv.shadow;
         let slot = |i: i64| base + i * word;
         let set: i64 = if self.bitness() == 32 {
-            i64::from(self.args_pushed)
+            i64::from(self.args_pushed())
         } else {
             (0..STACK_ARG_WINDOW / word)
                 .take_while(|i| {
@@ -423,7 +423,7 @@ impl Exec<'_, '_> {
         for i in 0..count {
             let o = slot(i);
             let k = Key::Slot(o);
-            let e = match self.env.vals.get(&k).cloned() {
+            let e = match self.slot_arg(o) {
                 Some(e) if self.is_save(&e) => break,
                 Some(e) => {
                     if !self.slot_def.contains_key(&o) {
@@ -465,7 +465,7 @@ impl Exec<'_, '_> {
     fn call_stack_args(&self, target: Option<u64>) -> Option<u32> {
         self.callee_stack_args(target)
             .map(|c| self.cleaned.map_or(c, |n| c.max(n)))
-            .or_else(|| (self.bitness() == 32 && self.bodyless(target)).then_some(self.args_pushed))
+            .or_else(|| self.fallback_stack_args(target))
     }
 
     /// Returns the declared argument count of the import a call reaches.
@@ -921,7 +921,7 @@ impl Exec<'_, '_> {
                                 && !matches!(u.access(), OpAccess::Read | OpAccess::CondRead)
                         }) => {}
                 (FlowControl::Return, _, _) => {
-                    let args = self.args_pushed.saturating_sub(stated);
+                    let args = self.args_pushed().saturating_sub(stated);
                     let exact = self
                         .env
                         .sp
@@ -934,12 +934,12 @@ impl Exec<'_, '_> {
                 }
                 (FlowControl::ConditionalBranch | FlowControl::IndirectBranch, _, _) => break,
                 _ => {
-                    let args = self.args_pushed.saturating_sub(stated);
+                    let args = self.args_pushed().saturating_sub(stated);
                     return (args, args);
                 }
             }
         }
-        let args = self.args_pushed.saturating_sub(stated);
+        let args = self.args_pushed().saturating_sub(stated);
         (args, args.saturating_sub(cleaned))
     }
 
@@ -2016,7 +2016,7 @@ impl Exec<'_, '_> {
         let stated = stated_pop(self.ctx, target, reached);
         let unstated = stated.is_none().then(|| {
             let (args, popped) = self.stack_after(instr);
-            self.args_pushed = args;
+            self.set_args_pushed(args);
             popped
         });
         let cdecl = target
@@ -2362,7 +2362,7 @@ impl Exec<'_, '_> {
             (None, Some(words)) if !cleans_stack(next) => i64::from(words) * self.ctx.conv.word,
             (None, _) => 0,
         };
-        self.args_pushed = 0;
+        self.push_bytes = 0;
         self.cleaned = None;
         if let Some(sp) = self.env.sp.filter(|_| popped > 0) {
             let gone: Vec<i64> = self

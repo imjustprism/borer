@@ -95,7 +95,12 @@ pub(super) fn double_shift_value(
         (_, &Expr::Const(n)) => fold(
             Op::Or,
             fold(near, dst.clone(), Expr::Const(n), bits),
-            fold(far, src, Expr::Const(u64::from(bits) - n), bits),
+            fold(
+                far,
+                src,
+                Expr::Const(u64::from(bits).saturating_sub(n)),
+                bits,
+            ),
             bits,
         ),
         (16, _) => {

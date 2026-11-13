@@ -95,9 +95,9 @@ impl Exec<'_, '_> {
             .then(|| self.through_register(instr))
             .flatten();
         let (mut args, rendered, mut values) = self.args_for(reached);
-        let arity = self.callee_stack_args(reached).or_else(|| {
-            (self.bitness() == 32 && self.bodyless(reached)).then_some(self.args_pushed)
-        });
+        let arity = self
+            .callee_stack_args(reached)
+            .or_else(|| self.fallback_stack_args(reached));
         let held = self.target_registers(instr);
         let written = self.before_call(arity, false, rendered, &values, &held);
         if Self::reads_any(&values, &written) {
@@ -1157,7 +1157,7 @@ impl Exec<'_, '_> {
                         self.env.fresh.insert(Key::Slot(sp));
                     } else {
                         if self.seh_registered && !self.is_register_save(ty, &v) {
-                            self.args_pushed += 1;
+                            self.push_arg(word);
                         }
                         self.slot_write(sp, ty, v);
                     }
@@ -1167,7 +1167,7 @@ impl Exec<'_, '_> {
                 Some(sp) => {
                     let v = self.slot_read(sp, ty);
                     self.env.sp = sp.checked_add(word);
-                    self.args_pushed = self.args_pushed.saturating_sub(1);
+                    self.pop_arg(word);
                     self.write_op0(instr, v);
                 }
                 None if instr.op0_kind() == OpKind::Register
@@ -1801,7 +1801,7 @@ impl Exec<'_, '_> {
         };
         if sp_written {
             self.env.sp = None;
-            self.args_pushed = 0;
+            self.push_bytes = 0;
         }
         if writes_memory {
             if let Some(p) = &mut self.ctx.probe {
