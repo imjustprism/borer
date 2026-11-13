@@ -199,7 +199,7 @@ impl Names {
             return String::new();
         }
         let h = head(raw);
-        match self.left.checked_sub(h.len()) {
+        match self.left.checked_sub(retained_bytes(h)) {
             Some(left) => {
                 self.left = left;
                 h.to_owned()
@@ -230,7 +230,7 @@ impl Names {
             Some(tail) => &raw[..1 + head(tail).len()],
             None => head(raw),
         };
-        match self.left.checked_sub(cut.len()) {
+        match self.left.checked_sub(retained_bytes(cut)) {
             Some(left) => {
                 self.left = left;
                 cut.to_owned()
@@ -297,6 +297,46 @@ impl Names {
             )
         })
     }
+}
+
+/// Returns the byte budget `s` consumes once [`adopt`] escapes it with
+/// [`one_line`].
+///
+/// # Arguments
+///
+/// * `s` - Candidate name slice already bounded by [`head`].
+///
+/// # Returns
+///
+/// Larger of `s.len()` and the escaped [`one_line`] byte length, computed
+/// without heap allocation on plain text.
+fn retained_bytes(s: &str) -> usize {
+    let mut room = OUTSIDE_MAX;
+    let mut bytes = 0usize;
+    for c in s.chars() {
+        let (width, len) = if needs_escape(c) {
+            let escaped_len = match u32::from(c) {
+                0..=0xff => 4,
+                0x100..=0xfff => 5,
+                0x1000..=0xffff => 6,
+                0x1_0000..=0xf_ffff => 7,
+                _ => 8,
+            };
+            (escaped_len, escaped_len)
+        } else {
+            (1, c.len_utf8())
+        };
+        if width > room {
+            bytes += 3;
+            break;
+        }
+        room -= width;
+        bytes += len;
+    }
+    if s.bytes().any(|b| matches!(b, b'<' | b'[' | b':')) {
+        bytes = bytes.saturating_add(scan(s).1.len());
+    }
+    s.len().max(bytes)
 }
 
 /// Escapes the text a program holds out of its file, so that each piece
@@ -424,6 +464,7 @@ fn escaped(text: &str, max: usize) -> String {
         room -= width;
         out.push_str(piece);
     }
+    out.shrink_to_fit();
     match fenced(&out) {
         std::borrow::Cow::Borrowed(_) => out,
         std::borrow::Cow::Owned(again) => escaped(&again, max),

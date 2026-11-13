@@ -870,6 +870,9 @@ fn coff_section_name<'a>(
         }
         std::str::from_utf8(dec).ok()?.parse::<usize>().ok()?
     };
+    if str_off < 4 {
+        return None;
+    }
     let sym_at = usize::try_from(pe.header.coff_header.pointer_to_symbol_table).ok()?;
     if sym_at == 0 {
         return None;
@@ -877,8 +880,17 @@ fn coff_section_name<'a>(
     let sym_bytes = usize::try_from(pe.header.coff_header.number_of_symbol_table)
         .ok()?
         .checked_mul(18)?;
-    let start = sym_at.checked_add(sym_bytes)?.checked_add(str_off)?;
-    let tail = bytes.get(start..)?;
+    let strtab_at = sym_at.checked_add(sym_bytes)?;
+    let size_bytes: [u8; 4] = bytes
+        .get(strtab_at..strtab_at.checked_add(4)?)?
+        .try_into()
+        .ok()?;
+    let table_size = usize::try_from(u32::from_le_bytes(size_bytes)).ok()?;
+    if str_off >= table_size {
+        return None;
+    }
+    let avail = bytes.get(strtab_at..)?.len().min(table_size);
+    let tail = bytes.get(strtab_at..strtab_at + avail)?.get(str_off..)?;
     let window = &tail[..tail.len().min(SCAN_MAX)];
     if let Some(nul) = window.iter().position(|&b| b == 0) {
         return std::str::from_utf8(&window[..nul]).ok();

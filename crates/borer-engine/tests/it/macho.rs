@@ -579,7 +579,11 @@ fn indirect_pointer_sections_cap_walked_slots_and_per_nlist_copies() {
     for k in 0..n {
         bytes.extend_from_slice(&k.to_le_bytes());
     }
-    let distinct = load(&bytes, "indirect-total-cap");
+    let distinct = Program::from_bytes(
+        std::path::PathBuf::from("indirect-total-cap"),
+        bytes.clone(),
+    )
+    .expect("the image loads");
     let imports: Vec<&str> = distinct
         .symbols
         .iter()
@@ -589,7 +593,8 @@ fn indirect_pointer_sections_cap_walked_slots_and_per_nlist_copies() {
     assert_eq!(imports.len(), SLOTS);
     assert!(imports.iter().all(|&s| s == "a"));
     bytes[ind_at..ind_at + SLOTS * 4].fill(0);
-    let shared = load(&bytes, "indirect-per-nlist-cap");
+    let shared = Program::from_bytes(std::path::PathBuf::from("indirect-per-nlist-cap"), bytes)
+        .expect("the image loads");
     let shared_count = shared
         .symbols
         .iter()

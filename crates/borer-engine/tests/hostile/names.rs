@@ -119,6 +119,22 @@ fn symbols_naming_one_long_string_load_within_the_heap_bar() {
     let _one = serial();
     let bytes = symtab_elf(SYMBOLS, &vec![b'A'; NAME_LEN], 0x1_0000);
     check_local_names("names.elf", bytes, SYMBOLS, "A");
+
+    let escaped = symtab_elf(SYMBOLS, &[b'\n'; 64], 0);
+    let esc_size = escaped.len();
+    let (loaded, extra) = measured(|| Program::from_bytes(PathBuf::from("nl.elf"), escaped));
+    let p = loaded.expect("the image loads");
+    assert!(
+        extra <= LOAD_HEAP_PER_BYTE * esc_size,
+        "a {esc_size} byte file took {extra} bytes of heap to load"
+    );
+    let names: Vec<&str> = p
+        .symbols
+        .iter()
+        .filter(|s| s.kind == SymbolKind::Local)
+        .map(|s| s.name.as_str())
+        .collect();
+    assert_budgeted(&p, &names, SYMBOLS, &"\\x0a".repeat(64), 0);
 }
 
 /// An ELF of [`SYMBOLS`] function symbols sharing one 258-character 4-byte
@@ -311,9 +327,15 @@ fn pe_indirect_section_names_stay_within_the_heap_bar() {
         opt + 60,
         u32::try_from(headers_end).expect("fits in u32"),
     );
+    let table_size = 4 + NAME_LEN + 1;
+    let out_of_table = format!("/{table_size}");
     for k in 0..SYMBOLS {
         let row = table + k * 40;
-        let label: &[u8] = if k == 1 { b"//AAAAAA" } else { b"/0" };
+        let label: &[u8] = match k {
+            1 => b"//AAAAAE",
+            2 => out_of_table.as_bytes(),
+            _ => b"/4",
+        };
         b[row..row + label.len()].copy_from_slice(label);
         put32(&mut b, row + 8, 0x200);
         put32(
@@ -337,8 +359,14 @@ fn pe_indirect_section_names_stay_within_the_heap_bar() {
     let strtab_at = u32::try_from(b.len()).expect("fits in u32");
     put32(&mut b, PE_AT + 12, strtab_at);
     put32(&mut b, PE_AT + 16, 0);
+    b.extend_from_slice(
+        &u32::try_from(table_size)
+            .expect("fits in u32")
+            .to_le_bytes(),
+    );
     b.resize(b.len() + NAME_LEN, b'A');
     b.push(0);
+    b.extend_from_slice(b"TAIL\0");
     let chk_field = PE_AT + 88;
     let mut sum = 0u32;
     for (i, pair) in b.chunks(2).enumerate() {
@@ -366,7 +394,13 @@ fn pe_indirect_section_names_stay_within_the_heap_bar() {
     assert_eq!(p.headers.checksum, Some((declared, declared)));
     let shown = format!("{}...", "A".repeat(OUTSIDE_MAX));
     let sec_names: Vec<&str> = p.sections.iter().map(|s| s.name.as_str()).collect();
-    assert_budgeted(&p, &sec_names, SYMBOLS, &shown, 0);
+    assert_eq!(sec_names[2], out_of_table);
+    let indirect: Vec<&str> = sec_names[..2]
+        .iter()
+        .chain(&sec_names[3..])
+        .copied()
+        .collect();
+    assert_budgeted(&p, &indirect, SYMBOLS - 1, &shown, 0);
 }
 
 /// An ELF64 whose `e_shstrndx` names a `256 KiB` non-UTF-8 string table
@@ -376,6 +410,7 @@ fn pe_indirect_section_names_stay_within_the_heap_bar() {
 fn elf_non_utf8_shstrtab_is_refused_without_quadratic_rescan() {
     /// Bytes in the malformed `.shstrtab` replacement.
     const BAD_LEN: usize = 256 << 10;
+    let _one = serial();
     let mut tail_bad = vec![b'a'; BAD_LEN - 2];
     tail_bad.extend_from_slice(&[0xff, 0]);
     for bad in [vec![0xff; BAD_LEN], tail_bad] {
