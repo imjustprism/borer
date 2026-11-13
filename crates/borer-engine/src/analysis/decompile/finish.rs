@@ -7,6 +7,7 @@ use super::*;
 use crate::analysis::Analysis;
 use crate::num::from_usize;
 use crate::program::{BinaryFormat, Program};
+pub use crate::timing::step_times;
 
 mod callee;
 pub(super) use callee::{CALLEE_INSTRUCTIONS_MAX, agreed_params};

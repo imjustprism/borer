@@ -85,7 +85,7 @@ impl Prov {
 pub(super) struct Ident(String);
 
 /// The C keywords [`Ident::new`] refuses.
-const KEYWORDS: [&str; 32] = [
+pub(super) const KEYWORDS: [&str; 32] = [
     "auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else",
     "enum", "extern", "float", "for", "goto", "if", "int", "long", "register", "return", "short",
     "signed", "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void",

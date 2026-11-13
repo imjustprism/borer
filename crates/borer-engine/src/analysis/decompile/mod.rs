@@ -97,10 +97,10 @@ mod verify_lanes;
 mod verify_rv;
 #[cfg(test)]
 mod verify_testing;
+pub mod view;
 mod warn;
 mod wire;
 
-pub use crate::timing::step_times;
 pub use answer::{Detail, answer, answer_header, shown, warnings, with_header};
 use arch::Lifter;
 pub use asserts::*;

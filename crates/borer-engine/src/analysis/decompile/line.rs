@@ -386,8 +386,20 @@ pub(super) fn goto_target(line: &str) -> Option<&str> {
 ///
 /// The address, or `None` for a line without a goto or with a computed one.
 pub(super) fn goto_address(line: &str) -> Option<u64> {
-    let hex = goto_target(line)?.strip_prefix("L_")?;
-    u64::from_str_radix(hex, 16).ok()
+    label_address(goto_target(line)?)
+}
+
+/// Returns the block address a label's name holds, `L_<va>`.
+///
+/// # Arguments
+///
+/// * `name` - The label's name, without its colon.
+///
+/// # Returns
+///
+/// The address, or `None` for a name that is no label's.
+pub(super) fn label_address(name: &str) -> Option<u64> {
+    u64::from_str_radix(name.strip_prefix("L_")?, 16).ok()
 }
 
 /// The condition and label of an `if (COND) goto LABEL;` line.

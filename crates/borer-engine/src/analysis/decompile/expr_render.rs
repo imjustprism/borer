@@ -238,7 +238,7 @@ impl Names<'_> {
             .symbols
             .iter()
             .find(|s| s.kind == SymbolKind::Import && s.addr == addr && s.addr != 0)
-            .map(|s| bare(&crate::search::demangled_name(&s.name)).into_owned())?;
+            .map(|s| import_spelling(&s.name))?;
         Some(if name == *self.own_name {
             format!("__imp_{name}")
         } else {
@@ -409,6 +409,17 @@ fn a64_name(r: a64::Reg) -> String {
         a64::Reg::Zr => "xzr".to_owned(),
         a64::Reg::V(n) => format!("v{n}"),
     }
+}
+
+/// Returns an import's name as a call through its slot spells it:
+/// demangled and bare ([`bare`]), unless it is the calling function's own
+/// name ([`Names::import_at`]).
+///
+/// # Arguments
+///
+/// * `raw` - The import symbol's name, possibly `DLL!name`.
+pub(super) fn import_spelling(raw: &str) -> String {
+    bare(&crate::search::demangled_name(raw)).into_owned()
 }
 
 /// Returns a function's name as the text spells it.

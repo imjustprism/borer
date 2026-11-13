@@ -57,7 +57,7 @@ const BODIES_MAX: usize = 8;
 const BODY_INSTRUCTIONS_MAX: usize = 32;
 
 /// The C keywords and constants a defined body may use besides its types.
-const C_WORDS: [&str; 16] = [
+pub(super) const C_WORDS: [&str; 16] = [
     "if", "else", "while", "for", "do", "switch", "case", "default", "break", "continue", "return",
     "goto", "sizeof", "nullptr", "true", "false",
 ];
@@ -103,16 +103,16 @@ const TABLE_MAX: usize = 256;
 
 /// The names a unit resolves, read once per program and names in force.
 #[derive(Debug, Default)]
-struct Index {
+pub(super) struct Index {
     /// Each function's name as the text spells it, to its entry; the
     /// lowest entry of several that share a name.
-    functions: BTreeMap<String, u64>,
+    pub(super) functions: BTreeMap<String, u64>,
     /// The names more than one function is spelled as.
-    shared: BTreeSet<String>,
+    pub(super) shared: BTreeSet<String>,
     /// The addresses the binary exports a symbol at.
     exported: BTreeSet<u64>,
     /// Each data symbol's name as the text spells it, to its address.
-    data: BTreeMap<String, u64>,
+    pub(super) data: BTreeMap<String, u64>,
     /// The imports' names, as the text spells them.
     imports: BTreeSet<String>,
 }
@@ -123,14 +123,16 @@ struct Index {
 /// The index reads the names alone, so it is keyed without the passes and
 /// choice points ([`Overlay::names_key`]): the texts a repair search builds
 /// under other passes and choices share it, where each of them built the
-/// whole index again.
+/// whole index again. Taking it reads every function's name; a caller that
+/// looks it up by the names one text spells takes it unnoted and notes the
+/// text ([`crate::analysis::reads`]).
 ///
 /// # Arguments
 ///
 /// * `program` - The loaded image.
 /// * `analysis` - Its functions.
 /// * `overlay` - User names.
-fn index(program: &Program, analysis: &Analysis, overlay: &Overlay) -> Arc<Index> {
+pub(super) fn index(program: &Program, analysis: &Analysis, overlay: &Overlay) -> Arc<Index> {
     analysis
         .derived
         .get_or_build_named("unit_index", overlay.names_key(), (), || {

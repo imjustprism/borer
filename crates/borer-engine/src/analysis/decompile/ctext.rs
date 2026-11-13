@@ -399,7 +399,7 @@ pub(super) fn tokens(text: &str) -> Result<Vec<Tok>, String> {
 /// # Arguments
 ///
 /// * `rest` - The text from the name's first character.
-fn name_end(rest: &str) -> usize {
+pub(super) fn name_end(rest: &str) -> usize {
     let mut end = rest
         .find(|d: char| !(d.is_alphanumeric() || d == '_'))
         .unwrap_or(rest.len());

@@ -23,6 +23,7 @@
 )]
 
 use borer_engine::analysis::decompile::verify::Verified;
+use borer_engine::analysis::decompile::view::view_of;
 use borer_engine::analysis::{
     Analysis, Overlay,
     decompile::{Swept, decompile, decompile_all, decompile_named_all, decompile_swept_all},
@@ -756,6 +757,116 @@ malformed: {malformed:?}",
     );
     assert_eq!(failed, 0, "functions that failed to decompile");
     assert!(malformed.is_empty(), "malformed output: {malformed:?}");
+}
+
+/// Returns each function's text as the sweep rendered it, named where it
+/// has a named one ([`Swept::named`], else [`Swept::text`]).
+///
+/// # Arguments
+///
+/// * `c` - The corpus.
+fn swept_texts(c: &Corpus) -> Vec<(u64, &str)> {
+    c.analysis
+        .functions
+        .iter()
+        .zip(c.swept())
+        .filter_map(|(f, s)| {
+            let s = s.as_ref()?;
+            Some((f.entry, s.named.as_deref().unwrap_or(&s.text)))
+        })
+        .collect()
+}
+
+/// Returns a hash of each text's view, on `threads` threads taking the
+/// texts from one queue: a hash of every token's line, end, kind and link
+/// in order, the view's canonical dump.
+///
+/// # Arguments
+///
+/// * `p` - The program.
+/// * `a` - Its analysis.
+/// * `texts` - Each function's entry and text.
+/// * `threads` - How many threads read the views.
+#[expect(
+    clippy::expect_used,
+    reason = "a worker thread that panics fails the sweep"
+)]
+fn view_dumps(p: &Program, a: &Analysis, texts: &[(u64, &str)], threads: usize) -> Vec<u64> {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let dump = |entry: u64, text: &str| {
+        let mut out = String::new();
+        if let Some(v) = view_of(p, a, &Overlay::default(), entry, text) {
+            for i in 0..v.lines() {
+                for (span, kind, link) in v.tokens(i) {
+                    out.push_str(&format!("{i}\t{}\t{kind:?}\t{link:?}\n", span.end));
+                }
+            }
+        }
+        let mut h = DefaultHasher::new();
+        out.hash(&mut h);
+        h.finish()
+    };
+    let mut each: Vec<(usize, u64)> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut done = Vec::new();
+                    loop {
+                        let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(&(entry, text)) = texts.get(k) else {
+                            return done;
+                        };
+                        done.push((k, dump(entry, text)));
+                    }
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|w| w.join().expect("a view thread"))
+            .collect()
+    });
+    each.sort_unstable();
+    each.into_iter().map(|(_, h)| h).collect()
+}
+
+/// Every function's view of the `BORER_DOGFOOD` binary reads the same
+/// tokens on one thread and on every core, and again in one process.
+///
+/// The views read the sweep's texts ([`swept_texts`]): on the corpus's
+/// analysis on one thread, on a fresh analysis whose memo the threads fill
+/// as they race, and on the first analysis again.
+#[test]
+#[ignore = "set BORER_DOGFOOD to a binary path to run this sweep"]
+fn every_view_reads_the_same_at_any_thread_count() {
+    let c = &*CORPUS;
+    let texts = swept_texts(c);
+    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    let once = view_dumps(&c.program, &c.analysis, &texts, 1);
+    let fresh = Analysis::compute(&c.program);
+    let wide = view_dumps(&c.program, &fresh, &texts, cores);
+    let again = view_dumps(&c.program, &c.analysis, &texts, 1);
+    let differ = |other: &[u64]| {
+        texts
+            .iter()
+            .zip(once.iter().zip(other))
+            .filter(|(_, (x, y))| x != y)
+            .map(|((e, _), _)| format!("{e:#x}"))
+            .take(10)
+            .collect::<Vec<_>>()
+    };
+    println!("{} views read on 1 and {cores} threads", texts.len());
+    assert!(
+        differ(&wide).is_empty(),
+        "across threads: {:?}",
+        differ(&wide)
+    );
+    assert!(
+        differ(&again).is_empty(),
+        "in one process: {:?}",
+        differ(&again)
+    );
 }
 
 /// Every fixture function's text is well formed, headers included.
