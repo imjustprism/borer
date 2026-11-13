@@ -25,8 +25,11 @@
 //! between its own and the scope's end - name the decompiler's stack
 //! slots, so `alpha` renders where `local_8` otherwise would.
 
+mod lines;
+
 use crate::dwarf::{frame_slot, local_name_ok};
 use crate::program::{Section, Symbol, SymbolKind, pe::rva_to_va};
+use lines::resolve_lines;
 use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -734,53 +737,6 @@ impl Gathered {
             crate::dwarf::take_local(map, slot, name);
         }
     }
-
-    /// Takes the first line row each stated procedure starts at.
-    ///
-    /// Rows are asked of the module's own program by the offset its
-    /// records state, and are not promised to be in offset order, so the
-    /// winner is the row with the least offset inside the procedure's
-    /// extent, ties by the lesser line. Only a procedure the gather sized
-    /// has an extent to place rows in; a row outside it, a zero line, or a
-    /// file the program does not name contributes nothing.
-    ///
-    /// # Arguments
-    ///
-    /// * `program` - The module's line program.
-    /// * `map` - The address map, translating the internal offsets the
-    ///   rows state into image RVAs.
-    /// * `procs` - The procedures this module states, RVA and record
-    ///   offset.
-    fn take_lines(
-        &mut self,
-        program: &pdb::LineProgram<'_>,
-        map: &pdb::AddressMap<'_>,
-        procs: &[(u32, pdb::PdbInternalSectionOffset)],
-    ) {
-        use pdb::FallibleIterator as _;
-        for &(rva, offset) in procs {
-            let Some(&end) = self.extents.get(&rva) else {
-                continue;
-            };
-            let mut rows = program.lines_for_symbol(offset);
-            while let Ok(Some(row)) = rows.next() {
-                let Some(at) = row.offset.to_rva(map).map(|rva| rva.0) else {
-                    continue;
-                };
-                if at < rva || at >= end || row.line_start == 0 {
-                    continue;
-                }
-                if self.lines.get(&rva).is_some_and(|&(best, _, line)| {
-                    best < at || (best == at && line <= row.line_start)
-                }) {
-                    continue;
-                }
-                if let Ok(file) = program.get_file_info(row.file_index) {
-                    self.lines.insert(rva, (at, file.name, row.line_start));
-                }
-            }
-        }
-    }
 }
 
 /// Reads how far a procedure's frame reaches below the entry stack
@@ -913,11 +869,12 @@ fn gather<'s>(
         max: SYMBOLS_MAX,
         ..Gathered::default()
     };
+    let mut line_reader = lines::LineReader::new(db, want_lines);
     if let Ok(dbi) = db.debug_information()
         && let Ok(mut modules) = dbi.modules()
     {
         while let Ok(Some(m)) = modules.next() {
-            let Ok(Some(info)) = db.module_info(&m) else {
+            let Some((info, lines_ok)) = line_reader.open(db, &m) else {
                 continue;
             };
             let Ok(mut syms) = info.symbols() else {
@@ -1047,12 +1004,7 @@ fn gather<'s>(
                     }
                 }
             }
-            if want_lines
-                && !procs.is_empty()
-                && let Ok(program) = info.line_program()
-            {
-                out.take_lines(&program, map, &procs);
-            }
+            out.collect_module_lines(&info, lines_ok, map, &procs);
         }
     }
     if let Ok(globals) = db.global_symbols() {
@@ -1153,45 +1105,6 @@ fn signatures<'s>(
         let sig = resolve(&finder, index);
         if sig.ret.is_some() || !sig.params.is_empty() {
             out.insert(rva, sig);
-        }
-    }
-    out
-}
-
-/// Reads the source file and line each gathered procedure starts at, from
-/// the modules' line programs.
-///
-/// One row per procedure: the first line row the module's program maps
-/// inside the procedure's extent, which is the line its first instruction
-/// was written on. A name the string table does not hold contributes
-/// nothing, never a guess; the winners stay bounded by the procedures
-/// gathered, whatever the rows number.
-///
-/// # Arguments
-///
-/// * `db` - The opened PDB.
-/// * `lines` - The winning rows, as [`Gathered::lines`] left them: their
-///   offset in the image, the file's reference into the string table and
-///   their line.
-///
-/// # Returns
-///
-/// Procedure RVA to the `(file, line)` its first row names.
-fn resolve_lines<'s>(
-    db: &mut pdb::PDB<'s, Cursor<&'s [u8]>>,
-    lines: &BTreeMap<u32, (u32, pdb::StringRef, u32)>,
-) -> BTreeMap<u32, (String, u32)> {
-    let mut out = BTreeMap::new();
-    if lines.is_empty() {
-        return out;
-    }
-    let Ok(table) = db.string_table() else {
-        return out;
-    };
-    for (start, (_, file, line)) in lines {
-        let name = table.get(*file).map(|n| n.to_string()).unwrap_or_default();
-        if !name.is_empty() {
-            out.insert(*start, (crate::text::one_line(&name), *line));
         }
     }
     out
