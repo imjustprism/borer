@@ -599,6 +599,15 @@ struct RawSymtab<'a> {
 
 impl<'a> RawSymtab<'a> {
     /// Opens the last in-bounds `LC_SYMTAB` load command in `m`.
+    ///
+    /// # Arguments
+    ///
+    /// * `slice` - Thin Mach-O image slice.
+    /// * `m` - Parsed Mach-O load commands and endianness.
+    ///
+    /// # Returns
+    ///
+    /// Bounded symbol-table reader, or `None` when no `LC_SYMTAB` sits inside `slice`.
     fn parse(slice: &'a [u8], m: &MachO<'a>) -> Option<Self> {
         let (syms, strings, nsyms) =
             m.load_commands
@@ -627,6 +636,14 @@ impl<'a> RawSymtab<'a> {
     }
 
     /// Reads the `index`-th `nlist` record and its bounded string prefix.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - Zero-based `nlist` index.
+    ///
+    /// # Returns
+    ///
+    /// `(name_prefix, nlist)`, or `None` when `index` is out of bounds or its string is invalid.
     fn get(&mut self, index: usize) -> Option<(&'a str, RawNlist)> {
         if index >= self.nsyms {
             return None;
@@ -675,6 +692,14 @@ impl<'a> RawSymtab<'a> {
     }
 
     /// Resolves `n_strx` to a UTF-8 prefix scanning at most [`NLIST_SCAN_MAX`] bytes.
+    ///
+    /// # Arguments
+    ///
+    /// * `n_strx` - Byte offset into the Mach-O string table.
+    ///
+    /// # Returns
+    ///
+    /// Bounded UTF-8 prefix, or `None` when out of range, unterminated at EOF, or invalid UTF-8.
     fn name_at(&mut self, n_strx: u32) -> Option<&'a str> {
         let slot = usize::try_from(n_strx).unwrap_or(0) & (NLIST_CACHE_SLOTS - 1);
         if let Some((hit, cached)) = self.cache[slot]
@@ -688,15 +713,17 @@ impl<'a> RawSymtab<'a> {
             .and_then(|rest| {
                 let window = &rest[..rest.len().min(NLIST_SCAN_MAX)];
                 if let Some(end) = window.iter().position(|&b| b == 0) {
-                    std::str::from_utf8(&window[..end]).ok()
-                } else {
-                    match std::str::from_utf8(window) {
-                        Ok(s) => Some(s),
-                        Err(e) if e.error_len().is_none() => {
-                            std::str::from_utf8(&window[..e.valid_up_to()]).ok()
-                        }
-                        Err(_) => None,
+                    return std::str::from_utf8(&window[..end]).ok();
+                }
+                if rest.len() < NLIST_SCAN_MAX {
+                    return None;
+                }
+                match std::str::from_utf8(window) {
+                    Ok(s) => Some(s),
+                    Err(e) if e.error_len().is_none() => {
+                        std::str::from_utf8(&window[..e.valid_up_to()]).ok()
                     }
+                    Err(_) => None,
                 }
             });
         self.cache[slot] = Some((n_strx, parsed));
@@ -704,9 +731,8 @@ impl<'a> RawSymtab<'a> {
     }
 }
 
-/// Names a Mach-O's pointer-section slots through its indirect symbol table,
-/// walking at most the indirect table's entry count across all sections and
-/// naming each `nlist` index at most [`SLOTS_PER_IMPORT`] times.
+/// Names pointer-section slots through the indirect symbol table within the
+/// indirect-table and [`SLOTS_PER_IMPORT`] caps.
 ///
 /// # Arguments
 ///
@@ -762,7 +788,9 @@ where
         if slots_left == 0 {
             break;
         }
-        let slots = usize::try_from(s.size / word).unwrap_or(0).min(slots_left);
+        let slots = usize::try_from(s.size / word)
+            .unwrap_or(usize::MAX)
+            .min(slots_left);
         for i in 0..slots {
             let Some(index) = usize::try_from(s.reserved1)
                 .ok()
@@ -898,7 +926,7 @@ fn image<'a>(
         if *slots < SLOTS_PER_IMPORT && seen.insert((b.slot, name)) {
             *slots += 1;
             symbols.push(Symbol {
-                name: names.take(name),
+                name: bind_symbol_name(import, name, *slots, names),
                 addr: b.slot,
                 kind: SymbolKind::Import,
             });
@@ -954,6 +982,35 @@ fn image<'a>(
         fit,
         lenient: None,
         relocs,
+    }
+}
+
+/// Chooses the owned symbol name for `slot` (1-based) of one bound `import`.
+///
+/// The first slot reuses the verbatim head `dyld::read` already paid for, and
+/// every slot of a replaced import shares its `name_<n>` placeholder; extra
+/// slots of a verbatim import pay from `names` so fan-out stays budgeted.
+///
+/// # Arguments
+///
+/// * `import` - Interned dyld import record.
+/// * `name` - Display stem with any leading C underscore stripped.
+/// * `slot` - One-based slot index emitted for `import`.
+/// * `names` - Remaining load name budget.
+///
+/// # Returns
+///
+/// Owned symbol name for the bound slot.
+fn bind_symbol_name(
+    import: &crate::reloc::Import,
+    name: &str,
+    slot: usize,
+    names: &mut Names,
+) -> String {
+    if slot == 1 || import.replaced {
+        name.to_owned()
+    } else {
+        names.take(name)
     }
 }
 

@@ -35,6 +35,9 @@ const STRING_MAX: usize = 4096;
 /// Most units one file's walk reads; past it the rest name nothing.
 const UNITS_MAX: usize = 1 << 20;
 
+/// Deepest DIE child chain one unit walks before refusing deeper nesting.
+const DIE_DEPTH_MAX: usize = 1024;
+
 /// Bytes of `.debug_abbrev` one walk may parse past the section's size.
 ///
 /// Tables are read once per offset ([`Abbrevs`]), so a real file parses
@@ -484,6 +487,8 @@ struct Text {
     intern_left: usize,
     /// Bytes the answer may still copy.
     copy_left: usize,
+    /// Whether the DIE walk has stopped taking further names.
+    stopped: bool,
 }
 
 impl Text {
@@ -501,6 +506,7 @@ impl Text {
                 .saturating_add(strings.lines.len())
                 .saturating_mul(2),
             copy_left: TEXT_MAX,
+            stopped: false,
         }
     }
 
@@ -544,18 +550,51 @@ impl Text {
             }
             None => {
                 self.copy_left = 0;
+                self.stopped = true;
                 false
             }
         }
     }
 
-    /// Whether the copy budget is spent.
+    /// Takes `n` bytes while keeping at least `floor` bytes for type resolution.
+    ///
+    /// # Arguments
+    ///
+    /// * `n` - Bytes about to be copied during the DIE walk.
+    /// * `floor` - Bytes reserved so gathered entries still resolve their types.
     ///
     /// # Returns
     ///
-    /// `true` once [`Text::copy`] refused.
+    /// `true` when `n` fits above `floor`; otherwise marks the walk stopped.
+    fn copy_above(&mut self, n: usize, floor: usize) -> bool {
+        match self.copy_left.checked_sub(n).filter(|&left| left >= floor) {
+            Some(left) => {
+                self.copy_left = left;
+                true
+            }
+            None => {
+                self.stopped = true;
+                false
+            }
+        }
+    }
+
+    /// Whether the DIE walk budget is spent.
+    ///
+    /// # Returns
+    ///
+    /// `true` once [`Text::copy`] or [`Text::copy_above`] refused.
     fn spent(&self) -> bool {
-        self.copy_left == 0
+        self.stopped || self.copy_left == 0
+    }
+
+    /// Whether post-walk type resolution still has copy budget left.
+    ///
+    /// # Returns
+    ///
+    /// `true` while [`Text::copy_left`] is non-zero.
+    fn has_copy(&self) -> bool {
+        self.copy_left > 0
     }
 }
 
@@ -817,6 +856,53 @@ struct TypeNode {
     scalar: Option<(u64, u64)>,
 }
 
+/// Inserts a type-bearing DIE into `nodes` while skipping non-type tags and
+/// holding the unit's type map within `cap`.
+///
+/// # Arguments
+///
+/// * `nodes` - Unit type graph keyed by DIE offset.
+/// * `cap` - Maximum entries `nodes` may hold for this unit.
+/// * `here` - Section offset of the current DIE.
+/// * `tag` - `DW_TAG_*` of the current DIE.
+/// * `entry` - Parsed attributes of the current DIE.
+/// * `inner` - Resolved `DW_AT_type` section offset, if any.
+fn record_type_node(
+    nodes: &mut BTreeMap<u64, TypeNode>,
+    cap: usize,
+    here: u64,
+    tag: u64,
+    entry: &Entry,
+    inner: Option<u64>,
+) {
+    if nodes.len() < cap
+        && !matches!(
+            tag,
+            0x0b | 0x11
+                | 0x1d
+                | 0x39
+                | 0x3c
+                | 0x48
+                | TAG_SUBPROGRAM
+                | TAG_FORMAL_PARAMETER
+                | TAG_VARIABLE
+                | TAG_MEMBER
+                | TAG_ENUMERATOR
+                | TAG_SUBRANGE
+        )
+    {
+        nodes.insert(
+            here,
+            TypeNode {
+                tag,
+                name: entry.name.clone(),
+                inner,
+                scalar: entry.encoding.zip(entry.byte_size),
+            },
+        );
+    }
+}
+
 /// Renders a type as C source by following the chain from `at`.
 ///
 /// A type is a chain of entries: a parameter points at a `const`, which
@@ -1014,26 +1100,32 @@ fn scalar(encoding: u64, size: u64) -> Option<TypeExpr> {
 /// * `nodes` - Every type entry of the unit, by section offset.
 /// * `at` - Where to start, or `None` for `void`.
 /// * `depth` - Remaining links to follow, against a circular chain.
+/// * `text` - Budget charged for each `TypeExpr::Named` allocation.
 ///
 /// # Returns
 ///
-/// The type, or `None` when the chain does not resolve into the language.
-fn type_expr(nodes: &BTreeMap<u64, TypeNode>, at: Option<u64>, depth: u32) -> Option<TypeExpr> {
+/// The type, or `None` when the chain does not resolve into the language or
+/// its named leaf exceeds `text`.
+fn type_expr(
+    nodes: &BTreeMap<u64, TypeNode>,
+    at: Option<u64>,
+    depth: u32,
+    text: &mut Text,
+) -> Option<TypeExpr> {
     let at = at?;
     if depth == 0 {
         return None;
     }
     let node = nodes.get(&at)?;
-    let inner = || type_expr(nodes, node.inner, depth - 1);
     match node.tag {
-        TAG_POINTER => Some(TypeExpr::Ptr(Box::new(inner().unwrap_or(TypeExpr::U8)))),
-        TAG_CONST | TAG_VOLATILE => inner(),
-        TAG_TYPEDEF => inner(),
-        TAG_STRUCTURE | TAG_CLASS | TAG_UNION | TAG_ENUMERATION => node
-            .name
-            .as_deref()
-            .filter(|n| is_ident(n))
-            .map(|n| TypeExpr::Named(n.to_owned())),
+        TAG_POINTER => Some(TypeExpr::Ptr(Box::new(
+            type_expr(nodes, node.inner, depth - 1, text).unwrap_or(TypeExpr::U8),
+        ))),
+        TAG_CONST | TAG_VOLATILE | TAG_TYPEDEF => type_expr(nodes, node.inner, depth - 1, text),
+        TAG_STRUCTURE | TAG_CLASS | TAG_UNION | TAG_ENUMERATION => {
+            let n = node.name.as_deref().filter(|n| is_ident(n))?;
+            (text.has_copy() && text.copy(n.len())).then(|| TypeExpr::Named(n.to_owned()))
+        }
         _ => node
             .scalar
             .and_then(|(encoding, size)| scalar(encoding, size)),
@@ -1151,7 +1243,9 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>, text: &mut Text) -
         let mut array_scopes: Vec<Option<u64>> = Vec::new();
         let mut counts: BTreeMap<u64, u64> = BTreeMap::new();
         let unit_base = u64::try_from(at_start).unwrap_or(0);
-        while !c.done(end) {
+        let reserve = text.copy_left / 4;
+        let node_cap = ((end - at_start) / 24).max(32);
+        while !text.spent() && !c.done(end) {
             let here = from_usize(c.at);
             let Some(code) = c.uleb() else { break };
             if code == 0 {
@@ -1176,7 +1270,7 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>, text: &mut Text) -
                     address_size,
                     offset_size,
                     strings,
-                    &mut text,
+                    text,
                 ) else {
                     read = false;
                     break;
@@ -1204,7 +1298,10 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>, text: &mut Text) -
             if !read {
                 break;
             }
-            if let Some(n) = &entry.name {
+            if abbreviation.tag == TAG_SUBPROGRAM
+                && by_offset.len() < node_cap
+                && let Some(n) = &entry.name
+            {
                 by_offset.insert(here, n.clone());
             }
             let absolute = |r: Option<(u64, bool)>| {
@@ -1216,19 +1313,18 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>, text: &mut Text) -
                     }
                 })
             };
-            nodes.insert(
+            record_type_node(
+                &mut nodes,
+                node_cap,
                 here,
-                TypeNode {
-                    tag: abbreviation.tag,
-                    name: entry.name.clone(),
-                    inner: absolute(entry.type_ref),
-                    scalar: entry.encoding.zip(entry.byte_size),
-                },
+                abbreviation.tag,
+                &entry,
+                absolute(entry.type_ref),
             );
             if abbreviation.tag == TAG_VARIABLE
                 && let Some(name) = entry.name.as_ref().filter(|n| is_ident(n))
                 && globals.len() + unit_globals.len() < GLOBALS_MAX
-                && text.copy(name.len())
+                && text.copy_above(name.len(), reserve)
             {
                 let word = address_size;
                 let addr = entry
@@ -1245,6 +1341,7 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>, text: &mut Text) -
                 }
             }
             if abbreviation.tag == TAG_SUBRANGE
+                && counts.len() < node_cap
                 && let (Some(Some(array)), Some(n)) = (array_scopes.last(), entry.count)
             {
                 counts.insert(*array, n);
@@ -1257,7 +1354,7 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>, text: &mut Text) -
             {
                 match (&entry.name, entry.origin) {
                     (Some(name), _) => {
-                        if !text.copy(name.len()) {
+                        if !text.copy_above(name.len(), reserve) {
                             break;
                         }
                         open.extend(abbreviation.children.then_some(out.len()));
@@ -1276,8 +1373,10 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>, text: &mut Text) -
                             locals: BTreeMap::new(),
                         });
                     }
-                    (None, Some(origin)) => pending.push((low_pc, origin)),
-                    (None, None) => {}
+                    (None, Some(origin)) if pending.len() < node_cap => {
+                        pending.push((low_pc, origin));
+                    }
+                    (None, _) => {}
                 }
             } else if abbreviation.tag == TAG_FORMAL_PARAMETER
                 && let Some(name) = entry.name.clone()
@@ -1285,7 +1384,7 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>, text: &mut Text) -
                 && let Some(owner) = open.last().copied()
                 && let Some(f) = out.get_mut(owner)
             {
-                if !text.copy(name.len()) {
+                if !text.copy_above(name.len(), reserve) {
                     break;
                 }
                 unresolved_params.push((owner, f.parameters.len(), absolute(entry.type_ref)));
@@ -1310,12 +1409,13 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>, text: &mut Text) -
                         }
                     });
                 if local_name_ok(name)
-                    && text.copy(name.len())
+                    && text.copy_above(name.len(), reserve)
                     && let Some(f) = out.get_mut(owner)
                 {
                     take_local(&mut f.locals, slot, name);
                 }
             } else if matches!(abbreviation.tag, TAG_MEMBER | TAG_ENUMERATOR)
+                && !text.spent()
                 && let (Some(name), Some(owner)) =
                     (&entry.name, type_scopes.last().copied().flatten())
                 && let Some(s) = stated.get_mut(owner)
@@ -1324,12 +1424,14 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>, text: &mut Text) -
                 if abbreviation.tag == TAG_MEMBER
                     && let Some(off) = entry.member_off
                     && s.members.len() < FIELDS_MAX
+                    && text.copy_above(name.len(), reserve)
                 {
                     s.members
                         .push((name.to_string(), off, absolute(entry.type_ref)));
                 } else if abbreviation.tag == TAG_ENUMERATOR
                     && let Some(value) = entry.const_value
                     && s.values.len() < ENUM_VALUES_MAX
+                    && text.copy_above(name.len(), reserve)
                 {
                     s.values.push((value, name.to_string()));
                 }
@@ -1338,9 +1440,11 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>, text: &mut Text) -
                 abbreviation.tag,
                 TAG_STRUCTURE | TAG_CLASS | TAG_UNION | TAG_ENUMERATION
             ) && abbreviation.children
+                && !text.spent()
                 && let (Some(name), Some(size)) = (&entry.name, entry.byte_size)
                 && types.len() + stated.len() < TYPES_MAX
                 && check_type_name(name).is_ok()
+                && text.copy_above(name.len(), reserve)
             {
                 stated.push(Stated {
                     name: name.to_string(),
@@ -1354,6 +1458,9 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>, text: &mut Text) -
                 None
             };
             if abbreviation.children {
+                if depth.len() >= DIE_DEPTH_MAX {
+                    break;
+                }
                 depth.push(named_function);
                 type_scopes.push(opened);
                 array_scopes.push((abbreviation.tag == TAG_ARRAY).then_some(here));
@@ -1375,38 +1482,16 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>, text: &mut Text) -
         }
         for (index, type_ref) in unresolved {
             if let Some(f) = out.get_mut(index)
-                && !text.spent()
+                && text.has_copy()
             {
                 f.return_type = type_name(&nodes, type_ref, TYPE_DEPTH)
                     .filter(|t| t != "void" && text.copy(t.len()));
             }
         }
-        for node in nodes.values().filter(|n| n.tag == TAG_TYPEDEF) {
-            let Some(name) = node.name.as_deref().filter(|n| is_ident(n)) else {
-                continue;
-            };
-            if typedefs.len() >= TYPES_MAX || typedefs.contains_key(name) || text.spent() {
-                continue;
-            }
-            let Some(to) = type_name(&nodes, node.inner, TYPE_DEPTH) else {
-                continue;
-            };
-            let to = match to.as_str() {
-                "struct" | "union" | "enum" => format!("{to} {name}"),
-                _ => to,
-            };
-            let words: Vec<&str> = to.split_whitespace().collect();
-            let tagged =
-                words.iter().zip(words.iter().skip(1)).all(|(kw, next)| {
-                    !matches!(*kw, "struct" | "union" | "enum") || is_ident(next)
-                }) && !matches!(words.last(), Some(&("struct" | "union" | "enum")));
-            if tagged && !to.contains(['(', '[', '&']) && to != name && text.copy(to.len()) {
-                typedefs.insert(name.to_owned(), to);
-            }
-        }
+        collect_typedefs(&nodes, text, &mut typedefs);
         for (owner, slot, type_ref) in unresolved_params {
             if let Some(p) = out.get_mut(owner).and_then(|f| f.parameters.get_mut(slot))
-                && !text.spent()
+                && text.has_copy()
             {
                 p.type_name =
                     type_name(&nodes, type_ref, TYPE_DEPTH).filter(|t| text.copy(t.len()));
@@ -1414,18 +1499,20 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>, text: &mut Text) -
         }
         for (name, addr, type_ref) in unit_globals {
             let ty = match type_ref.and_then(|at| nodes.get(&at)) {
-                Some(node) if node.tag == TAG_ARRAY => type_expr(&nodes, node.inner, TYPE_DEPTH)
-                    .map(|elem| {
+                Some(node) if node.tag == TAG_ARRAY => {
+                    type_expr(&nodes, node.inner, TYPE_DEPTH, text).map(|elem| {
                         let len = type_ref
                             .and_then(|at| counts.get(&at))
                             .copied()
                             .filter(|n| (1..=ARRAY_LEN_MAX).contains(n))
                             .unwrap_or(1);
                         TypeExpr::Array(Box::new(elem), len)
-                    }),
-                Some(_) | None => type_expr(&nodes, type_ref, TYPE_DEPTH),
+                    })
+                }
+                Some(_) | None => type_expr(&nodes, type_ref, TYPE_DEPTH, text),
             };
-            let type_name = (!text.spent())
+            let type_name = text
+                .has_copy()
                 .then(|| type_name(&nodes, type_ref, TYPE_DEPTH))
                 .flatten()
                 .filter(|t| text.copy(t.len()));
@@ -1436,39 +1523,15 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>, text: &mut Text) -
                 ty,
             });
         }
-        for s in stated {
-            if s.is_enum {
-                if let Ok(ty) = build_enum(&s.name, s.size, &s.values) {
-                    types.insert(s.name, ty);
-                }
-                continue;
-            }
-            let mut fields: BTreeMap<u64, UserField> = BTreeMap::new();
-            for (name, off, type_ref) in s.members {
-                if fields.contains_key(&off) {
-                    continue;
-                }
-                if let Some(ty) = type_expr(&nodes, type_ref, TYPE_DEPTH) {
-                    fields.insert(off, UserField { name, ty });
-                }
-            }
-            if fields.is_empty() {
-                continue;
-            }
-            types.insert(
-                s.name,
-                UserType::Struct(UserStruct {
-                    size: s.size,
-                    fields,
-                }),
-            );
-        }
+        collect_user_types(stated, &nodes, text, &mut types);
     }
     for (name, to) in &typedefs {
-        if let Some(tag) = to.strip_prefix("struct ")
+        if text.has_copy()
+            && let Some(tag) = to.strip_prefix("struct ")
             && tag != name
             && matches!(types.get(tag), Some(UserType::Struct(_)))
             && !types.contains_key(name)
+            && text.copy(name.len().saturating_add(tag.len()))
         {
             types.insert(
                 name.clone(),
@@ -1485,6 +1548,90 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>, text: &mut Text) -
         types,
         typedefs,
         globals,
+    }
+}
+
+/// Resolves one compilation unit's `DW_TAG_typedef` entries into `typedefs`.
+///
+/// # Arguments
+///
+/// * `nodes` - Unit type graph keyed by DIE offset.
+/// * `text` - Copy budget charged for accepted typedef spellings.
+/// * `typedefs` - Output map receiving resolved typedefs.
+fn collect_typedefs(
+    nodes: &BTreeMap<u64, TypeNode>,
+    text: &mut Text,
+    typedefs: &mut BTreeMap<String, String>,
+) {
+    for node in nodes.values().filter(|n| n.tag == TAG_TYPEDEF) {
+        let Some(name) = node.name.as_deref().filter(|n| is_ident(n)) else {
+            continue;
+        };
+        if typedefs.len() >= TYPES_MAX || typedefs.contains_key(name) || !text.has_copy() {
+            continue;
+        }
+        let Some(to) = type_name(nodes, node.inner, TYPE_DEPTH) else {
+            continue;
+        };
+        let to = match to.as_str() {
+            "struct" | "union" | "enum" => format!("{to} {name}"),
+            _ => to,
+        };
+        let words: Vec<&str> = to.split_whitespace().collect();
+        let tagged = words
+            .iter()
+            .zip(words.iter().skip(1))
+            .all(|(kw, next)| !matches!(*kw, "struct" | "union" | "enum") || is_ident(next))
+            && !matches!(words.last(), Some(&("struct" | "union" | "enum")));
+        if tagged
+            && !to.contains(['(', '[', '&'])
+            && to != name
+            && text.copy(name.len().saturating_add(to.len()))
+        {
+            typedefs.insert(name.to_owned(), to);
+        }
+    }
+}
+
+/// Resolves one compilation unit's [`Stated`] structs and enums into `types`.
+///
+/// # Arguments
+///
+/// * `stated` - Gathered struct, union, class, and enum definitions.
+/// * `nodes` - Unit type graph keyed by DIE offset.
+/// * `text` - Budget charged for named field types.
+/// * `types` - Output map receiving resolved user types.
+fn collect_user_types(
+    stated: Vec<Stated>,
+    nodes: &BTreeMap<u64, TypeNode>,
+    text: &mut Text,
+    types: &mut BTreeMap<String, UserType>,
+) {
+    for s in stated {
+        if s.is_enum {
+            if let Ok(ty) = build_enum(&s.name, s.size, &s.values) {
+                types.insert(s.name, ty);
+            }
+            continue;
+        }
+        let mut fields: BTreeMap<u64, UserField> = BTreeMap::new();
+        for (name, off, type_ref) in s.members {
+            if fields.contains_key(&off) {
+                continue;
+            }
+            if let Some(ty) = type_expr(nodes, type_ref, TYPE_DEPTH, text) {
+                fields.insert(off, UserField { name, ty });
+            }
+        }
+        if !fields.is_empty() {
+            types.insert(
+                s.name,
+                UserType::Struct(UserStruct {
+                    size: s.size,
+                    fields,
+                }),
+            );
+        }
     }
 }
 
@@ -1601,6 +1748,7 @@ pub(crate) fn read_budgeted(
     let mut text = Text::new(&strings);
     let cap = names.left().min(TEXT_MAX);
     text.copy_left = cap;
+    text.stopped = cap == 0;
     let out = read_in(info, abbrev, &strings, &mut text);
     names.spend(cap - text.copy_left);
     out

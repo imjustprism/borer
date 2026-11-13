@@ -115,8 +115,8 @@ const PERMISSIVE_STRTAB_STEPS_MAX: u128 = 64 << 20;
 /// Most `(offset, &str)` entries goblin's permissive ELF preparses may hold.
 const PERMISSIVE_STRTAB_ENTRIES_MAX: u128 = 2 << 20;
 
-/// Exact byte-scan steps and entry count goblin's permissive `Strtab` loop
-/// takes on `bytes[offset..offset + len]`, bounded by the permissive caps.
+/// Counts the byte-scan steps and entries goblin's permissive `Strtab` loop
+/// takes on `bytes[offset..offset + len]`, stopping past the permissive caps.
 ///
 /// On invalid UTF-8 goblin records `""` and advances by one byte, rescanning
 /// to the same NUL on every invalid prefix of a chunk. The first starting
@@ -128,6 +128,10 @@ const PERMISSIVE_STRTAB_ENTRIES_MAX: u128 = 2 << 20;
 /// * `bytes` - Whole ELF file image.
 /// * `offset` - String table file offset.
 /// * `len` - Stated string table byte length.
+///
+/// # Returns
+///
+/// `(steps, entries)` consumed before finishing or exceeding a permissive cap.
 fn strtab_cost(bytes: &[u8], offset: usize, len: usize) -> (u128, u128) {
     let Some(avail) = bytes.get(offset..) else {
         return (0, 0);
@@ -142,7 +146,13 @@ fn strtab_cost(bytes: &[u8], offset: usize, len: usize) -> (u128, u128) {
         let chunk_len = nul.unwrap_or(rest.len());
         let has_nul = nul.is_some();
         let chunk = &rest[..chunk_len];
-        let valid_tail = chunk.utf8_chunks().last().map_or(0, |c| c.valid().len());
+        let valid_tail = chunk.utf8_chunks().last().map_or(0, |c| {
+            if c.invalid().is_empty() {
+                c.valid().len()
+            } else {
+                0
+            }
+        });
         let bad = chunk_len - valid_tail;
         let runs = bad + usize::from(valid_tail > 0 || has_nul);
         let top = u128::try_from(chunk_len + usize::from(has_nul)).unwrap_or(0);
@@ -164,6 +174,10 @@ fn strtab_cost(bytes: &[u8], offset: usize, len: usize) -> (u128, u128) {
 /// # Arguments
 ///
 /// * `bytes` - Whole ELF file image.
+///
+/// # Returns
+///
+/// `true` when every preparsed string table fits within the scan and entry caps.
 ///
 /// # Errors
 ///

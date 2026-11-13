@@ -1,7 +1,5 @@
-//! A name many entries of a file's table share: the loader copies of it
-//! for each entry only what a row shows, and replaces excess names once the
-//! per-load name budget is spent, so the copies stay within the per-byte
-//! heap bar.
+//! Shared long table names: the loader copies only a row's head and replaces
+//! names past the per-load budget so total heap stays within the file-size bar.
 
 use std::path::PathBuf;
 
@@ -30,14 +28,15 @@ const NAME_LEN: usize = 64 << 10;
 /// * `names` - Extracted symbol names in load order.
 /// * `total` - Expected total entry count.
 /// * `shown` - Expected rendered string for budgeted entries.
-fn assert_budgeted(p: &Program, names: &[&str], total: usize, shown: &str) {
+/// * `extra_cut` - Additional names replaced later in the same load (such as header library rows).
+fn assert_budgeted(p: &Program, names: &[&str], total: usize, shown: &str, extra_cut: usize) {
     assert_eq!(names.len(), total);
     let kept = names.iter().take_while(|n| **n == shown).count();
     assert!(kept > 0 && kept < total, "kept {kept} of {total}");
     for (k, actual) in names[kept..].iter().enumerate() {
         assert_eq!(*actual, format!("name_{}", k + 1));
     }
-    let cut = total - kept;
+    let cut = total - kept + extra_cut;
     let expected = format!("{cut} names past the load name budget replaced");
     assert!(
         p.headers.lenient.iter().any(|w| w == &expected),
@@ -84,6 +83,34 @@ fn symtab_elf(count: usize, name: &[u8], strtab_addr: u64) -> Vec<u8> {
     elfgen::build(elfgen::ET_EXEC, elfgen::EM_X86_64, 0x1000, &secs)
 }
 
+/// Loads `bytes` under `label`, verifies peak heap against
+/// [`LOAD_HEAP_PER_BYTE`], and checks that `total` local symbols follow the
+/// name budget for `glyph`.
+///
+/// # Arguments
+///
+/// * `label` - Synthetic filename passed to [`Program::from_bytes`].
+/// * `bytes` - Raw image bytes.
+/// * `total` - Expected `SymbolKind::Local` count.
+/// * `glyph` - Repeated character or scalar forming the budgeted prefix.
+fn check_local_names(label: &str, bytes: Vec<u8>, total: usize, glyph: &str) {
+    let size = bytes.len();
+    let (loaded, extra) = measured(|| Program::from_bytes(PathBuf::from(label), bytes));
+    let p = loaded.expect("the image loads");
+    assert!(
+        extra <= LOAD_HEAP_PER_BYTE * size,
+        "a {size} byte file took {extra} bytes of heap to load"
+    );
+    let shown = format!("{}...", glyph.repeat(OUTSIDE_MAX));
+    let names: Vec<&str> = p
+        .symbols
+        .iter()
+        .filter(|s| s.kind == SymbolKind::Local)
+        .map(|s| s.name.as_str())
+        .collect();
+    assert_budgeted(&p, &names, total, &shown, 0);
+}
+
 /// An ELF of [`SYMBOLS`] function symbols that all name one string of
 /// [`NAME_LEN`] bytes loads within the heap bar, keeping budgeted heads and
 /// replacing the excess deterministically.
@@ -91,21 +118,7 @@ fn symtab_elf(count: usize, name: &[u8], strtab_addr: u64) -> Vec<u8> {
 fn symbols_naming_one_long_string_load_within_the_heap_bar() {
     let _one = serial();
     let bytes = symtab_elf(SYMBOLS, &vec![b'A'; NAME_LEN], 0x1_0000);
-    let size = bytes.len();
-    let (loaded, extra) = measured(|| Program::from_bytes(PathBuf::from("names.elf"), bytes));
-    let p = loaded.expect("the image loads");
-    assert!(
-        extra <= LOAD_HEAP_PER_BYTE * size,
-        "a {size} byte file took {extra} bytes of heap to load"
-    );
-    let shown = format!("{}...", "A".repeat(OUTSIDE_MAX));
-    let names: Vec<&str> = p
-        .symbols
-        .iter()
-        .filter(|s| s.kind == SymbolKind::Local)
-        .map(|s| s.name.as_str())
-        .collect();
-    assert_budgeted(&p, &names, SYMBOLS, &shown);
+    check_local_names("names.elf", bytes, SYMBOLS, "A");
 }
 
 /// An ELF of [`SYMBOLS`] function symbols sharing one 258-character 4-byte
@@ -119,21 +132,7 @@ fn four_byte_symbol_names_packed_tight_stay_within_the_heap_bar() {
     let _one = serial();
     let shared = "🦀".repeat(OUTSIDE_MAX + 2);
     let bytes = symtab_elf(SYMBOLS, shared.as_bytes(), 0);
-    let size = bytes.len();
-    let (loaded, extra) = measured(|| Program::from_bytes(PathBuf::from("crab.elf"), bytes));
-    let p = loaded.expect("the image loads");
-    assert!(
-        extra <= LOAD_HEAP_PER_BYTE * size,
-        "a {size} byte file took {extra} bytes of heap to load"
-    );
-    let shown = format!("{}...", "🦀".repeat(OUTSIDE_MAX));
-    let names: Vec<&str> = p
-        .symbols
-        .iter()
-        .filter(|s| s.kind == SymbolKind::Local)
-        .map(|s| s.name.as_str())
-        .collect();
-    assert_budgeted(&p, &names, SYMBOLS, &shown);
+    check_local_names("crab.elf", bytes, SYMBOLS, "🦀");
 }
 
 /// A PE whose [`IMPORTS`] lookup entries all name one [`NAME_LEN`]-byte
@@ -175,7 +174,8 @@ fn pe_imports_naming_one_long_string_load_within_the_heap_bar() {
         .filter(|s| s.kind == SymbolKind::Import)
         .map(|s| s.name.as_str())
         .collect();
-    assert_budgeted(&p, &names, IMPORTS, &shown);
+    assert_budgeted(&p, &names, IMPORTS, &shown, 1);
+    assert!(p.headers.libraries[0].starts_with("name_"));
 }
 
 /// PE delay imports keep 200 four-byte characters whole, mark 300 with
@@ -236,7 +236,7 @@ fn pe_delay_imports_bound_four_byte_names_and_heap() {
         format!("D.dll!{}...", "🦀".repeat(OUTSIDE_MAX - 6))
     );
     let shown = format!("D.dll!{}...", "A".repeat(OUTSIDE_MAX - 6));
-    assert_budgeted(&p, &names[2..], IMPORTS - 2, &shown);
+    assert_budgeted(&p, &names[2..], IMPORTS - 2, &shown, 0);
 }
 
 /// A 64-bit Mach-O of [`SYMBOLS`] `nlist_64` entries sharing one
@@ -284,21 +284,7 @@ fn macho_nlists_naming_one_long_string_load_within_the_heap_bar() {
     bytes.extend_from_slice(b"\0_");
     bytes.resize(bytes.len() + NAME_LEN, b'A');
     bytes.push(0);
-    let size = bytes.len();
-    let (loaded, extra) = measured(|| Program::from_bytes(PathBuf::from("names.macho"), bytes));
-    let p = loaded.expect("the image loads");
-    assert!(
-        extra <= LOAD_HEAP_PER_BYTE * size,
-        "a {size} byte file took {extra} bytes of heap to load"
-    );
-    let shown = format!("{}...", "A".repeat(OUTSIDE_MAX));
-    let names: Vec<&str> = p
-        .symbols
-        .iter()
-        .filter(|s| s.kind == SymbolKind::Local)
-        .map(|s| s.name.as_str())
-        .collect();
-    assert_budgeted(&p, &names, SYMBOLS, &shown);
+    check_local_names("names.macho", bytes, SYMBOLS, "A");
 }
 
 /// A PE with [`SYMBOLS`] `/0` and `//` indirect section headers naming one
@@ -310,6 +296,7 @@ fn pe_indirect_section_names_stay_within_the_heap_bar() {
     let mut b = pe(&[Sec::sound(".text", 0x1000, text(), CODE)], &[]);
     let table = PE_AT + 24 + OPTIONAL;
     let headers_end = (table + SYMBOLS * 40).div_ceil(FILE_ALIGN) * FILE_ALIGN;
+    b.truncate(table);
     b.resize(headers_end, 0);
     put16(
         &mut b,
@@ -352,6 +339,21 @@ fn pe_indirect_section_names_stay_within_the_heap_bar() {
     put32(&mut b, PE_AT + 16, 0);
     b.resize(b.len() + NAME_LEN, b'A');
     b.push(0);
+    let chk_field = PE_AT + 88;
+    let mut sum = 0u32;
+    for (i, pair) in b.chunks(2).enumerate() {
+        let at = i * 2;
+        if (chk_field..chk_field + 4).contains(&at) {
+            continue;
+        }
+        let lo = u32::from(pair.first().copied().unwrap_or(0));
+        let hi = u32::from(pair.get(1).copied().unwrap_or(0));
+        sum += lo | (hi << 8);
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    sum = (sum & 0xffff) + (sum >> 16);
+    let declared = (sum & 0xffff).wrapping_add(u32::try_from(b.len()).expect("fits"));
+    put32(&mut b, chk_field, declared);
     let expected_bytes = b.clone();
     let size = b.len();
     let (loaded, extra) = measured(|| Program::from_bytes(PathBuf::from("secs.exe"), b));
@@ -361,46 +363,51 @@ fn pe_indirect_section_names_stay_within_the_heap_bar() {
         "a {size} byte file took {extra} bytes of heap to load"
     );
     assert_eq!(p.bytes, expected_bytes);
+    assert_eq!(p.headers.checksum, Some((declared, declared)));
     let shown = format!("{}...", "A".repeat(OUTSIDE_MAX));
     let sec_names: Vec<&str> = p.sections.iter().map(|s| s.name.as_str()).collect();
-    assert_budgeted(&p, &sec_names, SYMBOLS, &shown);
+    assert_budgeted(&p, &sec_names, SYMBOLS, &shown, 0);
 }
 
 /// An ELF64 whose `e_shstrndx` names a `256 KiB` non-UTF-8 string table
-/// without a NUL is refused without running goblin's quadratic permissive
-/// `Strtab` rescan.
+/// (either all `0xff` or ASCII ending in `0xff`) is refused without running
+/// goblin's quadratic permissive `Strtab` rescan.
 #[test]
 fn elf_non_utf8_shstrtab_is_refused_without_quadratic_rescan() {
-    /// Bytes of `0xff` in the malformed `.shstrtab` replacement.
+    /// Bytes in the malformed `.shstrtab` replacement.
     const BAD_LEN: usize = 256 << 10;
-    let mut bytes = elfgen::build(
-        elfgen::ET_EXEC,
-        elfgen::EM_X86_64,
-        0x1000,
-        &[
-            elfgen::Sec::new(
-                ".text",
-                elfgen::PROGBITS,
-                elfgen::AX,
-                0x1000,
-                vec![0xc3; 16],
-            ),
-            elfgen::Sec::new(".bad", elfgen::STRTAB, 0, 0x2000, vec![0xff; BAD_LEN]),
-        ],
-    );
-    put16(&mut bytes, 62, 2);
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the test bounds the time a hostile string table takes"
-    )]
-    let started = std::time::Instant::now();
-    let loaded = Program::from_bytes(PathBuf::from("bad_shstr.elf"), bytes);
-    let took = started.elapsed();
-    assert!(loaded.is_err(), "quadratic permissive retry was skipped");
-    assert!(
-        took < std::time::Duration::from_secs(2),
-        "{BAD_LEN} bytes of 0xff took {took:?}"
-    );
+    let mut tail_bad = vec![b'a'; BAD_LEN - 2];
+    tail_bad.extend_from_slice(&[0xff, 0]);
+    for bad in [vec![0xff; BAD_LEN], tail_bad] {
+        let mut bytes = elfgen::build(
+            elfgen::ET_EXEC,
+            elfgen::EM_X86_64,
+            0x1000,
+            &[
+                elfgen::Sec::new(
+                    ".text",
+                    elfgen::PROGBITS,
+                    elfgen::AX,
+                    0x1000,
+                    vec![0xc3; 16],
+                ),
+                elfgen::Sec::new(".bad", elfgen::STRTAB, 0, 0x2000, bad),
+            ],
+        );
+        put16(&mut bytes, 62, 2);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test bounds the time a hostile string table takes"
+        )]
+        let started = std::time::Instant::now();
+        let loaded = Program::from_bytes(PathBuf::from("bad_shstr.elf"), bytes);
+        let took = started.elapsed();
+        assert!(loaded.is_err(), "quadratic permissive retry was skipped");
+        assert!(
+            took < std::time::Duration::from_secs(2),
+            "{BAD_LEN} non-UTF-8 strtab bytes took {took:?}"
+        );
+    }
 }
 
 /// A 32-bit Mach-O with `43,690` `nlist` records all naming one `512 KiB`
@@ -472,29 +479,200 @@ fn macho32_many_nlists_naming_half_megabyte_string_load_fast() {
     b.extend_from_slice(b"\0_");
     b.resize(b.len() + STR_LEN, b'A');
     b.push(0);
-    let size = b.len();
     #[expect(
         clippy::disallowed_methods,
         reason = "the test bounds the time a hostile nlist table takes"
     )]
     let started = std::time::Instant::now();
-    let (loaded, extra) = measured(|| Program::from_bytes(PathBuf::from("nlist32.macho"), b));
+    check_local_names("nlist32.macho", b, NLISTS, "A");
     let took = started.elapsed();
-    let p = loaded.expect("the 32-bit Mach-O loads");
     assert!(
         took < std::time::Duration::from_secs(2),
         "{NLISTS} nlists on a {STR_LEN}-byte string took {took:?}"
     );
+}
+
+/// DWARF struct and member names resolved through `.debug_str` share the
+/// per-load `Names` budget and stay within `LOAD_HEAP_PER_BYTE`.
+#[test]
+fn dwarf_struct_member_names_stay_within_the_heap_bar() {
+    let _one = serial();
+    /// Number of `DW_TAG_structure_type` DIEs in the unit.
+    const STRUCTS: usize = 400;
+    /// `DW_TAG_member` children per structure DIE.
+    const MEMBERS: usize = 128;
+    let abbrev = vec![
+        0x01, 0x13, 0x01, 0x03, 0x0e, 0x0b, 0x05, 0x00, 0x00, 0x02, 0x0d, 0x00, 0x03, 0x0e, 0x38,
+        0x05, 0x49, 0x13, 0x00, 0x00, 0x03, 0x24, 0x00, 0x03, 0x08, 0x0b, 0x0b, 0x3e, 0x0b, 0x00,
+        0x00, 0x00,
+    ];
+    let mut debug_str = Vec::new();
+    let struct_str = u32::try_from(debug_str.len()).expect("fits");
+    debug_str.extend_from_slice(&[b'T'; 56]);
+    debug_str.extend_from_slice(b"_leaf\0");
+    let member_str = u32::try_from(debug_str.len()).expect("fits");
+    debug_str.extend_from_slice(&[b'm'; 120]);
+    debug_str.push(0);
+
+    let mut dies = Vec::new();
+    let int_at = u32::try_from(12 + dies.len()).expect("fits");
+    dies.push(0x03);
+    dies.extend_from_slice(b"int\0\x04\x05");
+    let leaf_at = u32::try_from(12 + dies.len()).expect("fits");
+    dies.push(0x01);
+    dies.extend_from_slice(&struct_str.to_le_bytes());
+    dies.extend_from_slice(&8u16.to_le_bytes());
+    dies.push(0x02);
+    dies.extend_from_slice(&member_str.to_le_bytes());
+    dies.extend_from_slice(&0u16.to_le_bytes());
+    dies.extend_from_slice(&int_at.to_le_bytes());
+    dies.push(0x00);
+
+    for k in 0..STRUCTS {
+        let s_off = u32::try_from(debug_str.len()).expect("fits");
+        debug_str.extend_from_slice(format!("S{:04}_{}", k, "X".repeat(50)).as_bytes());
+        debug_str.push(0);
+        dies.push(0x01);
+        dies.extend_from_slice(&s_off.to_le_bytes());
+        dies.extend_from_slice(&u16::try_from(MEMBERS * 8).expect("fits").to_le_bytes());
+        for m in 0..MEMBERS {
+            dies.push(0x02);
+            dies.extend_from_slice(&member_str.to_le_bytes());
+            dies.extend_from_slice(&u16::try_from(m * 8).expect("fits").to_le_bytes());
+            dies.extend_from_slice(&leaf_at.to_le_bytes());
+        }
+        dies.push(0x00);
+    }
+    dies.push(0x00);
+    let mut unit_body = Vec::new();
+    unit_body.extend_from_slice(&5u16.to_le_bytes());
+    unit_body.push(0x01);
+    unit_body.push(8);
+    unit_body.extend_from_slice(&0u32.to_le_bytes());
+    unit_body.extend_from_slice(&dies);
+    let mut info = u32::try_from(unit_body.len())
+        .expect("fits")
+        .to_le_bytes()
+        .to_vec();
+    info.extend_from_slice(&unit_body);
+
+    let abbrev_at = 0x2000u64;
+    let info_at = abbrev_at + from_usize(abbrev.len());
+    let str_at = info_at + from_usize(info.len());
+    let bytes = elfgen::build(
+        elfgen::ET_EXEC,
+        elfgen::EM_X86_64,
+        0x1000,
+        &[
+            elfgen::Sec::new(
+                ".text",
+                elfgen::PROGBITS,
+                elfgen::AX,
+                0x1000,
+                vec![0xc3; 16],
+            ),
+            elfgen::Sec::new(".debug_abbrev", elfgen::PROGBITS, 0, abbrev_at, abbrev),
+            elfgen::Sec::new(".debug_info", elfgen::PROGBITS, 0, info_at, info),
+            elfgen::Sec::new(".debug_str", elfgen::PROGBITS, 0, str_at, debug_str),
+        ],
+    );
+    let size = bytes.len();
+    let (loaded, extra) = measured(|| Program::from_bytes(PathBuf::from("dwarf.elf"), bytes));
+    let p = loaded.expect("the ELF loads");
     assert!(
         extra <= LOAD_HEAP_PER_BYTE * size,
-        "a {size} byte file took {extra} bytes of heap to load"
+        "a {size} byte DWARF ELF took {extra} bytes of heap"
     );
-    let shown = format!("{}...", "A".repeat(OUTSIDE_MAX));
-    let names: Vec<&str> = p
+    assert!(!p.debug_types.is_empty(), "budgeted structs kept");
+    assert!(p.debug_types.len() < STRUCTS, "excess structs skipped");
+}
+
+/// Long `_`-prefixed Mach-O `LC_DYLD_INFO` bind names preserve `...` after
+/// stripping `_` and still deduplicate repeated binds after the `Names`
+/// budget is spent.
+#[test]
+fn macho_dyld_long_import_keeps_ellipsis_and_deduplicates_past_budget() {
+    let _one = serial();
+    /// Preferred base of `__TEXT`.
+    const TEXT: u64 = 0x1_0000_0000;
+    /// Preferred base of `__DATA`.
+    const DATA_VA: u64 = 0x1_0000_8000;
+    /// Linked dylib load commands so one symbol name can bind across ordinals.
+    const LIBS: u8 = 80;
+    let mut text_seg = vec![0u8; 0x8000];
+    text_seg[0x7f00..0x8000].fill(0xc3);
+    let data_seg = vec![0u8; 0x1000];
+    let segs = [
+        machogen::Seg {
+            name: "__TEXT",
+            vmaddr: TEXT,
+            fileoff: 0,
+            bytes: text_seg,
+            prot: machogen::RX,
+            sections: vec![machogen::Sect {
+                name: "__text",
+                addr: TEXT + 0x7f00,
+                size: 0x100,
+                flags: machogen::CODE,
+            }],
+        },
+        machogen::Seg {
+            name: "__DATA",
+            vmaddr: DATA_VA,
+            fileoff: 0x8000,
+            bytes: data_seg,
+            prot: machogen::RW,
+            sections: vec![machogen::Sect {
+                name: "__got",
+                addr: DATA_VA,
+                size: 0x1000,
+                flags: 0,
+            }],
+        },
+    ];
+    let mut ops = vec![0x51u8, 0x71, 0x00, 0x40];
+    ops.extend_from_slice(format!("_imp000_{}", "🦀".repeat(300)).as_bytes());
+    ops.push(0);
+    for ord in 1..=LIBS {
+        ops.extend_from_slice(&[0x20, ord, 0x90]);
+    }
+    let shared_raw = format!("_shared_{}", "C".repeat(300));
+    ops.push(0x11);
+    ops.push(0x40);
+    ops.extend_from_slice(shared_raw.as_bytes());
+    ops.push(0);
+    ops.resize(ops.len() + 64, 0x90);
+    ops.push(0x00);
+
+    let bind_off = 0x9000u64;
+    let mut extra: Vec<Vec<u8>> = (0..LIBS).map(|_| machogen::dylib("/l")).collect();
+    extra.push(machogen::dyld_info((0, 0), (bind_off, ops.len()), (0, 0)));
+    let mut bytes = machogen::build(machogen::X86_64, machogen::PIE, &segs, &extra);
+    assert_eq!(bytes.len(), usize::try_from(bind_off).expect("fits"));
+    bytes.extend_from_slice(&ops);
+    let size = bytes.len();
+    let (loaded, extra) = measured(|| Program::from_bytes(PathBuf::from("dyld.macho"), bytes));
+    let p = loaded.expect("the Mach-O loads");
+    assert!(
+        extra <= LOAD_HEAP_PER_BYTE * size,
+        "a {size} byte Mach-O took {extra} bytes of heap"
+    );
+    let imports: Vec<&str> = p
         .symbols
         .iter()
-        .filter(|s| s.kind == SymbolKind::Local)
+        .filter(|s| s.kind == SymbolKind::Import)
         .map(|s| s.name.as_str())
         .collect();
-    assert_budgeted(&p, &names, NLISTS, &shown);
+    let first_expected = format!("imp000_{}...", "🦀".repeat(OUTSIDE_MAX - 7));
+    assert_eq!(imports.first().copied(), Some(first_expected.as_str()));
+    let tail_name = *imports.last().expect("shared import emitted");
+    assert!(
+        tail_name.starts_with("name_"),
+        "expected post-budget placeholder, got {tail_name}"
+    );
+    let shared_rows = imports.iter().filter(|&&n| n == tail_name).count();
+    assert_eq!(
+        shared_rows, 16,
+        "repeated binds past budget deduplicate and obey SLOTS_PER_IMPORT"
+    );
 }

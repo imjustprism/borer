@@ -105,17 +105,36 @@ impl Patch {
     }
 }
 
-/// Puts back what [`loosen_pe`] changed.
+/// Puts back what [`loosen_pe`] and [`disarm_exports`] changed and refreshes
+/// `checksum` when header bytes were temporarily rewritten during the parse.
 ///
 /// # Arguments
 ///
 /// * `bytes` - The whole file.
-/// * `patches` - What was changed.
-pub(super) fn restore(bytes: &mut [u8], patches: &[Patch]) {
+/// * `patches` - What [`loosen_pe`] changed.
+/// * `disarmed` - Export directory entry zeroed by [`disarm_exports`], if any.
+/// * `checksum` - Declared and computed PE checksum to refresh on restored bytes.
+pub(super) fn restore(
+    bytes: &mut [u8],
+    patches: &[Patch],
+    disarmed: Option<Disarmed>,
+    checksum: &mut Option<(u32, u32)>,
+) {
+    if let Some(d) = disarmed
+        && let Some(slot) = bytes.get_mut(d.at..d.at + DIRECTORY_ENTRY)
+    {
+        slot.copy_from_slice(&d.saved);
+    }
     for p in patches {
         if let Some(slot) = bytes.get_mut(p.at..p.at + 4) {
             slot.copy_from_slice(&p.saved);
         }
+    }
+    if (!patches.is_empty() || disarmed.is_some())
+        && let Some((_, computed)) = checksum
+        && let Some(sig) = pe_signature(bytes)
+    {
+        *computed = crate::headers::pe_checksum(bytes, sig.saturating_add(88));
     }
 }
 
@@ -135,7 +154,7 @@ const IMPORTS_MAX: u64 = 1 << 16;
 pub(super) const EXPORTS_MAX: u32 = 1 << 16;
 
 /// Bytes of one data directory entry: a virtual address and a size.
-pub(super) const DIRECTORY_ENTRY: usize = 8;
+const DIRECTORY_ENTRY: usize = 8;
 
 /// Bytes of one section table row.
 const SECTION_ROW: usize = 40;
@@ -784,15 +803,16 @@ pub(super) fn section_name(
     names: &mut crate::text::Names,
 ) -> String {
     let mut raw = s.name;
-    if let Some(sig) = pe_signature(bytes) {
-        let table = sig + 24 + usize::from(pe.header.coff_header.size_of_optional_header);
-        if let Some(row_at) = idx
+    if let Some(sig) = pe_signature(bytes)
+        && let Some(table) = sig
+            .checked_add(24)
+            .and_then(|t| t.checked_add(usize::from(pe.header.coff_header.size_of_optional_header)))
+        && let Some(row_at) = idx
             .checked_mul(SECTION_ROW)
             .and_then(|off| table.checked_add(off))
-            && let Ok(k) = patches.binary_search_by_key(&row_at, |p| p.at)
-        {
-            raw[..4].copy_from_slice(&patches[k].saved);
-        }
+        && let Ok(k) = patches.binary_search_by_key(&row_at, |p| p.at)
+    {
+        raw[..4].copy_from_slice(&patches[k].saved);
     }
     let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
     let inline = &raw[..end];

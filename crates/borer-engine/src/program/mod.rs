@@ -26,8 +26,8 @@ pub use arch::{Arch, Feature};
 pub use file::{Parent, checked_metadata, open_regular, read_regular, unusable_path};
 use file::{Take, magic_name, parse_object, read_program_bytes};
 use pe::{
-    DIRECTORY_ENTRY, SANE_MAX, arm64_pdata, directory_entry, disarm_exports, implausible_imports,
-    loosen_pe, name_ordinal_imports, pe_symbols, restore, rva_to_va, sound_section_table,
+    SANE_MAX, arm64_pdata, directory_entry, disarm_exports, implausible_imports, loosen_pe,
+    name_ordinal_imports, pe_symbols, restore, rva_to_va, sound_section_table,
 };
 
 /// Container format of the loaded file.
@@ -1303,12 +1303,7 @@ impl Program {
             crate::isa::a32::Modes::default()
         };
         phases.mark("load headers+symbols");
-        if let Some(d) = disarmed
-            && let Some(slot) = bytes.get_mut(d.at..d.at + DIRECTORY_ENTRY)
-        {
-            slot.copy_from_slice(&d.saved);
-        }
-        restore(&mut bytes, &patches);
+        restore(&mut bytes, &patches, disarmed, &mut headers.checksum);
         headers.lenient = lenient;
         headers.dropped_sections = fit.dropped;
         headers.truncated = fit.cut;

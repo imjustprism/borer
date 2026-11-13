@@ -28,12 +28,11 @@
 //! panic or a hang.
 
 use std::collections::BTreeMap;
-use std::hash::{Hash as _, Hasher as _};
 
 use goblin::mach::MachO;
 use goblin::mach::load_command::CommandVariant;
 
-use crate::fxmap::{FxHashSet, FxHasher};
+use crate::fxmap::FxHashSet;
 use crate::macho::uleb;
 use crate::num::{u16_le, u32_le, u64_le};
 use crate::program::{Program, Section, SectionRow};
@@ -361,9 +360,10 @@ struct Walk<'a, 'n> {
     taken: FxHashSet<u64>,
     /// The imports named so far.
     imports: Vec<Import>,
-    /// Each import's index in [`Walk::imports`], keyed by name hash, ordinal
-    /// and weak flag and verified against the stored name.
-    interned: BTreeMap<(u64, i64, bool), usize>,
+    /// Each import's index in [`Walk::imports`], keyed by raw name SHA-256,
+    /// library ordinal and weak flag so repeated binds share one slot even
+    /// after [`Walk::names`] replaces names with placeholders.
+    interned: BTreeMap<([u8; 32], i64, bool), usize>,
     /// Entries refused.
     refused: usize,
     /// Fixups left to read, claimed or refused, before the cap.
@@ -408,21 +408,20 @@ impl Walk<'_, '_> {
     ///
     /// Its index in [`Walk::imports`].
     fn intern(&mut self, name: &str, ordinal: i64, weak: bool) -> usize {
-        let mut hasher = FxHasher::default();
-        name.hash(&mut hasher);
-        let key = (hasher.finish(), ordinal, weak);
-        if let Some(&k) = self.interned.get(&key)
-            && self.imports.get(k).is_some_and(|i| i.name == name)
-        {
+        let key = (crate::hashing::sha256(name.as_bytes()), ordinal, weak);
+        if let Some(&k) = self.interned.get(&key) {
             return k;
         }
         let k = self.imports.len();
-        let kept = self.names.take(name);
+        let before = self.names.cut();
+        let kept = self.names.take_c_symbol(name);
+        let replaced = self.names.cut() > before;
         self.interned.insert(key, k);
         self.imports.push(Import {
             name: kept,
             ordinal,
             weak,
+            replaced,
         });
         k
     }
@@ -863,6 +862,25 @@ impl Walk<'_, '_> {
         }
     }
 
+    /// Records one opcode-program bind claim at `va`.
+    ///
+    /// # Arguments
+    ///
+    /// * `va` - Bound slot virtual address.
+    /// * `word` - Pointer width in bytes.
+    /// * `import` - Index in [`Walk::imports`].
+    /// * `addend` - Signed addend added to the import's address.
+    /// * `lazy` - Whether the slot comes from the lazy bind program.
+    fn bind_slot(&mut self, va: u64, word: u64, import: usize, addend: i64, lazy: bool) {
+        let b = Bind {
+            slot: va,
+            import,
+            addend,
+            lazy,
+        };
+        self.claim(va, word, None, Some(b), None);
+    }
+
     /// Runs an `LC_DYLD_INFO` bind program.
     ///
     /// # Arguments
@@ -942,44 +960,41 @@ impl Walk<'_, '_> {
                     continue;
                 }
                 0x90 => (1, 0),
-                0xa0 => match uleb(program, &mut at) {
-                    Some(d) => (1, d),
-                    None => {
+                0xa0 => {
+                    let Some(d) = uleb(program, &mut at) else {
                         self.refused += 1;
                         return;
-                    }
-                },
+                    };
+                    (1, d)
+                }
                 0xb0 => (1, u64::from(imm).wrapping_mul(word)),
-                0xc0 => match (uleb(program, &mut at), uleb(program, &mut at)) {
-                    (Some(n), Some(d)) => (n, d),
-                    _ => {
+                0xc0 => {
+                    let (Some(n), Some(d)) = (uleb(program, &mut at), uleb(program, &mut at))
+                    else {
                         self.refused += 1;
                         return;
-                    }
-                },
+                    };
+                    (n, d)
+                }
                 _ => {
                     self.refused += 1;
                     return;
                 }
             };
+            let mut import = None;
             for _ in 0..times {
                 if !self.spend() {
                     return;
                 }
-                let va = segment.map(|s| s.vmaddr.wrapping_add(off));
-                match (segment, va, name.as_deref()) {
-                    (Some(s), Some(va), Some(n))
-                        if s.file_off(va, word).is_some() && self.known(ordinal) =>
+                match (segment, name.as_deref()) {
+                    (Some(s), Some(n))
+                        if s.file_off(s.vmaddr.wrapping_add(off), word).is_some()
+                            && self.known(ordinal) =>
                     {
+                        let va = s.vmaddr.wrapping_add(off);
                         if kind == TYPE_POINTER && self.taken.insert(va) {
-                            let import = self.intern(n, ordinal, weak);
-                            let bind = Bind {
-                                slot: va,
-                                import,
-                                addend,
-                                lazy,
-                            };
-                            self.claim(va, word, None, Some(bind), None);
+                            let idx = *import.get_or_insert_with(|| self.intern(n, ordinal, weak));
+                            self.bind_slot(va, word, idx, addend, lazy);
                         }
                     }
                     _ => self.refused += 1,

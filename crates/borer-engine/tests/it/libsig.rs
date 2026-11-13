@@ -402,3 +402,119 @@ fn oversized_elf_symbol_names_are_refused_with_a_damaged_note() {
         "{damaged:?}"
     );
 }
+
+/// Indirect `/` section headers in COFF objects stay fast and bounded without
+/// copying the COFF string table per section row.
+#[test]
+fn coff_indirect_sections_do_not_copy_string_table() {
+    /// Indirect `/4` COFF section headers pointing into one `256 KiB` string.
+    const SLASH_SECS: usize = 4000;
+    /// Shared COFF string length (`256 KiB`).
+    const BIG_SEC_NAME: usize = 256 << 10;
+    let code = [0x48, 0x89, 0xc8, 0xc3]; // ASM: mov rax,rcx; ret
+    let text_at = 20 + SLASH_SECS * 40;
+    let sym_at = text_at + code.len();
+    let mut coff = Vec::with_capacity(sym_at + 18 + 4 + BIG_SEC_NAME + 1);
+    coff.extend_from_slice(&0x8664u16.to_le_bytes());
+    coff.extend_from_slice(&u16::try_from(SLASH_SECS).expect("fits").to_le_bytes());
+    coff.extend_from_slice(&0u32.to_le_bytes());
+    coff.extend_from_slice(&u32::try_from(sym_at).expect("fits").to_le_bytes());
+    coff.extend_from_slice(&1u32.to_le_bytes());
+    coff.extend_from_slice(&0u16.to_le_bytes());
+    coff.extend_from_slice(&0u16.to_le_bytes());
+    for i in 0..SLASH_SECS {
+        coff.extend_from_slice(b"/4\0\0\0\0\0\0");
+        coff.extend_from_slice(&0u32.to_le_bytes());
+        coff.extend_from_slice(&0u32.to_le_bytes());
+        let (sz, ptr, ch) = if i == 0 {
+            (
+                u32::try_from(code.len()).expect("fits"),
+                u32::try_from(text_at).expect("fits"),
+                0x6000_0020u32,
+            )
+        } else {
+            (0, 0, 0x4000_0040u32)
+        };
+        coff.extend_from_slice(&sz.to_le_bytes());
+        coff.extend_from_slice(&ptr.to_le_bytes());
+        coff.extend_from_slice(&[0u8; 12]);
+        coff.extend_from_slice(&ch.to_le_bytes());
+    }
+    coff.extend_from_slice(&code);
+    coff.extend_from_slice(b"keep\0\0\0\0");
+    coff.extend_from_slice(&0u32.to_le_bytes());
+    coff.extend_from_slice(&1i16.to_le_bytes());
+    coff.extend_from_slice(&0x20u16.to_le_bytes());
+    coff.extend_from_slice(&[2, 0]);
+    coff.extend_from_slice(
+        &u32::try_from(4 + BIG_SEC_NAME + 1)
+            .expect("fits")
+            .to_le_bytes(),
+    );
+    coff.resize(coff.len() + BIG_SEC_NAME, b'S');
+    coff.push(0);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test bounds the time indirect COFF section rows take"
+    )]
+    let started = std::time::Instant::now();
+    let (found, damaged) = read(&coff).expect("the COFF object reads");
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert!(damaged.is_empty(), "{damaged:?}");
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].name, "keep");
+}
+
+/// Multi-member archives share a single symbol-name budget across all members,
+/// and oversized `.pat` symbol names are skipped with a `damaged` note.
+#[test]
+fn archive_symbol_budget_and_pat_cap_stay_bounded() {
+    let long_sym = "f".repeat(3500);
+    let mut member_strtab = vec![0u8];
+    let sym_off = u32::try_from(member_strtab.len()).expect("fits");
+    member_strtab.extend_from_slice(long_sym.as_bytes());
+    member_strtab.push(0);
+    let mut member_symtab = vec![0u8; 24];
+    let mut member_text = Vec::new();
+    for k in 0..64u64 {
+        member_text.extend_from_slice(&[0x48, 0x83, 0xc0, 0x01, 0xc3]); // ASM: add rax,1; ret
+        member_symtab.extend(elfgen::sym_sized(sym_off, 0x12, 1, k * 5, 5));
+    }
+    let mut secs = vec![
+        Sec::new(".text", PROGBITS, AX, 0x1000, member_text),
+        Sec::new(".symtab", SYMTAB, 0, 0x2000, member_symtab),
+        Sec::new(".strtab", STRTAB, 0, 0x3000, member_strtab),
+    ];
+    secs[1].link = 3;
+    secs[1].info = 1;
+    secs[1].entsize = 24;
+    let member_obj = elfgen::build(ET_REL, EM_X86_64, 0, &secs);
+    let entries: Vec<(String, &[u8])> = (0..60)
+        .map(|i| (format!("m{i}.o"), member_obj.as_slice()))
+        .collect();
+    let refs: Vec<(&str, &[u8])> = entries.iter().map(|(n, d)| (n.as_str(), *d)).collect();
+    let archive = ar(&refs);
+    let (found, damaged) = read(&archive).expect("archive reads");
+    let copied: usize = found.iter().map(|f| f.name.len()).sum();
+    let cap = (archive.len() * 8).max(1 << 20);
+    assert!(copied <= cap, "copied {copied} > cap {cap}");
+    assert!(found.len() < 60 * 64, "budget capped later members");
+    assert!(
+        damaged
+            .iter()
+            .any(|d| d.contains("past the symbol-name budget")),
+        "{damaged:?}"
+    );
+
+    let pat = format!(
+        "558BEC83EC0C535657E8000000005DC3 {}\n558BEC83EC0C535657E8000000005DC3 ok_pat\n",
+        "p".repeat(4097)
+    );
+    let (found, damaged) = read(pat.as_bytes()).expect("pat reads");
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].name, "ok_pat");
+    assert_eq!(
+        damaged,
+        vec!["skipped 1 symbol(s) with names past 4096 bytes"]
+    );
+}

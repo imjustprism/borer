@@ -111,6 +111,9 @@ pub(crate) struct Names {
 }
 
 impl Names {
+    /// Smallest verbatim byte allowance [`Names::for_file`] grants a tiny file.
+    const FLOOR: usize = 4 << 10;
+
     /// Creates the name budget for a file of `file_len` bytes.
     ///
     /// # Arguments
@@ -119,10 +122,10 @@ impl Names {
     ///
     /// # Returns
     ///
-    /// A budget allowing up to `2 * file_len` bytes of copied name heads.
+    /// A budget allowing up to `2 * file_len` (at least [`Names::FLOOR`]) bytes of copied name heads.
     #[must_use]
     pub(crate) fn for_file(file_len: usize) -> Self {
-        Self::with_budget(file_len.saturating_mul(2))
+        Self::with_budget(file_len.saturating_mul(2).max(Self::FLOOR))
     }
 
     /// Creates a name budget with an explicit byte allowance.
@@ -147,6 +150,16 @@ impl Names {
     #[must_use]
     pub(crate) fn left(&self) -> usize {
         self.left
+    }
+
+    /// Returns how many names have been replaced with placeholders so far.
+    ///
+    /// # Returns
+    ///
+    /// Count of replaced names.
+    #[must_use]
+    pub(crate) fn cut(&self) -> usize {
+        self.cut
     }
 
     /// Reports whether the verbatim byte allowance has reached zero.
@@ -190,6 +203,37 @@ impl Names {
             Some(left) => {
                 self.left = left;
                 h.to_owned()
+            }
+            None => self.placeholder(),
+        }
+    }
+
+    /// Copies a Mach-O symbol name keeping any leading `_` plus [`head`] of its
+    /// body within the budget, or synthesizes a placeholder when spent.
+    ///
+    /// Keeping one leading `_` before cutting the body lets Objective-C read
+    /// `_OBJC_CLASS_$_...` while `plain` still sees `OUTSIDE_MAX + 1` body
+    /// characters and renders `...` on cut symbols.
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - The Mach-O bind name as its table spells it.
+    ///
+    /// # Returns
+    ///
+    /// The owned C-prefixed head of `raw`, or `name_<n>` when the budget is spent.
+    pub(crate) fn take_c_symbol(&mut self, raw: &str) -> String {
+        if raw.is_empty() {
+            return String::new();
+        }
+        let cut = match raw.strip_prefix('_') {
+            Some(tail) => &raw[..1 + head(tail).len()],
+            None => head(raw),
+        };
+        match self.left.checked_sub(cut.len()) {
+            Some(left) => {
+                self.left = left;
+                cut.to_owned()
             }
             None => self.placeholder(),
         }

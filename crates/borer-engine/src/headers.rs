@@ -1151,7 +1151,11 @@ fn directory_name(kind: DataDirectoryType) -> &'static str {
 ///
 /// * `bytes` - The whole file.
 /// * `field` - File offset of the four-byte checksum field.
-fn pe_checksum(bytes: &[u8], field: usize) -> u32 {
+///
+/// # Returns
+///
+/// Computed 32-bit PE checksum over `bytes` excluding `field..field + 4`.
+pub(crate) fn pe_checksum(bytes: &[u8], field: usize) -> u32 {
     let mut sum: u32 = 0;
     for (i, pair) in bytes.chunks(2).enumerate() {
         let at = i * 2;
