@@ -483,3 +483,17 @@ fn a_spelling_past_the_cap_is_refused_as_it_is_parsed() {
         "{refused}"
     );
 }
+
+/// A stack slot past the span of a frame is refused as it is stated, as its
+/// saved key would be when the project loads.
+#[test]
+fn a_slot_past_the_frame_span_is_refused() {
+    for far in ["arg_10000", "local_fffffffffffffff"] {
+        let refused = VarKey::parse(far, 8, 8).expect_err("a slot past the span");
+        assert!(
+            refused.to_string().contains("bytes from the frame"),
+            "{refused}"
+        );
+    }
+    assert!(VarKey::parse("arg_ff00", 8, 8).is_ok());
+}

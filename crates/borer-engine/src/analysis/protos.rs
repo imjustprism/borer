@@ -446,15 +446,26 @@ impl VarKey {
         {
             return Ok(Self::Param(n - 1));
         }
+        let slot = |off: i64| {
+            if off.unsigned_abs() < crate::dwarf::FRAME_SPAN.unsigned_abs() {
+                return Ok(Self::Slot(off));
+            }
+            Err(anyhow::anyhow!(
+                "{} is {:#x} bytes from the frame; a stack slot is within {:#x} of it",
+                crate::text::quoted(text),
+                off.unsigned_abs(),
+                crate::dwarf::FRAME_SPAN
+            ))
+        };
         if let Some(off) = local_offset(text, frame) {
-            return Ok(Self::Slot(off));
+            return slot(off);
         }
         if let Some(off) = text
             .strip_prefix("home_")
             .or_else(|| text.strip_prefix("arg_"))
             .and_then(hex)
         {
-            return Ok(Self::Slot(off + word));
+            return slot(off.saturating_add(word));
         }
         Err(anyhow::anyhow!(
             "{} is no parameter or stack slot: name `aN` or `local_N` as the text shows them (a register holds many values, so it takes no name)",
