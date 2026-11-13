@@ -706,6 +706,18 @@ fn a_type_past_its_entries_is_refused_as_the_file_is_read() {
     }
 }
 
+/// A function a project states no variable of is left out on load, so
+/// the session counts the variables as the file did.
+///
+/// An empty table loaded and stayed; the file counted it as one variable
+/// and the session as none, so a session at the cap saved a project its
+/// load refused.
+#[test]
+fn a_function_stating_no_variable_is_left_out_on_load() {
+    let o = loaded(serde_json::json!({"vars": {"0x1000": {}}})).expect("loads");
+    assert!(o.vars.is_empty(), "{} functions kept", o.vars.len());
+}
+
 /// A session is held to every count a project file is: its types, its
 /// prototypes, its variables and the classes it states fields of, not
 /// only its names, comments and applied types.

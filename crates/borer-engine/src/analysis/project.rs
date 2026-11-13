@@ -603,7 +603,9 @@ impl Project {
     /// The fields stated of classes are read by offset and checked the
     /// same way ([`super::stated::validate`]); a class the file states no
     /// field of is left out, and two keys that read as one class once
-    /// escaped to a line refuse the file, as two keys of one address do.
+    /// escaped to a line refuse the file, as two keys of one address do. A
+    /// function the file states no variable of is left out too, so the
+    /// overlay counts its variables as a session does, one a variable.
     ///
     /// # Returns
     ///
@@ -636,6 +638,9 @@ impl Project {
         }
         let mut vars: BTreeMap<u64, BTreeMap<VarKey, Var>> = BTreeMap::new();
         for (va, (_, table)) in keyed("vars", &self.vars)? {
+            if table.is_empty() {
+                continue;
+            }
             let into = vars.entry(va).or_default();
             for (key, decl) in table {
                 let key = VarKey::parse_saved(key)
