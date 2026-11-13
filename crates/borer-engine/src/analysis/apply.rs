@@ -126,7 +126,8 @@ impl Plan {
 /// the register is no parameter at the entry, no field has a width, the
 /// struct does not build or takes the place of a type whose stated fields
 /// would no longer stand ([`super::stated::standing`]), or the prototype
-/// cannot be read or holds no such parameter.
+/// cannot be read, holds no such parameter, or passes
+/// [`utypes::SPELLING_MAX`] as spelled.
 pub fn from_pointer(
     p: &Program,
     a: &Analysis,
@@ -363,7 +364,8 @@ fn check_room(o: &Overlay, more: usize) -> Result<(), String> {
 /// # Errors
 ///
 /// When the function does not decompile, its signature does not read as a
-/// prototype, or it has no parameter at that position.
+/// prototype, it has no parameter at that position, or the prototype as
+/// spelled passes [`utypes::SPELLING_MAX`].
 fn typed(
     p: &Program,
     a: &Analysis,
@@ -392,6 +394,7 @@ fn typed(
         base: name.to_owned(),
         stars: 1,
     };
+    utypes::short_enough("a prototype as spelled", &proto.spell()).map_err(|e| e.to_string())?;
     Ok(proto)
 }
 

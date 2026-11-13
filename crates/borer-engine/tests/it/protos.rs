@@ -497,3 +497,22 @@ fn a_slot_past_the_frame_span_is_refused() {
     }
     assert!(VarKey::parse("arg_ff00", 8, 8).is_ok());
 }
+
+/// Applying a recovered struct to a parameter refuses a prototype whose
+/// mutated spelling passes [`borer_engine::analysis::utypes::SPELLING_MAX`].
+#[test]
+fn an_applied_layout_whose_prototype_spells_past_the_cap_is_refused() {
+    use borer_engine::analysis::apply::from_pointer;
+    let code = [
+        0x8b, 0x41, 0x10, // ASM: mov eax, [rcx+0x10]
+        0xc3, // ASM: ret
+    ];
+    let p = image(&code);
+    let a = Analysis::compute(&p);
+    let o = stating(0x401_000, &format!("{}int(i8)", "const ".repeat(10_920)));
+    assert!(o.prototypes.contains_key(&0x401_000));
+    assert!(from_pointer(&p, &a, &o, "0x401000,rcx", "S").is_ok());
+    let refused = from_pointer(&p, &a, &o, "0x401000,rcx", "LongStructName")
+        .expect_err("a prototype spelled past the cap was planned");
+    assert!(refused.contains("a prototype as spelled is"), "{refused}");
+}
