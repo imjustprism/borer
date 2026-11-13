@@ -1226,13 +1226,12 @@ fn stack_value(instr: &Instruction) -> Option<(i64, Ty)> {
 /// sets CF to the last bit shifted out of the destination and ZF, SF and
 /// PF from the result. At a count of 1, OF is the change of sign for SHL,
 /// SHLD and SHRD, the original top bit for SHR and 0 for SAR; past 1 it is
-/// undefined. [`Flags::Shift`] reads OF as 0, so a one-bit shift other than
-/// SAR leaves the flags unknown wherever OF may be read (a one-bit SHL is
+/// undefined. [`Flags::Shift`] leaves OF undecided, and a one-bit shift
+/// other than SAR whose OF may be read lifts to no flags (a one-bit SHL is
 /// lifted as `x + x` before it gets here). At the width or past it, which
 /// only an 8- or 16-bit operand reaches, ZF, SF and PF follow the lifted
-/// result and CF is not stated: SHL and SHR leave it undefined, and SAR's
-/// is the sign bit. A count that is no constant may mask to 0, so what it
-/// leaves is unknown.
+/// result and CF and OF stay undecided. A count that is no constant may
+/// mask to 0, so what it leaves is unknown.
 ///
 /// # Arguments
 ///

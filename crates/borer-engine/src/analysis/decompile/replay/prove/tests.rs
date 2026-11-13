@@ -74,6 +74,10 @@ fn a_condition_holds_where_the_lifter_s_logic_says() {
                         ),
                         (Flags::Result(ca.clone(), w), Flagged::Result(x.clone(), w)),
                         (
+                            Flags::Shift(ca.clone(), w, cb.clone()),
+                            Flagged::Shift(x.clone(), w, y.clone()),
+                        ),
+                        (
                             Flags::Add(ca.clone(), cb.clone(), w),
                             Flagged::Add(x.clone(), y.clone(), w),
                         ),

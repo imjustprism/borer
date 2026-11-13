@@ -1389,7 +1389,9 @@ impl Cond {
                         );
                     }
                     C::b | C::ae => Flags::Carry(c.clone()),
-                    C::o | C::no => return undecided(n, self.cc, inverted, &[e, c]),
+                    C::o | C::no | C::l | C::ge | C::le | C::g | C::None => {
+                        return undecided(n, self.cc, inverted, &[e, c]);
+                    }
                     _ => Flags::Result(e.clone(), *bits),
                 };
                 Cond { cc: self.cc, flags }.render(n, inverted)
@@ -1537,14 +1539,10 @@ impl Cond {
             Flags::Result(e, bits) => match cc.0 {
                 C::e => zero_compare(n, e, *bits, "=="),
                 C::ne => zero_compare(n, e, *bits, "!="),
-                C::s | C::l => signed_sign(n, *bits, e, "<"),
-                C::ns | C::ge => signed_sign(n, *bits, e, ">="),
-                C::le => signed_sign(n, *bits, e, "<="),
-                C::g => signed_sign(n, *bits, e, ">"),
+                C::s => signed_sign(n, *bits, e, "<"),
+                C::ns => signed_sign(n, *bits, e, ">="),
                 C::p | C::np => parity(n, cc, e),
-                C::b | C::ae | C::be | C::a | C::None | C::o | C::no => {
-                    undecided(n, self.cc, inverted, &[e])
-                }
+                _ => undecided(n, self.cc, inverted, &[e]),
             },
         }
     }

@@ -884,9 +884,11 @@ impl<'a> Builder<'a> {
                 let Some(w) = width(*bits) else {
                     return self.undef(Hole::Width);
                 };
+                if !matches!(cc.0, C::e | C::ne | C::s | C::ns | C::p | C::np) {
+                    return self.undef(Hole::Flags);
+                }
                 let x = self.lower(e, d);
-                let x = self.int(x, w);
-                self.zero_test(cc, x, w)
+                self.zero_test(cc, self.int(x, w), w)
             }
             Flags::Shift(e, bits, count) => {
                 let Some(w) = width(*bits) else {
@@ -911,18 +913,8 @@ impl<'a> Builder<'a> {
                             MTy::I(1),
                         )
                     }
-                    C::o | C::no => self.undef(Hole::Flags),
-                    C::None
-                    | C::e
-                    | C::ne
-                    | C::s
-                    | C::ns
-                    | C::p
-                    | C::np
-                    | C::l
-                    | C::ge
-                    | C::le
-                    | C::g => self.zero_test(cc, x, w),
+                    C::e | C::ne | C::s | C::ns | C::p | C::np => self.zero_test(cc, x, w),
+                    C::None | C::o | C::no | C::l | C::ge | C::le | C::g => self.undef(Hole::Flags),
                 }
             }
             Flags::Carry(e) => {

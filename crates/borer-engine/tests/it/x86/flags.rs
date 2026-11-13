@@ -471,3 +471,50 @@ fn a_one_bit_shr_whose_flags_leave_the_block_never_differs() {
     let differ = runs.iter().any(|(_, v)| matches!(v, Verdict::Differs(..)));
     assert!(!differ, "{runs:?}");
 }
+
+/// MIR leaves carry and signed-relation branches on a result's flags
+/// undecided, and a multi-bit shift leaves a signed branch undecided in C.
+///
+/// `sar al, 8` sets CF to the sign bit and leaves OF undefined, and `shl
+/// eax, 2` on `0x20000000` sets SF with OF undefined: neither decides `jl`.
+#[test]
+fn a_result_or_multi_bit_shift_leaves_carry_and_overflow_undecided() {
+    use borer_engine::analysis::decompile::verify::{verify_mir, verify_tsv};
+    use borer_engine::analysis::render::{Verdict, check_generated};
+    for jcc in [0x72u8, 0x7cu8] {
+        let p = image(&[
+            0xc0, 0xf8, 0x08, // ASM: sar al, 8
+            jcc, 0x03, // ASM: jc / jl 0x401008
+            0x31, 0xc0, // ASM: xor eax, eax
+            0xc3, // ASM: ret
+            0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+            0xc3, // ASM: ret
+        ]);
+        let a = Analysis::compute(&p);
+        for seed in 1..=16 {
+            let v = verify_mir(&p, &a, &[0x401000], seed);
+            assert!(
+                v.mismatches.is_empty(),
+                "jcc {jcc:#x} seed {seed}: {}",
+                verify_tsv(&v)
+            );
+        }
+    }
+    let shl = [
+        0xb8, 0x00, 0x00, 0x00, 0x20, // ASM: mov eax, 0x20000000
+        0xc1, 0xe0, 0x02, // ASM: shl eax, 2
+        0x7c, 0x03, // ASM: jl 0x40100d
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xc3, // ASM: ret
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+        0xc3, // ASM: ret
+    ];
+    let text = dc(&shl);
+    assert!(text.contains("flags_l("), "{text}");
+    let p = image(&shl);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let runs = check_generated(&p, &a, &o, 0x401000, 16, 1, 20_000).unwrap_or_default();
+    let differ = runs.iter().any(|(_, v)| matches!(v, Verdict::Differs(..)));
+    assert!(!differ, "{runs:?}");
+}

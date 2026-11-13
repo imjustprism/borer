@@ -751,7 +751,7 @@ fn a_condition_means_its_flags_and_inverts_to_its_negation() {
         0x7fff_ffff,
         0x8000_0000,
         0x8000_0001,
-        0xffff_ffff,
+        u32::MAX,
     ];
     for (flags, machine) in shapes() {
         for cc in CCS {
@@ -759,18 +759,15 @@ fn a_condition_means_its_flags_and_inverts_to_its_negation() {
                 cc: Cc(cc),
                 flags: flags.clone(),
             };
-            let normal = cond.render(&n, false);
-            let inverted = cond.render(&n, true);
+            let (normal, inverted) = (cond.render(&n, false), cond.render(&n, true));
             for &x in &ints {
                 for &y in &ints {
                     let yes = eval(&normal, (x, y), (0.0, 0.0));
                     let no = eval(&inverted, (x, y), (0.0, 0.0));
-                    assert_ne!(
-                        yes, no,
-                        "{cc:?} {flags:?}: {normal} vs {inverted} at {x:#x}, {y:#x}"
-                    );
-                    if let Some(want) = machine(x, y).holds(cc) {
-                        assert_eq!(yes, want, "{cc:?} {flags:?}: {normal} at {x:#x}, {y:#x}");
+                    assert_ne!(yes, no, "{cc:?} {flags:?}: {normal} vs {inverted}");
+                    match machine(x, y).holds(cc) {
+                        Some(want) => assert_eq!(yes, want, "{cc:?} {flags:?}: {normal}"),
+                        None => assert!(normal.starts_with("flags_") || normal == "FLAGS_UNKNOWN"),
                     }
                 }
             }

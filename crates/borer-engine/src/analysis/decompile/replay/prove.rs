@@ -503,32 +503,21 @@ fn flags_pred(cc: super::super::expr::Cc, f: Flagged) -> Result<Pred, Why> {
             let both = term::logic(Logic::And, 64, vec![l, r]);
             compare(cc.0, &both, &Term::Const(0), bits)?
         }
-        Flagged::Result(e, bits) => compare(cc.0, &e, &Term::Const(0), bits)?,
+        Flagged::Result(e, bits) if matches!(cc.0, C::e | C::ne | C::s | C::ns) => {
+            compare(cc.0, &e, &Term::Const(0), bits)?
+        }
+        Flagged::Result(..) => Pred::Undef,
         Flagged::Shift(e, bits, c) => match cc.0 {
             C::b => not(zero(c)),
             C::ae => zero(c),
             C::be | C::a => return Err("a shift's carry with its result"),
-            C::o | C::no => Pred::Undef,
-            C::None | C::e | C::ne | C::s | C::ns | C::p | C::np | C::l | C::ge | C::le | C::g => {
-                compare(cc.0, &e, &Term::Const(0), bits)?
-            }
+            C::e | C::ne | C::s | C::ns | C::p | C::np => compare(cc.0, &e, &Term::Const(0), bits)?,
+            _ => Pred::Undef,
         },
         Flagged::Carry(c) => match cc.0 {
             C::b | C::o => not(zero(c)),
             C::ae | C::no => zero(c),
-            C::None
-            | C::e
-            | C::ne
-            | C::be
-            | C::a
-            | C::s
-            | C::ns
-            | C::p
-            | C::np
-            | C::l
-            | C::ge
-            | C::le
-            | C::g => Pred::Undef,
+            _ => Pred::Undef,
         },
         Flagged::Add(l, r, bits) => {
             if bits == 0 || bits > 64 {

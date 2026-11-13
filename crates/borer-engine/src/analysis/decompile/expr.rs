@@ -1212,8 +1212,7 @@ impl Cond {
                 (C::a, Expr::Const(e), Expr::Const(c)) => {
                     return Some(*c == 0 && e & mask_bits(*bits) != 0);
                 }
-                (C::b | C::o | C::ae | C::no | C::be | C::a, _, _) => return None,
-                (_, Expr::Const(e), _) => (*e, 0, *bits),
+                (C::e | C::ne | C::s | C::ns, Expr::Const(e), _) => (*e, 0, *bits),
                 _ => return None,
             },
             Flags::Carry(Expr::Const(c)) => {
