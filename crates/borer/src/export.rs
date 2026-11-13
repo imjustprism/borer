@@ -331,6 +331,9 @@ pub fn write_mod_files(
             ModFile::CheatTable => modsdk::cheat::cheat_table(&sdk).into_bytes(),
             ModFile::ReClass => modsdk::reclass::reclass(&sdk)?,
         };
+        if let Some(why) = cut() {
+            return Err(why);
+        }
         rendered.push((kind, out, modsdk::fits(&sdk, kind.what(), bytes)?));
     }
     if let Some(why) = cut() {

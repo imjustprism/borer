@@ -848,9 +848,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 if extra == "all" {
                     all = true;
                 } else {
-                    overlay = borer::project::ProjectFile::load(extra)
-                        .and_then(|pf| pf.to_overlay())
-                        .map_err(anyhow::Error::msg)?;
+                    overlay = session::load_for_program(extra, &s.program)?.1;
                 }
             }
             let a = s.analysis(Feature::Decompile)?;
@@ -932,9 +930,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
         Query::Types => {
             let mut overlay = s.overlay.clone();
             if let Some(project) = args.get(2).filter(|p| !p.is_empty()) {
-                overlay = borer::project::ProjectFile::load(project)
-                    .and_then(|pf| pf.to_overlay())
-                    .map_err(anyhow::Error::msg)?;
+                overlay = session::load_for_program(project, &s.program)?.1;
             }
             let filter = args
                 .get(3)
@@ -1028,8 +1024,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
 fn set_type(args: &[String], s: &Session) -> anyhow::Result<()> {
     let project = read_path_arg(args, 2, "set-type needs a project file")?;
     let (program, sha256, mut overlay) = if std::path::Path::new(project).exists() {
-        let pf = borer::project::ProjectFile::load(project).map_err(anyhow::Error::msg)?;
-        let overlay = pf.to_overlay().map_err(anyhow::Error::msg)?;
+        let (pf, overlay) = session::load_for_program(project, &s.program)?;
         (pf.0.program, pf.0.sha256, overlay)
     } else {
         (

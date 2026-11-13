@@ -962,3 +962,39 @@ fn save_checks_path_before_serializing_and_counts_exact_overflow_bytes() {
     assert!(refused.contains(&expected), "{refused}");
     assert!(!exists);
 }
+
+/// Refusing a 4-byte layout on x64 keeps the session overlay and blocks CLI `set-type`.
+#[test]
+fn x64_layout_refusal_keeps_installed_overlay_and_refuses_cli_set_type() {
+    let root = std::env::temp_dir().join(format!("borer-narrow-keep-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let (exe_path, proj_path) = (root.join("bin64.exe"), root.join("narrow.json"));
+    std::fs::write(&exe_path, tiny_pe()).unwrap();
+    let raw = r#"{"program":"","names":{"0x140001000":"bad_load"},"comments":{},"types":{"W":{"Struct":{"size":8,"fields":{"0":{"name":"ptr","ty":{"Ptr":"U16"}},"4":{"name":"tag","ty":"U32"}}}}}}"#;
+    std::fs::write(&proj_path, raw).unwrap();
+    let (bin_str, proj_str) = (
+        exe_path.display().to_string(),
+        proj_path.display().to_string(),
+    );
+    let mut client = Client::start(&bin_str);
+    client.text(
+        "set_name",
+        r#"{"address":"0x140001000","name":"kept_fn","dry_run":false}"#,
+    );
+    let asked = serde_json::json!({"path": &proj_str, "force": true});
+    assert!(answer(&mut client, "load_project", &asked).is_err());
+    let anns = client.text("annotations", "{}");
+    client.finish();
+    let cli = std::process::Command::new(env!("CARGO_BIN_EXE_borer"))
+        .args(["set-type", &bin_str, &proj_str, "enum", "E", "4", "A:0"])
+        .output()
+        .unwrap();
+    std::fs::remove_dir_all(&root).ok();
+    assert!(
+        anns.contains("kept_fn") && !anns.contains("bad_load"),
+        "{anns}"
+    );
+    assert!(!cli.status.success());
+    let stderr = String::from_utf8_lossy(&cli.stderr);
+    assert!(stderr.contains("with the 8-byte pointers"), "{stderr}");
+}

@@ -836,7 +836,15 @@ impl BorerServer {
             } else if let Err(e) = overlay {
                 eprintln!("borer: the handed-over project's types: {e}");
             } else if let Ok(o) = overlay {
-                *write_lock(&self.overlay) = o;
+                let word = if self.loaded().is_some_and(|p| p.is_64) {
+                    8
+                } else {
+                    4
+                };
+                match borer_engine::analysis::utypes::laid_at(&o.types, word) {
+                    Ok(()) => *write_lock(&self.overlay) = o,
+                    Err(e) => eprintln!("borer: the handed-over project's types: {e}"),
+                }
             }
         }
         peer_info

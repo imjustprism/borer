@@ -153,13 +153,22 @@ pub fn short_path(path: &str) -> String {
 
 /// Escapes `text` to one line of at most `max` characters.
 ///
+/// Running it again at the same `max` leaves the line byte-for-byte
+/// unchanged, even when `\xNN` or `...` follows a turn prefix or a
+/// four-character escape pushed an earlier cut to `max + 1` or `max + 2`.
+///
 /// # Arguments
 ///
 /// * `text` - The outside text.
 /// * `max` - Widest result, before the `...` that marks a cut.
 fn escaped(text: &str, max: usize) -> String {
     let text = fenced(text);
-    if text.len() <= max && !text.chars().any(needs_escape) {
+    if !text.chars().any(needs_escape)
+        && (text.chars().count() <= max
+            || text
+                .strip_suffix("...")
+                .is_some_and(|s| s.chars().count() <= max))
+    {
         return text.into_owned();
     }
     let mut out = String::with_capacity(text.len().min(max) + 4);
@@ -181,7 +190,10 @@ fn escaped(text: &str, max: usize) -> String {
         room -= width;
         out.push_str(piece);
     }
-    out
+    match fenced(&out) {
+        std::borrow::Cow::Borrowed(_) => out,
+        std::borrow::Cow::Owned(again) => escaped(&again, max),
+    }
 }
 
 /// Quotes outside text for an error message, bounded and on one line.

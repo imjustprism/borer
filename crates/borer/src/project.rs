@@ -14,7 +14,10 @@ use borer_engine::program::Program;
 /// through [`std::ops::Deref`]; the file holds the same JSON.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
-pub struct ProjectFile(pub Project);
+pub struct ProjectFile(
+    /// The parsed project annotations.
+    pub Project,
+);
 
 impl std::ops::Deref for ProjectFile {
     type Target = Project;
@@ -238,15 +241,18 @@ impl ProjectFile {
     /// # Errors
     ///
     /// When `path` is unusable ([`borer_engine::program::unusable_path`]:
-    /// empty, a device, an NT object path or a network share), a file or
-    /// link is there and `existing` refuses it, the file would be longer
-    /// than [`PROJECT_MAX`] even unindented, which [`Self::load`] refuses,
-    /// or serialization or the write fails; nothing is written unless the
-    /// write itself fails.
+    /// empty, a device, an NT object path or a network share), a table passes
+    /// [`Project::counted`], a file or link is there and `existing` refuses it,
+    /// the file would be longer than [`PROJECT_MAX`] even unindented, which
+    /// [`Self::load`] refuses, or serialization or the write fails; nothing is
+    /// written unless the write itself fails.
     pub fn save(&self, path: &str, existing: crate::output::Existing) -> Result<(), String> {
         if let Some(why) = borer_engine::program::unusable_path(Path::new(path)) {
             return Err(format!("{why}; nothing was written"));
         }
+        self.0
+            .counted()
+            .map_err(|why| format!("{why}; nothing was written"))?;
         let mut out = BoundedJson {
             bytes: Vec::new(),
             total: 0,
@@ -343,5 +349,30 @@ mod tests {
         assert_eq!(out.total, 100 << 20);
         assert_eq!(out.bytes.len(), cap);
         assert_eq!(out.bytes.capacity(), cap);
+    }
+
+    /// Saving an over-cap [`super::ProjectFile`] fails before touching an
+    /// existing destination file.
+    #[test]
+    fn save_refuses_over_cap_tables_without_touching_existing_file() {
+        let dir = std::env::temp_dir().join(format!("borer-save-cap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("p.json");
+        let shown = path.display().to_string();
+        super::ProjectFile::from_overlay("b", None, &super::Overlay::default())
+            .save(&shown, crate::output::Existing::Replace)
+            .expect("seed project");
+        let before = std::fs::read(&path).expect("seed bytes");
+        let mut crowded = super::Overlay::default();
+        for va in 0..=borer_engine::num::from_usize(borer_engine::analysis::project::NAMES_MAX) {
+            crowded.names.insert(va, "n".to_owned());
+        }
+        let err = super::ProjectFile::from_overlay("b", None, &crowded)
+            .save(&shown, crate::output::Existing::Replace)
+            .expect_err("over-cap save must fail");
+        let after = std::fs::read(&path).expect("seed bytes preserved");
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(err.contains("262145 names"), "{err}");
+        assert_eq!(before, after);
     }
 }

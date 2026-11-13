@@ -44,10 +44,12 @@ fn full(out: &str) -> bool {
     out.len() > FILE_MAX || crate::cancel::Cancel::raised()
 }
 
-/// Hands back a mod file's bytes when they fit [`FILE_MAX`].
+/// Hands back a mod file's bytes when they fit [`FILE_MAX`] and were not
+/// cut short by cancellation.
 ///
-/// A renderer stops at the class that takes its file past the cap, so a
-/// file that long was cut there: it is refused rather than written.
+/// A renderer stops at the class that takes its file past the cap or once
+/// [`crate::cancel::Cancel::raised`] is set, so a stopped file is refused
+/// rather than written.
 ///
 /// # Arguments
 ///
@@ -57,11 +59,11 @@ fn full(out: &str) -> bool {
 ///
 /// # Errors
 ///
-/// When the file passes the cap; the message names the cap, what the SDK
-/// lays out and what to narrow.
+/// When the file passes the cap or the request's deadline passed; the size
+/// message names the cap, what the SDK lays out and what to narrow.
 pub fn fits(sdk: &Sdk, what: &str, bytes: Vec<u8>) -> anyhow::Result<Vec<u8>> {
     if bytes.len() <= FILE_MAX {
-        return Ok(bytes);
+        return crate::cancel::Cancel::whole(bytes).map_err(anyhow::Error::msg);
     }
     Err(anyhow::anyhow!(
         "the {what} passes the {FILE_MAX} bytes a mod file holds, laying out {} classes and {} globals, so nothing was written; state fewer or smaller structs, apply fewer types, or write another of the files",

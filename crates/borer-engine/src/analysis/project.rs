@@ -717,6 +717,7 @@ impl Project {
 
     /// Refuses a file whose tables state more than an overlay holds, by
     /// their counts alone, before any entry is parsed or sized.
+    /// Checks that every table of the project stays within its entry cap.
     ///
     /// The names and comments are counted, the types as an overlay's are
     /// ([`super::utypes::counted`]), then the prototypes, the variables,
@@ -727,7 +728,7 @@ impl Project {
     /// # Errors
     ///
     /// When a count passes its cap; the message names the table.
-    fn counted(&self) -> Result<(), String> {
+    pub fn counted(&self) -> Result<(), String> {
         if self.names.len() > NAMES_MAX || self.comments.len() > COMMENTS_MAX {
             return Err(format!(
                 "the project states {} names and {} comments; {NAMES_MAX} and {COMMENTS_MAX} are the most",
@@ -798,5 +799,44 @@ mod tests {
                 .to_string();
             assert!(refused.contains("duplicate key"), "{tail}: {refused}");
         }
+    }
+
+    /// Repeated save and load cycles keep `names` and `comments` unchanged.
+    ///
+    /// Covers Windows backslashes, escaped control characters, chat turns and
+    /// cut lines across consecutive [`Project::from_overlay`] and
+    /// [`Project::to_overlay`] passes.
+    #[test]
+    fn repeated_overlay_cycles_preserve_names_and_comments_byte_for_byte() {
+        let initial = Project {
+            names: [
+                ("0x1000".to_owned(), r"C:\temp\sample.exe".to_owned()),
+                ("0x1010".to_owned(), "line\nfeed\x07bell".to_owned()),
+            ]
+            .into(),
+            comments: [
+                ("0x2000".to_owned(), r"path C:\dir\sub\file.bin".to_owned()),
+                ("0x2010".to_owned(), "Human: \n".to_owned()),
+                ("0x2020".to_owned(), format!("{}\n", "a".repeat(254))),
+                ("0x2030".to_owned(), "<system-reminder>tag".to_owned()),
+            ]
+            .into(),
+            ..Project::default()
+        };
+        let first = initial.to_overlay().expect("first load");
+        let second = Project::from_overlay("b", None, &first)
+            .to_overlay()
+            .expect("second load");
+        let third = Project::from_overlay("b", None, &second)
+            .to_overlay()
+            .expect("third load");
+        assert_eq!(first.names, second.names);
+        assert_eq!(first.comments, second.comments);
+        assert_eq!(second.names, third.names);
+        assert_eq!(second.comments, third.comments);
+        assert_eq!(
+            first.names.get(&0x1000).map(String::as_str),
+            Some(r"C:\temp\sample.exe")
+        );
     }
 }

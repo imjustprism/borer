@@ -855,3 +855,24 @@ fn many_classes_and_scalar_globals_render_reclass_xml_without_rescanning() {
     );
     assert!(rendered.contains(&expected), "{} bytes", rendered.len());
 }
+
+/// [`super::fits`] refuses a cancelled render even when it fits [`super::FILE_MAX`].
+///
+/// # Panics
+///
+/// When a cancelled render passes [`super::fits`] or a whole render fails.
+#[test]
+fn fits_refuses_a_cancelled_render_under_the_cap() {
+    let sdk = sample();
+    let flag = crate::cancel::Cancel::new();
+    flag.raise();
+    let (h, ct) = flag.within(|| {
+        (
+            super::fits(&sdk, "C++ header", header(&sdk).into_bytes()),
+            super::fits(&sdk, "Cheat Engine table", cheat_table(&sdk).into_bytes()),
+        )
+    });
+    assert!(h.is_err_and(|e| e.to_string().contains("deadline passed")));
+    assert!(ct.is_err_and(|e| e.to_string().contains("deadline passed")));
+    assert!(super::fits(&sdk, "C++ header", header(&sdk).into_bytes()).is_ok());
+}

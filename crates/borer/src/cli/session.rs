@@ -135,6 +135,54 @@ pub(super) struct Session {
     pub(super) ready: RefCell<Option<Analysis>>,
 }
 
+/// Converts `pf` into an overlay and checks that its structs lay out at
+/// `program`'s pointer width.
+///
+/// # Arguments
+///
+/// * `pf` - The loaded project file.
+/// * `program` - The loaded binary whose pointer width governs layouts.
+///
+/// # Errors
+///
+/// When `pf` states more than an overlay holds or lays out a struct
+/// inconsistently at `program`'s pointer width.
+fn overlay_at_width(
+    pf: &borer::project::ProjectFile,
+    program: &Program,
+) -> anyhow::Result<Overlay> {
+    let overlay = pf.to_overlay().map_err(anyhow::Error::msg)?;
+    let word: u64 = if program.is_64 { 8 } else { 4 };
+    borer_engine::analysis::utypes::laid_at(&overlay.types, word).map_err(|e| {
+        anyhow::anyhow!(
+            "{e} with the {word}-byte pointers of {}; nothing was loaded",
+            short_path(&program.path.display().to_string())
+        )
+    })?;
+    Ok(overlay)
+}
+
+/// Reads a project file and checks that its structs lay out at `program`'s
+/// pointer width.
+///
+/// # Arguments
+///
+/// * `path` - The project file.
+/// * `program` - The loaded binary whose pointer width governs layouts.
+///
+/// # Errors
+///
+/// When the file cannot be read or parsed, states more than an overlay
+/// holds, or lays out a struct inconsistently at `program`'s pointer width.
+pub(super) fn load_for_program(
+    path: &str,
+    program: &Program,
+) -> anyhow::Result<(borer::project::ProjectFile, Overlay)> {
+    let pf = borer::project::ProjectFile::load(path).map_err(anyhow::Error::msg)?;
+    let overlay = overlay_at_width(&pf, program)?;
+    Ok((pf, overlay))
+}
+
 /// Reads a project file into the overlay a query applies.
 ///
 /// As the `load_project` tool does, a project saved for another build is
@@ -168,14 +216,7 @@ pub(super) fn project_overlay(path: &str, program: &Program) -> anyhow::Result<O
             short_path(&program.path.display().to_string())
         ),
     }
-    let mut overlay = pf.to_overlay().map_err(anyhow::Error::msg)?;
-    let word: u64 = if program.is_64 { 8 } else { 4 };
-    borer_engine::analysis::utypes::laid_at(&overlay.types, word).map_err(|e| {
-        anyhow::anyhow!(
-            "{e} with the {word}-byte pointers of {}; nothing was loaded",
-            short_path(&program.path.display().to_string())
-        )
-    })?;
+    let mut overlay = overlay_at_width(&pf, program)?;
     let placed = borer::project::keep_placeable(&mut overlay, program).len();
     let skipped = placed.saturating_add(crate::params::keep_settable(
         &mut overlay,
