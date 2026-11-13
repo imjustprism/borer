@@ -32,6 +32,7 @@ pub mod modsdk;
 mod naming;
 pub mod objc;
 pub mod opcodes;
+mod owner;
 pub mod ports;
 pub mod project;
 pub mod protocol;
@@ -1412,6 +1413,8 @@ pub struct Analysis {
     pub derived: Derived,
     /// Entry address to index into [`Analysis::functions`].
     entry_index: BTreeMap<u64, usize>,
+    /// Disjoint block stretches sorted by address ([`Analysis::block_at`]).
+    block_index: Vec<owner::BlockRow>,
     /// Address to index into the program's symbols: an export, forwarder,
     /// local or data symbol first, an import's slot where none is there
     /// (the first symbol of the winning kind at an address wins, and the
@@ -1559,9 +1562,9 @@ impl Analysis {
         analysis
     }
 
-    /// Builds the lookups over what discovery found: the entry index, the
-    /// clone and shape classes, the symbol index, and every reference
-    /// list sorted by site.
+    /// Builds the lookups over what discovery found: the entry and block
+    /// indexes, the clone and shape classes, the symbol index, and every
+    /// reference list sorted by site.
     ///
     /// The last step of discovery for every instruction set, run once the
     /// functions are final and sorted by entry; an instruction set with no
@@ -1572,9 +1575,7 @@ impl Analysis {
     ///
     /// * `program` - The program whose symbols are indexed.
     pub(crate) fn finish_index(&mut self, program: &Program) {
-        for (i, f) in self.functions.iter().enumerate() {
-            self.entry_index.insert(f.entry, i);
-        }
+        self.index_functions();
         self.clones = functions::shared_classes(&self.functions, |f| f.body_hash);
         self.shapes = functions::shared_classes(&self.functions, |f| f.shape_hash);
         for imports in [false, true] {
@@ -1587,6 +1588,15 @@ impl Analysis {
         for sites in self.xrefs.values_mut() {
             sites.sort_by_key(|s| s.va);
         }
+    }
+
+    /// Rebuilds the function-entry and block-extent indexes from [`Analysis::functions`].
+    pub(crate) fn index_functions(&mut self) {
+        self.entry_index.clear();
+        for (i, f) in self.functions.iter().enumerate() {
+            self.entry_index.insert(f.entry, i);
+        }
+        self.block_index = owner::index_blocks(&self.functions);
     }
 
     /// Looks up the function whose entry is exactly `entry`.
@@ -1612,24 +1622,50 @@ impl Analysis {
         self.functions.get_mut(i)
     }
 
-    /// Finds the function whose decoded range contains `va`.
+    /// Finds the function and basic block whose decoded instructions cover `va`.
+    ///
+    /// When more than one function claims a shared block, picks the one with
+    /// the highest `entry <= va`, else the lowest `entry`.
     ///
     /// # Arguments
     ///
-    /// * `va` - Any address inside a function.
+    /// * `va` - Any virtual address.
     ///
     /// # Returns
     ///
-    /// The function with the highest entry at or below `va` whose range
-    /// covers it, or `None`.
+    /// The owning function and block, or `None` when no discovered block holds `va`.
+    #[must_use]
+    pub fn block_at(&self, va: u64) -> Option<(&Function, &BasicBlock)> {
+        owner::block_in(&self.functions, &self.block_index, va)
+    }
+
+    /// Finds the function that owns `va`.
+    ///
+    /// Answers from discovered basic blocks first ([`Analysis::block_at`]):
+    /// when more than one function claims a shared block, picks the one with
+    /// the highest `entry <= va`, else the lowest `entry`. Only when no block
+    /// holds `va` does this fall back to the function with the highest
+    /// `entry <= va` whose `start..end` range covers `va`, keeping inline
+    /// tables and padding with their function while leaving inter-function gaps
+    /// `None`.
+    ///
+    /// # Arguments
+    ///
+    /// * `va` - Any virtual address.
+    ///
+    /// # Returns
+    ///
+    /// The owning function, or `None` when neither a block nor an enclosing
+    /// function range holds `va`.
+    #[must_use]
     pub fn function_at(&self, va: u64) -> Option<&Function> {
-        let idx = self.entry_index.range(..=va).next_back().map(|(_, &i)| i)?;
-        let f = &self.functions[idx];
-        if va >= f.start && va < f.end {
-            Some(f)
-        } else {
-            None
+        if let Some((f, _)) = self.block_at(va) {
+            return Some(f);
         }
+        let &idx = self.entry_index.range(..=va).next_back()?.1;
+        self.functions
+            .get(idx)
+            .filter(|f| va >= f.start && va < f.end)
     }
 
     /// Adds a function at `va` when no discovered function contains it.

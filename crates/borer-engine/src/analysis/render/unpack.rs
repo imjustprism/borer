@@ -609,10 +609,7 @@ fn handler_view(p: &Program, at: u64, bytes: &[u8]) -> HandlerView {
 /// The fetch's state, unknowing (nothing dropped through it) when the
 /// block or its bytes do not read.
 fn dispatch_step(p: &Program, a: &Analysis, emu: &Emulator<'_>, site: u64) -> StepState {
-    let Some(f) = a.function_at(site) else {
-        return StepState::unknown();
-    };
-    let Some(b) = f.blocks.iter().find(|b| b.start <= site && site < b.end) else {
+    let Some((_, b)) = a.block_at(site) else {
         return StepState::unknown();
     };
     let len = usize::try_from(b.end.saturating_sub(b.start)).unwrap_or(0);

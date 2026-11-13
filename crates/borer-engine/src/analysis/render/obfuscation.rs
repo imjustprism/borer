@@ -238,12 +238,8 @@ pub(super) fn flattened(a: &Analysis, site: u64, cases: &[u64]) -> Option<Dispat
     if cases.len() < FLAT_MIN_CASES {
         return None;
     }
-    let f = a.function_at(site)?;
-    let head = f
-        .blocks
-        .iter()
-        .find(|b| b.start <= site && site < b.end)?
-        .start;
+    let (f, block) = a.block_at(site)?;
+    let head = block.start;
     let leads = reaching(f, head);
     let back = cases
         .iter()

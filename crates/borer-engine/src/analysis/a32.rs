@@ -962,6 +962,10 @@ pub fn entry_or_gap(program: &Program, analysis: &mut Analysis, va: u64) -> Resu
 /// Tells whether an address lies in one of a function's blocks, not only in
 /// its span.
 ///
+/// On ARM, a block opening below `entry` may be an unclaimed body a later
+/// thunk jumped backward into ([`gap_covered`]), so its start is left open to
+/// [`Analysis::start_gap_function`].
+///
 /// # Arguments
 ///
 /// * `program` - The image. On ARM a Thumb bit on `va` is cleared, the same
@@ -970,14 +974,17 @@ pub fn entry_or_gap(program: &Program, analysis: &mut Analysis, va: u64) -> Resu
 /// * `entry` - The function's entry.
 /// * `va` - The address.
 pub fn in_blocks(program: &Program, analysis: &Analysis, entry: u64, va: u64) -> bool {
-    let va = if program.arch == crate::program::Arch::Arm {
-        va & !1
-    } else {
-        va
-    };
-    analysis
-        .function(entry)
-        .is_some_and(|f| f.blocks.iter().any(|b| va >= b.start && va < b.end))
+    let arm = program.arch == crate::program::Arch::Arm;
+    let va = if arm { va & !1 } else { va };
+    analysis.function(entry).is_some_and(|f| {
+        f.blocks.iter().any(|b| {
+            if arm && entry > va {
+                b.start < va && va < b.end
+            } else {
+                va >= b.start && va < b.end
+            }
+        })
+    })
 }
 
 /// Most functions one gap recovery adds, the asked one and the callees it
@@ -1047,10 +1054,7 @@ pub(crate) fn start_gap_function(
             }
         }
     }
-    analysis.entry_index.clear();
-    for (i, f) in analysis.functions.iter().enumerate() {
-        analysis.entry_index.insert(f.entry, i);
-    }
+    analysis.index_functions();
     for (caller, callees) in added {
         for callee in callees {
             if let Some(f) = analysis.function_mut(callee)

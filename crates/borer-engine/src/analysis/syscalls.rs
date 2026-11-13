@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use super::{Analysis, BasicBlock};
+use super::Analysis;
 use crate::isa::Isa;
 use crate::isa::x86::{
     Decoder, DecoderOptions, Instruction, InstructionInfoFactory, Mnemonic, OpAccess, OpKind,
@@ -318,18 +318,6 @@ fn scan(p: &Program, a: &Analysis) -> Vec<SyscallSite> {
     out
 }
 
-/// The function and the block an address is inside.
-///
-/// # Arguments
-///
-/// * `a` - The functions.
-/// * `va` - The address.
-fn block_of(a: &Analysis, va: u64) -> Option<(u64, &BasicBlock)> {
-    let f = a.function_at(va)?;
-    let b = f.blocks.iter().find(|b| b.start <= va && va < b.end)?;
-    Some((f.entry, b))
-}
-
 /// Reads an x86 syscall site: the instruction at `va` when it is the
 /// entry `gate` names and starts an instruction of its block, with the
 /// number its block leaves in `eax`.
@@ -342,7 +330,7 @@ fn block_of(a: &Analysis, va: u64) -> Option<(u64, &BasicBlock)> {
 /// * `gate` - Which entry the encoding is.
 /// * `bits` - Decoder bitness.
 fn x86_site(p: &Program, a: &Analysis, va: u64, gate: Gate, bits: u32) -> Option<SyscallSite> {
-    let (function, b) = block_of(a, va)?;
+    let (f, b) = a.block_at(va)?;
     let len = usize::try_from(va.checked_sub(b.start)?)
         .ok()?
         .checked_add(2)?;
@@ -360,7 +348,7 @@ fn x86_site(p: &Program, a: &Analysis, va: u64, gate: Gate, bits: u32) -> Option
             };
             return is_gate.then(|| SyscallSite {
                 at: va,
-                function,
+                function: f.entry,
                 gate,
                 nr: value,
                 name: value.and_then(|nr| gate.name(nr)),
@@ -437,7 +425,7 @@ fn eax_after(
 /// * `a` - Its functions.
 /// * `va` - The `svc`'s address.
 fn svc_site(p: &Program, a: &Analysis, va: u64) -> Option<SyscallSite> {
-    let (function, b) = block_of(a, va)?;
+    let (f, b) = a.block_at(va)?;
     let mut insns = Vec::new();
     let mut at = b.start;
     while at < va {
@@ -451,7 +439,7 @@ fn svc_site(p: &Program, a: &Analysis, va: u64) -> Option<SyscallSite> {
     let nr = super::a64::constant_in(&insns, 8);
     Some(SyscallSite {
         at: va,
-        function,
+        function: f.entry,
         gate: Gate::Svc,
         nr,
         name: nr.and_then(|nr| Gate::Svc.name(nr)),

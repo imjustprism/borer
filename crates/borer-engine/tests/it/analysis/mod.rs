@@ -24,6 +24,7 @@ mod functions;
 mod graph;
 mod hints;
 mod memo;
+mod owner;
 mod protection;
 mod unpack;
 mod votes;

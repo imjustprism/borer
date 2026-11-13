@@ -1115,10 +1115,7 @@ pub fn instruction_at_or_before(p: &Program, a: &Analysis, va: u64) -> Option<u6
         Isa::X86 { bits } => bits,
         Isa::A64 => return Some(va - va % from_usize(a64::INSN_LEN)),
         isa @ (Isa::A32 | Isa::Rv(_)) => {
-            let Some(b) = a
-                .function_at(va)
-                .and_then(|f| f.blocks.iter().find(|b| b.start <= va && va < b.end))
-            else {
+            let Some((_, b)) = a.block_at(va) else {
                 return Some(va & !1);
             };
             let len = usize::try_from(b.end - b.start).ok()?;
@@ -1130,8 +1127,7 @@ pub fn instruction_at_or_before(p: &Program, a: &Analysis, va: u64) -> Option<u6
                 .last();
         }
     };
-    let f = a.function_at(va)?;
-    let b = f.blocks.iter().find(|b| b.start <= va && va < b.end)?;
+    let (_, b) = a.block_at(va)?;
     let len = usize::try_from(b.end - b.start).ok()?;
     let code = p.read_va(b.start, len)?;
     let mut decoder = Decoder::with_ip(bitness, code, b.start, DecoderOptions::NONE);
