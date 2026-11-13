@@ -391,3 +391,38 @@ fn a_zero_count_double_shift_by_cl_keeps_the_overflow_agrees_with_the_emulator()
         0xc3, // ASM: ret
     ]);
 }
+
+/// A 64-bit shift masks a constant count past the width before its flags
+/// are read too: `shl rax, 65` shifts by one, so `setl` after it reads the
+/// overflow, which makes it the top bit of `rax` before the shift. The
+/// lifter once matched the one-bit form against the unmasked 65, missed
+/// it, and read bit 62.
+#[test]
+fn a_64_bit_shift_by_65_reads_the_overflow_agrees_with_the_emulator() {
+    agrees_with_the_emulator_64(&[
+        0x48, 0xc1, 0xe0, 0x41, // ASM: shl rax, 65
+        0x0f, 0x9c, 0xc0, // ASM: setl al
+        0xc3, // ASM: ret
+    ]);
+}
+
+/// `shr rax, 65` shifts by one as well, whose overflow is the top bit of
+/// `rax` before it. A one-bit `shr` whose block reads OF lifts to no
+/// flags, so its `setl` stays asm and the block is not checked, where the
+/// lift once read the flags of a wider shift and printed 0 for a top bit
+/// of 1.
+#[test]
+fn a_64_bit_shr_by_65_never_disagrees_with_the_emulator() {
+    use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
+    let code = [
+        0x48, 0xc1, 0xe8, 0x41, // ASM: shr rax, 65
+        0x0f, 0x9c, 0xc0, // ASM: setl al
+        0xc3, // ASM: ret
+    ];
+    let p = raw::image(Arch::X86_64, &code, &[]);
+    let a = Analysis::compute(&p);
+    for seed in 1..=16 {
+        let v = verify(&p, &a, &[0x401000], seed);
+        assert!(v.mismatches.is_empty(), "seed {seed}: {}", verify_tsv(&v));
+    }
+}

@@ -760,12 +760,12 @@ impl Exec<'_, '_> {
                     (Op::Sar, b) if b < 64 => sign_extend(l, b),
                     _ => l,
                 };
-                let r = self.val(instr, 1);
-                let r = match op {
-                    Op::Shl | Op::Shr | Op::Sar if bits < 64 => {
+                let r = match (op, self.val(instr, 1)) {
+                    (Op::Shl | Op::Shr | Op::Sar, r) if bits < 64 => {
                         fold(Op::And, r, Expr::Const(31), bits)
                     }
-                    _ => r,
+                    (Op::Shl | Op::Shr | Op::Sar, Expr::Const(n)) => Expr::Const(n & 0x3f),
+                    (_, r) => r,
                 };
                 let (l, r) = if bits == 64 && self.bitness() == 64 {
                     (widen64(l), widen64(r))
