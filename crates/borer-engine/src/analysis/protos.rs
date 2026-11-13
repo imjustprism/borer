@@ -265,12 +265,14 @@ impl Proto {
     ///
     /// # Errors
     ///
-    /// When the text has no parameter list, no return type, a type the
-    /// grammar does not read, a function-pointer parameter, a
+    /// When the text or its spelling is longer than
+    /// [`utypes::SPELLING_MAX`], or the text has no parameter list, no
+    /// return type, a type the grammar does not read or stacking more than
+    /// [`utypes::PTR_DEPTH_MAX`] pointers, a function-pointer parameter, a
     /// register-level convention, two parameters of one name, a name a
     /// decompiled text cannot carry, `...` before the last parameter, or
-    /// more than [`PARAMS_MAX`] parameters, or the text is longer than
-    /// [`utypes::SPELLING_MAX`]; the message names what was refused.
+    /// more than [`PARAMS_MAX`] parameters; the message names what was
+    /// refused.
     pub fn parse(text: &str) -> anyhow::Result<Self> {
         utypes::short_enough("a prototype", text)?;
         let t = text.trim().trim_end_matches(';').trim_end();
@@ -427,8 +429,10 @@ impl VarKey {
     ///
     /// # Errors
     ///
-    /// When the text names no parameter or stack slot: a register, which
-    /// holds many values over a function, is refused with that reason.
+    /// When the text names no parameter within [`PARAMS_MAX`] or stack slot
+    /// within [`crate::dwarf::FRAME_SPAN`] of the entry stack pointer; a
+    /// register, which holds many values over a function, is refused with
+    /// that reason.
     pub fn parse(text: &str, word: i64, frame: i64) -> anyhow::Result<Self> {
         let hex = |s: &str| {
             (!s.is_empty() && s.len() <= 8)
@@ -443,26 +447,15 @@ impl VarKey {
         {
             return Ok(Self::Param(n - 1));
         }
-        let slot = |off: i64| {
-            if off.unsigned_abs() < crate::dwarf::FRAME_SPAN.unsigned_abs() {
-                return Ok(Self::Slot(off));
-            }
-            Err(anyhow::anyhow!(
-                "{} is {:#x} bytes from the frame; a stack slot is within {:#x} of it",
-                crate::text::quoted(text),
-                off.unsigned_abs(),
-                crate::dwarf::FRAME_SPAN
-            ))
-        };
         if let Some(off) = local_offset(text, frame) {
-            return slot(off);
+            return slot_at(text, off);
         }
         if let Some(off) = text
             .strip_prefix("home_")
             .or_else(|| text.strip_prefix("arg_"))
             .and_then(hex)
         {
-            return slot(off.saturating_add(word));
+            return slot_at(text, off.saturating_add(word));
         }
         Err(anyhow::anyhow!(
             "{} is no parameter or stack slot: name `aN` or `local_N` as the text shows them (a register holds many values, so it takes no name)",
@@ -490,14 +483,21 @@ impl VarKey {
     ///
     /// # Errors
     ///
-    /// When the text is no saved key.
+    /// When the text is no saved key, keys a slot above the return address
+    /// by its text name (`home_N`, `arg_N`), or places a slot at or past
+    /// [`crate::dwarf::FRAME_SPAN`].
     pub fn parse_saved(text: &str) -> anyhow::Result<Self> {
-        if let Some(off) = text
+        if let Some((neg, h)) = text
             .strip_prefix("sp+0x")
-            .and_then(|h| i64::from_str_radix(h, 16).ok())
-            .filter(|off| (0..crate::dwarf::FRAME_SPAN).contains(off))
+            .map(|h| (false, h))
+            .or_else(|| text.strip_prefix("sp-0x").map(|h| (true, h)))
+            && !h.is_empty()
+            && h.bytes().all(|b| b.is_ascii_hexdigit())
         {
-            return Ok(Self::Slot(off));
+            let off = i64::from_str_radix(h, 16).unwrap_or(i64::MAX);
+            if !neg || off >= crate::dwarf::FRAME_SPAN {
+                return slot_at(text, if neg { off.saturating_neg() } else { off });
+            }
         }
         if text.starts_with("home_") || text.starts_with("arg_") {
             return Err(anyhow::anyhow!(
@@ -526,6 +526,28 @@ impl VarKey {
             Self::Slot(off) => format!("arg_{:x}", off - word),
         }
     }
+}
+
+/// Builds [`VarKey::Slot`] when `off` sits within [`crate::dwarf::FRAME_SPAN`].
+///
+/// # Arguments
+///
+/// * `text` - The key or name as written, for the message.
+/// * `off` - Byte offset from the entry stack pointer.
+///
+/// # Errors
+///
+/// When `off` reaches or passes [`crate::dwarf::FRAME_SPAN`].
+fn slot_at(text: &str, off: i64) -> anyhow::Result<VarKey> {
+    if off.unsigned_abs() < crate::dwarf::FRAME_SPAN.unsigned_abs() {
+        return Ok(VarKey::Slot(off));
+    }
+    Err(anyhow::anyhow!(
+        "{} is {:#x} bytes from the frame; a stack slot is within {:#x} of it",
+        crate::text::quoted(text),
+        off.unsigned_abs(),
+        crate::dwarf::FRAME_SPAN
+    ))
 }
 
 /// Returns the bytes between the entry stack pointer and the frame base,
@@ -668,9 +690,10 @@ impl Var {
     ///
     /// # Errors
     ///
-    /// When the text names nothing, or names something a decompiled text
-    /// cannot carry, or its type does not parse, or it is longer than
-    /// [`utypes::SPELLING_MAX`].
+    /// When the text or its spelling is longer than
+    /// [`utypes::SPELLING_MAX`], or it names nothing, names something a
+    /// decompiled text cannot carry, or states a type that does not parse or
+    /// stacks more than [`utypes::PTR_DEPTH_MAX`] pointers.
     pub fn parse(text: &str) -> anyhow::Result<Self> {
         utypes::short_enough("a declaration", text)?;
         let toks = tokens(text)?;
@@ -1174,5 +1197,22 @@ mod tests {
             refused.contains("stacks 17 pointers; 16 is the most"),
             "{refused}"
         );
+    }
+
+    /// A saved stack-slot key at or past [`crate::dwarf::FRAME_SPAN`] names
+    /// the frame limit rather than claiming the key is no stack slot.
+    #[test]
+    fn saved_slot_past_frame_span_names_the_frame_limit() {
+        assert_eq!(
+            VarKey::parse_saved("sp+0xffff").ok(),
+            Some(VarKey::Slot(0xffff))
+        );
+        for far in ["sp+0x10000", "sp-0x10000"] {
+            let refused = VarKey::parse_saved(far)
+                .expect_err("a saved slot past the frame span")
+                .to_string();
+            assert!(refused.contains("within 0x10000 of it"), "{refused}");
+        }
+        assert!(VarKey::parse_saved("sp-0x10").is_err());
     }
 }
