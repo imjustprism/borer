@@ -91,6 +91,10 @@ pub(super) const WHOLE: u8 = 64;
 /// # Arguments
 ///
 /// * `k` - The variable.
+///
+/// # Returns
+///
+/// Whether `k` is such a temporary.
 fn block_tmp(k: Key) -> bool {
     matches!(k, Key::Tmp(id) if id >= lift::BLOCK_TMP)
 }
@@ -160,6 +164,11 @@ pub(super) fn assumption(branch: &Branch, succ: u64, word: u32) -> Option<Fact> 
 /// * `code` - Decoded instructions per block (the first gives the start address).
 /// * `preds` - Predecessor block indices per block.
 /// * `recorded` - The previous dataflow round's block records (their branches).
+///
+/// # Returns
+///
+/// Each block's assumption, in block order; `None` for a block that may
+/// use none.
 pub(super) fn block_assumptions<L: Lifter>(
     ctx: &Ctx<'_>,
     code: &[Vec<L::Insn>],
@@ -230,6 +239,11 @@ fn block_assumption<L: Lifter>(
 /// * `recorded` - This round's block records so far.
 /// * `edges` - The facts the round before found, per block.
 /// * `b` - The block.
+///
+/// # Returns
+///
+/// The fact; `None` where the round before found none on the block's edge,
+/// or the branch as this round lifts it does not give the same one.
 fn held_fact<L: Lifter>(
     ctx: &Ctx<'_>,
     code: &[Vec<L::Insn>],

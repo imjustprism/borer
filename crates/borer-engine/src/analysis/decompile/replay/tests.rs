@@ -43,6 +43,10 @@ pub(super) fn replayed_with(
 /// * `seed` - The states' seed.
 /// * `change` - Rewrites one effect.
 /// * `told` - Rewrites the witness.
+///
+/// # Returns
+///
+/// What the replay found.
 pub(super) fn replayed_under(
     p: &Program,
     entry: u64,
@@ -64,6 +68,10 @@ pub(super) fn replayed_under(
 /// * `seed` - The states' seed.
 /// * `change` - Rewrites one effect.
 /// * `told` - Rewrites the witness.
+///
+/// # Returns
+///
+/// What the replay found.
 pub(super) fn replayed_in(
     p: &Program,
     a: &Analysis,
