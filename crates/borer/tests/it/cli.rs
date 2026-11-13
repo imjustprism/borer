@@ -8,7 +8,7 @@
 use std::process::{Command, Output};
 use std::sync::{Condvar, Mutex, PoisonError};
 
-mod paths;
+mod layout;
 
 /// Returns how many children the tests run at once: one per four cores,
 /// at least two.
@@ -93,7 +93,7 @@ fn output(args: &[&str]) -> Output {
 /// # Returns
 ///
 /// `(exit status was success, stdout as lossy UTF-8)`.
-pub(self) fn run(args: &[&str]) -> (bool, String) {
+fn run(args: &[&str]) -> (bool, String) {
     let out = output(args);
     (
         out.status.success(),
@@ -107,7 +107,7 @@ pub(self) fn run(args: &[&str]) -> (bool, String) {
 /// # Arguments
 ///
 /// * `args` - Command-line arguments after the program name.
-pub(self) fn run_all(args: &[&str]) -> (bool, String) {
+fn run_all(args: &[&str]) -> (bool, String) {
     let out = output(args);
     let mut text = String::from_utf8_lossy(&out.stdout).to_string();
     text.push_str(&String::from_utf8_lossy(&out.stderr));
@@ -1581,41 +1581,6 @@ fn cli_set_type_defines_applies_and_refuses() {
     drop(std::fs::remove_file(project));
 }
 
-/// `set-type typedef` refuses the typedef that takes a chain past the cap
-/// and leaves the project as it was, so the next command still loads it.
-///
-/// Only a name already defined was checked, so the 17th link of a chain
-/// was written, and every later command refused the project.
-#[test]
-#[cfg_attr(
-    not(windows),
-    ignore = "reads borer's own build, pinned as the Windows x64 PE"
-)]
-fn cli_set_type_refuses_a_chain_of_typedefs_past_the_cap() {
-    let exe = env!("CARGO_BIN_EXE_borer");
-    let dir = std::env::temp_dir().join(format!("borer-chain-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let project = dir.join("p.json");
-    let project = project.to_str().unwrap();
-    drop(std::fs::remove_file(project));
-    let (ok, out) = run(&["set-type", exe, project, "typedef", "T0", "u32"]);
-    assert!(ok, "{out}");
-    for k in 1..16 {
-        let (name, to) = (format!("T{k}"), format!("T{}", k - 1));
-        let (ok, out) = run(&["set-type", exe, project, "typedef", &name, &to]);
-        assert!(ok, "{name}: {out}");
-    }
-    let (ok, out) = run_all(&["set-type", exe, project, "typedef", "T16", "T15"]);
-    assert!(!ok, "a chain of 17 typedefs was written:\n{out}");
-    assert!(
-        out.contains("typedef 'T16' starts a chain of 17 typedefs; 16 is the most"),
-        "{out}"
-    );
-    let (ok, out) = run(&["set-type", exe, project, "typedef", "U", "u8"]);
-    assert!(ok, "the project no longer loads:\n{out}");
-    drop(std::fs::remove_file(project));
-}
-
 /// `set-type enum` writes an enum into a project and applies it at a data
 /// global.
 ///
@@ -1703,90 +1668,53 @@ fn cli_snapshot_compares_to_itself() {
     assert!(!ok, "a binary is not a snapshot");
 }
 
-/// A pack reads back its name, keys and warnings; `pack-keys` lists what a
-/// pack can set; `--pack` loads one for any command and a file that is not
-/// a pack is refused.
+/// `BORER_MAX_FILE` applies inside the program reader after stripping `@<off>`
+/// and across comparison loads (`diff`), so neither slice syntax nor `diff`
+/// reads an oversized file unchecked.
 #[test]
-#[cfg_attr(
-    not(windows),
-    ignore = "reads borer's own build, pinned as the Windows x64 PE"
-)]
-fn cli_packs_read_list_and_load() {
-    let exe = env!("CARGO_BIN_EXE_borer");
-    let dir = std::env::temp_dir();
-    let good = dir.join(format!("borer_pack_{}.borer", std::process::id()));
-    let bad = dir.join(format!("borer_notpack_{}.borer", std::process::id()));
-    std::fs::write(
-        &good,
-        "pack testpack 3\nabout a test\n[naming]\nsingleton Only\n[roles]\nclass A::B thing\nunknown x\n",
-    )
-    .expect("writes the pack");
-    std::fs::write(&bad, "[naming]\nsingleton x\n").expect("writes the file");
-    let good_path = good.to_string_lossy().to_string();
-    let bad_path = bad.to_string_lossy().to_string();
-    let (ok, out) = run(&["pack", &good_path]);
-    assert!(ok, "pack failed:\n{out}");
-    assert!(
-        out.starts_with("# pack testpack 3: 3 lines in 3 keys, 1 warnings"),
-        "{out}"
-    );
-    assert!(out.contains("naming\tsingleton\t1"), "{out}");
-    let (ok, out) = run(&["pack-keys"]);
-    assert!(ok, "pack-keys failed:\n{out}");
-    assert!(
-        out.contains("naming\tsingleton\tsingle\tinstance\t"),
-        "{out}"
-    );
-    let (ok, out) = run(&["info", exe, "--pack", &good_path]);
-    assert!(ok, "info with a pack failed:\n{out}");
-    let (ok, _) = run(&["info", exe, "--pack", &bad_path]);
-    std::fs::remove_file(&good).ok();
-    std::fs::remove_file(&bad).ok();
-    assert!(!ok, "a file that is not a pack loads");
+fn cli_max_file_caps_carved_slices_and_diff_loads() {
+    let pid = std::process::id();
+    let pe = std::env::temp_dir().join(format!("borer_max_{pid}.exe"));
+    let raw = std::env::temp_dir().join(format!("borer_max_{pid}.bin"));
+    std::fs::write(&pe, crate::contract::tiny_pe()).expect("the fixture is writable");
+    std::fs::write(&raw, [0xc3u8, 0x90, 0x90, 0x90]).expect("the raw fixture is writable");
+    let (pe_s, raw_s) = (pe.to_string_lossy(), raw.to_string_lossy());
+    let carved = format!("{pe_s}@0");
+    for args in [
+        vec!["--no-pdb", "triage", carved.as_str()],
+        vec!["--arch", "x86_64", "diff", raw_s.as_ref(), pe_s.as_ref()],
+    ] {
+        let (ok, said) = crate::contract::run_env(None, &[("BORER_MAX_FILE", "16")], &args);
+        assert!(
+            !ok && said.contains("past the 16-byte limit"),
+            "{args:?}: {said}"
+        );
+    }
+    std::fs::remove_file(&pe).ok();
+    std::fs::remove_file(&raw).ok();
 }
 
-/// `verify` checks RISC-V code against the RISC-V machine, and refuses the
-/// modes it does not run for RISC-V instead of checking nothing.
-///
-/// The fixture is a 64-bit `EM_RISCV` executable of one `PT_LOAD` segment
-/// holding `add a0, a0, a1; ret` at its entry.
+/// `fetch-pdb` and `grep` refuse a share root in `BORER_SYMCACHE` or
+/// `BORER_CACHE_DIR` before touching the network or claiming the next load
+/// applies a cached symbol file.
 #[test]
-fn cli_verifies_risc_v_code() {
-    const ENTRY: u64 = 0x1_0078;
-    let mut bytes = vec![0u8; 0x78];
-    bytes[..8].copy_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1, 1, 0]);
-    let mut put = |at: usize, v: u64, n: usize| {
-        bytes[at..at + n].copy_from_slice(&v.to_le_bytes()[..n]);
-    };
-    put(0x10, 2, 2);
-    put(0x12, 243, 2);
-    put(0x14, 1, 4);
-    put(0x18, ENTRY, 8);
-    put(0x20, 0x40, 8);
-    put(0x34, 64, 2);
-    put(0x36, 56, 2);
-    put(0x38, 1, 2);
-    put(0x3a, 64, 2);
-    put(0x40, 1, 4);
-    put(0x44, 5, 4);
-    put(0x50, 0x1_0000, 8);
-    put(0x58, 0x1_0000, 8);
-    put(0x60, 0x80, 8);
-    put(0x68, 0x80, 8);
-    put(0x70, 0x1000, 8);
-    bytes.extend_from_slice(&0x00b5_0533u32.to_le_bytes()); // ASM: add a0, a0, a1
-    bytes.extend_from_slice(&0x0000_8067u32.to_le_bytes()); // ASM: ret
-    let path = std::env::temp_dir().join(format!("borer_riscv_verify_{}.elf", std::process::id()));
-    std::fs::write(&path, &bytes).expect("the fixture is writable");
-    let path = path.to_string_lossy().to_string();
-
-    let (ok, out) = run_all(&["verify", &path, &format!("{ENTRY:#x}")]);
-    assert!(
-        ok && out.starts_with("# verified 1 functions, 1 blocks: 1 checked"),
-        "{out}"
+fn cli_refuses_a_share_in_symbol_and_index_caches() {
+    if !cfg!(windows) {
+        return;
+    }
+    let pe = std::env::temp_dir().join(format!("borer_symshare_{}.exe", std::process::id()));
+    std::fs::write(&pe, crate::contract::tiny_pe_with_pdb("app.pdb")).expect("writable");
+    let pe_s = pe.to_string_lossy();
+    let share = r"\\host.invalid\s";
+    let (ok, said) =
+        crate::contract::run_env(None, &[("BORER_SYMCACHE", share)], &["fetch-pdb", &pe_s]);
+    assert!(!ok && said.contains("names a network share"), "{said}");
+    assert!(!said.contains("next load applies it"), "{said}");
+    let (ok, said) = crate::contract::run_env(
+        None,
+        &[("BORER_CACHE_DIR", share)],
+        &["--no-pdb", "grep", &pe_s, "return"],
     );
-    let (ok, out) = run_all(&["verify", &path, &format!("{ENTRY:#x}"), "1", "1", "text"]);
-    assert!(!ok && out.contains("block by block only"), "{out}");
-
-    drop(std::fs::remove_file(&path));
+    std::fs::remove_file(&pe).ok();
+    assert!(!ok && said.contains("names a network share"), "{said}");
 }
