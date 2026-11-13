@@ -1181,9 +1181,11 @@ impl Cond {
     /// The truth value, or `None` when an operand is symbolic or the
     /// condition code is not decidable from the recorded flags.
     pub(super) fn eval(&self) -> Option<bool> {
+        use ConditionCode as C;
         if let Some(s) = self.simplify() {
             return s.eval();
         }
+        let cc = self.cc.0;
         let (l, r, bits) = match &self.flags {
             Flags::Cmp(Expr::Const(l), Expr::Const(r), bits) => (*l, *r, *bits),
             Flags::Float(Expr::Const(l), Expr::Const(r), bits)
@@ -1198,25 +1200,23 @@ impl Cond {
                 return Some(self.fcmp()?.0.holds(of(*l), of(*r)));
             }
             Flags::Test(Expr::Const(l), Expr::Const(r), bits) => (l & r, 0, *bits),
-            Flags::Result(Expr::Const(e), bits) => (*e, 0, *bits),
-            Flags::Shift(e, bits, c) => {
-                use ConditionCode as C;
-                match (self.cc.0, e, c) {
-                    (C::b, _, Expr::Const(c)) => return Some(*c != 0),
-                    (C::ae, _, Expr::Const(c)) => return Some(*c == 0),
-                    (C::be, Expr::Const(e), Expr::Const(c)) => {
-                        return Some(*c != 0 || e & mask_bits(*bits) == 0);
-                    }
-                    (C::a, Expr::Const(e), Expr::Const(c)) => {
-                        return Some(*c == 0 && e & mask_bits(*bits) != 0);
-                    }
-                    (C::b | C::o | C::ae | C::no | C::be | C::a, _, _) => return None,
-                    (_, Expr::Const(e), _) => (*e, 0, *bits),
-                    _ => return None,
-                }
+            Flags::Result(Expr::Const(e), bits) if matches!(cc, C::e | C::ne | C::s | C::ns) => {
+                (*e, 0, *bits)
             }
+            Flags::Shift(e, bits, c) => match (self.cc.0, e, c) {
+                (C::b, _, Expr::Const(c)) => return Some(*c != 0),
+                (C::ae, _, Expr::Const(c)) => return Some(*c == 0),
+                (C::be, Expr::Const(e), Expr::Const(c)) => {
+                    return Some(*c != 0 || e & mask_bits(*bits) == 0);
+                }
+                (C::a, Expr::Const(e), Expr::Const(c)) => {
+                    return Some(*c == 0 && e & mask_bits(*bits) != 0);
+                }
+                (C::b | C::o | C::ae | C::no | C::be | C::a, _, _) => return None,
+                (_, Expr::Const(e), _) => (*e, 0, *bits),
+                _ => return None,
+            },
             Flags::Carry(Expr::Const(c)) => {
-                use ConditionCode as C;
                 return match self.cc.0 {
                     C::b | C::o => Some(*c != 0),
                     C::ae | C::no => Some(*c == 0),
@@ -1224,7 +1224,6 @@ impl Cond {
                 };
             }
             Flags::Add(Expr::Const(l), Expr::Const(r), bits) => {
-                use ConditionCode as C;
                 let m = mask_bits(*bits);
                 let (lu, ru) = (l & m, r & m);
                 let sum = lu.wrapping_add(ru) & m;
@@ -1270,7 +1269,6 @@ impl Cond {
         let m = mask_bits(bits);
         let (lu, ru) = (l & m, r & m);
         let (ls, rs) = (sext(lu, bits).cast_signed(), sext(ru, bits).cast_signed());
-        use ConditionCode as C;
         Some(match self.cc.0 {
             C::e => lu == ru,
             C::ne => lu != ru,

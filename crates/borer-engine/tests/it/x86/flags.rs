@@ -243,6 +243,21 @@ fn a_shift_by_the_width_agrees_with_the_emulator() {
     ]);
 }
 
+/// The flags of a result decide only its zero and sign tests: `sar al, 8`
+/// leaves the sign bit in CF, so `jc` after it is taken at `al = 0x81`
+/// and the function returns 1. The decompiler once read the result's
+/// carry as 0, decided the branch untaken and dropped the arm.
+///
+/// `mov eax,0x81; sar al,8; jc L; xor eax,eax; ret; L: mov eax,1; ret`.
+#[test]
+fn a_result_decides_no_carry() {
+    let text = dc(&[
+        0xb8, 0x81, 0x00, 0x00, 0x00, 0xc0, 0xf8, 0x08, 0x72, 0x03, 0x31, 0xc0, 0xc3, 0xb8, 0x01,
+        0x00, 0x00, 0x00, 0xc3,
+    ]);
+    assert!(text.contains("return 1"), "{text}");
+}
+
 /// A count no constant gives may mask to 0 and leave every flag, so the
 /// lifter states none for it: the `je` after `shl eax, cl` is read
 /// neither as the shifted value being zero nor as the compare before.
