@@ -803,3 +803,55 @@ fn many_globals_of_one_name_are_named_in_linear_time() {
         h.len()
     );
 }
+
+/// [`data_xml`] indexes the globals once before rendering the classes, so
+/// 4,096 classes alongside 100,000 integer globals render in linearithmic
+/// time and still take the singleton address of `C0`.
+///
+/// # Panics
+///
+/// When [`data_xml`] takes over ten seconds, or `C0` lacks its singleton
+/// address.
+#[test]
+fn many_classes_and_scalar_globals_render_reclass_xml_without_rescanning() {
+    let mut sdk = sample();
+    sdk.classes = (0..4096)
+        .map(|k| Class {
+            name: format!("C{k}"),
+            size: Size::Stated(8),
+            parent: None,
+            vtable: None,
+            slots: Vec::new(),
+            fields: Vec::new(),
+            notes: Vec::new(),
+        })
+        .collect();
+    sdk.classes.sort_by(|a, b| a.name.cmp(&b.name));
+    sdk.globals = (0..100_000u64)
+        .map(|k| Global {
+            va: 0x1_4020_0000 + k * 4,
+            name: format!("g{k}"),
+            ty: Ty::Int {
+                bytes: 4,
+                signed: false,
+            },
+            evidence: Evidence::Stated,
+        })
+        .chain(std::iter::once(Global {
+            va: 0x1_4099_9900,
+            name: "g_c0".to_owned(),
+            ty: Ty::Ptr(Some("C0".to_owned())),
+            evidence: Evidence::Stated,
+        }))
+        .collect();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || tx.send(data_xml(&sdk)));
+    let rendered = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("reclass XML renders within ten seconds");
+    let expected = format!(
+        "name=\"C0\" comment=\"size 0x8 (stated)\" address=\"{}\"",
+        xml("[<game.exe> + 999900]")
+    );
+    assert!(rendered.contains(&expected), "{} bytes", rendered.len());
+}

@@ -9,6 +9,7 @@
 //! writes the same bytes. A class a global singleton points at takes that
 //! global as its address.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use super::{Class, Evidence, Part, Sdk, Ty, parts, xml};
@@ -82,6 +83,7 @@ pub fn data_xml(sdk: &Sdk) -> String {
     let mut out = format!(
         "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<reclass version=\"{FILE_VERSION}\" type=\"{platform}\">\n  <classes>\n"
     );
+    let addrs = addresses(sdk);
     for c in &sdk.classes {
         if super::full(&out) {
             break;
@@ -132,7 +134,7 @@ pub fn data_xml(sdk: &Sdk) -> String {
             uuid(&c.name),
             xml(&c.name),
             xml(&comment),
-            xml(&address(sdk, c))
+            xml(addrs.get(c.name.as_str()).map_or("0", String::as_str))
         );
         nodes(&mut out, sdk, c, &parts[..stop.unwrap_or(parts.len())]);
         out.push_str("    </class>\n");
@@ -233,26 +235,31 @@ fn hex(out: &mut String, name: &str, comment: &str, len: u64) {
     }
 }
 
-/// Returns a class's address formula: the global singleton holding it,
-/// else `0`.
+/// Indexes each class's address formula from the first global singleton
+/// holding it.
 ///
 /// # Arguments
 ///
 /// * `sdk` - The globals.
-/// * `class` - The class.
-fn address(sdk: &Sdk, class: &Class) -> String {
-    sdk.globals
-        .iter()
-        .find_map(|g| match &g.ty {
-            Ty::Ptr(Some(n)) if *n == class.name => {
-                Some(format!("[<{}> + {:X}]", sdk.module, sdk.rva(g.va)))
+fn addresses(sdk: &Sdk) -> BTreeMap<&str, String> {
+    let mut out = BTreeMap::new();
+    for g in &sdk.globals {
+        if crate::cancel::Cancel::raised() {
+            break;
+        }
+        match &g.ty {
+            Ty::Ptr(Some(n)) => {
+                out.entry(n.as_str())
+                    .or_insert_with(|| format!("[<{}> + {:X}]", sdk.module, sdk.rva(g.va)));
             }
-            Ty::Bytes(_, n) if *n == class.name => {
-                Some(format!("<{}> + {:X}", sdk.module, sdk.rva(g.va)))
+            Ty::Bytes(_, n) => {
+                out.entry(n.as_str())
+                    .or_insert_with(|| format!("<{}> + {:X}", sdk.module, sdk.rva(g.va)));
             }
-            _ => None,
-        })
-        .unwrap_or_else(|| "0".to_owned())
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Returns a uuid derived from a class name, spelled as a GUID.
