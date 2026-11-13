@@ -8,10 +8,10 @@
 //! on it and the layout is exactly the one written: a derived class's
 //! fields are flattened into its own, as its methods' accesses show them.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use super::{Class, Evidence, Part, Sdk, Size, Ty, ident, parts, unique};
+use super::{Class, Evidence, Part, Sdk, Size, Taken, Ty, ident, parts, unique};
 
 /// The C++ names one header gives a program's classes.
 struct Names {
@@ -66,7 +66,7 @@ pub fn header(sdk: &Sdk) -> String {
 ///
 /// * `sdk` - The classes.
 fn names(sdk: &Sdk) -> Names {
-    let mut taken: BTreeSet<String> = ["rva", "global", "tls"]
+    let mut taken: Taken = ["rva", "global", "tls"]
         .into_iter()
         .map(str::to_owned)
         .collect();
@@ -122,7 +122,7 @@ fn vtable_struct(sdk: &Sdk, class: &Class, names: &Names) -> String {
         class.slots.len(),
         names.vtables[&class.name]
     );
-    let mut taken: BTreeSet<String> = [names.vtables[&class.name].clone()].into();
+    let mut taken: Taken = [names.vtables[&class.name].clone()].into_iter().collect();
     for (i, (entry, name)) in class.slots.iter().enumerate() {
         let last = name.rsplit("::").next().unwrap_or(name);
         let last = last.rsplit('!').next().unwrap_or(last);
@@ -173,7 +173,7 @@ fn class_struct(sdk: &Sdk, class: &Class, names: &Names) -> String {
         );
         return out;
     }
-    let mut taken: BTreeSet<String> = [id.clone()].into();
+    let mut taken: Taken = [id.clone()].into_iter().collect();
     let mut asserts = String::new();
     let _ = writeln!(out, "struct {id} {{");
     for part in parts(class, sdk.word) {
@@ -288,7 +288,7 @@ fn evidence(e: &Evidence) -> String {
 /// * `names` - The vtable structs' identifiers, which name their tables.
 fn addresses(out: &mut String, sdk: &Sdk, names: &Names) {
     out.push_str("\n/* Addresses relative to the image base. */\nnamespace rva {\n");
-    let mut taken = BTreeSet::new();
+    let mut taken = Taken::default();
     for c in &sdk.classes {
         if super::full(out) {
             break;
@@ -311,7 +311,7 @@ fn addresses(out: &mut String, sdk: &Sdk, names: &Names) {
         );
     }
     out.push_str("} // namespace rva\n\nnamespace global {\n");
-    let mut taken = BTreeSet::new();
+    let mut taken = Taken::default();
     for g in &sdk.globals {
         if super::full(out) {
             break;
@@ -336,7 +336,7 @@ fn addresses(out: &mut String, sdk: &Sdk, names: &Names) {
     out.push_str(
         "} // namespace global\n\n/* Offsets into the module's TLS block. */\nnamespace tls {\n",
     );
-    let mut taken = BTreeSet::new();
+    let mut taken = Taken::default();
     for (off, class) in &sdk.tls {
         if super::full(out) {
             break;

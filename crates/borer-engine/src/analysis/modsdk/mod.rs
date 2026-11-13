@@ -724,23 +724,48 @@ pub fn ident(name: &str) -> String {
     }
 }
 
+/// The identifiers one scope has taken, and for each name wanted again the
+/// suffix it tries next ([`unique`]).
+#[derive(Debug, Default)]
+pub(crate) struct Taken {
+    /// The identifiers in use.
+    names: BTreeSet<String>,
+    /// For each name wanted again, the suffix it tries next.
+    next: BTreeMap<String, u64>,
+}
+
+impl FromIterator<String> for Taken {
+    fn from_iter<I: IntoIterator<Item = String>>(names: I) -> Self {
+        Self {
+            names: names.into_iter().collect(),
+            next: BTreeMap::new(),
+        }
+    }
+}
+
 /// Returns `want`, or `want_2`, `want_3`, ... whichever `taken` lacks, and
 /// takes it.
+///
+/// A name wanted again resumes at the suffix it reached: trying every
+/// suffix from 2 up, 131,072 globals named alike took nine billion tries.
 ///
 /// # Arguments
 ///
 /// * `taken` - The names in use in one scope.
 /// * `want` - The name wanted.
 #[must_use]
-pub fn unique(taken: &mut BTreeSet<String>, want: &str) -> String {
-    let mut name = want.to_owned();
-    let mut n = 2u64;
-    while taken.contains(&name) {
-        name = format!("{want}_{n}");
-        n = n.saturating_add(1);
+pub(crate) fn unique(taken: &mut Taken, want: &str) -> String {
+    if taken.names.insert(want.to_owned()) {
+        return want.to_owned();
     }
-    taken.insert(name.clone());
-    name
+    let n = taken.next.entry(want.to_owned()).or_insert(2);
+    loop {
+        let name = format!("{want}_{n}");
+        *n = n.saturating_add(1);
+        if taken.names.insert(name.clone()) {
+            return name;
+        }
+    }
 }
 
 /// The C++ keywords and alternative tokens no identifier may be.

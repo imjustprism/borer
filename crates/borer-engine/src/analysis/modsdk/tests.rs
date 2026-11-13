@@ -5,7 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::cheat::cheat_table;
 use super::header::header;
 use super::reclass::{data_xml, reclass, uuid};
-use super::{Class, Evidence, Field, Global, Sdk, Size, Ty, build, ident, recovered, unique, xml};
+use super::{
+    Class, Evidence, Field, Global, Sdk, Size, Taken, Ty, build, ident, recovered, unique, xml,
+};
 use crate::analysis::classes::{ClassLayout, FieldUse};
 use crate::analysis::utypes::{TypeExpr, UserField, UserStruct, UserType};
 use crate::analysis::vtables::ClassInfo;
@@ -559,7 +561,7 @@ fn names_become_distinct_cpp_identifiers() {
     assert_eq!(ident("UINT64_MAX"), "UINT64_MAX_");
     assert_eq!(ident("INT8_C"), "INT8_C_");
     assert_eq!(ident("MAX_HP"), "MAX_HP");
-    let mut taken = BTreeSet::new();
+    let mut taken = Taken::default();
     assert_eq!(unique(&mut taken, "a"), "a");
     assert_eq!(unique(&mut taken, "a"), "a_2");
     assert_eq!(unique(&mut taken, "a"), "a_3");
@@ -765,4 +767,39 @@ fn the_rows_after_the_classes_stop_once_the_flag_is_raised() {
     let (h, t) = (header(&sdk), cheat_table(&sdk));
     assert!(rows.iter().all(|row| h.contains(row)), "{h}");
     assert!(t.contains("Thread-local singleton"), "{t}");
+}
+
+/// A header of 131,072 globals all named `x` names them in linear time.
+///
+/// Each `x` tried every suffix from 2 up: nine billion tries, hours of an
+/// export.
+///
+/// # Panics
+///
+/// When the header takes over ten seconds, or its last global is not
+/// `x_131072`.
+#[test]
+fn many_globals_of_one_name_are_named_in_linear_time() {
+    let mut sdk = sample();
+    sdk.globals = (0..1u64 << 17)
+        .map(|k| Global {
+            va: 0x1_4020_0000 + k * 8,
+            name: "x".to_owned(),
+            ty: Ty::Int {
+                bytes: 8,
+                signed: false,
+            },
+            evidence: Evidence::Stated,
+        })
+        .collect();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || tx.send(header(&sdk)));
+    let h = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the header is written within ten seconds");
+    assert!(
+        h.contains("constexpr std::uintptr_t x_131072 = "),
+        "{} bytes",
+        h.len()
+    );
 }
