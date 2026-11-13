@@ -243,6 +243,62 @@ fn a_device_name_is_refused_however_windows_spells_it() {
     }
 }
 
+/// Builds a minimal x86-64 PE32+ image whose `CodeView` PDB70 debug record
+/// holds `pdb_path`.
+///
+/// # Panics
+///
+/// When `pdb_path` does not fit in the `.text` page.
+fn pe_with_codeview(pdb_path: &str) -> Vec<u8> {
+    const PE: usize = 0x80;
+    const OPT: usize = PE + 24;
+    const SEC: usize = OPT + 0xf0;
+    const DBG: usize = 0x220;
+    const RSDS: usize = 0x240;
+    let rsds_len = u64::try_from(24 + pdb_path.len() + 1).expect("rsds size");
+    let mut b = vec![0u8; 0x600];
+    assert!(RSDS + 25 + pdb_path.len() <= b.len(), "record path fits");
+    b[..2].copy_from_slice(b"MZ");
+    b[PE..PE + 4].copy_from_slice(b"PE\0\0");
+    b[SEC..SEC + 5].copy_from_slice(b".text");
+    b[0x200] = 0xc3;
+    b[RSDS..RSDS + 4].copy_from_slice(b"RSDS");
+    b[RSDS + 4..RSDS + 20].fill(1);
+    b[RSDS + 24..RSDS + 24 + pdb_path.len()].copy_from_slice(pdb_path.as_bytes());
+    for (at, val, width) in [
+        (0x3c, 0x80u64, 4usize),
+        (PE + 4, 0x8664, 2),
+        (PE + 6, 1, 2),
+        (PE + 20, 0xf0, 2),
+        (PE + 22, 0x22, 2),
+        (OPT, 0x20b, 2),
+        (OPT + 16, 0x1000, 4),
+        (OPT + 24, 0x1_4000_0000, 8),
+        (OPT + 32, 0x1000, 4),
+        (OPT + 36, 0x200, 4),
+        (OPT + 48, 6, 2),
+        (OPT + 56, 0x2000, 4),
+        (OPT + 60, 0x200, 4),
+        (OPT + 68, 3, 2),
+        (OPT + 108, 16, 4),
+        (OPT + 160, 0x1020, 4),
+        (OPT + 164, 28, 4),
+        (SEC + 8, 0x400, 4),
+        (SEC + 12, 0x1000, 4),
+        (SEC + 16, 0x400, 4),
+        (SEC + 20, 0x200, 4),
+        (SEC + 36, 0x6000_0020, 4),
+        (DBG + 12, 2, 4),
+        (DBG + 16, rsds_len, 4),
+        (DBG + 20, 0x1040, 4),
+        (DBG + 24, 0x240, 4),
+        (RSDS + 20, 1, 4),
+    ] {
+        b[at..at + width].copy_from_slice(&val.to_le_bytes()[..width]);
+    }
+    b
+}
+
 /// A PE whose `CodeView` record climbs through `//?/` loads without that
 /// path being tried.
 ///
@@ -252,39 +308,21 @@ fn a_device_name_is_refused_however_windows_spells_it() {
 ///
 /// # Panics
 ///
-/// When the record's path is tried.
+/// When the record does not parse or its path is tried.
 #[test]
 fn a_record_climbing_through_a_device_path_is_never_tried() {
-    let exe = std::env::current_exe().expect("the test binary has a path");
-    let record = Program::load_with(&exe, false)
-        .ok()
-        .and_then(|p| p.pdb_record);
-    let Some(record) = record.filter(|_| cfg!(windows)) else {
+    if !cfg!(windows) {
         return;
-    };
+    }
     let dir = std::env::temp_dir().join(format!("borer-cv-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a temp dir");
     let decoy = dir.join("cv.pdb");
     std::fs::write(&decoy, b"no pdb").expect("written");
     let climb = format!("//?/X:/../{}", decoy.display()).replace('\\', "/");
-    let mut bytes = std::fs::read(&exe).expect("the test binary is readable");
-    let old = record.path.as_bytes();
-    let at = bytes.windows(old.len()).position(|w| w == old);
-    let patched = at.filter(|_| climb.len() < old.len()).and_then(|at| {
-        let region = bytes.get_mut(at..at + old.len())?;
-        region.fill(0);
-        region
-            .get_mut(..climb.len())?
-            .copy_from_slice(climb.as_bytes());
-        Some(())
-    });
-    let loaded = patched
-        .map(|()| Program::from_bytes_with(dir.join("bin").join("x.exe"), bytes, true, None));
+    let bytes = pe_with_codeview(&climb);
+    let loaded = Program::from_bytes_with(dir.join("bin").join("x.exe"), bytes, true, None);
     std::fs::remove_dir_all(&dir).expect("cleans up");
-    let Some(loaded) = loaded else {
-        return;
-    };
-    let loaded = loaded.expect("the patched copy loads");
+    let loaded = loaded.expect("the image loads");
     assert_eq!(loaded.pdb_record.map(|r| r.path), Some(climb.clone()));
     assert!(loaded.pdb.is_none(), "{climb} was tried: {:?}", loaded.pdb);
 }
