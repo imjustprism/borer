@@ -150,7 +150,7 @@ struct RawSection {
 pub(crate) fn load(file: &[u8], mach: &Mach<'_>, names: &mut Names) -> anyhow::Result<Loaded> {
     match mach {
         Mach::Binary(m) => {
-            let mut loaded = image(file, m, 0, names);
+            let mut loaded = image(file, file, m, 0, names);
             loaded
                 .headers
                 .add_overlay(image_end(m), from_usize(file.len()));
@@ -204,7 +204,7 @@ pub(crate) fn load(file: &[u8], mach: &Mach<'_>, names: &mut Names) -> anyhow::R
                     )
                 }
             };
-            let mut loaded = image(file, &m, crate::num::saturating_usize(start), names);
+            let mut loaded = image(file, slice, &m, crate::num::saturating_usize(start), names);
             loaded.lenient = lenient;
             let slices = arches
                 .iter()
@@ -557,6 +557,152 @@ fn plain(name: &str) -> &str {
 /// of `n` bytes holds at most `n / NLIST_MIN` symbols, whatever count its
 /// header states.
 const NLIST_MIN: usize = 12;
+/// Most string-table bytes scanned for one `nlist` name: optional `_` plus
+/// enough 4-byte characters for [`head`] to cut accurately and 4 bytes of
+/// trailing UTF-8 slack.
+const NLIST_SCAN_MAX: usize = (crate::text::OUTSIDE_MAX + 4) * 4 + 4;
+/// Direct-mapped stack cache slots for repeated `n_strx` offsets.
+const NLIST_CACHE_SLOTS: usize = 64;
+
+/// Decoded Mach-O `nlist` or `nlist_64` symbol entry.
+#[derive(Clone, Copy)]
+struct RawNlist {
+    /// `n_type` flags (`N_STAB`, `N_TYPE`, `N_EXT`).
+    n_type: u8,
+    /// `n_desc` flags (`N_ARM_THUMB_DEF`).
+    n_desc: u16,
+    /// Symbol address or value.
+    n_value: u64,
+}
+
+/// Bounded `LC_SYMTAB` reader over one Mach-O slice.
+///
+/// Goblin's `Symbols` scans to the real NUL on every `nlist` iteration and
+/// every `get`, turning `N` entries sharing a long string into `O(N * L)`
+/// work. This reader decodes `nlist` / `nlist_64` records directly, bounds
+/// each string scan to [`NLIST_SCAN_MAX`] bytes, and caches recent `n_strx`
+/// lookups on the stack without allocating heap memory.
+struct RawSymtab<'a> {
+    /// Slice starting at `symoff`.
+    syms: &'a [u8],
+    /// Slice starting at `stroff`.
+    strings: &'a [u8],
+    /// Stated `nsyms` count.
+    nsyms: usize,
+    /// `true` for 16-byte `nlist_64`, `false` for 12-byte `nlist`.
+    is_64: bool,
+    /// `true` when integers in the slice are little-endian.
+    le: bool,
+    /// Direct-mapped stack cache of `(n_strx, resolved_prefix)`.
+    cache: [Option<(u32, Option<&'a str>)>; NLIST_CACHE_SLOTS],
+}
+
+impl<'a> RawSymtab<'a> {
+    /// Opens the last in-bounds `LC_SYMTAB` load command in `m`.
+    fn parse(slice: &'a [u8], m: &MachO<'a>) -> Option<Self> {
+        let (syms, strings, nsyms) =
+            m.load_commands
+                .iter()
+                .rev()
+                .find_map(|lc| match &lc.command {
+                    CommandVariant::Symtab(t) => {
+                        let symoff = usize::try_from(t.symoff).ok()?;
+                        let stroff = usize::try_from(t.stroff).ok()?;
+                        Some((
+                            slice.get(symoff..)?,
+                            slice.get(stroff..)?,
+                            usize::try_from(t.nsyms).unwrap_or(usize::MAX),
+                        ))
+                    }
+                    _ => None,
+                })?;
+        Some(Self {
+            syms,
+            strings,
+            nsyms,
+            is_64: m.is_64,
+            le: m.little_endian,
+            cache: [None; NLIST_CACHE_SLOTS],
+        })
+    }
+
+    /// Reads the `index`-th `nlist` record and its bounded string prefix.
+    fn get(&mut self, index: usize) -> Option<(&'a str, RawNlist)> {
+        if index >= self.nsyms {
+            return None;
+        }
+        let step = if self.is_64 { 16usize } else { 12usize };
+        let off = index.checked_mul(step)?;
+        let raw = self.syms.get(off..off.checked_add(step)?)?;
+        let u16_at = |b: &[u8]| {
+            let arr = *b.first_chunk::<2>()?;
+            Some(if self.le {
+                u16::from_le_bytes(arr)
+            } else {
+                u16::from_be_bytes(arr)
+            })
+        };
+        let u32_at = |b: &[u8]| {
+            let arr = *b.first_chunk::<4>()?;
+            Some(if self.le {
+                u32::from_le_bytes(arr)
+            } else {
+                u32::from_be_bytes(arr)
+            })
+        };
+        let n_strx = u32_at(raw)?;
+        let n_type = raw[4];
+        let n_desc = u16_at(&raw[6..8])?;
+        let n_value = if self.is_64 {
+            let arr = *raw[8..16].first_chunk::<8>()?;
+            if self.le {
+                u64::from_le_bytes(arr)
+            } else {
+                u64::from_be_bytes(arr)
+            }
+        } else {
+            u64::from(u32_at(&raw[8..12])?)
+        };
+        let name = self.name_at(n_strx)?;
+        Some((
+            name,
+            RawNlist {
+                n_type,
+                n_desc,
+                n_value,
+            },
+        ))
+    }
+
+    /// Resolves `n_strx` to a UTF-8 prefix scanning at most [`NLIST_SCAN_MAX`] bytes.
+    fn name_at(&mut self, n_strx: u32) -> Option<&'a str> {
+        let slot = usize::try_from(n_strx).unwrap_or(0) & (NLIST_CACHE_SLOTS - 1);
+        if let Some((hit, cached)) = self.cache[slot]
+            && hit == n_strx
+        {
+            return cached;
+        }
+        let parsed = usize::try_from(n_strx)
+            .ok()
+            .and_then(|at| self.strings.get(at..))
+            .and_then(|rest| {
+                let window = &rest[..rest.len().min(NLIST_SCAN_MAX)];
+                if let Some(end) = window.iter().position(|&b| b == 0) {
+                    std::str::from_utf8(&window[..end]).ok()
+                } else {
+                    match std::str::from_utf8(window) {
+                        Ok(s) => Some(s),
+                        Err(e) if e.error_len().is_none() => {
+                            std::str::from_utf8(&window[..e.valid_up_to()]).ok()
+                        }
+                        Err(_) => None,
+                    }
+                }
+            });
+        self.cache[slot] = Some((n_strx, parsed));
+        parsed
+    }
+}
 
 /// Names a Mach-O's pointer-section slots through its indirect symbol table,
 /// walking at most the indirect table's entry count across all sections and
@@ -569,18 +715,24 @@ const NLIST_MIN: usize = 12;
 /// * `base` - Byte offset of the Mach-O slice within `file`.
 /// * `word` - Pointer width in bytes (`4` or `8`).
 /// * `raw` - Raw section headers in load-command order.
+/// * `table` - Bounded `LC_SYMTAB` reader.
 /// * `seen` - Already-recorded `(address, plain_name)` pairs.
 /// * `names` - Per-load name budget.
 ///
 /// # Returns
 ///
 /// Import slot symbols in section and slot order.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "indirect import resolution threads slice layout, symbol table, dedup set, and budget"
+)]
 fn indirect_imports<'a, 's>(
     file: &'a [u8],
     m: &MachO<'a>,
     base: usize,
     word: u64,
     raw: &[RawSection],
+    table: &mut RawSymtab<'a>,
     seen: &mut BTreeSet<(u64, &'s str)>,
     names: &mut Names,
 ) -> Vec<Symbol>
@@ -588,9 +740,6 @@ where
     'a: 's,
 {
     let mut out = Vec::new();
-    let Some(table) = &m.symbols else {
-        return out;
-    };
     let Some((off, stated)) = m.load_commands.iter().find_map(|lc| match &lc.command {
         CommandVariant::Dysymtab(d) => Some((
             usize::try_from(d.indirectsymoff).ok()?,
@@ -633,7 +782,7 @@ where
                 continue;
             }
             *used += 1;
-            let Ok((name, _)) = table.get(usize::try_from(index).unwrap_or(usize::MAX)) else {
+            let Some((name, _)) = table.get(usize::try_from(index).unwrap_or(usize::MAX)) else {
                 continue;
             };
             let slot = s.addr.wrapping_add(from_usize(i) * word);
@@ -655,10 +804,17 @@ where
 /// # Arguments
 ///
 /// * `file` - The whole file.
+/// * `slice` - The Mach-O slice bytes (`file` for a thin image).
 /// * `m` - The image.
 /// * `base` - Where the image begins in the file: zero for a thin file.
 /// * `names` - The load's name budget.
-fn image<'a>(file: &'a [u8], m: &MachO<'a>, base: usize, names: &mut Names) -> Loaded {
+fn image<'a>(
+    file: &'a [u8],
+    slice: &'a [u8],
+    m: &MachO<'a>,
+    base: usize,
+    names: &mut Names,
+) -> Loaded {
     let arch = match m.header.cputype {
         CPU_X86_64 => Arch::X86_64,
         CPU_X86 => Arch::X86,
@@ -698,12 +854,11 @@ fn image<'a>(file: &'a [u8], m: &MachO<'a>, base: usize, names: &mut Names) -> L
     let mut symbols: Vec<Symbol> = Vec::new();
     let mut seen: BTreeSet<(u64, &str)> = BTreeSet::new();
     let mut named = 0usize;
-    if let Some(table) = &m.symbols {
-        for (name, nlist) in table
-            .iter()
-            .take(file.len() / NLIST_MIN)
-            .filter_map(Result::ok)
-        {
+    if let Some(mut table) = RawSymtab::parse(slice, m) {
+        for index in 0..table.nsyms.min(slice.len() / NLIST_MIN) {
+            let Some((name, nlist)) = table.get(index) else {
+                continue;
+            };
             if nlist.n_type & N_STAB != 0 || name.is_empty() {
                 continue;
             }
@@ -727,7 +882,7 @@ fn image<'a>(file: &'a [u8], m: &MachO<'a>, base: usize, names: &mut Names) -> L
             }
         }
         symbols.extend(indirect_imports(
-            file, m, base, word, &raw, &mut seen, names,
+            file, m, base, word, &raw, &mut table, &mut seen, names,
         ));
     }
 
@@ -998,7 +1153,7 @@ mod tests {
     fn a_got_at_the_top_of_the_space_names_its_slots() {
         let file = got_image(u64::MAX);
         let m = MachO::parse(&file, 0).expect("the image parses");
-        let loaded = image(&file, &m, 0, &mut Names::for_file(file.len()));
+        let loaded = image(&file, &file, &m, 0, &mut Names::for_file(file.len()));
         let slots: Vec<u64> = loaded
             .symbols
             .iter()
@@ -1017,7 +1172,7 @@ mod tests {
     fn a_got_away_from_the_top_names_its_slots() {
         let file = got_image(0x1000);
         let m = MachO::parse(&file, 0).expect("the image parses");
-        let loaded = image(&file, &m, 0, &mut Names::for_file(file.len()));
+        let loaded = image(&file, &file, &m, 0, &mut Names::for_file(file.len()));
         let slots: Vec<u64> = loaded
             .symbols
             .iter()

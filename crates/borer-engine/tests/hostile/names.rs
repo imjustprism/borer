@@ -402,3 +402,99 @@ fn elf_non_utf8_shstrtab_is_refused_without_quadratic_rescan() {
         "{BAD_LEN} bytes of 0xff took {took:?}"
     );
 }
+
+/// A 32-bit Mach-O with `43,690` `nlist` records all naming one `512 KiB`
+/// string loads within two seconds and within the heap bar without scanning
+/// `22.9 GB` of string bytes.
+#[test]
+fn macho32_many_nlists_naming_half_megabyte_string_load_fast() {
+    let _one = serial();
+    /// 32-bit `nlist` entry count (`524,280` bytes of `nlist` table).
+    const NLISTS: usize = 43_690;
+    /// Shared string length (`512 KiB`).
+    const STR_LEN: usize = 512 << 10;
+    let code_at = 0x100usize;
+    let code_len = 0x1_0000usize;
+    let symoff = code_at + code_len;
+    let stroff = symoff + NLISTS * 12;
+    let strsize = STR_LEN + 3;
+    let mut b = vec![0u8; code_at];
+    put32(&mut b, 0, 0xfeed_face);
+    put32(&mut b, 4, 7);
+    put32(&mut b, 8, 3);
+    put32(&mut b, 12, 2);
+    put32(&mut b, 16, 2);
+    put32(&mut b, 20, 124 + 24);
+    put32(&mut b, 28, 1);
+    put32(&mut b, 32, 124);
+    b[36..42].copy_from_slice(b"__TEXT");
+    put32(&mut b, 52, 0x1000);
+    put32(
+        &mut b,
+        56,
+        u32::try_from(symoff).expect("fits in 32-bit vmsize"),
+    );
+    put32(&mut b, 60, 0);
+    put32(
+        &mut b,
+        64,
+        u32::try_from(symoff).expect("fits in 32-bit filesize"),
+    );
+    put32(&mut b, 68, 7);
+    put32(&mut b, 72, 5);
+    put32(&mut b, 76, 1);
+    b[84..90].copy_from_slice(b"__text");
+    b[100..106].copy_from_slice(b"__TEXT");
+    put32(
+        &mut b,
+        116,
+        0x1000 + u32::try_from(code_at).expect("fits in u32"),
+    );
+    put32(&mut b, 120, u32::try_from(code_len).expect("fits in u32"));
+    put32(&mut b, 124, u32::try_from(code_at).expect("fits in u32"));
+    put32(&mut b, 140, 0x8000_0400);
+    let sym_cmd = 28 + 124;
+    put32(&mut b, sym_cmd, 2);
+    put32(&mut b, sym_cmd + 4, 24);
+    put32(&mut b, sym_cmd + 8, u32::try_from(symoff).expect("fits"));
+    put32(&mut b, sym_cmd + 12, u32::try_from(NLISTS).expect("fits"));
+    put32(&mut b, sym_cmd + 16, u32::try_from(stroff).expect("fits"));
+    put32(&mut b, sym_cmd + 20, u32::try_from(strsize).expect("fits"));
+    b.resize(symoff, 0xc3);
+    for k in 0..NLISTS {
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.push(0x0e);
+        b.push(1);
+        b.extend_from_slice(&0u16.to_le_bytes());
+        let va = 0x1100 + u32::try_from(k).expect("fits");
+        b.extend_from_slice(&va.to_le_bytes());
+    }
+    b.extend_from_slice(b"\0_");
+    b.resize(b.len() + STR_LEN, b'A');
+    b.push(0);
+    let size = b.len();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test bounds the time a hostile nlist table takes"
+    )]
+    let started = std::time::Instant::now();
+    let (loaded, extra) = measured(|| Program::from_bytes(PathBuf::from("nlist32.macho"), b));
+    let took = started.elapsed();
+    let p = loaded.expect("the 32-bit Mach-O loads");
+    assert!(
+        took < std::time::Duration::from_secs(2),
+        "{NLISTS} nlists on a {STR_LEN}-byte string took {took:?}"
+    );
+    assert!(
+        extra <= LOAD_HEAP_PER_BYTE * size,
+        "a {size} byte file took {extra} bytes of heap to load"
+    );
+    let shown = format!("{}...", "A".repeat(OUTSIDE_MAX));
+    let names: Vec<&str> = p
+        .symbols
+        .iter()
+        .filter(|s| s.kind == SymbolKind::Local)
+        .map(|s| s.name.as_str())
+        .collect();
+    assert_budgeted(&p, &names, NLISTS, &shown);
+}
