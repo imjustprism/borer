@@ -1812,7 +1812,11 @@ fn cli_diff_and_project_surface_sidecar_and_path_refusals() {
         f.write_all(b"# borer fingerprint\n").expect("header");
         f.set_len(65 << 20).expect("65 mib");
     }
-    std::fs::write(&proj, r#"{"program":"elsewhere.exe","names":{}}"#).expect("proj");
+    std::fs::write(
+        &proj,
+        r#"{"program":"elsewhere.exe","names":{},"comments":{}}"#,
+    )
+    .expect("proj");
     let (pe_s, side_s, proj_s) = (
         pe.to_string_lossy(),
         side.to_string_lossy(),

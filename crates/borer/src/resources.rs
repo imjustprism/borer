@@ -145,7 +145,7 @@ fn read_spec_file_max(path: &str, kind: &str, max: u64) -> Result<String, ErrorD
 }
 
 /// Reads a `# borer fingerprint` sidecar within [`SPEC_FILE_MAX`] bytes, or
-/// returns `Ok(None)` when `path` is a regular file with another header.
+/// returns `Ok(None)` when `path` names no file or has another header.
 ///
 /// # Arguments
 ///
@@ -153,12 +153,15 @@ fn read_spec_file_max(path: &str, kind: &str, max: u64) -> Result<String, ErrorD
 ///
 /// # Errors
 ///
-/// When `path` cannot be opened as a regular file, or opens with
+/// When `path` is unusable, names an existing non-regular file, or opens with
 /// `# borer fingerprint` and exceeds [`SPEC_FILE_MAX`] or is not UTF-8.
 pub(crate) fn fingerprint_sidecar(path: &Path) -> Result<Option<String>, String> {
     use std::io::Read as _;
     /// Magic prefix opening every fingerprint sidecar.
     const HEAD: &[u8] = b"# borer fingerprint";
+    if borer_engine::program::checked_metadata(path)?.is_none() {
+        return Ok(None);
+    }
     let f = borer_engine::program::open_regular(path, u64::MAX).map_err(|e| format!("{e:#}"))?;
     let shown = borer_engine::text::short_path(&path.to_string_lossy());
     let mut head = Vec::with_capacity(HEAD.len());
@@ -738,6 +741,7 @@ impl BorerServer {
     /// When no binary is loaded, or the other file cannot be loaded or has no
     /// code analysis.
     pub(crate) fn diff_text(&self, other: &str) -> Result<String, ErrorData> {
+        self.require_loaded()?;
         if let Some(text) = fingerprint_sidecar(Path::new(other)).map_err(|e| {
             err_params(format!(
                 "{e}; give a path to a program or a fingerprint sidecar"
