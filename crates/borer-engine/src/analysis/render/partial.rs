@@ -1843,4 +1843,23 @@ mod tests {
         let ecx = scanned(&code, 32).concrete(canonical(Register::ECX, 32));
         assert_eq!(ecx, Some(0xffff_ffff));
     }
+
+    /// A `lea` into a 32-bit register of 64-bit code keeps the low half of
+    /// the address it sums.
+    ///
+    /// `xor ecx,ecx; lea eax,[rcx-4]` sums `0xfffffffffffffffc` at 64 bits,
+    /// and `eax` keeps 0xfffffffc of it.
+    ///
+    /// # Panics
+    ///
+    /// When the folded value is wider.
+    #[test]
+    fn a_lea_into_a_32_bit_register_keeps_the_low_half() {
+        let code = [
+            0x31, 0xc9, // ASM: xor ecx, ecx
+            0x8d, 0x41, 0xfc, // ASM: lea eax, [rcx-4]
+        ];
+        let eax = scanned(&code, 64).concrete(canonical(Register::EAX, 64));
+        assert_eq!(eax, Some(0xffff_fffc));
+    }
 }
