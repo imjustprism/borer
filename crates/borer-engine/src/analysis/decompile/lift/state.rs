@@ -494,6 +494,8 @@ impl<'a> Exec<'_, 'a> {
     /// constant slot offset as often as the constant plus the block
     /// (`0x90 + r15`), and leaving the second form raw left the manager access
     /// spelled as a bare dereference where the first read as the singleton.
+    /// A slot offset the file states that would carry the global past the top
+    /// of the address space keeps the address as it is.
     ///
     /// # Arguments
     ///
@@ -508,8 +510,9 @@ impl<'a> Exec<'_, 'a> {
             if let Some((block, off)) = block_off
                 && self.is_tls_block(block)
                 && self.ctx.analysis.classes.tls_slots.contains_key(&off)
+                && let Some(at) = crate::analysis::decompile::expr::TLS_BASE.checked_add(off)
             {
-                return Expr::Const(crate::analysis::decompile::expr::TLS_BASE + off);
+                return Expr::Const(at);
             }
         }
         addr

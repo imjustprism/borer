@@ -1139,9 +1139,11 @@ pub(super) fn step(
     }
 }
 
-/// Returns the constant offset of a memory operand from its base: the
-/// displacement plus an index register holding a tracked constant with
-/// scale 1, or the displacement alone without an index.
+/// Returns the constant offset of a TLS-block memory operand from its base,
+/// when it fits in `u32`.
+///
+/// Sums the displacement and an index register holding a tracked constant
+/// with scale 1, or takes the displacement alone without an index.
 ///
 /// # Arguments
 ///
@@ -1150,16 +1152,17 @@ pub(super) fn step(
 fn memory_offset(instr: &Instruction, vals: &BTreeMap<Register, Tracked>) -> Option<u64> {
     let disp = instr.memory_displacement64();
     let index = instr.memory_index();
-    if index == Register::None {
-        return Some(disp);
-    }
-    if instr.memory_index_scale() != 1 {
-        return None;
-    }
-    match vals.get(&index) {
-        Some(Tracked::Const(c)) => Some(disp.wrapping_add(*c)),
-        _ => None,
-    }
+    let off = if index == Register::None {
+        Some(disp)
+    } else if instr.memory_index_scale() != 1 {
+        None
+    } else {
+        match vals.get(&index) {
+            Some(Tracked::Const(c)) => Some(disp.wrapping_add(*c)),
+            _ => None,
+        }
+    }?;
+    (off <= u64::from(u32::MAX)).then_some(off)
 }
 
 /// Returns the address a global-addressing memory operand names.

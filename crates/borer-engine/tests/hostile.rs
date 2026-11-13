@@ -8,8 +8,9 @@
 //! tables by its counts; a section whose memory size was two gigabytes was
 //! thrown away with the code it held. Each case here is the header that
 //! did it, rebuilt from scratch, with the bound it must now hold. Hand-edited
-//! project files ([`projects`]) and code moving the stack pointer to the far
-//! end of the 64-bit range ([`lift`]) are held the same way.
+//! project files ([`projects`]) and code whose offsets reach the far end of
+//! the 64-bit range (a moved stack pointer, a stated thread-local slot,
+//! [`lift`]) are held the same way.
 
 #![expect(
     clippy::missing_panics_doc,
