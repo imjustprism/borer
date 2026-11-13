@@ -518,3 +518,35 @@ fn a_result_or_multi_bit_shift_leaves_carry_and_overflow_undecided() {
     let differ = runs.iter().any(|(_, v)| matches!(v, Verdict::Differs(..)));
     assert!(!differ, "{runs:?}");
 }
+
+/// A 16-bit double shift by 16 copies its source and sets CF from the last
+/// bit shifted out of its destination, while counts 17 through 31 leave the
+/// instruction unmodeled.
+#[test]
+fn a_16_bit_double_shift_at_and_past_the_width_agrees_with_the_emulator() {
+    for code in [
+        &[0x66, 0x0f, 0xa4, 0xd8, 0x10, 0xc3][..], // ASM: shld ax, bx, 16; ret
+        &[0x66, 0x0f, 0xac, 0xd8, 0x10, 0xc3][..], // ASM: shrd ax, bx, 16; ret
+        &[0x66, 0x0f, 0xa4, 0xd8, 0x10, 0x0f, 0x92, 0xc0, 0xc3][..], // ASM: shld ax, bx, 16; setb al; ret
+        &[0xb1, 0x10, 0x66, 0x0f, 0xa4, 0xd8, 0xc3][..], // ASM: mov cl, 16; shld ax, bx, cl; ret
+        &[0xb1, 0x10, 0x66, 0x0f, 0xad, 0xd8, 0xc3][..], // ASM: mov cl, 16; shrd ax, bx, cl; ret
+    ] {
+        agrees_with_the_emulator(code);
+    }
+    let by_cl = dc(&[
+        0xb1, 0x10, 0x66, 0x0f, 0xa5, 0xd8, 0x72, 0x03, 0x31, 0xc0, 0xc3, 0xb8, 0x01, 0x00, 0x00,
+        0x00, 0xc3,
+    ]);
+    assert!(by_cl.contains("return 1"), "{by_cl}");
+    let past = [
+        0x66, 0x0f, 0xa4, 0xd8, 0x11, // ASM: shld ax, bx, 17
+        0x74, 0x03, // ASM: je 0x40100a
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xc3, // ASM: ret
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+        0xc3, // ASM: ret
+    ];
+    let text = dc(&past);
+    assert!(text.contains("FLAGS_UNKNOWN"), "{text}");
+    never_disagrees_with_the_emulator(&image(&past));
+}

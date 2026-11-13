@@ -869,15 +869,13 @@ impl<'a> Builder<'a> {
                 };
                 let (a, b) = (self.lower(a, d), self.lower(b, d));
                 let (l, r) = (self.int(a, w), self.int(b, w));
-                let and = self.emit(
-                    Inst::Bin {
-                        op: BinOp::And,
-                        w,
-                        l,
-                        r,
-                    },
-                    MTy::I(w),
-                );
+                let bin = Inst::Bin {
+                    op: BinOp::And,
+                    w,
+                    l,
+                    r,
+                };
+                let and = self.emit(bin, MTy::I(w));
                 self.zero_test(cc, and, w)
             }
             Flags::Result(e, bits) => {
@@ -888,7 +886,8 @@ impl<'a> Builder<'a> {
                     return self.undef(Hole::Flags);
                 }
                 let x = self.lower(e, d);
-                self.zero_test(cc, self.int(x, w), w)
+                let x = self.int(x, w);
+                self.zero_test(cc, x, w)
             }
             Flags::Shift(e, bits, count) => {
                 let Some(w) = width(*bits) else {
@@ -903,15 +902,13 @@ impl<'a> Builder<'a> {
                         let out = self.nonzero(c, 64, cc.0 == C::be);
                         let zero = self.nonzero(x, w, cc.0 == C::a);
                         let op = if cc.0 == C::be { BinOp::Or } else { BinOp::And };
-                        self.emit(
-                            Inst::Bin {
-                                op,
-                                w: 1,
-                                l: out,
-                                r: zero,
-                            },
-                            MTy::I(1),
-                        )
+                        let bin = Inst::Bin {
+                            op,
+                            w: 1,
+                            l: out,
+                            r: zero,
+                        };
+                        self.emit(bin, MTy::I(1))
                     }
                     C::e | C::ne | C::s | C::ns | C::p | C::np => self.zero_test(cc, x, w),
                     C::None | C::o | C::no | C::l | C::ge | C::le | C::g => self.undef(Hole::Flags),

@@ -795,28 +795,8 @@ impl Exec<'_, '_> {
                 };
                 self.write_op0(instr, v);
             }
-            Mnemonic::Shld | Mnemonic::Shrd
-                if instr.op_count() == 3
-                    && !matches!(self.val(instr, 2), Expr::Const(n) if n >= 1 && n < u64::from(bits)) =>
-            {
-                let mask = if bits == 64 { 0x3f } else { 0x1f };
-                let dst = self.val(instr, 0);
-                let src = self.val(instr, 1);
-                let cnt = fold(Op::And, self.val(instr, 2), Expr::Const(mask), bits);
-                let rest = fold(Op::Sub, Expr::Const(u64::from(bits) - 1), cnt.clone(), bits);
-                let (near, far) = if mn == Mnemonic::Shld {
-                    (Op::Shl, Op::Shr)
-                } else {
-                    (Op::Shr, Op::Shl)
-                };
-                let v = fold(
-                    Op::Or,
-                    fold(near, dst.clone(), cnt.clone(), bits),
-                    fold(far, fold(far, src, Expr::Const(1), bits), rest, bits),
-                    bits,
-                );
-                self.flags = shift_flags(mn, dst, &cnt, &v, bits, &self.flags, self.flags_needed);
-                self.write_op0(instr, v);
+            Mnemonic::Shld | Mnemonic::Shrd if instr.op_count() == 3 => {
+                self.double_shift(instr, mn, bits);
             }
             Mnemonic::Xorps | Mnemonic::Xorpd | Mnemonic::Pxor | Mnemonic::Pandn
                 if instr.op_count() == 2
@@ -1031,32 +1011,6 @@ impl Exec<'_, '_> {
                     && instr.op1_kind() == OpKind::Register =>
             {
                 self.xadd(instr, bits);
-            }
-            Mnemonic::Shld | Mnemonic::Shrd
-                if instr.op_count() == 3
-                    && matches!(self.val(instr, 2), Expr::Const(n) if n >= 1 && n < u64::from(bits)) =>
-            {
-                let n = match self.val(instr, 2) {
-                    Expr::Const(n) => n,
-                    _ => 1,
-                };
-                let a = self.val(instr, 0);
-                let b = self.val(instr, 1);
-                let rest = Expr::Const(u64::from(bits) - n);
-                let (near, far) = if mn == Mnemonic::Shld {
-                    (Op::Shl, Op::Shr)
-                } else {
-                    (Op::Shr, Op::Shl)
-                };
-                let v = fold(
-                    Op::Or,
-                    fold(near, a.clone(), Expr::Const(n), bits),
-                    fold(far, b, rest, bits),
-                    bits,
-                );
-                let needed = self.flags_needed;
-                self.flags = shift_flags(mn, a, &Expr::Const(n), &v, bits, &self.flags, needed);
-                self.write_op0(instr, v);
             }
             Mnemonic::Rcr | Mnemonic::Rcl
                 if instr.op_count() == 2
@@ -1901,6 +1855,27 @@ impl Exec<'_, '_> {
                         | OpAccess::ReadCondWrite
                 )
         }) || (matches!(instr.flow_control(), FlowControl::Return) && !self.ctx.unused_result)
+    }
+
+    /// Lifts a three-operand `shld` or `shrd` across 16-, 32- and 64-bit
+    /// operands, leaving 16-bit counts past 16 unmodeled.
+    ///
+    /// # Arguments
+    ///
+    /// * `instr` - The instruction.
+    /// * `mn` - `Shld` or `Shrd`.
+    /// * `bits` - Operand width in bits.
+    fn double_shift(&mut self, instr: &Instruction, mn: Mnemonic, bits: u8) {
+        let mask_cnt = if bits == 64 { 0x3f } else { 0x1f };
+        let cnt = fold(Op::And, self.val(instr, 2), Expr::Const(mask_cnt), bits);
+        if bits == 16 && matches!(cnt, Expr::Const(n) if n > 16) {
+            self.unmodeled(instr);
+            return;
+        }
+        let (dst, src) = (self.val(instr, 0), self.val(instr, 1));
+        let v = double_shift_value(mn, &dst, src, &cnt, bits);
+        self.flags = shift_flags(mn, dst, &cnt, &v, bits, &self.flags, self.flags_needed);
+        self.write_op0(instr, v);
     }
 }
 
