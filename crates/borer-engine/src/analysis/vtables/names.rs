@@ -13,11 +13,45 @@ use crate::fxmap::FxHashMap;
 use crate::isa::x86::{Decoder, DecoderOptions, Instruction, Mnemonic, OpKind, Register};
 use crate::program::{BinaryFormat, Program};
 
-/// The class that introduces slot `k`: the topmost ancestor whose own table
-/// reaches that far.
+/// Returns `class` and the ancestors whose own tables reach slot `k`,
+/// nearest first.
 ///
 /// A class known only from its descriptor, without a table of its own, is
-/// walked through.
+/// walked through; an ancestor whose table stops short of `k` ends the walk,
+/// since the slot is introduced below it.
+///
+/// # Arguments
+///
+/// * `classes` - Classes with their slots and parents.
+/// * `class` - Where to start; it comes first, with a table or without.
+/// * `k` - The slot index.
+fn reaching<'a>(
+    classes: &'a BTreeMap<String, ClassInfo>,
+    class: &'a str,
+    k: usize,
+) -> Vec<&'a str> {
+    let mut out = vec![class];
+    let mut at = class;
+    for _ in 0..ANCESTORS_MAX {
+        let Some(parent) = classes.get(at).and_then(|c| c.parent.as_deref()) else {
+            break;
+        };
+        let Some(p) = classes.get(parent).filter(|_| parent != at) else {
+            break;
+        };
+        if p.vtable.is_some() {
+            if p.slots.len() <= k {
+                break;
+            }
+            out.push(parent);
+        }
+        at = parent;
+    }
+    out
+}
+
+/// Returns the class that introduces slot `k`: the topmost ancestor whose
+/// own table reaches that far ([`reaching`]).
 ///
 /// # Arguments
 ///
@@ -25,35 +59,52 @@ use crate::program::{BinaryFormat, Program};
 /// * `class` - Where to start.
 /// * `k` - The slot index.
 pub(super) fn introducer(classes: &BTreeMap<String, ClassInfo>, class: &str, k: usize) -> String {
-    let mut cur = class.to_owned();
-    let mut at = class.to_owned();
-    for _ in 0..ANCESTORS_MAX {
-        let Some(parent) = classes.get(&at).and_then(|c| c.parent.clone()) else {
-            break;
-        };
-        let Some(p) = classes.get(&parent).filter(|_| parent != at) else {
-            break;
-        };
-        if p.vtable.is_some() {
-            if p.slots.len() <= k {
-                break;
-            }
-            cur.clone_from(&parent);
-        }
-        at = parent;
-    }
-    cur
+    reaching(classes, class, k)
+        .last()
+        .copied()
+        .unwrap_or(class)
+        .to_owned()
+}
+
+/// Returns the class the function at slot `k` of `class`'s table belongs
+/// to: the topmost ancestor whose own table holds that same function there
+/// ([`reaching`]).
+///
+/// A class's table holds at each slot the final overrider of the slot's
+/// method, which is the method of the topmost class whose table holds the
+/// same function there: an inherited entry belongs to the ancestor that
+/// defined it and an override to the class that overrides it, whichever
+/// class introduced the slot.
+///
+/// # Arguments
+///
+/// * `classes` - Classes with their slots and parents.
+/// * `class` - A class whose table holds the function at `k`.
+/// * `k` - The slot index.
+fn owner(classes: &BTreeMap<String, ClassInfo>, class: &str, k: usize) -> String {
+    let held = |c: &str| classes.get(c).and_then(|info| info.slots.get(k));
+    let f = held(class);
+    reaching(classes, class, k)
+        .into_iter()
+        .rfind(|&c| held(c) == f)
+        .unwrap_or(class)
+        .to_owned()
 }
 
 /// Names the virtual methods no signature string named.
 ///
 /// A function that sits at slot `k` of a class's table is that class's `k`th
 /// virtual method, so it takes the name `Class::vfunc_k` when nothing else
-/// named it. The class is the one that introduces the slot ([`introducer`]),
-/// since an inherited entry belongs to the ancestor that declared it; a
-/// function several unrelated tables share, such as an empty method reused
-/// as a slot filler, has no one class to belong to and keeps its address
-/// name. The name is marked inferred.
+/// named it. The class is the function's [`owner`], the topmost class whose
+/// own table holds it at `k`, so a name `Class::vfunc_k` names a function
+/// `Class`'s own table holds at `k`: an inherited entry keeps the name of
+/// the ancestor that defined it, and an override takes the overriding
+/// class's name, not the name of the base that introduced the slot. A
+/// function its tables give several owners, such as one body the linker
+/// folded into the tables of classes neither of which inherits it from the
+/// other, or an empty method reused as a slot filler, has no one class to
+/// belong to and keeps its address name, as does one held at two slot
+/// indexes. The name is marked inferred.
 ///
 /// # Arguments
 ///
@@ -66,7 +117,7 @@ pub(super) fn name_vtable_slots(classes: &BTreeMap<String, ClassInfo>, functions
             owners
                 .entry(entry)
                 .or_default()
-                .insert((introducer(classes, name, k), k));
+                .insert((owner(classes, name, k), k));
         }
     }
     let chosen: BTreeMap<u64, (String, usize)> = owners
@@ -673,15 +724,16 @@ fn dominant_shapes(
 ///
 /// Slot `i` of a class's table and slot `i` of an ancestor's table are the
 /// same virtual method, so a named override names the unnamed function an
-/// ancestor holds there (at the topmost ancestor holding that function) and
-/// a named ancestor method names an unnamed override. Proposals repeat
-/// until nothing new is named; a function proposed two different names gets
-/// none. Constructor, destructor and `ctor_or_dtor` names do not travel, and
-/// neither does a method name that an ancestor holds at a different slot
-/// (the function that inlined that method took its signature string), nor
-/// one whose function differs in shape from what nearly every function at
-/// that slot of the hierarchy is: one message class's slot 3 that inlined
-/// a setter's assert does not name the id getter of all 645.
+/// ancestor holds there (after its [`owner`], the topmost ancestor holding
+/// that function) and a named ancestor method names an unnamed override.
+/// Proposals repeat until nothing new is named; a function proposed two
+/// different names gets none. Constructor, destructor and `ctor_or_dtor`
+/// names do not travel, and neither does a method name that an ancestor
+/// holds at a different slot (the function that inlined that method took its
+/// signature string), nor one whose function differs in shape from what
+/// nearly every function at that slot of the hierarchy is: one message
+/// class's slot 3 that inlined a setter's assert does not name the id getter
+/// of all 645.
 ///
 /// # Arguments
 ///
@@ -737,19 +789,15 @@ pub(super) fn propagate_slot_names(
                         continue;
                     }
                     let mut done: BTreeSet<u64> = BTreeSet::new();
-                    for (k, (_, g)) in chain.iter().enumerate() {
+                    for (a, g) in &chain {
                         if !done.insert(*g) || method_part(name_of(*g).as_deref()).is_some() {
                             continue;
                         }
-                        let top = chain
-                            .iter()
-                            .skip(k)
-                            .rfind(|(_, h)| h == g)
-                            .map_or(info, |(a, _)| *a);
+                        let top = owner(classes, &a.name, i);
                         proposals
                             .entry(*g)
                             .or_default()
-                            .insert(format!("{}::{m}", top.name));
+                            .insert(format!("{top}::{m}"));
                     }
                 } else if let Some(mg) = chain
                     .iter()

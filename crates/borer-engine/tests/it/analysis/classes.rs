@@ -556,6 +556,136 @@ fn virtual_method_names_follow_the_slot() {
     assert!(base_slot0.name.as_deref().is_none_or(|n| !n.contains("::")));
 }
 
+/// Returns the entry of slot function `n` of a [`hierarchy`] image.
+///
+/// # Arguments
+///
+/// * `n` - The function's number.
+fn slot_fn(n: usize) -> u64 {
+    0x401800 + from_usize(0x10 * n)
+}
+
+/// Builds a raw x86-64 image of classes only their constructors' symbols
+/// name.
+///
+/// Class `i`'s constructor, `Name::Name` at 0x401000 + 0x20 * i, calls its
+/// parent's constructor with `this` when it has a parent, then stores the
+/// class's table at `[this]`. The table, at 0x402000 + 0x40 * i, holds the
+/// class's slot functions and then a zero word; slot function `n`, at
+/// [`slot_fn`], returns the dword at `this + 8 * n`, so every body reads
+/// `this` and no two are the same.
+///
+/// # Arguments
+///
+/// * `classes` - Per class its name, its parent's index in the list and
+///   the numbers of the slot functions its table holds.
+fn hierarchy(classes: &[(&str, Option<usize>, &[usize])]) -> Program {
+    use borer_engine::num::{lo8, lo32};
+    let text = |off: usize| 0x401000 + from_usize(off);
+    let rel32 = |to: u64, next: u64| lo32(to.wrapping_sub(next)).to_le_bytes();
+    let mut code = vec![0xccu8; 0x1000];
+    let mut data = vec![0u8; 0x1000];
+    let mut symbols = Vec::new();
+    for (i, &(name, parent, slots)) in classes.iter().enumerate() {
+        let at = 0x20 * i;
+        let mut ctor = Vec::new();
+        if let Some(p) = parent {
+            ctor.extend([0x48, 0x89, 0xcb]); // ASM: mov rbx, rcx
+            ctor.push(0xe8); // ASM: call rel32, the parent's constructor
+            ctor.extend(rel32(text(0x20 * p), text(at + 8)));
+        }
+        let table = 0x402000 + from_usize(0x40 * i);
+        ctor.extend([0x48, 0x8d, 0x05]); // ASM: lea rax, [rip + rel32], the table
+        ctor.extend(rel32(table, text(at + ctor.len() + 4)));
+        let object = if parent.is_some() { 0x03 } else { 0x01 };
+        ctor.extend([0x48, 0x89, object, 0xc3]); // ASM: mov [rbx] (or [rcx]), rax; ret
+        code[at..at + ctor.len()].copy_from_slice(&ctor);
+        for (k, &n) in slots.iter().enumerate() {
+            let f = 0x800 + 0x10 * n;
+            let body = [0x8b, 0x41, lo8(from_usize(8 * n)), 0xc3]; // ASM: mov eax, [rcx+8n]; ret
+            code[f..f + 4].copy_from_slice(&body);
+            let word = 0x40 * i + 8 * k;
+            data[word..word + 8].copy_from_slice(&slot_fn(n).to_le_bytes());
+        }
+        symbols.push(Symbol {
+            name: format!("{name}::{name}"),
+            addr: text(at),
+            kind: SymbolKind::Export,
+        });
+    }
+    let mut p = crate::raw::image(Arch::X86_64, &code, &data);
+    p.symbols = symbols;
+    p
+}
+
+/// An override is named after the class whose table holds it, not after
+/// the base that introduced its slot.
+///
+/// `Base`'s table holds functions 0 and 1; `Derived`, whose constructor
+/// calls `Base`'s, inherits 0 and overrides slot 1 with 2. Named after the
+/// slot's introducer, 2 was `Base::vfunc_1_2`, a name that points at
+/// `Base`, whose table holds 1 there. It is `Derived::vfunc_1`, and its
+/// `this` is a `Derived`; 0, which both tables hold, stays `Base`'s.
+#[test]
+fn an_override_is_named_after_the_class_whose_table_holds_it() {
+    let p = hierarchy(&[("Base", None, &[0, 1]), ("Derived", Some(0), &[0, 2])]);
+    let a = Analysis::compute(&p);
+    let derived = a.classes.by_name.get("Derived").expect("Derived");
+    assert_eq!(derived.parent.as_deref(), Some("Base"));
+    assert_eq!(derived.slots, [slot_fn(0), slot_fn(2)]);
+    let name = |n: usize| a.function(slot_fn(n)).and_then(|f| f.name.clone());
+    assert_eq!(name(0).as_deref(), Some("Base::vfunc_0"));
+    assert_eq!(name(1).as_deref(), Some("Base::vfunc_1"));
+    assert_eq!(name(2).as_deref(), Some("Derived::vfunc_1"));
+    let g = a.function(slot_fn(2)).expect("the override");
+    assert!(g.name_inferred);
+    assert_eq!(g.name_source, NameSource::Slot);
+    let o = Overlay::default();
+    let text =
+        borer_engine::analysis::decompile::decompile(&p, &a, &o, slot_fn(2)).expect("decompiles");
+    assert!(text.contains("Derived::vfunc_1(Derived *this)"), "{text}");
+}
+
+/// A body two classes' tables hold at one slot, neither class inheriting
+/// it from the other, has no one class to belong to and keeps its address
+/// name, as when the linker folds two methods into one body.
+///
+/// `One` and `Two`, unrelated, hold function 6 at slot 1, and each
+/// introduces its own slot 1, so it had no slot name before either.
+/// `Left` and `Right`, both derived from `Base`, hold function 3 at slot
+/// 1, where `Base` holds 1: named after the slot's introducer, 3 was
+/// `Base::vfunc_1_2`, a name that points at `Base`.
+#[test]
+fn a_body_folded_into_two_tables_keeps_its_address_name() {
+    let p = hierarchy(&[
+        ("Base", None, &[0, 1]),
+        ("Left", Some(0), &[0, 3]),
+        ("Right", Some(0), &[0, 3]),
+        ("One", None, &[4, 6]),
+        ("Two", None, &[5, 6]),
+    ]);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    for (class, parent, slots) in [
+        ("Left", Some("Base"), [0, 3]),
+        ("Right", Some("Base"), [0, 3]),
+        ("One", None, [4, 6]),
+        ("Two", None, [5, 6]),
+    ] {
+        let info = a.classes.by_name.get(class).expect("a class");
+        assert_eq!(info.parent.as_deref(), parent, "{class}");
+        assert_eq!(info.slots, slots.map(slot_fn), "{class}");
+    }
+    let name = |n: usize| a.function(slot_fn(n)).and_then(|f| f.name.clone());
+    assert_eq!(name(1).as_deref(), Some("Base::vfunc_1"));
+    assert_eq!(name(4).as_deref(), Some("One::vfunc_0"));
+    for n in [3, 6] {
+        let entry = slot_fn(n);
+        assert!(a.function(entry).is_some(), "function {n}");
+        assert_eq!(name_of(&a, &o, entry), format!("sub_{entry:x}"));
+    }
+}
+
 /// A constructor storing `this` into the TLS block registers a singleton.
 ///
 /// `Tls::Tls` stores at offset 0x10, so that slot is `Tls`, and the getter
