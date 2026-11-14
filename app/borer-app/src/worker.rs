@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use borer_engine::analysis::render::{FunctionOrder, FunctionRows, function_rows};
 use borer_engine::analysis::{Analysis, EnumSource, Overlay};
+use borer_engine::cancel::Cancel;
 use borer_engine::program::Program;
 use gpui::{App, Task};
 
@@ -236,9 +237,69 @@ impl<T> FilterLatest<T> {
     }
 }
 
+/// Monotonic ticket and cooperative [`Cancel`] pair invalidating superseded background work.
+#[derive(Debug, Default)]
+pub struct TaskEpoch {
+    /// Current generation counter; incremented on every start or invalidation.
+    seq: u64,
+    /// Active cancellation flag for the current generation, if any task is running.
+    cancel: Option<Cancel>,
+}
+
+impl TaskEpoch {
+    /// Creates an idle [`TaskEpoch`] at generation `0`.
+    ///
+    /// # Returns
+    ///
+    /// A new idle [`TaskEpoch`].
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            seq: 0,
+            cancel: None,
+        }
+    }
+
+    /// Raises any active [`Cancel`] flag and advances the generation so in-flight tickets expire.
+    pub fn invalidate(&mut self) {
+        if let Some(prev) = self.cancel.take() {
+            prev.raise();
+        }
+        self.seq = self.seq.saturating_add(1);
+    }
+
+    /// Invalidates any prior generation and starts a fresh one with a new [`Cancel`] token.
+    ///
+    /// # Returns
+    ///
+    /// `(ticket, cancel)` to pass into the background task and check on completion.
+    #[must_use]
+    pub fn begin(&mut self) -> (u64, Cancel) {
+        self.invalidate();
+        let cancel = Cancel::new();
+        self.cancel = Some(cancel.clone());
+        (self.seq, cancel)
+    }
+
+    /// Reports whether `ticket` and `cancel` still belong to the active, uncancelled generation.
+    ///
+    /// # Arguments
+    ///
+    /// * `ticket` - Generation counter returned by [`Self::begin`].
+    /// * `cancel` - Cooperative [`Cancel`] flag returned by [`Self::begin`].
+    ///
+    /// # Returns
+    ///
+    /// `true` when `ticket` matches the current generation and `cancel` was not raised.
+    #[must_use]
+    pub fn is_current(&self, ticket: u64, cancel: &Cancel) -> bool {
+        ticket == self.seq && !cancel.is_raised()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::FilterLatest;
+    use super::{FilterLatest, TaskEpoch};
 
     /// Older filter requests finishing after a newer one are discarded.
     ///
@@ -284,5 +345,27 @@ mod tests {
         assert!(!seq.accept(ticket_a, "binary-a-filtered"));
         assert!(seq.accept(ticket_b, "binary-b-filtered"));
         assert_eq!(seq.current().copied(), Some("binary-b-filtered"));
+    }
+
+    /// Invalidating an epoch when switching binaries cancels and rejects an in-flight decompile.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a superseded generation stays current or fails to raise its cancel flag.
+    #[test]
+    fn task_epoch_invalidation_cancels_and_rejects_prior_binary_ticket() {
+        let mut decompile_epoch = TaskEpoch::new();
+        let (ticket_a, cancel_a) = decompile_epoch.begin();
+        assert!(decompile_epoch.is_current(ticket_a, &cancel_a));
+        assert!(!cancel_a.is_raised());
+
+        decompile_epoch.invalidate();
+        assert!(cancel_a.is_raised());
+        assert!(!decompile_epoch.is_current(ticket_a, &cancel_a));
+
+        let (ticket_b, cancel_b) = decompile_epoch.begin();
+        assert!(ticket_b > ticket_a);
+        assert!(decompile_epoch.is_current(ticket_b, &cancel_b));
+        assert!(!decompile_epoch.is_current(ticket_a, &cancel_b));
     }
 }
