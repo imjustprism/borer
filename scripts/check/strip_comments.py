@@ -19,7 +19,27 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from harness.root import ROOT  # noqa: E402
 
-CRATES = ROOT / "crates"
+SOURCE_ROOTS = (ROOT / "crates", ROOT / "app")
+
+
+def is_app_build_output(path: Path) -> bool:
+    """Reports whether `path` sits inside a Cargo build directory under `app/`."""
+    app_root = ROOT / "app"
+    if not path.is_relative_to(app_root):
+        return False
+    parts = path.relative_to(app_root).parts
+    return bool(parts) and parts[0].startswith("target")
+
+
+def rust_sources() -> list[Path]:
+    """Every maintained Rust source file under `crates/` and `app/`, sorted by path."""
+    return sorted(
+        p
+        for base in SOURCE_ROOTS
+        if base.is_dir()
+        for p in base.rglob("*.rs")
+        if not is_app_build_output(p)
+    )
 
 
 def strip(src: str) -> str:
@@ -348,7 +368,8 @@ def main(argv: list[str]) -> int:
     _self_check()
     check = "--check" in argv
     changed = 0
-    for path in sorted(CRATES.rglob("*.rs")):
+    paths = rust_sources()
+    for path in paths:
         src = path.read_text(encoding="utf-8")
         nxt = strip(src)
         if nxt == src:

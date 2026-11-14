@@ -21,6 +21,7 @@ A file jscpd leaves out (`maxLines`, `maxSize`) fails the check.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -50,16 +51,25 @@ require(path.join(bin, "..", "jscpd")).detectClones(JSON.parse(fs.readFileSync(p
 npx puts the package's `.bin` directory, beside the package, on `PATH`."""
 
 
+def git_globs(pattern: str) -> list[str]:
+    """Expands one optional `{a,b}` brace group in `pattern` into `git ls-files` globs."""
+    m = re.search(r"\{([^{}]+)\}", pattern)
+    if not m:
+        return [f":(glob){pattern}"]
+    head, tail = pattern[: m.start()], pattern[m.end() :]
+    return [f":(glob){head}{part}{tail}" for part in m.group(1).split(",")]
+
+
 def scan() -> dict[str, int]:
     """Returns jscpd's totals over the tracked files, read in path order."""
     config = json.loads((ROOT / ".jscpd.json").read_text(encoding="utf-8"))
     listing = subprocess.run(
-        ["git", "ls-files", "-z", "--", f":(glob){config['pattern']}"],
+        ["git", "ls-files", "-z", "--", *git_globs(config["pattern"])],
         cwd=ROOT,
         capture_output=True,
         check=True,
     ).stdout.decode("utf-8")
-    files = sorted(p for p in listing.split("\0") if p)
+    files = sorted({p for p in listing.split("\0") if p})
     read = sum(
         1
         for p in files

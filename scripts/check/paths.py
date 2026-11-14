@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hold the engine to the modules that may name a decoder crate or a seeded hash map.
+"""Hold the engine and app to the modules that may name a decoder crate or a seeded hash map.
 
     python scripts/check/paths.py           fail on a use outside the module that owns it
     python scripts/check/paths.py --record  lower the allowed uses to today's
@@ -7,12 +7,13 @@
 Each rule in `RULES` is a pattern and the one path under the engine's source
 that may match it: the decoder crates stay behind `isa`, and the standard
 hash map and set, whose default hasher is seeded per process, stay in
-`fxmap.rs`, which gives them a fixed one. A map or set counts where it is
-named through `collections` or its `hash_map` and `hash_set`, and so do a
-glob import and an alias of `collections`, which would bring one in
-unnamed: a scan of the text, not the compiler's view. Comments and literals
-do not count. The uses that break a rule today are listed in `paths.tsv`, by rule
-and file with their count; each may shrink, never grow (ratchet.py).
+`fxmap.rs`, which gives them a fixed one (`app/` may not name them anywhere).
+A map or set counts where it is named through `collections` or its `hash_map`
+and `hash_set`, and so do a glob import and an alias of `collections`, which
+would bring one in unnamed: a scan of the text, not the compiler's view.
+Comments and literals do not count. The uses that break a rule today are
+listed in `paths.tsv`, by rule and file with their count; each may shrink,
+never grow (ratchet.py).
 """
 
 from __future__ import annotations
@@ -25,22 +26,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from check import ratchet  # noqa: E402
 from check.sizes import blank  # noqa: E402
+from check.strip_comments import is_app_build_output  # noqa: E402
 from harness.root import ROOT  # noqa: E402
 
 ENGINE = "crates/borer-engine/src/"
-"""The source the rules hold, from the repo root."""
+"""The engine source the decoder and hash-map rules hold, from the repo root."""
+
+APP = "app/"
+"""The desktop app workspace, where standard hash maps are forbidden everywhere."""
+
+HASH_MAP_RULE = (
+    "std hash map outside fxmap.rs",
+    re.compile(
+        r"\bcollections(::(hash_(map|set)::)?(\{[^}]*\b)?Hash(Map|Set)\b|::\*|\s+as\b)"
+        r"|\bRandomState\b"
+    ),
+    "fxmap.rs",
+)
 
 RULES = (
     ("iced_x86 outside isa", re.compile(r"\biced_x86\b"), "isa/"),
     ("yaxpeax outside isa/a64/decode.rs", re.compile(r"\byaxpeax_\w+"), "isa/a64/decode.rs"),
-    (
-        "std hash map outside fxmap.rs",
-        re.compile(
-            r"\bcollections(::(hash_(map|set)::)?(\{[^}]*\b)?Hash(Map|Set)\b|::\*|\s+as\b)"
-            r"|\bRandomState\b"
-        ),
-        "fxmap.rs",
-    ),
+    HASH_MAP_RULE,
 )
 """Each rule: its name, what a use looks like, and the path under `ENGINE` that may hold one."""
 
@@ -59,6 +66,14 @@ def uses() -> dict[str, int]:
         text = blank(path.read_text(encoding="utf-8"))
         for rule, pattern, home in RULES:
             if not rel.startswith(ENGINE + home) and (n := len(pattern.findall(text))):
+                found[f"{rule}: {rel}"] = n
+    app_root = ROOT / APP
+    if app_root.is_dir():
+        rule, pattern, _ = HASH_MAP_RULE
+        for path in sorted(p for p in app_root.rglob("*.rs") if not is_app_build_output(p)):
+            rel = path.relative_to(ROOT).as_posix()
+            text = blank(path.read_text(encoding="utf-8"))
+            if n := len(pattern.findall(text)):
                 found[f"{rule}: {rel}"] = n
     return found
 

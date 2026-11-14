@@ -1,6 +1,6 @@
 {
   "format": ["rust"],
-  "pattern": "crates/**/*.rs",
+  "pattern": "{crates,app}/**/*.rs",
   "minTokens": 70,
   "minLines": 6,
   "maxLines": 100000,

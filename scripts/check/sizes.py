@@ -22,7 +22,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from check import ratchet  # noqa: E402
-from check.strip_comments import _block_end, _char_end, _string_end  # noqa: E402
+from check.strip_comments import (  # noqa: E402
+    _block_end,
+    _char_end,
+    _string_end,
+    rust_sources,
+)
 from harness.root import ROOT  # noqa: E402
 
 FN_MAX = 100
@@ -89,7 +94,7 @@ def functions(text: str) -> list[tuple[str, int]]:
 def measure() -> dict[str, int]:
     """Every function and file over budget today, keyed `path` or `path::name#k`."""
     over: dict[str, int] = {}
-    for path in sorted((ROOT / "crates").rglob("*.rs")):
+    for path in rust_sources():
         rel = path.relative_to(ROOT).as_posix()
         text = blank(path.read_text(encoding="utf-8"))
         if (n := code_lines(text)) > FILE_MAX:

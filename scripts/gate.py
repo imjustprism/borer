@@ -4,7 +4,7 @@
     python scripts/gate.py             format, then verify everything
     python scripts/gate.py --check     verify only (what CI runs; formatting must already be clean,
                                        a missing tool fails instead of skipping, nothing is cached)
-    python scripts/gate.py --fast      skip the slow tail (smoke, deny, doc, dogfood, bench)
+    python scripts/gate.py --fast      skip the slow tail (smoke, deny, doc, dogfood, app, bench)
     python scripts/gate.py --no-cache  rerun every step, passed before or not
 
 Helpers are grouped under this directory. `check` fails when a generated
@@ -22,9 +22,10 @@ the modules that may name a decoder crate or a seeded map (scripts/check/paths.p
 the duplicate scan (scripts/check/dupes.py) and cargo deny (offline subset)); cargo clippy -D
 warnings and then cargo doc with warnings as errors (private items
 included); the debug build, cargo test and the doctests; the corpus and
-sweep builds, then the dogfood sweeps over real binaries and, after every
-heavy step, the decompile time bars (`timings` in tests/bench.rs); and, once the
-builds they drive are done, the readability benchmark against its baseline
+sweep builds, then the dogfood sweeps over real binaries, the GPUI desktop
+app check (`scripts/run/app.py`), and, after every heavy step, the decompile
+time bars (`timings` in tests/bench.rs); and, once the builds they drive are
+done, the readability benchmark against its baseline
 (scripts/run/readability.py), the golden diff of the `index` output
 (scripts/run/golden.py), scripts/run/smoke.py and scripts/run/agent_eval.py.
 Each step's output goes to `gate-logs/<step>.log` in the target directory;
@@ -33,7 +34,7 @@ and the whole output of the step that failed. The first failure stops the
 run: the steps still running are killed, and the exit status is non-zero.
 Tools that are not installed are reported and skipped, never silently
 passed. At most two of the steps that hold every core for minutes (the
-tests, the sweeps and smoke) run at once (`HEAVY_MAX`). A machine with
+tests, the sweeps, app and smoke) run at once (`HEAVY_MAX`). A machine with
 fewer than eight cores (a CI runner) runs one step at a time, in the order
 the plan lists them.
 
@@ -105,9 +106,13 @@ RUST = (
     "deny.toml",
     "rustfmt.toml",
 )
-"""What a Rust build reads: the crates and every file that configures them."""
+"""What a root Rust build reads: the crates and every file that configures them."""
+
+APP = ("app/",)
+"""The GPUI desktop workspace under `app/`."""
 
 SCRIPTS = ("scripts/", "ruff.toml")
+"""What the Python checks read."""
 
 STAGE = (
     "import os, shutil, sys; "
@@ -118,7 +123,6 @@ STAGE = (
 )
 """Copies the built server, and the examples built beside it, to where the steps
 that run them load them from."""
-"""What the Python checks read."""
 
 EVERYTHING = ("",)
 """Every file in the checkout."""
@@ -315,7 +319,13 @@ def shared_target() -> str | None:
     return str(Path(common).parent / "target-worktrees" / ROOT.name)
 
 
-SEEDED = ("debug", "corpus", "sweep", os.path.join("clippy", "debug"))
+SEEDED = (
+    "debug",
+    "corpus",
+    "sweep",
+    os.path.join("clippy", "debug"),
+    os.path.join("app", "debug"),
+)
 """The profile directories, under a target directory, a fresh worktree seeds."""
 
 
@@ -327,9 +337,9 @@ def workspace_names() -> set[str]:
         capture_output=True,
         text=True,
     )
-    names: set[str] = set()
     if proc.returncode != 0:
-        return names
+        return set()
+    names: set[str] = {"borer-app", "borer_app"}
     for package in json.loads(proc.stdout)["packages"]:
         names.add(package["name"])
         for target in package["targets"]:
@@ -478,9 +488,20 @@ def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[St
     them to run side by side."""
     py = sys.executable
     fmt = ["cargo", "fmt", "--all"] + (["--check"] if check_only else [])
+    app_fmt = [
+        py,
+        "-c",
+        "import subprocess, sys; raise SystemExit(subprocess.call(['cargo', 'fmt', '--all', *sys.argv[1:]], cwd='app'))",
+    ] + (["--check"] if check_only else [])
     first = [
         Step("commits", [py, os.path.join("scripts", "check", "commits.py")]),
         Step("fmt", fmt, inputs=RUST, rewrites=not check_only),
+        Step(
+            "app fmt",
+            app_fmt,
+            inputs=APP + ("rustfmt.toml",),
+            rewrites=not check_only,
+        ),
     ]
     # Side by side, clippy and doc check where the test build does not: in a
     # directory of their own they hold no lock the test build waits on, and
@@ -491,7 +512,7 @@ def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[St
         Step(
             "comments",
             [py, os.path.join("scripts", "check", "strip_comments.py"), "--check"],
-            inputs=RUST + SCRIPTS,
+            inputs=RUST + APP + SCRIPTS,
         ),
         Step("ruff check", ["ruff", "check", "scripts"], tool="ruff", inputs=SCRIPTS),
         Step("ruff format", ["ruff", "format", "--check", "scripts"], tool="ruff", inputs=SCRIPTS),
@@ -500,8 +521,16 @@ def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[St
             [py, os.path.join("scripts", "check", "typelib.py"), "--check"],
             inputs=RUST + SCRIPTS,
         ),
-        Step("sizes", [py, os.path.join("scripts", "check", "sizes.py")], inputs=RUST + SCRIPTS),
-        Step("paths", [py, os.path.join("scripts", "check", "paths.py")], inputs=RUST + SCRIPTS),
+        Step(
+            "sizes",
+            [py, os.path.join("scripts", "check", "sizes.py")],
+            inputs=RUST + APP + SCRIPTS,
+        ),
+        Step(
+            "paths",
+            [py, os.path.join("scripts", "check", "paths.py")],
+            inputs=RUST + APP + SCRIPTS,
+        ),
         # More duplicated Rust lines than scripts/check/dupes.tsv records fail.
         Step(
             "dupes",
@@ -509,6 +538,7 @@ def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[St
             tool="npx",
             inputs=(
                 "crates/",
+                "app/",
                 ".jscpd.json",
                 "scripts/check/dupes",
                 "scripts/check/ratchet.py",
@@ -693,6 +723,22 @@ def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[St
             inputs=RUST + SCRIPTS,
             needs=("examples", "stage"),
         ),
+        Step(
+            "app",
+            [py, os.path.join("scripts", "run", "app.py")] + (["--check"] if check_only else []),
+            inputs=(
+                "app/",
+                "crates/borer-engine/",
+                "Cargo.toml",
+                "README.md",
+                "clippy.toml",
+                "rustfmt.toml",
+                ".cargo/",
+                "scripts/run/app.py",
+                "scripts/harness/",
+            ),
+            heavy=True,
+        ),
     ]
     # The decompile time bars (`timings` in tests/bench.rs: the p95 and the
     # slowest function) on the notepad every Windows carries, in the sweep's
@@ -708,7 +754,7 @@ def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[St
                 {"BORER_BENCH": notepad},
                 inputs=RUST,
                 extra=(notepad,),
-                needs=("build sweep", "test", "dogfood text", "dogfood x86", "smoke"),
+                needs=("build sweep", "test", "dogfood text", "dogfood x86", "smoke", "app"),
                 heavy=True,
             )
         )
