@@ -16,7 +16,7 @@ const PUNCTS: [&str; 22] = [
 
 /// What a token is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Lex {
+pub(crate) enum Lex {
     /// An identifier.
     Name,
     /// A numeric literal.
@@ -29,7 +29,7 @@ pub(super) enum Lex {
 
 /// What a run of a line's bytes is: a token, or what lies between tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Piece {
+pub(crate) enum Piece {
     /// A run of whitespace.
     Space,
     /// `//` to the end of the line, `/*` through its `*/`, or a `/*` the
@@ -52,7 +52,7 @@ pub(super) struct Tok {
 
 /// Reads one line as the pieces that tile it ([`scan`]).
 #[derive(Debug, Clone)]
-pub(super) struct Scan<'t> {
+pub(crate) struct Scan<'t> {
     /// The line.
     line: &'t str,
     /// Where the next piece starts.
@@ -74,7 +74,7 @@ pub(super) struct Scan<'t> {
 /// # Returns
 ///
 /// The scanner, which yields each piece in order.
-pub(super) fn scan(line: &str, at: usize) -> Scan<'_> {
+pub(crate) fn scan(line: &str, at: usize) -> Scan<'_> {
     Scan { line, at }
 }
 

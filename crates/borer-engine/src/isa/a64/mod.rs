@@ -22,7 +22,7 @@ mod fmt;
 mod roles;
 mod structure;
 
-pub use decode::decode;
+pub use decode::{decode, is_register};
 pub use fmt::text;
 pub use roles::Registers;
 pub use structure::{Layout, Slot, Structure, structure};

@@ -55,7 +55,7 @@ mod helper;
 pub(crate) mod interp;
 mod ladder;
 mod lanes;
-mod lexer;
+pub(crate) mod lexer;
 pub(crate) mod lift;
 mod lift_a32;
 mod lift_a64;

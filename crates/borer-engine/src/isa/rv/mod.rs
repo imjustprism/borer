@@ -16,7 +16,7 @@ mod compressed;
 mod fmt;
 mod regs;
 
-pub use fmt::{name, text, var_name};
+pub use fmt::{is_register, name, text, var_name};
 pub use regs::{Registers, code, from_code};
 
 /// The zero register, `x0`.

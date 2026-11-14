@@ -1,5 +1,9 @@
 //! Decoding one A64 word with yaxpeax-arm into the engine's [`Insn`].
 
+use std::collections::BTreeSet;
+use std::fmt::Write as _;
+use std::sync::LazyLock;
+
 use yaxpeax_arch::{Decoder as _, U8Reader};
 use yaxpeax_arm::armv8::a64::{
     InstDecoder, Instruction, Opcode, Operand, SIMDSizeCode, ShiftStyle, SizeCode,
@@ -555,4 +559,101 @@ fn shift(style: ShiftStyle) -> Shift {
         ShiftStyle::SXTW => Shift::Sxtw,
         ShiftStyle::SXTX => Shift::Sxtx,
     }
+}
+
+/// Every register spelling the decoder's [`Operand`] formatter produces,
+/// outside the generic `s<op0>_<op1>_c<crn>_c<crm>_<op2>` system-register
+/// pattern checked by [`is_sysreg_code`].
+static REGISTER_NAMES: LazyLock<BTreeSet<String>> = LazyLock::new(|| {
+    let mut set = BTreeSet::new();
+    for reg in 0..=REG_31 {
+        for size in [SizeCode::X, SizeCode::W] {
+            set.insert(Operand::Register(size, reg).to_string());
+            set.insert(Operand::RegisterOrSP(size, reg).to_string());
+        }
+        for size in [
+            SIMDSizeCode::B,
+            SIMDSizeCode::H,
+            SIMDSizeCode::S,
+            SIMDSizeCode::D,
+            SIMDSizeCode::Q,
+        ] {
+            set.insert(Operand::SIMDRegister(size, reg).to_string());
+        }
+        let vec_elem =
+            Operand::SIMDRegisterElements(SIMDSizeCode::Q, reg, SIMDSizeCode::B).to_string();
+        if let Some((head, _)) = vec_elem.split_once('.') {
+            set.insert(head.to_owned());
+        }
+    }
+    let post = Operand::RegPostIndexReg(0, REG_31).to_string();
+    if let Some((_, tail)) = post.rsplit_once(", ") {
+        set.insert(tail.to_owned());
+    }
+    for crm in 0..16u16 {
+        set.insert(Operand::ControlReg(crm).to_string());
+    }
+    let pstate = Operand::PstateField(0).to_string();
+    if let Some((head, _)) = pstate.split_once('.') {
+        set.insert(head.to_owned());
+    }
+    let mut buf = String::with_capacity(24);
+    for sys in 0..0x8000u16 {
+        buf.clear();
+        if write!(buf, "{}", Operand::SystemReg(sys)).is_ok()
+            && !buf.starts_with("s2_")
+            && !buf.starts_with("s3_")
+        {
+            set.insert(buf.clone());
+        }
+    }
+    set
+});
+
+/// Tells whether `word` is a register name produced by the A64 operand
+/// speller.
+///
+/// # Arguments
+///
+/// * `word` - Candidate identifier token from [`super::text`].
+#[must_use]
+pub fn is_register(word: &str) -> bool {
+    REGISTER_NAMES.contains(word) || is_sysreg_code(word)
+}
+
+/// Checks whether `word` spells an unnamed A64 system register through
+/// [`Operand::SystemReg`].
+///
+/// # Arguments
+///
+/// * `word` - Candidate identifier token.
+fn is_sysreg_code(word: &str) -> bool {
+    if !word.starts_with("s2_") && !word.starts_with("s3_") {
+        return false;
+    }
+    let mut parts = word.split('_');
+    let (Some(s_op0), Some(s_op1), Some(s_crn), Some(s_crm), Some(s_op2), None) = (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) else {
+        return false;
+    };
+    let (Some(op0), Ok(op1), Some(crn), Some(crm), Ok(op2)) = (
+        s_op0.strip_prefix('s').and_then(|s| s.parse::<u16>().ok()),
+        s_op1.parse::<u16>(),
+        s_crn.strip_prefix('c').and_then(|s| s.parse::<u16>().ok()),
+        s_crm.strip_prefix('c').and_then(|s| s.parse::<u16>().ok()),
+        s_op2.parse::<u16>(),
+    ) else {
+        return false;
+    };
+    if !(2..=3).contains(&op0) || op1 > 7 || crn > 15 || crm > 15 || op2 > 7 {
+        return false;
+    }
+    let code = ((op0 - 2) << 14) | (op1 << 11) | (crn << 7) | (crm << 3) | op2;
+    Operand::SystemReg(code).to_string() == word
 }

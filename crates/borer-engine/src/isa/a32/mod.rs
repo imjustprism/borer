@@ -24,7 +24,7 @@ mod thumb;
 mod vfp;
 
 pub use super::a64::Cond;
-pub use fmt::{name, text};
+pub use fmt::{is_register, name, text};
 
 /// The stack pointer, `r13`.
 pub const SP: Reg = Reg::R(13);

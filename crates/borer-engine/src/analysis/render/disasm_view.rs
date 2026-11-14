@@ -3,8 +3,9 @@
 //! [`View`] ([`disasm_view`]) cannot drift.
 
 use super::{Analysis, Overlay, disasm, name_of, short_name};
+use crate::analysis::decompile::lexer::{self, Lex, Piece};
 use crate::analysis::syscalls::{self, SyscallSite};
-use crate::isa::Isa;
+use crate::isa::{Isa, a32, a64, rv};
 use crate::program::{Feature, Program, SymbolKind};
 use crate::view::{Builder, Kind, Ref, Sink, Unlinked, View};
 
@@ -243,7 +244,7 @@ fn disasm_into<S: Sink>(
                 let lines = disasm::disassemble_program(p, code, b.start, isa, budget);
                 for l in &lines {
                     ctx.write_head(l.va, &l.bytes, out);
-                    out.put(&l.text, Kind::Text, None);
+                    write_isa_line(&l.text, l.target, isa, a, out);
                     ctx.write_tail(l.va, l.target, None, out);
                 }
                 lines.len()
@@ -380,4 +381,120 @@ fn import_at(p: &Program, addr: Option<u64>) -> Option<(u64, &str)> {
         .iter()
         .find(|s| matches!(s.kind, SymbolKind::Import) && s.addr == addr)
         .map(|s| (addr, s.name.as_str()))
+}
+
+/// Tokenizes one non-x86 instruction's text into `out`, linking its branch
+/// target token when `target` is present.
+///
+/// # Arguments
+///
+/// * `text` - Assembly text from [`a64::text`], [`a32::text`] or [`rv::text`].
+/// * `target` - Direct branch or call target reported by the decoder.
+/// * `isa` - The instruction set `text` is written in.
+/// * `a` - Analysis, queried to distinguish [`Ref::Function`] from [`Ref::Address`].
+/// * `out` - The destination sink.
+fn write_isa_line<S: Sink>(text: &str, target: Option<u64>, isa: Isa, a: &Analysis, out: &mut S) {
+    if text.is_empty() {
+        return;
+    }
+    if text == "(bad)" {
+        out.put(text, Kind::Text, None);
+        return;
+    }
+    let (body, comment) = match text.find(';') {
+        Some(idx) => (&text[..idx], Some(&text[idx..])),
+        None => (text, None),
+    };
+    let mut mnem_end = 0;
+    for (piece, span) in lexer::scan(body, 0) {
+        if piece == Piece::Space {
+            break;
+        }
+        mnem_end = span.end;
+    }
+    if mnem_end > 0 {
+        out.put(&body[..mnem_end], Kind::Mnemonic, None);
+    }
+    let mut prev_punct: Option<&str> = None;
+    for (piece, span) in lexer::scan(body, mnem_end) {
+        let word = &body[span];
+        match piece {
+            Piece::Space => {
+                prev_punct = None;
+                out.put(word, Kind::Space, None);
+            }
+            Piece::Comment => {
+                prev_punct = None;
+                out.put(word, Kind::Comment, None);
+            }
+            Piece::Token(Lex::Punct) => {
+                prev_punct = Some(word);
+                out.put(word, Kind::Punct, None);
+            }
+            Piece::Token(Lex::Literal) => {
+                prev_punct = None;
+                out.put(word, Kind::String, None);
+            }
+            Piece::Token(Lex::Name) => {
+                let kind = if prev_punct != Some(".") && isa_is_register(isa, word) {
+                    Kind::Register
+                } else {
+                    Kind::Text
+                };
+                prev_punct = None;
+                out.put(word, kind, None);
+            }
+            Piece::Token(Lex::Number) => {
+                let link = target
+                    .filter(|&t| {
+                        !matches!(prev_punct, Some("#" | "-" | ".")) && parse_u64(word) == Some(t)
+                    })
+                    .map(|t| {
+                        if a.function(t).is_some() {
+                            Ref::Function(t)
+                        } else {
+                            Ref::Address(t)
+                        }
+                    });
+                let kind = if link.is_some() {
+                    Kind::Address
+                } else {
+                    Kind::Number
+                };
+                prev_punct = None;
+                out.put(word, kind, link);
+            }
+        }
+    }
+    if let Some(c) = comment {
+        out.put(c, Kind::Comment, None);
+    }
+}
+
+/// Checks whether `word` is a register name of `isa`.
+///
+/// # Arguments
+///
+/// * `isa` - The instruction set.
+/// * `word` - Candidate identifier token.
+fn isa_is_register(isa: Isa, word: &str) -> bool {
+    match isa {
+        Isa::A64 => a64::is_register(word),
+        Isa::A32 => a32::is_register(word),
+        Isa::Rv(_) => rv::is_register(word),
+        Isa::X86 { .. } => false,
+    }
+}
+
+/// Parses an unsigned hexadecimal (`0x...`) or decimal literal from `word`.
+///
+/// # Arguments
+///
+/// * `word` - Numeric token spelling.
+fn parse_u64(word: &str) -> Option<u64> {
+    if let Some(hex) = word.strip_prefix("0x").or_else(|| word.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16).ok()
+    } else {
+        word.parse::<u64>().ok()
+    }
 }

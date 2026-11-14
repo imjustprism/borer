@@ -1,5 +1,8 @@
 //! Assembly text for one RISC-V instruction, in GNU objdump's syntax.
 
+use std::collections::BTreeSet;
+use std::sync::LazyLock;
+
 use super::{
     Alu, AmoOp, BrCond, CsrOp, CsrSrc, FArith, FCmp, FOp, Fmt, Fused, Insn, IntFmt, Op, RA, Reg,
     Width, ZERO,
@@ -56,6 +59,30 @@ const CSR_NAMES: [(u16, &str); 30] = [
     (0xf12, "marchid"),
     (0xf14, "mhartid"),
 ];
+
+/// Every register and named CSR spelling [`name`] and [`csr_name`] produce.
+static REGISTER_NAMES: LazyLock<BTreeSet<&'static str>> = LazyLock::new(|| {
+    let mut set = BTreeSet::new();
+    for n in 0..32u8 {
+        set.insert(name(Reg::X(n)));
+        set.insert(name(Reg::F(n)));
+    }
+    for &(_, csr) in &CSR_NAMES {
+        set.insert(csr);
+    }
+    set
+});
+
+/// Tells whether `word` is an integer register, float register or named CSR
+/// spelling [`text`] produces.
+///
+/// # Arguments
+///
+/// * `word` - Candidate identifier token from [`text`].
+#[must_use]
+pub fn is_register(word: &str) -> bool {
+    REGISTER_NAMES.contains(word)
+}
 
 /// Returns a register's ABI name (`a0`, `sp`, `fa0`).
 ///

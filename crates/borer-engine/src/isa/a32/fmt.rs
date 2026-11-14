@@ -1,9 +1,42 @@
 //! Assembly text for one A32 or T32 instruction.
 
+use std::collections::BTreeSet;
+use std::sync::LazyLock;
+
 use super::{
     Addr, Block, Cond, Cvt, DpKind, FpOp, FpUn, Index, Insn, Offset, Op, Operand, PC, Reg, Shift,
     SysReg, Width, cond_code,
 };
+
+/// Every register spelling [`name`], [`SysReg::name`] and the status-register
+/// formatters in [`text`] produce.
+static REGISTER_NAMES: LazyLock<BTreeSet<String>> = LazyLock::new(|| {
+    let mut set = BTreeSet::new();
+    for n in 0..16u8 {
+        set.insert(name(Reg::R(n)));
+    }
+    for n in 0..32u8 {
+        set.insert(name(Reg::S(n)));
+        set.insert(name(Reg::D(n)));
+    }
+    for code in 0..=u8::MAX {
+        set.insert(SysReg(code).name());
+    }
+    for status in ["apsr", "apsr_nzcvq", "apsr_nzcv", "fpscr"] {
+        set.insert(status.to_owned());
+    }
+    set
+});
+
+/// Tells whether `word` is a register name [`text`] produces.
+///
+/// # Arguments
+///
+/// * `word` - Candidate identifier token from [`text`].
+#[must_use]
+pub fn is_register(word: &str) -> bool {
+    REGISTER_NAMES.contains(word)
+}
 
 /// Names the register an `mrs` or `msr` moves: the special register, or
 /// the flags' name when there is none.

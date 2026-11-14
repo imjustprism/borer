@@ -139,7 +139,11 @@ fn x64_listing_view_tokens_and_spell_match_text() {
             ("  ", Kind::Space, None),
             ("call", Kind::Mnemonic, None),
             (" ", Kind::Space, None),
-            ("0000000140001040h", Kind::Address, Some(Ref::Function(HELPER))),
+            (
+                "0000000140001040h",
+                Kind::Address,
+                Some(Ref::Function(HELPER))
+            ),
             ("  ", Kind::Space, None),
             ("; ", Kind::Comment, None),
             ("helper", Kind::Function, Some(Ref::Function(HELPER))),
@@ -232,7 +236,11 @@ fn x64_listing_view_branches_labels_and_prefixes() {
             (" ", Kind::Space, None),
             ("short", Kind::Keyword, None),
             (" ", Kind::Space, None),
-            ("0000000140001040h", Kind::Address, Some(Ref::Function(HELPER))),
+            (
+                "0000000140001040h",
+                Kind::Address,
+                Some(Ref::Function(HELPER))
+            ),
         ]
     );
     assert_eq!(v.definition(&Ref::Address(TEXT + 0x16)), Some(label_idx));
@@ -302,12 +310,20 @@ fn branch_target_links_distinguish_functions_from_addresses() {
     }
     let je_line = line_starting(&v, "0x140001000").1;
     assert!(
-        je_line.contains(&("000000014000100Bh", Kind::Address, Some(Ref::Address(TEXT + 0xb)))),
+        je_line.contains(&(
+            "000000014000100Bh",
+            Kind::Address,
+            Some(Ref::Address(TEXT + 0xb))
+        )),
         "{je_line:?}"
     );
     let jmp_line = line_starting(&v, "0x140001006").1;
     assert!(
-        jmp_line.contains(&("0000000140001040h", Kind::Address, Some(Ref::Function(HELPER)))),
+        jmp_line.contains(&(
+            "0000000140001040h",
+            Kind::Address,
+            Some(Ref::Function(HELPER))
+        )),
         "{jmp_line:?}"
     );
     assert!(
@@ -316,3 +332,172 @@ fn branch_target_links_distinguish_functions_from_addresses() {
     );
 }
 
+/// Builds a non-x86 raw image at `0x401000` with a caller at `0x401000` and a
+/// helper function at `0x401020` from little-endian 32-bit words.
+///
+/// # Arguments
+///
+/// * `arch` - Target architecture.
+/// * `main_words` - Words placed at `0x401000`.
+/// * `helper_words` - Words placed at `0x401020`.
+fn word_fixture(arch: Arch, main_words: &[u32], helper_words: &[u32]) -> (Program, Analysis) {
+    let mut code = vec![0u8; 0x30];
+    for (i, &w) in main_words.iter().enumerate() {
+        code[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+    }
+    for (i, &w) in helper_words.iter().enumerate() {
+        code[0x20 + i * 4..0x20 + i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+    }
+    let mut p = crate::raw::image(arch, &code, &[]);
+    p.symbols.push(Symbol {
+        name: "helper".to_owned(),
+        addr: 0x401020,
+        kind: SymbolKind::Export,
+    });
+    let a = Analysis::compute(&p);
+    (p, a)
+}
+
+/// Asserts that `disasm_view` spells `disasm_function` with and without bytes
+/// for the function at `0x401000` and returns the hidden-bytes view.
+///
+/// # Arguments
+///
+/// * `p` - The program.
+/// * `a` - Its analysis.
+fn checked_isa_view(p: &Program, a: &Analysis) -> View {
+    let o = Overlay::default();
+    for (flag, mode) in [(false, Bytes::Hidden), (true, Bytes::Shown)] {
+        let text = disasm_function(p, a, &o, 0x401000, 100, flag).expect("text");
+        let view = disasm_view(p, a, &o, 0x401000, 100, mode).expect("view");
+        assert_eq!(view.spell(), text, "bytes={flag}");
+    }
+    disasm_view(p, a, &o, 0x401000, 100, Bytes::Hidden).expect("view")
+}
+
+/// Arm64 listing views spell [`disasm_function`], mark general, vector and
+/// system registers as [`Kind::Register`], and link branch targets without
+/// mistaking `#imm` bit numbers on `tbz`.
+#[test]
+fn arm64_listing_view_tokens_and_links() {
+    let main_words: &[u32] = &[
+        // ASM: stp x29, x30, [sp, #-0x10]!
+        0xa9bf_7bfd,
+        // ASM: mrs x8, tpidr_el0
+        0xd53b_d048,
+        // ASM: eor v0.16b, v0.16b, v0.16b
+        0x6e20_1c00,
+        // ASM: tbz w0, #0x4, 0x401018
+        0x3620_0060,
+        // ASM: bl 0x401020
+        0x9400_0004,
+        // ASM: ldp x29, x30, [sp], #0x10
+        0xa8c1_7bfd,
+        // ASM: ret
+        0xd65f_03c0,
+    ];
+    let (p, a) = word_fixture(Arch::Arm64, main_words, &[0xd65f_03c0]);
+    let v = checked_isa_view(&p, &a);
+
+    let stp = line_tokens(&v, 1);
+    assert!(stp.contains(&("stp", Kind::Mnemonic, None)), "{stp:?}");
+    for reg in ["x29", "x30", "sp"] {
+        assert!(stp.contains(&(reg, Kind::Register, None)), "{stp:?}");
+    }
+    let mrs = line_tokens(&v, 2);
+    assert!(mrs.contains(&("x8", Kind::Register, None)), "{mrs:?}");
+    assert!(
+        mrs.contains(&("tpidr_el0", Kind::Register, None)),
+        "{mrs:?}"
+    );
+    let eor = line_tokens(&v, 3);
+    assert!(eor.contains(&("v0", Kind::Register, None)), "{eor:?}");
+    assert!(eor.contains(&("16b", Kind::Number, None)), "{eor:?}");
+    let tbz = line_tokens(&v, 4);
+    assert!(tbz.contains(&("w0", Kind::Register, None)), "{tbz:?}");
+    assert!(tbz.contains(&("0x4", Kind::Number, None)), "{tbz:?}");
+    assert!(
+        tbz.contains(&("0x401018", Kind::Address, Some(Ref::Address(0x401018)))),
+        "{tbz:?}"
+    );
+    let bl = line_tokens(&v, 6);
+    assert!(bl.contains(&("bl", Kind::Mnemonic, None)), "{bl:?}");
+    assert!(
+        bl.contains(&("0x401020", Kind::Address, Some(Ref::Function(0x401020)))),
+        "{bl:?}"
+    );
+}
+
+/// ARM32 and RISC-V listing views spell [`disasm_function`], mark core, float
+/// and CSR registers as [`Kind::Register`], keep dotted mnemonics intact, and
+/// link direct branch targets.
+#[test]
+fn arm32_and_riscv_listing_views_tokens_and_links() {
+    let a32_main: &[u32] = &[
+        // ASM: push {r4, lr}
+        0xe92d_4010,
+        // ASM: vadd.f64 d0, d1, d2
+        0xee31_0b02,
+        // ASM: cmp r0, #0x0
+        0xe350_0000,
+        // ASM: beq 0x401014
+        0x0a00_0000,
+        // ASM: bl 0x401020
+        0xeb00_0002,
+        // ASM: pop {r4, pc}
+        0xe8bd_8010,
+    ];
+    let (pa, aa) = word_fixture(Arch::Arm, a32_main, &[0xe12f_ff1e]);
+    let va = checked_isa_view(&pa, &aa);
+    assert!(line_tokens(&va, 1).contains(&("lr", Kind::Register, None)));
+    let vadd = line_tokens(&va, 2);
+    assert!(
+        vadd.contains(&("vadd.f64", Kind::Mnemonic, None)),
+        "{vadd:?}"
+    );
+    assert!(vadd.contains(&("d0", Kind::Register, None)), "{vadd:?}");
+    assert!(line_tokens(&va, 4).contains(&(
+        "0x401014",
+        Kind::Address,
+        Some(Ref::Address(0x401014))
+    )));
+    assert!(line_tokens(&va, 6).contains(&(
+        "0x401020",
+        Kind::Address,
+        Some(Ref::Function(0x401020))
+    )));
+
+    let rv_main: &[u32] = &[
+        // ASM: addi sp, sp, -16
+        0xff01_0113,
+        // ASM: fadd.d fa0, fa0, fa1
+        0x02b5_7553,
+        // ASM: csrr a1, fcsr
+        0x0030_25f3,
+        // ASM: beqz a0, 0x401018
+        0x0005_0663,
+        // ASM: jal 0x401020
+        0x0100_00ef,
+        // ASM: addi sp, sp, 16
+        0x0101_0113,
+        // ASM: ret
+        0x0000_8067,
+    ];
+    let (pr, ar) = word_fixture(Arch::RiscV64, rv_main, &[0x0000_8067]);
+    let vr = checked_isa_view(&pr, &ar);
+    let fadd = line_tokens(&vr, 2);
+    assert!(fadd.contains(&("fadd.d", Kind::Mnemonic, None)), "{fadd:?}");
+    assert!(fadd.contains(&("fa0", Kind::Register, None)), "{fadd:?}");
+    let csrr = line_tokens(&vr, 3);
+    assert!(csrr.contains(&("fcsr", Kind::Register, None)), "{csrr:?}");
+    assert!(line_tokens(&vr, 4).contains(&(
+        "0x401018",
+        Kind::Address,
+        Some(Ref::Address(0x401018))
+    )));
+    assert!(line_tokens(&vr, 6).contains(&(
+        "0x401020",
+        Kind::Address,
+        Some(Ref::Function(0x401020))
+    )));
+}
