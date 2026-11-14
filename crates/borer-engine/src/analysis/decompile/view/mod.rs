@@ -44,6 +44,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::sync::Arc;
 
+mod data;
+
 use super::lexer::{Lex, Piece, scan};
 use super::line::{header_len, is_global_name, label_address};
 use super::{
@@ -111,6 +113,8 @@ enum Named<'a> {
 struct Facts<'a> {
     /// The function.
     function: &'a Function,
+    /// Bare name of the function as its text spells it.
+    own: String,
     /// The targets of its reference sites.
     refs: BTreeSet<u64>,
     /// The functions its callees' linkage stubs are bound to.
@@ -120,6 +124,8 @@ struct Facts<'a> {
     /// The functions its virtual calls resolve to, sorted: read from its
     /// decompilation the first time a link needs them.
     virtual_callees: OnceCell<Vec<u64>>,
+    /// Literal spellings its reference targets produce, `None` when two do.
+    strings: OnceCell<BTreeMap<String, Option<u64>>>,
 }
 
 impl<'a> Facts<'a> {
@@ -128,19 +134,23 @@ impl<'a> Facts<'a> {
     /// # Arguments
     ///
     /// * `analysis` - The analysis it is in.
+    /// * `overlay` - Names in force, read unnoted for the function's bare name.
     /// * `entry` - The function's entry.
     ///
     /// # Returns
     ///
     /// The facts, `None` when no function starts at `entry`.
-    fn of(analysis: &'a Analysis, entry: u64) -> Option<Self> {
+    fn of(analysis: &'a Analysis, overlay: &Overlay, entry: u64) -> Option<Self> {
         let function = analysis.function(entry)?;
+        let own =
+            reads::unnoted(|| expr_render::bare(&name_of(analysis, overlay, entry)).into_owned());
         let callees = function
             .callees
             .iter()
             .filter_map(|&c| analysis.function(c));
         Some(Self {
             function,
+            own,
             refs: analysis
                 .refs_from(entry)
                 .into_iter()
@@ -149,6 +159,7 @@ impl<'a> Facts<'a> {
             bound: callees.clone().filter_map(|g| g.bound).collect(),
             stubs: callees.filter_map(|g| g.thunk).collect(),
             virtual_callees: OnceCell::new(),
+            strings: OnceCell::new(),
         })
     }
 
@@ -162,6 +173,27 @@ impl<'a> Facts<'a> {
             .blocks
             .binary_search_by_key(&va, |b| b.start)
             .is_ok()
+    }
+
+    /// Resolves a string-literal token against this function's reference sites.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The loaded image.
+    /// * `literal` - The token's exact quoted spelling.
+    /// * `tally` - Counts ambiguous matches.
+    fn string_link(&self, program: &Program, literal: &str, tally: &mut Tally) -> Option<Ref> {
+        let by = self
+            .strings
+            .get_or_init(|| data::candidate_strings(program, &self.own, &self.refs));
+        match by.get(literal) {
+            Some(&Some(va)) => Some(Ref::String(va)),
+            Some(&None) => {
+                tally.unlinked.ambiguous += 1;
+                None
+            }
+            None => None,
+        }
     }
 }
 
@@ -1022,7 +1054,7 @@ impl<'a> Reader<'a> {
             index,
             imports,
             renamed,
-            facts: Facts::of(analysis, entry),
+            facts: Facts::of(analysis, overlay, entry),
             declared,
             head,
             roles,
@@ -1085,7 +1117,7 @@ impl<'a> Reader<'a> {
         };
         let inline = owner
             .filter(|_| role == Role::Inline)
-            .and_then(|g| Facts::of(self.analysis, g));
+            .and_then(|g| Facts::of(self.analysis, self.overlay, g));
         let cut = cut_pieces(role, line, pieces);
         let scope = Scope {
             owner,
@@ -1106,7 +1138,13 @@ impl<'a> Reader<'a> {
                 Piece::Space => (Kind::Space, None, false),
                 Piece::Comment => (Kind::Comment, None, false),
                 Piece::Token(Lex::Number) => (Kind::Number, None, false),
-                Piece::Token(Lex::Literal) => (Kind::String, None, false),
+                Piece::Token(Lex::Literal) => {
+                    let tok = line.get(span.clone()).unwrap_or_default();
+                    let link = scope
+                        .facts
+                        .and_then(|f| f.string_link(self.program, tok, tally));
+                    (Kind::String, link, false)
+                }
                 Piece::Token(Lex::Punct) => (Kind::Punct, None, false),
                 Piece::Token(Lex::Name) => {
                     let at = At {

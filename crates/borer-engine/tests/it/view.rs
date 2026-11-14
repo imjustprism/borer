@@ -848,3 +848,75 @@ fn repeated_calls_to_a_many_slot_import_link_its_referenced_slot() {
     );
     assert_eq!(v.unlinked(), Unlinked::default());
 }
+
+/// Hostile string literals with escapes, embedded NULs, invalid UTF-8 escapes,
+/// unreferenced twins and a 4 KB payload spell the text and link only exact
+/// referenced matches.
+#[test]
+fn hostile_string_literals_spell_the_text_and_link_only_exact_matches() {
+    let rdata = 0x1_4000_3000u64;
+    let esc_va = rdata + 0x10;
+    let nul_va = rdata + 0x40;
+    let bad_va = rdata + 0x80;
+    let ghost_va = rdata + 0xc0;
+    let huge_va = rdata + 0x100;
+
+    let mut code = Vec::new();
+    for target in [esc_va, nul_va, bad_va, huge_va] {
+        let next = TEXT + u64::try_from(code.len() + 7).expect("fits");
+        let disp = i32::try_from(target - next).expect("near");
+        code.extend_from_slice(&[0x48, 0x8d, 0x05]); // ASM: lea rax,[rip+disp]
+        code.extend_from_slice(&disp.to_le_bytes());
+    }
+    code.push(0xc3); // ASM: ret
+
+    let mut bytes = vec![0u8; 0x4000];
+    bytes[..0x1000].fill(0xcc);
+    bytes[..code.len()].copy_from_slice(&code);
+    let put = |bytes: &mut [u8], va: u64, raw: &[u8]| {
+        let off = usize::try_from(0x1000 + (va - rdata)).expect("in rdata");
+        bytes[off..off + raw.len()].copy_from_slice(raw);
+    };
+    put(&mut bytes, esc_va, b"a\"b\\c\nd\t\0");
+    put(&mut bytes, nul_va, b"head\0tail\0");
+    put(&mut bytes, bad_va, b"ok\xff\xfe\0");
+    put(&mut bytes, ghost_va, b"ghost\0");
+    let mut huge = vec![b'x'; 4096];
+    huge.push(0);
+    put(&mut bytes, huge_va, &huge);
+
+    let sections = vec![
+        Section::mapped(".text", TEXT, 0, 0x1000, false, true),
+        Section::mapped(".rdata", rdata, 0x1000, 0x3000, false, false),
+    ];
+    let mut p = Program::raw(bytes, Arch::X86_64, 0x1_4000_0000, Some(TEXT), sections);
+    p.format = BinaryFormat::Pe;
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+
+    let capped = format!("\"{}...\"", "x".repeat(120));
+    let uncut_120 = format!("\"{}\"", "x".repeat(120));
+    let full_4k = format!("\"{}\"", "x".repeat(4096));
+    let snippet = format!(
+        "f(\"a\\\"b\\\\c\\nd\\t\", \"head\", \"head\\0tail\", \"ok\\xff\\xfe\", \"ghost\", {capped}, {uncut_120}, {full_4k});"
+    );
+    let v = view_of(&p, &a, &o, TEXT, &snippet).expect("a view");
+    assert_eq!(v.spell(), snippet);
+    assert_eq!(
+        spelled(&v, "\"a\\\"b\\\\c\\nd\\t\""),
+        [(Kind::String, Some(Ref::String(esc_va)))]
+    );
+    assert_eq!(
+        spelled(&v, "\"head\""),
+        [(Kind::String, Some(Ref::String(nul_va)))]
+    );
+    assert_eq!(spelled(&v, "\"head\\0tail\""), [(Kind::String, None)]);
+    assert_eq!(spelled(&v, "\"ok\\xff\\xfe\""), [(Kind::String, None)]);
+    assert_eq!(spelled(&v, "\"ghost\""), [(Kind::String, None)]);
+    assert_eq!(
+        spelled(&v, &capped),
+        [(Kind::String, Some(Ref::String(huge_va)))]
+    );
+    assert_eq!(spelled(&v, &uncut_120), [(Kind::String, None)]);
+    assert_eq!(spelled(&v, &full_4k), [(Kind::String, None)]);
+}

@@ -68,6 +68,8 @@ pub enum Ref {
     Import(u64),
     /// A global, by its address.
     Global(u64),
+    /// A string literal in the image, by its address.
+    String(u64),
     /// A variable of a function, by the name its text spells it with: a
     /// name `set_name` takes only when it is an `aN`, `local_N`, `home_N` or
     /// `arg_N`, or one the user gave.
@@ -250,7 +252,11 @@ impl View {
             .iter()
             .map(|r| match r {
                 Ref::Variable { name, .. } | Ref::Type(name) => name.len(),
-                Ref::Address(_) | Ref::Function(_) | Ref::Import(_) | Ref::Global(_) => 0,
+                Ref::Address(_)
+                | Ref::Function(_)
+                | Ref::Import(_)
+                | Ref::Global(_)
+                | Ref::String(_) => 0,
             })
             .sum();
         self.text.len()
