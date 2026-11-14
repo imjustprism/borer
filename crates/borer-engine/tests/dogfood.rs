@@ -26,20 +26,18 @@ use borer_engine::analysis::decompile::verify::Verified;
 use borer_engine::analysis::decompile::view::view_of;
 use borer_engine::analysis::{
     Analysis, Overlay,
-    decompile::{
-        Swept, declarations_end, decompile, decompile_all, decompile_named_all,
-        decompile_swept_all, virtual_callees,
-    },
+    decompile::{Swept, decompile, decompile_all, decompile_named_all, decompile_swept_all},
     name_of, render,
 };
-use borer_engine::program::{Program, SymbolKind};
-use borer_engine::view::{Kind, Ref, View};
+use borer_engine::program::Program;
 use std::collections::BTreeSet;
 use std::sync::{LazyLock, OnceLock};
 
 mod common;
 #[path = "common/gotos.rs"]
 mod gotos;
+#[path = "common/view_sweep.rs"]
+mod view_sweep;
 
 use gotos::{dangling_gotos, without_strings};
 
@@ -873,276 +871,23 @@ fn every_view_reads_the_same_at_any_thread_count() {
     );
 }
 
-/// Spells a function's or an import's name as a text does: without its
-/// module prefix, the `.`, `$` and `@` of a C name turned to `_`, a
-/// qualified name kept whole.
-///
-/// # Arguments
-///
-/// * `name` - The name.
-fn spelled(name: &str) -> String {
-    let name = borer_engine::analysis::bare_name(name);
-    if name.contains("::") || name.contains('(') {
-        name.to_owned()
-    } else {
-        name.replace(['.', '$', '@'], "_")
-    }
-}
-
-/// Returns how many discovered functions and imports go by each spelling:
-/// an import once, however many slots it has, and a stub that only jumps
-/// through an import's slot as that import.
-///
-/// # Arguments
-///
-/// * `p` - The program.
-/// * `a` - Its analysis.
-fn spellings(p: &Program, a: &Analysis) -> std::collections::BTreeMap<String, usize> {
-    let o = Overlay::default();
-    let mut by = std::collections::BTreeMap::new();
-    let imports: BTreeSet<&str> = p
-        .symbols
-        .iter()
-        .filter(|s| s.kind == SymbolKind::Import && s.addr != 0)
-        .map(|s| s.name.as_str())
-        .collect();
-    let functions = a
-        .functions
-        .iter()
-        .filter(|f| f.thunk.is_none())
-        .map(|f| spelled(&name_of(a, &o, f.entry)));
-    let imports = imports
-        .into_iter()
-        .map(|n| spelled(&borer_engine::search::demangled_name(n)));
-    for name in functions.chain(imports) {
-        *by.entry(name).or_insert(0) += 1;
-    }
-    by
-}
-
-/// Returns the ids a view ships that the function's facts, read here apart
-/// from the view, do not bear out.
-///
-/// A `static inline` line is the function its own name links to; every
-/// other line is the function the text is of. A function id must be the
-/// function, a callee or the function a callee's stub is bound to, a
-/// reference target, or a virtual callee; an import's slot an import's,
-/// and referenced or jumped through by a stub the function calls; a
-/// label's address a block's start; a global's address mapped and
-/// referenced; a variable the function's, defined on its signature, a
-/// declaration or its `static inline` line; a type defined on a line that
-/// spells it.
-///
-/// # Arguments
-///
-/// * `p` - The program.
-/// * `a` - Its analysis.
-/// * `entry` - The function the view is of.
-/// * `v` - The view.
-/// * `text` - The text it read.
-fn unborne(p: &Program, a: &Analysis, entry: u64, v: &View, text: &str) -> Vec<String> {
-    let decls = declarations_end(text).unwrap_or(0);
-    let targets =
-        |f: u64| -> BTreeSet<u64> { a.refs_from(f).into_iter().map(|(t, _)| t).collect() };
-    let main = targets(entry);
-    let mut virtuals: Option<Vec<u64>> = None;
-    let mut bad = Vec::new();
-    for i in 0..v.lines() {
-        let line = v.line(i).unwrap_or_default();
-        let tokens: Vec<_> = v.tokens(i).collect();
-        let scope = if line.starts_with("static inline ") {
-            let named = tokens.iter().find(|(_, kind, _)| *kind == Kind::Function);
-            named.and_then(|(.., link)| {
-                if let Some(Ref::Function(g)) = link {
-                    Some(*g)
-                } else {
-                    None
-                }
-            })
-        } else {
-            Some(entry)
-        };
-        let f = scope.and_then(|s| a.function(s));
-        let inline = scope
-            .filter(|s| *s != entry)
-            .map(targets)
-            .unwrap_or_default();
-        let referenced = |at: u64| match scope {
-            Some(s) if s == entry => main.contains(&at),
-            Some(_) => inline.contains(&at),
-            None => false,
-        };
-        for (span, _, link) in &tokens {
-            let Some(r) = link else { continue };
-            let ok = match r {
-                Ref::Function(e) => {
-                    Some(*e) == scope
-                        || f.is_some_and(|f| {
-                            f.callees.contains(e)
-                                || f.callees
-                                    .iter()
-                                    .any(|c| a.function(*c).and_then(|g| g.bound) == Some(*e))
-                        })
-                        || referenced(*e)
-                        || (scope == Some(entry)
-                            && virtuals
-                                .get_or_insert_with(|| {
-                                    virtual_callees(p, a, &Overlay::default(), entry)
-                                })
-                                .contains(e))
-                }
-                Ref::Import(s) => {
-                    let stub = f.is_some_and(|f| {
-                        f.callees
-                            .iter()
-                            .any(|c| a.function(*c).and_then(|g| g.thunk) == Some(*s))
-                    });
-                    (referenced(*s) || stub)
-                        && p.symbols
-                            .iter()
-                            .any(|y| y.kind == SymbolKind::Import && y.addr == *s)
-                }
-                Ref::Address(va) => f.is_some_and(|f| f.blocks.iter().any(|b| b.start == *va)),
-                Ref::Global(va) => {
-                    let mapped = p.section_at(*va).is_some()
-                        || p.zero_fill_at(*va).is_some()
-                        || p.in_headers(*va)
-                        || (p.format == borer_engine::program::BinaryFormat::Pe
-                            && *va == p.image_base);
-                    mapped && referenced(*va)
-                }
-                Ref::String(va) => p.section_at(*va).is_some() && referenced(*va),
-                Ref::Field { .. } => true,
-                Ref::Variable { function, name } => {
-                    Some(*function) == scope
-                        && v.definition(r).is_some_and(|d| {
-                            v.line(d).is_some_and(|l| {
-                                let declares = l.starts_with("// signature: ")
-                                    || l.starts_with("static inline ")
-                                    || d < decls;
-                                declares
-                                    && l.split(|c: char| !c.is_alphanumeric() && c != '_')
-                                        .any(|w| w == &**name)
-                            })
-                        })
-                }
-                Ref::Type(name) => v
-                    .definition(r)
-                    .is_some_and(|d| v.line(d).is_some_and(|l| l.contains(&**name))),
-            };
-            if !ok {
-                bad.push(format!(
-                    "{entry:#x} line {i}: {} {r:?}",
-                    &line[span.clone()]
-                ));
-            }
-        }
-    }
-    bad
-}
-
-/// What the sweep counts of the views: the call tokens (a name right
-/// before a `(`) and the tokens of three kinds, each with how many carry
-/// an id.
-#[derive(Debug, Default)]
-struct Census {
-    /// Call tokens, and how many carry an id.
-    calls: (usize, usize),
-    /// Call tokens whose spelling names exactly one discovered function or
-    /// import, and how many of them carry an id.
-    resolvable: (usize, usize),
-    /// Call tokens whose spelling names more than one.
-    ambiguous: usize,
-    /// Variable, label and global tokens, each with how many carry an id.
-    kinds: [(usize, usize); 3],
-    /// What the views counted of the names they left unlinked: the ones no
-    /// fact bore out, and the ones more than one thing spells.
-    counted: (usize, usize),
-    /// The first resolvable call tokens without an id.
-    examples: Vec<String>,
-}
-
-impl Census {
-    /// Adds one function's view.
-    ///
-    /// # Arguments
-    ///
-    /// * `entry` - The function.
-    /// * `v` - Its view.
-    /// * `by` - How many functions and imports go by each spelling
-    ///   ([`spellings`]).
-    fn add(&mut self, entry: u64, v: &View, by: &std::collections::BTreeMap<String, usize>) {
-        for i in 0..v.lines() {
-            let line = v.line(i).unwrap_or_default();
-            let tokens: Vec<_> = v.tokens(i).collect();
-            for (k, (span, kind, link)) in tokens.iter().enumerate() {
-                let slot = match kind {
-                    Kind::Variable => Some(0),
-                    Kind::Label => Some(1),
-                    Kind::Global => Some(2),
-                    Kind::Space
-                    | Kind::Comment
-                    | Kind::Keyword
-                    | Kind::Constant
-                    | Kind::Mnemonic
-                    | Kind::Register
-                    | Kind::Type
-                    | Kind::Function
-                    | Kind::Field
-                    | Kind::Address
-                    | Kind::String
-                    | Kind::Number
-                    | Kind::Punct
-                    | Kind::Text => None,
-                };
-                if let Some(s) = slot {
-                    self.kinds[s].0 += 1;
-                    self.kinds[s].1 += usize::from(link.is_some());
-                }
-                let opens = tokens
-                    .get(k + 1)
-                    .is_some_and(|(next, ..)| &line[next.clone()] == "(");
-                if !opens || !matches!(kind, Kind::Function | Kind::Text) {
-                    continue;
-                }
-                let word = &line[span.clone()];
-                self.calls.0 += 1;
-                self.calls.1 += usize::from(link.is_some());
-                match by.get(word).copied().unwrap_or(0) {
-                    0 => {}
-                    1 => {
-                        self.resolvable.0 += 1;
-                        self.resolvable.1 += usize::from(link.is_some());
-                        if link.is_none() && self.examples.len() < 10 {
-                            self.examples.push(format!("{entry:#x} line {i}: {word}"));
-                        }
-                    }
-                    _ => self.ambiguous += 1,
-                }
-            }
-        }
-        let counted = v.unlinked();
-        self.counted.0 += counted.uncorroborated;
-        self.counted.1 += counted.ambiguous;
-    }
-}
-
 /// Reads every function's text of the `BORER_DOGFOOD` binary as a view,
 /// checks that each spells its text and ships only corroborated ids
-/// ([`unborne`]), and prints the census.
+/// ([`view_sweep::unborne`]), and prints the census.
 ///
 /// The texts are the sweep's ([`swept_texts`]), so nothing decompiles
-/// twice. The census counts the call tokens that carry an id against those
-/// whose spelling names exactly one discovered function or import, lists
-/// the first of those left without one, and counts the variables, labels
-/// and globals linked.
+/// twice. The census counts call tokens, variables, labels, globals,
+/// string literals (listing unlinked ones by cause and requiring at least
+/// 95% of non-ambiguous string literals to link) and fields (requiring
+/// every `field_0x<hex>` token to carry its offset).
 #[test]
 #[ignore = "set BORER_DOGFOOD to a binary path to run this sweep"]
 fn every_view_spells_its_text_and_links_only_what_the_code_shows() {
     let c = &*CORPUS;
     let (p, a) = (&c.program, &c.analysis);
-    let by = spellings(p, a);
-    let (mut census, mut misspelled, mut bad) = (Census::default(), Vec::new(), Vec::new());
+    let by = view_sweep::spellings(p, a);
+    let (mut census, mut misspelled, mut bad) =
+        (view_sweep::Census::default(), Vec::new(), Vec::new());
     let started = std::time::Instant::now();
     for (entry, text) in swept_texts(c) {
         let Some(v) = view_of(p, a, &Overlay::default(), entry, text) else {
@@ -1152,12 +897,12 @@ fn every_view_spells_its_text_and_links_only_what_the_code_shows() {
         if v.spell() != text && misspelled.len() < 10 {
             misspelled.push(format!("{entry:#x}"));
         }
-        bad.extend(unborne(p, a, entry, &v, text));
-        census.add(entry, &v, &by);
+        bad.extend(view_sweep::unborne(p, a, entry, &v, text));
+        census.add(p, a, entry, &v, &by);
     }
     let share = |(n, k): (usize, usize)| format!("{k} of {n}");
     println!(
-        "binary: {}\nviews: {:?}\ncall tokens: {} linked; resolvable: {} linked; ambiguous {}\nfirst resolvable unlinked: {:?}\nvariables: {} linked; labels: {} linked; globals: {} linked\nthe views counted: {} uncorroborated, {} ambiguous",
+        "binary: {}\nviews: {:?}\ncall tokens: {} linked; resolvable: {} linked; ambiguous {}\nfirst resolvable unlinked: {:?}\nvariables: {} linked; labels: {} linked; globals: {} linked\nstrings: {} linked; resolvable: {} linked (unlinked causes: {:?}, samples: {:?})\nfields: {} linked; field_0x: {} linked\nthe views counted: {} uncorroborated, {} ambiguous",
         c.path,
         started.elapsed(),
         share(census.calls),
@@ -1167,6 +912,12 @@ fn every_view_spells_its_text_and_links_only_what_the_code_shows() {
         share(census.kinds[0]),
         share(census.kinds[1]),
         share(census.kinds[2]),
+        share(census.kinds[3]),
+        share(census.resolvable_strings),
+        census.string_causes,
+        census.string_examples,
+        share(census.kinds[4]),
+        share(census.field_hex),
         census.counted.0,
         census.counted.1,
     );
@@ -1179,6 +930,19 @@ fn every_view_spells_its_text_and_links_only_what_the_code_shows() {
         "{} ids no fact bears out: {:?}",
         bad.len(),
         &bad[..bad.len().min(10)]
+    );
+    assert_eq!(
+        census.field_hex.1, census.field_hex.0,
+        "field_0x tokens missing their offset: {:?}",
+        census.field_hex
+    );
+    assert!(
+        census.resolvable_strings.0 == 0
+            || census.resolvable_strings.1 * 100 >= census.resolvable_strings.0 * 95,
+        "fewer than 95% of non-ambiguous string literals linked: {} (total {}, causes: {:?})",
+        share(census.resolvable_strings),
+        share(census.kinds[3]),
+        census.string_causes
     );
 }
 

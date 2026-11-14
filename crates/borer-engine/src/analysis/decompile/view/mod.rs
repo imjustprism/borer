@@ -324,6 +324,18 @@ struct Reader<'a> {
     roles: Vec<Role>,
 }
 
+/// Renders the quoted string literal at `addr` as `own_name`'s text spells it.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `addr` - Candidate literal address.
+/// * `own_name` - Bare name of the enclosing function.
+#[must_use]
+pub fn literal_at(program: &Program, addr: u64, own_name: &str) -> Option<String> {
+    super::literal::literal_at(program, addr, own_name)
+}
+
 /// Returns a function's text read as lines of typed tokens, each name
 /// linked only where exactly one thing spells it and a fact of the engine
 /// agrees.

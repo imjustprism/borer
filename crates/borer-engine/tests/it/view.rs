@@ -1422,3 +1422,140 @@ fn applied_global_type_invalidates_cached_view_from_empty_overlay() {
         )]
     );
 }
+
+/// Builds the view of synthetic C text against a minimal one-byte function.
+///
+/// # Arguments
+///
+/// * `src` - Synthetic decompile C text to classify.
+#[expect(clippy::expect_used, reason = "synthetic view fixture exists at TEXT")]
+fn snippet_view(src: &str) -> View {
+    let p = image(&[(TEXT, &[0xc3])], Vec::new());
+    let a = Analysis::compute(&p);
+    view_of(&p, &a, &Overlay::default(), TEXT, src).expect("snippet view")
+}
+
+/// Builds a linked [`Kind::Field`] token pair for `ty` at `offset`.
+///
+/// # Arguments
+///
+/// * `ty` - Owning struct or class name.
+/// * `offset` - Byte offset of the field.
+fn linked_field(ty: &str, offset: u64) -> (Kind, Option<Ref>) {
+    (
+        Kind::Field,
+        Some(Ref::Field {
+            ty: Some(ty.into()),
+            offset,
+        }),
+    )
+}
+
+/// Initialized `static` declarations keep the declarator's name, and SDK
+/// pointer inference inside a `static inline` helper does not leak into the
+/// owning function's body.
+#[test]
+fn initialized_declarators_and_inline_helpers_keep_scoped_field_types() {
+    let v = snippet_view(concat!(
+        "// signature: uint32_t sub_140001000(void *a1)\n",
+        "struct Widget { uint32_t count; uint32_t flags; };\n",
+        "static struct Widget g_widget = *source;\n",
+        "static inline void helper(void *a1) { EnterCriticalSection(a1); a1->RecursionCount = 0; }\n",
+        "return g_widget.flags + a1->RecursionCount;\n",
+    ));
+    assert_eq!(
+        spelled(&v, "flags"),
+        [(Kind::Field, None), linked_field("Widget", 0x4)]
+    );
+    assert_eq!(
+        spelled(&v, "RecursionCount"),
+        [
+            linked_field("_RTL_CRITICAL_SECTION", 0xc),
+            (Kind::Field, None),
+        ]
+    );
+}
+
+/// Direct smart-pointer arrow calls resolve fields, and unparsed struct members
+/// stop trailing offset inference.
+#[test]
+fn smart_pointer_arrow_call_and_unsupported_struct_member_keep_sound_offsets() {
+    let v = snippet_view(concat!(
+        "// signature: uint64_t sub_140001000(void *a1, struct Hooks *a2)\n",
+        "struct Widget { uint32_t count; uint32_t flags; };\n",
+        "struct Hooks { uint64_t first; void (*cb)(void); uint64_t last; };\n",
+        "return std::shared_ptr<Widget>::operator ->(a1)->flags + a2->first + a2->last;\n",
+    ));
+    assert_eq!(
+        spelled(&v, "flags"),
+        [(Kind::Field, None), linked_field("Widget", 0x4)]
+    );
+    assert_eq!(
+        spelled(&v, "first"),
+        [(Kind::Field, None), linked_field("Hooks", 0x0)]
+    );
+    assert_eq!(
+        spelled(&v, "last"),
+        [(Kind::Field, None), (Kind::Field, None)]
+    );
+}
+
+/// Quoted or commented API spellings do not infer SDK pointers, and unit-defined
+/// structs apply target member alignment and tail padding unless ABI layout is unknown.
+#[test]
+fn quoted_and_commented_apis_stay_untyped_and_unit_structs_align_members() {
+    let v = snippet_view(concat!(
+        "// signature: uint64_t sub_140001000(void *a1, struct Outer *a2)\n",
+        "struct Inner { uint8_t tag; uint64_t val; uint8_t tail; };\n",
+        "struct Outer { uint8_t head; struct Inner inner; uint32_t after; };\n",
+        "puts(\"EnterCriticalSection(a1)\"); /* EnterCriticalSection(a1); */\n",
+        "/*\nEnterCriticalSection(a1);\nx = std::shared_ptr<Inner>::operator ->(p);\n*/\n",
+        "y = std::shared_ptr<Inner>::operator ->(p);\nif (ready) y = q;\n",
+        "z = puts(\"std::shared_ptr<Inner>::operator ->(p)\");\n",
+        "w = wrap(std::shared_ptr<Inner>::operator ->(p));\n",
+        "u = std::shared_ptr<Inner>::operator ->(p);\n",
+        "return a1->LockCount + x->val + y->val + z->val + w->val + u->val + a2->inner.val + a2->after;\n",
+    ));
+    assert_eq!(spelled(&v, "LockCount"), [(Kind::Field, None)]);
+    assert_eq!(
+        spelled(&v, "val"),
+        [
+            (Kind::Field, None),
+            (Kind::Field, None),
+            (Kind::Field, None),
+            (Kind::Field, None),
+            (Kind::Field, None),
+            linked_field("Inner", 0x8),
+            linked_field("Inner", 0x8),
+        ]
+    );
+    assert_eq!(
+        spelled(&v, "after"),
+        [(Kind::Field, None), linked_field("Outer", 0x20)]
+    );
+
+    let raw_unknown = Program::raw(
+        vec![0xc3],
+        Arch::Unknown,
+        TEXT,
+        Some(TEXT),
+        vec![Section::mapped(".text", TEXT, 0, 1, false, true)],
+    );
+    let a_unknown = Analysis::compute(&raw_unknown);
+    let v_unknown = view_of(
+        &raw_unknown,
+        &a_unknown,
+        &Overlay::default(),
+        TEXT,
+        concat!(
+            "// signature: uint64_t sub_140001000(struct Inner *a1)\n",
+            "struct Inner { uint8_t tag; uint64_t val; };\n",
+            "return a1->val;\n",
+        ),
+    )
+    .expect("unknown-arch view");
+    assert_eq!(
+        spelled(&v_unknown, "val"),
+        [(Kind::Field, None), (Kind::Field, None)]
+    );
+}
