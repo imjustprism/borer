@@ -1003,7 +1003,15 @@ fn unborne(p: &Program, a: &Analysis, entry: u64, v: &View, text: &str) -> Vec<S
                             .any(|y| y.kind == SymbolKind::Import && y.addr == *s)
                 }
                 Ref::Address(va) => f.is_some_and(|f| f.blocks.iter().any(|b| b.start == *va)),
-                Ref::Global(va) | Ref::String(va) => p.section_at(*va).is_some() && referenced(*va),
+                Ref::Global(va) => {
+                    let mapped = p.section_at(*va).is_some()
+                        || p.zero_fill_at(*va).is_some()
+                        || p.in_headers(*va)
+                        || (p.format == borer_engine::program::BinaryFormat::Pe
+                            && *va == p.image_base);
+                    mapped && referenced(*va)
+                }
+                Ref::String(va) => p.section_at(*va).is_some() && referenced(*va),
                 Ref::Variable { function, name } => {
                     Some(*function) == scope
                         && v.definition(r).is_some_and(|d| {

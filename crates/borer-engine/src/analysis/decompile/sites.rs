@@ -62,6 +62,51 @@ pub(crate) struct CallSite {
     pub(crate) args: Vec<CallArg>,
 }
 
+/// Builds a standalone [`Names`] resolver for `caller` outside the lifter.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `analysis` - Discovery results.
+/// * `overlay` - Names in force.
+/// * `caller` - Entry address of the function being read.
+pub(super) fn standalone_names<'a>(
+    program: &'a Program,
+    analysis: &'a Analysis,
+    overlay: &'a Overlay,
+    caller: u64,
+) -> Names<'a> {
+    let (bitness, first_stack) = match program.arch.isa() {
+        Some(crate::isa::Isa::X86 { bits }) => {
+            let conv = abi::conv(program, bits);
+            (bits, conv.word + conv.shadow)
+        }
+        Some(isa @ (crate::isa::Isa::A64 | crate::isa::Isa::A32 | crate::isa::Isa::Rv(_))) => {
+            (isa.bits(), 0)
+        }
+        None => (if program.is_64 { 64 } else { 32 }, 0),
+    };
+    let conv = abi::conv(program, bitness);
+    Names {
+        program,
+        analysis,
+        overlay,
+        this_param: false,
+        result_param: None,
+        own_name: Arc::from(super::expr_render::bare(&name_of(
+            analysis, overlay, caller,
+        ))),
+        debug_params: Arc::from(Vec::new()),
+        debug_locals: Arc::default(),
+        first_stack,
+        stack_params: 0,
+        reg_params: u32::try_from(conv.args.len()).unwrap_or(0),
+        word: conv.word,
+        slot_types: Arc::default(),
+        global_types: Arc::default(),
+    }
+}
+
 /// Lists the calls a function's text makes, with their arguments.
 ///
 /// The calls come from the effects the emission recorded
@@ -92,37 +137,15 @@ pub(crate) fn call_sites(
     overlay: &Overlay,
     caller: u64,
 ) -> Option<Vec<CallSite>> {
-    let (bitness, first_stack) = match program.arch.isa()? {
-        crate::isa::Isa::X86 { bits } => {
-            let conv = abi::conv(program, bits);
-            (bits, conv.word + conv.shadow)
-        }
-        isa @ (crate::isa::Isa::A64 | crate::isa::Isa::A32 | crate::isa::Isa::Rv(_)) => {
-            (isa.bits(), 0)
-        }
+    let bitness = match program.arch.isa()? {
+        crate::isa::Isa::X86 { bits } => bits,
+        isa @ (crate::isa::Isa::A64 | crate::isa::Isa::A32 | crate::isa::Isa::Rv(_)) => isa.bits(),
     };
     let f = analysis.function(caller)?;
     let memo = decompiled_cached(program, analysis, overlay, overlay.fingerprint(), caller);
     let d = memo.as_ref().as_ref()?;
     let conv = abi::conv(program, bitness);
-    let names = Names {
-        program,
-        analysis,
-        overlay,
-        this_param: false,
-        result_param: None,
-        own_name: Arc::from(crate::analysis::bare_name(&name_of(
-            analysis, overlay, caller,
-        ))),
-        debug_params: Arc::from(Vec::new()),
-        debug_locals: Arc::default(),
-        first_stack,
-        stack_params: 0,
-        reg_params: u32::try_from(conv.args.len()).unwrap_or(0),
-        word: conv.word,
-        slot_types: Arc::default(),
-        global_types: Arc::default(),
-    };
+    let names = standalone_names(program, analysis, overlay, caller);
     let mut out = Vec::new();
     for (i, b) in f.blocks.iter().enumerate() {
         for e in d.effects.block(i, b.start).unwrap_or_default() {

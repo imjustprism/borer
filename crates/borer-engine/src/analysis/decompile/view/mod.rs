@@ -126,6 +126,8 @@ struct Facts<'a> {
     virtual_callees: OnceCell<Vec<u64>>,
     /// Literal spellings its reference targets produce, `None` when two do.
     strings: OnceCell<BTreeMap<String, Option<u64>>>,
+    /// Named-data spellings its reference targets produce, `None` when two do.
+    data: OnceCell<BTreeMap<String, Option<u64>>>,
 }
 
 impl<'a> Facts<'a> {
@@ -160,6 +162,7 @@ impl<'a> Facts<'a> {
             stubs: callees.filter_map(|g| g.thunk).collect(),
             virtual_callees: OnceCell::new(),
             strings: OnceCell::new(),
+            data: OnceCell::new(),
         })
     }
 
@@ -194,6 +197,24 @@ impl<'a> Facts<'a> {
             }
             None => None,
         }
+    }
+
+    /// Returns the named-data candidates this function's reference sites spell.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The loaded image.
+    /// * `analysis` - Discovery results.
+    /// * `overlay` - Names in force.
+    fn data_map(
+        &self,
+        program: &Program,
+        analysis: &Analysis,
+        overlay: &Overlay,
+    ) -> &BTreeMap<String, Option<u64>> {
+        self.data.get_or_init(|| {
+            data::candidate_data(program, analysis, overlay, self.function.entry, &self.refs)
+        })
     }
 }
 
@@ -1299,15 +1320,26 @@ impl<'a> Reader<'a> {
             Kind::Text
         };
         let named = self.named(w);
-        if named == Named::Nothing && found == Kind::Text && self.overlay.types.contains_key(w) {
+        let cand = at.scope.facts.and_then(|f| {
+            f.data_map(self.program, self.analysis, self.overlay)
+                .get(w)
+                .copied()
+        });
+        if named == Named::Nothing
+            && cand.is_none()
+            && found == Kind::Text
+            && self.overlay.types.contains_key(w)
+        {
             return (Kind::Type, Some(Ref::Type(w.into())), false);
         }
         let many = if found == Kind::Text && call {
             Kind::Function
+        } else if cand.is_some() && found == Kind::Text {
+            Kind::Global
         } else {
             found
         };
-        let (kind, link) = self.link(named, found, many, at.scope.facts, tally);
+        let (kind, link) = self.link(named, cand, found, many, at.scope.facts, tally);
         let defines = link.as_ref().is_some_and(|r| {
             (*r == Ref::Function(self.entry) && at.role == Role::Signature)
                 || (at.role == Role::Inline && self.declared.inline.get(w) == Some(&at.i))
@@ -1377,6 +1409,8 @@ impl<'a> Reader<'a> {
     /// # Arguments
     ///
     /// * `named` - What the name spells ([`Reader::named`]).
+    /// * `cand` - Referenced named-data candidate (`Some(Some(va))` unique,
+    ///   `Some(None)` ambiguous).
     /// * `found` - Its kind when nothing goes by it: [`Kind::Function`] for
     ///   a function the text declares or its own name, [`Kind::Global`] for
     ///   a global's name, else [`Kind::Text`].
@@ -1387,18 +1421,37 @@ impl<'a> Reader<'a> {
     fn link(
         &self,
         named: Named<'_>,
+        cand: Option<Option<u64>>,
         found: Kind,
         many: Kind,
         facts: Option<&Facts<'_>>,
         tally: &mut Tally,
     ) -> (Kind, Option<Ref>) {
         let (kind, link) = match named {
-            Named::Nothing => return (found, None),
+            Named::Nothing => match cand {
+                Some(Some(va)) => (Kind::Global, Some(Ref::Global(va))),
+                Some(None) => {
+                    tally.unlinked.ambiguous += 1;
+                    return (Kind::Global, None);
+                }
+                None => return (found, None),
+            },
             Named::Many => {
                 tally.unlinked.ambiguous += 1;
                 return (many, None);
             }
-            Named::Data => (Kind::Global, None),
+            Named::Data => match cand {
+                Some(Some(va)) => (Kind::Global, Some(Ref::Global(va))),
+                Some(None) => {
+                    tally.unlinked.ambiguous += 1;
+                    return (Kind::Global, None);
+                }
+                None => (Kind::Global, None),
+            },
+            Named::Function(_) | Named::Import(_) if cand.is_some() => {
+                tally.unlinked.ambiguous += 1;
+                return (many, None);
+            }
             Named::Function(e) => {
                 let borne = facts.is_some_and(|f| self.reaches(f, e));
                 (Kind::Function, borne.then_some(Ref::Function(e)))
@@ -1414,7 +1467,7 @@ impl<'a> Reader<'a> {
             }
             Named::Address(a) => {
                 let refers = facts.is_some_and(|f| f.refs.contains(&a));
-                let borne = refers && self.program.section_at(a).is_some();
+                let borne = refers && data::is_mapped_data(self.program, a);
                 (Kind::Global, borne.then_some(Ref::Global(a)))
             }
         };

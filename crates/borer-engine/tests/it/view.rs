@@ -920,3 +920,102 @@ fn hostile_string_literals_spell_the_text_and_link_only_exact_matches() {
     assert_eq!(spelled(&v, &uncut_120), [(Kind::String, None)]);
     assert_eq!(spelled(&v, &full_4k), [(Kind::String, None)]);
 }
+
+/// Appends a RIP-relative instruction targeting `target` at `TEXT + buf.len()`.
+///
+/// # Arguments
+///
+/// * `buf` - Code buffer starting at [`TEXT`].
+/// * `op` - Opcode and ModR/M prefix bytes before the 32-bit displacement.
+/// * `target` - Target virtual address.
+#[expect(
+    clippy::expect_used,
+    reason = "fixture RIP displacement fits in 32 bits"
+)]
+fn push_rip(buf: &mut Vec<u8>, op: &[u8], target: u64) {
+    let next = TEXT + u64::try_from(buf.len() + op.len() + 4).expect("fits");
+    let disp = i32::try_from(target.cast_signed() - next.cast_signed()).expect("near");
+    buf.extend_from_slice(op);
+    buf.extend_from_slice(&disp.to_le_bytes());
+}
+
+/// Computes `(Analysis, View, String)` for [`TEXT`] under `o` and checks [`View::spell`].
+///
+/// # Arguments
+///
+/// * `p` - Fixture program.
+/// * `o` - Overlay in force.
+#[expect(
+    clippy::expect_used,
+    reason = "fixture program decompiles and builds a view at TEXT"
+)]
+fn analyzed_view(p: &Program, o: &Overlay) -> (Analysis, Arc<View>, String) {
+    let a = Analysis::compute(p);
+    let text = answer(p, &a, o, TEXT, Detail::Full).expect("an answer");
+    let v = view(p, &a, o, TEXT).expect("a view");
+    assert_eq!(v.spell(), text);
+    (a, v, text)
+}
+
+/// Named data symbols read by value or passed by address and a PE image base
+/// link to their referenced addresses, while two referenced data symbols
+/// sharing a spelling stay unlinked and count as ambiguous.
+#[test]
+fn named_data_links_unique_targets_and_counts_ambiguous_twins() {
+    let base = 0x1_4000_0000u64;
+    let count_va = GLOBAL;
+    let item_va = GLOBAL + 8;
+    let dup1_va = GLOBAL + 0x10;
+    let dup2_va = GLOBAL + 0x18;
+
+    let mut code = vec![0x48, 0x83, 0xec, 0x28]; // ASM: sub rsp,0x28
+    push_rip(&mut code, &[0x8b, 0x0d], count_va); // ASM: mov ecx,[rip+disp]
+    push_rip(&mut code, &[0x48, 0x8d, 0x15], item_va); // ASM: lea rdx,[rip+disp]
+    push_rip(&mut code, &[0x4c, 0x8d, 0x05], base); // ASM: lea r8,[rip+disp]
+    push_rip(&mut code, &[0xff, 0x15], SLOT); // ASM: call [rip+disp]
+    push_rip(&mut code, &[0x48, 0x8d, 0x0d], dup1_va); // ASM: lea rcx,[rip+disp]
+    push_rip(&mut code, &[0x48, 0x8d, 0x15], dup2_va); // ASM: lea rdx,[rip+disp]
+    push_rip(&mut code, &[0xff, 0x15], SLOT); // ASM: call [rip+disp]
+    code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x28, 0xc3]); // ASM: add rsp,0x28; ret
+
+    let symbols = vec![
+        symbol("TESTLIB.dll!consume", SLOT, SymbolKind::Import),
+        symbol("g_count", count_va, SymbolKind::Data),
+        symbol("g_item", item_va, SymbolKind::Data),
+        symbol("dup_data", dup1_va, SymbolKind::Data),
+        symbol("dup_data", dup2_va, SymbolKind::Data),
+    ];
+    let mut bytes = vec![0u8; 0x3400];
+    bytes[0..2].copy_from_slice(b"MZ");
+    bytes[0x400..0x1400].fill(0xcc);
+    bytes[0x400..0x400 + code.len()].copy_from_slice(&code);
+    let sections = vec![
+        Section::mapped(".text", TEXT, 0x400, 0x1000, false, true),
+        Section::mapped(".rdata", SLOT, 0x1400, 0x1000, false, false),
+        Section::mapped(".data", GLOBAL, 0x2400, 0x1000, true, false),
+    ];
+    let mut p = Program::raw(bytes, Arch::X86_64, base, Some(TEXT), sections);
+    p.format = BinaryFormat::Pe;
+    p.symbols = symbols;
+    let (_, v, text) = analyzed_view(&p, &Overlay::default());
+    for (name, va) in [
+        ("g_count", count_va),
+        ("g_item", item_va),
+        ("__ImageBase", base),
+    ] {
+        let hits = spelled(&v, name);
+        assert!(!hits.is_empty(), "{name} missing:\n{text}");
+        assert!(
+            hits.iter()
+                .all(|t| *t == (Kind::Global, Some(Ref::Global(va)))),
+            "{name}: {hits:?}\n{text}"
+        );
+    }
+    let dups = spelled(&v, "dup_data");
+    assert!(!dups.is_empty(), "{text}");
+    assert!(
+        dups.iter().all(|t| *t == (Kind::Global, None)),
+        "{dups:?}:\n{text}"
+    );
+    assert!(v.unlinked().ambiguous >= dups.len(), "{:?}", v.unlinked());
+}
