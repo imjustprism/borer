@@ -45,6 +45,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 mod data;
+mod fields;
 
 use super::lexer::{Lex, Piece, scan};
 use super::line::{header_len, is_global_name, label_address};
@@ -232,6 +233,8 @@ struct Declared<'t> {
     /// The types the unit declares (typedefs, `#define`d aliases, struct
     /// tags), each with the line that declares it.
     types: BTreeMap<&'t str, usize>,
+    /// The object-like `#define` constants the unit declares.
+    constants: BTreeSet<&'t str>,
     /// The functions the unit defines `static inline`, each with its line.
     inline: BTreeMap<&'t str, usize>,
 }
@@ -278,6 +281,8 @@ struct Tally {
     looked: BTreeSet<String>,
     /// Each `(function, slots[0])` import lookup already resolved.
     imports: BTreeMap<(u64, u64), Option<u64>>,
+    /// Cached `classes::field_names` tables by class name.
+    class_fields: BTreeMap<String, BTreeMap<u64, String>>,
 }
 
 /// What reading one function's text needs, read once before its lines.
@@ -291,6 +296,10 @@ struct Reader<'a> {
     overlay: &'a Overlay,
     /// The function's entry.
     entry: u64,
+    /// The function's full text.
+    text: &'a str,
+    /// Slice of [`Self::text`] starting at the owning function's body.
+    body: &'a str,
     /// The machine word in bits, which some scalar type names take.
     word: u8,
     /// The function's name as its text spells it.
@@ -307,6 +316,8 @@ struct Reader<'a> {
     facts: Option<Facts<'a>>,
     /// What the text's unit and declarations declare.
     declared: Declared<'a>,
+    /// Types, structs and constants read from the text's lines.
+    types: fields::Types<'a>,
     /// How many header lines the text opens with.
     head: usize,
     /// What each line after the header and up to the body is.
@@ -543,6 +554,29 @@ fn split_into(line: &str, from: usize, out: &mut Vec<Spanned>) {
 fn split(line: &str, from: usize, out: &mut Vec<Spanned>) {
     out.clear();
     split_into(line, from, out);
+}
+
+/// Returns the suffix of `text` starting at 0-based line `line_idx`, or `""`
+/// when `text` has fewer lines.
+///
+/// # Arguments
+///
+/// * `text` - Full multi-line text.
+/// * `line_idx` - Zero-based line index where the suffix starts.
+fn slice_from_line(text: &str, line_idx: usize) -> &str {
+    if line_idx == 0 {
+        return text;
+    }
+    let mut rem = line_idx;
+    for (idx, b) in text.bytes().enumerate() {
+        if b == b'\n' {
+            rem -= 1;
+            if rem == 0 {
+                return text.get(idx + 1..).unwrap_or("");
+            }
+        }
+    }
+    ""
 }
 
 /// Splits a [`Role::Signature`] line after [`SIGNATURE`], keeping `own`
@@ -986,6 +1020,8 @@ impl<'t> Declared<'t> {
             }
             if named(3).is_some() {
                 self.types.insert(name, i);
+            } else if code.len() > 3 && code.get(4).is_none_or(|(_, w, _)| *w != "*") {
+                self.constants.insert(name);
             }
             return Role::Item;
         }
@@ -1039,7 +1075,7 @@ impl<'a> Reader<'a> {
         overlay: &'a Overlay,
         entry: u64,
         lines: &[&'a str],
-        text: &str,
+        text: &'a str,
     ) -> Self {
         let (index, imports, renamed) = reads::unnoted(|| {
             (
@@ -1052,6 +1088,7 @@ impl<'a> Reader<'a> {
         let head = header_len(lines);
         let decls = declarations_end(text).map_or(head, |end| end.max(head));
         let mut declared = Declared::default();
+        let mut types = fields::Types::default();
         let mut pieces = Vec::new();
         if let Some(sig) = lines
             .get(..head)
@@ -1059,17 +1096,23 @@ impl<'a> Reader<'a> {
         {
             split_signature(sig, &own, &mut pieces);
             declared.vars.extend(params(sig, &pieces));
+            types.read_signature(sig, &pieces);
         }
         let mut roles = Vec::with_capacity(decls.saturating_sub(head));
         for (i, line) in lines.iter().copied().enumerate().take(decls).skip(head) {
             split(line, 0, &mut pieces);
-            roles.push(declared.read(i, line, &pieces));
+            let role = declared.read(i, line, &pieces);
+            types.read_line(role, line, &pieces, program);
+            roles.push(role);
         }
+        let body = slice_from_line(text, decls);
         Self {
             program,
             analysis,
             overlay,
             entry,
+            text,
+            body,
             word: if program.is_64 { 64 } else { 32 },
             own,
             index,
@@ -1077,8 +1120,23 @@ impl<'a> Reader<'a> {
             renamed,
             facts: Facts::of(analysis, overlay, entry),
             declared,
+            types,
             head,
             roles,
+        }
+    }
+
+    /// Builds the member and constant lookup context for this reader.
+    fn field_ctx(&self) -> fields::FieldCtx<'_, 'a> {
+        fields::FieldCtx {
+            program: self.program,
+            analysis: self.analysis,
+            overlay: self.overlay,
+            text: self.text,
+            body: self.body,
+            word_bits: self.word,
+            declared: &self.declared,
+            types: &self.types,
         }
     }
 
@@ -1227,8 +1285,8 @@ impl<'a> Reader<'a> {
         let w = word(at.line, at.pieces, at.k);
         let prev = code_before(at.pieces, at.k).map(|j| word(at.line, at.pieces, j));
         let next = word(at.line, at.pieces, at.k.saturating_add(1));
-        if matches!(prev, Some("->" | ".")) {
-            return (Kind::Field, None, false);
+        if let Some(op @ ("->" | ".")) = prev {
+            return self.field_ctx().resolve_member(w, op, at, tally);
         }
         if let Some(va) = label_address(w)
             && (next == ":" || prev == Some("goto"))
@@ -1331,6 +1389,13 @@ impl<'a> Reader<'a> {
             && self.overlay.types.contains_key(w)
         {
             return (Kind::Type, Some(Ref::Type(w.into())), false);
+        }
+        if named == Named::Nothing
+            && cand.is_none()
+            && found == Kind::Text
+            && self.field_ctx().is_constant(w, call, at.scope.facts)
+        {
+            return (Kind::Constant, None, false);
         }
         let many = if found == Kind::Text && call {
             Kind::Function

@@ -321,6 +321,24 @@ pub fn value(name: &str) -> Option<u32> {
     CODES.iter().find(|&&(_, n)| n == name).map(|&(c, _)| c)
 }
 
+/// Tells whether `name` is a status code or inner `HRESULT_FROM_WIN32` symbol
+/// from [`CODES`].
+///
+/// # Arguments
+///
+/// * `name` - Candidate identifier text.
+pub(crate) fn is_constant(name: &str) -> bool {
+    if !name.as_bytes().first().is_some_and(u8::is_ascii_uppercase) {
+        return false;
+    }
+    CODES.iter().any(|&(_, n)| {
+        n == name
+            || n.strip_prefix("HRESULT_FROM_WIN32(")
+                .and_then(|s| s.strip_suffix(')'))
+                == Some(name)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     #![expect(

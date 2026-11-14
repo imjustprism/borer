@@ -1012,6 +1012,7 @@ fn unborne(p: &Program, a: &Analysis, entry: u64, v: &View, text: &str) -> Vec<S
                     mapped && referenced(*va)
                 }
                 Ref::String(va) => p.section_at(*va).is_some() && referenced(*va),
+                Ref::Field { .. } => true,
                 Ref::Variable { function, name } => {
                     Some(*function) == scope
                         && v.definition(r).is_some_and(|d| {
@@ -1082,6 +1083,7 @@ impl Census {
                     Kind::Space
                     | Kind::Comment
                     | Kind::Keyword
+                    | Kind::Constant
                     | Kind::Mnemonic
                     | Kind::Register
                     | Kind::Type

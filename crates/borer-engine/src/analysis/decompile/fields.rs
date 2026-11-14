@@ -875,6 +875,168 @@ pub(super) fn rename_typed_fields(line: &str, var: &str, fields: &TypedFields) -
     s
 }
 
+/// Advances multiline `/* ... */` block-comment state across `line`, returning
+/// the byte offset of the first code token on `line` (`None` when the line holds
+/// no code tokens).
+///
+/// # Arguments
+///
+/// * `line` - Source line.
+/// * `in_comment` - Whether `line` begins inside an unclosed `/*` block comment;
+///   updated if `line` closes that comment or opens a new unclosed `/*`.
+pub(super) fn step_block_comment(line: &str, in_comment: &mut bool) -> Option<usize> {
+    let from = if *in_comment {
+        let close = line.find("*/")?;
+        *in_comment = false;
+        close + 2
+    } else {
+        0
+    };
+    let mut first_code = None;
+    for (piece, span) in lexer::scan(line, from) {
+        match piece {
+            lexer::Piece::Space => {}
+            lexer::Piece::Comment => {
+                let seg = line.get(span).unwrap_or("");
+                if seg.starts_with("/*") && !(seg.len() >= 4 && seg.ends_with("*/")) {
+                    *in_comment = true;
+                }
+            }
+            lexer::Piece::Token(_) => {
+                first_code.get_or_insert(span.start);
+            }
+        }
+    }
+    first_code
+}
+
+/// Counts direct variable writes (`=`, compound assignments, `++`, `--`) on `line`.
+///
+/// # Arguments
+///
+/// * `line` - Code slice of one source line.
+/// * `assigned` - Per-identifier write counter.
+pub(super) fn note_line_writes<'a>(line: &'a str, assigned: &mut BTreeMap<&'a str, usize>) {
+    let ln = lexer::Line {
+        text: line,
+        toks: lexer::lex(line),
+    };
+    let mut ctrl_parens: Vec<bool> = Vec::new();
+    let mut close_ctrl = false;
+    let mut decl_stars = false;
+    for (i, tok) in ln.toks.iter().enumerate() {
+        if tok.lex != lexer::Lex::Name {
+            let w = ln.word(i);
+            if tok.lex == lexer::Lex::Punct {
+                match w {
+                    "(" => ctrl_parens
+                        .push(i > 0 && matches!(ln.word(i - 1), "if" | "while" | "for" | "switch")),
+                    ")" => close_ctrl = ctrl_parens.pop().unwrap_or(false),
+                    _ => {}
+                }
+            }
+            if !(tok.lex == lexer::Lex::Punct && w == "*") {
+                decl_stars = false;
+            }
+            continue;
+        }
+        let Some(name) = line.get(tok.at..tok.end) else {
+            decl_stars = false;
+            continue;
+        };
+        let star_decl = decl_stars;
+        decl_stars = !matches!(name, "return" | "else" | "do" | "case" | "sizeof");
+        let prev = i.checked_sub(1).map(|j| ln.word(j));
+        let next = (i + 1 < ln.toks.len()).then(|| ln.word(i + 1));
+        if matches!(prev, Some("." | "->")) {
+            decl_stars = false;
+            continue;
+        }
+        let assign_op = matches!(
+            next,
+            Some("=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=")
+        );
+        let direct_lhs = assign_op
+            && match prev {
+                None
+                | Some(
+                    ";" | "{" | "}" | "(" | "," | "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&="
+                    | "|=" | "^=" | "<<=" | ">>=" | "?" | ":" | "else" | "do",
+                ) => true,
+                Some(")") => close_ctrl,
+                Some("*") => star_decl,
+                Some(w) => is_ident(w) && !matches!(w, "case" | "sizeof"),
+            };
+        let post_step = matches!(next, Some("++" | "--"));
+        let pre_step =
+            matches!(prev, Some("++" | "--")) && !matches!(next, Some("." | "->" | "[" | "("));
+        if direct_lhs || post_step || pre_step {
+            let entry = assigned.entry(name).or_default();
+            *entry = entry.saturating_add(1);
+        }
+    }
+}
+
+/// Infers single-assigned SDK structure tags `(variable, tag)` from declared
+/// API calls across `text`.
+///
+/// # Arguments
+///
+/// * `text` - The function's text.
+/// * `format` - Binary format selecting platform declarations.
+pub(super) fn api_pointee_tags<'a>(
+    text: &'a str,
+    format: crate::program::BinaryFormat,
+) -> BTreeMap<&'a str, &'static str> {
+    let mut found: BTreeMap<&'a str, Option<&'static str>> = BTreeMap::new();
+    let mut assigned: BTreeMap<&'a str, usize> = BTreeMap::new();
+    let mut in_comment = false;
+    for line in text.lines() {
+        let Some(code_at) = step_block_comment(line, &mut in_comment) else {
+            continue;
+        };
+        let t = line.get(code_at..).unwrap_or("");
+        note_line_writes(t, &mut assigned);
+        let bytes = t.as_bytes();
+        for open in code_open_parens(t) {
+            let Some(callee) = callee_before_paren(t, open) else {
+                continue;
+            };
+            let Some(decl) = crate::analysis::typelib::declared(callee, format) else {
+                continue;
+            };
+            let limit = bytes.len().min(open.saturating_add(4097));
+            let Some(args) = call_args_at(t, open, limit) else {
+                continue;
+            };
+            for (arg, param) in args.into_iter().zip(&decl.params) {
+                if !is_ident(arg) || arg.starts_with(|c: char| c.is_ascii_digit()) {
+                    continue;
+                }
+                let Some(s) = crate::analysis::sdk::pointee(param.ty) else {
+                    continue;
+                };
+                found
+                    .entry(arg)
+                    .and_modify(|prev| {
+                        if *prev != Some(s.tag) {
+                            *prev = None;
+                        }
+                    })
+                    .or_insert(Some(s.tag));
+            }
+        }
+    }
+    found
+        .into_iter()
+        .filter_map(|(name, tag)| {
+            let tag = tag?;
+            crate::analysis::sdk::structure(tag)?;
+            (assigned.get(name).copied().unwrap_or(0) <= 1).then_some((name, tag))
+        })
+        .collect()
+}
+
 /// Returns the pointers a function hands to an API as SDK structures, with
 /// their fields.
 ///
@@ -902,46 +1064,11 @@ pub(super) fn api_typed(
     format: crate::program::BinaryFormat,
     word: u64,
 ) -> Vec<(String, TypedFields)> {
-    let mut found: BTreeMap<&str, Option<&'static str>> = BTreeMap::new();
-    for line in text.lines().filter(|l| !l.trim_start().starts_with("//")) {
-        for (callee, args) in calls_in(line) {
-            let Some(decl) = crate::analysis::typelib::declared(callee, format) else {
-                continue;
-            };
-            for (arg, param) in args.into_iter().zip(&decl.params) {
-                if !is_ident(arg) {
-                    continue;
-                }
-                let Some(s) = crate::analysis::sdk::pointee(param.ty) else {
-                    continue;
-                };
-                found
-                    .entry(arg)
-                    .and_modify(|t| {
-                        if *t != Some(s.tag) {
-                            *t = None;
-                        }
-                    })
-                    .or_insert(Some(s.tag));
-            }
-        }
-    }
     let bits = u8::try_from(word * 8).unwrap_or(64);
-    found
+    api_pointee_tags(text, format)
         .into_iter()
         .filter_map(|(name, tag)| {
-            let s = crate::analysis::sdk::structure(tag?)?;
-            let assigned = text
-                .lines()
-                .filter(|l| {
-                    l.trim_start()
-                        .strip_prefix(name)
-                        .is_some_and(|r| r.starts_with(" = "))
-                })
-                .count();
-            if assigned > 1 {
-                return None;
-            }
+            let s = crate::analysis::sdk::structure(tag)?;
             let fields: TypedFields = s
                 .at(word)
                 .into_iter()
@@ -985,6 +1112,71 @@ fn pass_letter(pass: crate::analysis::typelib::Pass, word: u8) -> Option<&'stati
     })
 }
 
+/// Byte offsets of every opening `(` in `line` that is a code punctuation token.
+///
+/// # Arguments
+///
+/// * `line` - Source line.
+fn code_open_parens(line: &str) -> impl Iterator<Item = usize> + '_ {
+    lexer::scan(line, 0).filter_map(move |(piece, span)| {
+        (piece == lexer::Piece::Token(lexer::Lex::Punct) && line.get(span.clone()) == Some("("))
+            .then_some(span.start)
+    })
+}
+
+/// Extracts the bare ASCII identifier immediately preceding `(` at `open`.
+///
+/// # Arguments
+///
+/// * `line` - Source line.
+/// * `open` - Byte index of `(`.
+fn callee_before_paren(line: &str, open: usize) -> Option<&str> {
+    let prefix = line.get(..open)?;
+    let start = prefix
+        .char_indices()
+        .rev()
+        .find_map(|(i, ch)| {
+            let cont = ch.is_ascii_alphanumeric()
+                || ch == '_'
+                || ch == '$'
+                || (!ch.is_ascii() && !ch.is_whitespace());
+            (!cont).then_some(i + ch.len_utf8())
+        })
+        .unwrap_or(0);
+    line.get(start..open)
+        .filter(|c| is_ident(c) && !c.starts_with(|ch: char| ch.is_ascii_digit()))
+}
+
+/// Splits arguments inside `(` at `open` up to byte offset `limit`.
+///
+/// # Arguments
+///
+/// * `line` - Source line.
+/// * `open` - Byte index of `(`.
+/// * `limit` - Exclusive upper byte bound to scan.
+fn call_args_at(line: &str, open: usize, limit: usize) -> Option<Vec<&str>> {
+    let slice = line.as_bytes().get(open + 1..limit)?;
+    let (mut depth, mut from, mut args) = (0usize, open + 1, Vec::new());
+    for (rel, &b) in slice.iter().enumerate() {
+        let i = open + 1 + rel;
+        match b {
+            b'(' | b'[' => depth += 1,
+            b')' | b']' if depth > 0 => depth -= 1,
+            b')' => {
+                args.extend(line.get(from..i).map(str::trim).filter(|a| !a.is_empty()));
+                return Some(args);
+            }
+            b',' if depth == 0 => {
+                args.extend(line.get(from..i).map(str::trim));
+                from = i + 1;
+            }
+            b'"' => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
 /// The calls by plain name in one line, each with its whole arguments.
 ///
 /// # Arguments
@@ -995,41 +1187,15 @@ fn pass_letter(pass: crate::analysis::typelib::Pass, word: u8) -> Option<&'stati
 ///
 /// `(callee, arguments)` per call, outermost first; an argument is its
 /// trimmed text between the commas at the call's own depth.
+#[cfg(test)]
 fn calls_in(line: &str) -> Vec<(&str, Vec<&str>)> {
     let mut out = Vec::new();
-    let bytes = line.as_bytes();
-    for (open, _) in line.match_indices('(') {
-        let start = line
-            .get(..open)
-            .and_then(|h| {
-                h.rfind(|c: char| !is_ident_char(c))
-                    .map(|i| i + 1)
-                    .or(Some(0))
-            })
-            .unwrap_or(open);
-        let Some(callee) = line.get(start..open).filter(|c| is_ident(c)) else {
+    let limit = line.len();
+    for open in code_open_parens(line) {
+        let Some(callee) = callee_before_paren(line, open) else {
             continue;
         };
-        let (mut depth, mut from, mut args) = (0usize, open + 1, Vec::new());
-        let mut closed = false;
-        for (i, b) in bytes.iter().enumerate().skip(open + 1) {
-            match b {
-                b'(' | b'[' => depth += 1,
-                b')' | b']' if depth > 0 => depth -= 1,
-                b')' => {
-                    args.extend(line.get(from..i).map(str::trim).filter(|a| !a.is_empty()));
-                    closed = true;
-                    break;
-                }
-                b',' if depth == 0 => {
-                    args.extend(line.get(from..i).map(str::trim));
-                    from = i + 1;
-                }
-                b'"' => break,
-                _ => {}
-            }
-        }
-        if closed {
+        if let Some(args) = call_args_at(line, open, limit) {
             out.push((callee, args));
         }
     }
@@ -1044,6 +1210,29 @@ fn calls_in(line: &str) -> Vec<(&str, Vec<&str>)> {
 mod tests {
     use super::{api_typed, calls_in, rename_typed};
     use crate::program::BinaryFormat;
+
+    /// Multibyte UTF-8 before `(` never slices mid-character or splits off an
+    /// ASCII API suffix from a Unicode identifier.
+    #[test]
+    fn calls_in_handles_multibyte_utf8_before_paren() {
+        assert_eq!(calls_in("café(a); f(x);"), vec![("f", vec!["x"])]);
+        assert_eq!(
+            calls_in("caféEnterCriticalSection(a1); f(x);"),
+            vec![("f", vec!["x"])]
+        );
+        assert_eq!(
+            calls_in("cafe\u{301}EnterCriticalSection(a1); f(x);"),
+            vec![("f", vec!["x"])]
+        );
+        let unicode_prefixed = concat!(
+            "caféEnterCriticalSection(a1);\n",
+            "cafe\u{301}EnterCriticalSection(a1);\n",
+            "puts(\"EnterCriticalSection(a1)\"); /* EnterCriticalSection(a1); */\n",
+            "/*\nEnterCriticalSection(a1);\n*/\n",
+            "v = *(uint32_t*)(a1 + 0x8);\n",
+        );
+        assert!(api_typed(unicode_prefixed, BinaryFormat::Pe, 8).is_empty());
+    }
 
     /// A call's whole arguments split at its own depth.
     #[test]
@@ -1074,5 +1263,37 @@ mod tests {
         let twice = "var1 = f();\nEnterCriticalSection(var1);\nvar1 = g();\n";
         assert!(api_typed(twice, BinaryFormat::Pe, 8).is_empty());
         assert!(api_typed(text, BinaryFormat::Elf, 8).is_empty());
+    }
+
+    /// Braceless conditional writes, compound assignments and steps count as
+    /// reassignments, while dereference and member stores keep single-assigned
+    /// API pointers typed.
+    #[test]
+    fn inline_reassignments_keep_api_pointers_untyped_while_pointee_stores_do_not() {
+        for reassigned in [
+            "var1 = f();\nif (ready) var1 = g();\nEnterCriticalSection(var1);\n",
+            "var1 = f();\n*var1++;\nEnterCriticalSection(var1);\n",
+            "var1 = f();\nx = var1 = g();\nEnterCriticalSection(var1);\n",
+            "var1 = f();\nx += var1 = g();\nEnterCriticalSection(var1);\n",
+            "var1 = f();\nEnterCriticalSection(var1);\nreturn var1 = g();\n",
+        ] {
+            assert!(
+                api_typed(reassigned, BinaryFormat::Pe, 8).is_empty(),
+                "{reassigned}"
+            );
+        }
+        let pointee_store = concat!(
+            "var1 = f();\n",
+            "*(uint32_t *)var1 = 0;\n",
+            "var1->LockCount = 1;\n",
+            "EnterCriticalSection(var1);\n",
+        );
+        assert_eq!(api_typed(pointee_store, BinaryFormat::Pe, 8).len(), 1);
+        let hostile = format!(
+            "var1 = f();\n{}{}EnterCriticalSection(var1);\n",
+            "(".repeat(20_000),
+            ")x ".repeat(20_000),
+        );
+        assert_eq!(api_typed(&hostile, BinaryFormat::Pe, 8).len(), 1);
     }
 }

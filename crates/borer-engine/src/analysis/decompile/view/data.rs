@@ -65,6 +65,7 @@ fn usable_data_spelling(spelled: &str) -> bool {
         && !spelled.starts_with("L\"")
         && !spelled.contains('(')
         && !is_global_name(spelled)
+        && !crate::winconst::is_constant(spelled)
 }
 
 /// Records `(spelled, va)` in `by`, marking a second distinct address `None`.

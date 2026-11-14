@@ -1019,3 +1019,406 @@ fn named_data_links_unique_targets_and_counts_ambiguous_twins() {
     );
     assert!(v.unlinked().ambiguous >= dups.len(), "{:?}", v.unlinked());
 }
+
+/// Returns an [`Overlay`] declaring `Widget::title` at `0x18` and `Dialog::title` at `0x30`.
+fn widget_and_dialog_overlay() -> Overlay {
+    use borer_engine::analysis::stated::Field as StatedField;
+    use std::collections::BTreeMap;
+
+    let mut o = Overlay::default();
+    for (cls, off) in [("Widget", 0x18u64), ("Dialog", 0x30u64)] {
+        o.fields.insert(
+            cls.to_owned(),
+            BTreeMap::from([(
+                off,
+                StatedField {
+                    name: "title".to_owned(),
+                    ty: None,
+                },
+            )]),
+        );
+    }
+    o
+}
+
+/// Unique referenced strings, named data and `field_0x<hex>` offsets link,
+/// while twin strings and unreferenced `.rdata` strings stay unlinked.
+#[test]
+fn strings_named_data_and_field_offsets_link_where_bytes_agree() {
+    let hello_va = SLOT + 0x20;
+    let twin1_va = SLOT + 0x40;
+    let twin2_va = SLOT + 0x60;
+    let unref_va = SLOT + 0x80;
+    let count_va = GLOBAL;
+    let rec_va = GLOBAL + 8;
+
+    let mut code = vec![
+        0x53, // ASM: push rbx
+        0x48, 0x83, 0xec, 0x30, // ASM: sub rsp,0x30
+        0x48, 0x89, 0xcb, // ASM: mov rbx,rcx
+    ];
+    push_rip(&mut code, &[0x8b, 0x0d], count_va); // ASM: mov ecx,[rip+disp]
+    push_rip(&mut code, &[0x48, 0x8d, 0x15], hello_va); // ASM: lea rdx,[rip+disp]
+    push_rip(&mut code, &[0x4c, 0x8d, 0x05], rec_va); // ASM: lea r8,[rip+disp]
+    push_rip(&mut code, &[0xff, 0x15], SLOT); // ASM: call [rip+disp]
+    push_rip(&mut code, &[0x48, 0x8d, 0x0d], twin1_va); // ASM: lea rcx,[rip+disp]
+    push_rip(&mut code, &[0x48, 0x8d, 0x15], twin2_va); // ASM: lea rdx,[rip+disp]
+    push_rip(&mut code, &[0xff, 0x15], SLOT); // ASM: call [rip+disp]
+    for (k, &ch) in b"stack!\0".iter().enumerate() {
+        let off = 0x20 + u8::try_from(k).expect("small");
+        code.extend_from_slice(&[0xc6, 0x44, 0x24, off, ch]); // ASM: mov byte [rsp+off],ch
+    }
+    code.extend_from_slice(&[0x48, 0x8d, 0x4c, 0x24, 0x20]); // ASM: lea rcx,[rsp+0x20]
+    push_rip(&mut code, &[0xff, 0x15], SLOT); // ASM: call [rip+disp]
+    code.extend_from_slice(&[
+        0x8b, 0x03, // ASM: mov eax,[rbx]
+        0x03, 0x43, 0x08, // ASM: add eax,[rbx+8]
+        0x03, 0x43, 0x10, // ASM: add eax,[rbx+0x10]
+        0x48, 0x83, 0xc4, 0x30, // ASM: add rsp,0x30
+        0x5b, // ASM: pop rbx
+        0xc3, // ASM: ret
+    ]);
+
+    let symbols = vec![
+        symbol("TESTLIB.dll!consume", SLOT, SymbolKind::Import),
+        symbol("g_counter", count_va, SymbolKind::Data),
+        symbol("g_record", rec_va, SymbolKind::Data),
+    ];
+    let mut p = image(&[(TEXT, &code)], symbols);
+    let put = |p: &mut Program, va: u64, raw: &[u8]| {
+        let at = usize::try_from(va - TEXT).expect("in image");
+        p.bytes[at..at + raw.len()].copy_from_slice(raw);
+    };
+    put(&mut p, hello_va, b"hello_ok\0");
+    put(&mut p, twin1_va, b"twin_str\0");
+    put(&mut p, twin2_va, b"twin_str\0");
+    put(&mut p, unref_va, b"stack!\0");
+
+    let (_a, v, text) = analyzed_view(&p, &Overlay::default());
+    assert_eq!(
+        borer_engine::strings::cstr_at(&p, unref_va, 4, 120),
+        Some((6, "stack!".to_owned())),
+    );
+    assert_eq!(
+        spelled(&v, "\"hello_ok\""),
+        [(Kind::String, Some(Ref::String(hello_va)))],
+        "{text}"
+    );
+    for (gname, gva) in [("g_counter", count_va), ("g_record", rec_va)] {
+        let ghits = spelled(&v, gname);
+        assert!(!ghits.is_empty(), "{text}");
+        assert!(
+            ghits
+                .iter()
+                .all(|t| *t == (Kind::Global, Some(Ref::Global(gva)))),
+            "{text}"
+        );
+    }
+    let twins = spelled(&v, "\"twin_str\"");
+    assert_eq!(twins.len(), 2, "{text}");
+    assert!(twins.iter().all(|t| *t == (Kind::String, None)), "{text}");
+    assert!(v.unlinked().ambiguous >= 2, "{:?}", v.unlinked());
+    assert_eq!(spelled(&v, "\"stack!\""), [(Kind::String, None)], "{text}");
+    assert_eq!(
+        spelled(&v, "field_0x10"),
+        [(
+            Kind::Field,
+            Some(Ref::Field {
+                ty: None,
+                offset: 0x10,
+            }),
+        )],
+        "{text}"
+    );
+}
+
+/// A class `this` links its stated field without sibling confusion, bounds
+/// offsets by type size, and classifies constants.
+#[test]
+fn class_this_field_links_without_confusing_a_same_named_sibling() {
+    use borer_engine::analysis::utypes::{UserStruct, UserType};
+    use std::collections::BTreeMap;
+
+    let sig_va = SLOT + 0x20;
+    let mut body = Vec::new();
+    push_rip(&mut body, &[0x48, 0x8d, 0x15], sig_va); // ASM: lea rdx,[rip+disp]
+    body.extend_from_slice(&[0x8b, 0x41, 0x18, 0xc3]); // ASM: mov eax,[rcx+0x18]; ret
+    let mut p = image(&[(TEXT, &body)], Vec::new());
+    let sig_raw = b"unsigned int __cdecl Widget::read(void) const\0";
+    let sig_off = usize::try_from(sig_va - TEXT).expect("in image");
+    p.bytes[sig_off..sig_off + sig_raw.len()].copy_from_slice(sig_raw);
+    let o = widget_and_dialog_overlay();
+    let (a, v, text) = analyzed_view(&p, &o);
+    assert_eq!(
+        spelled(&v, "title"),
+        [(
+            Kind::Field,
+            Some(Ref::Field {
+                ty: Some("Widget".into()),
+                offset: 0x18,
+            }),
+        )],
+        "{text}"
+    );
+
+    let mut undersized = o.clone();
+    undersized.types.insert(
+        "Widget".to_owned(),
+        UserType::Struct(UserStruct {
+            size: 0x10,
+            fields: BTreeMap::new(),
+        }),
+    );
+    let past = view(&p, &a, &undersized, TEXT).expect("a view");
+    assert_eq!(
+        spelled(&past, "title"),
+        [(Kind::Field, None)],
+        "{}",
+        past.spell()
+    );
+    assert!(past.unlinked().uncorroborated >= 1, "{:?}", past.unlinked());
+
+    let consts = view_of(
+        &p,
+        &a,
+        &o,
+        TEXT,
+        "// enum Mode: 1 values, READY = 1\n#define LIMIT 0x20\n\nreturn LIMIT + READY + E_ACCESSDENIED + HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);",
+    )
+    .expect("a view");
+    for name in [
+        "LIMIT",
+        "READY",
+        "E_ACCESSDENIED",
+        "HRESULT_FROM_WIN32",
+        "ERROR_FILE_NOT_FOUND",
+    ] {
+        assert!(
+            spelled(&consts, name)
+                .iter()
+                .all(|t| *t == (Kind::Constant, None))
+                && !spelled(&consts, name).is_empty(),
+            "{name}: {:?}",
+            spelled(&consts, name)
+        );
+    }
+}
+
+/// An unrelated rename keeps a view that links strings, named data and class
+/// fields `Arc::ptr_eq` across [`borer_engine::analysis::Derived::moved`].
+#[test]
+fn unrelated_rename_keeps_data_and_field_views_intact() {
+    use borer_engine::analysis::stated::Field as StatedField;
+    use std::collections::BTreeMap;
+
+    let hello_va = SLOT + 0x20;
+    let sig_va = SLOT + 0x40;
+    let count_va = GLOBAL;
+    let other_fn = TEXT + 0x80;
+
+    let mut code = vec![
+        0x53, // ASM: push rbx
+        0x48, 0x83, 0xec, 0x20, // ASM: sub rsp,0x20
+        0x48, 0x89, 0xcb, // ASM: mov rbx,rcx
+    ];
+    push_rip(&mut code, &[0x48, 0x8d, 0x0d], hello_va); // ASM: lea rcx,[rip+disp]
+    push_rip(&mut code, &[0x8b, 0x15], count_va); // ASM: mov edx,[rip+disp]
+    push_rip(&mut code, &[0x4c, 0x8d, 0x05], sig_va); // ASM: lea r8,[rip+disp]
+    push_rip(&mut code, &[0xff, 0x15], SLOT); // ASM: call [rip+disp]
+    code.extend_from_slice(&[
+        0x8b, 0x43, 0x18, // ASM: mov eax,[rbx+0x18]
+        0x48, 0x83, 0xc4, 0x20, // ASM: add rsp,0x20
+        0x5b, // ASM: pop rbx
+        0xc3, // ASM: ret
+    ]);
+
+    let symbols = vec![
+        symbol("other", other_fn, SymbolKind::Export),
+        symbol("TESTLIB.dll!consume", SLOT, SymbolKind::Import),
+        symbol("g_counter", count_va, SymbolKind::Data),
+    ];
+    let mut p = image(&[(TEXT, &code), (other_fn, &[0x31, 0xc0, 0xc3])], symbols); // ASM: xor eax,eax; ret
+    let off = usize::try_from(hello_va - TEXT).expect("in image");
+    p.bytes[off..off + 9].copy_from_slice(b"hello_ok\0");
+    let sig_raw = b"unsigned int __cdecl Widget::inspect(void) const\0";
+    let sig_off = usize::try_from(sig_va - TEXT).expect("in image");
+    p.bytes[sig_off..sig_off + sig_raw.len()].copy_from_slice(sig_raw);
+
+    let a = Analysis::compute(&p);
+    let mut before = Overlay {
+        enum_source: EnumSource::Binary,
+        ..Overlay::default()
+    };
+    before.fields.insert(
+        "Widget".to_owned(),
+        BTreeMap::from([(
+            0x18,
+            StatedField {
+                name: "title".to_owned(),
+                ty: None,
+            },
+        )]),
+    );
+    let reads_of = |o: &Overlay| {
+        let text = decompile_named(&p, &a, o, TEXT).expect("a text");
+        let make = || view_of(&p, &a, o, TEXT, &text);
+        a.derived
+            .get_or_build_item("view_data_reads_test", o.fingerprint(), TEXT, make, |_| 0)
+    };
+    let was = reads_of(&before);
+    let built = was.as_ref().as_ref().expect("a view");
+    assert_eq!(
+        spelled(built, "\"hello_ok\""),
+        [(Kind::String, Some(Ref::String(hello_va)))]
+    );
+    let want_global = (Kind::Global, Some(Ref::Global(count_va)));
+    let before_globals = spelled(built, "g_counter");
+    assert!(
+        !before_globals.is_empty() && before_globals.iter().all(|t| *t == want_global),
+        "{before_globals:?}"
+    );
+    assert_eq!(
+        spelled(built, "title"),
+        [(
+            Kind::Field,
+            Some(Ref::Field {
+                ty: Some("Widget".into()),
+                offset: 0x18,
+            }),
+        )]
+    );
+
+    let mut far = before.clone();
+    far.names.insert(other_fn, "renamed_other".to_owned());
+    a.derived.moved(&a, &before, &far);
+    assert!(Arc::ptr_eq(&was, &reads_of(&far)));
+
+    let mut near = far.clone();
+    near.names.insert(count_va, "renamed_counter".to_owned());
+    a.derived.moved(&a, &far, &near);
+    let after = reads_of(&near);
+    assert!(!Arc::ptr_eq(&was, &after));
+    let relinked = after.as_ref().as_ref().expect("a view");
+    let after_globals = spelled(relinked, "renamed_counter");
+    assert!(
+        !after_globals.is_empty() && after_globals.iter().all(|t| *t == want_global),
+        "{after_globals:?}"
+    );
+}
+
+/// C operator precedence, multibyte UTF-8 before `(` and `Class::singleton`
+/// suffixes hold when resolving member links.
+#[test]
+fn member_precedence_utf8_and_singleton_suffixes_hold() {
+    let p = image(&[(TEXT, &[0xc3])], Vec::new()); // ASM: ret
+    let a = Analysis::compute(&p);
+    let o = widget_and_dialog_overlay();
+
+    let utf8_snippet =
+        "// signature: void f(Widget *w)\nputs(\"café(1)\"); naïve(1); return w->title;";
+    let v_utf8 = view_of(&p, &a, &o, TEXT, utf8_snippet).expect("utf8 view");
+    assert_eq!(v_utf8.spell(), utf8_snippet);
+    let widget_field = Some(Ref::Field {
+        ty: Some("Widget".into()),
+        offset: 0x18,
+    });
+    let dialog_field = Some(Ref::Field {
+        ty: Some("Dialog".into()),
+        offset: 0x30,
+    });
+    assert_eq!(
+        spelled(&v_utf8, "title"),
+        [(Kind::Field, widget_field.clone())]
+    );
+
+    for (expr, want) in [
+        ("(Dialog *)w->title", widget_field.clone()),
+        ("(uint64_t)w->title", widget_field.clone()),
+        ("&w->title", widget_field.clone()),
+        ("(*pp)->title", widget_field.clone()),
+        ("*pp->title", None),
+        ("((Dialog *)w)->title", dialog_field),
+        ("((Dialog *)a, w)->title", None),
+    ] {
+        let body =
+            format!("// signature: void f(Widget *w, Widget **pp, uint64_t a)\nreturn {expr};");
+        let v = view_of(&p, &a, &o, TEXT, &body).expect("precedence view");
+        assert_eq!(spelled(&v, "title"), [(Kind::Field, want)], "{expr}");
+    }
+
+    let singleton_tail = a.packs.name_for("singleton");
+    let s_ok = format!("return Widget::{singleton_tail}->title;");
+    let v_sing = view_of(&p, &a, &o, TEXT, &s_ok).expect("singleton view");
+    assert_eq!(spelled(&v_sing, "title"), [(Kind::Field, widget_field)]);
+    let v_static = view_of(&p, &a, &o, TEXT, "return Widget::s_other->title;").expect("static");
+    assert_eq!(spelled(&v_static, "title"), [(Kind::Field, None)]);
+}
+
+/// Adding a first applied global type to an empty [`Overlay::applied`] map
+/// invalidates a cached view whose member lookup missed that address.
+#[test]
+fn applied_global_type_invalidates_cached_view_from_empty_overlay() {
+    use borer_engine::analysis::utypes::{TypeExpr, UserField, UserStruct, UserType};
+    use std::collections::BTreeMap;
+
+    let count_va = GLOBAL;
+    let mut code = Vec::new();
+    push_rip(&mut code, &[0x48, 0x8b, 0x05], count_va); // ASM: mov rax,[rip+disp]
+    code.push(0xc3); // ASM: ret
+
+    let p = image(
+        &[(TEXT, &code)],
+        vec![symbol("g_box", count_va, SymbolKind::Data)],
+    );
+    let a = Analysis::compute(&p);
+    let before = Overlay::default();
+    let g_body = "return g_box->item;";
+    let cached_before = a.derived.get_or_build_item(
+        "view_applied_invalidation_test",
+        before.fingerprint(),
+        TEXT,
+        || view_of(&p, &a, &before, TEXT, g_body),
+        |_| 0,
+    );
+    let vb = cached_before.as_ref().as_ref().expect("before view");
+    assert_eq!(spelled(vb, "item"), [(Kind::Field, None)]);
+
+    let mut after = before.clone();
+    after.types.insert(
+        "Box".to_owned(),
+        UserType::Struct(UserStruct {
+            size: 0x10,
+            fields: BTreeMap::from([(
+                0x8,
+                UserField {
+                    name: "item".to_owned(),
+                    ty: TypeExpr::U64,
+                },
+            )]),
+        }),
+    );
+    after.applied.insert(
+        count_va,
+        TypeExpr::Ptr(Box::new(TypeExpr::Named("Box".to_owned()))),
+    );
+    a.derived.moved(&a, &before, &after);
+    let cached_after = a.derived.get_or_build_item(
+        "view_applied_invalidation_test",
+        after.fingerprint(),
+        TEXT,
+        || view_of(&p, &a, &after, TEXT, g_body),
+        |_| 0,
+    );
+    assert!(!Arc::ptr_eq(&cached_before, &cached_after));
+    let va = cached_after.as_ref().as_ref().expect("after view");
+    assert_eq!(
+        spelled(va, "item"),
+        [(
+            Kind::Field,
+            Some(Ref::Field {
+                ty: Some("Box".into()),
+                offset: 0x8,
+            }),
+        )]
+    );
+}

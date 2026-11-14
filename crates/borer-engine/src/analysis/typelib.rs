@@ -575,6 +575,21 @@ pub fn value_of(name: &str, format: BinaryFormat) -> Option<u64> {
     table.get(name).copied().flatten()
 }
 
+/// Tells whether `name` is a constant named by any group [`format`]'s
+/// declarations cite.
+///
+/// # Arguments
+///
+/// * `name` - Candidate identifier text.
+/// * `format` - The binary's container format.
+pub(crate) fn is_constant(name: &str, format: BinaryFormat) -> bool {
+    match format {
+        BinaryFormat::Pe => WIN_VALUES.contains_key(name),
+        BinaryFormat::Elf | BinaryFormat::MachO => POSIX_VALUES.contains_key(name),
+        BinaryFormat::Archive | BinaryFormat::Raw => false,
+    }
+}
+
 /// Every constant name the groups a platform's declarations cite state,
 /// with its value; `None` where two groups disagree.
 ///
