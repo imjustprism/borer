@@ -1,0 +1,20 @@
+[package]
+name = "borer-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Desktop GPUI application over borer-engine"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+borer-engine.workspace = true
+gpui.workspace = true
+gpui_platform.workspace = true
+theme.workspace = true
+ui.workspace = true

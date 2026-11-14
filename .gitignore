@@ -1,8 +1,10 @@
 /target
+/app/target
 # Brand sources: made and kept in borer-web. The README uses the copies in brand/.
 /assets
 # side build directories (CARGO_TARGET_DIR=target-live and friends)
 /target*/
+/app/target*/
 
 # local MCP registration (absolute path, machine-specific); the plugin's own
 # .mcp.json under plugins/ is part of the plugin

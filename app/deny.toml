@@ -1,0 +1,83 @@
+# cargo-deny: supply-chain and license policy for the `borer-app` GPUI workspace.
+#   cargo deny check                       (full: advisories need the network)
+#   cargo deny check bans licenses sources (offline subset run by scripts/run/app.py)
+
+[graph]
+targets = [{ triple = "x86_64-pc-windows-msvc" }]
+all-features = false
+
+[output]
+feature-depth = 1
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+  # smartstring, through rhai (the engine's script sandbox): unmaintained, with
+  # no known vulnerability and no release to move to.
+  { id = "RUSTSEC-2026-0249", reason = "smartstring via rhai: unmaintained, no vulnerability, no replacement" },
+  # rustybuzz 0.20.1, through usvg -> gpui (bundled SVG icon shaping): unmaintained,
+  # no vulnerability, pinned by Zed v1.28.1's resvg/usvg version.
+  { id = "RUSTSEC-2026-0206", reason = "rustybuzz via usvg/gpui: unmaintained, no vulnerability, pinned by Zed v1.28.1" },
+  # ttf-parser 0.25.1, through gpui and usvg/fontdb: unmaintained, no vulnerability,
+  # pinned by Zed v1.28.1.
+  { id = "RUSTSEC-2026-0192", reason = "ttf-parser via gpui/usvg: unmaintained, no vulnerability, pinned by Zed v1.28.1" },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+unused-allowed-license = "deny"
+allow = [
+  # Standard permissive Rust ecosystem crates across engine and GPUI dependencies.
+  "MIT",
+  # GPUI core crates (`gpui`, `gpui_platform`, `gpui_windows`, `sum_tree`, `collections`, etc.) and Rust ecosystem crates.
+  "Apache-2.0",
+  # BSD-2-Clause crates (`arrayref`, `mach2`, `zerocopy`, font/text helpers).
+  "BSD-2-Clause",
+  # BSD-3-Clause crates (`subtle`, `instant`, `skrifa`/`read-fonts` tables, cryptography/compression helpers).
+  "BSD-3-Clause",
+  # Unicode data tables (`icu_*`, `unicode-ident`).
+  "Unicode-3.0",
+  # Zlib-licensed crates (`foldhash`, `miniz_oxide`, `tinyvec`, graphics/windowing helpers).
+  "Zlib",
+  # `webpki-roots` / Mozilla-derived crates (`option-ext`).
+  "MPL-2.0",
+  # Public-domain / Unlicense crates (`byteorder`, `memchr`, `aho-corasick`, `same-file`, `winapi-util`).
+  "Unlicense",
+  # `tiny-keccak` via `rhai`: public-domain dedication.
+  "CC0-1.0",
+  # `yaxpeax-arm` and `yaxpeax-arch` in `borer-engine`: zero-clause BSD.
+  "0BSD",
+  # Zed UI and theme crates (`ui`, `ui_macros`, `theme`, `syntax_theme`, `component`, `icons`, `menu`, `refineable`).
+  "GPL-3.0-or-later",
+  # `borer-app` and `borer-engine` themselves.
+  "AGPL-3.0-only",
+]
+
+[licenses.private]
+# Zed's git crates set `publish = false`; `ignore = false` forces cargo-deny to verify every git crate's license.
+ignore = false
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = [
+  # Zed `v1.28.1` (`gpui`, `gpui_platform`, `ui`, `theme` and their workspace dependencies).
+  "https://github.com/zed-industries/zed",
+  # Zed's tested `async-task` patch (one commit over upstream for waker vtable identity).
+  "https://github.com/zed-industries/async-task",
+]
