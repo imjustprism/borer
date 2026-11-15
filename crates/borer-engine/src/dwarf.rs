@@ -155,7 +155,8 @@ pub(crate) const LOCALS_MAX: usize = 64;
 /// the same discipline every capped walk keeps against debug information
 /// larger than any type table holds.
 const TYPES_MAX: usize = 1 << 13;
-/// Furthest from the entry stack pointer a local's slot may sit, in bytes.
+/// Distance from the entry stack pointer, in bytes, a local's slot stays
+/// under; one at or past it is refused.
 ///
 /// A frame larger than this holds no local a compiler lays out for a
 /// function a decompiler reads; debug information stating one further out
@@ -302,7 +303,7 @@ pub(crate) fn frame_slot(off: i32, base_bp: bool, word: i64, frame: i64) -> Opti
 ///
 /// The slot, or `None` when no frame holds it.
 fn slot_held(slot: i64) -> Option<i64> {
-    (slot != 0 && slot.abs() <= FRAME_SPAN).then_some(slot)
+    (slot != 0 && slot.unsigned_abs() < FRAME_SPAN.unsigned_abs()).then_some(slot)
 }
 
 /// Takes one frame-relative local for a function the debug information

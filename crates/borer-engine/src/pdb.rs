@@ -639,8 +639,8 @@ struct Gathered {
     /// Procedure RVA to its locals, as slot offset to name: the
     /// frame-relative records its module states, converted into the
     /// decompiler's frame. Only a procedure the gather named has an entry,
-    /// and a local whose offset converts past [`crate::dwarf::FRAME_SPAN`]
-    /// is refused.
+    /// and a local whose offset converts to [`crate::dwarf::FRAME_SPAN`] or
+    /// past it is refused.
     locals: BTreeMap<u32, BTreeMap<i64, String>>,
     /// Real candidates past the cap, counted so the cut can be said.
     dropped: usize,

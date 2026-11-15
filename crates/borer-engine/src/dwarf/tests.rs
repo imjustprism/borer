@@ -775,3 +775,17 @@ fn a_huge_stated_length_ends_the_walk() {
     };
     assert!(read_in(&info, &abbrev(), &strings).subprograms.is_empty());
 }
+
+/// A slot at [`super::FRAME_SPAN`] is refused and one inside it is held.
+///
+/// That is the edge [`crate::analysis::protos::VarKey::parse_saved`] keeps
+/// for a stated slot, so no debug-named slot is one an agent cannot rename.
+#[test]
+fn a_slot_at_the_frame_span_is_refused() {
+    assert_eq!(super::slot_held(super::FRAME_SPAN), None);
+    assert_eq!(super::slot_held(-super::FRAME_SPAN), None);
+    assert_eq!(
+        super::slot_held(super::FRAME_SPAN - 1),
+        Some(super::FRAME_SPAN - 1)
+    );
+}
