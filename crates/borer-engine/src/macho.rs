@@ -710,22 +710,7 @@ impl<'a> RawSymtab<'a> {
         let parsed = usize::try_from(n_strx)
             .ok()
             .and_then(|at| self.strings.get(at..))
-            .and_then(|rest| {
-                let window = &rest[..rest.len().min(NLIST_SCAN_MAX)];
-                if let Some(end) = window.iter().position(|&b| b == 0) {
-                    return std::str::from_utf8(&window[..end]).ok();
-                }
-                if rest.len() < NLIST_SCAN_MAX {
-                    return None;
-                }
-                match std::str::from_utf8(window) {
-                    Ok(s) => Some(s),
-                    Err(e) if e.error_len().is_none() => {
-                        std::str::from_utf8(&window[..e.valid_up_to()]).ok()
-                    }
-                    Err(_) => None,
-                }
-            });
+            .and_then(|rest| crate::text::c_str_head(rest, NLIST_SCAN_MAX));
         self.cache[slot] = Some((n_strx, parsed));
         parsed
     }

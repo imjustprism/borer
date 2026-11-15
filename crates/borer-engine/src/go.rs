@@ -26,8 +26,10 @@ use crate::program::{Section, Symbol, SymbolKind};
 /// Most functions read from one table, whatever its header claims.
 const FUNCS_MAX: usize = 1 << 20;
 
-/// Longest function name read; a longer run is a corrupt table.
-const NAME_MAX: usize = 4096;
+/// Most bytes read of one name: enough for [`crate::text::head`] of
+/// four-byte characters, so a longer name reads as its head without a scan
+/// to its NUL.
+const NAME_MAX: usize = (crate::text::OUTSIDE_MAX + 2) * 4;
 
 /// Most bytes searched for the header's magic when no section names the
 /// table.
@@ -377,15 +379,15 @@ impl<'a> View<'a> {
         usize::try_from(self.word(at)?).ok()
     }
 
-    /// Reads a NUL-terminated name: printable ASCII or UTF-8, not empty.
+    /// Reads a NUL-terminated name: printable ASCII or UTF-8, not empty,
+    /// cut to its [`crate::text::head`] when longer than a row shows.
     ///
     /// # Arguments
     ///
     /// * `at` - Offset of its first byte.
     fn name(&self, at: usize) -> Option<&'a str> {
-        let rest = self.bytes.get(at..)?;
-        let len = rest.iter().take(NAME_MAX).position(|b| *b == 0)?;
-        let text = std::str::from_utf8(rest.get(..len)?).ok()?;
+        let text = crate::text::c_str_head(self.bytes.get(at..)?, NAME_MAX)?;
+        let text = crate::text::head(text);
         (!text.is_empty() && !text.chars().any(char::is_control)).then_some(text)
     }
 }
@@ -740,21 +742,22 @@ pub(crate) fn find<'a>(
 ///
 /// * `funcs` - The table's `(entry, name)` pairs.
 /// * `symbols` - The symbols the file states, which win.
+/// * `names` - The load's name budget, charged with each name copied.
 ///
 /// # Returns
 ///
 /// The new symbols, as local functions, in address order.
-pub(crate) fn symbols(funcs: &[(u64, &str)], symbols: &[Symbol]) -> Vec<Symbol> {
-    let named: std::collections::BTreeSet<u64> = symbols
-        .iter()
-        .filter(|s| s.kind != SymbolKind::Data)
-        .map(|s| s.addr)
-        .collect();
+pub(crate) fn symbols(
+    funcs: &[(u64, &str)],
+    symbols: &[Symbol],
+    names: &mut crate::text::Names,
+) -> Vec<Symbol> {
+    let named = crate::program::named_code(symbols);
     funcs
         .iter()
         .filter(|(entry, _)| !named.contains(entry))
         .map(|(entry, name)| Symbol {
-            name: crate::text::one_line(name),
+            name: names.take_line(name),
             addr: *entry,
             kind: SymbolKind::Local,
         })

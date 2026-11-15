@@ -96,6 +96,42 @@ pub(crate) fn head(name: &str) -> &str {
     }
 }
 
+/// Returns the UTF-8 text a NUL ends within the first `max` bytes of
+/// `rest`, or the valid UTF-8 prefix of those bytes when no NUL is among
+/// them.
+///
+/// A table name longer than a row can show is read as its first `max`
+/// bytes, so many entries naming one long string cost `max` bytes of scan
+/// each rather than the string's length; a `max` of at least
+/// ([`OUTSIDE_MAX`] + 2) * 4 bytes leaves [`head`] enough to cut the name
+/// where a row would.
+///
+/// # Arguments
+///
+/// * `rest` - The bytes from the name's first one on.
+/// * `max` - Most bytes scanned.
+///
+/// # Returns
+///
+/// The text, or `None` when it is not UTF-8 or `rest` ends within `max`
+/// bytes without a NUL.
+pub(crate) fn c_str_head(rest: &[u8], max: usize) -> Option<&str> {
+    let window = rest.get(..max).unwrap_or(rest);
+    if let Some(end) = window.iter().position(|&b| b == 0) {
+        return std::str::from_utf8(window.get(..end)?).ok();
+    }
+    if window.len() < max {
+        return None;
+    }
+    match std::str::from_utf8(window) {
+        Ok(s) => Some(s),
+        Err(e) if e.error_len().is_none() => {
+            std::str::from_utf8(window.get(..e.valid_up_to())?).ok()
+        }
+        Err(_) => None,
+    }
+}
+
 /// Load-time budget for names copied out of one file's tables.
 ///
 /// [`head`] bounds each copy to what a row can show; `Names` bounds all
@@ -206,6 +242,20 @@ impl Names {
             }
             None => self.placeholder(),
         }
+    }
+
+    /// Copies the [`head`] of `raw` within the budget made safe for a line,
+    /// for a name read after [`adopt`] has run.
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - The name as the file's table spells it.
+    ///
+    /// # Returns
+    ///
+    /// [`one_line`] of what [`Names::take`] returns.
+    pub(crate) fn take_line(&mut self, raw: &str) -> String {
+        one_line(&self.take(raw))
     }
 
     /// Copies a Mach-O symbol name keeping any leading `_` plus [`head`] of its

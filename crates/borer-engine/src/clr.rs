@@ -645,16 +645,18 @@ impl Clr {
     ///
     /// * `image_base` - The image's base.
     /// * `symbols` - The symbols the file states, which win.
+    /// * `names` - The load's name budget, charged with each name copied.
     ///
     /// # Returns
     ///
     /// The new symbols, in table order.
-    pub(crate) fn symbols(&self, image_base: u64, symbols: &[Symbol]) -> Vec<Symbol> {
-        let named: std::collections::BTreeSet<u64> = symbols
-            .iter()
-            .filter(|s| s.kind != SymbolKind::Data)
-            .map(|s| s.addr)
-            .collect();
+    pub(crate) fn symbols(
+        &self,
+        image_base: u64,
+        symbols: &[Symbol],
+        names: &mut crate::text::Names,
+    ) -> Vec<Symbol> {
+        let named = crate::program::named_code(symbols);
         self.methods
             .iter()
             .filter(|m| m.rva != 0)
@@ -665,7 +667,7 @@ impl Clr {
                     Body::Il | Body::Runtime | Body::None => SymbolKind::Data,
                 };
                 (!named.contains(&addr)).then(|| Symbol {
-                    name: m.name.clone(),
+                    name: names.take_line(&m.name),
                     addr,
                     kind,
                 })

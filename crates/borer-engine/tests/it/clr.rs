@@ -427,6 +427,21 @@ fn a_long_nested_name_is_cut() {
     }
 }
 
+/// A method named past what a row shows names its symbol by the name's
+/// head, cut where a row cuts it, as every other table's names are, and
+/// charged to the load's name budget.
+#[test]
+fn a_long_method_name_names_its_symbol_by_its_head() {
+    let mut m = meta();
+    let at = u16::try_from(m.strings.len()).expect("a small heap");
+    m.strings.extend([b'P'; 600].iter().chain(&[0; 4]));
+    m.tables[m.program_name..m.program_name + 2].copy_from_slice(&c2(at));
+    let p = load(&root(&m));
+    let main = p.symbols.iter().find(|s| s.addr == va(MAIN_RVA));
+    let shown = format!("Ns.{}...", "P".repeat(253));
+    assert_eq!(main.map(|s| s.name.as_str()), Some(shown.as_str()));
+}
+
 /// Method names are symbols, and `why` says the .NET metadata named them.
 ///
 /// An IL body is named by a data symbol and a native body by a function

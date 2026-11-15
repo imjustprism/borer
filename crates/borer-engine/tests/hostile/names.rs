@@ -807,3 +807,73 @@ fn a_symtab_twin_of_a_placeholder_export_adds_no_second_symbol() {
         "the budget was spent in .dynsym"
     );
 }
+
+/// A Go `pclntab` whose functions all name one long string stays in the heap bar.
+///
+/// Its [`SYMBOLS`] functions name one string of 1000 four-byte characters
+/// in a Go 1.20 table: each name is read
+/// as its head and charged to the load's name budget, so past the budget
+/// the functions take placeholders.
+#[test]
+fn go_functions_naming_one_long_string_load_within_the_heap_bar() {
+    /// Where the code starts, which the table's entries count from.
+    const TEXT: u64 = 0x1000;
+    /// Where the table sits.
+    const TABLE_AT: u64 = 0x3000;
+    /// Bytes in one Go 1.20 `_func` record.
+    const RECORD: usize = 44;
+    let _one = serial();
+    let mut name = "🦀".repeat(1000).into_bytes();
+    name.push(0);
+    let pcln = (72 + name.len()).next_multiple_of(8);
+    let functab = (SYMBOLS + 1) * 8;
+    let mut table = vec![0u8; pcln + functab + SYMBOLS * RECORD];
+    table[..8].copy_from_slice(&[0xf1, 0xff, 0xff, 0xff, 0, 0, 1, 8]);
+    let pcln64 = from_usize(pcln);
+    let header = [
+        from_usize(SYMBOLS),
+        0,
+        TEXT,
+        72,
+        pcln64,
+        pcln64,
+        pcln64,
+        pcln64,
+    ];
+    for (k, v) in header.iter().enumerate() {
+        put64(&mut table, 8 + k * 8, *v);
+    }
+    table[72..72 + name.len()].copy_from_slice(&name);
+    for k in 0..SYMBOLS {
+        let entry = u32::try_from(k).expect("fits");
+        let record = functab + k * RECORD;
+        put32(&mut table, pcln + k * 8, entry);
+        put32(
+            &mut table,
+            pcln + k * 8 + 4,
+            u32::try_from(record).expect("fits"),
+        );
+        put32(&mut table, pcln + record, entry);
+    }
+    put32(
+        &mut table,
+        pcln + SYMBOLS * 8,
+        u32::try_from(SYMBOLS).expect("fits"),
+    );
+    let bytes = elfgen::build(
+        elfgen::ET_EXEC,
+        elfgen::EM_X86_64,
+        TEXT,
+        &[
+            elfgen::Sec::new(
+                ".text",
+                elfgen::PROGBITS,
+                elfgen::AX,
+                TEXT,
+                vec![0xc3; SYMBOLS],
+            ),
+            elfgen::Sec::new(".gopclntab", elfgen::PROGBITS, elfgen::A, TABLE_AT, table),
+        ],
+    );
+    check_local_names("go.elf", bytes, SYMBOLS, "🦀");
+}

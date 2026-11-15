@@ -351,6 +351,25 @@ pub(crate) struct SectionRow {
     index: usize,
 }
 
+/// Returns the addresses a symbol other than a data symbol names, which a
+/// name read from a later table does not take over.
+///
+/// # Arguments
+///
+/// * `symbols` - The symbols read so far.
+///
+/// # Returns
+///
+/// The addresses, in order.
+#[must_use]
+pub(crate) fn named_code(symbols: &[Symbol]) -> BTreeSet<u64> {
+    symbols
+        .iter()
+        .filter(|s| s.kind != SymbolKind::Data)
+        .map(|s| s.addr)
+        .collect()
+}
+
 /// Finds the first-declared file-backed section holding an address, by a
 /// binary search of a table's rows ([`Program::index_sections`]).
 ///
@@ -1330,11 +1349,7 @@ impl Program {
             }
             _ => None,
         };
-        let already: BTreeSet<u64> = symbols
-            .iter()
-            .filter(|s| s.kind != SymbolKind::Data)
-            .map(|s| s.addr)
-            .collect();
+        let already = named_code(&symbols);
         for sub in &named {
             if sub.low_pc != 0 && !already.contains(&sub.low_pc) {
                 symbols.push(Symbol {
@@ -1376,12 +1391,12 @@ impl Program {
             parent: None,
             modes,
         };
-        program.headers.lenient.extend(names.note());
         crate::text::adopt(&mut program);
-        program.read_go();
+        program.read_go(&mut names);
         phases.mark("load go");
-        program.read_clr(clr_dir);
+        program.read_clr(clr_dir, &mut names);
         phases.mark("load clr");
+        program.headers.lenient.extend(names.note());
         Ok(program)
     }
 
@@ -1393,7 +1408,11 @@ impl Program {
     /// PIE's table states its text start through one. The table is read
     /// whatever the instruction set: its pointers are as wide as the
     /// image's ([`crate::analysis::pointer_size`]).
-    fn read_go(&mut self) {
+    ///
+    /// # Arguments
+    ///
+    /// * `names` - The load's name budget, charged with the names it copies.
+    fn read_go(&mut self, names: &mut Names) {
         let word = saturating_usize(crate::analysis::pointer_size(self));
         let (table, funcs) = match crate::go::find(&self.sections, |s| self.section_bytes(s), word)
         {
@@ -1403,7 +1422,7 @@ impl Program {
                 return;
             }
         };
-        let named = crate::go::symbols(&funcs, &self.symbols);
+        let named = crate::go::symbols(&funcs, &self.symbols, names);
         self.symbols.extend(named);
         self.go = Some(table);
     }
@@ -1415,13 +1434,15 @@ impl Program {
     ///
     /// * `dir` - The CLR runtime header's data directory, `(rva, size)`;
     ///   `None` for a file without one.
-    fn read_clr(&mut self, dir: Option<(u32, u32)>) {
+    /// * `names` - The load's name budget, charged with the symbol names it
+    ///   copies.
+    fn read_clr(&mut self, dir: Option<(u32, u32)>, names: &mut Names) {
         let Some(dir) = dir else {
             return;
         };
         let read = crate::clr::read(self, dir);
         if let Ok(clr) = &read {
-            let named = clr.symbols(self.image_base, &self.symbols);
+            let named = clr.symbols(self.image_base, &self.symbols, names);
             self.symbols.extend(named);
         }
         self.clr = Some(read);
