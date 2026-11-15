@@ -1013,7 +1013,10 @@ fn types_known(text: &str, sig: &str, proto: &Proto) -> bool {
 /// * `p` - One parameter, `uint64_t a1`, `const char *s` or `uint64_t`.
 fn param(p: &str) -> (CTy, Option<Name>) {
     let p = p.trim();
-    let name_at = p.rfind(|c: char| !is_ident_char(c)).map_or(0, |i| i + 1);
+    let name_at = p
+        .char_indices()
+        .rfind(|&(_, c)| !is_ident_char(c))
+        .map_or(0, |(i, c)| i + c.len_utf8());
     let ty = p[..name_at].trim_end();
     let name = &p[name_at..];
     if ty.is_empty() || name.is_empty() || name.starts_with(|c: char| c.is_ascii_digit()) {
@@ -1429,8 +1432,20 @@ fn code_of(line: &str) -> &str {
 mod tests {
     use super::{
         Index, Item, call_arities, code_of, declare_globals, implementation_named, library_items,
-        own_prototype, parse_proto, plain_type, platform_declarations, words,
+        own_prototype, param, parse_proto, plain_type, platform_declarations, words,
     };
+
+    /// A parameter whose last character outside a name is wider than a byte
+    /// is read without slicing inside that character.
+    ///
+    /// # Panics
+    ///
+    /// When the parameter panics or is read otherwise.
+    #[test]
+    fn a_parameter_ending_in_a_wide_character_is_read() {
+        assert!(param("int \u{15c}").1.is_none());
+        assert!(param("char \u{15c}x").1.is_some());
+    }
 
     /// A global the code names undeclared is declared after the text's own
     /// declarations; one only a literal spells is not, nor one declared.
