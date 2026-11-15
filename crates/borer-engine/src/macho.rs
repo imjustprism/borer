@@ -923,7 +923,7 @@ fn image<'a>(
             continue;
         };
         let name = plain(&import.name);
-        if *slots < SLOTS_PER_IMPORT && seen.insert((b.slot, name)) {
+        if *slots < SLOTS_PER_IMPORT && claim(&mut seen, import, b.slot, name) {
             *slots += 1;
             symbols.push(Symbol {
                 name: bind_symbol_name(import, name, *slots, names),
@@ -983,6 +983,36 @@ fn image<'a>(
         lenient: None,
         relocs,
     }
+}
+
+/// Records `name` at a bound `slot` unless it is already recorded there.
+///
+/// A bind whose import lost its name to the load's budget carries only a
+/// placeholder, which cannot match the name a symbol table gave the slot,
+/// so it is checked by address instead: no placeholder goes where a symbol
+/// already names the slot.
+///
+/// # Arguments
+///
+/// * `seen` - The `(address, name)` pairs recorded so far.
+/// * `import` - The bound import.
+/// * `slot` - The bound slot's address.
+/// * `name` - The import's name as a symbol shows it.
+///
+/// # Returns
+///
+/// Whether the slot takes a symbol for the import.
+fn claim<'s>(
+    seen: &mut BTreeSet<(u64, &'s str)>,
+    import: &crate::reloc::Import,
+    slot: u64,
+    name: &'s str,
+) -> bool {
+    let named = seen
+        .range((slot, "")..)
+        .next()
+        .is_some_and(|&(at, _)| at == slot);
+    !(import.replaced && named) && seen.insert((slot, name))
 }
 
 /// Chooses the owned symbol name for `slot` (1-based) of one bound `import`.
@@ -1237,5 +1267,31 @@ mod tests {
             .map(|s| s.addr)
             .collect();
         assert_eq!(slots, vec![0x1000, 0x1008], "both slots are named");
+    }
+
+    /// A bind whose import lost its name adds no placeholder at a named slot.
+    ///
+    /// A named import still takes a slot under its own name, and a
+    /// placeholder takes a slot no symbol names.
+    ///
+    /// # Panics
+    ///
+    /// When a placeholder lands beside a real name or a bind is refused a
+    /// free slot.
+    #[test]
+    fn a_placeholder_bind_never_shadows_a_named_slot() {
+        let import = |name: &str, replaced| crate::reloc::Import {
+            name: name.to_owned(),
+            ordinal: 1,
+            weak: false,
+            replaced,
+        };
+        let real = import("_malloc", false);
+        let cut = import("<name 1>", true);
+        let mut seen = std::collections::BTreeSet::from([(0x2000u64, "malloc")]);
+        assert!(!super::claim(&mut seen, &cut, 0x2000, "<name 1>"));
+        assert!(super::claim(&mut seen, &real, 0x2000, "free"));
+        assert!(super::claim(&mut seen, &cut, 0x2008, "<name 1>"));
+        assert!(!super::claim(&mut seen, &real, 0x2000, "free"));
     }
 }

@@ -1180,6 +1180,7 @@ impl Program {
                 }
                 relocs = applied.relocs;
                 let strs = &elf.dynstrtab;
+                let mut exported: BTreeSet<(u64, &str)> = BTreeSet::new();
                 for (i, sym) in elf.dynsyms.iter().enumerate() {
                     let Some(raw) = strs.get_at(sym.st_name).filter(|n| !n.is_empty()) else {
                         continue;
@@ -1187,6 +1188,7 @@ impl Program {
                     if sym.st_shndx == 0 {
                         let slots = slots_of.get(&i).map_or(&[0][..], Vec::as_slice);
                         for &addr in slots {
+                            exported.insert((addr, head(raw)));
                             symbols.push(Symbol {
                                 name: names.take(raw),
                                 addr,
@@ -1194,6 +1196,7 @@ impl Program {
                             });
                         }
                     } else if sym.st_value != 0 {
+                        exported.insert((sym.st_value, head(raw)));
                         symbols.push(Symbol {
                             name: names.take(raw),
                             addr: sym.st_value,
@@ -1201,9 +1204,6 @@ impl Program {
                         });
                     }
                 }
-                let exported: BTreeSet<(u64, &str)> =
-                    symbols.iter().map(|s| (s.addr, s.name.as_str())).collect();
-                let mut locals: Vec<Symbol> = Vec::new();
                 for sym in &elf.syms {
                     let kind = goblin::elf::sym::st_type(sym.st_info);
                     let is_code = kind == goblin::elf::sym::STT_FUNC
@@ -1218,7 +1218,7 @@ impl Program {
                     let shown = head(raw);
                     if is_data {
                         if !exported.contains(&(sym.st_value, shown)) {
-                            locals.push(Symbol {
+                            symbols.push(Symbol {
                                 name: names.take(raw),
                                 addr: sym.st_value,
                                 kind: SymbolKind::Data,
@@ -1232,18 +1232,12 @@ impl Program {
                         function_ranges.push((sym.st_value, end));
                     }
                     if !exported.contains(&(sym.st_value, shown)) {
-                        locals.push(Symbol {
+                        symbols.push(Symbol {
                             name: names.take(raw),
                             addr: sym.st_value,
                             kind: SymbolKind::Local,
                         });
                     }
-                }
-                drop(exported);
-                if symbols.is_empty() {
-                    symbols = locals;
-                } else {
-                    symbols.extend(locals);
                 }
                 let mut unwind = 0usize;
                 if let Some(sec) = sections.iter().find(|s| s.name == ".eh_frame")

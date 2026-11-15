@@ -711,3 +711,79 @@ fn macho_dyld_long_import_keeps_ellipsis_and_deduplicates_past_budget() {
         "repeated binds past budget deduplicate and obey SLOTS_PER_IMPORT"
     );
 }
+
+/// A function named in both `.dynsym` and `.symtab` gets one symbol.
+///
+/// Both tables name [`SYMBOLS`] functions with one string of [`NAME_LEN`]
+/// bytes, which spends the name budget in `.dynsym`: a `.symtab` entry
+/// matches its `.dynsym` twin by the name the table spells, not by the
+/// placeholder the twin took.
+#[test]
+fn a_symtab_twin_of_a_placeholder_export_adds_no_second_symbol() {
+    /// Where `.dynsym` sits, right after the code.
+    const DYNSYM_AT: u64 = 0x1800;
+    /// Where `.symtab` sits.
+    const SYMTAB_AT: u64 = 0xd400;
+    /// Where the string table both symbol tables share sits.
+    const DYNSTR_AT: u64 = 0x1_9000;
+    /// Where `.dynamic` sits, past the string table.
+    const DYNAMIC_AT: u64 = 0x2_9008;
+    /// Where the hash table that counts `.dynsym` sits, past `.dynamic`.
+    const HASH_AT: u64 = 0x2_9100;
+    let _one = serial();
+    let mut table = vec![0u8; 24];
+    for k in 0..SYMBOLS {
+        table.extend(elfgen::sym(1, 0x12, 1, 0x1000 + from_usize(k)));
+    }
+    let mut strtab = vec![0u8];
+    strtab.resize(1 + NAME_LEN, b'A');
+    strtab.push(0);
+    let strsz = from_usize(strtab.len());
+    let dynamic = elfgen::dynamic(&[
+        (4, HASH_AT),
+        (6, DYNSYM_AT),
+        (5, DYNSTR_AT),
+        (10, strsz),
+        (11, 24),
+    ]);
+    let nchain = u32::try_from(SYMBOLS + 1).expect("fits");
+    let hash: Vec<u8> = [1, nchain, 0]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+    let code = vec![0xc3; 0x800];
+    let mut secs = vec![
+        elfgen::Sec::new(".text", elfgen::PROGBITS, elfgen::AX, 0x1000, code),
+        elfgen::Sec::new(
+            ".dynsym",
+            elfgen::DYNSYM,
+            elfgen::A,
+            DYNSYM_AT,
+            table.clone(),
+        ),
+        elfgen::Sec::new(".symtab", elfgen::SYMTAB, 0, SYMTAB_AT, table),
+        elfgen::Sec::new(".dynstr", elfgen::STRTAB, elfgen::A, DYNSTR_AT, strtab),
+        elfgen::Sec::new(".dynamic", elfgen::DYNAMIC, elfgen::WA, DYNAMIC_AT, dynamic),
+        elfgen::Sec::new(".hash", elfgen::PROGBITS, elfgen::A, HASH_AT, hash),
+    ];
+    for s in &mut secs[1..3] {
+        s.link = 4;
+        s.info = 1;
+        s.entsize = 24;
+    }
+    secs[4].link = 4;
+    secs[4].entsize = 16;
+    let bytes = elfgen::build(elfgen::ET_DYN, elfgen::EM_X86_64, 0x1000, &secs);
+    let p = Program::from_bytes(PathBuf::from("twins.so"), bytes).expect("the image loads");
+    let mut per_addr: std::collections::BTreeMap<u64, usize> = std::collections::BTreeMap::new();
+    for s in &p.symbols {
+        *per_addr.entry(s.addr).or_default() += 1;
+    }
+    assert_eq!(per_addr.len(), SYMBOLS);
+    let doubled = per_addr.values().filter(|n| **n > 1).count();
+    assert_eq!(doubled, 0, "{doubled} functions named twice");
+    assert!(
+        p.symbols.iter().any(|s| s.name.starts_with("<name ")),
+        "the budget was spent in .dynsym"
+    );
+}
