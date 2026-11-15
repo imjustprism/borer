@@ -1000,10 +1000,8 @@ fn skip_format_spec(chars: &[char], mut at: usize) -> Option<usize> {
         .then_some(at + 1)
 }
 
-/// Tells whether a referenced string is specific enough for a YARA rule.
-///
-/// Format directives, digits and punctuation alone never identify a program,
-/// and short words such as `"Error"` match unrelated binaries.
+/// Tells whether a text is a bare module file name (`kernel32.dll`,
+/// `libc.so.6`), which every program importing that module also holds.
 ///
 /// # Arguments
 ///
@@ -1011,25 +1009,57 @@ fn skip_format_spec(chars: &[char], mut at: usize) -> Option<usize> {
 ///
 /// # Returns
 ///
-/// `true` when `text` holds at least [`STRING_MIN`] letters outside `printf`
-/// directives.
+/// `true` when `text` has no path separator or space and one of its dotted
+/// parts past the first is a module extension.
+fn is_module_name(text: &str) -> bool {
+    /// Extensions of the modules an import table or loader names.
+    const EXTS: [&str; 8] = ["dll", "exe", "sys", "drv", "ocx", "cpl", "so", "dylib"];
+    !text.contains(['\\', '/', ' '])
+        && text
+            .split('.')
+            .skip(1)
+            .any(|part| EXTS.iter().any(|e| part.eq_ignore_ascii_case(e)))
+}
+
+/// Tells whether a referenced string is specific enough for a YARA rule.
+///
+/// Format directives, digits and punctuation alone never identify a program,
+/// nor does one word: short ones such as `"Error"`, common ones such as
+/// `"Warning"`, and API names such as `"GetProcAddress"` sit in unrelated
+/// binaries, as does a module name such as `"kernel32.dll"`.
+///
+/// # Arguments
+///
+/// * `text` - The unquoted string text.
+///
+/// # Returns
+///
+/// `true` when `text` holds at least [`STRING_MIN`] letters in at least two
+/// words outside `printf` directives and is not a bare module name.
 fn identifying_text(text: &str) -> bool {
     let chars: Vec<char> = text.chars().collect();
     let mut letters = 0;
+    let mut words = 0;
+    let mut in_word = false;
     let mut i = 0;
     while let Some(&c) = chars.get(i) {
         if c == '%'
             && let Some(next) = skip_format_spec(&chars, i + 1)
         {
             i = next;
+            in_word = false;
             continue;
         }
         if c.is_alphabetic() {
             letters += 1;
+            words += usize::from(!in_word);
+            in_word = true;
+        } else if !c.is_alphanumeric() {
+            in_word = false;
         }
         i += 1;
     }
-    letters >= STRING_MIN
+    letters >= STRING_MIN && words >= 2 && !is_module_name(text)
 }
 
 /// The string a function references at an address, as YARA writes it,
@@ -1106,7 +1136,8 @@ fn rule_name(stem: &str) -> String {
 /// [`OWN_MIN`] non-idiom fixed bytes that match the image once; functions that
 /// fall short are noted in `//` comments above the rule. The condition asks for
 /// every code string, or at least two of the identifying strings (half when
-/// five or more, all when one).
+/// five or more). Beside code a lone string is left out, and a rule with no
+/// code string says it is rough.
 ///
 /// # Arguments
 ///
@@ -1163,6 +1194,11 @@ pub fn yara_rule(
                 notes.join("; ")
             }
         ));
+    }
+    if sigs.is_empty() {
+        notes.push("rough: no code string; unrelated programs may share these strings".to_owned());
+    } else if texts.len() == 1 {
+        texts.clear();
     }
     let stem = p
         .path
@@ -1740,5 +1776,84 @@ mod tests {
             let why = yara_signature(&prog, f).expect_err("no code string");
             assert!(why.contains("prologue"), "{why}");
         }
+    }
+
+    /// One word, an API name or a bare module name never identifies a
+    /// program; a text of two or more words does.
+    ///
+    /// # Panics
+    ///
+    /// When a weak text passes or a specific one fails.
+    #[test]
+    fn single_words_and_module_names_do_not_identify() {
+        use super::identifying_text;
+
+        for weak in [
+            "kernel32.dll",
+            "libc.so.6",
+            "GetProcAddress",
+            "Warning",
+            "Failed",
+            "%s: Error",
+        ] {
+            assert!(!identifying_text(weak), "{weak}");
+        }
+        for specific in [
+            "borer_unique_marker",
+            "Out of memory",
+            "C:\\temp\\borer.dll",
+        ] {
+            assert!(identifying_text(specific), "{specific}");
+        }
+    }
+
+    /// Beside a code string a lone referenced string makes no strings arm,
+    /// and a rule left with strings alone says it is rough.
+    ///
+    /// # Panics
+    ///
+    /// When the lone string is listed beside code, or the strings-only rule
+    /// carries no rough note.
+    #[test]
+    fn a_lone_string_beside_code_gives_no_strings_arm() {
+        use super::{Analysis, Overlay, yara_rule};
+
+        let mut code = vec![
+            0x55, // ASM: push rbp
+            0x48, 0x89, 0xe5, // ASM: mov rbp, rsp
+        ];
+        push_lea_rip(&mut code, 0x3d, 0x40_2000);
+        let mut bare = code.clone();
+        code.extend_from_slice(&[
+            0x69, 0xc7, 0x67, 0x45, 0x23, 0x01, // ASM: imul eax, edi, 0x01234567
+            0x83, 0xc0, 0x42, // ASM: add eax, 0x42
+            0x31, 0xd2, // ASM: xor edx, edx
+        ]);
+        for body in [&mut code, &mut bare] {
+            body.extend_from_slice(&[
+                0x5d, // ASM: pop rbp
+                0xc3, // ASM: ret
+            ]);
+        }
+        let prog = elf_x64(&code, b"borer lone marker\0");
+        let ana = Analysis::compute(&prog);
+        let rule = yara_rule(&prog, &ana, &Overlay::default(), &[0x40_1000]).expect("rule on code");
+        assert!(rule.contains("$c0"), "{rule}");
+        assert!(!rule.contains("$s0"), "{rule}");
+        assert!(!rule.contains("rough"), "{rule}");
+
+        let bare_prog = elf_x64(&bare, b"borer lone marker\0");
+        let bare_ana = Analysis::compute(&bare_prog);
+        let bare_rule = yara_rule(&bare_prog, &bare_ana, &Overlay::default(), &[0x40_1000])
+            .expect("rule on the string");
+        assert!(!bare_rule.contains("$c0"), "{bare_rule}");
+        assert!(
+            bare_rule.contains("$s0 = \"borer lone marker\" ascii"),
+            "{bare_rule}"
+        );
+        assert!(
+            bare_rule.lines().any(|l| l.starts_with("// rough:")),
+            "{bare_rule}"
+        );
     }
 }
