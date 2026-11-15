@@ -2647,6 +2647,31 @@ mod tests {
         }
     }
 
+    /// `diff` refuses a session with no binary before it probes `other`
+    /// for a fingerprint sidecar, and a path that names nothing goes on to
+    /// the binary load rather than failing as a sidecar.
+    ///
+    /// The probe ran first, so with nothing loaded a share was refused as a
+    /// sidecar path instead of answering that no binary was loaded.
+    ///
+    /// # Panics
+    ///
+    /// When either refusal differs.
+    #[test]
+    fn diff_refuses_no_binary_before_its_sidecar_probe() {
+        let share = r"\\host.invalid\s\x";
+        let e = BorerServer::default()
+            .diff_text(share)
+            .expect_err("nothing is loaded");
+        assert_eq!(e.message, crate::state::NO_BINARY);
+        let server = crate::testing::code_server(Arch::X86_64, &[0xc3]);
+        let e = server
+            .diff_text("C:/borer-no-such-dir/other.exe")
+            .expect_err("no such file");
+        assert!(e.message.starts_with("load failed: "), "{}", e.message);
+        assert!(!e.message.contains("fingerprint sidecar"), "{}", e.message);
+    }
+
     /// The comparison resources refuse a session with no binary before
     /// they load the other build, `exportpack` refuses a part after the
     /// name that is not `all`, and an enum table's row says `enum` once.
