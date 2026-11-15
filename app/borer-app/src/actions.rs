@@ -24,8 +24,6 @@ gpui::actions!(
         GoBack,
         /// Navigates to the next function in history.
         GoForward,
-        /// Runs the built-in UI frame and latency measurement suite.
-        Measure,
     ]
 );
 
@@ -51,6 +49,5 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("pageup", PageUp, Some("AppBrowse")),
         KeyBinding::new("alt-left", GoBack, Some("AppRoot")),
         KeyBinding::new("alt-right", GoForward, Some("AppRoot")),
-        KeyBinding::new("ctrl-shift-m", Measure, Some("AppRoot")),
     ]);
 }

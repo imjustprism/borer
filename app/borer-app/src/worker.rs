@@ -5,10 +5,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use borer_engine::analysis::decompile::view::view;
 use borer_engine::analysis::render::{FunctionOrder, FunctionRows, function_rows};
 use borer_engine::analysis::{Analysis, EnumSource, Overlay};
 use borer_engine::cancel::Cancel;
 use borer_engine::program::Program;
+use borer_engine::view::View;
 use gpui::{App, Task};
 
 thread_local! {
@@ -146,6 +148,23 @@ pub fn filter_rows_blocking(loaded: &LoadedBinary, filter: &str) -> FunctionRows
     )
 }
 
+/// Builds the decompile view of the function at `entry` in `loaded`.
+///
+/// Must be called inside [`spawn_engine`] (or [`run_engine`] in `--headless` mode).
+///
+/// # Arguments
+///
+/// * `loaded` - Previously loaded binary state.
+/// * `entry` - Entry virtual address of the function.
+///
+/// # Returns
+///
+/// The tokenized view, or `None` when no function starts at `entry`.
+#[must_use]
+pub fn decompile_blocking(loaded: &LoadedBinary, entry: u64) -> Option<Arc<View>> {
+    view(&loaded.program, &loaded.analysis, &loaded.overlay, entry)
+}
+
 /// Monotonic request sequencer ensuring a late older background answer never
 /// overwrites a newer filter result.
 #[derive(Debug, Clone)]
@@ -227,6 +246,19 @@ impl<T> FilterLatest<T> {
         true
     }
 
+    /// Returns the ticket of the latest issued request.
+    #[must_use]
+    pub const fn issued(&self) -> u64 {
+        self.issued
+    }
+
+    /// Returns the ticket of the latest accepted answer; every request up to it is
+    /// answered or superseded.
+    #[must_use]
+    pub const fn accepted(&self) -> u64 {
+        self.accepted
+    }
+
     /// Returns the most recent accepted answer.
     ///
     /// # Returns
@@ -280,6 +312,12 @@ impl TaskEpoch {
         let cancel = Cancel::new();
         self.cancel = Some(cancel.clone());
         (self.seq, cancel)
+    }
+
+    /// Returns the current generation counter.
+    #[must_use]
+    pub const fn seq(&self) -> u64 {
+        self.seq
     }
 
     /// Reports whether `ticket` and `cancel` still belong to the active, uncancelled generation.

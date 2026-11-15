@@ -1,6 +1,7 @@
 //! Token-to-`TextRun` styling and clickable reference mapping for [`View`].
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use borer_engine::view::{Kind, Ref, View};
 use gpui::{App, Font, Hsla, SharedString, TextRun, UnderlineStyle, px};
@@ -113,6 +114,76 @@ impl CodePalette {
             Kind::Number => self.number,
             Kind::Punct => self.punct,
         }
+    }
+}
+
+/// The lines the code pane shows: each one a line of one of its views.
+#[derive(Debug, Clone)]
+pub struct CodeLines {
+    /// The views the lines come from.
+    views: Vec<Arc<View>>,
+    /// Every shown line in order, as an index into [`Self::views`] and a line of that view.
+    lines: Vec<(usize, usize)>,
+}
+
+impl CodeLines {
+    /// Returns every line of `views`, each view's lines in order, one view after another.
+    ///
+    /// # Arguments
+    ///
+    /// * `views` - The decompile views to show, in order.
+    #[must_use]
+    pub fn new(views: Vec<Arc<View>>) -> Self {
+        let lines = views
+            .iter()
+            .enumerate()
+            .flat_map(|(v, view)| (0..view.lines()).map(move |l| (v, l)))
+            .collect();
+        Self { views, lines }
+    }
+
+    /// Returns these lines repeated until there are `len` of them; line `i` is line `i mod N`.
+    ///
+    /// # Arguments
+    ///
+    /// * `len` - How many lines to show; empty lines stay empty.
+    #[must_use]
+    pub fn cycled(mut self, len: usize) -> Self {
+        self.lines = self.lines.iter().copied().cycle().take(len).collect();
+        self
+    }
+
+    /// Returns how many lines there are to show.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.lines.len()
+    }
+
+    /// Returns whether there is no line to show.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
+    /// Returns how many views the lines come from.
+    #[must_use]
+    pub fn views(&self) -> usize {
+        self.views.len()
+    }
+
+    /// Returns shown line `ix` as its view and its line in that view.
+    ///
+    /// # Arguments
+    ///
+    /// * `ix` - Zero-based index of the shown line.
+    ///
+    /// # Returns
+    ///
+    /// The view and line, or `None` past the last line.
+    #[must_use]
+    pub fn get(&self, ix: usize) -> Option<(&Arc<View>, usize)> {
+        let &(v, l) = self.lines.get(ix)?;
+        Some((self.views.get(v)?, l))
     }
 }
 

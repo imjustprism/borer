@@ -13,7 +13,7 @@ use theme::LoadThemes;
 
 use crate::actions::bind_keys;
 use crate::app_view::AppView;
-use crate::measure::{CliMode, new_cli_exit_slot, parse_cli_args, run_headless};
+use crate::measure::{CliMode, Harness, new_cli_exit_slot, parse_cli_args, run_headless};
 use crate::theme_provider::AppThemeSettings;
 use crate::worker::mark_ui_thread;
 
@@ -24,6 +24,9 @@ const WINDOW_WIDTH_PX: f32 = 1280.0;
 const WINDOW_HEIGHT_PX: f32 = 800.0;
 
 /// Boots the GPUI platform (or `--headless` mode) according to CLI flags.
+///
+/// `borer-app [binary]` opens the app view as the window root; a measurement flag
+/// opens a [`Harness`] around it instead.
 ///
 /// # Errors
 ///
@@ -47,16 +50,27 @@ pub fn run() -> anyhow::Result<()> {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             ..WindowOptions::default()
         };
-        let view_slot = app_slot.clone();
-        if let Err(err) = cx.open_window(options, move |window, cx| {
-            cx.new(|cx| AppView::new_with_mode(mode, view_slot, window, cx))
-        }) {
+        let harness_slot = app_slot.clone();
+        let opened = match mode {
+            CliMode::Interactive(path) => cx
+                .open_window(options, |window, cx| {
+                    cx.new(|cx| AppView::new(path, window, cx))
+                })
+                .map(drop),
+            measured @ (CliMode::FirstFrame
+            | CliMode::ReportOpen(_)
+            | CliMode::Headless(_)
+            | CliMode::MeasureMemory(_)
+            | CliMode::Measure(_)) => cx
+                .open_window(options, |window, cx| {
+                    cx.new(|cx| Harness::new(measured, harness_slot, window, cx))
+                })
+                .map(drop),
+        };
+        if let Err(err) = opened {
             *app_slot.borrow_mut() = Some(err);
             cx.quit();
         }
     });
-    if let Some(err) = exit_slot.borrow_mut().take() {
-        return Err(err);
-    }
-    Ok(())
+    exit_slot.borrow_mut().take().map_or(Ok(()), Err)
 }

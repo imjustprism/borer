@@ -1,38 +1,28 @@
 //! Main window view hosting the function table, filter bar, and clickable decompile pane.
 
-use std::collections::VecDeque;
-use std::io::{BufRead as _, Write as _};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use borer_engine::analysis::decompile::view::view as build_decompile_view;
 use borer_engine::analysis::render::{FunctionRow, FunctionRows};
-use borer_engine::cancel::Cancel;
 use borer_engine::view::{Ref, View};
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _,
     InteractiveText, IntoElement, KeyDownEvent, ParentElement as _, PathPromptOptions, Render,
     ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled as _, StyledText, Task,
-    TextLayout, UniformListScrollHandle, Window, div, px, uniform_list,
+    UniformListScrollHandle, WeakEntity, Window, div, px, uniform_list,
 };
 use theme::ActiveTheme as _;
 use ui::{Button, Clickable as _, Disableable as _, KeyBinding, Table, TableInteractionState};
 
 use crate::actions::{
-    FocusFilter, GoBack, GoForward, Measure, NextRow, Open, OpenSelected, PageDown, PageUp,
-    PreviousRow,
+    FocusFilter, GoBack, GoForward, NextRow, Open, OpenSelected, PageDown, PageUp, PreviousRow,
 };
-use crate::code_view::{ClickOutcome, CodePalette, resolve_ref_click, style_view_line};
+use crate::code_view::{ClickOutcome, CodeLines, CodePalette, resolve_ref_click, style_view_line};
 use crate::history::NavHistory;
-use crate::measure::{
-    CliExitSlot, CliMode, CorpusCode, InjectMark, MarkWait, MeasurePhase, OneShotAction,
-    PendingInputMark, TARGET_CODE_LINES, begin_code_scroll_phase, begin_input_latency_phase,
-    begin_list_scroll_phase, evaluate_one_shot, new_cli_exit_slot, now_instant,
-};
 use crate::worker::{
-    FilterLatest, LoadedBinary, TaskEpoch, filter_rows_blocking, load_binary_blocking,
-    spawn_engine, ui_engine_calls,
+    FilterLatest, LoadedBinary, TaskEpoch, decompile_blocking, filter_rows_blocking,
+    load_binary_blocking, spawn_engine,
 };
 
 /// Note appended to status messages explaining what this direct engine load omits.
@@ -42,18 +32,25 @@ pub const LOAD_SCOPE_NOTE: &str = "packs left out; session load path comes next"
 const TABLE_COLS: usize = 8;
 
 /// Uniform height in logical pixels of each line row in the decompile pane.
-const CODE_ROW_HEIGHT_PX: f32 = 20.0;
+pub const CODE_ROW_HEIGHT_PX: f32 = 20.0;
+
+/// Left padding in logical pixels before the text of each decompile line.
+pub const CODE_PAD_PX: f32 = 8.0;
+
+/// Rows one page step moves the function-table selection.
+const PAGE_ROWS: isize = 25;
+
+/// Tickets of the latest background work a view asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tickets {
+    /// Latest filter request ([`FilterLatest::issue`]).
+    pub filter: u64,
+    /// Latest decompile generation ([`TaskEpoch::begin`]).
+    pub decompile: u64,
+}
 
 /// Root view managing the loaded binary, filter bar, function table, and decompile view.
 pub struct AppView {
-    /// Active CLI startup or benchmark mode.
-    mode: CliMode,
-    /// Shared exit error slot for non-interactive CLI failure propagation.
-    exit_slot: CliExitSlot,
-    /// Whether the one-shot startup hook (`--first-frame`, `--report-open`, etc.) has fired.
-    mode_reported: bool,
-    /// Whether a benchmark run is currently active (prevents re-entrant `Ctrl+Shift+M`).
-    measuring: bool,
     /// Root focus handle for keyboard shortcuts outside the filter bar.
     focus_handle: FocusHandle,
     /// Focus handle for the keystroke filter field.
@@ -68,38 +65,20 @@ pub struct AppView {
     load_error: Option<String>,
     /// Sequenced function-table rows matching [`Self::filter_text`].
     rows_seq: FilterLatest<Arc<FunctionRows>>,
-    /// Optional virtual row count repeating [`Self::rows_seq`] by index (`100_000` in `--measure`).
-    virtual_row_count: Option<usize>,
-    /// Optional 1,000,000-line corpus code table used during the code scroll benchmark.
-    corpus_code: Option<Arc<CorpusCode>>,
     /// Index of the highlighted row within the active [`FunctionRows`].
     selected_row: usize,
     /// Plain keystroke filter query.
     filter_text: String,
     /// Back/forward navigation stack of opened function entries.
     history: NavHistory,
-    /// Active tokenized decompile [`View`] displayed in the right pane.
-    active_view: Option<Arc<View>>,
-    /// Generation and cooperative [`Cancel`] state for in-flight binary loads.
+    /// Lines shown in the decompile pane, if any.
+    code: Option<Arc<CodeLines>>,
+    /// Generation and cooperative [`borer_engine::cancel::Cancel`] state for in-flight binary loads.
     load_epoch: TaskEpoch,
-    /// Generation and cooperative [`Cancel`] state for in-flight decompilations.
+    /// Generation and cooperative [`borer_engine::cancel::Cancel`] state for in-flight decompilations.
     decompile_epoch: TaskEpoch,
-    /// Generation and cooperative [`Cancel`] state for interactive or CLI measurement runs.
-    measure_epoch: TaskEpoch,
     /// Whether a background decompilation is currently awaiting completion.
     decompiling: bool,
-    /// Count of character/backspace/escape keystrokes handled in the filter input.
-    filter_keys_count: u64,
-    /// Count of `Ref::Function` call-token clicks handled in `InteractiveText`.
-    call_clicks_count: u64,
-    /// Painted [`TextLayout`] and byte index of the first visible `Ref::Function` token.
-    call_token_layout: Option<(TextLayout, usize)>,
-    /// Pre-`SendInput` timestamp slot active during `--measure --phase input`.
-    inject_mark: Option<InjectMark>,
-    /// FIFO queue of unpresented [`PendingInputMark`] timestamps in arrival order.
-    pending_marks: VecDeque<PendingInputMark>,
-    /// Whether the back entry of [`Self::pending_marks`] belongs to the currently dispatching event.
-    active_dispatch_pending: bool,
     /// Status message displayed at the bottom of the window.
     status: String,
     /// In-flight binary load task.
@@ -110,15 +89,11 @@ pub struct AppView {
     decompile_task: Option<Task<()>>,
     /// In-flight native file-picker prompt task.
     prompt_task: Option<Task<()>>,
-    /// In-flight automated measurement orchestration task.
-    measure_task: Option<Task<()>>,
 }
 
 impl std::fmt::Debug for AppView {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AppView")
-            .field("mode", &self.mode)
-            .field("measuring", &self.measuring)
             .field("selected_row", &self.selected_row)
             .field("filter_text", &self.filter_text)
             .field("current_entry", &self.history.current())
@@ -128,69 +103,7 @@ impl std::fmt::Debug for AppView {
 }
 
 impl AppView {
-    /// Creates an [`AppView`] configured for `mode` and bound to `exit_slot`.
-    ///
-    /// # Arguments
-    ///
-    /// * `mode` - Startup or benchmark [`CliMode`].
-    /// * `exit_slot` - Shared error slot populated when a non-interactive CLI mode fails.
-    /// * `window` - Window hosting the view.
-    /// * `cx` - View context.
-    ///
-    /// # Returns
-    ///
-    /// The initialized [`AppView`].
-    #[must_use]
-    pub fn new_with_mode(
-        mode: CliMode,
-        exit_slot: CliExitSlot,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) -> Self {
-        let focus_handle = cx.focus_handle();
-        let filter_focus = cx.focus_handle();
-        window.focus(&focus_handle, cx);
-        let table_state = cx.new(|cx| TableInteractionState::new(cx));
-        let mut view = Self {
-            mode: mode.clone(),
-            exit_slot,
-            mode_reported: false,
-            measuring: false,
-            focus_handle,
-            filter_focus,
-            table_state,
-            code_scroll: UniformListScrollHandle::new(),
-            loaded: None,
-            load_error: None,
-            rows_seq: FilterLatest::new(),
-            virtual_row_count: None,
-            corpus_code: None,
-            selected_row: 0,
-            filter_text: String::new(),
-            history: NavHistory::new(),
-            active_view: None,
-            load_epoch: TaskEpoch::new(),
-            decompile_epoch: TaskEpoch::new(),
-            measure_epoch: TaskEpoch::new(),
-            decompiling: false,
-            filter_keys_count: 0,
-            call_clicks_count: 0,
-            call_token_layout: None,
-            inject_mark: None,
-            pending_marks: VecDeque::new(),
-            active_dispatch_pending: false,
-            status: format!("Open a binary ({LOAD_SCOPE_NOTE})"),
-            load_task: None,
-            filter_task: None,
-            decompile_task: None,
-            prompt_task: None,
-            measure_task: None,
-        };
-        view.start_mode(mode, window, cx);
-        view
-    }
-
-    /// Creates an interactive [`AppView`], optionally starting a background load of `initial_path`.
+    /// Creates an [`AppView`], starting a background load of `initial_path` if given.
     ///
     /// # Arguments
     ///
@@ -200,56 +113,117 @@ impl AppView {
     ///
     /// # Returns
     ///
-    /// The initialized interactive [`AppView`].
+    /// The initialized [`AppView`].
     #[must_use]
     pub fn new(
         initial_path: Option<PathBuf>,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Self {
-        Self::new_with_mode(
-            CliMode::Interactive(initial_path),
-            new_cli_exit_slot(),
-            window,
-            cx,
-        )
+        let focus_handle = cx.focus_handle();
+        window.focus(&focus_handle, cx);
+        let mut view = Self {
+            focus_handle,
+            filter_focus: cx.focus_handle(),
+            table_state: cx.new(|cx| TableInteractionState::new(cx)),
+            code_scroll: UniformListScrollHandle::new(),
+            loaded: None,
+            load_error: None,
+            rows_seq: FilterLatest::new(),
+            selected_row: 0,
+            filter_text: String::new(),
+            history: NavHistory::new(),
+            code: None,
+            load_epoch: TaskEpoch::new(),
+            decompile_epoch: TaskEpoch::new(),
+            decompiling: false,
+            status: format!("Open a binary ({LOAD_SCOPE_NOTE})"),
+            load_task: None,
+            filter_task: None,
+            decompile_task: None,
+            prompt_task: None,
+        };
+        if let Some(path) = initial_path {
+            view.open_path(path, cx);
+        }
+        view
     }
 
-    /// Dispatches startup behavior requested by `mode`.
-    ///
-    /// # Arguments
-    ///
-    /// * `mode` - Requested [`CliMode`].
-    /// * `window` - Window hosting the view.
-    /// * `cx` - View context.
-    fn start_mode(&mut self, mode: CliMode, window: &mut Window, cx: &mut Context<'_, Self>) {
-        match mode {
-            CliMode::Interactive(Some(path))
-            | CliMode::ReportOpen(path)
-            | CliMode::MeasureMemory(path) => {
-                self.open_path(path, cx);
-            }
-            CliMode::Interactive(None) | CliMode::FirstFrame | CliMode::Headless(_) => {}
-            CliMode::Measure(MeasurePhase::BothScrolls) => {
-                begin_list_scroll_phase(self, true, true, window, cx);
-            }
-            CliMode::Measure(MeasurePhase::ListScroll) => {
-                begin_list_scroll_phase(self, false, true, window, cx);
-            }
-            CliMode::Measure(MeasurePhase::CodeScroll) => {
-                begin_code_scroll_phase(self, true, window, cx);
-            }
-            CliMode::Measure(MeasurePhase::InputLatency) => {
-                begin_input_latency_phase(self, window, cx);
-            }
+    /// Returns the loaded binary, once a load has finished.
+    #[must_use]
+    pub fn loaded(&self) -> Option<&Arc<LoadedBinary>> {
+        self.loaded.as_ref()
+    }
+
+    /// Returns the error of the most recent failed load, if any.
+    #[must_use]
+    pub fn load_error(&self) -> Option<&str> {
+        self.load_error.as_deref()
+    }
+
+    /// Returns the rows the function table shows, if any.
+    #[must_use]
+    pub fn rows(&self) -> Option<&Arc<FunctionRows>> {
+        self.rows_seq.current()
+    }
+
+    /// Returns the lines the decompile pane shows, if any.
+    #[must_use]
+    pub fn code(&self) -> Option<&Arc<CodeLines>> {
+        self.code.as_ref()
+    }
+
+    /// Returns the scroll handle of the decompile pane's line list.
+    #[must_use]
+    pub const fn code_scroll(&self) -> &UniformListScrollHandle {
+        &self.code_scroll
+    }
+
+    /// Returns the entry of the function the decompile pane is for, if any.
+    #[must_use]
+    pub fn current(&self) -> Option<u64> {
+        self.history.current()
+    }
+
+    /// Returns whether a background decompilation is still running.
+    #[must_use]
+    pub const fn is_decompiling(&self) -> bool {
+        self.decompiling
+    }
+
+    /// Returns whether [`NavHistory`] holds an earlier function entry to return to.
+    #[must_use]
+    pub fn can_go_back(&self) -> bool {
+        self.history.can_go_back()
+    }
+
+    /// Returns the tickets of the latest filter request and decompile.
+    #[must_use]
+    pub const fn tickets(&self) -> Tickets {
+        Tickets {
+            filter: self.rows_seq.issued(),
+            decompile: self.decompile_epoch.seq(),
         }
     }
 
-    /// Cancels and invalidates any in-flight binary load task.
-    fn cancel_load(&mut self) {
-        self.load_epoch.invalidate();
-        self.load_task = None;
-        self.load_error = None;
+    /// Returns whether filter request `seq` is answered on screen or superseded.
+    ///
+    /// # Arguments
+    ///
+    /// * `seq` - A [`Tickets::filter`] value.
+    #[must_use]
+    pub const fn filter_settled(&self, seq: u64) -> bool {
+        self.rows_seq.accepted() >= seq
+    }
+
+    /// Returns whether decompile `ticket` is on screen, cancelled, or superseded.
+    ///
+    /// # Arguments
+    ///
+    /// * `ticket` - A [`Tickets::decompile`] value.
+    #[must_use]
+    pub const fn decompile_settled(&self, ticket: u64) -> bool {
+        !self.decompiling || self.decompile_epoch.seq() > ticket
     }
 
     /// Cancels and invalidates any in-flight function decompilation task.
@@ -257,316 +231,46 @@ impl AppView {
         self.decompile_epoch.invalidate();
         self.decompiling = false;
         self.decompile_task = None;
-        self.call_token_layout = None;
-        let ready = now_instant();
-        for mark in &mut self.pending_marks {
-            if matches!(mark.wait, MarkWait::Decompile(_)) {
-                mark.ready_at = Some(ready);
-                mark.wait = MarkWait::Immediate;
-            }
-        }
     }
 
-    /// Cancels and invalidates any running or preparing benchmark task.
-    pub fn cancel_measure(&mut self) {
-        self.measure_epoch.invalidate();
-        self.measure_task = None;
-        self.inject_mark = None;
-        self.pending_marks.clear();
-        self.active_dispatch_pending = false;
-        self.measuring = false;
-    }
-
-    /// Attaches or clears the pre-`SendInput` [`InjectMark`] slot for input-latency profiling.
+    /// Shows `loaded` with `rows` in the table, clearing the filter, the code pane and history.
     ///
     /// # Arguments
     ///
-    /// * `mark` - Shared [`InjectMark`] populated right before `SendInput`.
-    pub fn set_inject_mark(&mut self, mark: Option<InjectMark>) {
-        self.inject_mark = mark;
-        self.pending_marks.clear();
-        self.active_dispatch_pending = false;
-    }
-
-    /// Captures the arrival timestamp of a marked input event and schedules presentation.
-    ///
-    /// # Arguments
-    ///
-    /// * `track_async` - `true` when target/bubble handlers may bind background work to this mark.
-    /// * `cx` - View context scheduling a frame draw when an armed mark arrives.
-    pub fn record_inject_arrival(&mut self, track_async: bool, cx: &mut Context<'_, Self>) {
-        self.active_dispatch_pending = false;
-        let Some(tracker) = &self.inject_mark else {
-            return;
-        };
-        if let Some((id, injected_at)) = tracker.take_armed() {
-            let arrived_at = now_instant();
-            self.pending_marks.push_back(PendingInputMark {
-                id,
-                injected_at,
-                arrived_at,
-                ready_at: Some(arrived_at),
-                wait: MarkWait::Immediate,
-            });
-            self.active_dispatch_pending = track_async;
-            cx.notify();
-        }
-    }
-
-    /// Clears the synchronous event-dispatch mark guard before programmatic navigation.
-    pub fn clear_dispatch_mark(&mut self) {
-        self.active_dispatch_pending = false;
-    }
-
-    /// Binds `wait` to the [`PendingInputMark`] pushed during the current event dispatch, if any.
-    ///
-    /// # Arguments
-    ///
-    /// * `wait` - Background completion condition required before the mark may retire.
-    fn bind_dispatch_mark(&mut self, wait: MarkWait) {
-        if std::mem::replace(&mut self.active_dispatch_pending, false)
-            && let Some(last) = self.pending_marks.back_mut()
-        {
-            last.ready_at = None;
-            last.wait = wait;
-        }
-    }
-
-    /// Marks every pending [`MarkWait::Filter`] entry up to `accepted_seq` ready to present.
-    ///
-    /// # Arguments
-    ///
-    /// * `accepted_seq` - Installed [`FilterLatest`] sequence number.
-    fn complete_filter_marks(&mut self, accepted_seq: u64) {
-        let ready = now_instant();
-        for mark in &mut self.pending_marks {
-            if let MarkWait::Filter(seq) = mark.wait
-                && seq <= accepted_seq
-            {
-                mark.ready_at = Some(ready);
-                mark.wait = MarkWait::Immediate;
-            }
-        }
-    }
-
-    /// Marks every pending [`MarkWait::Decompile`] entry up to `completed_ticket` ready to present.
-    ///
-    /// # Arguments
-    ///
-    /// * `completed_ticket` - Installed [`TaskEpoch`] decompile generation counter.
-    fn complete_decompile_marks(&mut self, completed_ticket: u64) {
-        let ready = now_instant();
-        for mark in &mut self.pending_marks {
-            if let MarkWait::Decompile(ticket) = mark.wait
-                && ticket <= completed_ticket
-            {
-                mark.ready_at = Some(ready);
-                mark.wait = MarkWait::Immediate;
-            }
-        }
-    }
-
-    /// Borrows the active [`InjectMark`] tracker, if input-latency profiling is armed.
-    ///
-    /// # Returns
-    ///
-    /// Shared [`InjectMark`] handle, or `None` outside `--measure --phase input`.
-    #[must_use]
-    pub const fn inject_tracker(&self) -> Option<&InjectMark> {
-        self.inject_mark.as_ref()
-    }
-
-    /// Reports whether any [`PendingInputMark`] entries are still awaiting presentation.
-    ///
-    /// # Returns
-    ///
-    /// `true` when [`Self::pending_marks`] is non-empty.
-    #[must_use]
-    pub fn has_pending_marks(&self) -> bool {
-        !self.pending_marks.is_empty()
-    }
-
-    /// Borrows the FIFO queue of unpresented [`PendingInputMark`] records.
-    ///
-    /// # Returns
-    ///
-    /// Mutable reference to [`Self::pending_marks`].
-    #[must_use]
-    pub fn pending_marks_mut(&mut self) -> &mut VecDeque<PendingInputMark> {
-        &mut self.pending_marks
-    }
-
-    /// Starts a new measurement generation, cancelling any prior measurement task.
-    ///
-    /// # Returns
-    ///
-    /// `(ticket, cancel)` guarding background preparation and foreground installation.
-    #[must_use]
-    pub fn begin_measure(&mut self) -> (u64, Cancel) {
-        self.cancel_measure();
-        self.measuring = true;
-        self.measure_epoch.begin()
-    }
-
-    /// Reports whether `ticket` and `cancel` still belong to the active measurement run.
-    ///
-    /// # Arguments
-    ///
-    /// * `ticket` - Generation counter returned by [`Self::begin_measure`].
-    /// * `cancel` - Cooperative [`Cancel`] flag returned by [`Self::begin_measure`].
-    ///
-    /// # Returns
-    ///
-    /// `true` while measurement remains active and uncancelled for `ticket`.
-    #[must_use]
-    pub fn is_measure_current(&self, ticket: u64, cancel: &Cancel) -> bool {
-        self.measuring && self.measure_epoch.is_current(ticket, cancel)
-    }
-
-    /// Reports whether [`NavHistory`] holds an earlier function entry to return to.
-    ///
-    /// # Returns
-    ///
-    /// `true` when [`Self::navigate_back`] can step to a prior entry.
-    #[must_use]
-    pub fn can_go_back(&self) -> bool {
-        self.history.can_go_back()
-    }
-
-    /// Records a fatal non-interactive CLI error and quits the GPUI run loop.
-    ///
-    /// # Arguments
-    ///
-    /// * `err` - Error to return from [`crate::run`].
-    /// * `cx` - View context used to quit the application.
-    pub fn fail_cli(&mut self, err: anyhow::Error, cx: &mut Context<'_, Self>) {
-        *self.exit_slot.borrow_mut() = Some(err);
-        cx.quit();
-    }
-
-    /// Clears the interactive measurement guard and reports an error in the status bar.
-    ///
-    /// # Arguments
-    ///
-    /// * `message` - Human-readable error status text.
-    /// * `cx` - View context used to schedule a repaint.
-    pub fn finish_interactive_measure_error(
+    /// * `loaded` - Analyzed binary to show.
+    /// * `rows` - Function rows the table lists.
+    /// * `cx` - View context.
+    pub fn show(
         &mut self,
-        message: String,
+        loaded: Arc<LoadedBinary>,
+        rows: Arc<FunctionRows>,
         cx: &mut Context<'_, Self>,
     ) {
-        self.measuring = false;
-        self.status = message;
+        self.load_epoch.invalidate();
+        self.cancel_decompile();
+        self.load_error = None;
+        self.filter_text.clear();
+        self.selected_row = 0;
+        self.history.clear();
+        self.code = None;
+        self.rows_seq.reset(rows);
+        self.loaded = Some(loaded);
+        self.scroll_to_selected(cx);
         cx.notify();
     }
 
-    /// Reports whether an interactive or CLI benchmark phase is currently active.
-    ///
-    /// # Returns
-    ///
-    /// `true` while a scroll or input benchmark is running.
-    #[must_use]
-    pub const fn is_measuring(&self) -> bool {
-        self.measuring
-    }
-
-    /// Updates whether a benchmark phase is currently active.
+    /// Shows `code` in the decompile pane, for no one function.
     ///
     /// # Arguments
     ///
-    /// * `active` - `true` when starting a benchmark phase, `false` when it settles.
-    pub fn set_measuring(&mut self, active: bool) {
-        self.measuring = active;
-    }
-
-    /// Stores the active measurement task handle on [`AppView`].
-    ///
-    /// # Arguments
-    ///
-    /// * `task` - Background orchestration [`Task`] to retain until completion.
-    pub fn set_measure_task(&mut self, task: Task<()>) {
-        self.measure_task = Some(task);
-    }
-
-    /// Installs `loaded` with `virtual_rows` index-repeated rows for the 100k-row list benchmark.
-    ///
-    /// # Arguments
-    ///
-    /// * `loaded` - Analyzed binary whose rows are repeated by index.
-    /// * `virtual_rows` - Virtual row count exposed to `uniform_list`.
+    /// * `code` - Lines to show.
     /// * `cx` - View context.
-    pub fn install_virtual_list(
-        &mut self,
-        loaded: Arc<LoadedBinary>,
-        virtual_rows: usize,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.cancel_load();
+    pub fn show_code(&mut self, code: Arc<CodeLines>, cx: &mut Context<'_, Self>) {
         self.cancel_decompile();
-        let rows = loaded.initial_rows.clone();
-        self.corpus_code = None;
-        self.active_view = None;
         self.history.clear();
-        self.virtual_row_count = Some(virtual_rows);
-        self.rows_seq.reset(rows);
-        self.loaded = Some(loaded);
+        self.code = Some(code);
+        self.code_scroll.scroll_to_item(0, ScrollStrategy::Top);
         cx.notify();
-    }
-
-    /// Installs `corpus` for the 1,000,000-line decompile-view scroll benchmark.
-    ///
-    /// # Arguments
-    ///
-    /// * `loaded` - Analyzed binary backing `corpus`.
-    /// * `corpus` - Flattened decompile views across every discovered function.
-    /// * `cx` - View context.
-    pub fn install_corpus_code(
-        &mut self,
-        loaded: Arc<LoadedBinary>,
-        corpus: Arc<CorpusCode>,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.cancel_load();
-        self.cancel_decompile();
-        let rows = loaded.initial_rows.clone();
-        self.virtual_row_count = None;
-        self.active_view = None;
-        self.history.clear();
-        self.rows_seq.reset(rows);
-        self.loaded = Some(loaded);
-        self.corpus_code = Some(corpus);
-        cx.notify();
-    }
-
-    /// Installs `loaded`, focuses the filter input, and opens `entry` for `--measure --phase input`.
-    ///
-    /// # Arguments
-    ///
-    /// * `loaded` - Analyzed binary under test.
-    /// * `entry` - Function entry address containing a visible `Ref::Function` call token.
-    /// * `window` - Window receiving keyboard focus in the filter box.
-    /// * `cx` - View context.
-    pub fn install_for_input_bench(
-        &mut self,
-        loaded: Arc<LoadedBinary>,
-        entry: u64,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.cancel_load();
-        self.cancel_decompile();
-        let rows = loaded.initial_rows.clone();
-        self.virtual_row_count = None;
-        self.corpus_code = None;
-        self.active_view = None;
-        self.history.clear();
-        self.filter_keys_count = 0;
-        self.call_clicks_count = 0;
-        self.rows_seq.reset(rows);
-        self.loaded = Some(loaded);
-        window.focus(&self.filter_focus, cx);
-        self.clear_dispatch_mark();
-        self.open_function(entry, true, cx);
     }
 
     /// Scrolls the function table to `item_ix` using `strategy`.
@@ -592,62 +296,10 @@ impl AppView {
     ///
     /// # Arguments
     ///
-    /// * `line_ix` - Zero-based virtual line index.
+    /// * `line_ix` - Zero-based shown line index.
     /// * `strategy` - GPUI [`ScrollStrategy`] governing placement.
     pub fn scroll_code_to(&self, line_ix: usize, strategy: ScrollStrategy) {
         self.code_scroll.scroll_to_item(line_ix, strategy);
-    }
-
-    /// Reports whether [`Self::active_view`] is populated.
-    ///
-    /// # Returns
-    ///
-    /// `true` when a decompiled [`View`] is ready in the code pane.
-    #[must_use]
-    pub const fn has_active_view(&self) -> bool {
-        self.active_view.is_some()
-    }
-
-    /// Reports whether a background decompilation is still running.
-    ///
-    /// # Returns
-    ///
-    /// `true` while awaiting an [`Self::open_function`] task.
-    #[must_use]
-    pub const fn decompile_in_flight(&self) -> bool {
-        self.decompiling
-    }
-
-    /// Returns how many filter keystrokes have been processed.
-    ///
-    /// # Returns
-    ///
-    /// Total character, backspace, and escape keystrokes handled in the filter bar.
-    #[must_use]
-    pub const fn filter_keys_handled(&self) -> u64 {
-        self.filter_keys_count
-    }
-
-    /// Returns how many `Ref::Function` call-token clicks have fired.
-    ///
-    /// # Returns
-    ///
-    /// Total function-call token clicks dispatched through [`InteractiveText`].
-    #[must_use]
-    pub const fn call_clicks(&self) -> u64 {
-        self.call_clicks_count
-    }
-
-    /// Resolves the logical client `(x, y)` center of the first visible `Ref::Function` token.
-    ///
-    /// # Returns
-    ///
-    /// Logical `(x, y)` client coordinates, or `None` when no call token is visible yet.
-    #[must_use]
-    pub fn call_token_client_xy(&self) -> Option<(f32, f32)> {
-        let (layout, byte_ix) = self.call_token_layout.as_ref()?;
-        let pt = layout.position_for_index(*byte_ix)?;
-        Some((f32::from(pt.x) + 3.0, f32::from(pt.y) + 7.0))
     }
 
     /// Opens a native file dialog and loads the chosen binary in the background.
@@ -666,7 +318,10 @@ impl AppView {
             let Ok(outcome) = receiver.await else {
                 return;
             };
-            let _ = this.update(cx, |view, cx| match outcome {
+            let Some(this) = this.upgrade() else {
+                return;
+            };
+            this.update(cx, |view, cx| match outcome {
                 Ok(Some(mut paths)) => {
                     if let Some(path) = paths.pop() {
                         view.open_path(path, cx);
@@ -688,15 +343,12 @@ impl AppView {
     /// * `path` - File path of the binary to load.
     /// * `cx` - View context spawning the background task.
     pub fn open_path(&mut self, path: PathBuf, cx: &mut Context<'_, Self>) {
-        self.cancel_measure();
         self.cancel_decompile();
         self.load_error = None;
         self.loaded = None;
-        self.active_view = None;
+        self.code = None;
         self.rows_seq.clear();
         self.filter_task = None;
-        self.virtual_row_count = None;
-        self.corpus_code = None;
         self.selected_row = 0;
         self.history.clear();
         let (ticket, worker_cancel) = self.load_epoch.begin();
@@ -708,11 +360,13 @@ impl AppView {
         });
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let result = bg.await;
-            let _ = this.update(cx, |view, cx| {
-                if !view.load_epoch.is_current(ticket, &check_cancel) {
-                    return;
+            let Some(this) = this.upgrade() else {
+                return;
+            };
+            this.update(cx, |view, cx| {
+                if view.load_epoch.is_current(ticket, &check_cancel) {
+                    view.finish_load(result, cx);
                 }
-                view.finish_load(result, cx);
             });
         }));
     }
@@ -728,44 +382,33 @@ impl AppView {
         result: anyhow::Result<Arc<LoadedBinary>>,
         cx: &mut Context<'_, Self>,
     ) {
-        self.cancel_decompile();
         match result {
             Ok(loaded) => {
                 let rows = loaded.initial_rows.clone();
-                let count = rows.rows.len();
-                let left_out = rows.left_out.clone();
                 let first_entry = rows.rows.first().map(|r| r.entry);
-                let display = loaded.path.display().to_string();
-                self.load_error = None;
-                self.filter_text.clear();
-                self.virtual_row_count = None;
-                self.corpus_code = None;
-                self.selected_row = 0;
-                self.history.clear();
-                self.active_view = None;
-                self.rows_seq.reset(rows);
-                self.loaded = Some(loaded);
-                self.status = format!("{display}: {count} functions{left_out} ({LOAD_SCOPE_NOTE})");
-                self.scroll_to_selected(cx);
-                let skip_initial_decompile = matches!(self.mode, CliMode::ReportOpen(_));
-                if !skip_initial_decompile && let Some(entry) = first_entry {
-                    self.clear_dispatch_mark();
+                self.status = format!(
+                    "{}: {} functions{} ({LOAD_SCOPE_NOTE})",
+                    loaded.path.display(),
+                    rows.rows.len(),
+                    rows.left_out
+                );
+                self.show(loaded, rows, cx);
+                if let Some(entry) = first_entry {
                     self.open_function(entry, true, cx);
                 }
             }
             Err(err) => {
+                self.cancel_decompile();
                 let msg = format!("{err:#}");
                 self.loaded = None;
-                self.active_view = None;
+                self.code = None;
                 self.rows_seq.clear();
                 self.history.clear();
-                self.virtual_row_count = None;
-                self.corpus_code = None;
-                self.load_error = Some(msg.clone());
                 self.status = format!("load failed: {msg}");
+                self.load_error = Some(msg);
+                cx.notify();
             }
         }
-        cx.notify();
     }
 
     /// Decompiles `entry` in the background under a fresh [`TaskEpoch`] generation.
@@ -780,7 +423,7 @@ impl AppView {
             return;
         };
         if record_history {
-            let _ = self.history.open(entry);
+            self.history.open(entry);
         }
         if let Some(rows) = self.rows_seq.current()
             && let Some(pos) = rows.rows.iter().position(|r| r.entry == entry)
@@ -790,42 +433,54 @@ impl AppView {
         }
         let (ticket, worker_cancel) = self.decompile_epoch.begin();
         let check_cancel = worker_cancel.clone();
-        self.bind_dispatch_mark(MarkWait::Decompile(ticket));
-        self.active_view = None;
+        self.code = None;
         self.decompiling = true;
-        self.call_token_layout = None;
         self.status = format!("decompiling {entry:#x} ({LOAD_SCOPE_NOTE})");
         cx.notify();
 
         let bg = spawn_engine(cx, move || {
-            worker_cancel.within(|| {
-                build_decompile_view(&loaded.program, &loaded.analysis, &loaded.overlay, entry)
-            })
+            worker_cancel.within(|| decompile_blocking(&loaded, entry))
         });
         self.decompile_task = Some(cx.spawn(async move |this, cx| {
             let built = bg.await;
-            let _ = this.update(cx, |view, cx| {
-                if !view.decompile_epoch.is_current(ticket, &check_cancel) {
-                    return;
+            let Some(this) = this.upgrade() else {
+                return;
+            };
+            this.update(cx, |view, cx| {
+                if view.decompile_epoch.is_current(ticket, &check_cancel) {
+                    view.finish_decompile(entry, built, cx);
                 }
-                view.decompiling = false;
-                match built {
-                    Some(v) => {
-                        let lines = v.lines();
-                        view.active_view = Some(v);
-                        view.code_scroll.scroll_to_item(0, ScrollStrategy::Top);
-                        view.status =
-                            format!("opened {entry:#x}: {lines} lines ({LOAD_SCOPE_NOTE})");
-                    }
-                    None => {
-                        view.active_view = None;
-                        view.status = format!("no function at {entry:#x} ({LOAD_SCOPE_NOTE})");
-                    }
-                }
-                view.complete_decompile_marks(ticket);
-                cx.notify();
             });
         }));
+    }
+
+    /// Shows the answer of a background decompile of `entry`.
+    ///
+    /// # Arguments
+    ///
+    /// * `entry` - Function entry address that was decompiled.
+    /// * `built` - Its view, or `None` when no function starts there.
+    /// * `cx` - View context.
+    fn finish_decompile(
+        &mut self,
+        entry: u64,
+        built: Option<Arc<View>>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.decompiling = false;
+        match built {
+            Some(v) => {
+                let lines = v.lines();
+                self.code = Some(Arc::new(CodeLines::new(vec![v])));
+                self.code_scroll.scroll_to_item(0, ScrollStrategy::Top);
+                self.status = format!("opened {entry:#x}: {lines} lines ({LOAD_SCOPE_NOTE})");
+            }
+            None => {
+                self.code = None;
+                self.status = format!("no function at {entry:#x} ({LOAD_SCOPE_NOTE})");
+            }
+        }
+        cx.notify();
     }
 
     /// Steps backward in [`NavHistory`] and opens the previous function.
@@ -857,21 +512,21 @@ impl AppView {
     /// * `cx` - View context spawning the background filter task.
     fn request_filter(&mut self, cx: &mut Context<'_, Self>) {
         let Some(loaded) = self.loaded.clone() else {
-            self.active_dispatch_pending = false;
             return;
         };
         let seq = self.rows_seq.issue();
-        self.bind_dispatch_mark(MarkWait::Filter(seq));
         let query = self.filter_text.clone();
         let bg = spawn_engine(cx, move || Arc::new(filter_rows_blocking(&loaded, &query)));
         self.filter_task = Some(cx.spawn(async move |this, cx| {
             let rows = bg.await;
-            let _ = this.update(cx, |view, cx| {
+            let Some(this) = this.upgrade() else {
+                return;
+            };
+            this.update(cx, |view, cx| {
                 if view.rows_seq.accept(seq, rows) {
                     view.selected_row = 0;
                     view.update_filter_status();
                     view.scroll_to_selected(cx);
-                    view.complete_filter_marks(seq);
                     cx.notify();
                 }
             });
@@ -904,11 +559,7 @@ impl AppView {
     ///
     /// * `cx` - View context reading the table scroll handle.
     fn scroll_to_selected(&self, cx: &Context<'_, Self>) {
-        let row = self.selected_row;
-        self.table_state
-            .read(cx)
-            .scroll_handle
-            .scroll_to_item(row, ScrollStrategy::Nearest);
+        self.scroll_table_to(self.selected_row, ScrollStrategy::Nearest, cx);
     }
 
     /// Moves focus to the function-filter input.
@@ -937,19 +588,16 @@ impl AppView {
     ) {
         let mods = event.keystroke.modifiers;
         if mods.control || mods.alt || mods.platform {
-            self.active_dispatch_pending = false;
             return;
         }
         match event.keystroke.key.as_str() {
             "backspace" => {
-                self.filter_keys_count = self.filter_keys_count.saturating_add(1);
                 if self.filter_text.pop().is_some() {
                     self.request_filter(cx);
                 }
                 cx.notify();
             }
             "escape" => {
-                self.filter_keys_count = self.filter_keys_count.saturating_add(1);
                 if self.filter_text.is_empty() {
                     window.focus(&self.focus_handle, cx);
                 } else {
@@ -969,25 +617,22 @@ impl AppView {
                     && ch.chars().all(|c| !c.is_control())
                     && !ch.is_empty()
                 {
-                    self.filter_keys_count = self.filter_keys_count.saturating_add(1);
                     self.filter_text.push_str(ch);
                     self.request_filter(cx);
                     cx.notify();
                 }
             }
         }
-        self.active_dispatch_pending = false;
     }
 
     /// Moves [`Self::selected_row`] by `delta` within the active row list.
     ///
     /// # Arguments
     ///
-    /// * `delta` - Signed row step (`1`, `-1`, `25`, `-25`).
+    /// * `delta` - Signed row step (`1`, `-1`, [`PAGE_ROWS`], `-PAGE_ROWS`).
     /// * `cx` - View context.
     fn step_row(&mut self, delta: isize, cx: &mut Context<'_, Self>) {
-        let base_len = self.rows_seq.current().map_or(0, |r| r.rows.len());
-        let len = self.virtual_row_count.unwrap_or(base_len);
+        let len = self.rows_seq.current().map_or(0, |r| r.rows.len());
         if len == 0 {
             return;
         }
@@ -1006,86 +651,16 @@ impl AppView {
     /// * `row_ix` - Highlighted row index in the function table.
     /// * `cx` - View context.
     fn activate_row(&mut self, row_ix: usize, cx: &mut Context<'_, Self>) {
-        let Some(rows) = self.rows_seq.current() else {
-            return;
-        };
-        if rows.rows.is_empty() {
-            return;
-        }
-        let Some(entry) = rows.rows.get(row_ix % rows.rows.len()).map(|r| r.entry) else {
+        let Some(entry) = self
+            .rows_seq
+            .current()
+            .and_then(|rows| rows.rows.get(row_ix))
+            .map(|r| r.entry)
+        else {
             return;
         };
         self.selected_row = row_ix;
         self.open_function(entry, true, cx);
-    }
-
-    /// Schedules one-shot stdout notifications for `--first-frame`, `--report-open`, and `--measure-memory`.
-    ///
-    /// # Arguments
-    ///
-    /// * `window` - Window registering the post-present callback.
-    /// * `cx` - View context.
-    fn check_one_shot_modes(&mut self, window: &Window, cx: &mut Context<'_, Self>) {
-        let action = evaluate_one_shot(
-            &self.mode,
-            self.mode_reported,
-            self.load_error.as_deref(),
-            self.loaded.is_some(),
-            self.decompiling,
-        );
-        match action {
-            OneShotAction::Wait => {}
-            OneShotAction::Fail(msg) => {
-                self.mode_reported = true;
-                self.fail_cli(anyhow::anyhow!(msg), cx);
-            }
-            OneShotAction::FirstFrameReady => {
-                self.mode_reported = true;
-                window.on_next_frame(|_, cx| {
-                    let mut out = std::io::stdout().lock();
-                    let _ = writeln!(out, "FIRST_FRAME_READY");
-                    let _ = out.flush();
-                    cx.quit();
-                });
-            }
-            OneShotAction::OpenListReady => {
-                let count = self.rows_seq.current().map_or(0, |r| r.rows.len());
-                self.mode_reported = true;
-                window.on_next_frame(move |_, cx| {
-                    let mut out = std::io::stdout().lock();
-                    let _ = writeln!(
-                        out,
-                        "OPEN_LIST_READY rows={count} ui_engine_calls={}",
-                        ui_engine_calls()
-                    );
-                    let _ = out.flush();
-                    cx.quit();
-                });
-            }
-            OneShotAction::MemoryReady => {
-                let rows = self.rows_seq.current().map_or(0, |r| r.rows.len());
-                let lines = self.active_view.as_ref().map_or(0, |v| v.lines());
-                self.mode_reported = true;
-                let wait_stdin = cx.background_executor().spawn(async move {
-                    let mut buf = String::new();
-                    let _ = std::io::stdin().lock().read_line(&mut buf);
-                });
-                self.measure_task = Some(cx.spawn(async move |_, cx| {
-                    wait_stdin.await;
-                    cx.update(|cx| cx.quit());
-                }));
-                window.on_next_frame(move |_, _| {
-                    let pid = std::process::id();
-                    let mut out = std::io::stdout().lock();
-                    let _ = writeln!(
-                        out,
-                        "MEMORY_READY pid={pid} rows={rows} lines={lines} ui_engine_calls={}",
-                        ui_engine_calls()
-                    );
-                    let _ = out.flush();
-                });
-            }
-        }
     }
 
     /// Renders the top toolbar: Zed's buttons for Open, Back and Forward, each
@@ -1179,12 +754,7 @@ impl AppView {
     /// Virtualized table [`AnyElement`].
     fn render_table(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let rows = self.rows_seq.current().cloned();
-        let base_count = rows.as_ref().map_or(0, |r| r.rows.len());
-        let count = if base_count == 0 {
-            0
-        } else {
-            self.virtual_row_count.unwrap_or(base_count)
-        };
+        let count = rows.as_ref().map_or(0, |r| r.rows.len());
         let selected = self.selected_row;
         let selected_bg = cx.theme().colors().element_selected;
         let view = cx.entity().downgrade();
@@ -1206,7 +776,10 @@ impl AppView {
                 styled
                     .cursor_pointer()
                     .on_click(move |_, window, cx| {
-                        let _ = view.update(cx, |this, cx| {
+                        let Some(view) = view.upgrade() else {
+                            return;
+                        };
+                        view.update(cx, |this, cx| {
                             window.focus(&this.focus_handle, cx);
                             this.activate_row(ix, cx);
                         });
@@ -1217,12 +790,8 @@ impl AppView {
                 let Some(rows) = &rows else {
                     return Vec::new();
                 };
-                let n = rows.rows.len();
-                if n == 0 {
-                    return Vec::new();
-                }
                 range
-                    .filter_map(|ix| rows.rows.get(ix % n).map(format_row_cells))
+                    .filter_map(|ix| rows.rows.get(ix).map(format_row_cells))
                     .collect()
             })
             .into_any_element()
@@ -1242,20 +811,15 @@ impl AppView {
             let colors = cx.theme().colors();
             (colors.surface_background, colors.border, colors.text_muted)
         };
-        let line_count = if self.corpus_code.is_some() {
-            TARGET_CODE_LINES
-        } else {
-            self.active_view.as_ref().map_or(0, |v| v.lines())
-        };
-        let header = if let Some(corpus) = &self.corpus_code {
-            SharedString::from(format!(
-                "Decompile benchmark ({} base lines replicated to {TARGET_CODE_LINES})",
-                corpus.lines.len()
-            ))
-        } else if let Some(entry) = self.history.current() {
-            SharedString::from(format!("Decompile {entry:#x}"))
-        } else {
-            SharedString::from("Decompile (select a function)")
+        let line_count = self.code.as_ref().map_or(0, |c| c.len());
+        let header = match (self.history.current(), &self.code) {
+            (Some(entry), _) => SharedString::from(format!("Decompile {entry:#x}")),
+            (None, Some(code)) => SharedString::from(format!(
+                "Decompile: {} lines from {} functions",
+                code.len(),
+                code.views()
+            )),
+            (None, None) => SharedString::from("Decompile (select a function)"),
         };
         let body = if line_count == 0 {
             div()
@@ -1299,7 +863,7 @@ impl AppView {
     ///
     /// # Arguments
     ///
-    /// * `range` - Visible virtual line index range requested by `uniform_list`.
+    /// * `range` - Visible shown-line index range requested by `uniform_list`.
     /// * `_window` - Window painting the rows.
     /// * `cx` - View context.
     ///
@@ -1312,90 +876,37 @@ impl AppView {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Vec<AnyElement> {
+        let Some(code) = self.code.clone() else {
+            return Vec::new();
+        };
         let font = theme::theme_settings(cx).buffer_font(cx).clone();
         let palette = CodePalette::from_theme(cx);
         let weak = cx.entity().downgrade();
-        let current_entry = self.history.current();
-        let record_layout = range.len() > 1;
-        let mut out = Vec::with_capacity(range.len());
-        let mut fallback_layout = None;
-        if record_layout {
-            self.call_token_layout = None;
-        }
-
-        for ix in range {
-            let Some((view_arc, line_ix)) = self.resolve_line_source(ix) else {
-                continue;
-            };
-            let styled = style_view_line(&view_arc, line_ix, &font, &palette);
-            let styled_text = StyledText::new(styled.text).with_runs(styled.runs);
-            if record_layout && self.call_token_layout.is_none() {
-                if let Some((pos, _)) = styled
-                    .click_refs
-                    .iter()
-                    .enumerate()
-                    .find(|(_, r)| matches!(r, Ref::Function(t) if Some(*t) != current_entry))
-                    && let Some(span) = styled.click_ranges.get(pos)
-                {
-                    self.call_token_layout = Some((styled_text.layout().clone(), span.start));
-                } else if fallback_layout.is_none()
-                    && let Some((pos, _)) = styled
-                        .click_refs
-                        .iter()
-                        .enumerate()
-                        .find(|(_, r)| matches!(r, Ref::Function(_)))
-                    && let Some(span) = styled.click_ranges.get(pos)
-                {
-                    fallback_layout = Some((styled_text.layout().clone(), span.start));
-                }
-            }
-            let text_el = build_interactive_line(
-                ix,
-                styled_text,
-                styled.click_ranges,
-                styled.click_refs,
-                view_arc,
-                weak.clone(),
-            );
-            out.push(
-                div()
-                    .h(px(CODE_ROW_HEIGHT_PX))
-                    .px(px(8.0))
-                    .flex()
-                    .items_center()
-                    .whitespace_nowrap()
-                    .child(text_el)
-                    .into_any_element(),
-            );
-        }
-        if record_layout && self.call_token_layout.is_none() {
-            self.call_token_layout = fallback_layout;
-        }
-        out
-    }
-
-    /// Maps virtual line index `ix` to its `(Arc<View>, line_index)` source.
-    ///
-    /// # Arguments
-    ///
-    /// * `ix` - Virtual line index in the code pane.
-    ///
-    /// # Returns
-    ///
-    /// Backing `(view, line_index)` pair, or `None` if out of bounds.
-    fn resolve_line_source(&self, ix: usize) -> Option<(Arc<View>, usize)> {
-        if let Some(corpus) = &self.corpus_code {
-            let n = corpus.lines.len();
-            if n == 0 {
-                return None;
-            }
-            let &(v_ix, l_ix) = corpus.lines.get(ix % n)?;
-            let v = corpus.views.get(v_ix)?.clone();
-            Some((v, l_ix))
-        } else {
-            let v = self.active_view.clone()?;
-            (ix < v.lines()).then_some((v, ix))
-        }
+        range
+            .filter_map(|ix| {
+                let (view, line_ix) = code.get(ix)?;
+                let styled = style_view_line(view, line_ix, &font, &palette);
+                let text = StyledText::new(styled.text).with_runs(styled.runs);
+                let line = build_interactive_line(
+                    (ix, line_ix),
+                    text,
+                    styled.click_ranges,
+                    styled.click_refs,
+                    view.clone(),
+                    weak.clone(),
+                );
+                Some(
+                    div()
+                        .h(px(CODE_ROW_HEIGHT_PX))
+                        .px(px(CODE_PAD_PX))
+                        .flex()
+                        .items_center()
+                        .whitespace_nowrap()
+                        .child(line)
+                        .into_any_element(),
+                )
+            })
+            .collect()
     }
 }
 
@@ -1403,48 +914,46 @@ impl AppView {
 ///
 /// # Arguments
 ///
-/// * `row_ix` - Virtual row index providing a stable element identifier.
+/// * `(row_ix, line_ix)` - Shown line index (also the element identifier) and its line in `view`.
 /// * `styled_text` - Highlighted line text and runs.
 /// * `click_ranges` - UTF-8 byte ranges of clickable tokens.
 /// * `click_refs` - Corroborated [`Ref`] targets matching `click_ranges`.
-/// * `view_for_click` - Owning [`View`] used to resolve `Ref::Block` targets.
+/// * `view` - Owning [`View`] used to resolve `Ref::Address` targets.
 /// * `entity` - Weak handle to [`AppView`].
 ///
 /// # Returns
 ///
-/// [`InteractiveText`] element wired to open functions or scroll to blocks.
+/// [`InteractiveText`] element wired to open functions or scroll to definitions.
 fn build_interactive_line(
-    row_ix: usize,
+    (row_ix, line_ix): (usize, usize),
     styled_text: StyledText,
     click_ranges: Vec<Range<usize>>,
     click_refs: Vec<Ref>,
-    view_for_click: Arc<View>,
-    entity: gpui::WeakEntity<AppView>,
+    view: Arc<View>,
+    entity: WeakEntity<AppView>,
 ) -> InteractiveText {
+    let line = InteractiveText::new(("code-line", row_ix), styled_text);
     if click_ranges.is_empty() {
-        return InteractiveText::new(("code-line", row_ix), styled_text);
+        return line;
     }
-    InteractiveText::new(("code-line", row_ix), styled_text).on_click(
-        click_ranges,
-        move |range_ix, _window, cx| {
-            let Some(target) = click_refs.get(range_ix) else {
-                return;
-            };
-            let outcome = resolve_ref_click(&view_for_click, target);
-            let _ = entity.update(cx, |this, cx| match outcome {
-                ClickOutcome::OpenFunction(callee) => {
-                    this.call_clicks_count = this.call_clicks_count.saturating_add(1);
-                    this.open_function(callee, true, cx);
-                }
-                ClickOutcome::ScrollToLine(line_ix) => {
-                    this.code_scroll
-                        .scroll_to_item(line_ix, ScrollStrategy::Top);
-                    cx.notify();
-                }
-                ClickOutcome::None => {}
-            });
-        },
-    )
+    line.on_click(click_ranges, move |range_ix, _window, cx| {
+        let Some(target) = click_refs.get(range_ix) else {
+            return;
+        };
+        let outcome = resolve_ref_click(&view, target);
+        let Some(entity) = entity.upgrade() else {
+            return;
+        };
+        entity.update(cx, |this, cx| match outcome {
+            ClickOutcome::OpenFunction(callee) => this.open_function(callee, true, cx),
+            ClickOutcome::ScrollToLine(def) => {
+                let shown = row_ix.saturating_sub(line_ix).saturating_add(def);
+                this.code_scroll.scroll_to_item(shown, ScrollStrategy::Top);
+                cx.notify();
+            }
+            ClickOutcome::None => {}
+        });
+    })
 }
 
 /// Formats one [`FunctionRow`] into eight cell elements without deriving new facts.
@@ -1471,8 +980,6 @@ fn format_row_cells(row: &FunctionRow) -> Vec<AnyElement> {
 
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        self.active_dispatch_pending = false;
-        self.check_one_shot_modes(window, cx);
         let key_ctx = if self.filter_focus.is_focused(window) {
             "AppRoot"
         } else {
@@ -1500,13 +1007,6 @@ impl Render for AppView {
             .id("app-root")
             .key_context(key_ctx)
             .track_focus(&self.focus_handle)
-            .capture_key_down(cx.listener(|this, _, _, cx| this.record_inject_arrival(true, cx)))
-            .capture_any_mouse_down(
-                cx.listener(|this, _, _, cx| this.record_inject_arrival(false, cx)),
-            )
-            .capture_any_mouse_up(
-                cx.listener(|this, _, _, cx| this.record_inject_arrival(true, cx)),
-            )
             .on_action(cx.listener(|this, _: &Open, _, cx| this.prompt_open(cx)))
             .on_action(cx.listener(|this, _: &FocusFilter, window, cx| {
                 this.focus_filter(window, cx);
@@ -1516,17 +1016,10 @@ impl Render for AppView {
             }))
             .on_action(cx.listener(|this, _: &NextRow, _, cx| this.step_row(1, cx)))
             .on_action(cx.listener(|this, _: &PreviousRow, _, cx| this.step_row(-1, cx)))
-            .on_action(cx.listener(|this, _: &PageDown, _, cx| this.step_row(25, cx)))
-            .on_action(cx.listener(|this, _: &PageUp, _, cx| this.step_row(-25, cx)))
+            .on_action(cx.listener(|this, _: &PageDown, _, cx| this.step_row(PAGE_ROWS, cx)))
+            .on_action(cx.listener(|this, _: &PageUp, _, cx| this.step_row(-PAGE_ROWS, cx)))
             .on_action(cx.listener(|this, _: &GoBack, _, cx| this.navigate_back(cx)))
             .on_action(cx.listener(|this, _: &GoForward, _, cx| this.navigate_forward(cx)))
-            .on_action(cx.listener(|this, _: &Measure, window, cx| {
-                if this.is_measuring() {
-                    cx.notify();
-                } else {
-                    begin_list_scroll_phase(this, true, false, window, cx);
-                }
-            }))
             .size_full()
             .flex()
             .flex_col()
