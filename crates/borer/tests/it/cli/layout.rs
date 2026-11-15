@@ -1,4 +1,5 @@
-//! CLI tests for pack inspection, stated dump layouts, and RISC-V verification.
+//! CLI tests for pack inspection and help, stated dump layouts, and RISC-V
+//! verification.
 
 use super::{run, run_all};
 
@@ -134,4 +135,11 @@ fn cli_verifies_risc_v_code() {
     assert!(!ok && out.contains("block by block only"), "{out}");
 
     drop(std::fs::remove_file(&path));
+}
+
+/// `help pack` answers with the `pack` command's usage.
+#[test]
+fn cli_help_lists_pack() {
+    let (ok, out) = run(&["help", "pack"]);
+    assert!(ok && out.contains("pack"), "{out}");
 }

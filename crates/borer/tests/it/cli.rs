@@ -9,6 +9,7 @@ use std::process::{Command, Output};
 use std::sync::{Condvar, Mutex, PoisonError};
 
 mod layout;
+mod types;
 
 /// Returns how many children the tests run at once: one per four cores,
 /// at least two.
