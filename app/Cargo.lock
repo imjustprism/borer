@@ -626,6 +626,7 @@ dependencies = [
  "borer-engine",
  "gpui",
  "gpui_platform",
+ "hdrhistogram",
  "theme",
  "ui",
 ]

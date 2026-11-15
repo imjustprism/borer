@@ -1319,8 +1319,40 @@ mod tests {
 
     use super::{
         CliMode, OneShotAction, build_corpus_code_blocking, evaluate_one_shot,
-        load_large_dll_blocking, parse_cli_args_os,
+        load_large_dll_blocking, parse_cli_args_os, scroll_report,
     };
+
+    /// Returns a frame snapshot whose three histograms each hold `n` one-millisecond samples.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a histogram cannot be built or record a sample.
+    fn snapshot(n: u64) -> gpui::profiler::FrameDurationSnapshot {
+        let hist = || {
+            let mut h = hdrhistogram::Histogram::<u64>::new(3).unwrap();
+            for _ in 0..n {
+                h.record(1_000_000).unwrap();
+            }
+            h
+        };
+        gpui::profiler::FrameDurationSnapshot {
+            dirty_to_present_histogram: hist(),
+            draw_duration_histogram: hist(),
+            present_interval_histogram: hist(),
+            by_refresh_interval: Vec::new(),
+        }
+    }
+
+    /// A scroll report whose histograms do not subtract fails instead of dropping samples.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a later snapshot holding fewer samples than the earlier one still reports.
+    #[test]
+    fn a_histogram_that_does_not_subtract_fails_the_scroll_report() {
+        assert!(scroll_report("list", "x", 1, 1, &snapshot(1), &snapshot(2), &mut []).is_ok());
+        assert!(scroll_report("list", "x", 1, 1, &snapshot(2), &snapshot(1), &mut []).is_err());
+    }
 
     /// Raised navigation [`Cancel`] flags immediately abort interactive benchmark preparation.
     ///
