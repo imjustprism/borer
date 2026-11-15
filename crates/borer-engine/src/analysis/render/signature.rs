@@ -1471,53 +1471,67 @@ mod tests {
     /// Two x86-64 ELF images sharing a stock `-O0` prologue and differing in
     /// their bodies share no YARA code string.
     ///
+    /// A body too short past the prologue gives none, and one long enough is
+    /// signed from its own bytes,
+    /// with the alignment `nop` inside it not counted toward
+    /// [`super::OWN_MIN`].
+    ///
     /// # Panics
     ///
-    /// When a code string from `A`'s rule matches `B`, or a body long enough
-    /// past the shared prologue fails to match `C` alone.
+    /// When `A` gets a code string, `A2`'s rule has none or one that matches
+    /// `B2`, or a body long enough past the shared prologue fails to match `C`
+    /// alone.
     #[test]
     fn shared_prologue_functions_produce_no_cross_matching_yara_code() {
         use super::{Analysis, Overlay, yara_rule};
 
-        let a_code: &[u8] = &[
+        let prologue: &[u8] = &[
             0x55, // ASM: push rbp
             0x48, 0x89, 0xe5, // ASM: mov rbp, rsp
             0x48, 0x83, 0xec, 0x40, // ASM: sub rsp, 0x40
             0x89, 0x7d, 0xfc, // ASM: mov [rbp - 4], edi
             0x8b, 0x45, 0xfc, // ASM: mov eax, [rbp - 4]
-            0x0f, 0xaf, 0xc0, // ASM: imul eax, eax
-            0xc9, // ASM: leave
-            0xc3, // ASM: ret
         ];
-        let b_code: &[u8] = &[
-            0x55, // ASM: push rbp
-            0x48, 0x89, 0xe5, // ASM: mov rbp, rsp
-            0x48, 0x83, 0xec, 0x40, // ASM: sub rsp, 0x40
-            0x89, 0x7d, 0xfc, // ASM: mov [rbp - 4], edi
-            0x8b, 0x45, 0xfc, // ASM: mov eax, [rbp - 4]
-            0x83, 0xc0, 0x07, // ASM: add eax, 7
-            0xc9, // ASM: leave
-            0xc3, // ASM: ret
-        ];
-        let a_prog = elf_x64(a_code, &[]);
-        let b_prog = elf_x64(b_code, &[]);
+        let build = |body: &[u8]| {
+            let mut code = prologue.to_vec();
+            code.extend_from_slice(body);
+            code.extend_from_slice(&[
+                0xc9, // ASM: leave
+                0xc3, // ASM: ret
+            ]);
+            elf_x64(&code, &[])
+        };
+        let a_prog = build(&[0x0f, 0xaf, 0xc0]); // ASM: imul eax, eax
+        let b_prog = build(&[0x83, 0xc0, 0x07]); // ASM: add eax, 7
         let a_ana = Analysis::compute(&a_prog);
         let sig = signature(&a_prog, 0x40_1000, Some(0x40_1013)).expect("in-image signature");
         assert_eq!(sig.spaced(), "55 48 89 E5 48 83 EC 40");
-        match yara_rule(&a_prog, &a_ana, &Overlay::default(), &[0x40_1000]) {
-            Ok(rule) => {
-                let patterns = rule_code_patterns(&rule);
-                assert!(!patterns.is_empty(), "{rule}");
-                for pat in &patterns {
-                    assert_eq!(
-                        crate::search::find_bytes(&b_prog, pat, 0).total,
-                        0,
-                        "{rule}"
-                    );
-                }
-            }
-            Err(why) => assert!(why.contains("prologue"), "{why}"),
-        }
+        let why = yara_rule(&a_prog, &a_ana, &Overlay::default(), &[0x40_1000])
+            .expect_err("a body too short for a code string");
+        assert!(why.contains("past its prologue"), "{why}");
+
+        let shared: &[u8] = &[
+            0x0f, 0xaf, 0xc0, // ASM: imul eax, eax
+            0xd1, 0xe0, // ASM: shl eax, 1
+            0x0f, 0x1f, 0x40, 0x00, // ASM: nop dword [rax]
+        ];
+        let a2_prog = build(&[shared, &[0x35, 0x78, 0x56, 0x34, 0x12]].concat()); // ASM: xor eax, 0x12345678
+        let b2_prog = build(&[shared, &[0x05, 0x78, 0x56, 0x34, 0x12]].concat()); // ASM: add eax, 0x12345678
+        let a2_ana = Analysis::compute(&a2_prog);
+        let rule = yara_rule(&a2_prog, &a2_ana, &Overlay::default(), &[0x40_1000])
+            .expect("a body long enough past the prologue");
+        let patterns = rule_code_patterns(&rule);
+        assert_eq!(patterns.len(), 1, "{rule}");
+        assert_eq!(
+            crate::search::find_bytes(&a2_prog, &patterns[0], 0).total,
+            1,
+            "{rule}"
+        );
+        assert_eq!(
+            crate::search::find_bytes(&b2_prog, &patterns[0], 0).total,
+            0,
+            "{rule}"
+        );
 
         let c_code: &[u8] = &[
             0x55, // ASM: push rbp
