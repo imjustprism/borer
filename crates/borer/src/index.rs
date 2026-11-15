@@ -29,7 +29,7 @@ use rayon::prelude::*;
 mod key;
 mod memo;
 use key::require_cache_dir;
-pub use key::{cache_base, cache_dir, index_key};
+pub use key::{cache_base, cache_dir, cache_dir_in, index_key, require_cache_dir_in};
 
 /// Magic bytes opening an index file.
 const MAGIC: &[u8; 8] = b"BORERIDX";

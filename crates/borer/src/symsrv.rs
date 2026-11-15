@@ -210,20 +210,7 @@ const NAME_MAX: usize = 255;
 ///
 /// When the configured directory names a share or a device.
 pub(crate) fn cache_dir() -> Result<Option<PathBuf>, String> {
-    let found = if let Ok(dir) = std::env::var(CACHE_ENV)
-        && !dir.is_empty()
-    {
-        Some((PathBuf::from(dir), CACHE_ENV))
-    } else {
-        borer::index::cache_base().map(|b| (b.join("borer").join("symsrv"), "the symbol cache"))
-    };
-    let Some((dir, from)) = found else {
-        return Ok(None);
-    };
-    if let Some(why) = borer_engine::program::unusable_path(&dir) {
-        return Err(format!("{from}: {why}"));
-    }
-    Ok(Some(dir))
+    borer::index::cache_dir_in(CACHE_ENV, "symsrv", "the symbol cache")
 }
 
 /// Returns the symbol cache directory for a caller that writes to it.
@@ -233,9 +220,7 @@ pub(crate) fn cache_dir() -> Result<Option<PathBuf>, String> {
 /// When no environment variable names a base, or the configured directory
 /// names a share or a device.
 pub(crate) fn require_cache_dir() -> Result<PathBuf, String> {
-    cache_dir()?.ok_or_else(|| {
-        format!("no cache directory: set {CACHE_ENV}, LOCALAPPDATA, XDG_CACHE_HOME or HOME")
-    })
+    borer::index::require_cache_dir_in(CACHE_ENV, "symsrv", "the symbol cache")
 }
 
 /// The file name a record's PDB is cached and asked for.
