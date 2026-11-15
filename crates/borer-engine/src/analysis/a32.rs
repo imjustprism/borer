@@ -929,11 +929,14 @@ fn function_at_gap(program: &Program, functions: &[Function], va: u64) -> Option
 /// Returns the entry of the function to decompile for an address, starting
 /// one there when it lies in no discovered function's blocks.
 ///
-/// [`Analysis::function_at`] accepts any address in a function's span, but a
-/// gap between its blocks is not that function's code. An address there, or
-/// in no function at all, starts a function when the ARM32 gap walk is clean
-/// ([`Analysis::start_gap_function`]); otherwise the function whose span
-/// holds it answers.
+/// [`Analysis::function_at`] answers from blocks first and falls back to the
+/// function whose span holds the address, but a gap between its blocks is
+/// not that function's code. The start of a block below its owner's entry
+/// is not taken as the owner's either ([`in_blocks`]): a later thunk may
+/// have jumped backward into an unclaimed body there. An address in a gap,
+/// at such a block start, or in no function at all starts a function when
+/// the ARM32 gap walk is clean ([`Analysis::start_gap_function`]); otherwise
+/// the function [`Analysis::function_at`] names answers.
 ///
 /// # Arguments
 ///

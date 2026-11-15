@@ -15,7 +15,9 @@
 //!
 //! * `program()`: `path`, `format`, `arch`, `bits`, `base`, `entry`.
 //! * `functions()`, `functions(filter)`: every function as a map (`entry`,
-//!   `name`, `size`, `instrs`, `blocks`, `source`), the filter a
+//!   `name`, `size` (the code bytes its blocks hold, not the span),
+//!   `instrs`, `blocks`, `source` (`usr` for a user name, else
+//!   [`NameSource::code`](crate::analysis::NameSource::code))), the filter a
 //!   case-insensitive part of the name; `function(entry or name)` adds
 //!   `callers` and `callees`, and is `()` for no function.
 //! * `callers(entry)`, `callees(entry)`, `name(entry)`,
@@ -121,7 +123,7 @@ const PROPOSAL_TEXT_MAX: usize = 1024;
 /// What `help()` returns: every function a script can call, one line each,
 /// for an agent that has the tool's short description and nothing else.
 const HELP: &str = "\
-functions() / functions(filter): maps of entry, name, size, instrs, blocks, source
+functions() / functions(filter): maps of entry, name, size (code bytes its blocks hold), instrs, blocks, source (usr for a user name, else sym, sig, pack, lib, ...; - for none)
 function(entry or name): one function's map plus callers, callees; () when none
 callers(e), callees(e): entries; name(e): the name in force
 strings(e): strings a function references, maps of at, text
