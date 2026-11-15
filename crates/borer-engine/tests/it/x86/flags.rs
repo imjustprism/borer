@@ -608,6 +608,9 @@ fn a_result_or_multi_bit_shift_leaves_carry_and_overflow_undecided() {
 /// A 16-bit double shift by 16 copies its source and sets CF from the last
 /// bit shifted out of its destination, while counts 17 through 31 leave the
 /// instruction unmodeled.
+///
+/// `jb` after `mov cl, 16; shld ax, bx, cl` reads that bit, never an
+/// undecided flag.
 #[test]
 fn a_16_bit_double_shift_at_and_past_the_width_agrees_with_the_emulator() {
     for code in [
@@ -624,6 +627,7 @@ fn a_16_bit_double_shift_at_and_past_the_width_agrees_with_the_emulator() {
         0x00, 0xc3,
     ]);
     assert!(by_cl.contains("return 1"), "{by_cl}");
+    assert!(!by_cl.to_lowercase().contains("flags_"), "{by_cl}");
     let past = [
         0x66, 0x0f, 0xa4, 0xd8, 0x11, // ASM: shld ax, bx, 17
         0x74, 0x03, // ASM: je 0x40100a
@@ -635,4 +639,25 @@ fn a_16_bit_double_shift_at_and_past_the_width_agrees_with_the_emulator() {
     let text = dc(&past);
     assert!(text.contains("FLAGS_UNKNOWN"), "{text}");
     never_disagrees_with_the_emulator(&image(&past));
+}
+
+/// A 16-bit double shift by a loaded count agrees with the emulator.
+///
+/// It funnels through a 32-bit word, so every count from 0 through 16
+/// agrees: `mov ecx, [esp+4]`, then `and ecx, 15; inc ecx` for counts 1 through 16
+/// or `and ecx, 1; shl ecx, 4` for 0 or 16, then `shld ax, bx, cl; ret`,
+/// and the same with `shrd`.
+#[test]
+fn a_16_bit_double_shift_by_a_loaded_count_agrees_with_the_emulator() {
+    let counts: [&[u8]; 2] = [
+        &[0x83, 0xe1, 0x0f, 0x41],             // ASM: and ecx, 15; inc ecx
+        &[0x83, 0xe1, 0x01, 0xc1, 0xe1, 0x04], // ASM: and ecx, 1; shl ecx, 4
+    ];
+    for op in [0xa5u8, 0xad] {
+        for count in counts {
+            let load = &[0x8b, 0x4c, 0x24, 0x04][..]; // ASM: mov ecx, [esp+4]
+            let shift = &[0x66, 0x0f, op, 0xd8, 0xc3][..]; // ASM: shld / shrd ax, bx, cl; ret
+            agrees_with_the_emulator(&[load, count, shift].concat());
+        }
+    }
 }
