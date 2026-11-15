@@ -377,6 +377,21 @@ enum ReadFail {
     Other(anyhow::Error),
 }
 
+impl ReadFail {
+    /// Returns the failure as the error a caller of a capped read sees.
+    ///
+    /// # Arguments
+    ///
+    /// * `max` - The cap the read was given, in bytes.
+    fn into_error(self, max: u64) -> anyhow::Error {
+        match self {
+            Self::Over(shown, len) => anyhow!("{shown} is {len} bytes, past the {max} it may hold"),
+            Self::Grew(shown) => anyhow!("{shown} grew past the {max} bytes it may hold"),
+            Self::Other(e) => e,
+        }
+    }
+}
+
 /// Reads a program file whole within `max` bytes, refusing what is not a
 /// regular file.
 ///
@@ -429,14 +444,7 @@ fn read_program_file(path: &Path, max: u64) -> anyhow::Result<Vec<u8>> {
 /// As [`open_regular`], and when the read fails or the file grew past
 /// `max` meanwhile.
 pub fn read_regular(path: &Path, max: u64) -> anyhow::Result<Vec<u8>> {
-    match read_regular_raw(path, max) {
-        Ok(bytes) => Ok(bytes),
-        Err(ReadFail::Over(shown, len)) => Err(anyhow!(
-            "{shown} is {len} bytes, past the {max} it may hold"
-        )),
-        Err(ReadFail::Grew(shown)) => Err(anyhow!("{shown} grew past the {max} bytes it may hold")),
-        Err(ReadFail::Other(e)) => Err(e),
-    }
+    read_regular_raw(path, max).map_err(|fail| fail.into_error(max))
 }
 
 /// Reads a regular file within `max` bytes, distinguishing size-cap refusals.
@@ -491,14 +499,9 @@ fn read_regular_raw(path: &Path, max: u64) -> Result<Vec<u8>, ReadFail> {
 /// device, a pipe or anything else that is not a regular file, holds more
 /// than `max` bytes, or does not open.
 pub fn open_regular(path: &Path, max: u64) -> anyhow::Result<std::fs::File> {
-    match open_regular_sized(path, max) {
-        Ok((file, _)) => Ok(file),
-        Err(ReadFail::Over(shown, len)) => Err(anyhow!(
-            "{shown} is {len} bytes, past the {max} it may hold"
-        )),
-        Err(ReadFail::Grew(shown)) => Err(anyhow!("{shown} grew past the {max} bytes it may hold")),
-        Err(ReadFail::Other(e)) => Err(e),
-    }
+    open_regular_sized(path, max)
+        .map(|(file, _)| file)
+        .map_err(|fail| fail.into_error(max))
 }
 
 /// Opens a regular file no larger than `max` and returns its stated length.
