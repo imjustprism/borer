@@ -279,8 +279,9 @@ struct Tally {
     /// The names looked up where no `(` follows them, which the text's own
     /// body does not note ([`reads::note_body`]).
     looked: BTreeSet<String>,
-    /// Each `(function, slots[0])` import lookup already resolved.
-    imports: BTreeMap<(u64, u64), Option<u64>>,
+    /// Whether each function bears out each import, by the import's slots,
+    /// as already resolved.
+    imports: BTreeMap<u64, BTreeMap<Vec<u64>, bool>>,
     /// Cached `classes::field_names` tables by class name.
     class_fields: BTreeMap<String, BTreeMap<u64, String>>,
 }
@@ -495,6 +496,31 @@ fn imports(program: &Program, analysis: &Analysis) -> Arc<BTreeMap<String, Vec<V
         }
         by
     })
+}
+
+/// Returns the id of the import listed at `slot`: the first of its slots
+/// ([`imports`]), which [`Ref::Import`] names it by.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `analysis` - Its analysis, holding the memo.
+/// * `slot` - One of the import's slots.
+///
+/// # Returns
+///
+/// The import's first slot, or `None` when no import is listed at `slot`.
+pub(crate) fn import_id(program: &Program, analysis: &Analysis, slot: u64) -> Option<u64> {
+    let symbol = program
+        .symbols
+        .iter()
+        .find(|s| s.kind == SymbolKind::Import && s.addr == slot && slot != 0)?;
+    imports(program, analysis)
+        .get(&expr_render::import_spelling(&symbol.name))?
+        .iter()
+        .find(|at| at.binary_search(&slot).is_ok())?
+        .first()
+        .copied()
 }
 
 /// Returns each name the overlay gives an address no function starts at,
@@ -1539,8 +1565,11 @@ impl<'a> Reader<'a> {
                 } else {
                     Kind::Function
                 };
-                let slot = facts.and_then(|f| import_slot(f, slots, tally));
-                (kind, slot.map(Ref::Import))
+                let borne = facts.is_some_and(|f| import_borne(f, slots, tally));
+                (
+                    kind,
+                    slots.first().copied().filter(|_| borne).map(Ref::Import),
+                )
             }
             Named::Address(a) => {
                 let refers = facts.is_some_and(|f| f.refs.contains(&a));
@@ -1633,30 +1662,28 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// Returns the lowest slot of `slots` that `f` references or calls a stub
-/// of, caching the lookup for `f` in `tally`.
+/// Tells whether `f` references one of an import's slots or calls a stub
+/// of one, caching the answer for `f` and that import in `tally`.
 ///
 /// # Arguments
 ///
 /// * `f` - The function's facts.
-/// * `slots` - The import's slots, sorted.
+/// * `slots` - The import's slots, sorted: the whole list names the import.
 /// * `tally` - Holds the per-import cache.
-fn import_slot(f: &Facts<'_>, slots: &[u64], tally: &mut Tally) -> Option<u64> {
-    let &first = slots.first()?;
-    if let Some(&cached) = tally.imports.get(&(f.function.entry, first)) {
+fn import_borne(f: &Facts<'_>, slots: &[u64], tally: &mut Tally) -> bool {
+    let cache = tally.imports.entry(f.function.entry).or_default();
+    if let Some(&cached) = cache.get(slots) {
         return cached;
     }
     let held = |s: &u64| f.refs.contains(s) || f.stubs.contains(s);
-    let slot = if slots.len() <= f.refs.len().saturating_add(f.stubs.len()) {
-        slots.iter().copied().find(held)
+    let borne = if slots.len() <= f.refs.len().saturating_add(f.stubs.len()) {
+        slots.iter().any(held)
     } else {
         f.refs
             .iter()
             .chain(&f.stubs)
-            .copied()
-            .filter(|s| slots.binary_search(s).is_ok())
-            .min()
+            .any(|s| slots.binary_search(s).is_ok())
     };
-    tally.imports.insert((f.function.entry, first), slot);
-    slot
+    cache.insert(slots.to_vec(), borne);
+    borne
 }

@@ -803,11 +803,11 @@ fn macho_imports_from_distinct_dylibs_stay_distinct() {
     assert_eq!(v.unlinked(), Unlinked::default());
 }
 
-/// Repeated calls of an import with 4,096 slots in a function referencing
-/// 1,024 addresses resolve to the one slot the function calls, reusing the
-/// cached lookup across all 2,000 tokens.
+/// Repeated calls of an import with 4,096 slots, in a function referencing
+/// 1,024 addresses, through its last slot all link to the import by its
+/// first slot: one id whichever slot a function calls through.
 #[test]
-fn repeated_calls_to_a_many_slot_import_link_its_referenced_slot() {
+fn repeated_calls_to_a_many_slot_import_link_the_import_by_its_first_slot() {
     let (rdata, data) = (0x1_4000_3000u64, 0x1_4000_b000u64);
     let highest = rdata + 8 * 4095;
     let mut code = Vec::with_capacity(0x1c00);
@@ -844,9 +844,39 @@ fn repeated_calls_to_a_many_slot_import_link_its_referenced_slot() {
     assert!(
         calls
             .iter()
-            .all(|c| *c == (Kind::Function, Some(Ref::Import(highest))))
+            .all(|c| *c == (Kind::Function, Some(Ref::Import(rdata))))
     );
     assert_eq!(v.unlinked(), Unlinked::default());
+}
+
+/// Two imports that share a slot each answer for their own slots.
+///
+/// They do so in either order and however often they are read: `foo` at `S` alone,
+/// `bar` at `S` and `T`, and a function that calls through `T` only bears
+/// out `bar`, by its first slot `S`, and not `foo`.
+#[test]
+fn imports_sharing_a_first_slot_are_borne_out_apart() {
+    let (shared, own) = (SLOT, SLOT + 8);
+    let mut code = Vec::new();
+    push_rip(&mut code, &[0xff, 0x15], own); // ASM: call [rip+disp]
+    code.push(0xc3); // ASM: ret
+    let p = image(
+        &[(TEXT, &code)],
+        vec![
+            symbol("foo", shared, SymbolKind::Import),
+            symbol("bar", shared, SymbolKind::Import),
+            symbol("bar", own, SymbolKind::Import),
+        ],
+    );
+    let a = Analysis::compute(&p);
+    for body in ["bar(); foo(); bar(); foo();", "foo(); bar(); foo(); bar();"] {
+        let v = view_of(&p, &a, &Overlay::default(), TEXT, body).expect("a view");
+        let bar = (Kind::Function, Some(Ref::Import(shared)));
+        assert_eq!(spelled(&v, "bar"), [bar.clone(), bar], "{body}");
+        let foo = (Kind::Function, None);
+        assert_eq!(spelled(&v, "foo"), [foo.clone(), foo], "{body}");
+        assert_eq!(v.unlinked().uncorroborated, 2, "{body}");
+    }
 }
 
 /// Hostile string literals with escapes, embedded NULs, invalid UTF-8 escapes,

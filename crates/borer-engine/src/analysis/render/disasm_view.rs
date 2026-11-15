@@ -4,6 +4,7 @@
 
 use super::{Analysis, Overlay, disasm, name_of, short_name};
 use crate::analysis::decompile::lexer::{self, Lex, Piece};
+use crate::analysis::decompile::view::import_id;
 use crate::analysis::syscalls::{self, SyscallSite};
 use crate::isa::{Isa, a32, a64, rv};
 use crate::program::{Feature, Program, SymbolKind};
@@ -355,7 +356,8 @@ impl RowCtx<'_> {
         } else if let Some((slot, name)) = import_at(p, memory) {
             out.put("  ", Kind::Space, None);
             out.put("; ", Kind::Comment, None);
-            out.put(name, Kind::Function, Some(Ref::Import(slot)));
+            let id = import_id(p, a, slot).unwrap_or(slot);
+            out.put(name, Kind::Function, Some(Ref::Import(id)));
         } else if let Ok(k) = self.sites.binary_search_by_key(&va, |s| s.at) {
             out.put("  ", Kind::Space, None);
             out.put(&format!("; {}", self.sites[k].label()), Kind::Comment, None);

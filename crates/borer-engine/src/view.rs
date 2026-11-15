@@ -67,7 +67,8 @@ pub enum Ref {
     Address(u64),
     /// A function, by its entry.
     Function(u64),
-    /// An import, by its slot.
+    /// An import, by its first slot: one id however many slots the loader
+    /// lists it at.
     Import(u64),
     /// A global, by its address.
     Global(u64),

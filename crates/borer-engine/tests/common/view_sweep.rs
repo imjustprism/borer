@@ -239,15 +239,24 @@ fn link_ok(
                         .contains(e))
         }
         Ref::Import(s) => {
-            let stub = f.is_some_and(|f| {
-                f.callees
-                    .iter()
-                    .any(|c| a.function(*c).and_then(|g| g.thunk) == Some(*s))
-            });
-            (referenced(*s) || stub)
-                && p.symbols
-                    .iter()
-                    .any(|y| y.kind == SymbolKind::Import && y.addr == *s)
+            let imports = || p.symbols.iter().filter(|y| y.kind == SymbolKind::Import);
+            let names: BTreeSet<&str> = imports()
+                .filter(|y| y.addr == *s)
+                .map(|y| y.name.as_str())
+                .collect();
+            let spelling = tok.strip_prefix("__imp_").unwrap_or(tok);
+            let held = |slot: u64| {
+                referenced(slot)
+                    || f.is_some_and(|f| {
+                        f.callees
+                            .iter()
+                            .any(|c| a.function(*c).and_then(|g| g.thunk) == Some(slot))
+                    })
+            };
+            names
+                .iter()
+                .any(|n| spelled(&borer_engine::search::demangled_name(n)) == spelling)
+                && imports().any(|y| names.contains(y.name.as_str()) && held(y.addr))
         }
         Ref::Address(va) => f.is_some_and(|f| f.blocks.iter().any(|b| b.start == *va)),
         Ref::Global(va) => {
