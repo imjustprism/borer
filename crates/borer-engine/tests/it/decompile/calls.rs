@@ -1104,3 +1104,54 @@ fn a_runtime_helper_call_takes_its_prototype() {
     assert!(plain.contains("plain_callee(a1, a2, 7, 9)"), "{plain}");
     assert!(!plain.contains("// runtime:"), "{plain}");
 }
+
+/// A pointer handed to an API that takes a structure reads its fields by
+/// name, and an API call spelled inside a string literal types nothing.
+///
+/// `push rbx; sub rsp,0x20; mov rbx,rcx; <arg>; call [slot]; mov
+/// eax,[rbx+8]; add rsp,0x20; pop rbx; ret`, where `<arg>` is `mov rcx,rbx`
+/// before a call of `EnterCriticalSection`, whose `LockCount` sits at 8,
+/// and `lea rcx,[text]` before one of `OutputDebugStringA`, `text` being
+/// `"EnterCriticalSection(a1)"`: the string's call names no API, so `a1`
+/// stays untyped.
+#[test]
+fn an_api_call_types_its_pointer_and_one_in_a_string_does_not() {
+    const SLOT: u64 = 0x1_4000_2000;
+    const TEXT_VA: u64 = SLOT + 0x10;
+    let rel = |next: u64, target: u64| {
+        i32::try_from(target.cast_signed() - next.cast_signed())
+            .unwrap_or_default()
+            .to_le_bytes()
+    };
+    let build = |pass_text: bool, api: &str| {
+        let mut code = vec![
+            0x53, // ASM: push rbx
+            0x48, 0x83, 0xec, 0x20, // ASM: sub rsp,0x20
+            0x48, 0x89, 0xcb, // ASM: mov rbx,rcx
+        ];
+        if pass_text {
+            code.extend([0x48, 0x8d, 0x0d]); // ASM: lea rcx,[rip+disp]
+            code.extend(rel(0x1_4000_100f, TEXT_VA));
+        } else {
+            code.extend([0x48, 0x89, 0xd9]); // ASM: mov rcx,rbx
+            code.extend([0x0f, 0x1f, 0x40, 0x00]); // ASM: nop dword [rax]
+        }
+        code.extend([0xff, 0x15]); // ASM: call [rip+disp]
+        code.extend(rel(0x1_4000_1015, SLOT));
+        code.extend([
+            0x8b, 0x43, 0x08, // ASM: mov eax,[rbx+8]
+            0x48, 0x83, 0xc4, 0x20, // ASM: add rsp,0x20
+            0x5b, // ASM: pop rbx
+            0xc3, // ASM: ret
+        ]);
+        let mut data = vec![0u8; 0x10];
+        data.extend_from_slice(b"EnterCriticalSection(a1)\0");
+        let p = program64_with_imports(&code, &data, &[(SLOT, api)]);
+        decompiled(&p, 0x1_4000_1000)
+    };
+    let typed = build(false, "KERNEL32.dll!EnterCriticalSection");
+    assert!(typed.contains("a1->LockCount"), "{typed}");
+    let quoted = build(true, "KERNEL32.dll!OutputDebugStringA");
+    assert!(quoted.contains("\"EnterCriticalSection(a1)\""), "{quoted}");
+    assert!(!quoted.contains("LockCount"), "{quoted}");
+}

@@ -1177,73 +1177,46 @@ fn call_args_at(line: &str, open: usize, limit: usize) -> Option<Vec<&str>> {
     None
 }
 
-/// The calls by plain name in one line, each with its whole arguments.
-///
-/// # Arguments
-///
-/// * `line` - The line.
-///
-/// # Returns
-///
-/// `(callee, arguments)` per call, outermost first; an argument is its
-/// trimmed text between the commas at the call's own depth.
-#[cfg(test)]
-fn calls_in(line: &str) -> Vec<(&str, Vec<&str>)> {
-    let mut out = Vec::new();
-    let limit = line.len();
-    for open in code_open_parens(line) {
-        let Some(callee) = callee_before_paren(line, open) else {
-            continue;
-        };
-        if let Some(args) = call_args_at(line, open, limit) {
-            out.push((callee, args));
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 #[expect(
     clippy::missing_panics_doc,
     reason = "assertions are the point of a test"
 )]
 mod tests {
-    use super::{api_typed, calls_in, rename_typed};
+    use super::{api_typed, rename_typed};
     use crate::program::BinaryFormat;
 
-    /// Multibyte UTF-8 before `(` never slices mid-character or splits off an
-    /// ASCII API suffix from a Unicode identifier.
+    /// Unicode, quoted and commented calls name no API.
+    ///
+    /// Multibyte UTF-8 before `(` never slices mid-character or splits an
+    /// ASCII API name off a Unicode identifier, a call quoted or commented
+    /// out names no API, and a call after a Unicode one still types its
+    /// pointer.
     #[test]
-    fn calls_in_handles_multibyte_utf8_before_paren() {
-        assert_eq!(calls_in("café(a); f(x);"), vec![("f", vec!["x"])]);
-        assert_eq!(
-            calls_in("caféEnterCriticalSection(a1); f(x);"),
-            vec![("f", vec!["x"])]
-        );
-        assert_eq!(
-            calls_in("cafe\u{301}EnterCriticalSection(a1); f(x);"),
-            vec![("f", vec!["x"])]
-        );
-        let unicode_prefixed = concat!(
+    fn unicode_quoted_and_commented_calls_name_no_api() {
+        let read = "v = *(uint32_t*)(a1 + 0x8);\n";
+        for before in [
             "caféEnterCriticalSection(a1);\n",
             "cafe\u{301}EnterCriticalSection(a1);\n",
             "puts(\"EnterCriticalSection(a1)\"); /* EnterCriticalSection(a1); */\n",
+            "x = 1; // EnterCriticalSection(a1)\n",
             "/*\nEnterCriticalSection(a1);\n*/\n",
-            "v = *(uint32_t*)(a1 + 0x8);\n",
-        );
-        assert!(api_typed(unicode_prefixed, BinaryFormat::Pe, 8).is_empty());
+        ] {
+            let text = format!("{before}{read}");
+            assert!(api_typed(&text, BinaryFormat::Pe, 8).is_empty(), "{text}");
+        }
+        let after = format!("café(a); EnterCriticalSection(a1);\n{read}");
+        assert_eq!(api_typed(&after, BinaryFormat::Pe, 8).len(), 1);
     }
 
-    /// A call's whole arguments split at its own depth.
+    /// A call's arguments split at its own depth, so a nested call's commas
+    /// leave a later argument at its own parameter.
     #[test]
     fn calls_split_their_arguments() {
-        assert_eq!(
-            calls_in("x = f(a1, g(b, c), *(uint32_t*)(a2 + 8));"),
-            vec![
-                ("f", vec!["a1", "g(b, c)", "*(uint32_t*)(a2 + 8)"]),
-                ("g", vec!["b", "c"]),
-            ]
-        );
+        let text = "FileTimeToSystemTime(g(b, c), a2);\nv = *(uint16_t*)(a2 + 0x2);\n";
+        let typed = api_typed(text, BinaryFormat::Pe, 8);
+        let names: Vec<&str> = typed.iter().map(|(v, _)| v.as_str()).collect();
+        assert_eq!(names, ["a2"]);
     }
 
     /// A pointer passed whole to an API declaring a structure pointer reads
