@@ -5,6 +5,8 @@
 # side build directories (CARGO_TARGET_DIR=target-live and friends)
 /target*/
 /app/target*/
+# Screenshots of the desktop app taken while checking it by hand.
+/app/shots/
 
 # local MCP registration (absolute path, machine-specific); the plugin's own
 # .mcp.json under plugins/ is part of the plugin
