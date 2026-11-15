@@ -348,7 +348,7 @@ mod tests {
     use borer_engine::view::{Ref, View};
     use gpui::{Font, Hsla};
 
-    use super::{ClickOutcome, CodePalette, resolve_ref_click, style_view_line};
+    use super::{ClickOutcome, CodeLines, CodePalette, resolve_ref_click, style_view_line};
 
     /// Builds a deterministic test palette without requiring a GPUI window.
     fn sample_palette() -> CodePalette {
@@ -518,5 +518,38 @@ mod tests {
             resolve_ref_click(&goto_view, &line1.click_refs[0]),
             ClickOutcome::ScrollToLine(2)
         );
+    }
+
+    /// Code lines list each view's lines in order, and cycled ones show line `i mod N`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a shown line maps to the wrong view or line.
+    #[test]
+    fn code_lines_follow_their_views_and_cycle_by_index() {
+        let (program, analysis, overlay) = sample_program();
+        let views: Vec<_> = analysis
+            .functions
+            .iter()
+            .filter_map(|f| view(&program, &analysis, &overlay, f.entry))
+            .collect();
+        let want: Vec<(usize, usize)> = views
+            .iter()
+            .enumerate()
+            .flat_map(|(v, built)| (0..built.lines()).map(move |l| (v, l)))
+            .collect();
+        let code = CodeLines::new(views.clone());
+        assert_eq!(code.len(), want.len());
+        assert_eq!(code.views(), views.len());
+        let cycled = code.cycled(want.len() * 3 + 1);
+        assert_eq!(cycled.len(), want.len() * 3 + 1);
+        for ix in 0..cycled.len() {
+            let (v, l) = want[ix % want.len()];
+            let (shown, line) = cycled.get(ix).unwrap();
+            assert!(std::sync::Arc::ptr_eq(shown, &views[v]));
+            assert_eq!(line, l);
+        }
+        assert!(cycled.get(cycled.len()).is_none());
+        assert!(CodeLines::new(Vec::new()).cycled(5).is_empty());
     }
 }
