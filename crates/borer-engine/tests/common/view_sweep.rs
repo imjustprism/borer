@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use borer_engine::analysis::decompile::view::literal_at;
+use borer_engine::analysis::decompile::literal_at;
 use borer_engine::analysis::decompile::{declarations_end, virtual_callees};
 use borer_engine::analysis::utypes::{UserType, width_of};
 use borer_engine::analysis::{Analysis, Overlay, name_of, sdk};

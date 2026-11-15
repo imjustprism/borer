@@ -14,8 +14,14 @@ use crate::strings::{cstr_text_at, wide_run_start, wstr_text_at};
 ///
 /// * `program` - The loaded image.
 /// * `addr` - The literal's address.
-/// * `own_name` - Bare name of the function being rendered.
-pub(super) fn literal_at(program: &Program, addr: u64, own_name: &str) -> Option<String> {
+/// * `own_name` - Name of the function being rendered, as its text spells
+///   it.
+///
+/// # Returns
+///
+/// The quoted literal, or `None` when `addr` holds none the text prints.
+#[must_use]
+pub fn literal_at(program: &Program, addr: u64, own_name: &str) -> Option<String> {
     /// Longest signature or path read in full.
     const FULL: usize = 512;
     literal_section(program, addr)?;
