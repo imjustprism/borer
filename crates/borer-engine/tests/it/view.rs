@@ -1629,3 +1629,48 @@ fn hex_fields_link_only_at_a_field_start_or_a_gap_of_their_type() {
     let base = of("return 0;").unlinked().uncorroborated;
     assert_eq!(v.unlinked().uncorroborated, base + 6, "{:?}", v.unlinked());
 }
+
+/// A kept view lets go of a rename to a name its text spells.
+///
+/// The renamed function is one its text never reaches, and the names are
+/// `h.cold`, which a text spells `h_cold`, or `~fb`, whose index entry cuts
+/// the `fb` of `~fb`. What it then answers is what a fresh build answers.
+///
+/// The images are [`exported_four`]'s, and the renamed function is `fd`,
+/// which `fa` neither calls nor references.
+#[test]
+fn renames_to_a_spelled_name_or_a_destructor_let_a_kept_view_go() {
+    let p = exported_four();
+    let a = Analysis::compute(&p);
+    let before = Overlay {
+        enum_source: EnumSource::Binary,
+        ..Overlay::default()
+    };
+    for (kind, body, renamed) in [
+        ("view_spelled_rename_test", "return h_cold(1);", "h.cold"),
+        ("view_dtor_rename_test", "return ~fb;", "~fb"),
+    ] {
+        let kept = |o: &Overlay| {
+            a.derived.get_or_build_item(
+                kind,
+                o.fingerprint(),
+                TEXT,
+                || view_of(&p, &a, o, TEXT, body),
+                |_| 0,
+            )
+        };
+        let was = kept(&before);
+        let mut after = before.clone();
+        after.names.insert(TEXT + 0xc0, renamed.to_owned());
+        a.derived.moved(&a, &before, &after);
+        let now = kept(&after);
+        let fresh = view_of(&p, &a, &after, TEXT, body).expect("a fresh view");
+        let now = now.as_ref().as_ref().expect("a kept view");
+        assert_eq!(tokens(now), tokens(&fresh), "{body}");
+        assert_ne!(
+            tokens(was.as_ref().as_ref().expect("the first view")),
+            tokens(&fresh),
+            "{body}"
+        );
+    }
+}

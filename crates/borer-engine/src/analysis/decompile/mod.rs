@@ -42,7 +42,7 @@ mod enums;
 mod evidence;
 pub mod export;
 mod expr;
-mod expr_render;
+pub(crate) mod expr_render;
 mod fcmp;
 mod fields;
 mod finish;

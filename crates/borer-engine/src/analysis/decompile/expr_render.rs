@@ -436,7 +436,7 @@ pub(super) fn import_spelling(raw: &str) -> String {
 /// # Returns
 ///
 /// The name, borrowed where nothing in it changes.
-pub(super) fn bare(name: &str) -> std::borrow::Cow<'_, str> {
+pub(crate) fn bare(name: &str) -> std::borrow::Cow<'_, str> {
     let name = crate::analysis::bare_name(name);
     if name.contains("::") || name.contains('(') || !name.contains(['.', '$', '@']) {
         return std::borrow::Cow::Borrowed(name);

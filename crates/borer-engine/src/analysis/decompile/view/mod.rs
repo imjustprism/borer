@@ -277,7 +277,8 @@ struct Tally {
     /// The names left unlinked.
     unlinked: Unlinked,
     /// The names looked up where no `(` follows them, which the text's own
-    /// body does not note ([`reads::note_body`]).
+    /// body does not note ([`reads::note_body`]), and the `~` destructors
+    /// looked up for a `~` before a name.
     looked: BTreeSet<String>,
     /// Whether each function bears out each import, by the import's slots,
     /// as already resolved.
@@ -1397,7 +1398,7 @@ impl<'a> Reader<'a> {
     /// * `at` - Where it stands.
     /// * `tally` - What the reading counts.
     fn looked_up(&self, w: &str, at: &At<'_>, tally: &mut Tally) -> (Kind, Option<Ref>, bool) {
-        if self.cut(at, w) {
+        if self.cut(at, w, tally) {
             return (Kind::Text, None, false);
         }
         let call = word(at.line, at.pieces, at.k.saturating_add(1)) == "(";
@@ -1616,15 +1617,20 @@ impl<'a> Reader<'a> {
     /// the index, or punctuation outside C (`\`, `$`, `@`, `#`, `?`, `` ` ``
     /// or past ASCII).
     ///
+    /// A `~` destructor looked up in the index is noted as a call of it
+    /// ([`Tally::looked`]), so an edit that renames anything to or from it
+    /// lets the view go.
+    ///
     /// # Arguments
     ///
     /// * `at` - Where the name stands.
     /// * `w` - The name's spelling.
-    fn cut(&self, at: &At<'_>, w: &str) -> bool {
+    /// * `tally` - What the reading looks up.
+    fn cut(&self, at: &At<'_>, w: &str, tally: &mut Tally) -> bool {
         if at.scope.cut.get(at.k).copied().unwrap_or(false) {
             return true;
         }
-        let tilde_before = || {
+        let mut tilde_before = || {
             let member =
                 at.k.checked_sub(2)
                     .and_then(|j| at.pieces.get(j))
@@ -1636,9 +1642,12 @@ impl<'a> Reader<'a> {
                 return true;
             }
             let dtor = format!("~{w}");
-            self.index.functions.contains_key(&dtor) || self.index.shared.contains(&dtor)
+            let found =
+                self.index.functions.contains_key(&dtor) || self.index.shared.contains(&dtor);
+            tally.looked.insert(dtor);
+            found
         };
-        let joins = |j: Option<usize>, after: bool| {
+        let mut joins = |j: Option<usize>, after: bool| {
             j.and_then(|j| at.pieces.get(j))
                 .is_some_and(|(piece, span)| {
                     let p = at.line.get(span.clone()).unwrap_or_default();

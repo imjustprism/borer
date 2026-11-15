@@ -769,7 +769,7 @@ pub struct Edit {
     /// a renamed address went by before and after.
     keys: FxHashSet<(Field, u64)>,
     /// `name(` for each display name a renamed address went by before and
-    /// after, as a body that called it reads.
+    /// after, raw and as a text spells it, as a body that called it reads.
     calls: Vec<String>,
 }
 
@@ -861,7 +861,8 @@ impl Edit {
     }
 
     /// Adds the class `at` goes by under `overlay`, and the call a body
-    /// makes to it by its display name ([`super::name_of`]).
+    /// makes to it by its display name ([`super::name_of`]) and by that
+    /// name as a text spells it ([`super::decompile::expr_render::bare`]).
     ///
     /// # Arguments
     ///
@@ -879,8 +880,15 @@ impl Edit {
             self.fields |= Field::Class.bit();
             self.keys.insert((Field::Class, class.fact()));
         }
-        self.calls
-            .push(declared.map_or_else(|| format!("sub_{at:x}("), |n| format!("{n}(")));
+        let Some(n) = declared else {
+            self.calls.push(format!("sub_{at:x}("));
+            return;
+        };
+        let spelled = super::decompile::expr_render::bare(n);
+        if spelled != n.as_str() {
+            self.calls.push(format!("{spelled}("));
+        }
+        self.calls.push(format!("{n}("));
     }
 }
 
