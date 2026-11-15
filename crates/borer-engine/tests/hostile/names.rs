@@ -20,7 +20,7 @@ const IMPORTS: usize = 1000;
 const NAME_LEN: usize = 64 << 10;
 
 /// Checks that `names` starts with budgeted `shown` copies followed by
-/// sequential `name_<n>` placeholders and a matching `lenient` count.
+/// sequential `<name n>` placeholders and a matching `lenient` count.
 ///
 /// # Arguments
 ///
@@ -34,7 +34,7 @@ fn assert_budgeted(p: &Program, names: &[&str], total: usize, shown: &str, extra
     let kept = names.iter().take_while(|n| **n == shown).count();
     assert!(kept > 0 && kept < total, "kept {kept} of {total}");
     for (k, actual) in names[kept..].iter().enumerate() {
-        assert_eq!(*actual, format!("name_{}", k + 1));
+        assert_eq!(*actual, format!("<name {}>", k + 1));
     }
     let cut = total - kept + extra_cut;
     let expected = format!("{cut} names past the load name budget replaced");
@@ -191,7 +191,7 @@ fn pe_imports_naming_one_long_string_load_within_the_heap_bar() {
         .map(|s| s.name.as_str())
         .collect();
     assert_budgeted(&p, &names, IMPORTS, &shown, 1);
-    assert!(p.headers.libraries[0].starts_with("name_"));
+    assert!(p.headers.libraries[0].starts_with("<name "));
 }
 
 /// PE delay imports keep 200 four-byte characters whole, mark 300 with
@@ -702,7 +702,7 @@ fn macho_dyld_long_import_keeps_ellipsis_and_deduplicates_past_budget() {
     assert_eq!(imports.first().copied(), Some(first_expected.as_str()));
     let tail_name = *imports.last().expect("shared import emitted");
     assert!(
-        tail_name.starts_with("name_"),
+        tail_name.starts_with("<name "),
         "expected post-budget placeholder, got {tail_name}"
     );
     let shared_rows = imports.iter().filter(|&&n| n == tail_name).count();

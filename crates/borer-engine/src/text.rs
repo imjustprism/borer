@@ -101,7 +101,7 @@ pub(crate) fn head(name: &str) -> &str {
 /// [`head`] bounds each copy to what a row can show; `Names` bounds all
 /// copies across a load to twice the file's byte length, so thousands of
 /// small table entries naming one string stay within the per-byte heap bar.
-/// Past the budget, each further non-empty name becomes `name_<n>` in read
+/// Past the budget, each further non-empty name becomes `<name n>` in read
 /// order and [`Names::note`] reports how many were replaced.
 pub(crate) struct Names {
     /// Bytes of name text the load may still copy verbatim.
@@ -193,7 +193,7 @@ impl Names {
     ///
     /// # Returns
     ///
-    /// The owned head of `raw`, or `name_<n>` when the budget is spent.
+    /// The owned head of `raw`, or `<name n>` when the budget is spent.
     pub(crate) fn take(&mut self, raw: &str) -> String {
         if raw.is_empty() {
             return String::new();
@@ -221,7 +221,7 @@ impl Names {
     ///
     /// # Returns
     ///
-    /// The owned C-prefixed head of `raw`, or `name_<n>` when the budget is spent.
+    /// The owned C-prefixed head of `raw`, or `<name n>` when the budget is spent.
     pub(crate) fn take_c_symbol(&mut self, raw: &str) -> String {
         if raw.is_empty() {
             return String::new();
@@ -250,7 +250,7 @@ impl Names {
     ///
     /// # Returns
     ///
-    /// The owned head of `"{left}{sep}{right}"`, or `name_<n>` when spent.
+    /// The owned head of `"{left}{sep}{right}"`, or `<name n>` when spent.
     pub(crate) fn joined(&mut self, left: &str, sep: char, right: &str) -> String {
         if self.left == 0 {
             return self.placeholder();
@@ -258,16 +258,20 @@ impl Names {
         self.take(&format!("{}{sep}{}", head(left), head(right)))
     }
 
-    /// Synthesizes the next replacement name (`name_1`, `name_2`, ...).
+    /// Synthesizes the next replacement name (`<name 1>`, `<name 2>`, ...).
+    ///
+    /// The angle brackets and the space make it a spelling no symbol table
+    /// writes for a name of its own, so an agent cannot mistake it for one.
     ///
     /// # Returns
     ///
     /// A short deterministic placeholder allocated to its exact length.
     pub(crate) fn placeholder(&mut self) -> String {
+        /// The placeholder's opening, before its number.
+        const OPEN: &[u8] = b"<name ";
         self.left = 0;
         self.cut = self.cut.saturating_add(1);
-        let mut buf = [0u8; 25];
-        buf[..5].copy_from_slice(b"name_");
+        let mut buf = [0u8; 27];
         let mut n = self.cut;
         let mut at = buf.len();
         while n > 0 || at == buf.len() {
@@ -276,9 +280,11 @@ impl Names {
             n /= 10;
         }
         let digits = buf.len() - at;
-        buf.copy_within(at.., 5);
-        std::str::from_utf8(&buf[..5 + digits])
-            .unwrap_or("name")
+        buf.copy_within(at.., OPEN.len());
+        buf[..OPEN.len()].copy_from_slice(OPEN);
+        buf[OPEN.len() + digits] = b'>';
+        std::str::from_utf8(&buf[..=OPEN.len() + digits])
+            .unwrap_or("<name>")
             .to_owned()
     }
 
@@ -1181,8 +1187,8 @@ mod tests {
         let mut budget = super::Names::with_budget(8);
         assert_eq!(budget.take(""), "");
         assert_eq!(budget.take("alpha"), "alpha");
-        assert_eq!(budget.take("beta"), "name_1");
-        assert_eq!(budget.joined("a.dll", '!', "f"), "name_2");
+        assert_eq!(budget.take("beta"), "<name 1>");
+        assert_eq!(budget.joined("a.dll", '!', "f"), "<name 2>");
         assert_eq!(
             budget.note().as_deref(),
             Some("2 names past the load name budget replaced")

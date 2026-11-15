@@ -112,7 +112,7 @@ pub(crate) struct Import {
     pub(crate) ordinal: i64,
     /// A weak import: the slot reads zero when no library defines it.
     pub(crate) weak: bool,
-    /// Whether [`Import::name`] is already a `name_<n>` budget placeholder.
+    /// Whether [`Import::name`] is already a `<name n>` budget placeholder.
     pub(crate) replaced: bool,
 }
 

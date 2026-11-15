@@ -988,7 +988,7 @@ fn image<'a>(
 /// Chooses the owned symbol name for `slot` (1-based) of one bound `import`.
 ///
 /// The first slot reuses the verbatim head `dyld::read` already paid for, and
-/// every slot of a replaced import shares its `name_<n>` placeholder; extra
+/// every slot of a replaced import shares its `<name n>` placeholder; extra
 /// slots of a verbatim import pay from `names` so fan-out stays budgeted.
 ///
 /// # Arguments
