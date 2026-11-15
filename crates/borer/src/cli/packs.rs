@@ -34,8 +34,8 @@ pub(super) fn write_file(path: &str, bytes: &[u8]) -> anyhow::Result<()> {
 /// # Arguments
 ///
 /// * `path` - The file, as the caller gave it.
-/// * `kind` - Either `<command> needs a <kind>` (placed before the reason) or
-///   `give a <kind>` (placed after it).
+/// * `kind` - What the command needed (`<command> needs a <kind>`), placed
+///   before the reason.
 /// * `max` - Most bytes the file may hold.
 ///
 /// # Returns
@@ -47,13 +47,8 @@ pub(super) fn write_file(path: &str, bytes: &[u8]) -> anyhow::Result<()> {
 /// When the path is a share or a device (refused before it is opened), is
 /// not a regular file, holds more than `max` bytes, or does not read.
 pub(super) fn read_given(path: &str, kind: &str, max: u64) -> anyhow::Result<Vec<u8>> {
-    borer_engine::program::read_regular(std::path::Path::new(path), max).map_err(|e| {
-        if kind.starts_with("give ") {
-            anyhow::anyhow!("{e:#}; {kind}")
-        } else {
-            anyhow::anyhow!("{kind}; {e:#}")
-        }
-    })
+    borer_engine::program::read_regular(std::path::Path::new(path), max)
+        .map_err(|e| anyhow::anyhow!("{kind}; {e:#}"))
 }
 
 /// Reads a text file a command was given ([`read_given`]).
@@ -147,7 +142,8 @@ pub(super) fn sigmake(args: &[String]) -> anyhow::Result<()> {
     let mut files = Vec::new();
     let max = crate::tools::load::configured_max_file();
     for library in libraries {
-        let bytes = read_given(library, "give a library or an object", max)?;
+        let bytes = borer_engine::program::read_regular(std::path::Path::new(library), max)
+            .map_err(|e| anyhow::anyhow!("{e:#}; give a library or an object"))?;
         let (found, damaged) = libsig::read(&bytes).with_context(|| short_path(library))?;
         for why in &damaged {
             eprintln!("borer: {}: {why}", short_path(library));
