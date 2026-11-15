@@ -189,13 +189,7 @@ pub fn signature_tsv(p: &Program, a: &Analysis, o: &Overlay, va: u64) -> Result<
     let (code, mask) = sig.code_and_mask();
     let named = a.function_at(va).map_or_else(
         || format!("{va:#x}"),
-        |f| {
-            if f.entry == va {
-                name_of(a, o, f.entry)
-            } else {
-                format!("{}+{:#x}", name_of(a, o, f.entry), va - f.entry)
-            }
-        },
+        |f| format!("{}{}", name_of(a, o, f.entry), f.offset_of(va)),
     );
     let verdict = match sig.matches {
         1 => "unique in the image".to_owned(),

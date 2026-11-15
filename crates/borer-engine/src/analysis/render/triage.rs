@@ -1124,12 +1124,10 @@ fn run_head(
     registers: &[(&str, u64)],
     last_ip: u64,
 ) -> String {
-    let ran = match a.function_at(spec.entry) {
-        Some(f) if f.entry != spec.entry => {
-            format!("{}+{:#x}", name_of(a, o, f.entry), spec.entry - f.entry)
-        }
-        _ => name_of(a, o, spec.entry),
-    };
+    let ran = a.function_at(spec.entry).map_or_else(
+        || name_of(a, o, spec.entry),
+        |f| format!("{}{}", name_of(a, o, f.entry), f.offset_of(spec.entry)),
+    );
     let mut out = format!(
         "# ran {} from {:#x}{}: {} after {} steps, {} bytes written\n",
         ran,
@@ -1213,11 +1211,7 @@ fn run_tail(
 /// read against the function list without a second lookup.
 fn where_in(a: &Analysis, o: &Overlay, at: u64) -> String {
     a.function_at(at).map_or_else(String::new, |f| {
-        if f.entry == at {
-            format!("  ({})", name_of(a, o, f.entry))
-        } else {
-            format!("  ({}+{:#x})", name_of(a, o, f.entry), at - f.entry)
-        }
+        format!("  ({}{})", name_of(a, o, f.entry), f.offset_of(at))
     })
 }
 

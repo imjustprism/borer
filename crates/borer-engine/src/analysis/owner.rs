@@ -18,6 +18,26 @@ pub(super) struct BlockRow {
     block: u32,
 }
 
+impl Function {
+    /// Returns where `va` sits from the entry as a name suffix: `+0x8` past
+    /// it, `-0x7fe` before it, empty at it.
+    ///
+    /// [`super::Analysis::function_at`] answers from blocks, and a cold block
+    /// the compiler placed below the entry belongs to the function, so `va`
+    /// can lie on either side.
+    ///
+    /// # Arguments
+    ///
+    /// * `va` - An address in the function.
+    pub fn offset_of(&self, va: u64) -> String {
+        match va.checked_sub(self.entry) {
+            Some(0) => String::new(),
+            Some(past) => format!("+{past:#x}"),
+            None => format!("-{:#x}", self.entry - va),
+        }
+    }
+}
+
 /// Ordering key of an active span: entry ascending, then lowest function and
 /// block indexes last so a range ceiling picks them first.
 type SpanKey = (u64, Reverse<u32>, Reverse<u32>);

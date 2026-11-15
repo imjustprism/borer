@@ -400,10 +400,10 @@ pub fn locate(
     {
         let _ = writeln!(
             out,
-            "function: {} at {:#x} + {:#x}",
+            "function: {}{} (entry {:#x})",
             crate::analysis::name_of(a, overlay, f.entry),
-            f.entry,
-            va - f.entry
+            f.offset_of(va),
+            f.entry
         );
     }
     Ok(out)

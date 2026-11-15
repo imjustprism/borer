@@ -99,15 +99,14 @@ fn nested_function_keeps_outer_block_past_inner_entry() {
     assert!(a.function_at(0x1120).is_none());
 }
 
-/// Attributes a cold block below its entry to its function and clears the listing caveat.
+/// Assembles function `0x2000`, whose `je` reaches a cold block at
+/// `0x1800..0x1806` below its entry, above function `0x1700`.
 ///
-/// Function `0x2000` branches backward to `0x1800`, above function `0x1700`;
-/// `0x1802` resolves to `0x2000`, snaps to instruction boundary `0x1800`, and
-/// carries no `outside every discovered function` caveat, while the `0xcc`
-/// gaps on either side stay `None`.
-#[test]
-fn cold_block_below_entry_resolves_to_owner_without_caveat() {
-    let p = raw_code(
+/// # Returns
+///
+/// The assembled [`Program`].
+fn cold_block_below_entry() -> Program {
+    raw_code(
         0x2000,
         0x2000,
         &[
@@ -136,7 +135,18 @@ fn cold_block_below_entry_resolves_to_owner_without_caveat() {
             ),
         ],
         &[("d", 0x1700)],
-    );
+    )
+}
+
+/// Attributes a cold block below its entry to its function and clears the listing caveat.
+///
+/// Function `0x2000` branches backward to `0x1800`, above function `0x1700`;
+/// `0x1802` resolves to `0x2000`, snaps to instruction boundary `0x1800`, and
+/// carries no `outside every discovered function` caveat, while the `0xcc`
+/// gaps on either side stay `None`.
+#[test]
+fn cold_block_below_entry_resolves_to_owner_without_caveat() {
+    let p = cold_block_below_entry();
     let a = Analysis::compute(&p);
     let c = a.function(0x2000).expect("function with cold block");
     assert!(
@@ -262,4 +272,42 @@ fn arm32_backward_jumped_body_stays_recoverable_at_its_start() {
         Ok(0x1000)
     );
     assert_eq!(a.function_at(0x1000).map(|f| f.entry), Some(0x1000));
+}
+
+/// Spells an address in a cold block below its owner's entry as a negative
+/// offset everywhere a name and offset are printed, never as a wrapped one.
+///
+/// `0x1802` and `0x1800` lie in `0x2000`'s cold block: `locate`, a
+/// signature, an emulated run's head and stop, and a live address all read
+/// `sub_2000-0x7fe` or `sub_2000-0x800`, and addresses past the entry keep `+`.
+#[test]
+fn cold_block_offsets_are_signed_from_the_entry() {
+    let p = cold_block_below_entry();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let f = a.function_at(0x1802).expect("the cold block's owner");
+    assert_eq!(f.offset_of(0x1802), "-0x7fe");
+    assert_eq!(f.offset_of(0x2008), "+0x8");
+    assert_eq!(f.offset_of(0x2000), "");
+    let located = borer_engine::fileinfo::locate(&p, Some(&a), &o, "0x1802").expect("a va");
+    assert!(
+        located.contains("function: sub_2000-0x7fe (entry 0x2000)"),
+        "{located}"
+    );
+    let signed =
+        borer_engine::analysis::render::signature_tsv(&p, &a, &o, 0x1800).expect("a signature");
+    assert!(signed.contains("sub_2000-0x800"), "{signed}");
+    let ran =
+        borer_engine::analysis::render::emulate_tsv(&p, &a, &o, "0x1800,steps=1").expect("a run");
+    assert!(ran.contains("# ran sub_2000-0x800 from 0x1800"), "{ran}");
+    assert!(ran.contains("# at: 0x1800  (sub_2000-0x800)"), "{ran}");
+    let live = borer_engine::live::Rebase {
+        static_base: 0,
+        static_end: 0x3000,
+        live_base: 0x7000_0000,
+    };
+    assert_eq!(
+        live.describe(&p, &a, &o, 0x7000_1802).as_deref(),
+        Some("sub_2000-0x7fe")
+    );
 }

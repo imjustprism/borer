@@ -341,12 +341,11 @@ impl Rebase {
     ) -> Option<String> {
         let va = self.to_static(live)?;
         if let Some(f) = analysis.function_at(va) {
-            let name = name_of(analysis, overlay, f.entry);
-            return Some(if va == f.entry {
-                name
-            } else {
-                format!("{name}+{:#x}", va - f.entry)
-            });
+            return Some(format!(
+                "{}{}",
+                name_of(analysis, overlay, f.entry),
+                f.offset_of(va)
+            ));
         }
         if let Some(class) = analysis.classes.vtables.get(&va) {
             return Some(format!("vftable of {class}"));
