@@ -26,12 +26,17 @@ pub fn mark_ui_thread() {
     IS_UI_THREAD.with(|flag| flag.set(true));
 }
 
-/// Returns how many engine calls have executed on the foreground UI thread.
+/// Returns how many engine calls routed through [`run_engine`] ran on the UI thread.
+///
+/// A call that bypasses [`run_engine`] is not counted here; the test
+/// `only_the_worker_names_engine_compute_calls` keeps every other module of the
+/// app from naming the engine's load, analysis, decompile and listing calls, so
+/// every call the app makes is routed.
 ///
 /// # Returns
 ///
-/// Count of foreground engine invocations since startup; zero when every
-/// engine call ran through [`spawn_engine`].
+/// Count of routed engine calls made on the UI thread since startup; zero when
+/// each ran through [`spawn_engine`].
 #[must_use]
 pub fn ui_engine_calls() -> u64 {
     UI_ENGINE_CALLS.load(Ordering::Relaxed)
@@ -339,6 +344,40 @@ impl TaskEpoch {
 #[cfg(test)]
 mod tests {
     use super::{FilterLatest, TaskEpoch};
+
+    /// No module of the app but this one names the engine's compute calls outside its
+    /// tests, so each such call goes through [`super::run_engine`] and is counted.
+    ///
+    /// # Panics
+    ///
+    /// Panics if another module names `Program::load`, `Analysis::compute`, a decompile
+    /// view or the function listing.
+    #[test]
+    fn only_the_worker_names_engine_compute_calls() {
+        let sources = [
+            ("actions.rs", include_str!("actions.rs")),
+            ("app_view.rs", include_str!("app_view.rs")),
+            ("code_view.rs", include_str!("code_view.rs")),
+            ("history.rs", include_str!("history.rs")),
+            ("lib.rs", include_str!("lib.rs")),
+            ("main.rs", include_str!("main.rs")),
+            ("measure.rs", include_str!("measure.rs")),
+            ("measure/input.rs", include_str!("measure/input.rs")),
+            ("theme_provider.rs", include_str!("theme_provider.rs")),
+        ];
+        let calls = [
+            "Program::load",
+            "Analysis::compute",
+            "decompile::view",
+            "function_rows(",
+        ];
+        for (name, text) in sources {
+            let code = text.split("#[cfg(test)]").next().unwrap_or(text);
+            for call in calls {
+                assert!(!code.contains(call), "{name} names {call}");
+            }
+        }
+    }
 
     /// Older filter requests finishing after a newer one are discarded.
     ///
