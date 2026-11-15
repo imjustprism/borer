@@ -73,10 +73,10 @@ pub enum Ref {
     Global(u64),
     /// A string literal in the image, by its address.
     String(u64),
-    /// A struct or class field, by its byte offset and optional aggregate type.
+    /// A struct or class field, by its aggregate type and byte offset.
     Field {
-        /// The struct or class type when known.
-        ty: Option<Box<str>>,
+        /// The struct or class type.
+        ty: Box<str>,
         /// Byte offset inside the aggregate.
         offset: u64,
     },
@@ -261,8 +261,9 @@ impl View {
             .refs
             .iter()
             .map(|r| match r {
-                Ref::Variable { name, .. } | Ref::Type(name) => name.len(),
-                Ref::Field { ty, .. } => ty.as_deref().map_or(0, str::len),
+                Ref::Variable { name, .. } | Ref::Type(name) | Ref::Field { ty: name, .. } => {
+                    name.len()
+                }
                 Ref::Address(_)
                 | Ref::Function(_)
                 | Ref::Import(_)

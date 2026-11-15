@@ -1041,8 +1041,9 @@ fn widget_and_dialog_overlay() -> Overlay {
     o
 }
 
-/// Unique referenced strings, named data and `field_0x<hex>` offsets link,
-/// while twin strings and unreferenced `.rdata` strings stay unlinked.
+/// Unique referenced strings and named data link, while twin strings,
+/// unreferenced `.rdata` strings and a `field_0x<hex>` on a receiver of no
+/// known type stay unlinked.
 #[test]
 fn strings_named_data_and_field_offsets_link_where_bytes_agree() {
     let hello_va = SLOT + 0x20;
@@ -1119,17 +1120,8 @@ fn strings_named_data_and_field_offsets_link_where_bytes_agree() {
     assert!(twins.iter().all(|t| *t == (Kind::String, None)), "{text}");
     assert!(v.unlinked().ambiguous >= 2, "{:?}", v.unlinked());
     assert_eq!(spelled(&v, "\"stack!\""), [(Kind::String, None)], "{text}");
-    assert_eq!(
-        spelled(&v, "field_0x10"),
-        [(
-            Kind::Field,
-            Some(Ref::Field {
-                ty: None,
-                offset: 0x10,
-            }),
-        )],
-        "{text}"
-    );
+    assert_eq!(spelled(&v, "field_0x10"), [(Kind::Field, None)], "{text}");
+    assert!(v.unlinked().uncorroborated >= 1, "{:?}", v.unlinked());
 }
 
 /// A class `this` links its stated field without sibling confusion, bounds
@@ -1154,7 +1146,7 @@ fn class_this_field_links_without_confusing_a_same_named_sibling() {
         [(
             Kind::Field,
             Some(Ref::Field {
-                ty: Some("Widget".into()),
+                ty: "Widget".into(),
                 offset: 0x18,
             }),
         )],
@@ -1282,7 +1274,7 @@ fn unrelated_rename_keeps_data_and_field_views_intact() {
         [(
             Kind::Field,
             Some(Ref::Field {
-                ty: Some("Widget".into()),
+                ty: "Widget".into(),
                 offset: 0x18,
             }),
         )]
@@ -1319,11 +1311,11 @@ fn member_precedence_utf8_and_singleton_suffixes_hold() {
     let v_utf8 = view_of(&p, &a, &o, TEXT, utf8_snippet).expect("utf8 view");
     assert_eq!(v_utf8.spell(), utf8_snippet);
     let widget_field = Some(Ref::Field {
-        ty: Some("Widget".into()),
+        ty: "Widget".into(),
         offset: 0x18,
     });
     let dialog_field = Some(Ref::Field {
-        ty: Some("Dialog".into()),
+        ty: "Dialog".into(),
         offset: 0x30,
     });
     assert_eq!(
@@ -1416,7 +1408,7 @@ fn applied_global_type_invalidates_cached_view_from_empty_overlay() {
         [(
             Kind::Field,
             Some(Ref::Field {
-                ty: Some("Box".into()),
+                ty: "Box".into(),
                 offset: 0x8,
             }),
         )]
@@ -1445,7 +1437,7 @@ fn linked_field(ty: &str, offset: u64) -> (Kind, Option<Ref>) {
     (
         Kind::Field,
         Some(Ref::Field {
-            ty: Some(ty.into()),
+            ty: ty.into(),
             offset,
         }),
     )
@@ -1558,4 +1550,52 @@ fn quoted_and_commented_apis_stay_untyped_and_unit_structs_align_members() {
         spelled(&v_unknown, "val"),
         [(Kind::Field, None), (Kind::Field, None)]
     );
+}
+
+/// A `field_0x<hex>` links only where its receiver's type lays out a field.
+///
+/// It links on a receiver of known type, at an offset that starts one of
+/// its fields or lies in a gap of a layout that lists every field; one inside a field, past the type, after a member of no
+/// known size, off a class field's start, or on a receiver of no known
+/// type stays unlinked and is counted.
+#[test]
+fn hex_fields_link_only_at_a_field_start_or_a_gap_of_their_type() {
+    let head = concat!(
+        "// signature: uint64_t f(struct Pair *a1, void *a2, struct Odd *a3, Widget *w)\n",
+        "struct Pair { uint64_t head; uint8_t buf[16]; uint8_t tag; };\n",
+        "struct Odd { uint32_t a; struct Missing m; uint32_t b; };\n",
+    );
+    let p = image(&[(TEXT, &[0xc3])], Vec::new()); // ASM: ret
+    let a = Analysis::compute(&p);
+    let o = widget_and_dialog_overlay();
+    let of = |body: &str| view_of(&p, &a, &o, TEXT, &format!("{head}{body}")).expect("a view");
+    let v = of(concat!(
+        "return a1->field_0x0 + a1->field_0x10 + a1->field_0x19 + a1->field_0x40",
+        " + a2->field_0x8 + a1->field_0x8->field_0x0 + a3->field_0x0 + a3->field_0x8",
+        " + w->field_0x18 + w->field_0x8;",
+    ));
+    assert_eq!(
+        spelled(&v, "field_0x0"),
+        [
+            linked_field("Pair", 0x0),
+            (Kind::Field, None),
+            linked_field("Odd", 0x0),
+        ]
+    );
+    assert_eq!(
+        spelled(&v, "field_0x8"),
+        [
+            (Kind::Field, None),
+            linked_field("Pair", 0x8),
+            (Kind::Field, None),
+            (Kind::Field, None),
+        ]
+    );
+    assert_eq!(spelled(&v, "field_0x19"), [linked_field("Pair", 0x19)]);
+    assert_eq!(spelled(&v, "field_0x18"), [linked_field("Widget", 0x18)]);
+    for inside_or_past in ["field_0x10", "field_0x40"] {
+        assert_eq!(spelled(&v, inside_or_past), [(Kind::Field, None)]);
+    }
+    let base = of("return 0;").unlinked().uncorroborated;
+    assert_eq!(v.unlinked().uncorroborated, base + 6, "{:?}", v.unlinked());
 }

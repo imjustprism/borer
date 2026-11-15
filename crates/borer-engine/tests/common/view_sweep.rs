@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use borer_engine::analysis::decompile::view::literal_at;
 use borer_engine::analysis::decompile::{declarations_end, virtual_callees};
-use borer_engine::analysis::utypes::UserType;
+use borer_engine::analysis::utypes::{UserType, width_of};
 use borer_engine::analysis::{Analysis, Overlay, name_of, sdk};
 use borer_engine::program::{BinaryFormat, Program, SymbolKind};
 use borer_engine::view::{Kind, Ref, View};
@@ -138,6 +138,37 @@ fn named_field_matches(
     unit_defined
 }
 
+/// Tells whether a linked `field_0x<hex>` sits where `ty` lays out a field.
+///
+/// It sits there when `offset` starts a field of `ty` or lies past the end of every field before it, by `ty`'s debug layout, else
+/// starts a field of its SDK or class layout; a view whose header defines
+/// `struct ty` reads that layout first, which the sweep takes on trust.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - Its analysis.
+/// * `ty` - Aggregate type name.
+/// * `offset` - Linked byte offset.
+/// * `unit_defined` - Whether the view's header defines `struct ty`.
+fn hex_field_placed(p: &Program, a: &Analysis, ty: &str, offset: u64, unit_defined: bool) -> bool {
+    let word = if p.is_64 { 8 } else { 4 };
+    if let Some(UserType::Struct(s)) = p.debug_types.get(ty) {
+        return s.fields.iter().all(|(&at, f)| {
+            at >= offset
+                || width_of(&p.debug_types, &f.ty, word)
+                    .is_some_and(|w| at.saturating_add(w) <= offset)
+        });
+    }
+    let starts: Vec<u64> = match sdk::structure(ty) {
+        Some(s) => s.at(word).into_iter().map(|(at, _)| at).collect(),
+        None => borer_engine::analysis::classes::field_names(p, a, &Overlay::default(), ty)
+            .into_keys()
+            .collect(),
+    };
+    unit_defined || starts.contains(&offset)
+}
+
 /// Resolves the function scope of line `line` inside `entry`'s view.
 ///
 /// # Arguments
@@ -238,21 +269,15 @@ fn link_ok(
                 && literal_at(p, *va, &own).as_deref() == Some(tok)
         }
         Ref::Field { ty, offset } => {
-            let size_ok = ty
-                .as_deref()
-                .is_none_or(|t| field_offset_below_size(p, t, *offset));
-            let member_ok = if let Some(h) = parse_field_hex(tok) {
-                h == *offset
-            } else {
-                ty.as_deref().is_none_or(|t| {
-                    let unit_defined = (0..decls).any(|i| {
-                        v.line(i)
-                            .is_some_and(|l| l.starts_with(&format!("struct {t} ")))
-                    });
-                    named_field_matches(p, a, t, tok, *offset, unit_defined)
-                })
-            };
-            size_ok && member_ok
+            let unit_defined = (0..decls).any(|i| {
+                v.line(i)
+                    .is_some_and(|l| l.starts_with(&format!("struct {ty} ")))
+            });
+            field_offset_below_size(p, ty, *offset)
+                && match parse_field_hex(tok) {
+                    Some(h) => h == *offset && hex_field_placed(p, a, ty, h, unit_defined),
+                    None => named_field_matches(p, a, ty, tok, *offset, unit_defined),
+                }
         }
         Ref::Variable { function, name } => {
             Some(*function) == scope
@@ -499,21 +524,15 @@ mod tests {
     use borer_engine::program::{Arch, BinaryFormat, Program, Section};
     use std::collections::BTreeMap;
 
+    /// Where [`ret_image`] maps its one instruction.
+    const ENTRY: u64 = 0x1_4000_1000;
+
     /// Known debug and SDK field layouts reject wrong in-bounds member offsets even
     /// when the view's header also defines `struct T`, while keeping the fallback
     /// when no outside layout exists.
     #[test]
     fn header_defined_structs_still_check_known_debug_and_sdk_field_offsets() {
-        const ENTRY: u64 = 0x1_4000_1000;
-        let mut p = Program::raw(
-            vec![0xc3],
-            Arch::X86_64,
-            0x1_4000_0000,
-            Some(ENTRY),
-            vec![Section::mapped(".text", ENTRY, 0, 1, false, true)],
-        );
-        p.format = BinaryFormat::Pe;
-        let a = Analysis::compute(&p);
+        let (p, a) = ret_image();
 
         let dbg_src = concat!(
             "// signature: uint32_t sub_140001000(struct Widget *a1)\n",
@@ -601,5 +620,50 @@ mod tests {
             unborne(&p_cls, &a_cls, ENTRY, &v_bad_cls, bad_cls_src).len(),
             1
         );
+    }
+
+    /// Returns a one-instruction PE image entered at [`ENTRY`], with its
+    /// analysis.
+    fn ret_image() -> (Program, Analysis) {
+        let mut p = Program::raw(
+            vec![0xc3],
+            Arch::X86_64,
+            0x1_4000_0000,
+            Some(ENTRY),
+            vec![Section::mapped(".text", ENTRY, 0, 1, false, true)],
+        );
+        p.format = BinaryFormat::Pe;
+        let a = Analysis::compute(&p);
+        (p, a)
+    }
+
+    /// A linked `field_0x<hex>` inside a field of its type's debug layout is
+    /// an id no outside fact bears out.
+    #[test]
+    fn hex_fields_inside_a_field_of_their_debug_layout_are_unborne() {
+        let (p, a) = ret_image();
+        let src = concat!(
+            "// signature: uint32_t sub_140001000(struct Widget *a1)\n",
+            "struct Widget { uint64_t pad; uint32_t count; };\n",
+            "\n",
+            "return a1->field_0x8;\n",
+        );
+        let v = view_of(&p, &a, &Overlay::default(), ENTRY, src).expect("view");
+        assert!(unborne(&p, &a, ENTRY, &v, src).is_empty());
+        let mut p_known = p;
+        p_known.debug_types.insert(
+            "Widget".to_owned(),
+            UserType::Struct(UserStruct {
+                size: 0x10,
+                fields: BTreeMap::from([(
+                    0x0,
+                    UserField {
+                        name: "bytes".to_owned(),
+                        ty: TypeExpr::Array(Box::new(TypeExpr::U8), 16),
+                    },
+                )]),
+            }),
+        );
+        assert_eq!(unborne(&p_known, &a, ENTRY, &v, src).len(), 1);
     }
 }

@@ -13,9 +13,9 @@ use super::super::fields::api_pointee_tags;
 use super::super::lexer::{Lex, Piece};
 use super::super::line::is_ident;
 use super::super::{cir, ctext, defs, enums, unit};
-use super::{At, Declared, Facts, Role, Spanned, Tally, code, code_before, word};
+use super::{At, Declared, Facts, Role, Spanned, Tally, code, code_before};
 use crate::analysis::attributes::global_addr;
-use crate::analysis::utypes::{ALIAS_DEPTH_MAX, TypeExpr, UserStruct, UserType};
+use crate::analysis::utypes::{self, ALIAS_DEPTH_MAX, TypeExpr, UserStruct, UserType};
 use crate::analysis::{Analysis, EnumSource, Overlay, classes, sdk, typelib};
 use crate::program::{Arch, BinaryFormat, Program};
 use crate::view::{Kind, Ref};
@@ -50,6 +50,8 @@ struct UnitField {
     name: String,
     /// Parsed member type.
     spec: TypeSpec,
+    /// Bytes the member spans, `None` for an array of no stated count.
+    width: Option<u64>,
 }
 
 /// Layout parsed from a unit-defined `struct Tag { ... };` line.
@@ -538,17 +540,18 @@ fn parse_unit_struct(
             if let (Some(cur), Some((elem_w, member_align))) = (offset, layout)
                 && let Some(field_off) = align_up(cur, member_align)
             {
-                fields.push(UnitField {
-                    offset: field_off,
-                    name: name.to_owned(),
-                    spec: spec.clone(),
-                });
-                max_align = max_align.map(|a| a.max(member_align));
                 let total = match (spec.array, arr_count) {
                     (false, _) => Some(elem_w),
                     (true, Some(n)) => elem_w.checked_mul(n),
                     (true, None) => None,
                 };
+                fields.push(UnitField {
+                    offset: field_off,
+                    name: name.to_owned(),
+                    spec,
+                    width: total,
+                });
+                max_align = max_align.map(|a| a.max(member_align));
                 offset = total.and_then(|w| field_off.checked_add(w));
                 if offset.is_none() {
                     max_align = None;
@@ -695,6 +698,13 @@ pub(super) struct FieldCtx<'a, 't> {
 impl FieldCtx<'_, '_> {
     /// Resolves a `Kind::Field` token right after `->` or `.`.
     ///
+    /// The receiver's type decides: a named member links to the one offset
+    /// that type gives it ([`Self::lookup_named_field`]), and a
+    /// `field_0x<hex>` to its offset when that starts a field of the type or
+    /// lies in a gap of its layout ([`Self::starts_field_or_gap`]). A
+    /// `field_0x<hex>` on a receiver of no known type, or at an offset inside
+    /// a field, names nothing the engine shows and is counted.
+    ///
     /// # Arguments
     ///
     /// * `w` - Member token text.
@@ -709,53 +719,28 @@ impl FieldCtx<'_, '_> {
         tally: &mut Tally,
     ) -> (Kind, Option<Ref>, bool) {
         let arrow = prev == "->";
-        let op_idx = code_before(at.pieces, at.k);
-        if let Some(offset) = field_hex_offset(w) {
-            let ty = op_idx
-                .filter(|_| arrow)
-                .and_then(|op| self.declared_base_pointee(op, at))
-                .filter(|t| self.offset_fits(t, offset))
-                .map(Into::into);
-            return (Kind::Field, Some(Ref::Field { ty, offset }), false);
-        }
-        let Some(op) = op_idx else {
-            return (Kind::Field, None, false);
-        };
-        let toks = code_before_op(at.line, at.pieces, op);
-        let Some(base_spec) = self.expr_type(&toks, at, 0, false) else {
-            return (Kind::Field, None, false);
-        };
-        let spec = self.resolve_aliases(base_spec);
-        let expect_ptrs = usize::from(arrow);
-        if spec.ptrs != expect_ptrs || spec.array || !self.is_named_aggregate(&spec.base) {
-            return (Kind::Field, None, false);
-        }
-        self.lookup_named_field(&spec.base, w, tally)
-    }
-
-    /// Returns the declared pointee aggregate type when the expression before
-    /// `->` is a bare variable or parameter declared in scope.
-    ///
-    /// # Arguments
-    ///
-    /// * `op_piece` - Piece index of `->`.
-    /// * `at` - Token position and scope.
-    fn declared_base_pointee(&self, op_piece: usize, at: &At<'_>) -> Option<String> {
-        let base_piece = code_before(at.pieces, op_piece)?;
-        let (piece, _) = at.pieces.get(base_piece)?;
-        if *piece != Piece::Token(Lex::Name) {
-            return None;
-        }
-        if let Some(before) = code_before(at.pieces, base_piece) {
-            let bw = word(at.line, at.pieces, before);
-            if matches!(bw, "->" | "." | "]") {
-                return None;
+        let ty = code_before(at.pieces, at.k).and_then(|op| {
+            let toks = code_before_op(at.line, at.pieces, op);
+            let spec = self.resolve_aliases(self.expr_type(&toks, at, 0, false)?);
+            (spec.ptrs == usize::from(arrow) && !spec.array && self.is_named_aggregate(&spec.base))
+                .then_some(spec.base)
+        });
+        match (field_hex_offset(w), ty) {
+            (Some(offset), Some(ty)) if self.starts_field_or_gap(&ty, offset, tally) => (
+                Kind::Field,
+                Some(Ref::Field {
+                    ty: ty.into(),
+                    offset,
+                }),
+                false,
+            ),
+            (Some(_), _) => {
+                tally.unlinked.uncorroborated += 1;
+                (Kind::Field, None, false)
             }
+            (None, Some(ty)) => self.lookup_named_field(&ty, w, tally),
+            (None, None) => (Kind::Field, None, false),
         }
-        let var = word(at.line, at.pieces, base_piece);
-        let raw = self.scope_var_spec(var, at)?;
-        let spec = self.resolve_aliases(raw);
-        (spec.ptrs == 1 && !spec.array && self.is_named_aggregate(&spec.base)).then_some(spec.base)
     }
 
     /// Looks up a declared variable or parameter's [`TypeSpec`] in `at`'s scope.
@@ -1179,6 +1164,71 @@ impl FieldCtx<'_, '_> {
         None
     }
 
+    /// Returns the fields `ty`'s class code names, by offset, read once per
+    /// view ([`classes::field_names`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `ty` - Class name.
+    /// * `tally` - Holds the tables read so far.
+    fn class_fields<'x>(&self, ty: &str, tally: &'x mut Tally) -> &'x BTreeMap<u64, String> {
+        tally
+            .class_fields
+            .entry(ty.to_owned())
+            .or_insert_with(|| classes::field_names(self.program, self.analysis, self.overlay, ty))
+    }
+
+    /// Tells whether `offset` starts a field of `ty` or lies in a gap of its
+    /// layout, below the type's size.
+    ///
+    /// The first source that lays `ty` out decides, in the order
+    /// [`Self::lookup_named_field`] reads them: the overlay's struct or the
+    /// debug info's, the unit's, the SDK's, then the fields its class code
+    /// names. A gap is an offset past the end of every field before it, in
+    /// a layout that lists every field: a user or debug struct, or a unit
+    /// struct whose every member has a size. The SDK's and a class's fields
+    /// carry no widths, so an offset off their starts may lie inside one and
+    /// starts nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `ty` - Aggregate type name.
+    /// * `offset` - Byte offset a `field_0x<hex>` spells.
+    /// * `tally` - Holds the class tables read so far.
+    fn starts_field_or_gap(&self, ty: &str, offset: u64, tally: &mut Tally) -> bool {
+        let word_bytes = if self.word_bits == 64 { 8 } else { 4 };
+        let user = [self.overlay.types.get(ty), self.program.debug_types.get(ty)]
+            .into_iter()
+            .flatten()
+            .find_map(|t| match t {
+                UserType::Struct(s) => Some(s),
+                UserType::Enum(_) | UserType::Alias(_) => None,
+            });
+        let (fields, complete): (Vec<(u64, Option<u64>)>, bool) = if let Some(s) = user {
+            let known = BTreeMap::new();
+            let fields = s.fields.iter();
+            let widths = fields.map(|(&at, f)| (at, utypes::width_of(&known, &f.ty, word_bytes)));
+            (widths.collect(), true)
+        } else if let Some(u) = self.types.unit_structs.get(ty) {
+            let fields = u.fields.iter().map(|f| (f.offset, f.width));
+            (fields.collect(), u.size.is_some())
+        } else if let Some(s) = sdk::structure(ty) {
+            let starts = s.at(word_bytes).into_iter().map(|(at, _)| (at, None));
+            (starts.collect(), false)
+        } else {
+            let starts = self.class_fields(ty, tally).keys().map(|&at| (at, None));
+            (starts.collect(), false)
+        };
+        let gap = || {
+            complete
+                && self.type_size(ty).is_some()
+                && fields.iter().all(|&(at, w)| {
+                    at > offset || w.is_some_and(|w| at.saturating_add(w) <= offset)
+                })
+        };
+        self.offset_fits(ty, offset) && (fields.iter().any(|&(at, _)| at == offset) || gap())
+    }
+
     /// Resolves a named field `field` on aggregate `ty` to its offset and checks
     /// [`Self::offset_fits`].
     ///
@@ -1227,10 +1277,7 @@ impl FieldCtx<'_, '_> {
             }
         }
         if offsets.is_empty() {
-            let map = tally.class_fields.entry(ty.to_owned()).or_insert_with(|| {
-                classes::field_names(self.program, self.analysis, self.overlay, ty)
-            });
-            for (&off, name) in map.iter() {
+            for (&off, name) in self.class_fields(ty, tally) {
                 if name == field {
                     offsets.insert(off);
                 }
@@ -1244,7 +1291,7 @@ impl FieldCtx<'_, '_> {
                     (
                         Kind::Field,
                         Some(Ref::Field {
-                            ty: Some(ty.into()),
+                            ty: ty.into(),
                             offset: off,
                         }),
                         false,

@@ -878,8 +878,9 @@ fn every_view_reads_the_same_at_any_thread_count() {
 /// The texts are the sweep's ([`swept_texts`]), so nothing decompiles
 /// twice. The census counts call tokens, variables, labels, globals,
 /// string literals (listing unlinked ones by cause and requiring at least
-/// 95% of non-ambiguous string literals to link) and fields (requiring
-/// every `field_0x<hex>` token to carry its offset).
+/// 95% of non-ambiguous string literals to link) and fields; a linked id
+/// must name the thing its token spells, and a linked `field_0x<hex>` its
+/// own offset, at a field start or a gap of its type's layout.
 #[test]
 #[ignore = "set BORER_DOGFOOD to a binary path to run this sweep"]
 fn every_view_spells_its_text_and_links_only_what_the_code_shows() {
@@ -930,11 +931,6 @@ fn every_view_spells_its_text_and_links_only_what_the_code_shows() {
         "{} ids no fact bears out: {:?}",
         bad.len(),
         &bad[..bad.len().min(10)]
-    );
-    assert_eq!(
-        census.field_hex.1, census.field_hex.0,
-        "field_0x tokens missing their offset: {:?}",
-        census.field_hex
     );
     assert!(
         census.resolvable_strings.0 == 0
