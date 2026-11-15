@@ -257,7 +257,7 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
 /// download fails.
 fn fetch_pdb(word: &str, args: &[String]) -> anyhow::Result<()> {
     let path = args.get(1).with_context(|| needs_a_binary(word))?;
-    let program = crate::tools::load::load_program(
+    let (program, _) = crate::tools::load::load_program(
         std::path::Path::new(path),
         false,
         None,

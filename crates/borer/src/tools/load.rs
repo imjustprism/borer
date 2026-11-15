@@ -76,7 +76,9 @@ pub(crate) fn configured_max_file() -> u64 {
 /// Loads a program file for the server or the CLI.
 ///
 /// A companion PDB, when it applies, is looked for in the symbol cache
-/// too ([`symsrv::cache_dir`]). A file past `max` is refused naming
+/// too ([`symsrv::cache_dir`]); a cache directory that is refused is
+/// skipped with a note when the program names a PDB, so a cached one that
+/// did not apply says why. A file past `max` is refused naming
 /// [`MAX_FILE_ENV`], which lifts the limit: the engine knows the limit
 /// only as a number.
 ///
@@ -87,6 +89,10 @@ pub(crate) fn configured_max_file() -> u64 {
 /// * `layout` - Where a raw file's bytes go, `None` to read its headers.
 /// * `max` - Most bytes the file may hold ([`configured_max_file`]).
 ///
+/// # Returns
+///
+/// The program, and the note on a refused symbol cache, if one was.
+///
 /// # Errors
 ///
 /// As [`Program::load_with_symsrv_max`], or [`Program::load_layout_max`]
@@ -96,15 +102,21 @@ pub(crate) fn load_program(
     apply_pdb: bool,
     layout: Option<&Layout>,
     max: u64,
-) -> anyhow::Result<Program> {
+) -> anyhow::Result<(Program, Option<String>)> {
+    let (symsrv, refused) = match symsrv::cache_dir() {
+        Ok(dir) => (dir, None),
+        Err(why) => (None, Some(why)),
+    };
     let loaded = match layout {
         Some(layout) => Program::load_layout_max(path, layout, max),
-        None => {
-            let symsrv = symsrv::cache_dir().ok().flatten().filter(|_| apply_pdb);
-            Program::load_with_symsrv_max(path, apply_pdb, symsrv.as_deref(), max)
-        }
+        None => Program::load_with_symsrv_max(
+            path,
+            apply_pdb,
+            symsrv.as_deref().filter(|_| apply_pdb),
+            max,
+        ),
     };
-    loaded.map_err(|e| {
+    let program = loaded.map_err(|e| {
         if e.is::<TooLarge>() {
             anyhow::anyhow!(
                 "{e:#}; set {MAX_FILE_ENV} (bytes, or 4G; 0 for no limit) to load it anyway"
@@ -112,7 +124,11 @@ pub(crate) fn load_program(
         } else {
             e
         }
-    })
+    })?;
+    let note = refused
+        .filter(|_| apply_pdb && layout.is_none() && program.pdb_record.is_some())
+        .map(|why| format!("skipped the symbol cache: {why}"));
+    Ok((program, note))
 }
 
 /// Says where a relative path was looked for, when it was relative.
@@ -299,7 +315,7 @@ impl BorerServer {
                 fault_text(e.as_ref())
             ))
         })?;
-        let mut program = loaded.map_err(|e| {
+        let (mut program, cache_note) = loaded.map_err(|e| {
             err_params(format!(
                 "load failed: {e:#}{}",
                 relative_note(Path::new(&path), std::env::current_dir().ok().as_deref())
@@ -336,7 +352,7 @@ impl BorerServer {
                 dropped.comments.len()
             ));
         }
-        for note in notes {
+        for note in cache_note.into_iter().chain(notes) {
             let _ = writeln!(summary, "{note}");
         }
         if let Some(s) = lock(&self.live).as_mut() {

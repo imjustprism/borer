@@ -119,6 +119,7 @@ impl BorerServer {
             None,
             crate::tools::load::configured_max_file(),
         )
+        .map(|(program, _)| program)
         .map_err(|e| err_params(format!("load failed: {e:#}")))?;
         if !prog.arch.supports(Feature::Discover) {
             return Err(err_params(format!(

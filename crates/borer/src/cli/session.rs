@@ -62,8 +62,11 @@ pub(super) fn open(args: &[String], load: &Loading) -> anyhow::Result<(Arc<Packs
         &format!("loading {}", file_name(file)),
         &head_bytes(file, max_file),
     );
-    let program = crate::tools::load::load_program(file, apply_pdb, layout, max_file)
+    let (program, note) = crate::tools::load::load_program(file, apply_pdb, layout, max_file)
         .with_context(|| format!("loading {}", short_path(path)))?;
+    if let Some(note) = note {
+        eprintln!("borer: {note}");
+    }
     Ok((named, program))
 }
 
