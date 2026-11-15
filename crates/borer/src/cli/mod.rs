@@ -11,7 +11,7 @@ use borer_engine::analysis::{
 };
 use borer_engine::isa::Isa;
 use borer_engine::pack::Pack;
-use borer_engine::program::{Feature, Program};
+use borer_engine::program::Feature;
 use borer_engine::table::Window;
 use borer_engine::text::{one_line, quoted, short_path};
 use borer_engine::{disasm, entropy, hexdump as hexfmt, memory, num, script, search};
@@ -257,7 +257,7 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
 /// download fails.
 fn fetch_pdb(word: &str, args: &[String]) -> anyhow::Result<()> {
     let path = args.get(1).with_context(|| needs_a_binary(word))?;
-    let program = Program::load_with_symsrv_max(
+    let program = crate::tools::load::load_program(
         std::path::Path::new(path),
         false,
         None,

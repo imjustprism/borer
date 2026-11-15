@@ -3,14 +3,14 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use borer::project::Identity;
 use borer_engine::analysis::{EnumSource, Overlay, stated};
 use borer_engine::layout::Layout;
 use borer_engine::num;
-use borer_engine::program::{Feature, Program};
+use borer_engine::program::{Feature, Program, TooLarge};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ErrorData, tool, tool_router};
 
@@ -71,6 +71,48 @@ pub(crate) fn max_file_size(value: Option<&str>) -> u64 {
 /// Reads the configured `BORER_MAX_FILE` limit from the environment.
 pub(crate) fn configured_max_file() -> u64 {
     max_file_size(std::env::var(MAX_FILE_ENV).ok().as_deref())
+}
+
+/// Loads a program file for the server or the CLI.
+///
+/// A companion PDB, when it applies, is looked for in the symbol cache
+/// too ([`symsrv::cache_dir`]). A file past `max` is refused naming
+/// [`MAX_FILE_ENV`], which lifts the limit: the engine knows the limit
+/// only as a number.
+///
+/// # Arguments
+///
+/// * `path` - The file, or `<file>@<offset>`.
+/// * `apply_pdb` - Whether a companion PDB's symbols apply.
+/// * `layout` - Where a raw file's bytes go, `None` to read its headers.
+/// * `max` - Most bytes the file may hold ([`configured_max_file`]).
+///
+/// # Errors
+///
+/// As [`Program::load_with_symsrv_max`], or [`Program::load_layout_max`]
+/// with a layout.
+pub(crate) fn load_program(
+    path: &Path,
+    apply_pdb: bool,
+    layout: Option<&Layout>,
+    max: u64,
+) -> anyhow::Result<Program> {
+    let loaded = match layout {
+        Some(layout) => Program::load_layout_max(path, layout, max),
+        None => {
+            let symsrv = symsrv::cache_dir().ok().flatten().filter(|_| apply_pdb);
+            Program::load_with_symsrv_max(path, apply_pdb, symsrv.as_deref(), max)
+        }
+    };
+    loaded.map_err(|e| {
+        if e.is::<TooLarge>() {
+            anyhow::anyhow!(
+                "{e:#}; set {MAX_FILE_ENV} (bytes, or 4G; 0 for no limit) to load it anyway"
+            )
+        } else {
+            e
+        }
+    })
 }
 
 /// Says where a relative path was looked for, when it was relative.
@@ -249,16 +291,7 @@ impl BorerServer {
         .map_err(|e| err_params(format!("load failed: {e:#}")))?;
         let max_file = configured_max_file();
         let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let path = PathBuf::from(&path);
-            match &layout {
-                Some(layout) => Program::load_layout_max(&path, layout, max_file),
-                None => Program::load_with_symsrv_max(
-                    &path,
-                    apply_pdb,
-                    symsrv::cache_dir().ok().flatten().as_deref(),
-                    max_file,
-                ),
-            }
+            load_program(Path::new(&path), apply_pdb, layout.as_ref(), max_file)
         }))
         .map_err(|e| {
             err_internal(format!(
@@ -668,7 +701,7 @@ mod tests {
         assert_eq!(max_file_size(Some("lots")), MAX_FILE_DEFAULT);
         assert_eq!(max_file_size(Some("99999999999999G")), u64::MAX);
         let exe = std::env::current_exe().expect("the test binary");
-        let refused = Program::load_with_symsrv_max(&exe, false, None, 16)
+        let refused = super::load_program(&exe, false, None, 16)
             .expect_err("past the limit")
             .to_string();
         assert!(refused.contains(MAX_FILE_ENV), "{refused}");

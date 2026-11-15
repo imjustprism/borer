@@ -62,17 +62,8 @@ pub(super) fn open(args: &[String], load: &Loading) -> anyhow::Result<(Arc<Packs
         &format!("loading {}", file_name(file)),
         &head_bytes(file, max_file),
     );
-    let program = match layout {
-        Some(layout) => Program::load_layout_max(file, layout, max_file),
-        None => {
-            let symsrv = crate::symsrv::cache_dir()
-                .ok()
-                .flatten()
-                .filter(|_| apply_pdb);
-            Program::load_with_symsrv_max(file, apply_pdb, symsrv.as_deref(), max_file)
-        }
-    }
-    .with_context(|| format!("loading {}", short_path(path)))?;
+    let program = crate::tools::load::load_program(file, apply_pdb, layout, max_file)
+        .with_context(|| format!("loading {}", short_path(path)))?;
     Ok((named, program))
 }
 

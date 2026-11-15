@@ -2,7 +2,7 @@
 //! around them, and how a server starts or resumes.
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use borer_engine::analysis::{Analysis, EnumSource, Overlay, parse_addr};
@@ -17,7 +17,6 @@ use crate::BorerServer;
 use crate::errors::{err_internal, err_params};
 use crate::handover::Resume;
 use crate::params::{LoadBinaryParams, RawArch};
-use crate::symsrv;
 
 /// The raw layout `load_binary` was asked to map a file by (its `arch`,
 /// `base`, `entry` and `regions`, as given); all `None` when the file's
@@ -114,10 +113,10 @@ impl BorerServer {
     /// 64-bit one pairs functions that share nothing and reports it as a
     /// change.
     pub(crate) fn load_other(&self, other: &str) -> Result<Program, ErrorData> {
-        let prog = Program::load_with_symsrv_max(
-            &PathBuf::from(other),
+        let prog = crate::tools::load::load_program(
+            Path::new(other),
             *read_lock(&self.pdb_applied),
-            symsrv::cache_dir().ok().flatten().as_deref(),
+            None,
             crate::tools::load::configured_max_file(),
         )
         .map_err(|e| err_params(format!("load failed: {e:#}")))?;

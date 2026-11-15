@@ -392,6 +392,20 @@ impl ReadFail {
     }
 }
 
+/// A program file past the size limit its load was given.
+///
+/// Its own type so the caller that set the limit can say how to lift it.
+#[derive(Debug)]
+pub struct TooLarge(String);
+
+impl std::fmt::Display for TooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for TooLarge {}
+
 /// Reads a program file whole within `max` bytes, refusing what is not a
 /// regular file.
 ///
@@ -406,20 +420,18 @@ impl ReadFail {
 ///
 /// # Errors
 ///
-/// Returns the I/O error of reading the file, the refusal of a file past
-/// `max` bytes (naming `BORER_MAX_FILE`), or the refusal of a name that is
-/// a device, a directory or anything else that is not a regular file.
+/// Returns the I/O error of reading the file, a [`TooLarge`] for a file
+/// past `max` bytes, or the refusal of a name that is a device, a
+/// directory or anything else that is not a regular file.
 fn read_program_file(path: &Path, max: u64) -> anyhow::Result<Vec<u8>> {
-    match read_regular_raw(path, max) {
-        Ok(bytes) => Ok(bytes),
-        Err(ReadFail::Over(shown, len)) => Err(anyhow!(
-            "{shown} is {len} bytes, past the {max}-byte limit: borer reads a file into memory whole and its analysis takes several times that. Set BORER_MAX_FILE (bytes, or 4G; 0 for no limit) to load it anyway, or load raw ranges with arch and regions"
-        )),
-        Err(ReadFail::Grew(shown)) => Err(anyhow!(
-            "{shown} grew past the {max}-byte limit: set BORER_MAX_FILE (bytes, or 4G; 0 for no limit) to load it anyway"
-        )),
-        Err(ReadFail::Other(e)) => Err(anyhow!("{e:#}; give a path to a program to analyze")),
-    }
+    read_regular_raw(path, max).map_err(|fail| match fail {
+        ReadFail::Over(shown, len) => TooLarge(format!(
+            "{shown} is {len} bytes, past the {max}-byte limit: a file is read into memory whole and its analysis takes several times that"
+        ))
+        .into(),
+        ReadFail::Grew(shown) => TooLarge(format!("{shown} grew past the {max}-byte limit")).into(),
+        ReadFail::Other(e) => anyhow!("{e:#}; give a path to a program to analyze"),
+    })
 }
 
 /// Reads a file whole when it is a regular one no larger than a cap.

@@ -1412,3 +1412,30 @@ fn read_regular_allocates_exact_capacity_for_the_stated_size() {
     assert_eq!(bytes.len(), 100_001);
     assert_eq!(bytes.capacity(), bytes.len());
 }
+
+/// A program past the load's size limit is refused as a
+/// [`borer_engine::program::TooLarge`] that states the limit as a number
+/// and names no server option, so each caller says how to lift its own.
+///
+/// # Panics
+///
+/// When the oversized file loads, or the refusal is not a `TooLarge` or
+/// names a `BORER_` variable.
+#[test]
+fn a_program_past_the_limit_is_refused_in_engine_words() {
+    let file = std::env::temp_dir().join(format!("borer_too_large_{}.bin", std::process::id()));
+    std::fs::write(&file, [0x90u8; 32]).expect("the fixture is writable");
+    let loaded = borer_engine::program::Program::load_with_symsrv_max(&file, false, None, 16);
+    std::fs::remove_file(&file).expect("the fixture is removed");
+    let refused = loaded.expect_err("past the limit");
+    assert!(
+        refused.is::<borer_engine::program::TooLarge>(),
+        "{refused:#}"
+    );
+    let said = format!("{refused:#}");
+    assert!(said.contains("past the 16-byte limit"), "{said}");
+    assert!(
+        !said.contains("BORER_") && !said.contains("regions"),
+        "{said}"
+    );
+}
