@@ -66,6 +66,18 @@ fn parse_field_hex(word: &str) -> Option<u64> {
         .flatten()
 }
 
+/// Parses a `g<bits>_<hex>` global's spelling into the address it names.
+///
+/// # Arguments
+///
+/// * `word` - Candidate token spelling.
+fn global_hex(word: &str) -> Option<u64> {
+    let (bits, hex) = word.strip_prefix('g')?.split_once('_')?;
+    (!bits.is_empty() && bits.bytes().all(|b| b.is_ascii_digit()) && !hex.is_empty())
+        .then(|| u64::from_str_radix(hex, 16).ok())
+        .flatten()
+}
+
 /// Tells whether `offset` lies strictly below `ty`'s known debug or SDK size.
 ///
 /// # Arguments
@@ -225,18 +237,21 @@ fn link_ok(
     let f = scope.and_then(|s| a.function(s));
     match r {
         Ref::Function(e) => {
-            Some(*e) == scope
-                || f.is_some_and(|f| {
-                    f.callees.contains(e)
-                        || f.callees
-                            .iter()
-                            .any(|c| a.function(*c).and_then(|g| g.bound) == Some(*e))
-                })
-                || referenced(*e)
-                || (scope == Some(entry)
-                    && virtuals
-                        .get_or_insert_with(|| virtual_callees(p, a, &Overlay::default(), entry))
-                        .contains(e))
+            spelled(&name_of(a, &Overlay::default(), *e)) == tok
+                && (Some(*e) == scope
+                    || f.is_some_and(|f| {
+                        f.callees.contains(e)
+                            || f.callees
+                                .iter()
+                                .any(|c| a.function(*c).and_then(|g| g.bound) == Some(*e))
+                    })
+                    || referenced(*e)
+                    || (scope == Some(entry)
+                        && virtuals
+                            .get_or_insert_with(|| {
+                                virtual_callees(p, a, &Overlay::default(), entry)
+                            })
+                            .contains(e)))
         }
         Ref::Import(s) => {
             let imports = || p.symbols.iter().filter(|y| y.kind == SymbolKind::Import);
@@ -264,14 +279,11 @@ fn link_ok(
                 || p.zero_fill_at(*va).is_some()
                 || p.in_headers(*va)
                 || (p.format == BinaryFormat::Pe && *va == p.image_base);
-            mapped && referenced(*va)
+            mapped && referenced(*va) && global_hex(tok).is_none_or(|g| g == *va)
         }
         Ref::String(va) => {
             let own = scope
-                .map(|s| {
-                    borer_engine::analysis::bare_name(&name_of(a, &Overlay::default(), s))
-                        .to_owned()
-                })
+                .map(|s| spelled(&name_of(a, &Overlay::default(), s)))
                 .unwrap_or_default();
             p.section_at(*va).is_some()
                 && referenced(*va)
@@ -507,7 +519,7 @@ fn classify_unlinked_string(
         return "helper_scope";
     };
     let counts = cache.entry(s).or_insert_with(|| {
-        let own = borer_engine::analysis::bare_name(&name_of(a, &Overlay::default(), s)).to_owned();
+        let own = spelled(&name_of(a, &Overlay::default(), s));
         let refs: BTreeSet<u64> = a.refs_from(s).into_iter().map(|(t, _)| t).collect();
         let mut by = BTreeMap::new();
         for va in refs {
@@ -674,5 +686,20 @@ mod tests {
             }),
         );
         assert_eq!(unborne(&p_known, &a, ENTRY, &v, src).len(), 1);
+    }
+
+    /// A function linked by a name the program does not give it is an id
+    /// no outside fact bears out.
+    #[test]
+    fn functions_linked_by_a_name_they_do_not_go_by_are_unborne() {
+        let (p, a) = ret_image();
+        let mut renamed = Overlay::default();
+        renamed.names.insert(ENTRY, "renamed_fn".to_owned());
+        let call = "// signature: void renamed_fn(void)\n\nrenamed_fn();\n";
+        let v_call = view_of(&p, &a, &renamed, ENTRY, call).expect("call view");
+        assert!(!unborne(&p, &a, ENTRY, &v_call, call).is_empty());
+        let plain = "// signature: void sub_140001000(void)\n\nsub_140001000();\n";
+        let v_plain = view_of(&p, &a, &Overlay::default(), ENTRY, plain).expect("plain view");
+        assert!(unborne(&p, &a, ENTRY, &v_plain, plain).is_empty());
     }
 }
