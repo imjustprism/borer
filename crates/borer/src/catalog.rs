@@ -209,7 +209,7 @@ pub(crate) const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
     ),
     (
         "borer://yara/{functions}",
-        "A YARA rule that finds the functions again: each one's unique byte signature and the strings it references, under the file's magic; functions are names or entries, comma-separated. The rule ends at its closing brace: save it up to there, since borer's own note lines follow, or use the CLI's borer yara, which writes it alone",
+        "A YARA rule finding the functions by bytes past the prologue and specific strings, under the file's magic, noting any left out; functions are names or entries, comma-separated. The rule ends at its closing brace: save it up to there, since borer's own note lines follow, or use the CLI's borer yara, which writes it alone",
         "borer://yara/{entry}",
     ),
     (
