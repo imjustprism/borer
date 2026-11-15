@@ -462,7 +462,7 @@ fn is_cookie_frame_store(
         && instr.op1_register().full_register() == cookie
 }
 
-/// Tells whether `instr` adjusts `rsp` or `esp` downward with an immediate.
+/// Tells whether `instr` adjusts `rsp` or `esp` downward.
 ///
 /// # Arguments
 ///
@@ -470,9 +470,17 @@ fn is_cookie_frame_store(
 ///
 /// # Returns
 ///
-/// `true` for `sub` or `and` on `rsp`/`esp`, or `add` with a negative immediate.
+/// `true` for `sub` or `and` on `rsp`/`esp` with an immediate, `add` with a
+/// negative immediate, or `sub` by a register (the size a stack probe checked).
 fn is_sp_adjust(instr: &Instruction) -> bool {
-    if instr.op0_kind() != OpKind::Register || !crate::analysis::is_imm(instr.op1_kind()) {
+    if instr.op0_kind() != OpKind::Register {
+        return false;
+    }
+    if instr.op1_kind() == OpKind::Register {
+        return instr.mnemonic() == Mnemonic::Sub
+            && matches!(instr.op0_register(), Register::RSP | Register::ESP);
+    }
+    if !crate::analysis::is_imm(instr.op1_kind()) {
         return false;
     }
     match (instr.op0_register(), instr.mnemonic()) {
@@ -543,6 +551,41 @@ enum Cookie {
     Stored(Register),
 }
 
+/// Tells whether `instr` loads the frame size for a stack probe (`__chkstk`).
+///
+/// # Arguments
+///
+/// * `p` - The loaded image, for its architecture.
+/// * `instr` - Candidate `mov eax, imm` instruction.
+/// * `after` - Following decoded instructions.
+///
+/// # Returns
+///
+/// `true` when `instr` sets `eax` or `rax` to an immediate and a call follows;
+/// on x86-64 the call must be followed by `sub rsp, rax`, since only x86's
+/// probe moves the stack pointer itself.
+fn is_probe_size(
+    p: &Program,
+    instr: &Instruction,
+    after: &[(Instruction, Vec<Option<u8>>)],
+) -> bool {
+    let sub_rax = after.get(1).is_some_and(|(n, _)| {
+        n.mnemonic() == Mnemonic::Sub
+            && n.op0_kind() == OpKind::Register
+            && n.op0_register() == Register::RSP
+            && n.op1_kind() == OpKind::Register
+            && n.op1_register() == Register::RAX
+    });
+    instr.mnemonic() == Mnemonic::Mov
+        && instr.op0_kind() == OpKind::Register
+        && matches!(instr.op0_register(), Register::EAX | Register::RAX)
+        && crate::analysis::is_imm(instr.op1_kind())
+        && after
+            .first()
+            .is_some_and(|(n, _)| n.flow_control() == FlowControl::Call)
+        && (p.arch == Arch::X86 || sub_rax)
+}
+
 /// Registers tracked across a function's leading prologue idiom.
 #[derive(Debug, Default)]
 struct Prologue {
@@ -550,6 +593,8 @@ struct Prologue {
     sp_alias: Option<Register>,
     /// Stack-cookie setup state.
     cookie: Cookie,
+    /// A stack probe's frame size is loaded and its call is next.
+    probe: bool,
 }
 
 impl Prologue {
@@ -614,7 +659,10 @@ impl Prologue {
     ///
     /// # Returns
     ///
-    /// `true` when `instr` belongs to the leading prologue or padding idiom.
+    /// `true` when `instr` belongs to the leading prologue or padding idiom:
+    /// frame setup, a stack probe, the stack cookie, register saves and
+    /// argument homes, or the zeroing of a frame slot (clang `-O0` clears
+    /// `main`'s return-value slot).
     fn step(
         &mut self,
         p: &Program,
@@ -652,6 +700,22 @@ impl Prologue {
             return true;
         }
         if is_sp_adjust(instr) {
+            return true;
+        }
+        if is_probe_size(p, instr, after) {
+            self.probe = true;
+            return true;
+        }
+        if self.probe && instr.flow_control() == FlowControl::Call {
+            self.probe = false;
+            return true;
+        }
+        if instr.mnemonic() == Mnemonic::Mov
+            && instr.op0_kind() == OpKind::Memory
+            && crate::analysis::is_imm(instr.op1_kind())
+            && instr.immediate(1) == 0
+            && on_frame(instr, self.sp_alias)
+        {
             return true;
         }
         if is_cookie_load(p, instr, after, self.sp_alias) {
@@ -1625,5 +1689,56 @@ mod tests {
         let canary_rule = yara_rule(&canary_prog, &canary_ana, &Overlay::default(), &[0x40_1000])
             .expect("rule on string when canary prologue is stripped");
         assert!(!canary_rule.contains("$c0"), "{canary_rule}");
+    }
+
+    /// Stack probes, cookies and zeroed frame slots make no code string.
+    ///
+    /// A stack probe (`mov eax, size; call __chkstk; sub rsp, rax`), the `/GS`
+    /// cookie after it, and clang `-O0`'s zeroed return-value slot before the
+    /// argument homes are prologue idiom.
+    ///
+    /// # Panics
+    ///
+    /// When either prologue yields a code string from a body shorter than
+    /// [`super::OWN_MIN`].
+    #[test]
+    fn stack_probes_cookies_and_zeroed_slots_are_prologue_idiom() {
+        use super::{Analysis, yara_signature};
+
+        let mut probe = vec![
+            0x48, 0x89, 0x5c, 0x24, 0x08, // ASM: mov [rsp + 8], rbx
+            0x57, // ASM: push rdi
+            0xb8, 0x30, 0x10, 0x00, 0x00, // ASM: mov eax, 0x1030
+            0xe8, 0x50, 0x00, 0x00, 0x00, // ASM: call 0x401060
+            0x48, 0x2b, 0xe0, // ASM: sub rsp, rax
+            0x48, 0x8b, 0x05, 0x56, 0x00, 0x00, 0x00, // ASM: mov rax, [rip + 0x56]
+            0x48, 0x33, 0xc4, // ASM: xor rax, rsp
+            0x48, 0x89, 0x84, 0x24, 0x20, 0x10, 0x00, 0x00, // ASM: mov [rsp + 0x1020], rax
+            0x89, 0xc8, // ASM: mov eax, ecx
+            0x5f, // ASM: pop rdi
+            0xc3, // ASM: ret
+        ];
+        probe.resize(0x60, 0xcc); // ASM: int3 padding
+        probe.push(0xc3); // ASM: ret
+        probe.resize(0x78, 0);
+        let clang_main: &[u8] = &[
+            0x55, // ASM: push rbp
+            0x48, 0x89, 0xe5, // ASM: mov rbp, rsp
+            0x48, 0x83, 0xec, 0x20, // ASM: sub rsp, 0x20
+            0xc7, 0x45, 0xfc, 0x00, 0x00, 0x00, 0x00, // ASM: mov dword [rbp - 4], 0
+            0x89, 0x7d, 0xf8, // ASM: mov [rbp - 8], edi
+            0x48, 0x89, 0x75, 0xf0, // ASM: mov [rbp - 0x10], rsi
+            0x31, 0xc0, // ASM: xor eax, eax
+            0x48, 0x83, 0xc4, 0x20, // ASM: add rsp, 0x20
+            0x5d, // ASM: pop rbp
+            0xc3, // ASM: ret
+        ];
+        for code in [probe.as_slice(), clang_main] {
+            let prog = elf_x64(code, &[]);
+            let ana = Analysis::compute(&prog);
+            let f = ana.function_at(0x40_1000).expect("a function at the entry");
+            let why = yara_signature(&prog, f).expect_err("no code string");
+            assert!(why.contains("prologue"), "{why}");
+        }
     }
 }
