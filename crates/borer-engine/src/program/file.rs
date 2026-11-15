@@ -112,8 +112,15 @@ pub(super) fn parse_object(
 
 /// Most scan steps goblin's permissive ELF string-table preparse may take.
 const PERMISSIVE_STRTAB_STEPS_MAX: u128 = 64 << 20;
-/// Most `(offset, &str)` entries goblin's permissive ELF preparses may hold.
-const PERMISSIVE_STRTAB_ENTRIES_MAX: u128 = 2 << 20;
+/// File bytes per `(offset, &str)` entry goblin's permissive preparses hold.
+///
+/// An entry takes 24 bytes and its vector up to twice that while it grows,
+/// so one per 8 file bytes keeps the preparse under 6 bytes of heap per
+/// file byte, inside the load's 8.
+const PERMISSIVE_STRTAB_BYTES_PER_ENTRY: usize = 8;
+/// Entries the permissive preparse may hold however small the file, so a
+/// tiny damaged file with a few short names still reads.
+const PERMISSIVE_STRTAB_ENTRIES_MIN: usize = 4096;
 
 /// Counts the byte-scan steps and entries goblin's permissive `Strtab` loop
 /// takes on `bytes[offset..offset + len]`, stopping past the permissive caps.
@@ -128,11 +135,13 @@ const PERMISSIVE_STRTAB_ENTRIES_MAX: u128 = 2 << 20;
 /// * `bytes` - Whole ELF file image.
 /// * `offset` - String table file offset.
 /// * `len` - Stated string table byte length.
+/// * `entries_max` - Most entries the preparse may hold, past which the
+///   count stops.
 ///
 /// # Returns
 ///
 /// `(steps, entries)` consumed before finishing or exceeding a permissive cap.
-fn strtab_cost(bytes: &[u8], offset: usize, len: usize) -> (u128, u128) {
+fn strtab_cost(bytes: &[u8], offset: usize, len: usize, entries_max: u128) -> (u128, u128) {
     let Some(avail) = bytes.get(offset..) else {
         return (0, 0);
     };
@@ -159,7 +168,7 @@ fn strtab_cost(bytes: &[u8], offset: usize, len: usize) -> (u128, u128) {
         let r = u128::try_from(runs).unwrap_or(0);
         steps += r * top - r * r.saturating_sub(1) / 2;
         entries += r;
-        if steps > PERMISSIVE_STRTAB_STEPS_MAX || entries > PERMISSIVE_STRTAB_ENTRIES_MAX {
+        if steps > PERMISSIVE_STRTAB_STEPS_MAX || entries > entries_max {
             return (steps, entries);
         }
         pos = pos.saturating_add(chunk_len).saturating_add(1);
@@ -170,6 +179,9 @@ fn strtab_cost(bytes: &[u8], offset: usize, len: usize) -> (u128, u128) {
 /// Checks whether goblin's permissive ELF retry stays within the string-table
 /// scan and entry budgets across `e_shstrndx`, `.symtab`'s linked table, and
 /// `DT_STRTAB`.
+///
+/// The entries the three tables hold together are capped by the file's
+/// length ([`PERMISSIVE_STRTAB_BYTES_PER_ENTRY`]).
 ///
 /// # Arguments
 ///
@@ -230,16 +242,20 @@ fn permissive_elf_affordable(bytes: &[u8]) -> anyhow::Result<bool> {
             .ok()
             .flatten()
             .map(|d| (d.info.strtab, d.info.strsz));
+        let entries_max = u128::try_from(
+            (bytes.len() / PERMISSIVE_STRTAB_BYTES_PER_ENTRY).max(PERMISSIVE_STRTAB_ENTRIES_MIN),
+        )
+        .unwrap_or(u128::MAX);
         let mut steps: u128 = 0;
         let mut entries: u128 = 0;
         for (off, len) in [sec_range(usize::from(header.e_shstrndx)), sym_str, dyn_str]
             .into_iter()
             .flatten()
         {
-            let (s, e) = strtab_cost(bytes, off, len);
+            let (s, e) = strtab_cost(bytes, off, len, entries_max);
             steps = steps.saturating_add(s);
             entries = entries.saturating_add(e);
-            if steps > PERMISSIVE_STRTAB_STEPS_MAX || entries > PERMISSIVE_STRTAB_ENTRIES_MAX {
+            if steps > PERMISSIVE_STRTAB_STEPS_MAX || entries > entries_max {
                 return false;
             }
         }

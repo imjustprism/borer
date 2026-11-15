@@ -403,6 +403,36 @@ fn pe_indirect_section_names_stay_within_the_heap_bar() {
     assert_budgeted(&p, &indirect, SYMBOLS - 1, &shown, 0);
 }
 
+/// Builds an ELF64 whose `e_shstrndx` names `.bad`, a string table of
+/// `bad`, beside a one-instruction `.text`.
+///
+/// # Arguments
+///
+/// * `bad` - The section-name string table's bytes.
+///
+/// # Returns
+///
+/// Raw ELF64 image bytes.
+fn shstrtab_elf(bad: Vec<u8>) -> Vec<u8> {
+    let mut bytes = elfgen::build(
+        elfgen::ET_EXEC,
+        elfgen::EM_X86_64,
+        0x1000,
+        &[
+            elfgen::Sec::new(
+                ".text",
+                elfgen::PROGBITS,
+                elfgen::AX,
+                0x1000,
+                vec![0xc3; 16],
+            ),
+            elfgen::Sec::new(".bad", elfgen::STRTAB, 0, 0x2000, bad),
+        ],
+    );
+    put16(&mut bytes, 62, 2);
+    bytes
+}
+
 /// An ELF64 whose `e_shstrndx` names a `256 KiB` non-UTF-8 string table
 /// (either all `0xff` or ASCII ending in `0xff`) is refused without running
 /// goblin's quadratic permissive `Strtab` rescan.
@@ -414,22 +444,7 @@ fn elf_non_utf8_shstrtab_is_refused_without_quadratic_rescan() {
     let mut tail_bad = vec![b'a'; BAD_LEN - 2];
     tail_bad.extend_from_slice(&[0xff, 0]);
     for bad in [vec![0xff; BAD_LEN], tail_bad] {
-        let mut bytes = elfgen::build(
-            elfgen::ET_EXEC,
-            elfgen::EM_X86_64,
-            0x1000,
-            &[
-                elfgen::Sec::new(
-                    ".text",
-                    elfgen::PROGBITS,
-                    elfgen::AX,
-                    0x1000,
-                    vec![0xc3; 16],
-                ),
-                elfgen::Sec::new(".bad", elfgen::STRTAB, 0, 0x2000, bad),
-            ],
-        );
-        put16(&mut bytes, 62, 2);
+        let bytes = shstrtab_elf(bad);
         #[expect(
             clippy::disallowed_methods,
             reason = "the test bounds the time a hostile string table takes"
@@ -443,6 +458,26 @@ fn elf_non_utf8_shstrtab_is_refused_without_quadratic_rescan() {
             "{BAD_LEN} non-UTF-8 strtab bytes took {took:?}"
         );
     }
+}
+
+/// A dense non-UTF-8 section-name table loads or is refused within the heap bar.
+///
+/// `e_shstrndx` names `256 KiB` of alternating `0xff 0x00`: one permissive
+/// string-table entry per byte, a cheap linear scan. The permissive retry's
+/// entries are capped by the file's length, not a fixed count.
+#[test]
+fn elf_dense_non_utf8_shstrtab_stays_within_the_heap_bar() {
+    /// Bytes in the malformed `.shstrtab` replacement.
+    const BAD_LEN: usize = 256 << 10;
+    let _one = serial();
+    let bad: Vec<u8> = [0xff, 0].repeat(BAD_LEN / 2);
+    let bytes = shstrtab_elf(bad);
+    let size = bytes.len();
+    let (_, extra) = measured(|| Program::from_bytes(PathBuf::from("dense_shstr.elf"), bytes));
+    assert!(
+        extra <= LOAD_HEAP_PER_BYTE * size,
+        "a {size} byte file took {extra} bytes of heap to load"
+    );
 }
 
 /// A 32-bit Mach-O with `43,690` `nlist` records all naming one `512 KiB`
