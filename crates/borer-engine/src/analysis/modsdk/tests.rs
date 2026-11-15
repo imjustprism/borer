@@ -804,20 +804,29 @@ fn many_globals_of_one_name_are_named_in_linear_time() {
     );
 }
 
-/// [`data_xml`] indexes the globals once before rendering the classes, so
-/// 4,096 classes alongside 100,000 integer globals render in linearithmic
-/// time and still take the singleton address of `C0`.
+/// [`data_xml`] indexes the globals once, not once per class.
+///
+/// 65,536 classes alongside 65,536 globals pointing at classes of none of
+/// their names render in linearithmic time and still take the singleton
+/// address of the first class.
+///
+/// Every name shares a long stem and has one length, so each class a
+/// render scanned the globals for compares every pointee name in full:
+/// four billion such compares, far past ten seconds.
 ///
 /// # Panics
 ///
-/// When [`data_xml`] takes over ten seconds, or `C0` lacks its singleton
-/// address.
+/// When [`data_xml`] takes over ten seconds, or the first class lacks its
+/// singleton address.
 #[test]
-fn many_classes_and_scalar_globals_render_reclass_xml_without_rescanning() {
+fn many_classes_and_pointer_globals_render_reclass_xml_without_rescanning() {
+    /// Classes, and globals pointing at no class.
+    const MANY: u64 = 1 << 16;
+    let stem = "S".repeat(256);
     let mut sdk = sample();
-    sdk.classes = (0..4096)
+    sdk.classes = (0..MANY)
         .map(|k| Class {
-            name: format!("C{k}"),
+            name: format!("{stem}C{k:05}"),
             size: Size::Stated(8),
             parent: None,
             vtable: None,
@@ -827,30 +836,29 @@ fn many_classes_and_scalar_globals_render_reclass_xml_without_rescanning() {
         })
         .collect();
     sdk.classes.sort_by(|a, b| a.name.cmp(&b.name));
-    sdk.globals = (0..100_000u64)
+    sdk.globals = (0..MANY)
         .map(|k| Global {
-            va: 0x1_4020_0000 + k * 4,
+            va: 0x1_4020_0000 + k * 8,
             name: format!("g{k}"),
-            ty: Ty::Int {
-                bytes: 4,
-                signed: false,
-            },
+            ty: Ty::Ptr(Some(format!("{stem}T{k:05}"))),
             evidence: Evidence::Stated,
         })
         .chain(std::iter::once(Global {
             va: 0x1_4099_9900,
             name: "g_c0".to_owned(),
-            ty: Ty::Ptr(Some("C0".to_owned())),
+            ty: Ty::Ptr(Some(format!("{stem}C00000"))),
             evidence: Evidence::Stated,
         }))
         .collect();
+    let flag = crate::cancel::Cancel::new();
+    let worker = flag.clone();
     let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || tx.send(data_xml(&sdk)));
-    let rendered = rx
-        .recv_timeout(std::time::Duration::from_secs(10))
-        .expect("reclass XML renders within ten seconds");
+    std::thread::spawn(move || tx.send(worker.within(|| data_xml(&sdk))));
+    let rendered = rx.recv_timeout(std::time::Duration::from_secs(10));
+    flag.raise();
+    let rendered = rendered.expect("reclass XML renders within ten seconds");
     let expected = format!(
-        "name=\"C0\" comment=\"size 0x8 (stated)\" address=\"{}\"",
+        "name=\"{stem}C00000\" comment=\"size 0x8 (stated)\" address=\"{}\"",
         xml("[<game.exe> + 999900]")
     );
     assert!(rendered.contains(&expected), "{} bytes", rendered.len());
