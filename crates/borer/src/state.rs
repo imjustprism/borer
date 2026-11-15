@@ -1195,4 +1195,51 @@ mod tests {
         let refused = super::read_packs(&[dir]).expect_err("a directory is no pack");
         assert!(refused.to_string().contains("is a directory"), "{refused}");
     }
+
+    /// A handed-over project whose types do not lay out at the reloaded
+    /// program's pointer width installs none of its annotations on resume,
+    /// and one whose types do installs its names.
+    ///
+    /// # Panics
+    ///
+    /// When the narrow layout's names are installed, or the plain
+    /// project's are not.
+    #[test]
+    fn resume_refuses_types_the_reloaded_width_does_not_lay_out() {
+        use crate::handover::Resume;
+        let path =
+            std::env::temp_dir().join(format!("borer-resume-layout-{}.bin", std::process::id()));
+        std::fs::write(&path, [0xc3; 16]).expect("written");
+        let program = serde_json::to_string(&path.display().to_string()).expect("a path");
+        let resumed = |types: &str| {
+            let json = format!(
+                r#"{{"program":{program},"names":{{"0x10000":"kept"}},"comments":{{}}{types}}}"#
+            );
+            let server = crate::BorerServer::default();
+            server.resume(Resume {
+                project: Some(borer::project::ProjectFile(
+                    serde_json::from_str(&json).expect("a project"),
+                )),
+                pdb: Some(false),
+                raw: super::RawLoad {
+                    arch: Some(super::RawArch::X64),
+                    base: Some("0x10000".to_owned()),
+                    ..super::RawLoad::default()
+                },
+                ..Resume::default()
+            });
+            assert!(server.loaded().is_some(), "the program reloads");
+            super::read_lock(&server.overlay)
+                .names
+                .get(&0x10000)
+                .cloned()
+        };
+        let plain = resumed("");
+        let narrow = resumed(
+            r#","types":{"W":{"Struct":{"size":8,"fields":{"0":{"name":"ptr","ty":{"Ptr":"U16"}},"4":{"name":"tag","ty":"U32"}}}}}"#,
+        );
+        std::fs::remove_file(&path).expect("cleans up");
+        assert_eq!(plain.as_deref(), Some("kept"));
+        assert_eq!(narrow, None, "a 4-byte pointer layout installed on x64");
+    }
 }
