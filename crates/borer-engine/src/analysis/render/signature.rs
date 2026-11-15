@@ -1870,4 +1870,37 @@ mod tests {
             "{bare_rule}"
         );
     }
+
+    /// A user name holding a newline stays on its `//` line and in the
+    /// description, so it cannot start a rule line of its own.
+    ///
+    /// # Panics
+    ///
+    /// When the name's text after its newline starts a line of the rule.
+    #[test]
+    fn a_name_with_a_newline_stays_on_its_line() {
+        use super::{Analysis, Overlay, yara_rule};
+
+        let code: &[u8] = &[
+            0x55, // ASM: push rbp
+            0x48, 0x89, 0xe5, // ASM: mov rbp, rsp
+            0x69, 0xc7, 0x67, 0x45, 0x23, 0x01, // ASM: imul eax, edi, 0x01234567
+            0x83, 0xc0, 0x42, // ASM: add eax, 0x42
+            0x31, 0xd2, // ASM: xor edx, edx
+            0x5d, // ASM: pop rbp
+            0xc3, // ASM: ret
+        ];
+        let prog = elf_x64(code, &[]);
+        let ana = Analysis::compute(&prog);
+        let mut o = Overlay::default();
+        o.names.insert(0x40_1000, "evil\nrule x {".to_owned());
+        let rule = yara_rule(&prog, &ana, &o, &[0x40_1000]).expect("rule on code");
+        assert!(rule.contains("$c0"), "{rule}");
+        assert_eq!(
+            rule.lines().filter(|l| l.starts_with("rule ")).count(),
+            1,
+            "{rule}"
+        );
+        assert!(rule.contains("// evil\\x0arule x {"), "{rule}");
+    }
 }
