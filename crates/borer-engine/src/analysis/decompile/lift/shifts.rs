@@ -1,5 +1,5 @@
 //! Shift value and flag semantics shared across single- and double-precision
-//! x86 shifts.
+//! x86 shifts, and the flags of the bit scans and counts.
 
 use super::*;
 
@@ -60,6 +60,51 @@ pub(super) fn shift_flags(
         }
         _ => Flags::Result(v.clone(), bits),
     }
+}
+
+/// Returns the flags a bit scan or count leaves.
+///
+/// SPEC: Intel SDM Vol. 2, BSF/BSR, TZCNT/LZCNT and POPCNT: BSF, BSR and
+/// POPCNT set ZF when the source is 0, TZCNT and LZCNT when the result is 0,
+/// and TZCNT and LZCNT set CF when the source is 0. POPCNT clears CF, OF, SF,
+/// AF and PF; the others leave OF, SF, AF and PF undefined, and BSF and BSR
+/// CF too. So the record is a [`Flags::Truth`] for the one code the readers
+/// need: CF where it is defined and read alone, any one flag POPCNT clears
+/// where it is read alone, else ZF. Every other code stays undecided.
+///
+/// # Arguments
+///
+/// * `mn` - `bsf`, `bsr`, `tzcnt`, `lzcnt` or `popcnt`.
+/// * `src` - The source operand.
+/// * `v` - The result.
+/// * `bits` - Operand width.
+/// * `needed` - The flags read after the instruction ([`RflagsBits`]), all
+///   of them where they leave the block.
+pub(super) fn count_flags(mn: Mnemonic, src: Expr, v: &Expr, bits: u8, needed: u32) -> Flags {
+    let only = |f: u32| needed & !f == 0;
+    let cleared = [
+        (RflagsBits::CF, ConditionCode::b),
+        (RflagsBits::SF, ConditionCode::s),
+        (RflagsBits::OF, ConditionCode::o),
+        (RflagsBits::PF, ConditionCode::p),
+    ]
+    .into_iter()
+    .find(|&(f, _)| only(f));
+    let (zero, cc) = match (mn, cleared) {
+        (Mnemonic::Popcnt, Some((_, cc))) => return Flags::Truth(Expr::Const(0), Cc(cc)),
+        (Mnemonic::Tzcnt | Mnemonic::Lzcnt, _) if only(RflagsBits::CF) => (src, ConditionCode::b),
+        (Mnemonic::Tzcnt | Mnemonic::Lzcnt, _) => (v.clone(), ConditionCode::e),
+        _ => (src, ConditionCode::e),
+    };
+    let is_zero = Cond {
+        cc: Cc(ConditionCode::e),
+        flags: Flags::Test(zero.clone(), zero, bits),
+    };
+    let truth = match is_zero.eval() {
+        Some(b) => Expr::Const(u64::from(b)),
+        None => Expr::Cond(Box::new(is_zero)),
+    };
+    Flags::Truth(truth, Cc(cc))
 }
 
 /// Builds the shifted value of a three-operand `shld` or `shrd`.

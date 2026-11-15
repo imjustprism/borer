@@ -174,6 +174,68 @@ fn tzcnt_sets_the_carry_on_a_zero_source() {
     assert!(equal.contains("if (tzcnt(a1) == 0) {"), "{equal}");
 }
 
+/// `popcnt` clears CF, OF, SF and PF, in the lifter as in the emulator.
+///
+/// `popcnt eax, ecx; setcc al; ret` with `sets`, `setp`, `setb` and `seto`
+/// sets `al` to 0, and `mov ecx,0x80000000; popcnt eax,ecx; js L` never
+/// jumps. The lifter once read the sign and parity of the source.
+#[test]
+fn popcnt_clears_the_sign_and_parity_agrees_with_the_emulator() {
+    for setcc in [0x98u8, 0x9a, 0x92, 0x90] {
+        agrees_with_the_emulator(&[
+            0xf3, 0x0f, 0xb8, 0xc1, // ASM: popcnt eax, ecx
+            0x0f, setcc, 0xc0, // ASM: sets / setp / setb / seto al
+            0xc3, // ASM: ret
+        ]);
+    }
+    let text = dc(&[
+        0xb9, 0x00, 0x00, 0x00, 0x80, // ASM: mov ecx, 0x80000000
+        0xf3, 0x0f, 0xb8, 0xc1, // ASM: popcnt eax, ecx
+        0x78, 0x03, // ASM: js 0x40100e
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xc3, // ASM: ret
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+        0xc3, // ASM: ret
+    ]);
+    assert!(!text.contains("return 1"), "{text}");
+}
+
+/// `bsf`, `bsr`, `tzcnt` and `lzcnt` leave SF and PF undecided.
+///
+/// The manual leaves both undefined, so `sets` and `setp` after them never
+/// disagree with the emulator, which keeps the flags of the `or` before,
+/// and a `js` reads as an undecided sign test, not the sign of the source
+/// or the count.
+#[test]
+fn a_bit_scan_or_count_leaves_the_sign_and_parity_undecided() {
+    for [a, b, c] in [
+        [0x90, 0x0f, 0xbc],
+        [0x90, 0x0f, 0xbd],
+        [0xf3, 0x0f, 0xbc],
+        [0xf3, 0x0f, 0xbd],
+    ] {
+        for setcc in [0x98u8, 0x9a] {
+            never_disagrees_with_the_emulator(&image(&[
+                0x83, 0xca, 0xff, // ASM: or edx, -1
+                a, b, c, 0xc1, // ASM: nop; bsf / bsr, or tzcnt / lzcnt eax, ecx
+                0x0f, setcc, 0xc0, // ASM: sets / setp al
+                0xc3, // ASM: ret
+            ]));
+        }
+        let text = dc(&[
+            0x8b, 0x4c, 0x24, 0x04, // ASM: mov ecx, [esp+4]
+            a, b, c, 0xc1, // ASM: nop; bsf / bsr, or tzcnt / lzcnt eax, ecx
+            0x78, 0x03, // ASM: js 0x40100d
+            0x31, 0xc0, // ASM: xor eax, eax
+            0xc3, // ASM: ret
+            0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+            0xc3, // ASM: ret
+        ]);
+        assert!(text.contains("flags_"), "{text}");
+        assert!(!text.contains("< 0"), "{text}");
+    }
+}
+
 /// A below-or-equal after arithmetic reads as C, never as a bare value.
 ///
 /// `add; jbe` is carry or zero, `and; jbe` the zero flag alone (a logical

@@ -45,7 +45,7 @@ pub(in crate::analysis::decompile) use pack::*;
 pub(in crate::analysis::decompile) use record::*;
 pub(in crate::analysis::decompile) use shared::*;
 pub(in crate::analysis::decompile) use shifts::flags_always_written;
-use shifts::{double_shift_value, shift_flags};
+use shifts::{count_flags, double_shift_value, shift_flags};
 pub(in crate::analysis::decompile) use state::try_level_store;
 pub(in crate::analysis::decompile) use stated::*;
 

@@ -958,20 +958,7 @@ impl Exec<'_, '_> {
                 };
                 let src = self.lane_operand(instr, 1, bits);
                 let v = unary(op, src.clone(), bits);
-                let counts = matches!(mn, Mnemonic::Tzcnt | Mnemonic::Lzcnt);
-                self.flags = if counts && self.flags_needed & !RflagsBits::CF == 0 {
-                    Flags::Truth(
-                        Expr::Cond(Box::new(Cond {
-                            cc: Cc(ConditionCode::e),
-                            flags: Flags::Test(src.clone(), src, bits),
-                        })),
-                        Cc(ConditionCode::b),
-                    )
-                } else if counts {
-                    Flags::Result(v.clone(), bits)
-                } else {
-                    Flags::Result(src, bits)
-                };
+                self.flags = count_flags(mn, src, &v, bits, self.flags_needed);
                 self.write_op0(instr, v);
             }
             Mnemonic::Cmp if instr.op_count() == 2 => {
