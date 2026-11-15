@@ -342,12 +342,10 @@ fn plain_run(len: usize, font: &Font, color: Hsla, underlined: bool) -> TextRun 
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use borer_engine::analysis::decompile::view::{view, view_of};
     use borer_engine::analysis::{Analysis, EnumSource, Overlay};
     use borer_engine::program::{Arch, BinaryFormat, Program, Section};
-    use borer_engine::view::Ref;
+    use borer_engine::view::{Ref, View};
     use gpui::{Font, Hsla};
 
     use super::{ClickOutcome, CodePalette, resolve_ref_click, style_view_line};
@@ -411,6 +409,17 @@ mod tests {
         (program, analysis, overlay)
     }
 
+    /// Builds an x86-64 program whose code is every byte value in turn, four times over,
+    /// so the decoder meets odd and invalid code without a file from the machine.
+    fn every_byte_program() -> (Program, Analysis) {
+        let bytes: Vec<u8> = (0..=u8::MAX).cycle().take(0x400).collect();
+        let sections = vec![Section::mapped(".text", 0x1000, 0, 0x400, false, true)];
+        let mut program = Program::raw(bytes, Arch::X86_64, 0x1000, Some(0x1000), sections);
+        program.format = BinaryFormat::Pe;
+        let analysis = Analysis::compute(&program);
+        (program, analysis)
+    }
+
     /// Run lengths sum to each line's byte length and land on UTF-8 boundaries.
     ///
     /// # Panics
@@ -422,52 +431,41 @@ mod tests {
         let font: Font = gpui::font("Cascadia Mono");
         let palette = sample_palette();
         assert!(analysis.functions.len() >= 2);
-
         for func in &analysis.functions {
             let built = view(&program, &analysis, &overlay, func.entry).expect("decompiles");
-            for line_ix in 0..built.lines() {
-                let styled = style_view_line(&built, line_ix, &font, &palette);
-                let mut offset = 0usize;
-                for run in &styled.runs {
-                    offset += run.len;
-                    assert!(
-                        styled.text.is_char_boundary(offset),
-                        "non-char boundary at {offset} in {:?}",
-                        styled.text
-                    );
-                }
-                assert_eq!(offset, styled.text.len());
-            }
+            assert_runs_tile(&built, &font, &palette);
         }
 
         let utf8_text = "// café — λ\nint sub_1000(void) {\n    goto L_1000;\nL_1000:\n    return sub_1030();\n}\n";
         let extra = view_of(&program, &analysis, &overlay, 0x1000, utf8_text).expect("utf8 view");
-        for line_ix in 0..extra.lines() {
-            let styled = style_view_line(&extra, line_ix, &font, &palette);
+        assert_runs_tile(&extra, &font, &palette);
+
+        let (noise, noise_analysis) = every_byte_program();
+        for func in &noise_analysis.functions {
+            if let Some(built) = view(&noise, &noise_analysis, &overlay, func.entry) {
+                assert_runs_tile(&built, &font, &palette);
+            }
+        }
+    }
+
+    /// Asserts every line's runs of `built` sum to its length on UTF-8 boundaries.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a line's runs fail to tile it or split a UTF-8 codepoint.
+    fn assert_runs_tile(built: &View, font: &Font, palette: &CodePalette) {
+        for line_ix in 0..built.lines() {
+            let styled = style_view_line(built, line_ix, font, palette);
             let mut offset = 0usize;
             for run in &styled.runs {
                 offset += run.len;
-                assert!(styled.text.is_char_boundary(offset));
+                assert!(
+                    styled.text.is_char_boundary(offset),
+                    "non-char boundary at {offset} in {:?}",
+                    styled.text
+                );
             }
             assert_eq!(offset, styled.text.len());
-        }
-
-        if let Ok(real_prog) = Program::load(Path::new(r"C:\Windows\System32\whoami.exe")) {
-            let real_analysis = Analysis::compute(&real_prog);
-            assert!(!real_analysis.functions.is_empty());
-            for func in &real_analysis.functions {
-                if let Some(built) = view(&real_prog, &real_analysis, &overlay, func.entry) {
-                    for line_ix in 0..built.lines() {
-                        let styled = style_view_line(&built, line_ix, &font, &palette);
-                        let mut offset = 0usize;
-                        for run in &styled.runs {
-                            offset += run.len;
-                            assert!(styled.text.is_char_boundary(offset));
-                        }
-                        assert_eq!(offset, styled.text.len());
-                    }
-                }
-            }
         }
     }
 
