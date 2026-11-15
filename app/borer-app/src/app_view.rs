@@ -17,11 +17,11 @@ use gpui::{
     TextLayout, UniformListScrollHandle, Window, div, px, uniform_list,
 };
 use theme::ActiveTheme as _;
-use ui::{Label, Table, TableInteractionState};
+use ui::{Button, Clickable as _, Disableable as _, KeyBinding, Table, TableInteractionState};
 
 use crate::actions::{
-    ActionId, FocusFilter, GoBack, GoForward, Measure, NextRow, Open, OpenSelected, PageDown,
-    PageUp, PreviousRow, TogglePalette,
+    FocusFilter, GoBack, GoForward, Measure, NextRow, Open, OpenSelected, PageDown, PageUp,
+    PreviousRow,
 };
 use crate::code_view::{ClickOutcome, CodePalette, resolve_ref_click, style_view_line};
 use crate::history::NavHistory;
@@ -30,7 +30,6 @@ use crate::measure::{
     PendingInputMark, TARGET_CODE_LINES, begin_code_scroll_phase, begin_input_latency_phase,
     begin_list_scroll_phase, evaluate_one_shot, new_cli_exit_slot, now_instant,
 };
-use crate::palette::{CommandPalette, handle_palette_key_down, render_palette_overlay};
 use crate::worker::{
     FilterLatest, LoadedBinary, TaskEpoch, filter_rows_blocking, load_binary_blocking,
     spawn_engine, ui_engine_calls,
@@ -59,10 +58,6 @@ pub struct AppView {
     focus_handle: FocusHandle,
     /// Focus handle for the keystroke filter field.
     filter_focus: FocusHandle,
-    /// Focus handle for the command palette overlay input.
-    palette_focus: FocusHandle,
-    /// Keyboard command palette listing [`crate::actions::ACTION_REGISTRY`].
-    palette: CommandPalette,
     /// Scroll and focus state for the [`Table`] component.
     table_state: Entity<TableInteractionState>,
     /// Scroll handle driving the virtualized decompile line list.
@@ -154,7 +149,6 @@ impl AppView {
     ) -> Self {
         let focus_handle = cx.focus_handle();
         let filter_focus = cx.focus_handle();
-        let palette_focus = cx.focus_handle();
         window.focus(&focus_handle, cx);
         let table_state = cx.new(|cx| TableInteractionState::new(cx));
         let mut view = Self {
@@ -164,8 +158,6 @@ impl AppView {
             measuring: false,
             focus_handle,
             filter_focus,
-            palette_focus,
-            palette: CommandPalette::new(),
             table_state,
             code_scroll: UniformListScrollHandle::new(),
             loaded: None,
@@ -187,7 +179,7 @@ impl AppView {
             inject_mark: None,
             pending_marks: VecDeque::new(),
             active_dispatch_pending: false,
-            status: format!("Press Ctrl+O to open a binary ({LOAD_SCOPE_NOTE})"),
+            status: format!("Open a binary ({LOAD_SCOPE_NOTE})"),
             load_task: None,
             filter_task: None,
             decompile_task: None,
@@ -664,8 +656,6 @@ impl AppView {
     ///
     /// * `cx` - View context spawning the dialog receiver task.
     pub fn prompt_open(&mut self, cx: &mut Context<'_, Self>) {
-        self.palette.close();
-        cx.notify();
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
@@ -698,7 +688,6 @@ impl AppView {
     /// * `path` - File path of the binary to load.
     /// * `cx` - View context spawning the background task.
     pub fn open_path(&mut self, path: PathBuf, cx: &mut Context<'_, Self>) {
-        self.palette.close();
         self.cancel_measure();
         self.cancel_decompile();
         self.load_error = None;
@@ -845,12 +834,8 @@ impl AppView {
     ///
     /// * `cx` - View context.
     pub fn navigate_back(&mut self, cx: &mut Context<'_, Self>) {
-        let was_open = self.palette.is_open();
-        self.palette.close();
         if let Some(prev) = self.history.go_back() {
             self.open_function(prev, false, cx);
-        } else if was_open {
-            cx.notify();
         }
     }
 
@@ -860,12 +845,8 @@ impl AppView {
     ///
     /// * `cx` - View context.
     pub fn navigate_forward(&mut self, cx: &mut Context<'_, Self>) {
-        let was_open = self.palette.is_open();
-        self.palette.close();
         if let Some(next) = self.history.go_forward() {
             self.open_function(next, false, cx);
-        } else if was_open {
-            cx.notify();
         }
     }
 
@@ -930,83 +911,14 @@ impl AppView {
             .scroll_to_item(row, ScrollStrategy::Nearest);
     }
 
-    /// Opens or closes the keyboard command palette overlay.
-    ///
-    /// # Arguments
-    ///
-    /// * `window` - Window managing keyboard focus.
-    /// * `cx` - View context.
-    pub fn toggle_palette(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        if self.palette.is_open() {
-            self.dismiss_palette(window, cx);
-        } else {
-            self.palette.open();
-            window.focus(&self.palette_focus, cx);
-            cx.notify();
-        }
-    }
-
-    /// Closes the command palette overlay and restores focus to the root view.
-    ///
-    /// # Arguments
-    ///
-    /// * `window` - Window managing keyboard focus.
-    /// * `cx` - View context.
-    pub fn dismiss_palette(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        self.palette.close();
-        window.focus(&self.focus_handle, cx);
-        cx.notify();
-    }
-
-    /// Closes the command palette if open and moves focus to the function-filter input.
+    /// Moves focus to the function-filter input.
     ///
     /// # Arguments
     ///
     /// * `window` - Window managing keyboard focus.
     /// * `cx` - View context.
     pub fn focus_filter(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        self.palette.close();
         window.focus(&self.filter_focus, cx);
-        cx.notify();
-    }
-
-    /// Handles keyboard events delivered to the open command palette overlay.
-    ///
-    /// # Arguments
-    ///
-    /// * `event` - GPUI [`KeyDownEvent`].
-    /// * `window` - Window managing focus and action dispatch.
-    /// * `cx` - View context.
-    pub fn on_palette_key_down(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let root_focus = self.focus_handle.clone();
-        handle_palette_key_down(&mut self.palette, &root_focus, event, window, cx);
-    }
-
-    /// Confirms and dispatches command palette match `ix` when clicked.
-    ///
-    /// # Arguments
-    ///
-    /// * `ix` - Clicked match index inside the open palette.
-    /// * `window` - Window managing focus and action dispatch.
-    /// * `cx` - View context.
-    pub fn execute_palette_index(
-        &mut self,
-        ix: usize,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let chosen = self.palette.confirm_index(ix);
-        window.focus(&self.focus_handle, cx);
-        if let Some(id) = chosen
-            && id != ActionId::TogglePalette
-        {
-            window.dispatch_action(id.boxed_action(), cx);
-        }
         cx.notify();
     }
 
@@ -1176,7 +1088,8 @@ impl AppView {
         }
     }
 
-    /// Renders the top toolbar with Open, Back, Forward, and the keystroke filter box.
+    /// Renders the top toolbar: Zed's buttons for Open, Back and Forward, each
+    /// with its shortcut as gpui's keymap binds it, and the keystroke filter box.
     ///
     /// # Arguments
     ///
@@ -1197,18 +1110,14 @@ impl AppView {
             )
         };
         let focused = self.filter_focus.is_focused(window);
-        let filter_label = if self.filter_text.is_empty() {
-            if focused {
-                SharedString::from("|")
-            } else {
-                SharedString::from("Filter functions (/ or Ctrl+F)...")
-            }
-        } else if focused {
-            SharedString::from(format!("{}|", self.filter_text))
-        } else {
-            SharedString::from(self.filter_text.clone())
+        let filter_label = match (self.filter_text.is_empty(), focused) {
+            (true, true) => SharedString::from("|"),
+            (true, false) => SharedString::from("Filter functions"),
+            (false, true) => SharedString::from(format!("{}|", self.filter_text)),
+            (false, false) => SharedString::from(self.filter_text.clone()),
         };
         let border = if focused { border_focused } else { border_col };
+        let root = &self.focus_handle;
         div()
             .flex()
             .flex_row()
@@ -1219,34 +1128,23 @@ impl AppView {
             .bg(surface_bg)
             .border_b_1()
             .border_color(border_col)
-            .child(toolbar_button(
-                "open-btn",
-                "Open (Ctrl+O)",
-                true,
-                border_col,
-                cx.listener(|this, _, _, cx| this.prompt_open(cx)),
-            ))
-            .child(toolbar_button(
-                "cmd-btn",
-                "Commands (Ctrl+Shift+P)",
-                true,
-                border_col,
-                cx.listener(|this, _, window, cx| this.toggle_palette(window, cx)),
-            ))
-            .child(toolbar_button(
-                "back-btn",
-                "Back",
-                self.history.can_go_back(),
-                border_col,
-                cx.listener(|this, _, _, cx| this.navigate_back(cx)),
-            ))
-            .child(toolbar_button(
-                "fwd-btn",
-                "Forward",
-                self.history.can_go_forward(),
-                border_col,
-                cx.listener(|this, _, _, cx| this.navigate_forward(cx)),
-            ))
+            .child(
+                Button::new("open", "Open")
+                    .key_binding(KeyBinding::for_action_in(&Open, root, cx))
+                    .on_click(|_, window, cx| window.dispatch_action(Box::new(Open), cx)),
+            )
+            .child(
+                Button::new("back", "Back")
+                    .key_binding(KeyBinding::for_action_in(&GoBack, root, cx))
+                    .disabled(!self.history.can_go_back())
+                    .on_click(|_, window, cx| window.dispatch_action(Box::new(GoBack), cx)),
+            )
+            .child(
+                Button::new("forward", "Forward")
+                    .key_binding(KeyBinding::for_action_in(&GoForward, root, cx))
+                    .disabled(!self.history.can_go_forward())
+                    .on_click(|_, window, cx| window.dispatch_action(Box::new(GoForward), cx)),
+            )
             .child(
                 div()
                     .id("filter-box")
@@ -1256,13 +1154,16 @@ impl AppView {
                         this.focus_filter(window, cx);
                     }))
                     .flex_1()
+                    .flex()
+                    .justify_between()
                     .px(px(8.0))
                     .py(px(3.0))
                     .bg(bg)
                     .border_1()
                     .border_color(border)
                     .cursor_text()
-                    .child(filter_label),
+                    .child(filter_label)
+                    .child(KeyBinding::for_action_in(&FocusFilter, root, cx)),
             )
             .into_any_element()
     }
@@ -1546,40 +1447,6 @@ fn build_interactive_line(
     )
 }
 
-/// Builds a small clickable toolbar button element.
-///
-/// # Arguments
-///
-/// * `id` - Static element ID.
-/// * `label` - Button caption.
-/// * `enabled` - Whether click events are attached and full opacity is used.
-/// * `border` - Border color from the active theme.
-/// * `on_click` - Click callback invoked when `enabled` is `true`.
-///
-/// # Returns
-///
-/// Toolbar button [`AnyElement`].
-fn toolbar_button(
-    id: &'static str,
-    label: &'static str,
-    enabled: bool,
-    border: gpui::Hsla,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
-) -> AnyElement {
-    let base = div()
-        .id(id)
-        .px(px(8.0))
-        .py(px(3.0))
-        .border_1()
-        .border_color(border)
-        .child(Label::new(label));
-    if enabled {
-        base.cursor_pointer().on_click(on_click).into_any_element()
-    } else {
-        base.opacity(0.45).into_any_element()
-    }
-}
-
 /// Formats one [`FunctionRow`] into eight cell elements without deriving new facts.
 ///
 /// # Arguments
@@ -1606,10 +1473,7 @@ impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         self.active_dispatch_pending = false;
         self.check_one_shot_modes(window, cx);
-        if self.palette.is_open() && !self.palette_focus.is_focused(window) {
-            window.focus(&self.palette_focus, cx);
-        }
-        let key_ctx = if self.filter_focus.is_focused(window) || self.palette.is_open() {
+        let key_ctx = if self.filter_focus.is_focused(window) {
             "AppRoot"
         } else {
             "AppRoot AppBrowse"
@@ -1617,10 +1481,6 @@ impl Render for AppView {
         let toolbar = self.render_toolbar(window, cx);
         let table = self.render_table(cx);
         let code_pane = self.render_code_pane(cx);
-        let palette_el = self
-            .palette
-            .is_open()
-            .then(|| render_palette_overlay(&self.palette, &self.palette_focus, cx));
         let status = SharedString::from(self.status.clone());
         let (bg, text_col, border_col, surface_bg, text_muted) = {
             let colors = cx.theme().colors();
@@ -1638,7 +1498,6 @@ impl Render for AppView {
 
         div()
             .id("app-root")
-            .relative()
             .key_context(key_ctx)
             .track_focus(&self.focus_handle)
             .capture_key_down(cx.listener(|this, _, _, cx| this.record_inject_arrival(true, cx)))
@@ -1648,9 +1507,6 @@ impl Render for AppView {
             .capture_any_mouse_up(
                 cx.listener(|this, _, _, cx| this.record_inject_arrival(true, cx)),
             )
-            .on_action(cx.listener(|this, _: &TogglePalette, window, cx| {
-                this.toggle_palette(window, cx);
-            }))
             .on_action(cx.listener(|this, _: &Open, _, cx| this.prompt_open(cx)))
             .on_action(cx.listener(|this, _: &FocusFilter, window, cx| {
                 this.focus_filter(window, cx);
@@ -1665,7 +1521,6 @@ impl Render for AppView {
             .on_action(cx.listener(|this, _: &GoBack, _, cx| this.navigate_back(cx)))
             .on_action(cx.listener(|this, _: &GoForward, _, cx| this.navigate_forward(cx)))
             .on_action(cx.listener(|this, _: &Measure, window, cx| {
-                this.palette.close();
                 if this.is_measuring() {
                     cx.notify();
                 } else {
@@ -1682,7 +1537,6 @@ impl Render for AppView {
             .child(toolbar)
             .child(split_body)
             .child(status_bar)
-            .children(palette_el)
     }
 }
 

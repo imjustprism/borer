@@ -5,7 +5,6 @@ pub mod app_view;
 pub mod code_view;
 pub mod history;
 pub mod measure;
-pub mod palette;
 pub mod theme_provider;
 pub mod worker;
 
