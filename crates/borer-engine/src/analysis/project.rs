@@ -715,9 +715,8 @@ impl Project {
         crate::cancel::Cancel::whole(o)
     }
 
-    /// Refuses a file whose tables state more than an overlay holds, by
-    /// their counts alone, before any entry is parsed or sized.
-    /// Checks that every table of the project stays within its entry cap.
+    /// Checks that every table of the project stays within its entry cap,
+    /// by the counts of its entries alone.
     ///
     /// The names and comments are counted, the types as an overlay's are
     /// ([`super::utypes::counted`]), then the prototypes, the variables,
