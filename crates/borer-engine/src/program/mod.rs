@@ -1317,12 +1317,12 @@ impl Program {
         };
         phases.mark("load headers+symbols");
         restore(&mut bytes, &patches, disarmed, &mut headers.checksum);
-        headers.lenient = lenient;
+        let debug = crate::dwarf::read_budgeted(&sections, &unmapped, &bytes, &mut names);
+        headers.lenient = lenient.into_iter().chain(debug.note()).collect();
         headers.dropped_sections = fit.dropped;
         headers.truncated = fit.cut;
         headers.implausible_imports = refused_imports;
         headers.implausible_exports = disarmed.map(|d| d.count);
-        let debug = crate::dwarf::read_budgeted(&sections, &unmapped, &bytes, &mut names);
         let mut named = debug.subprograms;
         phases.mark("load dwarf");
         let pdb = if apply_pdb {

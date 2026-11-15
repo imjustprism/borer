@@ -2,7 +2,12 @@ use super::Strings;
 
 /// Runs [`super::read_in`] with a fresh [`super::Text`] budget for a test.
 fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>) -> super::Debug {
-    super::read_in(info, abbrev, strings, &mut super::Text::new(strings))
+    super::read_in(
+        info,
+        abbrev,
+        strings,
+        &mut super::Text::new(strings, info.len()),
+    )
 }
 
 /// Builds an abbreviation table declaring a function and a parameter.
@@ -691,7 +696,7 @@ fn one_long_name_named_everywhere_stops_at_the_budget() {
         dies.extend_from_slice(&u32::try_from(k).expect("fits").to_le_bytes());
         dies.extend_from_slice(&u64::try_from(k).expect("fits").to_le_bytes());
     }
-    let mut text = super::Text::new(&strings);
+    let mut text = super::Text::new(&strings, 0);
     let budget = text.intern_left;
     let mut read = 0usize;
     for k in 0..name_len {
@@ -788,4 +793,93 @@ fn a_slot_at_the_frame_span_is_refused() {
         super::slot_held(super::FRAME_SPAN - 1),
         Some(super::FRAME_SPAN - 1)
     );
+}
+
+/// Reads a unit of `int`, [`DENSE_POINTERS`] pointers to it, and a global
+/// `last` typed by the last pointer, out of a file `scale` times its size.
+///
+/// # Arguments
+///
+/// * `scale` - How many times the unit's size the file is.
+///
+/// # Returns
+///
+/// What the unit states, and the unit's size.
+fn dense_unit(scale: usize) -> (super::Debug, usize) {
+    let abbrev: Vec<u8> = vec![
+        0x01, 0x24, 0x00, 0x03, 0x08, 0x0b, 0x0b, 0x3e, 0x0b, 0x00, 0x00, 0x02, 0x0f, 0x00, 0x0b,
+        0x0b, 0x49, 0x13, 0x00, 0x00, 0x03, 0x34, 0x00, 0x03, 0x08, 0x49, 0x13, 0x02, 0x18, 0x00,
+        0x00, 0x00,
+    ];
+    let mut dies: Vec<u8> = vec![0x01];
+    named(&mut dies, "int");
+    dies.extend_from_slice(&[4, 0x05]);
+    let mut last = 0u32;
+    for _ in 0..DENSE_POINTERS {
+        last = u32::try_from(12 + dies.len()).expect("fits");
+        dies.extend_from_slice(&[0x02, 8]);
+        dies.extend_from_slice(&12u32.to_le_bytes());
+    }
+    dies.push(0x03);
+    named(&mut dies, "last");
+    dies.extend_from_slice(&last.to_le_bytes());
+    dies.extend_from_slice(&[9, 0x03]);
+    dies.extend_from_slice(&0x4000u64.to_le_bytes());
+    let info = unit(&dies);
+    let strings = Strings {
+        text: &[],
+        lines: &[],
+    };
+    let mut text = super::Text::new(&strings, info.len() * scale);
+    (
+        super::read_in(&info, &abbrev, &strings, &mut text),
+        info.len(),
+    )
+}
+
+/// Pointer types in [`dense_unit`]: one per 6 bytes, four times what one
+/// map entry per 24 bytes of the unit would hold.
+const DENSE_POINTERS: usize = 4000;
+
+/// A type-dense unit that is a small part of its file keeps every type.
+///
+/// A header-heavy compile unit of a real binary is such a unit. The cap on a
+/// unit's map follows the file's size, not the unit's, so the global typed
+/// by the last of its pointers still reads as `int *`.
+#[test]
+fn a_dense_unit_in_a_larger_file_keeps_its_types() {
+    let (debug, _) = dense_unit(64);
+    let last = debug.globals.iter().find(|g| g.name == "last");
+    assert_eq!(
+        last.and_then(|g| g.type_name.as_deref()),
+        Some("int *"),
+        "{:?}",
+        debug.globals
+    );
+    assert_eq!(debug.skipped, 0);
+    assert_eq!(debug.note(), None);
+}
+
+/// A unit that states more types than its file's size allows one unit to
+/// hold says so: the entries past the cap are counted, and the note names
+/// what reads as unknown because of them.
+#[test]
+fn a_unit_past_the_file_s_cap_says_what_it_left_out() {
+    let (debug, unit_len) = dense_unit(1);
+    let cap = unit_len / 24;
+    assert!(
+        debug.skipped >= DENSE_POINTERS - cap,
+        "{} skipped",
+        debug.skipped
+    );
+    let note = debug.note().expect("the cap tripped");
+    assert!(
+        note.starts_with(&format!(
+            "{} debug info entries past a unit's memory cap",
+            debug.skipped
+        )),
+        "{note}"
+    );
+    let last = debug.globals.iter().find(|g| g.name == "last");
+    assert_eq!(last.and_then(|g| g.type_name.as_deref()), None);
 }

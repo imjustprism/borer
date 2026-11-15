@@ -53,6 +53,17 @@ const ABBREV_SLACK: usize = 1 << 16;
 /// entries times length.
 const TEXT_MAX: usize = 1 << 28;
 
+/// File bytes per entry each of one unit's maps may hold.
+///
+/// The maps are the unit's types, names, array lengths and origins. An entry
+/// costs about a hundred bytes of map, so one per 24 bytes of the file keeps
+/// a unit's maps near 5 bytes of heap per file byte, inside the load's 8,
+/// however dense the unit is.
+const FILE_BYTES_PER_NODE: usize = 24;
+
+/// Entries one unit's maps may hold however small the file.
+const NODES_MIN: usize = 32;
+
 /// `DW_TAG_subprogram`: a function.
 const TAG_SUBPROGRAM: u64 = 0x2e;
 /// `DW_TAG_formal_parameter`: one declared parameter.
@@ -490,6 +501,11 @@ struct Text {
     copy_left: usize,
     /// Whether the DIE walk has stopped taking further names.
     stopped: bool,
+    /// Most entries each of one unit's maps may hold, from the file's
+    /// length ([`FILE_BYTES_PER_NODE`]).
+    node_cap: usize,
+    /// Entries left out because their unit's map was full.
+    skipped: usize,
 }
 
 impl Text {
@@ -498,7 +514,8 @@ impl Text {
     /// # Arguments
     ///
     /// * `strings` - The file's string sections.
-    fn new(strings: &Strings<'_>) -> Self {
+    /// * `file_len` - Bytes in the whole file, which bound each unit's maps.
+    fn new(strings: &Strings<'_>, file_len: usize) -> Self {
         Text {
             interned: BTreeMap::new(),
             intern_left: strings
@@ -508,7 +525,25 @@ impl Text {
                 .saturating_mul(2),
             copy_left: TEXT_MAX,
             stopped: false,
+            node_cap: (file_len / FILE_BYTES_PER_NODE).max(NODES_MIN),
+            skipped: 0,
         }
+    }
+
+    /// Whether a unit's map holding `len` entries may take one more,
+    /// counting the entry left out when it may not.
+    ///
+    /// # Arguments
+    ///
+    /// * `len` - Entries the map holds.
+    ///
+    /// # Returns
+    ///
+    /// `true` while the map is under [`Text::node_cap`].
+    fn room(&mut self, len: usize) -> bool {
+        let fits = len < self.node_cap;
+        self.skipped = self.skipped.saturating_add(usize::from(!fits));
+        fits
     }
 
     /// Reads the string at an offset of a string section, once.
@@ -858,39 +893,38 @@ struct TypeNode {
 }
 
 /// Inserts a type-bearing DIE into `nodes` while skipping non-type tags and
-/// holding the unit's type map within `cap`.
+/// holding the unit's type map within [`Text::room`].
 ///
 /// # Arguments
 ///
 /// * `nodes` - Unit type graph keyed by DIE offset.
-/// * `cap` - Maximum entries `nodes` may hold for this unit.
+/// * `text` - The walk's budgets, whose cap bounds `nodes`.
 /// * `here` - Section offset of the current DIE.
 /// * `tag` - `DW_TAG_*` of the current DIE.
 /// * `entry` - Parsed attributes of the current DIE.
 /// * `inner` - Resolved `DW_AT_type` section offset, if any.
 fn record_type_node(
     nodes: &mut BTreeMap<u64, TypeNode>,
-    cap: usize,
+    text: &mut Text,
     here: u64,
     tag: u64,
     entry: &Entry,
     inner: Option<u64>,
 ) {
-    if nodes.len() < cap
-        && !matches!(
-            tag,
-            0x0b | 0x11
-                | 0x1d
-                | 0x39
-                | 0x3c
-                | 0x48
-                | TAG_SUBPROGRAM
-                | TAG_FORMAL_PARAMETER
-                | TAG_VARIABLE
-                | TAG_MEMBER
-                | TAG_ENUMERATOR
-                | TAG_SUBRANGE
-        )
+    if !matches!(
+        tag,
+        0x0b | 0x11
+            | 0x1d
+            | 0x39
+            | 0x3c
+            | 0x48
+            | TAG_SUBPROGRAM
+            | TAG_FORMAL_PARAMETER
+            | TAG_VARIABLE
+            | TAG_MEMBER
+            | TAG_ENUMERATOR
+            | TAG_SUBRANGE
+    ) && text.room(nodes.len())
     {
         nodes.insert(
             here,
@@ -1245,7 +1279,6 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>, text: &mut Text) -
         let mut counts: BTreeMap<u64, u64> = BTreeMap::new();
         let unit_base = u64::try_from(at_start).unwrap_or(0);
         let reserve = text.copy_left / 4;
-        let node_cap = ((end - at_start) / 24).max(32);
         while !text.spent() && !c.done(end) {
             let here = from_usize(c.at);
             let Some(code) = c.uleb() else { break };
@@ -1300,8 +1333,8 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>, text: &mut Text) -
                 break;
             }
             if abbreviation.tag == TAG_SUBPROGRAM
-                && by_offset.len() < node_cap
                 && let Some(n) = &entry.name
+                && text.room(by_offset.len())
             {
                 by_offset.insert(here, n.clone());
             }
@@ -1316,7 +1349,7 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>, text: &mut Text) -
             };
             record_type_node(
                 &mut nodes,
-                node_cap,
+                text,
                 here,
                 abbreviation.tag,
                 &entry,
@@ -1342,8 +1375,8 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>, text: &mut Text) -
                 }
             }
             if abbreviation.tag == TAG_SUBRANGE
-                && counts.len() < node_cap
                 && let (Some(Some(array)), Some(n)) = (array_scopes.last(), entry.count)
+                && text.room(counts.len())
             {
                 counts.insert(*array, n);
             }
@@ -1374,7 +1407,7 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>, text: &mut Text) -
                             locals: BTreeMap::new(),
                         });
                     }
-                    (None, Some(origin)) if pending.len() < node_cap => {
+                    (None, Some(origin)) if text.room(pending.len()) => {
                         pending.push((low_pc, origin));
                     }
                     (None, _) => {}
@@ -1549,6 +1582,7 @@ fn read_in(info: &[u8], abbrev: &[u8], strings: &Strings<'_>, text: &mut Text) -
         types,
         typedefs,
         globals,
+        skipped: text.skipped,
     }
 }
 
@@ -1689,6 +1723,27 @@ pub struct Debug {
     /// The variables of static storage: the declarations of ones defined
     /// elsewhere first, by name, then the defined ones by address.
     pub globals: Vec<Global>,
+    /// Entries left out because a unit stated more than the file's size
+    /// allows one unit to hold ([`FILE_BYTES_PER_NODE`]).
+    pub skipped: usize,
+}
+
+impl Debug {
+    /// Returns the load warning for the entries a unit's cap left out.
+    ///
+    /// # Returns
+    ///
+    /// The line for `Headers::lenient`, or `None` when nothing was left out.
+    #[must_use]
+    pub(crate) fn note(&self) -> Option<String> {
+        (self.skipped > 0).then(|| {
+            format!(
+                "{} debug info entr{} past a unit's memory cap left out, so some types, array lengths and inlined names read as unknown",
+                self.skipped,
+                if self.skipped == 1 { "y" } else { "ies" }
+            )
+        })
+    }
 }
 
 /// Reads what a program's debug information states.
@@ -1746,7 +1801,7 @@ pub(crate) fn read_budgeted(
         text: debug_section(&all, bytes, ".debug_str"),
         lines: debug_section(&all, bytes, ".debug_line_str"),
     };
-    let mut text = Text::new(&strings);
+    let mut text = Text::new(&strings, bytes.len());
     let cap = names.left().min(TEXT_MAX);
     text.copy_left = cap;
     text.stopped = cap == 0;
