@@ -445,18 +445,10 @@ fn elf_non_utf8_shstrtab_is_refused_without_quadratic_rescan() {
     tail_bad.extend_from_slice(&[0xff, 0]);
     for bad in [vec![0xff; BAD_LEN], tail_bad] {
         let bytes = shstrtab_elf(bad);
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "the test bounds the time a hostile string table takes"
-        )]
-        let started = std::time::Instant::now();
-        let loaded = Program::from_bytes(PathBuf::from("bad_shstr.elf"), bytes);
-        let took = started.elapsed();
-        assert!(loaded.is_err(), "quadratic permissive retry was skipped");
-        assert!(
-            took < std::time::Duration::from_secs(2),
-            "{BAD_LEN} non-UTF-8 strtab bytes took {took:?}"
-        );
+        let refused = Program::from_bytes(PathBuf::from("bad_shstr.elf"), bytes)
+            .expect_err("the strict parse fails and the retry is not run");
+        let why = format!("{refused:#}");
+        assert!(!why.contains("lenient:"), "the permissive retry ran: {why}");
     }
 }
 
@@ -480,11 +472,14 @@ fn elf_dense_non_utf8_shstrtab_stays_within_the_heap_bar() {
     );
 }
 
-/// A 32-bit Mach-O with `43,690` `nlist` records all naming one `512 KiB`
-/// string loads within two seconds and within the heap bar without scanning
-/// `22.9 GB` of string bytes.
+/// A 32-bit Mach-O with `43,690` `nlist` records naming one string stays bounded.
+///
+/// The string is `512 KiB`; the file loads within the heap bar, each
+/// record's name read from a window
+/// of the string rather than the `22.9 GB` all of them span (the window is
+/// `macho::tests::an_nlist_name_scan_stops_at_its_window`).
 #[test]
-fn macho32_many_nlists_naming_half_megabyte_string_load_fast() {
+fn macho32_many_nlists_naming_half_megabyte_string_stay_within_the_heap_bar() {
     let _one = serial();
     /// 32-bit `nlist` entry count (`524,280` bytes of `nlist` table).
     const NLISTS: usize = 43_690;
@@ -549,17 +544,7 @@ fn macho32_many_nlists_naming_half_megabyte_string_load_fast() {
     b.extend_from_slice(b"\0_");
     b.resize(b.len() + STR_LEN, b'A');
     b.push(0);
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the test bounds the time a hostile nlist table takes"
-    )]
-    let started = std::time::Instant::now();
     check_local_names("nlist32.macho", b, NLISTS, "A");
-    let took = started.elapsed();
-    assert!(
-        took < std::time::Duration::from_secs(2),
-        "{NLISTS} nlists on a {STR_LEN}-byte string took {took:?}"
-    );
 }
 
 /// DWARF struct and member names resolved through `.debug_str` share the

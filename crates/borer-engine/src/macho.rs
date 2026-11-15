@@ -1294,4 +1294,29 @@ mod tests {
         assert!(super::claim(&mut seen, &cut, 0x2008, "<name 1>"));
         assert!(!super::claim(&mut seen, &real, 0x2000, "free"));
     }
+
+    /// A name of `512 KiB` is read from a window of [`super::NLIST_SCAN_MAX`]
+    /// bytes, its head, so a table of records naming it scans each one's
+    /// window rather than the whole string.
+    ///
+    /// # Panics
+    ///
+    /// When the name does not read or reads past the window.
+    #[test]
+    fn an_nlist_name_scan_stops_at_its_window() {
+        let mut strings = vec![b'_'];
+        strings.resize(512 << 10, b'A');
+        strings.push(0);
+        let mut table = super::RawSymtab {
+            syms: &[],
+            strings: &strings,
+            nsyms: 0,
+            is_64: true,
+            le: true,
+            cache: [None; super::NLIST_CACHE_SLOTS],
+        };
+        let name = table.name_at(0).expect("a long name reads as its head");
+        assert!(name.starts_with("_AAA"), "{name}");
+        assert!(name.len() <= super::NLIST_SCAN_MAX, "{} bytes", name.len());
+    }
 }
