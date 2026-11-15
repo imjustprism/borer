@@ -3,11 +3,14 @@
 use std::io::Write as _;
 use std::process::ExitCode;
 
-/// Runs `borer-app` and maps errors to a non-zero exit status.
+/// Runs `borer-app` and maps errors to a non-zero exit status: 1 with the error on
+/// stderr, 2 when stderr cannot take it either.
 fn main() -> ExitCode {
-    if let Err(err) = borer_app::run() {
-        let _ = writeln!(std::io::stderr().lock(), "borer-app: {err:#}");
-        return ExitCode::FAILURE;
+    match borer_app::run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) if writeln!(std::io::stderr().lock(), "borer-app: {err:#}").is_ok() => {
+            ExitCode::FAILURE
+        }
+        Err(_) => ExitCode::from(2),
     }
-    ExitCode::SUCCESS
 }
