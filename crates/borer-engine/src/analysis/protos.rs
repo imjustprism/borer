@@ -500,7 +500,14 @@ impl VarKey {
             .strip_prefix("sp+0x")
             .filter(|h| !h.is_empty() && h.bytes().all(|b| b.is_ascii_hexdigit()))
         {
-            return slot_at(text, i64::from_str_radix(h, 16).unwrap_or(i64::MAX));
+            return match i64::from_str_radix(h, 16) {
+                Ok(off) => slot_at(text, off),
+                Err(_) => Err(anyhow::anyhow!(
+                    "{} passes the frame; a stack slot above it is within {:#x} of it",
+                    crate::text::quoted(text),
+                    crate::dwarf::FRAME_SPAN
+                )),
+            };
         }
         if text.starts_with("sp-") {
             return Err(anyhow::anyhow!(
@@ -1231,6 +1238,17 @@ mod tests {
                 .to_string();
             assert!(refused.contains("as local_N"), "{refused}");
         }
+    }
+
+    /// A saved key whose hex offset no 64-bit integer holds is refused for
+    /// passing the frame, without a distance it does not state.
+    #[test]
+    fn an_over_long_saved_key_states_no_distance() {
+        let refused = VarKey::parse_saved("sp+0xffffffffffffffffff")
+            .expect_err("an over-long saved key")
+            .to_string();
+        assert!(refused.contains("passes the frame"), "{refused}");
+        assert!(!refused.contains("bytes from the frame"), "{refused}");
     }
 
     /// A local deeper than [`crate::dwarf::FRAME_SPAN`], which the text
