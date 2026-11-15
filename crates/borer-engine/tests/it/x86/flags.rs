@@ -321,6 +321,24 @@ fn a_result_decides_no_carry() {
     assert!(text.contains("return 1"), "{text}");
 }
 
+/// At the width or past it, `sar` leaves the sign bit in CF.
+///
+/// The sign bit is the last bit it shifts out: `setb` after `sar al, 8` or
+/// `sar ax, 20` is the operand's sign, in the lifter as in the emulator. The
+/// lifter once left CF undecided there, as the manual leaves it only for SHL
+/// and SHR.
+#[test]
+fn a_sar_at_or_past_the_width_carries_the_sign_agrees_with_the_emulator() {
+    for code in [
+        &[0xc0, 0xf8, 0x08, 0x0f, 0x92, 0xc0, 0xc3][..], // ASM: sar al, 8; setb al; ret
+        &[0x66, 0xc1, 0xf8, 0x14, 0x0f, 0x92, 0xc0, 0xc3][..], // ASM: sar ax, 20; setb al; ret
+    ] {
+        agrees_with_the_emulator(code);
+        let text = dc(code);
+        assert!(!text.contains("flags_"), "{text}");
+    }
+}
+
 /// A count no constant gives may mask to 0 and leave every flag, so the
 /// lifter states none for it: the `je` after `shl eax, cl` is read
 /// neither as the shifted value being zero nor as the compare before.

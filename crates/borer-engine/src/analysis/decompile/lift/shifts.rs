@@ -15,8 +15,9 @@ use super::*;
 /// undefined. [`Flags::Shift`] leaves OF undecided, and a one-bit shift
 /// other than SAR whose OF may be read lifts to no flags (a one-bit SHL is
 /// lifted as `x + x` before it gets here). At the width on a 16-bit SHLD or
-/// SHRD, CF is still the last bit shifted out of the destination; at the
-/// width or past it on SHL, SHR or SAR, ZF, SF and PF follow the lifted
+/// SHRD, CF is still the last bit shifted out of the destination, and at the
+/// width or past it on SAR it is the sign bit, the last one shifted out; at
+/// the width or past it on SHL or SHR, ZF, SF and PF follow the lifted
 /// result and CF and OF stay undecided. A count that is no constant may
 /// mask to 0, so what it leaves is unknown.
 ///
@@ -48,10 +49,11 @@ pub(super) fn shift_flags(
         0 => before.clone(),
         1 if needed & RflagsBits::OF != 0 && mn != Mnemonic::Sar => Flags::Unknown,
         n if n < u64::from(bits)
+            || mn == Mnemonic::Sar
             || (n == u64::from(bits) && matches!(mn, Mnemonic::Shld | Mnemonic::Shrd)) =>
         {
             let pos = if matches!(mn, Mnemonic::Shr | Mnemonic::Sar | Mnemonic::Shrd) {
-                n - 1
+                (n - 1).min(u64::from(bits) - 1)
             } else {
                 u64::from(bits) - n
             };
