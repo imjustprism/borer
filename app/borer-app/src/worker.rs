@@ -79,8 +79,9 @@ pub struct LoadedBinary {
     pub analysis: Arc<Analysis>,
     /// Overlay matching the server's binary-enum configuration (packs left out).
     pub overlay: Arc<Overlay>,
-    /// Unfiltered function table fetched once during load.
-    pub initial_rows: FunctionRows,
+    /// Unfiltered function table fetched once during load, shared with the
+    /// view that shows it rather than copied.
+    pub initial_rows: Arc<FunctionRows>,
 }
 
 /// Loads `path`, runs [`Analysis::compute`], and builds the initial function rows.
@@ -105,14 +106,14 @@ pub fn load_binary_blocking(path: PathBuf) -> anyhow::Result<Arc<LoadedBinary>> 
         enum_source: EnumSource::Binary,
         ..Overlay::default()
     });
-    let initial_rows = function_rows(
+    let initial_rows = Arc::new(function_rows(
         &analysis,
         &overlay,
         None,
         FunctionOrder::Address,
         0,
         usize::MAX,
-    );
+    ));
     Ok(Arc::new(LoadedBinary {
         path,
         program,

@@ -503,7 +503,7 @@ impl AppView {
     ) {
         self.cancel_load();
         self.cancel_decompile();
-        let rows = Arc::new(loaded.initial_rows.clone());
+        let rows = loaded.initial_rows.clone();
         self.corpus_code = None;
         self.active_view = None;
         self.history.clear();
@@ -528,7 +528,7 @@ impl AppView {
     ) {
         self.cancel_load();
         self.cancel_decompile();
-        let rows = Arc::new(loaded.initial_rows.clone());
+        let rows = loaded.initial_rows.clone();
         self.virtual_row_count = None;
         self.active_view = None;
         self.history.clear();
@@ -555,7 +555,7 @@ impl AppView {
     ) {
         self.cancel_load();
         self.cancel_decompile();
-        let rows = Arc::new(loaded.initial_rows.clone());
+        let rows = loaded.initial_rows.clone();
         self.virtual_row_count = None;
         self.corpus_code = None;
         self.active_view = None;
@@ -731,7 +731,7 @@ impl AppView {
         self.cancel_decompile();
         match result {
             Ok(loaded) => {
-                let rows = Arc::new(loaded.initial_rows.clone());
+                let rows = loaded.initial_rows.clone();
                 let count = rows.rows.len();
                 let left_out = rows.left_out.clone();
                 let first_entry = rows.rows.first().map(|r| r.entry);
