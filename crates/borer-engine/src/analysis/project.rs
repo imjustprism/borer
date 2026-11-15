@@ -839,4 +839,29 @@ mod tests {
             Some(r"C:\temp\sample.exe")
         );
     }
+
+    /// A saved local deeper than [`crate::dwarf::FRAME_SPAN`] loads.
+    ///
+    /// A function with a large stack buffer names such a local; the
+    /// project loads with its name and saves it back under the same key.
+    #[test]
+    fn a_saved_local_past_the_frame_span_loads() {
+        use crate::analysis::protos::VarKey;
+        let project = Project {
+            vars: [(
+                "0x1000".to_owned(),
+                [("local_18000".to_owned(), "buf".to_owned())].into(),
+            )]
+            .into(),
+            ..Project::default()
+        };
+        let overlay = project.to_overlay().expect("a deep local loads");
+        let vars = overlay.vars.get(&0x1000).expect("the function's vars");
+        assert_eq!(
+            vars.get(&VarKey::Slot(-0x18000)).map(|v| v.name.as_str()),
+            Some("buf")
+        );
+        let saved = Project::from_overlay("b", None, &overlay);
+        assert_eq!(saved.vars, project.vars);
+    }
 }

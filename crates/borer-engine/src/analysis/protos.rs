@@ -36,6 +36,14 @@ pub const PROTOTYPES_MAX: usize = 1 << 16;
 /// Most variables one overlay names, across its functions.
 pub const VARS_MAX: usize = 1 << 16;
 
+/// Furthest below the entry stack pointer a named local may sit, in bytes:
+/// as far as one 32-bit x86 displacement reaches.
+///
+/// The text names a local at any depth its lift states, so a function with
+/// a stack buffer past [`crate::dwarf::FRAME_SPAN`] still names its locals
+/// `local_N` and an agent can rename them.
+const LOCAL_REACH: i64 = 1 << 31;
+
 /// A C type as an agent stated it: the words before the pointers, and the
 /// pointers.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -429,10 +437,10 @@ impl VarKey {
     ///
     /// # Errors
     ///
-    /// When the text names no parameter within [`PARAMS_MAX`] or stack slot
-    /// within [`crate::dwarf::FRAME_SPAN`] of the entry stack pointer; a
-    /// register, which holds many values over a function, is refused with
-    /// that reason.
+    /// When the text names no parameter within [`PARAMS_MAX`], no local
+    /// within [`LOCAL_REACH`] below the entry stack pointer, or no slot
+    /// within [`crate::dwarf::FRAME_SPAN`] above it; a register, which holds
+    /// many values over a function, is refused with that reason.
     pub fn parse(text: &str, word: i64, frame: i64) -> anyhow::Result<Self> {
         let hex = |s: &str| {
             (!s.is_empty() && s.len() <= 8)
@@ -483,21 +491,22 @@ impl VarKey {
     ///
     /// # Errors
     ///
-    /// When the text is no saved key, keys a slot above the return address
-    /// by its text name (`home_N`, `arg_N`), or places a slot at or past
-    /// [`crate::dwarf::FRAME_SPAN`].
+    /// When the text is no saved key, keys a slot by its offset below the
+    /// return address (`sp-0xN`) or by its text name above it (`home_N`,
+    /// `arg_N`), or places a slot at or past [`LOCAL_REACH`] below the entry
+    /// stack pointer or [`crate::dwarf::FRAME_SPAN`] above it.
     pub fn parse_saved(text: &str) -> anyhow::Result<Self> {
-        if let Some((neg, h)) = text
+        if let Some(h) = text
             .strip_prefix("sp+0x")
-            .map(|h| (false, h))
-            .or_else(|| text.strip_prefix("sp-0x").map(|h| (true, h)))
-            && !h.is_empty()
-            && h.bytes().all(|b| b.is_ascii_hexdigit())
+            .filter(|h| !h.is_empty() && h.bytes().all(|b| b.is_ascii_hexdigit()))
         {
-            let off = i64::from_str_radix(h, 16).unwrap_or(i64::MAX);
-            if !neg || off >= crate::dwarf::FRAME_SPAN {
-                return slot_at(text, if neg { off.saturating_neg() } else { off });
-            }
+            return slot_at(text, i64::from_str_radix(h, 16).unwrap_or(i64::MAX));
+        }
+        if text.starts_with("sp-") {
+            return Err(anyhow::anyhow!(
+                "{} is keyed by its offset; a project keys a slot below the return address as local_N",
+                crate::text::quoted(text)
+            ));
         }
         if text.starts_with("home_") || text.starts_with("arg_") {
             return Err(anyhow::anyhow!(
@@ -528,7 +537,8 @@ impl VarKey {
     }
 }
 
-/// Builds [`VarKey::Slot`] when `off` sits within [`crate::dwarf::FRAME_SPAN`].
+/// Builds [`VarKey::Slot`] when `off` sits within [`LOCAL_REACH`] below the
+/// entry stack pointer or [`crate::dwarf::FRAME_SPAN`] above it.
 ///
 /// # Arguments
 ///
@@ -537,16 +547,20 @@ impl VarKey {
 ///
 /// # Errors
 ///
-/// When `off` reaches or passes [`crate::dwarf::FRAME_SPAN`].
+/// When `off` reaches or passes the bound on its side.
 fn slot_at(text: &str, off: i64) -> anyhow::Result<VarKey> {
-    if off.unsigned_abs() < crate::dwarf::FRAME_SPAN.unsigned_abs() {
+    let (side, reach) = if off < 0 {
+        ("below", LOCAL_REACH)
+    } else {
+        ("above", crate::dwarf::FRAME_SPAN)
+    };
+    if off.unsigned_abs() < reach.unsigned_abs() {
         return Ok(VarKey::Slot(off));
     }
     Err(anyhow::anyhow!(
-        "{} is {:#x} bytes from the frame; a stack slot is within {:#x} of it",
+        "{} is {:#x} bytes from the frame; a stack slot {side} it is within {reach:#x} of it",
         crate::text::quoted(text),
-        off.unsigned_abs(),
-        crate::dwarf::FRAME_SPAN
+        off.unsigned_abs()
     ))
 }
 
@@ -1207,12 +1221,42 @@ mod tests {
             VarKey::parse_saved("sp+0xffff").ok(),
             Some(VarKey::Slot(0xffff))
         );
-        for far in ["sp+0x10000", "sp-0x10000"] {
-            let refused = VarKey::parse_saved(far)
-                .expect_err("a saved slot past the frame span")
+        let refused = VarKey::parse_saved("sp+0x10000")
+            .expect_err("a saved slot past the frame span")
+            .to_string();
+        assert!(refused.contains("within 0x10000 of it"), "{refused}");
+        for below in ["sp-0x10", "sp-0x10000"] {
+            let refused = VarKey::parse_saved(below)
+                .expect_err("a slot below the return address keyed by offset")
                 .to_string();
-            assert!(refused.contains("within 0x10000 of it"), "{refused}");
+            assert!(refused.contains("as local_N"), "{refused}");
         }
-        assert!(VarKey::parse_saved("sp-0x10").is_err());
+    }
+
+    /// A local deeper than [`crate::dwarf::FRAME_SPAN`], which the text
+    /// names as it names any local, is read as stated and as saved, and
+    /// one at or past [`super::LOCAL_REACH`] is refused naming that bound.
+    #[test]
+    fn a_local_past_the_frame_span_is_read() {
+        assert_eq!(
+            VarKey::parse("local_18000", 8, 8).ok(),
+            Some(VarKey::Slot(-0x18008))
+        );
+        assert_eq!(
+            VarKey::parse_saved("local_18000").ok(),
+            Some(VarKey::Slot(-0x18000))
+        );
+        assert_eq!(VarKey::Slot(-0x18000).spell_saved(), "local_18000");
+        assert_eq!(
+            VarKey::parse_saved("local_7fffffff").ok(),
+            Some(VarKey::Slot(-0x7fff_ffff))
+        );
+        let refused = VarKey::parse_saved("local_80000000")
+            .expect_err("a local at the reach")
+            .to_string();
+        assert!(
+            refused.contains("below it is within 0x80000000 of it"),
+            "{refused}"
+        );
     }
 }
