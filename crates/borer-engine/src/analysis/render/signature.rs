@@ -418,6 +418,27 @@ fn is_zero_scrub(instr: &Instruction, reg: Register) -> bool {
         && instr.op0_register().full_register() == reg
 }
 
+/// Tells whether `instr`'s memory operand addresses a stack-frame slot.
+///
+/// # Arguments
+///
+/// * `instr` - Instruction with a memory operand.
+/// * `sp_alias` - Optional full register aliasing the entry stack pointer.
+///
+/// # Returns
+///
+/// `true` when the base is `rsp`, `rbp`, `esp`, `ebp` or `sp_alias`, with no
+/// index register and no `fs` or `gs` segment.
+fn on_frame(instr: &Instruction, sp_alias: Option<Register>) -> bool {
+    let base = instr.memory_base();
+    !matches!(instr.memory_segment(), Register::FS | Register::GS)
+        && instr.memory_index() == Register::None
+        && (matches!(
+            base,
+            Register::RSP | Register::RBP | Register::ESP | Register::EBP
+        ) || sp_alias.is_some_and(|a| base.full_register() == a))
+}
+
 /// Tells whether `instr` stores `cookie` into a stack-frame slot.
 ///
 /// # Arguments
@@ -429,18 +450,15 @@ fn is_zero_scrub(instr: &Instruction, reg: Register) -> bool {
 /// # Returns
 ///
 /// `true` when `instr` writes `cookie` to a frame-addressed memory operand.
-fn is_cookie_frame_store(instr: &Instruction, cookie: Register, sp_alias: Option<Register>) -> bool {
-    let base = instr.memory_base();
-    let on_frame = matches!(
-        base,
-        Register::RSP | Register::RBP | Register::ESP | Register::EBP
-    ) || sp_alias.is_some_and(|a| base.full_register() == a);
+fn is_cookie_frame_store(
+    instr: &Instruction,
+    cookie: Register,
+    sp_alias: Option<Register>,
+) -> bool {
     instr.mnemonic() == Mnemonic::Mov
         && instr.op0_kind() == OpKind::Memory
         && instr.op1_kind() == OpKind::Register
-        && !matches!(instr.memory_segment(), Register::FS | Register::GS)
-        && instr.memory_index() == Register::None
-        && on_frame
+        && on_frame(instr, sp_alias)
         && instr.op1_register().full_register() == cookie
 }
 
@@ -574,17 +592,8 @@ impl Prologue {
         if !store
             || instr.op0_kind() != OpKind::Memory
             || instr.op1_kind() != OpKind::Register
-            || matches!(instr.memory_segment(), Register::FS | Register::GS)
-            || instr.memory_index() != Register::None
+            || !on_frame(instr, self.sp_alias)
         {
-            return false;
-        }
-        let base = instr.memory_base();
-        let on_frame = matches!(
-            base,
-            Register::RSP | Register::RBP | Register::ESP | Register::EBP
-        ) || self.sp_alias.is_some_and(|a| base.full_register() == a);
-        if !on_frame {
             return false;
         }
         let src = instr.op1_register();
