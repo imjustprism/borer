@@ -1207,6 +1207,9 @@ fn the_text_agrees_with_the_emulator_on_every_block() {
 /// binary as its answer's check decided it.
 ///
 /// Each function's check holds one record per block, in address order,
+/// each record holds the evidence its grade needs (a state compared for
+/// one compared and none for one not, a reason for all but a proved one,
+/// a disagreement for a wrong one and none for a proved or tested one),
 /// and every instruction the header says the machine does not bear out
 /// is held by the record of the block whose check found it, past as many
 /// as the records' caps left out. The records' counts against the
@@ -1256,13 +1259,14 @@ fn misgraded(
 ) -> Option<String> {
     let check = borer_engine::analysis::decompile::text_check(p, a, o, f.entry);
     let check = check.as_ref().as_ref()?;
-    let starts: Vec<u64> = check.blocks.iter().map(|b| b.start).collect();
-    let capped: usize = check.blocks.iter().map(|b| b.past_cap).sum();
+    use borer_engine::analysis::decompile::replay::Grade;
+    let starts: Vec<u64> = check.blocks.iter().map(|b| b.start()).collect();
+    let capped: usize = check.blocks.iter().map(|b| b.past_cap()).sum();
     let held = |at: u64| {
         check
             .blocks
             .iter()
-            .any(|b| b.disagreements.iter().any(|d| d.at == at))
+            .any(|b| b.disagreements().iter().any(|d| d.at == at))
     };
     let unheld: Vec<u64> = check
         .disagree
@@ -1270,12 +1274,30 @@ fn misgraded(
         .copied()
         .filter(|&at| !held(at))
         .collect();
+    let unfounded: Vec<u64> = check
+        .blocks
+        .iter()
+        .filter(|b| {
+            let (states, why, rows) = (
+                b.states() > 0,
+                b.why().is_some(),
+                !b.disagreements().is_empty(),
+            );
+            match b.grade() {
+                Grade::Proved => !states || why || rows,
+                Grade::Tested => !states || !why || rows,
+                Grade::Wrong => !states || !why || !rows,
+                Grade::Unchecked => states || !why,
+            }
+        })
+        .map(|b| b.start())
+        .collect();
     let blocks: Vec<u64> = f.blocks.iter().map(|b| b.start).collect();
-    if starts == blocks && unheld.len() <= capped {
+    if starts == blocks && unheld.len() <= capped && unfounded.is_empty() {
         return None;
     }
     Some(format!(
-        "{:#x}: records at {starts:x?} for blocks at {blocks:x?}; {}; disagree held by no record at {unheld:x?} past {capped} capped",
+        "{:#x}: records at {starts:x?} for blocks at {blocks:x?}; {}; disagree held by no record at {unheld:x?} past {capped} capped; records without their evidence at {unfounded:x?}",
         f.entry,
         check.header()
     ))

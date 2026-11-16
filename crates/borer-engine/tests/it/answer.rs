@@ -7,7 +7,7 @@
     reason = "assertions are the point of a test"
 )]
 
-use borer_engine::analysis::decompile::replay::{BlockCheck, Grade, TextCheck};
+use borer_engine::analysis::decompile::replay::{BlockCheck, Claim, Disagreement, TextCheck};
 use borer_engine::analysis::decompile::{
     Detail, Site, answer, answer_header, checked_header, decompile_named, shown, skeleton,
     with_header,
@@ -55,12 +55,26 @@ fn compare() -> Program {
 /// * `o` - The names the answer is asked under.
 /// * `repair` - What the search is to have ended with.
 fn flag(a: &Analysis, o: &Overlay, repair: Repair) {
+    let wrong = Disagreement {
+        function: 0x1000,
+        block: 0x1000,
+        at: 0x1000,
+        claim: Claim::Branch,
+        place: "the branch".to_owned(),
+        text: 1,
+        machine: 0,
+        bits: 1,
+        lane: false,
+        expr: "a1 == 0x1337abcd".to_owned(),
+    };
+    let block = BlockCheck::new(
+        0x1000,
+        Ok(Some("a state tried disagrees")),
+        (1, 1),
+        vec![wrong],
+    );
     let check = TextCheck {
-        blocks: vec![BlockCheck {
-            start: 0x1000,
-            grade: Grade::Wrong,
-            ..BlockCheck::default()
-        }],
+        blocks: vec![block],
         disagree: vec![0x1000],
     };
     let names = o.fingerprint();

@@ -92,28 +92,30 @@ pub enum Grade {
     Unchecked,
 }
 
-/// One block's check: its grade and the evidence behind it.
+/// One block's check: its grade and the evidence behind it, built only
+/// from what that check returned ([`BlockCheck::new`]), so a proved block
+/// has no `why` and no disagreement.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BlockCheck {
     /// The block's start.
-    pub start: u64,
+    pub(crate) start: u64,
     /// What the replay showed.
-    pub grade: Grade,
+    pub(crate) grade: Grade,
     /// States compared.
-    pub states: u32,
+    pub(crate) states: u32,
     /// Claims compared, over those states.
-    pub claims: usize,
+    pub(crate) claims: usize,
     /// Why the block was not checked, or not proved; `None` for one proved.
-    pub why: Option<&'static str>,
+    pub(crate) why: Option<&'static str>,
     /// The disagreements its check found, lane roughness aside, then those
     /// the proof found, the first [`KEPT_MAX`].
-    pub disagreements: Vec<Disagreement>,
+    pub(crate) disagreements: Vec<Disagreement>,
     /// Disagreements past [`KEPT_MAX`].
-    pub past_cap: usize,
+    pub(crate) past_cap: usize,
     /// The states a recheck asked for, other than those tried when it was
     /// clamped to `1..=`[`RECHECK_MAX`]; `None` for an answer's check,
     /// [`TRIALS`] per block.
-    pub asked: Option<u32>,
+    pub(crate) asked: Option<u32>,
 }
 
 /// What a replay had compared and found before one block's check.
@@ -146,15 +148,57 @@ impl BlockCheck {
     /// Returns the record of a block as its check decided it, with the
     /// disagreements that check found.
     ///
-    /// The grade is the check's own: a block compared and found to
-    /// disagree, lane roughness aside, is wrong; one not compared stays
-    /// unchecked whatever its check found, as the replay counts it.
+    /// The grade is the check's own: a block proved is proved, one
+    /// compared and found to disagree is wrong, one compared otherwise is
+    /// tested, and one not compared stays unchecked whatever its check
+    /// found, as the replay counts it.
     ///
     /// # Arguments
     ///
     /// * `start` - The block's start.
     /// * `checked` - What the check returned: `None` for a block proved,
     ///   else why not proved, or the error why not checked.
+    /// * `(states, claims)` - The states the check compared and the claims
+    ///   over them.
+    /// * `found` - The disagreements the check found, lane roughness
+    ///   aside; ignored for a block proved, kept up to [`KEPT_MAX`].
+    #[must_use]
+    pub fn new(
+        start: u64,
+        checked: Result<Option<&'static str>, &'static str>,
+        (states, claims): (u32, usize),
+        mut found: Vec<Disagreement>,
+    ) -> Self {
+        let (grade, why) = match checked {
+            Ok(None) => (Grade::Proved, None),
+            Ok(Some(why)) if found.is_empty() => (Grade::Tested, Some(why)),
+            Ok(Some(why)) => (Grade::Wrong, Some(why)),
+            Err(why) => (Grade::Unchecked, Some(why)),
+        };
+        if grade == Grade::Proved {
+            found.clear();
+        }
+        let past_cap = found.len().saturating_sub(KEPT_MAX);
+        found.truncate(KEPT_MAX);
+        Self {
+            start,
+            grade,
+            states,
+            claims,
+            why,
+            disagreements: found,
+            past_cap,
+            asked: None,
+        }
+    }
+
+    /// Returns the record of a block from what the replay found during its
+    /// check ([`BlockCheck::new`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - The block's start.
+    /// * `checked` - What the check returned.
     /// * `before` - What the replay had before this block's check.
     /// * `out` - The replay so far, this block's check included.
     pub(super) fn of(
@@ -170,25 +214,47 @@ impl BlockCheck {
             .chain(refuted.unwrap_or_default())
             .cloned()
             .collect();
-        let (grade, why) = match checked {
-            Ok(None) => (Grade::Proved, None),
-            Ok(Some(why)) if found.is_empty() => (Grade::Tested, Some(why)),
-            Ok(Some(why)) => (Grade::Wrong, Some(why)),
-            Err(why) => (Grade::Unchecked, Some(why)),
-        };
-        let past_cap = found.len().saturating_sub(KEPT_MAX);
-        let mut disagreements = found;
-        disagreements.truncate(KEPT_MAX);
-        Self {
-            start,
-            grade,
-            states: u32::try_from(out.trials.saturating_sub(before.trials)).unwrap_or(u32::MAX),
-            claims: claims(out).saturating_sub(before.claims),
-            why,
-            disagreements,
-            past_cap,
-            asked: None,
-        }
+        let states = u32::try_from(out.trials.saturating_sub(before.trials)).unwrap_or(u32::MAX);
+        let claims = claims(out).saturating_sub(before.claims);
+        Self::new(start, checked, (states, claims), found)
+    }
+
+    /// Returns the block's start.
+    #[must_use]
+    pub fn start(&self) -> u64 {
+        self.start
+    }
+
+    /// Returns what the replay showed of the block.
+    #[must_use]
+    pub fn grade(&self) -> Grade {
+        self.grade
+    }
+
+    /// Returns the states the block's check compared.
+    #[must_use]
+    pub fn states(&self) -> u32 {
+        self.states
+    }
+
+    /// Returns why the block was not checked, or not proved; `None` for a
+    /// block proved.
+    #[must_use]
+    pub fn why(&self) -> Option<&'static str> {
+        self.why
+    }
+
+    /// Returns the disagreements the block's check found, the first
+    /// [`KEPT_MAX`].
+    #[must_use]
+    pub fn disagreements(&self) -> &[Disagreement] {
+        &self.disagreements
+    }
+
+    /// Returns how many disagreements the check found past [`KEPT_MAX`].
+    #[must_use]
+    pub fn past_cap(&self) -> usize {
+        self.past_cap
     }
 
     /// Returns the evidence behind the grade, as plain lines a person
