@@ -12,6 +12,7 @@ pub mod function_columns;
 pub mod functions_panel;
 pub mod goto;
 pub mod measure;
+pub mod recent;
 pub mod start_item;
 pub mod worker;
 
@@ -50,8 +51,8 @@ pub fn run() -> anyhow::Result<()> {
                 match mode {
                     CliMode::Interactive(path) => cx
                         .open_window(options, |window, cx| {
-                            let workspace = app_view::new_workspace(&app_state, path, window, cx);
-                            cx.new(|cx| MultiWorkspace::new(workspace, window, cx))
+                            let app = app_view::new_workspace(&app_state, path, window, cx);
+                            cx.new(|cx| MultiWorkspace::new(app.workspace, window, cx))
                         })
                         .map(drop),
                     measured @ (CliMode::FirstFrame

@@ -299,7 +299,8 @@ mod tests {
     #[gpui::test]
     fn go_to_opens_what_the_engine_resolves(cx: &mut TestAppContext) {
         let app_state = init(cx);
-        let (workspace, cx) = open(&app_state, cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
         let plain = sample();
         let mut overlay = (*plain.overlay).clone();
         overlay.names.insert(CALLER, "caller_fn".to_owned());
@@ -350,7 +351,8 @@ mod tests {
     #[gpui::test]
     fn go_to_from_a_listing_opens_the_instruction(cx: &mut TestAppContext) {
         let app_state = init(cx);
-        let (workspace, cx) = open(&app_state, cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
         let loaded = sample();
         let (va, line) = fourth_instruction(&loaded);
         open_tab(&workspace, &loaded, (CALLER, Form::Listing), cx);

@@ -1,0 +1,237 @@
+//! The binaries opened last, kept in Zed's key-value store under the app's data directory.
+//!
+//! Each is kept with the engine's architecture and format as the load read them, so the
+//! start tab lists them without reading a file.
+
+use std::path::{Path, PathBuf};
+
+use anyhow::Context as _;
+use db::kvp::KeyValueStore;
+use gpui::{App, AppContext as _, Task};
+
+/// Namespace of the app's keys in Zed's key-value store.
+const SCOPE: &str = "borer";
+
+/// Key of the binaries opened last in [`SCOPE`].
+const KEY: &str = "recent_binaries";
+
+/// Most binaries the list keeps.
+pub const RECENT_MAX: usize = 10;
+
+/// Most binaries the start tab shows, each with its digit key.
+pub const SHOWN_MAX: usize = 5;
+
+/// A binary opened before: its path and what the engine said it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecentBinary {
+    /// The path it was opened from.
+    pub path: PathBuf,
+    /// The engine's architecture and format of it, as `x86-64 PE`.
+    pub kind: String,
+}
+
+impl RecentBinary {
+    /// Returns the file name, the whole path when it has none.
+    #[must_use]
+    pub fn name(&self) -> String {
+        file_name(&self.path)
+    }
+
+    /// Returns the folder the binary is in, empty when the path has none.
+    #[must_use]
+    pub fn folder(&self) -> String {
+        self.path
+            .parent()
+            .map(|dir| dir.display().to_string())
+            .unwrap_or_default()
+    }
+}
+
+/// Returns the file name of `path`, the whole path when it has none.
+///
+/// # Arguments
+///
+/// * `path` - A binary's path.
+#[must_use]
+pub fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
+/// Returns the binaries opened last, the newest first, at most [`RECENT_MAX`].
+///
+/// # Arguments
+///
+/// * `cx` - Application context reading the store.
+///
+/// # Errors
+///
+/// Returns an error when the store cannot be read or its record does not parse.
+pub fn read(cx: &App) -> anyhow::Result<Vec<RecentBinary>> {
+    parse(KeyValueStore::global(cx).scoped(SCOPE).read(KEY)?)
+}
+
+/// Returns the list a stored record holds, empty when there is none.
+///
+/// # Arguments
+///
+/// * `text` - The record, `None` when there is none.
+///
+/// # Errors
+///
+/// Returns an error when the record does not parse.
+fn parse(text: Option<String>) -> anyhow::Result<Vec<RecentBinary>> {
+    let Some(text) = text else {
+        return Ok(Vec::new());
+    };
+    let pairs: Vec<(PathBuf, String)> =
+        serde_json::from_str(&text).context("parsing the app's recent binaries")?;
+    let mut list: Vec<RecentBinary> = pairs
+        .into_iter()
+        .map(|(path, kind)| RecentBinary { path, kind })
+        .collect();
+    list.truncate(RECENT_MAX);
+    Ok(list)
+}
+
+/// Returns `list` with `opened` first and its path nowhere else, at most [`RECENT_MAX`].
+///
+/// A path that is not UTF-8 cannot be written to the store, so it is left out rather than
+/// keep every later write of the list from landing.
+///
+/// # Arguments
+///
+/// * `list` - The binaries opened last, the newest first.
+/// * `opened` - The binary just opened.
+#[must_use]
+pub fn remembered(mut list: Vec<RecentBinary>, opened: RecentBinary) -> Vec<RecentBinary> {
+    if opened.path.to_str().is_none() {
+        return list;
+    }
+    list.retain(|old| old.path != opened.path);
+    list.insert(0, opened);
+    list.truncate(RECENT_MAX);
+    list
+}
+
+/// Writes `list` to the store in the background.
+///
+/// # Arguments
+///
+/// * `list` - The binaries opened last, the newest first.
+/// * `cx` - Application context.
+///
+/// # Returns
+///
+/// The write, which fails when the store refuses it.
+pub fn write(list: &[RecentBinary], cx: &App) -> Task<anyhow::Result<()>> {
+    let text = encode(list);
+    let kvp = KeyValueStore::global(cx);
+    cx.background_spawn(async move { kvp.scoped(SCOPE).write(KEY.to_owned(), text?).await })
+}
+
+/// Returns the store's record of `list`.
+///
+/// # Arguments
+///
+/// * `list` - The binaries opened last, the newest first.
+///
+/// # Errors
+///
+/// Returns an error when a path is not UTF-8, which [`remembered`] never adds.
+fn encode(list: &[RecentBinary]) -> serde_json::Result<String> {
+    let pairs: Vec<(&Path, &str)> = list
+        .iter()
+        .map(|recent| (recent.path.as_path(), recent.kind.as_str()))
+        .collect();
+    serde_json::to_string(&pairs)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::{RECENT_MAX, RecentBinary, encode, parse, remembered};
+
+    /// Returns the recent binary `n`, a PE.
+    fn binary(n: usize) -> RecentBinary {
+        RecentBinary {
+            path: PathBuf::from(format!("dir/b{n}.exe")),
+            kind: String::from("x86-64 PE"),
+        }
+    }
+
+    /// A binary opened again moves to the front once, the list keeps [`RECENT_MAX`], and a
+    /// longer record read back is cut to them.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an entry repeats, the order is wrong or the cap does not hold.
+    #[test]
+    fn the_newest_binary_leads_once_and_the_list_is_capped() {
+        let list: Vec<RecentBinary> = (0..RECENT_MAX).map(binary).collect();
+        let again = remembered(list.clone(), binary(3));
+        assert_eq!(again.len(), RECENT_MAX);
+        assert_eq!(again.first(), Some(&binary(3)));
+        assert_eq!(again.iter().filter(|b| **b == binary(3)).count(), 1);
+        let fresh = remembered(list, binary(RECENT_MAX));
+        assert_eq!(fresh.len(), RECENT_MAX);
+        assert_eq!(fresh.last(), Some(&binary(RECENT_MAX - 2)));
+        let long: Vec<(PathBuf, String)> = (0..RECENT_MAX + 3)
+            .map(|n| (binary(n).path, binary(n).kind))
+            .collect();
+        let read = parse(Some(serde_json::to_string(&long).unwrap())).unwrap();
+        assert_eq!(read.len(), RECENT_MAX);
+        assert_eq!(read.first(), Some(&binary(0)));
+        assert!(parse(None).unwrap().is_empty());
+        assert!(parse(Some(String::from("not json"))).is_err());
+    }
+
+    /// A row shows the file name and its folder.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the name or the folder is wrong.
+    #[test]
+    fn a_row_splits_the_name_from_the_folder() {
+        let b = binary(1);
+        assert_eq!(b.name(), "b1.exe");
+        assert_eq!(b.folder(), PathBuf::from("dir").display().to_string());
+    }
+
+    /// Returns a path that is not UTF-8.
+    #[cfg(windows)]
+    fn not_utf8() -> PathBuf {
+        use std::os::windows::ffi::OsStringExt as _;
+        PathBuf::from(std::ffi::OsString::from_wide(&[0x61, 0xd800, 0x2e, 0x62]))
+    }
+
+    /// Returns a path that is not UTF-8.
+    #[cfg(unix)]
+    fn not_utf8() -> PathBuf {
+        use std::os::unix::ffi::OsStrExt as _;
+        PathBuf::from(std::ffi::OsStr::from_bytes(b"x\xff.bin"))
+    }
+
+    /// A path that is not UTF-8 is not added, so the list stays writable and the next
+    /// binary is kept.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the path is added or the list does not encode.
+    #[test]
+    fn a_path_that_is_not_utf8_leaves_the_list_writable() {
+        let odd = RecentBinary {
+            path: not_utf8(),
+            kind: String::from("x86-64 PE"),
+        };
+        let list = remembered(Vec::new(), odd);
+        assert!(list.is_empty());
+        let list = remembered(list, binary(1));
+        assert_eq!(list, vec![binary(1)]);
+        let read = parse(Some(encode(&list).unwrap())).unwrap();
+        assert_eq!(read, list);
+    }
+}

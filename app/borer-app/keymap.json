@@ -1,14 +1,14 @@
 [
   {
     "bindings": {
-      "ctrl-o": "borer::Open",
+      "secondary-o": "borer::Open",
       "ctrl-k ctrl-o": null
     }
   },
   {
     "context": "Workspace",
     "bindings": {
-      "ctrl-o": "borer::Open",
+      "secondary-o": "borer::Open",
       "ctrl-f": "borer::FocusFilter",
       "ctrl-shift-e": "borer::ToggleFunctions"
     }
@@ -27,6 +27,14 @@
     "bindings": {
       "up": "menu::SelectPrevious",
       "down": "menu::SelectNext"
+    }
+  },
+  {
+    "context": "StartItem",
+    "bindings": {
+      "up": "menu::SelectPrevious",
+      "down": "menu::SelectNext",
+      "enter": "menu::Confirm"
     }
   }
 ]

@@ -465,7 +465,7 @@ async fn assert_reported_not_fatal(text: Option<&str>, how: &str, cx: &mut TestA
     assert_eq!(shown(cx), "borer dark", "{text:?}");
     let said = notice(cx).expect("the problem is reported");
     assert!(said.starts_with(&format!("settings file {how}")), "{said}");
-    let binary = cx.new(|_| Binary::default());
+    let binary = cx.new(|cx| Binary::new(cx));
     let line = cx.new(|cx| StatusLine::new(binary, cx));
     let text_shown = line.read_with(cx, |line, cx| line.text(cx));
     assert!(text_shown.starts_with(&said), "{text_shown}");
@@ -506,8 +506,8 @@ async fn a_hostile_settings_file_keeps_ai_off_and_starts_no_server(cx: &mut Test
     let app_state = boot_with(Some(text), cx).await;
     assert!(cx.update(|cx| DisableAiSettings::get_global(cx).disable_ai));
     let (root, cx) = cx.add_window_view(|window, cx| {
-        let workspace = new_workspace(&app_state, None, window, cx);
-        MultiWorkspace::new(workspace, window, cx)
+        let app = new_workspace(&app_state, None, window, cx);
+        MultiWorkspace::new(app.workspace, window, cx)
     });
     cx.run_until_parked();
     let running = root.read_with(cx, |root, cx| {

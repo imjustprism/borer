@@ -10,7 +10,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Action, AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Div, Entity,
     EventEmitter, FocusHandle, Focusable, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, Render, ScrollStrategy, SharedString,
+    ParentElement as _, Pixels, Render, ScrollStrategy, SharedString, Stateful,
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, canvas,
     div, px, transparent_black,
 };
@@ -414,6 +414,18 @@ impl FunctionsPanel {
         self.open_row(0, TabMode::Preview, window, cx);
     }
 
+    /// Lists the functions of the panel's binary as it stands, for a panel added after the
+    /// binary loaded, which it observes only from then on.
+    ///
+    /// # Arguments
+    ///
+    /// * `window` - Window the panel is in.
+    /// * `cx` - Panel context.
+    pub fn follow(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let binary = self.binary.clone();
+        self.follow_binary(&binary, window, cx);
+    }
+
     /// Issues a sequenced background filter for the editor's query.
     ///
     /// # Arguments
@@ -455,22 +467,6 @@ impl FunctionsPanel {
             .read(cx)
             .scroll_handle
             .scroll_to_item(self.selected, ScrollStrategy::Nearest);
-    }
-
-    /// Moves the highlight to row `row`, clamped to the rows shown.
-    ///
-    /// # Arguments
-    ///
-    /// * `row` - Zero-based row index; past the last row selects the last.
-    /// * `cx` - Panel context.
-    fn select(&mut self, row: usize, cx: &mut Context<'_, Self>) {
-        let len = self.rows().map_or(0, |r| r.rows.len());
-        if len == 0 {
-            return;
-        }
-        self.selected = row.min(len - 1);
-        self.scroll_to_selected(cx);
-        cx.notify();
     }
 
     /// Highlights row `row` and shows its function as `mode` says: a permanent tab takes
@@ -676,16 +672,11 @@ impl Render for FunctionsPanel {
         )
         .absolute()
         .size_full();
-        div()
+        let root = div()
             .id("functions-panel")
             .key_context("FunctionsPanel")
-            .track_focus(&self.focus_handle)
-            .on_action(cx.listener(|this, _: &menu::SelectNext, _, cx| {
-                this.select(this.selected.saturating_add(1), cx);
-            }))
-            .on_action(cx.listener(|this, _: &menu::SelectPrevious, _, cx| {
-                this.select(this.selected.saturating_sub(1), cx);
-            }))
+            .track_focus(&self.focus_handle);
+        row_keys(root, cx)
             .on_action(cx.listener(|this, _: &menu::SelectFirst, _, cx| this.select(0, cx)))
             .on_action(cx.listener(|this, _: &menu::SelectLast, _, cx| {
                 this.select(usize::MAX, cx);
@@ -710,6 +701,54 @@ impl Render for FunctionsPanel {
                     .child(body)
                     .child(watch_width),
             )
+    }
+}
+
+/// A view with a highlighted row, which the menu's next and previous keys move.
+pub(crate) trait Rows: Sized + 'static {
+    /// Returns the index of the highlighted row.
+    fn selected(&self) -> usize;
+
+    /// Moves the highlight to row `row`, held to the rows shown.
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - Zero-based row; past the last selects the last.
+    /// * `cx` - View context.
+    fn select(&mut self, row: usize, cx: &mut Context<'_, Self>);
+}
+
+/// Returns `element` with the menu's next and previous keys moving `T`'s highlight.
+///
+/// # Arguments
+///
+/// * `element` - The view's root element.
+/// * `cx` - View context.
+pub(crate) fn row_keys<T: Rows>(element: Stateful<Div>, cx: &Context<'_, T>) -> Stateful<Div> {
+    element
+        .on_action(cx.listener(|this: &mut T, _: &menu::SelectNext, _, cx| {
+            this.select(this.selected().saturating_add(1), cx);
+        }))
+        .on_action(
+            cx.listener(|this: &mut T, _: &menu::SelectPrevious, _, cx| {
+                this.select(this.selected().saturating_sub(1), cx);
+            }),
+        )
+}
+
+impl Rows for FunctionsPanel {
+    fn selected(&self) -> usize {
+        self.selected
+    }
+
+    fn select(&mut self, row: usize, cx: &mut Context<'_, Self>) {
+        let len = self.rows().map_or(0, |r| r.rows.len());
+        if len == 0 {
+            return;
+        }
+        self.selected = row.min(len - 1);
+        self.scroll_to_selected(cx);
+        cx.notify();
     }
 }
 
@@ -786,15 +825,30 @@ mod tests {
         FunctionOrder, FunctionRow, FunctionRows, LeftOut, RowSource,
     };
     use gpui::{Entity, SharedString, TestAppContext, VisualTestContext, px};
-    use workspace::Workspace;
+    use workspace::dock::DockPosition;
+    use workspace::{AppState, Workspace};
 
     use super::{ENTRY_SELECTOR, Empty, FunctionsPanel, ROW_SELECTOR};
     use crate::actions::FocusFilter;
+    use crate::app_view::add_functions_panel;
     use crate::app_view::tests::{init, open, sample};
 
     /// Vertical padding of a cell of Zed's table at the pin, both sides together, in rems
     /// (`py_0p5` in `data_table.rs`).
     const CELL_PAD_Y_REMS: f32 = 0.25;
+
+    /// Opens a window over the app's workspace with a functions panel docked on the left
+    /// before any load, and returns the workspace.
+    fn open_docked<'a>(
+        app_state: &Arc<AppState>,
+        cx: &'a mut TestAppContext,
+    ) -> (Entity<Workspace>, &'a mut VisualTestContext) {
+        let (app, cx) = open(app_state, cx);
+        cx.update(|window, cx| {
+            add_functions_panel(&app.workspace, &app.binary, DockPosition::Left, window, cx);
+        });
+        (app.workspace, cx)
+    }
 
     /// Settles the work in flight and lays the window out twice, the second time at the
     /// table width the first measured.
@@ -868,7 +922,7 @@ mod tests {
     /// Panics when a step goes wrong, as [`the_function_table_draws_no_row_border`] says.
     fn the_function_table_draws_no_row_border_steps(cx: &mut TestAppContext) {
         let app_state = init(cx);
-        let (workspace, cx) = open(&app_state, cx);
+        let (workspace, cx) = open_docked(&app_state, cx);
         show_rows(&workspace, rows_at(&[0x1000, 0x2000, 0x3000]), cx);
         let row = cx.debug_bounds(ROW_SELECTOR).unwrap();
         let entry = cx.debug_bounds(ENTRY_SELECTOR).unwrap();
@@ -899,7 +953,7 @@ mod tests {
     /// Panics when a step goes wrong, as [`the_panel_follows_a_failing_load`] says.
     fn the_panel_follows_a_failing_load_steps(cx: &mut TestAppContext) {
         let app_state = init(cx);
-        let (workspace, cx) = open(&app_state, cx);
+        let (workspace, cx) = open_docked(&app_state, cx);
         let panel = panel_of(&workspace, cx);
         let empty = |cx: &mut VisualTestContext| panel.read_with(cx, |panel, cx| panel.empty(cx));
         assert_eq!(empty(cx), Some(Empty::NoBinary));
@@ -939,7 +993,7 @@ mod tests {
     /// Panics when a step goes wrong, as [`no_function_names_what_the_engine_left_out`] says.
     fn no_function_names_what_the_engine_left_out_steps(cx: &mut TestAppContext) {
         let app_state = init(cx);
-        let (workspace, cx) = open(&app_state, cx);
+        let (workspace, cx) = open_docked(&app_state, cx);
         let left_out = LeftOut {
             thunks: 3,
             funclets: 0,
@@ -985,7 +1039,7 @@ mod tests {
     /// Panics when a step goes wrong, as [`no_match_quotes_the_query_of_the_rows_shown`] says.
     fn no_match_quotes_the_query_of_the_rows_shown_steps(cx: &mut TestAppContext) {
         let app_state = init(cx);
-        let (workspace, cx) = open(&app_state, cx);
+        let (workspace, cx) = open_docked(&app_state, cx);
         let panel = panel_of(&workspace, cx);
         let set_filter = |text: &'static str, cx: &mut VisualTestContext| {
             panel.update_in(cx, |panel, window, cx| {
@@ -1031,7 +1085,7 @@ mod tests {
     /// Panics when a step goes wrong, as [`the_filter_hint_follows_the_keymap`] says.
     fn the_filter_hint_follows_the_keymap_steps(cx: &mut TestAppContext) {
         let app_state = init(cx);
-        let (workspace, cx) = open(&app_state, cx);
+        let (workspace, cx) = open_docked(&app_state, cx);
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.focus_panel::<FunctionsPanel>(window, cx);
         });

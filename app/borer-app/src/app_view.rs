@@ -1,5 +1,6 @@
-//! The app's window: Zed's [`Workspace`] over an empty local [`Project`], with the functions
-//! panel in its left dock and the load status in its status bar.
+//! The app's window: Zed's [`Workspace`] over an empty local [`Project`], with nothing docked
+//! until a binary loads, then the functions panel in its left dock, and the load status in
+//! its status bar.
 //!
 //! Zed's settings, themes, keymap, command palette and persistence run under the app's own
 //! data directory. Nothing signs in, updates, reports telemetry or collaborates:
@@ -13,7 +14,6 @@
 //! action opens a binary instead; AI is off and every folder untrusted.
 
 use std::any::{Any, TypeId};
-use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -36,8 +36,8 @@ use search::BufferSearchBar;
 use session::{AppSession, Session};
 use workspace::dock::DockPosition;
 use workspace::{
-    AddFolderToProject, AppState, DockStructure, MultiWorkspace, Pane, Workspace, WorkspaceId,
-    WorkspaceStore,
+    AddFolderToProject, AppState, DockData, DockStructure, MultiWorkspace, Pane, Workspace,
+    WorkspaceId, WorkspaceStore,
 };
 
 use crate::actions::{
@@ -239,12 +239,12 @@ fn flush_on_quit(cx: &mut App) -> impl Future<Output = ()> + use<> {
     async move { workspace::flush_windows_serialization(&windows, &mut cx).await }
 }
 
-/// Opens the first file dropped on one of `workspace`'s tabs as its binary, and refuses a
-/// folder with a status line; nothing of a drop reaches Zed's open path.
+/// Opens the first file dropped on a tab as the window's binary, and refuses a folder with
+/// a status line; nothing of a drop reaches Zed's open path.
 ///
 /// # Arguments
 ///
-/// * `workspace` - Workspace the tab belongs to.
+/// * `binary` - The window's binary.
 /// * `dropped` - What was dropped.
 /// * `cx` - Application context.
 ///
@@ -252,15 +252,11 @@ fn flush_on_quit(cx: &mut App) -> impl Future<Output = ()> + use<> {
 ///
 /// `true` for dropped paths, which the tab took, `false` for anything else (a dragged tab),
 /// which Zed's pane handles.
-pub fn open_dropped(workspace: &WeakEntity<Workspace>, dropped: &dyn Any, cx: &mut App) -> bool {
+pub fn open_dropped(binary: &Entity<Binary>, dropped: &dyn Any, cx: &mut App) -> bool {
     let Some(paths) = dropped.downcast_ref::<ExternalPaths>() else {
         return false;
     };
-    let binary = workspace
-        .upgrade()
-        .and_then(|workspace| workspace.read(cx).panel::<FunctionsPanel>(cx))
-        .map(|panel| panel.read(cx).binary().clone());
-    if let (Some(binary), Some(path)) = (binary, paths.paths().first()) {
+    if let Some(path) = paths.paths().first() {
         let path = path.clone();
         binary.update(cx, |binary, cx| {
             if matches!(checked_metadata(&path), Ok(Some(meta)) if meta.is_dir()) {
@@ -273,9 +269,37 @@ pub fn open_dropped(workspace: &WeakEntity<Workspace>, dropped: &dyn Any, cx: &m
     true
 }
 
-/// Returns the app's workspace for `window`: an empty local project, the functions panel,
-/// the status line and the app's actions, its docks as the last run left them, loading
-/// `path` when one is given.
+/// Returns the binary of the window `workspace` is in, which the status line shows, when
+/// the workspace is still open.
+///
+/// # Arguments
+///
+/// * `workspace` - The window's workspace.
+/// * `cx` - Application context.
+pub fn binary_of(workspace: &WeakEntity<Workspace>, cx: &App) -> Option<Entity<Binary>> {
+    let workspace = workspace.upgrade()?;
+    let line = workspace
+        .read(cx)
+        .status_bar()
+        .read(cx)
+        .item_of_type::<StatusLine>()?;
+    Some(line.read(cx).binary().clone())
+}
+
+/// A window's workspace and the binary it has open.
+#[derive(Debug, Clone)]
+pub struct AppWindow {
+    /// Zed's workspace: panes, docks and status bar.
+    pub workspace: Entity<Workspace>,
+    /// The window's binary.
+    pub binary: Entity<Binary>,
+}
+
+/// Returns the app's workspace for `window` and its binary: an empty local project, the
+/// status line and the app's actions, loading `path` when one is given.
+///
+/// Nothing is docked until a binary loads: the functions panel is added with the first
+/// loaded binary, in the dock and state the last run left it ([`dock_functions_panel`]).
 ///
 /// # Arguments
 ///
@@ -288,7 +312,7 @@ pub fn new_workspace(
     path: Option<PathBuf>,
     window: &mut Window,
     cx: &mut App,
-) -> Entity<Workspace> {
+) -> AppWindow {
     let project = Project::local(
         app_state.client.clone(),
         app_state.node_runtime.clone(),
@@ -302,61 +326,56 @@ pub fn new_workspace(
         },
         cx,
     );
-    let binary = cx.new(|_| Binary::default());
-    let saved = saved_layout(cx);
-    let in_right = saved.as_ref().is_ok_and(|docks| {
-        docks
-            .as_ref()
-            .is_some_and(|docks| docks.right.active_panel.as_deref() == Some(PANEL_KEY))
-    });
-    let position = if in_right {
-        DockPosition::Right
-    } else {
-        DockPosition::Left
-    };
+    let binary = cx.new(|cx| Binary::new(cx));
     let workspace = cx.new(|cx| {
         let id = WorkspaceId::from_i64(APP_WORKSPACE_ID);
         let mut workspace = Workspace::new(Some(id), project, app_state.clone(), window, cx);
-        let weak = cx.weak_entity();
-        let panel = cx.new(|cx| FunctionsPanel::new(weak, binary.clone(), position, window, cx));
-        workspace.add_panel(panel, window, cx);
         let status = cx.new(|cx| StatusLine::new(binary.clone(), cx));
         workspace
             .status_bar()
             .update(cx, |bar, cx| bar.add_left_item(status, window, cx));
-        register_actions(&mut workspace);
+        register_actions(&mut workspace, &binary);
         workspace
     });
-    match saved {
-        Ok(Some(docks)) => workspace.update(cx, |workspace, cx| {
-            workspace.set_dock_structure(docks, window, cx);
-        }),
-        Ok(None) => {}
-        Err(err) => binary.update(cx, |binary, cx| {
+    let saved = saved_layout(cx).unwrap_or_else(|err| {
+        binary.update(cx, |binary, cx| {
             binary.set_status(format!("dock layout not restored: {err:#}"), cx);
-        }),
-    }
+        });
+        None
+    });
     workspace.update(cx, |workspace, cx| workspace.finish_dock_restoration(cx));
-    let center = workspace.read(cx).active_pane().clone();
+    let app = AppWindow { workspace, binary };
+    let center = app.workspace.read(cx).active_pane().clone();
     center.update(cx, |pane, _| pane.set_should_display_welcome_page(false));
-    keep_filled(&center, &workspace.downgrade(), window, cx);
+    keep_filled(&center, &app.binary, window, cx);
     add_search_bar(&center, window, cx);
+    center.update(cx, |pane, cx| pane.focus_active_item(window, cx));
+    let pane_binary = app.binary.clone();
     window
         .subscribe(
-            &workspace,
+            &app.workspace,
             cx,
-            |workspace, event: &workspace::Event, window, cx| {
+            move |_, event: &workspace::Event, window, cx| {
                 if let workspace::Event::PaneAdded(pane) = event {
-                    keep_filled(pane, &workspace.downgrade(), window, cx);
+                    keep_filled(pane, &pane_binary, window, cx);
                     add_search_bar(pane, window, cx);
                 }
             },
         )
         .detach();
+    let weak = app.workspace.downgrade();
+    window
+        .observe(&app.binary, cx, move |binary, window, cx| {
+            if let Some(workspace) = weak.upgrade() {
+                dock_functions_panel(&workspace, &binary, saved.as_ref(), window, cx);
+            }
+        })
+        .detach();
     if let Some(path) = path {
-        binary.update(cx, |binary, cx| binary.open_path(path, cx));
+        app.binary
+            .update(cx, |binary, cx| binary.open_path(path, cx));
     }
-    workspace
+    app
 }
 
 /// Gives `pane` Zed's buffer search bar, which finds text in the active code tab.
@@ -374,15 +393,86 @@ fn add_search_bar(pane: &Entity<Pane>, window: &mut Window, cx: &mut App) {
     });
 }
 
-/// Registers the app's workspace-wide actions on `workspace`.
+/// Adds the functions panel to `workspace` once `binary` has loaded, when it has none.
+///
+/// The panel goes in the dock `saved` names it in, opened or closed as `saved` left that
+/// dock; with no saved layout naming it, it opens in the left dock. It then lists the
+/// binary's functions and opens the first.
+///
+/// # Arguments
+///
+/// * `workspace` - The window's workspace.
+/// * `binary` - The window's binary.
+/// * `saved` - The dock layout an earlier run left, if any.
+/// * `window` - Window the workspace is in.
+/// * `cx` - Application context.
+pub fn dock_functions_panel(
+    workspace: &Entity<Workspace>,
+    binary: &Entity<Binary>,
+    saved: Option<&DockStructure>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let docked = workspace.read(cx).panel::<FunctionsPanel>(cx).is_some();
+    if docked || binary.read(cx).loaded().is_none() {
+        return;
+    }
+    let named = |data: &DockData| data.active_panel.as_deref() == Some(PANEL_KEY);
+    let saved = saved.filter(|docks| named(&docks.left) || named(&docks.right));
+    let position = if saved.is_some_and(|docks| named(&docks.right)) {
+        DockPosition::Right
+    } else {
+        DockPosition::Left
+    };
+    let panel = add_functions_panel(workspace, binary, position, window, cx);
+    if let Some(docks) = saved {
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_dock_structure(docks.clone(), window, cx);
+        });
+    }
+    panel.update(cx, |panel, cx| panel.follow(window, cx));
+}
+
+/// Adds a functions panel over `binary` to `workspace`'s dock at `position`, open, and
+/// returns it; it lists nothing until told to or until the binary next changes.
+///
+/// # Arguments
+///
+/// * `workspace` - The window's workspace.
+/// * `binary` - The window's binary.
+/// * `position` - The dock the panel goes in.
+/// * `window` - Window the workspace is in.
+/// * `cx` - Application context.
+pub fn add_functions_panel(
+    workspace: &Entity<Workspace>,
+    binary: &Entity<Binary>,
+    position: DockPosition,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<FunctionsPanel> {
+    workspace.update(cx, |workspace, cx| {
+        let weak = cx.weak_entity();
+        let panel = cx.new(|cx| FunctionsPanel::new(weak, binary.clone(), position, window, cx));
+        workspace.add_panel(panel.clone(), window, cx);
+        panel
+    })
+}
+
+/// Registers the app's workspace-wide actions on `workspace`, over the window's `binary`.
 ///
 /// # Arguments
 ///
 /// * `workspace` - The workspace.
-fn register_actions(workspace: &mut Workspace) {
+/// * `binary` - The window's binary.
+fn register_actions(workspace: &mut Workspace, binary: &Entity<Binary>) {
+    let (open, add) = (binary.clone(), binary.clone());
     workspace
-        .register_action(|workspace, _: &Open, _, cx| prompt_open(workspace, cx))
-        .register_action(|workspace, _: &AddFolderToProject, _, cx| prompt_open(workspace, cx))
+        .register_action(move |_, _: &Open, _, cx| {
+            open.update(cx, |binary, cx| binary.prompt_open(cx));
+        })
+        .register_action(move |_, _: &AddFolderToProject, _, cx| {
+            add.update(cx, |binary, cx| binary.prompt_open(cx));
+        })
         .register_action(|workspace, _: &FocusFilter, window, cx| {
             workspace.focus_panel::<FunctionsPanel>(window, cx);
         })
@@ -407,19 +497,6 @@ fn register_actions(workspace: &mut Workspace) {
         .register_action(|workspace, _: &GoTo, window, cx| {
             crate::goto::toggle(workspace, window, cx);
         });
-}
-
-/// Opens the system file dialog for the binary of `workspace`'s functions panel.
-///
-/// # Arguments
-///
-/// * `workspace` - The workspace.
-/// * `cx` - Application context.
-fn prompt_open(workspace: &Workspace, cx: &mut App) {
-    if let Some(panel) = workspace.panel::<FunctionsPanel>(cx) {
-        let binary = panel.read(cx).binary().clone();
-        binary.update(cx, |binary, cx| binary.prompt_open(cx));
-    }
 }
 
 /// Returns the dock layout Zed saved for the app's empty workspace on an earlier run.
@@ -470,12 +547,15 @@ pub(crate) mod tests {
     use workspace::{AddFolderToProject, AppState, MultiWorkspace, Workspace};
     use workspace::{Item as _, Panel as _};
 
-    use super::{DEFAULT_DOCK_STATE_KEY, REFUSED_FOLDER, configure, data_dir, new_workspace};
+    use super::{
+        AppWindow, DEFAULT_DOCK_STATE_KEY, REFUSED_FOLDER, configure, data_dir, new_workspace,
+    };
     use crate::actions::ToggleFunctionColumns;
     use crate::decompile_item::{DecompileItem, TabMode, open_function};
     use crate::function_columns::Columns;
     use crate::functions_panel::FunctionsPanel;
     use crate::measure::{CliMode, MeasurePhase, split_data_dir};
+    use crate::start_item::StartItem;
     use crate::worker::LoadedBinary;
 
     /// Entry of the sample program's caller, which calls [`CALLEE`].
@@ -513,21 +593,9 @@ pub(crate) mod tests {
         })
     }
 
-    /// Returns the status line of `workspace`'s binary and empties it.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the workspace has no functions panel.
-    fn take_status(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> String {
-        let binary = workspace.read_with(cx, |workspace, cx| {
-            workspace
-                .panel::<FunctionsPanel>(cx)
-                .unwrap()
-                .read(cx)
-                .binary()
-                .clone()
-        });
-        binary.update(cx, |binary, cx| {
+    /// Returns the status line of the window's binary and empties it.
+    pub(crate) fn take_status(app: &AppWindow, cx: &mut VisualTestContext) -> String {
+        app.binary.update(cx, |binary, cx| {
             let status = binary.status().to_owned();
             binary.set_status(String::new(), cx);
             status
@@ -547,17 +615,41 @@ pub(crate) mod tests {
         cx.run_until_parked();
     }
 
-    /// Opens a window over the app's workspace and returns that workspace.
+    /// Opens a window over the app's workspace and returns that workspace and its binary.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the window's root is not built.
     pub(crate) fn open<'a>(
         app_state: &Arc<AppState>,
         cx: &'a mut TestAppContext,
-    ) -> (Entity<Workspace>, &'a mut VisualTestContext) {
-        let (root, cx) = cx.add_window_view(|window, cx| {
-            let workspace = new_workspace(app_state, None, window, cx);
-            MultiWorkspace::new(workspace, window, cx)
+    ) -> (AppWindow, &'a mut VisualTestContext) {
+        let mut opened = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let app = new_workspace(app_state, None, window, cx);
+            let root = MultiWorkspace::new(app.workspace.clone(), window, cx);
+            opened = Some(app);
+            root
         });
-        let workspace = root.read_with(cx, |root, _| root.workspace().clone());
-        (workspace, cx)
+        (opened.unwrap(), cx)
+    }
+
+    /// Shows the sample program as the window's loaded binary, which docks the functions
+    /// panel, and returns the panel.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no panel is docked.
+    pub(crate) fn load_sample(
+        app: &AppWindow,
+        cx: &mut VisualTestContext,
+    ) -> Entity<FunctionsPanel> {
+        app.binary
+            .update(cx, |binary, cx| binary.show_loaded(sample(), cx));
+        cx.run_until_parked();
+        app.workspace
+            .read_with(cx, |workspace, cx| workspace.panel::<FunctionsPanel>(cx))
+            .unwrap()
     }
 
     /// Returns the hand-built sample program, a caller and its callee, as a loaded binary.
@@ -581,7 +673,11 @@ pub(crate) mod tests {
     }
 
     /// Opens the sample's caller in `workspace`'s active pane as `mode` says, focused.
-    fn open_caller(workspace: &Entity<Workspace>, mode: TabMode, cx: &mut VisualTestContext) {
+    pub(crate) fn open_caller(
+        workspace: &Entity<Workspace>,
+        mode: TabMode,
+        cx: &mut VisualTestContext,
+    ) {
         let loaded = sample();
         workspace.update_in(cx, |workspace, window, cx| {
             open_function(workspace, loaded, CALLER, mode, true, window, cx);
@@ -637,7 +733,9 @@ pub(crate) mod tests {
     /// Panics when a step goes wrong, as [`every_borer_action_is_in_the_palette`] says.
     fn every_borer_action_is_in_the_palette_steps(cx: &mut TestAppContext) {
         let app_state = init(cx);
-        let (workspace, cx) = open(&app_state, cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace.clone();
+        load_sample(&app, cx);
         let declared: Vec<&str> = cx.update(|_, cx| {
             cx.all_action_names()
                 .iter()
@@ -704,7 +802,9 @@ pub(crate) mod tests {
     /// Panics when a step goes wrong, as [`the_palette_opens_with_the_app_actions_and_no_zed_opener`] says.
     fn the_palette_opens_with_the_app_actions_and_no_zed_opener_steps(cx: &mut TestAppContext) {
         let app_state = init(cx);
-        let (workspace, cx) = open(&app_state, cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace.clone();
+        load_sample(&app, cx);
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.focus_panel::<FunctionsPanel>(window, cx);
         });
@@ -768,10 +868,10 @@ pub(crate) mod tests {
     /// Panics when a step goes wrong, as [`the_palette_toggles_the_function_columns`] says.
     fn the_palette_toggles_the_function_columns_steps(cx: &mut TestAppContext) {
         let app_state = init(cx);
-        let (workspace, cx) = open(&app_state, cx);
-        let panel = workspace.update_in(cx, |workspace, window, cx| {
+        let (app, cx) = open(&app_state, cx);
+        let panel = load_sample(&app, cx);
+        app.workspace.update_in(cx, |workspace, window, cx| {
             workspace.focus_panel::<FunctionsPanel>(window, cx);
-            workspace.panel::<FunctionsPanel>(cx).unwrap()
         });
         for columns in [Columns::Brief, Columns::Full, Columns::Brief] {
             assert_eq!(panel.read_with(cx, |panel, _| panel.columns()), columns);
@@ -799,7 +899,8 @@ pub(crate) mod tests {
     /// Panics when a step goes wrong, as [`a_decompile_tab_is_titled_by_its_function`] says.
     fn a_decompile_tab_is_titled_by_its_function_steps(cx: &mut TestAppContext) {
         let app_state = init(cx);
-        let (workspace, cx) = open(&app_state, cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
         open_caller(&workspace, TabMode::Permanent, cx);
         assert_eq!(shown(&workspace, cx).map(|(entry, _)| entry), Some(CALLER));
         let loaded = sample();
@@ -866,21 +967,19 @@ pub(crate) mod tests {
                 serde_json::json!({ ".zed": { "settings.json": settings } }),
             )
             .await;
-        let (workspace, cx) = open(&app_state, cx);
-        workspace.update_in(cx, |workspace, window, cx| {
-            workspace.close_panel::<FunctionsPanel>(window, cx);
-        });
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace.clone();
         drop_on_center(&dir, cx);
-        assert!(take_status(&workspace, cx).ends_with(REFUSED_FOLDER));
+        assert!(take_status(&app, cx).ends_with(REFUSED_FOLDER));
         open_caller(&workspace, TabMode::Permanent, cx);
         assert_eq!(shown(&workspace, cx).map(|(entry, _)| entry), Some(CALLER));
         drop_on_center(&dir, cx);
-        assert!(take_status(&workspace, cx).ends_with(REFUSED_FOLDER));
+        assert!(take_status(&app, cx).ends_with(REFUSED_FOLDER));
         cx.dispatch_action(AddFolderToProject);
         cx.run_until_parked();
         cx.simulate_path_prompt_response(|_| Some(vec![dir.clone()]));
         cx.run_until_parked();
-        assert!(take_status(&workspace, cx).starts_with("load failed"));
+        assert!(take_status(&app, cx).starts_with("load failed"));
         std::fs::remove_dir_all(&dir).unwrap();
         let folders = workspace.read_with(cx, |workspace, cx| {
             workspace.project().read(cx).worktrees(cx).count()
@@ -907,7 +1006,8 @@ pub(crate) mod tests {
     /// Panics when a step goes wrong, as [`back_returns_to_where_each_function_was_left`] says.
     fn back_returns_to_where_each_function_was_left_steps(cx: &mut TestAppContext) {
         let app_state = init(cx);
-        let (workspace, cx) = open(&app_state, cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
         cx.simulate_resize(size(px(800.0), px(160.0)));
         open_caller(&workspace, TabMode::Preview, cx);
         assert_eq!(shown(&workspace, cx), Some((CALLER, 0)));
@@ -961,7 +1061,8 @@ pub(crate) mod tests {
     /// Panics when a step goes wrong, as [`a_jump_puts_its_line_at_the_top`] says.
     fn a_jump_puts_its_line_at_the_top_steps(cx: &mut TestAppContext) {
         let app_state = init(cx);
-        let (workspace, cx) = open(&app_state, cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
         cx.simulate_resize(size(px(800.0), px(160.0)));
         open_caller(&workspace, TabMode::Permanent, cx);
         assert_eq!(shown(&workspace, cx), Some((CALLER, 0)));
@@ -978,8 +1079,8 @@ pub(crate) mod tests {
         assert_eq!(shown(&workspace, cx), Some((CALLER, 2)));
     }
 
-    /// A saved layout that does not parse leaves the default layout, the panel open on the
-    /// left, and says so in the status line.
+    /// A saved layout that does not parse says so in the status line and leaves the default
+    /// layout: the panel opens on the left with the first load.
     ///
     /// # Panics
     ///
@@ -1000,16 +1101,17 @@ pub(crate) mod tests {
         kvp.write_kvp(DEFAULT_DOCK_STATE_KEY.to_owned(), "not json".to_owned())
             .await
             .unwrap();
-        let (workspace, cx) = open(&app_state, cx);
-        assert!(workspace.read_with(cx, |workspace, cx| {
+        let (app, cx) = open(&app_state, cx);
+        assert!(take_status(&app, cx).starts_with("dock layout not restored"));
+        load_sample(&app, cx);
+        assert!(app.workspace.read_with(cx, |workspace, cx| {
             let dock = workspace.left_dock().read(cx);
             dock.is_open() && dock.panel::<FunctionsPanel>().is_some()
         }));
-        assert!(take_status(&workspace, cx).starts_with("dock layout not restored"));
     }
 
-    /// The functions panel moved to the right dock comes back open there in a new workspace
-    /// over the same database.
+    /// The functions panel moved to the right dock comes back open there with the first load
+    /// in a new workspace over the same database.
     ///
     /// # Panics
     ///
@@ -1031,10 +1133,9 @@ pub(crate) mod tests {
             dock.is_open() && dock.panel::<FunctionsPanel>().is_some()
         };
         {
-            let (workspace, cx) = open(&app_state, cx);
-            let panel = workspace
-                .read_with(cx, |workspace, cx| workspace.panel::<FunctionsPanel>(cx))
-                .unwrap();
+            let (app, cx) = open(&app_state, cx);
+            let workspace = app.workspace.clone();
+            let panel = load_sample(&app, cx);
             panel.update_in(cx, |panel, window, cx| {
                 panel.set_position(DockPosition::Right, window, cx);
             });
@@ -1046,12 +1147,16 @@ pub(crate) mod tests {
             flush.await;
             cx.run_until_parked();
         }
-        let (workspace, cx) = open(&app_state, cx);
-        assert!(workspace.read_with(cx, |workspace, cx| in_open_right_dock(workspace, cx)));
+        let (app, cx) = open(&app_state, cx);
+        load_sample(&app, cx);
+        assert!(
+            app.workspace
+                .read_with(cx, |workspace, cx| in_open_right_dock(workspace, cx))
+        );
     }
 
     /// The functions panel's width and its dock's visibility, saved through Zed's
-    /// persistence, come back in a new workspace over the same database.
+    /// persistence, come back with the first load in a new workspace over the same database.
     ///
     /// # Panics
     ///
@@ -1070,10 +1175,12 @@ pub(crate) mod tests {
         let app_state = init(cx);
         let width = px(333.0);
         {
-            let (workspace, cx) = open(&app_state, cx);
-            let open_at_start =
+            let (app, cx) = open(&app_state, cx);
+            let workspace = app.workspace.clone();
+            load_sample(&app, cx);
+            let open_at_load =
                 workspace.read_with(cx, |workspace, cx| workspace.left_dock().read(cx).is_open());
-            assert!(open_at_start);
+            assert!(open_at_load);
             let flush = workspace.update_in(cx, |workspace, window, cx| {
                 let state = PanelSizeState {
                     size: Some(width),
@@ -1086,11 +1193,109 @@ pub(crate) mod tests {
             flush.await;
             cx.run_until_parked();
         }
-        let (workspace, cx) = open(&app_state, cx);
-        workspace.read_with(cx, |workspace, cx| {
+        let (app, cx) = open(&app_state, cx);
+        load_sample(&app, cx);
+        app.workspace.read_with(cx, |workspace, cx| {
             let saved = workspace.panel_size_state::<FunctionsPanel>(cx);
             assert_eq!(saved.and_then(|state| state.size), Some(width));
             assert!(!workspace.left_dock().read(cx).is_open());
         });
+    }
+
+    /// Before a load nothing is docked, no dock is open, the center holds only the start
+    /// tab and draws no tab bar over it; the first load docks the functions panel, opens
+    /// it, and opens the first function in a tab under a tab bar.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a panel or a tab bar shows before the load, or the load docks nothing.
+    #[gpui::test]
+    fn nothing_is_docked_until_a_binary_loads(cx: &mut TestAppContext) {
+        nothing_is_docked_until_a_binary_loads_steps(cx);
+    }
+
+    /// Runs the steps of [`nothing_is_docked_until_a_binary_loads`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`nothing_is_docked_until_a_binary_loads`] says.
+    fn nothing_is_docked_until_a_binary_loads_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        app.workspace.read_with(cx, |workspace, cx| {
+            assert!(workspace.panel::<FunctionsPanel>(cx).is_none());
+            for dock in [
+                workspace.left_dock(),
+                workspace.bottom_dock(),
+                workspace.right_dock(),
+            ] {
+                assert!(!dock.read(cx).is_open());
+            }
+            let pane = workspace.active_pane().read(cx);
+            assert_eq!(pane.items_len(), 1);
+            assert!(workspace.active_item_as::<StartItem>(cx).is_some());
+        });
+        let start = cx.debug_bounds("start-item").unwrap();
+        assert!(
+            start.origin.y < px(4.0),
+            "a tab bar sits over the start tab"
+        );
+        load_sample(&app, cx);
+        assert_eq!(
+            shown(&app.workspace, cx).map(|(entry, _)| entry),
+            Some(CALLER)
+        );
+        app.workspace.read_with(cx, |workspace, cx| {
+            let dock = workspace.left_dock().read(cx);
+            assert!(dock.is_open() && dock.panel::<FunctionsPanel>().is_some());
+            assert!(workspace.active_item_as::<StartItem>(cx).is_none());
+        });
+    }
+
+    /// A load puts the binary first among those opened before, under its absolute path and
+    /// with the engine's architecture and format, and the list comes back in a new window
+    /// over the same database.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the list misses the binary or does not come back.
+    #[gpui::test]
+    fn a_loaded_binary_is_remembered_for_the_start_tab(cx: &mut TestAppContext) {
+        a_loaded_binary_is_remembered_for_the_start_tab_steps(cx);
+    }
+
+    /// Runs the steps of [`a_loaded_binary_is_remembered_for_the_start_tab`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`a_loaded_binary_is_remembered_for_the_start_tab`]
+    /// says.
+    fn a_loaded_binary_is_remembered_for_the_start_tab_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let want = {
+            let (app, cx) = open(&app_state, cx);
+            assert!(
+                app.binary
+                    .read_with(cx, |binary, _| binary.recent().is_empty())
+            );
+            load_sample(&app, cx);
+            let recent = app
+                .binary
+                .read_with(cx, |binary, _| binary.recent().to_vec());
+            assert_eq!(recent.len(), 1);
+            let given = PathBuf::from("sample.bin");
+            assert_eq!(recent[0].path, std::path::absolute(&given).unwrap());
+            assert!(recent[0].path.is_absolute());
+            assert!(!recent[0].kind.is_empty());
+            recent
+        };
+        cx.run_until_parked();
+        let (app, cx) = open(&app_state, cx);
+        let back = app
+            .binary
+            .read_with(cx, |binary, _| binary.recent().to_vec());
+        assert_eq!(back, want);
     }
 }

@@ -72,10 +72,9 @@ async fn drop_twice(
 ) -> anyhow::Result<()> {
     let on_start = drop_and_check(this, dir, cx).await?;
     this.update(cx, |harness, cx| {
-        if let Some(panel) = harness.panel(cx) {
-            let binary_entity = panel.read(cx).binary().clone();
-            binary_entity.update(cx, |loaded, cx| loaded.open_path(binary, cx));
-        }
+        harness
+            .binary
+            .update(cx, |loaded, cx| loaded.open_path(binary, cx));
     })?;
     let mut polls = 0;
     while !this.update(cx, |harness, cx| {
@@ -123,10 +122,9 @@ async fn drop_and_check(
 ) -> anyhow::Result<bool> {
     let dir = dir.to_path_buf();
     let position = this.update_in(cx, |harness, window, cx| {
-        if let Some(panel) = harness.panel(cx) {
-            let binary = panel.read(cx).binary().clone();
-            binary.update(cx, |binary, cx| binary.set_status(String::new(), cx));
-        }
+        harness
+            .binary
+            .update(cx, |binary, cx| binary.set_status(String::new(), cx));
         let size = window.viewport_size();
         let position = point(size.width * 0.5, size.height * 0.5);
         window.defer(cx, move |window, cx| {
@@ -145,13 +143,6 @@ async fn drop_and_check(
     })?;
     cx.background_executor().timer(DROP_SETTLE).await;
     this.update(cx, |harness, cx| {
-        harness.panel(cx).is_some_and(|panel| {
-            panel
-                .read(cx)
-                .binary()
-                .read(cx)
-                .status()
-                .ends_with(REFUSED_FOLDER)
-        })
+        harness.binary.read(cx).status().ends_with(REFUSED_FOLDER)
     })
 }

@@ -455,6 +455,7 @@ mod tests {
     fn only_the_worker_names_engine_compute_calls() {
         let sources = [
             ("actions.rs", include_str!("actions.rs")),
+            ("app_assets.rs", include_str!("app_assets.rs")),
             ("app_view.rs", include_str!("app_view.rs")),
             ("binary.rs", include_str!("binary.rs")),
             ("code_semantics.rs", include_str!("code_semantics.rs")),
@@ -468,6 +469,7 @@ mod tests {
             ("measure/drop.rs", include_str!("measure/drop.rs")),
             ("measure/input.rs", include_str!("measure/input.rs")),
             ("measure/scroll.rs", include_str!("measure/scroll.rs")),
+            ("recent.rs", include_str!("recent.rs")),
             ("start_item.rs", include_str!("start_item.rs")),
         ];
         let calls = [

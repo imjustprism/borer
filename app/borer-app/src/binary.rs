@@ -1,5 +1,5 @@
-//! The binary a window has open: its background load, its load status, and the status-bar
-//! item that shows that status.
+//! The binary a window has open: its background load, its load status, the binaries opened
+//! before it, and the status-bar item that shows that status.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,10 +11,14 @@ use gpui::{
 use ui::{Color, Label, LabelCommon as _, LabelSize, h_flex};
 use workspace::{HideStatusItem, ItemHandle, StatusItemView};
 
+use crate::recent::{self, RecentBinary, file_name};
 use crate::worker::{LoadedBinary, TaskEpoch, load_binary_blocking, spawn_engine};
 
 /// Note appended to load status lines saying what this direct engine load omits.
 pub const LOAD_SCOPE_NOTE: &str = "packs left out; session load path comes next";
+
+/// The status line while no binary is open.
+pub const NO_BINARY: &str = "No binary loaded";
 
 /// The binary a window has open, or is loading, and the status line of that load.
 pub struct Binary {
@@ -26,14 +30,21 @@ pub struct Binary {
     error: Option<String>,
     /// The file a running load reads, `None` once it finished or before any.
     reading: Option<PathBuf>,
+    /// The file whose engine load is still running: the engine's analysis checks no cancel
+    /// flag yet, so a load keeps its thread until it ends.
+    busy: Option<PathBuf>,
     /// Status line the status bar shows.
     status: String,
+    /// The binaries opened before, the newest first.
+    recent: Vec<RecentBinary>,
     /// Generation and cancel flag of the running load.
     epoch: TaskEpoch,
     /// The running background load.
     load_task: Option<Task<()>>,
     /// The running file dialog.
     prompt_task: Option<Task<()>>,
+    /// The running write of the binaries opened before.
+    remember_task: Option<Task<()>>,
 }
 
 impl std::fmt::Debug for Binary {
@@ -44,22 +55,34 @@ impl std::fmt::Debug for Binary {
     }
 }
 
-impl Default for Binary {
-    fn default() -> Self {
+impl Binary {
+    /// Returns a window's binary with none open, and the binaries opened before as the
+    /// key-value store keeps them; a store that cannot be read says so on the status line.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Application context reading the store.
+    #[must_use]
+    pub fn new(cx: &App) -> Self {
+        let (recent, status) = match recent::read(cx) {
+            Ok(recent) => (recent, NO_BINARY.to_owned()),
+            Err(err) => (Vec::new(), format!("recent binaries not read: {err:#}")),
+        };
         Self {
             loaded: None,
             facts: Vec::new(),
             error: None,
             reading: None,
-            status: format!("Open a binary ({LOAD_SCOPE_NOTE})"),
+            busy: None,
+            status,
+            recent,
             epoch: TaskEpoch::new(),
             load_task: None,
             prompt_task: None,
+            remember_task: None,
         }
     }
-}
 
-impl Binary {
     /// Returns the facts the status line leads with, each with the color it draws in: the
     /// binary's architecture and format, soft, then the engine's count of its functions,
     /// muted; built once per load, none before one finished.
@@ -84,6 +107,19 @@ impl Binary {
     #[must_use]
     pub fn reading(&self) -> Option<&Path> {
         self.reading.as_deref()
+    }
+
+    /// Returns the file whose engine load still runs, if any; no other load starts until it
+    /// ends.
+    #[must_use]
+    pub fn busy(&self) -> Option<&Path> {
+        self.busy.as_deref()
+    }
+
+    /// Returns the binaries opened before, the newest first.
+    #[must_use]
+    pub fn recent(&self) -> &[RecentBinary] {
+        &self.recent
     }
 
     /// Returns the status line of the load.
@@ -135,13 +171,30 @@ impl Binary {
     }
 
     /// Starts loading and analyzing `path` on the background executor, dropping the
-    /// binary open before it.
+    /// binary open before it, unless an engine load still runs.
+    ///
+    /// The engine's analysis checks no cancel flag yet, so a superseded load keeps its
+    /// thread until its analysis ends; a second load is refused until then rather than run
+    /// beside it, and the status line says so.
     ///
     /// # Arguments
     ///
     /// * `path` - File path of the binary to load.
     /// * `cx` - Binary context spawning the background task.
-    pub fn open_path(&mut self, path: PathBuf, cx: &mut Context<'_, Self>) {
+    ///
+    /// # Returns
+    ///
+    /// Whether the load started.
+    pub fn open_path(&mut self, path: PathBuf, cx: &mut Context<'_, Self>) -> bool {
+        if let Some(busy) = &self.busy {
+            self.status = format!(
+                "still reading {}; open it again once that ends",
+                file_name(busy)
+            );
+            cx.notify();
+            return false;
+        }
+        self.busy = Some(path.clone());
         self.loaded = None;
         self.facts.clear();
         self.error = None;
@@ -159,11 +212,15 @@ impl Binary {
                 return;
             };
             this.update(cx, |binary, cx| {
+                binary.busy = None;
                 if binary.epoch.is_current(ticket, &check_cancel) {
                     binary.finish_load(result, cx);
+                } else {
+                    cx.notify();
                 }
             });
         }));
+        true
     }
 
     /// Applies the result of a background load.
@@ -179,25 +236,61 @@ impl Binary {
     ) {
         self.reading = None;
         match result {
-            Ok(loaded) => {
-                self.status = format!("{} ({LOAD_SCOPE_NOTE})", loaded.path.display());
-                let program = &loaded.program;
-                let kind = format!("{} {}", program.arch.name(), program.format.name());
-                let count = loaded.initial_rows.counts();
-                self.facts = vec![
-                    (kind.into(), Color::Muted),
-                    (count.into(), Color::Placeholder),
-                ];
-                self.loaded = Some(loaded);
-            }
+            Ok(loaded) => self.show_loaded(loaded, cx),
             Err(err) => {
                 let msg = format!("{err:#}");
                 self.status = format!("load failed: {msg}");
                 self.error = Some(msg);
+                cx.notify();
             }
         }
+    }
+
+    /// Shows `loaded` as the open binary and puts it first among the binaries opened
+    /// before, writing that list back in the background.
+    ///
+    /// # Arguments
+    ///
+    /// * `loaded` - A binary the engine loaded and analyzed.
+    /// * `cx` - Binary context.
+    pub fn show_loaded(&mut self, loaded: Arc<LoadedBinary>, cx: &mut Context<'_, Self>) {
+        self.status = format!("{} ({LOAD_SCOPE_NOTE})", loaded.path.display());
+        let kind = kind(&loaded);
+        let count = loaded.initial_rows.counts();
+        self.facts = vec![
+            (kind.clone().into(), Color::Muted),
+            (count.into(), Color::Placeholder),
+        ];
+        let opened = RecentBinary {
+            path: std::path::absolute(&loaded.path).unwrap_or_else(|_| loaded.path.clone()),
+            kind,
+        };
+        self.recent = recent::remembered(std::mem::take(&mut self.recent), opened);
+        let write = recent::write(&self.recent, cx);
+        self.remember_task = Some(cx.spawn(async move |this, cx| {
+            let Err(err) = write.await else {
+                return;
+            };
+            let Some(this) = this.upgrade() else {
+                return;
+            };
+            let why = format!("recent binaries not kept: {err:#}");
+            this.update(cx, |binary, cx| binary.set_status(why, cx));
+        }));
+        self.loaded = Some(loaded);
         cx.notify();
     }
+}
+
+/// Returns the engine's architecture and format of `loaded`, as `x86-64 PE`.
+///
+/// # Arguments
+///
+/// * `loaded` - A loaded binary.
+#[must_use]
+pub fn kind(loaded: &LoadedBinary) -> String {
+    let program = &loaded.program;
+    format!("{} {}", program.arch.name(), program.format.name())
 }
 
 /// The status-bar item showing a [`Binary`]'s status line.
@@ -238,6 +331,12 @@ impl StatusLine {
             binary,
             _observe: observe,
         }
+    }
+
+    /// Returns the binary whose status this shows.
+    #[must_use]
+    pub const fn binary(&self) -> &Entity<Binary> {
+        &self.binary
     }
 
     /// Returns the line's text: the settings notice, if any, then the binary's status.
@@ -312,7 +411,7 @@ mod tests {
     /// Panics when a step goes wrong, as [`the_status_line_leads_with_the_binarys_facts`]
     /// says.
     fn the_status_line_leads_with_the_binarys_facts_steps(cx: &mut TestAppContext) {
-        let binary = cx.new(|_| Binary::default());
+        let binary = cx.new(|cx| Binary::new(cx));
         let facts =
             |cx: &mut TestAppContext| binary.read_with(cx, |binary, _| binary.facts().to_vec());
         assert!(facts(cx).is_empty());
@@ -347,5 +446,36 @@ mod tests {
         let missing = std::env::temp_dir().join("borer-app-no-such-binary.exe");
         binary.update(cx, |binary, cx| binary.open_path(missing, cx));
         assert!(facts(cx).is_empty());
+    }
+
+    /// A second open is refused while a load's engine thread runs, and starts once it ended.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a second load starts beside a running one.
+    #[gpui::test]
+    fn a_second_load_waits_for_the_engine(cx: &mut TestAppContext) {
+        a_second_load_waits_for_the_engine_steps(cx);
+    }
+
+    /// Runs the steps of [`a_second_load_waits_for_the_engine`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`a_second_load_waits_for_the_engine`] says.
+    fn a_second_load_waits_for_the_engine_steps(cx: &mut TestAppContext) {
+        crate::app_view::tests::init(cx);
+        let binary = cx.new(|cx| Binary::new(cx));
+        let first = std::env::temp_dir().join("borer-app-first-missing.exe");
+        let second = std::env::temp_dir().join("borer-app-second-missing.exe");
+        let open = |path: &std::path::PathBuf, cx: &mut TestAppContext| {
+            binary.update(cx, |binary, cx| binary.open_path(path.clone(), cx))
+        };
+        assert!(open(&first, cx));
+        assert!(!open(&second, cx));
+        assert!(binary.read_with(cx, |binary, _| binary.busy().is_some()));
+        cx.run_until_parked();
+        assert!(binary.read_with(cx, |binary, _| binary.busy().is_none()));
+        assert!(open(&second, cx));
     }
 }

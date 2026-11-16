@@ -29,10 +29,12 @@ use gpui::{
     MouseButton, MouseDownEvent, MouseUpEvent, ParentElement as _, Render, Styled as _,
     Subscription, Task, Window, div,
 };
+use workspace::dock::DockPosition;
 use workspace::{AppState, MultiWorkspace, Workspace};
 
 use self::input::pick_function_with_callees;
-use crate::app_view::new_workspace;
+use crate::app_view::{AppWindow, add_functions_panel, new_workspace};
+use crate::binary::Binary;
 use crate::code_view::CodeLines;
 use crate::decompile_item::DecompileItem;
 use crate::functions_panel::FunctionsPanel;
@@ -696,6 +698,10 @@ pub struct Harness {
     root: Entity<MultiWorkspace>,
     /// The workspace the functions panel and the decompile tabs live in.
     workspace: Entity<Workspace>,
+    /// The window's binary.
+    binary: Entity<Binary>,
+    /// Whether the functions panel is observed, which it is from when it is docked.
+    panel_observed: bool,
     /// The measurement mode this run was started in.
     mode: CliMode,
     /// Where a failure is left for [`crate::run`] to return.
@@ -725,7 +731,7 @@ pub struct Harness {
     watched: Option<(EntityId, Subscription)>,
     /// Observers of the pane, the panel and the binary, which settle input marks and
     /// re-render the harness, so it checks its one-shot report, whenever they change.
-    _observe: Vec<Subscription>,
+    observers: Vec<Subscription>,
 }
 
 impl std::fmt::Debug for Harness {
@@ -764,7 +770,7 @@ impl Harness {
             | CliMode::Measure(_)
             | CliMode::MeasureDrop(..) => None,
         };
-        let workspace = new_workspace(app_state, path, window, cx);
+        let AppWindow { workspace, binary } = new_workspace(app_state, path, window, cx);
         let root = cx.new(|cx| MultiWorkspace::new(workspace.clone(), window, cx));
         let pane = workspace.read(cx).active_pane().clone();
         let harness = cx.weak_entity();
@@ -783,15 +789,10 @@ impl Harness {
                 }
             }),
         ];
-        if let Some(panel) = workspace.read(cx).panel::<FunctionsPanel>(cx) {
-            let binary = panel.read(cx).binary().clone();
-            observe.push(cx.observe(&binary, |_, _, cx| cx.notify()));
-            observe.push(cx.observe(&panel, |harness: &mut Self, _, cx| {
-                harness.panel_changed = Some(now_instant());
-                harness.settle_marks(cx);
-                cx.notify();
-            }));
-        }
+        observe.push(cx.observe(&binary, |harness: &mut Self, _, cx| {
+            harness.observe_panel(cx);
+            cx.notify();
+        }));
         let phase = match mode {
             CliMode::Measure(phase) => Some(phase),
             CliMode::Interactive(_)
@@ -804,6 +805,8 @@ impl Harness {
         let mut harness = Self {
             root,
             workspace,
+            binary,
+            panel_observed: false,
             mode,
             exit,
             reported: false,
@@ -817,7 +820,7 @@ impl Harness {
             panel_changed: None,
             item_changed: None,
             watched: None,
-            _observe: observe,
+            observers: observe,
         };
         if let Some(phase) = phase {
             harness.begin(phase, cx);
@@ -827,6 +830,50 @@ impl Harness {
             cx.on_next_frame(window, move |this, _, cx| this.drop_folder(dir, binary, cx));
         }
         harness
+    }
+
+    /// Observes the functions panel once it is docked, so a change of its rows settles the
+    /// input marks.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Harness context.
+    fn observe_panel(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(panel) = self.panel(cx).filter(|_| !self.panel_observed) else {
+            return;
+        };
+        self.panel_observed = true;
+        self.observers
+            .push(cx.observe(&panel, |harness: &mut Self, _, cx| {
+                harness.panel_changed = Some(now_instant());
+                harness.settle_marks(cx);
+                cx.notify();
+            }));
+    }
+
+    /// Returns the functions panel of the measured workspace, docking one on the left first
+    /// when there is none; a phase shows its rows in it without a load through the binary.
+    ///
+    /// # Arguments
+    ///
+    /// * `window` - Window the workspace is in.
+    /// * `cx` - Harness context.
+    fn docked_panel(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> Entity<FunctionsPanel> {
+        let panel = self.panel(cx).unwrap_or_else(|| {
+            add_functions_panel(
+                &self.workspace,
+                &self.binary,
+                DockPosition::Left,
+                window,
+                cx,
+            )
+        });
+        self.observe_panel(cx);
+        panel
     }
 
     /// Returns the functions panel of the measured workspace.
@@ -961,7 +1008,7 @@ impl Harness {
             let panel = panel_entity.as_ref().map(|panel| panel.read(cx));
             let item_entity = self.item(cx);
             let item = item_entity.as_ref().map(|item| item.read(cx));
-            let error = panel.and_then(|panel| panel.binary().read(cx).load_error());
+            let error = self.binary.read(cx).load_error();
             let rows = panel.and_then(|panel| panel.rows()).map(|r| r.rows.len());
             (
                 evaluate_one_shot(

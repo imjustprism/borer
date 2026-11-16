@@ -18,10 +18,10 @@ use editor::{
 };
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
-    FontWeight, HighlightStyle, InteractiveElement as _, IntoElement, MouseButton, MouseUpEvent,
-    ParentElement as _, Pixels, Render, Reservation, SharedString, Styled as _, Subscription, Task,
-    TaskExt as _, WeakEntity, Window, div, px,
+    AnyElement, App, AppContext as _, Context, Div, Entity, EventEmitter, ExternalPaths,
+    FocusHandle, Focusable, FontWeight, HighlightStyle, InteractiveElement as _, IntoElement,
+    MouseButton, MouseUpEvent, ParentElement as _, Pixels, Render, Reservation, SharedString,
+    Styled as _, Subscription, Task, TaskExt as _, WeakEntity, Window, div, px,
 };
 use language::{
     Bias, Buffer, BufferId, Capability, LineEnding, Point, ReplicaId, Rope, TextBuffer,
@@ -35,10 +35,9 @@ use workspace::searchable::SearchableItemHandle;
 use workspace::{Item, ItemNavHistory, Pane, Workspace};
 
 use crate::actions::{BACK_HINT, hint_row};
-use crate::app_view::open_dropped;
+use crate::app_view::{binary_of, open_dropped};
 use crate::code_semantics::for_one_view;
 use crate::code_view::{ClickOutcome, CodeLines, CodePalette, Role, resolve_ref_click};
-use crate::functions_panel::FunctionsPanel;
 use crate::worker::{LoadedBinary, TaskEpoch, decompile_or_why, listing_blocking, spawn_engine};
 
 /// Fewest logical pixels a row of code is tall.
@@ -790,12 +789,7 @@ impl DecompileItem {
     /// * `status` - The line.
     /// * `cx` - Application context.
     fn say(&self, status: String, cx: &mut App) {
-        let binary = self
-            .workspace
-            .upgrade()
-            .and_then(|workspace| workspace.read(cx).panel::<FunctionsPanel>(cx))
-            .map(|panel| panel.read(cx).binary().clone());
-        if let Some(binary) = binary {
+        if let Some(binary) = binary_of(&self.workspace, cx) {
             binary.update(cx, |binary, cx| binary.set_status(status, cx));
         }
     }
@@ -1122,7 +1116,10 @@ impl Item for DecompileItem {
         _window: &mut Window,
         cx: &mut App,
     ) -> bool {
-        open_dropped(&self.workspace, dropped, cx)
+        match binary_of(&self.workspace, cx) {
+            Some(binary) => open_dropped(&binary, dropped, cx),
+            None => dropped.is::<ExternalPaths>(),
+        }
     }
 }
 
@@ -1231,7 +1228,8 @@ pub(crate) mod tests {
     #[gpui::test]
     fn every_tab_holds_its_view_byte_for_byte(cx: &mut TestAppContext) {
         let app_state = init(cx);
-        let (workspace, cx) = open(&app_state, cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
         let exe = std::env::current_exe().unwrap();
         let loaded = load_binary_blocking(exe).unwrap();
         let entries: Vec<u64> = loaded
@@ -1324,7 +1322,8 @@ pub(crate) mod tests {
     #[gpui::test]
     fn every_token_is_colored_over_its_own_bytes(cx: &mut TestAppContext) {
         let app_state = init(cx);
-        let (workspace, cx) = open(&app_state, cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
         let loaded = sample();
         for form in [Form::Decompile, Form::Listing] {
             let tab = open_tab(&workspace, &loaded, (CALLER, form), cx);
@@ -1343,7 +1342,8 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_fold_above_a_line_moves_neither_jump_nor_color(cx: &mut TestAppContext) {
         let app_state = init(cx);
-        let (workspace, cx) = open(&app_state, cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
         let tab = open_tab(&workspace, &sample(), (CALLER, Form::Listing), cx);
         let lines = tab.read_with(cx, |item, _| item.code().unwrap().len());
         let target = lines - 2;
@@ -1372,7 +1372,8 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_code_tab_keeps_no_scroll_margin(cx: &mut TestAppContext) {
         let app_state = init(cx);
-        let (workspace, cx) = open(&app_state, cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
         let tab = open_tab(&workspace, &sample(), (CALLER, Form::Decompile), cx);
         let margin = |cx: &mut VisualTestContext| {
             tab.read_with(cx, |item, cx| {
@@ -1400,7 +1401,8 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_listing_that_cannot_be_built_says_why(cx: &mut TestAppContext) {
         let app_state = init(cx);
-        let (workspace, cx) = open(&app_state, cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
         let sections = vec![Section::mapped(".text", 0x1000, 0, 0x10, false, true)];
         let program = Program::raw(
             vec![0xc3; 0x10],
@@ -1479,7 +1481,8 @@ pub(crate) mod tests {
     #[gpui::test]
     fn following_a_link_goes_where_the_view_says(cx: &mut TestAppContext) {
         let app_state = init(cx);
-        let (workspace, cx) = open(&app_state, cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
         let loaded = sample();
         let caller = open_tab(&workspace, &loaded, (CALLER, Form::Decompile), cx);
         let (row, span, _) = find_link(&caller, |_, _, l| *l == Ref::Function(CALLEE), cx);
@@ -1534,7 +1537,8 @@ pub(crate) mod tests {
     #[gpui::test]
     async fn hover_and_uses_come_from_the_view(cx: &mut TestAppContext) {
         let app_state = init(cx);
-        let (workspace, cx) = open(&app_state, cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
         let loaded = sample();
         let tab = open_tab(&workspace, &loaded, (CALLER, Form::Decompile), cx);
         let callee = Ref::Function(CALLEE);
@@ -1598,7 +1602,8 @@ pub(crate) mod tests {
     #[gpui::test]
     fn the_toggle_switches_between_decompile_and_listing(cx: &mut TestAppContext) {
         let app_state = init(cx);
-        let (workspace, cx) = open(&app_state, cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
         let loaded = sample();
         open_tab(&workspace, &loaded, (CALLER, Form::Decompile), cx);
         for want in [Form::Listing, Form::Decompile] {
@@ -1629,7 +1634,8 @@ pub(crate) mod tests {
     #[gpui::test]
     fn a_listing_opens_at_the_line_of_its_address(cx: &mut TestAppContext) {
         let app_state = init(cx);
-        let (workspace, cx) = open(&app_state, cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
         let loaded = sample();
         let (va, line) = fourth_instruction(&loaded);
         workspace.update_in(cx, |workspace, window, cx| {
@@ -1647,7 +1653,8 @@ pub(crate) mod tests {
     #[gpui::test]
     fn find_marks_every_place_the_text_spells_the_query(cx: &mut TestAppContext) {
         let app_state = init(cx);
-        let (workspace, cx) = open(&app_state, cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
         let tab = open_tab(&workspace, &sample(), (CALLER, Form::Decompile), cx);
         cx.dispatch_action(Deploy::find());
         cx.run_until_parked();

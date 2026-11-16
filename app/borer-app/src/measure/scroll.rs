@@ -77,9 +77,8 @@ impl Harness {
             Prepared::Code(corpus) => (corpus.loaded.clone(), corpus.loaded.initial_rows.clone()),
             Prepared::Input(loaded, _) => (loaded.clone(), loaded.initial_rows.clone()),
         };
-        if let Some(panel) = self.panel(cx) {
-            panel.update(cx, |panel, cx| panel.show(loaded, rows, window, cx));
-        }
+        let panel = self.docked_panel(window, cx);
+        panel.update(cx, |panel, cx| panel.show(loaded, rows, window, cx));
         let (code, source, base, items, then_code) = match prepared {
             Prepared::List(ready, then_code) => {
                 let source = format!(
