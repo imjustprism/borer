@@ -1,7 +1,6 @@
 //! The overview: what the open file is, how it is protected, what it can do and which
 //! functions to read first, in the engine's triage words and order, every address a link.
 
-use std::any::Any;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -15,10 +14,9 @@ use gpui::{
 use theme::ActiveTheme as _;
 use ui::{Color, Icon, IconName, Label, LabelCommon as _, LabelSize, h_flex};
 use workspace::item::ItemEvent;
-use workspace::{Item, Pane, Workspace};
+use workspace::{Item, Workspace};
 
 use crate::actions::Overview;
-use crate::app_view::open_dropped;
 use crate::binary::{Binary, BinaryEvent};
 use crate::card::{Card, Tone};
 use crate::commands;
@@ -437,19 +435,7 @@ impl Item for OverviewItem {
         Some(Icon::new(IconName::Info))
     }
 
-    fn tab_tooltip_text(&self, _cx: &App) -> Option<SharedString> {
-        Some(self.loaded.path.display().to_string().into())
-    }
-
-    fn handle_drop(
-        &self,
-        _active_pane: &Pane,
-        dropped: &dyn Any,
-        _window: &mut Window,
-        cx: &mut App,
-    ) -> bool {
-        open_dropped(&self.binary, dropped, cx)
-    }
+    crate::app_view::snapshot_tab!();
 }
 
 impl Render for OverviewItem {

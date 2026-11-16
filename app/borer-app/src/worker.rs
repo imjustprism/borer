@@ -14,8 +14,8 @@ use borer_engine::analysis::decompile::text_check;
 use borer_engine::analysis::decompile::view::view;
 use borer_engine::analysis::find::{Found, Query, everywhere};
 use borer_engine::analysis::render::{
-    Bytes, FunctionOrder, FunctionRows, Triage, answered_flagged, disasm_view, function_rows,
-    triage,
+    Bytes, Dir, FunctionOrder, FunctionRows, LinearPage, Triage, answered_flagged, disasm_view,
+    function_rows, linear, triage,
 };
 use borer_engine::analysis::{Analysis, EnumSource, Overlay, no_function_at, resolve_suggesting};
 use borer_engine::cancel::Cancel;
@@ -575,6 +575,34 @@ pub fn listing_blocking(loaded: &LoadedBinary, entry: u64) -> Result<Arc<View>, 
         })
 }
 
+/// Builds one page of the linear listing of `loaded`, or says why none.
+///
+/// Must be called inside [`spawn_engine`].
+///
+/// # Arguments
+///
+/// * `loaded` - Previously loaded binary state.
+/// * `at` - Address the page runs from; one outside the image moves to its nearer end.
+/// * `dir` - Which way the page runs from `at`.
+/// * `rows` - Rows the page holds.
+///
+/// # Errors
+///
+/// Returns the engine's words when the architecture has no disassembler, else that the
+/// image maps no section.
+pub fn linear_page(
+    loaded: &LoadedBinary,
+    at: u64,
+    dir: Dir,
+    rows: usize,
+) -> Result<LinearPage, String> {
+    let (p, a, o) = (&*loaded.program, &*loaded.analysis, &*loaded.overlay);
+    linear(p, a, o, at, dir, rows).ok_or_else(|| match p.isa_for(Feature::Disasm) {
+        Err(why) => why,
+        Ok(_) => "The image maps no section.".to_owned(),
+    })
+}
+
 /// Returns the engine's triage of `loaded`: what the file is, how it is protected, what it
 /// can do and the functions to read first.
 ///
@@ -831,7 +859,7 @@ mod tests {
     }
 
     /// Returns every module of the crate but this one, by path under `src`, with its text.
-    fn sources() -> [(&'static str, &'static str); 34] {
+    fn sources() -> [(&'static str, &'static str); 35] {
         [
             ("actions.rs", include_str!("actions.rs")),
             ("app_assets.rs", include_str!("app_assets.rs")),
@@ -850,6 +878,7 @@ mod tests {
             ("functions_panel.rs", include_str!("functions_panel.rs")),
             ("goto.rs", include_str!("goto.rs")),
             ("lib.rs", include_str!("lib.rs")),
+            ("linear_item.rs", include_str!("linear_item.rs")),
             ("main.rs", include_str!("main.rs")),
             ("measure.rs", include_str!("measure.rs")),
             ("measure/drop.rs", include_str!("measure/drop.rs")),
@@ -902,8 +931,8 @@ mod tests {
     /// # Panics
     ///
     /// Panics if another module names `Program::load`, `Analysis::compute`, a decompile
-    /// or listing view, the resolver, the function listing, the check of an answer, the
-    /// triage or the find.
+    /// or listing view, the linear listing, the resolver, the function listing, the check
+    /// of an answer, the triage or the find.
     #[test]
     fn only_the_worker_names_engine_compute_calls() {
         let calls = [
@@ -911,6 +940,7 @@ mod tests {
             "Analysis::compute",
             "decompile::view",
             "disasm_view(",
+            "linear(&",
             "resolve_suggesting(",
             "function_rows(",
             "text_check(",

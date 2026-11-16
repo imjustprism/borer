@@ -341,6 +341,29 @@ pub fn open_dropped(binary: &Entity<Binary>, dropped: &dyn Any, cx: &mut App) ->
     true
 }
 
+/// Expands, inside an `impl Item`, to the methods every tab over one snapshot shares: the
+/// file's path as its tooltip, and a dropped path opened through [`open_dropped`].
+///
+/// The item holds the snapshot in `loaded` and the window's binary in `binary`.
+macro_rules! snapshot_tab {
+    () => {
+        fn tab_tooltip_text(&self, _cx: &gpui::App) -> Option<gpui::SharedString> {
+            Some(self.loaded.path.display().to_string().into())
+        }
+
+        fn handle_drop(
+            &self,
+            _active_pane: &workspace::Pane,
+            dropped: &dyn std::any::Any,
+            _window: &mut gpui::Window,
+            cx: &mut gpui::App,
+        ) -> bool {
+            crate::app_view::open_dropped(&self.binary, dropped, cx)
+        }
+    };
+}
+pub(crate) use snapshot_tab;
+
 /// A window's workspace and the binary it has open.
 #[derive(Debug, Clone)]
 pub struct AppWindow {
@@ -685,8 +708,9 @@ pub(crate) mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
-    use borer_engine::analysis::name_of;
     use borer_engine::analysis::render::{FunctionOrder, function_rows};
+    use borer_engine::analysis::{Analysis, Overlay, name_of};
+    use borer_engine::program::Program;
     use borer_engine::view::Ref;
     use command_palette::CommandPalette;
     use command_palette_hooks::CommandPaletteFilter;
@@ -812,6 +836,15 @@ pub(crate) mod tests {
     /// Returns the hand-built sample program, a caller and its callee, as a loaded binary.
     pub(crate) fn sample() -> Arc<LoadedBinary> {
         let (program, analysis, overlay) = crate::code_view::tests::sample_program();
+        loaded(program, analysis, overlay)
+    }
+
+    /// Returns a hand-built program, its analysis and overlay as a loaded binary.
+    pub(crate) fn loaded(
+        program: Program,
+        analysis: Analysis,
+        overlay: Overlay,
+    ) -> Arc<LoadedBinary> {
         let initial_rows = Arc::new(function_rows(
             &analysis,
             &overlay,

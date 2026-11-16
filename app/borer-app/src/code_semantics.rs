@@ -1,7 +1,7 @@
 //! What Zed's editor asks a language server, answered from one [`View`].
 //!
 //! The hover says what the token under the pointer is and links to, the document highlights
-//! are the view's uses of the referent under the cursor, read in the background, and a
+//! are the uses in its view of the referent under the cursor, read in the background, and a
 //! definition is the line of the same view the referent goes to, so Zed's go to definition
 //! and its ctrl-click move there. Everything else has no answer.
 
@@ -26,10 +26,11 @@ use project::{
 use crate::code_view::{ClickOutcome, CodeLines, Token, describe, resolve_ref_click};
 use crate::worker::spawn_engine;
 
-/// Answers Zed's editor about the one view a code tab shows, row for row.
+/// Answers Zed's editor about the views a code tab shows, each view's lines on the rows it
+/// is shown on.
 #[derive(Debug)]
 pub struct ViewSemantics {
-    /// The tab's lines: one view, its line `i` the buffer's row `i`.
+    /// The tab's lines: row `i` of the buffer is shown line `i`.
     pub code: Arc<CodeLines>,
 }
 
@@ -158,15 +159,19 @@ impl SemanticsProvider for ViewSemantics {
         let at = position.to_point(&snapshot);
         let code = self.code.clone();
         let uses = spawn_engine("Finding uses", cx, move || {
-            let Some((view, _, (_, _, Some(link)))) = token_under(&code, at) else {
+            let Some((view, line, (_, _, Some(link)))) = token_under(&code, at) else {
                 return Ok(Vec::new());
             };
+            let first = at
+                .row
+                .saturating_sub(u32::try_from(line).unwrap_or(u32::MAX));
             let (uses, _) = view.uses(link);
             Ok(uses
                 .iter()
                 .filter_map(|(line, span)| {
+                    let row = first.checked_add(u32::try_from(*line).ok()?)?;
                     Some(DocumentHighlight {
-                        range: anchors(&snapshot, u32::try_from(*line).ok()?, span),
+                        range: anchors(&snapshot, row, span),
                         kind: lsp::DocumentHighlightKind::READ,
                     })
                 })
@@ -183,11 +188,14 @@ impl SemanticsProvider for ViewSemantics {
         cx: &mut App,
     ) -> Option<Task<Result<Option<Vec<LocationLink>>>>> {
         let snapshot = buffer.read(cx).snapshot();
-        let (view, _, (_, _, link)) = token_under(&self.code, position.to_point(&snapshot))?;
-        let ClickOutcome::ScrollToLine(line) = resolve_ref_click(view, link?) else {
+        let at = position.to_point(&snapshot);
+        let (view, line, (_, _, link)) = token_under(&self.code, at)?;
+        let ClickOutcome::ScrollToLine(to) = resolve_ref_click(view, link?) else {
             return None;
         };
-        let start = snapshot.anchor_before(Point::new(u32::try_from(line).ok()?, 0));
+        let row = at.row.checked_sub(u32::try_from(line).ok()?)?;
+        let row = row.checked_add(u32::try_from(to).ok()?)?;
+        let start = snapshot.anchor_before(Point::new(row, 0));
         let target = Location {
             buffer: buffer.clone(),
             range: start..start,

@@ -32,10 +32,9 @@ use theme_settings::ThemeSettings;
 use ui::{Icon, IconName, Label, LabelCommon as _};
 use workspace::item::TabContentParams;
 use workspace::searchable::SearchableItemHandle;
-use workspace::{Item, ItemNavHistory, Pane, Workspace};
+use workspace::{Item, ItemNavHistory, Workspace};
 
 use crate::actions::{BACK_HINT, FollowLink, Hint, ToggleListing};
-use crate::app_view::open_dropped;
 use crate::binary::Binary;
 use crate::card::{Card, Tone};
 use crate::code_semantics::for_one_view;
@@ -138,7 +137,7 @@ impl Form {
 /// What a background build hands its tab: the lines, the text buffer over them and the
 /// function's name as the engine gives it (`None` for measured lines), or the engine's
 /// reason for building none.
-type Built = Result<(Arc<CodeLines>, TextBuffer, Option<String>), String>;
+pub(crate) type Built = Result<(Arc<CodeLines>, TextBuffer, Option<String>), String>;
 
 /// A line to bring to the top of the tab at its next paint, where the window is at hand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,13 +236,24 @@ fn hold_line_at_top(editor: &mut Editor, cx: &mut Context<'_, Editor>) {
     }
 }
 
+/// Returns the text buffer of `code`: its lines joined by newlines, under buffer id `id`.
+///
+/// # Arguments
+///
+/// * `code` - The lines.
+/// * `id` - Id of the buffer entity the text will be inserted as.
+pub(crate) fn text_buffer(code: &CodeLines, id: BufferId) -> TextBuffer {
+    let rope = Rope::from(code.text().as_str());
+    TextBuffer::new_normalized(ReplicaId::LOCAL, id, LineEnding::Unix, rope)
+}
+
 /// Returns the buffer row a display row of `map` shows, past the last the last one's.
 ///
 /// # Arguments
 ///
 /// * `map` - The editor's display snapshot, with its folds and wraps.
 /// * `display` - Zero-based display row.
-fn buffer_row(map: &DisplaySnapshot, display: usize) -> usize {
+pub(crate) fn buffer_row(map: &DisplaySnapshot, display: usize) -> usize {
     let row = DisplayRow(u32::try_from(display).unwrap_or(u32::MAX));
     let at = map.clip_point(DisplayPoint::new(row, 0), Bias::Left);
     usize::try_from(map.display_point_to_point(at, Bias::Left).row).unwrap_or(usize::MAX)
@@ -262,7 +272,7 @@ impl DecompileItem {
     /// * `build` - Builds the lines, or says why the engine built none.
     /// * `window` - Window the tab is in.
     /// * `cx` - Item context.
-    fn new(
+    pub(crate) fn new(
         workspace: WeakEntity<Workspace>,
         binary: Entity<Binary>,
         loaded: Arc<LoadedBinary>,
@@ -356,8 +366,7 @@ impl DecompileItem {
         };
         let work = move || {
             let code = build()?;
-            let rope = Rope::from(code.text().as_str());
-            let text = TextBuffer::new_normalized(ReplicaId::LOCAL, id, LineEnding::Unix, rope);
+            let text = text_buffer(&code, id);
             let name = entry.map(|at| name_of(&loaded.analysis, &loaded.overlay, at));
             Ok((code, text, name))
         };
@@ -376,7 +385,7 @@ impl DecompileItem {
     /// * `reservation` - The buffer's reserved entity.
     /// * `window` - Window the tab is in.
     /// * `cx` - Item context.
-    fn show(
+    pub(crate) fn show(
         &mut self,
         built: Built,
         reservation: Reservation<Buffer>,
@@ -623,6 +632,12 @@ impl DecompileItem {
                 (None, None) => ("No lines.".into(), Tone::Quiet, &[]),
             };
         Some(Card { says, tone, offers })
+    }
+
+    /// Drops the background build without its answer, so lines shown next come from the
+    /// caller ([`Self::show`]).
+    pub(crate) fn stop(&mut self) {
+        self.job.stop();
     }
 
     /// Returns whether the background build is still running.
@@ -895,7 +910,7 @@ pub const fn role_key(role: Role) -> HighlightKey {
     clippy::cast_sign_loss,
     reason = "a floored, non-negative, finite row count"
 )]
-fn whole_rows(y: f64) -> usize {
+pub(crate) fn whole_rows(y: f64) -> usize {
     if y.is_finite() && y > 0.0 {
         y.floor() as usize
     } else {
@@ -968,9 +983,7 @@ impl Item for DecompileItem {
         }))
     }
 
-    fn tab_tooltip_text(&self, _cx: &App) -> Option<SharedString> {
-        Some(self.loaded.path.display().to_string().into())
-    }
+    crate::app_view::snapshot_tab!();
 
     fn set_nav_history(
         &mut self,
@@ -1001,16 +1014,6 @@ impl Item for DecompileItem {
 
     fn as_searchable(&self, _: &Entity<Self>, _: &App) -> Option<Box<dyn SearchableItemHandle>> {
         Some(Box::new(self.editor.clone()))
-    }
-
-    fn handle_drop(
-        &self,
-        _active_pane: &Pane,
-        dropped: &dyn Any,
-        _window: &mut Window,
-        cx: &mut App,
-    ) -> bool {
-        open_dropped(&self.binary, dropped, cx)
     }
 }
 

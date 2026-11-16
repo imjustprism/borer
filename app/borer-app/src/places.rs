@@ -8,6 +8,7 @@ use workspace::{Item, ItemHandle, Workspace};
 
 use crate::binary::Binary;
 use crate::decompile_item::{DecompileItem, Form, TabMode};
+use crate::linear_item::LinearItem;
 use crate::overview::OverviewItem;
 use crate::worker::LoadedBinary;
 
@@ -26,6 +27,12 @@ pub enum Place {
     },
     /// The engine's triage of the binary: what it is, what it can do, where to start.
     Overview,
+    /// The whole image as one listing in address order, with the row holding `at` on its
+    /// top line when one is given.
+    Linear {
+        /// Virtual address to show, if any.
+        at: Option<u64>,
+    },
 }
 
 impl Place {
@@ -57,8 +64,9 @@ pub struct Opening {
 /// Shows `place` of `loaded` in the workspace's active pane.
 ///
 /// It activates the tab already showing the place for the same program, else opens one as
-/// `how` says; a place with an address puts the line that starts at that instruction at
-/// the top, now or once the view is built, and moves nowhere when no line starts there.
+/// `how` says; a place with an address puts the line that starts at that instruction (in
+/// the linear listing, the row holding it) at the top, now or once the view is built, and
+/// a code view moves nowhere when no line starts there.
 ///
 /// # Arguments
 ///
@@ -101,6 +109,16 @@ pub fn open(
                 OverviewItem::new(weak, binary, loaded, cx)
             };
             show(workspace, how, shows, build, window, cx);
+        }
+        Place::Linear { at } => {
+            let shows = |item: &LinearItem| Arc::ptr_eq(&item.loaded().program, &program);
+            let build = |weak, window: &mut Window, cx: &mut Context<'_, LinearItem>| {
+                LinearItem::new(weak, binary, loaded, window, cx)
+            };
+            let item = show(workspace, how, shows, build, window, cx);
+            if let Some(va) = at {
+                item.update(cx, |item, cx| item.go_to(va, window, cx));
+            }
         }
     }
 }
@@ -168,11 +186,15 @@ fn show<T: Item>(
 /// # Returns
 ///
 /// The function and view a code tab shows, with no address (a tab keeps no address, only
-/// its scroll), or the overview; `None` for the start tab and for measured lines.
+/// its scroll), the overview or the linear listing; `None` for the start tab and for
+/// measured lines.
 #[must_use]
 pub fn place_of(item: &dyn ItemHandle, cx: &App) -> Option<Place> {
     if item.downcast::<OverviewItem>().is_some() {
         return Some(Place::Overview);
+    }
+    if item.downcast::<LinearItem>().is_some() {
+        return Some(Place::Linear { at: None });
     }
     let item = item.downcast::<DecompileItem>()?;
     let item = item.read(cx);

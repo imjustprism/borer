@@ -25,7 +25,9 @@ const PANELS_RUN: &[&str] = &["Functions"];
 fn places() -> Vec<Place> {
     let code = Place::decompile(CALLER);
     match code {
-        Place::Code { .. } | Place::Overview => vec![code, Place::Overview],
+        Place::Code { .. } | Place::Overview | Place::Linear { .. } => {
+            vec![code, Place::Overview, Place::Linear { at: None }]
+        }
     }
 }
 
