@@ -235,8 +235,8 @@ impl View {
         Some((start..wide(t.end), t.kind, self.link(t)))
     }
 
-    /// Returns where a referent is spelled: each token linked to it, in
-    /// line order, at most [`USES_MAX`].
+    /// Returns where a referent is spelled: the first [`USES_MAX`] tokens
+    /// linked to it, in line order, and how many there are in all.
     ///
     /// # Arguments
     ///
@@ -244,10 +244,11 @@ impl View {
     ///
     /// # Returns
     ///
-    /// Each token's line and the bytes it spans there; empty when no token
-    /// links to `r`.
+    /// Each shown token's line and the bytes it spans there, and the count
+    /// of every token linked to `r`, so a caller can say `showing N of M`;
+    /// empty and 0 when no token links to `r`.
     #[must_use]
-    pub fn uses(&self, r: &Ref) -> Vec<(usize, Range<usize>)> {
+    pub fn uses(&self, r: &Ref) -> (Vec<(usize, Range<usize>)>, usize) {
         let Some(want) = self
             .refs
             .iter()
@@ -255,19 +256,23 @@ impl View {
             .and_then(|k| u32::try_from(k.checked_add(1)?).ok())
             .and_then(NonZeroU32::new)
         else {
-            return Vec::new();
+            return (Vec::new(), 0);
         };
-        (0..self.lines())
-            .flat_map(|i| {
-                let mut from = 0;
-                self.line_tokens(i).iter().filter_map(move |t| {
-                    let (start, end) = (from, wide(t.end));
-                    from = end;
-                    (t.link == Some(want)).then_some((i, start..end))
-                })
-            })
-            .take(USES_MAX)
-            .collect()
+        let (mut shown, mut total) = (Vec::new(), 0usize);
+        for i in 0..self.lines() {
+            let mut from = 0;
+            for t in self.line_tokens(i) {
+                let (start, end) = (from, wide(t.end));
+                from = end;
+                if t.link == Some(want) {
+                    total = total.saturating_add(1);
+                    if shown.len() < USES_MAX {
+                        shown.push((i, start..end));
+                    }
+                }
+            }
+        }
+        (shown, total)
     }
 
     /// Returns one line's tokens as stored, none past the last line.

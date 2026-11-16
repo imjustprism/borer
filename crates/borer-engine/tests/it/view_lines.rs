@@ -9,7 +9,7 @@
 use crate::view::{TEXT, exported_four, filling, tokens};
 use borer_engine::analysis::decompile::view::{view, view_of};
 use borer_engine::analysis::{Analysis, Overlay};
-use borer_engine::view::{Kind, Ref};
+use borer_engine::view::{Kind, Ref, USES_MAX};
 
 /// Every byte of a decompile view's lines lies in the token `token_at` gives.
 ///
@@ -71,8 +71,39 @@ fn uses_of_a_local_are_where_it_is_spelled() {
         function: TEXT,
         name: local.into(),
     };
-    assert_eq!(v.uses(&r), want, "{text}");
-    assert_eq!(v.uses(&Ref::Function(TEXT + 1)), Vec::new());
+    let total = want.len();
+    assert_eq!(v.uses(&r), (want, total), "{text}");
+    assert_eq!(v.uses(&Ref::Function(TEXT + 1)), (Vec::new(), 0));
+}
+
+/// A referent used past the cap shows the first [`USES_MAX`] uses in line
+/// order and counts every one.
+#[test]
+fn uses_past_the_cap_are_counted_in_all() {
+    let p = filling(false);
+    let a = Analysis::compute(&p);
+    let n = USES_MAX + 1;
+    let text = format!(
+        "// signature: uint64_t sub_140001000(uint64_t a1)\n{{\n{}}}\n",
+        "    a1 = a1;\n".repeat(n)
+    );
+    let v = view_of(&p, &a, &Overlay::default(), TEXT, &text).expect("a view");
+    let r = Ref::Variable {
+        function: TEXT,
+        name: "a1".into(),
+    };
+    let linked: Vec<(usize, std::ops::Range<usize>)> = (0..v.lines())
+        .flat_map(|i| {
+            v.tokens(i)
+                .filter(|(.., link)| *link == Some(&r))
+                .map(move |(span, ..)| (i, span))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(linked.len() >= 2 * n, "{}", &text[..200]);
+    let (shown, total) = v.uses(&r);
+    assert_eq!(total, linked.len());
+    assert_eq!(shown, linked[..USES_MAX]);
 }
 
 /// The checked line of a header links the function's instructions it names.
@@ -121,5 +152,5 @@ fn a_checked_header_links_only_the_functions_own_instructions() {
         assert_eq!(line(i).len(), 1, "line {i}: {:?}", line(i));
         assert_eq!(line(i)[0].1, Kind::Comment);
     }
-    assert_eq!(v.uses(&Ref::Address(TEXT + 9)), vec![(1, 100..111)]);
+    assert_eq!(v.uses(&Ref::Address(TEXT + 9)), (vec![(1, 100..111)], 1));
 }
