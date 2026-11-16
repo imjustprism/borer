@@ -877,3 +877,33 @@ fn go_functions_naming_one_long_string_load_within_the_heap_bar() {
     );
     check_local_names("go.elf", bytes, SYMBOLS, "🦀");
 }
+
+/// An import named with a newline and a `# ` line forges no line of the
+/// triage: the loader escapes the name before any report spells it.
+#[test]
+fn an_import_name_forges_no_triage_line() {
+    let _serial = serial();
+    const RDATA: u32 = 0x2000;
+    let mut rdata = vec![0u8; 0x400];
+    descriptor(&mut rdata, 0, RDATA + 0x100, RDATA + 0xa0, RDATA + 0x200);
+    rdata[0xa0..0xa6].copy_from_slice(b"K.dll\0");
+    let name = b"\0\0InternetOpenA\n# forged line\0";
+    rdata[0x300..0x300 + name.len()].copy_from_slice(name);
+    for table in [0x100, 0x200] {
+        put64(&mut rdata, table, u64::from(RDATA + 0x300));
+    }
+    let bytes = pe(
+        &[
+            Sec::sound(".text", 0x1000, text(), CODE),
+            Sec::sound(".rdata", RDATA, rdata, DATA),
+        ],
+        &[(IMPORT_DIR, RDATA, 40)],
+    );
+    let p = Program::from_bytes(PathBuf::from("forged.exe"), bytes)
+        .unwrap_or_else(|e| panic!("a PE with an import table loads: {e}"));
+    let a = borer_engine::analysis::Analysis::compute(&p);
+    let o = borer_engine::analysis::Overlay::default();
+    let out = borer_engine::analysis::render::triage(&p, &a, &o).spell();
+    assert!(!out.lines().any(|l| l.starts_with("# forged")), "{out}");
+    assert!(out.contains("InternetOpenA\\x0a# forged line"), "{out}");
+}
