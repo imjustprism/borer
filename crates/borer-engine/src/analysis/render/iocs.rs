@@ -719,16 +719,23 @@ fn by_kind(rows: &[&Row]) -> String {
 /// * `p` - The loaded image.
 /// * `a` - The analysis.
 /// * `o` - Names in force.
-pub(super) fn iocs_line(p: &Program, a: &Analysis, o: &Overlay) -> String {
+///
+/// # Returns
+///
+/// The line; `count` is every indicator collected, `at` empty (each
+/// indicator's site is a row of [`iocs_tsv`]).
+pub fn iocs_summary(p: &Program, a: &Analysis, o: &Overlay) -> Summary {
     let all = collected(p, a, o);
     let rows: Vec<&Row> = all.rows.iter().collect();
-    if rows.is_empty() {
-        return "none in the strings, stack strings, generated strings or API arguments".to_owned();
-    }
-    format!(
-        "{}; borer://iocs lists each with where it came from",
-        by_kind(&rows)
-    )
+    let headline = if rows.is_empty() {
+        "none in the strings, stack strings, generated strings or API arguments".to_owned()
+    } else {
+        format!(
+            "{}; borer://iocs lists each with where it came from",
+            by_kind(&rows)
+        )
+    };
+    Summary::new(headline, rows.len(), [])
 }
 
 /// Lists the indicators a program holds, each with where it came from.

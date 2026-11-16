@@ -104,12 +104,10 @@ crates/borer-engine/src/analysis/render/dataflow.rs::why_tsv#1	203
 crates/borer-engine/src/analysis/render/obfuscation.rs::decode_shape#1	186
 crates/borer-engine/src/analysis/render/obfuscation.rs::flattening_tsv#1	124
 crates/borer-engine/src/analysis/render/oracle.rs::solve_tsv#1	138
-crates/borer-engine/src/analysis/render/protection.rs::checks_of#1	106
 crates/borer-engine/src/analysis/render/runs/diff.rs::run_diff_tsv#1	126
 crates/borer-engine/src/analysis/render/runs/mod.rs::judge#1	199
 crates/borer-engine/src/analysis/render/runs/mod.rs::render_runs#1	117
 crates/borer-engine/src/analysis/render/summary.rs::summary_of#1	226
-crates/borer-engine/src/analysis/render/triage.rs::crypto_tsv#1	101
 crates/borer-engine/src/analysis/render/triage_view.rs::triage_of#1	179
 crates/borer-engine/src/analysis/render/unpack.rs::devirtualize_tsv#1	202
 crates/borer-engine/src/analysis/render/unpack.rs::unpack_tsv#1	169

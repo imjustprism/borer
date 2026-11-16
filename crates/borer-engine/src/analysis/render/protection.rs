@@ -82,19 +82,6 @@ const QUIET_IMPORTS: [&str; 1] = ["NtQueryInformationProcess"];
 pub fn anti_analysis_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
     let sites = anti_sites(p, a);
     let mut out = String::new();
-    let weak = |tag: &str| tag.starts_with("cpuid") || tag.starts_with("rdtsc (read)");
-    let alone = |tag: &str| {
-        tag.starts_with("int 2d")
-            || tag.starts_with("peb read (")
-            || tag.starts_with("hardware breakpoint")
-            || tag.starts_with("debugger window")
-            || tag.starts_with("debug block")
-            || tag.starts_with("breakpoint ")
-            || tag.starts_with("illegal opcode")
-            || tag.starts_with("debug port")
-    };
-    let strong = sites.keys().filter(|tag| !weak(tag)).count();
-    let instr_count: usize = sites.values().map(Vec::len).sum();
     for (tag, at) in sites.iter() {
         let shown: Vec<String> = at
             .iter()
@@ -116,7 +103,39 @@ pub fn anti_analysis_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
             name_of(a, o, named)
         );
     }
-    let mut imports: Vec<&str> = Vec::new();
+    let imports = anti_imports(p);
+    for label in &imports {
+        let _ = writeln!(out, "{label:<32}  import");
+    }
+    format!(
+        "# {}\n# technique                       sites  where\n{out}",
+        anti_summary(&sites, &imports).headline
+    )
+}
+
+/// Returns the first line [`anti_analysis_tsv`] answers, as a value.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis: functions and their blocks.
+///
+/// # Returns
+///
+/// The verdict; `count` is the techniques and telling imports listed,
+/// `at` the first site of each instruction technique.
+pub fn anti_analysis_summary(p: &Program, a: &Analysis) -> Summary {
+    anti_summary(&anti_sites(p, a), &anti_imports(p))
+}
+
+/// The labels of [`ANTI_IMPORTS`] the image imports, each once, in import
+/// table order.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+fn anti_imports(p: &Program) -> Vec<&'static str> {
+    let mut imports: Vec<&'static str> = Vec::new();
     for sym in &p.symbols {
         if !matches!(sym.kind, SymbolKind::Import) {
             continue;
@@ -133,9 +152,29 @@ pub fn anti_analysis_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
             }
         }
     }
-    for label in &imports {
-        let _ = writeln!(out, "{label:<32}  import");
-    }
+    imports
+}
+
+/// Weighs the anti-analysis sites and imports into the verdict.
+///
+/// # Arguments
+///
+/// * `sites` - Each instruction technique's sites ([`anti_sites`]).
+/// * `imports` - The telling imports ([`anti_imports`]).
+fn anti_summary(sites: &BTreeMap<&'static str, Vec<u64>>, imports: &[&str]) -> Summary {
+    let weak = |tag: &str| tag.starts_with("cpuid") || tag.starts_with("rdtsc (read)");
+    let alone = |tag: &str| {
+        tag.starts_with("int 2d")
+            || tag.starts_with("peb read (")
+            || tag.starts_with("hardware breakpoint")
+            || tag.starts_with("debugger window")
+            || tag.starts_with("debug block")
+            || tag.starts_with("breakpoint ")
+            || tag.starts_with("illegal opcode")
+            || tag.starts_with("debug port")
+    };
+    let strong = sites.keys().filter(|tag| !weak(tag)).count();
+    let instr_count: usize = sites.values().map(Vec::len).sum();
     let telling = imports
         .iter()
         .any(|label| !CRT_IMPORTS.contains(label) && !QUIET_IMPORTS.contains(label));
@@ -146,7 +185,11 @@ pub fn anti_analysis_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
     } else {
         "a few anti-analysis tells, within what ordinary code uses"
     };
-    format!("# {verdict}\n# technique                       sites  where\n{out}")
+    Summary::new(
+        verdict.to_owned(),
+        sites.len() + imports.len(),
+        sites.values().filter_map(|at| at.first().copied()),
+    )
 }
 
 /// Returns the sites of each anti-analysis instruction in the program's
@@ -283,13 +326,10 @@ pub(super) struct Check {
 /// It reads every referenced string and decompiles the input readers, so
 /// it is built once per set of names ([`Analysis::derived`]).
 pub fn license_checks_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
-    a.derived
-        .get_or_build_named("license_checks", o.fingerprint(), (), || checks_of(p, a, o))
-        .as_ref()
-        .clone()
+    license_checks(p, a, o).1.clone()
 }
 
-/// Builds the listing [`license_checks_tsv`] memoizes.
+/// Returns the first line [`license_checks_tsv`] answers, as a value.
 ///
 /// # Arguments
 ///
@@ -299,8 +339,36 @@ pub fn license_checks_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
 ///
 /// # Returns
 ///
-/// As [`license_checks_tsv`].
-fn checks_of(p: &Program, a: &Analysis, o: &Overlay) -> String {
+/// The count of judging functions; `count` is how many compare against a
+/// constant, `at` their entries.
+pub fn license_checks_summary(p: &Program, a: &Analysis, o: &Overlay) -> Summary {
+    license_checks(p, a, o).0.clone()
+}
+
+/// Returns the checks' summary and listing, built once per set of names.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis: cross-references, functions, blocks.
+/// * `o` - User names.
+fn license_checks(p: &Program, a: &Analysis, o: &Overlay) -> Arc<(Summary, String)> {
+    a.derived
+        .get_or_build_named("license_checks", o.fingerprint(), (), || checks_of(p, a, o))
+}
+
+/// Builds the summary and listing [`license_checks`] memoizes.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis: cross-references, functions, blocks.
+/// * `o` - User names.
+///
+/// # Returns
+///
+/// As [`license_checks_summary`] and [`license_checks_tsv`].
+fn checks_of(p: &Program, a: &Analysis, o: &Overlay) -> (Summary, String) {
     let mut found: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
     for (target, lit) in literal_targets(p, a).iter() {
         let sites = a.xrefs_to(*target);
@@ -335,16 +403,21 @@ fn checks_of(p: &Program, a: &Analysis, o: &Overlay) -> String {
     let (checks, mentions): (Vec<_>, Vec<_>) =
         rows.into_iter().partition(|c| !c.constants.is_empty());
     let readers = input_readers(p, a, o, &found, bits);
-    let mut out = format!(
-        "# {} function{} judge a key, serial or license{}\n",
-        checks.len().min(CHECKS_MAX),
-        plural(checks.len()),
-        if readers.is_empty() {
-            String::new()
-        } else {
-            format!("; {} more test what they read", readers.len())
-        }
+    let summary = Summary::new(
+        format!(
+            "{} function{} judge a key, serial or license{}",
+            checks.len().min(CHECKS_MAX),
+            plural(checks.len()),
+            if readers.is_empty() {
+                String::new()
+            } else {
+                format!("; {} more test what they read", readers.len())
+            }
+        ),
+        checks.len(),
+        checks.iter().map(|c| c.entry),
     );
+    let mut out = format!("# {}\n", summary.headline);
     if !mentions.is_empty() {
         let named: Vec<String> = mentions
             .iter()
@@ -375,36 +448,50 @@ fn checks_of(p: &Program, a: &Analysis, o: &Overlay) -> String {
             cs.join(", ")
         );
     }
-    if !readers.is_empty() {
-        let named: Vec<String> = readers
-            .iter()
-            .take(CHECK_CONSTS_MAX)
-            .map(|c| {
-                format!(
-                    "{} ({})",
-                    name_of(a, o, c.entry),
-                    if c.constants.is_empty() {
-                        "a value it parsed".to_owned()
-                    } else {
-                        c.constants
-                            .iter()
-                            .take(CHECK_CONSTS_MAX)
-                            .map(|v| format!("{v:#x}"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    }
-                )
-            })
-            .collect();
-        let _ = writeln!(
-            out,
-            "# {} read input and test what they compute against it: {}{}",
-            readers.len(),
-            named.join(", "),
-            plus_more(readers.len(), CHECK_CONSTS_MAX)
-        );
+    readers_line(&mut out, a, o, &readers);
+    (summary, out)
+}
+
+/// Writes the line naming the input readers [`checks_of`] found, and what
+/// each tests against; nothing when there are none.
+///
+/// # Arguments
+///
+/// * `out` - The listing.
+/// * `a` - The analysis.
+/// * `o` - User names.
+/// * `readers` - The reader checks ([`input_readers`]).
+fn readers_line(out: &mut String, a: &Analysis, o: &Overlay, readers: &[Check]) {
+    if readers.is_empty() {
+        return;
     }
-    out
+    let named: Vec<String> = readers
+        .iter()
+        .take(CHECK_CONSTS_MAX)
+        .map(|c| {
+            format!(
+                "{} ({})",
+                name_of(a, o, c.entry),
+                if c.constants.is_empty() {
+                    "a value it parsed".to_owned()
+                } else {
+                    c.constants
+                        .iter()
+                        .take(CHECK_CONSTS_MAX)
+                        .map(|v| format!("{v:#x}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            )
+        })
+        .collect();
+    let _ = writeln!(
+        out,
+        "# {} read input and test what they compute against it: {}{}",
+        readers.len(),
+        named.join(", "),
+        plus_more(readers.len(), CHECK_CONSTS_MAX)
+    );
 }
 
 /// The APIs whose buffer or return carries input the program did not
@@ -763,6 +850,79 @@ pub(super) const DYNIMPORTS_MAX: usize = 400;
 ///
 /// The DLLs loaded and the functions resolved, as text.
 pub fn dynamic_imports_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
+    let found = resolved(p, a, o);
+    let mut out = format!("# {}\n", found.summary().headline);
+    if !found.dlls.is_empty() {
+        out.push_str("# loaded libraries:\n");
+        for d in found.dlls.iter().take(DYNIMPORTS_MAX) {
+            let _ = writeln!(out, "  {d}");
+        }
+        elided_line(&mut out, found.dlls.len(), DYNIMPORTS_MAX, " libraries");
+    }
+    if !found.apis.is_empty() {
+        out.push_str("# resolved functions:\n");
+        for f in found.apis.iter().take(DYNIMPORTS_MAX) {
+            let _ = writeln!(out, "  {f}");
+        }
+        elided_line(&mut out, found.apis.len(), DYNIMPORTS_MAX, " functions");
+    }
+    out
+}
+
+/// Returns the first line [`dynamic_imports_tsv`] answers, as a value.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis: symbols and cross-references.
+/// * `o` - User names.
+///
+/// # Returns
+///
+/// The counts; `count` is the functions resolved, `at` the resolver
+/// callers.
+pub fn dynamic_imports_summary(p: &Program, a: &Analysis, o: &Overlay) -> Summary {
+    resolved(p, a, o).summary()
+}
+
+/// What the resolver callers of a program pass by name.
+struct Resolved {
+    /// Functions resolved by name.
+    apis: BTreeSet<String>,
+    /// Libraries loaded by name.
+    dlls: BTreeSet<String>,
+    /// Entries of the functions calling a resolver, ascending.
+    callers: Vec<u64>,
+}
+
+impl Resolved {
+    /// Returns the counts line [`dynamic_imports_tsv`] starts with.
+    fn summary(&self) -> Summary {
+        Summary::new(
+            format!(
+                "{} function{} resolved at runtime, {} librar{} loaded, from {} call site group{}",
+                self.apis.len(),
+                plural(self.apis.len()),
+                self.dlls.len(),
+                if self.dlls.len() == 1 { "y" } else { "ies" },
+                self.callers.len(),
+                plural(self.callers.len())
+            ),
+            self.apis.len(),
+            self.callers.iter().copied(),
+        )
+    }
+}
+
+/// Decompiles the callers of the resolver APIs and collects the names they
+/// pass ([`dynamic_imports_tsv`]).
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis: symbols and cross-references.
+/// * `o` - User names.
+fn resolved(p: &Program, a: &Analysis, o: &Overlay) -> Resolved {
     let mut callers: BTreeSet<u64> = BTreeSet::new();
     for sym in &p.symbols {
         if !matches!(sym.kind, SymbolKind::Import) || sym.addr == 0 {
@@ -793,30 +953,11 @@ pub fn dynamic_imports_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
             }
         }
     }
-    let mut out = format!(
-        "# {} function{} resolved at runtime, {} librar{} loaded, from {} call site group{}\n",
-        apis.len(),
-        plural(apis.len()),
-        dlls.len(),
-        if dlls.len() == 1 { "y" } else { "ies" },
-        callers.len(),
-        plural(callers.len())
-    );
-    if !dlls.is_empty() {
-        out.push_str("# loaded libraries:\n");
-        for d in dlls.iter().take(DYNIMPORTS_MAX) {
-            let _ = writeln!(out, "  {d}");
-        }
-        elided_line(&mut out, dlls.len(), DYNIMPORTS_MAX, " libraries");
+    Resolved {
+        apis,
+        dlls,
+        callers,
     }
-    if !apis.is_empty() {
-        out.push_str("# resolved functions:\n");
-        for f in apis.iter().take(DYNIMPORTS_MAX) {
-            let _ = writeln!(out, "  {f}");
-        }
-        elided_line(&mut out, apis.len(), DYNIMPORTS_MAX, " functions");
-    }
-    out
 }
 
 /// Pulls the string argument out of a resolver call on one line.
@@ -1656,6 +1797,103 @@ fn packing_marks(
 ///
 /// The verdict, the evidence and the section table.
 pub fn protection_tsv(p: &Program, a: &Analysis) -> String {
+    let found = protection_of(p, a);
+    let mut out = format!("# {}\n", found.summary().headline);
+    for e in &found.evidence {
+        let _ = writeln!(out, "# - {e}");
+    }
+    out.push_str("# section      va             raw         virtual  rwx  entropy\n");
+    out.push_str(&found.rows);
+    out
+}
+
+/// Returns the first line [`protection_tsv`] answers, as a value.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis, for how much code was found.
+///
+/// # Returns
+///
+/// The verdict; `count` is the marks of evidence listed under it, `at`
+/// empty (the marks are about the file's layout).
+pub fn protection_summary(p: &Program, a: &Analysis) -> Summary {
+    protection_of(p, a).summary()
+}
+
+/// What the marks a packer or protector leaves add up to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Packing {
+    /// Packers or protectors named by their marks, by family name, and
+    /// what the layout says about a UPX entry among them.
+    Protected(Vec<&'static str>, UpxEntry),
+    /// UPX marks on an image whose entry is not the stub.
+    Unpacked,
+    /// No name, but a strong mark and at least two marks in all.
+    Packed,
+    /// No mark at all.
+    Plain,
+    /// Weak marks only.
+    PlainWeak,
+    /// One strong mark and nothing else.
+    PlainOneMark,
+}
+
+impl std::fmt::Display for Packing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Protected(names, upx) => {
+                let listed: Vec<String> = names
+                    .iter()
+                    .map(|n| {
+                        if *n == "UPX" && *upx == UpxEntry::MaybeUnpacked {
+                            format!("UPX ({MAYBE_UNPACKED})")
+                        } else {
+                            (*n).to_owned()
+                        }
+                    })
+                    .collect();
+                write!(f, "protected: {}", listed.join(", "))
+            }
+            Self::Unpacked => f.write_str(
+                "unpacked: UPX marks, but its entry is not the stub (a dump or an unpacked image)",
+            ),
+            Self::Packed => f.write_str("packed: no name, but the marks are there"),
+            Self::Plain => f.write_str("plain: no packer marks"),
+            Self::PlainWeak => f.write_str(
+                "plain: no mark only packing leaves (entropy, writable code, sparse code)",
+            ),
+            Self::PlainOneMark => f.write_str("plain: one mark only, not enough to call it packed"),
+        }
+    }
+}
+
+/// The verdict on an image's packing, its evidence and its section table.
+pub(crate) struct Protection {
+    /// The verdict.
+    pub(crate) packing: Packing,
+    /// One sentence per mark: each named family's, then the strong and the
+    /// weak ones.
+    pub(crate) evidence: Vec<String>,
+    /// The section table's rows, one line each.
+    pub(crate) rows: String,
+}
+
+impl Protection {
+    /// Returns the verdict line [`protection_tsv`] starts with.
+    pub(crate) fn summary(&self) -> Summary {
+        Summary::new(self.packing.to_string(), self.evidence.len(), [])
+    }
+}
+
+/// Reads the marks a packer or protector leaves ([`protection_tsv`]).
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis, for how much code was found.
+pub(crate) fn protection_of(p: &Program, a: &Analysis) -> Protection {
     let names = packer_marks(p);
     let mut rows = String::new();
     let mut packed_bytes = 0u64;
@@ -1686,39 +1924,32 @@ pub fn protection_tsv(p: &Program, a: &Analysis) -> String {
     let share = (total_bytes > 0).then(|| packed_bytes * 100 / total_bytes);
     let (strong, weak) = packing_marks(p, a, share, &wx);
     let upx = upx_entry(p);
-    let listed: Vec<String> = names
+    let listed: Vec<&'static str> = names
         .keys()
-        .filter(|n| !(**n == "UPX" && upx == UpxEntry::Unpacked))
-        .map(|n| {
-            if *n == "UPX" && upx == UpxEntry::MaybeUnpacked {
-                format!("UPX ({MAYBE_UNPACKED})")
-            } else {
-                (*n).to_owned()
-            }
-        })
+        .copied()
+        .filter(|n| !(*n == "UPX" && upx == UpxEntry::Unpacked))
         .collect();
-    let verdict = if !listed.is_empty() {
-        format!("protected: {}", listed.join(", "))
+    let packing = if !listed.is_empty() {
+        Packing::Protected(listed, upx)
     } else if !names.is_empty() {
-        "unpacked: UPX marks, but its entry is not the stub (a dump or an unpacked image)"
-            .to_owned()
+        Packing::Unpacked
     } else if !strong.is_empty() && strong.len() + weak.len() >= 2 {
-        "packed: no name, but the marks are there".to_owned()
+        Packing::Packed
     } else if strong.is_empty() && weak.is_empty() {
-        "plain: no packer marks".to_owned()
+        Packing::Plain
     } else if strong.is_empty() {
-        "plain: no mark only packing leaves (entropy, writable code, sparse code)".to_owned()
+        Packing::PlainWeak
     } else {
-        "plain: one mark only, not enough to call it packed".to_owned()
+        Packing::PlainOneMark
     };
-    let mut out = format!("# {verdict}\n");
-    for (name, marks) in &names {
-        let _ = writeln!(out, "# - {name}: {}", marks.join("; "));
+    let mut evidence: Vec<String> = names
+        .iter()
+        .map(|(name, marks)| format!("{name}: {}", marks.join("; ")))
+        .collect();
+    evidence.extend(strong.into_iter().chain(weak));
+    Protection {
+        packing,
+        evidence,
+        rows,
     }
-    for e in strong.iter().chain(&weak) {
-        let _ = writeln!(out, "# - {e}");
-    }
-    out.push_str("# section      va             raw         virtual  rwx  entropy\n");
-    out.push_str(&rows);
-    out
 }

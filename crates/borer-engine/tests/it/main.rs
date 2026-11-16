@@ -106,6 +106,7 @@ mod syscalls;
 mod tells;
 mod textcheck;
 mod toolchain;
+mod triage;
 mod typelib;
 mod types;
 mod unchecked;

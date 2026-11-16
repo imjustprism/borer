@@ -343,6 +343,44 @@ fn name_gives(fragments: &[&str], api: &str) -> bool {
 /// first; the header counts the syscall sites, and those whose number
 /// their block does not set, when there are any.
 pub fn capability_map_tsv(p: &Program, a: Option<&Analysis>) -> String {
+    let (summary, body) = capability_lines(p, a);
+    let mut out = format!("# {}\n", summary.headline);
+    for line in &body {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Returns the first line [`capability_map_tsv`] answers, as a value.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - Its functions, for the syscall sites; `None` for a file with no
+///   code analysis.
+///
+/// # Returns
+///
+/// The counts; `count` is the capabilities present, `at` empty (they come
+/// from the import table and the syscall sites, not one place).
+pub fn capability_summary(p: &Program, a: Option<&Analysis>) -> Summary {
+    capability_lines(p, a).0
+}
+
+/// Builds the capability map: its first line as a value, then each line
+/// under it.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - Its functions, for the syscall sites.
+///
+/// # Returns
+///
+/// The summary, then the lines without their newlines: a note on a thin
+/// import table, and one row per capability, the fullest first.
+pub(super) fn capability_lines(p: &Program, a: Option<&Analysis>) -> (Summary, Vec<String>) {
     let imports: Vec<&str> = p
         .symbols
         .iter()
@@ -385,21 +423,21 @@ pub fn capability_map_tsv(p: &Program, a: Option<&Analysis>) -> String {
         }
     }
     hits.sort_by_key(|(cap, named)| (std::cmp::Reverse(named.len()), *cap));
-    let mut out = format!(
-        "# {} of {} capabilities present across {} imports",
+    let mut headline = format!(
+        "{} of {} capabilities present across {} imports",
         hits.len(),
         CAPABILITIES.len(),
         imports.len()
     );
+    let mut body = Vec::with_capacity(hits.len() + 1);
     if sites.is_empty() {
-        out.push('\n');
         if imports.len() < 12 {
-            out.push_str("# few imports: the rest are likely resolved at runtime, so this understates the reach\n");
+            body.push("# few imports: the rest are likely resolved at runtime, so this understates the reach".to_owned());
         }
     } else {
         let unresolved = sites.iter().filter(|s| s.nr.is_none()).count();
-        let _ = writeln!(
-            out,
+        let _ = write!(
+            headline,
             " and {} syscall site{} ({unresolved} whose number its block does not set)",
             sites.len(),
             plural(sites.len())
@@ -412,9 +450,9 @@ pub fn capability_map_tsv(p: &Program, a: Option<&Analysis>) -> String {
         } else {
             String::new()
         };
-        let _ = writeln!(out, "{capability:<24}  {}{more}", shown.join(", "));
+        body.push(format!("{capability:<24}  {}{more}", shown.join(", ")));
     }
-    out
+    (Summary::new(headline, hits.len(), []), body)
 }
 
 /// Whether an anti-analysis import is kept on the capability map.
@@ -1263,66 +1301,22 @@ pub(super) struct Group {
 pub fn crypto_tsv(p: &Program, a: &Analysis, o: &Overlay, offset: usize, limit: usize) -> String {
     /// Functions named in a group's `where` column before the rest are counted.
     const NAMED_MAX: usize = 8;
-    let mut groups: Vec<Group> = Vec::new();
-    let mut owned: BTreeSet<(&str, u64)> = BTreeSet::new();
     let mut page: Vec<crate::crypto::CryptoHit> = Vec::new();
-    let mut total = 0usize;
-    each_crypto_hit(p, a, |h| {
-        if total >= offset && page.len() < limit {
+    let mut seen = 0usize;
+    let (groups, total) = crypto_groups(p, a, |h| {
+        if seen >= offset && page.len() < limit {
             page.push(h.clone());
         }
-        total += 1;
-        let family = h.name.split_whitespace().next().unwrap_or(h.name);
-        let inside = h.va.and_then(|va| a.function_at(va));
-        let owners: Vec<u64> = match (inside, h.va) {
-            (Some(f), _) => vec![f.entry],
-            (None, Some(va)) => a.xrefs_to(va).iter().filter_map(|s| s.from_entry).collect(),
-            (None, None) => Vec::new(),
-        };
-        let at = match groups.iter().position(|g| g.family == family) {
-            Some(k) => k,
-            None => {
-                groups.push(Group {
-                    family,
-                    sites: 0,
-                    owners: Vec::new(),
-                    sections: Vec::new(),
-                });
-                groups.len() - 1
-            }
-        };
-        let slot = &mut groups[at];
-        slot.sites += 1;
-        for entry in owners {
-            if owned.insert((family, entry)) {
-                slot.owners.push(entry);
-            }
-        }
-        if inside.is_none() && !slot.sections.contains(&h.section) {
-            slot.sections.push(h.section.clone());
-        }
+        seen += 1;
     });
     let api = crate::analysis::apihash::api_hashes_tsv(
         &crate::analysis::apihash::find_api_hashes(p, a),
         limit,
     );
+    let mut out = format!("# {}\n", crypto_summary_of(&groups, total).headline);
     if total == 0 {
-        return crate::crypto::render(&[]) + api.as_str();
+        return out + crate::crypto::rows(&[]).as_str() + api.as_str();
     }
-    groups.sort_by(|l, r| r.sites.cmp(&l.sites).then(l.family.cmp(r.family)));
-    let functions: usize = {
-        let mut all: Vec<u64> = groups
-            .iter()
-            .flat_map(|g| g.owners.iter().copied())
-            .collect();
-        all.sort_unstable();
-        all.dedup();
-        all.len()
-    };
-    let mut out = format!(
-        "# {total} crypto/hash constant hits: {} algorithm(s) across {functions} function(s)\n",
-        groups.len()
-    );
     out.push_str("# algorithm        sites  functions  where\n");
     for g in &groups {
         let named: Vec<String> = g
@@ -1362,6 +1356,103 @@ pub fn crypto_tsv(p: &Program, a: &Analysis, o: &Overlay, offset: usize, limit: 
     out.push_str(&api);
     out
 }
+
+/// Returns the first line [`crypto_tsv`] answers, as a value.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis, for the function containing a hit.
+///
+/// # Returns
+///
+/// The hit and algorithm counts; `count` is the hits, `at` the functions
+/// holding or indexing them.
+pub fn crypto_summary(p: &Program, a: &Analysis) -> Summary {
+    let (groups, total) = crypto_groups(p, a, |_| {});
+    crypto_summary_of(&groups, total)
+}
+
+/// Spells the counts line of [`crypto_tsv`] from its groups.
+///
+/// # Arguments
+///
+/// * `groups` - The hits by algorithm ([`crypto_groups`]).
+/// * `total` - Every hit in the image.
+fn crypto_summary_of(groups: &[Group], total: usize) -> Summary {
+    let owners: BTreeSet<u64> = groups
+        .iter()
+        .flat_map(|g| g.owners.iter().copied())
+        .collect();
+    let headline = if total == 0 {
+        format!("{total} crypto/hash constant hits")
+    } else {
+        format!(
+            "{total} crypto/hash constant hits: {} algorithm(s) across {} function(s)",
+            groups.len(),
+            owners.len()
+        )
+    };
+    Summary::new(headline, total, owners)
+}
+
+/// Groups every crypto constant hit of the image by algorithm, the most
+/// sites first.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis, for the function containing a hit.
+/// * `visit` - Called once per hit, in scan order.
+///
+/// # Returns
+///
+/// The groups and the count of hits.
+fn crypto_groups(
+    p: &Program,
+    a: &Analysis,
+    mut visit: impl FnMut(&crate::crypto::CryptoHit),
+) -> (Vec<Group>, usize) {
+    let mut groups: Vec<Group> = Vec::new();
+    let mut owned: BTreeSet<(&str, u64)> = BTreeSet::new();
+    let mut total = 0usize;
+    each_crypto_hit(p, a, |h| {
+        visit(h);
+        total += 1;
+        let family = h.name.split_whitespace().next().unwrap_or(h.name);
+        let inside = h.va.and_then(|va| a.function_at(va));
+        let owners: Vec<u64> = match (inside, h.va) {
+            (Some(f), _) => vec![f.entry],
+            (None, Some(va)) => a.xrefs_to(va).iter().filter_map(|s| s.from_entry).collect(),
+            (None, None) => Vec::new(),
+        };
+        let at = match groups.iter().position(|g| g.family == family) {
+            Some(k) => k,
+            None => {
+                groups.push(Group {
+                    family,
+                    sites: 0,
+                    owners: Vec::new(),
+                    sections: Vec::new(),
+                });
+                groups.len() - 1
+            }
+        };
+        let slot = &mut groups[at];
+        slot.sites += 1;
+        for entry in owners {
+            if owned.insert((family, entry)) {
+                slot.owners.push(entry);
+            }
+        }
+        if inside.is_none() && !slot.sections.contains(&h.section) {
+            slot.sections.push(h.section.clone());
+        }
+    });
+    groups.sort_by(|l, r| r.sites.cmp(&l.sites).then(l.family.cmp(r.family)));
+    (groups, total)
+}
+
 /// Renders the triage of a file with no code to analyze.
 ///
 /// An unrecognized file (an encrypted wallet, an archive, a payload pulled

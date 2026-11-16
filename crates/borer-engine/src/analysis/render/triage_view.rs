@@ -2,8 +2,44 @@
 //! can do, what the report could not see and the functions to read first.
 
 use super::calls::{Reach, gather};
-use super::iocs::iocs_line;
 use super::*;
+
+/// Most addresses a [`Summary`] keeps.
+pub const SUMMARY_AT_MAX: usize = 16;
+
+/// What one report says in its first line, held as the value it is spelled
+/// from, so a reader of the summary never reads the report's text back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Summary {
+    /// The report's first line, without its `# `.
+    pub headline: String,
+    /// How many things the report found: techniques, hits, functions or
+    /// marks, as the producer's own docs say.
+    pub count: usize,
+    /// The addresses the headline is about, ascending and distinct, at most
+    /// [`SUMMARY_AT_MAX`]; empty for a report about the file rather than
+    /// places in it.
+    pub at: Vec<u64>,
+}
+
+impl Summary {
+    /// Returns a summary of `headline` keeping the lowest
+    /// [`SUMMARY_AT_MAX`] distinct addresses of `at`.
+    ///
+    /// # Arguments
+    ///
+    /// * `headline` - The first line, without its `# `.
+    /// * `count` - How many things the report found.
+    /// * `at` - The addresses the headline is about, in any order.
+    pub(super) fn new(headline: String, count: usize, at: impl IntoIterator<Item = u64>) -> Self {
+        let at: BTreeSet<u64> = at.into_iter().collect();
+        Self {
+            headline,
+            count,
+            at: at.into_iter().take(SUMMARY_AT_MAX).collect(),
+        }
+    }
+}
 
 /// Answers the first question about a binary in one call.
 ///
@@ -175,7 +211,7 @@ fn triage_of(p: &Program, a: &Analysis, o: &Overlay) -> String {
         let _ = writeln!(out, "#   {}", line.trim());
     }
     phases.mark("triage capabilities");
-    let _ = writeln!(out, "# iocs: {}", iocs_line(p, a, o));
+    let _ = writeln!(out, "# iocs: {}", iocs_summary(p, a, o).headline);
     phases.mark("triage iocs");
     for spot in blind_spots(p, a, o, headline(&protection, "protection")) {
         let _ = writeln!(out, "# blind spot: {spot}");
