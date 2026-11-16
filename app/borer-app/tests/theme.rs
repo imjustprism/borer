@@ -2,8 +2,8 @@
 //! engine draws, contrast floors, a check-grade ramp that survives color-vision deficiency,
 //! no stock Zed color in a slot the app shows, and the app booting into it.
 //!
-//! The color maths are written out here: WCAG 2 contrast, `OKLab` distance, and the Machado
-//! (2009) simulation of deuteranopia, protanopia and tritanopia at severity 1.0.
+//! The color maths are the app's own, in [`borer_app::theme_contract`], which a person's
+//! theme is checked by too.
 
 #![expect(
     clippy::expect_used,
@@ -20,13 +20,16 @@ use borer_app::binary::{Binary, SettingsNotice, StatusLine};
 use borer_app::code_view::{CodePalette, Role};
 use borer_app::decompile_item::code_row_height;
 use borer_app::shell::Shell;
+use borer_app::theme_contract::{
+    Failure, GRADES, TEXT_FLOOR, check, contrast, grade_rules, syntax_color, text_floors,
+};
 use borer_engine::program::checked_metadata;
 use fs::Fs as _;
 use gpui::{
     AppContext as _, BorrowAppContext as _, Hsla, Refineable as _, Rgba, TestAppContext, px,
 };
 use project::DisableAiSettings;
-use settings::{BufferLineHeight, Settings as _, SettingsStore, ThemeAppearanceMode};
+use settings::{BufferLineHeight, Settings as _, SettingsStore, ThemeAppearanceMode, ThemeColor};
 use theme::{ActiveTheme as _, AppearanceContent, Theme, ThemeColors, ThemeColorsRefinement};
 use theme_settings::{
     ThemeContent, ThemeSettings, deserialize_user_theme, refine_theme, status_colors_refinement,
@@ -37,42 +40,6 @@ use workspace::AppState;
 mod support;
 
 use support::{boot, start};
-
-/// Grade keys from least to most evidence, then the refuted grade.
-const GRADES: [&str; 4] = [
-    "borer.grade.unchecked",
-    "borer.grade.tested",
-    "borer.grade.proved",
-    "borer.grade.wrong",
-];
-
-/// Machado (2009) simulation matrices at severity 1.0 over linear sRGB, by deficiency.
-const MACHADO: [(&str, [[f64; 3]; 3]); 3] = [
-    (
-        "deuteranopia",
-        [
-            [0.367322, 0.860646, -0.227968],
-            [0.280085, 0.672501, 0.047413],
-            [-0.011820, 0.042940, 0.968881],
-        ],
-    ),
-    (
-        "protanopia",
-        [
-            [0.152286, 1.052583, -0.204868],
-            [0.114503, 0.786281, 0.099216],
-            [-0.003882, -0.048116, 1.051998],
-        ],
-    ),
-    (
-        "tritanopia",
-        [
-            [1.255528, -0.076749, -0.178779],
-            [-0.078411, 0.930809, 0.147602],
-            [0.004733, 0.691367, 0.303900],
-        ],
-    ),
-];
 
 /// Slots of [`ThemeColors`] the borer theme leaves to Zed's defaults, each because the app
 /// never draws it.
@@ -113,14 +80,6 @@ fn themes() -> Vec<(ThemeContent, Theme)> {
         .collect()
 }
 
-/// Returns the color the theme's syntax sets for `key`, if it sets one.
-fn syntax_color(theme: &Theme, key: &str) -> Option<Hsla> {
-    theme
-        .syntax()
-        .style_for_name(key)
-        .and_then(|style| style.color)
-}
-
 /// Returns whether `color` is the opaque `0xRRGGBB` color `rgb`, to within rounding.
 fn is(color: Hsla, rgb: u32) -> bool {
     let (got, want) = (Rgba::from(color), gpui::rgb(rgb));
@@ -131,62 +90,6 @@ fn is(color: Hsla, rgb: u32) -> bool {
         (got.a, 1.0),
     ];
     channels.iter().all(|(a, b)| (a - b).abs() < 1e-3)
-}
-
-/// Returns `color`'s linear sRGB channels.
-fn linear(color: Hsla) -> [f64; 3] {
-    let rgba = Rgba::from(color);
-    assert!((rgba.a - 1.0).abs() < 1e-6, "a measured color is opaque");
-    [rgba.r, rgba.g, rgba.b].map(|c| {
-        let c = f64::from(c);
-        if c <= 0.04045 {
-            c / 12.92
-        } else {
-            ((c + 0.055) / 1.055).powf(2.4)
-        }
-    })
-}
-
-/// Returns the WCAG 2 contrast ratio of `a` against `b`.
-fn contrast(a: Hsla, b: Hsla) -> f64 {
-    let luminance = |c| {
-        let [r, g, b] = linear(c);
-        0.0722f64.mul_add(b, 0.2126f64.mul_add(r, 0.7152 * g))
-    };
-    let (x, y) = (luminance(a), luminance(b));
-    (x.max(y) + 0.05) / (x.min(y) + 0.05)
-}
-
-/// Returns linear sRGB `[r, g, b]` in `OKLab`.
-fn oklab([r, g, b]: [f64; 3]) -> [f64; 3] {
-    let dot = |m: [f64; 3]| m[0].mul_add(r, m[1].mul_add(g, m[2] * b)).cbrt();
-    let l = dot([0.4122214708, 0.5363325363, 0.0514459929]);
-    let m = dot([0.2119034982, 0.6806995451, 0.1073969566]);
-    let s = dot([0.0883024619, 0.2817188376, 0.6299787005]);
-    let mix = |k: [f64; 3]| k[0].mul_add(l, k[1].mul_add(m, k[2] * s));
-    [
-        mix([0.2104542553, 0.7936177850, -0.0040720468]),
-        mix([1.9779984951, -2.4285922050, 0.4505937099]),
-        mix([0.0259040371, 0.7827717662, -0.8086757660]),
-    ]
-}
-
-/// Returns linear sRGB `rgb` as seen through `matrix`, clamped to the gamut.
-fn simulate(rgb: [f64; 3], matrix: [[f64; 3]; 3]) -> [f64; 3] {
-    matrix.map(|row| {
-        row[0]
-            .mul_add(rgb[0], row[1].mul_add(rgb[1], row[2] * rgb[2]))
-            .clamp(0.0, 1.0)
-    })
-}
-
-/// Returns the Euclidean distance of two `OKLab` colors.
-fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a.iter()
-        .zip(b)
-        .map(|(x, y)| (x - y).powi(2))
-        .sum::<f64>()
-        .sqrt()
 }
 
 /// Starts Zed's test app state with `text` as its settings file, then configures
@@ -284,30 +187,8 @@ fn every_token_kind_resolves_to_its_own_key() {
 #[test]
 fn text_roles_meet_their_contrast_floors() {
     for (content, theme) in themes() {
-        let colors = theme.colors();
-        let backgrounds = [colors.editor_background, colors.panel_background];
-        let floor = |what: &str, color: Hsla, ratio: f64| {
-            for background in backgrounds {
-                let got = contrast(color, background);
-                assert!(got >= ratio, "{} {what}: {got:.2} < {ratio}", content.name);
-            }
-        };
-        let quiet = "borer.byte.zero";
-        for key in content.style.syntax.keys() {
-            if GRADES.contains(&key.as_str()) || key == quiet {
-                continue;
-            }
-            if let Some(color) = syntax_color(&theme, key) {
-                floor(key, color, 4.5);
-            }
-        }
-        floor("text", colors.text, 4.5);
-        floor("text.muted", colors.text_muted, 4.5);
-        floor("text.accent", colors.text_accent, 4.5);
-        floor("editor.foreground", colors.editor_foreground, 4.5);
-        floor(quiet, syntax_color(&theme, quiet).expect("zero bytes"), 3.0);
-        floor("text.placeholder", colors.text_placeholder, 3.0);
-        floor("icon.muted", colors.icon_muted, 3.0);
+        let failures = text_floors(&content, &theme);
+        assert!(failures.is_empty(), "{}: {failures:?}", content.name);
     }
 }
 
@@ -316,35 +197,125 @@ fn text_roles_meet_their_contrast_floors() {
 #[test]
 fn check_grades_rise_with_evidence_and_stay_apart() {
     for (content, theme) in themes() {
-        let editor = theme.colors().editor_background;
-        let grades = GRADES.map(|key| syntax_color(&theme, key).expect(key));
-        let ramp = grades[..3].iter().map(|&c| contrast(c, editor));
-        let ramp: Vec<f64> = ramp.collect();
-        assert!(
-            ramp.windows(2).all(|w| w[0] < w[1]),
-            "{}: {ramp:?}",
-            content.name
-        );
-        let visions = std::iter::once(("normal vision", 0.12, None))
-            .chain(MACHADO.map(|(name, matrix)| (name, 0.08, Some(matrix))));
-        for (vision, floor, matrix) in visions {
-            let seen = |c| oklab(matrix.map_or_else(|| linear(c), |m| simulate(linear(c), m)));
-            for (i, &a) in grades.iter().enumerate() {
-                for (j, &b) in grades.iter().enumerate().skip(i + 1) {
-                    let apart = distance(seen(a), seen(b));
-                    assert!(
-                        apart >= floor,
-                        "{} {vision}: {} and {} are {apart:.3} apart",
-                        content.name,
-                        GRADES[i],
-                        GRADES[j]
-                    );
-                }
-            }
-        }
-        let wrong = theme.syntax().style_for_name(GRADES[3]);
-        assert!(wrong.and_then(|s| s.background_color).is_some());
+        let failures = grade_rules(&theme);
+        assert!(failures.is_empty(), "{}: {failures:?}", content.name);
     }
+}
+
+/// Returns `borer dark` with `edit` made to its written form, and as Zed refines that.
+fn dark_with(edit: impl FnOnce(&mut ThemeContent)) -> (ThemeContent, Theme) {
+    let (mut content, _) = themes().remove(0);
+    edit(&mut content);
+    let theme = refine_theme(&content);
+    (content, theme)
+}
+
+/// Sets the color of the syntax `key` of `content` to `color`.
+fn set_color(content: &mut ThemeContent, key: &str, color: Option<ThemeColor>) {
+    content.style.syntax.get_mut(key).expect(key).color = color;
+}
+
+/// Both of borer's themes keep the whole contract a person's theme is checked by.
+#[test]
+fn borer_themes_keep_the_contract() {
+    for (content, _) in themes() {
+        let failures = check(&content);
+        assert!(failures.is_empty(), "{}: {failures:?}", content.name);
+    }
+}
+
+/// A theme with the tested and proved grades swapped is reported by the ramp rule, with
+/// the contrast of each.
+#[test]
+fn swapped_grades_are_reported_with_both_contrasts() {
+    let (content, theme) = dark_with(|content| {
+        let syntax = &content.style.syntax;
+        let (tested, proved) = (
+            syntax[GRADES[1]].color.clone(),
+            syntax[GRADES[2]].color.clone(),
+        );
+        set_color(content, GRADES[1], proved);
+        set_color(content, GRADES[2], tested);
+    });
+    let editor = theme.colors().editor_background;
+    let ratio = |key| contrast(syntax_color(&theme, key).expect(key), editor);
+    let ramp = Failure::Ramp {
+        lower: GRADES[1],
+        higher: GRADES[2],
+        lower_ratio: ratio(GRADES[1]),
+        higher_ratio: ratio(GRADES[2]),
+    };
+    let failures = check(&content);
+    assert!(failures.contains(&ramp), "{failures:?}");
+    assert!(ratio(GRADES[1]) > ratio(GRADES[2]));
+}
+
+/// A theme whose registers are the editor's background color is reported by that role,
+/// with its ratio, in one line.
+#[test]
+fn an_unreadable_register_is_reported_with_its_ratio() {
+    let (content, _) = dark_with(|content| {
+        let background = content.style.colors.editor_background.clone();
+        set_color(content, "borer.register", background);
+    });
+    let unreadable = Failure::Contrast {
+        role: "borer.register".to_owned(),
+        background: "editor.background",
+        ratio: 1.0,
+        floor: TEXT_FLOOR,
+    };
+    let failures = check(&content);
+    assert!(failures.contains(&unreadable), "{failures:?}");
+    let line = unreadable.to_string();
+    assert_eq!(
+        line,
+        "borer.register on editor.background: 1.00:1, floor 4.5:1"
+    );
+}
+
+/// A proved grade that only a deuteranope cannot tell from a wrong one is reported under
+/// deuteranopia, and under no other vision.
+#[test]
+fn grades_merged_only_under_deuteranopia_are_reported() {
+    let (_, theme) = dark_with(|content| set_color(content, GRADES[2], Some("#00B040".into())));
+    let failures = grade_rules(&theme);
+    let merged = |vision: &str| {
+        failures.iter().any(|failure| {
+            matches!(failure, Failure::Close { a, b, vision: seen, .. }
+                if *a == GRADES[2] && *b == GRADES[3] && *seen == vision)
+        })
+    };
+    assert!(merged("deuteranopia"), "{failures:?}");
+    assert!(!merged("normal vision"), "{failures:?}");
+    assert!(
+        failures.iter().all(|failure| matches!(
+            failure,
+            Failure::Close {
+                vision: "deuteranopia",
+                ..
+            }
+        )),
+        "{failures:?}"
+    );
+}
+
+/// A theme that leaves a `borer.*` key unset is reported by it, with the key the app paints
+/// it with instead.
+#[test]
+fn an_unset_borer_key_names_its_fallback() {
+    let (content, _) = dark_with(|content| {
+        content.style.syntax.shift_remove("borer.register");
+    });
+    let failures = check(&content);
+    let unset = Failure::Unset {
+        role: "borer.register".to_owned(),
+        fallback: Some("variable.special"),
+    };
+    assert!(failures.contains(&unset), "{failures:?}");
+    assert_eq!(
+        unset.to_string(),
+        "borer.register is unset; falls back to variable.special"
+    );
 }
 
 /// Every slot of [`ThemeColors`] the app may draw is one the borer theme sets, so no stock
