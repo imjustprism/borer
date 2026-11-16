@@ -55,10 +55,10 @@ use super::{
     Detail, answer, cir, ctext, declarations_end, defs, expr_render, helper, unit, virtual_callees,
 };
 use crate::analysis::attributes::global_addr;
+use crate::analysis::render::block_instructions;
 use crate::analysis::{Analysis, Function, Overlay, name_of, reads};
 use crate::cancel::Cancel;
-use crate::disasm;
-use crate::program::{Feature, Program, SymbolKind};
+use crate::program::{Program, SymbolKind};
 use crate::view::{Builder, Kind, Ref, Unlinked, View};
 
 /// The prefix of the signature line, a comment before the C it holds.
@@ -186,34 +186,19 @@ impl<'a> Facts<'a> {
             .is_ok()
     }
 
-    /// Tells whether an instruction starts at `va` in the last of the
-    /// function's blocks that starts at or before it, decoding that block.
+    /// Tells whether an instruction starts at `va` in one of the
+    /// function's blocks that holds it ([`block_instructions`]).
     ///
     /// # Arguments
     ///
-    /// * `program` - The loaded image, for the block's bytes.
+    /// * `program` - The loaded image, for the blocks' bytes.
     /// * `va` - The address.
     fn runs_at(&self, program: &Program, va: u64) -> bool {
-        let blocks = &self.function.blocks;
-        let Some(b) = blocks
-            .partition_point(|b| b.start <= va)
-            .checked_sub(1)
-            .and_then(|k| blocks.get(k))
-            .filter(|b| va < b.end)
-        else {
-            return false;
-        };
-        let len = usize::try_from(b.end.saturating_sub(b.start)).unwrap_or(0);
-        va == b.start
-            || program
-                .isa_for(Feature::Disasm)
-                .ok()
-                .zip(program.read_va_upto(b.start, len))
-                .is_some_and(|(isa, code)| {
-                    disasm::disassemble_program(program, code, b.start, isa, len)
-                        .iter()
-                        .any(|l| l.va == va)
-                })
+        self.function
+            .blocks
+            .iter()
+            .filter(|b| b.start <= va && va < b.end)
+            .any(|b| block_instructions(program, b, va).last() == Some(&va))
     }
 
     /// Resolves a string-literal token against this function's reference sites.

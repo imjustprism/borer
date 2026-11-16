@@ -8,7 +8,7 @@
     reason = "assertions are the point of a test"
 )]
 
-use borer_engine::analysis::render::{Bytes, disasm_function, disasm_view};
+use borer_engine::analysis::render::{Bytes, block_instructions, disasm_function, disasm_view};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::program::{Arch, BinaryFormat, Program, Section, Symbol, SymbolKind};
 use borer_engine::view::{Kind, Ref, View};
@@ -545,4 +545,32 @@ fn arm32_and_riscv_listing_views_tokens_and_links() {
         Kind::Address,
         Some(Ref::Function(0x401020))
     )));
+}
+
+/// A block's walk lists its instructions up to the address it is given,
+/// the one starting there included, and the whole block past its end; an
+/// address inside an instruction ends the walk before it.
+#[test]
+fn a_block_walk_stops_at_the_address_it_is_given() {
+    let (p, a) = x64_fixture();
+    let f = a.function(TEXT).expect("the function");
+    let at = TEXT + 0x12;
+    let b = f
+        .blocks
+        .iter()
+        .find(|b| b.start <= at && at < b.end)
+        .expect("the block of rep movsb");
+    let all = block_instructions(&p, b, u64::MAX);
+    assert!(all.len() > 1 && all.contains(&at), "{all:x?}");
+    assert!(
+        all.iter().all(|&va| b.start <= va && va < b.end),
+        "{all:x?}"
+    );
+    for (k, &va) in all.iter().enumerate() {
+        assert_eq!(block_instructions(&p, b, va), all[..=k], "{va:#x}");
+        let next = all.get(k + 1).copied().unwrap_or(b.end);
+        if va + 1 < next {
+            assert_eq!(block_instructions(&p, b, va + 1), all[..=k], "{va:#x}+1");
+        }
+    }
 }

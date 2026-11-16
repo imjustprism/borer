@@ -1033,6 +1033,47 @@ pub fn instruction_at_or_before(p: &Program, a: &Analysis, va: u64) -> Option<u6
     Some(at)
 }
 
+/// The bytes past an instruction's start that hold all of it, on every
+/// architecture borer decodes.
+const INSN_SPAN: usize = 16;
+
+/// Returns the addresses of a block's instructions that start at or before
+/// `va`, in order, decoding the block no further than the instruction at
+/// `va`.
+///
+/// Unlike [`instruction_at_or_before`], it reads the block it is given,
+/// not the one [`Analysis::block_at`] finds, and decodes on every
+/// architecture.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image, for the block's bytes and instruction set.
+/// * `b` - The block.
+/// * `va` - Where the walk stops; at or past the block's end it walks the
+///   whole block.
+///
+/// # Returns
+///
+/// The addresses; empty when the architecture has no disassembler or the
+/// block's bytes are not mapped.
+#[must_use]
+pub fn block_instructions(p: &Program, b: &BasicBlock, va: u64) -> Vec<u64> {
+    let len = usize::try_from(b.end.saturating_sub(b.start)).unwrap_or(0);
+    let upto = usize::try_from(va.saturating_sub(b.start))
+        .ok()
+        .and_then(|off| off.checked_add(INSN_SPAN))
+        .map_or(len, |n| n.min(len))
+        .max(1);
+    let (Ok(isa), Some(code)) = (p.isa_for(Feature::Disasm), p.read_va_upto(b.start, upto)) else {
+        return Vec::new();
+    };
+    disasm::disassemble_program(p, code, b.start, isa, upto)
+        .into_iter()
+        .map(|l| l.va)
+        .take_while(|&at| at <= va)
+        .collect()
+}
+
 /// Returns where a linear sweep starting at `va` runs out of code.
 ///
 /// Bytes that no block of the containing function covers are not code. A

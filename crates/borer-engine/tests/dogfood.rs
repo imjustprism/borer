@@ -29,8 +29,7 @@ use borer_engine::analysis::{
     decompile::{Swept, decompile, decompile_all, decompile_named_all, decompile_swept_all},
     name_of, render,
 };
-use borer_engine::disasm;
-use borer_engine::program::{Feature, Program};
+use borer_engine::program::Program;
 use std::collections::BTreeSet;
 use std::sync::{LazyLock, OnceLock};
 
@@ -953,7 +952,6 @@ fn every_view_spells_its_text_and_links_only_what_the_code_shows() {
 fn every_listing_line_answers_the_instruction_it_shows() {
     let c = &*CORPUS;
     let (p, a) = (&c.program, &c.analysis);
-    let isa = p.isa_for(Feature::Disasm).expect("the corpus disassembles");
     let o = Overlay::default();
     let (mut bad, mut took, mut heap) = (Vec::new(), Vec::new(), 0usize);
     for f in &a.functions {
@@ -968,14 +966,7 @@ fn every_listing_line_answers_the_instruction_it_shows() {
         let decoded: Vec<u64> = f
             .blocks
             .iter()
-            .flat_map(|b| {
-                let len = usize::try_from(b.end.saturating_sub(b.start)).unwrap_or(0);
-                p.read_va_upto(b.start, len.max(1))
-                    .map(|code| disasm::disassemble_program(p, code, b.start, isa, usize::MAX))
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|l| l.va)
-            })
+            .flat_map(|b| render::block_instructions(p, b, u64::MAX))
             .collect();
         let shown: Vec<u64> = (0..v.lines()).filter_map(|i| v.address(i)).collect();
         let lost = shown
