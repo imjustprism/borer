@@ -1309,4 +1309,26 @@ mod tests {
             CliMode::ReportOpen(PathBuf::from(&raw))
         );
     }
+
+    /// A window and a headless run take the same path from the command line, whether it is
+    /// spelled with backslashes, forward slashes or spaces.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the two modes read a path differently.
+    #[test]
+    fn a_window_and_a_headless_run_take_the_same_path() {
+        let spellings = [
+            r"C:\Windows\System32\notepad.exe",
+            "C:/Windows/System32/notepad.exe",
+            r"C:\Program Files\some tool\a b.exe",
+        ];
+        for spelled in spellings {
+            let path = OsString::from(spelled);
+            let window = parse_cli_args_os(std::slice::from_ref(&path)).unwrap();
+            let headless = parse_cli_args_os(&[OsString::from("--headless"), path]).unwrap();
+            assert_eq!(window, CliMode::Interactive(Some(PathBuf::from(spelled))));
+            assert_eq!(headless, CliMode::Headless(PathBuf::from(spelled)));
+        }
+    }
 }
