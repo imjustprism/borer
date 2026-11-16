@@ -610,6 +610,16 @@ pub const COMMANDS: &[Command] = &[
             Need::Binary,
         )
     },
+    Command {
+        keys: &[Keys::all(Ctx::Workspace, &["secondary-shift-v"])],
+        serves: &["types"],
+        ..item(
+            "borer::ToggleTypes",
+            "Types",
+            (MenuName::View, 1),
+            Need::Binary,
+        )
+    },
     item(
         "borer::CycleSort",
         "Sort Table by Next Column",

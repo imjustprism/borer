@@ -459,7 +459,7 @@ impl Binary {
                 loaded.path.display()
             ));
         } else {
-            self.restored = own.iter().map(|tab| (tab.place, tab.top)).collect();
+            self.restored = own.iter().map(|tab| (tab.place.clone(), tab.top)).collect();
         }
         let mut dropped: Vec<String> = other.iter().map(|t| t.path.display().to_string()).collect();
         dropped.sort();

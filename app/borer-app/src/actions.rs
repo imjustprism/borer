@@ -121,6 +121,9 @@ gpui::actions!(
         SaveProjectAs,
         /// Picks one of the binaries opened last and opens it.
         OpenRecent,
+        /// Shows the types panel and focuses its filter, or moves focus back to the center
+        /// pane.
+        ToggleTypes,
     ]
 );
 

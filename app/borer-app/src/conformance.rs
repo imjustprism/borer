@@ -4,7 +4,11 @@
 //! A new panel adds its key to [`PANELS_RUN`]; a new place variant adds an example to
 //! [`places`], whose match stops compiling until it does.
 
-use gpui::{TestAppContext, VisualTestContext};
+use std::sync::Arc;
+
+use borer_engine::analysis::utypes::{TypeKind, TypeSource};
+use gpui::{Entity, TestAppContext, VisualTestContext};
+use workspace::Workspace;
 
 use crate::app_view::REFUSED_FOLDER;
 use crate::app_view::tests::{
@@ -16,7 +20,8 @@ use crate::panels::PANELS;
 use crate::places::{Place, place_of};
 use crate::rows_panel::HEADER_SELECTOR;
 use crate::start_item::StartItem;
-use crate::worker::Jobs;
+use crate::types::TypeKey;
+use crate::worker::{Jobs, LoadedBinary};
 
 /// The panels the suite runs over, by key, in [`PANELS`] order.
 const PANELS_RUN: &[&str] = &[
@@ -25,6 +30,7 @@ const PANELS_RUN: &[&str] = &[
     "Imports",
     "Exports",
     "Xrefs",
+    "Types",
     "CallTree",
 ];
 
@@ -38,15 +44,31 @@ fn places() -> Vec<Place> {
         | Place::Overview
         | Place::Linear { .. }
         | Place::Hex { .. }
+        | Place::Type(_)
         | Place::Xrefs(_) => {
             let graph = Place::Graph {
                 entry: CALLER,
                 at: None,
             };
             let (linear, hex) = (Place::Linear { at: None }, Place::Hex { at: None });
-            vec![code, graph, Place::Overview, linear, hex]
+            let struct_tab = Place::Type(TypeKey {
+                name: "CONFORMANCE".into(),
+                source: TypeSource::User,
+                kind: TypeKind::Struct,
+            });
+            vec![code, graph, Place::Overview, linear, hex, struct_tab]
         }
     }
+}
+
+/// Opens `place` of `loaded` in a permanent tab of `workspace`.
+fn open_permanent(
+    workspace: &Entity<Workspace>,
+    loaded: &Arc<LoadedBinary>,
+    place: &Place,
+    cx: &mut VisualTestContext,
+) {
+    open_place(workspace, loaded, place.clone(), TabMode::Permanent, cx);
 }
 
 /// Settles the work in flight and lays the window out.
@@ -129,21 +151,21 @@ fn every_place_opens_one_tab_that_names_it(cx: &mut TestAppContext) {
     let (app, cx) = open(&app_state, cx);
     let loaded = sample();
     for place in places() {
-        open_place(&app.workspace, &loaded, place, TabMode::Permanent, cx);
-        open_place(&app.workspace, &loaded, place, TabMode::Permanent, cx);
+        open_permanent(&app.workspace, &loaded, &place, cx);
+        open_permanent(&app.workspace, &loaded, &place, cx);
         draw(cx);
         let (named, tabs) = app.workspace.read_with(cx, |workspace, cx| {
             let pane = workspace.active_pane().read(cx);
             let tabs = pane
                 .items()
-                .filter(|item| place_of(item.as_ref(), cx) == Some(place));
+                .filter(|item| place_of(item.as_ref(), cx).as_ref() == Some(&place));
             let named = pane
                 .active_item()
                 .and_then(|item| place_of(item.as_ref(), cx));
             (named, tabs.count())
         });
         assert_eq!(tabs, 1, "{place:?}: {tabs} tabs");
-        assert_eq!(named, Some(place), "{place:?}");
+        assert_eq!(named.as_ref(), Some(&place), "{place:?}");
     }
 }
 
@@ -168,8 +190,8 @@ async fn a_folder_dropped_on_any_tab_never_joins_the_project(cx: &mut TestAppCon
             .map(|place| (format!("{place:?}"), Some(place))),
     );
     for (kind, place) in kinds {
-        if let Some(place) = place {
-            open_place(&app.workspace, &loaded, place, TabMode::Permanent, cx);
+        if let Some(place) = &place {
+            open_permanent(&app.workspace, &loaded, place, cx);
         }
         let active_is_start = app.workspace.read_with(cx, |workspace, cx| {
             workspace.active_item_as::<StartItem>(cx).is_some()
@@ -201,7 +223,7 @@ fn closing_a_view_leaves_no_live_job(cx: &mut TestAppContext) {
     let (app, cx) = open(&app_state, cx);
     let loaded = sample();
     for place in places() {
-        open_place(&app.workspace, &loaded, place, TabMode::Permanent, cx);
+        open_permanent(&app.workspace, &loaded, &place, cx);
         let running = cx.update(|_, cx| Jobs::running(cx).len());
         assert!(running > 0, "{place:?}: no request to stop");
         app.workspace.update_in(cx, |workspace, window, cx| {

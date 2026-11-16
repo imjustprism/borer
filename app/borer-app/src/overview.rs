@@ -337,7 +337,7 @@ impl OverviewItem {
     /// * `window` - Window the tab is in.
     /// * `cx` - Item context.
     pub fn follow(&mut self, ix: usize, window: &Window, cx: &mut Context<'_, Self>) {
-        let Some(&(_, place)) = self.rows.get(ix).and_then(|row| row.link.as_ref()) else {
+        let Some((_, place)) = self.rows.get(ix).and_then(|row| row.link.clone()) else {
             return;
         };
         self.selected = Some(ix);
@@ -370,7 +370,7 @@ impl OverviewItem {
         range
             .filter_map(|ix| Some((ix, self.rows.get(ix)?)))
             .map(|(ix, row)| {
-                let color = match (row.look, row.link) {
+                let color = match (row.look, &row.link) {
                     (_, Some(_)) => Color::Accent,
                     (Look::Heading, None) => Color::Muted,
                     (Look::Warning, None) => Color::Warning,
@@ -552,7 +552,11 @@ pub(crate) mod tests {
         let place = |at| Some(Place::decompile(at));
         let links: Vec<_> = rows(&hand_built(), place)
             .iter()
-            .filter_map(|row| row.link.map(|(at, link)| (row.text.to_string(), at, link)))
+            .filter_map(|row| {
+                row.link
+                    .clone()
+                    .map(|(at, link)| (row.text.to_string(), at, link))
+            })
             .collect();
         let want = [
             ("0x10", 0x10),

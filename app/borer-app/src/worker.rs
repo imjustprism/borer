@@ -21,6 +21,9 @@ use borer_engine::analysis::render::{
     call_children, cfg, disasm_view, function_rows, linear, symbol_rows, triage, xref_rows,
     xref_rows_of_import,
 };
+use borer_engine::analysis::utypes::{
+    TypeDetail, TypeKind, TypeRows, TypeSource, type_detail, type_rows,
+};
 use borer_engine::analysis::{
     Analysis, EnumSource, Overlay, decompile, name_of, no_function_at, resolve_suggesting,
 };
@@ -399,7 +402,7 @@ impl LoadedBinary {
     /// # Arguments
     ///
     /// * `overlay` - The overlay an edit or a project left.
-    fn with_overlay(&self, overlay: Overlay) -> Arc<Self> {
+    pub(crate) fn with_overlay(&self, overlay: Overlay) -> Arc<Self> {
         let initial_rows = Arc::new(all_rows(&self.analysis, &overlay));
         Arc::new(Self {
             path: self.path.clone(),
@@ -834,6 +837,63 @@ pub fn listing_blocking(loaded: &LoadedBinary, entry: u64) -> Result<Arc<View>, 
         })
 }
 
+/// Lists the first `limit` types of `loaded` whose name holds `filter`.
+///
+/// Must be called inside [`spawn_engine`].
+///
+/// # Arguments
+///
+/// * `loaded` - Previously loaded binary state.
+/// * `filter` - Case-insensitive substring of a name; empty selects every type.
+/// * `limit` - Most rows.
+#[must_use]
+pub fn type_rows_blocking(loaded: &LoadedBinary, filter: &str, limit: usize) -> TypeRows {
+    let (p, a, o) = (&*loaded.program, &*loaded.analysis, &*loaded.overlay);
+    let query = (!filter.is_empty()).then_some(filter);
+    type_rows(p, a, o, query, 0, limit)
+}
+
+/// Opens the type of `loaded` named `name` from `source` of kind `kind`.
+///
+/// Must be called inside [`spawn_engine`].
+///
+/// # Arguments
+///
+/// * `loaded` - Previously loaded binary state.
+/// * `name` - The type's name, as its row spells it.
+/// * `source` - Where the type comes from.
+/// * `kind` - What the type is.
+///
+/// # Returns
+///
+/// Its fields, holes and overlaps; `None` when no such type is listed or it is a
+/// recovered class.
+#[must_use]
+pub fn type_detail_blocking(
+    loaded: &LoadedBinary,
+    name: &str,
+    source: TypeSource,
+    kind: TypeKind,
+) -> Option<TypeDetail> {
+    let (p, a, o) = (&*loaded.program, &*loaded.analysis, &*loaded.overlay);
+    type_detail(p, a, o, name, source, kind)
+}
+
+/// Most function rows a go-to query lists.
+pub const GOTO_ROWS: usize = 200;
+
+/// What a go-to query finds: the function its text names, and the functions it filters.
+#[derive(Debug)]
+pub struct GoToAnswer {
+    /// The entry of the function holding the address the text resolves to, and that
+    /// address, else the engine's words for the miss (nearest names, or what holds no
+    /// function).
+    pub target: Result<(u64, u64), String>,
+    /// The function rows the text filters, at most [`GOTO_ROWS`].
+    pub rows: FunctionRows,
+}
+
+/// Resolves `query` as an address or a name, and filters the function rows by it.
 /// Builds the control-flow graph of the function at `entry` in `loaded`, laid out once
 /// with it, or says why none.
 ///
@@ -1288,7 +1348,7 @@ pub(crate) mod tests {
     }
 
     /// Returns every module of the crate but this one, by path under `src`, with its text.
-    fn sources() -> [(&'static str, &'static str); 49] {
+    fn sources() -> [(&'static str, &'static str); 50] {
         [
             ("actions.rs", include_str!("actions.rs")),
             ("app_assets.rs", include_str!("app_assets.rs")),
@@ -1336,6 +1396,7 @@ pub(crate) mod tests {
             ("theme_picker.rs", include_str!("theme_picker.rs")),
             ("title_bar.rs", include_str!("title_bar.rs")),
             ("tables.rs", include_str!("tables.rs")),
+            ("types.rs", include_str!("types.rs")),
             ("xrefs.rs", include_str!("xrefs.rs")),
             ("user_themes.rs", include_str!("user_themes.rs")),
             ("zed_import.rs", include_str!("zed_import.rs")),
@@ -1511,6 +1572,8 @@ pub(crate) mod tests {
             "edit::plan",
             "edit::commit",
             "project_file::",
+            "type_rows(",
+            "type_detail(",
         ];
         for (name, text) in sources() {
             let code = kept(text);

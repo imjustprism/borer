@@ -845,7 +845,7 @@ impl<K: RowKind> RowsPanel<K> {
                 let at = kept.and_then(|kept| {
                     rows.rows()
                         .iter()
-                        .position(|row| K::place(row) == Some(kept))
+                        .position(|row| K::place(row).as_ref() == Some(&kept))
                 });
                 panel.rows = Some(Filtered {
                     query,

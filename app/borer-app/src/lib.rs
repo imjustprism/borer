@@ -44,6 +44,7 @@ pub mod theme_contract;
 pub mod theme_import;
 pub mod theme_picker;
 pub mod title_bar;
+pub mod types;
 pub mod user_themes;
 pub mod worker;
 pub mod xrefs;

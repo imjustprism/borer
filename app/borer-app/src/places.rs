@@ -13,11 +13,13 @@ use crate::graph_item::GraphItem;
 use crate::hex_item::{HexItem, open_hex};
 use crate::linear_item::LinearItem;
 use crate::overview::OverviewItem;
+use crate::types::{StructItem, TypeKey};
 use crate::worker::{LoadedBinary, Referent};
 use crate::xrefs::show_xrefs;
 
-/// Where the app shows something; addresses and enums only, never a snapshot or an entity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Where the app shows something; addresses, enums and names only, never a snapshot or an
+/// entity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Place {
     /// One view of the function at `entry`, with the instruction at `at` on its top line
     /// when one is given.
@@ -52,6 +54,8 @@ pub enum Place {
     },
     /// The xrefs panel, listing the references to the referent.
     Xrefs(Referent),
+    /// The fields of one type.
+    Type(TypeKey),
 }
 
 impl Place {
@@ -117,6 +121,15 @@ pub fn open(
     let program = loaded.program.clone();
     match place {
         Place::Hex { at } => open_hex(workspace, &binary, &loaded, at, window, cx),
+        Place::Type(key) => {
+            let shows = |item: &StructItem| {
+                *item.key() == key && Arc::ptr_eq(&item.loaded().program, &program)
+            };
+            let build = |_, window: &mut Window, cx: &mut Context<'_, StructItem>| {
+                StructItem::new(binary, loaded, key.clone(), window, cx)
+            };
+            show(workspace, how, shows, build, window, cx);
+        }
         Place::Xrefs(referent) => show_xrefs(workspace, referent, window, cx),
         Place::Code { entry, form, at } => {
             let shows = |item: &DecompileItem| {
@@ -347,10 +360,13 @@ pub fn open_later(
 /// # Returns
 ///
 /// The function and view a code or graph tab shows, with no address (a tab keeps no
-/// address, only its scroll), the overview, the linear listing or a hex tab; `None` for the
+/// address, only its scroll), the overview, the linear listing, a hex tab or the type a struct tab shows; `None` for the
 /// start tab and for measured lines.
 #[must_use]
 pub fn place_of(item: &dyn ItemHandle, cx: &App) -> Option<Place> {
+    if let Some(item) = item.downcast::<StructItem>() {
+        return Some(Place::Type(item.read(cx).key().clone()));
+    }
     if item.downcast::<HexItem>().is_some() {
         return Some(Place::Hex { at: None });
     }
@@ -395,14 +411,14 @@ mod tests {
     /// Returns how many tabs of the active pane show `place`, and the active tab's place.
     fn tabs_of(
         workspace: &Entity<Workspace>,
-        place: Place,
+        place: &Place,
         cx: &mut VisualTestContext,
     ) -> (usize, Option<Place>) {
         workspace.read_with(cx, |workspace, cx| {
             let pane = workspace.active_pane().read(cx);
             let count = pane
                 .items()
-                .filter(|item| place_of(item.as_ref(), cx) == Some(place))
+                .filter(|item| place_of(item.as_ref(), cx).as_ref() == Some(place))
                 .count();
             let shown = pane
                 .active_item()
@@ -432,7 +448,7 @@ mod tests {
         ];
         for (place, top) in places {
             for _ in 0..2 {
-                open_place(&workspace, &loaded, place, TabMode::Permanent, cx);
+                open_place(&workspace, &loaded, place.clone(), TabMode::Permanent, cx);
                 cx.run_until_parked();
             }
             let Place::Code { form, .. } = place else {
@@ -440,7 +456,7 @@ mod tests {
             };
             let named = code(form, None);
             assert_eq!(
-                tabs_of(&workspace, named, cx),
+                tabs_of(&workspace, &named, cx),
                 (1, Some(named)),
                 "{place:?}"
             );
@@ -461,9 +477,9 @@ mod tests {
         let workspace = app.workspace;
         let first = sample();
         let place = Place::decompile(CALLER);
-        let tabs = |cx: &mut VisualTestContext| tabs_of(&workspace, place, cx).0;
-        open_place(&workspace, &first, place, TabMode::Permanent, cx);
-        open_place(&workspace, &sample(), place, TabMode::Permanent, cx);
+        let tabs = |cx: &mut VisualTestContext| tabs_of(&workspace, &place, cx).0;
+        open_place(&workspace, &first, place.clone(), TabMode::Permanent, cx);
+        open_place(&workspace, &sample(), place.clone(), TabMode::Permanent, cx);
         assert_eq!(tabs(cx), 2);
         let mut overlay = (*first.overlay).clone();
         overlay.names.insert(CALLER, "renamed".to_owned());
@@ -477,7 +493,7 @@ mod tests {
             notes: Vec::new(),
             identity: String::new(),
         });
-        open_place(&workspace, &renamed, place, TabMode::Permanent, cx);
+        open_place(&workspace, &renamed, place.clone(), TabMode::Permanent, cx);
         assert_eq!(tabs(cx), 2);
     }
 }

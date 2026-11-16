@@ -161,6 +161,7 @@ pub const PANELS: &[&PanelSpec] = &[
     &crate::tables::IMPORTS,
     &crate::tables::EXPORTS,
     &crate::xrefs::XREFS,
+    &crate::types::PANEL,
     &crate::call_tree_panel::PANEL,
 ];
 

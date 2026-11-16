@@ -190,11 +190,6 @@ pub fn cells() -> Vec<RailEntry> {
 /// built ones; a branch that builds one moves its row to [`PANELS`].
 pub const PLANNED: &[RailEntry] = &[
     RailEntry {
-        name: "Types",
-        glyph: Glyph::App(AppIcon::Types),
-        slot: Slot::Planned,
-    },
-    RailEntry {
         name: "Search",
         glyph: Glyph::Zed(IconName::MagnifyingGlass),
         slot: Slot::Planned,
