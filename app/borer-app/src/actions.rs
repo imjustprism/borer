@@ -34,6 +34,8 @@ gpui::actions!(
         MinimizeWindow,
         /// Maximizes the window, or restores it when it is maximized.
         ZoomWindow,
+        /// Opens the first menu of the window's menu bar (Windows and Linux).
+        OpenMenuBar,
     ]
 );
 

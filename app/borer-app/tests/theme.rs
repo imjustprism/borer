@@ -19,6 +19,7 @@ use borer_app::app_view::{configure, new_workspace, set_data_dir};
 use borer_app::binary::{Binary, SettingsNotice, StatusLine};
 use borer_app::code_view::{CodePalette, Role};
 use borer_app::decompile_item::code_row_height;
+use borer_app::shell::Shell;
 use borer_engine::program::checked_metadata;
 use fs::Fs as _;
 use gpui::{
@@ -35,7 +36,7 @@ use theme_settings::{
     ThemeContent, ThemeSettings, deserialize_user_theme, refine_theme, status_colors_refinement,
     theme_colors_refinement,
 };
-use workspace::{AppState, MultiWorkspace};
+use workspace::AppState;
 
 /// Grade keys from least to most evidence, then the refuted grade.
 const GRADES: [&str; 4] = [
@@ -507,9 +508,10 @@ async fn a_hostile_settings_file_keeps_ai_off_and_starts_no_server(cx: &mut Test
     assert!(cx.update(|cx| DisableAiSettings::get_global(cx).disable_ai));
     let (root, cx) = cx.add_window_view(|window, cx| {
         let app = new_workspace(&app_state, None, window, cx);
-        MultiWorkspace::new(app.workspace, window, cx)
+        Shell::new(app, window, cx)
     });
     cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
     let running = root.read_with(cx, |root, cx| {
         let project = root.workspace().read(cx).project().read(cx);
         project

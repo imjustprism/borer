@@ -30,7 +30,7 @@ use gpui::{
     Subscription, Task, Window, div,
 };
 use workspace::dock::DockPosition;
-use workspace::{AppState, MultiWorkspace, Workspace};
+use workspace::{AppState, Workspace};
 
 use self::input::pick_function_with_callees;
 use crate::app_view::{AppWindow, add_functions_panel, new_workspace};
@@ -38,6 +38,7 @@ use crate::binary::Binary;
 use crate::code_view::CodeLines;
 use crate::decompile_item::DecompileItem;
 use crate::functions_panel::FunctionsPanel;
+use crate::shell::Shell;
 use crate::worker::{
     LoadedBinary, TaskEpoch, decompile_blocking, load_binary_blocking, run_engine, spawn_engine,
     ui_engine_calls,
@@ -694,8 +695,8 @@ enum Prepared {
 /// The window root in measurement modes: the app's workspace window as its only child,
 /// with the scripted runs, the input marks and the one-shot reports kept here.
 pub struct Harness {
-    /// The workspace window under measurement, rendered as the harness's child.
-    root: Entity<MultiWorkspace>,
+    /// The app's window root under measurement, rendered as the harness's child.
+    root: Entity<Shell>,
     /// The workspace the functions panel and the decompile tabs live in.
     workspace: Entity<Workspace>,
     /// The window's binary.
@@ -770,8 +771,9 @@ impl Harness {
             | CliMode::Measure(_)
             | CliMode::MeasureDrop(..) => None,
         };
-        let AppWindow { workspace, binary } = new_workspace(app_state, path, window, cx);
-        let root = cx.new(|cx| MultiWorkspace::new(workspace.clone(), window, cx));
+        let app = new_workspace(app_state, path, window, cx);
+        let AppWindow { workspace, binary } = app.clone();
+        let root = cx.new(|cx| Shell::new(app, window, cx));
         let pane = workspace.read(cx).active_pane().clone();
         let harness = cx.weak_entity();
         let mut observe = vec![

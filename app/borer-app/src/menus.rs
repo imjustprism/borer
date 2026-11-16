@@ -167,6 +167,9 @@ pub const MENUS: &[AppMenu] = &[
     },
 ];
 
+/// The `borer` actions that are in the palette but in no menu, each with why.
+pub const PALETTE_ONLY: &[(&str, &str)] = &[("borer::OpenMenuBar", "opens the menu bar itself")];
+
 /// Returns `label` as a disabled row shows it: with the reason it is disabled.
 ///
 /// # Arguments
@@ -408,7 +411,7 @@ mod tests {
 
     use gpui::{AppContext as _, TestAppContext, VisualTestContext};
 
-    use super::{MENUS, MenuBar, Need, Row, Step, platform_menus};
+    use super::{MENUS, MenuBar, Need, PALETTE_ONLY, Row, Step, platform_menus};
     use crate::actions::CloseBinary;
     use crate::app_view::tests::{init, load_sample, open};
     use crate::binary::{Binary, NO_BINARY};
@@ -455,7 +458,7 @@ mod tests {
         assert!(names(false).contains(&String::from("Open Binary...")));
     }
 
-    /// Every `borer` action is in a menu, and with a
+    /// Every `borer` action is in a menu or named palette-only with a reason, and with a
     /// binary open every menu action is available where the person works, so the palette
     /// offers it and running it reaches a handler; the platform holds the same menus.
     ///
@@ -486,7 +489,12 @@ mod tests {
                 .collect()
         });
         for name in &declared {
-            assert!(rows.contains(name), "{name} is in no menu");
+            let palette_only = PALETTE_ONLY.iter().any(|(only, _)| only == name);
+            assert!(rows.contains(name) || palette_only, "{name} is in no menu");
+        }
+        for (name, _) in PALETTE_ONLY {
+            assert!(declared.contains(name), "{name} is not an action");
+            assert!(!rows.contains(name), "{name} is in a menu too");
         }
         let available = cx.update(|window, cx| window.available_actions(cx));
         for name in &rows {

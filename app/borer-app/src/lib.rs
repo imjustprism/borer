@@ -14,12 +14,13 @@ pub mod goto;
 pub mod measure;
 pub mod menus;
 pub mod recent;
+pub mod shell;
 pub mod start_item;
 pub mod status;
+pub mod title_bar;
 pub mod worker;
 
 use gpui::{App, AppContext as _};
-use workspace::MultiWorkspace;
 
 use crate::measure::{CliMode, Harness, new_cli_exit_slot, parse_cli_args, run_headless};
 use crate::worker::mark_ui_thread;
@@ -51,12 +52,9 @@ pub fn run() -> anyhow::Result<()> {
                 let options = app_view::window_options(cx);
                 let harness_slot = app_slot.clone();
                 match mode {
-                    CliMode::Interactive(path) => cx
-                        .open_window(options, |window, cx| {
-                            let app = app_view::new_workspace(&app_state, path, window, cx);
-                            cx.new(|cx| MultiWorkspace::new(app.workspace, window, cx))
-                        })
-                        .map(drop),
+                    CliMode::Interactive(path) => {
+                        app_view::open_window(&app_state, path, cx).map(drop)
+                    }
                     measured @ (CliMode::FirstFrame
                     | CliMode::ReportOpen(_)
                     | CliMode::Headless(_)
@@ -68,7 +66,7 @@ pub fn run() -> anyhow::Result<()> {
                                 Harness::new(measured, harness_slot, &app_state, window, cx)
                             })
                         })
-                        .map(drop),
+                        .and_then(|window| app_view::activate(window.into(), cx)),
                 }
             });
             if let Err(err) = opened {

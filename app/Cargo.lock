@@ -993,6 +993,7 @@ dependencies = [
  "node_runtime",
  "paths",
  "picker",
+ "platform_title_bar",
  "project",
  "search",
  "serde_json",
@@ -6896,6 +6897,23 @@ name = "plain"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
+
+[[package]]
+name = "platform_title_bar"
+version = "0.1.0"
+source = "git+https://github.com/zed-industries/zed?rev=e8bc16acee5ae1937600d571d441c4b5d7b0d288#e8bc16acee5ae1937600d571d441c4b5d7b0d288"
+dependencies = [
+ "gpui",
+ "project",
+ "settings",
+ "smallvec",
+ "theme",
+ "theme_settings",
+ "ui",
+ "windows 0.62.2",
+ "workspace",
+ "zed_actions",
+]
 
 [[package]]
 name = "plotters"

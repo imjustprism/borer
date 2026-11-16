@@ -24,8 +24,9 @@ use command_palette_hooks::CommandPaletteFilter;
 use db::kvp::KeyValueStore;
 use editor::Editor;
 use gpui::{
-    App, AppContext as _, Bounds, Context, Entity, ExternalPaths, PromptLevel, WeakEntity, Window,
-    WindowBounds, WindowOptions, px, size,
+    AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, ExternalPaths, PromptLevel,
+    SharedString, TitlebarOptions, WeakEntity, Window, WindowBounds, WindowHandle, WindowOptions,
+    point, px, size,
 };
 use http_client::{BlockedHttpClient, HttpClientWithUrl};
 use language::LanguageRegistry;
@@ -36,8 +37,8 @@ use search::BufferSearchBar;
 use session::{AppSession, Session};
 use workspace::dock::DockPosition;
 use workspace::{
-    AddFolderToProject, AppState, DockData, DockStructure, MultiWorkspace, Pane, Workspace,
-    WorkspaceId, WorkspaceStore,
+    AddFolderToProject, AppState, DockData, DockStructure, Pane, Workspace, WorkspaceId,
+    WorkspaceStore,
 };
 
 use crate::actions::{
@@ -49,6 +50,7 @@ use crate::decompile_item::DecompileItem;
 use crate::functions_panel::{FunctionsPanel, PANEL_KEY};
 use crate::goto::GoTo;
 use crate::measure::CliMode;
+use crate::shell::Shell;
 use crate::start_item::keep_filled;
 
 /// Directory of the app's settings, keymap, database and logs under the platform's local
@@ -71,6 +73,15 @@ const WINDOW_WIDTH_PX: f32 = 1280.0;
 
 /// Default window height in logical pixels.
 const WINDOW_HEIGHT_PX: f32 = 800.0;
+
+/// Narrowest window in logical pixels.
+const WINDOW_MIN_WIDTH_PX: f32 = 640.0;
+
+/// Shortest window in logical pixels.
+const WINDOW_MIN_HEIGHT_PX: f32 = 400.0;
+
+/// Offset in logical pixels of macOS's traffic lights from the window's top left corner.
+const TRAFFIC_LIGHT_PX: f32 = 9.0;
 
 /// Returns the data directory of a run in `mode`.
 ///
@@ -128,7 +139,14 @@ pub fn set_data_dir(dir: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(config).with_context(|| format!("creating {}", config.display()))
 }
 
-/// Returns the options of a new app window: centered at the default size.
+/// Returns the options of a new app window.
+///
+/// The window is centered at the default size, titled `borer`, with the system's title bar
+/// hidden so the app draws its own ([`crate::title_bar`]), and hidden until its first frame
+/// is drawn, so it never shows empty.
+///
+/// Linux keeps the system's decorations: Zed's client-side ones wrap only the workspace,
+/// not the title bar the app draws over it.
 ///
 /// # Arguments
 ///
@@ -138,8 +156,61 @@ pub fn window_options(cx: &App) -> WindowOptions {
     let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH_PX), px(WINDOW_HEIGHT_PX)), cx);
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
+        titlebar: Some(TitlebarOptions {
+            title: Some(SharedString::new_static("borer")),
+            appears_transparent: true,
+            traffic_light_position: Some(point(px(TRAFFIC_LIGHT_PX), px(TRAFFIC_LIGHT_PX))),
+        }),
+        focus: true,
+        show: false,
+        window_min_size: Some(size(px(WINDOW_MIN_WIDTH_PX), px(WINDOW_MIN_HEIGHT_PX))),
+        app_id: Some(DATA_DIR_NAME.to_owned()),
         ..WindowOptions::default()
     }
+}
+
+/// Opens an app window over a new workspace, loading `path` when one is given, and shows
+/// it.
+///
+/// # Arguments
+///
+/// * `app_state` - The app state from [`init`].
+/// * `path` - Binary to open, if any.
+/// * `cx` - Application context.
+///
+/// # Returns
+///
+/// The window.
+///
+/// # Errors
+///
+/// Returns an error when the platform does not open the window.
+pub fn open_window(
+    app_state: &Arc<AppState>,
+    path: Option<PathBuf>,
+    cx: &mut App,
+) -> anyhow::Result<WindowHandle<Shell>> {
+    let window = cx.open_window(window_options(cx), |window, cx| {
+        let app = new_workspace(app_state, path, window, cx);
+        cx.new(|cx| Shell::new(app, window, cx))
+    })?;
+    activate(window.into(), cx)?;
+    Ok(window)
+}
+
+/// Brings `window` forward and shows it: a window opened hidden ([`window_options`])
+/// appears only once activated, as Zed's own windows do.
+///
+/// # Arguments
+///
+/// * `window` - The window.
+/// * `cx` - Application context.
+///
+/// # Errors
+///
+/// Returns an error when the window is gone.
+pub fn activate(window: AnyWindowHandle, cx: &mut App) -> anyhow::Result<()> {
+    window.update(cx, |_, window, _| window.activate_window())
 }
 
 /// Starts Zed's database, settings, themes, fonts, keymap, workspace and command palette
@@ -206,7 +277,7 @@ pub fn configure(cx: &mut App) -> anyhow::Result<()> {
     search::buffer_search::init(cx);
     let hidden = [TypeId::of::<AddFolderToProject>()];
     CommandPaletteFilter::update_global(cx, |filter, _| filter.hide_action_types(&hidden));
-    cx.on_app_quit(flush_on_quit).detach();
+    cx.on_app_quit(crate::shell::flush_windows).detach();
     cx.on_action(|_: &zed_actions::Quit, cx| cx.quit());
     Ok(())
 }
@@ -223,22 +294,6 @@ pub fn configure(cx: &mut App) -> anyhow::Result<()> {
 fn erased_editor(window: &mut Window, cx: &mut App) -> Arc<dyn ui_input::ErasedEditor> {
     cx.new(|cx| Editor::single_line(window, cx))
         .update(cx, |editor, cx| editor.erased(cx))
-}
-
-/// Returns the flush of every app window's pending layout to Zed's database, as Zed's own
-/// workspace init does on quit.
-///
-/// # Arguments
-///
-/// * `cx` - Application context listing the windows.
-fn flush_on_quit(cx: &mut App) -> impl Future<Output = ()> + use<> {
-    let windows: Vec<_> = cx
-        .windows()
-        .into_iter()
-        .filter_map(|window| window.downcast::<MultiWorkspace>())
-        .collect();
-    let mut cx = cx.to_async();
-    async move { workspace::flush_windows_serialization(&windows, &mut cx).await }
 }
 
 /// Opens the first file dropped on a tab as the window's binary, and refuses a folder with
@@ -629,7 +684,7 @@ pub(crate) mod tests {
     use settings::Settings as _;
     use workspace::dock::{DockPosition, PanelSizeState};
     use workspace::pane::{GoBack, GoForward};
-    use workspace::{AddFolderToProject, AppState, MultiWorkspace, Workspace};
+    use workspace::{AddFolderToProject, AppState, Workspace};
     use workspace::{Item as _, Panel as _};
 
     use super::{
@@ -640,6 +695,7 @@ pub(crate) mod tests {
     use crate::function_columns::Columns;
     use crate::functions_panel::FunctionsPanel;
     use crate::measure::{CliMode, MeasurePhase, split_data_dir};
+    use crate::shell::Shell;
     use crate::start_item::StartItem;
     use crate::worker::LoadedBinary;
 
@@ -712,9 +768,8 @@ pub(crate) mod tests {
         let mut opened = None;
         let (_, cx) = cx.add_window_view(|window, cx| {
             let app = new_workspace(app_state, None, window, cx);
-            let root = MultiWorkspace::new(app.workspace.clone(), window, cx);
-            opened = Some(app);
-            root
+            opened = Some(app.clone());
+            Shell::new(app, window, cx)
         });
         (opened.unwrap(), cx)
     }
@@ -1323,8 +1378,9 @@ pub(crate) mod tests {
             assert!(workspace.active_item_as::<StartItem>(cx).is_some());
         });
         let start = cx.debug_bounds("start-item").unwrap();
+        let title = cx.debug_bounds("title-bar").unwrap();
         assert!(
-            start.origin.y < px(4.0),
+            start.origin.y - title.bottom() < px(4.0),
             "a tab bar sits over the start tab"
         );
         load_sample(&app, cx);
@@ -1382,5 +1438,56 @@ pub(crate) mod tests {
             .binary
             .read_with(cx, |binary, _| binary.recent().to_vec());
         assert_eq!(back, want);
+    }
+
+    /// A window opens titled `borer`, with the system's title bar hidden for the app's own,
+    /// and stays hidden until its first frame, so it never shows empty.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an option says otherwise.
+    #[gpui::test]
+    fn a_window_opens_hidden_under_the_apps_title_bar(cx: &mut TestAppContext) {
+        a_window_opens_hidden_under_the_apps_title_bar_steps(cx);
+    }
+
+    /// Runs the steps of [`a_window_opens_hidden_under_the_apps_title_bar`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`a_window_opens_hidden_under_the_apps_title_bar`] says.
+    fn a_window_opens_hidden_under_the_apps_title_bar_steps(cx: &mut TestAppContext) {
+        init(cx);
+        let options = cx.update(|cx| super::window_options(cx));
+        assert!(!options.show);
+        let titlebar = options.titlebar.unwrap();
+        assert!(titlebar.appears_transparent);
+        assert_eq!(titlebar.title.as_deref(), Some("borer"));
+        assert!(options.window_min_size.is_some());
+    }
+
+    /// An app window opened hidden is shown and brought forward, so it is the active window.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the window does not open or is not the active one.
+    #[gpui::test]
+    fn an_opened_window_is_shown_and_active(cx: &mut TestAppContext) {
+        an_opened_window_is_shown_and_active_steps(cx);
+    }
+
+    /// Runs the steps of [`an_opened_window_is_shown_and_active`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`an_opened_window_is_shown_and_active`] says.
+    fn an_opened_window_is_shown_and_active_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let window = cx
+            .update(|cx| super::open_window(&app_state, None, cx))
+            .unwrap();
+        cx.run_until_parked();
+        let active = cx.update(|cx| cx.active_window());
+        assert_eq!(active, Some(window.into()));
     }
 }

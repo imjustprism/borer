@@ -547,8 +547,10 @@ mod tests {
             ("measure/scroll.rs", include_str!("measure/scroll.rs")),
             ("menus.rs", include_str!("menus.rs")),
             ("recent.rs", include_str!("recent.rs")),
+            ("shell.rs", include_str!("shell.rs")),
             ("start_item.rs", include_str!("start_item.rs")),
             ("status.rs", include_str!("status.rs")),
+            ("title_bar.rs", include_str!("title_bar.rs")),
         ];
         let calls = [
             "Program::load",
