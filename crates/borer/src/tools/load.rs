@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 
-use borer_engine::analysis::project::{self, Admitted, Foreign, Identity};
+use borer_engine::analysis::project::{self, Foreign, Identity};
 use borer_engine::layout::Layout;
 use borer_engine::num;
 use borer_engine::pack::Packs;
@@ -583,7 +583,7 @@ impl BorerServer {
                 Err(replaced(&program))
             }
         };
-        let Admitted { plan, edit, said } = guarded(|| {
+        let (plan, edit, said) = guarded(|| {
             let overlay = self.overlay_plain();
             project::admit(&program, analysis, &overlay, &pf, force.unwrap_or(false)).map_err(|e| {
                 match e.downcast_ref::<Foreign>() {
@@ -591,7 +591,8 @@ impl BorerServer {
                     None => e.to_string(),
                 }
             })
-        })?;
+        })?
+        .into_parts();
         self.put_project(&program, edit, Some(plan))
             .map_err(|e| err_params(e.to_string()))?;
         Ok(said)

@@ -130,11 +130,12 @@ fn another_builds_project_is_admitted_only_when_forced() {
     );
     let forced = admit(&program, empty, &Overlay::default(), &file, true).expect("forced");
     assert_eq!(
-        forced.said,
+        forced.said(),
         "loaded 0 names + 0 comments + 0 types + 0 applied\n# forced: the project was saved for a.exe, so its names may sit on other code here\n"
     );
     let mut overlay = Overlay::default();
-    commit(&program, &Analysis::default(), &mut overlay, &forced.plan).expect("it commits");
+    let (plan, _, _) = forced.into_parts();
+    commit(&program, &Analysis::default(), &mut overlay, &plan).expect("it commits");
 }
 
 /// A file whose classes state no field is admitted without the analysis:

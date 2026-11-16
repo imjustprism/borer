@@ -1058,15 +1058,31 @@ impl Project {
 
 /// What [`admit`] made of a project file: the plan that puts its
 /// annotations in place of the overlay's, and the answer that says it.
+///
+/// Only [`admit`] makes one, so the plan is always the one made of the edit.
 #[derive(Debug, Clone)]
 pub struct Admitted {
     /// The plan, made over the overlay [`admit`] was given.
-    pub plan: Plan,
+    plan: Plan,
     /// The edit the plan was made of, to plan again over an overlay a
     /// commit changed meanwhile ([`super::edit::Stale`]).
-    pub edit: Edit,
+    edit: Edit,
     /// What was loaded and left out, and why, one line each.
-    pub said: String,
+    said: String,
+}
+
+impl Admitted {
+    /// Returns what was loaded and left out, and why, one line each.
+    #[must_use]
+    pub fn said(&self) -> &str {
+        &self.said
+    }
+
+    /// Returns the plan, the edit it was made of and the answer, together.
+    #[must_use]
+    pub fn into_parts(self) -> (Plan, Edit, String) {
+        (self.plan, self.edit, self.said)
+    }
 }
 
 /// Holds a project file to the loaded binary and plans putting what it
