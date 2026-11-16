@@ -131,6 +131,23 @@ pub enum Said {
     Placeholder,
 }
 
+/// How many referents of a view each [`Said`] names.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SaidCounts {
+    /// Referents named by the overlay.
+    pub user: usize,
+    /// Referents named by the file.
+    pub stated: usize,
+    /// Referents named by the engine's findings.
+    pub inferred: usize,
+    /// Referents nothing names.
+    pub placeholder: usize,
+    /// Referents that go by a name the view cannot tell of: no name token
+    /// spells them, or the fact one was spelled from does not say. String
+    /// literals and comments are no names and not counted.
+    pub unknown: usize,
+}
+
 /// How many names of a view name something yet carry no link.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Unlinked {
@@ -435,6 +452,36 @@ impl View {
         }
         self.said = seen.into_iter().map(Option::flatten).collect();
         self
+    }
+
+    /// Returns how many referents of the view each [`Said`] names, and how
+    /// many that go by a name it cannot tell of: one count per referent
+    /// however many tokens spell it.
+    #[must_use]
+    pub fn said_counts(&self) -> SaidCounts {
+        let mut n = SaidCounts::default();
+        for (k, r) in self.refs.iter().enumerate() {
+            let named = match r {
+                Ref::String(_) | Ref::Comment(_) => false,
+                Ref::Address(_)
+                | Ref::Function(_)
+                | Ref::Import(_)
+                | Ref::Global(_)
+                | Ref::Field { .. }
+                | Ref::Variable { .. }
+                | Ref::Type(_) => true,
+            };
+            let c = match self.said.get(k).copied().flatten() {
+                None if !named => continue,
+                Some(Said::User) => &mut n.user,
+                Some(Said::Stated) => &mut n.stated,
+                Some(Said::Inferred) => &mut n.inferred,
+                Some(Said::Placeholder) => &mut n.placeholder,
+                None => &mut n.unknown,
+            };
+            *c = c.saturating_add(1);
+        }
+        n
     }
 
     /// Returns the text the tokens spell, line by line.

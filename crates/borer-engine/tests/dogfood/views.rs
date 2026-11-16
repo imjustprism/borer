@@ -6,6 +6,7 @@ use super::{CORPUS, Corpus, drawn, view_sweep};
 use borer_engine::analysis::decompile::view::view_of;
 use borer_engine::analysis::{Analysis, Overlay, render};
 use borer_engine::program::Program;
+use borer_engine::view::{Kind, Ref, Said};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Returns each function's text as the sweep rendered it, named where it
@@ -186,6 +187,111 @@ fn every_view_spells_its_text_and_links_only_what_the_code_shows() {
         share(census.resolvable_strings),
         share(census.kinds[3]),
         census.string_causes
+    );
+}
+
+/// Tells whether a name has the shape the engine spells a placeholder in.
+///
+/// Those are `sub_<hex>`, `L_<hex>`, `field_0x<hex>`, `g<bits>_<hex>`, `aN`, `vN`,
+/// `local_<hex>`, `local_m<hex>`, `home_<hex>`, `arg_<hex>` or `<dll>_ord<n>`.
+///
+/// # Arguments
+///
+/// * `word` - The name as a view spells it.
+fn placeholder_shaped(word: &str) -> bool {
+    let hex = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit());
+    let dec = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    [
+        "sub_", "L_", "field_0x", "local_m", "local_", "home_", "arg_",
+    ]
+    .iter()
+    .any(|p| word.strip_prefix(p).is_some_and(hex))
+        || word.strip_prefix('a').is_some_and(dec)
+        || word.strip_prefix('v').is_some_and(dec)
+        || word
+            .strip_prefix('g')
+            .and_then(|r| r.split_once('_'))
+            .is_some_and(|(bits, at)| dec(bits) && hex(at))
+        || word.rsplit_once("_ord").is_some_and(|(_, n)| dec(n))
+}
+
+/// Every function's view of the `BORER_DOGFOOD` binary spells its text and
+/// says a name is a placeholder exactly where its spelling shows it is one.
+///
+/// The views read the sweep's texts ([`swept_texts`]) under no overlay. A
+/// name that says it is a placeholder must have a placeholder's shape
+/// ([`placeholder_shaped`]), and a function spelled `sub_` of its own
+/// entry or a label `L_` of its own block must say it is one. It prints
+/// the referents by who stated their names and the view build time at p95
+/// and worst, and lists at most 10 of the names it finds wrong.
+#[test]
+#[ignore = "set BORER_DOGFOOD to a binary path to run this sweep"]
+fn every_placeholder_names_what_nothing_else_names() {
+    let c = &*CORPUS;
+    let (p, a) = (&c.program, &c.analysis);
+    let o = Overlay::default();
+    let texts = swept_texts(c);
+    let (mut bad, mut took, mut by) = (Vec::new(), Vec::new(), [0usize; 5]);
+    for &(entry, text) in &texts {
+        let started = std::time::Instant::now();
+        let v = view_of(p, a, &o, entry, text);
+        took.push(started.elapsed());
+        let Some(v) = v else {
+            bad.push(format!("{entry:#x}: no view"));
+            continue;
+        };
+        if v.spell() != text {
+            bad.push(format!("{entry:#x}: does not spell its text"));
+        }
+        let n = v.said_counts();
+        for (sum, k) in by
+            .iter_mut()
+            .zip([n.user, n.stated, n.inferred, n.placeholder, n.unknown])
+        {
+            *sum += k;
+        }
+        for i in 0..v.lines() {
+            let line = v.line(i).unwrap_or_default();
+            for (span, kind, link) in v.tokens_said(i) {
+                let Some((r, said)) = link else {
+                    continue;
+                };
+                let word = line.get(span).unwrap_or_default();
+                let placeholder = said == Some(Said::Placeholder);
+                let own = if let Ref::Function(e) = r {
+                    word == format!("sub_{e:x}")
+                } else if let Ref::Address(va) = r {
+                    kind == Kind::Label && word == format!("L_{va:x}")
+                } else {
+                    false
+                };
+                if placeholder && !placeholder_shaped(word) {
+                    bad.push(format!("{entry:#x} line {i}: {word} is no placeholder"));
+                }
+                if own && !placeholder {
+                    bad.push(format!("{entry:#x} line {i}: {word} says {said:?}"));
+                }
+            }
+        }
+    }
+    took.sort_unstable();
+    let p95 = took.get(took.len().saturating_mul(95) / 100).copied();
+    println!(
+        "{} views: {} referents by who named them: user {}, stated {}, inferred {}, placeholder {}, unknown {}; build p95 {p95:?}, worst {:?}",
+        texts.len(),
+        by.iter().sum::<usize>(),
+        by[0],
+        by[1],
+        by[2],
+        by[3],
+        by[4],
+        took.last()
+    );
+    assert!(
+        bad.is_empty(),
+        "{} views or names wrong: {:?}",
+        bad.len(),
+        &bad[..bad.len().min(10)]
     );
 }
 

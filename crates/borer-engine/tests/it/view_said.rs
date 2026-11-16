@@ -18,7 +18,7 @@ use borer_engine::analysis::{Analysis, EnumSource, NameSource, Overlay};
 use borer_engine::dwarf::{Parameter, Subprogram};
 use borer_engine::headers::{ImportName, ImportOrigins, OrdinalName};
 use borer_engine::program::{Arch, BinaryFormat, Program, Symbol, SymbolKind};
-use borer_engine::view::{Kind, Ref, Said, View};
+use borer_engine::view::{Kind, Ref, Said, SaidCounts, View};
 
 /// Where [`callers`] enters: the function that calls the four others.
 const CALLER: u64 = 0x40_1000;
@@ -643,5 +643,34 @@ fn a_comment_elsewhere_keeps_a_view_with_notes() {
     assert!(
         Arc::ptr_eq(&was, &built(&after)),
         "the view was built again"
+    );
+}
+
+/// A view counts each referent once by who stated its name, however many
+/// tokens spell it.
+///
+/// Naming the unnamed callee moves one from the
+/// placeholders to the user's, and a note, which is no name, counts
+/// nowhere.
+#[test]
+fn said_counts_count_each_referent_once() {
+    let (p, a, o) = callers();
+    let before = view(&p, &a, &o, CALLER).expect("a view").said_counts();
+    assert_eq!(
+        (before.user, before.stated, before.inferred),
+        (1, 1, 1),
+        "{before:?}"
+    );
+    let mut named = o;
+    named.names.insert(UNNAMED, "named_now".to_owned());
+    named.comments.insert(CALLER + 4, "a note".to_owned());
+    let after = view(&p, &a, &named, CALLER).expect("a view").said_counts();
+    assert_eq!(
+        SaidCounts {
+            user: before.user + 1,
+            placeholder: before.placeholder - 1,
+            ..before
+        },
+        after
     );
 }
