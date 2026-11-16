@@ -43,7 +43,7 @@ from harness.root import ROOT  # noqa: E402
 REPO = "https://github.com/imjustprism/borer"
 """Where the releases are published."""
 
-DESCRIPTION = "Reverse-engineering engine for AI agents: MCP server and CLI"
+DESCRIPTION = "Reverse-engineering engine for AI agents and people: MCP server and CLI"
 """The one-line summary every package carries."""
 
 LICENSE = "AGPL-3.0-only"

@@ -1,6 +1,6 @@
 {
   "version": "0.2.5",
-  "description": "Reverse-engineering engine for AI agents: MCP server and CLI",
+  "description": "Reverse-engineering engine for AI agents and people: MCP server and CLI",
   "homepage": "https://github.com/imjustprism/borer",
   "license": "AGPL-3.0-only",
   "architecture": {
