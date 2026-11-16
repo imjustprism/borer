@@ -391,6 +391,7 @@ pub fn new_workspace(
     let workspace = cx.new(|cx| {
         let id = WorkspaceId::from_i64(APP_WORKSPACE_ID);
         let mut workspace = Workspace::new(Some(id), project, app_state.clone(), window, cx);
+        crate::overview::register(&mut workspace, &binary, window, cx);
         let status = cx.new(|cx| StatusLine::new(binary.clone(), cx));
         workspace
             .status_bar()
@@ -402,7 +403,6 @@ pub fn new_workspace(
             }
         });
         register_actions(&mut workspace, &binary);
-        crate::overview::register(&mut workspace, &binary);
         workspace
     });
     crate::menus::follow_binary(&binary, cx).detach();

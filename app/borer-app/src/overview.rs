@@ -160,14 +160,35 @@ const SHOWN: Opening = Opening {
     focus: true,
 };
 
-/// Registers the overview's command on `workspace`: it opens the overview of the binary
-/// open in the window, from anywhere.
+/// Opens the overview of each binary the window loads, and registers the overview's
+/// command on `workspace`, which opens it again from anywhere.
 ///
 /// # Arguments
 ///
 /// * `workspace` - The workspace.
 /// * `binary` - The window's binary.
-pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
+/// * `window` - Window the workspace is in.
+/// * `cx` - Workspace context.
+pub fn register(
+    workspace: &mut Workspace,
+    binary: &Entity<Binary>,
+    window: &mut Window,
+    cx: &mut Context<'_, Workspace>,
+) {
+    cx.subscribe_in(binary, window, |workspace, binary, event, window, cx| {
+        if let BinaryEvent::Opened(loaded) = event {
+            open(
+                workspace,
+                binary,
+                loaded,
+                Place::Overview,
+                SHOWN,
+                window,
+                cx,
+            );
+        }
+    })
+    .detach();
     let binary = binary.clone();
     workspace.register_action(move |workspace, _: &Overview, window, cx| {
         if let Some(loaded) = binary.read(cx).loaded().cloned() {
@@ -464,16 +485,16 @@ impl Render for OverviewItem {
 )]
 pub(crate) mod tests {
     use borer_engine::analysis::render::{
-        ReadFirst, Reason, SectionKind, Summary, Triage, TriageSection,
+        ReadFirst, Reason, SectionKind, Summary, Triage, TriageSection, triage,
     };
     use borer_engine::crypto::Storage;
     use gpui::{Entity, TestAppContext, VisualContext as _, VisualTestContext};
-    use workspace::Workspace;
+    use workspace::{ItemHandle, Workspace};
 
     use super::{OverviewItem, basis_label, rows};
     use crate::app_view::tests::{CALLER, init, open, open_place, sample, shown};
     use crate::decompile_item::{DecompileItem, Form, TabMode};
-    use crate::places::Place;
+    use crate::places::{Place, place_of};
 
     /// Returns a hand-built triage: two sections with addresses, a blind spot and a
     /// function to read first with a reason of every kind.
@@ -578,6 +599,39 @@ pub(crate) mod tests {
         ];
         let want: Vec<_> = want.iter().map(|&(t, l)| (t.to_owned(), l)).collect();
         assert_eq!(labels, want);
+    }
+
+    /// A load opens the overview as the pane's first tab, before the functions panel's
+    /// preview of the first function, and its lines hold every section headline of the
+    /// engine's triage.
+    #[gpui::test]
+    fn a_load_opens_the_overview_first(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
+        let binary = app.binary;
+        let loaded = sample();
+        binary.update(cx, |binary, cx| binary.finish_load(Ok(loaded.clone()), cx));
+        cx.run_until_parked();
+        let (first, active, text) = workspace.read_with(cx, |workspace, cx| {
+            let pane = workspace.active_pane().read(cx);
+            let place = |item: Option<&Box<dyn ItemHandle>>| place_of(item?.as_ref(), cx);
+            let item = pane.items_of_type::<OverviewItem>().next().unwrap();
+            let lines = item.read(cx).rows().iter().map(|row| row.text.to_string());
+            let text = lines.collect::<Vec<_>>().join("\n");
+            (
+                place(pane.items().next()),
+                place(pane.active_item().as_ref()),
+                text,
+            )
+        });
+        assert_eq!(first, Some(Place::Overview));
+        assert_eq!(active, Some(Place::decompile(CALLER)));
+        let triage = triage(&loaded.program, &loaded.analysis, &loaded.overlay);
+        assert!(!triage.sections.is_empty());
+        for section in &triage.sections {
+            assert!(text.contains(&section.summary.headline), "{text}");
+        }
     }
 
     /// Opens the overview of the sample in `workspace` and returns it once it is built.
