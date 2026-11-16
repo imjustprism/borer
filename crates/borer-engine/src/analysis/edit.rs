@@ -973,7 +973,9 @@ impl Draft {
 
     /// Writes a change taken back over the draft, refusing what [`plan`]
     /// refuses of the entry it leaves: a name another address answers to,
-    /// a variable's name another of the function's has.
+    /// a variable's name another of the function's has. It says what it
+    /// does as a plan does: a name's line, a comment's, else what it takes
+    /// back.
     ///
     /// # Arguments
     ///
@@ -998,13 +1000,42 @@ impl Draft {
         } else {
             None
         };
+        let renamed = if let Change::Name(target, _) = &change {
+            Some((*target, name_of(a, &self.overlay, *target)))
+        } else {
+            None
+        };
+        let what = change.entry();
+        let line = match &change {
+            Change::Name(..) => None,
+            Change::Comment(at, s) if s.after().is_some() => Some(Line::Commented { at: *at }),
+            Change::Comment(..)
+            | Change::Type(..)
+            | Change::Applied(..)
+            | Change::Proto(..)
+            | Change::Var(..)
+            | Change::Field(..) => Some(Line::Stated {
+                would: format!("take back {what}"),
+                done: format!("took back {what}"),
+            }),
+        };
         self.put(change);
-        if let Some((target, name)) = named {
-            taken(p, a, &self.overlay, target, &name)?;
+        if let Some((target, name)) = &named {
+            taken(p, a, &self.overlay, *target, name)?;
         }
         if let Some((entry, key, name)) = var {
             var_taken(p, &self.overlay, (entry, key), &name)?;
         }
+        if let Some((target, old)) = renamed {
+            self.lines.push(Line::Named {
+                target,
+                function: a.function(target).is_some(),
+                old,
+                new: name_of(a, &self.overlay, target),
+                number: named.as_ref().and_then(|(_, n)| parse_addr(n)),
+            });
+        }
+        self.lines.extend(line);
         Ok(())
     }
 }
@@ -1305,7 +1336,7 @@ pub fn commit(
 /// Over the overlay as it is now, their inverses, the last first, are
 /// checked as
 /// [`plan`] checks what it writes, so an undo leaves nothing a plan
-/// refuses. A plan made stale by a commit since ([`Stale`]) is made again
+/// refuses, and spelled as its lines ([`Plan::lines`]). A plan made stale by a commit since ([`Stale`]) is made again
 /// by its caller.
 ///
 /// # Arguments

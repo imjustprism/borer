@@ -513,3 +513,43 @@ fn a_revert_leaves_nothing_a_plan_refuses() {
     let twice = revert(&p, &a, &o, first.changes()).expect_err("x names the second now");
     assert!(twice.to_string().contains("x already names"), "{twice}");
 }
+
+/// A revert says what it does as a plan does: the name a function goes
+/// back to, and what else it takes back.
+#[test]
+fn a_revert_says_what_it_takes_back() {
+    let p = fixture();
+    let a = Analysis::compute(&p);
+    let entry = a.functions.first().expect("a function").entry;
+    let mut o = Overlay::default();
+    o.names.insert(entry, "foo".to_owned());
+    let edits = [
+        Edit::Name {
+            at: entry,
+            name: "bar".to_owned(),
+        },
+        Edit::Comment {
+            at: entry,
+            text: "a note".to_owned(),
+        },
+    ];
+    let made = plan(&p, &a, &o, &edits, Force::Refuse).expect("planned");
+    commit(&p, &a, &mut o, &made).expect("committed");
+    let back = revert(&p, &a, &o, made.changes()).expect("a revert");
+    assert_eq!(
+        back.lines(),
+        [
+            Line::Stated {
+                would: format!("take back the comment at {entry:#x}"),
+                done: format!("took back the comment at {entry:#x}"),
+            },
+            Line::Named {
+                target: entry,
+                function: true,
+                old: "bar".to_owned(),
+                new: "foo".to_owned(),
+                number: None,
+            },
+        ]
+    );
+}
