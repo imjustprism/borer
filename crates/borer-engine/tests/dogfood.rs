@@ -34,6 +34,8 @@ use std::collections::BTreeSet;
 use std::sync::{LazyLock, OnceLock};
 
 mod common;
+#[path = "common/drawn.rs"]
+mod drawn;
 #[path = "common/gotos.rs"]
 mod gotos;
 #[path = "common/view_sweep.rs"]
@@ -1701,4 +1703,103 @@ fn the_structure_agrees_with_the_cfg_on_every_function() {
         worst.1
     );
     assert!(flags.is_empty(), "{} functions disagree", flags.len());
+}
+
+/// Every corpus control-flow graph draws clear and deterministically.
+///
+/// Every function's control-flow graph of the `BORER_DOGFOOD` binary covers
+/// its listing rows, draws clear, shows the crossings it reports, and draws
+/// the same from a fresh analysis on sixteen threads as on one.
+///
+/// It prints the layout time at p50, p95 and worst, the graphs cut, the
+/// crossings before and after reduction, and the heap the graphs hold. The
+/// time is not held to a bar here, where the sweeps run side by side: the
+/// bench's `timings` holds the slowest layout to its bar alone.
+#[test]
+#[ignore = "set BORER_DOGFOOD to a binary path to run this sweep"]
+fn every_cfg_covers_its_rows_draws_clear_and_the_same_on_any_thread_count() {
+    let c = &*CORPUS;
+    let (p, o) = (&c.program, Overlay::default());
+    let entries: Vec<u64> = c.analysis.functions.iter().map(|f| f.entry).collect();
+    let (mut bad, mut took, mut first) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut before, mut after, mut heap, mut cut) = (0usize, 0usize, 0usize, 0usize);
+    for &entry in &entries {
+        let g = match render::cfg(p, &c.analysis, &o, entry) {
+            Ok(g) => g,
+            Err(e) => {
+                bad.push(format!("{entry:#x}: {e:#}"));
+                first.push(None);
+                continue;
+            }
+        };
+        let graph = drawn::graph_of(&g, entry);
+        let started = std::time::Instant::now();
+        let again = render::layout(&graph);
+        took.push((started.elapsed(), entry));
+        let l = g.layout();
+        if let Err(e) = drawn::rows(&g).and_then(|()| drawn::check(&graph, &l)) {
+            bad.push(format!("{entry:#x}: {e}"));
+        }
+        if again != *l {
+            bad.push(format!("{entry:#x}: laid out twice, drawn differently"));
+        }
+        (before, after) = (before + l.crossings_before, after + l.crossings);
+        heap += g.bytes();
+        cut += usize::from(g.cut.is_some());
+        first.push(Some(drawn::cfg_digest(&g, entry)));
+    }
+    let threads = 16;
+    let fresh = c.analysis.clone();
+    let mut again = vec![None; entries.len()];
+    std::thread::scope(|s| {
+        let parts: Vec<_> = (0..threads)
+            .map(|t| {
+                let (entries, fresh, o) = (&entries, &fresh, &o);
+                s.spawn(move || {
+                    entries
+                        .iter()
+                        .enumerate()
+                        .skip(t)
+                        .step_by(threads)
+                        .map(|(i, &e)| {
+                            let d = render::cfg(p, fresh, o, e).ok();
+                            (i, d.map(|g| drawn::cfg_digest(&g, e)))
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        for part in parts {
+            for (i, d) in part.join().expect("a worker") {
+                again[i] = d;
+            }
+        }
+    });
+    let differ: Vec<String> = entries
+        .iter()
+        .zip(first.iter().zip(&again))
+        .filter(|(_, (a, b))| a != b)
+        .map(|(e, _)| format!("{e:#x}"))
+        .collect();
+    took.sort_unstable();
+    let at = |q: usize| took.get(took.len().saturating_mul(q) / 100).map(|t| t.0);
+    let worst = took.last().copied();
+    println!(
+        "{} layouts ({cut} cut): p50 {:?}, p95 {:?}, worst {worst:x?}; crossings {before} before, {after} after; {heap} heap bytes",
+        took.len(),
+        at(50),
+        at(95),
+    );
+    assert!(
+        bad.is_empty(),
+        "{} graphs broken: {:?}",
+        bad.len(),
+        &bad[..bad.len().min(10)]
+    );
+    assert!(
+        differ.is_empty(),
+        "{} graphs draw differently on {threads} threads: {:?}",
+        differ.len(),
+        &differ[..differ.len().min(10)]
+    );
 }

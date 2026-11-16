@@ -739,3 +739,28 @@ fn a_graph_lists_at_most_its_total_of_rows() {
     rows(&g).expect("rows of the shortened blocks");
     check(&graph_of(&g, TEXT), &g.layout()).expect("a clear drawing");
 }
+
+/// A graph is built once per function and names in force: asked for again,
+/// it is the one kept, and nothing more is built; a failure is kept too and
+/// names the address.
+#[test]
+fn a_graph_is_built_once_and_kept() {
+    let p = fixture();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let entry = a.functions[0].entry;
+    let first = cfg(&p, &a, &o, entry).expect("graph");
+    let built = a.derived.builds();
+    let again = cfg(&p, &a, &o, entry).expect("graph");
+    assert_eq!(a.derived.builds(), built);
+    assert_eq!(first.edges, again.edges);
+    assert_eq!(first.layout(), again.layout());
+    let nowhere = cfg(&p, &a, &o, 0x7).expect_err("no function at 0x7");
+    let built = a.derived.builds();
+    assert_eq!(
+        cfg(&p, &a, &o, 0x7).expect_err("still none").to_string(),
+        nowhere.to_string()
+    );
+    assert_eq!(a.derived.builds(), built);
+    assert!(nowhere.to_string().contains("0x7"), "{nowhere}");
+}

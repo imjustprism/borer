@@ -60,6 +60,24 @@ impl Cfg {
     pub fn layout(&self) -> Arc<Drawing> {
         Arc::clone(&self.drawing)
     }
+
+    /// Returns the heap bytes the graph holds: its listing, nodes, edges
+    /// and drawing.
+    #[must_use]
+    pub fn bytes(&self) -> usize {
+        self.listing.bytes()
+            + self.nodes.capacity() * size_of::<Node>()
+            + self.edges.capacity() * size_of::<Edge>()
+            + self
+                .edges
+                .iter()
+                .map(|e| match &e.kind {
+                    EdgeKind::Cases(ns) => ns.capacity() * size_of::<u32>(),
+                    EdgeKind::Taken | EdgeKind::NotTaken | EdgeKind::Jump | EdgeKind::Fall => 0,
+                })
+                .sum::<usize>()
+            + self.drawing.bytes()
+    }
 }
 
 /// One block of a [`Cfg`].
@@ -309,6 +327,9 @@ fn drawn(f: &Function) -> Vec<&BasicBlock> {
 /// listing and its successor edges by kind, the back edges marked, laid
 /// out ([`Cfg::layout`]).
 ///
+/// Built once per function and names in force, and kept in the memo
+/// ([`crate::analysis::Derived::get_or_build_item`]) as one item.
+///
 /// # Arguments
 ///
 /// * `p` - The loaded image, read for the listing.
@@ -326,6 +347,32 @@ fn drawn(f: &Function) -> Vec<&BasicBlock> {
 /// for the architecture), or a block shows no row of the listing, which is
 /// a defect of the listing, never guessed around.
 pub fn cfg(p: &Program, a: &Analysis, o: &Overlay, entry: u64) -> anyhow::Result<Arc<Cfg>> {
+    let built = a.derived.get_or_build_item(
+        "cfg",
+        o.fingerprint(),
+        entry,
+        || build(p, a, o, entry).map_err(|e| format!("{e:#}")),
+        |r| r.as_ref().map_or_else(String::capacity, |g| g.bytes()),
+    );
+    match &*built {
+        Ok(g) => Ok(Arc::clone(g)),
+        Err(e) => Err(anyhow::anyhow!("{e}")),
+    }
+}
+
+/// Builds the graph [`cfg()`] keeps.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - User names and comments.
+/// * `entry` - The function's entry address.
+///
+/// # Errors
+///
+/// As for [`cfg()`].
+fn build(p: &Program, a: &Analysis, o: &Overlay, entry: u64) -> anyhow::Result<Arc<Cfg>> {
     let f = a
         .function(entry)
         .with_context(|| format!("no function starts at {entry:#x}"))?;

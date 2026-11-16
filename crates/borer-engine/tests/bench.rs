@@ -53,6 +53,13 @@ use borer_engine::program::Program;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+#[path = "common/drawn.rs"]
+#[expect(
+    dead_code,
+    reason = "the bench lays out graphs and checks none of them"
+)]
+mod drawn;
+
 /// Passes taken; the fastest is reported.
 const PASSES: usize = 5;
 
@@ -107,12 +114,18 @@ const VIEW_P95_US: u128 = 2000;
 /// The slowest one function's view may take to read, in milliseconds.
 const VIEW_MAX_MS: u128 = 100;
 
+/// The slowest one function's control-flow graph may take to lay out, in
+/// milliseconds, cut graphs included, that [`timings`] holds every
+/// function of the binary to ([`layouts`]).
+const LAYOUT_WORST_MS: u128 = 100;
+
 /// Reports the best time for analysis and for decompiling a fixed slice,
 /// then each function of the slice cold and alone: its p50, p95 and
 /// slowest, held to [`DECOMPILE_P95_MS`] and [`DECOMPILE_MAX_MS`].
 ///
 /// Also times reading each text so made as a view, held to
-/// [`VIEW_P95_US`] and [`VIEW_MAX_MS`].
+/// [`VIEW_P95_US`] and [`VIEW_MAX_MS`], and laying out every function's
+/// control-flow graph, held to [`LAYOUT_WORST_MS`] ([`layouts`]).
 #[test]
 #[ignore = "set BORER_BENCH to a binary path to run this harness"]
 fn timings() {
@@ -206,6 +219,50 @@ fn timings() {
         view_max.as_millis() <= VIEW_MAX_MS,
         "reading {view_slowest:#x} as a view took {view_max:?}"
     );
+    let (worst, at) = layouts(&program, &cold, &o);
+    assert!(
+        worst.as_millis() <= LAYOUT_WORST_MS,
+        "laying out {at:#x} took {worst:?}"
+    );
+}
+
+/// Returns the slowest graph layout and the entry of its function.
+///
+/// It times [`layout`](borer_engine::analysis::render::layout) alone over
+/// every function's control-flow graph and prints the layouts at p50, p95
+/// and worst.
+///
+/// # Arguments
+///
+/// * `p` - The program.
+/// * `a` - Its analysis.
+/// * `o` - User names and comments.
+fn layouts(p: &Program, a: &Analysis, o: &Overlay) -> (Duration, u64) {
+    let mut took: Vec<(Duration, u64)> = a
+        .functions
+        .iter()
+        .filter_map(|f| {
+            let g = borer_engine::analysis::render::cfg(p, a, o, f.entry).ok()?;
+            let graph = drawn::graph_of(&g, f.entry);
+            let t = Instant::now();
+            let drawn = borer_engine::analysis::render::layout(&graph);
+            let elapsed = t.elapsed();
+            drop(drawn);
+            Some((elapsed, f.entry))
+        })
+        .collect();
+    took.sort_unstable();
+    let times: Vec<Duration> = took.iter().map(|&(t, _)| t).collect();
+    let worst = took.last().copied().unwrap_or_default();
+    println!(
+        "layout:     {} graphs, p50 {:?}, p95 {:?}, max {:?} at {:#x}",
+        took.len(),
+        percentile(&times, 50),
+        percentile(&times, 95),
+        worst.0,
+        worst.1
+    );
+    worst
 }
 
 /// Functions [`iso_check_cost`] samples per binary, evenly by entry.
