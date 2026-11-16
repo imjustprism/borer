@@ -181,7 +181,10 @@ const RELOAD: &str = "After a rebuild of borer, {reload} restarts the server in 
 /// The resources by what an agent wants of them: every resource name in
 /// exactly one group, which the instructions list them under.
 const INTENTS: &[(&str, &[&str])] = &[
-    ("start", &["triage", "info", "help", "playbook", "about"]),
+    (
+        "start",
+        &["triage", "info", "stats", "help", "playbook", "about"],
+    ),
     (
         "run code",
         &[

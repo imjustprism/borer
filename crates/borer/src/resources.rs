@@ -562,6 +562,32 @@ impl BorerServer {
         )
     }
 
+    /// One chart series as a table ([`borer_engine::analysis::stats::stats_tsv`]),
+    /// a page at a time.
+    ///
+    /// # Arguments
+    ///
+    /// The series of the file's bytes answer on any architecture, from an
+    /// empty analysis where the code is not discovered; `sizes` refuses
+    /// there.
+    ///
+    /// # Arguments
+    ///
+    /// * `spec` - The kind and its settings.
+    /// * `asked` - The URI with its paging, which the table is paged by.
+    ///
+    /// # Errors
+    ///
+    /// When no binary is loaded, or the spec is refused.
+    pub(crate) fn stats_text(&self, spec: &str, asked: &Asked) -> Result<String, ErrorData> {
+        /// Most rows one read returns.
+        const PAGE: usize = 200;
+        let again = asked.again();
+        self.with_managed(|p, a| {
+            borer_engine::analysis::stats::stats_tsv(p, a, spec, asked.window(PAGE, &again))
+        })
+    }
+
     /// The shortest byte signature that matches code once
     /// ([`render::signature_tsv`]).
     ///

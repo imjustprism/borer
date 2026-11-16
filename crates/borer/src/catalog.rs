@@ -278,6 +278,11 @@ pub(crate) const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
         "borer://iocs/url",
     ),
     (
+        "borer://stats/{kind}",
+        "Chart series as tables, each row with its exact range, integer and the same on every host: entropy (every window of the file in file order, its millibits, 1000 x bits per byte; window=<bytes>, 1024 by default, grown to a power of two for at most 4,096 windows), strings (the same windows' bytes inside strings), sizes (functions by bytes of code, one bin per power of two or bins=<n> of one width, each bin's count and first entries, thunks and funclets counted apart) or sections (each section's extent, rwx and millibits); each takes filter=<text> and count, 200 rows a page",
+        "borer://stats/entropy",
+    ),
+    (
         "borer://hidden/{filter}",
         "Run-time generated strings whose text or generator matches {filter}",
         "borer://hidden/http",

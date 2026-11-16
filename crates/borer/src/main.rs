@@ -646,7 +646,8 @@ impl BorerServer {
     /// [`BorerServer::read_uri`] wraps it for `resources/read` and the
     /// `query` tool, and a script's `query(uri)` calls it directly
     /// ([`BorerServer::script`]). A listing that pages itself
-    /// (`attrs`, `messages`, `fieldrefs`, `grep`, `iocs`, `calls`, `clr`) is
+    /// (`attrs`, `messages`, `fieldrefs`, `grep`, `iocs`, `calls`, `clr`,
+    /// `stats`) is
     /// handed the page; any other answer's rows are paged here
     /// ([`borer_engine::table::page`]), under a `# showing N of M from K`
     /// line and over the URI that reads the next page.
@@ -684,6 +685,7 @@ impl BorerServer {
             ("triage", None) => self.triage_text()?,
             ("fingerprint", None) => self.fingerprint_text()?,
             ("hashes", None) => self.hashes_text()?,
+            ("stats", Some(spec)) => return self.stats_text(&spec, asked),
             ("encoded", filter) => self.encoded_text(filter.as_deref().unwrap_or(""))?,
             ("sig" | "yara" | "names" | "addr", Some(arg)) => self.handoff_text(kind, &arg)?,
             ("children", None) => self.children_text()?,
@@ -1222,6 +1224,46 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The chart series read as paged tables.
+    ///
+    /// A page of the entropy profile under its `# showing` line and the URI of
+    /// the next, the sections whole, and a kind the tables lack refused as a
+    /// bad argument with the kinds.
+    ///
+    /// # Panics
+    ///
+    /// When a table is not paged or spelled as its series, or the bad kind
+    /// answers.
+    #[test]
+    fn the_stats_resources_page_each_series() {
+        let server = raw_server();
+        let page = server
+            .resource_text("borer://stats/entropy,window=64")
+            .expect("a profile");
+        assert!(page.starts_with("# showing 4 of 4 from 0\n"), "{page}");
+        let (_, first) = server
+            .read_uri("borer://stats/entropy,window=64!limit=1")
+            .expect("a page");
+        assert!(first.starts_with("# showing 1 of 4 from 0\n"), "{first}");
+        assert!(first.contains("\n0x0\t64\t0x1000\t.text\t0\n"), "{first}");
+        assert!(
+            first.contains("borer://stats/entropy,window=64!limit=1!offset=1"),
+            "{first}"
+        );
+        let sections = server
+            .resource_text("borer://stats/sections")
+            .expect("the sections");
+        assert!(
+            sections.contains("\n.text\t0x1000\t0x100\t0x0\t0x100\tr-x\t0\n"),
+            "{sections}"
+        );
+        let refused = server
+            .resource_text("borer://stats/nosuch")
+            .expect_err("no such kind");
+        assert_eq!(refused.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert!(refused.message.contains("kinds: entropy"), "{refused:?}");
     }
 
     /// An arm64 program disassembles, lists its functions and decompiles.
