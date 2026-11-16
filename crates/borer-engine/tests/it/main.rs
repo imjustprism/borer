@@ -106,6 +106,7 @@ mod unchecked;
 mod unit;
 mod validate;
 mod view;
+mod view_lines;
 mod void_results;
 mod wire_tables;
 mod x86;

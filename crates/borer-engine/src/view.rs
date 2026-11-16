@@ -153,6 +153,9 @@ pub struct View {
     ordered: bool,
 }
 
+/// The most uses of one referent [`View::uses`] returns.
+pub const USES_MAX: usize = 4096;
+
 /// Widens a 32-bit offset or count of a view to an index.
 ///
 /// # Arguments
@@ -199,23 +202,94 @@ impl View {
         &self,
         i: usize,
     ) -> impl Iterator<Item = (Range<usize>, Kind, Option<&Ref>)> + '_ {
+        let mut from = 0;
+        self.line_tokens(i).iter().map(move |t| {
+            let (start, end) = (from, wide(t.end));
+            from = end;
+            (start..end, t.kind, self.link(t))
+        })
+    }
+
+    /// Returns the token that holds one byte of a line.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The line, from 0.
+    /// * `byte` - The byte, from the line's first.
+    ///
+    /// # Returns
+    ///
+    /// The bytes the token spans in the line, its kind and what it links
+    /// to, as [`View::tokens`] gives them; `None` past the line's end and
+    /// past the last line.
+    #[must_use]
+    pub fn token_at(&self, i: usize, byte: usize) -> Option<(Range<usize>, Kind, Option<&Ref>)> {
+        let line = self.line_tokens(i);
+        let k = line.partition_point(|t| wide(t.end) <= byte);
+        let t = line.get(k)?;
+        let start = k
+            .checked_sub(1)
+            .and_then(|j| line.get(j))
+            .map_or(0, |p| wide(p.end));
+        Some((start..wide(t.end), t.kind, self.link(t)))
+    }
+
+    /// Returns where a referent is spelled: each token linked to it, in
+    /// line order, at most [`USES_MAX`].
+    ///
+    /// # Arguments
+    ///
+    /// * `r` - The referent.
+    ///
+    /// # Returns
+    ///
+    /// Each token's line and the bytes it spans there; empty when no token
+    /// links to `r`.
+    #[must_use]
+    pub fn uses(&self, r: &Ref) -> Vec<(usize, Range<usize>)> {
+        let Some(want) = self
+            .refs
+            .iter()
+            .position(|x| x == r)
+            .and_then(|k| u32::try_from(k.checked_add(1)?).ok())
+            .and_then(NonZeroU32::new)
+        else {
+            return Vec::new();
+        };
+        (0..self.lines())
+            .flat_map(|i| {
+                let mut from = 0;
+                self.line_tokens(i).iter().filter_map(move |t| {
+                    let (start, end) = (from, wide(t.end));
+                    from = end;
+                    (t.link == Some(want)).then_some((i, start..end))
+                })
+            })
+            .take(USES_MAX)
+            .collect()
+    }
+
+    /// Returns one line's tokens as stored, none past the last line.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The line, from 0.
+    fn line_tokens(&self, i: usize) -> &[Token] {
         let span = i
             .checked_add(1)
             .and_then(|next| self.starts.get(i).zip(self.starts.get(next)))
             .map_or(0..0, |(a, b)| wide(a.first)..wide(b.first));
-        let mut from = 0;
-        self.tokens
-            .get(span)
-            .unwrap_or_default()
-            .iter()
-            .map(move |t| {
-                let (start, end) = (from, wide(t.end));
-                from = end;
-                let link = t
-                    .link
-                    .and_then(|k| self.refs.get(wide(k.get()).checked_sub(1)?));
-                (start..end, t.kind, link)
-            })
+        self.tokens.get(span).unwrap_or_default()
+    }
+
+    /// Returns what a token links to.
+    ///
+    /// # Arguments
+    ///
+    /// * `t` - The token.
+    fn link(&self, t: &Token) -> Option<&Ref> {
+        t.link
+            .and_then(|k| self.refs.get(wide(k.get()).checked_sub(1)?))
     }
 
     /// Returns the text the tokens spell, line by line.

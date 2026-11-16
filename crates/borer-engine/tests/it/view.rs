@@ -18,7 +18,7 @@ use borer_engine::program::{Arch, BinaryFormat, Program, Section, Symbol, Symbol
 use borer_engine::view::{Kind, Ref, Unlinked, View};
 
 /// Where [`image`] maps its code, entered at its start.
-const TEXT: u64 = 0x1_4000_1000;
+pub(crate) const TEXT: u64 = 0x1_4000_1000;
 
 /// The read-only page of [`image`], where an import's slot sits.
 const SLOT: u64 = 0x1_4000_2000;
@@ -83,7 +83,7 @@ fn symbol(name: &str, addr: u64, kind: SymbolKind) -> Symbol {
 /// # Arguments
 ///
 /// * `v` - The view.
-fn tokens(v: &View) -> Vec<(usize, String, Kind, Option<Ref>)> {
+pub(crate) fn tokens(v: &View) -> Vec<(usize, String, Kind, Option<Ref>)> {
     (0..v.lines())
         .flat_map(|i| {
             let line = v.line(i).unwrap_or_default();
@@ -122,7 +122,7 @@ const STUB: u64 = TEXT + 0x60;
 ///
 /// * `stub` - Whether `TEXT` calls the import through a stub at [`STUB`],
 ///   `jmp [SLOT]` (`call STUB; nop` in place of `call [SLOT]`).
-fn filling(stub: bool) -> Program {
+pub(crate) fn filling(stub: bool) -> Program {
     let call: &[u8] = if stub {
         &[0xe8, 0x4b, 0x00, 0x00, 0x00, 0x90] // ASM: call STUB; nop
     } else {
@@ -155,7 +155,7 @@ fn filling(stub: bool) -> Program {
 ///
 /// `A`: `sub rsp,0x28; call B; add rsp,0x28; ret`; `B`, `C`, `D`: `mov
 /// eax,k; ret`.
-fn exported_four() -> Program {
+pub(crate) fn exported_four() -> Program {
     let (b, c, d) = (TEXT + 0x40, TEXT + 0x80, TEXT + 0xc0);
     let code: [(u64, &[u8]); 6] = [
         (TEXT, &[0x48, 0x83, 0xec, 0x28]),              // ASM: sub rsp,0x28
