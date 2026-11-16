@@ -412,6 +412,17 @@ pub const COMMANDS: &[Command] = &[
         )
     },
     Command {
+        keys: &[Keys::all(Ctx::Workspace, &["secondary-p"])],
+        serves: &["borer://find"],
+        replaces: &["file_finder::Toggle", "menu::SelectPrevious"],
+        ..item(
+            "borer::FindEverywhere",
+            "Find Everywhere...",
+            (MenuName::Go, 0),
+            Need::Binary,
+        )
+    },
+    Command {
         keys: &[Keys::all(Ctx::Code, &["f12", "enter"])],
         serves: &["decompile"],
         replaces: &["editor::GoToDefinition", "editor::Newline"],

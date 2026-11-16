@@ -30,20 +30,30 @@ gpui::actions!(
         /// Opens the go-to picker: an address or a name opens the function holding it, and
         /// every function, symbol, string, type and note whose text holds it is listed.
         GoTo,
+        /// Opens the go-to picker to find a text in every function, symbol, string, type
+        /// and note; `@`, `"`, `t:` and `#` narrow it to one kind.
+        FindEverywhere,
     ]
 );
 
-/// Registers go to on `workspace`, over the window's `binary`.
+/// Registers go to and find everywhere on `workspace`, each opening the one picker.
 ///
 /// # Arguments
 ///
 /// * `workspace` - The window's workspace.
-/// * `binary` - The window's binary.
+/// * `binary` - The window's binary, which the picker searches.
 pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
-    let go = binary.clone();
+    let (go, find) = (binary.clone(), binary.clone());
     commands::register(workspace, binary, move |workspace, _: &GoTo, window, cx| {
         toggle(workspace, &go, window, cx);
     });
+    commands::register(
+        workspace,
+        binary,
+        move |workspace, _: &FindEverywhere, window, cx| {
+            toggle(workspace, &find, window, cx);
+        },
+    );
 }
 
 /// One line of the picker.
@@ -203,8 +213,8 @@ pub struct GoToDelegate {
     selected: usize,
 }
 
-/// Opens the go-to picker over the binary of the active code tab, else the window's
-/// binary; nothing opens before a binary is loaded.
+/// Opens the go-to picker, empty, over the binary of the active code tab, else the
+/// window's binary; nothing opens before a binary is loaded.
 ///
 /// # Arguments
 ///
@@ -212,7 +222,7 @@ pub struct GoToDelegate {
 /// * `binary` - The window's binary.
 /// * `window` - Window the workspace is in.
 /// * `cx` - Workspace context.
-pub fn toggle(
+fn toggle(
     workspace: &mut Workspace,
     binary: &Entity<Binary>,
     window: &mut Window,
@@ -423,11 +433,11 @@ mod tests {
     use picker::Picker;
     use workspace::Workspace;
 
-    use super::{GoToDelegate, Match, marks};
+    use super::{FindEverywhere, GoTo, GoToDelegate, Match, marks};
     use crate::app_view::tests::{CALLEE, CALLER, init, open, sample, take_status};
     use crate::decompile_item::tests::{active as tab, fourth_instruction, open_tab};
     use crate::decompile_item::{DecompileItem, Form, link_place};
-    use crate::functions_panel::Functions;
+    use crate::functions_panel::{Functions, FunctionsPanel};
     use crate::places::Place;
     use crate::rows_panel::RowKind as _;
     use crate::worker::{Jobs, LoadedBinary, decompile_blocking};
@@ -713,6 +723,71 @@ mod tests {
         );
         let kinds: Vec<_> = hits(&lines).iter().map(|hit| hit.kind()).collect();
         assert!(!kinds.contains(&HitKind::String), "{kinds:?}");
+    }
+
+    /// Go to and find everywhere each have a key, and find everywhere's opens the picker
+    /// empty from anywhere in the workspace.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an action has no key or the picker does not open.
+    #[gpui::test]
+    fn find_everywhere_has_a_key_and_opens_the_picker(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
+        open_tab(&workspace, &sample(), (CALLER, Form::Decompile), cx);
+        let keyed = cx.update(|_, cx| {
+            let keymap = cx.key_bindings();
+            let keymap = keymap.borrow();
+            let actions: [&dyn gpui::Action; 2] = [&GoTo, &FindEverywhere];
+            actions.map(|action| keymap.bindings_for_action(action).next().is_some())
+        });
+        assert_eq!(keyed, [true, true]);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.focus_panel::<FunctionsPanel>(window, cx);
+        });
+        cx.simulate_keystrokes("secondary-p");
+        cx.run_until_parked();
+        let picker = workspace.read_with(cx, |workspace, cx| {
+            workspace.active_modal::<Picker<GoToDelegate>>(cx)
+        });
+        let query = picker.map(|picker| picker.read_with(cx, |picker, cx| picker.query(cx)));
+        assert_eq!(query.as_deref(), Some(""));
+    }
+
+    /// ctrl-p in the open picker selects the line above, as in every Zed picker, and leaves
+    /// the picker open: find everywhere's key does not take it there.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the picker closes or the selection does not move up.
+    #[gpui::test]
+    fn ctrl_p_in_the_picker_selects_the_line_above(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
+        open_tab(&workspace, &named_calls(), (CALLER, Form::Decompile), cx);
+        let picker = ask(&workspace, "@_fn", cx);
+        let hits: Vec<usize> = shown(&picker, cx)
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, line)| matches!(line, Match::Hit { .. }).then_some(ix))
+            .collect();
+        let [above, below] = hits[..] else {
+            panic!("two functions listed: {hits:?}");
+        };
+        picker.update_in(cx, |picker, window, cx| {
+            picker.set_selected_index(below, None, false, window, cx);
+        });
+        cx.simulate_keystrokes("ctrl-p");
+        cx.run_until_parked();
+        let open = workspace.read_with(cx, |workspace, cx| {
+            workspace.active_modal::<Picker<GoToDelegate>>(cx).is_some()
+        });
+        assert!(open, "ctrl-p closed the picker");
+        let selected = picker.read_with(cx, |picker, _| picker.delegate.selected);
+        assert_eq!(selected, above);
     }
 
     /// From a listing tab, going to an address inside a function opens that function's
