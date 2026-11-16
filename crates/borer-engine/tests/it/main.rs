@@ -59,6 +59,7 @@ mod emptystr;
 mod emulate_calls;
 mod engine;
 mod families;
+mod find;
 mod fixups;
 mod float_results;
 mod folds;

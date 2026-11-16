@@ -693,7 +693,7 @@ pub fn symbol_rows(
         .take(limit)
         .map(|s| {
             let bare = bare_name(&s.name);
-            let module = s.name.strip_suffix(bare).and_then(|m| m.strip_suffix('!'));
+            let module = symbol_module(&s.name);
             let slot = if s.kind != SymbolKind::Import || s.addr == 0 {
                 SlotUse::NoSlot
             } else if a.xrefs.get(&s.addr).is_some_and(|v| !v.is_empty())
@@ -711,7 +711,7 @@ pub fn symbol_rows(
                 .map(|b| crate::text::one_line(&String::from_utf8_lossy(b)));
             SymbolRow {
                 kind: s.kind,
-                addr: (s.kind != SymbolKind::Import || s.addr != 0).then_some(s.addr),
+                addr: symbol_addr(s),
                 name: demangled_or_raw(bare),
                 module: module.map(str::to_owned),
                 slot,
@@ -725,6 +725,32 @@ pub fn symbol_rows(
         total: matched.len(),
         rows,
     }
+}
+
+/// Returns the module a symbol's name says it comes from: the `dll` of a
+/// `dll!name` import.
+///
+/// # Arguments
+///
+/// * `name` - The symbol's whole name.
+///
+/// # Returns
+///
+/// The module, `None` for a name without one ([`bare_name`]).
+#[must_use]
+pub fn symbol_module(name: &str) -> Option<&str> {
+    name.strip_suffix(bare_name(name))
+        .and_then(|m| m.strip_suffix('!'))
+}
+
+/// Returns where a symbol is: `None` for an import the file gives no slot.
+///
+/// # Arguments
+///
+/// * `s` - The symbol.
+#[must_use]
+pub fn symbol_addr(s: &Symbol) -> Option<u64> {
+    (s.kind != SymbolKind::Import || s.addr != 0).then_some(s.addr)
 }
 
 /// Lists the classes `moc` described: signals, slots, methods and

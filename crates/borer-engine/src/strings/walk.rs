@@ -140,7 +140,7 @@ impl StringRow {
 
 /// One program's walked strings, in offset order per encoding.
 #[derive(Debug)]
-struct StringWalks {
+pub(crate) struct StringWalks {
     /// ASCII runs of at least [`WALK_MIN`] bytes.
     ascii: Vec<RawStringSpan>,
     /// UTF-16LE runs of at least [`WALK_MIN`] code units outside a `#US`
@@ -152,6 +152,18 @@ struct StringWalks {
 }
 
 impl StringWalks {
+    /// Returns every walked run, ASCII then UTF-16LE, each in offset order,
+    /// with no row built.
+    pub(crate) fn spans(&self) -> impl Iterator<Item = RawStringSpan> + '_ {
+        self.ascii.iter().chain(&self.utf16).copied()
+    }
+
+    /// Returns a .NET assembly's user strings, read whole from its `#US`
+    /// heap; empty for every other program.
+    pub(crate) fn user(&self) -> &[StringHit] {
+        &self.user
+    }
+
     /// Returns the rows one encoding asks for, cut to runs of `min` or more.
     ///
     /// # Arguments
@@ -199,7 +211,7 @@ impl StringWalks {
 /// * `p` - The loaded program.
 /// * `a` - Its analysis, whose decoded code the walks leave out
 ///   ([`drop_code_runs`]) and whose memo keeps them.
-fn walks(p: &Program, a: &Analysis) -> Arc<StringWalks> {
+pub(crate) fn walks(p: &Program, a: &Analysis) -> Arc<StringWalks> {
     a.derived.get_or_build("string_walks", (), || {
         let (utf16, user) =
             crate::clr::split_user_strings(p, find_wide_spans(&p.bytes, WALK_MIN), WALK_MIN);
