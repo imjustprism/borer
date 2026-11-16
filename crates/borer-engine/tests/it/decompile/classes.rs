@@ -1488,3 +1488,60 @@ fn a_field_copied_sixteen_bytes_wide_is_kept_and_named() {
     assert!(text.contains("h->bounds"), "{text}");
     assert!(text.contains("h->n"), "{text}");
 }
+
+/// A class's layout, applied, types a method whose signature spells the
+/// class namespace-qualified (`ns::Cls *this`), so its text names the
+/// fields.
+///
+/// `mov eax,[rcx+0x30]; lea r10,[rip+sig]; ret` under `int __cdecl
+/// ns::Cls::Get(void)` prints `int ns::Cls::Get(ns::Cls *this)`; the
+/// prototype stated from it used to be refused for its `:`, leaving
+/// `this->field_0x30` though the struct landed. A prototype stated by hand
+/// with `ns::Cls *` names no struct, since only `Cls` is one: a qualified
+/// name binds only a type spelled the same.
+#[test]
+fn an_applied_class_layout_types_a_qualified_method() {
+    use borer_engine::analysis::apply::from_class;
+    use borer_engine::analysis::classes::class_layout;
+    use borer_engine::analysis::edit::{self, Edit, Force, Laid};
+    use borer_engine::analysis::protos::Proto;
+    let code = [
+        0x8b, 0x41, 0x30, // ASM: mov eax,[rcx+0x30]
+        0x4c, 0x8d, 0x15, 0xf6, 0x0f, 0x00, 0x00, // ASM: lea r10,[rip+0xff6]
+        0xc3, // ASM: ret
+    ];
+    let entry = 0x1_4000_1000;
+    let p = program64_with_data(&code, b"int __cdecl ns::Cls::Get(void) ");
+    let a = Analysis::compute(&p);
+    let plain = Overlay::default();
+    let before = decompile(&p, &a, &plain, entry).unwrap_or_default();
+    assert!(before.contains("ns::Cls *this"), "{before}");
+    let layout = class_layout(&p, &a, &plain, "ns::Cls").expect("class found");
+    let plan = from_class(&p, &a, &plain, &layout, "Cls").expect("a plan");
+    let lines = plan.describe(&a, &plain);
+    assert!(!lines.iter().any(|l| l.starts_with('#')), "{lines:?}");
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    let edits = [Edit::Layout {
+        from: Laid::Class("ns::Cls".to_owned()),
+        name: "Cls".to_owned(),
+    }];
+    let mut o = Overlay::default();
+    let made = edit::plan(&p, &a, &o, &edits, Force::Refuse).expect("planned");
+    edit::commit(&p, &a, &mut o, &made).expect("committed");
+    let after = decompile(&p, &a, &o, entry).unwrap_or_default();
+    assert!(after.contains("this->f_30"), "{after}");
+    let stated = |decl: &str| {
+        let mut stated = Overlay {
+            types: o.types.clone(),
+            ..Overlay::default()
+        };
+        let proto = Proto::parse(decl).expect("a prototype");
+        stated.prototypes.insert(entry, proto);
+        decompile(&p, &a, &stated, entry).unwrap_or_default()
+    };
+    let bare = stated("int (Cls *this)");
+    assert!(bare.contains("this->f_30"), "{bare}");
+    let qualified = stated("int (ns::Cls *this)");
+    assert!(qualified.contains("ns::Cls *this"), "{qualified}");
+    assert!(!qualified.contains("this->f_30"), "{qualified}");
+}

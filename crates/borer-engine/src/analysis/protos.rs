@@ -96,6 +96,10 @@ impl CType {
     /// The type in the user-type language, when the base names a user type
     /// the overlay defines: what field and enum lookups take.
     ///
+    /// A qualified base (`ecs::GridCollision`) names only a user type
+    /// spelled the same, never the one of its last part: `b::Cls` is not
+    /// the `Cls` stated for `a::Cls`.
+    ///
     /// # Arguments
     ///
     /// * `types` - The overlay's user types.
@@ -795,14 +799,18 @@ enum Tok {
 
 /// Splits a declaration into words and pointers.
 ///
+/// A `::` between two identifiers joins them into one word, so a
+/// namespace-qualified class (`ecs::GridCollision`, `a::b::C`) is one type
+/// word; any other `:` is refused.
+///
 /// # Arguments
 ///
 /// * `text` - The declaration, or a part of one.
 ///
 /// # Errors
 ///
-/// When a character is neither part of an identifier, a `*`, `[]`, nor
-/// space.
+/// When a character is neither part of an identifier, a `::` between
+/// two, a `*`, `[]`, nor space.
 fn tokens(text: &str) -> anyhow::Result<Vec<Tok>> {
     let mut out: Vec<Tok> = Vec::new();
     let mut word = String::new();
@@ -810,6 +818,18 @@ fn tokens(text: &str) -> anyhow::Result<Vec<Tok>> {
     while let Some(c) = chars.next() {
         if c.is_ascii_alphanumeric() || c == '_' {
             word.push(c);
+            continue;
+        }
+        let mut ahead = chars.clone();
+        if c == ':'
+            && !word.is_empty()
+            && ahead.next() == Some(':')
+            && ahead
+                .next()
+                .is_some_and(|n| n.is_ascii_alphabetic() || n == '_')
+        {
+            chars.next();
+            word.push_str("::");
             continue;
         }
         if !word.is_empty() {
@@ -844,8 +864,8 @@ fn tokens(text: &str) -> anyhow::Result<Vec<Tok>> {
 /// # Errors
 ///
 /// When no word leads, a word follows a pointer (`char * const` reads,
-/// `char * x y` does not), a word is not an identifier, or the pointers
-/// pass [`utypes::PTR_DEPTH_MAX`].
+/// `char * x y` does not), a word is not an identifier or identifiers
+/// joined by `::`, or the pointers pass [`utypes::PTR_DEPTH_MAX`].
 fn type_of(toks: &[Tok], text: &str) -> anyhow::Result<CType> {
     let shown = || crate::text::quoted(text);
     let mut words: Vec<&str> = Vec::new();
@@ -869,7 +889,7 @@ fn type_of(toks: &[Tok], text: &str) -> anyhow::Result<CType> {
     }
     if let Some(bad) = words
         .iter()
-        .find(|w| !utypes::is_ident(w) || w.starts_with(|c: char| c.is_ascii_digit()))
+        .find(|w| !is_qualified(w) || w.starts_with(|c: char| c.is_ascii_digit()))
     {
         return Err(anyhow::anyhow!(
             "{} is not a type word in {}",
@@ -888,6 +908,16 @@ fn type_of(toks: &[Tok], text: &str) -> anyhow::Result<CType> {
         base: words.join(" "),
         stars,
     })
+}
+
+/// Tells whether a type word is an identifier, or identifiers joined by
+/// `::` (`ecs::GridCollision`), at most [`crate::text::OUTSIDE_MAX`] long.
+///
+/// # Arguments
+///
+/// * `word` - The word.
+fn is_qualified(word: &str) -> bool {
+    word.len() <= crate::text::OUTSIDE_MAX && word.split("::").all(utypes::is_ident)
 }
 
 /// Tells whether a word is part of a type rather than a name: a C keyword
@@ -1062,6 +1092,64 @@ mod tests {
         assert!(err("int f(int $x)").contains("no type or name"));
         let many = format!("int f({})", vec!["int"; 40].join(", "));
         assert!(err(&many).contains("most"));
+    }
+
+    /// A namespace-qualified class is one type word and spells back.
+    ///
+    /// The qualified function name is dropped and never read as the return
+    /// type; any other `:`, a template, and a qualified parameter name are
+    /// refused as before.
+    #[test]
+    fn a_qualified_class_is_one_type_word() {
+        let p = Proto::parse("void a::b::C::Init(a::b::C *this, const ecs::Box2 *box, float)")
+            .expect("qualified names parse");
+        assert_eq!((p.ret.clone(), p.params.len()), (None, 3));
+        assert_eq!(
+            p.spell(),
+            "void (a::b::C *this, const ecs::Box2 *box, float)"
+        );
+        assert_eq!(Proto::parse(&p.spell()).expect("round trip"), p);
+        let named = Proto::parse("uint32_t *a::C::Get(void)").expect("a qualified getter");
+        assert_eq!(named.spell(), "uint32_t * (void)");
+        let err = |t: &str| Proto::parse(t).expect_err(t).to_string();
+        assert!(
+            err("void (a::B<int> *this)").contains("holds '<'"),
+            "{}",
+            err("void (a::B<int> *this)")
+        );
+        for colon in [
+            "void (a:b *x)",
+            "void (::a *x)",
+            "void (a:: *x)",
+            "void (a:::b *x)",
+        ] {
+            assert!(err(colon).contains("holds ':'"), "{colon}: {}", err(colon));
+        }
+        assert!(
+            err("void (int a::x)").contains("not a name"),
+            "{}",
+            err("void (int a::x)")
+        );
+    }
+
+    /// A qualified class names only a user type spelled the same: with
+    /// `Cls` stated (for `a::Cls`), `a::Cls *` and `b::Cls *` point at no
+    /// user struct, and `Cls *` points at it.
+    #[test]
+    fn a_qualified_class_binds_only_its_own_spelling() {
+        let cls = build_struct(
+            "Cls",
+            None,
+            &[(0, "x".to_owned(), TypeExpr::U32)],
+            &BTreeMap::new(),
+            8,
+        )
+        .expect("a struct");
+        let types = BTreeMap::from([("Cls".to_owned(), cls)]);
+        let bound = |t: &str| CType::parse(t).expect(t).pointee(&types).map(|s| s.size);
+        assert_eq!(bound("Cls *"), Some(4));
+        assert_eq!(bound("a::Cls *"), None);
+        assert_eq!(bound("b::Cls *"), None);
     }
 
     /// Variables key by the name the text shows, and refuse registers.
