@@ -4,13 +4,15 @@
 use std::any::Any;
 
 use gpui::{
-    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
-    WeakEntity, Window, div,
+    Action, AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle,
+    Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    Styled as _, WeakEntity, Window, div,
 };
 use theme::ActiveTheme as _;
+use ui::{Color, KeyBinding, Label, LabelCommon as _, LabelSize};
 use workspace::{Item, Pane, Workspace};
 
+use crate::actions::Open;
 use crate::app_view::open_dropped;
 
 /// A tab that says how to open a binary and opens a binary dropped on it.
@@ -122,15 +124,38 @@ impl Item for StartItem {
     }
 }
 
+/// Returns one line of the start tab: `label`, then the binding of `action` when it has one.
+///
+/// # Arguments
+///
+/// * `label` - What the line says.
+/// * `action` - The action whose key the line shows, if any.
+/// * `cx` - Application context reading the keymap.
+fn hint(label: &'static str, action: Option<&dyn Action>, cx: &App) -> AnyElement {
+    div()
+        .flex()
+        .gap_2()
+        .items_center()
+        .child(Label::new(label).color(Color::Muted))
+        .children(action.map(|action| KeyBinding::for_action(action, cx)))
+        .into_any_element()
+}
+
 impl Render for StartItem {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let palette = cx.build_action("command_palette::Toggle", None).ok();
         div()
             .track_focus(&self.focus_handle)
             .size_full()
+            .bg(cx.theme().colors().editor_background)
             .flex()
+            .flex_col()
+            .gap_2()
             .items_center()
             .justify_center()
-            .text_color(cx.theme().colors().text_muted)
-            .child("Open a binary with borer: open, or drop one here.")
+            .child(Label::new("Open a binary").size(LabelSize::Large))
+            .child(hint("Open", Some(&Open), cx))
+            .child(hint("Drop a file anywhere", None, cx))
+            .child(hint("Every command", palette.as_deref(), cx))
     }
 }
