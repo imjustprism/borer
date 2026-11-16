@@ -8,27 +8,33 @@
 //! sits at the address of the top line, and a click or a drag on it asks for the page at
 //! the address under the pointer.
 //!
+//! Beside the scrollbar, the overview band ([`band`]) splits the same range into one cell
+//! per pixel, each in the color of what holds most of its bytes; a click on a cell goes to
+//! its first address.
+//!
 //! [`linear`]: borer_engine::analysis::render::linear
+//! [`band`]: borer_engine::analysis::render::band
 
 use std::cell::Cell;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use borer_engine::analysis::render::{Dir, LinearPage, Row};
-use borer_engine::num::as_f64;
+use borer_engine::analysis::render::{Cell as BandCell, CellKind, Dir, LinearPage, Row};
+use borer_engine::num::{as_f64, from_usize};
 use borer_engine::view::View;
 use editor::scroll::ScrollAnchor;
 use editor::{EditorEvent, SelectionEffects, SemanticsProvider};
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
-    ParentElement as _, Pixels, Render, SharedString, Styled as _, Subscription, WeakEntity,
-    Window, canvas, div, fill, point, px,
+    Focusable, Hsla, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent,
+    MouseMoveEvent, ParentElement as _, Pixels, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, canvas, div,
+    fill, point, px,
 };
 use language::{Buffer, BufferId, Point};
 use theme::ActiveTheme as _;
-use ui::{Icon, IconName};
+use ui::{Icon, IconName, Tooltip};
 use workspace::{Item, Workspace};
 
 use crate::actions::{BACK_HINT, FollowLink, Hint};
@@ -37,7 +43,7 @@ use crate::card::{Card, Tone};
 use crate::code_semantics::ViewSemantics;
 use crate::code_view::CodeLines;
 use crate::decompile_item::{DecompileItem, Form, buffer_row, text_buffer, whole_rows};
-use crate::worker::{Job, LoadedBinary, linear_page};
+use crate::worker::{Job, LoadedBinary, band_cells, linear_page};
 
 /// Rows one page asks the engine for.
 const PAGE_ROWS: usize = 512;
@@ -55,6 +61,9 @@ const SCROLLBAR_PX: f32 = 10.0;
 
 /// Fewest logical pixels the scrollbar's thumb is tall.
 const THUMB_MIN_PX: f32 = 4.0;
+
+/// Width in logical pixels of the overview band.
+const BAND_PX: f32 = 8.0;
 
 /// One page the tab keeps: its lines, its rows and where the pages beside it start.
 #[derive(Debug, Clone)]
@@ -277,6 +286,16 @@ pub struct LinearItem {
     scrollbar: Rc<Cell<Bounds<Pixels>>>,
     /// The page request.
     job: Job,
+    /// The overview band's cells, in address order.
+    band: Vec<BandCell>,
+    /// Cells the band was last asked in: one per pixel of its height.
+    band_for: usize,
+    /// The band request.
+    band_job: Job,
+    /// Where the band was last laid out, for the cell under the pointer.
+    band_laid: Rc<Cell<Bounds<Pixels>>>,
+    /// The cell under the pointer, which the band's hover names.
+    hovered: Rc<Cell<Option<BandCell>>>,
 }
 
 impl std::fmt::Debug for LinearItem {
@@ -331,6 +350,11 @@ impl LinearItem {
             scrolls: None,
             scrollbar: Rc::default(),
             job: Job::default(),
+            band: Vec::new(),
+            band_for: 0,
+            band_job: Job::default(),
+            band_laid: Rc::default(),
+            hovered: Rc::default(),
         };
         item.fetch(0, Dir::Next, Fetch::Reset(0), window, cx);
         item
@@ -348,10 +372,10 @@ impl LinearItem {
         &self.code
     }
 
-    /// Returns whether a page request is running.
+    /// Returns whether a page or band request is running.
     #[must_use]
     pub fn is_fetching(&self) -> bool {
-        self.job.is_running()
+        self.job.is_running() || self.band_job.is_running()
     }
 
     /// Shows the row holding `va` at the top, the cursor on it: at once when a kept page
@@ -653,6 +677,147 @@ impl LinearItem {
     }
 }
 
+impl LinearItem {
+    /// Asks the engine for the band in one cell per pixel of the band's height, when that
+    /// height changed since the last request.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Item context.
+    fn ask_cells(&mut self, cx: &mut Context<'_, Self>) {
+        let cells = whole_rows(f64::from(self.band_laid.get().size.height.as_f32()));
+        if cells == 0 || cells == self.band_for {
+            return;
+        }
+        self.band_for = cells;
+        let loaded = self.loaded.clone();
+        let label = format!("Banding the image in {cells} cells");
+        let work = move || band_cells(&loaded, cells);
+        self.band_job.run(label, cx, work, |item, band, cx| {
+            item.band = band;
+            cx.notify();
+        });
+    }
+
+    /// Returns the band's cell under a pointer at `y`, `None` off the band or before it is in.
+    ///
+    /// # Arguments
+    ///
+    /// * `y` - The pointer's height in the window.
+    #[must_use]
+    pub fn cell_at(&self, y: Pixels) -> Option<BandCell> {
+        let bounds = self.band_laid.get();
+        let share = (y - bounds.top()) / bounds.size.height;
+        if !(0.0..1.0).contains(&share) {
+            return None;
+        }
+        let ix = whole_rows(f64::from(share) * as_f64(from_usize(self.band.len())));
+        self.band.get(ix).copied()
+    }
+
+    /// Returns where the band was last laid out and its cells.
+    #[must_use]
+    pub fn cells(&self) -> (Bounds<Pixels>, &[BandCell]) {
+        (self.band_laid.get(), &self.band)
+    }
+
+    /// Draws the overview band: each cell in its kind's color, and the shown addresses
+    /// outlined.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Item context.
+    fn render_cells(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
+        self.ask_cells(cx);
+        let colors: Vec<Hsla> = self.band.iter().map(|c| cell_color(c.kind, cx)).collect();
+        let (thumb, marker) = (self.thumb(cx), cx.theme().colors().text);
+        let (laid, hovered) = (self.band_laid.clone(), self.hovered.clone());
+        let paint = canvas(
+            move |bounds, window, _| {
+                if laid.replace(bounds).size.height != bounds.size.height {
+                    window.refresh();
+                }
+            },
+            move |bounds, (), window, _| {
+                let n = from_usize(colors.len());
+                let y = |i: usize| bounds.size.height * share_of(from_usize(i), n);
+                for (i, color) in colors.iter().enumerate() {
+                    let origin = point(bounds.left(), bounds.top() + y(i));
+                    let size = gpui::size(bounds.size.width, y(i + 1) - y(i));
+                    window.paint_quad(fill(Bounds::new(origin, size), *color));
+                }
+                if let Some((top, bottom)) = thumb {
+                    let height = bounds.size.height;
+                    let tall = (height * (bottom - top)).max(px(THUMB_MIN_PX));
+                    let origin = point(bounds.left(), bounds.top() + height * top);
+                    let shown = Bounds::new(origin, gpui::size(bounds.size.width, tall));
+                    window.paint_quad(gpui::outline(shown, marker, gpui::BorderStyle::Solid));
+                }
+            },
+        );
+        div()
+            .id("linear-band")
+            .w(px(BAND_PX))
+            .h_full()
+            .child(paint.size_full())
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|item, event: &MouseDownEvent, window, cx| {
+                    if let Some(cell) = item.cell_at(event.position.y) {
+                        item.go_to(cell.first, window, cx);
+                    }
+                }),
+            )
+            .on_mouse_move(cx.listener(|item, event: &MouseMoveEvent, _, _| {
+                item.hovered.set(item.cell_at(event.position.y));
+            }))
+            .tooltip(move |_, cx| {
+                let text = hovered.get().map_or_else(String::new, |cell| {
+                    format!("{} at {:#x}", cell_name(cell.kind), cell.first)
+                });
+                Tooltip::simple(text, cx)
+            })
+            .into_any_element()
+    }
+}
+
+/// Returns the color the band paints a cell of `kind` in, from the theme's status colors.
+///
+/// Code is `info`, data `warning`, strings `success`, unexplored bytes `unreachable` and the
+/// gaps between sections `hidden`.
+///
+/// # Arguments
+///
+/// * `kind` - What holds most of the cell's bytes.
+/// * `cx` - Application context reading the theme.
+#[must_use]
+pub fn cell_color(kind: CellKind, cx: &App) -> Hsla {
+    let status = cx.theme().status();
+    match kind {
+        CellKind::Code => status.info,
+        CellKind::Data => status.warning,
+        CellKind::String => status.success,
+        CellKind::Unexplored => status.unreachable,
+        CellKind::Unmapped => status.hidden,
+    }
+}
+
+/// Returns what the band's hover says a cell of `kind` holds, in the engine's words.
+///
+/// # Arguments
+///
+/// * `kind` - What holds most of the cell's bytes.
+#[must_use]
+pub const fn cell_name(kind: CellKind) -> &'static str {
+    match kind {
+        CellKind::Code => "code: instructions of discovered blocks",
+        CellKind::Data => "data: a typed value, a pointer, or bytes a name the file states names",
+        CellKind::String => "string: a string the walk found",
+        CellKind::Unexplored => "unexplored: bytes inside a section no fact covers",
+        CellKind::Unmapped => "unmapped: addresses between two sections",
+    }
+}
+
 /// Returns the image's first address and one past its last: the first row's start and the
 /// last row's end.
 ///
@@ -742,6 +907,7 @@ impl Render for LinearItem {
                     .child(self.code.clone())
                     .children(card.map(|card| div().absolute().inset_0().child(card))),
             )
+            .child(self.render_cells(cx))
             .child(self.render_scrollbar(cx))
     }
 }
@@ -754,10 +920,12 @@ impl Render for LinearItem {
 pub(crate) mod tests {
     use std::sync::Arc;
 
-    use borer_engine::analysis::render::Dir;
+    use borer_engine::analysis::render::{CellKind, Dir};
     use borer_engine::analysis::{Analysis, EnumSource, Overlay};
+    use borer_engine::num::from_usize;
     use borer_engine::program::{Arch, BinaryFormat, Program, Section};
     use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, point};
+    use theme::ActiveTheme as _;
     use workspace::Workspace;
 
     use super::{AHEAD_LINES, LinearItem, PAGE_ROWS, PAGES_MAX, Page, Pages};
@@ -943,6 +1111,76 @@ pub(crate) mod tests {
             let (_, top) = shown(&item, cx);
             let row = item.read_with(cx, |item, _| item.pages.row_lines(want));
             assert_eq!(row.map(|r| r.start), Some(top), "{want:#x}");
+        }
+    }
+
+    /// A click on a cell of the band shows the row holding the cell's first address at the
+    /// top, for a cell of code and one of data no fact covers.
+    #[gpui::test]
+    fn a_click_on_a_band_cell_goes_to_its_first_address(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
+        let item = open_linear(&workspace, &long_sample(), None, cx);
+        let (bounds, cells) = item.read_with(cx, |item, _| {
+            let (bounds, cells) = item.cells();
+            (bounds, cells.to_vec())
+        });
+        assert!(cells.len() > 16, "{}", cells.len());
+        let n = cells.len();
+        for kind in [CellKind::Code, CellKind::Unexplored] {
+            let ix = cells.iter().rposition(|c| c.kind == kind).unwrap();
+            let share = super::share_of(from_usize(2 * ix + 1), from_usize(2 * n));
+            let y = bounds.top() + bounds.size.height * share;
+            assert_eq!(
+                item.read_with(cx, |item, _| item.cell_at(y)),
+                Some(cells[ix])
+            );
+            cx.simulate_click(point(bounds.center().x, y), Modifiers::none());
+            settle(&item, cx);
+            let (_, top) = shown(&item, cx);
+            let row = item.read_with(cx, |item, _| item.pages.row_lines(cells[ix].first));
+            assert_eq!(row.map(|r| r.start), Some(top), "{kind:?}");
+        }
+    }
+
+    /// Returns whether `kind` is one of the kinds the color test lists; adding a kind
+    /// fails to build until it is listed.
+    const fn listed(kind: CellKind) -> bool {
+        match kind {
+            CellKind::Code
+            | CellKind::Data
+            | CellKind::String
+            | CellKind::Unexplored
+            | CellKind::Unmapped => true,
+        }
+    }
+
+    /// Each kind of cell has a color of its own in borer's dark and light themes, none the
+    /// editor's background.
+    #[gpui::test]
+    fn each_cell_kind_has_its_own_color(cx: &mut TestAppContext) {
+        let kinds = [
+            CellKind::Code,
+            CellKind::Data,
+            CellKind::String,
+            CellKind::Unexplored,
+            CellKind::Unmapped,
+        ];
+        assert!(kinds.into_iter().all(listed));
+        init(cx);
+        for name in ["borer dark", "borer light"] {
+            let (colors, background) = cx.update(|cx| {
+                let theme = theme::ThemeRegistry::global(cx).get(name).unwrap();
+                theme::GlobalTheme::update_theme(cx, theme);
+                let background = cx.theme().colors().editor_background;
+                (kinds.map(|kind| super::cell_color(kind, cx)), background)
+            });
+            for (i, color) in colors.iter().enumerate() {
+                assert_ne!(*color, background, "{:?} in {name}", kinds[i]);
+                let unique = colors[i + 1..].iter().all(|c| c != color);
+                assert!(unique, "{:?} in {name}", kinds[i]);
+            }
         }
     }
 

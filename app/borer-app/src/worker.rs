@@ -14,8 +14,8 @@ use borer_engine::analysis::decompile::text_check;
 use borer_engine::analysis::decompile::view::view;
 use borer_engine::analysis::find::{Found, Query, everywhere};
 use borer_engine::analysis::render::{
-    Bytes, Dir, FunctionOrder, FunctionRows, LinearPage, Triage, answered_flagged, disasm_view,
-    function_rows, linear, triage,
+    Bytes, Cell as BandCell, Dir, FunctionOrder, FunctionRows, LinearPage, Triage,
+    answered_flagged, band, disasm_view, function_rows, linear, triage,
 };
 use borer_engine::analysis::{Analysis, EnumSource, Overlay, no_function_at, resolve_suggesting};
 use borer_engine::cancel::Cancel;
@@ -603,6 +603,19 @@ pub fn linear_page(
     })
 }
 
+/// Returns the overview band of `loaded` in `cells` equal address buckets.
+///
+/// Must be called inside [`spawn_engine`].
+///
+/// # Arguments
+///
+/// * `loaded` - Previously loaded binary state.
+/// * `cells` - Buckets wanted; the engine holds them between 1 and its cap.
+#[must_use]
+pub fn band_cells(loaded: &LoadedBinary, cells: usize) -> Vec<BandCell> {
+    band(&loaded.program, &loaded.analysis, &loaded.overlay, cells)
+}
+
 /// Returns the engine's triage of `loaded`: what the file is, how it is protected, what it
 /// can do and the functions to read first.
 ///
@@ -941,6 +954,7 @@ mod tests {
             "decompile::view",
             "disasm_view(",
             "linear(&",
+            "band(&",
             "resolve_suggesting(",
             "function_rows(",
             "text_check(",
