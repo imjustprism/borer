@@ -24,8 +24,8 @@ use command_palette_hooks::CommandPaletteFilter;
 use db::kvp::KeyValueStore;
 use editor::Editor;
 use gpui::{
-    App, AppContext as _, BorrowAppContext as _, Bounds, Entity, ExternalPaths, WeakEntity, Window,
-    WindowBounds, WindowOptions, px, size,
+    App, AppContext as _, Bounds, Entity, ExternalPaths, WeakEntity, Window, WindowBounds,
+    WindowOptions, px, size,
 };
 use http_client::{BlockedHttpClient, HttpClientWithUrl};
 use language::LanguageRegistry;
@@ -33,7 +33,6 @@ use node_runtime::NodeRuntime;
 use project::trusted_worktrees::{self, DbTrustedPaths};
 use project::{LocalProjectFlags, Project};
 use session::{AppSession, Session};
-use settings::SettingsStore;
 use workspace::dock::DockPosition;
 use workspace::{
     AddFolderToProject, AppState, DockStructure, MultiWorkspace, Workspace, WorkspaceId,
@@ -60,9 +59,6 @@ const DEFAULT_DOCK_STATE_KEY: &str = "default_dock_state";
 
 /// What the status line ends with when a tab refuses a dropped folder.
 pub const REFUSED_FOLDER: &str = "is a folder; drop a binary";
-
-/// The app's settings over Zed's defaults: AI off.
-const APP_SETTINGS: &str = include_str!("../settings.json");
 
 /// Default window width in logical pixels.
 const WINDOW_WIDTH_PX: f32 = 1280.0;
@@ -104,7 +100,8 @@ pub fn data_dir(mode: &CliMode, given: Option<PathBuf>) -> anyhow::Result<PathBu
     }
 }
 
-/// Points Zed's settings, keymap, database and logs at `dir`.
+/// Points Zed's settings, keymap, database and logs at `dir`, and creates the config
+/// directory there, which the person's settings file is written in.
 ///
 /// Must run before anything reads Zed's data or config directory.
 ///
@@ -114,14 +111,15 @@ pub fn data_dir(mode: &CliMode, given: Option<PathBuf>) -> anyhow::Result<PathBu
 ///
 /// # Errors
 ///
-/// Returns an error when the directory cannot be created or its path is not UTF-8.
+/// Returns an error when a directory cannot be created or the path is not UTF-8.
 pub fn set_data_dir(dir: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let name = dir
         .to_str()
         .with_context(|| format!("the data directory {} is not UTF-8", dir.display()))?;
     paths::set_custom_data_dir(name);
-    Ok(())
+    let config = paths::config_dir();
+    std::fs::create_dir_all(config).with_context(|| format!("creating {}", config.display()))
 }
 
 /// Returns the options of a new app window: centered at the default size.
@@ -151,7 +149,7 @@ pub fn window_options(cx: &App) -> WindowOptions {
 ///
 /// # Errors
 ///
-/// Returns an error when Zed's fonts or the keymaps do not load.
+/// Returns an error when Zed's fonts do not load, or when [`configure`] fails.
 pub fn init(cx: &mut App) -> anyhow::Result<Arc<AppState>> {
     let app_db = db::AppDatabase::new();
     let kvp = KeyValueStore::from_app_db(&app_db);
@@ -180,23 +178,21 @@ pub fn init(cx: &mut App) -> anyhow::Result<Arc<AppState>> {
     Ok(app_state)
 }
 
-/// Applies the app's settings, keymap and command palette over Zed's.
+/// Applies borer's theme and the app's settings, keymap and command palette over Zed's.
 ///
-/// It also gives Zed's pickers their input, untrusts every folder, hides Zed's add folder
-/// action from the palette, and saves each window's layout on quit.
+/// The theme and the settings layers are [`crate::app_settings::apply`]'s. It also gives
+/// Zed's pickers their input, untrusts every folder, hides Zed's add folder action from the
+/// palette, and saves each window's layout on quit.
 ///
 /// # Arguments
 ///
-/// * `cx` - Application context, Zed's settings store already set.
+/// * `cx` - Application context, Zed's settings store, themes and file system already set.
 ///
 /// # Errors
 ///
-/// Returns an error when the app's settings or the keymaps do not load.
+/// Returns an error when borer's theme, the app's settings or the keymaps do not load.
 pub fn configure(cx: &mut App) -> anyhow::Result<()> {
-    cx.update_global(|store: &mut SettingsStore, cx| {
-        store.set_user_settings(APP_SETTINGS, cx).result()
-    })
-    .context("loading the app's settings")?;
+    crate::app_settings::apply(cx)?;
     ui_input::ERASED_EDITOR_FACTORY.get_or_init(|| erased_editor);
     trusted_worktrees::init(DbTrustedPaths::default(), cx);
     crate::actions::bind_keys(cx)?;
@@ -444,6 +440,19 @@ mod tests {
     /// Entry of the sample program's callee.
     const CALLEE: u64 = 0x1030;
 
+    /// Points Zed's paths at one data directory of the tests, once per process, so no test
+    /// resolves the person's own Zed settings.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the directory cannot be created.
+    fn use_test_data_dir() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            super::set_data_dir(&std::env::temp_dir().join("borer-app-tests")).unwrap();
+        });
+    }
+
     /// Starts Zed's test app state over a fresh in-memory database, configured as the app
     /// configures Zed.
     ///
@@ -451,6 +460,7 @@ mod tests {
     ///
     /// Panics if the app's settings or the keymaps do not load.
     fn init(cx: &mut TestAppContext) -> Arc<AppState> {
+        use_test_data_dir();
         cx.update(|cx| {
             cx.set_global(db::AppDatabase::test_new());
             let app_state = AppState::test(cx);

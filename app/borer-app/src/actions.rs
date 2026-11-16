@@ -13,6 +13,12 @@ gpui::actions!(
         FocusFilter,
         /// Shows the functions panel and focuses it, or moves focus back to the center pane.
         ToggleFunctions,
+        /// Switches between borer's dark and light theme and keeps the choice in the app's
+        /// settings file.
+        ToggleTheme,
+        /// Follows the system's light or dark appearance again, and keeps that in the app's
+        /// settings file.
+        FollowSystemTheme,
     ]
 );
 

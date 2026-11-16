@@ -4,7 +4,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpui::{Context, Entity, IntoElement, PathPromptOptions, Render, Subscription, Task, Window};
+use gpui::{
+    App, Context, Entity, Global, IntoElement, PathPromptOptions, Render, SharedString,
+    Subscription, Task, Window,
+};
 use ui::{Color, Label, LabelCommon as _, LabelSize};
 use workspace::{HideStatusItem, ItemHandle, StatusItemView};
 
@@ -178,9 +181,16 @@ impl Binary {
 pub struct StatusLine {
     /// The binary whose status this shows.
     binary: Entity<Binary>,
-    /// Repaints the line when the binary changes.
-    _observe: Subscription,
+    /// Repaints the line when the binary or the settings notice changes.
+    _observe: [Subscription; 2],
 }
+
+/// What went wrong with the person's settings file, read at startup or written by a theme
+/// action, `None` while nothing did; every status line shows it before the binary's status.
+#[derive(Debug, Clone, Default)]
+pub struct SettingsNotice(pub Option<SharedString>);
+
+impl Global for SettingsNotice {}
 
 impl std::fmt::Debug for StatusLine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -197,17 +207,34 @@ impl StatusLine {
     /// * `cx` - Status line context.
     #[must_use]
     pub fn new(binary: Entity<Binary>, cx: &mut Context<'_, Self>) -> Self {
-        let observe = cx.observe(&binary, |_, _, cx| cx.notify());
+        let observe = [
+            cx.observe(&binary, |_, _, cx| cx.notify()),
+            cx.observe_global::<SettingsNotice>(|_, cx| cx.notify()),
+        ];
         Self {
             binary,
             _observe: observe,
+        }
+    }
+
+    /// Returns the line's text: the settings notice, if any, then the binary's status.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Application context reading the binary and the notice.
+    #[must_use]
+    pub fn text(&self, cx: &App) -> String {
+        let status = self.binary.read(cx).status();
+        match cx.try_global::<SettingsNotice>().and_then(|n| n.0.as_ref()) {
+            Some(notice) => format!("{notice}; {status}"),
+            None => status.to_owned(),
         }
     }
 }
 
 impl Render for StatusLine {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        Label::new(self.binary.read(cx).status().to_owned())
+        Label::new(self.text(cx))
             .size(LabelSize::Small)
             .color(Color::Muted)
     }
@@ -222,7 +249,7 @@ impl StatusItemView for StatusLine {
     ) {
     }
 
-    fn hide_setting(&self, _cx: &gpui::App) -> Option<HideStatusItem> {
+    fn hide_setting(&self, _cx: &App) -> Option<HideStatusItem> {
         None
     }
 }

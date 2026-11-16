@@ -1,0 +1,271 @@
+//! The app's settings over Zed's, and the theme actions that write the person's file.
+//!
+//! borer's theme is loaded, the app's settings are Zed's global layer, and the person's
+//! settings file in the app's data directory is the user layer over them.
+
+use std::path::Path;
+use std::sync::{Arc, OnceLock};
+
+use anyhow::Context as _;
+use borer_engine::program::checked_metadata;
+use gpui::{App, BorrowAppContext as _, SharedString};
+use settings::{ParseStatus, Settings as _, SettingsFile, SettingsStore, ThemeAppearanceMode};
+use theme::{ActiveTheme as _, Appearance, ThemeRegistry};
+use theme_settings::ThemeSettings;
+
+use crate::actions::{FollowSystemTheme, ToggleTheme};
+use crate::binary::SettingsNotice;
+
+/// The app's settings over Zed's defaults: AI off, borer's theme, fonts and density.
+const APP_SETTINGS: &str = include_str!("../settings.json");
+
+/// borer's theme family, `borer dark` and `borer light`, in Zed's theme format.
+pub const BORER_THEME: &[u8] = include_bytes!("../themes/borer.json");
+
+/// Most bytes a person's settings file may hold before the app refuses to read it.
+const MAX_SETTINGS_BYTES: u64 = 1 << 20;
+
+/// What a theme action makes of the theme mode the person's settings file holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThemeChange {
+    /// Dark becomes light and light dark; following the system becomes the other of what
+    /// is shown.
+    Flip,
+    /// Follow the system's appearance.
+    FollowSystem,
+}
+
+/// Loads borer's theme, applies the app's settings and the person's settings file, and
+/// registers the theme actions.
+///
+/// A person's file that is missing is created empty, so it adds nothing and later writes
+/// start from nothing rather than from Zed's template. One that does not read or parse
+/// leaves the app's settings in force and says why on every status line.
+///
+/// # Arguments
+///
+/// * `cx` - Application context, Zed's settings store, themes and file system already set.
+///
+/// # Errors
+///
+/// Returns an error when borer's theme or the app's settings do not load.
+pub fn apply(cx: &mut App) -> anyhow::Result<()> {
+    theme_settings::load_user_theme(&ThemeRegistry::global(cx), BORER_THEME)
+        .context("loading the borer theme")?;
+    cx.update_global(|store: &mut SettingsStore, cx| {
+        store.set_global_settings(APP_SETTINGS, cx).result()
+    })
+    .context("loading the app's settings")?;
+    let notice = match load_person_settings(cx) {
+        Ok(()) => file_notice(cx),
+        Err(err) => Some(format!("settings file not applied: {err:#}").into()),
+    };
+    cx.set_global(SettingsNotice(notice));
+    cx.on_action(|_: &ToggleTheme, cx| change_theme(ThemeChange::Flip, cx));
+    cx.on_action(|_: &FollowSystemTheme, cx| change_theme(ThemeChange::FollowSystem, cx));
+    Ok(())
+}
+
+/// Applies the person's settings file as Zed's user layer, creating it empty when missing;
+/// how its fields parsed is [`file_notice`]'s to say.
+///
+/// # Arguments
+///
+/// * `cx` - Application context.
+///
+/// # Errors
+///
+/// Returns an error when [`check_settings_path`] refuses the path, or the file cannot be
+/// stated, read or created; a file whose text does not parse at all is left out, and
+/// [`file_notice`] says so.
+fn load_person_settings(cx: &mut App) -> anyhow::Result<()> {
+    let fs = <dyn fs::Fs>::global(cx);
+    let path = paths::settings_file();
+    check_settings_path(path)?;
+    let block = cx.foreground_executor().clone();
+    let meta = block
+        .block_on(fs.metadata(path))
+        .with_context(|| format!("stating {}", path.display()))?;
+    let text = if meta.is_some() {
+        block
+            .block_on(fs.load(path))
+            .with_context(|| format!("reading {}", path.display()))?
+    } else {
+        block
+            .block_on(fs.atomic_write(path.clone(), String::new()))
+            .with_context(|| format!("creating {}", path.display()))?;
+        String::new()
+    };
+    cx.update_global(|store: &mut SettingsStore, cx| drop(store.set_user_settings(&text, cx)));
+    Ok(())
+}
+
+/// Refuses a settings path that is there but is not a small regular file.
+///
+/// Following links, a directory, device, pipe or socket is refused, and so is a file over
+/// [`MAX_SETTINGS_BYTES`], so nothing blocks on it or reads a huge file; a path where
+/// nothing is passes.
+///
+/// # Arguments
+///
+/// * `path` - The settings file's path.
+///
+/// # Errors
+///
+/// Returns an error naming the path and why it is refused.
+fn check_settings_path(path: &Path) -> anyhow::Result<()> {
+    let meta = checked_metadata(path).map_err(|why| anyhow::anyhow!("{why}"))?;
+    let Some(meta) = meta else {
+        return Ok(());
+    };
+    if !meta.file_type().is_file() {
+        anyhow::bail!("{} is not a regular file", path.display());
+    }
+    if meta.len() > MAX_SETTINGS_BYTES {
+        anyhow::bail!(
+            "{} holds {} bytes, over the {MAX_SETTINGS_BYTES} the app reads",
+            path.display(),
+            meta.len()
+        );
+    }
+    Ok(())
+}
+
+/// Returns what the person's settings file's last parse leaves to say: nothing when every
+/// field applied, which fields did not when the rest did, and that none did when its text
+/// does not parse.
+///
+/// # Arguments
+///
+/// * `cx` - Application context reading Zed's settings store.
+fn file_notice(cx: &App) -> Option<SharedString> {
+    let store = cx.global::<SettingsStore>();
+    let ParseStatus::Failed { error } = store.error_for_file(SettingsFile::User)?.parse_status
+    else {
+        return None;
+    };
+    let how = if store.raw_user_settings().is_some() {
+        "partly applied"
+    } else {
+        "not applied"
+    };
+    Some(format!("settings file {how}: {error}").into())
+}
+
+/// Writes `change` of the theme mode to the person's settings file through Zed's settings
+/// store, which applies it, and puts any failure on the status line.
+///
+/// Each change reads the mode the file holds when its write runs, so quick changes in a
+/// row each see the one before. A single theme the settings name, with no dark and light
+/// pair, stays, and the status line says so.
+///
+/// # Arguments
+///
+/// * `change` - What to make of the stored mode.
+/// * `cx` - Application context.
+fn change_theme(change: ThemeChange, cx: &mut App) {
+    let theme_settings::ThemeSelection::Dynamic { mode, light, dark } =
+        ThemeSettings::get_global(cx).theme.clone()
+    else {
+        let why = "the settings name one theme, not a dark and light pair; nothing to switch";
+        cx.set_global(SettingsNotice(Some(why.into())));
+        return;
+    };
+    if let Err(err) = check_settings_path(paths::settings_file()) {
+        let why = format!("theme not saved: {err:#}");
+        cx.set_global(SettingsNotice(Some(why.into())));
+        return;
+    }
+    let other = match cx.theme().appearance {
+        Appearance::Dark => ThemeAppearanceMode::Light,
+        Appearance::Light => ThemeAppearanceMode::Dark,
+    };
+    let fs = <dyn fs::Fs>::global(cx);
+    let chosen = Arc::new(OnceLock::new());
+    let pick = chosen.clone();
+    let done = settings::update_settings_file_with_completion(fs, cx, move |content, _| {
+        let stored = match &content.theme.theme {
+            Some(settings::ThemeSelection::Dynamic { mode, .. }) => *mode,
+            Some(settings::ThemeSelection::Static(_)) | None => mode,
+        };
+        let next = match (change, stored) {
+            (ThemeChange::FollowSystem, _) => ThemeAppearanceMode::System,
+            (ThemeChange::Flip, ThemeAppearanceMode::Light) => ThemeAppearanceMode::Dark,
+            (ThemeChange::Flip, ThemeAppearanceMode::Dark) => ThemeAppearanceMode::Light,
+            (ThemeChange::Flip, ThemeAppearanceMode::System) => other,
+        };
+        pick.get_or_init(|| next);
+        content.theme.theme = Some(settings::ThemeSelection::Dynamic {
+            mode: next,
+            light,
+            dark,
+        });
+    });
+    cx.spawn(async move |cx| {
+        let done = done.await;
+        cx.update(|cx| {
+            let notice = match done {
+                Ok(Ok(())) => file_notice(cx),
+                Ok(Err(_))
+                    if chosen
+                        .get()
+                        .is_some_and(|mode| stored_mode(cx) == Some(*mode)) =>
+                {
+                    file_notice(cx)
+                }
+                Ok(Err(err)) => Some(format!("theme not saved: {err:#}").into()),
+                Err(_) => Some("theme not saved: Zed's settings writer stopped".into()),
+            };
+            cx.set_global(SettingsNotice(notice));
+        });
+    })
+    .detach();
+}
+
+/// Returns the theme mode the person's settings layer holds, if it holds a pair.
+///
+/// # Arguments
+///
+/// * `cx` - Application context reading Zed's settings store.
+fn stored_mode(cx: &App) -> Option<ThemeAppearanceMode> {
+    let user = cx.global::<SettingsStore>().raw_user_settings()?;
+    match user.content.theme.theme.as_ref()? {
+        settings::ThemeSelection::Dynamic { mode, .. } => Some(*mode),
+        settings::ThemeSelection::Static(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_SETTINGS_BYTES, check_settings_path};
+
+    /// A missing path and a small regular file pass; a directory and a file over the cap
+    /// are refused with the path and the reason.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a path is judged wrongly or the temporary files cannot be made.
+    #[test]
+    fn the_settings_path_must_be_a_small_regular_file() {
+        let dir = std::env::temp_dir().join(format!("borer-app-settings-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let missing = dir.join("missing.json");
+        assert!(check_settings_path(&missing).is_ok());
+        let small = dir.join("small.json");
+        std::fs::write(&small, "{}").unwrap();
+        assert!(check_settings_path(&small).is_ok());
+        let folder = dir.join("folder.json");
+        std::fs::create_dir_all(&folder).unwrap();
+        let err = check_settings_path(&folder).unwrap_err().to_string();
+        assert!(err.contains("folder.json is not a regular file"), "{err}");
+        let huge = dir.join("huge.json");
+        let len = usize::try_from(MAX_SETTINGS_BYTES).unwrap() + 1;
+        std::fs::write(&huge, vec![b' '; len]).unwrap();
+        let err = check_settings_path(&huge).unwrap_err().to_string();
+        assert!(
+            err.contains("huge.json holds") && err.contains("over the"),
+            "{err}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}

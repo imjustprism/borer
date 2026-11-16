@@ -1,3 +1,39 @@
 {
-  "disable_ai": true
+  "disable_ai": true,
+  "theme": {
+    "mode": "system",
+    "dark": "borer dark",
+    "light": "borer light"
+  },
+  "ui_font_family": ".ZedSans",
+  "ui_font_size": 15,
+  "ui_font_weight": 400,
+  "buffer_font_family": ".ZedMono",
+  "buffer_font_size": 13,
+  "buffer_font_features": {
+    "calt": false,
+    "liga": false
+  },
+  "buffer_line_height": {
+    "custom": 1.4
+  },
+  "unstable.ui_density": "compact",
+  "cursor_blink": false,
+  "current_line_highlight": "line",
+  "gutter": {
+    "line_numbers": false,
+    "runnables": false,
+    "bookmarks": false,
+    "breakpoints": false,
+    "folds": false
+  },
+  "minimap": {
+    "show": "never"
+  },
+  "tab_bar": {
+    "show_nav_history_buttons": false
+  },
+  "tabs": {
+    "show_close_button": "hover"
+  }
 }
