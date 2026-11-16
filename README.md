@@ -2,7 +2,7 @@
   <a href="https://borer.lol">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="brand/banner-dark.png">
-      <img alt="borer: reverse engineering, rebuilt for AI agents" src="brand/banner-light.png" width="100%">
+      <img alt="borer: one reverse-engineering engine for AI agents and the people who read binaries" src="brand/banner-light.png" width="100%">
     </picture>
   </a>
 </p>
@@ -23,19 +23,50 @@
   <a href="https://borer.lol/llms.txt">llms.txt</a>
 </p>
 
-borer is a reverse-engineering engine whose user is an AI agent. One Rust
-binary: an MCP server when run with no arguments, a command-line tool with
-them. It owns its loader, lifters, emulator and decompiler, and it has no GUI.
+borer is a reverse-engineering engine for AI agents and for the people who
+read binaries by hand. Its loader, lifters, emulator and decompiler are its
+own Rust code, over format and instruction-decoder crates (goblin, iced-x86,
+yaxpeax-arm); it never drives another reverse-engineering tool underneath.
+One engine answers three ways:
+
+- **Agents:** `borer` with no arguments is an MCP server. Every list is paged
+  and says how much it left out; triage and decompiles end with what to read next.
+- **People and scripts:** `borer <command>` gives the same answers in a terminal.
+- **Desktop:** the desktop app, `borer-app`, puts the engine in Zed's
+  workspace: a function list, decompile tabs and the command palette. On one
+  Windows machine it meets its frame, input, startup, open and memory bars
+  ([measured below](#a-desktop-app-held-to-the-same-bars)).
+
+> [!WARNING]
+> borer is early-stage. Tool names, output and resource URIs still change
+> between releases. Please report anything that looks wrong.
+
+## What it covers today
+
+| Part | What borer has | Measured |
+| --- | --- | --- |
+| Loader | PE, ELF, Mach-O, raw code and memory dumps; fuzzed in CI | a damaged file gets an error ([below](#a-hostile-file-gets-an-error-not-a-crash)); a load takes at most 8 bytes of heap per file byte (`tests/hostile.rs`, in the gate) |
+| Disassembler | x86, x86-64, arm64, 32-bit ARM (A32, Thumb-2), RISC-V | |
+| Decompiler | the same five; on all but RISC-V every function's header says how much of the text was checked against the binary | cold decompile 6.49 ms per function at p95 on notepad.exe (median of three runs); the gate holds it to 25 ms at p95 and 5 s at worst (`tests/bench.rs`) |
+| Decompile check | `certify` runs the text as C beside the binary and grades it (x86, x86-64) | on ntdll's `sub_180102184`: grade `agrees`, 20 of 64 inputs agree, 44 unchecked and named, 0 differ ([below](#the-decompiler-checks-its-own-work)) |
+| Emulator | x86, x86-64, arm64; runs one function on typed inputs, never the file; on x86 and x86-64 it also drives solving, unpacking, devirtualization, taint and struct recovery | ntdll's CRC-32 answers the published check value `0xcbf43926` ([below](#it-runs-code-without-running-the-file)) |
+| Live process | read-only attach, objects by class, value and pointer-chain scans (Windows) | |
+| Agent interface | MCP server, 42 tools and the `borer://` resources | notepad.exe triage in 2,408 bytes, ending with what to call next |
+| Command line | the same binary; `borer help` lists every command | notepad.exe triage, 523 functions, in about 2.3 s |
+| Desktop app | Zed's workspace, function list, decompile tabs, command palette (measured on Windows) | frame, input, startup, open and memory bars met ([table below](#a-desktop-app-held-to-the-same-bars)) |
+
+These are borer's own numbers against its own bars, each measured on one
+desktop machine (sources in
+[Fast enough to read everything](#fast-enough-to-read-everything) and
+[app/measurements.md](https://github.com/imjustprism/borer/blob/main/app/measurements.md));
+this README publishes no head-to-head comparison with other tools. borer's
+limits are listed in [docs/limits.md](https://github.com/imjustprism/borer/blob/main/docs/limits.md).
 
 Everything below is real output of borer 0.2.12 (release build, commit
 `7d9bb42c`) on two files of Windows 11: `notepad.exe` (sha256
 `2d0b3948...2efb158f`) and `ntdll.dll` (sha256 `b072efae...ce5aed21`). Lines cut for length are marked `...`. Addresses
 differ on another build: `borer symbols ntdll.dll RtlComputeCrc32` finds the
 export, and its decompile names the two functions it forwards to.
-
-> [!WARNING]
-> borer is early-stage. Tool names, output and resource URIs still change
-> between releases. Please report anything that looks wrong.
 
 ## What it does
 
@@ -219,8 +250,28 @@ whole file in about 2.3 seconds (release build `7d9bb42c`, three runs: 2.24,
 2.41, 2.29 s). A cold decompile takes under 7 ms per function at the 95th
 percentile (`tests/bench.rs`, release build `70b5db2c`, three runs: 6.64,
 6.48, 6.49 ms). Both on one desktop machine. The time bars, 25 ms at p95 and
-5 s at worst per function, are part of the gate. An agent can read every
-function instead of guessing where to look.
+5 s at worst per function, are part of the gate. An agent or a reviewer can
+read every function instead of guessing where to look.
+
+### A desktop app held to the same bars
+
+`borer-app` is the engine in Zed's workspace: the function list in the left
+dock, decompile tabs in the center, Zed's command palette, navigation history
+and saved docks. No engine call runs on the UI thread. Release build
+`c3f3742f`, AMD Ryzen 7 9800X3D, Windows ([app/measurements.md](https://github.com/imjustprism/borer/blob/main/app/measurements.md)):
+
+| Measure | Result | Bar |
+| --- | --- | --- |
+| 100,000-row list scroll, frame draw p99 | 2.97 ms | 8.3 ms |
+| 1,000,000-line code scroll, frame draw p99 | 2.62 ms | 8.3 ms |
+| Input to paint p99, 200 keys and 100 clicks | 6.83 ms | 16 ms |
+| First frame, median of 10 | 190.6 ms | 300 ms |
+| notepad.exe open to its function list, median of 10 | 247.0 ms | 1 s |
+| Memory beyond the engine | 87.1 MB | 150 MB |
+
+The app draws with Zed's base theme. It shows the function list and the
+decompile; disassembly, hex, strings, xrefs and in-place editing are in the
+command line and the MCP server. Windows is the measured platform.
 
 ## Platforms
 
@@ -251,6 +302,9 @@ The installer downloads the latest release, checks it against the release's
 SHA256SUMS and registers borer with every MCP client it finds: Claude Code,
 Claude Desktop, Cursor, VS Code, Windsurf, Zed, Codex CLI, Gemini CLI and 20
 more. Restart the clients it names afterwards.
+
+The desktop app builds from source and is not in the release downloads yet
+(see [Quick start](#quick-start)).
 
 Package managers install the same release binary:
 
@@ -324,7 +378,17 @@ borer help                                  # every command
 `--pack <file>` loads target knowledge, `--no-pdb` skips the companion PDB, and
 `--arch x86|x64|arm64` with `--base` and `--entry` maps raw code or a dump.
 
-## More of what only borer does
+From the desktop app, in its own cargo workspace under `app/`. On Windows it
+needs the MSVC C++ x64 build tools, the Windows 10/11 SDK 10.0.20348 or
+newer, Rust 1.98.1, `git` and about 0.6 GB in Cargo's git cache for the pinned
+Zed checkout (`app/Cargo.toml`); a clean release build takes about 11 minutes:
+
+```bash
+cd app && cargo build --release
+target/release/borer-app notepad.exe
+```
+
+## More of what it does
 
 ### Ask again, get only what changed
 
@@ -436,6 +500,7 @@ agents are in [`borer.rules`](borer.rules), and the terms for contributions in
 | [`borer`](crates/borer) | The MCP server and CLI over the engine. |
 | [`borer-live`](crates/borer-live) | Read-only access to a running process. |
 | [`borer-fixtures`](crates/borer-fixtures) | Programs the tests decompile and check against their source. |
+| [`borer-app`](app/borer-app) | The desktop app, in its own workspace under `app/` on Zed's crates. AGPL-3.0 only. |
 
 ## License
 
@@ -444,8 +509,10 @@ v3.0](LICENSE) (AGPL-3.0-only). If you distribute borer or a modified version,
 or let users interact with a modified version over a network, you must offer
 its complete source under the same license. Versions 0.1.0 and 0.1.1 were
 released under MIT. A
-commercial license is available for uses the AGPL does not fit: open an issue
-or reach out on GitHub.
+commercial license is available for the main workspace (the engine, server
+and live crates) where the AGPL does not fit: open an issue or reach out on GitHub. The desktop app builds on
+GPL-3.0-or-later crates of Zed, so it is AGPL-3.0 only and outside that
+license.
 
 Third-party notices are in [NOTICE](NOTICE), and each release archive carries
 the licenses of everything the binary links. Ghidra is a project of the NSA.
