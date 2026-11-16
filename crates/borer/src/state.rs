@@ -508,6 +508,36 @@ impl BorerServer {
         }
     }
 
+    /// Puts a project's annotations in place of the overlay's through the
+    /// edit path ([`Edit::Project`]): held to a project's caps, and the
+    /// analysis carried over to the names it leaves.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The program the project was read for, outside its
+    ///   lock.
+    /// * `loaded` - The project's annotations.
+    ///
+    /// # Returns
+    ///
+    /// The plan committed.
+    ///
+    /// # Errors
+    ///
+    /// When another program is loaded now, or the annotations would pass a
+    /// cap; nothing was applied.
+    pub(crate) fn put_project(
+        &self,
+        program: &Arc<Program>,
+        loaded: Overlay,
+    ) -> anyhow::Result<Plan> {
+        let edits = [Edit::Project(Box::new(loaded))];
+        let analysis = self.analysis_held();
+        let planned = |o: &Overlay| edit::plan(program, &analysis, o, &edits, Force::Refuse);
+        planned(&self.overlay_plain())
+            .and_then(|made| self.commit((program, Some(program)), made, planned))
+    }
+
     /// Plans `edits` over the overlay a tool read and, unless `dry`,
     /// commits them ([`Self::commit`]), planned again over the overlay as
     /// tools read it ([`tabled`]) when another edit landed first.
@@ -872,7 +902,13 @@ impl BorerServer {
                     4
                 };
                 match borer_engine::analysis::utypes::laid_at(&o.types, word) {
-                    Ok(()) => *write_lock(&self.overlay) = o,
+                    Ok(()) => {
+                        if let Some(program) = self.loaded()
+                            && let Err(e) = self.put_project(&program, o)
+                        {
+                            eprintln!("borer: the handed-over project: {e}");
+                        }
+                    }
                     Err(e) => eprintln!("borer: the handed-over project's types: {e}"),
                 }
             }
