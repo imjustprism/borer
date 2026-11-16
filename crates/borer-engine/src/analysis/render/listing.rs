@@ -533,8 +533,8 @@ const FORWARD_MAX: usize = 256;
 pub struct SymbolRow {
     /// What the symbol is.
     pub kind: SymbolKind,
-    /// Its address, an import's slot; `None` for a symbol the file places
-    /// nowhere.
+    /// Its address, an import's slot; `None` for an import the file gives
+    /// no slot.
     pub addr: Option<u64>,
     /// The name without its module, demangled ([`demangled_or_raw`]).
     pub name: String,
@@ -712,7 +712,7 @@ pub fn symbol_rows(
                 .map(|b| crate::text::one_line(&String::from_utf8_lossy(b)));
             SymbolRow {
                 kind: s.kind,
-                addr: (s.addr != 0).then_some(s.addr),
+                addr: (s.kind != SymbolKind::Import || s.addr != 0).then_some(s.addr),
                 name: demangled_or_raw(bare),
                 module: module.map(str::to_owned),
                 slot,
@@ -1691,7 +1691,7 @@ caller: 0x1030 call
 
     /// An import the file gives no slot has no address and no slot to
     /// reference, and its line still reads `0x0`; an export has its address
-    /// and no slot either.
+    /// and no slot either, and a local placed at 0 keeps that address.
     ///
     /// # Panics
     ///
@@ -1711,13 +1711,22 @@ caller: 0x1030 call
                 addr: 0x1000,
                 kind: SymbolKind::Export,
             },
+            Symbol {
+                name: "image".to_owned(),
+                addr: 0,
+                kind: SymbolKind::Local,
+            },
         ];
         let rows = symbol_rows(&p, &Analysis::default(), None, None, 0, 50);
         let facts: Vec<(Option<u64>, SlotUse)> =
             rows.rows.iter().map(|r| (r.addr, r.slot)).collect();
         assert_eq!(
             facts,
-            [(None, SlotUse::NoSlot), (Some(0x1000), SlotUse::NoSlot)]
+            [
+                (None, SlotUse::NoSlot),
+                (Some(0x1000), SlotUse::NoSlot),
+                (Some(0), SlotUse::NoSlot)
+            ]
         );
         assert!(rows.spell().contains("import 0x0 Sleep\n"), "{rows:?}");
     }
