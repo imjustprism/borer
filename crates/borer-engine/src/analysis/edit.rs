@@ -1205,6 +1205,10 @@ fn debug_name(p: &Program, entry: u64, key: VarKey) -> Option<&str> {
 /// or `arg_N` read by the distances the function's text numbers its slots
 /// by.
 ///
+/// A debug name that spells another variable's own `local_N` or `aN`,
+/// while the text still spells that variable so, names two variables, and
+/// neither is picked.
+///
 /// # Arguments
 ///
 /// * `p` - The loaded program.
@@ -1214,13 +1218,46 @@ fn debug_name(p: &Program, entry: u64, key: VarKey) -> Option<&str> {
 ///
 /// # Errors
 ///
-/// When the name is none of these, why ([`VarKey::parse`]).
+/// When the name is none of these, why ([`VarKey::parse`]); when it names
+/// two variables, both, and the spelling that names the debug one alone.
 fn resolve_var(p: &Program, o: &Overlay, entry: u64, var: &str) -> Result<VarKey, String> {
-    if let Some(key) = stated_key(o, entry, var).or_else(|| debug_key(p, o, entry, var)) {
+    if let Some(key) = stated_key(o, entry, var) {
         return Ok(key);
     }
-    let (stack, _, frame) = protos::slot_words(p, entry);
-    VarKey::parse(var, stack, frame).map_err(|e| e.to_string())
+    let (stack, shadow, frame) = protos::slot_words(p, entry);
+    let parsed = VarKey::parse(var, stack, frame);
+    match (debug_key(p, o, entry, var), parsed) {
+        (Some(debug), Ok(own)) if debug != own && spelled_own(p, o, entry, own) => {
+            let place = debug.spell(stack, shadow, frame);
+            Err(format!(
+                "{var} names two variables of this function: the one its debug information calls {var}, at {place}, and the one {var} spells by its place; name the first {place}"
+            ))
+        }
+        (Some(debug), _) => Ok(debug),
+        (None, parsed) => parsed.map_err(|e| e.to_string()),
+    }
+}
+
+/// Tells whether a function's text spells one of its variables by its own
+/// `aN` or `local_N`: no statement, prototype or debug name names it
+/// otherwise.
+///
+/// # Arguments
+///
+/// * `p` - The loaded program.
+/// * `o` - The overlay.
+/// * `entry` - The function.
+/// * `key` - The variable.
+fn spelled_own(p: &Program, o: &Overlay, entry: u64, key: VarKey) -> bool {
+    let stated = o.vars.get(&entry).is_some_and(|vs| vs.contains_key(&key));
+    let prototyped = match key {
+        VarKey::Param(i) => o
+            .prototypes
+            .get(&entry)
+            .is_some_and(|q| usize::from(i) < q.params.len()),
+        VarKey::Slot(_) => false,
+    };
+    !stated && !prototyped && debug_name(p, entry, key).is_none()
 }
 
 /// Returns the variable of a function a name its text spells is

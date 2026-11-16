@@ -335,3 +335,39 @@ fn a_debug_named_local_renames_through_the_edit_path() {
         );
     }
 }
+
+/// A debug name that spells another slot's own `local_N` names two
+/// variables: the edit path refuses it, naming both, the view keys it to
+/// neither, and the debug slot's own spelling still renames it.
+#[test]
+fn a_debug_name_spelling_another_slot_is_refused() {
+    let o = Overlay::default();
+    let (local, off) = filling_local();
+    let plain = filling(false);
+    let (stack, shadow, frame) = slot_words(&plain, TEXT);
+    let other = VarKey::Slot(off - 8).spell(stack, shadow, frame);
+    let (p, a) = debugged(Vec::new(), BTreeMap::from([(off, other.clone())]));
+    let why = plan(&p, &a, &o, &rename(&other, None, "filled"), Force::Refuse)
+        .err()
+        .map(|e| format!("{e:#}"))
+        .expect("refused");
+    assert!(why.contains(&other) && why.contains(&local), "{why}");
+    let v = view(&p, &a, &o, TEXT).expect("a view");
+    let keys: Vec<Option<Ref>> = tokens(&v)
+        .into_iter()
+        .filter(|(_, w, ..)| *w == other)
+        .map(|(.., link)| link)
+        .collect();
+    let unkeyed = Ref::Variable {
+        function: TEXT,
+        name: other.as_str().into(),
+        key: None,
+    };
+    assert!(
+        !keys.is_empty() && keys.iter().all(|k| *k == Some(unkeyed.clone())),
+        "{keys:?}"
+    );
+    let edits = rename(&local, None, "filled");
+    let (named, _) = committed((&p, &a), &edits, VarKey::Slot(off));
+    assert_eq!(named.as_deref(), Some("filled"));
+}
