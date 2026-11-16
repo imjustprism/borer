@@ -284,6 +284,71 @@ fn every_hit_is_what_the_program_holds() {
     }
 }
 
+/// A hundred thousand strings that match exactly are counted whole and
+/// kept to one kind's share, and a name that matches only at a word start
+/// still makes the list.
+#[test]
+fn one_huge_table_is_capped_and_starves_no_other() {
+    let p = Program::raw(
+        b"crypt\0".repeat(100_000),
+        Arch::X86_64,
+        0,
+        None,
+        Vec::new(),
+    );
+    let a = Analysis::default();
+    let mut o = Overlay::default();
+    o.names.insert(0x10, "my_crypt".to_owned());
+    let found = everywhere(&p, &a, &o, &Query::parse("crypt"), 3 * KIND_MAX);
+    assert_eq!(
+        found.counted,
+        [(HitKind::String, 100_000), (HitKind::Name, 1)]
+    );
+    let strings = found
+        .hits
+        .iter()
+        .filter(|h| h.kind() == HitKind::String)
+        .count();
+    assert_eq!(strings, KIND_MAX);
+    let name = one(&found, HitKind::Name);
+    assert_eq!((&*name.text, name.rank), ("my_crypt", Rank::Word));
+}
+
+/// A megabyte of query, a query of combining marks, an empty query and
+/// address forms past every place each answer within the limit and the
+/// kind cap, and the empty query finds nothing.
+#[test]
+fn a_hostile_query_answers_within_the_caps() {
+    let (p, o) = fixture();
+    let a = Analysis::compute(&p);
+    let long = "a".repeat(1 << 20);
+    let marks = "\u{301}".repeat(1 << 18);
+    for text in [
+        long.as_str(),
+        marks.as_str(),
+        "",
+        "@",
+        "t:",
+        "\"",
+        "#",
+        "0x",
+        "rva:0xffffffffffffffff",
+        "off:0xffffffffffffffff",
+        "18446744073709551615",
+    ] {
+        let found = everywhere(&p, &a, &o, &Query::parse(text), 10);
+        assert!(found.hits.len() <= 10, "{found:?}");
+        for (kind, _) in &found.counted {
+            let kept = found.hits.iter().filter(|h| h.kind() == *kind).count();
+            assert!(kept <= KIND_MAX, "{found:?}");
+        }
+    }
+    assert_eq!(
+        everywhere(&p, &a, &o, &Query::parse(""), 10),
+        Found::default()
+    );
+}
+
 /// `thunk` is a word like any other, and a thunk is a function a query
 /// finds by its name.
 #[test]

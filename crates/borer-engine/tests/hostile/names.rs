@@ -1,10 +1,15 @@
-//! Shared long table names: the loader copies only a row's head and replaces
-//! names past the per-load budget so total heap stays within the file-size bar.
+//! Shared long table names stay within the file-size bar.
+//!
+//! The loader copies only a row's head and replaces names past the per-load
+//! budget so total heap stays within the bar. A find over the names and
+//! strings a file holds keeps to the same bar, in time linear in the text.
 
 use std::path::PathBuf;
 
+use borer_engine::analysis::find::{HitKind, KIND_MAX, NEEDLE_MAX, Query, everywhere};
+use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::num::from_usize;
-use borer_engine::program::{Program, SymbolKind};
+use borer_engine::program::{Arch, Program, SymbolKind};
 use borer_engine::text::OUTSIDE_MAX;
 
 use super::{
@@ -901,9 +906,77 @@ fn an_import_name_forges_no_triage_line() {
     );
     let p = Program::from_bytes(PathBuf::from("forged.exe"), bytes)
         .unwrap_or_else(|e| panic!("a PE with an import table loads: {e}"));
-    let a = borer_engine::analysis::Analysis::compute(&p);
-    let o = borer_engine::analysis::Overlay::default();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
     let out = borer_engine::analysis::render::triage(&p, &a, &o).spell();
     assert!(!out.lines().any(|l| l.starts_with("# forged")), "{out}");
     assert!(out.contains("InternetOpenA\\x0a# forged line"), "{out}");
+}
+
+/// Returns a raw image of `bytes`, mapped by no section.
+///
+/// # Arguments
+///
+/// * `bytes` - The file.
+fn raw_image(bytes: Vec<u8>) -> Program {
+    Program::raw(bytes, Arch::X86_64, 0, None, Vec::new())
+}
+
+/// A find over one long run is linear in the run.
+///
+/// A needle of the longest kept length over a 16 MiB run that holds it at
+/// every place but the first is ranked in one pass, as fast as a needle of
+/// one character over the same run within a small factor: a search testing
+/// the whole needle at every place compared 256 times as many bytes.
+#[test]
+fn a_find_over_one_long_run_is_linear() {
+    /// How many times the one-character needle's time the longest may take.
+    const FACTOR: u32 = 8;
+    let _serial = serial();
+    let mut bytes = vec![b'b'];
+    bytes.resize(16 << 20, b'a');
+    bytes.push(0);
+    let p = raw_image(bytes);
+    let (a, o) = (Analysis::default(), Overlay::default());
+    let walked = everywhere(&p, &a, &o, &Query::parse("zzzzz"), 10);
+    assert!(walked.hits.is_empty());
+    let timed = |text: &str| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test bounds the time a hostile text takes"
+        )]
+        let started = std::time::Instant::now();
+        let found = everywhere(&p, &a, &o, &Query::parse(text), 10);
+        assert_eq!(found.counted, [(HitKind::String, 1)], "{text}");
+        started.elapsed()
+    };
+    let short = timed("a");
+    let long = timed(&"a".repeat(NEEDLE_MAX));
+    assert!(
+        long <= short * FACTOR + std::time::Duration::from_millis(50),
+        "a {NEEDLE_MAX}-character needle took {long:?}, one character {short:?}"
+    );
+}
+
+/// A find matching every one of a million short strings counts them all
+/// and holds only a kind's share of them: keeping every match before the
+/// cut took dozens of bytes per byte of file.
+#[test]
+fn a_find_over_many_matches_holds_only_its_share() {
+    let _serial = serial();
+    let bytes = b"aaaaa\0".repeat(1 << 20);
+    let size = bytes.len();
+    let strings = size / 6;
+    let p = raw_image(bytes);
+    let (a, o) = (Analysis::default(), Overlay::default());
+    let walked = everywhere(&p, &a, &o, &Query::parse("zzzzz"), 10);
+    assert!(walked.hits.is_empty());
+    let (found, extra) = measured(|| everywhere(&p, &a, &o, &Query::parse("a"), 1000));
+    assert_eq!(found.counted, [(HitKind::String, strings)]);
+    assert_eq!(found.hits.len(), KIND_MAX);
+    println!("find: {size} byte file, {extra} bytes of heap beyond the walk");
+    assert!(
+        extra <= LOAD_HEAP_PER_BYTE * size,
+        "a find over {strings} strings took {extra} bytes of heap"
+    );
 }
