@@ -68,11 +68,10 @@ pub struct XrefRow {
     pub name: String,
     /// Its sites in address order, each with what it does.
     pub sites: Vec<(u64, RefKind)>,
-    /// Entries of the other functions running the same code, in address
-    /// order; their sites are counted in the group, not listed.
-    pub folded: Vec<u64>,
-    /// Names of the first [`SAME_CODE_NAMES_MAX`] of [`XrefRow::folded`].
-    pub folded_names: Vec<String>,
+    /// Entry and name of every other function running the same code, in
+    /// address order; their sites are counted in the group, not listed, and
+    /// the text names the first [`SAME_CODE_NAMES_MAX`].
+    pub folded: Vec<(u64, String)>,
 }
 
 /// One page of a cross-reference listing, with what its header counts.
@@ -148,7 +147,8 @@ impl XrefRows {
                 .map(|(va, kind)| format!("{va:#x} {}", kind.word()))
                 .collect();
             let _ = write!(out, "{}: {}", r.name, sites.join(", "));
-            out.push_str(&same_code_spelled(r.folded.len(), &r.folded_names));
+            let names = r.folded.iter().map(|(_, name)| name.as_str());
+            out.push_str(&same_code_spelled(r.folded.len(), names));
             out.push('\n');
         }
         let next = offset.saturating_add(self.rows.len());
@@ -324,13 +324,7 @@ fn rows_of_sites(
                     entry: g.entry,
                     name: g.entry.map_or_else(|| "-".to_owned(), |e| name_of(a, o, e)),
                     sites: g.sites.iter().map(|s| (s.va, s.kind)).collect(),
-                    folded: g.others.clone(),
-                    folded_names: g
-                        .others
-                        .iter()
-                        .take(SAME_CODE_NAMES_MAX)
-                        .map(|&e| name_of(a, o, e))
-                        .collect(),
+                    folded: g.others.iter().map(|&e| (e, name_of(a, o, e))).collect(),
                 })
                 .collect();
             (Some(offset), rows)
@@ -361,12 +355,7 @@ fn rows_of_sites(
 ///
 /// As [`same_code_spelled`].
 pub(super) fn same_code(a: &Analysis, o: &Overlay, others: &[u64]) -> String {
-    let names: Vec<String> = others
-        .iter()
-        .take(SAME_CODE_NAMES_MAX)
-        .map(|&e| name_of(a, o, e))
-        .collect();
-    same_code_spelled(others.len(), &names)
+    same_code_spelled(others.len(), others.iter().map(|&e| name_of(a, o, e)))
 }
 
 /// Spells the functions a row folds in because they run the same code.
@@ -374,26 +363,31 @@ pub(super) fn same_code(a: &Analysis, o: &Overlay, others: &[u64]) -> String {
 /// # Arguments
 ///
 /// * `folded` - How many functions were folded.
-/// * `names` - The names of the first [`SAME_CODE_NAMES_MAX`] of them.
+/// * `names` - Their names in address order; only the first
+///   [`SAME_CODE_NAMES_MAX`] are read.
 ///
 /// # Returns
 ///
 /// ` (+N functions running the same code): name, name` with `...` past the
 /// names when more were folded; empty when nothing was.
-fn same_code_spelled(folded: usize, names: &[String]) -> String {
+fn same_code_spelled<S: AsRef<str>>(folded: usize, names: impl Iterator<Item = S>) -> String {
     if folded == 0 {
         return String::new();
     }
-    let more = if folded > SAME_CODE_NAMES_MAX {
-        ", ..."
-    } else {
-        ""
-    };
-    format!(
-        " (+{folded} function{} running the same code): {}{more}",
-        plural(folded),
-        names.join(", ")
-    )
+    let mut out = format!(
+        " (+{folded} function{} running the same code): ",
+        plural(folded)
+    );
+    for (i, name) in names.take(SAME_CODE_NAMES_MAX).enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(name.as_ref());
+    }
+    if folded > SAME_CODE_NAMES_MAX {
+        out.push_str(", ...");
+    }
+    out
 }
 
 /// Most folded functions a listing row names; the count covers the rest.

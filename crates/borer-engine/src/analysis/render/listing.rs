@@ -1224,7 +1224,6 @@ mod tests {
                 name: "stub".to_owned(),
                 sites: vec![(0x1100, RefKind::Jmp)],
                 folded: Vec::new(),
-                folded_names: Vec::new(),
             }]
         );
         assert_eq!(
@@ -1309,6 +1308,53 @@ stub: 0x1100 jmp
         let (p, a, o) = stubbed();
         let rows = xref_rows_of_import(&p, &a, &o, 0x3000, XrefView::Count).expect("an import");
         assert_eq!(rows.targets, [0x3000, 0x1100, 0x1200, 0x1300, 0x3010]);
+    }
+
+    /// A row folding more functions than its text names keeps every one,
+    /// entry and name, while the text names the first eight.
+    ///
+    /// # Panics
+    ///
+    /// When a folded function is lost or the text names another count.
+    #[test]
+    fn a_row_keeps_every_folded_function() {
+        let entries: Vec<u64> = (0..10).map(|i| 0x1000 + i * 0x10).collect();
+        let mut a = Analysis {
+            functions: entries.iter().map(|&e| bare(e, None)).collect(),
+            ..Analysis::default()
+        };
+        let sites = entries
+            .iter()
+            .map(|&e| RefSite {
+                va: e + 4,
+                kind: RefKind::Call,
+                from_entry: Some(e),
+            })
+            .collect();
+        a.xrefs.insert(0x5000, sites);
+        let p = Program::raw(
+            Vec::new(),
+            crate::program::Arch::X86_64,
+            0,
+            None,
+            Vec::new(),
+        );
+        a.finish_index(&p);
+        let page = XrefView::Page {
+            offset: 0,
+            limit: 60,
+        };
+        let rows = xref_rows(&p, &a, &Overlay::default(), 0x5000, page);
+        let folded: Vec<u64> = rows.rows[0].folded.iter().map(|(e, _)| *e).collect();
+        assert_eq!(folded, entries[1..]);
+        assert_eq!(rows.rows[0].folded[8].1, "sub_1090");
+        let text = rows.spell();
+        assert!(
+            text.contains(
+                "(+9 functions running the same code): sub_1010, sub_1020, sub_1030, sub_1040, sub_1050, sub_1060, sub_1070, sub_1080, ...\n"
+            ),
+            "{text}"
+        );
     }
 
     /// One site reaching an import through several stubs is listed once per
