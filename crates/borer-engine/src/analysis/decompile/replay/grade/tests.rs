@@ -228,3 +228,23 @@ fn blocks_alike_but_for_their_address_are_tried_from_different_states() {
     assert_eq!(found.len(), 2, "{}", replay_tsv(&r));
     assert_ne!(found.first(), found.last(), "{}", replay_tsv(&r));
 }
+
+/// A recheck asked for no state tries one, and says it was clamped.
+#[test]
+fn a_recheck_of_no_state_tries_one() {
+    let p = Program::raw_x64(&FLOAT_BETWEEN);
+    let a = Analysis::compute(&p);
+    let r = recheck_block(&p, &a, &Overlay::default(), 0x1000, 0x100a, 1, 0);
+    let r = r.expect("rechecked");
+    assert_eq!(
+        (r.grade, r.states, r.asked),
+        (Grade::Proved, 1, Some(0)),
+        "{r:?}"
+    );
+    assert!(
+        r.spell()
+            .contains("rechecked from up to 1 states: 0 asked for, clamped to 1\n"),
+        "{}",
+        r.spell()
+    );
+}

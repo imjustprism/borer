@@ -110,8 +110,9 @@ pub struct BlockCheck {
     pub disagreements: Vec<Disagreement>,
     /// Disagreements past [`KEPT_MAX`].
     pub past_cap: usize,
-    /// The states a recheck asked for, past [`RECHECK_MAX`] when it was
-    /// clamped; `None` for an answer's check, [`TRIALS`] per block.
+    /// The states a recheck asked for, other than those tried when it was
+    /// clamped to `1..=`[`RECHECK_MAX`]; `None` for an answer's check,
+    /// [`TRIALS`] per block.
     pub asked: Option<u32>,
 }
 
@@ -235,10 +236,10 @@ impl BlockCheck {
             let _ = writeln!(out, "{not}: {why}");
         }
         if let Some(asked) = self.asked {
-            let tried = asked.min(RECHECK_MAX);
+            let tried = asked.clamp(1, RECHECK_MAX);
             let _ = write!(out, "rechecked from up to {tried} states");
-            if asked > RECHECK_MAX {
-                let _ = write!(out, ": {asked} asked for, clamped to {RECHECK_MAX}");
+            if asked != tried {
+                let _ = write!(out, ": {asked} asked for, clamped to {tried}");
             }
             out.push('\n');
         }
@@ -285,13 +286,15 @@ fn claims(r: &Replayed) -> usize {
 /// * `block` - The block's start.
 /// * `seed` - The states' seed; [`ANSWER_SEED`](super::ANSWER_SEED) is the
 ///   answer check's.
-/// * `trials` - States to try the block from, clamped to [`RECHECK_MAX`].
+/// * `trials` - States to try the block from, clamped to
+///   `1..=`[`RECHECK_MAX`].
 ///
 /// # Returns
 ///
-/// The block's record, `None` when the function does not decompile, the
-/// image has no emulator, no block of the function starts at `block`, or
-/// the caller's [`Cancel`] was raised.
+/// The block's record, which says when `trials` was clamped; `None` when
+/// the function does not decompile, the image has no emulator, no block
+/// of the function starts at `block`, or the caller's [`Cancel`] was
+/// raised.
 #[must_use]
 pub fn recheck_block(
     program: &Program,
@@ -304,7 +307,7 @@ pub fn recheck_block(
 ) -> Option<BlockCheck> {
     let asked = Sampling::Recheck {
         block,
-        trials: trials.min(RECHECK_MAX),
+        trials: trials.clamp(1, RECHECK_MAX),
     };
     let mut record = match program.arch.isa()? {
         Isa::X86 { .. } => recheck_in::<arch::X86>(program, analysis, overlay, entry, seed, asked),
