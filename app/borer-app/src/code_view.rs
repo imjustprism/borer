@@ -1,5 +1,5 @@
-//! What the code editor shows of a [`View`]: the lines, the role of each token and
-//! where a link goes, all read from the view's tokens.
+//! What the code editor shows of a [`View`]: the lines, the role of each token, where a
+//! link goes and what a token is, all read from the view's tokens.
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -256,6 +256,29 @@ impl CodeLines {
         out
     }
 
+    /// Returns the token of shown line `row` that holds byte `col`, or the one ending there.
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - Zero-based shown line.
+    /// * `col` - Byte in the line, as a cursor stands before it.
+    ///
+    /// # Returns
+    ///
+    /// The view, its line, and the token as [`View::token_at`] gives it; the token before
+    /// a cursor at its end when the one after the cursor links nowhere.
+    #[must_use]
+    pub fn token_at(&self, row: usize, col: usize) -> Option<(&Arc<View>, usize, Token<'_>)> {
+        let (view, line) = self.get(row)?;
+        let after = view.token_at(line, col);
+        let before = col.checked_sub(1).and_then(|c| view.token_at(line, c));
+        let token = match after {
+            Some(t) if t.2.is_some() => t,
+            _ => before.filter(|t| t.2.is_some()).or(after)?,
+        };
+        Some((view, line, token))
+    }
+
     /// Returns where each role paints in shown lines `rows`: per role, by [`Role::index`],
     /// each token's shown line and its bytes in that line, in line order.
     ///
@@ -278,6 +301,9 @@ impl CodeLines {
         out
     }
 }
+
+/// One token as [`View::token_at`] gives it: its bytes in the line, its kind and its link.
+pub type Token<'a> = (Range<usize>, Kind, Option<&'a Ref>);
 
 /// Navigation that following a linked token [`Ref`] leads to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -321,6 +347,51 @@ pub fn resolve_ref_click(view: &View, target: &Ref) -> ClickOutcome {
     line.map_or(ClickOutcome::None, ClickOutcome::ScrollToLine)
 }
 
+/// Returns what a token is and what it links to, as the view says: its text and kind, then
+/// its referent, else that the engine links it to nothing.
+///
+/// # Arguments
+///
+/// * `text` - The token's text.
+/// * `kind` - Its kind.
+/// * `link` - What it links to.
+#[must_use]
+pub fn describe(text: &str, kind: Kind, link: Option<&Ref>) -> String {
+    let what = match kind {
+        Kind::Space => "whitespace",
+        Kind::Comment => "comment",
+        Kind::Keyword => "keyword",
+        Kind::Mnemonic => "mnemonic",
+        Kind::Register => "register",
+        Kind::Type => "type",
+        Kind::Function => "function",
+        Kind::Variable => "variable",
+        Kind::Global => "global",
+        Kind::Field => "field",
+        Kind::Label => "label",
+        Kind::Address => "address",
+        Kind::String => "string literal",
+        Kind::Number => "number",
+        Kind::Constant => "constant",
+        Kind::Punct => "punctuation",
+        Kind::Text => "name the engine does not resolve",
+    };
+    let to = match link {
+        None => return format!("{text}: {what}, linked to nothing"),
+        Some(Ref::Address(va)) => format!("the code at {va:#x}"),
+        Some(Ref::Function(va)) => format!("the function at {va:#x}"),
+        Some(Ref::Import(slot)) => format!("the import at slot {slot:#x}"),
+        Some(Ref::Global(va)) => format!("the global at {va:#x}"),
+        Some(Ref::String(va)) => format!("the string at {va:#x}"),
+        Some(Ref::Field { ty, offset }) => format!("the field at {offset:#x} of {ty}"),
+        Some(Ref::Variable { function, name, .. }) => {
+            format!("the variable {name} of the function at {function:#x}")
+        }
+        Some(Ref::Type(name)) => format!("the type {name}"),
+    };
+    format!("{text}: {what}, links to {to}")
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use std::sync::Arc;
@@ -330,7 +401,7 @@ pub(crate) mod tests {
     use borer_engine::program::{Arch, BinaryFormat, Program, Section};
     use borer_engine::view::{Kind, Ref};
 
-    use super::{ClickOutcome, CodeLines, CodePalette, ROLES, Role, resolve_ref_click};
+    use super::{ClickOutcome, CodeLines, CodePalette, ROLES, Role, describe, resolve_ref_click};
 
     /// Builds a small multi-function x86-64 program exercising calls, branches,
     /// labels, strings, and globals.
@@ -457,8 +528,8 @@ pub(crate) mod tests {
         }
     }
 
-    /// A call opens its callee, a label goes to the line it is defined on, and an import
-    /// is named.
+    /// A call opens its callee, a label goes to the line it is defined on, an import is
+    /// named, and the token at a cursor standing at a link's end is that link.
     ///
     /// # Panics
     ///
@@ -475,7 +546,9 @@ pub(crate) mod tests {
                     .map(|(span, _, _)| (line, span))
             })
             .expect("the caller calls its callee");
-        assert!(call.1.end > call.1.start);
+        let code = CodeLines::new(vec![caller.clone()]);
+        let (_, _, (_, _, link)) = code.token_at(call.0, call.1.end).expect("a token");
+        assert_eq!(link, Some(&Ref::Function(0x1030)));
         assert_eq!(
             resolve_ref_click(&caller, &Ref::Function(0x1030)),
             ClickOutcome::OpenFunction(0x1030)
@@ -494,6 +567,24 @@ pub(crate) mod tests {
         assert_eq!(
             resolve_ref_click(&goto_view, &Ref::Address(0x9999)),
             ClickOutcome::None
+        );
+    }
+
+    /// A description names the token, its kind and its referent, and says when the engine
+    /// links it to nothing.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a description says more or less than the token.
+    #[test]
+    fn a_description_says_only_what_the_token_carries() {
+        assert_eq!(
+            describe("sub_1030", Kind::Function, Some(&Ref::Function(0x1030))),
+            "sub_1030: function, links to the function at 0x1030"
+        );
+        assert_eq!(
+            describe("x", Kind::Text, None),
+            "x: name the engine does not resolve, linked to nothing"
         );
     }
 

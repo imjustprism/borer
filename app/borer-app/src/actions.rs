@@ -22,6 +22,9 @@ gpui::actions!(
         /// Follows the system's light or dark appearance again, and keeps that in the app's
         /// settings file.
         FollowSystemTheme,
+        /// Follows the link of the token under the cursor: a call opens its function, a label
+        /// or a branch target goes to its line, an import is named in the status line.
+        FollowLink,
     ]
 );
 

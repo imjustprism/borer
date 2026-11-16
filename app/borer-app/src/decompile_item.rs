@@ -4,19 +4,24 @@
 
 use std::any::Any;
 use std::ops::Range;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use borer_engine::analysis::name_of;
 use borer_engine::view::{Ref, View};
+use editor::actions::GoToDefinition;
 use editor::display_map::{DisplayRow, DisplaySnapshot};
 use editor::scroll::ScrollAnchor;
-use editor::{DisplayPoint, Editor, EditorEvent, HighlightKey, SelectionEffects};
+use editor::{
+    DisplayPoint, Editor, EditorEvent, HighlightKey, SelectionEffects, SemanticsProvider,
+    ToPoint as _,
+};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
-    FontWeight, HighlightStyle, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
-    Render, Reservation, SharedString, Styled as _, Subscription, Task, WeakEntity, Window, div,
-    px,
+    FontWeight, HighlightStyle, InteractiveElement as _, IntoElement, MouseButton, MouseUpEvent,
+    ParentElement as _, Pixels, Render, Reservation, SharedString, Styled as _, Subscription, Task,
+    TaskExt as _, WeakEntity, Window, div, px,
 };
 use language::{
     Bias, Buffer, BufferId, Capability, LineEnding, Point, ReplicaId, Rope, TextBuffer,
@@ -30,6 +35,7 @@ use workspace::{Item, ItemNavHistory, Pane, Workspace};
 
 use crate::actions::{BACK_HINT, hint_row};
 use crate::app_view::open_dropped;
+use crate::code_semantics::for_one_view;
 use crate::code_view::{ClickOutcome, CodeLines, CodePalette, Role, resolve_ref_click};
 use crate::functions_panel::FunctionsPanel;
 use crate::worker::{LoadedBinary, TaskEpoch, decompile_or_why, listing_blocking, spawn_engine};
@@ -392,6 +398,10 @@ impl DecompileItem {
                 if focused {
                     window.focus(&self.editor.focus_handle(cx), cx);
                 }
+                let semantics =
+                    for_one_view(&code).map(|s| -> Rc<dyn SemanticsProvider> { Rc::new(s) });
+                self.editor
+                    .update(cx, |editor, _| editor.set_semantics_provider(semantics));
                 self.code = Some(code);
                 self.painted = 0..0;
                 self.paint(false, cx);
@@ -599,6 +609,60 @@ impl DecompileItem {
             let offset = gpui::point(0.0, 0.0);
             editor.set_scroll_anchor(ScrollAnchor { anchor, offset }, window, cx);
         });
+    }
+
+    /// Returns the cursor's buffer row and byte in its row.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Application context reading the editor.
+    fn cursor(&self, cx: &App) -> Option<(usize, usize)> {
+        let editor = self.editor.read(cx);
+        let snapshot = editor.buffer().read(cx).snapshot(cx);
+        let at = editor.selections.newest_anchor().head().to_point(&snapshot);
+        Some((
+            usize::try_from(at.row).ok()?,
+            usize::try_from(at.column).ok()?,
+        ))
+    }
+
+    /// Follows the link of the token under the cursor: a call opens its function and an
+    /// import is named here, and a link into this view (a label, a branch target, a
+    /// definition) goes through Zed's go to definition, which the tab's provider answers.
+    ///
+    /// # Arguments
+    ///
+    /// * `same_view` - Whether a link into this view is followed too; a ctrl-click leaves
+    ///   it to Zed's own handling of the click.
+    /// * `window` - Window the tab is in.
+    /// * `cx` - Item context.
+    pub fn follow_cursor(
+        &mut self,
+        same_view: bool,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let (Some(code), Some((row, col))) = (self.code.clone(), self.cursor(cx)) else {
+            return;
+        };
+        let Some((view, line, (_, _, Some(target)))) = code.token_at(row, col) else {
+            return;
+        };
+        match resolve_ref_click(view, target) {
+            ClickOutcome::OpenFunction(_) | ClickOutcome::Import(_) => {
+                let (view, target) = (view.clone(), target.clone());
+                self.follow(&view, &target, (row, line), window, cx);
+            }
+            ClickOutcome::ScrollToLine(_) if same_view => {
+                self.editor.update(cx, |editor, cx| {
+                    let definition = GoToDefinition::default();
+                    editor
+                        .go_to_definition(&definition, window, cx)
+                        .detach_and_log_err(cx);
+                });
+            }
+            ClickOutcome::ScrollToLine(_) | ClickOutcome::None => {}
+        }
     }
 
     /// Follows the link `target` of line `line_ix` of `view`, shown as line `row_ix`: a
@@ -957,6 +1021,14 @@ impl Render for DecompileItem {
             .key_context("DecompileView")
             .relative()
             .size_full()
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|item, event: &MouseUpEvent, window, cx| {
+                    if event.modifiers.secondary(cx) {
+                        item.follow_cursor(false, window, cx);
+                    }
+                }),
+            )
             .child(self.editor.clone())
             .children(over.map(|over| div().absolute().top_0().left_0().child(over)))
     }
@@ -977,14 +1049,20 @@ mod tests {
     use theme::ActiveTheme as _;
     use workspace::Workspace;
 
+    use borer_engine::analysis::decompile::view::view_of;
     use borer_engine::analysis::render::{FunctionOrder, function_rows};
     use borer_engine::analysis::{Analysis, Overlay};
     use borer_engine::program::{Arch, Feature, Program, Section};
-    use language::Point;
+    use borer_engine::view::{Kind, Ref, View};
+    use editor::{SelectionEffects, SemanticsProvider as _};
+    use language::{Point, ToPoint as _};
 
-    use super::{DecompileItem, Form, TabMode, open_view, role_key};
-    use crate::app_view::tests::{CALLER, init, open, sample};
-    use crate::code_view::{CodePalette, Role};
+    use super::{DecompileItem, Form, TabMode, open_lines, open_view, role_key};
+    use crate::actions::FollowLink;
+    use crate::app_view::tests::{CALLEE, CALLER, init, open, sample};
+    use crate::code_semantics::for_one_view;
+    use crate::code_view::tests::sample_program;
+    use crate::code_view::{CodeLines, CodePalette, Role, describe};
     use crate::worker::{LoadedBinary, decompile_blocking, listing_blocking, load_binary_blocking};
 
     /// Most functions of the test executable whose tabs are checked.
@@ -1230,5 +1308,145 @@ mod tests {
         let tab = open_tab(&workspace, &loaded, (0x1000, Form::Listing), cx);
         let said = tab.read_with(cx, |item, _| item.failed.clone());
         assert_eq!(said, Some(why));
+    }
+    /// Puts the cursor of `tab` at byte `col` of row `row`.
+    pub(crate) fn put_cursor(
+        tab: &Entity<DecompileItem>,
+        (row, col): (usize, usize),
+        cx: &mut VisualTestContext,
+    ) {
+        let at = Point::new(u32::try_from(row).unwrap(), u32::try_from(col).unwrap());
+        tab.update_in(cx, |item, window, cx| {
+            item.editor().update(cx, |editor, cx| {
+                editor.change_selections(SelectionEffects::no_scroll(), window, cx, |s| {
+                    s.select_ranges([at..at]);
+                });
+            });
+        });
+    }
+
+    /// Returns the first token of `tab`'s lines whose link `pick` accepts, given the
+    /// token's view, its line in that view and the link: its row, its byte span and its
+    /// link.
+    fn find_link(
+        tab: &Entity<DecompileItem>,
+        pick: impl Fn(&View, usize, &Ref) -> bool,
+        cx: &mut VisualTestContext,
+    ) -> (usize, Range<usize>, Ref) {
+        tab.read_with(cx, |item, _| {
+            let code = item.code().unwrap();
+            (0..code.len())
+                .find_map(|row| {
+                    let (view, line) = code.get(row)?;
+                    view.tokens(line).find_map(|(span, _, link)| {
+                        let link = link.filter(|link| pick(view, line, link))?;
+                        Some((row, span, link.clone()))
+                    })
+                })
+                .unwrap()
+        })
+    }
+
+    /// Enter on a call opens its callee, and following a link into the view moves the
+    /// cursor, through Zed's go to definition, to a listing's branch target and to the line
+    /// that defines a label.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a link leads anywhere else.
+    #[gpui::test]
+    fn following_a_link_goes_where_the_view_says(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (workspace, cx) = open(&app_state, cx);
+        let loaded = sample();
+        let caller = open_tab(&workspace, &loaded, (CALLER, Form::Decompile), cx);
+        let (row, span, _) = find_link(&caller, |_, _, l| *l == Ref::Function(CALLEE), cx);
+        put_cursor(&caller, (row, span.start), cx);
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        let shown = workspace.read_with(cx, |workspace, cx| {
+            let item = workspace.active_item_as::<DecompileItem>(cx)?;
+            let item = item.read(cx);
+            Some((item.entry()?, item.form()))
+        });
+        assert_eq!(shown, Some((CALLEE, Form::Decompile)));
+        let listing = open_tab(&workspace, &loaded, (CALLER, Form::Listing), cx);
+        let operand = |view: &View, line: usize, link: &Ref| match link {
+            Ref::Address(va) => view.line_of(*va).is_some_and(|to| to != line),
+            _ => false,
+        };
+        let (row, span, target) = find_link(&listing, operand, cx);
+        let want = listing.read_with(cx, |item, _| match target {
+            Ref::Address(va) => item.code().unwrap().get(0).unwrap().0.line_of(va),
+            _ => None,
+        });
+        assert!(want.is_some_and(|line| line != row));
+        put_cursor(&listing, (row, span.end), cx);
+        cx.dispatch_action(FollowLink);
+        cx.run_until_parked();
+        let at = listing.read_with(cx, |item, cx| item.cursor(cx));
+        assert_eq!(at.map(|(row, _)| row), want);
+        let (program, analysis, overlay) = sample_program();
+        let text = "void sub_1000(void) {\n    goto L_1000;\nL_1000:\n    return;\n}\n";
+        let goto = Arc::new(view_of(&program, &analysis, &overlay, CALLER, text).unwrap());
+        let code = Arc::new(CodeLines::new(vec![goto.clone()]));
+        let lines = workspace.update_in(cx, |workspace, window, cx| {
+            open_lines(workspace, loaded.clone(), code.clone(), window, cx)
+        });
+        cx.run_until_parked();
+        put_cursor(&lines, (1, "    goto L_".len()), cx);
+        cx.dispatch_action(FollowLink);
+        cx.run_until_parked();
+        let label = goto.definition(&Ref::Address(CALLER));
+        assert_eq!(label, Some(2));
+        let at = lines.read_with(cx, |item, cx| item.cursor(cx));
+        assert_eq!(at.map(|(row, _)| row), label);
+    }
+
+    /// The hover over a call says what the view says of it, and the document highlights of
+    /// a call are every use of its callee the view shows.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the hover or the highlights say anything the view does not.
+    #[gpui::test]
+    async fn hover_and_uses_come_from_the_view(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (workspace, cx) = open(&app_state, cx);
+        let loaded = sample();
+        let tab = open_tab(&workspace, &loaded, (CALLER, Form::Decompile), cx);
+        let callee = Ref::Function(CALLEE);
+        let (row, span, _) = find_link(&tab, |_, _, l| *l == callee, cx);
+        let (code, buffer) = tab.read_with(cx, |item, cx| {
+            let buffer = item.editor().read(cx).buffer().read(cx).as_singleton();
+            (item.code().unwrap().clone(), buffer.unwrap())
+        });
+        let provider = for_one_view(&code).unwrap();
+        let at = Point::new(
+            u32::try_from(row).unwrap(),
+            u32::try_from(span.start).unwrap(),
+        );
+        let anchor = buffer.read_with(cx, |buffer, _| buffer.snapshot().anchor_after(at));
+        let hover = cx.update(|_, cx| provider.hover(&buffer, anchor, cx));
+        let hover = hover.unwrap().await.unwrap().remove(0);
+        let (view, line) = code.get(row).unwrap();
+        let name = &view.line(line).unwrap()[span.clone()];
+        let said = describe(name, Kind::Function, Some(&callee));
+        assert_eq!(hover.contents[0].text, said);
+        let uses = cx.update(|_, cx| provider.document_highlights(&buffer, anchor, cx));
+        let uses = uses.unwrap().await.unwrap();
+        let points = buffer.read_with(cx, |buffer, _| {
+            let snapshot = buffer.snapshot();
+            let wide = |n: u32| usize::try_from(n).unwrap();
+            uses.iter()
+                .map(|h| {
+                    let a = h.range.start.to_point(&snapshot);
+                    let b = h.range.end.to_point(&snapshot);
+                    (wide(a.row), wide(a.column)..wide(b.column))
+                })
+                .collect::<Vec<_>>()
+        });
+        assert!(points.len() >= 2);
+        assert_eq!(points, view.uses(&callee).0);
     }
 }

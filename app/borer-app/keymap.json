@@ -14,6 +14,13 @@
     }
   },
   {
+    "context": "DecompileView > Editor",
+    "bindings": {
+      "f12": "borer::FollowLink",
+      "enter": "borer::FollowLink"
+    }
+  },
+  {
     "context": "FunctionsPanel > Editor",
     "bindings": {
       "up": "menu::SelectPrevious",

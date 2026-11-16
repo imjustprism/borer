@@ -60,12 +60,14 @@ MOUSEEVENTF_LEFTUP = 0x0004
 MOUSEEVENTF_VIRTUALDESK = 0x4000
 MOUSEEVENTF_ABSOLUTE = 0x8000
 VK_BACK = 0x08
+VK_CONTROL = 0x11
 WM_KEYDOWN = 0x0100
 WM_KEYUP = 0x0101
 WM_MOUSEMOVE = 0x0200
 WM_LBUTTONDOWN = 0x0201
 WM_LBUTTONUP = 0x0202
 MK_LBUTTON = 0x0001
+MK_CONTROL = 0x0008
 SM_XVIRTUALSCREEN = 76
 SM_YVIRTUALSCREEN = 77
 SM_CXVIRTUALSCREEN = 78
@@ -348,9 +350,17 @@ def send_ascii_char(
     return send_vk(hwnd, vk, marks=marks, allow_fallback=allow_fallback)
 
 
+def _control_key(up: bool) -> INPUT:
+    key = INPUT(type=INPUT_KEYBOARD)
+    flags = KEYEVENTF_KEYUP if up else 0
+    key.ki = KEYBDINPUT(wVk=VK_CONTROL, wScan=0, dwFlags=flags, time=0, dwExtraInfo=0)
+    return key
+
+
 def _release_mouse_button(user32: Any, hwnd: int, lparam: wt.LPARAM) -> None:
-    release = INPUT(type=INPUT_MOUSE)
-    release.mi = MOUSEINPUT(
+    release = (INPUT * 2)()
+    release[0].type = INPUT_MOUSE
+    release[0].mi = MOUSEINPUT(
         dx=0,
         dy=0,
         mouseData=0,
@@ -358,9 +368,10 @@ def _release_mouse_button(user32: Any, hwnd: int, lparam: wt.LPARAM) -> None:
         time=0,
         dwExtraInfo=0,
     )
+    release[1] = _control_key(up=True)
     with contextlib.suppress(Exception):
-        released = int(user32.SendInput(1, ctypes.byref(release), ctypes.sizeof(INPUT)))
-        if released != 1:
+        released = int(user32.SendInput(2, release, ctypes.sizeof(INPUT)))
+        if released != 2:
             user32.PostMessageW(wt.HWND(hwnd), WM_LBUTTONUP, wt.WPARAM(0), lparam)
 
 
@@ -391,9 +402,10 @@ def send_client_click(
 
     armed_down: tuple[int, int] | None = None
     if ensure_foreground(hwnd, allow_fallback=allow_fallback):
-        move_down = (INPUT * 2)()
-        move_down[0].type = INPUT_MOUSE
-        move_down[0].mi = MOUSEINPUT(
+        move_down = (INPUT * 3)()
+        move_down[0] = _control_key(up=False)
+        move_down[1].type = INPUT_MOUSE
+        move_down[1].mi = MOUSEINPUT(
             dx=abs_x,
             dy=abs_y,
             mouseData=0,
@@ -401,8 +413,8 @@ def send_client_click(
             time=0,
             dwExtraInfo=0,
         )
-        move_down[1].type = INPUT_MOUSE
-        move_down[1].mi = MOUSEINPUT(
+        move_down[2].type = INPUT_MOUSE
+        move_down[2].mi = MOUSEINPUT(
             dx=abs_x,
             dy=abs_y,
             mouseData=0,
@@ -417,8 +429,8 @@ def send_client_click(
         if ensure_foreground(hwnd, allow_fallback=allow_fallback):
             ctypes.set_last_error(0)
             sent_down_ns = time.perf_counter_ns()
-            down_inserted = int(user32.SendInput(2, move_down, ctypes.sizeof(INPUT)))
-            if down_inserted == 2:
+            down_inserted = int(user32.SendInput(3, move_down, ctypes.sizeof(INPUT)))
+            if down_inserted == 3:
                 if marks is not None:
                     marks.record_sent(armed_down, sent_down_ns)
                 up_sent = False
@@ -428,8 +440,9 @@ def send_client_click(
                     if marks is not None and armed_up is None:
                         return None
                     ensure_foreground(hwnd, allow_fallback=False)
-                    up = INPUT(type=INPUT_MOUSE)
-                    up.mi = MOUSEINPUT(
+                    up = (INPUT * 2)()
+                    up[0].type = INPUT_MOUSE
+                    up[0].mi = MOUSEINPUT(
                         dx=abs_x,
                         dy=abs_y,
                         mouseData=0,
@@ -437,14 +450,15 @@ def send_client_click(
                         time=0,
                         dwExtraInfo=0,
                     )
+                    up[1] = _control_key(up=True)
                     ctypes.set_last_error(0)
                     sent_up_ns = time.perf_counter_ns()
-                    up_inserted = int(user32.SendInput(1, ctypes.byref(up), ctypes.sizeof(INPUT)))
-                    up_sent = up_inserted == 1
+                    up_inserted = int(user32.SendInput(2, up, ctypes.sizeof(INPUT)))
+                    up_sent = up_inserted == 2
                     if not up_sent:
                         err = ctypes.get_last_error()
                         raise RuntimeError(
-                            f"SendInput(mouse up) inserted {up_inserted}/1 events (last_error={err})"
+                            f"SendInput(mouse up) inserted {up_inserted}/2 events (last_error={err})"
                         )
                     if marks is not None:
                         marks.record_sent(armed_up, sent_up_ns)
@@ -455,7 +469,7 @@ def send_client_click(
             if not allow_fallback:
                 err = ctypes.get_last_error()
                 raise RuntimeError(
-                    f"SendInput(mouse down) inserted {down_inserted}/2 events (last_error={err}); "
+                    f"SendInput(mouse down) inserted {down_inserted}/3 events (last_error={err}); "
                     "unlock the Windows desktop or pass --allow-postmessage-fallback to record "
                     "window-message fallback separately"
                 )
@@ -466,7 +480,7 @@ def send_client_click(
             return None
     sent_down_ns = time.perf_counter_ns()
     user32.PostMessageW(wt.HWND(hwnd), WM_MOUSEMOVE, wt.WPARAM(0), lparam)
-    user32.PostMessageW(wt.HWND(hwnd), WM_LBUTTONDOWN, wt.WPARAM(MK_LBUTTON), lparam)
+    user32.PostMessageW(wt.HWND(hwnd), WM_LBUTTONDOWN, wt.WPARAM(MK_LBUTTON | MK_CONTROL), lparam)
     if marks is not None:
         marks.record_sent(armed_down, sent_down_ns)
     up_posted = False
@@ -476,7 +490,7 @@ def send_client_click(
         if marks is not None and armed_up is None:
             return None
         sent_up_ns = time.perf_counter_ns()
-        user32.PostMessageW(wt.HWND(hwnd), WM_LBUTTONUP, wt.WPARAM(0), lparam)
+        user32.PostMessageW(wt.HWND(hwnd), WM_LBUTTONUP, wt.WPARAM(MK_CONTROL), lparam)
         up_posted = True
         if marks is not None:
             marks.record_sent(armed_up, sent_up_ns)

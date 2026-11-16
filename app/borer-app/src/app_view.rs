@@ -39,8 +39,9 @@ use workspace::{
     WorkspaceStore,
 };
 
-use crate::actions::{FocusFilter, Open, ToggleFunctionColumns, ToggleFunctions};
+use crate::actions::{FocusFilter, FollowLink, Open, ToggleFunctionColumns, ToggleFunctions};
 use crate::binary::{Binary, StatusLine};
+use crate::decompile_item::DecompileItem;
 use crate::functions_panel::{FunctionsPanel, PANEL_KEY};
 use crate::measure::CliMode;
 use crate::start_item::keep_filled;
@@ -369,6 +370,11 @@ fn register_actions(workspace: &mut Workspace) {
         .register_action(|workspace, _: &ToggleFunctionColumns, _, cx| {
             if let Some(panel) = workspace.panel::<FunctionsPanel>(cx) {
                 panel.update(cx, FunctionsPanel::toggle_columns);
+            }
+        })
+        .register_action(|workspace, _: &FollowLink, window, cx| {
+            if let Some(item) = workspace.active_item_as::<DecompileItem>(cx) {
+                item.update(cx, |item, cx| item.follow_cursor(true, window, cx));
             }
         });
 }

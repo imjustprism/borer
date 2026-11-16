@@ -422,6 +422,7 @@ mod tests {
             ("actions.rs", include_str!("actions.rs")),
             ("app_view.rs", include_str!("app_view.rs")),
             ("binary.rs", include_str!("binary.rs")),
+            ("code_semantics.rs", include_str!("code_semantics.rs")),
             ("code_view.rs", include_str!("code_view.rs")),
             ("decompile_item.rs", include_str!("decompile_item.rs")),
             ("functions_panel.rs", include_str!("functions_panel.rs")),
