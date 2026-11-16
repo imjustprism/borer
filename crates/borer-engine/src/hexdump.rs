@@ -1,6 +1,7 @@
 //! Classic 16-bytes-per-row hexdump rendering.
 
 use crate::num::from_usize;
+use crate::program::BinaryFormat;
 
 /// Renders `bytes` as a hexdump whose first byte sits at address `base`.
 ///
@@ -134,6 +135,9 @@ impl HexRows {
 /// section by section, a section's addresses the file holds no bytes for,
 /// and addresses nothing maps, each a run of its own.
 ///
+/// A run the file holds no bytes for ends where any section, or a PE's
+/// mapped headers, begins, so the bytes there are read as such.
+///
 /// # Arguments
 ///
 /// * `program` - The loaded image.
@@ -153,6 +157,15 @@ pub fn hex_rows(program: &crate::program::Program, va: u64, len: usize) -> HexRo
         let want = usize::try_from(end - at).unwrap_or(HEXDUMP_MAX);
         let found = program.section_at(at);
         let holding = found.or_else(|| program.zero_fill_at(at));
+        let next = || {
+            program
+                .sections
+                .iter()
+                .map(|s| s.va.0)
+                .chain((program.format == BinaryFormat::Pe).then_some(program.image_base))
+                .filter(|&start| start > at)
+                .fold(end, u64::min)
+        };
         let (run, fill, section) = match (program.read_va_upto(at, want), holding) {
             (Some(bytes), _) => (
                 from_usize(bytes.len()),
@@ -162,21 +175,12 @@ pub fn hex_rows(program: &crate::program::Program, va: u64, len: usize) -> HexRo
             (None, Some(s)) => (
                 s.va.0
                     .saturating_add(s.vsize.max(s.file_size))
-                    .min(end)
+                    .min(next())
                     .saturating_sub(at),
                 HexFill::Unbacked,
                 Some(s),
             ),
-            (None, None) => {
-                let next = program
-                    .sections
-                    .iter()
-                    .map(|s| s.va.0)
-                    .filter(|&start| start > at)
-                    .min()
-                    .unwrap_or(end);
-                (next.min(end).saturating_sub(at), HexFill::Unmapped, None)
-            }
+            (None, None) => (next().saturating_sub(at), HexFill::Unmapped, None),
         };
         if run == 0 {
             break;
@@ -301,6 +305,41 @@ mod tests {
                 span(0x1020, 0x10, Some(".bss"), HexFill::Unbacked),
                 span(0x1030, 8, None, HexFill::Unmapped),
             ]
+        );
+    }
+
+    /// A run without file bytes stops where a file-backed section begins
+    /// inside it, and one nothing maps stops at a PE's mapped headers.
+    ///
+    /// # Panics
+    ///
+    /// When the bytes there are hidden under the run before them.
+    #[test]
+    fn hex_rows_stop_where_bytes_begin() {
+        let mut tbss = Section::mapped(".tbss", 0x2000, 0, 0x100, true, false);
+        tbss.file_size = 0;
+        let data = Section::mapped(".data", 0x2010, 0, 0x10, true, false);
+        let bytes: Vec<u8> = (0..0x10).collect();
+        let p = Program::raw(bytes.clone(), Arch::X86_64, 0, None, vec![tbss, data]);
+        let spans = hex_rows(&p, 0x2000, 0x20).spans;
+        assert_eq!(spans.len(), 2, "{spans:?}");
+        assert_eq!((spans[0].len, &spans[0].fill), (0x10, &HexFill::Unbacked));
+        assert_eq!(spans[1].fill, HexFill::Bytes(bytes));
+        assert_eq!(spans[1].section.as_deref(), Some(".data"));
+
+        let base = 0x1_4000_0000;
+        let mut image = vec![0u8; 0x210];
+        image[..2].copy_from_slice(b"MZ");
+        let text = Section::mapped(".text", base + 0x1000, 0x200, 0x10, false, true);
+        let mut pe = Program::raw(image, Arch::X86_64, base, None, vec![text]);
+        pe.format = BinaryFormat::Pe;
+        let spans = hex_rows(&pe, base - 8, 0x10).spans;
+        assert_eq!(spans.len(), 2, "{spans:?}");
+        assert_eq!((spans[0].len, &spans[0].fill), (8, &HexFill::Unmapped));
+        assert_eq!((spans[1].va, spans[1].section.as_deref()), (base, None));
+        assert!(
+            matches!(&spans[1].fill, HexFill::Bytes(b) if b.starts_with(b"MZ")),
+            "{spans:?}"
         );
     }
 
