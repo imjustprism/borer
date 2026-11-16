@@ -1103,6 +1103,8 @@ def _collect_bar_failures(
     if float(memory.get("delta_mb", 9999.0)) > 150.0:
         failures.append(f"memory delta {memory.get('delta_mb')} MB exceeds 150.0 MB bar")
     for label, phase in (("list-scroll", list_scroll), ("code-scroll", code_scroll)):
+        if phase.get("painted") is not True:
+            failures.append(f"{label} scrolled a view that was not painted")
         if int(phase.get("draw_n", 0)) <= 0:
             failures.append(f"{label} recorded zero draw samples (draw_n={phase.get('draw_n')})")
         if int(phase.get("present_n", 0)) <= 0:

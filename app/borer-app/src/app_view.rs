@@ -14,7 +14,7 @@
 
 use std::any::{Any, TypeId};
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context as _;
@@ -41,6 +41,7 @@ use workspace::{
 use crate::actions::{FocusFilter, Open, ToggleFunctions};
 use crate::binary::{Binary, StatusLine};
 use crate::functions_panel::FunctionsPanel;
+use crate::measure::CliMode;
 use crate::start_item::keep_filled;
 
 /// Directory of the app's settings, keymap, database and logs under the platform's local
@@ -64,19 +65,47 @@ const WINDOW_WIDTH_PX: f32 = 1280.0;
 /// Default window height in logical pixels.
 const WINDOW_HEIGHT_PX: f32 = 800.0;
 
-/// Points Zed's settings, keymap, database and logs at the app's own data directory.
+/// Returns the data directory of a run in `mode`.
 ///
-/// Must run before anything reads Zed's data or config directory.
+/// That is the app's own under the platform's local data directory for a person, one of
+/// the run's own under the temporary directory for a measurement, so a measurement neither
+/// reads nor writes the person's layout.
+///
+/// # Arguments
+///
+/// * `mode` - The run's mode.
 ///
 /// # Errors
 ///
-/// Returns an error when the platform has no local data directory, the directory cannot be
-/// created, or its path is not UTF-8.
-pub fn set_data_dir() -> anyhow::Result<()> {
-    let dir = dirs::data_local_dir()
-        .context("the platform has no local data directory")?
-        .join(DATA_DIR_NAME);
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+/// Returns an error when the platform has no local data directory.
+pub fn data_dir(mode: &CliMode) -> anyhow::Result<PathBuf> {
+    match mode {
+        CliMode::Interactive(_) => Ok(dirs::data_local_dir()
+            .context("the platform has no local data directory")?
+            .join(DATA_DIR_NAME)),
+        CliMode::FirstFrame
+        | CliMode::ReportOpen(_)
+        | CliMode::Headless(_)
+        | CliMode::MeasureMemory(_)
+        | CliMode::Measure(_) => Ok(
+            std::env::temp_dir().join(format!("{DATA_DIR_NAME}-measure-{}", std::process::id()))
+        ),
+    }
+}
+
+/// Points Zed's settings, keymap, database and logs at `dir`.
+///
+/// Must run before anything reads Zed's data or config directory.
+///
+/// # Arguments
+///
+/// * `dir` - The data directory, from [`data_dir`].
+///
+/// # Errors
+///
+/// Returns an error when the directory cannot be created or its path is not UTF-8.
+pub fn set_data_dir(dir: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let name = dir
         .to_str()
         .with_context(|| format!("the data directory {} is not UTF-8", dir.display()))?;
@@ -353,9 +382,10 @@ mod tests {
     use workspace::pane::{GoBack, GoForward};
     use workspace::{AddFolderToProject, AppState, MultiWorkspace, Workspace};
 
-    use super::{configure, new_workspace};
+    use super::{configure, data_dir, new_workspace};
     use crate::decompile_item::{DecompileItem, TabMode, open_function};
     use crate::functions_panel::FunctionsPanel;
+    use crate::measure::{CliMode, MeasurePhase};
     use crate::worker::LoadedBinary;
 
     /// Entry of the sample program's caller, which calls [`CALLEE`].
@@ -498,6 +528,27 @@ mod tests {
         });
         assert_eq!(shown(&workspace, cx).map(|(entry, _)| entry), Some(CALLER));
         assert_available(&declared, cx);
+    }
+
+    /// A measurement run gets a data directory of its own under the temporary directory,
+    /// never the person's.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a measurement mode shares the person's directory.
+    #[test]
+    fn a_measurement_run_gets_its_own_data_dir() {
+        let person = data_dir(&CliMode::Interactive(None)).unwrap();
+        for mode in [
+            CliMode::FirstFrame,
+            CliMode::ReportOpen(PathBuf::from("a.exe")),
+            CliMode::MeasureMemory(PathBuf::from("a.exe")),
+            CliMode::Measure(MeasurePhase::ListScroll),
+        ] {
+            let run = data_dir(&mode).unwrap();
+            assert_ne!(run, person);
+            assert!(run.starts_with(std::env::temp_dir()), "{}", run.display());
+        }
     }
 
     /// Zed's open, open files and reload are offered nowhere, and its add folder action is

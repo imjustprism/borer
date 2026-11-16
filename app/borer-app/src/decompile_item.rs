@@ -170,6 +170,13 @@ impl DecompileItem {
         &self.scroll
     }
 
+    /// Returns the height in logical pixels the line list was last painted at, zero before
+    /// its first paint.
+    #[must_use]
+    pub fn painted_height(&self) -> gpui::Pixels {
+        self.scroll.0.borrow().base_handle.bounds().size.height
+    }
+
     /// Returns the zero-based index of the line at the top of the tab: the line a scroll
     /// not yet laid out asks for, else the first line the scroll offset shows whole or in
     /// part.

@@ -191,6 +191,13 @@ impl Harness {
         };
         let after = window.frame_duration_snapshot();
         let kind = if run.code { "code" } else { "list" };
+        let painted = if run.code {
+            self.item(cx)
+                .map_or(gpui::px(0.0), |item| item.read(cx).painted_height())
+        } else {
+            self.panel(cx)
+                .map_or(gpui::px(0.0), |panel| panel.read(cx).painted_height(cx))
+        } > gpui::px(0.0);
         let report = scroll_report(
             kind,
             &run.source,
@@ -200,7 +207,7 @@ impl Harness {
             &after,
             &mut run.intervals,
         )
-        .and_then(|line| say(&line));
+        .and_then(|line| say(&format!("{line} painted={painted}")));
         match report {
             Err(err) => self.fail(err, cx),
             Ok(()) if run.then_code => self.begin(MeasurePhase::CodeScroll, cx),

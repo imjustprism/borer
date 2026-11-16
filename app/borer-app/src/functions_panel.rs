@@ -151,6 +151,25 @@ impl FunctionsPanel {
             .scroll_to_item(row, ScrollStrategy::Top);
     }
 
+    /// Returns the height in logical pixels the table was last painted at, zero before its
+    /// first paint.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Application context reading the table state.
+    #[must_use]
+    pub fn painted_height(&self, cx: &App) -> Pixels {
+        self.table_state
+            .read(cx)
+            .scroll_handle
+            .0
+            .borrow()
+            .base_handle
+            .bounds()
+            .size
+            .height
+    }
+
     /// Shows `rows` of `loaded`, clearing the filter and the selection.
     ///
     /// # Arguments
