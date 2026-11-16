@@ -262,7 +262,10 @@ impl<K: Ord, V, T: Tag> Tracked<K, V, T> {
 impl<K, V, T> Tracked<K, V, T> {
     /// Returns the entries without noting a read: for keying a memo by the
     /// overlay ([`Overlay::fingerprint`]), copying it, and telling two
-    /// overlays apart ([`Edit::between`]), none of which reaches a result.
+    /// overlays apart ([`Edit::between`]), none of which reaches a result,
+    /// and for a view passing over the blocks no comment falls in, whose
+    /// text already read every comment it shows
+    /// (`said::notes`).
     #[must_use]
     pub(crate) const fn raw(&self) -> &BTreeMap<K, V> {
         &self.map

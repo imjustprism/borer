@@ -35,7 +35,10 @@
 //! ([`Unlinked`]).
 //!
 //! Each linked name says who stated it ([`said`]), from the fact it was
-//! spelled with.
+//! spelled with. A body line that is exactly one of the overlay's comments
+//! at the function's instructions is a note, or an open question, linked
+//! to the comment's address when one address alone holds its text; no
+//! header line is.
 //!
 //! Reading notes no overlay fact beyond its text's and the spellings it
 //! looked up ([`reads`]): the whole-program indexes are taken unnoted, the
@@ -388,6 +391,10 @@ struct Reader<'a> {
     head: usize,
     /// What each line after the header and up to the body is.
     roles: Vec<Role>,
+    /// The overlay's comments at the function's instructions by their
+    /// text, read the first time a body line could show one
+    /// ([`said::notes`]).
+    notes: OnceCell<BTreeMap<&'a str, BTreeSet<u64>>>,
 }
 
 /// Returns a function's text read as lines of typed tokens, each name
@@ -1294,6 +1301,7 @@ impl<'a> Reader<'a> {
             types,
             head,
             roles,
+            notes: OnceCell::new(),
         }
     }
 
@@ -1352,6 +1360,9 @@ impl<'a> Reader<'a> {
         let role = self.role(i, line);
         if role == Role::Header && line.starts_with(CHECKED) {
             self.put_checked(b, line);
+            return;
+        }
+        if role == Role::Body && self.put_note(b, line) {
             return;
         }
         if role == Role::Signature {
@@ -1454,6 +1465,43 @@ impl<'a> Reader<'a> {
             from = at.end;
         }
         b.put(line.get(from..).unwrap_or_default(), Kind::Comment, None);
+    }
+
+    /// Puts a body line that is exactly one of the overlay's comments at the
+    /// function's instructions, `// {c}` after its indent, as one
+    /// [`Kind::Note`] or [`Kind::Question`] token ([`said::note_kind`]),
+    /// linked to the comment's address when one address alone holds that
+    /// text.
+    ///
+    /// # Arguments
+    ///
+    /// * `b` - The view being built.
+    /// * `line` - The line.
+    ///
+    /// # Returns
+    ///
+    /// Whether the line was such a note; nothing is put when it was not.
+    fn put_note(&self, b: &mut Builder, line: &str) -> bool {
+        let text = line.trim_start();
+        let held = text.strip_prefix("// ").and_then(|c| {
+            let f = self.facts.as_ref()?.function;
+            let by = self
+                .notes
+                .get_or_init(|| said::notes(self.program, self.overlay, f));
+            Some((c, by.get(c)?))
+        });
+        let Some((c, at)) = held else {
+            return false;
+        };
+        let mut at = at.iter();
+        let link = match (at.next(), at.next()) {
+            (Some(&va), None) => Some(Ref::Comment(va)),
+            _ => None,
+        };
+        let indent = line.len().saturating_sub(text.len());
+        b.put(line.get(..indent).unwrap_or_default(), Kind::Space, None);
+        b.put(text, said::note_kind(c), link);
+        true
     }
 
     /// Returns the function a `static inline` line defines: the one thing

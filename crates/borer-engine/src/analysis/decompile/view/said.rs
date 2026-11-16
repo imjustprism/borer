@@ -15,21 +15,26 @@
 //! `field_0x<hex>` at its own offset a placeholder. Each looks the overlay up by
 //! the referent's own key, which the text that spelled it read already, so
 //! a view reads what its answer read.
+//!
+//! A comment the overlay holds at one of a function's instructions shows
+//! as a note, or as an open question ([`note_kind`]); the decompile finds
+//! them by their text ([`notes`]). A type the text declares is the debug
+//! information's or says nothing, and reads no user type ([`type_said`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use super::super::expr_render::data_name;
 use super::super::line::label_address;
 use super::fields::field_hex_offset;
 use crate::analysis::attributes::global_addr;
-use crate::analysis::edit::var_said;
-use crate::analysis::render::RowSource;
+use crate::analysis::edit::{open_question, var_said};
+use crate::analysis::render::{RowSource, block_instructions};
 use crate::analysis::utypes::UserType;
-use crate::analysis::{Analysis, NameSource, Overlay, bare_name};
+use crate::analysis::{Analysis, Function, NameSource, Overlay, bare_name};
 use crate::headers::OrdinalName;
 use crate::program::{Program, SymbolKind};
-use crate::view::{Ref, Said};
+use crate::view::{Kind, Ref, Said};
 
 impl From<RowSource> for Said {
     fn from(source: RowSource) -> Self {
@@ -86,7 +91,7 @@ pub(crate) fn of(
         Ref::Variable { function, name, .. } => var_said(program, overlay, *function, name),
         Ref::Field { ty, offset } => field(program, overlay, ty, *offset, spelled),
         Ref::Type(name) => type_said(program, Some(overlay), name),
-        Ref::String(_) => None,
+        Ref::String(_) | Ref::Comment(_) => None,
     }
 }
 
@@ -267,4 +272,57 @@ fn field(
     } else {
         (field_hex_offset(spelled) == Some(offset)).then_some(Said::Placeholder)
     }
+}
+
+/// Returns the kind of a token that shows one of the overlay's comments: a
+/// question when it is an open question ([`open_question`]), else a note.
+///
+/// # Arguments
+///
+/// * `comment` - The comment's text.
+pub(crate) fn note_kind(comment: &str) -> Kind {
+    if open_question(comment).is_some() {
+        Kind::Question
+    } else {
+        Kind::Note
+    }
+}
+
+/// Returns the overlay's comments at the instructions of a function's
+/// blocks, each text with the addresses that hold it.
+///
+/// Each instruction's comment is looked up by its address, as the lift
+/// that wrote the text looked it up. A block no comment falls in is
+/// skipped undecoded and unread: the lift looked up each of its
+/// instructions as it wrote the text, so a comment added there changes the
+/// text the view reads and reaches the view through it.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image, for the blocks' instructions.
+/// * `overlay` - The comments in force.
+/// * `f` - The function.
+pub(super) fn notes<'o>(
+    program: &Program,
+    overlay: &'o Overlay,
+    f: &Function,
+) -> BTreeMap<&'o str, BTreeSet<u64>> {
+    let mut by: BTreeMap<&str, BTreeSet<u64>> = BTreeMap::new();
+    for b in &f.blocks {
+        if overlay
+            .comments
+            .raw()
+            .range(b.start..b.end)
+            .next()
+            .is_none()
+        {
+            continue;
+        }
+        for va in block_instructions(program, b, b.end) {
+            if let Some(c) = overlay.comments.get(&va) {
+                by.entry(c.as_str()).or_default().insert(va);
+            }
+        }
+    }
+    by
 }

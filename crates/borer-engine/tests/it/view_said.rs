@@ -515,3 +515,133 @@ fn a_type_the_text_declares_reads_no_user_type() {
         "the view was built again"
     );
 }
+
+/// Returns the kind and the link of each token of a view spelling `word`,
+/// in order.
+///
+/// # Arguments
+///
+/// * `v` - The view.
+/// * `word` - The spelling.
+fn kinds_spelled(v: &View, word: &str) -> Vec<(Kind, Option<Ref>)> {
+    (0..v.lines())
+        .flat_map(|i| {
+            let line = v.line(i).unwrap_or_default();
+            v.tokens(i)
+                .filter(|(span, ..)| line.get(span.clone()) == Some(word))
+                .map(|(_, kind, link)| (kind, link.cloned()))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Returns [`callers`]'s overlay with comments at [`CALLER`]'s instructions.
+///
+/// They are the first call's, the second's an open question, the third's and fourth's
+/// alike, the `add`'s spelled as an answer's trailer, and the `ret`'s an
+/// open question behind a blank.
+fn commented() -> Overlay {
+    let (.., mut o) = callers();
+    for (at, c) in [
+        (CALLER + 4, "checks the license"),
+        (CALLER + 9, "? why twice"),
+        (CALLER + 0xe, "same text"),
+        (CALLER + 0x13, "same text"),
+        (CALLER + 0x18, "next: borer://solve/0x401004"),
+        (CALLER + 0x1c, " ? why"),
+    ] {
+        o.comments.insert(at, c.to_owned());
+    }
+    o
+}
+
+/// An overlay comment at an instruction of the function is a note linked
+/// to its address.
+///
+/// One opening with `?` (blanks before it ignored) a
+/// question, a text two instructions hold a note linked to neither, and a
+/// header line, an answer's trailer among them, or a comment the overlay
+/// does not hold stays a comment; the listing marks its comments alike.
+#[test]
+fn an_overlay_comment_is_a_note_and_one_opening_with_a_question_mark_a_question() {
+    let (p, a, _) = callers();
+    let o = commented();
+    let note = |at: u64| (Kind::Note, Some(Ref::Comment(at)));
+    let question = |at: u64| (Kind::Question, Some(Ref::Comment(at)));
+    let answered = view(&p, &a, &o, CALLER).expect("a view");
+    assert_eq!(
+        kinds_spelled(&answered, "// checks the license"),
+        [note(CALLER + 4)],
+        "{}",
+        answered.spell()
+    );
+    let text = concat!(
+        "// sub_401000 @ 0x401000\n",
+        "// checks the license\n",
+        "// next: borer://solve/0x401004\n",
+        "// signature: uint64_t sub_401000(void)\n",
+        "\n",
+        "    // checks the license\n",
+        "// ? why twice\n",
+        "// same text\n",
+        "// not held\n",
+        "//  ? why\n",
+        "return 0;\n",
+    );
+    let v = view_of(&p, &a, &o, CALLER, text).expect("a view");
+    assert_eq!(v.spell(), text);
+    assert_eq!(
+        kinds_spelled(&v, "// checks the license"),
+        [(Kind::Comment, None), note(CALLER + 4)]
+    );
+    assert_eq!(
+        kinds_spelled(&v, "// next: borer://solve/0x401004"),
+        [(Kind::Comment, None)]
+    );
+    assert_eq!(kinds_spelled(&v, "// ? why twice"), [question(CALLER + 9)]);
+    assert_eq!(kinds_spelled(&v, "//  ? why"), [question(CALLER + 0x1c)]);
+    assert_eq!(kinds_spelled(&v, "// same text"), [(Kind::Note, None)]);
+    assert_eq!(kinds_spelled(&v, "// not held"), [(Kind::Comment, None)]);
+    let listing = disasm_view(&p, &a, &o, CALLER, 100, Bytes::Hidden).expect("a listing");
+    assert_eq!(
+        kinds_spelled(&listing, "// ? why twice"),
+        [question(CALLER + 9)]
+    );
+    assert_eq!(
+        kinds_spelled(&listing, "//  ? why"),
+        [question(CALLER + 0x1c)]
+    );
+    assert_eq!(
+        kinds_spelled(&listing, "// same text"),
+        [note(CALLER + 0xe), note(CALLER + 0x13)]
+    );
+}
+
+/// A comment at another function's instruction keeps a view that shows
+/// notes: the view reads the comments of its own instructions alone.
+#[test]
+fn a_comment_elsewhere_keeps_a_view_with_notes() {
+    let (p, a, _) = callers();
+    let before = commented();
+    let built = |o: &Overlay| {
+        let text = decompile_named(&p, &a, o, CALLER).expect("a text");
+        let make = || view_of(&p, &a, o, CALLER, &text);
+        a.derived
+            .get_or_build_item("view_notes_test", o.fingerprint(), CALLER, make, |_| 0)
+    };
+    let was = built(&before);
+    let shown = was.as_ref().as_ref().expect("a view");
+    assert_eq!(
+        kinds_spelled(shown, "// checks the license"),
+        [(Kind::Note, Some(Ref::Comment(CALLER + 4)))],
+        "{}",
+        shown.spell()
+    );
+    let mut after = before.clone();
+    after.comments.insert(APART, "elsewhere".to_owned());
+    a.derived.moved(&a, &before, &after);
+    assert!(
+        Arc::ptr_eq(&was, &built(&after)),
+        "the view was built again"
+    );
+}

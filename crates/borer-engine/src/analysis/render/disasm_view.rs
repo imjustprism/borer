@@ -478,7 +478,11 @@ impl RowCtx<'_> {
         }
         if let Some(c) = o.comments.get(&va) {
             out.put("  ", Kind::Space, None);
-            out.put(&format!("// {c}"), Kind::Comment, None);
+            out.put(
+                &format!("// {c}"),
+                said::note_kind(c),
+                Some(Ref::Comment(va)),
+            );
         }
         out.end_line();
     }

@@ -89,7 +89,7 @@ impl Role {
             Kind::Space => return None,
             Kind::Function if matches!(link, Some(Ref::Import(_))) => Self::Import,
             Kind::Text => Self::Text,
-            Kind::Comment => Self::Comment,
+            Kind::Comment | Kind::Note | Kind::Question => Self::Comment,
             Kind::Keyword => Self::Keyword,
             Kind::Mnemonic => Self::Mnemonic,
             Kind::Register => Self::Register,
@@ -343,6 +343,7 @@ pub fn resolve_ref_click(view: &View, target: &Ref) -> ClickOutcome {
         | Ref::Type(_)
         | Ref::String(_)
         | Ref::Field { .. } => view.definition(target),
+        Ref::Comment(_) => return ClickOutcome::None,
     };
     line.map_or(ClickOutcome::None, ClickOutcome::ScrollToLine)
 }
@@ -360,6 +361,8 @@ pub fn describe(text: &str, kind: Kind, link: Option<&Ref>) -> String {
     let what = match kind {
         Kind::Space => "whitespace",
         Kind::Comment => "comment",
+        Kind::Note => "note",
+        Kind::Question => "open question",
         Kind::Keyword => "keyword",
         Kind::Mnemonic => "mnemonic",
         Kind::Register => "register",
@@ -388,6 +391,7 @@ pub fn describe(text: &str, kind: Kind, link: Option<&Ref>) -> String {
             format!("the variable {name} of the function at {function:#x}")
         }
         Some(Ref::Type(name)) => format!("the type {name}"),
+        Some(Ref::Comment(va)) => format!("the comment at {va:#x}"),
     };
     format!("{text}: {what}, links to {to}")
 }

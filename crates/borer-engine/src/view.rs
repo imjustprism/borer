@@ -29,6 +29,11 @@ pub enum Kind {
     Space,
     /// A comment: `//` to the end of the line, or `/*` to its `*/`.
     Comment,
+    /// A comment the overlay holds at one of the function's instructions:
+    /// a decompile's line of its own, or a listing's after its instruction.
+    Note,
+    /// A note opening with `?`: an open question.
+    Question,
     /// A C keyword, a preprocessor directive's name, `nullptr`, `true` or
     /// `false`, or an assembly prefix or operand keyword.
     Keyword,
@@ -104,6 +109,8 @@ pub enum Ref {
     },
     /// A type the text or the user declares, by its name.
     Type(Box<str>),
+    /// A comment of the overlay, by the instruction address that holds it.
+    Comment(u64),
 }
 
 /// Who stated the name a referent goes by, read from the fact the engine
@@ -389,6 +396,8 @@ impl View {
                     | Kind::Type => true,
                     Kind::Space
                     | Kind::Comment
+                    | Kind::Note
+                    | Kind::Question
                     | Kind::Keyword
                     | Kind::Mnemonic
                     | Kind::Register
@@ -562,7 +571,8 @@ impl View {
                 | Ref::Function(_)
                 | Ref::Import(_)
                 | Ref::Global(_)
-                | Ref::String(_) => 0,
+                | Ref::String(_)
+                | Ref::Comment(_) => 0,
             })
             .sum();
         self.text.len()

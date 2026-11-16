@@ -323,6 +323,7 @@ fn link_ok(
         Ref::Type(name) => v
             .definition(r)
             .is_some_and(|d| v.line(d).is_some_and(|l| l.contains(&**name))),
+        Ref::Comment(_) => false,
     }
 }
 
@@ -438,6 +439,8 @@ impl Census {
                     Kind::Field => Some(4),
                     Kind::Space
                     | Kind::Comment
+                    | Kind::Note
+                    | Kind::Question
                     | Kind::Keyword
                     | Kind::Constant
                     | Kind::Mnemonic
