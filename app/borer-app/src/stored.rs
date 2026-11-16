@@ -8,19 +8,24 @@
 //! would never read back.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Context as _;
 use borer_front::places;
 use db::kvp::KeyValueStore;
-use gpui::{App, AppContext as _, Context, Entity, Global, PathPromptOptions, Task};
+use gpui::{
+    App, AppContext as _, Context, Entity, Global, PathPromptOptions, Task, WeakEntity, Window,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use workspace::Workspace;
 
 use crate::actions::{ChoosePacks, ChooseSymbolCache, ForgetPacks, ForgetSymbolCache};
 use crate::binary::Binary;
-use crate::places::Place;
-use crate::worker::Sources;
+use crate::decompile_item::{DecompileItem, TabMode};
+use crate::places::{Opening, Place, place_of};
+use crate::shell::Shell;
+use crate::worker::{LoadedBinary, Sources};
 
 /// Namespace of the app's keys in Zed's key-value store.
 pub(crate) const SCOPE: &str = "borer";
@@ -375,6 +380,91 @@ pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
         .register_action(move |w, _: &ChoosePacks, _, cx| packs(w, cx))
         .register_action(move |w, _: &ForgetSymbolCache, _, cx| no_cache(w, cx))
         .register_action(move |w, _: &ForgetPacks, _, cx| no_packs(w, cx));
+}
+
+/// Returns the write of every app window's open code tabs to the store on quit, which the
+/// next start restores ([`Binary::restore`]); a write that fails is said on stderr.
+///
+/// # Arguments
+///
+/// * `cx` - Application context listing the windows.
+pub(crate) fn keep_open_tabs(cx: &mut App) -> impl Future<Output = ()> + use<> {
+    let app: &App = cx;
+    let tabs: Vec<SavedTab> = app
+        .windows()
+        .into_iter()
+        .filter_map(|window| window.downcast::<Shell>())
+        .filter_map(|window| window.read(app).ok())
+        .flat_map(|shell| open_tabs(shell.workspace().read(app), app))
+        .collect();
+    let keep = keep_tabs(&tabs, cx);
+    async move {
+        if let Err(err) = keep.await {
+            eprintln!("borer-app: open tabs not kept: {err:#}");
+        }
+    }
+}
+
+/// Returns the code tabs of `workspace`'s panes that show a function, by place, in tab order.
+///
+/// # Arguments
+///
+/// * `workspace` - The workspace.
+/// * `cx` - Application context reading the tabs.
+pub(crate) fn open_tabs(workspace: &Workspace, cx: &App) -> Vec<SavedTab> {
+    workspace
+        .panes()
+        .iter()
+        .flat_map(|pane| pane.read(cx).items_of_type::<DecompileItem>())
+        .filter_map(|item| {
+            let place = place_of(&item, cx)?;
+            let item = item.read(cx);
+            Some(SavedTab {
+                path: item.loaded().path.clone(),
+                sha256: item.loaded().identity.clone(),
+                place,
+                top: item.top_line(),
+            })
+        })
+        .collect()
+}
+
+/// Opens the places a restore found unchanged in `loaded`, each at its top line.
+///
+/// Each is a permanent tab, the last one active; it runs once the load's other followers
+/// ran, so the first function the panel docked with opens behind them. The panel opens
+/// that function on a deferred update of its own, so the restore is deferred twice.
+///
+/// # Arguments
+///
+/// * `workspace` - The window's workspace.
+/// * `binary` - The window's binary, holding the places ([`Binary::take_restored`]).
+/// * `loaded` - The binary the restore opened.
+/// * `window` - Window the workspace is in.
+/// * `cx` - Application context.
+pub(crate) fn restore_places(
+    workspace: &WeakEntity<Workspace>,
+    binary: &Entity<Binary>,
+    loaded: &Arc<LoadedBinary>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let restored = binary.update(cx, |binary, _| binary.take_restored());
+    let Some(workspace) = workspace.upgrade().filter(|_| !restored.is_empty()) else {
+        return;
+    };
+    workspace.update(cx, |workspace, cx| {
+        for (place, top) in restored {
+            let how = Opening {
+                mode: TabMode::Permanent,
+                focus: true,
+            };
+            crate::places::open(workspace, binary, loaded, place, how, window, cx);
+            if let Some(item) = workspace.active_item_as::<DecompileItem>(cx) {
+                item.update(cx, |item, _| item.restore_top(top));
+            }
+        }
+    });
 }
 
 #[cfg(test)]

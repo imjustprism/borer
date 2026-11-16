@@ -45,18 +45,15 @@ use crate::actions::{CloseBinary, MinimizeWindow, Open, ZoomWindow};
 use crate::app_dirs::with_host_env;
 use crate::binary::{Binary, BinaryEvent, StatusLine};
 use crate::commands;
-use crate::decompile_item::{DecompileItem, TabMode};
 use crate::functions_panel::FunctionsPanel;
-use crate::linear_item::LinearItem;
 use crate::measure::CliMode;
 use crate::panels::{PANELS, add_panels};
-use crate::places::{self, Opening, place_of};
+use crate::places;
 use crate::shell::Shell;
 use crate::start_item::keep_filled;
-use crate::stored::{self, SavedTab};
+use crate::stored;
 use crate::theme_import::read_dropped;
 use crate::user_themes::is_theme_path;
-use crate::worker::LoadedBinary;
 
 /// The app's window id, which desktops match to its launcher entry.
 const APP_ID: &str = "borer-app";
@@ -310,7 +307,7 @@ pub fn configure(cx: &mut App) -> anyhow::Result<()> {
     ];
     CommandPaletteFilter::update_global(cx, |filter, _| filter.hide_action_types(&hidden));
     cx.on_app_quit(crate::shell::flush_windows).detach();
-    cx.on_app_quit(keep_open_tabs).detach();
+    cx.on_app_quit(stored::keep_open_tabs).detach();
     cx.on_action(|_: &zed_actions::Quit, cx| cx.quit());
     Ok(())
 }
@@ -327,53 +324,6 @@ pub fn configure(cx: &mut App) -> anyhow::Result<()> {
 fn erased_editor(window: &mut Window, cx: &mut App) -> Arc<dyn ui_input::ErasedEditor> {
     cx.new(|cx| Editor::single_line(window, cx))
         .update(cx, |editor, cx| editor.erased(cx))
-}
-
-/// Returns the write of every app window's open code tabs to the store on quit, which the
-/// next start restores ([`Binary::restore`]); a write that fails is said on stderr.
-///
-/// # Arguments
-///
-/// * `cx` - Application context listing the windows.
-fn keep_open_tabs(cx: &mut App) -> impl Future<Output = ()> + use<> {
-    let app: &App = cx;
-    let tabs: Vec<SavedTab> = app
-        .windows()
-        .into_iter()
-        .filter_map(|window| window.downcast::<Shell>())
-        .filter_map(|window| window.read(app).ok())
-        .flat_map(|shell| open_tabs(shell.workspace().read(app), app))
-        .collect();
-    let keep = stored::keep_tabs(&tabs, cx);
-    async move {
-        if let Err(err) = keep.await {
-            eprintln!("borer-app: open tabs not kept: {err:#}");
-        }
-    }
-}
-
-/// Returns the code tabs of `workspace`'s panes that show a function, by place, in tab order.
-///
-/// # Arguments
-///
-/// * `workspace` - The workspace.
-/// * `cx` - Application context reading the tabs.
-fn open_tabs(workspace: &Workspace, cx: &App) -> Vec<SavedTab> {
-    workspace
-        .panes()
-        .iter()
-        .flat_map(|pane| pane.read(cx).items_of_type::<DecompileItem>())
-        .filter_map(|item| {
-            let place = place_of(&item, cx)?;
-            let item = item.read(cx);
-            Some(SavedTab {
-                path: item.loaded().path.clone(),
-                sha256: item.loaded().identity.clone(),
-                place,
-                top: item.top_line(),
-            })
-        })
-        .collect()
 }
 
 /// Opens the first file dropped on a tab as the window's binary, and refuses a folder with
@@ -560,16 +510,22 @@ pub fn new_workspace(
         .detach();
     let opener = app.workspace.downgrade();
     window
-        .subscribe(&app.binary, cx, move |binary, event, window, cx| {
-            if let BinaryEvent::Opened(loaded) = event {
-                let (opener, loaded) = (opener.clone(), loaded.clone());
-                window.defer(cx, move |window, cx| {
+        .subscribe(
+            &app.binary,
+            cx,
+            move |binary, event, window, cx| match event {
+                BinaryEvent::Opened(loaded) => {
+                    let (opener, loaded) = (opener.clone(), loaded.clone());
                     window.defer(cx, move |window, cx| {
-                        restore_places(&opener, &binary, &loaded, window, cx);
+                        window.defer(cx, move |window, cx| {
+                            stored::restore_places(&opener, &binary, &loaded, window, cx);
+                        });
                     });
-                });
-            }
-        })
+                }
+                BinaryEvent::Closed => close_binary_tabs(&opener, window, cx),
+                BinaryEvent::Revised(_) => {}
+            },
+        )
         .detach();
     let first = path.is_none() && !cx.has_global::<TabsRestored>();
     let tabs = first.then(|| {
@@ -587,42 +543,31 @@ pub fn new_workspace(
     app
 }
 
-/// Opens the places a restore found unchanged in `loaded`, each at its top line.
-///
-/// Each is a permanent tab, the last one active; it runs once the load's other followers
-/// ran, so the first function the panel docked with opens behind them. The panel opens
-/// that function on a deferred update of its own, so the restore is deferred twice.
+/// Closes every tab of `workspace` that shows a binary: the one they show is no longer
+/// open, so a second binary opened in the window, like Close Binary, leaves none of the
+/// first's.
 ///
 /// # Arguments
 ///
 /// * `workspace` - The window's workspace.
-/// * `binary` - The window's binary, holding the places ([`Binary::take_restored`]).
-/// * `loaded` - The binary the restore opened.
 /// * `window` - Window the workspace is in.
 /// * `cx` - Application context.
-fn restore_places(
-    workspace: &WeakEntity<Workspace>,
-    binary: &Entity<Binary>,
-    loaded: &Arc<LoadedBinary>,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let restored = binary.update(cx, |binary, _| binary.take_restored());
-    let Some(workspace) = workspace.upgrade().filter(|_| !restored.is_empty()) else {
+fn close_binary_tabs(workspace: &WeakEntity<Workspace>, window: &mut Window, cx: &mut App) {
+    let Some(workspace) = workspace.upgrade() else {
         return;
     };
-    workspace.update(cx, |workspace, cx| {
-        for (place, top) in restored {
-            let how = Opening {
-                mode: TabMode::Permanent,
-                focus: true,
-            };
-            places::open(workspace, binary, loaded, place, how, window, cx);
-            if let Some(item) = workspace.active_item_as::<DecompileItem>(cx) {
-                item.update(cx, |item, _| item.restore_top(top));
+    for pane in workspace.read(cx).panes().to_vec() {
+        pane.update(cx, |pane, cx| {
+            let tabs: Vec<_> = pane
+                .items()
+                .filter(|item| places::shows_a_binary(item.as_ref(), cx))
+                .map(|item| item.item_id())
+                .collect();
+            for tab in tabs {
+                pane.remove_item(tab, false, false, window, cx);
             }
-        }
-    });
+        });
+    }
 }
 
 /// Gives `pane` Zed's buffer search bar, which finds text in the active code tab.
@@ -767,8 +712,8 @@ pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
     );
 }
 
-/// Closes `binary`, takes every panel of [`PANELS`] out of its dock and closes its code and
-/// linear listing tabs, which leaves each pane its start tab.
+/// Closes `binary` and takes every panel of [`PANELS`] out of its dock; its tabs close as
+/// every closed binary's do ([`close_binary_tabs`]), which leaves each pane its start tab.
 ///
 /// # Arguments
 ///
@@ -785,21 +730,6 @@ fn close_binary(
     binary.update(cx, Binary::close);
     for spec in PANELS {
         (spec.remove)(workspace, window, cx);
-    }
-    for pane in workspace.panes().to_vec() {
-        let pane_ref = pane.read(cx);
-        let code = pane_ref
-            .items_of_type::<DecompileItem>()
-            .map(|tab| tab.entity_id());
-        let linear = pane_ref
-            .items_of_type::<LinearItem>()
-            .map(|tab| tab.entity_id());
-        let tabs: Vec<_> = code.chain(linear).collect();
-        pane.update(cx, |pane, cx| {
-            for tab in tabs {
-                pane.remove_item(tab, false, false, window, cx);
-            }
-        });
     }
 }
 
@@ -2112,6 +2042,36 @@ pub(crate) mod tests {
         )
     }
 
+    /// Opening a second binary in the window closes the first one's code tabs, so every
+    /// code tab left shows the binary now open.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a tab of the first binary stays.
+    #[gpui::test]
+    fn a_second_binary_closes_the_first_ones_code_tabs(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
+        let (binary, _) = two_code_tabs(&workspace, cx);
+        let dir = scratch("second-binary");
+        let exe = dir.join("tiny.exe");
+        std::fs::write(&exe, tiny_pe()).unwrap();
+        binary.update(cx, |binary, cx| binary.open_path(exe, cx));
+        cx.run_until_parked();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let now = binary.read_with(cx, |binary, _| binary.loaded().cloned().unwrap());
+        let programs = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .panes()
+                .iter()
+                .flat_map(|pane| pane.read(cx).items_of_type::<DecompileItem>())
+                .map(|tab| Arc::ptr_eq(&tab.read(cx).loaded().program, &now.program))
+                .collect::<Vec<_>>()
+        });
+        assert!(programs.iter().all(|same| *same), "{programs:?}");
+    }
+
     /// A listing tab open at quit, kept as the quit keeps it, comes back in the next run's
     /// first window as a listing at the line it was left at.
     ///
@@ -2143,7 +2103,7 @@ pub(crate) mod tests {
             };
             open_place(&workspace, &loaded, listing, TabMode::Permanent, cx);
             shown(&workspace, cx);
-            let tabs = workspace.read_with(cx, super::open_tabs);
+            let tabs = workspace.read_with(cx, crate::stored::open_tabs);
             (tabs, line)
         };
         cx.update(|cx| keep_tabs(&tabs, cx)).await.unwrap();

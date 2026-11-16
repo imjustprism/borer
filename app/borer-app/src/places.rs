@@ -241,6 +241,18 @@ pub fn shown_binary(
     shown.or_else(|| binary.read(cx).loaded()).cloned()
 }
 
+/// Returns whether a center item shows a binary: a code, graph, hex, overview or linear
+/// listing tab.
+///
+/// # Arguments
+///
+/// * `item` - The item.
+/// * `cx` - Application context reading it.
+#[must_use]
+pub fn shows_a_binary(item: &dyn ItemHandle, cx: &App) -> bool {
+    loaded_of(item, cx).is_some()
+}
+
 /// Returns the snapshot a center item shows, `None` for an item that shows none.
 ///
 /// # Arguments
