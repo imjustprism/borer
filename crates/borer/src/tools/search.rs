@@ -180,7 +180,7 @@ impl BorerServer {
         let want = kind.map(borer_engine::program::SymbolKind::from);
         let page = Page::new(offset, limit, count_only, 50, 1000)?;
         self.with_program(|p| {
-            let (_, total, text) = render::symbols_tsv(
+            let rows = render::symbol_rows(
                 p,
                 &self.analysis_or_empty(),
                 want,
@@ -188,10 +188,11 @@ impl BorerServer {
                 page.offset,
                 page.limit.n,
             );
-            if page.count_only {
-                return Ok(format!("# {total} symbols\n"));
-            }
-            Ok(text)
+            Ok(if page.count_only {
+                rows.counted()
+            } else {
+                rows.spell()
+            })
         })
         .map(|text| page.limit.noted(text))
     }

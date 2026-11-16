@@ -528,18 +528,109 @@ pub fn function_detail(a: &Analysis, o: &Overlay, entry: u64, offset: usize) -> 
 /// Longest forwarding text a forwarded export's row reads.
 const FORWARD_MAX: usize = 256;
 
-/// Renders the paged symbol table.
+/// One row of the symbol table: the facts its line spells.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolRow {
+    /// What the symbol is.
+    pub kind: SymbolKind,
+    /// Its address; an import's slot, or zero for one with none.
+    pub addr: u64,
+    /// The name without its module, demangled ([`demangled_or_raw`]).
+    pub name: String,
+    /// The module a PE import's `module!name` names; `None` for a symbol
+    /// without one.
+    pub module: Option<String>,
+    /// Whether anything references an import's slot, directly or through a
+    /// thunk something calls: `Some(false)` is a redirected or leftover
+    /// slot. `None` for a symbol that is not an import with a slot.
+    pub referenced: Option<bool>,
+    /// The export a forwarded export forwards to (`NTDLL.RtlFoo`), read at
+    /// its address; `None` for every other symbol, or one whose text is
+    /// empty.
+    pub forward: Option<String>,
+}
+
+/// One page of the symbol table, with what its header counts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolRows {
+    /// The one kind asked for, which the rows leave unsaid; `None` for
+    /// every kind.
+    pub kind: Option<SymbolKind>,
+    /// Matches skipped before the page.
+    pub offset: usize,
+    /// Symbols the kind and filter matched, on every page.
+    pub total: usize,
+    /// The page's rows, in symbol-table order.
+    pub rows: Vec<SymbolRow>,
+}
+
+impl SymbolRows {
+    /// Returns the page as the `symbols` tool and the CLI print it.
+    ///
+    /// A PE import is `module!name`, and a page of three hundred imports
+    /// from a dozen modules spelled the module on every row: a `# module: X`
+    /// line opens each run of imports from one module and the rows carry
+    /// the bare name; a `# module: -` line closes the run when rows without
+    /// a module follow, so an export is not read as one more import of the
+    /// module above it. The `kind` column is left out when one kind was
+    /// asked for, since every row would say it.
+    ///
+    /// # Returns
+    ///
+    /// A `# showing N of M symbols` line (and the next page's offset when
+    /// more follow) and a column header, then one `kind addr name` row per
+    /// symbol (`addr name` under one kind), each run of one module's
+    /// imports under its `# module:` line; an unreferenced import's row
+    /// ends `  unreferenced`, a forward's ` -> MODULE.name`.
+    #[must_use]
+    pub fn spell(&self) -> String {
+        let (shown, total) = (self.rows.len(), self.total);
+        let mut out = format!("# showing {shown} of {total} symbols");
+        let next = self.offset.saturating_add(shown);
+        if next < total {
+            let _ = write!(out, "; offset={next} for the next page");
+        }
+        out.push('\n');
+        out.push_str(if self.kind.is_some() {
+            "# addr name\n"
+        } else {
+            "# kind addr name\n"
+        });
+        let mut module: Option<&str> = None;
+        for r in &self.rows {
+            let owner = r.module.as_deref();
+            if owner != module {
+                let _ = writeln!(out, "# module: {}", owner.unwrap_or("-"));
+            }
+            module = owner;
+            if self.kind.is_none() {
+                let _ = write!(out, "{} ", r.kind.name());
+            }
+            let _ = write!(out, "{:#x} {}", r.addr, r.name);
+            if let Some(to) = &r.forward {
+                let _ = write!(out, " -> {to}");
+            }
+            if r.referenced == Some(false) {
+                out.push_str("  unreferenced");
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Returns the `count_only` answer: `# M symbols`.
+    #[must_use]
+    pub fn counted(&self) -> String {
+        format!("# {} symbols\n", self.total)
+    }
+}
+
+/// Returns one page of the symbol table as rows.
 ///
-/// A PE import is `module!name`, and a page of three hundred imports from
-/// a dozen modules spelled the module on every row: a `# module: X` line
-/// opens each run of imports from one module and the rows carry the bare
-/// name; a `# module: -` line closes the run when rows without a module
-/// follow, so an export is not read as one more import of the module above
-/// it. The `kind` column is left out when one kind was asked for, since
-/// every row would say it. An import nothing references is a redirected or
-/// leftover slot, the shape a patched binary leaves behind, so its row says
-/// so. A forwarded export's address holds the name of the export it
-/// forwards to, not code, so its row ends with `-> MODULE.name`.
+/// An import nothing references is a redirected or leftover slot, the
+/// shape a patched binary leaves behind, so its row says so. A forwarded
+/// export's address holds the name of the export it forwards to, not
+/// code, so its row carries that name.
 ///
 /// # Arguments
 ///
@@ -550,22 +641,20 @@ const FORWARD_MAX: usize = 256;
 /// * `filter` - Case-insensitive substring of the full name, module
 ///   included, or of the demangled name a row shows.
 /// * `offset` - Matches to skip first (paging).
-/// * `limit` - Maximum rows to render.
+/// * `limit` - Maximum rows.
 ///
 /// # Returns
 ///
-/// `(shown, total, text)`: the text starts with `# showing N of M symbols`
-/// (and the next page's offset when more follow) and a column header, then
-/// one `kind addr name` row per symbol (`addr name` under one kind), each
-/// run of one module's imports under its `# module:` line.
-pub fn symbols_tsv(
+/// The page's rows with the total the kind and filter matched.
+#[must_use]
+pub fn symbol_rows(
     p: &Program,
     a: &Analysis,
     kind: Option<SymbolKind>,
     filter: Option<&str>,
     offset: usize,
     limit: usize,
-) -> (usize, usize, String) {
+) -> SymbolRows {
     let q = filter.map(str::to_lowercase);
     let matched: Vec<&Symbol> = p
         .symbols
@@ -580,57 +669,72 @@ pub fn symbols_tsv(
                 })
         })
         .collect();
-    let total = matched.len();
-    let shown = total.saturating_sub(offset).min(limit);
-    let mut out = format!("# showing {shown} of {total} symbols");
-    let next = offset.saturating_add(shown);
-    if next < total {
-        let _ = write!(out, "; offset={next} for the next page");
-    }
-    out.push('\n');
-    out.push_str(if kind.is_some() {
-        "# addr name\n"
-    } else {
-        "# kind addr name\n"
-    });
     let called_slots: BTreeSet<u64> = a
         .functions
         .iter()
         .filter(|f| a.xrefs.get(&f.entry).is_some_and(|v| !v.is_empty()))
         .filter_map(|f| f.thunk)
         .collect();
-    let mut module: Option<&str> = None;
-    for s in matched.into_iter().skip(offset).take(limit) {
-        let bare = bare_name(&s.name);
-        let owner = s.name.strip_suffix(bare).and_then(|m| m.strip_suffix('!'));
-        if owner != module {
-            let _ = writeln!(out, "# module: {}", owner.unwrap_or("-"));
-        }
-        module = owner;
-        let dead = s.kind == SymbolKind::Import
-            && s.addr != 0
-            && a.xrefs.get(&s.addr).is_none_or(Vec::is_empty)
-            && !called_slots.contains(&s.addr);
-        if kind.is_none() {
-            let _ = write!(out, "{} ", s.kind.name());
-        }
-        let target = (s.kind == SymbolKind::Forwarder)
-            .then(|| p.read_va_upto(s.addr, FORWARD_MAX))
-            .flatten()
-            .map(|b| b.split(|&c| c == 0).next().unwrap_or_default())
-            .filter(|b| !b.is_empty())
-            .map_or_else(String::new, |b| {
-                format!(" -> {}", crate::text::one_line(&String::from_utf8_lossy(b)))
+    let rows = matched
+        .iter()
+        .skip(offset)
+        .take(limit)
+        .map(|s| {
+            let bare = bare_name(&s.name);
+            let module = s.name.strip_suffix(bare).and_then(|m| m.strip_suffix('!'));
+            let referenced = (s.kind == SymbolKind::Import && s.addr != 0).then(|| {
+                a.xrefs.get(&s.addr).is_some_and(|v| !v.is_empty())
+                    || called_slots.contains(&s.addr)
             });
-        let _ = writeln!(
-            out,
-            "{:#x} {}{target}{}",
-            s.addr,
-            demangled_or_raw(bare),
-            if dead { "  unreferenced" } else { "" }
-        );
+            let forward = (s.kind == SymbolKind::Forwarder)
+                .then(|| p.read_va_upto(s.addr, FORWARD_MAX))
+                .flatten()
+                .map(|b| b.split(|&c| c == 0).next().unwrap_or_default())
+                .filter(|b| !b.is_empty())
+                .map(|b| crate::text::one_line(&String::from_utf8_lossy(b)));
+            SymbolRow {
+                kind: s.kind,
+                addr: s.addr,
+                name: demangled_or_raw(bare),
+                module: module.map(str::to_owned),
+                referenced,
+                forward,
+            }
+        })
+        .collect();
+    SymbolRows {
+        kind,
+        offset,
+        total: matched.len(),
+        rows,
     }
-    (shown, total, out)
+}
+
+/// Renders the paged symbol table ([`symbol_rows`], [`SymbolRows::spell`]).
+///
+/// # Arguments
+///
+/// * `p` - The loaded image, for its symbol table.
+/// * `a` - The analysis, for which import slots are referenced.
+/// * `kind` - One kind of symbol, or every kind.
+/// * `filter` - Case-insensitive substring of the full or demangled name.
+/// * `offset` - Matches to skip first (paging).
+/// * `limit` - Maximum rows to render.
+///
+/// # Returns
+///
+/// `(shown, total, text)`, the text as [`SymbolRows::spell`] spells it.
+#[must_use]
+pub fn symbols_tsv(
+    p: &Program,
+    a: &Analysis,
+    kind: Option<SymbolKind>,
+    filter: Option<&str>,
+    offset: usize,
+    limit: usize,
+) -> (usize, usize, String) {
+    let rows = symbol_rows(p, a, kind, filter, offset, limit);
+    (rows.rows.len(), rows.total, rows.spell())
 }
 
 /// Lists the classes `moc` described: signals, slots, methods and
@@ -1526,6 +1630,89 @@ mod tests {
         assert_eq!(forwards, 1);
         let summary = p.summary();
         assert!(summary.contains("exports: 2 (1 forwarded)"), "{summary}");
+    }
+
+    /// Symbol rows carry each line's facts and spell the text the symbol
+    /// table printed before it had rows.
+    ///
+    /// The fixture has module runs, a slot referenced through a thunk, an
+    /// unreferenced import, a forward, a page with a next page under one
+    /// kind, and a page past the end.
+    ///
+    /// # Panics
+    ///
+    /// When a fact, the total or the spelled text differs.
+    #[test]
+    fn symbol_rows_spell_the_table_the_text_printed() {
+        use crate::program::{Arch, Section, Symbol};
+        let mut bytes = vec![0u8; 0x100];
+        bytes[0x40..0x4d].copy_from_slice(b"NTDLL.RtlFoo\0");
+        let rdata = Section::mapped(".rdata", 0x1000, 0, 0x100, false, false);
+        let mut p = Program::raw(bytes, Arch::X86_64, 0x1000, None, vec![rdata]);
+        p.symbols = [
+            ("KERNEL32.dll!GetTickCount", 0x2000, SymbolKind::Import),
+            ("KERNEL32.dll!Sleep", 0x2008, SymbolKind::Import),
+            ("KERNEL32.dll!ExitProcess", 0x2010, SymbolKind::Import),
+            ("AcquireLock", 0x1040, SymbolKind::Forwarder),
+            ("_ZN3foo3barEv", 0x1080, SymbolKind::Export),
+        ]
+        .into_iter()
+        .map(|(name, addr, kind)| Symbol {
+            name: name.to_owned(),
+            addr,
+            kind,
+        })
+        .collect();
+        let site = |va: u64, kind: RefKind| RefSite {
+            va,
+            kind,
+            from_entry: None,
+        };
+        let mut thunk = bare(0x1100, None);
+        thunk.thunk = Some(0x2008);
+        let mut a = Analysis {
+            functions: vec![thunk],
+            ..Analysis::default()
+        };
+        a.xrefs.insert(0x2000, vec![site(0x1050, RefKind::Data)]);
+        a.xrefs.insert(0x1100, vec![site(0x1060, RefKind::Call)]);
+        let all = symbol_rows(&p, &a, None, None, 0, 50);
+        assert_eq!(all.total, 5);
+        let referenced: Vec<Option<bool>> = all.rows.iter().map(|r| r.referenced).collect();
+        assert_eq!(
+            referenced,
+            [Some(true), Some(true), Some(false), None, None]
+        );
+        assert_eq!(all.rows[0].module.as_deref(), Some("KERNEL32.dll"));
+        assert_eq!(all.rows[3].module, None);
+        assert_eq!(all.rows[3].forward.as_deref(), Some("NTDLL.RtlFoo"));
+        assert_eq!(all.rows[4].name, "foo::bar()");
+        assert_eq!(
+            all.spell(),
+            "# showing 5 of 5 symbols
+# kind addr name
+# module: KERNEL32.dll
+import 0x2000 GetTickCount
+import 0x2008 Sleep
+import 0x2010 ExitProcess  unreferenced
+# module: -
+forward 0x1040 AcquireLock -> NTDLL.RtlFoo
+export 0x1080 foo::bar()
+"
+        );
+        assert_eq!(all.counted(), "# 5 symbols\n");
+        assert_eq!(
+            symbol_rows(&p, &a, Some(SymbolKind::Import), None, 0, 2).spell(),
+            "# showing 2 of 3 symbols; offset=2 for the next page
+# addr name
+# module: KERNEL32.dll
+0x2000 GetTickCount
+0x2008 Sleep
+"
+        );
+        let past = symbol_rows(&p, &a, None, Some("kernel32"), 9, 50);
+        assert_eq!((past.rows.len(), past.total), (0, 3));
+        assert_eq!(past.spell(), "# showing 0 of 3 symbols\n# kind addr name\n");
     }
 
     /// Builds the function table's fixture: three functions, an import
