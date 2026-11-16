@@ -122,6 +122,9 @@ struct RetiredInputSample {
     raw_queue_ns: u64,
     /// Elapsed nanoseconds from `MARK` to frame presentation (`present_end - injected_at`).
     raw_e2e_ns: u64,
+    /// Elapsed nanoseconds from event arrival until the background work it started was
+    /// settled (`ready_at - arrived_at`); zero for an event that started none.
+    work_ns: u64,
 }
 
 /// Whether the input phase goes on after this frame.
@@ -448,9 +451,16 @@ impl Harness {
             sorted_quantiles_ms(&mut e2e_samples_ns)
         };
         let (qp50, qp95, qp99, qmax, qcount) = sorted_quantiles_ms(&mut queue_samples_ns);
+        let mut work_samples_ns: Vec<u64> = run
+            .retired
+            .iter()
+            .map(|s| s.work_ns)
+            .filter(|&ns| ns > 0)
+            .collect();
+        let (wp50, wp95, wp99, wmax, wcount) = sorted_quantiles_ms(&mut work_samples_ns);
         Ok(format!(
             "MEASURE_INPUT samples={ecount} p50_ms={ep50:.3} p95_ms={ep95:.3} p99_ms={ep99:.3} max_ms={emax:.3} \
-queue_samples={qcount} queue_p50_ms={qp50:.3} queue_p95_ms={qp95:.3} queue_p99_ms={qp99:.3} queue_max_ms={qmax:.3} \
+queue_samples={qcount} queue_p50_ms={qp50:.3} queue_p95_ms={qp95:.3} queue_p99_ms={qp99:.3} queue_max_ms={qmax:.3} work_samples={wcount} work_p50_ms={wp50:.3} work_p95_ms={wp95:.3} work_p99_ms={wp99:.3} work_max_ms={wmax:.3} \
 gpui_samples={} gpui_p50_ms={:.3} gpui_p95_ms={:.3} gpui_p99_ms={:.3} gpui_max_ms={:.3} \
 filter_keys={} call_clicks={} mid_draw_dropped={} ui_engine_calls={}",
             lat.len(),
@@ -507,6 +517,7 @@ fn retire_presented_marks(
                         raw_queue_ns: nanos(
                             mark.arrived_at.saturating_duration_since(mark.injected_at),
                         ),
+                        work_ns: nanos(ready.saturating_duration_since(mark.arrived_at)),
                         raw_e2e_ns: nanos(
                             present
                                 .present_end
