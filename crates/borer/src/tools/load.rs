@@ -9,7 +9,9 @@ use std::sync::Arc;
 use borer_engine::analysis::project::{self, Admitted};
 use borer_engine::layout::Layout;
 use borer_engine::num;
+use borer_engine::pack::Packs;
 use borer_engine::program::{Feature, Program, TooLarge};
+use borer_engine::session::{self, Open, Opened, Pdb};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ErrorData, tool, tool_router};
 
@@ -72,7 +74,8 @@ pub(crate) fn configured_max_file() -> u64 {
     max_file_size(std::env::var(MAX_FILE_ENV).ok().as_deref())
 }
 
-/// Loads a program file for the server or the CLI.
+/// Opens a program file for the server or the CLI with the packs that fit
+/// it ([`session::open`]), from what the environment says.
 ///
 /// A companion PDB, when it applies, is looked for in the symbol cache
 /// too ([`symsrv::cache_dir`]); a cache directory that is refused is
@@ -87,35 +90,41 @@ pub(crate) fn configured_max_file() -> u64 {
 /// * `apply_pdb` - Whether a companion PDB's symbols apply.
 /// * `layout` - Where a raw file's bytes go, `None` to read its headers.
 /// * `max` - Most bytes the file may hold ([`configured_max_file`]).
+/// * `(named, auto)` - The packs the user named, and whether the pack
+///   directories' packs may load by themselves
+///   ([`borer::packs::pack_files`]).
 ///
 /// # Returns
 ///
-/// The program, and the note on a refused symbol cache, if one was.
+/// The program, its packs and their notes (a skipped pack directory's
+/// first), and the note on a refused symbol cache, if one was.
 ///
 /// # Errors
 ///
-/// As [`Program::load_with_symsrv_max`], or [`Program::load_layout_max`]
-/// with a layout.
-pub(crate) fn load_program(
+/// As [`session::open`].
+pub(crate) fn open_program(
     path: &Path,
     apply_pdb: bool,
     layout: Option<&Layout>,
     max: u64,
-) -> anyhow::Result<(Program, Option<String>)> {
-    let (symsrv, refused) = match symsrv::cache_dir() {
-        Ok(dir) => (dir, None),
-        Err(why) => (None, Some(why)),
+    (named, auto): (Arc<Packs>, bool),
+) -> anyhow::Result<(Opened, Option<String>)> {
+    let mut notes = Vec::new();
+    let packs = borer::packs::pack_files(auto, &mut notes);
+    let (pdb, refused) = match symsrv::cache_dir() {
+        _ if !apply_pdb => (Pdb::Off, None),
+        Ok(Some(root)) => (Pdb::Cache(root), None),
+        Ok(None) => (Pdb::Beside, None),
+        Err(why) => (Pdb::Beside, Some(why)),
     };
-    let loaded = match layout {
-        Some(layout) => Program::load_layout_max(path, layout, max),
-        None => Program::load_with_symsrv_max(
-            path,
-            apply_pdb,
-            symsrv.as_deref().filter(|_| apply_pdb),
-            max,
-        ),
+    let open = Open {
+        max_file: max,
+        pdb,
+        named,
+        packs,
+        layout: layout.cloned(),
     };
-    let program = loaded.map_err(|e| {
+    let mut opened = session::open(path, &open).map_err(|e| {
         if e.is::<TooLarge>() {
             anyhow::anyhow!(
                 "{e:#}; set {MAX_FILE_ENV} (bytes, or 4G; 0 for no limit) to load it anyway"
@@ -124,10 +133,38 @@ pub(crate) fn load_program(
             e
         }
     })?;
+    notes.append(&mut opened.notes);
+    opened.notes = notes;
     let note = refused
-        .filter(|_| apply_pdb && layout.is_none() && program.pdb_record.is_some())
+        .filter(|_| layout.is_none() && opened.program.pdb_record.is_some())
         .map(|why| format!("skipped the symbol cache: {why}"));
-    Ok((program, note))
+    Ok((opened, note))
+}
+
+/// Loads a program file without packs ([`open_program`]).
+///
+/// # Arguments
+///
+/// * `path` - The file, or `<file>@<offset>`.
+/// * `apply_pdb` - Whether a companion PDB's symbols apply.
+/// * `layout` - Where a raw file's bytes go, `None` to read its headers.
+/// * `max` - Most bytes the file may hold ([`configured_max_file`]).
+///
+/// # Returns
+///
+/// The program, and the note on a refused symbol cache, if one was.
+///
+/// # Errors
+///
+/// As [`open_program`].
+pub(crate) fn load_program(
+    path: &Path,
+    apply_pdb: bool,
+    layout: Option<&Layout>,
+    max: u64,
+) -> anyhow::Result<(Program, Option<String>)> {
+    open_program(path, apply_pdb, layout, max, (Arc::default(), false))
+        .map(|(opened, note)| (opened.program, note))
 }
 
 /// Says where a relative path was looked for, when it was relative.
@@ -226,9 +263,10 @@ impl BorerServer {
             raw.regions.as_deref(),
         )
         .map_err(|e| err_params(format!("load failed: {e:#}")))?;
-        let max_file = configured_max_file();
         let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            load_program(Path::new(&path), apply_pdb, layout.as_ref(), max_file)
+            let packs = (Arc::clone(&self.packs), borer::packs::auto_enabled());
+            let max_file = configured_max_file();
+            open_program(Path::new(&path), apply_pdb, layout.as_ref(), max_file, packs)
         }))
         .map_err(|e| {
             err_internal(format!(
@@ -236,7 +274,14 @@ impl BorerServer {
                 fault_text(e.as_ref())
             ))
         })?;
-        let (mut program, cache_note) = loaded.map_err(|e| {
+        let (
+            Opened {
+                mut program,
+                packs,
+                notes,
+            },
+            cache_note,
+        ) = loaded.map_err(|e| {
             err_params(format!(
                 "load failed: {e:#}{}",
                 relative_note(Path::new(&path), std::env::current_dir().ok().as_deref())
@@ -258,7 +303,6 @@ impl BorerServer {
             program.entry = Some(va);
         }
         let mut summary = program.summary();
-        let (packs, notes) = self.packs_for(&program);
         let program = Arc::new(program);
         let loaded = (apply_pdb, entry_file_offset, raw);
         let (previous, dropped) = self.install(Arc::clone(&program), packs, loaded);

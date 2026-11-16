@@ -60,6 +60,7 @@ pub mod reloc;
 pub mod rsrc;
 pub mod script;
 pub mod search;
+pub mod session;
 pub mod strings;
 pub mod table;
 pub mod text;

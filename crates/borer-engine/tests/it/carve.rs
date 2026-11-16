@@ -66,7 +66,7 @@ fn crc32(data: &[u8]) -> u32 {
 
 /// A PE32+ x86-64 console exe, 0x400 bytes: headers, then one `.text`
 /// section of 0x200 file bytes at 0x200.
-fn tiny_pe() -> Vec<u8> {
+pub(crate) fn tiny_pe() -> Vec<u8> {
     /// The PE signature's offset.
     const SIG: usize = 0x80;
     /// The optional header's offset.

@@ -91,6 +91,7 @@ mod rv_decompile;
 mod rv_emulate;
 mod rv_lift;
 mod search;
+mod session;
 mod shapes;
 mod stated;
 mod strings;

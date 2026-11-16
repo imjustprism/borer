@@ -4,8 +4,9 @@
 //! A user names packs with `--pack <file>` or `BORER_PACKS`; those load for
 //! every program. A pack with a `[match]` section in a pack directory loads
 //! by itself for a program every one of its `[match]` lines fits
-//! ([`Pack::fit`]), so a matching program picks the pack up without a flag.
-//! The pack directories are `BORER_PACK_DIRS` when it is set, else the user's
+//! ([`borer_engine::pack::Pack::fit`]), so a matching program picks the
+//! pack up without a flag. The pack directories are `BORER_PACK_DIRS` when
+//! it is set, else the user's
 //! (`%APPDATA%\borer\packs`, `$XDG_CONFIG_HOME/borer/packs`,
 //! `~/.config/borer/packs`) and the `packs` directory beside the executable
 //! or two levels above it (a `target/release` build in the source tree).
@@ -15,8 +16,10 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use borer_engine::pack::{Fit, Pack, Packs};
+use borer_engine::pack::{Fit, Packs};
 use borer_engine::program::Program;
+use borer_engine::session;
+pub use borer_engine::session::{PACK_MAX, load_scripts};
 
 /// The variable naming the pack directories.
 pub const DIRS_ENV: &str = "BORER_PACK_DIRS";
@@ -24,12 +27,6 @@ pub const DIRS_ENV: &str = "BORER_PACK_DIRS";
 pub const AUTO_ENV: &str = "BORER_AUTO_PACKS";
 /// The extension of a pack file.
 pub const EXTENSION: &str = "borer";
-/// Largest pack file read, in bytes: 64 MiB.
-pub const PACK_MAX: u64 = 1 << 26;
-/// Most scripts one pack runs.
-pub const SCRIPTS_MAX: usize = 64;
-/// Most bytes the scripts one pack runs hold together: 4 MiB.
-pub const SCRIPT_BYTES_MAX: u64 = 1 << 22;
 
 /// Tells whether packs in the pack directories may load by themselves.
 #[must_use]
@@ -61,7 +58,7 @@ pub fn env_paths(var: &str) -> Option<Vec<PathBuf>> {
 ///
 /// One that names a share or a device
 /// ([`borer_engine::program::unusable_path`]) is listed as given and never
-/// touched: [`discovered`] skips it with a note.
+/// touched: [`pack_files`] skips it with a note.
 #[must_use]
 pub fn dirs() -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
@@ -99,73 +96,23 @@ pub fn dirs() -> Vec<PathBuf> {
     out
 }
 
-/// Reads the scripts a pack's `[scripts] run` lines name, relative to the
-/// pack's own file, into the pack.
+/// The pack files in the pack directories, in directory then file-name
+/// order: what [`session::read_found`] reads, and none when the
+/// directories are off.
 ///
-/// A line's words are joined to the pack's directory, so its `..` climbs
-/// from there, and each script is read by
-/// [`borer_engine::program::read_regular`], which refuses a share, a device
-/// and anything else that is not a regular file before it is opened. A pack
-/// runs at most [`SCRIPTS_MAX`] scripts holding [`SCRIPT_BYTES_MAX`] bytes
-/// together: one that ran itself 100,000 times read its own file as often.
+/// A directory that names a share or a device is skipped with a note,
+/// unread.
 ///
 /// # Arguments
 ///
-/// * `pack` - The pack, its scripts filled in place.
-/// * `file` - The pack's file.
-///
-/// # Errors
-///
-/// When the pack names more than [`SCRIPTS_MAX`] scripts, a script's path
-/// is refused or the file does not read as text, or the scripts hold more
-/// than [`SCRIPT_BYTES_MAX`] bytes.
-pub fn load_scripts(pack: &mut Pack, file: &Path) -> Result<(), String> {
-    let dir = file.parent().unwrap_or_else(|| Path::new("."));
-    let files = pack.script_files();
-    if files.len() > SCRIPTS_MAX {
-        return Err(format!(
-            "{}: {} scripts, past the {SCRIPTS_MAX} a pack may run",
-            pack.source,
-            files.len()
-        ));
-    }
-    let mut total = 0u64;
-    let mut scripts = Vec::with_capacity(files.len());
-    for rel in files {
-        let path = rel
-            .split(['/', '\\'])
-            .filter(|part| !part.is_empty())
-            .fold(dir.to_path_buf(), |p, part| p.join(part));
-        let shown = borer_engine::text::short_path(&path.to_string_lossy());
-        let bytes = borer_engine::program::read_regular(&path, SCRIPT_BYTES_MAX)
-            .map_err(|e| format!("{}: script {e:#}", pack.source))?;
-        total = total.saturating_add(borer_engine::num::from_usize(bytes.len()));
-        if total > SCRIPT_BYTES_MAX {
-            return Err(format!(
-                "{}: scripts hold {total} bytes, past the {SCRIPT_BYTES_MAX} a pack's scripts may hold",
-                pack.source
-            ));
-        }
-        let code = String::from_utf8(bytes)
-            .map_err(|_| format!("{}: script {shown} is not text", pack.source))?;
-        scripts.push((shown, code));
-    }
-    pack.scripts = scripts;
-    Ok(())
-}
-
-/// Every pack in the pack directories, in directory then file-name order,
-/// each with the file it came from as its `source`.
-///
-/// A file that does not read as a pack is skipped with a note, and so is a
-/// directory that names a share or a device, unread.
-///
-/// # Arguments
-///
-/// * `notes` - Where a skipped file's or directory's reason goes.
+/// * `auto` - Whether the pack directories are read.
+/// * `notes` - Where a skipped directory's reason goes.
 #[must_use]
-pub fn discovered(notes: &mut Vec<String>) -> Vec<Pack> {
+pub fn pack_files(auto: bool, notes: &mut Vec<String>) -> Vec<PathBuf> {
     let mut out = Vec::new();
+    if !auto {
+        return out;
+    }
     for dir in dirs() {
         if let Some(why) = borer_engine::program::unusable_path(&dir) {
             notes.push(format!("skipped a pack directory: {why}"));
@@ -181,31 +128,14 @@ pub fn discovered(notes: &mut Vec<String>) -> Vec<Pack> {
             .filter(|p| p.extension().is_some_and(|e| e == EXTENSION))
             .collect();
         files.sort();
-        for path in files {
-            let shown = borer_engine::text::short_path(&path.to_string_lossy());
-            let parsed = borer_engine::program::read_regular(&path, PACK_MAX)
-                .map_err(|e| format!("{e:#}"))
-                .and_then(|bytes| String::from_utf8(bytes).map_err(|_| "not text".to_owned()))
-                .and_then(|text| Pack::parse(&text, &shown))
-                .and_then(|(mut pack, _)| {
-                    load_scripts(&mut pack, &path)?;
-                    Ok(pack)
-                });
-            match parsed {
-                Ok(pack) => out.push(pack),
-                Err(e) => notes.push(format!("skipped {shown}: {e}")),
-            }
-        }
+        out.extend(files);
     }
     out
 }
 
 /// The packs an analysis of a program runs with: the pack directories'
-/// packs that fit it, then the packs the user named, so a named pack's
-/// single values win.
-///
-/// A discovered pack is left out when the user named a pack of the same
-/// name.
+/// packs that fit it, then the packs the user named
+/// ([`session::fitting`]).
 ///
 /// # Arguments
 ///
@@ -220,29 +150,9 @@ pub fn discovered(notes: &mut Vec<String>) -> Vec<Pack> {
 #[must_use]
 pub fn for_program(program: &Program, named: &Packs, auto: bool) -> (Arc<Packs>, Vec<String>) {
     let mut notes = Vec::new();
-    if !auto {
-        return (Arc::new(named.clone()), notes);
-    }
-    let mut packs: Vec<Pack> = Vec::new();
-    for found in discovered(&mut notes) {
-        if named.packs.iter().any(|p| p.name == found.name)
-            || packs.iter().any(|p| p.name == found.name)
-        {
-            continue;
-        }
-        if found.fit(program) == Fit::Holds {
-            notes.push(format!(
-                "pack {} {} from {} fits: {}",
-                found.name,
-                found.version,
-                found.source,
-                found.match_lines().join(", ")
-            ));
-            packs.push(found);
-        }
-    }
-    packs.extend(named.packs.iter().cloned());
-    (Arc::new(Packs { packs }), notes)
+    let found = session::read_found(&pack_files(auto, &mut notes), &mut notes);
+    let packs = session::fitting(program, named, found, &mut notes);
+    (Arc::new(packs), notes)
 }
 
 /// The packs borer knows of and how each fits a program, as a table: the
@@ -256,11 +166,7 @@ pub fn for_program(program: &Program, named: &Packs, auto: bool) -> (Arc<Packs>,
 #[must_use]
 pub fn listing(program: &Program, named: &Packs, auto: bool) -> String {
     let mut notes = Vec::new();
-    let found = if auto {
-        discovered(&mut notes)
-    } else {
-        Vec::new()
-    };
+    let found = session::read_found(&pack_files(auto, &mut notes), &mut notes);
     let dirs: Vec<String> = dirs()
         .iter()
         .map(|d| borer_engine::text::short_path(&d.to_string_lossy()))
