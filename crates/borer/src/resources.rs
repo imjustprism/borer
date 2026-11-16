@@ -21,10 +21,15 @@ use rmcp::ErrorData;
 
 use crate::BorerServer;
 use crate::catalog::{RESOURCE_TEMPLATES, RESOURCES, resource_name};
-use crate::errors::{err_not_found, err_params};
+use crate::errors::{err_internal, err_not_found, err_params};
 use crate::paging::Asked;
 use crate::session;
 use crate::state::{lock, read_lock};
+
+/// The refusal of a request whose cancel flag was raised while it analyzed
+/// another build ([`Analysis::try_compute_with`]).
+const OTHER_BUILD_CUT: &str =
+    "the request stopped before the other build's analysis was whole, so it was not compared";
 
 /// Another build of the loaded program, analysed for a comparison surface.
 #[derive(Debug)]
@@ -157,11 +162,13 @@ impl BorerServer {
     /// # Errors
     ///
     /// When no binary is loaded, or the other build does not load, has no
-    /// code analysis, or is not the loaded program's architecture.
+    /// code analysis, or is not the loaded program's architecture, or the
+    /// request's cancel flag was raised while the other build was analyzed.
     fn other_build(&self, path: &str) -> Result<OtherBuild, ErrorData> {
         self.require_loaded()?;
         let program = self.load_other(path)?;
-        let analysis = Analysis::compute_with(&program, self.packs_for(&program).0);
+        let analysis = Analysis::try_compute_with(&program, self.packs_for(&program).0)
+            .ok_or_else(|| err_internal(OTHER_BUILD_CUT))?;
         let label = file_label(&program.path);
         Ok(OtherBuild {
             program,
