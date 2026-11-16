@@ -291,8 +291,8 @@ pub struct Pack {
     /// Its lines, in order.
     pub entries: Vec<Entry>,
     /// The scripts its `[scripts] run` lines name, as the file each came
-    /// from and its text; a front end reads the files, since the engine
-    /// opens none.
+    /// from and its text, read through the checked reader
+    /// ([`crate::session::load_scripts`]).
     pub scripts: Vec<(String, String)>,
 }
 
