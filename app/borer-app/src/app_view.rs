@@ -5,26 +5,43 @@
 //! data directory. Nothing signs in, updates, reports telemetry or collaborates:
 //! `client::init`, `Project::init` and Zed's auto-update, crash, telemetry and call crates are
 //! never started, the client's HTTP is Zed's `BlockedHttpClient`, and Node is unavailable.
+//!
+//! No path ever becomes a project folder, so no folder's settings, context servers, git or
+//! login shell run: `workspace::init` and `editor::init`, which register Zed's open, open
+//! files, reload and new file actions, are not started; the app's keymap unbinds their keys;
+//! a dropped file reaches a tab, and every pane keeps one ([`keep_filled`]); Zed's add folder
+//! action opens a binary instead; AI is off and every folder untrusted.
 
+use std::any::{Any, TypeId};
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context as _;
+use borer_engine::program::checked_metadata;
 use client::{Client, UserStore};
+use command_palette_hooks::CommandPaletteFilter;
 use db::kvp::KeyValueStore;
 use gpui::{
-    App, AppContext as _, Bounds, Context, Entity, Window, WindowBounds, WindowOptions, px, size,
+    App, AppContext as _, BorrowAppContext as _, Bounds, Context, Entity, ExternalPaths,
+    WeakEntity, Window, WindowBounds, WindowOptions, px, size,
 };
 use http_client::{BlockedHttpClient, HttpClientWithUrl};
 use language::LanguageRegistry;
 use node_runtime::NodeRuntime;
+use project::trusted_worktrees::{self, DbTrustedPaths};
 use project::{LocalProjectFlags, Project};
 use session::{AppSession, Session};
-use workspace::{AppState, DockStructure, Workspace, WorkspaceId, WorkspaceStore};
+use settings::SettingsStore;
+use workspace::{
+    AddFolderToProject, AppState, DockStructure, MultiWorkspace, Workspace, WorkspaceId,
+    WorkspaceStore,
+};
 
 use crate::actions::{FocusFilter, Open, ToggleFunctions};
 use crate::binary::{Binary, StatusLine};
 use crate::functions_panel::FunctionsPanel;
+use crate::start_item::keep_filled;
 
 /// Directory of the app's settings, keymap, database and logs under the platform's local
 /// data directory, kept apart from an installed Zed's.
@@ -37,6 +54,9 @@ const APP_WORKSPACE_ID: i64 = 1;
 /// Zed's key-value key for the dock layout of an empty local workspace (private to
 /// `workspace::persistence`, which writes it on every serialization).
 const DEFAULT_DOCK_STATE_KEY: &str = "default_dock_state";
+
+/// The app's settings over Zed's defaults: AI off.
+const APP_SETTINGS: &str = include_str!("../settings.json");
 
 /// Default window width in logical pixels.
 const WINDOW_WIDTH_PX: f32 = 1280.0;
@@ -99,7 +119,6 @@ pub fn init(cx: &mut App) -> anyhow::Result<Arc<AppState>> {
     settings::init(cx);
     theme_settings::init(theme::LoadThemes::JustBase, cx);
     assets::Assets.load_fonts(cx)?;
-    crate::actions::bind_keys(cx)?;
     let fs = fs::RealFs::new(None, cx.background_executor().clone());
     <dyn fs::Fs>::set_global(fs.clone(), cx);
     let http = HttpClientWithUrl::new(Arc::new(BlockedHttpClient), "", None);
@@ -117,10 +136,82 @@ pub fn init(cx: &mut App) -> anyhow::Result<Arc<AppState>> {
         session: cx.new(|cx| AppSession::new(session, cx)),
     });
     AppState::set_global(app_state.clone(), cx);
-    editor::init(cx);
-    workspace::init(app_state.clone(), cx);
-    command_palette::init(cx);
+    configure(cx)?;
     Ok(app_state)
+}
+
+/// Applies the app's settings, keymap and command palette over Zed's, untrusts every folder,
+/// hides Zed's add folder action from the palette, and saves each window's layout on quit.
+///
+/// # Arguments
+///
+/// * `cx` - Application context, Zed's settings store already set.
+///
+/// # Errors
+///
+/// Returns an error when the app's settings or the keymaps do not load.
+pub fn configure(cx: &mut App) -> anyhow::Result<()> {
+    cx.update_global(|store: &mut SettingsStore, cx| {
+        store.set_user_settings(APP_SETTINGS, cx).result()
+    })
+    .context("loading the app's settings")?;
+    trusted_worktrees::init(DbTrustedPaths::default(), cx);
+    crate::actions::bind_keys(cx)?;
+    command_palette::init(cx);
+    let hidden = [TypeId::of::<AddFolderToProject>()];
+    CommandPaletteFilter::update_global(cx, |filter, _| filter.hide_action_types(&hidden));
+    cx.on_app_quit(flush_on_quit).detach();
+    Ok(())
+}
+
+/// Returns the flush of every app window's pending layout to Zed's database, as Zed's own
+/// workspace init does on quit.
+///
+/// # Arguments
+///
+/// * `cx` - Application context listing the windows.
+fn flush_on_quit(cx: &mut App) -> impl Future<Output = ()> + use<> {
+    let windows: Vec<_> = cx
+        .windows()
+        .into_iter()
+        .filter_map(|window| window.downcast::<MultiWorkspace>())
+        .collect();
+    let mut cx = cx.to_async();
+    async move { workspace::flush_windows_serialization(&windows, &mut cx).await }
+}
+
+/// Opens the first file dropped on one of `workspace`'s tabs as its binary, and refuses a
+/// folder with a status line; nothing of a drop reaches Zed's open path.
+///
+/// # Arguments
+///
+/// * `workspace` - Workspace the tab belongs to.
+/// * `dropped` - What was dropped.
+/// * `cx` - Application context.
+///
+/// # Returns
+///
+/// `true` for dropped paths, which the tab took, `false` for anything else (a dragged tab),
+/// which Zed's pane handles.
+pub fn open_dropped(workspace: &WeakEntity<Workspace>, dropped: &dyn Any, cx: &mut App) -> bool {
+    let Some(paths) = dropped.downcast_ref::<ExternalPaths>() else {
+        return false;
+    };
+    let binary = workspace
+        .upgrade()
+        .and_then(|workspace| workspace.read(cx).panel::<FunctionsPanel>(cx))
+        .map(|panel| panel.read(cx).binary().clone());
+    if let (Some(binary), Some(path)) = (binary, paths.paths().first()) {
+        let path = path.clone();
+        binary.update(cx, |binary, cx| {
+            if matches!(checked_metadata(&path), Ok(Some(meta)) if meta.is_dir()) {
+                binary.set_status(format!("{} is a folder; drop a binary", path.display()), cx);
+            } else {
+                binary.open_path(path, cx);
+            }
+        });
+    }
+    true
 }
 
 /// Returns the app's workspace for `window`: an empty local project, the functions panel,
@@ -147,7 +238,7 @@ pub fn new_workspace(
         app_state.fs.clone(),
         None,
         LocalProjectFlags {
-            init_worktree_trust: false,
+            init_worktree_trust: true,
             watch_global_configs: false,
         },
         cx,
@@ -171,6 +262,20 @@ pub fn new_workspace(
             binary.set_status(format!("dock layout not restored: {err:#}"), cx);
         });
     }
+    let center = workspace.read(cx).active_pane().clone();
+    center.update(cx, |pane, _| pane.set_should_display_welcome_page(false));
+    keep_filled(&center, &workspace.downgrade(), window, cx);
+    window
+        .subscribe(
+            &workspace,
+            cx,
+            |workspace, event: &workspace::Event, window, cx| {
+                if let workspace::Event::PaneAdded(pane) = event {
+                    keep_filled(pane, &workspace.downgrade(), window, cx);
+                }
+            },
+        )
+        .detach();
     if let Some(path) = path {
         binary.update(cx, |binary, cx| binary.open_path(path, cx));
     }
@@ -185,6 +290,12 @@ pub fn new_workspace(
 fn register_actions(workspace: &mut Workspace) {
     workspace
         .register_action(|workspace, _: &Open, _, cx| {
+            if let Some(panel) = workspace.panel::<FunctionsPanel>(cx) {
+                let binary = panel.read(cx).binary().clone();
+                binary.update(cx, |binary, cx| binary.prompt_open(cx));
+            }
+        })
+        .register_action(|workspace, _: &AddFolderToProject, _, cx| {
             if let Some(panel) = workspace.panel::<FunctionsPanel>(cx) {
                 let binary = panel.read(cx).binary().clone();
                 binary.update(cx, |binary, cx| binary.prompt_open(cx));
@@ -227,17 +338,22 @@ fn restore_layout(
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     use borer_engine::analysis::render::{FunctionOrder, function_rows};
     use borer_engine::view::Ref;
-    use gpui::{Entity, TestAppContext, VisualTestContext, px, size};
+    use command_palette_hooks::CommandPaletteFilter;
+    use gpui::{
+        Entity, ExternalPaths, FileDropEvent, TestAppContext, VisualTestContext, point, px, size,
+    };
+    use project::DisableAiSettings;
+    use settings::Settings as _;
     use workspace::dock::PanelSizeState;
     use workspace::pane::{GoBack, GoForward};
-    use workspace::{AppState, MultiWorkspace, Workspace};
+    use workspace::{AddFolderToProject, AppState, MultiWorkspace, Workspace};
 
-    use super::new_workspace;
+    use super::{configure, new_workspace};
     use crate::decompile_item::{DecompileItem, TabMode, open_function};
     use crate::functions_panel::FunctionsPanel;
     use crate::worker::LoadedBinary;
@@ -248,22 +364,32 @@ mod tests {
     /// Entry of the sample program's callee.
     const CALLEE: u64 = 0x1030;
 
-    /// Starts Zed's test app state over a fresh in-memory database, with the app's keymap,
-    /// Zed's editor, workspace and command palette.
+    /// Starts Zed's test app state over a fresh in-memory database, configured as the app
+    /// configures Zed.
     ///
     /// # Panics
     ///
-    /// Panics if the keymaps do not load.
+    /// Panics if the app's settings or the keymaps do not load.
     fn init(cx: &mut TestAppContext) -> Arc<AppState> {
         cx.update(|cx| {
             cx.set_global(db::AppDatabase::test_new());
             let app_state = AppState::test(cx);
-            crate::actions::bind_keys(cx).unwrap();
-            editor::init(cx);
-            workspace::init(app_state.clone(), cx);
-            command_palette::init(cx);
+            configure(cx).unwrap();
             app_state
         })
+    }
+
+    /// Drops `dir` from the system on the middle of the window.
+    fn drop_on_center(dir: &Path, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let size = cx.update(|window, _| window.viewport_size());
+        let position = point(size.width * 0.5, size.height * 0.5);
+        cx.simulate_event(FileDropEvent::Entered {
+            position,
+            paths: ExternalPaths([dir.to_path_buf()].into_iter().collect()),
+        });
+        cx.simulate_event(FileDropEvent::Submit { position });
+        cx.run_until_parked();
     }
 
     /// Opens a window over the app's workspace and returns that workspace.
@@ -372,6 +498,114 @@ mod tests {
         });
         assert_eq!(shown(&workspace, cx).map(|(entry, _)| entry), Some(CALLER));
         assert_available(&declared, cx);
+    }
+
+    /// Zed's open, open files and reload are offered nowhere, and its add folder action is
+    /// hidden from the palette.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the palette would list one of them.
+    #[gpui::test]
+    fn zed_open_actions_are_not_offered(cx: &mut TestAppContext) {
+        zed_open_actions_are_not_offered_steps(cx);
+    }
+
+    /// Runs the steps of [`zed_open_actions_are_not_offered`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`zed_open_actions_are_not_offered`] says.
+    fn zed_open_actions_are_not_offered_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (workspace, cx) = open(&app_state, cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.focus_panel::<FunctionsPanel>(window, cx);
+        });
+        cx.run_until_parked();
+        let offered: Vec<String> = cx.update(|window, cx| {
+            let filter = CommandPaletteFilter::try_global(cx);
+            window
+                .available_actions(cx)
+                .into_iter()
+                .filter(|action| filter.is_none_or(|filter| !filter.is_hidden(action.as_ref())))
+                .map(|action| action.name().to_owned())
+                .collect()
+        });
+        for name in [
+            "workspace::Open",
+            "workspace::OpenFiles",
+            "workspace::Reload",
+            "workspace::AddFolderToProject",
+        ] {
+            assert!(
+                !offered.iter().any(|offered| offered == name),
+                "{name} is offered"
+            );
+        }
+    }
+
+    /// A folder whose settings start a context server, dropped on a pane holding only the
+    /// start tab and on a pane holding a decompile tab, or picked through Zed's add folder
+    /// action, never becomes a project folder, and AI is off.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the project gains a folder or AI is on.
+    #[gpui::test]
+    async fn a_dropped_or_added_folder_never_joins_the_project(cx: &mut TestAppContext) {
+        a_dropped_or_added_folder_never_joins_the_project_steps(cx).await;
+    }
+
+    /// Runs the steps of [`a_dropped_or_added_folder_never_joins_the_project`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`a_dropped_or_added_folder_never_joins_the_project`] says.
+    async fn a_dropped_or_added_folder_never_joins_the_project_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let dir = PathBuf::from(if cfg!(windows) {
+            r"C:\dropped"
+        } else {
+            "/dropped"
+        });
+        let settings = r#"{"context_servers": {"x": {"command": "calc.exe"}}}"#;
+        app_state
+            .fs
+            .as_fake()
+            .insert_tree(
+                &dir,
+                serde_json::json!({ ".zed": { "settings.json": settings } }),
+            )
+            .await;
+        let (workspace, cx) = open(&app_state, cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.close_panel::<FunctionsPanel>(window, cx);
+        });
+        drop_on_center(&dir, cx);
+        let loaded = sample();
+        workspace.update_in(cx, |workspace, window, cx| {
+            open_function(
+                workspace,
+                loaded,
+                CALLER,
+                TabMode::Permanent,
+                true,
+                window,
+                cx,
+            );
+        });
+        assert_eq!(shown(&workspace, cx).map(|(entry, _)| entry), Some(CALLER));
+        drop_on_center(&dir, cx);
+        cx.dispatch_action(AddFolderToProject);
+        cx.run_until_parked();
+        cx.simulate_path_prompt_response(|_| Some(vec![dir.clone()]));
+        cx.run_until_parked();
+        let folders = workspace.read_with(cx, |workspace, cx| {
+            workspace.project().read(cx).worktrees(cx).count()
+        });
+        assert_eq!(folders, 0);
+        assert!(cx.update(|_, cx| DisableAiSettings::get_global(cx).disable_ai));
     }
 
     /// Zed's back and forward walk the places a decompile tab was left at: a jump inside

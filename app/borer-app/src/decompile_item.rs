@@ -13,8 +13,9 @@ use gpui::{
     WeakEntity, Window, div, px, uniform_list,
 };
 use theme::ActiveTheme as _;
-use workspace::{Item, ItemNavHistory, Workspace};
+use workspace::{Item, ItemNavHistory, Pane, Workspace};
 
+use crate::app_view::open_dropped;
 use crate::code_view::{ClickOutcome, CodeLines, CodePalette, resolve_ref_click, style_view_line};
 use crate::worker::{LoadedBinary, TaskEpoch, decompile_blocking, spawn_engine};
 
@@ -521,6 +522,16 @@ impl Item for DecompileItem {
 
     fn deactivated(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) {
         self.push_location(cx);
+    }
+
+    fn handle_drop(
+        &self,
+        _active_pane: &Pane,
+        dropped: &dyn Any,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
+        open_dropped(&self.workspace, dropped, cx)
     }
 }
 

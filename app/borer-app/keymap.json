@@ -1,5 +1,11 @@
 [
   {
+    "bindings": {
+      "ctrl-o": "borer::Open",
+      "ctrl-k ctrl-o": null
+    }
+  },
+  {
     "context": "Workspace",
     "bindings": {
       "ctrl-o": "borer::Open",

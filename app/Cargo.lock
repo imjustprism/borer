@@ -976,6 +976,7 @@ dependencies = [
  "client",
  "clock",
  "command_palette",
+ "command_palette_hooks",
  "db",
  "dirs",
  "editor",

@@ -7,6 +7,7 @@ pub mod code_view;
 pub mod decompile_item;
 pub mod functions_panel;
 pub mod measure;
+pub mod start_item;
 pub mod worker;
 
 use gpui::{App, AppContext as _};

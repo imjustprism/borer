@@ -366,6 +366,7 @@ mod tests {
             ("measure.rs", include_str!("measure.rs")),
             ("measure/input.rs", include_str!("measure/input.rs")),
             ("measure/scroll.rs", include_str!("measure/scroll.rs")),
+            ("start_item.rs", include_str!("start_item.rs")),
         ];
         let calls = [
             "Program::load",
