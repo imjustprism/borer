@@ -11,6 +11,9 @@
 //! nothing covers them; and the gaps between sections. A section's first
 //! row carries its header, a function's entry its header.
 //!
+//! The overview band ([`band`]) splits the same range into equal buckets,
+//! each named by the kind of fact holding most of its bytes.
+//!
 //! A row is the lines one address shows, and a page is a run of rows from
 //! where it starts. Pages count rows, not lines, and every row start is
 //! found by lookup ([`Cx::row_start`]), never by walking from afar, so a
@@ -63,6 +66,9 @@ const IT_REACH: usize = 4;
 
 /// The most bytes one x86 instruction spans.
 const INSN_MAX: u64 = 15;
+
+/// Most cells one band holds: a request for more is cut to it.
+pub const CELLS_MAX: usize = 4096;
 
 /// Which way a page runs from the address it is asked at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,6 +136,52 @@ pub struct LinearPage {
     pub cancelled: bool,
 }
 
+/// What holds the most bytes of one cell of the band.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellKind {
+    /// Instructions of discovered blocks.
+    Code,
+    /// A typed value, a pointer, or bytes a name the file states names.
+    Data,
+    /// A string the walk found.
+    String,
+    /// Bytes inside a section no fact covers, the file's or zero-filled.
+    Unexplored,
+    /// Addresses between two sections.
+    Unmapped,
+}
+
+impl CellKind {
+    /// Every kind, in the order a tie between them goes to.
+    const ALL: [Self; 5] = [
+        Self::Code,
+        Self::Data,
+        Self::String,
+        Self::Unexplored,
+        Self::Unmapped,
+    ];
+
+    /// Returns the kind's place in [`CellKind::ALL`].
+    fn slot(self) -> usize {
+        match self {
+            Self::Code => 0,
+            Self::Data => 1,
+            Self::String => 2,
+            Self::Unexplored => 3,
+            Self::Unmapped => 4,
+        }
+    }
+}
+
+/// One cell of the overview band.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cell {
+    /// The first address of its bucket.
+    pub first: u64,
+    /// The kind holding the most bytes of the bucket.
+    pub kind: CellKind,
+}
+
 /// What covers one span of the image.
 #[derive(Debug, Clone)]
 enum Fact {
@@ -154,6 +206,19 @@ enum Fact {
     Unbacked,
     /// Addresses between two sections.
     Unmapped,
+}
+
+impl Fact {
+    /// Returns the band's kind of the fact.
+    fn cell(&self) -> CellKind {
+        match self {
+            Self::Code | Self::Spill(_) => CellKind::Code,
+            Self::Text(_) => CellKind::String,
+            Self::Typed(_) | Self::Pointer(_) | Self::Named(_) => CellKind::Data,
+            Self::Unexplored | Self::Unbacked => CellKind::Unexplored,
+            Self::Unmapped => CellKind::Unmapped,
+        }
+    }
 }
 
 /// Where a typed value's type is stated, held as a place, not a copy.
@@ -1711,6 +1776,102 @@ pub fn linear(
         prev,
         cancelled: early || cut || late,
     })
+}
+
+/// Returns the image's overview band.
+///
+/// The band is its range from the first section's start to the last one's
+/// end in equal address buckets, each with the kind
+/// of fact holding the most of its bytes, a tie going to the kind first in
+/// [`CellKind`]'s order.
+///
+/// Built once per count under the overlay's names from the linear
+/// listing's own facts, and kept in the analysis's budgeted memo.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - The overlay, whose applied types are facts.
+/// * `cells` - Buckets wanted, 1 to [`CELLS_MAX`].
+///
+/// # Returns
+///
+/// The cells in address order, at most as many as asked: buckets of one
+/// whole number of bytes each, the last cut at the range's end, so a range
+/// that does not divide evenly gets fewer; empty for an image with no
+/// section or a request cancelled before the band was read.
+#[must_use]
+pub fn band(p: &Program, a: &Analysis, o: &Overlay, cells: usize) -> Vec<Cell> {
+    let cells = cells.clamp(1, CELLS_MAX);
+    if Cancel::raised() {
+        return Vec::new();
+    }
+    a.derived
+        .get_or_build_item(
+            "linear_band",
+            o.fingerprint(),
+            cells,
+            || buckets(&map(p, a, o), cells),
+            |c| c.capacity().saturating_mul(size_of::<Cell>()),
+        )
+        .to_vec()
+}
+
+/// Splits the map's range into `cells` equal buckets and names each by the
+/// kind holding the most of its bytes.
+///
+/// # Arguments
+///
+/// * `map` - The image's spans.
+/// * `cells` - Buckets wanted, at least 1.
+fn buckets(map: &Map, cells: usize) -> Vec<Cell> {
+    let Some((lo, hi)) = map.bounds() else {
+        return Vec::new();
+    };
+    let width = hi.saturating_sub(lo).div_ceil(from_usize(cells)).max(1);
+    let count = usize::try_from(hi.saturating_sub(lo).div_ceil(width))
+        .unwrap_or(cells)
+        .min(cells);
+    let mut bytes = vec![[0u64; CellKind::ALL.len()]; count];
+    for s in &map.spans {
+        let slot = s.fact.cell().slot();
+        let mut at = s.start;
+        while at < s.end {
+            let i = at.saturating_sub(lo) / width;
+            let to = i
+                .saturating_add(1)
+                .saturating_mul(width)
+                .saturating_add(lo)
+                .min(s.end);
+            let Some(held) = usize::try_from(i)
+                .ok()
+                .and_then(|i| bytes.get_mut(i))
+                .and_then(|b| b.get_mut(slot))
+            else {
+                break;
+            };
+            *held = held.saturating_add(to.saturating_sub(at));
+            if to <= at {
+                break;
+            }
+            at = to;
+        }
+    }
+    bytes
+        .iter()
+        .zip(0u64..)
+        .map(|(held, i)| Cell {
+            first: lo.saturating_add(i.saturating_mul(width)),
+            kind: CellKind::ALL.into_iter().fold(CellKind::Code, |best, k| {
+                if held[k.slot()] > held[best.slot()] {
+                    k
+                } else {
+                    best
+                }
+            }),
+        })
+        .collect()
 }
 
 #[cfg(test)]

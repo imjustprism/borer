@@ -7,7 +7,9 @@
     reason = "assertions are the point of a test"
 )]
 
-use borer_engine::analysis::render::{Dir, LINES_MAX, LinearPage, RowKind, linear};
+use borer_engine::analysis::render::{
+    CELLS_MAX, CellKind, Dir, LINES_MAX, LinearPage, RowKind, band, linear,
+};
 use borer_engine::analysis::utypes::TypeExpr;
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::dwarf::Global;
@@ -409,6 +411,76 @@ fn two_sections(code: &[u8], data: &[u8]) -> Program {
     p
 }
 
+/// The band's cells split the image's range into equal buckets from its
+/// start, in address order, and the unmapped gap holds the cells inside it.
+#[test]
+fn band_cells_partition_the_mapped_range() {
+    let p = image();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let cells = band(&p, &a, &o, 8);
+    assert_eq!(cells.len(), 8);
+    let width = (END - TEXT).div_ceil(8);
+    for (i, c) in (0u64..).zip(&cells) {
+        assert_eq!(c.first, TEXT + i * width, "cell {i}");
+    }
+    assert!(cells.last().is_some_and(|c| c.first + width >= END));
+    let gap = cells
+        .iter()
+        .find(|c| c.first >= GAP && c.first + width <= DATA)
+        .expect("a cell inside the gap");
+    assert_eq!(gap.kind, CellKind::Unmapped);
+    assert_eq!(band(&p, &a, &o, 8), cells, "memoized");
+    let most = band(&p, &a, &o, usize::MAX);
+    let step = (END - TEXT).div_ceil(4096);
+    assert_eq!(
+        most.len(),
+        usize::try_from((END - TEXT).div_ceil(step)).expect("fits")
+    );
+}
+
+/// An image of nothing but one function's code has only code cells.
+#[test]
+fn a_pure_code_image_has_only_code_cells() {
+    let mut code = vec![0x90u8; 15];
+    // ASM: ret
+    code.push(0xc3);
+    let p = two_sections(&code, &[]);
+    let a = Analysis::compute(&p);
+    let cells = band(&p, &a, &Overlay::default(), 4);
+    assert_eq!(cells.len(), 4);
+    assert!(cells.iter().all(|c| c.kind == CellKind::Code), "{cells:?}");
+}
+
+/// A bucket's kind is the one holding the most of its bytes, not the one
+/// with the most lines: 32 bytes of one-byte instructions lose to a string
+/// of 95.
+#[test]
+fn a_cell_is_named_by_bytes_not_by_lines() {
+    let mut code = vec![0x90u8; 31];
+    // ASM: ret
+    code.push(0xc3);
+    let mut data = vec![b'a'; 0x5f];
+    data.push(0);
+    let p = two_sections(&code, &data);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    assert_eq!(
+        band(&p, &a, &o, 1).first().map(|c| c.kind),
+        Some(CellKind::String)
+    );
+    let kinds: Vec<CellKind> = band(&p, &a, &o, 4).iter().map(|c| c.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            CellKind::Code,
+            CellKind::String,
+            CellKind::String,
+            CellKind::String
+        ]
+    );
+}
+
 /// Builds an image whose sections overlap each other, one reaching the end
 /// of the address space and one claiming more file than there is: a table
 /// no loader passes, built by hand.
@@ -427,9 +499,12 @@ fn hostile() -> Program {
     Program::raw(vec![0x90; 0x200], Arch::X86_64, 0, Some(0x1000), sections)
 }
 
-/// Pages asked anywhere, either way, answer a hostile section table within
-/// their caps, without a panic: no page holds more than [`LINES_MAX`] rows
-/// and a chain of pages moves forward.
+/// Pages and the band answer a hostile section table within their caps.
+///
+/// Pages asked anywhere, either way, and the band at its cap answer it
+/// without a panic: no page holds
+/// more than [`LINES_MAX`] rows, a chain of pages moves forward, and the
+/// band's cells run in address order.
 #[test]
 fn overlapping_and_huge_sections_page_within_the_caps() {
     let p = hostile();
@@ -457,6 +532,9 @@ fn overlapping_and_huge_sections_page_within_the_caps() {
             assert!(page.next.is_none_or(|next| next > va));
             at = page.next;
         }
+        let cells = band(&p, &a, &o, usize::MAX);
+        assert_eq!(cells.len(), CELLS_MAX);
+        assert!(cells.windows(2).all(|w| w[0].first < w[1].first));
     }
 }
 
@@ -707,4 +785,29 @@ fn a_run_of_edits_holds_at_most_one_map() {
         let held = a.derived.held("linear_map");
         assert!(held <= 2, "step {step}: {held} maps held");
     }
+}
+
+/// Applying a `u32` over bytes no fact covers turns its band cell from
+/// unexplored to data and its linear rows from hex into the value's line:
+/// the map and the band are read again under the new names.
+#[test]
+fn an_applied_type_changes_the_band_and_the_listing() {
+    let sections = vec![Section::mapped(".data", 0x1000, 0, 0x10, true, false)];
+    let p = Program::raw(vec![0u8; 0x10], Arch::X86_64, 0, None, sections);
+    let a = Analysis::compute(&p);
+    let before = Overlay::default();
+    let mut after = Overlay::default();
+    after.applied.insert(0x1004, TypeExpr::U32);
+    let kinds =
+        |o: &Overlay| -> Vec<CellKind> { band(&p, &a, o, 4).iter().map(|c| c.kind).collect() };
+    assert_eq!(kinds(&before)[1], CellKind::Unexplored);
+    assert_eq!(kinds(&after)[1], CellKind::Data);
+    let value = "0x1004  u32 = 0x0  ; a type the user applied";
+    let page = |o: &Overlay| linear(&p, &a, o, 0, Dir::Next, 16).expect("a page");
+    assert!(line(&page(&before), value).is_none());
+    assert!(
+        line(&page(&after), value).is_some(),
+        "{}",
+        page(&after).view.spell()
+    );
 }

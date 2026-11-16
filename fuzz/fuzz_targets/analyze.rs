@@ -3,19 +3,20 @@
 //! and reads each text as a view and its next steps, proposes a struct
 //! through its first argument, lists the types and opens the first page of
 //! them, lists what the assertions name, pages the linear listing both ways
-//! from the entry, an address the input names and the image's end, for a
-//! .NET assembly lists its first IL methods and its obfuscator markers, and
-//! reads every chart series table, a hostile spec among them: the path every
-//! agent request takes after a load. The first functions' call graphs and
-//! call tree levels are walked both ways too, and the callers of the first
-//! imports, which have no body.
+//! from the entry, an address the input names and the image's end, draws a
+//! band of a cell count the input names, for a .NET assembly lists its first
+//! IL methods and its obfuscator markers, and reads every chart series
+//! table, a hostile spec among them: the path every agent request takes
+//! after a load. The first functions' call graphs and call tree levels are
+//! walked both ways too, and the callers of the first imports, which have no
+//! body.
 
 #![no_main]
 
 use borer_engine::analysis::decompile::decompile;
 use borer_engine::analysis::decompile::view::view_of;
 use borer_engine::analysis::render::{
-    Bytes, Dir, Level, Walk, asserted_fields_tsv, call_children, callgraph, cfg,
+    Bytes, Dir, Level, Walk, asserted_fields_tsv, band, call_children, callgraph, cfg,
     disasm_function_with, disasm_view, linear, next_steps, propose,
 };
 use borer_engine::analysis::stats::stats_tsv;
@@ -107,6 +108,8 @@ fuzz_target!(|data: &[u8]| {
             assert!(page.prev.is_none_or(|prev| prev < page.first));
         }
     }
+    let cells = usize::try_from(word(8, 2)).unwrap_or(LISTED);
+    assert!(band(&program, &analysis, &overlay, cells).len() <= cells.max(1));
     for m in Managed::of(&program, &analysis)
         .methods
         .iter()
