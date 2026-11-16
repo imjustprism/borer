@@ -150,7 +150,7 @@ fn a_proved_and_an_unchecked_block_spell_their_grade() {
     assert_eq!(
         spelled.get(1).map(String::as_str),
         Some(
-            "block 0x1004: unchecked: not compared from any state\nnot checked: an instruction outside the checked subset\nthe text passes after the emission are not checked"
+            "block 0x1004: unchecked: not compared from any state\nnot checked (float/vector): an instruction outside the checked subset\nthe text passes after the emission are not checked"
         )
     );
 }

@@ -229,11 +229,10 @@ impl BlockCheck {
             let _ = writeln!(out, "{} more past the first {KEPT_MAX}", self.past_cap);
         }
         if let Some(why) = self.why {
-            let not = match self.grade {
-                Grade::Unchecked => "not checked",
-                Grade::Proved | Grade::Tested | Grade::Wrong => "not proved",
+            let _ = match self.grade {
+                Grade::Unchecked => writeln!(out, "not checked ({}): {why}", unchecked_label(why)),
+                Grade::Proved | Grade::Tested | Grade::Wrong => writeln!(out, "not proved: {why}"),
             };
-            let _ = writeln!(out, "{not}: {why}");
         }
         if let Some(asked) = self.asked {
             let tried = asked.clamp(1, RECHECK_MAX);
