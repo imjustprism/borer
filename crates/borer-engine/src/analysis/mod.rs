@@ -51,6 +51,7 @@ pub mod schema;
 pub mod sdk;
 mod seh32;
 pub mod senders;
+pub mod settable;
 pub mod sigs;
 pub mod snapshot;
 pub mod stated;

@@ -102,6 +102,26 @@ pub(crate) fn fault_text(e: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "no message".to_owned())
 }
 
+/// Runs `f` behind the fault boundary of a tool body
+/// ([`BorerServer::with_program`]).
+///
+/// # Arguments
+///
+/// * `f` - The work; its `Err` text becomes an invalid-params error.
+///
+/// # Errors
+///
+/// Invalid params when `f` refuses; internal error only when `f` faults.
+pub(crate) fn guarded<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, ErrorData> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(answer) => answer.map_err(err_params),
+        Err(e) => Err(err_internal(format!(
+            "the analysis faulted on this binary: {}. The session is still up; another tool or another address may still answer.",
+            fault_text(e.as_ref())
+        ))),
+    }
+}
+
 impl BorerServer {
     /// The packs an analysis of a program runs with: the pack directories'
     /// packs that fit it, then the named ones.
@@ -220,13 +240,7 @@ impl BorerServer {
         let Some(p) = guard.as_ref() else {
             return Err(err_params(NO_BINARY));
         };
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(p))) {
-            Ok(answer) => answer.map_err(err_params),
-            Err(e) => Err(err_internal(format!(
-                "the analysis faulted on this binary: {}. The session is still up; another tool or another address may still answer.",
-                fault_text(e.as_ref())
-            ))),
-        }
+        guarded(|| f(p))
     }
 
     /// The derived analysis, or an empty one when the architecture has none.
@@ -545,7 +559,9 @@ impl BorerServer {
     ///
     /// * `program` - The program the project was read for, outside its
     ///   lock.
-    /// * `loaded` - The project's annotations.
+    /// * `put` - The edit that puts the project's annotations in place.
+    /// * `made` - The plan already made of `put` over the overlay
+    ///   ([`borer_engine::analysis::project::admit`]); `None` plans it here.
     ///
     /// # Returns
     ///
@@ -558,12 +574,13 @@ impl BorerServer {
     pub(crate) fn put_project(
         &self,
         program: &Arc<Program>,
-        loaded: Overlay,
+        put: Edit,
+        made: Option<Plan>,
     ) -> anyhow::Result<Plan> {
-        let edits = [Edit::Project(Box::new(loaded))];
+        let edits = [put];
         let analysis = self.analysis_held();
         let planned = |o: &Overlay| edit::plan(program, &analysis, o, &edits, Force::Refuse);
-        planned(&self.overlay_plain())
+        made.map_or_else(|| planned(&self.overlay_plain()), Ok)
             .and_then(|made| self.commit((program, Some(program)), made, planned))
     }
 
@@ -933,7 +950,8 @@ impl BorerServer {
                 match borer_engine::analysis::utypes::laid_at(&o.types, word) {
                     Ok(()) => {
                         if let Some(program) = self.loaded()
-                            && let Err(e) = self.put_project(&program, o)
+                            && let Err(e) =
+                                self.put_project(&program, Edit::Project(Box::new(o)), None)
                         {
                             eprintln!("borer: the handed-over project: {e}");
                         }

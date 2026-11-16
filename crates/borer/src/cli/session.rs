@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 use anyhow::{Context as _, bail};
+use borer_engine::analysis::project::skipped_classes;
 use borer_engine::analysis::{
     Analysis, Overlay, decompile, parse_addr, render, resolve_suggesting, stated,
 };
@@ -19,7 +20,6 @@ use super::args::{arg, command_usage, decompile_args, entry_at};
 use crate::params::Detail;
 use crate::state::read_packs;
 use crate::tools::decompile::window;
-use crate::tools::load::skipped_classes;
 
 /// The refusal of a command given no binary: what it needs, then its own
 /// usage lines rather than every command's.
@@ -182,9 +182,9 @@ pub(super) fn load_for_program(
 ///
 /// As the `load_project` tool does, a project saved for another build is
 /// refused, and so is one with no hash whose path is another path as text
-/// ([`borer::project::ProjectFile::is_for`]); the annotations no section of
-/// the binary can hold, and the names and comments the tools would not set,
-/// are left out and counted on stderr.
+/// ([`borer_engine::analysis::project::Project::is_for`]); the annotations
+/// no section of the binary can hold, and the names and comments the tools
+/// would not set, are left out and counted on stderr.
 ///
 /// # Arguments
 ///
@@ -216,12 +216,12 @@ pub(super) fn project_overlay(path: &str, program: &Program) -> anyhow::Result<O
         Identity::OtherPath => bail!(
             "{}: {}. Give that binary, or edit \"program\" in the project file to match {loaded}",
             short_path(path),
-            borer::project::other_path_verdict(&saved, &loaded)
+            borer_engine::analysis::project::other_path_verdict(&saved, &loaded)
         ),
     }
     let mut overlay = overlay_at_width(&pf, program)?;
-    let placed = borer::project::keep_placeable(&mut overlay, program).len();
-    let skipped = placed.saturating_add(crate::params::keep_settable(
+    let placed = borer_engine::analysis::project::keep_placeable(&mut overlay, program).len();
+    let skipped = placed.saturating_add(borer_engine::analysis::settable::keep_settable(
         &mut overlay,
         0,
         &mut Vec::new(),

@@ -7,20 +7,28 @@
 //! past its cap as it is read ([`Capped`]), every table of a project
 //! however it was built is counted before any entry is parsed
 //! ([`Project::to_overlay`]), and every type and field is held to what the
-//! annotating tools hold a statement to. Reading the file from disk,
-//! writing it, and judging which binary it was saved for are the server's.
+//! annotating tools hold a statement to. Which binary a file was saved for
+//! is judged here ([`Project::identify`]), and what of it a binary keeps
+//! ([`admit`]); reading the file from disk and writing it are the
+//! front end's.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::marker::PhantomData;
+use std::path::{Component, Path, Prefix};
+use std::sync::Arc;
 
 use serde::de::{DeserializeSeed, Deserializer, Error as _, MapAccess, SeqAccess, Visitor};
 
+use super::edit::{self, Edit, Force, Plan};
 use super::protos::{PROTOTYPES_MAX, Proto, VARS_MAX, Var, VarKey};
 use super::stated::Field;
 use super::utypes::{
     APPLIED_MAX, ENUM_VALUES_MAX, FIELDS_MAX, TYPES_MAX, TypeExpr, UserField, UserType,
 };
-use super::{Overlay, parse_addr};
+use super::{Analysis, EnumSource, Overlay, parse_addr, settable};
+use crate::program::Program;
+use crate::text::short_path;
 
 /// A saved annotation overlay: the binary it belongs to, its names,
 /// comments and user-defined types, keyed by `0x`-hex address text where an
@@ -751,14 +759,589 @@ impl Project {
     }
 }
 
+/// How a project file's binary compares with the loaded one
+/// ([`Project::identify`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Identity {
+    /// The project records the loaded binary's SHA-256.
+    Same,
+    /// The project records another SHA-256: another build or another file.
+    Other,
+    /// The project records no hash, and its path is the loaded binary's.
+    PathOnly,
+    /// The project records no hash, and its path is another file's.
+    OtherPath,
+}
+
+/// Returns what identifies a binary in a project file: the SHA-256 of its
+/// bytes, as lowercase hex.
+///
+/// # Arguments
+///
+/// * `bytes` - The whole file.
+#[must_use]
+pub fn identity(bytes: &[u8]) -> String {
+    hex(crate::hashing::sha256(bytes))
+}
+
+/// Returns [`identity`] of a loaded binary, from the hash it keeps
+/// ([`Program::digest`]), so the file is hashed once per program.
+///
+/// # Arguments
+///
+/// * `program` - The loaded binary.
+#[must_use]
+pub fn program_identity(program: &Program) -> String {
+    hex(program.digest())
+}
+
+/// Spells a SHA-256 as lowercase hex.
+///
+/// # Arguments
+///
+/// * `digest` - The hash.
+fn hex(digest: [u8; 32]) -> String {
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Explains why a hashless project saved for `saved` was refused on `loaded`.
+///
+/// # Arguments
+///
+/// * `saved` - Shortened path recorded in the project file.
+/// * `loaded` - Shortened path of the loaded binary.
+#[must_use]
+pub fn other_path_verdict(saved: &str, loaded: &str) -> String {
+    format!(
+        "the project was saved for {saved}, but {loaded} is loaded, another path as text: the project records no sha-256, so its path names its binary; nothing was loaded"
+    )
+}
+
+/// Largest project file read or written, in bytes ([`Project::to_json`]).
+pub const PROJECT_MAX: u64 = 1 << 26;
+
+/// Buffers serialized JSON up to `cap` bytes, either aborting once the
+/// stream passes `cap` or counting the remaining bytes in constant space.
+struct BoundedJson {
+    /// Stored prefix of the stream, at most `cap` bytes.
+    bytes: Vec<u8>,
+    /// Total bytes written to the stream so far.
+    total: u64,
+    /// Maximum bytes `bytes` stores and allocates for.
+    cap: usize,
+    /// Whether passing `cap` returns an [`std::io::Error`] immediately.
+    abort_past_cap: bool,
+}
+
+impl std::io::Write for BoundedJson {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.total = self.total.saturating_add(crate::num::from_usize(buf.len()));
+        let keep = buf.len().min(self.cap.saturating_sub(self.bytes.len()));
+        if keep > 0 {
+            let needed = self.bytes.len().saturating_add(keep);
+            if needed > self.bytes.capacity() {
+                let target = self
+                    .bytes
+                    .capacity()
+                    .saturating_mul(2)
+                    .max(1024)
+                    .min(self.cap)
+                    .max(needed);
+                self.bytes
+                    .reserve_exact(target.saturating_sub(self.bytes.len()));
+            }
+            self.bytes.extend_from_slice(&buf[..keep]);
+        }
+        if self.abort_past_cap && self.total > crate::num::from_usize(self.cap) {
+            return Err(std::io::Error::other("past PROJECT_MAX"));
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Leaves out of an overlay what `set_name`, `set_comment` and `set_type`
+/// refuse of the loaded binary: an annotation at an address no section
+/// holds, and a blank name or comment.
+///
+/// A project file is edited by hand and may be loaded into a binary other
+/// than the one it was saved for; an annotation outside every section would
+/// sit in the overlay and never be shown, and a blank name names nothing.
+///
+/// # Arguments
+///
+/// * `o` - The overlay a project file rebuilt; left holding what fits.
+/// * `program` - The loaded binary.
+///
+/// # Returns
+///
+/// What was left out, one `name at 0x0 (in no section)` entry per
+/// annotation: names, then comments, applied types, prototypes and
+/// variables, each in address order.
+pub fn keep_placeable(o: &mut Overlay, program: &Program) -> Vec<String> {
+    let mut left_out: Vec<String> = Vec::new();
+    let mut keep = |what: &str, va: u64, text: Option<&str>| {
+        let why = if program.section_at(va).is_none() {
+            "in no section"
+        } else if text.is_some_and(|t| t.trim().is_empty()) {
+            "blank"
+        } else {
+            return true;
+        };
+        left_out.push(format!("{what} at {va:#x} ({why})"));
+        false
+    };
+    o.names.retain(|&va, n| keep("name", va, Some(n.as_str())));
+    o.comments
+        .retain(|&va, c| keep("comment", va, Some(c.as_str())));
+    o.applied.retain(|&va, _| keep("type", va, None));
+    o.prototypes.retain(|&va, _| keep("prototype", va, None));
+    o.vars.retain(|&va, _| keep("variables", va, None));
+    left_out
+}
+
+/// Returns a path's components as its text names them, read off no disk.
+///
+/// # Arguments
+///
+/// * `path` - The path.
+///
+/// # Returns
+///
+/// [`Path::components`] with `.` dropped and each `..` folded into the
+/// component before it (at a root, into the root).
+fn lexical(path: &Path) -> Vec<Component<'_>> {
+    let mut out = Vec::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir if matches!(out.last(), Some(Component::Normal(_))) => {
+                out.pop();
+            }
+            Component::ParentDir if matches!(out.last(), Some(Component::RootDir)) => {}
+            part => out.push(part),
+        }
+    }
+    out
+}
+
+/// Tells whether two components name one thing as text: on Windows a name
+/// in either ASCII case, and a drive in its long `\\?\` form, as Windows
+/// reads them; elsewhere only the same text.
+///
+/// # Arguments
+///
+/// * `a` - A component of one path.
+/// * `b` - The component of the other path at the same place.
+fn alike(a: &Component<'_>, b: &Component<'_>) -> bool {
+    let drive = |c: &Component<'_>| {
+        if let Component::Prefix(p) = c
+            && let Prefix::Disk(d) | Prefix::VerbatimDisk(d) = p.kind()
+        {
+            Some(d)
+        } else {
+            None
+        }
+    };
+    match (a, b) {
+        (Component::Normal(x), Component::Normal(y)) if cfg!(windows) => x.eq_ignore_ascii_case(y),
+        _ if cfg!(windows) && drive(a).is_some() => drive(a) == drive(b),
+        _ => a == b,
+    }
+}
+
+impl Project {
+    /// Judges whether the project was saved for the loaded binary.
+    ///
+    /// A project with its binary's SHA-256 belongs to the same bytes
+    /// wherever they were loaded from, and to nothing else: a rebuild at
+    /// the same path has other addresses, and took the old names silently
+    /// while the path was the identity. One saved before projects recorded
+    /// the hash is judged by its path ([`Project::is_for`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The loaded binary.
+    #[must_use]
+    pub fn identify(&self, program: &Program) -> Identity {
+        match &self.sha256 {
+            Some(saved) if saved.eq_ignore_ascii_case(&program_identity(program)) => Identity::Same,
+            Some(_) => Identity::Other,
+            None if self.is_for(&program.path) => Identity::PathOnly,
+            None => Identity::OtherPath,
+        }
+    }
+
+    /// Tells whether the project was saved for the binary at `path`.
+    ///
+    /// A project with its binary's SHA-256 is matched by the hash alone
+    /// ([`Project::identify`]); one without is matched here, by the path
+    /// it records and the loaded one compared as text ([`lexical`],
+    /// [`alike`]), never on disk, so a project file never makes borer open
+    /// a path. On Windows a name matches in either ASCII case (even inside a
+    /// case-sensitive directory, so `A.exe` matches `a.exe`) and a drive in
+    /// its long `\\?\` form, as Windows ordinarily reads them. `..` folds as
+    /// the text says on every system, though off Windows the kernel resolves
+    /// it through a link. Two spellings only the disk shows to be one file (a
+    /// link, an 8.3 name) are two paths, so [`admit`] refuses the project
+    /// unless forced.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Where the loaded binary was loaded from.
+    #[must_use]
+    pub fn is_for(&self, path: &Path) -> bool {
+        let (saved, loaded) = (lexical(Path::new(&self.program)), lexical(path));
+        saved.len() == loaded.len() && saved.iter().zip(&loaded).all(|(a, b)| alike(a, b))
+    }
+
+    /// Returns the file's text as pretty-printed JSON, or unindented when
+    /// only the unindented form fits [`PROJECT_MAX`].
+    ///
+    /// # Returns
+    ///
+    /// The bytes a project file holds, at most [`PROJECT_MAX`].
+    ///
+    /// # Errors
+    ///
+    /// When a table passes [`Project::counted`], the file would be longer
+    /// than [`PROJECT_MAX`] even unindented, which [`Project::from_json`]'s
+    /// readers refuse, or serialization fails; each says nothing was written.
+    pub fn to_json(&self) -> Result<Vec<u8>, String> {
+        self.counted()
+            .map_err(|why| format!("{why}; nothing was written"))?;
+        let mut out = BoundedJson {
+            bytes: Vec::new(),
+            total: 0,
+            cap: crate::num::saturating_usize(PROJECT_MAX),
+            abort_past_cap: true,
+        };
+        if let Err(e) = serde_json::to_writer_pretty(&mut out, self) {
+            if out.total <= PROJECT_MAX {
+                return Err(format!("serialize: {e}"));
+            }
+            out.bytes.clear();
+            out.total = 0;
+            out.abort_past_cap = false;
+            serde_json::to_writer(&mut out, self).map_err(|e| format!("serialize: {e}"))?;
+        }
+        if out.total > PROJECT_MAX {
+            return Err(format!(
+                "the project is {} bytes even unindented, past the {PROJECT_MAX} a project file holds, so nothing was written",
+                out.total
+            ));
+        }
+        Ok(out.bytes)
+    }
+
+    /// Parses a project file's bytes, each table held to its cap as it is
+    /// read ([`Capped`]).
+    ///
+    /// It takes bytes, not text, so a file that is not UTF-8 is refused by
+    /// the parser at the place it stops, as it always was.
+    ///
+    /// # Arguments
+    ///
+    /// * `json` - The file's bytes.
+    ///
+    /// # Errors
+    ///
+    /// When the bytes are not a valid project file: what the parser says of
+    /// them, escaped to one line, since it quotes the file.
+    pub fn from_json(json: &[u8]) -> Result<Project, String> {
+        serde_json::from_slice(json).map_err(|e| crate::text::one_line(&e.to_string()))
+    }
+}
+
+/// What [`admit`] made of a project file: the plan that puts its
+/// annotations in place of the overlay's, and the answer that says it.
+#[derive(Debug, Clone)]
+pub struct Admitted {
+    /// The plan, made over the overlay [`admit`] was given.
+    pub plan: Plan,
+    /// The edit the plan was made of, to plan again over an overlay a
+    /// commit changed meanwhile ([`super::edit::Stale`]).
+    pub edit: Edit,
+    /// What was loaded and left out, and why, one line each.
+    pub said: String,
+}
+
+/// Holds a project file to the loaded binary and plans putting what it
+/// keeps in place of the overlay.
+///
+/// A project's addresses belong to the binary it was saved for, and
+/// loading replaces every annotation, so a project saved for another
+/// binary ([`Project::identify`]: by its SHA-256, or by its path in a
+/// project older than the hash) is refused unless `force` says to admit it
+/// anyway; a rebuild is pointed at `borer://carry`. Either way the
+/// annotations the annotating tools would refuse of the loaded binary are
+/// skipped and listed ([`keep_placeable`], [`settable::keep_settable`]),
+/// and the fields the file states of classes are held to the binary's code
+/// ([`super::stated::settled`]): those of a class the code contradicts, or that
+/// no function belongs to, are skipped with the reason
+/// ([`skipped_classes`]).
+///
+/// # Arguments
+///
+/// * `program` - The loaded binary.
+/// * `analysis` - Hands over its analysis, which the stated fields are
+///   held to; called once, only for a file this binary admits, so a caller
+///   that has not computed it yet need not for a refused file.
+/// * `overlay` - The overlay the plan replaces.
+/// * `file` - The project file.
+/// * `force` - Whether a project saved for another binary is admitted.
+///
+/// # Returns
+///
+/// The plan and the answer ([`Admitted`]).
+///
+/// # Errors
+///
+/// When the file was saved for another binary and `force` is not set, it
+/// states something the overlay cannot hold or a struct that does not lay
+/// out with the binary's pointers ([`super::utypes::laid_at`]), or holding its
+/// class fields to the code is cut short by the deadline.
+pub fn admit(
+    program: &Program,
+    analysis: impl FnOnce() -> Arc<Analysis>,
+    overlay: &Overlay,
+    file: &Project,
+    force: bool,
+) -> anyhow::Result<Admitted> {
+    /// Most left-out annotations the answer names before counting the rest.
+    const LEFT_OUT_SHOWN: usize = 8;
+    let identity = file.identify(program);
+    let foreign = matches!(identity, Identity::Other | Identity::OtherPath);
+    let saved_for = short_path(&file.program);
+    let loaded_path = program.path.display().to_string();
+    if foreign && !force {
+        return Err(anyhow::Error::msg(refusal(program, file, &saved_for)));
+    }
+    let mut loaded = file.to_overlay().map_err(anyhow::Error::msg)?;
+    let word: u64 = if program.is_64 { 8 } else { 4 };
+    super::utypes::laid_at(&loaded.types, word).map_err(|e| {
+        anyhow::anyhow!(
+            "{e} with the {word}-byte pointers of {}; nothing was loaded",
+            short_path(&loaded_path)
+        )
+    })?;
+    let mut left_out = keep_placeable(&mut loaded, program);
+    let placed = left_out.len();
+    let room = LEFT_OUT_SHOWN.saturating_sub(placed);
+    let skipped = placed.saturating_add(settable::keep_settable(&mut loaded, room, &mut left_out));
+    let analysis = analysis();
+    let mut unsettled = super::stated::Unsettled::default();
+    if !loaded.fields.is_empty() {
+        let tabled = Overlay {
+            enum_source: EnumSource::Binary,
+            ..loaded.clone()
+        };
+        unsettled =
+            super::stated::settled(program, &analysis, &tabled).map_err(anyhow::Error::msg)?;
+    }
+    let gone = unsettled.leave_out(&mut loaded);
+    let stated = stated_counts(
+        loaded.prototypes.len(),
+        loaded.vars.values().map(BTreeMap::len).sum(),
+        loaded.fields.values().map(BTreeMap::len).sum(),
+    );
+    let mut said = format!(
+        "loaded {} names + {} comments + {} types + {} applied{stated}\n",
+        loaded.names.len(),
+        loaded.comments.len(),
+        loaded.types.len(),
+        loaded.applied.len()
+    );
+    if skipped > 0 {
+        let shown = left_out.len().min(LEFT_OUT_SHOWN);
+        let _ = writeln!(
+            said,
+            "# skipped {skipped} (showing {shown} of {skipped}): {}",
+            left_out[..shown].join(", ")
+        );
+    }
+    said.push_str(&skipped_classes(&unsettled, gone));
+    if foreign {
+        let _ = writeln!(
+            said,
+            "# forced: the project was saved for {saved_for}, so its names may sit on other code here"
+        );
+    }
+    if matches!(identity, Identity::PathOnly | Identity::OtherPath) {
+        said.push_str("# the project names its binary by path alone (saved before projects recorded its sha-256; matched ignoring ASCII case on Windows), so a rebuild or case twin at that path loads it too; save_project records the hash\n");
+    }
+    let put = Edit::Project(Box::new(loaded));
+    let plan = edit::plan(
+        program,
+        &analysis,
+        overlay,
+        std::slice::from_ref(&put),
+        Force::Refuse,
+    )?;
+    Ok(Admitted {
+        plan,
+        edit: put,
+        said,
+    })
+}
+
+/// Says why a project saved for another binary is refused, and what to do
+/// instead ([`admit`]).
+///
+/// # Arguments
+///
+/// * `program` - The loaded binary.
+/// * `file` - The project file.
+/// * `saved_for` - The file's binary, shortened.
+fn refusal(program: &Program, file: &Project, saved_for: &str) -> String {
+    /// Hex digits of a SHA-256 a message shows.
+    const HASH_SHOWN: usize = 12;
+    let loaded_path = program.path.display().to_string();
+    let short = |hash: &str| hash.chars().take(HASH_SHOWN).collect::<String>();
+    match &file.sha256 {
+        Some(saved) => format!(
+            "the project was saved for another build (sha-256 {}... at {saved_for}), but {} is sha-256 {}...; nothing was loaded. Its addresses belong to that build: load it with this project, then borer://carry/{} carries the names to this one; or pass force=true to load the project anyway",
+            short(&crate::text::one_line(saved)),
+            short_path(&loaded_path),
+            short(&program_identity(program)),
+            short_path(&loaded_path.replace('\\', "/"))
+        ),
+        None => format!(
+            "{}. Load that binary first, or pass force=true to load the project anyway and save_project to record the hash",
+            other_path_verdict(saved_for, &short_path(&loaded_path))
+        ),
+    }
+}
+
+/// Words what a project states beyond its names, comments and types, for
+/// the answers of saving and admitting one.
+///
+/// # Arguments
+///
+/// * `prototypes` - Prototypes stated.
+/// * `vars` - Variables stated, over every function.
+/// * `fields` - Fields stated, over every class.
+///
+/// # Returns
+///
+/// ` + 2 prototypes + 3 variables` when there is either, then
+/// ` + 1 stated fields` when there are any; empty when there is none.
+#[must_use]
+pub fn stated_counts(prototypes: usize, vars: usize, fields: usize) -> String {
+    let mut out = String::new();
+    if prototypes + vars > 0 {
+        let _ = write!(out, " + {prototypes} prototypes + {vars} variables");
+    }
+    if fields > 0 {
+        let _ = write!(out, " + {fields} stated fields");
+    }
+    out
+}
+
+/// Words the stated fields an admitted project could not keep, a line per
+/// reason, for [`admit`]'s answer and a command's stderr.
+///
+/// # Arguments
+///
+/// * `unsettled` - The classes whose fields were left out, and why.
+/// * `gone` - How many fields went with the classes of no function, then
+///   with the classes the code contradicts
+///   ([`super::stated::Unsettled::leave_out`]).
+///
+/// # Returns
+///
+/// `# skipped 2 stated field(s) of 1 class(es) that name no class of this
+/// binary (showing 1 of 1): Ghost`, and the like for the classes the code
+/// contradicts, each with the refusal that names the field; at most eight
+/// classes are named on a line and the rest counted. Where borer reads no
+/// code of the binary, one line says the fields were kept unheld and why.
+/// Empty when every class was held and kept its fields.
+#[must_use]
+pub fn skipped_classes(unsettled: &super::stated::Unsettled, gone: (usize, usize)) -> String {
+    /// Most classes a line names before it counts the rest.
+    const SHOWN: usize = 8;
+    let refused: Vec<String> = unsettled
+        .contradicted
+        .iter()
+        .map(|(class, why)| format!("{class} ({why})"))
+        .collect();
+    let mut out = String::new();
+    for (fields, why, classes) in [
+        (
+            gone.0,
+            "that name no class of this binary",
+            &unsettled.absent,
+        ),
+        (gone.1, "the binary's code contradicts", &refused),
+    ] {
+        if !classes.is_empty() {
+            let shown = classes.len().min(SHOWN);
+            let _ = writeln!(
+                out,
+                "# skipped {fields} stated field(s) of {total} class(es) {why} (showing {shown} of {total}): {}",
+                classes[..shown].join(", "),
+                total = classes.len()
+            );
+        }
+    }
+    if let Some(why) = &unsettled.unread {
+        let _ = writeln!(
+            out,
+            "# kept the stated fields as stated, held to no code: {why}"
+        );
+    }
+    out
+}
+
 #[cfg(test)]
 #[expect(
     clippy::missing_panics_doc,
     reason = "assertions are the point of a test"
 )]
 mod tests {
-    use super::Project;
+    use std::io::Write as _;
+
+    use super::{BoundedJson, PROJECT_MAX, Project};
     use crate::cancel::Cancel;
+
+    /// [`BoundedJson`] aborts past `cap` when asked, never allocates past
+    /// `cap`, and counts the full stream length on reuse.
+    #[test]
+    fn bounded_json_caps_allocation_and_counts_exact_bytes() {
+        let cap = crate::num::saturating_usize(PROJECT_MAX);
+        let mut out = BoundedJson {
+            bytes: Vec::new(),
+            total: 0,
+            cap,
+            abort_past_cap: true,
+        };
+        let chunk = vec![b'x'; 4093];
+        let mut written = 0usize;
+        while written <= cap {
+            let res = out.write(&chunk);
+            written += chunk.len();
+            if written > cap {
+                assert!(res.is_err());
+                break;
+            }
+            assert_eq!(res.ok(), Some(chunk.len()));
+        }
+        assert_eq!(out.bytes.len(), cap);
+        assert_eq!(out.bytes.capacity(), cap);
+        out.bytes.clear();
+        out.total = 0;
+        out.abort_past_cap = false;
+        let big = vec![b'y'; 1 << 20];
+        for _ in 0..100 {
+            out.write_all(&big).expect("counting pass");
+        }
+        assert_eq!(out.total, 100 << 20);
+        assert_eq!(out.bytes.len(), cap);
+        assert_eq!(out.bytes.capacity(), cap);
+    }
 
     /// Rebuilding an overlay under a raised [`Cancel`] refuses the result
     /// even when the project states only names and no types or fields.

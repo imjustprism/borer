@@ -644,6 +644,7 @@ dependencies = [
  "rhai",
  "rustc-demangle",
  "serde",
+ "serde_json",
  "smallvec",
  "yaxpeax-arch",
  "yaxpeax-arm",

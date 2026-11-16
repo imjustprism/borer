@@ -6,8 +6,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 
-use borer::project::Identity;
-use borer_engine::analysis::{EnumSource, Overlay, stated};
+use borer_engine::analysis::project::{self, Admitted};
 use borer_engine::layout::Layout;
 use borer_engine::num;
 use borer_engine::program::{Feature, Program, TooLarge};
@@ -19,7 +18,7 @@ use crate::catalog::template_names;
 use crate::errors::{err_internal, err_params};
 use crate::params::{FetchPdbParams, LoadBinaryParams, LoadProjectParams, SaveProjectParams};
 use crate::safety::{Effect, effects};
-use crate::state::{RawLoad, fault_text, lock, read_lock};
+use crate::state::{RawLoad, fault_text, guarded, lock, read_lock};
 use crate::symsrv;
 
 /// The line `load_binary` ends with: the one call that answers what the
@@ -157,84 +156,6 @@ pub(crate) fn relative_note(path: &Path, cwd: Option<&Path>) -> String {
             )
         },
     )
-}
-
-/// Words what a project states beyond its names, comments and types, for
-/// the answers of `save_project` and `load_project`.
-///
-/// # Arguments
-///
-/// * `prototypes` - Prototypes stated.
-/// * `vars` - Variables stated, over every function.
-/// * `fields` - Fields stated, over every class.
-///
-/// # Returns
-///
-/// ` + 2 prototypes + 3 variables` when there is either, then
-/// ` + 1 stated fields` when there are any; empty when there is none.
-fn stated_counts(prototypes: usize, vars: usize, fields: usize) -> String {
-    let mut out = String::new();
-    if prototypes + vars > 0 {
-        let _ = write!(out, " + {prototypes} prototypes + {vars} variables");
-    }
-    if fields > 0 {
-        let _ = write!(out, " + {fields} stated fields");
-    }
-    out
-}
-
-/// Words the stated fields a loaded project could not keep, a line per
-/// reason, for the answer of `load_project` and a command's stderr.
-///
-/// # Arguments
-///
-/// * `unsettled` - The classes whose fields were left out, and why.
-/// * `gone` - How many fields went with the classes of no function, then
-///   with the classes the code contradicts
-///   ([`stated::Unsettled::leave_out`]).
-///
-/// # Returns
-///
-/// `# skipped 2 stated field(s) of 1 class(es) that name no class of this
-/// binary (showing 1 of 1): Ghost`, and the like for the classes the code
-/// contradicts, each with the refusal that names the field; at most eight
-/// classes are named on a line and the rest counted. Where borer reads no
-/// code of the binary, one line says the fields were kept unheld and why.
-/// Empty when every class was held and kept its fields.
-pub(crate) fn skipped_classes(unsettled: &stated::Unsettled, gone: (usize, usize)) -> String {
-    /// Most classes a line names before it counts the rest.
-    const SHOWN: usize = 8;
-    let refused: Vec<String> = unsettled
-        .contradicted
-        .iter()
-        .map(|(class, why)| format!("{class} ({why})"))
-        .collect();
-    let mut out = String::new();
-    for (fields, why, classes) in [
-        (
-            gone.0,
-            "that name no class of this binary",
-            &unsettled.absent,
-        ),
-        (gone.1, "the binary's code contradicts", &refused),
-    ] {
-        if !classes.is_empty() {
-            let shown = classes.len().min(SHOWN);
-            let _ = writeln!(
-                out,
-                "# skipped {fields} stated field(s) of {total} class(es) {why} (showing {shown} of {total}): {}",
-                classes[..shown].join(", "),
-                total = classes.len()
-            );
-        }
-    }
-    if let Some(why) = &unsettled.unread {
-        let _ = writeln!(
-            out,
-            "# kept the stated fields as stated, held to no code: {why}"
-        );
-    }
-    out
 }
 
 #[tool_router(router = load_tools, vis = "pub(crate)")]
@@ -542,7 +463,7 @@ impl BorerServer {
             &read_lock(&self.overlay),
         );
         pf.save(&path, existing).map_err(err_internal)?;
-        let stated = stated_counts(
+        let stated = project::stated_counts(
             pf.prototypes.len(),
             pf.vars.values().map(BTreeMap::len).sum(),
             pf.fields.values().map(BTreeMap::len).sum(),
@@ -557,26 +478,13 @@ impl BorerServer {
 
     /// Loads a JSON project file into the overlay, replacing it.
     ///
-    /// A project's addresses belong to the binary it was saved for, and
-    /// loading replaces every annotation the session holds, so a project
-    /// saved for another binary ([`borer::project::ProjectFile::identify`]:
-    /// by its SHA-256, or by its path in a project older than the hash) is
-    /// refused, leaving the overlay as it was, unless `force` says to load
-    /// it anyway; a rebuild is pointed at `borer://carry`, which moves the
-    /// names to it, and a project judged by path says so. Either way the
-    /// annotations `set_name`, `set_comment` and
-    /// `set_type` would refuse of the loaded binary, at an address no
-    /// section holds or with blank text, are skipped and listed
-    /// ([`borer::project::keep_placeable`]), as are the names and comments
-    /// they would refuse of any binary ([`crate::params::keep_settable`]),
-    /// and the counts said are of what the overlay then holds. The fields
-    /// the file states of classes are
-    /// held to the binary's code as `set_type` holds a statement
-    /// ([`stated::settled`]): those of a class the code contradicts, or
-    /// that no function of the binary belongs to, are skipped with the
-    /// reason ([`skipped_classes`]) and the rest of the project loads.
-    /// Loaded so that borer reads no code of it, a binary has no class to
-    /// hold them to: they stay as stated, and the answer says so.
+    /// The engine judges the file ([`project::admit`]): a project saved for
+    /// another binary is refused, leaving the overlay as it was, unless
+    /// `force` says to load it anyway; the annotations the annotating tools
+    /// would refuse, and the stated fields the binary's code does not hold,
+    /// are skipped and listed, and the counts said are of what the overlay
+    /// then holds. What it admits is committed through the edit path
+    /// ([`Self::put_project`]).
     ///
     /// # Arguments
     ///
@@ -604,94 +512,21 @@ impl BorerServer {
         &self,
         Parameters(LoadProjectParams { path, force }): Parameters<LoadProjectParams>,
     ) -> Result<String, ErrorData> {
-        /// Most left-out annotations the answer names before counting the rest.
-        const LEFT_OUT_SHOWN: usize = 8;
-        /// Hex digits of a SHA-256 a message shows.
-        const HASH_SHOWN: usize = 12;
         let program = self.require_loaded()?;
         let pf = borer::project::ProjectFile::load(&path).map_err(err_params)?;
-        let identity = pf.identify(&program);
-        let foreign = matches!(identity, Identity::Other | Identity::OtherPath);
-        let saved_for = borer_engine::text::short_path(&pf.program);
-        let loaded_path = program.path.display().to_string();
-        if foreign && !force.unwrap_or(false) {
-            let short = |hash: &str| hash.chars().take(HASH_SHOWN).collect::<String>();
-            return Err(err_params(match &pf.sha256 {
-                Some(saved) => format!(
-                    "the project was saved for another build (sha-256 {}... at {saved_for}), but {} is sha-256 {}...; nothing was loaded. Its addresses belong to that build: load it with this project, then borer://carry/{} carries the names to this one; or pass force=true to load the project anyway",
-                    short(&borer_engine::text::one_line(saved)),
-                    borer_engine::text::short_path(&loaded_path),
-                    short(&borer::project::program_identity(&program)),
-                    borer_engine::text::short_path(&loaded_path.replace('\\', "/"))
-                ),
-                None => format!(
-                    "{}. Load that binary first, or pass force=true to load the project anyway and save_project to record the hash",
-                    borer::project::other_path_verdict(
-                        &saved_for,
-                        &borer_engine::text::short_path(&loaded_path)
-                    )
-                ),
-            }));
-        }
-        let mut loaded = pf.to_overlay().map_err(err_params)?;
-        let word: u64 = if program.is_64 { 8 } else { 4 };
-        borer_engine::analysis::utypes::laid_at(&loaded.types, word).map_err(|e| {
-            err_params(format!(
-                "{e} with the {word}-byte pointers of {}; nothing was loaded",
-                borer_engine::text::short_path(&loaded_path)
-            ))
+        let analysis = || {
+            if pf.fields.is_empty() {
+                self.analysis_held()
+            } else {
+                self.analysis_or_empty()
+            }
+        };
+        let Admitted { plan, edit, said } = guarded(|| {
+            let overlay = self.overlay_plain();
+            project::admit(&program, analysis, &overlay, &pf, force.unwrap_or(false))
+                .map_err(|e| e.to_string())
         })?;
-        let mut left_out = borer::project::keep_placeable(&mut loaded, &program);
-        let placed = left_out.len();
-        let room = LEFT_OUT_SHOWN.saturating_sub(placed);
-        let skipped = placed.saturating_add(crate::params::keep_settable(
-            &mut loaded,
-            room,
-            &mut left_out,
-        ));
-        let mut unsettled = stated::Unsettled::default();
-        if !loaded.fields.is_empty() {
-            let tabled = Overlay {
-                enum_source: EnumSource::Binary,
-                ..loaded.clone()
-            };
-            self.with_program(|p| {
-                unsettled = stated::settled(p, &self.analysis_or_empty(), &tabled)?;
-                Ok(String::new())
-            })?;
-        }
-        let gone = unsettled.leave_out(&mut loaded);
-        let stated = stated_counts(
-            loaded.prototypes.len(),
-            loaded.vars.values().map(BTreeMap::len).sum(),
-            loaded.fields.values().map(BTreeMap::len).sum(),
-        );
-        let mut said = format!(
-            "loaded {} names + {} comments + {} types + {} applied{stated}\n",
-            loaded.names.len(),
-            loaded.comments.len(),
-            loaded.types.len(),
-            loaded.applied.len()
-        );
-        if skipped > 0 {
-            let shown = left_out.len().min(LEFT_OUT_SHOWN);
-            let _ = writeln!(
-                said,
-                "# skipped {skipped} (showing {shown} of {skipped}): {}",
-                left_out[..shown].join(", ")
-            );
-        }
-        said.push_str(&skipped_classes(&unsettled, gone));
-        if foreign {
-            let _ = writeln!(
-                said,
-                "# forced: the project was saved for {saved_for}, so its names may sit on other code here"
-            );
-        }
-        if matches!(identity, Identity::PathOnly | Identity::OtherPath) {
-            said.push_str("# the project names its binary by path alone (saved before projects recorded its sha-256; matched ignoring ASCII case on Windows), so a rebuild or case twin at that path loads it too; save_project records the hash\n");
-        }
-        self.put_project(&program, loaded)
+        self.put_project(&program, edit, Some(plan))
             .map_err(|e| err_params(e.to_string()))?;
         Ok(said)
     }
