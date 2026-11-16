@@ -773,9 +773,12 @@ def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[St
         Step(
             "app",
             [py, os.path.join("scripts", "run", "app.py")] + (["--check"] if check_only else []),
+            # The engine's library only: the app builds no test, bench or
+            # example of a crate outside its workspace.
             inputs=(
                 "app/",
-                "crates/borer-engine/",
+                "crates/borer-engine/src/",
+                "crates/borer-engine/Cargo.toml",
                 "Cargo.toml",
                 "README.md",
                 "clippy.toml",
