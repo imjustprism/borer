@@ -1191,7 +1191,8 @@ mod tests {
         );
     }
 
-    /// Opens a hex tab of `loaded` and reads the pages of `rows`.
+    /// Opens a hex tab of `loaded` and reads the pages of `rows`, asking again when a
+    /// redraw in between (which asks only for the rows on screen) dropped a page's read.
     fn hex_of(
         workspace: &Entity<Workspace>,
         loaded: &Arc<LoadedBinary>,
@@ -1204,8 +1205,19 @@ mod tests {
         let hex = workspace
             .read_with(cx, |workspace, cx| workspace.active_item_as::<HexItem>(cx))
             .unwrap();
-        hex.update(cx, |hex, cx| hex.want_pages(rows, cx));
-        cx.run_until_parked();
+        let pages = rows.start / super::PAGE_ROWS..=rows.end.saturating_sub(1) / super::PAGE_ROWS;
+        for _ in 0..3 {
+            hex.update(cx, |hex, cx| hex.want_pages(rows.clone(), cx));
+            cx.run_until_parked();
+            let held = hex.read_with(cx, |hex, _| {
+                pages
+                    .clone()
+                    .all(|page| hex.line(page * super::PAGE_ROWS).is_some())
+            });
+            if held {
+                break;
+            }
+        }
         hex
     }
 

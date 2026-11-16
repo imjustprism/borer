@@ -35,8 +35,9 @@ enum ThemeChange {
     FollowSystem,
 }
 
-/// Loads borer's theme, applies the app's settings and the person's settings file, and
-/// registers the theme actions.
+/// Loads borer's theme, applies the app's settings and the person's settings file, starts
+/// reading and watching the person's themes folder ([`crate::user_themes`]), and registers
+/// the theme actions.
 ///
 /// A person's file that is missing is created empty, so it adds nothing and later writes
 /// start from nothing rather than from Zed's template. One that does not read or parse
@@ -61,6 +62,7 @@ pub fn apply(cx: &mut App) -> anyhow::Result<()> {
         Err(err) => Some(format!("settings file not applied: {err:#}").into()),
     };
     cx.set_global(SettingsNotice(notice));
+    crate::user_themes::load_and_watch(cx);
     cx.on_action(|_: &ToggleTheme, cx| change_theme(ThemeChange::Flip, cx));
     cx.on_action(|_: &FollowSystemTheme, cx| change_theme(ThemeChange::FollowSystem, cx));
     Ok(())
@@ -114,6 +116,21 @@ fn load_person_settings(cx: &mut App) -> anyhow::Result<()> {
 ///
 /// Returns an error naming the path and why it is refused.
 fn check_settings_path(path: &Path) -> anyhow::Result<()> {
+    check_path(path, MAX_SETTINGS_BYTES)
+}
+
+/// Refuses a path on disk that, following links, is there but is not a regular file or
+/// holds over `max` bytes; a path where nothing is passes.
+///
+/// # Arguments
+///
+/// * `path` - The file's path.
+/// * `max` - Most bytes the file may hold.
+///
+/// # Errors
+///
+/// Returns an error naming the path and why it is refused.
+pub(crate) fn check_path(path: &Path, max: u64) -> anyhow::Result<()> {
     let meta = checked_metadata(path).map_err(|why| anyhow::anyhow!("{why}"))?;
     let Some(meta) = meta else {
         return Ok(());
@@ -121,9 +138,9 @@ fn check_settings_path(path: &Path) -> anyhow::Result<()> {
     if !meta.file_type().is_file() {
         anyhow::bail!("{} is not a regular file", path.display());
     }
-    if meta.len() > MAX_SETTINGS_BYTES {
+    if meta.len() > max {
         anyhow::bail!(
-            "{} holds {} bytes, over the {MAX_SETTINGS_BYTES} the app reads",
+            "{} holds {} bytes, over the {max} the app reads",
             path.display(),
             meta.len()
         );

@@ -11,6 +11,7 @@
     reason = "assertions are the point of a test"
 )]
 
+use std::path::Path;
 use std::sync::Arc;
 
 use borer_app::actions::{FollowSystemTheme, ToggleTheme};
@@ -23,19 +24,23 @@ use borer_app::shell::Shell;
 use borer_app::theme_contract::{
     Failure, GRADES, TEXT_FLOOR, check, contrast, grade_rules, syntax_color, text_floors,
 };
+use borer_app::user_themes::{MAX_THEME_BYTES, MAX_THEME_ENTRIES, notice_id};
 use borer_engine::program::checked_metadata;
 use fs::Fs as _;
 use gpui::{
-    AppContext as _, BorrowAppContext as _, Hsla, Refineable as _, Rgba, TestAppContext, px,
+    AppContext as _, BorrowAppContext as _, Entity, Hsla, Refineable as _, Rgba, TestAppContext,
+    VisualTestContext, px,
 };
 use project::DisableAiSettings;
 use settings::{BufferLineHeight, Settings as _, SettingsStore, ThemeAppearanceMode, ThemeColor};
-use theme::{ActiveTheme as _, AppearanceContent, Theme, ThemeColors, ThemeColorsRefinement};
+use theme::{
+    ActiveTheme as _, AppearanceContent, Theme, ThemeColors, ThemeColorsRefinement, ThemeRegistry,
+};
 use theme_settings::{
     ThemeContent, ThemeSettings, deserialize_user_theme, refine_theme, status_colors_refinement,
     theme_colors_refinement,
 };
-use workspace::AppState;
+use workspace::{AppState, Workspace};
 
 mod support;
 
@@ -507,4 +512,193 @@ fn code_rows_follow_the_buffer_font(cx: &mut TestAppContext) {
         });
         assert_eq!(cx.update(|cx| code_row_height(cx)), rows, "{height}");
     }
+}
+
+/// Returns the text of a theme family file named `family`, holding one theme `name` of
+/// `appearance` whose `style` object is `style`.
+fn family(family: &str, name: &str, appearance: &str, style: &str) -> Vec<u8> {
+    let theme = format!(r#"{{"name": "{name}", "appearance": "{appearance}", "style": {style}}}"#);
+    format!(r#"{{"name": "{family}", "author": "a person", "themes": [{theme}]}}"#).into_bytes()
+}
+
+/// Returns whether a theme named `name` is registered.
+fn registered(name: &str, cx: &TestAppContext) -> bool {
+    cx.update(|cx| ThemeRegistry::global(cx).get(name).is_ok())
+}
+
+/// Starts Zed's test app state with each of `files` in its file system, its bytes or a
+/// folder, then configures it as the app does and lets the background reads land.
+async fn boot_with_files(
+    files: &[(&Path, Option<Vec<u8>>)],
+    cx: &mut TestAppContext,
+) -> Arc<AppState> {
+    let app_state = cx.update(start);
+    let fake = app_state.fs.as_fake();
+    fake.create_dir(paths::themes_dir())
+        .await
+        .expect("the themes folder is made");
+    for (path, bytes) in files {
+        match bytes {
+            Some(bytes) => fake.insert_file(path, bytes.clone()).await,
+            None => fake.create_dir(path).await.expect("the folder is made"),
+        }
+    }
+    cx.update(configure).expect("the app configures Zed");
+    cx.run_until_parked();
+    app_state
+}
+
+/// Opens a window over the app's workspace and returns that workspace and the window's
+/// context.
+fn open_window<'a>(
+    app_state: &Arc<AppState>,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Workspace>, &'a mut VisualTestContext) {
+    let (root, cx) = cx.add_window_view(|window, cx| {
+        Shell::new(new_workspace(app_state, None, window, cx), window, cx)
+    });
+    (root.read_with(cx, |root, _| root.workspace().clone()), cx)
+}
+
+/// Returns whether `workspace` shows the notification of the theme file or folder `path`.
+fn noticed(workspace: &Entity<Workspace>, path: &Path, cx: &mut VisualTestContext) -> bool {
+    workspace.read_with(cx, |workspace, _| {
+        workspace.has_notification(&notice_id(path))
+    })
+}
+
+/// A theme file in the themes folder at start is registered and shown when the settings
+/// name it; one written while the app runs is registered without a restart, and an edit
+/// of the shown one repaints it.
+#[gpui::test]
+async fn the_themes_folder_loads_at_start_and_on_change(cx: &mut TestAppContext) {
+    let mine = paths::themes_dir().join("mine.json");
+    let settings = r#"{"theme": {"mode": "dark", "dark": "mine dark", "light": "borer light"}}"#;
+    let files = [
+        (
+            mine.as_path(),
+            Some(family("mine", "mine dark", "dark", "{}")),
+        ),
+        (paths::settings_file().as_path(), Some(settings.into())),
+    ];
+    let app_state = boot_with_files(&files, cx).await;
+    assert_eq!(shown(cx), "mine dark");
+    let fake = app_state.fs.as_fake();
+    let later = paths::themes_dir().join("later.json");
+    fake.insert_file(&later, family("later", "later light", "light", "{}"))
+        .await;
+    cx.run_until_parked();
+    assert!(registered("later light", cx));
+    let edited = family(
+        "mine",
+        "mine dark",
+        "dark",
+        r##"{"background": "#102030"}"##,
+    );
+    fake.insert_file(&mine, edited).await;
+    cx.run_until_parked();
+    let background = cx.update(|cx| cx.theme().colors().background);
+    assert!(is(background, 0x102030), "{background:?}");
+}
+
+/// A theme file that does not parse, one over the size cap and a folder named like a
+/// theme are each a notification naming the path and why; startup goes on, the other
+/// themes load, and fixing the file takes its notification back.
+#[gpui::test]
+async fn a_bad_theme_file_is_a_notification_not_a_stop(cx: &mut TestAppContext) {
+    let dir = paths::themes_dir();
+    let (bad, huge, good) = (
+        dir.join("bad.json"),
+        dir.join("huge.json"),
+        dir.join("good.json"),
+    );
+    let folder = dir.join("folder.json");
+    let len = usize::try_from(MAX_THEME_BYTES).expect("fits") + 1;
+    let files = [
+        (bad.as_path(), Some(b"{".to_vec())),
+        (huge.as_path(), Some(vec![b' '; len])),
+        (
+            good.as_path(),
+            Some(family("good", "good dark", "dark", "{}")),
+        ),
+        (folder.as_path(), None),
+    ];
+    let app_state = boot_with_files(&files, cx).await;
+    assert_eq!(shown(cx), "borer dark");
+    assert!(registered("good dark", cx));
+    let (workspace, cx) = open_window(&app_state, cx);
+    cx.run_until_parked();
+    assert!(noticed(&workspace, &bad, cx));
+    assert!(noticed(&workspace, &huge, cx));
+    assert!(noticed(&workspace, &folder, cx));
+    assert!(!noticed(&workspace, &good, cx));
+    let fixed = family("bad", "bad dark", "dark", "{}");
+    app_state.fs.as_fake().insert_file(&bad, fixed).await;
+    cx.run_until_parked();
+    assert!(!noticed(&workspace, &bad, cx));
+    assert!(cx.update(|_, cx| ThemeRegistry::global(cx).get("bad dark").is_ok()));
+}
+
+/// A themes folder holding more entries than the app reads is a notification naming the
+/// folder, and none of its themes is read.
+#[gpui::test]
+async fn a_crowded_themes_folder_reads_no_theme(cx: &mut TestAppContext) {
+    let dir = paths::themes_dir();
+    let names: Vec<_> = (0..=MAX_THEME_ENTRIES)
+        .map(|i| dir.join(format!("t{i}.json")))
+        .collect();
+    let files: Vec<_> = names
+        .iter()
+        .map(|path| {
+            (
+                path.as_path(),
+                Some(family("t", "crowded dark", "dark", "{}")),
+            )
+        })
+        .collect();
+    let app_state = boot_with_files(&files, cx).await;
+    assert!(!registered("crowded dark", cx));
+    let (workspace, cx) = open_window(&app_state, cx);
+    cx.run_until_parked();
+    assert!(noticed(&workspace, dir, cx));
+}
+
+/// A theme file naming one of the app's own themes, or a theme an earlier file holds, is
+/// refused with a notification and the held theme stays; deleting a theme file drops its
+/// themes.
+#[gpui::test]
+async fn a_theme_name_has_one_file_and_leaves_with_it(cx: &mut TestAppContext) {
+    let dir = paths::themes_dir();
+    let (first, twin, own) = (dir.join("a.json"), dir.join("b.json"), dir.join("c.json"));
+    let style = r##"{"background": "#102030"}"##;
+    let files = [
+        (
+            first.as_path(),
+            Some(family("a", "mine dark", "dark", "{}")),
+        ),
+        (
+            twin.as_path(),
+            Some(family("b", "mine dark", "dark", style)),
+        ),
+        (
+            own.as_path(),
+            Some(family("c", "borer dark", "dark", style)),
+        ),
+    ];
+    let app_state = boot_with_files(&files, cx).await;
+    assert!(registered("mine dark", cx));
+    assert!(is(cx.update(|cx| cx.theme().colors().background), 0x0B0C0E));
+    let mine = cx.update(|cx| ThemeRegistry::global(cx).get("mine dark").expect("there"));
+    assert!(!is(mine.colors().background, 0x102030));
+    let (workspace, cx) = open_window(&app_state, cx);
+    cx.run_until_parked();
+    assert!(!noticed(&workspace, &first, cx));
+    assert!(noticed(&workspace, &twin, cx));
+    assert!(noticed(&workspace, &own, cx));
+    (app_state.fs)
+        .remove_file(&first, fs::RemoveOptions::default())
+        .await
+        .expect("removed");
+    cx.run_until_parked();
+    assert!(cx.update(|_, cx| ThemeRegistry::global(cx).get("mine dark").is_err()));
 }
