@@ -105,5 +105,5 @@ fn check_in<L: Replay>(
         ANSWER_BLOCKS,
         Sampling::UntilProved,
     );
-    (r.functions == 1).then(|| TextCheck::of(&r))
+    (r.functions == 1).then(|| TextCheck::of(r))
 }

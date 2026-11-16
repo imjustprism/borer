@@ -372,7 +372,7 @@ impl TextCheck {
     /// # Arguments
     ///
     /// * `r` - One function's replay.
-    pub(super) fn of(r: &Replayed) -> Self {
+    pub(super) fn of(r: Replayed) -> Self {
         let mut disagree: Vec<u64> = r
             .wrong()
             .iter()
@@ -382,7 +382,7 @@ impl TextCheck {
         disagree.sort_unstable();
         disagree.dedup();
         Self {
-            blocks: r.records.clone(),
+            blocks: r.records,
             disagree,
         }
     }

@@ -1439,7 +1439,7 @@ fn blocks_past_the_budget_are_counted_unchecked() {
         Sampling::UntilProved,
     );
     assert_eq!(
-        TextCheck::of(&r).header(),
+        TextCheck::of(r).header(),
         "// checked vs binary: statements as emitted, 1/3 blocks: 1 proved vs lift, 2 unknown; unchecked: 2 over budget, C spelling, later text passes"
     );
 }
