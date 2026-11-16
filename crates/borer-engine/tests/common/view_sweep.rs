@@ -5,8 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use borer_engine::analysis::decompile::literal_at;
 use borer_engine::analysis::decompile::{declarations_end, virtual_callees};
 use borer_engine::analysis::utypes::{UserType, width_of};
-use borer_engine::analysis::{Analysis, Overlay, name_of, sdk};
-use borer_engine::program::{BinaryFormat, Program, SymbolKind};
+use borer_engine::analysis::{Analysis, BasicBlock, Overlay, name_of, sdk};
+use borer_engine::disasm::disassemble_program;
+use borer_engine::program::{BinaryFormat, Feature, Program, SymbolKind};
 use borer_engine::view::{Kind, Ref, View};
 
 /// Spells a function's or an import's name as a text does: without its module
@@ -203,6 +204,26 @@ fn line_scope(
     })
 }
 
+/// Tells whether an instruction of block `b` starts at `va`, decoding the
+/// block.
+///
+/// # Arguments
+///
+/// * `p` - The program.
+/// * `b` - The block.
+/// * `va` - The address.
+fn starts_instruction(p: &Program, b: &BasicBlock, va: u64) -> bool {
+    let len = usize::try_from(b.end.saturating_sub(b.start)).unwrap_or(0);
+    p.isa_for(Feature::Disasm)
+        .ok()
+        .zip(p.read_va_upto(b.start, len))
+        .is_some_and(|(isa, code)| {
+            disassemble_program(p, code, b.start, isa, len)
+                .iter()
+                .any(|l| l.va == va)
+        })
+}
+
 /// Checks whether one linked token `(tok, r)` on line `i` is borne out by
 /// facts outside the view.
 ///
@@ -273,7 +294,11 @@ fn link_ok(
                 .any(|n| spelled(&borer_engine::search::demangled_name(n)) == spelling)
                 && imports().any(|y| names.contains(y.name.as_str()) && held(y.addr))
         }
-        Ref::Address(va) => f.is_some_and(|f| f.blocks.iter().any(|b| b.start == *va)),
+        Ref::Address(va) => f.is_some_and(|f| {
+            f.blocks.iter().any(|b| {
+                b.start == *va || (tok == format!("{va:#x}") && starts_instruction(p, b, *va))
+            })
+        }),
         Ref::Global(va) => {
             let mapped = p.section_at(*va).is_some()
                 || p.zero_fill_at(*va).is_some()

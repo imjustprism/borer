@@ -1,13 +1,13 @@
-//! What a decompile view answers of its lines: the token under a byte and
-//! the uses of a referent.
+//! What a decompile view answers of its lines: the token under a byte, the
+//! uses of a referent, and the instructions its checked header line names.
 
 #![expect(
     clippy::missing_panics_doc,
     reason = "assertions are the point of a test"
 )]
 
-use crate::view::{TEXT, filling, tokens};
-use borer_engine::analysis::decompile::view::view;
+use crate::view::{TEXT, exported_four, filling, tokens};
+use borer_engine::analysis::decompile::view::{view, view_of};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::view::{Kind, Ref};
 
@@ -73,4 +73,53 @@ fn uses_of_a_local_are_where_it_is_spelled() {
     };
     assert_eq!(v.uses(&r), want, "{text}");
     assert_eq!(v.uses(&Ref::Function(TEXT + 1)), Vec::new());
+}
+
+/// The checked line of a header links the function's instructions it names.
+///
+/// Mid-block ones link too; an address inside an instruction or of another
+/// function's code stays comment, as does every address of the other
+/// header lines, and the view spells its text.
+///
+/// The image is [`exported_four`]'s: `fa` runs `sub` at `TEXT`, `call` at
+/// `+4`, `add` at `+9` and `ret` at `+0xd`; `fb` starts at `+0x40`.
+#[test]
+fn a_checked_header_links_only_the_functions_own_instructions() {
+    let p = exported_four();
+    let a = Analysis::compute(&p);
+    let text = "// fa @ 0x140001000: 4 instructions\n\
+        // checked vs binary: statements as emitted, 1/1 blocks: 0 proved vs lift; disagree at 0x140001004, 0x140001009, 0x140001002, 0x140001040, 0x14000100d (+1 more); unchecked: C spelling\n\
+        // next: borer://solve/0x140001004,a1 (compares against 0x140001009: solve tries it as a1)\n\
+        uint64_t fa(void)\n\
+        {\n    return fb();\n}\n";
+    let v = view_of(&p, &a, &Overlay::default(), TEXT, text).expect("a view");
+    assert_eq!(v.spell(), text);
+    let line = |i: usize| -> Vec<(String, Kind, Option<Ref>)> {
+        let l = v.line(i).expect("a line");
+        v.tokens(i)
+            .map(|(span, kind, link)| (l[span].to_owned(), kind, link.cloned()))
+            .collect()
+    };
+    let linked: Vec<_> = line(1)
+        .into_iter()
+        .filter(|(_, kind, _)| *kind != Kind::Comment)
+        .collect();
+    let at = |off: u64| {
+        (
+            format!("{:#x}", TEXT + off),
+            Kind::Address,
+            Some(Ref::Address(TEXT + off)),
+        )
+    };
+    assert_eq!(linked, vec![at(4), at(9), at(0xd)], "{text}");
+    assert!(
+        line(1)
+            .iter()
+            .all(|(_, kind, link)| *kind == Kind::Address || link.is_none())
+    );
+    for i in [0, 2] {
+        assert_eq!(line(i).len(), 1, "line {i}: {:?}", line(i));
+        assert_eq!(line(i)[0].1, Kind::Comment);
+    }
+    assert_eq!(v.uses(&Ref::Address(TEXT + 9)), vec![(1, 100..111)]);
 }

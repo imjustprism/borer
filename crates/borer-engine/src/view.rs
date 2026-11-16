@@ -64,7 +64,8 @@ pub enum Kind {
 /// borne out by a fact of the engine.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Ref {
-    /// A code address: a label's block, a branch's target.
+    /// A code address: a label's block, a branch's target, an instruction
+    /// a listing line shows or a header names.
     Address(u64),
     /// A function, by its entry.
     Function(u64),

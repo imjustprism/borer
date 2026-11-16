@@ -8,7 +8,9 @@
 //! scopes and template arguments ([`ctext::name_end`]).
 //!
 //! Each line has a role ([`Role`]): the header comments, whose
-//! `// signature: ` line is C after its prefix; the unit's items
+//! `// signature: ` line is C after its prefix and whose `// checked vs
+//! binary: ` line links each address it names that starts an instruction
+//! of the function's blocks ([`Reader::put_checked`]); the unit's items
 //! (prototypes, function-like `#define`s, one-line `static inline` bodies,
 //! struct definitions, tables, typedefs, other `#define`s); the
 //! declarations of the locals; the body. A name resolves in its line's
@@ -55,11 +57,16 @@ use super::{
 use crate::analysis::attributes::global_addr;
 use crate::analysis::{Analysis, Function, Overlay, name_of, reads};
 use crate::cancel::Cancel;
-use crate::program::{Program, SymbolKind};
+use crate::disasm;
+use crate::program::{Feature, Program, SymbolKind};
 use crate::view::{Builder, Kind, Ref, Unlinked, View};
 
 /// The prefix of the signature line, a comment before the C it holds.
 const SIGNATURE: &str = "// signature: ";
+
+/// The prefix of the header line that says what of the text was checked
+/// against the binary, naming the instructions it found disagreeing.
+const CHECKED: &str = "// checked vs binary: ";
 
 /// One piece of a line and the bytes it spans ([`split`]).
 type Spanned = (Piece, Range<usize>);
@@ -177,6 +184,36 @@ impl<'a> Facts<'a> {
             .blocks
             .binary_search_by_key(&va, |b| b.start)
             .is_ok()
+    }
+
+    /// Tells whether an instruction starts at `va` in the last of the
+    /// function's blocks that starts at or before it, decoding that block.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The loaded image, for the block's bytes.
+    /// * `va` - The address.
+    fn runs_at(&self, program: &Program, va: u64) -> bool {
+        let blocks = &self.function.blocks;
+        let Some(b) = blocks
+            .partition_point(|b| b.start <= va)
+            .checked_sub(1)
+            .and_then(|k| blocks.get(k))
+            .filter(|b| va < b.end)
+        else {
+            return false;
+        };
+        let len = usize::try_from(b.end.saturating_sub(b.start)).unwrap_or(0);
+        va == b.start
+            || program
+                .isa_for(Feature::Disasm)
+                .ok()
+                .zip(program.read_va_upto(b.start, len))
+                .is_some_and(|(isa, code)| {
+                    disasm::disassemble_program(program, code, b.start, isa, len)
+                        .iter()
+                        .any(|l| l.va == va)
+                })
     }
 
     /// Resolves a string-literal token against this function's reference sites.
@@ -605,6 +642,26 @@ fn split_into(line: &str, from: usize, out: &mut Vec<Spanned>) {
         }
         out.push((Piece::Token(Lex::Name), span.start..end));
     }
+}
+
+/// Returns the hexadecimal numbers a line spells as words of their own,
+/// `0x` after a space and up to a byte no name holds, with their bytes.
+///
+/// # Arguments
+///
+/// * `line` - The line.
+fn hex_words(line: &str) -> impl Iterator<Item = (Range<usize>, u64)> + '_ {
+    line.match_indices(" 0x").filter_map(|(at, _)| {
+        let from = at.checked_add(3)?;
+        let rest = line.get(from..)?;
+        let digits = rest.bytes().take_while(u8::is_ascii_hexdigit).count();
+        let end = from.checked_add(digits)?;
+        let joined = line
+            .get(end..)?
+            .starts_with(|c: char| c.is_alphanumeric() || c == '_');
+        let va = u64::from_str_radix(line.get(from..end)?, 16).ok()?;
+        (!joined).then_some((at.checked_add(1)?..end, va))
+    })
 }
 
 /// Splits a line into the pieces a view reads from byte `from` on
@@ -1243,6 +1300,10 @@ impl<'a> Reader<'a> {
         pieces: &mut Vec<Spanned>,
     ) {
         let role = self.role(i, line);
+        if role == Role::Header && line.starts_with(CHECKED) {
+            self.put_checked(b, line);
+            return;
+        }
         if role == Role::Signature {
             b.put(SIGNATURE, Kind::Comment, None);
             split_signature(line, &self.own, pieces);
@@ -1306,6 +1367,41 @@ impl<'a> Reader<'a> {
                 b.define();
             }
         }
+    }
+
+    /// Puts the `// checked vs binary: ` header line into the view as one
+    /// comment, but for each address it names where an instruction of the
+    /// function's blocks starts ([`Facts::runs_at`]), which is a
+    /// [`Kind::Address`] token linked to it.
+    ///
+    /// The other header lines stay whole comments: they spell constants
+    /// (`compares against 0x1337abcd`) an address can equal, and
+    /// resources whose URIs stay text.
+    ///
+    /// # Arguments
+    ///
+    /// * `b` - The view being built.
+    /// * `line` - The line.
+    fn put_checked(&self, b: &mut Builder, line: &str) {
+        let mut from = 0;
+        for (at, va) in hex_words(line) {
+            if !self
+                .facts
+                .as_ref()
+                .is_some_and(|f| f.runs_at(self.program, va))
+            {
+                continue;
+            }
+            let (before, word) = (line.get(from..at.start), line.get(at.clone()));
+            b.put(before.unwrap_or_default(), Kind::Comment, None);
+            b.put(
+                word.unwrap_or_default(),
+                Kind::Address,
+                Some(Ref::Address(va)),
+            );
+            from = at.end;
+        }
+        b.put(line.get(from..).unwrap_or_default(), Kind::Comment, None);
     }
 
     /// Returns the function a `static inline` line defines: the one thing
