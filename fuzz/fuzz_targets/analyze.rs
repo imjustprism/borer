@@ -1,17 +1,19 @@
 //! Loads arbitrary bytes, lists the code at its entry, analyzes what loads,
-//! decompiles its first functions and reads each text as a view, and for a
-//! .NET assembly lists its first IL methods and its obfuscator markers: the
-//! path every agent request takes after a load. The first functions' call
-//! graphs and call tree levels are walked both ways too, and the callers
-//! of the first imports, which have no body.
+//! decompiles its first functions, reads each text as a view and proposes a
+//! struct through its first argument, lists the types and opens the first
+//! page of them, and for a .NET assembly lists its first IL methods and its
+//! obfuscator markers: the path every agent request takes after a load. The
+//! first functions' call graphs and call tree levels are walked both ways
+//! too, and the callers of the first imports, which have no body.
 
 #![no_main]
 
 use borer_engine::analysis::decompile::decompile;
 use borer_engine::analysis::decompile::view::view_of;
 use borer_engine::analysis::render::{
-    Bytes, Level, Walk, call_children, callgraph, disasm_function_with, disasm_view,
+    Bytes, Level, Walk, call_children, callgraph, disasm_function_with, disasm_view, propose,
 };
+use borer_engine::analysis::utypes::{type_detail, type_rows};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::clr::managed::{self, Managed};
 use borer_engine::clr::markers::markers_tsv;
@@ -23,6 +25,8 @@ use libfuzzer_sys::fuzz_target;
 const DECOMPILED: usize = 4;
 /// Instructions listed at the entry, and bytes read for them.
 const LISTED: usize = 64;
+/// Types listed and opened per input.
+const TYPES: usize = 200;
 
 fuzz_target!(|data: &[u8]| {
     let Ok(program) = Program::from_bytes_with("fuzz".into(), data.to_vec(), false, None) else {
@@ -58,6 +62,12 @@ fuzz_target!(|data: &[u8]| {
         if let Some(text) = decompile(&program, &analysis, &overlay, f.entry) {
             _ = view_of(&program, &analysis, &overlay, f.entry, &text);
         }
+        _ = propose(&program, &analysis, &overlay, &format!("{:#x}", f.entry));
+    }
+    for row in type_rows(&program, &analysis, &overlay, None, 0, TYPES).rows {
+        _ = type_detail(
+            &program, &analysis, &overlay, &row.name, row.source, row.kind,
+        );
     }
     for s in program
         .symbols

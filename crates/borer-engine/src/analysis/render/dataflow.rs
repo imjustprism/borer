@@ -479,7 +479,7 @@ pub struct PointerFields {
 
 /// Reads the fields a function's accesses through one pointer show, as
 /// [`layout_tsv`] proposes them, with the parameter the pointer arrives
-/// in.
+/// in: the widest width of each offset of [`propose`].
 ///
 /// # Arguments
 ///
@@ -495,16 +495,93 @@ pub struct PointerFields {
 ///
 /// # Errors
 ///
-/// When the spec is refused or the function's code does not read.
+/// As [`propose`].
 pub fn layout_fields(
     p: &Program,
     a: &Analysis,
     o: &Overlay,
     spec: &str,
 ) -> Result<PointerFields, String> {
+    let Proposal {
+        entry,
+        register,
+        param,
+        fields,
+    } = propose(p, a, o, spec)?;
+    Ok(PointerFields {
+        entry,
+        register,
+        param,
+        widths: fields
+            .iter()
+            .filter_map(|f| Some((f.offset, *f.widths.last()?)))
+            .collect(),
+        addressed: fields
+            .iter()
+            .filter(|f| f.widths.is_empty())
+            .map(|f| f.offset)
+            .collect(),
+    })
+}
+
+/// Most sites one proposed field lists.
+pub const PROPOSAL_SITES_MAX: usize = 32;
+
+/// One offset a function touches through a pointer, with every width and
+/// instruction that shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Proposed {
+    /// The offset from the pointer, negative below it.
+    pub offset: i64,
+    /// Every distinct width it is accessed at, in bytes, ascending; more
+    /// than one is a conflict, none an offset only handed to calls.
+    pub widths: Vec<u32>,
+    /// The instructions of the function that access it, ascending, the
+    /// first [`PROPOSAL_SITES_MAX`] of them.
+    pub sites: Vec<u64>,
+    /// How many instructions access it, `sites` and the ones past the cap.
+    pub seen: usize,
+    /// Its address is handed to a call.
+    pub passed: bool,
+}
+
+/// The struct a function's accesses through one pointer propose, each
+/// field with its evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Proposal {
+    /// Entry of the function the pointer is followed through.
+    pub entry: u64,
+    /// The register followed, lowercase as the spec spelled it.
+    pub register: String,
+    /// The parameter position the register holds, when the spec starts at
+    /// the function's entry and the register carries an argument there.
+    pub param: Option<usize>,
+    /// The offsets accessed or handed to calls, ascending.
+    pub fields: Vec<Proposed>,
+}
+
+/// Proposes a struct from a function's accesses through one pointer, as
+/// [`layout_tsv`] follows it, keeping every width and site per offset.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - User names and types.
+/// * `spec` - `<address>` or `<address>,<register>`, as [`layout_tsv`]
+///   reads it.
+///
+/// # Returns
+///
+/// The proposal and where the pointer comes from.
+///
+/// # Errors
+///
+/// When the spec is refused or the function's code does not read.
+pub fn propose(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<Proposal, String> {
     let Accesses {
         spec: parsed,
-        fields,
+        mut fields,
         taken,
     } = accesses(p, a, o, spec)?;
     let param = (parsed.start == parsed.entry)
@@ -516,18 +593,26 @@ pub fn layout_fields(
                 .position(|r| r.full_register() == parsed.seed.full_register())
         })
         .flatten();
-    Ok(PointerFields {
+    let offsets: BTreeSet<i64> = fields.keys().chain(taken.keys()).copied().collect();
+    Ok(Proposal {
         entry: parsed.entry,
         register: parsed.wanted,
         param,
-        widths: fields
-            .iter()
-            .filter_map(|(at, f)| Some((*at, f.widths.iter().copied().max()?)))
-            .collect(),
-        addressed: taken
-            .keys()
-            .filter(|at| !fields.contains_key(at))
-            .copied()
+        fields: offsets
+            .into_iter()
+            .map(|offset| {
+                let Field {
+                    mut widths, sites, ..
+                } = fields.remove(&offset).unwrap_or_default();
+                widths.sort_unstable();
+                Proposed {
+                    offset,
+                    widths,
+                    seen: sites.len(),
+                    sites: sites.into_iter().take(PROPOSAL_SITES_MAX).collect(),
+                    passed: taken.contains_key(&offset),
+                }
+            })
             .collect(),
     })
 }
@@ -1461,7 +1546,10 @@ pub(super) use crate::text::parse_hex_bytes;
 
 #[cfg(test)]
 mod tests {
-    use super::{ExperimentSpec, argument_registers, layout_tsv, parse_count, taint_tsv, why_tsv};
+    use super::{
+        ExperimentSpec, Proposed, argument_registers, layout_fields, layout_tsv, parse_count,
+        propose, taint_tsv, why_tsv,
+    };
     use crate::analysis::{Analysis, Overlay};
     use crate::program::{Arch, Program, Section};
 
@@ -1513,6 +1601,88 @@ mod tests {
              -0x8     4     written       1x\n\
              0x8      4     read          1x\n"
         );
+    }
+
+    /// A proposal keeps every width an offset is accessed at and every
+    /// instruction that accesses it.
+    ///
+    /// The layout's fields are its widest widths: `[rcx+0x10]` read four and
+    /// eight bytes wide is one field of two widths seen at both loads,
+    /// `[rcx+0x18]` one store, and `rcx` handed to a call an offset with no
+    /// width.
+    ///
+    /// # Panics
+    ///
+    /// When a width, a site or the fold into the layout is off.
+    #[test]
+    fn a_proposal_keeps_every_width_and_site() {
+        let p = Program::raw_x64(&[
+            0x8b, 0x41, 0x10, // ASM: mov eax,[rcx+0x10]
+            0x48, 0x8b, 0x51, 0x10, // ASM: mov rdx,[rcx+0x10]
+            0x89, 0x41, 0x18, // ASM: mov [rcx+0x18],eax
+            0xe8, 0x01, 0x00, 0x00, 0x00, // ASM: call 0x1010
+            0xc3, // ASM: ret
+            0xc3, // ASM: ret
+        ]);
+        let a = Analysis::compute(&p);
+        let o = Overlay::default();
+        let proposal = propose(&p, &a, &o, "0x1000").expect("a proposal");
+        let field = |offset, widths: &[u32], sites: &[u64], passed| Proposed {
+            offset,
+            widths: widths.to_vec(),
+            sites: sites.to_vec(),
+            seen: sites.len(),
+            passed,
+        };
+        assert_eq!(
+            proposal.fields,
+            [
+                field(0, &[], &[], true),
+                field(0x10, &[4, 8], &[0x1000, 0x1003], false),
+                field(0x18, &[4], &[0x1007], false),
+            ]
+        );
+        assert_eq!(
+            (proposal.entry, proposal.register.as_str()),
+            (0x1000, "rcx")
+        );
+        let layout = layout_fields(&p, &a, &o, "0x1000").expect("a layout");
+        assert_eq!(
+            layout.widths.into_iter().collect::<Vec<_>>(),
+            [(0x10, 8), (0x18, 4)]
+        );
+        assert_eq!(layout.addressed, [0]);
+        assert_eq!(layout.param, proposal.param);
+    }
+
+    /// An offset both read and handed to a call is a field with its width
+    /// that is passed, and the layout lists it as a field, not as an
+    /// offset only handed on.
+    ///
+    /// # Panics
+    ///
+    /// When the offset is left out, loses its width or reads as addressed
+    /// only.
+    #[test]
+    fn an_offset_read_and_passed_is_one_field() {
+        let p = Program::raw_x64(&[
+            0x48, 0x8d, 0x51, 0x10, // ASM: lea rdx,[rcx+0x10]
+            0x8b, 0x41, 0x10, // ASM: mov eax,[rcx+0x10]
+            0x48, 0x89, 0xd1, // ASM: mov rcx,rdx
+            0xe8, 0x01, 0x00, 0x00, 0x00, // ASM: call 0x1010
+            0xc3, // ASM: ret
+            0xc3, // ASM: ret
+        ]);
+        let a = Analysis::compute(&p);
+        let o = Overlay::default();
+        let proposal = propose(&p, &a, &o, "0x1000").expect("a proposal");
+        let at = |offset| proposal.fields.iter().find(|f| f.offset == offset);
+        let read = at(0x10).expect("0x10 is a field");
+        assert_eq!((read.widths.as_slice(), read.passed), (&[4][..], true));
+        assert_eq!(read.sites, [0x1004]);
+        let layout = layout_fields(&p, &a, &o, "0x1000").expect("a layout");
+        assert_eq!(layout.widths.get(&0x10), Some(&4));
+        assert!(!layout.addressed.contains(&0x10), "{:?}", layout.addressed);
     }
 
     /// A 32-bit call is direct and takes only `ecx`.
