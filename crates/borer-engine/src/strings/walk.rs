@@ -353,6 +353,12 @@ impl Needle {
     pub fn new(text: &str) -> Self {
         Self(text.to_lowercase())
     }
+
+    /// Returns the lowered text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// Returns whether one row passes a filter, the span's bytes tested where

@@ -24,6 +24,7 @@ pub mod edit;
 pub mod eh;
 pub mod encode;
 pub mod fieldrefs;
+pub mod find;
 pub mod functions;
 pub(crate) mod guards;
 pub mod libnames;
