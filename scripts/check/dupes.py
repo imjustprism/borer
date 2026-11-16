@@ -3,6 +3,10 @@
 
     python scripts/check/dupes.py           fail when the count is not the recorded one
     python scripts/check/dupes.py --record  lower the recorded count to today's
+    python scripts/check/dupes.py --selftest  only check the tokenizer against jscpd's cases
+
+Every run first checks the tokenizer against `dupes_cases.json`: Rust texts
+with the tokens jscpd 4.0.5 gave for them.
 
 The count is the duplicated lines jscpd 4.0.5 reports over every tracked file
 that `.jscpd.json`'s `pattern` names, with that file's token and line floors,
@@ -43,6 +47,9 @@ from harness.root import ROOT  # noqa: E402
 
 BASELINE = Path(__file__).with_name("dupes.tsv")
 """The duplicated lines recorded, which the count may not exceed."""
+
+CASES = Path(__file__).with_name("dupes_cases.json")
+"""Rust texts with the tokens jscpd 4.0.5 gave for each, which `selftest` checks the port against."""
 
 HEAD = "# duplicated lines jscpd finds in the tracked Rust: may shrink, never grow"
 """The baseline's first line."""
@@ -366,7 +373,37 @@ def clones(ids: bytes, starts: list[int], ends: list[int], seen: set[bytes], flo
         yield last - first
 
 
+def selftest() -> list[str]:
+    """Returns the cases in `CASES` whose tokens differ from jscpd's.
+
+    Each case is a Rust text with the `(type, text, start line, end line)`
+    tokens jscpd 4.0.5 gave for it, so the port is pinned without node.
+    """
+    cases = json.loads(CASES.read_text(encoding="utf-8"))
+    wrong = []
+    for name, case in cases.items():
+        starts, ends, keys = tokens(case["text"])
+        got = [
+            [
+                *(
+                    part.encode("utf-16-le", "surrogatepass").decode("utf-16-le")
+                    for part in k.split("\0", 1)
+                ),
+                s,
+                e,
+            ]
+            for k, s, e in zip(keys, starts, ends, strict=True)
+        ]
+        if got != case["tokens"]:
+            wrong.append(name)
+    return wrong
+
+
 def main(argv: list[str]) -> int:
+    if wrong := selftest():
+        sys.exit("the tokenizer no longer matches jscpd on " + ", ".join(wrong))
+    if "--selftest" in argv:
+        return 0
     total = scan()
     print(f"{total['sources']} files, {total['clones']} clones")
     return ratchet.run(BASELINE, HEAD, {"duplicated": total["duplicated"]}, argv, "lines")
