@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use gpui::{
     App, Context, Entity, Global, IntoElement, ParentElement as _, PathPromptOptions, Render,
@@ -20,6 +21,23 @@ pub const LOAD_SCOPE_NOTE: &str = "packs left out; session load path comes next"
 /// The status line while no binary is open.
 pub const NO_BINARY: &str = "No binary loaded";
 
+/// A load that is running: what it reads and since when.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Loading {
+    /// The binary being read.
+    pub path: PathBuf,
+    /// When the load started, on the executor's clock.
+    pub since: Instant,
+}
+
+impl Loading {
+    /// Returns the file name of the binary being read, the whole path when it has none.
+    #[must_use]
+    pub fn name(&self) -> String {
+        file_name(&self.path)
+    }
+}
+
 /// The binary a window has open, or is loading, and the status line of that load.
 pub struct Binary {
     /// The analyzed binary, once a load has finished.
@@ -28,10 +46,10 @@ pub struct Binary {
     facts: Vec<(SharedString, Color)>,
     /// Error text of the most recent failed load.
     error: Option<String>,
-    /// The file a running load reads, `None` once it finished or before any.
-    reading: Option<PathBuf>,
-    /// The file whose engine load is still running: the engine's analysis checks no cancel
-    /// flag yet, so a load keeps its thread until it ends.
+    /// The running load, `None` once it finished or before any.
+    reading: Option<Loading>,
+    /// The file whose engine load is still running, shown or cancelled: the engine's
+    /// analysis checks no cancel flag yet, so a cancelled load keeps its thread until it ends.
     busy: Option<PathBuf>,
     /// Status line the status bar shows.
     status: String,
@@ -103,14 +121,14 @@ impl Binary {
         self.error.as_deref()
     }
 
-    /// Returns the file the running load reads, `None` when no load runs.
+    /// Returns the running load, `None` when no load runs.
     #[must_use]
-    pub fn reading(&self) -> Option<&Path> {
-        self.reading.as_deref()
+    pub const fn reading(&self) -> Option<&Loading> {
+        self.reading.as_ref()
     }
 
-    /// Returns the file whose engine load still runs, if any; no other load starts until it
-    /// ends.
+    /// Returns the file whose engine load still runs, shown or cancelled, if any; no other
+    /// load starts until it ends.
     #[must_use]
     pub fn busy(&self) -> Option<&Path> {
         self.busy.as_deref()
@@ -173,9 +191,9 @@ impl Binary {
     /// Starts loading and analyzing `path` on the background executor, dropping the
     /// binary open before it, unless an engine load still runs.
     ///
-    /// The engine's analysis checks no cancel flag yet, so a superseded load keeps its
-    /// thread until its analysis ends; a second load is refused until then rather than run
-    /// beside it, and the status line says so.
+    /// A load the person cancelled keeps the engine busy until its analysis ends, so a
+    /// second load is refused until then rather than run beside it, and the status line
+    /// says so.
     ///
     /// # Arguments
     ///
@@ -200,8 +218,11 @@ impl Binary {
         self.error = None;
         let (ticket, worker_cancel) = self.epoch.begin();
         let check_cancel = worker_cancel.clone();
-        self.status = format!("loading {} ({LOAD_SCOPE_NOTE})", path.display());
-        self.reading = Some(path.clone());
+        self.status.clear();
+        self.reading = Some(Loading {
+            path: path.clone(),
+            since: cx.background_executor().now(),
+        });
         cx.notify();
         let bg = spawn_engine(cx, move || {
             worker_cancel.within(|| load_binary_blocking(path))
@@ -221,6 +242,23 @@ impl Binary {
             });
         }));
         true
+    }
+
+    /// Stops showing the running load and drops its answer when it comes.
+    ///
+    /// The engine's analysis checks no cancel flag yet, so its thread runs to the end of the
+    /// analysis and [`Self::busy`] holds until then.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Binary context.
+    pub fn cancel_load(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(loading) = self.reading.take() else {
+            return;
+        };
+        self.epoch.invalidate();
+        self.status = format!("cancelled reading {}", loading.name());
+        cx.notify();
     }
 
     /// Applies the result of a background load.
@@ -348,21 +386,30 @@ impl StatusLine {
     pub fn text(&self, cx: &App) -> String {
         let status = self.binary.read(cx).status();
         match cx.try_global::<SettingsNotice>().and_then(|n| n.0.as_ref()) {
+            Some(notice) if status.is_empty() => notice.to_string(),
             Some(notice) => format!("{notice}; {status}"),
             None => status.to_owned(),
         }
     }
 }
 
+/// Returns a status-bar label saying `text` in `color`.
+///
+/// # Arguments
+///
+/// * `text` - What it says.
+/// * `color` - Its color.
+pub(crate) fn status_label(text: impl Into<SharedString>, color: Color) -> Label {
+    Label::new(text).size(LabelSize::Small).color(color)
+}
+
 impl Render for StatusLine {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let label =
-            |text: SharedString, color| Label::new(text).size(LabelSize::Small).color(color);
         let facts = self.binary.read(cx).facts().iter();
         h_flex()
             .gap_3()
-            .children(facts.map(|(text, color)| label(text.clone(), *color)))
-            .child(label(self.text(cx).into(), Color::Placeholder))
+            .children(facts.map(|(text, color)| status_label(text.clone(), *color)))
+            .child(status_label(self.text(cx), Color::Placeholder))
     }
 }
 
@@ -448,7 +495,8 @@ mod tests {
         assert!(facts(cx).is_empty());
     }
 
-    /// A second open is refused while a load's engine thread runs, and starts once it ended.
+    /// A second open is refused while a load reads its file, and again after that load is
+    /// cancelled until its engine thread ends; then it starts.
     ///
     /// # Panics
     ///
@@ -473,7 +521,9 @@ mod tests {
         };
         assert!(open(&first, cx));
         assert!(!open(&second, cx));
-        assert!(binary.read_with(cx, |binary, _| binary.busy().is_some()));
+        binary.update(cx, |binary, cx| binary.cancel_load(cx));
+        assert!(binary.read_with(cx, |binary, _| binary.reading().is_none()));
+        assert!(!open(&second, cx));
         cx.run_until_parked();
         assert!(binary.read_with(cx, |binary, _| binary.busy().is_none()));
         assert!(open(&second, cx));

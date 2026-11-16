@@ -334,6 +334,7 @@ pub fn new_workspace(
         workspace
             .status_bar()
             .update(cx, |bar, cx| bar.add_left_item(status, window, cx));
+        crate::status::add_items(&mut workspace, &binary, window, cx);
         register_actions(&mut workspace, &binary);
         workspace
     });

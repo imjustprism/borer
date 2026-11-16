@@ -5,9 +5,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use borer_engine::analysis::decompile::replay::{Grade, TextCheck};
+use borer_engine::analysis::decompile::text_check;
 use borer_engine::analysis::decompile::view::view;
 use borer_engine::analysis::render::{
-    Bytes, FunctionOrder, FunctionRows, disasm_view, function_rows,
+    Bytes, FunctionOrder, FunctionRows, answered_flagged, disasm_view, function_rows,
 };
 use borer_engine::analysis::{Analysis, EnumSource, Overlay, no_function_at, resolve_suggesting};
 use borer_engine::cancel::Cancel;
@@ -153,6 +155,80 @@ pub fn filter_rows_blocking(loaded: &LoadedBinary, filter: &str) -> FunctionRows
         0,
         usize::MAX,
     )
+}
+
+/// What the engine's check of one function's answer found, counted as the answer's header
+/// line counts it ([`TextCheck::header`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GradeCounts {
+    /// Blocks whose every claim the check proved against the lift.
+    pub proved: usize,
+    /// Blocks compared but not proved, those with a disagreement among them.
+    pub tested: usize,
+    /// Blocks not compared.
+    pub unknown: usize,
+    /// Instructions whose statements the machine does not bear out.
+    pub disagree: usize,
+}
+
+impl GradeCounts {
+    /// Returns the counts of `check`, as its header line gives them.
+    ///
+    /// # Arguments
+    ///
+    /// * `check` - The engine's check of one answer.
+    #[must_use]
+    pub fn of(check: &TextCheck) -> Self {
+        let blocks = check.blocks.len();
+        let unknown = check.count(Grade::Unchecked);
+        let proved = check.count(Grade::Proved);
+        Self {
+            proved,
+            tested: blocks.saturating_sub(unknown).saturating_sub(proved),
+            unknown,
+            disagree: check.disagree.len(),
+        }
+    }
+
+    /// Returns the count shown under `grade`.
+    ///
+    /// # Arguments
+    ///
+    /// * `grade` - The engine's grade.
+    #[must_use]
+    pub const fn count(&self, grade: Grade) -> usize {
+        match grade {
+            Grade::Proved => self.proved,
+            Grade::Tested => self.tested,
+            Grade::Unchecked => self.unknown,
+            Grade::Wrong => self.disagree,
+        }
+    }
+}
+
+/// Returns what the engine's check found of the answer the function at `entry` is drawn as.
+///
+/// That is the check under the names [`answered_flagged`] gives, the ones the answer is
+/// drawn under, so the counts are those of the answer's own header line.
+///
+/// Must be called inside [`spawn_engine`]; the check and the repair search are memoized by
+/// the engine, so a second call for the same function and names is a lookup.
+///
+/// # Arguments
+///
+/// * `loaded` - Previously loaded binary state.
+/// * `entry` - Entry virtual address of the function.
+///
+/// # Returns
+///
+/// The counts, or `None` when the function does not decompile or the image has no
+/// emulator to check against.
+#[must_use]
+pub fn grade_counts_blocking(loaded: &LoadedBinary, entry: u64) -> Option<GradeCounts> {
+    let (program, analysis) = (&loaded.program, &loaded.analysis);
+    let (answered, _) = answered_flagged(program, analysis, &loaded.overlay, entry);
+    let check = text_check(program, analysis, &answered, entry);
+    (*check).as_ref().map(GradeCounts::of)
 }
 
 /// Builds the decompile view of the function at `entry` in `loaded`.
@@ -450,7 +526,7 @@ mod tests {
     /// # Panics
     ///
     /// Panics if another module names `Program::load`, `Analysis::compute`, a decompile
-    /// or listing view, the resolver or the function listing.
+    /// or listing view, the resolver, the function listing or the check of an answer.
     #[test]
     fn only_the_worker_names_engine_compute_calls() {
         let sources = [
@@ -471,6 +547,7 @@ mod tests {
             ("measure/scroll.rs", include_str!("measure/scroll.rs")),
             ("recent.rs", include_str!("recent.rs")),
             ("start_item.rs", include_str!("start_item.rs")),
+            ("status.rs", include_str!("status.rs")),
         ];
         let calls = [
             "Program::load",
@@ -479,6 +556,8 @@ mod tests {
             "disasm_view(",
             "resolve_suggesting(",
             "function_rows(",
+            "text_check(",
+            "answered_flagged(",
         ];
         for (name, text) in sources {
             let code = text.split("#[cfg(test)]").next().unwrap_or(text);

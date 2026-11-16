@@ -275,7 +275,7 @@ impl FunctionsPanel {
         let Some(Filtered { query, rows }) = self.rows.current() else {
             let binary = self.binary.read(cx);
             return Some(match (binary.reading(), binary.load_error()) {
-                (Some(path), _) => Empty::Reading(path.to_path_buf()),
+                (Some(loading), _) => Empty::Reading(loading.path.clone()),
                 (None, Some(reason)) => Empty::LoadFailed(reason.to_owned()),
                 (None, None) => Empty::NoBinary,
             });

@@ -14,6 +14,7 @@ pub mod goto;
 pub mod measure;
 pub mod recent;
 pub mod start_item;
+pub mod status;
 pub mod worker;
 
 use gpui::{App, AppContext as _};
