@@ -332,6 +332,51 @@ fn branch_target_links_distinguish_functions_from_addresses() {
     );
 }
 
+/// Every instruction line of an x64 listing answers the address it shows.
+///
+/// They come in the order the function's blocks decode; the header, label,
+/// user name and comment continuation lines answer none, and
+/// [`View::line_of`] finds each instruction's line again.
+#[test]
+fn listing_lines_answer_the_instruction_they_show() {
+    let (p, a) = x64_fixture();
+    let mut o = Overlay::default();
+    o.names.insert(TEXT + 5, "slot\ncall".to_owned());
+    o.comments.insert(TEXT + 0xb, "two\nlines".to_owned());
+    let f = a.function(TEXT).expect("the function");
+    let decoded: Vec<u64> = f
+        .blocks
+        .iter()
+        .flat_map(|b| {
+            let len = usize::try_from(b.end - b.start).expect("a block's length");
+            let code = p.read_va(b.start, len).expect("the block's bytes");
+            borer_engine::disasm::disassemble(code, b.start, 64, usize::MAX)
+                .into_iter()
+                .map(|l| l.va)
+        })
+        .collect();
+    for mode in [Bytes::Hidden, Bytes::Shown] {
+        let v = disasm_view(&p, &a, &o, TEXT, 100, mode).expect("view");
+        let mut shown = Vec::new();
+        for i in 0..v.lines() {
+            let line = v.line(i).expect("a line");
+            let spelled = line.strip_prefix("0x").map(|rest| {
+                let hex = rest.split(' ').next().unwrap_or_default();
+                u64::from_str_radix(hex, 16).expect("an address")
+            });
+            assert_eq!(v.address(i), spelled, "line {i}: {line:?}");
+            if let Some(va) = spelled {
+                assert_eq!(v.line_of(va), Some(i), "{va:#x}");
+                shown.push(va);
+            }
+        }
+        assert_eq!(shown, decoded, "{mode:?}");
+        assert!(v.lines() > shown.len() + 3, "{}", v.spell());
+        assert_eq!(v.address(v.lines()), None);
+        assert_eq!(v.line_of(TEXT + 1), None);
+    }
+}
+
 /// Builds a non-x86 raw image at `0x401000` with a caller at `0x401000` and a
 /// helper function at `0x401020` from little-endian 32-bit words.
 ///

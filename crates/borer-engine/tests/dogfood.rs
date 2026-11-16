@@ -29,7 +29,8 @@ use borer_engine::analysis::{
     decompile::{Swept, decompile, decompile_all, decompile_named_all, decompile_swept_all},
     name_of, render,
 };
-use borer_engine::program::Program;
+use borer_engine::disasm;
+use borer_engine::program::{Feature, Program};
 use std::collections::BTreeSet;
 use std::sync::{LazyLock, OnceLock};
 
@@ -939,6 +940,63 @@ fn every_view_spells_its_text_and_links_only_what_the_code_shows() {
         share(census.resolvable_strings),
         share(census.kinds[3]),
         census.string_causes
+    );
+}
+
+/// Every function's listing view of the `BORER_DOGFOOD` binary answers
+/// the addresses its blocks decode to.
+///
+/// Line by line, in order, and each instruction's line is found again; it
+/// prints the build time at p95 and worst and the heap the views hold.
+#[test]
+#[ignore = "set BORER_DOGFOOD to a binary path to run this sweep"]
+fn every_listing_line_answers_the_instruction_it_shows() {
+    let c = &*CORPUS;
+    let (p, a) = (&c.program, &c.analysis);
+    let isa = p.isa_for(Feature::Disasm).expect("the corpus disassembles");
+    let o = Overlay::default();
+    let (mut bad, mut took, mut heap) = (Vec::new(), Vec::new(), 0usize);
+    for f in &a.functions {
+        let started = std::time::Instant::now();
+        let v = render::disasm_view(p, a, &o, f.entry, usize::MAX, render::Bytes::Hidden);
+        took.push(started.elapsed());
+        let Some(v) = v else {
+            bad.push(format!("{:#x}: no view", f.entry));
+            continue;
+        };
+        heap = heap.saturating_add(v.bytes());
+        let decoded: Vec<u64> = f
+            .blocks
+            .iter()
+            .flat_map(|b| {
+                let len = usize::try_from(b.end.saturating_sub(b.start)).unwrap_or(0);
+                p.read_va_upto(b.start, len.max(1))
+                    .map(|code| disasm::disassemble_program(p, code, b.start, isa, usize::MAX))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|l| l.va)
+            })
+            .collect();
+        let shown: Vec<u64> = (0..v.lines()).filter_map(|i| v.address(i)).collect();
+        let lost = shown
+            .iter()
+            .find(|&&va| v.line_of(va).and_then(|i| v.address(i)) != Some(va));
+        if shown != decoded || lost.is_some() {
+            bad.push(format!("{:#x}: lost {lost:x?}", f.entry));
+        }
+    }
+    took.sort_unstable();
+    let p95 = took.get(took.len().saturating_mul(95) / 100).copied();
+    println!(
+        "{} listing views: build p95 {p95:?}, worst {:?}; {heap} heap bytes",
+        took.len(),
+        took.last()
+    );
+    assert!(
+        bad.is_empty(),
+        "{} listings whose lines lose their instructions: {:?}",
+        bad.len(),
+        &bad[..bad.len().min(10)]
     );
 }
 

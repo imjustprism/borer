@@ -9,7 +9,8 @@
 //! ([`crate::analysis::decompile::view`]) is read back out of the text a
 //! function decompiles to; the function listing view
 //! ([`crate::analysis::render::disasm_view`]) is written straight into a
-//! [`Sink`] alongside its text.
+//! [`Sink`] alongside its text, and each of its instruction lines answers
+//! the address it shows ([`View::address`]).
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
@@ -144,6 +145,12 @@ pub struct View {
     defs: Box<[Option<u32>]>,
     /// The names that name something yet carry no link.
     unlinked: Unlinked,
+    /// Each line that shows an instruction, with the instruction's address,
+    /// in line order; empty for a view of no listing.
+    addresses: Box<[(u32, u64)]>,
+    /// Whether [`View::addresses`] runs in address order as well, which
+    /// [`View::line_of`] searches by.
+    ordered: bool,
 }
 
 /// Widens a 32-bit offset or count of a view to an index.
@@ -254,8 +261,48 @@ impl View {
         self.defs.get(k).copied().flatten().map(wide)
     }
 
-    /// Returns the heap bytes the view holds: its text, lines, tokens and
-    /// referents.
+    /// Returns the address of the instruction a line shows.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The line, from 0.
+    ///
+    /// # Returns
+    ///
+    /// The address, `None` for a line that shows no instruction (a header,
+    /// a label, a comment) and for every line of a view of no listing.
+    #[must_use]
+    pub fn address(&self, i: usize) -> Option<u64> {
+        let i = u32::try_from(i).ok()?;
+        let k = self
+            .addresses
+            .binary_search_by_key(&i, |&(line, _)| line)
+            .ok()?;
+        self.addresses.get(k).map(|&(_, va)| va)
+    }
+
+    /// Returns the first line that shows the instruction at an address.
+    ///
+    /// # Arguments
+    ///
+    /// * `va` - The instruction's address.
+    ///
+    /// # Returns
+    ///
+    /// The line, from 0, or `None` when no line shows an instruction there.
+    #[must_use]
+    pub fn line_of(&self, va: u64) -> Option<usize> {
+        let found = if self.ordered {
+            let k = self.addresses.partition_point(|&(_, at)| at < va);
+            self.addresses.get(k).filter(|&&(_, at)| at == va)
+        } else {
+            self.addresses.iter().find(|&&(_, at)| at == va)
+        };
+        found.map(|&(line, _)| wide(line))
+    }
+
+    /// Returns the heap bytes the view holds: its text, lines, tokens,
+    /// referents and instruction addresses.
     #[must_use]
     pub fn bytes(&self) -> usize {
         let names: usize = self
@@ -277,6 +324,7 @@ impl View {
             + size_of_val(&*self.tokens)
             + size_of_val(&*self.refs)
             + size_of_val(&*self.defs)
+            + size_of_val(&*self.addresses)
             + names
     }
 
@@ -310,6 +358,14 @@ pub(crate) trait Sink {
     /// line, when the sink records definitions.
     fn define(&mut self) {}
 
+    /// Marks the open line as showing the instruction at `va`, when the
+    /// sink records addresses.
+    ///
+    /// # Arguments
+    ///
+    /// * `va` - The instruction's address.
+    fn at(&mut self, _va: u64) {}
+
     /// Ends the open line and starts the next.
     fn end_line(&mut self);
 }
@@ -341,6 +397,8 @@ pub(crate) struct Builder {
     defs: BTreeMap<NonZeroU32, u32>,
     /// The referent and first line of the most recent non-empty [`Builder::put`].
     last_put: Option<(NonZeroU32, u32)>,
+    /// The lines marked as showing an instruction, with its address.
+    addresses: Vec<(u32, u64)>,
     /// Whether the text outgrew the 32-bit offsets, which refuses the view.
     over: bool,
 }
@@ -352,6 +410,16 @@ impl Sink for Builder {
 
     fn define(&mut self) {
         Builder::define(self);
+    }
+
+    fn at(&mut self, va: u64) {
+        match u32::try_from(self.starts.len()) {
+            Ok(line) if self.addresses.last().is_none_or(|&(l, _)| l < line) => {
+                self.addresses.push((line, va));
+            }
+            Ok(_) => {}
+            Err(_) => self.over = true,
+        }
     }
 
     fn end_line(&mut self) {
@@ -477,6 +545,8 @@ impl Builder {
             refs: places.into_iter().map(|(_, r)| r).collect(),
             defs,
             unlinked,
+            ordered: self.addresses.is_sorted_by_key(|&(_, va)| va),
+            addresses: self.addresses.into_boxed_slice(),
         })
     }
 }

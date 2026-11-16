@@ -139,7 +139,8 @@ pub fn disasm_function_with(
 /// [`View`].
 ///
 /// Runs the exact renderer of [`disasm_function_with`] over [`Builder`], so
-/// [`View::spell`] equals [`disasm_function_with`] byte for byte.
+/// [`View::spell`] equals [`disasm_function_with`] byte for byte, and each
+/// instruction's line answers its address ([`View::address`]).
 ///
 /// # Arguments
 ///
@@ -280,8 +281,9 @@ struct RowCtx<'a> {
 }
 
 impl RowCtx<'_> {
-    /// Writes any inline user label above `va`, the address token and the
-    /// optional raw-bytes column.
+    /// Writes any inline user label above `va`, then marks the line as
+    /// showing `va` and writes the address token and the optional raw-bytes
+    /// column.
     ///
     /// # Arguments
     ///
@@ -294,6 +296,7 @@ impl RowCtx<'_> {
             out.put(&format!("; = {n} ="), Kind::Comment, None);
             out.end_line();
         }
+        out.at(va);
         let mut buf = [0u8; 18];
         out.put(
             hex_prefixed(b"0x", va, &mut buf),
