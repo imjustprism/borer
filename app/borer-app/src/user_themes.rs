@@ -1,4 +1,4 @@
-//! The person's themes: every `*.json` theme family in the themes folder of the app's data
+//! The person's themes: every `*.json` theme family in the themes folder of the app's config
 //! directory, read in the background at start and read again when one changes on disk.
 //!
 //! This follows Zed's own `load_user_themes_in_background` and `watch_themes` (in the `zed`
@@ -58,7 +58,7 @@ impl Global for ThemeFiles {}
 pub(crate) fn load_and_watch(cx: &mut App) {
     let fs = <dyn fs::Fs>::global(cx);
     cx.spawn(async move |cx| {
-        let dir = paths::themes_dir();
+        let dir = &crate::app_dirs::themes_dir();
         match theme_paths(fs.as_ref(), dir).await {
             Ok(found) => {
                 for path in &found {

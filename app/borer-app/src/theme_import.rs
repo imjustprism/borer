@@ -173,7 +173,7 @@ pub async fn import(
         .with_context(|| format!("{} names no file", source.display()))?
         .to_owned();
     name.push(".json");
-    let dir = paths::themes_dir();
+    let dir = &crate::app_dirs::themes_dir();
     let dest = dir.join(&name);
     let shown = dest.display();
     let there = fs.metadata(&dest).await;

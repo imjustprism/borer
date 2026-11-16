@@ -42,6 +42,7 @@ use workspace::{
 };
 
 use crate::actions::{CloseBinary, MinimizeWindow, Open, ZoomWindow};
+use crate::app_dirs::with_host_env;
 use crate::binary::{Binary, StatusLine};
 use crate::commands;
 use crate::decompile_item::DecompileItem;
@@ -54,9 +55,8 @@ use crate::start_item::keep_filled;
 use crate::theme_import::read_dropped;
 use crate::user_themes::is_theme_path;
 
-/// Directory of the app's settings, keymap, database and logs under the platform's local
-/// data directory, kept apart from an installed Zed's.
-const DATA_DIR_NAME: &str = "borer-app";
+/// The app's window id, which desktops match to its launcher entry.
+const APP_ID: &str = "borer-app";
 
 /// Id of the app's one workspace in its own database, the same on every run, so Zed keys
 /// the saved panel sizes the same way each time.
@@ -86,9 +86,10 @@ const TRAFFIC_LIGHT_PX: f32 = 9.0;
 
 /// Returns the data directory of a run in `mode`.
 ///
-/// That is `given` when the command line names one, else the app's own under the
-/// platform's local data directory for a person. A measurement must be given one, a fresh directory its caller creates and removes, so it
-/// neither reads nor writes the person's layout and nothing it leaves outlives the caller.
+/// That is `given` when the command line names one, else the app's own for a person
+/// ([`crate::app_dirs::Env::borer`]). A measurement must be given one, a fresh directory
+/// its caller creates and removes, so it neither reads nor writes the person's layout and
+/// nothing it leaves outlives the caller.
 ///
 /// # Arguments
 ///
@@ -97,16 +98,14 @@ const TRAFFIC_LIGHT_PX: f32 = 9.0;
 ///
 /// # Errors
 ///
-/// Returns an error when a measurement names no directory or the platform has no local
-/// data directory.
+/// Returns an error when a measurement names no directory or the platform's directories
+/// do not resolve.
 pub fn data_dir(mode: &CliMode, given: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     if let Some(dir) = given {
         return Ok(dir);
     }
     match mode {
-        CliMode::Interactive(_) => Ok(dirs::data_local_dir()
-            .context("the platform has no local data directory")?
-            .join(DATA_DIR_NAME)),
+        CliMode::Interactive(_) => Ok(with_host_env(|env| env.borer())?.data),
         CliMode::FirstFrame
         | CliMode::ReportOpen(_)
         | CliMode::Headless(_)
@@ -118,8 +117,8 @@ pub fn data_dir(mode: &CliMode, given: Option<PathBuf>) -> anyhow::Result<PathBu
     }
 }
 
-/// Points Zed's settings, keymap, database and logs at `dir`, and creates the config
-/// directory there, which the person's settings file is written in.
+/// Points Zed's database and logs at `dir`, and creates the app's config directory
+/// ([`crate::app_dirs::config_dir`]), which the person's settings and themes live in.
 ///
 /// Must run before anything reads Zed's data or config directory.
 ///
@@ -136,7 +135,7 @@ pub fn set_data_dir(dir: &Path) -> anyhow::Result<()> {
         .to_str()
         .with_context(|| format!("the data directory {} is not UTF-8", dir.display()))?;
     paths::set_custom_data_dir(name);
-    let config = paths::config_dir();
+    let config = crate::app_dirs::config_dir();
     std::fs::create_dir_all(config).with_context(|| format!("creating {}", config.display()))
 }
 
@@ -165,7 +164,7 @@ pub fn window_options(cx: &App) -> WindowOptions {
         focus: true,
         show: false,
         window_min_size: Some(size(px(WINDOW_MIN_WIDTH_PX), px(WINDOW_MIN_HEIGHT_PX))),
-        app_id: Some(DATA_DIR_NAME.to_owned()),
+        app_id: Some(APP_ID.to_owned()),
         icon: window_icon(),
         ..WindowOptions::default()
     }
@@ -275,8 +274,10 @@ pub fn init(cx: &mut App) -> anyhow::Result<Arc<AppState>> {
 /// Applies borer's theme and the app's settings, keymap and command palette over Zed's.
 ///
 /// The theme and the settings layers are [`crate::app_settings::apply`]'s. It also gives
-/// Zed's pickers their input, untrusts every folder, hides Zed's add folder action from the
-/// palette, and saves each window's layout on quit.
+/// Zed's pickers their input, untrusts every folder, and saves each window's layout on quit.
+/// It hides from the palette Zed's add folder action and the two Zed actions that would
+/// write Zed's own settings file, not the app's ([`crate::app_dirs`]): edit predictions for
+/// all files and the editor's tab bar, which no default key binds.
 ///
 /// # Arguments
 ///
@@ -293,7 +294,11 @@ pub fn configure(cx: &mut App) -> anyhow::Result<()> {
     cx.set_menus(commands::menus(cx));
     command_palette::init(cx);
     search::buffer_search::init(cx);
-    let hidden = [TypeId::of::<AddFolderToProject>()];
+    let hidden = [
+        TypeId::of::<AddFolderToProject>(),
+        TypeId::of::<workspace::ToggleEditPrediction>(),
+        TypeId::of::<editor::actions::ToggleTabBar>(),
+    ];
     CommandPaletteFilter::update_global(cx, |filter, _| filter.hide_action_types(&hidden));
     cx.on_app_quit(crate::shell::flush_windows).detach();
     cx.on_action(|_: &zed_actions::Quit, cx| cx.quit());
@@ -589,6 +594,9 @@ pub fn add_functions_panel(
 /// open, Zed's add folder (which opens a binary), close, the settings file, minimize, zoom
 /// and about.
 ///
+/// Zed's theme-mode toggle is answered here, before Zed's own handler, so it writes the
+/// app's settings file as [`crate::actions::ToggleTheme`] does.
+///
 /// # Arguments
 ///
 /// * `workspace` - The workspace.
@@ -683,7 +691,7 @@ fn close_binary(
 /// * `binary` - The window's binary, whose status line says what happened.
 /// * `cx` - Application context.
 fn open_settings_file(binary: &Entity<Binary>, cx: &mut App) {
-    let path = paths::settings_file();
+    let path = &crate::app_dirs::settings_file();
     match checked_metadata(path) {
         Ok(Some(_)) => cx.open_with_system(path),
         Ok(None) => binary.update(cx, |binary, cx| {

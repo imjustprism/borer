@@ -2,6 +2,7 @@
 
 pub mod actions;
 pub mod app_assets;
+pub mod app_dirs;
 pub mod app_settings;
 pub mod app_view;
 pub mod binary;
@@ -64,6 +65,9 @@ pub fn run() -> anyhow::Result<()> {
     let (mode, given_dir) = parse_cli_args()?;
     if let CliMode::Headless(path) = mode {
         return run_headless(path);
+    }
+    if given_dir.is_none() && matches!(mode, CliMode::Interactive(_)) {
+        app_dirs::set_config_dir(app_dirs::with_host_env(|env| env.borer())?.config);
     }
     app_view::set_data_dir(&app_view::data_dir(&mode, given_dir)?)?;
     let exit_slot = new_cli_exit_slot();

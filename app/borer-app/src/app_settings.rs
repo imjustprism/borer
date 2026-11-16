@@ -1,14 +1,18 @@
 //! The app's settings over Zed's, and the theme actions that write the person's file.
 //!
 //! borer's theme is loaded, the app's settings are Zed's global layer, and the person's
-//! settings file in the app's data directory is the user layer over them.
+//! settings file in the app's config directory ([`crate::app_dirs`]) is the user layer
+//! over them.
 
+use std::cell::OnceCell;
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::rc::Rc;
 
 use anyhow::Context as _;
 use borer_engine::program::checked_metadata;
-use gpui::{App, BorrowAppContext as _, SharedString};
+use futures::FutureExt as _;
+use futures::future::Shared;
+use gpui::{App, BorrowAppContext as _, Global, SharedString, Task};
 use settings::{
     ParseStatus, Settings as _, SettingsContent, SettingsFile, SettingsStore, ThemeAppearanceMode,
 };
@@ -29,7 +33,7 @@ const MAX_SETTINGS_BYTES: u64 = 1 << 20;
 
 /// What a theme action makes of the theme mode the person's settings file holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ThemeChange {
+pub(crate) enum ThemeChange {
     /// Dark becomes light and light dark; following the system becomes the other of what
     /// is shown.
     Flip,
@@ -84,7 +88,7 @@ pub fn apply(cx: &mut App) -> anyhow::Result<()> {
 /// [`file_notice`] says so.
 fn load_person_settings(cx: &mut App) -> anyhow::Result<()> {
     let fs = <dyn fs::Fs>::global(cx);
-    let path = paths::settings_file();
+    let path = &crate::app_dirs::settings_file();
     check_settings_path(path)?;
     let block = cx.foreground_executor().clone();
     let meta = block
@@ -182,7 +186,7 @@ fn file_notice(cx: &App) -> Option<SharedString> {
 ///
 /// * `change` - What to make of the stored mode.
 /// * `cx` - Application context.
-fn change_theme(change: ThemeChange, cx: &mut App) {
+pub(crate) fn change_theme(change: ThemeChange, cx: &mut App) {
     let theme_settings::ThemeSelection::Dynamic { mode, light, dark } =
         ThemeSettings::get_global(cx).theme.clone()
     else {
@@ -190,50 +194,46 @@ fn change_theme(change: ThemeChange, cx: &mut App) {
         cx.set_global(SettingsNotice(Some(why.into())));
         return;
     };
-    if let Err(err) = check_settings_path(paths::settings_file()) {
-        let why = format!("theme not saved: {err:#}");
-        cx.set_global(SettingsNotice(Some(why.into())));
-        return;
-    }
     let other = match cx.theme().appearance {
         Appearance::Dark => ThemeAppearanceMode::Light,
         Appearance::Light => ThemeAppearanceMode::Dark,
     };
-    let fs = <dyn fs::Fs>::global(cx);
-    let chosen = Arc::new(OnceLock::new());
+    let chosen = Rc::new(OnceCell::new());
     let pick = chosen.clone();
-    let done = settings::update_settings_file_with_completion(fs, cx, move |content, _| {
-        let stored = match &content.theme.theme {
-            Some(settings::ThemeSelection::Dynamic { mode, .. }) => *mode,
-            Some(settings::ThemeSelection::Static(_)) | None => mode,
-        };
-        let next = match (change, stored) {
-            (ThemeChange::FollowSystem, _) => ThemeAppearanceMode::System,
-            (ThemeChange::Flip, ThemeAppearanceMode::Light) => ThemeAppearanceMode::Dark,
-            (ThemeChange::Flip, ThemeAppearanceMode::Dark) => ThemeAppearanceMode::Light,
-            (ThemeChange::Flip, ThemeAppearanceMode::System) => other,
-        };
-        pick.get_or_init(|| next);
-        content.theme.theme = Some(settings::ThemeSelection::Dynamic {
-            mode: next,
-            light,
-            dark,
-        });
-    });
+    let done = write_settings(
+        move |content| {
+            let stored = match &content.theme.theme {
+                Some(settings::ThemeSelection::Dynamic { mode, .. }) => *mode,
+                Some(settings::ThemeSelection::Static(_)) | None => mode,
+            };
+            let next = match (change, stored) {
+                (ThemeChange::FollowSystem, _) => ThemeAppearanceMode::System,
+                (ThemeChange::Flip, ThemeAppearanceMode::Light) => ThemeAppearanceMode::Dark,
+                (ThemeChange::Flip, ThemeAppearanceMode::Dark) => ThemeAppearanceMode::Light,
+                (ThemeChange::Flip, ThemeAppearanceMode::System) => other,
+            };
+            pick.get_or_init(|| next);
+            content.theme.theme = Some(settings::ThemeSelection::Dynamic {
+                mode: next,
+                light,
+                dark,
+            });
+        },
+        cx,
+    );
     cx.spawn(async move |cx| {
         let done = done.await;
         cx.update(|cx| {
             let notice = match done {
-                Ok(Ok(())) => file_notice(cx),
-                Ok(Err(_))
+                Ok(()) => file_notice(cx),
+                Err(_)
                     if chosen
                         .get()
                         .is_some_and(|mode| stored_mode(cx) == Some(*mode)) =>
                 {
                     file_notice(cx)
                 }
-                Ok(Err(err)) => Some(format!("theme not saved: {err:#}").into()),
-                Err(_) => Some("theme not saved: Zed's settings writer stopped".into()),
+                Err(err) => Some(format!("theme not saved: {err}").into()),
             };
             cx.set_global(SettingsNotice(notice));
         });
@@ -241,8 +241,65 @@ fn change_theme(change: ThemeChange, cx: &mut App) {
     .detach();
 }
 
-/// Writes `edit` to the person's settings file through Zed's settings store, which applies
-/// it, and puts a failure on the status line as `what` not saved.
+/// The person's settings writes, newest last: each waits for the one before, so it reads
+/// the file that one wrote.
+#[derive(Default)]
+struct SettingsWrites(Option<Shared<Task<Result<(), SharedString>>>>);
+
+impl Global for SettingsWrites {}
+
+/// Writes `edit` to the person's settings file in the app's config directory and applies
+/// the file's new text as Zed's user layer, after the writes started before it.
+///
+/// Zed's own writer writes the settings file of Zed's config directory, which the app does
+/// not keep its settings in ([`crate::app_dirs`]), so the app writes its file itself with
+/// the same edit Zed makes: the text the file holds, changed only where `edit` changes it.
+///
+/// # Arguments
+///
+/// * `edit` - The change to the settings file's content.
+/// * `cx` - Application context.
+///
+/// # Returns
+///
+/// The write, which says why when the file is refused, does not read or write, or its new
+/// text does not apply in full.
+fn write_settings(
+    edit: impl FnOnce(&mut SettingsContent) + 'static,
+    cx: &mut App,
+) -> Shared<Task<Result<(), SharedString>>> {
+    let fs = <dyn fs::Fs>::global(cx);
+    let before = cx.default_global::<SettingsWrites>().0.take();
+    let write = cx.spawn(async move |cx| {
+        if let Some(before) = before {
+            drop(before.await);
+        }
+        let path = crate::app_dirs::settings_file();
+        let shown = path.display();
+        let written = async {
+            check_settings_path(&path)?;
+            let there = fs.metadata(&path).await;
+            let old = match there.with_context(|| format!("stating {shown}"))? {
+                Some(_) => (fs.load(&path).await).with_context(|| format!("reading {shown}"))?,
+                None => String::new(),
+            };
+            let new =
+                cx.read_global(|store: &SettingsStore, _| store.new_text_for_update(old, edit))?;
+            (fs.atomic_write(path.clone(), new.clone()).await)
+                .with_context(|| format!("writing {shown}"))?;
+            cx.update_global(|store: &mut SettingsStore, cx| {
+                store.set_user_settings(&new, cx).result().map(drop)
+            })
+        };
+        written.await.map_err(|err| format!("{err:#}").into())
+    });
+    let write = write.shared();
+    cx.default_global::<SettingsWrites>().0 = Some(write.clone());
+    write
+}
+
+/// Writes `edit` to the person's settings file with [`write_settings`], and puts a failure
+/// on the status line as `what` not saved.
 ///
 /// # Arguments
 ///
@@ -251,23 +308,16 @@ fn change_theme(change: ThemeChange, cx: &mut App) {
 /// * `cx` - Application context.
 pub(crate) fn save_settings(
     what: &'static str,
-    edit: impl FnOnce(&mut SettingsContent) + Send + 'static,
+    edit: impl FnOnce(&mut SettingsContent) + 'static,
     cx: &mut App,
 ) {
-    if let Err(err) = check_settings_path(paths::settings_file()) {
-        let why = format!("{what} not saved: {err:#}");
-        cx.set_global(SettingsNotice(Some(why.into())));
-        return;
-    }
-    let fs = <dyn fs::Fs>::global(cx);
-    let done = settings::update_settings_file_with_completion(fs, cx, |content, _| edit(content));
+    let done = write_settings(edit, cx);
     cx.spawn(async move |cx| {
         let done = done.await;
         cx.update(|cx| {
             let notice = match done {
-                Ok(Ok(())) => file_notice(cx),
-                Ok(Err(err)) => Some(format!("{what} not saved: {err:#}").into()),
-                Err(_) => Some(format!("{what} not saved: Zed's settings writer stopped").into()),
+                Ok(()) => file_notice(cx),
+                Err(err) => Some(format!("{what} not saved: {err}").into()),
             };
             cx.set_global(SettingsNotice(notice));
         });
