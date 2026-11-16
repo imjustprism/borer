@@ -32,14 +32,14 @@
 //! * `imports()`, `exports()` (`name`, `at`), `sections()` (`name`, `at`,
 //!   `size`, `r`, `w`, `x`).
 //! * `hex(n)`, `args()` (the words after the script on the command line),
-//!   `help()` (this list, short, for an agent), `help("query")` (every
-//!   resource with an example URI, from the front end) and `help(name)`
-//!   (one call's line).
-//! * `query(uri)`: the text of any `borer://` resource (`borer://taint/...`,
-//!   `borer://grep/...`, `borer://classes`), where the front end running
-//!   the script answers resources ([`Query`]); elsewhere the text of the
-//!   resources the engine answers on its own ([`crate::answer`]), and a
-//!   throw for the rest.
+//!   `help()` (this list, short, for an agent), `help("query")` (the
+//!   resources `query` reads: every one with an example URI from the front
+//!   end, else the ones the engine answers alone) and `help(name)` (one
+//!   call's line).
+//! * `query(uri)`: the text of a `borer://` resource (`borer://taint/...`,
+//!   `borer://classes`): any resource the front end running the script
+//!   answers ([`Query`]), else the ones the engine answers on its own
+//!   ([`crate::answer`]), and a throw for the rest.
 //!   `rows(uri)` reads the same text as a table ([`crate::table::records`]):
 //!   a map per row, keyed by the column header, a cell that reads as a
 //!   number an integer.
@@ -160,7 +160,7 @@ decompile(e), scenario(e, \"a2=5\"): pseudo-C text; 2000 calls per run
 disasm(addr, n): maps of at, bytes, text
 imports(), exports(): maps of name, at; sections(): name, at, size, r, w, x
 program(): path, format, arch, bits, base, entry
-query(uri): text of a borer:// resource help(\"query\") lists, e.g. query(\"borer://grep/CreateFileA\"); !offset=N!limit=N page a listing
+query(uri): text of a borer:// resource help(\"query\") lists, e.g. query(\"borer://calls/CreateFileA\"); !offset=N!limit=N page a listing
 rows(uri): the resource's table, a map per row keyed by its column header (else one key, text), numbers as integers
 layout(e), layout(e, reg): fields through a pointer (reg, else the first argument), maps of offset, size, addressed
 query, rows, layout and help(\"query\"): 200 calls per run together
