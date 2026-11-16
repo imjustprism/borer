@@ -208,12 +208,7 @@ pub fn callgraph(
     max_nodes: usize,
     walk: Walk,
 ) -> String {
-    let slots: BTreeMap<u64, &str> = p
-        .symbols
-        .iter()
-        .filter(|s| s.kind == SymbolKind::Import && s.addr != 0)
-        .map(|s| (s.addr, s.name.as_str()))
-        .collect();
+    let slots = import_slots(p);
     let mut g = CallGraph {
         nodes: vec![root],
         imports: BTreeMap::new(),
@@ -227,26 +222,7 @@ pub fn callgraph(
         let name = crate::search::demangled_name(raw);
         g.imports.insert(root, bare_name(&name).to_owned());
     }
-    let targets_of = |cur: u64| -> Vec<Callee> {
-        match walk {
-            Walk::Callers => match a.function(cur) {
-                Some(f) => f.callers.iter().map(|&c| Callee::near(c)).collect(),
-                None => {
-                    let mut from: Vec<Callee> = a.xrefs.get(&cur).map_or_else(Vec::new, |sites| {
-                        sites
-                            .iter()
-                            .filter_map(|s| s.from_entry)
-                            .map(Callee::near)
-                            .collect()
-                    });
-                    from.sort_unstable();
-                    from.dedup();
-                    from
-                }
-            },
-            Walk::Callees => callees_of(a, &slots, cur),
-        }
-    };
+    let targets_of = |cur: u64| call_targets(a, &slots, cur, walk);
     let mut held: Vec<(u64, Vec<Callee>)> = Vec::new();
     let mut head = 0;
     while head < g.nodes.len() {
@@ -403,6 +379,58 @@ impl CallGraph {
             Walk::Callers => self.edges.push((to.target, from)),
             Walk::Callees => self.edges.push((from, to.target)),
         }
+    }
+}
+
+/// Returns the program's import slots, each with the import's raw name.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+pub(super) fn import_slots(p: &Program) -> BTreeMap<u64, &str> {
+    p.symbols
+        .iter()
+        .filter(|s| s.kind == SymbolKind::Import && s.addr != 0)
+        .map(|s| (s.addr, s.name.as_str()))
+        .collect()
+}
+
+/// Returns the neighbors a call graph walk takes from one node: the one
+/// rule every walk of the call graph follows ([`callgraph`]).
+///
+/// Over callees they are [`callees_of`]. Over callers they are the
+/// function's callers, or, for a node with no body (an import slot, a
+/// global), every function that references it, in entry order.
+///
+/// # Arguments
+///
+/// * `a` - The analysis.
+/// * `slots` - Import slot address to the import's raw name
+///   ([`import_slots`]).
+/// * `cur` - The node: a function entry, an import slot or a data address.
+/// * `walk` - Which way to walk.
+pub(super) fn call_targets(
+    a: &Analysis,
+    slots: &BTreeMap<u64, &str>,
+    cur: u64,
+    walk: Walk,
+) -> Vec<Callee> {
+    match walk {
+        Walk::Callers => match a.function(cur) {
+            Some(f) => f.callers.iter().map(|&c| Callee::near(c)).collect(),
+            None => {
+                let mut from: Vec<Callee> = a
+                    .xrefs_to(cur)
+                    .iter()
+                    .filter_map(|s| s.from_entry)
+                    .map(Callee::near)
+                    .collect();
+                from.sort_unstable();
+                from.dedup();
+                from
+            }
+        },
+        Walk::Callees => callees_of(a, slots, cur),
     }
 }
 
