@@ -897,7 +897,10 @@ fn register(engine: &mut Engine, host: &Rc<Host>) {
 /// unnamed or named by vtable slot, the first script's first; a failing
 /// script names nothing and its error is kept. When a name goes on, the
 /// results the scripts built while they ran, the name index among them,
-/// are let go of: they read the names from before.
+/// are let go of: they read the names from before. A pack script's
+/// `query` throws: it runs inside the analysis, under no request's
+/// deadline, so one that queried the costly resources could run without
+/// end.
 ///
 /// # Arguments
 ///
@@ -927,13 +930,24 @@ pub fn run_pack_scripts(program: &Program, analysis: Analysis) -> Analysis {
     let runs: Vec<(PackScript, Vec<(u64, String)>)> = scripts
         .into_iter()
         .map(|(pack, file, code)| {
-            let result = run(
+            let refuse: Query = Rc::new(|uri: &str| {
+                Err(format!(
+                    "query is not available in a pack script: it runs inside the analysis, before any resource answers; {} is for a script run on the loaded program",
+                    crate::text::one_line(uri)
+                ))
+            });
+            let ran = run_with(
                 Arc::clone(&program),
                 Arc::clone(&shared),
                 Arc::default(),
                 &code,
                 &[],
+                Some(refuse),
             );
+            let result = match ran.error.clone() {
+                None => Ok(ran),
+                Some(e) => Err(e),
+            };
             let mut report = PackScript {
                 pack,
                 file,

@@ -189,3 +189,28 @@ fn a_raw_layout_maps_the_bytes_where_it_says() {
     assert!(opened.program.pdb_record.is_none());
     assert!(opened.notes.is_empty(), "{:?}", opened.notes);
 }
+
+/// A pack script's `query` throws, where it ran the resources inside the
+/// analysis under no request's deadline.
+#[test]
+fn a_pack_script_cannot_query() {
+    let text = borer_engine::program::Section::mapped(".text", 0x1000, 0, 0x10, false, true);
+    let program = borer_engine::program::Program::raw(
+        vec![0xc3; 0x10],
+        Arch::X86_64,
+        0,
+        Some(0x1000),
+        vec![text],
+    );
+    let (mut pack, _) =
+        borer_engine::pack::Pack::parse("pack q 1\n[scripts]\nrun s.rhai\n", "q.borer")
+            .expect("reads");
+    pack.scripts = vec![(
+        "s.rhai".to_owned(),
+        r#"query("borer://protection");"#.to_owned(),
+    )];
+    let packs = Arc::new(borer_engine::pack::Packs { packs: vec![pack] });
+    let a = Analysis::compute_with(&program, packs);
+    let error = a.pack_scripts[0].error.as_deref().unwrap_or_default();
+    assert!(error.contains("query is not available"), "{error}");
+}
