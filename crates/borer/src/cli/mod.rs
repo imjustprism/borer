@@ -12,14 +12,13 @@ use borer_engine::analysis::{
 use borer_engine::isa::Isa;
 use borer_engine::pack::Pack;
 use borer_engine::program::Feature;
+use borer_engine::strings::walk;
 use borer_engine::table::Window;
 use borer_engine::text::{one_line, quoted, short_path};
 use borer_engine::{disasm, entropy, hexdump as hexfmt, memory, num, script, search};
 
-use crate::params::{Filter, SearchKind, StringEncoding};
-use crate::params::{parse_field_offset, parse_unsigned, stated_fields, stated_values};
+use crate::params::{SearchKind, parse_field_offset, parse_unsigned, stated_fields, stated_values};
 use crate::resources::ABOUT_NEEDS_A_NAME;
-use crate::strwalk::{strings_page, walk_rows};
 use crate::tools::bytes::entropy_threshold;
 use crate::tools::search::render_hits;
 
@@ -647,14 +646,12 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             );
         }
         Query::Strings => {
-            let filter = Filter::new(args.get(2).map(String::as_str).filter(|f| !f.is_empty()));
-            let window = cli_page(args, 3, 100, 500)?;
-            let walk = (crate::strwalk::WALK_MIN, StringEncoding::Both);
-            let rows = walk_rows(&s.program, &s.analysis_or_empty(), walk.1, walk.0);
-            print!(
-                "{}",
-                strings_page(&s.program, rows, &filter, walk, window, false)
-            );
+            let filter = args.get(2).map(String::as_str).filter(|f| !f.is_empty());
+            let (offset, limit) = cli_page(args, 3, 100, 500)?;
+            let (p, a) = (&s.program, s.analysis_or_empty());
+            let both = walk::StringEncoding::Both;
+            let rows = walk::string_rows(p, &a, both, walk::WALK_MIN, filter, offset, limit);
+            print!("{}", rows.spell());
         }
         Query::Extra(extra) => extras::run(extra, args, s)?,
         Query::Wire(cmd) => wire::run(cmd, args, s)?,

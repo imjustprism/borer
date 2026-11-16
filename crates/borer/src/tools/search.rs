@@ -5,17 +5,16 @@ use std::fmt::Write as _;
 
 use borer_engine::analysis::{Analysis, Overlay, render};
 use borer_engine::program::Feature;
+use borer_engine::strings::walk::string_rows;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ErrorData, tool, tool_router};
 
 use crate::BorerServer;
 use crate::errors::err_params;
 use crate::params::{
-    CryptoParams, Filter, FindFunctionByStringParams, Page, SearchKind, SearchParams,
-    StringsParams, SymbolsParams, count_param, to_usize,
+    CryptoParams, FindFunctionByStringParams, Page, SearchKind, SearchParams, StringsParams,
+    SymbolsParams, count_param, to_usize,
 };
-use crate::strwalk;
-use crate::strwalk::{StringRow, strings_page, walk_rows};
 
 #[tool_router(router = search_tools, vis = "pub(crate)")]
 impl BorerServer {
@@ -124,24 +123,24 @@ impl BorerServer {
         }): Parameters<StringsParams>,
     ) -> Result<String, ErrorData> {
         let min = to_usize(min_length.unwrap_or(5).max(4));
-        let filter = Filter::new(filter.as_deref());
-        let encoding = encoding.unwrap_or_default();
+        let encoding = encoding.unwrap_or_default().into();
         let page = Page::new(offset, limit, count_only, 200, 500)?;
         self.with_program(|p| {
-            let a = self.analysis_or_empty();
-            let rows: Vec<StringRow> = if min >= strwalk::WALK_MIN {
-                strwalk::load_or_build(&self.strings, p, &a).rows(encoding, min)
-            } else {
-                walk_rows(p, &a, encoding, min)
-            };
-            Ok(strings_page(
+            let limit = if page.count_only { 0 } else { page.limit.n };
+            let rows = string_rows(
                 p,
-                rows,
-                &filter,
-                (min, encoding),
-                (page.offset, page.limit.n),
-                page.count_only,
-            ))
+                &self.analysis_or_empty(),
+                encoding,
+                min,
+                filter.as_deref(),
+                page.offset,
+                limit,
+            );
+            Ok(if page.count_only {
+                rows.counted()
+            } else {
+                rows.spell()
+            })
         })
         .map(|text| page.limit.noted(text))
     }

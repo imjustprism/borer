@@ -41,7 +41,6 @@ mod safety;
 mod session;
 mod setup;
 mod state;
-mod strwalk;
 mod symsrv;
 mod term;
 #[cfg(test)]
@@ -109,9 +108,6 @@ struct BorerServer {
     raw_load: Arc<RwLock<RawLoad>>,
     /// Derived analysis of `program`, computed on first use and reset by `load_binary`.
     analysis: Arc<RwLock<Option<Arc<Analysis>>>>,
-    /// The loaded program's string walks, computed on the first `strings`
-    /// call and reset by `load_binary`; see [`strwalk`].
-    strings: Arc<RwLock<Option<Arc<strwalk::StringWalks>>>>,
     /// User names and comments.
     overlay: Arc<RwLock<Overlay>>,
     /// The packs the user named in `BORER_PACKS`, read at start; every

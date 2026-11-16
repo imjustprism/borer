@@ -5,6 +5,8 @@ use crate::num::saturating_usize;
 use crate::program::Program;
 use crate::search::eq_mask;
 
+pub mod walk;
+
 /// Character encoding of an extracted string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Encoding {

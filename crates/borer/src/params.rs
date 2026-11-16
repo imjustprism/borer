@@ -140,20 +140,13 @@ pub(crate) enum StringEncoding {
     Both,
 }
 
-impl StringEncoding {
-    /// The canonical name, as the schema lists it.
-    pub(crate) fn word(self) -> &'static str {
-        match self {
-            Self::Ascii => "ascii",
-            Self::Utf16 => "utf16",
-            Self::Both => "both",
+impl From<StringEncoding> for borer_engine::strings::walk::StringEncoding {
+    fn from(e: StringEncoding) -> Self {
+        match e {
+            StringEncoding::Ascii => Self::Ascii,
+            StringEncoding::Utf16 => Self::Utf16,
+            StringEncoding::Both => Self::Both,
         }
-    }
-}
-
-impl std::fmt::Display for StringEncoding {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.word())
     }
 }
 

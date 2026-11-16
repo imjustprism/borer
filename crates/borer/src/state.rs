@@ -345,7 +345,7 @@ impl BorerServer {
 
     /// Puts `program` in place of the loaded one, with the way it was
     /// loaded, and lets go of what belonged to the old one: its names and
-    /// comments, its analysis and its string walks.
+    /// comments and its analysis, with the string walks its memo holds.
     ///
     /// All of it changes under the program's write lock, so no tool body
     /// (which holds the read lock for its whole run, [`Self::with_program`])
@@ -388,7 +388,6 @@ impl BorerServer {
         *write_lock(&self.raw_load) = raw;
         *write_lock(&self.program_packs) = packs;
         *write_lock(&self.analysis) = None;
-        *write_lock(&self.strings) = None;
         (loaded.replace(program), dropped)
     }
 
