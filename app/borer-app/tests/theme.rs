@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use borer_app::actions::{FollowSystemTheme, ToggleTheme};
 use borer_app::app_settings::BORER_THEME;
-use borer_app::app_view::{configure, new_workspace, set_data_dir};
+use borer_app::app_view::{configure, new_workspace};
 use borer_app::binary::{Binary, SettingsNotice, StatusLine};
 use borer_app::code_view::{CodePalette, Role};
 use borer_app::decompile_item::code_row_height;
@@ -23,20 +23,20 @@ use borer_app::shell::Shell;
 use borer_engine::program::checked_metadata;
 use fs::Fs as _;
 use gpui::{
-    App, AppContext as _, AssetSource as _, BorrowAppContext as _, Hsla, Refineable as _, Rgba,
-    TestAppContext, TestDispatcher, TextRun, WindowTextSystem, px,
+    AppContext as _, BorrowAppContext as _, Hsla, Refineable as _, Rgba, TestAppContext, px,
 };
 use project::DisableAiSettings;
 use settings::{BufferLineHeight, Settings as _, SettingsStore, ThemeAppearanceMode};
-use theme::{
-    ActiveTheme as _, Appearance, AppearanceContent, SystemAppearance, Theme, ThemeColors,
-    ThemeColorsRefinement,
-};
+use theme::{ActiveTheme as _, AppearanceContent, Theme, ThemeColors, ThemeColorsRefinement};
 use theme_settings::{
     ThemeContent, ThemeSettings, deserialize_user_theme, refine_theme, status_colors_refinement,
     theme_colors_refinement,
 };
 use workspace::AppState;
+
+mod support;
+
+use support::{boot, start};
 
 /// Grade keys from least to most evidence, then the refuted grade.
 const GRADES: [&str; 4] = [
@@ -187,31 +187,6 @@ fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
         .map(|(x, y)| (x - y).powi(2))
         .sum::<f64>()
         .sqrt()
-}
-
-/// Points Zed's paths at one data directory of the tests, once per process, so no test
-/// resolves the person's own Zed settings.
-fn use_test_data_dir() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        set_data_dir(&std::env::temp_dir().join("borer-app-tests")).expect("the data dir");
-    });
-}
-
-/// Starts Zed's test app state over a fresh in-memory database and file system, under a
-/// dark system appearance, not yet configured.
-fn start(cx: &mut App) -> Arc<AppState> {
-    use_test_data_dir();
-    cx.set_global(db::AppDatabase::test_new());
-    let app_state = AppState::test(cx);
-    *SystemAppearance::global_mut(cx) = SystemAppearance(Appearance::Dark);
-    app_state
-}
-
-/// Starts Zed's test app state, configured as the app configures Zed.
-fn boot(cx: &mut App) {
-    start(cx);
-    configure(cx).expect("the app configures Zed");
 }
 
 /// Starts Zed's test app state with `text` as its settings file, then configures
@@ -561,57 +536,4 @@ fn code_rows_follow_the_buffer_font(cx: &mut TestAppContext) {
         });
         assert_eq!(cx.update(|cx| code_row_height(cx)), rows, "{height}");
     }
-}
-
-/// With the app's fonts and its buffer font, `!=`, `->` and `==` each shape to the two
-/// glyphs their characters shape to alone: no ligature.
-///
-/// Lilex keeps two glyphs when its ligatures are on and swaps both for joined halves, so the
-/// glyphs are compared, not counted. Windows' headless platform shapes nothing, so there the
-/// test takes the windowed one; `!` and `=` shaping apart proves the shaper is real.
-#[test]
-fn the_buffer_font_draws_no_ligature() {
-    let text_system = gpui_platform::current_platform(cfg!(not(windows))).text_system();
-    let cx = TestAppContext::build_with_text_system(TestDispatcher::new(0), None, text_system);
-    cx.update(|cx| {
-        boot(cx);
-        let fonts = assets::Assets
-            .list("fonts")
-            .expect("the bundled fonts list")
-            .into_iter()
-            .filter(|path| path.ends_with(".ttf"))
-            .map(|path| {
-                assets::Assets
-                    .load(&path)
-                    .expect("loads")
-                    .expect("is there")
-            })
-            .collect();
-        cx.text_system().add_fonts(fonts).expect("the fonts load");
-        let settings = ThemeSettings::get_global(cx);
-        let (font, size) = (settings.buffer_font.clone(), settings.buffer_font_size(cx));
-        let shaper = WindowTextSystem::new(cx.text_system().clone());
-        let glyphs = |text: &str| {
-            let run = TextRun {
-                len: text.len(),
-                font: font.clone(),
-                color: gpui::black(),
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            };
-            let line = shaper.layout_line(text, size, &[run], None);
-            let ids = line.runs.iter().flat_map(|run| run.glyphs.iter());
-            ids.map(|glyph| glyph.id).collect::<Vec<_>>()
-        };
-        for pair in ["!=", "->", "=="] {
-            let alone: Vec<_> = pair.chars().flat_map(|c| glyphs(&c.to_string())).collect();
-            assert_eq!(alone.len(), 2, "{pair}");
-            assert!(
-                pair == "==" || alone[0] != alone[1],
-                "{pair}: the shaper is a stand-in"
-            );
-            assert_eq!(glyphs(pair), alone, "{pair} shapes as a ligature");
-        }
-    });
 }

@@ -54,3 +54,8 @@ gpui = { workspace = true, features = ["test-support"] }
 # Builds the profiler histograms gpui reports, at the version and features gpui uses.
 hdrhistogram = { version = "7", default-features = false }
 workspace = { workspace = true, features = ["test-support"] }
+
+# The real platform's shaper, which macOS builds only on the main thread: run from `main`.
+[[test]]
+name = "ligature"
+harness = false
