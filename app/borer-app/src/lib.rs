@@ -44,6 +44,7 @@ pub mod title_bar;
 pub mod user_themes;
 pub mod worker;
 pub mod xrefs;
+pub mod zed_import;
 
 use gpui::{App, AppContext as _};
 

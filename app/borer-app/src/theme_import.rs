@@ -5,7 +5,8 @@
 //! ([`crate::theme_contract`]) on the background executor, and a report shows the result
 //! before anything is copied.
 //!
-//! Import copies the file, byte for byte, into the themes folder and registers it; it
+//! Import copies the file, byte for byte (a Zed theme with borer's keys added,
+//! [`Origin::Zed`]), into the themes folder and registers it; it
 //! never edits the file it was given and never replaces one: the copy is written beside the
 //! destination and moved into place only if nothing is there. A theme name the themes
 //! folder's rule refuses ([`crate::user_themes::claim`]) refuses the import.
@@ -22,11 +23,13 @@ use gpui::{
 };
 use settings::Settings as _;
 use theme::{Appearance, SystemAppearance, ThemeFamily};
-use theme_settings::{ThemeSettings, refine_theme_family};
+use theme_settings::{
+    ThemeFamilyContent, ThemeSettings, deserialize_user_theme, refine_theme_family,
+};
 use ui::prelude::*;
 use workspace::{ModalView, Workspace};
 
-use crate::app_settings::{choose_theme, save_settings};
+use crate::app_settings::{BORER_THEME, choose_theme, save_settings};
 use crate::binary::pick_file;
 use crate::theme_contract::{Failure, check};
 use crate::user_themes::{claim, parse_theme, read_capped, register};
@@ -38,12 +41,16 @@ const MAX_REPORT_LINES: usize = 12;
 pub struct Candidate {
     /// The file the theme was read from, never written.
     pub source: PathBuf,
-    /// The file's bytes, as read.
+    /// The bytes to copy: the file's as read, or for [`Origin::Zed`] the family with
+    /// borer's keys.
     bytes: Vec<u8>,
     /// The file's theme family, refined.
     family: ThemeFamily,
     /// Each theme's name, appearance and the rules it breaks, in the file's order.
     pub reports: Vec<(SharedString, Appearance, Vec<Failure>)>,
+    /// Each theme's name and the `borer.*` keys it takes from borer's theme, from
+    /// [`borrow_borer_keys`]; empty for a file imported as it is.
+    pub borrowed: Vec<(SharedString, Vec<String>)>,
 }
 
 impl fmt::Debug for Candidate {
@@ -55,6 +62,16 @@ impl fmt::Debug for Candidate {
     }
 }
 
+/// Where a theme file comes from, which says whether it is imported as it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// A file the person picked or dropped: copied byte for byte.
+    File,
+    /// A theme Zed has installed: each `borer.*` key it leaves unset takes borer's value
+    /// ([`borrow_borer_keys`]), and the copy is the family with them.
+    Zed,
+}
+
 /// Returns the candidate `bytes`, read from `source`, make: parsed, each theme checked
 /// against the contract, the family refined.
 ///
@@ -62,16 +79,26 @@ impl fmt::Debug for Candidate {
 ///
 /// * `source` - The file the bytes were read from.
 /// * `bytes` - The file's bytes.
+/// * `origin` - Where the file comes from.
 ///
 /// # Errors
 ///
 /// Returns an error naming the file when the bytes do not parse as a theme family or hold
-/// no theme.
-fn candidate(source: PathBuf, bytes: Vec<u8>) -> anyhow::Result<Candidate> {
-    let content = parse_theme(&source, &bytes)?;
+/// no theme, or a Zed theme with borer's keys does not write back.
+fn candidate(source: PathBuf, bytes: Vec<u8>, origin: Origin) -> anyhow::Result<Candidate> {
+    let mut content = parse_theme(&source, &bytes)?;
     if content.themes.is_empty() {
         anyhow::bail!("{} holds no theme", source.display());
     }
+    let (bytes, borrowed) = match origin {
+        Origin::File => (bytes, Vec::new()),
+        Origin::Zed => {
+            let borrowed = borrow_borer_keys(&mut content);
+            let written = serde_json::to_vec_pretty(&content)
+                .with_context(|| format!("writing {} with borer's keys", source.display()))?;
+            (written, borrowed)
+        }
+    };
     let failures: Vec<_> = content.themes.iter().map(check).collect();
     let family = refine_theme_family(content);
     let reports = (family.themes.iter().zip(failures))
@@ -82,7 +109,42 @@ fn candidate(source: PathBuf, bytes: Vec<u8>) -> anyhow::Result<Candidate> {
         bytes,
         family,
         reports,
+        borrowed,
     })
+}
+
+/// Fills each `borer.*` syntax key the themes of `family` leave unset with the value
+/// borer's theme of the same appearance gives it.
+///
+/// # Arguments
+///
+/// * `family` - The theme family, as its file writes it.
+///
+/// # Returns
+///
+/// Each theme's name and the keys it took, in the file's order; none when borer's own
+/// family does not parse, which a test rules out.
+pub fn borrow_borer_keys(family: &mut ThemeFamilyContent) -> Vec<(SharedString, Vec<String>)> {
+    let Ok(borer) = deserialize_user_theme(BORER_THEME) else {
+        return Vec::new();
+    };
+    let mut borrowed = Vec::new();
+    for theme in &mut family.themes {
+        let own = borer
+            .themes
+            .iter()
+            .find(|b| b.appearance == theme.appearance);
+        let syntax = own.into_iter().flat_map(|own| &own.style.syntax);
+        let mut taken = Vec::new();
+        for (key, style) in syntax.filter(|(key, _)| key.starts_with("borer.")) {
+            if !theme.style.syntax.contains_key(key) {
+                theme.style.syntax.insert(key.clone(), style.clone());
+                taken.push(key.clone());
+            }
+        }
+        borrowed.push((theme.name.clone().into(), taken));
+    }
+    borrowed
 }
 
 /// Reads the theme file at `source` and checks each of its themes against the contract,
@@ -103,9 +165,30 @@ pub fn read_candidate(
     source: PathBuf,
     cx: &App,
 ) -> Task<anyhow::Result<Candidate>> {
+    read_from(fs, source, Origin::File, cx)
+}
+
+/// Reads the theme file at `source` as one from `origin`, as [`read_candidate`] does.
+///
+/// # Arguments
+///
+/// * `fs` - Zed's file system.
+/// * `source` - The theme file to import.
+/// * `origin` - Where the file comes from.
+/// * `cx` - Application context.
+///
+/// # Returns
+///
+/// The task reading it, failing as [`read_candidate`]'s does.
+pub fn read_from(
+    fs: Arc<dyn fs::Fs>,
+    source: PathBuf,
+    origin: Origin,
+    cx: &App,
+) -> Task<anyhow::Result<Candidate>> {
     cx.background_executor().spawn(async move {
         let bytes = read_capped(fs.as_ref(), &source).await?;
-        candidate(source, bytes)
+        candidate(source, bytes, origin)
     })
 }
 
@@ -136,13 +219,13 @@ pub fn read_dropped(
         };
         let themed = serde_json::from_slice::<serde_json::Value>(&bytes)
             .is_ok_and(|json| json.get("themes").is_some());
-        let read = candidate(source, bytes);
+        let read = candidate(source, bytes, Origin::File);
         (read.is_ok() || themed).then_some(read)
     })
 }
 
-/// Copies `candidate`'s file, byte for byte, into the themes folder under its own file name
-/// with a `.json` extension, and registers its themes.
+/// Copies `candidate`'s bytes into the themes folder under its file's own name with a
+/// `.json` extension, and registers its themes.
 ///
 /// The bytes are written to a `.part` file beside the destination, which is moved into
 /// place only if nothing is there, so a file that appears meanwhile is never replaced.
@@ -381,8 +464,17 @@ impl Focusable for ImportReport {
 impl Render for ImportReport {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let mut body = v_flex().gap_1();
+        let borrowed = self
+            .candidate
+            .as_ref()
+            .map_or(&[][..], |c| c.borrowed.as_slice());
         for (name, _, failures) in self.reports() {
             body = body.child(Label::new(name.clone()));
+            let taken = borrowed.iter().find(|(theme, _)| theme == name);
+            if let Some((_, keys)) = taken.filter(|(_, keys)| !keys.is_empty()) {
+                let line = format!("takes borer's value for {}", keys.join(", "));
+                body = body.child(Label::new(line).size(LabelSize::Small).color(Color::Muted));
+            }
             if failures.is_empty() {
                 body = body.child(Label::new("keeps the contract").color(Color::Muted));
             }

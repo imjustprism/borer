@@ -587,6 +587,12 @@ pub const COMMANDS: &[Command] = &[
         (MenuName::View, 3),
         Need::Nothing,
     ),
+    item(
+        "borer::ImportThemeFromZed",
+        "Import Theme from Zed...",
+        (MenuName::View, 3),
+        Need::Nothing,
+    ),
     Command {
         keys: &[
             Keys::all(Ctx::Code, &["g"]),

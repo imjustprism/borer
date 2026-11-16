@@ -15,6 +15,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use borer_app::actions::{FollowSystemTheme, SelectTheme, ToggleTheme};
+use borer_app::app_dirs::Dirs;
 use borer_app::app_settings::BORER_THEME;
 use borer_app::app_view::{configure, new_workspace};
 use borer_app::binary::{Binary, SettingsNotice, StatusLine};
@@ -25,9 +26,10 @@ use borer_app::shell::Shell;
 use borer_app::theme_contract::{
     Failure, GRADES, TEXT_FLOOR, check, contrast, grade_rules, syntax_color, text_floors,
 };
-use borer_app::theme_import::{ImportReport, import, read_candidate};
+use borer_app::theme_import::{ImportReport, Origin, import, read_candidate, read_from};
 use borer_app::theme_picker::ThemePicker;
 use borer_app::user_themes::{MAX_THEME_BYTES, MAX_THEME_ENTRIES, notice_id};
+use borer_app::zed_import::zed_themes;
 use borer_engine::program::checked_metadata;
 use fs::Fs as _;
 use futures::StreamExt as _;
@@ -931,4 +933,66 @@ async fn a_dropped_theme_file_opens_its_report(cx: &mut TestAppContext) {
         copied.expect("copied"),
         family("dropped", "dropped dark", "dark", style)
     );
+}
+
+/// Zed's themes folder and each installed extension's themes folder are listed, other
+/// files left out; a Zed theme imports with borer's value for every `borer.*` key it
+/// leaves unset, keeps the ones it sets, and its report names the keys it took.
+#[gpui::test]
+async fn a_zed_theme_imports_with_borers_keys(cx: &mut TestAppContext) {
+    let app_state = boot_with_files(&[], cx).await;
+    let fs = app_state.fs.clone();
+    let fake = fs.as_fake();
+    let root = std::env::temp_dir().join("borer-app-zed");
+    let zed = Dirs {
+        config: root.join("config"),
+        data: root.join("data"),
+    };
+    let (own_dir, ext_dir) = (
+        zed.config.join("themes"),
+        zed.data.join("extensions/installed/nice/themes"),
+    );
+    for dir in [&own_dir, &ext_dir] {
+        fake.create_dir(dir).await.expect("made");
+    }
+    let (own, ext) = (own_dir.join("mine.json"), ext_dir.join("nice.json"));
+    fake.insert_file(&own, family("mine", "mine dark", "dark", "{}"))
+        .await;
+    fake.insert_file(&own_dir.join("notes.txt"), b"x".to_vec())
+        .await;
+    let style = r##"{"syntax": {"borer.register": {"color": "#123456"}}}"##;
+    fake.insert_file(&ext, family("nice", "nice light", "light", style))
+        .await;
+    let found = zed_themes(fs.as_ref(), &zed).await;
+    let listed: Vec<_> = (found.iter())
+        .map(|theme| (theme.path.clone(), theme.from.to_string()))
+        .collect();
+    let want = [
+        (own, "themes folder".to_owned()),
+        (ext.clone(), "nice".to_owned()),
+    ];
+    assert_eq!(listed, want);
+    let read = cx.update(|cx| read_from(fs.clone(), ext, Origin::Zed, cx));
+    let candidate = read.await.expect("reads");
+    let (theme, taken) = candidate.borrowed.first().expect("one theme");
+    assert_eq!(theme, "nice light");
+    assert!(taken.iter().any(|key| key == "borer.address"), "{taken:?}");
+    assert!(
+        !taken.iter().any(|key| key == "borer.register"),
+        "{taken:?}"
+    );
+    let (_, _, failures) = candidate.reports.first().expect("one theme");
+    let unset = failures.iter().any(|f| matches!(f, Failure::Unset { .. }));
+    assert!(!unset, "{failures:?}");
+    import(fs.as_ref(), candidate, &mut cx.to_async())
+        .await
+        .expect("imports");
+    let get = |name: &str, cx: &TestAppContext| {
+        cx.update(|cx| ThemeRegistry::global(cx).get(name).expect("registered"))
+    };
+    let (nice, light) = (get("nice light", cx), get("borer light", cx));
+    let address = |theme: &Theme| syntax_color(theme, "borer.address");
+    assert_eq!(address(&nice), address(&light));
+    let register = syntax_color(&nice, "borer.register").expect("kept");
+    assert!(is(register, 0x123456), "{register:?}");
 }

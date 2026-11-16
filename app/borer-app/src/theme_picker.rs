@@ -21,13 +21,15 @@ use ui::prelude::*;
 use ui::{ListItem, ListItemSpacing};
 use workspace::{DismissDecision, ModalView, Workspace};
 
-use crate::actions::{ImportTheme, SelectTheme};
+use crate::actions::{ImportTheme, ImportThemeFromZed, SelectTheme};
 use crate::app_settings::{ThemeChange, change_theme, choose_theme, save_settings};
 use crate::binary::Binary;
 use crate::commands;
 
-/// Registers the theme commands on `workspace`, over the window's `binary`: the picker,
-/// importing a theme file ([`crate::theme_import::prompt`]), and Zed's light-dark toggle.
+/// Registers the theme commands on `workspace`, over the window's `binary`.
+///
+/// They are the picker, importing a theme file ([`crate::theme_import::prompt`]) or one Zed
+/// has installed ([`crate::zed_import::toggle`]), and Zed's light-dark toggle.
 ///
 /// # Arguments
 ///
@@ -44,6 +46,13 @@ pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
     commands::register(workspace, binary, |_, _: &ImportTheme, window, cx| {
         crate::theme_import::prompt(window, cx);
     });
+    commands::register(
+        workspace,
+        binary,
+        |_, _: &ImportThemeFromZed, window, cx| {
+            crate::zed_import::toggle(window, cx);
+        },
+    );
     commands::register(
         workspace,
         binary,

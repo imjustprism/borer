@@ -92,6 +92,9 @@ gpui::actions!(
         /// Opens the file dialog for a theme file, checks each of its themes against the
         /// theme contract and shows the report, from which it is copied into the themes folder.
         ImportTheme,
+        /// Lists the theme files Zed has installed, its themes folder's and its extensions',
+        /// and opens the import report of the one picked, with borer's keys it lacks.
+        ImportThemeFromZed,
     ]
 );
 
