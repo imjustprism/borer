@@ -574,3 +574,27 @@ fn a_block_walk_stops_at_the_address_it_is_given() {
         }
     }
 }
+
+/// Going to a block's label lands on its `L_x:` line, the one before the
+/// line [`View::line_of`] gives for its first instruction.
+#[test]
+fn a_label_is_defined_the_line_before_its_first_instruction() {
+    let (p, a) = x64_fixture();
+    let v = disasm_view(&p, &a, &Overlay::default(), TEXT, 100, Bytes::Hidden).expect("view");
+    let f = a.function(TEXT).expect("the function");
+    let starts: Vec<u64> = f
+        .blocks
+        .iter()
+        .map(|b| b.start)
+        .filter(|&s| s != TEXT)
+        .collect();
+    assert!(!starts.is_empty());
+    for s in starts {
+        let label = v.definition(&Ref::Address(s)).expect("a label line");
+        assert_eq!(v.line_of(s), Some(label + 1), "{s:#x}");
+        assert!(
+            v.line(label).is_some_and(|l| l == format!("L_{s:x}:")),
+            "{s:#x}"
+        );
+    }
+}

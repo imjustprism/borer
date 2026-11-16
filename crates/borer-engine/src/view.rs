@@ -325,7 +325,11 @@ impl View {
     /// A label is defined on its `L_x:` line, a parameter on the signature
     /// line, a local on its declaration, the function on its signature
     /// line, a function the text defines `static inline` and that body's
-    /// parameters on its line, a type on the line that declares it.
+    /// parameters on its line, a type on the line that declares it. In a
+    /// listing a block's [`Ref::Address`] is defined on its `L_x:` label
+    /// line, the one before the line that shows its first instruction
+    /// ([`View::line_of`]): going to a label goes here, going to an
+    /// instruction goes there.
     ///
     /// # Arguments
     ///
@@ -362,6 +366,9 @@ impl View {
     }
 
     /// Returns the first line that shows the instruction at an address.
+    ///
+    /// For a block's start that is the line after its `L_x:` label, which
+    /// [`View::definition`] gives.
     ///
     /// # Arguments
     ///
