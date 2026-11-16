@@ -72,18 +72,23 @@ const WINDOW_HEIGHT_PX: f32 = 800.0;
 
 /// Returns the data directory of a run in `mode`.
 ///
-/// That is the app's own under the platform's local data directory for a person, one of
-/// the run's own under the temporary directory for a measurement, so a measurement neither
-/// reads nor writes the person's layout.
+/// That is `given` when the command line names one, else the app's own under the
+/// platform's local data directory for a person. A measurement must be given one, a fresh directory its caller creates and removes, so it
+/// neither reads nor writes the person's layout and nothing it leaves outlives the caller.
 ///
 /// # Arguments
 ///
 /// * `mode` - The run's mode.
+/// * `given` - The directory `--data-dir` names, if any.
 ///
 /// # Errors
 ///
-/// Returns an error when the platform has no local data directory.
-pub fn data_dir(mode: &CliMode) -> anyhow::Result<PathBuf> {
+/// Returns an error when a measurement names no directory or the platform has no local
+/// data directory.
+pub fn data_dir(mode: &CliMode, given: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    if let Some(dir) = given {
+        return Ok(dir);
+    }
     match mode {
         CliMode::Interactive(_) => Ok(dirs::data_local_dir()
             .context("the platform has no local data directory")?
@@ -93,8 +98,8 @@ pub fn data_dir(mode: &CliMode) -> anyhow::Result<PathBuf> {
         | CliMode::Headless(_)
         | CliMode::MeasureMemory(_)
         | CliMode::Measure(_)
-        | CliMode::MeasureDrop(..) => Ok(
-            std::env::temp_dir().join(format!("{DATA_DIR_NAME}-measure-{}", std::process::id()))
+        | CliMode::MeasureDrop(..) => anyhow::bail!(
+            "a measurement run needs --data-dir <dir>, a fresh directory its caller removes"
         ),
     }
 }
@@ -405,6 +410,7 @@ fn saved_layout(cx: &App) -> anyhow::Result<Option<DockStructure>> {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
@@ -426,7 +432,7 @@ mod tests {
     use super::{DEFAULT_DOCK_STATE_KEY, REFUSED_FOLDER, configure, data_dir, new_workspace};
     use crate::decompile_item::{DecompileItem, TabMode, open_function};
     use crate::functions_panel::FunctionsPanel;
-    use crate::measure::{CliMode, MeasurePhase};
+    use crate::measure::{CliMode, MeasurePhase, split_data_dir};
     use crate::worker::LoadedBinary;
 
     /// Entry of the sample program's caller, which calls [`CALLEE`].
@@ -592,25 +598,34 @@ mod tests {
         assert_available(&declared, cx);
     }
 
-    /// A measurement run gets a data directory of its own under the temporary directory,
-    /// never the person's.
+    /// A measurement run uses only the data directory its caller names, and refuses to run
+    /// without one, never falling back to the person's; `--data-dir` leads the arguments.
     ///
     /// # Panics
     ///
-    /// Panics if a measurement mode shares the person's directory.
+    /// Panics if a measurement mode falls back to a directory of its own choosing.
     #[test]
-    fn a_measurement_run_gets_its_own_data_dir() {
-        let person = data_dir(&CliMode::Interactive(None)).unwrap();
+    fn a_measurement_run_uses_only_the_data_dir_it_is_given() {
+        let person = data_dir(&CliMode::Interactive(None), None).unwrap();
+        let given = PathBuf::from("run-dir");
         for mode in [
             CliMode::FirstFrame,
             CliMode::ReportOpen(PathBuf::from("a.exe")),
             CliMode::MeasureMemory(PathBuf::from("a.exe")),
             CliMode::Measure(MeasurePhase::ListScroll),
         ] {
-            let run = data_dir(&mode).unwrap();
-            assert_ne!(run, person);
-            assert!(run.starts_with(std::env::temp_dir()), "{}", run.display());
+            assert!(data_dir(&mode, None).is_err());
+            assert_eq!(data_dir(&mode, Some(given.clone())).unwrap(), given);
         }
+        assert_ne!(person, given);
+        let args: Vec<OsString> = ["--data-dir", "run-dir", "--first-frame"]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
+        let (dir, rest) = split_data_dir(&args).unwrap();
+        assert_eq!(dir, Some(given));
+        assert_eq!(rest, &args[2..]);
+        assert!(split_data_dir(&args[..1]).is_err());
     }
 
     /// Zed's command palette opens over the app, and what it lists holds every `borer`

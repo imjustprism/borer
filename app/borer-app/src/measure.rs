@@ -351,18 +351,43 @@ fn say(line: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Parses `std::env::args_os` into a [`CliMode`] without panicking on non-Unicode paths.
+/// Parses `std::env::args_os` into a [`CliMode`] and the data directory a leading
+/// `--data-dir <dir>` names, without panicking on non-Unicode paths.
 ///
 /// # Returns
 ///
-/// Parsed [`CliMode`] describing how `borer-app` should run.
+/// The parsed [`CliMode`] and the data directory, `None` when none is named.
 ///
 /// # Errors
 ///
 /// Returns an error when a flag requiring a `<path>` or `--phase` value omits it.
-pub fn parse_cli_args() -> anyhow::Result<CliMode> {
+pub fn parse_cli_args() -> anyhow::Result<(CliMode, Option<PathBuf>)> {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    parse_cli_args_os(&args)
+    let (data_dir, rest) = split_data_dir(&args)?;
+    Ok((parse_cli_args_os(rest)?, data_dir))
+}
+
+/// Splits a leading `--data-dir <dir>` off `args`.
+///
+/// # Arguments
+///
+/// * `args` - Command-line arguments excluding `argv[0]`.
+///
+/// # Returns
+///
+/// The named directory, `None` without the flag, and the arguments after it.
+///
+/// # Errors
+///
+/// Returns an error when `--data-dir` has no directory after it.
+pub fn split_data_dir(args: &[OsString]) -> anyhow::Result<(Option<PathBuf>, &[OsString])> {
+    if args.first().and_then(|first| first.to_str()) != Some("--data-dir") {
+        return Ok((None, args));
+    }
+    let dir = args
+        .get(1)
+        .ok_or_else(|| anyhow::anyhow!("--data-dir requires a <dir> path"))?;
+    Ok((Some(PathBuf::from(dir)), args.get(2..).unwrap_or_default()))
 }
 
 /// Parses an explicit slice of OS arguments into a [`CliMode`].

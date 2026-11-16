@@ -32,11 +32,13 @@ import ctypes.wintypes as wt
 import json
 import os
 import re
+import shutil
 import socket
 import statistics
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -483,6 +485,47 @@ def send_client_click(
         if not up_posted:
             with contextlib.suppress(Exception):
                 user32.PostMessageW(wt.HWND(hwnd), WM_LBUTTONUP, wt.WPARAM(0), lparam)
+
+
+_RUN_DIR_PREFIX = "borer-app-measure-"
+"""Name prefix of the data directory each app run gets, so a sweep finds leftovers."""
+
+_RUN_DIRS: list[Path] = []
+"""Data directories of this script's app runs, removed once every run has ended."""
+
+
+def _spawn_app(
+    exe: Path,
+    args: list[str],
+    *,
+    with_stdin: bool = False,
+) -> tuple[subprocess.Popen[str], Callable[[], str]]:
+    """Start the app over a fresh, randomly named, private data directory of its own."""
+    data_dir = Path(tempfile.mkdtemp(prefix=_RUN_DIR_PREFIX))
+    _RUN_DIRS.append(data_dir)
+    return _spawn_bench_proc([str(exe), "--data-dir", str(data_dir), *args], with_stdin=with_stdin)
+
+
+def _remove_run_dirs(dirs: list[Path]) -> str | None:
+    """Remove the given run data directories; return what could not be removed, or None."""
+    left: list[str] = []
+    for data_dir in dirs:
+        for attempt in range(20):
+            try:
+                shutil.rmtree(data_dir)
+                break
+            except FileNotFoundError:
+                break
+            except OSError as exc:
+                if attempt == 19:
+                    left.append(f"{data_dir}: {exc}")
+                time.sleep(0.1)
+    return "; ".join(left) or None
+
+
+def _stale_run_dirs() -> list[Path]:
+    """Return the run data directories earlier, killed or crashed measurements left."""
+    return sorted(Path(tempfile.gettempdir()).glob(f"{_RUN_DIR_PREFIX}*"))
 
 
 def _spawn_bench_proc(
@@ -985,7 +1028,7 @@ def measure_timed_marker(
     for i in range(runs):
         phase_id = f"{phase}-{i}"
         t0 = time.perf_counter()
-        proc, get_stderr = _spawn_bench_proc([str(exe), *args])
+        proc, get_stderr = _spawn_app(exe, args)
         watch_thread = watcher.watch_while(proc, phase_id)
         assert proc.stdout is not None
         matched = False
@@ -1018,7 +1061,7 @@ def measure_timed_marker(
 
 def measure_memory_delta(exe: Path, binary: str, watcher: NetWatcher) -> dict[str, Any]:
     def sample_mode(flag: str, marker: str, label: str) -> tuple[int, dict[str, Any]]:
-        proc, get_stderr = _spawn_bench_proc([str(exe), flag, binary], with_stdin=True)
+        proc, get_stderr = _spawn_app(exe, [flag, binary], with_stdin=True)
         watch_thread = watcher.watch_while(proc, label)
         assert proc.stdout is not None and proc.stdin is not None
         kv: dict[str, Any] = {}
@@ -1057,7 +1100,7 @@ def measure_memory_delta(exe: Path, binary: str, watcher: NetWatcher) -> dict[st
 
 def measure_scroll_phase(exe: Path, kind: str, watcher: NetWatcher) -> dict[str, Any]:
     phase_id = f"scroll-{kind}"
-    proc, get_stderr = _spawn_bench_proc([str(exe), "--measure", "--phase", kind])
+    proc, get_stderr = _spawn_app(exe, ["--measure", "--phase", kind])
     watch_thread = watcher.watch_while(proc, phase_id)
     assert proc.stdout is not None
     kv: dict[str, Any] = {}
@@ -1081,14 +1124,12 @@ def measure_scroll_phase(exe: Path, kind: str, watcher: NetWatcher) -> dict[str,
 def measure_folder_drop(exe: Path, watcher: NetWatcher) -> dict[str, Any]:
     """Drop a folder whose settings start a context server on the app and read back
     the project's folder count; the watcher's job counts any program the drop started."""
-    import tempfile
-
     with tempfile.TemporaryDirectory(prefix="borer-app-drop-") as tmp:
         settings = Path(tmp) / ".zed" / "settings.json"
         settings.parent.mkdir()
         server = {"context_servers": {"x": {"command": "cmd.exe", "args": ["/c", "exit"]}}}
         settings.write_text(json.dumps(server), encoding="utf-8")
-        proc, get_stderr = _spawn_bench_proc([str(exe), "--measure-drop", tmp])
+        proc, get_stderr = _spawn_app(exe, ["--measure-drop", tmp])
         watch_thread = watcher.watch_while(proc, "drop")
         assert proc.stdout is not None
         kv: dict[str, Any] = {}
@@ -1114,10 +1155,7 @@ def measure_input_latency(
     *,
     allow_fallback: bool = False,
 ) -> dict[str, Any]:
-    proc, get_stderr = _spawn_bench_proc(
-        [str(exe), "--measure", "--phase", "input"],
-        with_stdin=True,
-    )
+    proc, get_stderr = _spawn_app(exe, ["--measure", "--phase", "input"], with_stdin=True)
     watch_thread = watcher.watch_while(proc, "input")
     hwnd: int | None = None
     kv: dict[str, Any] = {}
@@ -1347,6 +1385,10 @@ def main() -> int:
     print(f"Hardware: CPU={hw['cpu']} GPUs={hw['gpus']}", flush=True)
     print(f"Binary:   {exe} ({exe.stat().st_size:,} bytes)", flush=True)
 
+    stale = _remove_run_dirs(_stale_run_dirs())
+    if stale is not None:
+        print(f"ERROR: run data directories left by earlier measurements: {stale}", file=sys.stderr)
+        return 1
     watcher = NetWatcher()
     try:
         print("==> 1/6 First frame (10 runs)...", flush=True)
@@ -1402,6 +1444,7 @@ def main() -> int:
         print(f"    folders={folder_drop.get('folders')}", flush=True)
     finally:
         watcher.close()
+        left = _remove_run_dirs(_RUN_DIRS)
 
     report = _build_report(
         exe,
@@ -1434,6 +1477,8 @@ def main() -> int:
     for where in ("on_start", "on_tab"):
         if folder_drop.get(where) is not True:
             failures.append(f"the drop {where} did not reach a tab's drop handler")
+    if left is not None:
+        failures.append(f"run data directories not removed: {left}")
     if folder_drop.get("folders") != 0:
         failures.append(
             f"a dropped folder joined the project (folders={folder_drop.get('folders')})"

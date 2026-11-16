@@ -28,16 +28,11 @@ use crate::worker::mark_ui_thread;
 /// (`--headless`, `--report-open`, `--measure-memory`, `--measure`) fails to load or
 /// measure its target binary.
 pub fn run() -> anyhow::Result<()> {
-    let mode = parse_cli_args()?;
+    let (mode, given_dir) = parse_cli_args()?;
     if let CliMode::Headless(path) = mode {
         return run_headless(path);
     }
-    let dir = app_view::data_dir(&mode)?;
-    let measured = !matches!(mode, CliMode::Interactive(_));
-    if measured {
-        remove_run_dir(&dir)?;
-    }
-    app_view::set_data_dir(&dir)?;
+    app_view::set_data_dir(&app_view::data_dir(&mode, given_dir)?)?;
     let exit_slot = new_cli_exit_slot();
     let app_slot = exit_slot.clone();
     gpui_platform::application()
@@ -73,27 +68,5 @@ pub fn run() -> anyhow::Result<()> {
                 cx.quit();
             }
         });
-    let result = exit_slot.borrow_mut().take().map_or(Ok(()), Err);
-    if measured && let Err(err) = remove_run_dir(&dir) {
-        eprintln!("borer-app: {err:#}");
-    }
-    result
-}
-
-/// Removes a measurement run's data directory, if it is there.
-///
-/// # Arguments
-///
-/// * `dir` - The run's data directory.
-///
-/// # Errors
-///
-/// Returns an error when the directory exists and cannot be removed.
-fn remove_run_dir(dir: &std::path::Path) -> anyhow::Result<()> {
-    match std::fs::remove_dir_all(dir) {
-        Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
-            Err(anyhow::Error::new(err).context(format!("removing {}", dir.display())))
-        }
-        Ok(()) | Err(_) => Ok(()),
-    }
+    exit_slot.borrow_mut().take().map_or(Ok(()), Err)
 }
