@@ -1,16 +1,22 @@
 //! Edits as values: the changes an edit writes replay it and their
-//! inverses take it back.
+//! inverses take it back, and a plan commits to the overlay it was made
+//! over and to no other.
 
 #![expect(
     clippy::missing_panics_doc,
     reason = "assertions are the point of a test"
 )]
 
-use borer_engine::analysis::Overlay;
-use borer_engine::analysis::edit::{Change, Key, Value};
+use crate::common::fixture;
+use borer_engine::analysis::edit::{
+    Change, Edit, Force, Key, Line, Plan, Refused, Stale, Value, commit, plan,
+};
+use borer_engine::analysis::project::NAMES_MAX;
 use borer_engine::analysis::protos::{Proto, Var, VarKey};
 use borer_engine::analysis::stated::Field;
 use borer_engine::analysis::utypes::{UserType, parse_type};
+use borer_engine::analysis::{Analysis, Overlay};
+use borer_engine::num::from_usize;
 
 /// The changes between two overlays, one per entry of every kind that
 /// differs, applied to the first give the second, and their inverses
@@ -70,4 +76,115 @@ fn changes_replay_an_edit_and_their_inverses_take_it_back() {
     replayed.apply(&back);
     assert_eq!(replayed.fingerprint(), before.fingerprint());
     assert!(replayed.changes(&before).is_empty());
+}
+
+/// A rename planned and committed names the function as `set_name` did:
+/// the plan says what the function went by and takes, and the change
+/// names the entry with what it held and holds.
+#[test]
+fn a_planned_rename_commits_the_name_and_its_change() {
+    let p = fixture();
+    let a = Analysis::compute(&p);
+    let entry = a.functions.first().expect("a function").entry;
+    let mut o = Overlay::default();
+    o.names.insert(entry, "first".to_owned());
+    let edits = [Edit::Name {
+        at: entry,
+        name: "second".to_owned(),
+    }];
+    let made = plan(&p, &a, &o, &edits, Force::Refuse).expect("planned");
+    assert_eq!(
+        made.lines,
+        vec![Line::Named {
+            target: entry,
+            function: true,
+            old: "first".to_owned(),
+            new: "second".to_owned(),
+            number: None,
+        }]
+    );
+    let changes = commit(&a, &mut o, &made).expect("committed");
+    assert_eq!(
+        changes,
+        vec![Change {
+            key: Key::Name(entry),
+            old: Some(Value::Text("first".to_owned())),
+            new: Some(Value::Text("second".to_owned())),
+        }]
+    );
+    let mut named = Overlay::default();
+    named.names.insert(entry, "second".to_owned());
+    assert_eq!(o.fingerprint(), named.fingerprint());
+}
+
+/// Two renames to one name planned over one overlay cannot both land.
+///
+/// The second commit finds the overlay changed and is refused as stale,
+/// and planned again it is refused as `set_name` refuses a taken name.
+///
+/// Before plans were values the server checked a rename against a copy of
+/// the overlay taken before its write lock, so two calls at once could
+/// both pass the check and leave two addresses of one name.
+#[test]
+fn a_plan_made_before_another_commit_is_stale() {
+    let p = fixture();
+    let a = Analysis::compute(&p);
+    let (first, second) = match a.functions.as_slice() {
+        [f, g, ..] => (f.entry, g.entry),
+        _ => panic!("two functions"),
+    };
+    let mut o = Overlay::default();
+    let rename = |at: u64| {
+        [Edit::Name {
+            at,
+            name: "shared".to_owned(),
+        }]
+    };
+    let made_a = plan(&p, &a, &o, &rename(first), Force::Refuse).expect("planned");
+    let made_b = plan(&p, &a, &o, &rename(second), Force::Refuse).expect("planned");
+    commit(&a, &mut o, &made_a).expect("committed");
+    let stale = commit(&a, &mut o, &made_b).expect_err("stale");
+    assert!(stale.is::<Stale>(), "{stale}");
+    assert_eq!(o.names.len(), 1, "the stale plan wrote nothing");
+    let again = plan(&p, &a, &o, &rename(second), Force::Refuse).expect_err("taken");
+    let refused = again.downcast_ref::<Refused>().expect("an edit refused");
+    assert_eq!(refused.edit, 0);
+    assert!(
+        refused.why.starts_with("'shared' ")
+            && refused.why.contains(&format!("{first:#x}"))
+            && refused
+                .why
+                .ends_with("pick another name, or force=true to take it"),
+        "{}",
+        refused.why
+    );
+}
+
+/// A plan that would take the overlay past a project's cap is refused by
+/// the commit, which leaves the overlay as it was, as the plan is.
+#[test]
+fn a_commit_past_a_cap_writes_nothing() {
+    let p = fixture();
+    let a = Analysis::compute(&p);
+    let mut o = Overlay::default();
+    o.names
+        .extend((0..NAMES_MAX).map(|i| (0x10_0000 + from_usize(i), format!("n{i}"))));
+    let before = o.fingerprint();
+    let one_more = Plan {
+        base: o.edits_key(),
+        changes: vec![Change {
+            key: Key::Name(0x1000),
+            old: None,
+            new: Some(Value::Text("one_more".to_owned())),
+        }],
+        lines: Vec::new(),
+    };
+    let refused = commit(&a, &mut o, &one_more).expect_err("past the cap");
+    assert!(refused.to_string().contains("names"), "{refused}");
+    assert_eq!(o.fingerprint(), before, "the overlay changed");
+    let edits = [Edit::Name {
+        at: 0x1000,
+        name: "one_more".to_owned(),
+    }];
+    plan(&p, &a, &o, &edits, Force::Take).expect_err("the plan refuses it too");
 }

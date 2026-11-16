@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+use borer_engine::analysis::edit::{self, Edit, Force, Plan};
 use borer_engine::analysis::{Analysis, EnumSource, Overlay, parse_addr};
 use borer_engine::clr::managed;
 use borer_engine::pack::{Pack, Packs};
@@ -35,6 +36,19 @@ pub(crate) struct RawLoad {
 
 /// The refusal every tool answers before `load_binary`.
 pub(crate) const NO_BINARY: &str = "no binary loaded; call load_binary first";
+
+/// Returns `o` as tools read it: constants rendered by the binary's own
+/// name tables ([`EnumSource::Binary`]).
+///
+/// # Arguments
+///
+/// * `o` - The overlay as the user left it.
+pub(crate) fn tabled(o: &Overlay) -> Overlay {
+    Overlay {
+        enum_source: EnumSource::Binary,
+        ..o.clone()
+    }
+}
 
 /// Reads under a lock, through a poisoning.
 ///
@@ -421,10 +435,7 @@ impl BorerServer {
     /// the functions it calls, each computed once ([`EnumSource::Binary`]),
     /// so no call waits for the binary's every table.
     pub(crate) fn overlay(&self) -> Overlay {
-        Overlay {
-            enum_source: EnumSource::Binary,
-            ..self.overlay_plain()
-        }
+        tabled(&read_lock(&self.overlay))
     }
 
     /// Returns the annotation overlay as the user left it, without the
@@ -513,6 +524,105 @@ impl BorerServer {
         };
         self.names_changed(&before);
         Ok(())
+    }
+
+    /// Returns the analysis when one is held, else an empty one, without
+    /// computing it: for an edit whose checks read no code, and for the
+    /// memo a commit carries over.
+    pub(crate) fn analysis_held(&self) -> Arc<Analysis> {
+        read_lock(&self.analysis).clone().unwrap_or_default()
+    }
+
+    /// Commits `plan` to the overlay under its write lock
+    /// ([`edit::commit`]), or, when another edit landed since the plan was
+    /// made ([`edit::Stale`]), the plan `again` makes over the overlay as it
+    /// is then, under the same lock, so no edit lands in between.
+    ///
+    /// A tool that read the program outside its lock (a script's run, a
+    /// project's identity check) must not land what it found on another
+    /// program a `load_binary` put in its place meanwhile: given the
+    /// program, the check and the commit hold the program's lock, which
+    /// `load_binary` takes to swap the program ([`Self::install`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The program the plan was made for, when the caller
+    ///   read it outside its lock; `None` inside a tool body, which holds it.
+    /// * `plan` - The plan.
+    /// * `again` - Plans the edits again over the overlay as it is. It runs
+    ///   under the overlay's write lock, so it must not take that lock.
+    ///
+    /// # Returns
+    ///
+    /// The plan committed: `plan`, or the one `again` made.
+    ///
+    /// # Errors
+    ///
+    /// When another program is loaded now, the edits planned again are
+    /// refused, or the overlay would hold more than a project file holds;
+    /// nothing was applied.
+    pub(crate) fn commit(
+        &self,
+        program: Option<&Arc<Program>>,
+        plan: Plan,
+        again: impl FnOnce(&Overlay) -> anyhow::Result<Plan>,
+    ) -> anyhow::Result<Plan> {
+        let loaded = program.map(|_| read_lock(&self.program));
+        if let (Some(program), Some(loaded)) = (program, &loaded)
+            && !loaded.as_ref().is_some_and(|now| Arc::ptr_eq(now, program))
+        {
+            anyhow::bail!(
+                "{} is no longer the loaded binary (a load_binary ran meanwhile); nothing was applied",
+                program.path.display()
+            );
+        }
+        let analysis = self.analysis_held();
+        let mut overlay = write_lock(&self.overlay);
+        match edit::commit(&analysis, &mut overlay, &plan) {
+            Ok(_) => Ok(plan),
+            Err(stale) if stale.is::<edit::Stale>() => {
+                let plan = again(&overlay)?;
+                edit::commit(&analysis, &mut overlay, &plan)?;
+                Ok(plan)
+            }
+            Err(refused) => Err(refused),
+        }
+    }
+
+    /// Plans `edits` over the overlay a tool read and, unless `dry`,
+    /// commits them ([`Self::commit`]), planned again over the overlay as
+    /// tools read it ([`tabled`]) when another edit landed first.
+    ///
+    /// # Arguments
+    ///
+    /// * `(p, a, o)` - The loaded program, its analysis and the overlay
+    ///   the tool read.
+    /// * `edits` - The edits.
+    /// * `force` - Whether a name another address answers to is taken.
+    /// * `dry` - Plan them and write nothing.
+    ///
+    /// # Returns
+    ///
+    /// The plan, committed unless `dry`.
+    ///
+    /// # Errors
+    ///
+    /// When an edit is refused ([`edit::Refused`]) or the edits would pass
+    /// a cap; nothing was applied.
+    pub(crate) fn edited(
+        &self,
+        (p, a, o): (&Program, &Analysis, &Overlay),
+        edits: &[Edit],
+        force: Force,
+        dry: bool,
+    ) -> anyhow::Result<Plan> {
+        let made = edit::plan(p, a, o, edits, force)?;
+        if dry {
+            return Ok(made);
+        }
+        self.commit(None, made, |now| {
+            edit::plan(p, a, &tabled(now), edits, force)
+        })
     }
 
     /// Resolves an address argument: `0x`-hex text, else a name looked up

@@ -3,9 +3,10 @@
 
 use std::fmt::Write as _;
 
-use borer_engine::analysis::project::{COMMENTS_MAX, room};
+use borer_engine::analysis::edit::{self, Edit, Force, Line};
+use borer_engine::analysis::project::room;
 use borer_engine::analysis::utypes::APPLIED_MAX;
-use borer_engine::analysis::{Analysis, Overlay, parse_addr, stated};
+use borer_engine::analysis::{Analysis, Overlay, stated};
 use borer_engine::program::{Feature, Program};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ErrorData, tool, tool_router};
@@ -261,81 +262,51 @@ impl BorerServer {
             must_fit_a_row(name, Annotation::Name)?;
             must_be_a_name(name)?;
         }
-        let force = force.unwrap_or(false);
-        let single = pairs.len() == 1;
+        let force = if force.unwrap_or(false) {
+            Force::Take
+        } else {
+            Force::Refuse
+        };
+        let item = |i: usize, e: String| match pairs.get(i) {
+            Some((address, name)) if pairs.len() > 1 => format!("{address}={name}: {e}"),
+            Some(_) | None => e,
+        };
         self.with_analysis(Feature::Discover, |p, a, o| {
-            let mut working = o.clone();
-            let mut renamed = Vec::with_capacity(pairs.len());
-            let mut lines = Vec::with_capacity(pairs.len());
-            for (address, name) in &pairs {
-                let item = |e: String| {
-                    if single {
-                        e
-                    } else {
-                        format!("{address}={name}: {e}")
-                    }
-                };
-                let va = self.addr(p, address).map_err(item)?;
-                must_be_in_a_section(p, va, Annotation::Name).map_err(item)?;
-                let target = a.function_at(va).map_or(va, |f| f.entry);
-                let old = borer_engine::analysis::name_of(a, &working, target);
-                working.names.insert(target, name.clone());
-                if !force {
-                    match borer_engine::analysis::resolve(p, a, &working, name) {
-                        Ok(at) if at == target => {}
-                        Ok(at) => {
-                            return Err(item(format!(
-                                "'{name}' already names {at:#x}; pick another name, or force=true to take it"
-                            )));
-                        }
-                        Err(why) => {
-                            return Err(item(format!(
-                                "'{name}' is taken ({why}); pick another name, or force=true to take it"
-                            )));
-                        }
-                    }
-                }
-                let what = if a.function(target).is_some() {
-                    "function"
-                } else {
-                    "data"
-                };
-                let numeric = parse_addr(name).map_or_else(String::new, |n| {
-                    format!(
-                        "
-# note: '{name}' also reads as the number {n:#x}; an address argument finds the name first, and 0x-prefixed text is always an address"
-                    )
-                });
-                let line = if dry {
-                    format!("would set name of {what} {target:#x} ({old}) to '{name}'")
-                } else {
-                    format!("renamed {what} {target:#x}: {old} -> {name}")
-                };
-                lines.push((line, numeric));
-                renamed.push((target, name.clone()));
-            }
-            borer_engine::analysis::project::held(&working)?;
-            let joined = || {
-                lines
+            let edits = pairs
+                .iter()
+                .enumerate()
+                .map(|(i, (address, name))| {
+                    let at = self.addr(p, address).map_err(|e| item(i, e))?;
+                    must_be_in_a_section(p, at, Annotation::Name).map_err(|e| item(i, e))?;
+                    Ok(Edit::Name {
+                        at,
+                        name: name.clone(),
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let plan = self
+                .edited((p, a, o), &edits, force, dry)
+                .map_err(|e| match e.downcast_ref::<edit::Refused>() {
+                    Some(refused) => item(refused.edit, refused.why.clone()),
+                    None => e.to_string(),
+                })?;
+            let lines: Vec<(String, String)> = plan.lines.iter().map(|l| said(l, dry)).collect();
+            Ok(match lines.as_slice() {
+                [_] => answered(&lines, dry),
+                more if dry => format!(
+                    "dry-run: {} names\n{}\npass dry_run=false to apply.",
+                    more.len(),
+                    more.iter()
+                        .map(|(line, numeric)| format!("would {line}{numeric}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ),
+                more => more
                     .iter()
                     .map(|(line, numeric)| format!("{line}{numeric}"))
                     .collect::<Vec<_>>()
-                    .join("\n")
-            };
-            if dry {
-                return Ok(match lines.as_slice() {
-                    [(line, numeric)] => {
-                        format!("dry-run: {line}. pass dry_run=false to apply.{numeric}")
-                    }
-                    more => format!(
-                        "dry-run: {} names\n{}\npass dry_run=false to apply.",
-                        more.len(),
-                        joined()
-                    ),
-                });
-            }
-            self.edit_overlay(|o| o.names.extend(renamed))?;
-            Ok(joined())
+                    .join("\n"),
+            })
         })
     }
 
@@ -373,21 +344,16 @@ impl BorerServer {
         self.with_program(|p| {
             let va = self.addr(p, &address)?;
             must_be_in_a_section(p, va, Annotation::Comment)?;
-            adding(
-                &read_lock(&self.overlay).comments,
-                Some(va),
-                "comments",
-                COMMENTS_MAX,
-            )?;
-            if dry {
-                return Ok(format!(
-                    "dry-run: would set comment at {va:#x}. pass dry_run=false to apply."
-                ));
-            }
-            self.edit_overlay(|o| {
-                o.comments.insert(va, comment.clone());
-            })?;
-            Ok(format!("comment set at {va:#x}"))
+            let edits = [Edit::Comment {
+                at: va,
+                text: comment.clone(),
+            }];
+            let a = self.analysis_held();
+            let plan = self
+                .edited((p, &a, &self.overlay()), &edits, Force::Refuse, dry)
+                .map_err(|e| e.to_string())?;
+            let lines: Vec<(String, String)> = plan.lines.iter().map(|l| said(l, dry)).collect();
+            Ok(answered(&lines, dry))
         })
     }
 
@@ -836,6 +802,69 @@ impl BorerServer {
             );
         }
         Ok(page.limit.noted(out))
+    }
+}
+
+/// Spells one line of a plan as the tools word it, without the `would`
+/// a dry run opens with: the line, and the note that follows the answer.
+///
+/// # Arguments
+///
+/// * `line` - The line.
+/// * `dry` - Whether the plan is a dry run's.
+///
+/// # Returns
+///
+/// The line's words, and its note, empty when it has none.
+fn said(line: &Line, dry: bool) -> (String, String) {
+    match line {
+        Line::Named {
+            target,
+            function,
+            old,
+            new,
+            number,
+        } => {
+            let what = if *function { "function" } else { "data" };
+            let numeric = number.map_or_else(String::new, |n| {
+                format!(
+                    "
+# note: '{new}' also reads as the number {n:#x}; an address argument finds the name first, and 0x-prefixed text is always an address"
+                )
+            });
+            let line = if dry {
+                format!("set name of {what} {target:#x} ({old}) to '{new}'")
+            } else {
+                format!("renamed {what} {target:#x}: {old} -> {new}")
+            };
+            (line, numeric)
+        }
+        Line::Commented { at } if dry => (format!("set comment at {at:#x}"), String::new()),
+        Line::Commented { at } => (format!("comment set at {at:#x}"), String::new()),
+    }
+}
+
+/// Answers a plan of one line or of lines joined by `; `: a dry run says
+/// what it would do and how to apply it, then the notes.
+///
+/// # Arguments
+///
+/// * `lines` - The plan's lines as [`said`] spells them.
+/// * `dry` - Whether the plan is a dry run's.
+fn answered(lines: &[(String, String)], dry: bool) -> String {
+    let said: Vec<&str> = lines
+        .iter()
+        .map(|(line, _)| line.as_str())
+        .filter(|line| !line.is_empty())
+        .collect();
+    let notes: String = lines.iter().map(|(_, note)| note.as_str()).collect();
+    if dry {
+        format!(
+            "dry-run: would {}. pass dry_run=false to apply.{notes}",
+            said.join("; ")
+        )
+    } else {
+        format!("{}{notes}", said.join("; "))
     }
 }
 

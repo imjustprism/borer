@@ -1674,3 +1674,49 @@ fn renames_to_a_spelled_name_or_a_destructor_let_a_kept_view_go() {
         );
     }
 }
+
+/// A rename committed through the edit path carries the memo over.
+///
+/// A view built over the text of a function that does not call the
+/// renamed one is the same result after the commit, and its caller's is
+/// built again with the new name ([`borer_engine::analysis::edit::commit`]).
+#[test]
+fn a_committed_rename_keeps_the_views_that_do_not_name_it() {
+    use borer_engine::analysis::edit::{Edit, Force, commit, plan};
+    let (b, c) = (TEXT + 0x40, TEXT + 0x80);
+    let p = exported_four();
+    let a = Analysis::compute(&p);
+    let view_at = |o: &Overlay, e: u64| {
+        let text = decompile_named(&p, &a, o, e).expect("a text");
+        let make = || view_of(&p, &a, o, e, &text);
+        a.derived
+            .get_or_build_item("edit_view_test", o.fingerprint(), e, make, |_| 0)
+    };
+    let mut o = Overlay {
+        enum_source: EnumSource::Binary,
+        ..Overlay::default()
+    };
+    let (caller, kept) = (view_at(&o, TEXT), view_at(&o, c));
+    let edits = [Edit::Name {
+        at: b,
+        name: "renamed_b".to_owned(),
+    }];
+    let made = plan(&p, &a, &o, &edits, Force::Refuse).expect("planned");
+    commit(&a, &mut o, &made).expect("committed");
+    assert!(
+        Arc::ptr_eq(&kept, &view_at(&o, c)),
+        "the view was built again"
+    );
+    let rebuilt = view_at(&o, TEXT);
+    assert!(
+        !Arc::ptr_eq(&caller, &rebuilt),
+        "the caller's view was kept"
+    );
+    let linked = rebuilt.as_ref().as_ref().map(tokens).unwrap_or_default();
+    assert!(
+        linked
+            .iter()
+            .any(|(_, w, _, link)| w == "renamed_b" && *link == Some(Ref::Function(b))),
+        "{linked:?}"
+    );
+}

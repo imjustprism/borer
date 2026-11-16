@@ -8,14 +8,22 @@
 //! The keys are the maps a project saves; the name tables, where they come
 //! from, the passes left out and the choice points moved are never saved
 //! and never written by an edit, so no change names them.
+//!
+//! What a tool asks for is an [`Edit`]. [`plan`] checks a list of them
+//! against the program, its analysis and the overlay and works out the
+//! changes they make, and [`commit`] writes those changes to the overlay
+//! they were planned over, and to no other: two edits planned at once
+//! cannot both pass a check the first one's write would fail.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
-use super::Overlay;
 use super::protos::{Proto, Var, VarKey};
 use super::reads::{Tag, Tracked};
 use super::stated::Field;
 use super::utypes::{TypeExpr, UserType};
+use super::{Analysis, Overlay, name_of, parse_addr, project, resolve};
+use crate::program::Program;
 
 /// One entry of the overlay: the map it is in and its key there.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -242,4 +250,295 @@ impl Overlay {
         diff(&mut out, fields, Key::Fields, Value::Fields);
         out
     }
+}
+
+/// Whether a name another address answers to is taken from it or refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Force {
+    /// A name another address answers to is refused: two places of one
+    /// name make every later lookup of it ambiguous.
+    Refuse,
+    /// The name is set whoever else answers to it.
+    Take,
+}
+
+/// One edit a tool asks for, its addresses and values parsed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Edit {
+    /// Names the function `at` is in, or the address itself when it is in
+    /// none.
+    Name {
+        /// An address inside the function or the data named.
+        at: u64,
+        /// The name.
+        name: String,
+    },
+    /// Comments an address.
+    Comment {
+        /// The address.
+        at: u64,
+        /// The comment.
+        text: String,
+    },
+}
+
+/// One thing a plan does, as facts a front end spells in its own words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Line {
+    /// An address takes a name.
+    Named {
+        /// The function's entry, or the data address.
+        target: u64,
+        /// Whether the target is a function rather than data.
+        function: bool,
+        /// The name it went by.
+        old: String,
+        /// The name it takes.
+        new: String,
+        /// The number the name also reads as, when it reads as one
+        /// ([`parse_addr`]).
+        number: Option<u64>,
+    },
+    /// An address takes a comment.
+    Commented {
+        /// The address.
+        at: u64,
+    },
+}
+
+/// A list of edits checked and worked out over one overlay, ready to be
+/// shown and committed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Plan {
+    /// The [`Overlay::edits_key`] of the overlay the plan was made over;
+    /// [`commit`] writes it to that overlay only.
+    pub base: u64,
+    /// The entries it writes, in the order written.
+    pub changes: Vec<Change>,
+    /// What it does, one line per thing done, in the order of the edits.
+    pub lines: Vec<Line>,
+}
+
+/// Why [`plan`] refused one edit of its list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refused {
+    /// The index of the edit refused.
+    pub edit: usize,
+    /// Why, as the agent reads it.
+    pub why: String,
+}
+
+impl fmt::Display for Refused {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.why)
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// Why [`commit`] refused a plan: another edit was committed to the overlay
+/// since the plan was made over it, so the plan is made again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stale;
+
+impl fmt::Display for Stale {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(
+            "the annotations changed since this edit was checked; nothing was applied, so check it again",
+        )
+    }
+}
+
+impl std::error::Error for Stale {}
+
+/// A plan as it is worked out: the overlay its edits leave so far, and
+/// what they wrote and did.
+struct Draft {
+    /// The overlay the plan was made over, with the edits so far written.
+    overlay: Overlay,
+    /// The entries written so far.
+    changes: Vec<Change>,
+    /// What the edits so far do.
+    lines: Vec<Line>,
+}
+
+impl Draft {
+    /// Writes `new` at `key` of the draft's overlay and keeps the change.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The entry.
+    /// * `new` - What it holds after.
+    fn put(&mut self, key: Key, new: Option<Value>) {
+        let change = self.overlay.put(key, new);
+        self.changes.push(change);
+    }
+
+    /// Checks one edit over the draft and writes it there.
+    ///
+    /// # Arguments
+    ///
+    /// * `(p, a)` - The program and its analysis.
+    /// * `edit` - The edit.
+    /// * `force` - Whether a taken name is taken or refused.
+    ///
+    /// # Errors
+    ///
+    /// When the edit is refused; the message says why.
+    fn step(
+        &mut self,
+        (p, a): (&Program, &Analysis),
+        edit: &Edit,
+        force: Force,
+    ) -> Result<(), String> {
+        match edit {
+            Edit::Name { at, name } => self.name((p, a), *at, name, force),
+            Edit::Comment { at, text } => {
+                self.put(Key::Comment(*at), Some(Value::Text(text.clone())));
+                self.lines.push(Line::Commented { at: *at });
+                Ok(())
+            }
+        }
+    }
+
+    /// Names the function `at` is in, or `at` itself when it is in none.
+    ///
+    /// # Arguments
+    ///
+    /// * `(p, a)` - The program and its analysis.
+    /// * `at` - An address inside the function or the data named.
+    /// * `name` - The name.
+    /// * `force` - Whether a name another address answers to is taken.
+    ///
+    /// # Errors
+    ///
+    /// Under [`Force::Refuse`], when another address answers to the name,
+    /// or the name reads as something else that is taken ([`resolve`]).
+    fn name(
+        &mut self,
+        (p, a): (&Program, &Analysis),
+        at: u64,
+        name: &str,
+        force: Force,
+    ) -> Result<(), String> {
+        let target = a.function_at(at).map_or(at, |f| f.entry);
+        let old = name_of(a, &self.overlay, target);
+        self.put(Key::Name(target), Some(Value::Text(name.to_owned())));
+        if force == Force::Refuse {
+            match resolve(p, a, &self.overlay, name) {
+                Ok(found) if found == target => {}
+                Ok(found) => {
+                    return Err(format!(
+                        "'{name}' already names {found:#x}; pick another name, or force=true to take it"
+                    ));
+                }
+                Err(why) => {
+                    return Err(format!(
+                        "'{name}' is taken ({why}); pick another name, or force=true to take it"
+                    ));
+                }
+            }
+        }
+        self.lines.push(Line::Named {
+            target,
+            function: a.function(target).is_some(),
+            old,
+            new: name.to_owned(),
+            number: parse_addr(name),
+        });
+        Ok(())
+    }
+}
+
+/// Checks `edits` in order over `overlay`, each over what the ones before
+/// it leave, and works out the changes they make, writing nothing.
+///
+/// The overlay the edits leave must hold no more than a project file
+/// holds ([`project::held`]), so a dry run refuses what its commit would.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `analysis` - Its analysis, for the functions an address is in and
+///   the names they go by.
+/// * `overlay` - The overlay the edits are made over.
+/// * `edits` - The edits.
+/// * `force` - Whether a name another address answers to is taken or
+///   refused.
+///
+/// # Returns
+///
+/// The plan, whose base is `overlay`'s [`Overlay::edits_key`].
+///
+/// # Errors
+///
+/// A [`Refused`] naming the first edit refused and why, or, when the
+/// edits together would take the overlay past a cap, the cap.
+pub fn plan(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    edits: &[Edit],
+    force: Force,
+) -> anyhow::Result<Plan> {
+    let mut draft = Draft {
+        overlay: overlay.clone(),
+        changes: Vec::with_capacity(edits.len()),
+        lines: Vec::with_capacity(edits.len()),
+    };
+    for (i, edit) in edits.iter().enumerate() {
+        draft
+            .step((program, analysis), edit, force)
+            .map_err(|why| Refused { edit: i, why })?;
+    }
+    project::held(&draft.overlay).map_err(anyhow::Error::msg)?;
+    Ok(Plan {
+        base: overlay.edits_key(),
+        changes: draft.changes,
+        lines: draft.lines,
+    })
+}
+
+/// Writes a plan's changes to the overlay it was made over.
+///
+/// It then carries
+/// what the analysis read under the overlay before over to the one it
+/// leaves ([`super::Derived::moved`]): a result that read none of the
+/// entries written is kept.
+///
+/// # Arguments
+///
+/// * `analysis` - The analysis whose memo is carried over.
+/// * `overlay` - The overlay written.
+/// * `plan` - The plan.
+///
+/// # Returns
+///
+/// The changes written.
+///
+/// # Errors
+///
+/// [`Stale`] when `overlay` is not the one the plan was made over; else,
+/// when the overlay would hold more than a project file holds
+/// ([`project::held`]), the cap. Either way nothing was written.
+pub fn commit(
+    analysis: &Analysis,
+    overlay: &mut Overlay,
+    plan: &Plan,
+) -> anyhow::Result<Vec<Change>> {
+    if plan.base != overlay.edits_key() {
+        return Err(Stale.into());
+    }
+    let before = overlay.clone();
+    let changes: Vec<Change> = plan
+        .changes
+        .iter()
+        .map(|c| overlay.put(c.key.clone(), c.new.clone()))
+        .collect();
+    if let Err(why) = project::held(overlay) {
+        *overlay = before;
+        return Err(anyhow::Error::msg(why));
+    }
+    analysis.derived.moved(analysis, &before, overlay);
+    Ok(changes)
 }
