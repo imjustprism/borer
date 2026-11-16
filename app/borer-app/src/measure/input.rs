@@ -394,8 +394,9 @@ impl Harness {
         Ok(InputStep::Continue)
     }
 
-    /// Returns the window position of a visible call token, preferring a call to another
-    /// function, found from the app's shown lines and its code list's laid-out bounds.
+    /// Returns the window position of a visible call to another function, found from the
+    /// app's shown lines and its code list's laid-out bounds; a call of a function to itself
+    /// only activates its own tab, so it opens nothing to measure.
     ///
     /// # Arguments
     ///
@@ -430,18 +431,12 @@ impl Harness {
                 break;
             };
             let call = view.tokens(line_ix).find_map(|(span, _, link)| match link {
-                Some(Ref::Function(t)) => Some((span.start, Some(*t) != current)),
+                Some(Ref::Function(t)) if Some(*t) != current => Some(span.start),
                 _ => None,
             });
-            match call {
-                Some((start, true)) => {
-                    found = Some((view, line_ix, start, center));
-                    break;
-                }
-                Some((start, false)) if found.is_none() => {
-                    found = Some((view, line_ix, start, center));
-                }
-                Some(_) | None => {}
+            if let Some(start) = call {
+                found = Some((view, line_ix, start, center));
+                break;
             }
         }
         let (view, line_ix, start, center) = found?;
