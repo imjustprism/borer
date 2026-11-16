@@ -763,23 +763,18 @@ mod tests {
         assert!(running(cx).is_empty());
     }
 
-    /// No module of the app but this one names the engine's compute calls outside its
-    /// tests, so each such call goes through [`super::run_engine`] and is counted.
-    ///
-    /// # Panics
-    ///
-    /// Panics if another module names `Program::load`, `Analysis::compute`, a decompile
-    /// or listing view, the resolver, the function listing or the check of an answer.
-    #[test]
-    fn only_the_worker_names_engine_compute_calls() {
-        let sources = [
+    /// Returns every module of the crate but this one, by path under `src`, with its text.
+    fn sources() -> [(&'static str, &'static str); 24] {
+        [
             ("actions.rs", include_str!("actions.rs")),
             ("app_assets.rs", include_str!("app_assets.rs")),
+            ("app_settings.rs", include_str!("app_settings.rs")),
             ("app_view.rs", include_str!("app_view.rs")),
             ("binary.rs", include_str!("binary.rs")),
             ("code_semantics.rs", include_str!("code_semantics.rs")),
             ("code_view.rs", include_str!("code_view.rs")),
             ("decompile_item.rs", include_str!("decompile_item.rs")),
+            ("function_columns.rs", include_str!("function_columns.rs")),
             ("functions_panel.rs", include_str!("functions_panel.rs")),
             ("goto.rs", include_str!("goto.rs")),
             ("lib.rs", include_str!("lib.rs")),
@@ -795,7 +790,18 @@ mod tests {
             ("start_item.rs", include_str!("start_item.rs")),
             ("status.rs", include_str!("status.rs")),
             ("title_bar.rs", include_str!("title_bar.rs")),
-        ];
+        ]
+    }
+
+    /// No module of the app but this one names the engine's compute calls outside its
+    /// tests, so each such call goes through [`super::run_engine`] and is counted.
+    ///
+    /// # Panics
+    ///
+    /// Panics if another module names `Program::load`, `Analysis::compute`, a decompile
+    /// or listing view, the resolver, the function listing or the check of an answer.
+    #[test]
+    fn only_the_worker_names_engine_compute_calls() {
         let calls = [
             "Program::load",
             "Analysis::compute",
@@ -806,10 +812,57 @@ mod tests {
             "text_check(",
             "answered_flagged(",
         ];
-        for (name, text) in sources {
+        for (name, text) in sources() {
             let code = text.split("#[cfg(test)]").next().unwrap_or(text);
             for call in calls {
                 assert!(!code.contains(call), "{name} names {call}");
+            }
+        }
+    }
+
+    /// Returns the module a line declares in a file of its own (`mod x;` with any
+    /// visibility), `None` for any other line.
+    fn declared_module(line: &str) -> Option<&str> {
+        let line = line.trim_start();
+        let line = match line.strip_prefix("pub") {
+            Some(rest) if rest.starts_with('(') => rest.split_once(") ")?.1,
+            Some(rest) => rest.strip_prefix(' ')?,
+            None => line,
+        };
+        line.strip_prefix("mod ")?.strip_suffix(';')
+    }
+
+    /// A module line of any visibility names its module, and no other line names one.
+    #[test]
+    fn a_module_line_of_any_visibility_names_its_module() {
+        for (line, want) in [
+            ("pub(super) mod report;", Some("report")),
+            ("    pub(crate) mod a;", Some("a")),
+            ("pub mod b;", Some("b")),
+            ("mod c;", Some("c")),
+            ("mod tests {", None),
+            ("let x = 1;", None),
+        ] {
+            assert_eq!(declared_module(line), want, "{line}");
+        }
+    }
+
+    /// The engine-call scan reads every module the crate declares: each `mod` line of a
+    /// scanned file names a scanned file, so a new module cannot slip past it.
+    #[test]
+    fn the_engine_call_scan_covers_every_module() {
+        let scanned: Vec<_> = sources().iter().map(|(name, _)| *name).collect();
+        for (name, text) in sources() {
+            let dir = match name {
+                "lib.rs" | "main.rs" => String::new(),
+                _ => format!("{}/", name.trim_end_matches(".rs")),
+            };
+            for module in text.lines().filter_map(declared_module) {
+                let file = format!("{dir}{module}.rs");
+                assert!(
+                    file == "worker.rs" || scanned.contains(&file.as_str()),
+                    "{name} declares {file}, which the scan skips"
+                );
             }
         }
     }
