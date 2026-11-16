@@ -190,23 +190,8 @@ pub fn cells() -> Vec<RailEntry> {
 /// built ones; a branch that builds one moves its row to [`PANELS`].
 pub const PLANNED: &[RailEntry] = &[
     RailEntry {
-        name: "Strings",
-        glyph: Glyph::Zed(IconName::Quote),
-        slot: Slot::Planned,
-    },
-    RailEntry {
-        name: "Imports and Exports",
-        glyph: Glyph::App(AppIcon::ImportsExports),
-        slot: Slot::Planned,
-    },
-    RailEntry {
         name: "Types",
         glyph: Glyph::App(AppIcon::Types),
-        slot: Slot::Planned,
-    },
-    RailEntry {
-        name: "Xrefs",
-        glyph: Glyph::Zed(IconName::ArrowRightLeft),
         slot: Slot::Planned,
     },
     RailEntry {
@@ -573,9 +558,10 @@ mod tests {
         let (app, cx) = open(&app_state, cx);
         let rail = rail(cx);
         let first = |states: Vec<CellState>| states[0];
-        let mut before = states(&rail, cx);
-        assert_eq!(before.remove(0), CellState::NeedsBinary);
-        assert!(before.iter().all(|state| *state == CellState::Planned));
+        let before = states(&rail, cx);
+        let (built, planned) = before.split_at(PANELS.len());
+        assert!(built.iter().all(|state| *state == CellState::NeedsBinary));
+        assert!(planned.iter().all(|state| *state == CellState::Planned));
         load_sample(&app, cx);
         assert_eq!(first(states(&rail, cx)), CellState::Open);
         click_functions(&app, cx);

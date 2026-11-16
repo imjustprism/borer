@@ -14,12 +14,15 @@ use borer_engine::analysis::decompile::text_check;
 use borer_engine::analysis::decompile::view::view;
 use borer_engine::analysis::find::{Found, Query, everywhere};
 use borer_engine::analysis::render::{
-    Bytes, Cell as BandCell, Cfg, Dir, FunctionOrder, FunctionRows, LinearPage, Triage,
-    answered_flagged, band, cfg, disasm_view, function_rows, linear, triage,
+    Bytes, Cell as BandCell, Cfg, Dir, FunctionOrder, FunctionRows, LinearPage, SymbolRows, Triage,
+    XREF_ROWS_MAX, XrefRows, XrefView, answered_flagged, band, cfg, disasm_view, function_rows,
+    linear, symbol_rows, triage, xref_rows, xref_rows_of_import,
 };
 use borer_engine::analysis::{Analysis, EnumSource, Overlay, no_function_at, resolve_suggesting};
 use borer_engine::cancel::Cancel;
-use borer_engine::program::{Feature, Program};
+use borer_engine::hexdump::{HexRows, hex_rows};
+use borer_engine::program::{Feature, Program, SymbolKind};
+use borer_engine::strings::walk::{StringEncoding, StringRows, WALK_MIN, string_rows};
 use borer_engine::view::View;
 use gpui::{App, Context, Global, SharedString, Task, Window};
 
@@ -399,18 +402,19 @@ pub fn load_binary_blocking(path: PathBuf) -> anyhow::Result<Arc<LoadedBinary>> 
     }))
 }
 
-/// Computes filtered [`FunctionRows`] for `loaded` matching `filter`.
+/// Computes the first `limit` [`FunctionRows`] of `loaded` matching `filter`.
 ///
 /// # Arguments
 ///
 /// * `loaded` - Previously loaded binary state.
 /// * `filter` - Substring or `0x`-hex query; empty selects every non-thunk function.
+/// * `limit` - Most rows.
 ///
 /// # Returns
 ///
 /// Matching [`FunctionRows`] in ascending entry-address order.
 #[must_use]
-pub fn filter_rows_blocking(loaded: &LoadedBinary, filter: &str) -> FunctionRows {
+pub fn filter_rows_blocking(loaded: &LoadedBinary, filter: &str, limit: usize) -> FunctionRows {
     let query = (!filter.is_empty()).then_some(filter);
     function_rows(
         &loaded.analysis,
@@ -418,7 +422,7 @@ pub fn filter_rows_blocking(loaded: &LoadedBinary, filter: &str) -> FunctionRows
         query,
         FunctionOrder::Address,
         0,
-        usize::MAX,
+        limit,
     )
 }
 
@@ -763,6 +767,122 @@ fn find_answer(loaded: &LoadedBinary, query: &str) -> FindAnswer {
     }
 }
 
+/// Returns the first `limit` strings of `loaded` that `filter` keeps, both encodings, at the
+/// engine's walked minimum length, as the `strings` tool reads them by default.
+///
+/// Must be called inside [`spawn_engine`].
+///
+/// # Arguments
+///
+/// * `loaded` - Previously loaded binary state.
+/// * `filter` - Case-insensitive substring of the whole text; empty keeps every string.
+/// * `limit` - Most rows.
+#[must_use]
+pub fn strings_blocking(loaded: &LoadedBinary, filter: &str, limit: usize) -> StringRows {
+    let (p, a) = (&*loaded.program, &*loaded.analysis);
+    let filter = (!filter.is_empty()).then_some(filter);
+    string_rows(p, a, StringEncoding::Both, WALK_MIN, filter, 0, limit)
+}
+
+/// Returns the first `limit` symbols of `kind` in `loaded` that `filter` keeps.
+///
+/// Must be called inside [`spawn_engine`].
+///
+/// # Arguments
+///
+/// * `loaded` - Previously loaded binary state.
+/// * `kind` - The one kind of symbol listed.
+/// * `filter` - Case-insensitive substring of the name; empty keeps every symbol.
+/// * `limit` - Most rows.
+#[must_use]
+pub fn symbols_blocking(
+    loaded: &LoadedBinary,
+    kind: SymbolKind,
+    filter: &str,
+    limit: usize,
+) -> SymbolRows {
+    let filter = (!filter.is_empty()).then_some(filter);
+    symbol_rows(
+        &loaded.program,
+        &loaded.analysis,
+        Some(kind),
+        filter,
+        0,
+        limit,
+    )
+}
+
+/// What a cross-reference listing lists the references to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Referent {
+    /// One address.
+    Address(u64),
+    /// An import, by one of its slots: every slot of it and every stub jumping through one.
+    Import(u64),
+}
+
+impl Referent {
+    /// Returns the address the referent is named by: the address, or the import's slot.
+    #[must_use]
+    pub const fn va(self) -> u64 {
+        match self {
+            Self::Address(va) | Self::Import(va) => va,
+        }
+    }
+}
+
+/// Returns the first `limit` groups of the references to `referent` in `loaded`, read a
+/// page of [`XREF_ROWS_MAX`] groups at a time; an import no symbol has a slot at is read
+/// as its one address.
+///
+/// Must be called inside [`spawn_engine`].
+///
+/// # Arguments
+///
+/// * `loaded` - Previously loaded binary state.
+/// * `referent` - What the references are to.
+/// * `limit` - Most groups.
+#[must_use]
+pub fn xrefs_blocking(loaded: &LoadedBinary, referent: Referent, limit: usize) -> XrefRows {
+    let (p, a, o) = (&*loaded.program, &*loaded.analysis, &*loaded.overlay);
+    let page = |offset| {
+        let view = XrefView::Page {
+            offset,
+            limit: XREF_ROWS_MAX,
+        };
+        match referent {
+            Referent::Import(va) => xref_rows_of_import(p, a, o, va, view)
+                .unwrap_or_else(|| xref_rows(p, a, o, va, view)),
+            Referent::Address(va) => xref_rows(p, a, o, va, view),
+        }
+    };
+    let mut rows = page(0);
+    while rows.rows.len() < limit.min(rows.groups) && !Cancel::raised() {
+        let next = page(rows.rows.len());
+        if next.rows.is_empty() {
+            break;
+        }
+        rows.rows.extend(next.rows);
+    }
+    rows.rows.truncate(limit);
+    rows
+}
+
+/// Returns the runs backing `len` addresses of `loaded` from `va`, as the `hexdump` tool
+/// reads them.
+///
+/// Must be called inside [`spawn_engine`].
+///
+/// # Arguments
+///
+/// * `loaded` - Previously loaded binary state.
+/// * `va` - Address of the first byte.
+/// * `len` - Bytes asked for, at most [`borer_engine::hexdump::HEXDUMP_MAX`].
+#[must_use]
+pub fn hex_blocking(loaded: &LoadedBinary, va: u64, len: usize) -> HexRows {
+    hex_rows(&loaded.program, va, len)
+}
+
 #[cfg(test)]
 #[expect(
     clippy::missing_panics_doc,
@@ -910,7 +1030,7 @@ mod tests {
     }
 
     /// Returns every module of the crate but this one, by path under `src`, with its text.
-    fn sources() -> [(&'static str, &'static str); 36] {
+    fn sources() -> [(&'static str, &'static str); 39] {
         [
             ("actions.rs", include_str!("actions.rs")),
             ("app_assets.rs", include_str!("app_assets.rs")),
@@ -929,6 +1049,7 @@ mod tests {
             ("functions_panel.rs", include_str!("functions_panel.rs")),
             ("goto.rs", include_str!("goto.rs")),
             ("graph_item.rs", include_str!("graph_item.rs")),
+            ("hex_item.rs", include_str!("hex_item.rs")),
             ("lib.rs", include_str!("lib.rs")),
             ("linear_item.rs", include_str!("linear_item.rs")),
             ("main.rs", include_str!("main.rs")),
@@ -948,6 +1069,8 @@ mod tests {
             ("status.rs", include_str!("status.rs")),
             ("table.rs", include_str!("table.rs")),
             ("title_bar.rs", include_str!("title_bar.rs")),
+            ("tables.rs", include_str!("tables.rs")),
+            ("xrefs.rs", include_str!("xrefs.rs")),
         ]
     }
 
@@ -1001,6 +1124,10 @@ mod tests {
             "triage(",
             "everywhere(",
             "render::cfg",
+            "string_rows(",
+            "symbol_rows(",
+            "xref_rows",
+            "hex_rows(",
         ];
         for (name, text) in sources() {
             let code = kept(text);

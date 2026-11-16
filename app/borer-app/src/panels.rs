@@ -4,7 +4,7 @@
 //! title, icon, toggle, docks, size, rail hooks and activation priority); [`add_panels`] is
 //! the one way to add them to a workspace, each in the dock the last run left it active in.
 
-use gpui::{Action, Context, Entity, Window};
+use gpui::{Action, Context, Entity, InteractiveElement as _, Window};
 use workspace::DockStructure;
 use workspace::Workspace;
 use workspace::dock::DockPosition;
@@ -34,6 +34,27 @@ pub struct PanelSpec {
     /// Builds the panel over the window's binary in a dock and adds it to the workspace.
     pub add:
         fn(&mut Workspace, &Entity<Binary>, DockPosition, &mut Window, &mut Context<'_, Workspace>),
+    /// Takes the panel out of its dock, when it is docked.
+    pub remove: fn(&mut Workspace, &mut Window, &mut Context<'_, Workspace>),
+    /// Shows the panel and focuses it, or moves focus back: what [`Self::toggle`] does.
+    pub focus: fn(&mut Workspace, &mut Window, &mut Context<'_, Workspace>),
+}
+
+/// Registers every panel's toggle on `workspace`, docked or not yet.
+///
+/// # Arguments
+///
+/// * `workspace` - The workspace.
+pub fn register_toggles(workspace: &mut Workspace) {
+    for &spec in PANELS {
+        workspace.register_action_renderer(move |div, _, _, cx| {
+            let this = cx.weak_entity();
+            div.on_boxed_action(spec.toggle, move |_, window, cx| {
+                this.update(cx, |workspace, cx| (spec.focus)(workspace, window, cx))
+                    .unwrap_or_default();
+            })
+        });
+    }
 }
 
 impl std::fmt::Debug for PanelSpec {
@@ -46,7 +67,13 @@ impl std::fmt::Debug for PanelSpec {
 }
 
 /// Every dock panel of the app, in activation order.
-pub const PANELS: &[&PanelSpec] = &[&crate::functions_panel::PANEL];
+pub const PANELS: &[&PanelSpec] = &[
+    &crate::functions_panel::PANEL,
+    &crate::tables::STRINGS,
+    &crate::tables::IMPORTS,
+    &crate::tables::EXPORTS,
+    &crate::xrefs::XREFS,
+];
 
 /// Returns the activation priority of the panel saved under `key`: its place in [`PANELS`]
 /// plus one, so no two panels share one, as Zed's dock requires.

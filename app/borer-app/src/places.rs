@@ -9,9 +9,11 @@ use workspace::{Item, ItemHandle, Workspace};
 use crate::binary::Binary;
 use crate::decompile_item::{DecompileItem, Form, TabMode};
 use crate::graph_item::GraphItem;
+use crate::hex_item::{HexItem, open_hex};
 use crate::linear_item::LinearItem;
 use crate::overview::OverviewItem;
-use crate::worker::LoadedBinary;
+use crate::worker::{LoadedBinary, Referent};
+use crate::xrefs::show_xrefs;
 
 /// Where the app shows something; addresses and enums only, never a snapshot or an entity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +44,13 @@ pub enum Place {
         /// Virtual address to show, if any.
         at: Option<u64>,
     },
+    /// The bytes of the mapped sections, the cursor on `at` when one is given.
+    Hex {
+        /// Virtual address of the byte to show, if any.
+        at: Option<u64>,
+    },
+    /// The xrefs panel, listing the references to the referent.
+    Xrefs(Referent),
 }
 
 impl Place {
@@ -70,12 +79,20 @@ pub struct Opening {
     pub focus: bool,
 }
 
-/// Shows `place` of `loaded` in the workspace's active pane.
+/// A permanent tab, or the panel, taking keyboard focus.
+pub const PERMANENT: Opening = Opening {
+    mode: TabMode::Permanent,
+    focus: true,
+};
+
+/// Shows `place` of `loaded`: a code or hex place in the workspace's active pane, an
+/// xrefs place in the xrefs panel.
 ///
 /// It activates the tab already showing the place for the same program, else opens one as
-/// `how` says; a place with an address puts the line that starts at that instruction (in
-/// the linear listing, the row holding it) at the top, now or once the view is built, and
-/// a code view moves nowhere when no line starts there.
+/// `how` says (an xrefs place in the xrefs panel); a place with an address puts the line
+/// that starts at that instruction (in the linear listing, the row holding it; in hex, the
+/// byte) at the top, now or once the view is built, and a code view moves nowhere when no
+/// line starts there.
 ///
 /// # Arguments
 ///
@@ -98,6 +115,8 @@ pub fn open(
     let (binary, loaded) = (binary.clone(), loaded.clone());
     let program = loaded.program.clone();
     match place {
+        Place::Hex { at } => open_hex(workspace, &binary, &loaded, at, window, cx),
+        Place::Xrefs(referent) => show_xrefs(workspace, referent, window, cx),
         Place::Code { entry, form, at } => {
             let shows = |item: &DecompileItem| {
                 item.entry() == Some(entry)
@@ -234,6 +253,9 @@ fn loaded_of<'a>(item: &dyn ItemHandle, cx: &'a App) -> Option<&'a Arc<LoadedBin
     if let Some(graph) = item.downcast::<GraphItem>() {
         return Some(graph.read(cx).loaded());
     }
+    if let Some(hex) = item.downcast::<HexItem>() {
+        return Some(hex.read(cx).loaded());
+    }
     if let Some(overview) = item.downcast::<OverviewItem>() {
         return Some(overview.read(cx).loaded());
     }
@@ -276,6 +298,32 @@ pub fn open_beside(
     });
 }
 
+/// Shows `place` of `loaded` as [`open`] does, once the current update ends, so a view can
+/// open a place that focuses or updates itself.
+///
+/// # Arguments
+///
+/// * `workspace` - The workspace.
+/// * `(binary, loaded)` - The window's binary and the snapshot the place is shown from.
+/// * `place` - What to show.
+/// * `how` - How a new tab opens.
+/// * `window` - Window the workspace is in.
+/// * `cx` - Application context.
+pub fn open_later(
+    workspace: Entity<Workspace>,
+    (binary, loaded): (Entity<Binary>, Arc<LoadedBinary>),
+    place: Place,
+    how: Opening,
+    window: &Window,
+    cx: &mut App,
+) {
+    window.defer(cx, move |window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            open(workspace, &binary, &loaded, place, how, window, cx);
+        });
+    });
+}
+
 /// Returns the place a center item shows.
 ///
 /// # Arguments
@@ -286,10 +334,13 @@ pub fn open_beside(
 /// # Returns
 ///
 /// The function and view a code or graph tab shows, with no address (a tab keeps no
-/// address, only its scroll), the overview or the linear listing; `None` for the start tab
-/// and for measured lines.
+/// address, only its scroll), the overview, the linear listing or a hex tab; `None` for the
+/// start tab and for measured lines.
 #[must_use]
 pub fn place_of(item: &dyn ItemHandle, cx: &App) -> Option<Place> {
+    if item.downcast::<HexItem>().is_some() {
+        return Some(Place::Hex { at: None });
+    }
     if let Some(graph) = item.downcast::<GraphItem>() {
         return Some(Place::Graph {
             entry: graph.read(cx).entry(),

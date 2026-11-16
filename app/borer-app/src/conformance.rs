@@ -19,18 +19,25 @@ use crate::start_item::StartItem;
 use crate::worker::Jobs;
 
 /// The panels the suite runs over, by key, in [`PANELS`] order.
-const PANELS_RUN: &[&str] = &["Functions"];
+const PANELS_RUN: &[&str] = &["Functions", "Strings", "Imports", "Exports", "Xrefs"];
 
-/// Returns one example of every [`Place`] variant.
+/// Returns one example of every [`Place`] variant a tab shows; an xrefs place shows in its
+/// panel, which the panel tests run.
 fn places() -> Vec<Place> {
     let code = Place::decompile(CALLER);
     match code {
-        Place::Code { .. } | Place::Graph { .. } | Place::Overview | Place::Linear { .. } => {
+        Place::Code { .. }
+        | Place::Graph { .. }
+        | Place::Overview
+        | Place::Linear { .. }
+        | Place::Hex { .. }
+        | Place::Xrefs(_) => {
             let graph = Place::Graph {
                 entry: CALLER,
                 at: None,
             };
-            vec![code, graph, Place::Overview, Place::Linear { at: None }]
+            let (linear, hex) = (Place::Linear { at: None }, Place::Hex { at: None });
+            vec![code, graph, Place::Overview, linear, hex]
         }
     }
 }
@@ -51,7 +58,7 @@ fn the_suite_lists_every_panel() {
     );
 }
 
-/// Every panel, added before any binary, draws its card and no column header.
+/// Every panel, added before any binary and shown, draws its card and no column header.
 #[gpui::test]
 fn every_panel_shows_a_card_without_a_binary(cx: &mut TestAppContext) {
     let app_state = init(cx);
@@ -60,6 +67,7 @@ fn every_panel_shows_a_card_without_a_binary(cx: &mut TestAppContext) {
         let binary = app.binary.clone();
         app.workspace.update_in(cx, |workspace, window, cx| {
             (spec.add)(workspace, &binary, spec.dock, window, cx);
+            (spec.focus)(workspace, window, cx);
         });
         draw(cx);
         draw(cx);

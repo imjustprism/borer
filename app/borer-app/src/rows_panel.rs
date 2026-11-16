@@ -1,8 +1,12 @@
 //! A panel of the engine's rows of one kind, in a dock of Zed's workspace.
 //!
 //! The rows are filtered through a Zed single-line editor in the background and drawn as
-//! Zed's table in the engine's words; a row opens its place.
+//! Zed's table in the engine's words; a row opens its place. A kind whose rows a load does
+//! not build asks the engine for them while its panel is open, [`PAGE_ROWS`] at a time and a
+//! page more as the list nears its end; sorted by a column, the panel asks for the first
+//! [`SORT_MAX`] rows the filter keeps and sorts them, and says so when it keeps more.
 
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -26,16 +30,22 @@ use ui::{
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
-use crate::actions::{FocusFilter, Hint, OPEN_HINT};
+use crate::actions::{CycleSort, FocusFilter, Hint, OPEN_HINT, ShowHex, Xrefs};
 use crate::app_assets::Glyph;
 use crate::binary::{Binary, BinaryEvent, SettingsNotice, reading_label};
 use crate::card::{Card, Tone};
-use crate::code_view::{CodePalette, Role};
+use crate::code_view::CodePalette;
 use crate::decompile_item::{TabMode, code_row_height};
 use crate::panels::{PanelSpec, priority};
-use crate::places::{Opening, Place, open};
+use crate::places::{Opening, Place, open_later};
 use crate::table::{Column, Columns, Ink, aligned, cells, widths};
-use crate::worker::{Job, LoadedBinary};
+use crate::worker::{Job, LoadedBinary, Referent};
+
+/// Rows one page asks the engine for.
+pub const PAGE_ROWS: usize = 20_000;
+
+/// Most rows a sorted table asks for and sorts.
+pub const SORT_MAX: usize = 100_000;
 
 /// One kind of rows a panel lists: its panel's facts, its columns, how the engine selects
 /// its rows and what a row opens.
@@ -43,7 +53,10 @@ pub trait RowKind: Sized + 'static {
     /// One row of the engine's answer.
     type Row: Send + Sync + 'static;
     /// The engine's whole answer for one filter: its rows and the words counting them.
-    type Shown: Send + Sync + 'static;
+    type Shown: Answer<Self::Row>;
+    /// What the rows are of beyond the binary, `()` for a whole table; a new binary starts
+    /// it over.
+    type Target: Clone + Default + Send + 'static;
     /// The panel's row of [`crate::panels::PANELS`].
     const PANEL: &'static PanelSpec;
     /// What the filter's empty editor says.
@@ -52,32 +65,214 @@ pub trait RowKind: Sized + 'static {
     const TABLE: &'static str;
     /// What the running work list calls a filter request (`Filtering functions`).
     const FILTERING: &'static str;
+    /// Whether a click shows a row's place in the preview tab, a new binary opens its first
+    /// row and the panel starts open; else a click only highlights a row.
+    const PREVIEWS: bool = false;
+    /// Whether the engine filters the rows by text, so the panel shows a filter.
+    const FILTERS: bool = true;
 
     /// Returns the columns of set `columns`, in order.
     fn columns(columns: Columns) -> &'static [Column<Self::Row>];
 
-    /// Returns the rows of an answer.
-    fn rows(shown: &Self::Shown) -> &[Self::Row];
-
-    /// Returns the engine's count line of an answer: `showing N of M` and what it left out.
-    fn showing(shown: &Self::Shown) -> SharedString;
-
     /// Returns the engine's warning about an answer, if it gave one.
-    fn warning(shown: &Self::Shown) -> Option<&'static str>;
+    fn warning(_shown: &Self::Shown) -> Option<&'static str> {
+        None
+    }
 
-    /// Returns the rows a finished load already built, every row unfiltered; no engine
+    /// Returns the rows a finished load already built, every row unfiltered, `None` when
+    /// the load builds none and the panel asks the engine in the background; no engine
     /// call, since it runs on the UI thread.
-    fn first(loaded: &LoadedBinary) -> Arc<Self::Shown>;
+    fn first(_loaded: &LoadedBinary) -> Option<Arc<Self::Shown>> {
+        None
+    }
 
-    /// Selects the rows matching `filter`, every row for an empty one; runs in the
-    /// background.
-    fn fetch(loaded: &LoadedBinary, filter: &str) -> Self::Shown;
+    /// Selects the first `limit` rows of `target` matching `filter`, every row for an
+    /// empty one; runs in the background.
+    ///
+    /// # Arguments
+    ///
+    /// * `loaded` - The binary.
+    /// * `target` - What the rows are of.
+    /// * `filter` - The filter's text, empty for every row.
+    /// * `limit` - Most rows; a kind whose load builds every row may return them all.
+    fn fetch(
+        loaded: &LoadedBinary,
+        target: &Self::Target,
+        filter: &str,
+        limit: usize,
+    ) -> Self::Shown;
 
     /// Returns why an answer with no rows has none, from the engine's words and `query`.
     fn nothing(shown: &Self::Shown, query: &SharedString) -> Empty;
 
     /// Returns what Enter on `row` opens, `None` for a row that opens nothing.
     fn place(row: &Self::Row) -> Option<Place>;
+
+    /// Returns what `row` stands for, whose references Xrefs lists and whose bytes Show
+    /// Hex shows; `None` for a row that stands for no address.
+    fn referent(_row: &Self::Row) -> Option<Referent> {
+        None
+    }
+}
+
+/// The engine's answer for one filter of a table of rows `R`.
+pub trait Answer<R>: Send + Sync + 'static {
+    /// Returns the rows of the answer.
+    fn rows(&self) -> &[R];
+
+    /// Returns the rows of the answer to reorder.
+    fn rows_mut(&mut self) -> &mut [R];
+
+    /// Returns how many rows the filter keeps in all, past the ones the answer holds.
+    fn total(&self) -> usize {
+        self.rows().len()
+    }
+
+    /// Returns the engine's count line of the answer: `showing N of M` and what it left out.
+    fn showing(&self) -> SharedString;
+}
+
+impl<R: Send + Sync + 'static> Answer<R> for Page<R> {
+    fn rows(&self) -> &[R] {
+        &self.rows
+    }
+
+    fn rows_mut(&mut self) -> &mut [R] {
+        &mut self.rows
+    }
+
+    fn total(&self) -> usize {
+        self.total
+    }
+
+    fn showing(&self) -> SharedString {
+        self.header.clone()
+    }
+}
+
+/// One answer of an engine table: its rows, how many the filter keeps and the engine's
+/// header counting them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Page<R> {
+    /// How many rows show of how many the filter keeps, in the engine's words.
+    pub header: SharedString,
+    /// Rows the filter keeps, on every page.
+    pub total: usize,
+    /// The rows shown, in the engine's order.
+    pub rows: Vec<R>,
+}
+
+impl<R> Page<R> {
+    /// Returns `rows` of `total` under `counted`, an engine's count-only answer (`# M
+    /// things` and its notes), as `showing N of M things`, its notes after `; `.
+    ///
+    /// # Arguments
+    ///
+    /// * `rows` - The rows on the page.
+    /// * `total` - Rows the filter keeps.
+    /// * `counted` - The engine's count-only text.
+    #[must_use]
+    pub fn counted(rows: Vec<R>, total: usize, counted: &str) -> Self {
+        let lines: Vec<&str> = counted
+            .lines()
+            .map(|line| line.trim_start_matches('#').trim())
+            .filter(|line| !line.is_empty())
+            .collect();
+        let header = format!("showing {} of {}", rows.len(), lines.join("; "));
+        Self {
+            header: header.into(),
+            total,
+            rows,
+        }
+    }
+
+    /// Returns why a page with no rows has none: no `noun` matches `query`, else the
+    /// engine's header.
+    ///
+    /// # Arguments
+    ///
+    /// * `noun` - What one row is.
+    /// * `query` - The filter that selected the page.
+    #[must_use]
+    pub fn nothing(&self, noun: &str, query: &SharedString) -> Empty {
+        if query.is_empty() {
+            Empty::Nothing(self.header.clone())
+        } else {
+            Empty::Nothing(format!("No {noun} matches \"{query}\"").into())
+        }
+    }
+}
+
+/// Which column the rows are sorted by, and which way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sort {
+    /// Index of the column among the shown ones.
+    pub column: usize,
+    /// Whether the largest come first.
+    pub descending: bool,
+}
+
+/// Returns the sort after `sort` that a click on column `column` asks for: ascending, then
+/// descending, then the engine's order again.
+///
+/// # Arguments
+///
+/// * `sort` - The sort in force.
+/// * `column` - The clicked column.
+#[must_use]
+pub const fn clicked(sort: Option<Sort>, column: usize) -> Option<Sort> {
+    match sort {
+        Some(Sort {
+            column: c,
+            descending,
+        }) if c == column => {
+            if descending {
+                None
+            } else {
+                Some(Sort {
+                    column,
+                    descending: true,
+                })
+            }
+        }
+        Some(_) | None => Some(Sort {
+            column,
+            descending: false,
+        }),
+    }
+}
+
+/// Returns the sort after `sort` that [`CycleSort`] asks for: each sortable column of
+/// `columns` ascending then descending, in order, then the engine's order again.
+///
+/// # Arguments
+///
+/// * `sort` - The sort in force.
+/// * `columns` - The shown columns.
+#[must_use]
+pub fn cycled<R>(sort: Option<Sort>, columns: &[Column<R>]) -> Option<Sort> {
+    let next_from = |from: usize| {
+        (from..columns.len())
+            .find(|&c| columns.get(c).is_some_and(|c| c.sort.is_some()))
+            .map(|column| Sort {
+                column,
+                descending: false,
+            })
+    };
+    match sort {
+        None => next_from(0),
+        Some(Sort {
+            column,
+            descending: false,
+        }) => Some(Sort {
+            column,
+            descending: true,
+        }),
+        Some(Sort {
+            column,
+            descending: true,
+        }) => next_from(column.saturating_add(1)),
+    }
 }
 
 /// Why the panel shows no table, each case from what the binary and the shown rows say.
@@ -93,6 +288,8 @@ pub enum Empty {
     NoFunction(LeftOut),
     /// The engine selected no function for this query.
     NoMatch(SharedString),
+    /// The engine's words for an answer with no rows of another kind.
+    Nothing(SharedString),
 }
 
 impl Empty {
@@ -105,6 +302,7 @@ impl Empty {
             Self::LoadFailed(reason) => format!("Load failed: {reason}").into(),
             Self::NoFunction(left_out) => format!("The engine found no function{left_out}").into(),
             Self::NoMatch(query) => format!("No function matches \"{query}\"").into(),
+            Self::Nothing(said) => said.clone(),
         }
     }
 
@@ -129,9 +327,11 @@ impl Empty {
     pub fn card(&self) -> Card {
         let tone = match self {
             Self::LoadFailed(_) => Tone::Error,
-            Self::NoBinary | Self::Reading(_) | Self::NoFunction(_) | Self::NoMatch(_) => {
-                Tone::Quiet
-            }
+            Self::NoBinary
+            | Self::Reading(_)
+            | Self::NoFunction(_)
+            | Self::NoMatch(_)
+            | Self::Nothing(_) => Tone::Quiet,
         };
         let offers: &'static [Hint] = if self.offers_open() {
             &[OPEN_HINT]
@@ -150,7 +350,7 @@ impl Empty {
     pub const fn offers_open(&self) -> bool {
         match self {
             Self::NoBinary | Self::LoadFailed(_) => true,
-            Self::Reading(_) | Self::NoFunction(_) | Self::NoMatch(_) => false,
+            Self::Reading(_) | Self::NoFunction(_) | Self::NoMatch(_) | Self::Nothing(_) => false,
         }
     }
 }
@@ -187,6 +387,8 @@ pub struct RowsPanel<K: RowKind> {
     binary: Entity<Binary>,
     /// Focus handle of the panel's root.
     focus_handle: FocusHandle,
+    /// Focus handle of the table, under the `BorerRows` key context its letter keys need.
+    rows_focus: FocusHandle,
     /// Zed's single-line editor holding the filter query.
     pub(crate) filter: Entity<Editor>,
     /// Scroll and focus state of the table.
@@ -199,6 +401,17 @@ pub struct RowsPanel<K: RowKind> {
     selected: usize,
     /// Columns the table shows.
     columns: Columns,
+    /// What the rows are of.
+    target: K::Target,
+    /// The sort in force, `None` for the engine's order.
+    sort: Option<Sort>,
+    /// Rows asked for while unsorted.
+    limit: usize,
+    /// Whether the panel is open in its dock.
+    active: bool,
+    /// Whether the rows shown are not what the panel's state asks for, so opening the
+    /// panel asks again.
+    stale: bool,
     /// Widths of the shown columns, laid out again when the rows, the columns, the
     /// settings or the table's width change.
     widths: Entity<ResizableColumnsState>,
@@ -249,7 +462,8 @@ impl<K: RowKind> RowsPanel<K> {
         let subscriptions = [
             cx.subscribe(&filter, |this, _, event: &EditorEvent, cx| {
                 if matches!(event, EditorEvent::BufferEdited) {
-                    this.request_filter(cx);
+                    this.limit = PAGE_ROWS;
+                    this.request(true, cx);
                 }
             }),
             cx.subscribe_in(&binary, window, |this, _, _: &BinaryEvent, window, cx| {
@@ -262,12 +476,18 @@ impl<K: RowKind> RowsPanel<K> {
             workspace,
             binary,
             focus_handle: cx.focus_handle(),
+            rows_focus: cx.focus_handle(),
             filter,
             table_state: cx.new(|cx| TableInteractionState::new(cx)),
             shown: None,
             rows: None,
             selected: 0,
             columns: Columns::Brief,
+            target: K::Target::default(),
+            sort: None,
+            limit: PAGE_ROWS,
+            active: false,
+            stale: false,
             widths: cx.new(|_| ResizableColumnsState::new(0, Vec::<Pixels>::new(), Vec::new())),
             table_width: px(K::PANEL.size_px),
             position,
@@ -298,7 +518,7 @@ impl<K: RowKind> RowsPanel<K> {
             cx.set_global(SettingsNotice(Some(why.into())));
             size
         });
-        let rows = self.rows().map_or(&[][..], |rows| K::rows(rows));
+        let rows = self.rows().map_or(&[][..], |rows| rows.rows());
         let widths = widths(K::columns(self.columns), rows, ch, pad, self.table_width);
         let cols = widths.len();
         let resize = vec![TableResizeBehavior::None; cols];
@@ -338,7 +558,52 @@ impl<K: RowKind> RowsPanel<K> {
     /// * `cx` - Panel context.
     pub fn toggle_columns(&mut self, cx: &mut Context<'_, Self>) {
         self.columns = self.columns.toggled();
+        if self.sort.take().is_some() {
+            self.request(true, cx);
+        }
         self.relayout(cx);
+    }
+
+    /// Returns the sort in force.
+    #[must_use]
+    pub const fn sort(&self) -> Option<Sort> {
+        self.sort
+    }
+
+    /// Sorts the rows as `sort` says and asks for them again.
+    ///
+    /// # Arguments
+    ///
+    /// * `sort` - The new sort, `None` for the engine's order.
+    /// * `cx` - Panel context.
+    pub fn set_sort(&mut self, sort: Option<Sort>, cx: &mut Context<'_, Self>) {
+        self.sort = sort;
+        self.request(true, cx);
+    }
+
+    /// Returns what the rows are of.
+    #[must_use]
+    pub const fn target(&self) -> &K::Target {
+        &self.target
+    }
+
+    /// Lists the rows of `target` from the first, asking the engine for them while the
+    /// panel is open.
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - What the rows are of.
+    /// * `cx` - Panel context.
+    pub fn set_target(&mut self, target: K::Target, cx: &mut Context<'_, Self>) {
+        self.target = target;
+        self.limit = PAGE_ROWS;
+        self.refresh(cx);
+    }
+
+    /// Returns the highlighted row, if any.
+    #[must_use]
+    pub fn selected_row(&self) -> Option<&K::Row> {
+        self.rows()?.rows().get(self.selected)
     }
 
     /// Returns why the panel shows no table, from the binary's load and the shown rows with
@@ -351,9 +616,13 @@ impl<K: RowKind> RowsPanel<K> {
     #[must_use]
     pub fn empty(&self, cx: &App) -> Option<Empty> {
         let Some(Filtered { query, rows }) = &self.rows else {
+            if self.shown.is_some() {
+                let reading = format!("Reading {}", K::PANEL.title.to_lowercase());
+                return Some(Empty::Nothing(reading.into()));
+            }
             return Some(Empty::of_binary(self.binary.read(cx)));
         };
-        K::rows(rows).is_empty().then(|| K::nothing(rows, query))
+        rows.rows().is_empty().then(|| K::nothing(rows, query))
     }
 
     /// Returns the filter's hint: the binding the keymap holds for [`FocusFilter`].
@@ -450,10 +719,11 @@ impl<K: RowKind> RowsPanel<K> {
         self.relayout(cx);
     }
 
-    /// Lists the rows the binary open now already holds and opens the first one's place,
-    /// or empties the table when none is open; it runs on every [`BinaryEvent`] and reads
-    /// the binary, not the event, so a panel added after a load and a load closed in the
-    /// same update both show what is open.
+    /// Lists the rows the binary open now holds, from the load or asked of the engine, and
+    /// opens the first one's place for a kind that previews, or empties the table when none
+    /// is open; the filter, the sort and the target start over. It runs on every
+    /// [`BinaryEvent`] and reads the binary, not the event, so a panel added after a load
+    /// and a load closed in the same update both show what is open.
     ///
     /// Never call it while the workspace is being updated: opening the first row updates
     /// the workspace.
@@ -463,11 +733,25 @@ impl<K: RowKind> RowsPanel<K> {
     /// * `window` - Window the panel is in.
     /// * `cx` - Panel context.
     pub fn follow(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.target = K::Target::default();
+        self.sort = None;
+        self.limit = PAGE_ROWS;
         match self.binary.read(cx).loaded().cloned() {
             Some(loaded) => {
-                let rows = K::first(&loaded);
-                self.show(loaded, rows, window, cx);
-                self.open_row(0, TabMode::Preview, window, cx);
+                if let Some(first) = K::first(&loaded) {
+                    self.show(loaded, first, window, cx);
+                } else {
+                    self.shown = Some(loaded);
+                    self.rows = None;
+                    if !self.filter.read(cx).text(cx).is_empty() {
+                        self.filter
+                            .update(cx, |editor, cx| editor.set_text("", window, cx));
+                    }
+                    self.refresh(cx);
+                }
+                if K::PREVIEWS {
+                    self.open_row(0, TabMode::Preview, window, cx);
+                }
             }
             None => {
                 if self.shown.take().is_some() {
@@ -479,25 +763,117 @@ impl<K: RowKind> RowsPanel<K> {
         }
     }
 
-    /// Filters the rows by the editor's query in the background, dropping the filter before.
+    /// Asks the engine for the rows the panel's state shows now when the panel is open,
+    /// else marks them stale for when it opens.
     ///
     /// # Arguments
     ///
-    /// * `cx` - Panel context spawning the background filter.
-    fn request_filter(&mut self, cx: &mut Context<'_, Self>) {
+    /// * `cx` - Panel context.
+    fn refresh(&mut self, cx: &mut Context<'_, Self>) {
+        if self.active {
+            self.request(true, cx);
+        } else {
+            self.filter_job.stop();
+            self.stale = true;
+        }
+    }
+
+    /// Asks the engine, in the background, for the rows the panel's state shows: the
+    /// filter's text, the target, the sort's order and how many rows, [`SORT_MAX`] when
+    /// sorted; the request before is dropped.
+    ///
+    /// # Arguments
+    ///
+    /// * `reset` - Whether the highlight goes back to the first row when the answer comes.
+    /// * `cx` - Panel context spawning the request.
+    fn request(&mut self, reset: bool, cx: &mut Context<'_, Self>) {
         let Some(loaded) = self.shown.clone() else {
             return;
         };
+        self.stale = false;
         let query = SharedString::from(self.filter.read(cx).text(cx));
-        let asked = query.clone();
-        let work = move || Arc::new(K::fetch(&loaded, &asked));
+        let order = self.sort.and_then(|s| {
+            let cmp = K::columns(self.columns).get(s.column)?.sort?;
+            Some((cmp, s.descending))
+        });
+        let limit = if order.is_some() {
+            SORT_MAX
+        } else {
+            self.limit
+        };
+        let (asked, target) = (query.clone(), self.target.clone());
+        let work = move || {
+            let mut shown = K::fetch(&loaded, &target, &asked, limit);
+            if let Some((cmp, descending)) = order {
+                let rows = shown.rows_mut();
+                if descending {
+                    rows.sort_by(|a, b| cmp(b, a));
+                } else {
+                    rows.sort_by(cmp);
+                }
+            }
+            Arc::new(shown)
+        };
         self.filter_job
-            .run(K::FILTERING, cx, work, |panel, rows, cx| {
+            .run(K::FILTERING, cx, work, move |panel, rows, cx| {
                 panel.rows = Some(Filtered { query, rows });
-                panel.selected = 0;
+                if reset {
+                    panel.selected = 0;
+                }
                 panel.scroll_to_selected(cx);
                 panel.relayout(cx);
             });
+    }
+
+    /// Asks for a page more when the list drew near the end of the rows, the engine has
+    /// more and nothing is in flight.
+    ///
+    /// # Arguments
+    ///
+    /// * `end` - One past the last row the list drew.
+    /// * `cx` - Panel context.
+    fn want_rows(&mut self, end: usize, cx: &mut Context<'_, Self>) {
+        let Some(shown) = self.rows() else {
+            return;
+        };
+        let len = shown.rows().len();
+        let more = len < shown.total() && len == self.limit && self.sort.is_none();
+        if more && !self.filter_job.is_running() && end.saturating_add(PAGE_ROWS / 4) >= len {
+            self.limit = self.limit.saturating_add(PAGE_ROWS);
+            self.request(false, cx);
+        }
+    }
+
+    /// Lists the references to what the highlighted row stands for in the xrefs panel; a
+    /// row that stands for no address leaves Xrefs to the workspace.
+    ///
+    /// # Arguments
+    ///
+    /// * `place` - The place of the row's referent.
+    /// * `window` - Window the panel is in.
+    /// * `cx` - Panel context.
+    fn open_referent(
+        &mut self,
+        place: fn(Referent) -> Place,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        match self.selected_row().and_then(K::referent) {
+            Some(referent) => self.open_place(place(referent), TabMode::Permanent, window, cx),
+            None => cx.propagate(),
+        }
+    }
+
+    /// Sorts by the next sortable column, as [`CycleSort`] asks.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Panel context.
+    fn cycle_sort(&mut self, cx: &mut Context<'_, Self>) {
+        let next = cycled(self.sort, K::columns(self.columns));
+        if next != self.sort {
+            self.set_sort(next, cx);
+        }
     }
 
     /// Scrolls the table so the highlighted row stays visible.
@@ -530,21 +906,46 @@ impl<K: RowKind> RowsPanel<K> {
     ) {
         let Some(place) = self
             .rows()
-            .and_then(|rows| K::rows(rows).get(row))
+            .and_then(|rows| rows.rows().get(row))
             .and_then(K::place)
         else {
             return;
         };
+        self.selected = row;
+        cx.notify();
+        self.open_place(place, mode, window, cx);
+    }
+
+    /// Shows `place` as `mode` says, once the update of the panel ends, since showing it
+    /// may focus another panel: a permanent tab takes keyboard focus, the preview leaves
+    /// it in the panel.
+    ///
+    /// # Arguments
+    ///
+    /// * `place` - What to show.
+    /// * `mode` - Whether a new tab is the preview tab or a permanent one.
+    /// * `window` - Window the panel is in.
+    /// * `cx` - Panel context.
+    fn open_place(
+        &self,
+        place: Place,
+        mode: TabMode,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         let (Some(loaded), Some(workspace)) = (self.shown.clone(), self.workspace.upgrade()) else {
             return;
         };
-        self.selected = row;
-        cx.notify();
-        workspace.update(cx, |workspace, cx| {
-            let focus = mode == TabMode::Permanent;
-            let how = Opening { mode, focus };
-            open(workspace, &self.binary, &loaded, place, how, window, cx);
-        });
+        let focus = mode == TabMode::Permanent;
+        let how = Opening { mode, focus };
+        open_later(
+            workspace,
+            (self.binary.clone(), loaded),
+            place,
+            how,
+            window,
+            cx,
+        );
     }
 
     /// Renders the virtualized table of the shown rows in the buffer font, its columns as
@@ -559,36 +960,27 @@ impl<K: RowKind> RowsPanel<K> {
     /// The table element.
     fn render_table(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let rows = self.rows().cloned();
-        let count = rows.as_ref().map_or(0, |r| K::rows(r).len());
+        let count = rows.as_ref().map_or(0, |r| r.rows().len());
         let selected = self.selected;
         let colors = cx.theme().colors();
         let (selected_bg, hover_bg) = (colors.element_selected, colors.element_hover);
         let (bar, muted) = (colors.text, colors.text_muted);
         let palette = self.palette;
         let ink = move |ink| match ink {
-            Ink::Address => palette.color(Role::Address),
-            Ink::Function => palette.color(Role::Function),
+            Ink::Role(role) => palette.color(role),
             Ink::Muted => muted,
         };
-        let ui_font = ThemeSettings::get_global(cx).ui_font.clone();
         let panel = cx.entity().downgrade();
-        let columns = self.columns;
-        let shown = K::columns(columns);
-        let headers = shown.iter().map(|c| {
-            let label = Label::new(c.header)
-                .size(LabelSize::Small)
-                .color(Color::Muted);
-            aligned(c.align, label)
-                .font(ui_font.clone())
-                .debug_selector(|| HEADER_SELECTOR.to_owned())
-        });
+        let drawn = panel.clone();
+        let shown = K::columns(self.columns);
+        let headers = self.headers(cx);
         Table::new(shown.len())
             .width_config(ColumnWidthConfig::Resizable(self.widths.clone()))
             .no_ui_font()
             .hide_row_borders()
             .hide_row_hover()
             .interactable(&self.table_state)
-            .header(headers.collect())
+            .header(headers)
             .map_row(move |(ix, row_div), _window, _cx| {
                 let panel = panel.clone();
                 let here = ix == selected;
@@ -615,36 +1007,148 @@ impl<K: RowKind> RowsPanel<K> {
                             return;
                         };
                         panel.update(cx, |this, cx| {
-                            window.focus(&this.focus_handle, cx);
-                            this.open_row(ix, TabMode::Preview, window, cx);
+                            window.focus(&this.rows_focus, cx);
+                            if K::PREVIEWS {
+                                this.open_row(ix, TabMode::Preview, window, cx);
+                            } else {
+                                this.select(ix, cx);
+                            }
                         });
                     })
                     .into_any_element()
             })
-            .uniform_list(K::PANEL.key, count, move |range, _window, _cx| {
-                let Some(rows) = &rows else {
-                    return Vec::new();
-                };
-                range
-                    .filter_map(|ix| K::rows(rows).get(ix))
-                    .map(|row| {
-                        cells(row, shown)
-                            .into_iter()
-                            .zip(shown)
-                            .enumerate()
-                            .map(|(col, (cell, c))| {
-                                aligned(c.align, cell)
-                                    .text_color(ink(c.ink))
-                                    .when(col == 0, |d| {
-                                        d.debug_selector(|| ENTRY_SELECTOR.to_owned())
-                                    })
-                                    .into_any_element()
-                            })
-                            .collect()
-                    })
-                    .collect()
-            })
+            .uniform_list(
+                K::PANEL.key,
+                count,
+                move |range: Range<usize>, _window, cx| {
+                    if let Some(panel) = drawn.upgrade() {
+                        panel.update(cx, |this, cx| this.want_rows(range.end, cx));
+                    }
+                    let Some(rows) = &rows else {
+                        return Vec::new();
+                    };
+                    range
+                        .filter_map(|ix| rows.rows().get(ix))
+                        .map(|row| {
+                            cells(row, shown)
+                                .into_iter()
+                                .zip(shown)
+                                .enumerate()
+                                .map(|(col, (cell, c))| {
+                                    aligned(c.align, cell)
+                                        .text_color(ink(c.ink))
+                                        .when(col == 0, |d| {
+                                            d.debug_selector(|| ENTRY_SELECTOR.to_owned())
+                                        })
+                                        .into_any_element()
+                                })
+                                .collect()
+                        })
+                        .collect()
+                },
+            )
             .into_any_element()
+    }
+
+    /// Returns the header cells: each shown column's name in the UI font, the sorted one
+    /// marked with its direction, a click on a sortable one sorting by it.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Panel context.
+    fn headers(&self, cx: &mut Context<'_, Self>) -> Vec<AnyElement> {
+        let ui_font = ThemeSettings::get_global(cx).ui_font.clone();
+        let sort = self.sort;
+        K::columns(self.columns)
+            .iter()
+            .enumerate()
+            .map(|(ix, column)| {
+                let mark = match sort {
+                    Some(Sort {
+                        column: c,
+                        descending,
+                    }) if c == ix => {
+                        if descending {
+                            " v"
+                        } else {
+                            " ^"
+                        }
+                    }
+                    Some(_) | None => "",
+                };
+                let label = Label::new(format!("{}{mark}", column.header))
+                    .size(LabelSize::Small)
+                    .color(Color::Muted);
+                let cell = aligned(column.align, label)
+                    .font(ui_font.clone())
+                    .debug_selector(|| HEADER_SELECTOR.to_owned());
+                if column.sort.is_none() {
+                    return cell.into_any_element();
+                }
+                div()
+                    .id(("sort", ix))
+                    .w_full()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_sort(clicked(this.sort, ix), cx);
+                    }))
+                    .child(cell)
+                    .into_any_element()
+            })
+            .collect()
+    }
+
+    /// Returns the count line: the engine's words, then the sort, saying when it sorted
+    /// only the first rows the filter keeps.
+    ///
+    /// # Arguments
+    ///
+    /// * `shown` - The rows shown.
+    fn count_line(&self, shown: &K::Shown) -> SharedString {
+        let showing = shown.showing();
+        let by = self
+            .sort
+            .and_then(|s| K::columns(self.columns).get(s.column));
+        let (len, total) = (shown.rows().len(), shown.total());
+        match by {
+            Some(column) if len < total => format!(
+                "{showing}; sorted the first {len} of {total} by {}",
+                column.header
+            )
+            .into(),
+            Some(column) => format!("{showing}, sorted by {}", column.header).into(),
+            None => showing,
+        }
+    }
+}
+
+impl<K: RowKind> RowsPanel<K> {
+    /// Returns `root` answering the actions about the highlighted row and the table:
+    /// Xrefs, Show Hex, Cycle Sort and Focus Filter, each left to the workspace when the
+    /// panel has nothing to answer it with.
+    ///
+    /// # Arguments
+    ///
+    /// * `root` - The panel's root element.
+    /// * `cx` - Panel context.
+    fn answer_row_actions(root: Stateful<Div>, cx: &mut Context<'_, Self>) -> Stateful<Div> {
+        root.on_action(cx.listener(|this, _: &Xrefs, window, cx| {
+            this.open_referent(Place::Xrefs, window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &ShowHex, window, cx| {
+            let hex = |referent: Referent| Place::Hex {
+                at: Some(referent.va()),
+            };
+            this.open_referent(hex, window, cx);
+        }))
+        .on_action(cx.listener(|this, _: &CycleSort, _, cx| this.cycle_sort(cx)))
+        .on_action(cx.listener(|this, _: &FocusFilter, window, cx| {
+            if K::FILTERS {
+                window.focus(&this.filter.focus_handle(cx), cx);
+            } else {
+                cx.propagate();
+            }
+        }))
     }
 }
 
@@ -658,7 +1162,7 @@ impl<K: RowKind> Render for RowsPanel<K> {
             .pt(px(6.0))
             .child(Label::new(K::PANEL.title).weight(FontWeight::SEMIBOLD))
             .children(rows.map(|rows| {
-                Label::new(K::showing(rows))
+                Label::new(self.count_line(rows))
                     .size(LabelSize::Small)
                     .color(Color::Muted)
             }));
@@ -669,12 +1173,14 @@ impl<K: RowKind> Render for RowsPanel<K> {
                     .color(Color::Warning),
             )
         });
-        let filter = h_flex()
-            .gap_2()
-            .px(px(8.0))
-            .py(px(6.0))
-            .child(div().flex_1().child(self.filter.clone()))
-            .child(Self::filter_hint(cx));
+        let filter = K::FILTERS.then(|| {
+            h_flex()
+                .gap_2()
+                .px(px(8.0))
+                .py(px(6.0))
+                .child(div().flex_1().child(self.filter.clone()))
+                .child(Self::filter_hint(cx))
+        });
         let body = match self.empty(cx) {
             Some(empty) => empty.card().render(cx),
             None => self.render_table(cx),
@@ -694,8 +1200,7 @@ impl<K: RowKind> Render for RowsPanel<K> {
         )
         .absolute()
         .size_full();
-        let root = div()
-            .id(K::PANEL.key)
+        let root = Self::answer_row_actions(div().id(K::PANEL.key), cx)
             .key_context("RowsPanel")
             .track_focus(&self.focus_handle);
         row_keys(root, cx)
@@ -711,9 +1216,12 @@ impl<K: RowKind> Render for RowsPanel<K> {
             .flex_col()
             .child(header)
             .children(incomplete)
-            .child(filter)
+            .children(filter)
             .child(
                 div()
+                    .id("rows")
+                    .key_context("BorerRows")
+                    .track_focus(&self.rows_focus)
                     .relative()
                     .flex_1()
                     .min_h(px(0.0))
@@ -764,7 +1272,7 @@ impl<K: RowKind> Rows for RowsPanel<K> {
     }
 
     fn select(&mut self, row: usize, cx: &mut Context<'_, Self>) {
-        let len = self.rows().map_or(0, |r| K::rows(r).len());
+        let len = self.rows().map_or(0, |r| r.rows().len());
         if len == 0 {
             return;
         }
@@ -772,6 +1280,66 @@ impl<K: RowKind> Rows for RowsPanel<K> {
         self.scroll_to_selected(cx);
         cx.notify();
     }
+}
+
+/// Builds the rows panel of kind `K` over the window's binary in dock `dock`, lists what the
+/// binary holds now, and adds it to `workspace`: every rows kind's [`PanelSpec::add`].
+///
+/// # Arguments
+///
+/// * `workspace` - The workspace.
+/// * `binary` - The window's binary.
+/// * `dock` - Dock the panel starts in.
+/// * `window` - Window the workspace is in.
+/// * `cx` - Workspace context.
+pub fn add<K: RowKind>(
+    workspace: &mut Workspace,
+    binary: &Entity<Binary>,
+    dock: DockPosition,
+    window: &mut Window,
+    cx: &mut Context<'_, Workspace>,
+) {
+    let weak = cx.weak_entity();
+    let binary = binary.clone();
+    let panel = cx.new(|cx| RowsPanel::<K>::new(weak, binary, dock, window, cx));
+    if !K::PREVIEWS {
+        panel.update(cx, |panel, cx| panel.follow(window, cx));
+    }
+    workspace.add_panel(panel, window, cx);
+}
+
+/// Takes the rows panel of kind `K` out of its dock, when it is docked: every rows kind's
+/// [`PanelSpec::remove`].
+///
+/// # Arguments
+///
+/// * `workspace` - The workspace.
+/// * `window` - Window the workspace is in.
+/// * `cx` - Workspace context.
+pub fn remove<K: RowKind>(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<'_, Workspace>,
+) {
+    if let Some(panel) = workspace.panel::<RowsPanel<K>>(cx) {
+        workspace.remove_panel(&panel, window, cx);
+    }
+}
+
+/// Shows the rows panel of kind `K` and focuses it, or moves focus back to the center
+/// pane: every rows kind's [`PanelSpec::focus`].
+///
+/// # Arguments
+///
+/// * `workspace` - The workspace.
+/// * `window` - Window the workspace is in.
+/// * `cx` - Workspace context.
+pub fn focus<K: RowKind>(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<'_, Workspace>,
+) {
+    workspace.toggle_panel_focus::<RowsPanel<K>>(window, cx);
 }
 
 impl<K: RowKind> EventEmitter<PanelEvent> for RowsPanel<K> {}
@@ -792,7 +1360,11 @@ impl<K: RowKind> Panel for RowsPanel<K> {
     }
 
     fn activation_focus_handle(&self, cx: &App) -> FocusHandle {
-        self.filter.focus_handle(cx)
+        if K::FILTERS {
+            self.filter.focus_handle(cx)
+        } else {
+            self.rows_focus.clone()
+        }
     }
 
     fn position(&self, _window: &Window, _cx: &App) -> DockPosition {
@@ -837,10 +1409,346 @@ impl<K: RowKind> Panel for RowsPanel<K> {
     }
 
     fn starts_open(&self, _window: &Window, _cx: &App) -> bool {
-        true
+        K::PREVIEWS
+    }
+
+    fn set_active(&mut self, active: bool, _window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.active = active;
+        if !active && self.filter_job.is_running() {
+            self.filter_job.stop();
+            self.stale = true;
+        } else if active && self.stale {
+            self.request(true, cx);
+        }
     }
 
     fn activation_priority(&self) -> u32 {
         priority(K::PANEL.key)
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test; gpui::test hides each body in an undocumented fn"
+)]
+pub(crate) mod tests {
+    use std::fmt::Debug;
+    use std::sync::Arc;
+
+    use borer_engine::analysis::render::symbol_rows;
+    use borer_engine::analysis::{Analysis, EnumSource, Overlay};
+    use borer_engine::program::{Arch, Program, Symbol, SymbolKind};
+    use borer_engine::strings::walk::{StringEncoding, WALK_MIN, string_rows};
+    use gpui::{Entity, SharedString, TestAppContext, VisualTestContext};
+    use ui::IconName;
+    use workspace::Workspace;
+    use workspace::dock::DockPosition;
+
+    use super::{
+        Empty, PAGE_ROWS, Page, RowKind, RowsPanel, Sort, add, clicked, cycled, focus, remove,
+    };
+    use crate::actions::{CycleSort, ToggleXrefs, Xrefs as XrefsAction};
+    use crate::app_assets::Glyph;
+    use crate::app_view::tests::{binary_in, init, loaded_of, open};
+    use crate::code_view::tests::sample_program;
+    use crate::panels::PanelSpec;
+    use crate::places::Place;
+    use crate::table::{Align, Column, Columns, Fit, Ink};
+    use crate::tables::{Exports, Imports, Strings};
+    use crate::worker::{LoadedBinary, Referent};
+    use crate::xrefs::Xrefs;
+
+    /// Returns the sample program, a caller, its callee and a string, with an import, two
+    /// exports and a forwarder in its symbol table, as a loaded binary.
+    pub(crate) fn sample() -> Arc<LoadedBinary> {
+        let (mut program, analysis, overlay) = sample_program();
+        let symbol = |name: &str, addr, kind| Symbol {
+            name: name.to_owned(),
+            addr,
+            kind,
+        };
+        program.symbols = vec![
+            symbol("KERNEL32.dll!Sleep", 0x1180, SymbolKind::Import),
+            symbol("caller", 0x1000, SymbolKind::Export),
+            symbol("callee", 0x1030, SymbolKind::Export),
+            symbol("forwarded", 0x1100, SymbolKind::Forwarder),
+        ];
+        loaded_of(program, analysis, overlay)
+    }
+
+    /// Shows `loaded` as `workspace`'s binary, opens the panel of kind `K` and returns it
+    /// once its rows arrived.
+    pub(crate) fn panel_of<K: RowKind>(
+        workspace: &Entity<Workspace>,
+        loaded: &Arc<LoadedBinary>,
+        cx: &mut VisualTestContext,
+    ) -> Entity<RowsPanel<K>> {
+        let binary = binary_in(workspace, cx);
+        binary.update(cx, |binary, cx| binary.finish_load(Ok(loaded.clone()), cx));
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.focus_panel::<RowsPanel<K>>(window, cx)
+        });
+        cx.run_until_parked();
+        panel.unwrap()
+    }
+
+    /// Types `text` into the panel's filter and waits for the answer.
+    pub(crate) fn set_filter<K: RowKind>(
+        panel: &Entity<RowsPanel<K>>,
+        text: &str,
+        cx: &mut VisualTestContext,
+    ) {
+        let editor = panel.read_with(cx, |panel, _| panel.filter.clone());
+        editor.update_in(cx, |editor, window, cx| editor.set_text(text, window, cx));
+        cx.run_until_parked();
+    }
+
+    /// Asserts the panel shows `rows` of `total` under `header`.
+    fn assert_shows<K: RowKind<Shown = Page<R>, Row = R>, R: PartialEq + Debug>(
+        panel: &Entity<RowsPanel<K>>,
+        (rows, total): (&[R], usize),
+        header: &str,
+        cx: &mut VisualTestContext,
+    ) {
+        panel.read_with(cx, |panel, _| {
+            let shown = panel.rows().unwrap();
+            assert_eq!(shown.rows, rows);
+            assert_eq!(shown.total, total);
+            assert_eq!(&*shown.header, header);
+        });
+    }
+
+    /// Each table lists the engine's rows for the same filter, unfiltered and filtered,
+    /// under the engine's own count; the exports table lists the forwarders after the
+    /// exports, and a filter nothing matches is said in the table's own noun.
+    #[gpui::test]
+    fn each_table_lists_the_engine_rows_and_counts(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
+        let loaded = sample();
+        let (p, a) = (&loaded.program, &loaded.analysis);
+        let strings = panel_of::<Strings>(&workspace, &loaded, cx);
+        for filter in [None, Some("hello"), Some("zz")] {
+            set_filter(&strings, filter.unwrap_or_default(), cx);
+            let want = string_rows(p, a, StringEncoding::Both, WALK_MIN, filter, 0, PAGE_ROWS);
+            assert_eq!(want.rows.is_empty(), filter == Some("zz"));
+            let page = Page::counted(want.rows.clone(), want.total, &want.counted());
+            assert_shows(&strings, (&want.rows, want.total), &page.header, cx);
+        }
+        let said = strings.read_with(cx, |panel, cx| panel.empty(cx));
+        assert_eq!(
+            said,
+            Some(Empty::Nothing("No string matches \"zz\"".into()))
+        );
+        let imports = panel_of::<Imports>(&workspace, &loaded, cx);
+        for filter in [None, Some("sleep")] {
+            set_filter(&imports, filter.unwrap_or_default(), cx);
+            let want = symbol_rows(p, a, Some(SymbolKind::Import), filter, 0, PAGE_ROWS);
+            let page = Page::counted(want.rows.clone(), want.total, &want.counted());
+            assert_shows(&imports, (&want.rows, want.total), &page.header, cx);
+        }
+        let exports = panel_of::<Exports>(&workspace, &loaded, cx);
+        let [exported, forwarded] = [SymbolKind::Export, SymbolKind::Forwarder]
+            .map(|kind| symbol_rows(p, a, Some(kind), None, 0, PAGE_ROWS));
+        assert_eq!((exported.total, forwarded.total), (2, 1));
+        let rows: Vec<_> = exported
+            .rows
+            .iter()
+            .chain(&forwarded.rows)
+            .cloned()
+            .collect();
+        let one = Page::counted(exported.rows.clone(), 2, &exported.counted()).header;
+        let two = Page::counted(forwarded.rows.clone(), 1, &forwarded.counted()).header;
+        let header = format!("exports: {one}; forwarders: {two}");
+        assert_shows(&exports, (&rows, 3), &header, cx);
+    }
+
+    /// Sorting by a column orders the rows by its fact and never changes which rows show;
+    /// a click on the same column turns the order around, a third restores the engine's,
+    /// and the palette's cycle visits each sortable column both ways, then the engine's
+    /// order.
+    #[gpui::test]
+    fn a_sort_orders_the_same_rows(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
+        let panel = panel_of::<Exports>(&workspace, &sample(), cx);
+        let names = |cx: &mut VisualTestContext| {
+            panel.read_with(cx, |panel, _| {
+                let rows = &panel.rows().unwrap().rows;
+                rows.iter().map(|r| r.name.clone()).collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(names(cx), ["caller", "callee", "forwarded"]);
+        let by_name = clicked(None, 1);
+        assert_eq!(
+            by_name,
+            Some(Sort {
+                column: 1,
+                descending: false
+            })
+        );
+        let mut seen = Vec::new();
+        for sort in [
+            by_name,
+            clicked(by_name, 1),
+            clicked(clicked(by_name, 1), 1),
+        ] {
+            panel.update(cx, |panel, cx| panel.set_sort(sort, cx));
+            cx.run_until_parked();
+            seen.push(names(cx));
+        }
+        let want = [
+            ["callee", "caller", "forwarded"],
+            ["forwarded", "caller", "callee"],
+            ["caller", "callee", "forwarded"],
+        ];
+        assert_eq!(seen, want);
+        let columns = Exports::columns(Columns::Brief);
+        let mut cycle = vec![cycled(None, columns)];
+        while let Some(&Some(last)) = cycle.last() {
+            cycle.push(cycled(Some(last), columns));
+        }
+        assert_eq!(cycle.len(), 2 * columns.len() + 1);
+    }
+
+    /// Returns a binary holding `n` strings no section maps, of 5 to 9 letters.
+    fn many_strings(n: usize) -> Arc<LoadedBinary> {
+        let mut bytes = Vec::new();
+        for k in 0..n {
+            let letter = b'a' + u8::try_from(k % 26).unwrap();
+            bytes.extend(std::iter::repeat_n(letter, 5 + k % 5));
+            bytes.push(0);
+        }
+        let program = Program::raw(bytes, Arch::X86_64, 0, None, Vec::new());
+        let analysis = Analysis::compute(&program);
+        let overlay = Overlay {
+            enum_source: EnumSource::Binary,
+            ..Overlay::default()
+        };
+        loaded_of(program, analysis, overlay)
+    }
+
+    /// Unsorted, the table holds one page of rows past which the engine has more; sorted,
+    /// it holds every row the filter keeps, longest first, so sorting reaches past the
+    /// first page.
+    #[gpui::test]
+    fn a_sort_reaches_past_the_first_page(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
+        let n = PAGE_ROWS + PAGE_ROWS / 2;
+        let panel = panel_of::<Strings>(&workspace, &many_strings(n), cx);
+        let counts = |cx: &mut VisualTestContext| {
+            panel.read_with(cx, |panel, _| {
+                let shown = panel.rows().unwrap();
+                (shown.rows.len(), shown.total)
+            })
+        };
+        assert_eq!(counts(cx), (PAGE_ROWS, n));
+        let by_len = Some(Sort {
+            column: 1,
+            descending: true,
+        });
+        panel.update(cx, |panel, cx| panel.set_sort(by_len, cx));
+        cx.run_until_parked();
+        assert_eq!(counts(cx), (n, n));
+        panel.read_with(cx, |panel, _| {
+            let lens: Vec<usize> = panel.rows().unwrap().rows.iter().map(|r| r.len).collect();
+            assert!(lens.is_sorted_by(|a, b| a >= b));
+            assert_eq!(lens.first(), Some(&9));
+        });
+    }
+
+    /// A kind no module but this test declares.
+    #[derive(Debug)]
+    enum Probe {}
+
+    /// The probe kind's panel row.
+    const PROBE: PanelSpec = PanelSpec {
+        key: "Probe",
+        title: "Probe",
+        icon: Glyph::Zed(IconName::Hash),
+        toggle: &ToggleXrefs,
+        dock: DockPosition::Left,
+        docks: &[DockPosition::Left],
+        size_px: 200.0,
+        hooks: crate::rail::panel::<RowsPanel<Probe>>(),
+        add: add::<Probe>,
+        remove: remove::<Probe>,
+        focus: focus::<Probe>,
+    };
+
+    /// The probe kind's one column: an address, sorted by value.
+    const PROBE_COLUMNS: &[Column<u64>] = &[Column {
+        header: "va",
+        cell: |va| format!("{va:#x}").into(),
+        align: Align::Start,
+        ink: Ink::Muted,
+        fit: Fit::Fill,
+        sort: Some(|a, b| a.cmp(b)),
+    }];
+
+    impl RowKind for Probe {
+        type Row = u64;
+        type Shown = Page<u64>;
+        type Target = ();
+        const PANEL: &'static PanelSpec = &PROBE;
+        const PLACEHOLDER: &'static str = "";
+        const TABLE: &'static str = "probe table";
+        const FILTERING: &'static str = "Probing";
+
+        fn columns(_columns: Columns) -> &'static [Column<u64>] {
+            PROBE_COLUMNS
+        }
+
+        fn fetch(_loaded: &LoadedBinary, (): &(), _filter: &str, _limit: usize) -> Page<u64> {
+            Page {
+                header: "probe".into(),
+                total: 2,
+                rows: vec![0x1030, 0x1000],
+            }
+        }
+
+        fn nothing(shown: &Page<u64>, _query: &SharedString) -> Empty {
+            Empty::Nothing(shown.header.clone())
+        }
+
+        fn place(_row: &u64) -> Option<Place> {
+            None
+        }
+
+        fn referent(row: &u64) -> Option<Referent> {
+            Some(Referent::Address(*row))
+        }
+    }
+
+    /// A kind registered only by being added answers Xrefs on its highlighted row and
+    /// sorts on Cycle Sort through the panel's own handlers; no workspace chain names it.
+    #[gpui::test]
+    fn a_kind_added_in_a_test_answers_xrefs_with_no_chain(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace.clone();
+        let binary = app.binary;
+        workspace.update_in(cx, |workspace, window, cx| {
+            add::<Probe>(workspace, &binary, DockPosition::Left, window, cx);
+        });
+        let loaded = sample();
+        let xrefs = panel_of::<Xrefs>(&workspace, &loaded, cx);
+        let probe = panel_of::<Probe>(&workspace, &loaded, cx);
+        let rows = |cx: &mut VisualTestContext| {
+            probe.read_with(cx, |panel, _| panel.rows().unwrap().rows.clone())
+        };
+        assert_eq!(rows(cx), [0x1030, 0x1000]);
+        cx.dispatch_action(CycleSort);
+        cx.run_until_parked();
+        assert_eq!(rows(cx), [0x1000, 0x1030]);
+        cx.dispatch_action(XrefsAction);
+        cx.run_until_parked();
+        let target = xrefs.read_with(cx, |panel, _| *panel.target());
+        assert_eq!(target, Some(Referent::Address(0x1000)));
     }
 }

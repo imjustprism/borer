@@ -64,6 +64,28 @@ gpui::actions!(
         WalkRight,
         /// Shows or hides the evidence behind the selected graph block's grade.
         ShowCheck,
+        /// Shows the strings panel and focuses its filter, or moves focus back to the center
+        /// pane.
+        ToggleStrings,
+        /// Shows the imports panel and focuses its filter, or moves focus back to the center
+        /// pane.
+        ToggleImports,
+        /// Shows the exports panel and focuses its filter, or moves focus back to the center
+        /// pane.
+        ToggleExports,
+        /// Shows the xrefs panel and focuses it, or moves focus back to the center pane.
+        ToggleXrefs,
+        /// Sorts the focused table by its next sortable column, ascending then descending,
+        /// then in the engine's order again.
+        CycleSort,
+        /// Lists the references to what the focus is on: a table's highlighted row, a code
+        /// tab's function or the hex tab's cursor; on nothing, Go to asks for an address.
+        Xrefs,
+        /// Shows the bytes at what the focus is on in the hex tab: a table's highlighted
+        /// row or a code tab's function; on nothing, the hex tab as it was.
+        ShowHex,
+        /// Makes the hex tab's cursor follow the active code tab's function, or stop.
+        LinkHex,
     ]
 );
 

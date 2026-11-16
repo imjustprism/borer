@@ -3,14 +3,16 @@
 //! The engine finds the text in every name table it holds, in the background, ranked into
 //! one list: the place it spells as an address first, then functions, imports, exports,
 //! symbols, strings, types, classes, user names and comments; a kind prefix (`@`, `"`,
-//! `t:`, `#`) narrows it. Enter opens the function holding a hit, a listing at the hit when
+//! `t:`, `#`) narrows it. An address it spells is followed by its xrefs, and in a hex tab
+//! its bytes come first. Enter opens the function holding a hit, a listing at the hit when
 //! a listing is the active view, and in the linear listing goes to the row of the hit; a
-//! string, a type, a class or a hit in no function is named in the status line. A miss
-//! shows the engine's own words, nearest names and all.
+//! string opens its xrefs and an address in no function its bytes; a type or a class is
+//! named in the status line. A miss shows the engine's own words, nearest names and all.
 
 use std::sync::Arc;
 
 use borer_engine::analysis::find::{Hit, HitKind};
+use borer_engine::fileinfo::Place as Spelled;
 use gpui::{App, Context, DismissEvent, Entity, Task, WeakEntity, Window};
 use picker::{Picker, PickerDelegate};
 use ui::{
@@ -19,12 +21,14 @@ use ui::{
 };
 use workspace::Workspace;
 
+use crate::actions::Xrefs;
 use crate::binary::Binary;
 use crate::commands;
 use crate::decompile_item::{DecompileItem, Form, TabMode};
+use crate::hex_item::HexItem;
 use crate::linear_item::LinearItem;
 use crate::places::{Opening, Place, open, shown_binary};
-use crate::worker::{FindAnswer, LoadedBinary, find_blocking, spawn_engine};
+use crate::worker::{FindAnswer, LoadedBinary, Referent, find_blocking, spawn_engine};
 
 gpui::actions!(
     borer,
@@ -38,14 +42,15 @@ gpui::actions!(
     ]
 );
 
-/// Registers go to and find everywhere on `workspace`, each opening the one picker.
+/// Registers go to, find everywhere and the xrefs fallback on `workspace`, each opening
+/// the one picker: Xrefs on nothing a focused view takes asks for an address.
 ///
 /// # Arguments
 ///
 /// * `workspace` - The window's workspace.
 /// * `binary` - The window's binary, which the picker searches.
 pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
-    let (go, find) = (binary.clone(), binary.clone());
+    let (go, find, ask) = (binary.clone(), binary.clone(), binary.clone());
     commands::register(workspace, binary, move |workspace, _: &GoTo, window, cx| {
         toggle(workspace, &go, window, cx);
     });
@@ -54,6 +59,13 @@ pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
         binary,
         move |workspace, _: &FindEverywhere, window, cx| {
             toggle(workspace, &find, window, cx);
+        },
+    );
+    commands::register(
+        workspace,
+        binary,
+        move |workspace, _: &Xrefs, window, cx| {
+            toggle(workspace, &ask, window, cx);
         },
     );
 }
@@ -71,6 +83,10 @@ enum Match {
         /// Byte offsets of the matched characters of the hit's text.
         marks: Vec<usize>,
     },
+    /// The bytes at the address the text spells, in the hex tab.
+    Hex(u64),
+    /// The references to the address the text spells.
+    Xrefs(u64),
     /// The engine's words for a text that matched nothing.
     Miss(String),
     /// A kind the find capped: what it is, how many of it are listed, and how many matched.
@@ -114,6 +130,40 @@ impl Match {
         })
     }
 
+    /// Returns whether the line can be selected: a hit, or a place of the spelled address.
+    const fn selectable(&self) -> bool {
+        matches!(self, Self::Hit { .. } | Self::Hex(_) | Self::Xrefs(_))
+    }
+
+    /// Returns what Enter on this line opens from a tab showing `here`: the address's bytes
+    /// or its xrefs, a string's xrefs, the bytes at an address in no function, else the
+    /// code [`Self::place`] or [`Self::linear_place`] opens; `None` for a type, a class or a
+    /// line that opens nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `here` - What the active tab shows.
+    fn target(&self, here: Here) -> Option<Place> {
+        match self {
+            Self::Hex(va) => return Some(Place::Hex { at: Some(*va) }),
+            Self::Xrefs(va) => return Some(Place::Xrefs(Referent::Address(*va))),
+            Self::Hit {
+                hit, entry: None, ..
+            } if hit.kind() == HitKind::Address => {
+                return hit.addr.map(|va| Place::Hex { at: Some(va) });
+            }
+            Self::Hit { hit, .. } if hit.kind() == HitKind::String => {
+                return hit.addr.map(|va| Place::Xrefs(Referent::Address(va)));
+            }
+            Self::Hit { .. } | Self::Miss(_) | Self::Capped(..) | Self::Count(..) => {}
+        }
+        match here {
+            Here::Code(form) => self.place(form),
+            Here::Hex => self.place(Form::Decompile),
+            Here::Linear => self.linear_place(),
+        }
+    }
+
     /// Returns what Enter on this line opens from a tab showing `form`: the function in
     /// that view, a listing at the hit's address; `None` for a line that opens nothing.
     ///
@@ -137,6 +187,8 @@ enum Here {
     Code(Form),
     /// The linear listing.
     Linear,
+    /// A hex tab.
+    Hex,
 }
 
 /// Returns the status line naming a hit Enter opens no code for: its kind, its text and its
@@ -185,10 +237,15 @@ fn marks(text: &str, needle: &str) -> Vec<usize> {
 /// first, a line for each capped kind, then how many of how many they are when the needle
 /// is not empty.
 ///
+/// The address the text spells, its first hit, is followed by its xrefs, and its bytes come
+/// first when a hex tab is the active view, which also shows an address no section maps
+/// (its own line says so).
+///
 /// # Arguments
 ///
 /// * `answer` - What the engine found.
-fn lines(answer: FindAnswer) -> Vec<Match> {
+/// * `here` - What the active tab shows.
+fn lines(answer: FindAnswer, here: Here) -> Vec<Match> {
     let FindAnswer {
         found,
         entries,
@@ -205,12 +262,30 @@ fn lines(answer: FindAnswer) -> Vec<Match> {
             (kept < count).then_some(Match::Capped(kind, kept, count))
         })
         .collect();
+    let spelled = found
+        .hits
+        .first()
+        .filter(|hit| hit.kind() == HitKind::Address)
+        .and_then(|hit| hit.addr);
+    let unmapped = found.unmapped.and_then(|place| match place {
+        Spelled::Va(va) | Spelled::Number(va) => Some(va),
+        Spelled::Rva(_) | Spelled::Off(_) => None,
+    });
+    let bytes = spelled
+        .or(unmapped)
+        .filter(|_| here == Here::Hex)
+        .map(Match::Hex);
     let hits = found.hits.into_iter().zip(entries).map(|(hit, entry)| {
         let marks = marks(&hit.text, &needle);
         Match::Hit { hit, entry, marks }
     });
+    let mut hits: Vec<Match> = hits.collect();
+    if let Some(va) = spelled {
+        hits.insert(1, Match::Xrefs(va));
+    }
     miss.map(Match::Miss)
         .into_iter()
+        .chain(bytes)
         .chain(hits)
         .chain(capped)
         .chain(count)
@@ -251,6 +326,8 @@ fn toggle(
 ) {
     let here = if workspace.active_item_as::<LinearItem>(cx).is_some() {
         Here::Linear
+    } else if workspace.active_item_as::<HexItem>(cx).is_some() {
+        Here::Hex
     } else {
         let tab = workspace.active_item_as::<DecompileItem>(cx);
         Here::Code(tab.map_or(Form::Decompile, |item| item.read(cx).form()))
@@ -301,9 +378,7 @@ impl PickerDelegate for GoToDelegate {
         _window: &mut Window,
         _cx: &mut Context<'_, Picker<Self>>,
     ) -> bool {
-        self.matches
-            .get(ix)
-            .is_some_and(|m| matches!(m, Match::Hit { .. }))
+        self.matches.get(ix).is_some_and(Match::selectable)
     }
 
     fn placeholder_text(&self, _window: &mut Window, _cx: &mut App) -> Arc<str> {
@@ -316,10 +391,10 @@ impl PickerDelegate for GoToDelegate {
         _window: &mut Window,
         cx: &mut Context<'_, Picker<Self>>,
     ) -> Task<()> {
-        let loaded = self.loaded.clone();
+        let (loaded, here) = (self.loaded.clone(), self.here);
         let label = format!("Going to {}", query.trim());
         let answer = spawn_engine(label, cx, move || {
-            lines(find_blocking(&loaded, query.trim()))
+            lines(find_blocking(&loaded, query.trim()), here)
         });
         cx.spawn(async move |picker, cx| {
             let (Some(matches), Some(picker)) = (answer.await, picker.upgrade()) else {
@@ -327,10 +402,7 @@ impl PickerDelegate for GoToDelegate {
             };
             picker.update(cx, |picker, cx| {
                 let delegate = &mut picker.delegate;
-                delegate.selected = matches
-                    .iter()
-                    .position(|m| matches!(m, Match::Hit { .. }))
-                    .unwrap_or(0);
+                delegate.selected = matches.iter().position(Match::selectable).unwrap_or(0);
                 delegate.matches = matches;
                 cx.notify();
             });
@@ -346,11 +418,7 @@ impl PickerDelegate for GoToDelegate {
         let Some(line) = self.matches.get(self.selected) else {
             return;
         };
-        let place = match self.here {
-            Here::Code(form) => line.place(form),
-            Here::Linear => line.linear_place(),
-        };
-        let Some(place) = place else {
+        let Some(place) = line.target(self.here) else {
             if let Match::Hit { hit, .. } = line {
                 let status = named(hit);
                 self.binary
@@ -361,7 +429,7 @@ impl PickerDelegate for GoToDelegate {
         };
         let mode = match self.here {
             Here::Code(Form::Listing) => TabMode::Preview,
-            Here::Code(Form::Decompile) | Here::Linear => TabMode::Permanent,
+            Here::Code(Form::Decompile) | Here::Linear | Here::Hex => TabMode::Permanent,
         };
         let (workspace, binary, loaded) = (
             self.workspace.clone(),
@@ -393,6 +461,8 @@ impl PickerDelegate for GoToDelegate {
     ) -> Option<Self::ListItem> {
         let line = match self.matches.get(ix)? {
             Match::Hit { hit, marks, .. } => hit_line(hit, marks),
+            Match::Hex(va) => Label::new(format!("show the bytes at {va:#x}")).into_any_element(),
+            Match::Xrefs(va) => Label::new(format!("list the xrefs to {va:#x}")).into_any_element(),
             Match::Miss(miss) => muted(miss.clone()),
             Match::Capped(kind, kept, count) => {
                 muted(format!("{}: showing {kept} of {count}", kind.word()))
@@ -458,14 +528,16 @@ mod tests {
     use picker::Picker;
     use workspace::Workspace;
 
-    use super::{FindEverywhere, GoTo, GoToDelegate, Match, marks};
-    use crate::app_view::tests::{CALLEE, CALLER, init, open, sample, take_status};
+    use super::{FindEverywhere, GoTo, GoToDelegate, Here, Match, marks};
+    use crate::app_view::tests::{CALLEE, CALLER, init, load_sample, open, open_place, sample};
     use crate::decompile_item::tests::{active as tab, fourth_instruction, open_tab};
-    use crate::decompile_item::{DecompileItem, Form, link_place};
+    use crate::decompile_item::{DecompileItem, Form, TabMode, link_place};
     use crate::functions_panel::{Functions, FunctionsPanel};
+    use crate::hex_item::HexItem;
     use crate::places::Place;
     use crate::rows_panel::RowKind as _;
-    use crate::worker::{Jobs, LoadedBinary, decompile_blocking};
+    use crate::worker::{Jobs, LoadedBinary, Referent, decompile_blocking};
+    use crate::xrefs::XrefsPanel;
 
     /// Returns the sample with the user's `names` over it.
     fn named(names: impl IntoIterator<Item = (u64, String)>) -> Arc<LoadedBinary> {
@@ -525,7 +597,11 @@ mod tests {
             .iter()
             .filter_map(|line| match line {
                 Match::Hit { hit, .. } => Some(hit),
-                Match::Miss(_) | Match::Capped(..) | Match::Count(..) => None,
+                Match::Hex(_)
+                | Match::Xrefs(_)
+                | Match::Miss(_)
+                | Match::Capped(..)
+                | Match::Count(..) => None,
             })
             .collect()
     }
@@ -580,22 +656,28 @@ mod tests {
     }
 
     /// A query naming a string the program holds lists it as a string hit, at its address,
-    /// with the needle's characters marked.
+    /// with the needle's characters marked, and Enter on it lists its xrefs.
     ///
     /// # Panics
     ///
-    /// Panics if the string is not listed.
+    /// Panics if the string is not listed or Enter lists other xrefs.
     #[gpui::test]
     fn a_string_of_the_program_is_found(cx: &mut TestAppContext) {
         let app_state = init(cx);
         let (app, cx) = open(&app_state, cx);
+        load_sample(&app, cx);
         let workspace = app.workspace.clone();
         open_tab(&workspace, &sample(), (CALLER, Form::Decompile), cx);
         let picker = ask(&workspace, "world", cx);
         let lines = shown(&picker, cx);
         let string = lines.iter().find_map(|line| match line {
             Match::Hit { hit, marks, .. } if hit.kind() == HitKind::String => Some((hit, marks)),
-            Match::Hit { .. } | Match::Miss(_) | Match::Capped(..) | Match::Count(..) => None,
+            Match::Hit { .. }
+            | Match::Hex(_)
+            | Match::Xrefs(_)
+            | Match::Miss(_)
+            | Match::Capped(..)
+            | Match::Count(..) => None,
         });
         let (hit, marks) = string.unwrap();
         assert_eq!((&*hit.text, hit.addr), ("hello world", Some(0x1100)));
@@ -608,7 +690,11 @@ mod tests {
         });
         cx.dispatch_action(menu::Confirm);
         cx.run_until_parked();
-        assert_eq!(take_status(&app, cx), "string hello world at 0x1100");
+        let listed = workspace.read_with(cx, |workspace, cx| {
+            let panel = workspace.panel::<XrefsPanel>(cx)?;
+            Some(*panel.read(cx).target())
+        });
+        assert_eq!(listed, Some(Some(Referent::Address(0x1100))));
         assert_eq!(active(&workspace, cx), Some(CALLER));
     }
 
@@ -819,6 +905,76 @@ mod tests {
         assert!(open, "ctrl-p closed the picker");
         let selected = picker.read_with(cx, |picker, _| picker.delegate.selected);
         assert_eq!(selected, above);
+    }
+
+    /// Go to lists the places of an address it spells: the address, then its xrefs, and in
+    /// a hex tab its bytes first; Enter opens the first, which in the hex tab puts the cursor
+    /// on the address. A string opens its xrefs and an address in no function its bytes.
+    #[gpui::test]
+    fn go_to_lists_the_places_of_an_address(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
+        let loaded = sample();
+        let firsts = |picker: &Entity<Picker<GoToDelegate>>, cx: &mut VisualTestContext| {
+            picker.read_with(cx, |picker, _| picker.delegate.matches[..3].to_vec())
+        };
+        let spelled = |line: &Match| {
+            matches!(line, Match::Hit { hit, entry: Some(CALLEE), .. }
+                if hit.kind() == HitKind::Address && hit.addr == Some(CALLEE))
+        };
+        open_tab(&workspace, &loaded, (CALLER, Form::Decompile), cx);
+        let picker = ask(&workspace, &format!("{CALLEE:#x}"), cx);
+        let code = firsts(&picker, cx);
+        assert!(spelled(&code[0]), "{code:?}");
+        assert_eq!(code[1], Match::Xrefs(CALLEE));
+        let here = Here::Code(Form::Decompile);
+        let xrefs = Some(Place::Xrefs(Referent::Address(CALLEE)));
+        assert_eq!(code[1].target(here), xrefs);
+        cx.dispatch_action(menu::Cancel);
+        let picker = ask(&workspace, "0x1100", cx);
+        let data = picker.read_with(cx, |picker, _| picker.delegate.matches[0].clone());
+        assert_eq!(data.target(here), Some(Place::Hex { at: Some(0x1100) }));
+        cx.dispatch_action(menu::Cancel);
+        let picker = ask(&workspace, "\"world", cx);
+        let lines = shown(&picker, cx);
+        let string = hits(&lines)
+            .into_iter()
+            .find(|hit| hit.kind() == HitKind::String)
+            .unwrap();
+        let line = Match::Hit {
+            hit: string.clone(),
+            entry: None,
+            marks: Vec::new(),
+        };
+        let uses = string.addr.map(|va| Place::Xrefs(Referent::Address(va)));
+        assert_eq!(line.target(here), uses);
+        cx.dispatch_action(menu::Cancel);
+        let hex = Place::Hex { at: None };
+        open_place(&workspace, &loaded, hex, TabMode::Permanent, cx);
+        cx.run_until_parked();
+        cx.dispatch_action(GoTo);
+        cx.run_until_parked();
+        let picker = workspace
+            .read_with(cx, |workspace, cx| {
+                workspace.active_modal::<Picker<GoToDelegate>>(cx)
+            })
+            .unwrap();
+        let query = format!("{CALLEE:#x}");
+        picker.update_in(cx, |picker, window, cx| {
+            picker.set_query(&query, window, cx);
+        });
+        cx.run_until_parked();
+        let lines = firsts(&picker, cx);
+        assert_eq!(lines[0], Match::Hex(CALLEE));
+        assert!(spelled(&lines[1]), "{lines:?}");
+        assert_eq!(lines[2], Match::Xrefs(CALLEE));
+        cx.dispatch_action(menu::Confirm);
+        cx.run_until_parked();
+        let cursor = workspace.read_with(cx, |workspace, cx| {
+            workspace.active_item_as::<HexItem>(cx)?.read(cx).cursor()
+        });
+        assert_eq!(cursor, Some(CALLEE));
     }
 
     /// From a listing tab, going to an address inside a function opens that function's

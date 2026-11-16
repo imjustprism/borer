@@ -86,13 +86,17 @@ pub enum Ctx {
     Overview,
     /// A graph tab.
     Graph,
+    /// A hex tab.
+    Hex,
+    /// A table's rows, not its filter.
+    Table,
     /// The in-window menu bar.
     MenuBar,
 }
 
 impl Ctx {
     /// Every context, in the order the keymap's sections go.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 10] = [
         Self::Global,
         Self::Workspace,
         Self::Code,
@@ -100,6 +104,8 @@ impl Ctx {
         Self::Start,
         Self::Overview,
         Self::Graph,
+        Self::Hex,
+        Self::Table,
         Self::MenuBar,
     ];
 
@@ -114,6 +120,8 @@ impl Ctx {
             Self::Start => Some("StartItem"),
             Self::Overview => Some("Overview"),
             Self::Graph => Some("GraphView"),
+            Self::Hex => Some("HexView"),
+            Self::Table => Some("BorerRows"),
             Self::MenuBar => Some("MenuBar"),
         }
     }
@@ -155,6 +163,22 @@ impl Keys {
             win: keys,
             linux: keys,
             mac: &[],
+            context,
+        }
+    }
+
+    /// Returns `others` on Windows and Linux and `mac` on macOS, in `context`.
+    #[must_use]
+    pub const fn split(
+        context: Ctx,
+        others: &'static [&'static str],
+        mac: &'static [&'static str],
+    ) -> Self {
+        Self {
+            all: &[],
+            win: others,
+            linux: others,
+            mac,
             context,
         }
     }
@@ -376,13 +400,7 @@ pub const COMMANDS: &[Command] = &[
         )
     },
     Command {
-        keys: &[Keys {
-            all: &[],
-            win: &["ctrl-5"],
-            linux: &["ctrl-5"],
-            mac: &["cmd-alt-5"],
-            context: Ctx::Workspace,
-        }],
+        keys: &[Keys::split(Ctx::Workspace, &["ctrl-5"], &["cmd-alt-5"])],
         serves: &["disassemble"],
         ..item(
             "borer::ShowLinear",
@@ -402,13 +420,7 @@ pub const COMMANDS: &[Command] = &[
         )
     },
     Command {
-        keys: &[Keys {
-            all: &[],
-            win: &["ctrl-3"],
-            linux: &["ctrl-3"],
-            mac: &["cmd-alt-3"],
-            context: Ctx::Workspace,
-        }],
+        keys: &[Keys::split(Ctx::Workspace, &["ctrl-3"], &["cmd-alt-3"])],
         serves: &["cfg"],
         ..item(
             "borer::ShowGraph",
@@ -470,38 +482,101 @@ pub const COMMANDS: &[Command] = &[
             Need::Binary,
         )
     },
+    Command {
+        keys: &[
+            Keys::split(Ctx::Workspace, &["ctrl-4"], &["cmd-alt-4"]),
+            Keys::all(Ctx::Code, &["h"]),
+            Keys::all(Ctx::Table, &["h"]),
+        ],
+        serves: &["hexdump", "read"],
+        ..item("borer::ShowHex", "Hex", (MenuName::View, 0), Need::Binary)
+    },
+    item(
+        "borer::LinkHex",
+        "Link Hex to Code",
+        (MenuName::View, 0),
+        Need::Binary,
+    ),
+    Command {
+        keys: &[Keys::all(Ctx::Workspace, &["secondary-shift-a"])],
+        serves: &["strings"],
+        ..item(
+            "borer::ToggleStrings",
+            "Strings",
+            (MenuName::View, 1),
+            Need::Binary,
+        )
+    },
+    Command {
+        serves: &["symbols"],
+        ..item(
+            "borer::ToggleImports",
+            "Imports",
+            (MenuName::View, 1),
+            Need::Binary,
+        )
+    },
+    Command {
+        serves: &["symbols"],
+        ..item(
+            "borer::ToggleExports",
+            "Exports",
+            (MenuName::View, 1),
+            Need::Binary,
+        )
+    },
+    Command {
+        keys: &[Keys::all(Ctx::Workspace, &["secondary-shift-r"])],
+        serves: &["xrefs"],
+        ..item(
+            "borer::ToggleXrefs",
+            "Xrefs",
+            (MenuName::View, 1),
+            Need::Binary,
+        )
+    },
+    item(
+        "borer::CycleSort",
+        "Sort Table by Next Column",
+        (MenuName::View, 1),
+        Need::Binary,
+    ),
     item(
         "workspace::ToggleLeftDock",
         "Toggle Left Dock",
-        (MenuName::View, 1),
+        (MenuName::View, 2),
         Need::Nothing,
     ),
     item(
         "workspace::ToggleBottomDock",
         "Toggle Bottom Dock",
-        (MenuName::View, 1),
+        (MenuName::View, 2),
         Need::Nothing,
     ),
     item(
         "workspace::ToggleRightDock",
         "Toggle Right Dock",
-        (MenuName::View, 1),
+        (MenuName::View, 2),
         Need::Nothing,
     ),
     item(
         "borer::ToggleTheme",
         "Toggle Light and Dark",
-        (MenuName::View, 2),
+        (MenuName::View, 3),
         Need::Nothing,
     ),
     item(
         "borer::FollowSystemTheme",
         "Follow System Theme",
-        (MenuName::View, 2),
+        (MenuName::View, 3),
         Need::Nothing,
     ),
     Command {
-        keys: &[Keys::all(Ctx::Code, &["g"])],
+        keys: &[
+            Keys::all(Ctx::Code, &["g"]),
+            Keys::all(Ctx::Hex, &["g"]),
+            Keys::all(Ctx::Table, &["g"]),
+        ],
         serves: &["borer://addr"],
         ..item(
             "borer::GoTo",
@@ -531,6 +606,20 @@ pub const COMMANDS: &[Command] = &[
         ..item(
             "borer::FollowLink",
             "Follow Link",
+            (MenuName::Go, 0),
+            Need::Binary,
+        )
+    },
+    Command {
+        keys: &[
+            Keys::all(Ctx::Code, &["x"]),
+            Keys::all(Ctx::Hex, &["x"]),
+            Keys::all(Ctx::Table, &["x"]),
+        ],
+        serves: &["xrefs"],
+        ..item(
+            "borer::Xrefs",
+            "Xrefs to Cursor",
             (MenuName::Go, 0),
             Need::Binary,
         )
@@ -583,6 +672,7 @@ pub const COMMANDS: &[Command] = &[
                 Keys::all(Ctx::Rows, &["up"]),
                 Keys::all(Ctx::Start, &["up"]),
                 Keys::all(Ctx::Overview, &["up"]),
+                Keys::all(Ctx::Hex, &["up"]),
             ],
         )
     },
@@ -595,6 +685,7 @@ pub const COMMANDS: &[Command] = &[
                 Keys::all(Ctx::Rows, &["down"]),
                 Keys::all(Ctx::Start, &["down"]),
                 Keys::all(Ctx::Overview, &["down"]),
+                Keys::all(Ctx::Hex, &["down"]),
             ],
         )
     },
@@ -636,6 +727,32 @@ pub const COMMANDS: &[Command] = &[
             "borer::WalkRight",
             "Graph Block Right",
             &[Keys::all(Ctx::Graph, &["right"])],
+        )
+    },
+    binding(
+        "menu::SelectFirst",
+        "First Row",
+        &[Keys::all(Ctx::Hex, &["secondary-home"])],
+    ),
+    binding(
+        "menu::SelectLast",
+        "Last Row",
+        &[Keys::all(Ctx::Hex, &["secondary-end"])],
+    ),
+    Command {
+        replaces: &["menu::SelectFirst"],
+        ..binding(
+            "editor::PageUp",
+            "Page Up",
+            &[Keys::all(Ctx::Hex, &["pageup"])],
+        )
+    },
+    Command {
+        replaces: &["menu::SelectLast"],
+        ..binding(
+            "editor::PageDown",
+            "Page Down",
+            &[Keys::all(Ctx::Hex, &["pagedown"])],
         )
     },
     binding(

@@ -34,14 +34,14 @@ use workspace::item::TabContentParams;
 use workspace::searchable::SearchableItemHandle;
 use workspace::{Item, ItemNavHistory, Workspace};
 
-use crate::actions::{BACK_HINT, FollowLink, Hint, ToggleListing};
+use crate::actions::{BACK_HINT, FollowLink, Hint, ShowHex, ToggleListing, Xrefs};
 use crate::binary::Binary;
 use crate::card::{Card, Tone};
 use crate::code_semantics::for_one_view;
 use crate::code_view::{ClickOutcome, CodeLines, CodePalette, Role, resolve_ref_click};
 use crate::commands;
-use crate::places::{Place, open_beside};
-use crate::worker::{Job, LoadedBinary, decompile_or_why, listing_blocking};
+use crate::places::{PERMANENT, Place, open_beside, open_later};
+use crate::worker::{Job, LoadedBinary, Referent, decompile_or_why, listing_blocking};
 
 /// Fewest logical pixels a row of code is tall.
 const MIN_ROW_HEIGHT_PX: f32 = 8.0;
@@ -840,6 +840,29 @@ impl DecompileItem {
         }
     }
 
+    /// Opens the place `place` names for the tab's function, in a permanent tab or panel
+    /// taking the focus, once the current update ends; a tab of measured lines leaves the
+    /// action to the workspace.
+    ///
+    /// # Arguments
+    ///
+    /// * `place` - The place of the function's entry.
+    /// * `window` - Window the tab is in.
+    /// * `cx` - Item context.
+    fn open_function_place(
+        &self,
+        place: fn(u64) -> Place,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let (Some(entry), Some(workspace)) = (self.entry, self.workspace.upgrade()) else {
+            cx.propagate();
+            return;
+        };
+        let shown = (self.binary.clone(), self.loaded.clone());
+        open_later(workspace, shown, place(entry), PERMANENT, window, cx);
+    }
+
     /// Shows `status` in the status line of the tab's binary.
     ///
     /// # Arguments
@@ -1084,6 +1107,16 @@ impl Render for DecompileItem {
         let over = self.card().map(|card| card.render(cx));
         div()
             .key_context("DecompileView")
+            .on_action(cx.listener(|item, _: &Xrefs, window, cx| {
+                item.open_function_place(
+                    |entry| Place::Xrefs(Referent::Address(entry)),
+                    window,
+                    cx,
+                );
+            }))
+            .on_action(cx.listener(|item, _: &ShowHex, window, cx| {
+                item.open_function_place(|entry| Place::Hex { at: Some(entry) }, window, cx);
+            }))
             .relative()
             .size_full()
             .on_mouse_up(

@@ -997,7 +997,7 @@ pub(crate) mod tests {
 
     use super::{AHEAD_LINES, LinearItem, PAGE_ROWS, PAGES_MAX, Page, Pages};
     use crate::actions::{CloseBinary, ShowLinear};
-    use crate::app_view::tests::{CALLER, init, load_sample, loaded, open, open_place, sample};
+    use crate::app_view::tests::{CALLER, init, load_sample, loaded_of, open, open_place, sample};
     use crate::decompile_item::tests::{fourth_instruction, open_tab, put_cursor};
     use crate::decompile_item::{Form, TabMode};
     use crate::goto::GoToDelegate;
@@ -1027,7 +1027,7 @@ pub(crate) mod tests {
             enum_source: EnumSource::Binary,
             ..Overlay::default()
         };
-        loaded(program, analysis, overlay)
+        loaded_of(program, analysis, overlay)
     }
 
     /// Returns every line of the linear listing of `loaded`, page after page from its start.

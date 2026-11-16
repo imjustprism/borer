@@ -21,6 +21,7 @@ pub mod function_columns;
 pub mod functions_panel;
 pub mod goto;
 pub mod graph_item;
+pub mod hex_item;
 pub mod linear_item;
 pub mod measure;
 pub mod menus;
@@ -34,8 +35,10 @@ pub mod shell;
 pub mod start_item;
 pub mod status;
 pub mod table;
+pub mod tables;
 pub mod title_bar;
 pub mod worker;
+pub mod xrefs;
 
 use gpui::{App, AppContext as _};
 

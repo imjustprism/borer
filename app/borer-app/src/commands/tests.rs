@@ -166,7 +166,13 @@ fn broken(text: &str, keys: &Keys, replaces: bool, os: Os) -> Vec<&'static str> 
         let bare = parts.iter().all(|m| *m == "shift");
         let readonly = matches!(
             keys.context,
-            Ctx::Code | Ctx::Start | Ctx::Overview | Ctx::Graph | Ctx::MenuBar
+            Ctx::Code
+                | Ctx::Start
+                | Ctx::Overview
+                | Ctx::Graph
+                | Ctx::Hex
+                | Ctx::Table
+                | Ctx::MenuBar
         );
         if bare && printable(key) && !readonly {
             out.push("R4 single keys only where nothing is typed");
@@ -260,7 +266,8 @@ fn overlaps(ctx: Ctx, zed: &str) -> bool {
         ],
         Ctx::Code => &["Workspace", "Pane", "Editor"],
         Ctx::Rows => &["Workspace", "Dock", "Editor"],
-        Ctx::Start | Ctx::Overview | Ctx::Graph => &["Workspace", "Pane"],
+        Ctx::Start | Ctx::Overview | Ctx::Graph | Ctx::Hex => &["Workspace", "Pane"],
+        Ctx::Table => &["Workspace", "Dock"],
         Ctx::MenuBar => &["Workspace", "menu"],
     };
     around.contains(&first)
@@ -341,9 +348,13 @@ fn handled(cx: &mut TestAppContext) -> Vec<(Ctx, BTreeSet<&'static str>)> {
                 Ctx::Code => in_code.clone(),
                 Ctx::Rows => in_rows.clone(),
                 Ctx::Graph => in_graph.clone(),
-                Ctx::Global | Ctx::Workspace | Ctx::Start | Ctx::Overview | Ctx::MenuBar => {
-                    anywhere.clone()
-                }
+                Ctx::Global
+                | Ctx::Workspace
+                | Ctx::Start
+                | Ctx::Overview
+                | Ctx::Hex
+                | Ctx::Table
+                | Ctx::MenuBar => anywhere.clone(),
             };
             (ctx, names)
         })

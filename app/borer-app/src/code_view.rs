@@ -139,6 +139,20 @@ impl Role {
     }
 }
 
+/// Returns the color of the first of `keys` the theme's syntax sets, else the theme's text
+/// color.
+///
+/// # Arguments
+///
+/// * `theme` - The Zed theme to paint with.
+/// * `keys` - Theme keys, borer's own first.
+#[must_use]
+pub fn theme_color(theme: &Theme, keys: &[&str]) -> Hsla {
+    keys.iter()
+        .find_map(|key| theme.syntax().style_for_name(key).and_then(|s| s.color))
+        .unwrap_or(theme.colors().text)
+}
+
 /// The color of every [`Role`], by [`Role::index`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CodePalette(pub [Hsla; ROLES]);
@@ -152,12 +166,7 @@ impl CodePalette {
     /// * `theme` - The Zed theme to paint with, normally the active one.
     #[must_use]
     pub fn from_theme(theme: &Theme) -> Self {
-        Self(Role::ALL.map(|role| {
-            role.keys()
-                .iter()
-                .find_map(|key| theme.syntax().style_for_name(key).and_then(|s| s.color))
-                .unwrap_or(theme.colors().text)
-        }))
+        Self(Role::ALL.map(|role| theme_color(theme, role.keys())))
     }
 
     /// Returns the color of `role`.

@@ -5,6 +5,8 @@ use borer_engine::analysis::render::FunctionRow;
 use borer_engine::num::from_usize;
 use gpui::{Pixels, SharedString};
 
+use crate::code_view::Role;
+
 use crate::table::{self, cells, widths};
 pub use crate::table::{Align, Columns, FILL_MIN_CHARS, Fit, Ink};
 
@@ -17,15 +19,17 @@ pub const COLUMNS: [Column; 8] = [
         header: "entry",
         cell: |row| format!("{:#x}", row.entry).into(),
         align: Align::Start,
-        ink: Ink::Address,
+        ink: Ink::Role(Role::Address),
         fit: Fit::Widest(|row| row.entry),
+        sort: Some(|a, b| a.entry.cmp(&b.entry)),
     },
     Column {
         header: "name",
         cell: |row| row.name.clone().into(),
         align: Align::Start,
-        ink: Ink::Function,
+        ink: Ink::Role(Role::Function),
         fit: Fit::Fill,
+        sort: Some(|a, b| a.name.cmp(&b.name)),
     },
     Column {
         header: "size",
@@ -33,6 +37,7 @@ pub const COLUMNS: [Column; 8] = [
         align: Align::End,
         ink: Ink::Muted,
         fit: Fit::Widest(|row| row.size),
+        sort: Some(|a, b| a.size.cmp(&b.size)),
     },
     Column {
         header: "callers",
@@ -40,6 +45,7 @@ pub const COLUMNS: [Column; 8] = [
         align: Align::End,
         ink: Ink::Muted,
         fit: Fit::Widest(|row| from_usize(row.callers)),
+        sort: Some(|a, b| a.callers.cmp(&b.callers)),
     },
     Column {
         header: "blocks",
@@ -47,6 +53,7 @@ pub const COLUMNS: [Column; 8] = [
         align: Align::End,
         ink: Ink::Muted,
         fit: Fit::Widest(|row| from_usize(row.blocks)),
+        sort: Some(|a, b| a.blocks.cmp(&b.blocks)),
     },
     Column {
         header: "instrs",
@@ -54,6 +61,7 @@ pub const COLUMNS: [Column; 8] = [
         align: Align::End,
         ink: Ink::Muted,
         fit: Fit::Widest(|row| from_usize(row.instrs)),
+        sort: Some(|a, b| a.instrs.cmp(&b.instrs)),
     },
     Column {
         header: "callees",
@@ -61,6 +69,7 @@ pub const COLUMNS: [Column; 8] = [
         align: Align::End,
         ink: Ink::Muted,
         fit: Fit::Widest(|row| from_usize(row.callees)),
+        sort: Some(|a, b| a.callees.cmp(&b.callees)),
     },
     Column {
         header: "src",
@@ -68,6 +77,7 @@ pub const COLUMNS: [Column; 8] = [
         align: Align::Start,
         ink: Ink::Muted,
         fit: Fit::Widest(|row| from_usize(row.src.code().len())),
+        sort: Some(|a, b| a.src.code().cmp(b.src.code())),
     },
 ];
 

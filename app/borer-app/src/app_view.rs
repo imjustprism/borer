@@ -623,8 +623,8 @@ fn close_binary(
     cx: &mut Context<'_, Workspace>,
 ) {
     binary.update(cx, Binary::close);
-    if let Some(panel) = workspace.panel::<FunctionsPanel>(cx) {
-        workspace.remove_panel(&panel, window, cx);
+    for spec in PANELS {
+        (spec.remove)(workspace, window, cx);
     }
     for pane in workspace.panes().to_vec() {
         let pane_ref = pane.read(cx);
@@ -712,9 +712,8 @@ pub(crate) mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
+    use borer_engine::analysis::name_of;
     use borer_engine::analysis::render::{FunctionOrder, function_rows};
-    use borer_engine::analysis::{Analysis, Overlay, name_of};
-    use borer_engine::program::Program;
     use borer_engine::view::Ref;
     use command_palette::CommandPalette;
     use command_palette_hooks::CommandPaletteFilter;
@@ -840,14 +839,15 @@ pub(crate) mod tests {
     /// Returns the hand-built sample program, a caller and its callee, as a loaded binary.
     pub(crate) fn sample() -> Arc<LoadedBinary> {
         let (program, analysis, overlay) = crate::code_view::tests::sample_program();
-        loaded(program, analysis, overlay)
+        loaded_of(program, analysis, overlay)
     }
 
-    /// Returns a hand-built program, its analysis and overlay as a loaded binary.
-    pub(crate) fn loaded(
-        program: Program,
-        analysis: Analysis,
-        overlay: Overlay,
+    /// Returns `program`, its `analysis` and `overlay` as a loaded binary, its function rows
+    /// read as a load reads them.
+    pub(crate) fn loaded_of(
+        program: borer_engine::program::Program,
+        analysis: borer_engine::analysis::Analysis,
+        overlay: borer_engine::analysis::Overlay,
     ) -> Arc<LoadedBinary> {
         let initial_rows = Arc::new(function_rows(
             &analysis,
@@ -1189,17 +1189,7 @@ pub(crate) mod tests {
     /// Panics when a step goes wrong, as [`a_dropped_or_added_folder_never_joins_the_project`] says.
     async fn a_dropped_or_added_folder_never_joins_the_project_steps(cx: &mut TestAppContext) {
         let app_state = init(cx);
-        let dir = std::env::temp_dir().join(format!("borer-app-drop-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let settings = r#"{"context_servers": {"x": {"command": "calc.exe"}}}"#;
-        app_state
-            .fs
-            .as_fake()
-            .insert_tree(
-                &dir,
-                serde_json::json!({ ".zed": { "settings.json": settings } }),
-            )
-            .await;
+        let dir = folder_with_settings(&app_state, "drop-test").await;
         let (app, cx) = open(&app_state, cx);
         let workspace = app.workspace.clone();
         drop_on_center(&dir, cx);
@@ -1219,6 +1209,27 @@ pub(crate) mod tests {
         });
         assert_eq!(folders, 0);
         assert!(cx.update(|_, cx| DisableAiSettings::get_global(cx).disable_ai));
+    }
+
+    /// Returns a new folder `borer-app-<name>-<pid>` under the temporary directory, whose
+    /// `.zed/settings.json` would start a context server if Zed read it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the folder cannot be made.
+    pub(crate) async fn folder_with_settings(app_state: &Arc<AppState>, name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("borer-app-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = r#"{"context_servers": {"x": {"command": "calc.exe"}}}"#;
+        app_state
+            .fs
+            .as_fake()
+            .insert_tree(
+                &dir,
+                serde_json::json!({ ".zed": { "settings.json": settings } }),
+            )
+            .await;
+        dir
     }
 
     /// A panel docked after a load lists the open binary and opens its first function.

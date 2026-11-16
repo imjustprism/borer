@@ -3,8 +3,12 @@
 //! One table of them says how a row fills each cell, where its text sits, what color it
 //! draws in and how wide it is, so headers and cells cannot drift apart.
 
+use std::cmp::Ordering;
+
 use gpui::prelude::FluentBuilder as _;
 use gpui::{Div, IntoElement, ParentElement as _, Pixels, SharedString, Styled as _, div};
+
+use crate::code_view::Role;
 
 /// Where a cell's text sits in its column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,10 +22,8 @@ pub enum Align {
 /// What a column's cells are, which picks the theme color they draw in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ink {
-    /// An address, in the theme's `borer.address` color.
-    Address,
-    /// A function's name, in the theme's `function` color.
-    Function,
+    /// A token of this role, in the theme's color for it.
+    Role(Role),
     /// A count or a code, in the theme's muted text color.
     Muted,
 }
@@ -49,6 +51,8 @@ pub struct Column<R> {
     pub ink: Ink,
     /// How wide the column is.
     pub fit: Fit<R>,
+    /// Orders two rows by the column's fact, `None` for a column the rows cannot sort by.
+    pub sort: Option<fn(&R, &R) -> Ordering>,
 }
 
 /// Which of a kind's columns a table shows.

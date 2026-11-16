@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use borer_engine::analysis::render::{FunctionRow, FunctionRows, INCOMPLETE_NOTE};
-use gpui::{AppContext as _, Entity, SharedString};
+use gpui::{Entity, SharedString};
 use ui::IconName;
 use workspace::Workspace;
 use workspace::dock::DockPosition;
@@ -18,7 +18,7 @@ use crate::panels::PanelSpec;
 use crate::places::Place;
 use crate::rail::panel;
 pub use crate::rows_panel::Empty;
-use crate::rows_panel::{RowKind, RowsPanel};
+use crate::rows_panel::{Answer, RowKind, RowsPanel, add, focus, remove};
 use crate::worker::{LoadedBinary, filter_rows_blocking};
 
 /// The functions panel's row of [`crate::panels::PANELS`].
@@ -31,16 +31,13 @@ pub const PANEL: PanelSpec = PanelSpec {
     docks: &[DockPosition::Left, DockPosition::Right],
     size_px: 560.0,
     hooks: panel::<FunctionsPanel>(),
-    add: |workspace, binary, dock, window, cx| {
-        let weak = cx.weak_entity();
-        let binary = binary.clone();
-        let panel = cx.new(|cx| FunctionsPanel::new(weak, binary, dock, window, cx));
-        workspace.add_panel(panel, window, cx);
-    },
+    add: add::<Functions>,
+    remove: remove::<Functions>,
+    focus: focus::<Functions>,
 };
 
-/// Registers the functions panel's actions on `workspace`: focus its filter, show or
-/// focus it, and show or hide its extra columns.
+/// Registers the functions panel's actions on `workspace`: focus its filter, and show or
+/// hide its extra columns; [`crate::panels::register_toggles`] shows or focuses it.
 ///
 /// # Arguments
 ///
@@ -52,13 +49,6 @@ pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
         binary,
         |workspace, _: &FocusFilter, window, cx| {
             workspace.focus_panel::<FunctionsPanel>(window, cx);
-        },
-    );
-    commands::register(
-        workspace,
-        binary,
-        |workspace, _: &ToggleFunctions, window, cx| {
-            workspace.toggle_panel_focus::<FunctionsPanel>(window, cx);
         },
     );
     commands::register(
@@ -82,21 +72,15 @@ pub struct Functions;
 impl RowKind for Functions {
     type Row = FunctionRow;
     type Shown = FunctionRows;
+    type Target = ();
     const PANEL: &'static PanelSpec = &PANEL;
     const PLACEHOLDER: &'static str = "Filter by name or address";
     const TABLE: &'static str = "function table";
     const FILTERING: &'static str = "Filtering functions";
+    const PREVIEWS: bool = true;
 
     fn columns(columns: Columns) -> &'static [Column] {
         columns.shown()
-    }
-
-    fn rows(shown: &FunctionRows) -> &[FunctionRow] {
-        &shown.rows
-    }
-
-    fn showing(shown: &FunctionRows) -> SharedString {
-        shown.showing().into()
     }
 
     fn warning(shown: &FunctionRows) -> Option<&'static str> {
@@ -105,12 +89,12 @@ impl RowKind for Functions {
             .then(|| INCOMPLETE_NOTE.trim_start_matches("# "))
     }
 
-    fn first(loaded: &LoadedBinary) -> Arc<FunctionRows> {
-        loaded.initial_rows.clone()
+    fn first(loaded: &LoadedBinary) -> Option<Arc<FunctionRows>> {
+        Some(loaded.initial_rows.clone())
     }
 
-    fn fetch(loaded: &LoadedBinary, filter: &str) -> FunctionRows {
-        filter_rows_blocking(loaded, filter)
+    fn fetch(loaded: &LoadedBinary, (): &(), filter: &str, limit: usize) -> FunctionRows {
+        filter_rows_blocking(loaded, filter, limit)
     }
 
     fn nothing(shown: &FunctionRows, query: &SharedString) -> Empty {
@@ -123,6 +107,24 @@ impl RowKind for Functions {
 
     fn place(row: &FunctionRow) -> Option<Place> {
         Some(Place::decompile(row.entry))
+    }
+}
+
+impl Answer<FunctionRow> for FunctionRows {
+    fn rows(&self) -> &[FunctionRow] {
+        &self.rows
+    }
+
+    fn rows_mut(&mut self) -> &mut [FunctionRow] {
+        &mut self.rows
+    }
+
+    fn total(&self) -> usize {
+        self.total
+    }
+
+    fn showing(&self) -> SharedString {
+        Self::showing(self).into()
     }
 }
 
