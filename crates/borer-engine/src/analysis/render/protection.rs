@@ -406,7 +406,7 @@ fn checks_of(p: &Program, a: &Analysis, o: &Overlay) -> (Summary, String) {
     let summary = Summary::new(
         format!(
             "{} function{} judge a key, serial or license{}",
-            checks.len().min(CHECKS_MAX),
+            checks.len(),
             plural(checks.len()),
             if readers.is_empty() {
                 String::new()
@@ -448,6 +448,7 @@ fn checks_of(p: &Program, a: &Analysis, o: &Overlay) -> (Summary, String) {
             cs.join(", ")
         );
     }
+    more_line(&mut out, checks.len(), CHECKS_MAX, "checks not listed");
     readers_line(&mut out, a, o, &readers);
     (summary, out)
 }

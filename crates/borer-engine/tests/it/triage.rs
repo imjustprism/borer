@@ -427,3 +427,70 @@ fn a_string_built_from_a_block_seed_is_credited_to_its_function() {
         triage.spell()
     );
 }
+
+/// Most check rows the checks listing names, as its own constant says.
+const CHECK_ROWS: usize = 200;
+
+/// Returns an image of `n` functions that each mention `bad serial number`
+/// and compare against a telling constant, all called from the entry.
+///
+/// # Arguments
+///
+/// * `n` - Check functions, at most 0x100 a page of code holds twice.
+fn many_checks(n: u32) -> Program {
+    /// Where the check functions start.
+    const FIRST: u32 = 0x40_1400;
+    /// Bytes each check function takes.
+    const EACH: u32 = 16;
+    /// Where the phrase sits.
+    const PHRASE: u32 = 0x40_3000;
+    let mut bytes = vec![0xccu8; 0x3000];
+    for i in 0..n {
+        let call = usize::try_from(i * 5).unwrap_or(0);
+        let next = 0x40_1000 + i * 5 + 5;
+        let f = FIRST + i * EACH;
+        bytes[call] = 0xe8;
+        bytes[call + 1..call + 5].copy_from_slice(&(f - next).to_le_bytes());
+        let at = usize::try_from(f - 0x40_1000).unwrap_or(0);
+        let lea = PHRASE - (f + 7);
+        bytes[at..at + 3].copy_from_slice(&[0x48, 0x8d, 0x05]);
+        bytes[at + 3..at + 7].copy_from_slice(&lea.to_le_bytes());
+        bytes[at + 7..at + 13].copy_from_slice(&[0x81, 0xf9, 0x44, 0x43, 0x42, 0x41]);
+        bytes[at + 13] = 0xc3;
+    }
+    bytes[usize::try_from(n * 5).unwrap_or(0)] = 0xc3;
+    let phrase = b"bad serial number\0";
+    bytes[0x2000..0x2000 + phrase.len()].copy_from_slice(phrase);
+    Program::raw(
+        bytes,
+        Arch::X86_64,
+        0x40_0000,
+        Some(0x40_1000),
+        vec![
+            borer_engine::program::Section::mapped(".text", 0x40_1000, 0, 0x2000, false, true),
+            borer_engine::program::Section::mapped(
+                ".rdata", 0x40_3000, 0x2000, 0x1000, false, false,
+            ),
+        ],
+    )
+}
+
+/// More checks than the listing names are all counted, in the headline
+/// and the summary alike, and the listing says how many it left out.
+#[test]
+fn the_checks_headline_counts_every_check() {
+    let p = many_checks(201);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let s = render::license_checks_summary(&p, &a, &o);
+    assert!(s.count > CHECK_ROWS, "{s:?}");
+    assert!(
+        s.headline
+            .starts_with(&format!("{} functions judge", s.count)),
+        "{s:?}"
+    );
+    assert!(
+        render::license_checks_tsv(&p, &a, &o).contains("checks not listed"),
+        "{s:?}"
+    );
+}
