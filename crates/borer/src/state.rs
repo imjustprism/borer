@@ -240,9 +240,13 @@ impl BorerServer {
     /// because an empty answer from those would read as "nothing found"
     /// rather than "not supported here". A tool body runs under
     /// [`Self::with_program`], so a binary is loaded and the architecture is
-    /// the one way the analysis can be missing.
+    /// the one way the analysis can be missing. The empty analysis is held
+    /// until the next load, so what its memo keeps (the string walk) is
+    /// worked out once per program, as an analysis's is.
     pub(crate) fn analysis_or_empty(&self) -> Arc<Analysis> {
-        self.ensure_analysis().unwrap_or_default()
+        self.ensure_analysis().unwrap_or_else(|_| {
+            Arc::clone(write_lock(&self.no_code).get_or_insert_with(Arc::default))
+        })
     }
 
     /// Returns an answer drawn from facts of the loaded file, the facts kept
@@ -388,6 +392,7 @@ impl BorerServer {
         *write_lock(&self.raw_load) = raw;
         *write_lock(&self.program_packs) = packs;
         *write_lock(&self.analysis) = None;
+        *write_lock(&self.no_code) = None;
         (loaded.replace(program), dropped)
     }
 
@@ -957,6 +962,37 @@ pub(crate) fn read_packs(files: &[String]) -> anyhow::Result<Arc<Packs>> {
 
 #[cfg(test)]
 mod tests {
+    /// A program whose architecture has no analysis is answered from one
+    /// empty analysis per load, so two string pages share one walk.
+    ///
+    /// # Panics
+    ///
+    /// When the empty analysis is made again or a page walks again.
+    #[test]
+    fn a_program_without_analysis_walks_its_strings_once() {
+        use crate::params::StringsParams;
+        use rmcp::handler::server::wrapper::Parameters;
+        let server = crate::testing::code_server(
+            borer_engine::program::Arch::Unknown,
+            b"plain text here\0more plain text\0",
+        );
+        assert!(server.ensure_analysis().is_err(), "no analysis to compute");
+        let held = server.analysis_or_empty();
+        assert!(std::sync::Arc::ptr_eq(&held, &server.analysis_or_empty()));
+        for filter in [None, Some("more".to_owned())] {
+            let page = server.strings(Parameters(StringsParams {
+                min_length: None,
+                filter,
+                encoding: None,
+                offset: None,
+                limit: None,
+                count_only: None,
+            }));
+            assert!(page.is_ok(), "{page:?}");
+        }
+        assert_eq!(held.derived.held("string_walks"), 1);
+    }
+
     /// The loaded file is named as pending until its analysis is held,
     /// and nothing is pending with no file loaded.
     ///
