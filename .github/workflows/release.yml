@@ -10,18 +10,28 @@ name: release
 # Homebrew tap and the Scoop bucket, each only when its credential is
 # configured. Run by hand on a branch, it builds and uploads the archives as
 # workflow artifacts and publishes nothing; run by hand on a tag, it publishes
-# that tag.
+# that tag. Run by hand with dev_build set, it builds the named ref and
+# replaces the rolling `dev-build` pre-release with its archives instead.
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      dev_build:
+        description: Publish the archives as the rolling dev-build pre-release
+        type: boolean
+        default: false
+      ref:
+        description: The branch, tag or commit a dev build builds
+        type: string
+        default: dev
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.dev_build && 'dev-build' || github.ref }}
   cancel-in-progress: false
 
 env:
@@ -29,8 +39,29 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
+  # The commit every build job checks out, so a branch that moves mid-run
+  # cannot mix two commits in one release, and the archives' version: the
+  # tag or branch, or `dev-build`.
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.dev_build && inputs.ref || github.ref }}
+      - id: resolve
+        env:
+          VERSION: ${{ inputs.dev_build && 'dev-build' || github.ref_name }}
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION//\//-}" >> "$GITHUB_OUTPUT"
+
   build:
     name: build (${{ matrix.target }})
+    needs: source
     strategy:
       fail-fast: false
       matrix:
@@ -50,6 +81,8 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.source.outputs.sha }}
 
       # rust-toolchain.toml pins the channel; the target is added to it.
       - name: toolchain
@@ -70,10 +103,12 @@ jobs:
           py=$(command -v python3 || command -v python)
           "$py" scripts/dev/licenses.py --target ${{ matrix.target }} --out THIRD-PARTY-LICENSES
 
-      # The archive name: borer-<tag or branch>-<target>.
+      # The archive name: borer-<tag, branch or dev-build>-<target>.
       - name: name
         shell: bash
-        run: echo "NAME=borer-${GITHUB_REF_NAME//\//-}-${{ matrix.target }}" >> "$GITHUB_ENV"
+        env:
+          VERSION: ${{ needs.source.outputs.version }}
+        run: echo "NAME=borer-$VERSION-${{ matrix.target }}" >> "$GITHUB_ENV"
 
       - name: package (zip)
         if: runner.os == 'Windows'
@@ -102,6 +137,7 @@ jobs:
   # toolchain for GPUI's shaders.
   app:
     name: app (${{ matrix.target }})
+    needs: source
     strategy:
       fail-fast: false
       matrix:
@@ -118,6 +154,8 @@ jobs:
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.source.outputs.sha }}
 
       - name: linux packages
         if: runner.os == 'Linux'
@@ -152,7 +190,9 @@ jobs:
 
       - name: name
         shell: bash
-        run: echo "NAME=borer-app-${GITHUB_REF_NAME//\//-}-${{ matrix.target }}" >> "$GITHUB_ENV"
+        env:
+          VERSION: ${{ needs.source.outputs.version }}
+        run: echo "NAME=borer-app-$VERSION-${{ matrix.target }}" >> "$GITHUB_ENV"
 
       - name: package (zip)
         if: runner.os == 'Windows'
@@ -176,11 +216,48 @@ jobs:
           path: ${{ env.NAME }}.*
           if-no-files-found: error
 
+  # The rolling preview, only by hand: the release and tag `dev-build` are
+  # deleted and made again at the built commit, a pre-release that is never
+  # the latest, with whichever archives built.
+  dev-build:
+    name: dev build
+    needs: [source, build, app]
+    if: ${{ !cancelled() && inputs.dev_build && needs.source.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: checksums
+        working-directory: dist
+        run: sha256sum borer-* > SHA256SUMS
+
+      - name: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.source.outputs.sha }}
+          REF: ${{ inputs.ref }}
+        run: |
+          {
+            echo "An unreviewed preview build of \`$REF\` at commit $SHA, not a release."
+            echo "Each dev build replaces the last; tagged releases are the reviewed ones."
+          } > notes.md
+          gh release delete dev-build --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
+          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/dev-build" || true
+          gh release create dev-build dist/* --repo "$GITHUB_REPOSITORY" \
+            --target "$SHA" --title "borer dev build" --notes-file notes.md \
+            --prerelease --latest=false
+
   # A failed app build leaves the server's release whole, without that archive.
   release:
     name: publish
     needs: [build, app]
-    if: ${{ !cancelled() && needs.build.result == 'success' && startsWith(github.ref, 'refs/tags/v') }}
+    if: ${{ !cancelled() && needs.build.result == 'success' && startsWith(github.ref, 'refs/tags/v') && !inputs.dev_build }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
