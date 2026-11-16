@@ -813,10 +813,37 @@ fn via_of(a: &Analysis, slots: &BTreeMap<u64, &str>, end: u64, called: bool) -> 
 /// Most blocks a control-flow graph draws.
 pub const CFG_BLOCKS_MAX: usize = 300;
 
+/// Most jump-table entries a mermaid edge names before counting the rest.
+const CASES_LISTED: usize = 4;
+
+/// Returns the mermaid label of a jump table's entries holding one target.
+///
+/// # Arguments
+///
+/// * `ns` - The entries, in increasing order.
+///
+/// # Returns
+///
+/// `|entry 3|`, or `|entries 0, 2 +5 more|` naming at most [`CASES_LISTED`].
+fn entries_label(ns: &[u32]) -> String {
+    let named: Vec<String> = ns.iter().take(CASES_LISTED).map(u32::to_string).collect();
+    let more = ns.len().saturating_sub(CASES_LISTED);
+    match (ns.len(), more) {
+        (1, _) => format!("|entry {}|", named.join("")),
+        (_, 0) => format!("|entries {}|", named.join(", ")),
+        _ => format!("|entries {} +{more} more|", named.join(", ")),
+    }
+}
+
 /// Renders a function's control-flow graph as mermaid.
 ///
 /// A node is labelled by its block's start and terminator; the end is the
-/// next block's start, and `function` lists the sizes. A function of more
+/// next block's start, and `function` lists the sizes. An edge is
+/// labelled by what takes it ([`block_edges`]) when it is taken or not
+/// taken under a condition (`taken`, `not taken`) or is the entries of a
+/// jump table that hold its target (`entry 3`, `entries 0, 2, 5, 7 +4 more`, at
+/// most [`CASES_LISTED`] named); a jump and a fall are unlabelled. A
+/// function of more
 /// than [`CFG_BLOCKS_MAX`] blocks draws that many in address order from
 /// `offset`, with the edges among them, and says so on the last line: a
 /// 2,900-block dispatcher drew 89 KB of mermaid at once, and the blocks
@@ -825,6 +852,7 @@ pub const CFG_BLOCKS_MAX: usize = 300;
 ///
 /// # Arguments
 ///
+/// * `p` - The loaded image, for the instruction set and arm blocks.
 /// * `a` - The analysis.
 /// * `o` - User names for the title.
 /// * `entry` - The function's entry address.
@@ -833,10 +861,17 @@ pub const CFG_BLOCKS_MAX: usize = 300;
 /// # Returns
 ///
 /// A `graph TD` document with one node per drawn block (`start term`) and
-/// one edge per successor among them, then a `%% showing N of M blocks
+/// one edge per successor among them (`n0 -->|taken| n2`), then a
+/// `%% showing N of M blocks
 /// from O` line when the function was cut; `None` when no function starts
 /// at `entry`.
-pub fn cfg_mermaid(a: &Analysis, o: &Overlay, entry: u64, offset: usize) -> Option<String> {
+pub fn cfg_mermaid(
+    p: &Program,
+    a: &Analysis,
+    o: &Overlay,
+    entry: u64,
+    offset: usize,
+) -> Option<String> {
     let f = a.function(entry)?;
     let drawn = f
         .blocks
@@ -858,10 +893,15 @@ pub fn cfg_mermaid(a: &Analysis, o: &Overlay, entry: u64, offset: usize) -> Opti
         let _ = writeln!(out, "  n{i}[\"{:#x} {}\"]", b.start, b.term.name());
     }
     for (i, b) in drawn.iter().enumerate() {
-        for &s in &b.successors {
-            if let Some(&j) = index.get(&s) {
-                let _ = writeln!(out, "  n{i} --> n{j}");
-            }
+        for (s, kind) in block_edges(p, a, b) {
+            let Some(&j) = index.get(&s) else { continue };
+            let label = match kind {
+                EdgeKind::Taken => "|taken|".to_owned(),
+                EdgeKind::NotTaken => "|not taken|".to_owned(),
+                EdgeKind::Cases(ns) => entries_label(&ns),
+                EdgeKind::Jump | EdgeKind::Fall => String::new(),
+            };
+            let _ = writeln!(out, "  n{i} -->{label} n{j}");
         }
     }
     if drawn.len() < f.blocks.len() {

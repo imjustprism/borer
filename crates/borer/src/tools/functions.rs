@@ -432,7 +432,7 @@ impl BorerServer {
         let offset = to_usize(offset.unwrap_or(0));
         self.with_analysis(Feature::Discover, |p, a, o| {
             let entry = self.function_entry(p, a, &address)?;
-            render::cfg_mermaid(a, o, entry, offset)
+            render::cfg_mermaid(p, a, o, entry, offset)
                 .ok_or_else(|| format!("no function at {entry:#x}"))
         })
     }

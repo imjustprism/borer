@@ -183,7 +183,7 @@ fn a_cfg_pages_its_blocks_on_a_mermaid_comment() {
     use borer_engine::analysis::render::cfg_mermaid;
     let p = image(&[0x85, 0xc9, 0x74, 0x01, 0x90, 0xc3]);
     let a = Analysis::compute(&p);
-    let out = cfg_mermaid(&a, &Overlay::default(), 0x401000, 1).unwrap_or_default();
+    let out = cfg_mermaid(&p, &a, &Overlay::default(), 0x401000, 1).unwrap_or_default();
     assert!(out.contains("%% showing 2 of 3 blocks from 1\n"), "{out}");
     assert!(out.contains("[\"0x401004 "), "{out}");
     assert!(!out.contains("[\"0x401000 "), "{out}");

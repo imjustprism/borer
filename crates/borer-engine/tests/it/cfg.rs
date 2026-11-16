@@ -14,7 +14,7 @@ use crate::raw::image;
 
 use borer_engine::analysis::render::{
     CFG_EDGES_MAX, CFG_LISTED_MAX, CFG_NODES_MAX, CFG_ROWS_MAX, Drawing, EdgeKind, Graph,
-    GraphEdge, LAYOUT_DUMMIES_PER_NODE, Route, Routed, cfg, layout,
+    GraphEdge, LAYOUT_DUMMIES_PER_NODE, Route, Routed, cfg, cfg_mermaid, layout,
 };
 use borer_engine::analysis::{Analysis, BasicBlock, BlockTerm, Overlay};
 use borer_engine::program::{Arch, Program, Section};
@@ -118,6 +118,53 @@ fn each_edge_is_named_by_what_takes_it_and_the_loop_edge_is_back() {
     );
     assert_eq!(g.cut, None);
     check(&graph_of(&g, TEXT), &g.layout()).expect("a clear drawing");
+}
+
+/// The mermaid graph labels a branch's edges taken and not taken and a
+/// jump table's by the entries holding each target, and leaves a jump and
+/// a fall unlabeled.
+#[test]
+fn the_mermaid_graph_labels_branches_and_table_entries() {
+    let blocks = vec![
+        (BlockTerm::Cond, vec![2, 1]),
+        (BlockTerm::Indirect, vec![2, 3, 2, 3, 3, 3, 3, 3]),
+        (BlockTerm::Fall, vec![3]),
+        (BlockTerm::Ret, vec![]),
+    ];
+    let (p, mut a) = one_byte_blocks(&blocks);
+    a.jump_tables
+        .insert(TEXT + 1, blocks[1].1.iter().map(|&b| TEXT + b).collect());
+    let out = cfg_mermaid(&p, &a, &Overlay::default(), TEXT, 0).expect("graph");
+    let edges: Vec<&str> = out.lines().filter(|l| l.contains("-->")).collect();
+    assert_eq!(
+        edges,
+        [
+            "  n0 -->|taken| n2",
+            "  n0 -->|not taken| n1",
+            "  n1 -->|entries 0, 2| n2",
+            "  n1 -->|entries 1, 3, 4, 5 +2 more| n3",
+            "  n2 --> n3",
+        ],
+        "{out}"
+    );
+}
+
+/// On arm the mermaid graph labels the test before a conditional run taken
+/// into it: `cmp r0, #0; popeq {r4, pc}; mov r0, #1; bx lr`.
+#[test]
+fn the_mermaid_graph_labels_an_arm_conditional_run_taken() {
+    let (p, a) = arm_run();
+    let out = cfg_mermaid(&p, &a, &Overlay::default(), 0x401000, 0).expect("graph");
+    let node = out
+        .lines()
+        .find(|l| l.contains("[\"0x401004 "))
+        .and_then(|l| l.trim().split('[').next())
+        .expect("the popeq node");
+    assert!(
+        out.lines()
+            .any(|l| l.ends_with(&format!("-->|taken| {node}"))),
+        "{out}"
+    );
 }
 
 /// An indirect jump whose successors are not its table's entries claims no
