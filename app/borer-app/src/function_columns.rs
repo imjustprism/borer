@@ -14,6 +14,17 @@ pub enum Align {
     End,
 }
 
+/// What a column's cells are, which picks the theme color they draw in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ink {
+    /// An address, in the theme's `borer.address` color.
+    Address,
+    /// A function's name, in the theme's `function` color.
+    Function,
+    /// A count or a code, in the theme's muted text color.
+    Muted,
+}
+
 /// How wide a column is.
 #[derive(Debug, Clone, Copy)]
 pub enum Fit {
@@ -33,6 +44,8 @@ pub struct Column {
     pub cell: fn(&FunctionRow) -> SharedString,
     /// Where the header and the cells sit.
     pub align: Align,
+    /// What the cells are, which picks their color.
+    pub ink: Ink,
     /// How wide the column is.
     pub fit: Fit,
 }
@@ -43,48 +56,56 @@ pub const COLUMNS: [Column; 8] = [
         header: "entry",
         cell: |row| format!("{:#x}", row.entry).into(),
         align: Align::Start,
+        ink: Ink::Address,
         fit: Fit::Widest(|row| row.entry),
     },
     Column {
         header: "name",
         cell: |row| row.name.clone().into(),
         align: Align::Start,
+        ink: Ink::Function,
         fit: Fit::Fill,
     },
     Column {
         header: "size",
         cell: |row| row.size.to_string().into(),
         align: Align::End,
+        ink: Ink::Muted,
         fit: Fit::Widest(|row| row.size),
     },
     Column {
         header: "callers",
         cell: |row| row.callers.to_string().into(),
         align: Align::End,
+        ink: Ink::Muted,
         fit: Fit::Widest(|row| from_usize(row.callers)),
     },
     Column {
         header: "blocks",
         cell: |row| row.blocks.to_string().into(),
         align: Align::End,
+        ink: Ink::Muted,
         fit: Fit::Widest(|row| from_usize(row.blocks)),
     },
     Column {
         header: "instrs",
         cell: |row| row.instrs.to_string().into(),
         align: Align::End,
+        ink: Ink::Muted,
         fit: Fit::Widest(|row| from_usize(row.instrs)),
     },
     Column {
         header: "callees",
         cell: |row| row.callees.to_string().into(),
         align: Align::End,
+        ink: Ink::Muted,
         fit: Fit::Widest(|row| from_usize(row.callees)),
     },
     Column {
         header: "src",
         cell: |row| row.src.code().into(),
         align: Align::Start,
+        ink: Ink::Muted,
         fit: Fit::Widest(|row| from_usize(row.src.code().len())),
     },
 ];

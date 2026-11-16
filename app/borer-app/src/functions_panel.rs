@@ -5,26 +5,29 @@ use std::sync::Arc;
 
 use borer_engine::analysis::render::FunctionRows;
 use editor::{Editor, EditorEvent};
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Action, AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Entity, EventEmitter,
-    FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
-    Render, ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Task, WeakEntity, Window, canvas, div, px,
+    Action, AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Div, Entity,
+    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _,
+    Pixels, Render, ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Task, WeakEntity, Window, canvas, div, px, transparent_black,
 };
 use settings::{Settings as _, SettingsStore};
-use theme::ActiveTheme as _;
+use theme::{ActiveTheme as _, GlobalTheme};
+
 use theme_settings::ThemeSettings;
 use ui::{
-    ColumnWidthConfig, IconName, ResizableColumnsState, Table, TableInteractionState,
-    TableResizeBehavior,
+    Color, ColumnWidthConfig, IconName, Label, LabelCommon as _, LabelSize, ResizableColumnsState,
+    Table, TableInteractionState, TableResizeBehavior,
 };
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use crate::actions::ToggleFunctions;
 use crate::binary::{Binary, SettingsNotice};
+use crate::code_view::CodePalette;
 use crate::decompile_item::{TabMode, code_row_height, open_function};
-use crate::function_columns::{Align, Columns, column_widths, row_cells};
+use crate::function_columns::{Align, Columns, Ink, column_widths, row_cells};
 use crate::worker::{FilterLatest, LoadedBinary, filter_rows_blocking, spawn_engine};
 
 /// Name Zed saves the panel's dock state and size under.
@@ -35,6 +38,16 @@ const DEFAULT_WIDTH_PX: f32 = 560.0;
 
 /// Horizontal padding of a cell of Zed's table, both sides together, in rems (`px_1`).
 const CELL_PAD_REMS: f32 = 0.5;
+
+/// Width in logical pixels of the bar the selected row paints over its left padding, so no
+/// row and no header moves.
+const SELECTED_BAR_PX: f32 = 2.0;
+
+/// Debug selector of a table row, whose laid-out bounds the tests read.
+const ROW_SELECTOR: &str = "function-row";
+
+/// Debug selector of an entry cell's content, whose laid-out bounds the tests read.
+const ENTRY_SELECTOR: &str = "function-entry";
 
 /// The open binary's function table, in a dock.
 pub struct FunctionsPanel {
@@ -65,8 +78,11 @@ pub struct FunctionsPanel {
     position: DockPosition,
     /// The running background filter.
     filter_task: Option<Task<()>>,
-    /// Reruns the filter on each edit and follows the binary's loads.
-    _subscriptions: [Subscription; 3],
+    /// Colors of the engine's token kinds, read again when the theme or the settings change.
+    palette: CodePalette,
+    /// Reruns the filter on each edit, follows the binary's loads, and lays the table out
+    /// again on a settings or theme change.
+    _subscriptions: [Subscription; 4],
 }
 
 impl std::fmt::Debug for FunctionsPanel {
@@ -110,6 +126,7 @@ impl FunctionsPanel {
                 this.follow_binary(&binary, window, cx);
             }),
             cx.observe_global::<SettingsStore>(Self::relayout),
+            cx.observe_global::<GlobalTheme>(Self::relayout),
         ];
         let mut panel = Self {
             workspace,
@@ -125,6 +142,7 @@ impl FunctionsPanel {
             table_width: px(DEFAULT_WIDTH_PX),
             position,
             filter_task: None,
+            palette: CodePalette::from_theme(cx.theme()),
             _subscriptions: subscriptions,
         };
         panel.relayout(cx);
@@ -132,13 +150,14 @@ impl FunctionsPanel {
     }
 
     /// Lays the shown columns out for the shown rows, the buffer font the table draws in and
-    /// the table's width; a font the text system cannot measure is measured by its size
-    /// instead, and the status line says so.
+    /// the table's width, and rereads the theme's token colors; a font the text system cannot
+    /// measure is measured by its size instead, and the status line says so.
     ///
     /// # Arguments
     ///
     /// * `cx` - Panel context.
     fn relayout(&mut self, cx: &mut Context<'_, Self>) {
+        self.palette = CodePalette::from_theme(cx.theme());
         let settings = ThemeSettings::get_global(cx);
         let (font, size) = (settings.buffer_font.clone(), settings.buffer_font_size(cx));
         let pad = settings.ui_font_size(cx) * CELL_PAD_REMS;
@@ -410,24 +429,51 @@ impl FunctionsPanel {
         let rows = self.rows.current().cloned();
         let count = rows.as_ref().map_or(0, |r| r.rows.len());
         let selected = self.selected;
-        let selected_bg = cx.theme().colors().element_selected;
+        let colors = cx.theme().colors();
+        let (selected_bg, hover_bg) = (colors.element_selected, colors.element_hover);
+        let (bar, muted) = (colors.text, colors.text_muted);
+        let palette = self.palette;
+        let ink = move |ink| match ink {
+            Ink::Address => palette.address,
+            Ink::Function => palette.function,
+            Ink::Muted => muted,
+        };
+        let ui_font = ThemeSettings::get_global(cx).ui_font.clone();
         let panel = cx.entity().downgrade();
         let columns = self.columns;
-        let headers = columns.shown().iter().map(|c| aligned(c.align, c.header));
+        let headers = columns.shown().iter().map(|c| {
+            let label = Label::new(c.header)
+                .size(LabelSize::Small)
+                .color(Color::Muted);
+            aligned(c.align, label).font(ui_font.clone())
+        });
         Table::new(columns.shown().len())
             .width_config(ColumnWidthConfig::Resizable(self.widths.clone()))
             .no_ui_font()
             .hide_row_borders()
+            .hide_row_hover()
             .interactable(&self.table_state)
             .header(headers.collect())
             .map_row(move |(ix, row_div), _window, _cx| {
                 let panel = panel.clone();
-                let styled = if ix == selected {
-                    row_div.bg(selected_bg)
-                } else {
-                    row_div
-                };
-                styled
+                let here = ix == selected;
+                let mark = div()
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .bottom_0()
+                    .w(px(SELECTED_BAR_PX))
+                    .bg(bar);
+                row_div
+                    .debug_selector(|| ROW_SELECTOR.to_owned())
+                    .relative()
+                    .bg(if here {
+                        selected_bg
+                    } else {
+                        transparent_black()
+                    })
+                    .when(here, |row| row.child(mark))
+                    .when(!here, |row| row.hover(|style| style.bg(hover_bg)))
                     .cursor_pointer()
                     .on_click(move |_, window, cx| {
                         let Some(panel) = panel.upgrade() else {
@@ -451,7 +497,15 @@ impl FunctionsPanel {
                         let shown = columns.shown().iter();
                         cells
                             .zip(shown)
-                            .map(|(cell, c)| aligned(c.align, cell))
+                            .enumerate()
+                            .map(|(col, (cell, c))| {
+                                aligned(c.align, cell)
+                                    .text_color(ink(c.ink))
+                                    .when(col == 0, |d| {
+                                        d.debug_selector(|| ENTRY_SELECTOR.to_owned())
+                                    })
+                                    .into_any_element()
+                            })
                             .collect()
                     })
                     .collect()
@@ -460,22 +514,19 @@ impl FunctionsPanel {
     }
 }
 
-/// Returns `text` as a table cell sitting where `align` says.
+/// Returns `child` as the content of a table cell, filling it and sitting where `align`
+/// says.
 ///
 /// # Arguments
 ///
-/// * `align` - Where the text sits in its column.
-/// * `text` - The cell's text.
-fn aligned(align: Align, text: impl Into<SharedString>) -> AnyElement {
-    match align {
-        Align::Start => text.into().into_any_element(),
-        Align::End => div()
-            .w_full()
-            .flex()
-            .justify_end()
-            .child(text.into())
-            .into_any_element(),
-    }
+/// * `align` - Where the content sits in its column.
+/// * `child` - The cell's text or label.
+fn aligned(align: Align, child: impl IntoElement) -> Div {
+    div()
+        .w_full()
+        .flex()
+        .when(align == Align::End, Div::justify_end)
+        .child(child)
 }
 
 impl Render for FunctionsPanel {
@@ -611,5 +662,107 @@ impl Panel for FunctionsPanel {
 
     fn activation_priority(&self) -> u32 {
         1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use borer_engine::analysis::render::{
+        FunctionOrder, FunctionRow, FunctionRows, LeftOut, RowSource,
+    };
+    use gpui::{Entity, TestAppContext, VisualTestContext, px};
+    use workspace::Workspace;
+
+    use super::{ENTRY_SELECTOR, FunctionsPanel, ROW_SELECTOR};
+    use crate::app_view::tests::{init, open, sample};
+
+    /// Vertical padding of a cell of Zed's table at the pin, both sides together, in rems
+    /// (`py_0p5` in `data_table.rs`).
+    const CELL_PAD_Y_REMS: f32 = 0.25;
+
+    /// Settles the work in flight and lays the window out twice, the second time at the
+    /// table width the first measured.
+    fn draw(cx: &mut VisualTestContext) {
+        for _ in 0..2 {
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+    }
+
+    /// Returns `workspace`'s functions panel.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the workspace has none.
+    fn panel_of(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+    ) -> Entity<FunctionsPanel> {
+        workspace
+            .read_with(cx, |workspace, cx| workspace.panel::<FunctionsPanel>(cx))
+            .unwrap()
+    }
+
+    /// Shows `rows` of the sample binary in `workspace`'s functions panel and lays it out.
+    fn show_rows(workspace: &Entity<Workspace>, rows: FunctionRows, cx: &mut VisualTestContext) {
+        let panel = panel_of(workspace, cx);
+        panel.update_in(cx, |panel, window, cx| {
+            panel.show(sample(), Arc::new(rows), window, cx);
+        });
+        draw(cx);
+    }
+
+    /// Returns hand-built rows of functions at `entries`, each one byte long.
+    fn rows_at(entries: &[u64]) -> FunctionRows {
+        let row = |&entry: &u64| FunctionRow {
+            entry,
+            size: 1,
+            blocks: 1,
+            instrs: 1,
+            callers: 0,
+            callees: 0,
+            src: RowSource::User,
+            name: format!("f{entry:x}"),
+        };
+        FunctionRows {
+            total: entries.len(),
+            noun: "functions",
+            order: FunctionOrder::Address,
+            left_out: LeftOut::default(),
+            incomplete: false,
+            rows: entries.iter().map(row).collect(),
+        }
+    }
+
+    /// The function table draws no border under its rows: a row is as tall as its cells'
+    /// content and Zed's cell padding, not a pixel more.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a row is taller, or no row is laid out.
+    #[gpui::test]
+    fn the_function_table_draws_no_row_border(cx: &mut TestAppContext) {
+        the_function_table_draws_no_row_border_steps(cx);
+    }
+
+    /// Runs the steps of [`the_function_table_draws_no_row_border`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`the_function_table_draws_no_row_border`] says.
+    fn the_function_table_draws_no_row_border_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (workspace, cx) = open(&app_state, cx);
+        show_rows(&workspace, rows_at(&[0x1000, 0x2000, 0x3000]), cx);
+        let row = cx.debug_bounds(ROW_SELECTOR).unwrap();
+        let entry = cx.debug_bounds(ENTRY_SELECTOR).unwrap();
+        let pad = cx.update(|window, _| window.rem_size()) * CELL_PAD_Y_REMS;
+        let extra = row.size.height - entry.size.height - pad;
+        assert!(
+            extra.abs() < px(0.5),
+            "a row is {extra:?} taller than its cells"
+        );
     }
 }

@@ -413,7 +413,7 @@ fn saved_layout(cx: &App) -> anyhow::Result<Option<DockStructure>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -466,7 +466,7 @@ mod tests {
     /// # Panics
     ///
     /// Panics if the app's settings or the keymaps do not load.
-    fn init(cx: &mut TestAppContext) -> Arc<AppState> {
+    pub(crate) fn init(cx: &mut TestAppContext) -> Arc<AppState> {
         use_test_data_dir();
         cx.update(|cx| {
             cx.set_global(db::AppDatabase::test_new());
@@ -511,7 +511,7 @@ mod tests {
     }
 
     /// Opens a window over the app's workspace and returns that workspace.
-    fn open<'a>(
+    pub(crate) fn open<'a>(
         app_state: &Arc<AppState>,
         cx: &'a mut TestAppContext,
     ) -> (Entity<Workspace>, &'a mut VisualTestContext) {
@@ -524,7 +524,7 @@ mod tests {
     }
 
     /// Returns the hand-built sample program, a caller and its callee, as a loaded binary.
-    fn sample() -> Arc<LoadedBinary> {
+    pub(crate) fn sample() -> Arc<LoadedBinary> {
         let (program, analysis, overlay) = crate::code_view::tests::sample_program();
         let initial_rows = Arc::new(function_rows(
             &analysis,
