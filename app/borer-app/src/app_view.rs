@@ -23,8 +23,8 @@ use client::{Client, UserStore};
 use command_palette_hooks::CommandPaletteFilter;
 use db::kvp::KeyValueStore;
 use gpui::{
-    App, AppContext as _, BorrowAppContext as _, Bounds, Context, Entity, ExternalPaths,
-    WeakEntity, Window, WindowBounds, WindowOptions, px, size,
+    App, AppContext as _, BorrowAppContext as _, Bounds, Entity, ExternalPaths, WeakEntity, Window,
+    WindowBounds, WindowOptions, px, size,
 };
 use http_client::{BlockedHttpClient, HttpClientWithUrl};
 use language::LanguageRegistry;
@@ -33,6 +33,7 @@ use project::trusted_worktrees::{self, DbTrustedPaths};
 use project::{LocalProjectFlags, Project};
 use session::{AppSession, Session};
 use settings::SettingsStore;
+use workspace::dock::DockPosition;
 use workspace::{
     AddFolderToProject, AppState, DockStructure, MultiWorkspace, Workspace, WorkspaceId,
     WorkspaceStore,
@@ -40,7 +41,7 @@ use workspace::{
 
 use crate::actions::{FocusFilter, Open, ToggleFunctions};
 use crate::binary::{Binary, StatusLine};
-use crate::functions_panel::FunctionsPanel;
+use crate::functions_panel::{FunctionsPanel, PANEL_KEY};
 use crate::measure::CliMode;
 use crate::start_item::keep_filled;
 
@@ -273,11 +274,22 @@ pub fn new_workspace(
         cx,
     );
     let binary = cx.new(|_| Binary::default());
+    let saved = saved_layout(cx);
+    let in_right = saved.as_ref().is_ok_and(|docks| {
+        docks
+            .as_ref()
+            .is_some_and(|docks| docks.right.active_panel.as_deref() == Some(PANEL_KEY))
+    });
+    let position = if in_right {
+        DockPosition::Right
+    } else {
+        DockPosition::Left
+    };
     let workspace = cx.new(|cx| {
         let id = WorkspaceId::from_i64(APP_WORKSPACE_ID);
         let mut workspace = Workspace::new(Some(id), project, app_state.clone(), window, cx);
         let weak = cx.weak_entity();
-        let panel = cx.new(|cx| FunctionsPanel::new(weak, binary.clone(), window, cx));
+        let panel = cx.new(|cx| FunctionsPanel::new(weak, binary.clone(), position, window, cx));
         workspace.add_panel(panel, window, cx);
         let status = cx.new(|cx| StatusLine::new(binary.clone(), cx));
         workspace
@@ -286,10 +298,16 @@ pub fn new_workspace(
         register_actions(&mut workspace);
         workspace
     });
-    if let Err(err) = workspace.update(cx, |workspace, cx| restore_layout(workspace, window, cx)) {
-        binary.update(cx, |binary, cx| {
+    match saved {
+        Ok(docks) => workspace.update(cx, |workspace, cx| {
+            if let Some(docks) = docks {
+                workspace.set_dock_structure(docks, window, cx);
+            }
+            workspace.finish_dock_restoration(cx);
+        }),
+        Err(err) => binary.update(cx, |binary, cx| {
             binary.set_status(format!("dock layout not restored: {err:#}"), cx);
-        });
+        }),
     }
     let center = workspace.read(cx).active_pane().clone();
     center.update(cx, |pane, _| pane.set_should_display_welcome_page(false));
@@ -338,31 +356,30 @@ fn register_actions(workspace: &mut Workspace) {
         });
 }
 
-/// Applies the dock layout Zed saved for the app's empty workspace on an earlier run.
+/// Returns the dock layout Zed saved for the app's empty workspace on an earlier run.
 ///
-/// It does so as Zed does for every empty local workspace; panel sizes come back through
-/// Zed's own per-workspace store when the panel is added.
+/// The workspace applies it as Zed does for every empty local workspace: it names the dock
+/// the functions panel was in; panel sizes come back through Zed's own per-workspace store
+/// when the panel is added.
 ///
 /// # Arguments
 ///
-/// * `workspace` - The workspace, its panels added.
-/// * `window` - Window the workspace is in.
-/// * `cx` - Workspace context.
+/// * `cx` - Application context reading Zed's database.
+///
+/// # Returns
+///
+/// The saved layout, or `None` on a first run.
 ///
 /// # Errors
 ///
 /// Returns an error when the database cannot be read or the saved layout does not parse.
-fn restore_layout(
-    workspace: &Workspace,
-    window: &mut Window,
-    cx: &mut Context<'_, Workspace>,
-) -> anyhow::Result<()> {
+fn saved_layout(cx: &App) -> anyhow::Result<Option<DockStructure>> {
     let Some(saved) = KeyValueStore::global(cx).read_kvp(DEFAULT_DOCK_STATE_KEY)? else {
-        return Ok(());
+        return Ok(None);
     };
-    let docks: DockStructure = serde_json::from_str(&saved).context("parsing the saved docks")?;
-    workspace.set_dock_structure(docks, window, cx);
-    Ok(())
+    serde_json::from_str(&saved)
+        .map(Some)
+        .context("parsing the saved docks")
 }
 
 #[cfg(test)]
@@ -378,7 +395,8 @@ mod tests {
     };
     use project::DisableAiSettings;
     use settings::Settings as _;
-    use workspace::dock::PanelSizeState;
+    use workspace::Panel as _;
+    use workspace::dock::{DockPosition, PanelSizeState};
     use workspace::pane::{GoBack, GoForward};
     use workspace::{AddFolderToProject, AppState, MultiWorkspace, Workspace};
 
@@ -768,6 +786,48 @@ mod tests {
         assert_eq!(shown(&workspace, cx), Some((CALLER, 0)));
         cx.dispatch_action(GoForward);
         assert_eq!(shown(&workspace, cx), Some((CALLER, 2)));
+    }
+
+    /// The functions panel moved to the right dock comes back open there in a new workspace
+    /// over the same database.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the panel is not in the right dock, open, after the move or the restore.
+    #[gpui::test]
+    async fn a_moved_panel_comes_back_in_its_dock(cx: &mut TestAppContext) {
+        a_moved_panel_comes_back_in_its_dock_steps(cx).await;
+    }
+
+    /// Runs the steps of [`a_moved_panel_comes_back_in_its_dock`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`a_moved_panel_comes_back_in_its_dock`] says.
+    async fn a_moved_panel_comes_back_in_its_dock_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let in_open_right_dock = |workspace: &Workspace, cx: &gpui::App| {
+            let dock = workspace.right_dock().read(cx);
+            dock.is_open() && dock.panel::<FunctionsPanel>().is_some()
+        };
+        {
+            let (workspace, cx) = open(&app_state, cx);
+            let panel = workspace
+                .read_with(cx, |workspace, cx| workspace.panel::<FunctionsPanel>(cx))
+                .unwrap();
+            panel.update_in(cx, |panel, window, cx| {
+                panel.set_position(DockPosition::Right, window, cx);
+            });
+            cx.run_until_parked();
+            assert!(workspace.read_with(cx, |workspace, cx| in_open_right_dock(workspace, cx)));
+            let flush = workspace.update_in(cx, |workspace, window, cx| {
+                workspace.flush_serialization(window, cx)
+            });
+            flush.await;
+            cx.run_until_parked();
+        }
+        let (workspace, cx) = open(&app_state, cx);
+        assert!(workspace.read_with(cx, |workspace, cx| in_open_right_dock(workspace, cx)));
     }
 
     /// The functions panel's width and its dock's visibility, saved through Zed's

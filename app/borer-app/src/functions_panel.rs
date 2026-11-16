@@ -6,11 +6,12 @@ use std::sync::Arc;
 use borer_engine::analysis::render::{FunctionRow, FunctionRows};
 use editor::{Editor, EditorEvent};
 use gpui::{
-    Action, AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
-    ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
-    WeakEntity, Window, div, px,
+    Action, AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Entity, EventEmitter,
+    FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
+    Render, ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Task, WeakEntity, Window, div, px,
 };
+use settings::SettingsStore;
 use theme::ActiveTheme as _;
 use ui::{IconName, Table, TableInteractionState};
 use workspace::Workspace;
@@ -22,7 +23,7 @@ use crate::decompile_item::{TabMode, open_function};
 use crate::worker::{FilterLatest, LoadedBinary, filter_rows_blocking, spawn_engine};
 
 /// Name Zed saves the panel's dock state and size under.
-const PANEL_KEY: &str = "Functions";
+pub const PANEL_KEY: &str = "Functions";
 
 /// Number of columns in the function table.
 const TABLE_COLS: usize = 8;
@@ -71,12 +72,14 @@ impl FunctionsPanel {
     ///
     /// * `workspace` - Workspace the panel opens decompile tabs in.
     /// * `binary` - The binary whose functions to list.
+    /// * `position` - Dock the panel starts in.
     /// * `window` - Window the panel is in.
     /// * `cx` - Panel context.
     #[must_use]
     pub fn new(
         workspace: WeakEntity<Workspace>,
         binary: Entity<Binary>,
+        position: DockPosition,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Self {
@@ -104,7 +107,7 @@ impl FunctionsPanel {
             shown: None,
             rows: FilterLatest::new(),
             selected: 0,
-            position: DockPosition::Left,
+            position,
             filter_task: None,
             _subscriptions: subscriptions,
         }
@@ -477,6 +480,7 @@ impl Panel for FunctionsPanel {
     ) {
         self.position = position;
         cx.notify();
+        cx.update_global::<SettingsStore, _>(|_, _| {});
     }
 
     fn default_size(&self, _window: &Window, _cx: &App) -> Pixels {
