@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use borer_engine::analysis::{Analysis, Overlay, render};
 use borer_engine::program::{Feature, Program};
-use borer_engine::strings::walk::{StringRow, row_matches};
+use borer_engine::strings::walk::{Needle, StringRow, row_matches};
 use rmcp::ErrorData;
 
 use crate::BorerServer;
@@ -1452,7 +1452,8 @@ impl BorerServer {
                 / walk.as_secs_f64()
                 / 1e9;
             let _ = writeln!(out, "strings\t{}\t{walk:.2?}\t{gb:.1} GB/s", spans.len());
-            let needle = Some("e");
+            let e = Needle::new("e");
+            let needle = Some(&e);
             let filtered = spans
                 .iter()
                 .filter(|&s| row_matches(p, &StringRow::Span(*s), needle));

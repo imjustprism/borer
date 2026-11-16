@@ -290,6 +290,23 @@ fn contains_fold_wide(raw: &[u8], needle: &[u8]) -> bool {
     })
 }
 
+/// A string filter, lowered once, so every row it tests is folded against
+/// the same text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Needle(String);
+
+impl Needle {
+    /// Returns the filter `text`, lowered.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The filter as given, in any case.
+    #[must_use]
+    pub fn new(text: &str) -> Self {
+        Self(text.to_lowercase())
+    }
+}
+
 /// Returns whether one row passes a filter, the span's bytes tested where
 /// they lie in the program and no text decoded.
 ///
@@ -302,11 +319,11 @@ fn contains_fold_wide(raw: &[u8], needle: &[u8]) -> bool {
 ///
 /// * `p` - The loaded program, for the bytes a span indexes.
 /// * `row` - The row tested.
-/// * `needle` - The lowered filter: a row passes when its text contains it
-///   in any case; `None` passes every row.
+/// * `needle` - The filter: a row passes when its text contains it in any
+///   case; `None` passes every row.
 #[must_use]
-pub fn row_matches(p: &Program, row: &StringRow, needle: Option<&str>) -> bool {
-    let Some(needle) = needle else {
+pub fn row_matches(p: &Program, row: &StringRow, needle: Option<&Needle>) -> bool {
+    let Some(Needle(needle)) = needle else {
         return true;
     };
     match row {
@@ -319,7 +336,10 @@ pub fn row_matches(p: &Program, row: &StringRow, needle: Option<&str>) -> bool {
             }
         }
         StringRow::Span(_) => false,
-        StringRow::Hit(_) => row.full_text(&p.bytes).to_lowercase().contains(needle),
+        StringRow::Hit(_) => row
+            .full_text(&p.bytes)
+            .to_lowercase()
+            .contains(needle.as_str()),
     }
 }
 
@@ -430,8 +450,8 @@ pub fn string_rows(
     } else {
         walk_rows(p, a, encoding, min)
     };
-    let lowered = filter.map(str::to_lowercase);
-    let needle = lowered.as_deref();
+    let lowered = filter.map(Needle::new);
+    let needle = lowered.as_ref();
     let kept = || rows.iter().filter(move |row| row_matches(p, row, needle));
     let page: Vec<&StringRow> = kept().skip(offset).take(limit).collect();
     let literals = if page.is_empty() {
@@ -742,6 +762,27 @@ off=0x16 15 utf16 \"wide stringxyzw\"
             .contains(&needle.to_lowercase())
     }
 
+    /// A filter given in any case matches a span and a .NET user string
+    /// holding it in another.
+    ///
+    /// # Panics
+    ///
+    /// When either row is missed.
+    #[test]
+    fn a_needle_matches_in_any_case() {
+        let p = raw(b"a foo here\0".to_vec());
+        let span = StringRow::Span(find_ascii_spans(&p.bytes, 5)[0]);
+        let hit = StringRow::Hit(StringHit {
+            off: 0,
+            len: 10,
+            text: "a fOO here".to_owned(),
+            encoding: Encoding::DotnetUs,
+        });
+        let needle = Needle::new("Foo");
+        assert!(row_matches(&p, &span, Some(&needle)));
+        assert!(row_matches(&p, &hit, Some(&needle)));
+    }
+
     /// The zero-copy span filter answers what the text filter answers for
     /// every row shape: ASCII and UTF-16 spans, case folds, a needle past
     /// the display cut, and a non-ASCII needle no walked text holds.
@@ -785,7 +826,7 @@ off=0x16 15 utf16 \"wide stringxyzw\"
             for row in &rows {
                 let want = text_accepts(&p, row, needle);
                 assert_eq!(
-                    row_matches(&p, row, Some(&needle.to_lowercase())),
+                    row_matches(&p, row, Some(&Needle::new(needle))),
                     want,
                     "{needle:?} at {:?}",
                     row.full_text(&p.bytes)
@@ -829,7 +870,7 @@ off=0x16 15 utf16 \"wide stringxyzw\"
             for row in &rows {
                 let want = text_accepts(&p, row, needle);
                 assert_eq!(
-                    row_matches(&p, row, Some(&needle.to_lowercase())),
+                    row_matches(&p, row, Some(&Needle::new(needle))),
                     want,
                     "needle {needle:?} on {:?}",
                     row.full_text(&p.bytes)
