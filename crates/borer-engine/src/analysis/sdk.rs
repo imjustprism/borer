@@ -97,6 +97,26 @@ pub struct Struct {
 }
 
 impl Struct {
+    /// Returns the structure's size in bytes for a machine word.
+    ///
+    /// # Arguments
+    ///
+    /// * `word` - The pointer width in bytes, 4 or 8.
+    ///
+    /// # Returns
+    ///
+    /// The size, `None` when that machine does not define the structure
+    /// or its size reads 0, which states no size.
+    #[must_use]
+    pub fn size_at(&self, word: u64) -> Option<u64> {
+        (if word == 8 {
+            Some(self.size64)
+        } else {
+            self.size32
+        })
+        .filter(|&n| n > 0)
+    }
+
     /// Returns the fields at their offsets for a machine word.
     ///
     /// # Arguments
@@ -473,6 +493,24 @@ pub fn declared(fn_name: &str, serves: impl Fn(Os) -> bool) -> Option<&'static D
 #[must_use]
 pub fn typedef(type_name: &str) -> Option<&'static Typedef> {
     TYPES.get(type_name)
+}
+
+/// Returns every typedef the SDK spells, by name.
+#[must_use]
+pub(crate) fn typedefs() -> &'static BTreeMap<&'static str, Typedef> {
+    &TYPES
+}
+
+/// Returns every structure, by tag.
+#[must_use]
+pub(crate) fn structures() -> &'static BTreeMap<&'static str, Struct> {
+    &STRUCTS
+}
+
+/// Returns every COM interface, by name.
+#[must_use]
+pub(crate) fn interfaces() -> &'static BTreeMap<&'static str, Interface> {
+    &INTERFACES
 }
 
 /// Returns a structure by its tag.

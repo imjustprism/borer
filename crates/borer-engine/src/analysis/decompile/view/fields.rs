@@ -869,12 +869,7 @@ impl FieldCtx<'_, '_> {
             return Some(sz);
         }
         if let Some(s) = sdk::structure(ty) {
-            let sz = if self.word_bits == 64 {
-                Some(s.size64)
-            } else {
-                s.size32
-            };
-            return sz.filter(|&n| n > 0);
+            return s.size_at(if self.word_bits == 64 { 8 } else { 4 });
         }
         None
     }

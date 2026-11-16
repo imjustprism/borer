@@ -12,6 +12,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+mod rows;
+
+pub use rows::{TypeKind, TypeRow, TypeRows, TypeSource, type_rows};
+
 /// A type in the small language user types are stated in.
 ///
 /// The scalars the decompiler already renders (`u8`..`u64`, `i8`..`i64`,
