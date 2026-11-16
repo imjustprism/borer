@@ -20,6 +20,7 @@ pub mod classes;
 pub mod decompile;
 mod descriptors;
 mod discover;
+pub mod edit;
 pub mod eh;
 pub mod encode;
 pub mod fieldrefs;

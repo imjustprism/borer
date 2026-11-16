@@ -48,6 +48,7 @@ mod decompile;
 mod disasm_view;
 mod discovery;
 mod dwarf;
+mod edit;
 mod eh;
 mod elf;
 mod emptystr;
