@@ -1,6 +1,7 @@
 //! Parses arbitrary bytes as a project file and, when its overlay loads,
 //! holds its class fields to a small program's code, lists its types and
-//! fields, decompiles the program's function under it, writes the
+//! fields, decompiles the program's function under it and reads that text
+//! and its listing as views, writes the
 //! program's header, Cheat Engine table and ReClass.NET project under it,
 //! and reads its first comment as C declarations over its types: the path
 //! a project file someone else wrote takes. Any input may be refused; none
@@ -10,8 +11,10 @@
 
 use borer_engine::analysis::cdecl::{self, Abi};
 use borer_engine::analysis::decompile::decompile;
+use borer_engine::analysis::decompile::view::view_of;
 use borer_engine::analysis::modsdk::{self, cheat, header, reclass};
 use borer_engine::analysis::project::Project;
+use borer_engine::analysis::render::{Bytes, disasm_view};
 use borer_engine::analysis::{Analysis, stated, utypes};
 use borer_engine::program::{Arch, Program, Section};
 use libfuzzer_sys::fuzz_target;
@@ -32,7 +35,10 @@ fuzz_target!(|data: &[u8]| {
     _ = stated::settled(&program, &analysis, &overlay);
     let fields = stated::rows(&overlay);
     _ = utypes::list_tsv(&overlay.types, &overlay.applied, &fields, None, 0, 500);
-    _ = decompile(&program, &analysis, &overlay, 0x1000);
+    if let Some(text) = decompile(&program, &analysis, &overlay, 0x1000) {
+        _ = view_of(&program, &analysis, &overlay, 0x1000, &text);
+    }
+    _ = disasm_view(&program, &analysis, &overlay, 0x1000, 100, Bytes::Hidden);
     let sdk = modsdk::build(&program, &analysis, &overlay);
     _ = header::header(&sdk);
     _ = cheat::cheat_table(&sdk);
