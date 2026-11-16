@@ -59,7 +59,9 @@ names, so sharing the main `target` would link one checkout's crates into
 the other. The machine lock below keeps two gates from building at once.
 A worktree's first gate copies the dependencies another worktree's gate
 built into its own directory (`seed`), so it builds only the workspace's
-own crates.
+own crates. Worktrees may instead take turns in one `CARGO_TARGET_DIR`,
+whose dependencies then stay built: a gate there first drops the units the
+last checkout's own crates left (`claim`).
 
 The sweep decompiles every function of the workspace's own server binary
 built with the `corpus` profile (unoptimized throughout, the debug codegen
@@ -348,6 +350,14 @@ def workspace_names() -> set[str]:
     return names
 
 
+def own_unit(entry: str, own: set[str]) -> bool:
+    """Whether a file or directory cargo wrote under a profile directory
+    belongs to one of the workspace's own units (or cannot be told apart
+    from one), going by the unit name before its hash."""
+    unit = entry.split(".")[0].rpartition("-")[0]
+    return not unit or unit in own or unit.removeprefix("lib") in own
+
+
 def seed(target: str) -> None:
     """Copies the dependencies another worktree's gate built into this
     worktree's target directory, for each profile it has not built yet.
@@ -384,8 +394,7 @@ def seed(target: str) -> None:
                 continue
             (here / profile / sub).mkdir(parents=True, exist_ok=True)
             for entry in (src / sub).iterdir():
-                unit = entry.name.split(".")[0].rpartition("-")[0]
-                if not unit or unit in own or unit.removeprefix("lib") in own:
+                if own_unit(entry.name, own):
                     continue
                 dest = here / profile / sub / entry.name
                 if entry.is_dir():
@@ -394,6 +403,44 @@ def seed(target: str) -> None:
                     shutil.copy2(entry, dest)
         units = sum(1 for _ in (here / profile / ".fingerprint").iterdir())
         print(f"[seed] {profile}: {units} dependency units from {src} ({time.time() - t0:.1f}s)")
+
+
+def claim(target: str) -> None:
+    """Makes cargo rebuild the workspace's own crates when the target
+    directory last built another checkout, then names this one its owner.
+
+    Gates of several worktrees may take turns in one directory (the machine
+    lock keeps them from overlapping), so that each starts with every
+    dependency built. Cargo would take the last checkout's own crates for
+    this one's: it names them by their path inside the workspace and judges
+    them fresh by file times, which a checkout made before that build
+    passes. Dropping their fingerprints (`.fingerprint/<unit>-<hash>`, in
+    every profile directory, the app's and the lint pass's included) makes
+    cargo build them again from these sources; the dependencies stay. The
+    owner is the checkout path in `gate-checkout.txt`; a directory without
+    one is treated as another checkout's.
+    """
+    here = Path(target)
+    mark = here / "gate-checkout.txt"
+    with contextlib.suppress(OSError):
+        if mark.read_text(encoding="utf-8") == str(ROOT):
+            return
+    prints = [*here.glob("*/.fingerprint"), *here.glob("*/*/.fingerprint")]
+    if prints:
+        own = workspace_names()
+        if not own:
+            raise SystemExit(
+                "gate.py: cargo metadata failed, so the workspace's own units are unknown"
+            )
+        gone = 0
+        for d in prints:
+            for entry in d.iterdir():
+                if own_unit(entry.name, own):
+                    shutil.rmtree(entry)
+                    gone += 1
+        print(f"[claim] {target}: {gone} units of another checkout dropped", flush=True)
+    here.mkdir(parents=True, exist_ok=True)
+    mark.write_text(str(ROOT), encoding="utf-8")
 
 
 class Inputs:
@@ -831,6 +878,7 @@ def main(argv: list[str]) -> int:
         seed(shared)
     # The build lands where cargo puts it: CARGO_TARGET_DIR when set.
     target = os.environ.get("CARGO_TARGET_DIR") or os.path.join(ROOT, "target")
+    claim(target)
     wide = (os.cpu_count() or 1) >= WIDE_CORES
     first, rest = plan(check_only, fast, target, wide)
     cache = Cache(os.path.join(target, "gate-cache.json"), use_cache)
