@@ -97,7 +97,7 @@ pub fn init(cx: &mut App) -> anyhow::Result<Arc<AppState>> {
     let kvp = KeyValueStore::from_app_db(&app_db);
     cx.set_global(app_db);
     settings::init(cx);
-    theme_settings::init(theme::LoadThemes::All(Box::new(assets::Assets)), cx);
+    theme_settings::init(theme::LoadThemes::JustBase, cx);
     assets::Assets.load_fonts(cx)?;
     crate::actions::bind_keys(cx)?;
     let fs = fs::RealFs::new(None, cx.background_executor().clone());
