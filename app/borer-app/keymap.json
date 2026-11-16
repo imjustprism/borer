@@ -30,6 +30,13 @@
     }
   },
   {
+    "context": "MenuBar",
+    "bindings": {
+      "left": "menu_bar::ActivateMenuLeft",
+      "right": "menu_bar::ActivateMenuRight"
+    }
+  },
+  {
     "context": "StartItem",
     "bindings": {
       "up": "menu::SelectPrevious",

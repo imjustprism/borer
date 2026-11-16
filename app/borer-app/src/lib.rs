@@ -12,6 +12,7 @@ pub mod function_columns;
 pub mod functions_panel;
 pub mod goto;
 pub mod measure;
+pub mod menus;
 pub mod recent;
 pub mod start_item;
 pub mod status;

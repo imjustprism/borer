@@ -244,6 +244,21 @@ impl Binary {
         true
     }
 
+    /// Closes the open binary, or stops its load, and shows that none is open.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Binary context.
+    pub fn close(&mut self, cx: &mut Context<'_, Self>) {
+        self.epoch.invalidate();
+        self.reading = None;
+        self.facts.clear();
+        self.loaded = None;
+        self.error = None;
+        self.status = NO_BINARY.to_owned();
+        cx.notify();
+    }
+
     /// Stops showing the running load and drops its answer when it comes.
     ///
     /// The engine's analysis checks no cancel flag yet, so its thread runs to the end of the

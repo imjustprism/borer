@@ -24,8 +24,8 @@ use command_palette_hooks::CommandPaletteFilter;
 use db::kvp::KeyValueStore;
 use editor::Editor;
 use gpui::{
-    App, AppContext as _, Bounds, Entity, ExternalPaths, WeakEntity, Window, WindowBounds,
-    WindowOptions, px, size,
+    App, AppContext as _, Bounds, Context, Entity, ExternalPaths, PromptLevel, WeakEntity, Window,
+    WindowBounds, WindowOptions, px, size,
 };
 use http_client::{BlockedHttpClient, HttpClientWithUrl};
 use language::LanguageRegistry;
@@ -41,7 +41,8 @@ use workspace::{
 };
 
 use crate::actions::{
-    FocusFilter, FollowLink, Open, ToggleFunctionColumns, ToggleFunctions, ToggleListing,
+    CloseBinary, FocusFilter, FollowLink, MinimizeWindow, Open, ToggleFunctionColumns,
+    ToggleFunctions, ToggleListing, ZoomWindow,
 };
 use crate::binary::{Binary, StatusLine};
 use crate::decompile_item::DecompileItem;
@@ -206,6 +207,7 @@ pub fn configure(cx: &mut App) -> anyhow::Result<()> {
     let hidden = [TypeId::of::<AddFolderToProject>()];
     CommandPaletteFilter::update_global(cx, |filter, _| filter.hide_action_types(&hidden));
     cx.on_app_quit(flush_on_quit).detach();
+    cx.on_action(|_: &zed_actions::Quit, cx| cx.quit());
     Ok(())
 }
 
@@ -338,6 +340,7 @@ pub fn new_workspace(
         register_actions(&mut workspace, &binary);
         workspace
     });
+    crate::menus::follow_binary(&binary, cx).detach();
     let saved = saved_layout(cx).unwrap_or_else(|err| {
         binary.update(cx, |binary, cx| {
             binary.set_status(format!("dock layout not restored: {err:#}"), cx);
@@ -498,6 +501,87 @@ fn register_actions(workspace: &mut Workspace, binary: &Entity<Binary>) {
         .register_action(|workspace, _: &GoTo, window, cx| {
             crate::goto::toggle(workspace, window, cx);
         });
+    let (close, settings) = (binary.clone(), binary.clone());
+    workspace
+        .register_action(move |workspace, _: &CloseBinary, window, cx| {
+            close_binary(workspace, &close, window, cx);
+        })
+        .register_action(move |_, _: &zed_actions::OpenSettingsFile, _, cx| {
+            open_settings_file(&settings, cx);
+        })
+        .register_action(|_, _: &MinimizeWindow, window, _| window.minimize_window())
+        .register_action(|_, _: &ZoomWindow, window, _| window.zoom_window())
+        .register_action(|_, _: &zed_actions::About, window, cx| about(window, cx));
+}
+
+/// Closes `binary`, takes its functions panel out of the dock and closes its decompile
+/// tabs, which leaves each pane its start tab.
+///
+/// # Arguments
+///
+/// * `workspace` - The window's workspace.
+/// * `binary` - The window's binary.
+/// * `window` - Window the workspace is in.
+/// * `cx` - Workspace context.
+fn close_binary(
+    workspace: &mut Workspace,
+    binary: &Entity<Binary>,
+    window: &mut Window,
+    cx: &mut Context<'_, Workspace>,
+) {
+    binary.update(cx, Binary::close);
+    if let Some(panel) = workspace.panel::<FunctionsPanel>(cx) {
+        workspace.remove_panel(&panel, window, cx);
+    }
+    for pane in workspace.panes().to_vec() {
+        let tabs: Vec<_> = pane
+            .read(cx)
+            .items_of_type::<DecompileItem>()
+            .map(|tab| tab.entity_id())
+            .collect();
+        pane.update(cx, |pane, cx| {
+            for tab in tabs {
+                pane.remove_item(tab, false, false, window, cx);
+            }
+        });
+    }
+}
+
+/// Opens the person's settings file with the system's editor for it, or says on the status
+/// line that there is none yet.
+///
+/// # Arguments
+///
+/// * `binary` - The window's binary, whose status line says what happened.
+/// * `cx` - Application context.
+fn open_settings_file(binary: &Entity<Binary>, cx: &mut App) {
+    let path = paths::settings_file();
+    match checked_metadata(path) {
+        Ok(Some(_)) => cx.open_with_system(path),
+        Ok(None) => binary.update(cx, |binary, cx| {
+            let why = format!("no settings file yet at {}", path.display());
+            binary.set_status(why, cx);
+        }),
+        Err(err) => binary.update(cx, |binary, cx| {
+            binary.set_status(format!("settings file not opened: {err:#}"), cx);
+        }),
+    }
+}
+
+/// Shows the app's name, version and license in a dialog.
+///
+/// # Arguments
+///
+/// * `window` - Window the dialog opens over.
+/// * `cx` - Application context.
+fn about(window: &mut Window, cx: &mut App) {
+    let detail = format!(
+        "borer-app {}, license {}",
+        env!("CARGO_PKG_VERSION"),
+        env!("CARGO_PKG_LICENSE")
+    );
+    let answer = window.prompt(PromptLevel::Info, "borer", Some(&detail), &["OK"], cx);
+    cx.background_spawn(answer).detach();
 }
 
 /// Returns the dock layout Zed saved for the app's empty workspace on an earlier run.

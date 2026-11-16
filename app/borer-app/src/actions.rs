@@ -28,6 +28,12 @@ gpui::actions!(
         /// Switches the code tab between its function's decompile and its listing, opening
         /// the other at the function's start.
         ToggleListing,
+        /// Closes the open binary, its tabs and its panels, and shows the welcome column.
+        CloseBinary,
+        /// Minimizes the window.
+        MinimizeWindow,
+        /// Maximizes the window, or restores it when it is maximized.
+        ZoomWindow,
     ]
 );
 
