@@ -1,14 +1,16 @@
 name: release
 
-# Builds the shipped binary (the `dist` profile) for four targets, packs
-# each with LICENSE, NOTICE, README.md and the licenses of everything the
+# Builds the shipped binaries (the `dist` profile) for four targets, the
+# server (borer-<tag>-<target>) and the desktop app (borer-app-<tag>-<target>),
+# packs each with LICENSE, NOTICE, a README and the licenses of everything the
 # binary links (THIRD-PARTY-LICENSES and RUST-STD-COPYRIGHT.html, written by
 # scripts/dev/licenses.py for that target), and attaches the archives and their
 # SHA-256 sums to the GitHub Release of a pushed `v*` tag. From that release
-# it then publishes to crates.io, npm and PyPI and updates the Homebrew tap and
-# the Scoop bucket, each only when its credential is configured. Run by hand on
-# a branch, it builds and uploads the archives as workflow artifacts and
-# publishes nothing; run by hand on a tag, it publishes that tag.
+# it then publishes the server to crates.io, npm and PyPI and updates the
+# Homebrew tap and the Scoop bucket, each only when its credential is
+# configured. Run by hand on a branch, it builds and uploads the archives as
+# workflow artifacts and publishes nothing; run by hand on a tag, it publishes
+# that tag.
 
 on:
   push:
@@ -95,10 +97,90 @@ jobs:
           path: ${{ env.NAME }}.*
           if-no-files-found: error
 
+  # The desktop app, from its own workspace and toolchain under app/. Linux
+  # needs the libraries the app CI job installs; macOS needs Xcode's Metal
+  # toolchain for GPUI's shaders.
+  app:
+    name: app (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: linux packages
+        if: runner.os == 'Linux'
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          clang cmake libfontconfig-dev libssl-dev libwayland-dev
+          libx11-xcb-dev libxkbcommon-x11-dev libvulkan1
+
+      - name: metal toolchain
+        if: runner.os == 'macOS'
+        run: xcrun -sdk macosx metal --version || xcodebuild -downloadComponent MetalToolchain
+
+      # app/rust-toolchain.toml pins the app's channel; rust-docs holds the
+      # standard library's license texts.
+      - name: toolchain
+        working-directory: app
+        shell: bash
+        run: |
+          rustup toolchain install --no-self-update
+          rustup component add rust-docs
+          rustup target add ${{ matrix.target }}
+
+      - name: build
+        working-directory: app
+        run: cargo build --locked --profile dist -p borer-app --target ${{ matrix.target }}
+
+      - name: third-party licenses
+        shell: bash
+        run: |
+          py=$(command -v python3 || command -v python)
+          "$py" scripts/dev/licenses.py --app --target ${{ matrix.target }} --out THIRD-PARTY-LICENSES
+
+      - name: name
+        shell: bash
+        run: echo "NAME=borer-app-${GITHUB_REF_NAME//\//-}-${{ matrix.target }}" >> "$GITHUB_ENV"
+
+      - name: package (zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path $env:NAME | Out-Null
+          Copy-Item app/target/${{ matrix.target }}/dist/borer-app.exe, LICENSE, NOTICE, packaging/borer-app/README.md, THIRD-PARTY-LICENSES, RUST-STD-COPYRIGHT.html -Destination $env:NAME
+          Compress-Archive -Path $env:NAME -DestinationPath "$env:NAME.zip"
+
+      - name: package (tar.gz)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir "$NAME"
+          cp app/target/${{ matrix.target }}/dist/borer-app LICENSE NOTICE packaging/borer-app/README.md THIRD-PARTY-LICENSES RUST-STD-COPYRIGHT.html "$NAME/"
+          tar -czf "$NAME.tar.gz" "$NAME"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ env.NAME }}
+          path: ${{ env.NAME }}.*
+          if-no-files-found: error
+
+  # A failed app build leaves the server's release whole, without that archive.
   release:
     name: publish
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, app]
+    if: ${{ !cancelled() && needs.build.result == 'success' && startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
