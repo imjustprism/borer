@@ -46,7 +46,7 @@ impl Asked {
     /// When a suffix is given twice, a row count is not one, or a tag is
     /// not one, each with the form it takes.
     pub(crate) fn read(uri: &str) -> Result<Asked, String> {
-        let read = Suffixed::read(uri)?;
+        let read = Suffixed::read_with(uri, |tag| Tag::parse(tag).map(drop))?;
         let since = read.since.map(Tag::parse).transpose()?;
         Ok(Asked {
             core: read.core.to_owned(),
@@ -154,6 +154,16 @@ mod tests {
             read("borer://iocs!offset=3").page("").spec_words(""),
             "offset=3"
         );
+        for bad_tag_first in [
+            "borer://attrs!offset=x!since=zz",
+            "borer://attrs!since=zz!since=0000abcd",
+        ] {
+            let err = Asked::read(bad_tag_first).expect_err(bad_tag_first);
+            assert!(
+                err.starts_with(r#"since="zz" is not a tag"#),
+                "{bad_tag_first}: {err}"
+            );
+        }
     }
 
     /// An escaped experiment spec decodes to the same spec sent plainly.

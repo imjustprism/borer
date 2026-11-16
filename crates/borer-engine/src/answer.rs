@@ -136,6 +136,26 @@ impl<'a> Suffixed<'a> {
     /// When a suffix is given twice or a row count is not one, each with
     /// the form it takes.
     pub fn read(uri: &'a str) -> Result<Suffixed<'a>, String> {
+        Suffixed::read_with(uri, |_| Ok(()))
+    }
+
+    /// Reads a URI's suffixes off its end, checking each `!since=` tag as
+    /// it is read off, so a tag that does not read is refused before
+    /// whatever lies left of it.
+    ///
+    /// # Arguments
+    ///
+    /// * `uri` - The URI as the reader sent it.
+    /// * `tag` - Refuses a tag that does not read, with the form it takes.
+    ///
+    /// # Errors
+    ///
+    /// When a suffix is given twice, a row count is not one or `tag`
+    /// refuses a tag, in the order they are read off from the end.
+    pub fn read_with(
+        uri: &'a str,
+        tag: impl Fn(&str) -> Result<(), String>,
+    ) -> Result<Suffixed<'a>, String> {
         let twice = |name: &str| {
             format!(
                 "{name} is given twice in {}; give it once",
@@ -153,8 +173,9 @@ impl<'a> Suffixed<'a> {
             let (core, suffix) = read.core.split_at(at);
             if suffix == FRESH_SUFFIX {
                 read.fresh = true;
-            } else if let Some(tag) = suffix.strip_prefix(SINCE_SUFFIX) {
-                if read.since.replace(tag).is_some() {
+            } else if let Some(since) = suffix.strip_prefix(SINCE_SUFFIX) {
+                tag(since)?;
+                if read.since.replace(since).is_some() {
                     return Err(twice(SINCE_SUFFIX));
                 }
             } else if let Some(n) = suffix.strip_prefix(OFFSET_SUFFIX) {
