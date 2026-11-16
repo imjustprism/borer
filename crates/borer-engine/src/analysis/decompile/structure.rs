@@ -1726,12 +1726,7 @@ pub(super) fn goto_switch<L: Lifter>(
     out: &mut String,
 ) {
     let block = &st.blocks[i];
-    let Some((_, targets)) = ctx
-        .analysis
-        .jump_tables
-        .range(block.start..block.end)
-        .next()
-    else {
+    let Some((_, targets)) = ctx.analysis.block_table(block) else {
         return;
     };
     let names = ctx.names();
@@ -2367,7 +2362,7 @@ pub(super) fn const_index(e: &Expr) -> Option<u64> {
 /// * `block` - The block ending in the table's jump.
 /// * `k` - The index.
 pub(super) fn table_target(analysis: &Analysis, block: &BasicBlock, k: u64) -> Option<u64> {
-    let (_, targets) = analysis.jump_tables.range(block.start..block.end).next()?;
+    let (_, targets) = analysis.block_table(block)?;
     targets.get(usize::try_from(k).ok()?).copied()
 }
 

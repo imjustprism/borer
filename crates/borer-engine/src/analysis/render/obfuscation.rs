@@ -383,7 +383,7 @@ pub(super) fn dispatch_loops_in(p: &Program, a: &Analysis, f: &Function) -> Vec<
         if b.term != BlockTerm::Indirect {
             continue;
         }
-        let Some((site, targets)) = a.jump_tables.range(b.start..b.end).next() else {
+        let Some((site, targets)) = a.block_table(b) else {
             continue;
         };
         let mut seen: BTreeSet<u64> = BTreeSet::new();
@@ -406,7 +406,7 @@ pub(super) fn dispatch_loops_in(p: &Program, a: &Analysis, f: &Function) -> Vec<
             continue;
         }
         found.push(DispatchLoop {
-            site: *site,
+            site,
             entry: f.entry,
             handlers,
             back,

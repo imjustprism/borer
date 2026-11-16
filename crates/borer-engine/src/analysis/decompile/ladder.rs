@@ -328,11 +328,7 @@ fn try_guarded_switch<L: Lifter>(
         return None;
     }
     let block = &st.blocks[d];
-    let (&site, targets) = ctx
-        .analysis
-        .jump_tables
-        .range(block.start..block.end)
-        .next()?;
+    let (site, targets) = ctx.analysis.block_table(block)?;
     let listed = u64::try_from(targets.len()).ok()?;
     if listed > len {
         return None;

@@ -99,7 +99,7 @@ fn blind(
     let reaches = to.any(|t| !through.contains(t));
     match b.term {
         BlockTerm::Call => !reaches,
-        BlockTerm::Indirect => !reaches && a.jump_tables.range(b.start..b.end).next().is_none(),
+        BlockTerm::Indirect => !reaches && a.block_table(b).is_none(),
         BlockTerm::Jmp => some && !reaches,
         BlockTerm::Ret | BlockTerm::Cond | BlockTerm::Fall | BlockTerm::Invalid => false,
     }

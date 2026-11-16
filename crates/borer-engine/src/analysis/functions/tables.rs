@@ -7,7 +7,7 @@ use super::{Recorded, decode_at};
 use crate::analysis::switch_index::{
     Cell, TableBound, check_bound, flag_reader, index_bound, table_index,
 };
-use crate::analysis::{read_u32, read_u64};
+use crate::analysis::{Analysis, BasicBlock, read_u32, read_u64};
 use crate::fxmap::FxHashSet;
 use crate::isa::x86::{
     Code, FlowControl, Instruction, InstructionInfoFactory, Mnemonic, OpKind, Register,
@@ -17,6 +17,25 @@ use crate::program::{Program, pe::rva_to_va};
 
 /// Largest jump table accepted (bound immediate).
 pub(crate) const TABLE_ENTRIES_MAX: u64 = 4096;
+
+impl Analysis {
+    /// Returns the resolved jump table of the indirect jump ending a block.
+    ///
+    /// # Arguments
+    ///
+    /// * `b` - The block.
+    ///
+    /// # Returns
+    ///
+    /// The jump's site and its case targets in table order, the first
+    /// inside the block; `None` when no resolved table's site lies in it.
+    pub(crate) fn block_table(&self, b: &BasicBlock) -> Option<(u64, &[u64])> {
+        (b.start <= b.end)
+            .then(|| self.jump_tables.range(b.start..b.end).next())
+            .flatten()
+            .map(|(&site, t)| (site, t.as_slice()))
+    }
+}
 
 /// Farthest a case may lie from its jump in a table sized loosely.
 ///

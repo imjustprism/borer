@@ -1424,13 +1424,7 @@ pub(super) fn try_switch<L: Lifter>(
     depth: usize,
 ) -> Option<usize> {
     let block = &st.blocks[i];
-    let site = *ctx
-        .analysis
-        .jump_tables
-        .range(block.start..block.end)
-        .next()
-        .map(|(k, _)| k)?;
-    let targets = ctx.analysis.jump_tables.get(&site)?;
+    let (_, targets) = ctx.analysis.block_table(block)?;
     if targets.is_empty() || targets.len() > SWITCH_VALUES_MAX {
         return None;
     }
