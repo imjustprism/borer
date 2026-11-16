@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Verify the GPUI desktop workspace in `app/` on Windows.
+"""Verify the GPUI desktop workspace in `app/`.
 
 Runs `cargo deny`, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
 `cargo doc`, and `cargo test` inside `app/` using a dedicated `<target>/app` build
 directory so its 1.98.1 artifacts never collide with the root workspace's 1.96.1 target.
-On platforms other than Windows it prints a `[skip]` line and exits 0.
+Linux needs the system packages the `app` job in `.github/workflows/ci.yml` installs.
 """
 
 from __future__ import annotations
@@ -22,10 +22,6 @@ from harness.root import ROOT  # noqa: E402
 
 def main() -> int:
     check_strict = "--check" in sys.argv[1:]
-    if sys.platform != "win32":
-        print("[skip] app: Windows-only GPUI desktop workspace")
-        return 0
-
     app_dir = ROOT / "app"
     if not (app_dir / "Cargo.toml").is_file():
         print(f"app workspace missing at {app_dir}", file=sys.stderr)
