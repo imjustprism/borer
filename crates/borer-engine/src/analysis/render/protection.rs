@@ -1627,25 +1627,26 @@ pub(crate) fn upx_entry(p: &Program) -> UpxEntry {
 /// # Arguments
 ///
 /// * `p` - The loaded image, for its entry.
-/// * `verdict` - The protection report's headline ([`protection_tsv`]).
+/// * `packing` - The protection report's verdict ([`protection_tsv`]).
 ///
 /// # Returns
 ///
 /// The line without its `# blind spot: ` prefix, or `None` for a plain
 /// image.
-pub(super) fn stub_spot(p: &Program, verdict: &str) -> Option<String> {
-    if verdict.starts_with("unpacked") {
-        return Some(
+pub(super) fn stub_spot(p: &Program, packing: &Packing) -> Option<String> {
+    let head = match packing {
+        Packing::Unpacked => return Some(
             "unpacked: the imports and capabilities above may be only the stub's few; the payload resolved its own at run time"
                 .to_owned(),
-        );
-    }
-    if !verdict.starts_with("packed") && !verdict.starts_with("protected") {
-        return None;
-    }
-    let head = verdict.split(':').next().unwrap_or(verdict);
+        ),
+        Packing::Protected(..) => "protected",
+        Packing::Packed => "packed",
+        Packing::Plain | Packing::PlainWeak | Packing::PlainOneMark => return None,
+    };
     let entry = hex_or_dash(p.entry);
-    Some(if verdict == format!("protected: UPX ({MAYBE_UNPACKED})") {
+    let maybe =
+        matches!(packing, Packing::Protected(names, UpxEntry::MaybeUnpacked) if *names == ["UPX"]);
+    Some(if maybe {
         format!(
             "{head}: the file {MAYBE_UNPACKED}; if a stub still runs at the entry, the strings, imports and capabilities above describe it, not the payload; borer://unpack/{entry} runs it"
         )

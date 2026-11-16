@@ -420,6 +420,36 @@ fn the_same_binary_answers_the_same_bytes_twice() {
     }
 }
 
+/// Requires the `BORER_DOGFOOD` binary's triage to be its values spelled,
+/// each section line to repeat its producer's first line, and each
+/// function on its reading list to be a discovered function.
+#[test]
+#[ignore = "set BORER_DOGFOOD to a binary path to run this sweep"]
+fn the_triage_is_spelled_from_its_values() {
+    let c = &*CORPUS;
+    let (p, a, o) = (&c.program, &c.analysis, &Overlay::default());
+    let triage = render::triage(p, a, o);
+    let text = render::triage_tsv(p, a, o);
+    assert_eq!(triage.spell(), text);
+    let firsts = [
+        ("protection", render::protection_tsv(p, a)),
+        ("anti-analysis", render::anti_analysis_tsv(p, a, o)),
+        ("crypto", render::crypto_tsv(p, a, o, 0, 1)),
+        ("dynamic imports", render::dynamic_imports_tsv(p, a, o)),
+        ("checks", render::license_checks_tsv(p, a, o)),
+        ("capabilities", render::capability_map_tsv(p, Some(a))),
+    ];
+    for (name, report) in &firsts {
+        let head = report.lines().next().unwrap_or("").trim_start_matches("# ");
+        let said = head.strip_prefix(&format!("{name}: ")).unwrap_or(head);
+        let line = format!("# {name}: {said}");
+        assert!(text.lines().any(|l| l == line), "{line}\n{text}");
+    }
+    for r in &triage.read_first {
+        assert!(a.function(r.entry).is_some(), "{:#x}\n{text}", r.entry);
+    }
+}
+
 #[test]
 #[ignore = "set BORER_DOGFOOD to a binary path to run this sweep"]
 fn decompile_every_function() {

@@ -41,6 +41,201 @@ impl Summary {
     }
 }
 
+/// Functions the reading list names.
+const READ_MAX: usize = 10;
+
+/// Capability rows the triage repeats under its capabilities line.
+const CAPABILITY_ROWS: usize = 6;
+
+/// A section of the triage: the report whose first line it repeats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SectionKind {
+    /// The packer and protector marks ([`protection_tsv`]).
+    Protection,
+    /// The anti-debug and anti-VM techniques ([`anti_analysis_tsv`]).
+    AntiAnalysis,
+    /// The crypto and hash constants ([`crypto_tsv`]).
+    Crypto,
+    /// The imports resolved by name at run time ([`dynamic_imports_tsv`]).
+    DynamicImports,
+    /// The functions that judge a key or serial ([`license_checks_tsv`]).
+    Checks,
+    /// The strings generators build when run ([`hidden_strings_tsv`]).
+    GeneratedStrings,
+    /// What the imports and syscalls let the program do
+    /// ([`capability_map_tsv`]).
+    Capabilities,
+    /// The indicators the program holds ([`iocs_tsv`]).
+    Iocs,
+}
+
+impl SectionKind {
+    /// Returns the label the triage puts in front of the section's line.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Protection => "protection",
+            Self::AntiAnalysis => "anti-analysis",
+            Self::Crypto => "crypto",
+            Self::DynamicImports => "dynamic imports",
+            Self::Checks => "checks",
+            Self::GeneratedStrings => "generated strings",
+            Self::Capabilities => "capabilities",
+            Self::Iocs => "iocs",
+        }
+    }
+
+    /// Returns the resource that answers more than the section's line.
+    ///
+    /// # Returns
+    ///
+    /// The URI, or `None` for the crypto constants, which the
+    /// `find_crypto_constants` tool lists and no resource does.
+    #[must_use]
+    pub const fn uri(self) -> Option<&'static str> {
+        match self {
+            Self::Protection => Some("borer://protection"),
+            Self::AntiAnalysis => Some("borer://antianalysis"),
+            Self::Crypto => None,
+            Self::DynamicImports => Some("borer://dynimports"),
+            Self::Checks => Some("borer://checks"),
+            Self::GeneratedStrings => Some("borer://hidden"),
+            Self::Capabilities => Some("borer://capabilities"),
+            Self::Iocs => Some("borer://iocs"),
+        }
+    }
+}
+
+/// One section of the triage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriageSection {
+    /// The report it repeats.
+    pub kind: SectionKind,
+    /// That report's first line, as a value.
+    pub summary: Summary,
+    /// The lines the triage prints under it, without their `#   `: the
+    /// first rows of the capability map, none for the other sections.
+    pub detail: Vec<String>,
+}
+
+impl TriageSection {
+    /// Returns a section with nothing under its line.
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - The report it repeats.
+    /// * `summary` - That report's first line.
+    fn new(kind: SectionKind, summary: Summary) -> Self {
+        Self {
+            kind,
+            summary,
+            detail: Vec::new(),
+        }
+    }
+
+    /// Writes the section's line and the lines under it.
+    ///
+    /// A headline that repeats the label in front of it is trimmed, so the
+    /// line does not read `anti-analysis: anti-analysis: ...`.
+    ///
+    /// # Arguments
+    ///
+    /// * `out` - The report.
+    fn spell(&self, out: &mut String) {
+        let label = self.kind.label();
+        let line = self.summary.headline.as_str();
+        let said = line
+            .strip_prefix(label)
+            .map_or(line, |rest| rest.trim_start_matches([':', ' ']))
+            .trim();
+        let _ = writeln!(out, "# {label}: {said}");
+        for row in &self.detail {
+            let _ = writeln!(out, "#   {row}");
+        }
+    }
+}
+
+/// A function the triage says to read first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadFirst {
+    /// The function's entry.
+    pub entry: u64,
+    /// Its name as the list prints it, without a module prefix.
+    pub name: String,
+    /// What its evidence weighs; zero for a function listed only for the
+    /// strings and imports it references.
+    pub score: usize,
+    /// Why it is on the list, at most four.
+    pub reasons: Vec<String>,
+}
+
+/// The triage of a program with code, as the values its text is spelled
+/// from ([`Triage::spell`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Triage {
+    /// The file's name.
+    pub name: String,
+    /// The format, architecture and counts line, without its `# `.
+    pub shape: String,
+    /// Whether discovery ran out of budget, so lists may be short.
+    pub incomplete: bool,
+    /// The lines about the file before its code
+    /// ([`crate::fileinfo::triage_lines`]), each with its `# `.
+    pub file: Vec<String>,
+    /// The sections, in the order the text prints them.
+    pub sections: Vec<TriageSection>,
+    /// What the report could not see, each without its `# blind spot: `.
+    pub blind_spots: Vec<String>,
+    /// The functions to read first, at most [`READ_MAX`], the first first.
+    pub read_first: Vec<ReadFirst>,
+    /// Every function that qualified for the list, listed or not.
+    pub candidates: usize,
+}
+
+impl Triage {
+    /// Returns the text [`triage_tsv`] answers.
+    #[must_use]
+    pub fn spell(&self) -> String {
+        let mut out = format!("# triage: {}\n# {}\n", self.name, self.shape);
+        if self.incomplete {
+            out.push_str(INCOMPLETE_NOTE);
+            out.push('\n');
+        }
+        for line in &self.file {
+            let _ = writeln!(out, "{line}");
+        }
+        for section in &self.sections {
+            section.spell(&mut out);
+        }
+        for spot in &self.blind_spots {
+            let _ = writeln!(out, "# blind spot: {spot}");
+        }
+        match self.read_first.first() {
+            None => out.push_str("# read first: nothing stood out; start at the entry point\n"),
+            Some(first) if first.score == 0 => out.push_str(
+                "# read first: no protection signal fired, so the ranking is by the strings and imports each function references\n",
+            ),
+            Some(_) => out.push_str("# read first\n"),
+        }
+        for r in &self.read_first {
+            let _ = writeln!(
+                out,
+                "{:<#12x} {:<28} {}",
+                r.entry,
+                r.name,
+                r.reasons.join("; ")
+            );
+        }
+        if !self.read_first.is_empty() {
+            more_line(&mut out, self.candidates, READ_MAX, "candidates not listed");
+        }
+        out.push_str(
+            "# next: function_summary(addr), then decompile(addr); emulate/<addr> runs one\n",
+        );
+        out
+    }
+}
+
 /// Answers the first question about a binary in one call.
 ///
 /// The procedure this replaces is ten calls in a fixed order: what format is
@@ -49,18 +244,10 @@ impl Summary {
 /// one of those answers already exists behind its own tool, and an agent
 /// spent ten round trips assembling them before it could start reading code.
 ///
-/// Each section is the headline of the tool that owns it, which is a stable
-/// line by convention here, so this composes rather than reimplements. The
-/// reading list is computed from evidence and says why each entry is on it:
-/// a function that builds a hidden string, holds a keystream's constants, or
-/// calls the network and crypto surface is where the program's own logic is.
-/// The evidence is weighted, because its kinds are not equally telling: a
-/// string a function builds says what it does, a call to the network or
-/// crypto surface says what it touches, and a keystream constant only says
-/// it obfuscates something, which most of these functions do. An ordinary
-/// program has none of that evidence, so the list is filled from what every
-/// binary can answer, the strings and imports each function references
-/// ([`everyday_reading_list`]), and the header says so.
+/// Each section is the summary of the report that owns it, the value that
+/// report spells its own first line from, so this composes rather than
+/// reimplements. The reading list is computed from evidence and says why
+/// each entry is on it ([`reading_list`]).
 ///
 /// An `iocs` line counts the indicators by kind ([`iocs_tsv`] lists them),
 /// and a `blind spot` line says each thing the report could not see
@@ -75,17 +262,14 @@ impl Summary {
 ///
 /// # Returns
 ///
-/// A report of a dozen lines, then the functions to read first. Every
-/// section reads the whole program, so the report is built once per set
-/// of names ([`Analysis::derived`]).
-pub fn triage_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
+/// The triage. Every section reads the whole program, so it is built once
+/// per set of names ([`Analysis::derived`]).
+pub fn triage(p: &Program, a: &Analysis, o: &Overlay) -> Arc<Triage> {
     a.derived
         .get_or_build_named("triage", o.fingerprint(), (), || triage_of(p, a, o))
-        .as_ref()
-        .clone()
 }
 
-/// Builds the report [`triage_tsv`] memoizes.
+/// Answers the first question about a binary in one call, as text.
 ///
 /// # Arguments
 ///
@@ -95,10 +279,149 @@ pub fn triage_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
 ///
 /// # Returns
 ///
-/// As [`triage_tsv`].
-fn triage_of(p: &Program, a: &Analysis, o: &Overlay) -> String {
-    /// Functions listed to read first.
-    const READ_MAX: usize = 10;
+/// A report of a dozen lines, then the functions to read first: the
+/// spelling of [`triage()`].
+pub fn triage_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
+    triage(p, a, o).spell()
+}
+
+/// Builds the triage [`triage()`] memoizes.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - User names.
+fn triage_of(p: &Program, a: &Analysis, o: &Overlay) -> Triage {
+    let mut phases = crate::timing::Phases::new();
+    let protection = protection_of(p, a);
+    let mut sections = vec![TriageSection::new(
+        SectionKind::Protection,
+        protection.summary(),
+    )];
+    phases.mark("triage protection");
+    sections.push(TriageSection::new(
+        SectionKind::AntiAnalysis,
+        anti_analysis_summary(p, a),
+    ));
+    phases.mark("triage anti-analysis");
+    sections.push(TriageSection::new(
+        SectionKind::Crypto,
+        crypto_summary(p, a),
+    ));
+    phases.mark("triage crypto");
+    sections.push(TriageSection::new(
+        SectionKind::DynamicImports,
+        dynamic_imports_summary(p, a, o),
+    ));
+    phases.mark("triage dynamic imports");
+    sections.push(TriageSection::new(
+        SectionKind::Checks,
+        license_checks_summary(p, a, o),
+    ));
+    phases.mark("triage checks");
+    let recovered = recovered_strings(p, a);
+    sections.push(TriageSection::new(
+        SectionKind::GeneratedStrings,
+        Summary::new(
+            format!(
+                "{} recovered from {} generator(s)",
+                recovered.found.len(),
+                recovered.generators
+            ),
+            recovered.found.len(),
+            recovered.found.iter().map(|g| g.built_by),
+        ),
+    ));
+    phases.mark("triage generated strings");
+    let (capabilities, rows) = capability_lines(p, Some(a));
+    sections.push(TriageSection {
+        kind: SectionKind::Capabilities,
+        summary: capabilities,
+        detail: rows
+            .iter()
+            .take(CAPABILITY_ROWS)
+            .map(|row| row.trim().to_owned())
+            .collect(),
+    });
+    phases.mark("triage capabilities");
+    sections.push(TriageSection::new(SectionKind::Iocs, iocs_summary(p, a, o)));
+    phases.mark("triage iocs");
+    let blind_spots = blind_spots(p, a, o, &protection.packing);
+    phases.mark("triage blind spots");
+    let (read_first, candidates) = reading_list(p, a, o, &recovered);
+    Triage {
+        name: p.path.file_name().map_or_else(
+            || String::from("<unnamed>"),
+            |n| n.to_string_lossy().into_owned(),
+        ),
+        shape: shape(p, a),
+        incomplete: a.incomplete,
+        file: crate::fileinfo::triage_lines(p)
+            .split_terminator('\n')
+            .map(str::to_owned)
+            .collect(),
+        sections,
+        blind_spots,
+        read_first,
+        candidates,
+    }
+}
+
+/// The triage's line on the file's format, architecture and counts.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis, for its function count.
+fn shape(p: &Program, a: &Analysis) -> String {
+    format!(
+        "{} {}, {} bytes, entry {}, {} sections, {} imports, {} exports, {} functions",
+        p.format.name(),
+        p.arch.name(),
+        p.bytes.len(),
+        hex_or_dash(p.entry),
+        p.sections.len(),
+        p.symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Import)
+            .count(),
+        p.symbols
+            .iter()
+            .filter(|s| matches!(s.kind, SymbolKind::Export | SymbolKind::Forwarder))
+            .count(),
+        a.functions.len()
+    )
+}
+
+/// Ranks the functions to read first by the evidence each one carries.
+///
+/// A function that builds a hidden string, holds a keystream's constants,
+/// or calls the network and crypto surface is where the program's own
+/// logic is. The evidence is weighted, because its kinds are not equally
+/// telling: a string a function builds says what it does, a call to the
+/// network or crypto surface says what it touches, and a keystream
+/// constant only says it obfuscates something, which most of these
+/// functions do. An ordinary program has none of that evidence, so the
+/// list is filled from what every binary can answer, the strings and
+/// imports each function references ([`everyday_reading_list`]).
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - User names.
+/// * `recovered` - The strings the generators build ([`recovered_strings`]).
+///
+/// # Returns
+///
+/// The first [`READ_MAX`] functions, ranked, and how many qualified.
+fn reading_list(
+    p: &Program,
+    a: &Analysis,
+    o: &Overlay,
+    recovered: &Recovery,
+) -> (Vec<ReadFirst>, usize) {
     /// Imports whose use marks a function as the program's own logic rather
     /// than its runtime: what it talks to, what it encrypts, what it injects.
     const TELLING: [&str; 24] = [
@@ -133,90 +456,6 @@ fn triage_of(p: &Program, a: &Analysis, o: &Overlay) -> String {
     const WEIGHT_CALLS: usize = 3;
     /// Score for holding a cipher or keystream constant.
     const WEIGHT_HOLDS: usize = 1;
-    /// The first line of a tool's output, which is its summary by convention.
-    ///
-    /// A headline that repeats the label this report puts in front of it is
-    /// trimmed, so the line does not read `anti-analysis: anti-analysis: ...`.
-    fn headline<'t>(text: &'t str, label: &str) -> &'t str {
-        let line = text.lines().next().unwrap_or("").trim_start_matches("# ");
-        line.strip_prefix(label)
-            .map_or(line, |rest| rest.trim_start_matches([':', ' ']))
-            .trim()
-    }
-    let mut out = format!(
-        "# triage: {}\n",
-        p.path.file_name().map_or_else(
-            || String::from("<unnamed>"),
-            |n| n.to_string_lossy().into_owned()
-        )
-    );
-    let _ = writeln!(
-        out,
-        "# {} {}, {} bytes, entry {}, {} sections, {} imports, {} exports, {} functions",
-        p.format.name(),
-        p.arch.name(),
-        p.bytes.len(),
-        hex_or_dash(p.entry),
-        p.sections.len(),
-        p.symbols
-            .iter()
-            .filter(|s| s.kind == SymbolKind::Import)
-            .count(),
-        p.symbols
-            .iter()
-            .filter(|s| matches!(s.kind, SymbolKind::Export | SymbolKind::Forwarder))
-            .count(),
-        a.functions.len()
-    );
-    if a.incomplete {
-        out.push_str(INCOMPLETE_NOTE);
-        out.push('\n');
-    }
-    out.push_str(&crate::fileinfo::triage_lines(p));
-    let mut phases = crate::timing::Phases::new();
-    let protection = protection_tsv(p, a);
-    let _ = writeln!(out, "# protection: {}", headline(&protection, "protection"));
-    phases.mark("triage protection");
-    let anti = anti_analysis_tsv(p, a, o);
-    let _ = writeln!(out, "# anti-analysis: {}", headline(&anti, "anti-analysis"));
-    phases.mark("triage anti-analysis");
-    let crypto = crypto_tsv(p, a, o, 0, 1);
-    let _ = writeln!(out, "# crypto: {}", headline(&crypto, "crypto"));
-    phases.mark("triage crypto");
-    let dynamic = dynamic_imports_tsv(p, a, o);
-    let _ = writeln!(
-        out,
-        "# dynamic imports: {}",
-        headline(&dynamic, "dynamic imports")
-    );
-    phases.mark("triage dynamic imports");
-    let checks = license_checks_tsv(p, a, o);
-    let _ = writeln!(out, "# checks: {}", headline(&checks, "checks"));
-    phases.mark("triage checks");
-    let recovered = recovered_strings(p, a);
-    let _ = writeln!(
-        out,
-        "# generated strings: {} recovered from {} generator(s)",
-        recovered.found.len(),
-        recovered.generators
-    );
-    phases.mark("triage generated strings");
-    let capabilities = capability_map_tsv(p, Some(a));
-    let _ = writeln!(
-        out,
-        "# capabilities: {}",
-        headline(&capabilities, "capabilities")
-    );
-    for line in capabilities.lines().skip(1).take(6) {
-        let _ = writeln!(out, "#   {}", line.trim());
-    }
-    phases.mark("triage capabilities");
-    let _ = writeln!(out, "# iocs: {}", iocs_summary(p, a, o).headline);
-    phases.mark("triage iocs");
-    for spot in blind_spots(p, a, o, headline(&protection, "protection")) {
-        let _ = writeln!(out, "# blind spot: {spot}");
-    }
-    phases.mark("triage blind spots");
     let mut reasons: BTreeMap<u64, Vec<String>> = BTreeMap::new();
     let mut score: BTreeMap<u64, usize> = BTreeMap::new();
     for g in &recovered.found {
@@ -262,28 +501,18 @@ fn triage_of(p: &Program, a: &Analysis, o: &Overlay) -> String {
         let have: BTreeSet<u64> = ranked.iter().map(|r| r.0).collect();
         ranked.extend(everyday_reading_list(p, a, &have, READ_MAX - telling));
     }
-    if ranked.is_empty() {
-        out.push_str("# read first: nothing stood out; start at the entry point\n");
-    } else {
-        if telling == 0 {
-            out.push_str(
-                "# read first: no protection signal fired, so the ranking is by the strings and imports each function references\n",
-            );
-        } else {
-            out.push_str("# read first\n");
-        }
-        for (entry, why) in ranked.iter().take(READ_MAX) {
-            let _ = writeln!(
-                out,
-                "{entry:<#12x} {:<28} {}",
-                short_name(a, o, *entry),
-                why.join("; ")
-            );
-        }
-        more_line(&mut out, ranked.len(), READ_MAX, "candidates not listed");
-    }
-    out.push_str("# next: function_summary(addr), then decompile(addr); emulate/<addr> runs one\n");
-    out
+    let candidates = ranked.len();
+    let listed = ranked
+        .into_iter()
+        .take(READ_MAX)
+        .map(|(entry, reasons)| ReadFirst {
+            entry,
+            name: short_name(a, o, entry),
+            score: score.get(&entry).copied().unwrap_or(0),
+            reasons,
+        })
+        .collect();
+    (listed, candidates)
 }
 
 /// Orders the reading list so a function left mostly unchecked is not first.
@@ -333,13 +562,13 @@ const SPOT_SECTION_MIN: u64 = 0x200;
 /// * `p` - The loaded image.
 /// * `a` - The analysis.
 /// * `o` - Names in force, which the decompiled callers are read under.
-/// * `verdict` - The protection report's headline.
+/// * `packing` - The protection report's verdict.
 ///
 /// # Returns
 ///
 /// The lines, without their `# blind spot: ` prefix; none for a plain image.
-fn blind_spots(p: &Program, a: &Analysis, o: &Overlay, verdict: &str) -> Vec<String> {
-    let mut spots: Vec<String> = stub_spot(p, verdict).into_iter().collect();
+fn blind_spots(p: &Program, a: &Analysis, o: &Overlay, packing: &Packing) -> Vec<String> {
+    let mut spots: Vec<String> = stub_spot(p, packing).into_iter().collect();
     let sized = || {
         p.sections
             .iter()

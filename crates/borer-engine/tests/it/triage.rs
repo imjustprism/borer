@@ -126,3 +126,130 @@ fn the_capability_summary_holds_without_an_analysis() {
         render::capability_summary(&p, None).headline
     );
 }
+
+/// The labels of the triage's section lines, in the order its text prints
+/// them.
+const ORDER: [&str; 8] = [
+    "protection",
+    "anti-analysis",
+    "crypto",
+    "dynamic imports",
+    "checks",
+    "generated strings",
+    "capabilities",
+    "iocs",
+];
+
+/// Requires the triage's text to be its values spelled, each section line
+/// to repeat its producer's first line, in [`ORDER`], and each function on
+/// the reading list to be a discovered function.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+fn spelled_from_values(p: &Program) {
+    let a = Analysis::compute(p);
+    let o = Overlay::default();
+    let triage = render::triage(p, &a, &o);
+    let text = render::triage_tsv(p, &a, &o);
+    assert_eq!(triage.spell(), text);
+    let kinds: Vec<&str> = triage.sections.iter().map(|s| s.kind.label()).collect();
+    assert_eq!(kinds, ORDER, "{text}");
+    let lines: Vec<&str> = text.lines().collect();
+    let at = |label: &str| {
+        lines
+            .iter()
+            .position(|l| l.starts_with(&format!("# {label}: ")))
+    };
+    let places: Vec<Option<usize>> = ORDER.iter().map(|label| at(label)).collect();
+    assert!(
+        places.iter().all(Option::is_some) && places.windows(2).all(|w| w[0] < w[1]),
+        "{places:?}\n{text}"
+    );
+    for (name, report, _) in producers(p, &a, &o) {
+        let head = first_line(&report);
+        let said = head.strip_prefix(&format!("{name}: ")).unwrap_or(head);
+        let line = at(name).and_then(|i| lines.get(i)).copied();
+        assert_eq!(line, Some(format!("# {name}: {said}").as_str()), "{name}");
+    }
+    assert!(triage.read_first.len() <= triage.candidates, "{text}");
+    for r in &triage.read_first {
+        assert!(
+            a.function(r.entry).is_some(),
+            "{:#x} is not a function entry:\n{text}",
+            r.entry
+        );
+    }
+}
+
+/// The fixture's triage is its values spelled, its sections repeat their
+/// producers in order and its reading list names functions.
+#[test]
+fn the_triage_is_spelled_from_its_values() {
+    let p = fixture();
+    spelled_from_values(&p);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    assert!(
+        !render::triage(&p, &a, &o).read_first.is_empty(),
+        "the fixture has functions worth reading"
+    );
+}
+
+/// A program with no imports and its bytes zeroed is spelled from its
+/// values too: every section has a line when it found nothing.
+#[test]
+fn an_empty_triage_is_spelled_from_its_values() {
+    let mut p = fixture();
+    p.symbols.clear();
+    p.bytes.iter_mut().for_each(|b| *b = 0);
+    spelled_from_values(&p);
+}
+
+/// A TLS callback raises a blind spot the values hold and the text prints.
+#[test]
+fn a_blind_spot_is_a_value_the_text_prints() {
+    let mut p = fixture();
+    p.headers.tls_callbacks.push(0x1_4000_1000);
+    spelled_from_values(&p);
+    let a = Analysis::compute(&p);
+    let triage = render::triage(&p, &a, &Overlay::default());
+    assert!(
+        triage
+            .blind_spots
+            .iter()
+            .any(|s| s.contains("TLS callback")),
+        "{:?}",
+        triage.blind_spots
+    );
+}
+
+/// Two analyses of one program give equal triages.
+#[test]
+fn the_triage_is_the_same_value_from_two_analyses() {
+    let p = fixture();
+    let o = Overlay::default();
+    let one = render::triage(&p, &Analysis::compute(&p), &o);
+    let two = render::triage(&p, &Analysis::compute(&p), &o);
+    assert_eq!(one, two);
+}
+
+/// Each section names the resource that answers more, the crypto
+/// constants aside, which only a tool lists.
+#[test]
+fn each_section_names_where_more_is() {
+    let p = fixture();
+    let a = Analysis::compute(&p);
+    for s in &render::triage(&p, &a, &Overlay::default()).sections {
+        let uri = s.kind.uri();
+        if s.kind == render::SectionKind::Crypto {
+            assert_eq!(uri, None);
+        } else {
+            assert!(
+                uri.is_some_and(|u| u.starts_with("borer://")),
+                "{:?}",
+                s.kind
+            );
+        }
+    }
+}

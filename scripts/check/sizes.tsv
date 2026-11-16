@@ -108,7 +108,6 @@ crates/borer-engine/src/analysis/render/runs/diff.rs::run_diff_tsv#1	126
 crates/borer-engine/src/analysis/render/runs/mod.rs::judge#1	199
 crates/borer-engine/src/analysis/render/runs/mod.rs::render_runs#1	117
 crates/borer-engine/src/analysis/render/summary.rs::summary_of#1	226
-crates/borer-engine/src/analysis/render/triage_view.rs::triage_of#1	179
 crates/borer-engine/src/analysis/render/unpack.rs::devirtualize_tsv#1	202
 crates/borer-engine/src/analysis/render/unpack.rs::unpack_tsv#1	169
 crates/borer-engine/src/analysis/returns.rs	1510
