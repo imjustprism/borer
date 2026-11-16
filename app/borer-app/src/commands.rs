@@ -343,6 +343,15 @@ pub const COMMANDS: &[Command] = &[
             Need::Nothing,
         )
     },
+    Command {
+        keys: &[Keys::split(Ctx::Workspace, &["ctrl-r"], &["ctrl-r"])],
+        ..item(
+            "borer::OpenRecent",
+            "Open Recent...",
+            (MenuName::File, 0),
+            Need::Nothing,
+        )
+    },
     item(
         "borer::CloseBinary",
         "Close Binary",

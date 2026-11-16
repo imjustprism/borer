@@ -119,6 +119,8 @@ gpui::actions!(
         SaveProject,
         /// Saves the names, comments and types to a project file picked in the system dialog.
         SaveProjectAs,
+        /// Picks one of the binaries opened last and opens it.
+        OpenRecent,
     ]
 );
 

@@ -24,9 +24,9 @@ use command_palette_hooks::CommandPaletteFilter;
 use db::kvp::KeyValueStore;
 use editor::Editor;
 use gpui::{
-    AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, ExternalPaths, PromptLevel,
-    SharedString, TaskExt as _, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions,
-    point, px, size,
+    AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, ExternalPaths, Global,
+    PromptLevel, SharedString, TaskExt as _, TitlebarOptions, WeakEntity, Window, WindowBounds,
+    WindowHandle, WindowOptions, point, px, size,
 };
 use http_client::{BlockedHttpClient, HttpClientWithUrl};
 use language::LanguageRegistry;
@@ -43,17 +43,20 @@ use workspace::{
 
 use crate::actions::{CloseBinary, MinimizeWindow, Open, ZoomWindow};
 use crate::app_dirs::with_host_env;
-use crate::binary::{Binary, StatusLine};
+use crate::binary::{Binary, BinaryEvent, StatusLine};
 use crate::commands;
-use crate::decompile_item::DecompileItem;
+use crate::decompile_item::{DecompileItem, TabMode};
 use crate::functions_panel::FunctionsPanel;
 use crate::linear_item::LinearItem;
 use crate::measure::CliMode;
 use crate::panels::{PANELS, add_panels};
+use crate::places::{self, Opening, place_of};
 use crate::shell::Shell;
 use crate::start_item::keep_filled;
+use crate::stored::{self, SavedTab};
 use crate::theme_import::read_dropped;
 use crate::user_themes::is_theme_path;
+use crate::worker::LoadedBinary;
 
 /// The app's window id, which desktops match to its launcher entry.
 const APP_ID: &str = "borer-app";
@@ -68,6 +71,12 @@ const DEFAULT_DOCK_STATE_KEY: &str = "default_dock_state";
 
 /// What the status line ends with when a tab refuses a dropped folder.
 pub const REFUSED_FOLDER: &str = "is a folder; drop a binary";
+
+/// Marks an app run whose first window restored the tabs of the last quit, so a later
+/// window does not open them again.
+struct TabsRestored;
+
+impl Global for TabsRestored {}
 
 /// Default window width in logical pixels.
 const WINDOW_WIDTH_PX: f32 = 1280.0;
@@ -301,6 +310,7 @@ pub fn configure(cx: &mut App) -> anyhow::Result<()> {
     ];
     CommandPaletteFilter::update_global(cx, |filter, _| filter.hide_action_types(&hidden));
     cx.on_app_quit(crate::shell::flush_windows).detach();
+    cx.on_app_quit(keep_open_tabs).detach();
     cx.on_action(|_: &zed_actions::Quit, cx| cx.quit());
     Ok(())
 }
@@ -317,6 +327,53 @@ pub fn configure(cx: &mut App) -> anyhow::Result<()> {
 fn erased_editor(window: &mut Window, cx: &mut App) -> Arc<dyn ui_input::ErasedEditor> {
     cx.new(|cx| Editor::single_line(window, cx))
         .update(cx, |editor, cx| editor.erased(cx))
+}
+
+/// Returns the write of every app window's open code tabs to the store on quit, which the
+/// next start restores ([`Binary::restore`]); a write that fails is said on stderr.
+///
+/// # Arguments
+///
+/// * `cx` - Application context listing the windows.
+fn keep_open_tabs(cx: &mut App) -> impl Future<Output = ()> + use<> {
+    let app: &App = cx;
+    let tabs: Vec<SavedTab> = app
+        .windows()
+        .into_iter()
+        .filter_map(|window| window.downcast::<Shell>())
+        .filter_map(|window| window.read(app).ok())
+        .flat_map(|shell| open_tabs(shell.workspace().read(app), app))
+        .collect();
+    let keep = stored::keep_tabs(&tabs, cx);
+    async move {
+        if let Err(err) = keep.await {
+            eprintln!("borer-app: open tabs not kept: {err:#}");
+        }
+    }
+}
+
+/// Returns the code tabs of `workspace`'s panes that show a function, by place, in tab order.
+///
+/// # Arguments
+///
+/// * `workspace` - The workspace.
+/// * `cx` - Application context reading the tabs.
+fn open_tabs(workspace: &Workspace, cx: &App) -> Vec<SavedTab> {
+    workspace
+        .panes()
+        .iter()
+        .flat_map(|pane| pane.read(cx).items_of_type::<DecompileItem>())
+        .filter_map(|item| {
+            let place = place_of(&item, cx)?;
+            let item = item.read(cx);
+            Some(SavedTab {
+                path: item.loaded().path.clone(),
+                sha256: item.loaded().identity.clone(),
+                place,
+                top: item.top_line(),
+            })
+        })
+        .collect()
 }
 
 /// Opens the first file dropped on a tab as the window's binary, and refuses a folder with
@@ -417,6 +474,9 @@ pub struct AppWindow {
 /// Nothing is docked until a binary loads: the functions panel is added with the first
 /// loaded binary, in the dock and state the last run left it ([`dock_panels`]).
 ///
+/// Without `path`, the run's first window restores the code tabs open at the last quit
+/// ([`Binary::restore`]).
+///
 /// # Arguments
 ///
 /// * `app_state` - The app state from [`init`].
@@ -498,11 +558,71 @@ pub fn new_workspace(
             }
         })
         .detach();
-    if let Some(path) = path {
-        app.binary
-            .update(cx, |binary, cx| binary.open_path(path, cx));
-    }
+    let opener = app.workspace.downgrade();
+    window
+        .subscribe(&app.binary, cx, move |binary, event, window, cx| {
+            if let BinaryEvent::Opened(loaded) = event {
+                let (opener, loaded) = (opener.clone(), loaded.clone());
+                window.defer(cx, move |window, cx| {
+                    window.defer(cx, move |window, cx| {
+                        restore_places(&opener, &binary, &loaded, window, cx);
+                    });
+                });
+            }
+        })
+        .detach();
+    let first = path.is_none() && !cx.has_global::<TabsRestored>();
+    let tabs = first.then(|| {
+        cx.set_global(TabsRestored);
+        stored::saved_tabs(cx)
+    });
+    app.binary.update(cx, |binary, cx| match (path, tabs) {
+        (Some(path), _) => {
+            binary.open_path(path, cx);
+        }
+        (None, Some(Ok(tabs))) => binary.restore(tabs, cx),
+        (None, Some(Err(err))) => binary.set_status(format!("tabs not restored: {err:#}"), cx),
+        (None, None) => {}
+    });
     app
+}
+
+/// Opens the places a restore found unchanged in `loaded`, each at its top line.
+///
+/// Each is a permanent tab, the last one active; it runs once the load's other followers
+/// ran, so the first function the panel docked with opens behind them. The panel opens
+/// that function on a deferred update of its own, so the restore is deferred twice.
+///
+/// # Arguments
+///
+/// * `workspace` - The window's workspace.
+/// * `binary` - The window's binary, holding the places ([`Binary::take_restored`]).
+/// * `loaded` - The binary the restore opened.
+/// * `window` - Window the workspace is in.
+/// * `cx` - Application context.
+fn restore_places(
+    workspace: &WeakEntity<Workspace>,
+    binary: &Entity<Binary>,
+    loaded: &Arc<LoadedBinary>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let restored = binary.update(cx, |binary, _| binary.take_restored());
+    let Some(workspace) = workspace.upgrade().filter(|_| !restored.is_empty()) else {
+        return;
+    };
+    workspace.update(cx, |workspace, cx| {
+        for (place, top) in restored {
+            let how = Opening {
+                mode: TabMode::Permanent,
+                focus: true,
+            };
+            places::open(workspace, binary, loaded, place, how, window, cx);
+            if let Some(item) = workspace.active_item_as::<DecompileItem>(cx) {
+                item.update(cx, |item, _| item.restore_top(top));
+            }
+        }
+    });
 }
 
 /// Gives `pane` Zed's buffer search bar, which finds text in the active code tab.
@@ -763,7 +883,8 @@ pub(crate) mod tests {
     use command_palette_hooks::CommandPaletteFilter;
     use db::kvp::KeyValueStore;
     use gpui::{
-        Entity, ExternalPaths, FileDropEvent, TestAppContext, VisualTestContext, point, px, size,
+        AppContext as _, Entity, ExternalPaths, FileDropEvent, TestAppContext, VisualTestContext,
+        point, px, size,
     };
     use project::DisableAiSettings;
     use settings::Settings as _;
@@ -786,7 +907,9 @@ pub(crate) mod tests {
     use crate::places::{self, Opening, Place};
     use crate::shell::Shell;
     use crate::start_item::StartItem;
+    use crate::stored::{SavedTab, keep_tabs};
     use crate::worker::LoadedBinary;
+    use crate::worker::tests::{HELPER, scratch, tiny_pe};
 
     /// Entry of the sample program's caller, which calls [`CALLEE`].
     pub(crate) const CALLER: u64 = 0x1000;
@@ -1008,15 +1131,15 @@ pub(crate) mod tests {
     /// Panics when a step goes wrong, as [`an_open_tab_follows_an_edit`] says.
     fn an_open_tab_follows_an_edit_steps(cx: &mut TestAppContext) {
         let app_state = init(cx);
-        let dir = crate::worker::tests::scratch("follow");
+        let dir = scratch("follow");
         let exe = dir.join("tiny.exe");
-        std::fs::write(&exe, crate::worker::tests::tiny_pe()).unwrap();
+        std::fs::write(&exe, tiny_pe()).unwrap();
         let (app, cx) = open(&app_state, cx);
         let workspace = app.workspace;
         let binary = binary_in(&workspace, cx);
         binary.update(cx, |binary, cx| binary.open_path(exe, cx));
         cx.run_until_parked();
-        let helper = crate::worker::tests::HELPER;
+        let helper = HELPER;
         let show = |cx: &mut VisualTestContext| {
             let now = binary.read_with(cx, |binary, _| binary.loaded().cloned().unwrap());
             open_place(
@@ -1942,5 +2065,170 @@ pub(crate) mod tests {
         cx.run_until_parked();
         let active = cx.update(|cx| cx.active_window());
         assert_eq!(active, Some(window.into()));
+    }
+
+    /// Keeps a tab of [`tiny_pe`]'s helper written to a fresh directory and a tab of another
+    /// binary, changes the file when `change` says, and opens the run's first workspace.
+    ///
+    /// # Returns
+    ///
+    /// The function the active tab shows, the status line, the binary's path, and the
+    /// other binary's.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a file or the store cannot be written.
+    async fn restore_kept_tabs(
+        change: bool,
+        cx: &mut TestAppContext,
+    ) -> (Option<u64>, String, String, String) {
+        let app_state = init(cx);
+        let dir = scratch(if change { "tabs-changed" } else { "tabs" });
+        let exe = dir.join("tiny.exe");
+        let mut bytes = tiny_pe();
+        std::fs::write(&exe, &bytes).unwrap();
+        let tab = |path: &Path| SavedTab {
+            path: path.to_path_buf(),
+            sha256: borer_engine::analysis::project::identity(&bytes),
+            place: Place::decompile(HELPER),
+            top: 0,
+        };
+        let other = dir.join("other.exe");
+        let tabs = [tab(&exe), tab(&other)];
+        cx.update(|cx| keep_tabs(&tabs, cx)).await.unwrap();
+        if change && let Some(last) = bytes.last_mut() {
+            *last = 0x90;
+        }
+        std::fs::write(&exe, &bytes).unwrap();
+        let (app, cx) = open(&app_state, cx);
+        let shown = shown(&app.workspace, cx).map(|(entry, _)| entry);
+        let status = take_status(&app, cx);
+        std::fs::remove_dir_all(&dir).unwrap();
+        (
+            shown,
+            status,
+            exe.display().to_string(),
+            other.display().to_string(),
+        )
+    }
+
+    /// A listing tab open at quit, kept as the quit keeps it, comes back in the next run's
+    /// first window as a listing at the line it was left at.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the tab comes back as another view, function or line.
+    #[gpui::test]
+    async fn a_listing_tab_comes_back_after_a_restart(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let dir = scratch("listing-tab");
+        let exe = dir.join("tiny.exe");
+        std::fs::write(&exe, tiny_pe()).unwrap();
+        let (tabs, line) = {
+            let (app, cx) = open(&app_state, cx);
+            let workspace = app.workspace;
+            let binary = binary_in(&workspace, cx);
+            binary.update(cx, |binary, cx| binary.open_path(exe.clone(), cx));
+            cx.run_until_parked();
+            let loaded = binary.read_with(cx, |binary, _| binary.loaded().cloned().unwrap());
+            let view = crate::worker::listing_blocking(&loaded, HELPER).unwrap();
+            let (va, line) = (0..view.lines())
+                .filter_map(|line| Some((view.address(line)?, line)))
+                .nth(2)
+                .unwrap();
+            let listing = Place::Code {
+                entry: HELPER,
+                form: Form::Listing,
+                at: Some(va),
+            };
+            open_place(&workspace, &loaded, listing, TabMode::Permanent, cx);
+            shown(&workspace, cx);
+            let tabs = workspace.read_with(cx, super::open_tabs);
+            (tabs, line)
+        };
+        cx.update(|cx| keep_tabs(&tabs, cx)).await.unwrap();
+        cx.update(|cx| cx.remove_global::<super::TabsRestored>());
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
+        let restored = crate::decompile_item::tests::active(&workspace, cx);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(restored, Some((HELPER, Form::Listing, line)));
+    }
+
+    /// The binaries opened last are one record in the store, under the shell's key and in its
+    /// format of path and kind: the picker lists what the record holds, and a load puts the
+    /// binary first there with the engine's kind; no record under another key is written.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the picker or the record disagree, or a second record appears.
+    #[gpui::test]
+    async fn one_recent_record_in_the_shells_format_serves_the_picker(cx: &mut TestAppContext) {
+        use crate::recent::RecentBinaries;
+        use crate::stored::{self, Key};
+        init(cx);
+        let before = vec![(PathBuf::from("dir").join("a.exe"), "x86-64 PE".to_owned())];
+        cx.update(|cx| stored::write(Key::RecentBinaries, &before, cx))
+            .await
+            .unwrap();
+        let binary = cx.new(|cx| Binary::new(cx));
+        let listed = |cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                let picker = RecentBinaries::new(binary.clone(), cx);
+                picker
+                    .shown()
+                    .iter()
+                    .map(|path| path.to_path_buf())
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(listed(cx), [before[0].0.clone()]);
+        let loaded = sample();
+        binary.update(cx, |binary, cx| {
+            binary.finish_load(Ok(loaded.clone()), cx);
+        });
+        cx.run_until_parked();
+        let record: Vec<(PathBuf, String)> = cx
+            .update(|cx| stored::read(Key::RecentBinaries, cx))
+            .unwrap();
+        let first = (
+            std::path::absolute(&loaded.path).unwrap(),
+            crate::binary::kind(&loaded),
+        );
+        assert_eq!(record, [first, before[0].clone()]);
+        let paths: Vec<PathBuf> = record.into_iter().map(|(path, _)| path).collect();
+        assert_eq!(listed(cx), paths);
+        let other = cx.update(|cx| KeyValueStore::global(cx).scoped("borer").read("recent"));
+        assert_eq!(other.unwrap(), None);
+    }
+
+    /// A decompile tab kept at quit comes back at its function in the run's first
+    /// workspace while its binary is the same file; a kept tab of another binary is dropped
+    /// and the status line names it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the tab is not restored or the dropped binary goes unsaid.
+    #[gpui::test]
+    async fn a_kept_tab_comes_back_while_its_file_is_the_same(cx: &mut TestAppContext) {
+        let (shown, status, _, other) = restore_kept_tabs(false, cx).await;
+        assert_eq!(shown, Some(HELPER), "{status}");
+        assert!(
+            status.contains(&format!("the tabs of {other} were not restored")),
+            "{status}"
+        );
+    }
+
+    /// A kept tab whose file changed since is dropped, with a status line naming the file.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the tab is restored or the change goes unsaid.
+    #[gpui::test]
+    async fn a_kept_tab_of_a_changed_file_is_dropped(cx: &mut TestAppContext) {
+        let (shown, status, exe, _) = restore_kept_tabs(true, cx).await;
+        assert_ne!(shown, Some(HELPER), "{status}");
+        let named = format!("{exe} changed since its tabs were saved");
+        assert!(status.contains(&named), "{status}");
     }
 }

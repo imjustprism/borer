@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use gpui::{App, AppContext as _, Context, Entity, EntityId, WeakEntity, Window};
+use serde::{Deserialize, Serialize};
 use workspace::{Item, ItemHandle, Workspace};
 
 use crate::binary::Binary;
@@ -16,7 +17,7 @@ use crate::worker::{LoadedBinary, Referent};
 use crate::xrefs::show_xrefs;
 
 /// Where the app shows something; addresses and enums only, never a snapshot or an entity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Place {
     /// One view of the function at `entry`, with the instruction at `at` on its top line
     /// when one is given.

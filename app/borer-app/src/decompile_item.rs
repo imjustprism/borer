@@ -26,6 +26,7 @@ use gpui::{
 use language::{
     Bias, Buffer, BufferId, Capability, LineEnding, Point, ReplicaId, Rope, TextBuffer,
 };
+use serde::{Deserialize, Serialize};
 use settings::{Settings as _, SettingsStore};
 use theme::{ActiveTheme as _, GlobalTheme};
 use theme_settings::ThemeSettings;
@@ -81,7 +82,7 @@ pub enum TabMode {
 }
 
 /// Which view of a function a code tab shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Form {
     /// The decompiled pseudo-C, as the engine's decompile view spells it.
     Decompile,
@@ -577,6 +578,20 @@ impl DecompileItem {
     #[must_use]
     pub const fn entry(&self) -> Option<u64> {
         self.entry
+    }
+
+    /// Puts line `top` at the top of the tab, once its lines arrive if they have not yet,
+    /// as a restored tab was left.
+    ///
+    /// # Arguments
+    ///
+    /// * `top` - Zero-based index of the line.
+    pub fn restore_top(&mut self, top: usize) {
+        if self.code.is_some() {
+            self.scroll_to(top);
+        } else {
+            self.keep_top = Some(top);
+        }
     }
 
     /// Returns the binary the tab's lines come from.

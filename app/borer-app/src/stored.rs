@@ -1,5 +1,7 @@
-//! What the app keeps between runs in Zed's key-value store under the app's data directory:
-//! where a load looks for a binary's PDB and packs, and the actions that change it.
+//! What the app keeps between runs in Zed's key-value store under the app's data directory.
+//!
+//! That is where a load looks for a binary's PDB and packs and the actions that change it,
+//! the binaries opened last ([`crate::recent`]), and the code tabs open at quit.
 //!
 //! These live in the key-value store, not the settings file: Zed's settings schema at this
 //! pin is a closed struct whose parser drops every key it does not name, so an app key there
@@ -11,18 +13,132 @@ use anyhow::Context as _;
 use borer_front::places;
 use db::kvp::KeyValueStore;
 use gpui::{App, AppContext as _, Context, Entity, Global, PathPromptOptions, Task};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use workspace::Workspace;
 
 use crate::actions::{ChoosePacks, ChooseSymbolCache, ForgetPacks, ForgetSymbolCache};
 use crate::binary::Binary;
+use crate::places::Place;
 use crate::worker::Sources;
 
 /// Namespace of the app's keys in Zed's key-value store.
-const SCOPE: &str = "borer";
+pub(crate) const SCOPE: &str = "borer";
 
-/// Key of the [`OpenSettings`] in [`SCOPE`].
-const OPEN_KEY: &str = "open";
+/// A record the app keeps in [`SCOPE`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Key {
+    /// The [`OpenSettings`].
+    Open,
+    /// The [`SavedTab`]s.
+    Tabs,
+    /// The binaries opened last, with what the engine said each is ([`crate::recent`]).
+    RecentBinaries,
+}
+
+impl Key {
+    /// Returns the key's name in the store.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Tabs => "tabs",
+            Self::RecentBinaries => "recent_binaries",
+        }
+    }
+}
+
+/// A code tab open at quit, which the next start opens again when its binary is still the
+/// same file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedTab {
+    /// The binary the tab's function belongs to.
+    pub path: PathBuf,
+    /// The binary's SHA-256 when the tab was saved, as a project file records it.
+    pub sha256: String,
+    /// What the tab shows.
+    pub place: Place,
+    /// Zero-based index of the line at the top of the tab.
+    pub top: usize,
+}
+
+/// Returns what the key-value store holds under `key`, the type's default when nothing.
+///
+/// # Arguments
+///
+/// * `key` - The record.
+/// * `cx` - Application context reading the store.
+///
+/// # Errors
+///
+/// Returns an error when the store cannot be read or what it holds does not parse.
+pub fn read<T: DeserializeOwned + Default>(key: Key, cx: &App) -> anyhow::Result<T> {
+    let name = key.name();
+    parse(name, KeyValueStore::global(cx).scoped(SCOPE).read(name)?)
+}
+
+/// Returns what `text`, the store's record under `key`, holds; the type's default when
+/// there is none.
+///
+/// # Arguments
+///
+/// * `key` - The key the record is under, for the error.
+/// * `text` - The record, `None` when there is none.
+///
+/// # Errors
+///
+/// Returns an error when the record does not parse.
+fn parse<T: DeserializeOwned + Default>(key: &str, text: Option<String>) -> anyhow::Result<T> {
+    let Some(text) = text else {
+        return Ok(T::default());
+    };
+    serde_json::from_str(&text).with_context(|| format!("parsing the app's {key} record"))
+}
+
+/// Writes `value` to the key-value store under `key`.
+///
+/// # Arguments
+///
+/// * `key` - The record.
+/// * `value` - What to keep.
+/// * `cx` - Application context.
+///
+/// # Returns
+///
+/// The write, which fails when the store refuses it or `value` does not serialize.
+pub fn write<T: Serialize>(key: Key, value: &T, cx: &App) -> Task<anyhow::Result<()>> {
+    let kvp = KeyValueStore::global(cx);
+    let text = serde_json::to_string(value);
+    let name = key.name();
+    cx.background_spawn(async move { kvp.scoped(SCOPE).write(name.to_owned(), text?).await })
+}
+
+/// Returns the code tabs open at the last quit, in tab order.
+///
+/// # Arguments
+///
+/// * `cx` - Application context reading the store.
+///
+/// # Errors
+///
+/// Returns an error when the store cannot be read or what it holds does not parse.
+pub fn saved_tabs(cx: &App) -> anyhow::Result<Vec<SavedTab>> {
+    read(Key::Tabs, cx)
+}
+
+/// Keeps `tabs` as the code tabs open now, in place of those kept before.
+///
+/// # Arguments
+///
+/// * `tabs` - The tabs, in tab order.
+/// * `cx` - Application context.
+///
+/// # Returns
+///
+/// The write, which fails when the store refuses it.
+pub fn keep_tabs(tabs: &[SavedTab], cx: &App) -> Task<anyhow::Result<()>> {
+    write(Key::Tabs, &tabs, cx)
+}
 
 /// What the person set for opening binaries; what is unset falls back to
 /// [`default_sources`].
@@ -81,10 +197,7 @@ pub fn default_sources() -> (Sources, Vec<String>) {
 ///
 /// Returns an error when the store cannot be read or what it holds does not parse.
 pub fn open_settings(cx: &App) -> anyhow::Result<OpenSettings> {
-    let Some(text) = KeyValueStore::global(cx).scoped(SCOPE).read(OPEN_KEY)? else {
-        return Ok(OpenSettings::default());
-    };
-    serde_json::from_str(&text).context("parsing the open settings")
+    read(Key::Open, cx)
 }
 
 /// Returns where the next load looks: [`FixedSources`] when set, else [`default_sources`]
@@ -125,22 +238,6 @@ pub fn merged(
     (sources, notes)
 }
 
-/// Writes `settings` to the key-value store.
-///
-/// # Arguments
-///
-/// * `settings` - The open settings.
-/// * `cx` - Application context.
-///
-/// # Returns
-///
-/// The write, which fails when the store refuses it.
-fn write_open(settings: &OpenSettings, cx: &App) -> Task<anyhow::Result<()>> {
-    let kvp = KeyValueStore::global(cx);
-    let text = serde_json::to_string(settings);
-    cx.background_spawn(async move { kvp.scoped(SCOPE).write(OPEN_KEY.to_owned(), text?).await })
-}
-
 /// Says what `paths` are, one after another.
 ///
 /// # Arguments
@@ -175,9 +272,9 @@ fn update(
         }
     };
     let said = change(&mut settings);
-    let write = write_open(&settings, cx);
+    let saving = write(Key::Open, &settings, cx);
     cx.spawn(async move |this, cx| {
-        let status = match write.await {
+        let status = match saving.await {
             Ok(()) => format!("{said}; the next open uses it"),
             Err(err) => format!("open settings not saved: {err:#}"),
         };

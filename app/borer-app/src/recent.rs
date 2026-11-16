@@ -1,19 +1,22 @@
-//! The binaries opened last, kept in Zed's key-value store under the app's data directory.
+//! The binaries opened last, kept in Zed's key-value store under the app's data directory,
+//! and the picker that opens one of them.
 //!
 //! Each is kept with the engine's architecture and format as the load read them, so the
 //! start tab lists them without reading a file.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Context as _;
 use db::kvp::KeyValueStore;
-use gpui::{App, AppContext as _, Task};
+use gpui::{App, AppContext as _, Context, DismissEvent, Entity, ParentElement as _, Task, Window};
+use picker::{Picker, PickerDelegate};
+use ui::{Label, ListItem, ListItemSpacing, Toggleable as _};
+use workspace::Workspace;
 
-/// Namespace of the app's keys in Zed's key-value store.
-const SCOPE: &str = "borer";
-
-/// Key of the binaries opened last in [`SCOPE`].
-const KEY: &str = "recent_binaries";
+use crate::actions::OpenRecent;
+use crate::binary::Binary;
+use crate::stored::{Key, SCOPE};
 
 /// Most binaries the list keeps.
 pub const RECENT_MAX: usize = 10;
@@ -70,7 +73,11 @@ pub fn file_name(path: &Path) -> String {
 ///
 /// Returns an error when the store cannot be read or its record does not parse.
 pub fn read(cx: &App) -> anyhow::Result<Vec<RecentBinary>> {
-    parse(KeyValueStore::global(cx).scoped(SCOPE).read(KEY)?)
+    parse(
+        KeyValueStore::global(cx)
+            .scoped(SCOPE)
+            .read(Key::RecentBinaries.name())?,
+    )
 }
 
 /// Returns the list a stored record holds, empty when there is none.
@@ -129,7 +136,11 @@ pub fn remembered(mut list: Vec<RecentBinary>, opened: RecentBinary) -> Vec<Rece
 pub fn write(list: &[RecentBinary], cx: &App) -> Task<anyhow::Result<()>> {
     let text = encode(list);
     let kvp = KeyValueStore::global(cx);
-    cx.background_spawn(async move { kvp.scoped(SCOPE).write(KEY.to_owned(), text?).await })
+    cx.background_spawn(async move {
+        kvp.scoped(SCOPE)
+            .write(Key::RecentBinaries.name().to_owned(), text?)
+            .await
+    })
 }
 
 /// Returns the store's record of `list`.
@@ -147,6 +158,169 @@ fn encode(list: &[RecentBinary]) -> serde_json::Result<String> {
         .map(|recent| (recent.path.as_path(), recent.kind.as_str()))
         .collect();
     serde_json::to_string(&pairs)
+}
+
+/// Registers [`OpenRecent`] on `workspace`, its picker opening the choice in `binary`.
+///
+/// # Arguments
+///
+/// * `workspace` - The workspace the action dispatches in.
+/// * `binary` - The window's binary.
+pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
+    let binary = binary.clone();
+    workspace.register_action(move |workspace, _: &OpenRecent, window, cx| {
+        toggle(workspace, binary.clone(), window, cx);
+    });
+}
+
+/// What the picker lists and which one is highlighted.
+#[derive(Debug)]
+pub struct RecentBinaries {
+    /// The binary a choice opens in.
+    binary: Entity<Binary>,
+    /// The binaries opened last, the newest first, as `binary` holds them.
+    list: Vec<RecentBinary>,
+    /// Indices into [`Self::list`] the query matches, in order.
+    matches: Vec<usize>,
+    /// Index into [`Self::matches`] of the highlighted row.
+    selected: usize,
+}
+
+impl RecentBinaries {
+    /// Returns the picker's rows over the binaries `binary` opened last, all matching.
+    ///
+    /// # Arguments
+    ///
+    /// * `binary` - The binary a choice opens in.
+    /// * `cx` - Application context reading it.
+    #[must_use]
+    pub fn new(binary: Entity<Binary>, cx: &App) -> Self {
+        let list = binary.read(cx).recent().to_vec();
+        Self {
+            binary,
+            matches: (0..list.len()).collect(),
+            list,
+            selected: 0,
+        }
+    }
+
+    /// Returns the paths the query matches, in order.
+    #[must_use]
+    pub fn shown(&self) -> Vec<&Path> {
+        self.matches
+            .iter()
+            .filter_map(|&ix| self.list.get(ix))
+            .map(|recent| recent.path.as_path())
+            .collect()
+    }
+}
+
+/// Opens the recent binaries picker over `workspace`.
+///
+/// # Arguments
+///
+/// * `workspace` - The workspace the picker opens in.
+/// * `binary` - The binary a choice opens in.
+/// * `window` - Window the workspace is in.
+/// * `cx` - Workspace context.
+pub fn toggle(
+    workspace: &mut Workspace,
+    binary: Entity<Binary>,
+    window: &mut Window,
+    cx: &mut Context<'_, Workspace>,
+) {
+    let delegate = RecentBinaries::new(binary, cx);
+    workspace.toggle_modal(window, cx, |window, cx| {
+        Picker::uniform_list(delegate, window, cx)
+    });
+}
+
+impl PickerDelegate for RecentBinaries {
+    type ListItem = ListItem;
+
+    fn name() -> &'static str {
+        "RecentBinaries"
+    }
+
+    fn placeholder_text(&self, _window: &mut Window, _cx: &mut App) -> Arc<str> {
+        "Open a recent binary".into()
+    }
+
+    fn selected_index(&self) -> usize {
+        self.selected
+    }
+
+    fn match_count(&self) -> usize {
+        self.matches.len()
+    }
+
+    fn set_selected_index(
+        &mut self,
+        ix: usize,
+        _window: &mut Window,
+        _cx: &mut Context<'_, Picker<Self>>,
+    ) {
+        self.selected = ix;
+    }
+
+    fn update_matches(
+        &mut self,
+        query: String,
+        _window: &mut Window,
+        _cx: &mut Context<'_, Picker<Self>>,
+    ) -> Task<()> {
+        let query = query.to_lowercase();
+        self.matches = self
+            .list
+            .iter()
+            .enumerate()
+            .filter(|(_, recent)| {
+                let path = recent.path.to_string_lossy().to_lowercase();
+                path.contains(&query)
+            })
+            .map(|(ix, _)| ix)
+            .collect();
+        self.selected = 0;
+        Task::ready(())
+    }
+
+    fn confirm(
+        &mut self,
+        _secondary: bool,
+        _window: &mut Window,
+        cx: &mut Context<'_, Picker<Self>>,
+    ) {
+        let chosen = self
+            .matches
+            .get(self.selected)
+            .and_then(|&ix| self.list.get(ix));
+        if let Some(recent) = chosen {
+            let path = recent.path.clone();
+            self.binary
+                .update(cx, |binary, cx| binary.open_path(path, cx));
+        }
+        cx.emit(DismissEvent);
+    }
+
+    fn dismissed(&mut self, _window: &mut Window, _cx: &mut Context<'_, Picker<Self>>) {}
+
+    fn render_match(
+        &self,
+        ix: usize,
+        selected: bool,
+        _window: &mut Window,
+        _cx: &mut Context<'_, Picker<Self>>,
+    ) -> Option<Self::ListItem> {
+        let recent = self.list.get(*self.matches.get(ix)?)?;
+        let text = format!("{}  {}", recent.path.display(), recent.kind);
+        Some(
+            ListItem::new(ix)
+                .inset(true)
+                .spacing(ListItemSpacing::Sparse)
+                .toggle_state(selected)
+                .child(Label::new(text)),
+        )
+    }
 }
 
 #[cfg(test)]

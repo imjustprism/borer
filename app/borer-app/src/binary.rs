@@ -19,7 +19,9 @@ use workspace::{HideStatusItem, ItemHandle, StatusItemView, Workspace};
 use borer_engine::cancel::Cancel;
 
 use crate::actions::{OpenProject, SaveProject, SaveProjectAs};
+use crate::places::Place;
 use crate::recent::{self, RecentBinary, file_name};
+use crate::stored::SavedTab;
 use crate::worker::{
     Job, LoadedBinary, edit_blocking, load_binary_blocking, open_project_blocking,
     read_project_blocking, save_project_blocking, spawn_engine,
@@ -96,6 +98,10 @@ pub struct Binary {
     project: Option<PathBuf>,
     /// [`LoadedBinary::fingerprint`] of the overlay last saved, opened or loaded.
     saved: u64,
+    /// The tabs of the last quit the running load is to restore.
+    restoring: Vec<SavedTab>,
+    /// The places and top lines of the restored tabs, until the window opens them.
+    restored: Vec<(Place, usize)>,
     /// Error text of the most recent failed load.
     error: Option<String>,
     /// The running load, `None` once it finished or before any.
@@ -149,6 +155,8 @@ impl Binary {
             facts: Vec::new(),
             project: None,
             saved: 0,
+            restoring: Vec::new(),
+            restored: Vec::new(),
             error: None,
             reading: None,
             busy: None,
@@ -349,6 +357,8 @@ impl Binary {
         self.loaded = None;
         self.facts.clear();
         self.project = None;
+        self.restoring.clear();
+        self.restored.clear();
         self.error = None;
         self.status.clear();
         self.reading = Some(Loading {
@@ -416,6 +426,57 @@ impl Binary {
         cx.notify();
     }
 
+    /// Opens the binary of the first of `tabs`, the decompile tabs open at the last quit,
+    /// to restore those of its tabs that it holds the bytes of ([`Self::restore_tabs`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `tabs` - The tabs open at the last quit, in tab order.
+    /// * `cx` - Binary context.
+    pub fn restore(&mut self, tabs: Vec<SavedTab>, cx: &mut Context<'_, Self>) {
+        let Some(path) = tabs.first().map(|tab| tab.path.clone()) else {
+            return;
+        };
+        self.open_path(path, cx);
+        self.restoring = tabs;
+    }
+
+    /// Takes the tabs a restore waits on for `loaded` and keeps those of its file to open
+    /// ([`Self::take_restored`]), unless the file's SHA-256 is not the one saved; the status
+    /// line names a file that changed and the other binaries whose tabs were dropped, one
+    /// binary being open per window.
+    ///
+    /// # Arguments
+    ///
+    /// * `loaded` - The binary the restore opened.
+    fn restore_tabs(&mut self, loaded: &LoadedBinary) {
+        let (own, other): (Vec<SavedTab>, Vec<SavedTab>) = std::mem::take(&mut self.restoring)
+            .into_iter()
+            .partition(|tab| tab.path == loaded.path);
+        if own.iter().any(|tab| tab.sha256 != loaded.identity) {
+            self.status.push_str(&format!(
+                "; {} changed since its tabs were saved, so they were not restored",
+                loaded.path.display()
+            ));
+        } else {
+            self.restored = own.iter().map(|tab| (tab.place, tab.top)).collect();
+        }
+        let mut dropped: Vec<String> = other.iter().map(|t| t.path.display().to_string()).collect();
+        dropped.sort();
+        dropped.dedup();
+        if !dropped.is_empty() {
+            self.status.push_str(&format!(
+                "; the tabs of {} were not restored: a window opens one binary",
+                dropped.join(", ")
+            ));
+        }
+    }
+
+    /// Returns the places and top lines of the tabs a restore found unchanged, once.
+    pub fn take_restored(&mut self) -> Vec<(Place, usize)> {
+        std::mem::take(&mut self.restored)
+    }
+
     /// Applies the result of a background load.
     ///
     /// # Arguments
@@ -434,6 +495,7 @@ impl Binary {
                 let msg = format!("{err:#}");
                 self.status = format!("load failed: {msg}");
                 self.error = Some(msg);
+                self.restoring.clear();
                 cx.emit(BinaryEvent::Closed);
                 cx.notify();
             }
@@ -477,6 +539,7 @@ impl Binary {
             this.update(cx, |binary, cx| binary.set_status(why, cx));
         }));
         self.saved = loaded.fingerprint;
+        self.restore_tabs(&loaded);
         self.loaded = Some(loaded.clone());
         cx.emit(BinaryEvent::Opened(loaded));
         cx.notify();
