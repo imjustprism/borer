@@ -460,6 +460,7 @@ mod tests {
             analysis: first.analysis.clone(),
             overlay: Arc::new(overlay),
             initial_rows: first.initial_rows.clone(),
+            notes: Vec::new(),
         });
         open_place(&workspace, &renamed, place, TabMode::Permanent, cx);
         assert_eq!(tabs(cx), 2);

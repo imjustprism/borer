@@ -17,7 +17,7 @@ use workspace::dock::DockPosition;
 use super::{Harness, Prepared, SYSTEM_NOTEPAD, nanos, now_instant, say, sorted_quantiles_ms};
 use crate::call_tree::{CallTree, Shape};
 use crate::call_tree_panel::{CallTreePanel, PANEL};
-use crate::worker::{LoadedBinary, load_binary_blocking, ui_engine_calls};
+use crate::worker::{LoadedBinary, Sources, load_binary_blocking, ui_engine_calls};
 
 /// Expansions asking the engine the phase times.
 const EXPANSIONS: usize = 200;
@@ -64,7 +64,11 @@ pub(super) struct TreeRun {
 /// Returns an error when notepad does not load or lists no function.
 pub(super) fn prepare_tree(cancel: &Cancel) -> anyhow::Result<Prepared> {
     cancel.within(|| {
-        let loaded = load_binary_blocking(PathBuf::from(SYSTEM_NOTEPAD))?;
+        let loaded = load_binary_blocking(
+            PathBuf::from(SYSTEM_NOTEPAD),
+            &Sources::default(),
+            Vec::new(),
+        )?;
         let root = loaded
             .initial_rows
             .rows

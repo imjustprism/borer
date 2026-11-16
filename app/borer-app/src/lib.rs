@@ -37,6 +37,7 @@ pub mod rows_panel;
 pub mod shell;
 pub mod start_item;
 pub mod status;
+pub mod stored;
 pub mod table;
 pub mod tables;
 pub mod theme_contract;

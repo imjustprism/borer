@@ -46,6 +46,7 @@ unused-allowed-license = "allow"
 exceptions = [
   { allow = ["AGPL-3.0-only"], crate = "borer" },
   { allow = ["AGPL-3.0-only"], crate = "borer-engine" },
+  { allow = ["AGPL-3.0-only"], crate = "borer-front" },
   { allow = ["AGPL-3.0-only"], crate = "borer-live" },
 ]
 

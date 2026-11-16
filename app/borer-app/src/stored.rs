@@ -1,0 +1,328 @@
+//! What the app keeps between runs in Zed's key-value store under the app's data directory:
+//! where a load looks for a binary's PDB and packs, and the actions that change it.
+//!
+//! These live in the key-value store, not the settings file: Zed's settings schema at this
+//! pin is a closed struct whose parser drops every key it does not name, so an app key there
+//! would never read back.
+
+use std::path::PathBuf;
+
+use anyhow::Context as _;
+use borer_front::places;
+use db::kvp::KeyValueStore;
+use gpui::{App, AppContext as _, Context, Entity, Global, PathPromptOptions, Task};
+use serde::{Deserialize, Serialize};
+use workspace::Workspace;
+
+use crate::actions::{ChoosePacks, ChooseSymbolCache, ForgetPacks, ForgetSymbolCache};
+use crate::binary::Binary;
+use crate::worker::Sources;
+
+/// Namespace of the app's keys in Zed's key-value store.
+const SCOPE: &str = "borer";
+
+/// Key of the [`OpenSettings`] in [`SCOPE`].
+const OPEN_KEY: &str = "open";
+
+/// What the person set for opening binaries; what is unset falls back to
+/// [`default_sources`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenSettings {
+    /// Root of the symbol-server cache a binary's PDB is looked for in, `None` for the
+    /// default one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_cache: Option<PathBuf>,
+    /// Pack files that load for every binary, in load order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub packs: Vec<PathBuf>,
+}
+
+/// Which open setting an action changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Choice {
+    /// The symbol cache directory.
+    SymbolCache,
+    /// The pack files.
+    Packs,
+}
+
+/// Sources every load uses in place of the ones the person set, for tests and measurement
+/// runs, so they read no packs or symbol cache of the machine's.
+#[derive(Debug, Clone, Default)]
+pub struct FixedSources(pub Sources);
+
+impl Global for FixedSources {}
+
+/// Returns where a load looks when the person set nothing, as the server does by default.
+///
+/// That is [`borer_front::places`]' symbol cache and, unless `BORER_AUTO_PACKS=0`, its pack
+/// directories, and a note when the symbol cache is refused.
+#[must_use]
+pub fn default_sources() -> (Sources, Vec<String>) {
+    let (symbol_cache, notes) = match places::symbol_cache() {
+        Ok(dir) => (dir, Vec::new()),
+        Err(why) => (None, vec![format!("skipped the symbol cache: {why}")]),
+    };
+    let sources = Sources {
+        symbol_cache,
+        packs: Vec::new(),
+        pack_dirs: places::searched(places::auto_enabled()),
+    };
+    (sources, notes)
+}
+
+/// Returns the open settings the key-value store holds.
+///
+/// # Arguments
+///
+/// * `cx` - Application context reading the store.
+///
+/// # Errors
+///
+/// Returns an error when the store cannot be read or what it holds does not parse.
+pub fn open_settings(cx: &App) -> anyhow::Result<OpenSettings> {
+    let Some(text) = KeyValueStore::global(cx).scoped(SCOPE).read(OPEN_KEY)? else {
+        return Ok(OpenSettings::default());
+    };
+    serde_json::from_str(&text).context("parsing the open settings")
+}
+
+/// Returns where the next load looks: [`FixedSources`] when set, else [`default_sources`]
+/// with what the person set over it ([`merged`]), and the notes on them.
+///
+/// # Arguments
+///
+/// * `cx` - Application context reading the store.
+#[must_use]
+pub fn sources(cx: &App) -> (Sources, Vec<String>) {
+    if let Some(fixed) = cx.try_global::<FixedSources>() {
+        return (fixed.0.clone(), Vec::new());
+    }
+    merged(default_sources(), open_settings(cx))
+}
+
+/// Returns `defaults` with the person's `settings` over them: their symbol cache when they
+/// set one, and their pack files; settings that do not read leave the defaults and a note.
+///
+/// # Arguments
+///
+/// * `(sources, notes)` - The defaults and their notes ([`default_sources`]).
+/// * `settings` - The person's settings, or why they do not read.
+#[must_use]
+pub fn merged(
+    (mut sources, mut notes): (Sources, Vec<String>),
+    settings: anyhow::Result<OpenSettings>,
+) -> (Sources, Vec<String>) {
+    match settings {
+        Ok(settings) => {
+            if settings.symbol_cache.is_some() {
+                sources.symbol_cache = settings.symbol_cache;
+            }
+            sources.packs = settings.packs;
+        }
+        Err(err) => notes.push(format!("open settings left out: {err:#}")),
+    }
+    (sources, notes)
+}
+
+/// Writes `settings` to the key-value store.
+///
+/// # Arguments
+///
+/// * `settings` - The open settings.
+/// * `cx` - Application context.
+///
+/// # Returns
+///
+/// The write, which fails when the store refuses it.
+fn write_open(settings: &OpenSettings, cx: &App) -> Task<anyhow::Result<()>> {
+    let kvp = KeyValueStore::global(cx);
+    let text = serde_json::to_string(settings);
+    cx.background_spawn(async move { kvp.scoped(SCOPE).write(OPEN_KEY.to_owned(), text?).await })
+}
+
+/// Says what `paths` are, one after another.
+///
+/// # Arguments
+///
+/// * `paths` - The paths.
+fn listed(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Changes one open setting with `change`, saves it, and says on `binary`'s status line what
+/// it is now, which the next open uses.
+///
+/// # Arguments
+///
+/// * `binary` - The binary whose status line takes the answer.
+/// * `change` - Changes the settings and says what they hold now.
+/// * `cx` - Binary context.
+fn update(
+    binary: &mut Binary,
+    change: impl FnOnce(&mut OpenSettings) -> String,
+    cx: &mut Context<'_, Binary>,
+) {
+    let mut settings = match open_settings(cx) {
+        Ok(settings) => settings,
+        Err(err) => {
+            binary.set_status(format!("open settings not changed: {err:#}"), cx);
+            return;
+        }
+    };
+    let said = change(&mut settings);
+    let write = write_open(&settings, cx);
+    cx.spawn(async move |this, cx| {
+        let status = match write.await {
+            Ok(()) => format!("{said}; the next open uses it"),
+            Err(err) => format!("open settings not saved: {err:#}"),
+        };
+        if let Some(this) = this.upgrade() {
+            this.update(cx, |binary, cx| binary.set_status(status, cx));
+        }
+    })
+    .detach();
+}
+
+/// Asks for the symbol cache directory or the pack files through the system dialog and
+/// keeps what the person picks; a cancelled dialog changes nothing.
+///
+/// # Arguments
+///
+/// * `what` - The setting to choose.
+/// * `binary` - The binary whose status line says what changed.
+/// * `cx` - Application context.
+pub fn choose(what: Choice, binary: &Entity<Binary>, cx: &mut App) {
+    let packs = what == Choice::Packs;
+    let options = PathPromptOptions {
+        files: packs,
+        directories: !packs,
+        multiple: packs,
+        prompt: None,
+    };
+    binary.update(cx, |binary, cx| {
+        binary.pick(
+            options,
+            move |binary, picked, cx| {
+                update(
+                    binary,
+                    move |settings| match what {
+                        Choice::SymbolCache => {
+                            let dir = picked.into_iter().next().unwrap_or_default();
+                            let said = format!("symbol cache {}", dir.display());
+                            settings.symbol_cache = Some(dir);
+                            said
+                        }
+                        Choice::Packs => {
+                            let said = format!("packs {}", listed(&picked));
+                            settings.packs = picked;
+                            said
+                        }
+                    },
+                    cx,
+                );
+            },
+            cx,
+        );
+    });
+}
+
+/// Puts one open setting back to what [`default_sources`] says.
+///
+/// # Arguments
+///
+/// * `what` - The setting to forget.
+/// * `binary` - The binary whose status line says what changed.
+/// * `cx` - Application context.
+pub fn forget(what: Choice, binary: &Entity<Binary>, cx: &mut App) {
+    binary.update(cx, |binary, cx| {
+        update(
+            binary,
+            |settings| match what {
+                Choice::SymbolCache => {
+                    settings.symbol_cache = None;
+                    default_sources().0.symbol_cache.map_or_else(
+                        || "no symbol cache".to_owned(),
+                        |dir| format!("symbol cache {}", dir.display()),
+                    )
+                }
+                Choice::Packs => {
+                    settings.packs.clear();
+                    "no pack files".to_owned()
+                }
+            },
+            cx,
+        );
+    });
+}
+
+/// Registers the actions that change the open settings on `workspace`, each on `binary`.
+///
+/// # Arguments
+///
+/// * `workspace` - The workspace the actions dispatch in.
+/// * `binary` - The window's binary, whose status line says what changed.
+pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
+    let on = |what: Choice, change: fn(Choice, &Entity<Binary>, &mut App)| {
+        let binary = binary.clone();
+        move |_: &mut Workspace, cx: &mut App| change(what, &binary, cx)
+    };
+    let (cache, packs) = (on(Choice::SymbolCache, choose), on(Choice::Packs, choose));
+    let (no_cache, no_packs) = (on(Choice::SymbolCache, forget), on(Choice::Packs, forget));
+    workspace
+        .register_action(move |w, _: &ChooseSymbolCache, _, cx| cache(w, cx))
+        .register_action(move |w, _: &ChoosePacks, _, cx| packs(w, cx))
+        .register_action(move |w, _: &ForgetSymbolCache, _, cx| no_cache(w, cx))
+        .register_action(move |w, _: &ForgetPacks, _, cx| no_packs(w, cx));
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::{OpenSettings, merged};
+    use crate::worker::Sources;
+
+    /// The person's symbol cache and pack files go over the defaults, an unset cache keeps
+    /// the default one, and settings that do not read leave the defaults with a note after
+    /// theirs.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a merge keeps the wrong value or says the wrong notes.
+    #[test]
+    fn the_persons_settings_go_over_the_defaults() {
+        let defaults = Sources {
+            symbol_cache: Some(PathBuf::from("cache")),
+            packs: Vec::new(),
+            pack_dirs: vec![PathBuf::from("dir")],
+        };
+        let set = OpenSettings {
+            symbol_cache: Some(PathBuf::from("mine")),
+            packs: vec![PathBuf::from("a.borer")],
+        };
+        let (sources, notes) = merged((defaults.clone(), Vec::new()), Ok(set));
+        let want = Sources {
+            symbol_cache: Some(PathBuf::from("mine")),
+            packs: vec![PathBuf::from("a.borer")],
+            pack_dirs: vec![PathBuf::from("dir")],
+        };
+        assert_eq!((sources, notes), (want, Vec::new()));
+        let unset = merged((defaults.clone(), Vec::new()), Ok(OpenSettings::default()));
+        assert_eq!(unset, (defaults.clone(), Vec::new()));
+        let noted = vec!["skipped the symbol cache: a share".to_owned()];
+        let (sources, notes) = merged((defaults.clone(), noted), Err(anyhow::anyhow!("bad json")));
+        assert_eq!(sources, defaults);
+        assert_eq!(
+            notes,
+            [
+                "skipped the symbol cache: a share",
+                "open settings left out: bad json"
+            ]
+        );
+    }
+}

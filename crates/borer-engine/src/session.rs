@@ -22,6 +22,12 @@ pub const EXTENSION: &str = "borer";
 /// Reading takes in the load's own phases ([`crate::program::LOAD_PHASES`]),
 /// the PDB's among them.
 pub(crate) const OPEN_PHASES: &[&str] = &["open read", "open packs"];
+/// Largest binary a front end opens unless its user says otherwise: 1 GiB.
+///
+/// A file is read into memory whole and analysis takes many times its
+/// size, so past this a load would end in an allocator abort, not a
+/// message.
+pub const MAX_FILE: u64 = 1 << 30;
 /// Largest pack file read, in bytes: 64 MiB.
 pub const PACK_MAX: u64 = 1 << 26;
 /// Most scripts one pack runs.
@@ -224,7 +230,8 @@ pub fn read_dirs(dirs: &[PathBuf], notes: &mut Vec<String>) -> Vec<Pack> {
     out
 }
 
-/// Reads one pack file found in a pack directory, its scripts with it.
+/// Reads one pack file, its scripts with it: one found in a pack
+/// directory, or one a user named.
 ///
 /// # Arguments
 ///
@@ -234,7 +241,7 @@ pub fn read_dirs(dirs: &[PathBuf], notes: &mut Vec<String>) -> Vec<Pack> {
 ///
 /// When the file does not read, is not text or not a pack, or its scripts
 /// are refused ([`load_scripts`]).
-fn read_pack(path: &Path) -> Result<Pack, String> {
+pub fn read_pack(path: &Path) -> Result<Pack, String> {
     let shown = crate::text::short_path(&path.to_string_lossy());
     let bytes = read_regular(path, PACK_MAX).map_err(|e| format!("{e:#}"))?;
     let text = String::from_utf8(bytes).map_err(|_| "not text".to_owned())?;

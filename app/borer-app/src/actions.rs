@@ -104,6 +104,14 @@ gpui::actions!(
         /// Lists or hides, in the call tree's callees, the virtual calls the decompiler
         /// resolves, which decompiles each function opened.
         ToggleVirtualCalls,
+        /// Picks the symbol cache directory the next open looks for a binary's PDB in.
+        ChooseSymbolCache,
+        /// Puts the symbol cache back to the one the server uses by default.
+        ForgetSymbolCache,
+        /// Picks the pack files that load for every binary the next open analyzes.
+        ChoosePacks,
+        /// Loads no pack files beyond those the pack directory fits to a binary.
+        ForgetPacks,
     ]
 );
 

@@ -59,7 +59,7 @@ allow = [
   "0BSD",
   # Zed UI and theme crates (`ui`, `ui_macros`, `theme`, `syntax_theme`, `component`, `icons`, `menu`, `refineable`).
   "GPL-3.0-or-later",
-  # `borer-app` and `borer-engine` themselves.
+  # `borer-app`, `borer-engine` and `borer-front` themselves.
   "AGPL-3.0-only",
   # Zed's `language_core` and `grammars`, whose license file reads as the older `GPL-3.0` id;
   # compatible with the app's AGPL-3.0-only under section 13 of each.

@@ -632,6 +632,7 @@ mod tests {
             analysis: Arc::new(analysis),
             overlay: Arc::new(overlay),
             initial_rows: Arc::new(rows),
+            notes: Vec::new(),
         })
     }
 

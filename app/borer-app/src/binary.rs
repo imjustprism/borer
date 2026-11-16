@@ -28,9 +28,6 @@ pub fn reading_label(path: &Path) -> SharedString {
     format!("Reading {}", file_name(path)).into()
 }
 
-/// Note appended to load status lines saying what this direct engine load omits.
-pub const LOAD_SCOPE_NOTE: &str = "packs left out; session load path comes next";
-
 /// The status line while no binary is open.
 pub const NO_BINARY: &str = "No binary loaded";
 
@@ -191,13 +188,21 @@ impl Binary {
         cx.notify();
     }
 
-    /// Opens the system file dialog and loads the chosen binary in the background.
+    /// Opens the system file dialog as `options` say and hands the paths the person picks to
+    /// `then`; a cancelled dialog does nothing, and one that fails says so on the status line.
     ///
     /// # Arguments
     ///
+    /// * `options` - What the dialog picks.
+    /// * `then` - Takes the binary and the picked paths, at least one.
     /// * `cx` - Binary context spawning the dialog receiver task.
-    pub fn prompt_open(&mut self, cx: &mut Context<'_, Self>) {
-        let receiver = pick_file(cx);
+    pub fn pick(
+        &mut self,
+        options: PathPromptOptions,
+        then: impl FnOnce(&mut Self, Vec<PathBuf>, &mut Context<'_, Self>) + 'static,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let receiver = ask_paths(options, cx);
         self.prompt_task = Some(cx.spawn(async move |this, cx| {
             let Ok(outcome) = receiver.await else {
                 return;
@@ -206,15 +211,28 @@ impl Binary {
                 return;
             };
             this.update(cx, |binary, cx| match outcome {
-                Ok(Some(mut paths)) => {
-                    if let Some(path) = paths.pop() {
-                        binary.open_path(path, cx);
-                    }
-                }
-                Ok(None) => {}
+                Ok(Some(paths)) if !paths.is_empty() => then(binary, paths, cx),
+                Ok(_) => {}
                 Err(err) => binary.set_status(format!("open dialog failed: {err:#}"), cx),
             });
         }));
+    }
+
+    /// Opens the system file dialog and loads the chosen binary in the background.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Binary context spawning the dialog receiver task.
+    pub fn prompt_open(&mut self, cx: &mut Context<'_, Self>) {
+        self.pick(
+            ONE_FILE,
+            |binary, mut paths, cx| {
+                if let Some(path) = paths.pop() {
+                    binary.open_path(path, cx);
+                }
+            },
+            cx,
+        );
     }
 
     /// Starts loading and analyzing `path` on the background executor, dropping the
@@ -252,7 +270,10 @@ impl Binary {
         });
         cx.emit(BinaryEvent::Closed);
         cx.notify();
-        let request = spawn_engine(reading_label(&path), cx, move || load_binary_blocking(path));
+        let (sources, notes) = crate::stored::sources(cx);
+        let label = reading_label(&path);
+        let work = move || load_binary_blocking(path, &sources, notes);
+        let request = spawn_engine(label, cx, work);
         self.load_flag = request.flag();
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let result = request.await;
@@ -340,7 +361,12 @@ impl Binary {
     /// * `loaded` - A binary the engine loaded and analyzed.
     /// * `cx` - Binary context.
     pub fn show_loaded(&mut self, loaded: Arc<LoadedBinary>, cx: &mut Context<'_, Self>) {
-        self.status = format!("{} ({LOAD_SCOPE_NOTE})", loaded.path.display());
+        let notes: String = loaded
+            .notes
+            .iter()
+            .map(|note| format!("; {note}"))
+            .collect();
+        self.status = format!("{}{notes}", loaded.path.display());
         let kind = kind(&loaded);
         let count = loaded.initial_rows.counts();
         self.facts = vec![
@@ -380,22 +406,29 @@ pub fn kind(loaded: &LoadedBinary) -> String {
     format!("{} {}", program.arch.name(), program.format.name())
 }
 
-/// Opens the system file dialog for one file, as the app asks for every file it opens.
+/// The system file dialog's options for one file, as the app asks for every file it opens.
+pub(crate) const ONE_FILE: PathPromptOptions = PathPromptOptions {
+    files: true,
+    directories: false,
+    multiple: false,
+    prompt: None,
+};
+
+/// Opens the system file dialog as `options` say: the one way the app asks for paths.
 ///
 /// # Arguments
 ///
+/// * `options` - What the dialog picks; [`ONE_FILE`] for a file to open.
 /// * `cx` - Application context.
 ///
 /// # Returns
 ///
 /// The dialog's answer: the chosen paths, `None` when it was cancelled, or why it failed.
-pub(crate) fn pick_file(cx: &App) -> oneshot::Receiver<anyhow::Result<Option<Vec<PathBuf>>>> {
-    cx.prompt_for_paths(PathPromptOptions {
-        files: true,
-        directories: false,
-        multiple: false,
-        prompt: None,
-    })
+pub(crate) fn ask_paths(
+    options: PathPromptOptions,
+    cx: &App,
+) -> oneshot::Receiver<anyhow::Result<Option<Vec<PathBuf>>>> {
+    cx.prompt_for_paths(options)
 }
 
 /// The status-bar item showing a [`Binary`]'s status line.
@@ -564,6 +597,7 @@ mod tests {
             analysis: sample.analysis.clone(),
             overlay: sample.overlay.clone(),
             initial_rows: Arc::new(rows),
+            notes: Vec::new(),
         });
         binary.update(cx, |binary, cx| binary.finish_load(Ok(loaded.clone()), cx));
         let program = &loaded.program;

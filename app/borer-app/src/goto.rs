@@ -552,6 +552,7 @@ mod tests {
             analysis: plain.analysis.clone(),
             overlay: Arc::new(overlay),
             initial_rows: plain.initial_rows.clone(),
+            notes: Vec::new(),
         })
     }
 

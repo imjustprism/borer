@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/borer", "crates/borer-engine", "crates/borer-fixtures", "crates/borer-live"]
+members = [
+  "crates/borer",
+  "crates/borer-engine",
+  "crates/borer-fixtures",
+  "crates/borer-front",
+  "crates/borer-live",
+]
 
 [workspace.package]
 version = "0.2.12"

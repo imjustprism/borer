@@ -40,8 +40,10 @@ use crate::code_view::CodeLines;
 use crate::decompile_item::DecompileItem;
 use crate::functions_panel::FunctionsPanel;
 use crate::shell::Shell;
+use crate::stored::FixedSources;
 use crate::worker::{
-    Job, LoadedBinary, decompile_blocking, load_binary_blocking, run_engine, ui_engine_calls,
+    Job, LoadedBinary, Sources, decompile_blocking, load_binary_blocking, run_engine,
+    ui_engine_calls,
 };
 
 /// Shared error slot transferring non-interactive CLI failures out of `Application::run`.
@@ -481,7 +483,7 @@ pub fn parse_cli_args_os(args: &[OsString]) -> anyhow::Result<CliMode> {
 /// Returns an error if loading `path` or reading/writing the headless readiness protocol fails.
 pub fn run_headless(path: PathBuf) -> anyhow::Result<()> {
     let (loaded, first_view) = run_engine(move || -> anyhow::Result<_> {
-        let loaded = load_binary_blocking(path)?;
+        let loaded = load_binary_blocking(path, &Sources::default(), Vec::new())?;
         let first_view = loaded
             .initial_rows
             .rows
@@ -538,7 +540,8 @@ fn load_within_budget(
                 }
             }
         })?;
-    let outcome = attempt.within(|| load_binary_blocking(path.to_path_buf()));
+    let outcome = attempt
+        .within(|| load_binary_blocking(path.to_path_buf(), &Sources::default(), Vec::new()));
     drop(done_tx);
     let elapsed = started.elapsed();
     let loaded = outcome?;
@@ -631,7 +634,8 @@ pub fn build_corpus_code_blocking(path: &Path, nav_cancel: &Cancel) -> anyhow::R
     if nav_cancel.is_raised() {
         anyhow::bail!("cancelled");
     }
-    let loaded = nav_cancel.within(|| load_binary_blocking(path.to_path_buf()))?;
+    let loaded = nav_cancel
+        .within(|| load_binary_blocking(path.to_path_buf(), &Sources::default(), Vec::new()))?;
     let mut views = Vec::with_capacity(loaded.initial_rows.rows.len());
     for row in &loaded.initial_rows.rows {
         if nav_cancel.is_raised() {
@@ -768,6 +772,9 @@ impl std::fmt::Debug for Harness {
 impl Harness {
     /// Creates the harness for `mode`, its workspace window, and starts the mode's phase.
     ///
+    /// Every load it makes uses [`Sources::default`] ([`FixedSources`]), so a measurement
+    /// reads no packs or symbol cache of the machine's.
+    ///
     /// # Arguments
     ///
     /// * `mode` - A measurement [`CliMode`].
@@ -791,6 +798,7 @@ impl Harness {
             | CliMode::Measure(_)
             | CliMode::MeasureDrop(..) => None,
         };
+        cx.set_global(FixedSources::default());
         let app = new_workspace(app_state, path, window, cx);
         let AppWindow { workspace, binary } = app.clone();
         let root = cx.new(|cx| Shell::new(app, window, cx));
@@ -1183,7 +1191,11 @@ impl Render for Harness {
 /// Returns an error when notepad does not load or has no such function.
 fn prepare_input(cancel: &Cancel) -> anyhow::Result<Prepared> {
     cancel.within(|| {
-        let loaded = load_binary_blocking(PathBuf::from(SYSTEM_NOTEPAD))?;
+        let loaded = load_binary_blocking(
+            PathBuf::from(SYSTEM_NOTEPAD),
+            &Sources::default(),
+            Vec::new(),
+        )?;
         let entry = pick_function_with_callees(&loaded).ok_or_else(|| {
             anyhow::anyhow!("{SYSTEM_NOTEPAD} has no function with a visible call token")
         })?;

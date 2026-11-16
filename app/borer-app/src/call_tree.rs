@@ -983,6 +983,7 @@ pub(crate) mod tests {
             analysis: Arc::new(analysis),
             overlay: Arc::new(overlay),
             initial_rows,
+            notes: Vec::new(),
         })
     }
 

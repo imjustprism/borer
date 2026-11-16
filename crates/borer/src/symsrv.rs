@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 pub(crate) const DEFAULT_SERVER: &str = "https://msdl.microsoft.com/download/symbols";
 
 /// The environment variable naming the cache directory.
-pub(crate) const CACHE_ENV: &str = "BORER_SYMCACHE";
+pub(crate) const CACHE_ENV: &str = borer_front::places::SYMCACHE_ENV;
 
 /// The environment variable naming the symbol server, in place of
 /// [`DEFAULT_SERVER`].
@@ -210,7 +210,7 @@ const NAME_MAX: usize = 255;
 ///
 /// When the configured directory names a share or a device.
 pub(crate) fn cache_dir() -> Result<Option<PathBuf>, String> {
-    borer::index::cache_dir_in(CACHE_ENV, "symsrv", "the symbol cache")
+    borer_front::places::symbol_cache()
 }
 
 /// Returns the symbol cache directory for a caller that writes to it.
@@ -220,7 +220,7 @@ pub(crate) fn cache_dir() -> Result<Option<PathBuf>, String> {
 /// When no environment variable names a base, or the configured directory
 /// names a share or a device.
 pub(crate) fn require_cache_dir() -> Result<PathBuf, String> {
-    borer::index::require_cache_dir_in(CACHE_ENV, "symsrv", "the symbol cache")
+    borer_front::places::require_cache_dir_in(CACHE_ENV, "symsrv", "the symbol cache")
 }
 
 /// The file name a record's PDB is cached and asked for.

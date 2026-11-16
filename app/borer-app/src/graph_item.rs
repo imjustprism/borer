@@ -1009,7 +1009,7 @@ mod tests {
     use crate::decompile_item::tests::{active, fourth_instruction};
     use crate::decompile_item::{Form, TabMode};
     use crate::places::Place;
-    use crate::worker::{LoadedBinary, graph_blocking, load_binary_blocking};
+    use crate::worker::{LoadedBinary, Sources, graph_blocking, load_binary_blocking};
 
     /// Most functions of the test executable whose graphs are walked.
     const WALKED: usize = 300;
@@ -1082,7 +1082,7 @@ mod tests {
     #[test]
     fn arrows_walk_only_along_edges() {
         let exe = std::env::current_exe().unwrap();
-        let loaded = load_binary_blocking(exe).unwrap();
+        let loaded = load_binary_blocking(exe, &Sources::default(), Vec::new()).unwrap();
         let (mut conds, mut steps) = (0, 0);
         for row in loaded.initial_rows.rows.iter().take(WALKED) {
             let Ok(graph) = graph_blocking(&loaded, row.entry) else {

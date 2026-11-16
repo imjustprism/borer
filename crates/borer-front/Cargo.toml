@@ -1,0 +1,17 @@
+[package]
+name = "borer-front"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "What borer's front ends share outside the pure engine: where they look by default."
+readme = "../../README.md"
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+borer-engine = { version = "0.2.12", path = "../borer-engine" }

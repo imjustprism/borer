@@ -804,7 +804,7 @@ pub(crate) mod tests {
     }
 
     /// Starts Zed's test app state over a fresh in-memory database, configured as the app
-    /// configures Zed.
+    /// configures Zed, every load reading no packs or symbol cache of the machine's.
     ///
     /// # Panics
     ///
@@ -813,6 +813,7 @@ pub(crate) mod tests {
         use_test_data_dir();
         cx.update(|cx| {
             cx.set_global(db::AppDatabase::test_new());
+            cx.set_global(crate::stored::FixedSources::default());
             let app_state = AppState::test(cx);
             configure(cx).unwrap();
             app_state
@@ -904,6 +905,7 @@ pub(crate) mod tests {
             analysis: Arc::new(analysis),
             overlay: Arc::new(overlay),
             initial_rows,
+            notes: Vec::new(),
         })
     }
 

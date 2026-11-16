@@ -973,6 +973,7 @@ dependencies = [
  "anyhow",
  "assets",
  "borer-engine",
+ "borer-front",
  "client",
  "clock",
  "collections",
@@ -998,6 +999,7 @@ dependencies = [
  "platform_title_bar",
  "project",
  "search",
+ "serde",
  "serde_json",
  "session",
  "settings",
@@ -1028,6 +1030,13 @@ dependencies = [
  "smallvec",
  "yaxpeax-arch",
  "yaxpeax-arm",
+]
+
+[[package]]
+name = "borer-front"
+version = "0.2.12"
+dependencies = [
+ "borer-engine",
 ]
 
 [[package]]

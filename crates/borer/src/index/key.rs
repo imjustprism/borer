@@ -7,6 +7,7 @@ use std::time::UNIX_EPOCH;
 
 use borer_engine::pack::Packs;
 use borer_engine::program::Program;
+use borer_front::places::{cache_dir_in, require_cache_dir_in};
 
 use super::{CACHE_ENV, FNV_SEED, FORMAT, IndexKey, fnv1a, program_key};
 
@@ -25,73 +26,6 @@ use super::{CACHE_ENV, FNV_SEED, FORMAT, IndexKey, fnv1a, program_key};
 /// When the configured directory names a share or a device.
 pub fn cache_dir() -> Result<Option<PathBuf>, String> {
     cache_dir_in(CACHE_ENV, "index", "the index cache")
-}
-
-/// Returns the directory one borer cache lives in.
-///
-/// `$<env>`, else `borer/<subdir>` under [`cache_base`].
-///
-/// # Arguments
-///
-/// * `env` - The environment variable that names the directory.
-/// * `subdir` - The cache's folder under the platform's `borer` folder.
-/// * `label` - What a refusal of the default directory calls it.
-///
-/// # Returns
-///
-/// The directory, or `None` when no environment variable names a base.
-///
-/// # Errors
-///
-/// When the configured directory names a share or a device.
-pub fn cache_dir_in(env: &str, subdir: &str, label: &str) -> Result<Option<PathBuf>, String> {
-    let found = if let Ok(dir) = std::env::var(env)
-        && !dir.is_empty()
-    {
-        Some((PathBuf::from(dir), env))
-    } else {
-        cache_base().map(|b| (b.join("borer").join(subdir), label))
-    };
-    let Some((dir, from)) = found else {
-        return Ok(None);
-    };
-    if let Some(why) = borer_engine::program::unusable_path(&dir) {
-        return Err(format!("{from}: {why}"));
-    }
-    Ok(Some(dir))
-}
-
-/// Returns one borer cache's directory for a call that reads or writes
-/// there ([`cache_dir_in`]).
-///
-/// # Arguments
-///
-/// * `env` - The environment variable that names the directory.
-/// * `subdir` - The cache's folder under the platform's `borer` folder.
-/// * `label` - What a refusal of the default directory calls it.
-///
-/// # Errors
-///
-/// When no environment variable names a base, or the configured directory
-/// names a share or a device.
-pub fn require_cache_dir_in(env: &str, subdir: &str, label: &str) -> Result<PathBuf, String> {
-    cache_dir_in(env, subdir, label)?.ok_or_else(|| {
-        format!("no cache directory: set {env}, LOCALAPPDATA, XDG_CACHE_HOME or HOME")
-    })
-}
-
-/// Returns the platform cache directory every borer cache hangs from
-/// (`%LOCALAPPDATA%`, `$XDG_CACHE_HOME`, else `~/.cache`).
-///
-/// # Returns
-///
-/// The directory, or `None` when no environment variable names a base.
-#[must_use]
-pub fn cache_base() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA")
-        .or_else(|| std::env::var_os("XDG_CACHE_HOME"))
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
 }
 
 /// Returns the index cache directory for a call that reads or writes there.

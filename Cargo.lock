@@ -84,6 +84,7 @@ version = "0.2.12"
 dependencies = [
  "anyhow",
  "borer-engine",
+ "borer-front",
  "borer-live",
  "mimalloc",
  "rayon",
@@ -118,6 +119,13 @@ dependencies = [
 [[package]]
 name = "borer-fixtures"
 version = "0.2.12"
+
+[[package]]
+name = "borer-front"
+version = "0.2.12"
+dependencies = [
+ "borer-engine",
+]
 
 [[package]]
 name = "borer-live"

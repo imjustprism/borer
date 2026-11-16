@@ -16,6 +16,7 @@ workspace = true
 [dependencies]
 anyhow = "1.0.104"
 borer-engine = { version = "0.2.12", path = "../borer-engine" }
+borer-front = { version = "0.2.12", path = "../borer-front" }
 borer-live = { version = "0.2.12", path = "../borer-live" }
 mimalloc = "0.1.52"
 rayon = "1.12.0"

@@ -1031,7 +1031,7 @@ fn now_secs() -> u64 {
 /// The file the daily check keeps its answer in: `<seconds> <tag>`.
 fn check_file() -> Option<PathBuf> {
     Some(
-        borer::index::cache_base()?
+        borer_front::places::cache_base()?
             .join("borer")
             .join("latest-release"),
     )

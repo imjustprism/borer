@@ -1207,7 +1207,8 @@ pub(crate) mod tests {
         let (app, cx) = open(&app_state, cx);
         let workspace = app.workspace;
         let exe = std::env::current_exe().unwrap();
-        let loaded = load_binary_blocking(exe).unwrap();
+        let loaded =
+            load_binary_blocking(exe, &crate::worker::Sources::default(), Vec::new()).unwrap();
         let entries: Vec<u64> = loaded
             .initial_rows
             .rows
@@ -1404,6 +1405,7 @@ pub(crate) mod tests {
             analysis: Arc::new(analysis),
             overlay: Arc::new(overlay),
             initial_rows: Arc::new(rows),
+            notes: Vec::new(),
         });
         let tab = open_tab(&workspace, &loaded, (0x1000, Form::Listing), cx);
         let said = tab.read_with(cx, |item, _| item.failed.clone());

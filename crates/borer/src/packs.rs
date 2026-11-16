@@ -6,104 +6,20 @@
 //! by itself for a program every one of its `[match]` lines fits
 //! ([`borer_engine::pack::Pack::fit`]), so a matching program picks the
 //! pack up without a flag. The pack directories are `BORER_PACK_DIRS` when
-//! it is set, else the user's
+//! it is set (set empty, it lists none), else the user's
 //! (`%APPDATA%\borer\packs`, `$XDG_CONFIG_HOME/borer/packs`,
 //! `~/.config/borer/packs`) and the `packs` directory beside the executable
 //! or two levels above it (a `target/release` build in the source tree).
 //! `BORER_AUTO_PACKS=0` or `--no-auto-packs` turns the directories off.
 
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use borer_engine::pack::{Fit, Packs};
 use borer_engine::program::Program;
 use borer_engine::session;
 pub use borer_engine::session::{PACK_MAX, load_scripts};
-
-/// The variable naming the pack directories.
-pub const DIRS_ENV: &str = "BORER_PACK_DIRS";
-/// The variable that turns the pack directories off when it is `0`.
-pub const AUTO_ENV: &str = "BORER_AUTO_PACKS";
-
-/// Tells whether packs in the pack directories may load by themselves.
-#[must_use]
-pub fn auto_enabled() -> bool {
-    std::env::var(AUTO_ENV).map_or(true, |v| v != "0")
-}
-
-/// The paths an environment variable lists, as the platform writes a path
-/// list (`;` on Windows, `:` elsewhere), empty entries dropped.
-///
-/// # Arguments
-///
-/// * `var` - The variable's name.
-///
-/// # Returns
-///
-/// The paths, or `None` when the variable is not set.
-#[must_use]
-pub fn env_paths(var: &str) -> Option<Vec<PathBuf>> {
-    let list = std::env::var_os(var)?;
-    Some(
-        std::env::split_paths(&list)
-            .filter(|p| !p.as_os_str().is_empty())
-            .collect(),
-    )
-}
-
-/// The pack directories, in search order, each once.
-///
-/// One that names a share or a device
-/// ([`borer_engine::program::unusable_path`]) is listed as given and never
-/// touched: [`session::read_dirs`] skips it with a note.
-#[must_use]
-pub fn dirs() -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
-    if let Some(listed) = env_paths(DIRS_ENV) {
-        out.extend(listed);
-    } else {
-        let config = std::env::var_os("APPDATA")
-            .or_else(|| std::env::var_os("XDG_CONFIG_HOME"))
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")));
-        if let Some(base) = config {
-            out.push(base.join("borer").join("packs"));
-        }
-        if let Ok(exe) = std::env::current_exe()
-            && let Some(dir) = exe.parent()
-        {
-            out.push(dir.join("packs"));
-            if let Some(tree) = dir.parent().and_then(Path::parent) {
-                out.push(tree.join("packs"));
-            }
-        }
-    }
-    let mut seen: Vec<PathBuf> = Vec::new();
-    out.retain(|d| {
-        let key = if borer_engine::program::unusable_path(d).is_some() {
-            d.clone()
-        } else {
-            #[expect(clippy::disallowed_methods, reason = "unusable_path just cleared d")]
-            std::fs::canonicalize(d).unwrap_or_else(|_| d.clone())
-        };
-        let fresh = !seen.contains(&key);
-        seen.push(key);
-        fresh
-    });
-    out
-}
-
-/// The pack directories to read: [`dirs`] when they may load by
-/// themselves, else none.
-///
-/// # Arguments
-///
-/// * `auto` - Whether the pack directories are read.
-#[must_use]
-pub fn searched(auto: bool) -> Vec<PathBuf> {
-    if auto { dirs() } else { Vec::new() }
-}
+pub use borer_front::places::{AUTO_ENV, DIRS_ENV, auto_enabled, dirs, env_paths, searched};
 
 /// The packs an analysis of a program runs with: the pack directories'
 /// packs that fit it, then the packs the user named

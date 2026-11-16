@@ -519,7 +519,9 @@ mod tests {
         let loaded = sample();
         let all = Some(loaded.initial_rows.rows.len());
         let first = loaded.initial_rows.rows.first().map(|row| row.entry);
-        binary.update(cx, |binary, cx| binary.finish_load(Ok(loaded.clone()), cx));
+        binary.update(cx, |binary, cx| {
+            binary.finish_load(Ok(loaded.clone()), cx);
+        });
         cx.run_until_parked();
         assert_eq!(*seen.borrow(), [true]);
         assert_eq!(listed(cx), all);
@@ -532,7 +534,9 @@ mod tests {
         assert_eq!(reading, Some(Empty::Reading(missing)));
         cx.run_until_parked();
         assert_eq!(*seen.borrow(), [true, false, false]);
-        binary.update(cx, |binary, cx| binary.finish_load(Ok(loaded), cx));
+        binary.update(cx, |binary, cx| {
+            binary.finish_load(Ok(loaded), cx);
+        });
         assert_eq!(*seen.borrow(), [true, false, false, true]);
         assert_eq!(listed(cx), all);
     }

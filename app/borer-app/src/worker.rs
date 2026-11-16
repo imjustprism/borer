@@ -24,7 +24,9 @@ use borer_engine::analysis::{
 };
 use borer_engine::cancel::Cancel;
 use borer_engine::hexdump::{HexRows, hex_rows};
+use borer_engine::pack::Packs;
 use borer_engine::program::{Feature, Program, SymbolKind};
+use borer_engine::session::{self, Open, Pdb};
 use borer_engine::strings::walk::{StringEncoding, StringRows, WALK_MIN, string_rows};
 use borer_engine::view::View;
 use gpui::{App, Context, Global, SharedString, Task, Window};
@@ -351,6 +353,19 @@ impl Job {
     }
 }
 
+/// Where a load finds a binary's companions: its PDB and its packs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Sources {
+    /// Root of the symbol-server cache searched for the binary's PDB after the places the
+    /// binary names; `None` searches only beside the binary and at its recorded path.
+    pub symbol_cache: Option<PathBuf>,
+    /// Pack files the person listed, which load for every binary, in load order.
+    pub packs: Vec<PathBuf>,
+    /// Pack directories, in search order, whose packs load for a binary their `[match]`
+    /// lines fit.
+    pub pack_dirs: Vec<PathBuf>,
+}
+
 /// Immutable engine state for one opened binary.
 #[derive(Debug)]
 pub struct LoadedBinary {
@@ -358,33 +373,67 @@ pub struct LoadedBinary {
     pub path: PathBuf,
     /// Parsed binary image.
     pub program: Arc<Program>,
-    /// Computed whole-program code and cross-reference analysis.
+    /// Computed whole-program code and cross-reference analysis, run with the binary's packs.
     pub analysis: Arc<Analysis>,
-    /// Overlay matching the server's binary-enum configuration (packs left out).
+    /// Overlay matching the server's binary-enum configuration.
     pub overlay: Arc<Overlay>,
     /// Unfiltered function table fetched once during load, shared with the
     /// view that shows it rather than copied.
     pub initial_rows: Arc<FunctionRows>,
+    /// The engine's notes on the open, in its words: the pack files and directories
+    /// skipped, the packs that fit and the PDB applied or skipped.
+    pub notes: Vec<String>,
 }
 
-/// Loads `path`, runs [`Analysis::compute`], and builds the initial function rows.
+/// Opens `path` as [`session::open`] does for the server and builds the initial function rows.
+///
+/// Its PDB and packs are looked for where `sources` says, the server's size cap held, and
+/// the analysis runs with the packs that fit.
+///
+/// A listed pack file that does not read is a note, as a pack directory's is.
 ///
 /// Must be called inside [`spawn_engine`] (or [`run_engine`] in `--headless` mode).
 ///
 /// # Arguments
 ///
 /// * `path` - File path of the untrusted binary to inspect.
+/// * `sources` - Where its PDB and packs are looked for.
+/// * `notes` - The notes on where they are looked for ([`crate::stored::sources`]), which
+///   the engine's notes follow.
 ///
 /// # Returns
 ///
-/// Shared [`LoadedBinary`] holding the program, analysis, overlay, and unfiltered rows.
+/// Shared [`LoadedBinary`] holding the program, analysis, overlay, unfiltered rows and
+/// the notes on the open.
 ///
 /// # Errors
 ///
-/// Returns an error when [`Program::load`] rejects or fails to read `path`.
-pub fn load_binary_blocking(path: PathBuf) -> anyhow::Result<Arc<LoadedBinary>> {
-    let program = Arc::new(Program::load(&path)?);
-    let analysis = Arc::new(Analysis::compute(&program));
+/// Returns an error when [`session::open`] refuses or fails to read `path`.
+pub fn load_binary_blocking(
+    path: PathBuf,
+    sources: &Sources,
+    mut notes: Vec<String>,
+) -> anyhow::Result<Arc<LoadedBinary>> {
+    let mut named = Vec::with_capacity(sources.packs.len());
+    for file in &sources.packs {
+        match session::read_pack(file) {
+            Ok(pack) => named.push(pack),
+            Err(why) => notes.push(format!("skipped pack {}: {why}", file.display())),
+        }
+    }
+    let how = Open {
+        max_file: session::MAX_FILE,
+        form: session::Form::Headers(sources.symbol_cache.clone().map_or(Pdb::Beside, Pdb::Cache)),
+        named: Arc::new(Packs { packs: named }),
+        dirs: sources.pack_dirs.clone(),
+    };
+    let opened = session::open(&path, &how)?;
+    notes.extend(opened.notes);
+    if let Some(pdb) = &opened.program.pdb {
+        notes.push(format!("pdb {}", pdb.render()));
+    }
+    let program = Arc::new(opened.program);
+    let analysis = Arc::new(Analysis::compute_with(&program, opened.packs));
     let overlay = Arc::new(Overlay {
         enum_source: EnumSource::Binary,
         ..Overlay::default()
@@ -403,6 +452,7 @@ pub fn load_binary_blocking(path: PathBuf) -> anyhow::Result<Arc<LoadedBinary>> 
         analysis,
         overlay,
         initial_rows,
+        notes,
     }))
 }
 
@@ -946,11 +996,13 @@ pub fn hex_blocking(loaded: &LoadedBinary, va: u64, len: usize) -> HexRows {
     clippy::missing_panics_doc,
     reason = "assertions are the point of a test; gpui::test hides each body in an undocumented fn"
 )]
-mod tests {
+pub(crate) mod tests {
+    use std::path::{Path, PathBuf};
+
     use borer_engine::cancel::Cancel;
     use gpui::{AppContext as _, Entity, SharedString, TestAppContext};
 
-    use super::{Job, Jobs, find_blocking, spawn_engine};
+    use super::{Job, Jobs, Sources, find_blocking, load_binary_blocking, spawn_engine};
 
     /// A view with one request slot, keeping the answers applied to it.
     #[derive(Default)]
@@ -1088,7 +1140,7 @@ mod tests {
     }
 
     /// Returns every module of the crate but this one, by path under `src`, with its text.
-    fn sources() -> [(&'static str, &'static str); 48] {
+    fn sources() -> [(&'static str, &'static str); 49] {
         [
             ("actions.rs", include_str!("actions.rs")),
             ("app_assets.rs", include_str!("app_assets.rs")),
@@ -1129,6 +1181,7 @@ mod tests {
             ("shell.rs", include_str!("shell.rs")),
             ("start_item.rs", include_str!("start_item.rs")),
             ("status.rs", include_str!("status.rs")),
+            ("stored.rs", include_str!("stored.rs")),
             ("table.rs", include_str!("table.rs")),
             ("theme_contract.rs", include_str!("theme_contract.rs")),
             ("theme_import.rs", include_str!("theme_import.rs")),
@@ -1167,14 +1220,116 @@ mod tests {
         }
     }
 
-    /// No module of the app but this one names the engine's compute calls outside its
-    /// tests, so each such call goes through [`super::run_engine`] and is counted.
+    /// Entry of [`tiny_pe`]'s helper function, which its entry calls.
+    pub(crate) const HELPER: u64 = 0x1_4000_1010;
+
+    /// The first bytes of [`tiny_pe`]'s helper as a pack's `[names]` signature.
+    const HELPER_SIG: &str = "b844332211058877665531c9c3";
+
+    /// Returns a fresh directory of the tests named for `what`, emptied if a run left it.
     ///
     /// # Panics
     ///
-    /// Panics if another module names `Program::load`, `Analysis::compute`, a decompile
-    /// or listing view, the linear listing, the resolver, the decompiler, the function
-    /// listing, the check of an answer, the triage, the find or a level of the call tree.
+    /// Panics if the directory cannot be made.
+    pub(crate) fn scratch(what: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("borer-app-{what}-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Returns a PE32+ at image base `0x140000000` whose `.text` at RVA `0x1000` holds its
+    /// entry, which calls a helper at [`HELPER`] and returns.
+    pub(crate) fn tiny_pe() -> Vec<u8> {
+        /// File offset of the optional header, after the signature and COFF header at `0x80`.
+        const OPT: usize = 0x98;
+        /// File offset of the one section row, after a PE32+ optional header.
+        const ROW: usize = OPT + 0xf0;
+        // ASM: call 0x140001010 ; ret
+        let entry = [0xe8, 0x0b, 0x00, 0x00, 0x00, 0xc3];
+        // ASM: mov eax, 0x11223344 ; add eax, 0x55667788 ; xor ecx, ecx ; ret
+        let helper = [
+            0xb8, 0x44, 0x33, 0x22, 0x11, 0x05, 0x88, 0x77, 0x66, 0x55, 0x31, 0xc9, 0xc3,
+        ];
+        let fields: [(usize, Vec<u8>); 25] = [
+            (0, b"MZ".to_vec()),
+            (0x3c, 0x80u32.to_le_bytes().to_vec()),
+            (0x80, b"PE\0\0".to_vec()),
+            (0x84, 0x8664u16.to_le_bytes().to_vec()),
+            (0x86, 1u16.to_le_bytes().to_vec()),
+            (0x94, 0xf0u16.to_le_bytes().to_vec()),
+            (0x96, 0x22u16.to_le_bytes().to_vec()),
+            (OPT, 0x20bu16.to_le_bytes().to_vec()),
+            (OPT + 16, 0x1000u32.to_le_bytes().to_vec()),
+            (OPT + 24, 0x1_4000_0000u64.to_le_bytes().to_vec()),
+            (OPT + 32, 0x1000u32.to_le_bytes().to_vec()),
+            (OPT + 36, 0x200u32.to_le_bytes().to_vec()),
+            (OPT + 48, 6u16.to_le_bytes().to_vec()),
+            (OPT + 56, 0x2000u32.to_le_bytes().to_vec()),
+            (OPT + 60, 0x200u32.to_le_bytes().to_vec()),
+            (OPT + 68, 3u16.to_le_bytes().to_vec()),
+            (OPT + 108, 16u32.to_le_bytes().to_vec()),
+            (ROW, b".text".to_vec()),
+            (ROW + 8, 0x200u32.to_le_bytes().to_vec()),
+            (ROW + 12, 0x1000u32.to_le_bytes().to_vec()),
+            (ROW + 16, 0x200u32.to_le_bytes().to_vec()),
+            (ROW + 20, 0x200u32.to_le_bytes().to_vec()),
+            (ROW + 36, 0x6000_0020u32.to_le_bytes().to_vec()),
+            (0x200, entry.to_vec()),
+            (0x210, helper.to_vec()),
+        ];
+        let mut bytes = vec![0u8; 0x200];
+        bytes.resize(0x400, 0xcc);
+        for (at, field) in fields {
+            bytes[at..at + field.len()].copy_from_slice(&field);
+        }
+        bytes
+    }
+
+    /// Writes a pack naming [`tiny_pe`]'s helper `name` into `dir`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the file cannot be written.
+    pub(crate) fn naming_pack(dir: &Path, name: &str) -> PathBuf {
+        let pack = dir.join("named.borer");
+        let text = format!("pack named 1\n[names]\nfn {HELPER_SIG} {name}\n");
+        std::fs::write(&pack, text).unwrap();
+        pack
+    }
+
+    /// A pack file the person listed names a function of a hand-built PE opened through the
+    /// engine's session, and the function rows show that name.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the load fails or the helper's row has another name.
+    #[test]
+    fn a_listed_pack_names_a_function_in_the_rows() {
+        let dir = scratch("pack");
+        let exe = dir.join("tiny.exe");
+        std::fs::write(&exe, tiny_pe()).unwrap();
+        let sources = Sources {
+            packs: vec![naming_pack(&dir, "packed_helper")],
+            ..Sources::default()
+        };
+        let loaded = load_binary_blocking(exe, &sources, Vec::new()).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let row = loaded
+            .initial_rows
+            .rows
+            .iter()
+            .find(|row| row.entry == HELPER);
+        assert_eq!(row.map(|row| row.name.as_str()), Some("packed_helper"));
+    }
+
+    /// No module of the app but this one names the engine's load, session, analysis,
+    /// decompile and listing calls outside its tests, so each such call goes through
+    /// [`super::run_engine`] and is counted.
+    ///
+    /// # Panics
+    ///
+    /// Panics if another module names one of them.
     #[test]
     fn only_the_worker_names_engine_compute_calls() {
         let calls = [
@@ -1197,6 +1352,9 @@ mod tests {
             "hex_rows(",
             "call_children(",
             "decompile::decompile(",
+            "borer_engine::session",
+            "session::open",
+            "read_pack",
         ];
         for (name, text) in sources() {
             let code = kept(text);

@@ -32,12 +32,9 @@ pub(crate) const LOAD_NEXT: &str = "# next: query borer://triage (a whole triage
 /// or with a `K`, `M` or `G` suffix (binary units); `0` lifts the limit.
 pub(crate) const MAX_FILE_ENV: &str = "BORER_MAX_FILE";
 
-/// The largest file loaded when `BORER_MAX_FILE` sets none: 1 GiB.
-///
-/// A file is read into memory whole and analysis takes many times its
-/// size, so past this a load would end in an allocator abort, not a
-/// message.
-const MAX_FILE_DEFAULT: u64 = 1 << 30;
+/// The largest file loaded when `BORER_MAX_FILE` sets none
+/// ([`session::MAX_FILE`]).
+const MAX_FILE_DEFAULT: u64 = session::MAX_FILE;
 
 /// Reads a `BORER_MAX_FILE` value.
 ///

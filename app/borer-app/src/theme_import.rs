@@ -30,7 +30,7 @@ use ui::prelude::*;
 use workspace::{ModalView, Workspace};
 
 use crate::app_settings::{BORER_THEME, choose_theme, save_settings};
-use crate::binary::pick_file;
+use crate::binary::{ONE_FILE, ask_paths};
 use crate::theme_contract::{Failure, check};
 use crate::user_themes::{claim, parse_theme, read_capped, register};
 
@@ -305,7 +305,7 @@ pub async fn import(
 /// * `window` - The workspace's window.
 /// * `cx` - Workspace context.
 pub fn prompt(window: &mut Window, cx: &mut Context<'_, Workspace>) {
-    let chosen = pick_file(cx);
+    let chosen = ask_paths(ONE_FILE, cx);
     cx.spawn_in(window, async move |workspace, cx| {
         let Ok(answer) = chosen.await else {
             return Ok(());
