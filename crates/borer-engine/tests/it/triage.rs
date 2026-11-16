@@ -1,13 +1,15 @@
-//! The triage as values: each producer's first line is its summary, and
-//! the summary keeps the addresses it is about.
+//! The triage as values: each producer's first line is its summary, the
+//! report is spelled from the summaries, and each reason it gives to read
+//! a function is one the engine holds.
 
 #![expect(
     clippy::missing_panics_doc,
     reason = "assertions are the point of a test"
 )]
 
-use borer_engine::analysis::render::{self, Summary};
-use borer_engine::analysis::{Analysis, Overlay};
+use borer_engine::analysis::render::{self, Basis, Reason, Summary};
+use borer_engine::analysis::{Analysis, Overlay, bare_name};
+use borer_engine::crypto::Storage;
 use borer_engine::program::Program;
 
 use crate::common::fixture;
@@ -251,5 +253,127 @@ fn each_section_names_where_more_is() {
                 s.kind
             );
         }
+    }
+}
+
+/// Requires every reason on the reading list to be one the engine holds.
+///
+/// A built string by a recovery of this function, a call by a callee of
+/// this function the symbol tables name so, a held constant by an address
+/// inside this function.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - Its analysis.
+/// * `triage` - The triage of the two.
+fn corroborated(p: &Program, a: &Analysis, triage: &render::Triage) {
+    let built = render::generated_strings(p, a, "");
+    for r in &triage.read_first {
+        let callees = a.function(r.entry).map(|f| f.callees.clone());
+        assert!(callees.is_some(), "{:#x} is no function", r.entry);
+        for why in &r.reasons {
+            match why {
+                Reason::Builds { written_at, text } => assert!(
+                    built.found.iter().any(|g| g.built_by == r.entry
+                        && g.written_at == *written_at
+                        && g.text == *text),
+                    "{why}"
+                ),
+                Reason::Calls { callee, name } => {
+                    assert!(
+                        callees.as_ref().is_some_and(|c| c.contains(callee)),
+                        "{why}"
+                    );
+                    assert_eq!(
+                        a.symbol_at(p, *callee)
+                            .or_else(|| a.symbol_at(p, a.function(*callee)?.thunk?))
+                            .map(|s| bare_name(&s.name)),
+                        Some(name.as_str()),
+                        "{why}"
+                    );
+                }
+                Reason::Holds { at, .. } => {
+                    assert_eq!(a.function_at(*at).map(|f| f.entry), Some(r.entry), "{why}");
+                }
+                Reason::References { strings, imports } => {
+                    assert!(strings + imports >= 3, "{why}");
+                }
+            }
+        }
+    }
+}
+
+/// The fixture with its imports renamed to the injection surface lists its
+/// callers for the calls, and every reason it gives is one the engine
+/// holds.
+#[test]
+fn each_reason_on_the_reading_list_is_corroborated() {
+    let mut p = fixture();
+    for s in &mut p.symbols {
+        s.name = s
+            .name
+            .replace("ExitProcess", "CreateRemoteThread")
+            .replace("ReportAssertFailure", "WriteProcessMemory");
+    }
+    let a = Analysis::compute(&p);
+    let triage = render::triage(&p, &a, &Overlay::default());
+    corroborated(&p, &a, &triage);
+    assert!(
+        triage
+            .read_first
+            .iter()
+            .flat_map(|r| &r.reasons)
+            .any(|why| matches!(why, Reason::Calls { .. })),
+        "{}",
+        triage.spell()
+    );
+    let plain = fixture();
+    let a = Analysis::compute(&plain);
+    corroborated(&plain, &a, &render::triage(&plain, &a, &Overlay::default()));
+}
+
+/// Each reason says how it is known, and prints as the list has always
+/// printed it.
+#[test]
+fn each_reason_says_how_it_is_known() {
+    let cases = [
+        (
+            Reason::Builds {
+                written_at: 0x10,
+                text: "a\"b".to_owned(),
+            },
+            Basis::Observed,
+            "builds \"a\\\"b\"",
+        ),
+        (
+            Reason::Calls {
+                callee: 0x20,
+                name: "connect".to_owned(),
+            },
+            Basis::Static,
+            "calls connect",
+        ),
+        (
+            Reason::Holds {
+                at: 0x30,
+                name: "AES S-box",
+                storage: Storage::Xored(0x5a),
+            },
+            Basis::Pattern,
+            "holds AES S-box (xor 0x5a)",
+        ),
+        (
+            Reason::References {
+                strings: 4,
+                imports: 2,
+            },
+            Basis::Static,
+            "references 4 strings and 2 imports",
+        ),
+    ];
+    for (why, basis, text) in cases {
+        assert_eq!(why.basis(), basis, "{why}");
+        assert_eq!(why.to_string(), text);
     }
 }

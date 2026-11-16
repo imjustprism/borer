@@ -166,7 +166,81 @@ pub struct ReadFirst {
     /// strings and imports it references.
     pub score: usize,
     /// Why it is on the list, at most four.
-    pub reasons: Vec<String>,
+    pub reasons: Vec<Reason>,
+}
+
+/// Why a function is on the reading list, with where the engine saw it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reason {
+    /// It builds a string a run of the generator recovered.
+    Builds {
+        /// Where the run wrote the text.
+        written_at: u64,
+        /// The recovered text.
+        text: String,
+    },
+    /// It calls a function of the network, crypto or injection surface.
+    Calls {
+        /// The callee: an import's slot, or a function the symbol tables
+        /// name.
+        callee: u64,
+        /// The callee's name, without its module.
+        name: String,
+    },
+    /// It holds a cipher's or keystream's constant.
+    Holds {
+        /// Where the constant sits.
+        at: u64,
+        /// The constant's signature name.
+        name: &'static str,
+        /// How the constant is stored.
+        storage: crate::crypto::Storage,
+    },
+    /// It references many strings and imports, on a list no other evidence
+    /// filled.
+    References {
+        /// Distinct string literals it references.
+        strings: usize,
+        /// Distinct imports it references or calls through a thunk.
+        imports: usize,
+    },
+}
+
+/// How the engine knows a [`Reason`]: a reading of what it did, not a
+/// confidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Basis {
+    /// The emulator ran the code and saw the result.
+    Observed,
+    /// The code's calls and references say it, without running it.
+    Static,
+    /// Bytes matched a known constant's signature.
+    Pattern,
+}
+
+impl Reason {
+    /// Returns how the engine knows this reason.
+    #[must_use]
+    pub const fn basis(&self) -> Basis {
+        match self {
+            Self::Builds { .. } => Basis::Observed,
+            Self::Calls { .. } | Self::References { .. } => Basis::Static,
+            Self::Holds { .. } => Basis::Pattern,
+        }
+    }
+}
+
+impl std::fmt::Display for Reason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Builds { text, .. } => write!(f, "builds {text:?}"),
+            Self::Calls { name, .. } => write!(f, "calls {name}"),
+            Self::Holds { name, storage, .. } => write!(f, "holds {name}{storage}"),
+            Self::References { strings, imports } => {
+                write!(f, "references {strings} strings and {imports} imports")
+            }
+        }
+    }
 }
 
 /// The triage of a program with code, as the values its text is spelled
@@ -218,13 +292,8 @@ impl Triage {
             Some(_) => out.push_str("# read first\n"),
         }
         for r in &self.read_first {
-            let _ = writeln!(
-                out,
-                "{:<#12x} {:<28} {}",
-                r.entry,
-                r.name,
-                r.reasons.join("; ")
-            );
+            let why: Vec<String> = r.reasons.iter().map(Reason::to_string).collect();
+            let _ = writeln!(out, "{:<#12x} {:<28} {}", r.entry, r.name, why.join("; "));
         }
         if !self.read_first.is_empty() {
             more_line(&mut out, self.candidates, READ_MAX, "candidates not listed");
@@ -456,45 +525,55 @@ fn reading_list(
     const WEIGHT_CALLS: usize = 3;
     /// Score for holding a cipher or keystream constant.
     const WEIGHT_HOLDS: usize = 1;
-    let mut reasons: BTreeMap<u64, Vec<String>> = BTreeMap::new();
+    let mut reasons: BTreeMap<u64, Vec<Reason>> = BTreeMap::new();
     let mut score: BTreeMap<u64, usize> = BTreeMap::new();
     for g in &recovered.found {
         *score.entry(g.built_by).or_default() += WEIGHT_BUILDS;
         let entry = reasons.entry(g.built_by).or_default();
         if entry.len() < 3 {
-            entry.push(format!("builds {:?}", g.text));
+            entry.push(Reason::Builds {
+                written_at: g.written_at,
+                text: g.text.clone(),
+            });
         }
     }
     for hit in crypto_hits(p, a).hits.iter().take(crate::crypto::HITS_MAX) {
-        if let Some(f) = hit.va.and_then(|va| a.function_at(va)) {
+        if let Some((at, f)) = hit.va.and_then(|va| a.function_at(va).map(|f| (va, f))) {
             let entry = reasons.entry(f.entry).or_default();
-            let note = format!("holds {}{}", hit.name, hit.storage);
-            if !entry.contains(&note) {
+            let held = |r: &Reason| matches!(r, Reason::Holds { name, storage, .. } if *name == hit.name && *storage == hit.storage);
+            if !entry.iter().any(held) {
                 *score.entry(f.entry).or_default() += WEIGHT_HOLDS;
                 if entry.len() < 4 {
-                    entry.push(note);
+                    entry.push(Reason::Holds {
+                        at,
+                        name: hit.name,
+                        storage: hit.storage,
+                    });
                 }
             }
         }
     }
     for f in &a.functions {
         for callee in &f.callees {
-            let Some(name) = a.symbol_at(p, *callee).map(|s| bare_name(&s.name)) else {
+            let Some(name) = called_import(p, a, *callee) else {
                 continue;
             };
             if TELLING.iter().any(|t| name.starts_with(t)) {
                 let entry = reasons.entry(f.entry).or_default();
-                let note = format!("calls {name}");
-                if !entry.contains(&note) {
+                let called = |r: &Reason| matches!(r, Reason::Calls { name: n, .. } if n == name);
+                if !entry.iter().any(called) {
                     *score.entry(f.entry).or_default() += WEIGHT_CALLS;
                     if entry.len() < 4 {
-                        entry.push(note);
+                        entry.push(Reason::Calls {
+                            callee: *callee,
+                            name: name.to_owned(),
+                        });
                     }
                 }
             }
         }
     }
-    let mut ranked: Vec<(u64, Vec<String>)> = reasons.into_iter().collect();
+    let mut ranked: Vec<(u64, Vec<Reason>)> = reasons.into_iter().collect();
     rank_reading(a, &score, &mut ranked);
     let telling = ranked.len();
     if telling < READ_MAX {
@@ -515,6 +594,24 @@ fn reading_list(
     (listed, candidates)
 }
 
+/// Returns the name a call to `callee` reaches: its symbol, or the import
+/// it jumps to when it is an import thunk.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `callee` - A call target's address.
+///
+/// # Returns
+///
+/// The bare name, `None` when no symbol names the target.
+fn called_import<'p>(p: &'p Program, a: &Analysis, callee: u64) -> Option<&'p str> {
+    a.symbol_at(p, callee)
+        .or_else(|| a.symbol_at(p, a.function(callee)?.thunk?))
+        .map(|s| bare_name(&s.name))
+}
+
 /// Orders the reading list so a function left mostly unchecked is not first.
 ///
 /// The checker stops at [`ANSWER_BLOCKS`](crate::analysis::decompile::replay::ANSWER_BLOCKS).
@@ -527,7 +624,7 @@ fn reading_list(
 /// * `a` - The analysis, for each function's blocks.
 /// * `score` - The rank each entry earned.
 /// * `ranked` - The candidates, sorted in place.
-fn rank_reading(a: &Analysis, score: &BTreeMap<u64, usize>, ranked: &mut [(u64, Vec<String>)]) {
+fn rank_reading(a: &Analysis, score: &BTreeMap<u64, usize>, ranked: &mut [(u64, Vec<Reason>)]) {
     let limit = 2 * crate::analysis::decompile::replay::ANSWER_BLOCKS;
     let open = |e: u64| a.function(e).is_some_and(|f| f.blocks.len() > limit);
     ranked.sort_by(|l, r| {

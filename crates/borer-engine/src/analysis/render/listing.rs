@@ -811,7 +811,7 @@ pub(super) fn everyday_reading_list(
     a: &Analysis,
     skip: &BTreeSet<u64>,
     take: usize,
-) -> Vec<(u64, Vec<String>)> {
+) -> Vec<(u64, Vec<Reason>)> {
     let slots: BTreeSet<u64> = p
         .symbols
         .iter()
@@ -845,14 +845,7 @@ pub(super) fn everyday_reading_list(
     scored
         .into_iter()
         .take(take)
-        .map(|(strings, imports, entry)| {
-            (
-                entry,
-                vec![format!(
-                    "references {strings} strings and {imports} imports"
-                )],
-            )
-        })
+        .map(|(strings, imports, entry)| (entry, vec![Reason::References { strings, imports }]))
         .collect()
 }
 
