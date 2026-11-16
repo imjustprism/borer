@@ -422,7 +422,13 @@ impl Host {
         let asked = crate::answer::Suffixed::read(uri)?;
         let again = asked.again();
         let page = asked.page(&again);
-        crate::answer::read(&self.program, &self.analysis, &self.overlay, asked.core, page)
+        crate::answer::read(
+            &self.program,
+            Some(&self.analysis),
+            &self.overlay,
+            asked.core,
+            page,
+        )
             .unwrap_or_else(|| {
                 Err(format!(
                     "query is not available here: {} is answered by the MCP server (its query and script tools), not by the engine alone",
@@ -1337,7 +1343,7 @@ mod tests {
         let uri = "borer://protection";
         let (p, a) = fixture();
         let page = crate::answer::Page::whole(uri);
-        let want = crate::answer::read(&p, &a, &Overlay::default(), uri, page)
+        let want = crate::answer::read(&p, Some(&a), &Overlay::default(), uri, page)
             .expect("the engine answers it")
             .expect("protection answers");
         let run = go(&format!(r#"print(query("{uri}"));"#)).expect("the query answers");

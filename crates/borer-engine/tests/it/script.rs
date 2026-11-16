@@ -53,7 +53,7 @@ fn both(
         &[],
     )
     .expect("the query answers");
-    let want = read(program, analysis, &Overlay::default(), core, page)
+    let want = read(program, Some(analysis), &Overlay::default(), core, page)
         .expect("the engine answers it")
         .expect("it reads");
     let lines = want

@@ -280,8 +280,11 @@ impl<'a> Page<'a> {
 struct Ask<'a> {
     /// The loaded program.
     p: &'a Program,
-    /// Its analysis, as [`Need`] asked.
+    /// Its analysis, as [`Need`] asked; an empty one where none is held and
+    /// none is needed.
     a: &'a Analysis,
+    /// The analysis held, whose memo keeps the file's facts.
+    memo: Option<&'a Analysis>,
     /// The names, comments and types in force.
     o: &'a Overlay,
     /// The URI's argument, decoded; empty for none.
@@ -369,23 +372,15 @@ const ANSWERS: &[Answer] = &[
     }),
     rows("hashes", Nothing, File, |q| {
         let made = || crate::hashing::hashes_tsv(q.p);
-        Ok(String::clone(&q.a.derived.get_or_build(
-            "file_hashes",
-            (),
-            made,
-        )))
+        Ok(String::clone(&file_fact(q, "file_hashes", made)))
     }),
     rows("children", Nothing, File, |q| {
         let made = || crate::carve::children_tsv(q.p);
-        Ok(String::clone(&q.a.derived.get_or_build(
-            "file_children",
-            (),
-            made,
-        )))
+        Ok(String::clone(&file_fact(q, "file_children", made)))
     }),
     rows("encoded", Either, File, |q| {
         let made = || render::encoded_strings(q.p);
-        let found = q.a.derived.get_or_build("file_encoded", (), made);
+        let found = file_fact(q, "file_encoded", made);
         Ok(render::encoded_strings_tsv(&found, q.arg))
     }),
     itself("injection", Either, File, |q| {
@@ -615,14 +610,17 @@ pub fn need(name: &str, arg: Option<&str>) -> Option<Result<Need, String>> {
 
 /// Answers a resource from the program, its analysis and an overlay.
 ///
-/// The analysis is the one [`need`] asked for: computed for a [`Need::Code`]
-/// resource, and for a [`Need::Best`] one where the program does the stage;
-/// any, an empty one too, elsewhere.
+/// The analysis is the one [`need`] asked for: a [`Need::Code`] resource,
+/// and a [`Need::Best`] one where the program does the stage, read the
+/// program's own and are refused without one, so no program is answered
+/// from an analysis that is not its. Elsewhere a held analysis keeps the
+/// file's facts and serves a `.NET` listing its methods index; without one
+/// the facts are worked out for this read alone.
 ///
 /// # Arguments
 ///
 /// * `program` - The loaded program.
-/// * `analysis` - Its analysis.
+/// * `analysis` - Its analysis, `None` when none is held.
 /// * `overlay` - The names, comments and types in force, with the binary's
 ///   name tables as decompilations read them.
 /// * `uri` - The URI with its page suffixes taken off.
@@ -631,12 +629,12 @@ pub fn need(name: &str, arg: Option<&str>) -> Option<Result<Need, String>> {
 /// # Returns
 ///
 /// The text, `Err` with the refusal of an argument the resource cannot
-/// answer or a stage the program's architecture lacks, `None` when the
-/// engine does not answer the resource.
+/// answer, a stage the program's architecture lacks, or code read with no
+/// analysis; `None` when the engine does not answer the resource.
 #[must_use]
 pub fn read(
     program: &Program,
-    analysis: &Analysis,
+    analysis: Option<&Analysis>,
     overlay: &Overlay,
     uri: &str,
     page: Page<'_>,
@@ -647,14 +645,32 @@ pub fn read(
     if let Some(why) = refused(name, &arg) {
         return Some(Err(why));
     }
-    if let Code(stage) = need_of(found, &arg)
-        && let Some(why) = program.refuses(stage)
-    {
-        return Some(Err(why));
-    }
+    let reads_code = match need_of(found, &arg) {
+        Code(stage) => match program.refuses(stage) {
+            Some(why) => return Some(Err(why)),
+            None => true,
+        },
+        Best(stage) => program.refuses(stage).is_none(),
+        File => false,
+    };
+    let empty;
+    let a = match analysis {
+        Some(a) => a,
+        None if reads_code => {
+            return Some(Err(format!(
+                "{} reads the program's code, and no analysis of it was given",
+                crate::text::one_line(uri)
+            )));
+        }
+        None => {
+            empty = Analysis::default();
+            &empty
+        }
+    };
     let ask = Ask {
         p: program,
-        a: analysis,
+        a,
+        memo: analysis,
         o: overlay,
         arg: &arg,
         page,
@@ -668,6 +684,30 @@ pub fn read(
         ),
         Paged::Rows | Paged::Itself => text,
     }))
+}
+
+/// Returns facts of the loaded file, kept in the held analysis's memo
+/// ([`Analysis::derived`]) once one is held and worked out for this read
+/// alone before.
+///
+/// Some answers read the file's bytes alone, hashing, carving or decoding
+/// all of them, which took a second on every read of a hundred-megabyte
+/// file. They do not wait for an analysis that is not there yet.
+///
+/// # Arguments
+///
+/// * `q` - The read.
+/// * `kind` - What the facts are, as a fixed name.
+/// * `make` - Works the facts out.
+fn file_fact<T: Send + Sync + 'static>(
+    q: &Ask<'_>,
+    kind: &'static str,
+    make: impl FnOnce() -> T,
+) -> std::sync::Arc<T> {
+    match q.memo {
+        Some(a) => a.derived.get_or_build(kind, (), make),
+        None => std::sync::Arc::new(make()),
+    }
 }
 
 /// Returns the resource a name and the presence of an argument name.
@@ -1366,20 +1406,49 @@ mod tests {
         let a = Analysis::compute(&p);
         let o = Overlay::default();
         let uri = "borer://encoded";
-        let whole = read(&p, &a, &o, uri, Page::whole(uri));
+        let whole = read(&p, Some(&a), &o, uri, Page::whole(uri));
         let page = Page {
             offset: Some(0),
             limit: NonZeroUsize::new(1),
             again: uri,
         };
-        let paged = read(&p, &a, &o, uri, page).and_then(Result::ok);
+        let paged = read(&p, Some(&a), &o, uri, page).and_then(Result::ok);
         assert!(
             paged.is_some_and(|text| text.starts_with("# showing ")),
             "{whole:?}"
         );
         assert_eq!(
-            read(&p, &a, &o, "borer://about/%20", Page::whole(uri)),
+            read(&p, Some(&a), &o, "borer://about/%20", Page::whole(uri)),
             Some(Err(super::ABOUT_NEEDS_A_NAME.to_owned()))
         );
+    }
+
+    /// A read of the program's code with no analysis given is refused, so
+    /// no caller pairs a program with an analysis that is not its; with
+    /// the analysis it answers.
+    ///
+    /// # Panics
+    ///
+    /// When the read without an analysis answers, or the one with it does
+    /// not.
+    #[test]
+    fn code_is_not_read_without_its_analysis() {
+        let p = Program::raw_x64(&[0xc3; 0x10]);
+        let a = Analysis::compute(&p);
+        let o = Overlay::default();
+        let uri = "borer://fingerprint";
+        assert!(matches!(
+            read(&p, None, &o, uri, Page::whole(uri)),
+            Some(Err(_))
+        ));
+        assert!(matches!(
+            read(&p, Some(&a), &o, uri, Page::whole(uri)),
+            Some(Ok(_))
+        ));
+        let file = "borer://hashes";
+        assert!(matches!(
+            read(&p, None, &o, file, Page::whole(file)),
+            Some(Ok(_))
+        ));
     }
 }

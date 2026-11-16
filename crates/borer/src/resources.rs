@@ -744,10 +744,13 @@ impl BorerServer {
     /// Answers a resource the engine answers on its own
     /// ([`borer_engine::answer::read`]), with what it reads prepared.
     ///
-    /// A [`Need::Code`] resource reads the analysis through
-    /// [`Self::with_analysis`], which refuses an architecture without the
-    /// stage; a [`Need::Best`] one does where the program does the stage;
-    /// a [`Need::File`] one reads the file alone, its facts kept in the
+    /// Everything is decided under the program's lock, so no load in
+    /// between pairs one program with another's analysis. A [`Need::Code`]
+    /// resource reads the analysis, and the engine refuses an architecture
+    /// without the stage; a [`Need::Best`] one reads it where the program
+    /// does the stage, else the empty analysis held for the program, which
+    /// keeps a `.NET` listing's index from one read to the next; a
+    /// [`Need::File`] one reads the file alone, its facts kept in the
     /// analysis's memo once one is held.
     ///
     /// # Arguments
@@ -763,27 +766,24 @@ impl BorerServer {
     pub(crate) fn engine_answer(&self, need: Need, asked: &Asked) -> Result<String, ErrorData> {
         let again = asked.again();
         let page = asked.page(&again);
-        let read = |p: &Program, a: &Analysis, o: &Overlay| {
-            borer_engine::answer::read(p, a, o, &asked.core, page).unwrap_or_else(|| {
-                Err(format!(
-                    "the engine does not answer {}",
-                    borer_engine::text::one_line(&asked.core)
-                ))
-            })
-        };
-        let stage = match need {
-            Need::Code(stage) => Some(stage),
-            Need::Best(stage) => self
-                .require_loaded()?
-                .refuses(stage)
-                .is_none()
-                .then_some(stage),
-            Need::File => None,
-        };
-        match stage {
-            Some(stage) => self.with_analysis(stage, read),
-            None => self.with_program(|p| read(p, &self.analysis_held(), &self.overlay())),
-        }
+        self.with_program(|p| {
+            let analysis = match need {
+                Need::Code(stage) | Need::Best(stage) if p.refuses(stage).is_none() => {
+                    Some(self.ensure_analysis()?)
+                }
+                Need::Code(_) => None,
+                Need::Best(_) => Some(self.empty_analysis()),
+                Need::File => read_lock(&self.analysis).clone(),
+            };
+            let o = self.overlay();
+            borer_engine::answer::read(p, analysis.as_deref(), &o, &asked.core, page)
+                .unwrap_or_else(|| {
+                    Err(format!(
+                        "the engine does not answer {}",
+                        borer_engine::text::one_line(&asked.core)
+                    ))
+                })
+        })
     }
 }
 
@@ -1366,9 +1366,10 @@ mod tests {
             }
             reached.insert(name.to_owned());
             let page = borer_engine::answer::Page::whole(&uri);
-            let engine = borer_engine::answer::read(&program, &analysis, &overlay, &uri, page)
-                .expect("the engine answers it")
-                .map(|text| mark(&text));
+            let engine =
+                borer_engine::answer::read(&program, Some(&analysis), &overlay, &uri, page)
+                    .expect("the engine answers it")
+                    .map(|text| mark(&text));
             let served = server
                 .read_uri(&uri)
                 .map(|(_, text)| mark(&text))
@@ -1378,5 +1379,38 @@ mod tests {
         for name in borer_engine::answer::names() {
             assert!(reached.contains(name), "no URI reaches borer://{name}");
         }
+    }
+
+    /// A program whose architecture borer does not disassemble answers its
+    /// triage from the file alone and refuses its fingerprint, and every
+    /// `.NET` listing of it reads the one empty analysis held for it.
+    ///
+    /// # Panics
+    ///
+    /// When the triage differs from the file's, the fingerprint answers, or
+    /// a second listing reads another analysis.
+    #[test]
+    fn a_program_without_code_analysis_reads_the_file_alone() {
+        let server = crate::testing::code_server(Arch::Unknown, &[0xc3; 0x10]);
+        let program = server.loaded().expect("a program is loaded");
+        let triage = server
+            .resource_text("borer://triage")
+            .expect("triage answers");
+        assert_eq!(
+            triage,
+            borer_engine::analysis::render::file_triage_tsv(&program)
+        );
+        assert!(server.resource_text("borer://fingerprint").is_err());
+        let held = || {
+            crate::state::read_lock(&server.no_code)
+                .as_ref()
+                .map(|(_, a)| Arc::clone(a))
+                .expect("an empty analysis is held")
+        };
+        let first = server.resource_text("borer://clr/methods");
+        let before = held();
+        let second = server.resource_text("borer://clr/methods");
+        assert_eq!(first.is_ok(), second.is_ok());
+        assert!(Arc::ptr_eq(&before, &held()));
     }
 }

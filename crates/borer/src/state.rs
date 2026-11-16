@@ -287,7 +287,7 @@ impl BorerServer {
     /// loaded: a caller outside a tool body may ask after a `load_binary`
     /// replaced its program, and the new program must not answer from the
     /// old one's memo.
-    fn empty_analysis(&self) -> Arc<Analysis> {
+    pub(crate) fn empty_analysis(&self) -> Arc<Analysis> {
         let Some(program) = self.loaded() else {
             return Arc::default();
         };
