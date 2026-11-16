@@ -8,15 +8,18 @@ use std::time::{Duration, Instant};
 use borer_engine::cancel::Cancel;
 use borer_engine::view::Ref;
 use gpui::{App, Context, Window, px};
+use language::Point;
 
 use super::{
     CALL_CLICKS, FILTER_KEYS, Harness, InjectTracker, MarkWait, PendingInputMark, nanos,
     now_instant, ns_to_ms, say, sorted_quantiles_ms,
 };
-use crate::code_view::style_view_line;
-use crate::decompile_item::{CODE_PAD_PX, DecompileItem, TabMode, open_function};
+use crate::decompile_item::{DecompileItem, TabMode, open_function};
 use crate::functions_panel::FunctionsPanel;
 use crate::worker::{LoadedBinary, decompile_blocking, ui_engine_calls};
+
+/// Most rows below the top row searched for a call to click: more than a window shows.
+const CALL_SCAN_ROWS: usize = 512;
 
 /// Action selected for a frame where a clickable call token is visible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -393,58 +396,57 @@ impl Harness {
     }
 
     /// Returns the window position of a visible call to another function, found from the
-    /// app's shown lines and its code list's laid-out bounds; a call of a function to itself
+    /// app's shown lines and laid out by the tab's editor; a call of a function to itself
     /// only activates its own tab, so it opens nothing to measure.
     ///
     /// # Arguments
     ///
-    /// * `window` - Window shaping the token's line exactly as the code pane does.
-    /// * `cx` - Application context reading the app and the theme.
+    /// * `window` - Window the editor laid its lines out in.
+    /// * `cx` - Application context reading the app and the editor.
     ///
     /// # Returns
     ///
     /// Logical `(x, y)` window coordinates, or `None` when no call token is visible.
-    fn call_target(&self, window: &Window, cx: &App) -> Option<(f32, f32)> {
+    fn call_target(&self, window: &mut Window, cx: &mut App) -> Option<(f32, f32)> {
         let item_entity = self.item(cx)?;
-        let item = item_entity.read(cx);
-        let code = item.code()?;
-        let current = item.entry();
-        let (bounds, offset) = {
-            let state = item.code_scroll().0.borrow();
-            (state.base_handle.bounds(), state.base_handle.offset())
+        let (code, current, editor, top) = {
+            let item = item_entity.read(cx);
+            (
+                item.code()?.clone(),
+                item.entry(),
+                item.editor().clone(),
+                item.top_line(),
+            )
         };
-        let style = item.style();
-        let row = style.row_height;
-        let mut top = bounds.top() + offset.y;
-        let mut found = None;
-        for ix in 0..code.len() {
-            let center = top + row * 0.5;
-            top += row;
-            if center < bounds.top() {
-                continue;
+        let bounds = *editor.read(cx).last_bounds()?;
+        editor.update(cx, |editor, cx| {
+            let snapshot = editor.snapshot(window, cx);
+            let style = editor.style(cx).clone();
+            let font_id = window.text_system().resolve_font(&style.text.font());
+            let font_size = style.text.font_size.to_pixels(window.rem_size());
+            let line_height = style.text.line_height_in_pixels(window.rem_size());
+            let gutter = snapshot.gutter_dimensions(font_id, font_size, &style, window, cx);
+            for row in (top..code.len()).take(CALL_SCAN_ROWS) {
+                let (view, line) = code.get(row)?;
+                let call = view.tokens(line).find_map(|(span, _, link)| match link {
+                    Some(Ref::Function(t)) if Some(*t) != current => Some(span.start),
+                    _ => None,
+                });
+                let Some(start) = call else {
+                    continue;
+                };
+                let at = Point::new(u32::try_from(row).ok()?, u32::try_from(start).ok()?);
+                let anchor = snapshot.display_snapshot.buffer_snapshot().anchor_after(at);
+                let at = editor.to_pixel_point(anchor, &snapshot, window, cx)?;
+                let y = bounds.top() + at.y + line_height * 0.5;
+                if y > bounds.bottom() {
+                    return None;
+                }
+                let x = bounds.left() + gutter.full_width() + at.x + px(3.0);
+                return Some((f32::from(x), f32::from(y)));
             }
-            if center > bounds.bottom() {
-                break;
-            }
-            let Some((view, line_ix)) = code.get(ix) else {
-                break;
-            };
-            let call = view.tokens(line_ix).find_map(|(span, _, link)| match link {
-                Some(Ref::Function(t)) if Some(*t) != current => Some(span.start),
-                _ => None,
-            });
-            if let Some(start) = call {
-                found = Some((view, line_ix, start, center));
-                break;
-            }
-        }
-        let (view, line_ix, start, center) = found?;
-        let styled = style_view_line(view, line_ix, &style.font, &style.palette);
-        let shaped = window
-            .text_system()
-            .shape_line(styled.text, style.size, &styled.runs, None);
-        let x = bounds.left() + offset.x + px(CODE_PAD_PX) + shaped.x_for_index(start) + px(3.0);
-        Some((f32::from(x), f32::from(center)))
+            None
+        })
     }
 
     /// Returns the `MEASURE_INPUT` quantile summary line once the clicks complete.

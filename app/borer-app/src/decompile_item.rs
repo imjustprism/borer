@@ -1,5 +1,6 @@
-//! A decompile tab: one function's view of the engine's tokens in Zed's center pane, on
-//! Zed's nav history, whose linked tokens open their function or scroll to their line.
+//! A code tab: one function's decompile or listing view in Zed's read-only editor, in
+//! Zed's center pane and nav history, colored from the engine's token kinds through the
+//! theme's syntax keys.
 
 use std::any::Any;
 use std::ops::Range;
@@ -7,12 +8,18 @@ use std::sync::Arc;
 
 use borer_engine::analysis::name_of;
 use borer_engine::view::{Ref, View};
+use editor::display_map::{DisplayRow, DisplaySnapshot};
+use editor::scroll::ScrollAnchor;
+use editor::{DisplayPoint, Editor, EditorEvent, HighlightKey, SelectionEffects};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
-    Font, FontWeight, InteractiveElement as _, InteractiveText, IntoElement, ParentElement as _,
-    Pixels, Render, ScrollStrategy, SharedString, Styled as _, StyledText, Subscription, Task,
-    UniformListScrollHandle, WeakEntity, Window, div, px, uniform_list,
+    FontWeight, HighlightStyle, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
+    Render, Reservation, SharedString, Styled as _, Subscription, Task, WeakEntity, Window, div,
+    px,
+};
+use language::{
+    Bias, Buffer, BufferId, Capability, LineEnding, Point, ReplicaId, Rope, TextBuffer,
 };
 use settings::{Settings as _, SettingsStore};
 use theme::{ActiveTheme as _, GlobalTheme};
@@ -23,16 +30,17 @@ use workspace::{Item, ItemNavHistory, Pane, Workspace};
 
 use crate::actions::{BACK_HINT, hint_row};
 use crate::app_view::open_dropped;
-use crate::code_view::{ClickOutcome, CodeLines, CodePalette, resolve_ref_click, style_view_line};
-use crate::worker::{LoadedBinary, TaskEpoch, decompile_blocking, spawn_engine};
+use crate::code_view::{ClickOutcome, CodeLines, CodePalette, Role, resolve_ref_click};
+use crate::functions_panel::FunctionsPanel;
+use crate::worker::{LoadedBinary, TaskEpoch, decompile_or_why, listing_blocking, spawn_engine};
 
-/// Fewest logical pixels a line row of a decompile tab is tall.
+/// Fewest logical pixels a row of code is tall.
 const MIN_ROW_HEIGHT_PX: f32 = 8.0;
 
-/// Most logical pixels a line row of a decompile tab is tall.
+/// Most logical pixels a row of code is tall.
 const MAX_ROW_HEIGHT_PX: f32 = 64.0;
 
-/// Returns the height of each line row of a decompile tab.
+/// Returns the height of each row of code the app lists outside a code tab's editor.
 ///
 /// That is the buffer font size times the buffer line height of Zed's settings, rounded to
 /// a whole pixel and held between [`MIN_ROW_HEIGHT_PX`] and [`MAX_ROW_HEIGHT_PX`], so no
@@ -48,41 +56,14 @@ pub fn code_row_height(cx: &App) -> Pixels {
     height.clamp(px(MIN_ROW_HEIGHT_PX), px(MAX_ROW_HEIGHT_PX))
 }
 
-/// What a decompile tab paints its lines with, read from the theme and the settings.
-#[derive(Debug, Clone)]
-pub(crate) struct CodeStyle {
-    /// Token colors of the active theme.
-    pub(crate) palette: CodePalette,
-    /// The buffer font.
-    pub(crate) font: Font,
-    /// The buffer font size.
-    pub(crate) size: Pixels,
-    /// Height of each line row, from [`code_row_height`].
-    pub(crate) row_height: Pixels,
-}
-
-impl CodeStyle {
-    /// Returns the style the active theme and the settings give.
-    ///
-    /// # Arguments
-    ///
-    /// * `cx` - Application context reading the theme and the settings.
-    fn read(cx: &App) -> Self {
-        let settings = ThemeSettings::get_global(cx);
-        Self {
-            palette: CodePalette::from_theme(cx.theme()),
-            font: settings.buffer_font.clone(),
-            size: settings.buffer_font_size(cx),
-            row_height: code_row_height(cx),
-        }
-    }
-}
-
-/// Corner radius in logical pixels of the card a failed decompile shows.
+/// Corner radius in logical pixels of the card a failed build shows.
 const CARD_RADIUS_PX: f32 = 6.0;
 
-/// Left padding in logical pixels before the text of each decompile line.
-pub const CODE_PAD_PX: f32 = 8.0;
+/// Rows a tall window shows at once; the colored rows reach this far below the top row.
+const PAGE_ROWS: usize = 256;
+
+/// Rows colored beyond the shown ones on each side, so a scroll of fewer recolors nothing.
+const MARGIN_ROWS: usize = 256;
 
 /// How a function opens in the center pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,16 +74,67 @@ pub enum TabMode {
     Permanent,
 }
 
-/// Where a decompile tab was when it went into the nav history.
+/// Which view of a function a code tab shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct NavData {
-    /// Entry of the function the tab shows, `None` for a tab of measured lines.
-    entry: Option<u64>,
-    /// Zero-based index of the line at the top of the tab.
-    top: usize,
+pub enum Form {
+    /// The decompiled pseudo-C, as the engine's decompile view spells it.
+    Decompile,
+    /// The disassembly listing with raw bytes, as the engine's listing view spells it.
+    Listing,
 }
 
-/// One function's decompile view, or a run of measured lines, as an item of Zed's center pane.
+impl Form {
+    /// Builds this view of the function at `entry`; runs in the background.
+    ///
+    /// # Arguments
+    ///
+    /// * `loaded` - Binary the function belongs to.
+    /// * `entry` - Entry of the function.
+    ///
+    /// # Errors
+    ///
+    /// Returns the engine's reason when it builds no view there.
+    fn build(self, loaded: &LoadedBinary, entry: u64) -> Result<Arc<CodeLines>, String> {
+        let view = match self {
+            Self::Decompile => decompile_or_why(loaded, entry),
+            Self::Listing => listing_blocking(loaded, entry),
+        }?;
+        Ok(Arc::new(CodeLines::new(vec![view])))
+    }
+
+    /// Returns what a tab of this view says while it builds.
+    const fn building(self) -> &'static str {
+        match self {
+            Self::Decompile => "Decompiling...",
+            Self::Listing => "Disassembling...",
+        }
+    }
+
+    /// Returns what the card of a tab whose view was not built is headed with.
+    const fn failed(self) -> &'static str {
+        match self {
+            Self::Decompile => "Decompile failed",
+            Self::Listing => "Listing failed",
+        }
+    }
+}
+
+/// What a background build hands its tab: the lines, the text buffer over them and the
+/// function's name as the engine gives it (`None` for measured lines), or the engine's
+/// reason for building none.
+type Built = Result<(Arc<CodeLines>, TextBuffer, Option<String>), String>;
+
+/// A line to bring to the top of the tab at its next paint, where the window is at hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Jump {
+    /// Zero-based shown line.
+    line: usize,
+    /// Whether the cursor moves there too.
+    cursor: bool,
+}
+
+/// One function's decompile or listing view, or a run of measured lines, as an item of
+/// Zed's center pane.
 pub struct DecompileItem {
     /// Workspace the tab opens further functions in.
     workspace: WeakEntity<Workspace>,
@@ -110,26 +142,39 @@ pub struct DecompileItem {
     loaded: Arc<LoadedBinary>,
     /// Entry of the function the tab shows, `None` for a tab of measured lines.
     entry: Option<u64>,
-    /// The function's name as the engine gives it, once its decompile is in; `None` while
-    /// it runs or when the engine decompiled nothing, so the tab keeps the entry.
+    /// Which view of the function the tab shows.
+    form: Form,
+    /// The function's name as the engine gives it, once its view is built; `None` while it
+    /// builds, when none was built or for measured lines, so the tab keeps the entry.
     name: Option<SharedString>,
-    /// Focus handle of the tab.
-    focus_handle: FocusHandle,
-    /// Lines the tab shows, once decompiled.
+    /// Zed's read-only editor: over an empty buffer until the view is built, then over a
+    /// read-only buffer of its text.
+    editor: Entity<Editor>,
+    /// Lines the tab shows, once built; row `i` of the buffer is line `i`.
     code: Option<Arc<CodeLines>>,
-    /// Scroll handle of the virtualized line list.
-    scroll: UniformListScrollHandle,
-    /// Colors, font and row height, rebuilt when the theme or the settings change.
-    style: CodeStyle,
-    /// Rebuilds [`Self::style`] on a settings or theme change.
-    _restyle: [Subscription; 2],
-    /// Generation and cancel flag of the background decompile.
-    epoch: TaskEpoch,
-    /// Whether the background decompile is still running.
-    decompiling: bool,
-    /// The pane's nav history, set when the tab is added to a pane.
+    /// The engine's reason the view was not built.
+    failed: Option<String>,
+    /// Token colors of the active theme.
+    palette: CodePalette,
+    /// Buffer rows whose tokens are colored now.
+    painted: Range<usize>,
+    /// Buffer row at the top of the editor, as it last scrolled.
+    top: usize,
+    /// Buffer row [`PAGE_ROWS`] display rows below the top one.
+    bottom: usize,
+    /// A jump not yet applied.
+    pending: Option<Jump>,
+    /// The pane's nav history, handed to each editor the tab shows.
     nav_history: Option<ItemNavHistory>,
-    /// The background decompile.
+    /// The editor's events.
+    editor_events: Subscription,
+    /// The settings and theme observers.
+    _restyle: [Subscription; 2],
+    /// Generation and cancel flag of the background build.
+    epoch: TaskEpoch,
+    /// Whether the background build is still running.
+    decompiling: bool,
+    /// The background build.
     task: Option<Task<()>>,
 }
 
@@ -137,6 +182,7 @@ impl std::fmt::Debug for DecompileItem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DecompileItem")
             .field("entry", &self.entry)
+            .field("form", &self.form)
             .field("decompiling", &self.decompiling)
             .finish_non_exhaustive()
     }
@@ -148,103 +194,296 @@ impl Drop for DecompileItem {
     }
 }
 
+/// Returns Zed's editor over `buffer`, read-only and with no scroll margin
+/// ([`hold_line_at_top`]).
+///
+/// # Arguments
+///
+/// * `buffer` - The text.
+/// * `window` - Window the editor is in.
+/// * `cx` - Application context.
+fn read_only_editor(buffer: Entity<Buffer>, window: &mut Window, cx: &mut App) -> Entity<Editor> {
+    cx.new(|cx| {
+        let mut editor = Editor::for_buffer(buffer, None, window, cx);
+        editor.set_read_only(true);
+        hold_line_at_top(&mut editor, cx);
+        editor
+    })
+}
+
+/// Sets `editor`'s vertical scroll margin to none, so a line a jump or the nav history puts
+/// at the top stays there when the cursor moves onto it, whatever margin the settings set.
+///
+/// Zed's editor rereads its margin from the settings on every settings change, so a tab
+/// applies this again after each one ([`DecompileItem::restyle`]).
+///
+/// # Arguments
+///
+/// * `editor` - The tab's editor.
+/// * `cx` - Editor context.
+fn hold_line_at_top(editor: &mut Editor, cx: &mut Context<'_, Editor>) {
+    if editor.vertical_scroll_margin() != 0 {
+        editor.set_vertical_scroll_margin(0, cx);
+    }
+}
+
+/// Returns the buffer row a display row of `map` shows, past the last the last one's.
+///
+/// # Arguments
+///
+/// * `map` - The editor's display snapshot, with its folds and wraps.
+/// * `display` - Zero-based display row.
+fn buffer_row(map: &DisplaySnapshot, display: usize) -> usize {
+    let row = DisplayRow(u32::try_from(display).unwrap_or(u32::MAX));
+    let at = map.clip_point(DisplayPoint::new(row, 0), Bias::Left);
+    usize::try_from(map.display_point_to_point(at, Bias::Left).row).unwrap_or(usize::MAX)
+}
+
 impl DecompileItem {
-    /// Returns a tab for `entry` of `loaded` showing `code`.
+    /// Returns a tab for `entry` of `loaded` building its lines with `build` in the
+    /// background.
     ///
     /// # Arguments
     ///
     /// * `workspace` - Workspace the tab opens further functions in.
     /// * `loaded` - Binary the lines come from.
-    /// * `entry` - Function the tab shows, `None` for measured lines.
-    /// * `code` - Lines to show, `None` until decompiled.
+    /// * `(entry, form)` - Function the tab shows, `None` for measured lines, and its view.
+    /// * `build` - Builds the lines, or says why the engine built none.
+    /// * `window` - Window the tab is in.
     /// * `cx` - Item context.
     fn new(
         workspace: WeakEntity<Workspace>,
         loaded: Arc<LoadedBinary>,
-        entry: Option<u64>,
-        code: Option<Arc<CodeLines>>,
+        (entry, form): (Option<u64>, Form),
+        build: impl FnOnce() -> Result<Arc<CodeLines>, String> + Send + 'static,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Self {
-        Self {
+        let empty = cx.new(|cx| Buffer::local("", cx));
+        let editor = read_only_editor(empty, window, cx);
+        let mut item = Self {
             workspace,
             loaded,
             entry,
+            form,
             name: None,
-            focus_handle: cx.focus_handle(),
-            code,
-            scroll: UniformListScrollHandle::new(),
-            style: CodeStyle::read(cx),
+            editor_events: cx.subscribe(&editor, |item, editor, event, cx| {
+                item.on_editor_event(&editor, event, cx);
+            }),
+            editor,
+            code: None,
+            failed: None,
+            palette: CodePalette::from_theme(cx.theme()),
+            painted: 0..0,
+            top: 0,
+            bottom: PAGE_ROWS,
+            pending: None,
+            nav_history: None,
             _restyle: [
                 cx.observe_global::<SettingsStore>(Self::restyle),
                 cx.observe_global::<GlobalTheme>(Self::restyle),
             ],
             epoch: TaskEpoch::new(),
-            decompiling: false,
-            nav_history: None,
+            decompiling: true,
             task: None,
-        }
+        };
+        item.load(build, window, cx);
+        item
     }
 
-    /// Returns a tab for the function at `entry` of `loaded`, decompiling it in the background.
+    /// Returns a tab for one view of the function at `entry` of `loaded`, building it in
+    /// the background.
     ///
     /// # Arguments
     ///
     /// * `workspace` - Workspace the tab opens further functions in.
     /// * `loaded` - Binary the function belongs to.
-    /// * `entry` - Entry virtual address of the function.
-    /// * `cx` - Item context spawning the decompile.
+    /// * `(entry, form)` - Entry virtual address of the function, and its view.
+    /// * `window` - Window the tab is in.
+    /// * `cx` - Item context spawning the build.
     #[must_use]
     pub fn function(
         workspace: WeakEntity<Workspace>,
         loaded: Arc<LoadedBinary>,
-        entry: u64,
+        (entry, form): (u64, Form),
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Self {
-        let mut item = Self::new(workspace, loaded, Some(entry), None, cx);
-        let (ticket, worker_cancel) = item.epoch.begin();
-        let check_cancel = worker_cancel.clone();
-        let loaded = item.loaded.clone();
-        item.decompiling = true;
-        let bg = spawn_engine(cx, move || {
-            worker_cancel.within(|| {
-                let view = decompile_blocking(&loaded, entry);
-                let name = view
-                    .is_some()
-                    .then(|| name_of(&loaded.analysis, &loaded.overlay, entry));
-                (view, name)
-            })
-        });
-        item.task = Some(cx.spawn(async move |this, cx| {
-            let (built, name) = bg.await;
-            let Some(this) = this.upgrade() else {
-                return;
-            };
-            this.update(cx, |item, cx| {
-                if item.epoch.is_current(ticket, &check_cancel) {
-                    item.decompiling = false;
-                    item.name = name.map(SharedString::from);
-                    item.code = built.map(|view| Arc::new(CodeLines::new(vec![view])));
-                    cx.notify();
-                }
-            });
-        }));
-        item
+        let source = loaded.clone();
+        let build = move || form.build(&source, entry);
+        Self::new(workspace, loaded, (Some(entry), form), build, window, cx)
     }
 
-    /// Rereads the tab's style from the theme and the settings and repaints it.
+    /// Builds the lines and their text buffer in the background, then shows them.
+    ///
+    /// The buffer's entity is reserved here, on the UI thread, so the background build can
+    /// give the text buffer the id the entity will have; only the entity's insertion is
+    /// left to the UI thread.
+    ///
+    /// # Arguments
+    ///
+    /// * `build` - Builds the lines, or says why the engine built none.
+    /// * `window` - Window the tab is in.
+    /// * `cx` - Item context.
+    fn load(
+        &mut self,
+        build: impl FnOnce() -> Result<Arc<CodeLines>, String> + Send + 'static,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let (ticket, worker_cancel) = self.epoch.begin();
+        let check_cancel = worker_cancel.clone();
+        let reservation = cx.reserve_entity::<Buffer>();
+        let id = BufferId::from(reservation.entity_id().as_non_zero_u64());
+        let (loaded, entry) = (self.loaded.clone(), self.entry);
+        let bg = spawn_engine(cx, move || {
+            worker_cancel.within(|| {
+                let code = build()?;
+                let rope = Rope::from(code.text().as_str());
+                let text = TextBuffer::new_normalized(ReplicaId::LOCAL, id, LineEnding::Unix, rope);
+                let name = entry.map(|at| name_of(&loaded.analysis, &loaded.overlay, at));
+                Ok((code, text, name))
+            })
+        });
+        self.task = Some(cx.spawn_in(window, async move |this, cx| {
+            let built = bg.await;
+            let shown = this.update_in(cx, |item, window, cx| {
+                if item.epoch.is_current(ticket, &check_cancel) {
+                    item.show(built, reservation, window, cx);
+                }
+            });
+            shown.unwrap_or(());
+        }));
+    }
+
+    /// Shows the built lines in a new editor over their buffer, or the engine's reason.
+    ///
+    /// # Arguments
+    ///
+    /// * `built` - The lines, their text buffer and the function's name, or why none were
+    ///   built.
+    /// * `reservation` - The buffer's reserved entity.
+    /// * `window` - Window the tab is in.
+    /// * `cx` - Item context.
+    fn show(
+        &mut self,
+        built: Built,
+        reservation: Reservation<Buffer>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.decompiling = false;
+        match built {
+            Err(why) => self.failed = Some(why),
+            Ok((code, text, name)) => {
+                self.name = name.map(SharedString::from);
+                let buffer = cx.insert_entity(reservation, |cx| {
+                    Buffer::build(text, None, Capability::ReadOnly, cx)
+                });
+                let focused = self.editor.focus_handle(cx).is_focused(window);
+                self.editor = read_only_editor(buffer, window, cx);
+                self.editor_events = cx.subscribe(&self.editor, |item, editor, event, cx| {
+                    item.on_editor_event(&editor, event, cx);
+                });
+                if let Some(history) = self.nav_history.clone() {
+                    self.editor
+                        .update(cx, |editor, _| editor.set_nav_history(Some(history)));
+                }
+                if focused {
+                    window.focus(&self.editor.focus_handle(cx), cx);
+                }
+                self.code = Some(code);
+                self.painted = 0..0;
+                self.paint(false, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Follows the editor's scroll: notes the buffer rows at the top and a page below it,
+    /// through the display map so folds and wraps count, and colors the rows around them.
+    ///
+    /// # Arguments
+    ///
+    /// * `editor` - The tab's editor.
+    /// * `event` - What the editor did.
+    /// * `cx` - Item context.
+    fn on_editor_event(
+        &mut self,
+        editor: &Entity<Editor>,
+        event: &EditorEvent,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let EditorEvent::ScrollPositionChanged { .. } = event {
+            (self.top, self.bottom) = editor.update(cx, |editor, cx| {
+                let top = whole_rows(editor.scroll_position(cx).y);
+                let map = editor.display_snapshot(cx);
+                let bottom = buffer_row(&map, top.saturating_add(PAGE_ROWS));
+                (buffer_row(&map, top), bottom)
+            });
+            self.paint(false, cx);
+        }
+    }
+
+    /// Colors the tokens of the buffer rows around the shown ones, unless they are colored
+    /// already, through one update of the editor's display map and one repaint.
+    ///
+    /// Zed's editor keeps one list of ranges per highlight; coloring a window of rows keeps
+    /// that list small however long the text is.
+    ///
+    /// # Arguments
+    ///
+    /// * `force` - Whether to recolor although the rows are colored (a theme change).
+    /// * `cx` - Item context.
+    fn paint(&mut self, force: bool, cx: &mut Context<'_, Self>) {
+        let Some(code) = self.code.clone() else {
+            return;
+        };
+        if !force && self.painted.start <= self.top && self.bottom <= self.painted.end {
+            return;
+        }
+        let from = self.top.saturating_sub(MARGIN_ROWS);
+        self.painted = from..self.bottom.saturating_add(MARGIN_ROWS);
+        let groups = code.highlights(self.painted.clone());
+        let palette = self.palette;
+        self.editor.update(cx, |editor, cx| {
+            let snapshot = editor.buffer().read(cx).snapshot(cx);
+            editor.display_map.update(cx, |map, cx| {
+                for (role, spans) in Role::ALL.into_iter().zip(groups) {
+                    let ranges = spans
+                        .into_iter()
+                        .filter_map(|(row, span)| {
+                            let row = u32::try_from(row).ok()?;
+                            let at = |col: usize| Some(Point::new(row, u32::try_from(col).ok()?));
+                            Some(
+                                snapshot.anchor_after(at(span.start)?)
+                                    ..snapshot.anchor_before(at(span.end)?),
+                            )
+                        })
+                        .collect();
+                    let style = HighlightStyle {
+                        color: Some(palette.color(role)),
+                        ..HighlightStyle::default()
+                    };
+                    map.highlight_text(role_key(role), ranges, style, false, cx);
+                }
+            });
+            cx.notify();
+        });
+    }
+
+    /// Rereads the token colors from the theme and recolors the shown rows, then, once the
+    /// editor has reread its settings, takes its scroll margin away again.
     ///
     /// # Arguments
     ///
     /// * `cx` - Item context.
     fn restyle(&mut self, cx: &mut Context<'_, Self>) {
-        self.style = CodeStyle::read(cx);
+        self.palette = CodePalette::from_theme(cx.theme());
+        self.paint(true, cx);
+        let editor = self.editor.clone();
+        cx.defer(move |cx| editor.update(cx, hold_line_at_top));
         cx.notify();
-    }
-
-    /// Returns what the tab paints its lines with.
-    #[must_use]
-    pub(crate) const fn style(&self) -> &CodeStyle {
-        &self.style
     }
 
     /// Returns the entry of the function the tab shows, `None` for measured lines.
@@ -253,60 +492,58 @@ impl DecompileItem {
         self.entry
     }
 
-    /// Returns the lines the tab shows, once decompiled.
+    /// Returns which view of its function the tab shows.
+    #[must_use]
+    pub const fn form(&self) -> Form {
+        self.form
+    }
+
+    /// Returns the lines the tab shows, once built.
     #[must_use]
     pub const fn code(&self) -> Option<&Arc<CodeLines>> {
         self.code.as_ref()
     }
 
-    /// Returns the scroll handle of the tab's line list.
+    /// Returns the tab's editor.
     #[must_use]
-    pub const fn code_scroll(&self) -> &UniformListScrollHandle {
-        &self.scroll
+    pub const fn editor(&self) -> &Entity<Editor> {
+        &self.editor
     }
 
-    /// Returns the height in logical pixels the line list was last painted at, zero before
+    /// Returns the height in logical pixels the editor was last painted at, zero before
     /// its first paint.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Application context reading the editor.
     #[must_use]
-    pub fn painted_height(&self) -> Pixels {
-        self.scroll.0.borrow().base_handle.bounds().size.height
+    pub fn painted_height(&self, cx: &App) -> Pixels {
+        self.editor
+            .read(cx)
+            .last_bounds()
+            .map_or(px(0.0), |bounds| bounds.size.height)
     }
 
-    /// Returns the zero-based index of the line at the top of the tab: the line a scroll
-    /// not yet laid out asks for, else the first line the scroll offset shows whole or in
-    /// part.
+    /// Returns the zero-based index of the line at the top of the tab: the line a jump not
+    /// yet painted asks for, else the row the editor last scrolled to.
     #[must_use]
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "a floored, non-negative, finite row count of a laid-out list"
-    )]
     pub fn top_line(&self) -> usize {
-        let state = self.scroll.0.borrow();
-        if let Some(deferred) = &state.deferred_scroll_to_item {
-            return deferred.item_index;
-        }
-        let rows = (-state.base_handle.offset().y / self.style.row_height).floor();
-        if rows.is_finite() && rows > 0.0 {
-            rows as usize
-        } else {
-            0
-        }
+        self.pending.map_or(self.top, |jump| jump.line)
     }
 
-    /// Returns whether the background decompile is still running.
+    /// Returns whether the background build is still running.
     #[must_use]
     pub const fn is_decompiling(&self) -> bool {
         self.decompiling
     }
 
-    /// Returns the ticket of the tab's decompile generation.
+    /// Returns the ticket of the tab's build generation.
     #[must_use]
     pub const fn ticket(&self) -> u64 {
         self.epoch.seq()
     }
 
-    /// Returns whether decompile `ticket` is on screen, cancelled, or superseded.
+    /// Returns whether build `ticket` is on screen, cancelled, or superseded.
     ///
     /// # Arguments
     ///
@@ -316,34 +553,61 @@ impl DecompileItem {
         !self.decompiling || self.epoch.seq() > ticket
     }
 
-    /// Scrolls line `line` to the top of the tab without a nav-history entry, also when
-    /// the line is already on screen.
+    /// Scrolls line `line` to the top of the tab at its next paint, without a nav-history
+    /// entry, also when the line is already on screen.
     ///
     /// # Arguments
     ///
     /// * `line` - Zero-based index of the shown line.
-    pub fn scroll_to(&self, line: usize) {
-        self.scroll.scroll_to_item_strict(line, ScrollStrategy::Top);
+    pub fn scroll_to(&mut self, line: usize) {
+        self.pending = Some(Jump {
+            line,
+            cursor: false,
+        });
     }
 
-    /// Records where the tab is in the nav history, then scrolls line `line` to its top.
+    /// Records where the tab is in the nav history, then moves the cursor to line `line`
+    /// and scrolls it to the top of the tab.
     ///
     /// # Arguments
     ///
     /// * `line` - Zero-based index of the shown line.
     /// * `cx` - Item context.
     pub fn jump_to_line(&mut self, line: usize, cx: &mut Context<'_, Self>) {
-        self.push_location(cx);
-        self.scroll_to(line);
+        self.editor
+            .update(cx, |editor, cx| editor.create_nav_history_entry(cx));
+        self.pending = Some(Jump { line, cursor: true });
         cx.notify();
     }
 
-    /// Follows the link `target` of line `line_ix` of `view`, shown as line `row_ix`: a
-    /// function opens in the preview tab and this tab stays, a label scrolls to its line.
+    /// Applies a jump: moves the cursor when it asks, and anchors the editor's top at the
+    /// line's buffer row, wherever folds and wraps put it on screen.
     ///
     /// # Arguments
     ///
-    /// * `view` - The view whose token was clicked.
+    /// * `jump` - The jump.
+    /// * `window` - Window the tab is in.
+    /// * `cx` - Item context.
+    fn apply(&self, jump: Jump, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let at = Point::new(u32::try_from(jump.line).unwrap_or(u32::MAX), 0);
+        self.editor.update(cx, |editor, cx| {
+            if jump.cursor {
+                let effects = SelectionEffects::no_scroll().nav_history(false);
+                editor.change_selections(effects, window, cx, |s| s.select_ranges([at..at]));
+            }
+            let anchor = editor.buffer().read(cx).snapshot(cx).anchor_before(at);
+            let offset = gpui::point(0.0, 0.0);
+            editor.set_scroll_anchor(ScrollAnchor { anchor, offset }, window, cx);
+        });
+    }
+
+    /// Follows the link `target` of line `line_ix` of `view`, shown as line `row_ix`: a
+    /// function opens in the preview tab and this tab stays, an address or a definition
+    /// moves to its line, an import is named in the status line.
+    ///
+    /// # Arguments
+    ///
+    /// * `view` - The view whose token is followed.
     /// * `target` - The token's link.
     /// * `(row_ix, line_ix)` - Shown line index and its line in `view`.
     /// * `window` - Window the tab is in.
@@ -357,22 +621,49 @@ impl DecompileItem {
         cx: &mut Context<'_, Self>,
     ) {
         match resolve_ref_click(view, target) {
-            ClickOutcome::OpenFunction(callee) => self.open_callee(callee, window, cx),
+            ClickOutcome::OpenFunction(callee) => self.open_beside(callee, self.form, window, cx),
             ClickOutcome::ScrollToLine(def) => {
                 self.jump_to_line(row_ix.saturating_sub(line_ix).saturating_add(def), cx);
+            }
+            ClickOutcome::Import(slot) => {
+                let name = view
+                    .tokens(line_ix)
+                    .find(|(_, _, link)| *link == Some(target))
+                    .and_then(|(span, _, _)| view.line(line_ix)?.get(span))
+                    .unwrap_or("this name");
+                self.say(format!("{name} is an import, at slot {slot:#x}"), cx);
             }
             ClickOutcome::None => {}
         }
     }
 
-    /// Keeps this tab and opens `callee` in the preview tab, once the click's update ends.
+    /// Shows `status` in the status line of the tab's binary.
     ///
     /// # Arguments
     ///
-    /// * `callee` - Entry of the function to open.
+    /// * `status` - The line.
+    /// * `cx` - Application context.
+    fn say(&self, status: String, cx: &mut App) {
+        let binary = self
+            .workspace
+            .upgrade()
+            .and_then(|workspace| workspace.read(cx).panel::<FunctionsPanel>(cx))
+            .map(|panel| panel.read(cx).binary().clone());
+        if let Some(binary) = binary {
+            binary.update(cx, |binary, cx| binary.set_status(status, cx));
+        }
+    }
+
+    /// Keeps this tab and opens view `form` of the function at `entry` in the preview tab,
+    /// once the current update ends.
+    ///
+    /// # Arguments
+    ///
+    /// * `entry` - Entry of the function to open.
+    /// * `form` - Which view of it.
     /// * `window` - Window the tab is in.
     /// * `cx` - Item context.
-    fn open_callee(&self, callee: u64, window: &Window, cx: &mut Context<'_, Self>) {
+    fn open_beside(&self, entry: u64, form: Form, window: &Window, cx: &mut Context<'_, Self>) {
         let (workspace, loaded, id) = (self.workspace.clone(), self.loaded.clone(), cx.entity_id());
         window.defer(cx, move |window, cx| {
             let Some(workspace) = workspace.upgrade() else {
@@ -382,10 +673,10 @@ impl DecompileItem {
                 workspace
                     .active_pane()
                     .update(cx, |pane, _| pane.unpreview_item_if_preview(id));
-                open_function(
+                open_view(
                     workspace,
                     loaded,
-                    callee,
+                    (entry, form),
                     TabMode::Preview,
                     true,
                     window,
@@ -394,135 +685,51 @@ impl DecompileItem {
             });
         });
     }
-
-    /// Pushes the tab's function and top line onto the pane's nav history.
-    ///
-    /// # Arguments
-    ///
-    /// * `cx` - Item context.
-    fn push_location(&mut self, cx: &mut Context<'_, Self>) {
-        let top = self.top_line();
-        let data = NavData {
-            entry: self.entry,
-            top,
-        };
-        if let Some(history) = self.nav_history.as_mut() {
-            history.push(Some(data), u32::try_from(top).ok(), cx);
-        }
-    }
-
-    /// Builds the visible rows in `range` of the tab's line list.
-    ///
-    /// # Arguments
-    ///
-    /// * `range` - Visible shown-line index range requested by `uniform_list`.
-    /// * `_window` - Window painting the rows.
-    /// * `cx` - Item context.
-    ///
-    /// # Returns
-    ///
-    /// Styled line elements covering `range`.
-    fn render_rows(
-        &mut self,
-        range: Range<usize>,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) -> Vec<AnyElement> {
-        let Some(code) = self.code.clone() else {
-            return Vec::new();
-        };
-        let CodeStyle {
-            palette,
-            font,
-            row_height,
-            ..
-        } = &self.style;
-        let weak = cx.entity().downgrade();
-        range
-            .filter_map(|ix| {
-                let (view, line_ix) = code.get(ix)?;
-                let styled = style_view_line(view, line_ix, font, palette);
-                let text = StyledText::new(styled.text).with_runs(styled.runs);
-                let line = build_interactive_line(
-                    (ix, line_ix),
-                    text,
-                    styled.click_ranges,
-                    styled.click_refs,
-                    view.clone(),
-                    weak.clone(),
-                );
-                Some(
-                    div()
-                        .h(*row_height)
-                        .px(px(CODE_PAD_PX))
-                        .flex()
-                        .items_center()
-                        .whitespace_nowrap()
-                        .child(line)
-                        .into_any_element(),
-                )
-            })
-            .collect()
-    }
 }
 
-/// Wraps one [`StyledText`] row in an [`InteractiveText`] that follows its links.
+/// Returns the editor highlight a role's tokens are colored through.
+///
+/// Zed's [`HighlightKey`] is a closed enum with no key for a caller outside Zed's crates.
+/// `ConsoleAnsiHighlight(usize)` is the indexed key Zed itself colors a read-only editor
+/// with from outside a language (the debugger console); nothing else sets it in a code
+/// tab's editor, so one index per role is the tab's alone.
 ///
 /// # Arguments
 ///
-/// * `(row_ix, line_ix)` - Shown line index (also the element identifier) and its line in `view`.
-/// * `styled_text` - Highlighted line text and runs.
-/// * `click_ranges` - UTF-8 byte ranges of clickable tokens.
-/// * `click_refs` - Corroborated [`Ref`] targets matching `click_ranges`.
-/// * `view` - The view the line comes from.
-/// * `entity` - Weak handle to the tab.
-///
-/// # Returns
-///
-/// [`InteractiveText`] element wired to [`DecompileItem::follow`].
-fn build_interactive_line(
-    (row_ix, line_ix): (usize, usize),
-    styled_text: StyledText,
-    click_ranges: Vec<Range<usize>>,
-    click_refs: Vec<Ref>,
-    view: Arc<View>,
-    entity: WeakEntity<DecompileItem>,
-) -> InteractiveText {
-    let line = InteractiveText::new(("code-line", row_ix), styled_text);
-    if click_ranges.is_empty() {
-        return line;
-    }
-    line.on_click(click_ranges, move |range_ix, window, cx| {
-        let (Some(target), Some(entity)) = (click_refs.get(range_ix), entity.upgrade()) else {
-            return;
-        };
-        entity.update(cx, |item, cx| {
-            item.follow(&view, target, (row_ix, line_ix), window, cx);
-        });
-    })
-}
-
-/// Returns what a tab says when the engine decompiles nothing at `entry`, true of every
-/// reason it can have: no function there, no lifter for the code, an answer too large.
-///
-/// # Arguments
-///
-/// * `entry` - Entry the tab asked the engine for.
+/// * `role` - The role.
 #[must_use]
-pub fn no_decompile(entry: u64) -> String {
-    format!("borer has no decompile for {entry:#x}")
+pub const fn role_key(role: Role) -> HighlightKey {
+    HighlightKey::ConsoleAnsiHighlight(role.index())
 }
 
-/// Returns the card a tab shows when the engine decompiles nothing at `entry`.
-///
-/// It is a raised card whose label alone is in the error color, then what is true of every
-/// way the engine answers nothing, then the way back.
+/// Returns the whole rows of a scroll position: its floor, zero when negative or not
+/// finite.
 ///
 /// # Arguments
 ///
-/// * `entry` - Entry the tab asked the engine for.
+/// * `y` - The editor's vertical scroll position, in rows.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a floored, non-negative, finite row count"
+)]
+fn whole_rows(y: f64) -> usize {
+    if y.is_finite() && y > 0.0 {
+        y.floor() as usize
+    } else {
+        0
+    }
+}
+
+/// Returns the card a tab shows when the engine builds no `form` view: a raised card whose
+/// heading alone is in the error color, then the engine's reason, then the way back.
+///
+/// # Arguments
+///
+/// * `form` - Which view was not built.
+/// * `why` - The engine's reason.
 /// * `cx` - Application context reading the theme and the keymap.
-fn failure_card(entry: u64, cx: &App) -> Div {
+fn failure_card(form: Form, why: &str, cx: &App) -> Div {
     let colors = cx.theme().colors();
     v_flex()
         .m(px(12.0))
@@ -534,20 +741,20 @@ fn failure_card(entry: u64, cx: &App) -> Div {
         .bg(colors.surface_background)
         .font(ThemeSettings::get_global(cx).ui_font.clone())
         .child(
-            Label::new("Decompile failed")
+            Label::new(form.failed())
                 .weight(FontWeight::SEMIBOLD)
                 .color(Color::Error),
         )
         .child(
-            Label::new(no_decompile(entry))
+            Label::new(SharedString::from(why.to_owned()))
                 .buffer_font(cx)
                 .color(Color::Muted),
         )
         .child(hint_row(BACK_HINT, cx))
 }
 
-/// Shows the function at `entry` of `loaded` in the workspace's active pane: activates its
-/// tab when one is open, else opens one as `mode` says.
+/// Shows the decompile view of the function at `entry` of `loaded` in the workspace's
+/// active pane, as [`open_view`] does.
 ///
 /// # Arguments
 ///
@@ -567,11 +774,43 @@ pub fn open_function(
     window: &mut Window,
     cx: &mut Context<'_, Workspace>,
 ) {
+    open_view(
+        workspace,
+        loaded,
+        (entry, Form::Decompile),
+        mode,
+        focus,
+        window,
+        cx,
+    );
+}
+
+/// Shows one view of the function at `entry` of `loaded` in the workspace's active pane:
+/// activates its tab when one is open, else opens one as `mode` says.
+///
+/// # Arguments
+///
+/// * `workspace` - The workspace.
+/// * `loaded` - Binary the function belongs to.
+/// * `(entry, form)` - Entry virtual address of the function, and which view of it.
+/// * `mode` - Whether a new tab is the preview tab or a permanent one.
+/// * `focus` - Whether the tab takes keyboard focus.
+/// * `window` - Window the workspace is in.
+/// * `cx` - Workspace context.
+pub fn open_view(
+    workspace: &mut Workspace,
+    loaded: Arc<LoadedBinary>,
+    (entry, form): (u64, Form),
+    mode: TabMode,
+    focus: bool,
+    window: &mut Window,
+    cx: &mut Context<'_, Workspace>,
+) {
     let weak = workspace.weak_handle();
     let pane = workspace.active_pane().clone();
     let existing = pane.read(cx).items_of_type::<DecompileItem>().find(|item| {
         let item = item.read(cx);
-        item.entry == Some(entry) && Arc::ptr_eq(&item.loaded, &loaded)
+        item.entry == Some(entry) && item.form == form && Arc::ptr_eq(&item.loaded, &loaded)
     });
     pane.update(cx, |pane, cx| {
         if let Some(item) = existing {
@@ -587,7 +826,7 @@ pub fn open_function(
             TabMode::Preview => pane.close_current_preview_item(window, cx),
             TabMode::Permanent => None,
         };
-        let item = cx.new(|cx| DecompileItem::function(weak, loaded, entry, cx));
+        let item = cx.new(|cx| DecompileItem::function(weak, loaded, (entry, form), window, cx));
         let id = item.entity_id();
         pane.add_item(Box::new(item), true, focus, at, window, cx);
         if mode == TabMode::Preview {
@@ -602,7 +841,7 @@ pub fn open_function(
 ///
 /// * `workspace` - The workspace.
 /// * `loaded` - Binary the lines come from.
-/// * `code` - The lines.
+/// * `code` - The lines; their text buffer is built in the background.
 /// * `window` - Window the workspace is in.
 /// * `cx` - Workspace context.
 ///
@@ -617,7 +856,9 @@ pub fn open_lines(
     cx: &mut Context<'_, Workspace>,
 ) -> Entity<DecompileItem> {
     let weak = workspace.weak_handle();
-    let item = cx.new(|cx| DecompileItem::new(weak, loaded, None, Some(code), cx));
+    let shown = (None, Form::Decompile);
+    let build = move || Ok(code);
+    let item = cx.new(|cx| DecompileItem::new(weak, loaded, shown, build, window, cx));
     workspace.add_item_to_active_pane(Box::new(item.clone()), None, true, window, cx);
     item
 }
@@ -625,8 +866,8 @@ pub fn open_lines(
 impl EventEmitter<()> for DecompileItem {}
 
 impl Focusable for DecompileItem {
-    fn focus_handle(&self, _cx: &App) -> FocusHandle {
-        self.focus_handle.clone()
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.editor.focus_handle(cx)
     }
 }
 
@@ -651,7 +892,10 @@ impl Item for DecompileItem {
     }
 
     fn tab_icon(&self, _window: &Window, _cx: &App) -> Option<Icon> {
-        Some(Icon::new(IconName::Code))
+        Some(Icon::new(match self.form {
+            Form::Decompile => IconName::Code,
+            Form::Listing => IconName::Hash,
+        }))
     }
 
     fn tab_tooltip_text(&self, _cx: &App) -> Option<SharedString> {
@@ -662,30 +906,27 @@ impl Item for DecompileItem {
         &mut self,
         history: ItemNavHistory,
         _window: &mut Window,
-        _cx: &mut Context<'_, Self>,
+        cx: &mut Context<'_, Self>,
     ) {
-        self.nav_history = Some(history);
+        self.nav_history = Some(history.clone());
+        self.editor
+            .update(cx, |editor, _| editor.set_nav_history(Some(history)));
     }
 
     fn navigate(
         &mut self,
         data: Arc<dyn Any + Send>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> bool {
-        let Some(&NavData { entry, top }) = data.downcast_ref::<NavData>() else {
-            return false;
-        };
-        if entry != self.entry || top == self.top_line() {
-            return false;
-        }
-        self.scroll_to(top);
-        cx.notify();
-        true
+        self.pending = None;
+        self.editor
+            .update(cx, |editor, cx| editor.navigate(data, window, cx))
     }
 
-    fn deactivated(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) {
-        self.push_location(cx);
+    fn deactivated(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.editor
+            .update(cx, |editor, cx| editor.deactivated(window, cx));
     }
 
     fn handle_drop(
@@ -700,39 +941,294 @@ impl Item for DecompileItem {
 }
 
 impl Render for DecompileItem {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let (background, text, muted) = {
-            let colors = cx.theme().colors();
-            (colors.editor_background, colors.text, colors.text_muted)
-        };
-        let line_count = self.code.as_ref().map_or(0, |c| c.len());
-        let body = match (line_count, self.decompiling, self.entry) {
-            (1.., _, _) => uniform_list("code-view", line_count, cx.processor(Self::render_rows))
-                .track_scroll(&self.scroll)
-                .size_full()
-                .into_any_element(),
-            (0, false, Some(entry)) if self.code.is_none() => {
-                failure_card(entry, cx).into_any_element()
-            }
-            (0, decompiling, _) => div()
-                .p(px(12.0))
-                .text_color(muted)
-                .child(if decompiling {
-                    "Decompiling..."
-                } else {
-                    "No lines."
-                })
-                .into_any_element(),
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        if let Some(jump) = self.pending.take() {
+            self.apply(jump, window, cx);
+        }
+        let muted = cx.theme().colors().text_muted;
+        let note = |note: &'static str| div().p(px(12.0)).text_color(muted).child(note);
+        let over = match (&self.code, &self.failed) {
+            (Some(_), _) => None,
+            (None, Some(why)) => Some(failure_card(self.form, why, cx)),
+            (None, None) if self.decompiling => Some(note(self.form.building())),
+            (None, None) => Some(note("No lines.")),
         };
         div()
-            .track_focus(&self.focus_handle)
             .key_context("DecompileView")
+            .relative()
             .size_full()
-            .bg(background)
-            .text_color(text)
-            .font(self.style.font.clone())
-            .text_size(self.style.size)
-            .line_height(self.style.row_height)
-            .child(body)
+            .child(self.editor.clone())
+            .children(over.map(|over| div().absolute().top_0().left_0().child(over)))
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test; gpui::test hides each body in an undocumented fn"
+)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::ops::Range;
+    use std::sync::Arc;
+
+    use editor::ToPoint as _;
+    use gpui::{Entity, TestAppContext, VisualTestContext};
+    use theme::ActiveTheme as _;
+    use workspace::Workspace;
+
+    use borer_engine::analysis::render::{FunctionOrder, function_rows};
+    use borer_engine::analysis::{Analysis, Overlay};
+    use borer_engine::program::{Arch, Feature, Program, Section};
+    use language::Point;
+
+    use super::{DecompileItem, Form, TabMode, open_view, role_key};
+    use crate::app_view::tests::{CALLER, init, open, sample};
+    use crate::code_view::{CodePalette, Role};
+    use crate::worker::{LoadedBinary, decompile_blocking, listing_blocking, load_binary_blocking};
+
+    /// Most functions of the test executable whose tabs are checked.
+    const TABS: usize = 12;
+
+    /// Opens view `form` of the function at `entry` and returns its tab once built.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no code tab is active.
+    pub(crate) fn open_tab(
+        workspace: &Entity<Workspace>,
+        loaded: &Arc<LoadedBinary>,
+        (entry, form): (u64, Form),
+        cx: &mut VisualTestContext,
+    ) -> Entity<DecompileItem> {
+        let loaded = loaded.clone();
+        workspace.update_in(cx, |workspace, window, cx| {
+            open_view(
+                workspace,
+                loaded,
+                (entry, form),
+                TabMode::Preview,
+                true,
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        workspace
+            .read_with(cx, |workspace, cx| {
+                workspace.active_item_as::<DecompileItem>(cx)
+            })
+            .unwrap()
+    }
+
+    /// Each tab's buffer holds its view's text byte for byte, decompile and listing alike,
+    /// for the first functions of the test executable.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a tab's text differs from its view's spelling.
+    #[gpui::test]
+    fn every_tab_holds_its_view_byte_for_byte(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (workspace, cx) = open(&app_state, cx);
+        let exe = std::env::current_exe().unwrap();
+        let loaded = load_binary_blocking(exe).unwrap();
+        let entries: Vec<u64> = loaded
+            .initial_rows
+            .rows
+            .iter()
+            .take(TABS)
+            .map(|r| r.entry)
+            .collect();
+        assert!(!entries.is_empty());
+        for entry in entries {
+            for form in [Form::Decompile, Form::Listing] {
+                let want = match form {
+                    Form::Decompile => decompile_blocking(&loaded, entry),
+                    Form::Listing => listing_blocking(&loaded, entry).ok(),
+                }
+                .map(|view| view.spell());
+                let tab = open_tab(&workspace, &loaded, (entry, form), cx);
+                let got = tab.read_with(cx, |item, cx| {
+                    item.code()?;
+                    Some(item.editor().read(cx).text(cx))
+                });
+                assert_eq!(got, want, "{form:?} of {entry:#x}");
+            }
+        }
+    }
+
+    /// Returns every colored span of `tab`'s editor, as its row, bytes and role's index,
+    /// checking each highlight's color and that none is underlined.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a highlight spans rows, is underlined or has another role's color.
+    fn colored(tab: &Entity<DecompileItem>, cx: &mut VisualTestContext) -> BTreeSet<Span> {
+        tab.read_with(cx, |item, cx| {
+            let palette = CodePalette::from_theme(cx.theme());
+            let editor = item.editor().read(cx);
+            let snapshot = editor.buffer().read(cx).snapshot(cx);
+            let mut got = BTreeSet::new();
+            for role in Role::ALL {
+                let Some((style, ranges)) = editor.text_highlights(role_key(role), cx) else {
+                    continue;
+                };
+                assert!(style.underline.is_none());
+                assert_eq!(style.color, Some(palette.color(role)));
+                for range in ranges {
+                    let (a, b) = (
+                        range.start.to_point(&snapshot),
+                        range.end.to_point(&snapshot),
+                    );
+                    assert_eq!(a.row, b.row);
+                    let wide = |n: u32| usize::try_from(n).unwrap();
+                    got.insert((wide(a.row), wide(a.column), wide(b.column), role.index()));
+                }
+            }
+            got
+        })
+    }
+
+    /// One colored span: its row, its first byte, one past its last, its role's index.
+    type Span = (usize, usize, usize, usize);
+
+    /// Returns the span of every token of `tab`'s rows `rows` that has a role.
+    fn tokens(
+        tab: &Entity<DecompileItem>,
+        rows: Range<usize>,
+        cx: &mut VisualTestContext,
+    ) -> BTreeSet<Span> {
+        tab.read_with(cx, |item, _| {
+            let code = item.code().unwrap();
+            let mut want = BTreeSet::new();
+            for row in rows.start..rows.end.min(code.len()) {
+                let (view, line) = code.get(row).unwrap();
+                for (span, kind, link) in view.tokens(line) {
+                    if let Some(role) = Role::of(kind, link) {
+                        want.insert((row, span.start, span.end, role.index()));
+                    }
+                }
+            }
+            want
+        })
+    }
+
+    /// Every token but whitespace is colored over exactly its bytes, in the color its role
+    /// takes and with no underline, in a decompile tab and in a listing tab.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a highlight is missing, extra, shifted or in another color.
+    #[gpui::test]
+    fn every_token_is_colored_over_its_own_bytes(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (workspace, cx) = open(&app_state, cx);
+        let loaded = sample();
+        for form in [Form::Decompile, Form::Listing] {
+            let tab = open_tab(&workspace, &loaded, (CALLER, form), cx);
+            let want = tokens(&tab, 0..usize::MAX, cx);
+            assert!(!want.is_empty());
+            assert_eq!(colored(&tab, cx), want, "{form:?}");
+        }
+    }
+
+    /// With rows folded above it, a jump still puts its buffer row at the top, and that
+    /// row's tokens are colored.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the fold shifts the jump or the coloring by display rows.
+    #[gpui::test]
+    fn a_fold_above_a_line_moves_neither_jump_nor_color(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (workspace, cx) = open(&app_state, cx);
+        let tab = open_tab(&workspace, &sample(), (CALLER, Form::Listing), cx);
+        let lines = tab.read_with(cx, |item, _| item.code().unwrap().len());
+        let target = lines - 2;
+        assert!(target > 6);
+        tab.update_in(cx, |item, window, cx| {
+            item.editor().update(cx, |editor, cx| {
+                editor.fold_ranges(vec![Point::new(1, 0)..Point::new(5, 0)], false, window, cx);
+            });
+            item.jump_to_line(target, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+        assert_eq!(tab.read_with(cx, |item, _| item.top_line()), target);
+        let row = tokens(&tab, target..target + 1, cx);
+        assert!(!row.is_empty());
+        assert!(row.is_subset(&colored(&tab, cx)));
+    }
+
+    /// A person's scroll margin does not reach a code tab's editor, before or after a
+    /// settings change, so a line put at the top stays at the top.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the editor keeps a margin.
+    #[gpui::test]
+    fn a_code_tab_keeps_no_scroll_margin(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (workspace, cx) = open(&app_state, cx);
+        let tab = open_tab(&workspace, &sample(), (CALLER, Form::Decompile), cx);
+        let margin = |cx: &mut VisualTestContext| {
+            tab.read_with(cx, |item, cx| {
+                item.editor().read(cx).vertical_scroll_margin()
+            })
+        };
+        assert_eq!(margin(cx), 0);
+        cx.update(|_, cx| {
+            gpui::BorrowAppContext::update_global(cx, |store: &mut settings::SettingsStore, cx| {
+                store.update_user_settings(cx, |content| {
+                    content.editor.vertical_scroll_margin = Some(5.0);
+                });
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(margin(cx), 0);
+    }
+
+    /// A listing the engine cannot build says the engine's reason, not that no function
+    /// starts there.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the tab says anything else.
+    #[gpui::test]
+    fn a_listing_that_cannot_be_built_says_why(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (workspace, cx) = open(&app_state, cx);
+        let sections = vec![Section::mapped(".text", 0x1000, 0, 0x10, false, true)];
+        let program = Program::raw(
+            vec![0xc3; 0x10],
+            Arch::Unknown,
+            0x1000,
+            Some(0x1000),
+            sections,
+        );
+        let why = program.isa_for(Feature::Disasm).unwrap_err();
+        let analysis = Analysis::compute(&program);
+        let overlay = Overlay::default();
+        let rows = function_rows(
+            &analysis,
+            &overlay,
+            None,
+            FunctionOrder::Address,
+            0,
+            usize::MAX,
+        );
+        let loaded = Arc::new(LoadedBinary {
+            path: "unknown.bin".into(),
+            program: Arc::new(program),
+            analysis: Arc::new(analysis),
+            overlay: Arc::new(overlay),
+            initial_rows: Arc::new(rows),
+        });
+        let tab = open_tab(&workspace, &loaded, (0x1000, Form::Listing), cx);
+        let said = tab.read_with(cx, |item, _| item.failed.clone());
+        assert_eq!(said, Some(why));
     }
 }

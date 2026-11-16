@@ -17,12 +17,9 @@ use borer_app::actions::{FollowSystemTheme, ToggleTheme};
 use borer_app::app_settings::BORER_THEME;
 use borer_app::app_view::{configure, new_workspace, set_data_dir};
 use borer_app::binary::{Binary, SettingsNotice, StatusLine};
-use borer_app::code_view::{CodePalette, IMPORT_KEYS, style_view_line, theme_keys};
+use borer_app::code_view::{CodePalette, Role};
 use borer_app::decompile_item::code_row_height;
-use borer_engine::analysis::decompile::view::view_of;
-use borer_engine::analysis::{Analysis, EnumSource, Overlay};
-use borer_engine::program::{Arch, BinaryFormat, Program, Section, checked_metadata};
-use borer_engine::view::{Kind, Ref};
+use borer_engine::program::checked_metadata;
 use fs::Fs as _;
 use gpui::{
     App, AppContext as _, AssetSource as _, BorrowAppContext as _, Hsla, Refineable as _, Rgba,
@@ -191,51 +188,6 @@ fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
         .sqrt()
 }
 
-/// Returns every token kind; the match stops compiling when the engine adds one.
-fn every_kind() -> [Kind; 17] {
-    let all = [
-        Kind::Space,
-        Kind::Comment,
-        Kind::Keyword,
-        Kind::Mnemonic,
-        Kind::Register,
-        Kind::Type,
-        Kind::Function,
-        Kind::Variable,
-        Kind::Global,
-        Kind::Field,
-        Kind::Label,
-        Kind::Address,
-        Kind::String,
-        Kind::Number,
-        Kind::Constant,
-        Kind::Punct,
-        Kind::Text,
-    ];
-    for kind in all {
-        match kind {
-            Kind::Space
-            | Kind::Comment
-            | Kind::Keyword
-            | Kind::Mnemonic
-            | Kind::Register
-            | Kind::Type
-            | Kind::Function
-            | Kind::Variable
-            | Kind::Global
-            | Kind::Field
-            | Kind::Label
-            | Kind::Address
-            | Kind::String
-            | Kind::Number
-            | Kind::Constant
-            | Kind::Punct
-            | Kind::Text => {}
-        }
-    }
-    all
-}
-
 /// Points Zed's paths at one data directory of the tests, once per process, so no test
 /// resolves the person's own Zed settings.
 fn use_test_data_dir() {
@@ -334,23 +286,20 @@ fn brand_tokens_pin_the_surfaces() {
     }
 }
 
-/// Every token kind and the import role take their own key of the theme, in both themes,
-/// with no fallback taken.
+/// Every role takes its own key of the theme, in both themes, with no fallback taken, and
+/// an import is colored apart from a function of the binary.
 #[test]
 fn every_token_kind_resolves_to_its_own_key() {
     for (content, theme) in themes() {
         let palette = CodePalette::from_theme(&theme);
-        for kind in every_kind() {
-            let key = theme_keys(kind)[0];
+        for role in Role::ALL {
+            let key = role.keys()[0];
             let color = syntax_color(&theme, key);
             assert!(color.is_some(), "{} sets no color for {key}", content.name);
-            assert_eq!(color, Some(palette.color_of(kind, None)), "{kind:?}");
+            assert_eq!(color, Some(palette.color(role)), "{role:?}");
         }
-        let import = syntax_color(&theme, IMPORT_KEYS[0]);
-        assert!(import.is_some(), "{} sets no import color", content.name);
-        let call = Some(&Ref::Import(0x1000));
-        assert_eq!(import, Some(palette.color_of(Kind::Function, call)));
-        assert_ne!(palette.import, palette.function, "{}", content.name);
+        let (import, function) = (palette.color(Role::Import), palette.color(Role::Function));
+        assert_ne!(import, function, "{}", content.name);
     }
 }
 
@@ -663,30 +612,4 @@ fn the_buffer_font_draws_no_ligature() {
             assert_eq!(glyphs(pair), alone, "{pair} shapes as a ligature");
         }
     });
-}
-
-/// A linked token draws without an underline, and stays a link.
-#[test]
-fn links_are_not_underlined_at_rest() {
-    let sections = vec![Section::mapped(".text", 0x1000, 0, 0x10, false, true)];
-    let mut program = Program::raw(
-        vec![0xc3; 0x10],
-        Arch::X86_64,
-        0x1000,
-        Some(0x1000),
-        sections,
-    );
-    program.format = BinaryFormat::Pe;
-    let analysis = Analysis::compute(&program);
-    let overlay = Overlay {
-        enum_source: EnumSource::Binary,
-        ..Overlay::default()
-    };
-    let text = "void sub_1000(void) {\n    goto L_1000;\nL_1000:\n    return;\n}\n";
-    let built = view_of(&program, &analysis, &overlay, 0x1000, text).expect("the view builds");
-    let (_, theme) = themes().remove(0);
-    let palette = CodePalette::from_theme(&theme);
-    let line = style_view_line(&built, 1, &gpui::font(".ZedMono"), &palette);
-    assert_eq!(line.click_refs, vec![Ref::Address(0x1000)]);
-    assert!(line.runs.iter().all(|run| run.underline.is_none()));
 }

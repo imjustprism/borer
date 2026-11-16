@@ -443,10 +443,10 @@ pub(crate) mod tests {
     use crate::worker::LoadedBinary;
 
     /// Entry of the sample program's caller, which calls [`CALLEE`].
-    const CALLER: u64 = 0x1000;
+    pub(crate) const CALLER: u64 = 0x1000;
 
     /// Entry of the sample program's callee.
-    const CALLEE: u64 = 0x1030;
+    pub(crate) const CALLEE: u64 = 0x1030;
 
     /// Points Zed's paths at one data directory of the tests, once per process, so no test
     /// resolves the person's own Zed settings.
@@ -554,7 +554,10 @@ pub(crate) mod tests {
 
     /// Returns the function and top line of the active decompile tab, once the work settled
     /// and a frame laid the tab out.
-    fn shown(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<(u64, usize)> {
+    pub(crate) fn shown(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+    ) -> Option<(u64, usize)> {
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear(cx));
         workspace.read_with(cx, |workspace, cx| {

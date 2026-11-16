@@ -121,7 +121,8 @@ impl Harness {
         });
     }
 
-    /// Scrolls one step of `run`, recording frame intervals, until 10 seconds pass.
+    /// Scrolls one step of `run`, recording frame intervals, until 10 seconds pass; a code
+    /// run waits, uncounted, until its tab's text is built.
     ///
     /// # Arguments
     ///
@@ -130,6 +131,15 @@ impl Harness {
     /// * `cx` - Harness context.
     fn scroll_step(&mut self, mut run: ScrollRun, window: &mut Window, cx: &mut Context<'_, Self>) {
         if !self.epoch.is_current(run.ticket, &run.cancel) {
+            return;
+        }
+        let building = self
+            .item(cx)
+            .is_some_and(|item| item.read(cx).is_decompiling());
+        if run.code && building {
+            cx.on_next_frame(window, move |this, window, cx| {
+                this.scroll_step(run, window, cx);
+            });
             return;
         }
         let now = now_instant();
@@ -193,7 +203,7 @@ impl Harness {
         let kind = if run.code { "code" } else { "list" };
         let painted = if run.code {
             self.item(cx)
-                .map_or(gpui::px(0.0), |item| item.read(cx).painted_height())
+                .map_or(gpui::px(0.0), |item| item.read(cx).painted_height(cx))
         } else {
             self.panel(cx)
                 .map_or(gpui::px(0.0), |panel| panel.read(cx).painted_height(cx))

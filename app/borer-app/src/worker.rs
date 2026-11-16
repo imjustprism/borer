@@ -6,10 +6,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use borer_engine::analysis::decompile::view::view;
-use borer_engine::analysis::render::{FunctionOrder, FunctionRows, function_rows};
+use borer_engine::analysis::render::{
+    Bytes, FunctionOrder, FunctionRows, disasm_view, function_rows,
+};
 use borer_engine::analysis::{Analysis, EnumSource, Overlay};
 use borer_engine::cancel::Cancel;
-use borer_engine::program::Program;
+use borer_engine::program::{Feature, Program};
 use borer_engine::view::View;
 use gpui::{App, Task};
 
@@ -168,6 +170,68 @@ pub fn filter_rows_blocking(loaded: &LoadedBinary, filter: &str) -> FunctionRows
 #[must_use]
 pub fn decompile_blocking(loaded: &LoadedBinary, entry: u64) -> Option<Arc<View>> {
     view(&loaded.program, &loaded.analysis, &loaded.overlay, entry)
+}
+
+/// Most instructions a listing shows; a cut listing ends with the engine's
+/// `# instruction cap` line.
+pub const LISTING_MAX: usize = 65_536;
+
+/// Returns what a tab says when no function starts at `entry`.
+///
+/// # Arguments
+///
+/// * `entry` - The address asked for.
+#[must_use]
+pub fn no_function(entry: u64) -> String {
+    format!("No function starts at {entry:#x}.")
+}
+
+/// Builds the decompile view of the function at `entry` in `loaded`, or says why none.
+///
+/// Must be called inside [`spawn_engine`].
+///
+/// # Arguments
+///
+/// * `loaded` - Previously loaded binary state.
+/// * `entry` - Entry virtual address of the function.
+///
+/// # Errors
+///
+/// Returns that no function starts at `entry`, or that the engine built no decompile view
+/// of it.
+pub fn decompile_or_why(loaded: &LoadedBinary, entry: u64) -> Result<Arc<View>, String> {
+    decompile_blocking(loaded, entry).ok_or_else(|| match loaded.analysis.function(entry) {
+        None => no_function(entry),
+        Some(_) => format!("The engine built no decompile view of the function at {entry:#x}."),
+    })
+}
+
+/// Builds the listing view of the function at `entry` in `loaded`, raw bytes shown, or
+/// says why none.
+///
+/// Must be called inside [`spawn_engine`] (or [`run_engine`] in `--headless` mode).
+///
+/// # Arguments
+///
+/// * `loaded` - Previously loaded binary state.
+/// * `entry` - Entry virtual address of the function.
+///
+/// # Errors
+///
+/// Returns the engine's words when the architecture has no disassembler, else that no
+/// function starts at `entry`, else that the listing outgrew what a view holds.
+pub fn listing_blocking(loaded: &LoadedBinary, entry: u64) -> Result<Arc<View>, String> {
+    let (p, a) = (&*loaded.program, &*loaded.analysis);
+    let built = disasm_view(p, a, &loaded.overlay, entry, LISTING_MAX, Bytes::Shown);
+    built
+        .map(Arc::new)
+        .ok_or_else(|| match (p.isa_for(Feature::Disasm), a.function(entry)) {
+            (Err(why), _) => why,
+            (Ok(_), None) => no_function(entry),
+            (Ok(_), Some(_)) => {
+                format!("The listing at {entry:#x} outgrew the 4 GiB a view holds.")
+            }
+        })
 }
 
 /// Monotonic request sequencer ensuring a late older background answer never
@@ -351,7 +415,7 @@ mod tests {
     /// # Panics
     ///
     /// Panics if another module names `Program::load`, `Analysis::compute`, a decompile
-    /// view or the function listing.
+    /// or listing view or the function listing.
     #[test]
     fn only_the_worker_names_engine_compute_calls() {
         let sources = [
@@ -373,6 +437,7 @@ mod tests {
             "Program::load",
             "Analysis::compute",
             "decompile::view",
+            "disasm_view(",
             "function_rows(",
         ];
         for (name, text) in sources {

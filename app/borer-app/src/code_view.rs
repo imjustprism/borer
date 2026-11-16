@@ -1,152 +1,173 @@
-//! Token-to-`TextRun` styling and clickable reference mapping for [`View`].
+//! What the code editor shows of a [`View`]: the lines, the role of each token and
+//! where a link goes, all read from the view's tokens.
 
 use std::ops::Range;
 use std::sync::Arc;
 
 use borer_engine::view::{Kind, Ref, View};
-use gpui::{Font, Hsla, SharedString, TextRun};
+use gpui::Hsla;
 use theme::Theme;
 
-/// Theme keys of an import's name, the callee outside the binary: borer's own key, then
-/// Zed's name for a function.
-pub const IMPORT_KEYS: &[&str] = &["borer.import", "function"];
+/// The role a token plays on screen, each one color: its kind, with a function that names
+/// an import apart from one of the binary's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// A name nothing resolves, and default text.
+    Text,
+    /// A comment.
+    Comment,
+    /// A C keyword or an assembly prefix.
+    Keyword,
+    /// An instruction mnemonic.
+    Mnemonic,
+    /// A machine register.
+    Register,
+    /// A type's name.
+    Type,
+    /// A function of the binary.
+    Function,
+    /// A function outside the binary: a [`Ref::Import`].
+    Import,
+    /// A parameter or a local.
+    Variable,
+    /// A global.
+    Global,
+    /// A named constant or an enum member.
+    Constant,
+    /// A struct or class field.
+    Field,
+    /// A block label.
+    Label,
+    /// A code or target address.
+    Address,
+    /// A string or character literal.
+    String,
+    /// A numeric literal.
+    Number,
+    /// An operator or punctuation.
+    Punct,
+}
 
-/// Returns the theme keys a token of `kind` takes its color from, in the order they are
-/// tried: borer's own key where Zed has no word for the role, then Zed's syntax name.
-///
-/// # Arguments
-///
-/// * `kind` - Token kind from [`View::tokens`].
-#[must_use]
-pub const fn theme_keys(kind: Kind) -> &'static [&'static str] {
-    match kind {
-        Kind::Space | Kind::Text => &["borer.text"],
-        Kind::Comment => &["comment"],
-        Kind::Keyword => &["keyword"],
-        Kind::Mnemonic => &["borer.mnemonic", "keyword"],
-        Kind::Register => &["borer.register", "variable.special"],
-        Kind::Type => &["type"],
-        Kind::Function => &["function"],
-        Kind::Variable => &["variable"],
-        Kind::Global => &["borer.global", "constant"],
-        Kind::Constant => &["constant"],
-        Kind::Field => &["borer.field", "property"],
-        Kind::Label => &["label"],
-        Kind::Address => &["borer.address", "comment"],
-        Kind::String => &["string"],
-        Kind::Number => &["number"],
-        Kind::Punct => &["punctuation"],
+/// How many roles there are.
+pub const ROLES: usize = 17;
+
+impl Role {
+    /// Every role, in declaration order: `Role::ALL[r as usize] == r`.
+    pub const ALL: [Self; ROLES] = [
+        Self::Text,
+        Self::Comment,
+        Self::Keyword,
+        Self::Mnemonic,
+        Self::Register,
+        Self::Type,
+        Self::Function,
+        Self::Import,
+        Self::Variable,
+        Self::Global,
+        Self::Constant,
+        Self::Field,
+        Self::Label,
+        Self::Address,
+        Self::String,
+        Self::Number,
+        Self::Punct,
+    ];
+
+    /// Returns the role of a token.
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - The token's kind.
+    /// * `link` - What the token links to.
+    ///
+    /// # Returns
+    ///
+    /// The role; `None` for whitespace, which keeps the editor's text color.
+    #[must_use]
+    pub const fn of(kind: Kind, link: Option<&Ref>) -> Option<Self> {
+        Some(match kind {
+            Kind::Space => return None,
+            Kind::Function if matches!(link, Some(Ref::Import(_))) => Self::Import,
+            Kind::Text => Self::Text,
+            Kind::Comment => Self::Comment,
+            Kind::Keyword => Self::Keyword,
+            Kind::Mnemonic => Self::Mnemonic,
+            Kind::Register => Self::Register,
+            Kind::Type => Self::Type,
+            Kind::Function => Self::Function,
+            Kind::Variable => Self::Variable,
+            Kind::Global => Self::Global,
+            Kind::Constant => Self::Constant,
+            Kind::Field => Self::Field,
+            Kind::Label => Self::Label,
+            Kind::Address => Self::Address,
+            Kind::String => Self::String,
+            Kind::Number => Self::Number,
+            Kind::Punct => Self::Punct,
+        })
+    }
+
+    /// Returns the theme keys the role takes its color from, in the order they are tried:
+    /// borer's own key where Zed has no word for the role, then Zed's syntax name.
+    #[must_use]
+    pub const fn keys(self) -> &'static [&'static str] {
+        match self {
+            Self::Text => &["borer.text"],
+            Self::Comment => &["comment"],
+            Self::Keyword => &["keyword"],
+            Self::Mnemonic => &["borer.mnemonic", "keyword"],
+            Self::Register => &["borer.register", "variable.special"],
+            Self::Type => &["type"],
+            Self::Function => &["function"],
+            Self::Import => &["borer.import", "function"],
+            Self::Variable => &["variable"],
+            Self::Global => &["borer.global", "constant"],
+            Self::Constant => &["constant"],
+            Self::Field => &["borer.field", "property"],
+            Self::Label => &["label"],
+            Self::Address => &["borer.address", "comment"],
+            Self::String => &["string"],
+            Self::Number => &["number"],
+            Self::Punct => &["punctuation"],
+        }
+    }
+
+    /// Returns the role's place in [`Role::ALL`] and in a [`CodePalette`].
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self as usize
     }
 }
 
-/// Resolved colors for every [`Kind`] token produced by [`borer_engine::view`].
-#[derive(Debug, Clone, Copy)]
-pub struct CodePalette {
-    /// Default text and whitespace color.
-    pub text: Hsla,
-    /// Comment color.
-    pub comment: Hsla,
-    /// C keyword or assembly prefix color.
-    pub keyword: Hsla,
-    /// Instruction mnemonic color.
-    pub mnemonic: Hsla,
-    /// Machine register color.
-    pub register: Hsla,
-    /// Type name color.
-    pub ty: Hsla,
-    /// Function color.
-    pub function: Hsla,
-    /// Import color: a function token whose link is [`Ref::Import`].
-    pub import: Hsla,
-    /// Parameter or local variable color.
-    pub variable: Hsla,
-    /// Global or named data color.
-    pub global: Hsla,
-    /// Named constant or enum-member color.
-    pub constant: Hsla,
-    /// Struct or class field color.
-    pub field: Hsla,
-    /// Block label color.
-    pub label: Hsla,
-    /// Code or target address color.
-    pub address: Hsla,
-    /// String or character literal color.
-    pub string: Hsla,
-    /// Numeric literal color.
-    pub number: Hsla,
-    /// Operator and punctuation color.
-    pub punct: Hsla,
-}
+/// The color of every [`Role`], by [`Role::index`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CodePalette(pub [Hsla; ROLES]);
 
 impl CodePalette {
     /// Builds a [`CodePalette`] from `theme`: each role takes the color of the first of its
-    /// keys ([`theme_keys`], [`IMPORT_KEYS`]) the theme's syntax sets, else the theme's text
-    /// color.
+    /// keys ([`Role::keys`]) the theme's syntax sets, else the theme's text color.
     ///
     /// # Arguments
     ///
     /// * `theme` - The Zed theme to paint with, normally the active one.
     #[must_use]
     pub fn from_theme(theme: &Theme) -> Self {
-        let pick = |keys: &[&str]| {
-            keys.iter()
+        Self(Role::ALL.map(|role| {
+            role.keys()
+                .iter()
                 .find_map(|key| theme.syntax().style_for_name(key).and_then(|s| s.color))
                 .unwrap_or(theme.colors().text)
-        };
-        let of = |kind| pick(theme_keys(kind));
-        Self {
-            text: of(Kind::Text),
-            comment: of(Kind::Comment),
-            keyword: of(Kind::Keyword),
-            mnemonic: of(Kind::Mnemonic),
-            register: of(Kind::Register),
-            ty: of(Kind::Type),
-            function: of(Kind::Function),
-            import: pick(IMPORT_KEYS),
-            variable: of(Kind::Variable),
-            global: of(Kind::Global),
-            constant: of(Kind::Constant),
-            field: of(Kind::Field),
-            label: of(Kind::Label),
-            address: of(Kind::Address),
-            string: of(Kind::String),
-            number: of(Kind::Number),
-            punct: of(Kind::Punct),
-        }
+        }))
     }
 
-    /// Maps an engine token [`Kind`] exhaustively to its foreground color; a function whose
-    /// link is an import takes the import color.
+    /// Returns the color of `role`.
     ///
     /// # Arguments
     ///
-    /// * `kind` - Token kind from [`View::tokens`].
-    /// * `link` - The token's referent, if it has one.
-    ///
-    /// # Returns
-    ///
-    /// Foreground [`Hsla`] color for the token.
+    /// * `role` - The role.
     #[must_use]
-    pub const fn color_of(&self, kind: Kind, link: Option<&Ref>) -> Hsla {
-        match kind {
-            Kind::Function if matches!(link, Some(Ref::Import(_))) => self.import,
-            Kind::Space | Kind::Text => self.text,
-            Kind::Comment => self.comment,
-            Kind::Keyword => self.keyword,
-            Kind::Mnemonic => self.mnemonic,
-            Kind::Register => self.register,
-            Kind::Type => self.ty,
-            Kind::Function => self.function,
-            Kind::Variable => self.variable,
-            Kind::Global => self.global,
-            Kind::Constant => self.constant,
-            Kind::Field => self.field,
-            Kind::Label => self.label,
-            Kind::Address => self.address,
-            Kind::String => self.string,
-            Kind::Number => self.number,
-            Kind::Punct => self.punct,
-        }
+    pub const fn color(&self, role: Role) -> Hsla {
+        self.0[role.index()]
     }
 }
 
@@ -164,7 +185,7 @@ impl CodeLines {
     ///
     /// # Arguments
     ///
-    /// * `views` - The decompile views to show, in order.
+    /// * `views` - The views to show, in order.
     #[must_use]
     pub fn new(views: Vec<Arc<View>>) -> Self {
         let lines = views
@@ -218,194 +239,98 @@ impl CodeLines {
         let &(v, l) = self.lines.get(ix)?;
         Some((self.views.get(v)?, l))
     }
+
+    /// Returns the text the editor holds: the shown lines joined by newlines, so row `i` of
+    /// the text is shown line `i`, and one view's text is its [`View::spell`] byte for byte.
+    #[must_use]
+    pub fn text(&self) -> String {
+        let mut out = String::new();
+        for ix in 0..self.len() {
+            if ix > 0 {
+                out.push('\n');
+            }
+            if let Some((view, line)) = self.get(ix) {
+                out.push_str(view.line(line).unwrap_or_default());
+            }
+        }
+        out
+    }
+
+    /// Returns where each role paints in shown lines `rows`: per role, by [`Role::index`],
+    /// each token's shown line and its bytes in that line, in line order.
+    ///
+    /// # Arguments
+    ///
+    /// * `rows` - Shown lines; those past the last are left out.
+    #[must_use]
+    pub fn highlights(&self, rows: Range<usize>) -> Vec<Vec<(usize, Range<usize>)>> {
+        let mut out = vec![Vec::new(); ROLES];
+        for row in rows.start..rows.end.min(self.len()) {
+            let Some((view, line)) = self.get(row) else {
+                break;
+            };
+            for (span, kind, link) in view.tokens(line) {
+                if let Some(spans) = Role::of(kind, link).and_then(|r| out.get_mut(r.index())) {
+                    spans.push((row, span));
+                }
+            }
+        }
+        out
+    }
 }
 
-/// Styled runs and ordered clickable token ranges for one line of a [`View`].
-#[derive(Debug, Clone)]
-pub struct StyledLine {
-    /// Line text without its trailing newline.
-    pub text: SharedString,
-    /// Contiguous [`TextRun`] slices tiling [`Self::text`] byte for byte.
-    pub runs: Vec<TextRun>,
-    /// Byte ranges within [`Self::text`] of every token carrying a [`Ref`], in line order.
-    pub click_ranges: Vec<Range<usize>>,
-    /// Referent corresponding 1:1 with each entry in [`Self::click_ranges`].
-    pub click_refs: Vec<Ref>,
-}
-
-/// Navigation action triggered when the user clicks a linked token [`Ref`].
+/// Navigation that following a linked token [`Ref`] leads to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClickOutcome {
     /// Opens the function at the given entry virtual address, pushing history.
     OpenFunction(u64),
-    /// Scrolls the current view to the 0-based line where the referent is defined.
+    /// Moves to the 0-based line of the view that the engine places the referent on.
     ScrollToLine(usize),
-    /// Token link has no click navigation in the spike.
+    /// Names the import with this first slot: there is no imports panel to open yet.
+    Import(u64),
+    /// The view places the referent on no line.
     None,
 }
 
-/// Resolves clicking `target` inside `view` into a [`ClickOutcome`].
+/// Resolves following `target` inside `view` into a [`ClickOutcome`].
+///
+/// A function opens; an address goes to the line that shows its instruction in a listing
+/// ([`View::line_of`]), else to the line that defines it ([`View::definition`]), as every
+/// other referent does.
 ///
 /// # Arguments
 ///
-/// * `view` - Active [`View`] supplying intra-function definition lines.
-/// * `target` - Engine referent attached to the clicked token.
+/// * `view` - Active [`View`] supplying its lines.
+/// * `target` - Engine referent attached to the token.
 ///
 /// # Returns
 ///
 /// Resulting [`ClickOutcome`] without parsing any text.
 #[must_use]
 pub fn resolve_ref_click(view: &View, target: &Ref) -> ClickOutcome {
-    match target {
-        Ref::Function(entry) => ClickOutcome::OpenFunction(*entry),
-        Ref::Address(_) => view
-            .definition(target)
-            .map_or(ClickOutcome::None, ClickOutcome::ScrollToLine),
-        Ref::Import(_)
-        | Ref::Global(_)
+    let line = match target {
+        Ref::Function(entry) => return ClickOutcome::OpenFunction(*entry),
+        Ref::Import(slot) => return ClickOutcome::Import(*slot),
+        Ref::Address(va) => view.line_of(*va).or_else(|| view.definition(target)),
+        Ref::Global(_)
         | Ref::Variable { .. }
         | Ref::Type(_)
         | Ref::String(_)
-        | Ref::Field { .. } => ClickOutcome::None,
-    }
-}
-
-/// Builds contiguous [`TextRun`]s and clickable ranges for `line_ix` of `view`.
-///
-/// Every run boundary is checked against UTF-8 character boundaries on the line
-/// so `StyledText::with_runs` never panics even on hostile or empty lines.
-///
-/// # Arguments
-///
-/// * `view` - Tokenized engine [`View`].
-/// * `line_ix` - Zero-based line index in `view`.
-/// * `font` - Monospace buffer font applied to every run.
-/// * `palette` - Syntax color table.
-///
-/// # Returns
-///
-/// [`StyledLine`] whose `runs` tile `text` and whose `click_ranges` match linked tokens.
-#[must_use]
-pub fn style_view_line(
-    view: &View,
-    line_ix: usize,
-    font: &Font,
-    palette: &CodePalette,
-) -> StyledLine {
-    let raw = view.line(line_ix).unwrap_or_default();
-    let mut runs = Vec::new();
-    let mut click_ranges = Vec::new();
-    let mut click_refs = Vec::new();
-    let mut cursor = 0usize;
-
-    for (span, kind, link) in view.tokens(line_ix) {
-        let start = clamp_char_boundary(raw, span.start.max(cursor));
-        let end = clamp_char_boundary(raw, span.end.max(start));
-        if start > cursor {
-            runs.push(plain_run(start - cursor, font, palette.text));
-            cursor = start;
-        }
-        if end > cursor {
-            runs.push(plain_run(end - cursor, font, palette.color_of(kind, link)));
-            if let Some(referent) = link {
-                click_ranges.push(cursor..end);
-                click_refs.push(referent.clone());
-            }
-            cursor = end;
-        }
-    }
-
-    if cursor < raw.len() {
-        runs.push(plain_run(raw.len() - cursor, font, palette.text));
-    }
-
-    StyledLine {
-        text: SharedString::from(raw.to_owned()),
-        runs,
-        click_ranges,
-        click_refs,
-    }
-}
-
-/// Clamps `idx` to `text.len()` and walks back to a valid UTF-8 char boundary.
-///
-/// # Arguments
-///
-/// * `text` - UTF-8 line slice.
-/// * `idx` - Candidate byte offset.
-///
-/// # Returns
-///
-/// Largest valid char boundary in `text` at or below `idx`.
-fn clamp_char_boundary(text: &str, idx: usize) -> usize {
-    let mut pos = idx.min(text.len());
-    while pos > 0 && !text.is_char_boundary(pos) {
-        pos -= 1;
-    }
-    pos
-}
-
-/// Constructs a single undecorated [`TextRun`] of `len` bytes: a link is not underlined
-/// at rest, and hovering one shows the pointer only.
-///
-/// # Arguments
-///
-/// * `len` - Byte length of the run.
-/// * `font` - Monospace font.
-/// * `color` - Foreground color.
-///
-/// # Returns
-///
-/// Configured [`TextRun`].
-fn plain_run(len: usize, font: &Font, color: Hsla) -> TextRun {
-    TextRun {
-        len,
-        font: font.clone(),
-        color,
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    }
+        | Ref::Field { .. } => view.definition(target),
+    };
+    line.map_or(ClickOutcome::None, ClickOutcome::ScrollToLine)
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::sync::Arc;
+
     use borer_engine::analysis::decompile::view::{view, view_of};
     use borer_engine::analysis::{Analysis, EnumSource, Overlay};
     use borer_engine::program::{Arch, BinaryFormat, Program, Section};
-    use borer_engine::view::{Ref, View};
-    use gpui::{Font, Hsla};
+    use borer_engine::view::{Kind, Ref};
 
-    use super::{ClickOutcome, CodeLines, CodePalette, resolve_ref_click, style_view_line};
-
-    /// Builds a deterministic test palette without requiring a GPUI window.
-    fn sample_palette() -> CodePalette {
-        let base = Hsla {
-            h: 0.0,
-            s: 0.0,
-            l: 0.85,
-            a: 1.0,
-        };
-        CodePalette {
-            text: base,
-            comment: base,
-            keyword: base,
-            mnemonic: base,
-            register: base,
-            ty: base,
-            function: base,
-            import: base,
-            variable: base,
-            global: base,
-            constant: base,
-            field: base,
-            label: base,
-            address: base,
-            string: base,
-            number: base,
-            punct: base,
-        }
-    }
+    use super::{ClickOutcome, CodeLines, CodePalette, ROLES, Role, resolve_ref_click};
 
     /// Builds a small multi-function x86-64 program exercising calls, branches,
     /// labels, strings, and globals.
@@ -438,114 +363,137 @@ pub(crate) mod tests {
         (program, analysis, overlay)
     }
 
-    /// Builds an x86-64 program whose code is every byte value in turn, four times over,
-    /// so the decoder meets odd and invalid code without a file from the machine.
-    fn every_byte_program() -> (Program, Analysis) {
+    /// Every role sits at its own index, a function naming an import takes the import's
+    /// role, and only whitespace has none.
+    ///
+    /// # Panics
+    ///
+    /// Panics if two roles share an index or a token's role is wrong.
+    #[test]
+    fn every_role_has_its_own_index() {
+        for (ix, role) in Role::ALL.into_iter().enumerate() {
+            assert_eq!(role.index(), ix);
+        }
+        let import = Ref::Import(0x2000);
+        assert_eq!(Role::of(Kind::Function, Some(&import)), Some(Role::Import));
+        assert_eq!(Role::of(Kind::Function, None), Some(Role::Function));
+        assert_eq!(Role::of(Kind::Space, None), None);
+        let hue = |n: u16| gpui::hsla(f32::from(n) / 32.0, 0.5, 0.5, 1.0);
+        let mut colors = [hue(0); ROLES];
+        for (n, color) in (0..).zip(colors.iter_mut()) {
+            *color = hue(n);
+        }
+        let palette = CodePalette(colors);
+        assert_eq!(palette.color(Role::Import), hue(7));
+    }
+
+    /// Every highlight starts and ends on a character boundary of its line, for text with
+    /// multi-byte characters and for code of every byte value.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a highlight would split a UTF-8 character.
+    #[test]
+    fn highlights_land_on_char_boundaries() {
+        let (program, analysis, overlay) = sample_program();
+        let utf8 = "// d\u{e9}j\u{e0} \u{2014} \u{3bb}\nint sub_1000(void) {\n    goto L_1000;\nL_1000:\n    return sub_1030();\n}\n";
+        let mut views = vec![Arc::new(
+            view_of(&program, &analysis, &overlay, 0x1000, utf8).expect("utf8 view"),
+        )];
         let bytes: Vec<u8> = (0..=u8::MAX).cycle().take(0x400).collect();
         let sections = vec![Section::mapped(".text", 0x1000, 0, 0x400, false, true)];
-        let mut program = Program::raw(bytes, Arch::X86_64, 0x1000, Some(0x1000), sections);
-        program.format = BinaryFormat::Pe;
-        let analysis = Analysis::compute(&program);
-        (program, analysis)
+        let mut noise = Program::raw(bytes, Arch::X86_64, 0x1000, Some(0x1000), sections);
+        noise.format = BinaryFormat::Pe;
+        let noise_analysis = Analysis::compute(&noise);
+        views.extend(
+            noise_analysis
+                .functions
+                .iter()
+                .filter_map(|f| view(&noise, &noise_analysis, &overlay, f.entry)),
+        );
+        let code = CodeLines::new(views);
+        for (row, span) in code.highlights(0..code.len()).into_iter().flatten() {
+            let (shown, line) = code.get(row).unwrap();
+            let text = shown.line(line).unwrap();
+            assert!(text.is_char_boundary(span.start) && text.is_char_boundary(span.end));
+            assert!(span.start < span.end && span.end <= text.len());
+        }
     }
 
-    /// Run lengths sum to each line's byte length and land on UTF-8 boundaries.
+    /// The editor's text is the views' lines joined by newlines, one view's text its
+    /// spelling byte for byte, and its highlights are exactly the tokens of the asked rows.
     ///
     /// # Panics
     ///
-    /// Panics if any line's runs fail to tile the line or split a UTF-8 codepoint.
+    /// Panics if the text or a highlight differs from the view's tokens.
     #[test]
-    fn runs_tile_every_line_on_char_boundaries() {
+    fn the_text_and_highlights_follow_the_tokens() {
         let (program, analysis, overlay) = sample_program();
-        let font: Font = gpui::font("Cascadia Mono");
-        let palette = sample_palette();
-        assert!(analysis.functions.len() >= 2);
         for func in &analysis.functions {
             let built = view(&program, &analysis, &overlay, func.entry).expect("decompiles");
-            assert_runs_tile(&built, &font, &palette);
-        }
-
-        let utf8_text = "// café — λ\nint sub_1000(void) {\n    goto L_1000;\nL_1000:\n    return sub_1030();\n}\n";
-        let extra = view_of(&program, &analysis, &overlay, 0x1000, utf8_text).expect("utf8 view");
-        assert_runs_tile(&extra, &font, &palette);
-
-        let (noise, noise_analysis) = every_byte_program();
-        for func in &noise_analysis.functions {
-            if let Some(built) = view(&noise, &noise_analysis, &overlay, func.entry) {
-                assert_runs_tile(&built, &font, &palette);
-            }
-        }
-    }
-
-    /// Asserts every line's runs of `built` sum to its length on UTF-8 boundaries.
-    ///
-    /// # Panics
-    ///
-    /// Panics if a line's runs fail to tile it or split a UTF-8 codepoint.
-    fn assert_runs_tile(built: &View, font: &Font, palette: &CodePalette) {
-        for line_ix in 0..built.lines() {
-            let styled = style_view_line(built, line_ix, font, palette);
-            let mut offset = 0usize;
-            for run in &styled.runs {
-                offset += run.len;
-                assert!(
-                    styled.text.is_char_boundary(offset),
-                    "non-char boundary at {offset} in {:?}",
-                    styled.text
-                );
-            }
-            assert_eq!(offset, styled.text.len());
+            let code = CodeLines::new(vec![built.clone()]);
+            assert_eq!(code.text(), built.spell());
+            let groups = code.highlights(0..usize::MAX);
+            let mut got: Vec<_> = groups
+                .iter()
+                .enumerate()
+                .flat_map(|(s, spans)| spans.iter().map(move |(r, span)| (*r, span.clone(), s)))
+                .collect();
+            let mut want: Vec<_> = (0..built.lines())
+                .flat_map(|line| {
+                    built.tokens(line).filter_map(move |(span, kind, link)| {
+                        Some((line, span, Role::of(kind, link)?.index()))
+                    })
+                })
+                .collect();
+            got.sort_by_key(|(r, span, _)| (*r, span.start));
+            want.sort_by_key(|(r, span, _)| (*r, span.start));
+            assert_eq!(got, want);
+            assert!(
+                code.highlights(built.lines()..usize::MAX)
+                    .iter()
+                    .all(Vec::is_empty)
+            );
         }
     }
 
-    /// Clickable ranges match every linked token in line order and map back to its [`Ref`].
+    /// A call opens its callee, a label goes to the line it is defined on, and an import
+    /// is named.
     ///
     /// # Panics
     ///
-    /// Panics if clickable ranges differ from linked tokens or resolve to the wrong target.
+    /// Panics if a link resolves anywhere else.
     #[test]
-    fn click_ranges_match_linked_tokens_in_order() {
+    fn links_resolve_to_what_the_view_says() {
         let (program, analysis, overlay) = sample_program();
-        let font: Font = gpui::font("Cascadia Mono");
-        let palette = sample_palette();
-        let mut total_links = 0usize;
-        let mut saw_callee = false;
-
-        for func in &analysis.functions {
-            let built = view(&program, &analysis, &overlay, func.entry).expect("decompiles");
-            for line_ix in 0..built.lines() {
-                let expected: Vec<_> = built
-                    .tokens(line_ix)
-                    .filter_map(|(span, _, link)| Some((span, link?.clone())))
-                    .collect();
-                let styled = style_view_line(&built, line_ix, &font, &palette);
-                assert_eq!(styled.click_ranges.len(), expected.len());
-                assert_eq!(styled.click_refs.len(), expected.len());
-                for (range_ix, (want_span, want_ref)) in expected.iter().enumerate() {
-                    assert_eq!(&styled.click_ranges[range_ix], want_span);
-                    assert_eq!(&styled.click_refs[range_ix], want_ref);
-                    if want_ref == &Ref::Function(0x1030) {
-                        saw_callee = true;
-                        assert_eq!(
-                            resolve_ref_click(&built, &styled.click_refs[range_ix]),
-                            ClickOutcome::OpenFunction(0x1030)
-                        );
-                    }
-                    total_links += 1;
-                }
-            }
-        }
-        assert!(total_links >= 2);
-        assert!(saw_callee);
-
+        let caller = view(&program, &analysis, &overlay, 0x1000).expect("decompiles");
+        let call = (0..caller.lines())
+            .find_map(|line| {
+                caller
+                    .tokens(line)
+                    .find(|(_, _, link)| *link == Some(&Ref::Function(0x1030)))
+                    .map(|(span, _, _)| (line, span))
+            })
+            .expect("the caller calls its callee");
+        assert!(call.1.end > call.1.start);
+        assert_eq!(
+            resolve_ref_click(&caller, &Ref::Function(0x1030)),
+            ClickOutcome::OpenFunction(0x1030)
+        );
         let goto_text = "void sub_1000(void) {\n    goto L_1000;\nL_1000:\n    return;\n}\n";
         let goto_view =
             view_of(&program, &analysis, &overlay, 0x1000, goto_text).expect("goto view");
-        let line1 = style_view_line(&goto_view, 1, &font, &palette);
-        assert_eq!(line1.click_refs, vec![Ref::Address(0x1000)]);
         assert_eq!(
-            resolve_ref_click(&goto_view, &line1.click_refs[0]),
+            resolve_ref_click(&goto_view, &Ref::Address(0x1000)),
             ClickOutcome::ScrollToLine(2)
+        );
+        assert_eq!(
+            resolve_ref_click(&goto_view, &Ref::Import(0x2000)),
+            ClickOutcome::Import(0x2000)
+        );
+        assert_eq!(
+            resolve_ref_click(&goto_view, &Ref::Address(0x9999)),
+            ClickOutcome::None
         );
     }
 
@@ -575,7 +523,7 @@ pub(crate) mod tests {
         for ix in 0..cycled.len() {
             let (v, l) = want[ix % want.len()];
             let (shown, line) = cycled.get(ix).unwrap();
-            assert!(std::sync::Arc::ptr_eq(shown, &views[v]));
+            assert!(Arc::ptr_eq(shown, &views[v]));
             assert_eq!(line, l);
         }
         assert!(cycled.get(cycled.len()).is_none());

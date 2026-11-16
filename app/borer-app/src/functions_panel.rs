@@ -27,7 +27,7 @@ use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use crate::actions::{FocusFilter, OPEN_HINT, ToggleFunctions, hint_row};
 use crate::binary::{Binary, SettingsNotice};
-use crate::code_view::CodePalette;
+use crate::code_view::{CodePalette, Role};
 use crate::decompile_item::{TabMode, code_row_height, open_function};
 use crate::function_columns::{Align, Columns, Ink, column_widths, row_cells};
 use crate::worker::{FilterLatest, LoadedBinary, filter_rows_blocking, spawn_engine};
@@ -526,8 +526,8 @@ impl FunctionsPanel {
         let (bar, muted) = (colors.text, colors.text_muted);
         let palette = self.palette;
         let ink = move |ink| match ink {
-            Ink::Address => palette.address,
-            Ink::Function => palette.function,
+            Ink::Address => palette.color(Role::Address),
+            Ink::Function => palette.color(Role::Function),
             Ink::Muted => muted,
         };
         let ui_font = ThemeSettings::get_global(cx).ui_font.clone();
