@@ -55,6 +55,7 @@ pub mod settable;
 pub mod sigs;
 pub mod snapshot;
 pub mod stated;
+pub mod stats;
 mod stripes;
 pub(crate) use stripes::{beside, joined, striped, striped_on, striped_with};
 mod switch_index;

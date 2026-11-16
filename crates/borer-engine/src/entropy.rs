@@ -135,6 +135,8 @@ const BATCH_BYTES: usize = 1 << 22;
 pub const REGIONS_MAX: usize = 200;
 /// Smallest window accepted by [`high_entropy_regions`], in bytes.
 pub const WINDOW_MIN: usize = 64;
+/// Window in bytes an entropy answer uses when its caller names none.
+pub const WINDOW_DEFAULT: usize = 1024;
 /// Fewest decoded bytes an encoded run needs to be judged: below this a
 /// random key and a word decode to entropies too close to tell apart.
 pub const ENCODED_MIN: usize = 64;

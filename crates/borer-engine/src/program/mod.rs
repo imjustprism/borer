@@ -567,9 +567,10 @@ pub(crate) fn caught<T>(parse: impl FnOnce() -> T) -> anyhow::Result<T> {
     })
 }
 
-/// Maps a file offset to the virtual address its section places it at.
+/// Maps a file offset to the section that holds it and the virtual address
+/// that section places it at.
 ///
-/// The one scan behind [`Program::offset_to_va`] and the PE reader's
+/// The one scan behind [`Program::offset_mapping`], [`Program::offset_to_va`] and the PE reader's
 /// file-offset lookups: the first section declared whose file extent
 /// covers the offset and places it at an address wins. The extent
 /// saturates rather than overflows on a hostile row, and a row that would
@@ -582,12 +583,12 @@ pub(crate) fn caught<T>(parse: impl FnOnce() -> T) -> anyhow::Result<T> {
 ///
 /// # Returns
 ///
-/// The address, or `None` when no section's file extent covers `off` at
-/// an address there is.
-fn offset_to_va_in(sections: &[Section], off: u64) -> Option<u64> {
-    sections.iter().find_map(|s| {
+/// The section's index in `sections` and the address, or `None` when no
+/// section's file extent covers `off` at an address there is.
+fn mapping_in(sections: &[Section], off: u64) -> Option<(usize, u64)> {
+    sections.iter().enumerate().find_map(|(i, s)| {
         (s.file_size > 0 && off >= s.file_off.0 && off < s.file_off.0.saturating_add(s.file_size))
-            .then(|| s.va.0.checked_add(off - s.file_off.0))?
+            .then(|| Some((i, s.va.0.checked_add(off - s.file_off.0)?)))?
     })
 }
 
@@ -1045,7 +1046,7 @@ impl Program {
                     flat_fallback = true;
                 }
 
-                let va_of_off = |off: u64| -> u64 { offset_to_va_in(&sections, off).unwrap_or(0) };
+                let va_of_off = |off: u64| mapping_in(&sections, off).map_or(0, |(_, va)| va);
                 let delay_slots = pe_symbols(
                     pe,
                     &bytes,
@@ -1748,7 +1749,23 @@ impl Program {
     /// The address, or `None` when no section's file extent covers `off`
     /// at an address there is.
     pub fn offset_to_va(&self, off: u64) -> Option<u64> {
-        offset_to_va_in(&self.sections, off)
+        self.offset_mapping(off).map(|(_, va)| va)
+    }
+
+    /// Returns the section that maps a file offset, by its index in
+    /// [`Program::sections`], with the address it maps the offset at.
+    ///
+    /// # Arguments
+    ///
+    /// * `off` - An offset into the file.
+    ///
+    /// # Returns
+    ///
+    /// The index and the address [`Program::offset_to_va`] answers, or
+    /// `None` when it answers none.
+    #[must_use]
+    pub fn offset_mapping(&self, off: u64) -> Option<(usize, u64)> {
+        mapping_in(&self.sections, off)
     }
 
     /// Returns the runs of file bytes that no section's file extent covers.

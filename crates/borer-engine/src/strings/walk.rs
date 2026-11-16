@@ -20,6 +20,7 @@ use super::{
     Encoding, RawStringSpan, StringHit, drop_code_runs, find_ascii_spans, find_wide_spans,
 };
 use crate::analysis::Analysis;
+use crate::num::from_usize;
 use crate::program::Program;
 
 /// Shortest run the memoized walks keep: the `strings` default, so every
@@ -208,6 +209,33 @@ fn walks(p: &Program, a: &Analysis) -> Arc<StringWalks> {
             user,
         }
     })
+}
+
+/// Returns where the program's walked strings lie in the file, read off
+/// the memoized walks ([`walks`]): every run of [`WALK_MIN`] or more
+/// characters outside code, and a .NET assembly's user strings.
+///
+/// # Arguments
+///
+/// * `p` - The loaded program.
+/// * `a` - Its analysis, whose memo keeps the walks.
+///
+/// # Returns
+///
+/// `(start, end)` file offsets per string, end exclusive, in start order;
+/// two may overlap.
+pub(crate) fn string_extents(p: &Program, a: &Analysis) -> Vec<(u64, u64)> {
+    walks(p, a)
+        .rows(StringEncoding::Both, WALK_MIN)
+        .iter()
+        .map(|row| {
+            let bytes = match row {
+                StringRow::Span(s) => s.raw_bytes(&p.bytes).len(),
+                StringRow::Hit(h) => h.len.saturating_mul(h.encoding.unit()),
+            };
+            (row.off(), row.off().saturating_add(from_usize(bytes)))
+        })
+        .collect()
 }
 
 /// Walks a program's strings of one encoding, without the memo.
