@@ -4,8 +4,40 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use borer_engine::view::{Kind, Ref, View};
-use gpui::{App, Font, Hsla, SharedString, TextRun, UnderlineStyle, px};
-use theme::ActiveTheme as _;
+use gpui::{Font, Hsla, SharedString, TextRun};
+use theme::Theme;
+
+/// Theme keys of an import's name, the callee outside the binary: borer's own key, then
+/// Zed's name for a function.
+pub const IMPORT_KEYS: &[&str] = &["borer.import", "function"];
+
+/// Returns the theme keys a token of `kind` takes its color from, in the order they are
+/// tried: borer's own key where Zed has no word for the role, then Zed's syntax name.
+///
+/// # Arguments
+///
+/// * `kind` - Token kind from [`View::tokens`].
+#[must_use]
+pub const fn theme_keys(kind: Kind) -> &'static [&'static str] {
+    match kind {
+        Kind::Space | Kind::Text => &["borer.text"],
+        Kind::Comment => &["comment"],
+        Kind::Keyword => &["keyword"],
+        Kind::Mnemonic => &["borer.mnemonic", "keyword"],
+        Kind::Register => &["borer.register", "variable.special"],
+        Kind::Type => &["type"],
+        Kind::Function => &["function"],
+        Kind::Variable => &["variable"],
+        Kind::Global => &["borer.global", "constant"],
+        Kind::Constant => &["constant"],
+        Kind::Field => &["borer.field", "property"],
+        Kind::Label => &["label"],
+        Kind::Address => &["borer.address", "comment"],
+        Kind::String => &["string"],
+        Kind::Number => &["number"],
+        Kind::Punct => &["punctuation"],
+    }
+}
 
 /// Resolved colors for every [`Kind`] token produced by [`borer_engine::view`].
 #[derive(Debug, Clone, Copy)]
@@ -22,8 +54,10 @@ pub struct CodePalette {
     pub register: Hsla,
     /// Type name color.
     pub ty: Hsla,
-    /// Function or import callee color.
+    /// Function color.
     pub function: Hsla,
+    /// Import color: a function token whose link is [`Ref::Import`].
+    pub import: Hsla,
     /// Parameter or local variable color.
     pub variable: Hsla,
     /// Global or named data color.
@@ -45,58 +79,57 @@ pub struct CodePalette {
 }
 
 impl CodePalette {
-    /// Builds a [`CodePalette`] from the active Zed theme's syntax and UI colors.
+    /// Builds a [`CodePalette`] from `theme`: each role takes the color of the first of its
+    /// keys ([`theme_keys`], [`IMPORT_KEYS`]) the theme's syntax sets, else the theme's text
+    /// color.
     ///
     /// # Arguments
     ///
-    /// * `cx` - Application context holding the active theme.
-    ///
-    /// # Returns
-    ///
-    /// Resolved token color palette.
+    /// * `theme` - The Zed theme to paint with, normally the active one.
     #[must_use]
-    pub fn from_theme(cx: &App) -> Self {
-        let theme = cx.theme();
-        let colors = theme.colors();
-        let syntax = theme.syntax();
-        let pick = |name: &str, fallback: Hsla| {
-            syntax
-                .style_for_name(name)
-                .and_then(|s| s.color)
-                .unwrap_or(fallback)
+    pub fn from_theme(theme: &Theme) -> Self {
+        let pick = |keys: &[&str]| {
+            keys.iter()
+                .find_map(|key| theme.syntax().style_for_name(key).and_then(|s| s.color))
+                .unwrap_or(theme.colors().text)
         };
+        let of = |kind| pick(theme_keys(kind));
         Self {
-            text: colors.text,
-            comment: pick("comment", colors.text_muted),
-            keyword: pick("keyword", colors.text_accent),
-            mnemonic: pick("keyword", colors.text_accent),
-            register: pick("variable.special", colors.text),
-            ty: pick("type", colors.text_accent),
-            function: pick("function", colors.text_accent),
-            variable: pick("variable", colors.text),
-            global: pick("constant", colors.text_accent),
-            constant: pick("constant", colors.text_accent),
-            field: pick("property", colors.text),
-            label: pick("label", colors.text_accent),
-            address: pick("link_uri", colors.text_accent),
-            string: pick("string", colors.text),
-            number: pick("number", colors.text),
-            punct: pick("punctuation", colors.text_muted),
+            text: of(Kind::Text),
+            comment: of(Kind::Comment),
+            keyword: of(Kind::Keyword),
+            mnemonic: of(Kind::Mnemonic),
+            register: of(Kind::Register),
+            ty: of(Kind::Type),
+            function: of(Kind::Function),
+            import: pick(IMPORT_KEYS),
+            variable: of(Kind::Variable),
+            global: of(Kind::Global),
+            constant: of(Kind::Constant),
+            field: of(Kind::Field),
+            label: of(Kind::Label),
+            address: of(Kind::Address),
+            string: of(Kind::String),
+            number: of(Kind::Number),
+            punct: of(Kind::Punct),
         }
     }
 
-    /// Maps an engine token [`Kind`] exhaustively to its foreground color.
+    /// Maps an engine token [`Kind`] exhaustively to its foreground color; a function whose
+    /// link is an import takes the import color.
     ///
     /// # Arguments
     ///
     /// * `kind` - Token kind from [`View::tokens`].
+    /// * `link` - The token's referent, if it has one.
     ///
     /// # Returns
     ///
-    /// Foreground [`Hsla`] color for `kind`.
+    /// Foreground [`Hsla`] color for the token.
     #[must_use]
-    pub const fn color_of(&self, kind: Kind) -> Hsla {
+    pub const fn color_of(&self, kind: Kind, link: Option<&Ref>) -> Hsla {
         match kind {
+            Kind::Function if matches!(link, Some(Ref::Import(_))) => self.import,
             Kind::Space | Kind::Text => self.text,
             Kind::Comment => self.comment,
             Kind::Keyword => self.keyword,
@@ -269,12 +302,11 @@ pub fn style_view_line(
         let start = clamp_char_boundary(raw, span.start.max(cursor));
         let end = clamp_char_boundary(raw, span.end.max(start));
         if start > cursor {
-            runs.push(plain_run(start - cursor, font, palette.text, false));
+            runs.push(plain_run(start - cursor, font, palette.text));
             cursor = start;
         }
         if end > cursor {
-            let color = palette.color_of(kind);
-            runs.push(plain_run(end - cursor, font, color, link.is_some()));
+            runs.push(plain_run(end - cursor, font, palette.color_of(kind, link)));
             if let Some(referent) = link {
                 click_ranges.push(cursor..end);
                 click_refs.push(referent.clone());
@@ -284,7 +316,7 @@ pub fn style_view_line(
     }
 
     if cursor < raw.len() {
-        runs.push(plain_run(raw.len() - cursor, font, palette.text, false));
+        runs.push(plain_run(raw.len() - cursor, font, palette.text));
     }
 
     StyledLine {
@@ -313,29 +345,25 @@ fn clamp_char_boundary(text: &str, idx: usize) -> usize {
     pos
 }
 
-/// Constructs a single [`TextRun`] of `len` bytes with optional link underline.
+/// Constructs a single undecorated [`TextRun`] of `len` bytes: a link is not underlined
+/// at rest, and hovering one shows the pointer only.
 ///
 /// # Arguments
 ///
 /// * `len` - Byte length of the run.
 /// * `font` - Monospace font.
 /// * `color` - Foreground color.
-/// * `underlined` - Whether to underline the token as a clickable link.
 ///
 /// # Returns
 ///
 /// Configured [`TextRun`].
-fn plain_run(len: usize, font: &Font, color: Hsla, underlined: bool) -> TextRun {
+fn plain_run(len: usize, font: &Font, color: Hsla) -> TextRun {
     TextRun {
         len,
         font: font.clone(),
         color,
         background_color: None,
-        underline: underlined.then_some(UnderlineStyle {
-            thickness: px(1.0),
-            color: Some(color),
-            wavy: false,
-        }),
+        underline: None,
         strikethrough: None,
     }
 }
@@ -366,6 +394,7 @@ pub(crate) mod tests {
             register: base,
             ty: base,
             function: base,
+            import: base,
             variable: base,
             global: base,
             constant: base,

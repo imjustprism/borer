@@ -13,10 +13,8 @@ use super::{
     CALL_CLICKS, FILTER_KEYS, Harness, InjectTracker, MarkWait, PendingInputMark, nanos,
     now_instant, ns_to_ms, say, sorted_quantiles_ms,
 };
-use crate::code_view::{CodePalette, style_view_line};
-use crate::decompile_item::{
-    CODE_PAD_PX, CODE_ROW_HEIGHT_PX, DecompileItem, TabMode, open_function,
-};
+use crate::code_view::style_view_line;
+use crate::decompile_item::{CODE_PAD_PX, DecompileItem, TabMode, open_function};
 use crate::functions_panel::FunctionsPanel;
 use crate::worker::{LoadedBinary, decompile_blocking, ui_engine_calls};
 
@@ -415,7 +413,8 @@ impl Harness {
             let state = item.code_scroll().0.borrow();
             (state.base_handle.bounds(), state.base_handle.offset())
         };
-        let row = px(CODE_ROW_HEIGHT_PX);
+        let style = item.style();
+        let row = style.row_height;
         let mut top = bounds.top() + offset.y;
         let mut found = None;
         for ix in 0..code.len() {
@@ -440,15 +439,10 @@ impl Harness {
             }
         }
         let (view, line_ix, start, center) = found?;
-        let settings = theme::theme_settings(cx);
-        let (font, size) = (
-            settings.buffer_font(cx).clone(),
-            settings.buffer_font_size(cx),
-        );
-        let styled = style_view_line(view, line_ix, &font, &CodePalette::from_theme(cx));
+        let styled = style_view_line(view, line_ix, &style.font, &style.palette);
         let shaped = window
             .text_system()
-            .shape_line(styled.text, size, &styled.runs, None);
+            .shape_line(styled.text, style.size, &styled.runs, None);
         let x = bounds.left() + offset.x + px(CODE_PAD_PX) + shaped.x_for_index(start) + px(3.0);
         Some((f32::from(x), f32::from(center)))
     }

@@ -7,20 +7,71 @@ use std::sync::Arc;
 
 use borer_engine::view::{Ref, View};
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement as _, InteractiveText, IntoElement, ParentElement as _, Render,
-    ScrollStrategy, SharedString, Styled as _, StyledText, Task, UniformListScrollHandle,
-    WeakEntity, Window, div, px, uniform_list,
+    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, Font,
+    InteractiveElement as _, InteractiveText, IntoElement, ParentElement as _, Pixels, Render,
+    ScrollStrategy, SharedString, Styled as _, StyledText, Subscription, Task,
+    UniformListScrollHandle, WeakEntity, Window, div, px, uniform_list,
 };
-use theme::ActiveTheme as _;
+use settings::{Settings as _, SettingsStore};
+use theme::{ActiveTheme as _, GlobalTheme};
+use theme_settings::ThemeSettings;
 use workspace::{Item, ItemNavHistory, Pane, Workspace};
 
 use crate::app_view::open_dropped;
 use crate::code_view::{ClickOutcome, CodeLines, CodePalette, resolve_ref_click, style_view_line};
 use crate::worker::{LoadedBinary, TaskEpoch, decompile_blocking, spawn_engine};
 
-/// Uniform height in logical pixels of each line row in a decompile tab.
-pub const CODE_ROW_HEIGHT_PX: f32 = 20.0;
+/// Fewest logical pixels a line row of a decompile tab is tall.
+const MIN_ROW_HEIGHT_PX: f32 = 8.0;
+
+/// Most logical pixels a line row of a decompile tab is tall.
+const MAX_ROW_HEIGHT_PX: f32 = 64.0;
+
+/// Returns the height of each line row of a decompile tab.
+///
+/// That is the buffer font size times the buffer line height of Zed's settings, rounded to
+/// a whole pixel and held between [`MIN_ROW_HEIGHT_PX`] and [`MAX_ROW_HEIGHT_PX`], so no
+/// setting makes it vanish or endless.
+///
+/// # Arguments
+///
+/// * `cx` - Application context reading the settings.
+#[must_use]
+pub fn code_row_height(cx: &App) -> Pixels {
+    let settings = ThemeSettings::get_global(cx);
+    let height = (settings.buffer_font_size(cx) * settings.line_height()).round();
+    height.clamp(px(MIN_ROW_HEIGHT_PX), px(MAX_ROW_HEIGHT_PX))
+}
+
+/// What a decompile tab paints its lines with, read from the theme and the settings.
+#[derive(Debug, Clone)]
+pub(crate) struct CodeStyle {
+    /// Token colors of the active theme.
+    pub(crate) palette: CodePalette,
+    /// The buffer font.
+    pub(crate) font: Font,
+    /// The buffer font size.
+    pub(crate) size: Pixels,
+    /// Height of each line row, from [`code_row_height`].
+    pub(crate) row_height: Pixels,
+}
+
+impl CodeStyle {
+    /// Returns the style the active theme and the settings give.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Application context reading the theme and the settings.
+    fn read(cx: &App) -> Self {
+        let settings = ThemeSettings::get_global(cx);
+        Self {
+            palette: CodePalette::from_theme(cx.theme()),
+            font: settings.buffer_font.clone(),
+            size: settings.buffer_font_size(cx),
+            row_height: code_row_height(cx),
+        }
+    }
+}
 
 /// Left padding in logical pixels before the text of each decompile line.
 pub const CODE_PAD_PX: f32 = 8.0;
@@ -57,6 +108,10 @@ pub struct DecompileItem {
     code: Option<Arc<CodeLines>>,
     /// Scroll handle of the virtualized line list.
     scroll: UniformListScrollHandle,
+    /// Colors, font and row height, rebuilt when the theme or the settings change.
+    style: CodeStyle,
+    /// Rebuilds [`Self::style`] on a settings or theme change.
+    _restyle: [Subscription; 2],
     /// Generation and cancel flag of the background decompile.
     epoch: TaskEpoch,
     /// Whether the background decompile is still running.
@@ -106,6 +161,11 @@ impl DecompileItem {
             focus_handle: cx.focus_handle(),
             code,
             scroll: UniformListScrollHandle::new(),
+            style: CodeStyle::read(cx),
+            _restyle: [
+                cx.observe_global::<SettingsStore>(Self::restyle),
+                cx.observe_global::<GlobalTheme>(Self::restyle),
+            ],
             epoch: TaskEpoch::new(),
             decompiling: false,
             nav_history: None,
@@ -152,6 +212,22 @@ impl DecompileItem {
         item
     }
 
+    /// Rereads the tab's style from the theme and the settings and repaints it.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Item context.
+    fn restyle(&mut self, cx: &mut Context<'_, Self>) {
+        self.style = CodeStyle::read(cx);
+        cx.notify();
+    }
+
+    /// Returns what the tab paints its lines with.
+    #[must_use]
+    pub(crate) const fn style(&self) -> &CodeStyle {
+        &self.style
+    }
+
     /// Returns the entry of the function the tab shows, `None` for measured lines.
     #[must_use]
     pub const fn entry(&self) -> Option<u64> {
@@ -173,7 +249,7 @@ impl DecompileItem {
     /// Returns the height in logical pixels the line list was last painted at, zero before
     /// its first paint.
     #[must_use]
-    pub fn painted_height(&self) -> gpui::Pixels {
+    pub fn painted_height(&self) -> Pixels {
         self.scroll.0.borrow().base_handle.bounds().size.height
     }
 
@@ -191,7 +267,7 @@ impl DecompileItem {
         if let Some(deferred) = &state.deferred_scroll_to_item {
             return deferred.item_index;
         }
-        let rows = (-state.base_handle.offset().y / px(CODE_ROW_HEIGHT_PX)).floor();
+        let rows = (-state.base_handle.offset().y / self.style.row_height).floor();
         if rows.is_finite() && rows > 0.0 {
             rows as usize
         } else {
@@ -336,13 +412,17 @@ impl DecompileItem {
         let Some(code) = self.code.clone() else {
             return Vec::new();
         };
-        let font = theme::theme_settings(cx).buffer_font(cx).clone();
-        let palette = CodePalette::from_theme(cx);
+        let CodeStyle {
+            palette,
+            font,
+            row_height,
+            ..
+        } = &self.style;
         let weak = cx.entity().downgrade();
         range
             .filter_map(|ix| {
                 let (view, line_ix) = code.get(ix)?;
-                let styled = style_view_line(view, line_ix, &font, &palette);
+                let styled = style_view_line(view, line_ix, font, palette);
                 let text = StyledText::new(styled.text).with_runs(styled.runs);
                 let line = build_interactive_line(
                     (ix, line_ix),
@@ -354,7 +434,7 @@ impl DecompileItem {
                 );
                 Some(
                     div()
-                        .h(px(CODE_ROW_HEIGHT_PX))
+                        .h(*row_height)
                         .px(px(CODE_PAD_PX))
                         .flex()
                         .items_center()
@@ -548,13 +628,6 @@ impl Render for DecompileItem {
             let colors = cx.theme().colors();
             (colors.editor_background, colors.text, colors.text_muted)
         };
-        let (font, size) = {
-            let settings = theme::theme_settings(cx);
-            (
-                settings.buffer_font(cx).clone(),
-                settings.buffer_font_size(cx),
-            )
-        };
         let line_count = self.code.as_ref().map_or(0, |c| c.len());
         let body = if line_count > 0 {
             uniform_list("code-view", line_count, cx.processor(Self::render_rows))
@@ -579,8 +652,9 @@ impl Render for DecompileItem {
             .size_full()
             .bg(background)
             .text_color(text)
-            .font(font)
-            .text_size(size)
+            .font(self.style.font.clone())
+            .text_size(self.style.size)
+            .line_height(self.style.row_height)
             .child(body)
     }
 }
