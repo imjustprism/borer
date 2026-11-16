@@ -25,6 +25,9 @@ gpui::actions!(
         /// Follows the link of the token under the cursor: a call opens its function, a label
         /// or a branch target goes to its line, an import is named in the status line.
         FollowLink,
+        /// Switches the code tab between its function's decompile and its listing, opening
+        /// the other at the function's start.
+        ToggleListing,
     ]
 );
 

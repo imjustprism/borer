@@ -17,7 +17,9 @@
     "context": "DecompileView > Editor",
     "bindings": {
       "f12": "borer::FollowLink",
-      "enter": "borer::FollowLink"
+      "enter": "borer::FollowLink",
+      "tab": "borer::ToggleListing",
+      "g": "borer::GoTo"
     }
   },
   {

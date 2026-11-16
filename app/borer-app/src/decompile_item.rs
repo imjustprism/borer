@@ -90,6 +90,15 @@ pub enum Form {
 }
 
 impl Form {
+    /// Returns the function's other view.
+    #[must_use]
+    pub const fn other(self) -> Self {
+        match self {
+            Self::Decompile => Self::Listing,
+            Self::Listing => Self::Decompile,
+        }
+    }
+
     /// Builds this view of the function at `entry`; runs in the background.
     ///
     /// # Arguments
@@ -176,6 +185,8 @@ pub struct DecompileItem {
     editor_events: Subscription,
     /// The settings and theme observers.
     _restyle: [Subscription; 2],
+    /// An address to move to once the view is built ([`Self::go_to_address`]).
+    waiting: Option<u64>,
     /// Generation and cancel flag of the background build.
     epoch: TaskEpoch,
     /// Whether the background build is still running.
@@ -289,6 +300,7 @@ impl DecompileItem {
                 cx.observe_global::<SettingsStore>(Self::restyle),
                 cx.observe_global::<GlobalTheme>(Self::restyle),
             ],
+            waiting: None,
             epoch: TaskEpoch::new(),
             decompiling: true,
             task: None,
@@ -405,9 +417,31 @@ impl DecompileItem {
                 self.code = Some(code);
                 self.painted = 0..0;
                 self.paint(false, cx);
+                if let Some(va) = self.waiting.take() {
+                    self.go_to_address(va, cx);
+                }
             }
         }
         cx.notify();
+    }
+
+    /// Moves to the first line that shows the instruction at `va` ([`View::line_of`]), now
+    /// or once the view is built; an address no line shows moves nowhere.
+    ///
+    /// # Arguments
+    ///
+    /// * `va` - The instruction's address.
+    /// * `cx` - Item context.
+    pub fn go_to_address(&mut self, va: u64, cx: &mut Context<'_, Self>) {
+        let Some(code) = self.code.clone() else {
+            self.waiting = Some(va);
+            return;
+        };
+        if let Some((view, _)) = code.get(0)
+            && let Some(line) = view.line_of(va)
+        {
+            self.jump_to_line(line, cx);
+        }
     }
 
     /// Follows the editor's scroll: notes the buffer rows at the top and a page below it,
@@ -500,6 +534,12 @@ impl DecompileItem {
     #[must_use]
     pub const fn entry(&self) -> Option<u64> {
         self.entry
+    }
+
+    /// Returns the binary the tab's lines come from.
+    #[must_use]
+    pub const fn loaded(&self) -> &Arc<LoadedBinary> {
+        &self.loaded
     }
 
     /// Returns which view of its function the tab shows.
@@ -701,6 +741,19 @@ impl DecompileItem {
         }
     }
 
+    /// Opens the function's other view, decompile or listing, at its start, keeping this
+    /// tab; a tab of measured lines has no function to switch.
+    ///
+    /// # Arguments
+    ///
+    /// * `window` - Window the tab is in.
+    /// * `cx` - Item context.
+    pub fn toggle_listing(&self, window: &Window, cx: &mut Context<'_, Self>) {
+        if let Some(entry) = self.entry {
+            self.open_beside(entry, self.form.other(), window, cx);
+        }
+    }
+
     /// Shows `status` in the status line of the tab's binary.
     ///
     /// # Arguments
@@ -899,6 +952,42 @@ pub fn open_view(
     });
 }
 
+/// Shows the listing of the function at `entry` in the preview tab, at the line of the
+/// instruction at `at` when one is given.
+///
+/// It is the one entry point that opens a listing at an address, as a call tree opens a
+/// caller at its call site.
+///
+/// # Arguments
+///
+/// * `workspace` - The workspace.
+/// * `loaded` - Binary the function belongs to.
+/// * `(entry, at)` - Entry of the function, and the address to show, if any.
+/// * `window` - Window the workspace is in.
+/// * `cx` - Workspace context.
+pub fn open_listing(
+    workspace: &mut Workspace,
+    loaded: Arc<LoadedBinary>,
+    (entry, at): (u64, Option<u64>),
+    window: &mut Window,
+    cx: &mut Context<'_, Workspace>,
+) {
+    let target = (entry, Form::Listing);
+    open_view(
+        workspace,
+        loaded,
+        target,
+        TabMode::Preview,
+        true,
+        window,
+        cx,
+    );
+    let tab = workspace.active_item_as::<DecompileItem>(cx);
+    if let (Some(tab), Some(va)) = (tab, at) {
+        tab.update(cx, |tab, cx| tab.go_to_address(va, cx));
+    }
+}
+
 /// Opens a permanent tab showing `code`, lines of `loaded` for no one function.
 ///
 /// # Arguments
@@ -1039,7 +1128,7 @@ impl Render for DecompileItem {
     clippy::missing_panics_doc,
     reason = "assertions are the point of a test; gpui::test hides each body in an undocumented fn"
 )]
-mod tests {
+pub(crate) mod tests {
     use std::collections::BTreeSet;
     use std::ops::Range;
     use std::sync::Arc;
@@ -1057,9 +1146,9 @@ mod tests {
     use editor::{SelectionEffects, SemanticsProvider as _};
     use language::{Point, ToPoint as _};
 
-    use super::{DecompileItem, Form, TabMode, open_lines, open_view, role_key};
+    use super::{DecompileItem, Form, TabMode, open_lines, open_listing, open_view, role_key};
     use crate::actions::FollowLink;
-    use crate::app_view::tests::{CALLEE, CALLER, init, open, sample};
+    use crate::app_view::tests::{CALLEE, CALLER, init, open, sample, shown};
     use crate::code_semantics::for_one_view;
     use crate::code_view::tests::sample_program;
     use crate::code_view::{CodeLines, CodePalette, Role, describe};
@@ -1448,5 +1537,71 @@ mod tests {
         });
         assert!(points.len() >= 2);
         assert_eq!(points, view.uses(&callee).0);
+    }
+
+    /// Returns the function, view and top line of the active code tab.
+    pub(crate) fn active(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+    ) -> Option<(u64, Form, usize)> {
+        let (entry, top) = shown(workspace, cx)?;
+        let form = workspace.read_with(cx, |workspace, cx| {
+            Some(
+                workspace
+                    .active_item_as::<DecompileItem>(cx)?
+                    .read(cx)
+                    .form(),
+            )
+        })?;
+        Some((entry, form, top))
+    }
+
+    /// Tab opens the function's listing at its start, and Tab again comes back to its
+    /// decompile.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a toggle shows another function, view or line.
+    #[gpui::test]
+    fn the_toggle_switches_between_decompile_and_listing(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (workspace, cx) = open(&app_state, cx);
+        let loaded = sample();
+        open_tab(&workspace, &loaded, (CALLER, Form::Decompile), cx);
+        for want in [Form::Listing, Form::Decompile] {
+            cx.simulate_keystrokes("tab");
+            assert_eq!(active(&workspace, cx), Some((CALLER, want, 0)));
+        }
+    }
+
+    /// Returns the address of the caller's fourth instruction and the line of its listing
+    /// that shows it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the listing does not build or holds fewer instructions.
+    pub(crate) fn fourth_instruction(loaded: &LoadedBinary) -> (u64, usize) {
+        let view = listing_blocking(loaded, CALLER).unwrap();
+        (0..view.lines())
+            .filter_map(|line| Some((view.address(line)?, line)))
+            .nth(3)
+            .unwrap()
+    }
+
+    /// A listing opened at an address puts the line that shows that instruction at the top.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the listing opens at another line.
+    #[gpui::test]
+    fn a_listing_opens_at_the_line_of_its_address(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (workspace, cx) = open(&app_state, cx);
+        let loaded = sample();
+        let (va, line) = fourth_instruction(&loaded);
+        workspace.update_in(cx, |workspace, window, cx| {
+            open_listing(workspace, loaded.clone(), (CALLER, Some(va)), window, cx);
+        });
+        assert_eq!(active(&workspace, cx), Some((CALLER, Form::Listing, line)));
     }
 }

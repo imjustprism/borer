@@ -9,7 +9,7 @@ use borer_engine::analysis::decompile::view::view;
 use borer_engine::analysis::render::{
     Bytes, FunctionOrder, FunctionRows, disasm_view, function_rows,
 };
-use borer_engine::analysis::{Analysis, EnumSource, Overlay};
+use borer_engine::analysis::{Analysis, EnumSource, Overlay, no_function_at, resolve_suggesting};
 use borer_engine::cancel::Cancel;
 use borer_engine::program::{Feature, Program};
 use borer_engine::view::View;
@@ -234,6 +234,41 @@ pub fn listing_blocking(loaded: &LoadedBinary, entry: u64) -> Result<Arc<View>, 
         })
 }
 
+/// Most function rows a go-to query lists.
+pub const GOTO_ROWS: usize = 200;
+
+/// What a go-to query finds: the function its text names, and the functions it filters.
+#[derive(Debug)]
+pub struct GoToAnswer {
+    /// The entry of the function holding the address the text resolves to, and that
+    /// address, else the engine's words for the miss (nearest names, or what holds no
+    /// function).
+    pub target: Result<(u64, u64), String>,
+    /// The function rows the text filters, at most [`GOTO_ROWS`].
+    pub rows: FunctionRows,
+}
+
+/// Resolves `query` as an address or a name, and filters the function rows by it.
+///
+/// Must be called inside [`spawn_engine`].
+///
+/// # Arguments
+///
+/// * `loaded` - Previously loaded binary state.
+/// * `query` - What the person typed: `0x`-hex, decimal or a name.
+#[must_use]
+pub fn goto_blocking(loaded: &LoadedBinary, query: &str) -> GoToAnswer {
+    let (p, a, o) = (&*loaded.program, &*loaded.analysis, &*loaded.overlay);
+    let target = resolve_suggesting(p, a, o, query).and_then(|va| {
+        a.function_at(va)
+            .map(|f| (f.entry, va))
+            .ok_or_else(|| no_function_at(p, a, va))
+    });
+    let filter = (!query.is_empty()).then_some(query);
+    let rows = function_rows(a, o, filter, FunctionOrder::Address, 0, GOTO_ROWS);
+    GoToAnswer { target, rows }
+}
+
 /// Monotonic request sequencer ensuring a late older background answer never
 /// overwrites a newer filter result.
 #[derive(Debug, Clone)]
@@ -415,7 +450,7 @@ mod tests {
     /// # Panics
     ///
     /// Panics if another module names `Program::load`, `Analysis::compute`, a decompile
-    /// or listing view or the function listing.
+    /// or listing view, the resolver or the function listing.
     #[test]
     fn only_the_worker_names_engine_compute_calls() {
         let sources = [
@@ -426,6 +461,7 @@ mod tests {
             ("code_view.rs", include_str!("code_view.rs")),
             ("decompile_item.rs", include_str!("decompile_item.rs")),
             ("functions_panel.rs", include_str!("functions_panel.rs")),
+            ("goto.rs", include_str!("goto.rs")),
             ("lib.rs", include_str!("lib.rs")),
             ("main.rs", include_str!("main.rs")),
             ("measure.rs", include_str!("measure.rs")),
@@ -439,6 +475,7 @@ mod tests {
             "Analysis::compute",
             "decompile::view",
             "disasm_view(",
+            "resolve_suggesting(",
             "function_rows(",
         ];
         for (name, text) in sources {

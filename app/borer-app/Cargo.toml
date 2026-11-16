@@ -32,6 +32,7 @@ lsp.workspace = true
 menu.workspace = true
 node_runtime.workspace = true
 paths.workspace = true
+picker.workspace = true
 project.workspace = true
 serde_json.workspace = true
 session.workspace = true

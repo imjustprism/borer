@@ -992,6 +992,7 @@ dependencies = [
  "menu",
  "node_runtime",
  "paths",
+ "picker",
  "project",
  "serde_json",
  "session",

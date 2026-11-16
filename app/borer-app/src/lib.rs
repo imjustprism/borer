@@ -10,6 +10,7 @@ pub mod code_view;
 pub mod decompile_item;
 pub mod function_columns;
 pub mod functions_panel;
+pub mod goto;
 pub mod measure;
 pub mod start_item;
 pub mod worker;
