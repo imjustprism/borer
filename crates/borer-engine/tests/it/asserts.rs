@@ -1,6 +1,8 @@
-//! What a build that keeps its assertions says: the next steps a function
-//! that asserts points at, and each member its asserts spell paired with
-//! the field offset the code around them reads.
+//! What a build that keeps its assertions says.
+//!
+//! It covers the next steps a function that asserts points at, and each member
+//! its asserts spell paired with the field offset the code around them reads,
+//! and a long `__PRETTY_FUNCTION__` read whole in parts.
 //!
 //! The image is a stripped build with assertions on, the shape GitHub issue
 //! 24's binary has: every method guards one member and reports a failure
@@ -13,9 +15,10 @@
 )]
 
 use borer_engine::analysis::classes::field_names;
-use borer_engine::analysis::decompile::answer_header;
+use borer_engine::analysis::decompile::{answer_header, decompile};
 use borer_engine::analysis::render::{NEXT_MAX, asserted_fields_tsv, function_summary, next_steps};
 use borer_engine::analysis::{Analysis, Overlay};
+use borer_engine::memory::{Kind, read_values, rest_of_cut};
 use borer_engine::num::{from_usize, lo32, saturating_usize};
 use borer_engine::program::{Arch, Program, Section, Symbol, SymbolKind};
 
@@ -420,4 +423,37 @@ fn asserted_members_pair_with_the_offsets_their_guards_read() {
         !size.contains("m_name") && !size.contains("set_type("),
         "the filter let another member through:\n{size}"
     );
+}
+
+/// A `__PRETTY_FUNCTION__` too long to print whole is cut in the text, and
+/// a read of it says where the rest starts, so its template arguments,
+/// the part the cut drops, are read whole in two reads.
+///
+/// GitHub issue 24's agent pruned the prefix fragments the cut left
+/// instead of reading the type names behind them.
+#[test]
+fn a_long_pretty_function_reads_whole_in_parts() {
+    let p = widget();
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), 0x1240).expect("decompiles");
+    assert!(
+        text.contains(&PRETTY[..60]) && !text.contains(&PRETTY[150..]),
+        "the text does not cut the long literal: {text}"
+    );
+    let first = read_values(&p, LONG, Kind::CStr, 1).expect("reads");
+    assert_eq!(
+        first[0].text,
+        format!("\"{}...\" (len {})", &PRETTY[..200], PRETTY.len())
+    );
+    let rest = rest_of_cut(&first[0], Kind::CStr).expect("the read is cut");
+    assert_eq!(rest, LONG + 200);
+    let next = read_values(&p, rest, Kind::CStr, 1).expect("reads on");
+    assert_eq!(
+        next[0].text,
+        format!("\"{}\" (len {})", &PRETTY[200..], PRETTY.len() - 200)
+    );
+    assert_eq!(rest_of_cut(&next[0], Kind::CStr), None);
+    let short = read_values(&p, PATH, Kind::CStr, 1).expect("reads");
+    assert_eq!(rest_of_cut(&short[0], Kind::CStr), None);
+    assert_eq!(rest_of_cut(&short[0], Kind::U8), None);
 }

@@ -250,6 +250,9 @@ impl BorerServer {
                 if let Some(s) = p.signing(v.at).filter(|_| place.is_empty() && v.size == 8) {
                     text.push_str(&format!(" signed {s}"));
                 }
+                if let Some(rest) = memory::rest_of_cut(v, kind) {
+                    text.push_str(&format!(", cut: the rest reads from {place}{rest:#x}"));
+                }
                 out.push_str(&format!("{:<12} {text}\n", format!("{:#x}", v.at)));
             }
             Ok(out)
@@ -366,4 +369,58 @@ impl BorerServer {
 /// ([`entropy::threshold_error`]).
 pub(crate) fn entropy_threshold(threshold: f64) -> Result<f64, String> {
     entropy::threshold_error(threshold).map_or(Ok(threshold), Err)
+}
+
+#[cfg(test)]
+mod tests {
+    use borer_engine::program::{Arch, Program, Section};
+    use rmcp::handler::server::wrapper::Parameters;
+
+    use crate::params::{ReadKind, ReadParams};
+
+    /// Every string longer than a read prints says where the rest of it
+    /// reads from, and the read from there is whole.
+    ///
+    /// A template's `__PRETTY_FUNCTION__` spells its arguments last, past
+    /// the cut, so the rest must be one read away.
+    ///
+    /// # Panics
+    ///
+    /// When a read fails, or the header does not say where the rest is.
+    #[test]
+    fn a_cut_string_says_where_its_rest_reads_from() {
+        let mut bytes = vec![b'A'; 300];
+        bytes.push(0);
+        bytes.extend([b'B'; 300]);
+        bytes.resize(0x1000, 0);
+        let sections = vec![Section::mapped(".rdata", 0x2000, 0, 0x1000, false, false)];
+        let server =
+            crate::testing::server_with(Program::raw(bytes, Arch::X86_64, 0, None, sections));
+        let read = |address: &str, count: u32| {
+            server
+                .read(Parameters(ReadParams {
+                    address: address.to_owned(),
+                    kind: Some(ReadKind::CStr),
+                    r#type: None,
+                    count: Some(count),
+                }))
+                .expect("reads")
+        };
+        let first = read("0x2000", 1);
+        assert!(
+            first.contains("...\" (len 300), cut: the rest reads from 0x20c8\n"),
+            "{first}"
+        );
+        let rest = read("0x20c8", 1);
+        assert!(
+            rest.contains("(len 100)") && !rest.contains("cut:"),
+            "{rest}"
+        );
+        let both = read("0x2000", 2);
+        assert!(
+            both.contains("cut: the rest reads from 0x20c8\n")
+                && both.contains("cut: the rest reads from 0x21f5\n"),
+            "{both}"
+        );
+    }
 }

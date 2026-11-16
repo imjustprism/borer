@@ -138,7 +138,7 @@ pub(crate) fn scalar_text(kind: Kind, raw: u64) -> (String, Option<u64>) {
     (text, None)
 }
 
-/// Longest string rendered in full.
+/// Longest string rendered in full, in characters.
 const STR_CAP: usize = 200;
 
 /// Decodes `count` consecutive values of `kind` starting at `va`.
@@ -454,6 +454,43 @@ pub(crate) fn decode<'a>(
         out.push(v);
     }
     out
+}
+
+/// Returns where the rest of a string value cut at its 200 characters
+/// starts, so a read from there gives the next part.
+///
+/// A `__PRETTY_FUNCTION__` of a template spells its arguments last (`void
+/// Box<T>::Put(const T &) [with T = ...]`), so the cut drops exactly the
+/// type names a reader wants; the value's `(len N)` says it was cut, and
+/// this says where the rest is.
+///
+/// # Arguments
+///
+/// * `v` - A value [`read_values`] or [`read_values_at_offset`] returned.
+/// * `kind` - The kind it was read as.
+///
+/// # Returns
+///
+/// The address (or file offset, for a read by offset) past the characters
+/// shown, or `None` when `v` is no string or is shown whole.
+#[must_use]
+pub fn rest_of_cut(v: &Value, kind: Kind) -> Option<u64> {
+    let unit = match kind {
+        Kind::CStr => 1,
+        Kind::WStr => 2,
+        Kind::U8
+        | Kind::U16
+        | Kind::U32
+        | Kind::U64
+        | Kind::I8
+        | Kind::I16
+        | Kind::I32
+        | Kind::I64
+        | Kind::F32
+        | Kind::F64
+        | Kind::Ptr => return None,
+    };
+    (v.size / unit > STR_CAP + 1).then(|| v.at.wrapping_add(from_usize(STR_CAP * unit)))
 }
 
 /// Assembles up to eight little-endian bytes into a `u64`.
