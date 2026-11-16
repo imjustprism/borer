@@ -258,6 +258,38 @@ impl BorerServer {
             .unwrap_or_else(|_| self.empty_analysis())
     }
 
+    /// Returns what a script runs over: the loaded program and its
+    /// analysis (empty when the architecture has none), taken together
+    /// under the program's lock, then the overlay.
+    ///
+    /// A script runs outside any lock, so a program and an analysis taken
+    /// on their own could meet a `load_binary` in between, and the script
+    /// would read one program through another's analysis. The overlay is
+    /// taken after the lock is let go, as every tool takes it: a script
+    /// waiting on an edit's hold of the overlay must not keep a load
+    /// waiting behind it, and a name it proposes for a program loaded over
+    /// is refused when it is applied ([`Self::commit`]).
+    ///
+    /// # Errors
+    ///
+    /// Invalid params when no binary is loaded or borer does not
+    /// disassemble its architecture.
+    pub(crate) fn script_snapshot(
+        &self,
+    ) -> Result<(Arc<Program>, Arc<Analysis>, Overlay), ErrorData> {
+        let guard = read_lock(&self.program);
+        let program = guard
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or_else(|| err_params(NO_BINARY))?;
+        if let Some(why) = program.refuses(Feature::Disasm) {
+            return Err(err_params(why));
+        }
+        let analysis = self.analysis_or_empty();
+        drop(guard);
+        Ok((program, analysis, self.overlay()))
+    }
+
     /// Returns the empty analysis held for the loaded program, making it on
     /// first use.
     ///
@@ -1328,5 +1360,30 @@ mod tests {
         std::fs::remove_file(&path).expect("cleans up");
         assert_eq!(plain.as_deref(), Some("kept"));
         assert_eq!(narrow, None, "a 4-byte pointer layout installed on x64");
+    }
+
+    /// A script's snapshot is the loaded program with its own analysis,
+    /// and is refused with nothing loaded or nothing to disassemble.
+    ///
+    /// # Panics
+    ///
+    /// When the parts do not belong together or a refusal answers.
+    #[test]
+    fn a_script_snapshot_holds_one_program() {
+        let server = crate::testing::code_server(borer_engine::program::Arch::X86_64, &[0xc3]);
+        let (program, analysis, _) = server.script_snapshot().expect("snapshots");
+        assert!(
+            server
+                .loaded()
+                .is_some_and(|now| std::sync::Arc::ptr_eq(&now, &program))
+        );
+        let held = server.ensure_analysis().expect("analyzed");
+        assert!(std::sync::Arc::ptr_eq(&held, &analysis));
+        let none = crate::BorerServer::default()
+            .script_snapshot()
+            .expect_err("nothing loaded");
+        assert_eq!(none.message, super::NO_BINARY);
+        let unknown = crate::testing::code_server(borer_engine::program::Arch::Unknown, &[0xc3]);
+        assert!(unknown.script_snapshot().is_err());
     }
 }

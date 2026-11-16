@@ -6,12 +6,10 @@ use std::sync::Arc;
 
 use borer_engine::analysis::Overlay;
 use borer_engine::analysis::edit::{self, Edit, Force};
-use borer_engine::program::Feature;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ErrorData, tool, tool_router};
 
 use crate::BorerServer;
-use crate::errors::err_params;
 use crate::paging;
 use crate::params::{
     Annotation, QueryParams, ScriptParams, must_be_a_name, must_be_in_a_section, must_fit_a_row,
@@ -95,11 +93,7 @@ impl BorerServer {
         &self,
         Parameters(ScriptParams { code, dry_run }): Parameters<ScriptParams>,
     ) -> Result<String, ErrorData> {
-        let program = self.require_loaded()?;
-        if let Some(why) = program.refuses(Feature::Disasm) {
-            return Err(err_params(why));
-        }
-        let analysis = self.analysis_or_empty();
+        let (program, analysis, overlay) = self.script_snapshot()?;
         let server = self.clone();
         let query: borer_engine::script::Query = std::rc::Rc::new(move |uri: &str| {
             if uri.starts_with("borer://script/") {
@@ -121,7 +115,7 @@ impl BorerServer {
         let run = borer_engine::script::run_with(
             Arc::clone(&program),
             Arc::clone(&analysis),
-            Arc::new(self.overlay()),
+            Arc::new(overlay),
             &code,
             &[],
             Some(query),
