@@ -34,6 +34,7 @@ node_runtime.workspace = true
 paths.workspace = true
 picker.workspace = true
 project.workspace = true
+search.workspace = true
 serde_json.workspace = true
 session.workspace = true
 settings.workspace = true
@@ -47,6 +48,7 @@ zed_actions.workspace = true
 
 [dev-dependencies]
 db = { workspace = true, features = ["test-support"] }
+editor = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 # Builds the profiler histograms gpui reports, at the version and features gpui uses.
 hdrhistogram = { version = "7", default-features = false }

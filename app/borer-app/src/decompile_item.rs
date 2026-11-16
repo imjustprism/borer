@@ -31,6 +31,7 @@ use theme::{ActiveTheme as _, GlobalTheme};
 use theme_settings::ThemeSettings;
 use ui::{Color, Icon, IconName, Label, LabelCommon as _, v_flex};
 use workspace::item::TabContentParams;
+use workspace::searchable::SearchableItemHandle;
 use workspace::{Item, ItemNavHistory, Pane, Workspace};
 
 use crate::actions::{BACK_HINT, hint_row};
@@ -415,6 +416,7 @@ impl DecompileItem {
                 self.editor
                     .update(cx, |editor, _| editor.set_semantics_provider(semantics));
                 self.code = Some(code);
+                self.refresh_search(window, cx);
                 self.painted = 0..0;
                 self.paint(false, cx);
                 if let Some(va) = self.waiting.take() {
@@ -442,6 +444,33 @@ impl DecompileItem {
         {
             self.jump_to_line(line, cx);
         }
+    }
+
+    /// Hands the new editor to the toolbar of the pane showing the tab, once the current
+    /// update ends, so the buffer search finds text in the built view, not in the empty
+    /// editor the toolbar was given when the tab was activated.
+    ///
+    /// # Arguments
+    ///
+    /// * `window` - Window the tab is in.
+    /// * `cx` - Item context.
+    fn refresh_search(&self, window: &Window, cx: &mut Context<'_, Self>) {
+        let (workspace, item) = (self.workspace.clone(), cx.entity());
+        window.defer(cx, move |window, cx| {
+            let Some(pane) = workspace.upgrade().and_then(|w| w.read(cx).pane_for(&item)) else {
+                return;
+            };
+            let pane = pane.read(cx);
+            if pane
+                .active_item()
+                .is_some_and(|a| a.item_id() == item.entity_id())
+            {
+                let toolbar = pane.toolbar().clone();
+                toolbar.update(cx, |toolbar, cx| {
+                    toolbar.set_active_item(Some(&item), window, cx);
+                });
+            }
+        });
     }
 
     /// Follows the editor's scroll: notes the buffer rows at the top and a page below it,
@@ -1082,6 +1111,10 @@ impl Item for DecompileItem {
             .update(cx, |editor, cx| editor.deactivated(window, cx));
     }
 
+    fn as_searchable(&self, _: &Entity<Self>, _: &App) -> Option<Box<dyn SearchableItemHandle>> {
+        Some(Box::new(self.editor.clone()))
+    }
+
     fn handle_drop(
         &self,
         _active_pane: &Pane,
@@ -1133,18 +1166,18 @@ pub(crate) mod tests {
     use std::ops::Range;
     use std::sync::Arc;
 
-    use editor::ToPoint as _;
-    use gpui::{Entity, TestAppContext, VisualTestContext};
-    use theme::ActiveTheme as _;
-    use workspace::Workspace;
-
     use borer_engine::analysis::decompile::view::view_of;
     use borer_engine::analysis::render::{FunctionOrder, function_rows};
     use borer_engine::analysis::{Analysis, Overlay};
     use borer_engine::program::{Arch, Feature, Program, Section};
     use borer_engine::view::{Kind, Ref, View};
-    use editor::{SelectionEffects, SemanticsProvider as _};
+    use editor::{SelectionEffects, SemanticsProvider as _, ToPoint as _};
+    use gpui::{Entity, TestAppContext, VisualTestContext};
     use language::{Point, ToPoint as _};
+    use search::BufferSearchBar;
+    use search::buffer_search::Deploy;
+    use theme::ActiveTheme as _;
+    use workspace::Workspace;
 
     use super::{DecompileItem, Form, TabMode, open_lines, open_listing, open_view, role_key};
     use crate::actions::FollowLink;
@@ -1603,5 +1636,52 @@ pub(crate) mod tests {
             open_listing(workspace, loaded.clone(), (CALLER, Some(va)), window, cx);
         });
         assert_eq!(active(&workspace, cx), Some((CALLER, Form::Listing, line)));
+    }
+
+    /// Zed's buffer search opens over a code tab and finds every place its text spells the
+    /// query.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the bar does not open or finds other places than the text holds.
+    #[gpui::test]
+    fn find_marks_every_place_the_text_spells_the_query(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (workspace, cx) = open(&app_state, cx);
+        let tab = open_tab(&workspace, &sample(), (CALLER, Form::Decompile), cx);
+        cx.dispatch_action(Deploy::find());
+        cx.run_until_parked();
+        let bar = workspace
+            .read_with(cx, |workspace, cx| {
+                let pane = workspace.active_pane().read(cx);
+                pane.toolbar().read(cx).item_of_type::<BufferSearchBar>()
+            })
+            .unwrap();
+        assert!(bar.read_with(cx, |bar, _| !bar.is_dismissed()));
+        let query = "sub_1030";
+        let done = bar.update_in(cx, |bar, window, cx| {
+            bar.search(query, None, false, window, cx)
+        });
+        cx.run_until_parked();
+        drop(done);
+        let found = tab.update(cx, |item, cx| {
+            item.editor()
+                .update(cx, |editor, cx| editor.search_background_highlights(cx))
+        });
+        let text = tab.read_with(cx, |item, cx| item.editor().read(cx).text(cx));
+        let want: Vec<_> = text
+            .lines()
+            .enumerate()
+            .flat_map(|(row, line)| {
+                line.match_indices(query).map(move |(col, _)| {
+                    let at = |c: usize| {
+                        Point::new(u32::try_from(row).unwrap(), u32::try_from(c).unwrap())
+                    };
+                    at(col)..at(col + query.len())
+                })
+            })
+            .collect();
+        assert!(!want.is_empty());
+        assert_eq!(found, want);
     }
 }

@@ -32,10 +32,11 @@ use language::LanguageRegistry;
 use node_runtime::NodeRuntime;
 use project::trusted_worktrees::{self, DbTrustedPaths};
 use project::{LocalProjectFlags, Project};
+use search::BufferSearchBar;
 use session::{AppSession, Session};
 use workspace::dock::DockPosition;
 use workspace::{
-    AddFolderToProject, AppState, DockStructure, MultiWorkspace, Workspace, WorkspaceId,
+    AddFolderToProject, AppState, DockStructure, MultiWorkspace, Pane, Workspace, WorkspaceId,
     WorkspaceStore,
 };
 
@@ -201,6 +202,7 @@ pub fn configure(cx: &mut App) -> anyhow::Result<()> {
     trusted_worktrees::init(DbTrustedPaths::default(), cx);
     crate::actions::bind_keys(cx)?;
     command_palette::init(cx);
+    search::buffer_search::init(cx);
     let hidden = [TypeId::of::<AddFolderToProject>()];
     CommandPaletteFilter::update_global(cx, |filter, _| filter.hide_action_types(&hidden));
     cx.on_app_quit(flush_on_quit).detach();
@@ -338,6 +340,7 @@ pub fn new_workspace(
     let center = workspace.read(cx).active_pane().clone();
     center.update(cx, |pane, _| pane.set_should_display_welcome_page(false));
     keep_filled(&center, &workspace.downgrade(), window, cx);
+    add_search_bar(&center, window, cx);
     window
         .subscribe(
             &workspace,
@@ -345,6 +348,7 @@ pub fn new_workspace(
             |workspace, event: &workspace::Event, window, cx| {
                 if let workspace::Event::PaneAdded(pane) = event {
                     keep_filled(pane, &workspace.downgrade(), window, cx);
+                    add_search_bar(pane, window, cx);
                 }
             },
         )
@@ -353,6 +357,21 @@ pub fn new_workspace(
         binary.update(cx, |binary, cx| binary.open_path(path, cx));
     }
     workspace
+}
+
+/// Gives `pane` Zed's buffer search bar, which finds text in the active code tab.
+///
+/// # Arguments
+///
+/// * `pane` - The pane.
+/// * `window` - Window the pane is in.
+/// * `cx` - Application context.
+fn add_search_bar(pane: &Entity<Pane>, window: &mut Window, cx: &mut App) {
+    let bar = cx.new(|cx| BufferSearchBar::new(None, window, cx));
+    pane.update(cx, |pane, cx| {
+        pane.toolbar()
+            .update(cx, |toolbar, cx| toolbar.add_item(bar, window, cx));
+    });
 }
 
 /// Registers the app's workspace-wide actions on `workspace`.
