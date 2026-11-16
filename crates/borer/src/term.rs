@@ -554,7 +554,7 @@ pub(crate) fn welcome() -> String {
     };
     let version = crate::doctor::version();
     let mut out = format!(
-        "{b}borer{r} {d}{version}{r}  reverse engineering, rebuilt for AI agents\n\n\
+        "{b}borer{r} {d}{version}{r}  reverse engineering for AI agents and people\n\n\
          borer is an MCP server: your agent starts it over stdin and stdout.\n\n"
     );
     for (command, what) in FIRST {
