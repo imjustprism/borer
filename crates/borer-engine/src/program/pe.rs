@@ -5,6 +5,7 @@
 use std::collections::BTreeSet;
 
 use super::{Symbol, SymbolKind, caught};
+use crate::headers::{ImportName, ImportOrigins, OrdinalName};
 use crate::num::{from_usize, u16_le, u32_le};
 
 /// Loosens PE header fields the Windows loader ignores or goblin copies
@@ -437,6 +438,9 @@ pub(super) fn c_name(bytes: &[u8], at: usize) -> Option<String> {
 ///   virtual addresses, a current one relative ones.
 /// * `is_64` - Whether the image is PE32+ (eight-byte slots).
 /// * `names` - The load's name budget.
+/// * `(marks, first)` - Receives which imports the loader named itself
+///   ([`ImportMarks`]), and the place the first one returned takes in the
+///   symbol table.
 ///
 /// # Returns
 ///
@@ -447,6 +451,7 @@ fn delay_imports(
     image_base: u64,
     is_64: bool,
     names: &mut crate::text::Names,
+    (marks, first): (&mut ImportMarks, usize),
 ) -> Vec<Symbol> {
     /// Bytes of one `ImgDelayDescr`.
     const DESCRIPTOR: usize = 32;
@@ -485,8 +490,9 @@ fn delay_imports(
         };
         let module = rva_of(u64::from(name))
             .and_then(|r| file_offset(&sections, r))
-            .and_then(|o| c_name(bytes, o))
-            .unwrap_or_else(|| "(unnamed)".to_owned());
+            .and_then(|o| c_name(bytes, o));
+        let unnamed = module.is_none();
+        let module = module.unwrap_or_else(|| "(unnamed)".to_owned());
         let table = rva_of(u64::from(table_rva)).and_then(|r| file_offset(&sections, r));
         if let (Some(iat), Some(table)) = (rva_of(u64::from(iat)), table) {
             for i in 0u64.. {
@@ -508,19 +514,29 @@ fn delay_imports(
                 else {
                     break;
                 };
+                let (cut, mut invented) = (names.cut(), false);
                 let full = if names.is_spent() {
                     names.placeholder()
                 } else {
                     let import = if thunk & ordinal_bit != 0 {
-                        format!("ORDINAL {}", thunk & 0xffff)
+                        Some(format!("ORDINAL {}", thunk & 0xffff))
                     } else {
                         rva_of(u64::from(crate::num::lo32(thunk)))
                             .and_then(|r| file_offset(&sections, r))
                             .and_then(|o| c_name(bytes, o.saturating_add(2)))
-                            .unwrap_or_else(|| "(unnamed)".to_owned())
                     };
+                    invented |= import.is_none();
+                    let import = import.unwrap_or_else(|| "(unnamed)".to_owned());
                     names.joined(&module, '!', &import)
                 };
+                let at = first.saturating_add(out.len());
+                let spent = names.cut() > cut;
+                if invented || spent {
+                    marks.made_name.push(at);
+                }
+                if unnamed || spent {
+                    marks.made_module.push(at);
+                }
                 out.push(Symbol {
                     name: full,
                     addr: image_base.wrapping_add(iat).wrapping_add(i * word),
@@ -534,39 +550,74 @@ fn delay_imports(
 }
 
 /// Names a PE's imports by ordinal, which the import table spells
-/// `module!ORDINAL n`.
+/// `module!ORDINAL n`, and records how the loader named each import the
+/// file does not name whole.
 ///
-/// Each takes the name of the export it is where a table of the system
-/// DLLs' exports lists it, else `<module>_ord<n>`
+/// Each import by ordinal takes the name of the export it is where a table
+/// of the system DLLs' exports lists it, else `<module>_ord<n>`
 /// ([`crate::hashing::import_ordinal_name`]), so a call to one reads as a
-/// C call to a function (`ldap_initW(..)`, `certcli_ord359(..)`).
+/// C call to a function (`ldap_initW(..)`, `certcli_ord60000(..)`).
 ///
 /// # Arguments
 ///
 /// * `symbols` - The program's symbols; its ordinal imports are renamed.
+/// * `marks` - Which imports the loader named itself ([`pe_symbols`]).
 ///
 /// # Returns
 ///
-/// Each renamed import's slot and ordinal, sorted by slot, for the import
-/// hash, which names an import by its ordinal.
-pub(super) fn name_ordinal_imports(symbols: &mut [Symbol]) -> Vec<(u64, u16)> {
+/// Each import renamed as an ordinal's and each made-up one, by symbol:
+/// for the import hash, which names an import by its ordinal, and for a
+/// view, which says who named it. An import made up and by ordinal is made
+/// up; every renamed one, a name that spells an ordinal among them, takes
+/// the name's origin from the table.
+pub(super) fn name_imports(symbols: &mut [Symbol], marks: &ImportMarks) -> ImportOrigins {
     let mut out = Vec::new();
-    for s in symbols.iter_mut().filter(|s| s.kind == SymbolKind::Import) {
-        let Some((dll, func)) = s.name.rsplit_once('!') else {
+    for (k, s) in symbols.iter_mut().enumerate() {
+        if s.kind != SymbolKind::Import {
             continue;
+        }
+        let made = marks.made_name.binary_search(&k).is_ok();
+        let module = marks.made_module.binary_search(&k).is_ok();
+        let renamed = s.name.rsplit_once('!').and_then(|(dll, func)| {
+            let n = func.strip_prefix("ORDINAL ")?.parse::<u16>().ok()?;
+            let (name, origin) = crate::hashing::import_ordinal_name(dll, n);
+            Some((format!("{dll}!{name}"), n, origin))
+        });
+        let (ordinal, origin) = match renamed {
+            Some((name, n, origin)) => {
+                s.name = name;
+                (Some(n), Some(origin))
+            }
+            None if made || module => (None, None),
+            None => continue,
         };
-        let Some(n) = func
-            .strip_prefix("ORDINAL ")
-            .and_then(|n| n.parse::<u16>().ok())
-        else {
-            continue;
-        };
-        s.name = format!("{dll}!{}", crate::hashing::import_ordinal_name(dll, n));
-        out.push((s.addr, n));
+        out.push(ImportName {
+            slot: s.addr,
+            symbol: k,
+            ordinal,
+            origin: if made {
+                Some(OrdinalName::Made)
+            } else {
+                origin
+            },
+            module: module.then_some(OrdinalName::Made),
+        });
     }
-    out.sort_unstable();
-    out.dedup_by_key(|(slot, _)| *slot);
-    out
+    ImportOrigins::new(out)
+}
+
+/// Which import symbols the loader named itself, each by its place in the
+/// symbol table, in ascending order.
+#[derive(Debug, Default)]
+pub(super) struct ImportMarks {
+    /// The imports whose name after the module the loader made up:
+    /// `(unnamed)` for a name that reads nowhere or is empty, `<name N>`
+    /// past the budget.
+    made_name: Vec<usize>,
+    /// The imports whose module's name the loader made up: `(unnamed)` for
+    /// one that reads nowhere, the empty name of one that reads as nothing,
+    /// `<name N>` past the budget.
+    made_module: Vec<usize>,
 }
 
 /// The exports a PE names by ordinal alone, which the parser leaves out.
@@ -623,14 +674,16 @@ fn ordinal_exports(pe: &goblin::pe::PE<'_>) -> Vec<Symbol> {
 ///
 /// # Returns
 ///
-/// Sorted slot addresses of the delay-loaded imports.
+/// Sorted slot addresses of the delay-loaded imports, and which imports
+/// the loader named itself ([`ImportMarks`]), for [`name_imports`].
 pub(super) fn pe_symbols(
     pe: &goblin::pe::PE<'_>,
     bytes: &[u8],
     include_delay: bool,
     names: &mut crate::text::Names,
     symbols: &mut Vec<Symbol>,
-) -> Vec<u64> {
+) -> (Vec<u64>, ImportMarks) {
+    let mut marks = ImportMarks::default();
     for imp in &pe.imports {
         let sym = if imp.name.is_empty() {
             "(unnamed)"
@@ -638,9 +691,19 @@ pub(super) fn pe_symbols(
             &imp.name
         };
         let rva = if imp.offset != 0 { imp.offset } else { imp.rva };
+        let (cut, addr) = (names.cut(), pe.image_base.wrapping_add(from_usize(rva)));
+        let module = imp.dll.trim_end_matches('\0');
+        let name = names.joined(module, '!', sym);
+        let spent = names.cut() > cut;
+        if imp.name.is_empty() || spent {
+            marks.made_name.push(symbols.len());
+        }
+        if module.is_empty() || spent {
+            marks.made_module.push(symbols.len());
+        }
         symbols.push(Symbol {
-            name: names.joined(imp.dll.trim_end_matches('\0'), '!', sym),
-            addr: pe.image_base.wrapping_add(from_usize(rva)),
+            name,
+            addr,
             kind: SymbolKind::Import,
         });
     }
@@ -660,14 +723,15 @@ pub(super) fn pe_symbols(
     }
     symbols.extend(ordinal_exports(pe));
     let delayed = if include_delay {
-        delay_imports(bytes, pe.image_base, pe.is_64, names)
+        let first = symbols.len();
+        delay_imports(bytes, pe.image_base, pe.is_64, names, (&mut marks, first))
     } else {
         Vec::new()
     };
     let mut delay_slots: Vec<u64> = delayed.iter().map(|s| s.addr).collect();
     delay_slots.sort_unstable();
     symbols.extend(delayed);
-    delay_slots
+    (delay_slots, marks)
 }
 
 /// A data directory entry zeroed for the length of a parse.

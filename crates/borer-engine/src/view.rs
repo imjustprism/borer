@@ -4,7 +4,8 @@
 //! A [`View`] holds its text once and the tokens that tile each line. A
 //! token is where it ends in its line, its [`Kind`] and, when the engine
 //! can show what it names, a place in the view's table of referents
-//! ([`Ref`]). The tokens of a line spell it in order, so a view spells its
+//! ([`Ref`]), which says who stated its name ([`Said`]) where the maker can
+//! tell. The tokens of a line spell it in order, so a view spells its
 //! text byte for byte ([`View::spell`]). The decompile view
 //! ([`crate::analysis::decompile::view`]) is read back out of the text a
 //! function decompiles to; the function listing view
@@ -13,7 +14,7 @@
 //! the address it shows ([`View::address`]). Each line of the decompile
 //! view answers the block it stands for ([`View::origin`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::ops::Range;
 use std::sync::Arc;
@@ -105,6 +106,24 @@ pub enum Ref {
     Type(Box<str>),
 }
 
+/// Who stated the name a referent goes by, read from the fact the engine
+/// spelled it with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Said {
+    /// The overlay's name: a person's or an agent's.
+    User,
+    /// The file's: its symbol table, an import or export, its debug
+    /// information.
+    Stated,
+    /// The engine's own finding: a helper's shape, a vtable slot, a
+    /// signature string, a pack's or a library's match.
+    Inferred,
+    /// A name the engine spells from an address, a slot or an ordinal
+    /// because nothing names the thing: `sub_`, `aN`, `local_N`, `home_N`,
+    /// `arg_N`, `g<bits>_`, `L_`, `field_0x`, `<dll>_ord<n>`.
+    Placeholder,
+}
+
 /// How many names of a view name something yet carry no link.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Unlinked {
@@ -139,6 +158,11 @@ struct Start {
     first: u32,
 }
 
+/// One token of a line as [`View::tokens_said`] gives it: the bytes it
+/// spans in the line, its kind, and its link with who stated its
+/// referent's name.
+pub type SaidToken<'v> = (Range<usize>, Kind, Option<(&'v Ref, Option<Said>)>);
+
 /// A text as lines of typed tokens.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct View {
@@ -151,6 +175,9 @@ pub struct View {
     tokens: Box<[Token]>,
     /// The referents, each once, in order of first use.
     refs: Box<[Ref]>,
+    /// Who stated each referent's name, by its place in `refs`; empty for a
+    /// view no maker read it for ([`View::with_said`]).
+    said: Box<[Option<Said>]>,
     /// The line each referent is defined on, by its place in `refs`.
     defs: Box<[Option<u32>]>,
     /// The names that name something yet carry no link.
@@ -218,6 +245,23 @@ impl View {
         &self,
         i: usize,
     ) -> impl Iterator<Item = (Range<usize>, Kind, Option<&Ref>)> + '_ {
+        self.tokens_said(i)
+            .map(|(span, kind, link)| (span, kind, link.map(|(r, _)| r)))
+    }
+
+    /// Returns one line's tokens in order as [`View::tokens`] does, each
+    /// link with who stated its referent's name.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The line, from 0.
+    ///
+    /// # Returns
+    ///
+    /// The tokens, which tile the line, each link paired with its
+    /// [`Said`], `None` where the maker could not tell; none past the last
+    /// line.
+    pub fn tokens_said(&self, i: usize) -> impl Iterator<Item = SaidToken<'_>> + '_ {
         let mut from = 0;
         self.line_tokens(i).iter().map(move |t| {
             let (start, end) = (from, wide(t.end));
@@ -247,7 +291,7 @@ impl View {
             .checked_sub(1)
             .and_then(|j| line.get(j))
             .map_or(0, |p| wide(p.end));
-        Some((start..wide(t.end), t.kind, self.link(t)))
+        Some((start..wide(t.end), t.kind, self.link(t).map(|(r, _)| r)))
     }
 
     /// Returns where a referent is spelled: the first [`USES_MAX`] tokens
@@ -303,14 +347,85 @@ impl View {
         self.tokens.get(span).unwrap_or_default()
     }
 
-    /// Returns what a token links to.
+    /// Returns what a token links to, with who stated its name.
     ///
     /// # Arguments
     ///
     /// * `t` - The token.
-    fn link(&self, t: &Token) -> Option<&Ref> {
-        t.link
-            .and_then(|k| self.refs.get(wide(k.get()).checked_sub(1)?))
+    fn link(&self, t: &Token) -> Option<(&Ref, Option<Said>)> {
+        let k = wide(t.link?.get()).checked_sub(1)?;
+        Some((self.refs.get(k)?, self.said.get(k).copied().flatten()))
+    }
+
+    /// Returns the view with who stated each referent's name, read off the
+    /// tokens that spell it as a name.
+    ///
+    /// The name tokens (a function, variable, global, field, label or type)
+    /// of each referent are asked of `said` once per spelling, and no more
+    /// once one says nothing; a referent whose spellings answer apart, or
+    /// no name token spells, says nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `said` - Tells who stated a referent's name from the spelling of
+    ///   one of its tokens, `None` when the fact it was spelled from does
+    ///   not say.
+    #[must_use]
+    pub(crate) fn with_said(mut self, mut said: impl FnMut(&Ref, &str) -> Option<Said>) -> Self {
+        let mut seen: Vec<Option<Option<Said>>> = vec![None; self.refs.len()];
+        let mut asked: BTreeSet<(usize, &str)> = BTreeSet::new();
+        for i in 0..self.lines() {
+            let at = self.starts.get(i).map_or(0, |s| wide(s.at));
+            let mut from = at;
+            for t in self.line_tokens(i) {
+                let span = from..at.saturating_add(wide(t.end));
+                from = span.end;
+                let named = match t.kind {
+                    Kind::Function
+                    | Kind::Variable
+                    | Kind::Global
+                    | Kind::Field
+                    | Kind::Label
+                    | Kind::Type => true,
+                    Kind::Space
+                    | Kind::Comment
+                    | Kind::Keyword
+                    | Kind::Mnemonic
+                    | Kind::Register
+                    | Kind::Address
+                    | Kind::String
+                    | Kind::Number
+                    | Kind::Constant
+                    | Kind::Punct
+                    | Kind::Text => false,
+                };
+                let Some(k) = t.link.and_then(|l| wide(l.get()).checked_sub(1)) else {
+                    continue;
+                };
+                let (true, Some(slot), Some(r), Some(spelled)) = (
+                    named,
+                    seen.get_mut(k),
+                    self.refs.get(k),
+                    self.text.get(span),
+                ) else {
+                    continue;
+                };
+                match *slot {
+                    None => {
+                        *slot = Some(said(r, spelled));
+                        asked.insert((k, spelled));
+                    }
+                    Some(None) => {}
+                    Some(Some(first)) => {
+                        if asked.insert((k, spelled)) && said(r, spelled) != Some(first) {
+                            *slot = Some(None);
+                        }
+                    }
+                }
+            }
+        }
+        self.said = seen.into_iter().map(Option::flatten).collect();
+        self
     }
 
     /// Returns the text the tokens spell, line by line.
@@ -454,6 +569,7 @@ impl View {
             + size_of_val(&*self.starts)
             + size_of_val(&*self.tokens)
             + size_of_val(&*self.refs)
+            + size_of_val(&*self.said)
             + size_of_val(&*self.defs)
             + size_of_val(&*self.instr_lines)
             + size_of_val(&*self.instr_vas)
@@ -679,6 +795,7 @@ impl Builder {
             starts: self.starts.into_boxed_slice(),
             tokens: self.tokens.into_boxed_slice(),
             refs: places.into_iter().map(|(_, r)| r).collect(),
+            said: Box::default(),
             defs,
             unlinked,
             ordered: self.instr_vas.is_sorted(),

@@ -45,6 +45,7 @@
 
 use std::fmt::Write as _;
 
+use crate::headers::OrdinalName;
 use crate::program::{Program, SymbolKind};
 
 /// MD5's per-step sine-derived constants, RFC 1321's `T` table.
@@ -382,22 +383,24 @@ fn listed<'t>(table: &'t str, dll: &str, ordinal: &str) -> Option<&'t str> {
 ///
 /// * `dll` - The module name as the import table states it.
 /// * `ordinal` - The ordinal imported.
+///
+/// # Returns
+///
+/// The name, and whether a table listed it or it was made up.
 #[must_use]
-pub(crate) fn import_ordinal_name(dll: &str, ordinal: u16) -> String {
+pub(crate) fn import_ordinal_name(dll: &str, ordinal: u16) -> (String, OrdinalName) {
     let lower = dll.to_lowercase();
     let n = ordinal.to_string();
-    listed(IMPORT_ORDINALS, &lower, &n)
-        .or_else(|| listed(ORDINALS, &lower, &n))
-        .map_or_else(
-            || {
-                let stem: String = dll_stem(dll)
-                    .chars()
-                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-                    .collect();
-                format!("{stem}_ord{n}")
-            },
-            ToOwned::to_owned,
-        )
+    match listed(IMPORT_ORDINALS, &lower, &n).or_else(|| listed(ORDINALS, &lower, &n)) {
+        Some(name) => (name.to_owned(), OrdinalName::Listed),
+        None => {
+            let stem: String = dll_stem(dll)
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect();
+            (format!("{stem}_ord{n}"), OrdinalName::Made)
+        }
+    }
 }
 
 /// The dll name lowercased with a final `.dll`, `.ocx` or `.sys` removed,
@@ -440,7 +443,7 @@ fn ordinal_name(dll: &str, ordinal: u16) -> String {
 /// table order, comma-joined, and the digest is MD5 of that string. The
 /// loader names an import by ordinal for the reader
 /// ([`import_ordinal_name`]) and keeps its ordinal beside it
-/// ([`crate::headers::Headers::ordinal_imports`]), which the hash names
+/// ([`crate::headers::Headers::import_names`]), which the hash names
 /// it by; a symbol still spelled `ORDINAL <n>` is read the same way. The
 /// loader keeps the table's order. An import whose name entry is empty is
 /// skipped; non-PE imports
@@ -477,11 +480,11 @@ pub fn imphash(program: &Program) -> Option<[u8; 16]> {
         .map(|(addr, dll, func)| {
             let ordinal = program
                 .headers
-                .ordinal_imports
-                .binary_search_by_key(&addr, |(slot, _)| *slot)
-                .ok()
-                .and_then(|k| program.headers.ordinal_imports.get(k))
-                .map(|(_, n)| *n)
+                .import_names
+                .at(addr)
+                .iter()
+                .filter_map(|e| e.ordinal)
+                .min()
                 .or_else(|| func.strip_prefix("ORDINAL ").and_then(|n| n.parse().ok()));
             let func = ordinal.map_or_else(|| func.to_owned(), |n| ordinal_name(dll, n));
             format!("{}.{}", dll_stem(dll), func.to_lowercase())
@@ -1253,18 +1256,18 @@ mod tests {
     /// module's name.
     #[test]
     fn ordinal_imports_are_named_as_c_functions() {
-        assert_eq!(import_ordinal_name("WLDAP32.dll", 145), "ldap_initW");
+        assert_eq!(import_ordinal_name("WLDAP32.dll", 145).0, "ldap_initW");
         assert_eq!(
-            import_ordinal_name("certcli.dll", 359),
+            import_ordinal_name("certcli.dll", 359).0,
             "CSPrintErrorLineFileData"
         );
-        assert_eq!(import_ordinal_name("WS2_32.dll", 115), "WSAStartup");
+        assert_eq!(import_ordinal_name("WS2_32.dll", 115).0, "WSAStartup");
         assert_eq!(
-            import_ordinal_name("certcli.dll", 60000),
+            import_ordinal_name("certcli.dll", 60000).0,
             "certcli_ord60000"
         );
         assert_eq!(
-            import_ordinal_name("api-ms-win-x.dll", 3),
+            import_ordinal_name("api-ms-win-x.dll", 3).0,
             "api_ms_win_x_ord3"
         );
         assert_eq!(ordinal_name("WLDAP32.dll", 145), "ord145");

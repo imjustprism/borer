@@ -172,11 +172,7 @@ impl FunctionRow {
             instrs: f.instr_count,
             callers: f.callers.len(),
             callees: f.callees.len(),
-            src: if o.names.contains_key(&f.entry) {
-                RowSource::User
-            } else {
-                RowSource::Found(f.name_source)
-            },
+            src: RowSource::of(o, f),
             name: name_of(a, o, f.entry),
         }
     }
@@ -192,6 +188,21 @@ pub enum RowSource {
 }
 
 impl RowSource {
+    /// Returns where the name `f` goes by under `o` came from.
+    ///
+    /// # Arguments
+    ///
+    /// * `o` - User names, which win over the analysis's.
+    /// * `f` - The function.
+    #[must_use]
+    pub fn of(o: &Overlay, f: &Function) -> Self {
+        if o.names.contains_key(&f.entry) {
+            RowSource::User
+        } else {
+            RowSource::Found(f.name_source)
+        }
+    }
+
     /// Returns the tag the function table prints: `usr` for a user's name,
     /// else [`NameSource::code`].
     #[must_use]

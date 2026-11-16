@@ -32,6 +32,73 @@ pub struct ExceptionHandler {
     pub data: u64,
 }
 
+/// Where the loader took an import's name from when the file does not
+/// state it whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum OrdinalName {
+    /// A table of the system DLLs' exports lists the ordinal's export.
+    Listed,
+    /// The loader made it up: `<dll>_ord<n>` for an ordinal no table
+    /// lists, `(unnamed)` for a name the file leaves out or that reads
+    /// nowhere, `<name N>` once the load's name budget is spent.
+    Made,
+}
+
+/// How the loader named one import symbol whose name the file does not
+/// state as it reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ImportName {
+    /// The import's address-table slot.
+    pub slot: u64,
+    /// The symbol's place in [`crate::program::Program::symbols`].
+    pub symbol: usize,
+    /// The ordinal the import hash names it by, `None` for an import by
+    /// name.
+    pub ordinal: Option<u16>,
+    /// Where the name after its module came from, `None` where the file
+    /// states it; a name the loader renames as an ordinal's, a name that
+    /// spells `ORDINAL <n>` among them, takes the table's.
+    pub origin: Option<OrdinalName>,
+    /// Where its module's name came from: [`OrdinalName::Made`] where the
+    /// loader made it up, `None` where the file states it.
+    pub module: Option<OrdinalName>,
+}
+
+/// The imports the loader named itself, sorted by slot, then symbol.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ImportOrigins(Vec<ImportName>);
+
+impl ImportOrigins {
+    /// Returns the entries sorted, each once, so a slot's are found by
+    /// search.
+    ///
+    /// # Arguments
+    ///
+    /// * `names` - The entries, in any order.
+    #[must_use]
+    pub fn new(mut names: Vec<ImportName>) -> Self {
+        names.sort_unstable();
+        names.dedup();
+        Self(names)
+    }
+
+    /// Returns the entries at one import slot, in symbol order.
+    ///
+    /// # Arguments
+    ///
+    /// * `slot` - The import's address-table slot.
+    ///
+    /// # Returns
+    ///
+    /// The entries, empty where the file names every import at `slot`.
+    #[must_use]
+    pub fn at(&self, slot: u64) -> &[ImportName] {
+        let from = self.0.partition_point(|e| e.slot < slot);
+        let to = self.0.partition_point(|e| e.slot <= slot);
+        self.0.get(from..to).unwrap_or_default()
+    }
+}
+
 /// Facts read from the file headers; every field is empty for a raw file.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Headers {
@@ -159,11 +226,12 @@ pub struct Headers {
     /// imports a DLL linked `/DELAYLOAD` binds on first call, which the
     /// import hash leaves out as `pefile` does.
     pub delay_imports: Vec<u64>,
-    /// The address-table slots of a PE's imports by ordinal and each one's
-    /// ordinal, sorted by slot: the loader names such an import by the
-    /// export it is (`wldap32.dll!ldap_initW`) or `<dll>_ord<n>`, and the
-    /// import hash names it by its ordinal, as `pefile` does.
-    pub ordinal_imports: Vec<(u64, u16)>,
+    /// A PE's imports the file does not name whole, sorted: each import by
+    /// ordinal, which the loader names by the export it is
+    /// (`wldap32.dll!ldap_initW`) or `<dll>_ord<n>` and the import hash
+    /// names by its ordinal, as `pefile` does, and each import whose name
+    /// the loader made up.
+    pub import_names: ImportOrigins,
     /// What the loader read past to load the file at all: a header the
     /// strict parse refused, a field the operating system's loader ignores,
     /// a container's headers a stated layout left unread, each said in a

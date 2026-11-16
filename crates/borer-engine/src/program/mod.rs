@@ -27,7 +27,7 @@ pub use file::{Parent, TooLarge, checked_metadata, open_regular, read_regular, u
 use file::{Take, magic_name, parse_object, read_program_bytes};
 use pe::{
     SANE_MAX, arm64_pdata, directory_entry, disarm_exports, implausible_imports, loosen_pe,
-    name_ordinal_imports, pe_symbols, restore, rva_to_va, sound_section_table,
+    name_imports, pe_symbols, restore, rva_to_va, sound_section_table,
 };
 
 /// Container format of the loaded file.
@@ -1047,7 +1047,7 @@ impl Program {
                 }
 
                 let va_of_off = |off: u64| mapping_in(&sections, off).map_or(0, |(_, va)| va);
-                let delay_slots = pe_symbols(
+                let (delay_slots, made_imports) = pe_symbols(
                     pe,
                     &bytes,
                     refused_imports.is_none(),
@@ -1132,7 +1132,7 @@ impl Program {
                 headers.exception_handlers = exception_handlers;
                 headers.chained_chunks = chained_chunks;
                 headers.delay_imports = delay_slots;
-                headers.ordinal_imports = name_ordinal_imports(&mut symbols);
+                headers.import_names = name_imports(&mut symbols, &made_imports);
                 pdb_record = pe
                     .debug_data
                     .as_ref()

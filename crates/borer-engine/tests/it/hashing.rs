@@ -17,6 +17,7 @@
 use std::path::PathBuf;
 
 use borer_engine::hashing::{authentihash, hashes_tsv, imphash, tlsh};
+use borer_engine::headers::OrdinalName;
 use borer_engine::program::{Program, SymbolKind};
 
 /// Where the headers end and the first section's bytes begin.
@@ -260,6 +261,247 @@ fn imphash_keeps_table_order_and_names_ordinals_as_pefile_does() {
     assert_eq!(
         hex(&imphash(&p).expect("imports")),
         "c7216ad5d21e0b14fa56758a6344ebe0"
+    );
+}
+
+/// The loader records how it named each import the file does not name
+/// whole: an ordinal a table lists as listed, one no table lists as made
+/// up, and an import by name not at all.
+#[test]
+fn the_loader_records_whether_a_table_or_it_named_an_ordinal_import() {
+    let p = load(image_with(&rdata_by_ordinal()));
+    let origin = |name: &str| {
+        let slot = p
+            .symbols
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| s.addr)
+            .expect("an import");
+        p.headers
+            .import_names
+            .at(slot)
+            .iter()
+            .map(|e| (e.ordinal, e.origin))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        origin("WS2_32.dll!WSAStartup"),
+        [(Some(115), Some(OrdinalName::Listed))]
+    );
+    assert_eq!(
+        origin("WS2_32.dll!ws2_32_ord999"),
+        [(Some(999), Some(OrdinalName::Made))]
+    );
+    assert!(origin("WS2_32.dll!send").is_empty());
+    assert!(origin("USER32.DLL!MessageBoxA").is_empty());
+}
+
+/// One import as the loader recorded naming it: the name it gave the
+/// symbol, the ordinal the hash names it by, where the name after the module
+/// came from, and where the module's did.
+type Recorded = (
+    String,
+    Option<u16>,
+    Option<OrdinalName>,
+    Option<OrdinalName>,
+);
+
+/// Returns each import the loader recorded naming itself ([`Recorded`]).
+///
+/// # Arguments
+///
+/// * `p` - The loaded file.
+fn recorded(p: &Program) -> Vec<Recorded> {
+    p.symbols
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.kind == SymbolKind::Import)
+        .flat_map(|(k, s)| {
+            p.headers
+                .import_names
+                .at(s.addr)
+                .iter()
+                .filter(move |e| e.symbol == k)
+                .map(|e| (s.name.clone(), e.ordinal, e.origin, e.module))
+        })
+        .collect()
+}
+
+/// Points data directory `dir` of an image [`image_with`] built at `rva`.
+///
+/// # Arguments
+///
+/// * `b` - The image.
+/// * `dir` - The directory's slot.
+/// * `(rva, size)` - Where it is and how many bytes it holds.
+fn directory(b: &mut [u8], dir: usize, (rva, size): (u32, u32)) {
+    put32(b, OPT + 112 + dir * 8, rva);
+    put32(b, OPT + 112 + dir * 8 + 4, size);
+}
+
+/// Imports that share an address-table slot, an empty hint/name, a
+/// hint/name that spells an ordinal and a module whose name reads as
+/// nothing are each recorded by their own symbol.
+///
+/// `KERNEL32.dll`'s `Sleep` shares one slot with the next descriptor's
+/// entry whose hint/name is empty, and another with `WS2_32.dll`'s ordinal
+/// 115; a fifth descriptor imports from `x.dll` a name that reads
+/// `ORDINAL 5`, and a sixth `Sleep` from a module named by an empty
+/// string. The empty name is made up, the ordinal is a table's, the name
+/// spelling an ordinal is renamed as one no table lists, so made up too,
+/// and the empty module is made up while its `Sleep` is the file's.
+#[test]
+fn shared_slots_and_odd_names_are_recorded_by_symbol() {
+    /// The lookup entry's flag for an import by ordinal.
+    const BY_ORDINAL: u64 = 1 << 63;
+    let mut r = vec![0u8; 0x400];
+    let rows = [
+        (0x100, 0xa0, 0x200, u64::from(RDATA + 0x300)),
+        (0x110, 0xa0, 0x200, u64::from(RDATA + 0x310)),
+        (0x120, 0xa0, 0x220, u64::from(RDATA + 0x300)),
+        (0x130, 0xb0, 0x220, BY_ORDINAL | 115),
+        (0x140, 0xc0, 0x240, u64::from(RDATA + 0x320)),
+        (0x150, 0xd0, 0x260, u64::from(RDATA + 0x300)),
+    ];
+    for (k, &(lookup, name, iat, entry)) in rows.iter().enumerate() {
+        let at = |off: usize| RDATA + u32::try_from(off).expect("fits");
+        descriptor(&mut r, k * 20, at(lookup), at(name), at(iat));
+        put64(&mut r, lookup, entry);
+        put64(&mut r, iat, entry);
+    }
+    r[0xa0..0xad].copy_from_slice(b"KERNEL32.dll\0");
+    r[0xb0..0xbb].copy_from_slice(b"WS2_32.dll\0");
+    r[0xc0..0xc6].copy_from_slice(b"x.dll\0");
+    r[0x300..0x308].copy_from_slice(b"\0\0Sleep\0");
+    r[0x320..0x32c].copy_from_slice(b"\0\0ORDINAL 5\0");
+    let mut b = image_with(&r);
+    directory(&mut b, IMPORT_DIR, (RDATA, 140));
+    let p = load(b);
+    let slot = |name: &str| {
+        p.symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Import && s.name == name)
+            .map(|s| s.addr)
+            .collect::<Vec<_>>()
+    };
+    let sleep = slot("KERNEL32.dll!Sleep");
+    assert_eq!(sleep.len(), 2, "{:?}", p.symbols);
+    assert_eq!(slot("KERNEL32.dll!(unnamed)"), [sleep[0]]);
+    assert_eq!(slot("WS2_32.dll!WSAStartup"), [sleep[1]]);
+    assert_eq!(
+        recorded(&p),
+        [
+            (
+                "KERNEL32.dll!(unnamed)".to_owned(),
+                None,
+                Some(OrdinalName::Made),
+                None
+            ),
+            (
+                "WS2_32.dll!WSAStartup".to_owned(),
+                Some(115),
+                Some(OrdinalName::Listed),
+                None
+            ),
+            (
+                "x.dll!x_ord5".to_owned(),
+                Some(5),
+                Some(OrdinalName::Made),
+                None
+            ),
+            ("!Sleep".to_owned(), None, None, Some(OrdinalName::Made)),
+        ]
+    );
+}
+
+/// A delay-load module or thunk name that reads nowhere is made up, and
+/// recorded so, apart.
+///
+/// That is the module of `Beep`, whose name points past every
+/// section, while `Beep` itself is the file's, and the entry of
+/// `DELAYED.dll` whose hint/name does.
+#[test]
+fn unreadable_delay_load_names_are_recorded_as_made_up() {
+    let mut r = vec![0u8; 0x400];
+    for (k, (name, iat, lookup, entry)) in [
+        (0x9000, 0x380, 0x3a0, RDATA + 0x3c0),
+        (RDATA + 0xc0, 0x390, 0x3b0, 0x9100),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let at = 0x40 + k * 32;
+        let rva = |off: usize| RDATA + u32::try_from(off).expect("fits");
+        put32(&mut r, at, 1);
+        put32(&mut r, at + 4, name);
+        put32(&mut r, at + 12, rva(iat));
+        put32(&mut r, at + 16, rva(lookup));
+        put64(&mut r, lookup, u64::from(entry));
+    }
+    r[0xc0..0xcc].copy_from_slice(b"DELAYED.dll\0");
+    r[0x3c0..0x3c7].copy_from_slice(b"\0\0Beep\0");
+    let mut b = image_with(&r);
+    directory(&mut b, 13, (RDATA + 0x40, 96));
+    let p = load(b);
+    assert_eq!(
+        recorded(&p),
+        [
+            (
+                "(unnamed)!Beep".to_owned(),
+                None,
+                None,
+                Some(OrdinalName::Made)
+            ),
+            (
+                "DELAYED.dll!(unnamed)".to_owned(),
+                None,
+                Some(OrdinalName::Made),
+                None
+            ),
+        ],
+        "{:?}",
+        p.symbols
+    );
+}
+
+/// An import named past the load's name budget, `<name N>`, is recorded as
+/// made up, while those named within it are not recorded.
+///
+/// Thirty-one entries name one 250-byte import, more text than the budget
+/// of a file this small holds.
+#[test]
+fn imports_past_the_name_budget_are_recorded_as_made_up() {
+    let mut r = vec![0u8; 0x400];
+    descriptor(&mut r, 0, RDATA + 0x100, RDATA + 0xa0, RDATA + 0x200);
+    r[0xa0..0xad].copy_from_slice(b"KERNEL32.dll\0");
+    for k in 0..31 {
+        put64(&mut r, 0x100 + k * 8, u64::from(RDATA + 0x300));
+        put64(&mut r, 0x200 + k * 8, u64::from(RDATA + 0x300));
+    }
+    r[0x302..0x302 + 250].fill(b'A');
+    let p = load(image_with(&r));
+    let named = recorded(&p);
+    assert!(
+        !named.is_empty()
+            && named
+                .iter()
+                .all(|(n, o, origin, module)| n.starts_with("<name ")
+                    && o.is_none()
+                    && *origin == Some(OrdinalName::Made)
+                    && *module == Some(OrdinalName::Made)),
+        "{named:?}"
+    );
+    let imports = p.symbols.iter().filter(|s| s.kind == SymbolKind::Import);
+    assert!(
+        imports
+            .clone()
+            .any(|s| s.name.starts_with("KERNEL32.dll!AAAA")),
+        "{:?}",
+        p.symbols
+    );
+    assert_eq!(
+        imports.filter(|s| s.name.starts_with("<name ")).count(),
+        named.len()
     );
 }
 

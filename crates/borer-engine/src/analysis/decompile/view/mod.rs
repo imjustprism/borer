@@ -34,10 +34,14 @@
 //! things spell, or one no fact bears out, keeps its kind and is counted
 //! ([`Unlinked`]).
 //!
+//! Each linked name says who stated it ([`said`]), from the fact it was
+//! spelled with.
+//!
 //! Reading notes no overlay fact beyond its text's and the spellings it
 //! looked up ([`reads`]): the whole-program indexes are taken unnoted, the
-//! text is noted as the body its names were looked up in, and a name looked
-//! up with no `(` after it is noted as if one followed. A view of an answer
+//! text is noted as the body its names were looked up in, a name looked up
+//! with no `(` after it is noted as if one followed, and who stated a name
+//! is read by its referent's own key. A view of an answer
 //! ([`view`]) reads what the answer read as well, so it is kept across an
 //! edit exactly when its answer is.
 
@@ -48,6 +52,7 @@ use std::sync::Arc;
 
 mod data;
 mod fields;
+pub(crate) mod said;
 
 use super::lexer::{Lex, Piece, scan};
 use super::line::{header_len, is_global_name, label_address};
@@ -390,7 +395,8 @@ struct Reader<'a> {
 /// agrees.
 ///
 /// Any text of the function reads, an answer's or a plain one; every byte
-/// lands in a token, so the view spells the text back ([`View::spell`]).
+/// lands in a token, so the view spells the text back ([`View::spell`]),
+/// and each link says who stated its referent's name ([`said::of`]).
 /// The whole-program indexes the names are looked up in are taken unnoted,
 /// and the text is noted as the body they were looked up in
 /// ([`reads::note_body`]): a build that takes the view reads no overlay
@@ -429,7 +435,9 @@ pub fn view_of(
         }
         reader.line(&mut b, &mut tally, i, line, &mut pieces);
     }
-    let view = b.finish(tally.unlinked)?;
+    let view = b
+        .finish(tally.unlinked)?
+        .with_said(|r, w| said::of(program, analysis, overlay, r, w));
     reads::note_body(view.text());
     if !tally.looked.is_empty() {
         let called: String = tally.looked.iter().map(|w| format!("{w}(")).collect();
@@ -638,11 +646,16 @@ fn renamed(analysis: &Analysis, overlay: &Overlay) -> Arc<BTreeMap<String, Vec<u
         })
 }
 
+/// The module the loader names an import by when the file names none, as
+/// the text spells it before the import's name and a `!`.
+const UNNAMED_MODULE: &str = "(unnamed)!";
+
 /// Appends the pieces a view reads from byte `from` of `line` on
 /// ([`scan`]).
 ///
 /// A name with its scopes and template arguments reads as one piece
-/// ([`ctext::name_end`]), including one opening past ASCII.
+/// ([`ctext::name_end`]), including one opening past ASCII and one after
+/// the module the loader made up ([`UNNAMED_MODULE`]).
 ///
 /// # Arguments
 ///
@@ -653,15 +666,21 @@ fn split_into(line: &str, from: usize, out: &mut Vec<Spanned>) {
     let mut pieces = scan(line, from);
     while let Some((piece, span)) = pieces.next() {
         let rest = line.get(span.start..).unwrap_or_default();
+        let module = rest
+            .strip_prefix(UNNAMED_MODULE)
+            .filter(|r| r.starts_with(char::is_alphabetic))
+            .map_or(0, |_| UNNAMED_MODULE.len());
+        let name = rest.get(module..).unwrap_or_default();
         let opens = piece == Piece::Token(Lex::Name)
-            || (piece == Piece::Token(Lex::Punct) && rest.starts_with(char::is_alphabetic));
+            || (piece == Piece::Token(Lex::Punct) && name.starts_with(char::is_alphabetic));
         if !opens {
             out.push((piece, span));
             continue;
         }
         let end = span
             .start
-            .saturating_add(ctext::name_end(rest))
+            .saturating_add(module)
+            .saturating_add(ctext::name_end(name))
             .max(span.end);
         if end > span.end {
             pieces = scan(line, end);

@@ -4,7 +4,7 @@
 
 use super::{Analysis, BasicBlock, Overlay, disasm, name_of, short_name};
 use crate::analysis::decompile::lexer::{self, Lex, Piece};
-use crate::analysis::decompile::view::import_id;
+use crate::analysis::decompile::view::{import_id, said};
 use crate::analysis::syscalls::{self, SyscallSite};
 use crate::isa::{Isa, a32, a64, rv};
 use crate::num::from_usize;
@@ -140,8 +140,9 @@ pub fn disasm_function_with(
 /// [`View`].
 ///
 /// Runs the exact renderer of [`disasm_function_with`] over [`Builder`], so
-/// [`View::spell`] equals [`disasm_function_with`] byte for byte, and each
-/// instruction's line answers its address ([`View::address`]).
+/// [`View::spell`] equals [`disasm_function_with`] byte for byte, each
+/// instruction's line answers its address ([`View::address`]), and each
+/// link says who stated its referent's name ([`View::tokens_said`]).
 ///
 /// # Arguments
 ///
@@ -168,6 +169,7 @@ pub fn disasm_view(
     let mut b = Builder::default();
     disasm_into(p, a, o, entry, Pick::All(max_instrs), bytes, &mut b)?;
     b.finish(Unlinked::default())
+        .map(|v| v.with_said(|r, w| said::of(p, a, o, r, w)))
 }
 
 /// Renders some of a function's blocks as a typed token [`View`], as
