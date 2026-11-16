@@ -108,10 +108,10 @@ struct BorerServer {
     raw_load: Arc<RwLock<RawLoad>>,
     /// Derived analysis of `program`, computed on first use and reset by `load_binary`.
     analysis: Arc<RwLock<Option<Arc<Analysis>>>>,
-    /// The empty analysis of a program whose architecture has none, held
-    /// so its memo keeps the facts of the file (the string walk) once per
-    /// load; reset by `load_binary`.
-    no_code: Arc<RwLock<Option<Arc<Analysis>>>>,
+    /// The empty analysis of a program whose architecture has none, with
+    /// the program it is of, held so its memo keeps the facts of the file
+    /// (the string walk) once per load; reset by `load_binary`.
+    no_code: Arc<RwLock<Option<state::EmptyAnalysis>>>,
     /// User names and comments.
     overlay: Arc<RwLock<Overlay>>,
     /// The packs the user named in `BORER_PACKS`, read at start; every

@@ -63,6 +63,9 @@ pub(crate) fn read_lock<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
     lock.read().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// An empty analysis with the program it was made for ([`crate::BorerServer::analysis_or_empty`]).
+pub(crate) type EmptyAnalysis = (Arc<Program>, Arc<Analysis>);
+
 /// Writes under a lock, through a poisoning (see [`read_lock`]).
 ///
 /// # Arguments
@@ -244,9 +247,31 @@ impl BorerServer {
     /// until the next load, so what its memo keeps (the string walk) is
     /// worked out once per program, as an analysis's is.
     pub(crate) fn analysis_or_empty(&self) -> Arc<Analysis> {
-        self.ensure_analysis().unwrap_or_else(|_| {
-            Arc::clone(write_lock(&self.no_code).get_or_insert_with(Arc::default))
-        })
+        self.ensure_analysis()
+            .unwrap_or_else(|_| self.empty_analysis())
+    }
+
+    /// Returns the empty analysis held for the loaded program, making it on
+    /// first use.
+    ///
+    /// The held one is served only to the program it was made for, the way
+    /// [`Self::ensure_analysis`] keeps an analysis only for the program still
+    /// loaded: a caller outside a tool body may ask after a `load_binary`
+    /// replaced its program, and the new program must not answer from the
+    /// old one's memo.
+    fn empty_analysis(&self) -> Arc<Analysis> {
+        let Some(program) = self.loaded() else {
+            return Arc::default();
+        };
+        let mut slot = write_lock(&self.no_code);
+        if let Some((of, held)) = slot.as_ref()
+            && Arc::ptr_eq(of, &program)
+        {
+            return Arc::clone(held);
+        }
+        let made = Arc::<Analysis>::default();
+        *slot = Some((program, Arc::clone(&made)));
+        made
     }
 
     /// Returns an answer drawn from facts of the loaded file, the facts kept
@@ -991,6 +1016,22 @@ mod tests {
             assert!(page.is_ok(), "{page:?}");
         }
         assert_eq!(held.derived.held("string_walks"), 1);
+    }
+
+    /// The empty analysis held for one program is never served to another
+    /// put in its place.
+    ///
+    /// # Panics
+    ///
+    /// When the new program is answered from the old one's analysis.
+    #[test]
+    fn an_empty_analysis_is_served_only_to_its_program() {
+        use borer_engine::program::{Arch, Program};
+        let server = crate::testing::code_server(Arch::Unknown, b"old text\0");
+        let old = server.analysis_or_empty();
+        let new = Program::raw(b"new text\0".to_vec(), Arch::Unknown, 0, None, Vec::new());
+        *crate::state::write_lock(&server.program) = Some(std::sync::Arc::new(new));
+        assert!(!std::sync::Arc::ptr_eq(&old, &server.analysis_or_empty()));
     }
 
     /// The loaded file is named as pending until its analysis is held,
