@@ -1169,7 +1169,7 @@ fn an_applied_class_layout_types_each_methods_object() {
         name: "ClsS".to_owned(),
     }];
     let made = edit::plan(&p, &a, &o, &edits, Force::Refuse).expect("planned");
-    edit::commit(&a, &mut o, &made).expect("committed");
+    edit::commit(&p, &a, &mut o, &made).expect("committed");
     let set = borer_engine::analysis::decompile::decompile(&p, &a, &o, 0x1640).expect("text");
     assert!(
         set.contains("// signature: void Cls::Set(ClsS *this, int a2)"),

@@ -435,7 +435,7 @@ fn a_layout_applies_as_a_struct_on_request() {
         name: "Rec".to_owned(),
     }];
     let made = edit::plan(&program, &analysis, &before, &edits, Force::Refuse).expect("plans");
-    edit::commit(&Analysis::default(), &mut planned, &made).expect("commits");
+    edit::commit(&program, &Analysis::default(), &mut planned, &made).expect("commits");
     for call in done.lines().filter_map(|l| l.strip_prefix("set_type ")) {
         let params = serde_json::from_str(call).expect("the call's arguments");
         server.set_type(Parameters(params)).expect("applies");

@@ -1702,7 +1702,7 @@ fn a_committed_rename_keeps_the_views_that_do_not_name_it() {
         name: "renamed_b".to_owned(),
     }];
     let made = plan(&p, &a, &o, &edits, Force::Refuse).expect("planned");
-    commit(&a, &mut o, &made).expect("committed");
+    commit(&p, &a, &mut o, &made).expect("committed");
     assert!(
         Arc::ptr_eq(&kept, &view_at(&o, c)),
         "the view was built again"

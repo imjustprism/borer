@@ -464,8 +464,9 @@ impl BorerServer {
     ///
     /// # Arguments
     ///
-    /// * `program` - The program the plan was made for, when the caller
-    ///   read it outside its lock; `None` inside a tool body, which holds it.
+    /// * `(p, outside)` - The program the plan was made for, and the same
+    ///   program again when the caller read it outside its lock; `None`
+    ///   inside a tool body, which holds it.
     /// * `plan` - The plan.
     /// * `again` - Plans the edits again over the overlay as it is. It runs
     ///   under the overlay's write lock, so it must not take that lock.
@@ -481,12 +482,12 @@ impl BorerServer {
     /// nothing was applied.
     pub(crate) fn commit(
         &self,
-        program: Option<&Arc<Program>>,
+        (p, outside): (&Program, Option<&Arc<Program>>),
         plan: Plan,
         again: impl FnOnce(&Overlay) -> anyhow::Result<Plan>,
     ) -> anyhow::Result<Plan> {
-        let loaded = program.map(|_| read_lock(&self.program));
-        if let (Some(program), Some(loaded)) = (program, &loaded)
+        let loaded = outside.map(|_| read_lock(&self.program));
+        if let (Some(program), Some(loaded)) = (outside, &loaded)
             && !loaded.as_ref().is_some_and(|now| Arc::ptr_eq(now, program))
         {
             anyhow::bail!(
@@ -496,11 +497,11 @@ impl BorerServer {
         }
         let analysis = self.analysis_held();
         let mut overlay = write_lock(&self.overlay);
-        match edit::commit(&analysis, &mut overlay, &plan) {
+        match edit::commit(p, &analysis, &mut overlay, &plan) {
             Ok(()) => Ok(plan),
             Err(stale) if stale.is::<edit::Stale>() => {
                 let plan = again(&overlay)?;
-                edit::commit(&analysis, &mut overlay, &plan)?;
+                edit::commit(p, &analysis, &mut overlay, &plan)?;
                 Ok(plan)
             }
             Err(refused) => Err(refused),
@@ -538,7 +539,7 @@ impl BorerServer {
         if dry {
             return Ok(made);
         }
-        self.commit(None, made, |now| {
+        self.commit((p, None), made, |now| {
             edit::plan(p, a, &tabled(now), edits, force)
         })
     }

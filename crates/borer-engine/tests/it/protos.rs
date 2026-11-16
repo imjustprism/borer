@@ -444,7 +444,7 @@ fn an_applied_layout_names_the_fields_read_through_its_pointer() {
         name: "Rec".to_owned(),
     }];
     let made = edit::plan(&p, &a, &o, &edits, Force::Refuse).expect("planned");
-    edit::commit(&a, &mut o, &made).expect("committed");
+    edit::commit(&p, &a, &mut o, &made).expect("committed");
     let (after, header) = decompiled(&p, &o, 0x401_000);
     assert!(
         after.contains("// signature: uint64_t sub_401000(Rec *a1)"),

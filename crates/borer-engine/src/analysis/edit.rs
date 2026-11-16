@@ -505,8 +505,8 @@ pub enum Line {
 /// shown and committed; only [`plan`] and [`revert`] make one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
-    /// The [`Overlay::edits_key`] of the overlay the plan was made over;
-    /// [`commit`] writes it to that overlay only.
+    /// The program and the overlay the plan was made over ([`base`]);
+    /// [`commit`] writes it to that overlay of that program only.
     base: u64,
     /// The entries it writes, in the order written.
     changes: Vec<Change>,
@@ -1077,6 +1077,27 @@ fn plan_var(
     Ok((key, var))
 }
 
+/// Returns what a plan made over `overlay` of `program` is keyed by.
+///
+/// The
+/// program's bytes, hashed once into its analysis's memo, folded with the
+/// overlay's [`Overlay::edits_key`], so a plan commits to no other
+/// program's overlay that happens to state the same.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `analysis` - Its analysis, whose memo keeps the hash.
+/// * `overlay` - The overlay.
+fn base(program: &Program, analysis: &Analysis, overlay: &Overlay) -> u64 {
+    let digest = analysis.derived.get_or_build("edit_program", (), || {
+        crate::hashing::sha256(&program.bytes)
+    });
+    let [b0, b1, b2, b3, b4, b5, b6, b7, ..] = *digest;
+    let file = u64::from_le_bytes([b0, b1, b2, b3, b4, b5, b6, b7]);
+    super::functions::mix(file, overlay.edits_key())
+}
+
 /// Checks `edits` in order over `overlay`, each over what the ones before
 /// it leave, and works out the changes they make, writing nothing.
 ///
@@ -1095,7 +1116,7 @@ fn plan_var(
 ///
 /// # Returns
 ///
-/// The plan, whose base is `overlay`'s [`Overlay::edits_key`].
+/// The plan, keyed by `program` and `overlay` ([`base`]).
 ///
 /// # Errors
 ///
@@ -1120,7 +1141,7 @@ pub fn plan(
     }
     project::held(&draft.overlay).map_err(anyhow::Error::msg)?;
     Ok(Plan {
-        base: overlay.edits_key(),
+        base: base(program, analysis, overlay),
         changes: draft.changes,
         lines: draft.lines,
     })
@@ -1140,19 +1161,26 @@ pub fn plan(
 ///
 /// # Arguments
 ///
+/// * `program` - The loaded image the overlay annotates.
 /// * `analysis` - The analysis whose memo is carried over.
 /// * `overlay` - The overlay written.
 /// * `plan` - The plan.
 ///
 /// # Errors
 ///
-/// [`Stale`] when `overlay` is not the one the plan was made over; else
+/// [`Stale`] when `overlay`, or `program`, is not the one the plan was
+/// made over; else
 /// when an entry no longer holds what a change found there (an edit
 /// committed since changed it), when the overlay would hold more than a
 /// project file holds, or when its types would not validate. Either way
 /// nothing was written.
-pub fn commit(analysis: &Analysis, overlay: &mut Overlay, plan: &Plan) -> anyhow::Result<()> {
-    if plan.base != overlay.edits_key() {
+pub fn commit(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &mut Overlay,
+    plan: &Plan,
+) -> anyhow::Result<()> {
+    if plan.base != base(program, analysis, overlay) {
         return Err(Stale.into());
     }
     let before = overlay.clone();
@@ -1194,12 +1222,19 @@ pub fn commit(analysis: &Analysis, overlay: &mut Overlay, plan: &Plan) -> anyhow
 ///
 /// # Arguments
 ///
+/// * `program` - The loaded image the overlay annotates.
+/// * `analysis` - Its analysis.
 /// * `overlay` - The overlay the changes were committed to, as it is now.
 /// * `changes` - The changes taken back.
 #[must_use]
-pub fn revert(overlay: &Overlay, changes: &[Change]) -> Plan {
+pub fn revert(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    changes: &[Change],
+) -> Plan {
     Plan {
-        base: overlay.edits_key(),
+        base: base(program, analysis, overlay),
         changes: changes.iter().rev().map(Change::inverse).collect(),
         lines: Vec::new(),
     }

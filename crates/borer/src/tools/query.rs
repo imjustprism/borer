@@ -170,8 +170,11 @@ impl BorerServer {
             }
         }
         let planned = |o: &Overlay| edit::plan(&program, &analysis, o, &edits, Force::Take);
-        let applied = planned(&self.overlay())
-            .and_then(|made| self.commit(Some(&program), made, |now| planned(&tabled(now))));
+        let applied = planned(&self.overlay()).and_then(|made| {
+            self.commit((&program, Some(&program)), made, |now| {
+                planned(&tabled(now))
+            })
+        });
         if let Err(why) = applied {
             let _ = writeln!(text, "# nothing applied: {why}");
             return Ok(text);

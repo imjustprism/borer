@@ -696,7 +696,7 @@ impl BorerServer {
         let analysis = self.analysis_held();
         let planned = |o: &Overlay| edit::plan(&program, &analysis, o, &edits, Force::Refuse);
         planned(&self.overlay_plain())
-            .and_then(|made| self.commit(Some(&program), made, planned))
+            .and_then(|made| self.commit((&program, Some(&program)), made, planned))
             .map_err(|e| err_params(e.to_string()))?;
         Ok(said)
     }

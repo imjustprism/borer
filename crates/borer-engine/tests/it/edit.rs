@@ -17,6 +17,7 @@ use borer_engine::analysis::stated::{Field, Mode};
 use borer_engine::analysis::utypes::{UserType, parse_type};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::num::from_usize;
+use borer_engine::program::{Arch, Program};
 
 /// A project put in place of the overlay changes one entry of every kind
 /// that differs, and its changes taken back give the overlay again.
@@ -70,10 +71,10 @@ fn changes_replay_an_edit_and_their_inverses_take_it_back() {
             .any(|c| matches!(c, Change::Comment(0x1010, s) if s.after().is_none())),
         "{changes:?}"
     );
-    commit(&a, &mut o, &made).expect("committed");
+    commit(&p, &a, &mut o, &made).expect("committed");
     assert_eq!(o.fingerprint(), after.fingerprint());
-    let back = revert(&o, made.changes());
-    commit(&a, &mut o, &back).expect("taken back");
+    let back = revert(&p, &a, &o, made.changes());
+    commit(&p, &a, &mut o, &back).expect("taken back");
     assert_eq!(o.fingerprint(), before.fingerprint());
 }
 
@@ -102,7 +103,7 @@ fn a_planned_rename_commits_the_name_and_its_change() {
             number: None,
         }]
     );
-    commit(&a, &mut o, &made).expect("committed");
+    commit(&p, &a, &mut o, &made).expect("committed");
     let changes = made.changes();
     assert!(
         matches!(changes, [Change::Name(at, s)]
@@ -141,8 +142,8 @@ fn a_plan_made_before_another_commit_is_stale() {
     };
     let made_a = plan(&p, &a, &o, &rename(first), Force::Refuse).expect("planned");
     let made_b = plan(&p, &a, &o, &rename(second), Force::Refuse).expect("planned");
-    commit(&a, &mut o, &made_a).expect("committed");
-    let stale = commit(&a, &mut o, &made_b).expect_err("stale");
+    commit(&p, &a, &mut o, &made_a).expect("committed");
+    let stale = commit(&p, &a, &mut o, &made_b).expect_err("stale");
     assert!(stale.is::<Stale>(), "{stale}");
     assert_eq!(o.names.len(), 1, "the stale plan wrote nothing");
     let again = plan(&p, &a, &o, &rename(second), Force::Refuse).expect_err("taken");
@@ -175,16 +176,16 @@ fn a_commit_past_a_cap_writes_nothing() {
     fewer.names.remove(&0x10_0000);
     let load = [Edit::Project(Box::new(fewer))];
     let loaded = plan(&p, &a, &o, &load, Force::Refuse).expect("planned");
-    commit(&a, &mut o, &loaded).expect("committed");
+    commit(&p, &a, &mut o, &loaded).expect("committed");
     let edits = [Edit::Name {
         at: 0x1000,
         name: "one_more".to_owned(),
     }];
     let named = plan(&p, &a, &o, &edits, Force::Take).expect("planned");
-    commit(&a, &mut o, &named).expect("committed");
+    commit(&p, &a, &mut o, &named).expect("committed");
     let before = o.fingerprint();
-    let back = revert(&o, loaded.changes());
-    let refused = commit(&a, &mut o, &back).expect_err("past the cap");
+    let back = revert(&p, &a, &o, loaded.changes());
+    let refused = commit(&p, &a, &mut o, &back).expect_err("past the cap");
     assert!(refused.to_string().contains("names"), "{refused}");
     assert_eq!(o.fingerprint(), before, "the overlay changed");
     let edits = [Edit::Name {
@@ -247,11 +248,11 @@ fn the_inverse_of_a_mixed_plan_restores_the_overlay() {
         },
     ];
     let made = plan(&p, &a, &o, &edits, Force::Refuse).expect("planned");
-    commit(&a, &mut o, &made).expect("committed");
+    commit(&p, &a, &mut o, &made).expect("committed");
     assert_eq!(made.changes().len(), 4, "{made:?}");
     assert_ne!(o.fingerprint(), before);
-    let back = revert(&o, made.changes());
-    commit(&a, &mut o, &back).expect("taken back");
+    let back = revert(&p, &a, &o, made.changes());
+    commit(&p, &a, &mut o, &back).expect("taken back");
     assert_eq!(o.fingerprint(), before, "{made:?}");
 }
 
@@ -271,10 +272,10 @@ fn a_project_put_in_place_is_taken_back_by_its_inverse() {
     let before = o.fingerprint();
     let edits = [Edit::Project(Box::new(loaded.clone()))];
     let made = plan(&p, &a, &o, &edits, Force::Refuse).expect("planned");
-    commit(&a, &mut o, &made).expect("committed");
+    commit(&p, &a, &mut o, &made).expect("committed");
     assert_eq!(o.fingerprint(), loaded.fingerprint());
-    let back = revert(&o, made.changes());
-    commit(&a, &mut o, &back).expect("taken back");
+    let back = revert(&p, &a, &o, made.changes());
+    commit(&p, &a, &mut o, &back).expect("taken back");
     assert_eq!(o.fingerprint(), before);
 }
 
@@ -313,7 +314,7 @@ fn every_change_says_what_its_entry_holds() {
         },
     ];
     let made = plan(&p, &a, &o, &edits, Force::Refuse).expect("planned");
-    commit(&a, &mut o, &made).expect("committed");
+    commit(&p, &a, &mut o, &made).expect("committed");
     assert_eq!(made.changes().len(), edits.len(), "{made:?}");
     for change in made.changes() {
         let holds = match change {
@@ -351,11 +352,11 @@ fn a_layout_planned_again_reads_the_prototypes_stated_meanwhile() {
     }];
     let made_layout = plan(&p, &a, &o, &layout, Force::Refuse).expect("planned");
     let made_proto = plan(&p, &a, &o, &stated, Force::Refuse).expect("planned");
-    commit(&a, &mut o, &made_proto).expect("committed");
-    let stale = commit(&a, &mut o, &made_layout).expect_err("stale");
+    commit(&p, &a, &mut o, &made_proto).expect("committed");
+    let stale = commit(&p, &a, &mut o, &made_layout).expect_err("stale");
     assert!(stale.is::<Stale>(), "{stale}");
     let again = plan(&p, &a, &o, &layout, Force::Refuse).expect("planned again");
-    commit(&a, &mut o, &again).expect("committed");
+    commit(&p, &a, &mut o, &again).expect("committed");
     let has = o.prototypes.get(&HAS).expect("a prototype");
     assert_eq!(has.params.len(), 3, "{}", has.spell());
     assert_eq!(
@@ -388,11 +389,11 @@ fn taking_an_edit_back_keeps_and_refuses_what_came_after() {
         }]
     };
     let first = plan(&p, &a, &o, &rename("x", "count"), Force::Refuse).expect("planned");
-    commit(&a, &mut o, &first).expect("committed");
+    commit(&p, &a, &mut o, &first).expect("committed");
     let second = plan(&p, &a, &o, &rename("y", "total"), Force::Refuse).expect("planned");
-    commit(&a, &mut o, &second).expect("committed");
-    let back = revert(&o, first.changes());
-    commit(&a, &mut o, &back).expect("taken back");
+    commit(&p, &a, &mut o, &second).expect("committed");
+    let back = revert(&p, &a, &o, first.changes());
+    commit(&p, &a, &mut o, &back).expect("taken back");
     let named = |key| {
         o.vars
             .get(&entry)
@@ -412,12 +413,12 @@ fn taking_an_edit_back_keeps_and_refuses_what_came_after() {
         }]
     };
     let one = plan(&p, &a, &o, &name("one"), Force::Refuse).expect("planned");
-    commit(&a, &mut o, &one).expect("committed");
+    commit(&p, &a, &mut o, &one).expect("committed");
     let two = plan(&p, &a, &o, &name("two"), Force::Refuse).expect("planned");
-    commit(&a, &mut o, &two).expect("committed");
+    commit(&p, &a, &mut o, &two).expect("committed");
     let before = o.fingerprint();
-    let back = revert(&o, one.changes());
-    let changed = commit(&a, &mut o, &back).expect_err("renamed since");
+    let back = revert(&p, &a, &o, one.changes());
+    let changed = commit(&p, &a, &mut o, &back).expect_err("renamed since");
     assert!(changed.to_string().contains("changed since"), "{changed}");
     assert_eq!(o.fingerprint(), before, "a refused take-back wrote");
     let word = parse_type("u32").expect("a type");
@@ -426,16 +427,44 @@ fn taking_an_edit_back_keeps_and_refuses_what_came_after() {
         ty: word,
     }];
     let defined = plan(&p, &a, &o, &define, Force::Refuse).expect("planned");
-    commit(&a, &mut o, &defined).expect("committed");
+    commit(&p, &a, &mut o, &defined).expect("committed");
     let applied = [Edit::Apply {
         at: 0x2040,
         ty: parse_type("Word").expect("a type"),
     }];
     let made = plan(&p, &a, &o, &applied, Force::Refuse).expect("planned");
-    commit(&a, &mut o, &made).expect("committed");
+    commit(&p, &a, &mut o, &made).expect("committed");
     let before = o.fingerprint();
-    let back = revert(&o, defined.changes());
-    let dropped = commit(&a, &mut o, &back).expect_err("still applied");
+    let back = revert(&p, &a, &o, defined.changes());
+    let dropped = commit(&p, &a, &mut o, &back).expect_err("still applied");
     assert!(dropped.to_string().contains("0x2040"), "{dropped}");
     assert_eq!(o.fingerprint(), before, "a refused take-back wrote");
+}
+
+/// A plan made over one program's overlay does not commit to another's,
+/// even where the two overlays state the same.
+#[test]
+fn a_plan_does_not_commit_to_another_programs_overlay() {
+    let p = fixture();
+    let a = Analysis::compute(&p);
+    let other = Program::raw(
+        vec![0xc3; 16],
+        Arch::X86_64,
+        0x1000,
+        Some(0x1000),
+        Vec::new(),
+    );
+    let edits = [Edit::Comment {
+        at: 0x1000,
+        text: "a note".to_owned(),
+    }];
+    let made = plan(&p, &a, &Overlay::default(), &edits, Force::Refuse).expect("planned");
+    let mut theirs = Overlay::default();
+    let stale =
+        commit(&other, &Analysis::default(), &mut theirs, &made).expect_err("another program");
+    assert!(stale.is::<Stale>(), "{stale}");
+    assert!(
+        theirs.comments.is_empty(),
+        "the other program's overlay changed"
+    );
 }
