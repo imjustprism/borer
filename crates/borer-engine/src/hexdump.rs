@@ -142,19 +142,19 @@ impl HexRows {
 ///
 /// * `program` - The loaded image.
 /// * `va` - Address of the first byte.
-/// * `len` - Bytes asked for, at most [`HEXDUMP_MAX`]; the runs stop at
-///   the top of the address space.
+/// * `len` - Bytes asked for, at most [`HEXDUMP_MAX`]; the runs stop
+///   after the byte at the top of the address space.
 ///
 /// # Returns
 ///
 /// The runs covering `va` onward.
 #[must_use]
 pub fn hex_rows(program: &crate::program::Program, va: u64, len: usize) -> HexRows {
-    let end = va.saturating_add(from_usize(len.min(HEXDUMP_MAX)));
+    let mut left = from_usize(len.min(HEXDUMP_MAX));
     let mut spans = Vec::new();
     let mut at = va;
-    while at < end {
-        let want = usize::try_from(end - at).unwrap_or(HEXDUMP_MAX);
+    while left > 0 {
+        let want = usize::try_from(left).unwrap_or(HEXDUMP_MAX);
         let found = program.section_at(at);
         let holding = found.or_else(|| program.zero_fill_at(at));
         let next = || {
@@ -164,7 +164,8 @@ pub fn hex_rows(program: &crate::program::Program, va: u64, len: usize) -> HexRo
                 .map(|s| s.va.0)
                 .chain((program.format == BinaryFormat::Pe).then_some(program.image_base))
                 .filter(|&start| start > at)
-                .fold(end, u64::min)
+                .map(|start| start - at)
+                .fold(left, u64::min)
         };
         let (run, fill, section) = match (program.read_va_upto(at, want), holding) {
             (Some(bytes), _) => (
@@ -175,12 +176,12 @@ pub fn hex_rows(program: &crate::program::Program, va: u64, len: usize) -> HexRo
             (None, Some(s)) => (
                 s.va.0
                     .saturating_add(s.vsize.max(s.file_size))
-                    .min(next())
-                    .saturating_sub(at),
+                    .saturating_sub(at)
+                    .min(next()),
                 HexFill::Unbacked,
                 Some(s),
             ),
-            (None, None) => (next().saturating_sub(at), HexFill::Unmapped, None),
+            (None, None) => (next(), HexFill::Unmapped, None),
         };
         if run == 0 {
             break;
@@ -191,7 +192,11 @@ pub fn hex_rows(program: &crate::program::Program, va: u64, len: usize) -> HexRo
             section: section.map(|s| s.name.clone()),
             fill,
         });
-        at = at.saturating_add(run);
+        left -= run;
+        let Some(after) = at.checked_add(run) else {
+            break;
+        };
+        at = after;
     }
     HexRows { va, spans }
 }
@@ -341,6 +346,21 @@ mod tests {
             matches!(&spans[1].fill, HexFill::Bytes(b) if b.starts_with(b"MZ")),
             "{spans:?}"
         );
+    }
+
+    /// A dump ending at the top of the address space holds every byte the
+    /// file backs up to it, the last one included.
+    ///
+    /// # Panics
+    ///
+    /// When a byte below the top is dropped.
+    #[test]
+    fn hex_rows_read_up_to_the_top_of_the_address_space() {
+        let top = Section::mapped(".top", 0xffff_ffff_ffff_f000, 0, 0x1000, false, false);
+        let p = Program::raw(vec![0x5a; 0x1000], Arch::X86_64, 0, None, vec![top]);
+        let spans = hex_rows(&p, 0xffff_ffff_ffff_fff0, 0x10).spans;
+        assert_eq!(spans.len(), 1, "{spans:?}");
+        assert_eq!(spans[0].fill, HexFill::Bytes(vec![0x5a; 0x10]));
     }
 
     /// The text is the dump the tool printed: the file's bytes from the
