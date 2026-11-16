@@ -1407,6 +1407,9 @@ def main() -> int:
         input_lat,
         watcher,
     )
+    for where in ("on_start", "on_tab"):
+        if folder_drop.get(where) is not True:
+            failures.append(f"the drop {where} did not reach a tab's drop handler")
     if folder_drop.get("folders") != 0:
         failures.append(
             f"a dropped folder joined the project (folders={folder_drop.get('folders')})"

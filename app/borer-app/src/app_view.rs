@@ -57,6 +57,9 @@ const APP_WORKSPACE_ID: i64 = 1;
 /// `workspace::persistence`, which writes it on every serialization).
 const DEFAULT_DOCK_STATE_KEY: &str = "default_dock_state";
 
+/// What the status line ends with when a tab refuses a dropped folder.
+pub const REFUSED_FOLDER: &str = "is a folder; drop a binary";
+
 /// The app's settings over Zed's defaults: AI off.
 const APP_SETTINGS: &str = include_str!("../settings.json");
 
@@ -89,7 +92,7 @@ pub fn data_dir(mode: &CliMode) -> anyhow::Result<PathBuf> {
         | CliMode::Headless(_)
         | CliMode::MeasureMemory(_)
         | CliMode::Measure(_)
-        | CliMode::MeasureDrop(_) => Ok(
+        | CliMode::MeasureDrop(..) => Ok(
             std::env::temp_dir().join(format!("{DATA_DIR_NAME}-measure-{}", std::process::id()))
         ),
     }
@@ -236,7 +239,7 @@ pub fn open_dropped(workspace: &WeakEntity<Workspace>, dropped: &dyn Any, cx: &m
         let path = path.clone();
         binary.update(cx, |binary, cx| {
             if matches!(checked_metadata(&path), Ok(Some(meta)) if meta.is_dir()) {
-                binary.set_status(format!("{} is a folder; drop a binary", path.display()), cx);
+                binary.set_status(format!("{} {REFUSED_FOLDER}", path.display()), cx);
             } else {
                 binary.open_path(path, cx);
             }
@@ -401,7 +404,7 @@ mod tests {
     use workspace::pane::{GoBack, GoForward};
     use workspace::{AddFolderToProject, AppState, MultiWorkspace, Workspace};
 
-    use super::{configure, data_dir, new_workspace};
+    use super::{REFUSED_FOLDER, configure, data_dir, new_workspace};
     use crate::decompile_item::{DecompileItem, TabMode, open_function};
     use crate::functions_panel::FunctionsPanel;
     use crate::measure::{CliMode, MeasurePhase};
@@ -425,6 +428,27 @@ mod tests {
             let app_state = AppState::test(cx);
             configure(cx).unwrap();
             app_state
+        })
+    }
+
+    /// Returns the status line of `workspace`'s binary and empties it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the workspace has no functions panel.
+    fn take_status(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> String {
+        let binary = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .panel::<FunctionsPanel>(cx)
+                .unwrap()
+                .read(cx)
+                .binary()
+                .clone()
+        });
+        binary.update(cx, |binary, cx| {
+            let status = binary.status().to_owned();
+            binary.set_status(String::new(), cx);
+            status
         })
     }
 
@@ -617,7 +641,8 @@ mod tests {
 
     /// A folder whose settings start a context server, dropped on a pane holding only the
     /// start tab and on a pane holding a decompile tab, or picked through Zed's add folder
-    /// action, never becomes a project folder, and AI is off.
+    /// action, reaches the binary's loader each time and never becomes a project folder, and
+    /// AI is off.
     ///
     /// # Panics
     ///
@@ -634,11 +659,8 @@ mod tests {
     /// Panics when a step goes wrong, as [`a_dropped_or_added_folder_never_joins_the_project`] says.
     async fn a_dropped_or_added_folder_never_joins_the_project_steps(cx: &mut TestAppContext) {
         let app_state = init(cx);
-        let dir = PathBuf::from(if cfg!(windows) {
-            r"C:\dropped"
-        } else {
-            "/dropped"
-        });
+        let dir = std::env::temp_dir().join(format!("borer-app-drop-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
         let settings = r#"{"context_servers": {"x": {"command": "calc.exe"}}}"#;
         app_state
             .fs
@@ -653,6 +675,7 @@ mod tests {
             workspace.close_panel::<FunctionsPanel>(window, cx);
         });
         drop_on_center(&dir, cx);
+        assert!(take_status(&workspace, cx).ends_with(REFUSED_FOLDER));
         let loaded = sample();
         workspace.update_in(cx, |workspace, window, cx| {
             open_function(
@@ -667,10 +690,13 @@ mod tests {
         });
         assert_eq!(shown(&workspace, cx).map(|(entry, _)| entry), Some(CALLER));
         drop_on_center(&dir, cx);
+        assert!(take_status(&workspace, cx).ends_with(REFUSED_FOLDER));
         cx.dispatch_action(AddFolderToProject);
         cx.run_until_parked();
         cx.simulate_path_prompt_response(|_| Some(vec![dir.clone()]));
         cx.run_until_parked();
+        assert!(take_status(&workspace, cx).starts_with("load failed"));
+        std::fs::remove_dir_all(&dir).unwrap();
         let folders = workspace.read_with(cx, |workspace, cx| {
             workspace.project().read(cx).worktrees(cx).count()
         });

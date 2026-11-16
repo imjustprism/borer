@@ -217,9 +217,9 @@ pub enum CliMode {
     MeasureMemory(PathBuf),
     /// Runs automated scroll or input-latency profiling.
     Measure(MeasurePhase),
-    /// Drops the folder `<path>` on the window, prints `DROP_DONE` with the project's
-    /// folder count, and exits.
-    MeasureDrop(PathBuf),
+    /// Drops the folder `<path>` on the start tab and on a tab of the binary `<binary>`
+    /// (default notepad), prints `DROP_DONE` with the project's folder count, and exits.
+    MeasureDrop(PathBuf, PathBuf),
 }
 
 /// One-shot startup transition decided from the current [`CliMode`] and load state.
@@ -284,7 +284,7 @@ pub fn evaluate_one_shot(
         CliMode::Interactive(_)
         | CliMode::Headless(_)
         | CliMode::Measure(_)
-        | CliMode::MeasureDrop(_) => OneShotAction::Wait,
+        | CliMode::MeasureDrop(..) => OneShotAction::Wait,
     }
 }
 
@@ -400,7 +400,10 @@ pub fn parse_cli_args_os(args: &[OsString]) -> anyhow::Result<CliMode> {
             let p = args
                 .get(1)
                 .ok_or_else(|| anyhow::anyhow!("--measure-drop requires a <folder> path"))?;
-            Ok(CliMode::MeasureDrop(PathBuf::from(p)))
+            let binary = args
+                .get(2)
+                .map_or_else(|| PathBuf::from(SYSTEM_NOTEPAD), PathBuf::from);
+            Ok(CliMode::MeasureDrop(PathBuf::from(p), binary))
         }
         Some("--measure") => {
             let phase = match args.get(1) {
@@ -734,7 +737,7 @@ impl Harness {
             CliMode::FirstFrame
             | CliMode::Headless(_)
             | CliMode::Measure(_)
-            | CliMode::MeasureDrop(_) => None,
+            | CliMode::MeasureDrop(..) => None,
         };
         let workspace = new_workspace(app_state, path, window, cx);
         let root = cx.new(|cx| MultiWorkspace::new(workspace.clone(), window, cx));
@@ -760,7 +763,7 @@ impl Harness {
             | CliMode::ReportOpen(_)
             | CliMode::Headless(_)
             | CliMode::MeasureMemory(_)
-            | CliMode::MeasureDrop(_) => None,
+            | CliMode::MeasureDrop(..) => None,
         };
         let mut harness = Self {
             root,
@@ -783,11 +786,9 @@ impl Harness {
         if let Some(phase) = phase {
             harness.begin(phase, cx);
         }
-        if let CliMode::MeasureDrop(dir) = &harness.mode {
-            let dir = dir.clone();
-            cx.on_next_frame(window, move |this, window, cx| {
-                this.drop_folder(dir, window, cx);
-            });
+        if let CliMode::MeasureDrop(dir, binary) = &harness.mode {
+            let (dir, binary) = (dir.clone(), binary.clone());
+            cx.on_next_frame(window, move |this, _, cx| this.drop_folder(dir, binary, cx));
         }
         harness
     }
