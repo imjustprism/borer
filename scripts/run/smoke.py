@@ -59,6 +59,54 @@ def dump_stderr_on_failure():
 
 atexit.register(dump_stderr_on_failure)
 
+# Hard watchdog against a hung server, not a performance budget, armed per
+# request: the diff, difffn and migrate resources each walk every function of
+# the binary under test, which is borer itself, so their cost grows with every
+# commit. A fixed budget for a whole session killed healthy runs whenever the
+# gate's earlier steps or other builds had loaded the machine (60s for the
+# 2026-07-28 session, 300s for the name-table job on the debug build).
+RPC_TIMEOUT = 900
+
+
+class Watchdog:
+    """Kills a server that has not answered one request within `RPC_TIMEOUT`
+    seconds, and remembers which request it gave up on. Its timers are daemons:
+    a live non-daemon timer holds the interpreter open at exit until it fires."""
+
+    def __init__(self, server):
+        self.server = server
+        self.timer = None
+        self.method = None
+        self.fired = False
+
+    def arm(self, method, params):
+        """Start the clock for one request, stopping the previous one."""
+        self.cancel()
+        target = (params or {}).get("name") or (params or {}).get("uri")
+        self.method = f"{method} {target}" if target else method
+        self.timer = threading.Timer(RPC_TIMEOUT, self.fire)
+        self.timer.daemon = True
+        self.timer.start()
+
+    def fire(self):
+        self.fired = True
+        self.server.kill()
+
+    def cancel(self):
+        """Stop the clock; a live timer would kill the server mid-step."""
+        if self.timer is not None:
+            self.timer.cancel()
+
+    def closed(self, session):
+        """The failure message for a server that closed stdout."""
+        if self.fired:
+            return (
+                f"{session}watchdog killed the server after {RPC_TIMEOUT} s "
+                f"waiting for {self.method}; its stderr follows"
+            )
+        return f"{session}server closed stdout; its stderr follows"
+
+
 # The servers write project files under the system temp directory, so it is
 # their output root.
 os.environ["BORER_OUTPUT_DIR"] = tempfile.gettempdir()
@@ -70,21 +118,15 @@ proc = subprocess.Popen(
     text=True,
     encoding="utf-8",
 )
-# Hard watchdog against a hung server, not a performance budget: the diff,
-# difffn and migrate resources each walk every function of the binary under
-# test, which is borer itself, so their cost grows with every commit. At 60s
-# this killed a healthy run whenever the gate's earlier steps had loaded the
-# machine; at 300s the name-table job on the debug build under load did.
 # A failed check exits mid-session; the server must not outlive it.
 atexit.register(proc.kill)
-watchdog = threading.Timer(900, proc.kill)
-watchdog.daemon = True
-watchdog.start()
+watchdog = Watchdog(proc)
 assert proc.stdin is not None and proc.stdout is not None
 stdin = proc.stdin
 stdout = proc.stdout
 
 _next_id = 0
+_methods = {}
 
 
 def send(method, params=None, notify=False):
@@ -97,18 +139,21 @@ def send(method, params=None, notify=False):
         _next_id += 1
         msg["id"] = _next_id
         rid = _next_id
+        _methods[rid] = (method, params)
     stdin.write(json.dumps(msg) + "\n")
     stdin.flush()
     return rid
 
 
 def wait_for(rid, allow_error=False):
+    watchdog.arm(*_methods.pop(rid))
     while True:
         line = stdout.readline()
         if not line:
-            raise SystemExit("server closed stdout; its stderr follows")
+            raise SystemExit(watchdog.closed(""))
         msg = json.loads(line)
         if msg.get("id") == rid:
+            watchdog.cancel()
             if "error" in msg and not allow_error:
                 raise SystemExit(f"rpc error: {msg['error']}")
             return msg.get("result") if "result" in msg else msg
@@ -809,13 +854,8 @@ p2 = subprocess.Popen(
     text=True,
     encoding="utf-8",
 )
-# Daemon and cancelled, like the first watchdog: a live non-daemon timer
-# holds the interpreter open at exit until it fires, which added its whole
-# budget to every green run.
 atexit.register(p2.kill)
-watchdog2 = threading.Timer(60, p2.kill)
-watchdog2.daemon = True
-watchdog2.start()
+watchdog2 = Watchdog(p2)
 assert p2.stdin is not None and p2.stdout is not None
 stdin2 = p2.stdin
 stdout2 = p2.stdout
@@ -828,12 +868,14 @@ META = {
 def rpc2(i, method, params):
     stdin2.write(json.dumps({"jsonrpc": "2.0", "id": i, "method": method, "params": params}) + "\n")
     stdin2.flush()
+    watchdog2.arm(method, params)
     while True:
         line = stdout2.readline()
         if not line:
-            raise SystemExit("2026-07-28 session: server closed stdout; its stderr follows")
+            raise SystemExit(watchdog2.closed("2026-07-28 session: "))
         r = json.loads(line)
         if r.get("id") == i:
+            watchdog2.cancel()
             if "error" in r:
                 raise SystemExit(f"2026-07-28 session rpc error: {r['error']}")
             return r["result"]
@@ -859,8 +901,6 @@ info2 = rpc2(4, "tools/call", {"_meta": META, "name": "binary_info", "arguments"
 assert "format:" in info2["content"][0]["text"], info2
 stdin2.close()
 p2.wait(timeout=10)
-watchdog2.cancel()
 print("2026-07-28 lifecycle OK (discover, cache hints, per-request _meta)")
 passed = True
 print("SMOKE OK")
-watchdog.cancel()
