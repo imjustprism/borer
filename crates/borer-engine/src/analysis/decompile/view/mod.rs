@@ -55,6 +55,8 @@ use super::{
     Detail, answer, cir, ctext, declarations_end, defs, expr_render, helper, unit, virtual_callees,
 };
 use crate::analysis::attributes::global_addr;
+use crate::analysis::edit::var_key;
+use crate::analysis::protos::VarKey;
 use crate::analysis::render::block_instructions;
 use crate::analysis::{Analysis, Function, Overlay, name_of, reads};
 use crate::cancel::Cancel;
@@ -311,6 +313,36 @@ struct Tally {
     imports: BTreeMap<u64, BTreeMap<Vec<u64>, bool>>,
     /// Cached `classes::field_names` tables by class name.
     class_fields: BTreeMap<String, BTreeMap<u64, String>>,
+    /// The variable each name of each function is ([`var_key`]), as
+    /// already resolved.
+    keys: BTreeMap<u64, BTreeMap<String, Option<VarKey>>>,
+}
+
+impl Tally {
+    /// Returns the variable a function's name is ([`var_key`]), resolving
+    /// each name of each function once.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The loaded image.
+    /// * `overlay` - Names in force.
+    /// * `function` - The function's entry.
+    /// * `name` - The name.
+    fn key(
+        &mut self,
+        program: &Program,
+        overlay: &Overlay,
+        function: u64,
+        name: &str,
+    ) -> Option<VarKey> {
+        let names = self.keys.entry(function).or_default();
+        if let Some(&key) = names.get(name) {
+            return key;
+        }
+        let key = var_key(program, overlay, function, name);
+        names.insert(name.to_owned(), key);
+        key
+    }
 }
 
 /// What reading one function's text needs, read once before its lines.
@@ -1468,6 +1500,7 @@ impl<'a> Reader<'a> {
             let link = at.scope.owner.map(|function| Ref::Variable {
                 function,
                 name: w.into(),
+                key: tally.key(self.program, self.overlay, function, w),
             });
             let declares = matches!(at.role, Role::Signature | Role::Inline | Role::Declaration);
             return (Kind::Variable, link, declares);

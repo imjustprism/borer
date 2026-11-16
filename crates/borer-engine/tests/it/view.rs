@@ -13,6 +13,7 @@ use std::sync::Arc;
 use crate::machogen::{self, CODE, Fix, PIE, R, RW, RX, Sect, Seg, Starts, X86_64};
 use borer_engine::analysis::decompile::view::{view, view_of};
 use borer_engine::analysis::decompile::{Detail, answer, decompile_named};
+use borer_engine::analysis::protos::{VarKey, slot_words};
 use borer_engine::analysis::{Analysis, EnumSource, Overlay};
 use borer_engine::program::{Arch, BinaryFormat, Program, Section, Symbol, SymbolKind};
 use borer_engine::view::{Kind, Ref, Unlinked, View};
@@ -192,9 +193,13 @@ fn every_name_of_an_answer_reads_with_its_one_link() {
     assert_eq!(v.spell(), text);
     let all = tokens(&v);
     let lines: Vec<&str> = text.split('\n').collect();
-    let variable = |function, name: &str| Ref::Variable {
-        function,
-        name: name.into(),
+    let variable = |function, name: &str| {
+        let (stack, _, frame) = slot_words(&p, function);
+        Ref::Variable {
+            function,
+            name: name.into(),
+            key: VarKey::parse(name, stack, frame).ok(),
+        }
     };
     for (i, word, kind, link) in &all {
         let named = word.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_');

@@ -1,5 +1,8 @@
-//! What a decompile view answers of its lines: the token under a byte, the
-//! uses of a referent, and the instructions its checked header line names.
+//! What a decompile view answers of its lines.
+//!
+//! The token under a byte, the uses of a referent, the instructions its
+//! checked header line names, and the variable a name is, which the edit
+//! path renames it by.
 
 #![expect(
     clippy::missing_panics_doc,
@@ -7,10 +10,15 @@
 )]
 
 use crate::view::{TEXT, exported_four, filling, tokens};
+use borer_engine::analysis::decompile::decompile_named;
 use borer_engine::analysis::decompile::replay::{BlockCheck, TextCheck};
 use borer_engine::analysis::decompile::view::{view, view_of};
+use borer_engine::analysis::edit::{Edit, Force, commit, plan};
+use borer_engine::analysis::protos::{VarKey, slot_words};
 use borer_engine::analysis::{Analysis, Overlay};
+use borer_engine::dwarf::Subprogram;
 use borer_engine::view::{Kind, Ref, USES_MAX};
+use std::collections::BTreeMap;
 
 /// Every byte of a decompile view's lines lies in the token `token_at` gives.
 ///
@@ -68,9 +76,11 @@ fn uses_of_a_local_are_where_it_is_spelled() {
         })
         .collect();
     assert!(want.len() > 1, "{text}");
+    let (stack, _, frame) = slot_words(&p, TEXT);
     let r = Ref::Variable {
         function: TEXT,
         name: local.into(),
+        key: VarKey::parse(local, stack, frame).ok(),
     };
     let total = want.len();
     assert_eq!(v.uses(&r), (want, total), "{text}");
@@ -92,6 +102,7 @@ fn uses_past_the_cap_are_counted_in_all() {
     let r = Ref::Variable {
         function: TEXT,
         name: "a1".into(),
+        key: Some(VarKey::Param(0)),
     };
     let linked: Vec<(usize, std::ops::Range<usize>)> = (0..v.lines())
         .flat_map(|i| {
@@ -198,4 +209,129 @@ fn the_replays_checked_line_links_the_instructions_it_names() {
         .collect();
     let want = [4, 9, 0xd].map(|off| Some(Ref::Address(TEXT + off)));
     assert_eq!(linked, want, "{text}");
+}
+
+/// Returns [`filling`]'s one stack local: its spelling and its slot's
+/// offset from the entry stack pointer.
+#[expect(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "the fixture's local is a slot"
+)]
+fn filling_local() -> (String, i64) {
+    let p = filling(false);
+    let a = Analysis::compute(&p);
+    let v = view(&p, &a, &Overlay::default(), TEXT).expect("a view");
+    let local = tokens(&v)
+        .into_iter()
+        .find_map(|(_, w, kind, _)| {
+            (kind == Kind::Variable && w.starts_with("local_")).then_some(w)
+        })
+        .expect("a local");
+    let (stack, _, frame) = slot_words(&p, TEXT);
+    match VarKey::parse(&local, stack, frame) {
+        Ok(VarKey::Slot(off)) => (local, off),
+        other => panic!("{local} is no slot: {other:?}"),
+    }
+}
+
+/// Returns [`filling`]'s image with a hand-built debug record of its
+/// function, and its analysis.
+///
+/// # Arguments
+///
+/// * `parameters` - The parameters the record names, in order.
+/// * `locals` - The locals it names, by slot offset.
+fn debugged(
+    parameters: Vec<borer_engine::dwarf::Parameter>,
+    locals: BTreeMap<i64, String>,
+) -> (borer_engine::program::Program, Analysis) {
+    let mut p = filling(false);
+    p.debug_functions.push(Subprogram {
+        low_pc: TEXT,
+        name: "filler".to_owned(),
+        parameters,
+        return_type: None,
+        locals,
+    });
+    let a = Analysis::compute(&p);
+    (p, a)
+}
+
+/// Returns the edit that names `var` of [`filling`]'s function `name`.
+///
+/// # Arguments
+///
+/// * `var` - The variable as the text spells it.
+/// * `field` - The offset it reads as when it spells an unnamed field.
+/// * `name` - Its new name.
+fn rename(var: &str, field: Option<u64>, name: &str) -> [Edit; 1] {
+    [Edit::Var {
+        entry: TEXT,
+        var: var.to_owned(),
+        field,
+        name: Some(name.to_owned()),
+        ty: None,
+    }]
+}
+
+/// Plans and commits `edits` over an empty overlay, and returns the name
+/// the overlay it leaves gives `key` of [`filling`]'s function, with that
+/// overlay.
+///
+/// # Arguments
+///
+/// * `(p, a)` - The program and its analysis.
+/// * `edits` - The edits.
+/// * `key` - The variable read back.
+#[expect(clippy::expect_used, reason = "a refused edit fails the test")]
+fn committed(
+    (p, a): (&borer_engine::program::Program, &Analysis),
+    edits: &[Edit],
+    key: VarKey,
+) -> (Option<String>, Overlay) {
+    let mut after = Overlay::default();
+    let made = plan(p, a, &after, edits, Force::Refuse).expect("planned");
+    commit(p, a, &mut after, &made).expect("committed");
+    let named = after.vars.get(&TEXT).and_then(|vs| vs.get(&key));
+    (named.map(|v| v.name.clone()), after)
+}
+
+/// A local only the debug information names renames through the edit path.
+///
+/// It links with its slot, and renaming it by that name or by its slot's
+/// own spelling states it in the overlay, and the decompile spells the new
+/// name.
+///
+/// The image is [`filling`]'s, its local handed to the import named
+/// `packet` by a hand-built debug record.
+#[test]
+fn a_debug_named_local_renames_through_the_edit_path() {
+    let o = Overlay::default();
+    let (local, off) = filling_local();
+    let key = VarKey::Slot(off);
+    let (p, a) = debugged(Vec::new(), BTreeMap::from([(off, "packet".to_owned())]));
+    let (stack, shadow, frame) = slot_words(&p, TEXT);
+    let text = decompile_named(&p, &a, &o, TEXT).expect("a text");
+    assert!(text.contains("packet") && !text.contains(&local), "{text}");
+    let v = view(&p, &a, &o, TEXT).expect("a view");
+    let linked = tokens(&v)
+        .into_iter()
+        .find(|(_, w, ..)| w == "packet")
+        .map(|(.., kind, link)| (kind, link));
+    let want = Ref::Variable {
+        function: TEXT,
+        name: "packet".into(),
+        key: Some(key),
+    };
+    assert_eq!(linked, Some((Kind::Variable, Some(want))), "{text}");
+    for var in ["packet".to_owned(), key.spell(stack, shadow, frame)] {
+        let (named, after) = committed((&p, &a), &rename(&var, None, "filled"), key);
+        assert_eq!(named.as_deref(), Some("filled"), "{var}");
+        let renamed = decompile_named(&p, &a, &after, TEXT).expect("a text");
+        assert!(
+            renamed.contains("filled") && !renamed.contains("packet"),
+            "{var}: {renamed}"
+        );
+    }
 }

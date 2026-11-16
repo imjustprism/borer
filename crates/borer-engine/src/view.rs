@@ -17,6 +17,8 @@ use std::num::NonZeroU32;
 use std::ops::Range;
 use std::sync::Arc;
 
+use crate::analysis::protos::VarKey;
+
 /// What a token of a view is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -83,14 +85,19 @@ pub enum Ref {
         /// Byte offset inside the aggregate.
         offset: u64,
     },
-    /// A variable of a function, by the name its text spells it with: a
-    /// name `set_name` takes only when it is an `aN`, `local_N`, `home_N` or
-    /// `arg_N`, or one the user gave.
+    /// A variable of a function, by the name its text spells it with and
+    /// the parameter or stack slot that name is.
     Variable {
         /// The function's entry.
         function: u64,
         /// The variable's name as the text spells it.
         name: Box<str>,
+        /// The parameter or slot the name is, as an edit of the variable
+        /// names it ([`crate::analysis::edit::Edit::Var`] takes its
+        /// [`VarKey::spell`]): one the user stated, one the debug
+        /// information names, or an `aN`, `local_N`, `home_N` or `arg_N`;
+        /// `None` for a name that is none of these.
+        key: Option<VarKey>,
     },
     /// A type the text or the user declares, by its name.
     Type(Box<str>),

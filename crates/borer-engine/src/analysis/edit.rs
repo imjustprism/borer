@@ -26,6 +26,7 @@ use super::reads::{Tag, Tracked};
 use super::stated::{self, Field, Mode, Statement};
 use super::utypes::{self, TypeExpr, UserType};
 use super::{Analysis, Overlay, apply, cdecl, name_of, parse_addr, project, resolve};
+use crate::dwarf::Subprogram;
 use crate::program::Program;
 
 /// What one entry of the overlay held and holds, `None` for an absent side.
@@ -921,6 +922,7 @@ impl Draft {
             && let Some(text) = decompile_named(p, a, o, entry)
             && !names_word(&text, var)
             && !names_word(&text, &spelled)
+            && !debug_name(p, entry, key).is_some_and(|n| names_word(&text, n))
         {
             return Err(format!(
                 "{fname} has no variable {spelled}: its text never names it, so a type there would invent a parameter the code does not take; decompile it for the variables it has"
@@ -1153,11 +1155,93 @@ fn stated_key(o: &Overlay, entry: u64, var: &str) -> Option<VarKey> {
         })
 }
 
+/// Returns what the debug information records of a function.
+///
+/// # Arguments
+///
+/// * `p` - The loaded program.
+/// * `entry` - The function.
+fn debug_of(p: &Program, entry: u64) -> Option<&Subprogram> {
+    p.debug_functions.iter().find(|d| d.low_pc == entry)
+}
+
+/// Finds the variable of a function that its debug information names `var`.
+///
+/// That is a frame local by its slot, or a parameter by its position where
+/// no prototype is stated, and only where no statement names it otherwise.
+///
+/// # Arguments
+///
+/// * `p` - The loaded program.
+/// * `o` - The overlay.
+/// * `entry` - The function.
+/// * `var` - The name.
+///
+/// # Returns
+///
+/// The variable, or `None` when the debug information names nothing so.
+fn debug_key(p: &Program, o: &Overlay, entry: u64, var: &str) -> Option<VarKey> {
+    let d = debug_of(p, entry)?;
+    let slot = d
+        .locals
+        .iter()
+        .find(|(_, n)| *n == var)
+        .map(|(&off, _)| VarKey::Slot(off));
+    let param = || {
+        let i = d.parameters.iter().position(|q| q.name == var)?;
+        let unstated = o.prototypes.get(&entry).is_none();
+        u8::try_from(i).ok().filter(|_| unstated).map(VarKey::Param)
+    };
+    slot.or_else(param)
+        .filter(|k| o.vars.get(&entry).is_none_or(|vs| !vs.contains_key(k)))
+}
+
+/// Returns the name a function's debug information gives one of its
+/// variables, as [`debug_key`] reads it.
+///
+/// # Arguments
+///
+/// * `p` - The loaded program.
+/// * `entry` - The function.
+/// * `key` - The variable.
+fn debug_name(p: &Program, entry: u64, key: VarKey) -> Option<&str> {
+    let d = debug_of(p, entry)?;
+    match key {
+        VarKey::Slot(off) => d.locals.get(&off).map(String::as_str),
+        VarKey::Param(i) => d.parameters.get(usize::from(i)).map(|q| q.name.as_str()),
+    }
+}
+
+/// Returns the variable of a function a name its text spells is.
+///
+/// That is one a statement names so ([`stated_key`]), one the debug
+/// information names so ([`debug_key`]), or an `aN`, `local_N`, `home_N`
+/// or `arg_N` read by the distances the function's text numbers its slots
+/// by.
+///
+/// # Arguments
+///
+/// * `p` - The loaded program.
+/// * `o` - The overlay.
+/// * `entry` - The function.
+/// * `var` - The name.
+///
+/// # Returns
+///
+/// The variable, or `None` when the name is none of these.
+pub(crate) fn var_key(p: &Program, o: &Overlay, entry: u64, var: &str) -> Option<VarKey> {
+    let (stack, _, frame) = protos::slot_words(p, entry);
+    stated_key(o, entry, var)
+        .or_else(|| debug_key(p, o, entry, var))
+        .or_else(|| VarKey::parse(var, stack, frame).ok())
+}
+
 /// Reads what a statement of a function's variable states: which variable
 /// `var` names, and the name and type it takes.
 ///
-/// `var` is the name the text shows (`a1`, `local_58`, `arg_8`) or one
-/// stated before, the variable's or the prototype's parameter's. A slot's
+/// `var` is the name the text shows (`a1`, `local_58`, `arg_8`, or a name
+/// the debug information gives) or one stated before, the variable's or
+/// the prototype's parameter's ([`var_key`]). A slot's
 /// name is read by the distances the function's text numbers its slots by
 /// ([`protos::slot_words`]), so `arg_8` names the slot an arm64, ARM32 or
 /// RISC-V text calls `arg_10`.
@@ -1184,7 +1268,7 @@ fn plan_var(
 ) -> Result<(VarKey, Var), String> {
     let (stack, _, frame) = protos::slot_words(p, entry);
     let stated = o.vars.get(&entry);
-    let key = stated_key(o, entry, var).map_or_else(
+    let key = var_key(p, o, entry, var).map_or_else(
         || VarKey::parse(var, stack, frame).map_err(|e| e.to_string()),
         Ok,
     )?;

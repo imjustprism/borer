@@ -307,7 +307,7 @@ fn link_ok(
                     None => named_field_matches(p, a, ty, tok, *offset, unit_defined),
                 }
         }
-        Ref::Variable { function, name } => {
+        Ref::Variable { function, name, .. } => {
             Some(*function) == scope
                 && v.definition(r).is_some_and(|d| {
                     v.line(d).is_some_and(|l| {
