@@ -12,7 +12,7 @@ use std::sync::Arc;
 use borer_engine::analysis::decompile::decompile_named;
 use borer_engine::analysis::decompile::view::{view, view_of};
 use borer_engine::analysis::edit::{Edit, Force, commit, plan};
-use borer_engine::analysis::render::{Bytes, FunctionRow, disasm_view};
+use borer_engine::analysis::render::{Bytes, FunctionRow, RowSource, disasm_view};
 use borer_engine::analysis::utypes::{TypeExpr, UserField, UserStruct, UserType};
 use borer_engine::analysis::{Analysis, EnumSource, NameSource, Overlay};
 use borer_engine::dwarf::{Parameter, Subprogram};
@@ -138,6 +138,40 @@ fn each_callee_says_who_named_it_as_its_function_row_does() {
                 "{what} {entry:#x}: {said:?}\n{text}"
             );
         }
+    }
+}
+
+/// Every source of a function's name maps to who stated it: the overlay's
+/// to the user, a symbol's to the file, no name to a placeholder, and
+/// every finding of the engine's to it.
+#[test]
+fn every_name_source_says_who_stated_it() {
+    assert_eq!(Said::from(RowSource::User), Said::User);
+    assert_eq!(
+        Said::from(RowSource::Found(NameSource::None)),
+        Said::Placeholder
+    );
+    assert_eq!(
+        Said::from(RowSource::Found(NameSource::Symbol)),
+        Said::Stated
+    );
+    for found in [
+        NameSource::Helper,
+        NameSource::Signature,
+        NameSource::Handler,
+        NameSource::Slot,
+        NameSource::Qt,
+        NameSource::Funclet,
+        NameSource::Pack,
+        NameSource::Library,
+        NameSource::ObjC,
+        NameSource::Constants,
+    ] {
+        assert_eq!(
+            Said::from(RowSource::Found(found)),
+            Said::Inferred,
+            "{found:?}"
+        );
     }
 }
 
