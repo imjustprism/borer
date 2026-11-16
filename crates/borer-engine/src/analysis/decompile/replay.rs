@@ -1011,16 +1011,15 @@ fn replay_effects<L: Replay>(
             continue;
         }
         out.blocks += 1;
-        let before = (out.trials, grade::claims(&out));
+        let before = grade::mark(&out);
         let checked = function.check(b, block, &mut room, &mut out);
         match checked {
             Ok(_) => out.checked += 1,
             Err(why) => *out.skipped.entry(why).or_default() += 1,
         }
-        let record = BlockCheck::of(block.start, checked, before, &out);
+        let record = BlockCheck::of(block.start, checked, &before, &out);
         out.records.push(record);
     }
-    grade::blame(&mut out);
     out
 }
 

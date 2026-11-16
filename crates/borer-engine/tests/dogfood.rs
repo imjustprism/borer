@@ -1203,16 +1203,18 @@ fn the_text_agrees_with_the_emulator_on_every_block() {
     );
 }
 
-/// Grades every block of every function of the `BORER_DOGFOOD` binary as
-/// its answer's check decided it.
+/// Keeps a record of every block of every function of the `BORER_DOGFOOD`
+/// binary as its answer's check decided it.
 ///
-/// Each function's check holds one record per block, its header counts
-/// them by grade, a block compared was compared from some state and one
-/// not compared from none, with its reason, and every instruction the
-/// header says the machine does not bear out lies in a block graded wrong.
+/// Each function's check holds one record per block, in address order,
+/// and every instruction the header says the machine does not bear out
+/// is held by the record of the block whose check found it, past as many
+/// as the records' caps left out. The records' counts against the
+/// replay's own are the unit tests' (`grade/tests.rs`): reaching those
+/// counters here would replay every block of the corpus a second time.
 #[test]
 #[ignore = "set BORER_DOGFOOD to a binary path to run this sweep"]
-fn every_block_has_the_grade_its_header_counts() {
+fn every_block_keeps_the_disagreements_its_check_found() {
     let c = &*CORPUS;
     let (p, a, o) = (&c.program, &c.analysis, &Overlay::default());
     let threads = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
@@ -1237,8 +1239,8 @@ fn every_block_has_the_grade_its_header_counts() {
     assert!(bad.is_empty(), "{} functions: {bad:#?}", bad.len());
 }
 
-/// Says how one function's block records disagree with its header or its
-/// blocks, `None` when they agree or nothing was checked.
+/// Says how one function's block records disagree with its blocks or its
+/// header, `None` when they agree or nothing was checked.
 ///
 /// # Arguments
 ///
@@ -1252,51 +1254,30 @@ fn misgraded(
     o: &Overlay,
     f: &borer_engine::analysis::Function,
 ) -> Option<String> {
-    use borer_engine::analysis::decompile::replay::Grade;
     let check = borer_engine::analysis::decompile::text_check(p, a, o, f.entry);
     let check = check.as_ref().as_ref()?;
-    let header = check.header();
-    let (blocks, unknown) = (check.blocks.len(), check.count(Grade::Unchecked));
-    let counts = format!(
-        "{}/{blocks} blocks: {} proved vs lift",
-        blocks - unknown,
-        check.count(Grade::Proved)
-    );
-    let unfounded = check.blocks.iter().filter(|b| match b.grade {
-        Grade::Unchecked => b.states > 0 || b.why.is_none(),
-        Grade::Tested => b.states == 0 || b.why.is_none(),
-        Grade::Proved => b.states == 0 || b.why.is_some(),
-        Grade::Wrong => b.disagreements.is_empty(),
-    });
-    let wrong = |at: u64| {
-        f.blocks
+    let starts: Vec<u64> = check.blocks.iter().map(|b| b.start).collect();
+    let capped: usize = check.blocks.iter().map(|b| b.past_cap).sum();
+    let held = |at: u64| {
+        check
+            .blocks
             .iter()
-            .find(|b| b.start <= at && at < b.end)
-            .is_some_and(|b| {
-                check
-                    .blocks
-                    .iter()
-                    .any(|r| r.start == b.start && r.grade == Grade::Wrong)
-            })
+            .any(|b| b.disagreements.iter().any(|d| d.at == at))
     };
-    let outside: Vec<u64> = check
+    let unheld: Vec<u64> = check
         .disagree
         .iter()
         .copied()
-        .filter(|&at| !wrong(at))
+        .filter(|&at| !held(at))
         .collect();
-    let unfounded: Vec<u64> = unfounded.map(|b| b.start).collect();
-    let fine = blocks == f.blocks.len()
-        && header.contains(&counts)
-        && outside.is_empty()
-        && unfounded.is_empty();
-    if fine {
+    let blocks: Vec<u64> = f.blocks.iter().map(|b| b.start).collect();
+    if starts == blocks && unheld.len() <= capped {
         return None;
     }
     Some(format!(
-        "{:#x}: {blocks} records of {} blocks; {header}; disagree outside a wrong block at {outside:x?}; records without their evidence at {unfounded:x?}",
+        "{:#x}: records at {starts:x?} for blocks at {blocks:x?}; {}; disagree held by no record at {unheld:x?} past {capped} capped",
         f.entry,
-        f.blocks.len()
+        check.header()
     ))
 }
 

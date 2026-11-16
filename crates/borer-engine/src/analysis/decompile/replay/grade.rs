@@ -3,10 +3,14 @@
 //!
 //! The replay decides every block ([`Function::check`](super::Function)):
 //! not checked and why, proved over every state, compared on the states
-//! tried, or contradicted by one. The record keeps that decision, and the
-//! header line an answer carries ([`TextCheck::header`]) counts the
-//! records, so the two cannot disagree. A block can be tried harder on
-//! request ([`recheck_block`]).
+//! tried, or contradicted by one. The record keeps that decision and the
+//! disagreements its check found, and the header line an answer carries
+//! ([`TextCheck::header`]) counts the records, so the two cannot
+//! disagree. A disagreement is charged to the block whose check found it:
+//! the run into a block that starts under an equality tries the
+//! predecessor ([`edge`]), and what that run finds is why the block is
+//! not checked, not a grade of the predecessor, whose own check graded it
+//! already. A block can be tried harder on request ([`recheck_block`]).
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -79,10 +83,11 @@ pub enum Grade {
     Proved,
     /// Compared, and the states tried agree; not proved.
     Tested,
-    /// A claim the machine does not bear out, lane roughness aside, on a
-    /// state tried or one the proof chose, whatever else held.
+    /// Compared, and its check found a claim the machine does not bear
+    /// out, lane roughness aside, on a state tried or one the proof chose.
     Wrong,
-    /// Not compared; a block with no record is this too.
+    /// Not compared, whatever its check found on the way; a block with no
+    /// record is this too.
     #[default]
     Unchecked,
 }
@@ -100,8 +105,8 @@ pub struct BlockCheck {
     pub claims: usize,
     /// Why the block was not checked, or not proved; `None` for one proved.
     pub why: Option<&'static str>,
-    /// The block's disagreements, lane roughness aside, then those the
-    /// proof found, the first [`KEPT_MAX`].
+    /// The disagreements its check found, lane roughness aside, then those
+    /// the proof found, the first [`KEPT_MAX`].
     pub disagreements: Vec<Disagreement>,
     /// Disagreements past [`KEPT_MAX`].
     pub past_cap: usize,
@@ -110,36 +115,77 @@ pub struct BlockCheck {
     pub asked: Option<u32>,
 }
 
+/// What a replay had compared and found before one block's check.
+pub(super) struct Mark {
+    /// States compared.
+    trials: usize,
+    /// Claims compared.
+    claims: usize,
+    /// Disagreements found.
+    disagreements: usize,
+    /// Disagreements the proof found.
+    refuted: usize,
+}
+
+/// Returns what a replay has compared and found so far.
+///
+/// # Arguments
+///
+/// * `out` - The replay so far.
+pub(super) fn mark(out: &Replayed) -> Mark {
+    Mark {
+        trials: out.trials,
+        claims: claims(out),
+        disagreements: out.disagreements.len(),
+        refuted: out.refuted.len(),
+    }
+}
+
 impl BlockCheck {
-    /// Returns the record of a block as its check decided it.
+    /// Returns the record of a block as its check decided it, with the
+    /// disagreements that check found.
+    ///
+    /// The grade is the check's own: a block compared and found to
+    /// disagree, lane roughness aside, is wrong; one not compared stays
+    /// unchecked whatever its check found, as the replay counts it.
     ///
     /// # Arguments
     ///
     /// * `start` - The block's start.
     /// * `checked` - What the check returned: `None` for a block proved,
     ///   else why not proved, or the error why not checked.
-    /// * `before` - The states and the claims the replay had compared
-    ///   before this block.
-    /// * `out` - The replay so far, this block included.
+    /// * `before` - What the replay had before this block's check.
+    /// * `out` - The replay so far, this block's check included.
     pub(super) fn of(
         start: u64,
         checked: Result<Option<&'static str>, &'static str>,
-        before: (usize, usize),
+        before: &Mark,
         out: &Replayed,
     ) -> Self {
+        let wrong = out.disagreements.get(before.disagreements..);
+        let refuted = out.refuted.get(before.refuted..);
+        let found: Vec<Disagreement> = (wrong.unwrap_or_default().iter())
+            .filter(|d| !d.lane)
+            .chain(refuted.unwrap_or_default())
+            .cloned()
+            .collect();
         let (grade, why) = match checked {
             Ok(None) => (Grade::Proved, None),
-            Ok(Some(why)) => (Grade::Tested, Some(why)),
+            Ok(Some(why)) if found.is_empty() => (Grade::Tested, Some(why)),
+            Ok(Some(why)) => (Grade::Wrong, Some(why)),
             Err(why) => (Grade::Unchecked, Some(why)),
         };
+        let past_cap = found.len().saturating_sub(KEPT_MAX);
+        let mut disagreements = found;
+        disagreements.truncate(KEPT_MAX);
         Self {
             start,
             grade,
-            states: u32::try_from(out.trials.saturating_sub(before.0)).unwrap_or(u32::MAX),
-            claims: claims(out).saturating_sub(before.1),
+            states: u32::try_from(out.trials.saturating_sub(before.trials)).unwrap_or(u32::MAX),
+            claims: claims(out).saturating_sub(before.claims),
             why,
-            disagreements: Vec::new(),
-            past_cap: 0,
+            disagreements,
+            past_cap,
             asked: None,
         }
     }
@@ -216,42 +262,8 @@ impl BlockCheck {
 /// # Arguments
 ///
 /// * `r` - The replay so far.
-pub(super) fn claims(r: &Replayed) -> usize {
+fn claims(r: &Replayed) -> usize {
     r.compared.values().sum()
-}
-
-/// Grades wrong each block of one function's replay that a disagreement,
-/// lane roughness aside, or a refutation names, and keeps it in the
-/// block's record.
-///
-/// # Arguments
-///
-/// * `out` - One function's replay, its records in block address order.
-pub(super) fn blame(out: &mut Replayed) {
-    let Replayed {
-        disagreements,
-        refuted,
-        records,
-        ..
-    } = out;
-    for d in disagreements
-        .iter()
-        .filter(|d| !d.lane)
-        .chain(refuted.iter())
-    {
-        let Ok(i) = records.binary_search_by_key(&d.block, |r| r.start) else {
-            continue;
-        };
-        let Some(r) = records.get_mut(i) else {
-            continue;
-        };
-        r.grade = Grade::Wrong;
-        if r.disagreements.len() < KEPT_MAX {
-            r.disagreements.push(d.clone());
-        } else {
-            r.past_cap += 1;
-        }
-    }
 }
 
 /// Replays one block of a function's text from more states than an

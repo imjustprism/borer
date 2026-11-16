@@ -1,9 +1,9 @@
 //! Each block's check as a record, and the header counted from the
 //! records.
 
-use super::super::tests::replayed_with;
+use super::super::tests::{counted_as_replayed, replayed_with};
 use super::super::{OUTSIDE_FLOAT, replay_function, replay_tsv};
-use super::{BlockCheck, DIFFERED, Grade, RECHECK_MAX, claims, recheck_block};
+use super::{BlockCheck, DIFFERED, Grade, RECHECK_MAX, recheck_block};
 use crate::analysis::decompile::expr::{Expr, Op};
 use crate::analysis::decompile::lift::EffectKind;
 use crate::analysis::decompile::text_check;
@@ -71,15 +71,7 @@ fn each_block_has_a_record_the_header_counts() {
 fn the_records_add_up_to_the_replay() {
     let p = Program::raw_x64(&FLOAT_BETWEEN);
     let a = Analysis::compute(&p);
-    let r = replay_function(&p, &a, 0x1000, 1);
-    let count = |g: Grade| r.records.iter().filter(|b| b.grade == g).count();
-    let states: u64 = r.records.iter().map(|b| u64::from(b.states)).sum();
-    let compared: usize = r.records.iter().map(|b| b.claims).sum();
-    assert_eq!(r.records.len(), r.blocks, "{}", replay_tsv(&r));
-    assert_eq!(r.blocks - count(Grade::Unchecked), r.checked);
-    assert_eq!(count(Grade::Proved), r.proved);
-    assert_eq!(compared, claims(&r));
-    assert_eq!(Ok(states), u64::try_from(r.trials));
+    counted_as_replayed(&replay_function(&p, &a, 0x1000, 1));
 }
 
 /// A text that differs from the machine only above a value's low 32 bits

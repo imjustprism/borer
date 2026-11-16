@@ -40,6 +40,30 @@ pub(super) fn graded(proved: usize, tested: usize, unchecked: &[&'static str]) -
         .collect()
 }
 
+/// Asserts that a replay's records count what the replay counted: one
+/// per block, the blocks compared and proved, each reason a block was not
+/// checked, the states and the claims.
+///
+/// # Arguments
+///
+/// * `r` - The replay.
+pub(super) fn counted_as_replayed(r: &Replayed) {
+    let count = |g: Grade| r.records.iter().filter(|b| b.grade == g).count();
+    let mut skipped = std::collections::BTreeMap::new();
+    for b in r.records.iter().filter(|b| b.grade == Grade::Unchecked) {
+        *skipped.entry(b.why.unwrap_or_default()).or_insert(0) += 1;
+    }
+    let states: u64 = r.records.iter().map(|b| u64::from(b.states)).sum();
+    let compared: usize = r.records.iter().map(|b| b.claims).sum();
+    let tsv = replay_tsv(r);
+    assert_eq!(r.records.len(), r.blocks, "{tsv}");
+    assert_eq!(r.blocks - count(Grade::Unchecked), r.checked, "{tsv}");
+    assert_eq!(count(Grade::Proved), r.proved, "{tsv}");
+    assert_eq!(skipped, r.skipped, "{tsv}");
+    assert_eq!(compared, r.compared.values().sum::<usize>(), "{tsv}");
+    assert_eq!(Ok(states), u64::try_from(r.trials), "{tsv}");
+}
+
 /// Replays a function's effects after `change` rewrote them.
 ///
 /// # Arguments
@@ -104,6 +128,33 @@ pub(super) fn replayed_in(
     change: impl Fn(&mut Effect),
     told: impl FnOnce(&mut Witness),
 ) -> Replayed {
+    replayed_sampled(p, a, entry, (seed, Sampling::Every), change, told)
+}
+
+/// Replays a function's effects as [`replayed_in`] does, its blocks tried
+/// from the states `sampling` names.
+///
+/// # Arguments
+///
+/// * `p` - The image.
+/// * `a` - Its analysis.
+/// * `entry` - The function.
+/// * `(seed, sampling)` - The states' seed, and which states each block
+///   is tried from.
+/// * `change` - Rewrites one effect.
+/// * `told` - Rewrites the witness.
+///
+/// # Returns
+///
+/// What the replay found.
+pub(super) fn replayed_sampled(
+    p: &Program,
+    a: &Analysis,
+    entry: u64,
+    (seed, sampling): (u64, Sampling),
+    change: impl Fn(&mut Effect),
+    told: impl FnOnce(&mut Witness),
+) -> Replayed {
     let f = a.function(entry).expect("function");
     let d = decompile_with(p, a, &Overlay::default(), entry, true, &[], true).expect("text");
     let mut effects: Vec<Vec<Effect>> = f
@@ -126,7 +177,7 @@ pub(super) fn replayed_in(
         (&w, &d.live.succs),
         &effects,
         usize::MAX,
-        Sampling::Every,
+        sampling,
     )
 }
 

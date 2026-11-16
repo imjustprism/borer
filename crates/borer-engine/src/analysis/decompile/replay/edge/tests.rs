@@ -4,8 +4,11 @@
 //! variable it is of, and a block no run bears it out for is not checked.
 
 use super::super::term::{Term, narrow};
-use super::super::tests::{agrees, claims, replayed_in, replayed_under, replayed_with};
-use super::super::{Claim, Replayed, Witness, replay_tsv};
+use super::super::tests::{
+    agrees, claims, counted_as_replayed, replayed_in, replayed_sampled, replayed_under,
+    replayed_with,
+};
+use super::super::{Claim, Grade, Replayed, Sampling, Witness, replay_tsv};
 use super::{ASSUMED, start_term};
 use crate::analysis::decompile::decompile;
 use crate::analysis::decompile::expr::{Expr, Key, Op};
@@ -604,4 +607,82 @@ fn an_equality_of_a_low_half_leaves_the_upper_half_free() {
     assert_eq!(start(WHOLE), Term::Const(0xffff_ffff_0000_0005));
     assert_eq!(narrow(&start(32), 32), Term::Const(5));
     assert!(!matches!(start(32), Term::Const(_)), "{:?}", start(32));
+}
+
+/// An equality no run into its block bears out is charged to that block.
+///
+/// The block stays unchecked, and no other block's grade moves: every
+/// block's record is what its own check made it, as the replay counted
+/// it.
+///
+/// Told that the block after the loop starts with `r9` one, the run into
+/// it from the loop finds the zero the loop leaves. Where none of the
+/// loop's own states leaves, that run is the block's, and its record
+/// holds what the run found.
+#[test]
+fn an_unborne_equality_is_charged_to_its_own_block() {
+    let p = Program::raw_x64(&[&COUNTED[..], &READ].concat());
+    let mut charged = 0;
+    for seed in 1..=16 {
+        let r = told_r9(&p, seed, 1);
+        counted_as_replayed(&r);
+        let after = r
+            .records
+            .iter()
+            .find(|b| b.start == 0x1012)
+            .expect("the block");
+        assert_eq!(
+            (after.grade, after.why),
+            (Grade::Unchecked, Some(ASSUMED)),
+            "seed {seed}"
+        );
+        let stale = |b: &&super::super::BlockCheck| {
+            b.disagreements
+                .iter()
+                .any(|d| d.block == 0x1005 && d.claim == Claim::Branch)
+        };
+        assert_eq!(
+            r.records.iter().filter(stale).count(),
+            1,
+            "seed {seed}: {}",
+            replay_tsv(&r)
+        );
+        charged += usize::from(stale(&after));
+    }
+    assert!(charged > 0, "no seed reached the run into the block");
+}
+
+/// A recheck of a block an equality no run bears out grades it as the
+/// sweep did, from the same run into it, and holds what that run found.
+#[test]
+fn a_recheck_of_an_unborne_block_finds_what_the_sweep_found() {
+    let p = Program::raw_x64(&[&COUNTED[..], &READ].concat());
+    let a = Analysis::compute(&p);
+    let told = |w: &mut Witness| w.assumes[2] = Some((Key::Reg(Register::R9), 1, WHOLE));
+    let mut compared = 0;
+    for seed in 1..=16 {
+        let swept = replayed_sampled(&p, &a, 0x1000, (seed, Sampling::Every), |_| {}, told);
+        let after = swept
+            .records
+            .iter()
+            .find(|b| b.start == 0x1012)
+            .expect("the block");
+        if after.disagreements.is_empty() {
+            continue;
+        }
+        let only = Sampling::Recheck {
+            block: 0x1012,
+            trials: 3,
+        };
+        let again = replayed_sampled(&p, &a, 0x1000, (seed, only), |_| {}, told);
+        let rechecked = again.records.first().expect("the block's record");
+        assert_eq!(
+            (rechecked.grade, rechecked.why, &rechecked.disagreements),
+            (after.grade, after.why, &after.disagreements),
+            "seed {seed}: {}",
+            replay_tsv(&again)
+        );
+        compared += 1;
+    }
+    assert!(compared > 0, "no seed reached the run into the block");
 }
