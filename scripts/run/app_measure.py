@@ -717,15 +717,89 @@ def _query_child_processes(pid: int) -> list[dict[str, Any]]:
     return children
 
 
+_PROCESS_SET_QUOTA = 0x0100
+_PROCESS_TERMINATE = 0x0001
+_JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
+
+
+class JOBOBJECT_BASIC_ACCOUNTING_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("TotalUserTime", ctypes.c_int64),
+        ("TotalKernelTime", ctypes.c_int64),
+        ("ThisPeriodTotalUserTime", ctypes.c_int64),
+        ("ThisPeriodTotalKernelTime", ctypes.c_int64),
+        ("TotalPageFaultCount", wt.DWORD),
+        ("TotalProcesses", wt.DWORD),
+        ("ActiveProcesses", wt.DWORD),
+        ("TotalTerminatedProcesses", wt.DWORD),
+    ]
+
+
+class ProcessJob:
+    """A job object holding one spawned process and every process it starts after.
+
+    The job counts a child however briefly it lives, which polling the process table
+    misses. The process joins right after it is spawned, before it starts any child.
+    """
+
+    def __init__(self, pid: int) -> None:
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateJobObjectW.restype = ctypes.c_void_p
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        self._handle = kernel32.CreateJobObjectW(None, None)
+        if not self._handle:
+            raise OSError(f"CreateJobObjectW failed with Win32 error {ctypes.GetLastError()}")
+        proc = kernel32.OpenProcess(_PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, pid)
+        if not proc:
+            self.close()
+            raise OSError(f"OpenProcess({pid}) failed with Win32 error {ctypes.GetLastError()}")
+        try:
+            if not kernel32.AssignProcessToJobObject(
+                ctypes.c_void_p(self._handle), ctypes.c_void_p(proc)
+            ):
+                self.close()
+                err = ctypes.GetLastError()
+                raise OSError(f"AssignProcessToJobObject failed with Win32 error {err}")
+        finally:
+            kernel32.CloseHandle(ctypes.c_void_p(proc))
+
+    def children(self) -> int:
+        """Return how many processes besides the spawned one have run in the job."""
+        info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION()
+        ok = ctypes.windll.kernel32.QueryInformationJobObject(
+            ctypes.c_void_p(self._handle),
+            _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+            None,
+        )
+        if not ok:
+            raise OSError(
+                f"QueryInformationJobObject failed with Win32 error {ctypes.GetLastError()}"
+            )
+        return max(int(info.TotalProcesses) - 1, 0)
+
+    def close(self) -> None:
+        if self._handle:
+            ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(self._handle))
+            self._handle = None
+
+
 class NetWatcher:
-    """Sub-millisecond `iphlpapi` socket-table poller tracking live phase coverage."""
+    """Sub-millisecond `iphlpapi` socket-table poller tracking live phase coverage.
+
+    Each watched process also runs in its own job object, whose count of every process it
+    started is the phase's child count; the process-table polls name the children seen.
+    """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._closed = threading.Event()
         self._live_phases: set[str] = set()
         self.events: list[dict[str, Any]] = []
-        self.children: list[dict[str, Any]] = []
+        self.children: dict[tuple[int, str], dict[str, Any]] = {}
+        self.child_counts: dict[str, int] = {}
+        self._jobs: dict[str, ProcessJob] = {}
         self.polls = 0
         self.error: str | None = None
         self.unmonitored_phases: list[str] = []
@@ -761,7 +835,7 @@ class NetWatcher:
             for ep in udp:
                 self.events.append({"phase": phase, "proto": "udp", **ep})
             for child in children:
-                self.children.append({"phase": phase, **child})
+                self.children.setdefault((child["pid"], child["exe"]), {"phase": phase, **child})
             if still_alive:
                 self._live_phases.add(phase)
             return still_alive
@@ -770,8 +844,27 @@ class NetWatcher:
         with self._lock:
             if phase not in self._live_phases and phase not in self.unmonitored_phases:
                 self.unmonitored_phases.append(phase)
+            job = self._jobs.pop(phase, None)
+            if job is not None:
+                try:
+                    count = job.children()
+                except OSError as exc:
+                    self._record_failure(phase, f"job query failed ({exc})")
+                    count = 0
+                finally:
+                    job.close()
+                if count:
+                    self.child_counts[phase] = count
+
+    def child_total(self) -> int:
+        """Return the children of every finished phase, each counted once."""
+        return max(sum(self.child_counts.values()), len(self.children))
 
     def watch_while(self, proc: subprocess.Popen[str], phase: str) -> threading.Thread:
+        try:
+            self._jobs[phase] = ProcessJob(proc.pid)
+        except OSError as exc:
+            self._record_failure(phase, f"job object setup failed ({exc})")
         self.poll_proc(proc, phase)
 
         def runner() -> None:
@@ -791,6 +884,29 @@ class NetWatcher:
 
     def close(self) -> None:
         self._closed.set()
+
+
+def child_count_self_test() -> str | None:
+    """Return why the watcher miscounts a stand-in parent with one 10 ms child, or None.
+
+    The parent starts `cmd.exe /c exit`, which is gone before most polls, then lives on
+    for several poll cycles; the watcher must report exactly one child.
+    """
+    script = "import subprocess, time; subprocess.run(['cmd.exe', '/c', 'exit']); time.sleep(1.0)"
+    watcher = NetWatcher()
+    proc, get_stderr = _spawn_bench_proc([sys.executable, "-I", "-c", script])
+    thread = watcher.watch_while(proc, "self-test")
+    rc = proc.wait(timeout=30)
+    thread.join(timeout=2)
+    watcher.finish_phase("self-test")
+    watcher.close()
+    if rc != 0:
+        return f"stand-in parent exited with code {rc}: {get_stderr()}"
+    if watcher.error is not None:
+        return watcher.error
+    if watcher.child_total() != 1:
+        return f"reported {watcher.child_total()} children, not 1 ({watcher.child_counts})"
+    return None
 
 
 def query_hardware() -> dict[str, Any]:
@@ -1067,7 +1183,11 @@ def _build_report(
             "error": watcher.error,
             "unmonitored_phases": watcher.unmonitored_phases,
         },
-        "child_processes": watcher.children,
+        "child_processes": {
+            "total": watcher.child_total(),
+            "by_phase": watcher.child_counts,
+            "seen": list(watcher.children.values()),
+        },
     }
     if not verified:
         report["input_latency_fallback"] = input_lat
@@ -1090,8 +1210,8 @@ def _collect_bar_failures(
         failures.append(f"unmonitored phases: {watcher.unmonitored_phases}")
     if watcher.events:
         failures.append(f"unexpected network sockets opened ({len(watcher.events)})")
-    if watcher.children:
-        failures.append(f"unexpected child processes started ({len(watcher.children)})")
+    if watcher.child_total():
+        failures.append(f"unexpected child processes started ({watcher.child_total()})")
     if float(first_frame.get("median_ms", 9999.0)) > 300.0:
         failures.append(
             f"first-frame median {first_frame.get('median_ms')} ms exceeds 300.0 ms bar"
@@ -1159,6 +1279,10 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    selftest = child_count_self_test()
+    if selftest is not None:
+        print(f"ERROR: child-process watcher self-test: {selftest}", file=sys.stderr)
+        return 1
     _enable_dpi_awareness()
     exe = (args.exe or default_release_exe()).resolve()
     if not exe.is_file():
