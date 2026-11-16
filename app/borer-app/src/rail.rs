@@ -15,7 +15,7 @@
 //! ```
 //!
 //! The panel type is Zed's [`Panel`], docked by the workspace once a binary loads (as
-//! [`crate::app_view::dock_functions_panel`] docks the functions panel), and the action
+//! [`crate::app_view::dock_panels`] docks every panel), and the action
 //! toggles it and is registered on the workspace and bound in the keymap, so the cell's
 //! tooltip shows its key. Every cell reads its state from Zed's docks through the public
 //! [`Workspace`] API, so a dock changed from anywhere (a key, a drag, a restore) shows here.

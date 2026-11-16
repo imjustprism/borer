@@ -31,14 +31,26 @@ use crate::card::{Card, Tone};
 use crate::code_view::{CodePalette, Role};
 use crate::decompile_item::{TabMode, code_row_height};
 use crate::function_columns::{Align, Columns, Ink, column_widths, row_cells};
+use crate::panels::{PanelSpec, priority};
 use crate::places::{Opening, Place, open};
 use crate::worker::{Job, LoadedBinary, filter_rows_blocking};
 
-/// Name Zed saves the panel's dock state and size under.
-pub const PANEL_KEY: &str = "Functions";
-
-/// Width in logical pixels of the panel before the person resizes it.
-const DEFAULT_WIDTH_PX: f32 = 560.0;
+/// The functions panel's row of [`crate::panels::PANELS`].
+pub const PANEL: PanelSpec = PanelSpec {
+    key: "Functions",
+    title: "Functions",
+    icon: IconName::ListTree,
+    toggle: &ToggleFunctions,
+    dock: DockPosition::Left,
+    docks: &[DockPosition::Left, DockPosition::Right],
+    size_px: 560.0,
+    add: |workspace, binary, dock, window, cx| {
+        let weak = cx.weak_entity();
+        let binary = binary.clone();
+        let panel = cx.new(|cx| FunctionsPanel::new(weak, binary, dock, window, cx));
+        workspace.add_panel(panel, window, cx);
+    },
+};
 
 /// Horizontal padding of a cell of Zed's table, both sides together, in rems (`px_1`).
 const CELL_PAD_REMS: f32 = 0.5;
@@ -237,7 +249,7 @@ impl FunctionsPanel {
             selected: 0,
             columns: Columns::Brief,
             widths: cx.new(|_| ResizableColumnsState::new(0, Vec::<Pixels>::new(), Vec::new())),
-            table_width: px(DEFAULT_WIDTH_PX),
+            table_width: px(PANEL.size_px),
             position,
             filter_job: Job::default(),
             palette: CodePalette::from_theme(cx.theme()),
@@ -773,11 +785,11 @@ impl Focusable for FunctionsPanel {
 
 impl Panel for FunctionsPanel {
     fn persistent_name() -> &'static str {
-        PANEL_KEY
+        PANEL.key
     }
 
     fn panel_key() -> &'static str {
-        PANEL_KEY
+        PANEL.key
     }
 
     fn activation_focus_handle(&self, cx: &App) -> FocusHandle {
@@ -789,7 +801,7 @@ impl Panel for FunctionsPanel {
     }
 
     fn position_is_valid(&self, position: DockPosition) -> bool {
-        matches!(position, DockPosition::Left | DockPosition::Right)
+        PANEL.docks.contains(&position)
     }
 
     fn set_position(
@@ -804,19 +816,19 @@ impl Panel for FunctionsPanel {
     }
 
     fn default_size(&self, _window: &Window, _cx: &App) -> Pixels {
-        px(DEFAULT_WIDTH_PX)
+        px(PANEL.size_px)
     }
 
     fn icon(&self, _window: &Window, _cx: &App) -> Option<IconName> {
-        Some(IconName::ListTree)
+        Some(PANEL.icon)
     }
 
     fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
-        Some("Functions")
+        Some(PANEL.title)
     }
 
     fn toggle_action(&self) -> Box<dyn Action> {
-        Box::new(ToggleFunctions)
+        PANEL.toggle.boxed_clone()
     }
 
     fn starts_open(&self, _window: &Window, _cx: &App) -> bool {
@@ -824,7 +836,7 @@ impl Panel for FunctionsPanel {
     }
 
     fn activation_priority(&self) -> u32 {
-        1
+        priority(PANEL.key)
     }
 }
 

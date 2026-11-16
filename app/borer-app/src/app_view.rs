@@ -47,9 +47,10 @@ use crate::actions::{
 };
 use crate::binary::{Binary, StatusLine};
 use crate::decompile_item::DecompileItem;
-use crate::functions_panel::{FunctionsPanel, PANEL_KEY};
+use crate::functions_panel::FunctionsPanel;
 use crate::goto::GoTo;
 use crate::measure::CliMode;
+use crate::panels::{PANELS, add_panels};
 use crate::shell::Shell;
 use crate::start_item::keep_filled;
 
@@ -339,7 +340,7 @@ pub struct AppWindow {
 /// status line and the app's actions, loading `path` when one is given.
 ///
 /// Nothing is docked until a binary loads: the functions panel is added with the first
-/// loaded binary, in the dock and state the last run left it ([`dock_functions_panel`]).
+/// loaded binary, in the dock and state the last run left it ([`dock_panels`]).
 ///
 /// # Arguments
 ///
@@ -418,7 +419,7 @@ pub fn new_workspace(
     window
         .observe(&app.binary, cx, move |binary, window, cx| {
             if let Some(workspace) = weak.upgrade() {
-                dock_functions_panel(&workspace, &binary, saved.as_ref(), window, cx);
+                dock_panels(&workspace, &binary, saved.as_ref(), window, cx);
             }
         })
         .detach();
@@ -444,10 +445,11 @@ fn add_search_bar(pane: &Entity<Pane>, window: &mut Window, cx: &mut App) {
     });
 }
 
-/// Adds the functions panel to `workspace` once `binary` has loaded, when it has none.
+/// Adds every panel of [`PANELS`] to `workspace` once `binary` has loaded, when none is
+/// docked yet.
 ///
-/// The panel goes in the dock `saved` names it in, opened or closed as `saved` left that
-/// dock; with no saved layout naming it, it opens in the left dock. It then lists the
+/// Each panel goes in the dock `saved` shows it in ([`add_panels`]), the docks opened or
+/// closed as `saved` left them when it names any panel; then the functions panel lists the
 /// binary's functions and opens the first.
 ///
 /// # Arguments
@@ -457,7 +459,7 @@ fn add_search_bar(pane: &Entity<Pane>, window: &mut Window, cx: &mut App) {
 /// * `saved` - The dock layout an earlier run left, if any.
 /// * `window` - Window the workspace is in.
 /// * `cx` - Application context.
-pub fn dock_functions_panel(
+pub fn dock_panels(
     workspace: &Entity<Workspace>,
     binary: &Entity<Binary>,
     saved: Option<&DockStructure>,
@@ -468,20 +470,24 @@ pub fn dock_functions_panel(
     if docked || binary.read(cx).loaded().is_none() {
         return;
     }
-    let named = |data: &DockData| data.active_panel.as_deref() == Some(PANEL_KEY);
-    let saved = saved.filter(|docks| named(&docks.left) || named(&docks.right));
-    let position = if saved.is_some_and(|docks| named(&docks.right)) {
-        DockPosition::Right
-    } else {
-        DockPosition::Left
+    let named = |data: &DockData| {
+        let active = data.active_panel.as_deref();
+        PANELS.iter().any(|spec| active == Some(spec.key))
     };
-    let panel = add_functions_panel(workspace, binary, position, window, cx);
-    if let Some(docks) = saved {
-        workspace.update(cx, |workspace, cx| {
+    let saved = saved.filter(|docks| {
+        [&docks.left, &docks.right, &docks.bottom]
+            .into_iter()
+            .any(named)
+    });
+    workspace.update(cx, |workspace, cx| {
+        add_panels(workspace, binary, saved, window, cx);
+        if let Some(docks) = saved {
             workspace.set_dock_structure(docks.clone(), window, cx);
-        });
+        }
+    });
+    if let Some(panel) = workspace.read(cx).panel::<FunctionsPanel>(cx) {
+        panel.update(cx, |panel, cx| panel.follow(window, cx));
     }
-    panel.update(cx, |panel, cx| panel.follow(window, cx));
 }
 
 /// Adds a functions panel over `binary` to `workspace`'s dock at `position`, open, and
