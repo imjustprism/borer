@@ -137,7 +137,7 @@ pub(crate) const RESOURCES: &[(&str, &str)] = &[
     ),
     (
         "borer://asserts",
-        "The member names the binary's assertions spell (`this->m_name`), each with how many functions assert it and their classes; a decompile or summary of a function that asserts points here",
+        "The member names the binary's assertions spell (`this->m_name`), each with how many functions assert it and their classes, then each paired with the field offset the code around its asserts reads: strong (the sites of two or more functions agree), contested (sites disagree; listed, not resolved) or weak, each with its sites, and the set_type call that states the strong ones; a decompile or summary of a function that asserts points here",
     ),
     (
         "borer://sources",
@@ -349,7 +349,7 @@ pub(crate) const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
     ),
     (
         "borer://asserts/{filter}",
-        "Asserted member names whose name or class contains the filter, with the conditions their asserts check",
+        "Asserted member names whose name or class contains the filter, with the conditions their asserts check and their pairings with field offsets",
         "borer://asserts/count",
     ),
     (

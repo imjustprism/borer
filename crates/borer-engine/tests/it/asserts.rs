@@ -1,5 +1,6 @@
 //! What a build that keeps its assertions says: the next steps a function
-//! that asserts points at.
+//! that asserts points at, and each member its asserts spell paired with
+//! the field offset the code around them reads.
 //!
 //! The image is a stripped build with assertions on, the shape GitHub issue
 //! 24's binary has: every method guards one member and reports a failure
@@ -11,8 +12,9 @@
     reason = "assertions are the point of a test"
 )]
 
+use borer_engine::analysis::classes::field_names;
 use borer_engine::analysis::decompile::answer_header;
-use borer_engine::analysis::render::{NEXT_MAX, function_summary, next_steps};
+use borer_engine::analysis::render::{NEXT_MAX, asserted_fields_tsv, function_summary, next_steps};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::num::{from_usize, lo32, saturating_usize};
 use borer_engine::program::{Arch, Program, Section, Symbol, SymbolKind};
@@ -324,5 +326,98 @@ fn an_assert_points_at_the_asserts_and_the_sources() {
     assert!(
         main.iter().all(|s| !s.contains("borer://asserts")),
         "{main:?}"
+    );
+}
+
+/// Each member the asserts spell is paired with the one offset the code
+/// around its asserts reads, by how many sites agree, and a pairing the
+/// sites dispute is listed and left open.
+///
+/// `m_name` is guarded at 0x270 by two methods: strong, and the answer
+/// names the `set_type` call that states it. `m_size` is guarded at 0x10
+/// by one method and at 0x18 by another: contested, both offsets listed
+/// with their sites, neither stated. `m_flags < m_limit` names two
+/// members over one guarded field, which says nothing of which is where:
+/// both are weak, with no offset. `m_id` is guarded at 0x40 by two
+/// methods and `m_key` at 0x40 by a third: both contested, each naming
+/// the other. `this->IsReady()` is a getter, paired with nothing.
+/// `m_depth`'s guards read a field of what +0x48 points at: never
+/// strong. `m_rect.w` reaches into a member, so the field at +0x48 its
+/// guards read may be a part of it: not paired. Two methods assert
+/// `m_key == "" || m_val` over +0x58: two members, no pairing. `m_far` is
+/// spelled past the 160 characters a pairing reads: listed, not paired.
+/// The decompiler names none of +0x48 and +0x58 either. The listing of
+/// names above is as it was.
+#[test]
+fn asserted_members_pair_with_the_offsets_their_guards_read() {
+    let p = widget();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let all = asserted_fields_tsv(&p, &a, &o, "");
+    for row in [
+        "2\tm_name\tWidget",
+        "2\tm_size\tWidget",
+        "strong\tWidget\tm_name\t0x270\t0x1100, 0x1140",
+        "contested\tWidget\tm_size\t0x10\t0x1180",
+        "contested\tWidget\tm_size\t0x18\t0x11c0",
+        "weak\tWidget\tm_flags\t-\t0x1200",
+        "weak\tWidget\tm_limit\t-\t0x1200",
+        "# state Widget's strong pairs: set_type(name=\"Widget\", fields=[\"0x270:m_name\"])",
+    ] {
+        assert!(all.lines().any(|l| l == row), "{row}:\n{all}");
+    }
+    assert!(
+        !all.contains("strong\tWidget\tm_size") && !all.contains(":m_size\""),
+        "a contested pairing was resolved:\n{all}"
+    );
+    for row in [
+        "contested\tWidget\tm_id\t0x40\t0x1280, 0x12c0; 0x40 also asserted as m_key",
+        "contested\tWidget\tm_key\t0x40\t0x1300; 0x40 also asserted as m_id",
+    ] {
+        assert!(all.lines().any(|l| l == row), "{row}:\n{all}");
+    }
+    assert!(
+        !all.contains("\tWidget\tIsReady\t"),
+        "a getter was paired as a member:\n{all}"
+    );
+    assert!(
+        !all.lines()
+            .any(|l| l.starts_with("strong\tWidget\tm_depth\t")),
+        "a field behind a pointer was paired as the guarded field:\n{all}"
+    );
+    for row in [
+        "2\tm_rect\tWidget",
+        "1\tm_far\tWidget",
+        "weak\tWidget\tm_val\t-\t0x14c0, 0x1500",
+    ] {
+        assert!(all.lines().any(|l| l == row), "{row}:\n{all}");
+    }
+    for paired in ["\tWidget\tm_rect\t", "\tm_key\t0x58", "\tWidget\tm_far\t"] {
+        assert!(!all.contains(paired), "{paired}:\n{all}");
+    }
+    let names = field_names(&p, &a, &o, "Widget");
+    assert_eq!(
+        names.get(&0x270).map(String::as_str),
+        Some("m_name"),
+        "{names:?}"
+    );
+    assert!(
+        !names.contains_key(&0x48) && !names.contains_key(&0x58),
+        "{names:?}"
+    );
+    assert_eq!(
+        all,
+        asserted_fields_tsv(&p, &Analysis::compute(&p), &o, ""),
+        "two analyses pair differently"
+    );
+    let size = asserted_fields_tsv(&p, &a, &o, "m_size");
+    assert!(
+        size.lines()
+            .any(|l| l == "contested\tWidget\tm_size\t0x10\t0x1180"),
+        "{size}"
+    );
+    assert!(
+        !size.contains("m_name") && !size.contains("set_type("),
+        "the filter let another member through:\n{size}"
     );
 }

@@ -1,18 +1,20 @@
 //! Loads arbitrary bytes, lists the code at its entry, analyzes what loads,
-//! decompiles its first functions, reads each text as a view and proposes a
-//! struct through its first argument, lists the types and opens the first
-//! page of them, for a .NET assembly lists its first IL methods and its
-//! obfuscator markers, and reads every chart series table, a hostile spec
-//! among them: the path every agent request takes after a load. The first
-//! functions' call graphs and call tree levels are walked both ways too, and
-//! the callers of the first imports, which have no body.
+//! decompiles its first functions, reads each text as a view and its next
+//! steps and proposes a struct through its first argument, lists the types
+//! and opens the first page of them, lists what the assertions name, for a
+//! .NET assembly lists its first IL methods and its obfuscator markers, and
+//! reads every chart series table, a hostile spec among them: the path every
+//! agent request takes after a load. The first functions' call graphs and
+//! call tree levels are walked both ways too, and the callers of the first
+//! imports, which have no body.
 
 #![no_main]
 
 use borer_engine::analysis::decompile::decompile;
 use borer_engine::analysis::decompile::view::view_of;
 use borer_engine::analysis::render::{
-    Bytes, Level, Walk, call_children, callgraph, disasm_function_with, disasm_view, propose,
+    Bytes, Level, Walk, asserted_fields_tsv, call_children, callgraph, disasm_function_with,
+    disasm_view, next_steps, propose,
 };
 use borer_engine::analysis::stats::stats_tsv;
 use borer_engine::analysis::utypes::{type_detail, type_rows};
@@ -62,6 +64,7 @@ fuzz_target!(|data: &[u8]| {
         for level in [Level::Callees, Level::CalleesAndVirtuals, Level::Callers] {
             _ = call_children(&program, &analysis, &overlay, f.entry, level);
         }
+        _ = next_steps(&program, &analysis, &overlay, f.entry);
         if let Some(text) = decompile(&program, &analysis, &overlay, f.entry) {
             _ = view_of(&program, &analysis, &overlay, f.entry, &text);
         }
@@ -89,6 +92,7 @@ fuzz_target!(|data: &[u8]| {
         _ = managed::listing(&program, m.token, usize::MAX);
         _ = managed::detail(&program, &analysis, m.token, 0);
     }
+    _ = asserted_fields_tsv(&program, &analysis, &overlay, "");
     _ = markers_tsv(&program, &analysis, "");
     _ = managed::methods_tsv(&program, &analysis, "");
     for spec in [

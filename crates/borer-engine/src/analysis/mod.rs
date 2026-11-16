@@ -28,6 +28,7 @@ pub mod functions;
 pub(crate) mod guards;
 pub mod libnames;
 pub mod map;
+pub(crate) mod members;
 pub mod messages;
 pub mod modsdk;
 mod naming;

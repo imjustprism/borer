@@ -22,9 +22,9 @@ use std::sync::Arc;
 
 use super::decompile::decompile_plain;
 use super::fieldrefs::{FieldAccess, FieldRef};
+use super::members::{MEMBER_STRING_CAP, collect_assert_names};
 use super::{
-    Analysis, Function, Overlay, Signature, name_of, plain_text_cached, single, slot_name_of,
-    striped,
+    Analysis, Function, Overlay, Signature, name_of, plain_text_cached, slot_name_of, striped,
 };
 use crate::fxmap::FxHashMap;
 use crate::program::Program;
@@ -817,8 +817,8 @@ fn template_index(analysis: &Analysis, overlay: &Overlay) -> TemplateIndex {
 }
 
 /// One method's assertion votes: each `(offset, member, count)` its guarded
-/// assertions tie together ([`collect_assert_names`]).
-type Votes = Vec<(u64, String, usize)>;
+/// assertions tie together ([`super::members::collect_assert_names`]).
+pub(crate) type Votes = Vec<(u64, String, usize)>;
 
 /// The assertion votes of one method, read once from its decompilation.
 ///
@@ -832,7 +832,7 @@ type Votes = Vec<(u64, String, usize)>;
 /// * `analysis` - Discovery results.
 /// * `overlay` - User names.
 /// * `entry` - The method.
-fn assert_votes(
+pub(crate) fn assert_votes(
     program: &Program,
     analysis: &Analysis,
     overlay: &Overlay,
@@ -885,7 +885,8 @@ fn add_votes(fields: &mut BTreeMap<u64, FieldUse>, votes: &Votes) {
 
 /// Returns the member name most of a field's assert votes agree on.
 ///
-/// [`collect_assert_names`] records `IsLocked()` for a condition that calls
+/// [`super::members::collect_assert_names`] records `IsLocked()` for a
+/// condition that calls
 /// a method, which says what reads the field, not what the field is called;
 /// rendering the field as `this->IsLocked()` would put a call in the text
 /// where the code reads memory, so those votes do not stand for a name and
@@ -945,12 +946,10 @@ fn generic_name(class: &str) -> String {
 /// sample settles them and the biggest templates stay cheap.
 const SIBLING_METHODS_MAX: usize = 24;
 
-/// Longest assert condition read when looking for a member name.
-const MEMBER_STRING_CAP: usize = 160;
-
 /// Tells whether a function can name a field at all.
 ///
-/// [`collect_assert_names`] reads the name out of a quoted condition, so a
+/// [`super::members::collect_assert_names`] reads the name out of a quoted
+/// condition, so a
 /// function that references no string holding `this->` cannot contribute
 /// one. Checking the referenced bytes costs a read where decompiling the
 /// function costs a decompile, and the classes with the most methods are the
@@ -1057,74 +1056,6 @@ fn sole_reader(f: &FieldUse) -> Option<String> {
         .filter(|(_, votes)| **votes * 2 > total)
         .and_then(|(n, _)| n.strip_suffix("()"))
         .map(str::to_owned)
-}
-
-/// Names a field from a guarded assert.
-///
-/// `if (COND) {` followed by `helper("EXPR", ..., __FUNCSIG__...);` ties the
-/// one field `COND` dereferences (`(this + off)`) to the one `this->member`
-/// `EXPR` mentions, the way `if (*(uint32_t*)(this + 0x38) < 0) {
-/// n_assert("i <= this->strLen") }` names `Util::String`'s field 0x38
-/// `strLen`. Anything with several fields or several members is skipped.
-///
-/// # Arguments
-///
-/// * `guard` - The previous line.
-/// * `call` - The current line.
-/// * `fields` - Field uses; the vote lands on the dereferenced offset.
-fn collect_assert_names(guard: &str, call: &str, fields: &mut BTreeMap<u64, FieldUse>) {
-    if !(guard.starts_with("if (") && guard.ends_with('{') && call.contains("__FUNCSIG__")) {
-        return;
-    }
-    let Some(expr) = call
-        .split_once('"')
-        .and_then(|(_, rest)| rest.split_once('"'))
-        .map(|(e, _)| e)
-    else {
-        return;
-    };
-    let members: BTreeSet<String> = expr
-        .match_indices("this->")
-        .map(|(i, _)| {
-            let rest = expr.get(i + 6..).unwrap_or("");
-            let ident = ident_prefix(rest);
-            if rest.get(ident.len()..).is_some_and(|r| r.starts_with('(')) {
-                format!("{ident}()")
-            } else {
-                ident.to_owned()
-            }
-        })
-        .filter(|m| !m.is_empty() && m != "()")
-        .collect();
-    let offsets: BTreeSet<u64> = guard
-        .match_indices("(this + ")
-        .filter_map(|(i, _)| {
-            let rest = guard.get(i + 8..)?;
-            let end = rest.find(')')?;
-            parse_number(rest.get(..end)?).map(|(v, _)| v)
-        })
-        .collect();
-    let (Some(member), Some(off)) = (single(&members), single(&offsets)) else {
-        return;
-    };
-    *fields
-        .entry(*off)
-        .or_default()
-        .names
-        .entry(member.clone())
-        .or_insert(0) += 1;
-}
-
-/// Returns the identifier at the start of `s` (letters, digits, `_`).
-///
-/// # Arguments
-///
-/// * `s` - Text starting at the identifier.
-fn ident_prefix(s: &str) -> &str {
-    let end = s
-        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-        .unwrap_or(s.len());
-    s.get(..end).unwrap_or("")
 }
 
 /// Returns the qualified callee name ending right before the `(` at `paren`.
@@ -1261,7 +1192,7 @@ fn assignment_rhs(tail: &str) -> Option<&str> {
 /// # Returns
 ///
 /// `(value, bytes consumed)`, or `None`.
-fn parse_number(s: &str) -> Option<(u64, usize)> {
+pub(crate) fn parse_number(s: &str) -> Option<(u64, usize)> {
     let (digits, radix, skip) = match s.strip_prefix("0x") {
         Some(h) => (h, 16, 2),
         None => (s, 10, 0),
