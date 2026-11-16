@@ -7,6 +7,7 @@ use borer_engine::program;
 use rmcp::{ErrorData, schemars};
 
 use crate::errors::err_params;
+pub(crate) use borer_engine::analysis::fieldrefs::{parse_field_offset, parse_unsigned};
 
 /// What `read` and `live_read` decode the bytes as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, schemars::JsonSchema)]
@@ -1216,51 +1217,6 @@ fn admits(
         Some(_) | None => true,
     };
     typed && above_minimum && fits_format
-}
-
-/// Parses a field offset: `0x10`, `16` or `-0x8`.
-///
-/// Hex takes its `0x`, as an address does: an offset is read in a context
-/// full of decimal counts, and reading bare digits as hex turned `16` into a
-/// guess and `abc` into `0xabc` without a word.
-///
-/// # Arguments
-///
-/// * `text` - The offset as typed: an optional minus sign, then `0x` and hex
-///   digits or decimal digits alone.
-///
-/// # Errors
-///
-/// When the text is not one of those forms, or the magnitude does not fit
-/// a signed displacement.
-pub(crate) fn parse_field_offset(text: &str) -> anyhow::Result<i64> {
-    use anyhow::Context as _;
-    let (negative, digits) = text.strip_prefix('-').map_or((false, text), |d| (true, d));
-    let magnitude = parse_unsigned(digits)
-        .with_context(|| format!("bad offset {}", borer_engine::text::quoted(text)))?;
-    let value = i64::try_from(magnitude)
-        .with_context(|| format!("offset {text} does not fit a signed displacement"))?;
-    Ok(if negative { -value } else { value })
-}
-
-/// Parses an unsigned number an agent states: `0x` and hex digits, or
-/// decimal digits alone.
-///
-/// # Arguments
-///
-/// * `text` - The number as typed.
-///
-/// # Returns
-///
-/// The number, or `None` when the text is neither form or past 64 bits.
-pub(crate) fn parse_unsigned(text: &str) -> Option<u64> {
-    let (radix, digits) = match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
-        Some(hex) => (16, hex),
-        None => (10, text),
-    };
-    (!digits.is_empty() && digits.chars().all(|c| c.is_digit(radix)))
-        .then(|| u64::from_str_radix(digits, radix).ok())
-        .flatten()
 }
 
 /// Reads the fields a struct or a class states, each `offset:name:type`
