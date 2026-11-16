@@ -6,6 +6,7 @@
 
 use std::fmt::Write as _;
 
+use crate::analysis::{hex_prefixed, parse_addr};
 use crate::hashing::{imphash, md5, paired, sha256, tlsh};
 use crate::program::Program;
 use crate::text::hex;
@@ -329,6 +330,50 @@ pub fn triage_lines(program: &Program) -> String {
     out
 }
 
+/// A place as typed: an address in one of the forms `borer://addr` and a
+/// find read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Place {
+    /// `0x`-prefixed hex: a virtual address.
+    Va(u64),
+    /// A bare number as [`parse_addr`] reads it: decimal digits, or hex
+    /// holding a hex letter. Where names are read too, a name that spells
+    /// it wins ([`crate::analysis::resolve`]).
+    Number(u64),
+    /// `rva:<n>`: relative to the image base.
+    Rva(u64),
+    /// `off:<n>`: a file offset.
+    Off(u64),
+}
+
+impl Place {
+    /// Returns the place `text` spells.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - `0x`-hex, a bare number, `rva:<n>` or `off:<n>`, the
+    ///   number after a prefix in any form [`parse_addr`] reads.
+    ///
+    /// # Returns
+    ///
+    /// The place, or `None` when `text` is no number in any of those forms.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Place> {
+        if let Some(rva) = text.strip_prefix("rva:") {
+            return parse_addr(rva).map(Place::Rva);
+        }
+        if let Some(off) = text.strip_prefix("off:") {
+            return parse_addr(off).map(Place::Off);
+        }
+        let n = parse_addr(text)?;
+        Some(if hex_prefixed(text) {
+            Place::Va(n)
+        } else {
+            Place::Number(n)
+        })
+    }
+}
+
 /// Where a virtual address, a relative address or a file offset sits: all
 /// three forms, the section, and the function holding it.
 ///
@@ -337,8 +382,9 @@ pub fn triage_lines(program: &Program) -> String {
 /// * `program` - The loaded file.
 /// * `analysis` - Its functions, when analyzed.
 /// * `overlay` - User names.
-/// * `what` - `0x...` or a decimal number for a virtual address, `rva:<n>`
-///   for one relative to the image base, `off:<n>` for a file offset.
+/// * `what` - A virtual address, `rva:<n>` for one relative to the image
+///   base, `off:<n>` for a file offset, each number in any form
+///   [`parse_addr`] reads ([`Place::parse`]).
 ///
 /// # Errors
 ///
@@ -349,30 +395,26 @@ pub fn locate(
     overlay: &crate::analysis::Overlay,
     what: &str,
 ) -> Result<String, String> {
-    let number = |t: &str| {
-        let t = t.trim();
-        t.strip_prefix("0x")
-            .or_else(|| t.strip_prefix("0X"))
-            .map_or_else(
-                || t.parse::<u64>().ok(),
-                |h| u64::from_str_radix(h, 16).ok(),
-            )
-    };
-    let va = if let Some(rva) = what.strip_prefix("rva:") {
-        program
-            .image_base
-            .checked_add(number(rva).ok_or_else(|| format!("bad rva {rva}"))?)
-    } else if let Some(off) = what.strip_prefix("off:") {
-        let off = number(off).ok_or_else(|| format!("bad file offset {off}"))?;
-        Some(
+    let cannot = || format!("cannot read {what}: give a virtual address, rva:<n> or off:<n>");
+    let va = match Place::parse(what) {
+        Some(Place::Va(va) | Place::Number(va)) => Some(va),
+        Some(Place::Rva(rva)) => program.image_base.checked_add(rva),
+        Some(Place::Off(off)) => Some(
             program
                 .offset_to_va(off)
                 .ok_or_else(|| format!("file offset {off:#x} is in no mapped section"))?,
-        )
-    } else {
-        number(what)
+        ),
+        None => {
+            return Err(
+                match (what.strip_prefix("rva:"), what.strip_prefix("off:")) {
+                    (Some(rva), _) => format!("bad rva {rva}"),
+                    (None, Some(off)) => format!("bad file offset {off}"),
+                    (None, None) => cannot(),
+                },
+            );
+        }
     }
-    .ok_or_else(|| format!("cannot read {what}: give a virtual address, rva:<n> or off:<n>"))?;
+    .ok_or_else(cannot)?;
     let mut out = format!("va:       {va:#x}\n");
     let _ = writeln!(
         out,
@@ -451,5 +493,35 @@ mod tests {
         assert_eq!(locate(&p, None, &o, "rva:0x1010").expect("an rva"), by_va);
         assert!(locate(&p, None, &o, "off:0x10").is_err());
         assert!(locate(&p, None, &o, "nowhere").is_err());
+    }
+
+    /// A number with a hex letter and no `0x` reads as hex in every form,
+    /// as an address argument reads it, and the refusals say which form
+    /// did not read.
+    ///
+    /// # Panics
+    ///
+    /// When a form reads otherwise.
+    #[test]
+    fn bare_hex_reads_in_every_form() {
+        let text = Section::mapped(".text", 0x1000, 0x400, 0x1000, false, true);
+        let p = Program::raw(
+            vec![0xc3; 0x1400],
+            Arch::X86_64,
+            0,
+            Some(0x1000),
+            vec![text],
+        );
+        let o = Overlay::default();
+        let by_va = locate(&p, None, &o, "0x1a00").expect("a va");
+        assert_eq!(locate(&p, None, &o, "1a00").expect("bare hex"), by_va);
+        assert_eq!(locate(&p, None, &o, "rva:1a00").expect("an rva"), by_va);
+        assert_eq!(locate(&p, None, &o, "off:10a00").ok(), None);
+        assert_eq!(locate(&p, None, &o, "off:e00").expect("an offset"), by_va);
+        assert_eq!(locate(&p, None, &o, "rva:zz"), Err("bad rva zz".to_owned()));
+        assert_eq!(
+            locate(&p, None, &o, "off:zz"),
+            Err("bad file offset zz".to_owned())
+        );
     }
 }
