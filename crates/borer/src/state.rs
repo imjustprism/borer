@@ -122,6 +122,19 @@ pub(crate) fn guarded<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, Err
     }
 }
 
+/// Says that `program`, read outside its lock, was put out of place by a
+/// load since, so nothing found of it applies.
+///
+/// # Arguments
+///
+/// * `program` - The program read.
+pub(crate) fn replaced(program: &Program) -> String {
+    format!(
+        "{} is no longer the loaded binary (a load_binary ran meanwhile); nothing was applied",
+        program.path.display()
+    )
+}
+
 impl BorerServer {
     /// The packs an analysis of a program runs with: the pack directories'
     /// packs that fit it, then the named ones.
@@ -533,10 +546,7 @@ impl BorerServer {
         if let (Some(program), Some(loaded)) = (outside, &loaded)
             && !loaded.as_ref().is_some_and(|now| Arc::ptr_eq(now, program))
         {
-            anyhow::bail!(
-                "{} is no longer the loaded binary (a load_binary ran meanwhile); nothing was applied",
-                program.path.display()
-            );
+            anyhow::bail!("{}", replaced(program));
         }
         let analysis = self.analysis_held();
         let mut overlay = write_lock(&self.overlay);

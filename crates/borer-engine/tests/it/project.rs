@@ -105,7 +105,7 @@ fn another_builds_project_is_admitted_only_when_forced() {
         sha256: Some(other.clone()),
         ..Project::default()
     };
-    let empty = || Arc::new(Analysis::default());
+    let empty = || Ok(Arc::new(Analysis::default()));
     let fielded = Project {
         fields: [("C".to_owned(), [("0x0".to_owned(), "a".to_owned())].into())].into(),
         ..Project::from_overlay("a.exe", Some(other.clone()), &Overlay::default())
@@ -113,7 +113,7 @@ fn another_builds_project_is_admitted_only_when_forced() {
     let asked = Cell::new(false);
     let analysis = || {
         asked.set(true);
-        Arc::new(Analysis::default())
+        Ok(Arc::new(Analysis::default()))
     };
     let refused = admit(&program, analysis, &Overlay::default(), &fielded, false)
         .expect_err("another build's project was admitted")
@@ -147,7 +147,7 @@ fn a_file_stating_no_field_never_asks_for_the_analysis() {
     let asked = Cell::new(false);
     let analysis = || {
         asked.set(true);
-        Arc::new(Analysis::default())
+        Ok(Arc::new(Analysis::default()))
     };
     admit(&program, analysis, &Overlay::default(), &file, false).expect("admitted");
     assert!(!asked.get(), "the analysis was asked for");

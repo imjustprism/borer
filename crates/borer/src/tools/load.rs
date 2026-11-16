@@ -20,7 +20,7 @@ use crate::catalog::template_names;
 use crate::errors::{err_internal, err_params};
 use crate::params::{FetchPdbParams, LoadBinaryParams, LoadProjectParams, SaveProjectParams};
 use crate::safety::{Effect, effects};
-use crate::state::{RawLoad, fault_text, guarded, lock, read_lock};
+use crate::state::{RawLoad, fault_text, guarded, lock, read_lock, replaced};
 use crate::symsrv;
 
 /// The line `load_binary` ends with: the one call that answers what the
@@ -554,7 +554,13 @@ impl BorerServer {
     ) -> Result<String, ErrorData> {
         let program = self.require_loaded()?;
         let pf = borer::project::ProjectFile::load(&path).map_err(err_params)?;
-        let analysis = || self.analysis_or_empty();
+        let analysis = || {
+            if self.loaded().is_some_and(|now| Arc::ptr_eq(&now, &program)) {
+                Ok(self.analysis_or_empty())
+            } else {
+                Err(replaced(&program))
+            }
+        };
         let Admitted { plan, edit, said } = guarded(|| {
             let overlay = self.overlay_plain();
             project::admit(&program, analysis, &overlay, &pf, force.unwrap_or(false))

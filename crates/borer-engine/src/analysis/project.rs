@@ -1090,8 +1090,8 @@ pub struct Admitted {
 /// * `analysis` - Hands over its analysis, which the stated fields are
 ///   held to; called once, only for a file this binary admits that states
 ///   fields of a class, so a caller that has not computed it yet need not
-///   for any other. The plan reads no code: a project's edit only puts
-///   entries in place.
+///   for any other; its refusal is the file's. The plan reads no code: a
+///   project's edit only puts entries in place.
 /// * `overlay` - The overlay the plan replaces.
 /// * `file` - The project file.
 /// * `force` - Whether a project saved for another binary is admitted.
@@ -1104,11 +1104,12 @@ pub struct Admitted {
 ///
 /// When the file was saved for another binary and `force` is not set, it
 /// states something the overlay cannot hold or a struct that does not lay
-/// out with the binary's pointers ([`super::utypes::laid_at`]), or holding its
-/// class fields to the code is cut short by the deadline.
+/// out with the binary's pointers ([`super::utypes::laid_at`]), `analysis`
+/// refuses, or holding its class fields to the code is cut short by the
+/// deadline.
 pub fn admit(
     program: &Program,
-    analysis: impl FnOnce() -> Arc<Analysis>,
+    analysis: impl FnOnce() -> Result<Arc<Analysis>, String>,
     overlay: &Overlay,
     file: &Project,
     force: bool,
@@ -1140,8 +1141,9 @@ pub fn admit(
             enum_source: EnumSource::Binary,
             ..loaded.clone()
         };
+        let analysis = analysis().map_err(anyhow::Error::msg)?;
         unsettled =
-            super::stated::settled(program, &analysis(), &tabled).map_err(anyhow::Error::msg)?;
+            super::stated::settled(program, &analysis, &tabled).map_err(anyhow::Error::msg)?;
     }
     let gone = unsettled.leave_out(&mut loaded);
     let stated = stated_counts(
