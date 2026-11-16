@@ -96,7 +96,7 @@ pub struct XrefRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XrefRows {
     /// The referenced addresses: the one asked for, then, for an import,
-    /// its other slots and the stubs jumping through one
+    /// its other slots and the stubs jumping through one, in address order
     /// ([`xref_rows_of_import`]).
     pub targets: Vec<u64>,
     /// Reference sites to the targets.
@@ -237,7 +237,8 @@ pub fn xref_rows(p: &Program, a: &Analysis, o: &Overlay, target: u64, view: Xref
 ///
 /// # Returns
 ///
-/// The rows as [`xref_rows`] gives them, the targets `import` first; `None`
+/// The rows as [`xref_rows`] gives them, the targets `import` first and the
+/// rest in address order, each once; `None`
 /// when no import symbol has a slot at `import`.
 #[must_use]
 pub fn xref_rows_of_import(
@@ -253,12 +254,13 @@ pub fn xref_rows_of_import(
         .iter()
         .filter(|f| f.thunk.is_some_and(|t| slots.contains(&t)))
         .map(|f| f.entry);
-    let mut targets = vec![import];
-    for t in slots.iter().copied().chain(stubs) {
-        if !targets.contains(&t) {
-            targets.push(t);
-        }
-    }
+    let others: BTreeSet<u64> = slots
+        .iter()
+        .copied()
+        .chain(stubs)
+        .filter(|&t| t != import)
+        .collect();
+    let targets: Vec<u64> = std::iter::once(import).chain(others).collect();
     let mut sites: Vec<RefSite> = targets
         .iter()
         .flat_map(|&t| a.xrefs_to(t).iter().cloned())

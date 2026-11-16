@@ -1268,6 +1268,76 @@ stub: 0x1100 jmp
         assert_eq!(xrefs_tsv(&p, &a, &o, 0x2000, 0, 60, true), count.spell());
     }
 
+    /// Builds an import with many ways in.
+    ///
+    /// `puts` is at slots 0x3000 and 0x3010 and at its PLT stub 0x1300,
+    /// which is also a stub through 0x3010; the stubs 0x1100 and 0x1200
+    /// jump through 0x3000. `caller`
+    /// (`0x1000`) reaches the stubs from one site, 0x1050, which calls
+    /// 0x1100, reads 0x1200 and calls 0x1300.
+    ///
+    /// # Returns
+    ///
+    /// The program, its analysis and an empty overlay.
+    fn stubbed() -> (Program, Analysis, Overlay) {
+        use crate::program::{Arch, Symbol};
+        let mut p = Program::raw(Vec::new(), Arch::X86_64, 0, None, Vec::new());
+        p.symbols = [0x1300, 0x3000, 0x3010]
+            .into_iter()
+            .map(|addr| Symbol {
+                name: "puts".to_owned(),
+                addr,
+                kind: SymbolKind::Import,
+            })
+            .collect();
+        let stub = |entry: u64, slot: u64| {
+            let mut f = bare(entry, None);
+            f.thunk = Some(slot);
+            f.shape_hash = entry;
+            f
+        };
+        let mut caller = bare(0x1000, None);
+        caller.shape_hash = 1;
+        let mut a = Analysis {
+            functions: vec![
+                caller,
+                stub(0x1100, 0x3000),
+                stub(0x1200, 0x3000),
+                stub(0x1300, 0x3010),
+            ],
+            ..Analysis::default()
+        };
+        for (target, kind) in [
+            (0x1100, RefKind::Call),
+            (0x1200, RefKind::Data),
+            (0x1300, RefKind::Call),
+        ] {
+            a.xrefs.insert(
+                target,
+                vec![RefSite {
+                    va: 0x1050,
+                    kind,
+                    from_entry: Some(0x1000),
+                }],
+            );
+        }
+        a.finish_index(&p);
+        (p, a, Overlay::default())
+    }
+
+    /// An import's targets are the slot asked for, then every other slot
+    /// and stub once, in address order, a stub that is also a slot once.
+    ///
+    /// # Panics
+    ///
+    /// When a target repeats or the order differs.
+    #[test]
+    fn an_import_s_targets_are_each_once_in_address_order() {
+        let (p, a, o) = stubbed();
+        let rows = xref_rows_of_import(&p, &a, &o, 0x3000, XrefView::Count).expect("an import");
+        assert_eq!(rows.targets, [0x3000, 0x1100, 0x1200, 0x1300, 0x3010]);
+    }
+
     /// An import's rows gather its every slot and every stub jumping
     /// through one, each reference once, and leave out another library's
     /// symbol of the same name; an address no import has is no import.
