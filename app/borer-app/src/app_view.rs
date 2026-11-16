@@ -747,6 +747,10 @@ fn saved_layout(cx: &App) -> anyhow::Result<Option<DockStructure>> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test; gpui::test hides each body in an undocumented fn"
+)]
 pub(crate) mod tests {
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
@@ -775,7 +779,7 @@ pub(crate) mod tests {
     use crate::actions::{Open, ToggleFunctionColumns};
     use crate::binary::{Binary, StatusLine};
     use crate::call_tree_panel::{CallTreePanel, OWN_ACTIONS};
-    use crate::decompile_item::{DecompileItem, TabMode};
+    use crate::decompile_item::{DecompileItem, Form, TabMode};
     use crate::function_columns::Columns;
     use crate::functions_panel::FunctionsPanel;
     use crate::measure::{CliMode, MeasurePhase, split_data_dir};
@@ -903,9 +907,11 @@ pub(crate) mod tests {
             path: PathBuf::from("sample.bin"),
             program: Arc::new(program),
             analysis: Arc::new(analysis),
+            fingerprint: overlay.fingerprint(),
             overlay: Arc::new(overlay),
             initial_rows,
             notes: Vec::new(),
+            identity: String::new(),
         })
     }
 
@@ -981,6 +987,181 @@ pub(crate) mod tests {
                 available.iter().any(|action| action.name() == *name),
                 "{name} is not available"
             );
+        }
+    }
+
+    /// An open decompile tab moves to the state an edit leaves and shows the new name at
+    /// once, and opening its function again finds that tab rather than adding one.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the tab keeps the old state or name, or a second tab opens.
+    #[gpui::test]
+    fn an_open_tab_follows_an_edit(cx: &mut TestAppContext) {
+        an_open_tab_follows_an_edit_steps(cx);
+    }
+
+    /// Runs the steps of [`an_open_tab_follows_an_edit`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`an_open_tab_follows_an_edit`] says.
+    fn an_open_tab_follows_an_edit_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let dir = crate::worker::tests::scratch("follow");
+        let exe = dir.join("tiny.exe");
+        std::fs::write(&exe, crate::worker::tests::tiny_pe()).unwrap();
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
+        let binary = binary_in(&workspace, cx);
+        binary.update(cx, |binary, cx| binary.open_path(exe, cx));
+        cx.run_until_parked();
+        let helper = crate::worker::tests::HELPER;
+        let show = |cx: &mut VisualTestContext| {
+            let now = binary.read_with(cx, |binary, _| binary.loaded().cloned().unwrap());
+            open_place(
+                &workspace,
+                &now,
+                Place::decompile(helper),
+                TabMode::Permanent,
+                cx,
+            );
+            cx.run_until_parked();
+            now
+        };
+        show(cx);
+        let rename = borer_engine::analysis::edit::Edit::Name {
+            at: helper,
+            name: "renamed_helper".to_owned(),
+        };
+        binary.update(cx, |binary, cx| binary.edit(vec![rename], cx));
+        cx.run_until_parked();
+        let now = show(cx);
+        std::fs::remove_dir_all(&dir).unwrap();
+        let tabs: Vec<Entity<DecompileItem>> = workspace.read_with(cx, |workspace, cx| {
+            let pane = workspace.active_pane().read(cx);
+            pane.items_of_type::<DecompileItem>()
+                .filter(|tab| tab.read(cx).entry() == Some(helper))
+                .collect()
+        });
+        assert_eq!(tabs.len(), 1);
+        let (moved, text) = tabs[0].read_with(cx, |tab, _| {
+            let first = tab.code().and_then(|code| code.get(0));
+            (
+                Arc::ptr_eq(tab.loaded(), &now),
+                first.map(|(view, _)| view.spell()),
+            )
+        });
+        assert!(moved);
+        let text = text.unwrap_or_default();
+        assert!(text.contains("renamed_helper"), "{text}");
+    }
+
+    /// Returns the window's binary with the sample open, a decompile tab of the caller and
+    /// its listing opened at its fourth instruction, both drawn and settled.
+    ///
+    /// # Returns
+    ///
+    /// The binary, and the listing's top line.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the panel is gone.
+    fn two_code_tabs(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+    ) -> (Entity<Binary>, usize) {
+        let binary = binary_in(workspace, cx);
+        let loaded = sample();
+        binary.update(cx, |binary, cx| {
+            binary.finish_load(Ok(loaded.clone()), cx);
+        });
+        let (va, line) = crate::decompile_item::tests::fourth_instruction(&loaded);
+        let listing = Place::Code {
+            entry: CALLER,
+            form: Form::Listing,
+            at: Some(va),
+        };
+        for place in [Place::decompile(CALLER), listing] {
+            open_place(workspace, &loaded, place, TabMode::Permanent, cx);
+            shown(workspace, cx);
+        }
+        (binary, line)
+    }
+
+    /// Renames the sample's callee to `name` through the edit path and waits for every
+    /// view to settle.
+    fn rename_callee(binary: &Entity<Binary>, name: &str, cx: &mut VisualTestContext) {
+        let rename = borer_engine::analysis::edit::Edit::Name {
+            at: CALLEE,
+            name: name.to_owned(),
+        };
+        binary.update(cx, |binary, cx| binary.edit(vec![rename], cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+    }
+
+    /// An edit builds every code tab again under the new name, through the tab's own
+    /// following of the binary, with the line at its top kept.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a tab keeps the old name or moves off its line.
+    #[gpui::test]
+    fn an_edit_rebuilds_each_code_tab_at_its_line(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
+        let (binary, line) = two_code_tabs(&workspace, cx);
+        rename_callee(&binary, "renamed_callee", cx);
+        let tabs = workspace.read_with(cx, |workspace, cx| {
+            let pane = workspace.active_pane().read(cx);
+            pane.items_of_type::<DecompileItem>()
+                .map(|tab| {
+                    let tab = tab.read(cx);
+                    let text = tab.code().and_then(|code| code.get(0));
+                    let text = text.map(|(view, _)| view.spell()).unwrap_or_default();
+                    (tab.form(), tab.top_line(), text)
+                })
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(tabs.len(), 2);
+        for (form, top, text) in tabs {
+            let want = if form == Form::Listing { line } else { 0 };
+            assert_eq!(top, want, "{form:?}");
+            assert!(text.contains("renamed_callee"), "{form:?}: {text}");
+        }
+    }
+
+    /// After an edit settles, every open view shows the state the edit left: each reports
+    /// the binary's overlay fingerprint, named by its type when it does not.
+    ///
+    /// # Panics
+    ///
+    /// Panics naming the first view left on an older state.
+    #[gpui::test]
+    fn no_view_is_left_on_an_old_revision_after_an_edit(cx: &mut TestAppContext) {
+        use crate::binary::Revision as _;
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
+        let (binary, _) = two_code_tabs(&workspace, cx);
+        rename_callee(&binary, "renamed_callee", cx);
+        let now = binary.read_with(cx, |binary, _| binary.loaded().map(|l| l.fingerprint));
+        let views = workspace.read_with(cx, |workspace, cx| {
+            let panel = workspace.panel::<FunctionsPanel>(cx).unwrap();
+            let mut views = vec![("FunctionsPanel", panel.read(cx).revision())];
+            for pane in workspace.panes() {
+                for tab in pane.read(cx).items_of_type::<DecompileItem>() {
+                    views.push(("DecompileItem", tab.read(cx).revision()));
+                }
+            }
+            views
+        });
+        assert_eq!(views.len(), 3);
+        for (view, revision) in views {
+            assert_eq!(revision, now, "{view} is left on an old revision");
         }
     }
 

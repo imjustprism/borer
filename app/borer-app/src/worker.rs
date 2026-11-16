@@ -2,7 +2,7 @@
 //! the UI-thread call counter, and the engine calls the app makes.
 
 use std::cell::Cell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -12,7 +12,9 @@ use std::task::Poll;
 use borer_engine::analysis::decompile::replay::{Grade, TextCheck};
 use borer_engine::analysis::decompile::text_check;
 use borer_engine::analysis::decompile::view::view;
+use borer_engine::analysis::edit::{self, Edit, Force};
 use borer_engine::analysis::find::{Found, Query, everywhere};
+use borer_engine::analysis::project::{self, PROJECT_MAX, Project};
 use borer_engine::analysis::render::{
     Bytes, Cell as BandCell, Cfg, Children, Dir, FunctionOrder, FunctionRows, Level, LinearPage,
     SymbolRows, Triage, Via, XREF_ROWS_MAX, XrefRows, XrefView, answered_flagged, band,
@@ -25,10 +27,11 @@ use borer_engine::analysis::{
 use borer_engine::cancel::Cancel;
 use borer_engine::hexdump::{HexRows, hex_rows};
 use borer_engine::pack::Packs;
-use borer_engine::program::{Feature, Program, SymbolKind};
+use borer_engine::program::{Feature, Program, SymbolKind, read_regular};
 use borer_engine::session::{self, Open, Pdb};
 use borer_engine::strings::walk::{StringEncoding, StringRows, WALK_MIN, string_rows};
 use borer_engine::view::View;
+use borer_front::project_file::{self, Existing};
 use gpui::{App, Context, Global, SharedString, Task, Window};
 
 use crate::call_tree::Search;
@@ -383,6 +386,49 @@ pub struct LoadedBinary {
     /// The engine's notes on the open, in its words: the pack files and directories
     /// skipped, the packs that fit and the PDB applied or skipped.
     pub notes: Vec<String>,
+    /// The binary's SHA-256 as a project file records it ([`project::program_identity`]).
+    pub identity: String,
+    /// [`Overlay::fingerprint`] of [`Self::overlay`].
+    pub fingerprint: u64,
+}
+
+impl LoadedBinary {
+    /// Returns the state with `overlay` in place of this one's, with its rows and its
+    /// fingerprint.
+    ///
+    /// # Arguments
+    ///
+    /// * `overlay` - The overlay an edit or a project left.
+    fn with_overlay(&self, overlay: Overlay) -> Arc<Self> {
+        let initial_rows = Arc::new(all_rows(&self.analysis, &overlay));
+        Arc::new(Self {
+            path: self.path.clone(),
+            program: self.program.clone(),
+            analysis: self.analysis.clone(),
+            fingerprint: overlay.fingerprint(),
+            overlay: Arc::new(overlay),
+            initial_rows,
+            notes: self.notes.clone(),
+            identity: self.identity.clone(),
+        })
+    }
+}
+
+/// Returns every function's row, in address order.
+///
+/// # Arguments
+///
+/// * `analysis` - The binary's analysis.
+/// * `overlay` - The names over it.
+fn all_rows(analysis: &Analysis, overlay: &Overlay) -> FunctionRows {
+    function_rows(
+        analysis,
+        overlay,
+        None,
+        FunctionOrder::Address,
+        0,
+        usize::MAX,
+    )
 }
 
 /// Opens `path` as [`session::open`] does for the server and builds the initial function rows.
@@ -434,28 +480,130 @@ pub fn load_binary_blocking(
     }
     let program = Arc::new(opened.program);
     let analysis = Arc::new(Analysis::compute_with(&program, opened.packs));
-    let overlay = Arc::new(Overlay {
+    let overlay = Overlay {
         enum_source: EnumSource::Binary,
         ..Overlay::default()
-    });
-    let initial_rows = Arc::new(function_rows(
-        &analysis,
-        &overlay,
-        None,
-        FunctionOrder::Address,
-        0,
-        usize::MAX,
-    ));
+    };
+    let initial_rows = Arc::new(all_rows(&analysis, &overlay));
     Ok(Arc::new(LoadedBinary {
         path,
+        identity: project::program_identity(&program),
         program,
         analysis,
-        overlay,
+        fingerprint: overlay.fingerprint(),
+        overlay: Arc::new(overlay),
         initial_rows,
         notes,
     }))
 }
 
+/// Plans `edits` over `loaded`'s overlay through the engine's edit path and commits them,
+/// as the server's annotating tools do.
+///
+/// Must be called inside [`spawn_engine`].
+///
+/// # Arguments
+///
+/// * `loaded` - The state the edits are made over.
+/// * `edits` - The edits, in order.
+///
+/// # Returns
+///
+/// The state they leave, and how many overlay entries they wrote.
+///
+/// # Errors
+///
+/// Returns the engine's refusal when it refuses an edit or the overlay would pass a cap;
+/// nothing was written.
+pub fn edit_blocking(
+    loaded: &LoadedBinary,
+    edits: &[Edit],
+) -> anyhow::Result<(Arc<LoadedBinary>, usize)> {
+    let (program, analysis) = (&loaded.program, &loaded.analysis);
+    let plan = edit::plan(program, analysis, &loaded.overlay, edits, Force::Refuse)?;
+    let mut overlay = (*loaded.overlay).clone();
+    edit::commit(program, analysis, &mut overlay, &plan)?;
+    Ok((loaded.with_overlay(overlay), plan.changes().len()))
+}
+
+/// Reads and parses the project file at `path` ([`Project::from_json`]).
+///
+/// Must be called inside [`spawn_engine`].
+///
+/// # Arguments
+///
+/// * `path` - The project file.
+///
+/// # Errors
+///
+/// Returns an error when the path is refused, the file is past [`PROJECT_MAX`] bytes or
+/// does not read, or it is not a project file.
+pub fn read_project_blocking(path: &Path) -> anyhow::Result<Project> {
+    let bytes = read_regular(path, PROJECT_MAX)?;
+    Project::from_json(&bytes).map_err(|why| anyhow::anyhow!("parse {}: {why}", path.display()))
+}
+
+/// Puts `file`'s annotations in place of `loaded`'s overlay as the engine admits them
+/// ([`project::admit`]), through the edit path.
+///
+/// Must be called inside [`spawn_engine`].
+///
+/// # Arguments
+///
+/// * `loaded` - The state the project replaces the annotations of.
+/// * `file` - The project, as read ([`read_project_blocking`]).
+/// * `force` - Whether a project saved for another binary is admitted.
+///
+/// # Returns
+///
+/// The state it leaves, and what the engine said of what it loaded and skipped.
+///
+/// # Errors
+///
+/// Returns the engine's refusal: a [`project::Foreign`] when the file was saved for another
+/// binary and `force` is not set.
+pub fn open_project_blocking(
+    loaded: &LoadedBinary,
+    file: &Project,
+    force: bool,
+) -> anyhow::Result<(Arc<LoadedBinary>, String)> {
+    let (program, analysis) = (&loaded.program, &loaded.analysis);
+    let admitted = project::admit(
+        program,
+        || Ok(analysis.clone()),
+        &loaded.overlay,
+        file,
+        force,
+    )?;
+    let (plan, _, said) = admitted.into_parts();
+    let mut overlay = (*loaded.overlay).clone();
+    edit::commit(program, analysis, &mut overlay, &plan)?;
+    Ok((loaded.with_overlay(overlay), said))
+}
+
+/// Writes `loaded`'s annotations to a project file at `path` as the engine spells one,
+/// keyed by the binary's SHA-256, replacing a regular file there whole
+/// ([`borer_front::project_file::write`]).
+///
+/// Must be called inside [`spawn_engine`].
+///
+/// # Arguments
+///
+/// * `loaded` - The state whose overlay is saved.
+/// * `path` - The project file.
+///
+/// # Errors
+///
+/// Returns an error when the path names a share or a device, a link or another non-file is
+/// there, the engine refuses to spell the file (it would pass a project's caps), or the
+/// write fails; nothing at `path` changed.
+pub fn save_project_blocking(loaded: &LoadedBinary, path: &Path) -> anyhow::Result<()> {
+    let program = loaded.program.path.display().to_string();
+    let file = Project::from_overlay(&program, Some(loaded.identity.clone()), &loaded.overlay);
+    project_file::write(path, &file, Existing::Replace).map_err(anyhow::Error::msg)
+}
+
+/// Computes filtered [`FunctionRows`] for `loaded` matching `filter`.
 /// Computes the first `limit` [`FunctionRows`] of `loaded` matching `filter`.
 ///
 /// # Arguments
@@ -1323,9 +1471,10 @@ pub(crate) mod tests {
         assert_eq!(row.map(|row| row.name.as_str()), Some("packed_helper"));
     }
 
-    /// No module of the app but this one names the engine's load, session, analysis,
-    /// decompile and listing calls outside its tests, so each such call goes through
-    /// [`super::run_engine`] and is counted.
+    /// No module of the app but this one names the engine's compute calls outside its tests.
+    ///
+    /// Those are its load, session, analysis, decompile, listing, project and edit calls, so
+    /// each such call goes through [`super::run_engine`] and is counted.
     ///
     /// # Panics
     ///
@@ -1355,6 +1504,13 @@ pub(crate) mod tests {
             "borer_engine::session",
             "session::open",
             "read_pack",
+            "project::admit",
+            "Project::from_json",
+            "Project::from_overlay",
+            ".to_json(",
+            "edit::plan",
+            "edit::commit",
+            "project_file::",
         ];
         for (name, text) in sources() {
             let code = kept(text);

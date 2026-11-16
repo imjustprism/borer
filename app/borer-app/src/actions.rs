@@ -112,6 +112,13 @@ gpui::actions!(
         ChoosePacks,
         /// Loads no pack files beyond those the pack directory fits to a binary.
         ForgetPacks,
+        /// Opens a project file's names, comments and types over the open binary, as the
+        /// engine admits them.
+        OpenProject,
+        /// Saves the names, comments and types to the project file last saved or opened.
+        SaveProject,
+        /// Saves the names, comments and types to a project file picked in the system dialog.
+        SaveProjectAs,
     ]
 );
 

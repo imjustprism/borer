@@ -981,9 +981,11 @@ pub(crate) mod tests {
             path: PathBuf::from("tree.bin"),
             program: Arc::new(program),
             analysis: Arc::new(analysis),
+            fingerprint: overlay.fingerprint(),
             overlay: Arc::new(overlay),
             initial_rows,
             notes: Vec::new(),
+            identity: String::new(),
         })
     }
 

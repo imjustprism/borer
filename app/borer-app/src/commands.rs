@@ -350,36 +350,64 @@ pub const COMMANDS: &[Command] = &[
         Need::Binary,
     ),
     item(
+        "borer::OpenProject",
+        "Open Project...",
+        (MenuName::File, 1),
+        Need::Binary,
+    ),
+    Command {
+        keys: &[Keys::all(Ctx::Workspace, &["secondary-s"])],
+        serves: &["save_project"],
+        replaces: &["workspace::Save"],
+        ..item(
+            "borer::SaveProject",
+            "Save Project",
+            (MenuName::File, 1),
+            Need::Binary,
+        )
+    },
+    Command {
+        keys: &[Keys::all(Ctx::Workspace, &["secondary-shift-s"])],
+        serves: &["save_project"],
+        replaces: &["workspace::SaveAs"],
+        ..item(
+            "borer::SaveProjectAs",
+            "Save Project As...",
+            (MenuName::File, 1),
+            Need::Binary,
+        )
+    },
+    item(
         "borer::ChooseSymbolCache",
         "Choose Symbol Cache...",
-        (MenuName::File, 1),
+        (MenuName::File, 2),
         Need::Nothing,
     ),
     item(
         "borer::ForgetSymbolCache",
         "Forget Symbol Cache",
-        (MenuName::File, 1),
+        (MenuName::File, 2),
         Need::Nothing,
     ),
     item(
         "borer::ChoosePacks",
         "Choose Packs...",
-        (MenuName::File, 1),
+        (MenuName::File, 2),
         Need::Nothing,
     ),
     item(
         "borer::ForgetPacks",
         "Forget Packs",
-        (MenuName::File, 1),
+        (MenuName::File, 2),
         Need::Nothing,
     ),
     item(
         "zed::OpenSettingsFile",
         "Settings File",
-        (MenuName::File, 2),
+        (MenuName::File, 3),
         Need::Nothing,
     ),
-    item("zed::Quit", "Quit", (MenuName::File, 2), Need::Nothing),
+    item("zed::Quit", "Quit", (MenuName::File, 3), Need::Nothing),
     Command {
         keys: &[Keys::all(Ctx::Workspace, &["secondary-f"])],
         serves: &["functions"],

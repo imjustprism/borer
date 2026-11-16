@@ -420,7 +420,8 @@ impl CallTreePanel {
     }
 
     /// Follows a change of the window's binary: a load that finished or a binary that
-    /// closed drops the tree, which raises the cancel of each of its reads.
+    /// closed drops the tree, which raises the cancel of each of its reads; an edit roots
+    /// the tree again at its root over the state the edit left, so its names are current.
     ///
     /// # Arguments
     ///
@@ -431,6 +432,11 @@ impl CallTreePanel {
             BinaryEvent::Opened(_) | BinaryEvent::Closed => {
                 if self.rooted.take().is_some() {
                     cx.notify();
+                }
+            }
+            BinaryEvent::Revised(loaded) => {
+                if let Some(root) = self.tree().map(CallTree::root) {
+                    self.set_root(loaded, root, cx);
                 }
             }
         }

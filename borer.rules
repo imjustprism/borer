@@ -90,7 +90,7 @@ details:
   workspace:
     crates/borer-engine: 'the analysis core: loading, disassembly, lifting, emulation, decompilation, queries.'
     crates/borer: the MCP server over stdio and the CLI.
-    crates/borer-front: 'what the server and the app share outside the engine: the default places, read from the environment.'
+    crates/borer-front: 'what the server and the app share outside the engine: the default places, read from the environment, and writing a project file.'
     crates/borer-live: read-only access to a running process; the only crate calling the OS process API.
     crates/borer-fixtures: small programs the tests compile, decompile and check against their source.
     fuzz: cargo-fuzz targets, outside the workspace.

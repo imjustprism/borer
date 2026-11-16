@@ -144,7 +144,7 @@ mod tests {
     use super::{Empty, Functions, FunctionsPanel};
     use crate::actions::FocusFilter;
     use crate::app_view::add_functions_panel;
-    use crate::app_view::tests::{init, open, sample, shown};
+    use crate::app_view::tests::{CALLEE, CALLER, init, open, sample, shown};
     use crate::binary::BinaryEvent;
     use crate::card::CARD_SELECTOR;
     use crate::decompile_item::Form;
@@ -539,6 +539,68 @@ mod tests {
         });
         assert_eq!(*seen.borrow(), [true, false, false, true]);
         assert_eq!(listed(cx), all);
+    }
+
+    /// An edit asks the table again over the state it left under the filter typed, which
+    /// stays, with the selected row kept by its place, not its index.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the filter, the selected place or the shown state is lost.
+    #[gpui::test]
+    fn an_edit_keeps_a_tables_filter_and_selection(cx: &mut TestAppContext) {
+        an_edit_keeps_a_tables_filter_and_selection_steps(cx);
+    }
+
+    /// Runs the steps of [`an_edit_keeps_a_tables_filter_and_selection`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`an_edit_keeps_a_tables_filter_and_selection`]
+    /// says.
+    fn an_edit_keeps_a_tables_filter_and_selection_steps(cx: &mut TestAppContext) {
+        use crate::binary::Revision as _;
+        use crate::rows_panel::Rows as _;
+        let app_state = init(cx);
+        let (workspace, cx) = open_docked(&app_state, cx);
+        let panel = panel_of(&workspace, cx);
+        let binary = panel.read_with(cx, |panel, _| panel.binary().clone());
+        binary.update(cx, |binary, cx| {
+            binary.finish_load(Ok(sample()), cx);
+        });
+        cx.run_until_parked();
+        let filter = panel.read_with(cx, |panel, _| panel.filter.clone());
+        cx.update(|window, cx| filter.update(cx, |editor, cx| editor.set_text("0", window, cx)));
+        cx.run_until_parked();
+        panel.update(cx, |panel, cx| panel.select(1, cx));
+        let callee = Some(Place::Code {
+            entry: CALLEE,
+            form: Form::Decompile,
+            at: None,
+        });
+        assert_eq!(
+            panel.read_with(cx, |panel, _| panel.selected_place()),
+            callee
+        );
+        let rename = borer_engine::analysis::edit::Edit::Name {
+            at: CALLER,
+            name: "caller_0".to_owned(),
+        };
+        binary.update(cx, |binary, cx| binary.edit(vec![rename], cx));
+        cx.run_until_parked();
+        let now = binary.read_with(cx, |binary, _| binary.loaded().map(|l| l.fingerprint));
+        let (text, place, revision, names) = panel.read_with(cx, |panel, cx| {
+            let names: Vec<String> = panel
+                .rows()
+                .map(|rows| rows.rows.iter().map(|row| row.name.clone()).collect())
+                .unwrap_or_default();
+            let text = panel.filter.read(cx).text(cx);
+            (text, panel.selected_place(), panel.revision(), names)
+        });
+        assert_eq!(text, "0");
+        assert_eq!(place, callee);
+        assert_eq!(revision, now);
+        assert!(names.iter().any(|name| name == "caller_0"), "{names:?}");
     }
 
     /// Enter on a function row opens that function's decompile view.

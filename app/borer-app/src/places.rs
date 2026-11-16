@@ -458,9 +458,11 @@ mod tests {
             path: first.path.clone(),
             program: first.program.clone(),
             analysis: first.analysis.clone(),
+            fingerprint: overlay.fingerprint(),
             overlay: Arc::new(overlay),
             initial_rows: first.initial_rows.clone(),
             notes: Vec::new(),
+            identity: String::new(),
         });
         open_place(&workspace, &renamed, place, TabMode::Permanent, cx);
         assert_eq!(tabs(cx), 2);

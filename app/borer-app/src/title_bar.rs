@@ -18,7 +18,6 @@ use ui::{Color, Tooltip, h_flex};
 use crate::app_assets::MARK_PATH;
 use crate::binary::Binary;
 use crate::menus::MenuBar;
-use crate::recent::file_name;
 use crate::start_item::small;
 
 /// Width in logical pixels of the cell the mark sits in, the rail's width below it.
@@ -30,8 +29,8 @@ const MARK_PX: f32 = 19.0;
 /// Window width in logical pixels from which the binary's folder follows its name.
 const FOLDER_SHOWN_FROM_PX: f32 = 1000.0;
 
-/// What the title bar and the window's title call the open binary: its file name and its
-/// folder, `borer` and no folder with nothing open.
+/// What the title bar and the window's title call the open binary: its title
+/// ([`Binary::title`]) and its folder, `borer` and no folder with nothing open.
 ///
 /// # Arguments
 ///
@@ -43,7 +42,7 @@ pub fn binary_title(binary: &Entity<Binary>, cx: &App) -> (String, Option<String
         return (String::from("borer"), None);
     };
     let path = &loaded.path;
-    let name = file_name(path);
+    let name = binary.read(cx).title();
     let folder = path.parent().map(|dir| dir.display().to_string());
     (name, folder.filter(|folder| !folder.is_empty()))
 }

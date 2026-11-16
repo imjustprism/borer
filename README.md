@@ -498,6 +498,7 @@ agents are in [`borer.rules`](borer.rules), and the terms for contributions in
 | --- | --- |
 | [`borer-engine`](crates/borer-engine) | The analysis core: loading, lifting, emulation, decompilation. Pure and synchronous. |
 | [`borer`](crates/borer) | The MCP server and CLI over the engine. |
+| [`borer-front`](crates/borer-front) | What the server and the app share outside the engine: the default places, read from the environment, and writing a project file. |
 | [`borer-live`](crates/borer-live) | Read-only access to a running process. |
 | [`borer-fixtures`](crates/borer-fixtures) | Programs the tests decompile and check against their source. |
 | [`borer-app`](app/borer-app) | The desktop app, in its own workspace under `app/` on Zed's crates. AGPL-3.0 only. |

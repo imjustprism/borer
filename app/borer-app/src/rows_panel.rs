@@ -30,7 +30,7 @@ use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use crate::actions::{CycleSort, FocusFilter, Hint, OPEN_HINT, ShowHex, Xrefs};
-use crate::binary::{Binary, BinaryEvent, SettingsNotice, reading_label};
+use crate::binary::{Binary, BinaryEvent, Revision, SettingsNotice, reading_label};
 use crate::card::{Card, Tone};
 use crate::code_view::CodePalette;
 use crate::decompile_item::{TabMode, code_row_height};
@@ -375,6 +375,8 @@ struct Filtered<K: RowKind> {
     query: SharedString,
     /// The engine's rows for it.
     rows: Arc<K::Shown>,
+    /// [`LoadedBinary::fingerprint`] of the state the rows were selected from.
+    revision: u64,
 }
 
 /// The open binary's rows of kind `K`, in a dock.
@@ -426,6 +428,12 @@ pub struct RowsPanel<K: RowKind> {
     _subscriptions: [Subscription; 4],
 }
 
+impl<K: RowKind> Revision for RowsPanel<K> {
+    fn revision(&self) -> Option<u64> {
+        self.rows.as_ref().map(|rows| rows.revision)
+    }
+}
+
 impl<K: RowKind> std::fmt::Debug for RowsPanel<K> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct(K::PANEL.key)
@@ -464,9 +472,14 @@ impl<K: RowKind> RowsPanel<K> {
                     this.request(true, cx);
                 }
             }),
-            cx.subscribe_in(&binary, window, |this, _, _: &BinaryEvent, window, cx| {
-                this.follow(window, cx);
-            }),
+            cx.subscribe_in(
+                &binary,
+                window,
+                |this, _, event: &BinaryEvent, window, cx| match event {
+                    BinaryEvent::Revised(loaded) => this.revise(loaded.clone(), cx),
+                    BinaryEvent::Opened(_) | BinaryEvent::Closed => this.follow(window, cx),
+                },
+            ),
             cx.observe_global::<SettingsStore>(Self::relayout),
             cx.observe_global::<GlobalTheme>(Self::relayout),
         ];
@@ -613,7 +626,7 @@ impl<K: RowKind> RowsPanel<K> {
     /// * `cx` - Application context reading the binary.
     #[must_use]
     pub fn empty(&self, cx: &App) -> Option<Empty> {
-        let Some(Filtered { query, rows }) = &self.rows else {
+        let Some(Filtered { query, rows, .. }) = &self.rows else {
             if self.shown.is_some() {
                 let reading = format!("Reading {}", K::PANEL.title.to_lowercase());
                 return Some(Empty::Nothing(reading.into()));
@@ -702,11 +715,12 @@ impl<K: RowKind> RowsPanel<K> {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        self.shown = Some(loaded);
         self.rows = Some(Filtered {
             query: SharedString::default(),
             rows,
+            revision: loaded.fingerprint,
         });
+        self.shown = Some(loaded);
         self.filter_job.stop();
         self.selected = 0;
         if !self.filter.read(cx).text(cx).is_empty() {
@@ -761,6 +775,18 @@ impl<K: RowKind> RowsPanel<K> {
         }
     }
 
+    /// Asks again under the filter over `loaded`, the state an edit or a project left,
+    /// keeping the highlighted row's place.
+    ///
+    /// # Arguments
+    ///
+    /// * `loaded` - The binary's state now.
+    /// * `cx` - Panel context.
+    fn revise(&mut self, loaded: Arc<LoadedBinary>, cx: &mut Context<'_, Self>) {
+        self.shown = Some(loaded);
+        self.request(false, cx);
+    }
+
     /// Asks the engine for the rows the panel's state shows now when the panel is open,
     /// else marks them stale for when it opens.
     ///
@@ -800,6 +826,8 @@ impl<K: RowKind> RowsPanel<K> {
             self.limit
         };
         let (asked, target) = (query.clone(), self.target.clone());
+        let revision = loaded.fingerprint;
+        let kept = (!reset).then(|| self.selected_place()).flatten();
         let work = move || {
             let mut shown = K::fetch(&loaded, &target, &asked, limit);
             if let Some((cmp, descending)) = order {
@@ -814,9 +842,20 @@ impl<K: RowKind> RowsPanel<K> {
         };
         self.filter_job
             .run(K::FILTERING, cx, work, move |panel, rows, cx| {
-                panel.rows = Some(Filtered { query, rows });
+                let at = kept.and_then(|kept| {
+                    rows.rows()
+                        .iter()
+                        .position(|row| K::place(row) == Some(kept))
+                });
+                panel.rows = Some(Filtered {
+                    query,
+                    rows,
+                    revision,
+                });
                 if reset {
                     panel.selected = 0;
+                } else if let Some(at) = at {
+                    panel.selected = at;
                 }
                 panel.scroll_to_selected(cx);
                 panel.relayout(cx);
@@ -872,6 +911,13 @@ impl<K: RowKind> RowsPanel<K> {
         if next != self.sort {
             self.set_sort(next, cx);
         }
+    }
+
+    /// Returns what the highlighted row opens, `None` with no rows or a row that opens
+    /// nothing.
+    #[must_use]
+    pub fn selected_place(&self) -> Option<Place> {
+        self.selected_row().and_then(K::place)
     }
 
     /// Scrolls the table so the highlighted row stays visible.

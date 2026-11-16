@@ -550,9 +550,11 @@ mod tests {
             path: plain.path.clone(),
             program: plain.program.clone(),
             analysis: plain.analysis.clone(),
+            fingerprint: overlay.fingerprint(),
             overlay: Arc::new(overlay),
             initial_rows: plain.initial_rows.clone(),
             notes: Vec::new(),
+            identity: String::new(),
         })
     }
 

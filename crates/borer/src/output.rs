@@ -14,6 +14,8 @@
 
 use std::path::{Component, Path, PathBuf};
 
+pub use borer_front::project_file::Existing;
+
 /// The environment variable naming the output root.
 pub const OUTPUT_ENV: &str = "BORER_OUTPUT_DIR";
 
@@ -22,35 +24,6 @@ const STEM_MAX: usize = 64;
 
 /// Hex digits of the binary's SHA-256 a project directory name keeps.
 const HASH_SHOWN: usize = 12;
-
-/// What a write does to a file already at its destination.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Existing {
-    /// The write is refused and the file is left as it was.
-    Keep,
-    /// The file is replaced, when it is a regular file and not a link.
-    Replace,
-}
-
-impl Existing {
-    /// Reads a tool's `overwrite` flag.
-    ///
-    /// # Arguments
-    ///
-    /// * `overwrite` - The flag, `None` when the call left it out.
-    ///
-    /// # Returns
-    ///
-    /// [`Existing::Replace`] only for an explicit `true`.
-    #[must_use]
-    pub fn from_flag(overwrite: Option<bool>) -> Self {
-        if overwrite.unwrap_or(false) {
-            Self::Replace
-        } else {
-            Self::Keep
-        }
-    }
-}
 
 /// The base of the borer data directory, before `borer`.
 ///

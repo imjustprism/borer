@@ -1,22 +1,29 @@
-//! The binary a window has open: its background load, its load status, the binaries opened
-//! before it, and the status-bar item that shows that status.
+//! The binary a window has open: its background load, its edits and project file, its load
+//! status, the binaries opened before it, and the status-bar item that shows that status.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use borer_engine::analysis::edit::Edit;
+use borer_engine::analysis::project::{Foreign, Project};
 use futures::channel::oneshot;
 use gpui::{
-    App, Context, Entity, EventEmitter, Global, IntoElement, ParentElement as _, PathPromptOptions,
-    Render, SharedString, Styled as _, Subscription, Task, Window,
+    AnyWindowHandle, App, Context, Entity, EventEmitter, Global, IntoElement, ParentElement as _,
+    PathPromptOptions, PromptLevel, Render, SharedString, Styled as _, Subscription, Task, Window,
 };
 use ui::{Color, Label, LabelCommon as _, LabelSize, h_flex};
-use workspace::{HideStatusItem, ItemHandle, StatusItemView};
+use workspace::{HideStatusItem, ItemHandle, StatusItemView, Workspace};
 
-use crate::recent::{self, RecentBinary, file_name};
 use borer_engine::cancel::Cancel;
 
-use crate::worker::{LoadedBinary, load_binary_blocking, spawn_engine};
+use crate::actions::{OpenProject, SaveProject, SaveProjectAs};
+use crate::recent::{self, RecentBinary, file_name};
+use crate::worker::{
+    Job, LoadedBinary, edit_blocking, load_binary_blocking, open_project_blocking,
+    read_project_blocking, save_project_blocking, spawn_engine,
+};
 
 /// Returns what a load of `path` is called while it runs: `Reading` and the file's name.
 ///
@@ -56,17 +63,39 @@ impl Loading {
 pub enum BinaryEvent {
     /// A load finished or a binary was shown: the functions panel lists this binary.
     Opened(Arc<LoadedBinary>),
+    /// An edit or a project changed the names, comments or types of the open binary: views
+    /// ask again over this state and keep their place.
+    Revised(Arc<LoadedBinary>),
     /// No binary is open any more: a load started, failed or was cancelled, or the binary
     /// was closed.
     Closed,
 }
 
+/// A view over a state of the window's binary, which says which state it shows, so a check
+/// can find a view an edit left behind.
+pub trait Revision {
+    /// Returns the [`LoadedBinary::fingerprint`] of the state the view shows, `None` while it
+    /// shows none.
+    fn revision(&self) -> Option<u64>;
+}
+
+/// What the window title ends the binary's name with while its overlay holds edits no
+/// project file has.
+pub const UNSAVED: &str = " *";
+
 /// The binary a window has open, or is loading, and the status line of that load.
+///
+/// Its state is an immutable [`LoadedBinary`] that views read; an edit or a project open
+/// makes the next one in the background and swaps it in here.
 pub struct Binary {
     /// The analyzed binary, once a load has finished.
     loaded: Option<Arc<LoadedBinary>>,
     /// What the status line leads with for [`Self::loaded`], built when it loaded.
     facts: Vec<(SharedString, Color)>,
+    /// The project file last saved or opened for the binary.
+    project: Option<PathBuf>,
+    /// [`LoadedBinary::fingerprint`] of the overlay last saved, opened or loaded.
+    saved: u64,
     /// Error text of the most recent failed load.
     error: Option<String>,
     /// The running load, `None` once it finished or before any.
@@ -86,6 +115,10 @@ pub struct Binary {
     prompt_task: Option<Task<()>>,
     /// The running write of the binaries opened before.
     remember_task: Option<Task<()>>,
+    /// The running edit, project open or save, one at a time.
+    edit: Job,
+    /// What [`Self::edit`] runs, `None` while nothing does.
+    editing: Option<String>,
 }
 
 impl EventEmitter<BinaryEvent> for Binary {}
@@ -114,6 +147,8 @@ impl Binary {
         Self {
             loaded: None,
             facts: Vec::new(),
+            project: None,
+            saved: 0,
             error: None,
             reading: None,
             busy: None,
@@ -123,6 +158,8 @@ impl Binary {
             load_task: None,
             prompt_task: None,
             remember_task: None,
+            edit: Job::default(),
+            editing: None,
         }
     }
 
@@ -177,6 +214,30 @@ impl Binary {
         &self.status
     }
 
+    /// Returns whether the overlay holds edits that the project file last saved or opened
+    /// does not.
+    #[must_use]
+    pub fn is_unsaved(&self) -> bool {
+        self.loaded
+            .as_ref()
+            .is_some_and(|loaded| loaded.fingerprint != self.saved)
+    }
+
+    /// Returns what the window's title calls the open binary: its file name, [`UNSAVED`]
+    /// while [`Self::is_unsaved`], and the project file's name; `borer` with none open.
+    #[must_use]
+    pub fn title(&self) -> String {
+        let Some(loaded) = &self.loaded else {
+            return "borer".to_owned();
+        };
+        let mark = if self.is_unsaved() { UNSAVED } else { "" };
+        let project = self
+            .project
+            .as_deref()
+            .map_or_else(String::new, |path| format!(" ({})", file_name(path)));
+        format!("{}{mark}{project}", file_name(&loaded.path))
+    }
+
     /// Replaces the status line with `status`.
     ///
     /// # Arguments
@@ -202,18 +263,43 @@ impl Binary {
         then: impl FnOnce(&mut Self, Vec<PathBuf>, &mut Context<'_, Self>) + 'static,
         cx: &mut Context<'_, Self>,
     ) {
-        let receiver = ask_paths(options, cx);
+        let answer = ask_paths(options, cx);
+        self.on_dialog(
+            answer,
+            |binary, paths, cx| {
+                if !paths.is_empty() {
+                    then(binary, paths, cx);
+                }
+            },
+            cx,
+        );
+    }
+
+    /// Hands what a system file dialog answers to `then`; a cancelled dialog does nothing,
+    /// and one that fails says so on the status line.
+    ///
+    /// # Arguments
+    ///
+    /// * `answer` - The dialog's answer, as gpui's dialogs give it.
+    /// * `then` - Takes the binary and what the person picked.
+    /// * `cx` - Binary context spawning the receiver task.
+    fn on_dialog<T: 'static, E>(
+        &mut self,
+        answer: impl Future<Output = Result<anyhow::Result<Option<T>>, E>> + 'static,
+        then: impl FnOnce(&mut Self, T, &mut Context<'_, Self>) + 'static,
+        cx: &mut Context<'_, Self>,
+    ) {
         self.prompt_task = Some(cx.spawn(async move |this, cx| {
-            let Ok(outcome) = receiver.await else {
+            let Ok(outcome) = answer.await else {
                 return;
             };
             let Some(this) = this.upgrade() else {
                 return;
             };
             this.update(cx, |binary, cx| match outcome {
-                Ok(Some(paths)) if !paths.is_empty() => then(binary, paths, cx),
-                Ok(_) => {}
-                Err(err) => binary.set_status(format!("open dialog failed: {err:#}"), cx),
+                Ok(Some(picked)) => then(binary, picked, cx),
+                Ok(None) => {}
+                Err(err) => binary.set_status(format!("file dialog failed: {err:#}"), cx),
             });
         }));
     }
@@ -262,6 +348,7 @@ impl Binary {
         self.busy = Some(path.clone());
         self.loaded = None;
         self.facts.clear();
+        self.project = None;
         self.error = None;
         self.status.clear();
         self.reading = Some(Loading {
@@ -389,10 +476,353 @@ impl Binary {
             let why = format!("recent binaries not kept: {err:#}");
             this.update(cx, |binary, cx| binary.set_status(why, cx));
         }));
+        self.saved = loaded.fingerprint;
         self.loaded = Some(loaded.clone());
         cx.emit(BinaryEvent::Opened(loaded));
         cx.notify();
     }
+
+    /// Runs `work`, labelled `label`, over the open state in the edit job and hands `done`
+    /// the state it ran over and what it returned; with no binary open, or while another
+    /// edit, project open or save runs, says so on the status line instead.
+    ///
+    /// # Arguments
+    ///
+    /// * `label` - What the job list calls the work.
+    /// * `work` - Engine work over the open state.
+    /// * `done` - Takes the binary, the state `work` ran over, and its result.
+    /// * `cx` - Binary context.
+    fn run<R: Send + Unpin + 'static>(
+        &mut self,
+        label: String,
+        work: impl FnOnce(&LoadedBinary) -> R + Send + 'static,
+        done: impl FnOnce(&mut Self, Arc<LoadedBinary>, R, &mut Context<'_, Self>) + 'static,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(base) = self.loaded.clone() else {
+            self.set_status("open a binary first".to_owned(), cx);
+            return;
+        };
+        if let Some(running) = &self.editing {
+            let why = format!("{label} refused: {running} still runs; do it again once it ends");
+            self.set_status(why, cx);
+            return;
+        }
+        self.editing = Some(label.clone());
+        let worked = base.clone();
+        let work = move || work(&worked);
+        self.edit.run(label, cx, work, move |binary, out, cx| {
+            binary.editing = None;
+            done(binary, base, out, cx);
+        });
+    }
+
+    /// Puts `next`, made over `base`, in place of the open state, unless another edit, a
+    /// project or a binary replaced `base` first, which the status line then says.
+    ///
+    /// # Arguments
+    ///
+    /// * `base` - The state `next` was made over.
+    /// * `next` - The state to show.
+    /// * `cx` - Binary context.
+    ///
+    /// # Returns
+    ///
+    /// Whether `next` is now the open state.
+    fn advance(
+        &mut self,
+        base: &Arc<LoadedBinary>,
+        next: Arc<LoadedBinary>,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        if !self
+            .loaded
+            .as_ref()
+            .is_some_and(|now| Arc::ptr_eq(now, base))
+        {
+            let why = "dropped: another edit, project or binary landed first; do it again";
+            self.set_status(why.to_owned(), cx);
+            return false;
+        }
+        self.loaded = Some(next.clone());
+        cx.emit(BinaryEvent::Revised(next));
+        cx.notify();
+        true
+    }
+
+    /// Plans and commits `edits` through the engine's edit path in the background, the same
+    /// path the server's annotating tools take, and shows the overlay they leave.
+    ///
+    /// # Arguments
+    ///
+    /// * `edits` - The edits, in order.
+    /// * `cx` - Binary context.
+    pub fn edit(&mut self, edits: Vec<Edit>, cx: &mut Context<'_, Self>) {
+        let label = match edits.first() {
+            Some(Edit::Name { at, .. }) => format!("Renaming {at:#x}"),
+            _ => "Editing".to_owned(),
+        };
+        self.run(
+            label,
+            move |loaded| edit_blocking(loaded, &edits),
+            |binary, base, out, cx| match out {
+                Ok((next, changes)) => {
+                    if binary.advance(&base, next, cx) {
+                        binary.set_status(format!("{changes} overlay entries changed"), cx);
+                    }
+                }
+                Err(err) => binary.set_status(format!("edit refused: {err:#}"), cx),
+            },
+            cx,
+        );
+    }
+
+    /// Opens the system file dialog for a project file and opens the one picked.
+    ///
+    /// # Arguments
+    ///
+    /// * `window` - Window the questions about it are asked in.
+    /// * `cx` - Binary context.
+    pub fn prompt_open_project(&mut self, window: AnyWindowHandle, cx: &mut Context<'_, Self>) {
+        let options = PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: None,
+        };
+        self.pick(
+            options,
+            move |binary, mut paths, cx| {
+                if let Some(path) = paths.pop() {
+                    binary.open_project(path, window, cx);
+                }
+            },
+            cx,
+        );
+    }
+
+    /// Opens the project file at `path` as the engine admits it, in the background, and
+    /// says what it loaded and skipped as the engine words it.
+    ///
+    /// Over edits no project file holds it first asks in `window` whether to drop them. A
+    /// refusal is the status line's, in the engine's words; one of a project saved for
+    /// another binary also asks in `window` whether to force the file as it was read.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The project file.
+    /// * `window` - Window the questions are asked in.
+    /// * `cx` - Binary context.
+    pub fn open_project(
+        &mut self,
+        path: PathBuf,
+        window: AnyWindowHandle,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if !self.is_unsaved() {
+            self.read_project(path, window, cx);
+            return;
+        }
+        let question = format!(
+            "The binary has edits no project file holds; opening {} replaces them.",
+            path.display()
+        );
+        Self::confirm(
+            window,
+            &question,
+            "Open",
+            move |binary, cx| binary.read_project(path, window, cx),
+            cx,
+        );
+    }
+
+    /// Reads the project file at `path` in the background and admits it unforced.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The project file.
+    /// * `window` - Window a refusal's force choice is asked in.
+    /// * `cx` - Binary context.
+    fn read_project(&mut self, path: PathBuf, window: AnyWindowHandle, cx: &mut Context<'_, Self>) {
+        let file = path.clone();
+        let label = format!("Reading project {}", file_name(&path));
+        self.run(
+            label,
+            move |_| read_project_blocking(&file),
+            move |binary, _, out, cx| match out {
+                Ok(project) => binary.admit(path, Arc::new(project), false, window, cx),
+                Err(err) => binary.set_status(format!("project not read: {err:#}"), cx),
+            },
+            cx,
+        );
+    }
+
+    /// Puts the annotations of `file`, read from `path`, in place of the overlay as the
+    /// engine admits them, in the background. A project forced over another build is not
+    /// the open binary's own file, so the next save asks where to write.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Where `file` was read from.
+    /// * `file` - The project as read, which a force choice admits again unchanged.
+    /// * `force` - Whether a project saved for another binary is admitted.
+    /// * `window` - Window a refusal's force choice is asked in.
+    /// * `cx` - Binary context.
+    fn admit(
+        &mut self,
+        path: PathBuf,
+        file: Arc<Project>,
+        force: bool,
+        window: AnyWindowHandle,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let kept = file.clone();
+        let label = format!("Opening project {}", file_name(&path));
+        self.run(
+            label,
+            move |loaded| open_project_blocking(loaded, &kept, force),
+            move |binary, base, out, cx| match out {
+                Ok((next, said)) => {
+                    let saved = next.fingerprint;
+                    if binary.advance(&base, next, cx) {
+                        binary.saved = saved;
+                        let said: Vec<&str> = said.lines().filter(|l| !l.is_empty()).collect();
+                        let status = format!("project {}: {}", path.display(), said.join("; "));
+                        binary.project = (!force).then_some(path);
+                        binary.set_status(status, cx);
+                    }
+                }
+                Err(err) => {
+                    let why = format!("{err:#}");
+                    binary.set_status(format!("project refused: {why}"), cx);
+                    if err.downcast_ref::<Foreign>().is_some() {
+                        Self::confirm(
+                            window,
+                            &why,
+                            "Force",
+                            move |binary, cx| binary.admit(path, file, true, window, cx),
+                            cx,
+                        );
+                    }
+                }
+            },
+            cx,
+        );
+    }
+
+    /// Asks `question` in `window` with `yes` and Cancel, and runs `then` on the binary when
+    /// the person picks `yes`.
+    ///
+    /// # Arguments
+    ///
+    /// * `window` - Window the question is asked in.
+    /// * `question` - What is asked.
+    /// * `yes` - The answer that runs `then`.
+    /// * `then` - What that answer does.
+    /// * `cx` - Binary context.
+    fn confirm(
+        window: AnyWindowHandle,
+        question: &str,
+        yes: &'static str,
+        then: impl FnOnce(&mut Self, &mut Context<'_, Self>) + 'static,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let asked = window.update(cx, |_, window, cx| {
+            window.prompt(PromptLevel::Warning, question, None, &[yes, "Cancel"], cx)
+        });
+        let Ok(answer) = asked else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            if matches!(answer.await, Ok(0))
+                && let Some(this) = this.upgrade()
+            {
+                this.update(cx, then);
+            }
+        })
+        .detach();
+    }
+
+    /// Saves the overlay to the project file last saved or opened, or, with `ask` or none
+    /// yet, to one the system dialog picks.
+    ///
+    /// # Arguments
+    ///
+    /// * `ask` - Whether to pick the file even when one was saved or opened.
+    /// * `cx` - Binary context.
+    pub fn save_project(&mut self, ask: bool, cx: &mut Context<'_, Self>) {
+        if let (Some(path), false) = (self.project.clone(), ask) {
+            self.save_to(path, cx);
+            return;
+        }
+        let Some(loaded) = self.loaded.clone() else {
+            self.set_status("open a binary first".to_owned(), cx);
+            return;
+        };
+        let dir = self
+            .project
+            .as_deref()
+            .or(Some(loaded.path.as_path()))
+            .and_then(Path::parent)
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        let stem = loaded
+            .path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let answer = cx.prompt_for_new_path(&dir, Some(&format!("{stem}.json")));
+        self.on_dialog(answer, Self::save_to, cx);
+    }
+
+    /// Writes the overlay to the project file at `path` in the background; once written,
+    /// what was saved is what the title compares against.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The project file.
+    /// * `cx` - Binary context.
+    fn save_to(&mut self, path: PathBuf, cx: &mut Context<'_, Self>) {
+        let file = path.clone();
+        let label = format!("Saving project {}", file_name(&path));
+        self.run(
+            label,
+            move |loaded| save_project_blocking(loaded, &file),
+            move |binary, base, out, cx| match out {
+                Ok(()) => {
+                    let status = format!("saved project {}", path.display());
+                    let same = binary.loaded.as_ref();
+                    if same.is_some_and(|now| Arc::ptr_eq(&now.program, &base.program)) {
+                        binary.saved = base.fingerprint;
+                        binary.project = Some(path);
+                    }
+                    binary.set_status(status, cx);
+                }
+                Err(err) => binary.set_status(format!("project not saved: {err:#}"), cx),
+            },
+            cx,
+        );
+    }
+}
+
+/// Registers the project actions on `workspace`, each on `binary`.
+///
+/// # Arguments
+///
+/// * `workspace` - The workspace the actions dispatch in.
+/// * `binary` - The window's binary.
+pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
+    let (open, save, save_as) = (binary.clone(), binary.clone(), binary.clone());
+    workspace
+        .register_action(move |_, _: &OpenProject, window, cx| {
+            let window = window.window_handle();
+            open.update(cx, |binary, cx| binary.prompt_open_project(window, cx));
+        })
+        .register_action(move |_, _: &SaveProject, _, cx| {
+            save.update(cx, |binary, cx| binary.save_project(false, cx));
+        })
+        .register_action(move |_, _: &SaveProjectAs, _, cx| {
+            save_as.update(cx, |binary, cx| binary.save_project(true, cx));
+        });
 }
 
 /// Returns the engine's architecture and format of `loaded`, as `x86-64 PE`.
@@ -549,16 +979,25 @@ impl Binary {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test; gpui::test hides each body in an undocumented fn"
+)]
 mod tests {
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
+    use borer_engine::analysis::edit::Edit;
     use borer_engine::analysis::render::{FunctionRows, LeftOut};
-    use gpui::{AppContext as _, SharedString, TestAppContext};
+    use gpui::{
+        AnyWindowHandle, AppContext as _, Entity, SharedString, TestAppContext, VisualTestContext,
+    };
     use ui::Color;
 
-    use super::{Binary, STILL_READING};
+    use super::{Binary, STILL_READING, UNSAVED};
     use crate::app_view::tests::sample;
     use crate::worker::LoadedBinary;
+    use crate::worker::tests::{HELPER, scratch, tiny_pe};
 
     /// The status line leads with the engine's architecture and format of the open binary,
     /// soft, then the engine's count of its functions with what it left out, muted; nothing
@@ -598,6 +1037,8 @@ mod tests {
             overlay: sample.overlay.clone(),
             initial_rows: Arc::new(rows),
             notes: Vec::new(),
+            identity: String::new(),
+            fingerprint: sample.fingerprint,
         });
         binary.update(cx, |binary, cx| binary.finish_load(Ok(loaded.clone()), cx));
         let program = &loaded.program;
@@ -638,7 +1079,7 @@ mod tests {
         let binary = cx.new(|cx| Binary::new(cx));
         let first = std::env::temp_dir().join("borer-app-first-missing.exe");
         let second = std::env::temp_dir().join("borer-app-second-missing.exe");
-        let open = |path: &std::path::PathBuf, cx: &mut TestAppContext| {
+        let open = |path: &PathBuf, cx: &mut TestAppContext| {
             binary.update(cx, |binary, cx| binary.open_path(path.clone(), cx))
         };
         assert!(open(&first, cx));
@@ -678,5 +1119,226 @@ mod tests {
         assert!(status(cx).starts_with(STILL_READING));
         cx.run_until_parked();
         assert!(!status(cx).starts_with(STILL_READING), "{}", status(cx));
+    }
+
+    /// A second edit asked while the first still runs is refused, the status line saying
+    /// which runs; only the first lands, and once it did an edit runs again.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the second edit is not refused, lands, or the reason is not said.
+    #[gpui::test]
+    fn a_second_edit_while_one_runs_is_refused_with_the_reason(cx: &mut TestAppContext) {
+        use crate::app_view::tests::{CALLEE, CALLER};
+        crate::app_view::tests::init(cx);
+        let binary = cx.new(|cx| Binary::new(cx));
+        binary.update(cx, |binary, cx| binary.finish_load(Ok(sample()), cx));
+        let rename = |at: u64, name: &str| {
+            vec![Edit::Name {
+                at,
+                name: name.to_owned(),
+            }]
+        };
+        binary.update(cx, |binary, cx| {
+            binary.edit(rename(CALLER, "first"), cx);
+            binary.edit(rename(CALLEE, "second"), cx);
+        });
+        let status = binary.read_with(cx, |binary, _| binary.status().to_owned());
+        assert_eq!(
+            status,
+            "Renaming 0x1030 refused: Renaming 0x1000 still runs; do it again once it ends"
+        );
+        cx.run_until_parked();
+        let names = |cx: &mut TestAppContext| {
+            binary.read_with(cx, |binary, _| {
+                let overlay = &binary.loaded().unwrap().overlay;
+                (
+                    overlay.names.get(&CALLER).cloned(),
+                    overlay.names.get(&CALLEE).cloned(),
+                )
+            })
+        };
+        assert_eq!(names(cx), (Some("first".to_owned()), None));
+        binary.update(cx, |binary, cx| binary.edit(rename(CALLEE, "second"), cx));
+        cx.run_until_parked();
+        assert_eq!(names(cx).1, Some("second".to_owned()));
+    }
+
+    /// Returns a binary in a fresh window over an in-memory database, its loads reading no
+    /// packs or symbol cache of the machine's, and the window.
+    fn binary(cx: &mut TestAppContext) -> (Entity<Binary>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            cx.set_global(db::AppDatabase::test_new());
+            cx.set_global(crate::stored::FixedSources::default());
+        });
+        let cx = cx.add_empty_window();
+        (cx.new(|cx| Binary::new(cx)), cx)
+    }
+
+    /// Returns the test window's handle.
+    fn window(cx: &mut VisualTestContext) -> AnyWindowHandle {
+        cx.update(|window, _| window.window_handle())
+    }
+
+    /// Opens `exe` in `binary` and waits for the load.
+    fn open(binary: &Entity<Binary>, exe: &Path, cx: &mut VisualTestContext) {
+        let exe = exe.to_path_buf();
+        binary.update(cx, |binary, cx| binary.open_path(exe, cx));
+        cx.run_until_parked();
+    }
+
+    /// Asks `binary` to open the project at `path` and waits for it, or for its question.
+    fn open_project(binary: &Entity<Binary>, path: &Path, cx: &mut VisualTestContext) {
+        let (path, window) = (path.to_path_buf(), window(cx));
+        binary.update(cx, |binary, cx| binary.open_project(path, window, cx));
+        cx.run_until_parked();
+    }
+
+    /// Returns the fingerprint of `binary`'s overlay, its title, and its status line.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no binary is open.
+    fn state(binary: &Entity<Binary>, cx: &mut VisualTestContext) -> (u64, String, String) {
+        binary.read_with(cx, |binary, _| {
+            let loaded = binary.loaded().unwrap();
+            (
+                loaded.fingerprint,
+                binary.title(),
+                binary.status().to_owned(),
+            )
+        })
+    }
+
+    /// Renames [`tiny_pe`]'s helper in `binary` through the edit path.
+    fn rename(binary: &Entity<Binary>, cx: &mut VisualTestContext) {
+        let rename = Edit::Name {
+            at: HELPER,
+            name: "renamed_helper".to_owned(),
+        };
+        binary.update(cx, |binary, cx| binary.edit(vec![rename], cx));
+        cx.run_until_parked();
+    }
+
+    /// Writes [`tiny_pe`] to `dir`, renames its helper through the edit path and saves the
+    /// project beside it.
+    ///
+    /// # Returns
+    ///
+    /// The binary, the project file, and the overlay's fingerprint after the rename.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a step fails or the title's unsaved mark is wrong after the edit or the
+    /// save.
+    fn renamed_and_saved(
+        binary: &Entity<Binary>,
+        dir: &Path,
+        cx: &mut VisualTestContext,
+    ) -> (PathBuf, PathBuf, u64) {
+        let exe = dir.join("tiny.exe");
+        std::fs::write(&exe, tiny_pe()).unwrap();
+        open(binary, &exe, cx);
+        assert!(!state(binary, cx).1.contains(UNSAVED));
+        rename(binary, cx);
+        let (edited, title, status) = state(binary, cx);
+        assert!(title.contains(UNSAVED), "{title}: {status}");
+        let project = dir.join("tiny.json");
+        let file = project.clone();
+        binary.update(cx, |binary, cx| binary.save_to(file, cx));
+        cx.run_until_parked();
+        let (_, title, status) = state(binary, cx);
+        assert!(!title.contains(UNSAVED), "{title}: {status}");
+        (exe, project, edited)
+    }
+
+    /// A rename made through the edit path, saved and opened in a fresh state, comes back
+    /// as the same overlay; the title marks the edit unsaved until the save.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the fingerprints differ or the unsaved mark is wrong.
+    #[gpui::test]
+    fn a_saved_project_opens_to_the_same_overlay(cx: &mut TestAppContext) {
+        let dir = scratch("project");
+        let (binary, cx) = binary(cx);
+        let (exe, project, edited) = renamed_and_saved(&binary, &dir, cx);
+        let fresh = cx.new(|cx| Binary::new(cx));
+        open(&fresh, &exe, cx);
+        open_project(&fresh, &project, cx);
+        let (opened, title, status) = state(&fresh, cx);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(opened, edited, "{status}");
+        assert!(!title.contains(UNSAVED), "{title}");
+    }
+
+    /// Opening a project over edits no project file holds asks first: Cancel keeps the
+    /// edits, Open replaces them with the project's.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the project opens unasked, on Cancel, or not on Open.
+    #[gpui::test]
+    fn a_project_over_unsaved_edits_asks_first(cx: &mut TestAppContext) {
+        let dir = scratch("unsaved");
+        let (binary, cx) = binary(cx);
+        let (_, project, edited) = renamed_and_saved(&binary, &dir, cx);
+        let again = Edit::Name {
+            at: HELPER,
+            name: "renamed_again".to_owned(),
+        };
+        binary.update(cx, |binary, cx| binary.edit(vec![again], cx));
+        cx.run_until_parked();
+        let (unsaved, ..) = state(&binary, cx);
+        assert_ne!(unsaved, edited);
+        for (answer, want) in [("Cancel", unsaved), ("Open", edited)] {
+            open_project(&binary, &project, cx);
+            assert!(cx.has_pending_prompt(), "{answer}");
+            cx.simulate_prompt_answer(answer);
+            cx.run_until_parked();
+            assert_eq!(state(&binary, cx).0, want, "{answer}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A project saved for another build is refused in the engine's words with a choice to
+    /// force it; forcing admits the bytes that were refused, though the file changed since,
+    /// and the next save asks where to write.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the project opens unforced, no choice is offered, force reads the file
+    /// again, or the forced file stays the save target.
+    #[gpui::test]
+    fn another_builds_project_is_refused_until_forced(cx: &mut TestAppContext) {
+        let dir = scratch("foreign");
+        let (binary, cx) = binary(cx);
+        let (_, project, edited) = renamed_and_saved(&binary, &dir, cx);
+        let rebuilt = dir.join("rebuilt.exe");
+        let mut bytes = tiny_pe();
+        if let Some(last) = bytes.last_mut() {
+            *last = 0x90;
+        }
+        std::fs::write(&rebuilt, bytes).unwrap();
+        let other = cx.new(|cx| Binary::new(cx));
+        open(&other, &rebuilt, cx);
+        let (loaded, ..) = state(&other, cx);
+        open_project(&other, &project, cx);
+        let (unforced, _, refused) = state(&other, cx);
+        assert_eq!(unforced, loaded);
+        assert!(
+            refused.starts_with("project refused: the project was saved for another build"),
+            "{refused}"
+        );
+        std::fs::write(&project, b"not a project").unwrap();
+        assert!(cx.has_pending_prompt());
+        cx.simulate_prompt_answer("Force");
+        cx.run_until_parked();
+        let (forced, _, said) = state(&other, cx);
+        let target = other.read_with(cx, |binary, _| binary.project.clone());
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(forced, edited, "{said}");
+        assert!(said.contains("# forced"), "{said}");
+        assert_eq!(target, None);
     }
 }

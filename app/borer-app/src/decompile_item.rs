@@ -35,7 +35,7 @@ use workspace::searchable::SearchableItemHandle;
 use workspace::{Item, ItemNavHistory, Workspace};
 
 use crate::actions::{BACK_HINT, FollowLink, Hint, ShowHex, ToggleListing, Xrefs};
-use crate::binary::Binary;
+use crate::binary::{Binary, BinaryEvent, Revision};
 use crate::card::{Card, Tone};
 use crate::code_semantics::for_one_view;
 use crate::code_view::{ClickOutcome, CodeLines, CodePalette, Role, resolve_ref_click};
@@ -185,8 +185,13 @@ pub struct DecompileItem {
     nav_history: Option<ItemNavHistory>,
     /// The editor's events.
     editor_events: Subscription,
-    /// The settings and theme observers.
-    _restyle: [Subscription; 2],
+    /// The settings and theme observers, and the binary's changes.
+    _restyle: [Subscription; 3],
+    /// [`LoadedBinary::fingerprint`] of the state the shown lines were built from, `None`
+    /// before any were and for measured lines.
+    revision: Option<u64>,
+    /// The line to put at the top once lines built after an edit arrive.
+    keep_top: Option<usize>,
     /// An address to move to once the view is built ([`Self::go_to_address`]).
     waiting: Option<u64>,
     /// The background build.
@@ -283,6 +288,7 @@ impl DecompileItem {
     ) -> Self {
         let empty = cx.new(|cx| Buffer::local("", cx));
         let editor = read_only_editor(empty, window, cx);
+        let follow = cx.subscribe_in(&binary, window, Self::follow_binary);
         let mut item = Self {
             workspace,
             binary,
@@ -305,7 +311,10 @@ impl DecompileItem {
             _restyle: [
                 cx.observe_global::<SettingsStore>(Self::restyle),
                 cx.observe_global::<GlobalTheme>(Self::restyle),
+                follow,
             ],
+            revision: None,
+            keep_top: None,
             waiting: None,
             job: Job::default(),
         };
@@ -359,6 +368,7 @@ impl DecompileItem {
         let reservation = cx.reserve_entity::<Buffer>();
         let id = BufferId::from(reservation.entity_id().as_non_zero_u64());
         let (loaded, entry) = (self.loaded.clone(), self.entry);
+        let revision = entry.map(|_| loaded.fingerprint);
         let label = match (entry, self.form) {
             (None, _) => "Building lines".to_owned(),
             (Some(at), Form::Decompile) => format!("Decompiling {at:#x}"),
@@ -371,7 +381,8 @@ impl DecompileItem {
             Ok((code, text, name))
         };
         self.job
-            .run_in(label, window, cx, work, |item, built, window, cx| {
+            .run_in(label, window, cx, work, move |item, built, window, cx| {
+                item.revision = revision;
                 item.show(built, reservation, window, cx);
             });
     }
@@ -419,6 +430,9 @@ impl DecompileItem {
                 self.refresh_search(window, cx);
                 self.painted = 0..0;
                 self.paint(false, cx);
+                if let Some(top) = self.keep_top.take() {
+                    self.scroll_to(top);
+                }
                 if let Some(va) = self.waiting.take() {
                     self.go_to_address(va, cx);
                 }
@@ -569,6 +583,51 @@ impl DecompileItem {
     #[must_use]
     pub const fn loaded(&self) -> &Arc<LoadedBinary> {
         &self.loaded
+    }
+
+    /// Builds the tab's function again over the state an edit or a project left, keeping
+    /// the line at its top; the other changes of the binary leave the tab as it is.
+    ///
+    /// # Arguments
+    ///
+    /// * `event` - What changed in the binary.
+    /// * `window` - Window the tab is in.
+    /// * `cx` - Item context.
+    fn follow_binary(
+        &mut self,
+        _: &Entity<Binary>,
+        event: &BinaryEvent,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        match event {
+            BinaryEvent::Revised(loaded) => self.move_to(loaded.clone(), window, cx),
+            BinaryEvent::Opened(_) | BinaryEvent::Closed => {}
+        }
+    }
+
+    /// Moves the tab to `loaded`, a later state of its binary that an edit or a project
+    /// left, and builds its function again under the names there, keeping its top line; the
+    /// lines shown stay until the new ones arrive. Measured lines stay as they are.
+    ///
+    /// # Arguments
+    ///
+    /// * `loaded` - The binary's state now.
+    /// * `window` - Window the tab is in.
+    /// * `cx` - Item context.
+    pub fn move_to(
+        &mut self,
+        loaded: Arc<LoadedBinary>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(entry) = self.entry else {
+            return;
+        };
+        self.loaded = loaded;
+        self.keep_top = Some(self.top_line());
+        let (source, form) = (self.loaded.clone(), self.form);
+        self.load(move || form.build(&source, entry), window, cx);
     }
 
     /// Returns which view of its function the tab shows.
@@ -1002,6 +1061,12 @@ pub fn open_lines(
 
 impl EventEmitter<()> for DecompileItem {}
 
+impl Revision for DecompileItem {
+    fn revision(&self) -> Option<u64> {
+        self.revision
+    }
+}
+
 impl Focusable for DecompileItem {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.editor.focus_handle(cx)
@@ -1400,12 +1465,14 @@ pub(crate) mod tests {
             usize::MAX,
         );
         let loaded = Arc::new(LoadedBinary {
+            notes: Vec::new(),
+            identity: String::new(),
+            fingerprint: overlay.fingerprint(),
             path: "unknown.bin".into(),
+            initial_rows: Arc::new(rows),
             program: Arc::new(program),
             analysis: Arc::new(analysis),
             overlay: Arc::new(overlay),
-            initial_rows: Arc::new(rows),
-            notes: Vec::new(),
         });
         let tab = open_tab(&workspace, &loaded, (0x1000, Form::Listing), cx);
         let said = tab.read_with(cx, |item, _| item.failed.clone());
