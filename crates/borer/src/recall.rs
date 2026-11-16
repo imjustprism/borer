@@ -14,6 +14,8 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
+use borer_engine::text::Op;
+
 /// Answers shorter than this carry no tag and are sent whole every time: a
 /// note in their place would save nothing.
 const RECALL_MIN: usize = 512;
@@ -187,83 +189,24 @@ const DELTA_SHARE: (usize, usize) = (1, 2);
 fn line_delta(old: &str, new: &str) -> Option<String> {
     let a: Vec<&str> = old.lines().collect();
     let b: Vec<&str> = new.lines().collect();
-    let (n, m) = (a.len(), b.len());
-    let n_i = isize::try_from(n).ok()?;
-    let m_i = isize::try_from(m).ok()?;
-    let reach = isize::try_from(DELTA_EDITS_MAX).ok()? + 1;
-    let width = usize::try_from(2 * reach + 1).ok()?;
-    let index = |k: isize| usize::try_from(k + reach).ok();
-    let mut v = vec![0isize; width];
-    let mut trace: Vec<Vec<isize>> = Vec::new();
-    let mut done = false;
-    for d in 0..=isize::try_from(DELTA_EDITS_MAX).ok()? {
-        trace.push(v.clone());
-        let mut k = -d;
-        while k <= d {
-            let down = k == -d || (k != d && v[index(k - 1)?] < v[index(k + 1)?]);
-            let mut x = if down {
-                v[index(k + 1)?]
-            } else {
-                v[index(k - 1)?] + 1
-            };
-            let mut y = x - k;
-            while x < n_i && y < m_i && a[usize::try_from(x).ok()?] == b[usize::try_from(y).ok()?] {
-                x += 1;
-                y += 1;
-            }
-            v[index(k)?] = x;
-            if x >= n_i && y >= m_i {
-                done = true;
-                break;
-            }
-            k += 2;
-        }
-        if done {
-            break;
-        }
-    }
-    if !done {
-        return None;
-    }
-    let mut edits: Vec<(bool, usize, usize)> = Vec::new();
-    let (mut x, mut y) = (n_i, m_i);
-    for (d, vd) in trace.iter().enumerate().rev() {
-        let d = isize::try_from(d).ok()?;
-        let k = x - y;
-        let down = k == -d || (k != d && vd[index(k - 1)?] < vd[index(k + 1)?]);
-        let prev_k = if down { k + 1 } else { k - 1 };
-        let prev_x = vd[index(prev_k)?];
-        let prev_y = prev_x - prev_k;
-        while x > prev_x && y > prev_y {
-            x -= 1;
-            y -= 1;
-        }
-        if d > 0 {
-            edits.push((
-                x == prev_x,
-                usize::try_from(prev_x).ok()?,
-                usize::try_from(prev_y).ok()?,
-            ));
-        }
-        x = prev_x;
-        y = prev_y;
-    }
-    edits.reverse();
+    let edits = borer_engine::text::edit_script(&a, &b, DELTA_EDITS_MAX, usize::MAX)?;
     let mut out = String::new();
     let mut i = 0;
-    while i < edits.len() {
-        let (_, x0, y0) = edits[i];
+    while let Some(first) = edits.get(i) {
+        let (x0, y0) = (first.old, first.new);
         let (mut cx, mut cy) = (x0, y0);
         let mut removed: Vec<&str> = Vec::new();
         let mut added: Vec<&str> = Vec::new();
-        while i < edits.len() && (edits[i].1, edits[i].2) == (cx, cy) {
-            let (insert, ex, ey) = edits[i];
-            if insert {
-                added.push(b.get(ey)?);
-                cy += 1;
-            } else {
-                removed.push(a.get(ex)?);
-                cx += 1;
+        while let Some(e) = edits.get(i).filter(|e| (e.old, e.new) == (cx, cy)) {
+            match e.op {
+                Op::Insert => {
+                    added.push(b.get(e.new)?);
+                    cy += 1;
+                }
+                Op::Delete => {
+                    removed.push(a.get(e.old)?);
+                    cx += 1;
+                }
             }
             i += 1;
         }

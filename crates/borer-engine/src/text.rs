@@ -1123,12 +1123,188 @@ pub fn parse_hex_bytes(text: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+/// What one step of an edit script does ([`Edit`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Op {
+    /// Deletes the old line at [`Edit::old`].
+    Delete,
+    /// Inserts the new line at [`Edit::new`].
+    Insert,
+}
+
+/// One step of a shortest edit script ([`edit_script`]), placed by where it
+/// stands in both lists: the old and the new lines before it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Edit {
+    /// Whether it deletes an old line or inserts a new one.
+    pub op: Op,
+    /// The old lines before it: the line it deletes.
+    pub old: usize,
+    /// The new lines before it: the line it inserts.
+    pub new: usize,
+}
+
+/// Returns the shortest edit script from one list of lines to another
+/// (Myers), its steps in order.
+///
+/// Between two steps that do not follow each other (the first ends where
+/// the second stands) the lines of both lists are equal, pair by pair. Each
+/// round keeps only the diagonals it can reach, so a script of `d` steps
+/// holds about `d * d` positions, not `d` times the widest round.
+///
+/// # Arguments
+///
+/// * `a` - The old lines.
+/// * `b` - The new lines.
+/// * `max` - Most steps the script may take.
+/// * `compares` - Most line comparisons it may make.
+///
+/// # Returns
+///
+/// The steps, empty when the lists are equal; `None` when the script takes
+/// more than `max` steps or `compares` comparisons.
+#[must_use]
+pub fn edit_script<T: PartialEq>(
+    a: &[T],
+    b: &[T],
+    max: usize,
+    compares: usize,
+) -> Option<Vec<Edit>> {
+    let (n, m) = (a.len(), b.len());
+    let n_i = isize::try_from(n).ok()?;
+    let m_i = isize::try_from(m).ok()?;
+    let most = isize::try_from(max.min(n.saturating_add(m))).ok()?;
+    let reach = most + 1;
+    let width = usize::try_from(2 * reach + 1).ok()?;
+    let index = |k: isize| usize::try_from(k + reach).ok();
+    let mut v = vec![0isize; width];
+    let mut rounds: Vec<Vec<isize>> = Vec::new();
+    let mut left = compares;
+    let mut done = false;
+    for d in 0..=most {
+        rounds.push(v.get(index(-d - 1)?..=index(d + 1)?)?.to_vec());
+        let mut k = -d;
+        while k <= d {
+            let down = k == -d || (k != d && v[index(k - 1)?] < v[index(k + 1)?]);
+            let mut x = if down {
+                v[index(k + 1)?]
+            } else {
+                v[index(k - 1)?] + 1
+            };
+            let mut y = x - k;
+            while x < n_i && y < m_i {
+                left = left.checked_sub(1)?;
+                if a[usize::try_from(x).ok()?] != b[usize::try_from(y).ok()?] {
+                    break;
+                }
+                x += 1;
+                y += 1;
+            }
+            v[index(k)?] = x;
+            if x >= n_i && y >= m_i {
+                done = true;
+                break;
+            }
+            k += 2;
+        }
+        if done {
+            break;
+        }
+    }
+    if !done {
+        return None;
+    }
+    let mut edits: Vec<Edit> = Vec::new();
+    let (mut x, mut y) = (n_i, m_i);
+    for (d, vd) in rounds.iter().enumerate().rev() {
+        let d = isize::try_from(d).ok()?;
+        let at = |k: isize| {
+            usize::try_from(k + d + 1)
+                .ok()
+                .and_then(|i| vd.get(i).copied())
+        };
+        let k = x - y;
+        let down = k == -d || (k != d && at(k - 1)? < at(k + 1)?);
+        let prev_k = if down { k + 1 } else { k - 1 };
+        let prev_x = at(prev_k)?;
+        let prev_y = prev_x - prev_k;
+        while x > prev_x && y > prev_y {
+            x -= 1;
+            y -= 1;
+        }
+        if d > 0 {
+            edits.push(Edit {
+                op: if x == prev_x { Op::Insert } else { Op::Delete },
+                old: usize::try_from(prev_x).ok()?,
+                new: usize::try_from(prev_y).ok()?,
+            });
+        }
+        x = prev_x;
+        y = prev_y;
+    }
+    edits.reverse();
+    Some(edits)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        Aimed, OUTSIDE_MAX, PATH_MAX, aimed, aimed_lines, edits_within, fenced, head, nearest,
-        one_line, plural, quoted, short_path,
+        Aimed, Edit, OUTSIDE_MAX, Op, PATH_MAX, aimed, aimed_lines, edit_script, edits_within,
+        fenced, head, nearest, one_line, plural, quoted, short_path,
     };
+
+    /// The edit script deletes and inserts only the lines that differ, each
+    /// placed by the lines of both lists before it, and gives up past its
+    /// cap.
+    ///
+    /// # Panics
+    ///
+    /// When a step is other than the change, or the cap does not hold.
+    #[test]
+    fn an_edit_script_takes_the_fewest_steps_and_its_cap() {
+        let old = ["a", "b", "c", "d"];
+        let new = ["a", "B", "c", "d", "e"];
+        let step = |op, old, new| Edit { op, old, new };
+        assert_eq!(
+            edit_script(&old, &new, 10, usize::MAX),
+            Some(vec![
+                step(Op::Delete, 1, 1),
+                step(Op::Insert, 2, 1),
+                step(Op::Insert, 4, 4)
+            ])
+        );
+        assert_eq!(edit_script(&old, &old, 10, usize::MAX), Some(Vec::new()));
+        assert_eq!(edit_script(&old, &new, 2, usize::MAX), None);
+        assert_eq!(edit_script::<&str>(&[], &[], 0, 0), Some(Vec::new()));
+    }
+
+    /// A line that counts how often it is compared.
+    #[derive(Debug)]
+    struct Counted<'c>(u32, &'c std::cell::Cell<usize>);
+
+    impl PartialEq for Counted<'_> {
+        fn eq(&self, other: &Self) -> bool {
+            self.1.set(self.1.get() + 1);
+            self.0 == other.0
+        }
+    }
+
+    /// A long script stops at its comparison budget: two lists of 200,000
+    /// lines with every hundredth changed give up within the budget.
+    ///
+    /// # Panics
+    ///
+    /// When the script is found, or compares past its budget.
+    #[test]
+    fn an_edit_script_stops_at_its_comparison_budget() {
+        let seen = std::cell::Cell::new(0);
+        let a: Vec<Counted<'_>> = (0..200_000).map(|k| Counted(k, &seen)).collect();
+        let b: Vec<Counted<'_>> = (0..200_000)
+            .map(|k| Counted(if k % 100 == 0 { k + 1_000_000 } else { k }, &seen))
+            .collect();
+        assert_eq!(edit_script(&a, &b, 1_000, 100_000), None);
+        assert!(seen.get() <= 100_000, "{} comparisons", seen.get());
+    }
 
     /// A count's noun takes its plural from either width a count is held in.
     ///
