@@ -5,7 +5,7 @@ use std::any::Any;
 use std::ops::Range;
 use std::sync::Arc;
 
-use borer_engine::analysis::render::{INCOMPLETE_NOTE, Reason, Triage};
+use borer_engine::analysis::render::{Basis, INCOMPLETE_NOTE, Reason, Triage};
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, ScrollStrategy, SharedString,
@@ -51,6 +51,24 @@ pub struct Row {
     /// The address of the triage the line names and the place it opens; `None` for a line
     /// that opens nothing.
     pub link: Option<(u64, Place)>,
+    /// How the engine knows a reason, `None` on every line but a reason's.
+    pub basis: Option<Basis>,
+}
+
+/// Returns the words a reason's basis is labelled with and the theme color they draw in:
+/// observed in the theme's `status().success`, static in `status().info`, pattern in
+/// `text_muted`.
+///
+/// # Arguments
+///
+/// * `basis` - How the engine knows the reason.
+#[must_use]
+pub const fn basis_label(basis: Basis) -> (&'static str, Color) {
+    match basis {
+        Basis::Observed => ("observed by running", Color::Success),
+        Basis::Static => ("static reference", Color::Info),
+        Basis::Pattern => ("pattern match", Color::Muted),
+    }
 }
 
 /// Returns the address a reason names, `None` for a reason about counts.
@@ -80,6 +98,7 @@ pub fn rows(triage: &Triage, place: impl Fn(u64) -> Option<Place>) -> Vec<Row> {
         text: SharedString::from(text.to_owned()),
         look,
         link: at.and_then(|at| Some((at, place(at)?))),
+        basis: None,
     };
     let mut out = vec![
         line(&triage.name, Look::Heading, None),
@@ -125,7 +144,11 @@ pub fn rows(triage: &Triage, place: impl Fn(u64) -> Option<Place>) -> Vec<Row> {
         let name = format!("{}  score {}", function.name, function.score);
         out.push(line(&name, Look::Plain, Some(function.entry)));
         for reason in &function.reasons {
-            out.push(line(&reason.to_string(), Look::Under, reason_at(reason)));
+            let basis = Some(reason.basis());
+            out.push(Row {
+                basis,
+                ..line(&reason.to_string(), Look::Under, reason_at(reason))
+            });
         }
     }
     out
@@ -341,6 +364,10 @@ impl OverviewItem {
                     .px_2()
                     .pl(px(8.0 + indent))
                     .gap_2()
+                    .children(row.basis.map(|basis| {
+                        let (words, color) = basis_label(basis);
+                        Label::new(words).size(LabelSize::XSmall).color(color)
+                    }))
                     .child(Label::new(row.text.clone()).size(size).color(color));
                 if self.selected == Some(ix) {
                     line = line.bg(selected_bg);
@@ -443,7 +470,7 @@ pub(crate) mod tests {
     use gpui::{Entity, TestAppContext, VisualContext as _, VisualTestContext};
     use workspace::Workspace;
 
-    use super::{OverviewItem, rows};
+    use super::{OverviewItem, basis_label, rows};
     use crate::app_view::tests::{CALLER, init, open, open_place, sample, shown};
     use crate::decompile_item::{DecompileItem, Form, TabMode};
     use crate::places::Place;
@@ -531,6 +558,26 @@ pub(crate) mod tests {
                 .iter()
                 .all(|row| row.link.is_none())
         );
+    }
+
+    /// Each reason is labelled with the engine's basis, and no other line is.
+    ///
+    /// A recovered string reads as observed by running, a call and a count of references
+    /// as static, a constant as a pattern match.
+    #[test]
+    fn every_basis_is_labelled() {
+        let labels: Vec<_> = rows(&hand_built(), |_| None)
+            .iter()
+            .filter_map(|row| Some((row.text.to_string(), basis_label(row.basis?).0)))
+            .collect();
+        let want = [
+            ("builds \"key\"", "observed by running"),
+            ("calls connect", "static reference"),
+            ("holds AES", "pattern match"),
+            ("references 3 strings and 4 imports", "static reference"),
+        ];
+        let want: Vec<_> = want.iter().map(|&(t, l)| (t.to_owned(), l)).collect();
+        assert_eq!(labels, want);
     }
 
     /// Opens the overview of the sample in `workspace` and returns it once it is built.
