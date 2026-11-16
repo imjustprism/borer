@@ -104,8 +104,9 @@ pub fn grade_text(counts: &GradeCounts, grade: Grade) -> String {
 
 /// The block grades the engine's check gave the function in the active tab.
 pub struct Grades {
-    /// The function the counts are for, and the counts, once the check answered.
-    shown: Option<(Checked, GradeCounts)>,
+    /// The function the last check answered for, and its counts, `None` inside when the
+    /// engine had no check of it; kept so the same function is not checked again.
+    shown: Option<(Checked, Option<GradeCounts>)>,
     /// The function the running check is for.
     running: Option<Checked>,
     /// The tab followed, and the observer that rechecks when it changes function.
@@ -143,7 +144,7 @@ impl Grades {
     pub fn shown(&self) -> Option<(u64, GradeCounts)> {
         self.shown
             .as_ref()
-            .map(|(checked, counts)| (checked.entry, *counts))
+            .and_then(|(checked, counts)| counts.map(|counts| (checked.entry, counts)))
     }
 
     /// Returns the generation of the latest check started.
@@ -203,7 +204,7 @@ impl Grades {
             this.update(cx, |grades, cx| {
                 if grades.epoch.is_current(ticket, &cancel) {
                     grades.running = None;
-                    grades.shown = counts.map(|counts| (target, counts));
+                    grades.shown = Some((target, counts));
                     cx.notify();
                 }
             });
@@ -604,10 +605,11 @@ mod tests {
     };
     use borer_engine::analysis::{Analysis, EnumSource, Overlay};
     use borer_engine::program::{Arch, Program, Section};
-    use gpui::TestAppContext;
+    use gpui::{TestAppContext, VisualTestContext};
     use workspace::Workspace;
 
     use super::{Address, Grades, Work, grade_text, shown_for};
+    use crate::app_view::AppWindow;
     use crate::app_view::tests::{CALLER, init, load_sample, open, open_caller, sample, shown};
     use crate::binary::{Loading, StatusLine, kind};
     use crate::decompile_item::{DecompileItem, TabMode, open_function};
@@ -722,7 +724,7 @@ mod tests {
     /// Panics if the bar has none.
     fn item<T: workspace::StatusItemView>(
         workspace: &gpui::Entity<Workspace>,
-        cx: &mut gpui::VisualTestContext,
+        cx: &mut VisualTestContext,
     ) -> gpui::Entity<T> {
         workspace.read_with(cx, |workspace, cx| {
             workspace.status_bar().read(cx).item_of_type::<T>().unwrap()
@@ -873,6 +875,37 @@ mod tests {
         assert_eq!(got, want.map(|counts| (CALLER, counts)));
     }
 
+    /// Opens the sample's function at `entry` in a focused tab of `app`'s workspace.
+    fn open_sample_at(app: &AppWindow, entry: u64, cx: &mut VisualTestContext) {
+        app.workspace.update_in(cx, |workspace, window, cx| {
+            open_function(
+                workspace,
+                sample(),
+                entry,
+                TabMode::Permanent,
+                true,
+                window,
+                cx,
+            );
+        });
+    }
+
+    /// Redraws the active code tab of `app`'s workspace twice, as scrolling it does.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no code tab is active.
+    fn redraw_active_tab(app: &AppWindow, cx: &mut VisualTestContext) {
+        let tab = app
+            .workspace
+            .read_with(cx, |workspace, cx| {
+                workspace.active_item_as::<DecompileItem>(cx)
+            })
+            .unwrap();
+        tab.update(cx, |_, cx| cx.notify());
+        tab.update(cx, |_, cx| cx.notify());
+    }
+
     /// A tab that changes while its check runs starts no second check.
     ///
     /// # Panics
@@ -892,26 +925,9 @@ mod tests {
         let app_state = init(cx);
         let (app, cx) = open(&app_state, cx);
         let grades = item::<Grades>(&app.workspace, cx);
-        app.workspace.update_in(cx, |workspace, window, cx| {
-            open_function(
-                workspace,
-                sample(),
-                CALLER,
-                TabMode::Permanent,
-                true,
-                window,
-                cx,
-            );
-        });
+        open_sample_at(&app, CALLER, cx);
         let started = grades.read_with(cx, |grades, _| grades.ticket());
-        let tab = app
-            .workspace
-            .read_with(cx, |workspace, cx| {
-                workspace.active_item_as::<DecompileItem>(cx)
-            })
-            .unwrap();
-        tab.update(cx, |_, cx| cx.notify());
-        tab.update(cx, |_, cx| cx.notify());
+        redraw_active_tab(&app, cx);
         assert_eq!(grades.read_with(cx, |grades, _| grades.ticket()), started);
     }
 
@@ -987,5 +1003,35 @@ mod tests {
             shown_for(&loading, later),
             Some(Duration::from_millis(1500))
         );
+    }
+
+    /// A function the engine has no check of is not checked again on every redraw of its
+    /// tab.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a redraw starts another check.
+    #[gpui::test]
+    fn a_check_with_no_answer_is_not_repeated(cx: &mut TestAppContext) {
+        a_check_with_no_answer_is_not_repeated_steps(cx);
+    }
+
+    /// Runs the steps of [`a_check_with_no_answer_is_not_repeated`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`a_check_with_no_answer_is_not_repeated`] says.
+    fn a_check_with_no_answer_is_not_repeated_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let grades = item::<Grades>(&app.workspace, cx);
+        let nowhere = 0x5;
+        open_sample_at(&app, nowhere, cx);
+        cx.run_until_parked();
+        assert_eq!(grades.read_with(cx, |grades, _| grades.shown()), None);
+        let settled = grades.read_with(cx, |grades, _| grades.ticket());
+        redraw_active_tab(&app, cx);
+        cx.run_until_parked();
+        assert_eq!(grades.read_with(cx, |grades, _| grades.ticket()), settled);
     }
 }
