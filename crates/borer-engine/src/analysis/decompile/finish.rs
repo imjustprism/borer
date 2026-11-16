@@ -230,7 +230,7 @@ fn stated_types(callers: Option<callee::Scope<'_>>) -> words::Stated {
             locals: true,
         };
     };
-    let debug = program.debug_functions.iter().any(|d| d.low_pc == entry);
+    let debug = program.debug_function(entry).is_some();
     let typed = |slot: bool| {
         overlay.vars.get(&entry).is_some_and(|vars| {
             vars.iter()

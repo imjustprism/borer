@@ -771,7 +771,7 @@ pub fn why_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Result<S
         .ok_or_else(|| unresolved(target))?;
     let mut out = String::new();
     let section = p.section_at(va);
-    let debug = p.debug_functions.iter().find(|d| d.low_pc == va);
+    let debug = p.debug_function(va);
     let symbol = a.symbol_at(p, va);
     let function = a.function(va);
     let containing = a.function_at(va);

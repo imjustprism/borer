@@ -789,7 +789,7 @@ fn new_ctx<'a>(
     block_starts: BTreeSet<u64>,
     assume: &[(u8, u64)],
 ) -> Ctx<'a> {
-    let debug = program.debug_functions.iter().find(|d| d.low_pc == f.entry);
+    let debug = program.debug_function(f.entry);
     let stated = overlay.prototypes.get(&f.entry);
     let vars = overlay.vars.get(&f.entry);
     let conv = abi::conv_at(program, f.entry, bitness);

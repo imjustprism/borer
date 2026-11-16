@@ -21,12 +21,12 @@ use std::collections::{BTreeMap, BTreeSet, btree_map};
 use std::fmt;
 
 use super::decompile::decompile_named;
+use super::decompile::interp::debug_local;
 use super::protos::{self, Proto, Var, VarKey};
 use super::reads::{Tag, Tracked};
 use super::stated::{self, Field, Mode, Statement};
 use super::utypes::{self, TypeExpr, UserType};
 use super::{Analysis, Overlay, apply, cdecl, name_of, parse_addr, project, resolve};
-use crate::dwarf::Subprogram;
 use crate::program::Program;
 
 /// What one entry of the overlay held and holds, `None` for an absent side.
@@ -1155,16 +1155,6 @@ fn stated_key(o: &Overlay, entry: u64, var: &str) -> Option<VarKey> {
         })
 }
 
-/// Returns what the debug information records of a function.
-///
-/// # Arguments
-///
-/// * `p` - The loaded program.
-/// * `entry` - The function.
-fn debug_of(p: &Program, entry: u64) -> Option<&Subprogram> {
-    p.debug_functions.iter().find(|d| d.low_pc == entry)
-}
-
 /// Finds the variable of a function that its debug information names `var`.
 ///
 /// That is a frame local by its slot, or a parameter by its position where
@@ -1181,13 +1171,9 @@ fn debug_of(p: &Program, entry: u64) -> Option<&Subprogram> {
 ///
 /// The variable, or `None` when the debug information names nothing so.
 fn debug_key(p: &Program, o: &Overlay, entry: u64, var: &str) -> Option<VarKey> {
-    let d = debug_of(p, entry)?;
-    let slot = d
-        .locals
-        .iter()
-        .find(|(_, n)| *n == var)
-        .map(|(&off, _)| VarKey::Slot(off));
+    let slot = debug_local(p, entry, var).map(VarKey::Slot);
     let param = || {
+        let d = p.debug_function(entry)?;
         let i = d.parameters.iter().position(|q| q.name == var)?;
         let unstated = o.prototypes.get(&entry).is_none();
         u8::try_from(i).ok().filter(|_| unstated).map(VarKey::Param)
@@ -1205,7 +1191,7 @@ fn debug_key(p: &Program, o: &Overlay, entry: u64, var: &str) -> Option<VarKey> 
 /// * `entry` - The function.
 /// * `key` - The variable.
 fn debug_name(p: &Program, entry: u64, key: VarKey) -> Option<&str> {
-    let d = debug_of(p, entry)?;
+    let d = p.debug_function(entry)?;
     match key {
         VarKey::Slot(off) => d.locals.get(&off).map(String::as_str),
         VarKey::Param(i) => d.parameters.get(usize::from(i)).map(|q| q.name.as_str()),
@@ -1226,14 +1212,32 @@ fn debug_name(p: &Program, entry: u64, key: VarKey) -> Option<&str> {
 /// * `entry` - The function.
 /// * `var` - The name.
 ///
+/// # Errors
+///
+/// When the name is none of these, why ([`VarKey::parse`]).
+fn resolve_var(p: &Program, o: &Overlay, entry: u64, var: &str) -> Result<VarKey, String> {
+    if let Some(key) = stated_key(o, entry, var).or_else(|| debug_key(p, o, entry, var)) {
+        return Ok(key);
+    }
+    let (stack, _, frame) = protos::slot_words(p, entry);
+    VarKey::parse(var, stack, frame).map_err(|e| e.to_string())
+}
+
+/// Returns the variable of a function a name its text spells is
+/// ([`resolve_var`]).
+///
+/// # Arguments
+///
+/// * `p` - The loaded program.
+/// * `o` - The overlay.
+/// * `entry` - The function.
+/// * `var` - The name.
+///
 /// # Returns
 ///
-/// The variable, or `None` when the name is none of these.
+/// The variable, or `None` when the name is none [`resolve_var`] reads.
 pub(crate) fn var_key(p: &Program, o: &Overlay, entry: u64, var: &str) -> Option<VarKey> {
-    let (stack, _, frame) = protos::slot_words(p, entry);
-    stated_key(o, entry, var)
-        .or_else(|| debug_key(p, o, entry, var))
-        .or_else(|| VarKey::parse(var, stack, frame).ok())
+    resolve_var(p, o, entry, var).ok()
 }
 
 /// Reads what a statement of a function's variable states: which variable
@@ -1266,12 +1270,8 @@ fn plan_var(
     var: &str,
     (name, ty): (Option<&str>, Option<&str>),
 ) -> Result<(VarKey, Var), String> {
-    let (stack, _, frame) = protos::slot_words(p, entry);
     let stated = o.vars.get(&entry);
-    let key = var_key(p, o, entry, var).map_or_else(
-        || VarKey::parse(var, stack, frame).map_err(|e| e.to_string()),
-        Ok,
-    )?;
+    let key = resolve_var(p, o, entry, var)?;
     let name = name.ok_or("naming a variable needs `name`, its new name (`type` is optional)")?;
     let decl = ty.map_or_else(|| name.to_owned(), |t| format!("{t} {name}"));
     let var = Var::parse(&decl).map_err(|e| e.to_string())?;

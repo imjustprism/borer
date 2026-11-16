@@ -525,17 +525,13 @@ fn slot_offset(name: &str, word: u64, frame: i64) -> Option<i64> {
 ///
 /// The slot offset the debug information states for the name, or `None`
 /// when the function's record names no local so.
-fn debug_local(program: &Program, entry: u64, name: &str) -> Option<i64> {
-    program
-        .debug_functions
-        .iter()
-        .find(|d| d.low_pc == entry)
-        .and_then(|d| {
-            d.locals
-                .iter()
-                .find(|(_, n)| n.as_str() == name)
-                .map(|(off, _)| *off)
-        })
+pub(crate) fn debug_local(program: &Program, entry: u64, name: &str) -> Option<i64> {
+    program.debug_function(entry).and_then(|d| {
+        d.locals
+            .iter()
+            .find(|(_, n)| n.as_str() == name)
+            .map(|(off, _)| *off)
+    })
 }
 
 /// The frame offset a local an agent named stands for

@@ -592,6 +592,21 @@ fn offset_to_va_in(sections: &[Section], off: u64) -> Option<u64> {
 }
 
 impl Program {
+    /// Returns what the debug information records of the function at an
+    /// entry.
+    ///
+    /// # Arguments
+    ///
+    /// * `entry` - The function's entry, as linked.
+    ///
+    /// # Returns
+    ///
+    /// The record, `None` when the debug information has none there.
+    #[must_use]
+    pub fn debug_function(&self, entry: u64) -> Option<&crate::dwarf::Subprogram> {
+        self.debug_functions.iter().find(|d| d.low_pc == entry)
+    }
+
     /// Returns the SHA-256 of the file's bytes, hashed once per program.
     #[must_use]
     pub fn digest(&self) -> [u8; 32] {
