@@ -2021,15 +2021,11 @@ impl Overlay {
 ///
 /// The overlay name, else the symbol name, else `sub_<hex>`.
 pub fn name_of(analysis: &Analysis, overlay: &Overlay, entry: u64) -> String {
-    if let Some(n) = overlay.names.get(&entry) {
-        return n.clone();
-    }
-    if let Some(f) = analysis.function(entry)
-        && let Some(n) = &f.name
-    {
-        return n.clone();
-    }
-    format!("sub_{entry:x}")
+    let named = match analysis.function(entry) {
+        Some(f) => f.name_in_force(overlay),
+        None => overlay.names.get(&entry).map(String::as_str),
+    };
+    named.map_or_else(|| format!("sub_{entry:x}"), str::to_owned)
 }
 
 /// Names one vtable slot for a listing: the function its word holds, or

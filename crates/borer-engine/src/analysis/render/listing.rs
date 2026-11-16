@@ -369,11 +369,7 @@ const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 /// # Returns
 /// Whether the function is listed.
 fn function_matches(f: &Function, o: &Overlay, q: &str, hex_q: &str) -> bool {
-    let name = o
-        .names
-        .get(&f.entry)
-        .map(String::as_str)
-        .or(f.name.as_deref());
+    let name = f.name_in_force(o);
     if name.is_some_and(|n| lower_contains(n, q)) {
         return true;
     }

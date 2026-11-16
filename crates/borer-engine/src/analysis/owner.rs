@@ -3,7 +3,7 @@
 use std::cmp::Reverse;
 use std::collections::BTreeSet;
 
-use super::{BasicBlock, Function};
+use super::{BasicBlock, Function, Overlay};
 
 /// One disjoint virtual-address stretch and the block that owns all of it.
 #[derive(Debug, Clone, Copy)]
@@ -19,6 +19,22 @@ pub(super) struct BlockRow {
 }
 
 impl Function {
+    /// Returns the name the function goes by, borrowed: the user's, else
+    /// the analysis's; `None` for one `sub_<hex>` names
+    /// ([`super::name_of`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `overlay` - User names, which win.
+    #[must_use]
+    pub fn name_in_force<'a>(&'a self, overlay: &'a Overlay) -> Option<&'a str> {
+        overlay
+            .names
+            .get(&self.entry)
+            .or(self.name.as_ref())
+            .map(String::as_str)
+    }
+
     /// Returns where `va` sits from the entry as a name suffix: `+0x8` past
     /// it, `-0x7fe` before it, empty at it.
     ///
