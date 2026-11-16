@@ -726,9 +726,11 @@ pub(crate) fn unnoted<R>(f: impl FnOnce() -> R) -> R {
 }
 
 /// The build running on one thread, the cancel flag
-/// ([`crate::cancel::Cancel`]) and the progress
-/// ([`crate::progress::Progress`]) in force there, for a thread it spawns
-/// to note its reads into, to stop with and to report to.
+/// ([`crate::cancel::Cancel`]), the progress ([`crate::progress::Progress`])
+/// and the worker cap ([`crate::progress::Workers`]) in force there.
+///
+/// A thread it spawns takes them to note its reads into, to stop with, to
+/// report to and to spread as few threads as on.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Handle {
     /// The build whose read-set the spawned thread notes into.
@@ -737,21 +739,25 @@ pub(crate) struct Handle {
     cancel: Option<crate::cancel::Cancel>,
     /// The progress the spawned thread reports to.
     progress: Option<crate::progress::Progress>,
+    /// The cap on the threads the spawned thread's sweeps spread over.
+    workers: Option<crate::progress::Workers>,
 }
 
 impl Handle {
     /// Returns the build running on this thread, if any, and the cancel
-    /// flag and the progress in force on it.
+    /// flag, the progress and the worker cap in force on it.
     pub(crate) fn here() -> Self {
         Self {
             frame: FRAMES.with(|frames| frames.borrow().last().cloned()),
             cancel: crate::cancel::Cancel::current(),
             progress: crate::progress::Progress::current(),
+            workers: crate::progress::Workers::current(),
         }
     }
 
     /// Runs `f`, on whatever thread, noting its reads into the build this
-    /// handle names, under the cancel flag and the progress it carries.
+    /// handle names, under the cancel flag, the progress and the worker
+    /// cap it carries.
     ///
     /// # Arguments
     ///
@@ -765,11 +771,14 @@ impl Handle {
             frame,
             cancel,
             progress,
+            workers,
         } = self;
         crate::cancel::Cancel::carried(cancel.as_ref(), || {
-            crate::progress::Progress::carried(progress.as_ref(), || match frame {
-                Some(frame) => within(frame, f),
-                None => f(),
+            crate::progress::Progress::carried(progress.as_ref(), || {
+                crate::progress::Workers::carried(workers, || match frame {
+                    Some(frame) => within(frame, f),
+                    None => f(),
+                })
             })
         })
     }

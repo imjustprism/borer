@@ -1,7 +1,9 @@
 //! Tests of the progress in force: the phases a job's plan runs, and that
 //! work outside a progress leaves it untouched.
 
-use super::{Plan, Progress, SEEN, Snapshot};
+use std::num::NonZeroUsize;
+
+use super::{Plan, Progress, SEEN, Snapshot, Workers};
 use crate::analysis::{Analysis, COMPUTE_PHASES};
 use crate::program::{Arch, Program, Section};
 
@@ -82,4 +84,81 @@ fn a_mark_out_of_its_plan_is_a_defect() {
         let mut phases = crate::timing::Phases::planned(Plan::Compute);
         phases.mark("analysis naming");
     });
+}
+
+/// Returns a cap of `n` threads, at least one.
+///
+/// # Arguments
+///
+/// * `n` - The threads.
+fn cap(n: usize) -> Workers {
+    Workers(NonZeroUsize::new(n).unwrap_or(NonZeroUsize::MIN))
+}
+
+/// A striped map over 1,000 items under a cap one below the machine's
+/// cores runs on exactly that many threads.
+///
+/// # Panics
+///
+/// When the map spreads past the cap, or not over the cores it may take.
+#[test]
+fn a_cap_bounds_the_threads_a_sweep_runs_on() {
+    let items: Vec<usize> = (0..1000).collect();
+    let seen = std::sync::Mutex::new(Vec::new());
+    let machine = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
+    let most = machine.saturating_sub(1).max(1);
+    cap(most).within(|| {
+        crate::analysis::striped(&items, |_| {
+            let mut seen = seen.lock().expect("no item panics");
+            let here = std::thread::current().id();
+            if !seen.contains(&here) {
+                seen.push(here);
+            }
+        })
+    });
+    assert_eq!(seen.lock().expect("no item panicked").len(), most);
+}
+
+/// Every thread a sweep spawns works under the progress and the cap of the
+/// thread that started it: four threads mapped under a cap of one each
+/// read the cap of one, on any machine.
+///
+/// # Panics
+///
+/// When a worker runs without the progress or past the cap.
+#[test]
+fn the_threads_a_sweep_spawns_take_the_progress_and_the_cap_along() {
+    let items: Vec<usize> = (0..1000).collect();
+    let progress = Progress::new();
+    let seen = progress.within(|| {
+        cap(1).within(|| {
+            crate::analysis::striped_on(
+                4,
+                &items,
+                || std::thread::current().id(),
+                |&id, _| (id, Progress::current().is_some(), super::cores()),
+            )
+        })
+    });
+    let mut threads: Vec<_> = seen.iter().map(|s| s.0).collect();
+    threads.dedup();
+    assert!(threads.len() > 1, "the map ran on one thread");
+    assert!(
+        seen.iter()
+            .all(|&(_, carried, cores)| carried && cores == 1)
+    );
+    assert!(Workers::current().is_none());
+}
+
+/// A panic caught inside a cap's scope leaves no cap in force on the
+/// thread.
+///
+/// # Panics
+///
+/// When the cap outlives its scope.
+#[test]
+fn a_caught_panic_leaves_no_cap_in_force() {
+    let caught = std::panic::catch_unwind(|| cap(2).within(|| panic!("the work fails")));
+    assert!(caught.is_err());
+    assert!(Workers::current().is_none());
 }

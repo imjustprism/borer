@@ -133,8 +133,10 @@ impl Cancel {
 }
 
 /// Runs `f` with `value` in force in the per-thread slot `slot`, the value
-/// there before put back after, on return and on a panic alike: the scope
-/// of a [`Cancel`] or a [`crate::progress::Progress`].
+/// there before put back after, on return and on a panic alike.
+///
+/// It is the scope of a [`Cancel`], a [`crate::progress::Progress`] or a
+/// [`crate::progress::Workers`].
 ///
 /// # Arguments
 ///

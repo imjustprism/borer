@@ -27,7 +27,8 @@ pub(crate) fn striped<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync)
 /// Maps `f` over `items` across the cores with a state per worker (a
 /// context carrying memos), results in the items' order.
 ///
-/// Workers take every `threads`-th item; each makes its own state with
+/// The cores are those [`crate::progress::cores`] allows. Workers take
+/// every `threads`-th item; each makes its own state with
 /// `init` first, so a memo need not be shared. With one core, or fewer
 /// than `min` items, the map runs inline over one state. A panic in `f`
 /// fails the call either way ([`striped_on`]).
@@ -48,8 +49,11 @@ pub(crate) fn striped_with<T: Sync, S, R: Send>(
     init: impl Fn() -> S + Sync,
     f: impl Fn(&S, &T) -> R + Sync,
 ) -> Vec<R> {
-    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
-    let threads = if items.len() < min { 1 } else { cores };
+    let threads = if items.len() < min {
+        1
+    } else {
+        crate::progress::cores()
+    };
     striped_on(threads, items, init, f)
 }
 
@@ -144,8 +148,7 @@ pub(crate) fn beside<M, S: Send>(
     main: impl FnOnce() -> M,
     side: impl FnOnce() -> S + Send,
 ) -> (M, Option<S>) {
-    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
-    if cores <= 1 {
+    if crate::progress::cores() <= 1 {
         let m = main();
         return (m, Some(side()));
     }

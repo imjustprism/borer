@@ -15,8 +15,14 @@
 //! spawn no thread. A job runs its phases from a
 //! plan, a const list of their names ([`Plan`]): each mark of a planned
 //! [`crate::timing::Phases`] moves the progress on to the next phase.
+//!
+//! A [`Workers`] in force caps the threads each sweep spreads over
+//! ([`cores`]), taken along the same way; discovery is handed the capped
+//! count for its walk lanes. The thread count changes no answer, only how
+//! soon it comes.
 
 use std::cell::RefCell;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -24,6 +30,12 @@ thread_local! {
     /// The progress in force on this thread, innermost
     /// [`Progress::within`] last.
     static IN_FORCE: RefCell<Option<Progress>> = const { RefCell::new(None) };
+}
+
+thread_local! {
+    /// The worker cap in force on this thread, innermost
+    /// [`Workers::within`] last.
+    static WORKERS: RefCell<Option<Workers>> = const { RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -180,6 +192,56 @@ impl Progress {
     pub(crate) fn carried<R>(progress: Option<&Self>, f: impl FnOnce() -> R) -> R {
         crate::cancel::in_force(&IN_FORCE, progress.cloned(), f)
     }
+}
+
+/// Most threads one sweep spreads over, for the work under
+/// [`Workers::within`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Workers(pub NonZeroUsize);
+
+impl Workers {
+    /// Runs `f` with this cap in force on this thread.
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The work to cap.
+    ///
+    /// # Returns
+    ///
+    /// What `f` returns; the cap in force before is in force again after.
+    pub fn within<R>(self, f: impl FnOnce() -> R) -> R {
+        crate::cancel::in_force(&WORKERS, Some(self), f)
+    }
+
+    /// The cap in force on this thread.
+    ///
+    /// # Returns
+    ///
+    /// The cap, or `None` outside every [`Workers::within`].
+    pub(crate) fn current() -> Option<Self> {
+        WORKERS.with(|c| *c.borrow())
+    }
+
+    /// Runs `f` under a cap taken from another thread, or under none.
+    ///
+    /// # Arguments
+    ///
+    /// * `workers` - The cap [`Workers::current`] read there.
+    /// * `f` - The work.
+    ///
+    /// # Returns
+    ///
+    /// What `f` returns.
+    pub(crate) fn carried<R>(workers: Option<Self>, f: impl FnOnce() -> R) -> R {
+        crate::cancel::in_force(&WORKERS, workers, f)
+    }
+}
+
+/// Returns the threads a sweep may spread over: the cores this process may
+/// run on, at most the [`Workers`] in force, at least one.
+pub(crate) fn cores() -> usize {
+    let cores = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
+    Workers::current().map_or(cores, |Workers(most)| cores.min(most.get()))
 }
 
 /// Most reads [`Progress::snapshot`] takes of a phase that keeps moving.

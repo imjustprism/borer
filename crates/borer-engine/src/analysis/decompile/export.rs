@@ -25,6 +25,7 @@
 
 use super::{Analysis, BTreeMap, BTreeSet, Function, Overlay, Program, name_of};
 use crate::analysis::NameSource;
+use crate::progress::cores;
 use std::fmt::Write as _;
 
 /// What the file declares before any declaration a function hoists: the
@@ -900,11 +901,6 @@ struct Window {
     held_bytes: usize,
     /// Costliest functions rendered before all others, never waiting.
     heavy: usize,
-}
-
-/// Returns the cores this process may run on, at least one.
-fn cores() -> usize {
-    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
 }
 
 impl Window {

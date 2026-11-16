@@ -1167,9 +1167,7 @@ pub fn verify_mir(program: &Program, analysis: &Analysis, entries: &[u64], seed:
 /// * `entries` - The functions to check.
 /// * `some` - Checks one part on the calling thread.
 pub(super) fn in_parts(entries: &[u64], some: impl Fn(&[u64]) -> Verified + Sync) -> Verified {
-    let threads = std::thread::available_parallelism()
-        .map_or(1, std::num::NonZeroUsize::get)
-        .min(entries.len().div_ceil(PAR_MIN).max(1));
+    let threads = crate::progress::cores().min(entries.len().div_ceil(PAR_MIN).max(1));
     let parts: Vec<&[u64]> = entries
         .chunks(entries.len().div_ceil(threads).max(1))
         .collect();
