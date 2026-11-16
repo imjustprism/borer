@@ -86,13 +86,14 @@ impl Harness {
             }
             Prepared::Code(corpus) => {
                 let source = corpus.loaded.path.display().to_string();
+                let binary = self.binary.clone();
                 self.workspace.update(cx, |workspace, cx| {
-                    open_lines(workspace, corpus.loaded, corpus.code, window, cx);
+                    open_lines(workspace, binary, corpus.loaded, corpus.code, window, cx);
                 });
                 (true, source, corpus.base_lines, TARGET_CODE_LINES, false)
             }
             Prepared::Input(loaded, entry) => {
-                self.start_input(cancel, loaded, entry, window, cx);
+                self.start_input(cancel, &loaded, entry, window, cx);
                 return;
             }
         };

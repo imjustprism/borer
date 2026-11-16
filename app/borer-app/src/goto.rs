@@ -6,13 +6,14 @@
 
 use std::sync::Arc;
 
-use gpui::{App, Context, DismissEvent, Task, WeakEntity, Window};
+use gpui::{App, Context, DismissEvent, Entity, Task, WeakEntity, Window};
 use picker::{Picker, PickerDelegate};
 use ui::{Color, Label, LabelCommon as _, ListItem, ListItemSpacing, prelude::*};
 use workspace::Workspace;
 
-use crate::decompile_item::{DecompileItem, Form, TabMode, open_function, open_listing};
-use crate::functions_panel::FunctionsPanel;
+use crate::binary::{Binary, StatusLine};
+use crate::decompile_item::{DecompileItem, Form, TabMode};
+use crate::places::{Opening, Place, open};
 use crate::worker::{GoToAnswer, LoadedBinary, goto_blocking, spawn_engine};
 
 gpui::actions!(
@@ -47,6 +48,24 @@ impl Match {
             Self::Miss(_) | Self::Count(..) => None,
         }
     }
+
+    /// Returns what Enter on this line opens from a tab showing `form`: the function in
+    /// that view, a listing at the resolved instruction; `None` for a line that opens
+    /// nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `form` - The view of the active code tab.
+    const fn place(&self, form: Form) -> Option<Place> {
+        let Some((entry, at)) = self.opens() else {
+            return None;
+        };
+        let at = match form {
+            Form::Listing => at,
+            Form::Decompile => None,
+        };
+        Some(Place::Code { entry, form, at })
+    }
 }
 
 /// Returns the picker's lines for an answer: the resolved function or the miss first when
@@ -75,6 +94,8 @@ fn lines(query: &str, answer: GoToAnswer) -> Vec<Match> {
 pub struct GoToDelegate {
     /// Workspace a confirmed line opens its function in.
     workspace: WeakEntity<Workspace>,
+    /// The window's binary, which the opened tab holds.
+    binary: Entity<Binary>,
     /// Binary the text is resolved in.
     loaded: Arc<LoadedBinary>,
     /// The view of the active code tab, which a confirmed line opens.
@@ -99,15 +120,16 @@ pub fn toggle(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<'
         .as_ref()
         .map_or(Form::Decompile, |item| item.read(cx).form());
     let tab = tab.map(|item| item.read(cx).loaded().clone());
-    let panel = || {
-        let panel = workspace.panel::<FunctionsPanel>(cx)?;
-        panel.read(cx).binary().read(cx).loaded().cloned()
+    let line = workspace.status_bar().read(cx).item_of_type::<StatusLine>();
+    let Some(binary) = line.map(|line| line.read(cx).binary().clone()) else {
+        return;
     };
-    let Some(loaded) = tab.or_else(panel) else {
+    let Some(loaded) = tab.or_else(|| binary.read(cx).loaded().cloned()) else {
         return;
     };
     let delegate = GoToDelegate {
         workspace: workspace.weak_handle(),
+        binary,
         loaded,
         form,
         matches: Vec::new(),
@@ -189,21 +211,30 @@ impl PickerDelegate for GoToDelegate {
         window: &mut Window,
         cx: &mut Context<'_, Picker<Self>>,
     ) {
-        let Some((entry, at)) = self.matches.get(self.selected).and_then(Match::opens) else {
+        let Some(place) = self
+            .matches
+            .get(self.selected)
+            .and_then(|m| m.place(self.form))
+        else {
             return;
         };
-        let (workspace, loaded, form) = (self.workspace.clone(), self.loaded.clone(), self.form);
+        let mode = match self.form {
+            Form::Listing => TabMode::Preview,
+            Form::Decompile => TabMode::Permanent,
+        };
+        let (workspace, binary, loaded) = (
+            self.workspace.clone(),
+            self.binary.clone(),
+            self.loaded.clone(),
+        );
         cx.emit(DismissEvent);
         window.defer(cx, move |window, cx| {
             let Some(workspace) = workspace.upgrade() else {
                 return;
             };
-            workspace.update(cx, |workspace, cx| match form {
-                Form::Listing => open_listing(workspace, loaded, (entry, at), window, cx),
-                Form::Decompile => {
-                    let mode = TabMode::Permanent;
-                    open_function(workspace, loaded, entry, mode, true, window, cx);
-                }
+            workspace.update(cx, |workspace, cx| {
+                let how = Opening { mode, focus: true };
+                open(workspace, &binary, &loaded, place, how, window, cx);
             });
         });
     }
@@ -247,6 +278,7 @@ mod tests {
     use std::sync::Arc;
 
     use borer_engine::analysis::resolve_suggesting;
+    use borer_engine::view::Ref;
     use gpui::{Entity, TestAppContext, VisualTestContext};
     use picker::Picker;
     use workspace::Workspace;
@@ -254,8 +286,10 @@ mod tests {
     use super::{GoToDelegate, Match};
     use crate::app_view::tests::{CALLEE, CALLER, init, open, sample};
     use crate::decompile_item::tests::{active as tab, fourth_instruction, open_tab};
-    use crate::decompile_item::{DecompileItem, Form};
-    use crate::worker::{Jobs, LoadedBinary};
+    use crate::decompile_item::{DecompileItem, Form, link_place};
+    use crate::functions_panel::row_place;
+    use crate::places::Place;
+    use crate::worker::{Jobs, LoadedBinary, decompile_blocking};
 
     /// Opens go to with its key from the focused code tab, types `query` and waits for the
     /// engine's answer.
@@ -340,6 +374,48 @@ mod tests {
         cx.dispatch_action(menu::Confirm);
         cx.run_until_parked();
         assert_eq!(active(&workspace, cx), Some(CALLER));
+    }
+
+    /// What Enter opens is a place, named without a window.
+    ///
+    /// A functions row names its decompile view, a call's link the callee in the same view,
+    /// a resolved go-to line the function (a listing at the instruction), and lines that
+    /// open nothing name none.
+    #[test]
+    fn rows_links_and_go_to_lines_name_their_places() {
+        let loaded = sample();
+        let code = |entry, form, at| Place::Code { entry, form, at };
+        let row = &loaded.initial_rows.rows[0];
+        assert_eq!(row_place(row), code(row.entry, Form::Decompile, None));
+        let view = decompile_blocking(&loaded, CALLER).unwrap();
+        let call = Ref::Function(CALLEE);
+        let link = |form| link_place(&view, &call, form);
+        assert_eq!(link(Form::Listing), Some(code(CALLEE, Form::Listing, None)));
+        assert_eq!(
+            link(Form::Decompile),
+            Some(code(CALLEE, Form::Decompile, None))
+        );
+        assert_eq!(
+            link_place(&view, &Ref::Address(CALLER), Form::Decompile),
+            None
+        );
+        let va = CALLEE + 1;
+        let target = Match::Target(CALLEE, va);
+        assert_eq!(
+            target.place(Form::Listing),
+            Some(code(CALLEE, Form::Listing, Some(va)))
+        );
+        assert_eq!(
+            target.place(Form::Decompile),
+            Some(code(CALLEE, Form::Decompile, None))
+        );
+        let named = Match::Row(CALLER, "f".to_owned());
+        assert_eq!(
+            named.place(Form::Decompile),
+            Some(code(CALLER, Form::Decompile, None))
+        );
+        assert_eq!(Match::Miss("no".to_owned()).place(Form::Listing), None);
+        assert_eq!(Match::Count(0, 0).place(Form::Listing), None);
     }
 
     /// A query typed again before the engine answered lists the second query's answer;

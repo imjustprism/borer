@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use borer_engine::analysis::render::{FunctionRows, INCOMPLETE_NOTE, LeftOut};
+use borer_engine::analysis::render::{FunctionRow, FunctionRows, INCOMPLETE_NOTE, LeftOut};
 use editor::{Editor, EditorEvent};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -29,8 +29,9 @@ use crate::actions::{FocusFilter, Hint, OPEN_HINT, ToggleFunctions};
 use crate::binary::{Binary, SettingsNotice, reading_label};
 use crate::card::{Card, Tone};
 use crate::code_view::{CodePalette, Role};
-use crate::decompile_item::{TabMode, code_row_height, open_function};
+use crate::decompile_item::{TabMode, code_row_height};
 use crate::function_columns::{Align, Columns, Ink, column_widths, row_cells};
+use crate::places::{Opening, Place, open};
 use crate::worker::{Job, LoadedBinary, filter_rows_blocking};
 
 /// Name Zed saves the panel's dock state and size under.
@@ -134,6 +135,16 @@ impl Empty {
             Self::Reading(_) | Self::NoFunction(_) | Self::NoMatch(_) => false,
         }
     }
+}
+
+/// Returns what Enter on a function row opens: the function's decompile view.
+///
+/// # Arguments
+///
+/// * `row` - The row.
+#[must_use]
+pub const fn row_place(row: &FunctionRow) -> Place {
+    Place::decompile(row.entry)
 }
 
 /// The open binary's function table, in a dock.
@@ -505,10 +516,10 @@ impl FunctionsPanel {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        let Some(entry) = self
+        let Some(place) = self
             .rows()
             .and_then(|rows| rows.rows.get(row))
-            .map(|r| r.entry)
+            .map(row_place)
         else {
             return;
         };
@@ -519,7 +530,8 @@ impl FunctionsPanel {
         cx.notify();
         workspace.update(cx, |workspace, cx| {
             let focus = mode == TabMode::Permanent;
-            open_function(workspace, loaded, entry, mode, focus, window, cx);
+            let how = Opening { mode, focus };
+            open(workspace, &self.binary, &loaded, place, how, window, cx);
         });
     }
 

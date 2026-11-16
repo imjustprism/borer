@@ -36,9 +36,11 @@ use workspace::{Item, ItemNavHistory, Pane, Workspace};
 
 use crate::actions::{BACK_HINT, Hint};
 use crate::app_view::{binary_of, open_dropped};
+use crate::binary::Binary;
 use crate::card::{Card, Tone};
 use crate::code_semantics::for_one_view;
 use crate::code_view::{ClickOutcome, CodeLines, CodePalette, Role, resolve_ref_click};
+use crate::places::{Opening, Place, open};
 use crate::worker::{Job, LoadedBinary, decompile_or_why, listing_blocking};
 
 /// Fewest logical pixels a row of code is tall.
@@ -151,6 +153,8 @@ struct Jump {
 pub struct DecompileItem {
     /// Workspace the tab opens further functions in.
     workspace: WeakEntity<Workspace>,
+    /// The window's binary, whose status line the tab writes and whose load a drop starts.
+    binary: Entity<Binary>,
     /// Binary the tab's function belongs to.
     loaded: Arc<LoadedBinary>,
     /// Entry of the function the tab shows, `None` for a tab of measured lines.
@@ -251,6 +255,7 @@ impl DecompileItem {
     /// # Arguments
     ///
     /// * `workspace` - Workspace the tab opens further functions in.
+    /// * `binary` - The window's binary.
     /// * `loaded` - Binary the lines come from.
     /// * `(entry, form)` - Function the tab shows, `None` for measured lines, and its view.
     /// * `build` - Builds the lines, or says why the engine built none.
@@ -258,6 +263,7 @@ impl DecompileItem {
     /// * `cx` - Item context.
     fn new(
         workspace: WeakEntity<Workspace>,
+        binary: Entity<Binary>,
         loaded: Arc<LoadedBinary>,
         (entry, form): (Option<u64>, Form),
         build: impl FnOnce() -> Result<Arc<CodeLines>, String> + Send + 'static,
@@ -268,6 +274,7 @@ impl DecompileItem {
         let editor = read_only_editor(empty, window, cx);
         let mut item = Self {
             workspace,
+            binary,
             loaded,
             entry,
             form,
@@ -301,6 +308,7 @@ impl DecompileItem {
     /// # Arguments
     ///
     /// * `workspace` - Workspace the tab opens further functions in.
+    /// * `binary` - The window's binary.
     /// * `loaded` - Binary the function belongs to.
     /// * `(entry, form)` - Entry virtual address of the function, and its view.
     /// * `window` - Window the tab is in.
@@ -308,6 +316,7 @@ impl DecompileItem {
     #[must_use]
     pub fn function(
         workspace: WeakEntity<Workspace>,
+        binary: Entity<Binary>,
         loaded: Arc<LoadedBinary>,
         (entry, form): (u64, Form),
         window: &mut Window,
@@ -315,7 +324,8 @@ impl DecompileItem {
     ) -> Self {
         let source = loaded.clone();
         let build = move || form.build(&source, entry);
-        Self::new(workspace, loaded, (Some(entry), form), build, window, cx)
+        let shown = (Some(entry), form);
+        Self::new(workspace, binary, loaded, shown, build, window, cx)
     }
 
     /// Builds the lines and their text buffer in the background, then shows them.
@@ -757,8 +767,11 @@ impl DecompileItem {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
+        if let Some(place) = link_place(view, target, self.form) {
+            self.open_beside(place, window, cx);
+            return;
+        }
         match resolve_ref_click(view, target) {
-            ClickOutcome::OpenFunction(callee) => self.open_beside(callee, self.form, window, cx),
             ClickOutcome::ScrollToLine(def) => {
                 self.jump_to_line(row_ix.saturating_sub(line_ix).saturating_add(def), cx);
             }
@@ -770,7 +783,7 @@ impl DecompileItem {
                     .unwrap_or("this name");
                 self.say(format!("{name} is an import, at slot {slot:#x}"), cx);
             }
-            ClickOutcome::None => {}
+            ClickOutcome::OpenFunction(_) | ClickOutcome::None => {}
         }
     }
 
@@ -783,7 +796,16 @@ impl DecompileItem {
     /// * `cx` - Item context.
     pub fn toggle_listing(&self, window: &Window, cx: &mut Context<'_, Self>) {
         if let Some(entry) = self.entry {
-            self.open_beside(entry, self.form.other(), window, cx);
+            let form = self.form.other();
+            self.open_beside(
+                Place::Code {
+                    entry,
+                    form,
+                    at: None,
+                },
+                window,
+                cx,
+            );
         }
     }
 
@@ -799,17 +821,16 @@ impl DecompileItem {
         }
     }
 
-    /// Keeps this tab and opens view `form` of the function at `entry` in the preview tab,
-    /// once the current update ends.
+    /// Keeps this tab and opens `place` in the preview tab, once the current update ends.
     ///
     /// # Arguments
     ///
-    /// * `entry` - Entry of the function to open.
-    /// * `form` - Which view of it.
+    /// * `place` - What to open.
     /// * `window` - Window the tab is in.
     /// * `cx` - Item context.
-    fn open_beside(&self, entry: u64, form: Form, window: &Window, cx: &mut Context<'_, Self>) {
-        let (workspace, loaded, id) = (self.workspace.clone(), self.loaded.clone(), cx.entity_id());
+    fn open_beside(&self, place: Place, window: &Window, cx: &mut Context<'_, Self>) {
+        let (workspace, id) = (self.workspace.clone(), cx.entity_id());
+        let (binary, loaded) = (self.binary.clone(), self.loaded.clone());
         window.defer(cx, move |window, cx| {
             let Some(workspace) = workspace.upgrade() else {
                 return;
@@ -818,17 +839,33 @@ impl DecompileItem {
                 workspace
                     .active_pane()
                     .update(cx, |pane, _| pane.unpreview_item_if_preview(id));
-                open_view(
-                    workspace,
-                    loaded,
-                    (entry, form),
-                    TabMode::Preview,
-                    true,
-                    window,
-                    cx,
-                );
+                let how = Opening {
+                    mode: TabMode::Preview,
+                    focus: true,
+                };
+                open(workspace, &binary, &loaded, place, how, window, cx);
             });
         });
+    }
+}
+
+/// Returns what following link `target` of `view` opens in a tab showing `form`: the
+/// called function in the same view; `None` for a link that opens no tab.
+///
+/// # Arguments
+///
+/// * `view` - The view holding the link.
+/// * `target` - The link.
+/// * `form` - The view the tab shows.
+#[must_use]
+pub fn link_place(view: &View, target: &Ref, form: Form) -> Option<Place> {
+    match resolve_ref_click(view, target) {
+        ClickOutcome::OpenFunction(entry) => Some(Place::Code {
+            entry,
+            form,
+            at: None,
+        }),
+        ClickOutcome::ScrollToLine(_) | ClickOutcome::Import(_) | ClickOutcome::None => None,
     }
 }
 
@@ -866,129 +903,12 @@ fn whole_rows(y: f64) -> usize {
     }
 }
 
-/// Shows the decompile view of the function at `entry` of `loaded` in the workspace's
-/// active pane, as [`open_view`] does.
-///
-/// # Arguments
-///
-/// * `workspace` - The workspace.
-/// * `loaded` - Binary the function belongs to.
-/// * `entry` - Entry virtual address of the function.
-/// * `mode` - Whether a new tab is the preview tab or a permanent one.
-/// * `focus` - Whether the tab takes keyboard focus.
-/// * `window` - Window the workspace is in.
-/// * `cx` - Workspace context.
-pub fn open_function(
-    workspace: &mut Workspace,
-    loaded: Arc<LoadedBinary>,
-    entry: u64,
-    mode: TabMode,
-    focus: bool,
-    window: &mut Window,
-    cx: &mut Context<'_, Workspace>,
-) {
-    open_view(
-        workspace,
-        loaded,
-        (entry, Form::Decompile),
-        mode,
-        focus,
-        window,
-        cx,
-    );
-}
-
-/// Shows one view of the function at `entry` of `loaded` in the workspace's active pane:
-/// activates its tab when one is open, else opens one as `mode` says.
-///
-/// # Arguments
-///
-/// * `workspace` - The workspace.
-/// * `loaded` - Binary the function belongs to.
-/// * `(entry, form)` - Entry virtual address of the function, and which view of it.
-/// * `mode` - Whether a new tab is the preview tab or a permanent one.
-/// * `focus` - Whether the tab takes keyboard focus.
-/// * `window` - Window the workspace is in.
-/// * `cx` - Workspace context.
-pub fn open_view(
-    workspace: &mut Workspace,
-    loaded: Arc<LoadedBinary>,
-    (entry, form): (u64, Form),
-    mode: TabMode,
-    focus: bool,
-    window: &mut Window,
-    cx: &mut Context<'_, Workspace>,
-) {
-    let weak = workspace.weak_handle();
-    let pane = workspace.active_pane().clone();
-    let existing = pane.read(cx).items_of_type::<DecompileItem>().find(|item| {
-        let item = item.read(cx);
-        item.entry == Some(entry) && item.form == form && Arc::ptr_eq(&item.loaded, &loaded)
-    });
-    pane.update(cx, |pane, cx| {
-        if let Some(item) = existing {
-            if mode == TabMode::Permanent {
-                pane.unpreview_item_if_preview(item.entity_id());
-            }
-            if let Some(ix) = pane.index_for_item(&item) {
-                pane.activate_item(ix, true, focus, window, cx);
-            }
-            return;
-        }
-        let at = match mode {
-            TabMode::Preview => pane.close_current_preview_item(window, cx),
-            TabMode::Permanent => None,
-        };
-        let item = cx.new(|cx| DecompileItem::function(weak, loaded, (entry, form), window, cx));
-        let id = item.entity_id();
-        pane.add_item(Box::new(item), true, focus, at, window, cx);
-        if mode == TabMode::Preview {
-            pane.replace_preview_item_id(id, window, cx);
-        }
-    });
-}
-
-/// Shows the listing of the function at `entry` in the preview tab, at the line of the
-/// instruction at `at` when one is given.
-///
-/// It is the one entry point that opens a listing at an address, as a call tree opens a
-/// caller at its call site.
-///
-/// # Arguments
-///
-/// * `workspace` - The workspace.
-/// * `loaded` - Binary the function belongs to.
-/// * `(entry, at)` - Entry of the function, and the address to show, if any.
-/// * `window` - Window the workspace is in.
-/// * `cx` - Workspace context.
-pub fn open_listing(
-    workspace: &mut Workspace,
-    loaded: Arc<LoadedBinary>,
-    (entry, at): (u64, Option<u64>),
-    window: &mut Window,
-    cx: &mut Context<'_, Workspace>,
-) {
-    let target = (entry, Form::Listing);
-    open_view(
-        workspace,
-        loaded,
-        target,
-        TabMode::Preview,
-        true,
-        window,
-        cx,
-    );
-    let tab = workspace.active_item_as::<DecompileItem>(cx);
-    if let (Some(tab), Some(va)) = (tab, at) {
-        tab.update(cx, |tab, cx| tab.go_to_address(va, cx));
-    }
-}
-
 /// Opens a permanent tab showing `code`, lines of `loaded` for no one function.
 ///
 /// # Arguments
 ///
 /// * `workspace` - The workspace.
+/// * `binary` - The window's binary.
 /// * `loaded` - Binary the lines come from.
 /// * `code` - The lines; their text buffer is built in the background.
 /// * `window` - Window the workspace is in.
@@ -999,6 +919,7 @@ pub fn open_listing(
 /// The new tab.
 pub fn open_lines(
     workspace: &mut Workspace,
+    binary: Entity<Binary>,
     loaded: Arc<LoadedBinary>,
     code: Arc<CodeLines>,
     window: &mut Window,
@@ -1007,7 +928,7 @@ pub fn open_lines(
     let weak = workspace.weak_handle();
     let shown = (None, Form::Decompile);
     let build = move || Ok(code);
-    let item = cx.new(|cx| DecompileItem::new(weak, loaded, shown, build, window, cx));
+    let item = cx.new(|cx| DecompileItem::new(weak, binary, loaded, shown, build, window, cx));
     workspace.add_item_to_active_pane(Box::new(item.clone()), None, true, window, cx);
     item
 }
@@ -1142,12 +1063,15 @@ pub(crate) mod tests {
     use theme::ActiveTheme as _;
     use workspace::Workspace;
 
-    use super::{DecompileItem, Form, TabMode, open_lines, open_listing, open_view, role_key};
+    use super::{DecompileItem, Form, TabMode, open_lines, role_key};
     use crate::actions::FollowLink;
-    use crate::app_view::tests::{CALLEE, CALLER, init, open, sample, shown};
+    use crate::app_view::tests::{
+        CALLEE, CALLER, binary_in, init, open, open_place, sample, shown,
+    };
     use crate::code_semantics::for_one_view;
     use crate::code_view::tests::sample_program;
     use crate::code_view::{CodeLines, CodePalette, Role, describe};
+    use crate::places::Place;
     use crate::worker::{LoadedBinary, decompile_blocking, listing_blocking, load_binary_blocking};
 
     /// Most functions of the test executable whose tabs are checked.
@@ -1164,18 +1088,12 @@ pub(crate) mod tests {
         (entry, form): (u64, Form),
         cx: &mut VisualTestContext,
     ) -> Entity<DecompileItem> {
-        let loaded = loaded.clone();
-        workspace.update_in(cx, |workspace, window, cx| {
-            open_view(
-                workspace,
-                loaded,
-                (entry, form),
-                TabMode::Preview,
-                true,
-                window,
-                cx,
-            );
-        });
+        let place = Place::Code {
+            entry,
+            form,
+            at: None,
+        };
+        open_place(workspace, loaded, place, TabMode::Preview, cx);
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear(cx));
         workspace
@@ -1481,8 +1399,9 @@ pub(crate) mod tests {
         let text = "void sub_1000(void) {\n    goto L_1000;\nL_1000:\n    return;\n}\n";
         let goto = Arc::new(view_of(&program, &analysis, &overlay, CALLER, text).unwrap());
         let code = Arc::new(CodeLines::new(vec![goto.clone()]));
+        let binary = binary_in(&workspace, cx);
         let lines = workspace.update_in(cx, |workspace, window, cx| {
-            open_lines(workspace, loaded.clone(), code.clone(), window, cx)
+            open_lines(workspace, binary, loaded.clone(), code.clone(), window, cx)
         });
         cx.run_until_parked();
         put_cursor(&lines, (1, "    goto L_".len()), cx);
@@ -1604,9 +1523,12 @@ pub(crate) mod tests {
         let workspace = app.workspace;
         let loaded = sample();
         let (va, line) = fourth_instruction(&loaded);
-        workspace.update_in(cx, |workspace, window, cx| {
-            open_listing(workspace, loaded.clone(), (CALLER, Some(va)), window, cx);
-        });
+        let place = Place::Code {
+            entry: CALLER,
+            form: Form::Listing,
+            at: Some(va),
+        };
+        open_place(&workspace, &loaded, place, TabMode::Preview, cx);
         assert_eq!(active(&workspace, cx), Some((CALLER, Form::Listing, line)));
     }
 

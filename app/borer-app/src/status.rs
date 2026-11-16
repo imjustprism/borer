@@ -597,9 +597,12 @@ mod tests {
 
     use super::{Address, Grades, Work, grade_text, shown_for};
     use crate::app_view::AppWindow;
-    use crate::app_view::tests::{CALLER, init, load_sample, open, open_caller, sample, shown};
+    use crate::app_view::tests::{
+        CALLER, init, load_sample, open, open_caller, open_place, sample, shown,
+    };
     use crate::binary::{Binary, Loading, StatusLine, kind};
-    use crate::decompile_item::{DecompileItem, TabMode, open_function};
+    use crate::decompile_item::{DecompileItem, TabMode};
+    use crate::places::Place;
     use crate::worker::{GradeCounts, LoadedBinary, grade_counts_blocking, run_engine};
 
     /// Returns a raw x86-64 image of `code` in `.text` at 0x1000, entered there, analyzed
@@ -845,17 +848,8 @@ mod tests {
         assert!(grades.read_with(cx, |grades, _| grades.shown()).is_some());
         let other = compare();
         let want = run_engine(|| grade_counts_blocking(&other, CALLER));
-        app.workspace.update_in(cx, |workspace, window, cx| {
-            open_function(
-                workspace,
-                other,
-                CALLER,
-                TabMode::Permanent,
-                true,
-                window,
-                cx,
-            );
-        });
+        let place = Place::decompile(CALLER);
+        open_place(&app.workspace, &other, place, TabMode::Permanent, cx);
         assert_eq!(grades.read_with(cx, |grades, _| grades.shown()), None);
         cx.run_until_parked();
         let got = grades.read_with(cx, |grades, _| grades.shown());
@@ -864,17 +858,8 @@ mod tests {
 
     /// Opens the sample's function at `entry` in a focused tab of `app`'s workspace.
     fn open_sample_at(app: &AppWindow, entry: u64, cx: &mut VisualTestContext) {
-        app.workspace.update_in(cx, |workspace, window, cx| {
-            open_function(
-                workspace,
-                sample(),
-                entry,
-                TabMode::Permanent,
-                true,
-                window,
-                cx,
-            );
-        });
+        let place = Place::decompile(entry);
+        open_place(&app.workspace, &sample(), place, TabMode::Permanent, cx);
     }
 
     /// Redraws the active code tab of `app`'s workspace twice, as scrolling it does.

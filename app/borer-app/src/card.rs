@@ -81,9 +81,10 @@ mod tests {
 
     use super::{CARD_SELECTOR, Tone};
     use crate::app_view::add_functions_panel;
-    use crate::app_view::tests::{init, open, sample};
-    use crate::decompile_item::{DecompileItem, TabMode, open_function};
+    use crate::app_view::tests::{init, open, open_place, sample};
+    use crate::decompile_item::{DecompileItem, TabMode};
     use crate::functions_panel::FunctionsPanel;
+    use crate::places::Place;
 
     /// Lays the window out without settling background work, and returns whether a card
     /// was drawn.
@@ -140,16 +141,14 @@ mod tests {
             let panel = workspace.panel::<FunctionsPanel>(cx).unwrap();
             let rows = loaded.initial_rows.clone();
             panel.update(cx, |panel, cx| panel.show(loaded.clone(), rows, window, cx));
-            open_function(
-                workspace,
-                loaded.clone(),
-                0x1,
-                TabMode::Permanent,
-                true,
-                window,
-                cx,
-            );
         });
+        open_place(
+            &workspace,
+            &loaded,
+            Place::decompile(0x1),
+            TabMode::Permanent,
+            cx,
+        );
         assert!(drawn(cx));
         assert_eq!(tab_card(&workspace, cx), quiet("Decompiling..."));
         cx.run_until_parked();

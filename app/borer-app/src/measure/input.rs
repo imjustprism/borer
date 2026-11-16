@@ -14,8 +14,9 @@ use super::{
     CALL_CLICKS, FILTER_KEYS, Harness, InjectTracker, MarkWait, PendingInputMark, nanos,
     now_instant, ns_to_ms, say, sorted_quantiles_ms,
 };
-use crate::decompile_item::{DecompileItem, TabMode, open_function};
+use crate::decompile_item::{DecompileItem, TabMode};
 use crate::functions_panel::FunctionsPanel;
+use crate::places::{Opening, Place, open};
 use crate::worker::{LoadedBinary, decompile_blocking, ui_engine_calls};
 
 /// Most rows below the top row searched for a call to click: more than a window shows.
@@ -187,21 +188,18 @@ impl Harness {
     pub(super) fn start_input(
         &mut self,
         cancel: Cancel,
-        loaded: Arc<LoadedBinary>,
+        loaded: &Arc<LoadedBinary>,
         entry: u64,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
         self.workspace.update(cx, |workspace, cx| {
-            open_function(
-                workspace,
-                loaded,
-                entry,
-                TabMode::Preview,
-                false,
-                window,
-                cx,
-            );
+            let place = Place::decompile(entry);
+            let how = Opening {
+                mode: TabMode::Preview,
+                focus: false,
+            };
+            open(workspace, &self.binary, loaded, place, how, window, cx);
             workspace.focus_panel::<FunctionsPanel>(window, cx);
         });
         self.keys = 0;

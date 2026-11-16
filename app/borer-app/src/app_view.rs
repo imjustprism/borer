@@ -364,6 +364,10 @@ pub struct AppWindow {
 /// * `path` - Binary to open, if any.
 /// * `window` - Window the workspace is for.
 /// * `cx` - Application context.
+///
+/// # Returns
+///
+/// The workspace and the window's binary.
 pub fn new_workspace(
     app_state: &Arc<AppState>,
     path: Option<PathBuf>,
@@ -696,10 +700,12 @@ pub(crate) mod tests {
         AppWindow, DEFAULT_DOCK_STATE_KEY, REFUSED_FOLDER, configure, data_dir, new_workspace,
     };
     use crate::actions::ToggleFunctionColumns;
-    use crate::decompile_item::{DecompileItem, TabMode, open_function};
+    use crate::binary::{Binary, StatusLine};
+    use crate::decompile_item::{DecompileItem, TabMode};
     use crate::function_columns::Columns;
     use crate::functions_panel::FunctionsPanel;
     use crate::measure::{CliMode, MeasurePhase, split_data_dir};
+    use crate::places::{self, Opening, Place};
     use crate::shell::Shell;
     use crate::start_item::StartItem;
     use crate::worker::LoadedBinary;
@@ -817,16 +823,48 @@ pub(crate) mod tests {
         })
     }
 
+    /// Returns the window's binary, which `workspace`'s status line holds.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the workspace has no status line.
+    pub(crate) fn binary_in(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+    ) -> Entity<Binary> {
+        workspace.read_with(cx, |workspace, cx| {
+            let line = workspace.status_bar().read(cx).item_of_type::<StatusLine>();
+            line.unwrap().read(cx).binary().clone()
+        })
+    }
+
+    /// Opens `place` of `loaded` in `workspace` as `mode` says, focused, through
+    /// [`open`](crate::places::open) with the window's binary, which the status line holds.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the workspace has no status line.
+    pub(crate) fn open_place(
+        workspace: &Entity<Workspace>,
+        loaded: &Arc<LoadedBinary>,
+        place: Place,
+        mode: TabMode,
+        cx: &mut VisualTestContext,
+    ) {
+        let binary = binary_in(workspace, cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            let how = Opening { mode, focus: true };
+            places::open(workspace, &binary, loaded, place, how, window, cx);
+        });
+    }
+
     /// Opens the sample's caller in `workspace`'s active pane as `mode` says, focused.
     pub(crate) fn open_caller(
         workspace: &Entity<Workspace>,
         mode: TabMode,
         cx: &mut VisualTestContext,
     ) {
-        let loaded = sample();
-        workspace.update_in(cx, |workspace, window, cx| {
-            open_function(workspace, loaded, CALLER, mode, true, window, cx);
-        });
+        open_place(workspace, &sample(), Place::decompile(CALLER), mode, cx);
     }
 
     /// Returns the function and top line of the active decompile tab, once the work settled
@@ -1057,17 +1095,13 @@ pub(crate) mod tests {
         assert_eq!(title, name);
         assert!(icon.is_some());
         let nowhere = 0x5;
-        workspace.update_in(cx, |workspace, window, cx| {
-            open_function(
-                workspace,
-                loaded,
-                nowhere,
-                TabMode::Permanent,
-                true,
-                window,
-                cx,
-            );
-        });
+        open_place(
+            &workspace,
+            &loaded,
+            Place::decompile(nowhere),
+            TabMode::Permanent,
+            cx,
+        );
         assert_eq!(shown(&workspace, cx), Some((nowhere, 0)));
         let (title, decompiled) = cx.update(|_, cx| {
             let item = workspace
