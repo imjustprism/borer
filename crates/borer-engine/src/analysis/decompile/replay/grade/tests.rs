@@ -108,3 +108,57 @@ fn a_lane_only_difference_grades_no_block_wrong() {
     );
     assert!(r.records.iter().all(|b| b.disagreements.is_empty()));
 }
+
+/// A text that misstates a store grades its block wrong, and the record
+/// spells where the text and the machine part and what each holds.
+#[test]
+fn a_misstated_store_is_wrong_and_spells_both_values() {
+    let p = Program::raw_x64(&STORE);
+    let r = replayed_with(&p, 0x1000, 1, |e| {
+        if let EffectKind::Store(s) = &mut e.kind {
+            s.2 = Expr::Const(0);
+        }
+    });
+    assert_eq!(r.records.len(), 1, "{}", replay_tsv(&r));
+    let block = r.records.first().expect("a record");
+    assert_eq!(block.grade, Grade::Wrong, "{}", replay_tsv(&r));
+    let d = block.disagreements.first().expect("a disagreement kept");
+    let spelled = block.spell();
+    for part in [
+        "block 0x1000: wrong".to_owned(),
+        format!("memory {} at {:#x}", d.place, d.at),
+        format!(
+            "text {:#x}, machine {:#x}, {} bits",
+            d.text, d.machine, d.bits
+        ),
+        "the text passes after the emission are not checked".to_owned(),
+    ] {
+        assert!(spelled.contains(&part), "{part}\n{spelled}");
+    }
+}
+
+/// A block proved, and one not checked, spell what their grade means and,
+/// for the one not checked, why.
+#[test]
+fn a_proved_and_an_unchecked_block_spell_their_grade() {
+    let p = Program::raw_x64(&FLOAT_BETWEEN);
+    let a = Analysis::compute(&p);
+    let check = text_check(&p, &a, &Overlay::default(), 0x1000);
+    let check = check.as_ref().as_ref().expect("checked");
+    let spelled: Vec<String> = check.blocks.iter().map(super::BlockCheck::spell).collect();
+    let first = spelled.first().expect("the first block");
+    assert!(
+        first.starts_with("block 0x1000: proved vs lift: "),
+        "{first}"
+    );
+    assert!(
+        first.contains("\nstates tried: 1, claims compared: "),
+        "{first}"
+    );
+    assert_eq!(
+        spelled.get(1).map(String::as_str),
+        Some(
+            "block 0x1004: unchecked: not compared from any state\nnot checked: an instruction outside the checked subset\nthe text passes after the emission are not checked"
+        )
+    );
+}

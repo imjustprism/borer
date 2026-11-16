@@ -93,6 +93,54 @@ impl BlockCheck {
         }
     }
 
+    /// Returns the evidence behind the grade, as plain lines a person
+    /// reads.
+    ///
+    /// The first line names the block and its grade with what the grade
+    /// means; a block compared then has the states tried and the claims
+    /// compared, a block found wrong each disagreement kept (its claim,
+    /// place and instruction, the text's value, the machine's, the width
+    /// compared and the text's expression) and how many more there were,
+    /// and a block not checked or not proved why. The last line says the
+    /// text passes after the emission are not checked.
+    #[must_use]
+    pub fn spell(&self) -> String {
+        let meaning = match self.grade {
+            Grade::Proved => {
+                "proved vs lift: every claim holds on every state against the lifter's semantics of its instructions, and the emulator agreed on each state tried"
+            }
+            Grade::Tested => {
+                "tested: the emulator agreed on each state tried; not proved over every state"
+            }
+            Grade::Wrong => "wrong: the machine does not bear out the text",
+            Grade::Unchecked => "unchecked: not compared from any state",
+        };
+        let mut out = format!("block {:#x}: {meaning}\n", self.start);
+        if self.grade != Grade::Unchecked {
+            let (states, claims) = (self.states, self.claims);
+            let _ = writeln!(out, "states tried: {states}, claims compared: {claims}");
+        }
+        for d in &self.disagreements {
+            let _ = writeln!(
+                out,
+                "{} {} at {:#x}: text {:#x}, machine {:#x}, {} bits, expression {}",
+                d.claim, d.place, d.at, d.text, d.machine, d.bits, d.expr
+            );
+        }
+        if self.past_cap > 0 {
+            let _ = writeln!(out, "{} more past the first {KEPT_MAX}", self.past_cap);
+        }
+        if let Some(why) = self.why {
+            let not = match self.grade {
+                Grade::Unchecked => "not checked",
+                Grade::Proved | Grade::Tested | Grade::Wrong => "not proved",
+            };
+            let _ = writeln!(out, "{not}: {why}");
+        }
+        out.push_str("the text passes after the emission are not checked");
+        out
+    }
+
     /// Returns the bytes the record holds beyond its own size.
     fn heap(&self) -> usize {
         self.disagreements.capacity() * size_of::<Disagreement>()
