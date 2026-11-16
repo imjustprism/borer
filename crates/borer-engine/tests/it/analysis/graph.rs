@@ -320,3 +320,302 @@ fn function_summary_shows_the_entry_comment() {
     let comment = s.lines().position(|l| l == "comment:  ? drops a reference");
     assert_eq!(comment, range.map(|r| r + 1), "{s}");
 }
+
+/// Builds an image whose `f` 0x401000 makes one call of each kind the
+/// call tree tells apart.
+///
+/// * `f` 0x401000: `call g; call [Sleep]; call thunk; ret`.
+/// * `g` 0x401020: `mov eax, 1; ret`.
+/// * `thunk` 0x401030: `jmp [ExitProcess]`.
+///
+/// The import slots are `Sleep` at 0x402000 and `ExitProcess` at 0x402008.
+fn call_tree_image() -> Program {
+    let mut code = vec![0xccu8; 0x40];
+    code[..5].copy_from_slice(&[0xe8, 0x1b, 0x00, 0x00, 0x00]); // ASM: call 0x401020
+    code[5..11].copy_from_slice(&[0xff, 0x15, 0xf5, 0x0f, 0x00, 0x00]); // ASM: call [rip+0xff5] -> 0x402000
+    code[11..16].copy_from_slice(&[0xe8, 0x20, 0x00, 0x00, 0x00]); // ASM: call 0x401030
+    code[16] = 0xc3; // ASM: ret
+    code[0x20..0x26].copy_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]); // ASM: mov eax,1; ret
+    code[0x30..0x36].copy_from_slice(&[0xff, 0x25, 0xd2, 0x0f, 0x00, 0x00]); // ASM: jmp [rip+0xfd2] -> 0x402008
+    let mut p = crate::raw::image(Arch::X86_64, &code, &[0; 0x10]);
+    p.symbols = vec![
+        Symbol {
+            name: "KERNEL32.dll!Sleep".to_owned(),
+            addr: 0x402000,
+            kind: SymbolKind::Import,
+        },
+        Symbol {
+            name: "KERNEL32.dll!ExitProcess".to_owned(),
+            addr: 0x402008,
+            kind: SymbolKind::Import,
+        },
+    ];
+    p
+}
+
+/// One level of the call tree says how each call is known and where it
+/// is made.
+///
+/// A direct call, a call through an import slot and a call of an import
+/// thunk are three edges of three kinds, each with its site.
+#[test]
+fn a_call_tree_level_says_how_each_callee_is_reached() {
+    use borer_engine::analysis::render::{Via, Walk, call_children};
+    let p = call_tree_image();
+    let a = Analysis::compute(&p);
+    let level = call_children(&p, &a, &Overlay::default(), 0x401000, Walk::Callees);
+    let got: Vec<(u64, Via, &[u64], bool)> = level
+        .rows
+        .iter()
+        .map(|e| (e.target, e.via, e.sites.as_slice(), e.leaf))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (0x401020, Via::Direct, &[0x401000][..], true),
+            (
+                0x401030,
+                Via::Thunk { slot: 0x402008 },
+                &[0x40100b][..],
+                false
+            ),
+            (0x402000, Via::Import, &[0x401005][..], true),
+        ],
+        "{level:?}"
+    );
+    assert_eq!(level.total, 3, "{level:?}");
+    assert_eq!(&*level.rows[2].name, "Sleep", "{level:?}");
+}
+
+/// Over callers a level names the calling function and the instruction in
+/// it that makes the call, and says how the call reaches the node.
+#[test]
+fn a_call_tree_level_over_callers_names_each_call_site() {
+    use borer_engine::analysis::render::{Via, Walk, call_children};
+    let p = call_tree_image();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    for (node, via, site) in [
+        (0x401020, Via::Direct, 0x401000),
+        (0x401030, Via::Thunk { slot: 0x402008 }, 0x40100b),
+        (0x402000, Via::Import, 0x401005),
+    ] {
+        let level = call_children(&p, &a, &o, node, Walk::Callers);
+        let got: Vec<(u64, Via, &[u64], bool)> = level
+            .rows
+            .iter()
+            .map(|e| (e.target, e.via, e.sites.as_slice(), e.leaf))
+            .collect();
+        assert_eq!(
+            got,
+            [(0x401000, via, &[site][..], true)],
+            "{node:#x}: {level:?}"
+        );
+    }
+}
+
+/// Returns the instruction starts of a function, decoded block by block.
+///
+/// # Arguments
+///
+/// * `p` - The image.
+/// * `f` - The function.
+fn instruction_starts(p: &Program, f: &borer_engine::analysis::Function) -> Option<Vec<u64>> {
+    let mut out = Vec::new();
+    for b in &f.blocks {
+        let len = usize::try_from(b.end.checked_sub(b.start)?).ok()?;
+        let bytes = p.read_va(b.start, len)?;
+        let mut d = iced_x86::Decoder::with_ip(64, bytes, b.start, iced_x86::DecoderOptions::NONE);
+        while d.can_decode() {
+            out.push(d.decode().ip());
+        }
+    }
+    Some(out)
+}
+
+/// Returns the address a call or jump names: its near target, or the
+/// memory it goes through.
+///
+/// # Arguments
+///
+/// * `p` - The image.
+/// * `site` - The instruction's address.
+fn named_by(p: &Program, site: u64) -> Option<u64> {
+    let bytes = p.read_va_upto(site, 15)?;
+    let i = iced_x86::Decoder::with_ip(64, bytes, site, iced_x86::DecoderOptions::NONE).decode();
+    Some(if i.op0_kind() == iced_x86::OpKind::Memory {
+        i.memory_displacement64()
+    } else {
+        i.near_branch_target()
+    })
+}
+
+/// Builds an image whose `C` 0x401000 calls a linkage stub bound to a
+/// local function and calls through an import slot that `H` only loads.
+///
+/// * `C` 0x401000: `call S; call [Sleep]; ret`.
+/// * `H` 0x401010 (an export): `mov rax, [Sleep]; ret`.
+/// * `F` 0x401020 (the export `local_f`): `mov eax, 1; ret`.
+/// * `S` 0x401030: `jmp [0x402010]`, the slot holding `F`'s entry.
+/// * `K` 0x401040 (an export): `mov rax, [Sleep]; call [Sleep]; ret`.
+///
+/// The import slot `Sleep` is at 0x402000.
+fn bound_stub_image() -> Program {
+    let mut code = vec![0xccu8; 0x50];
+    code[..5].copy_from_slice(&[0xe8, 0x2b, 0x00, 0x00, 0x00]); // ASM: call 0x401030
+    code[5..11].copy_from_slice(&[0xff, 0x15, 0xf5, 0x0f, 0x00, 0x00]); // ASM: call [rip+0xff5] -> 0x402000
+    code[11] = 0xc3; // ASM: ret
+    code[0x10..0x17].copy_from_slice(&[0x48, 0x8b, 0x05, 0xe9, 0x0f, 0x00, 0x00]); // ASM: mov rax,[rip+0xfe9] -> 0x402000
+    code[0x17] = 0xc3; // ASM: ret
+    code[0x20..0x26].copy_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]); // ASM: mov eax,1; ret
+    code[0x30..0x36].copy_from_slice(&[0xff, 0x25, 0xda, 0x0f, 0x00, 0x00]); // ASM: jmp [rip+0xfda] -> 0x402010
+    code[0x40..0x47].copy_from_slice(&[0x48, 0x8b, 0x05, 0xb9, 0x0f, 0x00, 0x00]); // ASM: mov rax,[rip+0xfb9] -> 0x402000
+    code[0x47..0x4d].copy_from_slice(&[0xff, 0x15, 0xb3, 0x0f, 0x00, 0x00]); // ASM: call [rip+0xfb3] -> 0x402000
+    code[0x4d] = 0xc3; // ASM: ret
+    let mut data = [0u8; 0x18];
+    data[0x10..].copy_from_slice(&0x401020u64.to_le_bytes());
+    let mut p = crate::raw::image(Arch::X86_64, &code, &data);
+    p.symbols = vec![
+        Symbol {
+            name: "KERNEL32.dll!Sleep".to_owned(),
+            addr: 0x402000,
+            kind: SymbolKind::Import,
+        },
+        Symbol {
+            name: "h".to_owned(),
+            addr: 0x401010,
+            kind: SymbolKind::Export,
+        },
+        Symbol {
+            name: "local_f".to_owned(),
+            addr: 0x401020,
+            kind: SymbolKind::Export,
+        },
+        Symbol {
+            name: "k".to_owned(),
+            addr: 0x401040,
+            kind: SymbolKind::Export,
+        },
+    ];
+    p
+}
+
+/// A call to a stub the loader binds to a local function is an edge to
+/// that function both ways.
+///
+/// Only a call through an import slot makes a caller of the slot an
+/// import call: a load of the slot is a data reference, and a function
+/// that loads the slot and calls through it lists the call alone.
+#[test]
+fn a_call_tree_level_follows_a_bound_stub_and_tells_a_load_from_a_call() {
+    use borer_engine::analysis::render::{Via, Walk, call_children};
+    let p = bound_stub_image();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let level = |node, walk| -> Vec<(u64, Via, Vec<u64>, usize)> {
+        call_children(&p, &a, &o, node, walk)
+            .rows
+            .into_iter()
+            .map(|e| {
+                assert!(e.leaf, "{e:?}");
+                (e.target, e.via, e.sites, e.site_count)
+            })
+            .collect()
+    };
+    let bound = Via::Bound { stub: 0x401030 };
+    assert_eq!(
+        level(0x401000, Walk::Callees),
+        [
+            (0x401020, bound, vec![0x401000], 1),
+            (0x402000, Via::Import, vec![0x401005], 1),
+        ]
+    );
+    assert_eq!(
+        level(0x401020, Walk::Callers),
+        [(0x401000, bound, vec![0x401000], 1)]
+    );
+    assert_eq!(
+        level(0x402000, Walk::Callers),
+        [
+            (0x401000, Via::Import, vec![0x401005], 1),
+            (0x401010, Via::Data, vec![0x401010], 1),
+            (0x401040, Via::Import, vec![0x401047], 1),
+        ]
+    );
+}
+
+/// An edge made by more calls than it lists says how many there are.
+///
+/// `f` 0x401000 calls `g` 0x401060 seventeen times, then returns.
+#[test]
+fn a_call_tree_edge_counts_the_sites_it_leaves_out() {
+    use borer_engine::analysis::render::{CALL_SITES_MAX, Walk, call_children};
+    let mut code = vec![0xccu8; 0x61];
+    for k in 0..17u8 {
+        let at = usize::from(k) * 5;
+        let rel = 0x5b - i32::from(k) * 5;
+        code[at] = 0xe8; // ASM: call 0x401060
+        code[at + 1..at + 5].copy_from_slice(&rel.to_le_bytes());
+    }
+    code[0x55] = 0xc3; // ASM: ret
+    code[0x60] = 0xc3; // ASM: ret (g)
+    let p = crate::raw::image(Arch::X86_64, &code, &[]);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    for (node, walk) in [(0x401000, Walk::Callees), (0x401060, Walk::Callers)] {
+        let level = call_children(&p, &a, &o, node, walk);
+        let [e] = level.rows.as_slice() else {
+            panic!("one edge: {level:?}");
+        };
+        assert_eq!((e.sites.len(), e.site_count), (CALL_SITES_MAX, 17), "{e:?}");
+        assert_eq!(e.sites.first(), Some(&0x401000), "{e:?}");
+    }
+}
+
+/// Every edge a level lists over a function has its sites, each a call
+/// in the caller.
+///
+/// Each site is an instruction of the calling function naming the called
+/// end, never the callee's entry. Each edge says it is a leaf exactly
+/// when its target's own level is empty. Both ways run, on every function
+/// of the fixture and of the call tree images.
+#[test]
+fn every_call_tree_site_is_a_call_in_the_caller() {
+    use borer_engine::analysis::render::{Via, Walk, call_children};
+    let mut checked = 0;
+    for p in [fixture(), call_tree_image(), bound_stub_image()] {
+        let a = Analysis::compute(&p);
+        let o = Overlay::default();
+        for f in &a.functions {
+            for walk in [Walk::Callees, Walk::Callers] {
+                for e in call_children(&p, &a, &o, f.entry, walk).rows {
+                    let (caller, called) = match (walk, e.via) {
+                        (Walk::Callees, Via::Bound { stub }) => (f.entry, stub),
+                        (Walk::Callees, _) => (f.entry, e.target),
+                        (Walk::Callers, Via::Bound { stub }) => (e.target, stub),
+                        (Walk::Callers, _) => (e.target, f.entry),
+                    };
+                    assert!(!e.sites.is_empty(), "{:#x}: no site for {e:?}", f.entry);
+                    assert!(e.site_count >= e.sites.len(), "{e:?}");
+                    let next = call_children(&p, &a, &o, e.target, walk);
+                    assert_eq!(e.leaf, next.total == 0, "{e:?}: {next:?}");
+                    let g = a.function(caller).expect("the caller is a function");
+                    let starts = instruction_starts(&p, g).expect("the caller's bytes");
+                    for &s in &e.sites {
+                        assert!(
+                            starts.contains(&s),
+                            "{s:#x} is no instruction of {caller:#x}"
+                        );
+                        assert_eq!(
+                            named_by(&p, s),
+                            Some(called),
+                            "{s:#x} in {caller:#x}: {e:?}"
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(checked > 10, "only {checked} sites checked");
+}

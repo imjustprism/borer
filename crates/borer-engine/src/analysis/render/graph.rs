@@ -223,18 +223,21 @@ pub fn callgraph(
         g.imports.insert(root, bare_name(&name).to_owned());
     }
     let targets_of = |cur: u64| call_targets(a, &slots, cur, walk);
+    let far = |targets: &[Callee]| -> Vec<u64> { targets.iter().map(|t| t.target).collect() };
+    let mut reached: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
     let mut held: Vec<(u64, Vec<Callee>)> = Vec::new();
     let mut head = 0;
     while head < g.nodes.len() {
         let cur = g.nodes[head];
         head += 1;
-        let targets = targets_of(cur);
-        let split = targets.len().min(CallGraph::FANOUT);
-        for t in &targets[..split] {
+        let mut targets = targets_of(cur);
+        reached.insert(cur, far(&targets));
+        let rest = targets.split_off(targets.len().min(CallGraph::FANOUT));
+        for t in &targets {
             g.link(cur, t);
         }
-        if split < targets.len() {
-            held.push((cur, targets[split..].to_vec()));
+        if !rest.is_empty() {
+            held.push((cur, rest));
         }
     }
     for (cur, rest) in held {
@@ -242,12 +245,14 @@ pub fn callgraph(
             g.link(cur, &t);
         }
     }
+    for &n in &g.nodes {
+        reached.entry(n).or_insert_with(|| far(&targets_of(n)));
+    }
     let drawn: BTreeSet<u64> = g.nodes.iter().copied().collect();
-    let hidden: BTreeSet<u64> = g
-        .nodes
-        .iter()
-        .flat_map(|&n| targets_of(n))
-        .map(|t| t.target)
+    let hidden: BTreeSet<u64> = reached
+        .values()
+        .flatten()
+        .copied()
         .filter(|t| !drawn.contains(t))
         .collect();
     let mut out = String::from("graph TD\n");
@@ -288,7 +293,8 @@ pub fn callgraph(
         g.nodes.len(),
         g.imports.len()
     );
-    unseen::graph_line(&mut out, p, a, walk, targets_of(root).len(), &drawn);
+    let from_root = reached.get(&root).map_or(0, Vec::len);
+    unseen::graph_line(&mut out, p, a, walk, from_root, &drawn);
     out
 }
 
@@ -312,27 +318,22 @@ fn node_label(p: &Program, a: &Analysis, o: &Overlay, n: u64) -> String {
     )
 }
 
-/// A call target and, when it is an import slot, the import's name.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+/// A neighbor a call graph walk takes from a node, with the instructions
+/// making the edge.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Callee {
     /// A function entry, or an import slot.
     pub(super) target: u64,
     /// The import's name, without its `dll!` prefix, when `target` is a slot.
     pub(super) import: Option<String>,
-}
-
-impl Callee {
-    /// A near callee: a function of the program's own.
-    ///
-    /// # Arguments
-    ///
-    /// * `target` - Its entry.
-    pub(super) fn near(target: u64) -> Self {
-        Self {
-            target,
-            import: None,
-        }
-    }
+    /// The instructions making the edge, in address order: in the node
+    /// over callees, in the caller over callers; only the calls and jumps
+    /// when there are any, else the references. Empty when discovery
+    /// knows the call without a site for it.
+    pub(super) sites: Vec<u64>,
+    /// Some site calls or jumps; when false every site only references
+    /// the node (a load of an import slot or of a global, over callers).
+    pub(super) called: bool,
 }
 
 /// The callgraph under construction: its nodes in the order they were
@@ -395,8 +396,9 @@ pub(super) fn import_slots(p: &Program) -> BTreeMap<u64, &str> {
         .collect()
 }
 
-/// Returns the neighbors a call graph walk takes from one node: the one
-/// rule every walk of the call graph follows ([`callgraph`]).
+/// Returns the neighbors a call graph walk takes from one node, each with
+/// the instructions making the edge: the one rule [`callgraph`] and
+/// [`call_children`] both follow.
 ///
 /// Over callees they are [`callees_of`]. Over callers they are the
 /// function's callers, or, for a node with no body (an import slot, a
@@ -416,26 +418,61 @@ pub(super) fn call_targets(
     walk: Walk,
 ) -> Vec<Callee> {
     match walk {
-        Walk::Callers => match a.function(cur) {
-            Some(f) => f.callers.iter().map(|&c| Callee::near(c)).collect(),
-            None => {
-                let mut from: Vec<Callee> = a
-                    .xrefs_to(cur)
-                    .iter()
-                    .filter_map(|s| s.from_entry)
-                    .map(Callee::near)
-                    .collect();
-                from.sort_unstable();
-                from.dedup();
-                from
-            }
-        },
+        Walk::Callers => callers_of(a, cur),
         Walk::Callees => callees_of(a, slots, cur),
     }
 }
 
+/// Lists what reaches a node: a function's callers, each with its call
+/// and jump sites naming the function, or, for a node with no body,
+/// every function referencing it, with every reference.
+///
+/// # Arguments
+///
+/// * `a` - The analysis.
+/// * `cur` - The node.
+///
+/// # Returns
+///
+/// The callers, in [`Function::callers`] order for a function, else by
+/// entry.
+fn callers_of(a: &Analysis, cur: u64) -> Vec<Callee> {
+    let body = a.function(cur);
+    let mut by: BTreeMap<u64, (Vec<u64>, Vec<u64>)> = BTreeMap::new();
+    for s in a.xrefs_to(cur) {
+        let Some(from) = s.from_entry else { continue };
+        let (calls, uses) = by.entry(from).or_default();
+        match (s.is_branch(), body) {
+            (true, _) => calls.push(s.va),
+            (false, None) => uses.push(s.va),
+            (false, Some(_)) => {}
+        }
+    }
+    let edge = |target: u64, (calls, uses): (Vec<u64>, Vec<u64>)| {
+        let called = !calls.is_empty() || uses.is_empty();
+        let mut sites = if calls.is_empty() { uses } else { calls };
+        sites.sort_unstable();
+        sites.dedup();
+        Callee {
+            target,
+            import: None,
+            sites,
+            called,
+        }
+    };
+    match body {
+        Some(f) => f
+            .callers
+            .iter()
+            .map(|&c| edge(c, by.remove(&c).unwrap_or_default()))
+            .collect(),
+        None => by.into_iter().map(|(c, made)| edge(c, made)).collect(),
+    }
+}
+
 /// Lists what a function calls: its near callees, then the imports it
-/// calls or jumps to through their slots, in site order.
+/// calls or jumps to through their slots, in site order, each with its
+/// call and jump sites.
 ///
 /// # Arguments
 ///
@@ -450,24 +487,284 @@ pub(super) fn callees_of(a: &Analysis, slots: &BTreeMap<u64, &str>, entry: u64) 
     let Some(f) = a.function(entry) else {
         return Vec::new();
     };
-    let mut out: Vec<Callee> = f.callees.iter().map(|&c| Callee::near(c)).collect();
-    let mut seen: BTreeSet<u64> = BTreeSet::new();
+    let mut by: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+    let mut first: Vec<u64> = Vec::new();
     for (target, site) in a.refs_from(entry) {
-        if !site.is_branch() {
-            continue;
+        if site.is_branch() {
+            let sites = by.entry(target).or_default();
+            if sites.is_empty() {
+                first.push(target);
+            }
+            sites.push(site.va);
         }
-        let Some(raw) = slots.get(&target) else {
-            continue;
-        };
-        if seen.insert(target) {
+    }
+    let mut out: Vec<Callee> = f
+        .callees
+        .iter()
+        .map(|&target| Callee {
+            target,
+            import: None,
+            sites: by.get(&target).cloned().unwrap_or_default(),
+            called: true,
+        })
+        .collect();
+    for target in first {
+        if let Some(raw) = slots.get(&target) {
             let name = crate::search::demangled_name(raw);
             out.push(Callee {
                 target,
                 import: Some(bare_name(&name).to_owned()),
+                sites: by.remove(&target).unwrap_or_default(),
+                called: true,
             });
         }
     }
     out
+}
+
+/// Most edges [`call_children`] lists for one node.
+pub const CALL_CHILDREN_MAX: usize = 1024;
+
+/// Most call sites one [`CallEdge`] lists.
+pub const CALL_SITES_MAX: usize = 16;
+
+/// How a call edge is known: what the called end of the edge is.
+///
+/// Over callees the called end is the edge's target; over callers it is
+/// the node the level was asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Via {
+    /// A call or jump straight to an address of the program's own.
+    Direct,
+    /// A call or jump through an import slot: the called end is the slot.
+    Import,
+    /// A call or jump to an import thunk, `jmp [slot]` and nothing else
+    /// ([`Function::thunk`]).
+    Thunk {
+        /// The import slot the thunk jumps through.
+        slot: u64,
+    },
+    /// A call or jump to a linkage stub the loader binds to a function of
+    /// the program's own ([`Function::bound`]): over callees the edge's
+    /// target is that function, not the stub, and over callers of that
+    /// function the stub's callers are its callers.
+    Bound {
+        /// The stub's entry, which the call instruction names.
+        stub: u64,
+    },
+    /// References that never call or jump to a node with no body, over
+    /// callers: a load of an import slot, or a use of a global.
+    Data,
+}
+
+/// One edge of a level of the call tree: a function the node calls, or
+/// one that calls it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallEdge {
+    /// The function entry or import slot at the far end of the edge.
+    pub target: u64,
+    /// The target's name as listings spell it: the overlay's, else the
+    /// engine's, else its symbol's, else its address.
+    pub name: Box<str>,
+    /// How the call is known.
+    pub via: Via,
+    /// The instructions making the call, in address order, the first
+    /// [`CALL_SITES_MAX`]: in the node over callees, in the target over
+    /// callers. Each names the called end: the stub for [`Via::Bound`];
+    /// for [`Via::Data`] they are the references.
+    pub sites: Vec<u64>,
+    /// How many instructions make the call, the ones `sites` holds
+    /// included. The cross-reference index keeps at most 65,536 sites of
+    /// one target, so past that it is a floor.
+    pub site_count: usize,
+    /// The target has no edge of its own to follow the same way: an
+    /// import, a function that calls nothing, or one nothing calls.
+    pub leaf: bool,
+}
+
+/// One level of the call tree, as [`call_children`] lists it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Children {
+    /// The edges, by target and then first site, at most
+    /// [`CALL_CHILDREN_MAX`].
+    pub rows: Vec<CallEdge>,
+    /// How many edges there are, the ones `rows` holds included.
+    pub total: usize,
+}
+
+/// Returns one level of the call tree under or over a node: each edge,
+/// how it is known and the instructions that make it.
+///
+/// The edges are the ones [`callgraph`] draws ([`call_targets`]), with one
+/// difference: a call to a stub the loader binds to a local function
+/// leads to that function, since the stub's own level would be empty, and
+/// the function's callers include the stub's. The graph draws the stub. A
+/// tree is expanded one node at a time, so a cycle is not a level's
+/// business: the caller marks a node already on its path.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image, for import and symbol names.
+/// * `a` - The analysis.
+/// * `o` - User names.
+/// * `node` - A function entry, an import slot or a data address.
+/// * `walk` - Whether the level lists what the node calls or what calls
+///   it.
+///
+/// # Returns
+///
+/// The edges by target and then first site, capped at
+/// [`CALL_CHILDREN_MAX`], and how many there are; no edges for a node that
+/// calls nothing, or that nothing calls.
+#[must_use]
+pub fn call_children(p: &Program, a: &Analysis, o: &Overlay, node: u64, walk: Walk) -> Children {
+    let slots = import_slots(p);
+    let stubs = bound_stubs(a, walk);
+    let mut found = tree_edges(a, &slots, &stubs, node, walk);
+    found.sort_unstable_by_key(|(target, via, sites)| (*target, sites.first().copied(), *via));
+    let total = found.len();
+    let rows = found
+        .into_iter()
+        .take(CALL_CHILDREN_MAX)
+        .map(|(target, via, mut sites)| {
+            let site_count = sites.len();
+            sites.truncate(CALL_SITES_MAX);
+            CallEdge {
+                target,
+                name: node_label(p, a, o, target).into_boxed_str(),
+                via,
+                sites,
+                site_count,
+                leaf: !has_edges(a, &slots, &stubs, target, walk),
+            }
+        })
+        .collect();
+    Children { rows, total }
+}
+
+/// Returns, over callers, each local function's entry with the entries of
+/// the linkage stubs bound to it ([`Function::bound`]); over callees none
+/// is needed.
+///
+/// # Arguments
+///
+/// * `a` - The analysis.
+/// * `walk` - Which way the level walks.
+fn bound_stubs(a: &Analysis, walk: Walk) -> BTreeMap<u64, Vec<u64>> {
+    let mut out: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+    if walk == Walk::Callers {
+        for f in &a.functions {
+            if let Some(to) = f.bound {
+                out.entry(to).or_default().push(f.entry);
+            }
+        }
+    }
+    out
+}
+
+/// Returns a node's edges in the call tree: [`call_targets`] with each
+/// one's far end and [`Via`], and over callers the callers of every stub
+/// bound to the node.
+///
+/// # Arguments
+///
+/// * `a` - The analysis.
+/// * `slots` - The import slots ([`import_slots`]).
+/// * `stubs` - The stubs bound to each local function ([`bound_stubs`]).
+/// * `node` - The node the level is for.
+/// * `walk` - Which way the level walks.
+///
+/// # Returns
+///
+/// Each edge as its target, how it is known and every site making it.
+fn tree_edges(
+    a: &Analysis,
+    slots: &BTreeMap<u64, &str>,
+    stubs: &BTreeMap<u64, Vec<u64>>,
+    node: u64,
+    walk: Walk,
+) -> Vec<(u64, Via, Vec<u64>)> {
+    let mut out: Vec<(u64, Via, Vec<u64>)> = call_targets(a, slots, node, walk)
+        .into_iter()
+        .map(|c| {
+            let end = match walk {
+                Walk::Callees => c.target,
+                Walk::Callers => node,
+            };
+            let via = via_of(a, slots, end, c.called);
+            let target = match (walk, via) {
+                (Walk::Callees, Via::Bound { .. }) => {
+                    crate::analysis::decompile::abi::reached(a, end)
+                }
+                _ => c.target,
+            };
+            (target, via, c.sites)
+        })
+        .collect();
+    for &stub in stubs.get(&node).map_or(&[][..], Vec::as_slice) {
+        out.extend(
+            callers_of(a, stub)
+                .into_iter()
+                .map(|c| (c.target, Via::Bound { stub }, c.sites)),
+        );
+    }
+    out
+}
+
+/// Tells whether a node has an edge of its own in the call tree, as
+/// [`tree_edges`] would list it, without listing them.
+///
+/// # Arguments
+///
+/// * `a` - The analysis.
+/// * `slots` - The import slots ([`import_slots`]).
+/// * `stubs` - The stubs bound to each local function ([`bound_stubs`]).
+/// * `n` - The node.
+/// * `walk` - Which way the level walks.
+fn has_edges(
+    a: &Analysis,
+    slots: &BTreeMap<u64, &str>,
+    stubs: &BTreeMap<u64, Vec<u64>>,
+    n: u64,
+    walk: Walk,
+) -> bool {
+    let called = |e: u64| a.function(e).is_some_and(|f| !f.callers.is_empty());
+    match (walk, a.function(n)) {
+        (Walk::Callees, None) => false,
+        (Walk::Callees, Some(f)) => {
+            !f.callees.is_empty()
+                || a.refs_from(n)
+                    .iter()
+                    .any(|(t, s)| s.is_branch() && slots.contains_key(t))
+        }
+        (Walk::Callers, Some(_)) => {
+            called(n) || stubs.get(&n).is_some_and(|s| s.iter().any(|&e| called(e)))
+        }
+        (Walk::Callers, None) => a.xrefs_to(n).iter().any(|s| s.from_entry.is_some()),
+    }
+}
+
+/// Returns how a call to its called end is known.
+///
+/// # Arguments
+///
+/// * `a` - The analysis.
+/// * `slots` - The import slots ([`import_slots`]).
+/// * `end` - The called end: a function entry, an import slot or, over
+///   callers, a data address.
+/// * `called` - Some site calls or jumps to `end`, rather than only
+///   referencing it.
+fn via_of(a: &Analysis, slots: &BTreeMap<u64, &str>, end: u64, called: bool) -> Via {
+    match a.function(end) {
+        Some(f) => match (f.thunk, f.bound) {
+            (Some(slot), _) => Via::Thunk { slot },
+            (None, Some(_)) => Via::Bound { stub: end },
+            (None, None) => Via::Direct,
+        },
+        None if !called => Via::Data,
+        None if slots.contains_key(&end) => Via::Import,
+        None => Via::Direct,
+    }
 }
 
 /// Most blocks a control-flow graph draws.
