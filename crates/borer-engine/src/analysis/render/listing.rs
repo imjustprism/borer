@@ -655,6 +655,10 @@ impl SymbolRows {
 /// export's address holds the name of the export it forwards to, not
 /// code, so its row carries that name.
 ///
+/// A raised [`crate::cancel::Cancel`] in force stops the scan at the next
+/// symbol: the page and the total then count only the symbols before it,
+/// for a caller that drops the answer.
+///
 /// # Arguments
 ///
 /// * `p` - The loaded image, for its symbol table.
@@ -682,6 +686,7 @@ pub fn symbol_rows(
     let matched: Vec<&Symbol> = p
         .symbols
         .iter()
+        .take_while(|_| !crate::cancel::Cancel::raised())
         .filter(|s| {
             kind.is_none_or(|k| s.kind == k)
                 && q.as_ref().is_none_or(|q| {
@@ -1757,6 +1762,29 @@ caller: 0x1030 call
         assert_eq!(forwards, 1);
         let summary = p.summary();
         assert!(summary.contains("exports: 2 (1 forwarded)"), "{summary}");
+    }
+
+    /// A raised cancel in force stops the scan: the page and the total
+    /// count nothing, while the same page outside it counts the symbol.
+    ///
+    /// # Panics
+    ///
+    /// When the cancelled page counts a symbol.
+    #[test]
+    fn a_raised_cancel_stops_the_symbol_scan() {
+        use crate::program::{Arch, Symbol};
+        let mut p = Program::raw(Vec::new(), Arch::X86_64, 0, None, Vec::new());
+        p.symbols = vec![Symbol {
+            name: "start".to_owned(),
+            addr: 0x1000,
+            kind: SymbolKind::Export,
+        }];
+        let a = Analysis::default();
+        assert_eq!(symbol_rows(&p, &a, None, None, 0, 50).total, 1);
+        let cancel = crate::cancel::Cancel::new();
+        cancel.raise();
+        let stopped = cancel.within(|| symbol_rows(&p, &a, None, None, 0, 50));
+        assert_eq!((stopped.total, stopped.rows.len()), (0, 0));
     }
 
     /// An import the file gives no slot has no address and no slot to

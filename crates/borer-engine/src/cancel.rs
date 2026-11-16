@@ -7,8 +7,9 @@
 //! emulator checks it every [`crate::emulate::CANCEL_EVERY`] steps and,
 //! raised, stops at that step boundary with [`crate::emulate::Limit::Time`];
 //! the decompile pipeline checks it at its passes and fixpoint rounds and,
-//! raised, answers one line saying it stopped; and the sweeps over callers
-//! and decoders take no further item. The flag is the one input that is
+//! raised, answers one line saying it stopped; the sweeps over callers and
+//! decoders take no further item; and the scans of the strings and symbol
+//! tables take no further row. The flag is the one input that is
 //! not the question, so a result built after it was raised is not memoized
 //! ([`crate::analysis::Derived`]) nor stored ([`Cancel::whole`]): the next
 //! request builds it whole, and a flag never raised changes no answer.

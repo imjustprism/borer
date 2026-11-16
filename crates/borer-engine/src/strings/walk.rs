@@ -486,6 +486,10 @@ impl StringRows {
 /// the literal it is a line of addresses a model, so an element opened and
 /// closed on lines of their own is broken on each.
 ///
+/// A raised [`crate::cancel::Cancel`] in force stops the scan at the next
+/// row: the page and the total then count only the rows before it, for a
+/// caller that drops the answer.
+///
 /// # Arguments
 ///
 /// * `p` - The loaded program.
@@ -518,7 +522,11 @@ pub fn string_rows(
     };
     let lowered = filter.map(Needle::new);
     let needle = lowered.as_ref();
-    let kept = || rows.iter().filter(move |row| row_matches(p, row, needle));
+    let kept = || {
+        rows.iter()
+            .take_while(|_| !crate::cancel::Cancel::raised())
+            .filter(move |row| row_matches(p, row, needle))
+    };
     let page: Vec<&StringRow> = kept().skip(offset).take(limit).collect();
     let literals = if page.is_empty() {
         Vec::new()
@@ -550,6 +558,17 @@ pub fn string_rows(
 mod tests {
     use super::*;
     use crate::program::Arch;
+
+    /// Returns the ASCII then the UTF-16 spans of at least four characters of `p`, as rows.
+    ///
+    /// # Arguments
+    ///
+    /// * `p` - The program.
+    fn spans_of(p: &Program) -> Vec<StringRow> {
+        let ascii = find_ascii_spans(&p.bytes, 4).into_iter();
+        let wide = find_wide_spans(&p.bytes, 4).into_iter();
+        ascii.chain(wide).map(StringRow::Span).collect()
+    }
 
     /// Builds a raw program from `bytes`, mapped by no section.
     ///
@@ -623,6 +642,24 @@ mod tests {
                 assert_eq!(cached, walked, "{encoding:?} min {min}");
             }
         }
+    }
+
+    /// A raised cancel in force stops the scan: the page and the total
+    /// count nothing, while the same page outside it counts every string.
+    ///
+    /// # Panics
+    ///
+    /// When the cancelled page counts a string or the whole one misses one.
+    #[test]
+    fn a_raised_cancel_stops_the_scan() {
+        let p = program();
+        let a = Analysis::default();
+        let whole = string_rows(&p, &a, StringEncoding::Both, 5, None, 0, 10);
+        assert!(whole.total > 0, "{whole:?}");
+        let cancel = crate::cancel::Cancel::new();
+        cancel.raise();
+        let stopped = cancel.within(|| string_rows(&p, &a, StringEncoding::Both, 5, None, 0, 10));
+        assert_eq!((stopped.total, stopped.rows.len()), (0, 0));
     }
 
     /// One analysis walks once: two pages under different filters and
@@ -869,15 +906,7 @@ off=0x16 15 utf16 \"wide stringxyzw\"
         bytes.extend_from_slice(&long);
         bytes.push(0);
         let p = raw(bytes);
-        let rows: Vec<StringRow> = find_ascii_spans(&p.bytes, 4)
-            .into_iter()
-            .map(StringRow::Span)
-            .chain(
-                find_wide_spans(&p.bytes, 4)
-                    .into_iter()
-                    .map(StringRow::Span),
-            )
-            .collect();
+        let rows = spans_of(&p);
         assert_eq!(rows.len(), 4, "{rows:?}");
         for needle in [
             "kernel32",
@@ -914,15 +943,7 @@ off=0x16 15 utf16 \"wide stringxyzw\"
         bytes.extend(b"LoNgWiDe".iter().flat_map(|b| [*b, 0]));
         bytes.push(0);
         let p = raw(bytes);
-        let rows: Vec<StringRow> = find_ascii_spans(&p.bytes, 4)
-            .into_iter()
-            .map(StringRow::Span)
-            .chain(
-                find_wide_spans(&p.bytes, 4)
-                    .into_iter()
-                    .map(StringRow::Span),
-            )
-            .collect();
+        let rows = spans_of(&p);
         assert_eq!(rows.len(), 2, "{rows:?}");
         for needle in [
             "Kernel32.DLL",
