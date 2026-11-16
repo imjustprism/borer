@@ -109,9 +109,9 @@ mod term;
 
 pub(crate) use answer::check_answer;
 pub(super) use answer::check_decompiled;
-use grade::{DIFFERED, REFUTED};
+use grade::{DIFFERED, REFUTED, Sampling};
 
-pub use grade::{BlockCheck, Grade, KEPT_MAX, TextCheck};
+pub use grade::{BlockCheck, Grade, KEPT_MAX, RECHECK_MAX, TextCheck, recheck_block};
 pub use report::replay_tsv;
 
 /// States each block is tried from.
@@ -957,7 +957,8 @@ fn effects_of(d: &super::Decompiled, f: &crate::analysis::Function) -> Vec<Vec<E
 /// * `effects` - Each block's effects, by block index.
 /// * `budget` - Blocks to try states for, in address order; the rest are
 ///   not checked.
-/// * `sampling` - Which states a block the proof settles is tried from.
+/// * `sampling` - Which states a block is tried from, and for a recheck
+///   the one block tried.
 #[expect(
     clippy::too_many_arguments,
     reason = "one function's facts, threaded through"
@@ -1006,6 +1007,9 @@ fn replay_effects<L: Replay>(
     };
     let mut room = budget;
     for (b, block) in f.blocks.iter().enumerate() {
+        if sampling.only().is_some_and(|at| at != block.start) {
+            continue;
+        }
         out.blocks += 1;
         let before = (out.trials, grade::claims(&out));
         let checked = function.check(b, block, &mut room, &mut out);
@@ -2746,18 +2750,6 @@ struct Function<'f, 'p, L: Replay> {
     sampling: Sampling,
 }
 
-/// Which states a block is tried from when the proof settles it after
-/// the first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Sampling {
-    /// Every state: a sweep's report counts the states and the claims
-    /// compared.
-    Every,
-    /// No more once the block is proved: an answer's header grades the
-    /// blocks and counts no state.
-    UntilProved,
-}
-
 /// One state a block is tried from, part way through: the emulator stopped
 /// where the block ends, the text replayed so far.
 struct Trial<'t, M> {
@@ -2833,8 +2825,9 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         let mut tried = 0;
         let mut wrote = None;
         let mut early = None;
-        for trial in 0..TRIALS + RULED_OUT_RETRIES {
-            if tried == TRIALS {
+        let trials = self.sampling.trials();
+        for trial in 0..trials + RULED_OUT_RETRIES {
+            if tried == trials || crate::cancel::Cancel::raised() {
                 break;
             }
             let pool: &[u64] = if trial == 0 { &[] } else { &pool };

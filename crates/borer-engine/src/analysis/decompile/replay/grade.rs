@@ -5,15 +5,21 @@
 //! not checked and why, proved over every state, compared on the states
 //! tried, or contradicted by one. The record keeps that decision, and the
 //! header line an answer carries ([`TextCheck::header`]) counts the
-//! records, so the two cannot disagree.
+//! records, so the two cannot disagree. A block can be tried harder on
+//! request ([`recheck_block`]).
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use super::{
-    BARE_RETURN, CONTRADICTED, DISAGREE_SHOWN, Disagreement, OUTSIDE_FLOAT, OVER_BUDGET, Replayed,
-    SHORT_CALL, TRIALS, edge,
+    BARE_RETURN, CONTRADICTED, DISAGREE_SHOWN, Disagreement, OUTSIDE_FLOAT, OVER_BUDGET, Replay,
+    Replayed, SHORT_CALL, TRIALS, edge, effects_of, replay_effects,
 };
+use crate::analysis::decompile::{arch, decompile_with};
+use crate::analysis::{Analysis, Overlay};
+use crate::cancel::Cancel;
+use crate::isa::Isa;
+use crate::program::Program;
 
 /// Why a block compared is not proved: a state tried disagrees with the
 /// text, which the proof does not take up.
@@ -23,6 +29,47 @@ pub(super) const DIFFERED: &str = "a state tried disagrees";
 pub(super) const REFUTED: &str = "a state the proof chose disagrees";
 /// Disagreements a block's record keeps; past them it counts.
 pub const KEPT_MAX: usize = 16;
+/// Most states a recheck tries a block from; more asked for are clamped
+/// to it.
+pub const RECHECK_MAX: u32 = 256;
+
+/// Which states a block is tried from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Sampling {
+    /// [`TRIALS`] states each: a sweep's report counts the states and the
+    /// claims compared.
+    Every,
+    /// [`TRIALS`] states each, no more once the block is proved: an
+    /// answer's header grades the blocks and counts no state.
+    UntilProved,
+    /// One block only, from as many states as asked: a recheck
+    /// ([`recheck_block`]).
+    Recheck {
+        /// The block's start.
+        block: u64,
+        /// States to try it from, at most [`RECHECK_MAX`].
+        trials: u32,
+    },
+}
+
+impl Sampling {
+    /// Returns the states each block is tried from.
+    pub(super) fn trials(self) -> u64 {
+        match self {
+            Self::Every | Self::UntilProved => TRIALS,
+            Self::Recheck { trials, .. } => u64::from(trials),
+        }
+    }
+
+    /// Returns the one block a recheck tries, `None` when every block is
+    /// tried.
+    pub(super) fn only(self) -> Option<u64> {
+        match self {
+            Self::Every | Self::UntilProved => None,
+            Self::Recheck { block, .. } => Some(block),
+        }
+    }
+}
 
 /// What the replay showed of one block.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -58,6 +105,9 @@ pub struct BlockCheck {
     pub disagreements: Vec<Disagreement>,
     /// Disagreements past [`KEPT_MAX`].
     pub past_cap: usize,
+    /// The states a recheck asked for, past [`RECHECK_MAX`] when it was
+    /// clamped; `None` for an answer's check, [`TRIALS`] per block.
+    pub asked: Option<u32>,
 }
 
 impl BlockCheck {
@@ -90,6 +140,7 @@ impl BlockCheck {
             why,
             disagreements: Vec::new(),
             past_cap: 0,
+            asked: None,
         }
     }
 
@@ -136,6 +187,14 @@ impl BlockCheck {
                 Grade::Proved | Grade::Tested | Grade::Wrong => "not proved",
             };
             let _ = writeln!(out, "{not}: {why}");
+        }
+        if let Some(asked) = self.asked {
+            let tried = asked.min(RECHECK_MAX);
+            let _ = write!(out, "rechecked from up to {tried} states");
+            if asked > RECHECK_MAX {
+                let _ = write!(out, ": {asked} asked for, clamped to {RECHECK_MAX}");
+            }
+            out.push('\n');
         }
         out.push_str("the text passes after the emission are not checked");
         out
@@ -193,6 +252,94 @@ pub(super) fn blame(out: &mut Replayed) {
             r.past_cap += 1;
         }
     }
+}
+
+/// Replays one block of a function's text from more states than an
+/// answer's check tries, as that check does and from the same seeds.
+///
+/// The text is decompiled afresh under `overlay` and its block tried from
+/// states seeded by `seed`, the block's address and the trial, as
+/// [`replay`](super::replay) seeds them, so the first [`TRIALS`] are the
+/// check's own; each state runs within the replay's step budget and the
+/// proof within its term budget. Not memoized: a caller asks once per
+/// request. The same arguments give the same record at any thread count.
+///
+/// # Arguments
+///
+/// * `program` - The image.
+/// * `analysis` - Its functions.
+/// * `overlay` - The names the text is decompiled under.
+/// * `entry` - The function's entry.
+/// * `block` - The block's start.
+/// * `seed` - The states' seed; [`ANSWER_SEED`](super::ANSWER_SEED) is the
+///   answer check's.
+/// * `trials` - States to try the block from, clamped to [`RECHECK_MAX`].
+///
+/// # Returns
+///
+/// The block's record, `None` when the function does not decompile, the
+/// image has no emulator, no block of the function starts at `block`, or
+/// the caller's [`Cancel`] was raised.
+#[must_use]
+pub fn recheck_block(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    entry: u64,
+    block: u64,
+    seed: u64,
+    trials: u32,
+) -> Option<BlockCheck> {
+    let asked = Sampling::Recheck {
+        block,
+        trials: trials.min(RECHECK_MAX),
+    };
+    let mut record = match program.arch.isa()? {
+        Isa::X86 { .. } => recheck_in::<arch::X86>(program, analysis, overlay, entry, seed, asked),
+        Isa::A64 => recheck_in::<arch::A64>(program, analysis, overlay, entry, seed, asked),
+        Isa::A32 => recheck_in::<arch::A32>(program, analysis, overlay, entry, seed, asked),
+        Isa::Rv(_) => None,
+    }?;
+    record.asked = Some(trials);
+    (!Cancel::raised()).then_some(record)
+}
+
+/// [`recheck_block`] for one instruction set.
+///
+/// # Arguments
+///
+/// * `program` - The image.
+/// * `analysis` - Its functions.
+/// * `overlay` - The names the text is decompiled under.
+/// * `entry` - The function's entry.
+/// * `seed` - The states' seed.
+/// * `sampling` - The block and the states to try it from.
+fn recheck_in<L: Replay>(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    entry: u64,
+    seed: u64,
+    sampling: Sampling,
+) -> Option<BlockCheck> {
+    let f = analysis.function(entry)?;
+    let d = decompile_with(program, analysis, overlay, entry, true, &[], true)?;
+    let w = d.take_witness()?;
+    let template = L::rig(program, analysis)?;
+    let effects = effects_of(&d, f);
+    let r = replay_effects::<L>(
+        program,
+        analysis,
+        overlay,
+        &template,
+        entry,
+        seed,
+        (&w, &d.live.succs),
+        &effects,
+        usize::MAX,
+        sampling,
+    );
+    r.records.into_iter().next()
 }
 
 /// What the check of one function's answer found: the header line the

@@ -3,7 +3,7 @@
 
 use super::super::tests::replayed_with;
 use super::super::{OUTSIDE_FLOAT, replay_function, replay_tsv};
-use super::{DIFFERED, Grade, claims};
+use super::{BlockCheck, DIFFERED, Grade, RECHECK_MAX, claims, recheck_block};
 use crate::analysis::decompile::expr::{Expr, Op};
 use crate::analysis::decompile::lift::EffectKind;
 use crate::analysis::decompile::text_check;
@@ -145,7 +145,7 @@ fn a_proved_and_an_unchecked_block_spell_their_grade() {
     let a = Analysis::compute(&p);
     let check = text_check(&p, &a, &Overlay::default(), 0x1000);
     let check = check.as_ref().as_ref().expect("checked");
-    let spelled: Vec<String> = check.blocks.iter().map(super::BlockCheck::spell).collect();
+    let spelled: Vec<String> = check.blocks.iter().map(BlockCheck::spell).collect();
     let first = spelled.first().expect("the first block");
     assert!(
         first.starts_with("block 0x1000: proved vs lift: "),
@@ -161,4 +161,78 @@ fn a_proved_and_an_unchecked_block_spell_their_grade() {
             "block 0x1004: unchecked: not compared from any state\nnot checked: an instruction outside the checked subset\nthe text passes after the emission are not checked"
         )
     );
+}
+
+/// Two blocks alike but for their address, each storing `r8` through
+/// `rdx`, past a `test ecx, ecx; js` that constrains neither.
+const TWO_STORES: [u8; 12] = [
+    0x85, 0xc9, // ASM: test ecx, ecx
+    0x78, 0x04, // ASM: js 0x1008
+    0x4c, 0x89, 0x02, // ASM: mov [rdx], r8
+    0xc3, // ASM: ret
+    0x4c, 0x89, 0x02, // ASM: mov [rdx], r8
+    0xc3, // ASM: ret
+];
+
+/// A recheck tries the block from every state asked for, and answers the
+/// same record twice and on eight threads at once.
+#[test]
+fn a_recheck_answers_the_same_record_at_any_thread_count() {
+    let p = Program::raw_x64(&FLOAT_BETWEEN);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let recheck = || recheck_block(&p, &a, &o, 0x1000, 0x100a, 7, 64);
+    let once = recheck().expect("rechecked");
+    assert_eq!(
+        (once.start, once.grade, once.states, once.asked),
+        (0x100a, Grade::Proved, 64, Some(64)),
+        "{once:?}"
+    );
+    assert_eq!(recheck().as_ref(), Some(&once));
+    let threads: Vec<Option<BlockCheck>> = std::thread::scope(|s| {
+        let all: Vec<_> = (0..8).map(|_| s.spawn(recheck)).collect();
+        all.into_iter()
+            .map(|h| h.join().expect("a recheck thread"))
+            .collect()
+    });
+    assert!(threads.iter().all(|r| r.as_ref() == Some(&once)));
+    assert!(recheck_block(&p, &a, &o, 0x1000, 0x1001, 7, 64).is_none());
+}
+
+/// A recheck asked for more states than it tries is clamped to its cap,
+/// and says so.
+#[test]
+fn a_recheck_past_its_cap_is_clamped_and_says_so() {
+    let p = Program::raw_x64(&FLOAT_BETWEEN);
+    let a = Analysis::compute(&p);
+    let r = recheck_block(&p, &a, &Overlay::default(), 0x1000, 0x1000, 1, 10_000);
+    let r = r.expect("rechecked");
+    assert_eq!((r.states, r.asked), (RECHECK_MAX, Some(10_000)), "{r:?}");
+    let spelled = r.spell();
+    assert!(
+        spelled.contains("rechecked from up to 256 states: 10000 asked for, clamped to 256\n"),
+        "{spelled}"
+    );
+}
+
+/// The states a block is tried from are drawn from the seed and the
+/// block's address: two blocks alike but for it, their text made to store
+/// zero, disagree with different machine values.
+#[test]
+fn blocks_alike_but_for_their_address_are_tried_from_different_states() {
+    let p = Program::raw_x64(&TWO_STORES);
+    let r = replayed_with(&p, 0x1000, 1, |e| {
+        if let EffectKind::Store(s) = &mut e.kind {
+            s.2 = Expr::Const(0);
+        }
+    });
+    let found: Vec<_> = r
+        .records
+        .iter()
+        .filter(|b| b.grade == Grade::Wrong)
+        .filter_map(|b| b.disagreements.first())
+        .map(|d| (d.place.clone(), d.machine))
+        .collect();
+    assert_eq!(found.len(), 2, "{}", replay_tsv(&r));
+    assert_ne!(found.first(), found.last(), "{}", replay_tsv(&r));
 }
