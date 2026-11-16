@@ -88,7 +88,11 @@ pub(crate) fn of(
         Ref::Import(id) => import(program, analysis, *id, spelled),
         Ref::Global(va) => global(program, analysis, overlay, *va, spelled),
         Ref::Address(va) => label(overlay, *va, spelled),
-        Ref::Variable { function, name, .. } => var_said(program, overlay, *function, name),
+        Ref::Variable {
+            function,
+            name,
+            key,
+        } => var_said(program, overlay, *function, (&**name, (*key)?)),
         Ref::Field { ty, offset } => field(program, overlay, ty, *offset, spelled),
         Ref::Type(name) => type_said(program, Some(overlay), name),
         Ref::String(_) | Ref::Comment(_) => None,

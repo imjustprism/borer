@@ -1290,14 +1290,17 @@ pub(crate) fn var_key(p: &Program, o: &Overlay, entry: u64, var: &str) -> Option
 /// * `p` - The loaded program.
 /// * `o` - The overlay.
 /// * `entry` - The function.
-/// * `var` - The name.
+/// * `(var, key)` - The name, and the variable [`var_key`] reads it as.
 ///
 /// # Returns
 ///
-/// Who stated it, `None` when the name is no variable's
-/// ([`resolve_var`]) or spells a slot something else names.
-pub(crate) fn var_said(p: &Program, o: &Overlay, entry: u64, var: &str) -> Option<Said> {
-    let key = resolve_var(p, o, entry, var).ok()?;
+/// Who stated it, `None` when the name spells a slot something else names.
+pub(crate) fn var_said(
+    p: &Program,
+    o: &Overlay,
+    entry: u64,
+    (var, key): (&str, VarKey),
+) -> Option<Said> {
     if stated_key(o, entry, var) == Some(key) {
         Some(Said::User)
     } else if debug_key(p, o, entry, var) == Some(key) {
