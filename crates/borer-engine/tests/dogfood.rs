@@ -22,6 +22,7 @@
     reason = "assertions are the point of a test"
 )]
 
+use borer_engine::analysis::decompile::Origins;
 use borer_engine::analysis::decompile::verify::Verified;
 use borer_engine::analysis::{
     Analysis, Overlay,
@@ -37,6 +38,8 @@ mod common;
 mod drawn;
 #[path = "common/gotos.rs"]
 mod gotos;
+#[path = "common/origins_sweep.rs"]
+mod origins_sweep;
 #[path = "common/view_sweep.rs"]
 mod view_sweep;
 #[path = "dogfood/views.rs"]
@@ -792,6 +795,70 @@ malformed: {malformed:?}",
     );
     assert_eq!(failed, 0, "functions that failed to decompile");
     assert!(malformed.is_empty(), "malformed output: {malformed:?}");
+}
+
+/// Every line of the `BORER_DOGFOOD` binary's named texts stands for the
+/// block whose lifted code spells it.
+///
+/// The sweep's texts are traced, and the record of which block's lifted
+/// code spells each statement ([`Swept::spelled`]) is kept apart from any
+/// label. A final line one block spells, which the final body spells
+/// exactly once, is an anchor: its origin, when known, must be that block.
+/// The sweep prints the share of the final code lines whose origin is
+/// known, and requires the traced texts, which the other sweeps read, to be
+/// the ones [`decompile_all`] and [`decompile_named_all`] render without
+/// tracing, one origin per line.
+#[test]
+#[ignore = "set BORER_DOGFOOD to a binary path to run this sweep"]
+fn every_line_stands_for_the_block_whose_code_spells_it() {
+    let c = &*CORPUS;
+    let (p, a) = (&c.program, &c.analysis);
+    let entries = c.entries();
+    let started = std::time::Instant::now();
+    let plain = decompile_named_all(p, a, &Overlay::default(), &entries);
+    let laid = decompile_all(p, a, &Overlay::default(), &entries);
+    let mut tally = origins_sweep::Tally::default();
+    let mut untraced: Vec<String> = Vec::new();
+    for (((entry, s), plain), laid) in entries.iter().zip(c.swept()).zip(&plain).zip(&laid) {
+        let Some(s) = s else {
+            continue;
+        };
+        if laid.as_ref() != Some(&s.text) && untraced.len() < 10 {
+            untraced.push(format!("{entry:#x}: the traced text"));
+        }
+        let Some(text) = &s.named else {
+            continue;
+        };
+        let lines = s.origins.as_ref().map_or(0, Origins::len);
+        if (plain.as_ref() != Some(text) || lines != text.lines().count()) && untraced.len() < 10 {
+            untraced.push(format!("{entry:#x}: {lines} origins"));
+        }
+        if let Some(origins) = &s.origins {
+            tally.add(*entry, text, origins, &s.spelled);
+        }
+    }
+    let share = tally.coverage();
+    println!(
+        "binary: {}\norigins: {} of {} code lines known ({}.{}%), {} anchors, {} contradicted ({:?})\nfirst contradictions: {:?}",
+        c.path,
+        tally.known,
+        tally.lines,
+        share / 10,
+        share % 10,
+        tally.anchors,
+        tally.contradicted,
+        started.elapsed(),
+        tally.contradictions,
+    );
+    assert!(
+        untraced.is_empty(),
+        "texts the tracing changed: {untraced:?}"
+    );
+    assert_eq!(
+        tally.contradicted, 0,
+        "lines that stand for a block other than the one spelling them: {:?}",
+        tally.contradictions
+    );
 }
 
 /// Every 64th function of the `BORER_DOGFOOD` binary decompiles to the same
