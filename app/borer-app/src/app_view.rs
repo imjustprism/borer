@@ -402,6 +402,7 @@ pub fn new_workspace(
             }
         });
         register_actions(&mut workspace, &binary);
+        crate::overview::register(&mut workspace, &binary);
         workspace
     });
     crate::menus::follow_binary(&binary, cx).detach();

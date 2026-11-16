@@ -14,6 +14,7 @@ pub mod functions_panel;
 pub mod goto;
 pub mod measure;
 pub mod menus;
+pub mod overview;
 pub mod panels;
 pub mod places;
 pub mod rail;

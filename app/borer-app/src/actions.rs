@@ -36,6 +36,9 @@ gpui::actions!(
         ZoomWindow,
         /// Opens the first menu of the window's menu bar (Windows and Linux).
         OpenMenuBar,
+        /// Opens the overview of the open binary: what the file is, how it is protected,
+        /// what it can do and which functions to read first, as the engine's triage says.
+        Overview,
     ]
 );
 

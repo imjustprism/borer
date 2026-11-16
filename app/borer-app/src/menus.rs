@@ -21,7 +21,7 @@ use ui::{
 };
 
 use crate::actions::{
-    CloseBinary, FocusFilter, FollowLink, FollowSystemTheme, MinimizeWindow, Open,
+    CloseBinary, FocusFilter, FollowLink, FollowSystemTheme, MinimizeWindow, Open, Overview,
     ToggleFunctionColumns, ToggleFunctions, ToggleListing, ToggleTheme, ZoomWindow,
 };
 use crate::binary::Binary;
@@ -128,6 +128,7 @@ pub const MENUS: &[AppMenu] = &[
     AppMenu {
         name: "View",
         rows: &[
+            row::<Overview>("Overview", Need::Binary),
             row::<ToggleFunctions>("Functions", Need::Binary),
             row::<ToggleFunctionColumns>("Function Columns", Need::Binary),
             row::<ToggleListing>("Toggle Listing", Need::Binary),

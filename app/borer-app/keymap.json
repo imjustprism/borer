@@ -10,7 +10,16 @@
     "bindings": {
       "secondary-o": "borer::Open",
       "ctrl-f": "borer::FocusFilter",
-      "ctrl-shift-e": "borer::ToggleFunctions"
+      "ctrl-shift-e": "borer::ToggleFunctions",
+      "secondary-shift-m": "borer::Overview"
+    }
+  },
+  {
+    "context": "Overview",
+    "bindings": {
+      "up": "menu::SelectPrevious",
+      "down": "menu::SelectNext",
+      "enter": "menu::Confirm"
     }
   },
   {

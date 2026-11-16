@@ -13,13 +13,17 @@ use borer_engine::analysis::decompile::replay::{Grade, TextCheck};
 use borer_engine::analysis::decompile::text_check;
 use borer_engine::analysis::decompile::view::view;
 use borer_engine::analysis::render::{
-    Bytes, FunctionOrder, FunctionRows, answered_flagged, disasm_view, function_rows,
+    Bytes, FunctionOrder, FunctionRows, Triage, answered_flagged, disasm_view, function_rows,
+    triage,
 };
 use borer_engine::analysis::{Analysis, EnumSource, Overlay, no_function_at, resolve_suggesting};
 use borer_engine::cancel::Cancel;
 use borer_engine::program::{Feature, Program};
 use borer_engine::view::View;
 use gpui::{App, Context, Global, SharedString, Task, Window};
+
+use crate::decompile_item::Form;
+use crate::places::Place;
 
 thread_local! {
     /// Marks the foreground UI thread so engine calls there are counted.
@@ -570,6 +574,46 @@ pub fn listing_blocking(loaded: &LoadedBinary, entry: u64) -> Result<Arc<View>, 
         })
 }
 
+/// Returns the engine's triage of `loaded`: what the file is, how it is protected, what it
+/// can do and the functions to read first.
+///
+/// Must be called inside [`spawn_engine`].
+///
+/// # Arguments
+///
+/// * `loaded` - Previously loaded binary state.
+#[must_use]
+pub fn triage_blocking(loaded: &LoadedBinary) -> Arc<Triage> {
+    triage(&loaded.program, &loaded.analysis, &loaded.overlay)
+}
+
+/// Returns what an address opens: the decompile of the function starting there, else the
+/// listing of the function holding it, at its instruction.
+///
+/// Must be called inside [`spawn_engine`].
+///
+/// # Arguments
+///
+/// * `loaded` - Previously loaded binary state.
+/// * `va` - The address.
+///
+/// # Returns
+///
+/// The place, or `None` when no function holds `va`.
+#[must_use]
+pub fn place_at(loaded: &LoadedBinary, va: u64) -> Option<Place> {
+    let entry = loaded.analysis.function_at(va)?.entry;
+    Some(if entry == va {
+        Place::decompile(va)
+    } else {
+        Place::Code {
+            entry,
+            form: Form::Listing,
+            at: Some(va),
+        }
+    })
+}
+
 /// Most function rows a go-to query lists.
 pub const GOTO_ROWS: usize = 200;
 
@@ -764,7 +808,7 @@ mod tests {
     }
 
     /// Returns every module of the crate but this one, by path under `src`, with its text.
-    fn sources() -> [(&'static str, &'static str); 29] {
+    fn sources() -> [(&'static str, &'static str); 30] {
         [
             ("actions.rs", include_str!("actions.rs")),
             ("app_assets.rs", include_str!("app_assets.rs")),
@@ -785,6 +829,7 @@ mod tests {
             ("measure/input.rs", include_str!("measure/input.rs")),
             ("measure/scroll.rs", include_str!("measure/scroll.rs")),
             ("menus.rs", include_str!("menus.rs")),
+            ("overview.rs", include_str!("overview.rs")),
             ("panels.rs", include_str!("panels.rs")),
             ("places.rs", include_str!("places.rs")),
             ("rail.rs", include_str!("rail.rs")),
@@ -842,6 +887,7 @@ mod tests {
             "function_rows(",
             "text_check(",
             "answered_flagged(",
+            "triage(",
         ];
         for (name, text) in sources() {
             let code = kept(text);

@@ -3,11 +3,12 @@
 
 use std::sync::Arc;
 
-use gpui::{App, AppContext as _, Context, Entity, Window};
-use workspace::{ItemHandle, Workspace};
+use gpui::{App, AppContext as _, Context, Entity, WeakEntity, Window};
+use workspace::{Item, ItemHandle, Workspace};
 
 use crate::binary::Binary;
 use crate::decompile_item::{DecompileItem, Form, TabMode};
+use crate::overview::OverviewItem;
 use crate::worker::LoadedBinary;
 
 /// Where the app shows something; addresses and enums only, never a snapshot or an entity.
@@ -23,6 +24,8 @@ pub enum Place {
         /// Virtual address of the instruction to show, if any.
         at: Option<u64>,
     },
+    /// The engine's triage of the binary: what it is, what it can do, where to start.
+    Overview,
 }
 
 impl Place {
@@ -75,19 +78,63 @@ pub fn open(
     window: &mut Window,
     cx: &mut Context<'_, Workspace>,
 ) {
-    let Place::Code { entry, form, at } = place;
-    let shown = Place::Code {
-        entry,
-        form,
-        at: None,
-    };
+    let (binary, loaded) = (binary.clone(), loaded.clone());
+    let program = loaded.program.clone();
+    match place {
+        Place::Code { entry, form, at } => {
+            let shows = |item: &DecompileItem| {
+                item.entry() == Some(entry)
+                    && item.form() == form
+                    && Arc::ptr_eq(&item.loaded().program, &program)
+            };
+            let build = |weak, window: &mut Window, cx: &mut Context<'_, DecompileItem>| {
+                DecompileItem::function(weak, binary, loaded, (entry, form), window, cx)
+            };
+            let item = show(workspace, how, shows, build, window, cx);
+            if let Some(va) = at {
+                item.update(cx, |item, cx| item.go_to_address(va, cx));
+            }
+        }
+        Place::Overview => {
+            let shows = |item: &OverviewItem| Arc::ptr_eq(&item.loaded().program, &program);
+            let build = |weak, _: &mut Window, cx: &mut Context<'_, OverviewItem>| {
+                OverviewItem::new(weak, binary, loaded, cx)
+            };
+            show(workspace, how, shows, build, window, cx);
+        }
+    }
+}
+
+/// Activates the tab of type `T` in the active pane that `shows` picks, else opens the one
+/// `build` makes as `how` says.
+///
+/// # Arguments
+///
+/// * `workspace` - The workspace.
+/// * `how` - How a new tab opens; a permanent opening also keeps a preview tab it finds.
+/// * `shows` - Whether a tab already shows what is asked for.
+/// * `build` - Makes the new tab.
+/// * `window` - Window the workspace is in.
+/// * `cx` - Workspace context.
+///
+/// # Returns
+///
+/// The tab, found or new.
+fn show<T: Item>(
+    workspace: &Workspace,
+    how: Opening,
+    shows: impl Fn(&T) -> bool,
+    build: impl FnOnce(WeakEntity<Workspace>, &mut Window, &mut Context<'_, T>) -> T,
+    window: &mut Window,
+    cx: &mut Context<'_, Workspace>,
+) -> Entity<T> {
     let weak = workspace.weak_handle();
     let pane = workspace.active_pane().clone();
-    let existing = pane.read(cx).items_of_type::<DecompileItem>().find(|item| {
-        place_of(item, cx) == Some(shown)
-            && Arc::ptr_eq(&item.read(cx).loaded().program, &loaded.program)
-    });
-    let item = pane.update(cx, |pane, cx| {
+    let existing = pane
+        .read(cx)
+        .items_of_type::<T>()
+        .find(|item| shows(item.read(cx)));
+    pane.update(cx, |pane, cx| {
         if let Some(item) = existing {
             if how.mode == TabMode::Permanent {
                 pane.unpreview_item_if_preview(item.entity_id());
@@ -101,19 +148,14 @@ pub fn open(
             TabMode::Preview => pane.close_current_preview_item(window, cx),
             TabMode::Permanent => None,
         };
-        let (binary, loaded) = (binary.clone(), loaded.clone());
-        let item =
-            cx.new(|cx| DecompileItem::function(weak, binary, loaded, (entry, form), window, cx));
+        let item = cx.new(|cx| build(weak, window, cx));
         let id = item.entity_id();
         pane.add_item(Box::new(item.clone()), true, how.focus, ix, window, cx);
         if how.mode == TabMode::Preview {
             pane.replace_preview_item_id(id, window, cx);
         }
         item
-    });
-    if let Some(va) = at {
-        item.update(cx, |item, cx| item.go_to_address(va, cx));
-    }
+    })
 }
 
 /// Returns the place a center item shows.
@@ -126,9 +168,12 @@ pub fn open(
 /// # Returns
 ///
 /// The function and view a code tab shows, with no address (a tab keeps no address, only
-/// its scroll); `None` for the start tab and for measured lines.
+/// its scroll), or the overview; `None` for the start tab and for measured lines.
 #[must_use]
 pub fn place_of(item: &dyn ItemHandle, cx: &App) -> Option<Place> {
+    if item.downcast::<OverviewItem>().is_some() {
+        return Some(Place::Overview);
+    }
     let item = item.downcast::<DecompileItem>()?;
     let item = item.read(cx);
     Some(Place::Code {
@@ -198,7 +243,9 @@ mod tests {
                 open_place(&workspace, &loaded, place, TabMode::Permanent, cx);
                 cx.run_until_parked();
             }
-            let Place::Code { form, .. } = place;
+            let Place::Code { form, .. } = place else {
+                continue;
+            };
             let named = code(form, None);
             assert_eq!(
                 tabs_of(&workspace, named, cx),
