@@ -1,8 +1,8 @@
 //! Edits of the overlay as values.
 //!
-//! The entries an edit writes, each a
-//! [`Change`] that names the entry, what it held and what it holds, so
-//! their inverses, in reverse order, take the edit back ([`revert`]).
+//! The entries an edit writes are each a [`Change`] that names the entry,
+//! what it held and what it holds, so their inverses, in reverse order,
+//! take the edit back ([`revert`]).
 //!
 //! The keys are the maps a project saves; the name tables, where they come
 //! from, the passes left out and the choice points moved are never saved
@@ -1203,10 +1203,9 @@ fn plan_var(
 
 /// Returns what a plan made over `overlay` of `program` is keyed by.
 ///
-/// The
-/// program's bytes ([`Program::digest`]) and where they map, folded with
-/// the overlay's [`Overlay::edits_key`], so a plan commits to no other
-/// program's overlay that happens to state the same.
+/// The program's bytes ([`Program::digest`]) and where they map are
+/// folded with the overlay's [`Overlay::edits_key`], so a plan commits to
+/// no other program's overlay that happens to state the same.
 ///
 /// # Arguments
 ///
@@ -1270,11 +1269,10 @@ pub fn plan(
 
 /// Writes a plan's changes to the overlay it was made over.
 ///
-/// Each goes to an
-/// entry that still holds what the change found there, then carries what
-/// the analysis read under the overlay before over to the one it leaves
-/// ([`super::Derived::moved`]): a result that read none of the entries
-/// written is kept.
+/// Each goes to an entry that still holds what the change found there;
+/// then what the analysis read under the overlay before is carried over
+/// to the one it leaves ([`super::Derived::moved`]): a result that read
+/// none of the entries written is kept.
 ///
 /// What the plan leaves is held to a project's caps ([`project::held`])
 /// and, when it writes a type or an application, to the checks a
@@ -1333,11 +1331,10 @@ pub fn commit(
 
 /// Plans taking back a committed plan's changes ([`Plan::changes`]).
 ///
-/// Over the overlay as it is now, their inverses, the last first, are
-/// checked as
-/// [`plan`] checks what it writes, so an undo leaves nothing a plan
-/// refuses, and spelled as its lines ([`Plan::lines`]). A plan made stale by a commit since ([`Stale`]) is made again
-/// by its caller.
+/// Their inverses, the last first, are checked over the overlay as it is
+/// now as [`plan`] checks what it writes, so an undo leaves nothing a plan
+/// refuses, and spelled as its lines ([`Plan::lines`]). A plan made stale
+/// by a commit since ([`Stale`]) is made again by its caller.
 ///
 /// # Arguments
 ///
