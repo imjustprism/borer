@@ -1,9 +1,8 @@
 //! Edits of the overlay as values.
 //!
 //! The entries an edit writes, each a
-//! [`Change`] that names the entry, what it held and what it holds, so a list
-//! of them replays the edit ([`Overlay::apply`]) and their inverses, in
-//! reverse order, take it back ([`Change::inverse`]).
+//! [`Change`] that names the entry, what it held and what it holds, so
+//! their inverses, in reverse order, take the edit back ([`revert`]).
 //!
 //! The keys are the maps a project saves; the name tables, where they come
 //! from, the passes left out and the choice points moved are never saved
@@ -269,8 +268,7 @@ impl Overlay {
     /// # Returns
     ///
     /// The changes; empty when the two state the same saved facts.
-    #[must_use]
-    pub fn changes(&self, after: &Self) -> Vec<Change> {
+    pub(crate) fn changes(&self, after: &Self) -> Vec<Change> {
         let mut out = Vec::new();
         let names = (self.names.raw(), after.names.raw());
         diff(&mut out, names, Change::Name);
@@ -291,18 +289,6 @@ impl Overlay {
             Change::Field(class, off, s)
         });
         out
-    }
-
-    /// Applies `changes` in order: each writes its new side at its entry
-    /// ([`Overlay::assign`]).
-    ///
-    /// # Arguments
-    ///
-    /// * `changes` - The changes.
-    pub fn apply(&mut self, changes: &[Change]) {
-        for change in changes {
-            self.assign(change.clone());
-        }
     }
 }
 
@@ -479,16 +465,32 @@ pub enum Line {
 }
 
 /// A list of edits checked and worked out over one overlay, ready to be
-/// shown and committed.
+/// shown and committed; only [`plan`] and [`revert`] make one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
     /// The [`Overlay::edits_key`] of the overlay the plan was made over;
     /// [`commit`] writes it to that overlay only.
-    pub base: u64,
+    base: u64,
     /// The entries it writes, in the order written.
-    pub changes: Vec<Change>,
+    changes: Vec<Change>,
     /// What it does, one line per thing done, in the order of the edits.
-    pub lines: Vec<Line>,
+    lines: Vec<Line>,
+}
+
+impl Plan {
+    /// Returns the entries the plan writes, in the order written: what
+    /// [`revert`] takes back once the plan is committed.
+    #[must_use]
+    pub fn changes(&self) -> &[Change] {
+        &self.changes
+    }
+
+    /// Returns what the plan does, one line per thing done, in the order
+    /// of the edits.
+    #[must_use]
+    pub fn lines(&self) -> &[Line] {
+        &self.lines
+    }
 }
 
 /// Why [`plan`] refused one edit of its list.
@@ -1100,33 +1102,42 @@ pub fn plan(
 /// * `overlay` - The overlay written.
 /// * `plan` - The plan.
 ///
-/// # Returns
-///
-/// The changes written.
-///
 /// # Errors
 ///
 /// [`Stale`] when `overlay` is not the one the plan was made over; else,
 /// when the overlay would hold more than a project file holds
 /// ([`project::held`]), the cap. Either way nothing was written.
-pub fn commit(
-    analysis: &Analysis,
-    overlay: &mut Overlay,
-    plan: &Plan,
-) -> anyhow::Result<Vec<Change>> {
+pub fn commit(analysis: &Analysis, overlay: &mut Overlay, plan: &Plan) -> anyhow::Result<()> {
     if plan.base != overlay.edits_key() {
         return Err(Stale.into());
     }
     let before = overlay.clone();
-    let changes: Vec<Change> = plan
-        .changes
-        .iter()
-        .map(|c| overlay.assign(c.clone()))
-        .collect();
+    for change in &plan.changes {
+        overlay.assign(change.clone());
+    }
     if let Err(why) = project::held(overlay) {
         *overlay = before;
         return Err(anyhow::Error::msg(why));
     }
     analysis.derived.moved(analysis, &before, overlay);
-    Ok(changes)
+    Ok(())
+}
+
+/// Returns the plan that takes back a committed plan's changes
+/// ([`Plan::changes`]).
+///
+/// It holds, over the overlay as it is now, their inverses,
+/// the last first.
+///
+/// # Arguments
+///
+/// * `overlay` - The overlay the changes were committed to, as it is now.
+/// * `changes` - The changes taken back.
+#[must_use]
+pub fn revert(overlay: &Overlay, changes: &[Change]) -> Plan {
+    Plan {
+        base: overlay.edits_key(),
+        changes: changes.iter().rev().map(Change::inverse).collect(),
+        lines: Vec::new(),
+    }
 }

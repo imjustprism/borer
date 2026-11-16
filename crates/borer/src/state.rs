@@ -497,7 +497,7 @@ impl BorerServer {
         let analysis = self.analysis_held();
         let mut overlay = write_lock(&self.overlay);
         match edit::commit(&analysis, &mut overlay, &plan) {
-            Ok(_) => Ok(plan),
+            Ok(()) => Ok(plan),
             Err(stale) if stale.is::<edit::Stale>() => {
                 let plan = again(&overlay)?;
                 edit::commit(&analysis, &mut overlay, &plan)?;

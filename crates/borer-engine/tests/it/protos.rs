@@ -410,6 +410,7 @@ fn a_void_prototype_whose_result_is_read_is_contradicted() {
 #[test]
 fn an_applied_layout_names_the_fields_read_through_its_pointer() {
     use borer_engine::analysis::apply::from_pointer;
+    use borer_engine::analysis::edit::{self, Edit, Force, Laid};
     let mut code = vec![
         0x8b, 0x41, 0x10, // ASM: mov eax, [rcx+0x10]
         0x48, 0x03, 0x41, 0x18, // ASM: add rax, [rcx+0x18]
@@ -438,7 +439,12 @@ fn an_applied_layout_names_the_fields_read_through_its_pointer() {
         ]
     );
     let mut o = plain.clone();
-    plan.apply(&mut o);
+    let edits = [Edit::Layout {
+        from: Laid::Pointer("0x401000,rcx".to_owned()),
+        name: "Rec".to_owned(),
+    }];
+    let made = edit::plan(&p, &a, &o, &edits, Force::Refuse).expect("planned");
+    edit::commit(&a, &mut o, &made).expect("committed");
     let (after, header) = decompiled(&p, &o, 0x401_000);
     assert!(
         after.contains("// signature: uint64_t sub_401000(Rec *a1)"),

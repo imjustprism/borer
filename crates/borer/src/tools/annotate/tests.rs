@@ -388,6 +388,8 @@ fn a_layout_applies_as_a_struct_on_request() {
     use crate::params::DecompileParams;
     use crate::params::ScriptParams;
     use crate::params::TypesParams;
+    use borer_engine::analysis::Analysis;
+    use borer_engine::analysis::edit::{self, Edit, Force, Laid};
     use rmcp::handler::server::wrapper::Parameters;
     let server = record_server();
     let types = || {
@@ -428,9 +430,12 @@ fn a_layout_applies_as_a_struct_on_request() {
     let program = server.loaded().expect("a program is loaded");
     let analysis = server.ensure_analysis().expect("analyzes");
     let mut planned = before.clone();
-    borer_engine::analysis::apply::from_pointer(&program, &analysis, &before, "0x401000", "Rec")
-        .expect("plans")
-        .apply(&mut planned);
+    let edits = [Edit::Layout {
+        from: Laid::Pointer("0x401000".to_owned()),
+        name: "Rec".to_owned(),
+    }];
+    let made = edit::plan(&program, &analysis, &before, &edits, Force::Refuse).expect("plans");
+    edit::commit(&Analysis::default(), &mut planned, &made).expect("commits");
     for call in done.lines().filter_map(|l| l.strip_prefix("set_type ")) {
         let params = serde_json::from_str(call).expect("the call's arguments");
         server.set_type(Parameters(params)).expect("applies");

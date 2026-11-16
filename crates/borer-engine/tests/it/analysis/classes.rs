@@ -1144,6 +1144,7 @@ fn disassembly_names_the_import_a_slot_call_reaches() {
 fn an_applied_class_layout_types_each_methods_object() {
     use borer_engine::analysis::apply::from_class;
     use borer_engine::analysis::classes::class_layout;
+    use borer_engine::analysis::edit::{self, Edit, Force, Laid};
     let p = fixture();
     let a = Analysis::compute(&p);
     let plain = Overlay::default();
@@ -1163,7 +1164,12 @@ fn an_applied_class_layout_types_each_methods_object() {
         borer_engine::analysis::decompile::decompile(&p, &a, &plain, 0x1640).expect("text");
     assert!(before.contains("this->field_0x8 = a2;"), "{before}");
     let mut o = plain;
-    plan.apply(&mut o);
+    let edits = [Edit::Layout {
+        from: Laid::Class("Cls".to_owned()),
+        name: "ClsS".to_owned(),
+    }];
+    let made = edit::plan(&p, &a, &o, &edits, Force::Refuse).expect("planned");
+    edit::commit(&a, &mut o, &made).expect("committed");
     let set = borer_engine::analysis::decompile::decompile(&p, &a, &o, 0x1640).expect("text");
     assert!(
         set.contains("// signature: void Cls::Set(ClsS *this, int a2)"),

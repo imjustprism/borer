@@ -9,7 +9,7 @@
 
 use crate::common::fixture;
 use borer_engine::analysis::edit::{
-    Change, Edit, Force, Laid, Line, Plan, Refused, Stale, commit, plan,
+    Change, Edit, Force, Laid, Line, Refused, Stale, commit, plan, revert,
 };
 use borer_engine::analysis::project::NAMES_MAX;
 use borer_engine::analysis::protos::{Proto, Var, VarKey};
@@ -18,11 +18,12 @@ use borer_engine::analysis::utypes::{UserType, parse_type};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::num::from_usize;
 
-/// The changes between two overlays, one per entry of every kind that
-/// differs, applied to the first give the second, and their inverses
-/// applied in reverse order give the first again.
+/// A project put in place of the overlay changes one entry of every kind
+/// that differs, and its changes taken back give the overlay again.
 #[test]
 fn changes_replay_an_edit_and_their_inverses_take_it_back() {
+    let p = fixture();
+    let a = Analysis::compute(&p);
     let ty = parse_type("u32").expect("a type");
     let mut before = Overlay::default();
     before.names.insert(0x1000, "old".to_owned());
@@ -52,7 +53,10 @@ fn changes_replay_an_edit_and_their_inverses_take_it_back() {
         .entry("C".to_owned())
         .or_default()
         .insert(8, field);
-    let changes = before.changes(&after);
+    let mut o = before.clone();
+    let edits = [Edit::Project(Box::new(after.clone()))];
+    let made = plan(&p, &a, &o, &edits, Force::Refuse).expect("planned");
+    let changes = made.changes();
     assert_eq!(changes.len(), 6, "{changes:?}");
     assert!(
         matches!(changes.first(), Some(Change::Name(0x1000, s))
@@ -66,14 +70,11 @@ fn changes_replay_an_edit_and_their_inverses_take_it_back() {
             .any(|c| matches!(c, Change::Comment(0x1010, s) if s.after().is_none())),
         "{changes:?}"
     );
-    let mut replayed = before.clone();
-    replayed.apply(&changes);
-    assert_eq!(replayed.fingerprint(), after.fingerprint());
-    assert!(replayed.changes(&after).is_empty());
-    let back: Vec<Change> = changes.iter().rev().map(Change::inverse).collect();
-    replayed.apply(&back);
-    assert_eq!(replayed.fingerprint(), before.fingerprint());
-    assert!(replayed.changes(&before).is_empty());
+    commit(&a, &mut o, &made).expect("committed");
+    assert_eq!(o.fingerprint(), after.fingerprint());
+    let back = revert(&o, made.changes());
+    commit(&a, &mut o, &back).expect("taken back");
+    assert_eq!(o.fingerprint(), before.fingerprint());
 }
 
 /// A rename planned and committed names the function as `set_name` did:
@@ -92,7 +93,7 @@ fn a_planned_rename_commits_the_name_and_its_change() {
     }];
     let made = plan(&p, &a, &o, &edits, Force::Refuse).expect("planned");
     assert_eq!(
-        made.lines,
+        made.lines(),
         vec![Line::Named {
             target: entry,
             function: true,
@@ -101,9 +102,10 @@ fn a_planned_rename_commits_the_name_and_its_change() {
             number: None,
         }]
     );
-    let changes = commit(&a, &mut o, &made).expect("committed");
+    commit(&a, &mut o, &made).expect("committed");
+    let changes = made.changes();
     assert!(
-        matches!(changes.as_slice(), [Change::Name(at, s)]
+        matches!(changes, [Change::Name(at, s)]
             if *at == entry
                 && s.before().map(String::as_str) == Some("first")
                 && s.after().map(String::as_str) == Some("second")),
@@ -158,7 +160,10 @@ fn a_plan_made_before_another_commit_is_stale() {
 }
 
 /// A plan that would take the overlay past a project's cap is refused by
-/// the commit, which leaves the overlay as it was, as the plan is.
+/// the commit, which leaves the overlay as it was.
+///
+/// Here a project's load taken back after a rename brings back a name the
+/// cap has no room for.
 #[test]
 fn a_commit_past_a_cap_writes_nothing() {
     let p = fixture();
@@ -166,20 +171,25 @@ fn a_commit_past_a_cap_writes_nothing() {
     let mut o = Overlay::default();
     o.names
         .extend((0..NAMES_MAX).map(|i| (0x10_0000 + from_usize(i), format!("n{i}"))));
-    let before = o.fingerprint();
-    let mut more = Overlay::default();
-    more.names.insert(0x1000, "one_more".to_owned());
-    let one_more = Plan {
-        base: o.edits_key(),
-        changes: Overlay::default().changes(&more),
-        lines: Vec::new(),
-    };
-    let refused = commit(&a, &mut o, &one_more).expect_err("past the cap");
-    assert!(refused.to_string().contains("names"), "{refused}");
-    assert_eq!(o.fingerprint(), before, "the overlay changed");
+    let mut fewer = o.clone();
+    fewer.names.remove(&0x10_0000);
+    let load = [Edit::Project(Box::new(fewer))];
+    let loaded = plan(&p, &a, &o, &load, Force::Refuse).expect("planned");
+    commit(&a, &mut o, &loaded).expect("committed");
     let edits = [Edit::Name {
         at: 0x1000,
         name: "one_more".to_owned(),
+    }];
+    let named = plan(&p, &a, &o, &edits, Force::Take).expect("planned");
+    commit(&a, &mut o, &named).expect("committed");
+    let before = o.fingerprint();
+    let back = revert(&o, loaded.changes());
+    let refused = commit(&a, &mut o, &back).expect_err("past the cap");
+    assert!(refused.to_string().contains("names"), "{refused}");
+    assert_eq!(o.fingerprint(), before, "the overlay changed");
+    let edits = [Edit::Name {
+        at: 0x7000_0000,
+        name: "two_more".to_owned(),
     }];
     plan(&p, &a, &o, &edits, Force::Take).expect_err("the plan refuses it too");
 }
@@ -237,12 +247,12 @@ fn the_inverse_of_a_mixed_plan_restores_the_overlay() {
         },
     ];
     let made = plan(&p, &a, &o, &edits, Force::Refuse).expect("planned");
-    let changes = commit(&a, &mut o, &made).expect("committed");
-    assert_eq!(changes.len(), 4, "{changes:?}");
+    commit(&a, &mut o, &made).expect("committed");
+    assert_eq!(made.changes().len(), 4, "{made:?}");
     assert_ne!(o.fingerprint(), before);
-    let back: Vec<Change> = changes.iter().rev().map(Change::inverse).collect();
-    o.apply(&back);
-    assert_eq!(o.fingerprint(), before, "{changes:?}");
+    let back = revert(&o, made.changes());
+    commit(&a, &mut o, &back).expect("taken back");
+    assert_eq!(o.fingerprint(), before, "{made:?}");
 }
 
 /// Loading a project is an edit too: its plan leaves the project's
@@ -261,10 +271,10 @@ fn a_project_put_in_place_is_taken_back_by_its_inverse() {
     let before = o.fingerprint();
     let edits = [Edit::Project(Box::new(loaded.clone()))];
     let made = plan(&p, &a, &o, &edits, Force::Refuse).expect("planned");
-    let changes = commit(&a, &mut o, &made).expect("committed");
+    commit(&a, &mut o, &made).expect("committed");
     assert_eq!(o.fingerprint(), loaded.fingerprint());
-    let back: Vec<Change> = changes.iter().rev().map(Change::inverse).collect();
-    o.apply(&back);
+    let back = revert(&o, made.changes());
+    commit(&a, &mut o, &back).expect("taken back");
     assert_eq!(o.fingerprint(), before);
 }
 
@@ -303,9 +313,9 @@ fn every_change_says_what_its_entry_holds() {
         },
     ];
     let made = plan(&p, &a, &o, &edits, Force::Refuse).expect("planned");
-    let changes = commit(&a, &mut o, &made).expect("committed");
-    assert_eq!(changes.len(), edits.len(), "{changes:?}");
-    for change in &changes {
+    commit(&a, &mut o, &made).expect("committed");
+    assert_eq!(made.changes().len(), edits.len(), "{made:?}");
+    for change in made.changes() {
         let holds = match change {
             Change::Name(at, s) => o.names.get(at) == s.after(),
             Change::Comment(at, s) => o.comments.get(at) == s.after(),

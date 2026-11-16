@@ -99,17 +99,6 @@ impl Plan {
             .chain(protos.map(|(at, p)| Change::Proto(at, to(Some(p)))))
             .collect()
     }
-
-    /// Writes the plan into an overlay ([`Plan::changes`]).
-    ///
-    /// # Arguments
-    ///
-    /// * `o` - The overlay.
-    pub fn apply(self, o: &mut Overlay) {
-        for change in self.changes() {
-            o.assign(change);
-        }
-    }
 }
 
 /// Plans the struct a function's accesses through one pointer show, and the

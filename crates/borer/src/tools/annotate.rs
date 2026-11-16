@@ -155,7 +155,7 @@ impl BorerServer {
                     Some(refused) => item(refused.edit, refused.why.clone()),
                     None => e.to_string(),
                 })?;
-            let lines: Vec<(String, String)> = plan.lines.iter().map(|l| said(l, dry)).collect();
+            let lines: Vec<(String, String)> = plan.lines().iter().map(|l| said(l, dry)).collect();
             Ok(match lines.as_slice() {
                 [_] => answered(&plan, dry),
                 more if dry => format!(
@@ -708,7 +708,7 @@ fn type_edits(
 /// * `plan` - The plan, its lines spelled by [`said`].
 /// * `dry` - Whether the plan is a dry run's.
 pub(crate) fn listed(plan: &Plan, dry: bool) -> String {
-    let mut out: String = plan.lines.iter().map(|l| said(l, dry).0).collect();
+    let mut out: String = plan.lines().iter().map(|l| said(l, dry).0).collect();
     if dry {
         out.push_str("pass dry_run=false to apply.\n");
     }
@@ -723,7 +723,7 @@ pub(crate) fn listed(plan: &Plan, dry: bool) -> String {
 /// * `plan` - The plan, its lines spelled by [`said`].
 /// * `dry` - Whether the plan is a dry run's.
 fn answered(plan: &Plan, dry: bool) -> String {
-    let lines: Vec<(String, String)> = plan.lines.iter().map(|l| said(l, dry)).collect();
+    let lines: Vec<(String, String)> = plan.lines().iter().map(|l| said(l, dry)).collect();
     let words: Vec<&str> = lines
         .iter()
         .map(|(line, _)| line.as_str())
