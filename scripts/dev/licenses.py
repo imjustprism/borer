@@ -16,8 +16,10 @@ normal dependencies only (build scripts and dev dependencies do not ship),
 from `cargo metadata --filter-platform`; the Rust standard library, whose
 license texts come from the toolchain's `rust-docs` component, with its full
 notice copied beside the output as RUST-STD-COPYRIGHT.html; and the C
-sources a crate compiles in, named in `scripts/dev/licenses.tmpl`'s
-`[bundled]` lines (mimalloc's, inside `libmimalloc-sys`). borer's own crates
+sources and data a crate compiles in, named in `scripts/dev/licenses.tmpl`'s
+`[bundled]` lines by a path from the crate's root (mimalloc's, inside
+`libmimalloc-sys`; FreeType's, inside `freetype-sys`; the fonts, icons and
+themes Zed's `assets` crate embeds from its repository's `assets/`). borer's own crates
 (path dependencies, under borer's license) are not listed. Each crate gets its
 name, version, SPDX license expression, where its source is published (which
 MPL-2.0 asks a binary to say) and the text of every license, copying, notice
