@@ -2008,7 +2008,7 @@ impl Exec<'_, '_> {
         if let Some(v) = virt.as_ref().filter(|v| !v.pure)
             && self.emit
         {
-            self.ctx.vcalls.insert(v.entry);
+            self.ctx.vcalls.insert(v.at(instr.ip()));
         }
         let reached = target
             .or_else(|| Self::import_slot(instr))

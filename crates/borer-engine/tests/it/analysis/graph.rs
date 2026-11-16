@@ -360,10 +360,10 @@ fn call_tree_image() -> Program {
 /// thunk are three edges of three kinds, each with its site.
 #[test]
 fn a_call_tree_level_says_how_each_callee_is_reached() {
-    use borer_engine::analysis::render::{Via, Walk, call_children};
+    use borer_engine::analysis::render::{Level, Via, call_children};
     let p = call_tree_image();
     let a = Analysis::compute(&p);
-    let level = call_children(&p, &a, &Overlay::default(), 0x401000, Walk::Callees);
+    let level = call_children(&p, &a, &Overlay::default(), 0x401000, Level::Callees);
     let got: Vec<(u64, Via, &[u64], bool)> = level
         .rows
         .iter()
@@ -391,7 +391,7 @@ fn a_call_tree_level_says_how_each_callee_is_reached() {
 /// it that makes the call, and says how the call reaches the node.
 #[test]
 fn a_call_tree_level_over_callers_names_each_call_site() {
-    use borer_engine::analysis::render::{Via, Walk, call_children};
+    use borer_engine::analysis::render::{Level, Via, call_children};
     let p = call_tree_image();
     let a = Analysis::compute(&p);
     let o = Overlay::default();
@@ -400,7 +400,7 @@ fn a_call_tree_level_over_callers_names_each_call_site() {
         (0x401030, Via::Thunk { slot: 0x402008 }, 0x40100b),
         (0x402000, Via::Import, 0x401005),
     ] {
-        let level = call_children(&p, &a, &o, node, Walk::Callers);
+        let level = call_children(&p, &a, &o, node, Level::Callers);
         let got: Vec<(u64, Via, &[u64], bool)> = level
             .rows
             .iter()
@@ -508,12 +508,12 @@ fn bound_stub_image() -> Program {
 /// that loads the slot and calls through it lists the call alone.
 #[test]
 fn a_call_tree_level_follows_a_bound_stub_and_tells_a_load_from_a_call() {
-    use borer_engine::analysis::render::{Via, Walk, call_children};
+    use borer_engine::analysis::render::{Level, Via, call_children};
     let p = bound_stub_image();
     let a = Analysis::compute(&p);
     let o = Overlay::default();
-    let level = |node, walk| -> Vec<(u64, Via, Vec<u64>, usize)> {
-        call_children(&p, &a, &o, node, walk)
+    let level = |node, level| -> Vec<(u64, Via, Vec<u64>, usize)> {
+        call_children(&p, &a, &o, node, level)
             .rows
             .into_iter()
             .map(|e| {
@@ -524,18 +524,18 @@ fn a_call_tree_level_follows_a_bound_stub_and_tells_a_load_from_a_call() {
     };
     let bound = Via::Bound { stub: 0x401030 };
     assert_eq!(
-        level(0x401000, Walk::Callees),
+        level(0x401000, Level::Callees),
         [
             (0x401020, bound, vec![0x401000], 1),
             (0x402000, Via::Import, vec![0x401005], 1),
         ]
     );
     assert_eq!(
-        level(0x401020, Walk::Callers),
+        level(0x401020, Level::Callers),
         [(0x401000, bound, vec![0x401000], 1)]
     );
     assert_eq!(
-        level(0x402000, Walk::Callers),
+        level(0x402000, Level::Callers),
         [
             (0x401000, Via::Import, vec![0x401005], 1),
             (0x401010, Via::Data, vec![0x401010], 1),
@@ -549,7 +549,7 @@ fn a_call_tree_level_follows_a_bound_stub_and_tells_a_load_from_a_call() {
 /// `f` 0x401000 calls `g` 0x401060 seventeen times, then returns.
 #[test]
 fn a_call_tree_edge_counts_the_sites_it_leaves_out() {
-    use borer_engine::analysis::render::{CALL_SITES_MAX, Walk, call_children};
+    use borer_engine::analysis::render::{CALL_SITES_MAX, Level, call_children};
     let mut code = vec![0xccu8; 0x61];
     for k in 0..17u8 {
         let at = usize::from(k) * 5;
@@ -562,8 +562,8 @@ fn a_call_tree_edge_counts_the_sites_it_leaves_out() {
     let p = crate::raw::image(Arch::X86_64, &code, &[]);
     let a = Analysis::compute(&p);
     let o = Overlay::default();
-    for (node, walk) in [(0x401000, Walk::Callees), (0x401060, Walk::Callers)] {
-        let level = call_children(&p, &a, &o, node, walk);
+    for (node, level) in [(0x401000, Level::Callees), (0x401060, Level::Callers)] {
+        let level = call_children(&p, &a, &o, node, level);
         let [e] = level.rows.as_slice() else {
             panic!("one edge: {level:?}");
         };
@@ -576,28 +576,34 @@ fn a_call_tree_edge_counts_the_sites_it_leaves_out() {
 /// in the caller.
 ///
 /// Each site is an instruction of the calling function naming the called
-/// end, never the callee's entry. Each edge says it is a leaf exactly
-/// when its target's own level is empty. Both ways run, on every function
-/// of the fixture and of the call tree images.
+/// end, never the callee's entry; a resolved virtual call names a vtable
+/// slot, so it is only held to being a call. Each edge says it is a leaf
+/// exactly when its target's own level is empty. Every level runs, on
+/// every function of the fixture and of the call tree images.
 #[test]
 fn every_call_tree_site_is_a_call_in_the_caller() {
-    use borer_engine::analysis::render::{Via, Walk, call_children};
+    use borer_engine::analysis::render::{Level, Via, call_children};
     let mut checked = 0;
     for p in [fixture(), call_tree_image(), bound_stub_image()] {
         let a = Analysis::compute(&p);
         let o = Overlay::default();
         for f in &a.functions {
-            for walk in [Walk::Callees, Walk::Callers] {
-                for e in call_children(&p, &a, &o, f.entry, walk).rows {
-                    let (caller, called) = match (walk, e.via) {
-                        (Walk::Callees, Via::Bound { stub }) => (f.entry, stub),
-                        (Walk::Callees, _) => (f.entry, e.target),
-                        (Walk::Callers, Via::Bound { stub }) => (e.target, stub),
-                        (Walk::Callers, _) => (e.target, f.entry),
+            for level in [Level::Callees, Level::CalleesAndVirtuals, Level::Callers] {
+                let next_level = match level {
+                    Level::Callers => Level::Callers,
+                    Level::Callees | Level::CalleesAndVirtuals => Level::Callees,
+                };
+                for e in call_children(&p, &a, &o, f.entry, level).rows {
+                    let (caller, called) = match (next_level, e.via) {
+                        (Level::Callers, Via::Bound { stub }) => (e.target, Some(stub)),
+                        (Level::Callers, _) => (e.target, Some(f.entry)),
+                        (_, Via::Virtual { .. }) => (f.entry, None),
+                        (_, Via::Bound { stub }) => (f.entry, Some(stub)),
+                        (_, _) => (f.entry, Some(e.target)),
                     };
                     assert!(!e.sites.is_empty(), "{:#x}: no site for {e:?}", f.entry);
                     assert!(e.site_count >= e.sites.len(), "{e:?}");
-                    let next = call_children(&p, &a, &o, e.target, walk);
+                    let next = call_children(&p, &a, &o, e.target, next_level);
                     assert_eq!(e.leaf, next.total == 0, "{e:?}: {next:?}");
                     let g = a.function(caller).expect("the caller is a function");
                     let starts = instruction_starts(&p, g).expect("the caller's bytes");
@@ -606,11 +612,10 @@ fn every_call_tree_site_is_a_call_in_the_caller() {
                             starts.contains(&s),
                             "{s:#x} is no instruction of {caller:#x}"
                         );
-                        assert_eq!(
-                            named_by(&p, s),
-                            Some(called),
-                            "{s:#x} in {caller:#x}: {e:?}"
-                        );
+                        match called {
+                            Some(c) => assert_eq!(named_by(&p, s), Some(c), "{s:#x}: {e:?}"),
+                            None => assert!(is_call(&p, s), "{s:#x} is no call: {e:?}"),
+                        }
                         checked += 1;
                     }
                 }
@@ -618,4 +623,45 @@ fn every_call_tree_site_is_a_call_in_the_caller() {
         }
     }
     assert!(checked > 10, "only {checked} sites checked");
+}
+
+/// Tells whether the instruction at an address is a call.
+///
+/// # Arguments
+///
+/// * `p` - The image.
+/// * `site` - The instruction's address.
+fn is_call(p: &Program, site: u64) -> bool {
+    p.read_va_upto(site, 15).is_some_and(|bytes| {
+        let i =
+            iced_x86::Decoder::with_ip(64, bytes, site, iced_x86::DecoderOptions::NONE).decode();
+        matches!(
+            i.flow_control(),
+            iced_x86::FlowControl::Call | iced_x86::FlowControl::IndirectCall
+        )
+    })
+}
+
+/// A virtual call is an edge only when asked for, and then with its slot
+/// and its site: `VR` calls slot 1 of `this`'s vtable at 0x1773, which
+/// resolves to 0x1200, a call no cross-reference records.
+#[test]
+fn a_call_tree_level_lists_a_virtual_call_only_when_asked() {
+    use borer_engine::analysis::render::{Level, Via, call_children};
+    let p = fixture();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let virtual_rows = |level| -> Vec<(u64, Via, Vec<u64>)> {
+        call_children(&p, &a, &o, 0x1770, level)
+            .rows
+            .into_iter()
+            .filter(|e| matches!(e.via, Via::Virtual { .. }))
+            .map(|e| (e.target, e.via, e.sites))
+            .collect()
+    };
+    assert_eq!(virtual_rows(Level::Callees), []);
+    assert_eq!(
+        virtual_rows(Level::CalleesAndVirtuals),
+        [(0x1200, Via::Virtual { slot: 1 }, vec![0x1773])]
+    );
 }

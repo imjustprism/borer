@@ -503,6 +503,21 @@ struct Virtual {
     pure: bool,
 }
 
+impl Virtual {
+    /// Returns the virtual call this resolution makes at a site.
+    ///
+    /// # Arguments
+    ///
+    /// * `site` - The address of the call instruction.
+    fn at(&self, site: u64) -> super::VirtualCall {
+        super::VirtualCall {
+            entry: self.entry,
+            site,
+            slot: self.slot,
+        }
+    }
+}
+
 /// Where a call through a dispatch thunk or a read-only pointer goes
 /// ([`Ctx::dispatch`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

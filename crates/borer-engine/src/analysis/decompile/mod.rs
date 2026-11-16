@@ -98,6 +98,7 @@ mod verify_rv;
 #[cfg(test)]
 mod verify_testing;
 pub mod view;
+mod virtuals;
 mod warn;
 mod wire;
 
@@ -126,6 +127,7 @@ use strlen::*;
 use structure::*;
 pub use tidy::*;
 use types::*;
+pub use virtuals::{VirtualCall, virtual_callees, virtual_calls};
 use wire::*;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -300,8 +302,8 @@ struct Ctx<'a> {
     /// so they name slots without touching their widths, which the
     /// lifting's own declarations keep stating.
     debug_locals: std::sync::Arc<BTreeMap<i64, String>>,
-    /// Entries the function's virtual calls resolved to (emission pass).
-    vcalls: BTreeSet<u64>,
+    /// The function's virtual calls that resolved (emission pass).
+    vcalls: BTreeSet<VirtualCall>,
     /// Callees whose whole body is `ret`, whose calls are left out of the
     /// text (emission pass); the header names them.
     empty_calls: BTreeSet<u64>,
@@ -1224,42 +1226,13 @@ fn name_fields(
     Some(out)
 }
 
-/// Returns the entries a function's virtual calls resolve to.
-///
-/// A call through the vtable of `this`, of a class-typed parameter or of a
-/// typed call result resolves to a slot function (the lifter's virtual-target rule);
-/// these are the callees the cross-reference index cannot see.
-///
-/// # Arguments
-///
-/// * `program` - The loaded image.
-/// * `analysis` - Discovery results the function comes from.
-/// * `overlay` - User names and comments.
-/// * `entry` - The function's entry address.
-///
-/// # Returns
-///
-/// The resolved entries, sorted and deduplicated; empty when the function
-/// does not decompile or makes no resolvable virtual call.
-pub fn virtual_callees(
-    program: &Program,
-    analysis: &Analysis,
-    overlay: &Overlay,
-    entry: u64,
-) -> Vec<u64> {
-    decompiled_cached(program, analysis, overlay, overlay.fingerprint(), entry)
-        .as_ref()
-        .as_ref()
-        .map_or_else(Vec::new, |d| d.virtual_callees.clone())
-}
-
 /// What one decompilation produced.
 #[derive(Debug, Default)]
 pub(crate) struct Decompiled {
     /// The pseudo-C text.
     pub(crate) text: String,
-    /// Entries the function's virtual calls resolved to, sorted.
-    pub(crate) virtual_callees: Vec<u64>,
+    /// The function's virtual calls that resolved, sorted.
+    pub(crate) virtual_calls: Vec<VirtualCall>,
     /// Basic blocks in the function.
     blocks: usize,
     /// Blocks no path from the entry reaches once constant branches and
@@ -1294,7 +1267,7 @@ impl Decompiled {
     /// soon as the decompilation is built.
     pub(crate) fn bytes(&self) -> usize {
         self.text.capacity()
-            + self.virtual_callees.capacity() * size_of::<u64>()
+            + self.virtual_calls.capacity() * size_of::<VirtualCall>()
             + self.live.bytes()
             + self.effects.bytes()
     }
@@ -2404,7 +2377,7 @@ fn decompile_in<L: Lifter>(
     lap.end(crate::timing::Step::Header);
     Some(Decompiled {
         text: out,
-        virtual_callees: ctx.vcalls.iter().copied().collect(),
+        virtual_calls: ctx.vcalls.iter().copied().collect(),
         blocks: n,
         cut: unreachable,
         live: handed,

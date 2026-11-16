@@ -552,6 +552,13 @@ pub enum Via {
         /// The stub's entry, which the call instruction names.
         stub: u64,
     },
+    /// A virtual call the decompiler resolved through the receiver's
+    /// vtable ([`crate::analysis::decompile::virtual_calls`]), listed only
+    /// for [`Level::CalleesAndVirtuals`].
+    Virtual {
+        /// The slot's index in the vtable.
+        slot: usize,
+    },
     /// References that never call or jump to a node with no body, over
     /// callers: a load of an import slot, or a use of a global.
     Data,
@@ -592,15 +599,40 @@ pub struct Children {
     pub total: usize,
 }
 
+/// Which level of the call tree [`call_children`] lists for a node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Level {
+    /// What the node calls, as the cross-references show it.
+    Callees,
+    /// What the node calls, with the virtual calls the decompiler resolves
+    /// in it ([`Via::Virtual`]): this decompiles the node, once, memoized.
+    CalleesAndVirtuals,
+    /// What calls the node.
+    Callers,
+}
+
+impl Level {
+    /// Returns the way the level walks the call graph.
+    #[must_use]
+    pub fn walk(self) -> Walk {
+        match self {
+            Level::Callees | Level::CalleesAndVirtuals => Walk::Callees,
+            Level::Callers => Walk::Callers,
+        }
+    }
+}
+
 /// Returns one level of the call tree under or over a node: each edge,
 /// how it is known and the instructions that make it.
 ///
 /// The edges are the ones [`callgraph`] draws ([`call_targets`]), with one
 /// difference: a call to a stub the loader binds to a local function
 /// leads to that function, since the stub's own level would be empty, and
-/// the function's callers include the stub's. The graph draws the stub. A
-/// tree is expanded one node at a time, so a cycle is not a level's
-/// business: the caller marks a node already on its path.
+/// the function's callers include the stub's. The graph draws the stub.
+/// Virtual calls are only listed when asked for, since finding them
+/// decompiles the node; a target's `leaf` never looks for them. A tree is
+/// expanded one node at a time, so a cycle is not a level's business: the
+/// caller marks a node already on its path.
 ///
 /// # Arguments
 ///
@@ -608,8 +640,8 @@ pub struct Children {
 /// * `a` - The analysis.
 /// * `o` - User names.
 /// * `node` - A function entry, an import slot or a data address.
-/// * `walk` - Whether the level lists what the node calls or what calls
-///   it.
+/// * `level` - Whether the level lists what the node calls, with or
+///   without its virtual calls, or what calls it.
 ///
 /// # Returns
 ///
@@ -617,10 +649,21 @@ pub struct Children {
 /// [`CALL_CHILDREN_MAX`], and how many there are; no edges for a node that
 /// calls nothing, or that nothing calls.
 #[must_use]
-pub fn call_children(p: &Program, a: &Analysis, o: &Overlay, node: u64, walk: Walk) -> Children {
+pub fn call_children(p: &Program, a: &Analysis, o: &Overlay, node: u64, level: Level) -> Children {
+    let walk = level.walk();
     let slots = import_slots(p);
     let stubs = bound_stubs(a, walk);
     let mut found = tree_edges(a, &slots, &stubs, node, walk);
+    if level == Level::CalleesAndVirtuals {
+        let mut resolved: BTreeMap<(u64, usize), Vec<u64>> = BTreeMap::new();
+        for c in crate::analysis::decompile::virtual_calls(p, a, o, node) {
+            resolved.entry((c.entry, c.slot)).or_default().push(c.site);
+        }
+        found.extend(resolved.into_iter().map(|((entry, slot), mut sites)| {
+            sites.sort_unstable();
+            (entry, Via::Virtual { slot }, sites)
+        }));
+    }
     found.sort_unstable_by_key(|(target, via, sites)| (*target, sites.first().copied(), *via));
     let total = found.len();
     let rows = found
