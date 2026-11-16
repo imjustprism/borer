@@ -4,7 +4,8 @@
 //! one list: the place it spells as an address first, then functions, imports, exports,
 //! symbols, strings, types, classes, user names and comments; a kind prefix (`@`, `"`,
 //! `t:`, `#`) narrows it. Enter opens the function holding a hit, a listing at the hit when
-//! a listing is the active view. A miss shows the engine's own words, nearest names and all.
+//! a listing is the active view; a string, a type, a class or a hit in no function is named
+//! in the status line. A miss shows the engine's own words, nearest names and all.
 
 use std::sync::Arc;
 
@@ -68,17 +69,26 @@ enum Match {
 
 impl Match {
     /// Returns the entry this line opens and the address to show in it, `None` for a line
-    /// that opens nothing.
-    const fn opens(&self) -> Option<(u64, Option<u64>)> {
-        match self {
-            Self::Hit {
-                hit,
-                entry: Some(entry),
-                ..
-            } => Some((*entry, hit.addr)),
-            Self::Hit { entry: None, .. } | Self::Miss(_) | Self::Capped(..) | Self::Count(..) => {
-                None
-            }
+    /// that opens no code: a string (whose uses the xrefs panel lists), a type or a class
+    /// (the types panel's), a hit in no function, or a line that is no hit.
+    fn opens(&self) -> Option<(u64, Option<u64>)> {
+        let Self::Hit {
+            hit,
+            entry: Some(entry),
+            ..
+        } = self
+        else {
+            return None;
+        };
+        match hit.kind() {
+            HitKind::Address
+            | HitKind::Function
+            | HitKind::Import
+            | HitKind::Export
+            | HitKind::Symbol
+            | HitKind::Name
+            | HitKind::Comment => Some((*entry, hit.addr)),
+            HitKind::String | HitKind::Type | HitKind::Class => None,
         }
     }
 
@@ -88,16 +98,27 @@ impl Match {
     /// # Arguments
     ///
     /// * `form` - The view of the active code tab.
-    const fn place(&self, form: Form) -> Option<Place> {
-        let Some((entry, at)) = self.opens() else {
-            return None;
-        };
+    fn place(&self, form: Form) -> Option<Place> {
+        let (entry, at) = self.opens()?;
         let at = match form {
             Form::Listing => at,
             Form::Decompile => None,
         };
         Some(Place::Code { entry, form, at })
     }
+}
+
+/// Returns the status line naming a hit Enter opens no code for: its kind, its text and its
+/// address when it has one.
+///
+/// # Arguments
+///
+/// * `hit` - The engine's hit.
+fn named(hit: &Hit) -> String {
+    let at = hit
+        .addr
+        .map_or_else(String::new, |va| format!(" at {va:#x}"));
+    format!("{} {}{at}", hit.kind().word(), hit.text)
 }
 
 /// Returns the byte offsets of the characters of `text` that the first case-folded match
@@ -291,11 +312,16 @@ impl PickerDelegate for GoToDelegate {
         window: &mut Window,
         cx: &mut Context<'_, Picker<Self>>,
     ) {
-        let Some(place) = self
-            .matches
-            .get(self.selected)
-            .and_then(|m| m.place(self.form))
-        else {
+        let Some(line) = self.matches.get(self.selected) else {
+            return;
+        };
+        let Some(place) = line.place(self.form) else {
+            if let Match::Hit { hit, .. } = line {
+                let status = named(hit);
+                self.binary
+                    .update(cx, |binary, cx| binary.set_status(status, cx));
+                cx.emit(DismissEvent);
+            }
             return;
         };
         let mode = match self.form {
@@ -391,13 +417,14 @@ mod tests {
 
     use borer_engine::analysis::find::{Hit, HitKind, KIND_MAX, Rank, Source};
     use borer_engine::analysis::resolve_suggesting;
+    use borer_engine::strings::Encoding;
     use borer_engine::view::Ref;
     use gpui::{Entity, TestAppContext, VisualTestContext};
     use picker::Picker;
     use workspace::Workspace;
 
     use super::{GoToDelegate, Match, marks};
-    use crate::app_view::tests::{CALLEE, CALLER, init, open, sample};
+    use crate::app_view::tests::{CALLEE, CALLER, init, open, sample, take_status};
     use crate::decompile_item::tests::{active as tab, fourth_instruction, open_tab};
     use crate::decompile_item::{DecompileItem, Form, link_place};
     use crate::functions_panel::Functions;
@@ -527,7 +554,7 @@ mod tests {
     fn a_string_of_the_program_is_found(cx: &mut TestAppContext) {
         let app_state = init(cx);
         let (app, cx) = open(&app_state, cx);
-        let workspace = app.workspace;
+        let workspace = app.workspace.clone();
         open_tab(&workspace, &sample(), (CALLER, Form::Decompile), cx);
         let picker = ask(&workspace, "world", cx);
         let lines = shown(&picker, cx);
@@ -538,6 +565,16 @@ mod tests {
         let (hit, marks) = string.unwrap();
         assert_eq!((&*hit.text, hit.addr), ("hello world", Some(0x1100)));
         assert_eq!(marks, &[6, 7, 8, 9, 10]);
+        let at = lines.iter().position(
+            |line| matches!(line, Match::Hit { hit, .. } if hit.kind() == HitKind::String),
+        );
+        picker.update_in(cx, |picker, window, cx| {
+            picker.set_selected_index(at.unwrap(), None, false, window, cx);
+        });
+        cx.dispatch_action(menu::Confirm);
+        cx.run_until_parked();
+        assert_eq!(take_status(&app, cx), "string hello world at 0x1100");
+        assert_eq!(active(&workspace, cx), Some(CALLER));
     }
 
     /// `@` and a function's name lists only functions, and Enter opens the function.
@@ -617,19 +654,19 @@ mod tests {
             link_place(&view, &Ref::Address(CALLER), Form::Decompile),
             None
         );
-        let hit = |addr, entry| Match::Hit {
+        let hit = |addr, entry, source| Match::Hit {
             hit: Hit {
                 addr: Some(addr),
                 text: "f".into(),
                 cut: false,
-                source: Source::User,
+                source,
                 rank: Rank::Exact,
             },
             entry,
             marks: Vec::new(),
         };
         let va = CALLEE + 1;
-        let inside = hit(va, Some(CALLEE));
+        let inside = hit(va, Some(CALLEE), Source::User);
         assert_eq!(
             inside.place(Form::Listing),
             Some(code(CALLEE, Form::Listing, Some(va)))
@@ -638,7 +675,13 @@ mod tests {
             inside.place(Form::Decompile),
             Some(code(CALLEE, Form::Decompile, None))
         );
-        assert_eq!(hit(0x1100, None).place(Form::Listing), None);
+        assert_eq!(hit(0x1100, None, Source::User).place(Form::Listing), None);
+        let string = Source::String {
+            off: 0x100,
+            section: None,
+            encoding: Encoding::Ascii,
+        };
+        assert_eq!(hit(va, Some(CALLEE), string).place(Form::Listing), None);
         assert_eq!(Match::Miss("no".to_owned()).place(Form::Listing), None);
         assert_eq!(Match::Count(0, 0).place(Form::Listing), None);
     }
