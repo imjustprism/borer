@@ -1030,7 +1030,7 @@ mod tests {
     }
 
     /// Returns every module of the crate but this one, by path under `src`, with its text.
-    fn sources() -> [(&'static str, &'static str); 42] {
+    fn sources() -> [(&'static str, &'static str); 43] {
         [
             ("actions.rs", include_str!("actions.rs")),
             ("app_assets.rs", include_str!("app_assets.rs")),
@@ -1069,6 +1069,7 @@ mod tests {
             ("status.rs", include_str!("status.rs")),
             ("table.rs", include_str!("table.rs")),
             ("theme_contract.rs", include_str!("theme_contract.rs")),
+            ("theme_import.rs", include_str!("theme_import.rs")),
             ("theme_picker.rs", include_str!("theme_picker.rs")),
             ("title_bar.rs", include_str!("title_bar.rs")),
             ("tables.rs", include_str!("tables.rs")),
@@ -1165,6 +1166,18 @@ mod tests {
         ] {
             assert_eq!(declared_module(line), want, "{line}");
         }
+    }
+
+    /// The app asks the system file dialog for a file in one place outside tests, so every
+    /// file it opens is picked the same way.
+    #[test]
+    fn the_app_has_one_file_dialog_helper() {
+        let asks: usize = sources()
+            .iter()
+            .map(|(_, text)| text.split("#[cfg(test)]").next().unwrap_or(text))
+            .map(|code| code.matches("prompt_for_paths(").count())
+            .sum();
+        assert_eq!(asks, 1);
     }
 
     /// The engine-call scan reads every module the crate declares: each `mod` line of a

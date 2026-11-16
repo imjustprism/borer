@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use futures::channel::oneshot;
 use gpui::{
     App, Context, Entity, EventEmitter, Global, IntoElement, ParentElement as _, PathPromptOptions,
     Render, SharedString, Styled as _, Subscription, Task, Window,
@@ -196,12 +197,7 @@ impl Binary {
     ///
     /// * `cx` - Binary context spawning the dialog receiver task.
     pub fn prompt_open(&mut self, cx: &mut Context<'_, Self>) {
-        let receiver = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: None,
-        });
+        let receiver = pick_file(cx);
         self.prompt_task = Some(cx.spawn(async move |this, cx| {
             let Ok(outcome) = receiver.await else {
                 return;
@@ -382,6 +378,24 @@ impl Binary {
 pub fn kind(loaded: &LoadedBinary) -> String {
     let program = &loaded.program;
     format!("{} {}", program.arch.name(), program.format.name())
+}
+
+/// Opens the system file dialog for one file, as the app asks for every file it opens.
+///
+/// # Arguments
+///
+/// * `cx` - Application context.
+///
+/// # Returns
+///
+/// The dialog's answer: the chosen paths, `None` when it was cancelled, or why it failed.
+pub(crate) fn pick_file(cx: &App) -> oneshot::Receiver<anyhow::Result<Option<Vec<PathBuf>>>> {
+    cx.prompt_for_paths(PathPromptOptions {
+        files: true,
+        directories: false,
+        multiple: false,
+        prompt: None,
+    })
 }
 
 /// The status-bar item showing a [`Binary`]'s status line.

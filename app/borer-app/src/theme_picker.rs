@@ -21,12 +21,13 @@ use ui::prelude::*;
 use ui::{ListItem, ListItemSpacing};
 use workspace::{DismissDecision, ModalView, Workspace};
 
-use crate::actions::SelectTheme;
+use crate::actions::{ImportTheme, SelectTheme};
 use crate::app_settings::{choose_theme, save_settings};
 use crate::binary::Binary;
 use crate::commands;
 
-/// Registers the theme picker's command on `workspace`, over the window's `binary`.
+/// Registers the theme commands on `workspace`, over the window's `binary`: the picker, and
+/// importing a theme file ([`crate::theme_import::prompt`]).
 ///
 /// # Arguments
 ///
@@ -40,6 +41,9 @@ pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
             toggle(workspace, window, cx);
         },
     );
+    commands::register(workspace, binary, |_, _: &ImportTheme, window, cx| {
+        crate::theme_import::prompt(window, cx);
+    });
 }
 
 /// Opens the theme picker over `workspace`, or closes the one open.

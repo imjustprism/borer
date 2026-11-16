@@ -355,10 +355,10 @@ impl Item for StartItem {
         &self,
         _active_pane: &Pane,
         dropped: &dyn Any,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut App,
     ) -> bool {
-        open_dropped(&self.binary, dropped, cx)
+        open_dropped(&self.binary, dropped, window, cx)
     }
 }
 

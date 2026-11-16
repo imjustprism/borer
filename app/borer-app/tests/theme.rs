@@ -25,13 +25,15 @@ use borer_app::shell::Shell;
 use borer_app::theme_contract::{
     Failure, GRADES, TEXT_FLOOR, check, contrast, grade_rules, syntax_color, text_floors,
 };
+use borer_app::theme_import::{ImportReport, import, read_candidate};
 use borer_app::theme_picker::ThemePicker;
 use borer_app::user_themes::{MAX_THEME_BYTES, MAX_THEME_ENTRIES, notice_id};
 use borer_engine::program::checked_metadata;
 use fs::Fs as _;
+use futures::StreamExt as _;
 use gpui::{
-    AppContext as _, BorrowAppContext as _, Entity, Hsla, ReadGlobal as _, Refineable as _, Rgba,
-    TestAppContext, VisualTestContext, px,
+    AppContext as _, BorrowAppContext as _, Entity, ExternalPaths, FileDropEvent, Hsla,
+    ReadGlobal as _, Refineable as _, Rgba, TestAppContext, VisualTestContext, px,
 };
 use project::DisableAiSettings;
 use settings::{BufferLineHeight, Settings as _, SettingsStore, ThemeAppearanceMode, ThemeColor};
@@ -761,4 +763,172 @@ async fn the_theme_picker_previews_keeps_and_puts_back(cx: &mut TestAppContext) 
         workspace.active_modal::<ThemePicker>(cx).is_some()
     });
     assert!(!open);
+}
+
+/// Returns the names in the themes folder, sorted.
+async fn themes_folder(app_state: &AppState) -> Vec<String> {
+    let entries = app_state.fs.read_dir(paths::themes_dir()).await;
+    let entries: Vec<_> = entries.expect("the folder lists").collect().await;
+    let mut names: Vec<String> = entries
+        .into_iter()
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .expect("named")
+                .to_string_lossy()
+                .into()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// A theme file imports byte for byte into the themes folder and is registered, its source
+/// untouched; a file name already in the folder is refused with that file's path, a theme
+/// name another file holds with that file, and one of the app's own theme names as such; a
+/// file over the size cap and a JSON file that is not a theme family are refused with
+/// their reasons; a refusal writes nothing.
+#[gpui::test]
+async fn an_import_copies_a_theme_file_and_refuses_the_rest(cx: &mut TestAppContext) {
+    let app_state = boot_with_files(&[], cx).await;
+    let fs = app_state.fs.clone();
+    let fake = fs.as_fake();
+    let elsewhere = std::env::temp_dir().join("borer-app-import");
+    fake.create_dir(&elsewhere).await.expect("made");
+    let source = elsewhere.join("pretty.json");
+    let mut bytes = family("pretty", "pretty dark", "dark", "{}");
+    bytes.extend_from_slice(b"\r\n  ");
+    fake.insert_file(&source, bytes.clone()).await;
+    let registry = cx.update(|cx| ThemeRegistry::global(cx));
+    let read = |path: &Path, cx: &mut TestAppContext| {
+        cx.update(|cx| read_candidate(fs.clone(), path.to_owned(), cx))
+    };
+    let candidate = read(&source, cx).await.expect("reads");
+    let names: Vec<_> = candidate
+        .reports
+        .iter()
+        .map(|(name, ..)| name.to_string())
+        .collect();
+    assert_eq!(names, ["pretty dark"]);
+    let dest = import(fs.as_ref(), candidate, &mut cx.to_async())
+        .await
+        .expect("imports");
+    assert_eq!(dest, paths::themes_dir().join("pretty.json"));
+    assert_eq!(fs.load_bytes(&dest).await.expect("copied"), bytes);
+    assert_eq!(fs.load_bytes(&source).await.expect("kept"), bytes);
+    assert!(registry.get("pretty dark").is_ok());
+    let again = read(&source, cx).await.expect("reads");
+    let clash = import(fs.as_ref(), again, &mut cx.to_async())
+        .await
+        .expect_err("a clash");
+    let said = format!("{clash:#}");
+    assert!(said.contains(&dest.display().to_string()), "{said}");
+    let big = elsewhere.join("big.json");
+    let len = usize::try_from(MAX_THEME_BYTES).expect("fits") + (1 << 20);
+    fake.insert_file(&big, vec![b' '; len]).await;
+    let said = format!("{:#}", read(&big, cx).await.expect_err("too big"));
+    assert!(
+        said.contains("big.json holds") && said.contains("over the"),
+        "{said}"
+    );
+    let other = elsewhere.join("other.json");
+    fake.insert_file(&other, br#"{"hello": 1}"#.to_vec()).await;
+    let said = format!("{:#}", read(&other, cx).await.expect_err("no theme"));
+    assert!(said.contains("other.json is not a theme family"), "{said}");
+    let twin = elsewhere.join("twin.json");
+    fake.insert_file(&twin, family("twin", "pretty dark", "dark", "{}"))
+        .await;
+    let twin = read(&twin, cx).await.expect("reads");
+    let clash = import(fs.as_ref(), twin, &mut cx.to_async())
+        .await
+        .expect_err("a name clash");
+    let said = format!("{clash:#}");
+    assert!(
+        said.contains("a theme named pretty dark is already in"),
+        "{said}"
+    );
+    let own = elsewhere.join("own.json");
+    fake.insert_file(&own, family("own", "borer light", "light", "{}"))
+        .await;
+    let own = read(&own, cx).await.expect("reads");
+    let clash = import(fs.as_ref(), own, &mut cx.to_async())
+        .await
+        .expect_err("the app's own name");
+    let said = format!("{clash:#}");
+    assert!(
+        said.contains("borer light is one of the app's own"),
+        "{said}"
+    );
+    assert_eq!(themes_folder(&app_state).await, ["pretty.json"]);
+}
+
+/// A theme file dropped on a tab opens its report, each theme with the rules it breaks;
+/// import and use copies it and shows its theme. A JSON file with a `themes` key that does
+/// not parse opens the report with why; other JSON opens as a binary.
+#[gpui::test]
+async fn a_dropped_theme_file_opens_its_report(cx: &mut TestAppContext) {
+    let app_state = boot_with_files(&[], cx).await;
+    let fake = app_state.fs.as_fake();
+    let elsewhere = std::env::temp_dir().join("borer-app-drop");
+    fake.create_dir(&elsewhere).await.expect("made");
+    let (source, other) = (elsewhere.join("dropped.json"), elsewhere.join("other.json"));
+    let broken = elsewhere.join("broken.json");
+    fake.insert_file(&broken, br#"{"themes": 1}"#.to_vec())
+        .await;
+    let style = r##"{"syntax": {"borer.register": {"color": "#0B0C0E"}}}"##;
+    fake.insert_file(&source, family("dropped", "dropped dark", "dark", style))
+        .await;
+    fake.insert_file(&other, br#"{"hello": 1}"#.to_vec()).await;
+    let (workspace, cx) = open_window(&app_state, cx);
+    let drop_file = |path: &Path, cx: &mut VisualTestContext| {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let size = cx.update(|window, _| window.viewport_size());
+        let position = gpui::point(size.width * 0.5, size.height * 0.5);
+        let paths = ExternalPaths([path.to_path_buf()].into_iter().collect());
+        cx.simulate_event(FileDropEvent::Entered { position, paths });
+        cx.simulate_event(FileDropEvent::Submit { position });
+        cx.run_until_parked();
+    };
+    let report = |cx: &mut VisualTestContext| {
+        workspace.read_with(cx, |workspace, cx| {
+            workspace.active_modal::<ImportReport>(cx)
+        })
+    };
+    drop_file(&other, cx);
+    assert!(report(cx).is_none());
+    let status = cx.update(|window, cx| {
+        let shell = window.root::<Shell>().flatten().expect("the shell");
+        shell.read(cx).binary().read(cx).status().to_owned()
+    });
+    assert!(status.contains("other.json"), "{status}");
+    drop_file(&broken, cx);
+    let modal = report(cx).expect("a theme-like file opens its report");
+    let why = modal.read_with(cx, |modal, _| modal.refusal().map(ToOwned::to_owned));
+    let why = why.expect("the parse error");
+    assert!(why.contains("broken.json is not a theme family"), "{why}");
+    cx.dispatch_action(menu::Cancel);
+    cx.run_until_parked();
+    assert!(report(cx).is_none());
+    drop_file(&source, cx);
+    let modal = report(cx).expect("the report opens");
+    let register = modal.read_with(cx, |modal, _| {
+        let (_, _, failures) = modal.reports().first().expect("one theme").clone();
+        failures.into_iter().find(
+            |failure| matches!(failure, Failure::Contrast { role, .. } if role == "borer.register"),
+        )
+    });
+    assert!(register.is_some());
+    modal.update(cx, |modal, cx| modal.import(true, cx));
+    cx.run_until_parked();
+    assert!(report(cx).is_none());
+    assert_eq!(shown(cx), "dropped dark");
+    let copied = app_state
+        .fs
+        .load_bytes(&paths::themes_dir().join("dropped.json"))
+        .await;
+    assert_eq!(
+        copied.expect("copied"),
+        family("dropped", "dropped dark", "dark", style)
+    );
 }

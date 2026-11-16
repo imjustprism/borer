@@ -89,6 +89,9 @@ gpui::actions!(
         /// Opens the theme picker: moving the selection shows a theme, Enter keeps it in the
         /// app's settings file, and leaving puts back the one shown before.
         SelectTheme,
+        /// Opens the file dialog for a theme file, checks each of its themes against the
+        /// theme contract and shows the report, from which it is copied into the themes folder.
+        ImportTheme,
     ]
 );
 

@@ -25,8 +25,8 @@ use db::kvp::KeyValueStore;
 use editor::Editor;
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, ExternalPaths, PromptLevel,
-    SharedString, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions, point, px,
-    size,
+    SharedString, TaskExt as _, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions,
+    point, px, size,
 };
 use http_client::{BlockedHttpClient, HttpClientWithUrl};
 use language::LanguageRegistry;
@@ -51,6 +51,8 @@ use crate::measure::CliMode;
 use crate::panels::{PANELS, add_panels};
 use crate::shell::Shell;
 use crate::start_item::keep_filled;
+use crate::theme_import::read_dropped;
+use crate::user_themes::is_theme_path;
 
 /// Directory of the app's settings, keymap, database and logs under the platform's local
 /// data directory, kept apart from an installed Zed's.
@@ -315,24 +317,54 @@ fn erased_editor(window: &mut Window, cx: &mut App) -> Arc<dyn ui_input::ErasedE
 /// Opens the first file dropped on a tab as the window's binary, and refuses a folder with
 /// a status line; nothing of a drop reaches Zed's open path.
 ///
+/// A dropped `.json` file is read in the background as a theme file: one that parses as a
+/// theme family, or as JSON with a top-level `themes` key, opens its import report with
+/// what it holds or why it does not parse ([`crate::theme_import::read_dropped`]); any
+/// other opens as a binary like any other file.
+///
 /// # Arguments
 ///
 /// * `binary` - The window's binary.
 /// * `dropped` - What was dropped.
+/// * `window` - Window the tab is in.
 /// * `cx` - Application context.
 ///
 /// # Returns
 ///
 /// `true` for dropped paths, which the tab took, `false` for anything else (a dragged tab),
 /// which Zed's pane handles.
-pub fn open_dropped(binary: &Entity<Binary>, dropped: &dyn Any, cx: &mut App) -> bool {
+pub fn open_dropped(
+    binary: &Entity<Binary>,
+    dropped: &dyn Any,
+    window: &mut Window,
+    cx: &mut App,
+) -> bool {
     let Some(paths) = dropped.downcast_ref::<ExternalPaths>() else {
         return false;
     };
     if let Some(path) = paths.paths().first() {
         let path = path.clone();
+        let folder = matches!(checked_metadata(&path), Ok(Some(meta)) if meta.is_dir());
+        let shell = window.root::<Shell>().flatten();
+        let workspace = shell.map(|shell| shell.read(cx).workspace().downgrade());
+        if let Some(workspace) = workspace.filter(|_| !folder && is_theme_path(&path)) {
+            let (read, binary) = (
+                read_dropped(<dyn fs::Fs>::global(cx), path.clone(), cx),
+                binary.clone(),
+            );
+            window
+                .spawn(cx, async move |cx| match read.await {
+                    Some(read) => crate::theme_import::show(&workspace, read, cx),
+                    None => {
+                        binary.update(cx, |binary, cx| binary.open_path(path, cx));
+                        Ok(())
+                    }
+                })
+                .detach_and_log_err(cx);
+            return true;
+        }
         binary.update(cx, |binary, cx| {
-            if matches!(checked_metadata(&path), Ok(Some(meta)) if meta.is_dir()) {
+            if folder {
                 binary.set_status(format!("{} {REFUSED_FOLDER}", path.display()), cx);
             } else {
                 binary.open_path(path, cx);
@@ -356,10 +388,10 @@ macro_rules! snapshot_tab {
             &self,
             _active_pane: &workspace::Pane,
             dropped: &dyn std::any::Any,
-            _window: &mut gpui::Window,
+            window: &mut gpui::Window,
             cx: &mut gpui::App,
         ) -> bool {
-            crate::app_view::open_dropped(&self.binary, dropped, cx)
+            crate::app_view::open_dropped(&self.binary, dropped, window, cx)
         }
     };
 }
