@@ -1872,3 +1872,23 @@ fn a_fixup_whose_file_offset_wraps_is_refused() {
     let summary = p.summary();
     assert!(summary.contains("; 1 refused ("), "{summary}");
 }
+
+/// A name far past any typo, as a URI or an argument can carry, finds no
+/// near names in bounded time, where each candidate copied the word.
+#[test]
+fn a_huge_name_finds_no_near_names_quickly() {
+    let _serial = serial();
+    let word = "a".repeat(1 << 25);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test bounds the time a hostile name takes"
+    )]
+    let started = std::time::Instant::now();
+    let near = borer_engine::text::nearest(&word, borer_engine::answer::names(), 3);
+    let took = started.elapsed();
+    assert!(near.is_empty(), "{near:?}");
+    assert!(
+        took < std::time::Duration::from_secs(2),
+        "the search took {took:?}"
+    );
+}

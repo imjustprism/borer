@@ -917,6 +917,11 @@ enum Near {
     Prefix(std::cmp::Reverse<usize>),
 }
 
+/// Longest word, in characters, [`nearest`] looks for names near: past
+/// it no name is one typo away, and each candidate costs the word's length
+/// times its own.
+pub const NEAREST_WORD_MAX: usize = 1024;
+
 /// Returns the candidates nearest a word nothing matched, nearest first.
 ///
 /// A candidate containing the word ranks first, the shortest first; then
@@ -938,7 +943,8 @@ enum Near {
 ///
 /// # Returns
 ///
-/// At most `n` candidates, nearest first; empty for a blank word.
+/// At most `n` candidates, nearest first; empty for a blank word or one
+/// past [`NEAREST_WORD_MAX`] characters.
 #[must_use]
 pub fn nearest<'a>(
     want: &str,
@@ -954,6 +960,9 @@ pub fn nearest<'a>(
     /// Fewest opening characters a candidate shares with the word to rank
     /// by them.
     const PREFIX_MIN: usize = 4;
+    if want.chars().take(NEAREST_WORD_MAX + 1).count() > NEAREST_WORD_MAX {
+        return Vec::new();
+    }
     let want = want.trim().to_lowercase();
     let len = want.chars().count();
     if len == 0 {
