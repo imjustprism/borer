@@ -7,6 +7,7 @@
 
 mod calls;
 mod catalog;
+mod cfg;
 mod compares;
 pub(crate) use compares::reg_touch;
 mod dataflow;
@@ -36,6 +37,7 @@ mod xrefs;
 
 pub use calls::*;
 pub use catalog::*;
+pub use cfg::*;
 pub use dataflow::*;
 pub use decoded::*;
 pub use diff::*;

@@ -40,6 +40,7 @@ mod bundle;
 mod calls;
 mod capabilities;
 mod carve;
+mod cfg;
 mod clr;
 mod clr_il;
 mod com;

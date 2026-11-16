@@ -2,11 +2,12 @@
 //! the plain-text listing ([`disasm_function_with`]) and the typed token
 //! [`View`] ([`disasm_view`]) cannot drift.
 
-use super::{Analysis, Overlay, disasm, name_of, short_name};
+use super::{Analysis, BasicBlock, Overlay, disasm, name_of, short_name};
 use crate::analysis::decompile::lexer::{self, Lex, Piece};
 use crate::analysis::decompile::view::import_id;
 use crate::analysis::syscalls::{self, SyscallSite};
 use crate::isa::{Isa, a32, a64, rv};
+use crate::num::from_usize;
 use crate::program::{Feature, Program, SymbolKind};
 use crate::view::{Builder, Kind, Ref, Sink, Unlinked, View};
 
@@ -131,7 +132,7 @@ pub fn disasm_function_with(
         .function(entry)
         .map_or(0, |f| f.instr_count.min(max_instrs).saturating_mul(48));
     let mut out = String::with_capacity(cap);
-    disasm_into(p, a, o, entry, max_instrs, bytes, &mut out)?;
+    disasm_into(p, a, o, entry, Pick::All(max_instrs), bytes, &mut out)?;
     Some(out)
 }
 
@@ -165,8 +166,64 @@ pub fn disasm_view(
     bytes: Bytes,
 ) -> Option<View> {
     let mut b = Builder::default();
-    disasm_into(p, a, o, entry, max_instrs, bytes, &mut b)?;
+    disasm_into(p, a, o, entry, Pick::All(max_instrs), bytes, &mut b)?;
     b.finish(Unlinked::default())
+}
+
+/// Renders some of a function's blocks as a typed token [`View`], as
+/// [`disasm_view`] renders them all.
+///
+/// The header, then each block named in `starts`, in address order, each
+/// cut with a `// ... N more bytes` row
+/// after its share of instructions: at most the per-block cap, and once
+/// the total is spent one, so every block keeps its first row.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image, read for the code bytes.
+/// * `a` - The analysis.
+/// * `o` - User names and comments.
+/// * `entry` - The function's entry address.
+/// * `bytes` - Whether the raw-bytes column is shown.
+/// * `starts` - The start addresses of the blocks to list, sorted.
+/// * `rows` - Most instructions listed of one block, and in all.
+///
+/// # Returns
+///
+/// The view and the starts of the blocks cut short, in address order;
+/// `None` as for [`disasm_view`].
+#[must_use]
+pub(crate) fn blocks_view(
+    p: &Program,
+    a: &Analysis,
+    o: &Overlay,
+    entry: u64,
+    bytes: Bytes,
+    starts: &[u64],
+    (each, total): (usize, usize),
+) -> Option<(View, Vec<u64>)> {
+    let mut b = Builder::default();
+    let short = disasm_into(
+        p,
+        a,
+        o,
+        entry,
+        Pick::Blocks(starts, each, total),
+        bytes,
+        &mut b,
+    )?;
+    Some((b.finish(Unlinked::default())?, short))
+}
+
+/// Which of a function's instructions a listing shows.
+#[derive(Debug, Clone, Copy)]
+enum Pick<'a> {
+    /// Every block, up to this many instructions in all.
+    All(usize),
+    /// The blocks starting at these sorted addresses, up to the first
+    /// count of instructions of each and the second in all, but at least
+    /// one of each.
+    Blocks(&'a [u64], usize, usize),
 }
 
 /// Writes a function's listing into `out`.
@@ -177,22 +234,27 @@ pub fn disasm_view(
 /// * `a` - The analysis.
 /// * `o` - User names and comments.
 /// * `entry` - The function's entry address.
-/// * `max_instrs` - Hard cap on instructions.
+/// * `pick` - Which blocks to list, and how many instructions.
 /// * `bytes` - Whether the raw-bytes column is shown.
 /// * `out` - The destination sink.
 ///
 /// # Returns
 ///
-/// `Some(())` when `entry` names a function and the architecture disassembles.
+/// The starts of the blocks cut short of their end by [`Pick::Blocks`],
+/// when `entry` names a function and the architecture disassembles.
 fn disasm_into<S: Sink>(
     p: &Program,
     a: &Analysis,
     o: &Overlay,
     entry: u64,
-    max_instrs: usize,
+    pick: Pick<'_>,
     bytes: Bytes,
     out: &mut S,
-) -> Option<()> {
+) -> Option<Vec<u64>> {
+    let (max_instrs, only, each) = match pick {
+        Pick::All(n) => (n, None, None),
+        Pick::Blocks(starts, n, total) => (total, Some(starts), Some(n)),
+    };
     let f = a.function(entry)?;
     let isa = p.isa_for(Feature::Disasm).ok()?;
     out.put(
@@ -221,7 +283,9 @@ fn disasm_into<S: Sink>(
         bytes,
     };
     let mut buf = [0u8; 18];
-    for b in &f.blocks {
+    let listed = |b: &&BasicBlock| only.is_none_or(|s| s.binary_search(&b.start).is_ok());
+    let mut short = Vec::new();
+    for b in f.blocks.iter().filter(listed) {
         let len = usize::try_from(b.end.saturating_sub(b.start)).unwrap_or(0);
         let Some(code) = p.read_va_upto(b.start, len.max(1)) else {
             continue;
@@ -236,15 +300,19 @@ fn disasm_into<S: Sink>(
             out.put(":", Kind::Punct, None);
             out.end_line();
         }
+        let room = each.map_or(budget, |n| n.min(budget).max(1));
+        let mut reached = b.start;
         let shown = match x86.as_mut() {
-            Some((bits, fmt)) => disasm::decode_x86(code, b.start, *bits, budget, |row| {
+            Some((bits, fmt)) => disasm::decode_x86(code, b.start, *bits, room, |row| {
+                reached = row.va.saturating_add(from_usize(row.bytes.len()));
                 ctx.write_head(row.va, row.bytes, out);
                 let targets = fmt.write(&row, out, |va| a.function(va).is_some());
                 ctx.write_tail(row.va, targets.branch, targets.memory, out);
             }),
             None => {
-                let lines = disasm::disassemble_program(p, code, b.start, isa, budget);
+                let lines = disasm::disassemble_program(p, code, b.start, isa, room);
                 for l in &lines {
+                    reached = l.va.saturating_add(from_usize(l.bytes.len()));
                     ctx.write_head(l.va, &l.bytes, out);
                     write_isa_line(&l.text, l.target, isa, a, out);
                     ctx.write_tail(l.va, l.target, None, out);
@@ -252,8 +320,17 @@ fn disasm_into<S: Sink>(
                 lines.len()
             }
         };
+        if each.is_some() && shown == room && reached < b.end {
+            out.put(
+                &format!("// ... {} more bytes", b.end - reached),
+                Kind::Comment,
+                None,
+            );
+            out.end_line();
+            short.push(b.start);
+        }
         budget = budget.saturating_sub(shown);
-        if budget == 0 {
+        if budget == 0 && each.is_none() {
             out.put(
                 &format!("# instruction cap ({max_instrs}) reached"),
                 Kind::Comment,
@@ -263,7 +340,7 @@ fn disasm_into<S: Sink>(
             break;
         }
     }
-    Some(())
+    Some(short)
 }
 
 /// Shared read-only inputs for rendering each instruction row.

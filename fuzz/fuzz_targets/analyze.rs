@@ -1,19 +1,20 @@
 //! Loads arbitrary bytes, lists the code at its entry, analyzes what loads,
-//! decompiles its first functions, reads each text as a view and its next
-//! steps and proposes a struct through its first argument, lists the types
-//! and opens the first page of them, lists what the assertions name, for a
-//! .NET assembly lists its first IL methods and its obfuscator markers, and
-//! reads every chart series table, a hostile spec among them: the path every
-//! agent request takes after a load. The first functions' call graphs and
-//! call tree levels are walked both ways too, and the callers of the first
-//! imports, which have no body.
+//! builds the control-flow graph of its first functions, decompiles them
+//! and reads each text as a view and its next steps, proposes a struct
+//! through its first argument, lists the types and opens the first page of
+//! them, lists what the assertions name, for a .NET assembly lists its first
+//! IL methods and its obfuscator markers, and reads every chart series
+//! table, a hostile spec among them: the path every agent request takes
+//! after a load. The first functions' call graphs and call tree levels are
+//! walked both ways too, and the callers of the first imports, which have no
+//! body.
 
 #![no_main]
 
 use borer_engine::analysis::decompile::decompile;
 use borer_engine::analysis::decompile::view::view_of;
 use borer_engine::analysis::render::{
-    Bytes, Level, Walk, asserted_fields_tsv, call_children, callgraph, disasm_function_with,
+    Bytes, Level, Walk, asserted_fields_tsv, call_children, callgraph, cfg, disasm_function_with,
     disasm_view, next_steps, propose,
 };
 use borer_engine::analysis::stats::stats_tsv;
@@ -65,6 +66,9 @@ fuzz_target!(|data: &[u8]| {
             _ = call_children(&program, &analysis, &overlay, f.entry, level);
         }
         _ = next_steps(&program, &analysis, &overlay, f.entry);
+        if let Ok(g) = cfg(&program, &analysis, &overlay, f.entry) {
+            _ = g.listing.lines();
+        }
         if let Some(text) = decompile(&program, &analysis, &overlay, f.entry) {
             _ = view_of(&program, &analysis, &overlay, f.entry, &text);
         }
