@@ -14,7 +14,8 @@ parent directory in order of first appearance, then last to first), since a
 clone counts against the files read earlier. `dupes.tsv` holds the count:
 more duplicated lines fail, and so do fewer until `--record` lowers the
 number, so it is always today's and can only shrink (ratchet.py). A file
-above `maxLines` or `maxSize` fails the check.
+above `maxLines` or `maxSize` fails the check, and so does one holding a
+`jscpd:ignore` marker.
 """
 
 from __future__ import annotations
@@ -117,6 +118,10 @@ GRAMMAR = [
     ("empty", [Pattern(r"WS+")]),
 ]
 """jscpd's Rust grammar: its ignore markers, Prism's Rust tokens, then whitespace, in match order."""
+
+MARKER = "jscpd:ignore"
+"""The prefix of jscpd's ignore markers, which no tracked file may hold: the
+text between them leaves the count, even inside a comment or rustdoc."""
 
 SKIPPED = {"ignore", "new_line", "empty"}
 """The token types jscpd's default `mild` mode leaves out of a clone."""
@@ -288,11 +293,12 @@ def git_globs(pattern: str) -> list[str]:
     return [f":(glob){head}{part}{tail}" for part in m.group(1).split(",")]
 
 
-def lex(root: Path, path: str) -> tuple[int, int, tuple[list[int], list[int], list[str]]]:
-    """Returns a tracked file's size in bytes, its line count and its [`tokens`]."""
+def lex(root: Path, path: str) -> tuple[int, int, bool, tuple[list[int], list[int], list[str]]]:
+    """Returns a tracked file's size in bytes, its line count, whether it holds
+    a `jscpd:ignore` marker, and its [`tokens`]."""
     raw = (root / path).read_bytes()
     text = raw.decode("utf-8", "replace")
-    return len(raw), text.count("\n") + 1, tokens(text)
+    return len(raw), text.count("\n") + 1, MARKER in text, tokens(text)
 
 
 def scan(root: Path = ROOT) -> dict[str, int]:
@@ -315,9 +321,11 @@ def scan(root: Path = ROOT) -> dict[str, int]:
     total = {"sources": 0, "clones": 0, "duplicated": 0}
     with ProcessPoolExecutor() as pool:
         lexed = pool.map(partial(lex, root), order, chunksize=4)
-        for path, (size, lines, (starts, ends, keys)) in zip(order, lexed, strict=True):
+        for path, (size, lines, marked, (starts, ends, keys)) in zip(order, lexed, strict=True):
             if size > size_cap or lines > config["maxLines"]:
                 sys.exit(f"{path}: {lines} lines, {size} bytes: lift the caps in .jscpd.json")
+            if marked:
+                sys.exit(f"{path}: holds `{MARKER}`, which would hide its clones from the count")
             if lines < min_lines or not keys:
                 continue
             ids = array("I", (interned.setdefault(k, len(interned)) for k in keys)).tobytes()
