@@ -195,3 +195,10 @@ overflow-checks = false
 debug = "limited"
 lto = "thin"
 codegen-units = 1
+
+# The shipped app, as the root workspace's dist profile builds the server:
+# everything release does, plus no symbols.
+[profile.dist]
+inherits = "release"
+panic = "unwind"
+strip = true
