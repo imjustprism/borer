@@ -154,3 +154,21 @@ fn a_checked_header_links_only_the_functions_own_instructions() {
     }
     assert_eq!(v.uses(&Ref::Address(TEXT + 9)), (vec![(1, 100..111)], 1));
 }
+
+/// A checked line naming one of the function's instructions ten times
+/// links only the first eight: the view decodes a block for each number it
+/// looks at, so it looks at no more.
+#[test]
+fn a_checked_header_links_no_more_than_eight_numbers() {
+    let p = exported_four();
+    let a = Analysis::compute(&p);
+    let named = ["0x140001004"; 10].join(", ");
+    let text = format!(
+        "// checked vs binary: 1/1 blocks: 0 proved vs lift; disagree at {named}; unchecked: C spelling\nuint64_t fa(void)\n{{\n    return 0;\n}}\n"
+    );
+    let v = view_of(&p, &a, &Overlay::default(), TEXT, &text).expect("a view");
+    assert_eq!(v.spell(), text);
+    let (shown, total) = v.uses(&Ref::Address(TEXT + 4));
+    assert_eq!(total, 8, "{text}");
+    assert!(shown.iter().all(|(i, _)| *i == 0));
+}

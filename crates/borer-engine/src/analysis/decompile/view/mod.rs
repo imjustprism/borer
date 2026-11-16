@@ -68,6 +68,10 @@ const SIGNATURE: &str = "// signature: ";
 /// against the binary, naming the instructions it found disagreeing.
 const CHECKED: &str = "// checked vs binary: ";
 
+/// The most numbers of a checked header line looked at for a link, each
+/// one decoding a block: twice the instructions the line names.
+const CHECKED_WORDS_MAX: usize = 8;
+
 /// One piece of a line and the bytes it spans ([`split`]).
 type Spanned = (Piece, Range<usize>);
 
@@ -1359,6 +1363,8 @@ impl<'a> Reader<'a> {
     /// function's blocks starts ([`Facts::runs_at`]), which is a
     /// [`Kind::Address`] token linked to it.
     ///
+    /// Only the first [`CHECKED_WORDS_MAX`] numbers are looked at.
+    ///
     /// The other header lines stay whole comments: they spell constants
     /// (`compares against 0x1337abcd`) an address can equal, and
     /// resources whose URIs stay text.
@@ -1369,7 +1375,7 @@ impl<'a> Reader<'a> {
     /// * `line` - The line.
     fn put_checked(&self, b: &mut Builder, line: &str) {
         let mut from = 0;
-        for (at, va) in hex_words(line) {
+        for (at, va) in hex_words(line).take(CHECKED_WORDS_MAX) {
             if !self
                 .facts
                 .as_ref()
