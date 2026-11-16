@@ -2,6 +2,7 @@
 //! and whole-function disassembly.
 
 use super::*;
+use crate::analysis::NameSource;
 use crate::analysis::qt::QtMethodKind;
 use crate::isa::{Isa, a64};
 use crate::num::lo8;
@@ -28,9 +29,41 @@ pub struct Selection<'a> {
     /// thunks` or `exception funclets` under the filter that lists only
     /// them.
     pub noun: &'static str,
-    /// The import thunks and exception funclets left out, as a header
-    /// says it after its counts; empty when none were.
-    pub left_out: String,
+    /// The import thunks and exception funclets left out.
+    pub left_out: LeftOut,
+}
+
+/// The import thunks and exception funclets a listing left out, which its
+/// header says after its counts ([`std::fmt::Display`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LeftOut {
+    /// Import thunks left out; zero under the `thunk` filter.
+    pub thunks: usize,
+    /// Exception funclets left out; zero under the `funclet` filter.
+    pub funclets: usize,
+}
+
+impl std::fmt::Display for LeftOut {
+    /// Spells `; N import thunks left out, filter=thunk lists them` and the
+    /// same of the funclets, each only when some were; nothing when none
+    /// were.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.thunks > 0 {
+            write!(
+                f,
+                "; {} import thunks left out, filter=thunk lists them",
+                self.thunks
+            )?;
+        }
+        if self.funclets > 0 {
+            write!(
+                f,
+                "; {} exception funclets left out, filter=funclet lists them",
+                self.funclets
+            )?;
+        }
+        Ok(())
+    }
 }
 
 /// Selects the functions a filter names, for every listing and batch that
@@ -58,8 +91,7 @@ pub fn select_functions<'a>(a: &'a Analysis, o: &Overlay, filter: Option<&str>) 
     let hex_q = q
         .as_deref()
         .map_or("", |q| q.strip_prefix("0x").unwrap_or(q));
-    let mut thunks = 0usize;
-    let mut funclets = 0usize;
+    let mut left_out = LeftOut::default();
     let functions: Vec<&Function> = a
         .functions
         .iter()
@@ -71,11 +103,11 @@ pub fn select_functions<'a>(a: &'a Analysis, o: &Overlay, filter: Option<&str>) 
                 return f.funclet.is_some();
             }
             if f.thunk.is_some() {
-                thunks += 1;
+                left_out.thunks += 1;
                 return false;
             }
             if f.funclet.is_some() {
-                funclets += 1;
+                left_out.funclets += 1;
                 return false;
             }
             match &q {
@@ -84,19 +116,6 @@ pub fn select_functions<'a>(a: &'a Analysis, o: &Overlay, filter: Option<&str>) 
             }
         })
         .collect();
-    let mut left_out = String::new();
-    if thunks > 0 {
-        let _ = write!(
-            left_out,
-            "; {thunks} import thunks left out, filter=thunk lists them"
-        );
-    }
-    if funclets > 0 {
-        let _ = write!(
-            left_out,
-            "; {funclets} exception funclets left out, filter=funclet lists them"
-        );
-    }
     let noun = if only_thunks {
         "import thunks"
     } else if only_funclets {
@@ -126,9 +145,8 @@ pub struct FunctionRow {
     pub callers: usize,
     /// Distinct near call targets it calls.
     pub callees: usize,
-    /// Where the name came from: `usr` for a user name, else the code of
-    /// [`Function::name_source`].
-    pub src: &'static str,
+    /// Where the name came from ([`RowSource::code`] spells it).
+    pub src: RowSource,
     /// The name in force ([`name_of`]).
     pub name: String,
 }
@@ -155,11 +173,32 @@ impl FunctionRow {
             callers: f.callers.len(),
             callees: f.callees.len(),
             src: if o.names.contains_key(&f.entry) {
-                "usr"
+                RowSource::User
             } else {
-                f.name_source.code()
+                RowSource::Found(f.name_source)
             },
             name: name_of(a, o, f.entry),
+        }
+    }
+}
+
+/// Where the name a function row shows came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowSource {
+    /// A user's name in the overlay.
+    User,
+    /// The analysis's own name, from this source ([`Function::name_source`]).
+    Found(NameSource),
+}
+
+impl RowSource {
+    /// Returns the tag the function table prints: `usr` for a user's name,
+    /// else [`NameSource::code`].
+    #[must_use]
+    pub fn code(self) -> &'static str {
+        match self {
+            RowSource::User => "usr",
+            RowSource::Found(source) => source.code(),
         }
     }
 }
@@ -174,9 +213,9 @@ pub struct FunctionRows {
     /// The order the rows are in.
     pub order: FunctionOrder,
     /// Every import thunk and exception funclet left out, counted whether or
-    /// not the filter matches it, as the header says it
-    /// ([`Selection::left_out`]); empty under `thunk` and `funclet`.
-    pub left_out: String,
+    /// not the filter matches it ([`Selection::left_out`]); none under
+    /// `thunk` and `funclet`.
+    pub left_out: LeftOut,
     /// The walk ran out of instruction budget ([`Analysis::incomplete`]), so
     /// the table may be short.
     pub incomplete: bool,
@@ -209,7 +248,14 @@ impl FunctionRows {
             let _ = writeln!(
                 out,
                 "{:#x} {} {} {} {} {} {} {}",
-                r.entry, r.size, r.blocks, r.instrs, r.callers, r.callees, r.src, r.name
+                r.entry,
+                r.size,
+                r.blocks,
+                r.instrs,
+                r.callers,
+                r.callees,
+                r.src.code(),
+                r.name
             );
         }
         out
@@ -1566,15 +1612,15 @@ mod tests {
                 instrs: 9,
                 callers: 0,
                 callees: 2,
-                src: "-",
+                src: RowSource::Found(NameSource::None),
                 name: "sub_1000".to_owned(),
             }
         );
         assert_eq!(
             (by_entry.rows[1].src, by_entry.rows[1].name.as_str()),
-            ("usr", "parse_header")
+            (RowSource::User, "parse_header")
         );
-        assert_eq!(by_entry.rows[2].src, "hlp");
+        assert_eq!(by_entry.rows[2].src, RowSource::Found(NameSource::Helper));
         let by_size = function_rows(&a, &o, None, FunctionOrder::Size, 0, 50);
         assert_eq!(entries(&by_size), [0x1080, 0x1000, 0x1040]);
         let past = function_rows(&a, &o, None, FunctionOrder::Address, 10, 50);
@@ -1604,6 +1650,38 @@ mod tests {
 0x1000 32 2 9 0 2 - sub_1000
 0x1040 32 1 7 1 0 usr parse_header
 "
+        );
+    }
+
+    /// The rows carry what was left out and where each name came from as
+    /// facts, and the header spells them.
+    ///
+    /// # Panics
+    ///
+    /// When a count or a source differs, or the header spells another.
+    #[test]
+    fn rows_type_what_was_left_out_and_each_source() {
+        let (a, o) = listed();
+        let all = function_rows(&a, &o, None, FunctionOrder::Address, 0, 50);
+        assert_eq!(
+            all.left_out,
+            LeftOut {
+                thunks: 1,
+                funclets: 1
+            }
+        );
+        let codes: Vec<&str> = all.rows.iter().map(|r| r.src.code()).collect();
+        assert_eq!(codes, ["-", "usr", "hlp"]);
+        let thunks = function_rows(&a, &o, Some("thunk"), FunctionOrder::Address, 0, 50);
+        assert_eq!(thunks.left_out, LeftOut::default());
+        assert_eq!(thunks.rows[0].src, RowSource::Found(NameSource::Symbol));
+        assert_eq!(
+            LeftOut {
+                thunks: 0,
+                funclets: 2
+            }
+            .to_string(),
+            "; 2 exception funclets left out, filter=funclet lists them"
         );
     }
 

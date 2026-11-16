@@ -973,7 +973,7 @@ fn format_row_cells(row: &FunctionRow) -> Vec<AnyElement> {
         SharedString::from(row.instrs.to_string()).into_any_element(),
         SharedString::from(row.callers.to_string()).into_any_element(),
         SharedString::from(row.callees.to_string()).into_any_element(),
-        SharedString::from(row.src).into_any_element(),
+        SharedString::from(row.src.code()).into_any_element(),
         SharedString::from(row.name.clone()).into_any_element(),
     ]
 }

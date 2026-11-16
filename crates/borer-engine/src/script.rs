@@ -309,7 +309,7 @@ impl Host {
             ("size", Dynamic::from_int(int(row.size))),
             ("instrs", Dynamic::from_int(count(row.instrs))),
             ("blocks", Dynamic::from_int(count(row.blocks))),
-            ("source", row.src.into()),
+            ("source", row.src.code().into()),
         ];
         if edges == Edges::Included {
             pairs.push(("callers", Dynamic::from_array(addrs(f.callers.clone()))));

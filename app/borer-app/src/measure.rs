@@ -524,7 +524,7 @@ pub fn load_large_dll_blocking(nav_cancel: &Cancel) -> anyhow::Result<LargeListR
                     total: TARGET_LIST_ROWS,
                     noun: base.noun,
                     order: base.order,
-                    left_out: base.left_out.clone(),
+                    left_out: base.left_out,
                     incomplete: base.incomplete,
                     rows: base
                         .rows
