@@ -795,6 +795,20 @@ mod tests {
         ]
     }
 
+    /// Nothing outside the tests reaches the window's binary through a view or the status
+    /// line: every view is handed it.
+    #[test]
+    fn no_view_reaches_the_binary_through_another_view() {
+        for (name, text) in sources() {
+            let code = text.split("#[cfg(test)]").next().unwrap_or(text);
+            assert!(!code.contains("binary_of("), "{name} looks the binary up");
+            assert!(
+                !code.contains(".binary()"),
+                "{name} reaches the binary through a view"
+            );
+        }
+    }
+
     /// No module of the app but this one names the engine's compute calls outside its
     /// tests, so each such call goes through [`super::run_engine`] and is counted.
     ///

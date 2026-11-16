@@ -26,7 +26,7 @@ use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use crate::actions::{FocusFilter, Hint, OPEN_HINT, ToggleFunctions};
-use crate::binary::{Binary, SettingsNotice, reading_label};
+use crate::binary::{Binary, BinaryEvent, SettingsNotice, reading_label};
 use crate::card::{Card, Tone};
 use crate::code_view::{CodePalette, Role};
 use crate::decompile_item::{TabMode, code_row_height};
@@ -220,8 +220,8 @@ impl FunctionsPanel {
                     this.request_filter(cx);
                 }
             }),
-            cx.observe_in(&binary, window, |this, binary, window, cx| {
-                this.follow_binary(&binary, window, cx);
+            cx.subscribe_in(&binary, window, |this, _, _: &BinaryEvent, window, cx| {
+                this.follow(window, cx);
             }),
             cx.observe_global::<SettingsStore>(Self::relayout),
             cx.observe_global::<GlobalTheme>(Self::relayout),
@@ -425,46 +425,33 @@ impl FunctionsPanel {
         self.relayout(cx);
     }
 
-    /// Lists the functions of a binary that finished loading and opens its first one, or
-    /// empties the table while a load runs.
+    /// Lists the functions of the binary open now and opens its first one, or empties the
+    /// table when none is open; it runs on every [`BinaryEvent`] and reads the binary, not
+    /// the event, so a panel added after a load and a load closed in the same update both
+    /// show what is open.
     ///
-    /// # Arguments
-    ///
-    /// * `binary` - The binary the panel follows.
-    /// * `window` - Window the panel is in.
-    /// * `cx` - Panel context.
-    fn follow_binary(
-        &mut self,
-        binary: &Entity<Binary>,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let Some(loaded) = binary.read(cx).loaded().cloned() else {
-            if self.shown.take().is_some() {
-                self.rows = None;
-                self.filter_job.stop();
-                self.relayout(cx);
-            }
-            return;
-        };
-        if self.shown.as_ref().is_some_and(|s| Arc::ptr_eq(s, &loaded)) {
-            return;
-        }
-        let rows = loaded.initial_rows.clone();
-        self.show(loaded, rows, window, cx);
-        self.open_row(0, TabMode::Preview, window, cx);
-    }
-
-    /// Lists the functions of the panel's binary as it stands, for a panel added after the
-    /// binary loaded, which it observes only from then on.
+    /// Never call it while the workspace is being updated: opening the first function
+    /// updates the workspace.
     ///
     /// # Arguments
     ///
     /// * `window` - Window the panel is in.
     /// * `cx` - Panel context.
     pub fn follow(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        let binary = self.binary.clone();
-        self.follow_binary(&binary, window, cx);
+        match self.binary.read(cx).loaded().cloned() {
+            Some(loaded) => {
+                let rows = loaded.initial_rows.clone();
+                self.show(loaded, rows, window, cx);
+                self.open_row(0, TabMode::Preview, window, cx);
+            }
+            None => {
+                if self.shown.take().is_some() {
+                    self.rows = None;
+                    self.filter_job.stop();
+                    self.relayout(cx);
+                }
+            }
+        }
     }
 
     /// Filters the rows by the editor's query in the background, dropping the filter before.
@@ -843,6 +830,8 @@ impl Panel for FunctionsPanel {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
     use std::sync::Arc;
 
     use borer_engine::analysis::render::{
@@ -855,7 +844,8 @@ mod tests {
     use super::{ENTRY_SELECTOR, Empty, FunctionsPanel, ROW_SELECTOR};
     use crate::actions::FocusFilter;
     use crate::app_view::add_functions_panel;
-    use crate::app_view::tests::{init, open, sample};
+    use crate::app_view::tests::{init, open, sample, shown};
+    use crate::binary::BinaryEvent;
     use crate::worker::Jobs;
 
     /// Vertical padding of a cell of Zed's table at the pin, both sides together, in rems
@@ -1185,6 +1175,61 @@ mod tests {
         draw(cx);
         let empty = panel.read_with(cx, |panel, cx| panel.empty(cx));
         assert_eq!(empty, Some(Empty::NoMatch("zzz".into())));
+    }
+
+    /// A finished load emits `Opened` once and a started or failed one `Closed`; the panel
+    /// lists the binary and opens its first function, clears while a load runs, and lists
+    /// again on the next finished load.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the events or the panel say otherwise.
+    #[gpui::test]
+    fn the_functions_panel_follows_opened_and_closed(cx: &mut TestAppContext) {
+        the_functions_panel_follows_opened_and_closed_steps(cx);
+    }
+
+    /// Runs the steps of [`the_functions_panel_follows_opened_and_closed`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`the_functions_panel_follows_opened_and_closed`]
+    /// says.
+    fn the_functions_panel_follows_opened_and_closed_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (workspace, cx) = open_docked(&app_state, cx);
+        let panel = panel_of(&workspace, cx);
+        let binary = panel.read_with(cx, |panel, _| panel.binary().clone());
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let log = seen.clone();
+        let _events = cx.update(|_, cx| {
+            cx.subscribe(&binary, move |_, event: &BinaryEvent, _| {
+                log.borrow_mut()
+                    .push(matches!(event, BinaryEvent::Opened(_)));
+            })
+        });
+        let listed = |cx: &mut VisualTestContext| {
+            panel.read_with(cx, |panel, _| panel.rows().map(|rows| rows.rows.len()))
+        };
+        let loaded = sample();
+        let all = Some(loaded.initial_rows.rows.len());
+        let first = loaded.initial_rows.rows.first().map(|row| row.entry);
+        binary.update(cx, |binary, cx| binary.finish_load(Ok(loaded.clone()), cx));
+        cx.run_until_parked();
+        assert_eq!(*seen.borrow(), [true]);
+        assert_eq!(listed(cx), all);
+        assert_eq!(shown(&workspace, cx).map(|(entry, _)| entry), first);
+        let missing = std::env::temp_dir().join("borer-app-no-such-binary.exe");
+        binary.update(cx, |binary, cx| binary.open_path(missing.clone(), cx));
+        assert_eq!(*seen.borrow(), [true, false]);
+        assert_eq!(listed(cx), None);
+        let reading = panel.read_with(cx, |panel, cx| panel.empty(cx));
+        assert_eq!(reading, Some(Empty::Reading(missing)));
+        cx.run_until_parked();
+        assert_eq!(*seen.borrow(), [true, false, false]);
+        binary.update(cx, |binary, cx| binary.finish_load(Ok(loaded), cx));
+        assert_eq!(*seen.borrow(), [true, false, false, true]);
+        assert_eq!(listed(cx), all);
     }
 
     /// The filter's hint shows the binding the keymap holds for [`FocusFilter`], and a new

@@ -18,8 +18,8 @@ use editor::{
 };
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, ExternalPaths, FocusHandle,
-    Focusable, HighlightStyle, InteractiveElement as _, IntoElement, MouseButton, MouseUpEvent,
+    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    HighlightStyle, InteractiveElement as _, IntoElement, MouseButton, MouseUpEvent,
     ParentElement as _, Pixels, Render, Reservation, SharedString, Styled as _, Subscription,
     TaskExt as _, WeakEntity, Window, div, px,
 };
@@ -35,7 +35,7 @@ use workspace::searchable::SearchableItemHandle;
 use workspace::{Item, ItemNavHistory, Pane, Workspace};
 
 use crate::actions::{BACK_HINT, Hint};
-use crate::app_view::{binary_of, open_dropped};
+use crate::app_view::open_dropped;
 use crate::binary::Binary;
 use crate::card::{Card, Tone};
 use crate::code_semantics::for_one_view;
@@ -816,9 +816,8 @@ impl DecompileItem {
     /// * `status` - The line.
     /// * `cx` - Application context.
     fn say(&self, status: String, cx: &mut App) {
-        if let Some(binary) = binary_of(&self.workspace, cx) {
-            binary.update(cx, |binary, cx| binary.set_status(status, cx));
-        }
+        self.binary
+            .update(cx, |binary, cx| binary.set_status(status, cx));
     }
 
     /// Keeps this tab and opens `place` in the preview tab, once the current update ends.
@@ -1010,10 +1009,7 @@ impl Item for DecompileItem {
         _window: &mut Window,
         cx: &mut App,
     ) -> bool {
-        match binary_of(&self.workspace, cx) {
-            Some(binary) => open_dropped(&binary, dropped, cx),
-            None => dropped.is::<ExternalPaths>(),
-        }
+        open_dropped(&self.binary, dropped, cx)
     }
 }
 
@@ -1578,5 +1574,26 @@ pub(crate) mod tests {
             .collect();
         assert!(!want.is_empty());
         assert_eq!(found, want);
+    }
+
+    /// Following an import's link names it in the window's status line, from inside the
+    /// workspace's own update, as Enter over an import does.
+    #[gpui::test]
+    fn following_an_import_names_it_in_the_status_line(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
+        let loaded = sample();
+        let tab = open_tab(&workspace, &loaded, (CALLER, Form::Decompile), cx);
+        let view = tab.read_with(cx, |item, _| item.code().unwrap().get(0).unwrap().0.clone());
+        workspace.update_in(cx, |_, window, cx| {
+            tab.update(cx, |item, cx| {
+                item.follow(&view, &Ref::Import(0x2000), (0, 0), window, cx);
+            });
+        });
+        let status = app
+            .binary
+            .read_with(cx, |binary, _| binary.status().to_owned());
+        assert!(status.ends_with("is an import, at slot 0x2000"), "{status}");
     }
 }

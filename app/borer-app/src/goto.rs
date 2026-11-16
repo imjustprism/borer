@@ -11,7 +11,7 @@ use picker::{Picker, PickerDelegate};
 use ui::{Color, Label, LabelCommon as _, ListItem, ListItemSpacing, prelude::*};
 use workspace::Workspace;
 
-use crate::binary::{Binary, StatusLine};
+use crate::binary::Binary;
 use crate::decompile_item::{DecompileItem, Form, TabMode};
 use crate::places::{Opening, Place, open};
 use crate::worker::{GoToAnswer, LoadedBinary, goto_blocking, spawn_engine};
@@ -106,24 +106,27 @@ pub struct GoToDelegate {
     selected: usize,
 }
 
-/// Opens the go-to picker over the binary of the active code tab, else of the functions
-/// panel; nothing opens before a binary is loaded.
+/// Opens the go-to picker over the binary of the active code tab, else the window's
+/// binary; nothing opens before a binary is loaded.
 ///
 /// # Arguments
 ///
 /// * `workspace` - The workspace.
+/// * `binary` - The window's binary.
 /// * `window` - Window the workspace is in.
 /// * `cx` - Workspace context.
-pub fn toggle(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<'_, Workspace>) {
+pub fn toggle(
+    workspace: &mut Workspace,
+    binary: &Entity<Binary>,
+    window: &mut Window,
+    cx: &mut Context<'_, Workspace>,
+) {
     let tab = workspace.active_item_as::<DecompileItem>(cx);
     let form = tab
         .as_ref()
         .map_or(Form::Decompile, |item| item.read(cx).form());
     let tab = tab.map(|item| item.read(cx).loaded().clone());
-    let line = workspace.status_bar().read(cx).item_of_type::<StatusLine>();
-    let Some(binary) = line.map(|line| line.read(cx).binary().clone()) else {
-        return;
-    };
+    let binary = binary.clone();
     let Some(loaded) = tab.or_else(|| binary.read(cx).loaded().cloned()) else {
         return;
     };

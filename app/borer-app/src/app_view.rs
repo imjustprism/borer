@@ -25,8 +25,8 @@ use db::kvp::KeyValueStore;
 use editor::Editor;
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, ExternalPaths, PromptLevel,
-    SharedString, TitlebarOptions, WeakEntity, Window, WindowBounds, WindowHandle, WindowOptions,
-    point, px, size,
+    SharedString, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions, point, px,
+    size,
 };
 use http_client::{BlockedHttpClient, HttpClientWithUrl};
 use language::LanguageRegistry;
@@ -326,23 +326,6 @@ pub fn open_dropped(binary: &Entity<Binary>, dropped: &dyn Any, cx: &mut App) ->
     true
 }
 
-/// Returns the binary of the window `workspace` is in, which the status line shows, when
-/// the workspace is still open.
-///
-/// # Arguments
-///
-/// * `workspace` - The window's workspace.
-/// * `cx` - Application context.
-pub fn binary_of(workspace: &WeakEntity<Workspace>, cx: &App) -> Option<Entity<Binary>> {
-    let workspace = workspace.upgrade()?;
-    let line = workspace
-        .read(cx)
-        .status_bar()
-        .read(cx)
-        .item_of_type::<StatusLine>()?;
-    Some(line.read(cx).binary().clone())
-}
-
 /// A window's workspace and the binary it has open.
 #[derive(Debug, Clone)]
 pub struct AppWindow {
@@ -533,7 +516,7 @@ pub fn add_functions_panel(
 /// * `workspace` - The workspace.
 /// * `binary` - The window's binary.
 fn register_actions(workspace: &mut Workspace, binary: &Entity<Binary>) {
-    let (open, add) = (binary.clone(), binary.clone());
+    let (open, add, go) = (binary.clone(), binary.clone(), binary.clone());
     workspace
         .register_action(move |_, _: &Open, _, cx| {
             open.update(cx, |binary, cx| binary.prompt_open(cx));
@@ -562,8 +545,8 @@ fn register_actions(workspace: &mut Workspace, binary: &Entity<Binary>) {
                 item.update(cx, |item, cx| item.toggle_listing(window, cx));
             }
         })
-        .register_action(|workspace, _: &GoTo, window, cx| {
-            crate::goto::toggle(workspace, window, cx);
+        .register_action(move |workspace, _: &GoTo, window, cx| {
+            crate::goto::toggle(workspace, &go, window, cx);
         });
     let (close, settings) = (binary.clone(), binary.clone());
     workspace
@@ -699,7 +682,7 @@ pub(crate) mod tests {
     use super::{
         AppWindow, DEFAULT_DOCK_STATE_KEY, REFUSED_FOLDER, configure, data_dir, new_workspace,
     };
-    use crate::actions::ToggleFunctionColumns;
+    use crate::actions::{Open, ToggleFunctionColumns};
     use crate::binary::{Binary, StatusLine};
     use crate::decompile_item::{DecompileItem, TabMode};
     use crate::function_columns::Columns;
@@ -1165,6 +1148,119 @@ pub(crate) mod tests {
         });
         assert_eq!(folders, 0);
         assert!(cx.update(|_, cx| DisableAiSettings::get_global(cx).disable_ai));
+    }
+
+    /// A panel docked after a load lists the open binary and opens its first function.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the late panel shows no rows or opens nothing.
+    #[gpui::test]
+    fn the_panel_follows_what_is_open_not_what_was_sent(cx: &mut TestAppContext) {
+        the_panel_follows_what_is_open_not_what_was_sent_steps(cx);
+    }
+
+    /// Runs the steps of [`the_panel_follows_what_is_open_not_what_was_sent`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`the_panel_follows_what_is_open_not_what_was_sent`]
+    /// says.
+    fn the_panel_follows_what_is_open_not_what_was_sent_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let loaded = sample();
+        app.binary
+            .update(cx, |binary, cx| binary.finish_load(Ok(loaded.clone()), cx));
+        cx.run_until_parked();
+        let workspace = app.workspace;
+        let panel = workspace.read_with(cx, |workspace, cx| workspace.panel::<FunctionsPanel>(cx));
+        let panel = panel.unwrap();
+        panel.update_in(cx, |panel, window, cx| panel.follow(window, cx));
+        cx.run_until_parked();
+        assert_eq!(panel.read_with(cx, |panel, cx| panel.empty(cx)), None);
+        let first = loaded.initial_rows.rows.first().map(|row| row.entry);
+        assert_eq!(shown(&workspace, cx).map(|(entry, _)| entry), first);
+    }
+
+    /// A load that starts in the update another finished in leaves no tab of the first.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a tab of the closed load opens.
+    #[gpui::test]
+    fn a_load_closed_in_its_update_opens_no_tab(cx: &mut TestAppContext) {
+        a_load_closed_in_its_update_opens_no_tab_steps(cx);
+    }
+
+    /// Runs the steps of [`a_load_closed_in_its_update_opens_no_tab`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`a_load_closed_in_its_update_opens_no_tab`] says.
+    fn a_load_closed_in_its_update_opens_no_tab_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let (workspace, binary) = (app.workspace, app.binary);
+        let missing = std::env::temp_dir().join("borer-app-no-such-binary.exe");
+        binary.update(cx, |binary, cx| {
+            binary.finish_load(Ok(sample()), cx);
+            binary.open_path(missing, cx);
+        });
+        cx.run_until_parked();
+        let tab = workspace.read_with(cx, |workspace, cx| {
+            workspace.active_item_as::<DecompileItem>(cx).is_some()
+        });
+        assert!(!tab, "a tab of the closed load opened");
+    }
+
+    /// Open asks for a file with no functions panel docked.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no path prompt appears.
+    #[gpui::test]
+    fn open_works_with_no_panel_docked(cx: &mut TestAppContext) {
+        open_works_with_no_panel_docked_steps(cx);
+    }
+
+    /// Runs the steps of [`open_works_with_no_panel_docked`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`open_works_with_no_panel_docked`] says.
+    fn open_works_with_no_panel_docked_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (_, cx) = open(&app_state, cx);
+        cx.dispatch_action(Open);
+        cx.run_until_parked();
+        assert!(cx.did_prompt_for_paths());
+    }
+
+    /// A file dropped on the start tab starts the window's binary reading it with no
+    /// functions panel docked.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the binary never tried to load the file.
+    #[gpui::test]
+    fn a_dropped_file_opens_with_no_panel_docked(cx: &mut TestAppContext) {
+        a_dropped_file_opens_with_no_panel_docked_steps(cx);
+    }
+
+    /// Runs the steps of [`a_dropped_file_opens_with_no_panel_docked`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`a_dropped_file_opens_with_no_panel_docked`] says.
+    fn a_dropped_file_opens_with_no_panel_docked_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let binary = app.binary;
+        let file = std::env::temp_dir().join("borer-app-no-such-dropped.exe");
+        drop_on_center(&file, cx);
+        let failed = binary.read_with(cx, |binary, _| binary.load_error().map(str::to_owned));
+        assert!(failed.is_some(), "the drop started no load");
     }
 
     /// Zed's back and forward walk the places a decompile tab was left at: a jump inside

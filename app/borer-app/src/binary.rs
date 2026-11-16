@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
-    App, Context, Entity, Global, IntoElement, ParentElement as _, PathPromptOptions, Render,
-    SharedString, Styled as _, Subscription, Task, Window,
+    App, Context, Entity, EventEmitter, Global, IntoElement, ParentElement as _, PathPromptOptions,
+    Render, SharedString, Styled as _, Subscription, Task, Window,
 };
 use ui::{Color, Label, LabelCommon as _, LabelSize, h_flex};
 use workspace::{HideStatusItem, ItemHandle, StatusItemView};
@@ -53,6 +53,16 @@ impl Loading {
     }
 }
 
+/// What changed in a window's binary.
+#[derive(Debug, Clone)]
+pub enum BinaryEvent {
+    /// A load finished or a binary was shown: the functions panel lists this binary.
+    Opened(Arc<LoadedBinary>),
+    /// No binary is open any more: a load started, failed or was cancelled, or the binary
+    /// was closed.
+    Closed,
+}
+
 /// The binary a window has open, or is loading, and the status line of that load.
 pub struct Binary {
     /// The analyzed binary, once a load has finished.
@@ -79,6 +89,8 @@ pub struct Binary {
     /// The running write of the binaries opened before.
     remember_task: Option<Task<()>>,
 }
+
+impl EventEmitter<BinaryEvent> for Binary {}
 
 impl std::fmt::Debug for Binary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -236,6 +248,7 @@ impl Binary {
             path: path.clone(),
             since: cx.background_executor().now(),
         });
+        cx.emit(BinaryEvent::Closed);
         cx.notify();
         let request = spawn_engine(reading_label(&path), cx, move || load_binary_blocking(path));
         self.load_flag = request.flag();
@@ -271,6 +284,7 @@ impl Binary {
         self.loaded = None;
         self.error = None;
         self.status = NO_BINARY.to_owned();
+        cx.emit(BinaryEvent::Closed);
         cx.notify();
     }
 
@@ -288,6 +302,7 @@ impl Binary {
         };
         self.load_flag.raise();
         self.status = format!("cancelled reading {}", loading.name());
+        cx.emit(BinaryEvent::Closed);
         cx.notify();
     }
 
@@ -297,7 +312,7 @@ impl Binary {
     ///
     /// * `result` - Outcome of [`load_binary_blocking`].
     /// * `cx` - Binary context.
-    fn finish_load(
+    pub(crate) fn finish_load(
         &mut self,
         result: anyhow::Result<Arc<LoadedBinary>>,
         cx: &mut Context<'_, Self>,
@@ -309,6 +324,7 @@ impl Binary {
                 let msg = format!("{err:#}");
                 self.status = format!("load failed: {msg}");
                 self.error = Some(msg);
+                cx.emit(BinaryEvent::Closed);
                 cx.notify();
             }
         }
@@ -345,7 +361,8 @@ impl Binary {
             let why = format!("recent binaries not kept: {err:#}");
             this.update(cx, |binary, cx| binary.set_status(why, cx));
         }));
-        self.loaded = Some(loaded);
+        self.loaded = Some(loaded.clone());
+        cx.emit(BinaryEvent::Opened(loaded));
         cx.notify();
     }
 }
