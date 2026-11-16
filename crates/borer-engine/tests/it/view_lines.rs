@@ -7,6 +7,7 @@
 )]
 
 use crate::view::{TEXT, exported_four, filling, tokens};
+use borer_engine::analysis::decompile::replay::{BlockCheck, TextCheck};
 use borer_engine::analysis::decompile::view::{view, view_of};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::view::{Kind, Ref, USES_MAX};
@@ -171,4 +172,30 @@ fn a_checked_header_links_no_more_than_eight_numbers() {
     let (shown, total) = v.uses(&Ref::Address(TEXT + 4));
     assert_eq!(total, 8, "{text}");
     assert!(shown.iter().all(|(i, _)| *i == 0));
+}
+
+/// The checked line the replay writes, read in a view, links the
+/// function's instructions it names and nothing else: the view reads the
+/// replay's own wording.
+#[test]
+fn the_replays_checked_line_links_the_instructions_it_names() {
+    let p = exported_four();
+    let a = Analysis::compute(&p);
+    let check = TextCheck {
+        blocks: vec![BlockCheck::default()],
+        disagree: vec![TEXT + 2, TEXT + 4, TEXT + 9, TEXT + 0xd, TEXT + 0x40],
+    };
+    let text = format!(
+        "{}\nuint64_t fa(void)\n{{\n    return 0;\n}}\n",
+        check.header()
+    );
+    let v = view_of(&p, &a, &Overlay::default(), TEXT, &text).expect("a view");
+    assert_eq!(v.spell(), text);
+    let linked: Vec<Option<Ref>> = v
+        .tokens(0)
+        .filter(|(_, kind, _)| *kind == Kind::Address)
+        .map(|(.., link)| link.cloned())
+        .collect();
+    let want = [4, 9, 0xd].map(|off| Some(Ref::Address(TEXT + off)));
+    assert_eq!(linked, want, "{text}");
 }
