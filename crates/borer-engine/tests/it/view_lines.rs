@@ -14,7 +14,7 @@ use borer_engine::analysis::decompile::decompile_named;
 use borer_engine::analysis::decompile::replay::{BlockCheck, TextCheck};
 use borer_engine::analysis::decompile::view::{view, view_of};
 use borer_engine::analysis::edit::{Edit, Force, commit, plan};
-use borer_engine::analysis::protos::{VarKey, slot_words};
+use borer_engine::analysis::protos::{Proto, VarKey, slot_words};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::dwarf::Subprogram;
 use borer_engine::view::{Kind, Ref, USES_MAX};
@@ -370,4 +370,50 @@ fn a_debug_name_spelling_another_slot_is_refused() {
     let edits = rename(&local, None, "filled");
     let (named, _) = committed((&p, &a), &edits, VarKey::Slot(off));
     assert_eq!(named.as_deref(), Some("filled"));
+}
+
+/// A parameter only the debug information names renames through the edit path.
+///
+/// It links with its position, and renaming it by that name states it in
+/// the overlay; under a stated prototype, whose names the text spells
+/// instead, the debug name names nothing.
+///
+/// The image is [`filling`]'s, its one parameter named `inbound` by a
+/// hand-built debug record.
+#[test]
+fn a_debug_named_parameter_renames_through_the_edit_path() {
+    let inbound = borer_engine::dwarf::Parameter {
+        name: "inbound".to_owned(),
+        type_name: None,
+    };
+    let (p, a) = debugged(vec![inbound], BTreeMap::new());
+    let o = Overlay::default();
+    let text = decompile_named(&p, &a, &o, TEXT).expect("a text");
+    let v = view(&p, &a, &o, TEXT).expect("a view");
+    let want = Ref::Variable {
+        function: TEXT,
+        name: "inbound".into(),
+        key: Some(VarKey::Param(0)),
+    };
+    let links: Vec<Option<Ref>> = tokens(&v)
+        .into_iter()
+        .filter(|(_, w, ..)| w == "inbound")
+        .map(|(.., link)| link)
+        .collect();
+    assert!(
+        !links.is_empty() && links.iter().all(|l| *l == Some(want.clone())),
+        "{text}"
+    );
+    let edits = rename("inbound", None, "outbound");
+    let (named, after) = committed((&p, &a), &edits, VarKey::Param(0));
+    assert_eq!(named.as_deref(), Some("outbound"));
+    let renamed = decompile_named(&p, &a, &after, TEXT).expect("a text");
+    assert!(
+        renamed.contains("outbound") && !renamed.contains("inbound"),
+        "{renamed}"
+    );
+    let mut prototyped = o;
+    let proto = Proto::parse("uint64_t filler(uint64_t z)").expect("a prototype");
+    prototyped.prototypes.insert(TEXT, proto);
+    assert!(plan(&p, &a, &prototyped, &edits, Force::Refuse).is_err());
 }
