@@ -16,6 +16,12 @@ more duplicated lines fail, and so do fewer until `--record` lowers the
 number, so it is always today's and can only shrink (ratchet.py). A file
 above `maxLines` or `maxSize` fails the check, and so does one holding a
 `jscpd:ignore` marker.
+
+The port has one known divergence from jscpd: an ignore block with an empty
+body (`jscpd:ignore-start` straight before `jscpd:ignore-end`). There jscpd
+emits an empty token whose value is not text and whose line count runs one
+backwards, and the port does not. Since no tracked file may hold a marker,
+the case cannot reach the count.
 """
 
 from __future__ import annotations
