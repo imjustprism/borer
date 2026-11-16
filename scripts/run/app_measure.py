@@ -490,6 +490,7 @@ def _spawn_bench_proc(
     *,
     with_stdin: bool = False,
 ) -> tuple[subprocess.Popen[str], Callable[[], str]]:
+    """Start `cmd` suspended; `NetWatcher.watch_while` joins it to its job, then resumes it."""
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE if with_stdin else None,
@@ -497,6 +498,7 @@ def _spawn_bench_proc(
         stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
+        creationflags=_CREATE_SUSPENDED,
     )
     err_chunks: list[str] = []
 
@@ -696,6 +698,21 @@ class PROCESSENTRY32W(ctypes.Structure):
     ]
 
 
+def _resume_process(pid: int) -> None:
+    """Resume a process started suspended."""
+    kernel32 = ctypes.windll.kernel32
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    handle = kernel32.OpenProcess(_PROCESS_SUSPEND_RESUME, False, pid)
+    if not handle:
+        raise OSError(f"OpenProcess({pid}) failed with Win32 error {ctypes.GetLastError()}")
+    try:
+        status = ctypes.windll.ntdll.NtResumeProcess(ctypes.c_void_p(handle))
+        if status != 0:
+            raise OSError(f"NtResumeProcess({pid}) failed with status {status:#x}")
+    finally:
+        kernel32.CloseHandle(ctypes.c_void_p(handle))
+
+
 def _query_child_processes(pid: int) -> list[dict[str, Any]]:
     """Return every live process whose parent is `pid`, from a Toolhelp snapshot."""
     kernel32 = ctypes.windll.kernel32
@@ -717,6 +734,8 @@ def _query_child_processes(pid: int) -> list[dict[str, Any]]:
     return children
 
 
+_CREATE_SUSPENDED = 0x00000004
+_PROCESS_SUSPEND_RESUME = 0x0800
 _PROCESS_SET_QUOTA = 0x0100
 _PROCESS_TERMINATE = 0x0001
 _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
@@ -736,10 +755,12 @@ class JOBOBJECT_BASIC_ACCOUNTING_INFORMATION(ctypes.Structure):
 
 
 class ProcessJob:
-    """A job object holding one spawned process and every process it starts after.
+    """A job object holding one spawned process and every process it starts.
 
     The job counts a child however briefly it lives, which polling the process table
-    misses. The process joins right after it is spawned, before it starts any child.
+    misses. The process joins while it is still suspended, before it runs at all. A
+    program the app hands to the shell or to a COM broker (opening a URL, say) runs
+    outside the job, as a child of that broker, and is not counted.
     """
 
     def __init__(self, pid: int) -> None:
@@ -865,6 +886,8 @@ class NetWatcher:
             self._jobs[phase] = ProcessJob(proc.pid)
         except OSError as exc:
             self._record_failure(phase, f"job object setup failed ({exc})")
+        finally:
+            _resume_process(proc.pid)
         self.poll_proc(proc, phase)
 
         def runner() -> None:
@@ -894,7 +917,8 @@ def child_count_self_test() -> str | None:
     """
     script = "import subprocess, time; subprocess.run(['cmd.exe', '/c', 'exit']); time.sleep(1.0)"
     watcher = NetWatcher()
-    proc, get_stderr = _spawn_bench_proc([sys.executable, "-I", "-c", script])
+    python = getattr(sys, "_base_executable", sys.executable)
+    proc, get_stderr = _spawn_bench_proc([python, "-I", "-c", script])
     thread = watcher.watch_while(proc, "self-test")
     rc = proc.wait(timeout=30)
     thread.join(timeout=2)
