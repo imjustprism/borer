@@ -21,8 +21,8 @@ use crate::actions::{Open, PALETTE_HINT, hint_row};
 use crate::app_assets::MARK_PATH;
 use crate::app_view::open_dropped;
 use crate::binary::Binary;
-use crate::functions_panel::{Rows, row_keys};
 use crate::recent::{RecentBinary, SHOWN_MAX, file_name};
+use crate::rows_panel::{Rows, row_keys};
 
 /// Side in logical pixels of the borer mark on the welcome column.
 const MARK_PX: f32 = 64.0;

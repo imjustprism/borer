@@ -5,50 +5,11 @@ use borer_engine::analysis::render::FunctionRow;
 use borer_engine::num::from_usize;
 use gpui::{Pixels, SharedString};
 
-/// Where a cell's text sits in its column.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Align {
-    /// Against the column's left edge.
-    Start,
-    /// Against the column's right edge, as numbers are.
-    End,
-}
-
-/// What a column's cells are, which picks the theme color they draw in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Ink {
-    /// An address, in the theme's `borer.address` color.
-    Address,
-    /// A function's name, in the theme's `function` color.
-    Function,
-    /// A count or a code, in the theme's muted text color.
-    Muted,
-}
-
-/// How wide a column is.
-#[derive(Debug, Clone, Copy)]
-pub enum Fit {
-    /// As wide as its header or its widest cell, which is the cell of the row with the
-    /// largest key, so the column is never ellipsized.
-    Widest(fn(&FunctionRow) -> u64),
-    /// What the other columns leave of the table.
-    Fill,
-}
+use crate::table::{self, cells, widths};
+pub use crate::table::{Align, Columns, FILL_MIN_CHARS, Fit, Ink};
 
 /// One column of the function table.
-#[derive(Debug, Clone, Copy)]
-pub struct Column {
-    /// The header's text.
-    pub header: &'static str,
-    /// Formats a row's cell from the engine's row, deriving no fact of its own.
-    pub cell: fn(&FunctionRow) -> SharedString,
-    /// Where the header and the cells sit.
-    pub align: Align,
-    /// What the cells are, which picks their color.
-    pub ink: Ink,
-    /// How wide the column is.
-    pub fit: Fit,
-}
+pub type Column = table::Column<FunctionRow>;
 
 /// Every column the table can show, the brief ones first.
 pub const COLUMNS: [Column; 8] = [
@@ -113,31 +74,14 @@ pub const COLUMNS: [Column; 8] = [
 /// How many of [`COLUMNS`] the brief columns are.
 const BRIEF_COLS: usize = 4;
 
-/// Which columns the function table shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Columns {
-    /// Entry, name, size and callers.
-    Brief,
-    /// The brief columns, then blocks, instrs, callees and src.
-    Full,
-}
-
 impl Columns {
-    /// Returns the columns shown, in order.
+    /// Returns the function table's columns of this set, in order: entry, name, size and
+    /// callers, then blocks, instrs, callees and src.
     #[must_use]
     pub fn shown(self) -> &'static [Column] {
         match self {
             Self::Brief => &COLUMNS[..BRIEF_COLS],
             Self::Full => &COLUMNS,
-        }
-    }
-
-    /// Returns the other set of columns.
-    #[must_use]
-    pub const fn toggled(self) -> Self {
-        match self {
-            Self::Brief => Self::Full,
-            Self::Full => Self::Brief,
         }
     }
 }
@@ -154,38 +98,11 @@ impl Columns {
 /// One cell per column of [`Columns::shown`].
 #[must_use]
 pub fn row_cells(row: &FunctionRow, columns: Columns) -> Vec<SharedString> {
-    columns
-        .shown()
-        .iter()
-        .map(|column| (column.cell)(row))
-        .collect()
+    cells(row, columns.shown())
 }
 
-/// Fewest characters the fill column gets; past it the table scrolls sideways.
-const FILL_MIN_CHARS: usize = 24;
-
-impl Column {
-    /// Returns how many characters wide the column must be to show its header and every
-    /// cell of `rows` whole, `None` for a [`Fit::Fill`] column.
-    ///
-    /// # Arguments
-    ///
-    /// * `rows` - Every row the table shows; one pass.
-    #[must_use]
-    pub fn chars(&self, rows: &[FunctionRow]) -> Option<usize> {
-        let Fit::Widest(key) = self.fit else {
-            return None;
-        };
-        let widest = rows.iter().max_by_key(|row| key(row));
-        let cell = widest.map_or(0, |row| (self.cell)(row).chars().count());
-        Some(cell.max(self.header.chars().count()))
-    }
-}
-
-/// Returns the width of each column `columns` shows, in order.
-///
-/// A fitted column holds its characters with one to spare, and the fill column takes what
-/// the others leave of `table`, but never under [`FILL_MIN_CHARS`].
+/// Returns the width of each column `columns` shows, in order, as [`table::widths`] lays
+/// them out.
 ///
 /// # Arguments
 ///
@@ -202,15 +119,7 @@ pub fn column_widths(
     pad: Pixels,
     table: Pixels,
 ) -> Vec<Pixels> {
-    let width = |chars: usize| ch * (chars + 1) + pad;
-    let fitted: Vec<Option<Pixels>> = columns
-        .shown()
-        .iter()
-        .map(|column| column.chars(rows).map(width))
-        .collect();
-    let rest = table - fitted.iter().flatten().sum::<Pixels>();
-    let fill = rest.max(width(FILL_MIN_CHARS));
-    fitted.into_iter().map(|w| w.unwrap_or(fill)).collect()
+    widths(columns.shown(), rows, ch, pad, table)
 }
 
 #[cfg(test)]

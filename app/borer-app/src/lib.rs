@@ -18,9 +18,11 @@ pub mod panels;
 pub mod places;
 pub mod rail;
 pub mod recent;
+pub mod rows_panel;
 pub mod shell;
 pub mod start_item;
 pub mod status;
+pub mod table;
 pub mod title_bar;
 pub mod worker;
 

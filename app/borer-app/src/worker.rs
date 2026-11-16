@@ -764,7 +764,7 @@ mod tests {
     }
 
     /// Returns every module of the crate but this one, by path under `src`, with its text.
-    fn sources() -> [(&'static str, &'static str); 27] {
+    fn sources() -> [(&'static str, &'static str); 29] {
         [
             ("actions.rs", include_str!("actions.rs")),
             ("app_assets.rs", include_str!("app_assets.rs")),
@@ -789,11 +789,25 @@ mod tests {
             ("places.rs", include_str!("places.rs")),
             ("rail.rs", include_str!("rail.rs")),
             ("recent.rs", include_str!("recent.rs")),
+            ("rows_panel.rs", include_str!("rows_panel.rs")),
             ("shell.rs", include_str!("shell.rs")),
             ("start_item.rs", include_str!("start_item.rs")),
             ("status.rs", include_str!("status.rs")),
+            ("table.rs", include_str!("table.rs")),
             ("title_bar.rs", include_str!("title_bar.rs")),
         ]
+    }
+
+    /// Returns the code of a module the scan reads: its text before its tests module.
+    fn kept(text: &str) -> &str {
+        text.find("mod tests {").map_or(text, |at| &text[..at])
+    }
+
+    /// The scan reads a module up to its tests, past any test-only import above them.
+    #[test]
+    fn the_scan_keeps_code_before_the_tests_module() {
+        assert!(kept(include_str!("functions_panel.rs")).contains("fn fetch"));
+        assert!(!kept(include_str!("functions_panel.rs")).contains("fn panel_of"));
     }
 
     /// Nothing outside the tests reaches the window's binary through a view or the status
@@ -801,7 +815,7 @@ mod tests {
     #[test]
     fn no_view_reaches_the_binary_through_another_view() {
         for (name, text) in sources() {
-            let code = text.split("#[cfg(test)]").next().unwrap_or(text);
+            let code = kept(text);
             assert!(!code.contains("binary_of("), "{name} looks the binary up");
             assert!(
                 !code.contains(".binary()"),
@@ -830,7 +844,7 @@ mod tests {
             "answered_flagged(",
         ];
         for (name, text) in sources() {
-            let code = text.split("#[cfg(test)]").next().unwrap_or(text);
+            let code = kept(text);
             for call in calls {
                 assert!(!code.contains(call), "{name} names {call}");
             }

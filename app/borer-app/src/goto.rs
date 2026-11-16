@@ -290,8 +290,9 @@ mod tests {
     use crate::app_view::tests::{CALLEE, CALLER, init, open, sample};
     use crate::decompile_item::tests::{active as tab, fourth_instruction, open_tab};
     use crate::decompile_item::{DecompileItem, Form, link_place};
-    use crate::functions_panel::row_place;
+    use crate::functions_panel::Functions;
     use crate::places::Place;
+    use crate::rows_panel::RowKind as _;
     use crate::worker::{Jobs, LoadedBinary, decompile_blocking};
 
     /// Opens go to with its key from the focused code tab, types `query` and waits for the
@@ -389,7 +390,10 @@ mod tests {
         let loaded = sample();
         let code = |entry, form, at| Place::Code { entry, form, at };
         let row = &loaded.initial_rows.rows[0];
-        assert_eq!(row_place(row), code(row.entry, Form::Decompile, None));
+        assert_eq!(
+            Functions::place(row),
+            Some(code(row.entry, Form::Decompile, None))
+        );
         let view = decompile_blocking(&loaded, CALLER).unwrap();
         let call = Ref::Function(CALLEE);
         let link = |form| link_place(&view, &call, form);

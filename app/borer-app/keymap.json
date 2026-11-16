@@ -23,7 +23,7 @@
     }
   },
   {
-    "context": "FunctionsPanel > Editor",
+    "context": "RowsPanel > Editor",
     "bindings": {
       "up": "menu::SelectPrevious",
       "down": "menu::SelectNext"
