@@ -9,6 +9,7 @@
 //! suffix naming one of these is read off.
 
 use std::fmt::Write as _;
+use std::num::NonZeroUsize;
 
 use borer_engine::answer::Page;
 pub(crate) use borer_engine::answer::percent_decode;
@@ -141,7 +142,7 @@ impl Asked {
     pub(crate) fn page<'a>(&self, again: &'a str) -> Page<'a> {
         Page {
             offset: self.offset,
-            limit: self.limit,
+            limit: self.limit.and_then(NonZeroUsize::new),
             again,
         }
     }

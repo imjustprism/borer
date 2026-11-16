@@ -9,6 +9,8 @@
 //! session and its evidence, a live process, the answer memory, a file the
 //! URI names, the packs on disk, the resource catalog) stay with it.
 
+use std::num::NonZeroUsize;
+
 use crate::analysis::{
     Analysis, EnumSource, Overlay, about, attributes, classes, decompile, encode, fieldrefs,
     function_entry, hex_prefixed, map, messages, name_of, objc, opcodes, parse_addr, ports,
@@ -89,8 +91,9 @@ enum Paged {
 pub struct Page<'a> {
     /// Rows to skip, when the reader asked.
     pub offset: Option<usize>,
-    /// Most rows to show, when the reader asked.
-    pub limit: Option<usize>,
+    /// Most rows to show, when the reader asked: one or more, as a page of
+    /// none would name its own offset as the next page.
+    pub limit: Option<NonZeroUsize>,
     /// The URI the line naming the next page appends its offset to: the
     /// resource and the limit asked for.
     pub again: &'a str,
@@ -127,7 +130,7 @@ impl<'a> Page<'a> {
     pub fn window(&self, page: usize) -> Window<'a> {
         Window {
             skip: self.offset.unwrap_or(0),
-            limit: self.limit.map_or(page, |n| n.min(page)),
+            limit: self.limit.map_or(page, |n| n.get().min(page)),
             again: Some(self.again),
         }
     }
@@ -537,7 +540,7 @@ pub fn read(
         Paged::Rows if page.paged() => crate::table::page(
             &text,
             page.offset.unwrap_or(0),
-            page.limit.unwrap_or(usize::MAX),
+            page.limit.map_or(usize::MAX, NonZeroUsize::get),
             page.again,
         ),
         Paged::Rows | Paged::Itself => text,
@@ -1192,6 +1195,8 @@ pub fn percent_decode(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
+
     use super::{Page, decompile, enum_row, need, read};
     use crate::analysis::{Analysis, Overlay};
     use crate::program::Program;
@@ -1241,7 +1246,7 @@ mod tests {
         let whole = read(&p, &a, &o, uri, Page::whole(uri));
         let page = Page {
             offset: Some(0),
-            limit: Some(1),
+            limit: NonZeroUsize::new(1),
             again: uri,
         };
         let paged = read(&p, &a, &o, uri, page).and_then(Result::ok);
