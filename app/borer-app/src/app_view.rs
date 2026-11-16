@@ -299,9 +299,11 @@ mod tests {
         })
     }
 
-    /// Returns the function and top line of the active decompile tab, once the work settled.
+    /// Returns the function and top line of the active decompile tab, once the work settled
+    /// and a frame laid the tab out.
     fn shown(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<(u64, usize)> {
         cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
         workspace.read_with(cx, |workspace, cx| {
             let item = workspace.active_item_as::<DecompileItem>(cx)?;
             let item = item.read(cx);
@@ -435,6 +437,52 @@ mod tests {
             cx.dispatch_action(GoForward);
             assert_eq!(shown(&workspace, cx), Some(want));
         }
+    }
+
+    /// A jump puts its line at the top of the tab although the line is already on screen,
+    /// and going forward again restores a top line that was on screen.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a jump or a restore leaves a different line at the top.
+    #[gpui::test]
+    fn a_jump_puts_its_line_at_the_top(cx: &mut TestAppContext) {
+        a_jump_puts_its_line_at_the_top_steps(cx);
+    }
+
+    /// Runs the steps of [`a_jump_puts_its_line_at_the_top`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`a_jump_puts_its_line_at_the_top`] says.
+    fn a_jump_puts_its_line_at_the_top_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (workspace, cx) = open(&app_state, cx);
+        cx.simulate_resize(size(px(800.0), px(160.0)));
+        let loaded = sample();
+        workspace.update_in(cx, |workspace, window, cx| {
+            open_function(
+                workspace,
+                loaded,
+                CALLER,
+                TabMode::Permanent,
+                true,
+                window,
+                cx,
+            );
+        });
+        assert_eq!(shown(&workspace, cx), Some((CALLER, 0)));
+        let caller = workspace
+            .read_with(cx, |workspace, cx| {
+                workspace.active_item_as::<DecompileItem>(cx)
+            })
+            .unwrap();
+        caller.update_in(cx, |item, _, cx| item.jump_to_line(2, cx));
+        assert_eq!(shown(&workspace, cx), Some((CALLER, 2)));
+        cx.dispatch_action(GoBack);
+        assert_eq!(shown(&workspace, cx), Some((CALLER, 0)));
+        cx.dispatch_action(GoForward);
+        assert_eq!(shown(&workspace, cx), Some((CALLER, 2)));
     }
 
     /// The functions panel's width and its dock's visibility, saved through Zed's
