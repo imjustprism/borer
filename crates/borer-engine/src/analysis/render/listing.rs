@@ -1338,6 +1338,27 @@ stub: 0x1100 jmp
         assert_eq!(rows.targets, [0x3000, 0x1100, 0x1200, 0x1300, 0x3010]);
     }
 
+    /// One site reaching an import through several stubs is listed once per
+    /// thing it does, however the stubs interleave its kinds.
+    ///
+    /// # Panics
+    ///
+    /// When a site and kind repeat or one is lost.
+    #[test]
+    fn an_import_s_sites_are_each_once_per_kind() {
+        let (p, a, o) = stubbed();
+        let page = XrefView::Page {
+            offset: 0,
+            limit: 60,
+        };
+        let rows = xref_rows_of_import(&p, &a, &o, 0x3000, page).expect("an import");
+        assert_eq!(rows.sites, 2);
+        assert_eq!(
+            rows.rows[0].sites,
+            [(0x1050, RefKind::Call), (0x1050, RefKind::Data)]
+        );
+    }
+
     /// An import's rows gather its every slot and every stub jumping
     /// through one, each reference once, and leave out another library's
     /// symbol of the same name; an address no import has is no import.

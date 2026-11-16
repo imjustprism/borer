@@ -265,8 +265,8 @@ pub fn xref_rows_of_import(
         .iter()
         .flat_map(|&t| a.xrefs_to(t).iter().cloned())
         .collect();
-    sites.sort_by_key(|s| s.va);
-    sites.dedup_by(|x, y| x.va == y.va && x.kind == y.kind);
+    sites.sort_by_key(|s| (s.va, s.kind));
+    sites.dedup_by_key(|s| (s.va, s.kind));
     let capped = targets
         .iter()
         .any(|&t| a.xrefs_to(t).len() >= crate::analysis::functions::XREF_SITES_PER_TARGET);
