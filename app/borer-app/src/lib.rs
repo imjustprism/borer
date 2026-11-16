@@ -6,6 +6,7 @@ pub mod app_view;
 pub mod binary;
 pub mod code_view;
 pub mod decompile_item;
+pub mod function_columns;
 pub mod functions_panel;
 pub mod measure;
 pub mod start_item;

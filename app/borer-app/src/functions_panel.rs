@@ -3,33 +3,38 @@
 
 use std::sync::Arc;
 
-use borer_engine::analysis::render::{FunctionRow, FunctionRows};
+use borer_engine::analysis::render::FunctionRows;
 use editor::{Editor, EditorEvent};
 use gpui::{
     Action, AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Entity, EventEmitter,
     FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
     Render, ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Task, WeakEntity, Window, div, px,
+    Subscription, Task, WeakEntity, Window, canvas, div, px,
 };
-use settings::SettingsStore;
+use settings::{Settings as _, SettingsStore};
 use theme::ActiveTheme as _;
-use ui::{IconName, Table, TableInteractionState};
+use theme_settings::ThemeSettings;
+use ui::{
+    ColumnWidthConfig, IconName, ResizableColumnsState, Table, TableInteractionState,
+    TableResizeBehavior,
+};
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use crate::actions::ToggleFunctions;
-use crate::binary::Binary;
-use crate::decompile_item::{TabMode, open_function};
+use crate::binary::{Binary, SettingsNotice};
+use crate::decompile_item::{TabMode, code_row_height, open_function};
+use crate::function_columns::{Align, Columns, column_widths, row_cells};
 use crate::worker::{FilterLatest, LoadedBinary, filter_rows_blocking, spawn_engine};
 
 /// Name Zed saves the panel's dock state and size under.
 pub const PANEL_KEY: &str = "Functions";
 
-/// Number of columns in the function table.
-const TABLE_COLS: usize = 8;
-
 /// Width in logical pixels of the panel before the person resizes it.
 const DEFAULT_WIDTH_PX: f32 = 560.0;
+
+/// Horizontal padding of a cell of Zed's table, both sides together, in rems (`px_1`).
+const CELL_PAD_REMS: f32 = 0.5;
 
 /// The open binary's function table, in a dock.
 pub struct FunctionsPanel {
@@ -49,12 +54,19 @@ pub struct FunctionsPanel {
     rows: FilterLatest<Arc<FunctionRows>>,
     /// Index of the highlighted row.
     selected: usize,
+    /// Columns the table shows.
+    columns: Columns,
+    /// Widths of the shown columns, laid out again when the rows, the columns, the
+    /// settings or the table's width change.
+    widths: Entity<ResizableColumnsState>,
+    /// Width of the table as last painted, the panel's default before its first paint.
+    table_width: Pixels,
     /// Dock the panel sits in.
     position: DockPosition,
     /// The running background filter.
     filter_task: Option<Task<()>>,
     /// Reruns the filter on each edit and follows the binary's loads.
-    _subscriptions: [Subscription; 2],
+    _subscriptions: [Subscription; 3],
 }
 
 impl std::fmt::Debug for FunctionsPanel {
@@ -97,8 +109,9 @@ impl FunctionsPanel {
             cx.observe_in(&binary, window, |this, binary, window, cx| {
                 this.follow_binary(&binary, window, cx);
             }),
+            cx.observe_global::<SettingsStore>(Self::relayout),
         ];
-        Self {
+        let mut panel = Self {
             workspace,
             binary,
             focus_handle: cx.focus_handle(),
@@ -107,9 +120,56 @@ impl FunctionsPanel {
             shown: None,
             rows: FilterLatest::new(),
             selected: 0,
+            columns: Columns::Brief,
+            widths: cx.new(|_| ResizableColumnsState::new(0, Vec::<Pixels>::new(), Vec::new())),
+            table_width: px(DEFAULT_WIDTH_PX),
             position,
             filter_task: None,
             _subscriptions: subscriptions,
+        };
+        panel.relayout(cx);
+        panel
+    }
+
+    /// Lays the shown columns out for the shown rows, the buffer font the table draws in and
+    /// the table's width; a font the text system cannot measure is measured by its size
+    /// instead, and the status line says so.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Panel context.
+    fn relayout(&mut self, cx: &mut Context<'_, Self>) {
+        let settings = ThemeSettings::get_global(cx);
+        let (font, size) = (settings.buffer_font.clone(), settings.buffer_font_size(cx));
+        let pad = settings.ui_font_size(cx) * CELL_PAD_REMS;
+        let text = cx.text_system();
+        let measured = text.ch_advance(text.resolve_font(&font), size);
+        let ch = measured.unwrap_or_else(|err| {
+            let why = format!("function table measured by font size: {err:#}");
+            cx.set_global(SettingsNotice(Some(why.into())));
+            size
+        });
+        let rows = self
+            .rows
+            .current()
+            .map_or(&[][..], |rows| rows.rows.as_slice());
+        let widths = column_widths(self.columns, rows, ch, pad, self.table_width);
+        let cols = widths.len();
+        let resize = vec![TableResizeBehavior::None; cols];
+        self.widths = cx.new(|_| ResizableColumnsState::new(cols, widths, resize));
+        cx.notify();
+    }
+
+    /// Lays the columns out again for a table now `width` wide, when that changed.
+    ///
+    /// # Arguments
+    ///
+    /// * `width` - Width the table was painted at.
+    /// * `cx` - Panel context.
+    fn set_table_width(&mut self, width: Pixels, cx: &mut Context<'_, Self>) {
+        if width > Pixels::ZERO && width != self.table_width {
+            self.table_width = width;
+            self.relayout(cx);
         }
     }
 
@@ -117,6 +177,22 @@ impl FunctionsPanel {
     #[must_use]
     pub const fn binary(&self) -> &Entity<Binary> {
         &self.binary
+    }
+
+    /// Returns the columns the table shows.
+    #[must_use]
+    pub const fn columns(&self) -> Columns {
+        self.columns
+    }
+
+    /// Shows the full columns if the brief ones are shown, else the brief ones.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Panel context.
+    pub fn toggle_columns(&mut self, cx: &mut Context<'_, Self>) {
+        self.columns = self.columns.toggled();
+        self.relayout(cx);
     }
 
     /// Returns the rows the table shows, if any.
@@ -197,7 +273,7 @@ impl FunctionsPanel {
                 .update(cx, |editor, cx| editor.set_text("", window, cx));
         }
         self.scroll_to_selected(cx);
-        cx.notify();
+        self.relayout(cx);
     }
 
     /// Lists the functions of a binary that finished loading and opens its first one, or
@@ -218,7 +294,7 @@ impl FunctionsPanel {
             if self.shown.take().is_some() {
                 self.rows.clear();
                 self.filter_task = None;
-                cx.notify();
+                self.relayout(cx);
             }
             return;
         };
@@ -251,7 +327,7 @@ impl FunctionsPanel {
                 if panel.rows.accept(seq, rows) {
                     panel.selected = 0;
                     panel.scroll_to_selected(cx);
-                    cx.notify();
+                    panel.relayout(cx);
                 }
             });
         }));
@@ -320,7 +396,8 @@ impl FunctionsPanel {
         });
     }
 
-    /// Renders the virtualized table of the shown rows.
+    /// Renders the virtualized table of the shown rows in the buffer font, its columns as
+    /// [`Self::relayout`] laid them out, scrolling sideways when they are wider than it.
     ///
     /// # Arguments
     ///
@@ -335,14 +412,14 @@ impl FunctionsPanel {
         let selected = self.selected;
         let selected_bg = cx.theme().colors().element_selected;
         let panel = cx.entity().downgrade();
-        let headers = vec![
-            "entry", "size", "blocks", "instrs", "callers", "callees", "src", "name",
-        ];
-        Table::new(TABLE_COLS)
-            .striped()
+        let columns = self.columns;
+        let headers = columns.shown().iter().map(|c| aligned(c.align, c.header));
+        Table::new(columns.shown().len())
+            .width_config(ColumnWidthConfig::Resizable(self.widths.clone()))
             .no_ui_font()
+            .hide_row_borders()
             .interactable(&self.table_state)
-            .header(headers)
+            .header(headers.collect())
             .map_row(move |(ix, row_div), _window, _cx| {
                 let panel = panel.clone();
                 let styled = if ix == selected {
@@ -368,33 +445,37 @@ impl FunctionsPanel {
                     return Vec::new();
                 };
                 range
-                    .filter_map(|ix| rows.rows.get(ix).map(format_row_cells))
+                    .filter_map(|ix| rows.rows.get(ix))
+                    .map(|row| {
+                        let cells = row_cells(row, columns).into_iter();
+                        let shown = columns.shown().iter();
+                        cells
+                            .zip(shown)
+                            .map(|(cell, c)| aligned(c.align, cell))
+                            .collect()
+                    })
                     .collect()
             })
             .into_any_element()
     }
 }
 
-/// Formats one [`FunctionRow`] into eight cell elements without deriving new facts.
+/// Returns `text` as a table cell sitting where `align` says.
 ///
 /// # Arguments
 ///
-/// * `row` - Engine [`FunctionRow`] to format.
-///
-/// # Returns
-///
-/// Eight cell elements in column order.
-fn format_row_cells(row: &FunctionRow) -> Vec<AnyElement> {
-    vec![
-        SharedString::from(format!("{:#x}", row.entry)).into_any_element(),
-        SharedString::from(row.size.to_string()).into_any_element(),
-        SharedString::from(row.blocks.to_string()).into_any_element(),
-        SharedString::from(row.instrs.to_string()).into_any_element(),
-        SharedString::from(row.callers.to_string()).into_any_element(),
-        SharedString::from(row.callees.to_string()).into_any_element(),
-        SharedString::from(row.src.code()).into_any_element(),
-        SharedString::from(row.name.clone()).into_any_element(),
-    ]
+/// * `align` - Where the text sits in its column.
+/// * `text` - The cell's text.
+fn aligned(align: Align, text: impl Into<SharedString>) -> AnyElement {
+    match align {
+        Align::Start => text.into().into_any_element(),
+        Align::End => div()
+            .w_full()
+            .flex()
+            .justify_end()
+            .child(text.into())
+            .into_any_element(),
+    }
 }
 
 impl Render for FunctionsPanel {
@@ -410,6 +491,21 @@ impl Render for FunctionsPanel {
                 format!("{} {}{}", rows.rows.len(), rows.noun, rows.left_out).into()
             });
         let table = self.render_table(cx);
+        let (font, size) = {
+            let settings = ThemeSettings::get_global(cx);
+            (settings.buffer_font.clone(), settings.buffer_font_size(cx))
+        };
+        let panel = cx.entity().downgrade();
+        let watch_width = canvas(
+            move |bounds, _, cx| {
+                if let Some(panel) = panel.upgrade() {
+                    panel.update(cx, |panel, cx| panel.set_table_width(bounds.size.width, cx));
+                }
+            },
+            |_, (), _, _| {},
+        )
+        .absolute()
+        .size_full();
         div()
             .id("functions-panel")
             .key_context("FunctionsPanel")
@@ -439,7 +535,17 @@ impl Render for FunctionsPanel {
                     .child(self.filter.clone()),
             )
             .child(div().px(px(8.0)).py(px(2.0)).text_color(muted).child(count))
-            .child(div().flex_1().min_h(px(0.0)).child(table))
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .font(font)
+                    .text_size(size)
+                    .line_height(code_row_height(cx))
+                    .child(table)
+                    .child(watch_width),
+            )
     }
 }
 

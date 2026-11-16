@@ -39,7 +39,7 @@ use workspace::{
     WorkspaceStore,
 };
 
-use crate::actions::{FocusFilter, Open, ToggleFunctions};
+use crate::actions::{FocusFilter, Open, ToggleFunctionColumns, ToggleFunctions};
 use crate::binary::{Binary, StatusLine};
 use crate::functions_panel::{FunctionsPanel, PANEL_KEY};
 use crate::measure::CliMode;
@@ -365,6 +365,11 @@ fn register_actions(workspace: &mut Workspace) {
         })
         .register_action(|workspace, _: &ToggleFunctions, window, cx| {
             workspace.toggle_panel_focus::<FunctionsPanel>(window, cx);
+        })
+        .register_action(|workspace, _: &ToggleFunctionColumns, _, cx| {
+            if let Some(panel) = workspace.panel::<FunctionsPanel>(cx) {
+                panel.update(cx, FunctionsPanel::toggle_columns);
+            }
         });
 }
 
@@ -429,7 +434,9 @@ mod tests {
     use workspace::{AddFolderToProject, AppState, MultiWorkspace, Workspace};
 
     use super::{DEFAULT_DOCK_STATE_KEY, REFUSED_FOLDER, configure, data_dir, new_workspace};
+    use crate::actions::ToggleFunctionColumns;
     use crate::decompile_item::{DecompileItem, TabMode, open_function};
+    use crate::function_columns::Columns;
     use crate::functions_panel::FunctionsPanel;
     use crate::measure::{CliMode, MeasurePhase, split_data_dir};
     use crate::worker::LoadedBinary;
@@ -701,6 +708,36 @@ mod tests {
             workspace.active_modal::<CommandPalette>(cx).is_some()
         });
         assert!(opened);
+    }
+
+    /// The function table shows its brief columns until the palette's
+    /// [`ToggleFunctionColumns`] shows them all, and takes them away again.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the table starts with other columns or the action does not toggle them.
+    #[gpui::test]
+    fn the_palette_toggles_the_function_columns(cx: &mut TestAppContext) {
+        the_palette_toggles_the_function_columns_steps(cx);
+    }
+
+    /// Runs the steps of [`the_palette_toggles_the_function_columns`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`the_palette_toggles_the_function_columns`] says.
+    fn the_palette_toggles_the_function_columns_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (workspace, cx) = open(&app_state, cx);
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.focus_panel::<FunctionsPanel>(window, cx);
+            workspace.panel::<FunctionsPanel>(cx).unwrap()
+        });
+        for columns in [Columns::Brief, Columns::Full, Columns::Brief] {
+            assert_eq!(panel.read_with(cx, |panel, _| panel.columns()), columns);
+            cx.dispatch_action(ToggleFunctionColumns);
+            cx.run_until_parked();
+        }
     }
 
     /// A folder whose settings start a context server, dropped on a pane holding only the

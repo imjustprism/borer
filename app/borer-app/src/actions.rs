@@ -13,6 +13,8 @@ gpui::actions!(
         FocusFilter,
         /// Shows the functions panel and focuses it, or moves focus back to the center pane.
         ToggleFunctions,
+        /// Shows or hides the function table's blocks, instrs, callees and src columns.
+        ToggleFunctionColumns,
         /// Switches between borer's dark and light theme and keeps the choice in the app's
         /// settings file.
         ToggleTheme,
