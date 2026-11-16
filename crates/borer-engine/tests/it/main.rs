@@ -34,6 +34,7 @@ mod abi;
 mod analysis;
 mod answer;
 mod arguments;
+mod asserts;
 mod bounds;
 mod bundle;
 mod calls;

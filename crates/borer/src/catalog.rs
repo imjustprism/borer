@@ -137,11 +137,11 @@ pub(crate) const RESOURCES: &[(&str, &str)] = &[
     ),
     (
         "borer://asserts",
-        "The fields the binary's assertions name, with the classes that assert them",
+        "The member names the binary's assertions spell (`this->m_name`), each with how many functions assert it and their classes; a decompile or summary of a function that asserts points here",
     ),
     (
         "borer://sources",
-        "The source files the binary's assertions name, by directory: the subsystems it was built from",
+        "The source files the binary's assertions cite, by directory with how many files and functions each holds: the subsystems the binary was built from",
     ),
     (
         "borer://classes",
@@ -349,12 +349,12 @@ pub(crate) const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
     ),
     (
         "borer://asserts/{filter}",
-        "Asserted fields whose name or class contains the filter",
+        "Asserted member names whose name or class contains the filter, with the conditions their asserts check",
         "borer://asserts/count",
     ),
     (
         "borer://sources/{filter}",
-        "Source files whose path contains the filter, with their function counts",
+        "Source files whose path contains the filter, with how many functions came from each and the lowest of their entries",
         "borer://sources/net",
     ),
     (

@@ -8,7 +8,7 @@
 //! the analysis already has (a dispatch loop, a flattened switch, a switch
 //! on an argument, a counted loop comparing a few bits of a product, a
 //! compare against a telling constant, a loop that mixes and stores bytes,
-//! fields read through an argument), the rules are tried
+//! fields read through an argument, an assert), the rules are tried
 //! in a fixed order, and the first [`NEXT_MAX`] that fire are kept.
 
 use super::*;
@@ -18,7 +18,7 @@ use crate::analysis::decompile::{EXPLODE_MAX, abi, decompile};
 pub const NEXT_MAX: usize = 2;
 
 /// The resources a next step can name, in the order the rules are tried.
-pub const NEXT_RESOURCES: [&str; 7] = [
+pub const NEXT_RESOURCES: [&str; 9] = [
     "vm",
     "flat",
     "scenarios",
@@ -26,6 +26,8 @@ pub const NEXT_RESOURCES: [&str; 7] = [
     "solve",
     "emulate",
     "layout",
+    "asserts",
+    "sources",
 ];
 
 /// Fewest distinct offsets a function dereferences through one argument
@@ -119,7 +121,7 @@ fn steps_of(p: &Program, a: &Analysis, o: &Overlay, entry: u64, text: &str) -> V
         return Vec::new();
     };
     let params = parameters(text);
-    let rules: [&dyn Fn() -> Option<String>; 7] = [
+    let rules: [&dyn Fn() -> Option<String>; 8] = [
         &|| vm_step(p, a, f),
         &|| flat_step(a, f),
         &|| switch_step(a, f, text),
@@ -127,6 +129,7 @@ fn steps_of(p: &Program, a: &Analysis, o: &Overlay, entry: u64, text: &str) -> V
         &|| check_step(p, a, f, bits, text, params),
         &|| loop_step(p, f, bits),
         &|| layout_step(p, f, bits, text, params),
+        &|| assert_step(p, a, o, f, text),
     ];
     rules
         .iter()
@@ -462,6 +465,53 @@ fn layout_step(p: &Program, f: &Function, bits: u32, text: &str, params: usize) 
                 )
             })
         })
+}
+
+/// Points a function whose text asserts at what the binary's assertions
+/// say past it: the members its class's asserts name
+/// ([`asserted_fields_tsv`]) and the source file they cite
+/// ([`source_tree_tsv`]).
+///
+/// The rule is tried last, so a function another rule already points
+/// somewhere keeps those steps. The class is offered only when the
+/// function's asserts spell a member of `this`, so a free function's
+/// namespace never reads as a class; it filters by its last component,
+/// which is a substring of the qualified name, and a template's is left
+/// out, since its brackets are no filter. The file is offered only when
+/// the asserts cited it: a `// source:` line from debug information
+/// carries its line (`file.cc:12`) and is not one.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image, for the strings the function references.
+/// * `a` - The analysis.
+/// * `o` - Names in force, for the function's class.
+/// * `f` - The function.
+/// * `text` - Its decompiled text.
+///
+/// # Returns
+///
+/// The step, or `None` when the text asserts nothing, or names neither a
+/// class nor a source file.
+fn assert_step(p: &Program, a: &Analysis, o: &Overlay, f: &Function, text: &str) -> Option<String> {
+    text.lines().find(|l| l.starts_with("// asserts: "))?;
+    let file = text
+        .lines()
+        .find_map(|l| l.strip_prefix("// source: "))
+        .and_then(|path| path.rsplit(['/', '\\']).next())
+        .filter(|file| !file.is_empty() && !file.contains(':'))
+        .map(|file| format!("borer://sources/{file} (the source file they cite)"));
+    let name = name_of(a, o, f.entry);
+    let class = crate::analysis::classes::asserts_a_member(p, a, f.entry)
+        .then(|| crate::analysis::classes::class_of(&name))
+        .flatten()
+        .and_then(|c| c.rsplit("::").next())
+        .filter(|c| !c.is_empty() && c.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_'))
+        .map(|c| format!("borer://asserts/{c} (the members its class's asserts name)"));
+    match (class, file) {
+        (Some(class), Some(file)) => Some(format!("{class}, {file}")),
+        (class, file) => class.or(file),
+    }
 }
 
 /// How many fields the decompiler laid out behind one argument: the
