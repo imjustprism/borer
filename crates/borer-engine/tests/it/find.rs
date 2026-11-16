@@ -9,7 +9,8 @@
 use std::collections::BTreeSet;
 
 use borer_engine::analysis::find::{
-    CommentKind, Found, Hit, HitKind, KIND_MAX, Query, Rank, Source, TypeOrigin, everywhere,
+    CommentKind, Found, Hit, HitKind, KIND_MAX, NEEDLE_MAX, Query, Rank, Source, TEXT_MAX,
+    TypeOrigin, everywhere,
 };
 use borer_engine::analysis::render::RowSource;
 use borer_engine::analysis::utypes::{TypeExpr, UserType};
@@ -349,6 +350,77 @@ fn a_hostile_query_answers_within_the_caps() {
     );
 }
 
+/// A find spells a header counting each kind and one row per hit with its
+/// rank, kind, address, source and text.
+#[test]
+fn a_find_spells_one_row_per_hit() {
+    let text = find("crypt").spell();
+    assert!(
+        text.starts_with("# showing 9 of 9 hits: function 1 of 1, import 1 of 1, ")
+            && text.contains("\n# rank kind addr source text\n"),
+        "{text}"
+    );
+    for row in [
+        "prefix function 0x401000 sym crypt_init\n",
+        "prefix import 0x402100 import:ADVAPI32.dll CryptEncrypt\n",
+        "prefix string 0x402000 .rdata:ascii crypto\n",
+        "prefix type - usr crypt_ctx\n",
+        "word comment 0x401000 question ?crypt key\n",
+    ] {
+        assert!(text.contains(row), "{row}: {text}");
+    }
+    let entry = find("0x401000").spell();
+    assert!(
+        entry.contains("\nexact address 0x401000 va crypt_init\n"),
+        "{entry}"
+    );
+}
+
+/// A needle cut to its cap matches no text whole and the header says it
+/// was cut, and a hit's text past its cap ends in `...`.
+#[test]
+fn a_cut_needle_and_a_cut_text_say_so() {
+    let whole = "a".repeat(NEEDLE_MAX);
+    let mut bytes = format!("{whole}\0").into_bytes();
+    bytes.extend_from_slice(format!("{}\0", "b".repeat(300)).as_bytes());
+    let p = Program::raw(bytes, Arch::X86_64, 0, None, Vec::new());
+    let (a, o) = (Analysis::default(), Overlay::default());
+    let cut = Query::parse(&format!("{whole}{}", "x".repeat(44)));
+    assert!(cut.cut);
+    let found = everywhere(&p, &a, &o, &cut, 100);
+    assert_eq!(
+        found.hits.iter().map(|h| h.rank).collect::<Vec<_>>(),
+        [Rank::Prefix]
+    );
+    assert!(
+        found
+            .spell()
+            .starts_with("# showing 1 of 1 hits: string 1 of 1; needle cut to 256 characters; 1 text cut to 200 characters\n"),
+        "{found:?}"
+    );
+    let long = everywhere(&p, &a, &o, &Query::parse("bbb"), 100);
+    let hit = one(&long, HitKind::String);
+    assert_eq!(&*hit.text, format!("{}...", "b".repeat(TEXT_MAX)));
+    assert!(hit.cut);
+}
+
+/// A place no section maps says so in the header instead of heading the
+/// list.
+#[test]
+fn an_unmapped_address_says_so() {
+    let text = find("rva:0x90000").spell();
+    assert!(
+        text.starts_with("# showing 0 of 0 hits; the address is in no mapped section\n"),
+        "{text}"
+    );
+    let off = find("off:0x900000").spell();
+    assert!(
+        off.starts_with("# showing 0 of 0 hits; the file offset is in no mapped section\n"),
+        "{off}"
+    );
+    assert!(!find("rva:0x1000").spell().contains("no mapped section"));
+}
+
 /// `thunk` is a word like any other, and a thunk is a function a query
 /// finds by its name.
 #[test]
@@ -419,6 +491,27 @@ fn an_unbound_import_yields_to_a_mapped_one() {
     assert_eq!(found.counted, [(HitKind::Import, 61)]);
     assert_eq!(found.hits.len(), KIND_MAX);
     assert_eq!(found.hits.first().map(|h| h.addr), Some(Some(0x40_2100)));
+}
+
+/// A section name with a blank stays one column of a spelled row.
+#[test]
+fn a_blank_in_a_section_name_stays_one_column() {
+    let mut bytes = b"crypto\0".to_vec();
+    bytes.resize(0x10, 0);
+    let section = Section::mapped("my sec", 0x1000, 0, 0x10, false, false);
+    let p = Program::raw(bytes, Arch::X86_64, 0, None, vec![section]);
+    let found = everywhere(
+        &p,
+        &Analysis::default(),
+        &Overlay::default(),
+        &Query::parse("crypt"),
+        100,
+    );
+    let text = found.spell();
+    assert!(
+        text.contains("\nprefix string 0x1000 my\\x20sec:ascii crypto\n"),
+        "{text}"
+    );
 }
 
 /// A relative address with a hex letter and no `0x` names the place a find

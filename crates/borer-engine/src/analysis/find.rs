@@ -17,6 +17,7 @@ use crate::program::{Program, Symbol, SymbolKind};
 use crate::search::demangled_or_raw;
 use crate::strings::Encoding;
 use crate::strings::walk::{Needle, walks};
+use crate::text::one_line;
 
 /// Most characters of a query's needle; the rest is cut before it is
 /// lowered, so a pasted megabyte costs no more than a word.
@@ -860,6 +861,135 @@ fn word_start(before: Option<char>, here: Option<char>) -> bool {
         (_, None) => false,
         (None, Some(_)) => true,
         (Some(b), Some(h)) => !b.is_alphanumeric() || (b.is_lowercase() && h.is_uppercase()),
+    }
+}
+
+impl Found {
+    /// Returns the find as the `borer://find` resource prints it.
+    ///
+    /// # Returns
+    ///
+    /// A `# showing N of M hits` line with each kind's kept and matched
+    /// counts, then when they hold that the needle was cut, how many texts
+    /// were cut and that the address or the file offset is in no mapped
+    /// section; a column header;
+    /// then one `rank kind addr source text` row per hit: `-` for no
+    /// address, the source and the text escaped to one column and one line.
+    #[must_use]
+    pub fn spell(&self) -> String {
+        let total: usize = self.counted.iter().map(|c| c.1).sum();
+        let mut out = format!("# showing {} of {total} hits", self.hits.len());
+        for (i, &(kind, count)) in self.counted.iter().enumerate() {
+            let kept = self.hits.iter().filter(|h| h.kind() == kind).count();
+            let sep = if i == 0 { ": " } else { ", " };
+            let _ = write!(out, "{sep}{} {kept} of {count}", kind.word());
+        }
+        if self.cut {
+            let _ = write!(out, "; needle cut to {NEEDLE_MAX} characters");
+        }
+        let cut = self.hits.iter().filter(|h| h.cut).count();
+        if cut > 0 {
+            let texts = if cut == 1 { "text" } else { "texts" };
+            let _ = write!(out, "; {cut} {texts} cut to {TEXT_MAX} characters");
+        }
+        match self.unmapped {
+            Some(Place::Off(_)) => out.push_str("; the file offset is in no mapped section"),
+            Some(Place::Va(_) | Place::Number(_) | Place::Rva(_)) => {
+                out.push_str("; the address is in no mapped section");
+            }
+            None => {}
+        }
+        out.push_str("\n# rank kind addr source text\n");
+        for h in &self.hits {
+            let addr = h.addr.map_or_else(|| "-".to_owned(), |a| format!("{a:#x}"));
+            let _ = writeln!(
+                out,
+                "{} {} {addr} {} {}",
+                h.rank.word(),
+                h.kind().word(),
+                h.source.code(),
+                one_line(&h.text)
+            );
+        }
+        out
+    }
+}
+
+impl HitKind {
+    /// Returns the word a row spells the kind with: `address`, `function`,
+    /// `import`, `export`, `symbol`, `string`, `type`, `class`, `name` or
+    /// `comment`.
+    #[must_use]
+    pub fn word(self) -> &'static str {
+        match self {
+            HitKind::Address => "address",
+            HitKind::Function => "function",
+            HitKind::Import => "import",
+            HitKind::Export => "export",
+            HitKind::Symbol => "symbol",
+            HitKind::String => "string",
+            HitKind::Type => "type",
+            HitKind::Class => "class",
+            HitKind::Name => "name",
+            HitKind::Comment => "comment",
+        }
+    }
+}
+
+impl Rank {
+    /// Returns the word a row spells the rank with: `exact`, `prefix`,
+    /// `word` or `substring`.
+    #[must_use]
+    pub fn word(self) -> &'static str {
+        match self {
+            Rank::Exact => "exact",
+            Rank::Prefix => "prefix",
+            Rank::Word => "word",
+            Rank::Substring => "substring",
+        }
+    }
+}
+
+impl Source {
+    /// Returns the token a row spells the source with, one column: a blank
+    /// in a module's or a section's name is written `\x20`.
+    ///
+    /// # Returns
+    ///
+    /// `va`, `number`, `rva` or `off` for the address form; a function's
+    /// [`RowSource::code`]; a symbol's kind, then `:` and its module when it
+    /// has one; a string's section (`off=<n>` for bytes no section maps),
+    /// `:` and its encoding; `usr` or `debug` for a type; `vtable` or
+    /// `descriptor` for a class; `usr` for a name; `finding` or `question`
+    /// for a comment.
+    #[must_use]
+    pub fn code(&self) -> String {
+        let column = |text: &str| one_line(text).replace(' ', "\\x20");
+        match self {
+            Source::Address(Place::Va(_)) => "va".to_owned(),
+            Source::Address(Place::Number(_)) => "number".to_owned(),
+            Source::Address(Place::Rva(_)) => "rva".to_owned(),
+            Source::Address(Place::Off(_)) => "off".to_owned(),
+            Source::Function(src) => src.code().to_owned(),
+            Source::Symbol { kind, module } => match module {
+                Some(m) => format!("{}:{}", kind.name(), column(m)),
+                None => kind.name().to_owned(),
+            },
+            Source::String {
+                off,
+                section,
+                encoding,
+            } => match section {
+                Some(s) => format!("{}:{}", column(s), encoding.name()),
+                None => format!("off={off:#x}:{}", encoding.name()),
+            },
+            Source::Type(TypeOrigin::User) | Source::User => "usr".to_owned(),
+            Source::Type(TypeOrigin::Debug) => "debug".to_owned(),
+            Source::Class(ClassOrigin::Vtable) => "vtable".to_owned(),
+            Source::Class(ClassOrigin::Descriptor) => "descriptor".to_owned(),
+            Source::Comment(CommentKind::Finding) => "finding".to_owned(),
+            Source::Comment(CommentKind::Question) => "question".to_owned(),
+        }
     }
 }
 

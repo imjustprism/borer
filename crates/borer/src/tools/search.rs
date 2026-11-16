@@ -3,7 +3,7 @@
 
 use std::fmt::Write as _;
 
-use borer_engine::analysis::{Analysis, Overlay, render};
+use borer_engine::analysis::{Analysis, Overlay, find, render};
 use borer_engine::program::Feature;
 use borer_engine::strings::walk::string_rows;
 use rmcp::handler::server::wrapper::Parameters;
@@ -264,6 +264,25 @@ impl BorerServer {
     }
 }
 
+impl BorerServer {
+    /// One search over every name table, ranked
+    /// ([`borer_engine::analysis::find::everywhere`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The query as typed ([`find::Query::parse`]).
+    ///
+    /// # Errors
+    ///
+    /// When no binary is loaded.
+    pub(crate) fn find_text(&self, query: &str) -> Result<String, ErrorData> {
+        self.with_analysis(Feature::Discover, |p, a, o| {
+            let q = find::Query::parse(query);
+            Ok(find::everywhere(p, a, o, &q, usize::MAX).spell())
+        })
+    }
+}
+
 /// Renders one page of search hits, one `function: va va` row per run of
 /// hits inside one function, under a header that says how many there are
 /// in all and where the page starts.
@@ -332,6 +351,69 @@ pub(crate) fn render_hits(
 #[cfg(test)]
 mod tests {
     use crate::testing::raw_server;
+
+    /// `borer://find` answers every name table at once, an address form
+    /// first, and a prefix narrows it.
+    ///
+    /// # Panics
+    ///
+    /// When a row or the header differs.
+    #[test]
+    fn find_answers_every_table_and_an_address_first() {
+        let server = raw_server();
+        let named = server
+            .resource_text("borer://find/SUB_1000")
+            .expect("answers");
+        assert!(
+            named.starts_with("# showing 1 of 1 hits: function 1 of 1\n# rank kind addr source text\nexact function 0x1000 - sub_1000\n"),
+            "{named}"
+        );
+        let at = server
+            .resource_text("borer://find/0x1000")
+            .expect("answers");
+        assert!(
+            at.contains("\n# rank kind addr source text\nexact address 0x1000 va sub_1000\n"),
+            "{at}"
+        );
+        let strings = server
+            .resource_text("borer://find/%22SUB_1000")
+            .expect("answers");
+        assert!(strings.starts_with("# showing 0 of 0 hits\n"), "{strings}");
+    }
+
+    /// `borer://find` reads its query percent-decoded: `%22` is the `"`
+    /// that narrows it to the strings, which the encoded text would not find.
+    ///
+    /// # Panics
+    ///
+    /// When the string is not found as the decoded query asks.
+    #[test]
+    fn find_decodes_its_query() {
+        use borer_engine::program::{Arch, Program, Section};
+        let mut bytes = vec![0xc3; 0x10];
+        bytes.extend_from_slice(b"crypto_box\0");
+        bytes.resize(0x20, 0);
+        let p = Program::raw(
+            bytes,
+            Arch::X86_64,
+            0,
+            Some(0x1000),
+            vec![
+                Section::mapped(".text", 0x1000, 0, 0x10, false, true),
+                Section::mapped(".rdata", 0x2000, 0x10, 0x10, false, false),
+            ],
+        );
+        let server = crate::testing::server_with(p);
+        let text = server
+            .resource_text("borer://find/%22crypto")
+            .expect("answers");
+        assert!(
+            text.contains(
+                "# rank kind addr source text\nprefix string 0x2000 .rdata:ascii crypto_box\n"
+            ),
+            "{text}"
+        );
+    }
 
     /// A search page says `showing N of M`, and a count states no page.
     ///

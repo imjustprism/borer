@@ -686,7 +686,8 @@ impl BorerServer {
     }
 
     /// Answers the resources that take a function, a tool or a place for
-    /// another tool: `sig`, `yara`, `names` and `addr`.
+    /// another tool, `sig`, `yara`, `names` and `addr`, and the query
+    /// `find` takes.
     ///
     /// # Arguments
     ///
@@ -701,6 +702,7 @@ impl BorerServer {
             "sig" => self.sig_text(arg),
             "yara" => self.yara_text(arg),
             "names" => self.names_text(arg),
+            "find" => self.find_text(arg),
             _ => self.addr_text(arg),
         }
     }

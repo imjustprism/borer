@@ -223,6 +223,11 @@ pub(crate) const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
         "borer://addr/{entry}",
     ),
     (
+        "borer://find/{query}",
+        "One search over every name table: the functions, imports, exports, symbols, strings, user and debug types, classes, user names and comments whose text holds query in any case, and first the place an address form names: 0x-hex, rva:<n>, off:<n>, or a bare number of decimal digits alone. Unlike borer://addr, find reads no bare hex, so add is a word here; a number a name spells is that name's hit, and a place no section maps is said in the header. Each row is rank (exact, prefix, word, substring), kind, address, how borer knows it (a function's name source, an import's module, a string's section and encoding, a type's origin, a comment as finding or question) and the text; at most 50 rows per kind, the header counting each kind's matches. The query is cut to 256 characters, which the header says and which then ranks nothing exact, and a row's text to 200 characters ending in ..., which the header counts A prefix narrows the tables: @ functions, %22 (a double quote) strings, t: types and classes, %23 (#) names and comments",
+        "borer://find/crypt",
+    ),
+    (
         "borer://encoded/{filter}",
         "Encoded strings whose decoded value contains {filter}",
         "borer://encoded/http",

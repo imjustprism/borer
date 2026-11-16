@@ -183,7 +183,9 @@ const RELOAD: &str = "After a rebuild of borer, {reload} restarts the server in 
 const INTENTS: &[(&str, &[&str])] = &[
     (
         "start",
-        &["triage", "info", "stats", "help", "playbook", "about"],
+        &[
+            "triage", "info", "stats", "help", "playbook", "about", "find",
+        ],
     ),
     (
         "run code",

@@ -687,7 +687,7 @@ impl BorerServer {
             ("hashes", None) => self.hashes_text()?,
             ("stats", Some(spec)) => return self.stats_text(&spec, asked),
             ("encoded", filter) => self.encoded_text(filter.as_deref().unwrap_or(""))?,
-            ("sig" | "yara" | "names" | "addr", Some(arg)) => self.handoff_text(kind, &arg)?,
+            ("sig" | "yara" | "names" | "addr" | "find", Some(a)) => self.handoff_text(kind, &a)?,
             ("children", None) => self.children_text()?,
             ("capabilities", None) => self.capabilities_text()?,
             ("qt", None) => self.qt_text()?,
