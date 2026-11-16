@@ -3,11 +3,12 @@ name: ci
 # The project's own gate on Windows: the same `scripts/gate.py --check` a
 # commit passes locally, so CI and the local gate cannot drift apart; clippy
 # and the tests on Linux (x64 and arm64) and macOS (arm64); clippy on Windows
-# arm64; and the RustSec advisories. Work on dev (its pull requests and
-# pushes) runs only `quick`: format, lints, clippy and the commit messages, in
-# minutes. The full set runs on a pull request into main, a push to main and a
-# manual run, so main never moves without it; advisories also run weekly. A
-# newer run on the same ref cancels the older one.
+# arm64; the GPUI app's clippy and tests on Linux and macOS; and the RustSec
+# advisories. Work on dev (its pull requests and pushes) runs only `quick`:
+# format, lints, clippy and the commit messages, in minutes. The full set
+# runs on a pull request into main, a push to main and a manual run, so main
+# never moves without it; advisories also run weekly. A newer run on the
+# same ref cancels the older one.
 
 on:
   push:
@@ -172,6 +173,60 @@ jobs:
 
       - name: test
         run: cargo test --workspace --lib --bins --tests
+
+  # The GPUI app, its own workspace under app/ on its own toolchain, built,
+  # linted and tested on Linux and macOS; the Windows gate runs it through
+  # scripts/run/app.py. Its tests run on GPUI's test platform and headless
+  # text systems, so no display server is needed; the ligature test runs
+  # from its own main, since macOS builds its platform only on the main
+  # thread. The Linux packages come from Zed's script/linux at the pinned
+  # revision: the fontconfig, freetype, OpenSSL and X11/xkbcommon libraries
+  # the native crates link, clang and CMake for the C they build (SQLite
+  # and zstd build from source), and the Wayland and Vulkan libraries GPUI
+  # loads at run time. macOS needs Xcode's Metal toolchain for GPUI's
+  # shaders, which newer Xcodes download on demand.
+  app:
+    name: app (${{ matrix.os }})
+    if: github.base_ref == 'main' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: linux packages
+        if: runner.os == 'Linux'
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          clang cmake libfontconfig-dev libssl-dev libwayland-dev
+          libx11-xcb-dev libxkbcommon-x11-dev libvulkan1
+
+      - name: metal toolchain
+        if: runner.os == 'macOS'
+        run: xcrun -sdk macosx metal --version || xcodebuild -downloadComponent MetalToolchain
+
+      # The app's own channel, named for rust-cache too, which otherwise keys
+      # on the root workspace's toolchain.
+      - name: toolchain
+        run: |
+          rustup toolchain install --no-self-update
+          echo "RUSTUP_TOOLCHAIN=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: app
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test --workspace
 
   # Windows on arm64: clippy compiles every target there, the C the
   # allocator builds included. The tests stay on x64 Windows, since the
