@@ -16,6 +16,10 @@ use crate::worker::ui_engine_calls;
 /// Time a drop is given to add a folder or start a program before it is checked.
 const DROP_SETTLE: Duration = Duration::from_secs(3);
 
+/// Time between a drag entering the window and its drop, so a frame lays out the hover
+/// the drop is tested against, as between a system drag's last move and its release.
+const DROP_HOVER: Duration = Duration::from_millis(200);
+
 /// Interval at which the phase polls for the binary's first decompile tab.
 const TAB_POLL: Duration = Duration::from_millis(50);
 
@@ -118,7 +122,7 @@ async fn drop_and_check(
     cx: &mut AsyncApp,
 ) -> anyhow::Result<bool> {
     let dir = dir.to_path_buf();
-    this.update_in(cx, |harness, window, cx| {
+    let position = this.update_in(cx, |harness, window, cx| {
         if let Some(panel) = harness.panel(cx) {
             let binary = panel.read(cx).binary().clone();
             binary.update(cx, |binary, cx| binary.set_status(String::new(), cx));
@@ -129,6 +133,12 @@ async fn drop_and_check(
             let paths = ExternalPaths([dir].into_iter().collect());
             let entered = FileDropEvent::Entered { position, paths };
             window.dispatch_event(PlatformInput::FileDrop(entered), cx);
+        });
+        position
+    })?;
+    cx.background_executor().timer(DROP_HOVER).await;
+    this.update_in(cx, |_, window, cx| {
+        window.defer(cx, move |window, cx| {
             let submit = FileDropEvent::Submit { position };
             window.dispatch_event(PlatformInput::FileDrop(submit), cx);
         });
