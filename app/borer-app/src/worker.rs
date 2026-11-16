@@ -12,6 +12,7 @@ use std::task::Poll;
 use borer_engine::analysis::decompile::replay::{Grade, TextCheck};
 use borer_engine::analysis::decompile::text_check;
 use borer_engine::analysis::decompile::view::view;
+use borer_engine::analysis::find::{Found, Query, everywhere};
 use borer_engine::analysis::render::{
     Bytes, FunctionOrder, FunctionRows, Triage, answered_flagged, disasm_view, function_rows,
     triage,
@@ -614,51 +615,73 @@ pub fn place_at(loaded: &LoadedBinary, va: u64) -> Option<Place> {
     })
 }
 
-/// Most function rows a go-to query lists.
-pub const GOTO_ROWS: usize = 200;
+/// Most hits a find lists.
+pub const FIND_HITS: usize = 200;
 
-/// What a go-to query finds: the function its text names, and the functions it filters.
+/// What a find query found: the engine's ranked hits, where each one's function starts,
+/// and the engine's words when nothing matched.
 #[derive(Debug)]
-pub struct GoToAnswer {
-    /// The entry of the function holding the address the text resolves to, and that
-    /// address, else the engine's words for the miss (nearest names, or what holds no
-    /// function).
-    pub target: Result<(u64, u64), String>,
-    /// The function rows the text filters, at most [`GOTO_ROWS`].
-    pub rows: FunctionRows,
+pub struct FindAnswer {
+    /// The hits, best first, at most [`FIND_HITS`], with every kind's true count.
+    pub found: Found,
+    /// The entry of the function holding each hit's address, in the order of the hits;
+    /// `None` for a hit with no address or one in no function.
+    pub entries: Vec<Option<u64>>,
+    /// The query's needle, lowered as the engine matched it.
+    pub needle: String,
+    /// The engine's words for a text nothing matched (nearest names, or what holds no
+    /// function); `None` when something matched or the text is empty.
+    pub miss: Option<String>,
 }
 
-/// Resolves `query` as an address or a name, and filters the function rows by it.
+/// Finds `query` in every name table the engine holds, ranked into one list.
 ///
 /// Must be called inside [`spawn_engine`]. It runs under a flag of its own that nothing
-/// raises: the name index it builds is kept for the next query only when no raised flag
-/// cut it short, and a query typed over would otherwise throw each build away.
+/// raises: the name index and the string walk it builds are kept for the next query only
+/// when no raised flag cut them short, and a query typed over would otherwise throw each
+/// build away.
 ///
 /// # Arguments
 ///
 /// * `loaded` - Previously loaded binary state.
-/// * `query` - What the person typed: `0x`-hex, decimal or a name.
+/// * `query` - What the person typed: an address form, a name, or a kind prefix (`@`
+///   functions, `"` strings, `t:` types, `#` names and comments) and a needle.
 #[must_use]
-pub fn goto_blocking(loaded: &LoadedBinary, query: &str) -> GoToAnswer {
-    Cancel::new().within(|| goto_answer(loaded, query))
+pub fn find_blocking(loaded: &LoadedBinary, query: &str) -> FindAnswer {
+    Cancel::new().within(|| find_answer(loaded, query))
 }
 
-/// Answers a go-to query, as [`goto_blocking`] does, under whatever flag is in force.
+/// Answers a find query, as [`find_blocking`] does, under whatever flag is in force.
 ///
 /// # Arguments
 ///
 /// * `loaded` - Previously loaded binary state.
 /// * `query` - What the person typed.
-fn goto_answer(loaded: &LoadedBinary, query: &str) -> GoToAnswer {
+fn find_answer(loaded: &LoadedBinary, query: &str) -> FindAnswer {
     let (p, a, o) = (&*loaded.program, &*loaded.analysis, &*loaded.overlay);
-    let target = resolve_suggesting(p, a, o, query).and_then(|va| {
-        a.function_at(va)
-            .map(|f| (f.entry, va))
-            .ok_or_else(|| no_function_at(p, a, va))
-    });
-    let filter = (!query.is_empty()).then_some(query);
-    let rows = function_rows(a, o, filter, FunctionOrder::Address, 0, GOTO_ROWS);
-    GoToAnswer { target, rows }
+    let q = Query::parse(query);
+    let found = everywhere(p, a, o, &q, FIND_HITS);
+    let entries = found
+        .hits
+        .iter()
+        .map(|hit| hit.addr.and_then(|va| a.function_at(va)).map(|f| f.entry))
+        .collect();
+    let miss = (found.hits.is_empty() && !query.is_empty())
+        .then(|| match resolve_suggesting(p, a, o, query) {
+            Err(words) => Some(words),
+            Ok(va) => a
+                .function_at(va)
+                .is_none()
+                .then(|| no_function_at(p, a, va)),
+        })
+        .flatten();
+    let needle = q.needle.as_str().to_owned();
+    FindAnswer {
+        found,
+        entries,
+        needle,
+        miss,
+    }
 }
 
 #[cfg(test)]
@@ -670,7 +693,7 @@ mod tests {
     use borer_engine::cancel::Cancel;
     use gpui::{AppContext as _, Entity, SharedString, TestAppContext};
 
-    use super::{Job, Jobs, goto_blocking, spawn_engine};
+    use super::{Job, Jobs, find_blocking, spawn_engine};
 
     /// A view with one request slot, keeping the answers applied to it.
     #[derive(Default)]
@@ -757,18 +780,18 @@ mod tests {
         assert!(flag.is_raised());
     }
 
-    /// Go to runs under a flag of its own, so a raised request flag keeps the name index
-    /// it builds for the next query.
+    /// A find runs under a flag of its own, so a raised request flag keeps the name index
+    /// its miss builds for the next query.
     ///
     /// # Panics
     ///
     /// Panics if the index is not kept.
     #[test]
-    fn go_to_keeps_its_name_index_under_a_raised_flag() {
+    fn a_find_keeps_its_name_index_under_a_raised_flag() {
         let loaded = crate::app_view::tests::sample();
         let raised = Cancel::new();
         raised.raise();
-        raised.within(|| goto_blocking(&loaded, "x"));
+        raised.within(|| find_blocking(&loaded, "zzqx"));
         assert_eq!(loaded.analysis.derived.held("name_index"), 1);
     }
 
@@ -879,7 +902,8 @@ mod tests {
     /// # Panics
     ///
     /// Panics if another module names `Program::load`, `Analysis::compute`, a decompile
-    /// or listing view, the resolver, the function listing or the check of an answer.
+    /// or listing view, the resolver, the function listing, the check of an answer, the
+    /// triage or the find.
     #[test]
     fn only_the_worker_names_engine_compute_calls() {
         let calls = [
@@ -892,6 +916,7 @@ mod tests {
             "text_check(",
             "answered_flagged(",
             "triage(",
+            "everywhere(",
         ];
         for (name, text) in sources() {
             let code = kept(text);

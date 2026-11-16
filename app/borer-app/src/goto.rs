@@ -1,27 +1,33 @@
-//! Go to: Zed's picker over what the person types.
+//! Go to: Zed's picker over what the person types, found everywhere.
 //!
-//! The engine resolves the text as an address or a name in the background and filters the
-//! function rows by it; Enter opens the function, a listing at the resolved instruction when
+//! The engine finds the text in every name table it holds, in the background, ranked into
+//! one list: the place it spells as an address first, then functions, imports, exports,
+//! symbols, strings, types, classes, user names and comments; a kind prefix (`@`, `"`,
+//! `t:`, `#`) narrows it. Enter opens the function holding a hit, a listing at the hit when
 //! a listing is the active view. A miss shows the engine's own words, nearest names and all.
 
 use std::sync::Arc;
 
+use borer_engine::analysis::find::{Hit, HitKind};
 use gpui::{App, Context, DismissEvent, Entity, Task, WeakEntity, Window};
 use picker::{Picker, PickerDelegate};
-use ui::{Color, Label, LabelCommon as _, ListItem, ListItemSpacing, prelude::*};
+use ui::{
+    Color, HighlightedLabel, Label, LabelCommon as _, LabelSize, ListItem, ListItemSpacing,
+    prelude::*,
+};
 use workspace::Workspace;
 
 use crate::binary::Binary;
 use crate::commands;
 use crate::decompile_item::{DecompileItem, Form, TabMode};
 use crate::places::{Opening, Place, open};
-use crate::worker::{GoToAnswer, LoadedBinary, goto_blocking, spawn_engine};
+use crate::worker::{FindAnswer, LoadedBinary, find_blocking, spawn_engine};
 
 gpui::actions!(
     borer,
     [
         /// Opens the go-to picker: an address or a name opens the function holding it, and
-        /// the functions whose names match are listed below it.
+        /// every function, symbol, string, type and note whose text holds it is listed.
         GoTo,
     ]
 );
@@ -42,13 +48,21 @@ pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
 /// One line of the picker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Match {
-    /// The function holding what the text resolves to: its entry and the address.
-    Target(u64, u64),
-    /// The engine's words for a text that resolves to no function.
+    /// One hit of the find: the engine's hit, the entry of the function holding its
+    /// address, and the byte offsets of the characters of its text the needle matched.
+    Hit {
+        /// The engine's hit.
+        hit: Hit,
+        /// Entry of the function holding the hit's address, if any.
+        entry: Option<u64>,
+        /// Byte offsets of the matched characters of the hit's text.
+        marks: Vec<usize>,
+    },
+    /// The engine's words for a text that matched nothing.
     Miss(String),
-    /// A function row the text filters: its entry and its name.
-    Row(u64, String),
-    /// How many rows are shown, and how many the text filters in all.
+    /// A kind the find capped: what it is, how many of it are listed, and how many matched.
+    Capped(HitKind, usize, usize),
+    /// How many hits are listed, and how many matched in all.
     Count(usize, usize),
 }
 
@@ -57,15 +71,19 @@ impl Match {
     /// that opens nothing.
     const fn opens(&self) -> Option<(u64, Option<u64>)> {
         match self {
-            Self::Target(entry, va) => Some((*entry, Some(*va))),
-            Self::Row(entry, _) => Some((*entry, None)),
-            Self::Miss(_) | Self::Count(..) => None,
+            Self::Hit {
+                hit,
+                entry: Some(entry),
+                ..
+            } => Some((*entry, hit.addr)),
+            Self::Hit { entry: None, .. } | Self::Miss(_) | Self::Capped(..) | Self::Count(..) => {
+                None
+            }
         }
     }
 
     /// Returns what Enter on this line opens from a tab showing `form`: the function in
-    /// that view, a listing at the resolved instruction; `None` for a line that opens
-    /// nothing.
+    /// that view, a listing at the hit's address; `None` for a line that opens nothing.
     ///
     /// # Arguments
     ///
@@ -82,25 +100,69 @@ impl Match {
     }
 }
 
-/// Returns the picker's lines for an answer: the resolved function or the miss first when
-/// the text is not empty, then the rows, then how many of how many they are.
+/// Returns the byte offsets of the characters of `text` that the first case-folded match
+/// of `needle` covers; none when the needle is empty or matched elsewhere (an import's
+/// module, a mangled name).
 ///
 /// # Arguments
 ///
-/// * `query` - The text, trimmed.
-/// * `answer` - What the engine found for it.
-fn lines(query: &str, answer: GoToAnswer) -> Vec<Match> {
-    let first = (!query.is_empty()).then_some(match answer.target {
-        Ok((entry, va)) => Match::Target(entry, va),
-        Err(miss) => Match::Miss(miss),
+/// * `text` - A hit's text.
+/// * `needle` - The needle, lowered as the engine matched it.
+fn marks(text: &str, needle: &str) -> Vec<usize> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let from = |start: usize| {
+        let mut lowered = String::new();
+        let mut at = Vec::new();
+        for (i, c) in text.get(start..)?.char_indices() {
+            if lowered.len() >= needle.len() {
+                break;
+            }
+            at.push(start + i);
+            lowered.extend(c.to_lowercase());
+        }
+        lowered.starts_with(needle).then_some(at)
+    };
+    text.char_indices()
+        .find_map(|(start, _)| from(start))
+        .unwrap_or_default()
+}
+
+/// Returns the picker's lines for an answer: the miss when nothing matched, the hits best
+/// first, a line for each capped kind, then how many of how many they are when the needle
+/// is not empty.
+///
+/// # Arguments
+///
+/// * `answer` - What the engine found.
+fn lines(answer: FindAnswer) -> Vec<Match> {
+    let FindAnswer {
+        found,
+        entries,
+        needle,
+        miss,
+    } = answer;
+    let total = found.counted.iter().map(|&(_, count)| count).sum();
+    let count = (!needle.is_empty()).then_some(Match::Count(found.hits.len(), total));
+    let capped: Vec<_> = found
+        .counted
+        .iter()
+        .filter_map(|&(kind, count)| {
+            let kept = found.hits.iter().filter(|h| h.kind() == kind).count();
+            (kept < count).then_some(Match::Capped(kind, kept, count))
+        })
+        .collect();
+    let hits = found.hits.into_iter().zip(entries).map(|(hit, entry)| {
+        let marks = marks(&hit.text, &needle);
+        Match::Hit { hit, entry, marks }
     });
-    let count = Match::Count(answer.rows.rows.len(), answer.rows.total);
-    let rows = answer
-        .rows
-        .rows
+    miss.map(Match::Miss)
         .into_iter()
-        .map(|r| Match::Row(r.entry, r.name));
-    first.into_iter().chain(rows).chain([count]).collect()
+        .chain(hits)
+        .chain(capped)
+        .chain(count)
+        .collect()
 }
 
 /// The go-to picker's state: the binary it searches and the lines of the latest answer.
@@ -187,11 +249,13 @@ impl PickerDelegate for GoToDelegate {
         _window: &mut Window,
         _cx: &mut Context<'_, Picker<Self>>,
     ) -> bool {
-        self.matches.get(ix).is_some_and(|m| m.opens().is_some())
+        self.matches
+            .get(ix)
+            .is_some_and(|m| matches!(m, Match::Hit { .. }))
     }
 
     fn placeholder_text(&self, _window: &mut Window, _cx: &mut App) -> Arc<str> {
-        "Go to an address or a name".into()
+        "Go to an address or a name; @ functions, \" strings, t: types, # notes".into()
     }
 
     fn update_matches(
@@ -203,8 +267,7 @@ impl PickerDelegate for GoToDelegate {
         let loaded = self.loaded.clone();
         let label = format!("Going to {}", query.trim());
         let answer = spawn_engine(label, cx, move || {
-            let query = query.trim();
-            lines(query, goto_blocking(&loaded, query))
+            lines(find_blocking(&loaded, query.trim()))
         });
         cx.spawn(async move |picker, cx| {
             let (Some(matches), Some(picker)) = (answer.await, picker.upgrade()) else {
@@ -214,7 +277,7 @@ impl PickerDelegate for GoToDelegate {
                 let delegate = &mut picker.delegate;
                 delegate.selected = matches
                     .iter()
-                    .position(|m| m.opens().is_some())
+                    .position(|m| matches!(m, Match::Hit { .. }))
                     .unwrap_or(0);
                 delegate.matches = matches;
                 cx.notify();
@@ -267,23 +330,55 @@ impl PickerDelegate for GoToDelegate {
         _window: &mut Window,
         _cx: &mut Context<'_, Picker<Self>>,
     ) -> Option<Self::ListItem> {
-        let (text, color) = match self.matches.get(ix)? {
-            Match::Target(entry, va) => (
-                format!("open the function at {entry:#x}, which holds {va:#x}"),
-                Color::Default,
-            ),
-            Match::Miss(miss) => (miss.clone(), Color::Muted),
-            Match::Row(entry, name) => (format!("{entry:#x}  {name}"), Color::Default),
-            Match::Count(shown, total) => (format!("showing {shown} of {total}"), Color::Muted),
+        let line = match self.matches.get(ix)? {
+            Match::Hit { hit, marks, .. } => hit_line(hit, marks),
+            Match::Miss(miss) => muted(miss.clone()),
+            Match::Capped(kind, kept, count) => {
+                muted(format!("{}: showing {kept} of {count}", kind.word()))
+            }
+            Match::Count(shown, total) => muted(format!("showing {shown} of {total}")),
         };
         Some(
             ListItem::new(ix)
                 .inset(true)
                 .spacing(ListItemSpacing::Sparse)
                 .toggle_state(selected)
-                .child(Label::new(text).color(color)),
+                .child(line),
         )
     }
+}
+
+/// Returns a line of muted text.
+///
+/// # Arguments
+///
+/// * `text` - What it says.
+fn muted(text: String) -> AnyElement {
+    Label::new(text).color(Color::Muted).into_any_element()
+}
+
+/// Returns a hit's line: its kind, its text with the needle's characters highlighted, its
+/// address, and how borer knows it, muted.
+///
+/// # Arguments
+///
+/// * `hit` - The engine's hit.
+/// * `marks` - Byte offsets of the matched characters of its text.
+fn hit_line(hit: &Hit, marks: &[usize]) -> AnyElement {
+    let small = |text: String| Label::new(text).size(LabelSize::Small).color(Color::Muted);
+    let addr = hit.addr.map_or_else(String::new, |va| format!("{va:#x}"));
+    h_flex()
+        .w_full()
+        .gap_2()
+        .child(
+            div()
+                .w(rems(4.5))
+                .child(small(hit.kind().word().to_owned())),
+        )
+        .child(HighlightedLabel::new(hit.text.to_string(), marks.to_vec()))
+        .child(small(addr))
+        .child(small(hit.source.code()))
+        .into_any_element()
 }
 
 #[cfg(test)]
@@ -294,13 +389,14 @@ impl PickerDelegate for GoToDelegate {
 mod tests {
     use std::sync::Arc;
 
+    use borer_engine::analysis::find::{Hit, HitKind, KIND_MAX, Rank, Source};
     use borer_engine::analysis::resolve_suggesting;
     use borer_engine::view::Ref;
     use gpui::{Entity, TestAppContext, VisualTestContext};
     use picker::Picker;
     use workspace::Workspace;
 
-    use super::{GoToDelegate, Match};
+    use super::{GoToDelegate, Match, marks};
     use crate::app_view::tests::{CALLEE, CALLER, init, open, sample};
     use crate::decompile_item::tests::{active as tab, fourth_instruction, open_tab};
     use crate::decompile_item::{DecompileItem, Form, link_place};
@@ -308,6 +404,30 @@ mod tests {
     use crate::places::Place;
     use crate::rows_panel::RowKind as _;
     use crate::worker::{Jobs, LoadedBinary, decompile_blocking};
+
+    /// Returns the sample with the user's `names` over it.
+    fn named(names: impl IntoIterator<Item = (u64, String)>) -> Arc<LoadedBinary> {
+        let plain = sample();
+        let mut overlay = (*plain.overlay).clone();
+        for (va, name) in names {
+            overlay.names.insert(va, name);
+        }
+        Arc::new(LoadedBinary {
+            path: plain.path.clone(),
+            program: plain.program.clone(),
+            analysis: plain.analysis.clone(),
+            overlay: Arc::new(overlay),
+            initial_rows: plain.initial_rows.clone(),
+        })
+    }
+
+    /// Returns the sample with its caller and callee named `caller_fn` and `callee_fn`.
+    fn named_calls() -> Arc<LoadedBinary> {
+        named([
+            (CALLER, "caller_fn".to_owned()),
+            (CALLEE, "callee_fn".to_owned()),
+        ])
+    }
 
     /// Opens go to with its key from the focused code tab, types `query` and waits for the
     /// engine's answer.
@@ -332,6 +452,22 @@ mod tests {
         picker
     }
 
+    /// Returns the lines the picker shows.
+    fn shown(picker: &Entity<Picker<GoToDelegate>>, cx: &mut VisualTestContext) -> Vec<Match> {
+        picker.read_with(cx, |picker, _| picker.delegate.matches.clone())
+    }
+
+    /// Returns the hits among `lines`.
+    fn hits(lines: &[Match]) -> Vec<&Hit> {
+        lines
+            .iter()
+            .filter_map(|line| match line {
+                Match::Hit { hit, .. } => Some(hit),
+                Match::Miss(_) | Match::Capped(..) | Match::Count(..) => None,
+            })
+            .collect()
+    }
+
     /// Returns the entry of the active code tab.
     fn active(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<u64> {
         workspace.read_with(cx, |workspace, cx| {
@@ -353,17 +489,7 @@ mod tests {
         let app_state = init(cx);
         let (app, cx) = open(&app_state, cx);
         let workspace = app.workspace;
-        let plain = sample();
-        let mut overlay = (*plain.overlay).clone();
-        overlay.names.insert(CALLER, "caller_fn".to_owned());
-        overlay.names.insert(CALLEE, "callee_fn".to_owned());
-        let loaded = Arc::new(LoadedBinary {
-            path: plain.path.clone(),
-            program: plain.program.clone(),
-            analysis: plain.analysis.clone(),
-            overlay: Arc::new(overlay),
-            initial_rows: plain.initial_rows.clone(),
-        });
+        let loaded = named_calls();
         open_tab(&workspace, &loaded, (CALLER, Form::Decompile), cx);
         for (query, want) in [
             (format!("{CALLEE:#x}"), CALLEE),
@@ -383,22 +509,93 @@ mod tests {
         );
         let miss = said.unwrap_err();
         assert!(miss.contains("callee_fn"), "{miss}");
-        let (first, last) = picker.read_with(cx, |picker, _| {
-            let matches = &picker.delegate.matches;
-            (matches.first().cloned(), matches.last().cloned())
-        });
-        assert_eq!(first, Some(Match::Miss(miss)));
-        assert_eq!(last, Some(Match::Count(0, 0)));
+        let lines = shown(&picker, cx);
+        assert_eq!(lines.first().cloned(), Some(Match::Miss(miss)));
+        assert_eq!(lines.last().cloned(), Some(Match::Count(0, 0)));
         cx.dispatch_action(menu::Confirm);
         cx.run_until_parked();
         assert_eq!(active(&workspace, cx), Some(CALLER));
     }
 
+    /// A query naming a string the program holds lists it as a string hit, at its address,
+    /// with the needle's characters marked.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the string is not listed.
+    #[gpui::test]
+    fn a_string_of_the_program_is_found(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
+        open_tab(&workspace, &sample(), (CALLER, Form::Decompile), cx);
+        let picker = ask(&workspace, "world", cx);
+        let lines = shown(&picker, cx);
+        let string = lines.iter().find_map(|line| match line {
+            Match::Hit { hit, marks, .. } if hit.kind() == HitKind::String => Some((hit, marks)),
+            Match::Hit { .. } | Match::Miss(_) | Match::Capped(..) | Match::Count(..) => None,
+        });
+        let (hit, marks) = string.unwrap();
+        assert_eq!((&*hit.text, hit.addr), ("hello world", Some(0x1100)));
+        assert_eq!(marks, &[6, 7, 8, 9, 10]);
+    }
+
+    /// `@` and a function's name lists only functions, and Enter opens the function.
+    ///
+    /// # Panics
+    ///
+    /// Panics if another kind is listed or Enter opens another function.
+    #[gpui::test]
+    fn a_function_prefix_lists_only_functions(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
+        let loaded = named_calls();
+        open_tab(&workspace, &loaded, (CALLER, Form::Decompile), cx);
+        let picker = ask(&workspace, "@callee", cx);
+        let lines = shown(&picker, cx);
+        let kinds: Vec<_> = hits(&lines).iter().map(|hit| hit.kind()).collect();
+        assert_eq!(kinds, [HitKind::Function]);
+        cx.dispatch_action(menu::Confirm);
+        cx.run_until_parked();
+        assert_eq!(active(&workspace, cx), Some(CALLEE));
+    }
+
+    /// A kind with more matches than the engine keeps says how many it lists of how many
+    /// matched, the engine's own total.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the capped kind or the total is missing.
+    #[gpui::test]
+    fn a_capped_kind_shows_the_engines_total(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
+        let many = KIND_MAX + 10;
+        let names = (0..many).map(|i| (0x1110 + u64::try_from(i).unwrap(), format!("note_{i}")));
+        open_tab(&workspace, &named(names), (CALLER, Form::Decompile), cx);
+        let picker = ask(&workspace, "#note_", cx);
+        let lines = shown(&picker, cx);
+        assert!(lines.contains(&Match::Capped(HitKind::Name, KIND_MAX, many)));
+        assert_eq!(lines.last().cloned(), Some(Match::Count(KIND_MAX, many)));
+    }
+
+    /// The matched characters of a hit's text are found in any case, by byte offset, and
+    /// none are for an empty needle or a text that does not hold it.
+    #[test]
+    fn marks_cover_the_needle_in_any_case() {
+        assert_eq!(marks("Hello World", "world"), [6, 7, 8, 9, 10]);
+        assert_eq!(marks("\u{c4}bc", "\u{e4}b"), [0, 2]);
+        assert!(marks("hello", "").is_empty());
+        assert!(marks("kernel32", "createfile").is_empty());
+    }
+
     /// What Enter opens is a place, named without a window.
     ///
     /// A functions row names its decompile view, a call's link the callee in the same view,
-    /// a resolved go-to line the function (a listing at the instruction), and lines that
-    /// open nothing name none.
+    /// a hit inside a function that function (a listing at the hit), and lines that open
+    /// nothing name none.
     #[test]
     fn rows_links_and_go_to_lines_name_their_places() {
         let loaded = sample();
@@ -420,27 +617,34 @@ mod tests {
             link_place(&view, &Ref::Address(CALLER), Form::Decompile),
             None
         );
+        let hit = |addr, entry| Match::Hit {
+            hit: Hit {
+                addr: Some(addr),
+                text: "f".into(),
+                cut: false,
+                source: Source::User,
+                rank: Rank::Exact,
+            },
+            entry,
+            marks: Vec::new(),
+        };
         let va = CALLEE + 1;
-        let target = Match::Target(CALLEE, va);
+        let inside = hit(va, Some(CALLEE));
         assert_eq!(
-            target.place(Form::Listing),
+            inside.place(Form::Listing),
             Some(code(CALLEE, Form::Listing, Some(va)))
         );
         assert_eq!(
-            target.place(Form::Decompile),
+            inside.place(Form::Decompile),
             Some(code(CALLEE, Form::Decompile, None))
         );
-        let named = Match::Row(CALLER, "f".to_owned());
-        assert_eq!(
-            named.place(Form::Decompile),
-            Some(code(CALLER, Form::Decompile, None))
-        );
+        assert_eq!(hit(0x1100, None).place(Form::Listing), None);
         assert_eq!(Match::Miss("no".to_owned()).place(Form::Listing), None);
         assert_eq!(Match::Count(0, 0).place(Form::Listing), None);
     }
 
-    /// A query typed again before the engine answered lists the second query's answer;
-    /// each query runs as a listed request.
+    /// Queries typed over one another before the engine answered list only the last
+    /// query's answer; each query runs as a listed request.
     #[gpui::test]
     fn a_go_to_query_typed_over_lists_the_newest_answer(cx: &mut TestAppContext) {
         let app_state = init(cx);
@@ -455,15 +659,21 @@ mod tests {
             let mut flags = jobs.into_iter().filter(|(_, l, _)| *l == label);
             flags.next().map(|(_, _, flag)| flag)
         };
-        assert!(query("0x1", cx).is_some());
+        assert!(query("world", cx).is_some());
+        query("0x1", cx);
         query(&format!("{CALLEE:#x}"), cx);
         cx.run_until_parked();
-        let opens = picker.read_with(cx, |picker, _| picker.delegate.matches.first().cloned());
-        assert_eq!(opens.and_then(|m| m.opens()), Some((CALLEE, Some(CALLEE))));
+        let lines = shown(&picker, cx);
+        assert_eq!(
+            lines.first().and_then(Match::opens),
+            Some((CALLEE, Some(CALLEE)))
+        );
+        let kinds: Vec<_> = hits(&lines).iter().map(|hit| hit.kind()).collect();
+        assert!(!kinds.contains(&HitKind::String), "{kinds:?}");
     }
 
     /// From a listing tab, going to an address inside a function opens that function's
-    /// listing at the line of the instruction, and the picker counts the rows it shows.
+    /// listing at the line of the instruction, and the picker counts the hits it shows.
     ///
     /// # Panics
     ///
@@ -477,7 +687,7 @@ mod tests {
         let (va, line) = fourth_instruction(&loaded);
         open_tab(&workspace, &loaded, (CALLER, Form::Listing), cx);
         let picker = ask(&workspace, &format!("{va:#x}"), cx);
-        let last = picker.read_with(cx, |picker, _| picker.delegate.matches.last().cloned());
+        let last = shown(&picker, cx).last().cloned();
         assert!(matches!(last, Some(Match::Count(..))));
         cx.dispatch_action(menu::Confirm);
         cx.run_until_parked();
