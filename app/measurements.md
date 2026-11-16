@@ -75,3 +75,46 @@ Zed crates in the graph:
   status line says so.
 - **gpui profiler.** gpui's `profiler` feature stays on in the shipped build.
   The harness reads its histograms.
+
+## U1-1: the app in Zed's workspace (2026-11-16)
+
+Release build of `c3f3742f` (add/app-workspace), same machine and script as above
+(`python scripts/run/app_measure.py --exe <exe>`). The window is now Zed's `Workspace`:
+the functions panel in the left dock, decompile tabs in the center pane, Zed's
+command palette, nav history and dock persistence. Every measured run gets a fresh
+data directory of its own.
+
+| Measure | Result | Bar | Pass |
+| --- | --- | --- | --- |
+| 100,000-row list scroll, frame draw p99 | 2.97 ms (max 4.99) | 8.3 ms | yes |
+| 1,000,000-line code scroll, frame draw p99 | 2.62 ms (max 25.8) | 8.3 ms | yes |
+| Input to paint p99, 200 keys and 100 clicks via `SendInput` | 6.83 ms (p50 3.24, max 8.29) | 16 ms | yes |
+| First frame, median of 10 | 190.6 ms (max 237.6) | 300 ms | yes |
+| notepad.exe open to its function list, median of 10 | 247.0 ms (max 272.1) | 1 s | yes |
+| Memory beyond the engine | 87.1 MB (108.7 MB minus 21.7 MB) | 150 MB | yes |
+
+- List scroll: `edgehtml.dll` (2.66 s to analyze), 98,962 rows repeated to 100,000;
+  present p99 3.88 ms. Code scroll: notepad's 24,427 lines repeated to 1,000,000;
+  present p99 3.79 ms. Both report the scrolled view painted.
+- Input: background work behind an input 1.88 ms at p99; gpui's own input-to-frame
+  histogram 5.76 ms at p99. Keys are counted where gpui intercepts them, before a
+  binding or the filter editor takes them.
+- Folder drop: a folder whose `.zed/settings.json` names a context server, dropped
+  on the Start tab and on a decompile tab, reaches the tab's handler both times;
+  the project keeps 0 folders.
+- UI-thread engine calls: 0 in every phase. Sockets: none (180 polls). Child
+  processes: 0 in every run, counted by a job object each run joins before it runs.
+- Compared with the spike, first frame is 49 ms slower (Zed's database, settings,
+  keymap and workspace), open to list 65 ms slower, memory 9 MB more.
+
+| Cost | Value |
+| --- | --- |
+| Clean `cargo build --release` (empty release directory, dependencies already fetched) | 644 s |
+| Incremental release build after touching one app file | 258 s |
+| `borer-app.exe` | 137.5 MB |
+| Unique crates, Windows graph (`cargo tree -p borer-app -e normal,build --target x86_64-pc-windows-msvc --prefix none \| sort -u`) | 736 (103 from Zed) |
+| `cargo deny check bans licenses sources` | ok (licenses added for Zed's graph, each named in deny.toml) |
+
+- The exe grew from 36 MB: Zed's workspace pulls `language`, which turns on
+  tree-sitter's `wasm` feature (wasmtime and cranelift) unconditionally, plus
+  `project`, `client` and their TLS stack; none of that runs, but it links.
