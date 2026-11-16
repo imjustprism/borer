@@ -25,7 +25,7 @@ const HEX: [u8; 16] = *b"0123456789abcdef";
 /// * `prefix` - Two-byte ASCII prefix.
 /// * `v` - Unsigned value to format.
 /// * `buf` - Scratch buffer holding up to 18 bytes.
-fn hex_prefixed<'b>(prefix: &[u8; 2], mut v: u64, buf: &'b mut [u8; 18]) -> &'b str {
+pub(super) fn hex_prefixed<'b>(prefix: &[u8; 2], mut v: u64, buf: &'b mut [u8; 18]) -> &'b str {
     let mut i = buf.len();
     loop {
         i -= 1;
@@ -48,7 +48,7 @@ fn hex_prefixed<'b>(prefix: &[u8; 2], mut v: u64, buf: &'b mut [u8; 18]) -> &'b 
 ///
 /// * `byte` - Encoded instruction byte.
 /// * `buf` - Two-byte scratch buffer.
-fn hex_byte(byte: u8, buf: &mut [u8; 2]) -> &str {
+pub(super) fn hex_byte(byte: u8, buf: &mut [u8; 2]) -> &str {
     buf[0] = HEX[usize::from(byte >> 4)];
     buf[1] = HEX[usize::from(byte & 0x0f)];
     std::str::from_utf8(buf).unwrap_or_default()
@@ -305,17 +305,13 @@ fn disasm_into<S: Sink>(
         let shown = match x86.as_mut() {
             Some((bits, fmt)) => disasm::decode_x86(code, b.start, *bits, room, |row| {
                 reached = row.va.saturating_add(from_usize(row.bytes.len()));
-                ctx.write_head(row.va, row.bytes, out);
-                let targets = fmt.write(&row, out, |va| a.function(va).is_some());
-                ctx.write_tail(row.va, targets.branch, targets.memory, out);
+                ctx.x86_row(fmt, &row, out);
             }),
             None => {
                 let lines = disasm::disassemble_program(p, code, b.start, isa, room);
                 for l in &lines {
                     reached = l.va.saturating_add(from_usize(l.bytes.len()));
-                    ctx.write_head(l.va, &l.bytes, out);
-                    write_isa_line(&l.text, l.target, isa, a, out);
-                    ctx.write_tail(l.va, l.target, None, out);
+                    ctx.isa_row(l, isa, out);
                 }
                 lines.len()
             }
@@ -343,21 +339,57 @@ fn disasm_into<S: Sink>(
     Some(short)
 }
 
-/// Shared read-only inputs for rendering each instruction row.
-struct RowCtx<'a> {
+/// Shared read-only inputs for rendering each instruction row, the one
+/// renderer of an instruction's line in a function listing and in the
+/// linear listing ([`super::linear()`]).
+pub(super) struct RowCtx<'a> {
     /// The loaded image.
-    program: &'a Program,
+    pub(super) program: &'a Program,
     /// The analysis.
-    analysis: &'a Analysis,
+    pub(super) analysis: &'a Analysis,
     /// User names and comments.
-    overlay: &'a Overlay,
+    pub(super) overlay: &'a Overlay,
     /// Resolved Linux syscall sites, sorted by address.
-    sites: &'a [SyscallSite],
+    pub(super) sites: &'a [SyscallSite],
     /// Whether the bytes column is shown.
-    bytes: Bytes,
+    pub(super) bytes: Bytes,
 }
 
 impl RowCtx<'_> {
+    /// Writes one decoded x86 instruction's lines: any user label, then the
+    /// address, the text and the trailing annotations.
+    ///
+    /// # Arguments
+    ///
+    /// * `fmt` - The formatter, kept across a listing's instructions.
+    /// * `row` - The decoded instruction.
+    /// * `out` - The destination sink.
+    pub(super) fn x86_row<S: Sink>(
+        &self,
+        fmt: &mut disasm::X86Format,
+        row: &disasm::X86Decoded<'_>,
+        out: &mut S,
+    ) {
+        self.write_head(row.va, row.bytes, out);
+        let targets = fmt.write(row, out, |va| self.analysis.function(va).is_some());
+        self.write_tail(row.va, targets.branch, targets.memory, out);
+    }
+
+    /// Writes one decoded instruction of an architecture other than x86:
+    /// any user label, then the address, the text and the trailing
+    /// annotations.
+    ///
+    /// # Arguments
+    ///
+    /// * `l` - The decoded instruction.
+    /// * `isa` - The instruction set its text is written in.
+    /// * `out` - The destination sink.
+    pub(super) fn isa_row<S: Sink>(&self, l: &disasm::DisasmLine, isa: Isa, out: &mut S) {
+        self.write_head(l.va, &l.bytes, out);
+        write_isa_line(&l.text, l.target, isa, self.analysis, out);
+        self.write_tail(l.va, l.target, None, out);
+    }
+
     /// Writes any inline user label above `va`, then marks the line as
     /// showing `va` and writes the address token and the optional raw-bytes
     /// column.

@@ -238,6 +238,26 @@ pub(crate) fn string_extents(p: &Program, a: &Analysis) -> Vec<(u64, u64)> {
         .collect()
 }
 
+/// Visits every string the memoized walks hold, both encodings, as spans
+/// in no promised order: a .NET user string as the span of its units.
+///
+/// # Arguments
+///
+/// * `p` - The loaded program.
+/// * `a` - Its analysis, whose memo keeps the walks.
+/// * `visit` - Called with each string's span.
+pub(crate) fn for_each_walked(p: &Program, a: &Analysis, mut visit: impl FnMut(RawStringSpan)) {
+    let w = walks(p, a);
+    w.ascii.iter().chain(&w.utf16).copied().for_each(&mut visit);
+    for h in &w.user {
+        visit(RawStringSpan {
+            off: h.off,
+            len: u32::try_from(h.len).unwrap_or(u32::MAX),
+            encoding: h.encoding,
+        });
+    }
+}
+
 /// Walks a program's strings of one encoding, without the memo.
 ///
 /// A .NET assembly's user strings are read whole from its `#US` heap in

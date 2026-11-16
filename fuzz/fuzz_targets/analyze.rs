@@ -2,20 +2,21 @@
 //! builds the control-flow graph of its first functions, decompiles them
 //! and reads each text as a view and its next steps, proposes a struct
 //! through its first argument, lists the types and opens the first page of
-//! them, lists what the assertions name, for a .NET assembly lists its first
-//! IL methods and its obfuscator markers, and reads every chart series
-//! table, a hostile spec among them: the path every agent request takes
-//! after a load. The first functions' call graphs and call tree levels are
-//! walked both ways too, and the callers of the first imports, which have no
-//! body.
+//! them, lists what the assertions name, pages the linear listing both ways
+//! from the entry, an address the input names and the image's end, for a
+//! .NET assembly lists its first IL methods and its obfuscator markers, and
+//! reads every chart series table, a hostile spec among them: the path every
+//! agent request takes after a load. The first functions' call graphs and
+//! call tree levels are walked both ways too, and the callers of the first
+//! imports, which have no body.
 
 #![no_main]
 
 use borer_engine::analysis::decompile::decompile;
 use borer_engine::analysis::decompile::view::view_of;
 use borer_engine::analysis::render::{
-    Bytes, Level, Walk, asserted_fields_tsv, call_children, callgraph, cfg, disasm_function_with,
-    disasm_view, next_steps, propose,
+    Bytes, Dir, Level, Walk, asserted_fields_tsv, call_children, callgraph, cfg,
+    disasm_function_with, disasm_view, linear, next_steps, propose,
 };
 use borer_engine::analysis::stats::stats_tsv;
 use borer_engine::analysis::utypes::{type_detail, type_rows};
@@ -87,6 +88,24 @@ fuzz_target!(|data: &[u8]| {
     {
         _ = callgraph(&program, &analysis, &overlay, s.addr, LISTED, Walk::Callers);
         _ = call_children(&program, &analysis, &overlay, s.addr, Level::Callers);
+    }
+    let word = |at: usize, len: usize| {
+        data.iter()
+            .skip(at)
+            .take(len)
+            .rev()
+            .fold(0u64, |v, &b| (v << 8) | u64::from(b))
+    };
+    let chosen = [program.entry.unwrap_or(0), word(0, 8), u64::MAX];
+    for (at, dir) in chosen
+        .into_iter()
+        .flat_map(|at| [(at, Dir::Next), (at, Dir::Prev)])
+    {
+        if let Some(page) = linear(&program, &analysis, &overlay, at, dir, LISTED) {
+            assert!(page.rows.len() <= LISTED);
+            assert!(page.next.is_none_or(|next| next > page.first));
+            assert!(page.prev.is_none_or(|prev| prev < page.first));
+        }
     }
     for m in Managed::of(&program, &analysis)
         .methods

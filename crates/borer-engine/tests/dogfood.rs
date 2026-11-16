@@ -30,7 +30,7 @@ use borer_engine::analysis::{
     name_of, render,
 };
 use borer_engine::program::Program;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{LazyLock, OnceLock};
 
 mod common;
@@ -1030,6 +1030,94 @@ fn every_listing_line_answers_the_instruction_it_shows() {
     );
 }
 
+/// Every linear instruction line is its function listing's line.
+///
+/// Every instruction line of the `BORER_DOGFOOD` binary's linear listing
+/// is its function listing's line byte for byte, and every instruction a
+/// function listing shows has its line there, but for those another block
+/// owns the bytes of (an overlap, or past a block's row table), which it
+/// names.
+///
+/// Every function, no sample: the listing is paged from the image's start
+/// to its end at the most rows a page holds, and it prints the pages and
+/// their build time at p95 and worst.
+#[test]
+#[ignore = "set BORER_DOGFOOD to a binary path to run this sweep"]
+fn every_linear_instruction_line_is_its_function_listing_line() {
+    let c = &*CORPUS;
+    let (p, a) = (&c.program, &c.analysis);
+    let o = Overlay::default();
+    let mut want: BTreeMap<u64, String> = BTreeMap::new();
+    for f in &a.functions {
+        let Some(v) = render::disasm_view(p, a, &o, f.entry, usize::MAX, render::Bytes::Hidden)
+        else {
+            continue;
+        };
+        for i in 0..v.lines() {
+            if let (Some(va), Some(line)) = (v.address(i), v.line(i)) {
+                want.entry(va).or_insert_with(|| line.to_owned());
+            }
+        }
+    }
+    let (mut seen, mut bad, mut took) = (BTreeSet::new(), Vec::new(), Vec::new());
+    let mut rows: Vec<render::Row> = Vec::new();
+    let mut at = Some(0);
+    while let Some(va) = at {
+        let started = std::time::Instant::now();
+        let Some(page) = render::linear(p, a, &o, va, render::Dir::Next, render::LINES_MAX) else {
+            bad.push(format!("{va:#x}: no page"));
+            break;
+        };
+        took.push(started.elapsed());
+        let v = &page.view;
+        for i in 0..v.lines() {
+            let (Some(va), Some(line)) = (v.address(i), v.line(i)) else {
+                continue;
+            };
+            let Some(listed) = want.get(&va).filter(|_| line.starts_with("0x")) else {
+                continue;
+            };
+            seen.insert(va);
+            if line != listed {
+                bad.push(format!("{va:#x}: {line:?} vs {listed:?}"));
+            }
+        }
+        rows.extend(page.rows);
+        at = page.next;
+    }
+    took.sort_unstable();
+    let p95 = took.get(took.len().saturating_mul(95) / 100).copied();
+    println!(
+        "{} linear pages: p95 {p95:?}, worst {:?}; {} of {} instruction lines compared",
+        took.len(),
+        took.last(),
+        seen.len(),
+        want.len()
+    );
+    let (mut hidden, mut missing) = (Vec::new(), Vec::new());
+    for &va in want.keys().filter(|va| !seen.contains(*va)) {
+        let k = rows.partition_point(|r| r.span.start <= va);
+        let row = k.checked_sub(1).and_then(|k| rows.get(k));
+        match row.map(|r| r.kind) {
+            Some(render::RowKind::Instruction | render::RowKind::Cut) => hidden.push(va),
+            _ => missing.push(va),
+        }
+    }
+    println!(
+        "{} instructions another block owns the bytes of: {:x?}",
+        hidden.len(),
+        &hidden[..hidden.len().min(10)]
+    );
+    assert!(
+        bad.is_empty() && missing.is_empty(),
+        "{} lines differ, {} missing: {:?} {:x?}",
+        bad.len(),
+        missing.len(),
+        &bad[..bad.len().min(10)],
+        &missing[..missing.len().min(10)]
+    );
+}
+
 /// Every fixture function's text is well formed, headers included.
 ///
 /// The dogfood sweep runs only when a binary is named, so this holds the
@@ -1474,8 +1562,8 @@ fn the_final_text_agrees_with_the_emulator_on_small_functions() {
     let took = started.elapsed();
     each.sort_by_key(|(e, ..)| *e);
     let (mut agree, mut differ, mut unchecked) = (0usize, 0usize, 0usize);
-    let mut skipped: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    let mut why: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut skipped: BTreeMap<String, usize> = BTreeMap::new();
+    let mut why: BTreeMap<String, usize> = BTreeMap::new();
     let mut flagged: BTreeSet<u64> = BTreeSet::new();
     for (e, _, r) in &each {
         match r {
@@ -1583,8 +1671,8 @@ fn every_value_the_text_reads_is_set_or_an_input() {
     let texts = decompile_named_all(&p, &a, &o, &entries);
     let started = std::time::Instant::now();
     let (mut read, mut flagged) = (0usize, Vec::new());
-    let mut unread: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    let mut by_name: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut unread: BTreeMap<String, usize> = BTreeMap::new();
+    let mut by_name: BTreeMap<String, usize> = BTreeMap::new();
     for (e, text) in entries.iter().zip(&texts) {
         let Some(text) = text else { continue };
         match decompile::unset_reads(&p, &a, &o, *e, text) {
@@ -1672,7 +1760,7 @@ fn the_structure_agrees_with_the_cfg_on_every_function() {
     let at = |q: usize| each.get(each.len() * q / 100).copied().unwrap_or_default();
     let worst = each.last().copied().unwrap_or_default();
     let (mut agree, mut flags) = (0usize, Vec::new());
-    let mut unchecked: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    let mut unchecked: BTreeMap<&str, usize> = BTreeMap::new();
     for (e, v) in entries.iter().zip(&verdicts) {
         match v {
             Some(Structure::Agrees) => agree += 1,

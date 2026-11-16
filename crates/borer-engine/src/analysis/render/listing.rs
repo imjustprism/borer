@@ -1144,7 +1144,7 @@ pub fn sweep_limit(p: &Program, a: &Analysis, va: u64) -> Option<u64> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::analysis::NameSource;
 
@@ -1495,7 +1495,7 @@ caller: 0x1030 call
 
     /// Builds the bare function a filter test needs: an entry, a name when
     /// one was given, and nothing else discovered.
-    fn bare(entry: u64, name: Option<&str>) -> Function {
+    pub(in crate::analysis::render) fn bare(entry: u64, name: Option<&str>) -> Function {
         Function {
             entry,
             start: entry,

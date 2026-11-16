@@ -288,6 +288,58 @@ pub fn disassemble_program(
     }
 }
 
+/// Visits where each instruction starts and how long it is, as
+/// [`disassemble_program`] decodes them, without formatting any text.
+///
+/// # Arguments
+///
+/// * `program` - The image the bytes come from, for ARM32's modes.
+/// * `code` - The bytes to decode.
+/// * `va` - Virtual address of `code[0]`.
+/// * `isa` - The program's instruction set.
+/// * `stop` - No instruction starting at or past it is visited.
+/// * `max_instrs` - Hard cap on the number of instructions visited.
+/// * `visit` - Called with each instruction's address and length.
+pub(crate) fn lengths(
+    program: &Program,
+    code: &[u8],
+    va: u64,
+    isa: Isa,
+    stop: u64,
+    max_instrs: usize,
+    mut visit: impl FnMut(u64, usize),
+) {
+    let mut it = a32::ItState::default();
+    let mut off = 0usize;
+    let mut decoder = match isa {
+        Isa::X86 { bits } => Some(Decoder::with_ip(bits, code, va, DecoderOptions::NONE)),
+        Isa::A64 | Isa::A32 | Isa::Rv(_) => None,
+    };
+    for _ in 0..max_instrs {
+        let at = va.wrapping_add(crate::num::from_usize(off));
+        let rest = code.get(off..).unwrap_or_default();
+        if at >= stop || rest.is_empty() {
+            return;
+        }
+        let len = match (isa, decoder.as_mut()) {
+            (Isa::X86 { .. }, Some(d)) => {
+                visit(at, d.decode().len());
+                off = d.position();
+                continue;
+            }
+            (Isa::A64, _) => rest.len().min(a64::INSN_LEN),
+            (Isa::A32, _) => a32::decode(rest, at, program.modes.at(at), &mut it)
+                .map_or(rest.len().min(2), |i| usize::from(i.len)),
+            (Isa::Rv(xlen), _) => {
+                rv::decode(rest, at, xlen).map_or(rest.len().min(2), |i| usize::from(i.len))
+            }
+            (Isa::X86 { .. }, None) => return,
+        };
+        visit(at, len);
+        off = off.saturating_add(len.max(1));
+    }
+}
+
 /// Disassembles ARM32 code in the instruction sets `modes` names.
 ///
 /// Each instruction is read in the instruction set `modes` names for its
@@ -665,8 +717,94 @@ impl<S: Sink, F: Fn(u64) -> bool> FormatterOutput for X86Adapter<'_, S, F> {
 
 #[cfg(test)]
 mod tests {
-    use super::stack_operand_bits;
+    use super::{disassemble_program, lengths, stack_operand_bits};
     use crate::isa::x86::{Decoder, DecoderOptions};
+    use crate::program::{Arch, Program};
+
+    /// Checks that [`lengths`] visits the addresses and lengths
+    /// [`disassemble_program`] decodes `code` to, whole and capped.
+    ///
+    /// # Arguments
+    ///
+    /// * `arch` - The architecture the bytes are read as.
+    /// * `code` - The bytes, bad ones and a cut-off last one among them.
+    ///
+    /// # Panics
+    ///
+    /// When the two disagree.
+    fn lengths_agree(arch: Arch, code: &[u8]) {
+        let p = Program::raw(code.to_vec(), arch, 0, None, Vec::new());
+        let Some(isa) = arch.isa() else {
+            panic!("{arch:?} has an instruction set");
+        };
+        for max in [usize::MAX, 3] {
+            let want: Vec<(u64, usize)> = disassemble_program(&p, code, 0x1000, isa, max)
+                .iter()
+                .map(|l| (l.va, l.bytes.len()))
+                .collect();
+            let mut got = Vec::new();
+            lengths(&p, code, 0x1000, isa, u64::MAX, max, |va, len| {
+                got.push((va, len));
+            });
+            assert_eq!(got, want, "{arch:?}, at most {max}");
+        }
+        let mut stopped = Vec::new();
+        lengths(&p, code, 0x1000, isa, 0x1002, usize::MAX, |va, _| {
+            stopped.push(va);
+        });
+        assert!(
+            stopped.iter().all(|&va| va < 0x1002),
+            "{arch:?}: {stopped:x?}"
+        );
+    }
+
+    /// x86-64 lengths agree with the disassembler over a `ret`, a long
+    /// `mov`, a byte iced cannot decode and a `mov` the buffer cuts off.
+    #[test]
+    fn x86_lengths_agree_with_the_disassembler() {
+        lengths_agree(
+            Arch::X86_64,
+            &[
+                0xc3, 0x48, 0xb8, 1, 2, 3, 4, 5, 6, 7, 8, 0x0f, 0x0b, 0xd6, 0xc3, 0xb8, 1, 2,
+            ],
+        );
+    }
+
+    /// AArch64 lengths agree with the disassembler over words that decode,
+    /// a word that does not and a short tail.
+    #[test]
+    fn a64_lengths_agree_with_the_disassembler() {
+        lengths_agree(
+            Arch::Arm64,
+            &[
+                0xc0, 0x03, 0x5f, 0xd6, 0xff, 0xff, 0xff, 0xff, 0x1f, 0x20, 0x03, 0xd5, 0x01, 0x02,
+            ],
+        );
+    }
+
+    /// ARM32 lengths agree with the disassembler over words that decode,
+    /// bytes that do not and a short tail.
+    #[test]
+    fn a32_lengths_agree_with_the_disassembler() {
+        lengths_agree(
+            Arch::Arm,
+            &[
+                0x1e, 0xff, 0x2f, 0xe1, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0xa0, 0xe1, 0x01,
+            ],
+        );
+    }
+
+    /// RISC-V lengths agree with the disassembler over a full and a
+    /// compressed instruction, bytes that do not decode and a short tail.
+    #[test]
+    fn rv_lengths_agree_with_the_disassembler() {
+        lengths_agree(
+            Arch::RiscV64,
+            &[
+                0x67, 0x80, 0x00, 0x00, 0x82, 0x80, 0x00, 0x00, 0xff, 0xff, 0x13,
+            ],
+        );
+    }
 
     /// Only value-moving stack instructions report a stack operand size.
     ///

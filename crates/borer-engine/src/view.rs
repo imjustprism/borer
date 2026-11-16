@@ -364,7 +364,9 @@ impl View {
     /// # Returns
     ///
     /// The address, `None` for a line that shows no instruction (a header,
-    /// a label, a comment) and for every line of a view of no listing.
+    /// a label, a comment) and for every line of a view of no listing; in
+    /// the linear listing ([`crate::analysis::render::linear()`]) every line
+    /// answers the address its row shows.
     #[must_use]
     pub fn address(&self, i: usize) -> Option<u64> {
         let i = u32::try_from(i).ok()?;

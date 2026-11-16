@@ -283,7 +283,7 @@ impl StringHit {
 }
 
 /// Longest text rendered in full; longer hits are cut with `...`.
-const DISPLAY_MAX: usize = 200;
+pub(crate) const DISPLAY_MAX: usize = 200;
 /// How far [`cstr_at`] / [`wstr_at`] look for a terminator, in bytes.
 pub(crate) const SCAN_MAX: usize = 4096;
 

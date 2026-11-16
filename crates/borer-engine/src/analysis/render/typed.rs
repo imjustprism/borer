@@ -14,6 +14,7 @@ use crate::memory::{Kind, le_word, scalar_text};
 use crate::num::from_usize;
 use crate::program::Program;
 use crate::strings::{cstr_text_at, escape_text, literal_byte};
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 /// Most rows one typed read prints; the header counts the rest.
@@ -396,6 +397,66 @@ fn hex_of(raw: &[u8]) -> String {
         out.push_str(" ...");
     }
     out
+}
+
+/// Returns the value one row of [`typed_tsv`] spells for a type that reads
+/// as one value: a scalar, a `char`, a pointer, or a `char` or `u8` array.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis, for naming pointers.
+/// * `o` - The user names.
+/// * `known` - The types `ty` is sized against: the user's for a type the
+///   user applied, the debug information's for a global it types.
+/// * `va` - Where the value starts.
+/// * `ty` - Its type.
+///
+/// # Returns
+///
+/// The value, `None` for a struct, an enum, a name or an array of other
+/// values, and when its bytes are not mapped.
+pub(super) fn one_value(
+    p: &Program,
+    a: &Analysis,
+    o: &Overlay,
+    known: &BTreeMap<String, UserType>,
+    va: u64,
+    ty: &TypeExpr,
+) -> Option<String> {
+    let single = match ty {
+        TypeExpr::Named(_) => false,
+        TypeExpr::Array(inner, _) => matches!(**inner, TypeExpr::Char | TypeExpr::U8),
+        TypeExpr::U8
+        | TypeExpr::U16
+        | TypeExpr::U32
+        | TypeExpr::U64
+        | TypeExpr::I8
+        | TypeExpr::I16
+        | TypeExpr::I32
+        | TypeExpr::I64
+        | TypeExpr::F32
+        | TypeExpr::F64
+        | TypeExpr::Char
+        | TypeExpr::Ptr(_) => true,
+    };
+    let word = crate::analysis::pointer_size(p);
+    let size = width_of(known, ty, word).filter(|_| single)?;
+    let want = usize::try_from(size.min(TYPED_BYTES_MAX)).ok()?;
+    let bytes = p.read_va_upto(va, want.max(1))?;
+    let mut walk = Walk {
+        p,
+        a: Some(a),
+        o,
+        bytes: bytes.get(..want).unwrap_or(bytes),
+        base: va,
+        word,
+        rows: Vec::new(),
+        total: 0,
+        fuel: FUEL,
+    };
+    walk.value(va, "", ty, 0);
+    walk.rows.pop().filter(|_| walk.total == 1).map(|r| r.value)
 }
 
 /// Renders a user type laid over the image's bytes at an address, one row
