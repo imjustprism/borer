@@ -3,17 +3,22 @@
 
     python scripts/dev/licenses.py --target x86_64-pc-windows-msvc --out THIRD-PARTY-LICENSES
 
+With `--app` it covers the `borer-app` binary of the app workspace under
+`app/` instead: its lock file, its toolchain (whose `rust-docs` must be
+installed) and its dependencies, Zed's crates among them.
+
 The release workflow runs this for each target and packs the file beside
 LICENSE and NOTICE, since most of these licenses require their copyright and
 license text to travel with a binary.
 
-What it lists. The crates the `borer` package depends on for that target,
+What it lists. The crates the package depends on for that target,
 normal dependencies only (build scripts and dev dependencies do not ship),
 from `cargo metadata --filter-platform`; the Rust standard library, whose
 license texts come from the toolchain's `rust-docs` component, with its full
 notice copied beside the output as RUST-STD-COPYRIGHT.html; and the C
 sources a crate compiles in, named in `scripts/dev/licenses.tmpl`'s
-`[bundled]` lines (mimalloc's, inside `libmimalloc-sys`). Each crate gets its
+`[bundled]` lines (mimalloc's, inside `libmimalloc-sys`). borer's own crates
+(path dependencies, under borer's license) are not listed. Each crate gets its
 name, version, SPDX license expression, where its source is published (which
 MPL-2.0 asks a binary to say) and the text of every license, copying, notice
 or copyright file at its root. A crate that ships none is listed with its
@@ -21,7 +26,7 @@ expression, its authors and the text of each license the expression names
 (from `rust-docs`), and is named on stderr.
 
 The layout is the checked-in template `scripts/dev/licenses.tmpl`: its text,
-with `{{target}}`, `{{std}}` and `{{crates}}` replaced. The output is
+with `{{package}}`, `{{target}}`, `{{std}}` and `{{crates}}` replaced. The output is
 deterministic (crates sorted by name and version), so two runs over one lock
 file and one toolchain agree.
 """
@@ -44,27 +49,27 @@ STD_NOTICE = "RUST-STD-COPYRIGHT.html"
 NL = "\n"
 
 
-def run(*command: str) -> str:
-    """A command's standard output, trimmed; a failure stops the script."""
+def run(cwd: Path, *command: str) -> str:
+    """A command's standard output in `cwd`, whose toolchain file picks rustc, trimmed; a failure stops the script."""
     return subprocess.run(
-        list(command), cwd=ROOT, check=True, capture_output=True, text=True
+        list(command), cwd=cwd, check=True, capture_output=True, text=True, encoding="utf-8"
     ).stdout.strip()
 
 
-def docs() -> Path:
+def docs(cwd: Path) -> Path:
     """The toolchain's `rust-docs` directory, which holds the license texts."""
-    path = Path(run("rustc", "--print", "sysroot")) / "share" / "doc" / "rust"
+    path = Path(run(cwd, "rustc", "--print", "sysroot")) / "share" / "doc" / "rust"
     if not (path / "licenses").is_dir():
         sys.exit(f"licenses: no {path / 'licenses'}; run `rustup component add rust-docs`")
     return path
 
 
-def shipped(meta: dict) -> list[dict]:
-    """The packages the `borer` binary links: its normal dependencies, transitively."""
+def shipped(meta: dict, name: str) -> list[dict]:
+    """The packages binary `name` links: its normal dependencies from a registry or git, transitively."""
     packages = {p["id"]: p for p in meta["packages"]}
     nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
     workspace = set(meta["workspace_members"])
-    root = next(i for i in workspace if packages[i]["name"] == "borer")
+    root = next(i for i in workspace if packages[i]["name"] == name)
     seen: set[str] = set()
     todo = [root]
     while todo:
@@ -74,7 +79,7 @@ def shipped(meta: dict) -> list[dict]:
                 seen.add(dep["pkg"])
                 todo.append(dep["pkg"])
     return sorted(
-        (packages[i] for i in seen if i not in workspace),
+        (packages[i] for i in seen if packages[i]["source"]),
         key=lambda p: (p["name"], p["version"]),
     )
 
@@ -112,6 +117,15 @@ def bundled_lines(template: str) -> dict[str, list[str]]:
     return found
 
 
+def source(package: dict) -> str:
+    """Where a package's source is published: its crates.io page, or its git repository and commit."""
+    origin = package["source"]
+    if origin.startswith("git+"):
+        url, _, commit = origin.removeprefix("git+").partition("#")
+        return f"{url.partition('?')[0]} at commit {commit}"
+    return f"https://crates.io/crates/{package['name']}/{package['version']}"
+
+
 def crate_section(package: dict, bundled: list[str], missing: list[str], known: Path) -> str:
     """One crate's entry: what it is, where its source is, and its license texts."""
     name, version = package["name"], package["version"]
@@ -121,7 +135,7 @@ def crate_section(package: dict, bundled: list[str], missing: list[str], known: 
         RULE,
         f"{name} {version}",
         f"license: {expression}",
-        f"source: https://crates.io/crates/{name}/{version}",
+        f"source: {source(package)}",
     ]
     if package.get("repository"):
         head.append(f"repository: {package['repository']}")
@@ -141,12 +155,12 @@ def crate_section(package: dict, bundled: list[str], missing: list[str], known: 
     return NL.join(head) + NL + NL + texts([f for f in named if f.is_file()], known)
 
 
-def std_section(rust_docs: Path) -> str:
+def std_section(rust_docs: Path, cwd: Path) -> str:
     """The Rust standard library's licenses, naming its full notice."""
     licenses = rust_docs / "licenses"
     head = [
         RULE,
-        f"The Rust standard library ({run('rustc', '-V')})",
+        f"The Rust standard library ({run(cwd, 'rustc', '-V')})",
         "license: MIT OR Apache-2.0",
         "source: https://github.com/rust-lang/rust",
         f"notices of the library and the code it includes: {STD_NOTICE}, beside this file",
@@ -164,12 +178,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--target", required=True, help="the target triple built")
     parser.add_argument("--out", required=True, type=Path, help="the file to write")
+    parser.add_argument("--app", action="store_true", help="cover borer-app, from app/")
     args = parser.parse_args()
-    rust_docs = docs()
+    cwd, package = (ROOT / "app", "borer-app") if args.app else (ROOT, "borer")
+    rust_docs = docs(cwd)
     template = TEMPLATE.read_text(encoding="utf-8")
     bundled = bundled_lines(template)
     meta = json.loads(
         run(
+            cwd,
             "cargo",
             "metadata",
             "--format-version",
@@ -182,11 +199,11 @@ def main() -> None:
     missing: list[str] = []
     crates = NL.join(
         crate_section(p, bundled.get(p["name"], []), missing, rust_docs / "licenses")
-        for p in shipped(meta)
+        for p in shipped(meta, package)
     )
     body = NL.join(line for line in template.splitlines() if not line.startswith("[bundled] "))
-    out = body.replace("{{target}}", args.target)
-    out = out.replace("{{std}}", std_section(rust_docs)).replace("{{crates}}", crates)
+    out = body.replace("{{package}}", package).replace("{{target}}", args.target)
+    out = out.replace("{{std}}", std_section(rust_docs, cwd)).replace("{{crates}}", crates)
     args.out.write_text(out.rstrip() + NL, encoding="utf-8", newline=NL)
     shutil.copyfile(rust_docs / "COPYRIGHT-library.html", args.out.with_name(STD_NOTICE))
     if missing:
