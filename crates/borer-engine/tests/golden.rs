@@ -18,6 +18,10 @@
 //! The binaries must be the same bytes before and after: the server binary
 //! the gate sweeps is rebuilt by every change, so copy it once and sweep
 //! the copy.
+//!
+//! `BORER_CALLGRAPH=notepad.exe cargo test --test golden callgraphs -- --ignored --nocapture`
+//! holds the call graphs of the largest functions to a recorded hash
+//! ([`callgraphs_draw_the_recorded_bytes`]).
 
 #![expect(clippy::disallowed_methods, reason = "the sweep reports its own time")]
 #![expect(
@@ -28,7 +32,7 @@
 use borer_engine::analysis::{
     Analysis, Overlay,
     decompile::{decompile_all, decompile_named_all},
-    render::disasm_function,
+    render::{Walk, callgraph, callgraph_mermaid, disasm_function},
 };
 use borer_engine::program::Program;
 use std::fmt::Write as _;
@@ -135,4 +139,44 @@ fn every_function_decompiles_to_the_recorded_bytes() {
         differ.len(),
         differ.iter().take(20).collect::<Vec<_>>()
     );
+}
+
+/// The FNV-1a hash of [`callgraphs_draw_the_recorded_bytes`]' text.
+///
+/// It was recorded on the Windows 11 `notepad.exe` of 360,448 bytes by
+/// the commit that added this test, before the walk's neighbor rule
+/// became one function: a refactor of the walk leaves the graphs alone.
+const CALLGRAPH_FNV: u64 = 0x543b_05e4_3927_6c4f;
+
+/// Draws the call graph of the 20 largest functions of `BORER_CALLGRAPH`,
+/// callees and callers, through [`callgraph`] and [`callgraph_mermaid`],
+/// and holds the hash of every graph to [`CALLGRAPH_FNV`].
+///
+/// The hash is the one binary's: another build of the program draws other
+/// graphs, so the test prints the hash it found for a new recording.
+#[test]
+#[ignore = "set BORER_CALLGRAPH to the recorded notepad.exe to run this check"]
+fn callgraphs_draw_the_recorded_bytes() {
+    let path = std::env::var("BORER_CALLGRAPH").expect("BORER_CALLGRAPH env var");
+    let p = Program::load_with(std::path::Path::new(&path), false).expect("load");
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let mut largest: Vec<(usize, u64)> = a
+        .functions
+        .iter()
+        .map(|f| (f.instr_count, f.entry))
+        .collect();
+    largest.sort_unstable_by_key(|&(n, e)| (std::cmp::Reverse(n), e));
+    let mut text = String::new();
+    for &(_, entry) in largest.iter().take(20) {
+        for walk in [Walk::Callees, Walk::Callers] {
+            text.push_str(&callgraph(&p, &a, &o, entry, 200, walk));
+        }
+        for callers in [false, true] {
+            text.push_str(&callgraph_mermaid(&p, &a, &o, entry, 30, callers));
+        }
+    }
+    let hash = fnv(Some(&text));
+    println!("callgraph hash: {hash:#018x}");
+    assert_eq!(hash, CALLGRAPH_FNV, "the call graphs changed");
 }
