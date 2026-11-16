@@ -23,7 +23,7 @@ use super::protos::{self, Proto, Var, VarKey};
 use super::reads::{Tag, Tracked};
 use super::stated::{self, Field, Mode, Statement};
 use super::utypes::{self, TypeExpr, UserType};
-use super::{Analysis, Overlay, cdecl, name_of, parse_addr, project, resolve};
+use super::{Analysis, Overlay, apply, cdecl, name_of, parse_addr, project, resolve};
 use crate::program::Program;
 
 /// One entry of the overlay: the map it is in and its key there.
@@ -264,7 +264,7 @@ pub enum Force {
 }
 
 /// One edit a tool asks for, its addresses and values parsed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum Edit {
     /// Names the function `at` is in, or the address itself when it is in
     /// none.
@@ -348,6 +348,12 @@ pub enum Edit {
         /// Its type as C, when one is stated.
         ty: Option<String>,
     },
+    /// Defines the struct a recovered layout shows and states the
+    /// prototypes that type a pointer with it, as planned from the layout
+    /// ([`apply::from_class`], [`apply::from_pointer`]).
+    Layout(apply::Plan),
+    /// Puts a project's annotations in place of the overlay's.
+    Project(Box<Overlay>),
 }
 
 /// One thing a plan does, as facts a front end spells in its own words.
@@ -525,6 +531,18 @@ impl Draft {
             } => {
                 let named = (name.as_deref(), ty.as_deref());
                 self.var((p, a), *entry, (var, *field), named)
+            }
+            Edit::Layout(plan) => {
+                for (key, new) in plan.clone().writes() {
+                    self.put(key, new);
+                }
+                Ok(())
+            }
+            Edit::Project(loaded) => {
+                for change in self.overlay.changes(loaded) {
+                    self.put(change.key, change.new);
+                }
+                Ok(())
             }
         }
     }

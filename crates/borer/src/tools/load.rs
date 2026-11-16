@@ -7,6 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use borer::project::Identity;
+use borer_engine::analysis::edit::{self, Edit, Force};
 use borer_engine::analysis::{EnumSource, Overlay, stated};
 use borer_engine::layout::Layout;
 use borer_engine::num;
@@ -691,8 +692,12 @@ impl BorerServer {
         if matches!(identity, Identity::PathOnly | Identity::OtherPath) {
             said.push_str("# the project names its binary by path alone (saved before projects recorded its sha-256; matched ignoring ASCII case on Windows), so a rebuild or case twin at that path loads it too; save_project records the hash\n");
         }
-        self.edit_overlay_of(&program, |o| *o = loaded)
-            .map_err(err_params)?;
+        let edits = [Edit::Project(Box::new(loaded))];
+        let analysis = self.analysis_held();
+        let planned = |o: &Overlay| edit::plan(&program, &analysis, o, &edits, Force::Refuse);
+        planned(&self.overlay_plain())
+            .and_then(|made| self.commit(Some(&program), made, planned))
+            .map_err(|e| err_params(e.to_string()))?;
         Ok(said)
     }
 }

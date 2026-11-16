@@ -237,3 +237,26 @@ fn the_inverse_of_a_mixed_plan_restores_the_overlay() {
     o.apply(&back);
     assert_eq!(o.fingerprint(), before, "{changes:?}");
 }
+
+/// Loading a project is an edit too: its plan leaves the project's
+/// annotations in place of the overlay's, and its inverse brings the
+/// overlay's back.
+#[test]
+fn a_project_put_in_place_is_taken_back_by_its_inverse() {
+    let p = fixture();
+    let a = Analysis::compute(&p);
+    let mut o = Overlay::default();
+    o.names.insert(0x1000, "kept_before".to_owned());
+    o.comments.insert(0x1000, "a note".to_owned());
+    let mut loaded = Overlay::default();
+    loaded.names.insert(0x1000, "from_project".to_owned());
+    loaded.names.insert(0x1010, "also".to_owned());
+    let before = o.fingerprint();
+    let edits = [Edit::Project(Box::new(loaded.clone()))];
+    let made = plan(&p, &a, &o, &edits, Force::Refuse).expect("planned");
+    let changes = commit(&a, &mut o, &made).expect("committed");
+    assert_eq!(o.fingerprint(), loaded.fingerprint());
+    let back: Vec<Change> = changes.iter().rev().map(Change::inverse).collect();
+    o.apply(&back);
+    assert_eq!(o.fingerprint(), before);
+}

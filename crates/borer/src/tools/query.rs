@@ -4,6 +4,8 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
+use borer_engine::analysis::Overlay;
+use borer_engine::analysis::edit::{self, Edit, Force};
 use borer_engine::program::Feature;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ErrorData, tool, tool_router};
@@ -15,6 +17,7 @@ use crate::params::{
     Annotation, QueryParams, ScriptParams, must_be_a_name, must_be_in_a_section, must_fit_a_row,
 };
 use crate::safety::{Effect, effects};
+use crate::state::tabled;
 
 #[tool_router(router = query_tools, vis = "pub(crate)")]
 impl BorerServer {
@@ -138,30 +141,37 @@ impl BorerServer {
         }
         let (mut named, mut commented) = (HashSet::new(), HashSet::new());
         let mut skipped = 0usize;
-        let applied = self.edit_overlay_of(&program, |overlay| {
-            for (at, name) in &run.names {
-                if must_fit_a_row(name, Annotation::Name).is_ok()
-                    && must_be_a_name(name).is_ok()
-                    && must_be_in_a_section(&program, *at, Annotation::Name).is_ok()
-                {
-                    let target = analysis.function_at(*at).map_or(*at, |f| f.entry);
-                    overlay.names.insert(target, name.clone());
-                    named.insert(target);
-                } else {
-                    skipped += 1;
-                }
+        let mut edits = Vec::with_capacity(proposed);
+        for (at, name) in &run.names {
+            if must_fit_a_row(name, Annotation::Name).is_ok()
+                && must_be_a_name(name).is_ok()
+                && must_be_in_a_section(&program, *at, Annotation::Name).is_ok()
+            {
+                named.insert(analysis.function_at(*at).map_or(*at, |f| f.entry));
+                edits.push(Edit::Name {
+                    at: *at,
+                    name: name.clone(),
+                });
+            } else {
+                skipped += 1;
             }
-            for (at, comment) in &run.comments {
-                if must_fit_a_row(comment, Annotation::Comment).is_ok()
-                    && must_be_in_a_section(&program, *at, Annotation::Comment).is_ok()
-                {
-                    overlay.comments.insert(*at, comment.clone());
-                    commented.insert(*at);
-                } else {
-                    skipped += 1;
-                }
+        }
+        for (at, comment) in &run.comments {
+            if must_fit_a_row(comment, Annotation::Comment).is_ok()
+                && must_be_in_a_section(&program, *at, Annotation::Comment).is_ok()
+            {
+                commented.insert(*at);
+                edits.push(Edit::Comment {
+                    at: *at,
+                    text: comment.clone(),
+                });
+            } else {
+                skipped += 1;
             }
-        });
+        }
+        let planned = |o: &Overlay| edit::plan(&program, &analysis, o, &edits, Force::Take);
+        let applied = planned(&self.overlay())
+            .and_then(|made| self.commit(Some(&program), made, |now| planned(&tabled(now))));
         if let Err(why) = applied {
             let _ = writeln!(text, "# nothing applied: {why}");
             return Ok(text);

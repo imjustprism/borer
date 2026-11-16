@@ -1,6 +1,7 @@
 //! The tools that describe functions and how they connect: summaries,
 //! listings, cross-references, class layouts, the call graph and the CFG.
 
+use borer_engine::analysis::edit::{Edit, Force};
 use borer_engine::analysis::{Analysis, Overlay, parse_addr, render, resolve};
 use borer_engine::program::{Feature, Program};
 use rmcp::handler::server::wrapper::Parameters;
@@ -23,8 +24,8 @@ impl BorerServer {
     /// # Arguments
     ///
     /// * `plan` - The plan ([`borer_engine::analysis::apply`]).
-    /// * `a` - The analysis, to name the functions.
-    /// * `o` - The overlay the plan was made under.
+    /// * `(p, a, o)` - The loaded program, its analysis, to name the
+    ///   functions, and the overlay the plan was made under.
     /// * `dry` - Say what would be done and write nothing.
     ///
     /// # Returns
@@ -34,12 +35,11 @@ impl BorerServer {
     /// # Errors
     ///
     /// When applying the plan would take the session past what a project
-    /// file holds ([`BorerServer::edit_overlay`]); nothing was applied.
+    /// file holds ([`BorerServer::commit`]); nothing was applied.
     pub(crate) fn answer_plan(
         &self,
         plan: borer_engine::analysis::apply::Plan,
-        a: &Analysis,
-        o: &Overlay,
+        (p, a, o): (&Program, &Analysis, &Overlay),
         dry: bool,
     ) -> Result<String, String> {
         let head = format!(
@@ -62,7 +62,8 @@ impl BorerServer {
             out.push_str("pass dry_run=false to apply.\n");
             return Ok(out);
         }
-        self.edit_overlay(|o| plan.apply(o))?;
+        self.edited((p, a, o), &[Edit::Layout(plan)], Force::Refuse, false)
+            .map_err(|e| e.to_string())?;
         Ok(out)
     }
 }
@@ -360,7 +361,7 @@ impl BorerServer {
                 ));
             };
             let plan = borer_engine::analysis::apply::from_class(p, a, o, &layout, apply)?;
-            self.answer_plan(plan, a, o, dry_run.unwrap_or(true))
+            self.answer_plan(plan, (p, a, o), dry_run.unwrap_or(true))
         })
     }
 

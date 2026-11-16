@@ -17,6 +17,7 @@
 use std::collections::BTreeMap;
 
 use super::classes::{ClassLayout, FieldLabel};
+use super::edit::{Key, Value};
 use super::protos::{CType, PROTOTYPES_MAX, Proto};
 use super::utypes::{self, TypeExpr, UserType, build_struct};
 use super::{Analysis, Overlay, bare_name, name_of};
@@ -89,15 +90,26 @@ impl Plan {
         out
     }
 
-    /// Writes the plan into an overlay: the struct, and each prototype in
-    /// place of any stated before.
+    /// Returns the overlay entries the plan writes, each with what it
+    /// holds after: the struct, then each prototype in place of any stated
+    /// before.
+    #[must_use]
+    pub fn writes(self) -> Vec<(Key, Option<Value>)> {
+        let protos = self.prototypes.into_iter();
+        std::iter::once((Key::Type(self.name), Some(Value::Type(self.ty))))
+            .chain(protos.map(|(at, p)| (Key::Proto(at), Some(Value::Proto(p)))))
+            .collect()
+    }
+
+    /// Writes the plan into an overlay ([`Plan::writes`]).
     ///
     /// # Arguments
     ///
     /// * `o` - The overlay.
     pub fn apply(self, o: &mut Overlay) {
-        o.types.insert(self.name, self.ty);
-        o.prototypes.extend(self.prototypes);
+        for (key, new) in self.writes() {
+            o.put(key, new);
+        }
     }
 }
 
