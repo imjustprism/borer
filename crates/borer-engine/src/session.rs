@@ -35,20 +35,29 @@ pub enum Pdb {
     Cache(PathBuf),
 }
 
+/// How a binary's bytes are read ([`Open::form`]).
+#[derive(Debug, Clone)]
+pub enum Form {
+    /// Its own headers say where its bytes go, and its companion PDB is
+    /// looked for as this says.
+    Headers(Pdb),
+    /// A caller-stated layout says where its raw bytes go; no headers and
+    /// no PDB are read.
+    Raw(Layout),
+}
+
 /// How to open a binary ([`open`]).
 #[derive(Debug, Clone)]
 pub struct Open {
     /// Most bytes the file may hold.
     pub max_file: u64,
-    /// Where its companion PDB is looked for; a raw layout reads none.
-    pub pdb: Pdb,
+    /// How its bytes are read: by its headers, with a PDB, or by a layout.
+    pub form: Form,
     /// The packs the user named, which load for every program.
     pub named: Arc<Packs>,
     /// The pack directories, in search order ([`read_dirs`]); a pack
     /// there loads only for a program its `[match]` lines fit.
     pub dirs: Vec<PathBuf>,
-    /// Where a raw file's bytes go; `None` reads its headers.
-    pub layout: Option<Layout>,
 }
 
 /// A binary opened ([`open`]): the program and the packs its analysis runs
@@ -79,18 +88,18 @@ pub struct Opened {
 /// # Errors
 ///
 /// As [`Program::load_with_symsrv_max`], or [`Program::load_layout_max`]
-/// with a layout: a file past [`Open::max_file`] bytes is a
+/// for [`Form::Raw`]: a file past [`Open::max_file`] bytes is a
 /// [`crate::program::TooLarge`]. A pack file that does not read is a note,
 /// not an error.
 pub fn open(path: &Path, how: &Open) -> anyhow::Result<Opened> {
-    let program = match &how.layout {
-        Some(layout) => Program::load_layout_max(path, layout, how.max_file)?,
-        None => {
-            let cache = match &how.pdb {
+    let program = match &how.form {
+        Form::Raw(layout) => Program::load_layout_max(path, layout, how.max_file)?,
+        Form::Headers(pdb) => {
+            let cache = match pdb {
                 Pdb::Cache(root) => Some(root.as_path()),
                 Pdb::Off | Pdb::Beside => None,
             };
-            Program::load_with_symsrv_max(path, how.pdb != Pdb::Off, cache, how.max_file)?
+            Program::load_with_symsrv_max(path, *pdb != Pdb::Off, cache, how.max_file)?
         }
     };
     let mut notes = Vec::new();

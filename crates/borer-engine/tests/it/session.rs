@@ -11,7 +11,9 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use borer_engine::analysis::Analysis;
-use borer_engine::session::{Open, Opened, Pdb, open, read_dirs};
+use borer_engine::layout::Layout;
+use borer_engine::program::Arch;
+use borer_engine::session::{Form, Open, Opened, Pdb, open, read_dirs};
 use borer_engine::text::short_path;
 
 /// Where the image is preferred to load.
@@ -59,10 +61,9 @@ fn scratch(name: &str) -> PathBuf {
 fn opened(binary: &std::path::Path, dirs: Vec<PathBuf>) -> Opened {
     let how = Open {
         max_file: u64::MAX,
-        pdb: Pdb::Off,
+        form: Form::Headers(Pdb::Off),
         named: Arc::default(),
         dirs,
-        layout: None,
     };
     open(binary, &how).expect("the binary opens")
 }
@@ -164,4 +165,27 @@ fn of_two_packs_of_one_name_the_first_by_file_name_fits() {
         "{}",
         opened.packs.packs[0].source
     );
+}
+
+/// A raw layout maps the file's bytes where it says, its headers unread,
+/// and its packs still fit.
+#[test]
+fn a_raw_layout_maps_the_bytes_where_it_says() {
+    let dir = scratch("raw");
+    let binary = dir.join("code.bin");
+    std::fs::write(&binary, CODE).expect("the code is written");
+    let layout = Layout::parse(Some(Arch::X86_64), Some("0x4000"), None, None)
+        .expect("the layout reads")
+        .expect("a layout is stated");
+    let how = Open {
+        max_file: u64::MAX,
+        form: Form::Raw(layout),
+        named: Arc::default(),
+        dirs: Vec::new(),
+    };
+    let opened = open(&binary, &how).expect("the code opens");
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(opened.program.entry, Some(0x4000));
+    assert!(opened.program.pdb_record.is_none());
+    assert!(opened.notes.is_empty(), "{:?}", opened.notes);
 }

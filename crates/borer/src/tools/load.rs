@@ -11,7 +11,7 @@ use borer_engine::layout::Layout;
 use borer_engine::num;
 use borer_engine::pack::Packs;
 use borer_engine::program::{Feature, Program, TooLarge};
-use borer_engine::session::{self, Open, Opened, Pdb};
+use borer_engine::session::{self, Form, Open, Opened, Pdb};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ErrorData, tool, tool_router};
 
@@ -109,18 +109,18 @@ pub(crate) fn open_program(
     max: u64,
     (named, auto): (Arc<Packs>, bool),
 ) -> anyhow::Result<(Opened, Option<String>)> {
-    let (pdb, refused) = match symsrv::cache_dir() {
-        _ if !apply_pdb => (Pdb::Off, None),
-        Ok(Some(root)) => (Pdb::Cache(root), None),
-        Ok(None) => (Pdb::Beside, None),
-        Err(why) => (Pdb::Beside, Some(why)),
+    let (form, refused) = match (layout, symsrv::cache_dir()) {
+        (Some(layout), _) => (Form::Raw(layout.clone()), None),
+        (None, _) if !apply_pdb => (Form::Headers(Pdb::Off), None),
+        (None, Ok(Some(root))) => (Form::Headers(Pdb::Cache(root)), None),
+        (None, Ok(None)) => (Form::Headers(Pdb::Beside), None),
+        (None, Err(why)) => (Form::Headers(Pdb::Beside), Some(why)),
     };
     let open = Open {
         max_file: max,
-        pdb,
+        form,
         named,
         dirs: borer::packs::searched(auto),
-        layout: layout.cloned(),
     };
     let opened = session::open(path, &open).map_err(|e| {
         if e.is::<TooLarge>() {
@@ -132,7 +132,7 @@ pub(crate) fn open_program(
         }
     })?;
     let note = refused
-        .filter(|_| layout.is_none() && opened.program.pdb_record.is_some())
+        .filter(|_| opened.program.pdb_record.is_some())
         .map(|why| format!("skipped the symbol cache: {why}"));
     Ok((opened, note))
 }
