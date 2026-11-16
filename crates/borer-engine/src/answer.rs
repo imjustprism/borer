@@ -4,8 +4,10 @@
 //! A front end reads a resource by its URI: the MCP server for
 //! `resources/read` and its `query` tool, a script's `query(uri)` wherever
 //! the engine runs ([`crate::script`]), and the app. Each asks [`need`] what
-//! to prepare and [`read`] for the text, so every front end answers a URI
-//! with the same bytes. The resources that read what a front end holds (the
+//! to prepare and [`read`] for the text, so front ends that read a URI
+//! under the same overlay answer it with the same bytes (the server reads
+//! the binary's name tables into its overlay, a script run from the CLI
+//! the overlay as the user left it). The resources that read what a front end holds (the
 //! session and its evidence, a live process, the answer memory, a file the
 //! URI names, the packs on disk, the resource catalog) stay with it.
 

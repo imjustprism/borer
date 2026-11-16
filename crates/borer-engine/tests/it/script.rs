@@ -115,3 +115,35 @@ fn a_script_query_reads_the_next_page_a_listing_names() {
         "{want:?}"
     );
 }
+
+/// With no front end, `help("query")` lists every resource the engine
+/// answers, and a URI it does not answer is refused with the names nearest
+/// it, where both pointed at the MCP server.
+#[test]
+fn a_script_with_no_front_end_names_what_it_reads() {
+    let (program, analysis) = image(vec![0xc3; 0x10]);
+    let script = |code: &str| {
+        run(
+            Arc::clone(&program),
+            Arc::clone(&analysis),
+            Arc::default(),
+            code,
+            &[],
+        )
+    };
+    let help = script(r#"print(help("query"));"#)
+        .map(|run| run.output.join("\n"))
+        .unwrap_or_default();
+    for name in borer_engine::answer::names() {
+        assert!(
+            help.contains(&format!("borer://{name}\n"))
+                || help.ends_with(&format!("borer://{name}")),
+            "{name}: {help}"
+        );
+    }
+    let refused = script(r#"query("borer://triag");"#)
+        .err()
+        .unwrap_or_default();
+    assert!(refused.contains("query is not available here"), "{refused}");
+    assert!(refused.contains("nearest: borer://triage"), "{refused}");
+}

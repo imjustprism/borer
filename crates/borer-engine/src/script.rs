@@ -122,6 +122,30 @@ const PROPOSALS_MAX: usize = 100_000;
 /// more.
 const PROPOSAL_TEXT_MAX: usize = 1024;
 
+/// Most names a refused `query` suggests.
+const NEAREST_SHOWN: usize = 3;
+
+/// Says that the engine alone does not answer a URI, with the names it
+/// answers nearest the one asked.
+///
+/// # Arguments
+///
+/// * `uri` - The URI as the script wrote it.
+fn unanswered(uri: &str) -> String {
+    let name = crate::answer::split(uri).map_or(uri, |(n, _)| n);
+    let near = crate::text::nearest(name, crate::answer::names(), NEAREST_SHOWN);
+    let near = if near.is_empty() {
+        "no resource it answers is near it".to_owned()
+    } else {
+        let uris: Vec<String> = near.iter().map(|n| format!("borer://{n}")).collect();
+        format!("nearest: {}", uris.join(", "))
+    };
+    format!(
+        "query is not available here: the engine alone does not answer {}; {near}; help(\"query\") lists what it answers",
+        crate::text::one_line(uri)
+    )
+}
+
 /// What `help()` returns: every function a script can call, one line each,
 /// for an agent that has the tool's short description and nothing else.
 const HELP: &str = "\
@@ -136,11 +160,11 @@ decompile(e), scenario(e, \"a2=5\"): pseudo-C text; 2000 calls per run
 disasm(addr, n): maps of at, bytes, text
 imports(), exports(): maps of name, at; sections(): name, at, size, r, w, x
 program(): path, format, arch, bits, base, entry
-query(uri): text of any borer:// resource, e.g. query(\"borer://grep/CreateFileA\"); !offset=N!limit=N page a listing
+query(uri): text of a borer:// resource help(\"query\") lists, e.g. query(\"borer://grep/CreateFileA\"); !offset=N!limit=N page a listing
 rows(uri): the resource's table, a map per row keyed by its column header (else one key, text), numbers as integers
 layout(e), layout(e, reg): fields through a pointer (reg, else the first argument), maps of offset, size, addressed
 query, rows, layout and help(\"query\"): 200 calls per run together
-hex(n), args(), print(x), help(\"query\"): every resource with an example URI, help(\"name\"): one call's line
+hex(n), args(), print(x), help(\"query\"): the resources query reads, help(\"name\"): one call's line
 rename(e, name), comment(addr, text): proposals, applied only with dry_run=false
 example: for f in functions(\"crypt\") { if callers(f.entry).len > 3 { print(`${hex(f.entry)} ${f.name}`); } }";
 
@@ -429,13 +453,30 @@ impl Host {
             asked.core,
             page,
         )
-            .unwrap_or_else(|| {
-                Err(format!(
-                    "query is not available here: {} is answered by the MCP server (its query and script tools), not by the engine alone",
-                    crate::text::one_line(uri)
-                ))
-            })
-            .map_err(Into::into)
+        .unwrap_or_else(|| Err(unanswered(uri)))
+        .map_err(Into::into)
+    }
+
+    /// Lists the resources `query` reads, against the query budget: the
+    /// front end's `borer://help`, or with no front end the ones the engine
+    /// answers alone.
+    ///
+    /// # Errors
+    ///
+    /// When the budget is spent or the front end refuses.
+    fn resources(&self) -> Result<String, Box<EvalAltResult>> {
+        if self.query.is_some() {
+            return self.ask("borer://help");
+        }
+        Host::spend(&self.queries, QUERIES_MAX, "query")?;
+        let uris: Vec<String> = crate::answer::names()
+            .map(|n| format!("borer://{n}"))
+            .collect();
+        Ok(format!(
+            "# {} resources a script reads with no MCP server; one that takes an argument takes it after a /, as borer://emulate/0x1000\n{}\n",
+            uris.len(),
+            uris.join("\n")
+        ))
     }
 
     /// The fields a function accesses or passes on through a pointer, as a
@@ -859,7 +900,7 @@ fn register(engine: &mut Engine, host: &Rc<Host>) {
         "help",
         move |topic: &str| -> Result<String, Box<EvalAltResult>> {
             if topic == "query" {
-                return h.ask("borer://help");
+                return h.resources();
             }
             let call = format!("{topic}(");
             let lines: Vec<&str> = HELP.lines().filter(|l| l.contains(&call)).collect();
