@@ -554,8 +554,9 @@ mod tests {
         }
     }
 
-    /// Close Binary takes the panel out of the dock and the function's tab away, leaves the
-    /// start tab and says no binary is open; the next load docks the panel again.
+    /// Close Binary, pressed while a second binary is being read, stops showing that read,
+    /// takes the panel out of the dock and the function's tab away, leaves the start tab and
+    /// says no binary is open; the next load docks the panel again.
     ///
     /// # Panics
     ///
@@ -574,6 +575,13 @@ mod tests {
         let app_state = init(cx);
         let (app, cx) = open(&app_state, cx);
         load_sample(&app, cx);
+        let missing = std::env::temp_dir().join("borer-app-closed-while-reading.exe");
+        app.binary
+            .update(cx, |binary, cx| binary.open_path(missing, cx));
+        assert!(
+            app.binary
+                .read_with(cx, |binary, _| binary.reading().is_some())
+        );
         cx.dispatch_action(CloseBinary);
         cx.run_until_parked();
         app.workspace.read_with(cx, |workspace, cx| {
