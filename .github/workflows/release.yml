@@ -41,7 +41,9 @@ env:
 jobs:
   # The commit every build job checks out, so a branch that moves mid-run
   # cannot mix two commits in one release, and the archives' version: the
-  # tag or branch, or `dev-build`.
+  # tag or branch, or `dev-build`. A dev build's ref is a branch, a tag or a
+  # full or short commit, and must be on one of this repository's branches,
+  # so a pull request's commit is refused.
   source:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -51,12 +53,28 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.dev_build && inputs.ref || github.ref }}
+          fetch-depth: ${{ inputs.dev_build && 0 || 1 }}
       - id: resolve
         env:
+          DEV_BUILD: ${{ inputs.dev_build || false }}
+          REF: ${{ inputs.ref }}
           VERSION: ${{ inputs.dev_build && 'dev-build' || github.ref_name }}
         run: |
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          sha=$GITHUB_SHA
+          if [ "$DEV_BUILD" = true ]; then
+            case "$REF" in
+              "" | -*) echo "::error::ref '$REF' names no branch, tag or commit"; exit 1 ;;
+            esac
+            sha=$(git rev-parse --verify --quiet "refs/remotes/origin/$REF^{commit}" \
+              || git rev-parse --verify --quiet "refs/tags/$REF^{commit}" \
+              || git rev-parse --verify --quiet "$REF^{commit}") \
+              || { echo "::error::ref '$REF' is no branch, tag or commit of this repository"; exit 1; }
+            if [ -z "$(git branch -r --contains "$sha")" ]; then
+              echo "::error::$sha is on no branch of this repository"
+              exit 1
+            fi
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION//\//-}" >> "$GITHUB_OUTPUT"
 
   build:
