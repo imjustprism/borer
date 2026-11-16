@@ -14,7 +14,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod rows;
 
-pub use rows::{TypeKind, TypeRow, TypeRows, TypeSource, type_rows};
+pub use rows::{
+    FieldRow, OVERLAPS_MAX, TypeDetail, TypeKind, TypeRow, TypeRows, TypeSource, type_detail,
+    type_rows,
+};
 
 /// A type in the small language user types are stated in.
 ///

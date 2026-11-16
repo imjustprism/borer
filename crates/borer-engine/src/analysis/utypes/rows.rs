@@ -81,6 +81,38 @@ pub struct TypeRows {
     pub total: usize,
 }
 
+/// Most field pairs one detail lists as sharing bytes.
+pub const OVERLAPS_MAX: usize = 256;
+
+/// One field of a type's detail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldRow {
+    /// The field's byte offset in the type.
+    pub offset: u64,
+    /// Its size in bytes, `None` when the engine cannot size its type.
+    pub size: Option<u64>,
+    /// Its name.
+    pub name: Box<str>,
+    /// Its type as its source spells it (`u32 *`, `WCHAR[260]`).
+    pub ty: Box<str>,
+}
+
+/// A type opened: its row, its fields, and the bytes they leave or share.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeDetail {
+    /// The type's row, as [`type_rows`] lists it.
+    pub row: TypeRow,
+    /// Its fields by ascending offset; empty for anything but a struct.
+    pub fields: Vec<FieldRow>,
+    /// `(offset, length)` of each run of bytes below the size no field
+    /// covers; none past a field the engine cannot size, whose end it
+    /// does not know.
+    pub holes: Vec<(u64, u64)>,
+    /// Index pairs into `fields` of two sized fields sharing a byte (a
+    /// union's members), lower index first, at most [`OVERLAPS_MAX`].
+    pub overlaps: Vec<(usize, usize)>,
+}
+
 /// Lists every type the engine knows, one row per name and source.
 ///
 /// # Arguments
@@ -113,6 +145,77 @@ pub fn type_rows(
     let total = kept.clone().count();
     let rows = kept.skip(offset).take(limit).cloned().collect();
     TypeRows { rows, total }
+}
+
+/// Opens one type: its fields with their sizes, the holes between them
+/// and the fields that overlap.
+///
+/// A user or debug field is sized by [`width_of`] against the types its
+/// own source holds, an SDK field by what the machine passes its type as
+/// ([`pass_of`]); a field neither sizes keeps `None`.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - The overlay.
+/// * `name` - The type's name, as its row spells it.
+/// * `source` - Where the type comes from.
+/// * `kind` - What it is: with `name` and `source`, the row to open, as
+///   two types of one name and source (a struct tag and a typedef) differ
+///   only by it.
+///
+/// # Returns
+///
+/// The detail, or `None` when no row has that name, source and kind, or
+/// the row is a recovered class, whose fields are
+/// [`crate::analysis::classes::class_layout`]'s answer with its evidence.
+#[must_use]
+pub fn type_detail(
+    p: &Program,
+    a: &Analysis,
+    o: &Overlay,
+    name: &str,
+    source: TypeSource,
+    kind: TypeKind,
+) -> Option<TypeDetail> {
+    if source == TypeSource::Recovered {
+        return None;
+    }
+    let all = memo(p, a, o);
+    let at = all
+        .binary_search_by(|r| (&*r.name, r.source, r.kind).cmp(&(name, source, kind)))
+        .ok()?;
+    let row = all.get(at)?.clone();
+    let word = word_of(p);
+    let mut fields = match source {
+        TypeSource::User => o.types.get(name).map(|t| user_fields(t, &o.types, word)),
+        TypeSource::Dwarf => p
+            .debug_types
+            .get(name)
+            .map(|t| user_fields(t, &p.debug_types, word)),
+        TypeSource::Sdk => sdk_struct(name, word).map(|s| {
+            s.at(word)
+                .into_iter()
+                .map(|(offset, f)| FieldRow {
+                    offset,
+                    size: sdk_c_size(f.ty, word),
+                    name: f.name.into(),
+                    ty: f.ty.into(),
+                })
+                .collect()
+        }),
+        TypeSource::Recovered => None,
+    }
+    .filter(|_| kind == TypeKind::Struct)
+    .unwrap_or_default();
+    fields.sort_by_key(|f| f.offset);
+    Some(TypeDetail {
+        holes: holes(&fields, row.size),
+        overlaps: overlaps(&fields),
+        row,
+        fields,
+    })
 }
 
 /// Returns every row, built once per overlay and kept in
@@ -284,6 +387,99 @@ fn hidden(p: &Program, word: u64, name: &str) -> Option<TypeSource> {
     sdk.then_some(TypeSource::Sdk)
 }
 
+/// Lists a struct's fields in the overlay's language, sized against the
+/// types its names resolve in.
+///
+/// # Arguments
+///
+/// * `ty` - The type; anything but a struct has no fields.
+/// * `known` - The types its fields' names resolve against.
+/// * `word` - The image's pointer width in bytes (4 or 8).
+fn user_fields(ty: &UserType, known: &BTreeMap<String, UserType>, word: u64) -> Vec<FieldRow> {
+    let UserType::Struct(s) = ty else {
+        return Vec::new();
+    };
+    s.fields
+        .iter()
+        .map(|(offset, f)| FieldRow {
+            offset: *offset,
+            size: width_of(known, &f.ty, word),
+            name: f.name.as_str().into(),
+            ty: f.ty.spell().into(),
+        })
+        .collect()
+}
+
+/// Finds the runs of bytes below `size` no field covers.
+///
+/// # Arguments
+///
+/// * `fields` - The fields, by ascending offset.
+/// * `size` - The type's size in bytes; with none there is no hole.
+///
+/// # Returns
+///
+/// `(offset, length)` per run, in order; none past a field of unknown
+/// size.
+fn holes(fields: &[FieldRow], size: Option<u64>) -> Vec<(u64, u64)> {
+    let Some(size) = size else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut end = Some(0u64);
+    for f in fields {
+        let start = f.offset.min(size);
+        if let Some(e) = end
+            && start > e
+        {
+            out.push((e, start - e));
+        }
+        end = end
+            .zip(f.size)
+            .map(|(e, len)| e.max(f.offset.saturating_add(len)));
+    }
+    if let Some(e) = end
+        && e < size
+    {
+        out.push((e, size - e));
+    }
+    out
+}
+
+/// Finds the pairs of sized fields that share a byte.
+///
+/// # Arguments
+///
+/// * `fields` - The fields, by ascending offset.
+///
+/// # Returns
+///
+/// Index pairs, lower first, at most [`OVERLAPS_MAX`].
+fn overlaps(fields: &[FieldRow]) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for (i, x) in fields.iter().enumerate() {
+        let Some(end) = x
+            .size
+            .filter(|&n| n > 0)
+            .map(|n| x.offset.saturating_add(n))
+        else {
+            continue;
+        };
+        for (j, y) in fields.iter().enumerate().skip(i + 1) {
+            if y.offset >= end {
+                break;
+            }
+            if y.size.is_some_and(|n| n > 0) {
+                if out.len() == OVERLAPS_MAX {
+                    return out;
+                }
+                out.push((i, j));
+            }
+        }
+    }
+    out
+}
+
 /// Returns the image's pointer width in bytes.
 ///
 /// # Arguments
@@ -359,7 +555,7 @@ fn sdk_c_size(spelled: &str, word: u64) -> Option<u64> {
     reason = "assertions are the point of a test"
 )]
 mod tests {
-    use super::{TypeKind, TypeSource, type_rows};
+    use super::{TypeKind, TypeSource, type_detail, type_rows};
     use crate::analysis::utypes::{TypeExpr, UserField, UserStruct, UserType};
     use crate::analysis::{Analysis, Overlay};
     use crate::program::{BinaryFormat, Program};
@@ -458,5 +654,77 @@ mod tests {
         let a = Analysis::compute(&p);
         let elf = type_rows(&p, &a, &o, None, 0, usize::MAX);
         assert!(elf.rows.iter().all(|r| r.source != TypeSource::Sdk));
+    }
+
+    /// A struct with `(offset, type)` fields, `size` bytes long.
+    ///
+    /// # Arguments
+    ///
+    /// * `size` - The struct's size in bytes.
+    /// * `fields` - The fields' offsets and types.
+    fn laid(size: u64, fields: &[(u64, TypeExpr)]) -> UserType {
+        let fields = fields
+            .iter()
+            .map(|(off, ty)| {
+                let name = format!("f{off}");
+                (
+                    *off,
+                    UserField {
+                        name,
+                        ty: ty.clone(),
+                    },
+                )
+            })
+            .collect();
+        UserType::Struct(UserStruct { size, fields })
+    }
+
+    /// A struct's holes are the bytes below its size no field covers, none
+    /// counted past the size.
+    ///
+    /// Two fields sharing bytes are one overlap; a field the engine cannot size
+    /// neither ends a hole nor overlaps; an SDK structure's fields are sized by
+    /// their C types.
+    #[test]
+    fn a_detail_finds_the_holes_and_the_overlaps() {
+        let mut p = Program::raw_x64(&[0xc3]);
+        p.format = BinaryFormat::Pe;
+        let a = Analysis::compute(&p);
+        let mut o = Overlay::default();
+        let unknown = TypeExpr::Named("Missing".to_owned());
+        for (name, ty) in [
+            ("Gaps", laid(24, &[(0, TypeExpr::U32), (8, TypeExpr::U64)])),
+            ("Short", laid(8, &[(0, TypeExpr::U32), (12, TypeExpr::U32)])),
+            ("Union", laid(8, &[(0, TypeExpr::U64), (4, TypeExpr::U32)])),
+            ("Open", laid(32, &[(0, unknown), (16, TypeExpr::U32)])),
+        ] {
+            o.types.insert(name.to_owned(), ty);
+        }
+        let open = |name: &str, source| {
+            type_detail(&p, &a, &o, name, source, TypeKind::Struct)
+                .unwrap_or_else(|| panic!("{name} from {source:?} opens"))
+        };
+        let gaps = open("Gaps", TypeSource::User);
+        assert_eq!(gaps.holes, [(4, 4), (16, 8)]);
+        assert!(gaps.overlaps.is_empty());
+        let sizes: Vec<Option<u64>> = gaps.fields.iter().map(|f| f.size).collect();
+        assert_eq!(sizes, [Some(4), Some(8)]);
+        assert_eq!(open("Short", TypeSource::User).holes, [(4, 4)]);
+        let union = open("Union", TypeSource::User);
+        assert_eq!((union.holes.len(), union.overlaps), (0, vec![(0, 1)]));
+        let open_ended = open("Open", TypeSource::User);
+        assert_eq!(open_ended.fields.first().map(|f| f.size), Some(None));
+        assert!(open_ended.holes.is_empty() && open_ended.overlaps.is_empty());
+        let startup = open("_STARTUPINFOW", TypeSource::Sdk);
+        let sizes: Vec<Option<u64>> = startup.fields.iter().take(2).map(|f| f.size).collect();
+        assert_eq!(sizes, [Some(4), Some(8)]);
+        assert_eq!(startup.holes.first(), Some(&(4, 4)));
+        let missing = [
+            (TypeSource::Dwarf, TypeKind::Struct),
+            (TypeSource::User, TypeKind::Enum),
+        ];
+        for (source, kind) in missing {
+            assert!(type_detail(&p, &a, &o, "Gaps", source, kind).is_none());
+        }
     }
 }
