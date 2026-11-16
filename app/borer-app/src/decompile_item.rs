@@ -725,6 +725,21 @@ impl DecompileItem {
         ))
     }
 
+    /// Returns the address of the cursor's line as its view says, else the tab's function's
+    /// entry; `None` for measured lines.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Application context reading the editor.
+    #[must_use]
+    pub fn cursor_address(&self, cx: &App) -> Option<u64> {
+        let line = self
+            .cursor(cx)
+            .and_then(|(row, _)| self.code.as_ref()?.get(row));
+        line.and_then(|(view, line)| view.address(line))
+            .or(self.entry)
+    }
+
     /// Follows the link of the token under the cursor: a call opens its function and an
     /// import is named here, and a link into this view (a label, a branch target, a
     /// definition) goes through Zed's go to definition, which the tab's provider answers.

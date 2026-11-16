@@ -39,7 +39,7 @@ use settings::{DEFAULT_KEYMAP_PATH, KeymapFile, KeymapFileLoadResult};
 use workspace::Workspace;
 
 use crate::binary::Binary;
-use crate::decompile_item::DecompileItem;
+use crate::places::shown_binary;
 
 /// A platform the app binds keys for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,7 +180,7 @@ impl Keys {
 pub enum Need {
     /// Nothing: it runs at any time.
     Nothing,
-    /// An open binary: loaded or being read, or shown by the active code tab.
+    /// An open binary: loaded or being read, or shown by the active tab.
     Binary,
 }
 
@@ -371,6 +371,32 @@ pub const COMMANDS: &[Command] = &[
             Need::Binary,
         )
     },
+    Command {
+        keys: &[Keys {
+            all: &[],
+            win: &["ctrl-5"],
+            linux: &["ctrl-5"],
+            mac: &["cmd-alt-5"],
+            context: Ctx::Workspace,
+        }],
+        serves: &["disassemble"],
+        ..item(
+            "borer::ShowLinear",
+            "Linear Listing",
+            (MenuName::View, 0),
+            Need::Binary,
+        )
+    },
+    Command {
+        keys: &[Keys::all(Ctx::Code, &["l"])],
+        serves: &["disassemble"],
+        ..item(
+            "borer::ShowInLinear",
+            "Show in Linear Listing",
+            (MenuName::View, 0),
+            Need::Binary,
+        )
+    },
     item(
         "workspace::ToggleLeftDock",
         "Toggle Left Dock",
@@ -554,7 +580,7 @@ pub fn register<A: Action>(
         let met = match needs {
             Need::Nothing => true,
             Need::Binary => {
-                binary.read(cx).is_open() || workspace.active_item_as::<DecompileItem>(cx).is_some()
+                binary.read(cx).is_open() || shown_binary(workspace, &binary, cx).is_some()
             }
         };
         if !met {

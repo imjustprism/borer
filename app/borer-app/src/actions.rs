@@ -38,6 +38,12 @@ gpui::actions!(
         /// Opens the overview of the open binary: what the file is, how it is protected,
         /// what it can do and which functions to read first, as the engine's triage says.
         Overview,
+        /// Opens the linear listing of the whole image: the tab already open, else a new one
+        /// at the image's start.
+        ShowLinear,
+        /// Opens the linear listing at the address of the code tab's cursor line, else of its
+        /// function's entry.
+        ShowInLinear,
     ]
 );
 

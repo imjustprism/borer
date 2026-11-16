@@ -176,6 +176,46 @@ fn show<T: Item>(
     })
 }
 
+/// Returns the snapshot the active center item shows, else the window's binary's.
+///
+/// # Arguments
+///
+/// * `workspace` - The workspace.
+/// * `binary` - The window's binary.
+/// * `cx` - Application context reading them.
+///
+/// # Returns
+///
+/// The snapshot, `None` before a binary is loaded.
+#[must_use]
+pub fn shown_binary(
+    workspace: &Workspace,
+    binary: &Entity<Binary>,
+    cx: &App,
+) -> Option<Arc<LoadedBinary>> {
+    let active = workspace.active_item(cx);
+    let shown = active
+        .as_ref()
+        .and_then(|item| loaded_of(item.as_ref(), cx));
+    shown.or_else(|| binary.read(cx).loaded()).cloned()
+}
+
+/// Returns the snapshot a center item shows, `None` for an item that shows none.
+///
+/// # Arguments
+///
+/// * `item` - The item.
+/// * `cx` - Application context reading it.
+fn loaded_of<'a>(item: &dyn ItemHandle, cx: &'a App) -> Option<&'a Arc<LoadedBinary>> {
+    if let Some(code) = item.downcast::<DecompileItem>() {
+        return Some(code.read(cx).loaded());
+    }
+    if let Some(overview) = item.downcast::<OverviewItem>() {
+        return Some(overview.read(cx).loaded());
+    }
+    Some(item.downcast::<LinearItem>()?.read(cx).loaded())
+}
+
 /// Returns the place a center item shows.
 ///
 /// # Arguments

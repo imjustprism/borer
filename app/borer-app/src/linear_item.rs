@@ -37,12 +37,14 @@ use theme::ActiveTheme as _;
 use ui::{Icon, IconName, Tooltip};
 use workspace::{Item, Workspace};
 
-use crate::actions::{BACK_HINT, FollowLink, Hint};
+use crate::actions::{BACK_HINT, FollowLink, Hint, ShowInLinear, ShowLinear};
 use crate::binary::Binary;
 use crate::card::{Card, Tone};
 use crate::code_semantics::ViewSemantics;
 use crate::code_view::CodeLines;
-use crate::decompile_item::{DecompileItem, Form, buffer_row, text_buffer, whole_rows};
+use crate::commands;
+use crate::decompile_item::{DecompileItem, Form, TabMode, buffer_row, text_buffer, whole_rows};
+use crate::places::{Opening, Place, open, shown_binary};
 use crate::worker::{Job, LoadedBinary, band_cells, linear_page};
 
 /// Rows one page asks the engine for.
@@ -818,6 +820,70 @@ pub const fn cell_name(kind: CellKind) -> &'static str {
     }
 }
 
+/// Opens the linear listing of what the active tab shows, else of the window's binary.
+///
+/// It reuses the tab already showing it, puts the row holding `at` on top when one is
+/// given, and opens nothing before a binary is loaded.
+///
+/// # Arguments
+///
+/// * `workspace` - The workspace.
+/// * `binary` - The window's binary.
+/// * `at` - The address to show, if any.
+/// * `window` - Window the workspace is in.
+/// * `cx` - Workspace context.
+pub fn show(
+    workspace: &mut Workspace,
+    binary: &Entity<Binary>,
+    at: Option<u64>,
+    window: &mut Window,
+    cx: &mut Context<'_, Workspace>,
+) {
+    let Some(loaded) = shown_binary(workspace, binary, cx) else {
+        return;
+    };
+    let how = Opening {
+        mode: TabMode::Permanent,
+        focus: true,
+    };
+    open(
+        workspace,
+        binary,
+        &loaded,
+        Place::Linear { at },
+        how,
+        window,
+        cx,
+    );
+}
+
+/// Registers the linear listing's commands on `workspace`, over the window's `binary`:
+/// open it, and open it at the code tab's cursor.
+///
+/// # Arguments
+///
+/// * `workspace` - The window's workspace.
+/// * `binary` - The window's binary.
+pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
+    let (linear, here) = (binary.clone(), binary.clone());
+    commands::register(
+        workspace,
+        binary,
+        move |workspace, _: &ShowLinear, window, cx| {
+            show(workspace, &linear, None, window, cx);
+        },
+    );
+    commands::register(
+        workspace,
+        binary,
+        move |workspace, _: &ShowInLinear, window, cx| {
+            let code = workspace.active_item_as::<DecompileItem>(cx);
+            let at = code.and_then(|item| item.read(cx).cursor_address(cx));
+            show(workspace, &here, at, window, cx);
+        },
+    );
+}
+
 /// Returns the image's first address and one past its last: the first row's start and the
 /// last row's end.
 ///
@@ -925,12 +991,15 @@ pub(crate) mod tests {
     use borer_engine::num::from_usize;
     use borer_engine::program::{Arch, BinaryFormat, Program, Section};
     use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, point};
+    use picker::Picker;
     use theme::ActiveTheme as _;
     use workspace::Workspace;
 
     use super::{AHEAD_LINES, LinearItem, PAGE_ROWS, PAGES_MAX, Page, Pages};
     use crate::app_view::tests::{CALLER, init, loaded, open, open_place, sample};
-    use crate::decompile_item::TabMode;
+    use crate::decompile_item::tests::{fourth_instruction, open_tab, put_cursor};
+    use crate::decompile_item::{Form, TabMode};
+    use crate::goto::GoToDelegate;
     use crate::places::Place;
     use crate::worker::{LoadedBinary, linear_page};
 
@@ -1142,6 +1211,56 @@ pub(crate) mod tests {
             let row = item.read_with(cx, |item, _| item.pages.row_lines(cells[ix].first));
             assert_eq!(row.map(|r| r.start), Some(top), "{kind:?}");
         }
+    }
+
+    /// From a listing tab the show-in-linear key opens the linear listing with the row of
+    /// the cursor's instruction on top; go to inside it moves to the row of the address it
+    /// resolves, in the same tab.
+    #[gpui::test]
+    fn show_in_linear_and_go_to_land_on_their_instructions(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
+        let loaded = sample();
+        let (va, line) = fourth_instruction(&loaded);
+        let tab = open_tab(&workspace, &loaded, (CALLER, Form::Listing), cx);
+        put_cursor(&tab, (line, 0), cx);
+        cx.simulate_keystrokes("l");
+        let linear = |cx: &mut VisualTestContext| {
+            let item = workspace.read_with(cx, |workspace, cx| {
+                workspace.active_item_as::<LinearItem>(cx)
+            });
+            let item = item.unwrap();
+            settle(&item, cx);
+            let (_, top) = shown(&item, cx);
+            item.read_with(cx, |item, cx| item.address(top, cx))
+        };
+        assert_eq!(linear(cx), Some(va));
+        let focused = workspace.update_in(cx, |workspace, window, cx| {
+            let item = workspace.active_item(cx).unwrap();
+            item.item_focus_handle(cx).contains_focused(window, cx)
+        });
+        assert!(focused, "the linear listing takes focus");
+        cx.simulate_keystrokes("g");
+        cx.run_until_parked();
+        let picker = workspace.read_with(cx, |workspace, cx| {
+            workspace.active_modal::<Picker<GoToDelegate>>(cx)
+        });
+        picker.unwrap().update_in(cx, |picker, window, cx| {
+            picker.set_query(&format!("{:#x}", CALLER + 2), window, cx);
+        });
+        cx.run_until_parked();
+        cx.dispatch_action(menu::Confirm);
+        cx.run_until_parked();
+        assert_eq!(linear(cx), Some(CALLER));
+        let tabs = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .active_pane()
+                .read(cx)
+                .items_of_type::<LinearItem>()
+                .count()
+        });
+        assert_eq!(tabs, 1);
     }
 
     /// Returns whether `kind` is one of the kinds the color test lists; adding a kind

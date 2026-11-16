@@ -4,8 +4,9 @@
 //! one list: the place it spells as an address first, then functions, imports, exports,
 //! symbols, strings, types, classes, user names and comments; a kind prefix (`@`, `"`,
 //! `t:`, `#`) narrows it. Enter opens the function holding a hit, a listing at the hit when
-//! a listing is the active view; a string, a type, a class or a hit in no function is named
-//! in the status line. A miss shows the engine's own words, nearest names and all.
+//! a listing is the active view, and in the linear listing goes to the row of the hit; a
+//! string, a type, a class or a hit in no function is named in the status line. A miss
+//! shows the engine's own words, nearest names and all.
 
 use std::sync::Arc;
 
@@ -21,7 +22,8 @@ use workspace::Workspace;
 use crate::binary::Binary;
 use crate::commands;
 use crate::decompile_item::{DecompileItem, Form, TabMode};
-use crate::places::{Opening, Place, open};
+use crate::linear_item::LinearItem;
+use crate::places::{Opening, Place, open, shown_binary};
 use crate::worker::{FindAnswer, LoadedBinary, find_blocking, spawn_engine};
 
 gpui::actions!(
@@ -102,6 +104,16 @@ impl Match {
         }
     }
 
+    /// Returns what Enter on this line opens in the linear listing: the row of the
+    /// resolved address, else of the listed function's entry; `None` for a line that
+    /// opens nothing.
+    fn linear_place(&self) -> Option<Place> {
+        let (entry, at) = self.opens()?;
+        Some(Place::Linear {
+            at: Some(at.unwrap_or(entry)),
+        })
+    }
+
     /// Returns what Enter on this line opens from a tab showing `form`: the function in
     /// that view, a listing at the hit's address; `None` for a line that opens nothing.
     ///
@@ -116,6 +128,15 @@ impl Match {
         };
         Some(Place::Code { entry, form, at })
     }
+}
+
+/// What the active tab shows, which a confirmed line opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Here {
+    /// A code tab showing this view of a function.
+    Code(Form),
+    /// The linear listing.
+    Linear,
 }
 
 /// Returns the status line naming a hit Enter opens no code for: its kind, its text and its
@@ -205,16 +226,16 @@ pub struct GoToDelegate {
     binary: Entity<Binary>,
     /// Binary the text is resolved in.
     loaded: Arc<LoadedBinary>,
-    /// The view of the active code tab, which a confirmed line opens.
-    form: Form,
+    /// What the active tab shows, which a confirmed line opens.
+    here: Here,
     /// The lines of the latest answer.
     matches: Vec<Match>,
     /// The selected line.
     selected: usize,
 }
 
-/// Opens the go-to picker, empty, over the binary of the active code tab, else the
-/// window's binary; nothing opens before a binary is loaded.
+/// Opens the go-to picker, empty, over the binary the active tab shows, else the window's
+/// binary; nothing opens before a binary is loaded.
 ///
 /// # Arguments
 ///
@@ -228,20 +249,20 @@ fn toggle(
     window: &mut Window,
     cx: &mut Context<'_, Workspace>,
 ) {
-    let tab = workspace.active_item_as::<DecompileItem>(cx);
-    let form = tab
-        .as_ref()
-        .map_or(Form::Decompile, |item| item.read(cx).form());
-    let tab = tab.map(|item| item.read(cx).loaded().clone());
-    let binary = binary.clone();
-    let Some(loaded) = tab.or_else(|| binary.read(cx).loaded().cloned()) else {
+    let here = if workspace.active_item_as::<LinearItem>(cx).is_some() {
+        Here::Linear
+    } else {
+        let tab = workspace.active_item_as::<DecompileItem>(cx);
+        Here::Code(tab.map_or(Form::Decompile, |item| item.read(cx).form()))
+    };
+    let Some(loaded) = shown_binary(workspace, binary, cx) else {
         return;
     };
     let delegate = GoToDelegate {
         workspace: workspace.weak_handle(),
-        binary,
+        binary: binary.clone(),
         loaded,
-        form,
+        here,
         matches: Vec::new(),
         selected: 0,
     };
@@ -325,7 +346,11 @@ impl PickerDelegate for GoToDelegate {
         let Some(line) = self.matches.get(self.selected) else {
             return;
         };
-        let Some(place) = line.place(self.form) else {
+        let place = match self.here {
+            Here::Code(form) => line.place(form),
+            Here::Linear => line.linear_place(),
+        };
+        let Some(place) = place else {
             if let Match::Hit { hit, .. } = line {
                 let status = named(hit);
                 self.binary
@@ -334,9 +359,9 @@ impl PickerDelegate for GoToDelegate {
             }
             return;
         };
-        let mode = match self.form {
-            Form::Listing => TabMode::Preview,
-            Form::Decompile => TabMode::Permanent,
+        let mode = match self.here {
+            Here::Code(Form::Listing) => TabMode::Preview,
+            Here::Code(Form::Decompile) | Here::Linear => TabMode::Permanent,
         };
         let (workspace, binary, loaded) = (
             self.workspace.clone(),
@@ -691,9 +716,15 @@ mod tests {
             section: None,
             encoding: Encoding::Ascii,
         };
-        assert_eq!(hit(va, Some(CALLEE), string).place(Form::Listing), None);
+        let string = hit(va, Some(CALLEE), string);
+        assert_eq!(string.place(Form::Listing), None);
+        assert_eq!(string.linear_place(), None);
         assert_eq!(Match::Miss("no".to_owned()).place(Form::Listing), None);
         assert_eq!(Match::Count(0, 0).place(Form::Listing), None);
+        assert_eq!(inside.linear_place(), Some(Place::Linear { at: Some(va) }));
+        assert_eq!(hit(0x1100, None, Source::User).linear_place(), None);
+        assert_eq!(Match::Miss("no".to_owned()).linear_place(), None);
+        assert_eq!(Match::Count(0, 0).linear_place(), None);
     }
 
     /// Queries typed over one another before the engine answered list only the last
