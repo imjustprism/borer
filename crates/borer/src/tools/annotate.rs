@@ -3,11 +3,11 @@
 
 use std::fmt::Write as _;
 
-use borer_engine::analysis::edit::{self, Edit, Force, Line};
-use borer_engine::analysis::project::room;
-use borer_engine::analysis::utypes::APPLIED_MAX;
+use borer_engine::analysis::edit::{self, Edit, Force, Line, Plan};
+use borer_engine::analysis::protos::Proto;
+use borer_engine::analysis::utypes::parse_type;
 use borer_engine::analysis::{Analysis, Overlay, stated};
-use borer_engine::program::{Feature, Program};
+use borer_engine::program::Feature;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ErrorData, tool, tool_router};
 
@@ -15,27 +15,11 @@ use crate::BorerServer;
 use crate::errors::err_params;
 use crate::params::{
     Annotation, AnnotationsParams, Filter, Page, SetCommentParams, SetNameParams, SetTypeParams,
-    TypesParams, field_var, must_be_a_name, must_be_in_a_section, must_fit_a_row, plan_var,
-    stated_fields, stated_key, stated_values,
+    TypesParams, field_var, must_be_a_name, must_be_in_a_section, must_fit_a_row, stated_fields,
+    stated_values,
 };
 use crate::safety::{Effect, effects};
 use crate::state::read_lock;
-
-/// Tells whether `text` holds `word` as a whole identifier, not inside a
-/// longer one (`a1` is not in `a12` or `data1`).
-///
-/// # Arguments
-///
-/// * `text` - The text searched.
-/// * `word` - The identifier.
-pub(crate) fn names_word(text: &str, word: &str) -> bool {
-    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
-    !word.is_empty()
-        && text.match_indices(word).any(|(i, _)| {
-            !text[..i].chars().next_back().is_some_and(ident)
-                && !text[i + word.len()..].chars().next().is_some_and(ident)
-        })
-}
 
 impl BorerServer {
     /// Defines the types C declarations state, laid out by the loaded
@@ -53,134 +37,20 @@ impl BorerServer {
     /// subset does not read, an offset assertion that fails), or the types
     /// with the overlay's would not validate.
     fn declare_c(&self, text: &str, dry: bool) -> Result<String, ErrorData> {
-        /// Types a reply describes before it counts the rest.
-        const SHOWN: usize = 64;
         self.with_program(|p| {
-            let abi = borer_engine::analysis::cdecl::Abi::of(p);
-            let o = self.overlay_plain();
-            let declared = borer_engine::analysis::cdecl::parse(text, &o.types, abi)
+            let edits = [Edit::Declare {
+                text: text.to_owned(),
+            }];
+            let a = self.analysis_or_empty();
+            let plan = self
+                .edited((p, &a, &self.overlay()), &edits, Force::Refuse, dry)
                 .map_err(|e| e.to_string())?;
-            let mut types = o.types.clone();
-            for (name, ty, _) in &declared.types {
-                types.insert(name.clone(), ty.clone());
-            }
-            borer_engine::analysis::utypes::validate(&types, &o.applied)
-                .map_err(|e| e.to_string())?;
-            if declared
-                .types
-                .iter()
-                .any(|(name, ..)| o.types.contains_key(name))
-            {
-                stated::standing(p, &self.analysis_or_empty(), &o, &types)?;
-            }
-            let lines = borer_engine::analysis::cdecl::describe(&declared);
-            let mut out = format!(
-                "{} {} type(s) from C, laid out for {}:\n",
-                if dry {
-                    "dry-run: would define"
-                } else {
-                    "defined"
-                },
-                declared.types.len(),
-                abi.name()
-            );
-            for line in lines.iter().take(SHOWN) {
-                out.push_str(line);
-                out.push('\n');
-            }
-            if lines.len() > SHOWN {
-                out.push_str(&format!(
-                    "# showing {SHOWN} of {} lines; `types` lists every type\n",
-                    lines.len()
-                ));
-            }
+            let mut out: String = plan.lines.iter().map(|l| said(l, dry).0).collect();
             if dry {
                 out.push_str("pass dry_run=false to apply.\n");
-                return Ok(out);
             }
-            self.edit_overlay(|o| {
-                o.types
-                    .extend(declared.types.into_iter().map(|(name, ty, _)| (name, ty)));
-            })?;
             Ok(out)
         })
-    }
-
-    /// States a variable of a function, or a field of the class the
-    /// function's object is of: `set_type` with `var`.
-    ///
-    /// `var` is a parameter or a stack slot as the function's text shows
-    /// it, or a name stated before ([`plan_var`]). Any other `var` that
-    /// spells an unnamed field as the text prints one (`field_0x270`) is
-    /// that field of the function's class, stated there as `name` and
-    /// `fields` state it by the class's name ([`stated::plan_at`]).
-    ///
-    /// # Arguments
-    ///
-    /// * `(p, a, o)` - The loaded program, its analysis and the overlay.
-    /// * `entry` - The function `address` is in, when it is in one.
-    /// * `var` - The variable or the field.
-    /// * `(name, ty)` - Its new name, and its type if one is stated.
-    /// * `dry` - Say what would be stated and write nothing.
-    ///
-    /// # Errors
-    ///
-    /// When `address` is in no function, the variable, the field or the
-    /// name is refused, or the function's text names no such variable.
-    fn state_var(
-        &self,
-        (p, a, o): (&Program, &Analysis, &Overlay),
-        entry: Option<u64>,
-        var: &str,
-        (name, ty): (Option<&str>, Option<&str>),
-        dry: bool,
-    ) -> Result<String, String> {
-        let entry = entry.ok_or_else(|| {
-            "`var` names a variable of a function: give the function's `address`".to_owned()
-        })?;
-        if let Some(off) = field_var(var).filter(|_| stated_key(o, entry, var).is_none()) {
-            let name =
-                name.ok_or("naming a field needs `name`, its new name (`type` is optional)")?;
-            let ty = ty
-                .map(borer_engine::analysis::utypes::parse_type)
-                .transpose()
-                .map_err(|e| e.to_string())?;
-            let name = name.to_owned();
-            let plan = stated::plan_at(p, a, o, entry, off, stated::Field { name, ty })?;
-            if dry {
-                return Ok(format!(
-                    "dry-run: would {}. pass dry_run=false to apply.",
-                    plan.would()
-                ));
-            }
-            let said = plan.done();
-            self.edit_overlay(|o| plan.apply(o))?;
-            return Ok(said);
-        }
-        let (key, named) = plan_var(p, o, entry, var, name, ty)?;
-        let (stack, shadow, frame) = borer_engine::analysis::protos::slot_words(p, entry);
-        let spelled = key.spell(stack, shadow, frame);
-        let fname = borer_engine::analysis::name_of(a, o, entry);
-        let renamed = o.vars.get(&entry).is_some_and(|v| v.contains_key(&key));
-        if !renamed
-            && let Some(text) = borer_engine::analysis::decompile::decompile_named(p, a, o, entry)
-            && !names_word(&text, var)
-            && !names_word(&text, &spelled)
-        {
-            return Err(format!(
-                "{fname} has no variable {spelled}: its text never names it, so a type there would invent a parameter the code does not take; decompile it for the variables it has"
-            ));
-        }
-        let what = format!("{spelled} of {fname} ({entry:#x}) {}", named.spell());
-        if dry {
-            return Ok(format!(
-                "dry-run: would name {what}; decompile then renders it so. pass dry_run=false to apply."
-            ));
-        }
-        self.edit_overlay(|o| {
-            o.vars.entry(entry).or_default().insert(key, named);
-        })?;
-        Ok(format!("named {what}"))
     }
 }
 
@@ -292,7 +162,7 @@ impl BorerServer {
                 })?;
             let lines: Vec<(String, String)> = plan.lines.iter().map(|l| said(l, dry)).collect();
             Ok(match lines.as_slice() {
-                [_] => answered(&lines, dry),
+                [_] => answered(&plan, dry),
                 more if dry => format!(
                     "dry-run: {} names\n{}\npass dry_run=false to apply.",
                     more.len(),
@@ -349,11 +219,9 @@ impl BorerServer {
                 text: comment.clone(),
             }];
             let a = self.analysis_held();
-            let plan = self
-                .edited((p, &a, &self.overlay()), &edits, Force::Refuse, dry)
-                .map_err(|e| e.to_string())?;
-            let lines: Vec<(String, String)> = plan.lines.iter().map(|l| said(l, dry)).collect();
-            Ok(answered(&lines, dry))
+            self.edited((p, &a, &self.overlay()), &edits, Force::Refuse, dry)
+                .map(|plan| answered(&plan, dry))
+                .map_err(|e| e.to_string())
         })
     }
 
@@ -381,7 +249,7 @@ impl BorerServer {
     /// or a name stated before), `name` and an optional `type` name and
     /// type that variable, and a `var` spelling an unnamed field
     /// (`field_0x270`) states that field of the function's class
-    /// ([`BorerServer::state_var`]). `type` alone is C declarations, laid
+    /// ([`edit::Edit::Var`]). `type` alone is C declarations, laid
     /// out by the binary's ABI ([`BorerServer::declare_c`]). Everything is
     /// validated before anything is written: types the language does not
     /// spell, references to names nothing defines, fields that overlap, a
@@ -412,7 +280,9 @@ impl BorerServer {
 
     pub(crate) fn set_type(
         &self,
-        Parameters(SetTypeParams {
+        Parameters(asked): Parameters<SetTypeParams>,
+    ) -> Result<String, ErrorData> {
+        let SetTypeParams {
             name,
             fields,
             replace,
@@ -422,16 +292,15 @@ impl BorerServer {
             r#type: ty,
             var,
             dry_run,
-        }): Parameters<SetTypeParams>,
-    ) -> Result<String, ErrorData> {
+        } = &asked;
         let dry = dry_run.unwrap_or(true);
-        if replace == Some(true) && (name.is_none() || fields.is_none() || var.is_some()) {
+        if *replace == Some(true) && (name.is_none() || fields.is_none() || var.is_some()) {
             return Err(err_params(
                 "`replace` drops the fields `fields` does not restate, so it goes with `name` and `fields`",
             ));
         }
         if let (None, None, None, None, None, None, Some(decl)) =
-            (&name, &address, &var, &fields, &values, size, &ty)
+            (name, address, var, fields, values, size, ty)
         {
             return self.declare_c(decl, dry);
         }
@@ -442,207 +311,41 @@ impl BorerServer {
         }
         for text in name
             .iter()
-            .chain(&ty)
-            .chain(&var)
+            .chain(ty)
+            .chain(var)
             .chain(fields.iter().flatten())
             .chain(values.iter().flatten())
         {
             must_fit_a_row(text, Annotation::Type)?;
         }
         self.with_analysis(Feature::Discover, |p, a, o| {
-            let word: u64 = if p.is_64 { 8 } else { 4 };
-            let function = match &address {
+            let (at, function) = match address {
                 Some(text) => {
                     let va = self.addr(p, text)?;
                     must_be_in_a_section(p, va, Annotation::Type)?;
-                    a.function_at(va).map(|f| f.entry)
+                    (Some(va), a.function_at(va).map(|f| f.entry))
                 }
-                None => None,
+                None => (None, None),
             };
-            if let Some(var) = &var {
-                let named = (name.as_deref(), ty.as_deref());
-                return self.state_var((p, a, o), function, var, named, dry);
-            }
-            let mut fielded = None;
-            let defined = match (&name, &fields, &values) {
-                (Some(n), Some(fs), vs) if !fs.is_empty() || replace == Some(true) => {
-                    if vs.is_some() {
-                        return Err(format!(
-                            "type {n} states both fields and values; a struct takes fields, an enum values"
-                        ));
-                    }
-                    let statement = stated::Statement {
-                        name: n,
-                        size,
-                        fields: &stated_fields(fs)?,
-                        mode: stated::Mode::asked(replace.unwrap_or(false)),
-                    };
-                    fielded = Some(stated::plan(p, a, o, &statement)?);
-                    None
-                }
-                (Some(n), Some(_), _) => {
-                    return Err(format!(
-                        "struct {n} states no fields; give fields, `values` for an enum, or a `type` for a typedef"
-                    ));
-                }
-                (Some(n), _, Some(vs)) if !vs.is_empty() => {
-                    let stated = stated_values(vs)?;
-                    Some((
-                        n.clone(),
-                        borer_engine::analysis::utypes::build_enum(
-                            n,
-                            size.unwrap_or(4),
-                            &stated,
-                        )
-                        .map_err(|e| e.to_string())?,
-                    ))
-                }
-                (Some(n), _, Some(_)) => {
-                    return Err(format!(
-                        "enum {n} states no values; give them as name:value"
-                    ));
-                }
-                (Some(n), None, None) if function.is_some() => {
-                    return Err(format!(
-                        "at a function `type` is its prototype; define typedef {n} in a call of its own"
-                    ));
-                }
-                (Some(n), None, None) => {
-                    let target = ty.as_deref().ok_or_else(|| {
-                        format!("typedef {n} needs the `type` it stands for")
-                    })?;
-                    let parsed = borer_engine::analysis::utypes::parse_type(target)
-                        .map_err(|e| e.to_string())?;
-                    Some((
-                        n.clone(),
-                        borer_engine::analysis::utypes::build_alias(n, &parsed, &o.types, word)
-                            .map_err(|e| e.to_string())?,
-                    ))
-                }
-                (None, _, _) => None,
-            };
-            let applied = match &address {
-                Some(text) if function.is_none() => {
-                    let spelled = ty.as_deref().ok_or_else(|| {
-                        "applying a type needs the `type` to apply".to_owned()
-                    })?;
-                    let parsed = borer_engine::analysis::utypes::parse_type(spelled)
-                        .map_err(|e| e.to_string())?;
-                    let va = self.addr(p, text)?;
-                    Some((va, parsed))
-                }
-                Some(_) | None => None,
-            };
-            let stated = match function {
-                Some(entry) => {
-                    let decl = ty.as_deref().ok_or_else(|| {
-                        "at a function `type` is its prototype: `int f(Player *p, uint32_t n)`"
+            let edits = match var {
+                Some(var) => {
+                    let entry = function.ok_or_else(|| {
+                        "`var` names a variable of a function: give the function's `address`"
                             .to_owned()
                     })?;
-                    let proto =
-                        borer_engine::analysis::protos::Proto::parse(decl).map_err(|e| {
-                            if decl.contains('(') {
-                                e.to_string()
-                            } else {
-                                format!(
-                                    "{entry:#x} is inside {}; types apply to data globals, and at a function `type` is its prototype (`int f(Player *p)`)",
-                                    borer_engine::analysis::name_of(a, o, entry)
-                                )
-                            }
-                        })?;
-                    if o.prototypes.len() >= borer_engine::analysis::protos::PROTOTYPES_MAX
-                        && !o.prototypes.contains_key(&entry)
-                    {
-                        return Err(format!(
-                            "the overlay states {} prototypes, the most it holds",
-                            o.prototypes.len()
-                        ));
-                    }
-                    Some((entry, proto))
+                    vec![Edit::Var {
+                        entry,
+                        var: var.clone(),
+                        field: field_var(var),
+                        name: name.clone(),
+                        ty: ty.clone(),
+                    }]
                 }
-                None => None,
+                None => type_edits(&asked, (a, o), at, function)?,
             };
-            let fresh = fielded.as_ref().and_then(stated::Plan::defined);
-            let fresh = fresh.or(defined.as_ref().map(|(n, ty)| (n.as_str(), ty)));
-            let types = stated::retyped(p, a, o, fresh)?;
-            let applied = applied
-                .map(|(va, ty)| {
-                    borer_engine::analysis::utypes::width_of(&types, &ty, word).ok_or_else(|| {
-                        let first = "set_type(name=..., fields=[...]) first";
-                        stated::undefined(Some(a), o, &ty, first)
-                    }).map(|w| (va, ty, w))
-                })
-                .transpose()?;
-            adding(&o.applied, applied.as_ref().map(|a| a.0), "applied types", APPLIED_MAX)?;
-            let mut done: Vec<String> = Vec::new();
-            let mut would: Vec<String> = Vec::new();
-            if let Some(plan) = &fielded {
-                done.push(plan.done());
-                would.push(plan.would());
-            }
-            if let Some((n, ty)) = &defined {
-                done.push(format!("defined {}", ty.describe(n)));
-                would.push(format!("define {}", ty.describe(n)));
-            }
-            if let Some((va, ty, width)) = &applied {
-                let renders = if borer_engine::analysis::utypes::named_enum(&types, ty).is_some() {
-                    "names its values"
-                } else {
-                    "names its fields"
-                };
-                done.push(format!(
-                    "applied {} at {va:#x} ({width} byte(s)); decompile {renders}",
-                    ty.spell()
-                ));
-                would.push(format!(
-                    "apply {} at {va:#x} ({width} byte(s)); decompile then {renders}",
-                    ty.spell()
-                ));
-            }
-            let mut note = String::new();
-            if let Some((entry, proto)) = &stated {
-                let fname = borer_engine::analysis::name_of(a, o, *entry);
-                done.push(format!("stated {fname} ({entry:#x}) as {}", proto.spell()));
-                would.push(format!(
-                    "state {fname} ({entry:#x}) as {}; decompile then renders its signature, its body and every call to it by it",
-                    proto.spell()
-                ));
-                let bits = u8::try_from(word * 8).unwrap_or(64);
-                let unknown: Vec<String> = proto
-                    .ret
-                    .iter()
-                    .chain(proto.params.iter().map(|q| &q.ty))
-                    .filter(|t| t.pass(&types, bits, p.format).is_none())
-                    .map(borer_engine::analysis::protos::CType::spell)
-                    .collect();
-                if !unknown.is_empty() {
-                    note = format!(
-                        "\n# note: {} names no user type or C type word borer knows, so it passes as a word",
-                        unknown.join(", ")
-                    );
-                }
-            }
-            if dry {
-                return Ok(format!(
-                    "dry-run: would {}. pass dry_run=false to apply.{note}",
-                    would.join("; ")
-                ));
-            }
-            self.edit_overlay(|overlay| {
-                if let Some(plan) = fielded {
-                    plan.apply(overlay);
-                }
-                if let Some((n, ty)) = defined {
-                    overlay.types.insert(n, ty);
-                }
-                if let Some((va, ty, _)) = applied {
-                    overlay.applied.insert(va, ty);
-                }
-                if let Some((entry, proto)) = stated {
-                    overlay.prototypes.insert(entry, proto);
-                }
-            })?;
-            Ok(format!("{}{note}", done.join("; ")))
+            self.edited((p, a, o), &edits, Force::Refuse, dry)
+                .map(|plan| answered(&plan, dry))
+                .map_err(|e| e.to_string())
         })
     }
 
@@ -841,7 +544,146 @@ fn said(line: &Line, dry: bool) -> (String, String) {
         }
         Line::Commented { at } if dry => (format!("set comment at {at:#x}"), String::new()),
         Line::Commented { at } => (format!("comment set at {at:#x}"), String::new()),
+        Line::Declared { types, abi, lines } => {
+            /// Types a reply describes before it counts the rest.
+            const SHOWN: usize = 64;
+            let verb = if dry {
+                "dry-run: would define"
+            } else {
+                "defined"
+            };
+            let mut out = format!("{verb} {types} type(s) from C, laid out for {abi}:\n");
+            for line in lines.iter().take(SHOWN) {
+                out.push_str(line);
+                out.push('\n');
+            }
+            if lines.len() > SHOWN {
+                out.push_str(&format!(
+                    "# showing {SHOWN} of {} lines; `types` lists every type\n",
+                    lines.len()
+                ));
+            }
+            (out, String::new())
+        }
+        Line::Stated { would, .. } if dry => (would.clone(), String::new()),
+        Line::Stated { done, .. } => (done.clone(), String::new()),
+        Line::Unknown(types) => (
+            String::new(),
+            format!(
+                "\n# note: {} names no user type or C type word borer knows, so it passes as a word",
+                types.join(", ")
+            ),
+        ),
     }
+}
+
+/// Plans the edits a `set_type` call states that are not a variable's:
+/// a struct's or a class's fields, an enum, a typedef, then a type
+/// applied at a data global or a function's prototype.
+///
+/// # Arguments
+///
+/// * `asked` - The call's parameters.
+/// * `(a, o)` - The analysis and the overlay, for the name of a function
+///   whose prototype does not read.
+/// * `at` - The address the call names, resolved.
+/// * `function` - The entry of the function `at` is in, if it is in one.
+///
+/// # Errors
+///
+/// When the parameters state a type two ways, a definition names nothing
+/// to define, a type, a field or a value does not parse, or a type to
+/// apply or a prototype is missing or does not parse.
+fn type_edits(
+    asked: &SetTypeParams,
+    (a, o): (&Analysis, &Overlay),
+    at: Option<u64>,
+    function: Option<u64>,
+) -> Result<Vec<Edit>, String> {
+    let SetTypeParams {
+        name,
+        fields,
+        replace,
+        values,
+        size,
+        r#type: ty,
+        ..
+    } = asked;
+    let mut edits = Vec::new();
+    match (name, fields, values) {
+        (Some(n), Some(fs), vs) if !fs.is_empty() || *replace == Some(true) => {
+            if vs.is_some() {
+                return Err(format!(
+                    "type {n} states both fields and values; a struct takes fields, an enum values"
+                ));
+            }
+            edits.push(Edit::Fields {
+                name: n.clone(),
+                size: *size,
+                fields: stated_fields(fs)?,
+                mode: stated::Mode::asked(replace.unwrap_or(false)),
+            });
+        }
+        (Some(n), Some(_), _) => {
+            return Err(format!(
+                "struct {n} states no fields; give fields, `values` for an enum, or a `type` for a typedef"
+            ));
+        }
+        (Some(n), _, Some(vs)) if !vs.is_empty() => edits.push(Edit::Enum {
+            name: n.clone(),
+            size: size.unwrap_or(4),
+            values: stated_values(vs)?,
+        }),
+        (Some(n), _, Some(_)) => {
+            return Err(format!(
+                "enum {n} states no values; give them as name:value"
+            ));
+        }
+        (Some(n), None, None) if function.is_some() => {
+            return Err(format!(
+                "at a function `type` is its prototype; define typedef {n} in a call of its own"
+            ));
+        }
+        (Some(n), None, None) => {
+            let target = ty
+                .as_deref()
+                .ok_or_else(|| format!("typedef {n} needs the `type` it stands for"))?;
+            edits.push(Edit::Alias {
+                name: n.clone(),
+                ty: parse_type(target).map_err(|e| e.to_string())?,
+            });
+        }
+        (None, _, _) => {}
+    }
+    match (at, function) {
+        (Some(at), None) => {
+            let spelled = ty
+                .as_deref()
+                .ok_or_else(|| "applying a type needs the `type` to apply".to_owned())?;
+            edits.push(Edit::Apply {
+                at,
+                ty: parse_type(spelled).map_err(|e| e.to_string())?,
+            });
+        }
+        (Some(_) | None, Some(entry)) => {
+            let decl = ty.as_deref().ok_or_else(|| {
+                "at a function `type` is its prototype: `int f(Player *p, uint32_t n)`".to_owned()
+            })?;
+            let proto = Proto::parse(decl).map_err(|e| {
+                if decl.contains('(') {
+                    e.to_string()
+                } else {
+                    format!(
+                        "{entry:#x} is inside {}; types apply to data globals, and at a function `type` is its prototype (`int f(Player *p)`)",
+                        borer_engine::analysis::name_of(a, o, entry)
+                    )
+                }
+            })?;
+            edits.push(Edit::Proto { entry, proto });
+        }
+        (None, None) => {}
+    }
+    Ok(edits)
 }
 
 /// Answers a plan of one line or of lines joined by `; `: a dry run says
@@ -849,10 +691,11 @@ fn said(line: &Line, dry: bool) -> (String, String) {
 ///
 /// # Arguments
 ///
-/// * `lines` - The plan's lines as [`said`] spells them.
+/// * `plan` - The plan, its lines spelled by [`said`].
 /// * `dry` - Whether the plan is a dry run's.
-fn answered(lines: &[(String, String)], dry: bool) -> String {
-    let said: Vec<&str> = lines
+fn answered(plan: &Plan, dry: bool) -> String {
+    let lines: Vec<(String, String)> = plan.lines.iter().map(|l| said(l, dry)).collect();
+    let words: Vec<&str> = lines
         .iter()
         .map(|(line, _)| line.as_str())
         .filter(|line| !line.is_empty())
@@ -861,40 +704,11 @@ fn answered(lines: &[(String, String)], dry: bool) -> String {
     if dry {
         format!(
             "dry-run: would {}. pass dry_run=false to apply.{notes}",
-            said.join("; ")
+            words.join("; ")
         )
     } else {
-        format!("{}{notes}", said.join("; "))
+        format!("{}{notes}", words.join("; "))
     }
-}
-
-/// Refuses an edit that would add an entry at `va` to a table past what a
-/// project file holds, by the count the edit would leave ([`room`]), so a
-/// dry run answers as its apply will.
-///
-/// # Arguments
-///
-/// * `table` - The table as it is.
-/// * `va` - Where the edit adds an entry, if it adds one.
-/// * `what` - The table, for the message (`comments`).
-/// * `most` - Its cap.
-///
-/// # Errors
-///
-/// When the entry would take the table past its cap.
-fn adding<V>(
-    table: &std::collections::BTreeMap<u64, V>,
-    va: Option<u64>,
-    what: &str,
-    most: usize,
-) -> Result<(), String> {
-    let Some(va) = va else {
-        return Ok(());
-    };
-    let count = table
-        .len()
-        .saturating_add(usize::from(!table.contains_key(&va)));
-    room(what, count, most)
 }
 
 #[cfg(test)]

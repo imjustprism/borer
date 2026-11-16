@@ -24,6 +24,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::classes::{self, FieldLabel, FieldUse};
+use super::edit::{Key, Value};
 use super::protos::VarKey;
 use super::utypes::{self, TypeExpr, UserStruct, UserType};
 use super::{Analysis, Function, Overlay, bare_name, name_of};
@@ -407,26 +408,29 @@ impl Plan {
         }
     }
 
-    /// Writes the plan into an overlay.
+    /// Returns the overlay entry the plan writes and what it holds after.
     ///
     /// A class left stating no field leaves the overlay: an entry without
     /// fields would list a class nothing is stated of.
+    #[must_use]
+    pub fn write(self) -> (Key, Option<Value>) {
+        match self.edit {
+            Edit::Struct(name, ty) => (Key::Type(name), Some(Value::Type(ty))),
+            Edit::Class(class, fields) => {
+                let new = (!fields.is_empty()).then_some(Value::Fields(fields));
+                (Key::Fields(class), new)
+            }
+        }
+    }
+
+    /// Writes the plan into an overlay ([`Plan::write`]).
     ///
     /// # Arguments
     ///
     /// * `o` - The overlay.
     pub fn apply(self, o: &mut Overlay) {
-        match self.edit {
-            Edit::Struct(name, ty) => {
-                o.types.insert(name, ty);
-            }
-            Edit::Class(class, fields) if fields.is_empty() => {
-                o.fields.remove(&class);
-            }
-            Edit::Class(class, fields) => {
-                o.fields.insert(class, fields);
-            }
-        }
+        let (key, new) = self.write();
+        o.put(key, new);
     }
 }
 

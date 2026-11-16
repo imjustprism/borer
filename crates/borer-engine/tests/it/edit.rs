@@ -13,7 +13,7 @@ use borer_engine::analysis::edit::{
 };
 use borer_engine::analysis::project::NAMES_MAX;
 use borer_engine::analysis::protos::{Proto, Var, VarKey};
-use borer_engine::analysis::stated::Field;
+use borer_engine::analysis::stated::{Field, Mode};
 use borer_engine::analysis::utypes::{UserType, parse_type};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::num::from_usize;
@@ -187,4 +187,53 @@ fn a_commit_past_a_cap_writes_nothing() {
         name: "one_more".to_owned(),
     }];
     plan(&p, &a, &o, &edits, Force::Take).expect_err("the plan refuses it too");
+}
+
+/// The inverses of a mixed plan's changes, a name, a comment, a struct
+/// and a variable's type, applied in reverse order give back the overlay
+/// the plan was committed to.
+#[test]
+fn the_inverse_of_a_mixed_plan_restores_the_overlay() {
+    let p = fixture();
+    let a = Analysis::compute(&p);
+    let entry = a.functions.first().expect("a function").entry;
+    let mut o = Overlay::default();
+    let x = Var::parse("x").expect("a variable");
+    o.vars.entry(entry).or_default().insert(VarKey::Param(0), x);
+    let before = o.fingerprint();
+    let word = parse_type("u32").expect("a type");
+    let field = |name: &str| Field {
+        name: name.to_owned(),
+        ty: Some(word.clone()),
+    };
+    let edits = [
+        Edit::Name {
+            at: entry,
+            name: "mixed".to_owned(),
+        },
+        Edit::Comment {
+            at: entry,
+            text: "? a guess".to_owned(),
+        },
+        Edit::Fields {
+            name: "Pair".to_owned(),
+            size: None,
+            fields: vec![(0, field("lo")), (4, field("hi"))],
+            mode: Mode::Merge,
+        },
+        Edit::Var {
+            entry,
+            var: "x".to_owned(),
+            field: None,
+            name: Some("count".to_owned()),
+            ty: Some("int".to_owned()),
+        },
+    ];
+    let made = plan(&p, &a, &o, &edits, Force::Refuse).expect("planned");
+    let changes = commit(&a, &mut o, &made).expect("committed");
+    assert_eq!(changes.len(), 4, "{changes:?}");
+    assert_ne!(o.fingerprint(), before);
+    let back: Vec<Change> = changes.iter().rev().map(Change::inverse).collect();
+    o.apply(&back);
+    assert_eq!(o.fingerprint(), before, "{changes:?}");
 }

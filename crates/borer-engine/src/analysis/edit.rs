@@ -18,11 +18,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use super::protos::{Proto, Var, VarKey};
+use super::decompile::decompile_named;
+use super::protos::{self, Proto, Var, VarKey};
 use super::reads::{Tag, Tracked};
-use super::stated::Field;
-use super::utypes::{TypeExpr, UserType};
-use super::{Analysis, Overlay, name_of, parse_addr, project, resolve};
+use super::stated::{self, Field, Mode, Statement};
+use super::utypes::{self, TypeExpr, UserType};
+use super::{Analysis, Overlay, cdecl, name_of, parse_addr, project, resolve};
 use crate::program::Program;
 
 /// One entry of the overlay: the map it is in and its key there.
@@ -280,6 +281,73 @@ pub enum Edit {
         /// The comment.
         text: String,
     },
+    /// Defines the types C declarations state, laid out by the binary's
+    /// ABI ([`cdecl`]).
+    Declare {
+        /// The declarations.
+        text: String,
+    },
+    /// States fields of a user struct, of a class borer recovered, or of
+    /// a struct it defines ([`stated::plan`]).
+    Fields {
+        /// The struct or the class.
+        name: String,
+        /// The struct's size in bytes, when one is stated.
+        size: Option<u64>,
+        /// The fields by byte offset, in the order stated.
+        fields: Vec<(u64, Field)>,
+        /// Whether the fields add to what the name states or take its
+        /// place.
+        mode: Mode,
+    },
+    /// Defines an enum.
+    Enum {
+        /// The enum's name.
+        name: String,
+        /// Its width in bytes.
+        size: u64,
+        /// Each value and its name, in the order stated.
+        values: Vec<(u64, String)>,
+    },
+    /// Defines a typedef.
+    Alias {
+        /// The typedef's name.
+        name: String,
+        /// The type it stands for.
+        ty: TypeExpr,
+    },
+    /// Applies a type at a data global, which the decompiler then types
+    /// the variable it renders there by.
+    Apply {
+        /// The global's address.
+        at: u64,
+        /// The type.
+        ty: TypeExpr,
+    },
+    /// States a function's prototype.
+    Proto {
+        /// The function's entry.
+        entry: u64,
+        /// The prototype.
+        proto: Proto,
+    },
+    /// Names, and types when a type is stated, a variable of a function,
+    /// or a field of the class the function's object is of
+    /// ([`stated::plan_at`]).
+    Var {
+        /// The function's entry.
+        entry: u64,
+        /// The variable as the function's text shows it (`a1`,
+        /// `local_58`), or a name stated before.
+        var: String,
+        /// The offset `var` reads as when it spells an unnamed field as
+        /// the text prints one (`field_0x270`).
+        field: Option<u64>,
+        /// Its new name.
+        name: Option<String>,
+        /// Its type as C, when one is stated.
+        ty: Option<String>,
+    },
 }
 
 /// One thing a plan does, as facts a front end spells in its own words.
@@ -304,6 +372,26 @@ pub enum Line {
         /// The address.
         at: u64,
     },
+    /// Types are defined from C declarations.
+    Declared {
+        /// How many.
+        types: usize,
+        /// The ABI they are laid out by.
+        abi: &'static str,
+        /// One line per type and per thing read loosely
+        /// ([`cdecl::describe`]).
+        lines: Vec<String>,
+    },
+    /// A type, a field, a prototype or a variable is stated.
+    Stated {
+        /// What a dry run says it would do, after `would`.
+        would: String,
+        /// What was done.
+        done: String,
+    },
+    /// The types a stated prototype names that no user type and no C
+    /// type word borer knows spells, so each passes as a word.
+    Unknown(Vec<String>),
 }
 
 /// A list of edits checked and worked out over one overlay, ready to be
@@ -391,6 +479,7 @@ impl Draft {
         edit: &Edit,
         force: Force,
     ) -> Result<(), String> {
+        let word: u64 = if p.is_64 { 8 } else { 4 };
         match edit {
             Edit::Name { at, name } => self.name((p, a), *at, name, force),
             Edit::Comment { at, text } => {
@@ -398,7 +487,284 @@ impl Draft {
                 self.lines.push(Line::Commented { at: *at });
                 Ok(())
             }
+            Edit::Declare { text } => self.declare((p, a), text),
+            Edit::Fields {
+                name,
+                size,
+                fields,
+                mode,
+            } => {
+                let statement = Statement {
+                    name,
+                    size: *size,
+                    fields,
+                    mode: *mode,
+                };
+                let plan = stated::plan(p, a, &self.overlay, &statement)?;
+                stated::retyped(p, a, &self.overlay, plan.defined())?;
+                self.stated(plan);
+                Ok(())
+            }
+            Edit::Enum { name, size, values } => {
+                let ty = utypes::build_enum(name, *size, values).map_err(|e| e.to_string())?;
+                self.define((p, a), name, ty)
+            }
+            Edit::Alias { name, ty } => {
+                let ty = utypes::build_alias(name, ty, &self.overlay.types, word)
+                    .map_err(|e| e.to_string())?;
+                self.define((p, a), name, ty)
+            }
+            Edit::Apply { at, ty } => self.apply_at(a, *at, ty, word),
+            Edit::Proto { entry, proto } => self.prototype((p, a), *entry, proto),
+            Edit::Var {
+                entry,
+                var,
+                field,
+                name,
+                ty,
+            } => {
+                let named = (name.as_deref(), ty.as_deref());
+                self.var((p, a), *entry, (var, *field), named)
+            }
         }
+    }
+
+    /// Keeps a line saying what a statement would do and did.
+    ///
+    /// # Arguments
+    ///
+    /// * `would` - What a dry run says, after `would`.
+    /// * `done` - What was done.
+    fn said(&mut self, would: String, done: String) {
+        self.lines.push(Line::Stated { would, done });
+    }
+
+    /// Writes a statement of fields planned over the draft, and says what
+    /// it does.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The statement's plan ([`stated::plan`]).
+    fn stated(&mut self, plan: stated::Plan) {
+        self.said(plan.would(), plan.done());
+        let (key, new) = plan.write();
+        self.put(key, new);
+    }
+
+    /// Defines the types C declarations state.
+    ///
+    /// # Arguments
+    ///
+    /// * `(p, a)` - The program and its analysis.
+    /// * `text` - The declarations.
+    ///
+    /// # Errors
+    ///
+    /// When the text is refused (a construct the subset does not read, an
+    /// offset assertion that fails), or the types with the overlay's would
+    /// not validate or would leave a stated field standing no longer
+    /// ([`stated::standing`]).
+    fn declare(&mut self, (p, a): (&Program, &Analysis), text: &str) -> Result<(), String> {
+        let abi = cdecl::Abi::of(p);
+        let o = &self.overlay;
+        let declared = cdecl::parse(text, &o.types, abi).map_err(|e| e.to_string())?;
+        let mut types = BTreeMap::clone(&o.types);
+        for (name, ty, _) in &declared.types {
+            types.insert(name.clone(), ty.clone());
+        }
+        utypes::validate(&types, &o.applied).map_err(|e| e.to_string())?;
+        if declared
+            .types
+            .iter()
+            .any(|(name, ..)| o.types.contains_key(name))
+        {
+            stated::standing(p, a, o, &types)?;
+        }
+        self.lines.push(Line::Declared {
+            types: declared.types.len(),
+            abi: abi.name(),
+            lines: cdecl::describe(&declared),
+        });
+        for (name, ty, _) in declared.types {
+            self.put(Key::Type(name), Some(Value::Type(ty)));
+        }
+        Ok(())
+    }
+
+    /// Defines one type, checked as [`stated::retyped`] checks it.
+    ///
+    /// # Arguments
+    ///
+    /// * `(p, a)` - The program and its analysis.
+    /// * `name` - The type's name.
+    /// * `ty` - The type.
+    ///
+    /// # Errors
+    ///
+    /// When a field stated with the type it replaces would no longer
+    /// stand, or the types it leaves do not validate.
+    fn define(
+        &mut self,
+        (p, a): (&Program, &Analysis),
+        name: &str,
+        ty: UserType,
+    ) -> Result<(), String> {
+        stated::retyped(p, a, &self.overlay, Some((name, &ty)))?;
+        let described = ty.describe(name);
+        self.said(
+            format!("define {described}"),
+            format!("defined {described}"),
+        );
+        self.put(Key::Type(name.to_owned()), Some(Value::Type(ty)));
+        Ok(())
+    }
+
+    /// Applies a type at a data global.
+    ///
+    /// # Arguments
+    ///
+    /// * `a` - The analysis, for the classes a type may name.
+    /// * `at` - The global's address.
+    /// * `ty` - The type.
+    /// * `word` - The machine word in bytes.
+    ///
+    /// # Errors
+    ///
+    /// When the type sizes to nothing ([`stated::undefined`]), or the
+    /// overlay would apply more types than a project file holds.
+    fn apply_at(&mut self, a: &Analysis, at: u64, ty: &TypeExpr, word: u64) -> Result<(), String> {
+        let o = &self.overlay;
+        let width = utypes::width_of(&o.types, ty, word).ok_or_else(|| {
+            stated::undefined(Some(a), o, ty, "set_type(name=..., fields=[...]) first")
+        })?;
+        let count = o
+            .applied
+            .len()
+            .saturating_add(usize::from(!o.applied.contains_key(&at)));
+        project::room("applied types", count, utypes::APPLIED_MAX)?;
+        let renders = if utypes::named_enum(&o.types, ty).is_some() {
+            "names its values"
+        } else {
+            "names its fields"
+        };
+        let spelled = ty.spell();
+        self.said(
+            format!("apply {spelled} at {at:#x} ({width} byte(s)); decompile then {renders}"),
+            format!("applied {spelled} at {at:#x} ({width} byte(s)); decompile {renders}"),
+        );
+        self.put(Key::Applied(at), Some(Value::Applied(ty.clone())));
+        Ok(())
+    }
+
+    /// States a function's prototype, noting the types it names that pass
+    /// as a word.
+    ///
+    /// # Arguments
+    ///
+    /// * `(p, a)` - The program and its analysis.
+    /// * `entry` - The function's entry.
+    /// * `proto` - The prototype.
+    ///
+    /// # Errors
+    ///
+    /// When the overlay states as many prototypes as it holds.
+    fn prototype(
+        &mut self,
+        (p, a): (&Program, &Analysis),
+        entry: u64,
+        proto: &Proto,
+    ) -> Result<(), String> {
+        let o = &self.overlay;
+        if o.prototypes.len() >= protos::PROTOTYPES_MAX && !o.prototypes.contains_key(&entry) {
+            return Err(format!(
+                "the overlay states {} prototypes, the most it holds",
+                o.prototypes.len()
+            ));
+        }
+        let fname = name_of(a, o, entry);
+        let bits = if p.is_64 { 64 } else { 32 };
+        let unknown: Vec<String> = proto
+            .ret
+            .iter()
+            .chain(proto.params.iter().map(|q| &q.ty))
+            .filter(|t| t.pass(&o.types, bits, p.format).is_none())
+            .map(protos::CType::spell)
+            .collect();
+        let spelled = proto.spell();
+        self.said(
+            format!(
+                "state {fname} ({entry:#x}) as {spelled}; decompile then renders its signature, its body and every call to it by it"
+            ),
+            format!("stated {fname} ({entry:#x}) as {spelled}"),
+        );
+        if !unknown.is_empty() {
+            self.lines.push(Line::Unknown(unknown));
+        }
+        self.put(Key::Proto(entry), Some(Value::Proto(proto.clone())));
+        Ok(())
+    }
+
+    /// Names, and types when a type is stated, a variable of a function,
+    /// or the field of its class a `var` spelling an unnamed field names.
+    ///
+    /// # Arguments
+    ///
+    /// * `(p, a)` - The program and its analysis.
+    /// * `entry` - The function's entry.
+    /// * `(var, field)` - The variable, and the offset it reads as when it
+    ///   spells an unnamed field.
+    /// * `(name, ty)` - Its new name, and its type if one is stated.
+    ///
+    /// # Errors
+    ///
+    /// When the variable, the field or the name is refused, or the
+    /// function's text names no such variable.
+    fn var(
+        &mut self,
+        (p, a): (&Program, &Analysis),
+        entry: u64,
+        (var, field): (&str, Option<u64>),
+        (name, ty): (Option<&str>, Option<&str>),
+    ) -> Result<(), String> {
+        if let Some(off) = field.filter(|_| stated_key(&self.overlay, entry, var).is_none()) {
+            let name =
+                name.ok_or("naming a field needs `name`, its new name (`type` is optional)")?;
+            let ty = ty
+                .map(utypes::parse_type)
+                .transpose()
+                .map_err(|e| e.to_string())?;
+            let field = Field {
+                name: name.to_owned(),
+                ty,
+            };
+            let plan = stated::plan_at(p, a, &self.overlay, entry, off, field)?;
+            self.stated(plan);
+            return Ok(());
+        }
+        let (key, named) = plan_var(p, &self.overlay, entry, var, (name, ty))?;
+        let (stack, shadow, frame) = protos::slot_words(p, entry);
+        let spelled = key.spell(stack, shadow, frame);
+        let o = &self.overlay;
+        let fname = name_of(a, o, entry);
+        let held = o.vars.get(&entry);
+        if !held.is_some_and(|v| v.contains_key(&key))
+            && let Some(text) = decompile_named(p, a, o, entry)
+            && !names_word(&text, var)
+            && !names_word(&text, &spelled)
+        {
+            return Err(format!(
+                "{fname} has no variable {spelled}: its text never names it, so a type there would invent a parameter the code does not take; decompile it for the variables it has"
+            ));
+        }
+        let what = format!("{spelled} of {fname} ({entry:#x}) {}", named.spell());
+        let mut vars = held.cloned().unwrap_or_default();
+        vars.insert(key, named);
+        self.said(
+            format!("name {what}; decompile then renders it so"),
+            format!("named {what}"),
+        );
+        self.put(Key::Vars(entry), Some(Value::Vars(vars)));
+        Ok(())
     }
 
     /// Names the function `at` is in, or `at` itself when it is in none.
@@ -448,6 +814,102 @@ impl Draft {
         });
         Ok(())
     }
+}
+
+/// Tells whether `text` holds `word` as a whole identifier, not inside a
+/// longer one (`a1` is not in `a12` or `data1`).
+///
+/// # Arguments
+///
+/// * `text` - The text searched.
+/// * `word` - The identifier.
+fn names_word(text: &str, word: &str) -> bool {
+    let ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    !word.is_empty()
+        && text.match_indices(word).any(|(i, _)| {
+            !text[..i].chars().next_back().is_some_and(ident)
+                && !text[i + word.len()..].chars().next().is_some_and(ident)
+        })
+}
+
+/// Finds the variable of a function that a name was stated for: one a
+/// statement named before, else a parameter the function's prototype names.
+///
+/// # Arguments
+///
+/// * `o` - The overlay.
+/// * `entry` - The function.
+/// * `var` - The name.
+///
+/// # Returns
+///
+/// The variable, or `None` when nothing stated of the function gives it
+/// that name.
+fn stated_key(o: &Overlay, entry: u64, var: &str) -> Option<VarKey> {
+    o.vars
+        .get(&entry)
+        .and_then(|vs| vs.iter().find(|(_, v)| v.name == var).map(|(k, _)| *k))
+        .or_else(|| {
+            let params = &o.prototypes.get(&entry)?.params;
+            let i = params.iter().position(|q| q.name == var)?;
+            u8::try_from(i).ok().map(VarKey::Param)
+        })
+}
+
+/// Reads what a statement of a function's variable states: which variable
+/// `var` names, and the name and type it takes.
+///
+/// `var` is the name the text shows (`a1`, `local_58`, `arg_8`) or one
+/// stated before, the variable's or the prototype's parameter's. A slot's
+/// name is read by the distances the function's text numbers its slots by
+/// ([`protos::slot_words`]), so `arg_8` names the slot an arm64, ARM32 or
+/// RISC-V text calls `arg_10`.
+///
+/// # Arguments
+///
+/// * `p` - The loaded program, for the function's convention.
+/// * `o` - The overlay.
+/// * `entry` - The function.
+/// * `var` - The variable.
+/// * `(name, ty)` - Its new name, and its type if one is stated.
+///
+/// # Errors
+///
+/// When `var` names no parameter or slot, `name` is missing or refused,
+/// the type does not parse, another variable of the function already has
+/// the name, or the overlay holds as many variables as it can.
+fn plan_var(
+    p: &Program,
+    o: &Overlay,
+    entry: u64,
+    var: &str,
+    (name, ty): (Option<&str>, Option<&str>),
+) -> Result<(VarKey, Var), String> {
+    let (stack, shadow, frame) = protos::slot_words(p, entry);
+    let stated = o.vars.get(&entry);
+    let key = stated_key(o, entry, var).map_or_else(
+        || VarKey::parse(var, stack, frame).map_err(|e| e.to_string()),
+        Ok,
+    )?;
+    let name = name.ok_or("naming a variable needs `name`, its new name (`type` is optional)")?;
+    let decl = ty.map_or_else(|| name.to_owned(), |t| format!("{t} {name}"));
+    let var = Var::parse(&decl).map_err(|e| e.to_string())?;
+    if let Some((other, _)) =
+        stated.and_then(|vs| vs.iter().find(|(k, v)| v.name == var.name && **k != key))
+    {
+        return Err(format!(
+            "{} already names {} of this function",
+            var.name,
+            other.spell(stack, shadow, frame)
+        ));
+    }
+    let held: usize = o.vars.values().map(BTreeMap::len).sum();
+    if held >= protos::VARS_MAX && !stated.is_some_and(|vs| vs.contains_key(&key)) {
+        return Err(format!(
+            "the overlay states {held} variables, the most it holds"
+        ));
+    }
+    Ok((key, var))
 }
 
 /// Checks `edits` in order over `overlay`, each over what the ones before
