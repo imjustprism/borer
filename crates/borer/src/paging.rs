@@ -11,18 +11,10 @@
 use std::fmt::Write as _;
 use std::num::NonZeroUsize;
 
-use borer_engine::answer::Page;
 pub(crate) use borer_engine::answer::percent_decode;
-use borer_engine::table::{row_limit, row_offset};
+use borer_engine::answer::{LIMIT_SUFFIX, OFFSET_SUFFIX, Page, Suffixed};
 
-use crate::recall::{FRESH_SUFFIX, SINCE_SUFFIX, Tag};
-
-/// What a URI ends with, before a row count, to skip that many rows of a
-/// listing.
-pub(crate) const OFFSET_SUFFIX: &str = "!offset=";
-/// What a URI ends with, before a row count, to show at most that many
-/// rows of a listing.
-pub(crate) const LIMIT_SUFFIX: &str = "!limit=";
+use crate::recall::Tag;
 
 /// A resource URI with its suffixes read off.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,40 +46,13 @@ impl Asked {
     /// When a suffix is given twice, a row count is not one, or a tag is
     /// not one, each with the form it takes.
     pub(crate) fn read(uri: &str) -> Result<Asked, String> {
-        let twice = |name: &str| {
-            format!(
-                "{name} is given twice in {}; give it once",
-                borer_engine::text::one_line(uri)
-            )
-        };
-        let (mut rest, mut fresh) = (uri, false);
-        let (mut offset, mut limit, mut since) = (None, None, None);
-        while let Some(at) = rest.rfind('!') {
-            let (core, suffix) = rest.split_at(at);
-            if suffix == FRESH_SUFFIX {
-                fresh = true;
-            } else if let Some(tag) = suffix.strip_prefix(SINCE_SUFFIX) {
-                if since.replace(Tag::parse(tag)?).is_some() {
-                    return Err(twice(SINCE_SUFFIX));
-                }
-            } else if let Some(n) = suffix.strip_prefix(OFFSET_SUFFIX) {
-                if offset.replace(row_offset(n)?).is_some() {
-                    return Err(twice(OFFSET_SUFFIX));
-                }
-            } else if let Some(n) = suffix.strip_prefix(LIMIT_SUFFIX) {
-                if limit.replace(row_limit(n)?).is_some() {
-                    return Err(twice(LIMIT_SUFFIX));
-                }
-            } else {
-                break;
-            }
-            rest = core;
-        }
+        let read = Suffixed::read(uri)?;
+        let since = read.since.map(Tag::parse).transpose()?;
         Ok(Asked {
-            core: rest.to_owned(),
-            offset,
-            limit,
-            since: since.filter(|_| !fresh),
+            core: read.core.to_owned(),
+            offset: read.offset,
+            limit: read.limit.map(NonZeroUsize::get),
+            since: since.filter(|_| !read.fresh),
         })
     }
 
@@ -127,10 +92,7 @@ impl Asked {
     /// The URI the line naming the next page appends its offset to: the
     /// resource and the limit asked for.
     pub(crate) fn again(&self) -> String {
-        match self.limit {
-            Some(n) => format!("{}{LIMIT_SUFFIX}{n}", self.core),
-            None => self.core.clone(),
-        }
+        borer_engine::answer::again(&self.core, self.limit.and_then(NonZeroUsize::new))
     }
 
     /// The page asked, for a listing that pages itself

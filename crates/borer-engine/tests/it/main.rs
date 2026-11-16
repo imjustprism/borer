@@ -97,6 +97,7 @@ mod rv;
 mod rv_decompile;
 mod rv_emulate;
 mod rv_lift;
+mod script;
 mod search;
 mod session;
 mod shapes;

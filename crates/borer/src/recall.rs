@@ -30,12 +30,7 @@ const BUDGET_DEFAULT: usize = 72_000;
 /// The tool argument that passes back the tag of the answer the reader
 /// holds; the server takes it off before the tool sees its arguments.
 pub(crate) const SINCE_ARG: &str = "since";
-/// What a resource URI ends with, before a tag, to pass back the tag of the
-/// answer the reader holds.
-pub(crate) const SINCE_SUFFIX: &str = "!since=";
-/// The suffix of a resource URI that asks for the text whole, as a URI
-/// without a tag gets it.
-pub(crate) const FRESH_SUFFIX: &str = "!fresh";
+pub(crate) use borer_engine::answer::{FRESH_SUFFIX, SINCE_SUFFIX};
 
 /// The tag of an answer: the low 32 bits of its FNV-1a hash, printed as
 /// eight hex digits.

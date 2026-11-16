@@ -85,6 +85,129 @@ enum Paged {
     Itself,
 }
 
+/// What a URI ends with, before a row count, to skip that many rows of a
+/// listing.
+pub const OFFSET_SUFFIX: &str = "!offset=";
+
+/// What a URI ends with, before a row count, to show at most that many
+/// rows of a listing.
+pub const LIMIT_SUFFIX: &str = "!limit=";
+
+/// What a resource URI ends with, before a tag, to pass back the tag of the
+/// answer the reader holds.
+pub const SINCE_SUFFIX: &str = "!since=";
+
+/// The suffix of a resource URI that asks for the text whole, as a URI
+/// without a tag gets it.
+pub const FRESH_SUFFIX: &str = "!fresh";
+
+/// A resource URI with its suffixes read off its end, in any order.
+///
+/// A `!` inside the resource's own argument (a `borer://calls` filter
+/// `a2!=0`) stays where it is: only a trailing suffix naming one of these
+/// is read off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Suffixed<'a> {
+    /// The URI without any suffix: the resource and its argument.
+    pub core: &'a str,
+    /// Rows to skip, when `!offset=` asked.
+    pub offset: Option<usize>,
+    /// Most rows to show, when `!limit=` asked.
+    pub limit: Option<NonZeroUsize>,
+    /// The tag `!since=` passed back, as written; the front end that keeps
+    /// answers reads it.
+    pub since: Option<&'a str>,
+    /// Whether `!fresh` asked for the text whole.
+    pub fresh: bool,
+}
+
+impl<'a> Suffixed<'a> {
+    /// Reads a URI's suffixes off its end.
+    ///
+    /// # Arguments
+    ///
+    /// * `uri` - The URI as the reader sent it.
+    ///
+    /// # Errors
+    ///
+    /// When a suffix is given twice or a row count is not one, each with
+    /// the form it takes.
+    pub fn read(uri: &'a str) -> Result<Suffixed<'a>, String> {
+        let twice = |name: &str| {
+            format!(
+                "{name} is given twice in {}; give it once",
+                crate::text::one_line(uri)
+            )
+        };
+        let mut read = Suffixed {
+            core: uri,
+            offset: None,
+            limit: None,
+            since: None,
+            fresh: false,
+        };
+        while let Some(at) = read.core.rfind('!') {
+            let (core, suffix) = read.core.split_at(at);
+            if suffix == FRESH_SUFFIX {
+                read.fresh = true;
+            } else if let Some(tag) = suffix.strip_prefix(SINCE_SUFFIX) {
+                if read.since.replace(tag).is_some() {
+                    return Err(twice(SINCE_SUFFIX));
+                }
+            } else if let Some(n) = suffix.strip_prefix(OFFSET_SUFFIX) {
+                if read.offset.replace(crate::table::row_offset(n)?).is_some() {
+                    return Err(twice(OFFSET_SUFFIX));
+                }
+            } else if let Some(n) = suffix.strip_prefix(LIMIT_SUFFIX) {
+                let n = NonZeroUsize::new(crate::table::row_limit(n)?).unwrap_or(NonZeroUsize::MIN);
+                if read.limit.replace(n).is_some() {
+                    return Err(twice(LIMIT_SUFFIX));
+                }
+            } else {
+                break;
+            }
+            read.core = core;
+        }
+        Ok(read)
+    }
+
+    /// The URI the line naming the next page appends its offset to: the
+    /// resource and the limit asked for.
+    #[must_use]
+    pub fn again(&self) -> String {
+        again(self.core, self.limit)
+    }
+
+    /// The page asked.
+    ///
+    /// # Arguments
+    ///
+    /// * `again` - [`Suffixed::again`], for the line naming the next page.
+    #[must_use]
+    pub fn page<'b>(&self, again: &'b str) -> Page<'b> {
+        Page {
+            offset: self.offset,
+            limit: self.limit,
+            again,
+        }
+    }
+}
+
+/// Returns the URI the line naming a listing's next page appends its
+/// offset to: the resource and the limit asked for.
+///
+/// # Arguments
+///
+/// * `core` - The URI without its suffixes.
+/// * `limit` - The limit asked, if any.
+#[must_use]
+pub fn again(core: &str, limit: Option<NonZeroUsize>) -> String {
+    match limit {
+        Some(n) => format!("{core}{LIMIT_SUFFIX}{n}"),
+        None => core.to_owned(),
+    }
+}
+
 /// The page a reader asked of a listing: `!offset=<n>` and `!limit=<n>` on
 /// the URI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

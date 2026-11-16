@@ -419,8 +419,10 @@ impl Host {
         if let Some(answer) = &self.query {
             return answer(uri).map_err(Into::into);
         }
-        let page = crate::answer::Page::whole(uri);
-        crate::answer::read(&self.program, &self.analysis, &self.overlay, uri, page)
+        let asked = crate::answer::Suffixed::read(uri)?;
+        let again = asked.again();
+        let page = asked.page(&again);
+        crate::answer::read(&self.program, &self.analysis, &self.overlay, asked.core, page)
             .unwrap_or_else(|| {
                 Err(format!(
                     "query is not available here: {} is answered by the MCP server (its query and script tools), not by the engine alone",
