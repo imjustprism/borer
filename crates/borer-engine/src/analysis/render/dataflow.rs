@@ -1043,7 +1043,7 @@ pub fn why_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Result<S
         );
     }
     if let Some(c) = o.comments.get(&va) {
-        match c.trim_start().strip_prefix('?') {
+        match crate::analysis::edit::open_question(c) {
             Some(claim) => {
                 let _ = writeln!(
                     out,

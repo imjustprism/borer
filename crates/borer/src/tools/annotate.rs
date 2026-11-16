@@ -445,7 +445,7 @@ impl BorerServer {
         let (open, settled): (Vec<_>, Vec<_>) = o
             .comments
             .iter()
-            .partition(|(_, c)| c.trim_start().starts_with('?'));
+            .partition(|(_, c)| edit::open_question(c).is_some());
         let fields = o.fields.iter().flat_map(|(class, fields)| {
             fields.iter().map(move |(off, field)| {
                 let at = format!("{class}+{off:#x}");

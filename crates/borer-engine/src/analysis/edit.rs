@@ -1500,3 +1500,18 @@ pub fn revert(
         lines: draft.lines,
     })
 }
+
+/// Returns what an open question asks: a user's comment that opens with
+/// `?`, blanks before it ignored, is one.
+///
+/// # Arguments
+///
+/// * `comment` - The comment as the user wrote it.
+///
+/// # Returns
+///
+/// The text after the `?`, untrimmed; `None` for a finding.
+#[must_use]
+pub fn open_question(comment: &str) -> Option<&str> {
+    comment.trim_start().strip_prefix('?')
+}

@@ -2002,7 +2002,7 @@ impl BorerServer {
             let open = o
                 .comments
                 .values()
-                .filter(|c| c.trim_start().starts_with('?'))
+                .filter(|c| borer_engine::analysis::edit::open_question(c).is_some())
                 .count();
             let fields: usize = o.fields.values().map(std::collections::BTreeMap::len).sum();
             let empty = o.names.is_empty()
