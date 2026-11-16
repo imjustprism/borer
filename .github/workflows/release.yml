@@ -236,11 +236,11 @@ jobs:
 
   # The rolling preview, only by hand: the release and tag `dev-build` are
   # deleted and made again at the built commit, a pre-release that is never
-  # the latest, with whichever archives built.
+  # the latest, once every server and app archive has built.
   dev-build:
     name: dev build
     needs: [source, build, app]
-    if: ${{ !cancelled() && inputs.dev_build && needs.source.result == 'success' }}
+    if: ${{ inputs.dev_build }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
