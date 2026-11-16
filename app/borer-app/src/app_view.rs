@@ -22,6 +22,7 @@ use borer_engine::program::checked_metadata;
 use client::{Client, UserStore};
 use command_palette_hooks::CommandPaletteFilter;
 use db::kvp::KeyValueStore;
+use editor::Editor;
 use gpui::{
     App, AppContext as _, BorrowAppContext as _, Bounds, Entity, ExternalPaths, WeakEntity, Window,
     WindowBounds, WindowOptions, px, size,
@@ -174,8 +175,10 @@ pub fn init(cx: &mut App) -> anyhow::Result<Arc<AppState>> {
     Ok(app_state)
 }
 
-/// Applies the app's settings, keymap and command palette over Zed's, untrusts every folder,
-/// hides Zed's add folder action from the palette, and saves each window's layout on quit.
+/// Applies the app's settings, keymap and command palette over Zed's.
+///
+/// It also gives Zed's pickers their input, untrusts every folder, hides Zed's add folder
+/// action from the palette, and saves each window's layout on quit.
 ///
 /// # Arguments
 ///
@@ -189,6 +192,7 @@ pub fn configure(cx: &mut App) -> anyhow::Result<()> {
         store.set_user_settings(APP_SETTINGS, cx).result()
     })
     .context("loading the app's settings")?;
+    ui_input::ERASED_EDITOR_FACTORY.get_or_init(|| erased_editor);
     trusted_worktrees::init(DbTrustedPaths::default(), cx);
     crate::actions::bind_keys(cx)?;
     command_palette::init(cx);
@@ -196,6 +200,20 @@ pub fn configure(cx: &mut App) -> anyhow::Result<()> {
     CommandPaletteFilter::update_global(cx, |filter, _| filter.hide_action_types(&hidden));
     cx.on_app_quit(flush_on_quit).detach();
     Ok(())
+}
+
+/// Returns a Zed single-line editor behind `ui_input`'s erased editor.
+///
+/// Every Zed picker, the command palette's among them, is built on it; Zed sets the same
+/// factory in `editor::init`, which the app does not run.
+///
+/// # Arguments
+///
+/// * `window` - Window the editor is for.
+/// * `cx` - Application context.
+fn erased_editor(window: &mut Window, cx: &mut App) -> Arc<dyn ui_input::ErasedEditor> {
+    cx.new(|cx| Editor::single_line(window, cx))
+        .update(cx, |editor, cx| editor.erased(cx))
 }
 
 /// Returns the flush of every app window's pending layout to Zed's database, as Zed's own
@@ -393,6 +411,7 @@ mod tests {
 
     use borer_engine::analysis::render::{FunctionOrder, function_rows};
     use borer_engine::view::Ref;
+    use command_palette::CommandPalette;
     use command_palette_hooks::CommandPaletteFilter;
     use gpui::{
         Entity, ExternalPaths, FileDropEvent, TestAppContext, VisualTestContext, point, px, size,
@@ -594,23 +613,24 @@ mod tests {
         }
     }
 
-    /// Zed's open, open files and reload are offered nowhere, and its add folder action is
-    /// hidden from the palette.
+    /// Zed's command palette opens over the app, and what it lists holds every `borer`
+    /// action but not Zed's open, open files or reload, which are offered nowhere, nor its
+    /// add folder action, which is hidden.
     ///
     /// # Panics
     ///
-    /// Panics if the palette would list one of them.
+    /// Panics if the palette does not open, misses a `borer` action or lists a Zed opener.
     #[gpui::test]
-    fn zed_open_actions_are_not_offered(cx: &mut TestAppContext) {
-        zed_open_actions_are_not_offered_steps(cx);
+    fn the_palette_opens_with_the_app_actions_and_no_zed_opener(cx: &mut TestAppContext) {
+        the_palette_opens_with_the_app_actions_and_no_zed_opener_steps(cx);
     }
 
-    /// Runs the steps of [`zed_open_actions_are_not_offered`].
+    /// Runs the steps of [`the_palette_opens_with_the_app_actions_and_no_zed_opener`].
     ///
     /// # Panics
     ///
-    /// Panics when a step goes wrong, as [`zed_open_actions_are_not_offered`] says.
-    fn zed_open_actions_are_not_offered_steps(cx: &mut TestAppContext) {
+    /// Panics when a step goes wrong, as [`the_palette_opens_with_the_app_actions_and_no_zed_opener`] says.
+    fn the_palette_opens_with_the_app_actions_and_no_zed_opener_steps(cx: &mut TestAppContext) {
         let app_state = init(cx);
         let (workspace, cx) = open(&app_state, cx);
         workspace.update_in(cx, |workspace, window, cx| {
@@ -637,6 +657,25 @@ mod tests {
                 "{name} is offered"
             );
         }
+        for name in [
+            "borer::Open",
+            "borer::FocusFilter",
+            "borer::ToggleFunctions",
+        ] {
+            assert!(
+                offered.iter().any(|offered| offered == name),
+                "{name} is missing"
+            );
+        }
+        let toggle = cx
+            .update(|_, cx| cx.build_action("command_palette::Toggle", None))
+            .unwrap();
+        cx.update(|window, cx| window.dispatch_action(toggle, cx));
+        cx.run_until_parked();
+        let opened = workspace.read_with(cx, |workspace, cx| {
+            workspace.active_modal::<CommandPalette>(cx).is_some()
+        });
+        assert!(opened);
     }
 
     /// A folder whose settings start a context server, dropped on a pane holding only the

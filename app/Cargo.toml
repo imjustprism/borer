@@ -42,6 +42,7 @@ settings = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae
 theme = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 theme_settings = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 ui = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
+ui_input = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 # Embeds Zed's settings, keymaps and assets in debug and test builds too, which otherwise
 # read them from a Zed checkout at run time and find none in this repository.
 util = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288", features = ["debug-embed"] }
