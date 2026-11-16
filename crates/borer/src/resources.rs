@@ -1316,14 +1316,15 @@ mod tests {
     }
 
     /// Every resource the engine answers reads the same through the server
-    /// as from the engine, refusals included.
+    /// as from the engine, refusals included, and a script with no front
+    /// end reads what the server answers.
     ///
     /// Only the `# since` and `# evidence` lines the server adds differ: the
     /// server holds no answer of its own for them, so a script or the app
-    /// reading the engine shows what an agent reads.
-    ///
-    /// Each URI is a fixed resource or a template's example over a small
-    /// function, and every resource the engine answers is among them.
+    /// reading the engine shows what an agent reads. Each URI is a fixed
+    /// resource or a template's example, read on a small function and on
+    /// a program whose architecture borer does not disassemble, and every
+    /// resource the engine answers is among them.
     ///
     /// # Panics
     ///
@@ -1331,15 +1332,39 @@ mod tests {
     /// answers is reached by no URI.
     #[test]
     fn the_server_answers_what_the_engine_answers() {
-        let server = crate::testing::code_server(
-            Arch::X86_64,
-            &[
-                0x8b, 0x41, 0x10, // ASM: mov eax, [rcx+0x10]
-                0xc3, // ASM: ret
-            ],
-        );
+        let code = [
+            0x8b, 0x41, 0x10, // ASM: mov eax, [rcx+0x10]
+            0xc3, // ASM: ret
+        ];
+        let mut reached = std::collections::BTreeSet::new();
+        for arch in [Arch::X86_64, Arch::Unknown] {
+            reached.extend(engine_answers_agree(&crate::testing::code_server(
+                arch, &code,
+            )));
+        }
+        for name in borer_engine::answer::names() {
+            assert!(reached.contains(name), "no URI reaches borer://{name}");
+        }
+    }
+
+    /// Reads every fixed resource and template example the engine answers
+    /// through the server, the engine and a script with no front end, and
+    /// holds them to one text.
+    ///
+    /// # Arguments
+    ///
+    /// * `server` - A server with a program loaded.
+    ///
+    /// # Returns
+    ///
+    /// The names of the resources read.
+    ///
+    /// # Panics
+    ///
+    /// When two of them differ.
+    fn engine_answers_agree(server: &BorerServer) -> Vec<String> {
         let program = server.loaded().expect("a program is loaded");
-        let analysis = server.ensure_analysis().expect("analyzed");
+        let analysis = server.ensure_analysis().ok();
         let overlay = server.overlay();
         let mark = |text: &str| {
             text.lines()
@@ -1356,7 +1381,7 @@ mod tests {
                 .iter()
                 .map(|t| super::example(t.2, Some(&program))),
         );
-        let mut reached = std::collections::BTreeSet::new();
+        let mut reached = Vec::new();
         for uri in uris {
             let Some((name, arg)) = borer_engine::answer::split(&uri) else {
                 continue;
@@ -1364,10 +1389,10 @@ mod tests {
             if borer_engine::answer::need(name, arg.as_deref()).is_none() {
                 continue;
             }
-            reached.insert(name.to_owned());
+            reached.push(name.to_owned());
             let page = borer_engine::answer::Page::whole(&uri);
             let engine =
-                borer_engine::answer::read(&program, Some(&analysis), &overlay, &uri, page)
+                borer_engine::answer::read(&program, analysis.as_deref(), &overlay, &uri, page)
                     .expect("the engine answers it")
                     .map(|text| mark(&text));
             let served = server
@@ -1375,10 +1400,22 @@ mod tests {
                 .map(|(_, text)| mark(&text))
                 .map_err(|e| e.message.into_owned());
             assert_eq!(served, engine, "{uri}");
+            if let Some(a) = &analysis {
+                let ran = borer_engine::script::run_with(
+                    Arc::clone(&program),
+                    Arc::clone(a),
+                    Arc::new(overlay.clone()),
+                    &format!(r#"print(query("{uri}"));"#),
+                    &[],
+                    None,
+                );
+                match &served {
+                    Ok(text) => assert_eq!(ran.output.join("\n"), *text, "{uri}"),
+                    Err(_) => assert!(ran.error.is_some(), "{uri}"),
+                }
+            }
         }
-        for name in borer_engine::answer::names() {
-            assert!(reached.contains(name), "no URI reaches borer://{name}");
-        }
+        reached
     }
 
     /// A program whose architecture borer does not disassemble answers its
