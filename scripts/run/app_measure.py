@@ -17,8 +17,9 @@ spike:
    `SendInput` and including Windows input-queue delay).
 
 During every measured run a background `iphlpapi` watcher polls IPv4/IPv6 TCP
-and UDP owner-PID tables (`GetExtendedTcpTable` / `GetExtendedUdpTable`) while
-confirming each phase's process is observed alive, recording any socket opened.
+and UDP owner-PID tables (`GetExtendedTcpTable` / `GetExtendedUdpTable`) and the
+process table (`CreateToolhelp32Snapshot`) while confirming each phase's process
+is observed alive, recording any socket opened and any child process started.
 """
 
 from __future__ import annotations
@@ -676,6 +677,46 @@ def _query_process_sockets(pid: int) -> tuple[list[dict[str, Any]], list[dict[st
     return tcp, udp
 
 
+_TH32CS_SNAPPROCESS = 0x00000002
+_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+
+class PROCESSENTRY32W(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wt.DWORD),
+        ("cntUsage", wt.DWORD),
+        ("th32ProcessID", wt.DWORD),
+        ("th32DefaultHeapID", ctypes.c_size_t),
+        ("th32ModuleID", wt.DWORD),
+        ("cntThreads", wt.DWORD),
+        ("th32ParentProcessID", wt.DWORD),
+        ("pcPriClassBase", wt.LONG),
+        ("dwFlags", wt.DWORD),
+        ("szExeFile", wt.WCHAR * 260),
+    ]
+
+
+def _query_child_processes(pid: int) -> list[dict[str, Any]]:
+    """Return every live process whose parent is `pid`, from a Toolhelp snapshot."""
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+    snap = kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
+    if snap is None or snap == _INVALID_HANDLE_VALUE:
+        raise OSError(f"CreateToolhelp32Snapshot failed with Win32 error {ctypes.GetLastError()}")
+    children: list[dict[str, Any]] = []
+    try:
+        entry = PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        ok = kernel32.Process32FirstW(ctypes.c_void_p(snap), ctypes.byref(entry))
+        while ok:
+            if entry.th32ParentProcessID == pid and entry.th32ProcessID != pid:
+                children.append({"pid": int(entry.th32ProcessID), "exe": entry.szExeFile})
+            ok = kernel32.Process32NextW(ctypes.c_void_p(snap), ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(ctypes.c_void_p(snap))
+    return children
+
+
 class NetWatcher:
     """Sub-millisecond `iphlpapi` socket-table poller tracking live phase coverage."""
 
@@ -684,6 +725,7 @@ class NetWatcher:
         self._closed = threading.Event()
         self._live_phases: set[str] = set()
         self.events: list[dict[str, Any]] = []
+        self.children: list[dict[str, Any]] = []
         self.polls = 0
         self.error: str | None = None
         self.unmonitored_phases: list[str] = []
@@ -708,8 +750,9 @@ class NetWatcher:
                 return False
             try:
                 tcp, udp = _query_process_sockets(proc.pid)
+                children = _query_child_processes(proc.pid)
             except Exception as exc:
-                self._record_failure(phase, f"iphlpapi socket query failed ({exc})")
+                self._record_failure(phase, f"socket or process query failed ({exc})")
                 return False
             still_alive = proc.poll() is None
             self.polls += 1
@@ -717,6 +760,8 @@ class NetWatcher:
                 self.events.append({"phase": phase, "proto": "tcp", **conn})
             for ep in udp:
                 self.events.append({"phase": phase, "proto": "udp", **ep})
+            for child in children:
+                self.children.append({"phase": phase, **child})
             if still_alive:
                 self._live_phases.add(phase)
             return still_alive
@@ -1022,6 +1067,7 @@ def _build_report(
             "error": watcher.error,
             "unmonitored_phases": watcher.unmonitored_phases,
         },
+        "child_processes": watcher.children,
     }
     if not verified:
         report["input_latency_fallback"] = input_lat
@@ -1044,6 +1090,8 @@ def _collect_bar_failures(
         failures.append(f"unmonitored phases: {watcher.unmonitored_phases}")
     if watcher.events:
         failures.append(f"unexpected network sockets opened ({len(watcher.events)})")
+    if watcher.children:
+        failures.append(f"unexpected child processes started ({len(watcher.children)})")
     if float(first_frame.get("median_ms", 9999.0)) > 300.0:
         failures.append(
             f"first-frame median {first_frame.get('median_ms')} ms exceeds 300.0 ms bar"
