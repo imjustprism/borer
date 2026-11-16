@@ -554,13 +554,7 @@ impl BorerServer {
     ) -> Result<String, ErrorData> {
         let program = self.require_loaded()?;
         let pf = borer::project::ProjectFile::load(&path).map_err(err_params)?;
-        let analysis = || {
-            if pf.fields.is_empty() {
-                self.analysis_held()
-            } else {
-                self.analysis_or_empty()
-            }
-        };
+        let analysis = || self.analysis_or_empty();
         let Admitted { plan, edit, said } = guarded(|| {
             let overlay = self.overlay_plain();
             project::admit(&program, analysis, &overlay, &pf, force.unwrap_or(false))
@@ -900,6 +894,34 @@ mod tests {
             refused.contains("another path as text") && refused.contains("save_project"),
             "{refused}"
         );
+    }
+
+    /// A project whose classes state no field loads without analyzing the
+    /// binary: only fields to hold to the code need its analysis.
+    ///
+    /// # Panics
+    ///
+    /// When the project does not load or the analysis was computed.
+    #[test]
+    fn a_project_stating_no_field_computes_no_analysis() {
+        use crate::params::LoadProjectParams;
+        use rmcp::handler::server::wrapper::Parameters;
+        let server = crate::testing::raw_server();
+        let dir = std::env::temp_dir().join(format!("borer-no-fields-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        let path = dir.join("empty.json");
+        std::fs::write(
+            &path,
+            r#"{"program":"","names":{},"comments":{},"fields":{"C":{}}}"#,
+        )
+        .expect("the project is written");
+        let said = server.load_project(Parameters(LoadProjectParams {
+            path: path.display().to_string(),
+            force: None,
+        }));
+        std::fs::remove_dir_all(&dir).expect("cleans up");
+        assert!(said.expect("loads").starts_with("loaded 0 names"));
+        assert!(super::read_lock(&server.analysis).is_none());
     }
 
     /// `load_binary` ends by naming the call that answers a whole triage,

@@ -1088,8 +1088,10 @@ pub struct Admitted {
 ///
 /// * `program` - The loaded binary.
 /// * `analysis` - Hands over its analysis, which the stated fields are
-///   held to; called once, only for a file this binary admits, so a caller
-///   that has not computed it yet need not for a refused file.
+///   held to; called once, only for a file this binary admits that states
+///   fields of a class, so a caller that has not computed it yet need not
+///   for any other. The plan reads no code: a project's edit only puts
+///   entries in place.
 /// * `overlay` - The overlay the plan replaces.
 /// * `file` - The project file.
 /// * `force` - Whether a project saved for another binary is admitted.
@@ -1132,7 +1134,6 @@ pub fn admit(
     let placed = left_out.len();
     let room = LEFT_OUT_SHOWN.saturating_sub(placed);
     let skipped = placed.saturating_add(settable::keep_settable(&mut loaded, room, &mut left_out));
-    let analysis = analysis();
     let mut unsettled = super::stated::Unsettled::default();
     if !loaded.fields.is_empty() {
         let tabled = Overlay {
@@ -1140,7 +1141,7 @@ pub fn admit(
             ..loaded.clone()
         };
         unsettled =
-            super::stated::settled(program, &analysis, &tabled).map_err(anyhow::Error::msg)?;
+            super::stated::settled(program, &analysis(), &tabled).map_err(anyhow::Error::msg)?;
     }
     let gone = unsettled.leave_out(&mut loaded);
     let stated = stated_counts(
@@ -1176,7 +1177,7 @@ pub fn admit(
     let put = Edit::Project(Box::new(loaded));
     let plan = edit::plan(
         program,
-        &analysis,
+        &Analysis::default(),
         overlay,
         std::slice::from_ref(&put),
         Force::Refuse,

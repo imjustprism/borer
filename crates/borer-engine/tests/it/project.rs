@@ -6,6 +6,7 @@
     reason = "assertions are the point of a test"
 )]
 
+use std::cell::Cell;
 use std::sync::Arc;
 
 use borer_engine::analysis::edit::commit;
@@ -123,4 +124,21 @@ fn another_builds_project_is_admitted_only_when_forced() {
     );
     let mut overlay = Overlay::default();
     commit(&program, &Analysis::default(), &mut overlay, &forced.plan).expect("it commits");
+}
+
+/// A file whose classes state no field is admitted without the analysis:
+/// only fields to hold to the code need it.
+#[test]
+fn a_file_stating_no_field_never_asks_for_the_analysis() {
+    let program = at_a(vec![0xc3; 64]);
+    let file =
+        Project::from_json(br#"{"program":"a.exe","names":{},"comments":{},"fields":{"C":{}}}"#)
+            .expect("the file reads");
+    let asked = Cell::new(false);
+    let analysis = || {
+        asked.set(true);
+        Arc::new(Analysis::default())
+    };
+    admit(&program, analysis, &Overlay::default(), &file, false).expect("admitted");
+    assert!(!asked.get(), "the analysis was asked for");
 }
