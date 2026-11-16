@@ -19,7 +19,7 @@ use super::{
     BARE_RETURN, CONTRADICTED, DISAGREE_SHOWN, Disagreement, OUTSIDE_FLOAT, OVER_BUDGET, Replay,
     Replayed, SHORT_CALL, TRIALS, edge, effects_of, replay_effects,
 };
-use crate::analysis::decompile::{arch, decompile_with};
+use crate::analysis::decompile::{Kept, arch, decompile_with};
 use crate::analysis::{Analysis, Overlay};
 use crate::cancel::Cancel;
 use crate::isa::Isa;
@@ -403,7 +403,7 @@ fn recheck_in<L: Replay>(
     sampling: Sampling,
 ) -> Option<BlockCheck> {
     let f = analysis.function(entry)?;
-    let d = decompile_with(program, analysis, overlay, entry, true, &[], true)?;
+    let d = decompile_with(program, analysis, overlay, entry, true, &[], Kept::WITNESS)?;
     let w = d.take_witness()?;
     let template = L::rig(program, analysis)?;
     let effects = effects_of(&d, f);

@@ -754,7 +754,7 @@ fn defined_body(
     let d = decompiled_cached(program, analysis, overlay, overlay.fingerprint(), entry);
     let text = tables::inline_tables(
         &polish_at(
-            &d.as_ref().as_ref()?.text,
+            Traced::new(d.as_ref().as_ref()?.text.clone(), None),
             overlay.passes,
             program,
             analysis,

@@ -67,6 +67,7 @@ mod loops;
 mod masks;
 mod mir;
 mod opaque;
+mod origin;
 mod outline;
 mod panics;
 mod params;
@@ -102,7 +103,9 @@ mod virtuals;
 mod warn;
 mod wire;
 
-pub use answer::{Detail, answer, answer_header, shown, warnings, with_header};
+pub use answer::{
+    Detail, answer, answer_header, answer_with_origins, shown, warnings, with_header,
+};
 use arch::Lifter;
 pub use asserts::*;
 pub use checked::{checked_header, decompile_checked_all, text_check};
@@ -116,6 +119,9 @@ pub(crate) use literal::empty_literal_at;
 pub use literal::literal_at;
 pub(in crate::analysis) use liveness::*;
 use masks::*;
+pub(crate) use origin::Kept;
+use origin::Traced;
+pub use origin::{Origins, Spelled};
 pub use outline::*;
 use params::*;
 pub use passes::{Pass, Passes};
@@ -195,6 +201,9 @@ struct Ctx<'a> {
     conv: &'static Conv,
     /// Registers a scenario fixes to constants at the function's entry.
     assume: Vec<(Register, u64)>,
+    /// Which block spells each statement the emission lifts, kept only for
+    /// a traced decompile ([`Kept::ORIGINS`]).
+    spelled: Option<Spelled>,
     /// Never write a value out: every register's value stays an expression
     /// over the block's entry state, for [`verify`] to evaluate.
     symbolic_only: bool,
@@ -480,6 +489,12 @@ pub struct Swept {
     pub settle: Settle,
     /// The text [`decompile_named_all`] renders; `None` where it renders none.
     pub named: Option<String>,
+    /// The block each line of [`Swept::named`] stands for; `None` where it
+    /// renders none.
+    pub origins: Option<Origins>,
+    /// Which block spells each statement the emission lifted, the record
+    /// [`Swept::origins`] are seeded from.
+    pub spelled: Spelled,
     /// The text with its fields named, before the finishing passes, and the
     /// graph its structurer was handed, which [`traces::check`] holds the
     /// text to; `None` where naming the fields fails.
@@ -511,20 +526,19 @@ pub fn decompile_swept_all(
     entries: &[u64],
 ) -> Vec<Option<Swept>> {
     render_all(program, analysis, overlay, entries, |p, a, o, e| {
-        let d = decompile_plain_full(p, a, o, e)?;
-        let text = finished(&d.text, p, a, o, e);
-        let fields = name_fields(p, a, o, e, &d.text);
-        let named = fields.as_ref().map(|f| {
-            if *f == d.text {
-                text.clone()
-            } else {
-                finished(f, p, a, o, e)
-            }
+        let d = decompile_with(p, a, o, e, true, &[], Kept::ORIGINS.and(Kept::SPELLED))?;
+        let text = finished_traced(d.traced(), p, a, o, e);
+        let named = named_from(p, a, o, e, (d.text.as_str(), d.origins.as_ref()), || {
+            Some(text.clone())
         });
+        let (fields, named) = named.unzip();
+        let named = named.flatten();
         Some(Swept {
-            text,
+            text: text.into_text(),
             settle: d.settle,
-            named,
+            origins: named.as_ref().and_then(|n| n.origins().cloned()),
+            named: named.map(Traced::into_text),
+            spelled: d.spelled.unwrap_or_default(),
             fields: fields.map(|f| (f, d.live)),
         })
     })
@@ -676,20 +690,7 @@ pub fn decompile(
     overlay: &Overlay,
     entry: u64,
 ) -> Option<String> {
-    let names = overlay.fingerprint();
-    let memo = analysis.derived.get_or_build_item(
-        "layout_text",
-        names,
-        entry,
-        || {
-            decompiled_cached(program, analysis, overlay, names, entry)
-                .as_ref()
-                .as_ref()
-                .map(|d| finished(&d.text, program, analysis, overlay, entry))
-        },
-        |text| text.as_ref().map_or(0, String::capacity),
-    );
-    memo.as_ref().clone()
+    laid_out(program, analysis, overlay, entry).as_ref().clone()
 }
 
 /// [`decompile`] built afresh, for a batch ([`decompile_all`]).
@@ -802,6 +803,7 @@ fn new_ctx<'a>(
         overlay_key: overlay.fingerprint(),
         bitness,
         conv,
+        spelled: None,
         assume: assume
             .iter()
             .filter_map(|&(slot, v)| Some((*conv.args.get(usize::from(slot))?, v)))
@@ -930,11 +932,11 @@ pub(crate) fn decompile_plain_full(
     overlay: &Overlay,
     entry: u64,
 ) -> Option<Decompiled> {
-    decompile_with(program, analysis, overlay, entry, true, &[], false)
+    decompile_with(program, analysis, overlay, entry, true, &[], Kept::NOTHING)
 }
 
 /// [`decompile_plain_full`] with the lifter's witness kept, for the check
-/// of an answer ([`crate::analysis::decompiled_witnessed`]).
+/// of an answer ([`crate::analysis::decompiled_kept`]).
 ///
 /// # Arguments
 ///
@@ -948,7 +950,7 @@ pub(crate) fn decompile_witnessed(
     overlay: &Overlay,
     entry: u64,
 ) -> Option<Decompiled> {
-    decompile_with(program, analysis, overlay, entry, true, &[], true)
+    decompile_with(program, analysis, overlay, entry, true, &[], Kept::WITNESS)
 }
 
 /// Decompiles like [`decompile`] and renders the fields of class-typed
@@ -981,22 +983,7 @@ pub fn decompile_named(
     overlay: &Overlay,
     entry: u64,
 ) -> Option<String> {
-    let names = overlay.fingerprint();
-    let memo = analysis.derived.get_or_build_item(
-        "named_text",
-        names,
-        entry,
-        || {
-            let text = plain_text_cached(program, analysis, overlay, names, entry)?;
-            let out = name_fields(program, analysis, overlay, entry, &text)?;
-            if out == text {
-                return decompile(program, analysis, overlay, entry);
-            }
-            Some(finished(&out, program, analysis, overlay, entry))
-        },
-        |text| text.as_ref().map_or(0, String::capacity),
-    );
-    memo.as_ref().clone()
+    named(program, analysis, overlay, entry).as_ref().clone()
 }
 
 /// Returns the choice points the lift met in a function besides the text
@@ -1231,6 +1218,13 @@ fn name_fields(
 pub(crate) struct Decompiled {
     /// The pseudo-C text.
     pub(crate) text: String,
+    /// The block each line of the text stands for; `None` unless the
+    /// decompile was traced ([`Kept::ORIGINS`]).
+    origins: Option<Origins>,
+    /// Which block spells each statement the emission lifted; `None` unless
+    /// the decompile was asked to keep it ([`Kept::SPELLED`]), which only a
+    /// sweep does, so no shared decompilation holds it.
+    spelled: Option<Spelled>,
     /// The function's virtual calls that resolved, sorted.
     pub(crate) virtual_calls: Vec<VirtualCall>,
     /// Basic blocks in the function.
@@ -1267,9 +1261,15 @@ impl Decompiled {
     /// soon as the decompilation is built.
     pub(crate) fn bytes(&self) -> usize {
         self.text.capacity()
+            + self.origins.as_ref().map_or(0, Origins::bytes)
             + self.virtual_calls.capacity() * size_of::<VirtualCall>()
             + self.live.bytes()
             + self.effects.bytes()
+    }
+
+    /// Returns the text, and the origins of its lines.
+    fn traced(&self) -> Traced {
+        Traced::new(self.text.clone(), self.origins.clone())
     }
 
     /// Returns the decompilation of a function the caller's cancel flag
@@ -1312,7 +1312,7 @@ pub fn decompile_raw(
     overlay: &Overlay,
     entry: u64,
 ) -> Option<String> {
-    decompile_with(program, analysis, overlay, entry, false, &[], false).map(|d| d.text)
+    decompile_with(program, analysis, overlay, entry, false, &[], Kept::NOTHING).map(|d| d.text)
 }
 
 /// Runs the decompiler pipeline for one function.
@@ -1344,23 +1344,23 @@ pub fn decompile_raw(
 /// * `entry` - The function's entry address.
 /// * `cleanup` - Run [`cleanup_text`] on the body.
 /// * `assume` - Parameter slots a scenario fixes, and their values.
-/// * `witness` - Keep what the lifter knew about each block beside the
-///   text, for [`replay`].
+/// * `kept` - What to keep beside the text ([`Kept`]): the lifter's witness
+///   for [`replay`], the block each line stands for, or both.
 ///
 /// # Returns
 ///
 /// The decompilation, or `None` when there is no such function or no lifter.
-fn decompile_with(
+pub(crate) fn decompile_with(
     program: &Program,
     analysis: &Analysis,
     overlay: &Overlay,
     entry: u64,
     cleanup: bool,
     assume: &[(u8, u64)],
-    witness: bool,
+    kept: Kept,
 ) -> Option<Decompiled> {
     let run = (program, analysis, overlay, entry);
-    stack::roomy(|| decompile_in_run(run, cleanup, assume, witness))
+    stack::roomy(|| decompile_in_run(run, cleanup, assume, kept))
 }
 
 /// [`decompile_with`] past the stack choice: pick the instruction set's
@@ -1372,8 +1372,8 @@ fn decompile_with(
 ///   comments, and the function's entry address.
 /// * `cleanup` - Run [`cleanup_text`] on the body.
 /// * `assume` - Parameter slots a scenario fixes, and their values.
-/// * `witness` - Keep what the lifter knew about each block beside the
-///   text, for [`replay`].
+/// * `kept` - What to keep beside the text: the lifter's witness for
+///   [`replay`], or the block each line stands for.
 ///
 /// # Returns
 ///
@@ -1384,18 +1384,18 @@ fn decompile_in_run(
     run: (&Program, &Analysis, &Overlay, u64),
     cleanup: bool,
     assume: &[(u8, u64)],
-    witness: bool,
+    kept: Kept,
 ) -> Option<Decompiled> {
     if crate::cancel::Cancel::raised() {
         return run.1.function(run.3).map(|_| Decompiled::stopped(run.3));
     }
     let done = match run.0.arch.isa()? {
         crate::isa::Isa::X86 { bits } => {
-            decompile_in::<arch::X86>(run, bits, cleanup, assume, witness)
+            decompile_in::<arch::X86>(run, bits, cleanup, assume, kept)
         }
-        crate::isa::Isa::A64 => decompile_in::<arch::A64>(run, 64, cleanup, assume, witness),
-        crate::isa::Isa::A32 => decompile_in::<arch::A32>(run, 32, cleanup, assume, witness),
-        crate::isa::Isa::Rv(x) => decompile_in::<arch::Rv>(run, x.bits(), cleanup, assume, witness),
+        crate::isa::Isa::A64 => decompile_in::<arch::A64>(run, 64, cleanup, assume, kept),
+        crate::isa::Isa::A32 => decompile_in::<arch::A32>(run, 32, cleanup, assume, kept),
+        crate::isa::Isa::Rv(x) => decompile_in::<arch::Rv>(run, x.bits(), cleanup, assume, kept),
     };
     if crate::cancel::Cancel::raised() {
         return done.map(|_| Decompiled::stopped(run.3));
@@ -1412,8 +1412,7 @@ fn decompile_in_run(
 /// * `bitness` - The register width in bits: 32 or 64.
 /// * `cleanup` - Run [`cleanup_text`] on the body.
 /// * `assume` - Parameter slots a scenario fixes, and their values.
-/// * `witness` - Keep what the lifter knew about each block beside the
-///   text, for [`replay`].
+/// * `kept` - What to keep beside the text ([`Kept`]).
 ///
 /// # Returns
 ///
@@ -1423,7 +1422,7 @@ fn decompile_in<L: Lifter>(
     bitness: u32,
     cleanup: bool,
     assume: &[(u8, u64)],
-    witness: bool,
+    kept: Kept,
 ) -> Option<Decompiled> {
     let (program, analysis, overlay, entry) = run;
     let mut lap = crate::timing::Lap::new();
@@ -1460,6 +1459,7 @@ fn decompile_in<L: Lifter>(
         idx.keys().copied().collect(),
         assume,
     );
+    ctx.spelled = kept.has(Kept::ORIGINS).then(Spelled::new);
     let code = L::decode_blocks(&ctx, f);
     let twins = twin_tests::<L>(&code, &preds);
     for (&d, &o) in &twins {
@@ -1727,17 +1727,18 @@ fn decompile_in<L: Lifter>(
         follow = trailing_goto(&body[at..]).and_then(|va| st.index_of(va));
     }
     let skip = overlay.passes;
-    let body = cir::fold(&body, &plan.regions, st.ends(&ctx, cleanup, skip).as_ref());
-    let body = if skip.runs(Pass::DropReturnedValues)
-        && f.returns_value == Some(false)
-        && f.signature.is_none()
-        && ctx.stated.is_none()
-        && !ctx.ret_sse
-    {
-        drop_returned_values(&body)
-    } else {
-        body
-    };
+    let ends = st.ends(&ctx, cleanup, skip);
+    let spelled = ctx.spelled.take();
+    let body = Traced::seeded(body, spelled.as_ref());
+    let body = body.map(|b| cir::fold(b, &plan.regions, ends.as_ref()));
+    let body = body.map_if(
+        skip.runs(Pass::DropReturnedValues)
+            && f.returns_value == Some(false)
+            && f.signature.is_none()
+            && ctx.stated.is_none()
+            && !ctx.ret_sse,
+        drop_returned_values,
+    );
     let returns_nothing = match stated_returns {
         Some(r) => r == lift::Returns::Nothing,
         None => f.signature.as_ref().map_or_else(
@@ -1753,26 +1754,24 @@ fn decompile_in<L: Lifter>(
     let live_out = ctx.ret_rdx || (bitness == 32 && f.hands_back_rdx);
     lap.end(crate::timing::Step::Structure);
     let (body, settle) = if cleanup {
-        cleanup_settled(&body, live_out.then_some(second_reg), skip)
+        cleanup_traced(body, live_out.then_some(second_reg), skip)
     } else {
         (body, Settle::default())
     };
     lap.end(crate::timing::Step::Cleanup);
     let (body, canary) = if cleanup && skip.runs(Pass::Canary) {
-        canary::fold(&body)
+        body.map_with(canary::fold)
     } else {
         (body, None)
     };
     let (body, panic_checks) = if cleanup && skip.runs(Pass::PanicChecks) {
-        panics::fold_checks(&panics::annotate(&body, program))
+        body.map_with(|b| panics::fold_checks(&panics::annotate(b, program)))
     } else {
         (body, Vec::new())
     };
-    let body = if returns_nothing && skip.runs(Pass::DropDeadResults) {
-        drop_dead_results(&body, result_reg)
-    } else {
-        body
-    };
+    let body = body.map_if(returns_nothing && skip.runs(Pass::DropDeadResults), |b| {
+        drop_dead_results(b, result_reg)
+    });
     let body = skip.apply(Pass::ApplyEnums, body, |body| match overlay.enum_source {
         EnumSource::Given => apply_enums(body, &overlay.enums),
         EnumSource::Binary => apply_enums(body, &called_tables(program, analysis, overlay, body)),
@@ -1815,17 +1814,14 @@ fn decompile_in<L: Lifter>(
             user_typed.push((var, fields));
         }
     }
-    let body = if user_typed.is_empty() || !skip.runs(Pass::RenameTyped) {
-        body
-    } else {
-        rename_typed(&body, &user_typed)
-    };
+    let body = body.map_if(
+        !user_typed.is_empty() && skip.runs(Pass::RenameTyped),
+        |b| rename_typed(b, &user_typed),
+    );
     let user_enums = user_enum_globals(overlay, &ctx.globals, &names);
-    let body = if user_enums.is_empty() || !skip.runs(Pass::UserEnums) {
-        body
-    } else {
-        apply_user_enums(&body, &user_enums)
-    };
+    let body = body.map_if(!user_enums.is_empty() && skip.runs(Pass::UserEnums), |b| {
+        apply_user_enums(b, &user_enums)
+    });
 
     let value_return = body
         .lines()
@@ -2314,7 +2310,7 @@ fn decompile_in<L: Lifter>(
         .collect();
     cir::print_decls(&globals, &mut out);
     out.push('\n');
-    out.push_str(&body);
+    let (text, origins) = Traced::under(out, body).into_parts();
     let emitted = blocks
         .iter()
         .map(|b| ctx.effects.contains_key(&b.start))
@@ -2324,7 +2320,7 @@ fn decompile_in<L: Lifter>(
             .iter()
             .map(|b| ctx.effects.remove(&b.start).unwrap_or_default()),
     );
-    let witness = witness.then(|| {
+    let witness = kept.has(Kept::WITNESS).then(|| {
         Box::new(replay::Witness {
             code: L::witness(code),
             ins: in_envs,
@@ -2376,7 +2372,9 @@ fn decompile_in<L: Lifter>(
     });
     lap.end(crate::timing::Step::Header);
     Some(Decompiled {
-        text: out,
+        text,
+        origins,
+        spelled: spelled.filter(|_| kept.has(Kept::SPELLED)),
         virtual_calls: ctx.vcalls.iter().copied().collect(),
         blocks: n,
         cut: unreachable,

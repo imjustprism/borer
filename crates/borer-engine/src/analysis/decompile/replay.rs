@@ -90,7 +90,7 @@ use super::verify::{
     Bench, EVAL_DEPTH, FRAME_SPAN, GOLDEN, REGION_MAX, REGS, REGS_32, Rng, STACK_WORDS, XMMS,
     aligns_stack, low, sext, word,
 };
-use super::{Ctx, decompile_with, table_target};
+use super::{Ctx, Kept, decompile_with, table_target};
 use crate::analysis::{Analysis, BasicBlock, Overlay, striped_with};
 use crate::emulate::{Emulator, HISTORY_MAX, Run, Stop, ThreadBlock, fill_byte};
 use crate::fxmap::{FxHashMap, FxHashSet};
@@ -905,10 +905,8 @@ fn replay_one<L: Replay>(
         return Replayed::default();
     };
     let overlay = Overlay::default();
-    let Some(d) = decompile_with(program, analysis, &overlay, entry, true, &[], true) else {
-        return Replayed::default();
-    };
-    let Some(w) = d.take_witness() else {
+    let d = decompile_with(program, analysis, &overlay, entry, true, &[], Kept::WITNESS);
+    let Some((d, w)) = d.and_then(|d| d.take_witness().map(|w| (d, w))) else {
         return Replayed::default();
     };
     let effects = effects_of(&d, f);

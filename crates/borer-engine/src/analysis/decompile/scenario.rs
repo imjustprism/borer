@@ -34,7 +34,15 @@ pub fn decompile_scenario(
 ) -> Option<String> {
     let bitness = program.arch.bitness().unwrap_or(64);
     let registers = abi::conv(program, bitness).args.len();
-    let d = decompile_with(program, analysis, overlay, entry, true, assume, false)?;
+    let d = decompile_with(
+        program,
+        analysis,
+        overlay,
+        entry,
+        true,
+        assume,
+        Kept::NOTHING,
+    )?;
     let word = if program.is_64 { 64 } else { 32 };
     let text = polish(&d.text, word, &analysis.packs);
     let said: Vec<String> = assume
@@ -117,7 +125,7 @@ pub fn explode(
             entry,
             true,
             &[(slot, value)],
-            false,
+            Kept::NOTHING,
         ) else {
             continue;
         };

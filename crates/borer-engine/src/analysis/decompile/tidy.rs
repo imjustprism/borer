@@ -1,6 +1,7 @@
 //! The last cleanup: dropped results and dead code, single-use blocks moved,
 //! early exits flattened.
 
+use super::origin::{Lines, Shadowed, Traced};
 use super::*;
 
 /// Summarizes what a body mutates, from its cleaned text.
@@ -698,7 +699,43 @@ pub fn cleanup(body: &str) -> String {
 ///
 /// The cleaned body, newline-terminated.
 pub(super) fn cleanup_text(body: &str, live_out: Option<&str>) -> String {
-    cleanup_settled(body, live_out, Passes::NONE).0
+    let body = Traced::new(body.to_owned(), None);
+    cleanup_traced(body, live_out, Passes::NONE).0.into_text()
+}
+
+/// [`cleanup_text`] over a body that may be traced, with how its passes
+/// ended, carrying the origins of its lines over every pass that changed
+/// them ([`Shadowed`]).
+///
+/// # Arguments
+///
+/// * `body` - Pseudo-C lines as the emitter writes them, and their
+///   origins when traced.
+/// * `live_out` - The register a second result comes back in, if any.
+/// * `skip` - The passes left out ([`Passes`]).
+///
+/// # Returns
+///
+/// The cleaned body, newline-terminated, and its [`Settle`].
+pub(super) fn cleanup_traced(
+    body: Traced,
+    live_out: Option<&str>,
+    skip: Passes,
+) -> (Traced, Settle) {
+    match body.into_parts() {
+        (text, Some(origins)) => {
+            let mut lines = Shadowed::new(&text, origins);
+            let settle = cleanup_settled(&mut lines, live_out, skip);
+            (lines.into_traced(), settle)
+        }
+        (text, None) => {
+            let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+            let settle = cleanup_settled(&mut lines, live_out, skip);
+            let mut text = lines.join("\n");
+            text.push('\n');
+            (Traced::new(text, None), settle)
+        }
+    }
 }
 
 /// Tells whether a `goto` jumps back to a label above it: a loop the text
@@ -718,42 +755,37 @@ fn jumps_back(lines: &[String]) -> bool {
     })
 }
 
-/// [`cleanup_text`], with how its passes ended.
+/// The passes of [`cleanup_text`] over body lines rewritten in place, told
+/// of each rewrite that changed them ([`Lines`]).
 ///
 /// # Arguments
 ///
-/// * `body` - Pseudo-C lines as the emitter writes them.
+/// * `lines` - The body lines as the emitter writes them.
 /// * `live_out` - The register a second result comes back in, if any.
 /// * `skip` - The passes left out ([`Passes`]).
 ///
 /// # Returns
 ///
-/// The cleaned body, newline-terminated, and its [`Settle`].
-pub(super) fn cleanup_settled(
-    body: &str,
-    live_out: Option<&str>,
-    skip: Passes,
-) -> (String, Settle) {
-    let mut lines: Vec<String> = body.lines().map(str::to_owned).collect();
-    let fuel = CLEANUP_PASSES.saturating_add(lines.len());
-    let mut settle = cleanup_passes(&mut lines, fuel, live_out, skip);
+/// How the passes ended ([`Settle`]).
+fn cleanup_settled(lines: &mut impl Lines, live_out: Option<&str>, skip: Passes) -> Settle {
+    let fuel = CLEANUP_PASSES.saturating_add(lines.lines().len());
+    let mut settle = cleanup_passes(lines, fuel, live_out, skip);
     let left = fuel.saturating_sub(settle.passes);
-    if skip.runs(Pass::FoldJumps) && left > 0 && jumps_back(&lines) {
-        let folded = cir::fold(&rejoin(&lines, "\n"), &[], Some(&BTreeSet::new()));
-        lines = folded.lines().map(str::to_owned).collect();
-        let again = cleanup_passes(&mut lines, left, live_out, skip);
+    if skip.runs(Pass::FoldJumps) && left > 0 && jumps_back(lines.lines()) {
+        let folded = cir::fold(&rejoin(lines.lines(), "\n"), &[], Some(&BTreeSet::new()));
+        *lines.lines() = folded.lines().map(str::to_owned).collect();
+        lines.rewrote();
+        let again = cleanup_passes(lines, left, live_out, skip);
         settle = Settle {
             passes: settle.passes.saturating_add(again.passes),
             fuel,
             churn: again.churn,
         };
     }
-    if skip.runs(Pass::RecoverLoops) {
-        loops::recover_loops(&mut lines);
+    if skip.runs(Pass::RecoverLoops) && loops::recover_loops(lines.lines()) {
+        lines.rewrote();
     }
-    let mut text = lines.join("\n");
-    text.push('\n');
-    (text, settle)
+    settle
 }
 
 /// Drops each `goto` (bare or `if (...) goto`) whose label follows it
@@ -889,7 +921,8 @@ pub(super) const CLEANUP_PASSES: usize = 64;
 ///
 /// # Arguments
 ///
-/// * `lines` - The body lines, rewritten in place.
+/// * `lines` - The body lines, rewritten in place and told of each pass
+///   that ran ([`Lines::rewrote`]).
 /// * `fuel` - Most passes run.
 /// * `live_out` - The register a second result comes back in, if any.
 ///
@@ -898,7 +931,7 @@ pub(super) const CLEANUP_PASSES: usize = 64;
 /// How many passes ran, out of how many, and what still changed when the
 /// budget ran out ([`Settle`]).
 pub(super) fn cleanup_passes(
-    lines: &mut Vec<String>,
+    lines: &mut impl Lines,
     fuel: usize,
     live_out: Option<&str>,
     skip: Passes,
@@ -1063,7 +1096,8 @@ struct Round {
 
 impl Round {
     /// Runs one pass unless it is left out or idle, or the caller's cancel
-    /// flag was raised ([`crate::cancel::Cancel`]), and records what it did.
+    /// flag was raised ([`crate::cancel::Cancel`]), records what it did, and
+    /// tells the lines when it changed them ([`Lines::rewrote`]).
     ///
     /// # Arguments
     ///
@@ -1077,14 +1111,15 @@ impl Round {
     fn run(
         &mut self,
         pass: Pass,
-        lines: &mut Vec<String>,
+        lines: &mut impl Lines,
         f: impl FnOnce(&mut Vec<String>) -> bool,
     ) -> bool {
         if !self.skip.runs(pass) || !self.idle.runs(pass) || crate::cancel::Cancel::raised() {
             return false;
         }
-        let did = f(lines);
+        let did = f(lines.lines());
         if did {
+            lines.rewrote();
             self.idle = Passes::NONE;
         } else {
             self.idle = self.idle.without(pass);
@@ -1286,6 +1321,93 @@ mod fuel_tests {
         assert!(spent.spent(), "{spent:?}");
         assert_ne!(one, settled);
         assert!(one.iter().any(|l| l.contains("goto ")), "{one:?}");
+    }
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::{Lines, Pass, Passes, Round, Shadowed, Spelled, Traced};
+
+    /// A pass a round runs that rewrites one line keeps every other line's
+    /// origin and gives the rewritten line its old line's, and a pass after
+    /// it that drops a line carries them on.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn a_round_carries_the_origins_over_each_pass() {
+        let mut round = Round {
+            skip: Passes::NONE,
+            idle: Passes::NONE,
+            churn: Vec::new(),
+        };
+        let text = "L_10:\nrax = a1;\nL_20:\nrbx = rax;\nreturn rbx;\n";
+        let spelled: Spelled = [
+            ("rax = a1;", 0x10),
+            ("rbx = rax;", 0x20),
+            ("return rbx;", 0x20),
+        ]
+        .into_iter()
+        .map(|(t, b)| (t.to_owned(), Some(b)))
+        .collect();
+        let (text, origins) = Traced::seeded(text.to_owned(), Some(&spelled)).into_parts();
+        let mut lines = Shadowed::new(&text, origins.unwrap_or_default());
+        assert!(round.run(Pass::FoldTempCopies, &mut lines, |l| {
+            l[3] = "rbx = a1;".to_owned();
+            true
+        }));
+        assert!(round.run(Pass::UnnamedLabels, &mut lines, |l| {
+            l.remove(2);
+            true
+        }));
+        assert_eq!(
+            *lines.lines(),
+            ["L_10:", "rax = a1;", "rbx = a1;", "return rbx;"]
+        );
+        let (_, o) = lines.into_traced().into_parts();
+        let o = o.unwrap_or_default();
+        let got: Vec<Option<u64>> = (0..o.len()).map(|i| o.line(i)).collect();
+        assert_eq!(got, [Some(0x10), Some(0x10), Some(0x20), Some(0x20)]);
+    }
+
+    /// Lines that count the rewrites they are told of.
+    #[derive(Debug, Default)]
+    struct Counted {
+        /// The lines.
+        lines: Vec<String>,
+        /// Rewrites told.
+        told: usize,
+    }
+
+    impl Lines for Counted {
+        fn lines(&mut self) -> &mut Vec<String> {
+            &mut self.lines
+        }
+
+        fn rewrote(&mut self) {
+            self.told += 1;
+        }
+    }
+
+    /// A pass that changes nothing tells the lines nothing, so a traced
+    /// text compares nothing after it.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn a_pass_that_changes_nothing_tells_nothing() {
+        let mut round = Round {
+            skip: Passes::NONE,
+            idle: Passes::NONE,
+            churn: Vec::new(),
+        };
+        let mut lines = Counted::default();
+        assert!(!round.run(Pass::MergeChains, &mut lines, |_| false));
+        assert_eq!(lines.told, 0);
+        assert!(round.run(Pass::FoldTempCopies, &mut lines, |_| true));
+        assert_eq!(lines.told, 1);
     }
 }
 

@@ -6,7 +6,7 @@ use super::{
 };
 use crate::analysis::decompile::expr::{Expr, Flags, Op, UnOp};
 use crate::analysis::decompile::lift::{ArgAt, Effect, EffectKind};
-use crate::analysis::decompile::{decompile, decompile_with};
+use crate::analysis::decompile::{Kept, decompile, decompile_with};
 use crate::analysis::{Analysis, Overlay};
 use crate::emulate::Emulator;
 use crate::program::{Arch, Program};
@@ -156,7 +156,8 @@ pub(super) fn replayed_sampled(
     told: impl FnOnce(&mut Witness),
 ) -> Replayed {
     let f = a.function(entry).expect("function");
-    let d = decompile_with(p, a, &Overlay::default(), entry, true, &[], true).expect("text");
+    let d =
+        decompile_with(p, a, &Overlay::default(), entry, true, &[], Kept::WITNESS).expect("text");
     let mut effects: Vec<Vec<Effect>> = f
         .blocks
         .iter()
@@ -1417,7 +1418,16 @@ fn blocks_past_the_budget_are_counted_unchecked() {
     let p = Program::raw_x64(&THREE_BLOCKS);
     let a = Analysis::compute(&p);
     let f = a.function(0x1000).expect("function");
-    let d = decompile_with(&p, &a, &Overlay::default(), 0x1000, true, &[], true).expect("text");
+    let d = decompile_with(
+        &p,
+        &a,
+        &Overlay::default(),
+        0x1000,
+        true,
+        &[],
+        Kept::WITNESS,
+    )
+    .expect("text");
     let effects: Vec<Vec<Effect>> = f
         .blocks
         .iter()

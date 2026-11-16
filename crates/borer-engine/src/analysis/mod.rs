@@ -1836,12 +1836,15 @@ pub(crate) fn decompiled_cached(
     )
 }
 
-/// [`decompiled_cached`], built, when nothing memoized it yet, with the
-/// lifter's witness kept beside the text for the answer's check to take
-/// ([`decompile::replay`]).
+/// Returns [`decompiled_cached`]'s decompilation, built with what `kept` asks
+/// kept beside the text when nothing memoized it yet.
+///
+/// What is kept is the lifter's witness for the answer's check to take
+/// ([`decompile::replay`]), the block each line stands for for a view, or
+/// both, so a view lifts the function once.
 ///
 /// The text is the same either way; only who builds the cell first decides
-/// whether it holds a witness.
+/// what it holds.
 ///
 /// # Arguments
 ///
@@ -1850,18 +1853,20 @@ pub(crate) fn decompiled_cached(
 /// * `overlay` - Names in force.
 /// * `overlay_key` - [`Overlay::fingerprint`] of `overlay`, computed once by the caller.
 /// * `entry` - The function's entry.
-pub(crate) fn decompiled_witnessed(
+/// * `kept` - What the build keeps beside the text.
+pub(crate) fn decompiled_kept(
     program: &Program,
     analysis: &Analysis,
     overlay: &Overlay,
     overlay_key: u64,
     entry: u64,
+    kept: decompile::Kept,
 ) -> Arc<Option<decompile::Decompiled>> {
     analysis.derived.get_or_build_item(
         "plain_text",
         overlay_key,
         entry,
-        || decompile::decompile_witnessed(program, analysis, overlay, entry),
+        || decompile::decompile_with(program, analysis, overlay, entry, true, &[], kept),
         |d| d.as_ref().map_or(0, decompile::Decompiled::bytes),
     )
 }

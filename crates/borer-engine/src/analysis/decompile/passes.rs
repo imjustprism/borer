@@ -10,6 +10,8 @@
 //! ([`crate::analysis::render::bisect_iso`]) leaves out a suffix of it to
 //! find the first pass whose text the ISO check rejects.
 
+use super::origin::Traced;
+
 /// One text pass of the decompile pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Pass {
@@ -360,7 +362,8 @@ impl Passes {
         self.0 & pass.bit() == 0
     }
 
-    /// Runs a rewrite of a text when its pass is not left out.
+    /// Runs a rewrite of a text when its pass is not left out, carrying the
+    /// origins of its lines over the rewrite ([`Traced::map`]).
     ///
     /// # Arguments
     ///
@@ -371,12 +374,13 @@ impl Passes {
     /// # Returns
     ///
     /// The rewritten text, or the text as it was when the pass is left out.
-    pub fn apply(self, pass: Pass, text: String, rewrite: impl FnOnce(&str) -> String) -> String {
-        if self.runs(pass) {
-            rewrite(&text)
-        } else {
-            text
-        }
+    pub(super) fn apply(
+        self,
+        pass: Pass,
+        text: Traced,
+        rewrite: impl FnOnce(&str) -> String,
+    ) -> Traced {
+        text.map_if(self.runs(pass), rewrite)
     }
 }
 

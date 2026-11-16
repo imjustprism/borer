@@ -7,9 +7,10 @@
 //! repair search, and the batch counts the lines of [`answer_header`].
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
-use super::{checked_header, decompile_named, skeleton, stack, warn};
-use crate::analysis::{Analysis, Overlay, name_of, render};
+use super::{Kept, Origins, checked_header, decompile_named, origin, skeleton, stack, warn};
+use crate::analysis::{Analysis, Overlay, decompiled_kept, name_of, render};
 use crate::program::Program;
 
 /// How much of a function's text an answer shows.
@@ -74,14 +75,100 @@ pub fn answer(
     entry: u64,
     detail: Detail,
 ) -> Option<String> {
-    let (overlay, differs) = render::answered_flagged(program, analysis, overlay, entry);
-    let header = answer_header(program, analysis, &overlay, entry, differs.as_deref());
+    let (overlay, header) = answered(program, analysis, overlay, entry);
     let text = decompile_named(program, analysis, &overlay, entry)?;
     let text = match detail {
         Detail::Full => text,
         Detail::Skeleton => skeleton(&text),
     };
     Some(with_header(&text, header.as_deref()))
+}
+
+/// Returns the answer [`answer`] gives at [`Detail::Full`] and the block
+/// each of its lines stands for, its header lines none, in one call so the
+/// two cannot come from different answers.
+///
+/// A line stands for the one block whose lifted code spells it, carried
+/// through every text pass ([`Origins`]); a line no rule places stands for
+/// none. The text is built traced, apart from the memoized untraced text a
+/// plain [`answer`] reads, and is the same text; the one lift it takes keeps
+/// the witness the answer's check reads too.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `analysis` - Its analysis.
+/// * `overlay` - Names in force.
+/// * `entry` - The function's entry.
+///
+/// # Returns
+///
+/// The answer and one origin per line of it, or `None` when the function
+/// does not decompile.
+///
+/// # Examples
+///
+/// ```
+/// use borer_engine::analysis::decompile::{Detail, answer, answer_with_origins};
+/// use borer_engine::analysis::{Analysis, Overlay};
+/// use borer_engine::program::{Arch, Program, Section};
+///
+/// // ASM: cmp ecx, 0x1337abcd ; sete al ; movzx eax, al ; ret
+/// let code = vec![0x81, 0xf9, 0xcd, 0xab, 0x37, 0x13, 0x0f, 0x94, 0xc0, 0x0f, 0xb6, 0xc0, 0xc3];
+/// let section = Section::mapped(".text", 0x1000, 0, 13, false, true);
+/// let p = Program::raw(code, Arch::X86_64, 0, Some(0x1000), vec![section]);
+/// let a = Analysis::compute(&p);
+/// let o = Overlay::default();
+/// let (text, lines) = answer_with_origins(&p, &a, &o, 0x1000).expect("decompiles");
+/// assert_eq!(Some(&text), answer(&p, &a, &o, 0x1000, Detail::Full).as_ref());
+/// assert_eq!(lines.len(), text.lines().count());
+/// assert_eq!(lines.line(1), None, "a header line stands for no block");
+/// assert!((0..lines.len()).all(|i| lines.line(i).is_none_or(|b| b == 0x1000)));
+/// assert!((0..lines.len()).any(|i| lines.line(i) == Some(0x1000)));
+/// ```
+#[must_use]
+pub fn answer_with_origins(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    entry: u64,
+) -> Option<(String, Arc<Origins>)> {
+    let both = Kept::WITNESS.and(Kept::ORIGINS);
+    decompiled_kept(
+        program,
+        analysis,
+        overlay,
+        overlay.fingerprint(),
+        entry,
+        both,
+    );
+    let (overlay, header) = answered(program, analysis, overlay, entry);
+    let traced = origin::named(program, analysis, &overlay, entry);
+    let text = traced.as_ref().as_ref()?;
+    let under = header.as_deref().map_or(0, |h| h.lines().count());
+    let lines = origin::under_header(text, under)?;
+    Some((with_header(text, header.as_deref()), Arc::new(lines)))
+}
+
+/// Returns the names an answer is rendered under, which the repair search
+/// picks ([`render::answered_flagged`]), and the lines it puts under its
+/// first line ([`answer_header`]).
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `analysis` - Its analysis.
+/// * `overlay` - Names in force.
+/// * `entry` - The function's entry.
+fn answered(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    entry: u64,
+) -> (Overlay, Option<String>) {
+    let (overlay, differs) = render::answered_flagged(program, analysis, overlay, entry);
+    let header = answer_header(program, analysis, &overlay, entry, differs.as_deref());
+    (overlay, header)
 }
 
 /// Returns the lines a `decompile` answer puts under its first line.

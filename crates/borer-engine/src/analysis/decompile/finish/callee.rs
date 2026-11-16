@@ -290,7 +290,8 @@ fn pointer_params(
                 .fold(overlay.passes.without(Pass::CalleeTypes), |s, p| {
                     s.without(*p)
                 });
-            let own = polish_at(&d.text, skip, program, analysis, overlay, entry);
+            let text = Traced::new(d.text.clone(), None);
+            let own = polish_at(text, skip, program, analysis, overlay, entry);
             signature_params(&own)
                 .into_iter()
                 .map(|(_, ty)| named_pointer(&ty))

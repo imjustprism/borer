@@ -5,8 +5,8 @@
 use super::{
     ANSWER_BLOCKS, ANSWER_SEED, Replay, Sampling, TextCheck, Witness, effects_of, replay_effects,
 };
-use crate::analysis::decompile::{Decompiled, arch, decompile_with};
-use crate::analysis::{Analysis, Overlay, decompiled_witnessed};
+use crate::analysis::decompile::{Decompiled, Kept, arch, decompile_with};
+use crate::analysis::{Analysis, Overlay, decompiled_kept};
 use crate::isa::Isa;
 use crate::program::Program;
 
@@ -32,12 +32,13 @@ pub(crate) fn check_answer(
     entry: u64,
 ) -> Option<TextCheck> {
     program.arch.isa()?;
-    let shared = decompiled_witnessed(program, analysis, overlay, overlay.fingerprint(), entry);
+    let key = overlay.fingerprint();
+    let shared = decompiled_kept(program, analysis, overlay, key, entry, Kept::WITNESS);
     let fresh;
     let (d, w) = match shared.as_ref().as_ref().map(|d| (d, d.take_witness())) {
         Some((d, Some(w))) => (d, w),
         _ => {
-            fresh = decompile_with(program, analysis, overlay, entry, true, &[], true)?;
+            fresh = decompile_with(program, analysis, overlay, entry, true, &[], Kept::WITNESS)?;
             let w = fresh.take_witness()?;
             (&fresh, w)
         }

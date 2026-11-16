@@ -275,6 +275,9 @@ pub(super) fn run_block_env<L: Lifter>(
         Some((&phi, &live_out)),
         facts,
     );
+    if let Some(spelled) = &mut ctx.spelled {
+        origin::spell(spelled, st.blocks[i].start, &out);
+    }
     (out, env)
 }
 

@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::origin::Traced;
 use super::*;
 use crate::analysis::Analysis;
 use crate::num::from_usize;
@@ -42,7 +43,8 @@ mod words;
 /// types and byte offsets through typed pointers applied.
 #[must_use]
 pub fn polish(text: &str, bitness: u32, packs: &crate::pack::Packs) -> String {
-    polish_skipping(text, bitness, packs, Passes::NONE, None)
+    let text = Traced::new(text.to_owned(), None);
+    polish_skipping(text, bitness, packs, Passes::NONE, None).into_text()
 }
 
 /// [`polish_skipping`] with the caller literals and the callees of `entry`
@@ -50,7 +52,8 @@ pub fn polish(text: &str, bitness: u32, packs: &crate::pack::Packs) -> String {
 ///
 /// # Arguments
 ///
-/// * `text` - A decompiled function, header lines first.
+/// * `text` - A decompiled function, header lines first, and the origins
+///   of its lines.
 /// * `skip` - The passes left out ([`Passes`]).
 /// * `program` - The loaded image, for its word width.
 /// * `analysis` - Discovery results, holding the packs in force.
@@ -60,15 +63,15 @@ pub fn polish(text: &str, bitness: u32, packs: &crate::pack::Packs) -> String {
 ///
 /// # Returns
 ///
-/// The polished text.
+/// The polished text, its origins carried over every pass.
 pub(super) fn polish_at(
-    text: &str,
+    text: Traced,
     skip: Passes,
     program: &Program,
     analysis: &Analysis,
     overlay: &Overlay,
     entry: u64,
-) -> String {
+) -> Traced {
     polish_skipping(
         text,
         if program.is_64 { 64 } else { 32 },
@@ -78,11 +81,13 @@ pub(super) fn polish_at(
     )
 }
 
-/// [`polish`] with some of its passes left out.
+/// [`polish`] with some of its passes left out, carrying the origins of
+/// the text's lines over each pass ([`Passes::apply`]).
 ///
 /// # Arguments
 ///
-/// * `text` - A decompiled function, header lines first.
+/// * `text` - A decompiled function, header lines first, and the origins
+///   of its lines.
 /// * `bitness` - The image's word in bits (32 or 64).
 /// * `packs` - The packs in force.
 /// * `skip` - The passes left out ([`Passes`]).
@@ -96,15 +101,15 @@ pub(super) fn polish_at(
 ///
 /// The polished text.
 pub(super) fn polish_skipping(
-    text: &str,
+    text: Traced,
     bitness: u32,
     packs: &crate::pack::Packs,
     skip: Passes,
     callers: Option<callee::Scope<'_>>,
-) -> String {
+) -> Traced {
     let streams = packs.list("types", "stream");
     let word = word_type(bitness);
-    let text = skip.apply(Pass::SplitReturns, text.to_owned(), split_returns);
+    let text = skip.apply(Pass::SplitReturns, text, split_returns);
     let text = skip.apply(Pass::NameOwnFields, text, name_own_fields);
     let text = skip.apply(Pass::SourceFile, text, source_file);
     let text = skip.apply(Pass::WireFormat, text, |t| wire_format(t, &streams));
@@ -112,13 +117,13 @@ pub(super) fn polish_skipping(
     let text = skip.apply(Pass::ApplyLayouts, text, apply_layouts);
     let text = skip.apply(Pass::FloatLanes, text, float_lanes);
     let text = skip.apply(Pass::LaneLocals, text, lane_locals);
-    let text = skip.apply(Pass::TypeParameters, text, |t| {
-        let t = skip.apply(Pass::CalleeTypes, t.to_owned(), |t| {
-            callee::noted(t, word, callers)
-        });
+    let text = if skip.runs(Pass::TypeParameters) {
+        let t = skip.apply(Pass::CalleeTypes, text, |t| callee::noted(t, word, callers));
         let callers = callers.map(|(program, analysis, _, entry)| (program, analysis, entry));
-        type_parameters(&callfmt::noted(&t, callers), word)
-    });
+        t.map(|t| type_parameters(&callfmt::noted(t, callers), word))
+    } else {
+        text
+    };
     let text = skip.apply(Pass::TypeLocals, text, type_locals);
     let text = skip.apply(Pass::SignedWords, text, |t| {
         words::signed_words(t, stated_types(callers), word)
@@ -148,16 +153,27 @@ pub(super) fn polish_skipping(
     let text = skip.apply(Pass::SelectStatements, text, |t| {
         selects::select_statements(t, word, &taken)
     });
-    let mut out = String::with_capacity(text.len() + 1);
-    for (i, line) in text.lines().enumerate() {
-        if i > 0 {
-            out.push('\n');
+    let text = text.map(|text| {
+        let mut out = String::with_capacity(text.len() + 1);
+        for (i, line) in text.lines().enumerate() {
+            if i > 0 {
+                out.push('\n');
+            }
+            let line = if skip.runs(Pass::CompoundAssign) {
+                compound_assign(line)
+            } else {
+                line.to_owned()
+            };
+            out.push_str(&if skip.runs(Pass::Elvis) {
+                elvis(&line)
+            } else {
+                line
+            });
         }
-        let line = skip.apply(Pass::CompoundAssign, line.to_owned(), compound_assign);
-        out.push_str(&skip.apply(Pass::Elvis, line, elvis));
-    }
-    out.push('\n');
-    let text = skip.apply(Pass::SpellIndex, out, spell_index);
+        out.push('\n');
+        out
+    });
+    let text = skip.apply(Pass::SpellIndex, text, spell_index);
     let text = skip.apply(Pass::SpellOwnEnum, text, spell_own_enum);
     let text = skip.apply(Pass::SpellNullptr, text, spell_nullptr);
     let text = skip.apply(Pass::StoreStrings, text, store_strings);
@@ -276,6 +292,31 @@ pub(super) fn finished(
     overlay: &Overlay,
     entry: u64,
 ) -> String {
+    let text = Traced::new(text.to_owned(), None);
+    finished_traced(text, program, analysis, overlay, entry).into_text()
+}
+
+/// [`finished`], carrying the origins of the text's lines over each pass.
+///
+/// # Arguments
+///
+/// * `text` - The plain or named decompilation, and the origins of its
+///   lines.
+/// * `program` - The loaded image.
+/// * `analysis` - Discovery results, for the packs and the callees.
+/// * `overlay` - User names, and the passes left out.
+/// * `entry` - The function's entry address.
+///
+/// # Returns
+///
+/// The text the tools show, and its origins.
+pub(super) fn finished_traced(
+    text: Traced,
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    entry: u64,
+) -> Traced {
     use crate::timing::{Step, timed};
     let skip = overlay.passes;
     let text = timed(Step::Polish, || {
@@ -298,6 +339,127 @@ pub(super) fn finished(
         skip.apply(Pass::HelperDeclare, text, |t| helper::declare(t, program))
     });
     skip.apply(Pass::TypeDeclare, text, |t| defs::declare(t, program))
+}
+
+/// Returns the text [`decompile`] answers, memoized per function under the
+/// names in force through [`Analysis::derived`].
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `analysis` - Discovery results, holding the memo.
+/// * `overlay` - User names and comments.
+/// * `entry` - The function's entry address.
+///
+/// # Returns
+///
+/// The text, `None` when the function does not decompile.
+pub(super) fn laid_out(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    entry: u64,
+) -> std::sync::Arc<Option<String>> {
+    let names = overlay.fingerprint();
+    analysis.derived.get_or_build_item(
+        "layout_text",
+        names,
+        entry,
+        || {
+            decompiled_cached(program, analysis, overlay, names, entry)
+                .as_ref()
+                .as_ref()
+                .map(|d| finished(&d.text, program, analysis, overlay, entry))
+        },
+        |text| text.as_ref().map_or(0, String::capacity),
+    )
+}
+
+/// Returns the text [`decompile_named`] answers, memoized as [`laid_out`]
+/// is; a text naming leaves as it was is [`laid_out`]'s.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `analysis` - Discovery results, holding the memo.
+/// * `overlay` - User names and comments.
+/// * `entry` - The function's entry address.
+///
+/// # Returns
+///
+/// The text, `None` when the function does not decompile.
+pub(super) fn named(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    entry: u64,
+) -> std::sync::Arc<Option<String>> {
+    let names = overlay.fingerprint();
+    analysis.derived.get_or_build_item(
+        "named_text",
+        names,
+        entry,
+        || {
+            let d = decompiled_cached(program, analysis, overlay, names, entry);
+            let laid = || {
+                let text = laid_out(program, analysis, overlay, entry).as_ref().clone();
+                text.map(|t| Traced::new(t, None))
+            };
+            let text = (d.as_ref().as_ref()?.text.as_str(), None);
+            named_from(program, analysis, overlay, entry, text, laid)?
+                .1
+                .map(Traced::into_text)
+        },
+        |text| text.as_ref().map_or(0, String::capacity),
+    )
+}
+
+/// Returns a decompiled text with the fields of its class-typed objects
+/// named ([`name_fields`]) and finished, plain or traced as the caller hands
+/// it.
+///
+/// It builds the memoized named texts, plain and traced, and the sweep's.
+/// The batch and check builders (`decompile_named_afresh`,
+/// `decompile_checked_afresh` and the export's `named`) still finish the
+/// named text even where naming changed nothing, which gives the same text.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `analysis` - Discovery results the function comes from.
+/// * `overlay` - User names and comments.
+/// * `entry` - The function's entry address.
+/// * `text` - Its decompiled text, and the origins of its lines when the
+///   caller traces it (an untraced caller passes none, whatever the shared
+///   decompilation holds).
+/// * `laid` - The finished `text` itself, which a text naming leaves as it
+///   was is.
+///
+/// # Returns
+///
+/// The text with its fields named, before the finishing passes, and the
+/// finished named text (`None` when `laid` gives none); `None` when no
+/// function starts at `entry`.
+pub(super) fn named_from(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    entry: u64,
+    text: (&str, Option<&Origins>),
+    laid: impl FnOnce() -> Option<Traced>,
+) -> Option<(String, Option<Traced>)> {
+    let out = name_fields(program, analysis, overlay, entry, text.0)?;
+    if out == text.0 {
+        return Some((out, laid()));
+    }
+    let named = finished_traced(
+        Traced::rewritten(text, out.clone()),
+        program,
+        analysis,
+        overlay,
+        entry,
+    );
+    Some((out, Some(named)))
 }
 
 /// Drops an assignment an `if` block opens with when the line before the
