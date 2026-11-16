@@ -14,11 +14,51 @@ use crate::program::Program;
 ///
 /// A value in `0.0..=8.0`; `8.0` means every byte value is equally likely.
 pub fn shannon(data: &[u8]) -> f64 {
-    let mut counts = [0usize; 256];
-    for &b in data {
-        counts[usize::from(b)] += 1;
+    let counts = ByteCounts::of(data);
+    of_counts(&counts.of, counts.n)
+}
+
+/// How many times each byte value occurs in the bytes counted, and how many
+/// bytes those were: what every entropy here is computed from.
+#[derive(Debug, Clone)]
+pub(crate) struct ByteCounts {
+    /// Occurrences of each byte value.
+    pub(crate) of: [usize; 256],
+    /// Bytes counted, the sum of `of`.
+    pub(crate) n: usize,
+}
+
+impl Default for ByteCounts {
+    /// Returns the counts of no bytes.
+    fn default() -> Self {
+        Self { of: [0; 256], n: 0 }
     }
-    of_counts(&counts, data.len())
+}
+
+impl ByteCounts {
+    /// Counts one byte.
+    ///
+    /// # Arguments
+    ///
+    /// * `b` - The byte.
+    pub(crate) fn add(&mut self, b: u8) {
+        self.of[usize::from(b)] += 1;
+        self.n += 1;
+    }
+
+    /// Returns the counts of `data`.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - The bytes counted.
+    pub(crate) fn of(data: &[u8]) -> Self {
+        let mut counts = Self::default();
+        for &b in data {
+            counts.of[usize::from(b)] += 1;
+        }
+        counts.n = data.len();
+        counts
+    }
 }
 
 /// Computes the Shannon entropy of a byte histogram in bits per byte.
@@ -276,13 +316,9 @@ fn encoded_run(
     } else {
         Encoding::Base64
     };
-    let mut counts = [0usize; 256];
-    let mut n = 0usize;
-    decode(text, encoding, |b| {
-        counts[usize::from(b)] += 1;
-        n += 1;
-    });
-    let e = of_counts(&counts, n);
+    let mut counts = ByteCounts::default();
+    decode(text, encoding, |b| counts.add(b));
+    let (e, n) = (of_counts(&counts.of, counts.n), counts.n);
     if n >= ENCODED_MIN && e >= ceiling(n) - margin {
         let off = from_usize(start);
         regions.push(Region {
