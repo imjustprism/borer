@@ -4,12 +4,12 @@
 //! through its first argument, lists the types and opens the first page of
 //! them, lists what the assertions name, pages the linear listing both ways
 //! from the entry, an address the input names and the image's end, draws a
-//! band of a cell count the input names, for a .NET assembly lists its first
-//! IL methods and its obfuscator markers, and reads every chart series
-//! table, a hostile spec among them: the path every agent request takes
-//! after a load. The first functions' call graphs and call tree levels are
-//! walked both ways too, and the callers of the first imports, which have no
-//! body.
+//! band of a cell count the input names, spells the typed triage, for a .NET
+//! assembly lists its first IL methods and its obfuscator markers, and reads
+//! every chart series table, a hostile spec among them: the path every agent
+//! request takes after a load. The first functions' call graphs and call
+//! tree levels are walked both ways too, and the callers of the first
+//! imports, which have no body.
 
 #![no_main]
 
@@ -17,7 +17,7 @@ use borer_engine::analysis::decompile::decompile;
 use borer_engine::analysis::decompile::view::view_of;
 use borer_engine::analysis::render::{
     Bytes, Dir, Level, Walk, asserted_fields_tsv, band, call_children, callgraph, cfg,
-    disasm_function_with, disasm_view, linear, next_steps, propose,
+    disasm_function_with, disasm_view, linear, next_steps, propose, triage,
 };
 use borer_engine::analysis::stats::stats_tsv;
 use borer_engine::analysis::utypes::{type_detail, type_rows};
@@ -25,7 +25,7 @@ use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::clr::managed::{self, Managed};
 use borer_engine::clr::markers::markers_tsv;
 use borer_engine::disasm::disassemble_program;
-use borer_engine::program::{Program, SymbolKind};
+use borer_engine::program::{Feature, Program, SymbolKind};
 use borer_engine::table::Window;
 use libfuzzer_sys::fuzz_target;
 
@@ -110,6 +110,9 @@ fuzz_target!(|data: &[u8]| {
     }
     let cells = usize::try_from(word(8, 2)).unwrap_or(LISTED);
     assert!(band(&program, &analysis, &overlay, cells).len() <= cells.max(1));
+    if program.refuses(Feature::Decompile).is_none() {
+        _ = triage(&program, &analysis, &overlay).spell();
+    }
     for m in Managed::of(&program, &analysis)
         .methods
         .iter()
