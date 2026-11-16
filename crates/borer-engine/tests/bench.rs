@@ -56,6 +56,12 @@ use std::time::{Duration, Instant};
 /// Passes taken; the fastest is reported.
 const PASSES: usize = 5;
 
+/// Most the best time under a progress may be of the best time without one.
+///
+/// The counting is a thread-local read a sweep and an add every 64 items a
+/// worker, so anything past the passes' spread is a regression.
+const REPORTED_RATIO: f64 = 1.10;
+
 /// Functions decompiled per pass, from the start of the program.
 const SLICE: usize = 2000;
 
@@ -134,6 +140,20 @@ fn timings() {
         entries.len(),
         per
     );
+    let progress = borer_engine::progress::Progress::new();
+    let watched = best(|| progress.within(|| Analysis::compute(&program)));
+    let swept = best(|| progress.within(|| decompile_all(&program, &a, &o, &entries)));
+    println!(
+        "reported:   analysis {:.1} ms, decompile {:.1} ms under a progress (best of {PASSES})",
+        watched.as_secs_f64() * 1e3,
+        swept.as_secs_f64() * 1e3
+    );
+    for (what, under, plain) in [("analysis", watched, analysis), ("decompile", swept, all)] {
+        assert!(
+            under.as_secs_f64() <= plain.as_secs_f64() * REPORTED_RATIO,
+            "{what} under a progress took {under:?}, past {REPORTED_RATIO} times {plain:?}"
+        );
+    }
     let cold = Analysis::compute(&program);
     let mut texts = Vec::with_capacity(entries.len());
     let mut each: Vec<(Duration, u64)> = entries

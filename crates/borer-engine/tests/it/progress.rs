@@ -1,6 +1,8 @@
-//! The progress a front end polls while the engine works: a sweep's items
-//! reach their total and never count back, two progresses keep apart,
-//! and opening a binary ends on its plan's last phase.
+//! The progress a front end polls while the engine works.
+//!
+//! A sweep's items reach their total and never count back, two progresses keep
+//! apart, opening a binary ends on its plan's last phase, and no answer moves
+//! for a progress or a worker cap in force.
 
 #![expect(
     clippy::missing_panics_doc,
@@ -12,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use borer_engine::analysis::decompile::decompile_all;
-use borer_engine::analysis::{Analysis, Overlay};
+use borer_engine::analysis::{Analysis, Overlay, render};
 use borer_engine::program::Program;
 use borer_engine::progress::{Phase, Progress, Workers};
 use borer_engine::session::{Form, Open, Pdb, open};
@@ -162,4 +164,27 @@ fn the_export_and_the_check_count_their_functions() {
     let n = u64::try_from(entries.len()).expect("fits");
     let s = progress.snapshot();
     assert_eq!((s.done, s.total), (n, n));
+}
+
+/// The analysis, the triage and every function's text read the same bytes
+/// with nothing in force and under a progress at one worker and at
+/// sixteen.
+#[test]
+fn no_answer_moves_under_a_progress_or_a_cap() {
+    let p = fixture();
+    let o = Overlay::default();
+    let answers = || {
+        let a = Analysis::compute(&p);
+        let entries: Vec<u64> = a.functions.iter().map(|f| f.entry).collect();
+        (
+            render::triage_tsv(&p, &a, &o),
+            decompile_all(&p, &a, &o, &entries),
+        )
+    };
+    let alone = answers();
+    for workers in [1, 16] {
+        let progress = Progress::new();
+        let under = progress.within(|| cap(workers).within(answers));
+        assert!(under == alone, "{workers} workers: an answer moved");
+    }
 }

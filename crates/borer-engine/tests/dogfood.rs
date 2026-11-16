@@ -833,6 +833,43 @@ fn view_dumps(p: &Program, a: &Analysis, texts: &[(u64, &str)], threads: usize) 
     each.into_iter().map(|(_, h)| h).collect()
 }
 
+/// Every 64th function of the `BORER_DOGFOOD` binary decompiles to the same
+/// text with nothing in force as under a progress at one worker and at sixteen.
+///
+/// What a front end watches and caps changes no answer.
+#[test]
+#[ignore = "set BORER_DOGFOOD to a binary path to run this sweep"]
+fn no_text_moves_under_a_progress_or_a_cap() {
+    use borer_engine::progress::{Progress, Workers};
+    let cap = |n| Workers(std::num::NonZeroUsize::new(n).unwrap_or(std::num::NonZeroUsize::MIN));
+    let c = &*CORPUS;
+    let (p, a, o) = (&c.program, &c.analysis, &Overlay::default());
+    let entries: Vec<u64> = a.functions.iter().step_by(64).map(|f| f.entry).collect();
+    let alone = decompile_all(p, a, o, &entries);
+    for workers in [1, 16] {
+        let progress = Progress::new();
+        let under = progress.within(|| cap(workers).within(|| decompile_all(p, a, o, &entries)));
+        let moved = entries
+            .iter()
+            .zip(alone.iter().zip(&under))
+            .find(|(_, (x, y))| x != y);
+        assert!(
+            moved.is_none(),
+            "{workers} workers: {:#x} moved",
+            moved.map_or(0, |m| *m.0)
+        );
+        let n = u64::try_from(entries.len()).unwrap_or(u64::MAX);
+        assert_eq!(
+            (progress.snapshot().done, progress.snapshot().total),
+            (n, n)
+        );
+    }
+    println!(
+        "{} texts read the same under a progress at 1 and 16 workers",
+        entries.len()
+    );
+}
+
 /// Every function's view of the `BORER_DOGFOOD` binary reads the same
 /// tokens on one thread and on every core, and again in one process.
 ///
