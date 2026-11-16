@@ -237,12 +237,7 @@ impl FunctionRows {
     /// line per row.
     #[must_use]
     pub fn spell(&self) -> String {
-        let mut out = format!(
-            "# showing {} of {}\n{}",
-            self.rows.len(),
-            self.counts(),
-            incomplete_line(self.incomplete)
-        );
+        let mut out = format!("# {}\n{}", self.showing(), incomplete_line(self.incomplete));
         out.push_str("# entry size blocks instrs callers callees src name\n");
         for r in &self.rows {
             let _ = writeln!(
@@ -274,6 +269,13 @@ impl FunctionRows {
         format!("# {}\n{}", self.counts(), incomplete_line(self.incomplete))
     }
 
+    /// Returns what the page header counts: `showing N of` the page's rows,
+    /// then [`FunctionRows::counts`].
+    #[must_use]
+    pub fn showing(&self) -> String {
+        format!("showing {} of {}", self.rows.len(), self.counts())
+    }
+
     /// Returns what both headers count: the total, what the selected are,
     /// the order and the thunks and funclets left out.
     ///
@@ -282,7 +284,8 @@ impl FunctionRows {
     /// `M functions`, `M import thunks` or `M exception funclets`
     /// ([`FunctionRows::noun`]), then `, largest first` under
     /// [`FunctionOrder::Size`], then [`FunctionRows::left_out`].
-    fn counts(&self) -> String {
+    #[must_use]
+    pub fn counts(&self) -> String {
         let order = match self.order {
             FunctionOrder::Address => "",
             FunctionOrder::Size => ", largest first",

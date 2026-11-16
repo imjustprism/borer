@@ -1,8 +1,9 @@
 //! The app's actions, under the `borer` namespace, and its key bindings: Zed's default
 //! keymap, then the app's keymap asset, which holds only the bindings Zed's lacks.
 
-use gpui::App;
+use gpui::{Action, App, Div, ParentElement as _, Styled as _};
 use settings::{DEFAULT_KEYMAP_PATH, KeymapFile, KeymapFileLoadResult};
+use ui::{Color, KeyBinding, Label, LabelCommon as _, LabelSize, h_flex};
 
 gpui::actions!(
     borer,
@@ -23,6 +24,33 @@ gpui::actions!(
         FollowSystemTheme,
     ]
 );
+
+/// A hint a surface shows: an action, then what it does in the hint's words.
+pub type Hint = (&'static dyn Action, &'static str);
+
+/// The hint for opening a binary.
+pub const OPEN_HINT: Hint = (&Open, "Open");
+
+/// The hint for Zed's command palette.
+pub const PALETTE_HINT: Hint = (&zed_actions::command_palette::Toggle, "Every command");
+
+/// The hint for going back to where the person was before.
+pub const BACK_HINT: Hint = (&workspace::pane::GoBack, "Go back");
+
+/// Returns a hint as a row: the binding the keymap holds for its action, as Zed's
+/// [`KeyBinding`] draws it, then what the action does.
+///
+/// # Arguments
+///
+/// * `(action, what)` - The hint.
+/// * `cx` - Application context reading the keymap.
+#[must_use]
+pub fn hint_row((action, what): Hint, cx: &App) -> Div {
+    h_flex()
+        .gap_2()
+        .child(KeyBinding::for_action(action, cx))
+        .child(Label::new(what).size(LabelSize::Small).color(Color::Muted))
+}
 
 /// The app's keymap: the bindings Zed's default keymap lacks, in Zed's keymap format.
 const APP_KEYMAP: &str = include_str!("../keymap.json");

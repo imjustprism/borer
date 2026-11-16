@@ -47,6 +47,7 @@ ui_input = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae
 # read them from a Zed checkout at run time and find none in this repository.
 util = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288", features = ["debug-embed"] }
 workspace = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
+zed_actions = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

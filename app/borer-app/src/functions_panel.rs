@@ -1,29 +1,31 @@
 //! The functions panel: the open binary's function table as a panel of Zed's left dock,
 //! filtered through a Zed single-line editor, opening a row in a decompile tab.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use borer_engine::analysis::render::FunctionRows;
+use borer_engine::analysis::render::{FunctionRows, INCOMPLETE_NOTE, LeftOut};
 use editor::{Editor, EditorEvent};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Action, AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Div, Entity,
-    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _,
-    Pixels, Render, ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Task, WeakEntity, Window, canvas, div, px, transparent_black,
+    EventEmitter, FocusHandle, Focusable, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement as _, Pixels, Render, ScrollStrategy, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, canvas,
+    div, px, transparent_black,
 };
 use settings::{Settings as _, SettingsStore};
 use theme::{ActiveTheme as _, GlobalTheme};
 
 use theme_settings::ThemeSettings;
 use ui::{
-    Color, ColumnWidthConfig, IconName, Label, LabelCommon as _, LabelSize, ResizableColumnsState,
-    Table, TableInteractionState, TableResizeBehavior,
+    Color, ColumnWidthConfig, IconName, KeyBinding, Label, LabelCommon as _, LabelSize,
+    ResizableColumnsState, Table, TableInteractionState, TableResizeBehavior, h_flex, v_flex,
 };
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
-use crate::actions::ToggleFunctions;
+use crate::actions::{FocusFilter, OPEN_HINT, ToggleFunctions, hint_row};
 use crate::binary::{Binary, SettingsNotice};
 use crate::code_view::CodePalette;
 use crate::decompile_item::{TabMode, code_row_height, open_function};
@@ -49,6 +51,56 @@ const ROW_SELECTOR: &str = "function-row";
 /// Debug selector of an entry cell's content, whose laid-out bounds the tests read.
 const ENTRY_SELECTOR: &str = "function-entry";
 
+/// Rows the engine selected, with the filter query that selected them.
+#[derive(Debug, Clone)]
+struct Filtered {
+    /// The query, empty for every function.
+    query: SharedString,
+    /// The engine's rows for it.
+    rows: Arc<FunctionRows>,
+}
+
+/// Why the panel shows no table, each case from what the binary and the shown rows say.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Empty {
+    /// No binary was opened, or the last one was closed.
+    NoBinary,
+    /// A load reads this file.
+    Reading(PathBuf),
+    /// The last load failed, for this reason.
+    LoadFailed(String),
+    /// The engine selected no function of the binary, leaving these out.
+    NoFunction(LeftOut),
+    /// The engine selected no function for this query.
+    NoMatch(SharedString),
+}
+
+impl Empty {
+    /// Returns what the panel says for the case.
+    #[must_use]
+    pub fn says(&self) -> SharedString {
+        match self {
+            Self::NoBinary => SharedString::new_static("No binary loaded"),
+            Self::Reading(path) => {
+                let name = path.file_name().unwrap_or(path.as_os_str());
+                format!("Reading {}", name.to_string_lossy()).into()
+            }
+            Self::LoadFailed(reason) => format!("Load failed: {reason}").into(),
+            Self::NoFunction(left_out) => format!("The engine found no function{left_out}").into(),
+            Self::NoMatch(query) => format!("No function matches \"{query}\"").into(),
+        }
+    }
+
+    /// Returns whether the case offers to open a binary.
+    #[must_use]
+    pub const fn offers_open(&self) -> bool {
+        match self {
+            Self::NoBinary | Self::LoadFailed(_) => true,
+            Self::Reading(_) | Self::NoFunction(_) | Self::NoMatch(_) => false,
+        }
+    }
+}
+
 /// The open binary's function table, in a dock.
 pub struct FunctionsPanel {
     /// Workspace the panel opens decompile tabs in.
@@ -63,8 +115,8 @@ pub struct FunctionsPanel {
     table_state: Entity<TableInteractionState>,
     /// The binary the rows come from.
     shown: Option<Arc<LoadedBinary>>,
-    /// Sequenced rows matching the filter, the newest answer winning.
-    rows: FilterLatest<Arc<FunctionRows>>,
+    /// Sequenced rows matching the filter, each with its query, the newest answer winning.
+    rows: FilterLatest<Filtered>,
     /// Index of the highlighted row.
     selected: usize,
     /// Columns the table shows.
@@ -113,7 +165,7 @@ impl FunctionsPanel {
     ) -> Self {
         let filter = cx.new(|cx| {
             let mut editor = Editor::single_line(window, cx);
-            editor.set_placeholder_text("Filter functions", window, cx);
+            editor.set_placeholder_text("Filter by name or address", window, cx);
             editor
         });
         let subscriptions = [
@@ -168,10 +220,7 @@ impl FunctionsPanel {
             cx.set_global(SettingsNotice(Some(why.into())));
             size
         });
-        let rows = self
-            .rows
-            .current()
-            .map_or(&[][..], |rows| rows.rows.as_slice());
+        let rows = self.rows().map_or(&[][..], |rows| rows.rows.as_slice());
         let widths = column_widths(self.columns, rows, ch, pad, self.table_width);
         let cols = widths.len();
         let resize = vec![TableResizeBehavior::None; cols];
@@ -214,10 +263,47 @@ impl FunctionsPanel {
         self.relayout(cx);
     }
 
+    /// Returns why the panel shows no table, from the binary's load and the shown rows with
+    /// the query that selected them, never the filter's text since; `None` while the
+    /// table has rows.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Application context reading the binary.
+    #[must_use]
+    pub fn empty(&self, cx: &App) -> Option<Empty> {
+        let Some(Filtered { query, rows }) = self.rows.current() else {
+            let binary = self.binary.read(cx);
+            return Some(match (binary.reading(), binary.load_error()) {
+                (Some(path), _) => Empty::Reading(path.to_path_buf()),
+                (None, Some(reason)) => Empty::LoadFailed(reason.to_owned()),
+                (None, None) => Empty::NoBinary,
+            });
+        };
+        if !rows.rows.is_empty() {
+            return None;
+        }
+        Some(if query.is_empty() {
+            Empty::NoFunction(rows.left_out)
+        } else {
+            Empty::NoMatch(query.clone())
+        })
+    }
+
+    /// Returns the filter's hint: the binding the keymap holds for [`FocusFilter`].
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Application context reading the keymap.
+    #[must_use]
+    pub fn filter_hint(cx: &App) -> KeyBinding {
+        KeyBinding::for_action(&FocusFilter, cx)
+    }
+
     /// Returns the rows the table shows, if any.
     #[must_use]
-    pub const fn rows(&self) -> Option<&Arc<FunctionRows>> {
-        self.rows.current()
+    pub fn rows(&self) -> Option<&Arc<FunctionRows>> {
+        self.rows.current().map(|filtered| &filtered.rows)
     }
 
     /// Returns the ticket of the latest filter request.
@@ -284,7 +370,10 @@ impl FunctionsPanel {
         cx: &mut Context<'_, Self>,
     ) {
         self.shown = Some(loaded);
-        self.rows.reset(rows);
+        self.rows.reset(Filtered {
+            query: SharedString::default(),
+            rows,
+        });
         self.filter_task = None;
         self.selected = 0;
         if !self.filter.read(cx).text(cx).is_empty() {
@@ -335,10 +424,14 @@ impl FunctionsPanel {
             return;
         };
         let seq = self.rows.issue();
-        let query = self.filter.read(cx).text(cx);
-        let bg = spawn_engine(cx, move || Arc::new(filter_rows_blocking(&loaded, &query)));
+        let query = SharedString::from(self.filter.read(cx).text(cx));
+        let asked = query.clone();
+        let bg = spawn_engine(cx, move || Arc::new(filter_rows_blocking(&loaded, &asked)));
         self.filter_task = Some(cx.spawn(async move |this, cx| {
-            let rows = bg.await;
+            let rows = Filtered {
+                query,
+                rows: bg.await,
+            };
             let Some(this) = this.upgrade() else {
                 return;
             };
@@ -371,7 +464,7 @@ impl FunctionsPanel {
     /// * `row` - Zero-based row index; past the last row selects the last.
     /// * `cx` - Panel context.
     fn select(&mut self, row: usize, cx: &mut Context<'_, Self>) {
-        let len = self.rows.current().map_or(0, |r| r.rows.len());
+        let len = self.rows().map_or(0, |r| r.rows.len());
         if len == 0 {
             return;
         }
@@ -397,8 +490,7 @@ impl FunctionsPanel {
         cx: &mut Context<'_, Self>,
     ) {
         let Some(entry) = self
-            .rows
-            .current()
+            .rows()
             .and_then(|rows| rows.rows.get(row))
             .map(|r| r.entry)
         else {
@@ -426,7 +518,7 @@ impl FunctionsPanel {
     ///
     /// The table element.
     fn render_table(&self, cx: &mut Context<'_, Self>) -> AnyElement {
-        let rows = self.rows.current().cloned();
+        let rows = self.rows().cloned();
         let count = rows.as_ref().map_or(0, |r| r.rows.len());
         let selected = self.selected;
         let colors = cx.theme().colors();
@@ -531,17 +623,44 @@ fn aligned(align: Align, child: impl IntoElement) -> Div {
 
 impl Render for FunctionsPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let (border, muted) = {
-            let colors = cx.theme().colors();
-            (colors.border, colors.text_muted)
+        let rows = self.rows();
+        let header = h_flex()
+            .justify_between()
+            .gap_2()
+            .px(px(8.0))
+            .pt(px(6.0))
+            .child(Label::new("Functions").weight(FontWeight::SEMIBOLD))
+            .children(rows.map(|rows| {
+                Label::new(rows.showing())
+                    .size(LabelSize::Small)
+                    .color(Color::Muted)
+            }));
+        let incomplete = rows.filter(|rows| rows.incomplete).map(|_| {
+            let note = INCOMPLETE_NOTE.trim_start_matches("# ");
+            div().px(px(8.0)).child(
+                Label::new(note)
+                    .size(LabelSize::Small)
+                    .color(Color::Warning),
+            )
+        });
+        let filter = h_flex()
+            .gap_2()
+            .px(px(8.0))
+            .py(px(6.0))
+            .child(div().flex_1().child(self.filter.clone()))
+            .child(Self::filter_hint(cx));
+        let body = match self.empty(cx) {
+            Some(empty) => v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .font(ThemeSettings::get_global(cx).ui_font.clone())
+                .child(Label::new(empty.says()).color(Color::Muted))
+                .when(empty.offers_open(), |d| d.child(hint_row(OPEN_HINT, cx)))
+                .into_any_element(),
+            None => self.render_table(cx),
         };
-        let count = self
-            .rows
-            .current()
-            .map_or_else(SharedString::default, |rows| {
-                format!("{} {}{}", rows.rows.len(), rows.noun, rows.left_out).into()
-            });
-        let table = self.render_table(cx);
         let (font, size) = {
             let settings = ThemeSettings::get_global(cx);
             (settings.buffer_font.clone(), settings.buffer_font_size(cx))
@@ -577,15 +696,9 @@ impl Render for FunctionsPanel {
             .size_full()
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .px(px(8.0))
-                    .py(px(6.0))
-                    .border_b_1()
-                    .border_color(border)
-                    .child(self.filter.clone()),
-            )
-            .child(div().px(px(8.0)).py(px(2.0)).text_color(muted).child(count))
+            .child(header)
+            .children(incomplete)
+            .child(filter)
             .child(
                 div()
                     .relative()
@@ -594,7 +707,7 @@ impl Render for FunctionsPanel {
                     .font(font)
                     .text_size(size)
                     .line_height(code_row_height(cx))
-                    .child(table)
+                    .child(body)
                     .child(watch_width),
             )
     }
@@ -672,10 +785,11 @@ mod tests {
     use borer_engine::analysis::render::{
         FunctionOrder, FunctionRow, FunctionRows, LeftOut, RowSource,
     };
-    use gpui::{Entity, TestAppContext, VisualTestContext, px};
+    use gpui::{Entity, SharedString, TestAppContext, VisualTestContext, px};
     use workspace::Workspace;
 
-    use super::{ENTRY_SELECTOR, FunctionsPanel, ROW_SELECTOR};
+    use super::{ENTRY_SELECTOR, Empty, FunctionsPanel, ROW_SELECTOR};
+    use crate::actions::FocusFilter;
     use crate::app_view::tests::{init, open, sample};
 
     /// Vertical padding of a cell of Zed's table at the pin, both sides together, in rems
@@ -763,6 +877,180 @@ mod tests {
         assert!(
             extra.abs() < px(0.5),
             "a row is {extra:?} taller than its cells"
+        );
+    }
+
+    /// Before a load the panel has no rows and offers to open a binary; while a load reads
+    /// a file it names the file; when the load fails it gives the binary's reason and
+    /// offers to open another.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a step says anything else.
+    #[gpui::test]
+    fn the_panel_follows_a_failing_load(cx: &mut TestAppContext) {
+        the_panel_follows_a_failing_load_steps(cx);
+    }
+
+    /// Runs the steps of [`the_panel_follows_a_failing_load`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`the_panel_follows_a_failing_load`] says.
+    fn the_panel_follows_a_failing_load_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (workspace, cx) = open(&app_state, cx);
+        let panel = panel_of(&workspace, cx);
+        let empty = |cx: &mut VisualTestContext| panel.read_with(cx, |panel, cx| panel.empty(cx));
+        assert_eq!(empty(cx), Some(Empty::NoBinary));
+        assert!(Empty::NoBinary.offers_open());
+        let path = std::env::temp_dir().join("borer-app-no-such-binary.exe");
+        let binary = panel.read_with(cx, |panel, _| panel.binary().clone());
+        binary.update(cx, |binary, cx| binary.open_path(path.clone(), cx));
+        let reading = empty(cx);
+        assert_eq!(reading, Some(Empty::Reading(path)));
+        assert_eq!(
+            reading.map(|empty| empty.says()),
+            Some("Reading borer-app-no-such-binary.exe".into())
+        );
+        cx.run_until_parked();
+        let reason = binary.read_with(cx, |binary, _| binary.load_error().map(str::to_owned));
+        let failed = empty(cx).unwrap();
+        assert_eq!(failed, Empty::LoadFailed(reason.unwrap()));
+        assert!(failed.offers_open());
+        assert!(failed.says().starts_with("Load failed: "));
+    }
+
+    /// A binary whose functions the engine all left out says so in the engine's words, how
+    /// many and how to list them, and the count line is the engine's own.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the panel words it otherwise.
+    #[gpui::test]
+    fn no_function_names_what_the_engine_left_out(cx: &mut TestAppContext) {
+        no_function_names_what_the_engine_left_out_steps(cx);
+    }
+
+    /// Runs the steps of [`no_function_names_what_the_engine_left_out`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`no_function_names_what_the_engine_left_out`] says.
+    fn no_function_names_what_the_engine_left_out_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (workspace, cx) = open(&app_state, cx);
+        let left_out = LeftOut {
+            thunks: 3,
+            funclets: 0,
+        };
+        show_rows(
+            &workspace,
+            FunctionRows {
+                left_out,
+                ..rows_at(&[])
+            },
+            cx,
+        );
+        let panel = panel_of(&workspace, cx);
+        let (empty, showing) = panel.read_with(cx, |panel, cx| {
+            (panel.empty(cx), panel.rows().map(|rows| rows.showing()))
+        });
+        let empty = empty.unwrap();
+        assert_eq!(empty, Empty::NoFunction(left_out));
+        assert!(!empty.offers_open());
+        let note = "; 3 import thunks left out, filter=thunk lists them";
+        assert_eq!(
+            empty.says(),
+            SharedString::from(format!("The engine found no function{note}"))
+        );
+        assert_eq!(showing, Some(format!("showing 0 of 0 functions{note}")));
+    }
+
+    /// A filter nothing matches is quoted as the query that selected the rows shown, and a
+    /// newer query whose answer is not in yet does not change what the panel says.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the panel quotes another query.
+    #[gpui::test]
+    fn no_match_quotes_the_query_of_the_rows_shown(cx: &mut TestAppContext) {
+        no_match_quotes_the_query_of_the_rows_shown_steps(cx);
+    }
+
+    /// Runs the steps of [`no_match_quotes_the_query_of_the_rows_shown`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`no_match_quotes_the_query_of_the_rows_shown`] says.
+    fn no_match_quotes_the_query_of_the_rows_shown_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (workspace, cx) = open(&app_state, cx);
+        let panel = panel_of(&workspace, cx);
+        let set_filter = |text: &'static str, cx: &mut VisualTestContext| {
+            panel.update_in(cx, |panel, window, cx| {
+                panel
+                    .filter
+                    .update(cx, |editor, cx| editor.set_text(text, window, cx));
+            });
+        };
+        let loaded = sample();
+        panel.update_in(cx, |panel, window, cx| {
+            panel.show(loaded.clone(), loaded.initial_rows.clone(), window, cx);
+        });
+        set_filter("zz", cx);
+        draw(cx);
+        let zz = Some(Empty::NoMatch("zz".into()));
+        let empty = |cx: &mut VisualTestContext| panel.read_with(cx, |panel, cx| panel.empty(cx));
+        assert_eq!(empty(cx), zz);
+        assert_eq!(
+            zz.map(|empty| empty.says()),
+            Some("No function matches \"zz\"".into())
+        );
+        set_filter("zzz", cx);
+        assert_eq!(empty(cx), Some(Empty::NoMatch("zz".into())));
+        draw(cx);
+        assert_eq!(empty(cx), Some(Empty::NoMatch("zzz".into())));
+    }
+
+    /// The filter's hint shows the binding the keymap holds for [`FocusFilter`], and a new
+    /// binding replaces it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the hint shows no binding or keeps the old one.
+    #[gpui::test]
+    fn the_filter_hint_follows_the_keymap(cx: &mut TestAppContext) {
+        the_filter_hint_follows_the_keymap_steps(cx);
+    }
+
+    /// Runs the steps of [`the_filter_hint_follows_the_keymap`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`the_filter_hint_follows_the_keymap`] says.
+    fn the_filter_hint_follows_the_keymap_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (workspace, cx) = open(&app_state, cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.focus_panel::<FunctionsPanel>(window, cx);
+        });
+        let hint = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                FunctionsPanel::filter_hint(cx).keyboard_shortcut_text(window, cx)
+            })
+        };
+        let before = hint(cx);
+        assert!(before.is_some(), "the hint shows no binding");
+        cx.update(|_, cx| {
+            let rebound = gpui::KeyBinding::new("ctrl-alt-9", FocusFilter, Some("Workspace"));
+            cx.bind_keys([rebound]);
+        });
+        let after = hint(cx);
+        assert_ne!(after, before);
+        assert!(
+            after.as_ref().is_some_and(|text| text.ends_with('9')),
+            "{after:?}"
         );
     }
 }

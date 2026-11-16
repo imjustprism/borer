@@ -1,7 +1,7 @@
 //! The binary a window has open: its background load, its load status, and the status-bar
 //! item that shows that status.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui::{
@@ -22,6 +22,8 @@ pub struct Binary {
     loaded: Option<Arc<LoadedBinary>>,
     /// Error text of the most recent failed load.
     error: Option<String>,
+    /// The file a running load reads, `None` once it finished or before any.
+    reading: Option<PathBuf>,
     /// Status line the status bar shows.
     status: String,
     /// Generation and cancel flag of the running load.
@@ -45,6 +47,7 @@ impl Default for Binary {
         Self {
             loaded: None,
             error: None,
+            reading: None,
             status: format!("Open a binary ({LOAD_SCOPE_NOTE})"),
             epoch: TaskEpoch::new(),
             load_task: None,
@@ -64,6 +67,12 @@ impl Binary {
     #[must_use]
     pub fn load_error(&self) -> Option<&str> {
         self.error.as_deref()
+    }
+
+    /// Returns the file the running load reads, `None` when no load runs.
+    #[must_use]
+    pub fn reading(&self) -> Option<&Path> {
+        self.reading.as_deref()
     }
 
     /// Returns the status line of the load.
@@ -127,6 +136,7 @@ impl Binary {
         let (ticket, worker_cancel) = self.epoch.begin();
         let check_cancel = worker_cancel.clone();
         self.status = format!("loading {} ({LOAD_SCOPE_NOTE})", path.display());
+        self.reading = Some(path.clone());
         cx.notify();
         let bg = spawn_engine(cx, move || {
             worker_cancel.within(|| load_binary_blocking(path))
@@ -155,6 +165,7 @@ impl Binary {
         result: anyhow::Result<Arc<LoadedBinary>>,
         cx: &mut Context<'_, Self>,
     ) {
+        self.reading = None;
         match result {
             Ok(loaded) => {
                 let rows = &loaded.initial_rows;

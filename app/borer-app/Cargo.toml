@@ -39,6 +39,7 @@ ui.workspace = true
 ui_input.workspace = true
 util.workspace = true
 workspace.workspace = true
+zed_actions.workspace = true
 
 [dev-dependencies]
 db = { workspace = true, features = ["test-support"] }

@@ -7,16 +7,18 @@ use std::sync::Arc;
 
 use borer_engine::view::{Ref, View};
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, Font,
-    InteractiveElement as _, InteractiveText, IntoElement, ParentElement as _, Pixels, Render,
-    ScrollStrategy, SharedString, Styled as _, StyledText, Subscription, Task,
+    AnyElement, App, AppContext as _, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
+    Font, FontWeight, InteractiveElement as _, InteractiveText, IntoElement, ParentElement as _,
+    Pixels, Render, ScrollStrategy, SharedString, Styled as _, StyledText, Subscription, Task,
     UniformListScrollHandle, WeakEntity, Window, div, px, uniform_list,
 };
 use settings::{Settings as _, SettingsStore};
 use theme::{ActiveTheme as _, GlobalTheme};
 use theme_settings::ThemeSettings;
+use ui::{Color, Label, LabelCommon as _, v_flex};
 use workspace::{Item, ItemNavHistory, Pane, Workspace};
 
+use crate::actions::{BACK_HINT, hint_row};
 use crate::app_view::open_dropped;
 use crate::code_view::{ClickOutcome, CodeLines, CodePalette, resolve_ref_click, style_view_line};
 use crate::worker::{LoadedBinary, TaskEpoch, decompile_blocking, spawn_engine};
@@ -72,6 +74,9 @@ impl CodeStyle {
         }
     }
 }
+
+/// Corner radius in logical pixels of the card a failed decompile shows.
+const CARD_RADIUS_PX: f32 = 6.0;
 
 /// Left padding in logical pixels before the text of each decompile line.
 pub const CODE_PAD_PX: f32 = 8.0;
@@ -483,6 +488,50 @@ fn build_interactive_line(
     })
 }
 
+/// Returns what a tab says when the engine decompiles nothing at `entry`, true of every
+/// reason it can have: no function there, no lifter for the code, an answer too large.
+///
+/// # Arguments
+///
+/// * `entry` - Entry the tab asked the engine for.
+#[must_use]
+pub fn no_decompile(entry: u64) -> String {
+    format!("borer has no decompile for {entry:#x}")
+}
+
+/// Returns the card a tab shows when the engine decompiles nothing at `entry`.
+///
+/// It is a raised card whose label alone is in the error color, then what is true of every
+/// way the engine answers nothing, then the way back.
+///
+/// # Arguments
+///
+/// * `entry` - Entry the tab asked the engine for.
+/// * `cx` - Application context reading the theme and the keymap.
+fn failure_card(entry: u64, cx: &App) -> Div {
+    let colors = cx.theme().colors();
+    v_flex()
+        .m(px(12.0))
+        .p(px(8.0))
+        .gap_1()
+        .rounded(px(CARD_RADIUS_PX))
+        .border_1()
+        .border_color(colors.border)
+        .bg(colors.surface_background)
+        .font(ThemeSettings::get_global(cx).ui_font.clone())
+        .child(
+            Label::new("Decompile failed")
+                .weight(FontWeight::SEMIBOLD)
+                .color(Color::Error),
+        )
+        .child(
+            Label::new(no_decompile(entry))
+                .buffer_font(cx)
+                .color(Color::Muted),
+        )
+        .child(hint_row(BACK_HINT, cx))
+}
+
 /// Shows the function at `entry` of `loaded` in the workspace's active pane: activates its
 /// tab when one is open, else opens one as `mode` says.
 ///
@@ -629,22 +678,23 @@ impl Render for DecompileItem {
             (colors.editor_background, colors.text, colors.text_muted)
         };
         let line_count = self.code.as_ref().map_or(0, |c| c.len());
-        let body = if line_count > 0 {
-            uniform_list("code-view", line_count, cx.processor(Self::render_rows))
+        let body = match (line_count, self.decompiling, self.entry) {
+            (1.., _, _) => uniform_list("code-view", line_count, cx.processor(Self::render_rows))
                 .track_scroll(&self.scroll)
                 .size_full()
-                .into_any_element()
-        } else {
-            let note = match (self.decompiling, self.entry) {
-                (true, _) => SharedString::from("Decompiling..."),
-                (false, Some(entry)) => format!("No function starts at {entry:#x}.").into(),
-                (false, None) => SharedString::from("No lines."),
-            };
-            div()
+                .into_any_element(),
+            (0, false, Some(entry)) if self.code.is_none() => {
+                failure_card(entry, cx).into_any_element()
+            }
+            (0, decompiling, _) => div()
                 .p(px(12.0))
                 .text_color(muted)
-                .child(note)
-                .into_any_element()
+                .child(if decompiling {
+                    "Decompiling..."
+                } else {
+                    "No lines."
+                })
+                .into_any_element(),
         };
         div()
             .track_focus(&self.focus_handle)
