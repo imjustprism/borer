@@ -37,6 +37,7 @@ pub mod status;
 pub mod table;
 pub mod tables;
 pub mod theme_contract;
+pub mod theme_picker;
 pub mod title_bar;
 pub mod user_themes;
 pub mod worker;

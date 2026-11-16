@@ -86,6 +86,9 @@ gpui::actions!(
         ShowHex,
         /// Makes the hex tab's cursor follow the active code tab's function, or stop.
         LinkHex,
+        /// Opens the theme picker: moving the selection shows a theme, Enter keeps it in the
+        /// app's settings file, and leaving puts back the one shown before.
+        SelectTheme,
     ]
 );
 

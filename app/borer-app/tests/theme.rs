@@ -14,27 +14,30 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use borer_app::actions::{FollowSystemTheme, ToggleTheme};
+use borer_app::actions::{FollowSystemTheme, SelectTheme, ToggleTheme};
 use borer_app::app_settings::BORER_THEME;
 use borer_app::app_view::{configure, new_workspace};
 use borer_app::binary::{Binary, SettingsNotice, StatusLine};
 use borer_app::code_view::{CodePalette, Role};
 use borer_app::decompile_item::code_row_height;
+use borer_app::functions_panel::FunctionsPanel;
 use borer_app::shell::Shell;
 use borer_app::theme_contract::{
     Failure, GRADES, TEXT_FLOOR, check, contrast, grade_rules, syntax_color, text_floors,
 };
+use borer_app::theme_picker::ThemePicker;
 use borer_app::user_themes::{MAX_THEME_BYTES, MAX_THEME_ENTRIES, notice_id};
 use borer_engine::program::checked_metadata;
 use fs::Fs as _;
 use gpui::{
-    AppContext as _, BorrowAppContext as _, Entity, Hsla, Refineable as _, Rgba, TestAppContext,
-    VisualTestContext, px,
+    AppContext as _, BorrowAppContext as _, Entity, Hsla, ReadGlobal as _, Refineable as _, Rgba,
+    TestAppContext, VisualTestContext, px,
 };
 use project::DisableAiSettings;
 use settings::{BufferLineHeight, Settings as _, SettingsStore, ThemeAppearanceMode, ThemeColor};
 use theme::{
-    ActiveTheme as _, AppearanceContent, Theme, ThemeColors, ThemeColorsRefinement, ThemeRegistry,
+    ActiveTheme as _, Appearance, AppearanceContent, SystemAppearance, Theme, ThemeColors,
+    ThemeColorsRefinement, ThemeRegistry,
 };
 use theme_settings::{
     ThemeContent, ThemeSettings, deserialize_user_theme, refine_theme, status_colors_refinement,
@@ -701,4 +704,61 @@ async fn a_theme_name_has_one_file_and_leaves_with_it(cx: &mut TestAppContext) {
         .expect("removed");
     cx.run_until_parked();
     assert!(cx.update(|_, cx| ThemeRegistry::global(cx).get("mine dark").is_err()));
+}
+
+/// Opens the theme picker over `workspace` with [`SelectTheme`], types `query` into it and
+/// lets the preview land.
+fn pick(workspace: &Entity<Workspace>, query: &str, cx: &mut VisualTestContext) {
+    workspace.update_in(cx, |workspace, window, cx| {
+        workspace.focus_panel::<FunctionsPanel>(window, cx);
+    });
+    cx.dispatch_action(SelectTheme);
+    cx.run_until_parked();
+    let modal = workspace.read_with(cx, |workspace, cx| {
+        workspace.active_modal::<ThemePicker>(cx)
+    });
+    let picker = modal
+        .expect("the picker opens")
+        .read_with(cx, |modal, _| modal.picker().clone());
+    picker.update_in(cx, |picker, window, cx| picker.set_query(query, window, cx));
+    cx.run_until_parked();
+}
+
+/// The theme picker shows the theme a query selects at once; Enter keeps it in the dark
+/// slot of the settings file, the light slot and the mode kept; a picker left with escape
+/// puts back the theme shown before it.
+#[gpui::test]
+async fn the_theme_picker_previews_keeps_and_puts_back(cx: &mut TestAppContext) {
+    let mine = paths::themes_dir().join("mine.json");
+    let files = [(
+        mine.as_path(),
+        Some(family("mine", "mine dark", "dark", "{}")),
+    )];
+    let app_state = boot_with_files(&files, cx).await;
+    let (workspace, cx) = open_window(&app_state, cx);
+    cx.update(|_, cx| *SystemAppearance::global_mut(cx) = SystemAppearance(Appearance::Dark));
+    pick(&workspace, "mine", cx);
+    assert_eq!(shown(cx), "mine dark");
+    cx.dispatch_action(menu::Confirm);
+    cx.run_until_parked();
+    let kept = cx.update(|_, cx| {
+        let user = SettingsStore::global(cx).raw_user_settings()?;
+        user.content.theme.theme.clone()
+    });
+    assert!(
+        matches!(&kept, Some(settings::ThemeSelection::Dynamic { mode, light, dark })
+            if *mode == ThemeAppearanceMode::System
+                && &*light.0 == "borer light"
+                && &*dark.0 == "mine dark"),
+        "{kept:?}"
+    );
+    pick(&workspace, "borer light", cx);
+    assert_eq!(shown(cx), "borer light");
+    cx.dispatch_action(menu::Cancel);
+    cx.run_until_parked();
+    assert_eq!(shown(cx), "mine dark");
+    let open = workspace.read_with(cx, |workspace, cx| {
+        workspace.active_modal::<ThemePicker>(cx).is_some()
+    });
+    assert!(!open);
 }

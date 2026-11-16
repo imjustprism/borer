@@ -9,7 +9,9 @@ use std::sync::{Arc, OnceLock};
 use anyhow::Context as _;
 use borer_engine::program::checked_metadata;
 use gpui::{App, BorrowAppContext as _, SharedString};
-use settings::{ParseStatus, Settings as _, SettingsFile, SettingsStore, ThemeAppearanceMode};
+use settings::{
+    ParseStatus, Settings as _, SettingsContent, SettingsFile, SettingsStore, ThemeAppearanceMode,
+};
 use theme::{ActiveTheme as _, Appearance, ThemeRegistry};
 use theme_settings::ThemeSettings;
 
@@ -237,6 +239,75 @@ fn change_theme(change: ThemeChange, cx: &mut App) {
         });
     })
     .detach();
+}
+
+/// Writes `edit` to the person's settings file through Zed's settings store, which applies
+/// it, and puts a failure on the status line as `what` not saved.
+///
+/// # Arguments
+///
+/// * `what` - What the edit saves, to name in a failure.
+/// * `edit` - The change to the settings file's content.
+/// * `cx` - Application context.
+pub(crate) fn save_settings(
+    what: &'static str,
+    edit: impl FnOnce(&mut SettingsContent) + Send + 'static,
+    cx: &mut App,
+) {
+    if let Err(err) = check_settings_path(paths::settings_file()) {
+        let why = format!("{what} not saved: {err:#}");
+        cx.set_global(SettingsNotice(Some(why.into())));
+        return;
+    }
+    let fs = <dyn fs::Fs>::global(cx);
+    let done = settings::update_settings_file_with_completion(fs, cx, |content, _| edit(content));
+    cx.spawn(async move |cx| {
+        let done = done.await;
+        cx.update(|cx| {
+            let notice = match done {
+                Ok(Ok(())) => file_notice(cx),
+                Ok(Err(err)) => Some(format!("{what} not saved: {err:#}").into()),
+                Err(_) => Some(format!("{what} not saved: Zed's settings writer stopped").into()),
+            };
+            cx.set_global(SettingsNotice(notice));
+        });
+    })
+    .detach();
+}
+
+/// Returns `current` with `name` chosen as Zed's theme selector chooses it.
+///
+/// The light or dark slot is picked by `appearance`, and the mode is kept unless keeping
+/// it would not show `name` under the `system` appearance; a single named theme is
+/// replaced.
+///
+/// # Arguments
+///
+/// * `current` - The theme selection in force, as Zed's theme settings hold it.
+/// * `name` - The chosen theme's name.
+/// * `appearance` - The chosen theme's appearance.
+/// * `system` - The system's appearance.
+///
+/// # Returns
+///
+/// The selection as a settings file holds it.
+#[must_use]
+pub fn choose_theme(
+    current: &theme_settings::ThemeSelection,
+    name: &str,
+    appearance: Appearance,
+    system: Appearance,
+) -> settings::ThemeSelection {
+    let current = match current.clone() {
+        theme_settings::ThemeSelection::Static(theme) => settings::ThemeSelection::Static(theme),
+        theme_settings::ThemeSelection::Dynamic { mode, light, dark } => {
+            settings::ThemeSelection::Dynamic { mode, light, dark }
+        }
+    };
+    let mut content = SettingsContent::default();
+    content.theme.theme = Some(current.clone());
+    theme_settings::set_theme(&mut content, name, appearance, system);
+    content.theme.theme.unwrap_or(current)
 }
 
 /// Returns the theme mode the person's settings layer holds, if it holds a pair.

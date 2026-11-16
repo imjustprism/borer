@@ -572,6 +572,16 @@ pub const COMMANDS: &[Command] = &[
         Need::Nothing,
     ),
     Command {
+        keys: &[Keys::all(Ctx::Workspace, &["secondary-k secondary-t"])],
+        replaces: &["theme_selector::Toggle"],
+        ..item(
+            "borer::SelectTheme",
+            "Select Theme...",
+            (MenuName::View, 3),
+            Need::Nothing,
+        )
+    },
+    Command {
         keys: &[
             Keys::all(Ctx::Code, &["g"]),
             Keys::all(Ctx::Hex, &["g"]),
