@@ -124,6 +124,7 @@ fn a_project_of_a_million_fields_typed_down_a_chain_is_refused() {
 /// field to a depth cap: `3^33` steps.
 #[test]
 fn a_struct_holding_itself_is_refused_and_a_declaration_over_it_ends() {
+    let _guard = super::serial();
     let held = UserStruct {
         size: 24,
         fields: (0..3u64)
@@ -164,6 +165,7 @@ fn a_struct_holding_itself_is_refused_and_a_declaration_over_it_ends() {
 /// steps.
 #[test]
 fn a_declaration_over_a_project_of_deep_structs_ends() {
+    let _guard = super::serial();
     let types = (0..7u32)
         .map(|k| {
             let ty = match k {

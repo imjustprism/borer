@@ -18,12 +18,11 @@
     reason = "assertions are the point of a test"
 )]
 
-use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use borer_engine::program::{FileOff, Program, Section, SymbolKind, read_regular};
 use borer_engine::{analysis::Analysis, num::from_usize};
+use heap::{measured, serial};
 
 #[path = "common/elfgen.rs"]
 #[expect(dead_code, reason = "writer helpers serve integration tests")]
@@ -33,6 +32,8 @@ mod elfgen;
 #[expect(dead_code, reason = "writer helpers serve integration tests")]
 mod machogen;
 
+#[path = "hostile/heap.rs"]
+mod heap;
 #[path = "hostile/lift.rs"]
 mod lift;
 #[path = "hostile/names.rs"]
@@ -41,89 +42,6 @@ mod names;
 mod pdb;
 #[path = "hostile/projects.rs"]
 mod projects;
-
-/// Live heap bytes, kept by [`Counting`].
-static LIVE: AtomicUsize = AtomicUsize::new(0);
-/// Highest [`LIVE`] since the last [`measured`] began.
-static PEAK: AtomicUsize = AtomicUsize::new(0);
-/// One test at a time, since the counters are process-wide.
-static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// The system allocator with a live-bytes counter and a high-water mark.
-struct Counting;
-
-/// Adds `n` live bytes and raises the peak.
-fn bump(n: usize) {
-    let now = LIVE.fetch_add(n, Ordering::Relaxed) + n;
-    PEAK.fetch_max(now, Ordering::Relaxed);
-}
-
-#[expect(
-    unsafe_code,
-    reason = "a global allocator is the one way to measure what a load allocates"
-)]
-// SAFETY: every method forwards to `System` unchanged and only counts bytes.
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: the caller's `alloc` contract is passed on unchanged.
-        let p = unsafe { System.alloc(layout) };
-        if !p.is_null() {
-            bump(layout.size());
-        }
-        p
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: the caller's `alloc_zeroed` contract is passed on unchanged.
-        let p = unsafe { System.alloc_zeroed(layout) };
-        if !p.is_null() {
-            bump(layout.size());
-        }
-        p
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: `ptr` came from `System` through this allocator with `layout`.
-        unsafe { System.dealloc(ptr, layout) };
-        LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        // SAFETY: `ptr` came from `System` through this allocator with `layout`.
-        let p = unsafe { System.realloc(ptr, layout, new_size) };
-        if !p.is_null() {
-            LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
-            bump(new_size);
-        }
-        p
-    }
-}
-
-#[global_allocator]
-static GLOBAL: Counting = Counting;
-
-/// Runs `f` and reports the most heap it held beyond what was live before.
-///
-/// # Arguments
-///
-/// * `f` - The work to measure.
-///
-/// # Returns
-///
-/// The result and the extra bytes at the peak.
-fn measured<T>(f: impl FnOnce() -> T) -> (T, usize) {
-    let before = LIVE.load(Ordering::Relaxed);
-    PEAK.store(before, Ordering::Relaxed);
-    let out = f();
-    (out, PEAK.load(Ordering::Relaxed).saturating_sub(before))
-}
-
-/// Takes the serial lock, poisoned or not.
-fn serial() -> std::sync::MutexGuard<'static, ()> {
-    SERIAL
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
 
 /// Where the headers end and the first section's bytes begin.
 const HEADERS: usize = 0x400;
@@ -1218,6 +1136,7 @@ fn fields_the_loader_ignores_do_not_refuse_the_file() {
 /// stops at the first entry the file cannot hold.
 #[test]
 fn a_fat_header_counting_past_the_file_stops_at_the_end() {
+    let _serial = serial();
     let bytes = vec![0xca, 0xfe, 0xba, 0xbe, 0xfa, 0xfe, 0, 0, 0, 0, 1, 0, 0, 0];
     let err = Program::from_bytes(PathBuf::from("fat"), bytes).expect_err("no slice fits");
     assert!(err.to_string().contains("names no slice"), "{err}");
@@ -1230,6 +1149,7 @@ fn a_fat_header_counting_past_the_file_stops_at_the_end() {
 /// skipped, one at a time, for 23 seconds.
 #[test]
 fn a_symbol_count_past_the_file_stops_at_the_end() {
+    let _serial = serial();
     let mut bytes = vec![
         0xfe, 0xed, 0xfa, 0xce, 0xc2, 0x00, 0x3e, 0x4d, 0xce, 0x44, 0x00, 0x7e, 0x44, 0x4d, 0x50,
         0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x14, 0xca, 0x5b, 0x4b, 0xed, 0x00, 0x00,
@@ -1254,6 +1174,7 @@ fn a_symbol_count_past_the_file_stops_at_the_end() {
 /// hold.
 #[test]
 fn a_section_count_past_the_file_stops_at_the_end() {
+    let _serial = serial();
     let bytes = vec![
         0xce, 0xfa, 0xed, 0xfe, 0xd6, 0x00, 0x01, 0x00, 0x21, 0x3c, 0x61, 0x72, 0x63, 0x68, 0x3e,
         0x0a, 0x04, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x01, 0x00,
@@ -1287,6 +1208,7 @@ fn a_section_count_past_the_file_stops_at_the_end() {
 /// it as the file's length minus an offset beyond it, and overflowed.
 #[test]
 fn an_empty_section_past_the_file_is_not_cut() {
+    let _serial = serial();
     let bytes = vec![
         0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x2f, 0x2f, 0xca, 0xfe, 0xba, 0xbe, 0xfe, 0xba, 0x89,
         0x88, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x20,
@@ -1515,6 +1437,7 @@ fn a_deep_text_is_warned_about_on_a_small_stack() {
 /// once a line, quadratic in the name.
 #[test]
 fn a_name_of_blank_lines_is_fenced_in_one_pass() {
+    let _serial = serial();
     /// Blank lines before the turn.
     const LINES: usize = 200_000;
     let name = format!("{}Human: hi", "\n".repeat(LINES));
@@ -1542,6 +1465,7 @@ fn a_name_of_blank_lines_is_fenced_in_one_pass() {
 /// discovery overflowed adding the section's size to its start.
 #[test]
 fn a_minidump_range_at_the_top_of_the_address_space_is_skipped() {
+    let _serial = serial();
     let bytes = vec![
         0x4d, 0x44, 0x4d, 0x50, 0x00, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x5b,
@@ -1577,6 +1501,7 @@ const IMAGE_BASE_AT: usize = PE_AT + 4 + 20 + 24;
 /// its size to its start.
 #[test]
 fn a_pe_section_past_the_top_of_the_address_space_is_dropped() {
+    let _serial = serial();
     let mut bytes = pe(
         &[
             Sec::sound(".text", 0x1000, text(), CODE),
@@ -1601,6 +1526,7 @@ fn a_pe_section_past_the_top_of_the_address_space_is_dropped() {
 /// would pass the top of the address space.
 #[test]
 fn a_flat_image_past_the_top_of_the_address_space_is_not_mapped() {
+    let _serial = serial();
     let mut bytes = pe(&[Sec::sound(".text", 0x1000, text(), CODE)], &[]);
     put64(&mut bytes, IMAGE_BASE_AT, u64::MAX - 0x1ff);
     let p = load(bytes);
@@ -1619,6 +1545,7 @@ fn a_flat_image_past_the_top_of_the_address_space_is_not_mapped() {
 /// refuse bytes the file holds and to answer address 0.
 #[test]
 fn a_raw_section_whose_extent_wraps_reads_without_overflow() {
+    let _serial = serial();
     let x64 = borer_engine::program::Arch::X86_64;
     let raw = |s: Section| Program::raw(vec![0x5a; 0x40], x64, 0, Some(0x1000), vec![s]);
     let stated = |va: u64, file_off: u64, file_size: u64| Section {
@@ -1649,6 +1576,7 @@ fn a_raw_section_whose_extent_wraps_reads_without_overflow() {
 /// 1, so the list reads the same in either order of the two.
 #[test]
 fn a_read_at_the_top_of_a_minidump_range_is_refused() {
+    let _serial = serial();
     let mut d = vec![0u8; 0x300];
     d[..4].copy_from_slice(b"MDMP");
     put32(&mut d, 8, 3);
@@ -1680,6 +1608,7 @@ fn a_read_at_the_top_of_a_minidump_range_is_refused() {
 /// it map nothing.
 #[test]
 fn a_memory64_list_counting_every_range_maps_what_the_file_holds() {
+    let _serial = serial();
     let mut d = vec![0u8; 0x80];
     d[..4].copy_from_slice(b"MDMP");
     put32(&mut d, 8, 1);
@@ -1729,6 +1658,7 @@ fn load_at_the_top(secs: &[Sec], dirs: &[(usize, u32, u32)]) -> Program {
 /// fourth, whose record no section holds, keeps its range.
 #[test]
 fn an_exception_table_at_the_top_of_the_address_space_keeps_what_fits() {
+    let _serial = serial();
     const PDATA: u32 = 0x2000;
     let mut code = text();
     code.copy_within(..6, 0x20);
@@ -1771,6 +1701,7 @@ fn an_exception_table_at_the_top_of_the_address_space_keeps_what_fits() {
 /// below it, and so does the second image's table.
 #[test]
 fn base_relocations_past_the_top_of_the_address_space_are_skipped() {
+    let _serial = serial();
     const RELOC: u32 = 0x2000;
     let mut reloc = vec![0u8; 0x200];
     for (at, page, entry) in [
@@ -1806,6 +1737,7 @@ fn base_relocations_past_the_top_of_the_address_space_are_skipped() {
 /// top, so the jump stays unresolved and the function is still found.
 #[test]
 fn a_jump_table_of_rvas_past_the_top_of_the_address_space_is_not_read() {
+    let _serial = serial();
     let mut code = vec![0xcc_u8; 0x200];
     code[..2].copy_from_slice(&[0x89, 0xc8]); // ASM: mov eax, ecx
     code[2..5].copy_from_slice(&[0x83, 0xf8, 0x03]); // ASM: cmp eax, 3
@@ -1885,6 +1817,7 @@ fn a_pdb_applied_at_the_top_of_the_address_space_names_what_fits() {
 /// and written over the slot the section table maps.
 #[test]
 fn a_fixup_whose_file_offset_wraps_is_refused() {
+    let _serial = serial();
     use machogen::{Fix, Sect, Seg, Starts};
     /// Where `__TEXT` is mapped: the image base.
     const TEXT: u64 = 0x1_0000_0000;

@@ -22,6 +22,7 @@ use borer_engine::program::{Arch, Program, Section, Symbol, SymbolKind};
 /// passes only by a word.
 #[test]
 fn a_stack_move_past_the_offset_range_decompiles() {
+    let _serial = super::serial();
     let after = |imm: u64, rest: &[u8]| {
         let mut code = vec![0x48, 0xb8]; // ASM: mov rax, imm
         code.extend(imm.to_le_bytes());
@@ -114,6 +115,7 @@ fn a_stack_move_past_the_offset_range_decompiles() {
 /// overflowing the TLS base.
 #[test]
 fn a_thread_local_slot_past_the_top_decompiles() {
+    let _serial = super::serial();
     let code = [
         0x65, 0x48, 0x8b, 0x04, 0x25, 0x58, 0x00, 0x00, 0x00, // ASM: mov rax, gs:[0x58]
         0x48, 0x8b, 0x04, 0xd0, // ASM: mov rax, [rax+rdx*8]
