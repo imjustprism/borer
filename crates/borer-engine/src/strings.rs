@@ -223,13 +223,38 @@ impl RawStringSpan {
     /// The text, empty when the run no longer stands in `bytes`.
     #[must_use]
     pub fn whole_text(self, bytes: &[u8]) -> std::borrow::Cow<'_, str> {
+        match self.encoding {
+            Encoding::Ascii => String::from_utf8_lossy(self.raw_bytes(bytes)),
+            Encoding::Utf16 | Encoding::DotnetUs => {
+                let mut text = String::new();
+                self.push_text(bytes, &mut text);
+                std::borrow::Cow::Owned(text)
+            }
+        }
+    }
+
+    /// Appends the span's whole text to `out`, as [`RawStringSpan::whole_text`]
+    /// spells it, with no allocation of its own: a UTF-16 run's units' low
+    /// bytes, each a character, one that is not ASCII as U+FFFD.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The bytes the span was walked from.
+    /// * `out` - Receives the text; nothing when the run no longer stands
+    ///   in `bytes`.
+    pub fn push_text(self, bytes: &[u8], out: &mut String) {
         let raw = self.raw_bytes(bytes);
         match self.encoding {
-            Encoding::Ascii => String::from_utf8_lossy(raw),
-            Encoding::Utf16 | Encoding::DotnetUs => std::borrow::Cow::Owned(
-                String::from_utf8_lossy(&raw.iter().step_by(2).copied().collect::<Vec<u8>>())
-                    .into_owned(),
-            ),
+            Encoding::Ascii => out.push_str(&String::from_utf8_lossy(raw)),
+            Encoding::Utf16 | Encoding::DotnetUs => {
+                out.extend(raw.iter().step_by(2).map(|&b| {
+                    if b.is_ascii() {
+                        char::from(b)
+                    } else {
+                        char::REPLACEMENT_CHARACTER
+                    }
+                }));
+            }
         }
     }
 }
@@ -273,9 +298,15 @@ impl StringHit {
                 .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
                 .collect(),
             ),
-            (Some(raw), Encoding::Ascii | Encoding::Utf16) => {
-                let text: Vec<u8> = raw.iter().step_by(units).copied().collect();
-                std::borrow::Cow::Owned(String::from_utf8_lossy(&text).into_owned())
+            (Some(_), Encoding::Ascii | Encoding::Utf16) => {
+                let span = RawStringSpan {
+                    off: self.off,
+                    len: u32::try_from(self.len).unwrap_or(u32::MAX),
+                    encoding: self.encoding,
+                };
+                let mut text = String::new();
+                span.push_text(bytes, &mut text);
+                std::borrow::Cow::Owned(text)
             }
             (None, _) => std::borrow::Cow::Borrowed(&self.text),
         }
