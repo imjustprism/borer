@@ -277,7 +277,7 @@ jobs:
       # lands without them.
       - name: notes
         run: |
-          prev=$(git describe --tags --abbrev=0 "$GITHUB_REF_NAME^" 2>/dev/null || true)
+          prev=$(git describe --tags --abbrev=0 --match 'v*' "$GITHUB_REF_NAME^" 2>/dev/null || true)
           range="${prev:+$prev..}$GITHUB_REF_NAME"
           git log --format=%s "$range" | awk '
             { t = $0; sub(/:.*/, "", t); s = $0; sub(/^[^:]*: /, "", s)
