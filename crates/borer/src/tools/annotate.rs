@@ -241,7 +241,8 @@ impl BorerServer {
     /// function, `type` is its prototype as C
     /// ([`borer_engine::analysis::protos::Proto`]), which its signature,
     /// its body and every call to it follow; with `var` (`a1`, `local_58`,
-    /// or a name stated before), `name` and an optional `type` name and
+    /// a name the debug information gives, or a name stated before),
+    /// `name` and an optional `type` name and
     /// type that variable, and a `var` spelling an unnamed field
     /// (`field_0x270`) states that field of the function's class
     /// ([`edit::Edit::Var`]). `type` alone is C declarations, laid

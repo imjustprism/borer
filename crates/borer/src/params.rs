@@ -636,7 +636,7 @@ pub(crate) struct SetTypeParams {
     pub(crate) address: Option<String>,
     /// Type to apply or typedef (`Player *`), a prototype, or alone C declarations.
     pub(crate) r#type: Option<String>,
-    /// Variable or field to name/type (`a1`, `local_58`, `field_0x10`).
+    /// Variable or field to name/type (`a1`, `local_58`, a debug-info name, `field_0x10`).
     pub(crate) var: Option<String>,
     /// False applies.
     pub(crate) dry_run: Option<bool>,
