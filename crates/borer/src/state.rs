@@ -203,27 +203,6 @@ impl BorerServer {
         self.loaded().ok_or_else(|| err_params(NO_BINARY))
     }
 
-    /// The analysis, for a test that reads one outside a tool body and
-    /// needs `feature` of the program's code.
-    ///
-    /// # Arguments
-    ///
-    /// * `feature` - The stage the resource reads ([`Program::refuses`]).
-    ///
-    /// # Errors
-    ///
-    /// Invalid params when no binary is loaded or the engine does not do
-    /// `feature` with its architecture, as [`Self::with_analysis`] refuses
-    /// both: the request came too early or asked the wrong file, and the
-    /// server did not fail.
-    #[cfg(test)]
-    pub(crate) fn analysis(&self, feature: Feature) -> Result<Arc<Analysis>, ErrorData> {
-        if let Some(why) = self.require_loaded()?.refuses(feature) {
-            return Err(err_params(why));
-        }
-        self.ensure_analysis().map_err(err_params)
-    }
-
     /// Runs `f` against the loaded program.
     ///
     /// A fault in an analysis pass would unwind out of the handler and take
@@ -1046,7 +1025,6 @@ mod tests {
     fn an_analysis_of_a_program_loaded_over_is_not_kept() {
         use crate::testing::load_raw;
         use borer_engine::analysis::Analysis;
-        use borer_engine::program::Feature;
         /// Functions in the big program, each calling the next.
         const CHAINED: usize = 60_000;
         let dir = std::env::temp_dir().join(format!("borer-loaded-over-{}", std::process::id()));
@@ -1065,11 +1043,7 @@ mod tests {
         let load = |path: &std::path::Path| load_raw(&server, path, "0x10000");
         load(&big).expect("the big program loads");
         std::thread::scope(|s| {
-            let first = s.spawn(|| {
-                server
-                    .analysis(Feature::Discover)
-                    .map(|a| a.functions.len())
-            });
+            let first = s.spawn(|| server.ensure_analysis().map(|a| a.functions.len()));
             std::thread::sleep(std::time::Duration::from_millis(300));
             load(&small).expect("the small program loads");
             let first = first.join().expect("the first analysis ends");

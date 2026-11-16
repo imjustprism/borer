@@ -1006,9 +1006,7 @@ mod tests {
             }))
             .expect("batch");
         assert!(!batch.contains("checked vs binary"), "{batch}");
-        let a = server
-            .analysis(borer_engine::program::Feature::Decompile)
-            .expect("analyzed");
+        let a = server.ensure_analysis().expect("analyzed");
         let plain = server
             .with_program(|p| {
                 borer_engine::analysis::decompile::decompile_named(p, &a, &server.overlay(), 0x1000)
@@ -1032,7 +1030,7 @@ mod tests {
     fn a_decompile_answer_is_the_engine_answer_paged() {
         use crate::params::{DecompileParams, Detail};
         use borer_engine::analysis::decompile;
-        use borer_engine::program::{Arch, Feature};
+        use borer_engine::program::Arch;
         use rmcp::handler::server::wrapper::Parameters;
         let mut code = vec![
             0x81, 0xf9, 0xcd, 0xab, 0x37, 0x13, // ASM: cmp ecx, 0x1337abcd
@@ -1052,7 +1050,7 @@ mod tests {
                     limit: None,
                 }))
                 .expect("decompiles");
-            let a = server.analysis(Feature::Decompile).expect("analyzed");
+            let a = server.ensure_analysis().expect("analyzed");
             let engine = server
                 .with_program(|p| {
                     let detail = detail.unwrap_or_default().into();

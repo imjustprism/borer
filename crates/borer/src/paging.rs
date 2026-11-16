@@ -108,17 +108,6 @@ impl Asked {
             again,
         }
     }
-
-    /// A spec that pages itself by `offset=` and `limit=` words, with the
-    /// page asked for added ([`Page::spec_words`]).
-    ///
-    /// # Arguments
-    ///
-    /// * `spec` - The resource's argument, empty for none.
-    #[cfg(test)]
-    pub(crate) fn spec_words(&self, spec: &str) -> String {
-        self.page("").spec_words(spec)
-    }
 }
 
 #[cfg(test)]
@@ -142,7 +131,10 @@ mod tests {
         );
         assert_eq!(a.key(), "borer://calls/f,a2!=0!offset=10!limit=5");
         assert_eq!(a.again(), "borer://calls/f,a2!=0!limit=5");
-        assert_eq!(a.spec_words("f,a2!=0"), "f,a2!=0,offset=10,limit=5");
+        assert_eq!(
+            a.page("").spec_words("f,a2!=0"),
+            "f,a2!=0,offset=10,limit=5"
+        );
         let b = read("borer://attrs!offset=200!since=0000abcd!fresh");
         assert_eq!(
             (b.core.as_str(), b.offset, b.since),
@@ -158,7 +150,10 @@ mod tests {
         ] {
             assert!(Asked::read(bad).is_err(), "{bad}");
         }
-        assert_eq!(read("borer://iocs!offset=3").spec_words(""), "offset=3");
+        assert_eq!(
+            read("borer://iocs!offset=3").page("").spec_words(""),
+            "offset=3"
+        );
     }
 
     /// An escaped experiment spec decodes to the same spec sent plainly.

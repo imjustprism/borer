@@ -28,7 +28,7 @@ fn a_rename_lets_go_of_the_text_read_under_the_old_names() {
     };
     let held = || {
         server
-            .analysis(borer_engine::program::Feature::Decompile)
+            .ensure_analysis()
             .expect("analyzed")
             .derived
             .held("plain_text")
@@ -82,9 +82,7 @@ fn a_rename_keeps_the_texts_that_did_not_read_the_name() {
             .expect("decompiles")
     };
     let derived = || {
-        let a = server
-            .analysis(borer_engine::program::Feature::Decompile)
-            .expect("analyzed");
+        let a = server.ensure_analysis().expect("analyzed");
         (a.derived.held("plain_text"), a.derived.builds())
     };
     let text = decompile();
