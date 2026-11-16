@@ -1089,21 +1089,60 @@ fn layout_text(q: &Ask<'_>) -> Result<String, String> {
 fn plan_calls(plan: &crate::analysis::apply::Plan) -> Vec<String> {
     let mut calls = Vec::new();
     if let crate::analysis::utypes::UserType::Struct(s) = &plan.ty {
-        let fields: Vec<String> = s
-            .fields
-            .iter()
-            .map(|(off, f)| format!("{off:#x}:{}:{}", f.name, f.ty.spell()))
-            .collect();
-        calls.push(serde_json::json!({
-            "name": plan.name, "fields": fields, "size": s.size, "dry_run": false,
+        calls.push(json(&StructCall {
+            dry_run: false,
+            fields: s
+                .fields
+                .iter()
+                .map(|(off, f)| format!("{off:#x}:{}:{}", f.name, f.ty.spell()))
+                .collect(),
+            name: &plan.name,
+            size: s.size,
         }));
     }
     calls.extend(plan.prototypes.iter().map(|(entry, proto)| {
-        serde_json::json!({
-            "address": format!("{entry:#x}"), "type": proto.spell(), "dry_run": false,
+        json(&PrototypeCall {
+            address: format!("{entry:#x}"),
+            dry_run: false,
+            ty: proto.spell(),
         })
     }));
     calls.iter().map(|c| format!("set_type {c}")).collect()
+}
+
+/// The `set_type` call that states a planned struct, its keys in the order
+/// written here whatever map the JSON writer keeps.
+#[derive(serde::Serialize)]
+struct StructCall<'a> {
+    /// Always false: the call applies.
+    dry_run: bool,
+    /// Each field as `offset:name:type`.
+    fields: Vec<String>,
+    /// The struct's name.
+    name: &'a str,
+    /// The struct's size in bytes.
+    size: u64,
+}
+
+/// The `set_type` call that states a planned prototype.
+#[derive(serde::Serialize)]
+struct PrototypeCall {
+    /// The function's entry, `0x` hex.
+    address: String,
+    /// Always false: the call applies.
+    dry_run: bool,
+    /// The prototype as C.
+    #[serde(rename = "type")]
+    ty: String,
+}
+
+/// Writes a call's arguments as one line of JSON.
+///
+/// # Arguments
+///
+/// * `call` - The arguments.
+fn json(call: &impl serde::Serialize) -> String {
+    serde_json::to_string(call).unwrap_or_default()
 }
 
 /// Parameters a scenario fixes: the argument's number and its value.
@@ -1360,6 +1399,12 @@ pub fn percent_decode(text: &str) -> String {
 mod tests {
     use std::num::NonZeroUsize;
 
+    /// The calls [`a_layout_plan_spells_its_calls_in_one_key_order`] reads.
+    const PINNED: [&str; 2] = [
+        r#"set_type {"dry_run":false,"fields":["0x10:f_10:u32"],"name":"Rec","size":20}"#,
+        r#"set_type {"address":"0x1000","dry_run":false,"type":"uint32_t (Rec *)"}"#,
+    ];
+
     use super::{Page, decompile, enum_row, need, read};
     use crate::analysis::{Analysis, Overlay};
     use crate::program::Program;
@@ -1450,5 +1495,26 @@ mod tests {
             read(&p, None, &o, file, Page::whole(file)),
             Some(Ok(_))
         ));
+    }
+
+    /// A layout's plan spells its `set_type` calls with their keys in one
+    /// order, whatever map the JSON writer keeps.
+    ///
+    /// # Panics
+    ///
+    /// When the plan does not read or a call's bytes differ.
+    #[test]
+    fn a_layout_plan_spells_its_calls_in_one_key_order() {
+        let p = Program::raw_x64(&[0x8b, 0x41, 0x10, 0xc3]);
+        let a = Analysis::compute(&p);
+        let uri = "borer://layout/0x1000,apply=Rec";
+        let text = read(&p, Some(&a), &Overlay::default(), uri, Page::whole(uri))
+            .expect("the engine answers it")
+            .expect("the plan reads");
+        let calls: Vec<&str> = text
+            .lines()
+            .filter(|l| l.starts_with("set_type "))
+            .collect();
+        assert_eq!(calls, PINNED, "{text}");
     }
 }
