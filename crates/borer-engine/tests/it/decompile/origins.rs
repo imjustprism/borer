@@ -2,11 +2,14 @@
 //! lifted code spells it, carried through the text passes.
 
 use super::*;
+use borer_engine::analysis::decompile::view::view;
 use borer_engine::analysis::decompile::{Detail, answer, answer_with_origins};
 
-/// The answer of one function of `code` at 0x140001000 and the block each
-/// of its lines stands for, checked to be the plain answer, one origin per
-/// line.
+/// Returns the answer of one function of `code` at 0x140001000 and the
+/// block each of its lines stands for.
+///
+/// The answer is checked to be the plain one, with one origin per line,
+/// some statement's block known, as its view reads them.
 ///
 /// # Arguments
 ///
@@ -26,7 +29,15 @@ fn traced(code: &[u8]) -> (String, Vec<Option<u64>>) {
         answer(&p, &a, &o, entry, Detail::Full).as_ref()
     );
     assert_eq!(lines.len(), text.lines().count(), "{text}");
-    let each = (0..lines.len()).map(|i| lines.line(i)).collect();
+    let shown = view(&p, &a, &o, entry).expect("a view");
+    assert!((0..shown.lines()).all(|i| shown.origin(i) == lines.line(i)));
+    let each: Vec<Option<u64>> = (0..lines.len()).map(|i| lines.line(i)).collect();
+    assert!(
+        text.lines()
+            .zip(&each)
+            .any(|(l, o)| o.is_some() && !l.trim().ends_with(':')),
+        "no statement's block is known:\n{text}"
+    );
     (text, each)
 }
 

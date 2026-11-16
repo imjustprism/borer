@@ -52,7 +52,8 @@ mod fields;
 use super::lexer::{Lex, Piece, scan};
 use super::line::{header_len, is_global_name, label_address};
 use super::{
-    Detail, answer, cir, ctext, declarations_end, defs, expr_render, helper, unit, virtual_callees,
+    answer_with_origins, cir, ctext, declarations_end, defs, expr_render, helper, unit,
+    virtual_callees,
 };
 use crate::analysis::attributes::global_addr;
 use crate::analysis::edit::var_key;
@@ -438,8 +439,11 @@ pub fn view_of(
 }
 
 /// Returns the view of the answer `decompile` gives for one function
-/// ([`answer()`] at [`Detail::Full`]), read once per function under the names
-/// in force through [`Analysis::derived`].
+/// ([`super::answer()`] at [`super::Detail::Full`]).
+///
+/// Each line comes with the block it stands for ([`answer_with_origins`]),
+/// read once per function under the names in force through
+/// [`Analysis::derived`].
 ///
 /// The view reads what its answer read and the spellings it looked up
 /// ([`view_of`]), so an edit carries it to the new names as it is
@@ -456,7 +460,7 @@ pub fn view_of(
 ///
 /// # Returns
 ///
-/// The view, or `None` when the function does not decompile ([`answer()`]),
+/// The view, or `None` when the function does not decompile ([`super::answer()`]),
 /// its answer reaches 4 GiB, or the caller's cancel flag is raised
 /// ([`Cancel`]).
 ///
@@ -492,8 +496,9 @@ pub fn view(
             overlay.fingerprint(),
             entry,
             || {
-                let text = answer(program, analysis, overlay, entry, Detail::Full)?;
-                view_of(program, analysis, overlay, entry, &text).map(Arc::new)
+                let (text, lines) = answer_with_origins(program, analysis, overlay, entry)?;
+                view_of(program, analysis, overlay, entry, &text)
+                    .map(|v| Arc::new(v.with_origins(lines)))
             },
             |v| {
                 v.as_deref().map_or(0, |v| {

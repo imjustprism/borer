@@ -10,13 +10,15 @@
 //! function decompiles to; the function listing view
 //! ([`crate::analysis::render::disasm_view`]) is written straight into a
 //! [`Sink`] alongside its text, and each of its instruction lines answers
-//! the address it shows ([`View::address`]).
+//! the address it shows ([`View::address`]). Each line of the decompile
+//! view answers the block it stands for ([`View::origin`]).
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 use std::ops::Range;
 use std::sync::Arc;
 
+use crate::analysis::decompile::Origins;
 use crate::analysis::protos::VarKey;
 
 /// What a token of a view is.
@@ -162,6 +164,9 @@ pub struct View {
     /// Whether [`View::instr_vas`] runs in address order, which
     /// [`View::line_of`] then searches by.
     ordered: bool,
+    /// The block each line stands for, read by [`View::origin`]; `None` for
+    /// a view of no decompiled text.
+    origins: Option<Arc<Origins>>,
 }
 
 /// The most uses of one referent [`View::uses`] returns.
@@ -397,8 +402,38 @@ impl View {
         self.instr_lines.get(k?).copied().map(wide)
     }
 
+    /// Returns the block a line of a decompiled text stands for.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The line, from 0.
+    ///
+    /// # Returns
+    ///
+    /// The start address of the one block whose lifted code spells the
+    /// line; `None` for a line no block is known to stand for (a header, a
+    /// declaration, a test or jump the emitter wrote, a line the text
+    /// passes wrote that no rule places), past the last line, and for every
+    /// line of a view of no decompiled text.
+    #[must_use]
+    pub fn origin(&self, i: usize) -> Option<u64> {
+        self.origins.as_deref().and_then(|o| o.line(i))
+    }
+
+    /// Returns the view with the block each of its lines stands for.
+    ///
+    /// # Arguments
+    ///
+    /// * `origins` - One origin per line of the view's text
+    ///   ([`crate::analysis::decompile::answer_with_origins`]).
+    #[must_use]
+    pub(crate) fn with_origins(mut self, origins: Arc<Origins>) -> Self {
+        self.origins = Some(origins);
+        self
+    }
+
     /// Returns the heap bytes the view holds: its text, lines, tokens,
-    /// referents and instruction addresses.
+    /// referents, instruction addresses and line origins.
     #[must_use]
     pub fn bytes(&self) -> usize {
         let names: usize = self
@@ -422,6 +457,7 @@ impl View {
             + size_of_val(&*self.defs)
             + size_of_val(&*self.instr_lines)
             + size_of_val(&*self.instr_vas)
+            + self.origins.as_deref().map_or(0, Origins::bytes)
             + names
     }
 
@@ -648,6 +684,7 @@ impl Builder {
             ordered: self.instr_vas.is_sorted(),
             instr_lines: self.instr_lines.into_boxed_slice(),
             instr_vas: self.instr_vas.into_boxed_slice(),
+            origins: None,
         })
     }
 }
