@@ -145,7 +145,7 @@ const WORKFLOW: &str = "borer: agent-native binary analysis (x86/x64 and arm64 P
      {callgraph} go deeper; {read} and {hexdump} read data. Every `address` accepts \
      0x-hex (always the address), a name (function, import, overlay), or bare \
      decimal digits; a name wins over bare text that also reads as a number, and one \
-     nothing matches is answered with the nearest names. {set_name}, {set_comment} \
+     nothing matches gets the nearest names. {set_name}, {set_comment} \
      (one opening with ? is an open question) and {set_type} (struct and class \
      fields decompile then names) annotate, dry-run by default; {save_project} \
      persists them. For anything no single tool answers, {script} runs a sandboxed \
@@ -154,7 +154,7 @@ const WORKFLOW: &str = "borer: agent-native binary analysis (x86/x64 and arm64 P
      Outputs are capped and paged; count_only and filter keep them small. An answer of \
      512 bytes or more carries `# since=<tag>` (a mermaid graph: `%% since=<tag>`); \
      the same request with \"since\": \"<tag>\" added (on a URI: !since=<tag>) answers \
-     with a one-line note if nothing changed, else only the changed lines. Every \
+     a one-line note if nothing changed, else only the changed lines. Every \
      answer's last line is `# evidence: <id>` naming it; \
      borer://session/evidence/<id> returns the text behind the id, the last 256 kept.";
 

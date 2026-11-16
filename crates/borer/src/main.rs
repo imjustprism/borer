@@ -744,14 +744,13 @@ impl BorerServer {
             ("opcodes", Some(spec)) => self.opcodes_text(&spec)?,
             ("opsends", filter) => self.opsends_text(filter.as_deref().unwrap_or(""))?,
             ("shape", Some(address)) => self.shape_text(&address)?,
-            ("messages", None) => return self.messages_text("", asked),
+            ("messages", _) => return self.messages_text(&all, asked),
             ("attrs", None) => return self.attrs_text("", asked),
             ("map", namespace) => self.map_text(namespace.as_deref().unwrap_or(""))?,
             ("about", Some(name)) => self.about_text(&name)?,
             ("changes", Some(path)) => self.changes_text(&path)?,
             ("ports", filter) => self.ports_text(filter.as_deref().unwrap_or(""))?,
             ("attrs", Some(filter)) => return self.attrs_text(&filter, asked),
-            ("messages", Some(filter)) => return self.messages_text(&filter, asked),
             ("anchors", Some(path)) => self.anchors_text(&path)?,
             ("function", Some(address)) => {
                 self.function_summary(Parameters(FunctionParams { address }))?
