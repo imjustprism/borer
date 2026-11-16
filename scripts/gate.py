@@ -582,7 +582,6 @@ def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[St
         Step(
             "dupes",
             [py, os.path.join("scripts", "check", "dupes.py")],
-            tool="npx",
             inputs=(
                 "crates/",
                 "app/",

@@ -1,12 +1,7 @@
 {
-  "format": ["rust"],
   "pattern": "{crates,app}/**/*.rs",
   "minTokens": 70,
   "minLines": 6,
   "maxLines": 100000,
-  "maxSize": "10mb",
-  "threshold": 0,
-  "reporters": ["console"],
-  "gitignore": true,
-  "silent": false
+  "maxSize": "10mb"
 }

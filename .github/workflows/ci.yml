@@ -76,7 +76,6 @@ jobs:
       - name: paths
         run: python3 scripts/check/paths.py
 
-      # jscpd@4.0.5, the version the script pins, through the runner's npx.
       - name: dupes
         run: python3 scripts/check/dupes.py
 
