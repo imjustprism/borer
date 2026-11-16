@@ -109,7 +109,7 @@ pub fn anti_analysis_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
     }
     format!(
         "# {}\n# technique                       sites  where\n{out}",
-        anti_summary(&sites, &imports).headline
+        anti_summary(&sites, &imports).1.headline
     )
 }
 
@@ -125,7 +125,39 @@ pub fn anti_analysis_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
 /// The verdict; `count` is the techniques and telling imports listed,
 /// `at` the first site of each instruction technique.
 pub fn anti_analysis_summary(p: &Program, a: &Analysis) -> Summary {
+    anti_analysis(p, a).1
+}
+
+/// Returns the anti-analysis verdict and the summary spelled from it.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis: functions and their blocks.
+pub(crate) fn anti_analysis(p: &Program, a: &Analysis) -> (Resistance, Summary) {
     anti_summary(&anti_sites(p, a), &anti_imports(p))
+}
+
+/// What the anti-analysis tells a program carries add up to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resistance {
+    /// Three strong techniques, a telling import, or one technique that
+    /// decides alone: the program resists being watched.
+    Resists,
+    /// Some tells, within what ordinary code uses.
+    Ordinary,
+    /// No tell at all.
+    Quiet,
+}
+
+impl std::fmt::Display for Resistance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Resists => "anti-analysis: a program that resists being watched",
+            Self::Ordinary => "a few anti-analysis tells, within what ordinary code uses",
+            Self::Quiet => "no anti-analysis tells",
+        })
+    }
 }
 
 /// The labels of [`ANTI_IMPORTS`] the image imports, each once, in import
@@ -161,7 +193,10 @@ fn anti_imports(p: &Program) -> Vec<&'static str> {
 ///
 /// * `sites` - Each instruction technique's sites ([`anti_sites`]).
 /// * `imports` - The telling imports ([`anti_imports`]).
-fn anti_summary(sites: &BTreeMap<&'static str, Vec<u64>>, imports: &[&str]) -> Summary {
+fn anti_summary(
+    sites: &BTreeMap<&'static str, Vec<u64>>,
+    imports: &[&str],
+) -> (Resistance, Summary) {
     let weak = |tag: &str| tag.starts_with("cpuid") || tag.starts_with("rdtsc (read)");
     let alone = |tag: &str| {
         tag.starts_with("int 2d")
@@ -179,17 +214,18 @@ fn anti_summary(sites: &BTreeMap<&'static str, Vec<u64>>, imports: &[&str]) -> S
         .iter()
         .any(|label| !CRT_IMPORTS.contains(label) && !QUIET_IMPORTS.contains(label));
     let verdict = if strong >= 3 || telling || sites.keys().any(|tag| alone(tag)) {
-        "anti-analysis: a program that resists being watched"
+        Resistance::Resists
     } else if instr_count + imports.len() == 0 {
-        "no anti-analysis tells"
+        Resistance::Quiet
     } else {
-        "a few anti-analysis tells, within what ordinary code uses"
+        Resistance::Ordinary
     };
-    Summary::new(
-        verdict.to_owned(),
+    let summary = Summary::new(
+        verdict.to_string(),
         sites.len() + imports.len(),
         sites.values().filter_map(|at| at.first().copied()),
-    )
+    );
+    (verdict, summary)
 }
 
 /// Returns the sites of each anti-analysis instruction in the program's
@@ -1646,7 +1682,7 @@ pub(super) fn stub_spot(p: &Program, packing: &Packing) -> Option<String> {
     };
     let entry = hex_or_dash(p.entry);
     let maybe =
-        matches!(packing, Packing::Protected(names, UpxEntry::MaybeUnpacked) if *names == ["UPX"]);
+        matches!(packing, Packing::Protected(listed) if *listed == [Packer::UpxMaybeUnpacked]);
     Some(if maybe {
         format!(
             "{head}: the file {MAYBE_UNPACKED}; if a stub still runs at the entry, the strings, imports and capabilities above describe it, not the payload; borer://unpack/{entry} runs it"
@@ -1826,10 +1862,9 @@ pub fn protection_summary(p: &Program, a: &Analysis) -> Summary {
 
 /// What the marks a packer or protector leaves add up to.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Packing {
-    /// Packers or protectors named by their marks, by family name, and
-    /// what the layout says about a UPX entry among them.
-    Protected(Vec<&'static str>, UpxEntry),
+pub enum Packing {
+    /// Packers or protectors named by their marks, in family name order.
+    Protected(Vec<Packer>),
     /// UPX marks on an image whose entry is not the stub.
     Unpacked,
     /// No name, but a strong mark and at least two marks in all.
@@ -1842,20 +1877,29 @@ pub(crate) enum Packing {
     PlainOneMark,
 }
 
+/// A packer or protector a verdict names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Packer {
+    /// A family whose marks the image carries, by name.
+    Named(&'static str),
+    /// UPX, on an image whose layout says it may already be unpacked.
+    UpxMaybeUnpacked,
+}
+
+impl std::fmt::Display for Packer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Named(name) => f.write_str(name),
+            Self::UpxMaybeUnpacked => write!(f, "UPX ({MAYBE_UNPACKED})"),
+        }
+    }
+}
+
 impl std::fmt::Display for Packing {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Protected(names, upx) => {
-                let listed: Vec<String> = names
-                    .iter()
-                    .map(|n| {
-                        if *n == "UPX" && *upx == UpxEntry::MaybeUnpacked {
-                            format!("UPX ({MAYBE_UNPACKED})")
-                        } else {
-                            (*n).to_owned()
-                        }
-                    })
-                    .collect();
+            Self::Protected(listed) => {
+                let listed: Vec<String> = listed.iter().map(Packer::to_string).collect();
                 write!(f, "protected: {}", listed.join(", "))
             }
             Self::Unpacked => f.write_str(
@@ -1926,13 +1970,16 @@ pub(crate) fn protection_of(p: &Program, a: &Analysis) -> Protection {
     let share = (total_bytes > 0).then(|| packed_bytes * 100 / total_bytes);
     let (strong, weak) = packing_marks(p, a, share, &wx);
     let upx = upx_entry(p);
-    let listed: Vec<&'static str> = names
+    let listed: Vec<Packer> = names
         .keys()
-        .copied()
-        .filter(|n| !(*n == "UPX" && upx == UpxEntry::Unpacked))
+        .filter_map(|&n| match (n, upx) {
+            ("UPX", UpxEntry::Unpacked) => None,
+            ("UPX", UpxEntry::MaybeUnpacked) => Some(Packer::UpxMaybeUnpacked),
+            _ => Some(Packer::Named(n)),
+        })
         .collect();
     let packing = if !listed.is_empty() {
-        Packing::Protected(listed, upx)
+        Packing::Protected(listed)
     } else if !names.is_empty() {
         Packing::Unpacked
     } else if !strong.is_empty() && strong.len() + weak.len() >= 2 {

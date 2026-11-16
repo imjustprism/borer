@@ -343,10 +343,10 @@ fn name_gives(fragments: &[&str], api: &str) -> bool {
 /// first; the header counts the syscall sites, and those whose number
 /// their block does not set, when there are any.
 pub fn capability_map_tsv(p: &Program, a: Option<&Analysis>) -> String {
-    let (summary, body) = capability_lines(p, a);
+    let (summary, map) = capability_map(p, a);
     let mut out = format!("# {}\n", summary.headline);
-    for line in &body {
-        out.push_str(line);
+    for line in map.body() {
+        out.push_str(&line);
         out.push('\n');
     }
     out
@@ -365,22 +365,63 @@ pub fn capability_map_tsv(p: &Program, a: Option<&Analysis>) -> String {
 /// The counts; `count` is the capabilities present, `at` empty (they come
 /// from the import table and the syscall sites, not one place).
 pub fn capability_summary(p: &Program, a: Option<&Analysis>) -> Summary {
-    capability_lines(p, a).0
+    capability_map(p, a).0
 }
 
-/// Builds the capability map: its first line as a value, then each line
-/// under it.
+/// The note a capability map carries when a program with no syscall sites
+/// imports too little to show its reach.
+const FEW_IMPORTS: &str =
+    "few imports: the rest are likely resolved at runtime, so this understates the reach";
+
+/// One capability the imports or syscalls grant, with what grants it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityRow {
+    /// The capability.
+    pub capability: &'static str,
+    /// The imports, then the syscalls as `name (syscall)`, that grant it.
+    pub named: Vec<String>,
+}
+
+impl std::fmt::Display for CapabilityRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let shown: Vec<&str> = self.named.iter().take(6).map(String::as_str).collect();
+        let more = if self.named.len() > shown.len() {
+            format!(", +{}", self.named.len() - shown.len())
+        } else {
+            String::new()
+        };
+        write!(f, "{:<24}  {}{more}", self.capability, shown.join(", "))
+    }
+}
+
+/// The capability map under its first line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityMap {
+    /// What the map says of a thin import table, when it says anything.
+    pub note: Option<&'static str>,
+    /// The capabilities present, the fullest first.
+    pub rows: Vec<CapabilityRow>,
+}
+
+impl CapabilityMap {
+    /// Returns the lines [`capability_map_tsv`] prints under its first
+    /// line: the note as a `#` line, then a line per row.
+    pub(super) fn body(&self) -> impl Iterator<Item = String> + '_ {
+        self.note
+            .map(|note| format!("# {note}"))
+            .into_iter()
+            .chain(self.rows.iter().map(CapabilityRow::to_string))
+    }
+}
+
+/// Builds the capability map: its first line as a value, then the note and
+/// the rows under it.
 ///
 /// # Arguments
 ///
 /// * `p` - The loaded image.
 /// * `a` - Its functions, for the syscall sites.
-///
-/// # Returns
-///
-/// The summary, then the lines without their newlines: a note on a thin
-/// import table, and one row per capability, the fullest first.
-pub(super) fn capability_lines(p: &Program, a: Option<&Analysis>) -> (Summary, Vec<String>) {
+pub(super) fn capability_map(p: &Program, a: Option<&Analysis>) -> (Summary, CapabilityMap) {
     let imports: Vec<&str> = p
         .symbols
         .iter()
@@ -391,7 +432,7 @@ pub(super) fn capability_lines(p: &Program, a: Option<&Analysis>) -> (Summary, V
     let sites = sites.as_deref().map_or(&[][..], Vec::as_slice);
     let called: BTreeSet<&str> = sites.iter().filter_map(|s| s.name).collect();
     let gives = name_gives;
-    let mut hits: Vec<(&str, Vec<String>)> = Vec::new();
+    let mut rows: Vec<CapabilityRow> = Vec::new();
     for (capability, fragments) in CAPABILITIES {
         let mut named: BTreeSet<&str> = BTreeSet::new();
         for import in &imports {
@@ -409,7 +450,7 @@ pub(super) fn capability_lines(p: &Program, a: Option<&Analysis>) -> (Summary, V
         if found.is_empty() {
             continue;
         }
-        let mut label = capability;
+        let mut label: &'static str = capability;
         if capability == "persistence" && settings_keys(p, a, &found) {
             label = "registry write";
         }
@@ -419,20 +460,23 @@ pub(super) fn capability_lines(p: &Program, a: Option<&Analysis>) -> (Summary, V
             found.retain(|name| called_as_check(p, analysis, name));
         }
         if !found.is_empty() {
-            hits.push((label, found));
+            rows.push(CapabilityRow {
+                capability: label,
+                named: found,
+            });
         }
     }
-    hits.sort_by_key(|(cap, named)| (std::cmp::Reverse(named.len()), *cap));
+    rows.sort_by_key(|r| (std::cmp::Reverse(r.named.len()), r.capability));
     let mut headline = format!(
         "{} of {} capabilities present across {} imports",
-        hits.len(),
+        rows.len(),
         CAPABILITIES.len(),
         imports.len()
     );
-    let mut body = Vec::with_capacity(hits.len() + 1);
+    let mut note = None;
     if sites.is_empty() {
         if imports.len() < 12 {
-            body.push("# few imports: the rest are likely resolved at runtime, so this understates the reach".to_owned());
+            note = Some(FEW_IMPORTS);
         }
     } else {
         let unresolved = sites.iter().filter(|s| s.nr.is_none()).count();
@@ -443,16 +487,8 @@ pub(super) fn capability_lines(p: &Program, a: Option<&Analysis>) -> (Summary, V
             plural(sites.len())
         );
     }
-    for (capability, named) in &hits {
-        let shown = named.iter().take(6).cloned().collect::<Vec<_>>();
-        let more = if named.len() > shown.len() {
-            format!(", +{}", named.len() - shown.len())
-        } else {
-            String::new()
-        };
-        body.push(format!("{capability:<24}  {}{more}", shown.join(", ")));
-    }
-    (Summary::new(headline, hits.len(), []), body)
+    let summary = Summary::new(headline, rows.len(), []);
+    (summary, CapabilityMap { note, rows })
 }
 
 /// Whether an anti-analysis import is kept on the capability map.

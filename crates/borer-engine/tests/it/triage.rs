@@ -7,7 +7,9 @@
     reason = "assertions are the point of a test"
 )]
 
-use borer_engine::analysis::render::{self, Basis, Reason, Summary};
+use borer_engine::analysis::render::{
+    self, Basis, Packer, Packing, Reason, Resistance, SectionKind, Summary,
+};
 use borer_engine::analysis::{Analysis, Overlay, bare_name};
 use borer_engine::crypto::Storage;
 use borer_engine::program::{Arch, Program};
@@ -244,7 +246,7 @@ fn each_section_names_where_more_is() {
     let a = Analysis::compute(&p);
     for s in &render::triage(&p, &a, &Overlay::default()).sections {
         let uri = s.kind.uri();
-        if s.kind == render::SectionKind::Crypto {
+        if s.kind == SectionKind::Crypto {
             assert_eq!(uri, None);
         } else {
             assert!(
@@ -407,6 +409,16 @@ fn a_string_built_from_a_block_seed_is_credited_to_its_function() {
         built.found
     );
     assert!(built.found.iter().all(|g| a.function(g.built_by).is_some()));
+    let hidden = render::hidden_strings_tsv(&p, &a, &Overlay::default(), "");
+    let said = hidden
+        .strip_prefix("# ")
+        .and_then(|l| l.split(' ').next())
+        .and_then(|n| n.parse::<usize>().ok());
+    assert_eq!(
+        Some(render::generated_summary(&p, &a).count),
+        said,
+        "{hidden}"
+    );
     let triage = render::triage(&p, &a, &Overlay::default());
     assert!(
         triage
@@ -484,6 +496,8 @@ fn the_checks_headline_counts_every_check() {
     let o = Overlay::default();
     let s = render::license_checks_summary(&p, &a, &o);
     assert!(s.count > CHECK_ROWS, "{s:?}");
+    assert_eq!(s.at.len(), render::SUMMARY_AT_MAX, "{s:?}");
+    assert_eq!(s.at_total, s.count, "{s:?}");
     assert!(
         s.headline
             .starts_with(&format!("{} functions judge", s.count)),
@@ -493,4 +507,109 @@ fn the_checks_headline_counts_every_check() {
         render::license_checks_tsv(&p, &a, &o).contains("checks not listed"),
         "{s:?}"
     );
+}
+
+/// Returns the protection and anti-analysis verdicts the triage holds.
+///
+/// # Arguments
+///
+/// * `triage` - The triage.
+fn verdicts(triage: &render::Triage) -> (Option<Packing>, Option<Resistance>) {
+    let mut found = (None, None);
+    for s in &triage.sections {
+        match &s.kind {
+            SectionKind::Protection(packing) => found.0 = Some(packing.clone()),
+            SectionKind::AntiAnalysis(resistance) => found.1 = Some(*resistance),
+            SectionKind::Crypto
+            | SectionKind::DynamicImports
+            | SectionKind::Checks
+            | SectionKind::GeneratedStrings
+            | SectionKind::Capabilities(_)
+            | SectionKind::Iocs => {}
+        }
+    }
+    found
+}
+
+/// A protector named by its sections is a typed verdict, a plain image's
+/// is plain, and each section line is spelled from its verdict.
+#[test]
+fn the_protection_verdict_is_a_value() {
+    use crate::protection::{data, pe, sec};
+    let mut code = vec![0xcc; 0x200];
+    code[..6].copy_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]);
+    let vmp = pe(
+        &[
+            data(".vmp0", 0x1000, vec![0x41; 0x200]),
+            sec(".vmp1", 0x3000, code.clone()),
+        ],
+        0x3000,
+    );
+    let plain = pe(&[sec(".text", 0x1000, code)], 0x1000);
+    for (bytes, protected) in [(vmp, true), (plain, false)] {
+        let p = Program::from_bytes(std::path::PathBuf::from("v.exe"), bytes)
+            .unwrap_or_else(|e| panic!("a PE loads: {e}"));
+        spelled_from_values(&p);
+        let a = Analysis::compute(&p);
+        let triage = render::triage(&p, &a, &Overlay::default());
+        let (packing, resistance) = verdicts(&triage);
+        let packing = packing.unwrap_or_else(|| panic!("no protection section"));
+        if protected {
+            assert_eq!(
+                packing,
+                Packing::Protected(vec![Packer::Named("VMProtect")])
+            );
+        } else {
+            assert!(
+                matches!(
+                    packing,
+                    Packing::Plain | Packing::PlainWeak | Packing::PlainOneMark
+                ),
+                "{packing:?}"
+            );
+        }
+        assert_eq!(
+            first_line(&render::protection_tsv(&p, &a)),
+            packing.to_string()
+        );
+        let resistance = resistance.unwrap_or_else(|| panic!("no anti-analysis section"));
+        assert_eq!(
+            render::anti_analysis_summary(&p, &a).headline,
+            resistance.to_string()
+        );
+    }
+}
+
+/// The capability map holds its note and its rows as values, and its text
+/// is the two spelled under its first line.
+#[test]
+fn the_capability_map_is_its_note_and_rows() {
+    let p = fixture();
+    let a = Analysis::compute(&p);
+    let triage = render::triage(&p, &a, &Overlay::default());
+    let Some(map) = triage.sections.iter().find_map(|s| {
+        if let SectionKind::Capabilities(map) = &s.kind {
+            Some(map)
+        } else {
+            None
+        }
+    }) else {
+        panic!("no capabilities section");
+    };
+    assert!(
+        map.note.is_some_and(|n| n.starts_with("few imports")),
+        "{map:?}"
+    );
+    assert!(map.rows.iter().all(|r| !r.named.is_empty()), "{map:?}");
+    let mut expected = format!("# {}\n", render::capability_summary(&p, Some(&a)).headline);
+    for line in map
+        .note
+        .map(|n| format!("# {n}"))
+        .into_iter()
+        .chain(map.rows.iter().map(ToString::to_string))
+    {
+        expected.push_str(&line);
+        expected.push('\n');
+    }
+    assert_eq!(render::capability_map_tsv(&p, Some(&a)), expected);
 }

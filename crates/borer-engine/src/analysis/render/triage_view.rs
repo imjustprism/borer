@@ -20,6 +20,9 @@ pub struct Summary {
     /// [`SUMMARY_AT_MAX`]; empty for a report about the file rather than
     /// places in it.
     pub at: Vec<u64>,
+    /// How many distinct addresses the headline is about, `at` holding the
+    /// lowest of them.
+    pub at_total: usize,
 }
 
 impl Summary {
@@ -36,6 +39,7 @@ impl Summary {
         Self {
             headline,
             count,
+            at_total: at.len(),
             at: at.into_iter().take(SUMMARY_AT_MAX).collect(),
         }
     }
@@ -44,27 +48,31 @@ impl Summary {
 /// Functions the reading list names.
 const READ_MAX: usize = 10;
 
-/// Capability rows the triage repeats under its capabilities line.
+/// Capability lines the triage repeats under its capabilities line.
 const CAPABILITY_ROWS: usize = 6;
 
-/// A section of the triage: the report whose first line it repeats.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A section of the triage: the report whose first line it repeats, with
+/// that report's typed verdict where it has one.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SectionKind {
-    /// The packer and protector marks ([`protection_tsv`]).
-    Protection,
-    /// The anti-debug and anti-VM techniques ([`anti_analysis_tsv`]).
-    AntiAnalysis,
+    /// The packer and protector marks ([`protection_tsv`]) and their verdict.
+    Protection(Packing),
+    /// The anti-debug and anti-VM techniques ([`anti_analysis_tsv`]) and
+    /// their verdict.
+    AntiAnalysis(Resistance),
     /// The crypto and hash constants ([`crypto_tsv`]).
     Crypto,
     /// The imports resolved by name at run time ([`dynamic_imports_tsv`]).
     DynamicImports,
     /// The functions that judge a key or serial ([`license_checks_tsv`]).
     Checks,
-    /// The strings generators build when run ([`hidden_strings_tsv`]).
+    /// The strings generators build when run, which [`hidden_strings_tsv`]
+    /// lists; the line counts them and the generators
+    /// ([`generated_summary`]), not that report's first line.
     GeneratedStrings,
     /// What the imports and syscalls let the program do
-    /// ([`capability_map_tsv`]).
-    Capabilities,
+    /// ([`capability_map_tsv`]), with the map's note and rows.
+    Capabilities(CapabilityMap),
     /// The indicators the program holds ([`iocs_tsv`]).
     Iocs,
 }
@@ -72,15 +80,15 @@ pub enum SectionKind {
 impl SectionKind {
     /// Returns the label the triage puts in front of the section's line.
     #[must_use]
-    pub const fn label(self) -> &'static str {
+    pub const fn label(&self) -> &'static str {
         match self {
-            Self::Protection => "protection",
-            Self::AntiAnalysis => "anti-analysis",
+            Self::Protection(_) => "protection",
+            Self::AntiAnalysis(_) => "anti-analysis",
             Self::Crypto => "crypto",
             Self::DynamicImports => "dynamic imports",
             Self::Checks => "checks",
             Self::GeneratedStrings => "generated strings",
-            Self::Capabilities => "capabilities",
+            Self::Capabilities(_) => "capabilities",
             Self::Iocs => "iocs",
         }
     }
@@ -92,15 +100,15 @@ impl SectionKind {
     /// The URI, or `None` for the crypto constants, which the
     /// `find_crypto_constants` tool lists and no resource does.
     #[must_use]
-    pub const fn uri(self) -> Option<&'static str> {
+    pub const fn uri(&self) -> Option<&'static str> {
         match self {
-            Self::Protection => Some("borer://protection"),
-            Self::AntiAnalysis => Some("borer://antianalysis"),
+            Self::Protection(_) => Some("borer://protection"),
+            Self::AntiAnalysis(_) => Some("borer://antianalysis"),
             Self::Crypto => None,
             Self::DynamicImports => Some("borer://dynimports"),
             Self::Checks => Some("borer://checks"),
             Self::GeneratedStrings => Some("borer://hidden"),
-            Self::Capabilities => Some("borer://capabilities"),
+            Self::Capabilities(_) => Some("borer://capabilities"),
             Self::Iocs => Some("borer://iocs"),
         }
     }
@@ -113,27 +121,11 @@ pub struct TriageSection {
     pub kind: SectionKind,
     /// That report's first line, as a value.
     pub summary: Summary,
-    /// The lines the triage prints under it, without their `#   `: the
-    /// first rows of the capability map, none for the other sections.
-    pub detail: Vec<String>,
 }
 
 impl TriageSection {
-    /// Returns a section with nothing under its line.
-    ///
-    /// # Arguments
-    ///
-    /// * `kind` - The report it repeats.
-    /// * `summary` - That report's first line.
-    fn new(kind: SectionKind, summary: Summary) -> Self {
-        Self {
-            kind,
-            summary,
-            detail: Vec::new(),
-        }
-    }
-
-    /// Writes the section's line and the lines under it.
+    /// Writes the section's line and, for the capabilities, the first lines
+    /// of the map under it.
     ///
     /// A headline that repeats the label in front of it is trimmed, so the
     /// line does not read `anti-analysis: anti-analysis: ...`.
@@ -149,8 +141,10 @@ impl TriageSection {
             .map_or(line, |rest| rest.trim_start_matches([':', ' ']))
             .trim();
         let _ = writeln!(out, "# {label}: {said}");
-        for row in &self.detail {
-            let _ = writeln!(out, "#   {row}");
+        if let SectionKind::Capabilities(map) = &self.kind {
+            for row in map.body().take(CAPABILITY_ROWS) {
+                let _ = writeln!(out, "#   {}", row.trim());
+            }
         }
     }
 }
@@ -210,7 +204,10 @@ pub enum Reason {
 /// confidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Basis {
-    /// The emulator ran the code and saw the result.
+    /// The emulator ran the code and saw the result: a permissive run,
+    /// where a read of unmapped memory answers zero, that may have begun
+    /// at a block inside the function rather than its entry, so what it
+    /// saw is what that run did, not every run the program makes.
     Observed,
     /// The code's calls and references say it, without running it.
     Static,
@@ -262,7 +259,8 @@ pub struct Triage {
     pub blind_spots: Vec<String>,
     /// The functions to read first, at most [`READ_MAX`], the first first.
     pub read_first: Vec<ReadFirst>,
-    /// Every function that qualified for the list, listed or not.
+    /// How many functions the list ranked, listed or not: every one with
+    /// evidence, then of the rest only enough to fill [`READ_MAX`].
     pub candidates: usize,
 }
 
@@ -362,63 +360,42 @@ pub fn triage_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
 /// * `a` - The analysis.
 /// * `o` - User names.
 fn triage_of(p: &Program, a: &Analysis, o: &Overlay) -> Triage {
+    let section = |kind, summary| TriageSection { kind, summary };
     let mut phases = crate::timing::Phases::new();
     let protection = protection_of(p, a);
-    let mut sections = vec![TriageSection::new(
-        SectionKind::Protection,
+    let mut sections = vec![section(
+        SectionKind::Protection(protection.packing.clone()),
         protection.summary(),
     )];
     phases.mark("triage protection");
-    sections.push(TriageSection::new(
-        SectionKind::AntiAnalysis,
-        anti_analysis_summary(p, a),
-    ));
+    let (resistance, anti) = anti_analysis(p, a);
+    sections.push(section(SectionKind::AntiAnalysis(resistance), anti));
     phases.mark("triage anti-analysis");
-    sections.push(TriageSection::new(
-        SectionKind::Crypto,
-        crypto_summary(p, a),
-    ));
+    sections.push(section(SectionKind::Crypto, crypto_summary(p, a)));
     phases.mark("triage crypto");
-    sections.push(TriageSection::new(
+    sections.push(section(
         SectionKind::DynamicImports,
         dynamic_imports_summary(p, a, o),
     ));
     phases.mark("triage dynamic imports");
-    sections.push(TriageSection::new(
+    sections.push(section(
         SectionKind::Checks,
         license_checks_summary(p, a, o),
     ));
     phases.mark("triage checks");
-    let recovered = recovered_strings(p, a);
-    sections.push(TriageSection::new(
+    sections.push(section(
         SectionKind::GeneratedStrings,
-        Summary::new(
-            format!(
-                "{} recovered from {} generator(s)",
-                recovered.found.len(),
-                recovered.generators
-            ),
-            recovered.found.len(),
-            recovered.found.iter().map(|g| g.built_by),
-        ),
+        generated_summary(p, a),
     ));
     phases.mark("triage generated strings");
-    let (capabilities, rows) = capability_lines(p, Some(a));
-    sections.push(TriageSection {
-        kind: SectionKind::Capabilities,
-        summary: capabilities,
-        detail: rows
-            .iter()
-            .take(CAPABILITY_ROWS)
-            .map(|row| row.trim().to_owned())
-            .collect(),
-    });
+    let (capabilities, map) = capability_map(p, Some(a));
+    sections.push(section(SectionKind::Capabilities(map), capabilities));
     phases.mark("triage capabilities");
-    sections.push(TriageSection::new(SectionKind::Iocs, iocs_summary(p, a, o)));
+    sections.push(section(SectionKind::Iocs, iocs_summary(p, a, o)));
     phases.mark("triage iocs");
     let blind_spots = blind_spots(p, a, o, &protection.packing);
     phases.mark("triage blind spots");
-    let (read_first, candidates) = reading_list(p, a, o, &recovered);
+    let (read_first, candidates) = reading_list(p, a, o, &recovered_strings(p, a));
     Triage {
         name: p.path.file_name().map_or_else(
             || String::from("<unnamed>"),
@@ -484,7 +461,8 @@ fn shape(p: &Program, a: &Analysis) -> String {
 ///
 /// # Returns
 ///
-/// The first [`READ_MAX`] functions, ranked, and how many qualified.
+/// The first [`READ_MAX`] functions, ranked, and how many were ranked
+/// ([`Triage::candidates`]).
 fn reading_list(
     p: &Program,
     a: &Analysis,

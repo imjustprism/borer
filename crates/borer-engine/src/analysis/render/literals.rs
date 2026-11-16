@@ -719,6 +719,32 @@ pub fn generated_strings(p: &Program, a: &Analysis, filter: &str) -> Recovery {
     }
 }
 
+/// Returns the triage's line on the strings the program generates, as a
+/// value: how many the one recovery holds ([`recovered_strings`]) and from
+/// how many generators.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis, holding the recovery.
+///
+/// # Returns
+///
+/// The counts; `count` is the strings recovered, `at` the functions that
+/// build them.
+pub fn generated_summary(p: &Program, a: &Analysis) -> Summary {
+    let recovered = recovered_strings(p, a);
+    Summary::new(
+        format!(
+            "{} recovered from {} generator(s)",
+            recovered.found.len(),
+            recovered.generators
+        ),
+        recovered.found.len(),
+        recovered.found.iter().map(|g| g.built_by),
+    )
+}
+
 /// The strings the program generates that contain `filter`, from the one
 /// recovery an analysis keeps ([`recovered_strings`]).
 ///
