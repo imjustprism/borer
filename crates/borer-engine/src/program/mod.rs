@@ -591,6 +591,18 @@ fn offset_to_va_in(sections: &[Section], off: u64) -> Option<u64> {
     })
 }
 
+/// The phases [`Program::from_bytes_with`] runs, in order: the plan whose
+/// place a [`crate::progress::Progress`] in force reports.
+pub(crate) const LOAD_PHASES: &[&str] = &[
+    "load parse",
+    "load headers+symbols",
+    "load dwarf",
+    "load pdb",
+    "load finish",
+    "load go",
+    "load clr",
+];
+
 impl Program {
     /// Returns what the debug information records of the function at an
     /// entry.
@@ -896,7 +908,7 @@ impl Program {
         apply_pdb: bool,
         symsrv: Option<&Path>,
     ) -> anyhow::Result<Program> {
-        let mut phases = crate::timing::Phases::new();
+        let mut phases = crate::timing::Phases::planned(crate::progress::Plan::Load);
         if bytes.is_empty() {
             return Err(anyhow!("the file is empty: there is nothing to load"));
         }

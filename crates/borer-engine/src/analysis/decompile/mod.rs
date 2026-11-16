@@ -590,21 +590,21 @@ fn render_all<T: Send + Clone>(
     entries: &[u64],
     render: fn(&Program, &Analysis, &Overlay, u64) -> Option<T>,
 ) -> Vec<Option<T>> {
-    let threads = std::thread::available_parallelism()
-        .map_or(1, std::num::NonZeroUsize::get)
-        .min(entries.len());
+    let threads = crate::progress::cores().min(entries.len());
     let workers = if threads > 1 { threads } else { 0 };
     let mut order: Vec<usize> = (0..entries.len()).collect();
     order.sort_by_key(|&i| {
         std::cmp::Reverse(analysis.function(entries[i]).map_or(0, Function::size))
     });
     let next = std::sync::atomic::AtomicUsize::new(0);
+    let sweep = crate::progress::Sweep::start(entries.len());
     let take = || {
-        let mut done = Vec::new();
+        let (mut done, mut tally) = (Vec::new(), sweep.tally());
         while let Some(&i) = order.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) {
             let one = || render(program, analysis, overlay, entries[i]);
             let text = std::panic::catch_unwind(std::panic::AssertUnwindSafe(one));
             done.push((i, text.ok().flatten()));
+            tally.one();
         }
         done
     };

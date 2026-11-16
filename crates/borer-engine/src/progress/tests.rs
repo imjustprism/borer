@@ -162,3 +162,24 @@ fn a_caught_panic_leaves_no_cap_in_force() {
     assert!(caught.is_err());
     assert!(Workers::current().is_none());
 }
+
+/// A sweep whose items each run a sweep of their own counts only its own
+/// items, inline and across the cores.
+///
+/// # Panics
+///
+/// When an inner sweep's items reach the count.
+#[test]
+fn only_the_outermost_sweep_is_counted() {
+    let items: Vec<usize> = (0..300).collect();
+    for workers in [1, 16] {
+        let progress = Progress::new();
+        progress.within(|| {
+            cap(workers).within(|| {
+                crate::analysis::striped(&items, |_| crate::analysis::striped(&items[..10], |x| *x))
+            })
+        });
+        let last = progress.snapshot();
+        assert_eq!((last.done, last.total), (300, 300), "{workers} workers");
+    }
+}

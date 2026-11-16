@@ -1172,7 +1172,13 @@ pub(super) fn in_parts(entries: &[u64], some: impl Fn(&[u64]) -> Verified + Sync
         .chunks(entries.len().div_ceil(threads).max(1))
         .collect();
     let mut out = Verified::default();
-    for part in striped_on(threads, &parts, || (), |(), part| some(part)) {
+    let sweep = crate::progress::Sweep::start(entries.len());
+    let counted = |part: &&[u64]| {
+        let found = some(part);
+        sweep.add(from_usize(part.len()));
+        found
+    };
+    for part in striped_on(threads, &parts, || (), |(), part| counted(part)) {
         out.merge(part);
     }
     out

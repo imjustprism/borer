@@ -84,20 +84,31 @@ pub(crate) fn striped_on<T: Sync, S, R: Send>(
     f: impl Fn(&S, &T) -> R + Sync,
 ) -> Vec<R> {
     let threads = threads.min(items.len());
+    let sweep = crate::progress::Sweep::start(items.len());
+    let counted = |state: &S, x: &T, tally: &mut crate::progress::Tally<'_>| {
+        let out = f(state, x);
+        tally.one();
+        out
+    };
     if threads <= 1 {
-        let state = init();
-        return items.iter().map(|x| f(&state, x)).collect();
+        let (state, mut tally) = (init(), sweep.tally());
+        return items
+            .iter()
+            .map(|x| counted(&state, x, &mut tally))
+            .collect();
     }
-    let (init, f) = (&init, &f);
+    let (init, counted, sweep) = (&init, &counted, &sweep);
     let here = reads::Handle::here();
     let mut stripes: Vec<std::vec::IntoIter<R>> = std::thread::scope(|scope| {
         let workers = (0..threads).map(|t| {
             let here = here.clone();
             scope.spawn(move || {
                 here.enter(|| {
-                    let state = init();
+                    let (state, mut tally) = (init(), sweep.tally());
                     let stripe = items.iter().skip(t).step_by(threads);
-                    stripe.map(|x| f(&state, x)).collect::<Vec<_>>()
+                    stripe
+                        .map(|x| counted(&state, x, &mut tally))
+                        .collect::<Vec<_>>()
                 })
             })
         });

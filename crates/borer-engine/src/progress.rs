@@ -14,7 +14,20 @@
 //! walk lanes do not: they only walk, and run no sweep, mark no phase and
 //! spawn no thread. A job runs its phases from a
 //! plan, a const list of their names ([`Plan`]): each mark of a planned
-//! [`crate::timing::Phases`] moves the progress on to the next phase.
+//! [`crate::timing::Phases`] moves the progress on to the next phase. A
+//! job run inside another's phase (the load inside an open) reports its
+//! own phases while it runs, and the outer job's next mark takes the
+//! report back.
+//!
+//! A sweep over items ([`crate::analysis::striped`],
+//! [`crate::analysis::decompile::decompile_all`], the export and the
+//! check of every function) reports its items done of its total
+//! ([`Sweep`]); each worker adds its share every [`TALLY_EVERY`] items
+//! ([`Tally`]), so the count lags the work by at most that many a worker
+//! and is whole when the sweep returns. Only the outermost sweep reports: one started
+//! while another runs under the same progress, on any thread (a sweep in a
+//! worker of a sweep, or one beside it), is not counted, so the total
+//! never jumps to an inner sweep's. Entering a phase clears the count.
 //!
 //! A [`Workers`] in force caps the threads each sweep spreads over
 //! ([`cores`]), taken along the same way; discovery is handed the capped
@@ -47,24 +60,32 @@ thread_local! {
 /// A job whose phases a [`Progress`] reports, by the plan they run in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Plan {
+    /// Opening a binary ([`crate::session::OPEN_PHASES`]).
+    Open,
+    /// Loading a file's bytes ([`crate::program::LOAD_PHASES`]).
+    Load,
     /// Analyzing a program ([`crate::analysis::COMPUTE_PHASES`]).
     Compute,
 }
 
 impl Plan {
     /// Every plan, each at its [`Plan::id`].
-    const ALL: [Self; 1] = [Self::Compute];
+    const ALL: [Self; 3] = [Self::Open, Self::Load, Self::Compute];
 
     /// Returns the plan's slot in [`Plan::ALL`].
     const fn id(self) -> u16 {
         match self {
-            Self::Compute => 0,
+            Self::Open => 0,
+            Self::Load => 1,
+            Self::Compute => 2,
         }
     }
 
     /// Returns the names of the plan's phases, in the order they run.
     pub(crate) const fn names(self) -> &'static [&'static str] {
         match self {
+            Self::Open => crate::session::OPEN_PHASES,
+            Self::Load => crate::program::LOAD_PHASES,
             Self::Compute => crate::analysis::COMPUTE_PHASES,
         }
     }
@@ -77,6 +98,7 @@ impl Plan {
 /// the items and the phase again with acquire and sees one phase twice
 /// holds that phase's items, or the cleared ones of the phase after it.
 #[derive(Debug, Default)]
+#[repr(align(64))]
 struct State {
     /// The phase running: its plan's [`Plan::id`] in the high 16 bits, its
     /// index plus one in the low 16; 0 before any phase.
@@ -84,6 +106,8 @@ struct State {
     /// The sweep running or last run: its items in the high 32 bits, the
     /// ones done in the low 32.
     items: AtomicU64,
+    /// Sweeps running under the progress, on every thread.
+    sweeps: AtomicU32,
 }
 
 /// What the work running under it has reached, for a front end to poll.
@@ -191,6 +215,111 @@ impl Progress {
     /// What `f` returns.
     pub(crate) fn carried<R>(progress: Option<&Self>, f: impl FnOnce() -> R) -> R {
         crate::cancel::in_force(&IN_FORCE, progress.cloned(), f)
+    }
+}
+
+/// A sweep's report of its items to the progress in force when it began.
+#[derive(Debug)]
+pub(crate) struct Sweep {
+    /// The progress the sweep runs under; `None` outside every
+    /// [`Progress::within`].
+    state: Option<Arc<State>>,
+    /// Whether its items are the ones reported: it began while no other
+    /// sweep ran under the progress, and its total fits the count.
+    counted: bool,
+}
+
+impl Sweep {
+    /// Starts a sweep of `total` items under the progress in force.
+    ///
+    /// # Arguments
+    ///
+    /// * `total` - How many items the sweep runs.
+    ///
+    /// # Returns
+    ///
+    /// The sweep, which reports until it is dropped.
+    pub(crate) fn start(total: usize) -> Self {
+        let state = Progress::current().map(|p| p.0);
+        let counted = state.as_ref().is_some_and(|s| {
+            let outermost = s.sweeps.fetch_add(1, Ordering::Relaxed) == 0;
+            let Some(total) = u32::try_from(total).ok().filter(|_| outermost) else {
+                return false;
+            };
+            s.items.store(u64::from(total) << 32, Ordering::Release);
+            true
+        });
+        Self { state, counted }
+    }
+
+    /// Counts `n` items of the sweep done, when its items are the ones
+    /// reported.
+    ///
+    /// # Arguments
+    ///
+    /// * `n` - The items just finished; the sweep's finished items never
+    ///   pass its total.
+    pub(crate) fn add(&self, n: u64) {
+        if let Some(s) = self.state.as_ref().filter(|_| self.counted) {
+            s.items.fetch_add(n, Ordering::Release);
+        }
+    }
+
+    /// Starts one worker's count of its items.
+    ///
+    /// # Returns
+    ///
+    /// The worker's tally, which adds what it holds when dropped.
+    pub(crate) fn tally(&self) -> Tally<'_> {
+        Tally {
+            sweep: self,
+            held: 0,
+        }
+    }
+}
+
+/// Items a worker counts before it adds them to its sweep's.
+const TALLY_EVERY: u64 = 64;
+
+/// One worker's items done of a [`Sweep`], added to the sweep's every
+/// [`TALLY_EVERY`] items and when dropped, so the workers of a counted
+/// sweep do not take turns at one cache line for every item.
+#[derive(Debug)]
+pub(crate) struct Tally<'s> {
+    /// The sweep the items are of.
+    sweep: &'s Sweep,
+    /// Items finished and not yet added, below [`TALLY_EVERY`].
+    held: u64,
+}
+
+impl Tally<'_> {
+    /// Counts one item done.
+    pub(crate) fn one(&mut self) {
+        if self.sweep.counted {
+            self.held += 1;
+            if self.held == TALLY_EVERY {
+                self.sweep.add(self.held);
+                self.held = 0;
+            }
+        }
+    }
+}
+
+impl Drop for Tally<'_> {
+    /// Adds the items held to the sweep's.
+    fn drop(&mut self) {
+        if self.held > 0 {
+            self.sweep.add(self.held);
+        }
+    }
+}
+
+impl Drop for Sweep {
+    /// Ends the sweep, so the next one under its progress may be counted.
+    fn drop(&mut self) {
+        if let Some(s) = &self.state {
+            s.sweeps.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 }
 

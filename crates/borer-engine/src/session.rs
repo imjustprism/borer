@@ -16,6 +16,12 @@ use crate::program::{Program, read_regular, unusable_path};
 
 /// The extension of a pack file.
 pub const EXTENSION: &str = "borer";
+/// The phases [`open`] runs, in order: the plan whose place a
+/// [`crate::progress::Progress`] in force reports.
+///
+/// Reading takes in the load's own phases ([`crate::program::LOAD_PHASES`]),
+/// the PDB's among them.
+pub(crate) const OPEN_PHASES: &[&str] = &["open read", "open packs"];
 /// Largest pack file read, in bytes: 64 MiB.
 pub const PACK_MAX: u64 = 1 << 26;
 /// Most scripts one pack runs.
@@ -92,6 +98,7 @@ pub struct Opened {
 /// [`crate::program::TooLarge`]. A pack file that does not read is a note,
 /// not an error.
 pub fn open(path: &Path, how: &Open) -> anyhow::Result<Opened> {
+    let mut phases = crate::timing::Phases::planned(crate::progress::Plan::Open);
     let program = match &how.form {
         Form::Raw(layout) => Program::load_layout_max(path, layout, how.max_file)?,
         Form::Headers(pdb) => {
@@ -102,9 +109,11 @@ pub fn open(path: &Path, how: &Open) -> anyhow::Result<Opened> {
             Program::load_with_symsrv_max(path, *pdb != Pdb::Off, cache, how.max_file)?
         }
     };
+    phases.mark("open read");
     let mut notes = Vec::new();
     let found = read_dirs(&how.dirs, &mut notes);
     let packs = Arc::new(fitting(&program, &how.named, found, &mut notes));
+    phases.mark("open packs");
     Ok(Opened {
         program,
         packs,

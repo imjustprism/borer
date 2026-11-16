@@ -76,6 +76,7 @@ mod noise;
 mod objc;
 mod opcodes;
 mod param_types;
+mod progress;
 mod project;
 mod protection;
 mod protos;

@@ -983,6 +983,7 @@ fn in_order(
     let (ready, room) = (Condvar::new(), Condvar::new());
     let (next, queue, ready, room) = (&next, &queue, &ready, &room);
     let here = super::super::reads::Handle::here();
+    let sweep = crate::progress::Sweep::start(entries.len());
     std::thread::scope(|scope| {
         let mut workers = 0;
         for _ in 0..threads {
@@ -1021,6 +1022,7 @@ fn in_order(
             workers += usize::from(worker.is_some());
         }
         let result = 'take: {
+            let mut tally = sweep.tally();
             for (i, &entry) in entries.iter().enumerate() {
                 let text = if workers == 0 {
                     render(entry)
@@ -1037,6 +1039,7 @@ fn in_order(
                     room.notify_all();
                     text
                 };
+                tally.one();
                 if let Err(e) = take(entry, text) {
                     break 'take Err(e);
                 }
