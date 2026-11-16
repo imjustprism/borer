@@ -88,7 +88,8 @@ pub fn data_dir(mode: &CliMode) -> anyhow::Result<PathBuf> {
         | CliMode::ReportOpen(_)
         | CliMode::Headless(_)
         | CliMode::MeasureMemory(_)
-        | CliMode::Measure(_) => Ok(
+        | CliMode::Measure(_)
+        | CliMode::MeasureDrop(_) => Ok(
             std::env::temp_dir().join(format!("{DATA_DIR_NAME}-measure-{}", std::process::id()))
         ),
     }

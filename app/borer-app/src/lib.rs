@@ -58,7 +58,8 @@ pub fn run() -> anyhow::Result<()> {
                     | CliMode::ReportOpen(_)
                     | CliMode::Headless(_)
                     | CliMode::MeasureMemory(_)
-                    | CliMode::Measure(_)) => cx
+                    | CliMode::Measure(_)
+                    | CliMode::MeasureDrop(_)) => cx
                         .open_window(options, |window, cx| {
                             cx.new(|cx| {
                                 Harness::new(measured, harness_slot, &app_state, window, cx)

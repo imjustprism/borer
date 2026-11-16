@@ -1054,6 +1054,36 @@ def measure_scroll_phase(exe: Path, kind: str, watcher: NetWatcher) -> dict[str,
     return kv
 
 
+def measure_folder_drop(exe: Path, watcher: NetWatcher) -> dict[str, Any]:
+    """Drop a folder whose settings start a context server on the app and read back
+    the project's folder count; the watcher's job counts any program the drop started."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="borer-app-drop-") as tmp:
+        settings = Path(tmp) / ".zed" / "settings.json"
+        settings.parent.mkdir()
+        server = {"context_servers": {"x": {"command": "cmd.exe", "args": ["/c", "exit"]}}}
+        settings.write_text(json.dumps(server), encoding="utf-8")
+        proc, get_stderr = _spawn_bench_proc([str(exe), "--measure-drop", tmp])
+        watch_thread = watcher.watch_while(proc, "drop")
+        assert proc.stdout is not None
+        kv: dict[str, Any] = {}
+        rc = 0
+        with _proc_watchdog(proc, 60.0, "drop"):
+            for line in proc.stdout:
+                if line.startswith("DROP_DONE"):
+                    kv = parse_kv_line(line)
+                    break
+            rc = proc.wait(timeout=30)
+        watch_thread.join(timeout=2)
+        watcher.finish_phase("drop")
+        if not kv:
+            raise RuntimeError(f"drop phase missed DROP_DONE (rc={rc}): {get_stderr()}")
+        if rc != 0:
+            raise RuntimeError(f"drop phase exited with code {rc}: {get_stderr()}")
+    return kv
+
+
 def measure_input_latency(
     exe: Path,
     watcher: NetWatcher,
@@ -1342,6 +1372,10 @@ def main() -> int:
             watcher,
             allow_fallback=args.allow_postmessage_fallback,
         )
+
+        print("==> drop of a folder with a context server in its settings...", flush=True)
+        folder_drop = measure_folder_drop(exe, watcher)
+        print(f"    folders={folder_drop.get('folders')}", flush=True)
     finally:
         watcher.close()
 
@@ -1356,6 +1390,7 @@ def main() -> int:
         input_lat,
         watcher,
     )
+    report["folder_drop"] = folder_drop
 
     if args.json is not None:
         args.json.parent.mkdir(parents=True, exist_ok=True)
@@ -1372,6 +1407,10 @@ def main() -> int:
         input_lat,
         watcher,
     )
+    if folder_drop.get("folders") != 0:
+        failures.append(
+            f"a dropped folder joined the project (folders={folder_drop.get('folders')})"
+        )
     if failures:
         for msg in failures:
             print(f"ERROR: {msg}", file=sys.stderr)
