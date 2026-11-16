@@ -66,10 +66,7 @@ impl Cancel {
     ///
     /// What `f` returns; the flag in force before is in force again after.
     pub fn within<R>(&self, f: impl FnOnce() -> R) -> R {
-        let before = IN_FORCE.with(|c| c.replace(Some(self.clone())));
-        let out = f();
-        IN_FORCE.with(|c| *c.borrow_mut() = before);
-        out
+        in_force(&IN_FORCE, Some(self.clone()), f)
     }
 
     /// The flag in force on this thread.
@@ -133,6 +130,40 @@ impl Cancel {
             None => f(),
         }
     }
+}
+
+/// Runs `f` with `value` in force in the per-thread slot `slot`, the value
+/// there before put back after, on return and on a panic alike: the scope
+/// of a [`Cancel`] or a [`crate::progress::Progress`].
+///
+/// # Arguments
+///
+/// * `slot` - The thread-local holding the value in force.
+/// * `value` - The value in force while `f` runs; `None` for none.
+/// * `f` - The work.
+///
+/// # Returns
+///
+/// What `f` returns.
+pub(crate) fn in_force<T: 'static, R>(
+    slot: &'static std::thread::LocalKey<RefCell<Option<T>>>,
+    value: Option<T>,
+    f: impl FnOnce() -> R,
+) -> R {
+    /// The slot and the value it held before, put back when dropped.
+    struct Restore<T: 'static>(
+        &'static std::thread::LocalKey<RefCell<Option<T>>>,
+        Option<T>,
+    );
+    impl<T: 'static> Drop for Restore<T> {
+        /// Puts the value before back in the slot.
+        fn drop(&mut self) {
+            let before = self.1.take();
+            self.0.with(|c| *c.borrow_mut() = before);
+        }
+    }
+    let _restore = Restore(slot, slot.with(|c| c.replace(value)));
+    f()
 }
 
 #[cfg(test)]

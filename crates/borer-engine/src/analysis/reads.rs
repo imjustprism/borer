@@ -725,24 +725,33 @@ pub(crate) fn unnoted<R>(f: impl FnOnce() -> R) -> R {
     within(Shared::default(), f)
 }
 
-/// The build running on one thread and the cancel flag in force there
-/// ([`crate::cancel::Cancel`]), for a thread it spawns to note its reads
-/// into and to stop with.
+/// The build running on one thread, the cancel flag
+/// ([`crate::cancel::Cancel`]) and the progress
+/// ([`crate::progress::Progress`]) in force there, for a thread it spawns
+/// to note its reads into, to stop with and to report to.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct Handle(Option<Shared>, Option<crate::cancel::Cancel>);
+pub(crate) struct Handle {
+    /// The build whose read-set the spawned thread notes into.
+    frame: Option<Shared>,
+    /// The cancel flag the spawned thread stops with.
+    cancel: Option<crate::cancel::Cancel>,
+    /// The progress the spawned thread reports to.
+    progress: Option<crate::progress::Progress>,
+}
 
 impl Handle {
     /// Returns the build running on this thread, if any, and the cancel
-    /// flag in force on it.
+    /// flag and the progress in force on it.
     pub(crate) fn here() -> Self {
-        Self(
-            FRAMES.with(|frames| frames.borrow().last().cloned()),
-            crate::cancel::Cancel::current(),
-        )
+        Self {
+            frame: FRAMES.with(|frames| frames.borrow().last().cloned()),
+            cancel: crate::cancel::Cancel::current(),
+            progress: crate::progress::Progress::current(),
+        }
     }
 
     /// Runs `f`, on whatever thread, noting its reads into the build this
-    /// handle names, under the cancel flag it carries.
+    /// handle names, under the cancel flag and the progress it carries.
     ///
     /// # Arguments
     ///
@@ -752,10 +761,16 @@ impl Handle {
     ///
     /// What `f` returned.
     pub(crate) fn enter<R>(self, f: impl FnOnce() -> R) -> R {
-        let Self(frame, cancel) = self;
-        crate::cancel::Cancel::carried(cancel.as_ref(), || match frame {
-            Some(frame) => within(frame, f),
-            None => f(),
+        let Self {
+            frame,
+            cancel,
+            progress,
+        } = self;
+        crate::cancel::Cancel::carried(cancel.as_ref(), || {
+            crate::progress::Progress::carried(progress.as_ref(), || match frame {
+                Some(frame) => within(frame, f),
+                None => f(),
+            })
         })
     }
 }

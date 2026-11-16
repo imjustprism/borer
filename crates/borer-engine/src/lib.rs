@@ -56,6 +56,7 @@ pub mod pack;
 pub mod patch;
 pub mod pdb;
 pub mod program;
+pub mod progress;
 pub mod reloc;
 pub mod rsrc;
 pub mod script;

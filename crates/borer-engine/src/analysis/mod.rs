@@ -1325,6 +1325,27 @@ pub struct ClassFacts {
     pub descriptors: BTreeMap<u64, String>,
 }
 
+/// The phases [`Analysis::compute_with`] runs, in order: the plan whose
+/// place a [`crate::progress::Progress`] in force reports.
+pub(crate) const COMPUTE_PHASES: &[&str] = &[
+    "analysis discover",
+    "analysis naming",
+    "analysis naming handlers",
+    "analysis descriptors",
+    "analysis returns",
+    "analysis vtables",
+    "analysis messages",
+    "analysis qt",
+    "analysis objc",
+    "analysis eh",
+    "analysis crypto",
+    "analysis refs_by_function",
+    "analysis sigs",
+    "analysis libnames",
+    "analysis recognize",
+    "analysis scripts",
+];
+
 impl Analysis {
     /// Discovers functions, blocks, cross-references and jump tables.
     ///
@@ -1369,7 +1390,7 @@ impl Analysis {
     /// them later (rendering, the catalogs).
     #[must_use]
     pub fn compute_with(program: &Program, packs: Arc<crate::pack::Packs>) -> Analysis {
-        let mut phases = crate::timing::Phases::new();
+        let mut phases = crate::timing::Phases::planned(crate::progress::Plan::Compute);
         let (mut analysis, crypto) =
             beside(|| discover::discover(program), || crypto_tables(program));
         let crypto = crypto.unwrap_or_else(|| crypto_tables(program));

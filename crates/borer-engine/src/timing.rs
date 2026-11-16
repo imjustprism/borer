@@ -19,13 +19,22 @@ fn on() -> bool {
     *ON.get_or_init(|| std::env::var_os("BORER_TIMING").is_some())
 }
 
-/// One stderr line per [`Phases::mark`], when `BORER_TIMING` is set.
+/// One stderr line per [`Phases::mark`], when `BORER_TIMING` is set, and
+/// for a planned pass the phase it runs, for the progress in force.
 ///
 /// Constructed once at the top of the pass being measured; each mark names
 /// the phase that just ended and restarts the clock, so the lines sum to
-/// the whole pass.
+/// the whole pass. A planned pass ([`Phases::planned`]) marks its plan's
+/// phases in order, and each mark moves the progress in force
+/// ([`crate::progress::Progress`]) on to the next.
 #[derive(Debug)]
-pub(crate) struct Phases(Option<std::time::Instant>);
+pub(crate) struct Phases {
+    /// When the last phase began; `None` with timing off.
+    clock: Option<std::time::Instant>,
+    /// The plan the marks follow and the phase running, its index there;
+    /// `None` for a pass only timed.
+    plan: Option<(crate::progress::Plan, usize)>,
+}
 
 impl Phases {
     /// Starts the clock, or stays inert when timing is off.
@@ -38,22 +47,63 @@ impl Phases {
         reason = "wall time printed to stderr behind BORER_TIMING only, never an output"
     )]
     pub(crate) fn new() -> Self {
-        Self(on().then(std::time::Instant::now))
+        Self {
+            clock: on().then(std::time::Instant::now),
+            plan: None,
+        }
     }
 
-    /// Prints the time since the last mark and restarts the clock.
+    /// Starts the clock and the first phase of `plan`, for the progress in
+    /// force.
     ///
     /// # Arguments
     ///
-    /// * `name` - The phase that just ended.
+    /// * `plan` - The phases the pass runs, in order.
+    ///
+    /// # Returns
+    ///
+    /// The mark holder for one pass.
+    pub(crate) fn planned(plan: crate::progress::Plan) -> Self {
+        crate::progress::enter(plan, 0);
+        Self {
+            plan: Some((plan, 0)),
+            ..Self::new()
+        }
+    }
+
+    /// Prints the time since the last mark and restarts the clock; on a
+    /// planned pass, moves the progress in force on to the next phase.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The phase that just ended; on a planned pass, the one
+    ///   its plan runs now, which a debug build holds it to.
+    ///
+    /// # Panics
+    ///
+    /// In a debug build, on a planned pass, when `name` is not the phase
+    /// its plan runs now: a bug in the pass.
     #[expect(
         clippy::disallowed_methods,
         reason = "wall time printed to stderr behind BORER_TIMING only, never an output"
     )]
     pub(crate) fn mark(&mut self, name: &str) {
-        if let Some(t0) = self.0 {
+        if let Some(t0) = self.clock {
             eprintln!("borer timing: {name} {:?}", t0.elapsed());
-            self.0 = Some(std::time::Instant::now());
+            self.clock = Some(std::time::Instant::now());
+        }
+        if let Some((plan, running)) = &mut self.plan {
+            let names = plan.names();
+            debug_assert_eq!(
+                names.get(*running).copied(),
+                Some(name),
+                "a phase marked out of its plan"
+            );
+            let next = running.saturating_add(1);
+            if next < names.len() {
+                *running = next;
+                crate::progress::enter(*plan, next);
+            }
         }
     }
 }
