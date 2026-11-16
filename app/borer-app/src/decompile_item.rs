@@ -18,10 +18,10 @@ use editor::{
 };
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Div, Entity, EventEmitter, ExternalPaths,
-    FocusHandle, Focusable, FontWeight, HighlightStyle, InteractiveElement as _, IntoElement,
-    MouseButton, MouseUpEvent, ParentElement as _, Pixels, Render, Reservation, SharedString,
-    Styled as _, Subscription, TaskExt as _, WeakEntity, Window, div, px,
+    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, ExternalPaths, FocusHandle,
+    Focusable, HighlightStyle, InteractiveElement as _, IntoElement, MouseButton, MouseUpEvent,
+    ParentElement as _, Pixels, Render, Reservation, SharedString, Styled as _, Subscription,
+    TaskExt as _, WeakEntity, Window, div, px,
 };
 use language::{
     Bias, Buffer, BufferId, Capability, LineEnding, Point, ReplicaId, Rope, TextBuffer,
@@ -29,13 +29,14 @@ use language::{
 use settings::{Settings as _, SettingsStore};
 use theme::{ActiveTheme as _, GlobalTheme};
 use theme_settings::ThemeSettings;
-use ui::{Color, Icon, IconName, Label, LabelCommon as _, v_flex};
+use ui::{Icon, IconName, Label, LabelCommon as _};
 use workspace::item::TabContentParams;
 use workspace::searchable::SearchableItemHandle;
 use workspace::{Item, ItemNavHistory, Pane, Workspace};
 
-use crate::actions::{BACK_HINT, hint_row};
+use crate::actions::{BACK_HINT, Hint};
 use crate::app_view::{binary_of, open_dropped};
+use crate::card::{Card, Tone};
 use crate::code_semantics::for_one_view;
 use crate::code_view::{ClickOutcome, CodeLines, CodePalette, Role, resolve_ref_click};
 use crate::worker::{Job, LoadedBinary, decompile_or_why, listing_blocking};
@@ -61,9 +62,6 @@ pub fn code_row_height(cx: &App) -> Pixels {
     let height = (settings.buffer_font_size(cx) * settings.line_height()).round();
     height.clamp(px(MIN_ROW_HEIGHT_PX), px(MAX_ROW_HEIGHT_PX))
 }
-
-/// Corner radius in logical pixels of the card a failed build shows.
-const CARD_RADIUS_PX: f32 = 6.0;
 
 /// Rows a tall window shows at once; the colored rows reach this far below the top row.
 const PAGE_ROWS: usize = 256;
@@ -592,6 +590,30 @@ impl DecompileItem {
         self.pending.map_or(self.top, |jump| jump.line)
     }
 
+    /// Returns what the tab says while it shows no lines: the engine's reason a build
+    /// failed under the failure's heading, the build running, or that it has no lines;
+    /// `None` once lines are shown.
+    #[must_use]
+    pub fn card(&self) -> Option<Card> {
+        let (says, tone, offers): (SharedString, _, &'static [Hint]) =
+            match (&self.code, &self.failed) {
+                (Some(_), _) => return None,
+                (None, Some(why)) => {
+                    let says = format!(
+                        "{}
+{why}",
+                        self.form.failed()
+                    );
+                    (says.into(), Tone::Error, &[BACK_HINT])
+                }
+                (None, None) if self.job.is_running() => {
+                    (self.form.building().into(), Tone::Quiet, &[])
+                }
+                (None, None) => ("No lines.".into(), Tone::Quiet, &[]),
+            };
+        Some(Card { says, tone, offers })
+    }
+
     /// Returns whether the background build is still running.
     #[must_use]
     pub fn is_decompiling(&self) -> bool {
@@ -844,38 +866,6 @@ fn whole_rows(y: f64) -> usize {
     }
 }
 
-/// Returns the card a tab shows when the engine builds no `form` view: a raised card whose
-/// heading alone is in the error color, then the engine's reason, then the way back.
-///
-/// # Arguments
-///
-/// * `form` - Which view was not built.
-/// * `why` - The engine's reason.
-/// * `cx` - Application context reading the theme and the keymap.
-fn failure_card(form: Form, why: &str, cx: &App) -> Div {
-    let colors = cx.theme().colors();
-    v_flex()
-        .m(px(12.0))
-        .p(px(8.0))
-        .gap_1()
-        .rounded(px(CARD_RADIUS_PX))
-        .border_1()
-        .border_color(colors.border)
-        .bg(colors.surface_background)
-        .font(ThemeSettings::get_global(cx).ui_font.clone())
-        .child(
-            Label::new(form.failed())
-                .weight(FontWeight::SEMIBOLD)
-                .color(Color::Error),
-        )
-        .child(
-            Label::new(SharedString::from(why.to_owned()))
-                .buffer_font(cx)
-                .color(Color::Muted),
-        )
-        .child(hint_row(BACK_HINT, cx))
-}
-
 /// Shows the decompile view of the function at `entry` of `loaded` in the workspace's
 /// active pane, as [`open_view`] does.
 ///
@@ -1111,14 +1101,7 @@ impl Render for DecompileItem {
         if let Some(jump) = self.pending.take() {
             self.apply(jump, window, cx);
         }
-        let muted = cx.theme().colors().text_muted;
-        let note = |note: &'static str| div().p(px(12.0)).text_color(muted).child(note);
-        let over = match (&self.code, &self.failed) {
-            (Some(_), _) => None,
-            (None, Some(why)) => Some(failure_card(self.form, why, cx)),
-            (None, None) if self.job.is_running() => Some(note(self.form.building())),
-            (None, None) => Some(note("No lines.")),
-        };
+        let over = self.card().map(|card| card.render(cx));
         div()
             .key_context("DecompileView")
             .relative()
@@ -1132,7 +1115,7 @@ impl Render for DecompileItem {
                 }),
             )
             .child(self.editor.clone())
-            .children(over.map(|over| div().absolute().top_0().left_0().child(over)))
+            .children(over.map(|over| div().absolute().inset_0().child(over)))
     }
 }
 

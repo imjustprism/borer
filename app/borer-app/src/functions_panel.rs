@@ -20,13 +20,14 @@ use theme::{ActiveTheme as _, GlobalTheme};
 use theme_settings::ThemeSettings;
 use ui::{
     Color, ColumnWidthConfig, IconName, KeyBinding, Label, LabelCommon as _, LabelSize,
-    ResizableColumnsState, Table, TableInteractionState, TableResizeBehavior, h_flex, v_flex,
+    ResizableColumnsState, Table, TableInteractionState, TableResizeBehavior, h_flex,
 };
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
-use crate::actions::{FocusFilter, OPEN_HINT, ToggleFunctions, hint_row};
+use crate::actions::{FocusFilter, Hint, OPEN_HINT, ToggleFunctions};
 use crate::binary::{Binary, SettingsNotice, reading_label};
+use crate::card::{Card, Tone};
 use crate::code_view::{CodePalette, Role};
 use crate::decompile_item::{TabMode, code_row_height, open_function};
 use crate::function_columns::{Align, Columns, Ink, column_widths, row_cells};
@@ -85,6 +86,43 @@ impl Empty {
             Self::LoadFailed(reason) => format!("Load failed: {reason}").into(),
             Self::NoFunction(left_out) => format!("The engine found no function{left_out}").into(),
             Self::NoMatch(query) => format!("No function matches \"{query}\"").into(),
+        }
+    }
+
+    /// Returns the case for a binary no rows are shown of: a load reading a file, the last
+    /// load's failure, else no binary.
+    ///
+    /// # Arguments
+    ///
+    /// * `binary` - The window's binary.
+    #[must_use]
+    pub fn of_binary(binary: &Binary) -> Self {
+        match (binary.reading(), binary.load_error()) {
+            (Some(loading), _) => Self::Reading(loading.path.clone()),
+            (None, Some(reason)) => Self::LoadFailed(reason.to_owned()),
+            (None, None) => Self::NoBinary,
+        }
+    }
+
+    /// Returns the card the panel draws for the case: its words, an error tone for a
+    /// failed load, and the open command where it offers one.
+    #[must_use]
+    pub fn card(&self) -> Card {
+        let tone = match self {
+            Self::LoadFailed(_) => Tone::Error,
+            Self::NoBinary | Self::Reading(_) | Self::NoFunction(_) | Self::NoMatch(_) => {
+                Tone::Quiet
+            }
+        };
+        let offers: &'static [Hint] = if self.offers_open() {
+            &[OPEN_HINT]
+        } else {
+            &[]
+        };
+        Card {
+            says: self.says(),
+            tone,
+            offers,
         }
     }
 
@@ -270,12 +308,7 @@ impl FunctionsPanel {
     #[must_use]
     pub fn empty(&self, cx: &App) -> Option<Empty> {
         let Some(Filtered { query, rows }) = &self.rows else {
-            let binary = self.binary.read(cx);
-            return Some(match (binary.reading(), binary.load_error()) {
-                (Some(loading), _) => Empty::Reading(loading.path.clone()),
-                (None, Some(reason)) => Empty::LoadFailed(reason.to_owned()),
-                (None, None) => Empty::NoBinary,
-            });
+            return Some(Empty::of_binary(self.binary.read(cx)));
         };
         if !rows.rows.is_empty() {
             return None;
@@ -633,15 +666,7 @@ impl Render for FunctionsPanel {
             .child(div().flex_1().child(self.filter.clone()))
             .child(Self::filter_hint(cx));
         let body = match self.empty(cx) {
-            Some(empty) => v_flex()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .font(ThemeSettings::get_global(cx).ui_font.clone())
-                .child(Label::new(empty.says()).color(Color::Muted))
-                .when(empty.offers_open(), |d| d.child(hint_row(OPEN_HINT, cx)))
-                .into_any_element(),
+            Some(empty) => empty.card().render(cx),
             None => self.render_table(cx),
         };
         let (font, size) = {

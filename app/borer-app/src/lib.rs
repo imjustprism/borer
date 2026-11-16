@@ -5,6 +5,7 @@ pub mod app_assets;
 pub mod app_settings;
 pub mod app_view;
 pub mod binary;
+pub mod card;
 pub mod code_semantics;
 pub mod code_view;
 pub mod decompile_item;
