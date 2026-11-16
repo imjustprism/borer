@@ -754,4 +754,27 @@ mod tests {
         assert_eq!(three.address(2), Some(0x1002));
         assert_eq!(three.address(3), None);
     }
+
+    /// A listing whose addresses run out of order, as overlapping blocks
+    /// can lay them, still finds the first line of each address.
+    ///
+    /// # Panics
+    ///
+    /// When [`super::View::line_of`] searches an unordered table as if it
+    /// were ordered, or finds a later line.
+    #[test]
+    fn line_of_finds_the_first_line_when_addresses_run_out_of_order() {
+        let mut b = Builder::default();
+        for va in [0x10, 0x18, 0x12, 0x18] {
+            Sink::at(&mut b, va);
+            b.put("x", Kind::Text, None);
+            b.end_line();
+        }
+        let v = b.finish(Unlinked::default()).expect("a small view");
+        assert_eq!(v.line_of(0x10), Some(0));
+        assert_eq!(v.line_of(0x18), Some(1));
+        assert_eq!(v.line_of(0x12), Some(2));
+        assert_eq!(v.line_of(0x11), None);
+        assert_eq!(v.address(3), Some(0x18));
+    }
 }
