@@ -119,10 +119,11 @@ fn another_builds_project_is_admitted_only_when_forced() {
         .expect_err("another build's project was admitted")
         .to_string();
     assert!(!asked.get(), "a refused file asked for the analysis");
+    assert!(!refused.contains("force=true"), "{refused}");
     assert_eq!(
         refused,
         format!(
-            "the project was saved for another build (sha-256 {}... at a.exe), but a.exe is sha-256 {}...; nothing was loaded. Its addresses belong to that build: load it with this project, then borer://carry/a.exe carries the names to this one; or pass force=true to load the project anyway",
+            "the project was saved for another build (sha-256 {}... at a.exe), but a.exe is sha-256 {}...; nothing was loaded",
             &other[..12],
             &program_identity(&program)[..12]
         )

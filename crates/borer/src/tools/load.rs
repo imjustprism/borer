@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 
-use borer_engine::analysis::project::{self, Admitted};
+use borer_engine::analysis::project::{self, Admitted, Foreign, Identity};
 use borer_engine::layout::Layout;
 use borer_engine::num;
 use borer_engine::pack::Packs;
@@ -189,6 +189,28 @@ pub(crate) fn relative_note(path: &Path, cwd: Option<&Path>) -> String {
             )
         },
     )
+}
+
+/// Says how to load a project saved for another binary, after the
+/// engine's refusal of it ([`Foreign`]).
+///
+/// # Arguments
+///
+/// * `foreign` - The refusal.
+/// * `program` - The loaded binary.
+///
+/// # Returns
+///
+/// For another build, `borer://carry` to move the names and `force=true`;
+/// for a project naming another path, `force=true` and `save_project`.
+fn way_out(foreign: &Foreign, program: &Program) -> String {
+    match foreign.identity {
+        Identity::OtherPath => ". Load that binary first, or pass force=true to load the project anyway and save_project to record the hash".to_owned(),
+        Identity::Same | Identity::Other | Identity::PathOnly => format!(
+            ". Its addresses belong to that build: load it with this project, then borer://carry/{} carries the names to this one; or pass force=true to load the project anyway",
+            borer_engine::text::short_path(&program.path.display().to_string().replace('\\', "/"))
+        ),
+    }
 }
 
 #[tool_router(router = load_tools, vis = "pub(crate)")]
@@ -563,8 +585,12 @@ impl BorerServer {
         };
         let Admitted { plan, edit, said } = guarded(|| {
             let overlay = self.overlay_plain();
-            project::admit(&program, analysis, &overlay, &pf, force.unwrap_or(false))
-                .map_err(|e| e.to_string())
+            project::admit(&program, analysis, &overlay, &pf, force.unwrap_or(false)).map_err(|e| {
+                match e.downcast_ref::<Foreign>() {
+                    Some(foreign) => format!("{foreign}{}", way_out(foreign, &program)),
+                    None => e.to_string(),
+                }
+            })
         })?;
         self.put_project(&program, edit, Some(plan))
             .map_err(|e| err_params(e.to_string()))?;

@@ -1075,8 +1075,8 @@ pub struct Admitted {
 /// A project's addresses belong to the binary it was saved for, and
 /// loading replaces every annotation, so a project saved for another
 /// binary ([`Project::identify`]: by its SHA-256, or by its path in a
-/// project older than the hash) is refused unless `force` says to admit it
-/// anyway; a rebuild is pointed at `borer://carry`. Either way the
+/// project older than the hash) is refused ([`Foreign`]) unless `force`
+/// says to admit it anyway. Either way the
 /// annotations the annotating tools would refuse of the loaded binary are
 /// skipped and listed ([`keep_placeable`], [`settable::keep_settable`]),
 /// and the fields the file states of classes are held to the binary's code
@@ -1102,7 +1102,8 @@ pub struct Admitted {
 ///
 /// # Errors
 ///
-/// When the file was saved for another binary and `force` is not set, it
+/// [`Foreign`] when the file was saved for another binary and `force` is
+/// not set; else when it
 /// states something the overlay cannot hold or a struct that does not lay
 /// out with the binary's pointers ([`super::utypes::laid_at`]), `analysis`
 /// refuses, or holding its class fields to the code is cut short by the
@@ -1121,7 +1122,7 @@ pub fn admit(
     let saved_for = short_path(&file.program);
     let loaded_path = program.path.display().to_string();
     if foreign && !force {
-        return Err(anyhow::Error::msg(refusal(program, file, &saved_for)));
+        return Err(refusal(program, file, (identity, &saved_for)).into());
     }
     let mut loaded = file.to_overlay().map_err(anyhow::Error::msg)?;
     let word: u64 = if program.is_64 { 8 } else { 4 };
@@ -1191,32 +1192,48 @@ pub fn admit(
     })
 }
 
-/// Says why a project saved for another binary is refused, and what to do
-/// instead ([`admit`]).
+/// A project saved for another binary, refused by [`admit`] without
+/// `force`: what the front end adds its way out to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Foreign {
+    /// How the file names another binary: [`Identity::Other`] by its
+    /// SHA-256, [`Identity::OtherPath`] by its path alone.
+    pub identity: Identity,
+    /// What is wrong: the binary the file was saved for and the loaded one,
+    /// ending `nothing was loaded`.
+    pub why: String,
+}
+
+impl std::fmt::Display for Foreign {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.why)
+    }
+}
+
+impl std::error::Error for Foreign {}
+
+/// Says why a project saved for another binary is refused ([`admit`]).
 ///
 /// # Arguments
 ///
 /// * `program` - The loaded binary.
 /// * `file` - The project file.
-/// * `saved_for` - The file's binary, shortened.
-fn refusal(program: &Program, file: &Project, saved_for: &str) -> String {
+/// * `(identity, saved_for)` - How the file names another binary, and that
+///   binary's path, shortened.
+fn refusal(program: &Program, file: &Project, (identity, saved_for): (Identity, &str)) -> Foreign {
     /// Hex digits of a SHA-256 a message shows.
     const HASH_SHOWN: usize = 12;
-    let loaded_path = program.path.display().to_string();
+    let loaded = short_path(&program.path.display().to_string());
     let short = |hash: &str| hash.chars().take(HASH_SHOWN).collect::<String>();
-    match &file.sha256 {
+    let why = match &file.sha256 {
         Some(saved) => format!(
-            "the project was saved for another build (sha-256 {}... at {saved_for}), but {} is sha-256 {}...; nothing was loaded. Its addresses belong to that build: load it with this project, then borer://carry/{} carries the names to this one; or pass force=true to load the project anyway",
+            "the project was saved for another build (sha-256 {}... at {saved_for}), but {loaded} is sha-256 {}...; nothing was loaded",
             short(&crate::text::one_line(saved)),
-            short_path(&loaded_path),
             short(&program_identity(program)),
-            short_path(&loaded_path.replace('\\', "/"))
         ),
-        None => format!(
-            "{}. Load that binary first, or pass force=true to load the project anyway and save_project to record the hash",
-            other_path_verdict(saved_for, &short_path(&loaded_path))
-        ),
-    }
+        None => other_path_verdict(saved_for, &loaded),
+    };
+    Foreign { identity, why }
 }
 
 /// Words what a project states beyond its names, comments and types, for
