@@ -776,6 +776,25 @@ pub(super) fn struct_fields(
     fields
 }
 
+/// Returns the `u8[16]` fields of a user struct, each read as one access.
+///
+/// Each carries the letter of the `uint128_t` access the text reads it
+/// by: what a layout states for an SSE access, which [`struct_fields`]
+/// leaves out as no scalar.
+///
+/// # Arguments
+///
+/// * `s` - The struct.
+pub(super) fn sixteen_byte_fields(
+    s: &crate::analysis::utypes::UserStruct,
+) -> impl Iterator<Item = (u64, (String, &'static str))> + '_ {
+    use crate::analysis::utypes::TypeExpr;
+    s.fields
+        .iter()
+        .filter(|(_, f)| matches!(&f.ty, TypeExpr::Array(e, 16) if **e == TypeExpr::U8))
+        .map(|(&off, f)| (off, (f.name.clone(), "u128")))
+}
+
 /// Names the fields of user-typed globals through a whole text
 /// ([`typed_globals`]).
 ///

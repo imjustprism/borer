@@ -6,15 +6,22 @@
 //! proposal it gets wrong; this turns one into the overlay entries that
 //! make the decompiler name the fields (`a1->f_10`). Each field takes the
 //! widest access seen at its offset (`u8`, `u16`, `u32` or `u64`; a class
-//! field read as floating point is `f32` or `f64`), named `f_<offset>` or
-//! by the member name the class's asserts give it. An offset that overlaps
-//! the field before it, one below the pointer, one of no scalar width and
-//! one only handed to calls is left out, and the plan says so. The
+//! field read as floating point is `f32` or `f64`; a width no scalar has
+//! is that many bytes, `u8[N]`), named `f_<offset>` or by the member name
+//! the class's asserts give it. A pointer's layout reads the machine's
+//! widths, so its `u8[N]` is any width (10 for x87, 16 for SSE, 32 for
+//! AVX); a class's layout reads the decompiled text, whose widest access
+//! is 16 bytes, so its only `u8[N]` is `u8[16]`. The text names only a
+//! `u8[16]` field, read as one `uint128_t`. An offset that overlaps the
+//! field before it, one whose bytes would run over the next offset
+//! accessed, one below the pointer and one only handed to calls is left
+//! out, and the plan says so. The
 //! prototype is the one stated for the function, else the one its
 //! decompiled signature prints, with the parameter's type replaced, so the
 //! arity, the return and the other parameters stay what the text shows.
 
 use std::collections::BTreeMap;
+use std::ops::Bound;
 
 use super::classes::{ClassLayout, FieldLabel};
 use super::edit::{Change, to};
@@ -159,10 +166,17 @@ pub fn from_pointer(
             ));
             continue;
         };
-        let Some(ty) = scalar(width, false) else {
-            notes.push(format!(
-                "{off:#x} is accessed {width} bytes wide, which no scalar is; left out"
-            ));
+        let next =
+            next_after(&found.widths, &found.addressed, at).and_then(|n| u64::try_from(n).ok());
+        let Some(ty) = field_type(width, false, off, next) else {
+            notes.push(match next {
+                Some(next) if width > 0 => format!(
+                    "{off:#x} is accessed {width} bytes wide, over the offset {next:#x} accessed; left out"
+                ),
+                _ => {
+                    format!("{off:#x} is accessed {width} bytes wide, which no scalar is; left out")
+                }
+            });
             continue;
         };
         if off < end {
@@ -251,7 +265,7 @@ pub fn from_class(
     layout: &ClassLayout,
     name: &str,
 ) -> Result<Plan, String> {
-    let (stated, mut notes) = scalar_fields(layout);
+    let (stated, mut notes) = stated_fields(layout);
     if stated.is_empty() {
         return Err(format!(
             "class {}'s methods access no field at a width a field takes; no struct to apply",
@@ -277,13 +291,14 @@ pub fn from_class(
     })
 }
 
-/// Returns the fields a class layout states as scalars, in offset order,
-/// and a note for each offset left out.
+/// Returns the fields a class layout states, in offset order, and a note
+/// for each offset left out.
 ///
-/// Each field takes the widest access seen at its offset, named by the
-/// member name the class's asserts give it or `f_<offset>`; an offset of
-/// no scalar width, one only addressed, and one overlapping the field
-/// before it are left out.
+/// Each field takes the widest access seen at its offset ([`field_type`]),
+/// named by the member name the class's asserts give it or `f_<offset>`;
+/// an offset of no width, one only addressed, one whose bytes would run
+/// over the next offset, and one overlapping the field before it are left
+/// out.
 ///
 /// # Arguments
 ///
@@ -292,7 +307,7 @@ pub fn from_class(
 /// # Returns
 ///
 /// The `(offset, name, type)` fields and the notes.
-pub(crate) fn scalar_fields(layout: &ClassLayout) -> (Vec<(u64, String, TypeExpr)>, Vec<String>) {
+pub(crate) fn stated_fields(layout: &ClassLayout) -> (Vec<(u64, String, TypeExpr)>, Vec<String>) {
     let mut notes: Vec<String> = Vec::new();
     let mut stated: Vec<(u64, String, TypeExpr)> = Vec::new();
     let mut taken: BTreeMap<String, u64> = BTreeMap::new();
@@ -300,10 +315,15 @@ pub(crate) fn scalar_fields(layout: &ClassLayout) -> (Vec<(u64, String, TypeExpr
     for (&off, f) in &layout.fields {
         let bits = f.widths.iter().copied().max().unwrap_or(0);
         let float = f.float_widths.contains(&bits);
-        let Some(ty) = scalar(u32::from(bits / 8), float) else {
+        let next = next_after(&layout.fields, &[], off);
+        let Some(ty) = field_type(u32::from(bits / 8), float, off, next) else {
             if f.address_taken > 0 && bits == 0 {
                 notes.push(format!(
                     "{off:#x} is only addressed (an embedded object), so it states no width; left out"
+                ));
+            } else if let Some(next) = next.filter(|_| bits > 0) {
+                notes.push(format!(
+                    "{off:#x} is accessed {bits} bits wide, over the offset {next:#x} accessed; left out"
                 ));
             } else {
                 notes.push(format!(
@@ -327,6 +347,48 @@ pub(crate) fn scalar_fields(layout: &ClassLayout) -> (Vec<(u64, String, TypeExpr
         stated.push((off, label, ty));
     }
     (stated, notes)
+}
+
+/// Returns the first offset after `at` that a layout accesses: a key of
+/// `map` or a value of `sorted`, found by search in each.
+///
+/// # Arguments
+///
+/// * `map` - The offsets accessed at a width, with what each holds.
+/// * `sorted` - Further offsets accessed, in ascending order.
+/// * `at` - The offset to look past.
+fn next_after<K: Ord + Copy, V>(map: &BTreeMap<K, V>, sorted: &[K], at: K) -> Option<K> {
+    let mapped = map.range((Bound::Excluded(at), Bound::Unbounded)).next();
+    let listed = sorted.get(sorted.partition_point(|&k| k <= at));
+    mapped
+        .map(|(&k, _)| k)
+        .into_iter()
+        .chain(listed.copied())
+        .min()
+}
+
+/// Returns the type of a field accessed `bytes` wide at `off`.
+///
+/// The scalar of that width, else that many bytes, `u8[N]` (16 for an SSE
+/// access, 32 for AVX, 10 for x87), which states the width and nothing of
+/// what the bytes hold, so a float vector is not called an integer.
+///
+/// # Arguments
+///
+/// * `bytes` - The width in bytes.
+/// * `float` - The field is read as floating point.
+/// * `off` - The field's offset.
+/// * `next` - The next offset accessed, which the bytes may not run over.
+///
+/// # Returns
+///
+/// The type, or `None` for no width, or bytes that run over `next`.
+fn field_type(bytes: u32, float: bool, off: u64, next: Option<u64>) -> Option<TypeExpr> {
+    scalar(bytes, float).or_else(|| {
+        let end = off.checked_add(u64::from(bytes))?;
+        (bytes > 0 && next.is_none_or(|n| end <= n))
+            .then(|| TypeExpr::Array(Box::new(TypeExpr::U8), u64::from(bytes)))
+    })
 }
 
 /// The scalar of a field's width.

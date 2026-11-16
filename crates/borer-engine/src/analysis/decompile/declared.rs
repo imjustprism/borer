@@ -140,7 +140,9 @@ pub(super) fn collect_slots(declared: &BTreeMap<Key, Ty>) -> Vec<(i64, Ty)> {
 /// fields of the user struct each points at: what the text names the
 /// fields read through them by (`p->hp`).
 ///
-/// A stated variable's type comes first, then the stated prototype's.
+/// A stated variable's type comes first, then the stated prototype's. A
+/// `u8[16]` field is named here too ([`sixteen_byte_fields`]), and only
+/// here: a global, or a pointer a debug type types, reads it as it did.
 ///
 /// # Arguments
 ///
@@ -159,7 +161,8 @@ pub(super) fn typed_pointers(
         let Some(s) = ty.pointee(&overlay.types) else {
             return;
         };
-        let fields = struct_fields(&overlay.types, s, word);
+        let mut fields = struct_fields(&overlay.types, s, word);
+        fields.extend(sixteen_byte_fields(s));
         if !fields.is_empty() && !out.iter().any(|(v, _)| *v == var) {
             out.push((var, fields));
         }

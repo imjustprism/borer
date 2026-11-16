@@ -472,7 +472,8 @@ pub struct PointerFields {
     pub param: Option<usize>,
     /// The widest access at each offset, in bytes.
     pub widths: BTreeMap<i64, u32>,
-    /// The offsets only handed to calls, which state no width.
+    /// The offsets only handed to calls, which state no width, in ascending
+    /// order.
     pub addressed: Vec<i64>,
 }
 

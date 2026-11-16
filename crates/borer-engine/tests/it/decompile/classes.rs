@@ -1411,3 +1411,80 @@ fn an_indexed_read_of_a_stated_table_names_the_field() {
     let text = decompiled(&p, 0x1_4000_1000);
     assert!(text.contains("return table[a1].name;"), "{text}");
 }
+
+/// A field copied 16 bytes wide (SSE) is kept as the `u8[16]` it is.
+///
+/// A pointer's layout, a class's layout and `set_type` state it alike, and
+/// the text names it through a stated pointer, a C header's `uint8_t[16]`
+/// included.
+///
+/// `mov eax,[rcx+0x7c]; movups xmm0,[rcx+0x80]; movups [rdx],xmm0; ret`
+/// reads a dword before the wide field: the struct covers both, 0x90
+/// bytes, where it used to stop at 0x80 and leave the copy unnamed.
+#[test]
+fn a_field_copied_sixteen_bytes_wide_is_kept_and_named() {
+    use borer_engine::analysis::apply::{from_class, from_pointer};
+    use borer_engine::analysis::classes::class_layout;
+    use borer_engine::analysis::edit::{self, Edit, Force, Laid};
+    use borer_engine::analysis::protos::Proto;
+    use borer_engine::analysis::stated::{Field, Mode};
+    use borer_engine::analysis::utypes::parse_type;
+    let code = [
+        0x8b, 0x41, 0x7c, // ASM: mov eax,[rcx+0x7c]
+        0x0f, 0x10, 0x81, 0x80, 0x00, 0x00, 0x00, // ASM: movups xmm0,[rcx+0x80]
+        0x0f, 0x11, 0x02, // ASM: movups [rdx],xmm0
+        0xc3, // ASM: ret
+    ];
+    let entry = 0x1_4000_1000;
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    let struct_line =
+        |name: &str| format!("struct {name} (0x90 bytes): 0x7c f_7c u32, 0x80 f_80 u8[16]");
+    let plain = Overlay::default();
+    let plan = from_pointer(&p, &a, &plain, "0x140001000,rcx", "Rec").expect("a plan");
+    let lines = plan.describe(&a, &plain);
+    assert_eq!(lines.first(), Some(&struct_line("Rec")), "{lines:?}");
+    assert!(!lines.iter().any(|l| l.starts_with('#')), "{lines:?}");
+    let mut o = Overlay::default();
+    o.names.insert(entry, "Grid::Copy".to_owned());
+    let layout = class_layout(&p, &a, &o, "Grid").expect("class found");
+    let plan = from_class(&p, &a, &o, &layout, "GridS").expect("a plan");
+    let lines = plan.describe(&a, &o);
+    assert_eq!(lines.first(), Some(&struct_line("GridS")), "{lines:?}");
+    assert!(!lines.iter().any(|l| l.starts_with('#')), "{lines:?}");
+    let edited = |mut o: Overlay, edits: &[Edit]| {
+        let made = edit::plan(&p, &a, &o, edits, Force::Refuse).expect("planned");
+        edit::commit(&p, &a, &mut o, &made).expect("committed");
+        decompile(&p, &a, &o, entry).unwrap_or_default()
+    };
+    let laid = Edit::Layout {
+        from: Laid::Class("Grid".to_owned()),
+        name: "GridS".to_owned(),
+    };
+    let text = edited(o, &[laid]);
+    assert!(text.contains("a1->f_80"), "{text}");
+    assert!(text.contains("a1->f_7c"), "{text}");
+    let typed = |ty: Edit, decl: &str| {
+        let proto = Proto::parse(decl).expect("a prototype");
+        edited(Overlay::default(), &[ty, Edit::Proto { entry, proto }])
+    };
+    let field = |name: &str, ty: &str| Field {
+        name: name.to_owned(),
+        ty: Some(parse_type(ty).expect("a type the language spells")),
+    };
+    let fields = Edit::Fields {
+        name: "Box".to_owned(),
+        size: None,
+        fields: vec![(0x7c, field("n", "u32")), (0x80, field("bounds", "u8[16]"))],
+        mode: Mode::Merge,
+    };
+    let text = typed(fields, "uint32_t (Box *b, void *out)");
+    assert!(text.contains("b->bounds"), "{text}");
+    assert!(text.contains("b->n"), "{text}");
+    let header = Edit::Declare {
+        text: "struct Hdr { uint8_t pad[124]; uint32_t n; uint8_t bounds[16]; };".to_owned(),
+    };
+    let text = typed(header, "uint32_t (Hdr *h, void *out)");
+    assert!(text.contains("h->bounds"), "{text}");
+    assert!(text.contains("h->n"), "{text}");
+}

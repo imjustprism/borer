@@ -3,7 +3,7 @@
 //!
 //! [`build`] gathers one [`Sdk`]: every class a vtable or RTTI names, with
 //! the fields its methods access ([`super::classes::class_layout`],
-//! [`super::apply::scalar_fields`]) and its virtual slots; every struct the
+//! [`super::apply::stated_fields`]) and its virtual slots; every struct the
 //! overlay states, which wins over a recovered class of the same name; the
 //! global and thread-local singletons and the globals the overlay names or
 //! types; and the named functions. Three renderers write it: a C++ header
@@ -372,7 +372,7 @@ pub fn recovered(
         });
     }
     if let Some(layout) = layout {
-        let (scalars, left_out) = super::apply::scalar_fields(layout);
+        let (scalars, left_out) = super::apply::stated_fields(layout);
         notes = left_out;
         if layout.sampled {
             notes.push(format!(
