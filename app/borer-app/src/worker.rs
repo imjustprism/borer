@@ -357,13 +357,16 @@ mod tests {
         let sources = [
             ("actions.rs", include_str!("actions.rs")),
             ("app_view.rs", include_str!("app_view.rs")),
+            ("binary.rs", include_str!("binary.rs")),
             ("code_view.rs", include_str!("code_view.rs")),
+            ("decompile_item.rs", include_str!("decompile_item.rs")),
+            ("functions_panel.rs", include_str!("functions_panel.rs")),
             ("history.rs", include_str!("history.rs")),
             ("lib.rs", include_str!("lib.rs")),
             ("main.rs", include_str!("main.rs")),
             ("measure.rs", include_str!("measure.rs")),
             ("measure/input.rs", include_str!("measure/input.rs")),
-            ("theme_provider.rs", include_str!("theme_provider.rs")),
+            ("measure/scroll.rs", include_str!("measure/scroll.rs")),
         ];
         let calls = [
             "Program::load",

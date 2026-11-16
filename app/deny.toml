@@ -53,6 +53,22 @@ allow = [
   "GPL-3.0-or-later",
   # `borer-app` and `borer-engine` themselves.
   "AGPL-3.0-only",
+  # Zed's `language_core` and `grammars`, whose license file reads as the older `GPL-3.0` id;
+  # compatible with the app's AGPL-3.0-only under section 13 of each.
+  "GPL-3.0",
+  # `wasmtime`, `cranelift-*`, `pulley-*`, `regalloc2`, `target-lexicon`, `psm`, `stacker`:
+  # `language` turns on tree-sitter's `wasm` feature unconditionally, so it cannot be dropped.
+  "Apache-2.0 WITH LLVM-exception",
+  # `rustls-webpki`, `untrusted`, `aws-lc-rs`, `aws-lc-sys` (Zed's TLS stack under `client`).
+  "ISC",
+  # `aws-lc-sys` (part of its license expression).
+  "MIT-0",
+  # `xxhash-rust` via Zed's `notify` fork under `fs`.
+  "BSL-1.0",
+  # `webpki-roots` via `http_client_tls` under `client`.
+  "CDLA-Permissive-2.0",
+  # `libbz2-rs-sys` via `bzip2` under `compression-codecs`.
+  "bzip2-1.0.6",
 ]
 
 [licenses.private]
@@ -67,7 +83,16 @@ highlight = "all"
 workspace-default-features = "allow"
 external-default-features = "allow"
 allow = []
-deny = []
+# Zed's workspace pulls its HTTP client, RPC client and TLS stack (`client`, `http_client`,
+# `rustls`, `hyper`, `tokio`), which the app never starts: it boots with Zed's
+# `BlockedHttpClient` and never calls `client::init`. The crates that would update,
+# report crashes or join calls stay out of the graph.
+deny = [
+  { crate = "auto_update", reason = "the app never updates itself through Zed" },
+  { crate = "auto_update_helper", reason = "the app never updates itself through Zed" },
+  { crate = "crashes", reason = "the app sends no crash reports" },
+  { crate = "livekit_client", reason = "the app joins no calls" },
+]
 skip = []
 skip-tree = []
 
@@ -76,7 +101,7 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
-  # Zed `v1.28.1` (`gpui`, `gpui_platform`, `ui`, `theme` and their workspace dependencies).
+  # Zed `v1.28.1` (`gpui`, `ui`, `workspace`, `editor`, `command_palette` and their workspace dependencies).
   "https://github.com/zed-industries/zed",
   # Zed's tested `async-task` patch (one commit over upstream for waker vtable identity).
   "https://github.com/zed-industries/async-task",
@@ -84,4 +109,21 @@ allow-git = [
   # features of `gpui_platform`) builds against it, so `Cargo.lock` resolves it for
   # Linux even though the Windows graph checked above never compiles it.
   "https://github.com/zed-industries/calloop",
+  # Zed's patches of `async-process` and `notify` (`fs` watches through it), and the
+  # tree-sitter revision Zed unifies `tree-sitter-language` on (`language`).
+  "https://github.com/zed-industries/async-process",
+  "https://github.com/zed-industries/notify",
+  "https://github.com/tree-sitter/tree-sitter",
+  # Zed's forks its workspace's `project`, `lsp`, `dap`, `fs` and `node_runtime` build on:
+  # `alacritty_terminal` (`terminal`), `async-pipe`, `async-tar`, `dap-types`,
+  # `lsp-types` and `trash`.
+  "https://github.com/zed-industries/alacritty",
+  "https://github.com/zed-industries/async-pipe-rs",
+  "https://github.com/zed-industries/async-tar",
+  "https://github.com/zed-industries/dap-types",
+  "https://github.com/zed-industries/lsp-types",
+  "https://github.com/zed-industries/trash-rs",
+  # The grammars `language`'s test support loads, for the app's tests.
+  "https://github.com/zed-industries/tree-sitter-markdown",
+  "https://github.com/zed-industries/tree-sitter-typescript",
 ]

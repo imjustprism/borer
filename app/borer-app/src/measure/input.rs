@@ -13,9 +13,11 @@ use super::{
     CALL_CLICKS, FILTER_KEYS, Harness, InjectTracker, MarkWait, PendingInputMark, nanos,
     now_instant, ns_to_ms, say, sorted_quantiles_ms,
 };
-use crate::app_view::{CODE_PAD_PX, CODE_ROW_HEIGHT_PX};
 use crate::code_view::{CodePalette, style_view_line};
-use crate::theme_provider::FONT_SIZE_PX;
+use crate::decompile_item::{
+    CODE_PAD_PX, CODE_ROW_HEIGHT_PX, DecompileItem, TabMode, open_function,
+};
+use crate::functions_panel::FunctionsPanel;
 use crate::worker::{LoadedBinary, decompile_blocking, ui_engine_calls};
 
 /// Action selected for a frame where a clickable call token is visible.
@@ -98,7 +100,7 @@ impl CallTargetTracker {
     ///
     /// # Arguments
     ///
-    /// * `can_go_back` - Whether [`crate::app_view::AppView::can_go_back`] permits stepping back.
+    /// * `can_go_back` - Whether the pane's nav history holds an earlier place to go back to.
     ///
     /// # Returns
     ///
@@ -173,7 +175,8 @@ impl Drop for InputRun {
 }
 
 impl Harness {
-    /// Shows notepad with the filter focused and `entry` open, then polls the input phase.
+    /// Opens `entry` in the preview tab with the filter focused, then polls the input phase;
+    /// the functions panel already lists `loaded`.
     ///
     /// # Arguments
     ///
@@ -192,11 +195,17 @@ impl Harness {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        let rows = loaded.initial_rows.clone();
-        self.app.update(cx, |app, cx| {
-            app.show(loaded, rows, cx);
-            app.focus_filter(window, cx);
-            app.open_function(entry, true, cx);
+        self.workspace.update(cx, |workspace, cx| {
+            open_function(
+                workspace,
+                loaded,
+                entry,
+                TabMode::Preview,
+                false,
+                window,
+                cx,
+            );
+            workspace.focus_panel::<FunctionsPanel>(window, cx);
         });
         self.keys = 0;
         self.clicks = 0;
@@ -259,24 +268,41 @@ impl Harness {
         }
     }
 
+    /// Returns whether the work `wait` names is on screen, superseded, or never started.
+    ///
+    /// # Arguments
+    ///
+    /// * `wait` - The work a mark waits on.
+    /// * `cx` - Application context reading the panel and the active tab.
+    pub(super) fn settled(&self, wait: MarkWait, cx: &App) -> bool {
+        match wait {
+            MarkWait::Immediate => true,
+            MarkWait::Filter(seq) => self
+                .panel(cx)
+                .is_none_or(|panel| panel.read(cx).filter_settled(seq)),
+            MarkWait::Decompile(id, ticket) => self.item(cx).is_none_or(|item| {
+                item.entity_id() != id || item.read(cx).decompile_settled(ticket)
+            }),
+        }
+    }
+
     /// Marks ready every pending mark whose background work the app has settled.
     ///
-    /// Runs whenever the app notifies, so the readiness time is when the app changed,
-    /// before any frame that draws the change; a frame polled before it can be drawn
-    /// without the poll, so settling there would retire marks late.
+    /// Runs whenever the panel or the active tab notifies, so the readiness time is when
+    /// the app changed, before any frame that draws the change; a frame polled before it
+    /// can be drawn without the poll, so settling there would retire marks late.
     ///
     /// # Arguments
     ///
     /// * `cx` - Harness context reading the app.
     pub(super) fn settle_marks(&mut self, cx: &App) {
-        let app = self.app.read(cx);
         let now = now_instant();
-        for mark in self.marks.iter_mut().filter(|m| m.ready_at.is_none()) {
-            let settled = match mark.wait {
-                MarkWait::Immediate => true,
-                MarkWait::Filter(seq) => app.filter_settled(seq),
-                MarkWait::Decompile(ticket) => app.decompile_settled(ticket),
-            };
+        let waits: Vec<_> = self
+            .marks
+            .iter()
+            .map(|m| m.ready_at.is_none() && self.settled(m.wait, cx))
+            .collect();
+        for (mark, settled) in self.marks.iter_mut().zip(waits) {
             if settled {
                 mark.ready_at = Some(now);
                 mark.wait = MarkWait::Immediate;
@@ -299,15 +325,20 @@ impl Harness {
     fn input_decide(
         &mut self,
         run: &mut InputRun,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> anyhow::Result<InputStep> {
         let (shown, decompiling, can_back) = {
-            let app = self.app.read(cx);
+            let item_entity = self.item(cx);
+            let item = item_entity.as_ref().map(|item| item.read(cx));
             (
-                app.code().is_some(),
-                app.is_decompiling(),
-                app.can_go_back(),
+                item.is_some_and(|item| item.code().is_some()),
+                item.is_some_and(DecompileItem::is_decompiling),
+                self.workspace
+                    .read(cx)
+                    .active_pane()
+                    .read(cx)
+                    .can_navigate_backward(),
             )
         };
         if !shown {
@@ -358,7 +389,7 @@ impl Harness {
                 );
             }
             self.before = None;
-            self.app.update(cx, |app, cx| app.navigate_back(cx));
+            window.dispatch_action(Box::new(workspace::pane::GoBack), cx);
         }
         Ok(InputStep::Continue)
     }
@@ -375,11 +406,12 @@ impl Harness {
     ///
     /// Logical `(x, y)` window coordinates, or `None` when no call token is visible.
     fn call_target(&self, window: &Window, cx: &App) -> Option<(f32, f32)> {
-        let app = self.app.read(cx);
-        let code = app.code()?;
-        let current = app.current();
+        let item_entity = self.item(cx)?;
+        let item = item_entity.read(cx);
+        let code = item.code()?;
+        let current = item.entry();
         let (bounds, offset) = {
-            let state = app.code_scroll().0.borrow();
+            let state = item.code_scroll().0.borrow();
             (state.base_handle.bounds(), state.base_handle.offset())
         };
         let row = px(CODE_ROW_HEIGHT_PX);
@@ -413,12 +445,15 @@ impl Harness {
             }
         }
         let (view, line_ix, start, center) = found?;
-        let font = theme::theme_settings(cx).buffer_font(cx).clone();
+        let settings = theme::theme_settings(cx);
+        let (font, size) = (
+            settings.buffer_font(cx).clone(),
+            settings.buffer_font_size(cx),
+        );
         let styled = style_view_line(view, line_ix, &font, &CodePalette::from_theme(cx));
-        let shaped =
-            window
-                .text_system()
-                .shape_line(styled.text, px(FONT_SIZE_PX), &styled.runs, None);
+        let shaped = window
+            .text_system()
+            .shape_line(styled.text, size, &styled.runs, None);
         let x = bounds.left() + offset.x + px(CODE_PAD_PX) + shaped.x_for_index(start) + px(3.0);
         Some((f32::from(x), f32::from(center)))
     }
@@ -691,7 +726,7 @@ mod tests {
             injected_at: ms(0),
             arrived_at: ms(5),
             ready_at: None,
-            wait: MarkWait::Decompile(1),
+            wait: MarkWait::Decompile(gpui::EntityId::from(1_u64), 1),
         }]);
         let loading_frame = [
             gpui::profiler::FrameEvent::Draw(gpui::profiler::FrameTiming {

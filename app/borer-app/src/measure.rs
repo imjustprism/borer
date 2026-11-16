@@ -1,11 +1,14 @@
-//! Measurement modes over the app: a harness entity that holds the [`AppView`] as
-//! its only child and drives scripted scrolls, input-latency marks and the startup
-//! and memory reports from outside it.
+//! Measurement modes over the app.
 //!
-//! The app view carries none of this: only the measurement command-line flags
-//! build a [`Harness`], and a plain `borer-app [binary]` window has none.
+//! A harness entity holds the app's workspace window as its only child and drives
+//! scripted scrolls, input-latency marks and the startup and memory reports from outside
+//! it.
+//!
+//! The workspace carries none of this: only the measurement command-line flags build a
+//! [`Harness`], and a plain `borer-app [binary]` window has none.
 
 mod input;
+mod scroll;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
@@ -21,14 +24,17 @@ use borer_engine::cancel::Cancel;
 use borer_engine::num::{as_f64, from_usize};
 use borer_engine::program::checked_metadata;
 use gpui::{
-    AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, MouseUpEvent, ParentElement as _, Render, ScrollStrategy,
+    App, AppContext as _, Context, Entity, EntityId, InteractiveElement as _, IntoElement,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseUpEvent, ParentElement as _, Render,
     Styled as _, Subscription, Task, Window, div,
 };
+use workspace::{AppState, MultiWorkspace, Workspace};
 
 use self::input::pick_function_with_callees;
-use crate::app_view::{AppView, Tickets};
+use crate::app_view::new_workspace;
 use crate::code_view::CodeLines;
+use crate::decompile_item::DecompileItem;
+use crate::functions_panel::FunctionsPanel;
 use crate::worker::{
     LoadedBinary, TaskEpoch, decompile_blocking, load_binary_blocking, run_engine, spawn_engine,
     ui_engine_calls,
@@ -112,10 +118,20 @@ pub type InjectMark = Arc<InjectTracker>;
 pub enum MarkWait {
     /// No background task needed; visible on the next drawn frame.
     Immediate,
-    /// Visible only once [`AppView::filter_settled`] holds for this filter ticket.
+    /// Visible only once [`FunctionsPanel::filter_settled`] holds for this filter ticket.
     Filter(u64),
-    /// Visible only once [`AppView::decompile_settled`] holds for this decompile ticket.
-    Decompile(u64),
+    /// Visible only once [`DecompileItem::decompile_settled`] holds for this ticket of the
+    /// tab with this id, or another tab is active.
+    Decompile(EntityId, u64),
+}
+
+/// Tickets of the latest background work the app was asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tickets {
+    /// Latest filter request of the functions panel ([`FunctionsPanel::filter_ticket`]).
+    pub filter: u64,
+    /// The active decompile tab and its decompile generation ([`DecompileItem::ticket`]).
+    pub decompile: Option<(EntityId, u64)>,
 }
 
 /// Timestamps and completion gate for one marked input event through GPUI presentation.
@@ -138,15 +154,6 @@ pub const TARGET_LIST_ROWS: usize = 100_000;
 
 /// Lines the code-view scroll shows: notepad's decompile lines repeated by index.
 pub const TARGET_CODE_LINES: usize = 1_000_000;
-
-/// Number of rows or lines advanced on each animation frame during scroll benchmarks.
-const SCROLL_STEP_PER_FRAME: usize = 7;
-
-/// Frames drawn before a scroll run starts recording.
-const WARMUP_FRAMES: u8 = 8;
-
-/// Duration of each scripted scroll benchmark run.
-const SCROLL_DURATION: Duration = Duration::from_secs(10);
 
 /// Maximum wall-clock time allowed for analyzing `edgehtml.dll` or `mshtml.dll`.
 const LARGE_DLL_BUDGET: Duration = Duration::from_secs(120);
@@ -233,7 +240,7 @@ pub enum OneShotAction {
 /// * `mode` - Active [`CliMode`].
 /// * `mode_reported` - `true` once the one-shot notification has already been scheduled.
 /// * `load_error` - Error text if loading the requested binary failed.
-/// * `has_loaded` - `true` once [`LoadedBinary`] has finished installing on [`AppView`].
+/// * `has_loaded` - `true` once the functions panel lists the loaded binary's rows.
 /// * `decompiling` - `true` while an initial function decompilation is still running.
 ///
 /// # Returns
@@ -630,124 +637,6 @@ fn sorted_quantiles_ms(samples_ns: &mut [u64]) -> (f64, f64, f64, f64, u64) {
     )
 }
 
-/// Summarizes frame work recorded between two snapshots, across refresh intervals.
-///
-/// # Arguments
-///
-/// * `before` - Profiler snapshot recorded immediately after warmup.
-/// * `after` - Profiler snapshot recorded after the 10-second scroll loop.
-///
-/// # Returns
-///
-/// `(work_n, work_p50_ms, work_p95_ms, work_p99_ms, work_max_ms, refresh_ms)`.
-///
-/// # Errors
-///
-/// Returns an error when the profiler's histograms cannot be subtracted or added, so a
-/// failed step never drops samples silently.
-fn frame_work(
-    before: &gpui::profiler::FrameDurationSnapshot,
-    after: &gpui::profiler::FrameDurationSnapshot,
-) -> anyhow::Result<(u64, f64, f64, f64, f64, f64)> {
-    let mut combined = None;
-    let mut max_refresh_ns: u64 = 0;
-    for post in &after.by_refresh_interval {
-        let pre = before
-            .by_refresh_interval
-            .iter()
-            .find(|pre| pre.refresh_interval == post.refresh_interval);
-        let mut work = post.work.clone();
-        if let Some(pre) = pre {
-            work.subtract(&pre.work)?;
-        }
-        let drawn = post
-            .frames_drawn
-            .saturating_sub(pre.map_or(0, |p| p.frames_drawn));
-        if drawn == 0 && work.is_empty() {
-            continue;
-        }
-        if let Some(interval) = post.refresh_interval {
-            max_refresh_ns = max_refresh_ns.max(nanos(interval));
-        }
-        match &mut combined {
-            None => combined = Some(work),
-            Some(acc) => acc.add(&work)?,
-        }
-    }
-    let refresh_ms = ns_to_ms(max_refresh_ns);
-    let Some(acc) = combined else {
-        return Ok((0, 0.0, 0.0, 0.0, 0.0, refresh_ms));
-    };
-    Ok((
-        acc.len(),
-        ns_to_ms(acc.value_at_quantile(0.50)),
-        ns_to_ms(acc.value_at_quantile(0.95)),
-        ns_to_ms(acc.value_at_quantile(0.99)),
-        ns_to_ms(acc.max()),
-        refresh_ms,
-    ))
-}
-
-/// Formats frame-duration and interval snapshots into one `MEASURE_SCROLL` protocol line.
-///
-/// # Arguments
-///
-/// * `kind` - `"list"` or `"code"`.
-/// * `source` - Label naming the loaded binary.
-/// * `base_items` - Unreplicated item count.
-/// * `virtual_items` - Item count the scrolled list shows.
-/// * `before` - Profiler snapshot recorded immediately after warmup.
-/// * `after` - Profiler snapshot recorded after the 10-second scroll loop.
-/// * `manual_intervals_ns` - Frame-to-frame durations collected via [`now_instant`].
-///
-/// # Errors
-///
-/// Returns an error when a histogram subtraction or addition fails.
-fn scroll_report(
-    kind: &str,
-    source: &str,
-    base_items: usize,
-    virtual_items: usize,
-    before: &gpui::profiler::FrameDurationSnapshot,
-    after: &gpui::profiler::FrameDurationSnapshot,
-    manual_intervals_ns: &mut [u64],
-) -> anyhow::Result<String> {
-    let mut draw = after.draw_duration_histogram.clone();
-    draw.subtract(&before.draw_duration_histogram)?;
-    let mut dirty = after.dirty_to_present_histogram.clone();
-    dirty.subtract(&before.dirty_to_present_histogram)?;
-    let mut present = after.present_interval_histogram.clone();
-    present.subtract(&before.present_interval_histogram)?;
-    let (wn, wp50, wp95, wp99, wmax, refresh_ms) = frame_work(before, after)?;
-    let (mp50, mp95, mp99, mmax, mcount) = sorted_quantiles_ms(manual_intervals_ns);
-    let replicated = base_items < virtual_items;
-    Ok(format!(
-        "MEASURE_SCROLL kind={kind} source={source:?} base_items={base_items} virtual_items={virtual_items} replicated={replicated} \
-draw_n={} draw_p50_ms={:.3} draw_p95_ms={:.3} draw_p99_ms={:.3} draw_max_ms={:.3} \
-work_n={wn} work_p50_ms={wp50:.3} work_p95_ms={wp95:.3} work_p99_ms={wp99:.3} work_max_ms={wmax:.3} refresh_ms={refresh_ms:.3} \
-dirty_n={} dirty_p50_ms={:.3} dirty_p95_ms={:.3} dirty_p99_ms={:.3} dirty_max_ms={:.3} \
-present_n={} present_p50_ms={:.3} present_p95_ms={:.3} present_p99_ms={:.3} present_max_ms={:.3} \
-manual_n={mcount} manual_p50_ms={mp50:.3} manual_p95_ms={mp95:.3} manual_p99_ms={mp99:.3} manual_max_ms={mmax:.3} \
-ui_engine_calls={}",
-        draw.len(),
-        ns_to_ms(draw.value_at_quantile(0.50)),
-        ns_to_ms(draw.value_at_quantile(0.95)),
-        ns_to_ms(draw.value_at_quantile(0.99)),
-        ns_to_ms(draw.max()),
-        dirty.len(),
-        ns_to_ms(dirty.value_at_quantile(0.50)),
-        ns_to_ms(dirty.value_at_quantile(0.95)),
-        ns_to_ms(dirty.value_at_quantile(0.99)),
-        ns_to_ms(dirty.max()),
-        present.len(),
-        ns_to_ms(present.value_at_quantile(0.50)),
-        ns_to_ms(present.value_at_quantile(0.95)),
-        ns_to_ms(present.value_at_quantile(0.99)),
-        ns_to_ms(present.max()),
-        ui_engine_calls(),
-    ))
-}
-
 /// What a phase's background preparation hands the harness to start on.
 #[derive(Debug)]
 enum Prepared {
@@ -759,41 +648,13 @@ enum Prepared {
     Input(Arc<LoadedBinary>, u64),
 }
 
-/// State of one 10-second scripted scroll, carried from frame to frame.
-struct ScrollRun {
-    /// Measurement generation owning this run.
-    ticket: u64,
-    /// Cooperative cancel flag owning this run.
-    cancel: Cancel,
-    /// `true` to scroll the code view, `false` the function table.
-    code: bool,
-    /// Label naming the loaded binary for the report.
-    source: String,
-    /// Items before repetition.
-    base: usize,
-    /// Items the scrolled list shows.
-    items: usize,
-    /// Whether the code scroll follows this one.
-    then_code: bool,
-    /// Warmup frames remaining before recording begins.
-    warmup: u8,
-    /// Snapshot captured immediately after warmup.
-    before: Option<gpui::profiler::FrameDurationSnapshot>,
-    /// Start of the recorded window.
-    started: Option<Instant>,
-    /// Timestamp of the previous frame.
-    prev: Option<Instant>,
-    /// Current scroll target index.
-    ix: usize,
-    /// Recorded frame-to-frame durations in nanoseconds.
-    intervals: Vec<u64>,
-}
-
-/// The window root in measurement modes: the [`AppView`] as its only child, with the
-/// scripted runs, the input marks and the one-shot reports kept here.
+/// The window root in measurement modes: the app's workspace window as its only child,
+/// with the scripted runs, the input marks and the one-shot reports kept here.
 pub struct Harness {
-    /// The app view under measurement.
-    app: Entity<AppView>,
+    /// The workspace window under measurement, rendered as the harness's child.
+    root: Entity<MultiWorkspace>,
+    /// The workspace the functions panel and the decompile tabs live in.
+    workspace: Entity<Workspace>,
     /// The measurement mode this run was started in.
     mode: CliMode,
     /// Where a failure is left for [`crate::run`] to return.
@@ -808,15 +669,22 @@ pub struct Harness {
     inject: Option<InjectMark>,
     /// Marked input events not yet presented, in arrival order.
     marks: VecDeque<PendingInputMark>,
-    /// The app's tickets when the latest marked event arrived, while its dispatch runs.
-    before: Option<Tickets>,
-    /// Key presses that reached the window root.
+    /// The app's tickets when the latest marked event arrived, and whether a left button
+    /// release followed it, until the next frame binds the event to its work.
+    before: Option<(Tickets, bool)>,
+    /// Key presses the window received.
     keys: u64,
     /// Clicks that opened a function.
     clicks: u64,
-    /// Settles input marks and re-renders the harness, so it checks its one-shot report,
-    /// whenever the app changes.
-    _observe: Subscription,
+    /// When the functions panel last changed.
+    panel_changed: Option<Instant>,
+    /// When the watched decompile tab last changed.
+    item_changed: Option<Instant>,
+    /// The active decompile tab and the observer settling marks when it changes.
+    watched: Option<(EntityId, Subscription)>,
+    /// Observers of the pane, the panel and the binary, which settle input marks and
+    /// re-render the harness, so it checks its one-shot report, whenever they change.
+    _observe: Vec<Subscription>,
 }
 
 impl std::fmt::Debug for Harness {
@@ -830,18 +698,20 @@ impl std::fmt::Debug for Harness {
 }
 
 impl Harness {
-    /// Creates the harness for `mode`, its app view, and starts the mode's phase.
+    /// Creates the harness for `mode`, its workspace window, and starts the mode's phase.
     ///
     /// # Arguments
     ///
     /// * `mode` - A measurement [`CliMode`].
     /// * `exit` - Shared error slot populated when the run fails.
+    /// * `app_state` - The app state the workspace is built from.
     /// * `window` - Window hosting the harness.
     /// * `cx` - Harness context.
     #[must_use]
     pub fn new(
         mode: CliMode,
         exit: CliExitSlot,
+        app_state: &Arc<AppState>,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Self {
@@ -850,11 +720,23 @@ impl Harness {
             CliMode::Interactive(p) => p.clone(),
             CliMode::FirstFrame | CliMode::Headless(_) | CliMode::Measure(_) => None,
         };
-        let app = cx.new(|cx| AppView::new(path, window, cx));
-        let observe = cx.observe(&app, |harness: &mut Self, _, cx| {
+        let workspace = new_workspace(app_state, path, window, cx);
+        let root = cx.new(|cx| MultiWorkspace::new(workspace.clone(), window, cx));
+        let pane = workspace.read(cx).active_pane().clone();
+        let mut observe = vec![cx.observe(&pane, |harness: &mut Self, _, cx| {
+            harness.watch_active_item(cx);
             harness.settle_marks(cx);
             cx.notify();
-        });
+        })];
+        if let Some(panel) = workspace.read(cx).panel::<FunctionsPanel>(cx) {
+            let binary = panel.read(cx).binary().clone();
+            observe.push(cx.observe(&binary, |_, _, cx| cx.notify()));
+            observe.push(cx.observe(&panel, |harness: &mut Self, _, cx| {
+                harness.panel_changed = Some(now_instant());
+                harness.settle_marks(cx);
+                cx.notify();
+            }));
+        }
         let phase = match mode {
             CliMode::Measure(phase) => Some(phase),
             CliMode::Interactive(_)
@@ -864,7 +746,8 @@ impl Harness {
             | CliMode::MeasureMemory(_) => None,
         };
         let mut harness = Self {
-            app,
+            root,
+            workspace,
             mode,
             exit,
             reported: false,
@@ -875,12 +758,75 @@ impl Harness {
             before: None,
             keys: 0,
             clicks: 0,
+            panel_changed: None,
+            item_changed: None,
+            watched: None,
             _observe: observe,
         };
         if let Some(phase) = phase {
             harness.begin(phase, cx);
         }
         harness
+    }
+
+    /// Returns the functions panel of the measured workspace.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Application context.
+    fn panel(&self, cx: &App) -> Option<Entity<FunctionsPanel>> {
+        self.workspace.read(cx).panel::<FunctionsPanel>(cx)
+    }
+
+    /// Returns the active decompile tab of the measured workspace.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Application context.
+    fn item(&self, cx: &App) -> Option<Entity<DecompileItem>> {
+        self.workspace.read(cx).active_item_as::<DecompileItem>(cx)
+    }
+
+    /// Returns the tickets of the latest filter request and of the active tab's decompile.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Application context.
+    fn tickets(&self, cx: &App) -> Tickets {
+        Tickets {
+            filter: self
+                .panel(cx)
+                .map_or(0, |panel| panel.read(cx).filter_ticket()),
+            decompile: self
+                .item(cx)
+                .map(|item| (item.entity_id(), item.read(cx).ticket())),
+        }
+    }
+
+    /// Observes the active decompile tab, once it is a different one, so its decompile
+    /// settles marks the moment it lands.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Harness context.
+    fn watch_active_item(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(item) = self.item(cx) else {
+            self.watched = None;
+            return;
+        };
+        if self
+            .watched
+            .as_ref()
+            .is_some_and(|(id, _)| *id == item.entity_id())
+        {
+            return;
+        }
+        let observe = cx.observe(&item, |harness: &mut Self, _, cx| {
+            harness.item_changed = Some(now_instant());
+            harness.settle_marks(cx);
+            cx.notify();
+        });
+        self.watched = Some((item.entity_id(), observe));
     }
 
     /// Leaves `err` for [`crate::run`] to return and quits.
@@ -943,152 +889,6 @@ impl Harness {
         }));
     }
 
-    /// Shows what `prepared` holds in the app and starts its run on the next frame.
-    ///
-    /// # Arguments
-    ///
-    /// * `ticket` - Generation of the phase.
-    /// * `cancel` - Cancel flag of the phase.
-    /// * `prepared` - The phase's background preparation.
-    /// * `window` - Window driving frame callbacks.
-    /// * `cx` - Harness context.
-    fn start(
-        &mut self,
-        ticket: u64,
-        cancel: Cancel,
-        prepared: Prepared,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        cx.activate(true);
-        window.activate_window();
-        let (code, source, base, items, then_code) = match prepared {
-            Prepared::List(ready, then_code) => {
-                let source = format!(
-                    "{} ({:.2}s)",
-                    ready.loaded.path.display(),
-                    ready.analyze_secs
-                );
-                self.app
-                    .update(cx, |app, cx| app.show(ready.loaded, ready.rows, cx));
-                (false, source, ready.base_rows, TARGET_LIST_ROWS, then_code)
-            }
-            Prepared::Code(corpus) => {
-                let source = corpus.loaded.path.display().to_string();
-                let rows = corpus.loaded.initial_rows.clone();
-                self.app.update(cx, |app, cx| {
-                    app.show(corpus.loaded, rows, cx);
-                    app.show_code(corpus.code, cx);
-                });
-                (true, source, corpus.base_lines, TARGET_CODE_LINES, false)
-            }
-            Prepared::Input(loaded, entry) => {
-                self.start_input(ticket, cancel, loaded, entry, window, cx);
-                return;
-            }
-        };
-        let run = ScrollRun {
-            ticket,
-            cancel,
-            code,
-            source,
-            base,
-            items,
-            then_code,
-            warmup: WARMUP_FRAMES,
-            before: None,
-            started: None,
-            prev: None,
-            ix: 0,
-            intervals: Vec::with_capacity(2048),
-        };
-        cx.on_next_frame(window, move |this, window, cx| {
-            this.scroll_step(run, window, cx);
-        });
-    }
-
-    /// Scrolls one step of `run`, recording frame intervals, until 10 seconds pass.
-    ///
-    /// # Arguments
-    ///
-    /// * `run` - The scroll's state.
-    /// * `window` - Window driving frame callbacks.
-    /// * `cx` - Harness context.
-    fn scroll_step(&mut self, mut run: ScrollRun, window: &mut Window, cx: &mut Context<'_, Self>) {
-        if !self.epoch.is_current(run.ticket, &run.cancel) {
-            return;
-        }
-        let now = now_instant();
-        if run.warmup > 0 {
-            run.warmup -= 1;
-            if run.warmup == 0 {
-                run.before = Some(window.frame_duration_snapshot());
-                run.started = Some(now);
-                run.prev = Some(now);
-            }
-        } else {
-            if let Some(prev) = run.prev.replace(now) {
-                run.intervals.push(nanos(now.duration_since(prev)));
-            }
-            if run
-                .started
-                .is_some_and(|t0| now.duration_since(t0) >= SCROLL_DURATION)
-            {
-                self.finish_scroll(run, window, cx);
-                return;
-            }
-        }
-        run.ix = run.ix.saturating_add(SCROLL_STEP_PER_FRAME) % run.items.max(1);
-        let (ix, code) = (run.ix, run.code);
-        self.app.update(cx, |app, cx| {
-            if code {
-                app.scroll_code_to(ix, ScrollStrategy::Top);
-            } else {
-                app.scroll_table_to(ix, ScrollStrategy::Top, cx);
-            }
-            cx.notify();
-        });
-        cx.on_next_frame(window, move |this, window, cx| {
-            this.scroll_step(run, window, cx);
-        });
-    }
-
-    /// Prints the report of a finished scroll, then runs the code scroll or quits.
-    ///
-    /// # Arguments
-    ///
-    /// * `run` - The finished scroll.
-    /// * `window` - Window providing the closing snapshot.
-    /// * `cx` - Harness context.
-    fn finish_scroll(
-        &mut self,
-        mut run: ScrollRun,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let Some(before) = run.before.take() else {
-            self.fail(anyhow::anyhow!("scroll run ended before its warmup"), cx);
-            return;
-        };
-        let after = window.frame_duration_snapshot();
-        let kind = if run.code { "code" } else { "list" };
-        let report = scroll_report(
-            kind,
-            &run.source,
-            run.base,
-            run.items,
-            &before,
-            &after,
-            &mut run.intervals,
-        )
-        .and_then(|line| say(&line));
-        match report {
-            Err(err) => self.fail(err, cx),
-            Ok(()) if run.then_code => self.begin(MeasurePhase::CodeScroll, cx),
-            Ok(()) => cx.quit(),
-        }
-    }
-
     /// Schedules the one-shot report of [`Self::mode`] once the app is ready for it.
     ///
     /// # Arguments
@@ -1097,17 +897,22 @@ impl Harness {
     /// * `cx` - Harness context.
     fn check_one_shot(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let (action, rows, lines) = {
-            let app = self.app.read(cx);
+            let panel_entity = self.panel(cx);
+            let panel = panel_entity.as_ref().map(|panel| panel.read(cx));
+            let item_entity = self.item(cx);
+            let item = item_entity.as_ref().map(|item| item.read(cx));
+            let error = panel.and_then(|panel| panel.binary().read(cx).load_error());
+            let rows = panel.and_then(|panel| panel.rows()).map(|r| r.rows.len());
             (
                 evaluate_one_shot(
                     &self.mode,
                     self.reported,
-                    app.load_error(),
-                    app.loaded().is_some(),
-                    app.is_decompiling(),
+                    error,
+                    rows.is_some(),
+                    item.is_some_and(DecompileItem::is_decompiling),
                 ),
-                app.rows().map_or(0, |r| r.rows.len()),
-                app.code().map_or(0, |c| c.len()),
+                rows.unwrap_or(0),
+                item.and_then(DecompileItem::code).map_or(0, |c| c.len()),
             )
         };
         let (line, quit) = match action {
@@ -1161,7 +966,7 @@ impl Harness {
     ///
     /// # Arguments
     ///
-    /// * `cx` - Harness context scheduling a frame so the mark can retire.
+    /// * `cx` - Harness context scheduling a frame so the mark can be bound and retire.
     fn arrive(&mut self, cx: &mut Context<'_, Self>) {
         let Some((id, injected_at)) = self.inject.as_ref().and_then(|t| t.take_armed()) else {
             return;
@@ -1174,56 +979,72 @@ impl Harness {
             ready_at: Some(arrived_at),
             wait: MarkWait::Immediate,
         });
-        self.before = Some(self.app.read(cx).tickets());
+        self.before = Some((self.tickets(cx), false));
         cx.notify();
     }
 
-    /// Binds the latest mark to the background work its event started, once the app
-    /// has handled the event.
+    /// Binds the latest mark to the background work its event started.
+    ///
+    /// Runs when the next frame renders the harness: the app's editor takes typed text as
+    /// a separate platform event and defers its edit, and a link opens its tab once the
+    /// click's update ends, so the work is known only after every effect of the event ran.
+    /// Work that already landed counts as ready when its panel or tab last changed.
     ///
     /// # Arguments
     ///
-    /// * `click` - Whether the event was a mouse release, counted when it opened a function.
-    /// * `cx` - Harness context.
-    fn bind(&mut self, click: bool, cx: &Context<'_, Self>) {
-        let Some(before) = self.before.take() else {
+    /// * `cx` - Application context.
+    fn bind(&mut self, cx: &App) {
+        let Some((before, click)) = self.before.take() else {
             return;
         };
-        let after = self.app.read(cx).tickets();
-        let wait = if after.decompile != before.decompile {
+        let after = self.tickets(cx);
+        let (wait, changed) = if after.decompile != before.decompile {
+            let Some((id, ticket)) = after.decompile else {
+                return;
+            };
             if click {
                 self.clicks = self.clicks.saturating_add(1);
             }
-            MarkWait::Decompile(after.decompile)
+            (MarkWait::Decompile(id, ticket), self.item_changed)
         } else if after.filter != before.filter {
-            MarkWait::Filter(after.filter)
+            (MarkWait::Filter(after.filter), self.panel_changed)
         } else {
             return;
         };
+        let settled = self.settled(wait, cx);
         if let Some(last) = self.marks.back_mut() {
-            last.ready_at = None;
-            last.wait = wait;
+            if settled {
+                let landed = changed.map_or(last.arrived_at, |at| at.max(last.arrived_at));
+                last.ready_at = Some(landed);
+            } else {
+                last.ready_at = None;
+                last.wait = wait;
+            }
         }
     }
 }
 
 impl Render for Harness {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        self.bind(cx);
         self.check_one_shot(window, cx);
         div()
             .size_full()
-            .capture_key_down(cx.listener(|this, _: &KeyDownEvent, _, cx| this.arrive(cx)))
-            .on_key_down(cx.listener(|this, _: &KeyDownEvent, _, cx| {
+            .capture_key_down(cx.listener(|this, _: &KeyDownEvent, _, cx| {
                 this.keys = this.keys.saturating_add(1);
-                this.bind(false, cx);
+                this.arrive(cx);
             }))
             .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| this.arrive(cx)))
             .capture_any_mouse_up(cx.listener(|this, _: &MouseUpEvent, _, cx| this.arrive(cx)))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, cx| this.bind(true, cx)),
+                cx.listener(|this, _: &MouseUpEvent, _, _| {
+                    if let Some((_, click)) = this.before.as_mut() {
+                        *click = true;
+                    }
+                }),
             )
-            .child(self.app.clone())
+            .child(self.root.clone())
     }
 }
 
@@ -1317,9 +1138,10 @@ mod tests {
 
     use borer_engine::cancel::Cancel;
 
+    use super::scroll::scroll_report;
     use super::{
         CliMode, OneShotAction, build_corpus_code_blocking, evaluate_one_shot,
-        load_large_dll_blocking, parse_cli_args_os, scroll_report,
+        load_large_dll_blocking, parse_cli_args_os,
     };
 
     /// Returns a frame snapshot whose three histograms each hold `n` one-millisecond samples.

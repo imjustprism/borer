@@ -1,76 +1,71 @@
-//! Desktop GPUI application over [`borer_engine`].
+//! Desktop GPUI application over [`borer_engine`], hosted in Zed's workspace.
 
 pub mod actions;
 pub mod app_view;
+pub mod binary;
 pub mod code_view;
+pub mod decompile_item;
+pub mod functions_panel;
 pub mod history;
 pub mod measure;
-pub mod theme_provider;
 pub mod worker;
 
-use gpui::{App, AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
-use theme::LoadThemes;
+use gpui::{App, AppContext as _};
+use workspace::MultiWorkspace;
 
-use crate::actions::bind_keys;
-use crate::app_view::AppView;
 use crate::measure::{CliMode, Harness, new_cli_exit_slot, parse_cli_args, run_headless};
-use crate::theme_provider::AppThemeSettings;
 use crate::worker::mark_ui_thread;
-
-/// Default window width in logical pixels.
-const WINDOW_WIDTH_PX: f32 = 1280.0;
-
-/// Default window height in logical pixels.
-const WINDOW_HEIGHT_PX: f32 = 800.0;
 
 /// Boots the GPUI platform (or `--headless` mode) according to CLI flags.
 ///
-/// `borer-app [binary]` opens the app view as the window root; a measurement flag
-/// opens a [`Harness`] around it instead.
+/// `borer-app [binary]` opens a window whose root is Zed's workspace; a measurement flag
+/// opens a [`Harness`] around that workspace instead.
 ///
 /// # Errors
 ///
-/// Returns an error if CLI flags are invalid, opening the window fails, or a
-/// non-interactive CLI mode (`--headless`, `--report-open`, `--measure-memory`,
-/// `--measure`) fails to load or measure its target binary.
+/// Returns an error if CLI flags are invalid, the data directory cannot be set up, Zed's
+/// fonts or keymaps do not load, opening the window fails, or a non-interactive CLI mode
+/// (`--headless`, `--report-open`, `--measure-memory`, `--measure`) fails to load or
+/// measure its target binary.
 pub fn run() -> anyhow::Result<()> {
     let mode = parse_cli_args()?;
     if let CliMode::Headless(path) = mode {
         return run_headless(path);
     }
+    app_view::set_data_dir()?;
     let exit_slot = new_cli_exit_slot();
     let app_slot = exit_slot.clone();
-    gpui_platform::application().run(move |cx: &mut App| {
-        mark_ui_thread();
-        theme::init(LoadThemes::JustBase, cx);
-        theme::set_theme_settings_provider(Box::new(AppThemeSettings::new()), cx);
-        bind_keys(cx);
-        let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH_PX), px(WINDOW_HEIGHT_PX)), cx);
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            ..WindowOptions::default()
-        };
-        let harness_slot = app_slot.clone();
-        let opened = match mode {
-            CliMode::Interactive(path) => cx
-                .open_window(options, |window, cx| {
-                    cx.new(|cx| AppView::new(path, window, cx))
-                })
-                .map(drop),
-            measured @ (CliMode::FirstFrame
-            | CliMode::ReportOpen(_)
-            | CliMode::Headless(_)
-            | CliMode::MeasureMemory(_)
-            | CliMode::Measure(_)) => cx
-                .open_window(options, |window, cx| {
-                    cx.new(|cx| Harness::new(measured, harness_slot, window, cx))
-                })
-                .map(drop),
-        };
-        if let Err(err) = opened {
-            *app_slot.borrow_mut() = Some(err);
-            cx.quit();
-        }
-    });
+    gpui_platform::application()
+        .with_assets(assets::Assets)
+        .run(move |cx: &mut App| {
+            mark_ui_thread();
+            let opened = app_view::init(cx).and_then(|app_state| {
+                let options = app_view::window_options(cx);
+                let harness_slot = app_slot.clone();
+                match mode {
+                    CliMode::Interactive(path) => cx
+                        .open_window(options, |window, cx| {
+                            let workspace = app_view::new_workspace(&app_state, path, window, cx);
+                            cx.new(|cx| MultiWorkspace::new(workspace, window, cx))
+                        })
+                        .map(drop),
+                    measured @ (CliMode::FirstFrame
+                    | CliMode::ReportOpen(_)
+                    | CliMode::Headless(_)
+                    | CliMode::MeasureMemory(_)
+                    | CliMode::Measure(_)) => cx
+                        .open_window(options, |window, cx| {
+                            cx.new(|cx| {
+                                Harness::new(measured, harness_slot, &app_state, window, cx)
+                            })
+                        })
+                        .map(drop),
+                }
+            });
+            if let Err(err) = opened {
+                *app_slot.borrow_mut() = Some(err);
+                cx.quit();
+            }
+        });
     exit_slot.borrow_mut().take().map_or(Ok(()), Err)
 }

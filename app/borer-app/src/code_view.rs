@@ -341,7 +341,7 @@ fn plain_run(len: usize, font: &Font, color: Hsla, underlined: bool) -> TextRun 
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use borer_engine::analysis::decompile::view::{view, view_of};
     use borer_engine::analysis::{Analysis, EnumSource, Overlay};
     use borer_engine::program::{Arch, BinaryFormat, Program, Section};
@@ -380,7 +380,7 @@ mod tests {
 
     /// Builds a small multi-function x86-64 program exercising calls, branches,
     /// labels, strings, and globals.
-    fn sample_program() -> (Program, Analysis, Overlay) {
+    pub(crate) fn sample_program() -> (Program, Analysis, Overlay) {
         let mut bytes = vec![0u8; 0x200];
         bytes[..0x100].fill(0xcc);
         // ASM: sub rsp, 0x28 ; test ecx, ecx ; jz +0x7 ; call 0x1030 ; jmp +0xc ; lea rcx, [rip+0xea] ; call 0x1030 ; add rsp, 0x28 ; ret

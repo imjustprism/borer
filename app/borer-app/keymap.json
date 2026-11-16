@@ -1,0 +1,17 @@
+[
+  {
+    "context": "Workspace",
+    "bindings": {
+      "ctrl-o": "borer::Open",
+      "ctrl-f": "borer::FocusFilter",
+      "ctrl-shift-e": "borer::ToggleFunctions"
+    }
+  },
+  {
+    "context": "FunctionsPanel > Editor",
+    "bindings": {
+      "up": "menu::SelectPrevious",
+      "down": "menu::SelectNext"
+    }
+  }
+]

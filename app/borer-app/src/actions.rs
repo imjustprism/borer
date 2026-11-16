@@ -1,53 +1,50 @@
-//! The app's actions and their default key bindings: the one list a button or a
-//! palette reads a shortcut from, through gpui's keymap.
+//! The app's actions, under the `borer` namespace, and its key bindings: Zed's default
+//! keymap, then the app's keymap asset, which holds only the bindings Zed's lacks.
 
-use gpui::{App, KeyBinding};
+use gpui::App;
+use settings::{DEFAULT_KEYMAP_PATH, KeymapFile, KeymapFileLoadResult};
 
 gpui::actions!(
-    borer_app,
+    borer,
     [
-        /// Opens a binary file via the native file dialog.
+        /// Opens a binary through the system file dialog.
         Open,
-        /// Moves keyboard focus into the function filter input.
+        /// Shows the functions panel and moves focus to its filter.
         FocusFilter,
-        /// Opens the decompile view for the currently highlighted function row.
-        OpenSelected,
-        /// Moves the function-table selection down by one row.
-        NextRow,
-        /// Moves the function-table selection up by one row.
-        PreviousRow,
-        /// Moves the function-table selection down by one page.
-        PageDown,
-        /// Moves the function-table selection up by one page.
-        PageUp,
-        /// Navigates to the previous function in history.
-        GoBack,
-        /// Navigates to the next function in history.
-        GoForward,
+        /// Shows the functions panel and focuses it, or moves focus back to the center pane.
+        ToggleFunctions,
     ]
 );
 
-/// Registers the default key binding of every action in gpui's keymap.
+/// The app's keymap: the bindings Zed's default keymap lacks, in Zed's keymap format.
+const APP_KEYMAP: &str = include_str!("../keymap.json");
+
+/// Binds Zed's default keymap for this platform, then the app's keymap over it.
 ///
-/// `AppRoot` bindings hold anywhere in the window; `AppBrowse` ones only while
-/// the filter field does not have focus, so typing there is never taken.
+/// Zed's bindings for actions of crates the app does not link are left out, as Zed's
+/// partial loader does; every binding of the app's keymap must load.
 ///
 /// # Arguments
 ///
 /// * `cx` - Application context receiving the keymap entries.
-pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("ctrl-o", Open, Some("AppRoot")),
-        KeyBinding::new("ctrl-f", FocusFilter, Some("AppRoot")),
-        KeyBinding::new("/", FocusFilter, Some("AppBrowse")),
-        KeyBinding::new("enter", OpenSelected, Some("AppBrowse")),
-        KeyBinding::new("down", NextRow, Some("AppBrowse")),
-        KeyBinding::new("j", NextRow, Some("AppBrowse")),
-        KeyBinding::new("up", PreviousRow, Some("AppBrowse")),
-        KeyBinding::new("k", PreviousRow, Some("AppBrowse")),
-        KeyBinding::new("pagedown", PageDown, Some("AppBrowse")),
-        KeyBinding::new("pageup", PageUp, Some("AppBrowse")),
-        KeyBinding::new("alt-left", GoBack, Some("AppRoot")),
-        KeyBinding::new("alt-right", GoForward, Some("AppRoot")),
-    ]);
+///
+/// # Errors
+///
+/// Returns an error when none of Zed's default bindings load, or when a binding of the
+/// app's keymap names an unknown action or does not parse.
+pub fn bind_keys(cx: &mut App) -> anyhow::Result<()> {
+    cx.bind_keys(KeymapFile::load_asset_allow_partial_failure(
+        DEFAULT_KEYMAP_PATH,
+        cx,
+    )?);
+    match KeymapFile::load(APP_KEYMAP, cx) {
+        KeymapFileLoadResult::Success { key_bindings } => cx.bind_keys(key_bindings),
+        KeymapFileLoadResult::SomeFailedToLoad { error_message, .. } => {
+            anyhow::bail!("the app keymap does not load: {error_message}")
+        }
+        KeymapFileLoadResult::JsonParseFailure { error } => {
+            anyhow::bail!("the app keymap does not parse: {error}")
+        }
+    }
+    Ok(())
 }
