@@ -959,19 +959,7 @@ impl Draft {
         let old = name_of(a, &self.overlay, target);
         self.put(Change::Name(target, to(Some(name.to_owned()))));
         if force == Force::Refuse {
-            match resolve(p, a, &self.overlay, name) {
-                Ok(found) if found == target => {}
-                Ok(found) => {
-                    return Err(format!(
-                        "'{name}' already names {found:#x}; pick another name, or force=true to take it"
-                    ));
-                }
-                Err(why) => {
-                    return Err(format!(
-                        "'{name}' is taken ({why}); pick another name, or force=true to take it"
-                    ));
-                }
-            }
+            taken(p, a, &self.overlay, target, name)?;
         }
         self.lines.push(Line::Named {
             target,
@@ -981,6 +969,116 @@ impl Draft {
             number: parse_addr(name),
         });
         Ok(())
+    }
+
+    /// Writes a change taken back over the draft, refusing what [`plan`]
+    /// refuses of the entry it leaves: a name another address answers to,
+    /// a variable's name another of the function's has.
+    ///
+    /// # Arguments
+    ///
+    /// * `(p, a)` - The program and its analysis.
+    /// * `change` - The inverse of a committed change.
+    ///
+    /// # Errors
+    ///
+    /// When the entry no longer holds what the change found there, or what
+    /// it leaves is refused.
+    fn undo(&mut self, (p, a): (&Program, &Analysis), change: Change) -> Result<(), String> {
+        if !self.overlay.holds(&change) {
+            return Err(changed(&change));
+        }
+        let named = if let Change::Name(target, s) = &change {
+            s.after().map(|n| (*target, n.clone()))
+        } else {
+            None
+        };
+        let var = if let Change::Var(entry, key, s) = &change {
+            s.after().map(|v| (*entry, *key, v.name.clone()))
+        } else {
+            None
+        };
+        self.put(change);
+        if let Some((target, name)) = named {
+            taken(p, a, &self.overlay, target, &name)?;
+        }
+        if let Some((entry, key, name)) = var {
+            var_taken(p, &self.overlay, (entry, key), &name)?;
+        }
+        Ok(())
+    }
+}
+
+/// Says that a change's entry no longer holds what the change found there.
+///
+/// # Arguments
+///
+/// * `change` - The change.
+fn changed(change: &Change) -> String {
+    format!(
+        "{} changed since this edit was planned; nothing was applied",
+        change.entry()
+    )
+}
+
+/// Refuses a name `target` takes when another address answers to it, or
+/// the name reads as something else that is taken ([`resolve`]).
+///
+/// # Arguments
+///
+/// * `(p, a, o)` - The program, its analysis and the overlay that names
+///   `target` so.
+/// * `target` - The function's entry, or the data address.
+/// * `name` - The name.
+///
+/// # Errors
+///
+/// When the name resolves anywhere else; the message says how to take it.
+fn taken(p: &Program, a: &Analysis, o: &Overlay, target: u64, name: &str) -> Result<(), String> {
+    match resolve(p, a, o, name) {
+        Ok(found) if found == target => Ok(()),
+        Ok(found) => Err(format!(
+            "'{name}' already names {found:#x}; pick another name, or force=true to take it"
+        )),
+        Err(why) => Err(format!(
+            "'{name}' is taken ({why}); pick another name, or force=true to take it"
+        )),
+    }
+}
+
+/// Refuses a name for a function's variable that another of its variables
+/// already has.
+///
+/// # Arguments
+///
+/// * `p` - The loaded program, for how the function's text spells slots.
+/// * `o` - The overlay.
+/// * `(entry, key)` - The function and the variable named.
+/// * `name` - The name.
+///
+/// # Errors
+///
+/// When another variable of the function has the name; the message names
+/// it as the function's text spells it.
+fn var_taken(
+    p: &Program,
+    o: &Overlay,
+    (entry, key): (u64, VarKey),
+    name: &str,
+) -> Result<(), String> {
+    let other = o
+        .vars
+        .get(&entry)
+        .and_then(|vs| vs.iter().find(|(k, v)| v.name == name && **k != key));
+    match other {
+        Some((other, _)) => {
+            let (stack, shadow, frame) = protos::slot_words(p, entry);
+            Err(format!(
+                "{name} already names {} of this function",
+                other.spell(stack, shadow, frame)
+            ))
+        }
+        None => Ok(()),
     }
 }
 
@@ -1053,7 +1151,7 @@ fn plan_var(
     var: &str,
     (name, ty): (Option<&str>, Option<&str>),
 ) -> Result<(VarKey, Var), String> {
-    let (stack, shadow, frame) = protos::slot_words(p, entry);
+    let (stack, _, frame) = protos::slot_words(p, entry);
     let stated = o.vars.get(&entry);
     let key = stated_key(o, entry, var).map_or_else(
         || VarKey::parse(var, stack, frame).map_err(|e| e.to_string()),
@@ -1062,15 +1160,7 @@ fn plan_var(
     let name = name.ok_or("naming a variable needs `name`, its new name (`type` is optional)")?;
     let decl = ty.map_or_else(|| name.to_owned(), |t| format!("{t} {name}"));
     let var = Var::parse(&decl).map_err(|e| e.to_string())?;
-    if let Some((other, _)) =
-        stated.and_then(|vs| vs.iter().find(|(k, v)| v.name == var.name && **k != key))
-    {
-        return Err(format!(
-            "{} already names {} of this function",
-            var.name,
-            other.spell(stack, shadow, frame)
-        ));
-    }
+    var_taken(p, o, (entry, key), &var.name)?;
     let held: usize = o.vars.values().map(BTreeMap::len).sum();
     if held >= protos::VARS_MAX && !stated.is_some_and(|vs| vs.contains_key(&key)) {
         return Err(format!(
@@ -1187,10 +1277,7 @@ pub fn commit(
     for change in &plan.changes {
         if !overlay.holds(change) {
             *overlay = before;
-            return Err(anyhow::anyhow!(
-                "{} changed since this edit was planned; nothing was applied",
-                change.entry()
-            ));
+            return Err(anyhow::Error::msg(changed(change)));
         }
         overlay.assign(change.clone());
     }
@@ -1213,29 +1300,54 @@ pub fn commit(
     Ok(())
 }
 
-/// Returns the plan that takes back a committed plan's changes
-/// ([`Plan::changes`]).
+/// Plans taking back a committed plan's changes ([`Plan::changes`]).
 ///
-/// It holds, over the overlay as it is now, their inverses,
-/// the last first, which [`commit`] refuses when an edit since changed an
-/// entry they take back.
+/// Over the overlay as it is now, their inverses, the last first, are
+/// checked as
+/// [`plan`] checks what it writes, so an undo leaves nothing a plan
+/// refuses. A plan made stale by a commit since ([`Stale`]) is made again
+/// by its caller.
 ///
 /// # Arguments
 ///
 /// * `program` - The loaded image the overlay annotates.
-/// * `_analysis` - Its analysis, which the checks of a revert will read.
+/// * `analysis` - Its analysis.
 /// * `overlay` - The overlay the changes were committed to, as it is now.
 /// * `changes` - The changes taken back.
-#[must_use]
+///
+/// # Errors
+///
+/// When an entry no longer holds what its change left there (an edit
+/// since changed it), or taking the changes back would leave a name
+/// another address answers to, a function's two variables of one name,
+/// or a class's stated fields that no longer stand
+/// ([`stated::validate`]). Caps and types are checked by [`commit`].
 pub fn revert(
     program: &Program,
-    _analysis: &Analysis,
+    analysis: &Analysis,
     overlay: &Overlay,
     changes: &[Change],
-) -> Plan {
-    Plan {
-        base: base(program, overlay),
-        changes: changes.iter().rev().map(Change::inverse).collect(),
+) -> anyhow::Result<Plan> {
+    let mut draft = Draft {
+        overlay: overlay.clone(),
+        changes: Vec::with_capacity(changes.len()),
         lines: Vec::new(),
+    };
+    for change in changes.iter().rev() {
+        draft
+            .undo((program, analysis), change.inverse())
+            .map_err(anyhow::Error::msg)?;
     }
+    let fielded = draft
+        .changes
+        .iter()
+        .any(|c| matches!(c, Change::Type(..) | Change::Field(..)));
+    if fielded {
+        stated::validate(&draft.overlay).map_err(anyhow::Error::msg)?;
+    }
+    Ok(Plan {
+        base: base(program, overlay),
+        changes: draft.changes,
+        lines: draft.lines,
+    })
 }

@@ -73,7 +73,7 @@ fn changes_replay_an_edit_and_their_inverses_take_it_back() {
     );
     commit(&p, &a, &mut o, &made).expect("committed");
     assert_eq!(o.fingerprint(), after.fingerprint());
-    let back = revert(&p, &a, &o, made.changes());
+    let back = revert(&p, &a, &o, made.changes()).expect("a revert");
     commit(&p, &a, &mut o, &back).expect("taken back");
     assert_eq!(o.fingerprint(), before.fingerprint());
 }
@@ -184,7 +184,7 @@ fn a_commit_past_a_cap_writes_nothing() {
     let named = plan(&p, &a, &o, &edits, Force::Take).expect("planned");
     commit(&p, &a, &mut o, &named).expect("committed");
     let before = o.fingerprint();
-    let back = revert(&p, &a, &o, loaded.changes());
+    let back = revert(&p, &a, &o, loaded.changes()).expect("a revert");
     let refused = commit(&p, &a, &mut o, &back).expect_err("past the cap");
     assert!(refused.to_string().contains("names"), "{refused}");
     assert_eq!(o.fingerprint(), before, "the overlay changed");
@@ -208,6 +208,23 @@ fn stating_x(a: &Analysis) -> (u64, Overlay) {
     let x = Var::parse("x").expect("a variable");
     o.vars.entry(entry).or_default().insert(VarKey::Param(0), x);
     (entry, o)
+}
+
+/// Returns the edit that renames a function's variable, keeping its type.
+///
+/// # Arguments
+///
+/// * `entry` - The function.
+/// * `var` - The variable as stated.
+/// * `name` - Its new name.
+fn renaming(entry: u64, var: &str, name: &str) -> [Edit; 1] {
+    [Edit::Var {
+        entry,
+        var: var.to_owned(),
+        field: None,
+        name: Some(name.to_owned()),
+        ty: None,
+    }]
 }
 
 /// The inverses of a mixed plan's changes, a name, a comment, a struct
@@ -251,7 +268,7 @@ fn the_inverse_of_a_mixed_plan_restores_the_overlay() {
     commit(&p, &a, &mut o, &made).expect("committed");
     assert_eq!(made.changes().len(), 4, "{made:?}");
     assert_ne!(o.fingerprint(), before);
-    let back = revert(&p, &a, &o, made.changes());
+    let back = revert(&p, &a, &o, made.changes()).expect("a revert");
     commit(&p, &a, &mut o, &back).expect("taken back");
     assert_eq!(o.fingerprint(), before, "{made:?}");
 }
@@ -274,7 +291,7 @@ fn a_project_put_in_place_is_taken_back_by_its_inverse() {
     let made = plan(&p, &a, &o, &edits, Force::Refuse).expect("planned");
     commit(&p, &a, &mut o, &made).expect("committed");
     assert_eq!(o.fingerprint(), loaded.fingerprint());
-    let back = revert(&p, &a, &o, made.changes());
+    let back = revert(&p, &a, &o, made.changes()).expect("a revert");
     commit(&p, &a, &mut o, &back).expect("taken back");
     assert_eq!(o.fingerprint(), before);
 }
@@ -379,20 +396,11 @@ fn taking_an_edit_back_keeps_and_refuses_what_came_after() {
     let stated = o.vars.entry(entry).or_default();
     stated.insert(VarKey::Param(0), Var::parse("x").expect("a variable"));
     stated.insert(VarKey::Param(1), Var::parse("y").expect("a variable"));
-    let rename = |var: &str, name: &str| {
-        [Edit::Var {
-            entry,
-            var: var.to_owned(),
-            field: None,
-            name: Some(name.to_owned()),
-            ty: None,
-        }]
-    };
-    let first = plan(&p, &a, &o, &rename("x", "count"), Force::Refuse).expect("planned");
+    let first = plan(&p, &a, &o, &renaming(entry, "x", "count"), Force::Refuse).expect("planned");
     commit(&p, &a, &mut o, &first).expect("committed");
-    let second = plan(&p, &a, &o, &rename("y", "total"), Force::Refuse).expect("planned");
+    let second = plan(&p, &a, &o, &renaming(entry, "y", "total"), Force::Refuse).expect("planned");
     commit(&p, &a, &mut o, &second).expect("committed");
-    let back = revert(&p, &a, &o, first.changes());
+    let back = revert(&p, &a, &o, first.changes()).expect("a revert");
     commit(&p, &a, &mut o, &back).expect("taken back");
     let named = |key| {
         o.vars
@@ -417,8 +425,7 @@ fn taking_an_edit_back_keeps_and_refuses_what_came_after() {
     let two = plan(&p, &a, &o, &name("two"), Force::Refuse).expect("planned");
     commit(&p, &a, &mut o, &two).expect("committed");
     let before = o.fingerprint();
-    let back = revert(&p, &a, &o, one.changes());
-    let changed = commit(&p, &a, &mut o, &back).expect_err("renamed since");
+    let changed = revert(&p, &a, &o, one.changes()).expect_err("renamed since");
     assert!(changed.to_string().contains("changed since"), "{changed}");
     assert_eq!(o.fingerprint(), before, "a refused take-back wrote");
     let word = parse_type("u32").expect("a type");
@@ -435,7 +442,7 @@ fn taking_an_edit_back_keeps_and_refuses_what_came_after() {
     let made = plan(&p, &a, &o, &applied, Force::Refuse).expect("planned");
     commit(&p, &a, &mut o, &made).expect("committed");
     let before = o.fingerprint();
-    let back = revert(&p, &a, &o, defined.changes());
+    let back = revert(&p, &a, &o, defined.changes()).expect("a revert");
     let dropped = commit(&p, &a, &mut o, &back).expect_err("still applied");
     assert!(dropped.to_string().contains("0x2040"), "{dropped}");
     assert_eq!(o.fingerprint(), before, "a refused take-back wrote");
@@ -467,4 +474,42 @@ fn a_plan_does_not_commit_to_another_programs_overlay() {
         theirs.comments.is_empty(),
         "the other program's overlay changed"
     );
+}
+
+/// Taking an edit back is held to what a plan is: it does not leave a
+/// name two functions answer to, nor two variables of one function of
+/// one name, and a revert says what it does as a plan does.
+#[test]
+fn a_revert_leaves_nothing_a_plan_refuses() {
+    let p = fixture();
+    let a = Analysis::compute(&p);
+    let (f1, f2) = match a.functions.as_slice() {
+        [f, g, ..] => (f.entry, g.entry),
+        _ => panic!("two functions"),
+    };
+    let name = |at: u64, n: &str| {
+        [Edit::Name {
+            at,
+            name: n.to_owned(),
+        }]
+    };
+    let mut o = Overlay::default();
+    o.names.insert(f1, "foo".to_owned());
+    let first = plan(&p, &a, &o, &name(f1, "bar"), Force::Refuse).expect("planned");
+    commit(&p, &a, &mut o, &first).expect("committed");
+    let second = plan(&p, &a, &o, &name(f2, "foo"), Force::Refuse).expect("planned");
+    commit(&p, &a, &mut o, &second).expect("committed");
+    let taken = revert(&p, &a, &o, first.changes()).expect_err("foo names f2 now");
+    assert!(taken.to_string().contains("'foo'"), "{taken}");
+    let (entry, mut o) = stating_x(&a);
+    o.vars
+        .entry(entry)
+        .or_default()
+        .insert(VarKey::Param(1), Var::parse("y").expect("a variable"));
+    let first = plan(&p, &a, &o, &renaming(entry, "x", "count"), Force::Refuse).expect("planned");
+    commit(&p, &a, &mut o, &first).expect("committed");
+    let second = plan(&p, &a, &o, &renaming(entry, "y", "x"), Force::Refuse).expect("planned");
+    commit(&p, &a, &mut o, &second).expect("committed");
+    let twice = revert(&p, &a, &o, first.changes()).expect_err("x names the second now");
+    assert!(twice.to_string().contains("x already names"), "{twice}");
 }

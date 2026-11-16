@@ -1355,3 +1355,30 @@ fn statements_in_any_order_leave_one_overlay() {
         texts(&one_way)
     );
 }
+
+/// Taking back the rename of a class's field is held to what a statement
+/// is: it does not leave two fields of the class of one name.
+#[test]
+fn taking_a_field_rename_back_leaves_no_name_twice() {
+    use borer_engine::analysis::edit::{self, Edit, Force};
+    let p = two_classes();
+    let a = Analysis::compute(&p);
+    let state = |o: &Overlay, off: u64, name: &str| {
+        let edits = [Edit::Fields {
+            name: CLASS.to_owned(),
+            size: None,
+            fields: vec![(off, field(name, None))],
+            mode: Mode::Merge,
+        }];
+        edit::plan(&p, &a, o, &edits, Force::Refuse).expect("planned")
+    };
+    let mut o = Overlay::default();
+    let hp = state(&o, 0x10, "hp");
+    edit::commit(&p, &a, &mut o, &hp).expect("committed");
+    let mp = state(&o, 0x10, "mp");
+    edit::commit(&p, &a, &mut o, &mp).expect("committed");
+    let again = state(&o, 0x14, "hp");
+    edit::commit(&p, &a, &mut o, &again).expect("committed");
+    let twice = edit::revert(&p, &a, &o, mp.changes()).expect_err("hp names +0x14 now");
+    assert!(twice.to_string().contains("hp already names"), "{twice}");
+}
