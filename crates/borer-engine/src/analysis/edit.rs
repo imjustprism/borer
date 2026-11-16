@@ -897,7 +897,7 @@ impl Draft {
         (var, field): (&str, Option<u64>),
         (name, ty): (Option<&str>, Option<&str>),
     ) -> Result<(), String> {
-        if let Some(off) = field.filter(|_| stated_key(&self.overlay, entry, var).is_none()) {
+        if let Some(off) = field.filter(|_| var_key(p, &self.overlay, entry, var).is_none()) {
             let name =
                 name.ok_or("naming a field needs `name`, its new name (`type` is optional)")?;
             let ty = ty

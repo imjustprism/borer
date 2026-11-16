@@ -417,3 +417,16 @@ fn a_debug_named_parameter_renames_through_the_edit_path() {
     prototyped.prototypes.insert(TEXT, proto);
     assert!(plan(&p, &a, &prototyped, &edits, Force::Refuse).is_err());
 }
+
+/// A debug local spelled like an unnamed field (`field_0x8`) is that
+/// local to the edit path, not a field of the function's class: naming it
+/// states the variable.
+#[test]
+fn a_debug_local_spelled_as_a_field_renames_the_local() {
+    let (_, off) = filling_local();
+    let (p, a) = debugged(Vec::new(), BTreeMap::from([(off, "field_0x8".to_owned())]));
+    let edits = rename("field_0x8", Some(8), "filled");
+    let (named, after) = committed((&p, &a), &edits, VarKey::Slot(off));
+    assert_eq!(named.as_deref(), Some("filled"));
+    assert!(after.fields.is_empty());
+}
