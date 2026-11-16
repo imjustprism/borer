@@ -146,11 +146,14 @@ pub struct View {
     defs: Box<[Option<u32>]>,
     /// The names that name something yet carry no link.
     unlinked: Unlinked,
-    /// Each line that shows an instruction, with the instruction's address,
-    /// in line order; empty for a view of no listing.
-    addresses: Box<[(u32, u64)]>,
-    /// Whether [`View::addresses`] runs in address order as well, which
-    /// [`View::line_of`] searches by.
+    /// Each line that shows an instruction, in line order; empty for a view
+    /// of no listing.
+    instr_lines: Box<[u32]>,
+    /// The address of the instruction each of [`View::instr_lines`] shows,
+    /// at the same place: two tables, so no entry carries padding.
+    instr_vas: Box<[u64]>,
+    /// Whether [`View::instr_vas`] runs in address order, which
+    /// [`View::line_of`] then searches by.
     ordered: bool,
 }
 
@@ -358,11 +361,8 @@ impl View {
     #[must_use]
     pub fn address(&self, i: usize) -> Option<u64> {
         let i = u32::try_from(i).ok()?;
-        let k = self
-            .addresses
-            .binary_search_by_key(&i, |&(line, _)| line)
-            .ok()?;
-        self.addresses.get(k).map(|&(_, va)| va)
+        let k = self.instr_lines.binary_search(&i).ok()?;
+        self.instr_vas.get(k).copied()
     }
 
     /// Returns the first line that shows the instruction at an address.
@@ -379,13 +379,13 @@ impl View {
     /// The line, from 0, or `None` when no line shows an instruction there.
     #[must_use]
     pub fn line_of(&self, va: u64) -> Option<usize> {
-        let found = if self.ordered {
-            let k = self.addresses.partition_point(|&(_, at)| at < va);
-            self.addresses.get(k).filter(|&&(_, at)| at == va)
+        let k = if self.ordered {
+            Some(self.instr_vas.partition_point(|&at| at < va))
+                .filter(|&k| self.instr_vas.get(k) == Some(&va))
         } else {
-            self.addresses.iter().find(|&&(_, at)| at == va)
+            self.instr_vas.iter().position(|&at| at == va)
         };
-        found.map(|&(line, _)| wide(line))
+        self.instr_lines.get(k?).copied().map(wide)
     }
 
     /// Returns the heap bytes the view holds: its text, lines, tokens,
@@ -411,7 +411,8 @@ impl View {
             + size_of_val(&*self.tokens)
             + size_of_val(&*self.refs)
             + size_of_val(&*self.defs)
-            + size_of_val(&*self.addresses)
+            + size_of_val(&*self.instr_lines)
+            + size_of_val(&*self.instr_vas)
             + names
     }
 
@@ -484,8 +485,10 @@ pub(crate) struct Builder {
     defs: BTreeMap<NonZeroU32, u32>,
     /// The referent and first line of the most recent non-empty [`Builder::put`].
     last_put: Option<(NonZeroU32, u32)>,
-    /// The lines marked as showing an instruction, with its address.
-    addresses: Vec<(u32, u64)>,
+    /// The lines marked as showing an instruction, in line order.
+    instr_lines: Vec<u32>,
+    /// The address of the instruction each of those lines shows.
+    instr_vas: Vec<u64>,
     /// Whether the text outgrew the 32-bit offsets, which refuses the view.
     over: bool,
 }
@@ -501,8 +504,9 @@ impl Sink for Builder {
 
     fn at(&mut self, va: u64) {
         match u32::try_from(self.starts.len()) {
-            Ok(line) if self.addresses.last().is_none_or(|&(l, _)| l < line) => {
-                self.addresses.push((line, va));
+            Ok(line) if self.instr_lines.last().is_none_or(|&l| l < line) => {
+                self.instr_lines.push(line);
+                self.instr_vas.push(va);
             }
             Ok(_) => {}
             Err(_) => self.over = true,
@@ -632,15 +636,16 @@ impl Builder {
             refs: places.into_iter().map(|(_, r)| r).collect(),
             defs,
             unlinked,
-            ordered: self.addresses.is_sorted_by_key(|&(_, va)| va),
-            addresses: self.addresses.into_boxed_slice(),
+            ordered: self.instr_vas.is_sorted(),
+            instr_lines: self.instr_lines.into_boxed_slice(),
+            instr_vas: self.instr_vas.into_boxed_slice(),
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Builder, Kind, Ref, Unlinked};
+    use super::{Builder, Kind, Ref, Sink, Unlinked};
 
     /// A view spells its text, lines and all, gives each line its tokens
     /// with their bytes, kinds and links, holds each referent once, and
@@ -710,5 +715,43 @@ mod tests {
         assert_eq!(v.definition(&first), Some(0));
         assert_eq!(v.definition(&second), None);
         assert_eq!(v.definition(&unplaced), None);
+    }
+
+    /// Builds a view of `lines` one-token lines, marking the first `marked`
+    /// of them as showing an instruction.
+    ///
+    /// # Arguments
+    ///
+    /// * `lines` - How many lines.
+    /// * `marked` - How many of them show an instruction.
+    ///
+    /// # Panics
+    ///
+    /// When the view is refused, which a small one never is.
+    fn listing(lines: u64, marked: u64) -> super::View {
+        let mut b = Builder::default();
+        for va in 0..lines {
+            if va < marked {
+                Sink::at(&mut b, 0x1000 + va);
+            }
+            b.put("x", Kind::Text, None);
+            b.end_line();
+        }
+        b.finish(Unlinked::default()).expect("a small view")
+    }
+
+    /// Each line that shows an instruction costs the view 12 bytes, its
+    /// line and its address with no padding, and a view of no listing
+    /// costs nothing for them.
+    ///
+    /// # Panics
+    ///
+    /// When the table holds more than 12 bytes per entry.
+    #[test]
+    fn an_instruction_line_costs_twelve_bytes() {
+        let (none, three) = (listing(4, 0), listing(4, 3));
+        assert_eq!(three.bytes() - none.bytes(), 3 * 12);
+        assert_eq!(three.address(2), Some(0x1002));
+        assert_eq!(three.address(3), None);
     }
 }
