@@ -26,8 +26,8 @@ use borer_engine::num::{as_f64, from_usize};
 use borer_engine::program::checked_metadata;
 use gpui::{
     App, AppContext as _, Context, Entity, EntityId, InteractiveElement as _, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseUpEvent, ParentElement as _, Render,
-    Styled as _, Subscription, Task, Window, div,
+    MouseButton, MouseDownEvent, MouseUpEvent, ParentElement as _, Render, Styled as _,
+    Subscription, Task, Window, div,
 };
 use workspace::{AppState, MultiWorkspace, Workspace};
 
@@ -713,7 +713,7 @@ pub struct Harness {
     /// The app's tickets when the latest marked event arrived, and whether a left button
     /// release followed it, until the next frame binds the event to its work.
     before: Option<(Tickets, bool)>,
-    /// Key presses the window received.
+    /// Key presses the window received, seen before any key binding or text input takes them.
     keys: u64,
     /// Clicks that opened a function.
     clicks: u64,
@@ -767,11 +767,22 @@ impl Harness {
         let workspace = new_workspace(app_state, path, window, cx);
         let root = cx.new(|cx| MultiWorkspace::new(workspace.clone(), window, cx));
         let pane = workspace.read(cx).active_pane().clone();
-        let mut observe = vec![cx.observe(&pane, |harness: &mut Self, _, cx| {
-            harness.watch_active_item(cx);
-            harness.settle_marks(cx);
-            cx.notify();
-        })];
+        let harness = cx.weak_entity();
+        let mut observe = vec![
+            cx.observe(&pane, |harness: &mut Self, _, cx| {
+                harness.watch_active_item(cx);
+                harness.settle_marks(cx);
+                cx.notify();
+            }),
+            cx.intercept_keystrokes(move |_, _, cx| {
+                if let Some(harness) = harness.upgrade() {
+                    harness.update(cx, |harness, cx| {
+                        harness.keys = harness.keys.saturating_add(1);
+                        harness.arrive(cx);
+                    });
+                }
+            }),
+        ];
         if let Some(panel) = workspace.read(cx).panel::<FunctionsPanel>(cx) {
             let binary = panel.read(cx).binary().clone();
             observe.push(cx.observe(&binary, |_, _, cx| cx.notify()));
@@ -1079,10 +1090,6 @@ impl Render for Harness {
         self.check_one_shot(window, cx);
         div()
             .size_full()
-            .capture_key_down(cx.listener(|this, _: &KeyDownEvent, _, cx| {
-                this.keys = this.keys.saturating_add(1);
-                this.arrive(cx);
-            }))
             .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| this.arrive(cx)))
             .capture_any_mouse_up(cx.listener(|this, _: &MouseUpEvent, _, cx| this.arrive(cx)))
             .on_mouse_up(
