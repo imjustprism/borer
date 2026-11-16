@@ -533,21 +533,33 @@ const FORWARD_MAX: usize = 256;
 pub struct SymbolRow {
     /// What the symbol is.
     pub kind: SymbolKind,
-    /// Its address; an import's slot, or zero for one with none.
-    pub addr: u64,
+    /// Its address, an import's slot; `None` for a symbol the file places
+    /// nowhere.
+    pub addr: Option<u64>,
     /// The name without its module, demangled ([`demangled_or_raw`]).
     pub name: String,
     /// The module a PE import's `module!name` names; `None` for a symbol
     /// without one.
     pub module: Option<String>,
-    /// Whether anything references an import's slot, directly or through a
-    /// thunk something calls: `Some(false)` is a redirected or leftover
-    /// slot. `None` for a symbol that is not an import with a slot.
-    pub referenced: Option<bool>,
+    /// Whether anything references the slot of an import.
+    pub slot: SlotUse,
     /// The export a forwarded export forwards to (`NTDLL.RtlFoo`), read at
     /// its address; `None` for every other symbol, or one whose text is
     /// empty.
     pub forward: Option<String>,
+}
+
+/// Whether anything references an import's slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotUse {
+    /// Not an import with a slot, so there is nothing to reference.
+    NoSlot,
+    /// Something references the slot, directly or through a thunk something
+    /// calls.
+    Referenced,
+    /// Nothing does: a redirected or leftover slot, the shape a patched
+    /// binary leaves behind.
+    Unreferenced,
 }
 
 /// One page of the symbol table, with what its header counts.
@@ -606,12 +618,13 @@ impl SymbolRows {
             if self.kind.is_none() {
                 let _ = write!(out, "{} ", r.kind.name());
             }
-            let _ = write!(out, "{:#x} {}", r.addr, r.name);
+            let _ = write!(out, "{:#x} {}", r.addr.unwrap_or_default(), r.name);
             if let Some(to) = &r.forward {
                 let _ = write!(out, " -> {to}");
             }
-            if r.referenced == Some(false) {
-                out.push_str("  unreferenced");
+            match r.slot {
+                SlotUse::Unreferenced => out.push_str("  unreferenced"),
+                SlotUse::NoSlot | SlotUse::Referenced => {}
             }
             out.push('\n');
         }
@@ -682,10 +695,15 @@ pub fn symbol_rows(
         .map(|s| {
             let bare = bare_name(&s.name);
             let module = s.name.strip_suffix(bare).and_then(|m| m.strip_suffix('!'));
-            let referenced = (s.kind == SymbolKind::Import && s.addr != 0).then(|| {
-                a.xrefs.get(&s.addr).is_some_and(|v| !v.is_empty())
-                    || called_slots.contains(&s.addr)
-            });
+            let slot = if s.kind != SymbolKind::Import || s.addr == 0 {
+                SlotUse::NoSlot
+            } else if a.xrefs.get(&s.addr).is_some_and(|v| !v.is_empty())
+                || called_slots.contains(&s.addr)
+            {
+                SlotUse::Referenced
+            } else {
+                SlotUse::Unreferenced
+            };
             let forward = (s.kind == SymbolKind::Forwarder)
                 .then(|| p.read_va_upto(s.addr, FORWARD_MAX))
                 .flatten()
@@ -694,10 +712,10 @@ pub fn symbol_rows(
                 .map(|b| crate::text::one_line(&String::from_utf8_lossy(b)));
             SymbolRow {
                 kind: s.kind,
-                addr: s.addr,
+                addr: (s.addr != 0).then_some(s.addr),
                 name: demangled_or_raw(bare),
                 module: module.map(str::to_owned),
-                referenced,
+                slot,
                 forward,
             }
         })
@@ -1671,6 +1689,39 @@ caller: 0x1030 call
         assert!(summary.contains("exports: 2 (1 forwarded)"), "{summary}");
     }
 
+    /// An import the file gives no slot has no address and no slot to
+    /// reference, and its line still reads `0x0`; an export has its address
+    /// and no slot either.
+    ///
+    /// # Panics
+    ///
+    /// When the address, the slot or the line differs.
+    #[test]
+    fn a_symbol_without_a_slot_has_no_address() {
+        use crate::program::{Arch, Symbol};
+        let mut p = Program::raw(Vec::new(), Arch::X86_64, 0, None, Vec::new());
+        p.symbols = vec![
+            Symbol {
+                name: "KERNEL32.dll!Sleep".to_owned(),
+                addr: 0,
+                kind: SymbolKind::Import,
+            },
+            Symbol {
+                name: "start".to_owned(),
+                addr: 0x1000,
+                kind: SymbolKind::Export,
+            },
+        ];
+        let rows = symbol_rows(&p, &Analysis::default(), None, None, 0, 50);
+        let facts: Vec<(Option<u64>, SlotUse)> =
+            rows.rows.iter().map(|r| (r.addr, r.slot)).collect();
+        assert_eq!(
+            facts,
+            [(None, SlotUse::NoSlot), (Some(0x1000), SlotUse::NoSlot)]
+        );
+        assert!(rows.spell().contains("import 0x0 Sleep\n"), "{rows:?}");
+    }
+
     /// Symbol rows carry each line's facts and spell the text the symbol
     /// table printed before it had rows.
     ///
@@ -1717,10 +1768,16 @@ caller: 0x1030 call
         a.xrefs.insert(0x1100, vec![site(0x1060, RefKind::Call)]);
         let all = symbol_rows(&p, &a, None, None, 0, 50);
         assert_eq!(all.total, 5);
-        let referenced: Vec<Option<bool>> = all.rows.iter().map(|r| r.referenced).collect();
+        let slots: Vec<SlotUse> = all.rows.iter().map(|r| r.slot).collect();
         assert_eq!(
-            referenced,
-            [Some(true), Some(true), Some(false), None, None]
+            slots,
+            [
+                SlotUse::Referenced,
+                SlotUse::Referenced,
+                SlotUse::Unreferenced,
+                SlotUse::NoSlot,
+                SlotUse::NoSlot
+            ]
         );
         assert_eq!(all.rows[0].module.as_deref(), Some("KERNEL32.dll"));
         assert_eq!(all.rows[3].module, None);
