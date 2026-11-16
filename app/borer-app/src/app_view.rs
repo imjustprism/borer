@@ -362,24 +362,27 @@ pub fn new_workspace(
 /// * `workspace` - The workspace.
 fn register_actions(workspace: &mut Workspace) {
     workspace
-        .register_action(|workspace, _: &Open, _, cx| {
-            if let Some(panel) = workspace.panel::<FunctionsPanel>(cx) {
-                let binary = panel.read(cx).binary().clone();
-                binary.update(cx, |binary, cx| binary.prompt_open(cx));
-            }
-        })
-        .register_action(|workspace, _: &AddFolderToProject, _, cx| {
-            if let Some(panel) = workspace.panel::<FunctionsPanel>(cx) {
-                let binary = panel.read(cx).binary().clone();
-                binary.update(cx, |binary, cx| binary.prompt_open(cx));
-            }
-        })
+        .register_action(|workspace, _: &Open, _, cx| prompt_open(workspace, cx))
+        .register_action(|workspace, _: &AddFolderToProject, _, cx| prompt_open(workspace, cx))
         .register_action(|workspace, _: &FocusFilter, window, cx| {
             workspace.focus_panel::<FunctionsPanel>(window, cx);
         })
         .register_action(|workspace, _: &ToggleFunctions, window, cx| {
             workspace.toggle_panel_focus::<FunctionsPanel>(window, cx);
         });
+}
+
+/// Opens the system file dialog for the binary of `workspace`'s functions panel.
+///
+/// # Arguments
+///
+/// * `workspace` - The workspace.
+/// * `cx` - Application context.
+fn prompt_open(workspace: &Workspace, cx: &mut App) {
+    if let Some(panel) = workspace.panel::<FunctionsPanel>(cx) {
+        let binary = panel.read(cx).binary().clone();
+        binary.update(cx, |binary, cx| binary.prompt_open(cx));
+    }
 }
 
 /// Returns the dock layout Zed saved for the app's empty workspace on an earlier run.
@@ -523,6 +526,14 @@ mod tests {
         })
     }
 
+    /// Opens the sample's caller in `workspace`'s active pane as `mode` says, focused.
+    fn open_caller(workspace: &Entity<Workspace>, mode: TabMode, cx: &mut VisualTestContext) {
+        let loaded = sample();
+        workspace.update_in(cx, |workspace, window, cx| {
+            open_function(workspace, loaded, CALLER, mode, true, window, cx);
+        });
+    }
+
     /// Returns the function and top line of the active decompile tab, once the work settled
     /// and a frame laid the tab out.
     fn shown(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<(u64, usize)> {
@@ -582,18 +593,7 @@ mod tests {
             workspace.focus_panel::<FunctionsPanel>(window, cx);
         });
         assert_available(&declared, cx);
-        let loaded = sample();
-        workspace.update_in(cx, |workspace, window, cx| {
-            open_function(
-                workspace,
-                loaded,
-                CALLER,
-                TabMode::Permanent,
-                true,
-                window,
-                cx,
-            );
-        });
+        open_caller(&workspace, TabMode::Permanent, cx);
         assert_eq!(shown(&workspace, cx).map(|(entry, _)| entry), Some(CALLER));
         assert_available(&declared, cx);
     }
@@ -730,18 +730,7 @@ mod tests {
         });
         drop_on_center(&dir, cx);
         assert!(take_status(&workspace, cx).ends_with(REFUSED_FOLDER));
-        let loaded = sample();
-        workspace.update_in(cx, |workspace, window, cx| {
-            open_function(
-                workspace,
-                loaded,
-                CALLER,
-                TabMode::Permanent,
-                true,
-                window,
-                cx,
-            );
-        });
+        open_caller(&workspace, TabMode::Permanent, cx);
         assert_eq!(shown(&workspace, cx).map(|(entry, _)| entry), Some(CALLER));
         drop_on_center(&dir, cx);
         assert!(take_status(&workspace, cx).ends_with(REFUSED_FOLDER));
@@ -778,18 +767,7 @@ mod tests {
         let app_state = init(cx);
         let (workspace, cx) = open(&app_state, cx);
         cx.simulate_resize(size(px(800.0), px(160.0)));
-        let loaded = sample();
-        workspace.update_in(cx, |workspace, window, cx| {
-            open_function(
-                workspace,
-                loaded,
-                CALLER,
-                TabMode::Preview,
-                true,
-                window,
-                cx,
-            );
-        });
+        open_caller(&workspace, TabMode::Preview, cx);
         assert_eq!(shown(&workspace, cx), Some((CALLER, 0)));
         let caller = workspace
             .read_with(cx, |workspace, cx| {
@@ -843,18 +821,7 @@ mod tests {
         let app_state = init(cx);
         let (workspace, cx) = open(&app_state, cx);
         cx.simulate_resize(size(px(800.0), px(160.0)));
-        let loaded = sample();
-        workspace.update_in(cx, |workspace, window, cx| {
-            open_function(
-                workspace,
-                loaded,
-                CALLER,
-                TabMode::Permanent,
-                true,
-                window,
-                cx,
-            );
-        });
+        open_caller(&workspace, TabMode::Permanent, cx);
         assert_eq!(shown(&workspace, cx), Some((CALLER, 0)));
         let caller = workspace
             .read_with(cx, |workspace, cx| {
