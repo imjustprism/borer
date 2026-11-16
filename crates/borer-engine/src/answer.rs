@@ -321,7 +321,42 @@ struct Answer {
     paged: Paged,
     /// The renderer.
     answer: Answerer,
+    /// Refuses an argument that does not read before anything is read of
+    /// the program; `None` where the program checks it.
+    check: Option<Check>,
+    /// What one read reads when its argument decides, else [`Answer::need`].
+    need_for: Option<fn(&str) -> Need>,
 }
+
+impl Answer {
+    /// Returns the resource with a check of its argument.
+    ///
+    /// # Arguments
+    ///
+    /// * `check` - Refuses an argument that does not read.
+    const fn checked(self, check: Check) -> Answer {
+        Answer {
+            check: Some(check),
+            ..self
+        }
+    }
+
+    /// Returns the resource with what a read reads decided by its argument.
+    ///
+    /// # Arguments
+    ///
+    /// * `need_for` - What a read of an argument reads.
+    const fn needing(self, need_for: fn(&str) -> Need) -> Answer {
+        Answer {
+            need_for: Some(need_for),
+            ..self
+        }
+    }
+}
+
+/// Refuses a resource's argument that does not read, with what is wrong;
+/// `None` for one that reads.
+type Check = fn(&str) -> Option<String>;
 
 /// Returns a resource whose rows [`read`] pages.
 ///
@@ -338,6 +373,8 @@ const fn rows(name: &'static str, takes: Takes, need: Need, answer: Answerer) ->
         need,
         paged: Paged::Rows,
         answer,
+        check: None,
+        need_for: None,
     }
 }
 
@@ -356,6 +393,8 @@ const fn itself(name: &'static str, takes: Takes, need: Need, answer: Answerer) 
         need,
         paged: Paged::Itself,
         answer,
+        check: None,
+        need_for: None,
     }
 }
 
@@ -388,7 +427,7 @@ const ANSWERS: &[Answer] = &[
     itself("injection", Either, File, |q| {
         crate::strings::injection_tsv(q.p, &q.page.spec_words(q.arg))
     }),
-    itself("clr", Either, File, clr_text),
+    itself("clr", Either, File, clr_text).needing(clr_need),
     rows("protection", Nothing, Code(Discover), |q| {
         Ok(render::protection_tsv(q.p, q.a))
     }),
@@ -409,7 +448,8 @@ const ANSWERS: &[Answer] = &[
     rows("yara", Argument, Code(Discover), yara_text),
     rows("names", Argument, Code(Discover), |q| {
         Ok(render::names_export(q.p, q.a, q.o, tool(q.arg)?))
-    }),
+    })
+    .checked(|a| tool(a).err()),
     rows("addr", Argument, Code(Discover), |q| {
         crate::fileinfo::locate(q.p, Some(q.a), q.o, q.arg)
     }),
@@ -508,36 +548,45 @@ const ANSWERS: &[Answer] = &[
         classes::fields_tsv(q.p, q.a, q.o, entry(q, q.arg)?)
             .ok_or_else(|| format!("{} did not decompile", q.arg))
     }),
-    itself("fieldrefs", Argument, Code(Decompile), fieldrefs_text),
+    itself("fieldrefs", Argument, Code(Decompile), fieldrefs_text)
+        .checked(|a| field_offset(a).err()),
     rows("vslot", Argument, Code(Decompile), |q| {
         let SlotSpec { slot, filter } = SlotSpec::parse(q.arg)?;
         Ok(vtables::slot_constants_tsv(
             q.p, q.a, slot, filter, SLOT_PAGE,
         ))
-    }),
+    })
+    .checked(slot_check),
     rows("exportpack", Argument, Code(Decompile), |q| {
         let (name, all) = pack_spec(q.arg)?;
         Ok(sigs::export_pack(q.p, q.a, q.o, name, all))
-    }),
-    rows("scenario", Argument, Code(Decompile), scenario_text),
-    rows("scenarios", Argument, Code(Decompile), scenarios_text),
+    })
+    .checked(|a| pack_spec(a).err()),
+    rows("scenario", Argument, Code(Decompile), scenario_text).checked(|a| scenario_spec(a).err()),
+    rows("scenarios", Argument, Code(Decompile), scenarios_text)
+        .checked(|a| scenarios_spec(a).err()),
     rows("schema", Argument, Code(Decompile), schema_text),
     rows("encode", Argument, Code(Decompile), encode_text),
     rows("schemas", Argument, Code(Decompile), |q| {
         slotted(q, schema::schemas_tsv)
-    }),
+    })
+    .checked(slot_check),
     rows("encodes", Argument, Code(Decompile), |q| {
         slotted(q, encode::encodings_tsv)
-    }),
+    })
+    .checked(slot_check),
     rows("senders", Argument, Code(Decompile), |q| {
         slotted(q, senders::senders_tsv)
-    }),
+    })
+    .checked(slot_check),
     rows("protocol", Argument, Code(Decompile), |q| {
         slotted(q, protocol::protocol_tsv)
-    }),
+    })
+    .checked(slot_check),
     rows("hooks", Argument, Code(Decompile), |q| {
         slotted(q, protocol::hooks_tsv)
-    }),
+    })
+    .checked(slot_check),
     rows("dispatchers", Either, Code(Decompile), |q| {
         Ok(capped(q, opcodes::dispatchers_tsv, SLOT_PAGE))
     }),
@@ -559,7 +608,8 @@ const ANSWERS: &[Answer] = &[
     }),
     rows("about", Argument, Code(Decompile), |q| {
         Ok(about::about_tsv(q.p, q.a, q.o, q.arg))
-    }),
+    })
+    .checked(|a| a.trim().is_empty().then(|| ABOUT_NEEDS_A_NAME.to_owned())),
 ];
 
 /// Lists the names of the resources the engine answers, in no promised
@@ -607,7 +657,7 @@ pub fn split(uri: &str) -> Option<(&str, Option<String>)> {
 pub fn need(name: &str, arg: Option<&str>) -> Option<Result<Need, String>> {
     let found = find(name, arg.is_some())?;
     let arg = arg.unwrap_or("");
-    Some(refused(name, arg).map_or_else(|| Ok(need_of(found, arg)), Err))
+    Some(refused(found, arg).map_or_else(|| Ok(need_of(found, arg)), Err))
 }
 
 /// Answers a resource from the program, its analysis and an overlay.
@@ -644,7 +694,7 @@ pub fn read(
     let (name, arg) = split(uri)?;
     let found = find(name, arg.is_some())?;
     let arg = arg.unwrap_or_default();
-    if let Some(why) = refused(name, &arg) {
+    if let Some(why) = refused(found, &arg) {
         return Some(Err(why));
     }
     let reads_code = match need_of(found, &arg) {
@@ -724,47 +774,39 @@ fn find(name: &str, given: bool) -> Option<&'static Answer> {
         .find(|r| r.name == name && r.takes.fits(given))
 }
 
-/// Returns what one read of a resource reads.
-///
-/// That is its own [`Answer::need`], but the analysis where the program
-/// does discovery for a `.NET` methods or markers listing, which reads the
-/// native callers too.
+/// Returns what one read of a resource reads: its own [`Answer::need`],
+/// unless its argument decides ([`Answer::need_for`]).
 ///
 /// # Arguments
 ///
 /// * `found` - The resource.
 /// * `arg` - Its argument.
 fn need_of(found: &Answer, arg: &str) -> Need {
-    if found.name == "clr" && matches!(clr_head(arg).0, "methods" | "markers") {
-        return Best(Discover);
-    }
-    found.need
+    found.need_for.map_or(found.need, |need| need(arg))
 }
 
 /// Refuses an argument that does not read, before anything is read of the
-/// program.
+/// program ([`Answer::check`]).
 ///
 /// # Arguments
 ///
-/// * `name` - The resource's name.
+/// * `found` - The resource.
 /// * `arg` - Its argument, empty for none.
+fn refused(found: &Answer, arg: &str) -> Option<String> {
+    found.check.and_then(|check| check(arg))
+}
+
+/// Returns what a `.NET` listing reads: the analysis where the program
+/// does discovery for its methods or markers, which read the native
+/// callers too, else the file alone.
 ///
-/// # Returns
+/// # Arguments
 ///
-/// The refusal, `None` when the argument reads or the resource checks it
-/// only against the program.
-fn refused(name: &str, arg: &str) -> Option<String> {
-    match name {
-        "vslot" | "schemas" | "encodes" | "hooks" | "protocol" | "senders" => {
-            SlotSpec::parse(arg).err()
-        }
-        "fieldrefs" => field_offset(arg).err(),
-        "exportpack" => pack_spec(arg).err(),
-        "scenario" => scenario_spec(arg).err(),
-        "scenarios" => scenarios_spec(arg).err(),
-        "names" => tool(arg).err(),
-        "about" => arg.trim().is_empty().then(|| ABOUT_NEEDS_A_NAME.to_owned()),
-        _ => None,
+/// * `arg` - The listing's argument.
+fn clr_need(arg: &str) -> Need {
+    match clr_head(arg).0 {
+        "methods" | "markers" => Best(Discover),
+        _ => File,
     }
 }
 
@@ -853,6 +895,15 @@ impl<'a> SlotSpec<'a> {
             filter: filter.trim(),
         })
     }
+}
+
+/// Refuses a slot spec whose slot is not a number ([`SlotSpec::parse`]).
+///
+/// # Arguments
+///
+/// * `spec` - The URI argument.
+fn slot_check(spec: &str) -> Option<String> {
+    SlotSpec::parse(spec).err()
 }
 
 /// Renders a listing keyed by a vtable slot.
@@ -1448,6 +1499,11 @@ mod tests {
             Some(Err("bad slot 'x': a zero-based index".to_owned()))
         );
         assert_eq!(need("session", None), None);
+        assert_eq!(
+            need("clr", Some("methods")),
+            Some(Ok(super::Best(super::Discover)))
+        );
+        assert_eq!(need("clr", None), Some(Ok(super::File)));
         assert_eq!(need("triage", Some("x")), None);
         let p = Program::raw_x64(&[0xc3; 0x10]);
         let a = Analysis::compute(&p);
