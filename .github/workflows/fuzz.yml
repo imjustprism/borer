@@ -2,8 +2,8 @@ name: fuzz
 
 # libFuzzer over the loaders (PE, ELF, Mach-O with DWARF, minidump, raw),
 # over load, analyze and decompile, over the carver, the `<file>@<offset>`
-# loads and a companion PDB, and over project files and what reads the
-# overlay they load: a minute per target on the way to main (its pull
+# loads and a companion PDB, over project files and what reads the
+# overlay they load, and over a find's query: a minute per target on the way to main (its pull
 # requests and pushes), ten minutes per target weekly.
 # A target with a folder under fuzz/seeds starts from the inputs in it. An
 # input that panics, runs past ten seconds or takes 2 GB fails the job and
@@ -24,9 +24,9 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: The target to fuzz; all fuzzes load, analyze, il, carve, nested, project and pdb in turn
+        description: The target to fuzz; all fuzzes load, analyze, il, carve, nested, project, pdb and find in turn
         type: choice
-        options: [all, load, analyze, il, carve, nested, project, pdb]
+        options: [all, load, analyze, il, carve, nested, project, pdb, find]
         default: all
       seed:
         description: libFuzzer's -seed; empty lets libFuzzer pick one
@@ -100,7 +100,7 @@ jobs:
           RUNS: ${{ inputs.runs }}
         run: |
           [[ "$SEED$RUNS" =~ ^[0-9]*$ ]] || { echo "seed and runs take digits only"; exit 1; }
-          targets="load analyze il carve nested project pdb"
+          targets="load analyze il carve nested project pdb find"
           if [ "${TARGET:-all}" != all ]; then targets=$TARGET; fi
           stop=(-max_total_time="$SECONDS_PER_TARGET")
           if [ -n "$RUNS" ]; then stop=(-runs="$RUNS"); fi

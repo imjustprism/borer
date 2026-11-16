@@ -63,6 +63,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "find"
+path = "fuzz_targets/find.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "project"
 path = "fuzz_targets/project.rs"
 test = false
