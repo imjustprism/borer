@@ -18,6 +18,10 @@
 //! times one cold `decompile` answer per sampled function as the MCP tool
 //! gives it, under the binary's name tables, and hashes every answer
 //! ([`mcp_latency`]).
+//!
+//! `BORER_CALLTREE=path/to/bin cargo test -p borer-engine --release --test bench call_tree -- --ignored --nocapture`
+//! times one level of the call tree for every function ([`call_tree`]).
+//!
 //! `timings` also holds each function's cold decompile to a p95 and a
 //! maximum ([`DECOMPILE_P95_MS`], [`DECOMPILE_MAX_MS`]), the bars the
 //! notepad of the golden corpus is measured against, and reading that text
@@ -671,5 +675,42 @@ fn mcp_latency() {
     }
     if let Some(steps) = step_times() {
         print!("{steps}");
+    }
+}
+
+/// Times one level of the call tree ([`call_children`]) for every
+/// function of `BORER_CALLTREE`, at every
+/// [`Level`](borer_engine::analysis::render::Level), and prints each
+/// level's p95 and slowest.
+///
+/// Each level is timed on a fresh analysis, so the level with virtual
+/// calls, which decompiles its node, finds the memo cold.
+#[test]
+#[ignore = "set BORER_CALLTREE to a binary path to run this harness"]
+fn call_tree() {
+    use borer_engine::analysis::render::{Level, call_children};
+    let path = std::env::var("BORER_CALLTREE").expect("BORER_CALLTREE env var");
+    let program = Program::load(std::path::Path::new(&path)).expect("load");
+    let o = Overlay::default();
+    for level in [Level::Callees, Level::Callers, Level::CalleesAndVirtuals] {
+        let a = Analysis::compute(&program);
+        let mut times: Vec<Duration> = a
+            .functions
+            .iter()
+            .map(|f| {
+                let t = Instant::now();
+                let edges = call_children(&program, &a, &o, f.entry, level);
+                let d = t.elapsed();
+                drop(edges);
+                d
+            })
+            .collect();
+        times.sort_unstable();
+        println!(
+            "call tree	{level:?}	{} functions	p95 {:.3} ms	max {:.3} ms",
+            times.len(),
+            percentile(&times, 95).as_secs_f64() * 1e3,
+            times.last().copied().unwrap_or_default().as_secs_f64() * 1e3
+        );
     }
 }
