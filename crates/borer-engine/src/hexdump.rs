@@ -66,93 +66,130 @@ pub fn hexdump_sparse(bytes: &[Option<u8>], base: u64) -> String {
 /// Most bytes one hexdump shows.
 pub const HEXDUMP_MAX: usize = 4096;
 
-/// The bytes at an address as a hexdump's rows hold them, with the section
-/// they are in.
+/// What backs one run of addresses in a hexdump.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HexFill {
+    /// The bytes the file holds there.
+    Bytes(Vec<u8>),
+    /// Inside a section, but the file holds no bytes for it: a tail the
+    /// loader fills with zeros, or a file cut short.
+    Unbacked,
+    /// No section and no header maps these addresses.
+    Unmapped,
+}
+
+/// One run of a hexdump's addresses with one backing and one section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HexSpan {
+    /// Address of the run's first byte.
+    pub va: u64,
+    /// Bytes in the run.
+    pub len: usize,
+    /// Name of the section holding the run; `None` for the headers or no
+    /// section at all.
+    pub section: Option<String>,
+    /// What backs the run.
+    pub fill: HexFill,
+}
+
+/// The addresses a hexdump asked for, as runs in address order that cover
+/// them all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HexRows {
-    /// Address of the first byte.
+    /// Address of the first byte asked for.
     pub va: u64,
-    /// Name of the section holding `va`; `None` outside every section.
-    pub section: Option<String>,
-    /// One entry per byte asked for: the bytes the file backs from `va`
-    /// within its section, then `None` for each past them.
-    pub bytes: Vec<Option<u8>>,
+    /// The runs, each starting where the one before ends.
+    pub spans: Vec<HexSpan>,
 }
 
 impl HexRows {
-    /// Returns the rows of 16 bytes, each with its address; the last may be
-    /// short.
-    pub fn rows(&self) -> impl Iterator<Item = (u64, &[Option<u8>])> {
-        self.bytes
-            .chunks(16)
-            .enumerate()
-            .map(|(i, row)| (self.va.wrapping_add(from_usize(i * 16)), row))
-    }
-
-    /// Returns how many bytes from `va` the file backs.
-    #[must_use]
-    pub fn mapped(&self) -> usize {
-        self.bytes.iter().take_while(|b| b.is_some()).count()
-    }
-
-    /// Returns the dump as the `hexdump` tool and the CLI print it.
+    /// Returns the dump as the `hexdump` tool and the CLI print it: the
+    /// bytes of the first run, the file's bytes from `va` within its
+    /// section.
     ///
     /// # Returns
     ///
-    /// A `# va..end section` header covering the bytes the file backs, then
-    /// their rows ([`hexdump_sparse`]); `None` when it backs none.
+    /// A `# va..end section` header covering those bytes, then their rows
+    /// ([`hexdump`]); `None` when the file holds no bytes at `va`.
     #[must_use]
     pub fn spell(&self) -> Option<String> {
-        let mapped = self.mapped();
-        if mapped == 0 {
+        let first = self.spans.first()?;
+        let HexFill::Bytes(bytes) = &first.fill else {
             return None;
-        }
-        let sec = self
+        };
+        let sec = first
             .section
             .as_deref()
             .map_or_else(String::new, |s| format!(" {s}"));
         Some(format!(
             "# {:#x}..{:#x}{sec}\n{}",
             self.va,
-            self.va.wrapping_add(from_usize(mapped)),
-            hexdump_sparse(&self.bytes[..mapped], self.va)
+            self.va.wrapping_add(from_usize(bytes.len())),
+            hexdump(bytes, self.va)
         ))
     }
 }
 
-/// Returns the bytes at `va` as a hexdump's rows hold them.
-///
-/// The bytes are those the file backs from `va` within the section holding
-/// it ([`crate::program::Program::read_va_upto`]): a range that runs off
-/// the section's end, or off the file, is that many `None` past them, so an
-/// unmapped byte never reads as a zero.
+/// Returns the addresses from `va` as a hexdump's runs: the file's bytes
+/// section by section, a section's addresses the file holds no bytes for,
+/// and addresses nothing maps, each a run of its own.
 ///
 /// # Arguments
 ///
 /// * `program` - The loaded image.
 /// * `va` - Address of the first byte.
-/// * `len` - Bytes asked for, at most [`HEXDUMP_MAX`].
+/// * `len` - Bytes asked for, at most [`HEXDUMP_MAX`]; the runs stop at
+///   the top of the address space.
 ///
 /// # Returns
 ///
-/// The bytes and the section, `None` for every byte when nothing backs
-/// `va`.
+/// The runs covering `va` onward.
 #[must_use]
 pub fn hex_rows(program: &crate::program::Program, va: u64, len: usize) -> HexRows {
-    let len = len.min(HEXDUMP_MAX);
-    let mut bytes: Vec<Option<u8>> = program
-        .read_va_upto(va, len)
-        .unwrap_or_default()
-        .iter()
-        .copied()
-        .map(Some)
-        .collect();
-    bytes.resize(len, None);
-    HexRows {
-        va,
-        section: program.section_at(va).map(|s| s.name.clone()),
-        bytes,
+    let end = va.saturating_add(from_usize(len.min(HEXDUMP_MAX)));
+    let mut spans = Vec::new();
+    let mut at = va;
+    while at < end {
+        let want = usize::try_from(end - at).unwrap_or(HEXDUMP_MAX);
+        let found = program.section_at(at);
+        let holding = found.or_else(|| program.zero_fill_at(at));
+        let (run, fill, section) = match (program.read_va_upto(at, want), holding) {
+            (Some(bytes), _) => (
+                from_usize(bytes.len()),
+                HexFill::Bytes(bytes.to_vec()),
+                found,
+            ),
+            (None, Some(s)) => (
+                s.va.0
+                    .saturating_add(s.vsize.max(s.file_size))
+                    .min(end)
+                    .saturating_sub(at),
+                HexFill::Unbacked,
+                Some(s),
+            ),
+            (None, None) => {
+                let next = program
+                    .sections
+                    .iter()
+                    .map(|s| s.va.0)
+                    .filter(|&start| start > at)
+                    .min()
+                    .unwrap_or(end);
+                (next.min(end).saturating_sub(at), HexFill::Unmapped, None)
+            }
+        };
+        if run == 0 {
+            break;
+        }
+        spans.push(HexSpan {
+            va: at,
+            len: usize::try_from(run).unwrap_or(HEXDUMP_MAX),
+            section: section.map(|s| s.name.clone()),
+            fill,
+        });
+        at = at.saturating_add(run);
     }
+    HexRows { va, spans }
 }
 
 /// Renders up to `max` bytes of the file at a file offset, rows addressed
@@ -202,49 +239,95 @@ mod tests {
     use super::*;
     use crate::program::{Arch, Program, Section};
 
-    /// Rows across a section's end hold its bytes, then `None` for each
-    /// past it, under the section's name; the text is the dump the tool
-    /// printed of the bytes the file backs, and an address nothing backs
-    /// has no text.
+    /// Builds a program of three sections: `.text` at 0x1000 and `.data`
+    /// at 0x1010, each 16 file bytes and adjacent, then `.bss` at 0x1020,
+    /// 16 bytes the file holds none of; nothing maps 0x1030 on.
+    fn sections() -> (Vec<u8>, Program) {
+        let bytes: Vec<u8> = (b'A'..b'A' + 0x20).collect();
+        let mut bss = Section::mapped(".bss", 0x1020, 0x20, 0x10, true, false);
+        bss.file_size = 0;
+        let all = vec![
+            Section::mapped(".text", 0x1000, 0, 0x10, false, true),
+            Section::mapped(".data", 0x1010, 0x10, 0x10, true, false),
+            bss,
+        ];
+        let p = Program::raw(bytes.clone(), Arch::X86_64, 0x1000, None, all);
+        (bytes, p)
+    }
+
+    /// A range across adjacent sections holds every byte, each under its
+    /// own section, and a section's addresses without file bytes and
+    /// addresses nothing maps are runs of their own kinds.
     ///
     /// # Panics
     ///
-    /// When a byte, the section or the text differs.
+    /// When a byte is missed, put under the wrong section, or a run's kind
+    /// differs.
     #[test]
-    fn hex_rows_end_with_none_past_the_section() {
-        let bytes: Vec<u8> = (b'A'..b'A' + 0x20).collect();
-        let text = Section::mapped(".text", 0x1000, 0, 0x20, false, true);
-        let p = Program::raw(bytes.clone(), Arch::X86_64, 0x1000, None, vec![text]);
-        let rows = hex_rows(&p, 0x1018, 0x10);
-        assert_eq!(rows.section.as_deref(), Some(".text"));
-        assert_eq!(rows.mapped(), 8);
-        let want: Vec<Option<u8>> = bytes[0x18..]
-            .iter()
-            .copied()
-            .map(Some)
-            .chain([None; 8])
-            .collect();
-        assert_eq!(rows.bytes, want);
-        let starts: Vec<u64> = rows.rows().map(|(va, _)| va).collect();
-        assert_eq!(starts, [0x1018]);
+    fn hex_rows_read_across_sections() {
+        let (bytes, p) = sections();
+        let span = |va: u64, len: usize, section: Option<&str>, fill: HexFill| HexSpan {
+            va,
+            len,
+            section: section.map(str::to_owned),
+            fill,
+        };
         assert_eq!(
-            rows.spell().as_deref(),
+            hex_rows(&p, 0x1008, 0x10).spans,
+            [
+                span(
+                    0x1008,
+                    8,
+                    Some(".text"),
+                    HexFill::Bytes(bytes[8..0x10].to_vec())
+                ),
+                span(
+                    0x1010,
+                    8,
+                    Some(".data"),
+                    HexFill::Bytes(bytes[0x10..0x18].to_vec())
+                ),
+            ]
+        );
+        assert_eq!(
+            hex_rows(&p, 0x1018, 0x20).spans,
+            [
+                span(
+                    0x1018,
+                    8,
+                    Some(".data"),
+                    HexFill::Bytes(bytes[0x18..].to_vec())
+                ),
+                span(0x1020, 0x10, Some(".bss"), HexFill::Unbacked),
+                span(0x1030, 8, None, HexFill::Unmapped),
+            ]
+        );
+    }
+
+    /// The text is the dump the tool printed: the file's bytes from the
+    /// address within its section, the next section's left out, and none
+    /// for an address without file bytes.
+    ///
+    /// # Panics
+    ///
+    /// When the text differs.
+    #[test]
+    fn hex_rows_spell_the_first_section_s_bytes() {
+        let (bytes, p) = sections();
+        assert_eq!(
+            hex_rows(&p, 0x1008, 0x10).spell().as_deref(),
             Some(
-                "# 0x1018..0x1020 .text\n0x0000001018  59 5a 5b 5c 5d 5e 5f 60                           |YZ[\\]^_`|\n"
+                "# 0x1008..0x1010 .text\n0x0000001008  49 4a 4b 4c 4d 4e 4f 50                           |IJKLMNOP|\n"
             )
         );
-        let whole = hex_rows(&p, 0x1000, 0x20);
-        assert_eq!(whole.rows().count(), 2);
         assert_eq!(
-            whole.spell(),
+            hex_rows(&p, 0x1010, 0x10).spell(),
             Some(format!(
-                "# 0x1000..0x1020 .text\n{}",
-                hexdump(&bytes, 0x1000)
+                "# 0x1010..0x1020 .data\n{}",
+                hexdump(&bytes[0x10..], 0x1010)
             ))
         );
-        let nothing = hex_rows(&p, 0x9000, 4);
-        assert_eq!((nothing.section.as_deref(), nothing.mapped()), (None, 0));
-        assert_eq!(nothing.bytes, [None; 4]);
+        assert_eq!(hex_rows(&p, 0x1020, 4).spell(), None);
         assert_eq!(hex_rows(&p, 0x9000, 4).spell(), None);
     }
 }
