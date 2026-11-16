@@ -5,7 +5,9 @@ use std::any::Any;
 use std::ops::Range;
 use std::sync::Arc;
 
+use borer_engine::analysis::name_of;
 use borer_engine::view::{Ref, View};
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Div, Entity, EventEmitter, FocusHandle, Focusable,
     Font, FontWeight, InteractiveElement as _, InteractiveText, IntoElement, ParentElement as _,
@@ -15,7 +17,8 @@ use gpui::{
 use settings::{Settings as _, SettingsStore};
 use theme::{ActiveTheme as _, GlobalTheme};
 use theme_settings::ThemeSettings;
-use ui::{Color, Label, LabelCommon as _, v_flex};
+use ui::{Color, Icon, IconName, Label, LabelCommon as _, v_flex};
+use workspace::item::TabContentParams;
 use workspace::{Item, ItemNavHistory, Pane, Workspace};
 
 use crate::actions::{BACK_HINT, hint_row};
@@ -107,6 +110,9 @@ pub struct DecompileItem {
     loaded: Arc<LoadedBinary>,
     /// Entry of the function the tab shows, `None` for a tab of measured lines.
     entry: Option<u64>,
+    /// The function's name as the engine gives it, once its decompile is in; `None` while
+    /// it runs or when the engine decompiled nothing, so the tab keeps the entry.
+    name: Option<SharedString>,
     /// Focus handle of the tab.
     focus_handle: FocusHandle,
     /// Lines the tab shows, once decompiled.
@@ -163,6 +169,7 @@ impl DecompileItem {
             workspace,
             loaded,
             entry,
+            name: None,
             focus_handle: cx.focus_handle(),
             code,
             scroll: UniformListScrollHandle::new(),
@@ -199,16 +206,23 @@ impl DecompileItem {
         let loaded = item.loaded.clone();
         item.decompiling = true;
         let bg = spawn_engine(cx, move || {
-            worker_cancel.within(|| decompile_blocking(&loaded, entry))
+            worker_cancel.within(|| {
+                let view = decompile_blocking(&loaded, entry);
+                let name = view
+                    .is_some()
+                    .then(|| name_of(&loaded.analysis, &loaded.overlay, entry));
+                (view, name)
+            })
         });
         item.task = Some(cx.spawn(async move |this, cx| {
-            let built = bg.await;
+            let (built, name) = bg.await;
             let Some(this) = this.upgrade() else {
                 return;
             };
             this.update(cx, |item, cx| {
                 if item.epoch.is_current(ticket, &check_cancel) {
                     item.decompiling = false;
+                    item.name = name.map(SharedString::from);
                     item.code = built.map(|view| Arc::new(CodeLines::new(vec![view])));
                     cx.notify();
                 }
@@ -620,10 +634,24 @@ impl Item for DecompileItem {
     type Event = ();
 
     fn tab_content_text(&self, _detail: usize, _cx: &App) -> SharedString {
-        match self.entry {
-            Some(entry) => format!("{entry:#x}").into(),
-            None => format!("{} lines", self.code.as_ref().map_or(0, |c| c.len())).into(),
+        match (&self.name, self.entry) {
+            (Some(name), _) => name.clone(),
+            (None, Some(entry)) => format!("{entry:#x}").into(),
+            (None, None) => format!("{} lines", self.code.as_ref().map_or(0, |c| c.len())).into(),
         }
+    }
+
+    fn tab_content(&self, params: TabContentParams, _window: &Window, cx: &App) -> AnyElement {
+        Label::new(self.tab_content_text(0, cx))
+            .single_line()
+            .buffer_font(cx)
+            .color(params.text_color())
+            .when(params.preview, Label::italic)
+            .into_any_element()
+    }
+
+    fn tab_icon(&self, _window: &Window, _cx: &App) -> Option<Icon> {
+        Some(Icon::new(IconName::Code))
     }
 
     fn tab_tooltip_text(&self, _cx: &App) -> Option<SharedString> {

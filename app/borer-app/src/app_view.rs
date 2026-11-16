@@ -418,6 +418,7 @@ pub(crate) mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
+    use borer_engine::analysis::name_of;
     use borer_engine::analysis::render::{FunctionOrder, function_rows};
     use borer_engine::view::Ref;
     use command_palette::CommandPalette;
@@ -428,10 +429,10 @@ pub(crate) mod tests {
     };
     use project::DisableAiSettings;
     use settings::Settings as _;
-    use workspace::Panel as _;
     use workspace::dock::{DockPosition, PanelSizeState};
     use workspace::pane::{GoBack, GoForward};
     use workspace::{AddFolderToProject, AppState, MultiWorkspace, Workspace};
+    use workspace::{Item as _, Panel as _};
 
     use super::{DEFAULT_DOCK_STATE_KEY, REFUSED_FOLDER, configure, data_dir, new_workspace};
     use crate::actions::ToggleFunctionColumns;
@@ -738,6 +739,61 @@ pub(crate) mod tests {
             cx.dispatch_action(ToggleFunctionColumns);
             cx.run_until_parked();
         }
+    }
+
+    /// A decompile tab is titled by the engine's name of its function once the decompile
+    /// is in, and carries the code icon; a tab the engine decompiled nothing for keeps its
+    /// entry as its title.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a title is not the engine's name or the entry, or the tab has no icon.
+    #[gpui::test]
+    fn a_decompile_tab_is_titled_by_its_function(cx: &mut TestAppContext) {
+        a_decompile_tab_is_titled_by_its_function_steps(cx);
+    }
+
+    /// Runs the steps of [`a_decompile_tab_is_titled_by_its_function`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`a_decompile_tab_is_titled_by_its_function`] says.
+    fn a_decompile_tab_is_titled_by_its_function_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (workspace, cx) = open(&app_state, cx);
+        open_caller(&workspace, TabMode::Permanent, cx);
+        assert_eq!(shown(&workspace, cx).map(|(entry, _)| entry), Some(CALLER));
+        let loaded = sample();
+        let name = name_of(&loaded.analysis, &loaded.overlay, CALLER);
+        let (title, icon) = cx.update(|window, cx| {
+            let item = workspace.read(cx).active_item(cx).unwrap();
+            (item.tab_content_text(0, cx), item.tab_icon(window, cx))
+        });
+        assert_eq!(title, name);
+        assert!(icon.is_some());
+        let nowhere = 0x5;
+        workspace.update_in(cx, |workspace, window, cx| {
+            open_function(
+                workspace,
+                loaded,
+                nowhere,
+                TabMode::Permanent,
+                true,
+                window,
+                cx,
+            );
+        });
+        assert_eq!(shown(&workspace, cx), Some((nowhere, 0)));
+        let (title, decompiled) = cx.update(|_, cx| {
+            let item = workspace
+                .read(cx)
+                .active_item_as::<DecompileItem>(cx)
+                .unwrap();
+            let item = item.read(cx);
+            (item.tab_content_text(0, cx), item.code().is_some())
+        });
+        assert_eq!(title, "0x5");
+        assert!(!decompiled);
     }
 
     /// A folder whose settings start a context server, dropped on a pane holding only the

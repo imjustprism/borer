@@ -1,6 +1,7 @@
 //! Desktop GPUI application over [`borer_engine`], hosted in Zed's workspace.
 
 pub mod actions;
+pub mod app_assets;
 pub mod app_settings;
 pub mod app_view;
 pub mod binary;
@@ -38,7 +39,7 @@ pub fn run() -> anyhow::Result<()> {
     let exit_slot = new_cli_exit_slot();
     let app_slot = exit_slot.clone();
     gpui_platform::application()
-        .with_assets(assets::Assets)
+        .with_assets(app_assets::AppAssets)
         .run(move |cx: &mut App| {
             mark_ui_thread();
             let opened = app_view::init(cx).and_then(|app_state| {

@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui::{
-    App, Context, Entity, Global, IntoElement, PathPromptOptions, Render, SharedString,
-    Subscription, Task, Window,
+    App, Context, Entity, Global, IntoElement, ParentElement as _, PathPromptOptions, Render,
+    SharedString, Styled as _, Subscription, Task, Window,
 };
-use ui::{Color, Label, LabelCommon as _, LabelSize};
+use ui::{Color, Label, LabelCommon as _, LabelSize, h_flex};
 use workspace::{HideStatusItem, ItemHandle, StatusItemView};
 
 use crate::worker::{LoadedBinary, TaskEpoch, load_binary_blocking, spawn_engine};
@@ -20,6 +20,8 @@ pub const LOAD_SCOPE_NOTE: &str = "packs left out; session load path comes next"
 pub struct Binary {
     /// The analyzed binary, once a load has finished.
     loaded: Option<Arc<LoadedBinary>>,
+    /// What the status line leads with for [`Self::loaded`], built when it loaded.
+    facts: Vec<(SharedString, Color)>,
     /// Error text of the most recent failed load.
     error: Option<String>,
     /// The file a running load reads, `None` once it finished or before any.
@@ -46,6 +48,7 @@ impl Default for Binary {
     fn default() -> Self {
         Self {
             loaded: None,
+            facts: Vec::new(),
             error: None,
             reading: None,
             status: format!("Open a binary ({LOAD_SCOPE_NOTE})"),
@@ -57,6 +60,14 @@ impl Default for Binary {
 }
 
 impl Binary {
+    /// Returns the facts the status line leads with, each with the color it draws in: the
+    /// binary's architecture and format, soft, then the engine's count of its functions,
+    /// muted; built once per load, none before one finished.
+    #[must_use]
+    pub fn facts(&self) -> &[(SharedString, Color)] {
+        &self.facts
+    }
+
     /// Returns the analyzed binary, once a load has finished.
     #[must_use]
     pub const fn loaded(&self) -> Option<&Arc<LoadedBinary>> {
@@ -132,6 +143,7 @@ impl Binary {
     /// * `cx` - Binary context spawning the background task.
     pub fn open_path(&mut self, path: PathBuf, cx: &mut Context<'_, Self>) {
         self.loaded = None;
+        self.facts.clear();
         self.error = None;
         let (ticket, worker_cancel) = self.epoch.begin();
         let check_cancel = worker_cancel.clone();
@@ -168,14 +180,14 @@ impl Binary {
         self.reading = None;
         match result {
             Ok(loaded) => {
-                let rows = &loaded.initial_rows;
-                self.status = format!(
-                    "{}: {} {}{} ({LOAD_SCOPE_NOTE})",
-                    loaded.path.display(),
-                    rows.rows.len(),
-                    rows.noun,
-                    rows.left_out
-                );
+                self.status = format!("{} ({LOAD_SCOPE_NOTE})", loaded.path.display());
+                let program = &loaded.program;
+                let kind = format!("{} {}", program.arch.name(), program.format.name());
+                let count = loaded.initial_rows.counts();
+                self.facts = vec![
+                    (kind.into(), Color::Muted),
+                    (count.into(), Color::Placeholder),
+                ];
                 self.loaded = Some(loaded);
             }
             Err(err) => {
@@ -245,9 +257,13 @@ impl StatusLine {
 
 impl Render for StatusLine {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        Label::new(self.text(cx))
-            .size(LabelSize::Small)
-            .color(Color::Muted)
+        let label =
+            |text: SharedString, color| Label::new(text).size(LabelSize::Small).color(color);
+        let facts = self.binary.read(cx).facts().iter();
+        h_flex()
+            .gap_3()
+            .children(facts.map(|(text, color)| label(text.clone(), *color)))
+            .child(label(self.text(cx).into(), Color::Placeholder))
     }
 }
 
@@ -262,5 +278,74 @@ impl StatusItemView for StatusLine {
 
     fn hide_setting(&self, _cx: &App) -> Option<HideStatusItem> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use borer_engine::analysis::render::{FunctionRows, LeftOut};
+    use gpui::{AppContext as _, SharedString, TestAppContext};
+    use ui::Color;
+
+    use super::Binary;
+    use crate::app_view::tests::sample;
+    use crate::worker::LoadedBinary;
+
+    /// The status line leads with the engine's architecture and format of the open binary,
+    /// soft, then the engine's count of its functions with what it left out, muted; nothing
+    /// before a load, and nothing again once another load starts.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the facts say anything else.
+    #[gpui::test]
+    fn the_status_line_leads_with_the_binarys_facts(cx: &mut TestAppContext) {
+        the_status_line_leads_with_the_binarys_facts_steps(cx);
+    }
+
+    /// Runs the steps of [`the_status_line_leads_with_the_binarys_facts`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`the_status_line_leads_with_the_binarys_facts`]
+    /// says.
+    fn the_status_line_leads_with_the_binarys_facts_steps(cx: &mut TestAppContext) {
+        let binary = cx.new(|_| Binary::default());
+        let facts =
+            |cx: &mut TestAppContext| binary.read_with(cx, |binary, _| binary.facts().to_vec());
+        assert!(facts(cx).is_empty());
+        let sample = sample();
+        let rows = FunctionRows {
+            left_out: LeftOut {
+                thunks: 2,
+                funclets: 1,
+            },
+            ..(*sample.initial_rows).clone()
+        };
+        let loaded = Arc::new(LoadedBinary {
+            path: sample.path.clone(),
+            program: sample.program.clone(),
+            analysis: sample.analysis.clone(),
+            overlay: sample.overlay.clone(),
+            initial_rows: Arc::new(rows),
+        });
+        binary.update(cx, |binary, cx| binary.finish_load(Ok(loaded.clone()), cx));
+        let program = &loaded.program;
+        let kind = format!("{} {}", program.arch.name(), program.format.name());
+        let count = format!(
+            "{} functions; 2 import thunks left out, filter=thunk lists them; \
+             1 exception funclets left out, filter=funclet lists them",
+            loaded.initial_rows.total
+        );
+        let want = vec![
+            (SharedString::from(kind), Color::Muted),
+            (SharedString::from(count), Color::Placeholder),
+        ];
+        assert_eq!(facts(cx), want);
+        let missing = std::env::temp_dir().join("borer-app-no-such-binary.exe");
+        binary.update(cx, |binary, cx| binary.open_path(missing, cx));
+        assert!(facts(cx).is_empty());
     }
 }

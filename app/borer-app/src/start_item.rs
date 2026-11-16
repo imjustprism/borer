@@ -6,14 +6,18 @@ use std::any::Any;
 use gpui::{
     App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
-    WeakEntity, Window,
+    WeakEntity, Window, px, svg,
 };
 use theme::ActiveTheme as _;
 use ui::{Color, Label, LabelCommon as _, LabelSize, v_flex};
 use workspace::{Item, Pane, Workspace};
 
 use crate::actions::{OPEN_HINT, PALETTE_HINT, hint_row};
+use crate::app_assets::MARK_PATH;
 use crate::app_view::open_dropped;
+
+/// Side in logical pixels of the borer mark on the start tab.
+const MARK_PX: f32 = 48.0;
 
 /// A tab that says how to open a binary and opens a binary dropped on it.
 pub struct StartItem {
@@ -136,6 +140,12 @@ impl Render for StartItem {
             .items_center()
             .justify_center()
             .gap_4()
+            .child(
+                svg()
+                    .path(MARK_PATH)
+                    .size(px(MARK_PX))
+                    .text_color(cx.theme().colors().text_muted),
+            )
             .child(Label::new("Open a binary").size(LabelSize::Large))
             .child(
                 v_flex()
