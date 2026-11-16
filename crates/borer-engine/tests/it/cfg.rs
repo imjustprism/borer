@@ -9,10 +9,12 @@
 )]
 
 use crate::common::fixture;
+use crate::drawn::{cfg_digest, check, digest, graph_of, rows};
 use crate::raw::image;
 
 use borer_engine::analysis::render::{
-    CFG_EDGES_MAX, CFG_LISTED_MAX, CFG_NODES_MAX, CFG_ROWS_MAX, EdgeKind, cfg,
+    CFG_EDGES_MAX, CFG_LISTED_MAX, CFG_NODES_MAX, CFG_ROWS_MAX, Drawing, EdgeKind, Graph,
+    GraphEdge, LAYOUT_DUMMIES_PER_NODE, Route, Routed, cfg, layout,
 };
 use borer_engine::analysis::{Analysis, BasicBlock, BlockTerm, Overlay};
 use borer_engine::program::{Arch, Program, Section};
@@ -115,6 +117,7 @@ fn each_edge_is_named_by_what_takes_it_and_the_loop_edge_is_back() {
         ]
     );
     assert_eq!(g.cut, None);
+    check(&graph_of(&g, TEXT), &g.layout()).expect("a clear drawing");
 }
 
 /// An indirect jump whose successors are not its table's entries claims no
@@ -134,35 +137,23 @@ fn an_indirect_jump_no_table_explains_claims_no_case() {
     );
 }
 
+/// Each node of every fixture graph covers its block's rows, and the graph
+/// draws clear.
+///
 /// Each node of every fixture function covers exactly the listing rows
-/// whose instruction lies in its block, from its first row to its last.
+/// whose instruction lies in its block, from its first row to its last,
+/// and every graph draws clear: boxes apart, edges down, routes from
+/// bottoms to tops through no box and along no other route, the crossings
+/// it shows those it reports.
 #[test]
-fn each_node_covers_exactly_the_rows_of_its_block() {
+fn each_node_covers_the_rows_of_its_block_and_draws_clear() {
     let p = fixture();
     let a = Analysis::compute(&p);
     let o = Overlay::default();
     for f in &a.functions {
         let g = cfg(&p, &a, &o, f.entry).expect("graph");
-        let v = &g.listing;
-        for n in &g.nodes {
-            let inside = |i: usize| {
-                v.address(i)
-                    .is_some_and(|va| (n.start..n.end).contains(&va))
-            };
-            let rows: Vec<usize> = (0..v.lines()).filter(|&i| inside(i)).collect();
-            let shown: Vec<usize> = n
-                .lines
-                .clone()
-                .filter(|&i| v.address(i).is_some())
-                .collect();
-            assert_eq!(rows, shown, "{:#x} block {:#x}", f.entry, n.start);
-            assert!(inside(n.lines.start), "{:#x} block {:#x}", f.entry, n.start);
-            assert!(
-                inside(n.lines.end - 1),
-                "{:#x} block {:#x}",
-                f.entry,
-                n.start
-            );
+        if let Err(e) = rows(&g).and_then(|()| check(&graph_of(&g, f.entry), &g.layout())) {
+            panic!("{:#x}: {e}", f.entry);
         }
     }
 }
@@ -187,6 +178,8 @@ fn a_function_past_the_cap_is_cut_and_says_so() {
         listed, CFG_NODES_MAX,
         "the listing shows only the drawn blocks"
     );
+    assert_eq!(g.layout().at.len(), CFG_NODES_MAX);
+    check(&graph_of(&g, TEXT), &g.layout()).expect("a clear drawing");
 }
 
 /// A function cut to the cap draws the blocks its entry reaches first,
@@ -332,6 +325,304 @@ fn a_guarded_return_or_jump_and_a_transaction_end_are_named() {
     );
 }
 
+/// Returns an edge laid out down.
+///
+/// # Arguments
+///
+/// * `from` - The source node.
+/// * `to` - The target node.
+fn down(from: usize, to: usize) -> GraphEdge {
+    GraphEdge {
+        from,
+        to,
+        route: Route::Down,
+    }
+}
+
+/// A seeded generator of graphs: a linear congruential sequence, so the
+/// graphs are the same on every host.
+#[derive(Debug)]
+struct Lcg(u64);
+
+impl Lcg {
+    /// Returns the next number below `n`.
+    ///
+    /// # Arguments
+    ///
+    /// * `n` - The bound, above zero.
+    fn below(&mut self, n: u64) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (self.0 >> 33) % n
+    }
+
+    /// Returns a graph: up to `nodes` boxes, each with up to three edges to
+    /// later nodes, some edges back to earlier ones or itself, routed up,
+    /// and nodes no edge reaches.
+    ///
+    /// # Arguments
+    ///
+    /// * `nodes` - Most nodes.
+    fn graph(&mut self, nodes: u64) -> Graph {
+        let n = usize::try_from(1 + self.below(nodes)).expect("fits");
+        let mut sizes = Vec::with_capacity(n);
+        let mut edges = Vec::new();
+        for u in 0..n {
+            let w = u32::try_from(3 + self.below(40)).expect("fits");
+            let h = u32::try_from(3 + self.below(10)).expect("fits");
+            sizes.push((w, h));
+            for _ in 0..self.below(4) {
+                let span = usize::try_from(1 + self.below(6)).expect("fits");
+                if u + span < n {
+                    edges.push(down(u, u + span));
+                }
+            }
+            if self.below(8) == 0 {
+                let to =
+                    usize::try_from(self.below(u64::try_from(u + 1).expect("fits"))).expect("fits");
+                edges.push(GraphEdge {
+                    from: u,
+                    to,
+                    route: Route::Up,
+                });
+            }
+        }
+        Graph {
+            sizes,
+            edges,
+            root: 0,
+        }
+    }
+}
+
+/// Seeded random graphs, a self loop, parallel edges and unreachable nodes
+/// among them, draw clear and the same twice, and reduction never adds a
+/// crossing.
+#[test]
+fn random_graphs_draw_clear_and_never_cross_more() {
+    let mut rng = Lcg(7);
+    for i in 0..300 {
+        let g = rng.graph(if i % 10 == 0 { 400 } else { 60 });
+        let l = layout(&g);
+        if let Err(e) = check(&g, &l) {
+            panic!("graph {i} ({} nodes): {e}", g.sizes.len());
+        }
+        assert_eq!(digest(&g, &layout(&g)), digest(&g, &l), "graph {i}");
+    }
+}
+
+/// Two edges that cross in the input order, `r -> a, r -> b, a -> d,
+/// b -> c`, are uncrossed, and the drawing shows the crossings it
+/// reports, their runs on lines of their own.
+#[test]
+fn crossed_edges_are_uncrossed_on_lines_of_their_own() {
+    let g = Graph {
+        sizes: vec![(6, 3); 5],
+        edges: vec![down(0, 1), down(0, 2), down(1, 4), down(2, 3)],
+        root: 0,
+    };
+    let l = layout(&g);
+    check(&g, &l).expect("a clear drawing");
+    assert_eq!((l.crossings_before, l.crossings), (1, 0));
+}
+
+/// Two edges from one wide node to the two small nodes under it run on
+/// lines stacked so neither crosses the other, and the drawing's own
+/// segments show the crossings it reports: none.
+#[test]
+fn runs_from_one_node_are_stacked_not_to_cross() {
+    let g = Graph {
+        sizes: vec![(40, 1), (4, 1), (4, 1), (60, 1)],
+        edges: vec![down(0, 1), down(0, 2), down(0, 3)],
+        root: 0,
+    };
+    let l = layout(&g);
+    check(&g, &l).expect("a clear drawing");
+    assert_eq!(l.crossings, 0);
+}
+
+/// Runs that would meet at a column cross there, and the drawing reports
+/// them.
+///
+/// Two nodes each to the same two nodes below them, `r -> u1, r -> u2`,
+/// `u1 -> l1, u1 -> l2, u2 -> l1, u2 -> l2`: the runs that would meet at a
+/// column cross there instead, and the drawing shows the crossings it
+/// reports.
+#[test]
+fn runs_meeting_at_a_column_cross_once() {
+    let g = Graph {
+        sizes: vec![(6, 3); 5],
+        edges: vec![
+            down(0, 1),
+            down(0, 2),
+            down(1, 3),
+            down(1, 4),
+            down(2, 3),
+            down(2, 4),
+        ],
+        root: 0,
+    };
+    let l = layout(&g);
+    check(&g, &l).expect("a clear drawing");
+}
+
+/// A node with more edges than columns is drawn wide enough to give each
+/// its own port on its layer's parity.
+#[test]
+fn a_node_too_narrow_for_its_edges_is_widened() {
+    let g = Graph {
+        sizes: vec![(2, 3), (2, 3), (2, 3), (2, 3), (2, 3)],
+        edges: (1..5).map(|v| down(0, v)).collect(),
+        root: 0,
+    };
+    let l = layout(&g);
+    check(&g, &l).expect("a clear drawing");
+    assert_eq!(l.sizes[0], (10, 3));
+    let ports: std::collections::BTreeSet<i32> = l.routes.iter().map(|r| r[0].0).collect();
+    assert_eq!(ports.len(), 4);
+}
+
+/// Runs going left and right keep their verticals apart.
+///
+/// A run going left that leaves down the column a run going right comes
+/// in at would share a vertical with it: two upper nodes, each to both of
+/// two lower ones of other widths, with a long edge past them, keep every
+/// route's verticals apart and show the crossings they report.
+#[test]
+fn runs_leaving_and_entering_one_column_never_meet() {
+    for widths in [[6, 6, 6, 6, 6], [4, 9, 5, 12, 3], [11, 3, 7, 3, 11]] {
+        let g = Graph {
+            sizes: widths.iter().map(|&w| (w, 3)).chain([(6, 3)]).collect(),
+            edges: vec![
+                down(0, 1),
+                down(0, 2),
+                down(1, 3),
+                down(1, 4),
+                down(2, 4),
+                down(2, 3),
+                down(0, 5),
+                down(3, 5),
+            ],
+            root: 0,
+        };
+        let l = layout(&g);
+        if let Err(e) = check(&g, &l) {
+            panic!("{widths:?}: {e}");
+        }
+    }
+}
+
+/// Edges naming nodes the graph does not have get no route, and a root it
+/// does not have counts as the first node; nothing panics.
+#[test]
+fn a_graph_naming_nodes_it_lacks_still_draws() {
+    let g = Graph {
+        sizes: vec![(4, 3), (4, 3)],
+        edges: vec![
+            down(0, 1),
+            down(0, 9),
+            GraphEdge {
+                from: 9,
+                to: 0,
+                route: Route::Up,
+            },
+        ],
+        root: 5,
+    };
+    let l = layout(&g);
+    assert_eq!(
+        l.routed,
+        [Routed::Layered, Routed::Missing, Routed::Missing]
+    );
+    assert!(l.routes[1].is_empty() && l.routes[2].is_empty());
+    assert!(!l.routes[0].is_empty());
+    assert_eq!(layout(&Graph::default()), Drawing::default());
+}
+
+/// Long and dense graphs lay out in seconds, and a fan spends its budget.
+///
+/// A chain of ten thousand blocks and ten thousand blocks each jumping to
+/// the next eight lay out in seconds, even unoptimized, and a fan from one
+/// node to every node of a long chain spends its budget of added nodes and
+/// says how many edges it routed on the side instead.
+#[test]
+#[expect(clippy::disallowed_methods, reason = "the bound is a time")]
+fn long_and_dense_graphs_lay_out_in_seconds() {
+    let n = 10_000;
+    let chain = Graph {
+        sizes: vec![(20, 5); n],
+        edges: (1..n).map(|v| down(v - 1, v)).collect(),
+        root: 0,
+    };
+    let dense = Graph {
+        sizes: vec![(20, 5); n],
+        edges: (0..n)
+            .flat_map(|u| (u + 1..n.min(u + 9)).map(move |v| down(u, v)))
+            .collect(),
+        root: 0,
+    };
+    let m = 2000;
+    let fan = Graph {
+        sizes: vec![(20, 5); m],
+        edges: (1..m)
+            .map(|v| down(v - 1, v))
+            .chain((2..m).map(|v| down(0, v)))
+            .collect(),
+        root: 0,
+    };
+    for (name, g) in [("chain", &chain), ("dense", &dense), ("fan", &fan)] {
+        let started = std::time::Instant::now();
+        let l = layout(g);
+        let took = started.elapsed();
+        assert!(took.as_secs() < 20, "{name} took {took:?}");
+        if let Err(e) = check(g, &l) {
+            panic!("{name}: {e}");
+        }
+    }
+    let l = layout(&fan);
+    assert!(
+        l.sided > 0,
+        "{LAYOUT_DUMMIES_PER_NODE} added nodes per node never ran out"
+    );
+    assert_eq!(
+        l.routed.iter().filter(|&&r| r == Routed::Side).count(),
+        l.sided
+    );
+}
+
+/// A function whose long edges would take more added nodes than the budget
+/// draws them on the side and its drawing says how many: one block jumping
+/// through a table to each of six hundred chained blocks.
+#[test]
+fn a_graph_past_the_budget_of_added_nodes_says_so() {
+    let n = 600;
+    let mut blocks: Vec<(BlockTerm, Vec<u64>)> = vec![(BlockTerm::Indirect, (1..n).collect())];
+    blocks.extend((1..n).map(|i| (BlockTerm::Fall, vec![i + 1])));
+    let (p, mut a) = one_byte_blocks(&blocks);
+    a.jump_tables
+        .insert(TEXT, (1..n).map(|i| TEXT + i).collect());
+    let g = cfg(&p, &a, &Overlay::default(), TEXT).expect("graph");
+    assert!(g.layout().sided > 0);
+    assert_eq!(g.cut, None, "routing on the side leaves nothing out");
+    check(&graph_of(&g, TEXT), &g.layout()).expect("a clear drawing");
+}
+
+/// Two graphs drawn alike but for one edge's kind digest apart.
+#[test]
+fn an_edge_kind_changes_the_digest() {
+    let (p, a) = one_byte_blocks(&[(BlockTerm::Jmp, vec![1]), (BlockTerm::Ret, vec![])]);
+    let (q, b) = one_byte_blocks(&[(BlockTerm::Fall, vec![1]), (BlockTerm::Ret, vec![])]);
+    let o = Overlay::default();
+    let (g, h) = (
+        cfg(&p, &a, &o, TEXT).expect("graph"),
+        cfg(&q, &b, &o, TEXT).expect("graph"),
+    );
+    assert_eq!(g.layout(), h.layout());
+    assert_ne!(cfg_digest(&g, TEXT), cfg_digest(&h, TEXT));
+}
+
 /// A block another overlaps keeps only its own rows: `jmp -1` at 0x401000
 /// jumps into its own second byte, where `inc eax; ret` decodes.
 #[test]
@@ -445,4 +736,6 @@ fn a_graph_lists_at_most_its_total_of_rows() {
             .skip(full)
             .all(|n| n.shortened && n.lines.len() == 2)
     );
+    rows(&g).expect("rows of the shortened blocks");
+    check(&graph_of(&g, TEXT), &g.layout()).expect("a clear drawing");
 }

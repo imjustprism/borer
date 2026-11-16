@@ -44,6 +44,22 @@ pub struct Cfg {
     /// [`CFG_EDGES_MAX`] edges, or a block more rows than
     /// [`CFG_ROWS_MAX`] and [`CFG_LISTED_MAX`] leave it.
     pub cut: Option<Cut>,
+    /// The drawing of the nodes and edges ([`Cfg::layout`]).
+    drawing: Arc<Drawing>,
+}
+
+impl Cfg {
+    /// Returns the graph laid out top to bottom from the entry block.
+    ///
+    /// Each node is its box ([`Node::size`]), widened by the layout where
+    /// it has more edges out or in than columns ([`Drawing::sizes`]), and
+    /// each edge's index is its place in [`Cfg::edges`]; back edges go up
+    /// the side, and long edges past the layout's budget down it
+    /// ([`Drawing::sided`]). It is laid out once, with the graph.
+    #[must_use]
+    pub fn layout(&self) -> Arc<Drawing> {
+        Arc::clone(&self.drawing)
+    }
 }
 
 /// One block of a [`Cfg`].
@@ -62,6 +78,9 @@ pub struct Node {
     /// Whether the block is cut short: its last row says how many bytes
     /// it does not list.
     pub shortened: bool,
+    /// The node's text box in cells, columns and rows: its widest row in
+    /// characters and its row count, each plus a cell on both sides.
+    pub size: (u32, u32),
 }
 
 /// One successor edge of a [`Cfg`].
@@ -287,7 +306,8 @@ fn drawn(f: &Function) -> Vec<&BasicBlock> {
 }
 
 /// Returns a function's control-flow graph: its blocks as rows of their
-/// listing and its successor edges by kind, the back edges marked.
+/// listing and its successor edges by kind, the back edges marked, laid
+/// out ([`Cfg::layout`]).
 ///
 /// # Arguments
 ///
@@ -333,6 +353,7 @@ pub fn cfg(p: &Program, a: &Analysis, o: &Overlay, entry: u64) -> anyhow::Result
                 start: b.start,
                 end: b.end,
                 term: b.term,
+                size: node_size(&listing, &lines),
                 lines,
                 shortened,
             })
@@ -354,7 +375,20 @@ pub fn cfg(p: &Program, a: &Analysis, o: &Overlay, entry: u64) -> anyhow::Result
             }
         }
     }
-    mark_back_edges(nodes.len(), index(entry).unwrap_or(0), &mut edges);
+    let root = index(entry).unwrap_or(0);
+    mark_back_edges(nodes.len(), root, &mut edges);
+    let drawing = layout(&Graph {
+        sizes: nodes.iter().map(|n| n.size).collect(),
+        edges: edges
+            .iter()
+            .map(|e| GraphEdge {
+                from: e.from,
+                to: e.to,
+                route: if e.back { Route::Up } else { Route::Down },
+            })
+            .collect(),
+        root,
+    });
     let cut = Cut {
         shown: shown.len(),
         total: f.blocks.len(),
@@ -369,7 +403,26 @@ pub fn cfg(p: &Program, a: &Analysis, o: &Overlay, entry: u64) -> anyhow::Result
         nodes,
         edges,
         cut,
+        drawing: Arc::new(drawing),
     }))
+}
+
+/// Returns a node's box in text cells: its widest row in characters and
+/// its row count, each plus a cell on both sides.
+///
+/// # Arguments
+///
+/// * `listing` - The function's listing.
+/// * `lines` - The node's rows.
+fn node_size(listing: &View, lines: &Range<usize>) -> (u32, u32) {
+    let widest = lines
+        .clone()
+        .filter_map(|i| listing.line(i))
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(0);
+    let cells = |x: usize| u32::try_from(x.saturating_add(2)).unwrap_or(u32::MAX);
+    (cells(widest), cells(lines.len()))
 }
 
 /// Returns the rows of a listing that show a block's instructions.

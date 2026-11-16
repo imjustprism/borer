@@ -9,6 +9,8 @@
 mod common;
 #[path = "../common/decompiled.rs"]
 mod decompiled;
+#[path = "../common/drawn.rs"]
+mod drawn;
 #[path = "../common/elfgen.rs"]
 mod elfgen;
 #[path = "../common/fixture_pack.rs"]
