@@ -187,7 +187,9 @@ mod tests {
     use std::sync::Arc;
 
     use borer_engine::analysis::render::{FunctionOrder, function_rows};
-    use gpui::{Entity, TestAppContext, VisualTestContext};
+    use borer_engine::view::Ref;
+    use gpui::{Entity, TestAppContext, VisualTestContext, px, size};
+    use workspace::pane::{GoBack, GoForward};
     use workspace::{AppState, MultiWorkspace, Workspace};
 
     use super::new_workspace;
@@ -195,8 +197,11 @@ mod tests {
     use crate::functions_panel::FunctionsPanel;
     use crate::worker::LoadedBinary;
 
-    /// Entry of the sample program's caller.
+    /// Entry of the sample program's caller, which calls [`CALLEE`].
     const CALLER: u64 = 0x1000;
+
+    /// Entry of the sample program's callee.
+    const CALLEE: u64 = 0x1030;
 
     /// Starts Zed's test app state over a fresh in-memory database, with the app's keymap,
     /// Zed's editor, workspace and command palette.
@@ -320,5 +325,70 @@ mod tests {
         });
         assert_eq!(shown(&workspace, cx).map(|(entry, _)| entry), Some(CALLER));
         assert_available(&declared, cx);
+    }
+
+    /// Zed's back and forward walk the places a decompile tab was left at: a jump inside
+    /// the caller, then the caller's link to its callee.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a step shows the wrong function or top line.
+    #[gpui::test]
+    fn back_returns_to_where_each_function_was_left(cx: &mut TestAppContext) {
+        back_returns_to_where_each_function_was_left_steps(cx);
+    }
+
+    /// Runs the steps of [`back_returns_to_where_each_function_was_left`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`back_returns_to_where_each_function_was_left`] says.
+    fn back_returns_to_where_each_function_was_left_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (workspace, cx) = open(&app_state, cx);
+        cx.simulate_resize(size(px(800.0), px(160.0)));
+        let loaded = sample();
+        workspace.update_in(cx, |workspace, window, cx| {
+            open_function(
+                workspace,
+                loaded,
+                CALLER,
+                TabMode::Preview,
+                true,
+                window,
+                cx,
+            );
+        });
+        assert_eq!(shown(&workspace, cx), Some((CALLER, 0)));
+        let caller = workspace
+            .read_with(cx, |workspace, cx| {
+                workspace.active_item_as::<DecompileItem>(cx)
+            })
+            .unwrap();
+        let (view, line) = caller.read_with(cx, |item, _| {
+            let code = item.code().unwrap();
+            (0..code.len())
+                .find_map(|ix| {
+                    let (view, line) = code.get(ix)?;
+                    view.tokens(line)
+                        .any(|(_, _, link)| link == Some(&Ref::Function(CALLEE)))
+                        .then(|| (view.clone(), line))
+                })
+                .unwrap()
+        });
+        caller.update_in(cx, |item, _, cx| item.jump_to_line(1, cx));
+        assert_eq!(shown(&workspace, cx), Some((CALLER, 1)));
+        caller.update_in(cx, |item, window, cx| {
+            item.follow(&view, &Ref::Function(CALLEE), (line, line), window, cx);
+        });
+        assert_eq!(shown(&workspace, cx), Some((CALLEE, 0)));
+        for want in [(CALLER, 1), (CALLER, 0)] {
+            cx.dispatch_action(GoBack);
+            assert_eq!(shown(&workspace, cx), Some(want));
+        }
+        for want in [(CALLER, 1), (CALLEE, 0)] {
+            cx.dispatch_action(GoForward);
+            assert_eq!(shown(&workspace, cx), Some(want));
+        }
     }
 }

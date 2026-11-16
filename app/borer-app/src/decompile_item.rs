@@ -1,6 +1,7 @@
-//! A decompile tab: one function's view of the engine's tokens in Zed's center pane, whose
-//! linked tokens open their function or scroll to their line.
+//! A decompile tab: one function's view of the engine's tokens in Zed's center pane, on
+//! Zed's nav history, whose linked tokens open their function or scroll to their line.
 
+use std::any::Any;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -12,7 +13,7 @@ use gpui::{
     WeakEntity, Window, div, px, uniform_list,
 };
 use theme::ActiveTheme as _;
-use workspace::{Item, Workspace};
+use workspace::{Item, ItemNavHistory, Workspace};
 
 use crate::code_view::{ClickOutcome, CodeLines, CodePalette, resolve_ref_click, style_view_line};
 use crate::worker::{LoadedBinary, TaskEpoch, decompile_blocking, spawn_engine};
@@ -30,6 +31,15 @@ pub enum TabMode {
     Preview,
     /// In a tab of its own that stays until closed.
     Permanent,
+}
+
+/// Where a decompile tab was when it went into the nav history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NavData {
+    /// Entry of the function the tab shows, `None` for a tab of measured lines.
+    entry: Option<u64>,
+    /// Zero-based index of the line at the top of the tab.
+    top: usize,
 }
 
 /// One function's decompile view, or a run of measured lines, as an item of Zed's center pane.
@@ -50,6 +60,8 @@ pub struct DecompileItem {
     epoch: TaskEpoch,
     /// Whether the background decompile is still running.
     decompiling: bool,
+    /// The pane's nav history, set when the tab is added to a pane.
+    nav_history: Option<ItemNavHistory>,
     /// The background decompile.
     task: Option<Task<()>>,
 }
@@ -95,6 +107,7 @@ impl DecompileItem {
             scroll: UniformListScrollHandle::new(),
             epoch: TaskEpoch::new(),
             decompiling: false,
+            nav_history: None,
             task: None,
         }
     }
@@ -200,7 +213,8 @@ impl DecompileItem {
         !self.decompiling || self.epoch.seq() > ticket
     }
 
-    /// Scrolls line `line` to the top of the tab.
+    /// Scrolls line `line` to the top of the tab without a nav-history entry, also when
+    /// the line is already on screen.
     ///
     /// # Arguments
     ///
@@ -209,13 +223,14 @@ impl DecompileItem {
         self.scroll.scroll_to_item_strict(line, ScrollStrategy::Top);
     }
 
-    /// Scrolls line `line` to the top of the tab, as a label's link does.
+    /// Records where the tab is in the nav history, then scrolls line `line` to its top.
     ///
     /// # Arguments
     ///
     /// * `line` - Zero-based index of the shown line.
     /// * `cx` - Item context.
     pub fn jump_to_line(&mut self, line: usize, cx: &mut Context<'_, Self>) {
+        self.push_location(cx);
         self.scroll_to(line);
         cx.notify();
     }
@@ -275,6 +290,22 @@ impl DecompileItem {
                 );
             });
         });
+    }
+
+    /// Pushes the tab's function and top line onto the pane's nav history.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Item context.
+    fn push_location(&mut self, cx: &mut Context<'_, Self>) {
+        let top = self.top_line();
+        let data = NavData {
+            entry: self.entry,
+            top,
+        };
+        if let Some(history) = self.nav_history.as_mut() {
+            history.push(Some(data), u32::try_from(top).ok(), cx);
+        }
     }
 
     /// Builds the visible rows in `range` of the tab's line list.
@@ -460,6 +491,36 @@ impl Item for DecompileItem {
 
     fn tab_tooltip_text(&self, _cx: &App) -> Option<SharedString> {
         Some(self.loaded.path.display().to_string().into())
+    }
+
+    fn set_nav_history(
+        &mut self,
+        history: ItemNavHistory,
+        _window: &mut Window,
+        _cx: &mut Context<'_, Self>,
+    ) {
+        self.nav_history = Some(history);
+    }
+
+    fn navigate(
+        &mut self,
+        data: Arc<dyn Any + Send>,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        let Some(&NavData { entry, top }) = data.downcast_ref::<NavData>() else {
+            return false;
+        };
+        if entry != self.entry || top == self.top_line() {
+            return false;
+        }
+        self.scroll_to(top);
+        cx.notify();
+        true
+    }
+
+    fn deactivated(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.push_location(cx);
     }
 }
 

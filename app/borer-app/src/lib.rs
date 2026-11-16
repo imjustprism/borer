@@ -6,7 +6,6 @@ pub mod binary;
 pub mod code_view;
 pub mod decompile_item;
 pub mod functions_panel;
-pub mod history;
 pub mod measure;
 pub mod worker;
 

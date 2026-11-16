@@ -361,7 +361,6 @@ mod tests {
             ("code_view.rs", include_str!("code_view.rs")),
             ("decompile_item.rs", include_str!("decompile_item.rs")),
             ("functions_panel.rs", include_str!("functions_panel.rs")),
-            ("history.rs", include_str!("history.rs")),
             ("lib.rs", include_str!("lib.rs")),
             ("main.rs", include_str!("main.rs")),
             ("measure.rs", include_str!("measure.rs")),
