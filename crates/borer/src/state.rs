@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use borer_engine::analysis::edit::{self, Edit, Force, Plan};
-use borer_engine::analysis::{Analysis, EnumSource, Overlay, parse_addr};
+use borer_engine::analysis::{Analysis, EnumSource, Overlay};
 use borer_engine::clr::managed;
 use borer_engine::pack::{Pack, Packs};
 use borer_engine::program::{Feature, Program};
@@ -594,17 +594,7 @@ impl BorerServer {
     /// When the text is neither an address nor a known name, naming the
     /// names nearest it ([`borer_engine::analysis::resolve_suggesting`]).
     pub(crate) fn addr(&self, p: &Program, text: &str) -> Result<u64, String> {
-        if borer_engine::analysis::hex_prefixed(text)
-            && let Some(va) = parse_addr(text)
-        {
-            return Ok(va);
-        }
-        borer_engine::analysis::resolve_suggesting(
-            p,
-            &self.analysis_or_empty(),
-            &self.overlay(),
-            text,
-        )
+        borer_engine::answer::address(p, text, || (self.analysis_or_empty(), self.overlay()))
     }
 
     /// The .NET members an argument names, when it names managed code

@@ -11,6 +11,7 @@
 //! session and its evidence, a live process, the answer memory, a file the
 //! URI names, the packs on disk, the resource catalog) stay with it.
 
+use std::borrow::Borrow;
 use std::num::NonZeroUsize;
 
 use crate::analysis::{
@@ -822,11 +823,38 @@ fn clr_need(arg: &str) -> Need {
 ///
 /// When the text names nothing, or no function contains the address.
 fn entry(q: &Ask<'_>, text: &str) -> Result<u64, String> {
-    let va = match parse_addr(text).filter(|_| hex_prefixed(text)) {
-        Some(va) => va,
-        None => resolve_suggesting(q.p, q.a, q.o, text)?,
-    };
+    let va = address(q.p, text, || (q.a, q.o))?;
     entry_of(q.p, q.a, va, text)
+}
+
+/// Resolves an address argument: `0x` text is always the address it
+/// spells, and anything else is looked up as a name first
+/// ([`resolve_suggesting`]).
+///
+/// The names are asked for only when the text is not a `0x` address, so a
+/// caller that would work out an analysis to look a name up pays for it
+/// only then.
+///
+/// # Arguments
+///
+/// * `program` - Supplies the symbol table.
+/// * `text` - The address or name as the agent wrote it.
+/// * `names` - Gives the analysis and the overlay a name is looked up in.
+///
+/// # Errors
+///
+/// When the text is neither an address nor a known name, naming the names
+/// nearest it.
+pub fn address<A: Borrow<Analysis>, O: Borrow<Overlay>>(
+    program: &Program,
+    text: &str,
+    names: impl FnOnce() -> (A, O),
+) -> Result<u64, String> {
+    if let Some(va) = parse_addr(text).filter(|_| hex_prefixed(text)) {
+        return Ok(va);
+    }
+    let (a, o) = names();
+    resolve_suggesting(program, a.borrow(), o.borrow(), text)
 }
 
 /// Returns the entry of the function containing an address an agent
