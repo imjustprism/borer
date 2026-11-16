@@ -203,8 +203,8 @@ impl BorerServer {
         self.loaded().ok_or_else(|| err_params(NO_BINARY))
     }
 
-    /// The analysis, for a resource read outside a tool body that needs
-    /// `feature` of the program's code.
+    /// The analysis, for a test that reads one outside a tool body and
+    /// needs `feature` of the program's code.
     ///
     /// # Arguments
     ///
@@ -216,6 +216,7 @@ impl BorerServer {
     /// `feature` with its architecture, as [`Self::with_analysis`] refuses
     /// both: the request came too early or asked the wrong file, and the
     /// server did not fail.
+    #[cfg(test)]
     pub(crate) fn analysis(&self, feature: Feature) -> Result<Arc<Analysis>, ErrorData> {
         if let Some(why) = self.require_loaded()?.refuses(feature) {
             return Err(err_params(why));
@@ -299,41 +300,6 @@ impl BorerServer {
         let made = Arc::<Analysis>::default();
         *slot = Some((program, Arc::clone(&made)));
         made
-    }
-
-    /// Returns an answer drawn from facts of the loaded file, the facts kept
-    /// in the memo of its analysis ([`Analysis::derived`]) once the
-    /// analysis is held.
-    ///
-    /// Some answers read the file's bytes alone, hashing, carving or
-    /// decoding all of them, which took a second on every read of a
-    /// hundred-megabyte file. The facts are kept once, whatever the
-    /// question, and `answer` reads each question off them. They do not
-    /// wait for an analysis that is not there yet: without one the facts
-    /// are worked out each time, as before.
-    ///
-    /// # Arguments
-    ///
-    /// * `kind` - What the facts are, as a fixed name.
-    /// * `make` - Works the facts out from the program.
-    /// * `answer` - Renders the answer from the facts.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded.
-    pub(crate) fn file_fact<T: Send + Sync + 'static>(
-        &self,
-        kind: &'static str,
-        make: impl FnOnce(&Program) -> T,
-        answer: impl FnOnce(&T) -> String,
-    ) -> Result<String, ErrorData> {
-        self.with_program(|p| {
-            let held = read_lock(&self.analysis).clone();
-            Ok(match held {
-                Some(a) => answer(&a.derived.get_or_build(kind, (), || make(p))),
-                None => answer(&make(p)),
-            })
-        })
     }
 
     /// Names the loaded file when its analysis has not been computed yet,
@@ -847,8 +813,7 @@ impl BorerServer {
     /// # Errors
     ///
     /// When the text does not resolve or no function contains the address
-    /// ([`borer_engine::analysis::function_entry`] says an import's slot is
-    /// one).
+    /// ([`borer_engine::answer::entry_of`] says an import's slot is one).
     pub(crate) fn function_entry(
         &self,
         p: &Program,
@@ -856,18 +821,7 @@ impl BorerServer {
         text: &str,
     ) -> Result<u64, String> {
         let va = self.addr(p, text)?;
-        borer_engine::analysis::function_entry(p, a, va).map_err(|e| {
-            let digits = text.trim();
-            let hint = u64::from_str_radix(digits, 16)
-                .ok()
-                .filter(|hex| {
-                    digits.bytes().all(|b| b.is_ascii_digit()) && a.function_at(*hex).is_some()
-                })
-                .map_or_else(String::new, |hex| {
-                    format!("; bare digits are decimal, write {hex:#x} for the hex address")
-                });
-            format!("{e}{hint}")
-        })
+        borer_engine::answer::entry_of(p, a, va, text)
     }
 
     /// A server with nothing loaded, the packs `BORER_PACKS` names, live

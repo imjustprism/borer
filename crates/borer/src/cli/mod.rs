@@ -9,6 +9,7 @@ use borer_engine::analysis::{
     Overlay, about, anchors, attributes, classes, decompile, fieldrefs, map, messages, name_of,
     parse_off, ports, render, sigs, snapshot, stated, utypes, vtables,
 };
+use borer_engine::answer::ABOUT_NEEDS_A_NAME;
 use borer_engine::isa::Isa;
 use borer_engine::pack::Pack;
 use borer_engine::program::Feature;
@@ -18,7 +19,6 @@ use borer_engine::text::{one_line, quoted, short_path};
 use borer_engine::{disasm, entropy, hexdump as hexfmt, memory, num, script, search};
 
 use crate::params::{SearchKind, parse_field_offset, parse_unsigned, stated_fields, stated_values};
-use crate::resources::ABOUT_NEEDS_A_NAME;
 use crate::tools::bytes::entropy_threshold;
 use crate::tools::search::render_hits;
 

@@ -1,14 +1,20 @@
 //! The handlers behind the `borer://` resource templates, and the help
 //! that says how to read each one.
 //!
-//! One method per template, each answering in the same table conventions as
-//! the tools; `read_resource` in `main.rs` parses the URI and dispatches here.
+//! The engine answers most resources on its own ([`borer_engine::answer`]);
+//! this holds the ones that read what the server holds (another build or a
+//! file the URI names, the packs, the decompilation index on disk, the
+//! session), each answering in the same table conventions as the tools, and
+//! the call that prepares what an engine answer reads
+//! ([`BorerServer::engine_answer`]). `read_resource` in `main.rs` parses the
+//! URI and dispatches here.
 
 use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 
 use borer_engine::analysis::{Analysis, Overlay, render};
+use borer_engine::answer::Need;
 use borer_engine::program::{Feature, Program};
 use borer_engine::strings::walk::{Needle, StringRow, row_matches};
 use rmcp::ErrorData;
@@ -17,50 +23,8 @@ use crate::BorerServer;
 use crate::catalog::{RESOURCE_TEMPLATES, RESOURCES, resource_name};
 use crate::errors::{err_not_found, err_params};
 use crate::paging::Asked;
-use crate::params::parse_field_offset;
 use crate::session;
 use crate::state::{lock, read_lock};
-
-/// Most rows one listing keyed by a vtable slot returns.
-const SLOT_PAGE: usize = 2000;
-
-/// The refusal of an `about` given no name, the resource's and the CLI's.
-pub(crate) const ABOUT_NEEDS_A_NAME: &str =
-    "about needs a name: an attribute, a class, or a function";
-
-/// A listing keyed by a vtable slot: `<slot>[,<class-filter>]`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SlotSpec<'a> {
-    /// The zero-based vtable index.
-    slot: usize,
-    /// A case-insensitive substring of the class name, empty for every class.
-    filter: &'a str,
-}
-
-impl<'a> SlotSpec<'a> {
-    /// Reads a spec as the URI carries it.
-    ///
-    /// # Arguments
-    ///
-    /// * `spec` - The URI argument.
-    ///
-    /// # Errors
-    ///
-    /// When the slot is not a number.
-    fn parse(spec: &'a str) -> Result<SlotSpec<'a>, ErrorData> {
-        let (slot_text, filter) = spec.split_once(',').unwrap_or((spec, ""));
-        let slot = slot_text.trim().parse().map_err(|_| {
-            err_params(format!(
-                "bad slot {}: a zero-based index",
-                borer_engine::text::quoted(slot_text)
-            ))
-        })?;
-        Ok(SlotSpec {
-            slot,
-            filter: filter.trim(),
-        })
-    }
-}
 
 /// Another build of the loaded program, analysed for a comparison surface.
 #[derive(Debug)]
@@ -282,286 +246,6 @@ impl BorerServer {
         refused.map_or(Ok(out), |why| Err(err_params(why)))
     }
 
-    /// Runs the emulator from a routine and reports what it decoded.
-    ///
-    /// # Arguments
-    ///
-    /// * `target` - The routine's address or name, then directives.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, or the spec is refused.
-    pub(crate) fn emulate_text(&self, target: &str) -> Result<String, ErrorData> {
-        self.refusing(Feature::Emulate, |p, a, o| {
-            render::emulate_tsv(p, a, o, target)
-        })
-    }
-
-    /// Plans a dry-run patch: the bytes to write to replace the instructions
-    /// at an address, the code cave a detour needs, and a patch file.
-    ///
-    /// # Arguments
-    ///
-    /// * `spec` - `<at>/<hexbytes>[,detour][,cave=<addr>]`.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, or the spec is refused.
-    pub(crate) fn patch_text(&self, spec: &str) -> Result<String, ErrorData> {
-        self.refusing(Feature::Disasm, |p, a, o| {
-            borer_engine::patch::plan_tsv(p, a, o, spec)
-        })
-    }
-
-    /// Runs a function over a probe string in every argument shape and
-    /// reports what it does with it, the CLI's `oracle`.
-    ///
-    /// # Arguments
-    ///
-    /// * `target` - The function's address or name.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, or the target is not a function.
-    pub(crate) fn oracle_text(&self, target: &str) -> Result<String, ErrorData> {
-        self.refusing(Feature::Emulate, |p, a, o| {
-            render::oracle_tsv(p, a, o, target)
-        })
-    }
-
-    /// Calls a function on typed inputs and checks its decompiled text on
-    /// them, the CLI's `run`.
-    ///
-    /// # Arguments
-    ///
-    /// * `spec` - `<function>[,steps=N]/<input>[;<input>...]`.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, or the spec is refused.
-    pub(crate) fn run_text(&self, spec: &str) -> Result<String, ErrorData> {
-        self.refusing(Feature::Emulate, |p, a, o| render::run_tsv(p, a, o, spec))
-    }
-
-    /// Answers where two runs of one function part ways.
-    ///
-    /// # Arguments
-    ///
-    /// * `spec` - `<function>[,steps=N]/<input>;<input>`.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, or the spec is refused.
-    pub(crate) fn diverge_text(&self, spec: &str) -> Result<String, ErrorData> {
-        self.refusing(Feature::Emulate, |p, a, o| {
-            render::run_diff_tsv(p, a, o, spec)
-        })
-    }
-
-    /// Records test vectors for reimplementing a function: typed inputs
-    /// run in the emulator and a C harness asserting what came back.
-    ///
-    /// # Arguments
-    ///
-    /// * `spec` - `<function>[,count=N][,steps=N]`.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, it is not emulated, or the spec or the
-    /// function's signature is refused.
-    pub(crate) fn vectors_text(&self, spec: &str) -> Result<String, ErrorData> {
-        self.refusing(Feature::Emulate, |p, a, o| {
-            render::vectors_tsv(p, a, o, spec)
-        })
-    }
-
-    /// Names the first text cleanup pass that breaks a function, the input
-    /// it differs on and whether leaving it out alone repairs it, the
-    /// CLI's `blame`.
-    ///
-    /// # Arguments
-    ///
-    /// * `spec` - `<function>[,count=N][,steps=N]`.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, it is not x86, or the spec, the function
-    /// or its signature is refused.
-    pub(crate) fn blame_text(&self, spec: &str) -> Result<String, ErrorData> {
-        self.refusing(Feature::Emulate, |p, a, o| render::blame_tsv(p, a, o, spec))
-    }
-
-    /// Says how far a function's decompilation was checked against the
-    /// binary, the CLI's `certify`.
-    ///
-    /// # Arguments
-    ///
-    /// * `spec` - `<function>[,count=N][,steps=N]`.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, or the spec or the function is refused.
-    pub(crate) fn certify_text(&self, spec: &str) -> Result<String, ErrorData> {
-        self.refusing(Feature::Emulate, |p, a, o| {
-            render::certify_tsv(p, a, o, spec)
-        })
-    }
-
-    /// Recovers the strings the program generates at run time, the CLI's
-    /// `hidden`.
-    ///
-    /// # Arguments
-    ///
-    /// * `filter` - Case-insensitive text the string or its generator must
-    ///   contain; empty for all.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded.
-    pub(crate) fn hidden_text(&self, filter: &str) -> Result<String, ErrorData> {
-        self.with_analysis(Feature::Emulate, |p, a, o| {
-            Ok(render::hidden_strings_tsv(p, a, o, filter))
-        })
-    }
-
-    /// Recovers the strings a decoder produces when run at each of its call
-    /// sites, the resource `borer://decoded`.
-    ///
-    /// # Arguments
-    ///
-    /// * `filter` - Case-insensitive text the string must contain, with
-    ///   `offset=<n>` and `limit=<n>` for paging; empty for all.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, or the offset or the limit does not read.
-    pub(crate) fn decoded_text(&self, filter: &str) -> Result<String, ErrorData> {
-        self.refusing(Feature::Emulate, |p, a, o| {
-            render::decoded_tsv(p, a, o, filter)
-        })
-    }
-
-    /// Groups the imports, and the syscall sites of a program with code
-    /// analysis, into the capabilities they grant.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, or its analysis fails.
-    pub(crate) fn capabilities_text(&self) -> Result<String, ErrorData> {
-        self.with_program(|p| {
-            let a = match p.refuses(Feature::Discover) {
-                None => Some(self.ensure_analysis()?),
-                Some(_) => None,
-            };
-            Ok(render::capability_map_tsv(p, a.as_deref()))
-        })
-    }
-
-    /// Lists the `QObject` subclasses `moc` described and their methods.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded.
-    pub(crate) fn qt_text(&self) -> Result<String, ErrorData> {
-        let a = self.analysis(Feature::Decompile)?;
-        Ok(render::qt_tsv(&a))
-    }
-
-    /// Lists the Objective-C classes and categories a Mach-O's metadata
-    /// describes, a row per method with its implementation.
-    ///
-    /// # Arguments
-    ///
-    /// * `filter` - Case-insensitive substring of the class or selector;
-    ///   empty for all.
-    /// * `asked` - The read, for its page.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded or its functions are not discovered.
-    pub(crate) fn objc_text(&self, filter: &str, asked: &Asked) -> Result<String, ErrorData> {
-        /// Most rows one read returns, where the renderer pages too.
-        const PAGE: usize = 200;
-        let again = asked.again();
-        self.with_analysis(Feature::Discover, |_, a, _| {
-            Ok(borer_engine::analysis::objc::objc_tsv(
-                a,
-                filter.trim(),
-                asked.window(PAGE, &again),
-            ))
-        })
-    }
-
-    /// Recovers the strings functions build on their stacks.
-    ///
-    /// # Arguments
-    ///
-    /// * `filter` - Case-insensitive substring of the recovered text.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded.
-    pub(crate) fn stack_strings_text(&self, filter: &str) -> Result<String, ErrorData> {
-        self.with_analysis(Feature::Decompile, |p, a, o| {
-            Ok(render::stack_strings_tsv(p, a, o, filter))
-        })
-    }
-
-    /// Recovers the virtual program a virtualized function runs.
-    ///
-    /// # Arguments
-    ///
-    /// * `target` - The function's address, with optional registers.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, or the spec is refused.
-    pub(crate) fn devirtualize_text(&self, target: &str) -> Result<String, ErrorData> {
-        self.refusing(Feature::Emulate, |p, a, o| {
-            render::devirtualize_tsv(p, a, o, target)
-        })
-    }
-
-    /// Runs a packer's bootstrap and reports the code it decrypts into memory.
-    ///
-    /// # Arguments
-    ///
-    /// * `target` - Where to start, with optional registers; entry by default.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, or the spec is refused.
-    pub(crate) fn unpack_text(&self, target: &str) -> Result<String, ErrorData> {
-        self.refusing(Feature::Emulate, |p, a, o| {
-            render::unpack_tsv(p, a, o, target)
-        })
-    }
-
-    /// The loaded binary's function fingerprint manifest.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded.
-    pub(crate) fn fingerprint_text(&self) -> Result<String, ErrorData> {
-        self.with_analysis(Feature::Discover, |_, a, _| {
-            Ok(render::fingerprint_digest(a))
-        })
-    }
-
-    /// The content hashes the loaded file is correlated by: imphash,
-    /// authentihash, TLSH and borer-lsh, from the image alone.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded.
-    pub(crate) fn hashes_text(&self) -> Result<String, ErrorData> {
-        self.file_fact(
-            "file_hashes",
-            borer_engine::hashing::hashes_tsv,
-            String::clone,
-        )
-    }
-
     /// One chart series as a table ([`borer_engine::analysis::stats::stats_tsv`]),
     /// a page at a time.
     ///
@@ -584,170 +268,8 @@ impl BorerServer {
         const PAGE: usize = 200;
         let again = asked.again();
         self.with_managed(|p, a| {
-            borer_engine::analysis::stats::stats_tsv(p, a, spec, asked.window(PAGE, &again))
+            borer_engine::analysis::stats::stats_tsv(p, a, spec, asked.page(&again).window(PAGE))
         })
-    }
-
-    /// The shortest byte signature that matches code once
-    /// ([`render::signature_tsv`]).
-    ///
-    /// # Arguments
-    ///
-    /// * `target` - A function's name or entry, or any code address.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, the target names nothing, or the image is
-    /// not x86 or x86-64 code.
-    pub(crate) fn sig_text(&self, target: &str) -> Result<String, ErrorData> {
-        self.with_analysis(Feature::Discover, |p, a, o| {
-            let va = borer_engine::analysis::resolve_suggesting(p, a, o, target)?;
-            render::signature_tsv(p, a, o, va)
-        })
-    }
-
-    /// A YARA rule from functions' signatures and the strings they
-    /// reference ([`render::yara_rule`]).
-    ///
-    /// # Arguments
-    ///
-    /// * `list` - Functions by name or entry, comma-separated.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, a function names nothing, or nothing is
-    /// left to match on.
-    pub(crate) fn yara_text(&self, list: &str) -> Result<String, ErrorData> {
-        self.with_analysis(Feature::Discover, |p, a, o| {
-            let entries = list
-                .split(',')
-                .map(str::trim)
-                .filter(|f| !f.is_empty())
-                .map(|f| borer_engine::analysis::resolve_suggesting(p, a, o, f))
-                .collect::<Result<Vec<u64>, String>>()?;
-            render::yara_rule(p, a, o, &entries)
-        })
-    }
-
-    /// borer's names and comments as a script or database another tool
-    /// applies ([`render::names_export`]).
-    ///
-    /// # Arguments
-    ///
-    /// * `tool` - `ida`, `ghidra`, `binja` or `x64dbg`.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded or the tool is not one of those.
-    pub(crate) fn names_text(&self, tool: &str) -> Result<String, ErrorData> {
-        let Some(tool) = render::Tool::parse(tool) else {
-            return Err(err_params(format!(
-                "unknown tool {}; use one of: {}",
-                borer_engine::text::quoted(tool),
-                render::Tool::NAMES
-            )));
-        };
-        self.with_analysis(Feature::Discover, |p, a, o| {
-            Ok(render::names_export(p, a, o, tool))
-        })
-    }
-
-    /// One place as virtual address, relative address, file offset,
-    /// section and function ([`borer_engine::fileinfo::locate`]).
-    ///
-    /// # Arguments
-    ///
-    /// * `place` - A virtual address, `rva:<n>` or `off:<n>`.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, or the place is not a number or maps to
-    /// nothing.
-    pub(crate) fn addr_text(&self, place: &str) -> Result<String, ErrorData> {
-        self.with_analysis(Feature::Discover, |p, a, o| {
-            borer_engine::fileinfo::locate(p, Some(a), o, place)
-        })
-    }
-
-    /// Base64 and hex strings that decode to text or a known file
-    /// ([`render::encoded_strings_tsv`]).
-    ///
-    /// # Arguments
-    ///
-    /// * `filter` - Text the decoded value must contain; empty for all.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded.
-    pub(crate) fn encoded_text(&self, filter: &str) -> Result<String, ErrorData> {
-        self.file_fact("file_encoded", render::encoded_strings, |found| {
-            render::encoded_strings_tsv(found, filter)
-        })
-    }
-
-    /// Answers the resources that take a function, a tool or a place for
-    /// another tool, `sig`, `yara`, `names` and `addr`, and the query
-    /// `find` takes.
-    ///
-    /// # Arguments
-    ///
-    /// * `kind` - The resource's name.
-    /// * `arg` - Its argument.
-    ///
-    /// # Errors
-    ///
-    /// As the resource does.
-    pub(crate) fn handoff_text(&self, kind: &str, arg: &str) -> Result<String, ErrorData> {
-        match kind {
-            "sig" => self.sig_text(arg),
-            "yara" => self.yara_text(arg),
-            "names" => self.names_text(arg),
-            "find" => self.find_text(arg),
-            _ => self.addr_text(arg),
-        }
-    }
-
-    /// Lists a .NET assembly's metadata: types, methods, P/Invokes,
-    /// external members, references and user strings; with `methods` first
-    /// its IL methods by the APIs they call and the strings they load
-    /// ([`borer_engine::clr::managed::methods_tsv`]), with `markers` its
-    /// obfuscator markers ([`borer_engine::clr::markers::markers_tsv`]).
-    ///
-    /// # Arguments
-    ///
-    /// * `spec` - Kinds and texts to keep, and the page, comma-separated;
-    ///   or `methods` or `markers` and their words.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, its metadata was refused, or the page
-    /// does not read.
-    pub(crate) fn clr_text(&self, spec: &str) -> Result<String, ErrorData> {
-        let (head, rest) = spec.split_once([',', '/']).unwrap_or((spec, ""));
-        match head.trim() {
-            "methods" => {
-                self.with_managed(|p, a| borer_engine::clr::managed::methods_tsv(p, a, rest))
-            }
-            "markers" => {
-                self.with_managed(|p, a| borer_engine::clr::markers::markers_tsv(p, a, rest))
-            }
-            _ => self
-                .with_program(|p| borer_engine::clr::clr_tsv(p, spec).map_err(|e| e.to_string())),
-        }
-    }
-
-    /// Lists the programs and containers embedded in the loaded file, and
-    /// the high-entropy runs no header explains.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded.
-    pub(crate) fn children_text(&self) -> Result<String, ErrorData> {
-        self.file_fact(
-            "file_children",
-            borer_engine::carve::children_tsv,
-            String::clone,
-        )
     }
 
     /// Compares the loaded binary against another version and reports the diff.
@@ -848,299 +370,6 @@ impl BorerServer {
         self.across_builds(spec, "migrate", render::migrate_function_tsv)
     }
 
-    /// Finds the dispatch loops, or describes the handlers of one.
-    ///
-    /// # Arguments
-    ///
-    /// * `filter` - Empty for the list, or a dispatch or function address.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, or the filter names no dispatch loop.
-    pub(crate) fn vm_text(&self, filter: &str) -> Result<String, ErrorData> {
-        self.refusing(Feature::Decompile, |p, a, o| {
-            render::vm_dispatch_tsv(p, a, o, filter)
-        })
-    }
-
-    /// Recovers the APIs and DLLs the program resolves at runtime.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded.
-    pub(crate) fn dynamic_imports_text(&self) -> Result<String, ErrorData> {
-        self.with_analysis(Feature::Decompile, |p, a, o| {
-            Ok(render::dynamic_imports_tsv(p, a, o))
-        })
-    }
-
-    /// Finds the functions that judge a key, serial or license.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded.
-    pub(crate) fn checks_text(&self) -> Result<String, ErrorData> {
-        self.with_analysis(Feature::Decompile, |p, a, o| {
-            Ok(render::license_checks_tsv(p, a, o))
-        })
-    }
-
-    /// Reports the anti-debug and anti-VM techniques the binary carries.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded.
-    pub(crate) fn anti_analysis_text(&self) -> Result<String, ErrorData> {
-        self.with_analysis(Feature::Decompile, |p, a, o| {
-            Ok(render::anti_analysis_tsv(p, a, o))
-        })
-    }
-
-    /// Reports flattened control flow.
-    ///
-    /// # Arguments
-    ///
-    /// * `filter` - Empty for every dispatcher, or one address or name.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, it has no code analysis, or the filter
-    /// names no dispatcher.
-    pub(crate) fn flattening_text(&self, filter: &str) -> Result<String, ErrorData> {
-        self.refusing(Feature::Decompile, |p, a, o| {
-            render::flattening_tsv(p, a, o, filter)
-        })
-    }
-
-    /// Searches for an argument value that changes a function's answer.
-    ///
-    /// # Arguments
-    ///
-    /// * `spec` - `<address>[,aN]`, `aN` the argument the decompiler names
-    ///   so, counting from one; `a1` when absent.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, it has no code analysis, or the spec is
-    /// refused.
-    pub(crate) fn solve_text(&self, spec: &str) -> Result<String, ErrorData> {
-        self.refusing(Feature::Emulate, |p, a, o| render::solve_tsv(p, a, o, spec))
-    }
-
-    /// Reports a counted loop that compares a few bits of a product.
-    ///
-    /// A loop with no such check is a refusal, not a `#` line: an empty
-    /// success would read as a check the function does not have.
-    ///
-    /// # Arguments
-    ///
-    /// * `address` - The function's address or name.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, it has no code analysis, or the function
-    /// has no partial product check.
-    pub(crate) fn partial_text(&self, address: &str) -> Result<String, ErrorData> {
-        self.refusing(Feature::Decompile, |p, a, o| {
-            render::partial_tsv(p, a, o, address)
-        })
-    }
-
-    /// Says what is at an address and where each fact came from.
-    ///
-    /// # Arguments
-    ///
-    /// * `target` - An address or a name.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, it has no code analysis, or the target
-    /// names nothing.
-    pub(crate) fn why_text(&self, target: &str) -> Result<String, ErrorData> {
-        self.refusing(Feature::Decompile, |p, a, o| {
-            render::why_tsv(p, a, o, target)
-        })
-    }
-
-    /// Proposes a structure from a pointer's accesses, or with `apply=Name`
-    /// plans it as a user struct typing the parameter the pointer arrives
-    /// in ([`borer_engine::analysis::apply::from_pointer`]).
-    ///
-    /// A read applies nothing, whatever `dry_run` the spec says: the plan
-    /// names the `set_type` calls that state it ([`plan_calls`]).
-    ///
-    /// # Arguments
-    ///
-    /// * `spec` - `<address>[,<register>][,apply=<Name>]`.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, it has no code analysis, or the spec or
-    /// the struct to plan is refused.
-    pub(crate) fn layout_text(&self, spec: &str) -> Result<String, ErrorData> {
-        let mut apply: Option<&str> = None;
-        let mut kept: Vec<&str> = Vec::new();
-        for part in spec.split(',') {
-            match part.trim() {
-                "dry_run=false" | "dry_run=true" => {}
-                t => match t.strip_prefix("apply=") {
-                    Some(name) => apply = Some(name),
-                    None => kept.push(part),
-                },
-            }
-        }
-        let spec = kept.join(",");
-        self.refusing(Feature::Decompile, |p, a, o| match apply {
-            None => render::layout_tsv(p, a, o, &spec),
-            Some(name) => {
-                let plan = borer_engine::analysis::apply::from_pointer(p, a, o, &spec, name)?;
-                let mut out = format!(
-                    "plan: struct {} and {} prototype(s), nothing applied by a read; send the set_type calls below and decompile names the fields:\n",
-                    plan.name,
-                    plan.prototypes.len()
-                );
-                for line in plan.describe(a, o).into_iter().chain(plan_calls(&plan)) {
-                    out.push_str(&line);
-                    out.push('\n');
-                }
-                Ok(out)
-            }
-        })
-    }
-
-    /// Follows a value forward from an address.
-    ///
-    /// # Arguments
-    ///
-    /// * `spec` - `<address>[,<register>]`.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, it has no code analysis, or the spec is
-    /// refused.
-    pub(crate) fn taint_text(&self, spec: &str) -> Result<String, ErrorData> {
-        self.refusing(Feature::Decompile, |p, a, o| {
-            render::taint_tsv(p, a, o, spec)
-        })
-    }
-
-    /// Renders the one-call triage report: the code triage where the
-    /// engine decompiles the program, else the triage of its bytes.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded.
-    pub(crate) fn triage_text(&self) -> Result<String, ErrorData> {
-        if self.require_loaded()?.refuses(Feature::Decompile).is_some() {
-            return self.with_program(|p| Ok(render::file_triage_tsv(p)));
-        }
-        self.with_analysis(Feature::Decompile, |p, a, o| {
-            Ok(render::triage_tsv(p, a, o))
-        })
-    }
-
-    /// Reports the marks a packer or protector leaves on the image.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded.
-    pub(crate) fn protection_text(&self) -> Result<String, ErrorData> {
-        self.with_analysis(Feature::Discover, |p, a, _| {
-            Ok(render::protection_tsv(p, a))
-        })
-    }
-
-    /// Lists the indicators the program holds, each with where it came from.
-    ///
-    /// # Arguments
-    ///
-    /// * `filter` - Kind words, text the value contains and `offset=<n>`,
-    ///   comma-separated; empty for every indicator.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, or the offset does not read.
-    pub(crate) fn iocs_text(&self, filter: &str) -> Result<String, ErrorData> {
-        self.refusing(Feature::Decompile, |p, a, o| {
-            render::iocs_tsv(p, a, o, filter)
-        })
-    }
-
-    /// Lists the strings of the program that address an AI model.
-    ///
-    /// # Arguments
-    ///
-    /// * `spec` - Text a row's mark or string contains, `offset=<n>` and
-    ///   `limit=<n>`, comma-separated; empty for every row.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, or the offset or the limit does not read.
-    pub(crate) fn injection_text(&self, spec: &str) -> Result<String, ErrorData> {
-        self.with_program(|p| borer_engine::strings::injection_tsv(p, spec))
-    }
-
-    /// Lists every call site of a function or import with its arguments.
-    ///
-    /// # Arguments
-    ///
-    /// * `spec` - `<callee>[,aN<op><value>]...[,offset=<n>]`.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, it does not decompile, or the spec is
-    /// refused.
-    pub(crate) fn calls_text(&self, spec: &str) -> Result<String, ErrorData> {
-        self.refusing(Feature::Decompile, |p, a, o| {
-            render::calls_tsv(p, a, o, spec)
-        })
-    }
-
-    /// Lists the fields the binary's assertions name.
-    ///
-    /// # Arguments
-    ///
-    /// * `filter` - Case-insensitive substring of the field or class.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded.
-    pub(crate) fn asserts_text(&self, filter: &str) -> Result<String, ErrorData> {
-        self.with_analysis(Feature::Decompile, |p, a, o| {
-            Ok(render::asserted_fields_tsv(p, a, o, filter))
-        })
-    }
-
-    /// Groups the functions by the source file their assertions name.
-    ///
-    /// # Arguments
-    ///
-    /// * `filter` - Case-insensitive substring of the path, or empty for the
-    ///   directory summary.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded.
-    pub(crate) fn sources_text(&self, filter: &str) -> Result<String, ErrorData> {
-        self.with_analysis(Feature::Decompile, |p, a, _| {
-            Ok(render::source_tree_tsv(p, a, filter))
-        })
-    }
-
-    /// Lists the classes that registered a four-character code.
-    ///
-    /// # Arguments
-    ///
-    /// * `filter` - Case-insensitive substring of the class name or the code.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded.
-    pub(crate) fn classes_text(&self, filter: &str) -> Result<String, ErrorData> {
-        let a = self.analysis(Feature::Decompile)?;
-        Ok(render::class_ids_tsv(&a, filter))
-    }
-
     /// Lists the packs this session knows and how each fits the loaded
     /// program, the CLI's `packs`.
     ///
@@ -1156,56 +385,6 @@ impl BorerServer {
             ));
             out.push_str(&borer_engine::script::pack_scripts_tsv(&a.pack_scripts));
             Ok(out)
-        })
-    }
-
-    /// Decompiles a function under a scenario, the CLI's `scenario`.
-    ///
-    /// # Arguments
-    ///
-    /// * `spec` - `<function>/<a2=5,...>`.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, the spec does not read, or the function
-    /// does not decompile.
-    pub(crate) fn scenario_text(&self, spec: &str) -> Result<String, ErrorData> {
-        let (target, assume) = spec
-            .rsplit_once('/')
-            .ok_or_else(|| err_params("borer://scenario/<function>/<a2=5,...>"))?;
-        let assume =
-            borer_engine::analysis::decompile::parse_scenario(assume).map_err(err_params)?;
-        self.with_analysis(Feature::Decompile, |p, a, o| {
-            let entry = self.function_entry(p, a, target)?;
-            borer_engine::analysis::decompile::decompile_scenario(p, a, o, entry, &assume)
-                .ok_or_else(|| "the function does not decompile".to_owned())
-        })
-    }
-
-    /// Runs a scenario for each value of one parameter and groups the ones
-    /// that behave alike, the CLI's `scenarios`.
-    ///
-    /// # Arguments
-    ///
-    /// * `spec` - `<function>/<a2=0..32>`.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded or the spec does not read.
-    pub(crate) fn scenarios_text(&self, spec: &str) -> Result<String, ErrorData> {
-        let (target, values) = spec
-            .rsplit_once('/')
-            .ok_or_else(|| err_params("borer://scenarios/<function>/<a2=0..32>"))?;
-        let (slot, values) =
-            borer_engine::analysis::decompile::parse_explosion(values).map_err(err_params)?;
-        self.with_analysis(Feature::Decompile, |p, a, o| {
-            let entry = self.function_entry(p, a, target)?;
-            let cases = borer_engine::analysis::decompile::explode(p, a, o, entry, slot, &values);
-            Ok(borer_engine::analysis::decompile::explode_tsv(
-                &cases,
-                slot,
-                values.len(),
-            ))
         })
     }
 
@@ -1237,138 +416,6 @@ impl BorerServer {
         Ok(borer_engine::script::run_tsv(&run))
     }
 
-    /// Writes the session's names as a pack that finds the same functions
-    /// in another build by their first bytes, the CLI's `export-pack`.
-    ///
-    /// # Arguments
-    ///
-    /// * `spec` - The pack's name, then `,all` to add the names the
-    ///   analysis recovered to the user's.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, the name is empty or has a space, or what
-    /// follows a comma is not `all`: `x,y` named a pack `x,y`.
-    pub(crate) fn export_pack_text(&self, spec: &str) -> Result<String, ErrorData> {
-        let (name, all) = match spec.split_once(',') {
-            None => (spec, false),
-            Some((name, "all")) => (name, true),
-            Some((_, other)) => {
-                return Err(err_params(format!(
-                    "after the pack name comes ,all or nothing, not {}",
-                    borer_engine::text::quoted(other)
-                )));
-            }
-        };
-        if name.is_empty() || name.contains(char::is_whitespace) {
-            return Err(err_params(format!(
-                "a pack name is one word, not {}",
-                borer_engine::text::quoted(name)
-            )));
-        }
-        self.with_analysis(Feature::Decompile, |p, a, o| {
-            Ok(borer_engine::analysis::sigs::export_pack(
-                p, a, o, name, all,
-            ))
-        })
-    }
-
-    /// Lists the program's recovered singletons (thread-local and global),
-    /// each with its slot, `::Instance` accessor and class.
-    ///
-    /// # Arguments
-    ///
-    /// * `filter` - Case-insensitive substring of the class name; empty for all.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded.
-    pub(crate) fn singletons_text(&self, filter: &str) -> Result<String, ErrorData> {
-        let a = self.analysis(Feature::Decompile)?;
-        Ok(render::singletons_tsv(&a, &self.overlay(), filter))
-    }
-
-    /// Lists the pointer-relative field accesses one function makes, keyed by
-    /// `(base, offset)`, from its decompilation.
-    ///
-    /// The offset an SDK anchors to an engine function is confirmed against a
-    /// real typed dereference here, not a byte search, and a field a build
-    /// moved shows its new offset.
-    ///
-    /// # Arguments
-    ///
-    /// * `address` - A function entry, an interior address, or a name.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, the address is not in a function, or it does
-    /// not decompile.
-    pub(crate) fn fields_text(&self, address: &str) -> Result<String, ErrorData> {
-        self.with_analysis(Feature::Decompile, |p, a, o| {
-            let entry = self.function_entry(p, a, address)?;
-            borer_engine::analysis::classes::fields_tsv(p, a, o, entry)
-                .ok_or_else(|| format!("{address} did not decompile"))
-        })
-    }
-
-    /// Lists every instruction in the program that touches `[reg + offset]`,
-    /// each with the function it belongs to.
-    ///
-    /// The inverse of [`Self::fields_text`]: that asks what one function
-    /// dereferences, this asks who dereferences one field. A byte search for
-    /// the encoding finds the same sites among strangers that share the
-    /// displacement and names none of them.
-    ///
-    /// # Arguments
-    ///
-    /// * `spec` - `<offset>[,<name-filter>]`: the field offset as hex or
-    ///   decimal with an optional minus sign, then a case-insensitive
-    ///   substring of the function name.
-    /// * `asked` - The URI as asked, for the page it asks for.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded or the offset does not parse.
-    pub(crate) fn fieldrefs_text(&self, spec: &str, asked: &Asked) -> Result<String, ErrorData> {
-        /// Most rows one read returns: 500 rows of a common offset like
-        /// `0x10` ran past 20 KB, a page more than one question needs.
-        const PAGE: usize = 200;
-        let (offset_text, filter) = spec.split_once(',').unwrap_or((spec, ""));
-        let offset = parse_field_offset(offset_text.trim()).map_err(err_params)?;
-        let again = asked.again();
-        self.with_analysis(Feature::Decompile, |p, a, o| {
-            Ok(borer_engine::analysis::fieldrefs::field_refs_tsv(
-                p,
-                a,
-                o,
-                offset,
-                filter.trim(),
-                asked.window(PAGE, &again),
-            ))
-        })
-    }
-
-    /// Lists every recovered class whose virtual at a vtable slot returns a
-    /// constant, with the constant: a registry's id table read off the
-    /// classes instead of the registry.
-    ///
-    /// # Arguments
-    ///
-    /// * `spec` - `<slot>[,<class-filter>]`: the zero-based vtable index,
-    ///   then a case-insensitive substring of the class name.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded or the slot does not parse.
-    pub(crate) fn vslot_text(&self, spec: &str) -> Result<String, ErrorData> {
-        let SlotSpec { slot, filter } = SlotSpec::parse(spec)?;
-        self.with_analysis(Feature::Decompile, |p, a, _| {
-            Ok(borer_engine::analysis::vtables::slot_constants_tsv(
-                p, a, slot, filter, SLOT_PAGE,
-            ))
-        })
-    }
-
     /// Lists pseudo-C lines program-wide containing `text`, or matching it
     /// when written `re:<expression>`, from the decompilation index, building
     /// the index on first use.
@@ -1398,7 +445,7 @@ impl BorerServer {
         let again = asked.again();
         self.with_analysis(Feature::Decompile, |p, a, o| {
             let (index, _, _) = borer::index::load_or_build(p, a)?;
-            borer::index::grep_tsv(&index, a, o, text, "", asked.window(PAGE, &again))
+            borer::index::grep_tsv(&index, a, o, text, "", asked.page(&again).window(PAGE))
         })
     }
 
@@ -1523,292 +570,6 @@ impl BorerServer {
         })
     }
 
-    /// Renders the record a deserializer reads off its stream.
-    ///
-    /// A function that reads no stream is an answer, not a fault: the line
-    /// says so, where an error code read as the server failing.
-    ///
-    /// # Arguments
-    ///
-    /// * `what` - A function by address or name, or a class name whose
-    ///   reading virtual is picked.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, or the name is neither a function nor a
-    /// class whose virtuals read a stream.
-    pub(crate) fn schema_text(&self, what: &str) -> Result<String, ErrorData> {
-        self.with_analysis(Feature::Decompile, |p, a, o| {
-            match self.function_entry(p, a, what) {
-                Ok(entry) => Ok(borer_engine::analysis::schema::schema_tsv(p, a, o, entry)
-                    .unwrap_or_else(|| {
-                        format!(
-                            "# {} hands no stream to its calls: not a deserializer\n",
-                            borer_engine::analysis::name_of(a, o, entry)
-                        )
-                    })),
-                Err(_) => borer_engine::analysis::schema::class_schema_tsv(p, a, o, what)
-                    .ok_or_else(|| {
-                        format!(
-                            "{} is neither a function nor a class whose virtuals read a stream",
-                            borer_engine::text::quoted(what)
-                        )
-                    }),
-            }
-        })
-    }
-
-    /// Lists every class with a constant at a vtable slot and the record its
-    /// reading virtual decodes.
-    ///
-    /// # Arguments
-    ///
-    /// * `spec` - `<slot>[,<class-filter>]`.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded or the slot does not parse.
-    pub(crate) fn schemas_text(&self, spec: &str) -> Result<String, ErrorData> {
-        let SlotSpec { slot, filter } = SlotSpec::parse(spec)?;
-        self.with_analysis(Feature::Decompile, |p, a, o| {
-            Ok(borer_engine::analysis::schema::schemas_tsv(
-                p, a, o, slot, filter, SLOT_PAGE,
-            ))
-        })
-    }
-
-    /// Renders what a serializer writes onto its stream.
-    ///
-    /// A function that writes no stream is an answer, not a fault, as for
-    /// [`Self::schema_text`].
-    ///
-    /// # Arguments
-    ///
-    /// * `what` - A function by address or name, or a class name whose
-    ///   writing virtual is picked.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, or the name is neither a function nor a
-    /// class whose virtuals write a stream.
-    pub(crate) fn encode_text(&self, what: &str) -> Result<String, ErrorData> {
-        self.with_analysis(Feature::Decompile, |p, a, o| {
-            match self.function_entry(p, a, what) {
-                Ok(entry) => Ok(borer_engine::analysis::encode::encoding_tsv(p, a, o, entry)
-                    .unwrap_or_else(|| {
-                        format!(
-                            "# {} hands its stream nothing: not a serializer\n",
-                            borer_engine::analysis::name_of(a, o, entry)
-                        )
-                    })),
-                Err(_) => borer_engine::analysis::encode::class_encoding_tsv(p, a, o, what)
-                    .ok_or_else(|| {
-                        format!(
-                            "{} is neither a function nor a class whose virtuals write a stream",
-                            borer_engine::text::quoted(what)
-                        )
-                    }),
-            }
-        })
-    }
-
-    /// Lists every class with a constant at a vtable slot and what its
-    /// writing virtual puts on the wire.
-    ///
-    /// # Arguments
-    ///
-    /// * `spec` - `<slot>[,<class-filter>]`.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded or the slot does not parse.
-    pub(crate) fn encodes_text(&self, spec: &str) -> Result<String, ErrorData> {
-        let SlotSpec { slot, filter } = SlotSpec::parse(spec)?;
-        self.with_analysis(Feature::Decompile, |p, a, o| {
-            Ok(borer_engine::analysis::encode::encodings_tsv(
-                p, a, o, slot, filter, SLOT_PAGE,
-            ))
-        })
-    }
-
-    /// Lists every class with a constant at a vtable slot with the addresses
-    /// a binding hooks.
-    ///
-    /// # Arguments
-    ///
-    /// * `spec` - `<slot>[,<class-filter>]`.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded or the slot does not parse.
-    pub(crate) fn hooks_text(&self, spec: &str) -> Result<String, ErrorData> {
-        let SlotSpec { slot, filter } = SlotSpec::parse(spec)?;
-        self.with_analysis(Feature::Decompile, |p, a, o| {
-            Ok(borer_engine::analysis::protocol::hooks_tsv(
-                p, a, o, slot, filter, SLOT_PAGE,
-            ))
-        })
-    }
-
-    /// Lists every class with a constant at a vtable slot with its senders,
-    /// its encoding and its decoding on one row.
-    ///
-    /// # Arguments
-    ///
-    /// * `spec` - `<slot>[,<class-filter>]`.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded or the slot does not parse.
-    pub(crate) fn protocol_text(&self, spec: &str) -> Result<String, ErrorData> {
-        let SlotSpec { slot, filter } = SlotSpec::parse(spec)?;
-        self.with_analysis(Feature::Decompile, |p, a, o| {
-            Ok(borer_engine::analysis::protocol::protocol_tsv(
-                p, a, o, slot, filter, SLOT_PAGE,
-            ))
-        })
-    }
-
-    /// Lists the functions switching on an opcode read off a stream.
-    ///
-    /// # Arguments
-    ///
-    /// * `filter` - Substring of the dispatcher's name; empty for all.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded.
-    pub(crate) fn dispatchers_text(&self, filter: &str) -> Result<String, ErrorData> {
-        self.with_analysis(Feature::Decompile, |p, a, o| {
-            Ok(borer_engine::analysis::opcodes::dispatchers_tsv(
-                p,
-                a,
-                o,
-                filter.trim(),
-                SLOT_PAGE,
-            ))
-        })
-    }
-
-    /// Renders one dispatcher's opcodes with their handlers and records.
-    ///
-    /// A function that switches on no opcode is an answer, not a fault, as
-    /// for [`Self::schema_text`].
-    ///
-    /// # Arguments
-    ///
-    /// * `spec` - `<function>[,<filter>]`: the dispatcher by address or
-    ///   name, and a substring of the opcode or the handler's name.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded or the function does not resolve.
-    pub(crate) fn opcodes_text(&self, spec: &str) -> Result<String, ErrorData> {
-        let (what, filter) = spec.split_once(',').unwrap_or((spec, ""));
-        self.with_analysis(Feature::Decompile, |p, a, o| {
-            let entry = self.function_entry(p, a, what.trim())?;
-            Ok(borer_engine::analysis::opcodes::dispatch_tsv(
-                p,
-                a,
-                o,
-                entry,
-                filter.trim(),
-                SLOT_PAGE,
-            )
-            .unwrap_or_else(|| {
-                format!(
-                    "# {} switches on no value read off a stream that its cases read on from: not a dispatcher\n",
-                    borer_engine::analysis::name_of(a, o, entry)
-                )
-            }))
-        })
-    }
-
-    /// Lists the functions writing a constant opcode first and then fields
-    /// through the same writer.
-    ///
-    /// # Arguments
-    ///
-    /// * `filter` - Substring of the opcode, the sender's or the writer's
-    ///   name; empty for all.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded.
-    pub(crate) fn opsends_text(&self, filter: &str) -> Result<String, ErrorData> {
-        self.with_analysis(Feature::Decompile, |p, a, o| {
-            Ok(borer_engine::analysis::opcodes::sends_tsv(
-                p,
-                a,
-                o,
-                filter.trim(),
-                SLOT_PAGE,
-            ))
-        })
-    }
-
-    /// Lists every class with a constant at a vtable slot and the functions
-    /// constructing it.
-    ///
-    /// # Arguments
-    ///
-    /// * `spec` - `<slot>[,<class-filter>]`.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded or the slot does not parse.
-    pub(crate) fn senders_text(&self, spec: &str) -> Result<String, ErrorData> {
-        let SlotSpec { slot, filter } = SlotSpec::parse(spec)?;
-        self.with_analysis(Feature::Decompile, |p, a, o| {
-            Ok(borer_engine::analysis::senders::senders_tsv(
-                p, a, o, slot, filter, SLOT_PAGE,
-            ))
-        })
-    }
-
-    /// Lists every function sharing the shape of one, with what differs.
-    ///
-    /// # Arguments
-    ///
-    /// * `address` - A function entry, an interior address, or a name.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded or the address is not in a function.
-    pub(crate) fn shape_text(&self, address: &str) -> Result<String, ErrorData> {
-        /// Most rows one read returns.
-        const PAGE: usize = 2000;
-        self.with_analysis(Feature::Discover, |p, a, o| {
-            let entry = self.function_entry(p, a, address)?;
-            render::shape_siblings_tsv(p, a, o, entry, PAGE)
-                .ok_or_else(|| format!("no function at {address}"))
-        })
-    }
-
-    /// Lists every message every component accepts, with its handler.
-    ///
-    /// # Arguments
-    ///
-    /// * `filter` - Substring of the component's or the message's class;
-    ///   empty for all.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded.
-    pub(crate) fn ports_text(&self, filter: &str) -> Result<String, ErrorData> {
-        /// Most rows one read returns.
-        const PAGE: usize = 5000;
-        self.with_analysis(Feature::Decompile, |p, a, o| {
-            Ok(borer_engine::analysis::ports::routes_tsv(
-                p,
-                a,
-                o,
-                filter.trim(),
-                PAGE,
-            ))
-        })
-    }
-
     /// Compares a snapshot file of an earlier build with the loaded binary.
     ///
     /// # Arguments
@@ -1830,97 +591,6 @@ impl BorerServer {
             let after = borer_engine::analysis::snapshot::facts(p, a, o);
             Ok(borer_engine::analysis::snapshot::changes_tsv(
                 &before, &after,
-            ))
-        })
-    }
-
-    /// Answers everything the analysis knows about one name.
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - The name, as the URI carried it (decoded once at
-    ///   [`super::BorerServer::read_uri`]).
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, or the name is empty.
-    pub(crate) fn about_text(&self, name: &str) -> Result<String, ErrorData> {
-        if name.trim().is_empty() {
-            return Err(err_params(ABOUT_NEEDS_A_NAME));
-        }
-        self.with_analysis(Feature::Decompile, |p, a, o| {
-            Ok(borer_engine::analysis::about::about_tsv(p, a, o, name))
-        })
-    }
-
-    /// Lays out the program's namespaces, or one namespace's classes, by role.
-    ///
-    /// # Arguments
-    ///
-    /// * `namespace` - A namespace; empty for the overview.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded.
-    pub(crate) fn map_text(&self, namespace: &str) -> Result<String, ErrorData> {
-        /// Most rows one read returns.
-        const PAGE: usize = 5000;
-        let a = self.analysis(Feature::Decompile)?;
-        Ok(borer_engine::analysis::map::map_tsv(
-            &a,
-            &self.overlay(),
-            namespace.trim(),
-            PAGE,
-        ))
-    }
-
-    /// Lists every attribute the loaded client registers.
-    ///
-    /// # Arguments
-    ///
-    /// * `filter` - Substring of the name or the code; empty for all.
-    /// * `asked` - The URI as asked, for the page it asks for.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded.
-    pub(crate) fn attrs_text(&self, filter: &str, asked: &Asked) -> Result<String, ErrorData> {
-        /// Most rows one read returns, where the renderer pages too.
-        const PAGE: usize = 200;
-        let again = asked.again();
-        self.with_analysis(Feature::Decompile, |p, a, o| {
-            Ok(borer_engine::analysis::attributes::catalog_tsv(
-                p,
-                a,
-                o,
-                filter.trim(),
-                asked.window(PAGE, &again),
-            ))
-        })
-    }
-
-    /// Lists every class that registered a wire id, with its named fields
-    /// and the functions that test for the id.
-    ///
-    /// # Arguments
-    ///
-    /// * `filter` - Case-insensitive substring of the class name; empty for all.
-    /// * `asked` - The URI as asked, for the page it asks for.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded.
-    pub(crate) fn messages_text(&self, filter: &str, asked: &Asked) -> Result<String, ErrorData> {
-        /// Most rows one read returns, where the renderer pages too.
-        const PAGE: usize = 200;
-        let again = asked.again();
-        self.with_analysis(Feature::Decompile, |p, a, o| {
-            Ok(borer_engine::analysis::messages::catalog_tsv(
-                p,
-                a,
-                o,
-                filter.trim(),
-                asked.window(PAGE, &again),
             ))
         })
     }
@@ -2071,90 +741,50 @@ impl BorerServer {
         }
     }
 
-    /// Lists every name table the binary encodes, one line per function.
+    /// Answers a resource the engine answers on its own
+    /// ([`borer_engine::answer::read`]), with what it reads prepared.
     ///
-    /// The listing reads every table-shaped function of the binary, the
-    /// one answer that waits for them all; every other tool reads only the
-    /// tables of the functions it decompiles. A table named by an enum
-    /// type is written `enum <type>` once, where the type's own `enum`
-    /// made it `enum enum <type>`.
+    /// A [`Need::Code`] resource reads the analysis through
+    /// [`Self::with_analysis`], which refuses an architecture without the
+    /// stage; a [`Need::Best`] one does where the program does the stage;
+    /// a [`Need::File`] one reads the file alone, its facts kept in the
+    /// analysis's memo once one is held.
+    ///
+    /// # Arguments
+    ///
+    /// * `need` - What the resource reads ([`borer_engine::answer::need`]).
+    /// * `asked` - The URI with its suffixes read off, for the page.
     ///
     /// # Errors
     ///
-    /// When no binary is loaded.
-    pub(crate) fn enums_text(&self) -> Result<String, ErrorData> {
-        let a = self.analysis(Feature::Decompile)?;
-        let p = self.require_loaded()?;
-        let o = self.overlay_plain();
-        let tables = borer_engine::analysis::decompile::enum_tables(&p, &a, &o);
-        let mut out = format!("# {} name tables\n", tables.len());
-        for (entry, table) in &tables {
-            out.push_str(&enum_row(
-                &borer_engine::analysis::name_of(&a, &o, *entry),
-                *entry,
-                table,
-            ));
+    /// Invalid params when no binary is loaded or the engine refuses the
+    /// argument or the architecture; internal error when the analysis
+    /// faults.
+    pub(crate) fn engine_answer(&self, need: Need, asked: &Asked) -> Result<String, ErrorData> {
+        let again = asked.again();
+        let page = asked.page(&again);
+        let read = |p: &Program, a: &Analysis, o: &Overlay| {
+            borer_engine::answer::read(p, a, o, &asked.core, page).unwrap_or_else(|| {
+                Err(format!(
+                    "the engine does not answer {}",
+                    borer_engine::text::one_line(&asked.core)
+                ))
+            })
+        };
+        let stage = match need {
+            Need::Code(stage) => Some(stage),
+            Need::Best(stage) => self
+                .require_loaded()?
+                .refuses(stage)
+                .is_none()
+                .then_some(stage),
+            Need::File => None,
+        };
+        match stage {
+            Some(stage) => self.with_analysis(stage, read),
+            None => self.with_program(|p| read(p, &self.analysis_held(), &self.overlay())),
         }
-        Ok(out)
     }
-}
-
-/// Spells the `set_type` calls that state a layout's plan, ready to send.
-///
-/// # Arguments
-///
-/// * `plan` - The plan a `borer://layout/...,apply=<Name>` read made.
-///
-/// # Returns
-///
-/// One line per call, `set_type` and its arguments as JSON with
-/// `dry_run` false: the struct first, then each prototype.
-fn plan_calls(plan: &borer_engine::analysis::apply::Plan) -> Vec<String> {
-    let mut calls = Vec::new();
-    if let borer_engine::analysis::utypes::UserType::Struct(s) = &plan.ty {
-        let fields: Vec<String> = s
-            .fields
-            .iter()
-            .map(|(off, f)| format!("{off:#x}:{}:{}", f.name, f.ty.spell()))
-            .collect();
-        calls.push(serde_json::json!({
-            "name": plan.name, "fields": fields, "size": s.size, "dry_run": false,
-        }));
-    }
-    calls.extend(plan.prototypes.iter().map(|(entry, proto)| {
-        serde_json::json!({
-            "address": format!("{entry:#x}"), "type": proto.spell(), "dry_run": false,
-        })
-    }));
-    calls.iter().map(|c| format!("set_type {c}")).collect()
-}
-
-/// One `borer://enums` row: the function, its entry, `enum` and the
-/// table's name, then its members.
-///
-/// # Arguments
-///
-/// * `function` - The function's name.
-/// * `entry` - Its entry.
-/// * `table` - The name table it encodes.
-fn enum_row(
-    function: &str,
-    entry: u64,
-    table: &borer_engine::analysis::decompile::EnumTable,
-) -> String {
-    let members: Vec<String> = table
-        .members
-        .iter()
-        .map(|(k, lit)| format!("{lit} = {k}"))
-        .collect();
-    let name = match table.name.strip_prefix("enum ").unwrap_or(&table.name) {
-        "" => String::new(),
-        bare => format!(" {bare}"),
-    };
-    format!(
-        "{function} @ {entry:#x}: enum{name}: {}\n",
-        members.join(", ")
-    )
 }
 
 /// Most resources the refusal of an unknown URI names.
@@ -2394,10 +1024,9 @@ mod tests {
     use rmcp::ErrorData;
     use rmcp::model::ErrorCode;
 
-    use super::{ABOUT_NEEDS_A_NAME, Asked, BorerServer};
+    use borer_engine::answer::ABOUT_NEEDS_A_NAME;
 
-    /// A resource handler, as `read_resource` calls it with the URI's argument.
-    type Handler = fn(&BorerServer, &str) -> Result<String, ErrorData>;
+    use super::BorerServer;
 
     /// A layout's plan read while another request edits the overlay is no
     /// change of the session: only a read told to apply can be one.
@@ -2464,7 +1093,7 @@ mod tests {
             ..BorerServer::default()
         };
         let out = server
-            .fieldrefs_text("0x10", &Asked::whole("borer://fieldrefs/0x10"))
+            .resource_text("borer://fieldrefs/0x10")
             .expect("lists the sites");
         assert!(
             out.starts_with("# 250 sites touch [reg+0x10], showing 200 from 0\n"),
@@ -2567,101 +1196,32 @@ mod tests {
             program: Arc::new(RwLock::new(Some(Arc::new(program)))),
             ..BorerServer::default()
         };
-        let cases: [(&str, Handler, &str, &str); 16] = [
-            (
-                "why",
-                BorerServer::why_text,
-                "nowhere",
-                "cannot resolve nowhere",
-            ),
-            (
-                "taint",
-                BorerServer::taint_text,
-                "nowhere",
-                "cannot resolve nowhere",
-            ),
-            (
-                "layout",
-                BorerServer::layout_text,
-                "nowhere",
-                "cannot resolve nowhere",
-            ),
-            (
-                "solve",
-                BorerServer::solve_text,
-                "nowhere",
-                "cannot resolve nowhere",
-            ),
-            (
-                "emulate",
-                BorerServer::emulate_text,
-                "nowhere",
-                "cannot resolve nowhere",
-            ),
-            (
-                "emulate",
-                BorerServer::emulate_text,
-                "0x1",
-                "nothing is mapped at 0x1;",
-            ),
-            (
-                "emulate",
-                BorerServer::emulate_text,
-                "0x1000,steps=abc",
-                "bad step count in steps=abc",
-            ),
+        let cases: [(&str, &str, &str); 16] = [
+            ("why", "nowhere", "cannot resolve nowhere"),
+            ("taint", "nowhere", "cannot resolve nowhere"),
+            ("layout", "nowhere", "cannot resolve nowhere"),
+            ("solve", "nowhere", "cannot resolve nowhere"),
+            ("emulate", "nowhere", "cannot resolve nowhere"),
+            ("emulate", "0x1", "nothing is mapped at 0x1;"),
+            ("emulate", "0x1000,steps=abc", "bad step count in steps=abc"),
+            ("run", "nowhere/1", "cannot resolve nowhere"),
             (
                 "run",
-                BorerServer::run_text,
-                "nowhere/1",
-                "cannot resolve nowhere",
-            ),
-            (
-                "run",
-                BorerServer::run_text,
                 "0x1000,steps=abc/1",
                 "cannot read steps=abc; use steps=N",
             ),
-            (
-                "devirt",
-                BorerServer::devirtualize_text,
-                "nowhere",
-                "no function nowhere",
-            ),
-            (
-                "unpack",
-                BorerServer::unpack_text,
-                "0x1000,budget=abc",
-                "bad budget in budget=abc",
-            ),
-            (
-                "oracle",
-                BorerServer::oracle_text,
-                "nowhere",
-                "no discovered function at 'nowhere'",
-            ),
-            (
-                "flat",
-                BorerServer::flattening_text,
-                "nowhere",
-                "cannot resolve nowhere",
-            ),
-            (
-                "vm",
-                BorerServer::vm_text,
-                "nowhere",
-                "cannot resolve nowhere",
-            ),
-            (
-                "grep",
-                |server, text| server.grep_text(text, &Asked::whole("borer://grep/")),
-                "",
-                "grep needs a non-empty text",
-            ),
-            ("about", BorerServer::about_text, "", ABOUT_NEEDS_A_NAME),
+            ("devirt", "nowhere", "no function nowhere"),
+            ("unpack", "0x1000,budget=abc", "bad budget in budget=abc"),
+            ("oracle", "nowhere", "no discovered function at 'nowhere'"),
+            ("flat", "nowhere", "cannot resolve nowhere"),
+            ("vm", "nowhere", "cannot resolve nowhere"),
+            ("grep", "", "grep needs a non-empty text"),
+            ("about", "", ABOUT_NEEDS_A_NAME),
         ];
-        for (resource, handler, arg, message) in cases {
-            let err = handler(&server, arg).expect_err(resource);
+        for (resource, arg, message) in cases {
+            let err = server
+                .resource_text(&format!("borer://{resource}/{arg}"))
+                .expect_err(resource);
             assert_eq!(
                 err.code,
                 ErrorCode::INVALID_PARAMS,
@@ -2701,12 +1261,12 @@ mod tests {
     }
 
     /// The comparison resources refuse a session with no binary before
-    /// they load the other build, `exportpack` refuses a part after the
-    /// name that is not `all`, and an enum table's row says `enum` once.
+    /// they load the other build, and `exportpack` refuses a part after the
+    /// name that is not `all`.
     ///
     /// # Panics
     ///
-    /// When a refusal differs or a row repeats `enum`.
+    /// When a refusal differs.
     #[test]
     fn resources_refuse_what_they_would_drop_or_waste() {
         let server = BorerServer::default();
@@ -2720,24 +1280,13 @@ mod tests {
             let e = refused.expect_err("nothing is loaded");
             assert_eq!(e.message, crate::state::NO_BINARY);
         }
-        let e = server.export_pack_text("x,y").expect_err("not all");
+        let e = server
+            .resource_text("borer://exportpack/x,y")
+            .expect_err("not all");
         assert_eq!(e.code, ErrorCode::INVALID_PARAMS);
         assert_eq!(
             e.message,
             "after the pack name comes ,all or nothing, not 'y'"
-        );
-        let table = |name: &str| borer_engine::analysis::decompile::EnumTable {
-            name: name.to_owned(),
-            members: vec![(0, "S".to_owned()), (1, "X".to_owned())],
-            param: Some(0),
-        };
-        assert_eq!(
-            super::enum_row("f", 0x10, &table("enum mi_chunkbin_e")),
-            "f @ 0x10: enum mi_chunkbin_e: S = 0, X = 1\n"
-        );
-        assert_eq!(
-            super::enum_row("f", 0x10, &table("")),
-            "f @ 0x10: enum: S = 0, X = 1\n"
         );
     }
 
@@ -2760,7 +1309,74 @@ mod tests {
             program: Arc::new(RwLock::new(Some(Arc::new(program)))),
             ..BorerServer::default()
         };
-        let out = server.about_text("x%2541").expect("about answers");
+        let out = server
+            .resource_text("borer://about/x%252541")
+            .expect("about answers");
         assert!(out.contains("'x%2541'"), "{out}");
+    }
+
+    /// Every resource the engine answers reads the same through the server
+    /// as from the engine, refusals included.
+    ///
+    /// Only the `# since` and `# evidence` lines the server adds differ: the
+    /// server holds no answer of its own for them, so a script or the app
+    /// reading the engine shows what an agent reads.
+    ///
+    /// Each URI is a fixed resource or a template's example over a small
+    /// function, and every resource the engine answers is among them.
+    ///
+    /// # Panics
+    ///
+    /// When an answer or a refusal differs, or a resource the engine
+    /// answers is reached by no URI.
+    #[test]
+    fn the_server_answers_what_the_engine_answers() {
+        let server = crate::testing::code_server(
+            Arch::X86_64,
+            &[
+                0x8b, 0x41, 0x10, // ASM: mov eax, [rcx+0x10]
+                0xc3, // ASM: ret
+            ],
+        );
+        let program = server.loaded().expect("a program is loaded");
+        let analysis = server.ensure_analysis().expect("analyzed");
+        let overlay = server.overlay();
+        let mark = |text: &str| {
+            text.lines()
+                .filter(|l| {
+                    !["# since=", "%% since=", "# evidence:", "%% evidence:"]
+                        .iter()
+                        .any(|m| l.starts_with(m))
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let uris = super::RESOURCES.iter().map(|r| r.0.to_owned()).chain(
+            super::RESOURCE_TEMPLATES
+                .iter()
+                .map(|t| super::example(t.2, Some(&program))),
+        );
+        let mut reached = std::collections::BTreeSet::new();
+        for uri in uris {
+            let Some((name, arg)) = borer_engine::answer::split(&uri) else {
+                continue;
+            };
+            if borer_engine::answer::need(name, arg.as_deref()).is_none() {
+                continue;
+            }
+            reached.insert(name.to_owned());
+            let page = borer_engine::answer::Page::whole(&uri);
+            let engine = borer_engine::answer::read(&program, &analysis, &overlay, &uri, page)
+                .expect("the engine answers it")
+                .map(|text| mark(&text));
+            let served = server
+                .read_uri(&uri)
+                .map(|(_, text)| mark(&text))
+                .map_err(|e| e.message.into_owned());
+            assert_eq!(served, engine, "{uri}");
+        }
+        for name in borer_engine::answer::names() {
+            assert!(reached.contains(name), "no URI reaches borer://{name}");
+        }
     }
 }

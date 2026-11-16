@@ -71,7 +71,6 @@ use tokio::runtime::Handle;
 use crate::catalog::{RESOURCE_TEMPLATES, RESOURCES, TEXT_PLAIN, resource_name};
 use crate::errors::{err_internal, err_params};
 use crate::handover::{HandOver, HandOverTransport, Resume, end_quietly_when_stdout_closes};
-use crate::paging::percent_decode;
 use crate::params::{
     AnnotationsParams, DecompileParams, DisassembleFunctionParams, FunctionParams,
 };
@@ -645,12 +644,13 @@ impl BorerServer {
     ///
     /// [`BorerServer::read_uri`] wraps it for `resources/read` and the
     /// `query` tool, and a script's `query(uri)` calls it directly
-    /// ([`BorerServer::script`]). A listing that pages itself
-    /// (`attrs`, `messages`, `fieldrefs`, `grep`, `iocs`, `calls`, `clr`,
-    /// `stats`) is
-    /// handed the page; any other answer's rows are paged here
-    /// ([`borer_engine::table::page`]), under a `# showing N of M from K`
-    /// line and over the URI that reads the next page.
+    /// ([`BorerServer::script`]). A resource the engine answers on its own
+    /// is the engine's ([`borer_engine::answer`], through
+    /// [`BorerServer::engine_answer`]), which pages it; one that reads
+    /// what the server holds is answered here, `grep` and `stats` handed the
+    /// page and any other paged here ([`borer_engine::table::page`]), under a
+    /// `# showing N of M from K` line and over the URI that reads the next
+    /// page.
     ///
     /// A template named without its argument (`borer://emulate`) answers
     /// how to read it ([`BorerServer::help_text`]).
@@ -665,94 +665,27 @@ impl BorerServer {
     /// it ([`resources::unknown_resource`]); otherwise the handler's error.
     pub(crate) fn listing(&self, asked: &paging::Asked) -> Result<String, ErrorData> {
         let uri = asked.core.as_str();
-        let Some(path) = uri.strip_prefix("borer://") else {
+        let Some((kind, arg)) = borer_engine::answer::split(uri) else {
             return Err(resources::unknown_resource(uri));
         };
-        let (kind, arg) = path
-            .split_once('/')
-            .map_or((path, None), |(k, a)| (k, Some(percent_decode(a))));
-        let all = arg.clone().unwrap_or_default();
+        if let Some(need) = borer_engine::answer::need(kind, arg.as_deref()) {
+            return self.engine_answer(need.map_err(err_params)?, asked);
+        }
         let text = match (kind, arg) {
             ("info", None) => self.binary_info()?,
             ("annotations", None) => self.annotations(Parameters(AnnotationsParams::default()))?,
-            ("enums", None) => self.enums_text()?,
-            ("dynimports", None) => self.dynamic_imports_text()?,
-            ("checks", None) => self.checks_text()?,
-            ("antianalysis", None) => self.anti_analysis_text()?,
-            ("protection", None) => self.protection_text()?,
-            ("iocs", _) => return self.iocs_text(&asked.spec_words(&all)),
-            ("calls", Some(spec)) => return self.calls_text(&asked.spec_words(&spec)),
-            ("triage", None) => self.triage_text()?,
-            ("fingerprint", None) => self.fingerprint_text()?,
-            ("hashes", None) => self.hashes_text()?,
             ("stats", Some(spec)) => return self.stats_text(&spec, asked),
-            ("encoded", filter) => self.encoded_text(filter.as_deref().unwrap_or(""))?,
-            ("sig" | "yara" | "names" | "addr" | "find", Some(a)) => self.handoff_text(kind, &a)?,
-            ("children", None) => self.children_text()?,
-            ("capabilities", None) => self.capabilities_text()?,
-            ("qt", None) => self.qt_text()?,
-            ("objc", None) => return self.objc_text("", asked),
-            ("objc", Some(filter)) => return self.objc_text(&filter, asked),
-            ("clr", None) => return self.clr_text(&asked.spec_words("")),
-            ("clr", Some(filter)) => return self.clr_text(&asked.spec_words(&filter)),
-            ("stackstrings", filter) => self.stack_strings_text(filter.as_deref().unwrap_or(""))?,
-            ("injection", _) => return self.injection_text(&asked.spec_words(&all)),
-            ("emulate", Some(address)) => self.emulate_text(&address)?,
-            ("patch", Some(spec)) => self.patch_text(&spec)?,
-            ("taint", Some(spec)) => self.taint_text(&spec)?,
-            ("layout", Some(spec)) => self.layout_text(&spec)?,
-            ("why", Some(target)) => self.why_text(&target)?,
-            ("solve", Some(spec)) => self.solve_text(&spec)?,
-            ("partial", Some(address)) => self.partial_text(&address)?,
-            ("flat", filter) => self.flattening_text(filter.as_deref().unwrap_or(""))?,
-            ("devirt", Some(address)) => self.devirtualize_text(&address)?,
-            ("unpack", Some(address)) => self.unpack_text(&address)?,
-            ("hidden", filter) => self.hidden_text(filter.as_deref().unwrap_or(""))?,
-            ("decoded", _) => return self.decoded_text(&asked.spec_words(&all)),
-            ("oracle", Some(address)) => self.oracle_text(&address)?,
-            ("run", Some(spec)) => self.run_text(&spec)?,
-            ("diverge", Some(spec)) => self.diverge_text(&spec)?,
-            ("vectors", Some(spec)) => self.vectors_text(&spec)?,
-            ("blame", Some(spec)) => self.blame_text(&spec)?,
-            ("certify", Some(spec)) => self.certify_text(&spec)?,
+            ("find", Some(query)) => self.find_text(&query)?,
             ("diff", Some(other)) => self.diff_text(&other)?,
             ("difffn", Some(spec)) => self.diff_function_text(&spec)?,
             ("migrate", Some(spec)) => self.migrate_text(&spec)?,
             ("carry", Some(path)) => self.carry_text(&path)?,
-            ("vm", filter) => self.vm_text(filter.as_deref().unwrap_or(""))?,
-            ("asserts", filter) => self.asserts_text(filter.as_deref().unwrap_or(""))?,
-            ("sources", filter) => self.sources_text(filter.as_deref().unwrap_or(""))?,
-            ("classes", filter) => self.classes_text(filter.as_deref().unwrap_or(""))?,
-            ("singletons", filter) => self.singletons_text(filter.as_deref().unwrap_or(""))?,
-            ("fields", Some(address)) => self.fields_text(&address)?,
-            ("fieldrefs", Some(spec)) => return self.fieldrefs_text(&spec, asked),
-            ("vslot", Some(spec)) => self.vslot_text(&spec)?,
             ("grep", Some(text)) => return self.grep_text(&text, asked),
             ("packs", None) => self.packs_text()?,
-            ("exportpack", Some(spec)) => self.export_pack_text(&spec)?,
             ("script", Some(path)) => self.script_text(&path)?,
-            ("scenario", Some(spec)) => self.scenario_text(&spec)?,
-            ("scenarios", Some(spec)) => self.scenarios_text(&spec)?,
             ("index", None) => self.index_text()?,
             ("bench", None) => self.bench_text()?,
-            ("schema", Some(what)) => self.schema_text(&what)?,
-            ("schemas", Some(spec)) => self.schemas_text(&spec)?,
-            ("encode", Some(what)) => self.encode_text(&what)?,
-            ("encodes", Some(spec)) => self.encodes_text(&spec)?,
-            ("senders", Some(spec)) => self.senders_text(&spec)?,
-            ("protocol", Some(spec)) => self.protocol_text(&spec)?,
-            ("hooks", Some(spec)) => self.hooks_text(&spec)?,
-            ("dispatchers", filter) => self.dispatchers_text(filter.as_deref().unwrap_or(""))?,
-            ("opcodes", Some(spec)) => self.opcodes_text(&spec)?,
-            ("opsends", filter) => self.opsends_text(filter.as_deref().unwrap_or(""))?,
-            ("shape", Some(address)) => self.shape_text(&address)?,
-            ("messages", _) => return self.messages_text(&all, asked),
-            ("attrs", None) => return self.attrs_text("", asked),
-            ("map", namespace) => self.map_text(namespace.as_deref().unwrap_or(""))?,
-            ("about", Some(name)) => self.about_text(&name)?,
             ("changes", Some(path)) => self.changes_text(&path)?,
-            ("ports", filter) => self.ports_text(filter.as_deref().unwrap_or(""))?,
-            ("attrs", Some(filter)) => return self.attrs_text(&filter, asked),
             ("anchors", Some(path)) => self.anchors_text(&path)?,
             ("function", Some(address)) => {
                 self.function_summary(Parameters(FunctionParams { address }))?

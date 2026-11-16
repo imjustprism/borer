@@ -10,7 +10,9 @@
 
 use std::fmt::Write as _;
 
-use borer_engine::table::{Window, row_limit, row_offset};
+use borer_engine::answer::Page;
+pub(crate) use borer_engine::answer::percent_decode;
+use borer_engine::table::{row_limit, row_offset};
 
 use crate::recall::{FRESH_SUFFIX, SINCE_SUFFIX, Tag};
 
@@ -130,82 +132,30 @@ impl Asked {
         }
     }
 
-    /// The window a listing that pages itself shows: from the offset asked,
-    /// at most `page` rows, fewer when the limit asks for fewer.
+    /// The page asked, for a listing that pages itself
+    /// ([`borer_engine::answer::Page`]).
     ///
     /// # Arguments
     ///
-    /// * `page` - The most rows the listing shows in one answer.
     /// * `again` - [`Asked::again`], for the line naming the next page.
-    pub(crate) fn window<'a>(&self, page: usize, again: &'a str) -> Window<'a> {
-        Window {
-            skip: self.offset.unwrap_or(0),
-            limit: self.limit.map_or(page, |n| n.min(page)),
-            again: Some(again),
+    pub(crate) fn page<'a>(&self, again: &'a str) -> Page<'a> {
+        Page {
+            offset: self.offset,
+            limit: self.limit,
+            again,
         }
     }
 
     /// A spec that pages itself by `offset=` and `limit=` words, with the
-    /// page asked for added: `borer://iocs` and `borer://calls` read these.
+    /// page asked for added ([`Page::spec_words`]).
     ///
     /// # Arguments
     ///
     /// * `spec` - The resource's argument, empty for none.
+    #[cfg(test)]
     pub(crate) fn spec_words(&self, spec: &str) -> String {
-        let mut words: Vec<String> = Some(spec.to_owned())
-            .filter(|s| !s.is_empty())
-            .into_iter()
-            .collect();
-        words.extend(self.offset.map(|n| format!("offset={n}")));
-        words.extend(self.limit.map(|n| format!("limit={n}")));
-        words.join(",")
+        self.page("").spec_words(spec)
     }
-}
-
-/// Percent-decodes a resource URI argument.
-///
-/// A URI carries an argument in a path segment, where `,`, `=` and `:` are
-/// reserved, so a correct client may send them escaped: an experiment spec
-/// like `0x1400,rax=1` can arrive as `0x1400%2Crax%3D1`. The escaped form is
-/// canonical, so decoding it is what makes those URIs resolve. A `%` that
-/// does not begin a valid escape is left alone, so a name containing one
-/// still resolves, and bytes that are not UTF-8 leave the text as it came.
-///
-/// # Arguments
-///
-/// * `text` - The raw path segment.
-///
-/// # Returns
-///
-/// The decoded argument.
-pub(crate) fn percent_decode(text: &str) -> String {
-    if !text.contains('%') {
-        return text.to_owned();
-    }
-    let raw = text.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(raw.len());
-    let mut i = 0;
-    while i < raw.len() {
-        let escape = if raw[i] == b'%' {
-            let hex = |k: usize| {
-                raw.get(k)
-                    .copied()
-                    .map(char::from)
-                    .and_then(|c| c.to_digit(16))
-            };
-            hex(i + 1).zip(hex(i + 2))
-        } else {
-            None
-        };
-        if let Some((high, low)) = escape {
-            out.push(u8::try_from(high * 16 + low).unwrap_or(b'%'));
-            i += 3;
-        } else {
-            out.push(raw[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).unwrap_or_else(|_| text.to_owned())
 }
 
 #[cfg(test)]
