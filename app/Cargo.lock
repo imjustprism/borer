@@ -989,6 +989,7 @@ dependencies = [
  "node_runtime",
  "paths",
  "project",
+ "serde_json",
  "session",
  "settings",
  "theme",

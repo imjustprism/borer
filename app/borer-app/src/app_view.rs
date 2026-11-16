@@ -12,13 +12,15 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use client::{Client, UserStore};
 use db::kvp::KeyValueStore;
-use gpui::{App, AppContext as _, Bounds, Entity, Window, WindowBounds, WindowOptions, px, size};
+use gpui::{
+    App, AppContext as _, Bounds, Context, Entity, Window, WindowBounds, WindowOptions, px, size,
+};
 use http_client::{BlockedHttpClient, HttpClientWithUrl};
 use language::LanguageRegistry;
 use node_runtime::NodeRuntime;
 use project::{LocalProjectFlags, Project};
 use session::{AppSession, Session};
-use workspace::{AppState, Workspace, WorkspaceStore};
+use workspace::{AppState, DockStructure, Workspace, WorkspaceId, WorkspaceStore};
 
 use crate::actions::{FocusFilter, Open, ToggleFunctions};
 use crate::binary::{Binary, StatusLine};
@@ -27,6 +29,14 @@ use crate::functions_panel::FunctionsPanel;
 /// Directory of the app's settings, keymap, database and logs under the platform's local
 /// data directory, kept apart from an installed Zed's.
 const DATA_DIR_NAME: &str = "borer-app";
+
+/// Id of the app's one workspace in its own database, the same on every run, so Zed keys
+/// the saved panel sizes the same way each time.
+const APP_WORKSPACE_ID: i64 = 1;
+
+/// Zed's key-value key for the dock layout of an empty local workspace (private to
+/// `workspace::persistence`, which writes it on every serialization).
+const DEFAULT_DOCK_STATE_KEY: &str = "default_dock_state";
 
 /// Default window width in logical pixels.
 const WINDOW_WIDTH_PX: f32 = 1280.0;
@@ -114,7 +124,8 @@ pub fn init(cx: &mut App) -> anyhow::Result<Arc<AppState>> {
 }
 
 /// Returns the app's workspace for `window`: an empty local project, the functions panel,
-/// the status line and the app's actions, loading `path` when one is given.
+/// the status line and the app's actions, its docks as the last run left them, loading
+/// `path` when one is given.
 ///
 /// # Arguments
 ///
@@ -143,7 +154,8 @@ pub fn new_workspace(
     );
     let binary = cx.new(|_| Binary::default());
     let workspace = cx.new(|cx| {
-        let mut workspace = Workspace::new(None, project, app_state.clone(), window, cx);
+        let id = WorkspaceId::from_i64(APP_WORKSPACE_ID);
+        let mut workspace = Workspace::new(Some(id), project, app_state.clone(), window, cx);
         let weak = cx.weak_entity();
         let panel = cx.new(|cx| FunctionsPanel::new(weak, binary.clone(), window, cx));
         workspace.add_panel(panel, window, cx);
@@ -154,6 +166,11 @@ pub fn new_workspace(
         register_actions(&mut workspace);
         workspace
     });
+    if let Err(err) = workspace.update(cx, |workspace, cx| restore_layout(workspace, window, cx)) {
+        binary.update(cx, |binary, cx| {
+            binary.set_status(format!("dock layout not restored: {err:#}"), cx);
+        });
+    }
     if let Some(path) = path {
         binary.update(cx, |binary, cx| binary.open_path(path, cx));
     }
@@ -181,6 +198,33 @@ fn register_actions(workspace: &mut Workspace) {
         });
 }
 
+/// Applies the dock layout Zed saved for the app's empty workspace on an earlier run.
+///
+/// It does so as Zed does for every empty local workspace; panel sizes come back through
+/// Zed's own per-workspace store when the panel is added.
+///
+/// # Arguments
+///
+/// * `workspace` - The workspace, its panels added.
+/// * `window` - Window the workspace is in.
+/// * `cx` - Workspace context.
+///
+/// # Errors
+///
+/// Returns an error when the database cannot be read or the saved layout does not parse.
+fn restore_layout(
+    workspace: &Workspace,
+    window: &mut Window,
+    cx: &mut Context<'_, Workspace>,
+) -> anyhow::Result<()> {
+    let Some(saved) = KeyValueStore::global(cx).read_kvp(DEFAULT_DOCK_STATE_KEY)? else {
+        return Ok(());
+    };
+    let docks: DockStructure = serde_json::from_str(&saved).context("parsing the saved docks")?;
+    workspace.set_dock_structure(docks, window, cx);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -189,6 +233,7 @@ mod tests {
     use borer_engine::analysis::render::{FunctionOrder, function_rows};
     use borer_engine::view::Ref;
     use gpui::{Entity, TestAppContext, VisualTestContext, px, size};
+    use workspace::dock::PanelSizeState;
     use workspace::pane::{GoBack, GoForward};
     use workspace::{AppState, MultiWorkspace, Workspace};
 
@@ -390,5 +435,49 @@ mod tests {
             cx.dispatch_action(GoForward);
             assert_eq!(shown(&workspace, cx), Some(want));
         }
+    }
+
+    /// The functions panel's width and its dock's visibility, saved through Zed's
+    /// persistence, come back in a new workspace over the same database.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the width or the visibility is not restored.
+    #[gpui::test]
+    async fn dock_layout_survives_a_new_workspace(cx: &mut TestAppContext) {
+        dock_layout_survives_a_new_workspace_steps(cx).await;
+    }
+
+    /// Runs the steps of [`dock_layout_survives_a_new_workspace`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`dock_layout_survives_a_new_workspace`] says.
+    async fn dock_layout_survives_a_new_workspace_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let width = px(333.0);
+        {
+            let (workspace, cx) = open(&app_state, cx);
+            let open_at_start =
+                workspace.read_with(cx, |workspace, cx| workspace.left_dock().read(cx).is_open());
+            assert!(open_at_start);
+            let flush = workspace.update_in(cx, |workspace, window, cx| {
+                let state = PanelSizeState {
+                    size: Some(width),
+                    flex: None,
+                };
+                workspace.set_panel_size_state::<FunctionsPanel>(state, window, cx);
+                workspace.close_panel::<FunctionsPanel>(window, cx);
+                workspace.flush_serialization(window, cx)
+            });
+            flush.await;
+            cx.run_until_parked();
+        }
+        let (workspace, cx) = open(&app_state, cx);
+        workspace.read_with(cx, |workspace, cx| {
+            let saved = workspace.panel_size_state::<FunctionsPanel>(cx);
+            assert_eq!(saved.and_then(|state| state.size), Some(width));
+            assert!(!workspace.left_dock().read(cx).is_open());
+        });
     }
 }
