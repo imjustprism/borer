@@ -1,19 +1,21 @@
 //! Opening a binary the way a front end does: the file within a size cap,
-//! its companion PDB from beside it or a symbol cache, and the packs that
-//! fit it, read from the pack files the front end found.
+//! its companion PDB from beside it or a symbol cache, and the packs in
+//! the pack directories that fit it.
 //!
 //! The engine reads every file here through the checked reader
 //! ([`read_regular`]) and writes none; it reads no environment variable and
-//! fetches nothing. Which pack files to try, where the symbol cache is and
-//! how large a file may be are the front end's to say ([`Open`]).
+//! fetches nothing. Which pack directories to read, where the symbol cache
+//! is and how large a file may be are the front end's to say ([`Open`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::layout::Layout;
 use crate::pack::{Fit, Pack, Packs};
-use crate::program::{Program, read_regular};
+use crate::program::{Program, read_regular, unusable_path};
 
+/// The extension of a pack file.
+pub const EXTENSION: &str = "borer";
 /// Largest pack file read, in bytes: 64 MiB.
 pub const PACK_MAX: u64 = 1 << 26;
 /// Most scripts one pack runs.
@@ -42,9 +44,9 @@ pub struct Open {
     pub pdb: Pdb,
     /// The packs the user named, which load for every program.
     pub named: Arc<Packs>,
-    /// The pack files found in the pack directories, in the order they
-    /// are tried; each loads only for a program its `[match]` lines fit.
-    pub packs: Vec<PathBuf>,
+    /// The pack directories, in search order ([`read_dirs`]); a pack
+    /// there loads only for a program its `[match]` lines fit.
+    pub dirs: Vec<PathBuf>,
     /// Where a raw file's bytes go; `None` reads its headers.
     pub layout: Option<Layout>,
 }
@@ -57,7 +59,8 @@ pub struct Opened {
     pub program: Program,
     /// The found packs that fit it, then the named ones.
     pub packs: Arc<Packs>,
-    /// One line per pack file skipped and per pack that loaded by itself,
+    /// One line per pack directory or file skipped and per pack that
+    /// loaded by itself,
     /// saying why.
     pub notes: Vec<String>,
 }
@@ -91,7 +94,7 @@ pub fn open(path: &Path, how: &Open) -> anyhow::Result<Opened> {
         }
     };
     let mut notes = Vec::new();
-    let found = read_found(&how.packs, &mut notes);
+    let found = read_dirs(&how.dirs, &mut notes);
     let packs = Arc::new(fitting(&program, &how.named, found, &mut notes));
     Ok(Opened {
         program,
@@ -155,37 +158,71 @@ pub fn load_scripts(pack: &mut Pack, file: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Reads pack files found in the pack directories, each with the file it
-/// came from as its `source` and its scripts read ([`load_scripts`]).
+/// Reads the packs in the pack directories, a directory at a time and
+/// its `.borer` files in name order, each with the file it came from as
+/// its `source` and its scripts read ([`load_scripts`]).
+///
+/// A directory that names a share or a device is skipped with a note,
+/// unread, and one that cannot be listed is passed over; a file that does
+/// not read as a pack is skipped with a note. The notes come in the order
+/// the directories and files are read.
 ///
 /// # Arguments
 ///
-/// * `files` - The pack files, in the order they are tried.
-/// * `notes` - Takes a `skipped <file>: <why>` line for each file that does
-///   not read as a pack.
+/// * `dirs` - The pack directories, in search order.
+/// * `notes` - Takes a line for each directory or file skipped, saying why.
 ///
 /// # Returns
 ///
-/// The packs that read, in the order of `files`.
+/// The packs that read, in the order they were read.
 #[must_use]
-pub fn read_found(files: &[PathBuf], notes: &mut Vec<String>) -> Vec<Pack> {
+pub fn read_dirs(dirs: &[PathBuf], notes: &mut Vec<String>) -> Vec<Pack> {
     let mut out = Vec::new();
-    for path in files {
-        let shown = crate::text::short_path(&path.to_string_lossy());
-        let parsed = read_regular(path, PACK_MAX)
-            .map_err(|e| format!("{e:#}"))
-            .and_then(|bytes| String::from_utf8(bytes).map_err(|_| "not text".to_owned()))
-            .and_then(|text| Pack::parse(&text, &shown))
-            .and_then(|(mut pack, _)| {
-                load_scripts(&mut pack, path)?;
-                Ok(pack)
-            });
-        match parsed {
-            Ok(pack) => out.push(pack),
-            Err(e) => notes.push(format!("skipped {shown}: {e}")),
+    for dir in dirs {
+        if let Some(why) = unusable_path(dir) {
+            notes.push(format!("skipped a pack directory: {why}"));
+            continue;
+        }
+        #[expect(clippy::disallowed_methods, reason = "unusable_path just cleared dir")]
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        let mut files: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == EXTENSION))
+            .collect();
+        files.sort();
+        for path in &files {
+            match read_pack(path) {
+                Ok(pack) => out.push(pack),
+                Err(e) => notes.push(format!(
+                    "skipped {}: {e}",
+                    crate::text::short_path(&path.to_string_lossy())
+                )),
+            }
         }
     }
     out
+}
+
+/// Reads one pack file found in a pack directory, its scripts with it.
+///
+/// # Arguments
+///
+/// * `path` - The pack file.
+///
+/// # Errors
+///
+/// When the file does not read, is not text or not a pack, or its scripts
+/// are refused ([`load_scripts`]).
+fn read_pack(path: &Path) -> Result<Pack, String> {
+    let shown = crate::text::short_path(&path.to_string_lossy());
+    let bytes = read_regular(path, PACK_MAX).map_err(|e| format!("{e:#}"))?;
+    let text = String::from_utf8(bytes).map_err(|_| "not text".to_owned())?;
+    let (mut pack, _) = Pack::parse(&text, &shown)?;
+    load_scripts(&mut pack, path)?;
+    Ok(pack)
 }
 
 /// The packs an analysis of a program runs with: the found packs that fit
@@ -198,7 +235,7 @@ pub fn read_found(files: &[PathBuf], notes: &mut Vec<String>) -> Vec<Pack> {
 ///
 /// * `program` - The program.
 /// * `named` - The packs the user named.
-/// * `found` - The packs found in the pack directories ([`read_found`]).
+/// * `found` - The packs found in the pack directories ([`read_dirs`]).
 /// * `notes` - Takes a line for each found pack that fits, naming its
 ///   `[match]` lines.
 #[must_use]

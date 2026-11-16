@@ -92,12 +92,12 @@ pub(crate) fn configured_max_file() -> u64 {
 /// * `max` - Most bytes the file may hold ([`configured_max_file`]).
 /// * `(named, auto)` - The packs the user named, and whether the pack
 ///   directories' packs may load by themselves
-///   ([`borer::packs::pack_files`]).
+///   ([`borer::packs::searched`]).
 ///
 /// # Returns
 ///
-/// The program, its packs and their notes (a skipped pack directory's
-/// first), and the note on a refused symbol cache, if one was.
+/// The program, its packs and their notes, and the note on a refused
+/// symbol cache, if one was.
 ///
 /// # Errors
 ///
@@ -109,8 +109,6 @@ pub(crate) fn open_program(
     max: u64,
     (named, auto): (Arc<Packs>, bool),
 ) -> anyhow::Result<(Opened, Option<String>)> {
-    let mut notes = Vec::new();
-    let packs = borer::packs::pack_files(auto, &mut notes);
     let (pdb, refused) = match symsrv::cache_dir() {
         _ if !apply_pdb => (Pdb::Off, None),
         Ok(Some(root)) => (Pdb::Cache(root), None),
@@ -121,10 +119,10 @@ pub(crate) fn open_program(
         max_file: max,
         pdb,
         named,
-        packs,
+        dirs: borer::packs::searched(auto),
         layout: layout.cloned(),
     };
-    let mut opened = session::open(path, &open).map_err(|e| {
+    let opened = session::open(path, &open).map_err(|e| {
         if e.is::<TooLarge>() {
             anyhow::anyhow!(
                 "{e:#}; set {MAX_FILE_ENV} (bytes, or 4G; 0 for no limit) to load it anyway"
@@ -133,8 +131,6 @@ pub(crate) fn open_program(
             e
         }
     })?;
-    notes.append(&mut opened.notes);
-    opened.notes = notes;
     let note = refused
         .filter(|_| layout.is_none() && opened.program.pdb_record.is_some())
         .map(|why| format!("skipped the symbol cache: {why}"));

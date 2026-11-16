@@ -25,8 +25,6 @@ pub use borer_engine::session::{PACK_MAX, load_scripts};
 pub const DIRS_ENV: &str = "BORER_PACK_DIRS";
 /// The variable that turns the pack directories off when it is `0`.
 pub const AUTO_ENV: &str = "BORER_AUTO_PACKS";
-/// The extension of a pack file.
-pub const EXTENSION: &str = "borer";
 
 /// Tells whether packs in the pack directories may load by themselves.
 #[must_use]
@@ -58,7 +56,7 @@ pub fn env_paths(var: &str) -> Option<Vec<PathBuf>> {
 ///
 /// One that names a share or a device
 /// ([`borer_engine::program::unusable_path`]) is listed as given and never
-/// touched: [`pack_files`] skips it with a note.
+/// touched: [`session::read_dirs`] skips it with a note.
 #[must_use]
 pub fn dirs() -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
@@ -96,41 +94,15 @@ pub fn dirs() -> Vec<PathBuf> {
     out
 }
 
-/// The pack files in the pack directories, in directory then file-name
-/// order: what [`session::read_found`] reads, and none when the
-/// directories are off.
-///
-/// A directory that names a share or a device is skipped with a note,
-/// unread.
+/// The pack directories to read: [`dirs`] when they may load by
+/// themselves, else none.
 ///
 /// # Arguments
 ///
 /// * `auto` - Whether the pack directories are read.
-/// * `notes` - Where a skipped directory's reason goes.
 #[must_use]
-pub fn pack_files(auto: bool, notes: &mut Vec<String>) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if !auto {
-        return out;
-    }
-    for dir in dirs() {
-        if let Some(why) = borer_engine::program::unusable_path(&dir) {
-            notes.push(format!("skipped a pack directory: {why}"));
-            continue;
-        }
-        #[expect(clippy::disallowed_methods, reason = "unusable_path just cleared dir")]
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        let mut files: Vec<PathBuf> = entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|e| e == EXTENSION))
-            .collect();
-        files.sort();
-        out.extend(files);
-    }
-    out
+pub fn searched(auto: bool) -> Vec<PathBuf> {
+    if auto { dirs() } else { Vec::new() }
 }
 
 /// The packs an analysis of a program runs with: the pack directories'
@@ -150,7 +122,7 @@ pub fn pack_files(auto: bool, notes: &mut Vec<String>) -> Vec<PathBuf> {
 #[must_use]
 pub fn for_program(program: &Program, named: &Packs, auto: bool) -> (Arc<Packs>, Vec<String>) {
     let mut notes = Vec::new();
-    let found = session::read_found(&pack_files(auto, &mut notes), &mut notes);
+    let found = session::read_dirs(&searched(auto), &mut notes);
     let packs = session::fitting(program, named, found, &mut notes);
     (Arc::new(packs), notes)
 }
@@ -166,7 +138,7 @@ pub fn for_program(program: &Program, named: &Packs, auto: bool) -> (Arc<Packs>,
 #[must_use]
 pub fn listing(program: &Program, named: &Packs, auto: bool) -> String {
     let mut notes = Vec::new();
-    let found = session::read_found(&pack_files(auto, &mut notes), &mut notes);
+    let found = session::read_dirs(&searched(auto), &mut notes);
     let dirs: Vec<String> = dirs()
         .iter()
         .map(|d| borer_engine::text::short_path(&d.to_string_lossy()))

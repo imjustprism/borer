@@ -11,7 +11,7 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use borer_engine::analysis::Analysis;
-use borer_engine::session::{Open, Opened, Pdb, open};
+use borer_engine::session::{Open, Opened, Pdb, open, read_dirs};
 use borer_engine::text::short_path;
 
 /// Where the image is preferred to load.
@@ -46,22 +46,22 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
-/// Opens `binary` with `packs` as the pack files found, no PDB and no cap.
+/// Opens `binary` with `dirs` as the pack directories, no PDB and no cap.
 ///
 /// # Arguments
 ///
 /// * `binary` - The binary.
-/// * `packs` - The pack files.
+/// * `dirs` - The pack directories.
 #[expect(
     clippy::expect_used,
     reason = "a test helper has no recovery from a binary that does not open"
 )]
-fn opened(binary: &std::path::Path, packs: Vec<PathBuf>) -> Opened {
+fn opened(binary: &std::path::Path, dirs: Vec<PathBuf>) -> Opened {
     let how = Open {
         max_file: u64::MAX,
         pdb: Pdb::Off,
         named: Arc::default(),
-        packs,
+        dirs,
         layout: None,
     };
     open(binary, &how).expect("the binary opens")
@@ -81,7 +81,7 @@ fn a_found_pack_that_fits_names_a_function() {
         "pack t 1\n[match]\nsection .text\n[names]\nfn 4883EC2831C04883C428C3 by_pack\n",
     )
     .expect("the pack is written");
-    let opened = opened(&binary, vec![pack.clone()]);
+    let opened = opened(&binary, vec![dir.clone()]);
     std::fs::remove_dir_all(&dir).ok();
     assert_eq!(
         opened.notes,
@@ -109,7 +109,8 @@ fn a_pack_that_runs_itself_ten_thousand_times_is_refused_quickly() {
     );
     std::fs::write(&pack, text).expect("the pack is written");
     let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || tx.send(Box::new(opened(&binary, vec![pack]))));
+    let packs = dir.clone();
+    std::thread::spawn(move || tx.send(Box::new(opened(&binary, vec![packs]))));
     let opened = rx
         .recv_timeout(Duration::from_secs(1))
         .expect("the open ends within a second");
@@ -120,5 +121,47 @@ fn a_pack_that_runs_itself_ten_thousand_times_is_refused_quickly() {
         opened.notes[0].contains("10000 scripts, past the 64 a pack may run"),
         "{:?}",
         opened.notes
+    );
+}
+
+/// The notes of the pack directories come a directory at a time: a file
+/// of the first that is no pack, then the second directory, which names
+/// nothing usable.
+#[test]
+fn pack_directory_notes_come_in_the_order_they_are_read() {
+    let dir = scratch("order");
+    let bad = dir.join("bad.borer");
+    std::fs::write(&bad, [0xffu8, 0xfe]).expect("the file is written");
+    let mut notes = Vec::new();
+    let packs = read_dirs(&[dir.clone(), PathBuf::new()], &mut notes);
+    std::fs::remove_dir_all(&dir).ok();
+    assert!(packs.is_empty(), "{packs:?}");
+    assert_eq!(
+        notes,
+        vec![
+            format!("skipped {}: not text", short_path(&bad.to_string_lossy())),
+            "skipped a pack directory: the path is empty".to_owned(),
+        ]
+    );
+}
+
+/// Of two packs of one name in a directory, the one first by file name
+/// fits, whatever order the directory lists them in.
+#[test]
+fn of_two_packs_of_one_name_the_first_by_file_name_fits() {
+    let dir = scratch("twins");
+    let binary = dir.join("a.exe");
+    std::fs::write(&binary, pe()).expect("the binary is written");
+    for file in ["b.borer", "a.borer"] {
+        std::fs::write(dir.join(file), "pack foo 1\n[match]\nsection .text\n")
+            .expect("the pack is written");
+    }
+    let opened = opened(&binary, vec![dir.clone()]);
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(opened.packs.packs.len(), 1, "{:?}", opened.packs);
+    assert!(
+        opened.packs.packs[0].source.ends_with("a.borer"),
+        "{}",
+        opened.packs.packs[0].source
     );
 }
