@@ -321,16 +321,15 @@ pub fn new_workspace(
         workspace
     });
     match saved {
-        Ok(docks) => workspace.update(cx, |workspace, cx| {
-            if let Some(docks) = docks {
-                workspace.set_dock_structure(docks, window, cx);
-            }
-            workspace.finish_dock_restoration(cx);
+        Ok(Some(docks)) => workspace.update(cx, |workspace, cx| {
+            workspace.set_dock_structure(docks, window, cx);
         }),
+        Ok(None) => {}
         Err(err) => binary.update(cx, |binary, cx| {
             binary.set_status(format!("dock layout not restored: {err:#}"), cx);
         }),
     }
+    workspace.update(cx, |workspace, cx| workspace.finish_dock_restoration(cx));
     let center = workspace.read(cx).active_pane().clone();
     center.update(cx, |pane, _| pane.set_should_display_welcome_page(false));
     keep_filled(&center, &workspace.downgrade(), window, cx);
@@ -413,6 +412,7 @@ mod tests {
     use borer_engine::view::Ref;
     use command_palette::CommandPalette;
     use command_palette_hooks::CommandPaletteFilter;
+    use db::kvp::KeyValueStore;
     use gpui::{
         Entity, ExternalPaths, FileDropEvent, TestAppContext, VisualTestContext, point, px, size,
     };
@@ -423,7 +423,7 @@ mod tests {
     use workspace::pane::{GoBack, GoForward};
     use workspace::{AddFolderToProject, AppState, MultiWorkspace, Workspace};
 
-    use super::{REFUSED_FOLDER, configure, data_dir, new_workspace};
+    use super::{DEFAULT_DOCK_STATE_KEY, REFUSED_FOLDER, configure, data_dir, new_workspace};
     use crate::decompile_item::{DecompileItem, TabMode, open_function};
     use crate::functions_panel::FunctionsPanel;
     use crate::measure::{CliMode, MeasurePhase};
@@ -852,6 +852,36 @@ mod tests {
         assert_eq!(shown(&workspace, cx), Some((CALLER, 0)));
         cx.dispatch_action(GoForward);
         assert_eq!(shown(&workspace, cx), Some((CALLER, 2)));
+    }
+
+    /// A saved layout that does not parse leaves the default layout, the panel open on the
+    /// left, and says so in the status line.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the panel is not open on the left or the status line is silent.
+    #[gpui::test]
+    async fn an_unreadable_layout_falls_back_to_the_default(cx: &mut TestAppContext) {
+        an_unreadable_layout_falls_back_to_the_default_steps(cx).await;
+    }
+
+    /// Runs the steps of [`an_unreadable_layout_falls_back_to_the_default`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`an_unreadable_layout_falls_back_to_the_default`] says.
+    async fn an_unreadable_layout_falls_back_to_the_default_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let kvp = cx.update(|cx| KeyValueStore::global(cx));
+        kvp.write_kvp(DEFAULT_DOCK_STATE_KEY.to_owned(), "not json".to_owned())
+            .await
+            .unwrap();
+        let (workspace, cx) = open(&app_state, cx);
+        assert!(workspace.read_with(cx, |workspace, cx| {
+            let dock = workspace.left_dock().read(cx);
+            dock.is_open() && dock.panel::<FunctionsPanel>().is_some()
+        }));
+        assert!(take_status(&workspace, cx).starts_with("dock layout not restored"));
     }
 
     /// The functions panel moved to the right dock comes back open there in a new workspace
