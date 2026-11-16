@@ -35,7 +35,7 @@ use project::trusted_worktrees::{self, DbTrustedPaths};
 use project::{LocalProjectFlags, Project};
 use search::BufferSearchBar;
 use session::{AppSession, Session};
-use workspace::dock::DockPosition;
+use workspace::dock::{DockPosition, PanelButtons};
 use workspace::{
     AddFolderToProject, AppState, DockData, DockStructure, Pane, Workspace, WorkspaceId,
     WorkspaceStore,
@@ -392,6 +392,11 @@ pub fn new_workspace(
             .status_bar()
             .update(cx, |bar, cx| bar.add_left_item(status, window, cx));
         crate::status::add_items(&mut workspace, &binary, window, cx);
+        workspace.status_bar().update(cx, |bar, cx| {
+            while let Some(ix) = bar.position_of_item::<PanelButtons>() {
+                bar.remove_item_at(ix, cx);
+            }
+        });
         register_actions(&mut workspace, &binary);
         workspace
     });

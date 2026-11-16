@@ -89,8 +89,8 @@ pub struct AppMenu {
     pub rows: &'static [Row],
 }
 
-/// Returns a boxed `A`, for a [`Row`]'s action.
-fn boxed<A: Action + Default>() -> Box<dyn Action> {
+/// Returns a boxed `A`, for a menu row's or a rail cell's action.
+pub(crate) fn boxed<A: Action + Default>() -> Box<dyn Action> {
     Box::new(A::default())
 }
 

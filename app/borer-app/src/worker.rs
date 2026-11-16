@@ -546,6 +546,7 @@ mod tests {
             ("measure/input.rs", include_str!("measure/input.rs")),
             ("measure/scroll.rs", include_str!("measure/scroll.rs")),
             ("menus.rs", include_str!("menus.rs")),
+            ("rail.rs", include_str!("rail.rs")),
             ("recent.rs", include_str!("recent.rs")),
             ("shell.rs", include_str!("shell.rs")),
             ("start_item.rs", include_str!("start_item.rs")),

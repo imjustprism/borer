@@ -1,4 +1,5 @@
-//! The window's root: the app's title bar over the full width, then Zed's workspace.
+//! The window's root: the app's title bar over the full width, then the rail beside Zed's
+//! workspace; the rail runs to the window's foot and the status bar starts right of it.
 //!
 //! Zed's [`Workspace`] draws its own docks, panes and status bar and has no slot left of
 //! them, and its title bar slot sits inside its client-side decorations, so the app's
@@ -16,6 +17,7 @@ use workspace::{CloseIntent, CloseWindow, MultiWorkspace, Workspace};
 use crate::actions::OpenMenuBar;
 use crate::app_view::AppWindow;
 use crate::binary::Binary;
+use crate::rail::Rail;
 use crate::title_bar::TitleBar;
 
 /// The window's root view.
@@ -26,6 +28,8 @@ pub struct Shell {
     root: Entity<MultiWorkspace>,
     /// The app's title bar.
     title_bar: Entity<TitleBar>,
+    /// The rail left of the docks.
+    rail: Entity<Rail>,
 }
 
 impl std::fmt::Debug for Shell {
@@ -46,10 +50,12 @@ impl Shell {
     pub fn new(app: AppWindow, window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
         let root = cx.new(|cx| MultiWorkspace::new(app.workspace.clone(), window, cx));
         let title_bar = cx.new(|cx| TitleBar::new(app.binary.clone(), window, cx));
+        let rail = cx.new(|cx| Rail::new(&app.workspace, app.binary.clone(), cx));
         Self {
             app,
             root,
             title_bar,
+            rail,
         }
     }
 
@@ -63,6 +69,12 @@ impl Shell {
     #[must_use]
     pub const fn binary(&self) -> &Entity<Binary> {
         &self.app.binary
+    }
+
+    /// Returns the rail.
+    #[must_use]
+    pub const fn rail(&self) -> &Entity<Rail> {
+        &self.rail
     }
 
     /// Returns the title bar.
@@ -157,7 +169,15 @@ impl Render for Shell {
                 shell.close(window, cx);
             }))
             .child(self.title_bar.clone())
-            .child(div().flex_1().min_h_0().child(self.root.clone()))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_row()
+                    .child(self.rail.clone())
+                    .child(div().flex_1().min_w_0().h_full().child(self.root.clone())),
+            )
     }
 }
 

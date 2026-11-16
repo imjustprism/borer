@@ -13,6 +13,7 @@ pub mod functions_panel;
 pub mod goto;
 pub mod measure;
 pub mod menus;
+pub mod rail;
 pub mod recent;
 pub mod shell;
 pub mod start_item;
