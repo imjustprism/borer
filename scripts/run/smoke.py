@@ -159,6 +159,31 @@ def wait_for(rid, allow_error=False):
             return msg.get("result") if "result" in msg else msg
 
 
+def read_many(*uris):
+    """Read resources that do not depend on each other side by side: every
+    request goes out at once, the server answers them in parallel, and the
+    texts come back in the order asked. The watchdog restarts with each answer,
+    and names the first one still unanswered."""
+    rids = [send("resources/read", {"uri": u}) for u in uris]
+    texts = {}
+    while len(texts) < len(rids):
+        watchdog.arm(*_methods[next(rid for rid in rids if rid not in texts)])
+        while True:
+            line = stdout.readline()
+            if not line:
+                raise SystemExit(watchdog.closed(""))
+            msg = json.loads(line)
+            if msg.get("id") in rids:
+                break
+        if "error" in msg:
+            raise SystemExit(f"rpc error: {msg['error']}")
+        texts[msg["id"]] = msg["result"]["contents"][0]["text"]
+    watchdog.cancel()
+    for rid in rids:
+        del _methods[rid]
+    return [texts[rid] for rid in rids]
+
+
 def call_tool(name, args):
     res = wait_for(send("tools/call", {"name": name, "arguments": args}))
     if res.get("isError"):
@@ -505,11 +530,10 @@ assert uris == [
     "borer://triage",
     "borer://vm",
 ], uris
-flat = wait_for(send("resources/read", {"uri": "borer://flat"}))["contents"][0]["text"]
+flat, triage = read_many("borer://flat", "borer://triage")
 assert flat.startswith("# "), flat[:200]
 print("flat resource OK:", flat.splitlines()[0])
 
-triage = wait_for(send("resources/read", {"uri": "borer://triage"}))["contents"][0]["text"]
 assert triage.startswith("# triage:"), triage[:200]
 for want in ("# protection:", "# capabilities:", "# next:"):
     assert want in triage, (want, triage[:400])
@@ -523,38 +547,40 @@ ledger = wait_for(send("resources/read", {"uri": "borer://session"}))["contents"
 assert "capped paged  borer://help!offset=3!limit=3" in ledger, ledger[-600:]
 print("paged resource and session ledger OK:", page.splitlines()[0])
 
-enums = wait_for(send("resources/read", {"uri": "borer://enums"}))["contents"][0]["text"]
+enums, classes, singletons, sources, asserts, protection, aa, checks, dyn, vm, ss = read_many(
+    "borer://enums",
+    "borer://classes",
+    "borer://singletons",
+    "borer://sources",
+    "borer://asserts",
+    "borer://protection",
+    "borer://antianalysis",
+    "borer://checks",
+    "borer://dynimports",
+    "borer://vm",
+    "borer://stackstrings",
+)
 assert enums.startswith("# ") and "name tables" in enums, enums[:200]
 print("enums resource OK:", enums.splitlines()[0])
-classes = wait_for(send("resources/read", {"uri": "borer://classes"}))["contents"][0]["text"]
 assert "four-character code" in classes, classes[:200]
 print("classes resource OK:", classes.splitlines()[0])
-singletons = wait_for(send("resources/read", {"uri": "borer://singletons"}))["contents"][0]["text"]
 assert "singletons" in singletons.splitlines()[0], singletons[:200]
 assert "kind\tslot\tinstance\tclass" in singletons, singletons[:200]
 print("singletons resource OK:", singletons.splitlines()[0])
-sources = wait_for(send("resources/read", {"uri": "borer://sources"}))["contents"][0]["text"]
 assert "directory" in sources, sources[:200]
 print("sources resource OK:", sources.splitlines()[0])
-asserts = wait_for(send("resources/read", {"uri": "borer://asserts"}))["contents"][0]["text"]
 assert "field" in asserts, asserts[:200]
 print("asserts resource OK:", asserts.splitlines()[0])
-protection = wait_for(send("resources/read", {"uri": "borer://protection"}))["contents"][0]["text"]
 assert protection.startswith("# "), protection[:200]
 print("protection resource OK:", protection.splitlines()[0])
-aa = wait_for(send("resources/read", {"uri": "borer://antianalysis"}))["contents"][0]["text"]
 assert aa.startswith("# "), aa[:200]
 print("antianalysis resource OK:", aa.splitlines()[0])
-checks = wait_for(send("resources/read", {"uri": "borer://checks"}))["contents"][0]["text"]
 assert checks.startswith("# "), checks[:200]
 print("checks resource OK:", checks.splitlines()[0])
-dyn = wait_for(send("resources/read", {"uri": "borer://dynimports"}))["contents"][0]["text"]
 assert dyn.startswith("# "), dyn[:200]
 print("dynimports resource OK:", dyn.splitlines()[0])
-vm = wait_for(send("resources/read", {"uri": "borer://vm"}))["contents"][0]["text"]
 assert "dispatch loop" in vm, vm[:200]
 print("vm resource OK:", vm.splitlines()[0])
-ss = wait_for(send("resources/read", {"uri": "borer://stackstrings"}))["contents"][0]["text"]
 assert "stack string" in ss, ss[:200]
 print("stackstrings resource OK:", ss.splitlines()[0])
 bad = wait_for(send("tools/call", {"name": "functions", "arguments": {"nosuchfield": 5}}))
@@ -645,17 +671,16 @@ for tool in tools["tools"]:
         text = json.dumps(res)
         assert "nosuchfield_xyz" in text, (tool["name"], text[:200])
 print(f"parameter round-trip OK ({survived} parameters across {len(tools['tools'])} tools)")
-hid = wait_for(send("resources/read", {"uri": "borer://hidden"}))["contents"][0]["text"]
+hid, orc, packs, caps = read_many(
+    "borer://hidden", "borer://oracle/entry_thunk", "borer://packs", "borer://capabilities"
+)
 # "1 generated string" or "N generated strings": the count depends on the binary
 assert hid.startswith("# ") and "generated string" in hid, hid[:200]
 print("hidden resource OK:", hid.splitlines()[0])
-orc = wait_for(send("resources/read", {"uri": "borer://oracle/entry_thunk"}))["contents"][0]["text"]
 assert orc.startswith("# "), orc[:200]
 print("oracle resource OK:", orc.splitlines()[0])
-packs = wait_for(send("resources/read", {"uri": "borer://packs"}))["contents"][0]["text"]
 assert "pack\tversion\tfile\tloads\tmatch" in packs, packs[:300]
 print("packs resource OK:", packs.splitlines()[0])
-caps = wait_for(send("resources/read", {"uri": "borer://capabilities"}))["contents"][0]["text"]
 assert "capabilities" in caps, caps[:200]
 print("capabilities resource OK:", caps.splitlines()[0])
 tmpl = wait_for(send("resources/templates/list", {}))
@@ -664,67 +689,52 @@ assert any(t["uriTemplate"] == "borer://decompile/{address}" for t in tmpl["reso
 )
 rd = wait_for(send("resources/read", {"uri": "borer://info"}))
 assert "format:" in rd["contents"][0]["text"], rd
-rd2 = wait_for(send("resources/read", {"uri": "borer://decompile/entry_thunk"}))
-assert "signature:" in rd2["contents"][0]["text"], rd2
-fields = wait_for(send("resources/read", {"uri": "borer://fields/entry_thunk"}))["contents"][0][
-    "text"
-]
+target_uri = os.path.abspath(TARGET).replace("\\", "/")
+rd2, fields, emu, dev, unp, disp, sends, ops, dif, difffn, migrate, fp = read_many(
+    "borer://decompile/entry_thunk",
+    "borer://fields/entry_thunk",
+    "borer://emulate/entry_thunk",
+    "borer://devirt/entry_thunk",
+    "borer://unpack/entry_thunk",
+    "borer://dispatchers",
+    "borer://opsends",
+    "borer://opcodes/entry_thunk",
+    "borer://diff/" + target_uri,
+    "borer://difffn/entry_thunk/" + target_uri,
+    "borer://migrate/entry_thunk/" + target_uri,
+    "borer://fingerprint",
+)
+assert "signature:" in rd2, rd2[:200]
 assert fields.startswith("# fields dereferenced by"), fields[:200]
 assert "base\toffset\twidths\tdir" in fields, fields[:200]
 assert any(t["uriTemplate"] == "borer://fields/{address}" for t in tmpl["resourceTemplates"]), tmpl
 print("fields resource OK:", fields.splitlines()[0][:70])
-emu = wait_for(send("resources/read", {"uri": "borer://emulate/entry_thunk"}))["contents"][0][
-    "text"
-]
 assert emu.startswith("# ran"), emu[:200]
 print("emulate resource OK:", emu.splitlines()[0][:70])
 assert any(t["uriTemplate"] == "borer://devirt/{address}" for t in tmpl["resourceTemplates"]), tmpl
-dev = wait_for(send("resources/read", {"uri": "borer://devirt/entry_thunk"}))["contents"][0]["text"]
 assert dev.startswith("# "), dev[:200]
 print("devirt resource OK:", dev.splitlines()[0][:70])
 assert any(t["uriTemplate"] == "borer://unpack/{address}" for t in tmpl["resourceTemplates"]), tmpl
-unp = wait_for(send("resources/read", {"uri": "borer://unpack/entry_thunk"}))["contents"][0]["text"]
 assert "emulated unpacking" in unp, unp[:200]
 print("unpack resource OK:", unp.splitlines()[0][:70])
-disp = wait_for(send("resources/read", {"uri": "borer://dispatchers"}))["contents"][0]["text"]
 assert "switch on an opcode read off a stream" in disp, disp[:200]
-sends = wait_for(send("resources/read", {"uri": "borer://opsends"}))["contents"][0]["text"]
 assert "write a constant opcode first" in sends, sends[:200]
-ops = wait_for(send("resources/read", {"uri": "borer://opcodes/entry_thunk"}))["contents"][0][
-    "text"
-]
 assert ops.startswith("# "), ops[:200]
 print("opcode resources OK:", disp.splitlines()[0][:70])
 assert any(t["uriTemplate"] == "borer://diff/{path}" for t in tmpl["resourceTemplates"]), tmpl
-dif = wait_for(
-    send("resources/read", {"uri": "borer://diff/" + os.path.abspath(TARGET).replace("\\", "/")})
-)["contents"][0]["text"]
 assert "identical" in dif, dif[:200]
 print("diff resource OK:", dif.splitlines()[-1][:70])
 assert any(
     t["uriTemplate"] == "borer://difffn/{function}/{path}" for t in tmpl["resourceTemplates"]
 ), tmpl
-difffn = wait_for(
-    send(
-        "resources/read",
-        {"uri": "borer://difffn/entry_thunk/" + os.path.abspath(TARGET).replace("\\", "/")},
-    )
-)["contents"][0]["text"]
 assert "difffn" in difffn, difffn[:200]
 print("difffn resource OK:", difffn.splitlines()[-1][:70])
 assert any(
     t["uriTemplate"] == "borer://migrate/{function}/{path}" for t in tmpl["resourceTemplates"]
 ), tmpl
-migrate = wait_for(
-    send(
-        "resources/read",
-        {"uri": "borer://migrate/entry_thunk/" + os.path.abspath(TARGET).replace("\\", "/")},
-    )
-)["contents"][0]["text"]
 assert migrate.startswith("# migrate "), migrate[:200]
 assert "0 moved" in migrate, migrate[:200]  # a binary against itself moved nothing
 print("migrate resource OK:", migrate.splitlines()[0][:70])
-fp = wait_for(send("resources/read", {"uri": "borer://fingerprint"}))["contents"][0]["text"]
 assert fp.startswith("# borer fingerprint v1 digest "), fp[:200]
 assert "sidecar" in fp, fp[:300]  # the answer is a digest; the CLI writes the manifest
 fp_path = os.path.join(tempfile.gettempdir(), f"borer-smoke-{os.getpid()}.bfp")
