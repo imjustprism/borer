@@ -159,11 +159,18 @@ def wait_for(rid, allow_error=False):
             return msg.get("result") if "result" in msg else msg
 
 
+# The notes a request cut at its deadline ends with: the server's
+# (crates/borer/src/requests.rs) and a live scan's (live/scan.rs).
+DEADLINE_STOPS = ("# stopped: time limit", "# stopped: the request's deadline passed")
+
+
 def read_many(*uris):
     """Read resources that do not depend on each other side by side: every
     request goes out at once, the server answers them in parallel, and the
     texts come back in the order asked. The watchdog restarts with each answer,
-    and names the first one still unanswered."""
+    and names the first one still unanswered. An answer the server cut short
+    at the request's deadline (`DEADLINE_STOPS`) fails, naming its URI, and a
+    cancelled one answers an error; an emulator's own stop is an answer."""
     rids = [send("resources/read", {"uri": u}) for u in uris]
     texts = {}
     while len(texts) < len(rids):
@@ -175,9 +182,12 @@ def read_many(*uris):
             msg = json.loads(line)
             if msg.get("id") in rids:
                 break
+        uri = uris[rids.index(msg["id"])]
         if "error" in msg:
-            raise SystemExit(f"rpc error: {msg['error']}")
-        texts[msg["id"]] = msg["result"]["contents"][0]["text"]
+            raise SystemExit(f"rpc error reading {uri}: {msg['error']}")
+        text = msg["result"]["contents"][0]["text"]
+        assert not any(stop in text for stop in DEADLINE_STOPS), (uri, text[:300])
+        texts[msg["id"]] = text
     watchdog.cancel()
     for rid in rids:
         del _methods[rid]
