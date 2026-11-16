@@ -21,7 +21,7 @@ use gpui::{
     AnyElement, App, AppContext as _, Context, Div, Entity, EventEmitter, ExternalPaths,
     FocusHandle, Focusable, FontWeight, HighlightStyle, InteractiveElement as _, IntoElement,
     MouseButton, MouseUpEvent, ParentElement as _, Pixels, Render, Reservation, SharedString,
-    Styled as _, Subscription, Task, TaskExt as _, WeakEntity, Window, div, px,
+    Styled as _, Subscription, TaskExt as _, WeakEntity, Window, div, px,
 };
 use language::{
     Bias, Buffer, BufferId, Capability, LineEnding, Point, ReplicaId, Rope, TextBuffer,
@@ -38,7 +38,7 @@ use crate::actions::{BACK_HINT, hint_row};
 use crate::app_view::{binary_of, open_dropped};
 use crate::code_semantics::for_one_view;
 use crate::code_view::{ClickOutcome, CodeLines, CodePalette, Role, resolve_ref_click};
-use crate::worker::{LoadedBinary, TaskEpoch, decompile_or_why, listing_blocking, spawn_engine};
+use crate::worker::{Job, LoadedBinary, decompile_or_why, listing_blocking};
 
 /// Fewest logical pixels a row of code is tall.
 const MIN_ROW_HEIGHT_PX: f32 = 8.0;
@@ -187,12 +187,8 @@ pub struct DecompileItem {
     _restyle: [Subscription; 2],
     /// An address to move to once the view is built ([`Self::go_to_address`]).
     waiting: Option<u64>,
-    /// Generation and cancel flag of the background build.
-    epoch: TaskEpoch,
-    /// Whether the background build is still running.
-    decompiling: bool,
     /// The background build.
-    task: Option<Task<()>>,
+    job: Job,
 }
 
 impl std::fmt::Debug for DecompileItem {
@@ -200,14 +196,8 @@ impl std::fmt::Debug for DecompileItem {
         f.debug_struct("DecompileItem")
             .field("entry", &self.entry)
             .field("form", &self.form)
-            .field("decompiling", &self.decompiling)
+            .field("job", &self.job)
             .finish_non_exhaustive()
-    }
-}
-
-impl Drop for DecompileItem {
-    fn drop(&mut self) {
-        self.epoch.invalidate();
     }
 }
 
@@ -301,9 +291,7 @@ impl DecompileItem {
                 cx.observe_global::<GlobalTheme>(Self::restyle),
             ],
             waiting: None,
-            epoch: TaskEpoch::new(),
-            decompiling: true,
-            task: None,
+            job: Job::default(),
         };
         item.load(build, window, cx);
         item
@@ -349,29 +337,25 @@ impl DecompileItem {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        let (ticket, worker_cancel) = self.epoch.begin();
-        let check_cancel = worker_cancel.clone();
         let reservation = cx.reserve_entity::<Buffer>();
         let id = BufferId::from(reservation.entity_id().as_non_zero_u64());
         let (loaded, entry) = (self.loaded.clone(), self.entry);
-        let bg = spawn_engine(cx, move || {
-            worker_cancel.within(|| {
-                let code = build()?;
-                let rope = Rope::from(code.text().as_str());
-                let text = TextBuffer::new_normalized(ReplicaId::LOCAL, id, LineEnding::Unix, rope);
-                let name = entry.map(|at| name_of(&loaded.analysis, &loaded.overlay, at));
-                Ok((code, text, name))
-            })
-        });
-        self.task = Some(cx.spawn_in(window, async move |this, cx| {
-            let built = bg.await;
-            let shown = this.update_in(cx, |item, window, cx| {
-                if item.epoch.is_current(ticket, &check_cancel) {
-                    item.show(built, reservation, window, cx);
-                }
+        let label = match (entry, self.form) {
+            (None, _) => "Building lines".to_owned(),
+            (Some(at), Form::Decompile) => format!("Decompiling {at:#x}"),
+            (Some(at), Form::Listing) => format!("Listing {at:#x}"),
+        };
+        let work = move || {
+            let code = build()?;
+            let rope = Rope::from(code.text().as_str());
+            let text = TextBuffer::new_normalized(ReplicaId::LOCAL, id, LineEnding::Unix, rope);
+            let name = entry.map(|at| name_of(&loaded.analysis, &loaded.overlay, at));
+            Ok((code, text, name))
+        };
+        self.job
+            .run_in(label, window, cx, work, |item, built, window, cx| {
+                item.show(built, reservation, window, cx);
             });
-            shown.unwrap_or(());
-        }));
     }
 
     /// Shows the built lines in a new editor over their buffer, or the engine's reason.
@@ -390,7 +374,6 @@ impl DecompileItem {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        self.decompiling = false;
         match built {
             Err(why) => self.failed = Some(why),
             Ok((code, text, name)) => {
@@ -611,14 +594,14 @@ impl DecompileItem {
 
     /// Returns whether the background build is still running.
     #[must_use]
-    pub const fn is_decompiling(&self) -> bool {
-        self.decompiling
+    pub fn is_decompiling(&self) -> bool {
+        self.job.is_running()
     }
 
     /// Returns the ticket of the tab's build generation.
     #[must_use]
     pub const fn ticket(&self) -> u64 {
-        self.epoch.seq()
+        self.job.ticket()
     }
 
     /// Returns whether build `ticket` is on screen, cancelled, or superseded.
@@ -627,8 +610,8 @@ impl DecompileItem {
     ///
     /// * `ticket` - A [`Self::ticket`] value.
     #[must_use]
-    pub const fn decompile_settled(&self, ticket: u64) -> bool {
-        !self.decompiling || self.epoch.seq() > ticket
+    pub fn decompile_settled(&self, ticket: u64) -> bool {
+        self.job.settled(ticket)
     }
 
     /// Scrolls line `line` to the top of the tab at its next paint, without a nav-history
@@ -1133,7 +1116,7 @@ impl Render for DecompileItem {
         let over = match (&self.code, &self.failed) {
             (Some(_), _) => None,
             (None, Some(why)) => Some(failure_card(self.form, why, cx)),
-            (None, None) if self.decompiling => Some(note(self.form.building())),
+            (None, None) if self.job.is_running() => Some(note(self.form.building())),
             (None, None) => Some(note("No lines.")),
         };
         div()

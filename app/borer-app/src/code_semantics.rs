@@ -157,7 +157,7 @@ impl SemanticsProvider for ViewSemantics {
         let snapshot = buffer.read(cx).snapshot();
         let at = position.to_point(&snapshot);
         let code = self.code.clone();
-        Some(spawn_engine(cx, move || {
+        let uses = spawn_engine("Finding uses", cx, move || {
             let Some((view, _, (_, _, Some(link)))) = token_under(&code, at) else {
                 return Ok(Vec::new());
             };
@@ -171,7 +171,8 @@ impl SemanticsProvider for ViewSemantics {
                     })
                 })
                 .collect())
-        }))
+        });
+        Some(cx.spawn(async move |_| uses.await.unwrap_or_else(|| Ok(Vec::new()))))
     }
 
     fn definitions(

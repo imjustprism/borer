@@ -162,13 +162,13 @@ impl PickerDelegate for GoToDelegate {
         cx: &mut Context<'_, Picker<Self>>,
     ) -> Task<()> {
         let loaded = self.loaded.clone();
-        let answer = spawn_engine(cx, move || {
+        let label = format!("Going to {}", query.trim());
+        let answer = spawn_engine(label, cx, move || {
             let query = query.trim();
             lines(query, goto_blocking(&loaded, query))
         });
         cx.spawn(async move |picker, cx| {
-            let matches = answer.await;
-            let Some(picker) = picker.upgrade() else {
+            let (Some(matches), Some(picker)) = (answer.await, picker.upgrade()) else {
                 return;
             };
             picker.update(cx, |picker, cx| {
@@ -255,7 +255,7 @@ mod tests {
     use crate::app_view::tests::{CALLEE, CALLER, init, open, sample};
     use crate::decompile_item::tests::{active as tab, fourth_instruction, open_tab};
     use crate::decompile_item::{DecompileItem, Form};
-    use crate::worker::LoadedBinary;
+    use crate::worker::{Jobs, LoadedBinary};
 
     /// Opens go to with its key from the focused code tab, types `query` and waits for the
     /// engine's answer.
@@ -340,6 +340,29 @@ mod tests {
         cx.dispatch_action(menu::Confirm);
         cx.run_until_parked();
         assert_eq!(active(&workspace, cx), Some(CALLER));
+    }
+
+    /// A query typed again before the engine answered lists the second query's answer;
+    /// each query runs as a listed request.
+    #[gpui::test]
+    fn a_go_to_query_typed_over_lists_the_newest_answer(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
+        open_tab(&workspace, &sample(), (CALLER, Form::Decompile), cx);
+        let picker = ask(&workspace, "", cx);
+        let query = |text: &str, cx: &mut VisualTestContext| {
+            picker.update_in(cx, |picker, window, cx| picker.set_query(text, window, cx));
+            let jobs = cx.update(|_, cx| Jobs::running(cx));
+            let label = format!("Going to {text}");
+            let mut flags = jobs.into_iter().filter(|(_, l, _)| *l == label);
+            flags.next().map(|(_, _, flag)| flag)
+        };
+        assert!(query("0x1", cx).is_some());
+        query(&format!("{CALLEE:#x}"), cx);
+        cx.run_until_parked();
+        let opens = picker.read_with(cx, |picker, _| picker.delegate.matches.first().cloned());
+        assert_eq!(opens.and_then(|m| m.opens()), Some((CALLEE, Some(CALLEE))));
     }
 
     /// From a listing tab, going to an address inside a function opens that function's

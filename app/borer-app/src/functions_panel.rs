@@ -11,8 +11,8 @@ use gpui::{
     Action, AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Div, Entity,
     EventEmitter, FocusHandle, Focusable, FontWeight, InteractiveElement as _, IntoElement,
     ParentElement as _, Pixels, Render, ScrollStrategy, SharedString, Stateful,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, canvas,
-    div, px, transparent_black,
+    StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, canvas, div,
+    px, transparent_black,
 };
 use settings::{Settings as _, SettingsStore};
 use theme::{ActiveTheme as _, GlobalTheme};
@@ -26,11 +26,11 @@ use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use crate::actions::{FocusFilter, OPEN_HINT, ToggleFunctions, hint_row};
-use crate::binary::{Binary, SettingsNotice};
+use crate::binary::{Binary, SettingsNotice, reading_label};
 use crate::code_view::{CodePalette, Role};
 use crate::decompile_item::{TabMode, code_row_height, open_function};
 use crate::function_columns::{Align, Columns, Ink, column_widths, row_cells};
-use crate::worker::{FilterLatest, LoadedBinary, filter_rows_blocking, spawn_engine};
+use crate::worker::{Job, LoadedBinary, filter_rows_blocking};
 
 /// Name Zed saves the panel's dock state and size under.
 pub const PANEL_KEY: &str = "Functions";
@@ -81,10 +81,7 @@ impl Empty {
     pub fn says(&self) -> SharedString {
         match self {
             Self::NoBinary => SharedString::new_static("No binary loaded"),
-            Self::Reading(path) => {
-                let name = path.file_name().unwrap_or(path.as_os_str());
-                format!("Reading {}", name.to_string_lossy()).into()
-            }
+            Self::Reading(path) => reading_label(path),
             Self::LoadFailed(reason) => format!("Load failed: {reason}").into(),
             Self::NoFunction(left_out) => format!("The engine found no function{left_out}").into(),
             Self::NoMatch(query) => format!("No function matches \"{query}\"").into(),
@@ -115,8 +112,8 @@ pub struct FunctionsPanel {
     table_state: Entity<TableInteractionState>,
     /// The binary the rows come from.
     shown: Option<Arc<LoadedBinary>>,
-    /// Sequenced rows matching the filter, each with its query, the newest answer winning.
-    rows: FilterLatest<Filtered>,
+    /// The rows shown, with the query that selected them.
+    rows: Option<Filtered>,
     /// Index of the highlighted row.
     selected: usize,
     /// Columns the table shows.
@@ -128,8 +125,8 @@ pub struct FunctionsPanel {
     table_width: Pixels,
     /// Dock the panel sits in.
     position: DockPosition,
-    /// The running background filter.
-    filter_task: Option<Task<()>>,
+    /// The running background filter, the newest answer winning.
+    filter_job: Job,
     /// Colors of the engine's token kinds, read again when the theme or the settings change.
     palette: CodePalette,
     /// Reruns the filter on each edit, follows the binary's loads, and lays the table out
@@ -187,13 +184,13 @@ impl FunctionsPanel {
             filter,
             table_state: cx.new(|cx| TableInteractionState::new(cx)),
             shown: None,
-            rows: FilterLatest::new(),
+            rows: None,
             selected: 0,
             columns: Columns::Brief,
             widths: cx.new(|_| ResizableColumnsState::new(0, Vec::<Pixels>::new(), Vec::new())),
             table_width: px(DEFAULT_WIDTH_PX),
             position,
-            filter_task: None,
+            filter_job: Job::default(),
             palette: CodePalette::from_theme(cx.theme()),
             _subscriptions: subscriptions,
         };
@@ -272,7 +269,7 @@ impl FunctionsPanel {
     /// * `cx` - Application context reading the binary.
     #[must_use]
     pub fn empty(&self, cx: &App) -> Option<Empty> {
-        let Some(Filtered { query, rows }) = self.rows.current() else {
+        let Some(Filtered { query, rows }) = &self.rows else {
             let binary = self.binary.read(cx);
             return Some(match (binary.reading(), binary.load_error()) {
                 (Some(loading), _) => Empty::Reading(loading.path.clone()),
@@ -303,13 +300,13 @@ impl FunctionsPanel {
     /// Returns the rows the table shows, if any.
     #[must_use]
     pub fn rows(&self) -> Option<&Arc<FunctionRows>> {
-        self.rows.current().map(|filtered| &filtered.rows)
+        self.rows.as_ref().map(|filtered| &filtered.rows)
     }
 
     /// Returns the ticket of the latest filter request.
     #[must_use]
     pub const fn filter_ticket(&self) -> u64 {
-        self.rows.issued()
+        self.filter_job.ticket()
     }
 
     /// Returns whether filter request `seq` is answered on screen or superseded.
@@ -318,8 +315,8 @@ impl FunctionsPanel {
     ///
     /// * `seq` - A [`Self::filter_ticket`] value.
     #[must_use]
-    pub const fn filter_settled(&self, seq: u64) -> bool {
-        self.rows.accepted() >= seq
+    pub fn filter_settled(&self, seq: u64) -> bool {
+        self.filter_job.settled(seq)
     }
 
     /// Scrolls the table so row `row` is at its top.
@@ -370,11 +367,11 @@ impl FunctionsPanel {
         cx: &mut Context<'_, Self>,
     ) {
         self.shown = Some(loaded);
-        self.rows.reset(Filtered {
+        self.rows = Some(Filtered {
             query: SharedString::default(),
             rows,
         });
-        self.filter_task = None;
+        self.filter_job.stop();
         self.selected = 0;
         if !self.filter.read(cx).text(cx).is_empty() {
             self.filter
@@ -400,8 +397,8 @@ impl FunctionsPanel {
     ) {
         let Some(loaded) = binary.read(cx).loaded().cloned() else {
             if self.shown.take().is_some() {
-                self.rows.clear();
-                self.filter_task = None;
+                self.rows = None;
+                self.filter_job.stop();
                 self.relayout(cx);
             }
             return;
@@ -426,7 +423,7 @@ impl FunctionsPanel {
         self.follow_binary(&binary, window, cx);
     }
 
-    /// Issues a sequenced background filter for the editor's query.
+    /// Filters the rows by the editor's query in the background, dropping the filter before.
     ///
     /// # Arguments
     ///
@@ -435,26 +432,16 @@ impl FunctionsPanel {
         let Some(loaded) = self.shown.clone() else {
             return;
         };
-        let seq = self.rows.issue();
         let query = SharedString::from(self.filter.read(cx).text(cx));
         let asked = query.clone();
-        let bg = spawn_engine(cx, move || Arc::new(filter_rows_blocking(&loaded, &asked)));
-        self.filter_task = Some(cx.spawn(async move |this, cx| {
-            let rows = Filtered {
-                query,
-                rows: bg.await,
-            };
-            let Some(this) = this.upgrade() else {
-                return;
-            };
-            this.update(cx, |panel, cx| {
-                if panel.rows.accept(seq, rows) {
-                    panel.selected = 0;
-                    panel.scroll_to_selected(cx);
-                    panel.relayout(cx);
-                }
+        let work = move || Arc::new(filter_rows_blocking(&loaded, &asked));
+        self.filter_job
+            .run("Filtering functions", cx, work, |panel, rows, cx| {
+                panel.rows = Some(Filtered { query, rows });
+                panel.selected = 0;
+                panel.scroll_to_selected(cx);
+                panel.relayout(cx);
             });
-        }));
     }
 
     /// Scrolls the table so the highlighted row stays visible.
@@ -832,6 +819,7 @@ mod tests {
     use crate::actions::FocusFilter;
     use crate::app_view::add_functions_panel;
     use crate::app_view::tests::{init, open, sample};
+    use crate::worker::Jobs;
 
     /// Vertical padding of a cell of Zed's table at the pin, both sides together, in rems
     /// (`py_0p5` in `data_table.rs`).
@@ -848,6 +836,19 @@ mod tests {
             add_functions_panel(&app.workspace, &app.binary, DockPosition::Left, window, cx);
         });
         (app.workspace, cx)
+    }
+
+    /// Returns `workspace`'s functions panel showing every row of the sample binary.
+    fn showing_sample(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+    ) -> Entity<FunctionsPanel> {
+        let panel = panel_of(workspace, cx);
+        let loaded = sample();
+        panel.update_in(cx, |panel, window, cx| {
+            panel.show(loaded.clone(), loaded.initial_rows.clone(), window, cx);
+        });
+        panel
     }
 
     /// Settles the work in flight and lays the window out twice, the second time at the
@@ -1065,6 +1066,88 @@ mod tests {
         assert_eq!(empty(cx), Some(Empty::NoMatch("zz".into())));
         draw(cx);
         assert_eq!(empty(cx), Some(Empty::NoMatch("zzz".into())));
+    }
+
+    /// A binary that starts loading while a filter runs stops the filter: no rows stay, the
+    /// load's failure is what the panel says, and the filter's ticket is settled; the load is
+    /// listed by the words the panel reads it with.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the stopped filter's rows come back, or its ticket stays open.
+    #[gpui::test]
+    fn a_load_stops_a_running_filter(cx: &mut TestAppContext) {
+        a_load_stops_a_running_filter_steps(cx);
+    }
+
+    /// Runs the steps of [`a_load_stops_a_running_filter`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`a_load_stops_a_running_filter`] says.
+    fn a_load_stops_a_running_filter_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (workspace, cx) = open_docked(&app_state, cx);
+        let panel = showing_sample(&workspace, cx);
+        panel.update_in(cx, |panel, window, cx| {
+            panel
+                .filter
+                .update(cx, |editor, cx| editor.set_text("zz", window, cx));
+        });
+        let binary = panel.read_with(cx, |panel, _| panel.binary().clone());
+        let missing = std::env::temp_dir().join("borer-app-no-such-binary.exe");
+        binary.update(cx, |binary, cx| binary.open_path(missing.clone(), cx));
+        let labels: Vec<_> = cx.update(|_, cx| Jobs::running(cx));
+        let labels: Vec<_> = labels.into_iter().map(|(_, label, _)| label).collect();
+        assert_eq!(labels, [Empty::Reading(missing).says()]);
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, cx| {
+            assert!(panel.rows().is_none());
+            assert!(matches!(panel.empty(cx), Some(Empty::LoadFailed(_))));
+            assert!(panel.filter_settled(panel.filter_ticket()));
+        });
+    }
+
+    /// A filter typed again before the engine answered raises the first request's flag at
+    /// once, and the rows shown are the second query's.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the first flag stays low or the rows answer the first query.
+    #[gpui::test]
+    fn a_superseded_functions_filter_raises_its_cancel(cx: &mut TestAppContext) {
+        a_superseded_functions_filter_raises_its_cancel_steps(cx);
+    }
+
+    /// Runs the steps of [`a_superseded_functions_filter_raises_its_cancel`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`a_superseded_functions_filter_raises_its_cancel`]
+    /// says.
+    fn a_superseded_functions_filter_raises_its_cancel_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (workspace, cx) = open_docked(&app_state, cx);
+        let panel = showing_sample(&workspace, cx);
+        let filter = |text: &'static str, cx: &mut VisualTestContext| {
+            panel.update_in(cx, |panel, window, cx| {
+                panel
+                    .filter
+                    .update(cx, |editor, cx| editor.set_text(text, window, cx));
+            });
+            let jobs = cx.update(|_, cx| Jobs::running(cx));
+            let mut flags = jobs
+                .into_iter()
+                .filter(|(_, label, _)| label == "Filtering functions");
+            flags.next().map(|(_, _, flag)| flag)
+        };
+        let first = filter("zz", cx).unwrap();
+        assert!(!first.is_raised());
+        filter("zzz", cx);
+        assert!(first.is_raised());
+        draw(cx);
+        let empty = panel.read_with(cx, |panel, cx| panel.empty(cx));
+        assert_eq!(empty, Some(Empty::NoMatch("zzz".into())));
     }
 
     /// The filter's hint shows the binding the keymap holds for [`FocusFilter`], and a new

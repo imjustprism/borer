@@ -24,9 +24,7 @@ const SCROLL_DURATION: Duration = Duration::from_secs(10);
 
 /// State of one 10-second scripted scroll, carried from frame to frame.
 struct ScrollRun {
-    /// Measurement generation owning this run.
-    ticket: u64,
-    /// Cooperative cancel flag owning this run.
+    /// Flag of the phase owning this run, raised when the next phase begins.
     cancel: Cancel,
     /// `true` to scroll the code view, `false` the function table.
     code: bool,
@@ -57,14 +55,12 @@ impl Harness {
     ///
     /// # Arguments
     ///
-    /// * `ticket` - Generation of the phase.
-    /// * `cancel` - Cancel flag of the phase.
+    /// * `cancel` - Flag of the phase.
     /// * `prepared` - The phase's background preparation.
     /// * `window` - Window driving frame callbacks.
     /// * `cx` - Harness context.
     pub(super) fn start(
         &mut self,
-        ticket: u64,
         cancel: Cancel,
         prepared: Prepared,
         window: &mut Window,
@@ -96,12 +92,11 @@ impl Harness {
                 (true, source, corpus.base_lines, TARGET_CODE_LINES, false)
             }
             Prepared::Input(loaded, entry) => {
-                self.start_input(ticket, cancel, loaded, entry, window, cx);
+                self.start_input(cancel, loaded, entry, window, cx);
                 return;
             }
         };
         let run = ScrollRun {
-            ticket,
             cancel,
             code,
             source,
@@ -129,7 +124,7 @@ impl Harness {
     /// * `window` - Window driving frame callbacks.
     /// * `cx` - Harness context.
     fn scroll_step(&mut self, mut run: ScrollRun, window: &mut Window, cx: &mut Context<'_, Self>) {
-        if !self.epoch.is_current(run.ticket, &run.cancel) {
+        if run.cancel.is_raised() {
             return;
         }
         let building = self
@@ -219,7 +214,7 @@ impl Harness {
         .and_then(|line| say(&format!("{line} painted={painted}")));
         match report {
             Err(err) => self.fail(err, cx),
-            Ok(()) if run.then_code => self.begin(MeasurePhase::CodeScroll, cx),
+            Ok(()) if run.then_code => self.begin(MeasurePhase::CodeScroll, window, cx),
             Ok(()) => cx.quit(),
         }
     }

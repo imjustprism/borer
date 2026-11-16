@@ -13,7 +13,19 @@ use ui::{Color, Label, LabelCommon as _, LabelSize, h_flex};
 use workspace::{HideStatusItem, ItemHandle, StatusItemView};
 
 use crate::recent::{self, RecentBinary, file_name};
-use crate::worker::{LoadedBinary, TaskEpoch, load_binary_blocking, spawn_engine};
+use borer_engine::cancel::Cancel;
+
+use crate::worker::{LoadedBinary, load_binary_blocking, spawn_engine};
+
+/// Returns what a load of `path` is called while it runs: `Reading` and the file's name.
+///
+/// # Arguments
+///
+/// * `path` - The file the load reads.
+#[must_use]
+pub fn reading_label(path: &Path) -> SharedString {
+    format!("Reading {}", file_name(path)).into()
+}
 
 /// Note appended to load status lines saying what this direct engine load omits.
 pub const LOAD_SCOPE_NOTE: &str = "packs left out; session load path comes next";
@@ -58,8 +70,8 @@ pub struct Binary {
     status: String,
     /// The binaries opened before, the newest first.
     recent: Vec<RecentBinary>,
-    /// Generation and cancel flag of the running load.
-    epoch: TaskEpoch,
+    /// Flag of the running load; raising it drops the load's answer.
+    load_flag: Cancel,
     /// The running background load.
     load_task: Option<Task<()>>,
     /// The running file dialog.
@@ -97,7 +109,7 @@ impl Binary {
             busy: None,
             status,
             recent,
-            epoch: TaskEpoch::new(),
+            load_flag: Cancel::new(),
             load_task: None,
             prompt_task: None,
             remember_task: None,
@@ -219,25 +231,22 @@ impl Binary {
         self.loaded = None;
         self.facts.clear();
         self.error = None;
-        let (ticket, worker_cancel) = self.epoch.begin();
-        let check_cancel = worker_cancel.clone();
         self.status.clear();
         self.reading = Some(Loading {
             path: path.clone(),
             since: cx.background_executor().now(),
         });
         cx.notify();
-        let bg = spawn_engine(cx, move || {
-            worker_cancel.within(|| load_binary_blocking(path))
-        });
+        let request = spawn_engine(reading_label(&path), cx, move || load_binary_blocking(path));
+        self.load_flag = request.flag();
         self.load_task = Some(cx.spawn(async move |this, cx| {
-            let result = bg.await;
+            let result = request.await;
             let Some(this) = this.upgrade() else {
                 return;
             };
             this.update(cx, |binary, cx| {
                 binary.busy = None;
-                if binary.epoch.is_current(ticket, &check_cancel) {
+                if let Some(result) = result.filter(|_| binary.reading.is_some()) {
                     binary.finish_load(result, cx);
                 } else {
                     if binary.status.starts_with(STILL_READING) {
@@ -256,7 +265,7 @@ impl Binary {
     ///
     /// * `cx` - Binary context.
     pub fn close(&mut self, cx: &mut Context<'_, Self>) {
-        self.epoch.invalidate();
+        self.load_flag.raise();
         self.reading = None;
         self.facts.clear();
         self.loaded = None;
@@ -277,7 +286,7 @@ impl Binary {
         let Some(loading) = self.reading.take() else {
             return;
         };
-        self.epoch.invalidate();
+        self.load_flag.raise();
         self.status = format!("cancelled reading {}", loading.name());
         cx.notify();
     }

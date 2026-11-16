@@ -141,9 +141,7 @@ enum InputStep {
 
 /// State of the input phase, carried from frame to frame.
 pub(super) struct InputRun {
-    /// Measurement generation ticket owning this input benchmark.
-    ticket: u64,
-    /// Cooperative [`Cancel`] flag owning this input benchmark.
+    /// Flag of the phase owning this input benchmark, raised when the next phase begins.
     cancel: Cancel,
     /// Target [`gpui::WindowId`] filtering profiler [`gpui::profiler::FrameEvent`] entries.
     window_id: gpui::WindowId,
@@ -181,15 +179,13 @@ impl Harness {
     ///
     /// # Arguments
     ///
-    /// * `ticket` - Generation of the phase.
-    /// * `cancel` - Cancel flag of the phase.
+    /// * `cancel` - Flag of the phase.
     /// * `loaded` - Notepad, analyzed.
     /// * `entry` - A function with a call token near its top.
     /// * `window` - Window receiving real OS keyboard and mouse events.
     /// * `cx` - Harness context.
     pub(super) fn start_input(
         &mut self,
-        ticket: u64,
         cancel: Cancel,
         loaded: Arc<LoadedBinary>,
         entry: u64,
@@ -213,7 +209,6 @@ impl Harness {
         self.before = None;
         self.marks.clear();
         let run = InputRun {
-            ticket,
             cancel,
             window_id: window.window_handle().window_id(),
             was_trace_enabled: gpui::profiler::set_trace_enabled(true),
@@ -244,7 +239,7 @@ impl Harness {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        if !self.epoch.is_current(run.ticket, &run.cancel) {
+        if run.cancel.is_raised() {
             return;
         }
         let events = run.collector.collect_unseen();

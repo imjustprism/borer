@@ -27,7 +27,7 @@ use crate::actions::ToggleTheme;
 use crate::app_assets::{AppIcon, Glyph};
 use crate::binary::{Binary, Loading, status_label};
 use crate::decompile_item::DecompileItem;
-use crate::worker::{GradeCounts, LoadedBinary, TaskEpoch, grade_counts_blocking, spawn_engine};
+use crate::worker::{GradeCounts, Job, LoadedBinary, grade_counts_blocking};
 
 /// How long a load runs before the work item shows it.
 const WORK_SHOWN_AFTER: Duration = Duration::from_millis(100);
@@ -111,10 +111,8 @@ pub struct Grades {
     running: Option<Checked>,
     /// The tab followed, and the observer that rechecks when it changes function.
     tab: Option<(Entity<DecompileItem>, Subscription)>,
-    /// Generation and cancel flag of the running check.
-    epoch: TaskEpoch,
     /// The running background check.
-    task: Option<Task<()>>,
+    job: Job,
 }
 
 impl std::fmt::Debug for Grades {
@@ -133,8 +131,7 @@ impl Grades {
             shown: None,
             running: None,
             tab: None,
-            epoch: TaskEpoch::new(),
-            task: None,
+            job: Job::default(),
         }
     }
 
@@ -150,7 +147,7 @@ impl Grades {
     /// Returns the generation of the latest check started.
     #[must_use]
     pub const fn ticket(&self) -> u64 {
-        self.epoch.seq()
+        self.job.ticket()
     }
 
     /// Checks the function the followed tab shows in the background, unless its counts
@@ -169,8 +166,7 @@ impl Grades {
             })
         });
         let Some(target) = target else {
-            self.epoch.invalidate();
-            self.task = None;
+            self.job.stop();
             self.running = None;
             self.shown = None;
             cx.notify();
@@ -190,25 +186,14 @@ impl Grades {
         self.shown = None;
         self.running = Some(target.clone());
         cx.notify();
-        let (ticket, cancel) = self.epoch.begin();
-        let worker = cancel.clone();
         let job = target.clone();
-        let bg = spawn_engine(cx, move || {
-            worker.within(|| grade_counts_blocking(&job.loaded, job.entry))
+        let work = move || grade_counts_blocking(&job.loaded, job.entry);
+        let label = format!("Grading {:#x}", target.entry);
+        self.job.run(label, cx, work, |grades, counts, cx| {
+            grades.running = None;
+            grades.shown = Some((target, counts));
+            cx.notify();
         });
-        self.task = Some(cx.spawn(async move |this, cx| {
-            let counts = bg.await;
-            let Some(this) = this.upgrade() else {
-                return;
-            };
-            this.update(cx, |grades, cx| {
-                if grades.epoch.is_current(ticket, &cancel) {
-                    grades.running = None;
-                    grades.shown = Some((target, counts));
-                    cx.notify();
-                }
-            });
-        }));
     }
 }
 

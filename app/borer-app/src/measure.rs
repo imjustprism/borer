@@ -40,8 +40,7 @@ use crate::decompile_item::DecompileItem;
 use crate::functions_panel::FunctionsPanel;
 use crate::shell::Shell;
 use crate::worker::{
-    LoadedBinary, TaskEpoch, decompile_blocking, load_binary_blocking, run_engine, spawn_engine,
-    ui_engine_calls,
+    Job, LoadedBinary, decompile_blocking, load_binary_blocking, run_engine, ui_engine_calls,
 };
 
 /// Shared error slot transferring non-interactive CLI failures out of `Application::run`.
@@ -201,6 +200,15 @@ impl MeasurePhase {
             Self::BothScrolls | Self::ListScroll => "list scroll load failed",
             Self::CodeScroll => "code scroll load failed",
             Self::InputLatency => "input latency load failed",
+        }
+    }
+
+    /// Returns what the running work list calls this phase's preparation.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::BothScrolls | Self::ListScroll => "Preparing the list scroll",
+            Self::CodeScroll => "Preparing the code scroll",
+            Self::InputLatency => "Preparing the input run",
         }
     }
 }
@@ -709,9 +717,11 @@ pub struct Harness {
     exit: CliExitSlot,
     /// Whether the one-shot report of [`Self::mode`] has been scheduled.
     reported: bool,
-    /// Generation and cancel flag of the running phase.
-    epoch: TaskEpoch,
-    /// The running background preparation or stdin wait.
+    /// Flag of the running phase, raised when the next phase begins.
+    phase: Cancel,
+    /// The running background preparation.
+    prep: Job,
+    /// The running stdin wait.
     task: Option<Task<()>>,
     /// The stdin `MARK` reader of the input phase.
     inject: Option<InjectMark>,
@@ -812,7 +822,8 @@ impl Harness {
             mode,
             exit,
             reported: false,
-            epoch: TaskEpoch::new(),
+            phase: Cancel::new(),
+            prep: Job::default(),
             task: None,
             inject: None,
             marks: VecDeque::new(),
@@ -825,7 +836,7 @@ impl Harness {
             observers: observe,
         };
         if let Some(phase) = phase {
-            harness.begin(phase, cx);
+            harness.begin(phase, window, cx);
         }
         if let CliMode::MeasureDrop(dir, binary) = &harness.mode {
             let (dir, binary) = (dir.clone(), binary.clone());
@@ -949,23 +960,26 @@ impl Harness {
         cx.quit();
     }
 
-    /// Prepares `phase` on the background executor, then starts it.
+    /// Prepares `phase` on the background executor, then starts it; the phase before ends.
     ///
     /// # Arguments
     ///
     /// * `phase` - The phase to run.
+    /// * `window` - Window the phase runs in.
     /// * `cx` - Harness context.
-    fn begin(&mut self, phase: MeasurePhase, cx: &mut Context<'_, Self>) {
-        let (ticket, cancel) = self.epoch.begin();
+    fn begin(&mut self, phase: MeasurePhase, window: &Window, cx: &mut Context<'_, Self>) {
+        self.phase.raise();
+        self.phase = Cancel::new();
+        let cancel = self.phase.clone();
         let worker = cancel.clone();
-        let bg = match phase {
+        let work: Box<dyn FnOnce() -> anyhow::Result<Prepared> + Send> = match phase {
             MeasurePhase::BothScrolls | MeasurePhase::ListScroll => {
                 let then_code = phase == MeasurePhase::BothScrolls;
-                spawn_engine(cx, move || {
+                Box::new(move || {
                     load_large_dll_blocking(&worker).map(|ready| Prepared::List(ready, then_code))
                 })
             }
-            MeasurePhase::CodeScroll => spawn_engine(cx, move || {
+            MeasurePhase::CodeScroll => Box::new(move || {
                 build_corpus_code_blocking(Path::new(SYSTEM_NOTEPAD), &worker).map(Prepared::Code)
             }),
             MeasurePhase::InputLatency => {
@@ -976,26 +990,19 @@ impl Harness {
                         return;
                     }
                 }
-                spawn_engine(cx, move || prepare_input(&worker))
+                Box::new(move || prepare_input(&worker))
             }
         };
-        let exit = self.exit.clone();
-        self.task = Some(cx.spawn(async move |this, cx| {
-            let ready = bg.await;
-            let started = this.update_in(cx, |harness, window, cx| {
-                if !harness.epoch.is_current(ticket, &cancel) {
-                    return;
-                }
-                match ready {
-                    Ok(prepared) => harness.start(ticket, cancel, prepared, window, cx),
-                    Err(err) => harness.fail(err.context(phase.failure()), cx),
-                }
-            });
-            if let Err(err) = started {
-                *exit.borrow_mut() = Some(err.context("the measured window is gone"));
-                cx.update(|cx| cx.quit());
-            }
-        }));
+        self.prep.run_in(
+            phase.label(),
+            window,
+            cx,
+            work,
+            move |harness, ready, window, cx| match ready {
+                Ok(prepared) => harness.start(cancel, prepared, window, cx),
+                Err(err) => harness.fail(err.context(phase.failure()), cx),
+            },
+        );
     }
 
     /// Schedules the one-shot report of [`Self::mode`] once the app is ready for it.

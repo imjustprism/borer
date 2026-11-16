@@ -1,9 +1,13 @@
-//! Background engine execution guard, UI-thread call counter, and filter sequencer.
+//! The one door for engine work: background requests, their list and each view's slot,
+//! the UI-thread call counter, and the engine calls the app makes.
 
 use std::cell::Cell;
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::Poll;
 
 use borer_engine::analysis::decompile::replay::{Grade, TextCheck};
 use borer_engine::analysis::decompile::text_check;
@@ -15,7 +19,7 @@ use borer_engine::analysis::{Analysis, EnumSource, Overlay, no_function_at, reso
 use borer_engine::cancel::Cancel;
 use borer_engine::program::{Feature, Program};
 use borer_engine::view::View;
-use gpui::{App, Task};
+use gpui::{App, Context, Global, SharedString, Task, Window};
 
 thread_local! {
     /// Marks the foreground UI thread so engine calls there are counted.
@@ -62,21 +66,277 @@ pub fn run_engine<R>(f: impl FnOnce() -> R) -> R {
     f()
 }
 
-/// Spawns synchronous engine work `f` onto GPUI's background executor.
+/// A background engine request, whose answer is `None` once its flag was raised.
+///
+/// Awaiting it gives the answer, or `None` when its flag was raised while the work ran, so
+/// a stopped request's answer is never used; dropping it, answered or not, raises the
+/// request's own [`Cancel`] and takes it off [`Jobs`].
+///
+/// Raising the flag asks the engine to stop at its next check; work that reads no flag runs
+/// on to its end unlisted, and its answer is dropped.
+#[derive(Debug)]
+#[must_use = "dropping the request cancels it"]
+pub struct EngineTask<R> {
+    /// The background run of the work, `None` when the flag was raised before it returned.
+    task: Task<Option<R>>,
+    /// The flag in force while the work runs.
+    cancel: Cancel,
+}
+
+impl<R: Unpin + 'static> Future for EngineTask<R> {
+    type Output = Option<R>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Option<R>> {
+        Pin::new(&mut self.task).poll(cx)
+    }
+}
+
+impl<R> EngineTask<R> {
+    /// Returns the request's flag: raising it drops the answer and asks the engine to stop.
+    #[must_use]
+    pub fn flag(&self) -> Cancel {
+        self.cancel.clone()
+    }
+}
+
+impl<R> Drop for EngineTask<R> {
+    fn drop(&mut self) {
+        self.cancel.raise();
+    }
+}
+
+/// Lists the engine requests running in the app, oldest first.
+///
+/// Each entry is an id, a label naming the request's subject and its [`Cancel`]; a raised
+/// flag marks an answered or dropped request, which readers skip and the next request
+/// prunes. It holds no time, and no answer reads it.
+#[derive(Debug, Default)]
+pub struct Jobs {
+    /// Id of the newest request.
+    newest: u64,
+    /// Every request since the last prune: id, label and flag.
+    live: Vec<(u64, SharedString, Cancel)>,
+}
+
+impl Global for Jobs {}
+
+impl Jobs {
+    /// Returns the requests still running, oldest first.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Application context holding the list.
+    ///
+    /// # Returns
+    ///
+    /// Each running request's id, label and flag; raising the flag drops its answer and asks
+    /// the engine to stop at its next check.
+    #[must_use]
+    pub fn running(cx: &App) -> Vec<(u64, SharedString, Cancel)> {
+        cx.try_global::<Self>().map_or_else(Vec::new, |jobs| {
+            let live = jobs.live.iter().filter(|(_, _, flag)| !flag.is_raised());
+            live.cloned().collect()
+        })
+    }
+}
+
+/// Spawns synchronous engine work onto GPUI's background executor, under a fresh
+/// [`Cancel`], and lists it in [`Jobs`] while it runs.
 ///
 /// # Arguments
 ///
-/// * `cx` - Application context providing the background thread pool.
-/// * `f` - Synchronous engine closure to execute off the UI thread.
+/// * `label` - What the request does to which subject (`Reading notepad.exe`), from data
+///   the caller already holds.
+/// * `cx` - Application context providing the background thread pool and the list.
+/// * `work` - Synchronous engine closure to execute off the UI thread.
 ///
 /// # Returns
 ///
-/// A [`Task`] yielding the result of `f`.
-pub fn spawn_engine<R: Send + 'static>(
-    cx: &App,
-    f: impl FnOnce() -> R + Send + 'static,
-) -> Task<R> {
-    cx.background_executor().spawn(async move { run_engine(f) })
+/// The request; dropping it raises its flag.
+pub fn spawn_engine<R: Send + Unpin + 'static>(
+    label: impl Into<SharedString>,
+    cx: &mut App,
+    work: impl FnOnce() -> R + Send + 'static,
+) -> EngineTask<R> {
+    let cancel = Cancel::new();
+    let jobs = cx.default_global::<Jobs>();
+    jobs.live.retain(|(_, _, flag)| !flag.is_raised());
+    jobs.newest = jobs.newest.saturating_add(1);
+    jobs.live.push((jobs.newest, label.into(), cancel.clone()));
+    let flag = cancel.clone();
+    let task = cx.background_executor().spawn(async move {
+        flag.within(|| {
+            let answer = run_engine(work);
+            (!Cancel::raised()).then_some(answer)
+        })
+    });
+    EngineTask { task, cancel }
+}
+
+/// Holds one view's newest engine request.
+///
+/// A new run raises the flag of the one before and drops it, so its answer is never
+/// applied; dropping the view drops the slot, which raises its request's flag. Tickets let
+/// tests and the measure harness wait for one request.
+///
+/// The slot raises the flag itself, at once, because dropping a gpui [`Task`] drops its
+/// future only when the executor next polls it, so the [`EngineTask`] inside would raise
+/// its flag one turn of the UI thread late.
+#[derive(Debug, Default)]
+pub struct Job {
+    /// Ticket of the newest request or stop.
+    issued: u64,
+    /// Ticket of the newest request whose answer was applied, or of the newest stop.
+    settled: Rc<Cell<u64>>,
+    /// The applying of the newest request's answer, and that request's flag.
+    running: Option<(Task<()>, Cancel)>,
+}
+
+impl Drop for Job {
+    fn drop(&mut self) {
+        self.halt();
+    }
+}
+
+impl Job {
+    /// Drops the request before and starts `work` under a new ticket.
+    ///
+    /// # Arguments
+    ///
+    /// * `label` - What [`Jobs`] lists the request as.
+    /// * `cx` - Application context.
+    /// * `work` - Synchronous engine closure.
+    ///
+    /// # Returns
+    ///
+    /// The ticket, the request and the cell its applying settles.
+    fn start<R: Send + Unpin + 'static>(
+        &mut self,
+        label: impl Into<SharedString>,
+        cx: &mut App,
+        work: impl FnOnce() -> R + Send + 'static,
+    ) -> (u64, EngineTask<R>, Rc<Cell<u64>>) {
+        self.halt();
+        self.issued = self.issued.saturating_add(1);
+        (
+            self.issued,
+            spawn_engine(label, cx, work),
+            self.settled.clone(),
+        )
+    }
+
+    /// Runs `work` in the background and hands its answer to `done` on the UI thread,
+    /// unless a newer run, a stop, the view's drop or a raise of its flag came first; a
+    /// raised request settles its ticket without `done`.
+    ///
+    /// # Arguments
+    ///
+    /// * `label` - What [`Jobs`] lists the request as.
+    /// * `cx` - Context of the view holding the slot.
+    /// * `work` - Synchronous engine closure.
+    /// * `done` - Applies the answer to the view.
+    ///
+    /// # Returns
+    ///
+    /// The request's ticket.
+    pub fn run<V: 'static, R: Send + Unpin + 'static>(
+        &mut self,
+        label: impl Into<SharedString>,
+        cx: &mut Context<'_, V>,
+        work: impl FnOnce() -> R + Send + 'static,
+        done: impl FnOnce(&mut V, R, &mut Context<'_, V>) + 'static,
+    ) -> u64 {
+        let (ticket, request, settled) = self.start(label, cx, work);
+        let flag = request.cancel.clone();
+        let task = cx.spawn(async move |view, cx| {
+            let answer = request.await;
+            if let Some(view) = view.upgrade() {
+                view.update(cx, |view, cx| {
+                    settled.set(ticket);
+                    if let Some(answer) = answer {
+                        done(view, answer, cx);
+                    }
+                });
+            }
+        });
+        self.running = Some((task, flag));
+        ticket
+    }
+
+    /// Runs `work` in the background and hands its answer to `done` on the UI thread with
+    /// the view's window, unless a newer run, a stop, the view's drop, the window's close or
+    /// a raise of its flag came first; a raised request settles its ticket without `done`.
+    ///
+    /// # Arguments
+    ///
+    /// * `label` - What [`Jobs`] lists the request as.
+    /// * `window` - Window the view is in.
+    /// * `cx` - Context of the view holding the slot.
+    /// * `work` - Synchronous engine closure.
+    /// * `done` - Applies the answer to the view.
+    ///
+    /// # Returns
+    ///
+    /// The request's ticket.
+    pub fn run_in<V: 'static, R: Send + Unpin + 'static>(
+        &mut self,
+        label: impl Into<SharedString>,
+        window: &Window,
+        cx: &mut Context<'_, V>,
+        work: impl FnOnce() -> R + Send + 'static,
+        done: impl FnOnce(&mut V, R, &mut Window, &mut Context<'_, V>) + 'static,
+    ) -> u64 {
+        let (ticket, request, settled) = self.start(label, cx, work);
+        let flag = request.cancel.clone();
+        let task = cx.spawn_in(window, async move |view, cx| {
+            let answer = request.await;
+            let applied = view.update_in(cx, |view, window, cx| {
+                settled.set(ticket);
+                if let Some(answer) = answer {
+                    done(view, answer, window, cx);
+                }
+            });
+            applied.unwrap_or(());
+        });
+        self.running = Some((task, flag));
+        ticket
+    }
+
+    /// Raises the newest request's flag and drops it.
+    fn halt(&mut self) {
+        if let Some((_, flag)) = self.running.take() {
+            flag.raise();
+        }
+    }
+
+    /// Drops the running request, raising its flag, and settles every ticket.
+    pub fn stop(&mut self) {
+        self.halt();
+        self.issued = self.issued.saturating_add(1);
+        self.settled.set(self.issued);
+    }
+
+    /// Returns whether the newest request's answer is not applied yet.
+    #[must_use]
+    pub fn is_running(&self) -> bool {
+        self.settled.get() < self.issued
+    }
+
+    /// Returns the ticket of the newest request or stop.
+    #[must_use]
+    pub const fn ticket(&self) -> u64 {
+        self.issued
+    }
+
+    /// Returns whether request `ticket` is applied, stopped or superseded.
+    ///
+    /// # Arguments
+    ///
+    /// * `ticket` - A [`Self::ticket`] value.
+    #[must_use]
+    pub fn settled(&self, ticket: u64) -> bool {
+        ticket < self.issued || self.settled.get() >= ticket
+    }
 }
 
 /// Immutable engine state for one opened binary.
@@ -326,7 +586,9 @@ pub struct GoToAnswer {
 
 /// Resolves `query` as an address or a name, and filters the function rows by it.
 ///
-/// Must be called inside [`spawn_engine`].
+/// Must be called inside [`spawn_engine`]. It runs under a flag of its own that nothing
+/// raises: the name index it builds is kept for the next query only when no raised flag
+/// cut it short, and a query typed over would otherwise throw each build away.
 ///
 /// # Arguments
 ///
@@ -334,6 +596,16 @@ pub struct GoToAnswer {
 /// * `query` - What the person typed: `0x`-hex, decimal or a name.
 #[must_use]
 pub fn goto_blocking(loaded: &LoadedBinary, query: &str) -> GoToAnswer {
+    Cancel::new().within(|| goto_answer(loaded, query))
+}
+
+/// Answers a go-to query, as [`goto_blocking`] does, under whatever flag is in force.
+///
+/// # Arguments
+///
+/// * `loaded` - Previously loaded binary state.
+/// * `query` - What the person typed.
+fn goto_answer(loaded: &LoadedBinary, query: &str) -> GoToAnswer {
     let (p, a, o) = (&*loaded.program, &*loaded.analysis, &*loaded.overlay);
     let target = resolve_suggesting(p, a, o, query).and_then(|va| {
         a.function_at(va)
@@ -345,180 +617,151 @@ pub fn goto_blocking(loaded: &LoadedBinary, query: &str) -> GoToAnswer {
     GoToAnswer { target, rows }
 }
 
-/// Monotonic request sequencer ensuring a late older background answer never
-/// overwrites a newer filter result.
-#[derive(Debug, Clone)]
-pub struct FilterLatest<T> {
-    /// Sequence number of the latest issued request.
-    issued: u64,
-    /// Sequence number of the latest accepted answer.
-    accepted: u64,
-    /// Value held for `accepted`, if any answer has arrived.
-    value: Option<T>,
-}
-
-impl<T> Default for FilterLatest<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<T> FilterLatest<T> {
-    /// Creates an empty sequencer with no issued requests.
-    ///
-    /// # Returns
-    ///
-    /// A new [`FilterLatest`] state.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            issued: 0,
-            accepted: 0,
-            value: None,
-        }
-    }
-
-    /// Replaces the current value immediately and invalidates all earlier in-flight requests.
-    ///
-    /// # Arguments
-    ///
-    /// * `value` - New baseline value (such as the unfiltered rows of a freshly opened binary).
-    pub fn reset(&mut self, value: T) {
-        self.issued = self.issued.saturating_add(1);
-        self.accepted = self.issued;
-        self.value = Some(value);
-    }
-
-    /// Clears the current value immediately and invalidates all earlier in-flight requests.
-    pub fn clear(&mut self) {
-        self.issued = self.issued.saturating_add(1);
-        self.accepted = self.issued;
-        self.value = None;
-    }
-
-    /// Issues a new request ticket higher than every previous ticket.
-    ///
-    /// # Returns
-    ///
-    /// Sequence ticket to pass to [`FilterLatest::accept`] when the background task finishes.
-    pub fn issue(&mut self) -> u64 {
-        self.issued = self.issued.saturating_add(1);
-        self.issued
-    }
-
-    /// Accepts `value` only when `seq` is strictly newer than the already accepted answer
-    /// and matches the latest issued request (or supersedes older ones).
-    ///
-    /// # Arguments
-    ///
-    /// * `seq` - Ticket returned by [`FilterLatest::issue`].
-    /// * `value` - Answer produced for `seq`.
-    ///
-    /// # Returns
-    ///
-    /// `true` when `value` became the active answer, `false` when discarded as stale.
-    pub fn accept(&mut self, seq: u64, value: T) -> bool {
-        if seq < self.issued || seq <= self.accepted {
-            return false;
-        }
-        self.accepted = seq;
-        self.value = Some(value);
-        true
-    }
-
-    /// Returns the ticket of the latest issued request.
-    #[must_use]
-    pub const fn issued(&self) -> u64 {
-        self.issued
-    }
-
-    /// Returns the ticket of the latest accepted answer; every request up to it is
-    /// answered or superseded.
-    #[must_use]
-    pub const fn accepted(&self) -> u64 {
-        self.accepted
-    }
-
-    /// Returns the most recent accepted answer.
-    ///
-    /// # Returns
-    ///
-    /// Active value, or `None` before any reset or accepted answer.
-    #[must_use]
-    pub const fn current(&self) -> Option<&T> {
-        self.value.as_ref()
-    }
-}
-
-/// Monotonic ticket and cooperative [`Cancel`] pair invalidating superseded background work.
-#[derive(Debug, Default)]
-pub struct TaskEpoch {
-    /// Current generation counter; incremented on every start or invalidation.
-    seq: u64,
-    /// Active cancellation flag for the current generation, if any task is running.
-    cancel: Option<Cancel>,
-}
-
-impl TaskEpoch {
-    /// Creates an idle [`TaskEpoch`] at generation `0`.
-    ///
-    /// # Returns
-    ///
-    /// A new idle [`TaskEpoch`].
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            seq: 0,
-            cancel: None,
-        }
-    }
-
-    /// Raises any active [`Cancel`] flag and advances the generation so in-flight tickets expire.
-    pub fn invalidate(&mut self) {
-        if let Some(prev) = self.cancel.take() {
-            prev.raise();
-        }
-        self.seq = self.seq.saturating_add(1);
-    }
-
-    /// Invalidates any prior generation and starts a fresh one with a new [`Cancel`] token.
-    ///
-    /// # Returns
-    ///
-    /// `(ticket, cancel)` to pass into the background task and check on completion.
-    #[must_use]
-    pub fn begin(&mut self) -> (u64, Cancel) {
-        self.invalidate();
-        let cancel = Cancel::new();
-        self.cancel = Some(cancel.clone());
-        (self.seq, cancel)
-    }
-
-    /// Returns the current generation counter.
-    #[must_use]
-    pub const fn seq(&self) -> u64 {
-        self.seq
-    }
-
-    /// Reports whether `ticket` and `cancel` still belong to the active, uncancelled generation.
-    ///
-    /// # Arguments
-    ///
-    /// * `ticket` - Generation counter returned by [`Self::begin`].
-    /// * `cancel` - Cooperative [`Cancel`] flag returned by [`Self::begin`].
-    ///
-    /// # Returns
-    ///
-    /// `true` when `ticket` matches the current generation and `cancel` was not raised.
-    #[must_use]
-    pub fn is_current(&self, ticket: u64, cancel: &Cancel) -> bool {
-        ticket == self.seq && !cancel.is_raised()
-    }
-}
-
 #[cfg(test)]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test; gpui::test hides each body in an undocumented fn"
+)]
 mod tests {
-    use super::{FilterLatest, TaskEpoch};
+    use borer_engine::cancel::Cancel;
+    use gpui::{AppContext as _, Entity, SharedString, TestAppContext};
+
+    use super::{Job, Jobs, goto_blocking, spawn_engine};
+
+    /// A view with one request slot, keeping the answers applied to it.
+    #[derive(Default)]
+    struct Probe {
+        /// The slot.
+        job: Job,
+        /// Answers applied, oldest first: the request's label and whether its flag was
+        /// raised while its work ran.
+        answers: Vec<(&'static str, bool)>,
+    }
+
+    /// Runs a request labelled `label` in `probe`'s slot.
+    fn ask(probe: &Entity<Probe>, label: &'static str, cx: &mut TestAppContext) {
+        probe.update(cx, |probe, cx| {
+            let work = move || (label, Cancel::raised());
+            probe.job.run(label, cx, work, |probe, answer, _| {
+                probe.answers.push(answer);
+            });
+        });
+    }
+
+    /// Returns the label and flag of every running request.
+    fn running(cx: &mut TestAppContext) -> Vec<(SharedString, Cancel)> {
+        let jobs = cx.read(Jobs::running);
+        jobs.into_iter()
+            .map(|(_, label, flag)| (label, flag))
+            .collect()
+    }
+
+    /// A second request in one slot raises the first's flag at once and only the second's
+    /// answer is applied, from work that ran under a flag not raised.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the first flag stays low, its answer is applied, or the tickets disagree.
+    #[gpui::test]
+    fn a_new_request_raises_the_cancel_of_the_one_before_and_drops_its_answer(
+        cx: &mut TestAppContext,
+    ) {
+        let probe = cx.new(|_| Probe::default());
+        ask(&probe, "first", cx);
+        let first = running(cx);
+        assert_eq!(first.len(), 1);
+        ask(&probe, "second", cx);
+        assert!(first[0].1.is_raised());
+        let job = |cx: &mut TestAppContext| {
+            probe.read_with(cx, |p, _| {
+                (p.job.ticket(), p.job.settled(1), p.job.settled(2))
+            })
+        };
+        assert_eq!(job(cx), (2, true, false));
+        cx.run_until_parked();
+        assert_eq!(job(cx), (2, true, true));
+        let answers = probe.read_with(cx, |probe, _| probe.answers.clone());
+        assert_eq!(answers, [("second", false)]);
+    }
+
+    /// A request whose flag is raised while it runs settles its ticket and is never applied.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the answer is applied or the ticket stays open.
+    #[gpui::test]
+    fn a_raised_request_settles_without_its_answer(cx: &mut TestAppContext) {
+        let probe = cx.new(|_| Probe::default());
+        ask(&probe, "raised", cx);
+        running(cx).remove(0).1.raise();
+        cx.run_until_parked();
+        let (answers, settled) = probe.read_with(cx, |p, _| (p.answers.clone(), p.job.settled(1)));
+        assert!(answers.is_empty());
+        assert!(settled);
+    }
+
+    /// Dropping a request before it is answered raises its flag at once.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the flag stays low.
+    #[gpui::test]
+    fn dropping_an_engine_task_raises_its_flag(cx: &mut TestAppContext) {
+        let request = cx.update(|cx| spawn_engine("dropped", cx, || ()));
+        let flag = running(cx).remove(0).1;
+        drop(request);
+        assert!(flag.is_raised());
+    }
+
+    /// Go to runs under a flag of its own, so a raised request flag keeps the name index
+    /// it builds for the next query.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the index is not kept.
+    #[test]
+    fn go_to_keeps_its_name_index_under_a_raised_flag() {
+        let loaded = crate::app_view::tests::sample();
+        let raised = Cancel::new();
+        raised.raise();
+        raised.within(|| goto_blocking(&loaded, "x"));
+        assert_eq!(loaded.analysis.derived.held("name_index"), 1);
+    }
+
+    /// Dropping the view holding a slot raises its request's flag, and the list keeps no
+    /// running entry.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the flag stays low or the list still names the request.
+    #[gpui::test]
+    fn dropping_a_view_stops_its_job(cx: &mut TestAppContext) {
+        let probe = cx.new(|_| Probe::default());
+        ask(&probe, "dropped", cx);
+        let flag = running(cx).remove(0).1;
+        drop(probe);
+        cx.update(|_| ());
+        assert!(flag.is_raised());
+        cx.run_until_parked();
+        assert!(running(cx).is_empty());
+    }
+
+    /// The list names each running request by its label, oldest first, and forgets each
+    /// once it is answered.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the labels differ or an answered request stays listed.
+    #[gpui::test]
+    fn the_jobs_list_names_each_running_request_and_forgets_it(cx: &mut TestAppContext) {
+        let (one, two) = (cx.new(|_| Probe::default()), cx.new(|_| Probe::default()));
+        ask(&one, "Reading a.exe", cx);
+        ask(&two, "Filtering functions", cx);
+        let labels: Vec<_> = running(cx).into_iter().map(|(label, _)| label).collect();
+        assert_eq!(labels, ["Reading a.exe", "Filtering functions"]);
+        cx.run_until_parked();
+        assert!(running(cx).is_empty());
+    }
 
     /// No module of the app but this one names the engine's compute calls outside its
     /// tests, so each such call goes through [`super::run_engine`] and is counted.
@@ -569,73 +812,5 @@ mod tests {
                 assert!(!code.contains(call), "{name} names {call}");
             }
         }
-    }
-
-    /// Older filter requests finishing after a newer one are discarded.
-    ///
-    /// # Panics
-    ///
-    /// Panics if a stale answer overwrites the newest request's answer.
-    #[test]
-    fn newest_filter_request_wins_over_late_older_answer() {
-        let mut seq = FilterLatest::new();
-        seq.reset("all");
-        assert_eq!(seq.current().copied(), Some("all"));
-
-        let older = seq.issue();
-        let newer = seq.issue();
-
-        assert!(seq.accept(newer, "new-rows"));
-        assert_eq!(seq.current().copied(), Some("new-rows"));
-
-        assert!(!seq.accept(older, "stale-rows"));
-        assert_eq!(seq.current().copied(), Some("new-rows"));
-    }
-
-    /// Clearing or resetting rows permanently rejects in-flight filter tickets from an earlier binary.
-    ///
-    /// # Panics
-    ///
-    /// Panics if a prior binary's ticket is accepted after [`FilterLatest::clear`] or [`FilterLatest::reset`].
-    #[test]
-    fn reset_and_clear_permanently_reject_prior_binary_filter_tickets() {
-        let mut seq = FilterLatest::new();
-        seq.reset("binary-a-all");
-        let ticket_a = seq.issue();
-
-        seq.clear();
-        assert_eq!(seq.current().copied(), None);
-        assert!(!seq.accept(ticket_a, "binary-a-filtered"));
-
-        seq.reset("binary-b-all");
-        assert_eq!(seq.current().copied(), Some("binary-b-all"));
-        assert!(!seq.accept(ticket_a, "binary-a-filtered"));
-
-        let ticket_b = seq.issue();
-        assert!(!seq.accept(ticket_a, "binary-a-filtered"));
-        assert!(seq.accept(ticket_b, "binary-b-filtered"));
-        assert_eq!(seq.current().copied(), Some("binary-b-filtered"));
-    }
-
-    /// Invalidating an epoch when switching binaries cancels and rejects an in-flight decompile.
-    ///
-    /// # Panics
-    ///
-    /// Panics if a superseded generation stays current or fails to raise its cancel flag.
-    #[test]
-    fn task_epoch_invalidation_cancels_and_rejects_prior_binary_ticket() {
-        let mut decompile_epoch = TaskEpoch::new();
-        let (ticket_a, cancel_a) = decompile_epoch.begin();
-        assert!(decompile_epoch.is_current(ticket_a, &cancel_a));
-        assert!(!cancel_a.is_raised());
-
-        decompile_epoch.invalidate();
-        assert!(cancel_a.is_raised());
-        assert!(!decompile_epoch.is_current(ticket_a, &cancel_a));
-
-        let (ticket_b, cancel_b) = decompile_epoch.begin();
-        assert!(ticket_b > ticket_a);
-        assert!(decompile_epoch.is_current(ticket_b, &cancel_b));
-        assert!(!decompile_epoch.is_current(ticket_a, &cancel_b));
     }
 }
