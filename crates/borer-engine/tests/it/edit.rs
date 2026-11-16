@@ -365,3 +365,77 @@ fn a_layout_planned_again_reads_the_prototypes_stated_meanwhile() {
         has.spell()
     );
 }
+
+/// Taking back one rename of a function's variables keeps a later rename
+/// of another, and taking back what a later edit changed again, or a type
+/// a later edit applies, is refused with nothing written.
+#[test]
+fn taking_an_edit_back_keeps_and_refuses_what_came_after() {
+    let p = fixture();
+    let a = Analysis::compute(&p);
+    let entry = a.functions.first().expect("a function").entry;
+    let mut o = Overlay::default();
+    let stated = o.vars.entry(entry).or_default();
+    stated.insert(VarKey::Param(0), Var::parse("x").expect("a variable"));
+    stated.insert(VarKey::Param(1), Var::parse("y").expect("a variable"));
+    let rename = |var: &str, name: &str| {
+        [Edit::Var {
+            entry,
+            var: var.to_owned(),
+            field: None,
+            name: Some(name.to_owned()),
+            ty: None,
+        }]
+    };
+    let first = plan(&p, &a, &o, &rename("x", "count"), Force::Refuse).expect("planned");
+    commit(&a, &mut o, &first).expect("committed");
+    let second = plan(&p, &a, &o, &rename("y", "total"), Force::Refuse).expect("planned");
+    commit(&a, &mut o, &second).expect("committed");
+    let back = revert(&o, first.changes());
+    commit(&a, &mut o, &back).expect("taken back");
+    let named = |key| {
+        o.vars
+            .get(&entry)
+            .and_then(|v| v.get(&key))
+            .map(|v| v.name.clone())
+    };
+    assert_eq!(named(VarKey::Param(0)).as_deref(), Some("x"));
+    assert_eq!(
+        named(VarKey::Param(1)).as_deref(),
+        Some("total"),
+        "the later rename went"
+    );
+    let name = |n: &str| {
+        [Edit::Name {
+            at: entry,
+            name: n.to_owned(),
+        }]
+    };
+    let one = plan(&p, &a, &o, &name("one"), Force::Refuse).expect("planned");
+    commit(&a, &mut o, &one).expect("committed");
+    let two = plan(&p, &a, &o, &name("two"), Force::Refuse).expect("planned");
+    commit(&a, &mut o, &two).expect("committed");
+    let before = o.fingerprint();
+    let back = revert(&o, one.changes());
+    let changed = commit(&a, &mut o, &back).expect_err("renamed since");
+    assert!(changed.to_string().contains("changed since"), "{changed}");
+    assert_eq!(o.fingerprint(), before, "a refused take-back wrote");
+    let word = parse_type("u32").expect("a type");
+    let define = [Edit::Alias {
+        name: "Word".to_owned(),
+        ty: word,
+    }];
+    let defined = plan(&p, &a, &o, &define, Force::Refuse).expect("planned");
+    commit(&a, &mut o, &defined).expect("committed");
+    let applied = [Edit::Apply {
+        at: 0x2040,
+        ty: parse_type("Word").expect("a type"),
+    }];
+    let made = plan(&p, &a, &o, &applied, Force::Refuse).expect("planned");
+    commit(&a, &mut o, &made).expect("committed");
+    let before = o.fingerprint();
+    let back = revert(&o, defined.changes());
+    let dropped = commit(&a, &mut o, &back).expect_err("still applied");
+    assert!(dropped.to_string().contains("0x2040"), "{dropped}");
+    assert_eq!(o.fingerprint(), before, "a refused take-back wrote");
+}

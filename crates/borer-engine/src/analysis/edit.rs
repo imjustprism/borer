@@ -87,6 +87,21 @@ pub enum Change {
 }
 
 impl Change {
+    /// Spells the entry the change is of, for a message.
+    fn entry(&self) -> String {
+        match self {
+            Self::Name(at, _) => format!("the name at {at:#x}"),
+            Self::Comment(at, _) => format!("the comment at {at:#x}"),
+            Self::Type(name, _) => format!("type {}", crate::text::one_line(name)),
+            Self::Applied(at, _) => format!("the type applied at {at:#x}"),
+            Self::Proto(at, _) => format!("the prototype of {at:#x}"),
+            Self::Var(at, ..) => format!("a variable of {at:#x}"),
+            Self::Field(class, off, _) => {
+                format!("field {}+{off:#x}", crate::text::one_line(class))
+            }
+        }
+    }
+
     /// Returns the change that takes this one back: the same entry, from
     /// what this one leaves to what it found.
     #[must_use]
@@ -207,6 +222,28 @@ impl Overlay {
     #[must_use]
     pub fn edits_key(&self) -> u64 {
         self.without_tables().fingerprint()
+    }
+
+    /// Tells whether the overlay holds at a change's entry what the change
+    /// found there, its old side, reading it unnoted ([`Tracked::raw`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `change` - The change.
+    fn holds(&self, change: &Change) -> bool {
+        match change {
+            Change::Name(at, s) => self.names.raw().get(at) == s.before(),
+            Change::Comment(at, s) => self.comments.raw().get(at) == s.before(),
+            Change::Type(name, s) => self.types.raw().get(name) == s.before(),
+            Change::Applied(at, s) => self.applied.raw().get(at) == s.before(),
+            Change::Proto(at, s) => self.prototypes.raw().get(at) == s.before(),
+            Change::Var(at, key, s) => {
+                self.vars.raw().get(at).and_then(|v| v.get(key)) == s.before()
+            }
+            Change::Field(class, off, s) => {
+                self.fields.raw().get(class).and_then(|f| f.get(off)) == s.before()
+            }
+        }
     }
 
     /// Writes a change's new side at its entry, whatever the entry holds.
@@ -1091,10 +1128,15 @@ pub fn plan(
 
 /// Writes a plan's changes to the overlay it was made over.
 ///
-/// It then carries
-/// what the analysis read under the overlay before over to the one it
-/// leaves ([`super::Derived::moved`]): a result that read none of the
-/// entries written is kept.
+/// Each goes to an
+/// entry that still holds what the change found there, then carries what
+/// the analysis read under the overlay before over to the one it leaves
+/// ([`super::Derived::moved`]): a result that read none of the entries
+/// written is kept.
+///
+/// What the plan leaves is held to a project's caps ([`project::held`])
+/// and, when it writes a type or an application, to the checks a
+/// project's types pass on load ([`utypes::validate`]).
 ///
 /// # Arguments
 ///
@@ -1104,18 +1146,38 @@ pub fn plan(
 ///
 /// # Errors
 ///
-/// [`Stale`] when `overlay` is not the one the plan was made over; else,
-/// when the overlay would hold more than a project file holds
-/// ([`project::held`]), the cap. Either way nothing was written.
+/// [`Stale`] when `overlay` is not the one the plan was made over; else
+/// when an entry no longer holds what a change found there (an edit
+/// committed since changed it), when the overlay would hold more than a
+/// project file holds, or when its types would not validate. Either way
+/// nothing was written.
 pub fn commit(analysis: &Analysis, overlay: &mut Overlay, plan: &Plan) -> anyhow::Result<()> {
     if plan.base != overlay.edits_key() {
         return Err(Stale.into());
     }
     let before = overlay.clone();
     for change in &plan.changes {
+        if !overlay.holds(change) {
+            *overlay = before;
+            return Err(anyhow::anyhow!(
+                "{} changed since this edit was planned; nothing was applied",
+                change.entry()
+            ));
+        }
         overlay.assign(change.clone());
     }
-    if let Err(why) = project::held(overlay) {
+    let typed = plan
+        .changes
+        .iter()
+        .any(|c| matches!(c, Change::Type(..) | Change::Applied(..)));
+    let checked = project::held(overlay).and_then(|()| {
+        if typed {
+            utypes::validate(&overlay.types, &overlay.applied).map_err(|e| e.to_string())
+        } else {
+            Ok(())
+        }
+    });
+    if let Err(why) = checked {
         *overlay = before;
         return Err(anyhow::Error::msg(why));
     }
@@ -1127,7 +1189,8 @@ pub fn commit(analysis: &Analysis, overlay: &mut Overlay, plan: &Plan) -> anyhow
 /// ([`Plan::changes`]).
 ///
 /// It holds, over the overlay as it is now, their inverses,
-/// the last first.
+/// the last first, which [`commit`] refuses when an edit since changed an
+/// entry they take back.
 ///
 /// # Arguments
 ///
