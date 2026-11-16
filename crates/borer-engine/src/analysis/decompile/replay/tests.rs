@@ -1,7 +1,8 @@
 use crate::isa::x86::Register;
 
 use super::{
-    Claim, Replayed, Sampling, TextCheck, Witness, replay_effects, replay_function, replay_tsv,
+    BlockCheck, Claim, Grade, OUTSIDE_FLOAT, OVER_BUDGET, Replayed, Sampling, TextCheck, Witness,
+    replay_effects, replay_function, replay_tsv,
 };
 use crate::analysis::decompile::expr::{Expr, Flags, Op, UnOp};
 use crate::analysis::decompile::lift::{ArgAt, Effect, EffectKind};
@@ -14,6 +15,29 @@ use crate::program::{Arch, Program};
 /// of a lane only.
 pub(super) fn claims(r: &Replayed) -> Vec<Claim> {
     r.wrong().iter().map(|d| d.claim).collect()
+}
+
+/// Records of `proved` blocks proved, `tested` tested, then one not
+/// checked for each reason, at consecutive starts.
+///
+/// # Arguments
+///
+/// * `proved` - Blocks proved.
+/// * `tested` - Blocks tested.
+/// * `unchecked` - Why each block not checked was not.
+pub(super) fn graded(proved: usize, tested: usize, unchecked: &[&'static str]) -> Vec<BlockCheck> {
+    let grades = std::iter::repeat_n((Grade::Proved, None), proved)
+        .chain(std::iter::repeat_n((Grade::Tested, None), tested))
+        .chain(unchecked.iter().map(|&why| (Grade::Unchecked, Some(why))));
+    (0x1000..)
+        .zip(grades)
+        .map(|(start, (grade, why))| BlockCheck {
+            start,
+            grade,
+            why,
+            ..BlockCheck::default()
+        })
+        .collect()
 }
 
 /// Replays a function's effects after `change` rewrote them.
@@ -1178,10 +1202,7 @@ fn a_thread_block_read_is_no_float() {
 #[test]
 fn the_header_names_the_statements_the_binary_contradicts() {
     let check = TextCheck {
-        blocks: 8,
-        checked: 8,
-        proved: 5,
-        unchecked: Vec::new(),
+        blocks: graded(5, 3, &[]),
         disagree: vec![0x404171],
     };
     assert_eq!(
@@ -1189,10 +1210,8 @@ fn the_header_names_the_statements_the_binary_contradicts() {
         "// checked vs binary: statements as emitted, 8/8 blocks: 5 proved vs lift, 3 tested x3 states; disagree at 0x404171; unchecked: C spelling, later text passes"
     );
     let many = TextCheck {
-        blocks: 9,
+        blocks: graded(5, 3, &[OUTSIDE_FLOAT]),
         disagree: (0..6).map(|i| 0x401000 + i).collect(),
-        unchecked: vec![("float/vector", 1)],
-        ..check
     };
     assert_eq!(
         many.header(),
@@ -1308,10 +1327,7 @@ fn a_block_the_proof_does_not_model_is_only_tested() {
 #[test]
 fn the_header_grades_blocks_proved_tested_and_unknown() {
     let all = TextCheck {
-        blocks: 4,
-        checked: 4,
-        proved: 4,
-        unchecked: Vec::new(),
+        blocks: graded(4, 0, &[]),
         disagree: Vec::new(),
     };
     assert_eq!(
@@ -1319,10 +1335,8 @@ fn the_header_grades_blocks_proved_tested_and_unknown() {
         "// checked vs binary: statements as emitted, 4/4 blocks: 4 proved vs lift; unchecked: C spelling, later text passes"
     );
     let none = TextCheck {
-        checked: 3,
-        proved: 0,
-        unchecked: vec![("over budget", 1)],
-        ..all
+        blocks: graded(0, 3, &[OVER_BUDGET]),
+        disagree: Vec::new(),
     };
     assert_eq!(
         none.header(),

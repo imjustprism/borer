@@ -1203,6 +1203,103 @@ fn the_text_agrees_with_the_emulator_on_every_block() {
     );
 }
 
+/// Grades every block of every function of the `BORER_DOGFOOD` binary as
+/// its answer's check decided it.
+///
+/// Each function's check holds one record per block, its header counts
+/// them by grade, a block compared was compared from some state and one
+/// not compared from none, with its reason, and every instruction the
+/// header says the machine does not bear out lies in a block graded wrong.
+#[test]
+#[ignore = "set BORER_DOGFOOD to a binary path to run this sweep"]
+fn every_block_has_the_grade_its_header_counts() {
+    let c = &*CORPUS;
+    let (p, a, o) = (&c.program, &c.analysis, &Overlay::default());
+    let threads = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+    let part = a.functions.len().div_ceil(threads).max(1);
+    let bad: Vec<String> = std::thread::scope(|scope| {
+        let parts: Vec<_> = a
+            .functions
+            .chunks(part)
+            .map(|fs| {
+                scope.spawn(move || {
+                    fs.iter()
+                        .filter_map(|f| misgraded(p, a, o, f))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        parts
+            .into_iter()
+            .flat_map(|h| h.join().expect("a grading thread"))
+            .collect()
+    });
+    assert!(bad.is_empty(), "{} functions: {bad:#?}", bad.len());
+}
+
+/// Says how one function's block records disagree with its header or its
+/// blocks, `None` when they agree or nothing was checked.
+///
+/// # Arguments
+///
+/// * `p` - The binary.
+/// * `a` - Its analysis.
+/// * `o` - The names the answers are checked under.
+/// * `f` - The function.
+fn misgraded(
+    p: &Program,
+    a: &Analysis,
+    o: &Overlay,
+    f: &borer_engine::analysis::Function,
+) -> Option<String> {
+    use borer_engine::analysis::decompile::replay::Grade;
+    let check = borer_engine::analysis::decompile::text_check(p, a, o, f.entry);
+    let check = check.as_ref().as_ref()?;
+    let header = check.header();
+    let (blocks, unknown) = (check.blocks.len(), check.count(Grade::Unchecked));
+    let counts = format!(
+        "{}/{blocks} blocks: {} proved vs lift",
+        blocks - unknown,
+        check.count(Grade::Proved)
+    );
+    let unfounded = check.blocks.iter().filter(|b| match b.grade {
+        Grade::Unchecked => b.states > 0 || b.why.is_none(),
+        Grade::Tested => b.states == 0 || b.why.is_none(),
+        Grade::Proved => b.states == 0 || b.why.is_some(),
+        Grade::Wrong => b.disagreements.is_empty(),
+    });
+    let wrong = |at: u64| {
+        f.blocks
+            .iter()
+            .find(|b| b.start <= at && at < b.end)
+            .is_some_and(|b| {
+                check
+                    .blocks
+                    .iter()
+                    .any(|r| r.start == b.start && r.grade == Grade::Wrong)
+            })
+    };
+    let outside: Vec<u64> = check
+        .disagree
+        .iter()
+        .copied()
+        .filter(|&at| !wrong(at))
+        .collect();
+    let unfounded: Vec<u64> = unfounded.map(|b| b.start).collect();
+    let fine = blocks == f.blocks.len()
+        && header.contains(&counts)
+        && outside.is_empty()
+        && unfounded.is_empty();
+    if fine {
+        return None;
+    }
+    Some(format!(
+        "{:#x}: {blocks} records of {} blocks; {header}; disagree outside a wrong block at {outside:x?}; records without their evidence at {unfounded:x?}",
+        f.entry,
+        f.blocks.len()
+    ))
+}
+
 /// Runs every small function of the `BORER_DOGFOOD` binary on inputs its
 /// signature types, in the emulator and through its final text as C, and
 /// requires the two to agree on every input.

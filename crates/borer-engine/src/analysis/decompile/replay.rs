@@ -66,7 +66,6 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write as _;
 
 use crate::isa::x86::{
     FlowControl, Instruction, InstructionInfoFactory, Mnemonic, OpKind, Register,
@@ -102,6 +101,7 @@ use subset::{integer_or_zero_fill, outside_subset, reads_whole_lanes};
 
 mod answer;
 mod edge;
+mod grade;
 mod prove;
 mod report;
 mod subset;
@@ -109,7 +109,9 @@ mod term;
 
 pub(crate) use answer::check_answer;
 pub(super) use answer::check_decompiled;
+use grade::{DIFFERED, REFUTED};
 
+pub use grade::{BlockCheck, Grade, KEPT_MAX, TextCheck};
 pub use report::replay_tsv;
 
 /// States each block is tried from.
@@ -760,6 +762,8 @@ pub struct Replayed {
     /// state it chose to tell a claim's two sides apart, run on the
     /// emulator.
     pub refuted: Vec<Disagreement>,
+    /// Each block's check, in function and block address order.
+    pub records: Vec<BlockCheck>,
 }
 
 impl Replayed {
@@ -788,6 +792,7 @@ impl Replayed {
             *self.unproved.entry(k).or_default() += n;
         }
         self.refuted.extend(part.refuted);
+        self.records.extend(part.records);
     }
 
     /// The disagreements that are wrong values, not lane roughness.
@@ -921,155 +926,6 @@ fn replay_one<L: Replay>(
     )
 }
 
-/// What the check of one function's answer found: the header line the
-/// `decompile` tool prints.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct TextCheck {
-    /// The function's blocks.
-    pub blocks: usize,
-    /// Blocks compared from at least one state.
-    pub checked: usize,
-    /// Of those, blocks proved over every state.
-    pub proved: usize,
-    /// Blocks not compared, by what kept them out, most first.
-    pub unchecked: Vec<(&'static str, usize)>,
-    /// The instructions of the statements the machine does not bear out,
-    /// lane roughness aside, in address order: from a state tried or one
-    /// the proof chose.
-    pub disagree: Vec<u64>,
-}
-
-impl TextCheck {
-    /// Sums a replay up.
-    ///
-    /// # Arguments
-    ///
-    /// * `r` - One function's replay.
-    fn of(r: &Replayed) -> Self {
-        let mut why: BTreeMap<&'static str, usize> = BTreeMap::new();
-        for (reason, n) in &r.skipped {
-            *why.entry(unchecked_label(reason)).or_default() += n;
-        }
-        let mut unchecked: Vec<(&'static str, usize)> = why.into_iter().collect();
-        unchecked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
-        let mut disagree: Vec<u64> = r
-            .wrong()
-            .iter()
-            .map(|d| d.at)
-            .chain(r.refuted.iter().map(|d| d.at))
-            .collect();
-        disagree.sort_unstable();
-        disagree.dedup();
-        Self {
-            blocks: r.blocks,
-            checked: r.checked,
-            proved: r.proved,
-            unchecked,
-            disagree,
-        }
-    }
-
-    /// The bytes the result holds, which the memo keeping it counts.
-    #[must_use]
-    pub fn bytes(&self) -> usize {
-        size_of::<Self>()
-            + self.unchecked.capacity() * size_of::<(&'static str, usize)>()
-            + self.disagree.capacity() * size_of::<u64>()
-    }
-
-    /// The header line: what of the answer was checked against the binary,
-    /// what the binary contradicts, and what was not checked.
-    ///
-    /// Checked means the statements as the lifter emitted them were
-    /// replayed from [`TRIALS`] states per block (one random, the others
-    /// drawn from the block's own constants and their neighbors) and
-    /// compared with the emulator. Each checked block is graded: proved
-    /// when its claims hold over every state, symbolically against the
-    /// lifter's semantics of its instructions, tested when only the states
-    /// tried agree; blocks not checked are unknown. The proof's machine is
-    /// the lifter itself ([`prove`]), so the line says `proved vs lift`:
-    /// the text equals the lift on every state, and met the emulator on
-    /// the one state tried before the proof, not on every state.
-    /// A misreading of an instruction the lifter makes is proved, and only
-    /// the states tried and [`super::verify`] hold the lift to the
-    /// emulator, which may share it. A statement the machine does not bear
-    /// out, on a state tried or on one the proof chose to tell a claim's
-    /// sides apart, is named by its instruction, the first
-    /// [`DISAGREE_SHOWN`] of them, so a block that was compared and found
-    /// wrong never reads as agreement; the blocks left out are counted by
-    /// why. What a statement computes is checked, not how its C is spelled
-    /// (a cast that makes C's `>>` the signed one, a constant written as a
-    /// literal), and the text passes after the emission are not checked
-    /// either, which the line says too. One line on every answer costs
-    /// tokens, so it is terse, and a grade no block has is left out: `//
-    /// checked vs binary: statements as emitted, 41/44 blocks: 30 proved
-    /// vs lift, 11 tested x3 states, 3 unknown; disagree at 0x401a2c;
-    /// unchecked: 2 float/vector, 1 over budget, C spelling, later text
-    /// passes`.
-    #[must_use]
-    pub fn header(&self) -> String {
-        let mut out = format!(
-            "// checked vs binary: statements as emitted, {}/{} blocks: {} proved vs lift",
-            self.checked, self.blocks, self.proved
-        );
-        let tested = self.checked.saturating_sub(self.proved);
-        if tested > 0 {
-            let _ = write!(out, ", {tested} tested x{TRIALS} states");
-        }
-        let unknown = self.blocks.saturating_sub(self.checked);
-        if unknown > 0 {
-            let _ = write!(out, ", {unknown} unknown");
-        }
-        out.push_str("; ");
-        if !self.disagree.is_empty() {
-            let shown: Vec<String> = self
-                .disagree
-                .iter()
-                .take(DISAGREE_SHOWN)
-                .map(|a| format!("{a:#x}"))
-                .collect();
-            let _ = write!(out, "disagree at {}", shown.join(", "));
-            let more = self.disagree.len().saturating_sub(DISAGREE_SHOWN);
-            if more > 0 {
-                let _ = write!(out, " (+{more} more)");
-            }
-            out.push_str("; ");
-        }
-        out.push_str("unchecked: ");
-        for (label, n) in &self.unchecked {
-            let _ = write!(out, "{n} {label}, ");
-        }
-        out.push_str("C spelling, later text passes");
-        out
-    }
-}
-
-/// The few words the header line gives a reason a block was not checked.
-///
-/// # Arguments
-///
-/// * `reason` - Why the replay did not compare the block.
-fn unchecked_label(reason: &str) -> &'static str {
-    match reason {
-        "not in the text" => "not in text",
-        OUTSIDE_FLOAT => "float/vector",
-        "a read or write through the thread block" => "fs/gs access",
-        OVER_BUDGET => "over budget",
-        "a call the text leaves out or reads in place" => "call left out",
-        SHORT_CALL => "call args dropped",
-        CONTRADICTED => "declaration contradicted",
-        BARE_RETURN => "result dropped",
-        "a statement no effect models"
-        | "an instruction the emulator does not model"
-        | "an instruction outside every checked form"
-        | "a trap or a branch with no model" => "unmodeled",
-        "flags set in another block" => "flags across blocks",
-        edge::ASSUMED => "entry equality",
-        "the stack pointer unknown at its start" | "a frame alignment" => "stack unknown",
-        _ => "other",
-    }
-}
-
 /// Each block's effects of a decompilation, by block index, empty for a
 /// block the text leaves out.
 ///
@@ -1151,11 +1007,16 @@ fn replay_effects<L: Replay>(
     let mut room = budget;
     for (b, block) in f.blocks.iter().enumerate() {
         out.blocks += 1;
-        match function.check(b, block, &mut room, &mut out) {
-            Ok(()) => out.checked += 1,
+        let before = (out.trials, grade::claims(&out));
+        let checked = function.check(b, block, &mut room, &mut out);
+        match checked {
+            Ok(_) => out.checked += 1,
             Err(why) => *out.skipped.entry(why).or_default() += 1,
         }
+        let record = BlockCheck::of(block.start, checked, before, &out);
+        out.records.push(record);
     }
+    grade::blame(&mut out);
     out
 }
 
@@ -2943,6 +2804,11 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
     /// * `room` - Blocks still to be tried; this one spends one.
     /// * `out` - Where the counts and disagreements go.
     ///
+    /// # Returns
+    ///
+    /// `None` for a block proved, else why the proof left it to the
+    /// states tried.
+    ///
     /// # Errors
     ///
     /// Why the block was not checked.
@@ -2952,7 +2818,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         block: &BasicBlock,
         room: &mut usize,
         out: &mut Replayed,
-    ) -> Result<(), &'static str> {
+    ) -> Result<Option<&'static str>, &'static str> {
         let (code, sp) = self.admit(b)?;
         let end = End::of::<L>(code)?;
         *room = room.checked_sub(1).ok_or(OVER_BUDGET)?;
@@ -2982,7 +2848,7 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
                         if matches!(proof, prove::Proof::Proved) {
                             out.trials += compared;
                             out.proved += 1;
-                            return Ok(());
+                            return Ok(None);
                         }
                         early = Some((proof, undo));
                     }
@@ -3000,21 +2866,21 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         if compared == 0 {
             return Err(why);
         }
-        match (wrote, early) {
+        Ok(match (wrote, early) {
             (Some(_), Some((proof, _))) if seen.is_empty() => {
-                self.settle(b, block, code, sp, end, proof, out);
+                self.settle(b, block, code, sp, end, proof, out)
             }
             (Some(wrote), None) if seen.is_empty() => {
                 let proof = self.prove(b, block, &wrote);
-                self.settle(b, block, code, sp, end, proof, out);
+                self.settle(b, block, code, sp, end, proof, out)
             }
             (_, Some((_, (lifting, nodes)))) => {
                 *self.lifting.borrow_mut() = lifting;
                 self.proof_nodes.set(nodes);
+                Some(DIFFERED)
             }
-            (Some(_) | None, None) => {}
-        }
-        Ok(())
+            (Some(_) | None, None) => Some(DIFFERED),
+        })
     }
 
     /// The instructions of a block the replay can check and the stack
@@ -3088,6 +2954,10 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
     /// * `proof` - The block's proof from the bytes a run from the first
     ///   state compared wrote ([`Function::prove`]).
     /// * `out` - Where the outcome goes.
+    ///
+    /// # Returns
+    ///
+    /// `None` for a block proved, else why it is not.
     #[expect(
         clippy::too_many_arguments,
         reason = "one block's facts, threaded through"
@@ -3101,15 +2971,15 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
         end: End<L::Insn>,
         proof: prove::Proof,
         out: &mut Replayed,
-    ) {
+    ) -> Option<&'static str> {
         let states = match proof {
             prove::Proof::Proved => {
                 out.proved += 1;
-                return;
+                return None;
             }
             prove::Proof::Unknown(why) => {
                 *out.unproved.entry(why).or_default() += 1;
-                return;
+                return Some(why);
             }
             prove::Proof::Differ(states) => states,
         };
@@ -3131,10 +3001,11 @@ impl<'p, L: Replay> Function<'_, 'p, L> {
             if ran.is_ok() && found.disagreements.iter().any(|d| !d.lane) {
                 out.refuted
                     .extend(found.disagreements.into_iter().filter(|d| !d.lane));
-                return;
+                return Some(REFUTED);
             }
         }
         *out.unproved.entry(UNSETTLED).or_default() += 1;
+        Some(UNSETTLED)
     }
 
     /// Tells whether the flags a block leaves reach a reader whose condition

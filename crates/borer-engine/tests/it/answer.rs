@@ -7,7 +7,7 @@
     reason = "assertions are the point of a test"
 )]
 
-use borer_engine::analysis::decompile::replay::TextCheck;
+use borer_engine::analysis::decompile::replay::{BlockCheck, Grade, TextCheck};
 use borer_engine::analysis::decompile::{
     Detail, Site, answer, answer_header, checked_header, decompile_named, shown, skeleton,
     with_header,
@@ -56,10 +56,12 @@ fn compare() -> Program {
 /// * `repair` - What the search is to have ended with.
 fn flag(a: &Analysis, o: &Overlay, repair: Repair) {
     let check = TextCheck {
-        blocks: 1,
-        checked: 1,
+        blocks: vec![BlockCheck {
+            start: 0x1000,
+            grade: Grade::Wrong,
+            ..BlockCheck::default()
+        }],
         disagree: vec![0x1000],
-        ..TextCheck::default()
     };
     let names = o.fingerprint();
     a.derived
