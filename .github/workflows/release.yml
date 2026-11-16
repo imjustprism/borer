@@ -265,11 +265,22 @@ jobs:
             echo "An unreviewed preview build of \`$REF\` at commit $SHA, not a release."
             echo "Each dev build replaces the last; tagged releases are the reviewed ones."
           } > notes.md
-          gh release delete dev-build --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
-          gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/dev-build" || true
+          if ! err=$(gh release view dev-build --repo "$GITHUB_REPOSITORY" --json tagName 2>&1); then
+            [[ $err == *"release not found"* ]] || { echo "$err" >&2; exit 1; }
+          else
+            gh release delete dev-build --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
+          fi
+          if ! err=$(gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/dev-build" 2>&1); then
+            [[ $err == *"HTTP 404"* || $err == *"HTTP 422"* ]] || { echo "$err" >&2; exit 1; }
+          fi
           gh release create dev-build dist/* --repo "$GITHUB_REPOSITORY" \
             --target "$SHA" --title "borer dev build" --notes-file notes.md \
             --prerelease --latest=false
+          tagged=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/dev-build" --jq .object.sha)
+          if [ "$tagged" != "$SHA" ]; then
+            echo "::error::dev-build points at $tagged, not $SHA"
+            exit 1
+          fi
 
   # A failed app build leaves the server's release whole, without that archive.
   release:
