@@ -10,9 +10,12 @@
 //!
 //! What a tool asks for is an [`Edit`]. [`plan`] checks a list of them
 //! against the program, its analysis and the overlay and works out the
-//! changes they make, and [`commit`] writes those changes to the overlay
-//! they were planned over, and to no other: two edits planned at once
-//! cannot both pass a check the first one's write would fail.
+//! changes they make. [`commit`] writes them only to the overlay, of the
+//! program, they were planned over, refusing one planned over another as
+//! [`Stale`] so the caller plans it again; only to entries that still hold
+//! what each change found there; and only while the overlay stays within a
+//! project's caps and its types validate. Anything else it refuses, with
+//! nothing written.
 
 use std::collections::{BTreeMap, BTreeSet, btree_map};
 use std::fmt;
