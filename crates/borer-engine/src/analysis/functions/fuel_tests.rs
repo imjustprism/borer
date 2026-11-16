@@ -1,6 +1,8 @@
-//! Tests of discovery's instruction budget across walker lanes: what is
-//! found when the budget runs out inside a wave may not depend on how
-//! many lanes walk it.
+//! Tests of discovery's instruction budget across walker lanes.
+//!
+//! What is found when the budget runs out inside a wave may not depend on
+//! how many lanes walk it; and a raised cancel flag stops the walks as a
+//! spent budget does.
 
 use super::discover;
 use crate::program::{Arch, Program, Section};
@@ -74,4 +76,55 @@ fn spent_fuel_cuts_the_same_walks_at_any_lane_count() {
             assert!(many.2 == one.2, "{leaves} leaves on {lanes} lanes");
         }
     }
+}
+
+/// Discovery under a raised cancel flag takes no walk and says it is
+/// incomplete, on one lane and on many, where the same image under no
+/// flag finds the entry and every leaf.
+///
+/// # Panics
+///
+/// When a walk runs past the raised flag, or the unraised run misses a
+/// function.
+#[test]
+fn a_raised_flag_stops_discovery_before_its_first_walk() {
+    let p = sled(300, 4);
+    let whole = discover(&p, 64, 1);
+    assert_eq!((whole.functions.len(), whole.incomplete), (301, false));
+    let flag = crate::cancel::Cancel::new();
+    flag.raise();
+    for lanes in [1, 8] {
+        let cut = flag.within(|| discover(&p, 64, lanes));
+        assert_eq!(
+            (cut.functions.len(), cut.incomplete),
+            (0, true),
+            "{lanes} lanes"
+        );
+    }
+}
+
+/// An analysis cut by a raised flag is handed back as none.
+///
+/// Never as the partial one, while [`crate::analysis::Analysis::compute`]
+/// under the same flag runs whole; and under a flag never raised the
+/// analysis is the one `compute` makes.
+///
+/// # Panics
+///
+/// When a cut analysis is handed back, or one run differs from another.
+#[test]
+fn a_cut_analysis_is_none_and_an_uncut_one_is_unchanged() {
+    use crate::analysis::Analysis;
+    let p = sled(300, 4);
+    let flag = crate::cancel::Cancel::new();
+    let shown = |a: &Analysis| format!("{:?}", (&a.functions, &a.xrefs));
+    let whole = shown(&Analysis::compute(&p));
+    let uncut = flag.within(|| Analysis::try_compute_with(&p, std::sync::Arc::default()));
+    assert_eq!(uncut.as_ref().map(shown), Some(whole.clone()));
+    flag.raise();
+    assert!(
+        flag.within(|| Analysis::try_compute_with(&p, std::sync::Arc::default()))
+            .is_none()
+    );
+    assert_eq!(shown(&flag.within(|| Analysis::compute(&p))), whole);
 }

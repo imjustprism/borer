@@ -34,6 +34,24 @@ fn the_analysis_runs_its_plan_in_order() {
     assert_eq!(Some(&last.name), COMPUTE_PHASES.last());
 }
 
+/// An analysis under a cancel flag raised before it began stops as its
+/// first phase ends: no later phase runs, and it hands back no analysis.
+///
+/// # Panics
+///
+/// When a phase runs past the raised flag, or an analysis is handed back.
+#[test]
+fn a_raised_flag_ends_the_analysis_with_its_first_phase() {
+    SEEN.with(|s| s.borrow_mut().clear());
+    let (progress, flag) = (Progress::new(), crate::cancel::Cancel::new());
+    flag.raise();
+    let cut = progress.within(|| {
+        flag.within(|| Analysis::try_compute_with(&program(), std::sync::Arc::default()))
+    });
+    assert!(cut.is_none());
+    assert_eq!(SEEN.with(|s| s.borrow().clone()), COMPUTE_PHASES[..1]);
+}
+
 /// A progress never put in force reads nothing, while another runs work
 /// on another thread and one more on this thread runs none.
 ///

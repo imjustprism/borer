@@ -1011,8 +1011,7 @@ pub fn unpack_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Resul
         out.push_str(
             "# not re-analyzed: every byte the run wrote is data, outside the image's executable sections, and none of it ran\n",
         );
-    } else if let Some(rebuilt) = rebuild(p, &emu, &regions) {
-        let after = Analysis::compute(&rebuilt);
+    } else if let Some(after) = reanalyzed(p, &emu, &regions) {
         let _ = writeln!(
             out,
             "# re-analyzed the materialized image: {} functions against {} before",
@@ -1061,6 +1060,24 @@ fn writes_code(p: &Program, regions: &[(u64, u64)], oep: Option<u64>) -> bool {
                     && start < s.va.0.saturating_add(s.vsize.max(s.file_size))
             })
         })
+}
+
+/// Returns the analysis of the image a run materialized
+/// ([`rebuild`]), under the cancel flag in force.
+///
+/// # Arguments
+///
+/// * `p` - The packed image.
+/// * `emu` - The finished run, holding the bytes it wrote.
+/// * `regions` - The materialized regions, as `(start, length)`.
+///
+/// # Returns
+///
+/// The analysis, or `None` when nothing landed inside the file or the flag
+/// was raised before the analysis was whole
+/// ([`Analysis::try_compute_with`]).
+fn reanalyzed(p: &Program, emu: &Emulator<'_>, regions: &[(u64, u64)]) -> Option<Analysis> {
+    Analysis::try_compute_with(&rebuild(p, emu, regions)?, Arc::default())
 }
 
 /// Runs a program's unpacking and returns the image it materialized.

@@ -1124,7 +1124,8 @@ impl Discovery<'_> {
     }
 
     /// Walks every queued entry once, wave after wave, queueing the callees
-    /// each kept walk finds.
+    /// each kept walk finds, until the fuel runs out or the cancel flag in
+    /// force is raised.
     ///
     /// # Arguments
     ///
@@ -1138,7 +1139,7 @@ impl Discovery<'_> {
             if wave.is_empty() {
                 return;
             }
-            if self.fuel == 0 {
+            if self.fuel == 0 || crate::cancel::Cancel::raised() {
                 self.incomplete = true;
                 return;
             }
@@ -1177,7 +1178,7 @@ impl Discovery<'_> {
                     self.fuel = self.fuel.saturating_sub(w.spent);
                     self.commit(e, w);
                 }
-                if self.fuel == 0 {
+                if self.fuel == 0 || crate::cancel::Cancel::raised() {
                     self.incomplete = true;
                     return;
                 }

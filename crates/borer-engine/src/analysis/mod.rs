@@ -1215,7 +1215,9 @@ pub struct Analysis {
     pub library_names: libnames::LibraryNames,
     /// What each pack script ran to and named ([`crate::script`]).
     pub pack_scripts: Vec<crate::script::PackScript>,
-    /// The instruction fuel ran out before the walk finished.
+    /// The instruction fuel ran out before the walk finished, or the cancel
+    /// flag in force stopped it ([`Analysis::try_compute_with`] then hands
+    /// out no analysis).
     pub incomplete: bool,
     /// Entries of the functions discovery found never return: by name, by
     /// what follows their calls, or by their own code
@@ -1328,7 +1330,7 @@ pub struct ClassFacts {
     pub descriptors: BTreeMap<u64, String>,
 }
 
-/// The phases [`Analysis::compute_with`] runs, in order: the plan whose
+/// The phases [`Analysis::try_compute_with`] runs, in order: the plan whose
 /// place a [`crate::progress::Progress`] in force reports.
 pub(crate) const COMPUTE_PHASES: &[&str] = &[
     "analysis discover",
@@ -1381,6 +1383,11 @@ impl Analysis {
     /// own strings and tables leave a choice open (what a class's static
     /// instance is called, which types are serializer streams).
     ///
+    /// It runs under a cancel flag of its own that nothing raises, so a
+    /// flag in force around it ([`crate::cancel::Cancel`]) never cuts it
+    /// short; a caller that must stop at its flag runs
+    /// [`Analysis::try_compute_with`].
+    ///
     /// # Arguments
     ///
     /// * `program` - The loaded binary.
@@ -1393,47 +1400,73 @@ impl Analysis {
     /// them later (rendering, the catalogs).
     #[must_use]
     pub fn compute_with(program: &Program, packs: Arc<crate::pack::Packs>) -> Analysis {
+        crate::cancel::Cancel::new()
+            .within(|| Analysis::try_compute_with(program, packs))
+            .unwrap_or_default()
+    }
+
+    /// Runs the analysis with packs ([`Analysis::compute_with`]) under the
+    /// cancel flag in force, stopping once it is raised.
+    ///
+    /// Discovery takes no further walk once the flag is raised, and the
+    /// phases look at it as each ends ([`COMPUTE_PHASES`]), so a raised
+    /// flag stops the work within the phase running; what that phase made
+    /// is dropped, never handed out as an analysis.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The loaded binary.
+    /// * `packs` - The packs, in load order; empty for the generic rules
+    ///   alone.
+    ///
+    /// # Returns
+    ///
+    /// The complete analysis, as [`Analysis::compute_with`] makes it; `None`
+    /// when the flag was raised before it was whole.
+    #[must_use]
+    pub fn try_compute_with(program: &Program, packs: Arc<crate::pack::Packs>) -> Option<Analysis> {
         let mut phases = crate::timing::Phases::planned(crate::progress::Plan::Compute);
+        let mut ended = |name| (!crate::cancel::Cancel::raised()).then(|| phases.mark(name));
         let (mut analysis, crypto) =
             beside(|| discover::discover(program), || crypto_tables(program));
         let crypto = crypto.unwrap_or_else(|| crypto_tables(program));
-        phases.mark("analysis discover");
+        ended("analysis discover")?;
         analysis.packs = packs;
         naming::infer(program, &mut analysis);
-        phases.mark("analysis naming");
+        ended("analysis naming")?;
         naming::infer_handlers(program, &mut analysis);
-        phases.mark("analysis naming handlers");
+        ended("analysis naming handlers")?;
         descriptors::qualify_registrations(&mut analysis);
-        phases.mark("analysis descriptors");
+        ended("analysis descriptors")?;
         discover::infer_returns(program, &mut analysis);
-        phases.mark("analysis returns");
+        ended("analysis returns")?;
         vtables::infer(program, &mut analysis);
-        phases.mark("analysis vtables");
+        ended("analysis vtables")?;
         messages::name_id_accessors(program, &mut analysis);
-        phases.mark("analysis messages");
+        ended("analysis messages")?;
         qt::infer(program, &mut analysis);
-        phases.mark("analysis qt");
+        ended("analysis qt")?;
         objc::infer(program, &mut analysis);
-        phases.mark("analysis objc");
+        ended("analysis objc")?;
         eh::infer(program, &mut analysis);
-        phases.mark("analysis eh");
+        ended("analysis eh")?;
         analysis.crypto = crypto;
-        phases.mark("analysis crypto");
+        ended("analysis crypto")?;
         analysis.index_refs();
-        phases.mark("analysis refs_by_function");
+        ended("analysis refs_by_function")?;
         let mut pack_names = sigs::find_pack_names(program, &analysis);
         sigs::apply_pack_names(&mut analysis, &mut pack_names);
         analysis.pack_names = pack_names;
-        phases.mark("analysis sigs");
+        ended("analysis sigs")?;
         let mut library_names = libnames::find_library_names(program, &analysis);
         libnames::apply_library_names(&mut analysis, &mut library_names);
         analysis.library_names = library_names;
-        phases.mark("analysis libnames");
+        ended("analysis libnames")?;
         recognize::infer(program, &mut analysis);
-        phases.mark("analysis recognize");
+        ended("analysis recognize")?;
         let analysis = crate::script::run_pack_scripts(program, analysis);
-        phases.mark("analysis scripts");
-        analysis
+        ended("analysis scripts")?;
+        Some(analysis)
     }
 
     /// Builds the lookups over what discovery found: the entry and block

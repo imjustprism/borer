@@ -678,7 +678,7 @@ struct Walks {
     walked: BTreeMap<u64, Walked>,
     /// Instructions left to decode.
     fuel: u64,
-    /// Whether the fuel ran out.
+    /// Whether the fuel ran out, or the cancel flag in force was raised.
     incomplete: bool,
 }
 
@@ -695,7 +695,7 @@ impl Walks {
             if self.walked.contains_key(&e) {
                 continue;
             }
-            if self.fuel == 0 {
+            if self.fuel == 0 || crate::cancel::Cancel::raised() {
                 self.incomplete = true;
                 break;
             }

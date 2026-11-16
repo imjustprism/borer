@@ -1395,7 +1395,7 @@ struct Walks<'a> {
     data: BTreeMap<u64, (u64, bool)>,
     /// Instructions left to decode.
     fuel: u64,
-    /// Whether the fuel ran out.
+    /// Whether the fuel ran out, or the cancel flag in force was raised.
     incomplete: bool,
     /// The imports by slot address.
     imports: &'a BTreeMap<u64, &'a str>,
@@ -1414,7 +1414,7 @@ impl Walks<'_> {
             if self.walked.contains_key(&e) {
                 continue;
             }
-            if self.fuel == 0 {
+            if self.fuel == 0 || crate::cancel::Cancel::raised() {
                 self.incomplete = true;
                 break;
             }

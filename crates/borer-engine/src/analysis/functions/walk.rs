@@ -1073,6 +1073,9 @@ impl WalkState<'_> {
 
     /// Walks every queued entry once, queueing the callees it finds.
     ///
+    /// A raised cancel flag ([`crate::cancel::Cancel`]) spends the fuel
+    /// left at the next wave or batch, so the walks after it never start.
+    ///
     /// # Returns
     ///
     /// `true` when the fuel ran out, before the queue emptied or inside a
@@ -1096,7 +1099,7 @@ impl WalkState<'_> {
             if wave.is_empty() {
                 break;
             }
-            if self.worker.fuel == 0 {
+            if self.worker.fuel == 0 || crate::cancel::Cancel::raised() {
                 incomplete = true;
                 break;
             }
@@ -1136,6 +1139,9 @@ impl WalkState<'_> {
     fn walk_wave(&mut self, wave: &[u64], known: &Known<'_>, lanes: &Lanes<'_>) {
         let mut ahead: Option<Ahead<'_>> = None;
         for batch in wave.chunks(WAVE_BATCH) {
+            if crate::cancel::Cancel::raised() {
+                self.worker.fuel = 0;
+            }
             let threads = lanes.lanes.len().min(batch.len());
             let sent = (batch.len() >= WAVE_MIN && threads > 1).then(|| Ahead {
                 batch,
