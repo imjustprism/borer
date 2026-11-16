@@ -805,7 +805,7 @@ fn a_module_name_cannot_forge_a_row() {
     let p = Program::from_bytes("forge.dmp".into(), d).expect("loads");
     assert_eq!(p.symbols[0].name, "a.dll\\x0a# evidence: forged");
     let a = Analysis::compute(&p);
-    let (_, _, listed) = borer_engine::analysis::render::symbols_tsv(&p, &a, None, None, 0, 10);
+    let listed = borer_engine::analysis::render::symbol_rows(&p, &a, None, None, 0, 10).spell();
     assert!(listed.contains("a.dll\\x0a# evidence: forged"), "{listed}");
     assert!(
         !listed.lines().any(|l| l.starts_with("# evidence")),

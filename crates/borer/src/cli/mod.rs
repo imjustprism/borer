@@ -328,15 +328,9 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
         Query::Symbols => {
             let a = s.analysis_or_empty();
             let (offset, limit) = cli_page(args, 3, 50, 1000)?;
-            let (_, _, text) = render::symbols_tsv(
-                &s.program,
-                &a,
-                None,
-                args.get(2).map(String::as_str).filter(|f| !f.is_empty()),
-                offset,
-                limit,
-            );
-            print!("{text}");
+            let filter = args.get(2).map(String::as_str).filter(|f| !f.is_empty());
+            let rows = render::symbol_rows(&s.program, &a, None, filter, offset, limit);
+            print!("{}", rows.spell());
         }
         Query::Hexdump => {
             let n: usize = num_arg(args, 3, 64, "hexdump length")?.min(hexfmt::HEXDUMP_MAX);

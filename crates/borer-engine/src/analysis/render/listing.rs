@@ -710,33 +710,6 @@ pub fn symbol_rows(
     }
 }
 
-/// Renders the paged symbol table ([`symbol_rows`], [`SymbolRows::spell`]).
-///
-/// # Arguments
-///
-/// * `p` - The loaded image, for its symbol table.
-/// * `a` - The analysis, for which import slots are referenced.
-/// * `kind` - One kind of symbol, or every kind.
-/// * `filter` - Case-insensitive substring of the full or demangled name.
-/// * `offset` - Matches to skip first (paging).
-/// * `limit` - Maximum rows to render.
-///
-/// # Returns
-///
-/// `(shown, total, text)`, the text as [`SymbolRows::spell`] spells it.
-#[must_use]
-pub fn symbols_tsv(
-    p: &Program,
-    a: &Analysis,
-    kind: Option<SymbolKind>,
-    filter: Option<&str>,
-    offset: usize,
-    limit: usize,
-) -> (usize, usize, String) {
-    let rows = symbol_rows(p, a, kind, filter, offset, limit);
-    (rows.rows.len(), rows.total, rows.spell())
-}
-
 /// Lists the classes `moc` described: signals, slots, methods and
 /// properties, each method with the function it maps to when known.
 ///
@@ -1146,16 +1119,16 @@ mod tests {
             offset: 0,
             limit: 1,
         };
-        let capped = xrefs(&p, &a, &o, 0x1000, page);
+        let capped = xref_rows(&p, &a, &o, 0x1000, page).spell();
         assert!(
             capped.starts_with(&format!("# {cap}+ (capped: ")),
             "{capped}"
         );
-        let short = xrefs(&p, &a, &o, 0x3000, page);
+        let short = xref_rows(&p, &a, &o, 0x3000, page).spell();
         assert!(short.starts_with("# 1 xrefs to 0x3000"), "{short}");
         assert!(!short.contains(INCOMPLETE_NOTE), "{short}");
         a.incomplete = true;
-        let cut = xrefs(&p, &a, &o, 0x3000, XrefView::Count);
+        let cut = xref_rows(&p, &a, &o, 0x3000, XrefView::Count).spell();
         assert!(
             cut.ends_with(&format!(
                 "{INCOMPLETE_NOTE}
@@ -1635,17 +1608,18 @@ caller: 0x1030 call
             symbol("_ZN3foo3barEv", 0x1080, SymbolKind::Export),
         ];
         let a = Analysis::default();
-        let (_, _, all) = symbols_tsv(&p, &a, None, None, 0, 50);
+        let all = symbol_rows(&p, &a, None, None, 0, 50).spell();
         assert!(
             all.contains(
                 "# module: KERNEL32.dll\nimport 0x0 GetTickCount\n# module: -\nforward 0x1040 AcquireLock -> NTDLL.RtlFoo\n"
             ),
             "{all}"
         );
-        let (shown, total, found) = symbols_tsv(&p, &a, None, Some("foo::bar"), 0, 50);
+        let rows = symbol_rows(&p, &a, None, Some("foo::bar"), 0, 50);
+        let (shown, total, found) = (rows.rows.len(), rows.total, rows.spell());
         assert_eq!((shown, total), (1, 1), "{found}");
         assert!(found.contains("export 0x1080 foo::bar()"), "{found}");
-        let (_, forwards, _) = symbols_tsv(&p, &a, Some(SymbolKind::Forwarder), None, 0, 50);
+        let forwards = symbol_rows(&p, &a, Some(SymbolKind::Forwarder), None, 0, 50).total;
         assert_eq!(forwards, 1);
         let summary = p.summary();
         assert!(summary.contains("exports: 2 (1 forwarded)"), "{summary}");

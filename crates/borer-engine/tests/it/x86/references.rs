@@ -750,7 +750,7 @@ fn an_i386_plt_entry_is_named_for_its_import() {
     let f = a.function(0x1000).expect("the PLT entry");
     assert_eq!(f.name.as_deref(), Some("strlen"));
     assert_eq!(f.thunk, Some(0x200c));
-    let (_, _, listed) = borer_engine::analysis::render::symbols_tsv(&p, &a, None, None, 0, 10);
+    let listed = borer_engine::analysis::render::symbol_rows(&p, &a, None, None, 0, 10).spell();
     assert!(!listed.contains("unreferenced"), "{listed}");
 }
 

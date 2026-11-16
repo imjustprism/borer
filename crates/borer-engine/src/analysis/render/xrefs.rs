@@ -25,7 +25,8 @@ pub enum XrefView {
 /// Renders the cross-references to one address, collapsing the sites whose
 /// functions run the same code.
 ///
-/// [`xrefs`] with the page spelled as `offset`, `limit` and `count_only`.
+/// [`xref_rows`] with the page spelled as `offset`, `limit` and
+/// `count_only`.
 ///
 /// # Arguments
 ///
@@ -39,7 +40,7 @@ pub enum XrefView {
 ///
 /// # Returns
 ///
-/// As [`xrefs`].
+/// The text [`XrefRows::spell`] spells.
 pub fn xrefs_tsv(
     p: &Program,
     a: &Analysis,
@@ -54,24 +55,6 @@ pub fn xrefs_tsv(
     } else {
         XrefView::Page { offset, limit }
     };
-    xrefs(p, a, o, target, view)
-}
-
-/// Renders the cross-references to one address ([`xref_rows`],
-/// [`XrefRows::spell`]).
-///
-/// # Arguments
-///
-/// * `p` - The loaded image, for its imports.
-/// * `a` - The analysis.
-/// * `o` - User names for the containing functions.
-/// * `target` - The referenced address.
-/// * `view` - The header alone, or which page of groups.
-///
-/// # Returns
-///
-/// The text [`XrefRows::spell`] spells.
-pub fn xrefs(p: &Program, a: &Analysis, o: &Overlay, target: u64, view: XrefView) -> String {
     xref_rows(p, a, o, target, view).spell()
 }
 
