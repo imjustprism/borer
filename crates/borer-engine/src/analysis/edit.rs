@@ -28,6 +28,7 @@ use super::stated::{self, Field, Mode, Statement};
 use super::utypes::{self, TypeExpr, UserType};
 use super::{Analysis, Overlay, apply, cdecl, name_of, parse_addr, project, resolve};
 use crate::program::Program;
+use crate::view::Said;
 
 /// What one entry of the overlay held and holds, `None` for an absent side.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1275,6 +1276,35 @@ fn spelled_own(p: &Program, o: &Overlay, entry: u64, key: VarKey) -> bool {
 /// The variable, or `None` when the name is none [`resolve_var`] reads.
 pub(crate) fn var_key(p: &Program, o: &Overlay, entry: u64, var: &str) -> Option<VarKey> {
     resolve_var(p, o, entry, var).ok()
+}
+
+/// Returns who stated the name a function's text spells one of its
+/// variables by, by the way [`resolve_var`] reads it.
+///
+/// A statement's name or a stated prototype's is the user's, a debug name
+/// the file's, and an `aN`, `local_N`, `home_N` or `arg_N` a placeholder
+/// when nothing else names that variable ([`spelled_own`]).
+///
+/// # Arguments
+///
+/// * `p` - The loaded program.
+/// * `o` - The overlay.
+/// * `entry` - The function.
+/// * `var` - The name.
+///
+/// # Returns
+///
+/// Who stated it, `None` when the name is no variable's
+/// ([`resolve_var`]) or spells a slot something else names.
+pub(crate) fn var_said(p: &Program, o: &Overlay, entry: u64, var: &str) -> Option<Said> {
+    let key = resolve_var(p, o, entry, var).ok()?;
+    if stated_key(o, entry, var) == Some(key) {
+        Some(Said::User)
+    } else if debug_key(p, o, entry, var) == Some(key) {
+        Some(Said::Stated)
+    } else {
+        spelled_own(p, o, entry, key).then_some(Said::Placeholder)
+    }
 }
 
 /// Reads what a statement of a function's variable states: which variable

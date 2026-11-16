@@ -6,12 +6,16 @@
     reason = "assertions are the point of a test"
 )]
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use borer_engine::analysis::decompile::decompile_named;
 use borer_engine::analysis::decompile::view::{view, view_of};
+use borer_engine::analysis::edit::{Edit, Force, commit, plan};
 use borer_engine::analysis::render::{Bytes, FunctionRow, disasm_view};
+use borer_engine::analysis::utypes::{TypeExpr, UserField, UserStruct, UserType};
 use borer_engine::analysis::{Analysis, EnumSource, NameSource, Overlay};
+use borer_engine::dwarf::{Parameter, Subprogram};
 use borer_engine::headers::{ImportName, ImportOrigins, OrdinalName};
 use borer_engine::program::{Arch, BinaryFormat, Program, Symbol, SymbolKind};
 use borer_engine::view::{Kind, Ref, Said, View};
@@ -268,15 +272,212 @@ fn a_named_block_start_is_no_placeholder() {
     let named = said_of(&listing, &Ref::Address(CALLER + 4));
     assert!(
         !named.is_empty() && named.iter().all(|&(_, s)| s != Some(Said::Placeholder)),
-        "{named:?}
-{}",
+        "{named:?}\n{}",
         listing.spell()
     );
     let unnamed = said_of(&listing, &Ref::Address(CALLER + 5));
     assert!(
         unnamed.contains(&(Kind::Label, Some(Said::Placeholder))),
-        "{unnamed:?}
-{}",
+        "{unnamed:?}\n{}",
         listing.spell()
+    );
+}
+
+/// Returns who each linked token of a view spelling `word` says stated
+/// its name, in order.
+///
+/// # Arguments
+///
+/// * `v` - The view.
+/// * `word` - The spelling.
+fn said_spelled(v: &View, word: &str) -> Vec<Option<Said>> {
+    (0..v.lines())
+        .flat_map(|i| {
+            let line = v.line(i).unwrap_or_default();
+            v.tokens_said(i)
+                .filter_map(|(span, _, link)| {
+                    let (_, said) = link?;
+                    (line.get(span) == Some(word)).then_some(said)
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Returns the first variable of a view spelled with `prefix`.
+///
+/// # Arguments
+///
+/// * `v` - The view.
+/// * `prefix` - How its name opens.
+fn variable_named(v: &View, prefix: &str) -> Option<String> {
+    (0..v.lines()).find_map(|i| {
+        let line = v.line(i)?;
+        v.tokens(i).find_map(|(span, kind, _)| {
+            let word = line.get(span)?;
+            (kind == Kind::Variable && word.starts_with(prefix)).then(|| word.to_owned())
+        })
+    })
+}
+
+/// Tells whether every linked token spelling `word` says `want`, and one
+/// does.
+///
+/// # Arguments
+///
+/// * `v` - The view.
+/// * `word` - The spelling.
+/// * `want` - Who each should say stated it.
+fn all_say(v: &View, word: &str, want: Option<Said>) -> bool {
+    let said = said_spelled(v, word);
+    !said.is_empty() && said.iter().all(|&s| s == want)
+}
+
+/// A variable says who named it as the edit path reads it: an unnamed
+/// local or parameter is a placeholder, a local the overlay names the
+/// user's, and a parameter a debug record names the file's.
+///
+/// The image is [`crate::view::filling`]'s.
+#[test]
+fn a_variable_says_who_named_it() {
+    use crate::view::{TEXT, filling};
+    let p = filling(false);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let plain = view(&p, &a, &o, TEXT).expect("a view");
+    let local = variable_named(&plain, "local_").expect("a local");
+    for word in [local.as_str(), "a1"] {
+        assert!(
+            all_say(&plain, word, Some(Said::Placeholder)),
+            "{word}: {:?}\n{}",
+            said_spelled(&plain, word),
+            plain.spell()
+        );
+    }
+    let edits = [Edit::Var {
+        entry: TEXT,
+        var: local,
+        field: None,
+        name: Some("packet".to_owned()),
+        ty: None,
+    }];
+    let mut named = o.clone();
+    let made = plan(&p, &a, &named, &edits, Force::Refuse).expect("planned");
+    commit(&p, &a, &mut named, &made).expect("committed");
+    let v = view(&p, &a, &named, TEXT).expect("a view");
+    assert!(all_say(&v, "packet", Some(Said::User)), "{}", v.spell());
+    let mut debugged = filling(false);
+    debugged.debug_functions.push(Subprogram {
+        low_pc: TEXT,
+        name: "filler".to_owned(),
+        parameters: vec![Parameter {
+            name: "inbound".to_owned(),
+            type_name: None,
+        }],
+        return_type: None,
+        locals: BTreeMap::new(),
+    });
+    let a = Analysis::compute(&debugged);
+    let v = view(&debugged, &a, &o, TEXT).expect("a view");
+    assert!(all_say(&v, "inbound", Some(Said::Stated)), "{}", v.spell());
+}
+
+/// A field or a type says who named it.
+///
+/// The overlay's struct is the
+/// user's, the debug information's the file's, a `field_0x<hex>` at its own
+/// offset a placeholder, and a struct only the text defines says nothing.
+#[test]
+fn a_field_and_a_type_say_who_named_them() {
+    let field = |name: &str, ty: TypeExpr| UserField {
+        name: name.to_owned(),
+        ty,
+    };
+    let strukt = |off: u64, f: UserField| {
+        UserType::Struct(UserStruct {
+            size: 0x10,
+            fields: BTreeMap::from([(off, f)]),
+        })
+    };
+    let mut p = crate::raw::image(Arch::X86_64, &[0xc3], &[]); // ASM: ret
+    p.debug_types.insert(
+        "Record".to_owned(),
+        strukt(8, field("level", TypeExpr::U64)),
+    );
+    let a = Analysis::compute(&p);
+    let mut o = Overlay::default();
+    o.types
+        .insert("Player".to_owned(), strukt(4, field("hp", TypeExpr::U32)));
+    let text = concat!(
+        "// signature: uint64_t sub_401000(struct Player *a1, struct Record *a2, struct Pair *a3)
+",
+        "struct Record { uint64_t pad; uint64_t level; };
+",
+        "struct Pair { uint64_t head; uint64_t tail; };
+",
+        "return a1->hp + a2->level + a3->head + a3->field_0x8;
+",
+    );
+    let v = view_of(&p, &a, &o, CALLER, text).expect("a view");
+    for (word, want) in [
+        ("hp", Some(Said::User)),
+        ("Player", Some(Said::User)),
+        ("level", Some(Said::Stated)),
+        ("Record", Some(Said::Stated)),
+        ("field_0x8", Some(Said::Placeholder)),
+        ("head", None),
+        ("Pair", None),
+    ] {
+        assert!(
+            all_say(&v, word, want),
+            "{word}: {:?}\n{}",
+            said_spelled(&v, word),
+            v.spell()
+        );
+    }
+}
+
+/// A view of a text that declares its own `Foo` reads no user type of that
+/// name, so it says nothing of who named `Foo` and stating a user `Foo`
+/// keeps it.
+#[test]
+fn a_type_the_text_declares_reads_no_user_type() {
+    let p = crate::raw::image(Arch::X86_64, &[0xc3], &[]); // ASM: ret
+    let a = Analysis::compute(&p);
+    let mut before = Overlay::default();
+    before
+        .comments
+        .insert(CALLER + 0x100, "elsewhere".to_owned());
+    let text = concat!(
+        "// signature: uint64_t sub_401000(struct Foo *a1)\n",
+        "struct Foo { uint64_t x; };\n",
+        "\n",
+        "return 0;\n",
+    );
+    let built = |o: &Overlay| {
+        let make = || view_of(&p, &a, o, CALLER, text);
+        a.derived.get_or_build_item(
+            "view_declared_type_test",
+            o.fingerprint(),
+            CALLER,
+            make,
+            |_| 0,
+        )
+    };
+    let was = built(&before);
+    let shown = was.as_ref().as_ref().expect("a view");
+    assert!(all_say(shown, "Foo", None), "{}", shown.spell());
+    let mut after = before.clone();
+    after.types.insert(
+        "Foo".to_owned(),
+        UserType::Struct(UserStruct {
+            size: 8,
+            fields: BTreeMap::new(),
+        }),
+    );
+    a.derived.moved(&a, &before, &after);
+    assert!(
+        Arc::ptr_eq(&was, &built(&after)),
+        "the view was built again"
     );
 }

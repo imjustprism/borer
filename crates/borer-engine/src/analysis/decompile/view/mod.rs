@@ -435,9 +435,14 @@ pub fn view_of(
         }
         reader.line(&mut b, &mut tally, i, line, &mut pieces);
     }
-    let view = b
-        .finish(tally.unlinked)?
-        .with_said(|r, w| said::of(program, analysis, overlay, r, w));
+    let view = b.finish(tally.unlinked)?.with_said(|r, w| {
+        if let Ref::Type(name) = r
+            && reader.declared.types.contains_key(&**name)
+        {
+            return said::type_said(program, None, name);
+        }
+        said::of(program, analysis, overlay, r, w)
+    });
     reads::note_body(view.text());
     if !tally.looked.is_empty() {
         let called: String = tally.looked.iter().map(|w| format!("{w}(")).collect();

@@ -770,7 +770,7 @@ impl FieldCtx<'_, '_> {
     fn resolve_aliases(&self, mut spec: TypeSpec) -> TypeSpec {
         let mut seen = BTreeSet::new();
         for _ in 0..ALIAS_DEPTH_MAX {
-            if !seen.insert(spec.base.clone()) {
+            if self.types.unit_structs.contains_key(&spec.base) || !seen.insert(spec.base.clone()) {
                 break;
             }
             let next = if let Some(a) = self.types.aliases.get(spec.base.as_str()) {
@@ -839,12 +839,12 @@ impl FieldCtx<'_, '_> {
     ///
     /// * `base` - Aggregate name.
     fn is_known_struct(&self, base: &str) -> bool {
-        matches!(self.overlay.types.get(base), Some(UserType::Struct(_)))
+        self.types.unit_structs.contains_key(base)
+            || matches!(self.overlay.types.get(base), Some(UserType::Struct(_)))
             || matches!(
                 self.program.debug_types.get(base),
                 Some(UserType::Struct(_))
             )
-            || self.types.unit_structs.contains_key(base)
             || sdk::structure(base).is_some()
     }
 
@@ -1385,13 +1385,16 @@ impl FieldCtx<'_, '_> {
     }
 
     /// Appends member names when `name` resolves to a [`UserType::Enum`] in the
-    /// overlay or debug information.
+    /// overlay or debug information, and the unit declares no struct of it.
     ///
     /// # Arguments
     ///
     /// * `name` - Resolved base type name.
     /// * `out` - Destination set of enum member names.
     fn push_named_enum_values(&self, name: &str, out: &mut BTreeSet<String>) {
+        if self.types.unit_structs.contains_key(name) {
+            return;
+        }
         if let Some(UserType::Enum(e)) = self
             .overlay
             .types

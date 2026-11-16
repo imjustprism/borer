@@ -9,7 +9,10 @@
 //! a data symbol's where it is spelled as theirs, and a placeholder where
 //! it is spelled from its address and nothing names it; a label is the
 //! overlay's, or a placeholder spelled from its block's address where the
-//! overlay names it nothing. Each looks the overlay up by
+//! overlay names it nothing. A variable says what the edit path reads it
+//! as ([`var_said`]); a field or a type is the overlay's or the debug
+//! information's where they name it so, and a field spelled
+//! `field_0x<hex>` at its own offset a placeholder. Each looks the overlay up by
 //! the referent's own key, which the text that spelled it read already, so
 //! a view reads what its answer read.
 
@@ -18,8 +21,11 @@ use std::sync::Arc;
 
 use super::super::expr_render::data_name;
 use super::super::line::label_address;
+use super::fields::field_hex_offset;
 use crate::analysis::attributes::global_addr;
+use crate::analysis::edit::var_said;
 use crate::analysis::render::RowSource;
+use crate::analysis::utypes::UserType;
 use crate::analysis::{Analysis, NameSource, Overlay, bare_name};
 use crate::headers::OrdinalName;
 use crate::program::{Program, SymbolKind};
@@ -77,7 +83,10 @@ pub(crate) fn of(
         Ref::Import(id) => import(program, analysis, *id, spelled),
         Ref::Global(va) => global(program, analysis, overlay, *va, spelled),
         Ref::Address(va) => label(overlay, *va, spelled),
-        Ref::Variable { .. } | Ref::Field { .. } | Ref::Type(_) | Ref::String(_) => None,
+        Ref::Variable { function, name, .. } => var_said(program, overlay, *function, name),
+        Ref::Field { ty, offset } => field(program, overlay, ty, *offset, spelled),
+        Ref::Type(name) => type_said(program, Some(overlay), name),
+        Ref::String(_) => None,
     }
 }
 
@@ -199,5 +208,63 @@ fn label(overlay: &Overlay, va: u64, spelled: &str) -> Option<Said> {
     match overlay.names.get(&va) {
         Some(n) => (n == spelled || bare_name(n) == spelled).then_some(Said::User),
         None => (label_address(spelled) == Some(va)).then_some(Said::Placeholder),
+    }
+}
+
+/// Returns who stated a type's name: the overlay, else the debug
+/// information.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image, for its debug types.
+/// * `overlay` - The types in force, `None` for a type the text declares,
+///   whose name reads no user type, as the view's reading of it reads none.
+/// * `name` - The type's name.
+pub(super) fn type_said(program: &Program, overlay: Option<&Overlay>, name: &str) -> Option<Said> {
+    if overlay.is_some_and(|o| o.types.contains_key(name)) {
+        Some(Said::User)
+    } else {
+        program
+            .debug_types
+            .contains_key(name)
+            .then_some(Said::Stated)
+    }
+}
+
+/// Returns who stated the name a field is spelled by: the overlay's struct
+/// or the debug information's naming it so at its offset, the overlay's
+/// fields of its class, or its own `field_0x<hex>` offset.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image, for its debug types.
+/// * `overlay` - Names in force, looked up by the field's type.
+/// * `ty` - The aggregate type.
+/// * `offset` - The field's byte offset.
+/// * `spelled` - The token's text.
+fn field(
+    program: &Program,
+    overlay: &Overlay,
+    ty: &str,
+    offset: u64,
+    spelled: &str,
+) -> Option<Said> {
+    let names = |t: Option<&UserType>| match t {
+        Some(UserType::Struct(s)) => s.fields.get(&offset).is_some_and(|f| f.name == spelled),
+        Some(UserType::Enum(_) | UserType::Alias(_)) | None => false,
+    };
+    let stated = || {
+        overlay
+            .fields
+            .get(ty)
+            .and_then(|fs| fs.get(&offset))
+            .is_some_and(|f| f.name == spelled)
+    };
+    if names(overlay.types.get(ty)) || stated() {
+        Some(Said::User)
+    } else if names(program.debug_types.get(ty)) {
+        Some(Said::Stated)
+    } else {
+        (field_hex_offset(spelled) == Some(offset)).then_some(Said::Placeholder)
     }
 }
