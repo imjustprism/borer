@@ -339,7 +339,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             print!("{text}");
         }
         Query::Hexdump => {
-            let n: usize = num_arg(args, 3, 64, "hexdump length")?.min(4096);
+            let n: usize = num_arg(args, 3, 64, "hexdump length")?.min(hexfmt::HEXDUMP_MAX);
             if n == 0 {
                 bail!("hexdump length must be at least 1");
             }
@@ -349,18 +349,15 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 return Ok(());
             }
             let va = s.address(arg(args, 2, "hexdump needs an address")?)?;
-            let code = s.program.read_va_upto(va, n).with_context(|| {
-                format!(
-                    "address {va:#x} not mapped{}",
-                    memory::by_offset_hint(&s.program)
-                )
-            })?;
-            let sec = s
-                .program
-                .section_at(va)
-                .map_or_else(String::new, |sec| format!(" {}", sec.name));
-            println!("# {va:#x}..{:#x}{sec}", va + num::from_usize(code.len()));
-            print!("{}", hexfmt::hexdump(code, va));
+            let dump = hexfmt::hex_rows(&s.program, va, n)
+                .spell()
+                .with_context(|| {
+                    format!(
+                        "address {va:#x} not mapped{}",
+                        memory::by_offset_hint(&s.program)
+                    )
+                })?;
+            print!("{dump}");
         }
         Query::Entropy => {
             let threshold = entropy_threshold(num_arg(args, 2, 7.2, "entropy threshold")?)

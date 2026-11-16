@@ -63,6 +63,98 @@ pub fn hexdump_sparse(bytes: &[Option<u8>], base: u64) -> String {
     out
 }
 
+/// Most bytes one hexdump shows.
+pub const HEXDUMP_MAX: usize = 4096;
+
+/// The bytes at an address as a hexdump's rows hold them, with the section
+/// they are in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HexRows {
+    /// Address of the first byte.
+    pub va: u64,
+    /// Name of the section holding `va`; `None` outside every section.
+    pub section: Option<String>,
+    /// One entry per byte asked for: the bytes the file backs from `va`
+    /// within its section, then `None` for each past them.
+    pub bytes: Vec<Option<u8>>,
+}
+
+impl HexRows {
+    /// Returns the rows of 16 bytes, each with its address; the last may be
+    /// short.
+    pub fn rows(&self) -> impl Iterator<Item = (u64, &[Option<u8>])> {
+        self.bytes
+            .chunks(16)
+            .enumerate()
+            .map(|(i, row)| (self.va.wrapping_add(from_usize(i * 16)), row))
+    }
+
+    /// Returns how many bytes from `va` the file backs.
+    #[must_use]
+    pub fn mapped(&self) -> usize {
+        self.bytes.iter().take_while(|b| b.is_some()).count()
+    }
+
+    /// Returns the dump as the `hexdump` tool and the CLI print it.
+    ///
+    /// # Returns
+    ///
+    /// A `# va..end section` header covering the bytes the file backs, then
+    /// their rows ([`hexdump_sparse`]); `None` when it backs none.
+    #[must_use]
+    pub fn spell(&self) -> Option<String> {
+        let mapped = self.mapped();
+        if mapped == 0 {
+            return None;
+        }
+        let sec = self
+            .section
+            .as_deref()
+            .map_or_else(String::new, |s| format!(" {s}"));
+        Some(format!(
+            "# {:#x}..{:#x}{sec}\n{}",
+            self.va,
+            self.va.wrapping_add(from_usize(mapped)),
+            hexdump_sparse(&self.bytes[..mapped], self.va)
+        ))
+    }
+}
+
+/// Returns the bytes at `va` as a hexdump's rows hold them.
+///
+/// The bytes are those the file backs from `va` within the section holding
+/// it ([`crate::program::Program::read_va_upto`]): a range that runs off
+/// the section's end, or off the file, is that many `None` past them, so an
+/// unmapped byte never reads as a zero.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `va` - Address of the first byte.
+/// * `len` - Bytes asked for, at most [`HEXDUMP_MAX`].
+///
+/// # Returns
+///
+/// The bytes and the section, `None` for every byte when nothing backs
+/// `va`.
+#[must_use]
+pub fn hex_rows(program: &crate::program::Program, va: u64, len: usize) -> HexRows {
+    let len = len.min(HEXDUMP_MAX);
+    let mut bytes: Vec<Option<u8>> = program
+        .read_va_upto(va, len)
+        .unwrap_or_default()
+        .iter()
+        .copied()
+        .map(Some)
+        .collect();
+    bytes.resize(len, None);
+    HexRows {
+        va,
+        section: program.section_at(va).map(|s| s.name.clone()),
+        bytes,
+    }
+}
+
 /// Renders up to `max` bytes of the file at a file offset, rows addressed
 /// by file offset.
 ///
@@ -103,4 +195,56 @@ pub fn file_hexdump(
         off + from_usize(bytes.len()),
         hexdump(bytes, off)
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::program::{Arch, Program, Section};
+
+    /// Rows across a section's end hold its bytes, then `None` for each
+    /// past it, under the section's name; the text is the dump the tool
+    /// printed of the bytes the file backs, and an address nothing backs
+    /// has no text.
+    ///
+    /// # Panics
+    ///
+    /// When a byte, the section or the text differs.
+    #[test]
+    fn hex_rows_end_with_none_past_the_section() {
+        let bytes: Vec<u8> = (b'A'..b'A' + 0x20).collect();
+        let text = Section::mapped(".text", 0x1000, 0, 0x20, false, true);
+        let p = Program::raw(bytes.clone(), Arch::X86_64, 0x1000, None, vec![text]);
+        let rows = hex_rows(&p, 0x1018, 0x10);
+        assert_eq!(rows.section.as_deref(), Some(".text"));
+        assert_eq!(rows.mapped(), 8);
+        let want: Vec<Option<u8>> = bytes[0x18..]
+            .iter()
+            .copied()
+            .map(Some)
+            .chain([None; 8])
+            .collect();
+        assert_eq!(rows.bytes, want);
+        let starts: Vec<u64> = rows.rows().map(|(va, _)| va).collect();
+        assert_eq!(starts, [0x1018]);
+        assert_eq!(
+            rows.spell().as_deref(),
+            Some(
+                "# 0x1018..0x1020 .text\n0x0000001018  59 5a 5b 5c 5d 5e 5f 60                           |YZ[\\]^_`|\n"
+            )
+        );
+        let whole = hex_rows(&p, 0x1000, 0x20);
+        assert_eq!(whole.rows().count(), 2);
+        assert_eq!(
+            whole.spell(),
+            Some(format!(
+                "# 0x1000..0x1020 .text\n{}",
+                hexdump(&bytes, 0x1000)
+            ))
+        );
+        let nothing = hex_rows(&p, 0x9000, 4);
+        assert_eq!((nothing.section.as_deref(), nothing.mapped()), (None, 0));
+        assert_eq!(nothing.bytes, [None; 4]);
+        assert_eq!(hex_rows(&p, 0x9000, 4).spell(), None);
+    }
 }

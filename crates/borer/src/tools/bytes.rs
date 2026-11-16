@@ -335,27 +335,19 @@ impl BorerServer {
         &self,
         Parameters(HexdumpParams { address, length }): Parameters<HexdumpParams>,
     ) -> Result<String, ErrorData> {
-        let length = count_param(length, 64, 4096, "length")?;
+        let length = count_param(length, 64, hexfmt::HEXDUMP_MAX, "length")?;
         self.with_program(|p| {
             if let Some(off) = parse_off(&address) {
                 return hexfmt::file_hexdump(p, off, length.n);
             }
             let va = self.addr(p, &address)?;
-            let code = p.read_va_upto(va, length.n).ok_or_else(|| {
+            hexfmt::hex_rows(p, va, length.n).spell().ok_or_else(|| {
                 format!(
                     "address {va:#x} not mapped; sections: {}{}",
                     p.section_list(),
                     memory::by_offset_hint(p)
                 )
-            })?;
-            let sec = p
-                .section_at(va)
-                .map_or_else(String::new, |s| format!(" {}", s.name));
-            Ok(format!(
-                "# {va:#x}..{:#x}{sec}\n{}",
-                va + num::from_usize(code.len()),
-                hexfmt::hexdump(code, va)
-            ))
+            })
         })
         .map(|text| length.noted(text))
     }
