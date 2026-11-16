@@ -1,18 +1,22 @@
 //! Loads arbitrary bytes, lists the code at its entry, analyzes what loads,
 //! decompiles its first functions and reads each text as a view, and for a
 //! .NET assembly lists its first IL methods and its obfuscator markers: the
-//! path every agent request takes after a load.
+//! path every agent request takes after a load. The first functions' call
+//! graphs and call tree levels are walked both ways too, and the callers
+//! of the first imports, which have no body.
 
 #![no_main]
 
 use borer_engine::analysis::decompile::decompile;
 use borer_engine::analysis::decompile::view::view_of;
-use borer_engine::analysis::render::{Bytes, disasm_function_with, disasm_view};
+use borer_engine::analysis::render::{
+    Bytes, Level, Walk, call_children, callgraph, disasm_function_with, disasm_view,
+};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::clr::managed::{self, Managed};
 use borer_engine::clr::markers::markers_tsv;
 use borer_engine::disasm::disassemble_program;
-use borer_engine::program::Program;
+use borer_engine::program::{Program, SymbolKind};
 use libfuzzer_sys::fuzz_target;
 
 /// Functions decompiled per input, so one input stays fast.
@@ -45,9 +49,24 @@ fuzz_target!(|data: &[u8]| {
                 }
             }
         }
+        for walk in [Walk::Callees, Walk::Callers] {
+            _ = callgraph(&program, &analysis, &overlay, f.entry, LISTED, walk);
+        }
+        for level in [Level::Callees, Level::CalleesAndVirtuals, Level::Callers] {
+            _ = call_children(&program, &analysis, &overlay, f.entry, level);
+        }
         if let Some(text) = decompile(&program, &analysis, &overlay, f.entry) {
             _ = view_of(&program, &analysis, &overlay, f.entry, &text);
         }
+    }
+    for s in program
+        .symbols
+        .iter()
+        .filter(|s| s.kind == SymbolKind::Import)
+        .take(DECOMPILED)
+    {
+        _ = callgraph(&program, &analysis, &overlay, s.addr, LISTED, Walk::Callers);
+        _ = call_children(&program, &analysis, &overlay, s.addr, Level::Callers);
     }
     for m in Managed::of(&program, &analysis)
         .methods
