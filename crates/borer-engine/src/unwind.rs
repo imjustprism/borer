@@ -1072,6 +1072,7 @@ mod tests {
             clr: None,
             parent: None,
             modes: crate::isa::a32::Modes::default(),
+            digest: std::sync::OnceLock::new(),
         }
     }
 

@@ -3095,34 +3095,13 @@ g(tmp_5);";
             writable: false,
             executable: true,
         }];
-        let section_index = crate::program::Program::index_sections(&sections);
-        let p = crate::program::Program {
-            path: std::path::PathBuf::new(),
+        let p = crate::program::Program::raw(
             bytes,
-            format: crate::program::BinaryFormat::Raw,
-            arch: crate::program::Arch::X86_64,
-            is_64: true,
-            entry: Some(0x1000),
-            image_base: 0,
+            crate::program::Arch::X86_64,
+            0,
+            Some(0x1000),
             sections,
-            section_index,
-            symbols: Vec::new(),
-            function_ranges: Vec::new(),
-            headers: crate::headers::Headers::default(),
-            debug_functions: Vec::new(),
-            debug_types: std::collections::BTreeMap::new(),
-            debug_typedefs: std::collections::BTreeMap::new(),
-            debug_globals: Vec::new(),
-            pdb: None,
-            pdb_record: None,
-            pdb_source: None,
-            flat_fallback: false,
-            relocs: crate::reloc::Relocs::default(),
-            go: None,
-            clr: None,
-            parent: None,
-            modes: crate::isa::a32::Modes::default(),
-        };
+        );
         let a = crate::analysis::Analysis::compute(&p);
         let o = crate::analysis::Overlay::default();
         let text = super::decompile(&p, &a, &o, 0x1000).expect("decompiles");

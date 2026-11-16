@@ -895,7 +895,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 overlay.comments.extend(run.comments.iter().cloned());
                 borer::project::ProjectFile::from_overlay(
                     &s.program.path.display().to_string(),
-                    Some(borer::project::identity(&s.program.bytes)),
+                    Some(borer::project::program_identity(&s.program)),
                     &overlay,
                 )
                 .save(&path, borer::output::Existing::Replace)
@@ -1040,7 +1040,7 @@ fn set_type(args: &[String], s: &Session) -> anyhow::Result<()> {
     } else {
         (
             s.program.path.display().to_string(),
-            Some(borer::project::identity(&s.program.bytes)),
+            Some(borer::project::program_identity(&s.program)),
             Overlay::default(),
         )
     };
@@ -1448,7 +1448,7 @@ mod tests {
                 .expect("saves");
             path
         };
-        let same = save("same.json", borer::project::identity(&s.program.bytes));
+        let same = save("same.json", borer::project::program_identity(&s.program));
         let other = save("other.json", "00".repeat(32));
         let overlay = project_overlay(&same, &s.program);
         let refused = project_overlay(&other, &s.program);

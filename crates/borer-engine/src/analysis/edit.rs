@@ -1083,22 +1083,19 @@ fn plan_var(
 /// Returns what a plan made over `overlay` of `program` is keyed by.
 ///
 /// The
-/// program's bytes, hashed once into its analysis's memo, folded with the
-/// overlay's [`Overlay::edits_key`], so a plan commits to no other
+/// program's bytes ([`Program::digest`]) and where they map, folded with
+/// the overlay's [`Overlay::edits_key`], so a plan commits to no other
 /// program's overlay that happens to state the same.
 ///
 /// # Arguments
 ///
 /// * `program` - The loaded image.
-/// * `analysis` - Its analysis, whose memo keeps the hash.
 /// * `overlay` - The overlay.
-fn base(program: &Program, analysis: &Analysis, overlay: &Overlay) -> u64 {
-    let digest = analysis.derived.get_or_build("edit_program", (), || {
-        crate::hashing::sha256(&program.bytes)
-    });
-    let [b0, b1, b2, b3, b4, b5, b6, b7, ..] = *digest;
+fn base(program: &Program, overlay: &Overlay) -> u64 {
+    let [b0, b1, b2, b3, b4, b5, b6, b7, ..] = program.digest();
     let file = u64::from_le_bytes([b0, b1, b2, b3, b4, b5, b6, b7]);
-    super::functions::mix(file, overlay.edits_key())
+    let mapped = super::functions::mix(file, program.image_base);
+    super::functions::mix(mapped, overlay.edits_key())
 }
 
 /// Checks `edits` in order over `overlay`, each over what the ones before
@@ -1144,7 +1141,7 @@ pub fn plan(
     }
     project::held(&draft.overlay).map_err(anyhow::Error::msg)?;
     Ok(Plan {
-        base: base(program, analysis, overlay),
+        base: base(program, overlay),
         changes: draft.changes,
         lines: draft.lines,
     })
@@ -1183,7 +1180,7 @@ pub fn commit(
     overlay: &mut Overlay,
     plan: &Plan,
 ) -> anyhow::Result<()> {
-    if plan.base != base(program, analysis, overlay) {
+    if plan.base != base(program, overlay) {
         return Err(Stale.into());
     }
     let before = overlay.clone();
@@ -1226,18 +1223,18 @@ pub fn commit(
 /// # Arguments
 ///
 /// * `program` - The loaded image the overlay annotates.
-/// * `analysis` - Its analysis.
+/// * `_analysis` - Its analysis, which the checks of a revert will read.
 /// * `overlay` - The overlay the changes were committed to, as it is now.
 /// * `changes` - The changes taken back.
 #[must_use]
 pub fn revert(
     program: &Program,
-    analysis: &Analysis,
+    _analysis: &Analysis,
     overlay: &Overlay,
     changes: &[Change],
 ) -> Plan {
     Plan {
-        base: base(program, analysis, overlay),
+        base: base(program, overlay),
         changes: changes.iter().rev().map(Change::inverse).collect(),
         lines: Vec::new(),
     }

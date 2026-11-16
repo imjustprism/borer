@@ -263,7 +263,7 @@ pub fn for_program(
     extensions: &[&str],
     existing: Existing,
 ) -> Result<PathBuf, String> {
-    let root = root(&program.path, &crate::project::identity(&program.bytes))?;
+    let root = root(&program.path, &crate::project::program_identity(program))?;
     confine(&root, requested, extensions, existing)
 }
 

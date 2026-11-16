@@ -538,7 +538,7 @@ impl BorerServer {
             .to_string();
         let pf = borer::project::ProjectFile::from_overlay(
             &program.path.display().to_string(),
-            Some(borer::project::identity(&program.bytes)),
+            Some(borer::project::program_identity(&program)),
             &read_lock(&self.overlay),
         );
         pf.save(&path, existing).map_err(err_internal)?;
@@ -621,7 +621,7 @@ impl BorerServer {
                     "the project was saved for another build (sha-256 {}... at {saved_for}), but {} is sha-256 {}...; nothing was loaded. Its addresses belong to that build: load it with this project, then borer://carry/{} carries the names to this one; or pass force=true to load the project anyway",
                     short(&borer_engine::text::one_line(saved)),
                     borer_engine::text::short_path(&loaded_path),
-                    short(&borer::project::identity(&program.bytes)),
+                    short(&borer::project::program_identity(&program)),
                     borer_engine::text::short_path(&loaded_path.replace('\\', "/"))
                 ),
                 None => format!(

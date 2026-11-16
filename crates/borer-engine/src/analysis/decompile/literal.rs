@@ -356,6 +356,7 @@ mod tests {
             clr: None,
             parent: None,
             modes: crate::isa::a32::Modes::default(),
+            digest: std::sync::OnceLock::new(),
         };
         assert_eq!(
             super::string_at(&p, 0x2000),

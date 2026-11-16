@@ -50,10 +50,27 @@ pub enum Identity {
 /// * `bytes` - The whole file.
 #[must_use]
 pub fn identity(bytes: &[u8]) -> String {
-    borer_engine::hashing::sha256(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    hex(borer_engine::hashing::sha256(bytes))
+}
+
+/// Returns [`identity`] of a loaded binary, from the hash it keeps
+/// ([`Program::digest`]), so the file is hashed once per program.
+///
+/// # Arguments
+///
+/// * `program` - The loaded binary.
+#[must_use]
+pub fn program_identity(program: &Program) -> String {
+    hex(program.digest())
+}
+
+/// Spells a SHA-256 as lowercase hex.
+///
+/// # Arguments
+///
+/// * `digest` - The hash.
+fn hex(digest: [u8; 32]) -> String {
+    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Explains why a hashless project saved for `saved` was refused on `loaded`.
@@ -236,7 +253,7 @@ impl ProjectFile {
     #[must_use]
     pub fn identify(&self, program: &Program) -> Identity {
         match &self.sha256 {
-            Some(saved) if saved.eq_ignore_ascii_case(&identity(&program.bytes)) => Identity::Same,
+            Some(saved) if saved.eq_ignore_ascii_case(&program_identity(program)) => Identity::Same,
             Some(_) => Identity::Other,
             None if self.is_for(&program.path) => Identity::PathOnly,
             None => Identity::OtherPath,

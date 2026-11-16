@@ -442,7 +442,8 @@ fn taking_an_edit_back_keeps_and_refuses_what_came_after() {
 }
 
 /// A plan made over one program's overlay does not commit to another's,
-/// even where the two overlays state the same.
+/// even where the two overlays state the same and the plan's own
+/// analysis is the one passed.
 #[test]
 fn a_plan_does_not_commit_to_another_programs_overlay() {
     let p = fixture();
@@ -460,8 +461,7 @@ fn a_plan_does_not_commit_to_another_programs_overlay() {
     }];
     let made = plan(&p, &a, &Overlay::default(), &edits, Force::Refuse).expect("planned");
     let mut theirs = Overlay::default();
-    let stale =
-        commit(&other, &Analysis::default(), &mut theirs, &made).expect_err("another program");
+    let stale = commit(&other, &a, &mut theirs, &made).expect_err("another program");
     assert!(stale.is::<Stale>(), "{stale}");
     assert!(
         theirs.comments.is_empty(),

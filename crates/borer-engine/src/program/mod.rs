@@ -335,6 +335,9 @@ pub struct Program {
     /// code ([`Arch::Arm`]): empty, which is A32 throughout, for every
     /// other architecture.
     pub modes: crate::isa::a32::Modes,
+    /// The SHA-256 of [`Program::bytes`], worked out the first time it is
+    /// asked for ([`Program::digest`]).
+    pub(crate) digest: std::sync::OnceLock<[u8; 32]>,
 }
 
 /// Rows of [`Program::section_index`]: one stretch of addresses and the
@@ -589,6 +592,14 @@ fn offset_to_va_in(sections: &[Section], off: u64) -> Option<u64> {
 }
 
 impl Program {
+    /// Returns the SHA-256 of the file's bytes, hashed once per program.
+    #[must_use]
+    pub fn digest(&self) -> [u8; 32] {
+        *self
+            .digest
+            .get_or_init(|| crate::hashing::sha256(&self.bytes))
+    }
+
     /// A program built from bytes in memory, with no symbols, ranges,
     /// headers or debug information: a fixture, or a dump that has no file.
     ///
@@ -637,6 +648,7 @@ impl Program {
             clr: None,
             parent: None,
             modes: crate::isa::a32::Modes::default(),
+            digest: std::sync::OnceLock::new(),
         }
     }
 
@@ -1363,7 +1375,6 @@ impl Program {
         function_ranges.dedup();
         phases.mark("load finish");
 
-        let section_index = Program::index_sections(&sections);
         let mut program = Program {
             path,
             bytes,
@@ -1372,8 +1383,8 @@ impl Program {
             is_64,
             entry,
             image_base,
+            section_index: Program::index_sections(&sections),
             sections,
-            section_index,
             symbols,
             function_ranges,
             headers,
@@ -1390,6 +1401,7 @@ impl Program {
             clr: None,
             parent: None,
             modes,
+            digest: std::sync::OnceLock::new(),
         };
         crate::text::adopt(&mut program);
         program.read_go(&mut names);
