@@ -29,6 +29,16 @@ impl Encoding {
             Encoding::DotnetUs => "dotnet-us",
         }
     }
+
+    /// Returns the bytes one character takes: one for ASCII, two for a
+    /// UTF-16 code unit.
+    #[must_use]
+    pub fn unit(self) -> usize {
+        match self {
+            Encoding::Ascii => 1,
+            Encoding::Utf16 | Encoding::DotnetUs => 2,
+        }
+    }
 }
 
 /// One extracted string.
@@ -195,11 +205,7 @@ impl RawStringSpan {
     /// The run, empty when it no longer stands in `bytes`.
     #[must_use]
     pub fn raw_bytes(self, bytes: &[u8]) -> &[u8] {
-        let unit = match self.encoding {
-            Encoding::Ascii => 1,
-            Encoding::Utf16 | Encoding::DotnetUs => 2,
-        };
-        self.raw(bytes, unit)
+        self.raw(bytes, self.encoding.unit())
     }
 
     /// Returns the span's whole text as the file holds it, neither cut nor
@@ -254,10 +260,7 @@ impl StringHit {
         if self.len <= DISPLAY_MAX && self.text.len() == self.len {
             return std::borrow::Cow::Borrowed(&self.text);
         }
-        let units = match self.encoding {
-            Encoding::Ascii => 1,
-            Encoding::Utf16 | Encoding::DotnetUs => 2,
-        };
+        let units = self.encoding.unit();
         let run = usize::try_from(self.off)
             .ok()
             .and_then(|start| bytes.get(start..start.checked_add(self.len.checked_mul(units)?)?));
@@ -645,10 +648,7 @@ fn is_code_run(
     let Some(va) = program.offset_to_va(span.off) else {
         return false;
     };
-    let unit: u64 = match span.encoding {
-        Encoding::Ascii => 1,
-        Encoding::Utf16 | Encoding::DotnetUs => 2,
-    };
+    let unit = crate::num::from_usize(span.encoding.unit());
     let end = va.saturating_add(u64::from(span.len).saturating_mul(unit));
     let first = code.partition_point(|&(_, hi)| hi <= va);
     let mut cur = va;
