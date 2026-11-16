@@ -1,7 +1,7 @@
 //! The tools that describe functions and how they connect: summaries,
 //! listings, cross-references, class layouts, the call graph and the CFG.
 
-use borer_engine::analysis::edit::{Edit, Force};
+use borer_engine::analysis::edit::{Edit, Force, Laid};
 use borer_engine::analysis::{Analysis, Overlay, parse_addr, render, resolve};
 use borer_engine::program::{Feature, Program};
 use rmcp::handler::server::wrapper::Parameters;
@@ -13,60 +13,7 @@ use crate::params::{
     FunctionsParams, Page, ReachesParams, XrefsParams, count_param, to_usize,
 };
 use crate::safety::{Effect, effects};
-
-impl BorerServer {
-    /// Answers a recovered layout's plan: what it would define and state,
-    /// or, applied, what it did.
-    ///
-    /// The struct and the prototypes are written to the overlay unless
-    /// `dry`, as `class_layout` does.
-    ///
-    /// # Arguments
-    ///
-    /// * `plan` - The plan ([`borer_engine::analysis::apply`]).
-    /// * `(p, a, o)` - The loaded program, its analysis, to name the
-    ///   functions, and the overlay the plan was made under.
-    /// * `dry` - Say what would be done and write nothing.
-    ///
-    /// # Returns
-    ///
-    /// A line saying what was (or would be) done, then the plan's lines.
-    ///
-    /// # Errors
-    ///
-    /// When applying the plan would take the session past what a project
-    /// file holds ([`BorerServer::commit`]); nothing was applied.
-    pub(crate) fn answer_plan(
-        &self,
-        plan: borer_engine::analysis::apply::Plan,
-        (p, a, o): (&Program, &Analysis, &Overlay),
-        dry: bool,
-    ) -> Result<String, String> {
-        let head = format!(
-            "{} struct {} and {} {} prototype(s); decompile then names the fields:\n",
-            if dry {
-                "dry-run: would define"
-            } else {
-                "defined"
-            },
-            plan.name,
-            if dry { "state" } else { "stated" },
-            plan.prototypes.len()
-        );
-        let mut out = head;
-        for line in plan.describe(a, o) {
-            out.push_str(&line);
-            out.push('\n');
-        }
-        if dry {
-            out.push_str("pass dry_run=false to apply.\n");
-            return Ok(out);
-        }
-        self.edited((p, a, o), &[Edit::Layout(plan)], Force::Refuse, false)
-            .map_err(|e| e.to_string())?;
-        Ok(out)
-    }
-}
+use crate::tools::annotate::listed;
 
 #[tool_router(router = function_tools, vis = "pub(crate)")]
 impl BorerServer {
@@ -348,20 +295,20 @@ impl BorerServer {
                 }
                 Err(_) => class.clone(),
             };
-            let layout =
-                borer_engine::analysis::classes::class_layout(p, a, o, &name).ok_or_else(|| {
-                    format!(
-                        "no function belongs to class {}",
-                        borer_engine::text::quoted(&name)
-                    )
-                })?;
             let Some(apply) = &apply else {
+                let layout = borer_engine::analysis::apply::class_named(p, a, o, &name)?;
                 return Ok(borer_engine::analysis::classes::render_layout(
                     &layout, a, o,
                 ));
             };
-            let plan = borer_engine::analysis::apply::from_class(p, a, o, &layout, apply)?;
-            self.answer_plan(plan, (p, a, o), dry_run.unwrap_or(true))
+            let dry = dry_run.unwrap_or(true);
+            let edits = [Edit::Layout {
+                from: Laid::Class(name),
+                name: apply.clone(),
+            }];
+            self.edited((p, a, o), &edits, Force::Refuse, dry)
+                .map(|plan| listed(&plan, dry))
+                .map_err(|e| e.to_string())
         })
     }
 

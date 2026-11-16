@@ -42,14 +42,9 @@ impl BorerServer {
                 text: text.to_owned(),
             }];
             let a = self.analysis_or_empty();
-            let plan = self
-                .edited((p, &a, &self.overlay()), &edits, Force::Refuse, dry)
-                .map_err(|e| e.to_string())?;
-            let mut out: String = plan.lines.iter().map(|l| said(l, dry).0).collect();
-            if dry {
-                out.push_str("pass dry_run=false to apply.\n");
-            }
-            Ok(out)
+            self.edited((p, &a, &self.overlay()), &edits, Force::Refuse, dry)
+                .map(|plan| listed(&plan, dry))
+                .map_err(|e| e.to_string())
         })
     }
 }
@@ -565,6 +560,25 @@ fn said(line: &Line, dry: bool) -> (String, String) {
             }
             (out, String::new())
         }
+        Line::Laid {
+            name,
+            prototypes,
+            lines,
+        } => {
+            let (define, state) = if dry {
+                ("dry-run: would define", "state")
+            } else {
+                ("defined", "stated")
+            };
+            let mut out = format!(
+                "{define} struct {name} and {state} {prototypes} prototype(s); decompile then names the fields:\n"
+            );
+            for line in lines {
+                out.push_str(line);
+                out.push('\n');
+            }
+            (out, String::new())
+        }
         Line::Stated { would, .. } if dry => (would.clone(), String::new()),
         Line::Stated { done, .. } => (done.clone(), String::new()),
         Line::Unknown(types) => (
@@ -684,6 +698,21 @@ fn type_edits(
         (None, None) => {}
     }
     Ok(edits)
+}
+
+/// Answers a plan whose lines are blocks of their own (types from C, a
+/// layout): the blocks, then, for a dry run, how to apply them.
+///
+/// # Arguments
+///
+/// * `plan` - The plan, its lines spelled by [`said`].
+/// * `dry` - Whether the plan is a dry run's.
+pub(crate) fn listed(plan: &Plan, dry: bool) -> String {
+    let mut out: String = plan.lines.iter().map(|l| said(l, dry).0).collect();
+    if dry {
+        out.push_str("pass dry_run=false to apply.\n");
+    }
+    out
 }
 
 /// Answers a plan of one line or of lines joined by `; `: a dry run says

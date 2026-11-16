@@ -402,11 +402,26 @@ pub enum Edit {
         ty: Option<String>,
     },
     /// Defines the struct a recovered layout shows and states the
-    /// prototypes that type a pointer with it, as planned from the layout
-    /// ([`apply::from_class`], [`apply::from_pointer`]).
-    Layout(apply::Plan),
+    /// prototypes that type a pointer with it, the layout read over the
+    /// overlay the edit is planned over.
+    Layout {
+        /// Where the layout is read from.
+        from: Laid,
+        /// The struct's name.
+        name: String,
+    },
     /// Puts a project's annotations in place of the overlay's.
     Project(Box<Overlay>),
+}
+
+/// Where a layout to define as a struct is read from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Laid {
+    /// The class of that name borer recovered ([`apply::from_class`]).
+    Class(String),
+    /// The accesses through a pointer, `<address>[,<register>]` as
+    /// `borer://layout` reads it ([`apply::from_pointer`]).
+    Pointer(String),
 }
 
 /// One thing a plan does, as facts a front end spells in its own words.
@@ -451,6 +466,16 @@ pub enum Line {
     /// The types a stated prototype names that no user type and no C
     /// type word borer knows spells, so each passes as a word.
     Unknown(Vec<String>),
+    /// A layout is defined as a struct.
+    Laid {
+        /// The struct's name.
+        name: String,
+        /// How many prototypes type a pointer with it.
+        prototypes: usize,
+        /// The struct with its fields, each prototype, then the notes
+        /// ([`apply::Plan::describe`]).
+        lines: Vec<String>,
+    },
 }
 
 /// A list of edits checked and worked out over one overlay, ready to be
@@ -585,12 +610,7 @@ impl Draft {
                 let named = (name.as_deref(), ty.as_deref());
                 self.var((p, a), *entry, (var, *field), named)
             }
-            Edit::Layout(plan) => {
-                for change in plan.clone().changes() {
-                    self.put(change);
-                }
-                Ok(())
-            }
+            Edit::Layout { from, name } => self.layout((p, a), from, name),
             Edit::Project(loaded) => {
                 for change in self.overlay.changes(loaded) {
                     self.put(change);
@@ -598,6 +618,43 @@ impl Draft {
                 Ok(())
             }
         }
+    }
+
+    /// Defines a recovered layout as a struct and types the pointers it is
+    /// read through with it, the layout read over the draft.
+    ///
+    /// # Arguments
+    ///
+    /// * `(p, a)` - The program and its analysis.
+    /// * `from` - Where the layout is read from.
+    /// * `name` - The struct's name.
+    ///
+    /// # Errors
+    ///
+    /// When nothing belongs to the class, the pointer is refused, or the
+    /// struct is ([`apply::from_class`], [`apply::from_pointer`]).
+    fn layout(
+        &mut self,
+        (p, a): (&Program, &Analysis),
+        from: &Laid,
+        name: &str,
+    ) -> Result<(), String> {
+        let o = &self.overlay;
+        let plan = match from {
+            Laid::Class(class) => {
+                apply::from_class(p, a, o, &apply::class_named(p, a, o, class)?, name)?
+            }
+            Laid::Pointer(spec) => apply::from_pointer(p, a, o, spec, name)?,
+        };
+        self.lines.push(Line::Laid {
+            name: name.to_owned(),
+            prototypes: plan.prototypes.len(),
+            lines: plan.describe(a, o),
+        });
+        for change in plan.changes() {
+            self.put(change);
+        }
+        Ok(())
     }
 
     /// Keeps a line saying what a statement would do and did.

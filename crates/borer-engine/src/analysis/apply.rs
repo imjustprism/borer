@@ -209,6 +209,29 @@ pub fn from_pointer(
     })
 }
 
+/// Returns the layout of the class of that name, as its methods show it
+/// ([`super::classes::class_layout`]).
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - User names, types and prototypes.
+/// * `name` - The class.
+///
+/// # Errors
+///
+/// When no function belongs to the class.
+pub fn class_named(
+    p: &Program,
+    a: &Analysis,
+    o: &Overlay,
+    name: &str,
+) -> Result<ClassLayout, String> {
+    super::classes::class_layout(p, a, o, name)
+        .ok_or_else(|| format!("no function belongs to class {}", crate::text::quoted(name)))
+}
+
 /// Plans the struct a class's methods show, and the prototypes that type
 /// each method's first parameter, its object, with it.
 ///

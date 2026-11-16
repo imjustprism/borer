@@ -8,7 +8,9 @@
 )]
 
 use crate::common::fixture;
-use borer_engine::analysis::edit::{Change, Edit, Force, Line, Plan, Refused, Stale, commit, plan};
+use borer_engine::analysis::edit::{
+    Change, Edit, Force, Laid, Line, Plan, Refused, Stale, commit, plan,
+};
 use borer_engine::analysis::project::NAMES_MAX;
 use borer_engine::analysis::protos::{Proto, Var, VarKey};
 use borer_engine::analysis::stated::{Field, Mode};
@@ -317,4 +319,39 @@ fn every_change_says_what_its_entry_holds() {
         };
         assert!(holds, "{change:?}");
     }
+}
+
+/// A layout planned again after another edit landed reads the overlay as
+/// that edit left it: a prototype stated meanwhile for one of the class's
+/// methods keeps its parameters, and only its object is typed.
+#[test]
+fn a_layout_planned_again_reads_the_prototypes_stated_meanwhile() {
+    /// `Cls::Has`, a method of the fixture's class `Cls`.
+    const HAS: u64 = 0x1660;
+    let p = fixture();
+    let a = Analysis::compute(&p);
+    let mut o = Overlay::default();
+    let layout = [Edit::Layout {
+        from: Laid::Class("Cls".to_owned()),
+        name: "ClsS".to_owned(),
+    }];
+    let stated = [Edit::Proto {
+        entry: HAS,
+        proto: Proto::parse("bool f(void *self, int key, char *why)").expect("a prototype"),
+    }];
+    let made_layout = plan(&p, &a, &o, &layout, Force::Refuse).expect("planned");
+    let made_proto = plan(&p, &a, &o, &stated, Force::Refuse).expect("planned");
+    commit(&a, &mut o, &made_proto).expect("committed");
+    let stale = commit(&a, &mut o, &made_layout).expect_err("stale");
+    assert!(stale.is::<Stale>(), "{stale}");
+    let again = plan(&p, &a, &o, &layout, Force::Refuse).expect("planned again");
+    commit(&a, &mut o, &again).expect("committed");
+    let has = o.prototypes.get(&HAS).expect("a prototype");
+    assert_eq!(has.params.len(), 3, "{}", has.spell());
+    assert_eq!(
+        has.params.first().map(|q| q.ty.spell()).as_deref(),
+        Some("ClsS *"),
+        "{}",
+        has.spell()
+    );
 }
