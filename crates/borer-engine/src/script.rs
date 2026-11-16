@@ -37,7 +37,9 @@
 //!   (one call's line).
 //! * `query(uri)`: the text of any `borer://` resource (`borer://taint/...`,
 //!   `borer://grep/...`, `borer://classes`), where the front end running
-//!   the script answers resources ([`Query`]); elsewhere it throws.
+//!   the script answers resources ([`Query`]); elsewhere the text of the
+//!   resources the engine answers on its own ([`crate::answer`]), and a
+//!   throw for the rest.
 //!   `rows(uri)` reads the same text as a table ([`crate::table::records`]):
 //!   a map per row, keyed by the column header, a cell that reads as a
 //!   number an integer.
@@ -204,7 +206,7 @@ struct Host {
     run: RefCell<ScriptRun>,
     /// The words after the script on the command line.
     args: Vec<String>,
-    /// Who answers `query`, `None` where nothing does.
+    /// Who answers `query`, `None` where the engine answers alone.
     query: Option<Query>,
     /// `decompile` and `scenario` calls made so far.
     decompiles: Cell<u32>,
@@ -399,7 +401,10 @@ impl Host {
         Ok(())
     }
 
-    /// Asks the front end for a resource's text, against the query budget.
+    /// Asks the front end for a resource's text, against the query budget;
+    /// with no front end, the engine answers the resources it answers on
+    /// its own ([`crate::answer::read`]), so a script run from the CLI or
+    /// the app queries those as one run from the MCP server does.
     ///
     /// # Arguments
     ///
@@ -407,14 +412,22 @@ impl Host {
     ///
     /// # Errors
     ///
-    /// When no front end answers resources, the budget is spent, or the
-    /// front end refuses the URI.
+    /// When the budget is spent, the front end refuses the URI, or with no
+    /// front end the engine does not answer the resource or refuses it.
     fn ask(&self, uri: &str) -> Result<String, Box<EvalAltResult>> {
-        let Some(answer) = &self.query else {
-            return Err("query is not available here: no front end answers resources".into());
-        };
         Host::spend(&self.queries, QUERIES_MAX, "query")?;
-        answer(uri).map_err(Into::into)
+        if let Some(answer) = &self.query {
+            return answer(uri).map_err(Into::into);
+        }
+        let page = crate::answer::Page::whole(uri);
+        crate::answer::read(&self.program, &self.analysis, &self.overlay, uri, page)
+            .unwrap_or_else(|| {
+                Err(format!(
+                    "query is not available here: {} is answered by the MCP server (its query and script tools), not by the engine alone",
+                    crate::text::one_line(uri)
+                ))
+            })
+            .map_err(Into::into)
     }
 
     /// The fields a function accesses or passes on through a pointer, as a
@@ -517,7 +530,8 @@ pub fn run(
 /// * `overlay` - The names in force.
 /// * `code` - The script.
 /// * `args` - The words after the script on the command line.
-/// * `query` - Who answers `query(uri)`; `None` makes it throw.
+/// * `query` - Who answers `query(uri)`; `None` leaves it to the engine
+///   ([`crate::answer::read`]).
 ///
 /// # Returns
 ///
@@ -1293,6 +1307,30 @@ mod tests {
         assert!(err.contains("unknown resource borer://nope"), "{err}");
         let err = go(r#"query("borer://echo/x");"#).expect_err("no front end");
         assert!(err.contains("query is not available here"), "{err}");
+    }
+
+    /// With no front end, `query` answers the resources the engine answers
+    /// on its own with the engine's text, where it threw for every URI: a
+    /// script run from the CLI could read none.
+    ///
+    /// # Panics
+    ///
+    /// When the script's text differs from the engine's answer.
+    #[test]
+    fn a_script_with_no_front_end_queries_the_engines_resources() {
+        let uri = "borer://protection";
+        let (p, a) = fixture();
+        let page = crate::answer::Page::whole(uri);
+        let want = crate::answer::read(&p, &a, &Overlay::default(), uri, page)
+            .expect("the engine answers it")
+            .expect("protection answers");
+        let run = go(&format!(r#"print(query("{uri}"));"#)).expect("the query answers");
+        let lines: Vec<&str> = want
+            .strip_suffix('\n')
+            .unwrap_or(&want)
+            .split('\n')
+            .collect();
+        assert_eq!(run.output, lines);
     }
 
     /// A run stops at its `query` and `decompile` budgets with an error
