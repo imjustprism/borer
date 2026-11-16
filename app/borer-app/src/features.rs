@@ -25,4 +25,5 @@ pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
     crate::goto::register(workspace, binary);
     crate::overview::register(workspace, binary);
     crate::linear_item::register(workspace, binary);
+    crate::graph_item::register(workspace, binary);
 }

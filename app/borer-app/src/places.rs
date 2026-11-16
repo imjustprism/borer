@@ -3,11 +3,12 @@
 
 use std::sync::Arc;
 
-use gpui::{App, AppContext as _, Context, Entity, WeakEntity, Window};
+use gpui::{App, AppContext as _, Context, Entity, EntityId, WeakEntity, Window};
 use workspace::{Item, ItemHandle, Workspace};
 
 use crate::binary::Binary;
 use crate::decompile_item::{DecompileItem, Form, TabMode};
+use crate::graph_item::GraphItem;
 use crate::linear_item::LinearItem;
 use crate::overview::OverviewItem;
 use crate::worker::LoadedBinary;
@@ -23,6 +24,14 @@ pub enum Place {
         /// Which view of it.
         form: Form,
         /// Virtual address of the instruction to show, if any.
+        at: Option<u64>,
+    },
+    /// The control-flow graph of the function at `entry`, with the block holding `at`
+    /// selected when one is given.
+    Graph {
+        /// Entry virtual address of the function.
+        entry: u64,
+        /// Virtual address of the instruction whose block to select, if any.
         at: Option<u64>,
     },
     /// The engine's triage of the binary: what it is, what it can do, where to start.
@@ -97,6 +106,18 @@ pub fn open(
             };
             let build = |weak, window: &mut Window, cx: &mut Context<'_, DecompileItem>| {
                 DecompileItem::function(weak, binary, loaded, (entry, form), window, cx)
+            };
+            let item = show(workspace, how, shows, build, window, cx);
+            if let Some(va) = at {
+                item.update(cx, |item, cx| item.go_to_address(va, cx));
+            }
+        }
+        Place::Graph { entry, at } => {
+            let shows = |item: &GraphItem| {
+                item.entry() == entry && Arc::ptr_eq(&item.loaded().program, &program)
+            };
+            let build = |weak, window: &mut Window, cx: &mut Context<'_, GraphItem>| {
+                GraphItem::new(weak, binary, loaded, entry, window, cx)
             };
             let item = show(workspace, how, shows, build, window, cx);
             if let Some(va) = at {
@@ -210,10 +231,49 @@ fn loaded_of<'a>(item: &dyn ItemHandle, cx: &'a App) -> Option<&'a Arc<LoadedBin
     if let Some(code) = item.downcast::<DecompileItem>() {
         return Some(code.read(cx).loaded());
     }
+    if let Some(graph) = item.downcast::<GraphItem>() {
+        return Some(graph.read(cx).loaded());
+    }
     if let Some(overview) = item.downcast::<OverviewItem>() {
         return Some(overview.read(cx).loaded());
     }
     Some(item.downcast::<LinearItem>()?.read(cx).loaded())
+}
+
+/// Keeps the tab `id` and opens `place` in the preview tab, once the current update ends.
+///
+/// # Arguments
+///
+/// * `workspace` - The workspace.
+/// * `binary` - The window's binary.
+/// * `loaded` - The snapshot the place is shown from.
+/// * `(id, place)` - The tab opening it, kept, and what to open.
+/// * `window` - Window the tab is in.
+/// * `cx` - Application context.
+pub fn open_beside(
+    workspace: &WeakEntity<Workspace>,
+    binary: &Entity<Binary>,
+    loaded: &Arc<LoadedBinary>,
+    (id, place): (EntityId, Place),
+    window: &Window,
+    cx: &mut App,
+) {
+    let (workspace, binary, loaded) = (workspace.clone(), binary.clone(), loaded.clone());
+    window.defer(cx, move |window, cx| {
+        let Some(workspace) = workspace.upgrade() else {
+            return;
+        };
+        workspace.update(cx, |workspace, cx| {
+            workspace
+                .active_pane()
+                .update(cx, |pane, _| pane.unpreview_item_if_preview(id));
+            let how = Opening {
+                mode: TabMode::Preview,
+                focus: true,
+            };
+            open(workspace, &binary, &loaded, place, how, window, cx);
+        });
+    });
 }
 
 /// Returns the place a center item shows.
@@ -225,11 +285,17 @@ fn loaded_of<'a>(item: &dyn ItemHandle, cx: &'a App) -> Option<&'a Arc<LoadedBin
 ///
 /// # Returns
 ///
-/// The function and view a code tab shows, with no address (a tab keeps no address, only
-/// its scroll), the overview or the linear listing; `None` for the start tab and for
-/// measured lines.
+/// The function and view a code or graph tab shows, with no address (a tab keeps no
+/// address, only its scroll), the overview or the linear listing; `None` for the start tab
+/// and for measured lines.
 #[must_use]
 pub fn place_of(item: &dyn ItemHandle, cx: &App) -> Option<Place> {
+    if let Some(graph) = item.downcast::<GraphItem>() {
+        return Some(Place::Graph {
+            entry: graph.read(cx).entry(),
+            at: None,
+        });
+    }
     if item.downcast::<OverviewItem>().is_some() {
         return Some(Place::Overview);
     }

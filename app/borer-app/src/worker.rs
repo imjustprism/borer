@@ -14,8 +14,8 @@ use borer_engine::analysis::decompile::text_check;
 use borer_engine::analysis::decompile::view::view;
 use borer_engine::analysis::find::{Found, Query, everywhere};
 use borer_engine::analysis::render::{
-    Bytes, Cell as BandCell, Dir, FunctionOrder, FunctionRows, LinearPage, Triage,
-    answered_flagged, band, disasm_view, function_rows, linear, triage,
+    Bytes, Cell as BandCell, Cfg, Dir, FunctionOrder, FunctionRows, LinearPage, Triage,
+    answered_flagged, band, cfg, disasm_view, function_rows, linear, triage,
 };
 use borer_engine::analysis::{Analysis, EnumSource, Overlay, no_function_at, resolve_suggesting};
 use borer_engine::cancel::Cancel;
@@ -490,10 +490,9 @@ impl GradeCounts {
 /// emulator to check against.
 #[must_use]
 pub fn grade_counts_blocking(loaded: &LoadedBinary, entry: u64) -> Option<GradeCounts> {
-    let (program, analysis) = (&loaded.program, &loaded.analysis);
-    let (answered, _) = answered_flagged(program, analysis, &loaded.overlay, entry);
-    let check = text_check(program, analysis, &answered, entry);
-    (*check).as_ref().map(GradeCounts::of)
+    (*check_blocking(loaded, entry))
+        .as_ref()
+        .map(GradeCounts::of)
 }
 
 /// Builds the decompile view of the function at `entry` in `loaded`.
@@ -573,6 +572,45 @@ pub fn listing_blocking(loaded: &LoadedBinary, entry: u64) -> Result<Arc<View>, 
                 format!("The listing at {entry:#x} outgrew the 4 GiB a view holds.")
             }
         })
+}
+
+/// Builds the control-flow graph of the function at `entry` in `loaded`, laid out once
+/// with it, or says why none.
+///
+/// Must be called inside [`spawn_engine`].
+///
+/// # Arguments
+///
+/// * `loaded` - Previously loaded binary state.
+/// * `entry` - Entry virtual address of the function.
+///
+/// # Errors
+///
+/// Returns the engine's words when it builds no graph there.
+pub fn graph_blocking(loaded: &LoadedBinary, entry: u64) -> Result<Arc<Cfg>, String> {
+    cfg(&loaded.program, &loaded.analysis, &loaded.overlay, entry).map_err(|e| format!("{e:#}"))
+}
+
+/// Checks the decompiled text of the function at `entry` in `loaded` against the machine,
+/// block by block, under the names [`answered_flagged`] gives, the ones the answer is drawn
+/// under.
+///
+/// Must be called inside [`spawn_engine`].
+///
+/// # Arguments
+///
+/// * `loaded` - Previously loaded binary state.
+/// * `entry` - Entry virtual address of the function.
+///
+/// # Returns
+///
+/// The check, `None` inside when the function does not decompile or the image has no
+/// emulator.
+#[must_use]
+pub fn check_blocking(loaded: &LoadedBinary, entry: u64) -> Arc<Option<TextCheck>> {
+    let (program, analysis) = (&loaded.program, &loaded.analysis);
+    let (answered, _) = answered_flagged(program, analysis, &loaded.overlay, entry);
+    text_check(program, analysis, &answered, entry)
 }
 
 /// Builds one page of the linear listing of `loaded`, or says why none.
@@ -872,7 +910,7 @@ mod tests {
     }
 
     /// Returns every module of the crate but this one, by path under `src`, with its text.
-    fn sources() -> [(&'static str, &'static str); 35] {
+    fn sources() -> [(&'static str, &'static str); 36] {
         [
             ("actions.rs", include_str!("actions.rs")),
             ("app_assets.rs", include_str!("app_assets.rs")),
@@ -890,6 +928,7 @@ mod tests {
             ("function_columns.rs", include_str!("function_columns.rs")),
             ("functions_panel.rs", include_str!("functions_panel.rs")),
             ("goto.rs", include_str!("goto.rs")),
+            ("graph_item.rs", include_str!("graph_item.rs")),
             ("lib.rs", include_str!("lib.rs")),
             ("linear_item.rs", include_str!("linear_item.rs")),
             ("main.rs", include_str!("main.rs")),
@@ -961,6 +1000,7 @@ mod tests {
             "answered_flagged(",
             "triage(",
             "everywhere(",
+            "render::cfg",
         ];
         for (name, text) in sources() {
             let code = kept(text);

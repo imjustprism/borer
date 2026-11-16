@@ -40,7 +40,7 @@ use crate::card::{Card, Tone};
 use crate::code_semantics::for_one_view;
 use crate::code_view::{ClickOutcome, CodeLines, CodePalette, Role, resolve_ref_click};
 use crate::commands;
-use crate::places::{Opening, Place, open};
+use crate::places::{Place, open_beside};
 use crate::worker::{Job, LoadedBinary, decompile_or_why, listing_blocking};
 
 /// Fewest logical pixels a row of code is tall.
@@ -859,23 +859,37 @@ impl DecompileItem {
     /// * `window` - Window the tab is in.
     /// * `cx` - Item context.
     fn open_beside(&self, place: Place, window: &Window, cx: &mut Context<'_, Self>) {
-        let (workspace, id) = (self.workspace.clone(), cx.entity_id());
-        let (binary, loaded) = (self.binary.clone(), self.loaded.clone());
-        window.defer(cx, move |window, cx| {
-            let Some(workspace) = workspace.upgrade() else {
-                return;
-            };
-            workspace.update(cx, |workspace, cx| {
-                workspace
-                    .active_pane()
-                    .update(cx, |pane, _| pane.unpreview_item_if_preview(id));
-                let how = Opening {
-                    mode: TabMode::Preview,
-                    focus: true,
-                };
-                open(workspace, &binary, &loaded, place, how, window, cx);
+        let id = cx.entity_id();
+        open_beside(
+            &self.workspace,
+            &self.binary,
+            &self.loaded,
+            (id, place),
+            window,
+            cx,
+        );
+    }
+
+    /// Opens the function's graph with the block of the cursor's instruction selected,
+    /// keeping this tab; a tab of measured lines has no function to graph.
+    ///
+    /// # Arguments
+    ///
+    /// * `window` - Window the tab is in.
+    /// * `cx` - Item context.
+    pub fn toggle_graph(&self, window: &Window, cx: &mut Context<'_, Self>) {
+        let Some(entry) = self.entry else {
+            return;
+        };
+        let at = self
+            .code
+            .as_ref()
+            .zip(self.cursor(cx))
+            .and_then(|(code, (row, _))| {
+                let (view, line) = code.get(row)?;
+                view.address(line)
             });
-        });
+        self.open_beside(Place::Graph { entry, at }, window, cx);
     }
 }
 

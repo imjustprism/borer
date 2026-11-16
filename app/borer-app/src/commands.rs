@@ -84,19 +84,22 @@ pub enum Ctx {
     Start,
     /// The overview tab.
     Overview,
+    /// A graph tab.
+    Graph,
     /// The in-window menu bar.
     MenuBar,
 }
 
 impl Ctx {
     /// Every context, in the order the keymap's sections go.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Global,
         Self::Workspace,
         Self::Code,
         Self::Rows,
         Self::Start,
         Self::Overview,
+        Self::Graph,
         Self::MenuBar,
     ];
 
@@ -110,6 +113,7 @@ impl Ctx {
             Self::Rows => Some("RowsPanel > Editor"),
             Self::Start => Some("StartItem"),
             Self::Overview => Some("Overview"),
+            Self::Graph => Some("GraphView"),
             Self::MenuBar => Some("MenuBar"),
         }
     }
@@ -397,6 +401,75 @@ pub const COMMANDS: &[Command] = &[
             Need::Binary,
         )
     },
+    Command {
+        keys: &[Keys {
+            all: &[],
+            win: &["ctrl-3"],
+            linux: &["ctrl-3"],
+            mac: &["cmd-alt-3"],
+            context: Ctx::Workspace,
+        }],
+        serves: &["cfg"],
+        ..item(
+            "borer::ShowGraph",
+            "Graph",
+            (MenuName::View, 0),
+            Need::Binary,
+        )
+    },
+    Command {
+        keys: &[
+            Keys::all(Ctx::Code, &["space"]),
+            Keys::all(Ctx::Graph, &["space"]),
+        ],
+        serves: &["cfg"],
+        ..item(
+            "borer::ToggleGraph",
+            "Toggle Graph",
+            (MenuName::View, 0),
+            Need::Binary,
+        )
+    },
+    Command {
+        keys: &[Keys::all(Ctx::Graph, &["secondary-="])],
+        replaces: &["zed::IncreaseBufferFontSize"],
+        ..item(
+            "borer::ZoomIn",
+            "Zoom In Graph",
+            (MenuName::View, 0),
+            Need::Binary,
+        )
+    },
+    Command {
+        keys: &[Keys::all(Ctx::Graph, &["secondary--"])],
+        replaces: &["zed::DecreaseBufferFontSize"],
+        ..item(
+            "borer::ZoomOut",
+            "Zoom Out Graph",
+            (MenuName::View, 0),
+            Need::Binary,
+        )
+    },
+    Command {
+        keys: &[Keys::all(Ctx::Graph, &["secondary-0"])],
+        replaces: &["zed::ResetBufferFontSize"],
+        ..item(
+            "borer::FitGraph",
+            "Fit Graph",
+            (MenuName::View, 0),
+            Need::Binary,
+        )
+    },
+    Command {
+        keys: &[Keys::all(Ctx::Graph, &["i"])],
+        serves: &["borer://certify"],
+        ..item(
+            "borer::ShowCheck",
+            "Block Evidence",
+            (MenuName::View, 0),
+            Need::Binary,
+        )
+    },
     item(
         "workspace::ToggleLeftDock",
         "Toggle Left Dock",
@@ -449,7 +522,10 @@ pub const COMMANDS: &[Command] = &[
         )
     },
     Command {
-        keys: &[Keys::all(Ctx::Code, &["f12", "enter"])],
+        keys: &[
+            Keys::all(Ctx::Code, &["f12", "enter"]),
+            Keys::all(Ctx::Graph, &["enter"]),
+        ],
         serves: &["decompile"],
         replaces: &["editor::GoToDefinition", "editor::Newline"],
         ..item(
@@ -530,6 +606,38 @@ pub const COMMANDS: &[Command] = &[
             Keys::all(Ctx::Overview, &["enter"]),
         ],
     ),
+    Command {
+        needs: Need::Binary,
+        ..binding(
+            "borer::WalkUp",
+            "Graph Block Above",
+            &[Keys::all(Ctx::Graph, &["up"])],
+        )
+    },
+    Command {
+        needs: Need::Binary,
+        ..binding(
+            "borer::WalkDown",
+            "Graph Block Below",
+            &[Keys::all(Ctx::Graph, &["down"])],
+        )
+    },
+    Command {
+        needs: Need::Binary,
+        ..binding(
+            "borer::WalkLeft",
+            "Graph Block Left",
+            &[Keys::all(Ctx::Graph, &["left"])],
+        )
+    },
+    Command {
+        needs: Need::Binary,
+        ..binding(
+            "borer::WalkRight",
+            "Graph Block Right",
+            &[Keys::all(Ctx::Graph, &["right"])],
+        )
+    },
     binding(
         "menu_bar::ActivateMenuLeft",
         "Menu on the Left",

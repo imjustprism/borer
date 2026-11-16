@@ -16,7 +16,7 @@ use gpui::{
     IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
     Subscription, Task, Window, div, px,
 };
-use theme::ActiveTheme as _;
+use theme::{ActiveTheme as _, Theme};
 use ui::{
     ButtonCommon as _, Clickable as _, Color, IconButton, IconName, IconSize, KeyBinding,
     LabelCommon as _, Tooltip, h_flex,
@@ -203,15 +203,16 @@ impl Default for Grades {
     }
 }
 
-/// Returns the theme's color for the grade under syntax key `key`, the muted text color
-/// when the theme has none.
+/// Returns the theme's color for `grade`, under its `borer.grade.*` syntax key, the muted
+/// text color when the theme has none.
 ///
 /// # Arguments
 ///
-/// * `key` - A `borer.grade.*` syntax key.
-/// * `cx` - Application context reading the theme.
-fn grade_color(key: &str, cx: &App) -> Hsla {
-    let theme = cx.theme();
+/// * `grade` - The engine's grade.
+/// * `theme` - The theme.
+#[must_use]
+pub fn grade_color(grade: Grade, theme: &Theme) -> Hsla {
+    let (key, _) = grade_words(grade);
     theme
         .syntax()
         .style_for_name(key)
@@ -225,7 +226,6 @@ impl Render for Grades {
             return div().into_any_element();
         };
         let cells = SHOWN_GRADES.into_iter().map(|grade| {
-            let (key, _) = grade_words(grade);
             let color = match grade {
                 Grade::Wrong if counts.disagree > 0 => Color::Error,
                 Grade::Proved | Grade::Tested | Grade::Unchecked | Grade::Wrong => Color::Muted,
@@ -236,7 +236,7 @@ impl Render for Grades {
                     div()
                         .w(px(RAIL_WIDTH_PX))
                         .h(px(RAIL_HEIGHT_PX))
-                        .bg(grade_color(key, cx)),
+                        .bg(grade_color(grade, cx.theme())),
                 )
                 .child(status_label(grade_text(&counts, grade), color))
         });

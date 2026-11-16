@@ -20,6 +20,7 @@ pub mod features;
 pub mod function_columns;
 pub mod functions_panel;
 pub mod goto;
+pub mod graph_item;
 pub mod linear_item;
 pub mod measure;
 pub mod menus;

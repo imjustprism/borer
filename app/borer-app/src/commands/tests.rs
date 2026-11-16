@@ -9,6 +9,7 @@ use settings::KeymapFile;
 use super::{COMMANDS, Ctx, Keys, MenuName, Os, UNBOUND, keymap};
 use crate::app_view::tests::{init, load_sample, open};
 use crate::decompile_item::{DecompileItem, TabMode};
+use crate::graph_item::GraphItem;
 use crate::places::{Opening, Place};
 
 /// One binding as a keymap holds it: context predicate, normalized keys, action name
@@ -163,7 +164,10 @@ fn broken(text: &str, keys: &Keys, replaces: bool, os: Os) -> Vec<&'static str> 
             out.push("R3 no alt-<printable> where text is typed (Option characters)");
         }
         let bare = parts.iter().all(|m| *m == "shift");
-        let readonly = matches!(keys.context, Ctx::Code | Ctx::Start | Ctx::MenuBar);
+        let readonly = matches!(
+            keys.context,
+            Ctx::Code | Ctx::Start | Ctx::Overview | Ctx::Graph | Ctx::MenuBar
+        );
         if bare && printable(key) && !readonly {
             out.push("R4 single keys only where nothing is typed");
         }
@@ -256,7 +260,7 @@ fn overlaps(ctx: Ctx, zed: &str) -> bool {
         ],
         Ctx::Code => &["Workspace", "Pane", "Editor"],
         Ctx::Rows => &["Workspace", "Dock", "Editor"],
-        Ctx::Start | Ctx::Overview => &["Workspace", "Pane"],
+        Ctx::Start | Ctx::Overview | Ctx::Graph => &["Workspace", "Pane"],
         Ctx::MenuBar => &["Workspace", "menu"],
     };
     around.contains(&first)
@@ -265,8 +269,8 @@ fn overlaps(ctx: Ctx, zed: &str) -> bool {
 /// Returns the names of the actions with a handler in reach, for each place a row's keys
 /// work.
 ///
-/// The window has a binary open; a code tab and the functions panel's filter are focused
-/// in turn, and the workspace-wide places take what either has.
+/// The window has a binary open; a code tab, the functions panel's filter and a graph tab
+/// are focused in turn, and the workspace-wide places take what the first two have.
 ///
 /// # Panics
 ///
@@ -310,6 +314,25 @@ fn handled(cx: &mut TestAppContext) -> Vec<(Ctx, BTreeSet<&'static str>)> {
     let rows = panel.read_with(cx, |panel, cx| panel.focus_handle(cx));
     cx.update(|window, cx| window.focus(&rows, cx));
     let in_rows: BTreeSet<&str> = take(cx);
+    app.workspace.update_in(cx, |workspace, window, cx| {
+        let how = Opening {
+            mode: TabMode::Permanent,
+            focus: true,
+        };
+        let place = Place::Graph {
+            entry: crate::app_view::tests::CALLER,
+            at: None,
+        };
+        crate::places::open(workspace, &binary, &loaded, place, how, window, cx);
+    });
+    let graph = app.workspace.read_with(cx, |workspace, cx| {
+        workspace.active_item_as::<GraphItem>(cx)
+    });
+    let graph = graph
+        .unwrap()
+        .read_with(cx, |item, cx| item.focus_handle(cx));
+    cx.update(|window, cx| window.focus(&graph, cx));
+    let in_graph: BTreeSet<&str> = take(cx);
     let anywhere: BTreeSet<&str> = in_code.union(&in_rows).copied().collect();
     Ctx::ALL
         .into_iter()
@@ -317,6 +340,7 @@ fn handled(cx: &mut TestAppContext) -> Vec<(Ctx, BTreeSet<&'static str>)> {
             let names = match ctx {
                 Ctx::Code => in_code.clone(),
                 Ctx::Rows => in_rows.clone(),
+                Ctx::Graph => in_graph.clone(),
                 Ctx::Global | Ctx::Workspace | Ctx::Start | Ctx::Overview | Ctx::MenuBar => {
                     anywhere.clone()
                 }

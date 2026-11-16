@@ -25,8 +25,12 @@ const PANELS_RUN: &[&str] = &["Functions"];
 fn places() -> Vec<Place> {
     let code = Place::decompile(CALLER);
     match code {
-        Place::Code { .. } | Place::Overview | Place::Linear { .. } => {
-            vec![code, Place::Overview, Place::Linear { at: None }]
+        Place::Code { .. } | Place::Graph { .. } | Place::Overview | Place::Linear { .. } => {
+            let graph = Place::Graph {
+                entry: CALLER,
+                at: None,
+            };
+            vec![code, graph, Place::Overview, Place::Linear { at: None }]
         }
     }
 }

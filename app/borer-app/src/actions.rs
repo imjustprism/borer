@@ -44,6 +44,26 @@ gpui::actions!(
         /// Opens the linear listing at the address of the code tab's cursor line, else of its
         /// function's entry.
         ShowInLinear,
+        /// Opens the control-flow graph of the code tab's function.
+        ShowGraph,
+        /// Switches between a function's graph and its listing at the same address.
+        ToggleGraph,
+        /// Zooms the graph in; the engine's layout is only scaled.
+        ZoomIn,
+        /// Zooms the graph out; the engine's layout is only scaled.
+        ZoomOut,
+        /// Zooms and pans the graph so the whole function fits the tab.
+        FitGraph,
+        /// Selects the graph block nearest above the selected one along an edge.
+        WalkUp,
+        /// Selects the graph block nearest below the selected one along an edge.
+        WalkDown,
+        /// Selects the graph block nearest left of the selected one along an edge.
+        WalkLeft,
+        /// Selects the graph block nearest right of the selected one along an edge.
+        WalkRight,
+        /// Shows or hides the evidence behind the selected graph block's grade.
+        ShowCheck,
     ]
 );
 
