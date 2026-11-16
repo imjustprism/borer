@@ -21,6 +21,9 @@ pub const LOAD_SCOPE_NOTE: &str = "packs left out; session load path comes next"
 /// The status line while no binary is open.
 pub const NO_BINARY: &str = "No binary loaded";
 
+/// How the status line starts while an open waits for a running load's engine thread.
+pub const STILL_READING: &str = "still reading";
+
 /// A load that is running: what it reads and since when.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Loading {
@@ -206,7 +209,7 @@ impl Binary {
     pub fn open_path(&mut self, path: PathBuf, cx: &mut Context<'_, Self>) -> bool {
         if let Some(busy) = &self.busy {
             self.status = format!(
-                "still reading {}; open it again once that ends",
+                "{STILL_READING} {}; open it again once that ends",
                 file_name(busy)
             );
             cx.notify();
@@ -237,6 +240,9 @@ impl Binary {
                 if binary.epoch.is_current(ticket, &check_cancel) {
                     binary.finish_load(result, cx);
                 } else {
+                    if binary.status.starts_with(STILL_READING) {
+                        binary.status = NO_BINARY.to_owned();
+                    }
                     cx.notify();
                 }
             });
@@ -450,7 +456,7 @@ mod tests {
     use gpui::{AppContext as _, SharedString, TestAppContext};
     use ui::Color;
 
-    use super::Binary;
+    use super::{Binary, STILL_READING};
     use crate::app_view::tests::sample;
     use crate::worker::LoadedBinary;
 
@@ -542,5 +548,34 @@ mod tests {
         cx.run_until_parked();
         assert!(binary.read_with(cx, |binary, _| binary.busy().is_none()));
         assert!(open(&second, cx));
+    }
+
+    /// A refused open's line goes once the cancelled load it waited for ends.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the line stays after the engine thread ended.
+    #[gpui::test]
+    fn a_refused_open_line_goes_when_the_load_ends(cx: &mut TestAppContext) {
+        a_refused_open_line_goes_when_the_load_ends_steps(cx);
+    }
+
+    /// Runs the steps of [`a_refused_open_line_goes_when_the_load_ends`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`a_refused_open_line_goes_when_the_load_ends`] says.
+    fn a_refused_open_line_goes_when_the_load_ends_steps(cx: &mut TestAppContext) {
+        crate::app_view::tests::init(cx);
+        let binary = cx.new(|cx| Binary::new(cx));
+        let a = std::env::temp_dir().join("borer-app-a-missing.exe");
+        let b = std::env::temp_dir().join("borer-app-b-missing.exe");
+        assert!(binary.update(cx, |binary, cx| binary.open_path(a, cx)));
+        binary.update(cx, |binary, cx| binary.cancel_load(cx));
+        assert!(!binary.update(cx, |binary, cx| binary.open_path(b, cx)));
+        let status = |cx: &mut TestAppContext| binary.read_with(cx, |b, _| b.status().to_owned());
+        assert!(status(cx).starts_with(STILL_READING));
+        cx.run_until_parked();
+        assert!(!status(cx).starts_with(STILL_READING), "{}", status(cx));
     }
 }
