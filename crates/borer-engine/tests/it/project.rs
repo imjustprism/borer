@@ -106,9 +106,19 @@ fn another_builds_project_is_admitted_only_when_forced() {
         ..Project::default()
     };
     let empty = || Arc::new(Analysis::default());
-    let refused = admit(&program, empty, &Overlay::default(), &file, false)
+    let fielded = Project {
+        fields: [("C".to_owned(), [("0x0".to_owned(), "a".to_owned())].into())].into(),
+        ..Project::from_overlay("a.exe", Some(other.clone()), &Overlay::default())
+    };
+    let asked = Cell::new(false);
+    let analysis = || {
+        asked.set(true);
+        Arc::new(Analysis::default())
+    };
+    let refused = admit(&program, analysis, &Overlay::default(), &fielded, false)
         .expect_err("another build's project was admitted")
         .to_string();
+    assert!(!asked.get(), "a refused file asked for the analysis");
     assert_eq!(
         refused,
         format!(
