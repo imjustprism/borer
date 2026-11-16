@@ -311,6 +311,7 @@ jobs:
   # packaging/SETUP.md lists what to create.
   registries:
     needs: release
+    if: ${{ !cancelled() && needs.release.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -338,7 +339,7 @@ jobs:
   # release archive). The engine and live crates go first: borer depends on them.
   crates:
     needs: registries
-    if: needs.registries.outputs.crates == 'true'
+    if: ${{ !cancelled() && needs.registries.result == 'success' && needs.registries.outputs.crates == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -355,7 +356,7 @@ jobs:
   # package whose version npm already has (a rerun) is left alone.
   npm:
     needs: registries
-    if: needs.registries.outputs.npm == 'true'
+    if: ${{ !cancelled() && needs.registries.result == 'success' && needs.registries.outputs.npm == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -396,7 +397,7 @@ jobs:
   # environment once it is registered there as the project's publisher.
   pypi:
     needs: registries
-    if: needs.registries.outputs.pypi == 'true'
+    if: ${{ !cancelled() && needs.registries.result == 'success' && needs.registries.outputs.pypi == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: pypi
@@ -425,7 +426,7 @@ jobs:
   # bucket repositories; either is skipped while its token is not set.
   manifests:
     needs: registries
-    if: needs.registries.outputs.manifests == 'true'
+    if: ${{ !cancelled() && needs.registries.result == 'success' && needs.registries.outputs.manifests == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
