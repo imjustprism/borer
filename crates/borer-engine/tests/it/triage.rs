@@ -10,7 +10,7 @@
 use borer_engine::analysis::render::{self, Basis, Reason, Summary};
 use borer_engine::analysis::{Analysis, Overlay, bare_name};
 use borer_engine::crypto::Storage;
-use borer_engine::program::Program;
+use borer_engine::program::{Arch, Program};
 
 use crate::common::fixture;
 
@@ -376,4 +376,54 @@ fn each_reason_says_how_it_is_known() {
         assert_eq!(why.basis(), basis, "{why}");
         assert_eq!(why.to_string(), text);
     }
+}
+
+/// A string built from a block seed is credited to its function.
+///
+/// A generator whose entry branches past its mixer is recovered by a run
+/// from the mixer's block, so the reading list names the function once and
+/// never the block.
+#[test]
+fn a_string_built_from_a_block_seed_is_credited_to_its_function() {
+    let code = [
+        0x48, 0x81, 0xf9, 0x34, 0x12, 0x00, 0x00, // ASM: cmp rcx, 0x1234
+        0x75, 0x19, // ASM: jne 0x401022
+        0x48, 0xb8, 0x15, 0x7c, 0x4a, 0x7f, 0xb9, 0x79, 0x37,
+        0x9e, // ASM: mov rax, golden gamma
+        0x48, 0xb8, b's', b'e', b'c', b'r', b'e', b't', b'!',
+        b'!', // ASM: mov rax, "secret!!"
+        0x48, 0x89, 0x44, 0x24, 0xf0, // ASM: mov [rsp-0x10], rax
+        0xc3, // ASM: ret
+    ];
+    let p = crate::raw::image(Arch::X86_64, &code, &[]);
+    let a = Analysis::compute(&p);
+    let built = render::generated_strings(&p, &a, "");
+    assert!(
+        built
+            .found
+            .iter()
+            .any(|g| g.text == "secret!!" && g.built_by == 0x401000),
+        "{:?}",
+        built.found
+    );
+    assert!(built.found.iter().all(|g| a.function(g.built_by).is_some()));
+    let triage = render::triage(&p, &a, &Overlay::default());
+    assert!(
+        triage
+            .read_first
+            .iter()
+            .all(|r| a.function(r.entry).is_some()),
+        "{}",
+        triage.spell()
+    );
+    assert_eq!(
+        triage
+            .read_first
+            .iter()
+            .filter(|r| r.entry == 0x401000)
+            .count(),
+        1,
+        "{}",
+        triage.spell()
+    );
 }

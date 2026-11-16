@@ -607,7 +607,9 @@ pub struct Recovery {
 /// run from its entry and from the blocks around the mixer: starting at the
 /// entry runs argument-dependent code that can branch past the generator
 /// entirely, starting at the generator's own block skips that, and the
-/// machine's stack pointer is valid either way.
+/// machine's stack pointer is valid either way. What a run builds is
+/// credited to the function holding the constants, whichever of its blocks
+/// the run began at.
 ///
 /// One string reached from two start points is one string, and a fragment of
 /// a longer recovery is the same string seen from a start that joined the
@@ -637,7 +639,7 @@ pub fn generated_strings(p: &Program, a: &Analysis, filter: &str) -> Recovery {
     /// ciphertext load and the buffer the loop fills.
     const BLOCKS_BACK: usize = 3;
     let want = filter.to_lowercase();
-    let mut seeds: BTreeSet<u64> = BTreeSet::new();
+    let mut seeds: BTreeMap<u64, u64> = BTreeMap::new();
     let mut funcs: BTreeSet<u64> = BTreeSet::new();
     for hit in crate::crypto::find_crypto_constants(p) {
         if !hit.name.contains("obfuscation") && !hit.name.contains("gamma") {
@@ -647,11 +649,11 @@ pub fn generated_strings(p: &Program, a: &Analysis, filter: &str) -> Recovery {
             continue;
         };
         funcs.insert(f.entry);
-        seeds.insert(f.entry);
+        seeds.entry(f.entry).or_insert(f.entry);
         if let Some(i) = f.blocks.iter().position(|b| b.start <= va && va < b.end) {
             for back in 0..=BLOCKS_BACK {
                 if let Some(b) = i.checked_sub(back).and_then(|j| f.blocks.get(j)) {
-                    seeds.insert(b.start);
+                    seeds.entry(b.start).or_insert(f.entry);
                 }
             }
         }
@@ -661,7 +663,7 @@ pub fn generated_strings(p: &Program, a: &Analysis, filter: &str) -> Recovery {
     let mut stops: BTreeMap<String, usize> = BTreeMap::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut runs = 0usize;
-    for entry in seeds.iter().copied().take(CANDIDATES_MAX) {
+    for (&start, &owner) in seeds.iter().take(CANDIDATES_MAX) {
         let Some(mut emu) = Emulator::new(p, BUDGET) else {
             return Recovery {
                 found: Vec::new(),
@@ -673,13 +675,13 @@ pub fn generated_strings(p: &Program, a: &Analysis, filter: &str) -> Recovery {
         };
         emu.install_imports();
         emu.set_permissive(true);
-        let run = emu.run(entry);
+        let run = emu.run(start);
         runs += 1;
         *stops.entry(run.stop.to_string()).or_default() += 1;
         for call in emu.api_calls() {
             for text in call.strings() {
                 emulated.push(EmulatedArg {
-                    built_by: entry,
+                    built_by: owner,
                     at: call.caller,
                     api: call.api.clone(),
                     text: text.to_owned(),
@@ -695,7 +697,7 @@ pub fn generated_strings(p: &Program, a: &Analysis, filter: &str) -> Recovery {
             }
             found.push(Generated {
                 written_at,
-                built_by: entry,
+                built_by: owner,
                 text,
             });
         }
