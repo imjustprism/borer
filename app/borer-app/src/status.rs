@@ -593,7 +593,9 @@ pub fn add_items(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::path::PathBuf;
+    use std::rc::Rc;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -605,13 +607,13 @@ mod tests {
     };
     use borer_engine::analysis::{Analysis, EnumSource, Overlay};
     use borer_engine::program::{Arch, Program, Section};
-    use gpui::{TestAppContext, VisualTestContext};
+    use gpui::{AppContext as _, TestAppContext, VisualTestContext};
     use workspace::Workspace;
 
     use super::{Address, Grades, Work, grade_text, shown_for};
     use crate::app_view::AppWindow;
     use crate::app_view::tests::{CALLER, init, load_sample, open, open_caller, sample, shown};
-    use crate::binary::{Loading, StatusLine, kind};
+    use crate::binary::{Binary, Loading, StatusLine, kind};
     use crate::decompile_item::{DecompileItem, TabMode, open_function};
     use crate::worker::{GradeCounts, LoadedBinary, grade_counts_blocking, run_engine};
 
@@ -976,11 +978,11 @@ mod tests {
     }
 
     /// The work item stays hidden for the first tenth of a second of a load, then shows how
-    /// long it has run.
+    /// long it has run, redrawn at that tenth and then a second after each redraw.
     ///
     /// # Panics
     ///
-    /// Panics if it shows early or not at all.
+    /// Panics if it shows early, or redraws early or not at all.
     #[gpui::test]
     fn the_work_item_shows_after_a_tenth_of_a_second(cx: &mut TestAppContext) {
         the_work_item_shows_after_a_tenth_of_a_second_steps(cx);
@@ -1002,6 +1004,33 @@ mod tests {
         assert_eq!(
             shown_for(&loading, later),
             Some(Duration::from_millis(1500))
+        );
+        init(cx);
+        let binary = cx.new(|cx| Binary::new(cx));
+        let work = cx.new(|cx| Work::new(binary.clone(), cx));
+        let redraws = Rc::new(Cell::new(0_u32));
+        let count = redraws.clone();
+        let _watch = cx.update(|cx| cx.observe(&work, move |_, _| count.set(count.get() + 1)));
+        binary.update(cx, |binary, cx| {
+            binary.show_reading(loading.path, since, cx);
+        });
+        cx.run_until_parked();
+        let start = redraws.get();
+        let step = |ms, cx: &mut TestAppContext| {
+            cx.executor().advance_clock(Duration::from_millis(ms));
+            redraws.get()
+        };
+        assert_eq!(step(99, cx), start, "redrawn before a tenth of a second");
+        assert_eq!(step(1, cx), start + 1, "not redrawn at a tenth of a second");
+        assert_eq!(
+            step(999, cx),
+            start + 1,
+            "redrawn within a second of the last"
+        );
+        assert_eq!(
+            step(1, cx),
+            start + 2,
+            "not redrawn a second after the last"
         );
     }
 

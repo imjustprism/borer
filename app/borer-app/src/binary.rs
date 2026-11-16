@@ -449,6 +449,27 @@ impl StatusItemView for StatusLine {
 }
 
 #[cfg(test)]
+impl Binary {
+    /// Shows `path` as read since `since` with no engine load behind it, for tests of what
+    /// draws a running load over time.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The file shown as read.
+    /// * `since` - When the shown load started, on the executor's clock.
+    /// * `cx` - Binary context.
+    pub(crate) fn show_reading(
+        &mut self,
+        path: PathBuf,
+        since: Instant,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.reading = Some(Loading { path, since });
+        cx.notify();
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
