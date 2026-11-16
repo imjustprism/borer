@@ -47,7 +47,7 @@ jobs:
       - name: toolchain
         run: rustup toolchain install --no-self-update
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
@@ -114,7 +114,7 @@ jobs:
           # synthesizes, whose title the message check would refuse.
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
 
@@ -123,7 +123,7 @@ jobs:
       - name: toolchain
         run: rustup toolchain install --no-self-update
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           cache-all-crates: true
 
@@ -166,7 +166,7 @@ jobs:
       - name: toolchain
         run: rustup toolchain install --no-self-update
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -242,7 +242,7 @@ jobs:
       - name: toolchain
         run: rustup toolchain install --no-self-update
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
