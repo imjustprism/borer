@@ -32,6 +32,7 @@ mod triage;
 mod typed;
 mod unpack;
 mod unseen;
+mod xrefs;
 
 pub use calls::*;
 pub use catalog::*;
@@ -57,6 +58,7 @@ pub use triage::*;
 pub use typed::*;
 pub use unpack::*;
 pub use unseen::{Reach, unseen_line};
+pub use xrefs::*;
 
 use super::{
     Analysis, BasicBlock, BlockTerm, Function, Overlay, RefKind, RefSite, bare_name, name_of,

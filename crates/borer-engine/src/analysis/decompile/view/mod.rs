@@ -488,7 +488,7 @@ fn imports(program: &Program, analysis: &Analysis) -> Arc<BTreeMap<String, Vec<V
 }
 
 /// Returns the id of the import listed at `slot`: the first of its slots
-/// ([`imports`]), which [`Ref::Import`] names it by.
+/// ([`import_slots`]), which [`Ref::Import`] names it by.
 ///
 /// # Arguments
 ///
@@ -500,6 +500,44 @@ fn imports(program: &Program, analysis: &Analysis) -> Arc<BTreeMap<String, Vec<V
 ///
 /// The import's first slot, or `None` when no import is listed at `slot`.
 pub(crate) fn import_id(program: &Program, analysis: &Analysis, slot: u64) -> Option<u64> {
+    in_import(program, analysis, slot, |at| at.first().copied()).flatten()
+}
+
+/// Returns the slots of the import listed at `slot`: every slot the loader
+/// lists for that library's symbol, as [`imports`] groups them.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image, whose symbols and binds name the imports.
+/// * `analysis` - Its analysis, holding the memo.
+/// * `slot` - One slot of the import.
+///
+/// # Returns
+///
+/// The slots in address order, `slot` among them; `None` when no import is
+/// listed at `slot`.
+pub(crate) fn import_slots(program: &Program, analysis: &Analysis, slot: u64) -> Option<Vec<u64>> {
+    in_import(program, analysis, slot, <[u64]>::to_vec)
+}
+
+/// Reads the slots of the import listed at `slot` ([`imports`]).
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `analysis` - Its analysis, holding the memo.
+/// * `slot` - One of the import's slots.
+/// * `read` - What is read off the slots, in address order.
+///
+/// # Returns
+///
+/// What `read` returns, or `None` when no import is listed at `slot`.
+fn in_import<T>(
+    program: &Program,
+    analysis: &Analysis,
+    slot: u64,
+    read: impl FnOnce(&[u64]) -> T,
+) -> Option<T> {
     let symbol = program
         .symbols
         .iter()
@@ -507,9 +545,8 @@ pub(crate) fn import_id(program: &Program, analysis: &Analysis, slot: u64) -> Op
     imports(program, analysis)
         .get(&expr_render::import_spelling(&symbol.name))?
         .iter()
-        .find(|at| at.binary_search(&slot).is_ok())?
-        .first()
-        .copied()
+        .find(|at| at.binary_search(&slot).is_ok())
+        .map(|at| read(at.as_slice()))
 }
 
 /// Returns each name the overlay gives an address no function starts at,

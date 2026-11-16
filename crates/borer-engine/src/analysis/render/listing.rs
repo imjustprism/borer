@@ -1,5 +1,5 @@
-//! Function and symbol tables, one function's detail and cross-references,
-//! and whole-function disassembly.
+//! Function and symbol tables, one function's detail, and whole-function
+//! disassembly.
 
 use super::*;
 use crate::analysis::NameSource;
@@ -792,11 +792,6 @@ pub fn qt_tsv(a: &Analysis) -> String {
     out
 }
 
-/// Reference groups listed per page unless a limit says otherwise.
-pub const XREF_ROWS_DEFAULT: usize = 60;
-/// Most reference groups one page lists.
-pub const XREF_ROWS_MAX: usize = 500;
-
 /// Ranks functions by what every binary can answer: the distinct string
 /// literals and imports each one references.
 ///
@@ -869,229 +864,6 @@ pub(super) fn everyday_reading_list(
 
 /// Fewest strings and imports combined that make a function worth listing.
 pub(super) const EVERYDAY_MIN: usize = 3;
-
-/// What a cross-reference listing shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum XrefView {
-    /// The header line only.
-    Count,
-    /// One page of groups.
-    Page {
-        /// Groups to skip first.
-        offset: usize,
-        /// Most groups to list; clamped to [`XREF_ROWS_MAX`].
-        limit: usize,
-    },
-}
-
-/// Renders the cross-references to one address, collapsing the sites whose
-/// functions run the same code.
-///
-/// [`xrefs`] with the page spelled as `offset`, `limit` and `count_only`.
-///
-/// # Arguments
-///
-/// * `p` - The loaded image, for its imports.
-/// * `a` - The analysis.
-/// * `o` - User names for the containing functions.
-/// * `target` - The referenced address.
-/// * `offset` - Groups to skip first.
-/// * `limit` - Most groups to list; clamped to [`XREF_ROWS_MAX`].
-/// * `count_only` - Only the header line.
-///
-/// # Returns
-///
-/// As [`xrefs`].
-pub fn xrefs_tsv(
-    p: &Program,
-    a: &Analysis,
-    o: &Overlay,
-    target: u64,
-    offset: usize,
-    limit: usize,
-    count_only: bool,
-) -> String {
-    let view = if count_only {
-        XrefView::Count
-    } else {
-        XrefView::Page { offset, limit }
-    };
-    xrefs(p, a, o, target, view)
-}
-
-/// Renders the cross-references to one address, one row per function
-/// making them, the functions that run the same code folded into one.
-///
-/// A hot function is called from hundreds of sites, and a row per site
-/// named its function on every one: 525 of 585 consecutive rows on a game
-/// client repeated the function of the row before. Each function is one
-/// row, its sites in address order with their kinds, so the name is
-/// printed once. A registration table points hundreds of one-shape thunks
-/// at one string, and listing every one buries the functions that differ,
-/// so the functions whose code is the same are one row too: the lowest
-/// entry stands for them and the row counts the rest. A target with a
-/// handful of distinct callers is one row per caller.
-///
-/// The rows page: `offset` groups are skipped and at most `limit` listed,
-/// and the header says how many there are in all, so a target with more
-/// callers than one page holds is read in pages rather than cut off. The
-/// group covering the most sites comes first.
-///
-/// # Arguments
-///
-/// * `p` - The loaded image, for its imports.
-/// * `a` - The analysis.
-/// * `o` - User names for the containing functions.
-/// * `target` - The referenced address.
-/// * `view` - The header alone, or which page of groups.
-///
-/// # Returns
-///
-/// A `# N xrefs to <target> in G groups, showing S of G from O` header, a column
-/// header, then one `function: site kind, site kind` row per group of the
-/// page, ending with how many more functions run the same code when the
-/// group folds several; a pointer stored in data is in function `-`. The
-/// count-only view is the first line alone.
-pub fn xrefs(p: &Program, a: &Analysis, o: &Overlay, target: u64, view: XrefView) -> String {
-    let sites = a.xrefs_to(target);
-    let mut by_function: BTreeMap<Option<u64>, Vec<&RefSite>> = BTreeMap::new();
-    for s in sites {
-        by_function.entry(s.from_entry).or_default().push(s);
-    }
-    let mut families: BTreeMap<u64, XrefGroup<'_>> = BTreeMap::new();
-    let mut ordered: Vec<XrefGroup<'_>> = Vec::new();
-    for (&entry, fn_sites) in &by_function {
-        let group = XrefGroup {
-            entry,
-            sites: fn_sites,
-            others: Vec::new(),
-            total: fn_sites.len(),
-        };
-        match entry.and_then(|e| a.function(e).map(|f| (e, f.shape_hash))) {
-            Some((e, shape)) => {
-                if let Some(held) = families.get_mut(&shape) {
-                    held.others.push(e);
-                    held.total += fn_sites.len();
-                } else {
-                    families.insert(shape, group);
-                }
-            }
-            None => ordered.push(group),
-        }
-    }
-    ordered.extend(families.into_values());
-    ordered.sort_by_key(|g| (std::cmp::Reverse(g.total), g.sites.first().map(|s| s.va)));
-    let groups_word = if ordered.len() == 1 {
-        "group"
-    } else {
-        "groups"
-    };
-    let count = if sites.len() >= crate::analysis::functions::XREF_SITES_PER_TARGET {
-        format!(
-            "{}+ (capped: more sites exist than are kept per target)",
-            sites.len()
-        )
-    } else {
-        sites.len().to_string()
-    };
-    let callers = sites.iter().filter(|s| s.is_branch()).count();
-    let short = callers < unseen::SHORT_CALLERS && (callers > 0 || a.function_at(target).is_some());
-    let unseen = short
-        .then(|| unseen_line(p, a, Reach::Program, "#"))
-        .flatten()
-        .unwrap_or_default();
-    let incomplete = if a.incomplete {
-        format!("{INCOMPLETE_NOTE}\n{unseen}")
-    } else {
-        unseen
-    };
-    let XrefView::Page { offset, limit } = view else {
-        return format!(
-            "# {count} xrefs to {target:#x} in {} {groups_word}\n{incomplete}",
-            ordered.len()
-        );
-    };
-    let limit = limit.clamp(1, XREF_ROWS_MAX);
-    let page_end = offset.saturating_add(limit).min(ordered.len());
-    let shown = page_end.saturating_sub(offset.min(page_end));
-    let mut out = format!(
-        "# {count} xrefs to {target:#x} in {} {groups_word}, showing {shown} of {} from {offset}\n{incomplete}# function: site kind, ...\n",
-        ordered.len(),
-        ordered.len()
-    );
-    for g in ordered.iter().skip(offset).take(limit) {
-        let name = g.entry.map_or_else(|| "-".to_owned(), |e| name_of(a, o, e));
-        let sites: Vec<String> = g
-            .sites
-            .iter()
-            .map(|s| format!("{:#x} {}", s.va, s.kind.word()))
-            .collect();
-        let _ = write!(out, "{name}: {}", sites.join(", "));
-        out.push_str(&same_code(a, o, &g.others));
-        out.push('\n');
-    }
-    if page_end < ordered.len() {
-        let _ = writeln!(
-            out,
-            "# {} more groups; offset={page_end} for the next page",
-            ordered.len() - page_end
-        );
-    }
-    out
-}
-
-/// Names the functions a row folds in because they run the same code as
-/// the one it shows, so each stays reachable from the listing.
-///
-/// # Arguments
-///
-/// * `a` - The analysis.
-/// * `o` - User names.
-/// * `others` - Entries of the folded functions, in address order.
-///
-/// # Returns
-///
-/// ` (+N functions running the same code): name, name` with at most
-/// [`SAME_CODE_NAMES_MAX`] names and `...` past them; empty when nothing
-/// was folded.
-pub(super) fn same_code(a: &Analysis, o: &Overlay, others: &[u64]) -> String {
-    if others.is_empty() {
-        return String::new();
-    }
-    let names: Vec<String> = others
-        .iter()
-        .take(SAME_CODE_NAMES_MAX)
-        .map(|&e| name_of(a, o, e))
-        .collect();
-    let more = if others.len() > SAME_CODE_NAMES_MAX {
-        ", ..."
-    } else {
-        ""
-    };
-    format!(
-        " (+{} function{} running the same code): {}{more}",
-        others.len(),
-        plural(others.len()),
-        names.join(", ")
-    )
-}
-
-/// Most folded functions a listing row names; the count covers the rest.
-const SAME_CODE_NAMES_MAX: usize = 8;
-
-/// One row of a cross-reference listing: a function's sites, standing for
-/// every function that runs the same code.
-#[derive(Debug, Clone)]
-struct XrefGroup<'a> {
-    /// The function the sites are in; `None` for a pointer stored in data.
-    entry: Option<u64>,
-    /// Its sites, in address order.
-    sites: &'a [&'a RefSite],
-    /// The other functions running the same code, in address order.
-    others: Vec<u64>,
-    /// Sites across the whole family, what the groups are ordered by.
-    total: usize,
-}
 
 /// Makes a name safe inside a quoted mermaid node label.
 ///
@@ -1391,6 +1163,162 @@ mod tests {
             )),
             "{cut}"
         );
+    }
+
+    /// Builds the import fixture of the cross-reference tests.
+    ///
+    /// `puts` is one ELF import at a GOT and a PLT slot; `Sleep` is
+    /// exported by two libraries, the first reached through the stub at
+    /// `0x1100` as well as its slot. `caller` (`0x1000`) reads the GOT slot,
+    /// calls the PLT slot, calls the stub and calls the second `Sleep`.
+    ///
+    /// # Returns
+    ///
+    /// The program with the import symbols, the analysis and the overlay
+    /// naming both functions.
+    fn imported() -> (Program, Analysis, Overlay) {
+        use crate::program::{Arch, Symbol};
+        let mut p = Program::raw(Vec::new(), Arch::X86_64, 0, None, Vec::new());
+        let import = |name: &str, addr: u64| Symbol {
+            name: name.to_owned(),
+            addr,
+            kind: SymbolKind::Import,
+        };
+        p.symbols = vec![
+            import("puts", 0x3000),
+            import("puts", 0x3010),
+            import("A.dll!Sleep", 0x2000),
+            import("B.dll!Sleep", 0x2008),
+        ];
+        let mut caller = bare(0x1000, None);
+        caller.shape_hash = 1;
+        let mut stub = bare(0x1100, None);
+        stub.shape_hash = 2;
+        stub.thunk = Some(0x2000);
+        let mut a = Analysis {
+            functions: vec![caller, stub],
+            ..Analysis::default()
+        };
+        let site = |va: u64, kind: RefKind, from: u64| RefSite {
+            va,
+            kind,
+            from_entry: Some(from),
+        };
+        a.xrefs
+            .insert(0x3000, vec![site(0x1010, RefKind::Data, 0x1000)]);
+        a.xrefs
+            .insert(0x3010, vec![site(0x1020, RefKind::Call, 0x1000)]);
+        a.xrefs
+            .insert(0x2000, vec![site(0x1100, RefKind::Jmp, 0x1100)]);
+        a.xrefs
+            .insert(0x1100, vec![site(0x1030, RefKind::Call, 0x1000)]);
+        a.xrefs
+            .insert(0x2008, vec![site(0x1040, RefKind::Call, 0x1000)]);
+        a.finish_index(&p);
+        let mut o = Overlay::default();
+        o.names.insert(0x1000, "caller".to_owned());
+        o.names.insert(0x1100, "stub".to_owned());
+        (p, a, o)
+    }
+
+    /// Cross-reference rows carry each group's facts and spell the text the
+    /// listing printed before it had rows, the page and the count alike.
+    ///
+    /// # Panics
+    ///
+    /// When a fact or the spelled text differs.
+    #[test]
+    fn xref_rows_spell_the_listing_the_text_printed() {
+        let (p, a, o) = imported();
+        let page = XrefView::Page {
+            offset: 0,
+            limit: 60,
+        };
+        let rows = xref_rows(&p, &a, &o, 0x2000, page);
+        assert_eq!(
+            (
+                rows.targets.as_slice(),
+                rows.sites,
+                rows.groups,
+                rows.capped
+            ),
+            ([0x2000].as_slice(), 1, 1, false)
+        );
+        assert_eq!(
+            rows.rows,
+            [XrefRow {
+                entry: Some(0x1100),
+                name: "stub".to_owned(),
+                sites: vec![(0x1100, RefKind::Jmp)],
+                folded: Vec::new(),
+                folded_names: Vec::new(),
+            }]
+        );
+        assert_eq!(
+            rows.spell(),
+            "# 1 xrefs to 0x2000 in 1 group, showing 1 of 1 from 0
+# function: site kind, ...
+stub: 0x1100 jmp
+"
+        );
+        assert_eq!(xrefs_tsv(&p, &a, &o, 0x2000, 0, 60, false), rows.spell());
+        let count = xref_rows(&p, &a, &o, 0x2000, XrefView::Count);
+        assert!(count.rows.is_empty(), "{count:?}");
+        assert_eq!(count.spell(), "# 1 xrefs to 0x2000 in 1 group\n");
+        assert_eq!(xrefs_tsv(&p, &a, &o, 0x2000, 0, 60, true), count.spell());
+    }
+
+    /// An import's rows gather its every slot and every stub jumping
+    /// through one, each reference once, and leave out another library's
+    /// symbol of the same name; an address no import has is no import.
+    ///
+    /// # Panics
+    ///
+    /// When a reference is missed, repeated or taken from the other
+    /// library, or the page spells otherwise.
+    #[test]
+    fn an_import_s_rows_gather_its_slots_and_stubs() {
+        let (p, a, o) = imported();
+        let page = XrefView::Page {
+            offset: 0,
+            limit: 60,
+        };
+        let sites = |rows: &XrefRows| {
+            let mut all: Vec<(u64, RefKind)> =
+                rows.rows.iter().flat_map(|r| r.sites.clone()).collect();
+            all.sort_by_key(|s| s.0);
+            all
+        };
+        let puts = xref_rows_of_import(&p, &a, &o, 0x3010, page).expect("an import");
+        assert_eq!(puts.targets, [0x3010, 0x3000]);
+        assert_eq!(
+            sites(&puts),
+            [(0x1010, RefKind::Data), (0x1020, RefKind::Call)]
+        );
+        assert_eq!(puts.sites, 2);
+        let sleep = xref_rows_of_import(&p, &a, &o, 0x2000, page).expect("an import");
+        assert_eq!(sleep.targets, [0x2000, 0x1100]);
+        assert_eq!(
+            sites(&sleep),
+            [(0x1030, RefKind::Call), (0x1100, RefKind::Jmp)]
+        );
+        let first = XrefView::Page {
+            offset: 0,
+            limit: 1,
+        };
+        assert_eq!(
+            xref_rows_of_import(&p, &a, &o, 0x2000, first)
+                .expect("an import")
+                .spell(),
+            "# 2 xrefs to 0x2000, 0x1100 in 2 groups, showing 1 of 2 from 0
+# function: site kind, ...
+caller: 0x1030 call
+# 1 more groups; offset=1 for the next page
+"
+        );
+        let other = xref_rows_of_import(&p, &a, &o, 0x2008, page).expect("an import");
+        assert_eq!(sites(&other), [(0x1040, RefKind::Call)]);
+        assert_eq!(xref_rows_of_import(&p, &a, &o, 0x1000, page), None);
     }
 
     /// Builds the bare function a filter test needs: an entry, a name when
