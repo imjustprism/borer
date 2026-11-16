@@ -1,7 +1,7 @@
 //! Edits of the overlay as values.
 //!
 //! The entries an edit writes, each a
-//! [`Change`] that names what the entry held and what it holds, so a list
+//! [`Change`] that names the entry, what it held and what it holds, so a list
 //! of them replays the edit ([`Overlay::apply`]) and their inverses, in
 //! reverse order, take it back ([`Change::inverse`]).
 //!
@@ -15,7 +15,7 @@
 //! they were planned over, and to no other: two edits planned at once
 //! cannot both pass a check the first one's write would fail.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, btree_map};
 use std::fmt;
 
 use super::decompile::decompile_named;
@@ -26,51 +26,65 @@ use super::utypes::{self, TypeExpr, UserType};
 use super::{Analysis, Overlay, apply, cdecl, name_of, parse_addr, project, resolve};
 use crate::program::Program;
 
-/// One entry of the overlay: the map it is in and its key there.
+/// What one entry of the overlay held and holds, `None` for an absent side.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Key {
-    /// [`Overlay::names`], by address.
-    Name(u64),
-    /// [`Overlay::comments`], by address.
-    Comment(u64),
-    /// [`Overlay::types`], by the type's name.
-    Type(String),
-    /// [`Overlay::applied`], by address.
-    Applied(u64),
-    /// [`Overlay::prototypes`], by function entry.
-    Proto(u64),
-    /// [`Overlay::vars`], by function entry: every variable stated of it.
-    Vars(u64),
-    /// [`Overlay::fields`], by class: every field stated of it.
-    Fields(String),
-}
-
-/// What an entry of the overlay holds, of the kind its [`Key`] names.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Value {
-    /// A name or a comment.
-    Text(String),
-    /// A user type.
-    Type(UserType),
-    /// A type applied at an address.
-    Applied(TypeExpr),
-    /// A stated prototype.
-    Proto(Proto),
-    /// The variables stated of one function.
-    Vars(BTreeMap<VarKey, Var>),
-    /// The fields stated of one class.
-    Fields(BTreeMap<u64, Field>),
-}
-
-/// One entry an edit added, removed or replaced.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Change {
-    /// The entry.
-    pub key: Key,
+pub struct Swap<V> {
     /// What it held before, `None` when it was absent.
-    pub old: Option<Value>,
+    old: Option<V>,
     /// What it holds after, `None` when the edit removed it.
-    pub new: Option<Value>,
+    new: Option<V>,
+}
+
+impl<V> Swap<V> {
+    /// Returns what the entry held before, `None` when it was absent.
+    #[must_use]
+    pub const fn before(&self) -> Option<&V> {
+        self.old.as_ref()
+    }
+
+    /// Returns what the entry holds after, `None` when it was removed.
+    #[must_use]
+    pub const fn after(&self) -> Option<&V> {
+        self.new.as_ref()
+    }
+
+    /// Returns the swap that takes this one back.
+    fn flip(self) -> Self {
+        Self {
+            old: self.new,
+            new: self.old,
+        }
+    }
+}
+
+/// Returns the swap that writes `new`, its old side read when it is
+/// written ([`Overlay::assign`]).
+///
+/// # Arguments
+///
+/// * `new` - What the entry holds after, `None` to remove it.
+pub(crate) const fn to<V>(new: Option<V>) -> Swap<V> {
+    Swap { old: None, new }
+}
+
+/// One entry of the overlay an edit added, removed or replaced, keyed by
+/// the map it is in, so its key and its values are always of one kind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Change {
+    /// [`Overlay::names`], by address.
+    Name(u64, Swap<String>),
+    /// [`Overlay::comments`], by address.
+    Comment(u64, Swap<String>),
+    /// [`Overlay::types`], by the type's name.
+    Type(String, Swap<UserType>),
+    /// [`Overlay::applied`], by address.
+    Applied(u64, Swap<TypeExpr>),
+    /// [`Overlay::prototypes`], by function entry.
+    Proto(u64, Swap<Proto>),
+    /// [`Overlay::vars`], by function entry and the variable.
+    Var(u64, VarKey, Swap<Var>),
+    /// [`Overlay::fields`], by class and byte offset.
+    Field(String, u64, Swap<Field>),
 }
 
 impl Change {
@@ -78,10 +92,14 @@ impl Change {
     /// what this one leaves to what it found.
     #[must_use]
     pub fn inverse(&self) -> Self {
-        Self {
-            key: self.key.clone(),
-            old: self.new.clone(),
-            new: self.old.clone(),
+        match self.clone() {
+            Self::Name(at, s) => Self::Name(at, s.flip()),
+            Self::Comment(at, s) => Self::Comment(at, s.flip()),
+            Self::Type(name, s) => Self::Type(name, s.flip()),
+            Self::Applied(at, s) => Self::Applied(at, s.flip()),
+            Self::Proto(at, s) => Self::Proto(at, s.flip()),
+            Self::Var(at, key, s) => Self::Var(at, key, s.flip()),
+            Self::Field(class, off, s) => Self::Field(class, off, s.flip()),
         }
     }
 }
@@ -94,11 +112,48 @@ impl Change {
 /// * `map` - The overlay map.
 /// * `key` - The entry.
 /// * `new` - What it holds after.
-fn set<K: Ord, V, T: Tag>(map: &mut Tracked<K, V, T>, key: K, new: Option<V>) {
-    match new {
-        Some(v) => map.insert(key, v),
+///
+/// # Returns
+///
+/// What the entry held and holds.
+fn swap<K: Ord, V: Clone, T: Tag>(map: &mut Tracked<K, V, T>, key: K, new: Option<V>) -> Swap<V> {
+    let old = match &new {
+        Some(v) => map.insert(key, v.clone()),
         None => map.remove(&key),
     };
+    Swap { old, new }
+}
+
+/// Writes `new` at `inner` of `outer` in a map of maps, or removes it,
+/// dropping an outer entry left empty: a function stating no variable and
+/// a class stating no field leave the overlay.
+///
+/// # Arguments
+///
+/// * `map` - The overlay map of maps.
+/// * `(outer, inner)` - The entry.
+/// * `new` - What it holds after.
+///
+/// # Returns
+///
+/// What the entry held and holds.
+fn swap_in<K: Ord, J: Ord, V: Clone, T: Tag>(
+    map: &mut Tracked<K, BTreeMap<J, V>, T>,
+    (outer, inner): (K, J),
+    new: Option<V>,
+) -> Swap<V> {
+    let old = match (&new, map.entry(outer)) {
+        (Some(v), held) => held.or_default().insert(inner, v.clone()),
+        (None, btree_map::Entry::Occupied(mut held)) => {
+            let old = held.get_mut().remove(&inner);
+            if held.get().is_empty() {
+                held.remove();
+            }
+            old
+        }
+        (None, btree_map::Entry::Vacant(_)) => None,
+    };
+    Swap { old, new }
 }
 
 /// Adds a change for each key whose entries differ between two maps, in
@@ -108,23 +163,40 @@ fn set<K: Ord, V, T: Tag>(map: &mut Tracked<K, V, T>, key: K, new: Option<V>) {
 ///
 /// * `out` - The changes, extended.
 /// * `(a, b)` - The map before and after.
-/// * `key` - Makes the [`Key`] of an entry.
-/// * `value` - Makes the [`Value`] of an entry.
+/// * `change` - Makes the change of a key and its swap.
 fn diff<K: Ord + Clone, V: PartialEq + Clone>(
     out: &mut Vec<Change>,
     (a, b): (&BTreeMap<K, V>, &BTreeMap<K, V>),
-    key: impl Fn(K) -> Key,
-    value: impl Fn(V) -> Value,
+    change: impl Fn(K, Swap<V>) -> Change,
 ) {
     let keys: BTreeSet<&K> = a.keys().chain(b.keys()).collect();
     out.extend(keys.into_iter().filter_map(|k| {
         let (old, new) = (a.get(k), b.get(k));
-        (old != new).then(|| Change {
-            key: key(k.clone()),
-            old: old.cloned().map(&value),
-            new: new.cloned().map(&value),
+        (old != new).then(|| {
+            let swap = Swap {
+                old: old.cloned(),
+                new: new.cloned(),
+            };
+            change(k.clone(), swap)
         })
     }));
+}
+
+/// Returns a map of maps as one map by the outer then the inner key.
+///
+/// # Arguments
+///
+/// * `map` - The map of maps.
+fn flat<K: Ord + Clone, J: Ord + Clone, V: Clone>(
+    map: &BTreeMap<K, BTreeMap<J, V>>,
+) -> BTreeMap<(K, J), V> {
+    map.iter()
+        .flat_map(|(k, inner)| {
+            inner
+                .iter()
+                .map(|(j, v)| ((k.clone(), j.clone()), v.clone()))
+        })
+        .collect()
 }
 
 impl Overlay {
@@ -138,88 +210,53 @@ impl Overlay {
         self.without_tables().fingerprint()
     }
 
-    /// Returns what the overlay holds at `key`, reading it unnoted
-    /// ([`Tracked::raw`]).
+    /// Writes a change's new side at its entry, whatever the entry holds.
     ///
     /// # Arguments
     ///
-    /// * `key` - The entry.
+    /// * `change` - The change; its old side is not read.
     ///
     /// # Returns
     ///
-    /// The value, `None` when the entry is absent.
-    fn value(&self, key: &Key) -> Option<Value> {
-        match key {
-            Key::Name(at) => self.names.raw().get(at).cloned().map(Value::Text),
-            Key::Comment(at) => self.comments.raw().get(at).cloned().map(Value::Text),
-            Key::Type(name) => self.types.raw().get(name).cloned().map(Value::Type),
-            Key::Applied(at) => self.applied.raw().get(at).cloned().map(Value::Applied),
-            Key::Proto(at) => self.prototypes.raw().get(at).cloned().map(Value::Proto),
-            Key::Vars(at) => self.vars.raw().get(at).cloned().map(Value::Vars),
-            Key::Fields(class) => self.fields.raw().get(class).cloned().map(Value::Fields),
+    /// The change as written: the entry, what it held and what it holds.
+    pub(crate) fn assign(&mut self, change: Change) -> Change {
+        match change {
+            Change::Name(at, s) => Change::Name(at, swap(&mut self.names, at, s.new)),
+            Change::Comment(at, s) => Change::Comment(at, swap(&mut self.comments, at, s.new)),
+            Change::Type(name, s) => {
+                let s = swap(&mut self.types, name.clone(), s.new);
+                Change::Type(name, s)
+            }
+            Change::Applied(at, s) => Change::Applied(at, swap(&mut self.applied, at, s.new)),
+            Change::Proto(at, s) => Change::Proto(at, swap(&mut self.prototypes, at, s.new)),
+            Change::Var(at, key, s) => {
+                Change::Var(at, key, swap_in(&mut self.vars, (at, key), s.new))
+            }
+            Change::Field(class, off, s) => {
+                let s = swap_in(&mut self.fields, (class.clone(), off), s.new);
+                Change::Field(class, off, s)
+            }
         }
     }
 
-    /// Writes `new` at `key`, or removes the entry when `new` is `None`.
-    ///
-    /// A value not of its key's kind writes nothing; no edit makes one.
+    /// Writes the fields stated of `class` as `fields`, one change per
+    /// offset that differs; no field leaves the class out of the overlay.
     ///
     /// # Arguments
     ///
-    /// * `key` - The entry.
-    /// * `new` - What it holds after.
+    /// * `class` - The class.
+    /// * `fields` - Its fields after, by byte offset.
     ///
     /// # Returns
     ///
-    /// The change: the entry, what it held and what it holds now.
-    pub fn put(&mut self, key: Key, new: Option<Value>) -> Change {
-        let old = self.value(&key);
-        match (&key, new.clone()) {
-            (Key::Name(at), Some(Value::Text(t))) => set(&mut self.names, *at, Some(t)),
-            (Key::Name(at), None) => set(&mut self.names, *at, None),
-            (Key::Comment(at), Some(Value::Text(t))) => set(&mut self.comments, *at, Some(t)),
-            (Key::Comment(at), None) => set(&mut self.comments, *at, None),
-            (Key::Type(n), Some(Value::Type(ty))) => set(&mut self.types, n.clone(), Some(ty)),
-            (Key::Type(n), None) => set(&mut self.types, n.clone(), None),
-            (Key::Applied(at), Some(Value::Applied(ty))) => set(&mut self.applied, *at, Some(ty)),
-            (Key::Applied(at), None) => set(&mut self.applied, *at, None),
-            (Key::Proto(at), Some(Value::Proto(p))) => set(&mut self.prototypes, *at, Some(p)),
-            (Key::Proto(at), None) => set(&mut self.prototypes, *at, None),
-            (Key::Vars(at), Some(Value::Vars(v))) => set(&mut self.vars, *at, Some(v)),
-            (Key::Vars(at), None) => set(&mut self.vars, *at, None),
-            (Key::Fields(c), Some(Value::Fields(f))) => set(&mut self.fields, c.clone(), Some(f)),
-            (Key::Fields(c), None) => set(&mut self.fields, c.clone(), None),
-            (
-                Key::Name(_)
-                | Key::Comment(_)
-                | Key::Type(_)
-                | Key::Applied(_)
-                | Key::Proto(_)
-                | Key::Vars(_)
-                | Key::Fields(_),
-                Some(
-                    Value::Text(_)
-                    | Value::Type(_)
-                    | Value::Applied(_)
-                    | Value::Proto(_)
-                    | Value::Vars(_)
-                    | Value::Fields(_),
-                ),
-            ) => {}
-        }
-        Change { key, old, new }
-    }
-
-    /// Applies `changes` in order: each writes its new value at its key,
-    /// or removes the entry when it has none ([`Overlay::put`]).
-    ///
-    /// # Arguments
-    ///
-    /// * `changes` - The changes.
-    pub fn apply(&mut self, changes: &[Change]) {
-        for change in changes {
-            self.put(change.key.clone(), change.new.clone());
-        }
+    /// The changes written, in offset order.
+    pub(crate) fn restate(&mut self, class: &str, fields: &BTreeMap<u64, Field>) -> Vec<Change> {
+        let was = self.fields.raw().get(class).cloned().unwrap_or_default();
+        let mut out = Vec::new();
+        diff(&mut out, (&was, fields), |off, s| {
+            Change::Field(class.to_owned(), off, s)
+        });
+        out.into_iter().map(|c| self.assign(c)).collect()
     }
 
     /// Returns what differs between this overlay and `after`, one change
@@ -236,20 +273,36 @@ impl Overlay {
     pub fn changes(&self, after: &Self) -> Vec<Change> {
         let mut out = Vec::new();
         let names = (self.names.raw(), after.names.raw());
-        diff(&mut out, names, Key::Name, Value::Text);
+        diff(&mut out, names, Change::Name);
         let comments = (self.comments.raw(), after.comments.raw());
-        diff(&mut out, comments, Key::Comment, Value::Text);
+        diff(&mut out, comments, Change::Comment);
         let types = (self.types.raw(), after.types.raw());
-        diff(&mut out, types, Key::Type, Value::Type);
+        diff(&mut out, types, Change::Type);
         let applied = (self.applied.raw(), after.applied.raw());
-        diff(&mut out, applied, Key::Applied, Value::Applied);
+        diff(&mut out, applied, Change::Applied);
         let protos = (self.prototypes.raw(), after.prototypes.raw());
-        diff(&mut out, protos, Key::Proto, Value::Proto);
-        let vars = (self.vars.raw(), after.vars.raw());
-        diff(&mut out, vars, Key::Vars, Value::Vars);
-        let fields = (self.fields.raw(), after.fields.raw());
-        diff(&mut out, fields, Key::Fields, Value::Fields);
+        diff(&mut out, protos, Change::Proto);
+        let vars = (flat(self.vars.raw()), flat(after.vars.raw()));
+        diff(&mut out, (&vars.0, &vars.1), |(at, key), s| {
+            Change::Var(at, key, s)
+        });
+        let fields = (flat(self.fields.raw()), flat(after.fields.raw()));
+        diff(&mut out, (&fields.0, &fields.1), |(class, off), s| {
+            Change::Field(class, off, s)
+        });
         out
+    }
+
+    /// Applies `changes` in order: each writes its new side at its entry
+    /// ([`Overlay::assign`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `changes` - The changes.
+    pub fn apply(&mut self, changes: &[Change]) {
+        for change in changes {
+            self.assign(change.clone());
+        }
     }
 }
 
@@ -457,15 +510,15 @@ struct Draft {
 }
 
 impl Draft {
-    /// Writes `new` at `key` of the draft's overlay and keeps the change.
+    /// Writes a change's new side to the draft's overlay and keeps the
+    /// change as written.
     ///
     /// # Arguments
     ///
-    /// * `key` - The entry.
-    /// * `new` - What it holds after.
-    fn put(&mut self, key: Key, new: Option<Value>) {
-        let change = self.overlay.put(key, new);
-        self.changes.push(change);
+    /// * `change` - The change; its old side is read as it is written.
+    fn put(&mut self, change: Change) {
+        let written = self.overlay.assign(change);
+        self.changes.push(written);
     }
 
     /// Checks one edit over the draft and writes it there.
@@ -489,7 +542,7 @@ impl Draft {
         match edit {
             Edit::Name { at, name } => self.name((p, a), *at, name, force),
             Edit::Comment { at, text } => {
-                self.put(Key::Comment(*at), Some(Value::Text(text.clone())));
+                self.put(Change::Comment(*at, to(Some(text.clone()))));
                 self.lines.push(Line::Commented { at: *at });
                 Ok(())
             }
@@ -533,14 +586,14 @@ impl Draft {
                 self.var((p, a), *entry, (var, *field), named)
             }
             Edit::Layout(plan) => {
-                for (key, new) in plan.clone().writes() {
-                    self.put(key, new);
+                for change in plan.clone().changes() {
+                    self.put(change);
                 }
                 Ok(())
             }
             Edit::Project(loaded) => {
                 for change in self.overlay.changes(loaded) {
-                    self.put(change.key, change.new);
+                    self.put(change);
                 }
                 Ok(())
             }
@@ -565,8 +618,8 @@ impl Draft {
     /// * `plan` - The statement's plan ([`stated::plan`]).
     fn stated(&mut self, plan: stated::Plan) {
         self.said(plan.would(), plan.done());
-        let (key, new) = plan.write();
-        self.put(key, new);
+        let written = plan.write(&mut self.overlay);
+        self.changes.extend(written);
     }
 
     /// Defines the types C declarations state.
@@ -604,7 +657,7 @@ impl Draft {
             lines: cdecl::describe(&declared),
         });
         for (name, ty, _) in declared.types {
-            self.put(Key::Type(name), Some(Value::Type(ty)));
+            self.put(Change::Type(name, to(Some(ty))));
         }
         Ok(())
     }
@@ -633,7 +686,7 @@ impl Draft {
             format!("define {described}"),
             format!("defined {described}"),
         );
-        self.put(Key::Type(name.to_owned()), Some(Value::Type(ty)));
+        self.put(Change::Type(name.to_owned(), to(Some(ty))));
         Ok(())
     }
 
@@ -670,7 +723,7 @@ impl Draft {
             format!("apply {spelled} at {at:#x} ({width} byte(s)); decompile then {renders}"),
             format!("applied {spelled} at {at:#x} ({width} byte(s)); decompile {renders}"),
         );
-        self.put(Key::Applied(at), Some(Value::Applied(ty.clone())));
+        self.put(Change::Applied(at, to(Some(ty.clone()))));
         Ok(())
     }
 
@@ -718,7 +771,7 @@ impl Draft {
         if !unknown.is_empty() {
             self.lines.push(Line::Unknown(unknown));
         }
-        self.put(Key::Proto(entry), Some(Value::Proto(proto.clone())));
+        self.put(Change::Proto(entry, to(Some(proto.clone()))));
         Ok(())
     }
 
@@ -775,13 +828,11 @@ impl Draft {
             ));
         }
         let what = format!("{spelled} of {fname} ({entry:#x}) {}", named.spell());
-        let mut vars = held.cloned().unwrap_or_default();
-        vars.insert(key, named);
         self.said(
             format!("name {what}; decompile then renders it so"),
             format!("named {what}"),
         );
-        self.put(Key::Vars(entry), Some(Value::Vars(vars)));
+        self.put(Change::Var(entry, key, to(Some(named))));
         Ok(())
     }
 
@@ -807,7 +858,7 @@ impl Draft {
     ) -> Result<(), String> {
         let target = a.function_at(at).map_or(at, |f| f.entry);
         let old = name_of(a, &self.overlay, target);
-        self.put(Key::Name(target), Some(Value::Text(name.to_owned())));
+        self.put(Change::Name(target, to(Some(name.to_owned()))));
         if force == Force::Refuse {
             match resolve(p, a, &self.overlay, name) {
                 Ok(found) if found == target => {}
@@ -1013,7 +1064,7 @@ pub fn commit(
     let changes: Vec<Change> = plan
         .changes
         .iter()
-        .map(|c| overlay.put(c.key.clone(), c.new.clone()))
+        .map(|c| overlay.assign(c.clone()))
         .collect();
     if let Err(why) = project::held(overlay) {
         *overlay = before;

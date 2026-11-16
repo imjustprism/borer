@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 
 use super::classes::{ClassLayout, FieldLabel};
-use super::edit::{Key, Value};
+use super::edit::{Change, to};
 use super::protos::{CType, PROTOTYPES_MAX, Proto};
 use super::utypes::{self, TypeExpr, UserType, build_struct};
 use super::{Analysis, Overlay, bare_name, name_of};
@@ -90,25 +90,24 @@ impl Plan {
         out
     }
 
-    /// Returns the overlay entries the plan writes, each with what it
-    /// holds after: the struct, then each prototype in place of any stated
+    /// Returns the changes the plan writes, their old sides read as they
+    /// are written: the struct, then each prototype in place of any stated
     /// before.
-    #[must_use]
-    pub fn writes(self) -> Vec<(Key, Option<Value>)> {
+    pub(crate) fn changes(self) -> Vec<Change> {
         let protos = self.prototypes.into_iter();
-        std::iter::once((Key::Type(self.name), Some(Value::Type(self.ty))))
-            .chain(protos.map(|(at, p)| (Key::Proto(at), Some(Value::Proto(p)))))
+        std::iter::once(Change::Type(self.name, to(Some(self.ty))))
+            .chain(protos.map(|(at, p)| Change::Proto(at, to(Some(p)))))
             .collect()
     }
 
-    /// Writes the plan into an overlay ([`Plan::writes`]).
+    /// Writes the plan into an overlay ([`Plan::changes`]).
     ///
     /// # Arguments
     ///
     /// * `o` - The overlay.
     pub fn apply(self, o: &mut Overlay) {
-        for (key, new) in self.writes() {
-            o.put(key, new);
+        for change in self.changes() {
+            o.assign(change);
         }
     }
 }

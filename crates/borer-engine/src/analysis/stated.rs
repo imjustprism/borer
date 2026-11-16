@@ -24,7 +24,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::classes::{self, FieldLabel, FieldUse};
-use super::edit::{Key, Value};
+use super::edit::{Change, to};
 use super::protos::VarKey;
 use super::utypes::{self, TypeExpr, UserStruct, UserType};
 use super::{Analysis, Function, Overlay, bare_name, name_of};
@@ -408,18 +408,22 @@ impl Plan {
         }
     }
 
-    /// Returns the overlay entry the plan writes and what it holds after.
+    /// Writes the plan into an overlay: the struct, or each field of the
+    /// class that changes; a class left stating no field leaves the
+    /// overlay, since an entry without fields would list a class nothing
+    /// is stated of.
     ///
-    /// A class left stating no field leaves the overlay: an entry without
-    /// fields would list a class nothing is stated of.
-    #[must_use]
-    pub fn write(self) -> (Key, Option<Value>) {
+    /// # Arguments
+    ///
+    /// * `o` - The overlay.
+    ///
+    /// # Returns
+    ///
+    /// The changes written.
+    pub(crate) fn write(self, o: &mut Overlay) -> Vec<Change> {
         match self.edit {
-            Edit::Struct(name, ty) => (Key::Type(name), Some(Value::Type(ty))),
-            Edit::Class(class, fields) => {
-                let new = (!fields.is_empty()).then_some(Value::Fields(fields));
-                (Key::Fields(class), new)
-            }
+            Edit::Struct(name, ty) => vec![o.assign(Change::Type(name, to(Some(ty))))],
+            Edit::Class(class, fields) => o.restate(&class, &fields),
         }
     }
 
@@ -429,8 +433,7 @@ impl Plan {
     ///
     /// * `o` - The overlay.
     pub fn apply(self, o: &mut Overlay) {
-        let (key, new) = self.write();
-        o.put(key, new);
+        self.write(o);
     }
 }
 

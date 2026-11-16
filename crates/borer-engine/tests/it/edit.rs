@@ -8,9 +8,7 @@
 )]
 
 use crate::common::fixture;
-use borer_engine::analysis::edit::{
-    Change, Edit, Force, Key, Line, Plan, Refused, Stale, Value, commit, plan,
-};
+use borer_engine::analysis::edit::{Change, Edit, Force, Line, Plan, Refused, Stale, commit, plan};
 use borer_engine::analysis::project::NAMES_MAX;
 use borer_engine::analysis::protos::{Proto, Var, VarKey};
 use borer_engine::analysis::stated::{Field, Mode};
@@ -54,18 +52,16 @@ fn changes_replay_an_edit_and_their_inverses_take_it_back() {
         .insert(8, field);
     let changes = before.changes(&after);
     assert_eq!(changes.len(), 6, "{changes:?}");
-    assert_eq!(
-        changes.first(),
-        Some(&Change {
-            key: Key::Name(0x1000),
-            old: Some(Value::Text("old".to_owned())),
-            new: Some(Value::Text("new".to_owned())),
-        })
+    assert!(
+        matches!(changes.first(), Some(Change::Name(0x1000, s))
+            if s.before().map(String::as_str) == Some("old")
+                && s.after().map(String::as_str) == Some("new")),
+        "{changes:?}"
     );
     assert!(
         changes
             .iter()
-            .any(|c| c.key == Key::Comment(0x1010) && c.new.is_none()),
+            .any(|c| matches!(c, Change::Comment(0x1010, s) if s.after().is_none())),
         "{changes:?}"
     );
     let mut replayed = before.clone();
@@ -104,13 +100,12 @@ fn a_planned_rename_commits_the_name_and_its_change() {
         }]
     );
     let changes = commit(&a, &mut o, &made).expect("committed");
-    assert_eq!(
-        changes,
-        vec![Change {
-            key: Key::Name(entry),
-            old: Some(Value::Text("first".to_owned())),
-            new: Some(Value::Text("second".to_owned())),
-        }]
+    assert!(
+        matches!(changes.as_slice(), [Change::Name(at, s)]
+            if *at == entry
+                && s.before().map(String::as_str) == Some("first")
+                && s.after().map(String::as_str) == Some("second")),
+        "{changes:?}"
     );
     let mut named = Overlay::default();
     named.names.insert(entry, "second".to_owned());
@@ -170,13 +165,11 @@ fn a_commit_past_a_cap_writes_nothing() {
     o.names
         .extend((0..NAMES_MAX).map(|i| (0x10_0000 + from_usize(i), format!("n{i}"))));
     let before = o.fingerprint();
+    let mut more = Overlay::default();
+    more.names.insert(0x1000, "one_more".to_owned());
     let one_more = Plan {
         base: o.edits_key(),
-        changes: vec![Change {
-            key: Key::Name(0x1000),
-            old: None,
-            new: Some(Value::Text("one_more".to_owned())),
-        }],
+        changes: Overlay::default().changes(&more),
         lines: Vec::new(),
     };
     let refused = commit(&a, &mut o, &one_more).expect_err("past the cap");
@@ -189,6 +182,21 @@ fn a_commit_past_a_cap_writes_nothing() {
     plan(&p, &a, &o, &edits, Force::Take).expect_err("the plan refuses it too");
 }
 
+/// Returns the first function's entry of an analysis and an overlay
+/// naming that function's first parameter `x`.
+///
+/// # Arguments
+///
+/// * `a` - The analysis.
+#[expect(clippy::expect_used, reason = "a test's setup")]
+fn stating_x(a: &Analysis) -> (u64, Overlay) {
+    let entry = a.functions.first().expect("a function").entry;
+    let mut o = Overlay::default();
+    let x = Var::parse("x").expect("a variable");
+    o.vars.entry(entry).or_default().insert(VarKey::Param(0), x);
+    (entry, o)
+}
+
 /// The inverses of a mixed plan's changes, a name, a comment, a struct
 /// and a variable's type, applied in reverse order give back the overlay
 /// the plan was committed to.
@@ -196,10 +204,7 @@ fn a_commit_past_a_cap_writes_nothing() {
 fn the_inverse_of_a_mixed_plan_restores_the_overlay() {
     let p = fixture();
     let a = Analysis::compute(&p);
-    let entry = a.functions.first().expect("a function").entry;
-    let mut o = Overlay::default();
-    let x = Var::parse("x").expect("a variable");
-    o.vars.entry(entry).or_default().insert(VarKey::Param(0), x);
+    let (entry, mut o) = stating_x(&a);
     let before = o.fingerprint();
     let word = parse_type("u32").expect("a type");
     let field = |name: &str| Field {
@@ -259,4 +264,57 @@ fn a_project_put_in_place_is_taken_back_by_its_inverse() {
     let back: Vec<Change> = changes.iter().rev().map(Change::inverse).collect();
     o.apply(&back);
     assert_eq!(o.fingerprint(), before);
+}
+
+/// Every change a plan writes says what its entry holds once committed:
+/// a change's key and its values are of one kind, so none can claim a
+/// value its entry does not take.
+#[test]
+fn every_change_says_what_its_entry_holds() {
+    let p = fixture();
+    let a = Analysis::compute(&p);
+    let (entry, mut o) = stating_x(&a);
+    let word = parse_type("u32").expect("a type");
+    let edits = [
+        Edit::Name {
+            at: entry,
+            name: "kinds".to_owned(),
+        },
+        Edit::Comment {
+            at: entry,
+            text: "a note".to_owned(),
+        },
+        Edit::Alias {
+            name: "word_t".to_owned(),
+            ty: word,
+        },
+        Edit::Proto {
+            entry,
+            proto: Proto::parse("int f(int a)").expect("a prototype"),
+        },
+        Edit::Var {
+            entry,
+            var: "x".to_owned(),
+            field: None,
+            name: Some("count".to_owned()),
+            ty: None,
+        },
+    ];
+    let made = plan(&p, &a, &o, &edits, Force::Refuse).expect("planned");
+    let changes = commit(&a, &mut o, &made).expect("committed");
+    assert_eq!(changes.len(), edits.len(), "{changes:?}");
+    for change in &changes {
+        let holds = match change {
+            Change::Name(at, s) => o.names.get(at) == s.after(),
+            Change::Comment(at, s) => o.comments.get(at) == s.after(),
+            Change::Type(name, s) => o.types.get(name) == s.after(),
+            Change::Applied(at, s) => o.applied.get(at) == s.after(),
+            Change::Proto(at, s) => o.prototypes.get(at) == s.after(),
+            Change::Var(at, key, s) => o.vars.get(at).and_then(|v| v.get(key)) == s.after(),
+            Change::Field(class, off, s) => {
+                o.fields.get(class).and_then(|f| f.get(off)) == s.after()
+            }
+        };
+        assert!(holds, "{change:?}");
+    }
 }
