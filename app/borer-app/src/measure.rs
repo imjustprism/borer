@@ -7,10 +7,12 @@
 //! The workspace carries none of this: only the measurement command-line flags build a
 //! [`Harness`], and a plain `borer-app [binary]` window has none.
 
+mod actions;
 mod drop;
 mod input;
 mod scroll;
 mod tree;
+mod watch;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
@@ -196,6 +198,9 @@ pub enum MeasurePhase {
     InputLatency,
     /// Opens 200 nodes of notepad's call tree, timing each expand to its painted rows.
     CallTree,
+    /// Times a script of actions on notepad and the large DLL, each to its first visible
+    /// change and to settled views, and graph pans and zooms frame by frame.
+    Actions,
 }
 
 impl MeasurePhase {
@@ -206,6 +211,7 @@ impl MeasurePhase {
             Self::CodeScroll => "code scroll load failed",
             Self::InputLatency => "input latency load failed",
             Self::CallTree => "call tree load failed",
+            Self::Actions => "actions load failed",
         }
     }
 
@@ -216,6 +222,7 @@ impl MeasurePhase {
             Self::CodeScroll => "Preparing the code scroll",
             Self::InputLatency => "Preparing the input run",
             Self::CallTree => "Preparing the call tree run",
+            Self::Actions => "Preparing the action run",
         }
     }
 }
@@ -456,8 +463,13 @@ pub fn parse_cli_args_os(args: &[OsString]) -> anyhow::Result<CliMode> {
                     Some(v) if v.to_str() == Some("code") => MeasurePhase::CodeScroll,
                     Some(v) if v.to_str() == Some("input") => MeasurePhase::InputLatency,
                     Some(v) if v.to_str() == Some("tree") => MeasurePhase::CallTree,
+                    Some(v) if v.to_str() == Some("actions") => MeasurePhase::Actions,
                     Some(v) => anyhow::bail!("unknown --measure --phase {}", v.display()),
-                    None => anyhow::bail!("--measure --phase requires list, code, input or tree"),
+                    None => {
+                        anyhow::bail!(
+                            "--measure --phase requires list, code, input, tree or actions"
+                        )
+                    }
                 },
                 Some(other) => {
                     anyhow::bail!("unexpected argument after --measure: {}", other.display())
@@ -710,6 +722,8 @@ enum Prepared {
     Input(Arc<LoadedBinary>, u64),
     /// Notepad, and the root of its call tree.
     Tree(Arc<LoadedBinary>, u64),
+    /// Notepad, and the functions the actions phase runs on.
+    Actions(actions::Prep),
 }
 
 /// The window root in measurement modes: the app's workspace window as its only child,
@@ -1012,6 +1026,7 @@ impl Harness {
                 Box::new(move || prepare_input(&worker))
             }
             MeasurePhase::CallTree => Box::new(move || tree::prepare_tree(&worker)),
+            MeasurePhase::Actions => Box::new(move || actions::prepare_actions(&worker)),
         };
         self.prep.run_in(
             phase.label(),

@@ -74,6 +74,7 @@ impl Harness {
             Prepared::Input(loaded, _) | Prepared::Tree(loaded, _) => {
                 (loaded.clone(), loaded.initial_rows.clone())
             }
+            Prepared::Actions(prep) => (prep.loaded.clone(), prep.loaded.initial_rows.clone()),
         };
         let panel = self.docked_panel(window, cx);
         panel.update(cx, |panel, cx| panel.show(loaded, rows, window, cx));
@@ -100,6 +101,10 @@ impl Harness {
             }
             Prepared::Tree(loaded, root) => {
                 self.start_tree(cancel, (loaded, root), window, cx);
+                return;
+            }
+            Prepared::Actions(prep) => {
+                self.start_actions(cancel, prep, window, cx);
                 return;
             }
         };

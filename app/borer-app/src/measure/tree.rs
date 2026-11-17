@@ -100,7 +100,7 @@ fn next_closed(tree: &CallTree, from: usize) -> Option<usize> {
 ///
 /// * `prefix` - The fields' prefix.
 /// * `samples` - Times in nanoseconds, sorted in place.
-fn quantiles(prefix: &str, samples: &mut [u64]) -> String {
+pub(super) fn quantiles(prefix: &str, samples: &mut [u64]) -> String {
     let (p50, p95, p99, max, n) = sorted_quantiles_ms(samples);
     format!(
         "{prefix}samples={n} {prefix}p50_ms={p50:.3} {prefix}p95_ms={p95:.3} \

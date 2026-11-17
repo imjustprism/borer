@@ -7,7 +7,7 @@ use gpui::{App, AppContext as _, Context, Entity, EntityId, WeakEntity, Window};
 use serde::{Deserialize, Serialize};
 use workspace::{Item, ItemHandle, Workspace};
 
-use crate::binary::Binary;
+use crate::binary::{Binary, Revision};
 use crate::decompile_item::{DecompileItem, Form, TabMode};
 use crate::graph_item::GraphItem;
 use crate::hex_item::HexItem;
@@ -465,6 +465,30 @@ pub fn place_of(item: &dyn ItemHandle, cx: &App) -> Option<Place> {
         form: item.form(),
         at: None,
     })
+}
+
+/// Returns `item` as a view over a state of the window's binary.
+///
+/// # Arguments
+///
+/// * `item` - The item.
+/// * `cx` - Application context reading it.
+///
+/// # Returns
+///
+/// The view, `None` for an item that shows no binary (the start tab).
+#[must_use]
+pub fn view_of<'a>(item: &dyn ItemHandle, cx: &'a App) -> Option<&'a dyn Revision> {
+    /// Returns `item` as a `T`, `None` when it is another kind.
+    fn of<'a, T: Revision + 'static>(
+        item: &dyn ItemHandle,
+        cx: &'a App,
+    ) -> Option<&'a dyn Revision> {
+        Some(item.downcast::<T>()?.read(cx))
+    }
+    let kinds = [of::<DecompileItem>, of::<GraphItem>, of::<OverviewItem>];
+    let more = [of::<LinearItem>, of::<HexItem>, of::<StructItem>];
+    kinds.iter().chain(&more).find_map(|of| of(item, cx))
 }
 
 #[cfg(test)]
