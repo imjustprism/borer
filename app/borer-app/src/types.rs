@@ -146,7 +146,7 @@ const COLUMNS: [Column<TypeRow>; 6] = [
         header: "name",
         cell: |row| row.name.to_string().into(),
         align: Align::Start,
-        ink: Ink::Role(Role::Function),
+        ink: Ink::Role(Role::Type),
         fit: Fit::Fill,
         sort: Some(|a, b| a.name.cmp(&b.name)),
     },
@@ -1058,9 +1058,11 @@ mod tests {
     use super::{Ask, Line, Shown, StructItem, TypeKey, Types, TypesPanel, lines};
     use crate::app_view::tests::{CALLER, init, open, open_place, sample};
     use crate::binary::{Binary, BinaryEvent};
+    use crate::code_view::Role;
     use crate::decompile_item::TabMode;
     use crate::places::Place;
     use crate::rows_panel::RowKind as _;
+    use crate::table::Ink;
     use crate::worker::LoadedBinary;
 
     /// Returns a field row at `offset`, `size` bytes long.
@@ -1136,6 +1138,17 @@ mod tests {
         assert_eq!(Types::place(&user), Some(Place::Type(want)));
         let cells: Vec<_> = super::COLUMNS.iter().map(|c| (c.cell)(&user)).collect();
         assert_eq!(cells, ["S", "struct", "?", "3", "0", "user, shadows debug"]);
+    }
+
+    /// The name column draws in the theme's type color, the others muted.
+    #[test]
+    fn type_names_draw_in_the_type_color() {
+        let inks: Vec<Ink> = super::COLUMNS.iter().map(|c| c.ink).collect();
+        assert_eq!(inks.first(), Some(&Ink::Role(Role::Type)));
+        assert!(
+            inks.iter().skip(1).all(|ink| *ink == Ink::Muted),
+            "{inks:?}"
+        );
     }
 
     /// Returns `base` with a user struct `S` of a `u32` `a` at 0 and one `b` at 8, 16
