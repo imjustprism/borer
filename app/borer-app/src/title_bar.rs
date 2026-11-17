@@ -26,6 +26,9 @@ pub const MARK_CELL_PX: f32 = 40.0;
 /// Side in logical pixels of the mark in the title bar.
 const MARK_PX: f32 = 19.0;
 
+/// Gap in logical pixels between the mark's cell and the first menu.
+const MARK_GAP_PX: f32 = 4.0;
+
 /// Window width in logical pixels from which the binary's folder follows its name.
 const FOLDER_SHOWN_FROM_PX: f32 = 1000.0;
 
@@ -175,6 +178,7 @@ impl Render for TitleBar {
         let left = h_flex()
             .flex_1()
             .h_full()
+            .gap(px(MARK_GAP_PX))
             .child(Self::render_mark(cx))
             .child(self.menu_bar.clone())
             .into_any_element();

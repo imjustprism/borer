@@ -8,16 +8,20 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Action, App, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
 };
 use ui::{
-    Button, ButtonCommon as _, ButtonStyle, ContextMenu, LabelSize, PopoverMenu, PopoverMenuHandle,
-    rems_from_px,
+    ButtonCommon as _, ButtonLike, ButtonSize, ButtonStyle, Color, ContextMenu, Label,
+    LabelCommon as _, LabelSize, PopoverMenu, PopoverMenuHandle, rems_from_px,
 };
 
 use crate::binary::Binary;
 use crate::commands::{MenuName, menu_rows};
 use crate::start_item::TEXT_PX;
+
+/// Height in logical pixels of a menu's title cell; [`ButtonSize::Medium`] pads it 8 px
+/// on each side.
+const TITLE_PX: f32 = 22.0;
 
 gpui::actions!(
     menu_bar,
@@ -199,6 +203,11 @@ impl Render for MenuBar {
                 let binary = self.binary.clone();
                 let all = all.clone();
                 let hovered = handle.clone();
+                let color = if handle.is_deployed() {
+                    Color::Default
+                } else {
+                    Color::Muted
+                };
                 div()
                     .id(SharedString::from(format!("{name}-menu")))
                     .occlude()
@@ -206,12 +215,15 @@ impl Render for MenuBar {
                         PopoverMenu::new(SharedString::from(format!("{name}-menu-popover")))
                             .menu(move |window, cx| Some(context_menu(menu, &binary, window, cx)))
                             .trigger(
-                                Button::new(
-                                    SharedString::from(format!("{name}-menu-trigger")),
-                                    name,
-                                )
-                                .style(ButtonStyle::Subtle)
-                                .label_size(LabelSize::Custom(rems_from_px(TEXT_PX))),
+                                ButtonLike::new(SharedString::from(format!("{name}-menu-trigger")))
+                                    .style(ButtonStyle::Subtle)
+                                    .size(ButtonSize::Medium)
+                                    .height(px(TITLE_PX).into())
+                                    .child(
+                                        Label::new(name)
+                                            .size(LabelSize::Custom(rems_from_px(TEXT_PX)))
+                                            .color(color),
+                                    ),
                             )
                             .with_handle(handle),
                     )
@@ -237,7 +249,6 @@ impl Render for MenuBar {
             .flex()
             .flex_row()
             .items_center()
-            .gap(gpui::px(2.0))
             .when(!cfg!(target_os = "macos"), |bar| bar.children(menus))
     }
 }
