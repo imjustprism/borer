@@ -18,8 +18,8 @@ use borer_engine::hexdump::{HEXDUMP_MAX, HexFill, HexRows, hexdump_sparse};
 use borer_engine::num::from_usize;
 use borer_engine::program::Section;
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, Font,
-    Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, ScrollStrategy,
+    AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, Font, Hsla,
+    InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, ScrollStrategy,
     SharedString, Styled as _, StyledText, Subscription, Task, TextRun, UniformListScrollHandle,
     WeakEntity, Window, div, px, uniform_list,
 };
@@ -873,48 +873,6 @@ impl HexItem {
     }
 }
 
-/// Shows `loaded`'s bytes in the workspace's active pane, its hex tab activated or opened,
-/// the cursor on `at` when one is given: the [`Place::Hex`] arm of [`crate::places::open`].
-///
-/// # Arguments
-///
-/// * `workspace` - The workspace.
-/// * `binary` - The window's binary.
-/// * `loaded` - The binary whose bytes to show.
-/// * `at` - Address to put the cursor on, if any.
-/// * `window` - Window the workspace is in.
-/// * `cx` - Workspace context.
-pub fn open_hex(
-    workspace: &mut Workspace,
-    binary: &Entity<Binary>,
-    loaded: &Arc<LoadedBinary>,
-    at: Option<u64>,
-    window: &mut Window,
-    cx: &mut Context<'_, Workspace>,
-) {
-    let pane = workspace.active_pane().clone();
-    let existing = workspace
-        .items_of_type::<HexItem>(cx)
-        .find(|item| Arc::ptr_eq(&item.read(cx).loaded.program, &loaded.program));
-    let item = if let Some(item) = existing {
-        pane.update(cx, |pane, cx| {
-            if let Some(ix) = pane.index_for_item(&item) {
-                pane.activate_item(ix, true, true, window, cx);
-            }
-        });
-        item
-    } else {
-        let this = cx.entity();
-        let (binary, loaded) = (binary.clone(), loaded.clone());
-        let item = cx.new(|cx| HexItem::new(&this, binary, loaded, cx));
-        workspace.add_item_to_active_pane(Box::new(item.clone()), None, true, window, cx);
-        item
-    };
-    if let Some(va) = at {
-        item.update(cx, |item, cx| item.go_to(va, cx));
-    }
-}
-
 /// Returns why no row shows `va`, as the status line says it.
 ///
 /// # Arguments
@@ -1064,7 +1022,10 @@ mod tests {
     use borer_engine::program::{Arch, Program, Section};
     use gpui::{Entity, TestAppContext, VisualTestContext};
     use picker::Picker;
-    use workspace::Workspace;
+    use workspace::{SplitDirection, Workspace};
+
+    use crate::actions::ShowHex;
+    use crate::app_view::tests::load_sample;
 
     use super::{
         HexItem, HexLayout, HexLine, MAX_ROWS, Miss, RUN_MAX_BYTES, WINDOW_ROWS, inks, miss_line,
@@ -1242,6 +1203,44 @@ mod tests {
             assert_eq!(&*end.text, hexdump_sparse(&want, 0x1010).trim_end());
             assert_eq!(hex.line(514).unwrap().cells, [None; 16]);
         });
+    }
+
+    /// Show Hex with the hex tab in another pane shows the bytes in the active one.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the active pane's item is not a hex tab.
+    #[gpui::test]
+    fn show_hex_shows_it_in_the_active_pane(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace.clone();
+        load_sample(&app, cx);
+        let loaded = app
+            .binary
+            .read_with(cx, |binary, _| binary.loaded().cloned().unwrap());
+        hex_of(&workspace, &loaded, 0..1, cx);
+        let left = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        let right = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.split_pane(left.clone(), SplitDirection::Right, window, cx)
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            let start = right.read(cx).active_item();
+            if let Some(start) = start {
+                workspace.activate_item(start.as_ref(), true, true, window, cx);
+            }
+        });
+        cx.run_until_parked();
+        let active = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        assert_eq!(active, right);
+        cx.dispatch_action(ShowHex);
+        cx.run_until_parked();
+        let shown = right.read_with(cx, |pane, _| {
+            pane.active_item()
+                .and_then(|item| item.downcast::<HexItem>())
+        });
+        assert!(shown.is_some());
     }
 
     /// Go to scrolls to an address's row, past the list's window too; the cursor keys move

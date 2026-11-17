@@ -10,7 +10,7 @@ use workspace::{Item, ItemHandle, Workspace};
 use crate::binary::Binary;
 use crate::decompile_item::{DecompileItem, Form, TabMode};
 use crate::graph_item::GraphItem;
-use crate::hex_item::{HexItem, open_hex};
+use crate::hex_item::HexItem;
 use crate::linear_item::LinearItem;
 use crate::overview::OverviewItem;
 use crate::types::{StructItem, Subject, TypeKey};
@@ -126,7 +126,17 @@ pub fn open(
     let (binary, loaded) = (binary.clone(), loaded.clone());
     let program = loaded.program.clone();
     match place {
-        Place::Hex { at } => open_hex(workspace, &binary, &loaded, at, window, cx),
+        Place::Hex { at } => {
+            let this = cx.entity();
+            let shows = |item: &HexItem| Arc::ptr_eq(&item.loaded().program, &program);
+            let build = |_, _: &mut Window, cx: &mut Context<'_, HexItem>| {
+                HexItem::new(&this, binary, loaded, cx)
+            };
+            let item = show(workspace, how, shows, build, window, cx);
+            if let Some(va) = at {
+                item.update(cx, |item, cx| item.go_to(va, cx));
+            }
+        }
         Place::Type(key) => {
             open_struct(
                 workspace,
