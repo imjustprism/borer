@@ -45,6 +45,7 @@ fn places() -> Vec<Place> {
         | Place::Linear { .. }
         | Place::Hex { .. }
         | Place::Type(_)
+        | Place::Proposal { .. }
         | Place::Xrefs(_) => {
             let graph = Place::Graph {
                 entry: CALLER,
@@ -56,7 +57,16 @@ fn places() -> Vec<Place> {
                 source: TypeSource::User,
                 kind: TypeKind::Struct,
             });
-            vec![code, graph, Place::Overview, linear, hex, struct_tab]
+            let proposal = Place::Proposal { entry: CALLER };
+            vec![
+                code,
+                graph,
+                Place::Overview,
+                linear,
+                hex,
+                struct_tab,
+                proposal,
+            ]
         }
     }
 }

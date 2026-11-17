@@ -13,7 +13,7 @@ use crate::graph_item::GraphItem;
 use crate::hex_item::{HexItem, open_hex};
 use crate::linear_item::LinearItem;
 use crate::overview::OverviewItem;
-use crate::types::{StructItem, TypeKey};
+use crate::types::{StructItem, Subject, TypeKey};
 use crate::worker::{LoadedBinary, Referent};
 use crate::xrefs::show_xrefs;
 
@@ -56,6 +56,12 @@ pub enum Place {
     Xrefs(Referent),
     /// The fields of one type.
     Type(TypeKey),
+    /// The struct the accesses of the function at `entry` through its first argument
+    /// propose.
+    Proposal {
+        /// Entry virtual address of the function.
+        entry: u64,
+    },
 }
 
 impl Place {
@@ -122,13 +128,19 @@ pub fn open(
     match place {
         Place::Hex { at } => open_hex(workspace, &binary, &loaded, at, window, cx),
         Place::Type(key) => {
-            let shows = |item: &StructItem| {
-                *item.key() == key && Arc::ptr_eq(&item.loaded().program, &program)
-            };
-            let build = |_, window: &mut Window, cx: &mut Context<'_, StructItem>| {
-                StructItem::new(binary, loaded, key.clone(), window, cx)
-            };
-            show(workspace, how, shows, build, window, cx);
+            open_struct(
+                workspace,
+                Subject::Type(key),
+                &binary,
+                &loaded,
+                how,
+                window,
+                cx,
+            );
+        }
+        Place::Proposal { entry } => {
+            let subject = Subject::Proposal(entry);
+            open_struct(workspace, subject, &binary, &loaded, how, window, cx);
         }
         Place::Xrefs(referent) => show_xrefs(workspace, referent, window, cx),
         Place::Code { entry, form, at } => {
@@ -175,6 +187,37 @@ pub fn open(
             }
         }
     }
+}
+
+/// Shows `subject` of `loaded` in a struct tab, as [`open`] shows a place.
+///
+/// # Arguments
+///
+/// * `workspace` - The workspace.
+/// * `subject` - What the tab shows.
+/// * `binary` - The window's binary.
+/// * `loaded` - The snapshot it is shown from.
+/// * `how` - How a new tab opens.
+/// * `window` - Window the workspace is in.
+/// * `cx` - Workspace context.
+fn open_struct(
+    workspace: &mut Workspace,
+    subject: Subject,
+    binary: &Entity<Binary>,
+    loaded: &Arc<LoadedBinary>,
+    how: Opening,
+    window: &mut Window,
+    cx: &mut Context<'_, Workspace>,
+) {
+    let (shown, program) = (subject.place(), loaded.program.clone());
+    let shows = |item: &StructItem| {
+        item.subject().place() == shown && Arc::ptr_eq(&item.loaded().program, &program)
+    };
+    let (binary, loaded) = (binary.clone(), loaded.clone());
+    let build = |weak, window: &mut Window, cx: &mut Context<'_, StructItem>| {
+        StructItem::new(weak, binary, loaded, subject, window, cx)
+    };
+    show(workspace, how, shows, build, window, cx);
 }
 
 /// Activates the tab of type `T` in the active pane that `shows` picks, else opens the one
@@ -282,6 +325,9 @@ fn loaded_of<'a>(item: &dyn ItemHandle, cx: &'a App) -> Option<&'a Arc<LoadedBin
     if let Some(hex) = item.downcast::<HexItem>() {
         return Some(hex.read(cx).loaded());
     }
+    if let Some(tab) = item.downcast::<StructItem>() {
+        return Some(tab.read(cx).loaded());
+    }
     if let Some(overview) = item.downcast::<OverviewItem>() {
         return Some(overview.read(cx).loaded());
     }
@@ -365,7 +411,7 @@ pub fn open_later(
 #[must_use]
 pub fn place_of(item: &dyn ItemHandle, cx: &App) -> Option<Place> {
     if let Some(item) = item.downcast::<StructItem>() {
-        return Some(Place::Type(item.read(cx).key().clone()));
+        return Some(item.read(cx).subject().place());
     }
     if item.downcast::<HexItem>().is_some() {
         return Some(Place::Hex { at: None });

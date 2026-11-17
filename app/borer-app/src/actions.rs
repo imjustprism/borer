@@ -124,6 +124,22 @@ gpui::actions!(
         /// Shows the types panel and focuses its filter, or moves focus back to the center
         /// pane.
         ToggleTypes,
+        /// Renames the struct tab's selected field: the plan shows, Enter commits it.
+        RenameField,
+        /// Retypes the struct tab's selected field: the plan shows, Enter commits it.
+        RetypeField,
+        /// Adds a field at the struct tab's selected hole: the plan shows, Enter commits it.
+        AddField,
+        /// Deletes the struct tab's selected field: the plan shows, Enter commits it.
+        DeleteField,
+        /// Gives the struct tab's struct a new size: the plan shows, Enter commits it.
+        ResizeStruct,
+        /// Plans a user struct of the fields of the struct tab's debug or SDK type.
+        CopyToUserType,
+        /// Proposes a struct from the active code tab's accesses through its first argument.
+        ProposeStruct,
+        /// Plans the struct the proposal tab shows under a name: Enter commits it.
+        AcceptProposal,
     ]
 );
 

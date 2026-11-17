@@ -17,9 +17,9 @@ use borer_engine::analysis::find::{Found, Query, everywhere};
 use borer_engine::analysis::project::{self, PROJECT_MAX, Project};
 use borer_engine::analysis::render::{
     Bytes, Cell as BandCell, Cfg, Children, Dir, FunctionOrder, FunctionRows, Level, LinearPage,
-    SymbolRows, Triage, Via, XREF_ROWS_MAX, XrefRows, XrefView, answered_flagged, band,
-    call_children, cfg, disasm_view, function_rows, linear, symbol_rows, triage, xref_rows,
-    xref_rows_of_import,
+    Proposal, SymbolRows, Triage, Via, XREF_ROWS_MAX, XrefRows, XrefView, answered_flagged, band,
+    call_children, cfg, disasm_view, function_rows, linear, propose, symbol_rows, triage,
+    xref_rows, xref_rows_of_import,
 };
 use borer_engine::analysis::utypes::{
     TypeDetail, TypeKind, TypeRows, TypeSource, type_detail, type_rows,
@@ -879,6 +879,45 @@ pub fn type_detail_blocking(
     type_detail(p, a, o, name, source, kind)
 }
 
+/// Plans `edits` over `loaded`'s overlay through the engine's edit path, writing nothing,
+/// and words each line of the plan as a dry run does.
+///
+/// Must be called inside [`spawn_engine`].
+///
+/// # Arguments
+///
+/// * `loaded` - The state the edits would be made over.
+/// * `edits` - The edits, in order.
+///
+/// # Errors
+///
+/// Returns the engine's refusal of the first edit it refuses, or of a cap the edits pass.
+pub fn plan_blocking(loaded: &LoadedBinary, edits: &[Edit]) -> Result<Vec<String>, String> {
+    let (p, a) = (&*loaded.program, &*loaded.analysis);
+    let plan =
+        edit::plan(p, a, &loaded.overlay, edits, Force::Refuse).map_err(|e| format!("{e:#}"))?;
+    Ok(plan.lines().iter().map(|line| line.said(true).0).collect())
+}
+
+/// Proposes a struct from the accesses of the function at `entry` through its first
+/// argument, as the agent's `borer://layout/<entry>` follows it.
+///
+/// Must be called inside [`spawn_engine`].
+///
+/// # Arguments
+///
+/// * `loaded` - Previously loaded binary state.
+/// * `entry` - Entry virtual address of the function.
+///
+/// # Errors
+///
+/// Returns the engine's words when the spec is refused or the function's code does not
+/// read.
+pub fn propose_blocking(loaded: &LoadedBinary, entry: u64) -> Result<Proposal, String> {
+    let (p, a, o) = (&*loaded.program, &*loaded.analysis, &*loaded.overlay);
+    propose(p, a, o, &format!("{entry:#x}"))
+}
+
 /// Most function rows a go-to query lists.
 pub const GOTO_ROWS: usize = 200;
 
@@ -1348,7 +1387,7 @@ pub(crate) mod tests {
     }
 
     /// Returns every module of the crate but this one, by path under `src`, with its text.
-    fn sources() -> [(&'static str, &'static str); 50] {
+    fn sources() -> [(&'static str, &'static str); 51] {
         [
             ("actions.rs", include_str!("actions.rs")),
             ("app_assets.rs", include_str!("app_assets.rs")),
@@ -1400,6 +1439,7 @@ pub(crate) mod tests {
             ("xrefs.rs", include_str!("xrefs.rs")),
             ("user_themes.rs", include_str!("user_themes.rs")),
             ("zed_import.rs", include_str!("zed_import.rs")),
+            ("types/edit.rs", include_str!("types/edit.rs")),
         ]
     }
 
@@ -1574,6 +1614,7 @@ pub(crate) mod tests {
             "project_file::",
             "type_rows(",
             "type_detail(",
+            "propose(",
         ];
         for (name, text) in sources() {
             let code = kept(text);

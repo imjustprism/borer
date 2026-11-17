@@ -92,13 +92,17 @@ pub enum Ctx {
     Table,
     /// The call tree panel.
     CallTree,
+    /// A struct tab's lines, not its editor.
+    Struct,
+    /// A struct tab's editor, where a field's new name or type is typed.
+    StructEditor,
     /// The in-window menu bar.
     MenuBar,
 }
 
 impl Ctx {
     /// Every context, in the order the keymap's sections go.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 13] = [
         Self::Global,
         Self::Workspace,
         Self::Code,
@@ -109,6 +113,8 @@ impl Ctx {
         Self::Hex,
         Self::Table,
         Self::CallTree,
+        Self::Struct,
+        Self::StructEditor,
         Self::MenuBar,
     ];
 
@@ -126,6 +132,8 @@ impl Ctx {
             Self::Hex => Some("HexView"),
             Self::Table => Some("BorerRows"),
             Self::CallTree => Some("CallTreePanel"),
+            Self::Struct => Some("StructItem && !Editor"),
+            Self::StructEditor => Some("StructItem > Editor"),
             Self::MenuBar => Some("MenuBar"),
         }
     }
@@ -424,6 +432,15 @@ pub const COMMANDS: &[Command] = &[
         ..item(
             "borer::FocusFilter",
             "Find Function",
+            (MenuName::Edit, 0),
+            Need::Binary,
+        )
+    },
+    Command {
+        serves: &["borer://fields"],
+        ..item(
+            "borer::ProposeStruct",
+            "Propose Struct from Accesses",
             (MenuName::Edit, 0),
             Need::Binary,
         )
@@ -780,6 +797,7 @@ pub const COMMANDS: &[Command] = &[
                 Keys::all(Ctx::Start, &["up"]),
                 Keys::all(Ctx::Overview, &["up"]),
                 Keys::all(Ctx::Hex, &["up"]),
+                Keys::all(Ctx::Struct, &["up"]),
             ],
         )
     },
@@ -793,6 +811,7 @@ pub const COMMANDS: &[Command] = &[
                 Keys::all(Ctx::Start, &["down"]),
                 Keys::all(Ctx::Overview, &["down"]),
                 Keys::all(Ctx::Hex, &["down"]),
+                Keys::all(Ctx::Struct, &["down"]),
             ],
         )
     },
@@ -862,6 +881,68 @@ pub const COMMANDS: &[Command] = &[
         "Expand or Go to Child",
         &[Keys::all(Ctx::CallTree, &["right"])],
     ),
+    Command {
+        needs: Need::Binary,
+        serves: &["set_type"],
+        ..binding(
+            "borer::RenameField",
+            "Rename Field",
+            &[Keys::all(Ctx::Struct, &["f2"])],
+        )
+    },
+    Command {
+        needs: Need::Binary,
+        serves: &["set_type"],
+        ..binding(
+            "borer::RetypeField",
+            "Retype Field",
+            &[Keys::all(Ctx::Struct, &["shift-f2"])],
+        )
+    },
+    Command {
+        needs: Need::Binary,
+        serves: &["set_type"],
+        ..binding(
+            "borer::AddField",
+            "Add Field",
+            &[Keys::all(Ctx::Struct, &["insert"])],
+        )
+    },
+    Command {
+        needs: Need::Binary,
+        serves: &["set_type"],
+        ..binding(
+            "borer::DeleteField",
+            "Delete Field",
+            &[Keys::all(Ctx::Struct, &["delete"])],
+        )
+    },
+    Command {
+        needs: Need::Binary,
+        serves: &["set_type"],
+        ..binding("borer::ResizeStruct", "Resize Struct", &[])
+    },
+    Command {
+        needs: Need::Binary,
+        serves: &["set_type"],
+        ..binding("borer::CopyToUserType", "Copy to a User Type", &[])
+    },
+    Command {
+        needs: Need::Binary,
+        serves: &["set_type"],
+        ..binding("borer::AcceptProposal", "Accept the Proposal", &[])
+    },
+    Command {
+        replaces: &["workspace::Unfollow", "editor::Cancel"],
+        ..binding(
+            "menu::Cancel",
+            "Drop the Planned Edit",
+            &[
+                Keys::all(Ctx::Struct, &["escape"]),
+                Keys::all(Ctx::StructEditor, &["escape"]),
+            ],
+        )
+    },
     binding(
         "menu::SelectFirst",
         "First Row",
