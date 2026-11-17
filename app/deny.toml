@@ -47,6 +47,9 @@ ignore = [
   { id = "RUSTSEC-2026-0371", reason = "zbus_names via Zed's Linux platform crates: unmaintained, no vulnerability, no release; moves when Zed moves zbus" },
   { id = "RUSTSEC-2026-0370", reason = "zvariant via Zed's Linux platform crates: unmaintained, no vulnerability, no release; moves when Zed moves zbus" },
   { id = "RUSTSEC-2026-0372", reason = "zvariant_derive via Zed's Linux platform crates: unmaintained, no vulnerability, no release; moves when Zed moves zbus" },
+  # chrono, through Zed's client, editor, project and workspace crates: unmaintained,
+  # no vulnerability, no release to move to.
+  { id = "RUSTSEC-2026-0543", reason = "chrono via Zed's crates: unmaintained, no vulnerability, no release; moves when Zed drops chrono" },
 ]
 
 [licenses]

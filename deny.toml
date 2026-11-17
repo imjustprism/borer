@@ -16,6 +16,10 @@ ignore = [
   # vulnerability and no release to move to; rhai is the one pure-Rust
   # embeddable language small enough for the engine.
   { id = "RUSTSEC-2026-0249", reason = "smartstring via rhai: unmaintained, no vulnerability, no replacement" },
+  # chrono, through rmcp (the MCP SDK) and schemars (its tool schemas):
+  # unmaintained, with no known vulnerability; borer calls no chrono API, and
+  # it leaves when rmcp and schemars move to jiff or time.
+  { id = "RUSTSEC-2026-0543", reason = "chrono via rmcp and schemars: unmaintained, no vulnerability, no release without it" },
 ]
 
 [licenses]
