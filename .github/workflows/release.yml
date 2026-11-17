@@ -185,6 +185,17 @@ jobs:
           clang cmake libfontconfig-dev libssl-dev libwayland-dev
           libx11-xcb-dev libxkbcommon-x11-dev libvulkan1
 
+      # The app's optimized link outgrows the runner's 16 GB: the runner is
+      # killed (exit 143) or lost. 16 GB of swap more lets it finish.
+      - name: linux swap
+        if: runner.os == 'Linux'
+        run: |
+          sudo fallocate -l 16G /mnt/app-swap
+          sudo chmod 600 /mnt/app-swap
+          sudo mkswap /mnt/app-swap
+          sudo swapon /mnt/app-swap
+          free -h
+
       - name: metal toolchain
         if: runner.os == 'macOS'
         run: xcrun -sdk macosx metal --version || xcodebuild -downloadComponent MetalToolchain
