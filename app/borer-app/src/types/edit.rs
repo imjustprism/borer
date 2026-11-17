@@ -46,7 +46,7 @@ impl Ask {
     /// Returns whether the ask takes typed text before it is planned.
     #[must_use]
     pub const fn takes_text(self) -> bool {
-        !matches!(self, Self::Delete)
+        !self.prompt().is_empty()
     }
 }
 

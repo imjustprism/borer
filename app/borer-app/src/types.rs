@@ -712,7 +712,14 @@ impl StructItem {
                         self.open_site(proposal.entry, site, window, cx);
                     }
                 }
-                _ => {}
+                (
+                    None | Some(Line::Field(..) | Line::Proposed(_)),
+                    Shown::Asking
+                    | Shown::Missing
+                    | Shown::Refused(_)
+                    | Shown::Detail(..)
+                    | Shown::Proposal(..),
+                ) => {}
             }
             return;
         };

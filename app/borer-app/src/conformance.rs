@@ -21,7 +21,7 @@ use crate::places::{Place, place_of};
 use crate::rows_panel::HEADER_SELECTOR;
 use crate::start_item::StartItem;
 use crate::types::TypeKey;
-use crate::worker::{Jobs, LoadedBinary};
+use crate::worker::{Jobs, LoadedBinary, Referent};
 
 /// The panels the suite runs over, by key, in [`PANELS`] order.
 const PANELS_RUN: &[&str] = &[
@@ -36,39 +36,30 @@ const PANELS_RUN: &[&str] = &[
 
 /// Returns one example of every [`Place`] variant a tab shows; an xrefs place shows in its
 /// panel, which the panel tests run.
-fn places() -> Vec<Place> {
-    let code = Place::decompile(CALLER);
-    match code {
-        Place::Code { .. }
-        | Place::Graph { .. }
-        | Place::Overview
-        | Place::Linear { .. }
-        | Place::Hex { .. }
-        | Place::Type(_)
-        | Place::Proposal { .. }
-        | Place::Xrefs(_) => {
-            let graph = Place::Graph {
-                entry: CALLER,
-                at: None,
-            };
-            let (linear, hex) = (Place::Linear { at: None }, Place::Hex { at: None });
-            let struct_tab = Place::Type(TypeKey {
-                name: "CONFORMANCE".into(),
-                source: TypeSource::User,
-                kind: TypeKind::Struct,
-            });
-            let proposal = Place::Proposal { entry: CALLER };
-            vec![
-                code,
-                graph,
-                Place::Overview,
-                linear,
-                hex,
-                struct_tab,
-                proposal,
-            ]
-        }
-    }
+///
+/// The examples chain one variant to the next, one arm each, so a new variant does not
+/// compile until its arm names the example after it.
+pub(crate) fn places() -> Vec<Place> {
+    let next = |place: &Place| match place {
+        Place::Code { .. } => Some(Place::Graph {
+            entry: CALLER,
+            at: None,
+        }),
+        Place::Graph { .. } => Some(Place::Overview),
+        Place::Overview => Some(Place::Linear { at: None }),
+        Place::Linear { .. } => Some(Place::Hex { at: None }),
+        Place::Hex { .. } => Some(Place::Type(TypeKey {
+            name: "CONFORMANCE".into(),
+            source: TypeSource::User,
+            kind: TypeKind::Struct,
+        })),
+        Place::Type(_) => Some(Place::Proposal { entry: CALLER }),
+        Place::Proposal { .. } => Some(Place::Xrefs(Referent::Address(CALLER))),
+        Place::Xrefs(_) => None,
+    };
+    std::iter::successors(Some(Place::decompile(CALLER)), next)
+        .filter(|place| !matches!(place, Place::Xrefs(_)))
+        .collect()
 }
 
 /// Opens `place` of `loaded` in a permanent tab of `workspace`.

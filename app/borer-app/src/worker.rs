@@ -606,7 +606,6 @@ pub fn save_project_blocking(loaded: &LoadedBinary, path: &Path) -> anyhow::Resu
     project_file::write(path, &file, Existing::Replace).map_err(anyhow::Error::msg)
 }
 
-/// Computes filtered [`FunctionRows`] for `loaded` matching `filter`.
 /// Computes the first `limit` [`FunctionRows`] of `loaded` matching `filter`.
 ///
 /// # Arguments
@@ -748,10 +747,12 @@ pub fn call_level_blocking(loaded: &LoadedBinary, node: u64, level: Level) -> (C
     let search = match level {
         Level::Callees | Level::Callers => Search::NotAsked,
         Level::CalleesAndVirtuals => {
-            let found = children
-                .rows
-                .iter()
-                .any(|e| matches!(e.via, Via::Virtual { .. }));
+            let found = children.rows.iter().any(|e| match e.via {
+                Via::Virtual { .. } => true,
+                Via::Direct | Via::Import | Via::Thunk { .. } | Via::Bound { .. } | Via::Data => {
+                    false
+                }
+            });
             if found || decompile::decompile(p, a, o, node).is_some() {
                 Search::Searched
             } else {
@@ -918,21 +919,6 @@ pub fn propose_blocking(loaded: &LoadedBinary, entry: u64) -> Result<Proposal, S
     propose(p, a, o, &format!("{entry:#x}"))
 }
 
-/// Most function rows a go-to query lists.
-pub const GOTO_ROWS: usize = 200;
-
-/// What a go-to query finds: the function its text names, and the functions it filters.
-#[derive(Debug)]
-pub struct GoToAnswer {
-    /// The entry of the function holding the address the text resolves to, and that
-    /// address, else the engine's words for the miss (nearest names, or what holds no
-    /// function).
-    pub target: Result<(u64, u64), String>,
-    /// The function rows the text filters, at most [`GOTO_ROWS`].
-    pub rows: FunctionRows,
-}
-
-/// Resolves `query` as an address or a name, and filters the function rows by it.
 /// Builds the control-flow graph of the function at `entry` in `loaded`, laid out once
 /// with it, or says why none.
 ///
