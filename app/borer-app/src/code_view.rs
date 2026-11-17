@@ -236,6 +236,23 @@ impl CodeLines {
         self.views.len()
     }
 
+    /// Returns the views the lines come from, in order.
+    #[must_use]
+    pub fn each_view(&self) -> &[Arc<View>] {
+        &self.views
+    }
+
+    /// Returns shown line `ix` as the place of its view in [`Self::each_view`] and its line
+    /// in that view, `None` past the last line.
+    ///
+    /// # Arguments
+    ///
+    /// * `ix` - Zero-based index of the shown line.
+    #[must_use]
+    pub fn slot(&self, ix: usize) -> Option<(usize, usize)> {
+        self.lines.get(ix).copied()
+    }
+
     /// Returns shown line `ix` as its view and its line in that view.
     ///
     /// # Arguments
@@ -247,7 +264,7 @@ impl CodeLines {
     /// The view and line, or `None` past the last line.
     #[must_use]
     pub fn get(&self, ix: usize) -> Option<(&Arc<View>, usize)> {
-        let &(v, l) = self.lines.get(ix)?;
+        let (v, l) = self.slot(ix)?;
         Some((self.views.get(v)?, l))
     }
 

@@ -7,6 +7,7 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use borer_engine::analysis::decompile::replay::Grade;
 use borer_engine::analysis::name_of;
 use borer_engine::view::{Ref, View};
 use editor::actions::GoToDefinition;
@@ -38,11 +39,14 @@ use workspace::{Item, ItemNavHistory, Workspace};
 use crate::actions::{BACK_HINT, FollowLink, Hint, ShowHex, ToggleListing, Xrefs};
 use crate::binary::{Binary, BinaryEvent, Digest, Revision};
 use crate::card::{Card, Tone};
+use crate::check_marks::{MarkHits, Marks, glyph_layer, paint_gutter};
 use crate::code_semantics::for_one_view;
 use crate::code_view::{ClickOutcome, CodeLines, CodePalette, Role, resolve_ref_click};
 use crate::commands;
 use crate::places::{PERMANENT, Place, open_beside, open_later};
-use crate::worker::{Job, LoadedBinary, Referent, decompile_or_why, listing_blocking};
+use crate::worker::{
+    Job, LoadedBinary, Referent, decompile_or_why, listing_blocking, marks_blocking,
+};
 
 /// Fewest logical pixels a row of code is tall.
 const MIN_ROW_HEIGHT_PX: f32 = 8.0;
@@ -197,6 +201,12 @@ pub struct DecompileItem {
     waiting: Option<u64>,
     /// The background build.
     job: Job,
+    /// The grade of each shown line, once its functions' checks are in.
+    marks: Option<Marks>,
+    /// The background grading of the shown lines.
+    marks_job: Job,
+    /// Where the marks were last drawn.
+    hits: MarkHits,
 }
 
 impl std::fmt::Debug for DecompileItem {
@@ -221,6 +231,7 @@ fn read_only_editor(buffer: Entity<Buffer>, window: &mut Window, cx: &mut App) -
     cx.new(|cx| {
         let mut editor = Editor::for_buffer(buffer, None, window, cx);
         editor.set_read_only(true);
+        editor.set_show_runnables(true, cx);
         hold_line_at_top(&mut editor, cx);
         editor
     })
@@ -318,6 +329,9 @@ impl DecompileItem {
             keep_top: None,
             waiting: None,
             job: Job::default(),
+            marks: None,
+            marks_job: Job::default(),
+            hits: MarkHits::default(),
         };
         item.load(build, window, cx);
         item
@@ -427,6 +441,8 @@ impl DecompileItem {
                     for_one_view(&code).map(|s| -> Rc<dyn SemanticsProvider> { Rc::new(s) });
                 self.editor
                     .update(cx, |editor, _| editor.set_semantics_provider(semantics));
+                self.marks = None;
+                self.grade_lines(code.clone(), cx);
                 self.code = Some(code);
                 self.refresh_search(window, cx);
                 self.painted = 0..0;
@@ -510,7 +526,40 @@ impl DecompileItem {
                 (buffer_row(&map, top), bottom)
             });
             self.paint(false, cx);
+            cx.notify();
         }
+    }
+
+    /// Grades `code`, the lines shown now, in the background, from the check of each
+    /// function they stand for, and marks them once graded.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - The shown lines.
+    /// * `cx` - Item context.
+    fn grade_lines(&mut self, code: Arc<CodeLines>, cx: &mut Context<'_, Self>) {
+        let (loaded, entry) = (self.loaded.clone(), self.entry);
+        let label = entry.map_or_else(
+            || "Grading lines".to_owned(),
+            |at| format!("Grading {at:#x}"),
+        );
+        let work = move || marks_blocking(&loaded, &code, entry);
+        self.marks_job.run(label, cx, work, |item, marks, cx| {
+            item.marks = Some(marks);
+            item.paint(true, cx);
+            cx.notify();
+        });
+    }
+
+    /// Returns the grade shown line `row` is marked with, `None` while the lines are graded
+    /// and for a line with no mark.
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - Zero-based shown line.
+    #[must_use]
+    pub fn grade(&self, row: usize) -> Option<Grade> {
+        self.marks.as_ref()?.grade(self.code.as_deref()?, row)
     }
 
     /// Colors the tokens of the buffer rows around the shown ones, unless they are colored
@@ -556,6 +605,9 @@ impl DecompileItem {
                     map.highlight_text(role_key(role), ranges, style, false, cx);
                 }
             });
+            if let Some(marks) = &self.marks {
+                paint_gutter(editor, (marks, &*code), self.painted.clone(), cx);
+            }
             cx.notify();
         });
     }
@@ -1193,6 +1245,9 @@ impl Render for DecompileItem {
             self.apply(jump, window, cx);
         }
         let over = self.card().map(|card| card.render(cx));
+        let item = cx.entity().downgrade();
+        let grade_of = move |row, cx: &App| item.upgrade()?.read(cx).grade(row);
+        let marks = glyph_layer(self.editor.clone(), grade_of, self.hits.clone());
         div()
             .key_context("DecompileView")
             .on_action(cx.listener(|item, _: &Xrefs, window, cx| {
@@ -1216,6 +1271,7 @@ impl Render for DecompileItem {
                 }),
             )
             .child(self.editor.clone())
+            .child(marks)
             .children(over.map(|over| div().absolute().inset_0().child(over)))
     }
 }

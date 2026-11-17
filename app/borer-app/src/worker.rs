@@ -38,6 +38,8 @@ use borer_front::project_file::{self, Existing};
 use gpui::{App, Context, Global, SharedString, Task, Window};
 
 use crate::call_tree::Search;
+use crate::check_marks::Marks;
+use crate::code_view::CodeLines;
 use crate::decompile_item::Form;
 use crate::places::Place;
 
@@ -960,6 +962,23 @@ pub fn check_blocking(loaded: &LoadedBinary, entry: u64) -> Arc<Option<TextCheck
     text_check(program, analysis, &answered, entry)
 }
 
+/// Grades each of `code`'s lines from the check of the function it stands for, under the
+/// names its text was built with: `entry`'s, else the block's own function's.
+///
+/// Must be called inside [`spawn_engine`]; each check is memoized by the engine, so the
+/// one the text was built with is a lookup.
+///
+/// # Arguments
+///
+/// * `loaded` - Previously loaded binary state.
+/// * `code` - A tab's lines.
+/// * `entry` - The tab's function, `None` for lines of no one function.
+#[must_use]
+pub fn marks_blocking(loaded: &LoadedBinary, code: &CodeLines, entry: Option<u64>) -> Marks {
+    let (p, a, o) = (&*loaded.program, &*loaded.analysis, &*loaded.overlay);
+    Marks::new(a, code, entry, |at| text_check(p, a, o, at))
+}
+
 /// Builds one page of the linear listing of `loaded`, or says why none.
 ///
 /// Must be called inside [`spawn_engine`].
@@ -1375,7 +1394,7 @@ pub(crate) mod tests {
     }
 
     /// Returns every module of the crate but this one, by path under `src`, with its text.
-    fn sources() -> [(&'static str, &'static str); 53] {
+    fn sources() -> [(&'static str, &'static str); 54] {
         [
             ("actions.rs", include_str!("actions.rs")),
             ("app_assets.rs", include_str!("app_assets.rs")),
@@ -1386,6 +1405,7 @@ pub(crate) mod tests {
             ("call_tree.rs", include_str!("call_tree.rs")),
             ("call_tree_panel.rs", include_str!("call_tree_panel.rs")),
             ("card.rs", include_str!("card.rs")),
+            ("check_marks.rs", include_str!("check_marks.rs")),
             ("code_semantics.rs", include_str!("code_semantics.rs")),
             ("code_view.rs", include_str!("code_view.rs")),
             ("commands.rs", include_str!("commands.rs")),
