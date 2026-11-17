@@ -21,6 +21,12 @@ spike:
    asks the engine waits for `call_children` on the background executor, engine
    work like a decompile, so it holds its own bar, p95 <= 50 ms with virtual calls
    off.
+8. Action bars (`--measure --phase actions`): a fixed script of actions on
+   `notepad.exe`, then on the large DLL of the list scroll, 50 runs each, timed from
+   dispatch to the first presented change (ack) and to settled views (settle), and
+   graph pan and zoom sweeps timed frame by frame. The bars are the harness's own
+   table; this script prints the times and fails on every `MEASURE_MISS` it reports.
+   A large DLL that is missing or too slow to analyze is printed as skipped.
 
 During every measured run a background `iphlpapi` watcher polls IPv4/IPv6 TCP
 and UDP owner-PID tables (`GetExtendedTcpTable` / `GetExtendedUdpTable`) and the
@@ -1143,6 +1149,59 @@ def measure_scroll_phase(
     return kv
 
 
+def measure_actions(exe: Path, watcher: NetWatcher) -> dict[str, Any]:
+    """Run the actions phase, print its table, and return its rows, misses and skips."""
+    proc, get_stderr = _spawn_app(exe, ["--measure", "--phase", "actions"])
+    watch_thread = watcher.watch_while(proc, "actions")
+    assert proc.stdout is not None
+    out: dict[str, Any] = {"actions": [], "frames": [], "misses": [], "skipped": [], "end": {}}
+    rc = 0
+    with _proc_watchdog(proc, 3600.0, "actions"):
+        for line in proc.stdout:
+            kv = parse_kv_line(line)
+            for marker, key in (
+                ("MEASURE_ACTION ", "actions"),
+                ("MEASURE_FRAMES ", "frames"),
+                ("MEASURE_MISS ", "misses"),
+                ("MEASURE_ACTIONS_SKIPPED ", "skipped"),
+            ):
+                if line.startswith(marker):
+                    out[key].append(kv)
+            if line.startswith("MEASURE_ACTIONS "):
+                out["end"] = kv
+        rc = proc.wait(timeout=60)
+    watch_thread.join(timeout=2)
+    watcher.finish_phase("actions")
+    if not out["end"]:
+        raise RuntimeError(f"actions phase missed MEASURE_ACTIONS (rc={rc}): {get_stderr()}")
+    if rc != 0:
+        raise RuntimeError(f"actions phase exited with code {rc}: {get_stderr()}")
+    head = "bench    action    ack p50/p95/p99/max ms (n)        settle p50/p95/p99/max ms (n)"
+    print(f"    {head}   still late skipped", flush=True)
+    for row in out["actions"]:
+        cells = [
+            "/".join(
+                f"{float(row.get(f'{part}_{q}_ms', 0)):.2f}" for q in ("p50", "p95", "p99", "max")
+            )
+            + f" ({row.get(f'{part}_samples', 0)})"
+            for part in ("ack", "settle")
+        ]
+        print(
+            f"    {row.get('bench'):<8} {row.get('action'):<9} {cells[0]:<33} {cells[1]:<33}"
+            f" {row.get('still')} {row.get('late')} {row.get('skipped')}",
+            flush=True,
+        )
+    for row in out["frames"]:
+        print(
+            f"    {row.get('bench'):<8} {row.get('sweep'):<9} frame draw p99 {row.get('p99_ms')} ms"
+            f" max {row.get('max_ms')} ms ({row.get('samples')} frames)",
+            flush=True,
+        )
+    for row in out["skipped"]:
+        print(f"    [skip] {row.get('bench')}: {row.get('reason')}", flush=True)
+    return out
+
+
 def measure_folder_drop(exe: Path, watcher: NetWatcher) -> dict[str, Any]:
     """Drop a folder whose settings start a context server on the app and read back
     the project's folder count; the watcher's job counts any program the drop started."""
@@ -1467,6 +1526,9 @@ def main() -> int:
 
         print("==> call tree expansions (200 on notepad.exe)...", flush=True)
         call_tree = measure_scroll_phase(exe, "tree", watcher, marker="MEASURE_TREE")
+
+        print("==> action bars (notepad.exe, then the large DLL)...", flush=True)
+        actions = measure_actions(exe, watcher)
     finally:
         watcher.close()
         left = _remove_run_dirs(_RUN_DIRS)
@@ -1484,6 +1546,7 @@ def main() -> int:
     )
     report["folder_drop"] = folder_drop
     report["call_tree"] = call_tree
+    report["actions"] = actions
 
     if args.json is not None:
         args.json.parent.mkdir(parents=True, exist_ok=True)
@@ -1514,6 +1577,15 @@ def main() -> int:
     if int(call_tree.get("ui_engine_calls", 1)) != 0:
         failures.append(
             f"call tree phase recorded {call_tree.get('ui_engine_calls')} UI-thread engine calls"
+        )
+    for miss in actions["misses"]:
+        failures.append(
+            f"{miss.get('bench')} {miss.get('what')} {miss.get('held')} misses its bar: "
+            + " ".join(f"{k}={v}" for k, v in miss.items() if k not in ("bench", "what", "held"))
+        )
+    if int(actions["end"].get("ui_engine_calls", 1)) != 0:
+        failures.append(
+            f"actions phase recorded {actions['end'].get('ui_engine_calls')} UI-thread engine calls"
         )
     if left is not None:
         failures.append(f"run data directories not removed: {left}")

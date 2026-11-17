@@ -118,3 +118,32 @@ data directory of its own.
 - The exe grew from 36 MB: Zed's workspace pulls `language`, which turns on
   tree-sitter's `wasm` feature (wasmtime and cranelift) unconditionally, plus
   `project`, `client` and their TLS stack; none of that runs, but it links.
+
+## Action bars
+
+`python scripts/run/app_measure.py` runs `--measure --phase actions`: on notepad.exe, then
+on the large DLL the list scroll loads, each action 50 times on the first functions by
+address that call another (the first call token of each for xrefs), dispatched through
+the path its key takes. Ack is dispatch to the first presented frame whose stamp (active
+tab and its revision, its top line, the functions panel's row and filter, the go-to
+picker, running jobs, status line) differs; settle is dispatch to the presented frame
+after which no job runs, every open view shows the binary's state and the stamp holds
+one more frame. Pan and zoom sweep 2 s each on notepad's 20 largest graphs and the large
+DLL's largest, timed by frame draw. A large DLL that is missing or too slow to analyze
+is printed as skipped. The bars are `BARS` in `borer-app/src/measure/actions.rs`:
+
+| Action | Ack p99 | Settle p95, notepad | Settle p95, large DLL |
+| --- | --- | --- | --- |
+| go to a name (confirm) | 16 ms | 50 ms | 100 ms |
+| Find Everywhere keystroke | 16 ms | 16 ms | 50 ms |
+| xrefs on a call token | 16 ms | 16 ms | 33 ms |
+| toggle listing (warm) | 16 ms | 16 ms | 16 ms |
+| open graph (warm) | 16 ms | 50 ms | 100 ms |
+| functions filter keystroke | 16 ms | 16 ms | 50 ms |
+| open overview | 16 ms | 500 ms | reported |
+| back | 16 ms | reported | reported |
+| graph pan, zoom: frame draw p99 | 8.3 ms | | |
+
+First run: not yet recorded. The phase opens a window, and the branch that adds it was
+built and tested without one; its numbers and the six bars above, re-run on the same
+build, go here with the commit they came from.
