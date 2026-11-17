@@ -210,8 +210,14 @@ jobs:
           rustup component add rust-docs
           rustup target add ${{ matrix.target }}
 
+      # dist strips the binary, so the debug info `release` asks for is built
+      # only to be thrown away, and one codegen unit runs the app's link past
+      # the job's limit on the macOS runners.
       - name: build
         working-directory: app
+        env:
+          CARGO_PROFILE_DIST_DEBUG: "false"
+          CARGO_PROFILE_DIST_CODEGEN_UNITS: "16"
         run: cargo build --locked --profile dist -p borer-app --target ${{ matrix.target }}
 
       - name: third-party licenses
