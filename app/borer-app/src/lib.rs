@@ -10,6 +10,7 @@ pub mod code_semantics;
 pub mod code_view;
 pub mod commands;
 pub mod decompile_item;
+pub mod features;
 pub mod function_columns;
 pub mod functions_panel;
 pub mod goto;

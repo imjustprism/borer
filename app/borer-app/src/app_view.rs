@@ -41,15 +41,11 @@ use workspace::{
     WorkspaceStore,
 };
 
-use crate::actions::{
-    CloseBinary, FocusFilter, FollowLink, MinimizeWindow, Open, ToggleFunctionColumns,
-    ToggleFunctions, ToggleListing, ZoomWindow,
-};
+use crate::actions::{CloseBinary, MinimizeWindow, Open, ZoomWindow};
 use crate::binary::{Binary, StatusLine};
-use crate::commands::register;
+use crate::commands;
 use crate::decompile_item::DecompileItem;
 use crate::functions_panel::FunctionsPanel;
-use crate::goto::GoTo;
 use crate::measure::CliMode;
 use crate::panels::{PANELS, add_panels};
 use crate::shell::Shell;
@@ -290,8 +286,8 @@ pub fn configure(cx: &mut App) -> anyhow::Result<()> {
     crate::app_settings::apply(cx)?;
     ui_input::ERASED_EDITOR_FACTORY.get_or_init(|| erased_editor);
     trusted_worktrees::init(DbTrustedPaths::default(), cx);
-    crate::commands::bind_keys(cx)?;
-    cx.set_menus(crate::commands::menus(cx));
+    commands::bind_keys(cx)?;
+    cx.set_menus(commands::menus(cx));
     command_palette::init(cx);
     search::buffer_search::init(cx);
     let hidden = [TypeId::of::<AddFolderToProject>()];
@@ -393,7 +389,7 @@ pub fn new_workspace(
     let workspace = cx.new(|cx| {
         let id = WorkspaceId::from_i64(APP_WORKSPACE_ID);
         let mut workspace = Workspace::new(Some(id), project, app_state.clone(), window, cx);
-        crate::overview::register(&mut workspace, &binary, window, cx);
+        crate::overview::open_on_load(&binary, window, cx);
         let status = cx.new(|cx| StatusLine::new(binary.clone(), cx));
         workspace
             .status_bar()
@@ -404,7 +400,7 @@ pub fn new_workspace(
                 bar.remove_item_at(ix, cx);
             }
         });
-        register_actions(&mut workspace, &binary);
+        crate::features::register(&mut workspace, &binary);
         workspace
     });
     let saved = saved_layout(cx).unwrap_or_else(|err| {
@@ -533,93 +529,52 @@ pub fn add_functions_panel(
     })
 }
 
-/// Registers the app's workspace-wide actions on `workspace`, over the window's `binary`.
+/// Registers the file and window actions on `workspace`, over the window's `binary`:
+/// open, Zed's add folder (which opens a binary), close, the settings file, minimize, zoom
+/// and about.
 ///
 /// # Arguments
 ///
 /// * `workspace` - The workspace.
 /// * `binary` - The window's binary.
-fn register_actions(workspace: &mut Workspace, binary: &Entity<Binary>) {
-    let (open, add, go, close, settings) = (
-        binary.clone(),
+pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
+    let (open, add, close, settings) = (
         binary.clone(),
         binary.clone(),
         binary.clone(),
         binary.clone(),
     );
-    register(workspace, binary, move |_, _: &Open, _, cx| {
+    commands::register(workspace, binary, move |_, _: &Open, _, cx| {
         open.update(cx, |binary, cx| binary.prompt_open(cx));
     });
-    register(
+    commands::register(
         workspace,
         binary,
         move |_, _: &AddFolderToProject, _, cx| {
             add.update(cx, |binary, cx| binary.prompt_open(cx));
         },
     );
-    register(
-        workspace,
-        binary,
-        |workspace, _: &FocusFilter, window, cx| {
-            workspace.focus_panel::<FunctionsPanel>(window, cx);
-        },
-    );
-    register(
-        workspace,
-        binary,
-        |workspace, _: &ToggleFunctions, window, cx| {
-            workspace.toggle_panel_focus::<FunctionsPanel>(window, cx);
-        },
-    );
-    register(
-        workspace,
-        binary,
-        |workspace, _: &ToggleFunctionColumns, _, cx| {
-            if let Some(panel) = workspace.panel::<FunctionsPanel>(cx) {
-                panel.update(cx, FunctionsPanel::toggle_columns);
-            }
-        },
-    );
-    register(
-        workspace,
-        binary,
-        |workspace, _: &FollowLink, window, cx| {
-            if let Some(item) = workspace.active_item_as::<DecompileItem>(cx) {
-                item.update(cx, |item, cx| item.follow_cursor(true, window, cx));
-            }
-        },
-    );
-    register(
-        workspace,
-        binary,
-        |workspace, _: &ToggleListing, window, cx| {
-            if let Some(item) = workspace.active_item_as::<DecompileItem>(cx) {
-                item.update(cx, |item, cx| item.toggle_listing(window, cx));
-            }
-        },
-    );
-    register(workspace, binary, move |workspace, _: &GoTo, window, cx| {
-        crate::goto::toggle(workspace, &go, window, cx);
-    });
-    register(
+    commands::register(
         workspace,
         binary,
         move |workspace, _: &CloseBinary, window, cx| {
             close_binary(workspace, &close, window, cx);
         },
     );
-    register(
+    commands::register(
         workspace,
         binary,
-        move |_, _: &zed_actions::OpenSettingsFile, _, cx| open_settings_file(&settings, cx),
+        move |_, _: &zed_actions::OpenSettingsFile, _, cx| {
+            open_settings_file(&settings, cx);
+        },
     );
-    register(workspace, binary, |_, _: &MinimizeWindow, window, _| {
+    commands::register(workspace, binary, |_, _: &MinimizeWindow, window, _| {
         window.minimize_window();
     });
-    register(workspace, binary, |_, _: &ZoomWindow, window, _| {
+    commands::register(workspace, binary, |_, _: &ZoomWindow, window, _| {
         window.zoom_window();
     });
-    register(
+    commands::register(
         workspace,
         binary,
         |_, _: &zed_actions::About, window, cx| {

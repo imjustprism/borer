@@ -21,6 +21,7 @@ use crate::actions::Overview;
 use crate::app_view::open_dropped;
 use crate::binary::{Binary, BinaryEvent};
 use crate::card::{Card, Tone};
+use crate::commands;
 use crate::decompile_item::TabMode;
 use crate::places::{Opening, Place, open};
 use crate::worker::{Job, LoadedBinary, place_at, triage_blocking};
@@ -160,21 +161,14 @@ const SHOWN: Opening = Opening {
     focus: true,
 };
 
-/// Opens the overview of each binary the window loads, and registers the overview's
-/// command on `workspace`, which opens it again from anywhere.
+/// Opens the overview of each binary the window loads.
 ///
 /// # Arguments
 ///
-/// * `workspace` - The workspace.
 /// * `binary` - The window's binary.
 /// * `window` - Window the workspace is in.
 /// * `cx` - Workspace context.
-pub fn register(
-    workspace: &mut Workspace,
-    binary: &Entity<Binary>,
-    window: &mut Window,
-    cx: &mut Context<'_, Workspace>,
-) {
+pub fn open_on_load(binary: &Entity<Binary>, window: &mut Window, cx: &mut Context<'_, Workspace>) {
     cx.subscribe_in(binary, window, |workspace, binary, event, window, cx| {
         if let BinaryEvent::Opened(loaded) = event {
             open(
@@ -189,20 +183,34 @@ pub fn register(
         }
     })
     .detach();
-    let binary = binary.clone();
-    workspace.register_action(move |workspace, _: &Overview, window, cx| {
-        if let Some(loaded) = binary.read(cx).loaded().cloned() {
-            open(
-                workspace,
-                &binary,
-                &loaded,
-                Place::Overview,
-                SHOWN,
-                window,
-                cx,
-            );
-        }
-    });
+}
+
+/// Registers the overview's command on `workspace`, which opens the overview of the
+/// window's `binary` again from anywhere.
+///
+/// # Arguments
+///
+/// * `workspace` - The window's workspace.
+/// * `binary` - The window's binary.
+pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
+    let held = binary.clone();
+    commands::register(
+        workspace,
+        binary,
+        move |workspace, _: &Overview, window, cx| {
+            if let Some(loaded) = held.read(cx).loaded().cloned() {
+                open(
+                    workspace,
+                    &held,
+                    &loaded,
+                    Place::Overview,
+                    SHOWN,
+                    window,
+                    cx,
+                );
+            }
+        },
+    );
 }
 
 /// A center tab showing the engine's triage of the open binary.

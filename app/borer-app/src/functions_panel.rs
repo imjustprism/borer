@@ -4,12 +4,15 @@
 use std::sync::Arc;
 
 use borer_engine::analysis::render::{FunctionRow, FunctionRows, INCOMPLETE_NOTE};
-use gpui::{AppContext as _, SharedString};
+use gpui::{AppContext as _, Entity, SharedString};
 use ui::IconName;
+use workspace::Workspace;
 use workspace::dock::DockPosition;
 
-use crate::actions::ToggleFunctions;
+use crate::actions::{FocusFilter, ToggleFunctionColumns, ToggleFunctions};
 use crate::app_assets::Glyph;
+use crate::binary::Binary;
+use crate::commands;
 use crate::function_columns::{Column, Columns};
 use crate::panels::PanelSpec;
 use crate::places::Place;
@@ -35,6 +38,39 @@ pub const PANEL: PanelSpec = PanelSpec {
         workspace.add_panel(panel, window, cx);
     },
 };
+
+/// Registers the functions panel's actions on `workspace`: focus its filter, show or
+/// focus it, and show or hide its extra columns.
+///
+/// # Arguments
+///
+/// * `workspace` - The window's workspace.
+/// * `binary` - The window's binary.
+pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
+    commands::register(
+        workspace,
+        binary,
+        |workspace, _: &FocusFilter, window, cx| {
+            workspace.focus_panel::<FunctionsPanel>(window, cx);
+        },
+    );
+    commands::register(
+        workspace,
+        binary,
+        |workspace, _: &ToggleFunctions, window, cx| {
+            workspace.toggle_panel_focus::<FunctionsPanel>(window, cx);
+        },
+    );
+    commands::register(
+        workspace,
+        binary,
+        |workspace, _: &ToggleFunctionColumns, _, cx| {
+            if let Some(panel) = workspace.panel::<FunctionsPanel>(cx) {
+                panel.update(cx, FunctionsPanel::toggle_columns);
+            }
+        },
+    );
+}
 
 /// The open binary's function table, in a dock.
 pub type FunctionsPanel = RowsPanel<Functions>;

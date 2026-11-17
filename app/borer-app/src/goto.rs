@@ -12,6 +12,7 @@ use ui::{Color, Label, LabelCommon as _, ListItem, ListItemSpacing, prelude::*};
 use workspace::Workspace;
 
 use crate::binary::Binary;
+use crate::commands;
 use crate::decompile_item::{DecompileItem, Form, TabMode};
 use crate::places::{Opening, Place, open};
 use crate::worker::{GoToAnswer, LoadedBinary, goto_blocking, spawn_engine};
@@ -24,6 +25,19 @@ gpui::actions!(
         GoTo,
     ]
 );
+
+/// Registers go to on `workspace`, over the window's `binary`.
+///
+/// # Arguments
+///
+/// * `workspace` - The window's workspace.
+/// * `binary` - The window's binary.
+pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
+    let go = binary.clone();
+    commands::register(workspace, binary, move |workspace, _: &GoTo, window, cx| {
+        toggle(workspace, &go, window, cx);
+    });
+}
 
 /// One line of the picker.
 #[derive(Debug, Clone, PartialEq, Eq)]

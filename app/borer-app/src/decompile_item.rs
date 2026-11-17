@@ -34,12 +34,13 @@ use workspace::item::TabContentParams;
 use workspace::searchable::SearchableItemHandle;
 use workspace::{Item, ItemNavHistory, Pane, Workspace};
 
-use crate::actions::{BACK_HINT, Hint};
+use crate::actions::{BACK_HINT, FollowLink, Hint, ToggleListing};
 use crate::app_view::open_dropped;
 use crate::binary::Binary;
 use crate::card::{Card, Tone};
 use crate::code_semantics::for_one_view;
 use crate::code_view::{ClickOutcome, CodeLines, CodePalette, Role, resolve_ref_click};
+use crate::commands;
 use crate::places::{Opening, Place, open};
 use crate::worker::{Job, LoadedBinary, decompile_or_why, listing_blocking};
 
@@ -1011,6 +1012,36 @@ impl Item for DecompileItem {
     ) -> bool {
         open_dropped(&self.binary, dropped, cx)
     }
+}
+
+/// Registers the code tab's actions on `workspace`: follow the link under the cursor and
+/// switch between the decompile and the listing, each on the active code tab.
+///
+/// They stay on the workspace, not the view, so the palette offers them from a panel too.
+///
+/// # Arguments
+///
+/// * `workspace` - The window's workspace.
+/// * `binary` - The window's binary.
+pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
+    commands::register(
+        workspace,
+        binary,
+        |workspace, _: &FollowLink, window, cx| {
+            if let Some(item) = workspace.active_item_as::<DecompileItem>(cx) {
+                item.update(cx, |item, cx| item.follow_cursor(true, window, cx));
+            }
+        },
+    );
+    commands::register(
+        workspace,
+        binary,
+        |workspace, _: &ToggleListing, window, cx| {
+            if let Some(item) = workspace.active_item_as::<DecompileItem>(cx) {
+                item.update(cx, |item, cx| item.toggle_listing(window, cx));
+            }
+        },
+    );
 }
 
 impl Render for DecompileItem {
