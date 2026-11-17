@@ -25,7 +25,7 @@ use workspace::{HideStatusItem, ItemHandle, StatusItemView};
 
 use crate::actions::ToggleTheme;
 use crate::app_assets::{AppIcon, Glyph};
-use crate::binary::{Binary, Loading, status_label};
+use crate::binary::{Binary, Loading, reading_label, status_label};
 use crate::decompile_item::DecompileItem;
 use crate::worker::{GradeCounts, Job, LoadedBinary, grade_counts_blocking};
 
@@ -361,7 +361,7 @@ impl Render for Work {
         let Some(elapsed) = shown_for(loading, now) else {
             return div().into_any_element();
         };
-        let label = format!("Reading {}", loading.name());
+        let label = reading_label(&loading.path);
         let binary = self.binary.clone();
         h_flex()
             .gap(px(8.0))

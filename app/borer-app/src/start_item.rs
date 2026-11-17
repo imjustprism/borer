@@ -20,8 +20,8 @@ use workspace::{Item, Pane};
 use crate::actions::{Open, PALETTE_HINT, hint_row};
 use crate::app_assets::MARK_PATH;
 use crate::app_view::open_dropped;
-use crate::binary::Binary;
-use crate::recent::{RecentBinary, SHOWN_MAX, file_name};
+use crate::binary::{Binary, reading_label};
+use crate::recent::{RecentBinary, SHOWN_MAX};
 use crate::rows_panel::{Rows, row_keys};
 
 /// Side in logical pixels of the borer mark on the welcome column.
@@ -372,7 +372,7 @@ impl Render for StartItem {
         );
         let binary = self.binary.read(cx);
         let column = if let Some(busy) = binary.busy() {
-            column.child(headline(format!("Reading {}", file_name(busy))))
+            column.child(headline(reading_label(busy)))
         } else {
             let error = binary
                 .load_error()
@@ -419,7 +419,7 @@ impl Render for StartItem {
 /// # Arguments
 ///
 /// * `text` - What it says.
-fn headline(text: String) -> Label {
+fn headline(text: impl Into<SharedString>) -> Label {
     Label::new(text)
         .size(LabelSize::Custom(rems_from_px(HEADLINE_PX)))
         .weight(FontWeight::SEMIBOLD)
