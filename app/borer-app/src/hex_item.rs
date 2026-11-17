@@ -11,7 +11,7 @@
 //! keys move the window.
 
 use std::collections::BTreeMap;
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 use std::sync::Arc;
 
 use borer_engine::hexdump::{HEXDUMP_MAX, HexFill, HexRows, hexdump_sparse};
@@ -428,6 +428,9 @@ pub struct HexItem {
     pages: BTreeMap<usize, Arc<[HexLine]>>,
     /// Pages being read, by index; dropping one drops its request.
     pending: BTreeMap<usize, Task<()>>,
+    /// Pages the rows on screen fall in, as [`Self::want_pages`] last asked for them; the
+    /// pages held past [`HELD_PAGES`] are dropped farthest from them first.
+    wanted: RangeInclusive<usize>,
     /// The address the cursor is on.
     cursor: Option<u64>,
     /// Why no row shows the cursor's address, when none does.
@@ -485,6 +488,7 @@ impl HexItem {
             base: 0,
             pages: BTreeMap::new(),
             pending: BTreeMap::new(),
+            wanted: 0..=0,
             cursor: None,
             miss: None,
             linked: false,
@@ -726,6 +730,24 @@ impl HexItem {
             .max(1.0) as isize
     }
 
+    /// Returns the rows on screen, among every row: from [`Self::top_row`] on, as many as
+    /// the list was last painted tall (one before its first paint), and as many above it
+    /// while a scroll not yet laid out may put its row at the bottom.
+    fn screen_rows(&self) -> Range<usize> {
+        let shown = self.page_rows().cast_unsigned().saturating_add(1);
+        let top = self.top_row();
+        let deferred = self.scroll.0.borrow().deferred_scroll_to_item.is_some();
+        let start = if deferred {
+            top.saturating_sub(shown)
+        } else {
+            top
+        };
+        let end = top
+            .saturating_add(shown)
+            .min(self.base.saturating_add(self.window_rows()));
+        start..end.max(start)
+    }
+
     /// Reads, in the background, the pages of `rows` (among every row) not held or being
     /// read, drops the reads of pages that left them, and drops the pages farthest from
     /// them past [`HELD_PAGES`].
@@ -739,7 +761,8 @@ impl HexItem {
             return;
         };
         let first = rows.start / PAGE_ROWS;
-        let last = rows.end.saturating_sub(1) / PAGE_ROWS;
+        let last = (rows.end.saturating_sub(1) / PAGE_ROWS).max(first);
+        self.wanted = first..=last;
         self.pending.retain(|page, _| (first..=last).contains(page));
         for page in first..=last {
             if self.pages.contains_key(&page) || self.pending.contains_key(&page) {
@@ -756,11 +779,18 @@ impl HexItem {
                 this.update(cx, |item, cx| {
                     item.pending.remove(&page);
                     item.pages.insert(page, lines.into());
+                    item.evict();
                     cx.notify();
                 });
             });
             self.pending.insert(page, task);
         }
+        self.evict();
+    }
+
+    /// Drops the pages farthest from [`Self::wanted`] until at most [`HELD_PAGES`] are held.
+    fn evict(&mut self) {
+        let (first, last) = (*self.wanted.start(), *self.wanted.end());
         while self.pages.len() > HELD_PAGES {
             let far = self
                 .pages
@@ -774,21 +804,22 @@ impl HexItem {
         }
     }
 
-    /// Builds the rows in `range` of the list's window, asking for the pages they need.
+    /// Builds the rows in `range` of the list's window from the pages held; [`Self::render`]
+    /// asks for the pages of the rows on screen, since the list also builds a row to
+    /// measure it.
     ///
     /// # Arguments
     ///
     /// * `range` - Rows of the window the list draws.
     /// * `_window` - Window painting the rows.
-    /// * `cx` - Item context.
+    /// * `_cx` - Item context.
     fn render_rows(
         &mut self,
         range: Range<usize>,
         _window: &mut Window,
-        cx: &mut Context<'_, Self>,
+        _cx: &mut Context<'_, Self>,
     ) -> Vec<AnyElement> {
         let rows = self.base.saturating_add(range.start)..self.base.saturating_add(range.end);
-        self.want_pages(rows.clone(), cx);
         let cursor_row = self
             .cursor
             .and_then(|va| self.layout.as_ref()?.row_of(va).ok());
@@ -972,14 +1003,17 @@ impl Render for HexItem {
         };
         let body = match self.card() {
             Some(card) => card.render(cx),
-            None => uniform_list(
-                "hex-view",
-                self.window_rows(),
-                cx.processor(Self::render_rows),
-            )
-            .track_scroll(&self.scroll)
-            .flex_1()
-            .into_any_element(),
+            None => {
+                self.want_pages(self.screen_rows(), cx);
+                uniform_list(
+                    "hex-view",
+                    self.window_rows(),
+                    cx.processor(Self::render_rows),
+                )
+                .track_scroll(&self.scroll)
+                .flex_1()
+                .into_any_element()
+            }
         };
         div()
             .track_focus(&self.focus_handle)
@@ -1253,6 +1287,36 @@ mod tests {
                 .and_then(|item| item.downcast::<HexItem>())
         });
         assert!(shown.is_some());
+    }
+
+    /// Scrolled page by page past [`super::HELD_PAGES`] pages, the tab still holds the page
+    /// on screen and reads nothing more once it lands: the row the list builds to measure
+    /// itself never drops the page on screen.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the page on screen is dropped or read again.
+    #[gpui::test]
+    fn hex_keeps_the_page_on_screen_past_the_held_pages(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let hex = hex_of(&app.workspace, &sections(), 0..1, cx);
+        let draw = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.run_until_parked();
+        };
+        let far = super::HELD_PAGES + 6;
+        for page in 1..=far {
+            hex.update(cx, |hex, cx| hex.scroll_to_row(page * super::PAGE_ROWS, cx));
+            draw(cx);
+            draw(cx);
+        }
+        draw(cx);
+        hex.read_with(cx, |hex, _| {
+            assert!(hex.line(far * super::PAGE_ROWS).is_some());
+            assert_eq!(hex.pending_pages(), 0);
+            assert!(hex.held_pages() <= super::HELD_PAGES);
+        });
     }
 
     /// Go to scrolls to an address's row, past the list's window too; the cursor keys move
