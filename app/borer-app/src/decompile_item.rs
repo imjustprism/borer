@@ -789,7 +789,7 @@ impl DecompileItem {
     /// # Arguments
     ///
     /// * `cx` - Application context reading the editor.
-    fn cursor(&self, cx: &App) -> Option<(usize, usize)> {
+    pub(crate) fn cursor(&self, cx: &App) -> Option<(usize, usize)> {
         let editor = self.editor.read(cx);
         let snapshot = editor.buffer().read(cx).snapshot(cx);
         let at = editor.selections.newest_anchor().head().to_point(&snapshot);

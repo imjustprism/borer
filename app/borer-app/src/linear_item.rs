@@ -118,6 +118,17 @@ impl Shift {
     pub const fn moved(self, line: usize) -> usize {
         line.saturating_add(self.added).saturating_sub(self.dropped)
     }
+
+    /// Returns where kept line `line` is after the shift, `None` when it was dropped from
+    /// above the kept lines.
+    ///
+    /// # Arguments
+    ///
+    /// * `line` - Index of the line before the shift.
+    #[must_use]
+    pub const fn kept(self, line: usize) -> Option<usize> {
+        line.saturating_add(self.added).checked_sub(self.dropped)
+    }
 }
 
 impl Pages {
@@ -480,8 +491,9 @@ impl LinearItem {
             });
     }
 
-    /// Shows the kept lines in the code tab, the top line staying where it was or, after a
-    /// reset, the row of the address on top with the cursor on it.
+    /// Shows the kept lines in the code tab, the top line and the cursor staying on the
+    /// lines they were on (the cursor on the top line when its line was dropped) or, after
+    /// a reset, the row of the address on top with the cursor on it.
     ///
     /// # Arguments
     ///
@@ -508,8 +520,18 @@ impl LinearItem {
         let y = editor.update(cx, |editor, cx| editor.scroll_position(cx).y);
         let (top, frac) = (self.top_line(cx), y - y.floor());
         let (top, frac, cursor) = match how {
-            Fetch::Extend => (shift.moved(top), frac, false),
-            Fetch::Reset(va) => (pages.row_lines(va).map_or(0, |l| l.start), 0.0, true),
+            Fetch::Extend => {
+                let top = shift.moved(top);
+                let cursor = self.code.read(cx).cursor(cx).and_then(|(row, column)| {
+                    let row = shift.kept(row).filter(|&row| row < pages.len())?;
+                    Some((row, column))
+                });
+                (top, frac, cursor.unwrap_or((top, 0)))
+            }
+            Fetch::Reset(va) => {
+                let top = pages.row_lines(va).map_or(0, |l| l.start);
+                (top, 0.0, (top, 0))
+            }
         };
         self.pages = pages;
         let semantics: Rc<dyn SemanticsProvider> = Rc::new(ViewSemantics { code: code.clone() });
@@ -518,10 +540,13 @@ impl LinearItem {
             item.editor().update(cx, |editor, cx| {
                 editor.set_semantics_provider(Some(semantics));
                 let at = Point::new(u32::try_from(top).unwrap_or(u32::MAX), 0);
-                if cursor {
-                    let effects = SelectionEffects::no_scroll().nav_history(false);
-                    editor.change_selections(effects, window, cx, |s| s.select_ranges([at..at]));
-                }
+                let (row, column) = cursor;
+                let on = Point::new(
+                    u32::try_from(row).unwrap_or(u32::MAX),
+                    u32::try_from(column).unwrap_or(u32::MAX),
+                );
+                let effects = SelectionEffects::no_scroll().nav_history(false);
+                editor.change_selections(effects, window, cx, |s| s.select_ranges([on..on]));
                 let anchor = editor.buffer().read(cx).snapshot(cx).anchor_before(at);
                 let offset = point(0.0, frac);
                 editor.set_scroll_anchor(ScrollAnchor { anchor, offset }, window, cx);
@@ -1173,6 +1198,36 @@ pub(crate) mod tests {
             settle(&item, cx);
         }
         panic!("the end was never shown");
+    }
+
+    /// A page added while scrolling keeps the cursor on the line it was on, as it keeps the
+    /// top line.
+    #[gpui::test]
+    fn a_page_added_while_scrolling_keeps_the_cursor(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let item = open_linear(&app.workspace, &long_sample(), None, cx);
+        let code = item.read_with(cx, |item, _| item.code().clone());
+        put_cursor(&code, (100, 2), cx);
+        let under = |cx: &mut VisualTestContext| {
+            code.read_with(cx, |code, cx| (code.cursor_address(cx), code.cursor(cx)))
+        };
+        let (at, _) = under(cx);
+        assert!(at.is_some_and(|va| va > TEXT), "{at:x?}");
+        let (lines, _) = shown(&item, cx);
+        let kept = |cx: &mut VisualTestContext| item.read_with(cx, |item, _| item.pages.0.len());
+        let before = kept(cx);
+        item.update(cx, |item, cx| {
+            item.code().update(cx, |code, cx| {
+                code.scroll_to(lines.len() - 1);
+                cx.notify();
+            });
+        });
+        settle(&item, cx);
+        assert!(kept(cx) > before, "no page was added");
+        let (now, cursor) = under(cx);
+        assert_eq!(now, at);
+        assert_eq!(cursor.map(|(_, column)| column), Some(2));
     }
 
     /// Going to an address inside an instruction puts that instruction's row on the top
