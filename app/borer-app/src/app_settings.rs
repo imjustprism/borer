@@ -4,9 +4,7 @@
 //! settings file in the app's config directory ([`crate::app_dirs`]) is the user layer
 //! over them.
 
-use std::cell::OnceCell;
 use std::path::Path;
-use std::rc::Rc;
 
 use anyhow::Context as _;
 use borer_engine::program::checked_metadata;
@@ -198,8 +196,6 @@ pub(crate) fn change_theme(change: ThemeChange, cx: &mut App) {
         Appearance::Dark => ThemeAppearanceMode::Light,
         Appearance::Light => ThemeAppearanceMode::Dark,
     };
-    let chosen = Rc::new(OnceCell::new());
-    let pick = chosen.clone();
     let done = write_settings(
         move |content| {
             let stored = match &content.theme.theme {
@@ -212,7 +208,6 @@ pub(crate) fn change_theme(change: ThemeChange, cx: &mut App) {
                 (ThemeChange::Flip, ThemeAppearanceMode::Dark) => ThemeAppearanceMode::Light,
                 (ThemeChange::Flip, ThemeAppearanceMode::System) => other,
             };
-            pick.get_or_init(|| next);
             content.theme.theme = Some(settings::ThemeSelection::Dynamic {
                 mode: next,
                 light,
@@ -226,13 +221,6 @@ pub(crate) fn change_theme(change: ThemeChange, cx: &mut App) {
         cx.update(|cx| {
             let notice = match done {
                 Ok(()) => file_notice(cx),
-                Err(_)
-                    if chosen
-                        .get()
-                        .is_some_and(|mode| stored_mode(cx) == Some(*mode)) =>
-                {
-                    file_notice(cx)
-                }
                 Err(err) => Some(format!("theme not saved: {err}").into()),
             };
             cx.set_global(SettingsNotice(notice));
@@ -262,8 +250,8 @@ impl Global for SettingsWrites {}
 ///
 /// # Returns
 ///
-/// The write, which says why when the file is refused, does not read or write, or its new
-/// text does not apply in full.
+/// The write, which says why when the file is refused or does not read or write; once the
+/// file is written, how its new text applied is [`file_notice`]'s to say.
 fn write_settings(
     edit: impl FnOnce(&mut SettingsContent) + 'static,
     cx: &mut App,
@@ -288,8 +276,9 @@ fn write_settings(
             (fs.atomic_write(path.clone(), new.clone()).await)
                 .with_context(|| format!("writing {shown}"))?;
             cx.update_global(|store: &mut SettingsStore, cx| {
-                store.set_user_settings(&new, cx).result().map(drop)
-            })
+                drop(store.set_user_settings(&new, cx));
+            });
+            anyhow::Ok(())
         };
         written.await.map_err(|err| format!("{err:#}").into())
     });
@@ -358,19 +347,6 @@ pub fn choose_theme(
     content.theme.theme = Some(current.clone());
     theme_settings::set_theme(&mut content, name, appearance, system);
     content.theme.theme.unwrap_or(current)
-}
-
-/// Returns the theme mode the person's settings layer holds, if it holds a pair.
-///
-/// # Arguments
-///
-/// * `cx` - Application context reading Zed's settings store.
-fn stored_mode(cx: &App) -> Option<ThemeAppearanceMode> {
-    let user = cx.global::<SettingsStore>().raw_user_settings()?;
-    match user.content.theme.theme.as_ref()? {
-        settings::ThemeSelection::Dynamic { mode, .. } => Some(*mode),
-        settings::ThemeSelection::Static(_) => None,
-    }
 }
 
 #[cfg(test)]

@@ -823,6 +823,32 @@ async fn the_theme_picker_previews_keeps_and_puts_back(cx: &mut TestAppContext) 
     assert!(!open);
 }
 
+/// A theme the picker keeps over a settings file one field of which does not apply is
+/// written, and the status line reports the file, not a theme left unsaved.
+#[gpui::test]
+async fn a_picked_theme_over_a_partly_applied_file_is_saved(cx: &mut TestAppContext) {
+    let mine = themes_dir().join("mine.json");
+    let files = [
+        (
+            mine.as_path(),
+            Some(family("mine", "mine dark", "dark", "{}")),
+        ),
+        (
+            settings_file().as_path(),
+            Some(br#"{"ui_font_size": "big"}"#.to_vec()),
+        ),
+    ];
+    let app_state = boot_with_files(&files, cx).await;
+    let (workspace, cx) = open_window(&app_state, cx);
+    pick(&workspace, "mine", cx);
+    cx.dispatch_action(menu::Confirm);
+    cx.run_until_parked();
+    let said = notice(cx).expect("the file is reported");
+    assert!(said.starts_with("settings file partly applied: "), "{said}");
+    let text = app_state.fs.load(settings_file()).await.expect("written");
+    assert!(text.contains("mine dark"), "{text}");
+}
+
 /// Returns the names in the themes folder, sorted.
 async fn themes_folder(app_state: &AppState) -> Vec<String> {
     let entries = app_state.fs.read_dir(themes_dir()).await;
