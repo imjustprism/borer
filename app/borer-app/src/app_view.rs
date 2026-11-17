@@ -308,7 +308,7 @@ pub fn configure(cx: &mut App) -> anyhow::Result<()> {
     CommandPaletteFilter::update_global(cx, |filter, _| filter.hide_action_types(&hidden));
     cx.on_app_quit(crate::shell::flush_windows).detach();
     cx.on_app_quit(stored::keep_open_tabs).detach();
-    cx.on_action(|_: &zed_actions::Quit, cx| cx.quit());
+    cx.on_action(|_: &zed_actions::Quit, cx| crate::shell::quit(cx));
     Ok(())
 }
 
@@ -683,13 +683,9 @@ pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
             add.update(cx, |binary, cx| binary.prompt_open(cx));
         },
     );
-    commands::register(
-        workspace,
-        binary,
-        move |workspace, _: &CloseBinary, window, cx| {
-            close_binary(workspace, &close, window, cx);
-        },
-    );
+    commands::register(workspace, binary, move |_, _: &CloseBinary, window, cx| {
+        close_binary(&close, window, cx);
+    });
     commands::register(
         workspace,
         binary,
@@ -712,25 +708,32 @@ pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
     );
 }
 
-/// Closes `binary` and takes every panel of [`PANELS`] out of its dock; its tabs close as
-/// every closed binary's do ([`close_binary_tabs`]), which leaves each pane its start tab.
+/// Closes `binary` and takes every panel of [`PANELS`] out of its dock.
+///
+/// That waits until edits no project file holds are saved or discarded
+/// ([`Binary::settled`]); its tabs close as every closed binary's do
+/// ([`close_binary_tabs`]), which leaves each pane its start tab.
 ///
 /// # Arguments
 ///
-/// * `workspace` - The window's workspace.
 /// * `binary` - The window's binary.
 /// * `window` - Window the workspace is in.
 /// * `cx` - Workspace context.
-fn close_binary(
-    workspace: &mut Workspace,
-    binary: &Entity<Binary>,
-    window: &mut Window,
-    cx: &mut Context<'_, Workspace>,
-) {
-    binary.update(cx, Binary::close);
-    for spec in PANELS {
-        (spec.remove)(workspace, window, cx);
-    }
+fn close_binary(binary: &Entity<Binary>, window: &mut Window, cx: &mut Context<'_, Workspace>) {
+    let settled = binary.update(cx, |binary, cx| binary.settled("closing it", cx));
+    let binary = binary.clone();
+    cx.spawn_in(window, async move |workspace, cx| {
+        if !settled.await {
+            return Ok(());
+        }
+        workspace.update_in(cx, |workspace, window, cx| {
+            binary.update(cx, Binary::close);
+            for spec in PANELS {
+                (spec.remove)(workspace, window, cx);
+            }
+        })
+    })
+    .detach_and_log_err(cx);
 }
 
 /// Opens the person's settings file with the system's editor for it, or says on the status

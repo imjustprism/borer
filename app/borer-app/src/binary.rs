@@ -126,6 +126,9 @@ pub struct Binary {
     edit: Job,
     /// What [`Self::edit`] runs, `None` while nothing does.
     editing: Option<String>,
+    /// The window the binary is shown in, where its questions are asked; `None` until
+    /// [`Self::set_window`], and then nothing asks before dropping edits.
+    window: Option<AnyWindowHandle>,
 }
 
 impl EventEmitter<BinaryEvent> for Binary {}
@@ -169,7 +172,17 @@ impl Binary {
             remember_task: None,
             edit: Job::default(),
             editing: None,
+            window: None,
         }
+    }
+
+    /// Makes `window` the window the binary's questions are asked in.
+    ///
+    /// # Arguments
+    ///
+    /// * `window` - The window the binary is shown in.
+    pub const fn set_window(&mut self, window: AnyWindowHandle) {
+        self.window = Some(window);
     }
 
     /// Returns the facts the status line leads with, each with the color it draws in: the
@@ -331,7 +344,8 @@ impl Binary {
     }
 
     /// Starts loading and analyzing `path` on the background executor, dropping the
-    /// binary open before it, unless an engine load still runs.
+    /// binary open before it, unless an engine load still runs; over edits no project file
+    /// holds it first asks whether to save or drop them ([`Self::settled`]).
     ///
     /// A load the person cancelled keeps the engine busy until its analysis ends, so a
     /// second load is refused until then rather than run beside it, and the status line
@@ -344,8 +358,85 @@ impl Binary {
     ///
     /// # Returns
     ///
-    /// Whether the load started.
+    /// Whether the load started; `false` while the question waits, the load starting once
+    /// it is answered Save or Discard.
     pub fn open_path(&mut self, path: PathBuf, cx: &mut Context<'_, Self>) -> bool {
+        if !self.asks() {
+            return self.load_path(path, cx);
+        }
+        let settled = self.settled(&format!("opening {}", file_name(&path)), cx);
+        cx.spawn(async move |this, cx| {
+            if settled.await
+                && let Some(this) = this.upgrade()
+            {
+                this.update(cx, |binary, cx| binary.load_path(path, cx));
+            }
+        })
+        .detach();
+        false
+    }
+
+    /// Returns whether dropping the open overlay asks first: it holds edits no project file
+    /// holds, and the binary has a window to ask in.
+    fn asks(&self) -> bool {
+        self.window.is_some() && self.is_unsaved()
+    }
+
+    /// Asks, over edits no project file holds, whether `doing` may drop them: Save writes
+    /// them to the project file first (asking for one when there is none), Discard drops
+    /// them, Cancel keeps them; with no such edits, or no window to ask in, it answers at
+    /// once.
+    ///
+    /// # Arguments
+    ///
+    /// * `doing` - What drops the edits, as the question words it (`opening a.exe`).
+    /// * `cx` - Binary context.
+    ///
+    /// # Returns
+    ///
+    /// Whether to go on: `true` once the edits are saved or the person discards them,
+    /// `false` on Cancel, on a save that did not land, or when the window is gone.
+    pub fn settled(&mut self, doing: &str, cx: &mut Context<'_, Self>) -> Task<bool> {
+        let Some(window) = self.window.filter(|_| self.is_unsaved()) else {
+            return Task::ready(true);
+        };
+        let question = format!("The binary has edits no project file holds; {doing} drops them.");
+        cx.spawn(async move |this, cx| {
+            let asked = window.update(cx, |_, window, cx| {
+                window.prompt(PromptLevel::Warning, &question, None, &SETTLE_ANSWERS, cx)
+            });
+            let Ok(answer) = asked else {
+                return false;
+            };
+            match answer.await {
+                Ok(DISCARD) => true,
+                Ok(SAVE) => {
+                    let Some(this) = this.upgrade() else {
+                        return false;
+                    };
+                    let (landed, saved) = oneshot::channel();
+                    let then = move |_: &mut Self, _: &mut Context<'_, Self>| {
+                        landed.send(()).unwrap_or_default();
+                    };
+                    this.update(cx, |binary, cx| binary.save(false, then, cx));
+                    saved.await.is_ok() && this.read_with(cx, |binary, _| !binary.is_unsaved())
+                }
+                Ok(_) | Err(_) => false,
+            }
+        })
+    }
+
+    /// Starts loading and analyzing `path` as [`Self::open_path`] does, unasked.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - File path of the binary to load.
+    /// * `cx` - Binary context spawning the background task.
+    ///
+    /// # Returns
+    ///
+    /// Whether the load started.
+    fn load_path(&mut self, path: PathBuf, cx: &mut Context<'_, Self>) -> bool {
         if let Some(busy) = &self.busy {
             self.status = format!(
                 "{STILL_READING} {}; open it again once that ends",
@@ -393,7 +484,8 @@ impl Binary {
         true
     }
 
-    /// Closes the open binary, or stops its load, and shows that none is open.
+    /// Closes the open binary, or stops its load, and shows that none is open; its edits go
+    /// unasked, so Close Binary asks first ([`Self::settled`]).
     ///
     /// # Arguments
     ///
@@ -815,8 +907,26 @@ impl Binary {
     /// * `ask` - Whether to pick the file even when one was saved or opened.
     /// * `cx` - Binary context.
     pub fn save_project(&mut self, ask: bool, cx: &mut Context<'_, Self>) {
+        self.save(ask, |_, _| {}, cx);
+    }
+
+    /// Saves the overlay as [`Self::save_project`] does and runs `then` once the overlay
+    /// shown is the one saved; a save that fails, is refused or whose dialog is cancelled
+    /// drops `then` unrun.
+    ///
+    /// # Arguments
+    ///
+    /// * `ask` - Whether to pick the file even when one was saved or opened.
+    /// * `then` - What runs once the save landed.
+    /// * `cx` - Binary context.
+    fn save(
+        &mut self,
+        ask: bool,
+        then: impl FnOnce(&mut Self, &mut Context<'_, Self>) + 'static,
+        cx: &mut Context<'_, Self>,
+    ) {
         if let (Some(path), false) = (self.project.clone(), ask) {
-            self.save_to(path, cx);
+            self.write_project(path, then, cx);
             return;
         }
         let Some(loaded) = self.loaded.clone() else {
@@ -835,17 +945,28 @@ impl Binary {
             .unwrap_or_default()
             .to_string_lossy();
         let answer = cx.prompt_for_new_path(&dir, Some(&format!("{stem}.json")));
-        self.on_dialog(answer, Self::save_to, cx);
+        self.on_dialog(
+            answer,
+            move |binary, path, cx| binary.write_project(path, then, cx),
+            cx,
+        );
     }
 
     /// Writes the overlay to the project file at `path` in the background; once written,
-    /// what was saved is what the title compares against.
+    /// what was saved is what the title compares against, and `then` runs when that is the
+    /// overlay shown.
     ///
     /// # Arguments
     ///
     /// * `path` - The project file.
+    /// * `then` - What runs once the save landed.
     /// * `cx` - Binary context.
-    fn save_to(&mut self, path: PathBuf, cx: &mut Context<'_, Self>) {
+    fn write_project(
+        &mut self,
+        path: PathBuf,
+        then: impl FnOnce(&mut Self, &mut Context<'_, Self>) + 'static,
+        cx: &mut Context<'_, Self>,
+    ) {
         let file = path.clone();
         let label = format!("Saving project {}", file_name(&path));
         self.run(
@@ -860,6 +981,9 @@ impl Binary {
                         binary.project = Some(path);
                     }
                     binary.set_status(status, cx);
+                    if !binary.is_unsaved() {
+                        then(binary, cx);
+                    }
                 }
                 Err(err) => binary.set_status(format!("project not saved: {err:#}"), cx),
             },
@@ -898,6 +1022,15 @@ pub fn kind(loaded: &LoadedBinary) -> String {
     let program = &loaded.program;
     format!("{} {}", program.arch.name(), program.format.name())
 }
+
+/// What the question over unsaved edits offers ([`Binary::settled`]), in order.
+const SETTLE_ANSWERS: [&str; 3] = ["Save", "Discard", "Cancel"];
+
+/// Index of Save among [`SETTLE_ANSWERS`].
+const SAVE: usize = 0;
+
+/// Index of Discard among [`SETTLE_ANSWERS`].
+const DISCARD: usize = 1;
 
 /// The system file dialog's options for one file, as the app asks for every file it opens.
 pub(crate) const ONE_FILE: PathPromptOptions = PathPromptOptions {
@@ -1038,6 +1171,16 @@ impl Binary {
     ) {
         self.reading = Some(Loading { path, since });
         cx.notify();
+    }
+
+    /// Writes the overlay to the project file at `path` as a save does, nothing after.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The project file.
+    /// * `cx` - Binary context.
+    pub(crate) fn save_to(&mut self, path: PathBuf, cx: &mut Context<'_, Self>) {
+        self.write_project(path, |_, _| {}, cx);
     }
 }
 
@@ -1227,6 +1370,16 @@ mod tests {
         assert_eq!(names(cx).1, Some("second".to_owned()));
     }
 
+    /// Returns the text of the file at `path`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if it does not read as UTF-8 text.
+    fn text_of(path: &Path) -> String {
+        let bytes = borer_engine::program::read_regular(path, 1 << 20).unwrap();
+        String::from_utf8(bytes).unwrap()
+    }
+
     /// Returns a binary in a fresh window over an in-memory database, its loads reading no
     /// packs or symbol cache of the machine's, and the window.
     fn binary(cx: &mut TestAppContext) -> (Entity<Binary>, &mut VisualTestContext) {
@@ -1360,6 +1513,60 @@ mod tests {
             cx.simulate_prompt_answer(answer);
             cx.run_until_parked();
             assert_eq!(state(&binary, cx).0, want, "{answer}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Opening another binary over edits no project file holds asks first: Cancel keeps the
+    /// edits and the binary, Save writes them to the project file and then opens, Discard
+    /// opens over them.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the open goes unasked, Cancel drops the edits, or Save or Discard does not
+    /// open.
+    #[gpui::test]
+    fn opening_over_unsaved_edits_asks_save_discard_or_cancel(cx: &mut TestAppContext) {
+        let dir = scratch("settle");
+        let (binary, cx) = binary(cx);
+        let window = window(cx);
+        binary.update(cx, |binary, _| binary.set_window(window));
+        let (exe, project, _) = renamed_and_saved(&binary, &dir, cx);
+        let other = dir.join("other.exe");
+        std::fs::write(&other, tiny_pe()).unwrap();
+        let shown = |cx: &mut VisualTestContext| {
+            binary.read_with(cx, |binary, _| binary.loaded().map(|l| l.path.clone()))
+        };
+        for answer in ["Cancel", "Save", "Discard"] {
+            if shown(cx).as_deref() != Some(exe.as_path()) {
+                open(&binary, &exe, cx);
+            }
+            let again = Edit::Name {
+                at: HELPER,
+                name: format!("before_{answer}"),
+            };
+            binary.update(cx, |binary, cx| binary.edit(vec![again], cx));
+            cx.run_until_parked();
+            let (edited, ..) = state(&binary, cx);
+            open(&binary, &other, cx);
+            assert!(cx.has_pending_prompt(), "{answer}");
+            assert_eq!(shown(cx).as_deref(), Some(exe.as_path()), "{answer}");
+            cx.simulate_prompt_answer(answer);
+            cx.run_until_parked();
+            let (want, kept) = match answer {
+                "Cancel" => (exe.clone(), Some(edited)),
+                _ => (other.clone(), None),
+            };
+            assert_eq!(shown(cx), Some(want), "{answer}");
+            if let Some(edited) = kept {
+                assert_eq!(state(&binary, cx).0, edited);
+            }
+            let saved = text_of(&project);
+            assert_eq!(
+                saved.contains("before_Save"),
+                answer != "Cancel",
+                "{answer}"
+            );
         }
         std::fs::remove_dir_all(&dir).unwrap();
     }
