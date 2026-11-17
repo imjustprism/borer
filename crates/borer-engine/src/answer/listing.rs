@@ -2,7 +2,19 @@
 
 use std::ops::Range;
 
+use crate::analysis::{hex_prefixed, parse_addr};
 use crate::table::{self, Line};
+
+/// Where an answer's rows hold an address, as its resource states it, so
+/// a front end links that cell and no other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Place {
+    /// Every cell of the named column.
+    Column(&'static str),
+    /// The space-separated word at this index, from 0, of a row of an
+    /// answer with no columns.
+    Word(usize),
+}
 
 /// An answer's text with its lines read once: notes, at most one column
 /// header and rows, each row's fields, and the total the engine's pager
@@ -11,8 +23,11 @@ use crate::table::{self, Line};
 /// This is a bridge. Answers are written as text for agents, and a
 /// listing reads that text back with the reader paging uses
 /// ([`table::classify`]), so a front end draws the rows without a reader of
-/// its own. When a producer builds its rows typed, it builds its listing
-/// from them, and once no producer is read back this read mode is deleted.
+/// its own; which cells are addresses is not read off the text but stated
+/// by the answer's resource ([`Place`]), and a test holds every stated
+/// cell to an address the program maps. When a producer builds its rows
+/// typed, it builds its listing from them and its statement of places is
+/// deleted; once no statement is left, this read mode is deleted with it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Listing {
     /// The answer as an agent reads it.
@@ -26,6 +41,8 @@ pub struct Listing {
     /// The rows of the whole answer, as the engine's pager counted them;
     /// `None` when it did not page the answer.
     total: Option<usize>,
+    /// Where the rows hold addresses, as the resource states it.
+    places: &'static [Place],
 }
 
 impl Listing {
@@ -36,7 +53,8 @@ impl Listing {
     /// * `text` - The answer.
     /// * `total` - The rows the engine's pager counted, `None` when it did
     ///   not page the answer.
-    pub(crate) fn read(text: String, total: Option<usize>) -> Listing {
+    /// * `places` - Where the rows hold addresses.
+    pub(crate) fn read(text: String, total: Option<usize>, places: &'static [Place]) -> Listing {
         let classified = table::classify(&text);
         let columns = table::columns_of(&classified);
         let mut at = 0usize;
@@ -61,6 +79,7 @@ impl Listing {
             rows,
             columns,
             total,
+            places,
         }
     }
 
@@ -128,6 +147,63 @@ impl Listing {
         })
     }
 
+    /// Returns where this answer's rows hold addresses, as its resource
+    /// states it: none for an answer with no address cell.
+    #[must_use]
+    pub fn places(&self) -> &'static [Place] {
+        self.places
+    }
+
+    /// Returns the cell a place names in one row: the column's field, or
+    /// the word of a row with no columns.
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row, from 0.
+    /// * `at` - The place.
+    ///
+    /// # Returns
+    ///
+    /// The cell, `None` past the last row, for a column the answer does not
+    /// name, or for a word the row does not have.
+    #[must_use]
+    pub fn cell(&self, row: usize, at: Place) -> Option<&str> {
+        let fields = self.fields(row)?;
+        match at {
+            Place::Column(name) => {
+                let column = self.columns()?.iter().position(|c| c == name)?;
+                fields.get(column).copied()
+            }
+            Place::Word(n) => self
+                .columns
+                .is_none()
+                .then(|| fields.first()?.split_whitespace().nth(n))
+                .flatten(),
+        }
+    }
+
+    /// Returns the address a stated place holds in one row, read with the
+    /// engine's reader of `0x` addresses ([`parse_addr`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row, from 0.
+    /// * `at` - The place.
+    ///
+    /// # Returns
+    ///
+    /// The address, `None` when the answer's resource does not state the
+    /// place, or the cell is no `0x` address (an empty mark such as `-`).
+    #[must_use]
+    pub fn place(&self, row: usize, at: Place) -> Option<u64> {
+        if !self.places.contains(&at) {
+            return None;
+        }
+        self.cell(row, at)
+            .filter(|cell| hex_prefixed(cell))
+            .and_then(parse_addr)
+    }
+
     /// Returns one row's line.
     ///
     /// # Arguments
@@ -153,10 +229,10 @@ mod tests {
     #[test]
     fn a_listing_keeps_its_text_verbatim() {
         let text = "# site       caller\r\n0x10         main\n\n0x20         f";
-        let read = Listing::read(text.to_owned(), None);
+        let read = Listing::read(text.to_owned(), None, &[]);
         assert_eq!(read.spell(), text);
         assert_eq!(read.fields(1), Some(vec!["0x20         f"]));
-        let tabbed = Listing::read("va\tname\n0x10\tmain\tmore\n".to_owned(), Some(4));
+        let tabbed = Listing::read("va\tname\n0x10\tmain\tmore\n".to_owned(), Some(4), &[]);
         assert_eq!(tabbed.fields(0), Some(vec!["0x10", "main\tmore"]));
         assert_eq!(tabbed.total(), Some(4));
     }

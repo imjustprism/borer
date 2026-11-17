@@ -22,6 +22,10 @@
 //! `BORER_CALLTREE=path/to/bin cargo test -p borer-engine --release --test bench call_tree -- --ignored --nocapture`
 //! times one level of the call tree for every function ([`call_tree`]).
 //!
+//! `BORER_LISTING=bin1;bin2 cargo test -p borer-engine --release --test bench listing -- --ignored --nocapture`
+//! reads every answer as a listing, holds its stated places to mapped
+//! addresses and times its classification against its read ([`listing`]).
+//!
 //! `timings` also holds each function's cold decompile to a p95 and a
 //! maximum ([`DECOMPILE_P95_MS`], [`DECOMPILE_MAX_MS`]), the bars the
 //! notepad of the golden corpus is measured against, and reading that text
@@ -852,4 +856,147 @@ fn call_tree() {
             times.last().copied().unwrap_or_default().as_secs_f64() * 1e3
         );
     }
+}
+
+/// Reads every answer the catalog names as a listing on each binary of
+/// `BORER_LISTING`.
+///
+/// Every stated place is held to a mapped address, an empty mark or a
+/// file offset, and what the read and the classification cost is printed.
+/// Per binary a line per answer: its rows, whether it names columns, the
+/// stated place cells (addresses, empty marks), its first read and the
+/// best of three classifications in microseconds, and the columns and
+/// words no place states whose every filled cell is a mapped `0x` address,
+/// for a statement to add. The last line sums the place cells.
+#[test]
+#[ignore = "set BORER_LISTING to binary paths separated by ';' to run this harness"]
+fn listing() {
+    use borer_engine::analysis::{hex_prefixed, parse_addr};
+    use borer_engine::answer::catalog::{RESOURCE_TEMPLATES, RESOURCES, example, resource_name};
+    use borer_engine::answer::{Page, listing, names, read};
+    use borer_engine::table::{classify, columns_of};
+    let paths = std::env::var("BORER_LISTING").expect("BORER_LISTING env var");
+    let o = Overlay::default();
+    let best = |f: &dyn Fn()| {
+        (0..3)
+            .map(|_| {
+                let t = Instant::now();
+                f();
+                t.elapsed()
+            })
+            .min()
+            .unwrap_or_default()
+    };
+    for path in paths.split(';').filter(|p| !p.is_empty()) {
+        let p = Program::load(std::path::Path::new(path)).expect("load");
+        let a = Analysis::compute(&p);
+        let mapped = |cell: &str| {
+            hex_prefixed(cell) && parse_addr(cell).is_some_and(|va| p.section_at(va).is_some())
+        };
+        let (mut places, mut empty) = (0usize, 0usize);
+        let uris = RESOURCES
+            .iter()
+            .map(|r| r.0.to_owned())
+            .chain(RESOURCE_TEMPLATES.iter().map(|t| example(t.2, Some(&p))))
+            .filter(|uri| names().any(|n| n == resource_name(uri)));
+        for uri in uris {
+            let page = Page::whole(&uri);
+            let cold = Instant::now();
+            drop(read(&p, Some(&a), &o, &uri, page));
+            let read_time = cold.elapsed();
+            let Ok(l) = listing(&p, Some(&a), &o, &uri) else {
+                println!("{path}\t{uri}\trefused");
+                continue;
+            };
+            let (mut here, mut marks) = (0usize, 0usize);
+            for row in 0..l.len() {
+                for &at in l.places() {
+                    match l.place(row, at) {
+                        Some(va) => {
+                            assert!(p.section_at(va).is_some(), "{uri} row {row}: {va:#x}");
+                            here += 1;
+                        }
+                        None => {
+                            let cell = l.cell(row, at).unwrap_or_default();
+                            assert!(
+                                EMPTY_MARKS.contains(&cell) || cell.starts_with("off="),
+                                "{uri} row {row}: {cell}"
+                            );
+                            marks += 1;
+                        }
+                    }
+                }
+            }
+            places += here;
+            empty += marks;
+            let (unstated, words) = unstated(&l, &mapped);
+            let text = l.spell();
+            let classify_time = best(&|| drop(columns_of(&classify(text))));
+            println!(
+                "{path}\t{uri}\t{} rows\t{}\t{here} places\t{marks} marks\tread {}us\tclassify {}us\tunstated {unstated:?} {words:?}",
+                l.len(),
+                if l.columns().is_some() {
+                    "tab"
+                } else {
+                    "lines"
+                },
+                read_time.as_micros(),
+                classify_time.as_micros()
+            );
+        }
+        println!("{path}\ttotal\t{places} place cells\t{empty} empty marks");
+    }
+}
+
+/// The cells [`listing`] counts as empty: what the renderers write where a
+/// place column holds no address.
+const EMPTY_MARKS: [&str; 2] = ["", "-"];
+
+/// Returns the columns and the first four words of a listing that no place
+/// states and whose every filled cell is a mapped `0x` address, for a
+/// statement to add.
+///
+/// # Arguments
+///
+/// * `l` - The listing.
+/// * `mapped` - Whether a cell is a `0x` address a section maps.
+fn unstated<'l>(
+    l: &'l borer_engine::answer::Listing,
+    mapped: &dyn Fn(&str) -> bool,
+) -> (Vec<&'l str>, Vec<usize>) {
+    use borer_engine::answer::Place;
+    let columns: Vec<&str> = l.columns().map_or(Vec::new(), |names| {
+        names
+            .iter()
+            .enumerate()
+            .filter(|(i, name)| {
+                !l.places()
+                    .iter()
+                    .any(|at| matches!(at, Place::Column(c) if *c == name.as_str()))
+                    && (0..l.len()).any(|r| {
+                        l.fields(r)
+                            .is_some_and(|f| f.get(*i).is_some_and(|c| !c.is_empty()))
+                    })
+                    && (0..l.len()).all(|r| {
+                        l.fields(r)
+                            .and_then(|f| f.get(*i).copied())
+                            .is_none_or(|c| EMPTY_MARKS.contains(&c) || mapped(c))
+                    })
+            })
+            .map(|(_, name)| name.as_str())
+            .collect()
+    });
+    let words: Vec<usize> = (0..4)
+        .filter(|n| {
+            l.columns().is_none()
+                && !l.places().contains(&Place::Word(*n))
+                && !l.is_empty()
+                && (0..l.len()).all(|r| {
+                    l.fields(r)
+                        .and_then(|f| f.first().and_then(|line| line.split_whitespace().nth(*n)))
+                        .is_some_and(|w| EMPTY_MARKS.contains(&w) || mapped(w))
+                })
+        })
+        .collect();
+    (columns, words)
 }

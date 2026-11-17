@@ -142,3 +142,41 @@ fn a_listing_total_is_the_pagers_count() {
     }
     assert!(longer > 0, "no paged answer has two rows");
 }
+
+/// What a renderer writes in a place cell that holds no address: nothing,
+/// or `-`.
+const EMPTY_MARKS: [&str; 2] = ["", "-"];
+
+/// How a renderer writes bytes no section maps, by their file offset
+/// (`off=0x2bc00`), which is no address to go to.
+const OFF: &str = "off=";
+
+/// Every cell of a place an answer states is an address inside a section
+/// the program maps, or an empty mark, or bytes no section maps; and some
+/// stated cell read is an address.
+#[test]
+fn every_stated_place_is_an_address_the_program_maps() {
+    let mut addresses = 0;
+    for (p, a) in programs() {
+        for uri in uris(&p) {
+            let Ok(l) = listed(&p, &a, &uri) else {
+                continue;
+            };
+            for row in 0..l.len() {
+                for &at in l.places() {
+                    if let Some(va) = l.place(row, at) {
+                        assert!(p.section_at(va).is_some(), "{uri} row {row}: {va:#x}");
+                        addresses += 1;
+                        continue;
+                    }
+                    let cell = l.cell(row, at).unwrap_or_default();
+                    assert!(
+                        EMPTY_MARKS.contains(&cell) || cell.starts_with(OFF),
+                        "{uri} row {row} {at:?}: {cell:?}"
+                    );
+                }
+            }
+        }
+    }
+    assert!(addresses > 0, "no stated place holds an address");
+}

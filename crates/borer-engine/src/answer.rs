@@ -25,12 +25,13 @@ use crate::program::{Feature, Program};
 use crate::table::Window;
 use Feature::{Decompile, Disasm, Discover, Emulate};
 use Need::{Best, Code, File};
+use Place::{Column, Word};
 use Takes::{Argument, Either, Nothing};
 
 pub mod catalog;
 mod listing;
 
-pub use listing::Listing;
+pub use listing::{Listing, Place};
 
 /// The refusal of an `about` given no name, the resource's and the CLI's.
 pub const ABOUT_NEEDS_A_NAME: &str = "about needs a name: an attribute, a class, or a function";
@@ -348,6 +349,9 @@ struct Answer {
     need: Need,
     /// Who pages it.
     paged: Paged,
+    /// Where its rows hold addresses ([`Listing::place`]); none for an
+    /// answer with no address cell.
+    places: &'static [Place],
     /// The renderer.
     answer: Answerer,
     /// Refuses an argument that does not read before anything is read of
@@ -394,13 +398,21 @@ type Check = fn(&str) -> Option<String>;
 /// * `name` - The resource's name.
 /// * `takes` - Whether it takes an argument.
 /// * `need` - What it reads of the program.
+/// * `places` - Where its rows hold addresses.
 /// * `answer` - The renderer.
-const fn rows(name: &'static str, takes: Takes, need: Need, answer: Answerer) -> Answer {
+const fn rows(
+    name: &'static str,
+    takes: Takes,
+    need: Need,
+    places: &'static [Place],
+    answer: Answerer,
+) -> Answer {
     Answer {
         name,
         takes,
         need,
         paged: Paged::Rows,
+        places,
         answer,
         check: None,
         need_for: None,
@@ -414,13 +426,21 @@ const fn rows(name: &'static str, takes: Takes, need: Need, answer: Answerer) ->
 /// * `name` - The resource's name.
 /// * `takes` - Whether it takes an argument.
 /// * `need` - What it reads of the program.
+/// * `places` - Where its rows hold addresses.
 /// * `answer` - The renderer.
-const fn itself(name: &'static str, takes: Takes, need: Need, answer: Answerer) -> Answer {
+const fn itself(
+    name: &'static str,
+    takes: Takes,
+    need: Need,
+    places: &'static [Place],
+    answer: Answerer,
+) -> Answer {
     Answer {
         name,
         takes,
         need,
         paged: Paged::Itself,
+        places,
         answer,
         check: None,
         need_for: None,
@@ -429,228 +449,259 @@ const fn itself(name: &'static str, takes: Takes, need: Need, answer: Answerer) 
 
 /// Every resource the engine answers.
 const ANSWERS: &[Answer] = &[
-    rows("triage", Nothing, Best(Decompile), |q| {
+    rows("triage", Nothing, Best(Decompile), &[], |q| {
         Ok(if q.p.refuses(Decompile).is_some() {
             render::file_triage_tsv(q.p)
         } else {
             render::triage_tsv(q.p, q.a, q.o)
         })
     }),
-    rows("capabilities", Nothing, Best(Discover), |q| {
+    rows("capabilities", Nothing, Best(Discover), &[], |q| {
         let a = q.p.refuses(Discover).is_none().then_some(q.a);
         Ok(render::capability_map_tsv(q.p, a))
     }),
-    rows("hashes", Nothing, File, |q| {
+    rows("hashes", Nothing, File, &[], |q| {
         let made = || crate::hashing::hashes_tsv(q.p);
         Ok(String::clone(&file_fact(q, "file_hashes", made)))
     }),
-    rows("children", Nothing, File, |q| {
+    rows("children", Nothing, File, &[], |q| {
         let made = || crate::carve::children_tsv(q.p);
         Ok(String::clone(&file_fact(q, "file_children", made)))
     }),
-    rows("encoded", Either, File, |q| {
+    rows("encoded", Either, File, &[Word(0)], |q| {
         let made = || render::encoded_strings(q.p);
         let found = file_fact(q, "file_encoded", made);
         Ok(render::encoded_strings_tsv(&found, q.arg))
     }),
-    itself("injection", Either, File, |q| {
+    itself("injection", Either, File, &[Word(0)], |q| {
         crate::strings::injection_tsv(q.p, &q.page.spec_words(q.arg))
     }),
-    itself("clr", Either, File, clr_text).needing(clr_need),
-    rows("protection", Nothing, Code(Discover), |q| {
+    itself("clr", Either, File, &[], clr_text).needing(clr_need),
+    rows("protection", Nothing, Code(Discover), &[Word(1)], |q| {
         Ok(render::protection_tsv(q.p, q.a))
     }),
-    rows("fingerprint", Nothing, Code(Discover), |q| {
+    rows("fingerprint", Nothing, Code(Discover), &[], |q| {
         Ok(render::fingerprint_digest(q.a))
     }),
-    itself("objc", Either, Code(Discover), |q| {
+    itself("objc", Either, Code(Discover), &[Column("imp")], |q| {
         Ok(objc::objc_tsv(
             q.a,
             q.arg.trim(),
             q.page.window(WINDOW_PAGE),
         ))
     }),
-    rows("sig", Argument, Code(Discover), |q| {
+    rows("sig", Argument, Code(Discover), &[], |q| {
         let va = resolve_suggesting(q.p, q.a, q.o, q.arg)?;
         render::signature_tsv(q.p, q.a, q.o, va)
     }),
-    rows("yara", Argument, Code(Discover), yara_text),
-    rows("names", Argument, Code(Discover), |q| {
+    rows("yara", Argument, Code(Discover), &[], yara_text),
+    rows("names", Argument, Code(Discover), &[], |q| {
         Ok(render::names_export(q.p, q.a, q.o, tool(q.arg)?))
     })
     .checked(|a| tool(a).err()),
-    rows("addr", Argument, Code(Discover), |q| {
+    rows("addr", Argument, Code(Discover), &[], |q| {
         crate::fileinfo::locate(q.p, Some(q.a), q.o, q.arg)
     }),
-    rows("shape", Argument, Code(Discover), |q| {
+    rows("shape", Argument, Code(Discover), &[Column("entry")], |q| {
         render::shape_siblings_tsv(q.p, q.a, q.o, entry(q, q.arg)?, SLOT_PAGE)
             .ok_or_else(|| format!("no function at {}", q.arg))
     }),
-    rows("patch", Argument, Code(Disasm), |q| {
+    rows("patch", Argument, Code(Disasm), &[], |q| {
         crate::patch::plan_tsv(q.p, q.a, q.o, q.arg)
     }),
-    rows("emulate", Argument, Code(Emulate), |q| {
+    rows("emulate", Argument, Code(Emulate), &[], |q| {
         render::emulate_tsv(q.p, q.a, q.o, q.arg)
     }),
-    rows("oracle", Argument, Code(Emulate), |q| {
+    rows("oracle", Argument, Code(Emulate), &[], |q| {
         render::oracle_tsv(q.p, q.a, q.o, q.arg)
     }),
-    rows("run", Argument, Code(Emulate), |q| {
+    rows("run", Argument, Code(Emulate), &[], |q| {
         render::run_tsv(q.p, q.a, q.o, q.arg)
     }),
-    rows("diverge", Argument, Code(Emulate), |q| {
+    rows("diverge", Argument, Code(Emulate), &[], |q| {
         render::run_diff_tsv(q.p, q.a, q.o, q.arg)
     }),
-    rows("vectors", Argument, Code(Emulate), |q| {
+    rows("vectors", Argument, Code(Emulate), &[], |q| {
         render::vectors_tsv(q.p, q.a, q.o, q.arg)
     }),
-    rows("blame", Argument, Code(Emulate), |q| {
+    rows("blame", Argument, Code(Emulate), &[], |q| {
         render::blame_tsv(q.p, q.a, q.o, q.arg)
     }),
-    rows("certify", Argument, Code(Emulate), |q| {
-        render::certify_tsv(q.p, q.a, q.o, q.arg)
-    }),
-    rows("solve", Argument, Code(Emulate), |q| {
+    rows(
+        "certify",
+        Argument,
+        Code(Emulate),
+        &[Column("entry")],
+        |q| render::certify_tsv(q.p, q.a, q.o, q.arg),
+    ),
+    rows("solve", Argument, Code(Emulate), &[], |q| {
         render::solve_tsv(q.p, q.a, q.o, q.arg)
     }),
-    rows("devirt", Argument, Code(Emulate), |q| {
+    rows("devirt", Argument, Code(Emulate), &[], |q| {
         render::devirtualize_tsv(q.p, q.a, q.o, q.arg)
     }),
-    rows("unpack", Argument, Code(Emulate), |q| {
+    rows("unpack", Argument, Code(Emulate), &[], |q| {
         render::unpack_tsv(q.p, q.a, q.o, q.arg)
     }),
-    rows("hidden", Either, Code(Emulate), |q| {
+    rows("hidden", Either, Code(Emulate), &[], |q| {
         Ok(render::hidden_strings_tsv(q.p, q.a, q.o, q.arg))
     }),
-    itself("decoded", Either, Code(Emulate), |q| {
+    itself("decoded", Either, Code(Emulate), &[], |q| {
         render::decoded_tsv(q.p, q.a, q.o, &q.page.spec_words(q.arg))
     }),
-    rows("enums", Nothing, Code(Decompile), |q| Ok(enums_text(q))),
-    rows("dynimports", Nothing, Code(Decompile), |q| {
+    rows("enums", Nothing, Code(Decompile), &[], |q| {
+        Ok(enums_text(q))
+    }),
+    rows("dynimports", Nothing, Code(Decompile), &[], |q| {
         Ok(render::dynamic_imports_tsv(q.p, q.a, q.o))
     }),
-    rows("checks", Nothing, Code(Decompile), |q| {
+    rows("checks", Nothing, Code(Decompile), &[], |q| {
         Ok(render::license_checks_tsv(q.p, q.a, q.o))
     }),
-    rows("antianalysis", Nothing, Code(Decompile), |q| {
+    rows("antianalysis", Nothing, Code(Decompile), &[], |q| {
         Ok(render::anti_analysis_tsv(q.p, q.a, q.o))
     }),
-    rows("qt", Nothing, Code(Decompile), |q| Ok(render::qt_tsv(q.a))),
-    itself("iocs", Either, Code(Decompile), |q| {
+    rows("qt", Nothing, Code(Decompile), &[], |q| {
+        Ok(render::qt_tsv(q.a))
+    }),
+    itself("iocs", Either, Code(Decompile), &[Word(3)], |q| {
         render::iocs_tsv(q.p, q.a, q.o, &q.page.spec_words(q.arg))
     }),
-    itself("calls", Argument, Code(Decompile), |q| {
+    itself("calls", Argument, Code(Decompile), &[Word(0)], |q| {
         render::calls_tsv(q.p, q.a, q.o, &q.page.spec_words(q.arg))
     }),
-    rows("stackstrings", Either, Code(Decompile), |q| {
+    rows("stackstrings", Either, Code(Decompile), &[], |q| {
         Ok(render::stack_strings_tsv(q.p, q.a, q.o, q.arg))
     }),
-    rows("taint", Argument, Code(Decompile), |q| {
+    rows("taint", Argument, Code(Decompile), &[], |q| {
         render::taint_tsv(q.p, q.a, q.o, q.arg)
     }),
-    rows("layout", Argument, Code(Decompile), layout_text),
-    rows("why", Argument, Code(Decompile), |q| {
+    rows("layout", Argument, Code(Decompile), &[], layout_text),
+    rows("why", Argument, Code(Decompile), &[], |q| {
         render::why_tsv(q.p, q.a, q.o, q.arg)
     }),
-    rows("partial", Argument, Code(Decompile), |q| {
+    rows("partial", Argument, Code(Decompile), &[], |q| {
         render::partial_tsv(q.p, q.a, q.o, q.arg)
     }),
-    rows("flat", Either, Code(Decompile), |q| {
+    rows("flat", Either, Code(Decompile), &[], |q| {
         render::flattening_tsv(q.p, q.a, q.o, q.arg)
     }),
-    rows("vm", Either, Code(Decompile), |q| {
+    rows("vm", Either, Code(Decompile), &[], |q| {
         render::vm_dispatch_tsv(q.p, q.a, q.o, q.arg)
     }),
-    rows("asserts", Either, Code(Decompile), |q| {
+    rows("asserts", Either, Code(Decompile), &[], |q| {
         Ok(render::asserted_fields_tsv(q.p, q.a, q.o, q.arg))
     }),
-    rows("sources", Either, Code(Decompile), |q| {
+    rows("sources", Either, Code(Decompile), &[], |q| {
         Ok(render::source_tree_tsv(q.p, q.a, q.arg))
     }),
-    rows("vocab", Either, Code(Decompile), |q| {
+    rows("vocab", Either, Code(Decompile), &[], |q| {
         Ok(render::source_vocabulary_tsv(q.p, q.a, q.o, q.arg))
     }),
-    rows("classes", Either, Code(Decompile), |q| {
-        Ok(render::class_ids_tsv(q.a, q.arg))
-    }),
-    rows("singletons", Either, Code(Decompile), |q| {
-        Ok(render::singletons_tsv(q.a, q.o, q.arg))
-    }),
-    rows("fields", Argument, Code(Decompile), |q| {
+    rows(
+        "classes",
+        Either,
+        Code(Decompile),
+        &[Column("first")],
+        |q| Ok(render::class_ids_tsv(q.a, q.arg)),
+    ),
+    rows(
+        "singletons",
+        Either,
+        Code(Decompile),
+        &[Column("instance")],
+        |q| Ok(render::singletons_tsv(q.a, q.o, q.arg)),
+    ),
+    rows("fields", Argument, Code(Decompile), &[], |q| {
         classes::fields_tsv(q.p, q.a, q.o, entry(q, q.arg)?)
             .ok_or_else(|| format!("{} did not decompile", q.arg))
     }),
-    itself("fieldrefs", Argument, Code(Decompile), fieldrefs_text)
-        .checked(|a| field_offset(a).err()),
-    rows("vslot", Argument, Code(Decompile), |q| {
+    itself(
+        "fieldrefs",
+        Argument,
+        Code(Decompile),
+        &[Column("va")],
+        fieldrefs_text,
+    )
+    .checked(|a| field_offset(a).err()),
+    rows("vslot", Argument, Code(Decompile), &[], |q| {
         let SlotSpec { slot, filter } = SlotSpec::parse(q.arg)?;
         Ok(vtables::slot_constants_tsv(
             q.p, q.a, slot, filter, SLOT_PAGE,
         ))
     })
     .checked(slot_check),
-    rows("exportpack", Argument, Code(Decompile), |q| {
+    rows("exportpack", Argument, Code(Decompile), &[], |q| {
         let (name, all) = pack_spec(q.arg)?;
         Ok(sigs::export_pack(q.p, q.a, q.o, name, all))
     })
     .checked(|a| pack_spec(a).err()),
-    rows("scenario", Argument, Code(Decompile), scenario_text).checked(|a| scenario_spec(a).err()),
-    rows("scenarios", Argument, Code(Decompile), scenarios_text)
+    rows("scenario", Argument, Code(Decompile), &[], scenario_text)
+        .checked(|a| scenario_spec(a).err()),
+    rows("scenarios", Argument, Code(Decompile), &[], scenarios_text)
         .checked(|a| scenarios_spec(a).err()),
-    rows("schema", Argument, Code(Decompile), schema_text),
-    rows("encode", Argument, Code(Decompile), encode_text),
-    rows("schemas", Argument, Code(Decompile), |q| {
+    rows("schema", Argument, Code(Decompile), &[], schema_text),
+    rows("encode", Argument, Code(Decompile), &[], encode_text),
+    rows("schemas", Argument, Code(Decompile), &[], |q| {
         slotted(q, schema::schemas_tsv)
     })
     .checked(slot_check),
-    rows("encodes", Argument, Code(Decompile), |q| {
+    rows("encodes", Argument, Code(Decompile), &[], |q| {
         slotted(q, encode::encodings_tsv)
     })
     .checked(slot_check),
-    rows("senders", Argument, Code(Decompile), |q| {
+    rows("senders", Argument, Code(Decompile), &[], |q| {
         slotted(q, senders::senders_tsv)
     })
     .checked(slot_check),
-    rows("protocol", Argument, Code(Decompile), |q| {
+    rows("protocol", Argument, Code(Decompile), &[], |q| {
         slotted(q, protocol::protocol_tsv)
     })
     .checked(slot_check),
-    rows("hooks", Argument, Code(Decompile), |q| {
+    rows("hooks", Argument, Code(Decompile), &[], |q| {
         slotted(q, protocol::hooks_tsv)
     })
     .checked(slot_check),
-    rows("dispatchers", Either, Code(Decompile), |q| {
-        Ok(capped(q, opcodes::dispatchers_tsv, SLOT_PAGE))
-    }),
-    rows("opsends", Either, Code(Decompile), |q| {
-        Ok(capped(q, opcodes::sends_tsv, SLOT_PAGE))
-    }),
-    rows("ports", Either, Code(Decompile), |q| {
+    rows(
+        "dispatchers",
+        Either,
+        Code(Decompile),
+        &[Column("address"), Column("read_at")],
+        |q| Ok(capped(q, opcodes::dispatchers_tsv, SLOT_PAGE)),
+    ),
+    rows(
+        "opsends",
+        Either,
+        Code(Decompile),
+        &[Column("address"), Column("write_at")],
+        |q| Ok(capped(q, opcodes::sends_tsv, SLOT_PAGE)),
+    ),
+    rows("ports", Either, Code(Decompile), &[], |q| {
         Ok(capped(q, ports::routes_tsv, MAP_PAGE))
     }),
-    rows("opcodes", Argument, Code(Decompile), opcodes_text),
-    itself("messages", Either, Code(Decompile), |q| {
+    rows("opcodes", Argument, Code(Decompile), &[], opcodes_text),
+    itself("messages", Either, Code(Decompile), &[], |q| {
         Ok(windowed(q, messages::catalog_tsv))
     }),
-    itself("attrs", Either, Code(Decompile), |q| {
+    itself("attrs", Either, Code(Decompile), &[], |q| {
         Ok(windowed(q, attributes::catalog_tsv))
     }),
-    rows("map", Either, Code(Decompile), |q| {
+    rows("map", Either, Code(Decompile), &[], |q| {
         Ok(map::map_tsv(q.a, q.o, q.arg.trim(), MAP_PAGE))
     }),
-    rows("about", Argument, Code(Decompile), |q| {
+    rows("about", Argument, Code(Decompile), &[], |q| {
         Ok(about::about_tsv(q.p, q.a, q.o, q.arg))
     })
     .checked(|a| a.trim().is_empty().then(|| ABOUT_NEEDS_A_NAME.to_owned())),
-    rows("function", Argument, Code(Discover), |q| {
+    rows("function", Argument, Code(Discover), &[], |q| {
         let entry = entry(q, q.arg)?;
         render::function_summary(q.p, q.a, q.o, entry)
             .ok_or_else(|| format!("no function at {entry:#x}"))
     }),
-    rows("disasm", Argument, Best(Discover), |q| {
+    rows("disasm", Argument, Best(Discover), &[], |q| {
         disasm_function(q.p, q.a, q.o, q.arg, FUNCTION_INSTRS_DEFAULT, false)
     }),
-    rows("decompile", Argument, Code(Decompile), |q| {
+    rows("decompile", Argument, Code(Decompile), &[], |q| {
         let va = address(q.p, q.arg, || (q.a, q.o))?;
         let (grown, entry) = match recovered(q.p, q.a, va) {
             Some(found) => found,
@@ -661,7 +712,7 @@ const ANSWERS: &[Answer] = &[
             .ok_or_else(|| format!("decompilation failed at {entry:#x}"))?;
         Ok(decompile::window(&text, None, None, None))
     }),
-    rows("annotations", Nothing, File, |q| Ok(annotations(q.o))),
+    rows("annotations", Nothing, File, &[], |q| Ok(annotations(q.o))),
 ];
 
 /// Instructions a whole-function listing shows when no count is asked.
@@ -848,7 +899,7 @@ pub fn read(
     uri: &str,
     page: Page<'_>,
 ) -> Option<Result<String, String>> {
-    Some(answered(program, analysis, overlay, uri, page)?.map(|(text, _)| text))
+    Some(answered(program, analysis, overlay, uri, page)?.map(|(text, _, _)| text))
 }
 
 /// Answers a resource as a listing a front end draws as a table: the text
@@ -876,15 +927,21 @@ pub fn listing(
 ) -> Result<Listing, String> {
     let asked = Suffixed::read(uri)?;
     let again = asked.again();
-    let (text, total) = answered(program, analysis, overlay, asked.core, asked.page(&again))
-        .unwrap_or_else(|| {
-            Err(format!(
-                "the engine does not answer {}",
-                crate::text::one_line(asked.core)
-            ))
-        })?;
-    Ok(Listing::read(text, total))
+    let (text, total, places) =
+        answered(program, analysis, overlay, asked.core, asked.page(&again)).unwrap_or_else(
+            || {
+                Err(format!(
+                    "the engine does not answer {}",
+                    crate::text::one_line(asked.core)
+                ))
+            },
+        )?;
+    Ok(Listing::read(text, total, places))
 }
+
+/// An answer's text, the rows the engine's pager counted when it paged it
+/// (`None` when it did not), and where its rows hold addresses.
+type Answered = (String, Option<usize>, &'static [Place]);
 
 /// Answers a resource as [`read`] does, with the rows the engine's pager
 /// counted when it paged the answer ([`crate::table::page_counted`]).
@@ -899,15 +956,15 @@ pub fn listing(
 ///
 /// # Returns
 ///
-/// The text and the count, `None` for a count when the pager did not page
-/// it; refused and unanswered as [`read`].
+/// The text, the count, `None` when the pager did not page it, and where
+/// the answer's rows hold addresses; refused and unanswered as [`read`].
 fn answered(
     program: &Program,
     analysis: Option<&Analysis>,
     overlay: &Overlay,
     uri: &str,
     page: Page<'_>,
-) -> Option<Result<(String, Option<usize>), String>> {
+) -> Option<Result<Answered, String>> {
     let (name, arg) = split(uri)?;
     let found = find(name, arg.is_some())?;
     let arg = arg.unwrap_or_default();
@@ -952,9 +1009,9 @@ fn answered(
                 page.limit.map_or(usize::MAX, NonZeroUsize::get),
                 page.again,
             );
-            (text, Some(total))
+            (text, Some(total), found.places)
         }
-        Paged::Rows | Paged::Itself => (text, None),
+        Paged::Rows | Paged::Itself => (text, None, found.places),
     }))
 }
 
