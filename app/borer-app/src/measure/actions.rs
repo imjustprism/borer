@@ -160,7 +160,8 @@ pub(super) struct Prep {
     bench: Bench,
     /// The binary, analyzed.
     pub(super) loaded: Arc<LoadedBinary>,
-    /// The functions the actions run on, one more than [`RUNS`] when there are so many.
+    /// The functions the actions run on, one more than [`RUNS`] when there are so many: run
+    /// `i` acts on the target after `i` and starts from `i`.
     targets: Vec<Target>,
     /// The functions the graph sweeps run on.
     largest: Vec<u64>,
@@ -224,7 +225,8 @@ fn prep_of(bench: Bench, loaded: Arc<LoadedBinary>) -> Prep {
 ///
 /// # Errors
 ///
-/// Returns an error when notepad does not load or no function of it calls another.
+/// Returns an error when notepad does not load or fewer than two of its functions call
+/// another.
 pub(super) fn prepare_actions(cancel: &Cancel) -> anyhow::Result<Prepared> {
     cancel.within(|| {
         let loaded = load_binary_blocking(
@@ -234,8 +236,8 @@ pub(super) fn prepare_actions(cancel: &Cancel) -> anyhow::Result<Prepared> {
         )?;
         let prep = prep_of(Bench::Notepad, loaded);
         anyhow::ensure!(
-            !prep.targets.is_empty(),
-            "{SYSTEM_NOTEPAD} has no function that calls another"
+            prep.targets.len() > 1,
+            "{SYSTEM_NOTEPAD} has fewer than two functions that call another"
         );
         Ok(Prepared::Actions(prep))
     })
@@ -249,15 +251,16 @@ pub(super) fn prepare_actions(cancel: &Cancel) -> anyhow::Result<Prepared> {
 ///
 /// # Errors
 ///
-/// Returns why the DLL is skipped: missing, too slow to analyze, or calling nothing.
+/// Returns why the DLL is skipped: missing, too slow to analyze, or with fewer than two
+/// functions that call another.
 fn prepare_large(cancel: &Cancel) -> Result<Prep, String> {
     let ready = load_large_dll_blocking(cancel).map_err(|err| format!("{err:#}"))?;
     if ready.loaded.path.as_path() == std::path::Path::new(SYSTEM_NOTEPAD) {
         return Err("no large DLL analyzed within the budget".to_owned());
     }
     let prep = prep_of(Bench::Large, ready.loaded);
-    if prep.targets.is_empty() {
-        return Err("no function calls another".to_owned());
+    if prep.targets.len() < 2 {
+        return Err("fewer than two functions call another".to_owned());
     }
     Ok(prep)
 }
@@ -309,20 +312,21 @@ fn key_of(c: Option<char>) -> String {
         .to_string()
 }
 
-/// Returns the steps of one run of `act` on `t`, with `next` the target after it.
+/// Returns the steps of one run of `act` on `t`, with `from` the target before it.
 ///
 /// # Arguments
 ///
 /// * `act` - The action.
+/// * `from` - The target before it, which go to starts from and back leaves; an earlier
+///   run's, so no run's setup warms a later run's target.
 /// * `t` - The target.
-/// * `next` - The target after it, which go to starts from and back leaves.
-fn moves(act: Act, t: &Target, next: &Target) -> VecDeque<Move> {
+fn moves(act: Act, from: &Target, t: &Target) -> VecDeque<Move> {
     let code = |entry| Move::Open(Place::decompile(entry));
     let mut chars = t.name.chars();
     let last = chars.next_back();
     let steps = match act {
         Act::GoTo => vec![
-            code(next.entry),
+            code(from.entry),
             Move::Dispatch(Box::new(GoTo)),
             Move::Query(t.name.clone()),
             Move::Dispatch(Box::new(menu::Confirm)),
@@ -359,15 +363,15 @@ fn moves(act: Act, t: &Target, next: &Target) -> VecDeque<Move> {
         Act::Overview => vec![code(t.entry), Move::Dispatch(Box::new(Overview))],
         Act::Back => vec![
             code(t.entry),
-            code(next.entry),
+            code(from.entry),
             Move::Dispatch(Box::new(workspace::pane::GoBack)),
         ],
     };
     std::iter::once(Move::Clear).chain(steps).collect()
 }
 
-/// Returns every run on `prep`: each action on each target, then each sweep on each of
-/// the largest functions.
+/// Returns every run on `prep`: each action on each target after the first, from the one
+/// before it, then each sweep on each of the largest functions.
 ///
 /// # Arguments
 ///
@@ -375,12 +379,13 @@ fn moves(act: Act, t: &Target, next: &Target) -> VecDeque<Move> {
 fn script(prep: &Prep) -> VecDeque<Run> {
     let mut runs = VecDeque::new();
     for act in Act::ALL {
-        for (i, t) in prep.targets.iter().take(RUNS).enumerate() {
-            let next = prep.targets.get(i.saturating_add(1)).unwrap_or(t);
-            runs.push_back(Run {
-                what: What::Act(act),
-                moves: moves(act, t, next),
-            });
+        for pair in prep.targets.windows(2).take(RUNS) {
+            if let [from, t] = pair {
+                runs.push_back(Run {
+                    what: What::Act(act),
+                    moves: moves(act, from, t),
+                });
+            }
         }
     }
     for &entry in &prep.largest {
@@ -1060,12 +1065,14 @@ mod tests {
     use gpui::{Entity, TestAppContext, VisualTestContext, WindowId};
 
     use super::{
-        Act, ActionsRun, Bench, Move, Sweep, Times, What, feed, largest, misses, pick_targets,
+        Act, ActionsRun, Bench, Move, Prep, RUNS, Sweep, Target, Times, What, feed, largest,
+        misses, pick_targets, script,
     };
     use crate::app_view::tests::{CALLER, init, sample};
     use crate::functions_panel::FunctionsPanel;
     use crate::measure::watch::{Seen, Stamp, Watch, seen};
     use crate::measure::{CliMode, Harness, Tracing, now_instant};
+    use crate::places::Place;
 
     /// Returns a hand-built row at `entry` calling `callees` functions, `size` bytes long.
     fn row(entry: u64, callees: usize, size: u64) -> FunctionRow {
@@ -1102,6 +1109,43 @@ mod tests {
         let picked = pick_targets(&loaded.initial_rows.rows, 51);
         assert_eq!(picked, pick_targets(&again.initial_rows.rows, 51));
         assert_eq!(picked.first().map(|t| t.entry), Some(CALLER));
+    }
+
+    /// No run's setup opens the target of a later run of its action, and go to never opens
+    /// its own, so each go to decompiles a function no run opened before.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a run's setup opens a target it should find cold.
+    #[test]
+    fn no_run_warms_a_later_runs_target() {
+        let targets: Vec<Target> = (0..60u64)
+            .map(|i| Target {
+                entry: 0x1000 + i,
+                name: format!("f{i}"),
+            })
+            .collect();
+        let prep = Prep {
+            bench: Bench::Notepad,
+            loaded: sample(),
+            targets: targets.clone(),
+            largest: Vec::new(),
+        };
+        let runs = script(&prep);
+        for act in Act::ALL {
+            let of_act: Vec<_> = runs.iter().filter(|r| r.what == What::Act(act)).collect();
+            assert_eq!(of_act.len(), RUNS, "{act:?}");
+            for (k, run) in of_act.iter().enumerate() {
+                let cold = if act == Act::GoTo { k + 1 } else { k + 2 };
+                for step in &run.moves {
+                    if let Move::Open(Place::Code { entry, .. } | Place::Graph { entry, .. }) = step
+                    {
+                        let warmed = targets[cold..].iter().any(|t| t.entry == *entry);
+                        assert!(!warmed, "{act:?} run {k} opens {entry:#x}");
+                    }
+                }
+            }
+        }
     }
 
     /// Opens an interactive harness window over the sample and returns it and its context.
