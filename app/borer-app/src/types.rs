@@ -1056,7 +1056,7 @@ mod tests {
 
     use super::edit::edits;
     use super::{Ask, Line, Shown, StructItem, TypeKey, Types, TypesPanel, lines};
-    use crate::app_view::tests::{CALLER, init, open, open_place, sample};
+    use crate::app_view::tests::{CALLEE, CALLER, init, open, open_place, sample};
     use crate::binary::{Binary, BinaryEvent};
     use crate::code_view::Role;
     use crate::decompile_item::TabMode;
@@ -1480,6 +1480,88 @@ mod tests {
             "{planned:?}"
         );
         assert_eq!(said, Some(want));
+    }
+
+    /// Accepting the proposal of a function that reads through its first argument is
+    /// planned by the engine, and Enter commits it: the overlay holds the struct named.
+    #[gpui::test]
+    fn accepting_a_proposal_commits_its_struct(cx: &mut TestAppContext) {
+        let (workspace, binary, loaded, cx) = loaded_with_structs(cx);
+        let item = struct_tab(&workspace, &loaded, Place::Proposal { entry: CALLEE }, cx);
+        let texts = item.read_with(cx, |item, _| item.texts());
+        assert!(!texts.is_empty(), "the callee reads through rcx");
+        item.update_in(cx, |item, window, cx| item.start(Ask::Accept, window, cx));
+        type_and_confirm(&item, "Obj", cx);
+        let said = item.read_with(cx, |item, _| item.said().cloned());
+        assert!(matches!(said, Some(Ok(_))), "{said:?}");
+        item.update_in(cx, |item, window, cx| item.confirm(window, cx));
+        cx.run_until_parked();
+        let now = binary.read_with(cx, |binary, _| binary.loaded().cloned().unwrap());
+        let obj = now.overlay.types.get("Obj");
+        assert!(matches!(obj, Some(UserType::Struct(_))), "{obj:?}");
+    }
+
+    /// Asks `ask` on line `line` of the struct tab with `text` typed, checks the engine took
+    /// the plan and commits it, returning the dry-run lines and the binary's state after.
+    fn commit(
+        item: &Entity<StructItem>,
+        binary: &Entity<Binary>,
+        (ask, line, text): (Ask, usize, &str),
+        cx: &mut VisualTestContext,
+    ) -> (Vec<String>, Arc<LoadedBinary>) {
+        item.update_in(cx, |item, window, cx| {
+            item.select(line, cx);
+            item.start(ask, window, cx);
+        });
+        if ask.takes_text() {
+            type_and_confirm(item, text, cx);
+        }
+        cx.run_until_parked();
+        let said = item.read_with(cx, |item, _| item.said().cloned());
+        let said = said.unwrap().unwrap_or_else(|why| panic!("{ask:?}: {why}"));
+        item.update_in(cx, |item, window, cx| item.confirm(window, cx));
+        cx.run_until_parked();
+        (
+            said,
+            binary.read_with(cx, |binary, _| binary.loaded().cloned().unwrap()),
+        )
+    }
+
+    /// Rename, Retype, Size and Delete each commit through the edit path, and the engine's
+    /// detail after each shows the field or size asked for.
+    #[gpui::test]
+    fn each_field_edit_commits_what_was_asked(cx: &mut TestAppContext) {
+        let (workspace, binary, loaded, cx) = loaded_with_structs(cx);
+        let item = struct_tab(&workspace, &loaded, type_place("S", TypeSource::User), cx);
+        let detail = |now: &LoadedBinary| {
+            let (p, a, o) = (&*now.program, &*now.analysis, &*now.overlay);
+            type_detail(p, a, o, "S", TypeSource::User, TypeKind::Struct).unwrap()
+        };
+        let fields = |now: &LoadedBinary| -> Vec<(u64, String, String)> {
+            let detail = detail(now);
+            let fields = detail.fields.iter();
+            fields
+                .map(|f| (f.offset, f.name.to_string(), f.ty.to_string()))
+                .collect()
+        };
+        let (said, now) = commit(&item, &binary, (Ask::Rename, 0, "x"), cx);
+        assert!(
+            said.iter().any(|l| l.contains("a u32 -> x u32")),
+            "{said:?}"
+        );
+        let (x, b) = ((0, "x".to_owned(), "u32".to_owned()), (8, "b".to_owned()));
+        assert_eq!(
+            fields(&now),
+            [x.clone(), (b.0, b.1.clone(), "u32".to_owned())]
+        );
+        let (_, now) = commit(&item, &binary, (Ask::Retype, 2, "u16"), cx);
+        let retyped = (b.0, b.1, "u16".to_owned());
+        assert_eq!(fields(&now), [x, retyped.clone()]);
+        let (_, now) = commit(&item, &binary, (Ask::Size, 0, "0x20"), cx);
+        assert_eq!(detail(&now).row.size, Some(0x20));
+        let (_, now) = commit(&item, &binary, (Ask::Delete, 0, ""), cx);
+        assert_eq!(fields(&now), [retyped]);
+        assert_eq!(detail(&now).row.size, Some(0x20));
     }
 
     /// Enter on a hole starts adding a field there, and the field planned sits at the
