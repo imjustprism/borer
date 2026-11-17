@@ -9,7 +9,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::Poll;
 
-use borer_engine::analysis::decompile::replay::{Grade, TextCheck};
+use borer_engine::analysis::decompile::replay::{
+    ANSWER_SEED, BlockCheck, Grade, TextCheck, recheck_block,
+};
 use borer_engine::analysis::decompile::text_check;
 use borer_engine::analysis::decompile::view::view;
 use borer_engine::analysis::edit::{self, Edit, Force};
@@ -981,6 +983,40 @@ pub fn marks_blocking(loaded: &LoadedBinary, code: &CodeLines, entry: Option<u64
     Marks::new(&loaded.analysis, code, entry, |at| {
         check_blocking(loaded, at)
     })
+}
+
+/// Replays block `start` of the function at `entry` from `states` states seeded as the
+/// answer's check seeds them, under the names [`check_blocking`] checks; the first states
+/// are the check's own.
+///
+/// Must be called inside [`spawn_engine`]; a raised flag stops it.
+///
+/// # Arguments
+///
+/// * `loaded` - Previously loaded binary state.
+/// * `(entry, start)` - The function and the block's start.
+/// * `states` - States to try, which the engine holds within its cap.
+///
+/// # Returns
+///
+/// The block's record, `None` when the engine cannot recheck it.
+#[must_use]
+pub fn recheck_blocking(
+    loaded: &LoadedBinary,
+    (entry, start): (u64, u64),
+    states: u32,
+) -> Option<BlockCheck> {
+    let (program, analysis) = (&loaded.program, &loaded.analysis);
+    let (answered, _) = answered_flagged(program, analysis, &loaded.overlay, entry);
+    recheck_block(
+        program,
+        analysis,
+        &answered,
+        entry,
+        start,
+        ANSWER_SEED,
+        states,
+    )
 }
 
 /// Builds one page of the linear listing of `loaded`, or says why none.

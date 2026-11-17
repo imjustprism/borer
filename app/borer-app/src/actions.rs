@@ -69,6 +69,8 @@ gpui::actions!(
         NextWrongBlock,
         /// Moves the code tab's cursor to the previous line marked wrong, going round.
         PreviousWrongBlock,
+        /// Replays the block of the code tab's cursor line from more states.
+        RecheckBlock,
         /// Shows the strings panel and focuses its filter, or moves focus back to the center
         /// pane.
         ToggleStrings,

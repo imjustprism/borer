@@ -437,6 +437,15 @@ pub const COMMANDS: &[Command] = &[
         )
     },
     Command {
+        serves: &["borer://certify"],
+        ..item(
+            "borer::RecheckBlock",
+            "Recheck Block",
+            (MenuName::Edit, 0),
+            Need::Binary,
+        )
+    },
+    Command {
         serves: &["borer://fields"],
         ..item(
             "borer::ProposeStruct",

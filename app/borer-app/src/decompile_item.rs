@@ -37,8 +37,8 @@ use workspace::searchable::SearchableItemHandle;
 use workspace::{Item, ItemNavHistory, Workspace};
 
 use crate::actions::{
-    BACK_HINT, FollowLink, Hint, NextWrongBlock, PreviousWrongBlock, ShowCheck, ShowHex,
-    ToggleListing, Xrefs,
+    BACK_HINT, FollowLink, Hint, NextWrongBlock, PreviousWrongBlock, RecheckBlock, ShowCheck,
+    ShowHex, ToggleListing, Xrefs,
 };
 use crate::binary::{Binary, BinaryEvent, Digest, Revision};
 use crate::card::{Card, Tone};
@@ -47,8 +47,10 @@ use crate::code_semantics::for_one_view;
 use crate::code_view::{ClickOutcome, CodeLines, CodePalette, Role, resolve_ref_click};
 use crate::commands;
 use crate::places::{PERMANENT, Place, open_beside, open_later};
+use crate::stored::recheck_states;
 use crate::worker::{
     Job, LoadedBinary, Referent, decompile_or_why, listing_blocking, marks_blocking,
+    recheck_blocking,
 };
 
 /// Fewest logical pixels a row of code is tall.
@@ -212,6 +214,8 @@ pub struct DecompileItem {
     hits: MarkHits,
     /// The evidence shown under a line: the line, what it says and its block in the editor.
     evidence: Option<(usize, String, CustomBlockId)>,
+    /// The background recheck of a block.
+    recheck_job: Job,
 }
 
 impl std::fmt::Debug for DecompileItem {
@@ -338,6 +342,7 @@ impl DecompileItem {
             marks_job: Job::default(),
             hits: MarkHits::default(),
             evidence: None,
+            recheck_job: Job::default(),
         };
         item.load(build, window, cx);
         item
@@ -449,6 +454,7 @@ impl DecompileItem {
                     .update(cx, |editor, _| editor.set_semantics_provider(semantics));
                 self.marks = None;
                 self.evidence = None;
+                self.recheck_job.stop();
                 self.grade_lines(code.clone(), cx);
                 self.code = Some(code);
                 self.refresh_search(window, cx);
@@ -601,6 +607,65 @@ impl DecompileItem {
                 editor.remove_blocks([block].into_iter().collect(), None, cx);
             });
         }
+    }
+
+    /// Replays the block of the cursor's line from `states` states in the background, as
+    /// the answer's check seeds them, and marks its lines and shows its evidence by the new
+    /// record; leaving the tab drops it.
+    ///
+    /// # Arguments
+    ///
+    /// * `states` - States to try, which the engine holds within its cap.
+    /// * `cx` - Item context.
+    pub fn recheck(&mut self, states: u32, cx: &mut Context<'_, Self>) {
+        let row = self.cursor(cx).map(|(row, _)| row);
+        let marks = self.marks.as_ref().zip(self.code.as_deref());
+        let Some(block @ (_, start)) = marks.zip(row).and_then(|((m, c), r)| m.block(c, r)) else {
+            self.say(
+                "This line stands for no graded block to recheck.".to_owned(),
+                cx,
+            );
+            return;
+        };
+        let loaded = self.loaded.clone();
+        let work = move || recheck_blocking(&loaded, block, states);
+        let label = format!("Rechecking {start:#x}");
+        self.recheck_job
+            .run(label, cx, work, move |item, record, cx| {
+                let Some(record) = record else {
+                    item.say(
+                        format!("The engine could not recheck block {start:#x}."),
+                        cx,
+                    );
+                    return;
+                };
+                if let Some(marks) = item.marks.as_mut() {
+                    marks.set_recheck(block, record);
+                }
+                item.paint(true, cx);
+                let shown = item.evidence.as_ref().map(|(row, _, _)| *row);
+                if let Some(row) = shown.filter(|&row| item.block_of(row) == Some(block)) {
+                    item.hide_check(cx);
+                    item.show_check(Some(row), cx);
+                }
+                cx.notify();
+            });
+    }
+
+    /// Returns the block shown line `row` stands for, `None` while the lines are graded and
+    /// for a line with no mark.
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - Zero-based shown line.
+    fn block_of(&self, row: usize) -> Option<(u64, u64)> {
+        self.marks.as_ref()?.block(self.code.as_deref()?, row)
+    }
+
+    /// Returns the grades of the shown lines, once they are in.
+    #[must_use]
+    pub const fn marks(&self) -> Option<&Marks> {
+        self.marks.as_ref()
     }
 
     /// Returns the evidence shown under a line, `None` when none is.
@@ -1277,6 +1342,7 @@ impl Item for DecompileItem {
     }
 
     fn deactivated(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.recheck_job.stop();
         self.editor
             .update(cx, |editor, cx| editor.deactivated(window, cx));
     }
@@ -1305,6 +1371,12 @@ pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
             }
         },
     );
+    commands::register(workspace, binary, |workspace, _: &RecheckBlock, _, cx| {
+        if let Some(item) = workspace.active_item_as::<DecompileItem>(cx) {
+            let states = recheck_states(cx);
+            item.update(cx, |item, cx| item.recheck(states, cx));
+        }
+    });
     commands::register(workspace, binary, |workspace, _: &NextWrongBlock, _, cx| {
         if let Some(item) = workspace.active_item_as::<DecompileItem>(cx) {
             item.update(cx, |item, cx| item.step_wrong(false, cx));

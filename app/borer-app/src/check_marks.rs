@@ -112,6 +112,8 @@ pub struct Marks {
     /// The check of each function the lines stand for, by entry; `None` inside when the
     /// function does not decompile or the image has no emulator.
     checks: BTreeMap<u64, Arc<Option<TextCheck>>>,
+    /// The records rechecks gave, which stand in for the check's.
+    rechecked: BTreeMap<LineBlock, BlockCheck>,
 }
 
 impl Marks {
@@ -144,7 +146,11 @@ impl Marks {
         for &(owner, _) in blocks.iter().flatten().flatten() {
             checks.entry(owner).or_insert_with(|| check(owner));
         }
-        Self { blocks, checks }
+        Self {
+            blocks,
+            checks,
+            rechecked: BTreeMap::new(),
+        }
     }
 
     /// Returns the block shown line `row` of `code` stands for, `None` for a line with no
@@ -160,13 +166,27 @@ impl Marks {
         *self.blocks.get(v)?.get(line)?
     }
 
-    /// Returns the check's record of `block`, `None` when the check has none.
+    /// Puts `record`, what a recheck of `block` gave, in place of the check's record of it.
+    ///
+    /// # Arguments
+    ///
+    /// * `block` - The block, with the function whose check graded it.
+    /// * `record` - The recheck's record.
+    pub fn set_recheck(&mut self, block: LineBlock, record: BlockCheck) {
+        self.rechecked.insert(block, record);
+    }
+
+    /// Returns the record of `block`: the last recheck's, else the check's; `None` when
+    /// neither has one.
     ///
     /// # Arguments
     ///
     /// * `(entry, start)` - The block, with the function whose check grades it.
     #[must_use]
     pub fn record(&self, (entry, start): LineBlock) -> Option<&BlockCheck> {
+        if let Some(record) = self.rechecked.get(&(entry, start)) {
+            return Some(record);
+        }
         let check = self.checks.get(&entry)?.as_ref().as_ref()?;
         let ix = check
             .blocks
@@ -448,7 +468,7 @@ pub(crate) mod tests {
     use super::{GRADES, Marks, glyph, grade_index};
     use crate::app_view::tests::{CALLEE, CALLER, init, loaded_of, open, sample};
     use crate::code_view::CodeLines;
-    use crate::decompile_item::tests::open_tab;
+    use crate::decompile_item::tests::{open_tab, put_cursor};
     use crate::decompile_item::{DecompileItem, Form};
     use crate::linear_item::tests::{open_linear, settle};
     use crate::worker::{
@@ -665,6 +685,39 @@ pub(crate) mod tests {
             }
         }
         assert!(shown.iter().all(|&n| n > 1), "{shown:?}");
+    }
+
+    /// A recheck from the answer's seed gives the same record twice, which stands in for the
+    /// check's: it tried the states asked for, and the evidence says it is a recheck.
+    #[gpui::test]
+    fn a_recheck_is_deterministic_and_updates_the_record(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
+        let tab = open_tab(&workspace, &sample(), (CALLER, Form::Listing), cx);
+        let row = tab.read_with(cx, |item, _| {
+            let code = item.code().unwrap();
+            (0..code.len()).find(|&r| item.marks().unwrap().block(code, r).is_some())
+        });
+        let row = row.unwrap();
+        put_cursor(&tab, (row, 0), cx);
+        let mut records = Vec::new();
+        for _ in 0..2 {
+            tab.update(cx, |item, cx| item.recheck(64, cx));
+            cx.run_until_parked();
+            records.push(tab.read_with(cx, |item, _| {
+                let (marks, code) = (item.marks().unwrap(), item.code().unwrap());
+                marks
+                    .record(marks.block(code, row).unwrap())
+                    .cloned()
+                    .unwrap()
+            }));
+        }
+        assert_eq!(records[0], records[1]);
+        assert_eq!(records[0].states(), 64, "{:?}", records[0]);
+        tab.update(cx, |item, cx| item.show_check(Some(row), cx));
+        let said = tab.read_with(cx, |item, _| item.evidence().unwrap().to_owned());
+        assert!(said.contains("rechecked from up to 64 states"), "{said}");
     }
 
     /// Next and previous wrong go round to the lines a wrong block marks, from any line, and

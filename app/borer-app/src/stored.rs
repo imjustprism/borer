@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context as _;
+use borer_engine::analysis::decompile::replay::RECHECK_MAX;
 use borer_front::places;
 use db::kvp::KeyValueStore;
 use futures::future::OptionFuture;
@@ -41,6 +42,8 @@ pub enum Key {
     Tabs,
     /// The binaries opened last, with what the engine said each is ([`crate::recent`]).
     RecentBinaries,
+    /// The states a recheck tries a block from ([`recheck_states`]).
+    RecheckStates,
 }
 
 impl Key {
@@ -51,8 +54,27 @@ impl Key {
             Self::Open => "open",
             Self::Tabs => "tabs",
             Self::RecentBinaries => "recent_binaries",
+            Self::RecheckStates => "recheck_states",
         }
     }
+}
+
+/// States a recheck tries a block from when the person's record names none.
+pub const RECHECK_STATES: u32 = 64;
+
+/// Returns the states a recheck tries a block from: the person's record under
+/// [`Key::RecheckStates`], else [`RECHECK_STATES`], held within `1..=`[`RECHECK_MAX`].
+///
+/// # Arguments
+///
+/// * `cx` - Application context reading the store.
+#[must_use]
+pub fn recheck_states(cx: &App) -> u32 {
+    let asked = match read::<Option<u32>>(Key::RecheckStates, cx) {
+        Ok(Some(states)) => states,
+        Ok(None) | Err(_) => RECHECK_STATES,
+    };
+    asked.clamp(1, RECHECK_MAX)
 }
 
 /// A code tab open at quit, which the next start opens again when its binary is still the
