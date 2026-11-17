@@ -123,7 +123,7 @@ data directory of its own.
 
 `python scripts/run/app_measure.py` runs `--measure --phase actions`: on notepad.exe, then
 on the large DLL the list scroll loads, each action 50 times on the first functions by
-address that call another (the first call token of each for xrefs), dispatched through
+address that call another (xrefs lists the references to each), dispatched through
 the path its key takes. Ack is dispatch to the first presented frame whose stamp (active
 tab and its revision, its top line, the functions panel's row and filter, the go-to
 picker, the xrefs panel's referent and rows, status line) differs, a count of running
@@ -137,7 +137,7 @@ is printed as skipped. The bars are `BARS` in `borer-app/src/measure/actions.rs`
 | --- | --- | --- | --- |
 | go to a name (confirm) | 16 ms | 50 ms | 100 ms |
 | Find Everywhere keystroke | 16 ms | 16 ms | 50 ms |
-| xrefs on a call token | 16 ms | 16 ms | 33 ms |
+| xrefs of the function | 16 ms | 16 ms | 33 ms |
 | toggle listing (warm) | 16 ms | 16 ms | 16 ms |
 | open graph (warm) | 16 ms | 50 ms | 100 ms |
 | functions filter keystroke | 16 ms | 16 ms | 50 ms |

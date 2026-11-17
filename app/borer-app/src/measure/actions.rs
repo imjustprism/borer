@@ -6,8 +6,8 @@
 //!
 //! Every run starts from a cleared window, sets its action up through the same paths and
 //! waits for it to settle, untimed; only its last step is timed. The targets are the
-//! engine's: the first functions by address that call others, and the first call token of
-//! each, never picked by time or chance. A large DLL that is missing or too slow to analyze
+//! engine's: the first functions by address that call others, never picked by time or
+//! chance. A large DLL that is missing or too slow to analyze
 //! is reported as skipped.
 
 use std::collections::{BTreeMap, VecDeque};
@@ -17,13 +17,10 @@ use std::time::{Duration, Instant};
 use borer_engine::analysis::render::FunctionRow;
 use borer_engine::cancel::Cancel;
 use borer_engine::num::as_f64;
-use borer_engine::view::Ref;
-use editor::SelectionEffects;
 use gpui::{
     Action, Context, Keystroke, Modifiers, PlatformInput, ScrollDelta, ScrollEvent, Window,
     WindowId, point, px,
 };
-use language::Point;
 use picker::Picker;
 
 use super::tree::quantiles;
@@ -33,7 +30,6 @@ use super::{
     sorted_quantiles_ms,
 };
 use crate::actions::{FocusFilter, Overview, ShowGraph, ToggleListing, Xrefs, ZoomIn, ZoomOut};
-use crate::code_view::CodeLines;
 use crate::decompile_item::Form;
 use crate::goto::{FindEverywhere, GoTo, GoToDelegate};
 use crate::graph_item::GraphItem;
@@ -68,7 +64,7 @@ pub(super) enum Act {
     GoTo,
     /// One keystroke typed into Find Everywhere.
     Find,
-    /// Xrefs (`x`) on a call token.
+    /// Xrefs (`x`) of a code tab's function, listed in the xrefs panel.
     Xrefs,
     /// Toggle a code tab to its listing, both built before.
     Listing,
@@ -200,22 +196,6 @@ pub(super) fn largest(rows: &[FunctionRow], n: usize) -> Vec<u64> {
     sized.into_iter().take(n).map(|(_, entry)| entry).collect()
 }
 
-/// Returns the shown line and byte of the first token of `code` calling a function other
-/// than `entry`.
-///
-/// # Arguments
-///
-/// * `code` - The lines a code tab shows.
-/// * `entry` - The function the tab shows.
-pub(super) fn first_call(code: &CodeLines, entry: u64) -> Option<(usize, usize)> {
-    (0..code.len()).find_map(|row| {
-        let (view, line) = code.get(row)?;
-        view.tokens(line).find_map(|(span, _, link)| {
-            matches!(link, Some(Ref::Function(to)) if *to != entry).then_some((row, span.start))
-        })
-    })
-}
-
 /// Returns `loaded` with the functions its actions and sweeps run on.
 ///
 /// # Arguments
@@ -295,8 +275,6 @@ enum Move {
     Query(String),
     /// Types one key into the focused element, once the harness's update ends.
     Key(String),
-    /// Puts the active code tab's cursor on its first call token.
-    Cursor,
     /// Runs a sweep for [`SWEEP`].
     Sweep(Sweep),
 }
@@ -355,7 +333,7 @@ fn moves(act: Act, t: &Target, next: &Target) -> VecDeque<Move> {
             Move::Query(chars.as_str().to_owned()),
             Move::Key(key_of(last)),
         ],
-        Act::Xrefs => vec![code(t.entry), Move::Cursor, Move::Dispatch(Box::new(Xrefs))],
+        Act::Xrefs => vec![code(t.entry), Move::Dispatch(Box::new(Xrefs))],
         Act::Listing => vec![
             Move::Open(Place::Code {
                 entry: t.entry,
@@ -911,8 +889,7 @@ impl Harness {
     ///
     /// # Returns
     ///
-    /// `None` when the step cannot be done: no binary, no picker, no call token, a key
-    /// that does not parse.
+    /// `None` when the step cannot be done: no binary, no picker.
     fn perform(&self, step: Move, window: &mut Window, cx: &mut Context<'_, Self>) -> Option<()> {
         match step {
             Move::Clear => self.clear(window, cx),
@@ -939,20 +916,6 @@ impl Harness {
                 };
                 window.defer(cx, move |window, cx| {
                     window.dispatch_keystroke(keystroke, cx);
-                });
-            }
-            Move::Cursor => {
-                let tab = self.item(cx)?;
-                let (row, col) = {
-                    let tab = tab.read(cx);
-                    first_call(tab.code()?, tab.entry()?)?
-                };
-                let at = Point::new(u32::try_from(row).ok()?, u32::try_from(col).ok()?);
-                let editor = tab.read(cx).editor().clone();
-                editor.update(cx, |editor, cx| {
-                    editor.change_selections(SelectionEffects::no_scroll(), window, cx, |s| {
-                        s.select_ranges([at..at]);
-                    });
                 });
             }
             Move::Sweep(_) => return None,
@@ -1097,15 +1060,12 @@ mod tests {
     use gpui::{Entity, TestAppContext, VisualTestContext, WindowId};
 
     use super::{
-        Act, ActionsRun, Bench, Move, Sweep, Times, What, feed, first_call, largest, misses,
-        pick_targets,
+        Act, ActionsRun, Bench, Move, Sweep, Times, What, feed, largest, misses, pick_targets,
     };
-    use crate::app_view::tests::{CALLEE, CALLER, init, sample};
-    use crate::code_view::CodeLines;
+    use crate::app_view::tests::{CALLER, init, sample};
     use crate::functions_panel::FunctionsPanel;
     use crate::measure::watch::{Seen, Stamp, Watch, seen};
     use crate::measure::{CliMode, Harness, Tracing, now_instant};
-    use crate::worker::decompile_blocking;
 
     /// Returns a hand-built row at `entry` calling `callees` functions, `size` bytes long.
     fn row(entry: u64, callees: usize, size: u64) -> FunctionRow {
@@ -1121,8 +1081,8 @@ mod tests {
         }
     }
 
-    /// Two runs pick the same targets: the first rows by address that call another, the
-    /// largest functions by size then address, and the first call token of a function.
+    /// Two runs pick the same targets: the first rows by address that call another, and the
+    /// largest functions by size then address.
     ///
     /// # Panics
     ///
@@ -1142,15 +1102,6 @@ mod tests {
         let picked = pick_targets(&loaded.initial_rows.rows, 51);
         assert_eq!(picked, pick_targets(&again.initial_rows.rows, 51));
         assert_eq!(picked.first().map(|t| t.entry), Some(CALLER));
-        let code = |loaded| CodeLines::new(vec![decompile_blocking(loaded, CALLER).unwrap()]);
-        let call = first_call(&code(&loaded), CALLER);
-        assert!(call.is_some());
-        assert_eq!(call, first_call(&code(&again), CALLER));
-        let (row, col) = call.unwrap();
-        let shown = code(&loaded);
-        let (view, line) = shown.get(row).unwrap();
-        let (_, _, link) = view.token_at(line, col).unwrap();
-        assert_eq!(link, Some(&borer_engine::view::Ref::Function(CALLEE)));
     }
 
     /// Opens an interactive harness window over the sample and returns it and its context.
