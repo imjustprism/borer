@@ -1088,7 +1088,7 @@ mod tests {
     }
 
     /// Returns every module of the crate but this one, by path under `src`, with its text.
-    fn sources() -> [(&'static str, &'static str); 47] {
+    fn sources() -> [(&'static str, &'static str); 48] {
         [
             ("actions.rs", include_str!("actions.rs")),
             ("app_assets.rs", include_str!("app_assets.rs")),
@@ -1118,6 +1118,7 @@ mod tests {
             ("measure/drop.rs", include_str!("measure/drop.rs")),
             ("measure/input.rs", include_str!("measure/input.rs")),
             ("measure/scroll.rs", include_str!("measure/scroll.rs")),
+            ("measure/tree.rs", include_str!("measure/tree.rs")),
             ("menus.rs", include_str!("menus.rs")),
             ("overview.rs", include_str!("overview.rs")),
             ("panels.rs", include_str!("panels.rs")),

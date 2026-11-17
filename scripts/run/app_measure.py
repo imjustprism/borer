@@ -15,6 +15,12 @@ spike:
 6. Real Win32 `SendInput` latency (`--measure --phase input`, 200 filter
    keystrokes at 20/s + 100 clicks on call tokens, bar <= 16 ms anchored at
    `SendInput` and including Windows input-queue delay).
+7. Call tree expansions (`--measure --phase tree`, nodes of `notepad.exe`'s call
+   tree opened one by one until 200 asked the engine). An expansion of a level the
+   tree kept is UI work only and holds the 16 ms input-to-paint bar at p95; one that
+   asks the engine waits for `call_children` on the background executor, engine
+   work like a decompile, so it holds its own bar, p95 <= 50 ms with virtual calls
+   off.
 
 During every measured run a background `iphlpapi` watcher polls IPv4/IPv6 TCP
 and UDP owner-PID tables (`GetExtendedTcpTable` / `GetExtendedUdpTable`) and the
@@ -1112,7 +1118,9 @@ def measure_memory_delta(exe: Path, binary: str, watcher: NetWatcher) -> dict[st
     }
 
 
-def measure_scroll_phase(exe: Path, kind: str, watcher: NetWatcher) -> dict[str, Any]:
+def measure_scroll_phase(
+    exe: Path, kind: str, watcher: NetWatcher, marker: str = "MEASURE_SCROLL"
+) -> dict[str, Any]:
     phase_id = f"scroll-{kind}"
     proc, get_stderr = _spawn_app(exe, ["--measure", "--phase", kind])
     watch_thread = watcher.watch_while(proc, phase_id)
@@ -1122,7 +1130,7 @@ def measure_scroll_phase(exe: Path, kind: str, watcher: NetWatcher) -> dict[str,
     with _proc_watchdog(proc, 400.0, phase_id):
         for line in proc.stdout:
             print(f"  [{kind}] {line.rstrip()}", flush=True)
-            if line.startswith("MEASURE_SCROLL"):
+            if line.startswith(marker):
                 kv = parse_kv_line(line)
         rc = proc.wait(timeout=400)
     watch_thread.join(timeout=2)
@@ -1456,6 +1464,9 @@ def main() -> int:
         print("==> drop of a folder with a context server in its settings...", flush=True)
         folder_drop = measure_folder_drop(exe, watcher)
         print(f"    folders={folder_drop.get('folders')}", flush=True)
+
+        print("==> call tree expansions (200 on notepad.exe)...", flush=True)
+        call_tree = measure_scroll_phase(exe, "tree", watcher, marker="MEASURE_TREE")
     finally:
         watcher.close()
         left = _remove_run_dirs(_RUN_DIRS)
@@ -1472,6 +1483,7 @@ def main() -> int:
         watcher,
     )
     report["folder_drop"] = folder_drop
+    report["call_tree"] = call_tree
 
     if args.json is not None:
         args.json.parent.mkdir(parents=True, exist_ok=True)
@@ -1491,6 +1503,18 @@ def main() -> int:
     for where in ("on_start", "on_tab"):
         if folder_drop.get(where) is not True:
             failures.append(f"the drop {where} did not reach a tab's drop handler")
+    if int(call_tree.get("samples", 0)) < 200:
+        failures.append(f"call tree timed {call_tree.get('samples')} of 200 expansions")
+    if float(call_tree.get("p95_ms", 9999.0)) > 50.0:
+        failures.append(f"call tree expand p95 {call_tree.get('p95_ms')} ms exceeds 50.0 ms bar")
+    if int(call_tree.get("kept_samples", 0)) > 0 and float(call_tree.get("kept_p95_ms")) > 16.0:
+        failures.append(
+            f"call tree kept-level expand p95 {call_tree.get('kept_p95_ms')} ms exceeds 16.0 ms bar"
+        )
+    if int(call_tree.get("ui_engine_calls", 1)) != 0:
+        failures.append(
+            f"call tree phase recorded {call_tree.get('ui_engine_calls')} UI-thread engine calls"
+        )
     if left is not None:
         failures.append(f"run data directories not removed: {left}")
     if folder_drop.get("folders") != 0:

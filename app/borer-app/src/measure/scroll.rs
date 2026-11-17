@@ -71,7 +71,9 @@ impl Harness {
         let (loaded, rows) = match &prepared {
             Prepared::List(ready, _) => (ready.loaded.clone(), ready.rows.clone()),
             Prepared::Code(corpus) => (corpus.loaded.clone(), corpus.loaded.initial_rows.clone()),
-            Prepared::Input(loaded, _) => (loaded.clone(), loaded.initial_rows.clone()),
+            Prepared::Input(loaded, _) | Prepared::Tree(loaded, _) => {
+                (loaded.clone(), loaded.initial_rows.clone())
+            }
         };
         let panel = self.docked_panel(window, cx);
         panel.update(cx, |panel, cx| panel.show(loaded, rows, window, cx));
@@ -94,6 +96,10 @@ impl Harness {
             }
             Prepared::Input(loaded, entry) => {
                 self.start_input(cancel, &loaded, entry, window, cx);
+                return;
+            }
+            Prepared::Tree(loaded, root) => {
+                self.start_tree(cancel, (loaded, root), window, cx);
                 return;
             }
         };

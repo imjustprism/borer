@@ -1,8 +1,8 @@
 //! Measurement modes over the app.
 //!
 //! A harness entity holds the app's workspace window as its only child and drives
-//! scripted scrolls, input-latency marks and the startup and memory reports from outside
-//! it.
+//! scripted scrolls, input-latency marks, call tree expansions and the startup and memory
+//! reports from outside it.
 //!
 //! The workspace carries none of this: only the measurement command-line flags build a
 //! [`Harness`], and a plain `borer-app [binary]` window has none.
@@ -10,6 +10,7 @@
 mod drop;
 mod input;
 mod scroll;
+mod tree;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
@@ -191,6 +192,8 @@ pub enum MeasurePhase {
     CodeScroll,
     /// Runs the interactive Win32 `SendInput` filter + call-click benchmark and exits.
     InputLatency,
+    /// Opens 200 nodes of notepad's call tree, timing each expand to its painted rows.
+    CallTree,
 }
 
 impl MeasurePhase {
@@ -200,6 +203,7 @@ impl MeasurePhase {
             Self::BothScrolls | Self::ListScroll => "list scroll load failed",
             Self::CodeScroll => "code scroll load failed",
             Self::InputLatency => "input latency load failed",
+            Self::CallTree => "call tree load failed",
         }
     }
 
@@ -209,6 +213,7 @@ impl MeasurePhase {
             Self::BothScrolls | Self::ListScroll => "Preparing the list scroll",
             Self::CodeScroll => "Preparing the code scroll",
             Self::InputLatency => "Preparing the input run",
+            Self::CallTree => "Preparing the call tree run",
         }
     }
 }
@@ -448,8 +453,9 @@ pub fn parse_cli_args_os(args: &[OsString]) -> anyhow::Result<CliMode> {
                     Some(v) if v.to_str() == Some("list") => MeasurePhase::ListScroll,
                     Some(v) if v.to_str() == Some("code") => MeasurePhase::CodeScroll,
                     Some(v) if v.to_str() == Some("input") => MeasurePhase::InputLatency,
+                    Some(v) if v.to_str() == Some("tree") => MeasurePhase::CallTree,
                     Some(v) => anyhow::bail!("unknown --measure --phase {}", v.display()),
-                    None => anyhow::bail!("--measure --phase requires list, code, or input"),
+                    None => anyhow::bail!("--measure --phase requires list, code, input or tree"),
                 },
                 Some(other) => {
                     anyhow::bail!("unexpected argument after --measure: {}", other.display())
@@ -698,6 +704,8 @@ enum Prepared {
     Code(CodeCorpus),
     /// Notepad, and a function with a call token near its top.
     Input(Arc<LoadedBinary>, u64),
+    /// Notepad, and the root of its call tree.
+    Tree(Arc<LoadedBinary>, u64),
 }
 
 /// The window root in measurement modes: the app's workspace window as its only child,
@@ -740,6 +748,8 @@ pub struct Harness {
     item_changed: Option<Instant>,
     /// The active decompile tab and the observer settling marks when it changes.
     watched: Option<(EntityId, Subscription)>,
+    /// The call tree phase, once its root's read is asked for.
+    tree_run: Option<tree::TreeRun>,
     /// Observers of the pane, the panel and the binary, which settle input marks and
     /// re-render the harness, so it checks its one-shot report, whenever they change.
     observers: Vec<Subscription>,
@@ -833,6 +843,7 @@ impl Harness {
             panel_changed: None,
             item_changed: None,
             watched: None,
+            tree_run: None,
             observers: observe,
         };
         if let Some(phase) = phase {
@@ -992,6 +1003,7 @@ impl Harness {
                 }
                 Box::new(move || prepare_input(&worker))
             }
+            MeasurePhase::CallTree => Box::new(move || tree::prepare_tree(&worker)),
         };
         self.prep.run_in(
             phase.label(),
