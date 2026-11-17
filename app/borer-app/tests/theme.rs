@@ -11,7 +11,7 @@
     reason = "assertions are the point of a test"
 )]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use borer_app::actions::{FollowSystemTheme, SelectTheme, ToggleTheme};
@@ -51,7 +51,7 @@ use workspace::{AppState, Workspace};
 
 mod support;
 
-use support::{boot, start};
+use support::{boot, start, use_test_data_dir};
 
 /// Slots of [`ThemeColors`] the borer theme leaves to Zed's defaults, each because the app
 /// never draws it.
@@ -104,11 +104,30 @@ fn is(color: Hsla, rgb: u32) -> bool {
     channels.iter().all(|(a, b)| (a - b).abs() < 1e-3)
 }
 
+/// Returns Zed's config directory under the tests' data directory, which it points Zed at
+/// first, so no test resolves Zed's paths before the data directory is set.
+fn config_dir() -> &'static PathBuf {
+    use_test_data_dir();
+    paths::config_dir()
+}
+
+/// Returns the settings file under the tests' data directory.
+fn settings_file() -> &'static PathBuf {
+    use_test_data_dir();
+    paths::settings_file()
+}
+
+/// Returns the themes folder under the tests' data directory.
+fn themes_dir() -> &'static PathBuf {
+    use_test_data_dir();
+    paths::themes_dir()
+}
+
 /// Starts Zed's test app state with `text` as its settings file, then configures
 /// it as the app does.
 async fn boot_with(text: Option<&str>, cx: &mut TestAppContext) -> Arc<AppState> {
     let app_state = cx.update(start);
-    let path = paths::settings_file();
+    let path = settings_file();
     let fake = app_state.fs.as_fake();
     let parent = path.parent().expect("the settings file sits in a folder");
     fake.create_dir(parent).await.expect("the folder is made");
@@ -370,9 +389,9 @@ async fn a_first_run_shows_borer_dark(cx: &mut TestAppContext) {
     cx.update(configure).expect("the app configures Zed");
     assert_eq!(shown(cx), "borer dark");
     assert_eq!(notice(cx), None);
-    let written = app_state.fs.load(paths::settings_file()).await;
+    let written = app_state.fs.load(settings_file()).await;
     assert_eq!(written.expect("the file is created").trim(), "");
-    let config = checked_metadata(paths::config_dir()).expect("the path is usable");
+    let config = checked_metadata(config_dir()).expect("the path is usable");
     assert!(config.is_some_and(|meta| meta.is_dir()));
 }
 
@@ -408,7 +427,7 @@ async fn a_toggle_keeps_the_rest_of_the_settings_file(cx: &mut TestAppContext) {
     run(&ToggleTheme, cx);
     let written = app_state
         .fs
-        .load(paths::settings_file())
+        .load(settings_file())
         .await
         .expect("the file reads");
     assert!(written.contains("// mine"), "{written}");
@@ -541,7 +560,7 @@ async fn boot_with_files(
 ) -> Arc<AppState> {
     let app_state = cx.update(start);
     let fake = app_state.fs.as_fake();
-    fake.create_dir(paths::themes_dir())
+    fake.create_dir(themes_dir())
         .await
         .expect("the themes folder is made");
     for (path, bytes) in files {
@@ -579,19 +598,19 @@ fn noticed(workspace: &Entity<Workspace>, path: &Path, cx: &mut VisualTestContex
 /// of the shown one repaints it.
 #[gpui::test]
 async fn the_themes_folder_loads_at_start_and_on_change(cx: &mut TestAppContext) {
-    let mine = paths::themes_dir().join("mine.json");
+    let mine = themes_dir().join("mine.json");
     let settings = r#"{"theme": {"mode": "dark", "dark": "mine dark", "light": "borer light"}}"#;
     let files = [
         (
             mine.as_path(),
             Some(family("mine", "mine dark", "dark", "{}")),
         ),
-        (paths::settings_file().as_path(), Some(settings.into())),
+        (settings_file().as_path(), Some(settings.into())),
     ];
     let app_state = boot_with_files(&files, cx).await;
     assert_eq!(shown(cx), "mine dark");
     let fake = app_state.fs.as_fake();
-    let later = paths::themes_dir().join("later.json");
+    let later = themes_dir().join("later.json");
     fake.insert_file(&later, family("later", "later light", "light", "{}"))
         .await;
     cx.run_until_parked();
@@ -613,7 +632,7 @@ async fn the_themes_folder_loads_at_start_and_on_change(cx: &mut TestAppContext)
 /// themes load, and fixing the file takes its notification back.
 #[gpui::test]
 async fn a_bad_theme_file_is_a_notification_not_a_stop(cx: &mut TestAppContext) {
-    let dir = paths::themes_dir();
+    let dir = themes_dir();
     let (bad, huge, good) = (
         dir.join("bad.json"),
         dir.join("huge.json"),
@@ -650,7 +669,7 @@ async fn a_bad_theme_file_is_a_notification_not_a_stop(cx: &mut TestAppContext) 
 /// folder, and none of its themes is read.
 #[gpui::test]
 async fn a_crowded_themes_folder_reads_no_theme(cx: &mut TestAppContext) {
-    let dir = paths::themes_dir();
+    let dir = themes_dir();
     let names: Vec<_> = (0..=MAX_THEME_ENTRIES)
         .map(|i| dir.join(format!("t{i}.json")))
         .collect();
@@ -675,7 +694,7 @@ async fn a_crowded_themes_folder_reads_no_theme(cx: &mut TestAppContext) {
 /// themes.
 #[gpui::test]
 async fn a_theme_name_has_one_file_and_leaves_with_it(cx: &mut TestAppContext) {
-    let dir = paths::themes_dir();
+    let dir = themes_dir();
     let (first, twin, own) = (dir.join("a.json"), dir.join("b.json"), dir.join("c.json"));
     let style = r##"{"background": "#102030"}"##;
     let files = [
@@ -733,7 +752,7 @@ fn pick(workspace: &Entity<Workspace>, query: &str, cx: &mut VisualTestContext) 
 /// puts back the theme shown before it.
 #[gpui::test]
 async fn the_theme_picker_previews_keeps_and_puts_back(cx: &mut TestAppContext) {
-    let mine = paths::themes_dir().join("mine.json");
+    let mine = themes_dir().join("mine.json");
     let files = [(
         mine.as_path(),
         Some(family("mine", "mine dark", "dark", "{}")),
@@ -769,7 +788,7 @@ async fn the_theme_picker_previews_keeps_and_puts_back(cx: &mut TestAppContext) 
 
 /// Returns the names in the themes folder, sorted.
 async fn themes_folder(app_state: &AppState) -> Vec<String> {
-    let entries = app_state.fs.read_dir(paths::themes_dir()).await;
+    let entries = app_state.fs.read_dir(themes_dir()).await;
     let entries: Vec<_> = entries.expect("the folder lists").collect().await;
     let mut names: Vec<String> = entries
         .into_iter()
@@ -816,7 +835,7 @@ async fn an_import_copies_a_theme_file_and_refuses_the_rest(cx: &mut TestAppCont
     let dest = import(fs.as_ref(), candidate, &mut cx.to_async())
         .await
         .expect("imports");
-    assert_eq!(dest, paths::themes_dir().join("pretty.json"));
+    assert_eq!(dest, themes_dir().join("pretty.json"));
     assert_eq!(fs.load_bytes(&dest).await.expect("copied"), bytes);
     assert_eq!(fs.load_bytes(&source).await.expect("kept"), bytes);
     assert!(registry.get("pretty dark").is_ok());
@@ -927,7 +946,7 @@ async fn a_dropped_theme_file_opens_its_report(cx: &mut TestAppContext) {
     assert_eq!(shown(cx), "dropped dark");
     let copied = app_state
         .fs
-        .load_bytes(&paths::themes_dir().join("dropped.json"))
+        .load_bytes(&themes_dir().join("dropped.json"))
         .await;
     assert_eq!(
         copied.expect("copied"),

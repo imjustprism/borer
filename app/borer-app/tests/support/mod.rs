@@ -9,7 +9,7 @@ use workspace::AppState;
 
 /// Points Zed's paths at one data directory of the tests, once per process, so no test
 /// resolves the person's own Zed settings.
-fn use_test_data_dir() {
+pub(crate) fn use_test_data_dir() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         set_data_dir(&std::env::temp_dir().join("borer-app-tests")).expect("the data dir");
