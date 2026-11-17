@@ -608,7 +608,7 @@ impl<K: RowKind> RowsPanel<K> {
     pub fn set_target(&mut self, target: K::Target, cx: &mut Context<'_, Self>) {
         self.target = target;
         self.limit = PAGE_ROWS;
-        self.refresh(cx);
+        self.refresh(true, cx);
     }
 
     /// Keeps only the rows `text` filters, as typing it into the filter does.
@@ -777,7 +777,7 @@ impl<K: RowKind> RowsPanel<K> {
                         self.filter
                             .update(cx, |editor, cx| editor.set_text("", window, cx));
                     }
-                    self.refresh(cx);
+                    self.refresh(true, cx);
                 }
                 if K::PREVIEWS {
                     self.open_row(0, TabMode::Preview, window, cx);
@@ -793,8 +793,9 @@ impl<K: RowKind> RowsPanel<K> {
         }
     }
 
-    /// Asks again under the filter over `loaded`, the state an edit or a project left,
-    /// keeping the highlighted row's place.
+    /// Asks again under the filter over `loaded`, the state an edit or a project left, for
+    /// at least as many rows as the table shows, keeping the highlighted row's place; a
+    /// closed panel only marks its rows stale.
     ///
     /// # Arguments
     ///
@@ -802,7 +803,9 @@ impl<K: RowKind> RowsPanel<K> {
     /// * `cx` - Panel context.
     fn revise(&mut self, loaded: Arc<LoadedBinary>, cx: &mut Context<'_, Self>) {
         self.shown = Some(loaded);
-        self.request(false, cx);
+        let held = self.rows().map_or(0, |rows| rows.rows().len());
+        self.limit = self.limit.max(held);
+        self.refresh(false, cx);
     }
 
     /// Asks the engine for the rows the panel's state shows now when the panel is open,
@@ -810,10 +813,11 @@ impl<K: RowKind> RowsPanel<K> {
     ///
     /// # Arguments
     ///
+    /// * `reset` - Whether the highlight goes back to the first row when the answer comes.
     /// * `cx` - Panel context.
-    fn refresh(&mut self, cx: &mut Context<'_, Self>) {
+    fn refresh(&mut self, reset: bool, cx: &mut Context<'_, Self>) {
         if self.active {
-            self.request(true, cx);
+            self.request(reset, cx);
         } else {
             self.filter_job.stop();
             self.stale = true;
@@ -1771,5 +1775,101 @@ pub(crate) mod tests {
         cx.run_until_parked();
         let target = xrefs.read_with(cx, |panel, _| *panel.target());
         assert_eq!(target, Some(Referent::Address(0x1000)));
+    }
+
+    /// A kind whose load builds [`MANY`] rows, past one page, and whose engine answers as
+    /// many as it is asked for.
+    #[derive(Debug)]
+    enum Many {}
+
+    /// Rows the many kind's load builds.
+    const MANY: usize = PAGE_ROWS + PAGE_ROWS / 2;
+
+    /// The many kind's panel row.
+    const MANY_SPEC: PanelSpec = PanelSpec {
+        key: "Many",
+        title: "Many",
+        hooks: crate::rail::panel::<RowsPanel<Many>>(),
+        add: add::<Many>,
+        remove: crate::panels::remove::<RowsPanel<Many>>,
+        focus: focus::<Many>,
+        ..PROBE
+    };
+
+    impl RowKind for Many {
+        type Row = u64;
+        type Shown = Page<u64>;
+        type Target = ();
+        const PANEL: &'static PanelSpec = &MANY_SPEC;
+        const PLACEHOLDER: &'static str = "";
+        const TABLE: &'static str = "many table";
+        const FILTERING: &'static str = "Counting";
+
+        fn columns(_columns: Columns) -> &'static [Column<u64>] {
+            PROBE_COLUMNS
+        }
+
+        fn first(loaded: &LoadedBinary) -> Option<Arc<Page<u64>>> {
+            Some(Arc::new(Self::fetch(loaded, &(), "", MANY)))
+        }
+
+        fn fetch(_loaded: &LoadedBinary, (): &(), _filter: &str, limit: usize) -> Page<u64> {
+            let rows: Vec<u64> = (0..).take(limit.min(MANY)).collect();
+            Page {
+                header: "many".into(),
+                total: MANY,
+                rows,
+            }
+        }
+
+        fn nothing(shown: &Page<u64>, _query: &SharedString) -> Empty {
+            Empty::Nothing(shown.header.clone())
+        }
+
+        fn place(row: &u64) -> Option<Place> {
+            Some(Place::decompile(*row))
+        }
+    }
+
+    /// After an edit an open panel still holds every row its load built, past one page; a
+    /// closed one asks the engine nothing until it opens.
+    #[gpui::test]
+    fn an_edit_keeps_the_rows_shown_and_spares_a_closed_panel(cx: &mut TestAppContext) {
+        use crate::binary::Revision as _;
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let (workspace, binary) = (app.workspace.clone(), app.binary);
+        workspace.update_in(cx, |workspace, window, cx| {
+            add::<Many>(workspace, &binary, DockPosition::Left, window, cx);
+        });
+        let panel = panel_of::<Many>(&workspace, &sample(), cx);
+        let held = |cx: &mut VisualTestContext| {
+            panel.read_with(cx, |panel, _| panel.rows().map(|rows| rows.rows.len()))
+        };
+        assert_eq!(held(cx), Some(MANY));
+        let edit = |name: &str, cx: &mut VisualTestContext| {
+            let rename = borer_engine::analysis::edit::Edit::Name {
+                at: 0x1000,
+                name: name.to_owned(),
+            };
+            binary.update(cx, |binary, cx| binary.edit(vec![rename], cx));
+            cx.run_until_parked();
+            binary.read_with(cx, |binary, _| binary.loaded().map(|l| l.fingerprint))
+        };
+        let now = edit("first", cx);
+        assert_eq!(panel.read_with(cx, |panel, _| panel.revision()), now);
+        assert_eq!(held(cx), Some(MANY));
+        let set_active = |active, cx: &mut VisualTestContext| {
+            use workspace::dock::Panel as _;
+            panel.update_in(cx, |panel, window, cx| panel.set_active(active, window, cx));
+            cx.run_until_parked();
+        };
+        set_active(false, cx);
+        let later = edit("second", cx);
+        assert_ne!(later, now);
+        assert_eq!(panel.read_with(cx, |panel, _| panel.revision()), now);
+        set_active(true, cx);
+        assert_eq!(panel.read_with(cx, |panel, _| panel.revision()), later);
+        assert_eq!(held(cx), Some(MANY));
     }
 }
