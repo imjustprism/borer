@@ -1,4 +1,4 @@
-//! The theme contract, held by borer's own themes and checked on any theme a person brings.
+//! The theme contract, held by borer's own themes and checked on any theme a person imports.
 //!
 //! Text roles read on the editor and on a panel, the check grades rise with evidence and
 //! stay apart under color-vision deficiency, and every `borer.*` key is set.
@@ -355,18 +355,24 @@ fn borer_keys() -> &'static [String] {
     })
 }
 
-/// Returns a [`Failure::Unset`] for `role`, with the key the app paints it with instead:
-/// the next of its [`Role::keys`], if it is the first of them.
+/// Returns a [`Failure::Unset`] for `role`, with the key the app paints it with instead.
+///
+/// That is `comment` for zero bytes, as the hex tab does, the muted text color for a grade,
+/// as the status bar does, else the next of its [`Role::keys`], if it is the first of them.
 ///
 /// # Arguments
 ///
 /// * `role` - The unset key.
 fn unset(role: &str) -> Failure {
-    let fallback = Role::ALL
-        .iter()
-        .map(|r| r.keys())
-        .find(|keys| keys.first() == Some(&role))
-        .and_then(|keys| keys.get(1).copied());
+    let fallback = match role {
+        ZERO_BYTE => Some("comment"),
+        grade if GRADES.contains(&grade) => Some("text.muted"),
+        _ => Role::ALL
+            .iter()
+            .map(|r| r.keys())
+            .find(|keys| keys.first() == Some(&role))
+            .and_then(|keys| keys.get(1).copied()),
+    };
     Failure::Unset {
         role: role.to_owned(),
         fallback,

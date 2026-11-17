@@ -349,6 +349,24 @@ fn an_unset_borer_key_names_its_fallback() {
     );
 }
 
+/// Unset zero bytes and an unset grade name the colors the hex tab and the status bar paint
+/// them with: `comment` and the muted text color.
+#[test]
+fn unset_zero_bytes_and_grades_name_what_paints_them() {
+    let (content, _) = dark_with(|content| {
+        content.style.syntax.shift_remove("borer.byte.zero");
+        content.style.syntax.shift_remove("borer.grade.proved");
+    });
+    let failures = check(&content);
+    let said: Vec<String> = failures.iter().map(ToString::to_string).collect();
+    for want in [
+        "borer.byte.zero is unset; falls back to comment",
+        "borer.grade.proved is unset; falls back to text.muted",
+    ] {
+        assert!(said.iter().any(|line| line == want), "{said:?}");
+    }
+}
+
 /// Every slot of [`ThemeColors`] the app may draw is one the borer theme sets, so no stock
 /// Zed color reaches the screen; only the [`UNDRAWN`] slots are left to Zed.
 #[test]
