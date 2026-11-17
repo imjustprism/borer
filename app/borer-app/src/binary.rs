@@ -19,6 +19,7 @@ use workspace::{HideStatusItem, ItemHandle, StatusItemView, Workspace};
 use borer_engine::cancel::Cancel;
 
 use crate::actions::{OpenProject, SaveProject, SaveProjectAs};
+use crate::commands;
 use crate::places::Place;
 use crate::recent::{self, RecentBinary, file_name};
 use crate::stored::SavedTab;
@@ -875,17 +876,16 @@ impl Binary {
 /// * `binary` - The window's binary.
 pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
     let (open, save, save_as) = (binary.clone(), binary.clone(), binary.clone());
-    workspace
-        .register_action(move |_, _: &OpenProject, window, cx| {
-            let window = window.window_handle();
-            open.update(cx, |binary, cx| binary.prompt_open_project(window, cx));
-        })
-        .register_action(move |_, _: &SaveProject, _, cx| {
-            save.update(cx, |binary, cx| binary.save_project(false, cx));
-        })
-        .register_action(move |_, _: &SaveProjectAs, _, cx| {
-            save_as.update(cx, |binary, cx| binary.save_project(true, cx));
-        });
+    commands::register(workspace, binary, move |_, _: &OpenProject, window, cx| {
+        let window = window.window_handle();
+        open.update(cx, |binary, cx| binary.prompt_open_project(window, cx));
+    });
+    commands::register(workspace, binary, move |_, _: &SaveProject, _, cx| {
+        save.update(cx, |binary, cx| binary.save_project(false, cx));
+    });
+    commands::register(workspace, binary, move |_, _: &SaveProjectAs, _, cx| {
+        save_as.update(cx, |binary, cx| binary.save_project(true, cx));
+    });
 }
 
 /// Returns the engine's architecture and format of `loaded`, as `x86-64 PE`.

@@ -22,6 +22,7 @@ use workspace::Workspace;
 
 use crate::actions::{ChoosePacks, ChooseSymbolCache, ForgetPacks, ForgetSymbolCache};
 use crate::binary::Binary;
+use crate::commands;
 use crate::decompile_item::{DecompileItem, TabMode};
 use crate::places::{Opening, Place, place_of};
 use crate::shell::Shell;
@@ -375,15 +376,26 @@ pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
     };
     let (cache, packs) = (on(Choice::SymbolCache, choose), on(Choice::Packs, choose));
     let (no_cache, no_packs) = (on(Choice::SymbolCache, forget), on(Choice::Packs, forget));
-    workspace
-        .register_action(move |w, _: &ChooseSymbolCache, _, cx| cache(w, cx))
-        .register_action(move |w, _: &ChoosePacks, _, cx| packs(w, cx))
-        .register_action(move |w, _: &ForgetSymbolCache, _, cx| no_cache(w, cx))
-        .register_action(move |w, _: &ForgetPacks, _, cx| no_packs(w, cx));
+    commands::register(workspace, binary, move |w, _: &ChooseSymbolCache, _, cx| {
+        cache(w, cx);
+    });
+    commands::register(workspace, binary, move |w, _: &ChoosePacks, _, cx| {
+        packs(w, cx);
+    });
+    commands::register(workspace, binary, move |w, _: &ForgetSymbolCache, _, cx| {
+        no_cache(w, cx);
+    });
+    commands::register(workspace, binary, move |w, _: &ForgetPacks, _, cx| {
+        no_packs(w, cx);
+    });
 }
 
-/// Returns the write of every app window's open code tabs to the store on quit, which the
-/// next start restores ([`Binary::restore`]); a write that fails is said on stderr.
+/// Returns the write of every app window's open code tabs to the store, which the next
+/// start restores ([`Binary::restore`]).
+///
+/// It runs on quit, and as a window closes, before it goes; with no app window left it
+/// writes nothing, so the tabs the last window kept as it closed stay. A write that fails
+/// is said on stderr.
 ///
 /// # Arguments
 ///

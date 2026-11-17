@@ -4,7 +4,7 @@
 //! title, icon, toggle, docks, size, rail hooks and activation priority); [`add_panels`] is
 //! the one way to add them to a workspace, each in the dock the last run left it active in.
 
-use gpui::{Action, Context, Entity, InteractiveElement as _, Window};
+use gpui::{Action, Context, Entity, Window};
 use workspace::DockStructure;
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel};
@@ -40,20 +40,16 @@ pub struct PanelSpec {
     pub focus: fn(&mut Workspace, &mut Window, &mut Context<'_, Workspace>),
 }
 
-/// Registers every panel's toggle on `workspace`, docked or not yet.
+/// Registers every panel's toggle on `workspace`, docked or not yet, in reach as its
+/// command row says ([`crate::commands::register_boxed`]).
 ///
 /// # Arguments
 ///
 /// * `workspace` - The workspace.
-pub fn register_toggles(workspace: &mut Workspace) {
-    for &spec in PANELS {
-        workspace.register_action_renderer(move |div, _, _, cx| {
-            let this = cx.weak_entity();
-            div.on_boxed_action(spec.toggle, move |_, window, cx| {
-                this.update(cx, |workspace, cx| (spec.focus)(workspace, window, cx))
-                    .unwrap_or_default();
-            })
-        });
+/// * `binary` - The window's binary.
+pub fn register_toggles(workspace: &mut Workspace, binary: &Entity<Binary>) {
+    for spec in PANELS {
+        crate::commands::register_boxed(workspace, binary, spec.toggle, spec.focus);
     }
 }
 

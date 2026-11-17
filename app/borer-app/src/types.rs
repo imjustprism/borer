@@ -35,6 +35,7 @@ use crate::app_view::open_dropped;
 use crate::binary::{Binary, BinaryEvent, Revision};
 use crate::card::{Card, Tone};
 use crate::code_view::Role;
+use crate::commands;
 use crate::decompile_item::{DecompileItem, Form, TabMode, code_row_height};
 use crate::panels::{PanelSpec, remove};
 use crate::places::{self, Opening, Place};
@@ -988,21 +989,32 @@ impl Render for StructItem {
 /// * `workspace` - The window's workspace.
 /// * `binary` - The window's binary.
 pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
-    let binary = binary.clone();
-    workspace
-        .register_action(|w, _: &RenameField, window, cx| ask_active(w, Ask::Rename, window, cx))
-        .register_action(|w, _: &RetypeField, window, cx| ask_active(w, Ask::Retype, window, cx))
-        .register_action(|w, _: &AddField, window, cx| ask_active(w, Ask::Add, window, cx))
-        .register_action(|w, _: &DeleteField, window, cx| ask_active(w, Ask::Delete, window, cx))
-        .register_action(|w, _: &ResizeStruct, window, cx| ask_active(w, Ask::Size, window, cx))
-        .register_action(|w, _: &CopyToUserType, window, cx| ask_active(w, Ask::Copy, window, cx))
-        .register_action(|w, _: &AcceptProposal, window, cx| {
-            ask_active(w, Ask::Accept, window, cx);
-        })
-        .register_action(|workspace, _: &ToggleTypes, window, cx| {
-            workspace.toggle_panel_focus::<TypesPanel>(window, cx);
-        })
-        .register_action(move |workspace, _: &ProposeStruct, window, cx| {
+    commands::register(workspace, binary, |w, _: &RenameField, window, cx| {
+        ask_active(w, Ask::Rename, window, cx);
+    });
+    commands::register(workspace, binary, |w, _: &RetypeField, window, cx| {
+        ask_active(w, Ask::Retype, window, cx);
+    });
+    commands::register(workspace, binary, |w, _: &AddField, window, cx| {
+        ask_active(w, Ask::Add, window, cx);
+    });
+    commands::register(workspace, binary, |w, _: &DeleteField, window, cx| {
+        ask_active(w, Ask::Delete, window, cx);
+    });
+    commands::register(workspace, binary, |w, _: &ResizeStruct, window, cx| {
+        ask_active(w, Ask::Size, window, cx);
+    });
+    commands::register(workspace, binary, |w, _: &CopyToUserType, window, cx| {
+        ask_active(w, Ask::Copy, window, cx);
+    });
+    commands::register(workspace, binary, |w, _: &AcceptProposal, window, cx| {
+        ask_active(w, Ask::Accept, window, cx);
+    });
+    let held = binary.clone();
+    commands::register(
+        workspace,
+        binary,
+        move |workspace, _: &ProposeStruct, window, cx| {
             let code = workspace.active_item_as::<DecompileItem>(cx);
             let opened = code.and_then(|code| {
                 let code = code.read(cx);
@@ -1010,7 +1022,7 @@ pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
             });
             let Some((entry, loaded)) = opened else {
                 let why = "open a function's code tab first: its first argument is followed";
-                binary.update(cx, |binary, cx| binary.set_status(why.to_owned(), cx));
+                held.update(cx, |binary, cx| binary.set_status(why.to_owned(), cx));
                 return;
             };
             let how = Opening {
@@ -1018,8 +1030,9 @@ pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
                 focus: true,
             };
             let place = Place::Proposal { entry };
-            places::open(workspace, &binary, &loaded, place, how, window, cx);
-        });
+            places::open(workspace, &held, &loaded, place, how, window, cx);
+        },
+    );
 }
 
 /// Starts `ask` on the active struct tab's selected line; with none active it does nothing.

@@ -167,10 +167,14 @@ fn encode(list: &[RecentBinary]) -> serde_json::Result<String> {
 /// * `workspace` - The workspace the action dispatches in.
 /// * `binary` - The window's binary.
 pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
-    let binary = binary.clone();
-    workspace.register_action(move |workspace, _: &OpenRecent, window, cx| {
-        toggle(workspace, binary.clone(), window, cx);
-    });
+    let held = binary.clone();
+    crate::commands::register(
+        workspace,
+        binary,
+        move |workspace, _: &OpenRecent, window, cx| {
+            toggle(workspace, held.clone(), window, cx);
+        },
+    );
 }
 
 /// What the picker lists and which one is highlighted.

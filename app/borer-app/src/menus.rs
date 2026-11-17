@@ -250,10 +250,53 @@ mod tests {
     use crate::actions::CloseBinary;
     use crate::app_view::tests::{init, load_sample, open};
     use crate::binary::{Binary, NO_BINARY};
-    use crate::commands::{MenuName, Need};
+    use crate::commands::{COMMANDS, MenuName, Need};
     use crate::decompile_item::DecompileItem;
     use crate::functions_panel::FunctionsPanel;
     use crate::start_item::StartItem;
+
+    /// No action whose row needs a binary has a handler in reach before one is open, the
+    /// panel toggles and the project and struct actions among them; once one is, the
+    /// window-wide ones are.
+    ///
+    /// # Panics
+    ///
+    /// Panics naming an action in reach without a binary.
+    #[gpui::test]
+    fn no_binary_action_is_in_reach_without_a_binary(cx: &mut TestAppContext) {
+        no_binary_action_is_in_reach_without_a_binary_steps(cx);
+    }
+
+    /// Runs the steps of [`no_binary_action_is_in_reach_without_a_binary`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`no_binary_action_is_in_reach_without_a_binary`]
+    /// says.
+    fn no_binary_action_is_in_reach_without_a_binary_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let available = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let actions = cx.update(|window, cx| window.available_actions(cx));
+            let names: Vec<&str> = actions.iter().map(|action| action.name()).collect();
+            COMMANDS
+                .iter()
+                .filter(|row| row.needs == Need::Binary && names.contains(&row.action))
+                .map(|row| row.action)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(available(cx), Vec::<&str>::new());
+        load_sample(&app, cx);
+        let loaded = available(cx);
+        for name in [
+            "borer::ToggleTypes",
+            "borer::SaveProject",
+            "borer::OpenProject",
+        ] {
+            assert!(loaded.contains(&name), "{name}: {loaded:?}");
+        }
+    }
 
     /// Close Binary has no handler in reach while no binary is open, so macOS greys it
     /// (gpui asks `is_action_available`) and the menu bar disables it with its need; once

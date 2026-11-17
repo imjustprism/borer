@@ -33,5 +33,5 @@ pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
     crate::hex_item::register(workspace, binary);
     crate::tables::register(workspace, binary);
     crate::theme_picker::register(workspace, binary);
-    crate::panels::register_toggles(workspace);
+    crate::panels::register_toggles(workspace, binary);
 }

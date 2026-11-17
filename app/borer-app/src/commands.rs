@@ -1012,17 +1012,11 @@ pub fn register<A: Action>(
     binary: &Entity<Binary>,
     handle: impl Fn(&mut Workspace, &A, &mut Window, &mut Context<'_, Workspace>) + 'static,
 ) {
-    let needs = command(A::name_for_type()).map_or(Need::Nothing, |row| row.needs);
+    let needs = needs_of(A::name_for_type());
     let binary = binary.clone();
     let handle = Rc::new(handle);
     workspace.register_action_renderer(move |div, workspace, _, cx| {
-        let met = match needs {
-            Need::Nothing => true,
-            Need::Binary => {
-                binary.read(cx).is_open() || shown_binary(workspace, &binary, cx).is_some()
-            }
-        };
-        if !met {
+        if !met(needs, workspace, &binary, cx) {
             return div;
         }
         let handle = handle.clone();
@@ -1030,6 +1024,61 @@ pub fn register<A: Action>(
             handle(workspace, action, window, cx);
         }))
     });
+}
+
+/// Registers `handle` for `action`, an action known only as a value, on `workspace`, in
+/// reach as [`register`] keeps a typed one.
+///
+/// # Arguments
+///
+/// * `workspace` - The window's workspace.
+/// * `binary` - The window's binary, which meets [`Need::Binary`].
+/// * `action` - The action.
+/// * `handle` - What it does.
+pub fn register_boxed(
+    workspace: &mut Workspace,
+    binary: &Entity<Binary>,
+    action: &'static dyn Action,
+    handle: fn(&mut Workspace, &mut Window, &mut Context<'_, Workspace>),
+) {
+    let needs = needs_of(action.name());
+    let binary = binary.clone();
+    workspace.register_action_renderer(move |div, workspace, _, cx| {
+        if !met(needs, workspace, &binary, cx) {
+            return div;
+        }
+        let this = cx.weak_entity();
+        div.on_boxed_action(action, move |_, window, cx| {
+            this.update(cx, |workspace, cx| handle(workspace, window, cx))
+                .unwrap_or_default();
+        })
+    });
+}
+
+/// Returns what the row of the action named `name` needs, nothing for an action with no
+/// row.
+///
+/// # Arguments
+///
+/// * `name` - The action's name.
+fn needs_of(name: &str) -> Need {
+    command(name).map_or(Need::Nothing, |row| row.needs)
+}
+
+/// Returns whether `needs` is met in `workspace`: always for nothing, and for a binary while
+/// the window's is open or a tab shows one.
+///
+/// # Arguments
+///
+/// * `needs` - What a row needs.
+/// * `workspace` - The window's workspace.
+/// * `binary` - The window's binary.
+/// * `cx` - Application context reading them.
+fn met(needs: Need, workspace: &Workspace, binary: &Entity<Binary>, cx: &App) -> bool {
+    match needs {
+        Need::Nothing => true,
+        Need::Binary => binary.read(cx).is_open() || shown_binary(workspace, binary, cx).is_some(),
+    }
 }
 
 /// Returns the app's keymap on `os` in Zed's keymap format: one section per context, the
