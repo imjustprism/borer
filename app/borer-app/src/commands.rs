@@ -773,6 +773,10 @@ pub const COMMANDS: &[Command] = &[
             &[],
         )
     },
+    Command {
+        serves: &["calls"],
+        ..binding("borer::ShowCallSites", "Call Sites in the Call Tree", &[])
+    },
     binding(
         "menu::SelectFirst",
         "First Row",

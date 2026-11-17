@@ -11,6 +11,9 @@ use std::sync::Arc;
 
 use borer_engine::analysis::render::{CallEdge, Children, Level, Via};
 
+use crate::decompile_item::Form;
+use crate::places::Place;
+
 /// Most edges the cache of levels read keeps; past it the least recently read levels go,
 /// and a node of one opens again by asking the engine. Levels shown stay while shown.
 pub const KEPT_EDGES_MAX: usize = 1 << 16;
@@ -147,13 +150,27 @@ pub enum Row {
         /// Its depth, the root at 0.
         depth: usize,
     },
-    /// The engine cut a level: it lists `shown` of `total`.
+    /// One instruction making the call of the node row above it.
+    Site {
+        /// Entry of the function the instruction is in.
+        function: u64,
+        /// Address of the instruction.
+        at: u64,
+        /// One more than the node's depth.
+        depth: usize,
+    },
+    /// The engine knows the call of the node row above it without an instruction making it.
+    NoSites {
+        /// One more than the node's depth.
+        depth: usize,
+    },
+    /// The engine cut a level or a list of sites: it lists `shown` of `total`.
     More {
-        /// Edges listed.
+        /// Edges or sites listed.
         shown: usize,
-        /// Edges there are.
+        /// Edges or sites there are.
         total: usize,
-        /// Depth of the edges, the root's children at 1.
+        /// Depth of the edges or sites, the root's children at 1.
         depth: usize,
     },
     /// The engine knows no edge of an open node.
@@ -176,9 +193,45 @@ impl Row {
     pub const fn depth(&self) -> usize {
         match *self {
             Self::Node { depth, .. }
+            | Self::Site { depth, .. }
+            | Self::NoSites { depth }
             | Self::More { depth, .. }
             | Self::Empty { depth, .. }
             | Self::Unsearched { depth } => depth,
+        }
+    }
+}
+
+/// Where following a row leads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Follow {
+    /// To the function at this entry.
+    Function(u64),
+    /// To one instruction of a function.
+    Site {
+        /// Entry of the function.
+        function: u64,
+        /// Address of the instruction.
+        at: u64,
+    },
+}
+
+impl Follow {
+    /// Returns the place following leads to: a function's decompile, or the listing of the
+    /// function making a call with the call's instruction on its top line.
+    #[must_use]
+    pub const fn place(self) -> Place {
+        match self {
+            Self::Function(entry) => Place::Code {
+                entry,
+                form: Form::Decompile,
+                at: None,
+            },
+            Self::Site { function, at } => Place::Code {
+                entry: function,
+                form: Form::Listing,
+                at: Some(at),
+            },
         }
     }
 }
@@ -197,6 +250,8 @@ struct Node {
     depth: usize,
     /// Whether the person opened it.
     open: bool,
+    /// Whether its call sites are listed under it.
+    sites: bool,
     /// Whether its target is already on its path.
     cycle: bool,
     /// Whether the engine says it has no edge to follow.
@@ -252,6 +307,7 @@ impl CallTree {
             parent: None,
             depth: 0,
             open: false,
+            sites: false,
             cycle: false,
             leaf: false,
             children: None,
@@ -489,6 +545,57 @@ impl CallTree {
         self.expand(ix)
     }
 
+    /// Lists the call sites of row `ix`'s edge, or hides them.
+    ///
+    /// # Arguments
+    ///
+    /// * `ix` - Zero-based row index.
+    ///
+    /// # Returns
+    ///
+    /// Whether the row has an edge whose sites it lists or hides; the root has none.
+    pub fn toggle_sites(&mut self, ix: usize) -> bool {
+        let Some(&Row::Node { id, .. }) = self.rows.get(ix) else {
+            return false;
+        };
+        let Some(node) = self.nodes.get_mut(&id).filter(|node| node.edge.is_some()) else {
+            return false;
+        };
+        node.sites = !node.sites;
+        self.relayout(ix);
+        true
+    }
+
+    /// Returns where following row `ix` leads: a node to its function, a site to its
+    /// instruction. An import's node has no function of the binary's to lead to, so
+    /// following it lists its call sites instead.
+    ///
+    /// # Arguments
+    ///
+    /// * `ix` - Zero-based row index.
+    ///
+    /// # Returns
+    ///
+    /// Where the row leads, `None` for an import and for rows of no node or site.
+    pub fn follow(&mut self, ix: usize) -> Option<Follow> {
+        let row = *self.rows.get(ix)?;
+        match row {
+            Row::Node { .. } => {
+                let import = self.direction == Direction::Callees
+                    && self.edge(&row).is_some_and(|e| e.via == Via::Import);
+                if import {
+                    self.toggle_sites(ix);
+                    return None;
+                }
+                Some(Follow::Function(self.target(&row)?))
+            }
+            Row::Site { function, at, .. } => Some(Follow::Site { function, at }),
+            Row::NoSites { .. } | Row::More { .. } | Row::Empty { .. } | Row::Unsearched { .. } => {
+                None
+            }
+        }
+    }
+
     /// Returns the index of the node row above row `ix` one level up.
     ///
     /// # Arguments
@@ -623,6 +730,7 @@ impl CallTree {
                 parent: Some(id),
                 depth,
                 open: false,
+                sites: false,
                 cycle: self.on_path(id, e.target),
                 leaf: e.leaf && (!virtuals || e.via == Via::Import),
                 children: None,
@@ -714,6 +822,9 @@ impl CallTree {
             id,
             depth: node.depth,
         });
+        if node.sites {
+            self.push_sites(node, rows);
+        }
         let Some((answer, kids)) = &node.children else {
             return;
         };
@@ -733,6 +844,50 @@ impl CallTree {
         }
         if answer.search == Search::Failed {
             rows.push(Row::Unsearched { depth });
+        }
+    }
+
+    /// Pushes a row for each call site of a node's edge, one saying when the engine cut
+    /// them, or one saying it knows none.
+    ///
+    /// Over callees the sites are in the edge's parent, over callers in its target.
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node.
+    /// * `rows` - The rows laid out so far.
+    fn push_sites(&self, node: &Node, rows: &mut Vec<Row>) {
+        let Some(edge) = node
+            .edge
+            .as_ref()
+            .and_then(|(answer, k)| answer.children.rows.get(*k))
+        else {
+            return;
+        };
+        let parent = node
+            .parent
+            .and_then(|p| self.nodes.get(&p))
+            .map(|p| p.target);
+        let function = match self.direction {
+            Direction::Callees => parent,
+            Direction::Callers => Some(node.target),
+        };
+        let depth = node.depth.saturating_add(1);
+        let Some(function) = function.filter(|_| !edge.sites.is_empty()) else {
+            rows.push(Row::NoSites { depth });
+            return;
+        };
+        rows.extend(edge.sites.iter().map(|&at| Row::Site {
+            function,
+            at,
+            depth,
+        }));
+        if edge.site_count > edge.sites.len() {
+            rows.push(Row::More {
+                shown: edge.sites.len(),
+                total: edge.site_count,
+                depth,
+            });
         }
     }
 
@@ -764,7 +919,7 @@ pub(crate) mod tests {
     use borer_engine::program::{Arch, BinaryFormat, Program, Section};
 
     use super::{
-        Answer, CallTree, Direction, KEPT_EDGES_MAX, Missing, Row, Search, Shape, Virtuals,
+        Answer, CallTree, Direction, Follow, KEPT_EDGES_MAX, Missing, Row, Search, Shape, Virtuals,
         via_label,
     };
     use crate::worker::{LoadedBinary, call_level_blocking};
@@ -858,6 +1013,9 @@ pub(crate) mod tests {
             search,
         }
     }
+
+    /// Address of `main`'s call to [`ZETA`].
+    pub(crate) const MAIN_CALLS_ZETA: u64 = 0x1004;
 
     /// Returns the target of each node row of `tree`, the root's included.
     pub(crate) fn targets(tree: &CallTree) -> Vec<u64> {
@@ -1096,6 +1254,81 @@ pub(crate) mod tests {
         assert_eq!(tree.expand(2), None);
         assert!(tree.collapse(2));
         assert_eq!(tree.expand(1), Some(a));
+    }
+
+    /// A call's sites list under its row, in the function that makes the call: the parent
+    /// over callees, the target over callers; following a site leads to its instruction.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a site row is missing, misplaced or names the wrong function.
+    #[test]
+    fn sites_list_under_their_call_in_the_calling_function() {
+        let loaded = tree_program();
+        let site = Row::Site {
+            function: MAIN,
+            at: MAIN_CALLS_ZETA,
+            depth: 2,
+        };
+        let mut tree = CallTree::new(MAIN, Direction::Callees, Virtuals::Hidden);
+        let asked = tree.expand(0);
+        answer_asked(&mut tree, &loaded, asked);
+        assert!(!tree.toggle_sites(0));
+        assert!(tree.toggle_sites(1));
+        assert_eq!(tree.rows().get(2), Some(&site));
+        assert_eq!(targets(&tree), [MAIN, ZETA, ALPHA, MID]);
+        let follow = Follow::Site {
+            function: MAIN,
+            at: MAIN_CALLS_ZETA,
+        };
+        assert_eq!(tree.follow(2), Some(follow));
+        assert_eq!(tree.follow(1), Some(Follow::Function(ZETA)));
+        assert!(tree.toggle_sites(1));
+        assert_eq!(tree.rows().len(), 4);
+
+        let mut callers = CallTree::new(ZETA, Direction::Callers, Virtuals::Hidden);
+        let asked = callers.expand(0);
+        answer_asked(&mut callers, &loaded, asked);
+        assert!(callers.toggle_sites(1));
+        assert_eq!(callers.rows().get(2), Some(&site));
+    }
+
+    /// Following an import lists its call sites instead of opening anything, a call with no
+    /// known site says so, and a cut list of sites says how many it shows.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an import leads somewhere or a sites row is wrong.
+    #[test]
+    fn following_an_import_lists_its_sites() {
+        let (root, slot, quiet, busy) = (0x10, 0x9000, 0x20, 0x30);
+        let mut tree = CallTree::new(root, Direction::Callees, Virtuals::Hidden);
+        let asked = tree.expand(0);
+        let mut many = edge(busy, Via::Direct, &[0x13, 0x14], false);
+        many.site_count = 40;
+        let level = vec![
+            edge(slot, Via::Import, &[0x11], true),
+            edge(quiet, Via::Direct, &[], false),
+            many,
+        ];
+        tree.answer(root, made(level, 3, Search::NotAsked));
+        assert_eq!(asked, Some(root));
+        assert_eq!(tree.follow(1), None);
+        let site = Row::Site {
+            function: root,
+            at: 0x11,
+            depth: 2,
+        };
+        assert_eq!(tree.rows().get(2), Some(&site));
+        assert!(tree.toggle_sites(3));
+        assert_eq!(tree.rows().get(4), Some(&Row::NoSites { depth: 2 }));
+        assert!(tree.toggle_sites(5));
+        let cut = Row::More {
+            shown: 2,
+            total: 40,
+            depth: 2,
+        };
+        assert_eq!(tree.rows().get(8), Some(&cut));
     }
 
     /// Every way the engine knows a call has its label.

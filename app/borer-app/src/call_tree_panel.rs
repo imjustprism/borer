@@ -1,7 +1,9 @@
 //! The call tree panel: the callers or callees of one function of the open binary as a tree
 //! in a Zed dock.
 //!
-//! Each node's level is read from the engine in the background when it opens.
+//! Each node's level is read from the engine in the background when it opens. A click
+//! opens a row in the preview tab, Enter in a permanent one: a node its function, a call
+//! site its caller's listing at the instruction.
 
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -11,8 +13,8 @@ use borer_engine::analysis::render::Via;
 use gpui::{
     Action, AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle,
     Focusable, Font, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    ScrollStrategy, SharedString, Styled as _, Subscription, UniformListScrollHandle, Window, div,
-    px, uniform_list,
+    ScrollStrategy, SharedString, Styled as _, Subscription, UniformListScrollHandle, WeakEntity,
+    Window, div, px, uniform_list,
 };
 use settings::Settings as _;
 use smallvec::SmallVec;
@@ -26,14 +28,15 @@ use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use crate::actions::ToggleVirtualCalls;
-use crate::actions::{CallTree as CallTreeAction, CallTreeDirection, Hint};
+use crate::actions::{CallTree as CallTreeAction, CallTreeDirection, Hint, ShowCallSites};
 use crate::app_assets::Glyph;
 use crate::binary::{Binary, BinaryEvent};
 use crate::call_tree::{Answer, CallTree, Direction, Missing, Row, Shape, Virtuals, via_label};
 use crate::card::{Card, Tone};
 use crate::code_view::{CodePalette, Role};
-use crate::decompile_item::DecompileItem;
+use crate::decompile_item::{DecompileItem, TabMode};
 use crate::panels::{PanelSpec, remove, spec_panel};
+use crate::places::{Opening, open};
 use crate::rows_panel::Empty;
 use crate::worker::{Job, LoadedBinary, call_level_blocking, function_name_blocking};
 
@@ -52,7 +55,8 @@ pub const PANEL: PanelSpec = PanelSpec {
     size_px: 280.0,
     hooks: crate::rail::panel::<CallTreePanel>(),
     add: |workspace, binary, dock, window, cx| {
-        let panel = cx.new(|cx| CallTreePanel::new(binary, dock, cx));
+        let weak = cx.weak_entity();
+        let panel = cx.new(|cx| CallTreePanel::new(weak, binary, dock, cx));
         workspace.add_panel(panel, window, cx);
     },
     remove: remove::<CallTreePanel>,
@@ -87,7 +91,7 @@ fn root_and_focus(workspace: &mut Workspace, window: &mut Window, cx: &mut Conte
 
 /// The actions the panel answers in its own `on_action`, about the tree it shows, so they
 /// are available only while it has focus.
-pub const OWN_ACTIONS: &[&dyn Action] = &[&CallTreeDirection, &ToggleVirtualCalls];
+pub const OWN_ACTIONS: &[&dyn Action] = &[&CallTreeDirection, &ToggleVirtualCalls, &ShowCallSites];
 
 /// The hint the panel offers while no tree is rooted.
 const ROOT_HINT: Hint = (
@@ -113,6 +117,8 @@ struct Rooted {
 
 /// The callers or callees of one function, as a tree in a dock.
 pub struct CallTreePanel {
+    /// Workspace the panel opens functions and listings in.
+    workspace: WeakEntity<Workspace>,
     /// Focus handle of the panel's root.
     focus_handle: FocusHandle,
     /// The binary whose functions the tree roots in.
@@ -140,16 +146,19 @@ impl CallTreePanel {
     ///
     /// # Arguments
     ///
+    /// * `workspace` - Workspace the panel opens functions and listings in.
     /// * `binary` - The binary whose functions the tree roots in.
     /// * `position` - Dock the panel starts in.
     /// * `cx` - Panel context.
     #[must_use]
     pub fn new(
+        workspace: WeakEntity<Workspace>,
         binary: &Entity<Binary>,
         position: DockPosition,
         cx: &mut Context<'_, Self>,
     ) -> Self {
         Self {
+            workspace,
             focus_handle: cx.focus_handle(),
             binary: binary.clone(),
             rooted: None,
@@ -244,6 +253,52 @@ impl CallTreePanel {
         let ask = rooted.tree.toggle(ix);
         self.read(ask, cx);
         cx.notify();
+    }
+
+    /// Lists the call sites of the selected row's call, or hides them.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Panel context.
+    pub fn toggle_sites(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(rooted) = self.rooted.as_mut()
+            && rooted.tree.toggle_sites(rooted.tree.selected())
+        {
+            cx.notify();
+        }
+    }
+
+    /// Follows the selected row as `mode` says: a node opens its function's decompile, a
+    /// call site the listing of the function making the call at its instruction, and an
+    /// import lists its call sites. A permanent tab takes keyboard focus, the preview leaves
+    /// it in the tree.
+    ///
+    /// # Arguments
+    ///
+    /// * `mode` - Whether the tab is the preview tab or a permanent one.
+    /// * `window` - Window the panel is in.
+    /// * `cx` - Panel context.
+    pub fn confirm(&mut self, mode: TabMode, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let Some(rooted) = self.rooted.as_mut() else {
+            return;
+        };
+        let place = rooted
+            .tree
+            .follow(rooted.tree.selected())
+            .map(|f| f.place());
+        let loaded = rooted.loaded.clone();
+        cx.notify();
+        let (Some(place), Some(workspace)) = (place, self.workspace.upgrade()) else {
+            return;
+        };
+        let binary = self.binary.clone();
+        let how = Opening {
+            mode,
+            focus: mode == TabMode::Permanent,
+        };
+        workspace.update(cx, |workspace, cx| {
+            open(workspace, &binary, &loaded, place, how, window, cx);
+        });
     }
 
     /// Selects row `ix` and keeps it on screen.
@@ -488,7 +543,7 @@ fn muted(text: impl Into<SharedString>) -> Label {
     Label::new(text).size(LabelSize::Small).color(Color::Muted)
 }
 
-/// Returns the text of a row of no node.
+/// Returns the text of a row of no node and no site.
 ///
 /// # Arguments
 ///
@@ -496,10 +551,11 @@ fn muted(text: impl Into<SharedString>) -> Label {
 ///
 /// # Returns
 ///
-/// The text, `None` for a node row.
+/// The text, `None` for a node or site row.
 fn note_of(row: &Row) -> Option<String> {
     Some(match *row {
-        Row::Node { .. } => return None,
+        Row::Node { .. } | Row::Site { .. } => return None,
+        Row::NoSites { .. } => String::from("The engine knows this call without its instruction"),
         Row::More { shown, total, .. } => format!("showing {shown} of {total}"),
         Row::Empty { missing, .. } => String::from(match missing {
             Missing::Callee => "The engine knows no callee of this function",
@@ -537,7 +593,19 @@ fn render_row(
         .on_click(cx.listener(move |this, _, window, cx| {
             window.focus(&this.focus_handle, cx);
             this.select(ix, cx);
+            this.confirm(TabMode::Preview, window, cx);
         }));
+    if let Row::Site { at, .. } = *row {
+        return item
+            .child(
+                div()
+                    .font(look.font.clone())
+                    .text_color(look.palette.color(Role::Address))
+                    .child(format!("{at:#x}")),
+            )
+            .end_slot(muted("call site"))
+            .into_any_element();
+    }
     let Some(shape) = tree.shape(row) else {
         return item.children(note_of(row).map(muted)).into_any_element();
     };
@@ -591,6 +659,10 @@ impl Render for CallTreePanel {
             .on_action(cx.listener(|this, _: &CallTreeDirection, _, cx| this.flip_direction(cx)))
             .on_action(cx.listener(|this, _: &ToggleVirtualCalls, _, cx| {
                 this.toggle_virtuals(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShowCallSites, _, cx| this.toggle_sites(cx)))
+            .on_action(cx.listener(|this, _: &menu::Confirm, window, cx| {
+                this.confirm(TabMode::Permanent, window, cx);
             }));
         if let Some(card) = self.card(cx) {
             return root.child(card.render(cx));
@@ -638,15 +710,17 @@ mod tests {
     use workspace::Workspace;
 
     use super::CallTreePanel;
-    use crate::actions::{CallTree, CallTreeDirection, CloseBinary, ToggleVirtualCalls};
+    use crate::actions::{
+        CallTree, CallTreeDirection, CloseBinary, ShowCallSites, ToggleVirtualCalls,
+    };
     use crate::app_view::AppWindow;
     use crate::app_view::tests::{init, open, open_place};
-    use crate::call_tree::tests::{MAIN, MID, ZETA, tree_program};
+    use crate::call_tree::tests::{MAIN, MAIN_CALLS_ZETA, MID, ZETA, tree_program};
     use crate::call_tree::{Missing, Row};
     use crate::card::Tone;
-    use crate::decompile_item::TabMode;
+    use crate::decompile_item::{DecompileItem, Form, TabMode};
     use crate::places::Place;
-    use crate::worker::{Jobs, LoadedBinary, call_level_blocking};
+    use crate::worker::{Jobs, LoadedBinary, call_level_blocking, listing_blocking};
 
     /// Makes `loaded` the binary open in `app`, as a finished load does, which docks the
     /// panels.
@@ -841,5 +915,56 @@ mod tests {
         assert_eq!(docked(cx), 0);
         load(&app, &loaded, cx);
         assert_eq!(docked(cx), 1);
+    }
+
+    /// Enter on a call site opens the listing of the function making the call in a
+    /// permanent tab, named for the function, with the site's line at its top as the
+    /// engine's listing places it.
+    #[gpui::test]
+    fn enter_on_a_site_opens_the_listing_at_its_line(cx: &mut TestAppContext) {
+        let (workspace, loaded, panel, cx) = rooted_at_main(cx);
+        panel.update(cx, |panel, cx| panel.select(1, cx));
+        cx.dispatch_action(ShowCallSites);
+        let site = Row::Site {
+            function: MAIN,
+            at: MAIN_CALLS_ZETA,
+            depth: 2,
+        };
+        panel.update(cx, |panel, cx| {
+            let tree = panel.tree().unwrap();
+            assert_eq!(tree.target(&tree.rows()[1]), Some(ZETA));
+            assert_eq!(tree.rows().get(2), Some(&site));
+            panel.select(2, cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.dispatch_action(menu::Confirm);
+        cx.run_until_parked();
+        let line = listing_blocking(&loaded, MAIN)
+            .unwrap()
+            .line_of(MAIN_CALLS_ZETA)
+            .unwrap();
+        assert!(line > 0);
+        let name = name_of(&loaded.analysis, &loaded.overlay, MAIN);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let shown = workspace.read_with(cx, |workspace, cx| {
+            let item = workspace.active_item_as::<DecompileItem>(cx).unwrap();
+            let label = workspace::Item::tab_content_text(item.read(cx), 0, cx);
+            let item = item.read(cx);
+            (
+                item.entry(),
+                item.form(),
+                item.top_line(),
+                label.to_string(),
+            )
+        });
+        assert_eq!(shown, (Some(MAIN), Form::Listing, line, name));
+        let preview = workspace.read_with(cx, |workspace, cx| {
+            let pane = workspace.active_pane().read(cx);
+            pane.preview_item_id()
+        });
+        let active = workspace.read_with(cx, |workspace, cx| {
+            workspace.active_item(cx).map(|item| item.item_id())
+        });
+        assert_ne!(preview, active);
     }
 }

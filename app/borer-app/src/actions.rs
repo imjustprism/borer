@@ -99,6 +99,8 @@ gpui::actions!(
         CallTree,
         /// Flips the call tree between what its functions call and what calls them.
         CallTreeDirection,
+        /// Lists the instructions making the selected call of the call tree, or hides them.
+        ShowCallSites,
         /// Lists or hides, in the call tree's callees, the virtual calls the decompiler
         /// resolves, which decompiles each function opened.
         ToggleVirtualCalls,
