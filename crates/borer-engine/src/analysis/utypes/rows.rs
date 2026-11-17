@@ -214,8 +214,12 @@ pub fn type_detail(
     .filter(|_| kind == TypeKind::Struct)
     .unwrap_or_default();
     fields.sort_by_key(|f| f.offset);
+    let holes = match kind {
+        TypeKind::Struct => holes(&fields, row.size),
+        TypeKind::Enum | TypeKind::Typedef | TypeKind::Interface | TypeKind::Class => Vec::new(),
+    };
     Some(TypeDetail {
-        holes: holes(&fields, row.size),
+        holes,
         overlaps: overlaps(&fields),
         row,
         fields,
@@ -729,6 +733,29 @@ mod tests {
         ];
         for (source, kind) in missing {
             assert!(type_detail(&p, &a, &o, "Gaps", source, kind).is_none());
+        }
+    }
+
+    /// A user enum or typedef has no fields, so none of its bytes is a hole.
+    #[test]
+    fn an_enum_or_typedef_has_no_holes() {
+        let mut p = Program::raw_x64(&[0xc3]);
+        p.format = BinaryFormat::Pe;
+        let a = Analysis::compute(&p);
+        let mut o = Overlay::default();
+        let e = crate::analysis::utypes::build_enum("E", 4, &[(1, "One".to_owned())]);
+        o.types
+            .insert("E".to_owned(), e.unwrap_or_else(|e| panic!("{e}")));
+        o.types
+            .insert("T".to_owned(), UserType::Alias(TypeExpr::U64));
+        for (name, kind) in [("E", TypeKind::Enum), ("T", TypeKind::Typedef)] {
+            let detail = type_detail(&p, &a, &o, name, TypeSource::User, kind)
+                .unwrap_or_else(|| panic!("{name} opens"));
+            assert!(
+                detail.row.size.is_some_and(|size| size > 0),
+                "{name} is sized"
+            );
+            assert_eq!((detail.fields.len(), detail.holes.len()), (0, 0), "{name}");
         }
     }
 }
