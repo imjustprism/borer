@@ -29,7 +29,7 @@ use picker::Picker;
 use super::tree::quantiles;
 use super::watch::{Watch, seen};
 use super::{
-    Harness, Prepared, SYSTEM_NOTEPAD, load_large_dll_blocking, nanos, now_instant, say,
+    Harness, Prepared, SYSTEM_NOTEPAD, Tracing, load_large_dll_blocking, nanos, now_instant, say,
     sorted_quantiles_ms,
 };
 use crate::actions::{FocusFilter, Overview, ShowGraph, ToggleListing, Xrefs, ZoomIn, ZoomOut};
@@ -447,8 +447,8 @@ pub(super) struct ActionsRun {
     cancel: Cancel,
     /// The measured window.
     window_id: WindowId,
-    /// Whether gpui's frame tracing was on before the phase.
-    was_trace_enabled: bool,
+    /// Keeps gpui's frame tracing on while the phase lives.
+    _tracing: Tracing,
     /// The frame events not read yet.
     collector: gpui::profiler::FrameTimingCollector,
     /// The binary the runs are on.
@@ -468,14 +468,6 @@ pub(super) struct ActionsRun {
     times: BTreeMap<(Bench, Act), Times>,
     /// Each sweep's frame draw times in nanoseconds, by binary.
     frames: BTreeMap<(Bench, Sweep), Vec<u64>>,
-}
-
-impl Drop for ActionsRun {
-    fn drop(&mut self) {
-        if !self.was_trace_enabled {
-            gpui::profiler::set_trace_enabled(false);
-        }
-    }
 }
 
 impl ActionsRun {
@@ -749,7 +741,7 @@ impl Harness {
         let run = ActionsRun {
             cancel,
             window_id: window.window_handle().window_id(),
-            was_trace_enabled: gpui::profiler::set_trace_enabled(true),
+            _tracing: Tracing::on(),
             collector: gpui::profiler::FrameTimingCollector::new(),
             bench: prep.bench,
             script: VecDeque::new(),

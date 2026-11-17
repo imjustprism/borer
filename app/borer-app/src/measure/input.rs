@@ -10,7 +10,7 @@ use borer_engine::view::Ref;
 use gpui::{App, Context, Window};
 
 use super::{
-    CALL_CLICKS, FILTER_KEYS, Harness, InjectTracker, MarkWait, PendingInputMark, nanos,
+    CALL_CLICKS, FILTER_KEYS, Harness, InjectTracker, MarkWait, PendingInputMark, Tracing, nanos,
     now_instant, ns_to_ms, say, sorted_quantiles_ms,
 };
 use crate::decompile_item::{DecompileItem, TabMode};
@@ -145,8 +145,8 @@ pub(super) struct InputRun {
     cancel: Cancel,
     /// Target [`gpui::WindowId`] filtering profiler [`gpui::profiler::FrameEvent`] entries.
     window_id: gpui::WindowId,
-    /// Whether GPUI profiler tracing was already enabled before this run started.
-    was_trace_enabled: bool,
+    /// Keeps GPUI profiler tracing on while the run lives.
+    _tracing: Tracing,
     /// Cursor draining newly recorded [`gpui::profiler::FrameEvent`] entries.
     collector: gpui::profiler::FrameTimingCollector,
     /// Start timestamp of the latest `Window::draw` awaiting presentation.
@@ -163,14 +163,6 @@ pub(super) struct InputRun {
     empty_frames: u8,
     /// Post-completion frames awaited so the 100th click's presentation is captured.
     settle_frames: u8,
-}
-
-impl Drop for InputRun {
-    fn drop(&mut self) {
-        if !self.was_trace_enabled {
-            gpui::profiler::set_trace_enabled(false);
-        }
-    }
 }
 
 impl Harness {
@@ -209,7 +201,7 @@ impl Harness {
         let run = InputRun {
             cancel,
             window_id: window.window_handle().window_id(),
-            was_trace_enabled: gpui::profiler::set_trace_enabled(true),
+            _tracing: Tracing::on(),
             collector: gpui::profiler::FrameTimingCollector::new(),
             pending_draw_start: None,
             before: window.input_latency_snapshot(),

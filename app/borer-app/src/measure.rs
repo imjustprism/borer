@@ -352,6 +352,31 @@ pub fn now_instant() -> Instant {
     Instant::now()
 }
 
+/// Keeps gpui's frame tracing on while it lives; dropped, it turns tracing off only if it
+/// was the one to turn it on.
+#[derive(Debug)]
+pub(super) struct Tracing {
+    /// Whether tracing was off before, so this guard turned it on.
+    turned_on: bool,
+}
+
+impl Tracing {
+    /// Turns gpui's frame tracing on and returns the guard that puts it back.
+    pub(super) fn on() -> Self {
+        Self {
+            turned_on: gpui::profiler::set_trace_enabled(true),
+        }
+    }
+}
+
+impl Drop for Tracing {
+    fn drop(&mut self) {
+        if self.turned_on {
+            gpui::profiler::set_trace_enabled(false);
+        }
+    }
+}
+
 /// Returns `d` in nanoseconds, saturating at [`u64::MAX`].
 ///
 /// # Arguments
@@ -1307,9 +1332,28 @@ mod tests {
 
     use super::scroll::scroll_report;
     use super::{
-        CliMode, OneShotAction, build_corpus_code_blocking, evaluate_one_shot,
+        CliMode, OneShotAction, Tracing, build_corpus_code_blocking, evaluate_one_shot,
         load_large_dll_blocking, parse_cli_args_os,
     };
+
+    /// A tracing guard turns tracing off when dropped only if it turned it on: with tracing
+    /// already on, it stays on.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the guard leaves tracing other than it found it.
+    #[test]
+    fn a_tracing_guard_puts_tracing_back_as_it_found_it() {
+        let was = gpui::profiler::trace_enabled();
+        for before in [true, false] {
+            gpui::profiler::set_trace_enabled(before);
+            let guard = Tracing::on();
+            assert!(gpui::profiler::trace_enabled());
+            drop(guard);
+            assert_eq!(gpui::profiler::trace_enabled(), before);
+        }
+        gpui::profiler::set_trace_enabled(was);
+    }
 
     /// Returns a frame snapshot whose three histograms each hold `n` one-millisecond samples.
     ///
