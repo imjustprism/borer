@@ -587,6 +587,32 @@ fn a_statement_of_no_fields_defines_no_struct() {
     }
 }
 
+/// Fields stated under the name of a user enum or typedef define a struct
+/// in its place, and the dry run names the type the struct replaces.
+#[test]
+fn a_struct_stated_over_an_enum_or_typedef_names_what_it_replaces() {
+    let p = two_classes();
+    let a = Analysis::compute(&p);
+    let mut o = Overlay::default();
+    let e = build_enum("E", 4, &[(1, "One".to_owned())]).expect("an enum");
+    o.types.insert("E".to_owned(), e);
+    let t = UserType::Alias(parse_type("u32").expect("a type the language spells"));
+    o.types.insert("T".to_owned(), t);
+    let one = [(0, "a", Some("u32"))];
+    for (name, mode, kind) in [
+        ("E", Mode::Merge, "enum"),
+        ("E", Mode::Replace, "enum"),
+        ("T", Mode::Merge, "typedef"),
+    ] {
+        let (said, after) = state((&p, &a), &o, name, &one, mode).expect("defines");
+        assert_eq!(
+            said,
+            format!("define struct {name}: 1 field(s), 0x4 byte(s), in place of {kind} {name}")
+        );
+        assert!(matches!(after.types.get(name), Some(UserType::Struct(_))));
+    }
+}
+
 /// A user struct takes stated fields by offset too: a field restated
 /// without a type keeps the one it had, the others stay, the size never
 /// shrinks, and replacing leaves the stated fields alone.

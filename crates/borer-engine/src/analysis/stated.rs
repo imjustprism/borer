@@ -465,7 +465,8 @@ fn by_offset(fields: &[(u64, Field)]) -> Result<BTreeMap<u64, &Field>, String> {
 ///
 /// A name that is a user struct takes the fields into the struct; else a
 /// name that is exactly a class with methods takes them as that class's
-/// stated fields ([`plan_class`]); any other name defines a struct. Under
+/// stated fields ([`plan_class`]); any other name defines a struct, and the
+/// plan says which user enum or typedef of the name the struct replaces. Under
 /// [`Mode::Merge`] a stated field takes its offset and every other field
 /// stays; a struct's field stated without a type keeps the type it had,
 /// and a class's keeps the width its code accesses it at.
@@ -492,7 +493,13 @@ pub fn plan(p: &Program, a: &Analysis, o: &Overlay, s: &Statement<'_>) -> Result
     match o.types.get(s.name) {
         Some(UserType::Struct(old)) => structure(o, s, Some(old), word),
         None if !classes::methods_of(a, o, s.name).is_empty() => plan_class(p, a, o, s),
-        Some(UserType::Enum(_) | UserType::Alias(_)) | None => structure(o, s, None, word),
+        Some(other @ (UserType::Enum(_) | UserType::Alias(_))) => {
+            let mut plan = structure(o, s, None, word)?;
+            plan.what
+                .push_str(&format!(", in place of {} {}", other.kind(), s.name));
+            Ok(plan)
+        }
+        None => structure(o, s, None, word),
     }
 }
 
