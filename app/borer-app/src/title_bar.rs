@@ -7,12 +7,12 @@
 //! app fills it with its own children.
 
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
+    AnyElement, App, AppContext as _, Context, Entity, Hsla, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
     div, px, svg,
 };
 use platform_title_bar::PlatformTitleBar;
-use theme::ActiveTheme as _;
+use theme::{ActiveTheme as _, ThemeColors};
 use ui::{Color, Tooltip, h_flex};
 
 use crate::app_assets::MARK_PATH;
@@ -28,6 +28,21 @@ const MARK_PX: f32 = 19.0;
 
 /// Window width in logical pixels from which the binary's folder follows its name.
 const FOLDER_SHOWN_FROM_PX: f32 = 1000.0;
+
+/// Returns the color the caption buttons of Windows draw their glyphs in at rest: the
+/// theme's muted text.
+///
+/// Zed's caption buttons set no color of their own at rest and inherit the title bar's;
+/// hovered, minimize and maximize take the theme's `text` over `ghost_element_hover`, and
+/// close the white-on-red of Windows.
+///
+/// # Arguments
+///
+/// * `colors` - The active theme's colors.
+#[must_use]
+pub const fn caption_glyph(colors: &ThemeColors) -> Hsla {
+    colors.text_muted
+}
 
 /// What the title bar and the window's title call the open binary: its title
 /// ([`Binary::title`]) and its folder, `borer` and no folder with nothing open.
@@ -171,6 +186,7 @@ impl Render for TitleBar {
             .debug_selector(|| "title-bar".to_owned())
             .border_b_1()
             .border_color(cx.theme().colors().border)
+            .text_color(caption_glyph(cx.theme().colors()))
             .child(self.platform.clone())
     }
 }
@@ -179,8 +195,29 @@ impl Render for TitleBar {
 mod tests {
     use gpui::TestAppContext;
 
-    use super::binary_title;
+    use super::{binary_title, caption_glyph};
+    use crate::app_settings::BORER_THEME;
     use crate::app_view::tests::{init, load_sample, open};
+    use crate::theme_contract::{QUIET_FLOOR, contrast};
+
+    /// In each of borer's themes the caption glyphs read on the title bar at rest and on the
+    /// hover fill Zed gives minimize and maximize.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a glyph falls under [`QUIET_FLOOR`] on either fill.
+    #[test]
+    fn the_caption_glyphs_read_on_the_title_bar() {
+        let family = theme_settings::deserialize_user_theme(BORER_THEME).unwrap();
+        for content in &family.themes {
+            let theme = theme_settings::refine_theme(content);
+            let colors = theme.colors();
+            let rest = contrast(caption_glyph(colors), colors.title_bar_background);
+            assert!(rest >= QUIET_FLOOR, "{}: {rest:.2} at rest", theme.name);
+            let hover = contrast(colors.text, colors.ghost_element_hover);
+            assert!(hover >= QUIET_FLOOR, "{}: {hover:.2} hovered", theme.name);
+        }
+    }
 
     /// The title says `borer` with nothing open and the binary's file name once one loads;
     /// the sample's path has no folder, so none follows.
