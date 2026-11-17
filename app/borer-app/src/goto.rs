@@ -6,8 +6,9 @@
 //! `t:`, `#`) narrows it. An address it spells is followed by its xrefs, and in a hex tab
 //! its bytes come first. Enter opens the function holding a hit, a listing at the hit when
 //! a listing is the active view, and in the linear listing goes to the row of the hit; a
-//! string opens its xrefs and an address in no function its bytes; a type or a class is
-//! named in the status line. A miss shows the engine's own words, nearest names and all.
+//! string opens its xrefs and an address in no function its bytes; a type or a class opens
+//! the types panel filtered to its name. A miss shows the engine's own words, nearest names
+//! and all.
 
 use std::sync::Arc;
 
@@ -28,6 +29,7 @@ use crate::decompile_item::{DecompileItem, Form, TabMode};
 use crate::hex_item::HexItem;
 use crate::linear_item::LinearItem;
 use crate::places::{Opening, Place, open, shown_binary};
+use crate::types::TypesPanel;
 use crate::worker::{FindAnswer, LoadedBinary, Referent, find_blocking, spawn_engine};
 
 gpui::actions!(
@@ -189,6 +191,27 @@ enum Here {
     Linear,
     /// A hex tab.
     Hex,
+}
+
+/// Shows the types panel filtered to `name`, so the type or class a hit names is listed with
+/// every source and kind of that name, for the person to open the one meant.
+///
+/// # Arguments
+///
+/// * `workspace` - The workspace.
+/// * `name` - The type's or class's name.
+/// * `window` - Window the workspace is in.
+/// * `cx` - Application context.
+fn show_type(workspace: &WeakEntity<Workspace>, name: &str, window: &mut Window, cx: &mut App) {
+    let Some(workspace) = workspace.upgrade() else {
+        return;
+    };
+    let panel = workspace.update(cx, |workspace, cx| {
+        workspace.focus_panel::<TypesPanel>(window, cx)
+    });
+    if let Some(panel) = panel {
+        panel.update(cx, |panel, cx| panel.set_filter(name, window, cx));
+    }
 }
 
 /// Returns the status line naming a hit Enter opens no code for: its kind, its text and its
@@ -420,6 +443,14 @@ impl PickerDelegate for GoToDelegate {
         };
         let Some(place) = line.target(self.here) else {
             if let Match::Hit { hit, .. } = line {
+                if matches!(hit.kind(), HitKind::Type | HitKind::Class) {
+                    let (workspace, name) = (self.workspace.clone(), hit.text.clone());
+                    cx.emit(DismissEvent);
+                    window.defer(cx, move |window, cx| {
+                        show_type(&workspace, &name, window, cx);
+                    });
+                    return;
+                }
                 let status = named(hit);
                 self.binary
                     .update(cx, |binary, cx| binary.set_status(status, cx));

@@ -1134,6 +1134,30 @@ mod tests {
         })
     }
 
+    /// Go to's Enter on a type's hit shows the types panel filtered to the type's name, so
+    /// each source and kind of that name is listed to open.
+    #[gpui::test]
+    fn going_to_a_type_lists_it_in_the_types_panel(cx: &mut TestAppContext) {
+        let (workspace, _, _, cx) = loaded_with_structs(cx);
+        cx.dispatch_action(crate::goto::GoTo);
+        cx.run_until_parked();
+        let picker = workspace
+            .read_with(cx, |workspace, cx| {
+                workspace.active_modal::<picker::Picker<crate::goto::GoToDelegate>>(cx)
+            })
+            .unwrap();
+        picker.update_in(cx, |picker, window, cx| picker.set_query("t:S", window, cx));
+        cx.run_until_parked();
+        cx.dispatch_action(menu::Confirm);
+        cx.run_until_parked();
+        let filter = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .panel::<TypesPanel>(cx)
+                .map(|panel| panel.read(cx).filter_text(cx))
+        });
+        assert_eq!(filter.as_deref(), Some("S"));
+    }
+
     /// Returns the window's binary, loaded with [`with_structs`] over the sample, and its
     /// workspace.
     fn loaded_with_structs(

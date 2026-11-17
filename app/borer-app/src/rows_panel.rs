@@ -611,6 +611,24 @@ impl<K: RowKind> RowsPanel<K> {
         self.refresh(cx);
     }
 
+    /// Keeps only the rows `text` filters, as typing it into the filter does.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The filter's new text.
+    /// * `window` - Window the panel is in.
+    /// * `cx` - Panel context.
+    pub fn set_filter(&mut self, text: &str, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.filter
+            .update(cx, |editor, cx| editor.set_text(text, window, cx));
+    }
+
+    /// Returns the filter's text.
+    #[must_use]
+    pub fn filter_text(&self, cx: &App) -> String {
+        self.filter.read(cx).text(cx)
+    }
+
     /// Returns the highlighted row, if any.
     #[must_use]
     pub fn selected_row(&self) -> Option<&K::Row> {
