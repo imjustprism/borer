@@ -95,6 +95,13 @@ gpui::actions!(
         /// Lists the theme files Zed has installed, its themes folder's and its extensions',
         /// and opens the import report of the one picked, with borer's keys it lacks.
         ImportThemeFromZed,
+        /// Roots the call tree at the function of the active tab and focuses its panel.
+        CallTree,
+        /// Flips the call tree between what its functions call and what calls them.
+        CallTreeDirection,
+        /// Lists or hides, in the call tree's callees, the virtual calls the decompiler
+        /// resolves, which decompiles each function opened.
+        ToggleVirtualCalls,
     ]
 );
 

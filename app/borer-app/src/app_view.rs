@@ -647,7 +647,7 @@ pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
     );
 }
 
-/// Closes `binary`, takes its functions panel out of the dock and closes its code and
+/// Closes `binary`, takes every panel of [`PANELS`] out of its dock and closes its code and
 /// linear listing tabs, which leaves each pane its start tab.
 ///
 /// # Arguments
@@ -774,6 +774,7 @@ pub(crate) mod tests {
     };
     use crate::actions::{Open, ToggleFunctionColumns};
     use crate::binary::{Binary, StatusLine};
+    use crate::call_tree_panel::{CallTreePanel, OWN_ACTIONS};
     use crate::decompile_item::{DecompileItem, TabMode};
     use crate::function_columns::Columns;
     use crate::functions_panel::FunctionsPanel;
@@ -981,12 +982,13 @@ pub(crate) mod tests {
         }
     }
 
-    /// Every action of the `borer` namespace is available to Zed's command palette, with the
-    /// functions panel focused and with a decompile tab focused.
+    /// Every action of the `borer` namespace is available to Zed's command palette: every
+    /// window-wide one with the functions panel focused and with a decompile tab focused,
+    /// and every one with the call tree focused, whose own actions it answers itself.
     ///
     /// # Panics
     ///
-    /// Panics if an action is missing in either place.
+    /// Panics if an action is missing in any of those places.
     #[gpui::test]
     fn every_borer_action_is_in_the_palette(cx: &mut TestAppContext) {
         every_borer_action_is_in_the_palette_steps(cx);
@@ -1010,12 +1012,23 @@ pub(crate) mod tests {
                 .collect()
         });
         assert!(!declared.is_empty());
+        let own: Vec<&str> = OWN_ACTIONS.iter().map(|action| action.name()).collect();
+        assert!(own.iter().all(|name| declared.contains(name)));
+        let wide: Vec<&str> = declared
+            .iter()
+            .copied()
+            .filter(|name| !own.contains(name))
+            .collect();
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.focus_panel::<FunctionsPanel>(window, cx);
         });
-        assert_available(&declared, cx);
+        assert_available(&wide, cx);
         open_caller(&workspace, TabMode::Permanent, cx);
         assert_eq!(shown(&workspace, cx).map(|(entry, _)| entry), Some(CALLER));
+        assert_available(&wide, cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.focus_panel::<CallTreePanel>(window, cx);
+        });
         assert_available(&declared, cx);
     }
 

@@ -19,7 +19,14 @@ use crate::start_item::StartItem;
 use crate::worker::Jobs;
 
 /// The panels the suite runs over, by key, in [`PANELS`] order.
-const PANELS_RUN: &[&str] = &["Functions", "Strings", "Imports", "Exports", "Xrefs"];
+const PANELS_RUN: &[&str] = &[
+    "Functions",
+    "Strings",
+    "Imports",
+    "Exports",
+    "Xrefs",
+    "CallTree",
+];
 
 /// Returns one example of every [`Place`] variant a tab shows; an xrefs place shows in its
 /// panel, which the panel tests run.

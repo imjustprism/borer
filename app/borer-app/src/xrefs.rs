@@ -16,7 +16,7 @@ use crate::code_view::Role;
 use crate::decompile_item::Form;
 use crate::panels::PanelSpec;
 use crate::places::Place;
-use crate::rows_panel::{Empty, Page, RowKind, RowsPanel, add, focus, remove};
+use crate::rows_panel::{Empty, Page, RowKind, RowsPanel, add, focus};
 use crate::table::{Align, Column, Columns, Fit, Ink};
 use crate::worker::{LoadedBinary, Referent, xrefs_blocking};
 
@@ -42,7 +42,7 @@ pub const XREFS: PanelSpec = PanelSpec {
     size_px: 260.0,
     hooks: crate::rail::panel::<XrefsPanel>(),
     add: add::<Xrefs>,
-    remove: remove::<Xrefs>,
+    remove: crate::panels::remove::<XrefsPanel>,
     focus: focus::<Xrefs>,
 };
 

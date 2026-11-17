@@ -14,11 +14,11 @@ use crate::app_assets::Glyph;
 use crate::binary::Binary;
 use crate::commands;
 use crate::function_columns::{Column, Columns};
-use crate::panels::PanelSpec;
+use crate::panels::{PanelSpec, remove};
 use crate::places::Place;
 use crate::rail::panel;
 pub use crate::rows_panel::Empty;
-use crate::rows_panel::{Answer, RowKind, RowsPanel, add, focus, remove};
+use crate::rows_panel::{Answer, RowKind, RowsPanel, add, focus};
 use crate::worker::{LoadedBinary, filter_rows_blocking};
 
 /// The functions panel's row of [`crate::panels::PANELS`].
@@ -32,7 +32,7 @@ pub const PANEL: PanelSpec = PanelSpec {
     size_px: 560.0,
     hooks: panel::<FunctionsPanel>(),
     add: add::<Functions>,
-    remove: remove::<Functions>,
+    remove: remove::<FunctionsPanel>,
     focus: focus::<Functions>,
 };
 

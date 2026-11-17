@@ -374,6 +374,16 @@ pub const COMMANDS: &[Command] = &[
         )
     },
     Command {
+        keys: &[Keys::all(Ctx::Workspace, &["secondary-shift-b"])],
+        serves: &["callgraph"],
+        ..item(
+            "borer::CallTree",
+            "Call Tree",
+            (MenuName::View, 0),
+            Need::Binary,
+        )
+    },
+    Command {
         keys: &[Keys::all(Ctx::Workspace, &["secondary-shift-e"])],
         serves: &["functions"],
         ..item(
@@ -749,6 +759,18 @@ pub const COMMANDS: &[Command] = &[
             "borer::WalkRight",
             "Graph Block Right",
             &[Keys::all(Ctx::Graph, &["right"])],
+        )
+    },
+    Command {
+        serves: &["callgraph"],
+        ..binding("borer::CallTreeDirection", "Flip the Call Tree", &[])
+    },
+    Command {
+        serves: &["callgraph"],
+        ..binding(
+            "borer::ToggleVirtualCalls",
+            "Virtual Calls in the Call Tree",
+            &[],
         )
     },
     binding(

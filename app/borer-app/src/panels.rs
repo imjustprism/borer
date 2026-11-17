@@ -7,7 +7,7 @@
 use gpui::{Action, Context, Entity, InteractiveElement as _, Window};
 use workspace::DockStructure;
 use workspace::Workspace;
-use workspace::dock::DockPosition;
+use workspace::dock::{DockPosition, Panel};
 
 use crate::app_assets::Glyph;
 use crate::binary::Binary;
@@ -66,6 +66,94 @@ impl std::fmt::Debug for PanelSpec {
     }
 }
 
+/// Takes the panel of type `T` out of its dock, when it is docked: a row's
+/// [`PanelSpec::remove`].
+///
+/// # Arguments
+///
+/// * `workspace` - The workspace.
+/// * `window` - Window the workspace is in.
+/// * `cx` - Workspace context.
+pub fn remove<T: Panel>(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<'_, Workspace>,
+) {
+    if let Some(panel) = workspace.panel::<T>(cx) {
+        workspace.remove_panel(&panel, window, cx);
+    }
+}
+
+/// Writes the methods of Zed's [`Panel`] that a panel reads from its [`PanelSpec`] row,
+/// inside the panel's `impl Panel`.
+///
+/// The panel keeps its dock in a `position` field. Moving it pokes the settings store
+/// once: Zed's dock moves a panel only when the store changes (the settings observer
+/// `Dock::add_panel` sets), and the app keeps no dock setting of its own to write.
+///
+/// # Arguments
+///
+/// * `$spec` - The panel's row, a `&PanelSpec` expression.
+macro_rules! spec_panel {
+    ($spec:expr) => {
+        fn persistent_name() -> &'static str {
+            $spec.key
+        }
+
+        fn panel_key() -> &'static str {
+            $spec.key
+        }
+
+        fn position(&self, _window: &::gpui::Window, _cx: &::gpui::App) -> DockPosition {
+            self.position
+        }
+
+        fn position_is_valid(&self, position: DockPosition) -> bool {
+            $spec.docks.contains(&position)
+        }
+
+        fn set_position(
+            &mut self,
+            position: DockPosition,
+            _window: &mut ::gpui::Window,
+            cx: &mut ::gpui::Context<'_, Self>,
+        ) {
+            use ::gpui::BorrowAppContext as _;
+            self.position = position;
+            cx.notify();
+            cx.update_global::<::settings::SettingsStore, _>(|_, _| {});
+        }
+
+        fn default_size(&self, _window: &::gpui::Window, _cx: &::gpui::App) -> ::gpui::Pixels {
+            ::gpui::px($spec.size_px)
+        }
+
+        fn icon(&self, _window: &::gpui::Window, _cx: &::gpui::App) -> Option<::ui::IconName> {
+            match $spec.icon {
+                $crate::app_assets::Glyph::Zed(name) => Some(name),
+                $crate::app_assets::Glyph::App(_) => None,
+            }
+        }
+
+        fn icon_tooltip(
+            &self,
+            _window: &::gpui::Window,
+            _cx: &::gpui::App,
+        ) -> Option<&'static str> {
+            Some($spec.title)
+        }
+
+        fn toggle_action(&self) -> Box<dyn ::gpui::Action> {
+            $spec.toggle.boxed_clone()
+        }
+
+        fn activation_priority(&self) -> u32 {
+            $crate::panels::priority($spec.key)
+        }
+    };
+}
+pub(crate) use spec_panel;
+
 /// Every dock panel of the app, in activation order.
 pub const PANELS: &[&PanelSpec] = &[
     &crate::functions_panel::PANEL,
@@ -73,6 +161,7 @@ pub const PANELS: &[&PanelSpec] = &[
     &crate::tables::IMPORTS,
     &crate::tables::EXPORTS,
     &crate::xrefs::XREFS,
+    &crate::call_tree_panel::PANEL,
 ];
 
 /// Returns the activation priority of the panel saved under `key`: its place in [`PANELS`]
@@ -144,11 +233,41 @@ pub fn add_panels(
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test; gpui::test hides each body in an undocumented fn"
+)]
 mod tests {
+    use gpui::{Entity, TestAppContext};
     use workspace::dock::DockPosition;
     use workspace::{DockData, DockStructure};
 
     use super::{PANELS, priority, saved_dock};
+    use crate::app_view::tests::{init, load_sample, open};
+
+    /// Every panel the workspace docks is a row of [`PANELS`], and it activates at the
+    /// priority its row's place gives, never a number of its own.
+    #[gpui::test]
+    fn every_docked_panel_takes_its_priority_from_its_row(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        load_sample(&app, cx);
+        let workspace = app.workspace.clone();
+        let mut docked = Vec::new();
+        workspace.update_in(cx, |workspace, window, cx| {
+            for dock in workspace.all_docks().map(Entity::clone) {
+                for ix in 0..dock.read(cx).panels_len() {
+                    dock.update(cx, |dock, cx| dock.activate_panel(ix, window, cx));
+                    let panel = dock.read(cx).active_panel().unwrap().clone();
+                    docked.push((panel.persistent_name(), panel.activation_priority(cx)));
+                }
+            }
+        });
+        docked.sort_unstable();
+        let mut rows: Vec<_> = PANELS.iter().map(|s| (s.key, priority(s.key))).collect();
+        rows.sort_unstable();
+        assert_eq!(docked, rows);
+    }
 
     /// Within each dock, the panels that may sit there have distinct priorities, every key
     /// is its own, and a priority is the panel's place in the list.

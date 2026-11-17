@@ -14,11 +14,14 @@ use borer_engine::analysis::decompile::text_check;
 use borer_engine::analysis::decompile::view::view;
 use borer_engine::analysis::find::{Found, Query, everywhere};
 use borer_engine::analysis::render::{
-    Bytes, Cell as BandCell, Cfg, Dir, FunctionOrder, FunctionRows, LinearPage, SymbolRows, Triage,
-    XREF_ROWS_MAX, XrefRows, XrefView, answered_flagged, band, cfg, disasm_view, function_rows,
-    linear, symbol_rows, triage, xref_rows, xref_rows_of_import,
+    Bytes, Cell as BandCell, Cfg, Children, Dir, FunctionOrder, FunctionRows, Level, LinearPage,
+    SymbolRows, Triage, Via, XREF_ROWS_MAX, XrefRows, XrefView, answered_flagged, band,
+    call_children, cfg, disasm_view, function_rows, linear, symbol_rows, triage, xref_rows,
+    xref_rows_of_import,
 };
-use borer_engine::analysis::{Analysis, EnumSource, Overlay, no_function_at, resolve_suggesting};
+use borer_engine::analysis::{
+    Analysis, EnumSource, Overlay, decompile, name_of, no_function_at, resolve_suggesting,
+};
 use borer_engine::cancel::Cancel;
 use borer_engine::hexdump::{HexRows, hex_rows};
 use borer_engine::program::{Feature, Program, SymbolKind};
@@ -26,6 +29,7 @@ use borer_engine::strings::walk::{StringEncoding, StringRows, WALK_MIN, string_r
 use borer_engine::view::View;
 use gpui::{App, Context, Global, SharedString, Task, Window};
 
+use crate::call_tree::Search;
 use crate::decompile_item::Form;
 use crate::places::Place;
 
@@ -514,6 +518,60 @@ pub fn grade_counts_blocking(loaded: &LoadedBinary, entry: u64) -> Option<GradeC
 #[must_use]
 pub fn decompile_blocking(loaded: &LoadedBinary, entry: u64) -> Option<Arc<View>> {
     view(&loaded.program, &loaded.analysis, &loaded.overlay, entry)
+}
+
+/// Lists one level of the call tree under or over `node` of `loaded`, and says whether
+/// the engine looked for the node's virtual calls.
+///
+/// The engine lists no virtual call of a function that does not decompile, so a level
+/// asking for them that lists none asks the decompiler whether the function decompiles;
+/// that decompilation is the one finding them made, memoized.
+///
+/// Must be called inside [`spawn_engine`].
+///
+/// # Arguments
+///
+/// * `loaded` - Previously loaded binary state.
+/// * `node` - A function entry or import slot of the tree.
+/// * `level` - Whether the level lists what the node calls, with or without its resolved
+///   virtual calls, or what calls it.
+///
+/// # Returns
+///
+/// The engine's edges of the level and how many there are, and whether its virtual calls
+/// were looked for.
+#[must_use]
+pub fn call_level_blocking(loaded: &LoadedBinary, node: u64, level: Level) -> (Children, Search) {
+    let (p, a, o) = (&loaded.program, &loaded.analysis, &loaded.overlay);
+    let children = call_children(p, a, o, node, level);
+    let search = match level {
+        Level::Callees | Level::Callers => Search::NotAsked,
+        Level::CalleesAndVirtuals => {
+            let found = children
+                .rows
+                .iter()
+                .any(|e| matches!(e.via, Via::Virtual { .. }));
+            if found || decompile::decompile(p, a, o, node).is_some() {
+                Search::Searched
+            } else {
+                Search::Failed
+            }
+        }
+    };
+    (children, search)
+}
+
+/// Returns the name listings give the function at `entry` of `loaded`.
+///
+/// Must be called inside [`spawn_engine`].
+///
+/// # Arguments
+///
+/// * `loaded` - Previously loaded binary state.
+/// * `entry` - Entry virtual address of the function.
+#[must_use]
+pub fn function_name_blocking(loaded: &LoadedBinary, entry: u64) -> String {
+    name_of(&loaded.analysis, &loaded.overlay, entry)
 }
 
 /// Most instructions a listing shows; a cut listing ends with the engine's
@@ -1030,7 +1088,7 @@ mod tests {
     }
 
     /// Returns every module of the crate but this one, by path under `src`, with its text.
-    fn sources() -> [(&'static str, &'static str); 45] {
+    fn sources() -> [(&'static str, &'static str); 47] {
         [
             ("actions.rs", include_str!("actions.rs")),
             ("app_assets.rs", include_str!("app_assets.rs")),
@@ -1038,6 +1096,8 @@ mod tests {
             ("app_settings.rs", include_str!("app_settings.rs")),
             ("app_view.rs", include_str!("app_view.rs")),
             ("binary.rs", include_str!("binary.rs")),
+            ("call_tree.rs", include_str!("call_tree.rs")),
+            ("call_tree_panel.rs", include_str!("call_tree_panel.rs")),
             ("card.rs", include_str!("card.rs")),
             ("code_semantics.rs", include_str!("code_semantics.rs")),
             ("code_view.rs", include_str!("code_view.rs")),
@@ -1112,8 +1172,8 @@ mod tests {
     /// # Panics
     ///
     /// Panics if another module names `Program::load`, `Analysis::compute`, a decompile
-    /// or listing view, the linear listing, the resolver, the function listing, the check
-    /// of an answer, the triage or the find.
+    /// or listing view, the linear listing, the resolver, the decompiler, the function
+    /// listing, the check of an answer, the triage, the find or a level of the call tree.
     #[test]
     fn only_the_worker_names_engine_compute_calls() {
         let calls = [
@@ -1134,6 +1194,8 @@ mod tests {
             "symbol_rows(",
             "xref_rows",
             "hex_rows(",
+            "call_children(",
+            "decompile::decompile(",
         ];
         for (name, text) in sources() {
             let code = kept(text);

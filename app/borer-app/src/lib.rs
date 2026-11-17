@@ -6,6 +6,8 @@ pub mod app_dirs;
 pub mod app_settings;
 pub mod app_view;
 pub mod binary;
+pub mod call_tree;
+pub mod call_tree_panel;
 pub mod card;
 pub mod code_semantics;
 pub mod code_view;

@@ -14,29 +14,27 @@ use borer_engine::analysis::render::LeftOut;
 use editor::{Editor, EditorEvent};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Action, AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Div, Entity,
-    EventEmitter, FocusHandle, Focusable, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, Render, ScrollStrategy, SharedString, Stateful,
-    StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, canvas, div,
-    px, transparent_black,
+    AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Div, Entity, EventEmitter,
+    FocusHandle, Focusable, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
+    Pixels, Render, ScrollStrategy, SharedString, Stateful, StatefulInteractiveElement as _,
+    Styled as _, Subscription, WeakEntity, Window, canvas, div, px, transparent_black,
 };
 use settings::{Settings as _, SettingsStore};
 use theme::{ActiveTheme as _, GlobalTheme};
 use theme_settings::ThemeSettings;
 use ui::{
-    Color, ColumnWidthConfig, IconName, KeyBinding, Label, LabelCommon as _, LabelSize,
+    Color, ColumnWidthConfig, KeyBinding, Label, LabelCommon as _, LabelSize,
     ResizableColumnsState, Table, TableInteractionState, TableResizeBehavior, h_flex,
 };
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use crate::actions::{CycleSort, FocusFilter, Hint, OPEN_HINT, ShowHex, Xrefs};
-use crate::app_assets::Glyph;
 use crate::binary::{Binary, BinaryEvent, SettingsNotice, reading_label};
 use crate::card::{Card, Tone};
 use crate::code_view::CodePalette;
 use crate::decompile_item::{TabMode, code_row_height};
-use crate::panels::{PanelSpec, priority};
+use crate::panels::{PanelSpec, spec_panel};
 use crate::places::{Opening, Place, open_later};
 use crate::table::{Column, Columns, Ink, aligned, cells, widths};
 use crate::worker::{Job, LoadedBinary, Referent};
@@ -1308,24 +1306,6 @@ pub fn add<K: RowKind>(
     workspace.add_panel(panel, window, cx);
 }
 
-/// Takes the rows panel of kind `K` out of its dock, when it is docked: every rows kind's
-/// [`PanelSpec::remove`].
-///
-/// # Arguments
-///
-/// * `workspace` - The workspace.
-/// * `window` - Window the workspace is in.
-/// * `cx` - Workspace context.
-pub fn remove<K: RowKind>(
-    workspace: &mut Workspace,
-    window: &mut Window,
-    cx: &mut Context<'_, Workspace>,
-) {
-    if let Some(panel) = workspace.panel::<RowsPanel<K>>(cx) {
-        workspace.remove_panel(&panel, window, cx);
-    }
-}
-
 /// Shows the rows panel of kind `K` and focuses it, or moves focus back to the center
 /// pane: every rows kind's [`PanelSpec::focus`].
 ///
@@ -1351,13 +1331,7 @@ impl<K: RowKind> Focusable for RowsPanel<K> {
 }
 
 impl<K: RowKind> Panel for RowsPanel<K> {
-    fn persistent_name() -> &'static str {
-        K::PANEL.key
-    }
-
-    fn panel_key() -> &'static str {
-        K::PANEL.key
-    }
+    spec_panel!(K::PANEL);
 
     fn activation_focus_handle(&self, cx: &App) -> FocusHandle {
         if K::FILTERS {
@@ -1365,47 +1339,6 @@ impl<K: RowKind> Panel for RowsPanel<K> {
         } else {
             self.rows_focus.clone()
         }
-    }
-
-    fn position(&self, _window: &Window, _cx: &App) -> DockPosition {
-        self.position
-    }
-
-    fn position_is_valid(&self, position: DockPosition) -> bool {
-        K::PANEL.docks.contains(&position)
-    }
-
-    /// Moves the panel to `position`, then pokes the settings store once: Zed's dock moves a
-    /// panel only when the store changes (the settings observer `Dock::add_panel` sets), and
-    /// the app keeps no dock setting of its own to write.
-    fn set_position(
-        &mut self,
-        position: DockPosition,
-        _window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        self.position = position;
-        cx.notify();
-        cx.update_global::<SettingsStore, _>(|_, _| {});
-    }
-
-    fn default_size(&self, _window: &Window, _cx: &App) -> Pixels {
-        px(K::PANEL.size_px)
-    }
-
-    fn icon(&self, _window: &Window, _cx: &App) -> Option<IconName> {
-        match K::PANEL.icon {
-            Glyph::Zed(name) => Some(name),
-            Glyph::App(_) => None,
-        }
-    }
-
-    fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
-        Some(K::PANEL.title)
-    }
-
-    fn toggle_action(&self) -> Box<dyn Action> {
-        K::PANEL.toggle.boxed_clone()
     }
 
     fn starts_open(&self, _window: &Window, _cx: &App) -> bool {
@@ -1420,10 +1353,6 @@ impl<K: RowKind> Panel for RowsPanel<K> {
         } else if active && self.stale {
             self.request(true, cx);
         }
-    }
-
-    fn activation_priority(&self) -> u32 {
-        priority(K::PANEL.key)
     }
 }
 
@@ -1445,9 +1374,7 @@ pub(crate) mod tests {
     use workspace::Workspace;
     use workspace::dock::DockPosition;
 
-    use super::{
-        Empty, PAGE_ROWS, Page, RowKind, RowsPanel, Sort, add, clicked, cycled, focus, remove,
-    };
+    use super::{Empty, PAGE_ROWS, Page, RowKind, RowsPanel, Sort, add, clicked, cycled, focus};
     use crate::actions::{CycleSort, ToggleXrefs, Xrefs as XrefsAction};
     use crate::app_assets::Glyph;
     use crate::app_view::tests::{binary_in, init, loaded_of, open};
@@ -1677,7 +1604,7 @@ pub(crate) mod tests {
         size_px: 200.0,
         hooks: crate::rail::panel::<RowsPanel<Probe>>(),
         add: add::<Probe>,
-        remove: remove::<Probe>,
+        remove: crate::panels::remove::<RowsPanel<Probe>>,
         focus: focus::<Probe>,
     };
 

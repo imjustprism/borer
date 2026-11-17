@@ -20,7 +20,7 @@ use crate::decompile_item::Form;
 use crate::panels::PanelSpec;
 use crate::places::Place;
 use crate::rail::panel;
-use crate::rows_panel::{Empty, Page, RowKind, RowsPanel, add, focus, remove};
+use crate::rows_panel::{Empty, Page, RowKind, RowsPanel, add, focus};
 use crate::table::{Align, Column, Columns, Fit, Ink};
 use crate::worker::{LoadedBinary, Referent, strings_blocking, symbols_blocking};
 
@@ -61,7 +61,7 @@ const fn side<K: RowKind>(
         size_px: 480.0,
         hooks: panel::<RowsPanel<K>>(),
         add: add::<K>,
-        remove: remove::<K>,
+        remove: crate::panels::remove::<RowsPanel<K>>,
         focus: focus::<K>,
     }
 }
