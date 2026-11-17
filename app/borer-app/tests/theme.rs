@@ -489,6 +489,32 @@ async fn a_settings_file_with_a_wrong_type_is_partly_applied(cx: &mut TestAppCon
     assert!(said.starts_with("settings file partly applied"), "{said}");
 }
 
+/// A settings file that is a link stays one through a theme change: the change is written
+/// to the file the link leads to.
+#[gpui::test]
+async fn a_linked_settings_file_stays_a_link(cx: &mut TestAppContext) {
+    let app_state = cx.update(start);
+    let fake = app_state.fs.as_fake();
+    let target = std::env::temp_dir()
+        .join("borer-app-link")
+        .join("settings.json");
+    let path = settings_file();
+    for file in [&target, path] {
+        let parent = file.parent().expect("the file sits in a folder");
+        fake.create_dir(parent).await.expect("the folder is made");
+    }
+    fake.insert_file(&target, b"{}".to_vec()).await;
+    fake.insert_symlink(path, target.clone()).await;
+    cx.update(configure).expect("the app configures Zed");
+    cx.run_until_parked();
+    run(&ToggleTheme, cx);
+    let link = app_state.fs.metadata(path).await;
+    assert!(link.expect("stated").expect("there").is_symlink);
+    let text = app_state.fs.load(&target).await.expect("the target");
+    assert!(text.contains("theme"), "{text}");
+    assert_eq!(notice(cx), None);
+}
+
 /// A directory where the settings file should be never stops startup.
 #[gpui::test]
 async fn a_settings_directory_is_reported(cx: &mut TestAppContext) {

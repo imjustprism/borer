@@ -241,7 +241,8 @@ impl Global for SettingsWrites {}
 ///
 /// Zed's own writer writes the settings file of Zed's config directory, which the app does
 /// not keep its settings in ([`crate::app_dirs`]), so the app writes its file itself with
-/// the same edit Zed makes: the text the file holds, changed only where `edit` changes it.
+/// the same edit Zed makes: the text the file holds, changed only where `edit` changes it,
+/// written where a link at the file's path leads, as Zed's writer does, so the link stays.
 ///
 /// # Arguments
 ///
@@ -267,14 +268,17 @@ fn write_settings(
         let written = async {
             check_settings_path(&path)?;
             let there = fs.metadata(&path).await;
-            let old = match there.with_context(|| format!("stating {shown}"))? {
-                Some(_) => (fs.load(&path).await).with_context(|| format!("reading {shown}"))?,
-                None => String::new(),
+            let (old, target) = match there.with_context(|| format!("stating {shown}"))? {
+                Some(_) => (
+                    (fs.load(&path).await).with_context(|| format!("reading {shown}"))?,
+                    (fs.canonicalize(&path).await).with_context(|| format!("resolving {shown}"))?,
+                ),
+                None => (String::new(), path.clone()),
             };
             let new =
                 cx.read_global(|store: &SettingsStore, _| store.new_text_for_update(old, edit))?;
-            (fs.atomic_write(path.clone(), new.clone()).await)
-                .with_context(|| format!("writing {shown}"))?;
+            (fs.atomic_write(target.clone(), new.clone()).await)
+                .with_context(|| format!("writing {}", target.display()))?;
             cx.update_global(|store: &mut SettingsStore, cx| {
                 drop(store.set_user_settings(&new, cx));
             });
