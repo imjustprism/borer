@@ -3,7 +3,8 @@
 //!
 //! This follows Zed's own `load_user_themes_in_background` and `watch_themes` (in the `zed`
 //! crate, which is not a library). Each file is opened once and read through that handle
-//! to at most [`MAX_THEME_BYTES`], then parsed and refined on the background executor; only
+//! to at most [`MAX_THEME_BYTES`], its themes counted against [`MAX_FAMILY_THEMES`], then
+//! parsed and refined on the background executor; only
 //! registering the result runs on the UI thread. A theme name is held by one file: a file
 //! naming one of the app's own themes or a theme another file holds is refused, as an
 //! import is ([`claim`]). A file deleted takes its themes with it. A file that is refused,
@@ -28,6 +29,9 @@ use crate::shell::{dismiss_app_notice, show_app_notice};
 
 /// Most bytes a theme file may hold before the app refuses to read it.
 pub const MAX_THEME_BYTES: u64 = 4 << 20;
+
+/// Most themes one theme family may hold before the app refuses to parse it.
+pub const MAX_FAMILY_THEMES: usize = 64;
 
 /// Most entries the themes folder may hold, and most theme files one change may touch.
 ///
@@ -192,7 +196,15 @@ pub(crate) async fn read_capped(fs: &dyn fs::Fs, path: &Path) -> anyhow::Result<
     Ok(bytes)
 }
 
-/// Returns the theme family `bytes`, read from `path`, hold.
+/// A theme family's themes, counted without reading them.
+#[derive(serde::Deserialize)]
+struct Counted {
+    /// One entry per theme, each skipped.
+    themes: Vec<serde::de::IgnoredAny>,
+}
+
+/// Returns the theme family `bytes`, read from `path`, hold, once a count of its themes
+/// finds no more than [`MAX_FAMILY_THEMES`].
 ///
 /// # Arguments
 ///
@@ -201,8 +213,16 @@ pub(crate) async fn read_capped(fs: &dyn fs::Fs, path: &Path) -> anyhow::Result<
 ///
 /// # Errors
 ///
-/// Returns an error naming the path when the bytes do not parse as a theme family.
+/// Returns an error naming the path when the bytes hold over [`MAX_FAMILY_THEMES`] themes
+/// or do not parse as a theme family.
 pub(crate) fn parse_theme(path: &Path, bytes: &[u8]) -> anyhow::Result<ThemeFamilyContent> {
+    let counted = serde_json_lenient::from_slice::<Counted>(bytes).map_or(0, |c| c.themes.len());
+    if counted > MAX_FAMILY_THEMES {
+        anyhow::bail!(
+            "{} holds {counted} themes, over the {MAX_FAMILY_THEMES} the app reads",
+            path.display()
+        );
+    }
     deserialize_user_theme(bytes)
         .with_context(|| format!("{} is not a theme family", path.display()))
 }
@@ -223,8 +243,9 @@ pub(crate) fn parse_theme(path: &Path, bytes: &[u8]) -> anyhow::Result<ThemeFami
 pub(crate) fn claim(names: &[SharedString], path: &Path, cx: &App) -> anyhow::Result<()> {
     let registry = ThemeRegistry::global(cx);
     let owners = cx.try_global::<ThemeFiles>();
-    for (i, name) in names.iter().enumerate() {
-        if names.iter().take(i).any(|earlier| earlier == name) {
+    let mut seen = BTreeSet::new();
+    for name in names {
+        if !seen.insert(name) {
             anyhow::bail!("{} names the theme {name} twice", path.display());
         }
         match owners.and_then(|owners| owners.0.get(name)) {
@@ -256,9 +277,10 @@ pub(crate) fn claim(names: &[SharedString], path: &Path, cx: &App) -> anyhow::Re
 pub(crate) fn register(path: &Path, family: ThemeFamily, cx: &mut App) -> anyhow::Result<()> {
     let names: Vec<SharedString> = family.themes.iter().map(|t| t.name.clone()).collect();
     claim(&names, path, cx)?;
+    let kept: BTreeSet<&SharedString> = names.iter().collect();
     let stale: Vec<_> = owned_by(path, cx)
         .into_iter()
-        .filter(|name| !names.contains(name))
+        .filter(|name| !kept.contains(name))
         .collect();
     let registry = ThemeRegistry::global(cx);
     registry.remove_user_themes(&stale);

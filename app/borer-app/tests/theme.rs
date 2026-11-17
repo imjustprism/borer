@@ -28,7 +28,7 @@ use borer_app::theme_contract::{
 };
 use borer_app::theme_import::{ImportReport, Origin, import, read_candidate, read_from};
 use borer_app::theme_picker::ThemePicker;
-use borer_app::user_themes::{MAX_THEME_BYTES, MAX_THEME_ENTRIES, notice_id};
+use borer_app::user_themes::{MAX_FAMILY_THEMES, MAX_THEME_BYTES, MAX_THEME_ENTRIES, notice_id};
 use borer_app::zed_import::zed_themes;
 use borer_engine::program::checked_metadata;
 use fs::Fs as _;
@@ -901,6 +901,41 @@ async fn an_import_copies_a_theme_file_and_refuses_the_rest(cx: &mut TestAppCont
         "{said}"
     );
     assert_eq!(themes_folder(&app_state).await, ["pretty.json"]);
+}
+
+/// Returns a theme family of `count` dark themes with nothing set, `t0 dark` onward.
+fn family_of(count: usize) -> Vec<u8> {
+    let themes: Vec<String> = (0..count)
+        .map(|i| format!(r#"{{"name": "t{i} dark", "appearance": "dark", "style": {{}}}}"#))
+        .collect();
+    let themes = themes.join(", ");
+    format!(r#"{{"name": "many", "author": "a person", "themes": [{themes}]}}"#).into_bytes()
+}
+
+/// A theme family of more themes than the app reads is refused naming the cap, before its
+/// themes are parsed; one of exactly the cap reads, every theme in its report.
+#[gpui::test]
+async fn a_family_of_too_many_themes_is_refused(cx: &mut TestAppContext) {
+    let app_state = boot_with_files(&[], cx).await;
+    let fs = app_state.fs.clone();
+    let fake = fs.as_fake();
+    let elsewhere = std::env::temp_dir().join("borer-app-many");
+    fake.create_dir(&elsewhere).await.expect("made");
+    let (over, full) = (elsewhere.join("over.json"), elsewhere.join("full.json"));
+    fake.insert_file(&over, family_of(MAX_FAMILY_THEMES + 1))
+        .await;
+    fake.insert_file(&full, family_of(MAX_FAMILY_THEMES)).await;
+    let read = |path: &Path, cx: &mut TestAppContext| {
+        cx.update(|cx| read_candidate(fs.clone(), path.to_owned(), cx))
+    };
+    let said = format!("{:#}", read(&over, cx).await.expect_err("too many"));
+    let cap = format!("over the {MAX_FAMILY_THEMES} the app reads");
+    assert!(
+        said.contains("over.json holds") && said.contains(&cap),
+        "{said}"
+    );
+    let candidate = read(&full, cx).await.expect("reads");
+    assert_eq!(candidate.reports.len(), MAX_FAMILY_THEMES);
 }
 
 /// A theme file dropped on a tab opens its report, each theme with the rules it breaks;
