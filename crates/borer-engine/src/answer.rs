@@ -28,6 +28,9 @@ use Need::{Best, Code, File};
 use Takes::{Argument, Either, Nothing};
 
 pub mod catalog;
+mod listing;
+
+pub use listing::Listing;
 
 /// The refusal of an `about` given no name, the resource's and the CLI's.
 pub const ABOUT_NEEDS_A_NAME: &str = "about needs a name: an attribute, a class, or a function";
@@ -845,6 +848,66 @@ pub fn read(
     uri: &str,
     page: Page<'_>,
 ) -> Option<Result<String, String>> {
+    Some(answered(program, analysis, overlay, uri, page)?.map(|(text, _)| text))
+}
+
+/// Answers a resource as a listing a front end draws as a table: the text
+/// [`read`] gives, its lines read once ([`Listing`]).
+///
+/// # Arguments
+///
+/// * `program` - The loaded program.
+/// * `analysis` - Its analysis, `None` when none is held, as [`read`]
+///   takes it.
+/// * `overlay` - The names, comments and types in force.
+/// * `uri` - The URI, with any `!offset=` and `!limit=` suffix
+///   ([`Suffixed`]); a `!since=` or `!fresh` is the front end's and is
+///   left to it.
+///
+/// # Errors
+///
+/// When a suffix does not read, the engine does not answer the resource,
+/// or it refuses the read, with the sentence [`read`] gives.
+pub fn listing(
+    program: &Program,
+    analysis: Option<&Analysis>,
+    overlay: &Overlay,
+    uri: &str,
+) -> Result<Listing, String> {
+    let asked = Suffixed::read(uri)?;
+    let again = asked.again();
+    let (text, total) = answered(program, analysis, overlay, asked.core, asked.page(&again))
+        .unwrap_or_else(|| {
+            Err(format!(
+                "the engine does not answer {}",
+                crate::text::one_line(asked.core)
+            ))
+        })?;
+    Ok(Listing::read(text, total))
+}
+
+/// Answers a resource as [`read`] does, with the rows the engine's pager
+/// counted when it paged the answer ([`crate::table::page_counted`]).
+///
+/// # Arguments
+///
+/// * `program` - The loaded program.
+/// * `analysis` - Its analysis, `None` when none is held.
+/// * `overlay` - The names, comments and types in force.
+/// * `uri` - The URI with its page suffixes taken off.
+/// * `page` - The page asked.
+///
+/// # Returns
+///
+/// The text and the count, `None` for a count when the pager did not page
+/// it; refused and unanswered as [`read`].
+fn answered(
+    program: &Program,
+    analysis: Option<&Analysis>,
+    overlay: &Overlay,
+    uri: &str,
+    page: Page<'_>,
+) -> Option<Result<(String, Option<usize>), String>> {
     let (name, arg) = split(uri)?;
     let found = find(name, arg.is_some())?;
     let arg = arg.unwrap_or_default();
@@ -882,13 +945,16 @@ pub fn read(
         page,
     };
     Some((found.answer)(&ask).map(|text| match found.paged {
-        Paged::Rows if page.paged() => crate::table::page(
-            &text,
-            page.offset.unwrap_or(0),
-            page.limit.map_or(usize::MAX, NonZeroUsize::get),
-            page.again,
-        ),
-        Paged::Rows | Paged::Itself => text,
+        Paged::Rows if page.paged() => {
+            let (text, total) = crate::table::page_counted(
+                &text,
+                page.offset.unwrap_or(0),
+                page.limit.map_or(usize::MAX, NonZeroUsize::get),
+                page.again,
+            );
+            (text, Some(total))
+        }
+        Paged::Rows | Paged::Itself => (text, None),
     }))
 }
 

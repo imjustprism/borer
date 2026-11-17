@@ -74,6 +74,7 @@ mod layout;
 mod libsig;
 mod line_blocks;
 mod linear;
+mod listing;
 mod lsda;
 mod macho;
 mod memo;

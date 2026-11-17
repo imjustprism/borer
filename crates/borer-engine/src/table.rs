@@ -117,7 +117,21 @@ pub fn classify(text: &str) -> Vec<(Line, &str)> {
 /// The names, or `None` when the listing names no columns this reads.
 #[must_use]
 pub fn columns(text: &str) -> Option<Vec<String>> {
-    let lines = classify(text);
+    columns_of(&classify(text))
+}
+
+/// The column names of a listing already classified ([`classify`]), as
+/// [`columns`] reads them.
+///
+/// # Arguments
+///
+/// * `lines` - The listing's lines with what each is.
+///
+/// # Returns
+///
+/// The names, or `None` when the listing names no columns this reads.
+#[must_use]
+pub fn columns_of(lines: &[(Line, &str)]) -> Option<Vec<String>> {
     if let Some((_, header)) = lines.iter().find(|(k, _)| *k == Line::Header) {
         return names(header, true);
     }
@@ -204,6 +218,24 @@ pub fn records(text: &str) -> Vec<Vec<(String, String)>> {
 /// ```
 #[must_use]
 pub fn page(text: &str, offset: usize, limit: usize, again: &str) -> String {
+    page_counted(text, offset, limit, again).0
+}
+
+/// One page of a listing's rows ([`page`]), and how many rows the whole
+/// listing holds, as the page's `# showing` line counts them.
+///
+/// # Arguments
+///
+/// * `text` - The listing.
+/// * `offset` - Rows to skip.
+/// * `limit` - Most rows to keep.
+/// * `again` - The URI that read the listing, without its offset.
+///
+/// # Returns
+///
+/// The page and the listing's row count.
+#[must_use]
+pub fn page_counted(text: &str, offset: usize, limit: usize, again: &str) -> (String, usize) {
     let lines = classify(text);
     let total = lines.iter().filter(|(k, _)| *k == Line::Row).count();
     let start = offset.min(total);
@@ -232,7 +264,7 @@ pub fn page(text: &str, offset: usize, limit: usize, again: &str) -> String {
         let _ = writeln!(out, "{note}");
     }
     out.push_str(&next_page(total, end, again));
-    out
+    (out, total)
 }
 
 /// Reads the rows a page skips, as a URI writes them.
