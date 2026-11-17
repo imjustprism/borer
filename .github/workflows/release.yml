@@ -248,24 +248,31 @@ jobs:
       # WiX v5 (MS-RL, no EULA to accept), pinned, into a tool path of its own.
       # The license page shows LICENSE as RTF. The MSI is then unpacked with an
       # administrative install, which installs nothing, to check it holds the app.
+      # A native command's nonzero exit stops the step with its name and line.
+      # msiexec prints nothing, so its verbose log is printed when it fails, and
+      # it takes only backslashed paths (a forward slash is its error 1324).
       - name: installer (msi)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $wix = "$env:RUNNER_TEMP/wix/wix.exe"
-          dotnet tool install wix --version 5.0.2 --tool-path "$env:RUNNER_TEMP/wix"
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $PSNativeCommandUseErrorActionPreference = $true
+          $tools = Join-Path $env:RUNNER_TEMP wix
+          dotnet tool install wix --version 5.0.2 --tool-path $tools
+          $wix = Join-Path $tools wix.exe
           & $wix extension add --global WixToolset.UI.wixext/5.0.2
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           $text = (Get-Content LICENSE -Raw) -replace '\\', '\\' -replace '\{', '\{' -replace '\}', '\}' -replace '\r?\n', "\par`n"
           Set-Content -Path "$env:NAME/LICENSE.rtf" -NoNewline -Value "{\rtf1\ansi\deff0{\fonttbl{\f0 Consolas;}}\fs16 $text}"
           & $wix build packaging/borer-app/borer-app.wxs -arch x64 -ext WixToolset.UI.wixext `
             -d "Version=$env:NUMERIC" -d "Dir=$env:NAME" -o "$env:NAME.msi"
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          $image = "$env:RUNNER_TEMP/msi"
-          $run = Start-Process msiexec -Wait -PassThru -ArgumentList '/a', "`"$((Resolve-Path "$env:NAME.msi").Path)`"", '/qn', "TARGETDIR=`"$image`""
-          if ($run.ExitCode) { exit $run.ExitCode }
-          if (-not (Get-ChildItem $image -Recurse -Filter borer-app.exe)) { throw "the MSI holds no borer-app.exe" }
+          $image = Join-Path $env:RUNNER_TEMP msi
+          $log = Join-Path $env:RUNNER_TEMP msi.log
+          $msiexec = '/a', "`"$((Resolve-Path "$env:NAME.msi").Path)`"", '/qn', "TARGETDIR=`"$image`"", '/l*v', "`"$log`""
+          $run = Start-Process msiexec -Wait -PassThru -ArgumentList $msiexec
+          if ($run.ExitCode) {
+            Get-Content $log | Out-Host
+            throw "msiexec $msiexec exited with $($run.ExitCode); its log is above"
+          }
+          if (-not (Get-ChildItem $image -Recurse -Filter borer-app.exe)) { throw "the MSI at $image holds no borer-app.exe" }
 
       # borer.app: the binary, Info.plist at the numeric version and the icon,
       # ad-hoc signed so the bundle is sealed, on a .dmg beside a link to
