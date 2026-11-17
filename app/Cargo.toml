@@ -27,12 +27,16 @@ command_palette = { git = "https://github.com/zed-industries/zed", rev = "e8bc16
 command_palette_hooks = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 db = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 dirs = "6"
+# The icon resource of borer-app.exe (borer-app/build.rs), at the version gpui embeds its manifest with.
+embed-resource = "3.0.12"
 editor = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 fs = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 futures = "0.3.34"
 gpui = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288", features = ["profiler"] }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288", default-features = false, features = ["font-kit", "wayland", "x11"] }
 http_client = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
+# Decodes the X11 window icon, at the version and with a feature gpui already builds.
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 language = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 lsp = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 menu = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }

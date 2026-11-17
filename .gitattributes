@@ -16,6 +16,8 @@
 *.dll binary
 *.bin binary
 *.png binary
+*.ico binary
+*.icns binary
 *.bsig binary
 
 # Fuzz seeds are bytes, whatever they look like.

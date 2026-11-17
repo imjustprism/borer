@@ -166,8 +166,24 @@ pub fn window_options(cx: &App) -> WindowOptions {
         show: false,
         window_min_size: Some(size(px(WINDOW_MIN_WIDTH_PX), px(WINDOW_MIN_HEIGHT_PX))),
         app_id: Some(DATA_DIR_NAME.to_owned()),
+        icon: window_icon(),
         ..WindowOptions::default()
     }
+}
+
+/// Returns the app icon at 128 px, the window icon GPUI sets on X11.
+///
+/// Other platforms take their window icon elsewhere: Windows from the icon resource
+/// `build.rs` embeds, macOS from the app bundle, Wayland from the desktop entry named by
+/// the window's app id.
+///
+/// # Returns
+///
+/// `None` if the embedded PNG does not decode, which `window_icon_decodes` rules out.
+fn window_icon() -> Option<Arc<image::RgbaImage>> {
+    let png = include_bytes!("../../../packaging/borer-app/icons/128.png");
+    let icon = image::load_from_memory_with_format(png, image::ImageFormat::Png).ok()?;
+    Some(Arc::new(icon.into_rgba8()))
 }
 
 /// Opens an app window over a new workspace, loading `path` when one is given, and shows
@@ -687,6 +703,7 @@ pub(crate) mod tests {
 
     use super::{
         AppWindow, DEFAULT_DOCK_STATE_KEY, REFUSED_FOLDER, configure, data_dir, new_workspace,
+        window_icon,
     };
     use crate::actions::{Open, ToggleFunctionColumns};
     use crate::binary::{Binary, StatusLine};
@@ -923,6 +940,17 @@ pub(crate) mod tests {
         open_caller(&workspace, TabMode::Permanent, cx);
         assert_eq!(shown(&workspace, cx).map(|(entry, _)| entry), Some(CALLER));
         assert_available(&declared, cx);
+    }
+
+    /// The X11 window icon is the embedded 128 px app icon, decoded.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the icon does not decode to 128 by 128 pixels.
+    #[test]
+    fn window_icon_decodes() {
+        let icon = window_icon().unwrap();
+        assert_eq!(icon.dimensions(), (128, 128));
     }
 
     /// A measurement run uses only the data directory its caller names, and refuses to run

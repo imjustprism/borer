@@ -27,6 +27,7 @@ futures.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 http_client.workspace = true
+image.workspace = true
 language.workspace = true
 lsp.workspace = true
 menu.workspace = true
@@ -46,6 +47,10 @@ ui_input.workspace = true
 util.workspace = true
 workspace.workspace = true
 zed_actions.workspace = true
+
+[build-dependencies]
+# Compiles the icon resource (build.rs); gpui already builds it to embed its manifest.
+embed-resource.workspace = true
 
 [dev-dependencies]
 db = { workspace = true, features = ["test-support"] }
