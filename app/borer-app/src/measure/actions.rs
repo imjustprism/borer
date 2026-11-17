@@ -27,7 +27,7 @@ use language::Point;
 use picker::Picker;
 
 use super::tree::quantiles;
-use super::watch::{Watch, seen};
+use super::watch::{Seen, Watch, seen};
 use super::{
     Harness, Prepared, SYSTEM_NOTEPAD, Tracing, load_large_dll_blocking, nanos, now_instant, say,
     sorted_quantiles_ms,
@@ -461,7 +461,7 @@ pub(super) struct ActionsRun {
     moves: VecDeque<Move>,
     /// The step being watched.
     going: Option<Going>,
-    /// Each frame drawn since that step began: when it started drawing, when it was
+    /// Each frame drawn since that step began: when it finished drawing, when it was
     /// presented.
     drawn: Vec<(Instant, Option<Instant>)>,
     /// Each action's times, by binary.
@@ -479,15 +479,15 @@ impl ActionsRun {
         Some(self.times.entry((self.bench, act)).or_default())
     }
 
-    /// Returns when the first frame drawn at or after `ready` was presented, `ready` when
-    /// none was: nothing the window draws changed.
+    /// Returns when the frame showing what was read at `ready` was presented: the draw it
+    /// was read in, else the first after it; `ready` when none was presented.
     ///
     /// # Arguments
     ///
-    /// * `ready` - Start of the frame the change was first read in.
+    /// * `ready` - When the change was first read.
     fn shown(&self, ready: Instant) -> Instant {
-        let drawn = self.drawn.iter().find(|(start, _)| *start >= ready);
-        drawn.and_then(|&(_, end)| end).unwrap_or(ready)
+        let drawn = self.drawn.iter().find(|(end, _)| *end >= ready);
+        drawn.and_then(|&(_, presented)| presented).unwrap_or(ready)
     }
 
     /// Reads the frame events since the last frame: each draw of the window, its
@@ -496,7 +496,7 @@ impl ActionsRun {
         for event in self.collector.collect_unseen() {
             match event {
                 gpui::profiler::FrameEvent::Draw(draw) if draw.window_id == self.window_id => {
-                    self.drawn.push((draw.draw_start, None));
+                    self.drawn.push((draw.draw_end, None));
                     if let Some(Going::Sweeping(sweep, ..)) = self.going {
                         let ns = nanos(draw.draw_end.saturating_duration_since(draw.draw_start));
                         self.frames.entry((self.bench, sweep)).or_default().push(ns);
@@ -583,6 +583,28 @@ impl ActionsRun {
         }
         lines
     }
+}
+
+/// Feeds `watch` the reads of the draws since the last frame, then this frame's read.
+///
+/// A draw's read is taken as it draws, so a change is credited to the draw that showed it;
+/// this frame's read, taken before it draws, catches what no draw has shown yet.
+///
+/// # Arguments
+///
+/// * `watch` - The step's watch.
+/// * `draws` - Each draw since the last frame: when it was read, and the read.
+/// * `now` - Start of this frame.
+/// * `read` - What the window shows now.
+///
+/// # Returns
+///
+/// Whether the step has settled.
+fn feed(watch: &mut Watch, draws: Vec<(Instant, Seen)>, now: Instant, read: Seen) -> bool {
+    draws
+        .into_iter()
+        .chain([(now, read)])
+        .fold(false, |_, (at, seen)| watch.frame(at, seen))
 }
 
 /// What a bar holds.
@@ -738,6 +760,7 @@ impl Harness {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
+        self.draws = Some(Vec::new());
         let run = ActionsRun {
             cancel,
             window_id: window.window_handle().window_id(),
@@ -798,10 +821,11 @@ impl Harness {
         }
         let now = now_instant();
         run.take_frames();
+        let draws = self.draws.as_mut().map(std::mem::take).unwrap_or_default();
         let read = seen(&self.workspace, &self.binary, cx);
         match run.going.take() {
             Some(Going::Watching(mut watch, at, timed)) => {
-                let settled = watch.frame(now, read.clone());
+                let settled = feed(&mut watch, draws, now, read.clone());
                 let limit = if timed { LATE } else { SETUP_LIMIT };
                 if settled || now.saturating_duration_since(at) > limit {
                     if timed {
@@ -1044,7 +1068,8 @@ impl Harness {
     ///
     /// * `run` - The phase's state.
     /// * `cx` - Harness context.
-    fn actions_end(&self, run: &ActionsRun, cx: &mut Context<'_, Self>) {
+    fn actions_end(&mut self, run: &ActionsRun, cx: &mut Context<'_, Self>) {
+        self.draws = None;
         let missed = misses(&run.times, &run.frames);
         let end = format!(
             "MEASURE_ACTIONS misses={} ui_engine_calls={}",
@@ -1064,15 +1089,22 @@ impl Harness {
     reason = "assertions are the point of a test; gpui::test hides each body in an undocumented fn"
 )]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, VecDeque};
+    use std::time::Duration;
 
     use borer_engine::analysis::render::{FunctionRow, RowSource};
+    use borer_engine::cancel::Cancel;
+    use gpui::{Entity, TestAppContext, VisualTestContext, WindowId};
 
-    use super::{Act, Bench, Move, Sweep, Times, first_call, largest, misses, pick_targets};
+    use super::{
+        Act, ActionsRun, Bench, Move, Sweep, Times, What, feed, first_call, largest, misses,
+        pick_targets,
+    };
     use crate::app_view::tests::{CALLEE, CALLER, init, sample};
     use crate::code_view::CodeLines;
     use crate::functions_panel::FunctionsPanel;
-    use crate::measure::{CliMode, Harness};
+    use crate::measure::watch::{Seen, Stamp, Watch, seen};
+    use crate::measure::{CliMode, Harness, Tracing, now_instant};
     use crate::worker::decompile_blocking;
 
     /// Returns a hand-built row at `entry` calling `callees` functions, `size` bytes long.
@@ -1121,14 +1153,8 @@ mod tests {
         assert_eq!(link, Some(&borer_engine::view::Ref::Function(CALLEE)));
     }
 
-    /// A key step types into the focused filter once the harness's update ends, so the
-    /// harness's own keystroke count never updates it twice.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the step fails or the filter does not read the key.
-    #[gpui::test]
-    fn a_key_step_types_into_the_focused_filter(cx: &mut gpui::TestAppContext) {
+    /// Opens an interactive harness window over the sample and returns it and its context.
+    fn harness(cx: &mut TestAppContext) -> (Entity<Harness>, &mut VisualTestContext) {
         let app_state = init(cx);
         let (harness, cx) = cx.add_window_view(|window, cx| {
             let mode = CliMode::Interactive(None);
@@ -1137,6 +1163,79 @@ mod tests {
         let binary = harness.read_with(cx, |harness, _| harness.binary.clone());
         binary.update(cx, |binary, cx| binary.show_loaded(sample(), cx));
         cx.run_until_parked();
+        (harness, cx)
+    }
+
+    /// While the actions phase runs, each draw of the harness reads what it shows.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a draw is not read, or its read is not what the window shows.
+    #[gpui::test]
+    fn each_draw_of_the_actions_phase_reads_what_it_shows(cx: &mut TestAppContext) {
+        let (harness, cx) = harness(cx);
+        harness.update(cx, |harness, _| harness.draws = Some(Vec::new()));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let (draws, now) = harness.read_with(cx, |harness, cx| {
+            let now = seen(&harness.workspace, &harness.binary, cx);
+            (harness.draws.clone().unwrap_or_default(), now)
+        });
+        assert_eq!(draws.len(), 1, "{draws:?}");
+        assert_eq!(draws.first().map(|(_, read)| read), Some(&now));
+    }
+
+    /// A change read as a frame drew is credited to that frame's presentation, not to the
+    /// next frame's start.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the ack or the settle is credited to another frame.
+    #[test]
+    fn a_change_is_credited_to_the_frame_that_drew_it() {
+        let at = now_instant();
+        let ms = |n| at + Duration::from_millis(n);
+        let mut run = ActionsRun {
+            cancel: Cancel::new(),
+            window_id: WindowId::from(1),
+            _tracing: Tracing { turned_on: false },
+            collector: gpui::profiler::FrameTimingCollector::new(),
+            bench: Bench::Notepad,
+            script: VecDeque::new(),
+            what: What::Act(Act::Find),
+            moves: VecDeque::new(),
+            going: None,
+            drawn: vec![(ms(1), Some(ms(3)))],
+            times: BTreeMap::new(),
+            frames: BTreeMap::new(),
+        };
+        let shows = |status: &str| Seen {
+            stamp: Stamp {
+                status: status.to_owned(),
+                ..Stamp::default()
+            },
+            quiet: true,
+        };
+        let mut watch = Watch::new(shows("").stamp);
+        let drawn = vec![(ms(1), shows("changed"))];
+        assert!(feed(&mut watch, drawn, ms(17), shows("changed")));
+        run.record(&watch, at, ms(17));
+        let times = run.times.get(&(Bench::Notepad, Act::Find));
+        let three = 3_000_000;
+        assert_eq!(
+            times.map(|t| (t.ack.clone(), t.settle.clone())),
+            Some((vec![three], vec![three]))
+        );
+    }
+
+    /// A key step types into the focused filter once the harness's update ends, so the
+    /// harness's own keystroke count never updates it twice.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the step fails or the filter does not read the key.
+    #[gpui::test]
+    fn a_key_step_types_into_the_focused_filter(cx: &mut TestAppContext) {
+        let (harness, cx) = harness(cx);
         let workspace = harness.read_with(cx, |harness, _| harness.workspace.clone());
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.focus_panel::<FunctionsPanel>(window, cx);

@@ -1,10 +1,11 @@
 //! The ack and settle detectors of the actions phase.
 //!
-//! Once a frame, the phase reads what the window shows ([`seen`]): a cheap [`Stamp`] of what
-//! a person sees change, nothing they do not (no count of running requests), and whether the app is quiet, no [`Jobs`] request running and every
+//! As each frame draws, and as each frame starts, the phase reads what the window shows
+//! ([`seen`]): a cheap [`Stamp`] of what a person sees change, nothing they do not (no count
+//! of running requests), and whether the app is quiet, no [`Jobs`] request running and every
 //! open view on the binary's state. A [`Watch`] started at an action's dispatch takes those
-//! reads and names the frame of the first change (ack) and the frame after which the app is
-//! quiet and the stamp holds for one more frame (settle).
+//! reads and names the read of the first change (ack) and the read after which the app is
+//! quiet and the stamp holds for one more read (settle).
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -23,21 +24,21 @@ use crate::worker::{Jobs, Referent};
 use crate::xrefs::XrefsPanel;
 
 /// What a person sees change in the window, cheap enough to read every frame.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct Stamp {
     /// The active center item and the state it shows ([`crate::binary::Revision`]).
-    active: Option<(EntityId, Option<u64>)>,
+    pub(super) active: Option<(EntityId, Option<u64>)>,
     /// The top line of the active code tab.
-    top: Option<usize>,
+    pub(super) top: Option<usize>,
     /// The functions panel's highlighted row and its filter's text.
-    panel: Option<(usize, String)>,
+    pub(super) panel: Option<(usize, String)>,
     /// The go-to picker's query and its line count, while it is open.
-    picker: Option<(String, usize)>,
+    pub(super) picker: Option<(String, usize)>,
     /// The xrefs panel's referent and the rows it shows, by identity: the rows change when
     /// an answer lands, not when its request starts.
-    xrefs: Option<(Option<Referent>, Option<usize>)>,
+    pub(super) xrefs: Option<(Option<Referent>, Option<usize>)>,
     /// The status line.
-    status: String,
+    pub(super) status: String,
 }
 
 /// One frame's read of the window.
@@ -107,11 +108,11 @@ pub(super) fn seen(workspace: &Entity<Workspace>, binary: &Entity<Binary>, cx: &
 pub(super) struct Watch {
     /// What the window showed before the action.
     before: Stamp,
-    /// Start of the first frame showing a change.
+    /// When the first read showing a change was taken.
     ack: Option<Instant>,
-    /// Start of the latest quiet frame and what it showed, while the frames since are quiet.
+    /// When the latest quiet read was taken and what it showed, while the reads since are quiet.
     quiet: Option<(Instant, Stamp)>,
-    /// Start of the frame after which the app is quiet and the stamp held one more frame.
+    /// When the read was taken after which the app is quiet and the stamp held one more read.
     settle: Option<Instant>,
 }
 
@@ -130,11 +131,11 @@ impl Watch {
         }
     }
 
-    /// Takes the read of the frame starting at `at`.
+    /// Takes the read taken at `at`.
     ///
     /// # Arguments
     ///
-    /// * `at` - When the frame started, before it drew.
+    /// * `at` - When it was read: as a draw drew, or as a frame started, before it drew.
     /// * `seen` - What it shows.
     ///
     /// # Returns
@@ -156,12 +157,12 @@ impl Watch {
         self.settle.is_some()
     }
 
-    /// Returns the start of the first frame showing a change, `None` before one did.
+    /// Returns when the first read showing a change was taken, `None` before one was.
     pub(super) const fn ack(&self) -> Option<Instant> {
         self.ack
     }
 
-    /// Returns the start of the frame the action settled on, `None` before it did.
+    /// Returns when the read the action settled on was taken, `None` before it settled.
     pub(super) const fn settle(&self) -> Option<Instant> {
         self.settle
     }

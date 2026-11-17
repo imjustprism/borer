@@ -797,6 +797,9 @@ pub struct Harness {
     watched: Option<(EntityId, Subscription)>,
     /// The call tree phase, once its root's read is asked for.
     tree_run: Option<tree::TreeRun>,
+    /// What each draw showed while the actions phase runs, read as it drew: when, and the
+    /// read; `None` outside the phase.
+    draws: Option<Vec<(Instant, watch::Seen)>>,
     /// Observers of the pane, the panel and the binary, which settle input marks and
     /// re-render the harness, so it checks its one-shot report, whenever they change.
     observers: Vec<Subscription>,
@@ -896,6 +899,7 @@ impl Harness {
             item_changed: None,
             watched: None,
             tree_run: None,
+            draws: None,
             observers: observe,
         };
         if let Some(phase) = phase {
@@ -1217,6 +1221,12 @@ impl Render for Harness {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         self.bind(cx);
         self.check_one_shot(window, cx);
+        if let Some(draws) = self.draws.as_mut() {
+            draws.push((
+                now_instant(),
+                watch::seen(&self.workspace, &self.binary, cx),
+            ));
+        }
         div()
             .size_full()
             .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| {
