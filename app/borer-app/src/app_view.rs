@@ -761,7 +761,7 @@ pub(crate) mod tests {
     }
 
     /// Drops `dir` from the system on the middle of the window.
-    fn drop_on_center(dir: &Path, cx: &mut VisualTestContext) {
+    pub(crate) fn drop_on_center(dir: &Path, cx: &mut VisualTestContext) {
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let size = cx.update(|window, _| window.viewport_size());
         let position = point(size.width * 0.5, size.height * 0.5);

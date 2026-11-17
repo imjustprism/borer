@@ -9,6 +9,12 @@ pub mod card;
 pub mod code_semantics;
 pub mod code_view;
 pub mod commands;
+#[cfg(test)]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test; gpui::test hides each body in an undocumented fn"
+)]
+mod conformance;
 pub mod decompile_item;
 pub mod features;
 pub mod function_columns;
