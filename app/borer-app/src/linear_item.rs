@@ -996,7 +996,8 @@ pub(crate) mod tests {
     use workspace::Workspace;
 
     use super::{AHEAD_LINES, LinearItem, PAGE_ROWS, PAGES_MAX, Page, Pages};
-    use crate::app_view::tests::{CALLER, init, loaded, open, open_place, sample};
+    use crate::actions::{CloseBinary, ShowLinear};
+    use crate::app_view::tests::{CALLER, init, load_sample, loaded, open, open_place, sample};
     use crate::decompile_item::tests::{fourth_instruction, open_tab, put_cursor};
     use crate::decompile_item::{Form, TabMode};
     use crate::goto::GoToDelegate;
@@ -1261,6 +1262,29 @@ pub(crate) mod tests {
                 .count()
         });
         assert_eq!(tabs, 1);
+    }
+
+    /// Closing the binary closes its linear listing too, so no tab shows a closed binary.
+    #[gpui::test]
+    fn closing_the_binary_closes_its_linear_listing(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        load_sample(&app, cx);
+        cx.dispatch_action(ShowLinear);
+        cx.run_until_parked();
+        let linear = |cx: &mut VisualTestContext| {
+            app.workspace.read_with(cx, |workspace, cx| {
+                workspace
+                    .active_pane()
+                    .read(cx)
+                    .items_of_type::<LinearItem>()
+                    .count()
+            })
+        };
+        assert_eq!(linear(cx), 1);
+        cx.dispatch_action(CloseBinary);
+        cx.run_until_parked();
+        assert_eq!(linear(cx), 0);
     }
 
     /// Returns whether `kind` is one of the kinds the color test lists; adding a kind

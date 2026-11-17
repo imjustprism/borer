@@ -46,6 +46,7 @@ use crate::binary::{Binary, StatusLine};
 use crate::commands;
 use crate::decompile_item::DecompileItem;
 use crate::functions_panel::FunctionsPanel;
+use crate::linear_item::LinearItem;
 use crate::measure::CliMode;
 use crate::panels::{PANELS, add_panels};
 use crate::shell::Shell;
@@ -606,8 +607,8 @@ pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
     );
 }
 
-/// Closes `binary`, takes its functions panel out of the dock and closes its decompile
-/// tabs, which leaves each pane its start tab.
+/// Closes `binary`, takes its functions panel out of the dock and closes its code and
+/// linear listing tabs, which leaves each pane its start tab.
 ///
 /// # Arguments
 ///
@@ -626,11 +627,14 @@ fn close_binary(
         workspace.remove_panel(&panel, window, cx);
     }
     for pane in workspace.panes().to_vec() {
-        let tabs: Vec<_> = pane
-            .read(cx)
+        let pane_ref = pane.read(cx);
+        let code = pane_ref
             .items_of_type::<DecompileItem>()
-            .map(|tab| tab.entity_id())
-            .collect();
+            .map(|tab| tab.entity_id());
+        let linear = pane_ref
+            .items_of_type::<LinearItem>()
+            .map(|tab| tab.entity_id());
+        let tabs: Vec<_> = code.chain(linear).collect();
         pane.update(cx, |pane, cx| {
             for tab in tabs {
                 pane.remove_item(tab, false, false, window, cx);
