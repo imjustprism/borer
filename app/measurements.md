@@ -131,7 +131,7 @@ requests left out as nothing on screen shows it; settle is dispatch to the prese
 after which no job runs, every open view shows the binary's state and the stamp holds
 one more frame. Pan and zoom sweep 2 s each on notepad's 20 largest graphs and the large
 DLL's largest, timed by frame draw. A large DLL that is missing or too slow to analyze
-is printed as skipped. The bars are `BARS` in `borer-app/src/measure/actions.rs`:
+is printed as skipped; an action whose setup failed in more than 10% of its runs misses. The bars are `BARS` in `borer-app/src/measure/actions.rs`:
 
 | Action | Ack p99 | Settle p95, notepad | Settle p95, large DLL |
 | --- | --- | --- | --- |

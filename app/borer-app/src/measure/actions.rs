@@ -45,6 +45,9 @@ const LATE: Duration = Duration::from_secs(10);
 /// Most a run's untimed setup may take to settle before the run is skipped.
 const SETUP_LIMIT: Duration = Duration::from_secs(60);
 
+/// Most of an action's runs, in percent, that may be skipped before the action misses.
+const SKIPPED_PERCENT: usize = 10;
+
 /// How long each pan or zoom sweep runs on one graph.
 const SWEEP: Duration = Duration::from_secs(2);
 
@@ -610,14 +613,6 @@ impl Held {
             Self::Frame => "frame",
         }
     }
-
-    /// Returns the percentile the bar holds.
-    const fn percentile(self) -> usize {
-        match self {
-            Self::Ack | Self::Frame => 99,
-            Self::Settle => 95,
-        }
-    }
 }
 
 /// One bar of the phase: what it times, what it holds, and its limit in microseconds on
@@ -669,7 +664,9 @@ pub(super) const BARS: &[Bar] = &[
 /// Returns every bar the times miss, one line each.
 ///
 /// A line names the binary, the action or sweep, what is held, the percentile, the time
-/// and the bar; a bar on a binary the phase ran with no time to hold misses too.
+/// and the bar; a bar on a binary the phase ran with no time to hold misses too, and so does
+/// an action whose skipped runs pass [`SKIPPED_PERCENT`] of its runs, since a skipped run
+/// times nothing.
 ///
 /// # Arguments
 ///
@@ -711,8 +708,10 @@ pub(super) fn misses(
             };
             let mut samples = samples.cloned().unwrap_or_default();
             let (_, p95, p99, _, n) = sorted_quantiles_ms(&mut samples);
-            let pct = bar.held.percentile();
-            let at = if pct == 95 { p95 } else { p99 };
+            let (pct, at) = match bar.held {
+                Held::Ack | Held::Frame => (99, p99),
+                Held::Settle => (95, p95),
+            };
             let limit_ms = as_f64(limit) / 1000.0;
             if n == 0 || at > limit_ms {
                 out.push(format!(
@@ -720,6 +719,20 @@ pub(super) fn misses(
                     bench.word(),
                     bar.what,
                     bar.held.word(),
+                ));
+            }
+        }
+        for act in Act::ALL {
+            let Some(t) = times.get(&(bench, act)) else {
+                continue;
+            };
+            let runs = t.settle.len().saturating_add(t.skipped);
+            if t.skipped.saturating_mul(100) > runs.saturating_mul(SKIPPED_PERCENT) {
+                out.push(format!(
+                    "MEASURE_MISS bench={} what={} held=skipped skipped={} runs={runs} bar_pct={SKIPPED_PERCENT}",
+                    bench.word(),
+                    act.word(),
+                    t.skipped,
                 ));
             }
         }
@@ -1251,6 +1264,33 @@ mod tests {
     /// Returns times of `n` samples of `ns` nanoseconds each.
     fn of(n: usize, ns: u64) -> Vec<u64> {
         vec![ns; n]
+    }
+
+    /// An action skipped in more than a tenth of its runs misses however fast the runs that
+    /// timed, and one skipped in a tenth does not.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the skipped share is not held to its bar.
+    #[test]
+    fn an_action_skipped_too_often_misses() {
+        let skipped = |timed, skipped| -> Vec<String> {
+            let times = Times {
+                ack: of(timed, 1_000),
+                settle: of(timed, 1_000),
+                skipped,
+                ..Times::default()
+            };
+            let times = BTreeMap::from([((Bench::Notepad, Act::GoTo), times)]);
+            misses(&times, &BTreeMap::new())
+                .into_iter()
+                .filter(|m| m.contains("held=skipped"))
+                .collect()
+        };
+        let want = "what=goto held=skipped skipped=49 runs=50 bar_pct=10";
+        let missed = skipped(1, 49);
+        assert!(missed.iter().any(|m| m.contains(want)), "{missed:?}");
+        assert_eq!(skipped(45, 5), Vec::<String>::new());
     }
 
     /// Every action's ack, every settle with a bar and every sweep's frames, made slower
