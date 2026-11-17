@@ -87,6 +87,8 @@ const fn reason_at(reason: &Reason) -> Option<u64> {
 /// Returns the overview's lines of `triage`: the file, each section with its addresses,
 /// the blind spots and the functions to read first, in the triage's order.
 ///
+/// A list the engine cut short says `showing N of M` under it.
+///
 /// # Arguments
 ///
 /// * `triage` - The engine's triage.
@@ -149,6 +151,11 @@ pub fn rows(triage: &Triage, place: impl Fn(u64) -> Option<Place>) -> Vec<Row> {
                 ..line(&reason.to_string(), Look::Under, reason_at(reason))
             });
         }
+    }
+    if triage.candidates > triage.read_first.len() {
+        let listed = triage.read_first.len();
+        let shown = format!("showing {listed} of {}", triage.candidates);
+        out.push(line(&shown, Look::Plain, None));
     }
     out
 }
@@ -600,6 +607,22 @@ pub(crate) mod tests {
                 .iter()
                 .all(|row| row.link.is_none())
         );
+    }
+
+    /// A read-first list the engine cut short says how many of how many candidates it
+    /// shows, under the list, as a section's addresses do; a whole list says nothing.
+    #[test]
+    fn a_cut_read_first_list_says_how_many_it_shows() {
+        let mut triage = hand_built();
+        let last = |triage: &Triage| rows(triage, |_| None).last().map(|row| row.text.clone());
+        assert_eq!(
+            last(&triage).as_deref(),
+            Some("references 3 strings and 4 imports")
+        );
+        let first = triage.read_first[0].clone();
+        triage.read_first = vec![first; 10];
+        triage.candidates = 25;
+        assert_eq!(last(&triage).as_deref(), Some("showing 10 of 25"));
     }
 
     /// Each reason is labelled with the engine's basis, and no other line is.
