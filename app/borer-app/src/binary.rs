@@ -430,13 +430,16 @@ impl Binary {
     ///
     /// # Arguments
     ///
-    /// * `path` - File path of the binary to load.
+    /// * `path` - File path of the binary to load; a relative one is made absolute against
+    ///   the working directory, so Recent and the tabs kept at quit name the same file
+    ///   wherever the app starts next.
     /// * `cx` - Binary context spawning the background task.
     ///
     /// # Returns
     ///
     /// Whether the load started.
     fn load_path(&mut self, path: PathBuf, cx: &mut Context<'_, Self>) -> bool {
+        let path = absolute(path);
         if let Some(busy) = &self.busy {
             self.status = format!(
                 "{STILL_READING} {}; open it again once that ends",
@@ -526,7 +529,10 @@ impl Binary {
     ///
     /// * `tabs` - The tabs open at the last quit, in tab order.
     /// * `cx` - Binary context.
-    pub fn restore(&mut self, tabs: Vec<SavedTab>, cx: &mut Context<'_, Self>) {
+    pub fn restore(&mut self, mut tabs: Vec<SavedTab>, cx: &mut Context<'_, Self>) {
+        for tab in &mut tabs {
+            tab.path = absolute(std::mem::take(&mut tab.path));
+        }
         let Some(path) = tabs.first().map(|tab| tab.path.clone()) else {
             return;
         };
@@ -616,7 +622,7 @@ impl Binary {
             (count.into(), Color::Placeholder),
         ];
         let opened = RecentBinary {
-            path: std::path::absolute(&loaded.path).unwrap_or_else(|_| loaded.path.clone()),
+            path: absolute(loaded.path.clone()),
             kind,
         };
         self.recent = recent::remembered(std::mem::take(&mut self.recent), opened);
@@ -1021,6 +1027,15 @@ pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
 pub fn kind(loaded: &LoadedBinary) -> String {
     let program = &loaded.program;
     format!("{} {}", program.arch.name(), program.format.name())
+}
+
+/// Returns `path` made absolute against the working directory, as it is when that fails.
+///
+/// # Arguments
+///
+/// * `path` - A path to a binary, as given.
+fn absolute(path: PathBuf) -> PathBuf {
+    std::path::absolute(&path).unwrap_or(path)
 }
 
 /// What the question over unsaved edits offers ([`Binary::settled`]), in order.
@@ -1569,6 +1584,54 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A binary opened by a relative path is kept by its absolute path, the same in the
+    /// tabs kept at quit as in Recent, so a start from another folder opens that file.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a kept path is relative or the two differ.
+    #[gpui::test]
+    fn a_binary_opened_by_a_relative_path_is_kept_absolute(cx: &mut TestAppContext) {
+        use std::path::Component;
+        let app_state = crate::app_view::tests::init(cx);
+        let dir = scratch("relative");
+        let exe = dir.join("tiny.exe");
+        std::fs::write(&exe, tiny_pe()).unwrap();
+        let normal = |path: &Path| {
+            path.components()
+                .filter(|part| matches!(part, Component::Normal(_)))
+                .count()
+        };
+        let mut relative: PathBuf =
+            std::iter::repeat_n("..", normal(&std::env::current_dir().unwrap())).collect();
+        relative.extend(
+            exe.components()
+                .filter(|part| matches!(part, Component::Normal(_))),
+        );
+        assert!(relative.is_relative());
+        let (app, cx) = crate::app_view::tests::open(&app_state, cx);
+        app.binary
+            .update(cx, |binary, cx| binary.open_path(relative, cx));
+        cx.run_until_parked();
+        let loaded = app
+            .binary
+            .read_with(cx, |binary, _| binary.loaded().cloned().unwrap());
+        let place = crate::places::Place::decompile(HELPER);
+        let mode = crate::decompile_item::TabMode::Permanent;
+        crate::app_view::tests::open_place(&app.workspace, &loaded, place, mode, cx);
+        cx.run_until_parked();
+        let tabs = app.workspace.read_with(cx, crate::stored::open_tabs);
+        let recent = app
+            .binary
+            .read_with(cx, |binary, _| binary.recent()[0].path.clone());
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(recent.is_absolute(), "{}", recent.display());
+        assert!(!tabs.is_empty());
+        for tab in tabs {
+            assert_eq!(tab.path, recent);
+        }
     }
 
     /// A project saved for another build is refused in the engine's words with a choice to
