@@ -151,3 +151,67 @@ pub fn aligned(align: Align, child: impl IntoElement) -> Div {
         .when(align == Align::End, Div::justify_end)
         .child(child)
 }
+
+/// Returns a table's count as a person reads it: `481 functions` when the page holds every
+/// row the filter keeps, `200 of 1,204 functions` when it holds fewer.
+///
+/// # Arguments
+///
+/// * `shown` - Rows on the page.
+/// * `total` - Rows the filter keeps.
+/// * `plural` - What the rows are, plural and ending in `s`; one row drops the `s`.
+#[must_use]
+pub fn count_text(shown: usize, total: usize, plural: &str) -> String {
+    let noun = if total == 1 {
+        plural.strip_suffix('s').unwrap_or(plural)
+    } else {
+        plural
+    };
+    if shown < total {
+        format!("{} of {} {noun}", grouped(shown), grouped(total))
+    } else {
+        format!("{} {noun}", grouped(total))
+    }
+}
+
+/// Returns `n` in decimal with a comma between groups of three digits (`1,204`).
+///
+/// # Arguments
+///
+/// * `n` - The count.
+#[must_use]
+pub fn grouped(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len().saturating_add(digits.len() / 3));
+    for (at, digit) in digits.chars().enumerate() {
+        if at > 0 && digits.len().saturating_sub(at).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::count_text;
+
+    /// A count groups its digits, says `N of M` only when the page holds fewer rows than
+    /// the filter keeps, and drops the plural for one row.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a count reads any other way.
+    #[test]
+    fn a_count_reads_as_a_person_says_it() {
+        assert_eq!(count_text(481, 481, "functions"), "481 functions");
+        assert_eq!(count_text(200, 1204, "functions"), "200 of 1,204 functions");
+        assert_eq!(count_text(1, 1, "strings"), "1 string");
+        assert_eq!(count_text(0, 0, "imports"), "0 imports");
+        assert_eq!(count_text(0, 1, "exports"), "0 of 1 export");
+        assert_eq!(
+            count_text(1_234_567, 1_234_567, "strings"),
+            "1,234,567 strings"
+        );
+    }
+}

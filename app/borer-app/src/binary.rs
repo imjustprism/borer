@@ -616,7 +616,7 @@ impl Binary {
             .collect();
         self.status = format!("{}{notes}", loaded.path.display());
         let kind = kind(&loaded);
-        let count = loaded.initial_rows.counts();
+        let count = crate::functions_panel::function_count(&loaded.initial_rows);
         self.facts = vec![
             (kind.clone().into(), Color::Muted),
             (count.into(), Color::Placeholder),
@@ -1310,7 +1310,7 @@ mod tests {
     use crate::worker::tests::{HELPER, scratch, tiny_pe};
 
     /// The status line leads with the engine's architecture and format of the open binary,
-    /// soft, then the engine's count of its functions with what it left out, muted; nothing
+    /// soft, then the engine's count of its functions and of those it hid, muted; nothing
     /// before a load, and nothing again once another load starts.
     ///
     /// # Panics
@@ -1353,11 +1353,7 @@ mod tests {
         binary.update(cx, |binary, cx| binary.finish_load(Ok(loaded.clone()), cx));
         let program = &loaded.program;
         let kind = format!("{} {}", program.arch.name(), program.format.name());
-        let count = format!(
-            "{} functions; 2 import thunks left out, filter=thunk lists them; \
-             1 exception funclets left out, filter=funclet lists them",
-            loaded.initial_rows.total
-        );
+        let count = format!("{} functions, 3 hidden", loaded.initial_rows.total);
         let want = vec![
             (SharedString::from(kind), Color::Muted),
             (SharedString::from(count), Color::Placeholder),

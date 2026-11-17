@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use borer_engine::analysis::render::{FunctionRow, FunctionRows, INCOMPLETE_NOTE};
+use borer_engine::analysis::render::{FunctionRow, FunctionRows, INCOMPLETE_NOTE, LeftOut};
 use gpui::{Entity, SharedString};
 use ui::IconName;
 use workspace::Workspace;
@@ -19,6 +19,7 @@ use crate::places::Place;
 use crate::rail::panel;
 pub use crate::rows_panel::Empty;
 use crate::rows_panel::{Answer, RowKind, RowsPanel, add, focus};
+use crate::table::{count_text, grouped};
 use crate::worker::{LoadedBinary, filter_rows_blocking};
 
 /// The functions panel's row of [`crate::panels::PANELS`].
@@ -60,6 +61,62 @@ pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
             }
         },
     );
+}
+
+/// Returns what the engine left out of the function table, as a person reads it.
+///
+/// A short `42 hidden`, and a sentence naming the parts and the filter words that list
+/// them.
+///
+/// # Returns
+///
+/// `None` when nothing was left out.
+///
+/// # Arguments
+///
+/// * `left_out` - The import thunks and exception funclets the engine left out.
+#[must_use]
+pub fn hidden(left_out: LeftOut) -> Option<(SharedString, SharedString)> {
+    let parts: Vec<(usize, &str, &str)> = [
+        (left_out.thunks, "import thunks", "thunk"),
+        (left_out.funclets, "exception funclets", "funclet"),
+    ]
+    .into_iter()
+    .filter(|(count, _, _)| *count > 0)
+    .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let all = left_out.thunks.saturating_add(left_out.funclets);
+    let named: Vec<String> = parts
+        .iter()
+        .map(|(count, plural, _)| count_text(*count, *count, plural))
+        .collect();
+    let words: Vec<String> = parts
+        .iter()
+        .map(|(_, _, word)| format!("\"{word}\""))
+        .collect();
+    let tip = format!(
+        "Hidden: {}. Type {} in the filter to list them.",
+        named.join(" and "),
+        words.join(" or ")
+    );
+    Some((format!("{} hidden", grouped(all)).into(), tip.into()))
+}
+
+/// Returns the open binary's count of functions for the status line: `481 functions`,
+/// then `, 42 hidden` when the engine left some out.
+///
+/// # Arguments
+///
+/// * `rows` - The engine's unfiltered function table.
+#[must_use]
+pub fn function_count(rows: &FunctionRows) -> String {
+    let count = count_text(rows.total, rows.total, rows.noun);
+    match hidden(rows.left_out) {
+        Some((short, _)) => format!("{count}, {short}"),
+        None => count,
+    }
 }
 
 /// The open binary's function table, in a dock.
@@ -124,7 +181,11 @@ impl Answer<FunctionRow> for FunctionRows {
     }
 
     fn showing(&self) -> SharedString {
-        Self::showing(self).into()
+        count_text(self.rows.len(), self.total, self.noun).into()
+    }
+
+    fn hidden(&self) -> Option<(SharedString, SharedString)> {
+        hidden(self.left_out)
     }
 }
 
@@ -141,7 +202,7 @@ mod tests {
     use workspace::dock::DockPosition;
     use workspace::{AppState, Workspace};
 
-    use super::{Empty, Functions, FunctionsPanel};
+    use super::{Empty, Functions, FunctionsPanel, function_count, hidden};
     use crate::actions::FocusFilter;
     use crate::app_view::add_functions_panel;
     use crate::app_view::tests::{CALLEE, CALLER, init, open, sample, shown};
@@ -149,9 +210,53 @@ mod tests {
     use crate::card::CARD_SELECTOR;
     use crate::decompile_item::Form;
     use crate::places::Place;
+    use crate::rows_panel::Answer;
     use crate::rows_panel::RowKind as _;
     use crate::rows_panel::{ENTRY_SELECTOR, HEADER_SELECTOR, ROW_SELECTOR};
     use crate::worker::Jobs;
+
+    /// The count line says how many functions show and, apart, how many are hidden.
+    ///
+    /// The hidden count's tooltip names the import thunks and exception funclets and the
+    /// filter words that list them; nothing is hidden when nothing was left out.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a count or the tooltip says anything else.
+    #[test]
+    fn the_count_line_says_what_is_hidden_in_a_persons_words() {
+        let rows = FunctionRows {
+            total: 481,
+            noun: "functions",
+            order: FunctionOrder::Address,
+            left_out: LeftOut {
+                thunks: 39,
+                funclets: 3,
+            },
+            incomplete: false,
+            rows: Vec::new(),
+        };
+        assert_eq!(Answer::<FunctionRow>::showing(&rows), "0 of 481 functions");
+        let tip = concat!(
+            "Hidden: 39 import thunks and 3 exception funclets. ",
+            "Type \"thunk\" or \"funclet\" in the filter to list them."
+        );
+        assert_eq!(
+            rows.hidden(),
+            Some((SharedString::from("42 hidden"), SharedString::from(tip)))
+        );
+        assert_eq!(function_count(&rows), "481 functions, 42 hidden");
+        let one = LeftOut {
+            thunks: 0,
+            funclets: 1,
+        };
+        let tip = "Hidden: 1 exception funclet. Type \"funclet\" in the filter to list them.";
+        assert_eq!(
+            hidden(one),
+            Some((SharedString::from("1 hidden"), SharedString::from(tip)))
+        );
+        assert_eq!(hidden(LeftOut::default()), None);
+    }
 
     /// Vertical padding of a cell of Zed's table at the pin, both sides together, in rems
     /// (`py_0p5` in `data_table.rs`).
@@ -341,17 +446,22 @@ mod tests {
         );
         let panel = panel_of(&workspace, cx);
         let (empty, showing) = panel.read_with(cx, |panel, cx| {
-            (panel.empty(cx), panel.rows().map(|rows| rows.showing()))
+            (
+                panel.empty(cx),
+                panel
+                    .rows()
+                    .map(|rows| Answer::<FunctionRow>::showing(&**rows)),
+            )
         });
         let empty = empty.unwrap();
         assert_eq!(empty, Empty::NoFunction(left_out));
         assert!(!empty.offers_open());
-        let note = "; 3 import thunks left out, filter=thunk lists them";
+        let note = "Hidden: 3 import thunks. Type \"thunk\" in the filter to list them.";
         assert_eq!(
             empty.says(),
-            SharedString::from(format!("The engine found no function{note}"))
+            SharedString::from(format!("The engine found no function. {note}"))
         );
-        assert_eq!(showing, Some(format!("showing 0 of 0 functions{note}")));
+        assert_eq!(showing, Some(SharedString::from("0 functions")));
     }
 
     /// A filter nothing matches is quoted as the query that selected the rows shown, and a

@@ -24,7 +24,7 @@ use theme::{ActiveTheme as _, GlobalTheme};
 use theme_settings::ThemeSettings;
 use ui::{
     Color, ColumnWidthConfig, KeyBinding, Label, LabelCommon as _, LabelSize,
-    ResizableColumnsState, Table, TableInteractionState, TableResizeBehavior, h_flex,
+    ResizableColumnsState, Table, TableInteractionState, TableResizeBehavior, Tooltip, h_flex,
 };
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
@@ -36,7 +36,7 @@ use crate::code_view::CodePalette;
 use crate::decompile_item::{TabMode, code_row_height};
 use crate::panels::{PanelSpec, spec_panel};
 use crate::places::{Opening, Place, open_later};
-use crate::table::{Column, Columns, Ink, aligned, cells, widths};
+use crate::table::{Column, Columns, Ink, aligned, cells, count_text, widths};
 use crate::worker::{Job, LoadedBinary, Referent};
 
 /// Rows one page asks the engine for.
@@ -126,8 +126,14 @@ pub trait Answer<R>: Send + Sync + 'static {
         self.rows().len()
     }
 
-    /// Returns the engine's count line of the answer: `showing N of M` and what it left out.
+    /// Returns the answer's count as a person reads it ([`crate::table::count_text`]).
     fn showing(&self) -> SharedString;
+
+    /// Returns a short count of the rows the engine left out unless the filter asks for
+    /// them, and the sentence its tooltip says; `None` when it left none out.
+    fn hidden(&self) -> Option<(SharedString, SharedString)> {
+        None
+    }
 }
 
 impl<R: Send + Sync + 'static> Answer<R> for Page<R> {
@@ -161,22 +167,16 @@ pub struct Page<R> {
 }
 
 impl<R> Page<R> {
-    /// Returns `rows` of `total` under `counted`, an engine's count-only answer (`# M
-    /// things` and its notes), as `showing N of M things`, its notes after `; `.
+    /// Returns `rows` of `total`, counted as `plural` ([`count_text`]).
     ///
     /// # Arguments
     ///
     /// * `rows` - The rows on the page.
     /// * `total` - Rows the filter keeps.
-    /// * `counted` - The engine's count-only text.
+    /// * `plural` - What the rows are, plural.
     #[must_use]
-    pub fn counted(rows: Vec<R>, total: usize, counted: &str) -> Self {
-        let lines: Vec<&str> = counted
-            .lines()
-            .map(|line| line.trim_start_matches('#').trim())
-            .filter(|line| !line.is_empty())
-            .collect();
-        let header = format!("showing {} of {}", rows.len(), lines.join("; "));
+    pub fn counted(rows: Vec<R>, total: usize, plural: &str) -> Self {
+        let header = count_text(rows.len(), total, plural);
         Self {
             header: header.into(),
             total,
@@ -298,7 +298,10 @@ impl Empty {
             Self::NoBinary => SharedString::new_static("No binary loaded"),
             Self::Reading(path) => reading_label(path),
             Self::LoadFailed(reason) => format!("Load failed: {reason}").into(),
-            Self::NoFunction(left_out) => format!("The engine found no function{left_out}").into(),
+            Self::NoFunction(left_out) => match crate::functions_panel::hidden(*left_out) {
+                Some((_, tip)) => format!("The engine found no function. {tip}").into(),
+                None => SharedString::new_static("The engine found no function"),
+            },
             Self::NoMatch(query) => format!("No function matches \"{query}\"").into(),
             Self::Nothing(said) => said.clone(),
         }
@@ -1239,9 +1242,20 @@ impl<K: RowKind> Render for RowsPanel<K> {
             .pt(px(6.0))
             .child(Label::new(K::PANEL.title).weight(FontWeight::SEMIBOLD))
             .children(rows.map(|rows| {
-                Label::new(self.count_line(rows))
-                    .size(LabelSize::Small)
-                    .color(Color::Muted)
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Label::new(self.count_line(rows))
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .children(rows.hidden().map(|(short, tip)| {
+                        div().id("rows-hidden").tooltip(Tooltip::text(tip)).child(
+                            Label::new(short)
+                                .size(LabelSize::Small)
+                                .color(Color::Placeholder),
+                        )
+                    }))
             }));
         let incomplete = rows.and_then(|rows| K::warning(rows)).map(|note| {
             div().px(px(8.0)).child(
@@ -1460,7 +1474,7 @@ pub(crate) mod tests {
     use crate::code_view::tests::sample_program;
     use crate::panels::PanelSpec;
     use crate::places::Place;
-    use crate::table::{Align, Column, Columns, Fit, Ink};
+    use crate::table::{Align, Column, Columns, Fit, Ink, count_text};
     use crate::tables::{Exports, Imports, Strings};
     use crate::worker::{LoadedBinary, Referent};
     use crate::xrefs::Xrefs;
@@ -1540,8 +1554,8 @@ pub(crate) mod tests {
             set_filter(&strings, filter.unwrap_or_default(), cx);
             let want = string_rows(p, a, StringEncoding::Both, WALK_MIN, filter, 0, PAGE_ROWS);
             assert_eq!(want.rows.is_empty(), filter == Some("zz"));
-            let page = Page::counted(want.rows.clone(), want.total, &want.counted());
-            assert_shows(&strings, (&want.rows, want.total), &page.header, cx);
+            let header = count_text(want.rows.len(), want.total, "strings");
+            assert_shows(&strings, (&want.rows, want.total), &header, cx);
         }
         let said = strings.read_with(cx, |panel, cx| panel.empty(cx));
         assert_eq!(
@@ -1552,8 +1566,8 @@ pub(crate) mod tests {
         for filter in [None, Some("sleep")] {
             set_filter(&imports, filter.unwrap_or_default(), cx);
             let want = symbol_rows(p, a, Some(SymbolKind::Import), filter, 0, PAGE_ROWS);
-            let page = Page::counted(want.rows.clone(), want.total, &want.counted());
-            assert_shows(&imports, (&want.rows, want.total), &page.header, cx);
+            let header = count_text(want.rows.len(), want.total, "imports");
+            assert_shows(&imports, (&want.rows, want.total), &header, cx);
         }
         let exports = panel_of::<Exports>(&workspace, &loaded, cx);
         let [exported, forwarded] = [SymbolKind::Export, SymbolKind::Forwarder]
@@ -1565,10 +1579,7 @@ pub(crate) mod tests {
             .chain(&forwarded.rows)
             .cloned()
             .collect();
-        let one = Page::counted(exported.rows.clone(), 2, &exported.counted()).header;
-        let two = Page::counted(forwarded.rows.clone(), 1, &forwarded.counted()).header;
-        let header = format!("exports: {one}; forwarders: {two}");
-        assert_shows(&exports, (&rows, 3), &header, cx);
+        assert_shows(&exports, (&rows, 3), "2 exports, 1 forwarder", cx);
     }
 
     /// Sorting by a column orders the rows by its fact and never changes which rows show;

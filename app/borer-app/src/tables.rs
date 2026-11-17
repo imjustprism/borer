@@ -144,8 +144,7 @@ impl RowKind for Strings {
 
     fn fetch(loaded: &LoadedBinary, (): &(), filter: &str, limit: usize) -> Page<StringLine> {
         let rows = strings_blocking(loaded, filter, limit);
-        let counted = rows.counted();
-        Page::counted(rows.rows, rows.total, &counted)
+        Page::counted(rows.rows, rows.total, "strings")
     }
 
     fn nothing(shown: &Page<StringLine>, query: &SharedString) -> Empty {
@@ -287,8 +286,7 @@ impl RowKind for Imports {
 
     fn fetch(loaded: &LoadedBinary, (): &(), filter: &str, limit: usize) -> Page<SymbolRow> {
         let rows = symbols_blocking(loaded, SymbolKind::Import, filter, limit);
-        let counted = rows.counted();
-        Page::counted(rows.rows, rows.total, &counted)
+        Page::counted(rows.rows, rows.total, "imports")
     }
 
     fn nothing(shown: &Page<SymbolRow>, query: &SharedString) -> Empty {
@@ -321,10 +319,12 @@ impl RowKind for Exports {
         let exports = symbols_blocking(loaded, SymbolKind::Export, filter, limit);
         let left = limit.saturating_sub(exports.rows.len());
         let forwards = symbols_blocking(loaded, SymbolKind::Forwarder, filter, left);
-        let (one, two) = (exports.counted(), forwards.counted());
-        let one = Page::counted(exports.rows, exports.total, &one);
-        let two = Page::counted(forwards.rows, forwards.total, &two);
-        let header = format!("exports: {}; forwarders: {}", one.header, two.header);
+        let one = Page::counted(exports.rows, exports.total, "exports");
+        let two = Page::counted(forwards.rows, forwards.total, "forwarders");
+        let header = match two.total {
+            0 => one.header.to_string(),
+            _ => format!("{}, {}", one.header, two.header),
+        };
         let mut rows = one.rows;
         rows.extend(two.rows);
         Page {

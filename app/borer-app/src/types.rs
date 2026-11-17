@@ -245,7 +245,7 @@ impl Answer<TypeRow> for TypeRows {
     }
 
     fn showing(&self) -> SharedString {
-        format!("showing {} of {} types", self.rows.len(), self.total).into()
+        crate::table::count_text(self.rows.len(), self.total, "types").into()
     }
 }
 
