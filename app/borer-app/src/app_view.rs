@@ -331,8 +331,9 @@ fn erased_editor(window: &mut Window, cx: &mut App) -> Arc<dyn ui_input::ErasedE
 ///
 /// A dropped `.json` file is read in the background as a theme file: one that parses as a
 /// theme family, or as JSON with a top-level `themes` key, opens its import report with
-/// what it holds or why it does not parse ([`crate::theme_import::read_dropped`]); any
-/// other opens as a binary like any other file.
+/// what it holds or why it does not parse ([`crate::theme_import::read_dropped`]); one that
+/// reads as a project file opens as the open binary's project, and any other opens as a
+/// binary like any other file ([`Binary::open_dropped`]).
 ///
 /// # Arguments
 ///
@@ -368,7 +369,8 @@ pub fn open_dropped(
                 .spawn(cx, async move |cx| match read.await {
                     Some(read) => crate::theme_import::show(&workspace, read, cx),
                     None => {
-                        binary.update(cx, |binary, cx| binary.open_path(path, cx));
+                        let window = cx.window_handle();
+                        binary.update(cx, |binary, cx| binary.open_dropped(path, window, cx));
                         Ok(())
                     }
                 })

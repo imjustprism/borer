@@ -781,21 +781,87 @@ impl Binary {
         window: AnyWindowHandle,
         cx: &mut Context<'_, Self>,
     ) {
-        if !self.is_unsaved() {
-            self.read_project(path, window, cx);
-            return;
-        }
-        let question = format!(
-            "The binary has edits no project file holds; opening {} replaces them.",
-            path.display()
-        );
-        Self::confirm(
-            window,
+        let question = replaces(&path);
+        self.over_edits(
             &question,
-            "Open",
+            window,
             move |binary, cx| binary.read_project(path, window, cx),
             cx,
         );
+    }
+
+    /// Runs `then` now, or, over edits no project file holds, once the person answers
+    /// Open to `question` in `window`.
+    ///
+    /// # Arguments
+    ///
+    /// * `question` - What is asked ([`replaces`]).
+    /// * `window` - Window it is asked in.
+    /// * `then` - What opening does.
+    /// * `cx` - Binary context.
+    fn over_edits(
+        &mut self,
+        question: &str,
+        window: AnyWindowHandle,
+        then: impl FnOnce(&mut Self, &mut Context<'_, Self>) + 'static,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.is_unsaved() {
+            Self::confirm(window, question, "Open", then, cx);
+        } else {
+            then(self, cx);
+        }
+    }
+
+    /// Opens a dropped file: the project it holds over the open binary, as
+    /// [`Self::open_project`] does, else the file as a binary ([`Self::open_path`]); a
+    /// project dropped with no binary open says to open its binary first.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The dropped file.
+    /// * `window` - Window the questions are asked in.
+    /// * `cx` - Binary context.
+    pub fn open_dropped(
+        &mut self,
+        path: PathBuf,
+        window: AnyWindowHandle,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let file = path.clone();
+        let label = format!("Reading {}", file_name(&path));
+        let read = spawn_engine(label, cx, move || read_project_blocking(&file));
+        cx.spawn(async move |this, cx| {
+            let Some(read) = read.await else {
+                return;
+            };
+            let Some(this) = this.upgrade() else {
+                return;
+            };
+            this.update(cx, |binary, cx| match read {
+                Ok(project) if binary.loaded.is_some() => {
+                    let question = replaces(&path);
+                    let project = Arc::new(project);
+                    binary.over_edits(
+                        &question,
+                        window,
+                        move |binary, cx| binary.admit(path, project, false, window, cx),
+                        cx,
+                    );
+                }
+                Ok(_) => {
+                    let why = format!(
+                        "{} is a project file; open its binary first",
+                        path.display()
+                    );
+                    binary.set_status(why, cx);
+                }
+                Err(_) => {
+                    binary.open_path(path, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// Reads the project file at `path` in the background and admits it unforced.
@@ -1027,6 +1093,19 @@ pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
 pub fn kind(loaded: &LoadedBinary) -> String {
     let program = &loaded.program;
     format!("{} {}", program.arch.name(), program.format.name())
+}
+
+/// Returns the question asked before a project at `path` replaces edits no project file
+/// holds.
+///
+/// # Arguments
+///
+/// * `path` - The project file.
+fn replaces(path: &Path) -> String {
+    format!(
+        "The binary has edits no project file holds; opening {} replaces them.",
+        path.display()
+    )
 }
 
 /// Returns `path` made absolute against the working directory, as it is when that fails.
@@ -1584,6 +1663,43 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A saved project file dropped on the window opens as the open binary's project: the
+    /// binary stays, and the file never joins Recent as a binary.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the drop loads the file as a binary.
+    #[gpui::test]
+    fn a_dropped_project_opens_as_the_binarys_project(cx: &mut TestAppContext) {
+        let app_state = crate::app_view::tests::init(cx);
+        let dir = scratch("dropped-project");
+        let exe = dir.join("tiny.exe");
+        std::fs::write(&exe, tiny_pe()).unwrap();
+        let project = dir.join("tiny.json");
+        let (app, cx) = crate::app_view::tests::open(&app_state, cx);
+        app.binary
+            .update(cx, |binary, cx| binary.open_path(exe.clone(), cx));
+        cx.run_until_parked();
+        let saved = project.clone();
+        app.binary
+            .update(cx, |binary, cx| binary.save_to(saved, cx));
+        cx.run_until_parked();
+        crate::app_view::tests::drop_on_center(&project, cx);
+        cx.run_until_parked();
+        let (path, status, recent) = app.binary.read_with(cx, |binary, _| {
+            let path = binary.loaded().map(|loaded| loaded.path.clone());
+            let recent: Vec<PathBuf> = binary.recent().iter().map(|r| r.path.clone()).collect();
+            (path, binary.status().to_owned(), recent)
+        });
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(status.starts_with("project"), "{status}");
+        assert_eq!(path.as_deref(), Some(exe.as_path()));
+        assert!(
+            !recent.iter().any(|path| path.ends_with("tiny.json")),
+            "{recent:?}"
+        );
     }
 
     /// A binary opened by a relative path is kept by its absolute path, the same in the
