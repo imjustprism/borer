@@ -2,7 +2,7 @@
 //! the text typed; nothing here writes the overlay.
 
 use borer_engine::analysis::edit::{Edit, Laid};
-use borer_engine::analysis::parse_addr;
+use borer_engine::analysis::fieldrefs::parse_unsigned;
 use borer_engine::analysis::stated::{Field, Mode};
 use borer_engine::analysis::utypes::{FieldRow, TypeDetail, TypeExpr, parse_type};
 
@@ -19,7 +19,7 @@ pub enum Ask {
     Add,
     /// Takes the selected field out of the struct.
     Delete,
-    /// Gives the struct a new size.
+    /// Gives the struct a new size: decimal, or hex after `0x`.
     Size,
     /// Defines a user struct of the shown type's fields.
     Copy,
@@ -201,7 +201,7 @@ fn struct_edits(
             }
         }
         Ask::Size => {
-            let size = parse_addr(text.trim())
+            let size = parse_unsigned(text.trim())
                 .ok_or_else(|| format!("\"{}\" is no size in bytes", text.trim()))?;
             Edit::Fields {
                 name,

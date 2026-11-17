@@ -1521,6 +1521,26 @@ mod tests {
         assert_eq!(fields.first().map(|(offset, _)| *offset), Some(4));
     }
 
+    /// A size is decimal or hex after `0x`: `1a` is no size, `26` and `0x1a` are 26 bytes.
+    #[test]
+    fn a_size_reads_as_decimal_or_0x_hex() {
+        let detail = TypeDetail {
+            row: row("S"),
+            fields: vec![field(0, 4, "a")],
+            holes: Vec::new(),
+            overlaps: Vec::new(),
+        };
+        let shown = shown(detail);
+        assert!(edits(Ask::Size, &shown, None, "1a").is_err());
+        for text in ["26", "0x1a"] {
+            let planned = edits(Ask::Size, &shown, None, text).unwrap();
+            let [Edit::Fields { size, .. }] = planned.as_slice() else {
+                panic!("{planned:?}");
+            };
+            assert_eq!(*size, Some(26), "{text}");
+        }
+    }
+
     /// No code of the types panel or the struct tab writes an overlay: every edit is an
     /// engine plan, committed by the binary's edit path.
     #[test]
