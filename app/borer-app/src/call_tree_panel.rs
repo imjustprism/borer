@@ -255,6 +255,48 @@ impl CallTreePanel {
         cx.notify();
     }
 
+    /// Moves the selection `by` rows down, or up when negative, and keeps it on screen.
+    ///
+    /// # Arguments
+    ///
+    /// * `by` - Rows to move; the selection stops at the first and the last row.
+    /// * `cx` - Panel context.
+    pub fn select_by(&mut self, by: isize, cx: &mut Context<'_, Self>) {
+        if let Some(tree) = self.tree() {
+            let ix = tree.selected().saturating_add_signed(by);
+            self.select(ix, cx);
+        }
+    }
+
+    /// Steps into the selected row: opens it when closed, else selects its first child.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Panel context.
+    pub fn step_in(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(rooted) = self.rooted.as_mut() else {
+            return;
+        };
+        let ask = rooted.tree.step_in();
+        let ix = rooted.tree.selected();
+        self.read(ask, cx);
+        self.select(ix, cx);
+    }
+
+    /// Steps out of the selected row: closes it when open, else selects its parent.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Panel context.
+    pub fn step_out(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(rooted) = self.rooted.as_mut() else {
+            return;
+        };
+        rooted.tree.step_out();
+        let ix = rooted.tree.selected();
+        self.select(ix, cx);
+    }
+
     /// Lists the call sites of the selected row's call, or hides them.
     ///
     /// # Arguments
@@ -663,7 +705,17 @@ impl Render for CallTreePanel {
             .on_action(cx.listener(|this, _: &ShowCallSites, _, cx| this.toggle_sites(cx)))
             .on_action(cx.listener(|this, _: &menu::Confirm, window, cx| {
                 this.confirm(TabMode::Permanent, window, cx);
-            }));
+            }))
+            .on_action(cx.listener(|this, _: &menu::SelectNext, _, cx| this.select_by(1, cx)))
+            .on_action(cx.listener(|this, _: &menu::SelectPrevious, _, cx| {
+                this.select_by(-1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &menu::SelectFirst, _, cx| this.select(0, cx)))
+            .on_action(cx.listener(|this, _: &menu::SelectLast, _, cx| {
+                this.select(usize::MAX, cx);
+            }))
+            .on_action(cx.listener(|this, _: &menu::SelectChild, _, cx| this.step_in(cx)))
+            .on_action(cx.listener(|this, _: &menu::SelectParent, _, cx| this.step_out(cx)));
         if let Some(card) = self.card(cx) {
             return root.child(card.render(cx));
         }
@@ -716,7 +768,7 @@ mod tests {
     use crate::app_view::AppWindow;
     use crate::app_view::tests::{init, open, open_place};
     use crate::call_tree::tests::{MAIN, MAIN_CALLS_ZETA, MID, ZETA, tree_program};
-    use crate::call_tree::{Missing, Row};
+    use crate::call_tree::{Missing, Row, Shape};
     use crate::card::Tone;
     use crate::decompile_item::{DecompileItem, Form, TabMode};
     use crate::places::Place;
@@ -966,5 +1018,54 @@ mod tests {
             workspace.active_item(cx).map(|item| item.item_id())
         });
         assert_ne!(preview, active);
+    }
+
+    /// The panel's keys walk the tree: down and up move, right opens a node or enters it,
+    /// left leaves a child for its parent or closes an open node, and the app's key roots
+    /// the tree at the active tab's function.
+    #[gpui::test]
+    fn the_keys_walk_the_tree(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace.clone();
+        let loaded = tree_program();
+        load(&app, &loaded, cx);
+        open_place(
+            &workspace,
+            &loaded,
+            Place::decompile(MAIN),
+            TabMode::Permanent,
+            cx,
+        );
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_keystrokes("secondary-shift-b");
+        cx.run_until_parked();
+        let panel = panel_of(&workspace, cx);
+        let at = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            panel.read_with(cx, |panel, _| {
+                let tree = panel.tree().unwrap();
+                let row = tree.rows()[tree.selected()];
+                let node = (tree.target(&row).unwrap(), tree.shape(&row).unwrap());
+                (tree.selected(), node, tree.rows().len())
+            })
+        };
+        assert_eq!(at(cx), (0, (MAIN, Shape::Open), 4));
+        cx.simulate_keystrokes("down");
+        assert_eq!(at(cx), (1, (ZETA, Shape::Leaf), 4));
+        cx.simulate_keystrokes("right down down");
+        assert_eq!(at(cx), (3, (MID, Shape::Closed), 4));
+        cx.simulate_keystrokes("right");
+        assert_eq!(at(cx), (3, (MID, Shape::Open), 5));
+        cx.simulate_keystrokes("right");
+        assert_eq!(at(cx), (4, (MID, Shape::Cycle), 5));
+        cx.simulate_keystrokes("left");
+        assert_eq!(at(cx), (3, (MID, Shape::Open), 5));
+        cx.simulate_keystrokes("left");
+        assert_eq!(at(cx), (3, (MID, Shape::Closed), 4));
+        cx.simulate_keystrokes("up up up");
+        assert_eq!(at(cx), (0, (MAIN, Shape::Open), 4));
     }
 }

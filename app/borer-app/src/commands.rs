@@ -90,13 +90,15 @@ pub enum Ctx {
     Hex,
     /// A table's rows, not its filter.
     Table,
+    /// The call tree panel.
+    CallTree,
     /// The in-window menu bar.
     MenuBar,
 }
 
 impl Ctx {
     /// Every context, in the order the keymap's sections go.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Global,
         Self::Workspace,
         Self::Code,
@@ -106,6 +108,7 @@ impl Ctx {
         Self::Graph,
         Self::Hex,
         Self::Table,
+        Self::CallTree,
         Self::MenuBar,
     ];
 
@@ -122,6 +125,7 @@ impl Ctx {
             Self::Graph => Some("GraphView"),
             Self::Hex => Some("HexView"),
             Self::Table => Some("BorerRows"),
+            Self::CallTree => Some("CallTreePanel"),
             Self::MenuBar => Some("MenuBar"),
         }
     }
@@ -777,6 +781,16 @@ pub const COMMANDS: &[Command] = &[
         serves: &["calls"],
         ..binding("borer::ShowCallSites", "Call Sites in the Call Tree", &[])
     },
+    binding(
+        "menu::SelectParent",
+        "Collapse or Go to Parent",
+        &[Keys::all(Ctx::CallTree, &["left"])],
+    ),
+    binding(
+        "menu::SelectChild",
+        "Expand or Go to Child",
+        &[Keys::all(Ctx::CallTree, &["right"])],
+    ),
     binding(
         "menu::SelectFirst",
         "First Row",

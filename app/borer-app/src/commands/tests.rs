@@ -172,6 +172,7 @@ fn broken(text: &str, keys: &Keys, replaces: bool, os: Os) -> Vec<&'static str> 
                 | Ctx::Graph
                 | Ctx::Hex
                 | Ctx::Table
+                | Ctx::CallTree
                 | Ctx::MenuBar
         );
         if bare && printable(key) && !readonly {
@@ -267,7 +268,7 @@ fn overlaps(ctx: Ctx, zed: &str) -> bool {
         Ctx::Code => &["Workspace", "Pane", "Editor"],
         Ctx::Rows => &["Workspace", "Dock", "Editor"],
         Ctx::Start | Ctx::Overview | Ctx::Graph | Ctx::Hex => &["Workspace", "Pane"],
-        Ctx::Table => &["Workspace", "Dock"],
+        Ctx::Table | Ctx::CallTree => &["Workspace", "Dock"],
         Ctx::MenuBar => &["Workspace", "menu"],
     };
     around.contains(&first)
@@ -354,6 +355,7 @@ fn handled(cx: &mut TestAppContext) -> Vec<(Ctx, BTreeSet<&'static str>)> {
                 | Ctx::Overview
                 | Ctx::Hex
                 | Ctx::Table
+                | Ctx::CallTree
                 | Ctx::MenuBar => anywhere.clone(),
             };
             (ctx, names)
