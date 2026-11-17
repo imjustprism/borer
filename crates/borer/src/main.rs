@@ -662,8 +662,8 @@ impl BorerServer {
     /// ([`BorerServer::script`]). A resource the engine answers on its own
     /// is the engine's ([`borer_engine::answer`], through
     /// [`BorerServer::engine_answer`]), which pages it; one that reads
-    /// what the server holds is answered here, `grep` and `stats` handed the
-    /// page and any other paged here ([`borer_engine::table::page`]), under a
+    /// what the server holds is answered here, `grep` handed the page and
+    /// any other paged here ([`borer_engine::table::page`]), under a
     /// `# showing N of M from K` line and over the URI that reads the next
     /// page.
     ///
@@ -689,8 +689,6 @@ impl BorerServer {
         }
         let text = match (kind, arg) {
             ("info", None) => self.binary_info()?,
-            ("stats", Some(spec)) => return self.stats_text(&spec, asked),
-            ("find", Some(query)) => self.find_text(&query)?,
             ("diff", Some(other)) => self.diff_text(&other)?,
             ("difffn", Some(spec)) => self.diff_function_text(&spec)?,
             ("migrate", Some(spec)) => self.migrate_text(&spec)?,

@@ -255,31 +255,76 @@ mod tests {
             ("xrefs", serde_json::json!({"address": "0x100a"})),
             ("xrefs", serde_json::json!({"address": "nosuch"})),
         ];
+        for server in [
+            crate::testing::raw_server(),
+            crate::testing::code_server(Arch::X86_64, &code),
+        ] {
+            answer_alike(&server, &calls);
+        }
+        assert!(
+            TOOLS
+                .iter()
+                .all(|t| calls.iter().any(|(n, _)| *n == t.name))
+        );
+    }
+
+    /// `query` reads `borer://find` and `borer://stats` as the same bytes
+    /// through the plainest front end as through the server: hits, no hit,
+    /// a page, a refused argument and a stage the program lacks.
+    ///
+    /// # Panics
+    ///
+    /// When a read answers otherwise on the two faces.
+    #[test]
+    fn find_and_stats_read_alike_through_a_plain_front_end() {
+        let uris = [
+            "borer://find/sub_10",
+            "borer://find/zzqq",
+            "borer://find/sub!offset=1!limit=1",
+            "borer://stats/sections",
+            "borer://stats/entropy,window=4!limit=2",
+            "borer://stats/sizes,bins=2",
+            "borer://stats/nope",
+        ];
+        let calls = uris.map(|uri| ("query", serde_json::json!({ "uri": uri })));
+        for server in [
+            crate::testing::raw_server(),
+            crate::testing::code_server(borer_engine::program::Arch::X86_64, &[0xc3; 16]),
+        ] {
+            answer_alike(&server, &calls);
+        }
+    }
+
+    /// Runs each call on the server and on a [`borer_front::tools::Loaded`]
+    /// over its program, analysis and names, the server's session lines (the
+    /// `# since=` tag and the `# evidence:` id) left out.
+    ///
+    /// # Arguments
+    ///
+    /// * `server` - The server.
+    /// * `calls` - Each tool's name and arguments.
+    ///
+    /// # Panics
+    ///
+    /// When a call answers otherwise on the two faces.
+    fn answer_alike(server: &crate::BorerServer, calls: &[(&str, serde_json::Value)]) {
         let session = |text: String| {
             text.lines()
                 .filter(|l| !l.starts_with("# since=") && !l.starts_with("# evidence:"))
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        for server in [
-            crate::testing::raw_server(),
-            crate::testing::code_server(Arch::X86_64, &code),
-        ] {
-            let plain = borer_front::tools::Loaded {
-                program: server.loaded().expect("loaded"),
-                analysis: server.analysis_or_empty(),
-                overlay: server.overlay_plain(),
-            };
-            let mut reached: Vec<&str> = Vec::new();
-            for (name, args) in &calls {
-                let t = borer_front::tools::tool(name).expect("a catalog tool");
-                let args = args.as_object().cloned().unwrap_or_default();
-                let served = (t.run)(&server, args.clone()).map(session);
-                let plainly = (t.run)(&plain, args).map(session);
-                assert_eq!(served, plainly, "{name}");
-                reached.push(name);
-            }
-            assert!(TOOLS.iter().all(|t| reached.contains(&t.name)));
+        let plain = borer_front::tools::Loaded {
+            program: server.loaded().expect("loaded"),
+            analysis: server.analysis_or_empty(),
+            overlay: server.overlay_plain(),
+        };
+        for (name, given) in calls {
+            let t = borer_front::tools::tool(name).expect("a catalog tool");
+            let args = given.as_object().cloned().unwrap_or_default();
+            let served = (t.run)(server, args.clone()).map(session);
+            let plainly = (t.run)(&plain, args).map(session);
+            assert_eq!(served, plainly, "{name}: {given}");
         }
     }
 

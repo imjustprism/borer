@@ -147,3 +147,56 @@ fn a_script_with_no_front_end_names_what_it_reads() {
     assert!(refused.contains("query is not available here"), "{refused}");
     assert!(refused.contains("nearest: borer://triage"), "{refused}");
 }
+
+/// With no front end, a script reads `find` and `stats` as the server
+/// answered them: the search over every place a name or text lives, and a
+/// chart series a page at a time.
+#[test]
+fn a_script_reads_find_and_stats_with_no_front_end() {
+    use borer_engine::analysis::find::{Query, everywhere};
+    use borer_engine::analysis::stats::stats_tsv;
+    let mut bytes = vec![0xc3; 0x10];
+    bytes.extend(b"decrypt the payload\0");
+    let (program, analysis) = image(bytes);
+    let o = Overlay::default();
+    let lines = |text: &str| -> Vec<String> {
+        text.strip_suffix('\n')
+            .unwrap_or(text)
+            .split('\n')
+            .map(str::to_owned)
+            .collect()
+    };
+    let stats = "borer://stats/entropy";
+    for (uri, want) in [
+        (
+            "borer://find/crypt",
+            everywhere(&program, &analysis, &o, &Query::parse("crypt"), usize::MAX).spell(),
+        ),
+        (
+            stats,
+            stats_tsv(
+                &program,
+                &analysis,
+                "entropy",
+                Page::whole(stats).window(200),
+            )
+            .expect("entropy reads"),
+        ),
+    ] {
+        let ran = run(
+            Arc::clone(&program),
+            Arc::clone(&analysis),
+            Arc::default(),
+            &format!(r#"print(query("{uri}"));"#),
+            &[],
+        )
+        .expect("the query answers");
+        assert_eq!(ran.output, lines(&want), "{uri}");
+    }
+    assert!(
+        lines(&everywhere(&program, &analysis, &o, &Query::parse("crypt"), usize::MAX).spell())
+            .iter()
+            .any(|l| l.contains("decrypt the payload")),
+        "the needle is found"
+    );
+}

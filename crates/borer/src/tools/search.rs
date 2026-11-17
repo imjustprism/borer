@@ -1,34 +1,11 @@
-//! `borer://find`, and the tests of the search tools.
+//! The tests of the search tools and `borer://find`.
 //!
 //! The tools that find things (strings, symbols, byte and text search, crypto
 //! constants, the functions that use a string) are the catalog's
-//! ([`borer_front::tools`]).
+//! ([`borer_front::tools`]); `borer://find` is the engine's
+//! ([`borer_engine::answer`]).
 
-use borer_engine::analysis::find;
-use borer_engine::program::Feature;
-use rmcp::ErrorData;
-
-use crate::BorerServer;
 pub(crate) use borer_front::tools::render_hits;
-
-impl BorerServer {
-    /// One search over every name table, ranked
-    /// ([`borer_engine::analysis::find::everywhere`]).
-    ///
-    /// # Arguments
-    ///
-    /// * `query` - The query as typed ([`find::Query::parse`]).
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded.
-    pub(crate) fn find_text(&self, query: &str) -> Result<String, ErrorData> {
-        self.with_analysis(Feature::Discover, |p, a, o| {
-            let q = find::Query::parse(query);
-            Ok(find::everywhere(p, a, o, &q, usize::MAX).spell())
-        })
-    }
-}
 
 #[cfg(test)]
 mod tests {

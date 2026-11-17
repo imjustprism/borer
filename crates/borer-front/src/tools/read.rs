@@ -21,7 +21,6 @@ pub const SERVER_RESOURCES: &[(&str, &str)] = &[
     ("changes", "it loads another file from disk"),
     ("diff", "it loads another file from disk"),
     ("difffn", "it loads another file from disk"),
-    ("find", "the MCP server answers it until the engine does"),
     ("grep", "it reads the code index cached on disk"),
     ("help", "the resource list is the MCP server's"),
     ("index", "it reads the code index cached on disk"),
@@ -34,7 +33,6 @@ pub const SERVER_RESOURCES: &[(&str, &str)] = &[
         "session",
         "the session ledger and its evidence are the MCP server's",
     ),
-    ("stats", "the MCP server answers it until the engine does"),
 ];
 
 /// Answers a resource the engine answers, through what a front end holds.

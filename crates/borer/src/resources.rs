@@ -14,14 +14,13 @@ use std::path::Path;
 use std::sync::Arc;
 
 use borer_engine::analysis::{Analysis, Overlay, render};
-use borer_engine::answer::Need;
 use borer_engine::answer::catalog::{RESOURCE_TEMPLATES, RESOURCES, example, resource_name};
 use borer_engine::program::{Feature, Program};
 use borer_engine::strings::walk::{Needle, StringRow, row_matches};
 use rmcp::ErrorData;
 
 use crate::BorerServer;
-use crate::errors::{err_internal, err_not_found, err_params, failed};
+use crate::errors::{err_internal, err_not_found, err_params};
 use crate::paging::Asked;
 use crate::session;
 use crate::state::{lock, read_lock};
@@ -251,34 +250,6 @@ impl BorerServer {
             }))
         })?;
         refused.map_or(Ok(out), |why| Err(err_params(why)))
-    }
-
-    /// One chart series as a table ([`borer_engine::analysis::stats::stats_tsv`]),
-    /// a page at a time.
-    ///
-    /// # Arguments
-    ///
-    /// The series of the file's bytes answer on any architecture, from an
-    /// empty analysis where the code is not discovered; `sizes` refuses
-    /// there.
-    ///
-    /// # Arguments
-    ///
-    /// * `spec` - The kind and its settings.
-    /// * `asked` - The URI with its paging, which the table is paged by.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, or the spec is refused.
-    pub(crate) fn stats_text(&self, spec: &str, asked: &Asked) -> Result<String, ErrorData> {
-        /// Most rows one read returns.
-        const PAGE: usize = 200;
-        let again = asked.again();
-        borer_front::tools::run(self, Need::Best(Feature::Discover), |s| {
-            let window = asked.page(&again).window(PAGE);
-            borer_engine::analysis::stats::stats_tsv(s.program(), s.analysis(), spec, window)
-        })
-        .map_err(failed)
     }
 
     /// Compares the loaded binary against another version and reports the diff.

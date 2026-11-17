@@ -19,7 +19,7 @@ use std::num::NonZeroUsize;
 use crate::analysis::{
     Analysis, EnumSource, Overlay, about, attributes, classes, decompile, encode, fieldrefs,
     function_entry, hex_prefixed, map, messages, name_of, objc, opcodes, parse_addr, ports,
-    protocol, render, resolve_suggesting, schema, senders, sigs, vtables,
+    protocol, render, resolve_suggesting, schema, senders, sigs, stats, vtables,
 };
 use crate::program::{Feature, Program};
 use crate::table::Window;
@@ -713,6 +713,13 @@ const ANSWERS: &[Answer] = &[
         Ok(decompile::window(&text, None, None, None))
     }),
     rows("annotations", Nothing, File, &[], |q| Ok(annotations(q.o))),
+    rows("find", Argument, Code(Discover), &[Word(2)], |q| {
+        let query = crate::analysis::find::Query::parse(q.arg);
+        Ok(crate::analysis::find::everywhere(q.p, q.a, q.o, &query, usize::MAX).spell())
+    }),
+    itself("stats", Argument, Best(Discover), &[Column("va")], |q| {
+        stats::stats_tsv(q.p, q.a, q.arg, q.page.window(WINDOW_PAGE))
+    }),
 ];
 
 /// Instructions a whole-function listing shows when no count is asked.
