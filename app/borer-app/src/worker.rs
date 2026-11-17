@@ -642,28 +642,27 @@ pub fn save_project_blocking(loaded: &LoadedBinary, path: &Path) -> anyhow::Resu
     project_file::write(path, &file, Existing::Replace).map_err(anyhow::Error::msg)
 }
 
-/// Computes the first `limit` [`FunctionRows`] of `loaded` matching `filter`.
+/// Computes the first `limit` [`FunctionRows`] of `loaded` matching `filter`, in `order`.
 ///
 /// # Arguments
 ///
 /// * `loaded` - Previously loaded binary state.
 /// * `filter` - Substring or `0x`-hex query; empty selects every non-thunk function.
+/// * `order` - The engine's order of the rows.
 /// * `limit` - Most rows.
 ///
 /// # Returns
 ///
-/// Matching [`FunctionRows`] in ascending entry-address order.
+/// Matching [`FunctionRows`] in `order`.
 #[must_use]
-pub fn filter_rows_blocking(loaded: &LoadedBinary, filter: &str, limit: usize) -> FunctionRows {
+pub fn filter_rows_blocking(
+    loaded: &LoadedBinary,
+    filter: &str,
+    order: FunctionOrder,
+    limit: usize,
+) -> FunctionRows {
     let query = (!filter.is_empty()).then_some(filter);
-    function_rows(
-        &loaded.analysis,
-        &loaded.overlay,
-        query,
-        FunctionOrder::Address,
-        0,
-        limit,
-    )
+    function_rows(&loaded.analysis, &loaded.overlay, query, order, 0, limit)
 }
 
 /// What the engine's check of one function's answer found, counted as the answer's header

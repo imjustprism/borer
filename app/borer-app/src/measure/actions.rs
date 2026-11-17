@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use borer_engine::analysis::render::FunctionRow;
+use borer_engine::analysis::render::{FunctionOrder, FunctionRow};
 use borer_engine::cancel::Cancel;
 use borer_engine::num::as_f64;
 use gpui::{
@@ -34,7 +34,9 @@ use crate::decompile_item::Form;
 use crate::goto::{FindEverywhere, GoTo, GoToDelegate};
 use crate::graph_item::GraphItem;
 use crate::places::{PERMANENT, Place, open};
-use crate::worker::{LoadedBinary, Sources, load_binary_blocking, ui_engine_calls};
+use crate::worker::{
+    LoadedBinary, Sources, filter_rows_blocking, load_binary_blocking, ui_engine_calls,
+};
 
 /// Timed runs of each action on each binary.
 const RUNS: usize = 50;
@@ -188,18 +190,6 @@ pub(super) fn pick_targets(rows: &[FunctionRow], n: usize) -> Vec<Target> {
         .collect()
 }
 
-/// Returns the entries of the `n` largest functions, the lowest entry first among equals.
-///
-/// # Arguments
-///
-/// * `rows` - The function table's rows.
-/// * `n` - Most functions.
-pub(super) fn largest(rows: &[FunctionRow], n: usize) -> Vec<u64> {
-    let mut sized: Vec<(u64, u64)> = rows.iter().map(|row| (row.size, row.entry)).collect();
-    sized.sort_by_key(|&(size, entry)| (std::cmp::Reverse(size), entry));
-    sized.into_iter().take(n).map(|(_, entry)| entry).collect()
-}
-
 /// Returns `loaded` with the functions its actions and sweeps run on.
 ///
 /// # Arguments
@@ -207,15 +197,15 @@ pub(super) fn largest(rows: &[FunctionRow], n: usize) -> Vec<u64> {
 /// * `bench` - Which binary it is.
 /// * `loaded` - The binary, analyzed.
 fn prep_of(bench: Bench, loaded: Arc<LoadedBinary>) -> Prep {
-    let rows = &loaded.initial_rows.rows;
     let graphs = match bench {
         Bench::Notepad => NOTEPAD_GRAPHS,
         Bench::Large => 1,
     };
+    let largest = filter_rows_blocking(&loaded, "", FunctionOrder::Size, graphs).rows;
     Prep {
         bench,
-        targets: pick_targets(rows, RUNS.saturating_add(1)),
-        largest: largest(rows, graphs),
+        targets: pick_targets(&loaded.initial_rows.rows, RUNS.saturating_add(1)),
+        largest: largest.iter().map(|row| row.entry).collect(),
         loaded,
     }
 }
@@ -1078,8 +1068,8 @@ mod tests {
     use gpui::{Entity, TestAppContext, VisualTestContext, WindowId};
 
     use super::{
-        Act, ActionsRun, Bench, Move, Prep, RUNS, Sweep, Target, Times, What, feed, largest,
-        misses, pick_targets, script,
+        Act, ActionsRun, Bench, Move, Prep, RUNS, Sweep, Target, Times, What, feed, misses,
+        pick_targets, prep_of, script,
     };
     use crate::app_view::tests::{CALLER, init, sample};
     use crate::functions_panel::FunctionsPanel;
@@ -1102,7 +1092,7 @@ mod tests {
     }
 
     /// Two runs pick the same targets: the first rows by address that call another, and the
-    /// largest functions by size then address.
+    /// engine's largest function.
     ///
     /// # Panics
     ///
@@ -1116,12 +1106,20 @@ mod tests {
         let want: Vec<u64> = (0..8u64).map(|i| 0x1000 + i * 0x30).collect();
         assert_eq!(entries(8), want);
         assert_eq!(entries(8), entries(8));
-        assert_eq!(largest(&rows, 3), vec![0x1000, 0x1070, 0x10e0]);
         let loaded = sample();
         let again = sample();
         let picked = pick_targets(&loaded.initial_rows.rows, 51);
         assert_eq!(picked, pick_targets(&again.initial_rows.rows, 51));
         assert_eq!(picked.first().map(|t| t.entry), Some(CALLER));
+        let rows = &loaded.initial_rows.rows;
+        let biggest = rows
+            .iter()
+            .max_by_key(|r| (r.size, std::cmp::Reverse(r.entry)));
+        let graphs = prep_of(Bench::Large, loaded.clone()).largest;
+        assert_eq!(
+            graphs,
+            biggest.map(|r| r.entry).into_iter().collect::<Vec<_>>()
+        );
     }
 
     /// No run's setup opens the target of a later run of its action, and go to never opens

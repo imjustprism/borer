@@ -3,7 +3,9 @@
 
 use std::sync::Arc;
 
-use borer_engine::analysis::render::{FunctionRow, FunctionRows, INCOMPLETE_NOTE, LeftOut};
+use borer_engine::analysis::render::{
+    FunctionOrder, FunctionRow, FunctionRows, INCOMPLETE_NOTE, LeftOut,
+};
 use gpui::{Entity, SharedString};
 use ui::IconName;
 use workspace::Workspace;
@@ -151,7 +153,7 @@ impl RowKind for Functions {
     }
 
     fn fetch(loaded: &LoadedBinary, (): &(), filter: &str, limit: usize) -> FunctionRows {
-        filter_rows_blocking(loaded, filter, limit)
+        filter_rows_blocking(loaded, filter, FunctionOrder::Address, limit)
     }
 
     fn nothing(shown: &FunctionRows, query: &SharedString) -> Empty {
