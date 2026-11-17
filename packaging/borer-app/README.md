@@ -13,8 +13,7 @@ SHA256SUMS to check them with. None is signed yet, so each system warns once.
   SmartScreen stops it, choose "More info", then "Run anyway". It installs
   for every user under `Program Files\borer`, adds borer to the Start menu
   and to Installed apps (uninstall it there), and another version's MSI
-  replaces the installed one in place. A console window opens beside the
-  app; leave it open.
+  replaces the installed one in place.
 - **macOS:** open `borer-app-<version>-<arch>-apple-darwin.dmg` and drag
   borer to Applications. Gatekeeper refuses an app from an unidentified
   developer the first time: Control-click borer in Applications, choose Open,
