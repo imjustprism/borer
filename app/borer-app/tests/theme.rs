@@ -729,6 +729,25 @@ async fn a_theme_name_has_one_file_and_leaves_with_it(cx: &mut TestAppContext) {
     assert!(cx.update(|_, cx| ThemeRegistry::global(cx).get("mine dark").is_err()));
 }
 
+/// A theme file renamed while the app runs keeps its themes: the new name is read after the
+/// old one is dropped, whatever their order, with no notification.
+#[gpui::test]
+async fn a_renamed_theme_file_keeps_its_themes(cx: &mut TestAppContext) {
+    let dir = themes_dir();
+    let (old, new) = (dir.join("zz.json"), dir.join("aa.json"));
+    let files = [(old.as_path(), Some(family("zz", "mine dark", "dark", "{}")))];
+    let app_state = boot_with_files(&files, cx).await;
+    assert!(registered("mine dark", cx));
+    let (workspace, cx) = open_window(&app_state, cx);
+    (app_state.fs)
+        .rename(&old, &new, fs::RenameOptions::default())
+        .await
+        .expect("renamed");
+    cx.run_until_parked();
+    assert!(cx.update(|_, cx| ThemeRegistry::global(cx).get("mine dark").is_ok()));
+    assert!(!noticed(&workspace, &new, cx));
+}
+
 /// Opens the theme picker over `workspace` with [`SelectTheme`], types `query` into it and
 /// lets the preview land.
 fn pick(workspace: &Entity<Workspace>, query: &str, cx: &mut VisualTestContext) {

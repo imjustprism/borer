@@ -47,7 +47,8 @@ impl Global for ThemeFiles {}
 /// Reads every theme file of the themes folder in the background, then watches it.
 ///
 /// The folder is created when it is missing. Each file that changes is read again and the
-/// themes of each file deleted are dropped; the shown theme is applied again after each
+/// themes of each file deleted are dropped, the deleted first, so a file renamed keeps its
+/// themes under the new name; the shown theme is applied again after each
 /// change, so one the settings name shows once it loads.
 ///
 /// # Arguments
@@ -79,16 +80,21 @@ pub(crate) fn load_and_watch(cx: &mut App) {
                 cx.update(|cx| notice(dir, Err(&why), cx));
                 continue;
             }
-            let mut touched = false;
+            let (mut touched, mut there) = (false, Vec::new());
             for path in &changed {
-                touched |= match fs.metadata(path).await {
-                    Ok(Some(meta)) if meta.is_dir => false,
-                    Ok(None) => cx.update(|cx| {
-                        notice(path, Ok(()), cx);
-                        unregister(path, cx)
-                    }),
-                    Ok(Some(_)) | Err(_) => load(&fs, path, cx).await,
-                };
+                match fs.metadata(path).await {
+                    Ok(Some(meta)) if meta.is_dir => {}
+                    Ok(None) => {
+                        touched |= cx.update(|cx| {
+                            notice(path, Ok(()), cx);
+                            unregister(path, cx)
+                        });
+                    }
+                    Ok(Some(_)) | Err(_) => there.push(path),
+                }
+            }
+            for path in there {
+                touched |= load(&fs, path, cx).await;
             }
             if touched {
                 cx.update(theme_settings::reload_theme);
