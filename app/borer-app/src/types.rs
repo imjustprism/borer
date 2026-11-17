@@ -507,7 +507,8 @@ impl StructItem {
         let revised = cx.subscribe(&binary, |item, _, event: &BinaryEvent, cx| match event {
             BinaryEvent::Revised(loaded) => {
                 item.loaded = loaded.clone();
-                item.draft = None;
+                item.shown = Shown::Asking;
+                item.redraft(None);
                 item.ask(cx);
             }
             BinaryEvent::Opened(_) | BinaryEvent::Closed => {}
@@ -610,7 +611,7 @@ impl StructItem {
     /// * `cx` - Tab context.
     pub fn select(&mut self, line: usize, cx: &mut Context<'_, Self>) {
         self.selected = line.min(self.shown.lines().len().saturating_sub(1));
-        self.draft = None;
+        self.redraft(None);
         cx.notify();
     }
 
@@ -628,14 +629,14 @@ impl StructItem {
             && ask != Ask::Copy
             && let Some(why) = read_only(key)
         {
-            self.draft = Some(Draft {
+            self.redraft(Some(Draft {
                 ask,
                 planned: Some((Vec::new(), Err(why))),
-            });
+            }));
             cx.notify();
             return;
         }
-        self.draft = Some(Draft { ask, planned: None });
+        self.redraft(Some(Draft { ask, planned: None }));
         if ask.takes_text() {
             self.input.update(cx, |input, cx| {
                 input.set_text("", window, cx);
@@ -646,6 +647,17 @@ impl StructItem {
             self.plan(window, cx);
         }
         cx.notify();
+    }
+
+    /// Puts `draft` in place of the edit asked for, stopping the plan of the one before so
+    /// its answer never lands in another draft.
+    ///
+    /// # Arguments
+    ///
+    /// * `draft` - The edit now asked for, if any.
+    fn redraft(&mut self, draft: Option<Draft>) {
+        self.plan_job.stop();
+        self.draft = draft;
     }
 
     /// Plans the edit asked for with the input's text in the background; the engine's
@@ -727,7 +739,7 @@ impl StructItem {
     /// * `window` - Window the tab is in.
     /// * `cx` - Tab context.
     pub fn cancel(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        self.draft = None;
+        self.redraft(None);
         window.focus(&self.focus_handle, cx);
         cx.notify();
     }
@@ -1045,7 +1057,7 @@ mod tests {
     use super::edit::edits;
     use super::{Ask, Line, Shown, StructItem, TypeKey, Types, TypesPanel, lines};
     use crate::app_view::tests::{CALLER, init, open, open_place, sample};
-    use crate::binary::Binary;
+    use crate::binary::{Binary, BinaryEvent};
     use crate::decompile_item::TabMode;
     use crate::places::Place;
     use crate::rows_panel::RowKind as _;
@@ -1299,6 +1311,35 @@ mod tests {
             Some("0x0000      4  x  u32")
         );
         assert_eq!(revision, Some(now.fingerprint));
+    }
+
+    /// A plan that lands after its draft was dropped fills no later draft: Delete on `a`,
+    /// then a move and Rename before Delete's plan lands, leaves nothing planned.
+    #[gpui::test]
+    fn a_plan_lands_only_in_its_own_draft(cx: &mut TestAppContext) {
+        let (workspace, _, loaded, cx) = loaded_with_structs(cx);
+        let item = struct_tab(&workspace, &loaded, type_place("S", TypeSource::User), cx);
+        item.update_in(cx, |item, window, cx| {
+            item.start(Ask::Delete, window, cx);
+            item.select(1, cx);
+            item.start(Ask::Rename, window, cx);
+        });
+        cx.run_until_parked();
+        let planned = item.read_with(cx, |item, _| item.planned().to_vec());
+        assert!(planned.is_empty(), "{planned:?}");
+    }
+
+    /// An edit asked after the binary was revised, before the tab's new detail lands, is not
+    /// planned from the lines shown before.
+    #[gpui::test]
+    fn an_edit_after_a_revision_waits_for_the_new_lines(cx: &mut TestAppContext) {
+        let (workspace, binary, loaded, cx) = loaded_with_structs(cx);
+        let item = struct_tab(&workspace, &loaded, type_place("S", TypeSource::User), cx);
+        binary.update(cx, |_, cx| cx.emit(BinaryEvent::Revised(loaded.clone())));
+        item.update_in(cx, |item, window, cx| item.start(Ask::Delete, window, cx));
+        cx.run_until_parked();
+        let planned = item.read_with(cx, |item, _| item.planned().to_vec());
+        assert!(planned.is_empty(), "{planned:?}");
     }
 
     /// A debug type opens read only, saying so in place of a plan, and Copy to User Type
