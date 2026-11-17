@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=borer
+GenericName=Reverse Engineering Tool
+Comment=Load and decompile PE, ELF and Mach-O binaries
+Exec=borer-app %f
+Icon=borer-app
+Terminal=false
+Categories=Development;Debugger;
+StartupWMClass=borer-app

@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The Windows installer of borer-app, built by the release workflow with WiX v5:
+
+    wix build borer-app.wxs -arch x64 -ext WixToolset.UI.wixext -d Version=0.2.12 -d Dir=<staging> -o borer-app.msi
+
+  Version is numeric (major.minor.build); Dir holds borer-app.exe, LICENSE,
+  LICENSE.rtf (LICENSE as RTF, for the license page), NOTICE, README.md,
+  THIRD-PARTY-LICENSES and RUST-STD-COPYRIGHT.html. It installs for every user
+  under Program Files\borer with a Start menu shortcut and an entry in
+  installed apps. The upgrade code never changes, and any version replaces any
+  other in place, so a dev build and a release swap freely.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package Name="borer" Manufacturer="borer" Version="$(var.Version)"
+           UpgradeCode="085FD8C8-EA1B-4D3C-9BC0-D1C57066E632" Scope="perMachine" Language="1033">
+    <MajorUpgrade AllowDowngrades="yes" />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="borer.ico" SourceFile="$(sys.SOURCEFILEDIR)icons\borer-app.ico" />
+    <Property Id="ARPPRODUCTICON" Value="borer.ico" />
+    <Property Id="ARPURLINFOABOUT" Value="https://borer.lol" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/imjustprism/borer" />
+
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.Dir)\LICENSE.rtf" />
+    <ui:WixUI Id="WixUI_Minimal" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="borer" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
+      <Component>
+        <File Source="$(var.Dir)\borer-app.exe" KeyPath="yes">
+          <Shortcut Id="StartMenuShortcut" Name="borer" Description="Reverse-engineering engine"
+                    Directory="ProgramMenuFolder" WorkingDirectory="INSTALLFOLDER" Icon="borer.ico" />
+        </File>
+      </Component>
+      <Component><File Source="$(var.Dir)\LICENSE" KeyPath="yes" /></Component>
+      <Component><File Source="$(var.Dir)\NOTICE" KeyPath="yes" /></Component>
+      <Component><File Source="$(var.Dir)\README.md" KeyPath="yes" /></Component>
+      <Component><File Source="$(var.Dir)\THIRD-PARTY-LICENSES" KeyPath="yes" /></Component>
+      <Component><File Source="$(var.Dir)\RUST-STD-COPYRIGHT.html" KeyPath="yes" /></Component>
+    </ComponentGroup>
+
+    <Feature Id="Main" Title="borer">
+      <ComponentGroupRef Id="AppFiles" />
+    </Feature>
+  </Package>
+</Wix>

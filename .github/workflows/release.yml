@@ -4,7 +4,9 @@ name: release
 # server (borer-<tag>-<target>) and the desktop app (borer-app-<tag>-<target>),
 # packs each with LICENSE, NOTICE, a README and the licenses of everything the
 # binary links (THIRD-PARTY-LICENSES and RUST-STD-COPYRIGHT.html, written by
-# scripts/dev/licenses.py for that target), and attaches the archives and their
+# scripts/dev/licenses.py for that target), adds the app's installers (an MSI
+# on Windows, a .dmg holding borer.app on macOS; the Linux archive carries a
+# desktop entry and icons), and attaches the archives, the installers and their
 # SHA-256 sums to the GitHub Release of a pushed `v*` tag. From that release
 # it then publishes the server to crates.io, npm and PyPI and updates the
 # Homebrew tap and the Scoop bucket, each only when its credential is
@@ -152,7 +154,8 @@ jobs:
 
   # The desktop app, from its own workspace and toolchain under app/. Linux
   # needs the libraries the app CI job installs; macOS needs Xcode's Metal
-  # toolchain for GPUI's shaders.
+  # toolchain for GPUI's shaders. The installers are unsigned; the files they
+  # use are under packaging/borer-app/.
   app:
     name: app (${{ matrix.target }})
     needs: source
@@ -206,11 +209,17 @@ jobs:
           py=$(command -v python3 || command -v python)
           "$py" scripts/dev/licenses.py --app --target ${{ matrix.target }} --out THIRD-PARTY-LICENSES
 
+      # The archive name, and the numeric version the MSI and borer.app need:
+      # a `vX.Y.Z` tag's X.Y.Z, otherwise 0.0.<run number>.
       - name: name
         shell: bash
         env:
           VERSION: ${{ needs.source.outputs.version }}
-        run: echo "NAME=borer-app-$VERSION-${{ matrix.target }}" >> "$GITHUB_ENV"
+        run: |
+          echo "NAME=borer-app-$VERSION-${{ matrix.target }}" >> "$GITHUB_ENV"
+          numeric=0.0.$GITHUB_RUN_NUMBER
+          if [[ $VERSION =~ ^v([0-9]+\.[0-9]+\.[0-9]+) ]]; then numeric=${BASH_REMATCH[1]}; fi
+          echo "NUMERIC=$numeric" >> "$GITHUB_ENV"
 
       - name: package (zip)
         if: runner.os == 'Windows'
@@ -226,7 +235,57 @@ jobs:
         run: |
           mkdir "$NAME"
           cp app/target/${{ matrix.target }}/dist/borer-app LICENSE NOTICE packaging/borer-app/README.md THIRD-PARTY-LICENSES RUST-STD-COPYRIGHT.html "$NAME/"
+          if [ "$RUNNER_OS" = Linux ]; then
+            mkdir -p "$NAME/share/applications"
+            cp packaging/borer-app/borer-app.desktop "$NAME/share/applications/"
+            for n in 16 32 48 64 128 256; do
+              mkdir -p "$NAME/share/icons/hicolor/${n}x$n/apps"
+              cp "packaging/borer-app/icons/$n.png" "$NAME/share/icons/hicolor/${n}x$n/apps/borer-app.png"
+            done
+          fi
           tar -czf "$NAME.tar.gz" "$NAME"
+
+      # WiX v5 (MS-RL, no EULA to accept), pinned, into a tool path of its own.
+      # The license page shows LICENSE as RTF. The MSI is then unpacked with an
+      # administrative install, which installs nothing, to check it holds the app.
+      - name: installer (msi)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $wix = "$env:RUNNER_TEMP/wix/wix.exe"
+          dotnet tool install wix --version 5.0.2 --tool-path "$env:RUNNER_TEMP/wix"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          & $wix extension add --global WixToolset.UI.wixext/5.0.2
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $text = (Get-Content LICENSE -Raw) -replace '\\', '\\' -replace '\{', '\{' -replace '\}', '\}' -replace '\r?\n', "\par`n"
+          Set-Content -Path "$env:NAME/LICENSE.rtf" -NoNewline -Value "{\rtf1\ansi\deff0{\fonttbl{\f0 Consolas;}}\fs16 $text}"
+          & $wix build packaging/borer-app/borer-app.wxs -arch x64 -ext WixToolset.UI.wixext `
+            -d "Version=$env:NUMERIC" -d "Dir=$env:NAME" -o "$env:NAME.msi"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $image = "$env:RUNNER_TEMP/msi"
+          $run = Start-Process msiexec -Wait -PassThru -ArgumentList '/a', "`"$((Resolve-Path "$env:NAME.msi").Path)`"", '/qn', "TARGETDIR=`"$image`""
+          if ($run.ExitCode) { exit $run.ExitCode }
+          if (-not (Get-ChildItem $image -Recurse -Filter borer-app.exe)) { throw "the MSI holds no borer-app.exe" }
+
+      # borer.app: the binary, Info.plist at the numeric version and the icon,
+      # ad-hoc signed so the bundle is sealed, on a .dmg beside a link to
+      # /Applications.
+      - name: installer (dmg)
+        if: runner.os == 'macOS'
+        run: |
+          root="$RUNNER_TEMP/dmg"
+          app="$root/borer.app/Contents"
+          mkdir -p "$app/MacOS" "$app/Resources"
+          cp app/target/${{ matrix.target }}/dist/borer-app "$app/MacOS/"
+          cp packaging/borer-app/icons/borer-app.icns LICENSE NOTICE THIRD-PARTY-LICENSES RUST-STD-COPYRIGHT.html "$app/Resources/"
+          sed "s/@VERSION@/$NUMERIC/g" packaging/borer-app/Info.plist > "$app/Info.plist"
+          plutil -lint "$app/Info.plist"
+          codesign --force --sign - "$root/borer.app"
+          codesign --verify --strict "$root/borer.app"
+          cp LICENSE packaging/borer-app/README.md "$root/"
+          ln -s /Applications "$root/Applications"
+          hdiutil create -volname borer -srcfolder "$root" -fs HFS+ -format UDZO "$NAME.dmg"
+          hdiutil verify "$NAME.dmg"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
