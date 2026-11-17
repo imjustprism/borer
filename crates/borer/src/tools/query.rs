@@ -209,7 +209,7 @@ mod tests {
             },
         )
         .expect("a script answers");
-        for &(uri, _, _) in crate::catalog::RESOURCE_TEMPLATES {
+        for &(uri, _, _) in borer_engine::answer::catalog::RESOURCE_TEMPLATES {
             assert!(out.contains(&format!("\n{uri}\t")), "{uri}: {out}");
         }
         assert!(

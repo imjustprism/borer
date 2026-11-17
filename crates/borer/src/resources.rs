@@ -15,12 +15,12 @@ use std::sync::Arc;
 
 use borer_engine::analysis::{Analysis, Overlay, render};
 use borer_engine::answer::Need;
+use borer_engine::answer::catalog::{RESOURCE_TEMPLATES, RESOURCES, example, resource_name};
 use borer_engine::program::{Feature, Program};
 use borer_engine::strings::walk::{Needle, StringRow, row_matches};
 use rmcp::ErrorData;
 
 use crate::BorerServer;
-use crate::catalog::{RESOURCE_TEMPLATES, RESOURCES, resource_name};
 use crate::errors::{err_internal, err_not_found, err_params, failed};
 use crate::paging::Asked;
 use crate::session;
@@ -818,27 +818,6 @@ pub(crate) fn playbook_text(spec: &str) -> Result<String, ErrorData> {
                 names.join(", ")
             ))
         })
-}
-
-/// Fills a template's example from the loaded binary.
-///
-/// `{entry}` becomes its entry point (else its first section's address)
-/// and `{path}` its file, which a comparison against itself reads.
-///
-/// # Arguments
-///
-/// * `shown` - The example as [`RESOURCE_TEMPLATES`] writes it.
-/// * `program` - The loaded binary; `None` leaves `<entry>` and `<path>`
-///   for the reader to fill.
-fn example(shown: &str, program: Option<&Program>) -> String {
-    let entry = program
-        .and_then(|p| p.entry.or_else(|| p.sections.first().map(|s| s.va.0)))
-        .map_or_else(|| "<entry>".to_owned(), |va| format!("{va:#x}"));
-    let path = program
-        .map(|p| p.path.display().to_string().replace('\\', "/"))
-        .filter(|path| !path.is_empty())
-        .unwrap_or_else(|| "<path>".to_owned());
-    shown.replace("{entry}", &entry).replace("{path}", &path)
 }
 
 /// Lists every resource with what it answers, one line each, a template's

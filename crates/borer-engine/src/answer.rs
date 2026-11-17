@@ -9,7 +9,9 @@
 //! the binary's name tables into its overlay, a script run from the CLI
 //! the overlay as the user left it). The resources that read what a front end holds (the
 //! session and its evidence, a live process, the answer memory, a file the
-//! URI names, the packs on disk, the resource catalog) stay with it.
+//! URI names, the packs on disk) stay with it; what every resource
+//! answers is listed here ([`catalog`]), so a front end that cannot link
+//! the server lists them with their meaning.
 
 use std::borrow::Borrow;
 use std::num::NonZeroUsize;
@@ -24,6 +26,8 @@ use crate::table::Window;
 use Feature::{Decompile, Disasm, Discover, Emulate};
 use Need::{Best, Code, File};
 use Takes::{Argument, Either, Nothing};
+
+pub mod catalog;
 
 /// The refusal of an `about` given no name, the resource's and the CLI's.
 pub const ABOUT_NEEDS_A_NAME: &str = "about needs a name: an attribute, a class, or a function";

@@ -68,13 +68,14 @@ use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt, prompt_handler, tool_handler};
 use tokio::runtime::Handle;
 
-use crate::catalog::{RESOURCE_TEMPLATES, RESOURCES, TEXT_PLAIN, resource_name};
+use crate::catalog::TEXT_PLAIN;
 use crate::errors::{err_internal, err_params};
 use crate::handover::{HandOver, HandOverTransport, Resume, end_quietly_when_stdout_closes};
 use crate::recall::{Narrow, Recall, SINCE_ARG, Tag, budgeted};
 use crate::session::{EVIDENCE_URI, SESSION_URI};
 use crate::state::{RawLoad, lock};
 use crate::tools::live::LiveSession;
+use borer_engine::answer::catalog::{RESOURCE_TEMPLATES, RESOURCES, resource_name};
 
 /// The MCP server state: one loaded program, its lazily computed analysis,
 /// and the annotation overlay.
@@ -1070,10 +1071,14 @@ mod tests {
             );
             assert_eq!(refused.message, crate::state::NO_BINARY, "{uri}");
         }
-        let uris = crate::catalog::RESOURCES
+        let uris = borer_engine::answer::catalog::RESOURCES
             .iter()
             .map(|r| r.0)
-            .chain(crate::catalog::RESOURCE_TEMPLATES.iter().map(|t| t.0))
+            .chain(
+                borer_engine::answer::catalog::RESOURCE_TEMPLATES
+                    .iter()
+                    .map(|t| t.0),
+            )
             .map(|uri| {
                 uri.split('/')
                     .map(|part| if part.starts_with('{') { "x" } else { part })
@@ -1459,11 +1464,11 @@ mod tests {
     #[test]
     fn a_template_read_bare_says_its_grammar_and_an_example() {
         let server = raw_server();
-        for &(uri, description, _) in crate::catalog::RESOURCE_TEMPLATES {
-            let name = crate::catalog::resource_name(uri);
-            let fixed = crate::catalog::RESOURCES
+        for &(uri, description, _) in borer_engine::answer::catalog::RESOURCE_TEMPLATES {
+            let name = borer_engine::answer::catalog::resource_name(uri);
+            let fixed = borer_engine::answer::catalog::RESOURCES
                 .iter()
-                .any(|r| crate::catalog::resource_name(r.0) == name);
+                .any(|r| borer_engine::answer::catalog::resource_name(r.0) == name);
             let bare = if fixed {
                 format!("borer://help/{name}")
             } else {
@@ -1501,10 +1506,14 @@ mod tests {
             .skip(1)
             .filter_map(|l| l.split('\t').next())
             .collect();
-        let every: Vec<&str> = crate::catalog::RESOURCES
+        let every: Vec<&str> = borer_engine::answer::catalog::RESOURCES
             .iter()
             .map(|r| r.0)
-            .chain(crate::catalog::RESOURCE_TEMPLATES.iter().map(|t| t.0))
+            .chain(
+                borer_engine::answer::catalog::RESOURCE_TEMPLATES
+                    .iter()
+                    .map(|t| t.0),
+            )
             .collect();
         assert_eq!(listed, every, "{index}");
     }
