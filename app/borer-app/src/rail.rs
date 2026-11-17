@@ -3,15 +3,12 @@
 //!
 //! # Adding a panel
 //!
-//! [`RAIL`] is the one place a panel joins the rail. A branch that builds a panel replaces
-//! its [`Slot::Planned`] row (or adds a row) with [`Slot::Panel`] built by [`panel`]:
+//! The rail draws one cell per row of [`crate::panels::PANELS`], then one disabled cell per
+//! row of [`PLANNED`], the panels the design has that are not built yet. A branch that
+//! builds a panel moves its row from [`PLANNED`] to `PANELS`, its hooks built by [`panel`]:
 //!
 //! ```ignore
-//! RailEntry {
-//!     name: "Strings",
-//!     glyph: Glyph::Zed(IconName::Quote),
-//!     slot: panel::<StringsPanel, ToggleStrings>(),
-//! },
+//! hooks: panel::<StringsPanel>(),
 //! ```
 //!
 //! The panel type is Zed's [`Panel`], docked by the workspace once a binary loads (as
@@ -22,20 +19,18 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Action, AnyElement, App, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, WeakEntity, Window, div, px,
+    AnyElement, App, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
+    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity,
+    Window, div, px,
 };
 use theme::ActiveTheme as _;
 use ui::{Color, ContextMenu, IconName, IconSize, Tooltip, right_click_menu, v_flex};
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel};
 
-use crate::actions::ToggleFunctions;
 use crate::app_assets::{AppIcon, Glyph};
 use crate::binary::Binary;
-use crate::functions_panel::FunctionsPanel;
-use crate::menus::boxed;
+use crate::panels::{PANELS, PanelSpec};
 use crate::title_bar::MARK_CELL_PX;
 
 /// Side in logical pixels of a rail cell.
@@ -65,8 +60,6 @@ pub struct Placement {
 /// The workspace hooks of one panel type, each a function of Zed's public API.
 #[derive(Debug, Clone, Copy)]
 pub struct PanelHooks {
-    /// Builds the action that toggles the panel, whose key the tooltip shows.
-    pub toggle: fn() -> Box<dyn Action>,
     /// Returns where the panel sits, `None` while it is not docked.
     pub placed: fn(&Workspace, &Window, &App) -> Option<Placement>,
     /// Closes the panel's dock when the panel is open, else opens and focuses it.
@@ -81,7 +74,7 @@ pub struct PanelHooks {
 #[derive(Debug, Clone, Copy)]
 pub enum Slot {
     /// A panel the app has.
-    Panel(PanelHooks),
+    Panel(&'static PanelSpec),
     /// A panel the design has that is not built yet; its cell is drawn disabled.
     Planned,
 }
@@ -170,25 +163,32 @@ fn move_to<T: Panel>(
     }
 }
 
-/// Returns the slot of panel type `T`, toggled by action `A`.
+/// Returns the rail hooks of panel type `T`.
 #[must_use]
-pub const fn panel<T: Panel, A: Action + Default>() -> Slot {
-    Slot::Panel(PanelHooks {
-        toggle: boxed::<A>,
+pub const fn panel<T: Panel>() -> PanelHooks {
+    PanelHooks {
         placed: placed::<T>,
         click: click::<T>,
         fits: fits::<T>,
         move_to: move_to::<T>,
-    })
+    }
 }
 
-/// The rail's cells, top to bottom: the registration point of every panel.
-pub const RAIL: &[RailEntry] = &[
-    RailEntry {
-        name: "Functions",
-        glyph: Glyph::Zed(IconName::ListTree),
-        slot: panel::<FunctionsPanel, ToggleFunctions>(),
-    },
+/// Returns the rail's cells, top to bottom: every built panel of [`PANELS`], then every
+/// cell of [`PLANNED`].
+#[must_use]
+pub fn cells() -> Vec<RailEntry> {
+    let built = PANELS.iter().map(|spec| RailEntry {
+        name: spec.title,
+        glyph: spec.icon,
+        slot: Slot::Panel(spec),
+    });
+    built.chain(PLANNED.iter().copied()).collect()
+}
+
+/// The panels the design has that are not built yet, drawn as disabled cells below the
+/// built ones; a branch that builds one moves its row to [`PANELS`].
+pub const PLANNED: &[RailEntry] = &[
     RailEntry {
         name: "Strings",
         glyph: Glyph::Zed(IconName::Quote),
@@ -295,14 +295,15 @@ impl Rail {
     ///
     /// # Arguments
     ///
-    /// * `entry` - A row of [`RAIL`].
+    /// * `entry` - A row of [`cells`].
     /// * `window` - The window.
     /// * `cx` - Application context reading the docks.
     #[must_use]
     pub fn state(&self, entry: &RailEntry, window: &Window, cx: &App) -> CellState {
-        let Slot::Panel(hooks) = entry.slot else {
+        let Slot::Panel(spec) = entry.slot else {
             return CellState::Planned;
         };
+        let hooks = spec.hooks;
         let placed = self
             .workspace
             .upgrade()
@@ -379,7 +380,7 @@ impl Rail {
     ///
     /// # Arguments
     ///
-    /// * `ix` - The row's index in [`RAIL`].
+    /// * `ix` - The row's index in [`cells`].
     /// * `entry` - The row.
     /// * `window` - The window.
     /// * `cx` - Rail context.
@@ -420,7 +421,7 @@ impl Rail {
             })
             .child(icon);
         let name = entry.name;
-        let Slot::Panel(hooks) = entry.slot else {
+        let Slot::Panel(spec) = entry.slot else {
             let why = format!("{name}: not built yet");
             return cell.tooltip(Tooltip::text(why)).into_any_element();
         };
@@ -428,12 +429,13 @@ impl Rail {
             let why = format!("{name}: open a binary first");
             return cell.tooltip(Tooltip::text(why)).into_any_element();
         }
+        let hooks = spec.hooks;
         let workspace = self.workspace.clone();
         let menu_workspace = self.workspace.clone();
         let cell = cell
             .cursor_pointer()
             .hover(move |cell| cell.bg(hover))
-            .tooltip(Tooltip::for_action_title(name, (hooks.toggle)().as_ref()))
+            .tooltip(Tooltip::for_action_title(name, spec.toggle))
             .on_click(move |_, window, cx| {
                 Self::on_workspace(&workspace, window, cx, hooks.click);
             });
@@ -476,7 +478,7 @@ impl Rail {
 
 impl Render for Rail {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let cells: Vec<AnyElement> = RAIL
+        let cells: Vec<AnyElement> = cells()
             .iter()
             .enumerate()
             .map(|(ix, entry)| self.render_cell(ix, entry, window, cx))
@@ -502,10 +504,11 @@ mod tests {
     use gpui::{Entity, TestAppContext, VisualTestContext};
     use workspace::dock::{DockPosition, PanelButtons};
 
-    use super::{CellState, RAIL, Rail, Slot};
+    use super::{CellState, PLANNED, Rail, Slot, cells};
     use crate::app_view::AppWindow;
     use crate::app_view::tests::{init, load_sample, open};
     use crate::functions_panel::FunctionsPanel;
+    use crate::panels::PANELS;
     use crate::shell::Shell;
 
     /// Returns the window's rail.
@@ -525,7 +528,8 @@ mod tests {
     fn states(rail: &Entity<Rail>, cx: &mut VisualTestContext) -> Vec<CellState> {
         cx.update(|window, cx| {
             let rail = rail.read(cx);
-            RAIL.iter()
+            cells()
+                .iter()
                 .map(|entry| rail.state(entry, window, cx))
                 .collect()
         })
@@ -537,11 +541,11 @@ mod tests {
     ///
     /// Panics if the first cell is not the functions panel.
     fn click_functions(app: &AppWindow, cx: &mut VisualTestContext) {
-        let Slot::Panel(hooks) = RAIL[0].slot else {
+        let Slot::Panel(spec) = cells()[0].slot else {
             panic!("the first cell is the functions panel");
         };
         app.workspace.update_in(cx, |workspace, window, cx| {
-            (hooks.click)(workspace, window, cx);
+            (spec.hooks.click)(workspace, window, cx);
         });
         cx.run_until_parked();
     }
@@ -581,9 +585,10 @@ mod tests {
         cx.dispatch_action(workspace::ToggleLeftDock);
         cx.run_until_parked();
         assert_eq!(first(states(&rail, cx)), CellState::Closed);
-        let Slot::Panel(hooks) = RAIL[0].slot else {
+        let Slot::Panel(spec) = cells()[0].slot else {
             panic!("the first cell is the functions panel");
         };
+        let hooks = spec.hooks;
         app.workspace.update_in(cx, |workspace, window, cx| {
             assert!(!(hooks.fits)(workspace, DockPosition::Bottom, cx));
             (hooks.move_to)(workspace, DockPosition::Bottom, window, cx);
@@ -607,5 +612,36 @@ mod tests {
                 .position_of_item::<PanelButtons>()
         });
         assert_eq!(buttons, None);
+    }
+
+    /// The rail draws one cell per built panel, in [`PANELS`]' order with its title and
+    /// icon, then every cell of [`PLANNED`], each drawn not built.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a cell is missing, out of order, built when planned, or drawn twice.
+    #[test]
+    fn the_rail_draws_every_panel_and_every_planned_cell() {
+        let cells = cells();
+        assert_eq!(cells.len(), PANELS.len() + PLANNED.len());
+        for (cell, spec) in cells.iter().zip(PANELS) {
+            let Slot::Panel(built) = cell.slot else {
+                panic!("{} is drawn not built", spec.key);
+            };
+            assert_eq!((cell.name, built.key), (spec.title, spec.key));
+        }
+        for (cell, planned) in cells[PANELS.len()..].iter().zip(PLANNED) {
+            assert!(matches!(cell.slot, Slot::Planned), "{}", cell.name);
+            assert_eq!(cell.name, planned.name);
+        }
+        let names: Vec<_> = cells.iter().map(|cell| cell.name).collect();
+        let mut unique = names.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            names.len(),
+            "a panel is both built and planned"
+        );
     }
 }

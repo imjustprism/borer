@@ -27,6 +27,7 @@ use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use crate::actions::{FocusFilter, Hint, OPEN_HINT};
+use crate::app_assets::Glyph;
 use crate::binary::{Binary, BinaryEvent, SettingsNotice, reading_label};
 use crate::card::{Card, Tone};
 use crate::code_view::{CodePalette, Role};
@@ -821,7 +822,10 @@ impl<K: RowKind> Panel for RowsPanel<K> {
     }
 
     fn icon(&self, _window: &Window, _cx: &App) -> Option<IconName> {
-        Some(K::PANEL.icon)
+        match K::PANEL.icon {
+            Glyph::Zed(name) => Some(name),
+            Glyph::App(_) => None,
+        }
     }
 
     fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {

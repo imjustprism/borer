@@ -1,25 +1,26 @@
 //! The app's dock panels, one row each.
 //!
-//! A row holds what the docks and the command palette read of a panel (its key, title,
-//! icon, toggle, docks, size and activation priority); [`add_panels`] is the one way to
-//! add them to a workspace, each in the dock the last run left it active in.
+//! A row holds what the rail, the docks and the command palette read of a panel (its key,
+//! title, icon, toggle, docks, size, rail hooks and activation priority); [`add_panels`] is
+//! the one way to add them to a workspace, each in the dock the last run left it active in.
 
 use gpui::{Action, Context, Entity, Window};
-use ui::IconName;
 use workspace::DockStructure;
 use workspace::Workspace;
 use workspace::dock::DockPosition;
 
+use crate::app_assets::Glyph;
 use crate::binary::Binary;
+use crate::rail::PanelHooks;
 
 /// One dock panel's facts.
 pub struct PanelSpec {
     /// Name Zed saves the panel's dock state and size under.
     pub key: &'static str,
-    /// What the panel is called on its header and its dock button's tooltip.
+    /// What the panel is called on its header, its rail cell and its tooltip.
     pub title: &'static str,
-    /// Icon of its dock button.
-    pub icon: IconName,
+    /// Icon of its rail cell and dock button.
+    pub icon: Glyph,
     /// The action that shows the panel and focuses it, or moves focus back.
     pub toggle: &'static dyn Action,
     /// Dock the panel starts in before the person moves it.
@@ -28,6 +29,8 @@ pub struct PanelSpec {
     pub docks: &'static [DockPosition],
     /// Width or height in logical pixels before the person resizes it.
     pub size_px: f32,
+    /// What the rail does with the panel: find it, open or close it, move it.
+    pub hooks: PanelHooks,
     /// Builds the panel over the window's binary in a dock and adds it to the workspace.
     pub add:
         fn(&mut Workspace, &Entity<Binary>, DockPosition, &mut Window, &mut Context<'_, Workspace>),

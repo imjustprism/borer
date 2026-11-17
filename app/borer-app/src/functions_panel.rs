@@ -9,9 +9,11 @@ use ui::IconName;
 use workspace::dock::DockPosition;
 
 use crate::actions::ToggleFunctions;
+use crate::app_assets::Glyph;
 use crate::function_columns::{Column, Columns};
 use crate::panels::PanelSpec;
 use crate::places::Place;
+use crate::rail::panel;
 pub use crate::rows_panel::Empty;
 use crate::rows_panel::{RowKind, RowsPanel};
 use crate::worker::{LoadedBinary, filter_rows_blocking};
@@ -20,11 +22,12 @@ use crate::worker::{LoadedBinary, filter_rows_blocking};
 pub const PANEL: PanelSpec = PanelSpec {
     key: "Functions",
     title: "Functions",
-    icon: IconName::ListTree,
+    icon: Glyph::Zed(IconName::ListTree),
     toggle: &ToggleFunctions,
     dock: DockPosition::Left,
     docks: &[DockPosition::Left, DockPosition::Right],
     size_px: 560.0,
+    hooks: panel::<FunctionsPanel>(),
     add: |workspace, binary, dock, window, cx| {
         let weak = cx.weak_entity();
         let binary = binary.clone();
