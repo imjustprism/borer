@@ -293,7 +293,7 @@ enum Move {
     Dispatch(Box<dyn Action>),
     /// Puts text in the go-to picker's query.
     Query(String),
-    /// Types one key into the focused element.
+    /// Types one key into the focused element, once the harness's update ends.
     Key(String),
     /// Puts the active code tab's cursor on its first call token.
     Cursor,
@@ -1067,14 +1067,20 @@ impl Harness {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test; gpui::test hides each body in an undocumented fn"
+)]
 mod tests {
     use std::collections::BTreeMap;
 
     use borer_engine::analysis::render::{FunctionRow, RowSource};
 
-    use super::{Act, Bench, Sweep, Times, first_call, largest, misses, pick_targets};
-    use crate::app_view::tests::{CALLEE, CALLER, sample};
+    use super::{Act, Bench, Move, Sweep, Times, first_call, largest, misses, pick_targets};
+    use crate::app_view::tests::{CALLEE, CALLER, init, sample};
     use crate::code_view::CodeLines;
+    use crate::functions_panel::FunctionsPanel;
+    use crate::measure::{CliMode, Harness};
     use crate::worker::decompile_blocking;
 
     /// Returns a hand-built row at `entry` calling `callees` functions, `size` bytes long.
@@ -1121,6 +1127,39 @@ mod tests {
         let (view, line) = shown.get(row).unwrap();
         let (_, _, link) = view.token_at(line, col).unwrap();
         assert_eq!(link, Some(&borer_engine::view::Ref::Function(CALLEE)));
+    }
+
+    /// A key step types into the focused filter once the harness's update ends, so the
+    /// harness's own keystroke count never updates it twice.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the step fails or the filter does not read the key.
+    #[gpui::test]
+    fn a_key_step_types_into_the_focused_filter(cx: &mut gpui::TestAppContext) {
+        let app_state = init(cx);
+        let (harness, cx) = cx.add_window_view(|window, cx| {
+            let mode = CliMode::Interactive(None);
+            Harness::new(mode, std::rc::Rc::default(), &app_state, window, cx)
+        });
+        let binary = harness.read_with(cx, |harness, _| harness.binary.clone());
+        binary.update(cx, |binary, cx| binary.show_loaded(sample(), cx));
+        cx.run_until_parked();
+        let workspace = harness.read_with(cx, |harness, _| harness.workspace.clone());
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.focus_panel::<FunctionsPanel>(window, cx);
+        });
+        let done = harness.update_in(cx, |harness, window, cx| {
+            harness.perform(Move::Key("a".to_owned()), window, cx)
+        });
+        assert_eq!(done, Some(()));
+        cx.run_until_parked();
+        let filter = harness.read_with(cx, |harness, cx| {
+            harness
+                .panel(cx)
+                .map(|panel| panel.read(cx).filter_text(cx))
+        });
+        assert_eq!(filter.as_deref(), Some("a"));
     }
 
     /// Returns times of `n` samples of `ns` nanoseconds each.
