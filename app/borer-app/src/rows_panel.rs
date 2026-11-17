@@ -826,7 +826,8 @@ impl<K: RowKind> RowsPanel<K> {
     ///
     /// # Arguments
     ///
-    /// * `reset` - Whether the highlight goes back to the first row when the answer comes.
+    /// * `reset` - Whether the highlight goes back to the first row when the answer comes,
+    ///   else it stays on the place of the row highlighted then ([`Self::kept_row`]).
     /// * `cx` - Panel context spawning the request.
     fn request(&mut self, reset: bool, cx: &mut Context<'_, Self>) {
         let Some(loaded) = self.shown.clone() else {
@@ -845,7 +846,6 @@ impl<K: RowKind> RowsPanel<K> {
         };
         let (asked, target) = (query.clone(), self.target.clone());
         let revision = loaded.fingerprint;
-        let kept = (!reset).then(|| self.selected_place()).flatten();
         let work = move || {
             let mut shown = K::fetch(&loaded, &target, &asked, limit);
             if let Some((cmp, descending)) = order {
@@ -860,24 +860,35 @@ impl<K: RowKind> RowsPanel<K> {
         };
         self.filter_job
             .run(K::FILTERING, cx, work, move |panel, rows, cx| {
-                let at = kept.and_then(|kept| {
-                    rows.rows()
-                        .iter()
-                        .position(|row| K::place(row).as_ref() == Some(&kept))
-                });
+                let selected = if reset { 0 } else { panel.kept_row(&rows) };
                 panel.rows = Some(Filtered {
                     query,
                     rows,
                     revision,
                 });
-                if reset {
-                    panel.selected = 0;
-                } else if let Some(at) = at {
-                    panel.selected = at;
-                }
+                panel.selected = selected;
                 panel.scroll_to_selected(cx);
                 panel.relayout(cx);
             });
+    }
+
+    /// Returns where the highlighted row is among `rows`, as the panel highlights it now:
+    /// the row of its place, the first when no row has it; a highlighted row that opens
+    /// nothing keeps its index while `rows` reach it.
+    ///
+    /// # Arguments
+    ///
+    /// * `rows` - The rows about to be shown.
+    fn kept_row(&self, rows: &K::Shown) -> usize {
+        let rows = rows.rows();
+        match self.selected_place() {
+            Some(kept) => rows
+                .iter()
+                .position(|row| K::place(row).as_ref() == Some(&kept))
+                .unwrap_or(0),
+            None if self.selected < rows.len() => self.selected,
+            None => 0,
+        }
     }
 
     /// Asks for a page more when the list drew near the end of the rows, the engine has
@@ -1651,6 +1662,25 @@ pub(crate) mod tests {
             assert!(lens.is_sorted_by(|a, b| a >= b));
             assert_eq!(lens.first(), Some(&9));
         });
+    }
+
+    /// Arrow keys pressed while a request is in flight stay pressed when its rows land:
+    /// the highlight is kept on the place it is on when they land, not when they were
+    /// asked for.
+    #[gpui::test]
+    fn moves_made_while_rows_are_asked_for_are_kept(cx: &mut TestAppContext) {
+        use super::Rows as _;
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let panel = panel_of::<Exports>(&app.workspace, &sample(), cx);
+        panel.update(cx, |panel, cx| {
+            panel.request(false, cx);
+            for _ in 0..2 {
+                panel.select(panel.selected() + 1, cx);
+            }
+        });
+        cx.run_until_parked();
+        assert_eq!(panel.read_with(cx, |panel, _| panel.selected), 2);
     }
 
     /// A kind no module but this test declares.
