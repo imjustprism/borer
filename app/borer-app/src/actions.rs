@@ -1,8 +1,7 @@
-//! The app's actions, under the `borer` namespace, and its key bindings: Zed's default
-//! keymap, then the app's keymap asset, which holds only the bindings Zed's lacks.
+//! The app's actions, under the `borer` namespace, and the hints that show their keys;
+//! each action's row, keys and menu are in [`crate::commands::COMMANDS`].
 
 use gpui::{Action, App, Div, ParentElement as _, Styled as _};
-use settings::{DEFAULT_KEYMAP_PATH, KeymapFile, KeymapFileLoadResult};
 use ui::{Color, KeyBinding, Label, LabelCommon as _, LabelSize, h_flex};
 
 gpui::actions!(
@@ -67,37 +66,4 @@ pub fn hint_row((action, what): Hint, cx: &App) -> Div {
         .gap_2()
         .child(KeyBinding::for_action(action, cx))
         .child(Label::new(what).size(LabelSize::Small).color(Color::Muted))
-}
-
-/// The app's keymap: the bindings Zed's default keymap lacks, in Zed's keymap format.
-const APP_KEYMAP: &str = include_str!("../keymap.json");
-
-/// Binds Zed's default keymap for this platform, then the app's keymap over it.
-///
-/// Zed's bindings for actions of crates the app does not link are left out, as Zed's
-/// partial loader does; every binding of the app's keymap must load.
-///
-/// # Arguments
-///
-/// * `cx` - Application context receiving the keymap entries.
-///
-/// # Errors
-///
-/// Returns an error when none of Zed's default bindings load, or when a binding of the
-/// app's keymap names an unknown action or does not parse.
-pub fn bind_keys(cx: &mut App) -> anyhow::Result<()> {
-    cx.bind_keys(KeymapFile::load_asset_allow_partial_failure(
-        DEFAULT_KEYMAP_PATH,
-        cx,
-    )?);
-    match KeymapFile::load(APP_KEYMAP, cx) {
-        KeymapFileLoadResult::Success { key_bindings } => cx.bind_keys(key_bindings),
-        KeymapFileLoadResult::SomeFailedToLoad { error_message, .. } => {
-            anyhow::bail!("the app keymap does not load: {error_message}")
-        }
-        KeymapFileLoadResult::JsonParseFailure { error } => {
-            anyhow::bail!("the app keymap does not parse: {error}")
-        }
-    }
-    Ok(())
 }

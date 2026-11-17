@@ -23,7 +23,7 @@ use ui::{
 };
 use workspace::{HideStatusItem, ItemHandle, StatusItemView};
 
-use crate::actions::ToggleTheme;
+use crate::actions::{PALETTE_HINT, ToggleTheme};
 use crate::app_assets::{AppIcon, Glyph};
 use crate::binary::{Binary, Loading, reading_label, status_label};
 use crate::decompile_item::DecompileItem;
@@ -520,15 +520,13 @@ pub struct PaletteHint;
 
 impl Render for PaletteHint {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let Ok(toggle) = cx.build_action("command_palette::Toggle", None) else {
-            return div().into_any_element();
-        };
+        let (toggle, _) = PALETTE_HINT;
         let child = h_flex()
             .gap(px(6.0))
             .child(status_label("palette", Color::Muted))
-            .child(KeyBinding::for_action(toggle.as_ref(), cx))
+            .child(KeyBinding::for_action(toggle, cx))
             .into_any_element();
-        action_control("palette", "Command Palette", toggle.as_ref(), child, cx)
+        action_control("palette", "Command Palette", toggle, child, cx)
     }
 }
 

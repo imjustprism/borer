@@ -142,6 +142,12 @@ impl Binary {
         self.loaded.as_ref()
     }
 
+    /// Returns whether a binary is open: loaded, or being read, which Close Binary stops.
+    #[must_use]
+    pub const fn is_open(&self) -> bool {
+        self.loaded.is_some() || self.reading.is_some()
+    }
+
     /// Returns the error of the most recent failed load, if any.
     #[must_use]
     pub fn load_error(&self) -> Option<&str> {

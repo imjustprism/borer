@@ -1,31 +1,22 @@
-//! The app's menus, one table ([`MENUS`]) of actions the app handles.
+//! The in-window menu bar of Windows and Linux, a port of the logic of Zed's
+//! `ApplicationMenu` over the menus [`crate::commands`] generates; macOS draws the same
+//! menus natively from `cx.set_menus`.
 //!
-//! The table is given to the platform with `cx.set_menus` (macOS draws it as the system menu
-//! bar) and drawn in the window by [`MenuBar`] on Windows and Linux, a port of the logic of
-//! Zed's `ApplicationMenu`.
-//!
-//! Every row is an action, so it is in the command palette under the same name with the
-//! same key, and the key a menu shows is read from the keymap. A row whose need is unmet is
-//! shown disabled with the reason, never hidden. Only actions with a handler are rows: a
-//! menu the app has nothing for yet is left out rather than drawn empty.
+//! A row is disabled exactly when its action has no handler in reach of the focused
+//! element, the rule gpui applies to macOS's menus, and then says what it needs.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Action, App, Context, Entity, InteractiveElement as _, IntoElement, Menu, MenuItem,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div,
+    Action, App, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 use ui::{
     Button, ButtonCommon as _, ButtonStyle, ContextMenu, LabelSize, PopoverMenu, PopoverMenuHandle,
     rems_from_px,
 };
 
-use crate::actions::{
-    CloseBinary, FocusFilter, FollowLink, FollowSystemTheme, MinimizeWindow, Open, Overview,
-    ToggleFunctionColumns, ToggleFunctions, ToggleListing, ToggleTheme, ZoomWindow,
-};
 use crate::binary::Binary;
-use crate::goto::GoTo;
+use crate::commands::{MenuName, menu_rows};
 use crate::start_item::TEXT_PX;
 
 gpui::actions!(
@@ -40,138 +31,7 @@ gpui::actions!(
     ]
 );
 
-/// What a row needs before it can run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Need {
-    /// Nothing: it runs at any time.
-    Nothing,
-    /// An open binary.
-    Binary,
-}
-
-impl Need {
-    /// Returns why a row with this need is disabled, `None` when `binary_open` meets it.
-    ///
-    /// # Arguments
-    ///
-    /// * `binary_open` - Whether the window has a binary open.
-    #[must_use]
-    pub const fn unmet(self, binary_open: bool) -> Option<&'static str> {
-        match self {
-            Self::Binary if !binary_open => Some("needs a binary"),
-            Self::Binary | Self::Nothing => None,
-        }
-    }
-}
-
-/// One row of a menu.
-#[derive(Debug, Clone, Copy)]
-pub enum Row {
-    /// An action, its label and what it needs.
-    Item {
-        /// What the menu and the palette call it.
-        label: &'static str,
-        /// Builds the action the row runs.
-        action: fn() -> Box<dyn Action>,
-        /// What it needs before it can run.
-        need: Need,
-    },
-    /// A hairline between groups of rows.
-    Separator,
-}
-
-/// One menu of the menu bar.
-#[derive(Debug, Clone, Copy)]
-pub struct AppMenu {
-    /// The menu's name in the bar.
-    pub name: &'static str,
-    /// Its rows, top to bottom.
-    pub rows: &'static [Row],
-}
-
-/// Returns a boxed `A`, for a menu row's action.
-pub(crate) fn boxed<A: Action + Default>() -> Box<dyn Action> {
-    Box::new(A::default())
-}
-
-/// Returns a row running `A`, labelled `label`, that needs `need`.
-///
-/// # Arguments
-///
-/// * `label` - What the menu calls it.
-/// * `need` - What it needs before it can run.
-const fn row<A: Action + Default>(label: &'static str, need: Need) -> Row {
-    Row::Item {
-        label,
-        action: boxed::<A>,
-        need,
-    }
-}
-
-/// The menu bar, left to right. Analysis, Edit's code commands and the rest of the
-/// designed rows join it with the actions that run them.
-pub const MENUS: &[AppMenu] = &[
-    AppMenu {
-        name: "File",
-        rows: &[
-            row::<Open>("Open Binary...", Need::Nothing),
-            row::<CloseBinary>("Close Binary", Need::Binary),
-            Row::Separator,
-            row::<zed_actions::OpenSettingsFile>("Settings File", Need::Nothing),
-            row::<zed_actions::Quit>("Quit", Need::Nothing),
-        ],
-    },
-    AppMenu {
-        name: "Edit",
-        rows: &[row::<FocusFilter>("Find Function", Need::Binary)],
-    },
-    AppMenu {
-        name: "View",
-        rows: &[
-            row::<Overview>("Overview", Need::Binary),
-            row::<ToggleFunctions>("Functions", Need::Binary),
-            row::<ToggleFunctionColumns>("Function Columns", Need::Binary),
-            row::<ToggleListing>("Toggle Listing", Need::Binary),
-            Row::Separator,
-            row::<workspace::ToggleLeftDock>("Toggle Left Dock", Need::Nothing),
-            row::<workspace::ToggleBottomDock>("Toggle Bottom Dock", Need::Nothing),
-            row::<workspace::ToggleRightDock>("Toggle Right Dock", Need::Nothing),
-            Row::Separator,
-            row::<ToggleTheme>("Toggle Light and Dark", Need::Nothing),
-            row::<FollowSystemTheme>("Follow System Theme", Need::Nothing),
-        ],
-    },
-    AppMenu {
-        name: "Go",
-        rows: &[
-            row::<GoTo>("Go to Address or Name...", Need::Binary),
-            row::<FollowLink>("Follow Link", Need::Binary),
-            Row::Separator,
-            row::<workspace::pane::GoBack>("Back", Need::Binary),
-            row::<workspace::pane::GoForward>("Forward", Need::Binary),
-        ],
-    },
-    AppMenu {
-        name: "Window",
-        rows: &[
-            row::<MinimizeWindow>("Minimize", Need::Nothing),
-            row::<ZoomWindow>("Zoom", Need::Nothing),
-        ],
-    },
-    AppMenu {
-        name: "Help",
-        rows: &[
-            row::<zed_actions::command_palette::Toggle>("Command Palette", Need::Nothing),
-            Row::Separator,
-            row::<zed_actions::About>("About borer", Need::Nothing),
-        ],
-    },
-];
-
-/// The `borer` actions that are in the palette but in no menu, each with why.
-pub const PALETTE_ONLY: &[(&str, &str)] = &[("borer::OpenMenuBar", "opens the menu bar itself")];
-
-/// Returns `label` as a disabled row shows it: with the reason it is disabled.
+/// Returns `label` as a row shows it: with the reason it is disabled, when it is.
 ///
 /// # Arguments
 ///
@@ -184,94 +44,70 @@ fn shown_label(label: &'static str, unmet: Option<&'static str>) -> SharedString
     )
 }
 
-/// Returns the menu bar for the platform's menus (macOS draws them), with the rows whose
-/// need is unmet disabled.
-///
-/// # Arguments
-///
-/// * `binary_open` - Whether the window has a binary open.
-#[must_use]
-pub fn platform_menus(binary_open: bool) -> Vec<Menu> {
-    MENUS
-        .iter()
-        .map(|menu| {
-            Menu::new(menu.name).items(menu.rows.iter().map(|row| match *row {
-                Row::Item {
-                    label,
-                    action,
-                    need,
-                } => {
-                    let unmet = need.unmet(binary_open);
-                    MenuItem::Action {
-                        name: shown_label(label, unmet),
-                        action: action(),
-                        os_action: None,
-                        checked: false,
-                        disabled: unmet.is_some(),
-                    }
-                }
-                Row::Separator => MenuItem::separator(),
-            }))
-        })
-        .collect()
-}
+/// One shown row of a menu: its label with the reason it is off, whether it is off, and
+/// its action; `None` is a separator.
+type Shown = Option<(SharedString, bool, Box<dyn Action>)>;
 
-/// Gives the platform the menu bar for `binary`'s state, and again on each change of it.
-///
-/// # Arguments
-///
-/// * `binary` - The window's binary.
-/// * `cx` - Application context.
-///
-/// # Returns
-///
-/// The observation, which keeps the menus following the binary while it is held.
-pub fn follow_binary(binary: &Entity<Binary>, cx: &mut App) -> Subscription {
-    let open = binary.read(cx).loaded().is_some();
-    cx.set_menus(platform_menus(open));
-    cx.observe(binary, |binary, cx| {
-        let open = binary.read(cx).loaded().is_some();
-        cx.set_menus(platform_menus(open));
-    })
-}
-
-/// Returns the context menu of `menu`, its rows disabled where the window's binary does not
-/// meet their need, run in the context of the element focused when it opened.
+/// Returns the rows of `menu` as the bar shows them: off exactly when `available` holds no
+/// handler of the row's action, then labelled with why.
 ///
 /// # Arguments
 ///
 /// * `menu` - The menu.
-/// * `binary` - The window's binary.
+/// * `binary_open` - Whether the window has a binary open, which words an off row.
+/// * `available` - The actions with a handler in reach of the focused element.
+/// * `cx` - Application context that builds the actions.
+fn shown_rows(
+    menu: MenuName,
+    binary_open: bool,
+    available: &[Box<dyn Action>],
+    cx: &App,
+) -> Vec<Shown> {
+    menu_rows(menu, cx)
+        .into_iter()
+        .map(|row| {
+            row.map(|(row, action)| {
+                let id = action.as_any().type_id();
+                let on = available.iter().any(|ready| ready.as_any().type_id() == id);
+                let unmet = (!on).then(|| row.needs.why_off(binary_open));
+                (shown_label(row.label, unmet), !on, action)
+            })
+        })
+        .collect()
+}
+
+/// Returns the context menu of `menu`, its rows disabled where no handler of their action
+/// is in reach of the element focused when it opened, and run in that element's context.
+///
+/// # Arguments
+///
+/// * `menu` - The menu.
+/// * `binary` - The window's binary, which words the disabled rows.
 /// * `window` - Window the menu opens in.
 /// * `cx` - Application context.
 fn context_menu(
-    menu: AppMenu,
+    menu: MenuName,
     binary: &Entity<Binary>,
     window: &mut Window,
     cx: &mut App,
 ) -> Entity<ContextMenu> {
-    let open = binary.read(cx).loaded().is_some();
+    let open = binary.read(cx).is_open();
+    let rows = shown_rows(menu, open, &window.available_actions(cx), cx);
     ContextMenu::build(window, cx, move |built, window, cx| {
         let built = built.when_some(window.focused(cx), |built, focused| built.context(focused));
-        menu.rows.iter().fold(built, |built, row| match *row {
-            Row::Item {
-                label,
-                action,
-                need,
-            } => {
-                let unmet = need.unmet(open);
-                built.action_disabled_when(unmet.is_some(), shown_label(label, unmet), action())
-            }
-            Row::Separator => built.separator(),
+        rows.into_iter().fold(built, |built, row| match row {
+            Some((label, off, action)) => built.action_disabled_when(off, label, action),
+            None => built.separator(),
         })
     })
 }
 
-/// The in-window menu bar of Windows and Linux: one popover per menu of [`MENUS`].
+/// The in-window menu bar of Windows and Linux: one popover per menu of
+/// [`MenuName::ALL`].
 pub struct MenuBar {
-    /// The window's binary, whose state enables the rows.
+    /// The window's binary, whose state words the disabled rows.
     binary: Entity<Binary>,
-    /// One handle per menu, in [`MENUS`] order.
+    /// One handle per menu, in [`MenuName::ALL`] order.
     handles: Vec<PopoverMenuHandle<ContextMenu>>,
 }
 
@@ -300,7 +136,7 @@ impl MenuBar {
     pub fn new(binary: Entity<Binary>) -> Self {
         Self {
             binary,
-            handles: MENUS.iter().map(|_| PopoverMenuHandle::default()).collect(),
+            handles: MenuName::ALL.map(|_| PopoverMenuHandle::default()).to_vec(),
         }
     }
 
@@ -355,24 +191,24 @@ impl MenuBar {
 impl Render for MenuBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let all = self.handles.clone();
-        let menus = MENUS
-            .iter()
+        let menus = MenuName::ALL
+            .into_iter()
             .zip(self.handles.iter().cloned())
             .map(|(menu, handle)| {
-                let menu = *menu;
+                let name = menu.name();
                 let binary = self.binary.clone();
                 let all = all.clone();
                 let hovered = handle.clone();
                 div()
-                    .id(SharedString::from(format!("{}-menu", menu.name)))
+                    .id(SharedString::from(format!("{name}-menu")))
                     .occlude()
                     .child(
-                        PopoverMenu::new(SharedString::from(format!("{}-menu-popover", menu.name)))
+                        PopoverMenu::new(SharedString::from(format!("{name}-menu-popover")))
                             .menu(move |window, cx| Some(context_menu(menu, &binary, window, cx)))
                             .trigger(
                                 Button::new(
-                                    SharedString::from(format!("{}-menu-trigger", menu.name)),
-                                    menu.name,
+                                    SharedString::from(format!("{name}-menu-trigger")),
+                                    name,
                                 )
                                 .style(ButtonStyle::Subtle)
                                 .label_size(LabelSize::Custom(rems_from_px(TEXT_PX))),
@@ -408,110 +244,64 @@ impl Render for MenuBar {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-
     use gpui::{AppContext as _, TestAppContext, VisualTestContext};
 
-    use super::{MENUS, MenuBar, Need, PALETTE_ONLY, Row, Step, platform_menus};
+    use super::{MenuBar, Step, shown_rows};
     use crate::actions::CloseBinary;
     use crate::app_view::tests::{init, load_sample, open};
     use crate::binary::{Binary, NO_BINARY};
+    use crate::commands::{MenuName, Need};
     use crate::decompile_item::DecompileItem;
     use crate::functions_panel::FunctionsPanel;
     use crate::start_item::StartItem;
 
-    /// Returns the names of every action in [`MENUS`].
-    fn menu_actions() -> BTreeSet<&'static str> {
-        MENUS
-            .iter()
-            .flat_map(|menu| menu.rows.iter())
-            .filter_map(|row| match row {
-                Row::Item { action, .. } => Some(action().name()),
-                Row::Separator => None,
-            })
-            .collect()
-    }
-
-    /// A row needing a binary says so while none is open, and runs once one is.
+    /// Close Binary has no handler in reach while no binary is open, so macOS greys it
+    /// (gpui asks `is_action_available`) and the menu bar disables it with its need; once
+    /// a binary is open it is available and enabled in both.
     ///
     /// # Panics
     ///
-    /// Panics if a need is met or unmet wrongly.
-    #[test]
-    fn a_row_says_what_it_needs() {
-        assert_eq!(Need::Binary.unmet(false), Some("needs a binary"));
-        assert_eq!(Need::Binary.unmet(true), None);
-        assert_eq!(Need::Nothing.unmet(false), None);
-        let names = |open| -> Vec<String> {
-            platform_menus(open)
-                .into_iter()
-                .flat_map(|menu| menu.owned().items)
-                .filter_map(|item| match item {
-                    gpui::OwnedMenuItem::Action { name, disabled, .. } => {
-                        Some(format!("{name}{}", if disabled { " off" } else { "" }))
-                    }
-                    _ => None,
-                })
-                .collect()
-        };
-        assert!(names(false).contains(&String::from("Close Binary (needs a binary) off")));
-        assert!(names(true).contains(&String::from("Close Binary")));
-        assert!(names(false).contains(&String::from("Open Binary...")));
-    }
-
-    /// Every `borer` action is in a menu or named palette-only with a reason, and with a
-    /// binary open every menu action is available where the person works, so the palette
-    /// offers it and running it reaches a handler; the platform holds the same menus.
-    ///
-    /// # Panics
-    ///
-    /// Panics if an action is in no menu, a menu row has no handler in reach, or the
-    /// platform holds other menus.
+    /// Panics if Close Binary is available without a binary, or not with one.
     #[gpui::test]
-    fn every_menu_row_has_a_handler_and_every_action_a_row(cx: &mut TestAppContext) {
-        every_menu_row_has_a_handler_and_every_action_a_row_steps(cx);
+    fn close_binary_is_off_until_a_binary_opens(cx: &mut TestAppContext) {
+        close_binary_is_off_until_a_binary_opens_steps(cx);
     }
 
-    /// Runs the steps of [`every_menu_row_has_a_handler_and_every_action_a_row`].
+    /// Runs the steps of [`close_binary_is_off_until_a_binary_opens`].
     ///
     /// # Panics
     ///
-    /// Panics when a step goes wrong, as [`every_menu_row_has_a_handler_and_every_action_a_row`] says.
-    fn every_menu_row_has_a_handler_and_every_action_a_row_steps(cx: &mut TestAppContext) {
+    /// Panics when a step goes wrong, as [`close_binary_is_off_until_a_binary_opens`] says.
+    fn close_binary_is_off_until_a_binary_opens_steps(cx: &mut TestAppContext) {
+        assert_eq!(Need::Binary.why_off(false), "needs a binary");
+        assert_eq!(Need::Binary.why_off(true), "not here");
         let app_state = init(cx);
         let (app, cx) = open(&app_state, cx);
+        let state = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let platform = cx.update(|window, cx| window.is_action_available(&CloseBinary, cx));
+            let open = app.binary.read_with(cx, |binary, _| binary.is_open());
+            let labels: Vec<String> = cx.update(|window, cx| {
+                let available = window.available_actions(cx);
+                let rows = shown_rows(MenuName::File, open, &available, cx);
+                let shown = rows.into_iter().flatten();
+                let off = |off: bool| if off { " off" } else { "" };
+                shown
+                    .map(|(label, is_off, _)| format!("{label}{}", off(is_off)))
+                    .collect()
+            });
+            (platform, labels)
+        };
+        let (platform, labels) = state(cx);
+        assert!(!platform);
+        assert!(
+            labels.contains(&String::from("Close Binary (needs a binary) off")),
+            "{labels:?}"
+        );
         load_sample(&app, cx);
-        let rows = menu_actions();
-        let declared: Vec<&str> = cx.update(|_, cx| {
-            cx.all_action_names()
-                .iter()
-                .copied()
-                .filter(|name| name.starts_with("borer::"))
-                .collect()
-        });
-        for name in &declared {
-            let palette_only = PALETTE_ONLY.iter().any(|(only, _)| only == name);
-            assert!(rows.contains(name) || palette_only, "{name} is in no menu");
-        }
-        for (name, _) in PALETTE_ONLY {
-            assert!(declared.contains(name), "{name} is not an action");
-            assert!(!rows.contains(name), "{name} is in a menu too");
-        }
-        let available = cx.update(|window, cx| window.available_actions(cx));
-        for name in &rows {
-            assert!(
-                available.iter().any(|action| action.name() == *name),
-                "{name} has no handler in reach"
-            );
-        }
-        let held: Vec<String> = cx
-            .update(|_, cx| cx.get_menus())
-            .unwrap_or_default()
-            .into_iter()
-            .map(|menu| menu.name.to_string())
-            .collect();
-        let want: Vec<String> = MENUS.iter().map(|menu| menu.name.to_owned()).collect();
-        assert_eq!(held, want, "the platform holds other menus");
+        let (platform, labels) = state(cx);
+        assert!(platform);
+        assert!(labels.contains(&String::from("Close Binary")), "{labels:?}");
     }
 
     /// The bar opens its first menu, walks left past the first to the last and right back
@@ -545,7 +335,7 @@ mod tests {
         settle(cx);
         if !cfg!(target_os = "macos") {
             assert_eq!(open(cx), Some(0));
-            let last = MENUS.len() - 1;
+            let last = MenuName::ALL.len() - 1;
             bar.update_in(cx, |bar, window, cx| bar.step(Step::Left, window, cx));
             settle(cx);
             assert_eq!(open(cx), Some(last));

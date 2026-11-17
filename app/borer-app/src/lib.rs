@@ -8,6 +8,7 @@ pub mod binary;
 pub mod card;
 pub mod code_semantics;
 pub mod code_view;
+pub mod commands;
 pub mod decompile_item;
 pub mod function_columns;
 pub mod functions_panel;
