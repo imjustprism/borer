@@ -12,7 +12,9 @@ use crate::analysis::{Analysis, Overlay, sdk};
 use crate::program::{BinaryFormat, Program};
 
 /// What a type is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum TypeKind {
     /// A struct or union: fields at offsets.
     Struct,
@@ -27,7 +29,9 @@ pub enum TypeKind {
 }
 
 /// Where a type comes from, in the order a listing ranks the same name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum TypeSource {
     /// The overlay: a type the user or an agent stated.
     User,

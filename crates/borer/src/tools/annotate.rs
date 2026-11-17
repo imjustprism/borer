@@ -3,7 +3,7 @@
 
 use std::fmt::Write as _;
 
-use borer_engine::analysis::edit::{self, Edit, Force, Line, Plan};
+use borer_engine::analysis::edit::{self, Edit, Force, Plan};
 use borer_engine::analysis::protos::Proto;
 use borer_engine::analysis::utypes::parse_type;
 use borer_engine::analysis::{Analysis, Overlay, stated};
@@ -155,7 +155,7 @@ impl BorerServer {
                     Some(refused) => item(refused.edit, refused.why.clone()),
                     None => e.to_string(),
                 })?;
-            let lines: Vec<(String, String)> = plan.lines().iter().map(|l| said(l, dry)).collect();
+            let lines: Vec<(String, String)> = plan.lines().iter().map(|l| l.said(dry)).collect();
             Ok(match lines.as_slice() {
                 [_] => answered(&plan, dry),
                 more if dry => format!(
@@ -504,94 +504,6 @@ impl BorerServer {
     }
 }
 
-/// Spells one line of a plan as the tools word it, without the `would`
-/// a dry run opens with: the line, and the note that follows the answer.
-///
-/// # Arguments
-///
-/// * `line` - The line.
-/// * `dry` - Whether the plan is a dry run's.
-///
-/// # Returns
-///
-/// The line's words, and its note, empty when it has none.
-fn said(line: &Line, dry: bool) -> (String, String) {
-    match line {
-        Line::Named {
-            target,
-            function,
-            old,
-            new,
-            number,
-        } => {
-            let what = if *function { "function" } else { "data" };
-            let numeric = number.map_or_else(String::new, |n| {
-                format!(
-                    "
-# note: '{new}' also reads as the number {n:#x}; an address argument finds the name first, and 0x-prefixed text is always an address"
-                )
-            });
-            let line = if dry {
-                format!("set name of {what} {target:#x} ({old}) to '{new}'")
-            } else {
-                format!("renamed {what} {target:#x}: {old} -> {new}")
-            };
-            (line, numeric)
-        }
-        Line::Commented { at } if dry => (format!("set comment at {at:#x}"), String::new()),
-        Line::Commented { at } => (format!("comment set at {at:#x}"), String::new()),
-        Line::Declared { types, abi, lines } => {
-            /// Types a reply describes before it counts the rest.
-            const SHOWN: usize = 64;
-            let verb = if dry {
-                "dry-run: would define"
-            } else {
-                "defined"
-            };
-            let mut out = format!("{verb} {types} type(s) from C, laid out for {abi}:\n");
-            for line in lines.iter().take(SHOWN) {
-                out.push_str(line);
-                out.push('\n');
-            }
-            if lines.len() > SHOWN {
-                out.push_str(&format!(
-                    "# showing {SHOWN} of {} lines; `types` lists every type\n",
-                    lines.len()
-                ));
-            }
-            (out, String::new())
-        }
-        Line::Laid {
-            name,
-            prototypes,
-            lines,
-        } => {
-            let (define, state) = if dry {
-                ("dry-run: would define", "state")
-            } else {
-                ("defined", "stated")
-            };
-            let mut out = format!(
-                "{define} struct {name} and {state} {prototypes} prototype(s); decompile then names the fields:\n"
-            );
-            for line in lines {
-                out.push_str(line);
-                out.push('\n');
-            }
-            (out, String::new())
-        }
-        Line::Stated { would, .. } if dry => (would.clone(), String::new()),
-        Line::Stated { done, .. } => (done.clone(), String::new()),
-        Line::Unknown(types) => (
-            String::new(),
-            format!(
-                "\n# note: {} names no user type or C type word borer knows, so it passes as a word",
-                types.join(", ")
-            ),
-        ),
-    }
-}
-
 /// Plans the edits a `set_type` call states that are not a variable's:
 /// a struct's or a class's fields, an enum, a typedef, then a type
 /// applied at a data global or a function's prototype.
@@ -709,7 +621,7 @@ fn type_edits(
 /// * `plan` - The plan, its lines spelled by [`said`].
 /// * `dry` - Whether the plan is a dry run's.
 pub(crate) fn listed(plan: &Plan, dry: bool) -> String {
-    let mut out: String = plan.lines().iter().map(|l| said(l, dry).0).collect();
+    let mut out: String = plan.lines().iter().map(|l| l.said(dry).0).collect();
     if dry {
         out.push_str("pass dry_run=false to apply.\n");
     }
@@ -724,7 +636,7 @@ pub(crate) fn listed(plan: &Plan, dry: bool) -> String {
 /// * `plan` - The plan, its lines spelled by [`said`].
 /// * `dry` - Whether the plan is a dry run's.
 fn answered(plan: &Plan, dry: bool) -> String {
-    let lines: Vec<(String, String)> = plan.lines().iter().map(|l| said(l, dry)).collect();
+    let lines: Vec<(String, String)> = plan.lines().iter().map(|l| l.said(dry)).collect();
     let words: Vec<&str> = lines
         .iter()
         .map(|(line, _)| line.as_str())
