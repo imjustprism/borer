@@ -10,8 +10,10 @@
 use anyhow::Context as _;
 use gpui::{
     App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, Styled as _, Task, TaskExt as _, Window, div,
+    ParentElement as _, Render, SharedString, Styled as _, Task, TaskExt as _, Window, div,
 };
+use workspace::notifications::simple_message_notification::MessageNotification;
+use workspace::notifications::{NotificationId, dismiss_app_notification, show_app_notification};
 use workspace::{CloseIntent, CloseWindow, MultiWorkspace, Workspace};
 
 use crate::actions::OpenMenuBar;
@@ -181,11 +183,78 @@ impl Render for Shell {
     }
 }
 
+/// Shows the app-wide notice `id` saying `text` in every window's workspace, and in each
+/// workspace opened after, until [`dismiss_app_notice`] takes it back.
+///
+/// Zed's own app notifications reach only the windows whose root is its
+/// [`MultiWorkspace`]; the app's root is its [`Shell`], so each shell's workspace is shown
+/// the notice too, once the current update ends.
+///
+/// # Arguments
+///
+/// * `id` - The notice's id; showing it again replaces it.
+/// * `text` - What it says.
+/// * `cx` - Application context.
+pub fn show_app_notice(id: NotificationId, text: SharedString, cx: &mut App) {
+    let shown = text.clone();
+    show_app_notification(id.clone(), cx, move |cx| {
+        cx.new(|cx| MessageNotification::new(shown.clone(), cx))
+    });
+    each_workspace(cx, move |workspace, cx| {
+        let text = text.clone();
+        workspace.show_notification(id.clone(), cx, |cx| {
+            cx.new(|cx| MessageNotification::new(text, cx))
+        });
+    });
+}
+
+/// Takes back the app-wide notice `id` from every window's workspace.
+///
+/// # Arguments
+///
+/// * `id` - The notice's id.
+/// * `cx` - Application context.
+pub fn dismiss_app_notice(id: &NotificationId, cx: &mut App) {
+    dismiss_app_notification(id, cx);
+    let id = id.clone();
+    each_workspace(cx, move |workspace, cx| {
+        workspace.dismiss_notification(&id, cx);
+    });
+}
+
+/// Runs `f` on the workspace of every shell window, once the current update ends, so no
+/// window being updated is reached.
+///
+/// # Arguments
+///
+/// * `cx` - Application context listing the windows.
+/// * `f` - What to do in each workspace.
+fn each_workspace(cx: &mut App, f: impl Fn(&mut Workspace, &mut Context<'_, Workspace>) + 'static) {
+    cx.defer(move |cx| {
+        let shells = cx
+            .windows()
+            .into_iter()
+            .filter_map(|window| window.downcast::<Shell>());
+        let workspaces: Vec<_> = shells
+            .filter_map(|shell| {
+                shell
+                    .read_with(cx, |shell, _| shell.workspace().clone())
+                    .ok()
+            })
+            .collect();
+        for workspace in workspaces {
+            workspace.update(cx, |workspace, cx| f(workspace, cx));
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use gpui::{TestAppContext, VisualTestContext};
 
-    use super::Shell;
+    use workspace::notifications::NotificationId;
+
+    use super::{Shell, dismiss_app_notice, show_app_notice};
     use crate::actions::OpenMenuBar;
     use crate::app_view::tests::{init, open};
 
@@ -263,5 +332,40 @@ mod tests {
         cx.dispatch_action(workspace::CloseWindow);
         cx.run_until_parked();
         assert!(cx.cx.update(|cx| cx.windows()).is_empty());
+    }
+
+    /// An app-wide notice reaches the workspace of every shell window, each of two, and is
+    /// taken back from both.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a window misses the notice or keeps it.
+    #[gpui::test]
+    fn an_app_notice_reaches_every_shell_window(cx: &mut TestAppContext) {
+        an_app_notice_reaches_every_shell_window_steps(cx);
+    }
+
+    /// Runs the steps of [`an_app_notice_reaches_every_shell_window`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`an_app_notice_reaches_every_shell_window`] says.
+    fn an_app_notice_reaches_every_shell_window_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (one, _) = open(&app_state, cx);
+        let (two, cx) = open(&app_state, cx);
+        let id = NotificationId::named("borer test notice".into());
+        let shown = |cx: &mut VisualTestContext| {
+            [&one, &two].map(|app| {
+                app.workspace
+                    .read_with(cx, |workspace, _| workspace.has_notification(&id))
+            })
+        };
+        cx.update(|_, cx| show_app_notice(id.clone(), "a notice".into(), cx));
+        cx.run_until_parked();
+        assert_eq!(shown(cx), [true, true]);
+        cx.update(|_, cx| dismiss_app_notice(&id, cx));
+        cx.run_until_parked();
+        assert_eq!(shown(cx), [false, false]);
     }
 }

@@ -18,15 +18,13 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use futures::StreamExt as _;
-use gpui::{App, AppContext as _, AsyncApp, Context, Global, SharedString};
+use gpui::{App, AsyncApp, Global, SharedString};
 use theme::{ThemeFamily, ThemeRegistry};
 use theme_settings::{ThemeFamilyContent, deserialize_user_theme, refine_theme_family};
-use workspace::Workspace;
-use workspace::notifications::simple_message_notification::MessageNotification;
-use workspace::notifications::{NotificationId, dismiss_app_notification, show_app_notification};
+use workspace::notifications::NotificationId;
 
 use crate::app_settings::check_path;
-use crate::shell::Shell;
+use crate::shell::{dismiss_app_notice, show_app_notice};
 
 /// Most bytes a theme file may hold before the app refuses to read it.
 pub const MAX_THEME_BYTES: u64 = 4 << 20;
@@ -337,47 +335,8 @@ async fn load(fs: &Arc<dyn fs::Fs>, path: &Path, cx: &mut AsyncApp) -> bool {
 fn notice(path: &Path, read: Result<(), &anyhow::Error>, cx: &mut App) {
     let id = notice_id(path);
     match read {
-        Ok(()) => {
-            dismiss_app_notification(&id, cx);
-            each_workspace(cx, |workspace, cx| workspace.dismiss_notification(&id, cx));
-        }
-        Err(err) => {
-            let text: SharedString = format!("theme not loaded: {err:#}").into();
-            let shown = text.clone();
-            show_app_notification(id.clone(), cx, move |cx| {
-                cx.new(|cx| MessageNotification::new(shown.clone(), cx))
-            });
-            each_workspace(cx, |workspace, cx| {
-                let text = text.clone();
-                workspace.show_notification(id.clone(), cx, |cx| {
-                    cx.new(|cx| MessageNotification::new(text, cx))
-                });
-            });
-        }
-    }
-}
-
-/// Runs `f` on the workspace of every app window, which Zed's app notifications miss: they
-/// reach only the windows whose root is Zed's own, and the app's root is its [`Shell`].
-///
-/// # Arguments
-///
-/// * `cx` - Application context listing the windows.
-/// * `f` - What to do in each workspace.
-fn each_workspace(cx: &mut App, f: impl Fn(&mut Workspace, &mut Context<'_, Workspace>)) {
-    let shells = cx
-        .windows()
-        .into_iter()
-        .filter_map(|w| w.downcast::<Shell>());
-    let workspaces: Vec<_> = shells
-        .filter_map(|shell| {
-            shell
-                .read_with(cx, |shell, _| shell.workspace().clone())
-                .ok()
-        })
-        .collect();
-    for workspace in workspaces {
-        workspace.update(cx, |workspace, cx| f(workspace, cx));
+        Ok(()) => dismiss_app_notice(&id, cx),
+        Err(err) => show_app_notice(id, format!("theme not loaded: {err:#}").into(), cx),
     }
 }
 
