@@ -36,7 +36,7 @@ use workspace::searchable::SearchableItemHandle;
 use workspace::{Item, ItemNavHistory, Workspace};
 
 use crate::actions::{BACK_HINT, FollowLink, Hint, ShowHex, ToggleListing, Xrefs};
-use crate::binary::{Binary, BinaryEvent, Revision};
+use crate::binary::{Binary, BinaryEvent, Digest, Revision};
 use crate::card::{Card, Tone};
 use crate::code_semantics::for_one_view;
 use crate::code_view::{ClickOutcome, CodeLines, CodePalette, Role, resolve_ref_click};
@@ -1079,6 +1079,14 @@ impl EventEmitter<()> for DecompileItem {}
 impl Revision for DecompileItem {
     fn revision(&self) -> Option<u64> {
         self.revision
+    }
+
+    fn digest(&self, _cx: &App) -> u64 {
+        let failed = self.failed.as_deref().unwrap_or_default();
+        let d = Digest::default()
+            .text(&format!("{:?}", self.form))
+            .text(failed);
+        self.code.as_ref().map_or(d, |code| code.digest(d)).value()
     }
 }
 

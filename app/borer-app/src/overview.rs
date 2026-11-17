@@ -17,7 +17,7 @@ use workspace::item::ItemEvent;
 use workspace::{Item, Workspace};
 
 use crate::actions::Overview;
-use crate::binary::{Binary, BinaryEvent, Revision};
+use crate::binary::{Binary, BinaryEvent, Digest, Revision};
 use crate::card::{Card, Tone};
 use crate::commands;
 use crate::decompile_item::TabMode;
@@ -441,6 +441,14 @@ impl EventEmitter<ItemEvent> for OverviewItem {}
 impl Revision for OverviewItem {
     fn revision(&self) -> Option<u64> {
         Some(self.loaded.fingerprint)
+    }
+
+    fn digest(&self, _cx: &App) -> u64 {
+        let d = self.rows.iter().fold(Digest::default(), |d, row| {
+            let marks = format!("{:?} {:?} {:?}", row.look, row.link, row.basis);
+            d.text(&row.text).text(&marks)
+        });
+        d.text(&format!("{:?}", self.selected)).value()
     }
 }
 

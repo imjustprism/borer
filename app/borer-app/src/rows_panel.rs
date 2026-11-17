@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use borer_engine::analysis::render::LeftOut;
+use borer_engine::num::from_usize;
 use editor::{Editor, EditorEvent};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -30,7 +31,7 @@ use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use crate::actions::{CycleSort, FocusFilter, Hint, OPEN_HINT, ShowHex, Xrefs};
-use crate::binary::{Binary, BinaryEvent, Revision, SettingsNotice, reading_label};
+use crate::binary::{Binary, BinaryEvent, Digest, Revision, SettingsNotice, reading_label};
 use crate::card::{Card, Tone};
 use crate::code_view::CodePalette;
 use crate::decompile_item::{TabMode, code_row_height};
@@ -434,6 +435,20 @@ pub struct RowsPanel<K: RowKind> {
 impl<K: RowKind> Revision for RowsPanel<K> {
     fn revision(&self) -> Option<u64> {
         self.rows.as_ref().map(|rows| rows.revision)
+    }
+
+    fn digest(&self, _cx: &App) -> u64 {
+        let d = Digest::default().num(from_usize(self.selected));
+        let Some(shown) = &self.rows else {
+            return d.value();
+        };
+        let d = d.text(&shown.query).text(&shown.rows.showing());
+        let cells = shown.rows.rows().iter().flat_map(|row| {
+            K::columns(self.columns)
+                .iter()
+                .map(move |column| (column.cell)(row))
+        });
+        cells.fold(d, |d, cell| d.text(&cell)).value()
     }
 }
 

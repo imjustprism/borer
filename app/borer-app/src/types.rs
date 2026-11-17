@@ -32,7 +32,7 @@ use crate::actions::{
 };
 use crate::app_assets::{AppIcon, Glyph};
 use crate::app_view::open_dropped;
-use crate::binary::{Binary, BinaryEvent, Revision};
+use crate::binary::{Binary, BinaryEvent, Digest, Revision};
 use crate::card::{Card, Tone};
 use crate::code_view::Role;
 use crate::commands;
@@ -877,6 +877,24 @@ impl StructItem {
 impl Revision for StructItem {
     fn revision(&self) -> Option<u64> {
         Some(self.loaded.fingerprint)
+    }
+
+    fn digest(&self, _cx: &App) -> u64 {
+        let state = match &self.shown {
+            Shown::Asking => "asking",
+            Shown::Missing => "missing",
+            Shown::Refused(why) => why,
+            Shown::Detail(..) => "detail",
+            Shown::Proposal(..) => "proposal",
+        };
+        let d = Digest::default().text(state).num(from_usize(self.selected));
+        let lines = self.shown.lines().iter();
+        lines
+            .fold(d, |d, &line| {
+                let color = format!("{:?}", self.shown.color(line));
+                d.text(&self.shown.text(line)).text(&color)
+            })
+            .value()
     }
 }
 

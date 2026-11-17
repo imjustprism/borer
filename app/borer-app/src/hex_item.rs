@@ -30,7 +30,7 @@ use ui::{Icon, IconName};
 use workspace::{Item, Workspace};
 
 use crate::actions::{LinkHex, ShowHex, Xrefs};
-use crate::binary::{Binary, BinaryEvent, Revision};
+use crate::binary::{Binary, BinaryEvent, Digest, Revision};
 use crate::card::{Card, Tone};
 use crate::code_view::theme_color;
 use crate::commands;
@@ -977,6 +977,16 @@ impl Focusable for HexItem {
 impl Revision for HexItem {
     fn revision(&self) -> Option<u64> {
         Some(self.loaded.fingerprint)
+    }
+
+    fn digest(&self, _cx: &App) -> u64 {
+        let rows = self.layout.as_ref().map_or(0, |layout| layout.rows);
+        let d = Digest::default().num(from_usize(rows));
+        let d = d.text(&format!("{:?} {:?}", self.cursor, self.miss));
+        let lines = self.pages.values().flat_map(|page| page.iter());
+        lines
+            .fold(d, |d, line| d.num(line.va).text(&line.text))
+            .value()
     }
 }
 

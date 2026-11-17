@@ -5,6 +5,8 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use borer_engine::view::{Kind, Ref, View};
+
+use crate::binary::Digest;
 use gpui::Hsla;
 use theme::Theme;
 
@@ -247,6 +249,18 @@ impl CodeLines {
     pub fn get(&self, ix: usize) -> Option<(&Arc<View>, usize)> {
         let &(v, l) = self.lines.get(ix)?;
         Some((self.views.get(v)?, l))
+    }
+
+    /// Returns `digest` with every shown line folded in, in order ([`Digest::line`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `digest` - The fold so far.
+    #[must_use]
+    pub fn digest(&self, digest: Digest) -> Digest {
+        (0..self.len())
+            .filter_map(|ix| self.get(ix))
+            .fold(digest, |d, (view, line)| d.line(view, line))
     }
 
     /// Returns the text the editor holds: the shown lines joined by newlines, so row `i` of

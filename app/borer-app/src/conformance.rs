@@ -4,20 +4,24 @@
 //! A new panel adds its key to [`PANELS_RUN`]; a new place variant adds an example to
 //! [`places`], whose match stops compiling until it does.
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use borer_engine::analysis::utypes::{TypeKind, TypeSource};
+use borer_engine::progress::Workers;
 use gpui::{Entity, TestAppContext, VisualTestContext};
-use workspace::Workspace;
+use workspace::{AppState, Workspace};
 
 use crate::app_view::REFUSED_FOLDER;
 use crate::app_view::tests::{
     CALLER, drop_on_center, init, load_sample, open, open_place, sample, take_status,
 };
+use crate::binary::{Digest, Revision as _};
 use crate::card::CARD_SELECTOR;
 use crate::decompile_item::{DecompileItem, TabMode};
+use crate::functions_panel::FunctionsPanel;
 use crate::panels::PANELS;
-use crate::places::{Place, place_of};
+use crate::places::{Place, place_of, view_of};
 use crate::rows_panel::HEADER_SELECTOR;
 use crate::start_item::StartItem;
 use crate::types::TypeKey;
@@ -213,6 +217,56 @@ async fn a_folder_dropped_on_any_tab_never_joins_the_project(cx: &mut TestAppCon
         assert_eq!(folders, 0, "{kind}: the folder joined the project");
     }
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Returns the digest of every place of [`places`], each named by its place, and of the
+/// functions panel.
+///
+/// They are read in a new window over a fresh load of the sample whose engine work, the
+/// load's and the views', runs under a cap of `workers` threads.
+fn digests(
+    app_state: &Arc<AppState>,
+    workers: usize,
+    cx: &mut TestAppContext,
+) -> Vec<(String, u64)> {
+    let cap = Workers(NonZeroUsize::new(workers).unwrap());
+    cap.within(|| {
+        let (app, cx) = open(app_state, cx);
+        let loaded = sample();
+        app.binary
+            .update(cx, |binary, cx| binary.show_loaded(loaded.clone(), cx));
+        let mut out = Vec::new();
+        for place in places() {
+            open_permanent(&app.workspace, &loaded, &place, cx);
+            draw(cx);
+            draw(cx);
+            let digest = app.workspace.read_with(cx, |workspace, cx| {
+                let item = workspace.active_item(cx).unwrap();
+                view_of(item.as_ref(), cx).unwrap().digest(cx)
+            });
+            out.push((format!("{place:?}"), digest));
+        }
+        let panel = app.workspace.read_with(cx, |workspace, cx| {
+            let panel = workspace.panel::<FunctionsPanel>(cx).unwrap();
+            panel.read(cx).digest(cx)
+        });
+        out.push(("FunctionsPanel".to_owned(), panel));
+        out
+    })
+}
+
+/// Every place, and the functions panel, shows the same digest whether the engine ran on
+/// one thread or on sixteen, each over its own load of one file, and no digest is the
+/// empty fold.
+#[gpui::test]
+fn every_place_shows_the_same_digest_at_one_and_sixteen_workers(cx: &mut TestAppContext) {
+    let app_state = init(cx);
+    let one = digests(&app_state, 1, cx);
+    let sixteen = digests(&app_state, 16, cx);
+    assert_eq!(one.len(), places().len() + 1);
+    assert_eq!(one, sixteen);
+    let empty = Digest::default().value();
+    assert!(one.iter().all(|(_, digest)| *digest != empty), "{one:?}");
 }
 
 /// Closing a place's tab while its view is being built leaves no live request in [`Jobs`],
