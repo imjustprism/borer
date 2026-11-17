@@ -30,7 +30,7 @@ use ui::{Icon, IconName};
 use workspace::{Item, Workspace};
 
 use crate::actions::{LinkHex, ShowHex, Xrefs};
-use crate::binary::Binary;
+use crate::binary::{Binary, BinaryEvent, Revision};
 use crate::card::{Card, Tone};
 use crate::code_view::theme_color;
 use crate::commands;
@@ -440,7 +440,8 @@ pub struct HexItem {
     style: HexStyle,
     /// The layout's background request.
     layout_job: Job,
-    /// Rebuilds [`Self::style`] on a settings or theme change, and follows the active tab.
+    /// Rebuilds [`Self::style`] on a settings or theme change, follows the active tab, and
+    /// moves to the state an edit or a project leaves.
     _subscriptions: Vec<Subscription>,
 }
 
@@ -471,6 +472,10 @@ impl HexItem {
         loaded: Arc<LoadedBinary>,
         cx: &mut Context<'_, Self>,
     ) -> Self {
+        let revised = cx.subscribe(&binary, |item, _, event, _| match event {
+            BinaryEvent::Revised(loaded) => item.loaded = loaded.clone(),
+            BinaryEvent::Opened(_) | BinaryEvent::Closed => {}
+        });
         let mut item = Self {
             workspace: workspace.downgrade(),
             binary,
@@ -494,6 +499,7 @@ impl HexItem {
                         item.follow(&workspace, cx);
                     }
                 }),
+                revised,
             ],
         };
         let program = item.loaded.program.clone();
@@ -934,6 +940,12 @@ impl EventEmitter<()> for HexItem {}
 impl Focusable for HexItem {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+impl Revision for HexItem {
+    fn revision(&self) -> Option<u64> {
+        Some(self.loaded.fingerprint)
     }
 }
 

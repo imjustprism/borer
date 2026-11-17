@@ -38,7 +38,7 @@ use ui::{Icon, IconName, Tooltip};
 use workspace::{Item, Workspace};
 
 use crate::actions::{BACK_HINT, FollowLink, Hint, ShowInLinear, ShowLinear};
-use crate::binary::Binary;
+use crate::binary::{Binary, BinaryEvent, Revision};
 use crate::card::{Card, Tone};
 use crate::code_semantics::ViewSemantics;
 use crate::code_view::CodeLines;
@@ -298,6 +298,8 @@ pub struct LinearItem {
     band_laid: Rc<Cell<Bounds<Pixels>>>,
     /// The cell under the pointer, which the band's hover names.
     hovered: Rc<Cell<Option<BandCell>>>,
+    /// Lists the image again over the state an edit or a project leaves.
+    _revised: Subscription,
 }
 
 impl std::fmt::Debug for LinearItem {
@@ -310,7 +312,8 @@ impl std::fmt::Debug for LinearItem {
 }
 
 impl LinearItem {
-    /// Returns a linear listing of `loaded`, its first page fetched in the background.
+    /// Returns a linear listing of `loaded`, its first page fetched in the background; over
+    /// each state an edit or a project leaves it lists again from its top line.
     ///
     /// # Arguments
     ///
@@ -342,6 +345,10 @@ impl LinearItem {
             code.show(Ok((empty, text, None)), reservation, window, cx);
             code
         });
+        let revised = cx.subscribe_in(&binary, window, |item, _, event, window, cx| match event {
+            BinaryEvent::Revised(loaded) => item.revise(loaded.clone(), window, cx),
+            BinaryEvent::Opened(_) | BinaryEvent::Closed => {}
+        });
         let mut item = Self {
             binary,
             loaded,
@@ -357,9 +364,25 @@ impl LinearItem {
             band_job: Job::default(),
             band_laid: Rc::default(),
             hovered: Rc::default(),
+            _revised: revised,
         };
         item.fetch(0, Dir::Next, Fetch::Reset(0), window, cx);
         item
+    }
+
+    /// Moves the listing to `loaded`, a later state of its binary, and fetches its pages
+    /// again from the row on its top line, which stays on top.
+    ///
+    /// # Arguments
+    ///
+    /// * `loaded` - The binary's state now.
+    /// * `window` - Window the tab is in.
+    /// * `cx` - Item context.
+    fn revise(&mut self, loaded: Arc<LoadedBinary>, window: &Window, cx: &mut Context<'_, Self>) {
+        self.loaded = loaded;
+        let top = self.top_line(cx);
+        let va = self.address(top, cx).unwrap_or(0);
+        self.fetch(va, Dir::Next, Fetch::Reset(va), window, cx);
     }
 
     /// Returns the binary the listing shows.
@@ -937,6 +960,12 @@ impl EventEmitter<()> for LinearItem {}
 impl Focusable for LinearItem {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.code.read(cx).focus_handle(cx)
+    }
+}
+
+impl Revision for LinearItem {
+    fn revision(&self) -> Option<u64> {
+        Some(self.loaded.fingerprint)
     }
 }
 

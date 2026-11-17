@@ -1192,35 +1192,69 @@ pub(crate) mod tests {
         }
     }
 
-    /// After an edit settles, every open view shows the state the edit left: each reports
-    /// the binary's overlay fingerprint, named by its type when it does not.
+    /// After an edit settles, every open view shows the state the edit left: the functions
+    /// panel and a tab of every kind ([`crate::conformance::places`]) each report the
+    /// binary's overlay fingerprint, and the snapshot a tab holds is that state, named by
+    /// its type when it is not; with the overview active, Go to reads that state too.
     ///
     /// # Panics
     ///
     /// Panics naming the first view left on an older state.
     #[gpui::test]
     fn no_view_is_left_on_an_old_revision_after_an_edit(cx: &mut TestAppContext) {
-        use crate::binary::Revision as _;
+        use crate::{binary::Revision, graph_item::GraphItem, hex_item::HexItem};
+        use crate::{linear_item::LinearItem, overview::OverviewItem, types::StructItem};
         let app_state = init(cx);
         let (app, cx) = open(&app_state, cx);
         let workspace = app.workspace;
         let (binary, _) = two_code_tabs(&workspace, cx);
+        let loaded = binary.read_with(cx, |binary, _| binary.loaded().cloned().unwrap());
+        for place in crate::conformance::places() {
+            open_place(&workspace, &loaded, place, TabMode::Permanent, cx);
+            shown(&workspace, cx);
+        }
         rename_callee(&binary, "renamed_callee", cx);
         let now = binary.read_with(cx, |binary, _| binary.loaded().map(|l| l.fingerprint));
         let views = workspace.read_with(cx, |workspace, cx| {
+            fn of<T: Revision + 'static>(
+                item: &dyn workspace::ItemHandle,
+                cx: &gpui::App,
+            ) -> Option<Option<u64>> {
+                Some(item.downcast::<T>()?.read(cx).revision())
+            }
             let panel = workspace.panel::<FunctionsPanel>(cx).unwrap();
-            let mut views = vec![("FunctionsPanel", panel.read(cx).revision())];
+            let mut views = vec![("FunctionsPanel".to_owned(), panel.read(cx).revision())];
             for pane in workspace.panes() {
-                for tab in pane.read(cx).items_of_type::<DecompileItem>() {
-                    views.push(("DecompileItem", tab.read(cx).revision()));
+                for item in pane.read(cx).items() {
+                    let Some(held) = places::loaded_of(item.as_ref(), cx) else {
+                        continue;
+                    };
+                    let kind = format!("{:?}", places::place_of(item.as_ref(), cx));
+                    views.push((format!("{kind} snapshot"), Some(held.fingerprint)));
+                    let kinds = [of::<DecompileItem>, of::<GraphItem>, of::<OverviewItem>];
+                    let more = [of::<LinearItem>, of::<HexItem>, of::<StructItem>];
+                    let revision = kinds
+                        .iter()
+                        .chain(&more)
+                        .find_map(|of| of(item.as_ref(), cx));
+                    views.push((kind, revision.flatten()));
                 }
             }
             views
         });
-        assert_eq!(views.len(), 3);
+        assert!(
+            views.len() > 2 * crate::conformance::places().len(),
+            "{views:?}"
+        );
         for (view, revision) in views {
             assert_eq!(revision, now, "{view} is left on an old revision");
         }
+        open_place(&workspace, &loaded, Place::Overview, TabMode::Permanent, cx);
+        cx.run_until_parked();
+        let read = workspace.read_with(cx, |workspace, cx| {
+            places::shown_binary(workspace, &binary, cx).map(|shown| shown.fingerprint)
+        });
+        assert_eq!(read, now);
     }
 
     /// Every action of the `borer` namespace is available to Zed's command palette: every

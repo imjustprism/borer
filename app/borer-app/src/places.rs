@@ -109,7 +109,8 @@ pub const PERMANENT: Opening = Opening {
 ///
 /// * `workspace` - The workspace.
 /// * `binary` - The window's binary, whose status line and drops the tab uses.
-/// * `loaded` - The snapshot the place is shown from.
+/// * `loaded` - The snapshot the place is shown from; the binary's state now goes in its
+///   place when it is a later state of the same program ([`current`]).
 /// * `place` - What to show.
 /// * `how` - How a new tab opens.
 /// * `window` - Window the workspace is in.
@@ -123,7 +124,7 @@ pub fn open(
     window: &mut Window,
     cx: &mut Context<'_, Workspace>,
 ) {
-    let (binary, loaded) = (binary.clone(), loaded.clone());
+    let (binary, loaded) = (binary.clone(), current(binary, loaded, cx));
     let program = loaded.program.clone();
     match place {
         Place::Hex { at } => {
@@ -283,7 +284,23 @@ fn show<T: Item>(
     })
 }
 
-/// Returns the snapshot the active center item shows, else the window's binary's.
+/// Returns `binary`'s state now when it is a later state of `loaded`'s program, which an
+/// edit or a project left, else `loaded`.
+///
+/// # Arguments
+///
+/// * `binary` - The window's binary.
+/// * `loaded` - A snapshot a view holds.
+/// * `cx` - Application context reading the binary.
+fn current(binary: &Entity<Binary>, loaded: &Arc<LoadedBinary>, cx: &App) -> Arc<LoadedBinary> {
+    let now = binary.read(cx).loaded();
+    now.filter(|now| Arc::ptr_eq(&now.program, &loaded.program))
+        .unwrap_or(loaded)
+        .clone()
+}
+
+/// Returns the snapshot the active center item shows, else the window's binary's; the
+/// binary's state now in place of an older state of the same program ([`current`]).
 ///
 /// # Arguments
 ///
@@ -304,7 +321,10 @@ pub fn shown_binary(
     let shown = active
         .as_ref()
         .and_then(|item| loaded_of(item.as_ref(), cx));
-    shown.or_else(|| binary.read(cx).loaded()).cloned()
+    match shown {
+        Some(shown) => Some(current(binary, shown, cx)),
+        None => binary.read(cx).loaded().cloned(),
+    }
 }
 
 /// Returns whether a center item shows a binary: a code, graph, hex, overview or linear
@@ -325,7 +345,7 @@ pub fn shows_a_binary(item: &dyn ItemHandle, cx: &App) -> bool {
 ///
 /// * `item` - The item.
 /// * `cx` - Application context reading it.
-fn loaded_of<'a>(item: &dyn ItemHandle, cx: &'a App) -> Option<&'a Arc<LoadedBinary>> {
+pub(crate) fn loaded_of<'a>(item: &dyn ItemHandle, cx: &'a App) -> Option<&'a Arc<LoadedBinary>> {
     if let Some(code) = item.downcast::<DecompileItem>() {
         return Some(code.read(cx).loaded());
     }

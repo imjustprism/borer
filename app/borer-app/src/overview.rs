@@ -17,7 +17,7 @@ use workspace::item::ItemEvent;
 use workspace::{Item, Workspace};
 
 use crate::actions::Overview;
-use crate::binary::{Binary, BinaryEvent};
+use crate::binary::{Binary, BinaryEvent, Revision};
 use crate::card::{Card, Tone};
 use crate::commands;
 use crate::decompile_item::TabMode;
@@ -229,8 +229,9 @@ pub struct OverviewItem {
     focus_handle: FocusHandle,
     /// The background triage.
     job: Job,
-    /// Closes the tab once its binary is closed or another load starts.
-    _closed: Subscription,
+    /// Closes the tab once its binary is closed or another load starts, and triages again
+    /// the state an edit or a project leaves.
+    _follows: Subscription,
 }
 
 impl std::fmt::Debug for OverviewItem {
@@ -243,7 +244,8 @@ impl std::fmt::Debug for OverviewItem {
 }
 
 impl OverviewItem {
-    /// Returns the overview of `loaded`, its triage built in the background.
+    /// Returns the overview of `loaded`, its triage built in the background, and again over
+    /// each state an edit or a project leaves.
     ///
     /// # Arguments
     ///
@@ -258,10 +260,10 @@ impl OverviewItem {
         loaded: Arc<LoadedBinary>,
         cx: &mut Context<'_, Self>,
     ) -> Self {
-        let closed = cx.subscribe(&binary, |_, _, event, cx| {
-            if matches!(event, BinaryEvent::Closed) {
-                cx.emit(ItemEvent::CloseItem);
-            }
+        let follows = cx.subscribe(&binary, |item, _, event, cx| match event {
+            BinaryEvent::Closed => cx.emit(ItemEvent::CloseItem),
+            BinaryEvent::Revised(loaded) => item.build(loaded.clone(), cx),
+            BinaryEvent::Opened(_) => {}
         });
         let mut item = Self {
             workspace,
@@ -272,17 +274,32 @@ impl OverviewItem {
             scroll: UniformListScrollHandle::new(),
             focus_handle: cx.focus_handle(),
             job: Job::default(),
-            _closed: closed,
+            _follows: follows,
         };
+        item.build(loaded, cx);
+        item
+    }
+
+    /// Shows the triage of `loaded` once built in the background, the lines shown staying
+    /// until then and the highlight staying on its line while that line is still a link.
+    ///
+    /// # Arguments
+    ///
+    /// * `loaded` - The binary to triage.
+    /// * `cx` - Item context.
+    fn build(&mut self, loaded: Arc<LoadedBinary>, cx: &mut Context<'_, Self>) {
+        self.loaded = loaded.clone();
         let name = loaded.path.file_name().unwrap_or(loaded.path.as_os_str());
         let label = format!("Triaging {}", name.to_string_lossy());
         let work = move || rows(&triage_blocking(&loaded), |at| place_at(&loaded, at));
-        item.job.run(label, cx, work, |item, rows, cx| {
-            item.selected = rows.iter().position(|row| row.link.is_some());
+        self.job.run(label, cx, work, |item, rows, cx| {
+            let kept = item
+                .selected
+                .filter(|&ix| rows.get(ix).is_some_and(|r| r.link.is_some()));
+            item.selected = kept.or_else(|| rows.iter().position(|row| row.link.is_some()));
             item.rows = rows;
             cx.notify();
         });
-        item
     }
 
     /// Returns the binary the triage is of.
@@ -413,6 +430,12 @@ impl OverviewItem {
 }
 
 impl EventEmitter<ItemEvent> for OverviewItem {}
+
+impl Revision for OverviewItem {
+    fn revision(&self) -> Option<u64> {
+        Some(self.loaded.fingerprint)
+    }
+}
 
 impl Focusable for OverviewItem {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {

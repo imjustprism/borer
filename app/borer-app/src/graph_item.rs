@@ -15,7 +15,8 @@ use gpui::{
     App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
     InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
     ParentElement as _, PathBuilder, Pixels, Point, Render, ScrollEvent, SharedString, Size,
-    Styled as _, TextAlign, TextRun, WeakEntity, Window, canvas, div, point, px, quad, size,
+    Styled as _, Subscription, TextAlign, TextRun, WeakEntity, Window, canvas, div, point, px,
+    quad, size,
 };
 use settings::Settings as _;
 use theme::{ActiveTheme as _, Theme};
@@ -27,7 +28,7 @@ use crate::actions::{
     BACK_HINT, FitGraph, FollowLink, ShowCheck, ShowGraph, ToggleGraph, WalkDown, WalkLeft,
     WalkRight, WalkUp, ZoomIn, ZoomOut,
 };
-use crate::binary::Binary;
+use crate::binary::{Binary, BinaryEvent, Revision};
 use crate::card::{Card, Tone};
 use crate::code_view::{ClickOutcome, CodePalette, Role, resolve_ref_click};
 use crate::commands;
@@ -125,6 +126,8 @@ pub struct GraphItem {
     job: Job,
     /// The background check of the decompiled text.
     check_job: Job,
+    /// Builds the graph and its check again over the state an edit or a project leaves.
+    _revised: Subscription,
 }
 
 impl std::fmt::Debug for GraphItem {
@@ -138,7 +141,8 @@ impl std::fmt::Debug for GraphItem {
 
 impl GraphItem {
     /// Returns a tab for the graph of the function at `entry` of `loaded`, building it and
-    /// the check of its text in the background.
+    /// the check of its text in the background, and again over each state an edit or a
+    /// project leaves.
     ///
     /// # Arguments
     ///
@@ -157,6 +161,10 @@ impl GraphItem {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Self {
+        let revised = cx.subscribe(&binary, |item, _, event, cx| match event {
+            BinaryEvent::Revised(loaded) => item.build(loaded.clone(), cx),
+            BinaryEvent::Opened(_) | BinaryEvent::Closed => {}
+        });
         let mut item = Self {
             workspace,
             binary,
@@ -179,28 +187,53 @@ impl GraphItem {
             focus: cx.focus_handle(),
             job: Job::default(),
             check_job: Job::default(),
+            _revised: revised,
         };
-        let source = loaded.clone();
+        item.build(loaded, cx);
+        item
+    }
+
+    /// Builds the graph and the check of its text over `loaded` in the background; the
+    /// first build selects the asked node, a later one keeps the selection and the camera.
+    ///
+    /// # Arguments
+    ///
+    /// * `loaded` - The binary's state to build over.
+    /// * `cx` - Item context.
+    fn build(&mut self, loaded: Arc<LoadedBinary>, cx: &mut Context<'_, Self>) {
+        self.loaded = loaded.clone();
+        let (source, entry) = (loaded.clone(), self.entry);
         let work = move || {
             let name = name_of(&source.analysis, &source.overlay, entry);
             (graph_blocking(&source, entry), name)
         };
-        item.job.run(
+        self.job.run(
             format!("Graphing {entry:#x}"),
             cx,
             work,
             |item, (graph, name), cx| {
+                let first = item.graph.is_none();
                 item.name = Some(name.into());
                 match graph {
-                    Ok(graph) => item.graph = Some(graph),
-                    Err(why) => item.failed = Some(why),
+                    Ok(graph) => {
+                        item.graph = Some(graph);
+                        item.failed = None;
+                    }
+                    Err(why) => {
+                        item.graph = None;
+                        item.failed = Some(why);
+                    }
                 }
                 item.regrade();
-                item.select(item.at.and_then(|va| item.node_of(va)).unwrap_or(0), cx);
+                if first {
+                    item.select(item.at.and_then(|va| item.node_of(va)).unwrap_or(0), cx);
+                } else {
+                    cx.notify();
+                }
             },
         );
         let work = move || check_blocking(&loaded, entry);
-        item.check_job.run(
+        self.check_job.run(
             format!("Checking {entry:#x}"),
             cx,
             work,
@@ -210,7 +243,6 @@ impl GraphItem {
                 cx.notify();
             },
         );
-        item
     }
 
     /// Returns the entry of the function the tab shows.
@@ -888,6 +920,12 @@ impl EventEmitter<()> for GraphItem {}
 impl Focusable for GraphItem {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus.clone()
+    }
+}
+
+impl Revision for GraphItem {
+    fn revision(&self) -> Option<u64> {
+        Some(self.loaded.fingerprint)
     }
 }
 
