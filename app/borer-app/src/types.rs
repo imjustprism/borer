@@ -109,6 +109,28 @@ fn source_cell(row: &TypeRow) -> SharedString {
     )
 }
 
+/// Returns why the fields of `key` take no edit but a copy, `None` for a user struct.
+///
+/// # Arguments
+///
+/// * `key` - The type the tab shows.
+fn read_only(key: &TypeKey) -> Option<String> {
+    let copy = "Copy to User Type plans a user struct of its fields";
+    if key.source != TypeSource::User {
+        return Some(format!(
+            "{} types are read only: {copy}",
+            source_word(key.source)
+        ));
+    }
+    (key.kind != TypeKind::Struct).then(|| {
+        let kind = kind_word(key.kind);
+        format!(
+            "{kind} {} has no fields to edit: only a struct's are",
+            key.name
+        )
+    })
+}
+
 /// Returns a count or a size the engine may not know, `?` for one it does not.
 ///
 /// # Arguments
@@ -592,7 +614,7 @@ impl StructItem {
         cx.notify();
     }
 
-    /// Starts `ask` on the selected line: a type that is not the user's is read only but
+    /// Starts `ask` on the selected line: a type that is not a user struct is read only but
     /// for a copy, an ask that takes text focuses the input, and one that takes none is
     /// planned at once.
     ///
@@ -603,13 +625,9 @@ impl StructItem {
     /// * `cx` - Tab context.
     pub fn start(&mut self, ask: Ask, window: &mut Window, cx: &mut Context<'_, Self>) {
         if let Subject::Type(key) = &self.subject
-            && key.source != TypeSource::User
             && ask != Ask::Copy
+            && let Some(why) = read_only(key)
         {
-            let why = format!(
-                "{} types are read only: Copy to User Type plans a user struct of its fields",
-                source_word(key.source)
-            );
             self.draft = Some(Draft {
                 ask,
                 planned: Some((Vec::new(), Err(why))),
@@ -1018,7 +1036,7 @@ mod tests {
     use borer_engine::analysis::stated::{Field, Mode};
     use borer_engine::analysis::utypes::{
         FieldRow, TypeDetail, TypeExpr, TypeKind, TypeRow, TypeSource, UserField, UserStruct,
-        UserType, type_detail,
+        UserType, build_enum, type_detail,
     };
     use gpui::{Entity, TestAppContext, VisualTestContext};
     use ui::Color;
@@ -1316,6 +1334,39 @@ mod tests {
         let got: Vec<(u64, String)> = fields.iter().map(|(o, f)| (*o, f.name.clone())).collect();
         assert_eq!(got, want);
         assert!(said.unwrap().is_ok());
+    }
+
+    /// A user enum lists none of its bytes as not covered, and no ask but a copy plans an
+    /// edit of it: each says why in place of a plan.
+    #[gpui::test]
+    fn a_user_enum_takes_no_field_edit(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let base = sample();
+        let mut overlay = (*base.overlay).clone();
+        let e = build_enum("E", 4, &[(1, "One".to_owned())]).unwrap();
+        overlay.types.insert("E".to_owned(), e);
+        let loaded = base.with_overlay(overlay);
+        app.binary
+            .update(cx, |binary, cx| binary.show_loaded(loaded.clone(), cx));
+        cx.run_until_parked();
+        let place = Place::Type(TypeKey {
+            name: "E".into(),
+            source: TypeSource::User,
+            kind: TypeKind::Enum,
+        });
+        let item = struct_tab(&app.workspace, &loaded, place, cx);
+        let texts = item.read_with(cx, |item, _| item.texts());
+        assert!(
+            !texts.iter().any(|t| t.contains("not covered")),
+            "{texts:?}"
+        );
+        for ask in [Ask::Add, Ask::Rename, Ask::Retype, Ask::Delete, Ask::Size] {
+            item.update_in(cx, |item, window, cx| item.start(ask, window, cx));
+            cx.run_until_parked();
+            let said = item.read_with(cx, |item, _| item.said().cloned());
+            assert!(matches!(said, Some(Err(_))), "{ask:?}: {said:?}");
+        }
     }
 
     /// Returns a proposal of a pointer read at two widths at offset 0 and one at 8.
