@@ -15,6 +15,118 @@ use anyhow::Context as _;
 /// The directory name the app's config and data live under.
 const APP: &str = "borer";
 
+/// The directory name earlier builds kept the app's config and data under ([`Env::legacy`]).
+const LEGACY_APP: &str = "borer-app";
+
+/// Most files and folders a migration copies ([`migrate`]); past it the copy stops.
+const MIGRATE_MAX_ENTRIES: usize = 10_000;
+
+/// Picks one directory of a [`Dirs`]: its config or its data directory.
+type Pick = fn(&Dirs) -> &PathBuf;
+
+/// What a migration copies from the old directories to the new: the settings file and the
+/// themes folder of the config directory, and Zed's database of the data directory.
+const MIGRATED: [(Pick, &str); 3] = [
+    (|dirs| &dirs.config, "settings.json"),
+    (|dirs| &dirs.config, "themes"),
+    (|dirs| &dirs.data, "db"),
+];
+
+/// Copies what an earlier build kept in `old` into `new`, once: on the first run under `new`,
+/// when neither of its directories exists yet; links inside a folder are skipped.
+///
+/// # Arguments
+///
+/// * `old` - Where the earlier build kept its files ([`Env::legacy`]).
+/// * `new` - Where the app keeps them now ([`Env::borer`]).
+///
+/// # Returns
+///
+/// The paths copied to, empty when there was nothing to copy or `new` already exists.
+///
+/// # Errors
+///
+/// Returns an error naming the path when a stat, a read, a copy or a folder fails, or when
+/// the old directories hold more than [`MIGRATE_MAX_ENTRIES`] entries.
+pub fn migrate(old: &Dirs, new: &Dirs) -> anyhow::Result<Vec<PathBuf>> {
+    if stat(&new.config)?.is_some() || stat(&new.data)?.is_some() {
+        return Ok(Vec::new());
+    }
+    let mut budget = MIGRATE_MAX_ENTRIES;
+    let mut copied = Vec::new();
+    for (dir, name) in MIGRATED {
+        let (from, to) = (dir(old).join(name), dir(new).join(name));
+        let Some(meta) = stat(&from)? else {
+            continue;
+        };
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        copy_tree(&from, &to, meta.is_dir(), &mut budget)?;
+        copied.push(to);
+    }
+    Ok(copied)
+}
+
+/// Returns the metadata of `path`, `None` when nothing is there.
+///
+/// # Arguments
+///
+/// * `path` - A path under the app's own directories.
+///
+/// # Errors
+///
+/// Returns an error when the path is unusable, with the reason.
+fn stat(path: &Path) -> anyhow::Result<Option<std::fs::Metadata>> {
+    borer_engine::program::checked_metadata(path)
+        .map_err(|why| anyhow::anyhow!("{}: {why}", path.display()))
+}
+
+/// Copies the file or folder `from` to `to`, folders whole, skipping the links in them.
+///
+/// # Arguments
+///
+/// * `from` - What to copy.
+/// * `to` - Where it goes; its parent folder exists.
+/// * `folder` - Whether `from` is a folder.
+/// * `budget` - Entries left to copy, spent one per file or folder.
+///
+/// # Errors
+///
+/// Returns an error naming the path when a read, a copy or a folder fails, or when the
+/// budget runs out.
+fn copy_tree(from: &Path, to: &Path, folder: bool, budget: &mut usize) -> anyhow::Result<()> {
+    *budget = budget
+        .checked_sub(1)
+        .with_context(|| format!("more than {MIGRATE_MAX_ENTRIES} entries to migrate"))?;
+    if !folder {
+        std::fs::copy(from, to).with_context(|| format!("copying {}", from.display()))?;
+        return Ok(());
+    }
+    std::fs::create_dir_all(to).with_context(|| format!("creating {}", to.display()))?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a folder of the app's own directories, which the app names itself"
+    )]
+    let entries = std::fs::read_dir(from).with_context(|| format!("reading {}", from.display()))?;
+    for entry in entries {
+        let entry = entry.with_context(|| format!("reading {}", from.display()))?;
+        let kind = entry
+            .file_type()
+            .with_context(|| format!("reading {}", entry.path().display()))?;
+        if kind.is_file() || kind.is_dir() {
+            copy_tree(
+                &entry.path(),
+                &to.join(entry.file_name()),
+                kind.is_dir(),
+                budget,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// The platform whose conventions place the directories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Os {
@@ -124,6 +236,26 @@ impl Env<'_> {
         Ok(Dirs {
             config: config.join(APP),
             data: data.join(APP),
+        })
+    }
+
+    /// Returns where builds before the move under `borer` kept the app's files: one
+    /// `borer-app` directory in the platform's local data directory, its config in `config`
+    /// under it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on Windows when `%LOCALAPPDATA%` is not set.
+    pub fn legacy(&self) -> anyhow::Result<Dirs> {
+        let local = match self.os {
+            Os::Linux => self.xdg("XDG_DATA_HOME", ".local/share"),
+            Os::MacOs => self.support(),
+            Os::Windows => self.windows("LOCALAPPDATA")?,
+        };
+        let data = local.join(LEGACY_APP);
+        Ok(Dirs {
+            config: data.join("config"),
+            data,
         })
     }
 
@@ -290,6 +422,65 @@ mod tests {
         let zed = resolved(Os::MacOs, &set, |env| env.zed()).unwrap();
         let zed_data = "home/p/Library/Application Support/Zed";
         assert_eq!(zed, dirs("home/p/.config/zed", zed_data));
+    }
+
+    /// An earlier build kept everything in `borer-app` under the local data directory, its
+    /// config in `config` there.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the old place resolves elsewhere.
+    #[test]
+    fn the_legacy_place_is_borer_app_in_local_data() {
+        let set = [("APPDATA", "/roaming"), ("LOCALAPPDATA", "/local")];
+        let got = resolved(Os::Windows, &set, |env| env.legacy()).unwrap();
+        assert_eq!(got, dirs("local/borer-app/config", "local/borer-app"));
+        let got = resolved(Os::Linux, &[], |env| env.legacy()).unwrap();
+        let old = "home/p/.local/share/borer-app";
+        assert_eq!(got, dirs(&format!("{old}/config"), old));
+    }
+
+    /// The first run under the new place copies the settings file, the themes folder and
+    /// the database of the old one; once the new place exists nothing is copied again.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a file is not copied, or is copied over the new place.
+    #[test]
+    fn the_first_run_copies_an_earlier_builds_files_once() {
+        let root = std::env::temp_dir().join(format!("borer-app-migrate-{}", std::process::id()));
+        let old = Dirs {
+            config: root.join("old/config"),
+            data: root.join("old"),
+        };
+        let new = Dirs {
+            config: root.join("new/config"),
+            data: root.join("new/data"),
+        };
+        let theme = old.config.join("themes/mine.json");
+        let db = old.data.join("db/0-stable/db.sqlite");
+        for file in [&old.config.join("settings.json"), &theme, &db] {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, file.display().to_string()).unwrap();
+        }
+        let copied = super::migrate(&old, &new).unwrap();
+        assert_eq!(copied.len(), 3, "{copied:?}");
+        let read = |path: PathBuf| {
+            let bytes = borer_engine::program::read_regular(&path, 1 << 16).unwrap();
+            String::from_utf8(bytes).unwrap()
+        };
+        assert_eq!(
+            read(new.config.join("themes/mine.json")),
+            theme.display().to_string()
+        );
+        assert_eq!(
+            read(new.data.join("db/0-stable/db.sqlite")),
+            db.display().to_string()
+        );
+        std::fs::write(new.config.join("settings.json"), "mine").unwrap();
+        assert!(super::migrate(&old, &new).unwrap().is_empty());
+        assert_eq!(read(new.config.join("settings.json")), "mine");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     /// On Windows config is under `%APPDATA%` and data under `%LOCALAPPDATA%`; an empty

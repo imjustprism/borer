@@ -42,9 +42,13 @@ borer-app path/to/program  # opens a PE, ELF or Mach-O file
 ```
 
 The command palette (Ctrl+Shift+P, Cmd+Shift+P on macOS) lists every action.
-Settings, keymap and layout are kept in the local data directory, under
-`borer-app` (`%LOCALAPPDATA%`, `~/Library/Application Support` or
-`~/.local/share`); `--data-dir <dir>` as the first argument picks another.
+Settings, keymap and themes are kept in the config directory, under `borer`
+(`%APPDATA%`, `~/Library/Application Support` or `~/.config`); the layout,
+Recent and the tabs open at quit in the local data directory, under `borer`
+(`%LOCALAPPDATA%`, `~/Library/Application Support` or `~/.local/share`).
+The first run there copies in the settings, themes and layout an earlier build
+kept under `borer-app` in the local data directory. `--data-dir <dir>` as the
+first argument keeps everything in another directory.
 
 ## License
 

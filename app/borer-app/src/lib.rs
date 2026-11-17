@@ -58,7 +58,8 @@ use crate::worker::mark_ui_thread;
 /// Boots the GPUI platform (or `--headless` mode) according to CLI flags.
 ///
 /// `borer-app [binary]` opens a window whose root is Zed's workspace; a measurement flag
-/// opens a [`Harness`] around that workspace instead.
+/// opens a [`Harness`] around that workspace instead. A person's first run under the app's
+/// directories copies in what an earlier build kept elsewhere ([`app_dirs::migrate`]).
 ///
 /// # Errors
 ///
@@ -72,7 +73,11 @@ pub fn run() -> anyhow::Result<()> {
         return run_headless(path);
     }
     if given_dir.is_none() && matches!(mode, CliMode::Interactive(_)) {
-        app_dirs::set_config_dir(app_dirs::with_host_env(|env| env.borer())?.config);
+        let (dirs, legacy) = app_dirs::with_host_env(|env| Ok((env.borer()?, env.legacy()?)))?;
+        if let Err(err) = app_dirs::migrate(&legacy, &dirs) {
+            eprintln!("borer-app: the files of an earlier build were not copied: {err:#}");
+        }
+        app_dirs::set_config_dir(dirs.config);
     }
     app_view::set_data_dir(&app_view::data_dir(&mode, given_dir)?)?;
     let exit_slot = new_cli_exit_slot();
