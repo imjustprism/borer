@@ -565,7 +565,7 @@ pub const COMMANDS: &[Command] = &[
         )
     },
     Command {
-        keys: &[Keys::all(Ctx::Graph, &["i"])],
+        keys: &[Keys::all(Ctx::Graph, &["i"]), Keys::all(Ctx::Code, &["i"])],
         serves: &["borer://certify"],
         ..item(
             "borer::ShowCheck",
@@ -744,6 +744,28 @@ pub const COMMANDS: &[Command] = &[
         ..item(
             "borer::Xrefs",
             "Xrefs to Cursor",
+            (MenuName::Go, 0),
+            Need::Binary,
+        )
+    },
+    Command {
+        keys: &[Keys::all(Ctx::Code, &["f8"])],
+        serves: &["borer://certify"],
+        replaces: &["editor::GoToDiagnostic"],
+        ..item(
+            "borer::NextWrongBlock",
+            "Next Wrong Block",
+            (MenuName::Go, 0),
+            Need::Binary,
+        )
+    },
+    Command {
+        keys: &[Keys::all(Ctx::Code, &["shift-f8"])],
+        serves: &["borer://certify"],
+        replaces: &["editor::GoToPreviousDiagnostic"],
+        ..item(
+            "borer::PreviousWrongBlock",
+            "Previous Wrong Block",
             (MenuName::Go, 0),
             Need::Binary,
         )

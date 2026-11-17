@@ -4,9 +4,9 @@
 //! A decompile line takes the grade of the block it stands for ([`View::origin`], known
 //! from the line origins through the text passes); a listing or linear line shows an
 //! instruction, and takes the grade of the block holding it ([`Analysis::block_at`]). The
-//! grade is the record of that block start in its function's check
-//! ([`text_check`](borer_engine::analysis::decompile::text_check)), as the graph looks it
-//! up. A line with no origin and no instruction has no mark.
+//! grade is the record of that block start in its function's check, the one the graph and
+//! the status bar read ([`check_blocking`](crate::worker::check_blocking)). A line with no
+//! origin and no instruction has no mark.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -17,13 +17,17 @@ use std::sync::Arc;
 use borer_engine::analysis::Analysis;
 use borer_engine::analysis::decompile::replay::{BlockCheck, Grade, TextCheck};
 use borer_engine::view::View;
+use editor::display_map::{
+    BlockContext, BlockPlacement, BlockProperties, BlockStyle, CustomBlockId, RenderBlock,
+};
 use editor::{Anchor, Editor};
 use gpui::{
-    App, Bounds, Context, Entity, Hsla, IntoElement, Pixels, Styled as _, TextAlign, TextRun,
-    canvas, point, px,
+    App, Bounds, Context, Entity, Hsla, IntoElement, ParentElement as _, Pixels, SharedString,
+    Styled as _, TextAlign, TextRun, canvas, div, point, px,
 };
 use language::Point;
 use theme::ActiveTheme as _;
+use ui::{Color, Label, LabelCommon as _};
 
 use crate::code_view::CodeLines;
 use crate::decompile_item::{buffer_row, whole_rows};
@@ -186,6 +190,60 @@ impl Marks {
                 .map_or(Grade::Unchecked, BlockCheck::grade),
         )
     }
+
+    /// Returns the evidence behind shown line `row`'s mark: its block's record as the
+    /// engine spells it, and for a decompile line how its block is known.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - The lines the marks were made for.
+    /// * `row` - Zero-based shown line.
+    ///
+    /// # Returns
+    ///
+    /// The evidence, `None` for a line with no mark.
+    #[must_use]
+    pub fn evidence(&self, code: &CodeLines, row: usize) -> Option<String> {
+        let block @ (_, start) = self.block(code, row)?;
+        let mut said = self.record(block).map_or_else(
+            || format!("block {start:#x}: unchecked: the check holds no record of it"),
+            BlockCheck::spell,
+        );
+        let (view, line) = code.get(row)?;
+        if view.origin(line).is_some() {
+            said.push_str(&format!(
+                "\nthis line stands for block {start:#x}, known from the line origins through the text passes"
+            ));
+        }
+        Some(said)
+    }
+
+    /// Returns the next shown line after `from` marked wrong, or the one before it when
+    /// `back`, going round past either end; `from` itself is the last tried.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - The lines the marks were made for.
+    /// * `from` - Zero-based shown line to start from.
+    /// * `back` - Whether to look upward.
+    ///
+    /// # Returns
+    ///
+    /// The line, `None` when no line is marked wrong.
+    #[must_use]
+    pub fn next_wrong(&self, code: &CodeLines, from: usize, back: bool) -> Option<usize> {
+        let n = code.len();
+        let from = from.min(n.saturating_sub(1));
+        (1..=n)
+            .map(|k| {
+                if back {
+                    (from + n - k) % n
+                } else {
+                    (from + k) % n
+                }
+            })
+            .find(|&row| self.grade(code, row) == Some(Grade::Wrong))
+    }
 }
 
 /// The key of the gutter highlight of the lines one grade marks: Zed keys a gutter
@@ -234,6 +292,51 @@ pub fn paint_gutter(
     editor.highlight_gutter::<GradeMark<1>>(tested, mark_color::<1>, cx);
     editor.highlight_gutter::<GradeMark<2>>(wrong, mark_color::<2>, cx);
     editor.highlight_gutter::<GradeMark<3>>(unchecked, mark_color::<3>, cx);
+}
+
+/// Shows `said`, the evidence behind a line's mark, in a block under shown line `row` of
+/// `editor`, one row of the editor per line of it.
+///
+/// # Arguments
+///
+/// * `editor` - The tab's editor.
+/// * `row` - Zero-based shown line.
+/// * `said` - The evidence.
+/// * `cx` - Editor context.
+///
+/// # Returns
+///
+/// The block, to remove it by.
+pub fn insert_evidence(
+    editor: &mut Editor,
+    row: usize,
+    said: &str,
+    cx: &mut Context<'_, Editor>,
+) -> Option<CustomBlockId> {
+    let lines: Vec<SharedString> = said.lines().map(|l| l.to_owned().into()).collect();
+    let height = u32::try_from(lines.len()).ok()?;
+    let at = Point::new(u32::try_from(row).ok()?, 0);
+    let anchor = editor.buffer().read(cx).snapshot(cx).anchor_after(at);
+    let render: RenderBlock = Arc::new(move |block: &mut BlockContext<'_, '_>| {
+        let rows = lines.iter().map(|line| {
+            let label = Label::new(line.clone())
+                .buffer_font(block.app)
+                .color(Color::Muted);
+            div().h(block.line_height).child(label)
+        });
+        div()
+            .pl(block.margins.gutter.full_width())
+            .children(rows)
+            .into_any_element()
+    });
+    let properties = BlockProperties {
+        placement: BlockPlacement::Below(anchor),
+        height: Some(height),
+        style: BlockStyle::Fixed,
+        render,
+        priority: 0,
+    };
+    editor.insert_blocks([properties], None, cx).pop()
 }
 
 /// Where the glyph layer last drew each mark: its bounds and its shown line, for a click.
@@ -336,19 +439,21 @@ pub(crate) mod tests {
     use borer_engine::analysis::decompile::replay::{
         BlockCheck, Claim, Disagreement, Grade, TextCheck,
     };
-    use borer_engine::analysis::decompile::text_check;
+
     use borer_engine::analysis::{Analysis, EnumSource, Overlay};
     use borer_engine::program::{Arch, BinaryFormat, Program, Section};
     use borer_engine::view::View;
     use gpui::{Entity, TestAppContext, VisualTestContext};
 
     use super::{GRADES, Marks, glyph, grade_index};
-    use crate::app_view::tests::{init, loaded_of, open, sample};
+    use crate::app_view::tests::{CALLEE, CALLER, init, loaded_of, open, sample};
     use crate::code_view::CodeLines;
     use crate::decompile_item::tests::open_tab;
     use crate::decompile_item::{DecompileItem, Form};
     use crate::linear_item::tests::{open_linear, settle};
-    use crate::worker::{LoadedBinary, decompile_blocking, listing_blocking, load_binary_blocking};
+    use crate::worker::{
+        LoadedBinary, check_blocking, decompile_blocking, listing_blocking, load_binary_blocking,
+    };
 
     /// Three blocks the check grades proved, unchecked and proved.
     ///
@@ -393,13 +498,13 @@ pub(crate) mod tests {
         view: &View,
         line: usize,
     ) -> Option<Grade> {
-        let (p, a, o) = (&*loaded.program, &*loaded.analysis, &*loaded.overlay);
+        let a = &*loaded.analysis;
         let start = match view.origin(line) {
             Some(origin) => origin,
             None => a.block_at(view.address(line)?)?.1.start,
         };
         let owner = entry.unwrap_or_else(|| a.block_at(start).unwrap().0.entry);
-        let check = text_check(p, a, o, owner);
+        let check = check_blocking(loaded, owner);
         let records = check.as_ref().as_ref().map_or(&[][..], |c| &*c.blocks);
         let record = records.iter().find(|r| r.start() == start);
         Some(record.map_or(Grade::Unchecked, BlockCheck::grade))
@@ -506,6 +611,88 @@ pub(crate) mod tests {
             }
         }
         assert!(wrong >= 3, "{wrong}");
+    }
+
+    /// Returns the evidence line `line` of `view` should show, apart from the marks: its
+    /// block's record as the engine spells it, and the origins sentence on a decompile line.
+    fn want_evidence(loaded: &LoadedBinary, entry: u64, view: &View, line: usize) -> String {
+        let a = &*loaded.analysis;
+        let start = view
+            .origin(line)
+            .unwrap_or_else(|| a.block_at(view.address(line).unwrap()).unwrap().1.start);
+        let check = check_blocking(loaded, entry);
+        let record = check.as_ref().as_ref().unwrap();
+        let record = record.blocks.iter().find(|r| r.start() == start).unwrap();
+        let mut want = record.spell();
+        if view.origin(line).is_some() {
+            want.push_str(&format!(
+                "\nthis line stands for block {start:#x}, known from the line origins through the text passes"
+            ));
+        }
+        want
+    }
+
+    /// The evidence under a marked line is its block's record as the engine spells it, with
+    /// one more sentence on a decompile line; a line with no mark shows none, and asking
+    /// again on the same line hides it.
+    #[gpui::test]
+    fn the_evidence_is_the_engine_spelling_of_the_line_block(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
+        let mut shown = [0; 2];
+        let tabs = [
+            (sample(), CALLER),
+            (sample(), CALLEE),
+            (one_function(&FLOAT_BETWEEN), 0x1000),
+        ];
+        for ((loaded, entry), form) in tabs
+            .into_iter()
+            .flat_map(|tab| [(tab.clone(), Form::Decompile), (tab, Form::Listing)])
+        {
+            let tab = open_tab(&workspace, &loaded, (entry, form), cx);
+            let code = tab.read_with(cx, |item, _| item.code().unwrap().clone());
+            for row in 0..code.len() {
+                let (view, line) = code.get(row).unwrap();
+                tab.update(cx, |item, cx| item.show_check(Some(row), cx));
+                let said = tab.read_with(cx, |item, _| item.evidence().map(str::to_owned));
+                let marked = view.origin(line).or(view.address(line)).is_some();
+                let want = marked.then(|| want_evidence(&loaded, entry, view, line));
+                assert_eq!(said, want, "{form:?} row {row}");
+                shown[usize::from(view.origin(line).is_some())] += usize::from(marked);
+                tab.update(cx, |item, cx| item.show_check(Some(row), cx));
+                assert!(tab.read_with(cx, |item, _| item.evidence().is_none()));
+            }
+        }
+        assert!(shown.iter().all(|&n| n > 1), "{shown:?}");
+    }
+
+    /// Next and previous wrong go round to the lines a wrong block marks, from any line, and
+    /// find none in a function whose check finds nothing wrong.
+    #[test]
+    fn next_and_previous_wrong_go_round() {
+        let loaded = one_function(&STORE);
+        let a = &*loaded.analysis;
+        let view = decompile_blocking(&loaded, 0x1000).unwrap();
+        let code = CodeLines::new(vec![view.clone()]);
+        let marks = Marks::new(a, &code, Some(0x1000), |_| wrong_check());
+        let wrong: Vec<usize> = (0..code.len())
+            .filter(|&row| view.origin(row).is_some())
+            .collect();
+        let (first, last) = (wrong[0], *wrong.last().unwrap());
+        for from in 0..code.len() {
+            let next = wrong.iter().copied().find(|&r| r > from).unwrap_or(first);
+            let prev = wrong
+                .iter()
+                .rev()
+                .copied()
+                .find(|&r| r < from)
+                .unwrap_or(last);
+            assert_eq!(marks.next_wrong(&code, from, false), Some(next), "{from}");
+            assert_eq!(marks.next_wrong(&code, from, true), Some(prev), "{from}");
+        }
+        let clean = Marks::new(a, &code, Some(0x1000), |_| Arc::new(None));
+        assert_eq!(clean.next_wrong(&code, 0, false), None);
     }
 
     /// Each grade has a glyph of its own, so marks are told apart with their colors

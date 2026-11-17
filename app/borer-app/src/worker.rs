@@ -962,8 +962,11 @@ pub fn check_blocking(loaded: &LoadedBinary, entry: u64) -> Arc<Option<TextCheck
     text_check(program, analysis, &answered, entry)
 }
 
-/// Grades each of `code`'s lines from the check of the function it stands for, under the
-/// names its text was built with: `entry`'s, else the block's own function's.
+/// Grades each of `code`'s lines from the check of the function it stands for: `entry`'s,
+/// else the block's own function's.
+///
+/// Each check is [`check_blocking`]'s, under the names the answer is drawn under, which are
+/// the names a decompile view's text is built under.
 ///
 /// Must be called inside [`spawn_engine`]; each check is memoized by the engine, so the
 /// one the text was built with is a lookup.
@@ -975,8 +978,9 @@ pub fn check_blocking(loaded: &LoadedBinary, entry: u64) -> Arc<Option<TextCheck
 /// * `entry` - The tab's function, `None` for lines of no one function.
 #[must_use]
 pub fn marks_blocking(loaded: &LoadedBinary, code: &CodeLines, entry: Option<u64>) -> Marks {
-    let (p, a, o) = (&*loaded.program, &*loaded.analysis, &*loaded.overlay);
-    Marks::new(a, code, entry, |at| text_check(p, a, o, at))
+    Marks::new(&loaded.analysis, code, entry, |at| {
+        check_blocking(loaded, at)
+    })
 }
 
 /// Builds one page of the linear listing of `loaded`, or says why none.

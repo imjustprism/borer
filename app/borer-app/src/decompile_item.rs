@@ -11,7 +11,7 @@ use borer_engine::analysis::decompile::replay::Grade;
 use borer_engine::analysis::name_of;
 use borer_engine::view::{Ref, View};
 use editor::actions::GoToDefinition;
-use editor::display_map::{DisplayRow, DisplaySnapshot};
+use editor::display_map::{CustomBlockId, DisplayRow, DisplaySnapshot};
 use editor::scroll::ScrollAnchor;
 use editor::{
     DisplayPoint, Editor, EditorEvent, HighlightKey, SelectionEffects, SemanticsProvider,
@@ -36,10 +36,13 @@ use workspace::item::TabContentParams;
 use workspace::searchable::SearchableItemHandle;
 use workspace::{Item, ItemNavHistory, Workspace};
 
-use crate::actions::{BACK_HINT, FollowLink, Hint, ShowHex, ToggleListing, Xrefs};
+use crate::actions::{
+    BACK_HINT, FollowLink, Hint, NextWrongBlock, PreviousWrongBlock, ShowCheck, ShowHex,
+    ToggleListing, Xrefs,
+};
 use crate::binary::{Binary, BinaryEvent, Digest, Revision};
 use crate::card::{Card, Tone};
-use crate::check_marks::{MarkHits, Marks, glyph_layer, paint_gutter};
+use crate::check_marks::{MarkHits, Marks, glyph_layer, insert_evidence, paint_gutter};
 use crate::code_semantics::for_one_view;
 use crate::code_view::{ClickOutcome, CodeLines, CodePalette, Role, resolve_ref_click};
 use crate::commands;
@@ -207,6 +210,8 @@ pub struct DecompileItem {
     marks_job: Job,
     /// Where the marks were last drawn.
     hits: MarkHits,
+    /// The evidence shown under a line: the line, what it says and its block in the editor.
+    evidence: Option<(usize, String, CustomBlockId)>,
 }
 
 impl std::fmt::Debug for DecompileItem {
@@ -332,6 +337,7 @@ impl DecompileItem {
             marks: None,
             marks_job: Job::default(),
             hits: MarkHits::default(),
+            evidence: None,
         };
         item.load(build, window, cx);
         item
@@ -442,6 +448,7 @@ impl DecompileItem {
                 self.editor
                     .update(cx, |editor, _| editor.set_semantics_provider(semantics));
                 self.marks = None;
+                self.evidence = None;
                 self.grade_lines(code.clone(), cx);
                 self.code = Some(code);
                 self.refresh_search(window, cx);
@@ -549,6 +556,76 @@ impl DecompileItem {
             item.paint(true, cx);
             cx.notify();
         });
+    }
+
+    /// Shows the evidence behind the mark of shown line `row`, else of the cursor's line,
+    /// in a block under it, or hides it when it is shown there already; the status line
+    /// says why a line has none.
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - Zero-based shown line, `None` for the cursor's.
+    /// * `cx` - Item context.
+    pub fn show_check(&mut self, row: Option<usize>, cx: &mut Context<'_, Self>) {
+        let Some(row) = row.or_else(|| Some(self.cursor(cx)?.0)) else {
+            return;
+        };
+        let here = self.evidence.as_ref().is_some_and(|(at, _, _)| *at == row);
+        self.hide_check(cx);
+        if here {
+            return;
+        }
+        let Some((marks, code)) = self.marks.as_ref().zip(self.code.as_deref()) else {
+            self.say("The lines are still being graded.".to_owned(), cx);
+            return;
+        };
+        let Some(said) = marks.evidence(code, row) else {
+            let why = "This line stands for no block, so it has no grade.";
+            self.say(why.to_owned(), cx);
+            return;
+        };
+        let block = self
+            .editor
+            .update(cx, |editor, cx| insert_evidence(editor, row, &said, cx));
+        self.evidence = block.map(|block| (row, said, block));
+    }
+
+    /// Hides the evidence shown under a line, if any.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Item context.
+    fn hide_check(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some((_, _, block)) = self.evidence.take() {
+            self.editor.update(cx, |editor, cx| {
+                editor.remove_blocks([block].into_iter().collect(), None, cx);
+            });
+        }
+    }
+
+    /// Returns the evidence shown under a line, `None` when none is.
+    #[must_use]
+    pub fn evidence(&self) -> Option<&str> {
+        self.evidence.as_ref().map(|(_, said, _)| said.as_str())
+    }
+
+    /// Moves to the next line after the cursor's marked wrong, or the one before it when
+    /// `back`, going round past either end; the status line says when no line is.
+    ///
+    /// # Arguments
+    ///
+    /// * `back` - Whether to look upward.
+    /// * `cx` - Item context.
+    pub fn step_wrong(&mut self, back: bool, cx: &mut Context<'_, Self>) {
+        let Some((marks, code)) = self.marks.as_ref().zip(self.code.as_deref()) else {
+            self.say("The lines are still being graded.".to_owned(), cx);
+            return;
+        };
+        let from = self.cursor(cx).map_or(0, |(row, _)| row);
+        match marks.next_wrong(code, from, back) {
+            Some(row) => self.jump_to_line(row, cx),
+            None => self.say("No line of this tab is marked wrong.".to_owned(), cx),
+        }
     }
 
     /// Returns the grade shown line `row` is marked with, `None` while the lines are graded
@@ -1228,6 +1305,20 @@ pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
             }
         },
     );
+    commands::register(workspace, binary, |workspace, _: &NextWrongBlock, _, cx| {
+        if let Some(item) = workspace.active_item_as::<DecompileItem>(cx) {
+            item.update(cx, |item, cx| item.step_wrong(false, cx));
+        }
+    });
+    commands::register(
+        workspace,
+        binary,
+        |workspace, _: &PreviousWrongBlock, _, cx| {
+            if let Some(item) = workspace.active_item_as::<DecompileItem>(cx) {
+                item.update(cx, |item, cx| item.step_wrong(true, cx));
+            }
+        },
+    );
     commands::register(
         workspace,
         binary,
@@ -1257,6 +1348,9 @@ impl Render for DecompileItem {
                     cx,
                 );
             }))
+            .on_action(cx.listener(|item, _: &ShowCheck, _, cx| {
+                item.show_check(None, cx);
+            }))
             .on_action(cx.listener(|item, _: &ShowHex, window, cx| {
                 item.open_function_place(|entry| Place::Hex { at: Some(entry) }, window, cx);
             }))
@@ -1265,7 +1359,13 @@ impl Render for DecompileItem {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|item, event: &MouseUpEvent, window, cx| {
-                    if event.modifiers.secondary(cx) {
+                    let hit =
+                        item.hits.borrow().iter().find_map(|(bounds, row)| {
+                            bounds.contains(&event.position).then_some(*row)
+                        });
+                    if let Some(row) = hit {
+                        item.show_check(Some(row), cx);
+                    } else if event.modifiers.secondary(cx) {
                         item.follow_cursor(false, window, cx);
                     }
                 }),

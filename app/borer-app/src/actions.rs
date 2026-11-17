@@ -62,8 +62,13 @@ gpui::actions!(
         WalkLeft,
         /// Selects the graph block nearest right of the selected one along an edge.
         WalkRight,
-        /// Shows or hides the evidence behind the selected graph block's grade.
+        /// Shows or hides the evidence behind the selected graph block's grade, or under the
+        /// code line at the cursor behind its mark.
         ShowCheck,
+        /// Moves the code tab's cursor to the next line marked wrong, going round.
+        NextWrongBlock,
+        /// Moves the code tab's cursor to the previous line marked wrong, going round.
+        PreviousWrongBlock,
         /// Shows the strings panel and focuses its filter, or moves focus back to the center
         /// pane.
         ToggleStrings,
