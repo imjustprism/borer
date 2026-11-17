@@ -32,7 +32,7 @@ use workspace::{ModalView, Workspace};
 use crate::app_settings::{BORER_THEME, choose_theme, save_settings};
 use crate::binary::{ONE_FILE, ask_paths};
 use crate::theme_contract::{Failure, check};
-use crate::user_themes::{claim, parse_theme, read_capped, register};
+use crate::user_themes::{MAX_THEME_BYTES, claim, parse_theme, read_capped, register};
 
 /// Most failure lines the report shows for one theme; the rest are counted.
 const MAX_REPORT_LINES: usize = 12;
@@ -84,7 +84,8 @@ pub enum Origin {
 /// # Errors
 ///
 /// Returns an error naming the file when the bytes do not parse as a theme family or hold
-/// no theme, or a Zed theme with borer's keys does not write back.
+/// no theme, or a Zed theme with borer's keys does not write back or writes back over
+/// [`MAX_THEME_BYTES`], which the themes folder would not read.
 fn candidate(source: PathBuf, bytes: Vec<u8>, origin: Origin) -> anyhow::Result<Candidate> {
     let mut content = parse_theme(&source, &bytes)?;
     if content.themes.is_empty() {
@@ -96,6 +97,13 @@ fn candidate(source: PathBuf, bytes: Vec<u8>, origin: Origin) -> anyhow::Result<
             let borrowed = borrow_borer_keys(&mut content);
             let written = serde_json::to_vec_pretty(&content)
                 .with_context(|| format!("writing {} with borer's keys", source.display()))?;
+            let len = u64::try_from(written.len()).unwrap_or(u64::MAX);
+            if len > MAX_THEME_BYTES {
+                anyhow::bail!(
+                    "{} with borer's keys holds {len} bytes, over the {MAX_THEME_BYTES} the app reads",
+                    source.display()
+                );
+            }
             (written, borrowed)
         }
     };

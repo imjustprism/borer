@@ -1069,3 +1069,29 @@ async fn a_zed_theme_imports_with_borers_keys(cx: &mut TestAppContext) {
     let register = syntax_color(&nice, "borer.register").expect("kept");
     assert!(is(register, 0x123456), "{register:?}");
 }
+
+/// A Zed theme whose copy with borer's keys would be over the size cap is refused before
+/// anything is written, so the themes folder never holds a file it will not read.
+#[gpui::test]
+async fn a_zed_theme_whose_copy_is_over_the_cap_is_refused(cx: &mut TestAppContext) {
+    let app_state = boot_with_files(&[], cx).await;
+    let fs = app_state.fs.clone();
+    let fake = fs.as_fake();
+    let dir = std::env::temp_dir().join("borer-app-zed-big");
+    fake.create_dir(&dir).await.expect("made");
+    let keys: Vec<String> = (0..100_000)
+        .map(|i| format!(r##""k{i}":{{"color":"#000000"}}"##))
+        .collect();
+    let style = format!(r#"{{"syntax":{{{}}}}}"#, keys.join(","));
+    let bytes = family("big", "big dark", "dark", &style);
+    assert!(u64::try_from(bytes.len()).expect("fits") <= MAX_THEME_BYTES);
+    let source = dir.join("big.json");
+    fake.insert_file(&source, bytes).await;
+    let read = cx.update(|cx| read_from(fs.clone(), source, Origin::Zed, cx));
+    let said = format!("{:#}", read.await.expect_err("over the cap"));
+    assert!(
+        said.contains("big.json with borer's keys holds") && said.contains("over the"),
+        "{said}"
+    );
+    assert!(themes_folder(&app_state).await.is_empty());
+}
