@@ -30,6 +30,23 @@ ignore = [
   # ttf-parser 0.25.1, through gpui and usvg/fontdb: unmaintained, no vulnerability,
   # pinned by Zed v1.28.1.
   { id = "RUSTSEC-2026-0192", reason = "ttf-parser via gpui/usvg: unmaintained, no vulnerability, pinned by Zed v1.28.1" },
+  # The rest only a Zed change can move (vault S-30): each comes through Zed's crates at
+  # the pinned revision, and `cargo update --precise` to the fixed release is refused.
+  # libsqlite3-sys 0.30.1 (bundled SQLite), through Zed's sqlez: the fix is 0.39, a major
+  # sqlez does not accept; the app reads only its own local store through it.
+  { id = "RUSTSEC-2026-0459", reason = "libsqlite3-sys via Zed sqlez: fixed in 0.39, a major sqlez at the pinned Zed rejects; moves when Zed takes rusqlite 0.41 (S-30)" },
+  # rsa 0.9.10, through Zed's rpc: the fix is 0.10, which rpc does not accept; the app
+  # opens no connection that would use rpc's RSA path.
+  { id = "RUSTSEC-2023-0071", reason = "rsa via Zed rpc: fixed in 0.10, which rpc at the pinned Zed rejects; moves when Zed takes rsa 0.10 or drops it (S-30)" },
+  # async-std and pin-utils, through Zed's async-tar (fs, node_runtime, dap): unmaintained,
+  # no vulnerability, no release to move to.
+  { id = "RUSTSEC-2025-0052", reason = "async-std via Zed async-tar: discontinued, no vulnerability, no release; moves when Zed drops async-tar's async-std (S-30)" },
+  { id = "RUSTSEC-2026-0441", reason = "pin-utils via async-std: unmaintained, no vulnerability, no release; moves with async-std (S-30)" },
+  # zbus_names, zvariant and zvariant_derive, through Zed's Linux desktop crates:
+  # unmaintained, no vulnerability, no release to move to.
+  { id = "RUSTSEC-2026-0371", reason = "zbus_names via Zed's Linux platform crates: unmaintained, no vulnerability, no release; moves when Zed moves zbus (S-30)" },
+  { id = "RUSTSEC-2026-0370", reason = "zvariant via Zed's Linux platform crates: unmaintained, no vulnerability, no release; moves when Zed moves zbus (S-30)" },
+  { id = "RUSTSEC-2026-0372", reason = "zvariant_derive via Zed's Linux platform crates: unmaintained, no vulnerability, no release; moves when Zed moves zbus (S-30)" },
 ]
 
 [licenses]
