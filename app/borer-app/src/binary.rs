@@ -887,7 +887,9 @@ impl Binary {
 
     /// Puts the annotations of `file`, read from `path`, in place of the overlay as the
     /// engine admits them, in the background. A project forced over another build is not
-    /// the open binary's own file, so the next save asks where to write.
+    /// the open binary's own file, and one the engine left annotations of out holds more
+    /// than the overlay, so writing it back would drop them: after either the next save
+    /// asks where to write, and after the second the title marks the overlay unsaved.
     ///
     /// # Arguments
     ///
@@ -910,13 +912,21 @@ impl Binary {
             label,
             move |loaded| open_project_blocking(loaded, &kept, force),
             move |binary, base, out, cx| match out {
-                Ok((next, said)) => {
+                Ok((next, said, left_out)) => {
                     let saved = next.fingerprint;
                     if binary.advance(&base, next, cx) {
-                        binary.saved = saved;
+                        let whole = left_out == 0;
+                        if whole {
+                            binary.saved = saved;
+                        }
                         let said: Vec<&str> = said.lines().filter(|l| !l.is_empty()).collect();
-                        let status = format!("project {}: {}", path.display(), said.join("; "));
-                        binary.project = (!force).then_some(path);
+                        let mut status = format!("project {}: {}", path.display(), said.join("; "));
+                        if !whole {
+                            status.push_str(&format!(
+                                "; {left_out} left out stay in the file, so Save asks for a new one"
+                            ));
+                        }
+                        binary.project = (whole && !force).then_some(path);
                         binary.set_status(status, cx);
                     }
                 }
@@ -1663,6 +1673,42 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A project the engine left an annotation of out is not the save target: the title
+    /// marks the overlay unsaved, Save asks for a new file, and the file keeps the entry.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the project stays the save target or a save rewrites the file.
+    #[gpui::test]
+    fn a_project_with_skipped_entries_is_not_saved_over(cx: &mut TestAppContext) {
+        let dir = scratch("skipped");
+        let (binary, cx) = binary(cx);
+        let (exe, project, _) = renamed_and_saved(&binary, &dir, cx);
+        let mut file: serde_json::Value = serde_json::from_str(&text_of(&project)).unwrap();
+        file["names"]["0x10"] = serde_json::Value::from("nowhere");
+        let text = serde_json::to_string_pretty(&file).unwrap();
+        std::fs::write(&project, &text).unwrap();
+        let fresh = cx.new(|cx| Binary::new(cx));
+        open(&fresh, &exe, cx);
+        open_project(&fresh, &project, cx);
+        let (_, title, status) = state(&fresh, cx);
+        assert!(status.contains("Save asks for a new one"), "{status}");
+        assert!(title.contains(UNSAVED), "{title}");
+        assert_eq!(
+            fresh.read_with(cx, |binary, _| binary.project.clone()),
+            None
+        );
+        fresh.update(cx, |binary, cx| binary.save_project(false, cx));
+        cx.run_until_parked();
+        let asked = cx.did_prompt_for_new_path();
+        cx.simulate_new_path_selection(|_| None);
+        cx.run_until_parked();
+        let kept = text_of(&project);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(asked);
+        assert_eq!(kept, text);
     }
 
     /// A saved project file dropped on the window opens as the open binary's project: the

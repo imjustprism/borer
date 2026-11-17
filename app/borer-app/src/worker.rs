@@ -559,7 +559,8 @@ pub fn read_project_blocking(path: &Path) -> anyhow::Result<Project> {
 ///
 /// # Returns
 ///
-/// The state it leaves, and what the engine said of what it loaded and skipped.
+/// The state it leaves, what the engine said of what it loaded and skipped, and how many
+/// annotations of the file it left out ([`project::Admitted::left_out`]).
 ///
 /// # Errors
 ///
@@ -569,7 +570,7 @@ pub fn open_project_blocking(
     loaded: &LoadedBinary,
     file: &Project,
     force: bool,
-) -> anyhow::Result<(Arc<LoadedBinary>, String)> {
+) -> anyhow::Result<(Arc<LoadedBinary>, String, usize)> {
     let (program, analysis) = (&loaded.program, &loaded.analysis);
     let admitted = project::admit(
         program,
@@ -578,10 +579,11 @@ pub fn open_project_blocking(
         file,
         force,
     )?;
+    let left_out = admitted.left_out();
     let (plan, _, said) = admitted.into_parts();
     let mut overlay = (*loaded.overlay).clone();
     edit::commit(program, analysis, &mut overlay, &plan)?;
-    Ok((loaded.with_overlay(overlay), said))
+    Ok((loaded.with_overlay(overlay), said, left_out))
 }
 
 /// Writes `loaded`'s annotations to a project file at `path` as the engine spells one,

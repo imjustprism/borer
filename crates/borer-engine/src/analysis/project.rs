@@ -1069,6 +1069,9 @@ pub struct Admitted {
     edit: Edit,
     /// What was loaded and left out, and why, one line each.
     said: String,
+    /// How many annotations of the file were left out: those the binary cannot place or
+    /// set, and the fields of classes its code contradicts or does not have.
+    left_out: usize,
 }
 
 impl Admitted {
@@ -1076,6 +1079,14 @@ impl Admitted {
     #[must_use]
     pub fn said(&self) -> &str {
         &self.said
+    }
+
+    /// Returns how many annotations of the file were left out, so a front end can tell a
+    /// project loaded whole from one whose file still holds more than the overlay; zero
+    /// when nothing was.
+    #[must_use]
+    pub const fn left_out(&self) -> usize {
+        self.left_out
     }
 
     /// Returns the plan, the edit it was made of and the answer, together.
@@ -1205,6 +1216,7 @@ pub fn admit(
         plan,
         edit: put,
         said,
+        left_out: skipped.saturating_add(gone.0).saturating_add(gone.1),
     })
 }
 
