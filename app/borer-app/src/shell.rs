@@ -9,7 +9,7 @@
 
 use anyhow::Context as _;
 use gpui::{
-    App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
+    App, AppContext as _, AsyncApp, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Task, TaskExt as _, Window,
     WindowHandle, div,
 };
@@ -129,7 +129,8 @@ impl Shell {
 
     /// Closes the window as Zed's root closes one whose root it is: asks whether the
     /// binary's unsaved edits may go ([`Binary::settled`]), asks the workspace to prepare
-    /// (unsaved work may keep it open), saves what is pending, then removes it.
+    /// (unsaved work may keep it open), keeps every window's open tabs, its own among them
+    /// ([`crate::stored::keep_open_tabs`]), saves what is pending, then removes it.
     ///
     /// # Arguments
     ///
@@ -149,6 +150,7 @@ impl Shell {
             if !prepare.await.context("preparing the window to close")? {
                 return anyhow::Ok(());
             }
+            AsyncApp::update(cx, crate::stored::keep_open_tabs).await;
             let flushes = this.update_in(cx, |shell, window, cx| shell.flushes(window, cx))?;
             for flush in flushes {
                 flush.await;
@@ -312,6 +314,10 @@ fn each_workspace(cx: &mut App, f: impl Fn(&mut Workspace, &mut Context<'_, Work
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test; gpui::test hides each body in an undocumented fn"
+)]
 mod tests {
     use borer_engine::analysis::edit::Edit;
     use gpui::{TestAppContext, VisualTestContext};
@@ -320,7 +326,8 @@ mod tests {
 
     use super::{Shell, dismiss_app_notice, show_app_notice};
     use crate::actions::{CloseBinary, OpenMenuBar};
-    use crate::app_view::tests::{CALLEE, init, load_sample, open};
+    use crate::app_view::tests::{CALLEE, init, load_sample, open, open_caller};
+    use crate::decompile_item::TabMode;
 
     /// Returns the window's root.
     ///
@@ -449,6 +456,30 @@ mod tests {
         cx.simulate_prompt_answer("Discard");
         cx.run_until_parked();
         assert!(cx.cx.update(|cx| cx.windows()).is_empty());
+    }
+
+    /// Closing the only window keeps its code tabs, and the quit that follows with no
+    /// window left keeps them too, rather than writing none.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the kept tabs are not the window's.
+    #[gpui::test]
+    async fn closing_the_last_window_keeps_its_tabs(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, vcx) = open(&app_state, cx);
+        load_sample(&app, vcx);
+        open_caller(&app.workspace, TabMode::Permanent, vcx);
+        vcx.run_until_parked();
+        let open_now = app.workspace.read_with(vcx, crate::stored::open_tabs);
+        assert!(!open_now.is_empty());
+        vcx.dispatch_action(workspace::CloseWindow);
+        vcx.run_until_parked();
+        assert!(cx.update(|cx| cx.windows()).is_empty());
+        cx.update(crate::stored::keep_open_tabs).await;
+        cx.run_until_parked();
+        let kept = cx.update(|cx| crate::stored::saved_tabs(cx)).unwrap();
+        assert_eq!(kept, open_now);
     }
 
     /// An app-wide notice reaches the workspace of every shell window, each of two, and is

@@ -13,6 +13,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use borer_front::places;
 use db::kvp::KeyValueStore;
+use futures::future::OptionFuture;
 use gpui::{
     App, AppContext as _, Context, Entity, Global, PathPromptOptions, Task, WeakEntity, Window,
 };
@@ -402,16 +403,19 @@ pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
 /// * `cx` - Application context listing the windows.
 pub(crate) fn keep_open_tabs(cx: &mut App) -> impl Future<Output = ()> + use<> {
     let app: &App = cx;
-    let tabs: Vec<SavedTab> = app
+    let shells: Vec<&Shell> = app
         .windows()
         .into_iter()
         .filter_map(|window| window.downcast::<Shell>())
         .filter_map(|window| window.read(app).ok())
+        .collect();
+    let tabs: Vec<SavedTab> = shells
+        .iter()
         .flat_map(|shell| open_tabs(shell.workspace().read(app), app))
         .collect();
-    let keep = keep_tabs(&tabs, cx);
+    let keep = (!shells.is_empty()).then(|| keep_tabs(&tabs, cx));
     async move {
-        if let Err(err) = keep.await {
+        if let Some(Err(err)) = OptionFuture::from(keep).await {
             eprintln!("borer-app: open tabs not kept: {err:#}");
         }
     }
