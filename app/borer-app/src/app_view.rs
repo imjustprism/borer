@@ -1202,8 +1202,7 @@ pub(crate) mod tests {
     /// Panics naming the first view left on an older state.
     #[gpui::test]
     fn no_view_is_left_on_an_old_revision_after_an_edit(cx: &mut TestAppContext) {
-        use crate::{binary::Revision, graph_item::GraphItem, hex_item::HexItem};
-        use crate::{linear_item::LinearItem, overview::OverviewItem, types::StructItem};
+        use crate::binary::Revision as _;
         let app_state = init(cx);
         let (app, cx) = open(&app_state, cx);
         let workspace = app.workspace;
@@ -1216,12 +1215,6 @@ pub(crate) mod tests {
         rename_callee(&binary, "renamed_callee", cx);
         let now = binary.read_with(cx, |binary, _| binary.loaded().map(|l| l.fingerprint));
         let views = workspace.read_with(cx, |workspace, cx| {
-            fn of<T: Revision + 'static>(
-                item: &dyn workspace::ItemHandle,
-                cx: &gpui::App,
-            ) -> Option<Option<u64>> {
-                Some(item.downcast::<T>()?.read(cx).revision())
-            }
             let panel = workspace.panel::<FunctionsPanel>(cx).unwrap();
             let mut views = vec![("FunctionsPanel".to_owned(), panel.read(cx).revision())];
             for pane in workspace.panes() {
@@ -1231,13 +1224,8 @@ pub(crate) mod tests {
                     };
                     let kind = format!("{:?}", places::place_of(item.as_ref(), cx));
                     views.push((format!("{kind} snapshot"), Some(held.fingerprint)));
-                    let kinds = [of::<DecompileItem>, of::<GraphItem>, of::<OverviewItem>];
-                    let more = [of::<LinearItem>, of::<HexItem>, of::<StructItem>];
-                    let revision = kinds
-                        .iter()
-                        .chain(&more)
-                        .find_map(|of| of(item.as_ref(), cx));
-                    views.push((kind, revision.flatten()));
+                    let view = places::view_of(item.as_ref(), cx);
+                    views.push((kind, view.and_then(|view| view.revision())));
                 }
             }
             views
