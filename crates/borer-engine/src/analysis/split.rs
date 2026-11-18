@@ -32,11 +32,6 @@ pub const UNITS_MAX: usize = 4096;
 const DEPTH_MAX: usize = 8;
 /// Most characters of one path component.
 const COMPONENT_MAX: usize = 64;
-/// Names Windows keeps for devices, whatever the extension.
-const DEVICES: [&str; 22] = [
-    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
-    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-];
 
 /// Returns one path component made safe to create on any file system.
 ///
@@ -65,8 +60,7 @@ fn safe_component(part: &str) -> String {
     while out.ends_with('.') {
         out.pop();
     }
-    let stem = out.split('.').next().unwrap_or("").to_ascii_uppercase();
-    if out.is_empty() || DEVICES.contains(&stem.as_str()) {
+    if out.is_empty() || crate::program::file::named_device(&out) {
         out.insert(0, '_');
     }
     out

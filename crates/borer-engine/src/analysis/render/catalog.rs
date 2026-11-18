@@ -1080,10 +1080,7 @@ pub(crate) fn cited_sources(p: &Program, a: &Analysis) -> BTreeMap<String, BTree
         if entries.is_empty() {
             continue;
         }
-        files
-            .entry(path.replace('\\', "/"))
-            .or_default()
-            .extend(entries);
+        files.entry(slashed(path)).or_default().extend(entries);
     }
     files
 }

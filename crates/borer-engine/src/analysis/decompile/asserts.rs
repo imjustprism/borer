@@ -183,6 +183,11 @@ pub(super) fn call_starts(line: &str) -> Vec<usize> {
     out
 }
 
+/// The file extensions a cited C or C++ source path ends with.
+pub(crate) const CITED_EXTENSIONS: [&str; 10] = [
+    ".h", ".hpp", ".hh", ".hxx", ".inl", ".c", ".cc", ".cpp", ".cxx", ".inc",
+];
+
 /// Tells whether an argument is a literal naming a C or C++ source file
 /// ([`is_source_path`]).
 ///
@@ -194,16 +199,13 @@ pub(super) fn source_path(arg: &str) -> bool {
 }
 
 /// Tells whether a literal's text names a C or C++ source file, as an
-/// assert cites one: no space, a C or C++ file extension.
+/// assert cites one: no space, a [`CITED_EXTENSIONS`] extension.
 ///
 /// # Arguments
 ///
 /// * `text` - The literal's text, unquoted.
 pub(crate) fn is_source_path(text: &str) -> bool {
-    const EXTENSIONS: [&str; 10] = [
-        ".h", ".hpp", ".hh", ".hxx", ".inl", ".c", ".cc", ".cpp", ".cxx", ".inc",
-    ];
-    !text.contains(' ') && EXTENSIONS.iter().any(|e| text.ends_with(e))
+    !text.contains(' ') && CITED_EXTENSIONS.iter().any(|e| text.ends_with(e))
 }
 
 /// Most variables the asserts name in one function.

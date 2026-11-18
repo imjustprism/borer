@@ -351,6 +351,25 @@ pub fn unusable_path(path: &Path) -> Option<String> {
     if device {
         return Some(format!("{spelled} names a device, not a file"));
     }
+    let mut chars = raw.chars();
+    if !matches!(path.components().next(), Some(Component::Prefix(_)))
+        && matches!((chars.next(), chars.next()), (Some(_), Some(':')))
+        && named_device(chars.as_str())
+    {
+        return Some(format!("{raw} names a device, not a file"));
+    }
+    let name = path.file_name()?.to_str()?;
+    named_device(name).then(|| format!("{name} names a device, not a file"))
+}
+
+/// Tells whether a path component is a name Windows keeps for a device
+/// (`con`, `nul.txt`, `COM1`, `lpt\u{b9}`), whatever its extension.
+///
+/// # Arguments
+///
+/// * `part` - One component of a path.
+#[must_use]
+pub(crate) fn named_device(part: &str) -> bool {
     const DEVICES: [&str; 9] = [
         "con", "prn", "aux", "nul", "com", "lpt", "conin$", "conout$", "clock$",
     ];
@@ -361,26 +380,15 @@ pub fn unusable_path(path: &Path) -> Option<String> {
             (Some('1'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}'), None)
         )
     };
-    let named_device = |part: &str| {
-        let base = part
-            .split(['.', ':'])
-            .next()
-            .unwrap_or_default()
-            .trim_end_matches([' ', '.'])
-            .to_ascii_lowercase();
-        DEVICES.iter().any(|d| {
-            base == *d || (matches!(*d, "com" | "lpt") && base.strip_prefix(d).is_some_and(port))
-        })
-    };
-    let mut chars = raw.chars();
-    if !matches!(path.components().next(), Some(Component::Prefix(_)))
-        && matches!((chars.next(), chars.next()), (Some(_), Some(':')))
-        && named_device(chars.as_str())
-    {
-        return Some(format!("{raw} names a device, not a file"));
-    }
-    let name = path.file_name()?.to_str()?;
-    named_device(name).then(|| format!("{name} names a device, not a file"))
+    let base = part
+        .split(['.', ':'])
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches([' ', '.'])
+        .to_ascii_lowercase();
+    DEVICES.iter().any(|d| {
+        base == *d || (matches!(*d, "com" | "lpt") && base.strip_prefix(d).is_some_and(port))
+    })
 }
 
 /// How a capped read failed.
