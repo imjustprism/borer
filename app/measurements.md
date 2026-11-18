@@ -145,6 +145,35 @@ is printed as skipped. The bars are `BARS` in `borer-app/src/measure/actions.rs`
 | back | 16 ms | reported | reported |
 | graph pan, zoom: frame draw p99 | 8.3 ms | | |
 
-First run: not yet recorded. The phase opens a window, and the branch that adds it was
-built and tested without one; its numbers and the six bars above, re-run on the same
-build, go here with the commit they came from.
+First run, 2026-11-18, release build of add/app-check-gutter (the tip that adds this
+line), Ryzen 7 9800X3D, another agent's cargo build running on the machine throughout, so
+the times are upper bounds. Ack and settle p95/p99 in ms:
+
+| Bench | Action | Ack p95/p99 | Settle p95/p99 |
+| --- | --- | --- | --- |
+| notepad | goto | 13.3/15.4 | 13.3/15.4 |
+| notepad | find | 5.4/7.1 | 5.4/7.1 |
+| notepad | xrefs | none seen (36 still, 14 skipped) | 2.2/2.2 |
+| notepad | listing | 13.3/14.0 | 13.3/14.0 |
+| notepad | graph | 7.7/8.2 | 7.7/8.2 |
+| notepad | filter | 8.6/10.3 | 8.6/10.3 |
+| notepad | overview | 8.9/9.9 | 9.0/2466 |
+| notepad | back | 10.5/11.8 | 10.5/11.8 |
+| large | goto | 10.3/11.0 | 10.8/10002 (1 late) |
+| large | find | 4.5/9.7 | 11.0/11.5 |
+| large | xrefs | none seen (50 still) | 2.0/2.1 |
+| large | listing | 10.4/11.3 | 10.4/11.3 |
+| large | graph | 8.9/11.2 | 8.9/11.2 |
+| large | filter | 6.6/7.8 | 10.8/12.2 |
+| large | overview | 7.0/7.6 | 7.3/8805 |
+| large | back | 8.6/9.8 | 8.6/9.8 |
+
+Graph frame draw p99: pan 2.2 ms (notepad) and 2.0 ms (large), zoom 7.8 and 5.6 ms. UI
+thread engine calls: 0. Misses: xrefs ack on both benches. With the job count out of the
+stamp, the window shows no change after an xrefs on the same call token as the run before
+(same referent, same rows), so the script needs a step that changes the referent before
+this bar measures anything. The other phases of the full script ran to the input phase on
+this build: first frame median 192 ms, notepad open median 234 ms, memory delta 146.0 MB,
+list scroll draw p99 3.2 ms, code scroll draw p99 3.6 ms; the input phase stalled at its
+first click (the window did not take SendInput clicks with the machine busy), so the
+script stopped before the call tree and actions phases, which were run alone.
