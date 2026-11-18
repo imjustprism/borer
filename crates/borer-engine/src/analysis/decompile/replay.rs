@@ -111,7 +111,7 @@ pub(crate) use answer::check_answer;
 pub(super) use answer::check_decompiled;
 use grade::{DIFFERED, REFUTED, Sampling};
 
-pub use grade::{BlockCheck, Grade, KEPT_MAX, RECHECK_MAX, TextCheck, recheck_block};
+pub use grade::*;
 pub use report::replay_tsv;
 
 /// States each block is tried from.
@@ -1009,7 +1009,7 @@ fn replay_effects<L: Replay>(
             continue;
         }
         out.blocks += 1;
-        let before = grade::mark(&out);
+        let before = mark(&out);
         let checked = function.check(b, block, &mut room, &mut out);
         match checked {
             Ok(_) => out.checked += 1,

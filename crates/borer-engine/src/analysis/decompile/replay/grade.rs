@@ -37,6 +37,19 @@ pub const KEPT_MAX: usize = 16;
 /// to it.
 pub const RECHECK_MAX: u32 = 256;
 
+/// Returns the states a recheck asked for `asked` tries: at least the
+/// check's own [`TRIALS`], so a recheck never tries fewer states than the
+/// grade it rechecks, and at most [`RECHECK_MAX`].
+///
+/// # Arguments
+///
+/// * `asked` - The states asked for.
+#[must_use]
+pub fn recheck_states(asked: u32) -> u32 {
+    let least = u32::try_from(TRIALS).unwrap_or(RECHECK_MAX);
+    asked.clamp(least, RECHECK_MAX)
+}
+
 /// Which states a block is tried from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Sampling {
@@ -113,7 +126,7 @@ pub struct BlockCheck {
     /// Disagreements past [`KEPT_MAX`].
     pub(crate) past_cap: usize,
     /// The states a recheck asked for, other than those tried when it was
-    /// clamped to `1..=`[`RECHECK_MAX`]; `None` for an answer's check,
+    /// clamped by [`recheck_states`]; `None` for an answer's check,
     /// [`TRIALS`] per block.
     pub(crate) asked: Option<u32>,
 }
@@ -301,7 +314,7 @@ impl BlockCheck {
             };
         }
         if let Some(asked) = self.asked {
-            let tried = asked.clamp(1, RECHECK_MAX);
+            let tried = recheck_states(asked);
             let _ = write!(out, "rechecked from up to {tried} states");
             if asked != tried {
                 let _ = write!(out, ": {asked} asked for, clamped to {tried}");
@@ -351,8 +364,8 @@ fn claims(r: &Replayed) -> usize {
 /// * `block` - The block's start.
 /// * `seed` - The states' seed; [`ANSWER_SEED`](super::ANSWER_SEED) is the
 ///   answer check's.
-/// * `trials` - States to try the block from, clamped to
-///   `1..=`[`RECHECK_MAX`].
+/// * `trials` - States to try the block from, clamped by
+///   [`recheck_states`].
 ///
 /// # Returns
 ///
@@ -372,7 +385,7 @@ pub fn recheck_block(
 ) -> Option<BlockCheck> {
     let asked = Sampling::Recheck {
         block,
-        trials: trials.clamp(1, RECHECK_MAX),
+        trials: recheck_states(trials),
     };
     let mut record = match program.arch.isa()? {
         Isa::X86 { .. } => recheck_in::<arch::X86>(program, analysis, overlay, entry, seed, asked),
@@ -422,6 +435,82 @@ fn recheck_in<L: Replay>(
     r.records.into_iter().next()
 }
 
+/// The record a recheck met in a function's check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Prior {
+    /// Its grade.
+    pub grade: Grade,
+    /// The states it was tried from.
+    pub states: u32,
+    /// Whether an earlier recheck made it, not the check.
+    pub rechecked: bool,
+}
+
+/// What [`TextCheck::put_recheck`] did with a recheck's record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rechecked {
+    /// The check held no record of the block; the recheck's is its first.
+    Added,
+    /// The recheck's record took the place of this one.
+    Replaced(Prior),
+    /// This record stays: it is wrong from more states than the recheck
+    /// tried.
+    KeptWrong(Prior),
+}
+
+/// What a function's check says of one block: the one answer every reader
+/// of a block's grade and evidence takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockAnswer<'c> {
+    /// No check ran: the function does not decompile or the image has no
+    /// emulator.
+    NoCheck(u64),
+    /// The check ran and holds no record of the block.
+    NoRecord(u64),
+    /// The block's record.
+    Record(&'c BlockCheck),
+}
+
+impl<'c> BlockAnswer<'c> {
+    /// Returns what `check` says of the block at `start`.
+    ///
+    /// # Arguments
+    ///
+    /// * `check` - The function's check, `None` when none ran.
+    /// * `start` - The block's start.
+    #[must_use]
+    pub fn of(check: Option<&'c TextCheck>, start: u64) -> Self {
+        match check {
+            None => Self::NoCheck(start),
+            Some(c) => c.record(start).map_or(Self::NoRecord(start), Self::Record),
+        }
+    }
+
+    /// Returns the block's grade: its record's, unchecked without one.
+    #[must_use]
+    pub fn grade(&self) -> Grade {
+        match self {
+            Self::NoCheck(_) | Self::NoRecord(_) => Grade::Unchecked,
+            Self::Record(r) => r.grade,
+        }
+    }
+
+    /// Returns the evidence behind the grade, as plain lines a person
+    /// reads: the record's ([`BlockCheck::spell`]), else why there is none.
+    #[must_use]
+    pub fn spell(&self) -> String {
+        match self {
+            Self::NoCheck(start) => format!(
+                "block {start:#x}: unchecked: no check ran: the function does not decompile or the image has no emulator"
+            ),
+            Self::NoRecord(start) => {
+                format!("block {start:#x}: unchecked: the check holds no record of it")
+            }
+            Self::Record(r) => r.spell(),
+        }
+    }
+}
+
 /// What the check of one function's answer found: the header line the
 /// `decompile` tool prints.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -453,6 +542,55 @@ impl TextCheck {
             blocks: r.records,
             disagree,
         }
+    }
+
+    /// Returns the record of the block starting at `start`, `None` when the
+    /// check holds none.
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - The block's start.
+    #[must_use]
+    pub fn record(&self, start: u64) -> Option<&BlockCheck> {
+        let ix = self.blocks.binary_search_by_key(&start, |b| b.start).ok()?;
+        self.blocks.get(ix)
+    }
+
+    /// Puts a recheck's record of a block in place of the one the check or
+    /// an earlier recheck holds, unless that one is wrong from more states
+    /// than the recheck tried: a recheck from fewer states never clears a
+    /// wrong found from more.
+    ///
+    /// # Arguments
+    ///
+    /// * `record` - What [`recheck_block`] gave.
+    ///
+    /// # Returns
+    ///
+    /// What became of the record and what it took the place of.
+    pub fn put_recheck(&mut self, record: BlockCheck) -> Rechecked {
+        let at = self.blocks.binary_search_by_key(&record.start, |b| b.start);
+        let Ok(ix) = at else {
+            let ix = at.unwrap_or_else(|ix| ix);
+            self.blocks.insert(ix, record);
+            return Rechecked::Added;
+        };
+        let Some(prior) = self.blocks.get_mut(ix) else {
+            return Rechecked::Added;
+        };
+        let was = Prior {
+            grade: prior.grade,
+            states: prior.states,
+            rechecked: prior.asked.is_some(),
+        };
+        if prior.grade == Grade::Wrong
+            && record.grade != Grade::Wrong
+            && record.states < prior.states
+        {
+            return Rechecked::KeptWrong(was);
+        }
+        *prior = record;
+        Rechecked::Replaced(was)
     }
 
     /// Returns how many blocks have a grade.
