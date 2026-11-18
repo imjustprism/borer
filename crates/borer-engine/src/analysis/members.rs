@@ -165,7 +165,9 @@ pub(crate) fn is_source_path(text: &str) -> bool {
 /// A condition is each literal it references within [`ASSERT_CALL_SPAN`]
 /// bytes of both a reference to a source path ([`is_source_path`]) and one
 /// to a function signature, the `(expression, file, line, signature)` call
-/// GCC's, Clang's and most engines' asserts make.
+/// GCC's, Clang's and most engines' asserts make. Only a condition's text
+/// is kept: every other reference is read for its role alone, in the
+/// order [`Analysis::refs_from`] gives, by site.
 ///
 /// # Arguments
 ///
@@ -182,29 +184,31 @@ pub(crate) fn assert_conditions(
     analysis: &Analysis,
     entry: u64,
 ) -> BTreeMap<u64, String> {
-    #[derive(PartialEq)]
+    #[derive(Clone, Copy, PartialEq)]
     enum Role {
         Path,
         Signature,
+        Condition,
         Other,
     }
-    let mut lits: Vec<(u64, u64, Role, String)> = analysis
+    let lits: Vec<(u64, u64, Role)> = analysis
         .refs_from(entry)
         .into_iter()
         .filter(|(t, _)| program.section_at(*t).is_some_and(|s| !s.executable))
         .filter_map(|(t, site)| {
-            let (_, text) = crate::strings::cstr_at(program, t, 1, SIGNATURE_CAP)?;
+            let (len, text) = crate::strings::cstr_at(program, t, 1, SIGNATURE_CAP)?;
             let role = if is_source_path(&text) {
                 Role::Path
             } else if naming::is_signature(&text) {
                 Role::Signature
+            } else if len <= MEMBER_STRING_CAP {
+                Role::Condition
             } else {
                 Role::Other
             };
-            Some((site.va, t, role, text))
+            Some((site.va, t, role))
         })
         .collect();
-    lits.sort_by_key(|l| l.0);
     let near = |va: u64, role: Role| {
         let from = lits.partition_point(|l| l.0 < va.saturating_sub(ASSERT_CALL_SPAN));
         lits.iter()
@@ -213,9 +217,13 @@ pub(crate) fn assert_conditions(
             .any(|l| l.2 == role)
     };
     lits.iter()
-        .filter(|l| l.2 == Role::Other && l.3.len() <= MEMBER_STRING_CAP)
-        .filter(|l| near(l.0, Role::Path) && near(l.0, Role::Signature))
-        .map(|l| (l.1, l.3.clone()))
+        .filter(|l| l.2 == Role::Condition && near(l.0, Role::Path) && near(l.0, Role::Signature))
+        .filter_map(|l| {
+            Some((
+                l.1,
+                crate::strings::cstr_at(program, l.1, 1, MEMBER_STRING_CAP)?.1,
+            ))
+        })
         .collect()
 }
 

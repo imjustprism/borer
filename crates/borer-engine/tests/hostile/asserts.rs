@@ -1,12 +1,12 @@
 //! Assert-shaped references in bulk: the assertion index reads them in
-//! time linear in the references.
+//! time linear in the references and in heap within the file-size bar.
 
-use borer_engine::analysis::render::asserted_fields_tsv;
+use borer_engine::analysis::render::{asserted_fields_tsv, source_tree_tsv};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::num::{from_usize, lo32};
 use borer_engine::program::{Arch, Program, Section};
 
-use super::serial;
+use super::{LOAD_HEAP_PER_BYTE, measured, serial};
 
 /// Where `.text` starts, and the function there.
 const TEXT: u64 = 0x1000;
@@ -112,5 +112,38 @@ fn many_assert_sites_in_one_function_read_in_linear_time() {
         long <= short * 16 + std::time::Duration::from_millis(100),
         "{} sites took {long:?}, {SITES} took {short:?}",
         8 * SITES
+    );
+}
+
+/// The assertion index holds no text for the references that are no
+/// assert's condition, within the file-size heap bar.
+///
+/// One function references a 1 MB run of printable bytes at a hundred
+/// thousand places, beside one real assert: every reference's text, up to
+/// a kilobyte each, was read and kept before the shape was checked.
+#[test]
+fn references_into_a_long_run_hold_no_text() {
+    /// References into the run.
+    const REFS: usize = 100_000;
+    let _serial = serial();
+    let mut rdata = CITED.to_vec();
+    let cond = rdata.len();
+    rdata.extend_from_slice(b"!m_x\0");
+    let run = rdata.len();
+    rdata.resize(run + (1 << 20), b'+');
+    rdata.push(0);
+    let mut targets = vec![cond, 0, 10];
+    targets.extend((0..REFS).map(|k| run + 8 * k));
+    let p = referencing(&rdata, &targets);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    source_tree_tsv(&p, &a, "");
+    let (text, extra) = measured(|| asserted_fields_tsv(&p, &a, &o, "zzz"));
+    assert!(text.starts_with("# 0 of 0 asserted field names"), "{text}");
+    let size = p.bytes.len();
+    println!("assert index: {size} byte file, {extra} bytes of heap");
+    assert!(
+        extra <= LOAD_HEAP_PER_BYTE * size,
+        "a {size} byte file took {extra} bytes of heap to index its asserts"
     );
 }
