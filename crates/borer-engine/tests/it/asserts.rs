@@ -5,10 +5,13 @@
 //! a long `__PRETTY_FUNCTION__` read whole in parts, and template
 //! signatures shown whole without naming anything.
 //!
-//! The image is a stripped build with assertions on, the shape GitHub issue
-//! 24's binary has: every method guards one member and reports a failure
-//! as `assert("<expression>", "<file>", <line>, "<__PRETTY_FUNCTION__>")`,
-//! the signature literal naming the method, and nothing else names it.
+//! Each image is a stripped build with assertions on: every method guards
+//! one field and reports a failure as `assert("<expression>", "<file>",
+//! <line>, "<__PRETTY_FUNCTION__>")`, the signature literal naming the
+//! method, and nothing else names it. The `Widget` image spells its
+//! members `this->m_name`; the `Registry` image spells them bare
+//! (`!m_stop`, `m_replicas.size()`), the shape GitHub issue 24's GCC
+//! build has.
 
 #![expect(
     clippy::missing_panics_doc,
@@ -590,4 +593,165 @@ fn a_libstdcxx_assert_is_not_folded_on_its_file() {
     let outline = skeleton(&text);
     assert!(!outline.contains("assert("), "{outline}");
     assert!(outline.contains("\"__n < this->size()\""), "{outline}");
+}
+
+/// `"!m_stop"`, a member spelled bare.
+const STOP: u64 = 0x2120;
+
+/// `"m_replicas.size()"`, a bare member reached into.
+const REPLICAS: u64 = 0x2140;
+
+/// `"index >= 0 && index < (int)m_replicas.size()"`: a parameter and a
+/// member, both spelled bare.
+const INDEX: u64 = 0x2160;
+
+/// `"m_entityComponents.size() == m_entityBitsets.size()"`, two bare
+/// members.
+const BOTH: u64 = 0x21a0;
+
+/// `"value < limit"`, asserted by a free function.
+const CLAMP: u64 = 0x21e0;
+
+/// Methods whose asserts spell members bare, as GitHub issue 24's GCC
+/// build does.
+///
+/// `Stop` and `Halt` guard `m_stop` at +0x20, `At` and `Get`
+/// guard +0x28 under a condition naming `index` and `m_replicas`. Last,
+/// `tools::Clamp` is a free function in a namespace, its one argument
+/// the one register it reads.
+const BARE: [(u64, Guard, u64, u64, &str); 7] = [
+    (
+        0x1100,
+        Guard::Field(0x20),
+        STOP,
+        0x2200,
+        "void Registry::Stop()",
+    ),
+    (
+        0x1140,
+        Guard::Field(0x20),
+        STOP,
+        0x2240,
+        "void Registry::Halt()",
+    ),
+    (
+        0x1180,
+        Guard::Field(0x28),
+        REPLICAS,
+        0x2280,
+        "void Registry::Count()",
+    ),
+    (
+        0x11c0,
+        Guard::Field(0x28),
+        INDEX,
+        0x22c0,
+        "void Registry::At()",
+    ),
+    (
+        0x1200,
+        Guard::Field(0x28),
+        INDEX,
+        0x2300,
+        "void Registry::Get()",
+    ),
+    (
+        0x1240,
+        Guard::Field(0x38),
+        BOTH,
+        0x2340,
+        "void Registry::Check()",
+    ),
+    (
+        0x1280,
+        Guard::Field(0x8),
+        CLAMP,
+        0x2380,
+        "void tools::Clamp(int)",
+    ),
+];
+
+/// Builds the image of [`BARE`] and their expressions.
+fn registry() -> Program {
+    image(
+        &BARE,
+        &[
+            (STOP, b"!m_stop\0"),
+            (REPLICAS, b"m_replicas.size()\0"),
+            (INDEX, b"index >= 0 && index < (int)m_replicas.size()\0"),
+            (
+                BOTH,
+                b"m_entityComponents.size() == m_entityBitsets.size()\0",
+            ),
+            (CLAMP, b"value < limit\0"),
+        ],
+    )
+}
+
+/// Members an assert spells bare are listed and paired like those
+/// spelled after `this->`, and the answer says a bare name may be a local.
+///
+/// `!m_stop` over +0x20 in two methods is strong. `m_replicas.size()`
+/// reaches into its member, so +0x28 may be a part of it: listed, not
+/// paired. `index >= 0 && index < (int)m_replicas.size()` names two
+/// candidates over one field, which says nothing of which is where, and
+/// `index` is a parameter: listed as spelled, paired with nothing, and
+/// not offered as a member with no offset either, since nothing shows a
+/// bare name is a member. The decompiler names fields from `this->` alone.
+#[test]
+fn bare_members_are_listed_and_paired() {
+    let p = registry();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let all = asserted_fields_tsv(&p, &a, &o, "");
+    for row in [
+        "2\tm_stop\tRegistry",
+        "3\tm_replicas\tRegistry",
+        "2\tindex\tRegistry",
+        "1\tm_entityComponents\tRegistry",
+        "strong\tRegistry\tm_stop\t0x20\t0x1100, 0x1140",
+        "# state Registry's strong pairs: set_type(name=\"Registry\", fields=[\"0x20:m_stop\"])",
+    ] {
+        assert!(all.lines().any(|l| l == row), "{row}:\n{all}");
+    }
+    let note = "a local or a parameter is spelled the same way";
+    assert!(
+        all.lines().next().is_some_and(|l| l.contains(note)),
+        "{all}"
+    );
+    assert!(
+        all.lines()
+            .any(|l| l.starts_with("# 1 pairings") && l.contains(note)),
+        "{all}"
+    );
+    for member in [
+        "index",
+        "m_replicas",
+        "m_entityComponents",
+        "m_entityBitsets",
+    ] {
+        let row = format!("\tRegistry\t{member}\t");
+        assert!(!all.contains(&row), "{member} was paired:\n{all}");
+    }
+    assert!(field_names(&p, &a, &o, "Registry").is_empty());
+}
+
+/// A method whose only assert spells its member bare points at the
+/// members its class's asserts name; a free function's bare assert does
+/// not read its namespace as a class.
+#[test]
+fn a_bare_assert_points_at_the_asserts() {
+    let p = registry();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let step = "borer://asserts/Registry (the members its class's asserts name), borer://sources/widget.cpp (the source file they cite)";
+    for entry in [0x1100, 0x11c0] {
+        let header = answer_header(&p, &a, &o, entry, None).unwrap_or_default();
+        assert!(header.contains(&format!("// next: {step}")), "{header}");
+    }
+    let free = next_steps(&p, &a, &o, 0x1280);
+    assert!(
+        free.iter().all(|s| !s.contains("borer://asserts")),
+        "{free:?}"
+    );
 }
