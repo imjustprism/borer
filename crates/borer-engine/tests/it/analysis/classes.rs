@@ -1417,6 +1417,22 @@ fn a_repeated_stub_is_no_shared_slot() {
     assert!(family_of(&a, &o, "Z").is_none(), "a stub links nothing");
 }
 
+/// A function named as the pure-call handler links no tables, even held
+/// once at one slot by each: `X` and `Y` share `0x100` and a `_purecall`,
+/// one anchor, so they are no family.
+#[test]
+fn a_pure_call_handler_links_no_family() {
+    use borer_engine::analysis::vtables::family_of;
+    let (a, o) = family_fixture(
+        &[
+            ("X", 0x8000, &[0x100, 0x900, 0x300]),
+            ("Y", 0x8100, &[0x100, 0x900, 0x310]),
+        ],
+        &[(0x900, "_purecall")],
+    );
+    assert!(family_of(&a, &o, "Y").is_none(), "one anchor links nothing");
+}
+
 /// A stub each sibling holds once, at the same slot, is no shared slot
 /// once the program shows it is a stub, so the sibling's names stop at the
 /// slots they truly share.

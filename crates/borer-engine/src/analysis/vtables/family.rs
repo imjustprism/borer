@@ -50,7 +50,8 @@ struct Families {
     /// The linking stopped at [`PAIR_WORK_MAX`], so a family may miss
     /// members.
     capped: bool,
-    /// The functions no table holds as an anchor ([`slot_stubs`]).
+    /// The functions no table holds as an anchor: [`slot_stubs`] and the
+    /// ones named as the pure-call handler ([`reports_pure_call`]).
     stubs: BTreeSet<u64>,
 }
 
@@ -153,10 +154,21 @@ fn anchors(slots: &[u64], stubs: &BTreeSet<u64>) -> BTreeSet<u64> {
 ///
 /// # Arguments
 ///
-/// * `classes` - Classes with their tables.
-fn families(classes: &BTreeMap<String, ClassInfo>) -> Families {
+/// * `analysis` - Classes with their tables, and function names.
+/// * `overlay` - User names, which may name the pure-call handler.
+fn families(analysis: &Analysis, overlay: &Overlay) -> Families {
+    let classes = &analysis.classes.by_name;
     let names: Vec<&String> = classes.keys().collect();
-    let stubs = slot_stubs(classes, BUCKET_MAX);
+    let mut stubs = slot_stubs(classes, BUCKET_MAX);
+    let slots: BTreeSet<u64> = classes
+        .values()
+        .flat_map(|c| c.slots.iter().copied())
+        .collect();
+    stubs.extend(
+        slots
+            .into_iter()
+            .filter(|&f| f != 0 && reports_pure_call(&name_of(analysis, overlay, f))),
+    );
     let mut held: Vec<(usize, usize, u64, usize)> = Vec::new();
     for (at, info) in classes.values().enumerate() {
         if info.vtable.is_none() {
@@ -302,9 +314,12 @@ fn spellers(by: &[&str]) -> Spellers {
 /// * `analysis`, `overlay`, `class` - As for [`family_of`].
 fn build_family(analysis: &Analysis, overlay: &Overlay, class: &str) -> Option<Family> {
     let classes = &analysis.classes.by_name;
-    let all = analysis
-        .derived
-        .get_or_build("vtable_families", (), || families(classes));
+    let all =
+        analysis
+            .derived
+            .get_or_build_named("vtable_families", overlay.fingerprint(), (), || {
+                families(analysis, overlay)
+            });
     let group = all.groups.get(*all.of.get(class)?)?;
     let own = classes.get(class)?;
     let shapes = analysis.derived.get_or_build("vtable_slot_shapes", (), || {
@@ -320,8 +335,7 @@ fn build_family(analysis: &Analysis, overlay: &Overlay, class: &str) -> Option<F
     let mut votes: BTreeMap<usize, BTreeMap<String, Vec<&str>>> = BTreeMap::new();
     let mut members = Vec::new();
     let mut member_count = 0usize;
-    let mut own_anchors = anchors(&own.slots, &all.stubs);
-    own_anchors.retain(|&f| !reports_pure_call(&name_of(analysis, overlay, f)));
+    let own_anchors = anchors(&own.slots, &all.stubs);
     for m in group.iter().filter(|m| *m != class) {
         let Some(info) = classes.get(m) else {
             continue;
