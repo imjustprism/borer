@@ -755,6 +755,7 @@ fn find_bytes_at_the_end_of_a_short_file_extent() {
         file_off: FileOff(0),
         file_size: 0x20,
         lost: 0,
+        thread_local: false,
         readable: true,
         writable: false,
         executable: true,

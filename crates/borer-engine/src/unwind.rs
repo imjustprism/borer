@@ -1022,6 +1022,7 @@ mod tests {
             file_off: FileOff(off),
             file_size: 0x1000,
             lost: 0,
+            thread_local: false,
             readable: true,
             writable: false,
             executable,

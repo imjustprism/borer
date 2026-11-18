@@ -919,6 +919,17 @@ fn a_thread_local_bss_takes_no_addresses() {
     assert!(bss.contains("in .bss"), "{bss}");
     let tls = p.no_bytes_at(BASE + 0x1000);
     assert!(tls.contains("not mapped"), "{tls}");
+    let summary = p.summary();
+    assert!(
+        summary
+            .lines()
+            .any(|l| l.trim_start().starts_with(".tbss") && l.contains(" 0x1000 ")),
+        "{summary}"
+    );
+    for va in (BASE + 0x1000..BASE + 0x2000).step_by(0x80) {
+        let found = p.declared_at(va).map(|s| s.name.as_str());
+        assert_ne!(found, Some(".tbss"), "{va:#x}");
+    }
 }
 
 /// A section name that is not UTF-8 no longer refuses the file.

@@ -501,6 +501,7 @@ pub(crate) fn program(path: std::path::PathBuf, bytes: Vec<u8>) -> Option<Progra
             file_off: crate::program::FileOff(r.at),
             file_size: held,
             lost: r.size.min(room) - held,
+            thread_local: false,
             readable: true,
             writable: write,
             executable: exec,

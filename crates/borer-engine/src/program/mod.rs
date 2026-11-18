@@ -101,6 +101,10 @@ pub struct Section {
     /// a truncated file: the `lost` addresses after `file_size` are
     /// missing, not zero-filled; `0` when the file holds the whole extent.
     pub lost: u64,
+    /// The section is thread-local storage (ELF `SHF_TLS`): a template each
+    /// thread's block is made from. One the file holds no bytes for
+    /// (`.tbss`) takes no image addresses, so address lookups skip it.
+    pub thread_local: bool,
     /// Section is readable when mapped.
     pub readable: bool,
     /// Section is writable when mapped.
@@ -145,6 +149,7 @@ impl Section {
             readable: true,
             writable,
             executable,
+            thread_local: false,
         }
     }
 
@@ -400,6 +405,7 @@ fn load_segments(headers: &[goblin::elf::ProgramHeader]) -> Vec<Section> {
             file_off: FileOff(ph.p_offset),
             file_size: ph.p_filesz,
             lost: 0,
+            thread_local: false,
             readable: ph.p_flags & PF.2 != 0,
             writable: ph.p_flags & PF.1 != 0,
             executable: ph.p_flags & PF.0 != 0,
@@ -407,24 +413,30 @@ fn load_segments(headers: &[goblin::elf::ProgramHeader]) -> Vec<Section> {
         .collect()
 }
 
-/// Returns the bytes an ELF section takes in the image: its size, but none
-/// for thread-local storage the file holds no bytes for (`.tbss`).
-///
-/// A `.tbss` is a template each thread's block is made from; its address
-/// range overlaps the sections after it (glibc lays `.init_array` and
-/// `.dynamic` there), so it takes none of their addresses.
+/// Returns an ELF section header as a section, mapped where it states.
 ///
 /// # Arguments
 ///
-/// * `sh` - The section header.
-fn image_size(sh: &goblin::elf::SectionHeader) -> u64 {
-    /// `SHF_TLS`.
-    const TLS: u64 = 0x400;
-    let nobits = sh.sh_type == goblin::elf::section_header::SHT_NOBITS;
-    if nobits && sh.sh_flags & TLS != 0 {
-        0
-    } else {
-        sh.sh_size
+/// * `name` - The section's name.
+/// * `sh` - Its header.
+fn elf_section(name: String, sh: &goblin::elf::SectionHeader) -> Section {
+    use goblin::elf::section_header::{SHF_EXECINSTR, SHF_TLS, SHF_WRITE, SHT_NOBITS};
+    let flag = |f: u32| sh.sh_flags & u64::from(f) != 0;
+    Section {
+        name,
+        va: Va(sh.sh_addr),
+        vsize: sh.sh_size,
+        file_off: FileOff(sh.sh_offset),
+        file_size: if sh.sh_type == SHT_NOBITS {
+            0
+        } else {
+            sh.sh_size
+        },
+        lost: 0,
+        readable: true,
+        writable: flag(SHF_WRITE),
+        executable: flag(SHF_EXECINSTR),
+        thread_local: flag(SHF_TLS),
     }
 }
 
@@ -1096,6 +1108,7 @@ impl Program {
                             file_off: FileOff(rawoff),
                             file_size: if cut { file_len - rawoff } else { rawsz },
                             lost: if cut { rawoff + rawsz - file_len } else { 0 },
+                            thread_local: false,
                             readable: s.characteristics & READ != 0,
                             writable: s.characteristics & WRITE != 0,
                             executable: s.characteristics & EXEC != 0,
@@ -1114,6 +1127,7 @@ impl Program {
                         file_off: FileOff(0),
                         file_size: file_len,
                         lost: 0,
+                        thread_local: false,
                         readable: true,
                         writable: true,
                         executable: true,
@@ -1226,10 +1240,6 @@ impl Program {
                     }
                 }
 
-                /// `SHF_WRITE`.
-                const WRITE: u64 = 0x1;
-                /// `SHF_EXECINSTR`.
-                const EXEC: u64 = 0x4;
                 for sh in &elf.section_headers {
                     let raw = elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("");
                     let nobits = sh.sh_type == goblin::elf::section_header::SHT_NOBITS;
@@ -1242,6 +1252,7 @@ impl Program {
                                 file_off: FileOff(sh.sh_offset),
                                 file_size: sh.sh_size,
                                 lost: 0,
+                                thread_local: false,
                                 readable: false,
                                 writable: false,
                                 executable: false,
@@ -1249,17 +1260,7 @@ impl Program {
                         }
                         continue;
                     }
-                    sections.push(Section {
-                        name: names.take(raw),
-                        va: Va(sh.sh_addr),
-                        vsize: image_size(sh),
-                        file_off: FileOff(sh.sh_offset),
-                        file_size: if nobits { 0 } else { sh.sh_size },
-                        lost: 0,
-                        readable: true,
-                        writable: sh.sh_flags & WRITE != 0,
-                        executable: sh.sh_flags & EXEC != 0,
-                    });
+                    sections.push(elf_section(names.take(raw), sh));
                 }
                 if elf.section_headers.is_empty() {
                     sections.extend(load_segments(&elf.program_headers));
@@ -1675,6 +1676,7 @@ impl Program {
         let mut spans: Vec<(u64, u64, (bool, usize))> = sections
             .iter()
             .enumerate()
+            .filter(|(_, s)| !(s.thread_local && s.file_size == 0))
             .map(|(index, s)| {
                 (
                     s.va.0,

@@ -152,6 +152,7 @@ fn program64_with_globals(
         file_off: FileOff(if zero_filled { 0 } else { 0x1000 }),
         file_size: if zero_filled { 0 } else { 0x1000 },
         lost: 0,
+        thread_local: false,
         readable: true,
         writable: true,
         executable: false,
