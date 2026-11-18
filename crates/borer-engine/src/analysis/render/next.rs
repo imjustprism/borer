@@ -475,8 +475,9 @@ fn layout_step(p: &Program, f: &Function, bits: u32, text: &str, params: usize) 
 /// The rule is tried last, so a function another rule already points
 /// somewhere keeps those steps. The class is offered only when the
 /// function's asserts spell a member of `this`, or spell one bare in a
-/// function the text gives a `this` (`Registry *this`), so a free
-/// function's namespace never reads as a class; it filters by its last component,
+/// function the text gives a `this` (`Registry *this`), which a local or a
+/// parameter spells the same way and the step says so; a free function's
+/// namespace never reads as a class. It filters by its last component,
 /// which is a substring of the qualified name, and a template's is left
 /// out, since its brackets are no filter. The file is offered only when
 /// the asserts cited it: a `// source:` line from debug information
@@ -506,12 +507,18 @@ fn assert_step(p: &Program, a: &Analysis, o: &Overlay, f: &Function, text: &str)
     use crate::analysis::members::Receiver;
     let method = text.contains(" *this)") || text.contains(" *this,");
     let asserts = |r| crate::analysis::members::asserts_a_member(p, a, f.entry, r);
-    let class = (asserts(Receiver::This) || (method && asserts(Receiver::Bare)))
-        .then(|| crate::analysis::classes::class_of(&name))
-        .flatten()
+    let what = if asserts(Receiver::This) {
+        Some("the members its class's asserts name")
+    } else {
+        (method && asserts(Receiver::Bare))
+            .then_some("the names its class's asserts spell bare: members, locals or parameters")
+    };
+    let class = what
+        .and_then(|_| crate::analysis::classes::class_of(&name))
         .and_then(|c| c.rsplit("::").next())
         .filter(|c| !c.is_empty() && c.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_'))
-        .map(|c| format!("borer://asserts/{c} (the members its class's asserts name)"));
+        .zip(what)
+        .map(|(c, what)| format!("borer://asserts/{c} ({what})"));
     match (class, file) {
         (Some(class), Some(file)) => Some(format!("{class}, {file}")),
         (class, file) => class.or(file),

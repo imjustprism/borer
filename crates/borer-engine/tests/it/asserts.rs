@@ -446,6 +446,50 @@ fn asserted_members_pair_with_the_offsets_their_guards_read() {
     );
 }
 
+/// The `Widget` answer, every member spelled after `this->`, as it was
+/// before bare names were read.
+const WIDGET_ANSWER: [&str; 25] = [
+    "# 11 of 11 asserted field names\n",
+    "# functions\tfield\tclasses\n",
+    "3\tm_key\tWidget\n",
+    "2\tIsReady\tWidget\n",
+    "2\tm_depth\tWidget\n",
+    "2\tm_id\tWidget\n",
+    "2\tm_name\tWidget\n",
+    "2\tm_rect\tWidget\n",
+    "2\tm_size\tWidget\n",
+    "2\tm_val\tWidget\n",
+    "1\tm_far\tWidget\n",
+    "1\tm_flags\tWidget\n",
+    "1\tm_limit\tWidget\n",
+    "# 9 pairings of asserted members with field offsets, from the code around each assert: 1 strong (two or more functions' single-offset sites agree), 4 contested (sites disagree; not resolved), 4 weak (fewer than two functions, or not verified against the rest; offset - when no site reads one field)\n",
+    "# tier\tclass\tmember\toffset\tsites (function entries, xN for N sites)\n",
+    "strong\tWidget\tm_name\t0x270\t0x1100, 0x1140\n",
+    "contested\tWidget\tm_id\t0x40\t0x1280, 0x12c0; 0x40 also asserted as m_key\n",
+    "contested\tWidget\tm_key\t0x40\t0x1300; 0x40 also asserted as m_id\n",
+    "contested\tWidget\tm_size\t0x10\t0x1180\n",
+    "contested\tWidget\tm_size\t0x18\t0x11c0\n",
+    "weak\tWidget\tm_depth\t-\t0x13c0, 0x1400\n",
+    "weak\tWidget\tm_flags\t-\t0x1200\n",
+    "weak\tWidget\tm_limit\t-\t0x1200\n",
+    "weak\tWidget\tm_val\t-\t0x14c0, 0x1500\n",
+    "# state Widget's strong pairs: set_type(name=\"Widget\", fields=[\"0x270:m_name\"])\n",
+];
+
+/// Reading bare names leaves an answer of `this->` spellings as it was,
+/// byte for byte.
+///
+/// `count > 0`, asserted under a template signature that names no
+/// method, once listed `1 count` as a name, and both headers carried a
+/// note on bare names no row needed.
+#[test]
+fn a_this_answer_is_as_it_was() {
+    let p = widget();
+    let a = Analysis::compute(&p);
+    let all = asserted_fields_tsv(&p, &a, &Overlay::default(), "");
+    assert_eq!(all, WIDGET_ANSWER.concat());
+}
+
 /// A member asserted at two offsets names neither of the class's fields,
 /// while a member asserted at one offset keeps its name.
 ///
@@ -814,15 +858,16 @@ fn a_bare_local_or_parameter_pairs_strong_nowhere() {
     assert!(field_names(&p, &a, &o, "Registry").is_empty());
 }
 
-/// A method whose only assert spells its member bare points at the
-/// members its class's asserts name; a free function's bare assert does
-/// not read its namespace as a class.
+/// A method whose only assert spells its member bare points at its
+/// class's bare names, saying they may be no members.
+///
+/// A free function's bare assert does not read its namespace as a class.
 #[test]
 fn a_bare_assert_points_at_the_asserts() {
     let p = registry();
     let a = Analysis::compute(&p);
     let o = Overlay::default();
-    let step = "borer://asserts/Registry (the members its class's asserts name), borer://sources/widget.cpp (the source file they cite)";
+    let step = "borer://asserts/Registry (the names its class's asserts spell bare: members, locals or parameters), borer://sources/widget.cpp (the source file they cite)";
     for entry in [0x1100, 0x11c0] {
         let header = answer_header(&p, &a, &o, entry, None).unwrap_or_default();
         assert!(header.contains(&format!("// next: {step}")), "{header}");
