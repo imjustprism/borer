@@ -1081,10 +1081,10 @@ const NAME_MAX: usize = 120;
 /// image takes at most a byte per signature byte over the same image
 /// holding prose.
 ///
-/// Spelling each binding into the class's arguments made names and heap
-/// grow with the uses times the binding, past both bounds (C-208). The
-/// read-only data is padded to a megabyte: two thousand functions take
-/// their own heap, signatures or not.
+/// It pins that naming never spells a binding into a name: doing so
+/// would grow names and heap with the uses times the binding, past both
+/// bounds (C-208). The read-only data is padded to a megabyte: two
+/// thousand functions take their own heap, signatures or not.
 #[test]
 fn bound_signatures_stay_within_the_name_and_heap_bars() {
     let _serial = serial();

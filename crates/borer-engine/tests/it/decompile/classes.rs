@@ -6,9 +6,10 @@ use super::*;
 /// own signature gives it, and shows the template's whole.
 ///
 /// `Lexer::Next` references `void Lexer::Next()` and the assert of the
-/// `std::vector<Token>::operator[]` it inlined. Read as a candidate, the
-/// template's signature was a second name only `Lexer::Next` references,
-/// and the method stayed `sub_` (C-208).
+/// `std::vector<Token>::operator[]` it inlined. It pins that a template's
+/// signature is no candidate name (as a second name only `Lexer::Next`
+/// references it would leave the method `sub_`) and that the text shows
+/// it whole, not cut at 120 characters (C-208).
 #[test]
 fn an_inlined_template_assert_leaves_its_method_named() {
     let code = [
