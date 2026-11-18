@@ -522,7 +522,7 @@ pub fn view(
             || {
                 let (text, lines) = answer_with_origins(program, analysis, overlay, entry)?;
                 view_of(program, analysis, overlay, entry, &text)
-                    .map(|v| Arc::new(v.with_origins(lines)))
+                    .map(|v| Arc::new(v.with_origins(entry, lines)))
             },
             |v| {
                 v.as_deref().map_or(0, |v| {

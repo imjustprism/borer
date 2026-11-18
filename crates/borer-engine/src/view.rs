@@ -12,13 +12,15 @@
 //! ([`crate::analysis::render::disasm_view`]) is written straight into a
 //! [`Sink`] alongside its text, and each of its instruction lines answers
 //! the address it shows ([`View::address`]). Each line of the decompile
-//! view answers the block it stands for ([`View::origin`]).
+//! view answers the block it stands for ([`View::origin`]), and each line
+//! of either view the block it was written from ([`View::block`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::ops::Range;
 use std::sync::Arc;
 
+use crate::analysis::Analysis;
 use crate::analysis::decompile::Origins;
 use crate::analysis::protos::VarKey;
 
@@ -158,6 +160,28 @@ pub struct Unlinked {
     pub ambiguous: usize,
 }
 
+/// A block a line was written from, with the function it was written as
+/// part of: a block two functions share is a block of each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LineBlock {
+    /// The entry of the function whose listing or text wrote the line.
+    pub function: u64,
+    /// The block's start address.
+    pub start: u64,
+}
+
+/// A run of lines written from one block: a block's instruction lines sit
+/// together, so a listing holds about one run per block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BlockRun {
+    /// Its first line.
+    from: u32,
+    /// One past its last line.
+    to: u32,
+    /// The block.
+    block: LineBlock,
+}
+
 /// One token: where it ends in its line, what it is, what it links to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Token {
@@ -215,9 +239,12 @@ pub struct View {
     /// Whether [`View::instr_vas`] runs in address order, which
     /// [`View::line_of`] then searches by.
     ordered: bool,
-    /// The block each line stands for, read by [`View::origin`]; `None` for
-    /// a view of no decompiled text.
-    origins: Option<Arc<Origins>>,
+    /// The runs of lines and the block each was written from, in line
+    /// order; empty for a view of no listing.
+    blocks: Box<[BlockRun]>,
+    /// The function the text is of and the block each line stands for,
+    /// read by [`View::origin`]; `None` for a view of no decompiled text.
+    origins: Option<(u64, Arc<Origins>)>,
 }
 
 /// The most uses of one referent [`View::uses`] returns.
@@ -588,18 +615,76 @@ impl View {
     /// line of a view of no decompiled text.
     #[must_use]
     pub fn origin(&self, i: usize) -> Option<u64> {
-        self.origins.as_deref().and_then(|o| o.line(i))
+        self.origins.as_ref().and_then(|(_, o)| o.line(i))
+    }
+
+    /// Returns the block a line was written from, with its function.
+    ///
+    /// A decompiled text's line is written from its origin ([`View::origin`])
+    /// as part of the text's function; a listing's instruction line from the
+    /// block the listing wrote it under, which for code two functions share
+    /// is the listed function's own block, never the other's.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The line, from 0.
+    ///
+    /// # Returns
+    ///
+    /// The block, `None` for a line written from no block: a header, a
+    /// label, a comment, a line no rule places, and past the last line.
+    #[must_use]
+    pub fn block(&self, i: usize) -> Option<LineBlock> {
+        if let Some((function, origins)) = &self.origins {
+            let start = origins.line(i)?;
+            return Some(LineBlock {
+                function: *function,
+                start,
+            });
+        }
+        let line = u32::try_from(i).ok()?;
+        let k = self.blocks.partition_point(|r| r.to <= line);
+        self.blocks
+            .get(k)
+            .filter(|r| r.from <= line)
+            .map(|r| r.block)
+    }
+
+    /// Returns the first line that stands for the instruction at an
+    /// address: the line showing it, else the first line written from a
+    /// block holding it, by the bounds of that line's own function's block.
+    ///
+    /// # Arguments
+    ///
+    /// * `a` - The analysis, for the blocks' bounds.
+    /// * `va` - The instruction's address.
+    ///
+    /// # Returns
+    ///
+    /// The line, from 0, or `None` when no line stands for it.
+    #[must_use]
+    pub fn line_for(&self, a: &Analysis, va: u64) -> Option<usize> {
+        self.line_of(va).or_else(|| {
+            (0..self.lines()).find(|&i| {
+                self.block(i).is_some_and(|b| {
+                    a.function(b.function)
+                        .and_then(|f| f.blocks.iter().find(|x| x.start == b.start))
+                        .is_some_and(|x| x.start <= va && va < x.end)
+                })
+            })
+        })
     }
 
     /// Returns the view with the block each of its lines stands for.
     ///
     /// # Arguments
     ///
+    /// * `function` - The entry of the function the text is of.
     /// * `origins` - One origin per line of the view's text
     ///   ([`crate::analysis::decompile::answer_with_origins`]).
     #[must_use]
-    pub(crate) fn with_origins(mut self, origins: Arc<Origins>) -> Self {
-        self.origins = Some(origins);
+    pub(crate) fn with_origins(mut self, function: u64, origins: Arc<Origins>) -> Self {
+        self.origins = Some((function, origins));
         self
     }
 
@@ -630,7 +715,8 @@ impl View {
             + size_of_val(&*self.defs)
             + size_of_val(&*self.instr_lines)
             + size_of_val(&*self.instr_vas)
-            + self.origins.as_deref().map_or(0, Origins::bytes)
+            + size_of_val(&*self.blocks)
+            + self.origins.as_ref().map_or(0, |(_, o)| o.bytes())
             + names
     }
 
@@ -672,6 +758,14 @@ pub(crate) trait Sink {
     /// * `va` - The instruction's address.
     fn at(&mut self, _va: u64) {}
 
+    /// Marks the open line as written from `block`, when the sink records
+    /// blocks.
+    ///
+    /// # Arguments
+    ///
+    /// * `block` - The block, with the function whose listing writes it.
+    fn block(&mut self, _block: LineBlock) {}
+
     /// Ends the open line and starts the next.
     fn end_line(&mut self);
 }
@@ -707,6 +801,8 @@ pub(crate) struct Builder {
     instr_lines: Vec<u32>,
     /// The address of the instruction each of those lines shows.
     instr_vas: Vec<u64>,
+    /// The runs of lines marked as written from one block, in line order.
+    blocks: Vec<BlockRun>,
     /// Whether the text outgrew the 32-bit offsets, which refuses the view.
     over: bool,
 }
@@ -728,6 +824,23 @@ impl Sink for Builder {
             }
             Ok(_) => {}
             Err(_) => self.over = true,
+        }
+    }
+
+    fn block(&mut self, block: LineBlock) {
+        let Ok(line) = u32::try_from(self.starts.len()) else {
+            self.over = true;
+            return;
+        };
+        let to = line.saturating_add(1);
+        match self.blocks.last_mut() {
+            Some(r) if r.to > line => {}
+            Some(r) if r.to == line && r.block == block => r.to = to,
+            _ => self.blocks.push(BlockRun {
+                from: line,
+                to,
+                block,
+            }),
         }
     }
 
@@ -858,6 +971,7 @@ impl Builder {
             ordered: self.instr_vas.is_sorted(),
             instr_lines: self.instr_lines.into_boxed_slice(),
             instr_vas: self.instr_vas.into_boxed_slice(),
+            blocks: self.blocks.into_boxed_slice(),
             origins: None,
         })
     }

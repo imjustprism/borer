@@ -71,6 +71,7 @@ mod idioms;
 mod iocs;
 mod layout;
 mod libsig;
+mod line_blocks;
 mod linear;
 mod lsda;
 mod macho;

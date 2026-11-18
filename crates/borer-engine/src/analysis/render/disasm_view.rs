@@ -9,7 +9,7 @@ use crate::analysis::syscalls::{self, SyscallSite};
 use crate::isa::{Isa, a32, a64, rv};
 use crate::num::from_usize;
 use crate::program::{Feature, Program, SymbolKind};
-use crate::view::{Builder, Kind, Ref, Sink, Unlinked, View};
+use crate::view::{Builder, Kind, LineBlock, Ref, Sink, Unlinked, View};
 
 /// Twenty-five spaces, the widest pad after an empty bytes column.
 const BYTE_PAD: &str = "                         ";
@@ -304,16 +304,20 @@ fn disasm_into<S: Sink>(
         }
         let room = each.map_or(budget, |n| n.min(budget).max(1));
         let mut reached = b.start;
+        let block = LineBlock {
+            function: f.entry,
+            start: b.start,
+        };
         let shown = match x86.as_mut() {
             Some((bits, fmt)) => disasm::decode_x86(code, b.start, *bits, room, |row| {
                 reached = row.va.saturating_add(from_usize(row.bytes.len()));
-                ctx.x86_row(fmt, &row, out);
+                ctx.x86_row(fmt, &row, block, out);
             }),
             None => {
                 let lines = disasm::disassemble_program(p, code, b.start, isa, room);
                 for l in &lines {
                     reached = l.va.saturating_add(from_usize(l.bytes.len()));
-                    ctx.isa_row(l, isa, out);
+                    ctx.isa_row(l, isa, block, out);
                 }
                 lines.len()
             }
@@ -365,14 +369,16 @@ impl RowCtx<'_> {
     ///
     /// * `fmt` - The formatter, kept across a listing's instructions.
     /// * `row` - The decoded instruction.
+    /// * `block` - The block the row is written from.
     /// * `out` - The destination sink.
     pub(super) fn x86_row<S: Sink>(
         &self,
         fmt: &mut disasm::X86Format,
         row: &disasm::X86Decoded<'_>,
+        block: LineBlock,
         out: &mut S,
     ) {
-        self.write_head(row.va, row.bytes, out);
+        self.write_head(row.va, row.bytes, block, out);
         let targets = fmt.write(row, out, |va| self.analysis.function(va).is_some());
         self.write_tail(row.va, targets.branch, targets.memory, out);
     }
@@ -385,29 +391,38 @@ impl RowCtx<'_> {
     ///
     /// * `l` - The decoded instruction.
     /// * `isa` - The instruction set its text is written in.
+    /// * `block` - The block the row is written from.
     /// * `out` - The destination sink.
-    pub(super) fn isa_row<S: Sink>(&self, l: &disasm::DisasmLine, isa: Isa, out: &mut S) {
-        self.write_head(l.va, &l.bytes, out);
+    pub(super) fn isa_row<S: Sink>(
+        &self,
+        l: &disasm::DisasmLine,
+        isa: Isa,
+        block: LineBlock,
+        out: &mut S,
+    ) {
+        self.write_head(l.va, &l.bytes, block, out);
         write_isa_line(&l.text, l.target, isa, self.analysis, out);
         self.write_tail(l.va, l.target, None, out);
     }
 
     /// Writes any inline user label above `va`, then marks the line as
-    /// showing `va` and writes the address token and the optional raw-bytes
-    /// column.
+    /// showing `va`, written from `block`, and writes the address token and
+    /// the optional raw-bytes column.
     ///
     /// # Arguments
     ///
     /// * `va` - The instruction's address.
     /// * `raw` - The instruction's encoded bytes.
+    /// * `block` - The block the line is written from.
     /// * `out` - The destination sink.
-    fn write_head<S: Sink>(&self, va: u64, raw: &[u8], out: &mut S) {
+    fn write_head<S: Sink>(&self, va: u64, raw: &[u8], block: LineBlock, out: &mut S) {
         if let Some(n) = self.overlay.names.get(&va) {
             out.put("            ", Kind::Space, None);
             out.put(&format!("; = {n} ="), Kind::Comment, None);
             out.end_line();
         }
         out.at(va);
+        out.block(block);
         let mut buf = [0u8; 18];
         out.put(
             hex_prefixed(b"0x", va, &mut buf),

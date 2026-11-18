@@ -41,7 +41,7 @@ use crate::program::{Feature, Program, SymbolKind};
 use crate::strings::walk::for_each_walked;
 use crate::strings::{DISPLAY_MAX, Encoding, RawStringSpan, escape_text};
 use crate::text::plural;
-use crate::view::{Builder, Kind, Ref, Sink, Unlinked, View};
+use crate::view::{Builder, Kind, LineBlock, Ref, Sink, Unlinked, View};
 
 /// Most rows one page holds: a request for more is cut to it.
 pub const LINES_MAX: usize = 4096;
@@ -982,6 +982,10 @@ impl<S: Sink> Sink for Addressed<'_, S> {
         self.out.at(va);
     }
 
+    fn block(&mut self, block: LineBlock) {
+        self.out.block(block);
+    }
+
     fn end_line(&mut self) {
         self.marked = false;
         self.out.end_line();
@@ -1290,7 +1294,12 @@ impl Cx<'_> {
     ///
     /// What the row shows.
     fn instruction<S: Sink>(&self, va: u64, fmt: &mut disasm::X86Format, out: &mut S) -> RowKind {
-        let Some((s, b, rows)) = self.map.stretch(va).and_then(|k| self.table(k)) else {
+        let owned = self.map.stretch(va).and_then(|k| self.table(k));
+        let owned = owned.and_then(|t| {
+            let f = self.a.functions.get(usize::try_from(t.0.func).ok()?)?;
+            Some((t, f.entry))
+        });
+        let Some(((s, b, rows), function)) = owned else {
             comment(out, "; no block owns these bytes");
             return RowKind::Instruction;
         };
@@ -1306,13 +1315,17 @@ impl Cx<'_> {
             return RowKind::Cut;
         }
         self.head(va, b.start, out);
+        let block = LineBlock {
+            function,
+            start: b.start,
+        };
         let mut shown = false;
         match self.isa {
             Isa::X86 { bits } => {
                 let len = usize::try_from(b.end.saturating_sub(va).min(INSN_MAX)).unwrap_or(0);
                 let code = self.p.read_va_upto(va, len.max(1)).unwrap_or_default();
                 disasm::decode_x86(code, va, bits, 1, |d| {
-                    self.rows.x86_row(fmt, &d, out);
+                    self.rows.x86_row(fmt, &d, block, out);
                     shown = true;
                 });
             }
@@ -1330,7 +1343,7 @@ impl Cx<'_> {
                 let code = self.p.read_va_upto(from, len.max(1)).unwrap_or_default();
                 let lines = disasm::disassemble_program(self.p, code, from, isa, back + 1);
                 for l in lines.iter().filter(|l| l.va == va) {
-                    self.rows.isa_row(l, isa, out);
+                    self.rows.isa_row(l, isa, block, out);
                     shown = true;
                 }
             }
