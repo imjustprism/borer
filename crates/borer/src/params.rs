@@ -8,6 +8,7 @@ use rmcp::{ErrorData, schemars};
 
 use crate::errors::err_params;
 pub(crate) use borer_engine::analysis::fieldrefs::{parse_field_offset, parse_unsigned};
+pub(crate) use borer_engine::text::Filter;
 
 /// What `read` and `live_read` decode the bytes as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, schemars::JsonSchema)]
@@ -1024,41 +1025,6 @@ impl Page {
             limit: count_param(limit, default, max, "limit")?,
             count_only: count_only.unwrap_or(false),
         })
-    }
-}
-
-/// A case-insensitive substring filter, lowered once at the boundary.
-///
-/// Every list tool narrows by one: absent keeps every row, present keeps
-/// the rows whose text contains it in any case.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) struct Filter(Option<String>);
-
-impl Filter {
-    /// Lowers the filter as given.
-    ///
-    /// # Arguments
-    ///
-    /// * `text` - The filter parameter; `None` keeps everything.
-    pub(crate) fn new(text: Option<&str>) -> Filter {
-        Filter(text.map(str::to_lowercase))
-    }
-
-    /// Whether a row passes: its text contains the filter in any case, or
-    /// there is no filter.
-    ///
-    /// # Arguments
-    ///
-    /// * `text` - The row's text as printed.
-    pub(crate) fn accepts(&self, text: &str) -> bool {
-        self.0
-            .as_ref()
-            .is_none_or(|f| text.to_lowercase().contains(f.as_str()))
-    }
-
-    /// The lowered filter, `None` when there is none.
-    pub(crate) fn needle(&self) -> Option<&str> {
-        self.0.as_deref()
     }
 }
 

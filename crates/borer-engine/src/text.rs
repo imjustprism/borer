@@ -1246,6 +1246,44 @@ pub fn edit_script<T: PartialEq>(
     Some(edits)
 }
 
+/// A case-insensitive substring filter, lowered once at the boundary.
+///
+/// Every list narrows by one: absent keeps every row, present keeps the
+/// rows whose text contains it in any case.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Filter(Option<String>);
+
+impl Filter {
+    /// Lowers the filter as given.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The filter parameter; `None` keeps everything.
+    #[must_use]
+    pub fn new(text: Option<&str>) -> Filter {
+        Filter(text.map(str::to_lowercase))
+    }
+
+    /// Whether a row passes: its text contains the filter in any case, or
+    /// there is no filter.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The row's text as printed.
+    #[must_use]
+    pub fn accepts(&self, text: &str) -> bool {
+        self.0
+            .as_ref()
+            .is_none_or(|f| text.to_lowercase().contains(f.as_str()))
+    }
+
+    /// The lowered filter, `None` when there is none.
+    #[must_use]
+    pub fn needle(&self) -> Option<&str> {
+        self.0.as_deref()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

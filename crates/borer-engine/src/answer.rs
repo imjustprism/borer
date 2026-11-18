@@ -635,7 +635,126 @@ const ANSWERS: &[Answer] = &[
         Ok(about::about_tsv(q.p, q.a, q.o, q.arg))
     })
     .checked(|a| a.trim().is_empty().then(|| ABOUT_NEEDS_A_NAME.to_owned())),
+    rows("function", Argument, Code(Discover), |q| {
+        let entry = entry(q, q.arg)?;
+        render::function_summary(q.p, q.a, q.o, entry)
+            .ok_or_else(|| format!("no function at {entry:#x}"))
+    }),
+    rows("disasm", Argument, Best(Discover), |q| {
+        disasm_function(q.p, q.a, q.o, q.arg, FUNCTION_INSTRS_DEFAULT, false)
+    }),
+    rows("decompile", Argument, Code(Decompile), |q| {
+        let (grown, entry) = decompile_entry(q.p, q.a, q.o, q.arg)?;
+        let a = grown.as_ref().unwrap_or(q.a);
+        let text = decompile::answer(q.p, a, q.o, entry, decompile::Detail::Full)
+            .ok_or_else(|| format!("decompilation failed at {entry:#x}"))?;
+        Ok(decompile::window(&text, None, None, None))
+    }),
+    rows("annotations", Nothing, File, |q| Ok(annotations(q.o))),
 ];
+
+/// Instructions a whole-function listing shows when no count is asked.
+pub const FUNCTION_INSTRS_DEFAULT: usize = 400;
+
+/// Returns the ledger's first page, as `borer://annotations` lists it.
+///
+/// # Arguments
+///
+/// * `overlay` - The names, comments and fields in force.
+#[must_use]
+pub fn annotations(overlay: &Overlay) -> String {
+    render::annotations_tsv(
+        overlay,
+        &crate::text::Filter::new(None),
+        0,
+        render::LEDGER_ROWS_DEFAULT,
+        false,
+    )
+}
+
+/// Lists a whole function block by block, or a `.NET` method's CIL when
+/// the text names one.
+///
+/// # Arguments
+///
+/// * `p` - The loaded program.
+/// * `a` - Its analysis, an empty one where the program has no discovery.
+/// * `o` - The names in force.
+/// * `text` - The function as the agent wrote it.
+/// * `max` - Most instructions listed.
+/// * `bytes` - Whether each instruction shows its bytes.
+///
+/// # Errors
+///
+/// When the program does no discovery and the text names no IL method,
+/// the text names nothing, or no function holds the address.
+pub fn disasm_function(
+    p: &Program,
+    a: &Analysis,
+    o: &Overlay,
+    text: &str,
+    max: usize,
+    bytes: bool,
+) -> Result<String, String> {
+    let token = p.clr().and_then(|_| {
+        crate::clr::managed::il_method_named(p, text, address(p, text, || (a, o)).ok())
+    });
+    if let Some(token) = token {
+        return crate::clr::managed::listing(p, token, max);
+    }
+    if let Some(why) = p.refuses(Discover) {
+        return Err(why);
+    }
+    let entry = entry_of(p, a, address(p, text, || (a, o))?, text)?;
+    render::disasm_function(p, a, o, entry, max, bytes)
+        .ok_or_else(|| format!("no function at {entry:#x}"))
+}
+
+/// Resolves the function to decompile at an argument, starting one at an
+/// ARM32 address no discovered function's blocks hold.
+///
+/// The function so recovered goes into a copy of the analysis
+/// ([`crate::analysis::entry_or_gap`]); a front end that keeps it for later
+/// reads stores the copy, and one that does not pays for the copy per read.
+///
+/// # Arguments
+///
+/// * `p` - The loaded program.
+/// * `a` - Its analysis.
+/// * `o` - The names in force.
+/// * `text` - The function as the agent wrote it.
+///
+/// # Returns
+///
+/// The grown analysis when one was recovered, and the function's entry.
+///
+/// # Errors
+///
+/// When the text names nothing, or no function holds the address and none
+/// starts there.
+pub fn decompile_entry(
+    p: &Program,
+    a: &Analysis,
+    o: &Overlay,
+    text: &str,
+) -> Result<(Option<Analysis>, u64), String> {
+    let va = address(p, text, || (a, o))?;
+    let held = function_entry(p, a, va)
+        .ok()
+        .filter(|&e| crate::analysis::in_blocks(p, a, e, va));
+    if let Some(entry) = held {
+        return Ok((None, entry));
+    }
+    if p.arch == crate::program::Arch::Arm {
+        let mut grown = a.clone();
+        if let Ok(entry) = crate::analysis::entry_or_gap(p, &mut grown, va)
+            && grown.functions.len() > a.functions.len()
+        {
+            return Ok((Some(grown), entry));
+        }
+    }
+    Ok((None, entry_of(p, a, va, text)?))
+}
 
 /// Lists the names of the resources the engine answers, in no promised
 /// order.

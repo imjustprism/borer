@@ -1,12 +1,10 @@
 //! The tools that annotate: names, comments, types, and the listing of
 //! every annotation the session holds.
 
-use std::fmt::Write as _;
-
 use borer_engine::analysis::edit::{self, Edit, Force, Plan};
 use borer_engine::analysis::protos::Proto;
 use borer_engine::analysis::utypes::parse_type;
-use borer_engine::analysis::{Analysis, Overlay, stated};
+use borer_engine::analysis::{Analysis, Overlay, render, stated};
 use borer_engine::program::Feature;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ErrorData, tool, tool_router};
@@ -433,71 +431,24 @@ impl BorerServer {
             count_only,
         }): Parameters<AnnotationsParams>,
     ) -> Result<String, ErrorData> {
-        /// Rows a page holds when `limit` is absent.
-        const ROWS_DEFAULT: usize = 200;
-        /// Most rows a page holds.
-        const ROWS_MAX: usize = 1000;
-        let page = Page::new(offset, limit, count_only, ROWS_DEFAULT, ROWS_MAX)?;
-        let filter = Filter::new(filter.as_deref());
-        let o = read_lock(&self.overlay);
-        let (open, settled): (Vec<_>, Vec<_>) = o
-            .comments
-            .iter()
-            .partition(|(_, c)| edit::open_question(c).is_some());
-        let fields = o.fields.iter().flat_map(|(class, fields)| {
-            fields.iter().map(move |(off, field)| {
-                let at = format!("{class}+{off:#x}");
-                format!("{at:<12} field: {}", field.spell())
-            })
-        });
-        let stated: usize = o.fields.values().map(std::collections::BTreeMap::len).sum();
-        let rows = o
-            .names
-            .iter()
-            .map(|(va, name)| format!("{:<12} name: {name}", format!("{va:#x}")))
-            .chain(fields)
-            .chain(
-                settled
-                    .iter()
-                    .map(|(va, c)| format!("{:<12} found: {c}", format!("{va:#x}"))),
-            )
-            .chain(open.iter().map(|(va, c)| {
-                let claim = c.trim_start().trim_start_matches('?').trim_start();
-                format!("{:<12} open:  {claim}", format!("{va:#x}"))
-            }))
-            .filter(|row| filter.accepts(row));
-        let (mut total, mut shown) = (0usize, Vec::new());
-        for row in rows {
-            if total >= page.offset && shown.len() < page.limit.n {
-                shown.push(row);
-            }
-            total += 1;
-        }
-        let counts = format!(
-            "{} names, {} findings, {} open question(s){}",
-            o.names.len(),
-            settled.len(),
-            open.len(),
-            match stated {
-                0 => String::new(),
-                n => format!(", {n} stated field(s)"),
-            }
+        let page = Page::new(
+            offset,
+            limit,
+            count_only,
+            render::LEDGER_ROWS_DEFAULT,
+            render::LEDGER_ROWS_MAX,
+        )?;
+        let out = render::annotations_tsv(
+            &read_lock(&self.overlay),
+            &Filter::new(filter.as_deref()),
+            page.offset,
+            page.limit.n,
+            page.count_only,
         );
         if page.count_only {
-            return Ok(format!("# {total} annotations ({counts})\n"));
+            return Ok(out);
         }
-        let mut out = format!(
-            "# showing {} of {total} annotations ({counts})\n# addr annotation\n",
-            shown.len()
-        );
-        for row in shown {
-            let _ = writeln!(out, "{row}");
-        }
-        if !o.comments.is_empty() {
-            out.push_str(
-                "# a comment opening with ? is an open question; drop the ? once it is proved\n",
-            );
-        }
+
         Ok(page.limit.noted(out))
     }
 }

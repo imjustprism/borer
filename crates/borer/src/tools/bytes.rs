@@ -127,16 +127,18 @@ impl BorerServer {
             bytes,
         }): Parameters<DisassembleFunctionParams>,
     ) -> Result<String, ErrorData> {
-        let max = count_param(max_instrs, 400, 2000, "max_instrs")?;
-        if let Some(answer) = self.il_answer(&address, |p, _, token| {
-            borer_engine::clr::managed::listing(p, token, max.n)
-        }) {
-            return answer.map(|text| max.noted(text));
-        }
-        self.with_analysis(Feature::Discover, |p, a, o| {
-            let entry = self.function_entry(p, a, &address)?;
-            render::disasm_function(p, a, o, entry, max.n, bytes.unwrap_or(false))
-                .ok_or_else(|| format!("no function at {entry:#x}"))
+        use borer_engine::answer::{FUNCTION_INSTRS_DEFAULT, disasm_function};
+        let max = count_param(max_instrs, FUNCTION_INSTRS_DEFAULT, 2000, "max_instrs")?;
+        self.with_program(|p| {
+            let a = self.analysis_or_empty();
+            disasm_function(
+                p,
+                &a,
+                &self.overlay(),
+                &address,
+                max.n,
+                bytes.unwrap_or(false),
+            )
         })
         .map(|text| max.noted(text))
     }

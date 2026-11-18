@@ -769,7 +769,7 @@ impl BorerServer {
         let again = asked.again();
         let page = asked.page(&again);
         self.with_program(|p| {
-            let analysis = match need {
+            let mut analysis = match need {
                 Need::Code(stage) | Need::Best(stage) if p.refuses(stage).is_none() => {
                     Some(self.ensure_analysis()?)
                 }
@@ -777,6 +777,13 @@ impl BorerServer {
                 Need::Best(_) => Some(self.empty_analysis()),
                 Need::File => read_lock(&self.analysis).clone(),
             };
+            if p.arch == borer_engine::program::Arch::Arm
+                && let (Some(a), Some(("decompile", Some(arg)))) =
+                    (&analysis, borer_engine::answer::split(&asked.core))
+                && let Ok((grown, _)) = self.decompile_entry(p, Arc::clone(a), &arg)
+            {
+                analysis = Some(grown);
+            }
             let o = self.overlay();
             borer_engine::answer::read(p, analysis.as_deref(), &o, &asked.core, page)
                 .unwrap_or_else(|| {

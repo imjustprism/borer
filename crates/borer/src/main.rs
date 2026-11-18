@@ -56,7 +56,6 @@ use borer_engine::pack::Packs;
 use borer_engine::program::Program;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
-use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, CompleteRequestParams, CompleteResult,
     CompletionInfo, ContentBlock, CustomRequest, CustomResult, ErrorCode,
@@ -71,9 +70,6 @@ use tokio::runtime::Handle;
 use crate::catalog::{RESOURCE_TEMPLATES, RESOURCES, TEXT_PLAIN, resource_name};
 use crate::errors::{err_internal, err_params};
 use crate::handover::{HandOver, HandOverTransport, Resume, end_quietly_when_stdout_closes};
-use crate::params::{
-    AnnotationsParams, DecompileParams, DisassembleFunctionParams, FunctionParams,
-};
 use crate::recall::{Narrow, Recall, SINCE_ARG, Tag, budgeted};
 use crate::session::{EVIDENCE_URI, SESSION_URI};
 use crate::state::{RawLoad, lock};
@@ -668,12 +664,15 @@ impl BorerServer {
         let Some((kind, arg)) = borer_engine::answer::split(uri) else {
             return Err(resources::unknown_resource(uri));
         };
-        if let Some(need) = borer_engine::answer::need(kind, arg.as_deref()) {
+        let unloaded = kind == "annotations" && self.loaded().is_none();
+        if let Some(need) = borer_engine::answer::need(kind, arg.as_deref())
+            && !unloaded
+        {
             return self.engine_answer(need.map_err(err_params)?, asked);
         }
         let text = match (kind, arg) {
             ("info", None) => self.binary_info()?,
-            ("annotations", None) => self.annotations(Parameters(AnnotationsParams::default()))?,
+            ("annotations", None) => borer_engine::answer::annotations(&self.overlay()),
             ("stats", Some(spec)) => return self.stats_text(&spec, asked),
             ("find", Some(query)) => self.find_text(&query)?,
             ("diff", Some(other)) => self.diff_text(&other)?,
@@ -687,23 +686,6 @@ impl BorerServer {
             ("bench", None) => self.bench_text()?,
             ("changes", Some(path)) => self.changes_text(&path)?,
             ("anchors", Some(path)) => self.anchors_text(&path)?,
-            ("function", Some(address)) => {
-                self.function_summary(Parameters(FunctionParams { address }))?
-            }
-            ("decompile", Some(address)) => self.decompile(Parameters(DecompileParams {
-                address,
-                detail: None,
-                filter: None,
-                offset: None,
-                limit: None,
-            }))?,
-            ("disasm", Some(address)) => {
-                self.disassemble_function(Parameters(DisassembleFunctionParams {
-                    address,
-                    max_instrs: None,
-                    bytes: None,
-                }))?
-            }
             ("playbook", Some(spec)) => resources::playbook_text(&spec)?,
             ("help", None) => resources::help_index(self.loaded().as_deref()),
             ("session", None) => self.session_text(),

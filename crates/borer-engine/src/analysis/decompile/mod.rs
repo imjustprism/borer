@@ -103,9 +103,7 @@ mod virtuals;
 mod warn;
 mod wire;
 
-pub use answer::{
-    Detail, answer, answer_header, answer_with_origins, shown, warnings, with_header,
-};
+pub use answer::*;
 use arch::Lifter;
 pub use asserts::*;
 pub use checked::{checked_header, decompile_checked_all, text_check};

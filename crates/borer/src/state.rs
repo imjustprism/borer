@@ -774,32 +774,18 @@ impl BorerServer {
         a: Arc<Analysis>,
         text: &str,
     ) -> Result<(Arc<Analysis>, u64), String> {
-        let va = self.addr(p, text)?;
-        let held = borer_engine::analysis::function_entry(p, &a, va)
-            .ok()
-            .filter(|&e| borer_engine::analysis::in_blocks(p, &a, e, va));
-        if let Some(entry) = held {
-            return Ok((a, entry));
-        }
-        if p.arch == borer_engine::program::Arch::Arm {
+        let o = self.overlay();
+        let (None, entry) = borer_engine::answer::decompile_entry(p, &a, &o, text)? else {
             let mut slot = write_lock(&self.analysis);
             let base = slot.clone().unwrap_or_else(|| Arc::clone(&a));
-            let held = borer_engine::analysis::function_entry(p, &base, va)
-                .ok()
-                .filter(|&e| borer_engine::analysis::in_blocks(p, &base, e, va));
-            if let Some(entry) = held {
+            let (grown, entry) = borer_engine::answer::decompile_entry(p, &base, &o, text)?;
+            let Some(grown) = grown else {
                 return Ok((base, entry));
-            }
-            let mut grown = (*base).clone();
-            if let Ok(entry) = borer_engine::analysis::entry_or_gap(p, &mut grown, va)
-                && grown.functions.len() > base.functions.len()
-            {
-                let grown = Arc::new(grown);
-                *slot = Some(Arc::clone(&grown));
-                return Ok((grown, entry));
-            }
-        }
-        let entry = self.function_entry(p, &a, text)?;
+            };
+            let grown = Arc::new(grown);
+            *slot = Some(Arc::clone(&grown));
+            return Ok((grown, entry));
+        };
         Ok((a, entry))
     }
 
