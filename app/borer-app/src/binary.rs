@@ -1752,22 +1752,14 @@ mod tests {
     /// Panics if a kept path is relative or the two differ.
     #[gpui::test]
     fn a_binary_opened_by_a_relative_path_is_kept_absolute(cx: &mut TestAppContext) {
-        use std::path::Component;
         let app_state = crate::app_view::tests::init(cx);
-        let dir = scratch("relative");
-        let exe = dir.join("tiny.exe");
-        std::fs::write(&exe, tiny_pe()).unwrap();
-        let normal = |path: &Path| {
-            path.components()
-                .filter(|part| matches!(part, Component::Normal(_)))
-                .count()
-        };
-        let mut relative: PathBuf =
-            std::iter::repeat_n("..", normal(&std::env::current_dir().unwrap())).collect();
-        relative.extend(
-            exe.components()
-                .filter(|part| matches!(part, Component::Normal(_))),
-        );
+        let dir = Path::new("..")
+            .join("target")
+            .join(format!("borer-app-relative-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let relative = dir.join("tiny.exe");
+        std::fs::write(&relative, tiny_pe()).unwrap();
         assert!(relative.is_relative());
         let (app, cx) = crate::app_view::tests::open(&app_state, cx);
         app.binary
