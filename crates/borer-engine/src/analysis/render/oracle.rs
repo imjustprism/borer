@@ -61,10 +61,13 @@ pub(super) struct Candidate {
 /// the values that produce another, the smallest group first, since a check
 /// accepts few inputs and rejects the rest. A single value standing apart
 /// from all the others is the one the check is looking for, and the report
-/// says which comparison it came from. A flat answer with a pointer argument
-/// is explained as such: a constant put in a pointer is read as an address,
-/// so the function checks whatever that address holds, which is nothing,
-/// and varying the buffer is the useful move.
+/// says which comparison it came from. A run that does not return is
+/// grouped by where it stopped as well as why, since two stops that read
+/// alike (`unmodeled Xgetbv`) at different places are different answers.
+/// A flat answer with a pointer argument is explained as such: a constant
+/// put in a pointer is read as an address, so the function checks whatever
+/// that address holds, which is nothing, and varying the buffer is the
+/// useful move.
 ///
 /// This is not a solver. A check that hashes its input before comparing, or
 /// derives the expected value at run time, has no constant to harvest and
@@ -146,7 +149,7 @@ pub fn solve_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
         CANDIDATES_MAX,
     );
     let pass = passing(p, a, o, entry);
-    let mut answers: BTreeMap<String, Vec<Candidate>> = BTreeMap::new();
+    let mut answers: BTreeMap<(String, Option<u64>), Vec<Candidate>> = BTreeMap::new();
     for c in &candidates {
         let mut emu = Emulator::new(p, BUDGET)
             .ok_or_else(|| String::from("this architecture is not emulated yet"))?;
@@ -155,23 +158,21 @@ pub fn solve_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
         let sp = emu.register("rsp").unwrap_or(0);
         pass.place_arg(&mut emu, sp, slot, c.value, 0);
         let run = emu.run(entry);
+        let stopped = (!matches!(run.stop, Stop::Returned)).then(|| emu.last_ip());
         let answer = match run.stop {
-            Stop::Returned => {
-                format!("returns {:#x}", emu.register("rax").unwrap_or(0))
-            }
+            Stop::Returned => format!("returns {:#x}", emu.register("rax").unwrap_or(0)),
             other => format!("does not return: {other}"),
         };
-        answers.entry(answer).or_default().push(*c);
+        answers.entry((answer, stopped)).or_default().push(*c);
     }
     let name = short_name(a, o, entry);
     let (what, mut out) = heading(&name, &pass, slot, unlisted, candidates.len());
     if answers.len() <= 1 {
-        let same = answers.keys().next().cloned().unwrap_or_default();
-        let why = if same.starts_with("returns") {
-            "so none of its own constants decides this"
-        } else {
-            "so no run decided anything"
-        };
+        let (same, stopped) = answers.keys().next().cloned().unwrap_or_default();
+        let why = stopped.map_or_else(
+            || String::from("so none of its own constants decides this"),
+            |at| format!("so no run decided anything; each run stopped at {at:#x}"),
+        );
         let _ = writeln!(out, "# every candidate {same}, {why}");
         if let Some(hint) = partial::partial_hint(p, a, o, entry) {
             let _ = writeln!(out, "# next: {hint}");
@@ -213,9 +214,9 @@ pub fn solve_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
         }
         return Ok(out);
     }
-    let mut grouped: Vec<(&String, &Vec<Candidate>)> = answers.iter().collect();
+    let mut grouped: Vec<_> = answers.iter().collect();
     grouped.sort_by_key(|(_, vs)| vs.len());
-    for (answer, values) in grouped.iter().take(GROUPS_MAX) {
+    for ((answer, stopped), values) in grouped.iter().take(GROUPS_MAX) {
         let shown: Vec<String> = values
             .iter()
             .take(VALUES_MAX)
@@ -228,7 +229,8 @@ pub fn solve_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
             .collect();
         let _ = writeln!(
             out,
-            "# {answer}: {}{}",
+            "# {answer}{}: {}{}",
+            stopped.map_or_else(String::new, |at| format!(" (stopped at {at:#x})")),
             shown.join(", "),
             plus_more(values.len(), VALUES_MAX)
         );
@@ -868,6 +870,41 @@ mod tests {
             "{out}"
         );
         assert!(!out.contains("none of its own constants"), "{out}");
+    }
+
+    /// Runs that stop at different places are different answers, though
+    /// the stop reads the same.
+    ///
+    /// `0x1337` falls through to the `xgetbv` at 0x1008, every other value
+    /// jumps to the one at 0x100b; both read `unmodeled Xgetbv`, and the
+    /// solve said every candidate stopped alike, hiding the one value the
+    /// check singles out.
+    ///
+    /// # Panics
+    ///
+    /// When the two stops group together.
+    #[test]
+    fn runs_stopping_at_different_places_group_apart() {
+        let stops = Program::raw_x64(&[
+            0x81, 0xf9, 0x37, 0x13, 0x00, 0x00, // ASM: cmp ecx,0x1337
+            0x75, 0x03, // ASM: jne 0x100b
+            0x0f, 0x01, 0xd0, // ASM: xgetbv
+            0x0f, 0x01, 0xd0, // ASM: xgetbv
+            0xc3, // ASM: ret
+        ]);
+        let a = Analysis::compute(&stops);
+        let out = solve_tsv(&stops, &a, &Overlay::default(), "0x1000").unwrap();
+        assert!(!out.contains("every candidate"), "{out}");
+        assert!(
+            out.contains(
+                "\n# does not return: unmodeled Xgetbv (stopped at 0x1008): 0x1337 (from 0x1000)\n"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains("\n# does not return: unmodeled Xgetbv (stopped at 0x100b): 0x0, 0x1, "),
+            "{out}"
+        );
     }
 
     /// A flat solve calls an argument a pointer only when read through.
