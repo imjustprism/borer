@@ -282,7 +282,9 @@ pub fn unit_prologue(file: &str) -> String {
     let what = if file == REMAINDER {
         "the functions the split filed under no source file (the export's answer counts why: no cited file, a tie, a cut path fitting several, a file past the cap, or no text to read: it did not decompile or was cut for size; one of those referencing a single source path is filed under it)".to_owned()
     } else {
-        format!("{file}: the functions whose asserts cite this source file")
+        format!(
+            "{file}: the functions filed under this source file, the one source path their literals name or the one their text settles on among several"
+        )
     };
     format!(
         "/* {what}, as borer decompiled them.\n   Rough pseudo-C: it says what the binary does, and is not the source it was built from. */\n#include \"{}{DECLS}\"\n\n",
@@ -570,5 +572,23 @@ mod tests {
             Filed::PastCap.why().as_deref(),
             Some("cite a file past the 4096 a split writes")
         );
+    }
+
+    /// A split file's opening says how its functions were filed, not that
+    /// asserts cite it: a function is filed on any source path its literals
+    /// name.
+    ///
+    /// # Panics
+    ///
+    /// When the opening claims asserts.
+    #[test]
+    fn a_split_file_says_how_its_functions_were_filed() {
+        let head = unit_prologue("net/a.cpp.c");
+        assert!(!head.contains("asserts cite"), "{head}");
+        assert!(
+            head.contains("the one source path their literals name"),
+            "{head}"
+        );
+        assert!(head.contains("#include \"../_decls.h\""), "{head}");
     }
 }

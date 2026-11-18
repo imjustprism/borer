@@ -791,7 +791,7 @@ pub fn source_tree_tsv(p: &Program, a: &Analysis, filter: &str) -> String {
             by_dir.len()
         );
         out.push_str(
-            "# functions\tfiles\tdirectory (borer://sources/<filter> for the files and their assert expressions)\n",
+            "# functions\tfiles\tdirectory (borer://sources/<filter> for the files, borer://vocab/<filter> for their assert expressions)\n",
         );
         for (dir, (n, entries)) in dirs.iter().take(SOURCES_MAX) {
             let _ = writeln!(out, "{}\t{n}\t{dir}", entries.len());
