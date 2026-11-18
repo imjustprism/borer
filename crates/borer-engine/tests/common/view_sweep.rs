@@ -293,7 +293,7 @@ fn link_ok(
                 .unwrap_or_default();
             p.section_at(*va).is_some()
                 && referenced(*va)
-                && literal_at(p, *va, &own).as_deref() == Some(tok)
+                && literal_at(p, a, *va, &own).as_deref() == Some(tok)
         }
         Ref::Field { ty, offset } => {
             let unit_defined = (0..decls).any(|i| {
@@ -532,7 +532,7 @@ fn classify_unlinked_string(
         let refs: BTreeSet<u64> = a.refs_from(s).into_iter().map(|(t, _)| t).collect();
         let mut by = BTreeMap::new();
         for va in refs {
-            if let Some(lit) = literal_at(p, va, &own) {
+            if let Some(lit) = literal_at(p, a, va, &own) {
                 *by.entry(lit).or_insert(0) += 1;
             }
         }

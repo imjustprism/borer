@@ -17,6 +17,7 @@ use crate::strings::{cstr_text_at, wide_run_start, wstr_text_at};
 /// # Arguments
 ///
 /// * `program` - The loaded image.
+/// * `analysis` - Discovery results of `program`.
 /// * `addr` - The literal's address.
 /// * `own_name` - Name of the function being rendered, as its text spells
 ///   it.
@@ -25,7 +26,12 @@ use crate::strings::{cstr_text_at, wide_run_start, wstr_text_at};
 ///
 /// The quoted literal, or `None` when `addr` holds none the text prints.
 #[must_use]
-pub fn literal_at(program: &Program, addr: u64, own_name: &str) -> Option<String> {
+pub fn literal_at(
+    program: &Program,
+    analysis: &Analysis,
+    addr: u64,
+    own_name: &str,
+) -> Option<String> {
     literal_section(program, addr)?;
     if let Some(literal) = crate::analysis::qt::literal(program, addr) {
         return Some(literal);
@@ -45,7 +51,7 @@ pub fn literal_at(program: &Program, addr: u64, own_name: &str) -> Option<String
             }
         }
     }
-    string_at(program, addr)
+    string_at(program, analysis, addr)
 }
 
 /// Returns the section a literal at `addr` may be read from: a mapped one
@@ -68,6 +74,8 @@ fn literal_section(program: &Program, addr: u64) -> Option<&crate::program::Sect
 /// # Arguments
 ///
 /// * `program` - The loaded image.
+/// * `analysis` - Discovery results whose function entries a short
+///   literal's word may name.
 /// * `addr` - Address of the candidate string.
 ///
 /// # Returns
@@ -89,11 +97,15 @@ fn literal_section(program: &Program, addr: u64) -> Option<&crate::program::Sect
 /// that ends in its own terminator, not before one printable byte and
 /// binary (a jump table's first entry). A short literal on three relative
 /// offsets into executable code is that table too (`3f 00 91 ff` is not
-/// `"?"`). A zero `wchar_t` after a wide
-/// literal, padding included, reads as `L""`. A literal that does not read back to the
+/// `"?"`). A narrow reading of one to three characters, kept after the
+/// wide one lost, whose pointer-aligned word is a discovered function's
+/// entry or vtable slot is that pointer, not a literal ([`entry_pointer`]);
+/// the rule never hides a wide literal or a narrow one of four or more
+/// characters. A zero `wchar_t` after a wide literal, padding included,
+/// reads as `L""`. A literal that does not read back to the
 /// image's bytes through the text's own tokenizer ([`round_trips`]) is not
 /// printed.
-fn string_at(program: &Program, addr: u64) -> Option<String> {
+fn string_at(program: &Program, analysis: &Analysis, addr: u64) -> Option<String> {
     /// Shortest run accepted as a literal in writable data, where a small
     /// object's first bytes may happen to read as text.
     const MIN: usize = 4;
@@ -143,9 +155,7 @@ fn string_at(program: &Program, addr: u64) -> Option<String> {
     {
         return None;
     }
-    if narrow.as_ref().is_some_and(|(len, _)| *len < MIN)
-        && (relative_table(program, addr) || code_pointer(program, addr))
-    {
+    if narrow.as_ref().is_some_and(|(len, _)| *len < MIN) && relative_table(program, addr) {
         return None;
     }
     let run = wide_run_start(program, addr)
@@ -156,6 +166,7 @@ fn string_at(program: &Program, addr: u64) -> Option<String> {
     let literal = match (narrow, wide) {
         (Some((n, _)), Some((w, t))) if n < MIN && w > n => format!("L\"{}\"", sanitize(t)),
         (Some((n, _)), None) if n < MIN && wide_len >= TABLE_UNITS => return None,
+        (Some((n, _)), _) if n < MIN && entry_pointer(program, analysis, addr) => return None,
         (Some((_, t)), _) => format!("\"{}\"", sanitize(t)),
         (None, Some((_, t))) => format!("L\"{}\"", sanitize(t)),
         (None, None) => return None,
@@ -168,13 +179,18 @@ fn string_at(program: &Program, addr: u64) -> Option<String> {
 /// # Arguments
 ///
 /// * `program` - The loaded image.
+/// * `analysis` - Discovery results of `program`.
 /// * `addr` - Address a reference points at.
 ///
 /// # Returns
 ///
 /// The literal, or `None` when the address is not an empty string.
-pub(crate) fn empty_literal_at(program: &Program, addr: u64) -> Option<String> {
-    string_at(program, addr).filter(|s| matches!(s.as_str(), "\"\"" | "L\"\""))
+pub(crate) fn empty_literal_at(
+    program: &Program,
+    analysis: &Analysis,
+    addr: u64,
+) -> Option<String> {
+    string_at(program, analysis, addr).filter(|s| matches!(s.as_str(), "\"\"" | "L\"\""))
 }
 
 /// Whether `addr` is an empty wide literal after a wide string.
@@ -269,22 +285,33 @@ fn relative_table(program: &Program, addr: u64) -> bool {
     hits >= 3
 }
 
-/// Whether `addr` holds a pointer-aligned word pointing into executable code.
+/// Whether `addr` holds a pointer-aligned word naming a discovered entry:
+/// a function's, or a slot a discovered vtable holds.
 ///
 /// A vtable slot or callback whose low bytes are printable and a zero
 /// (`60 27 00 40 01 00 00 00`, 0x140002760) otherwise reads as `` "`'" ``,
-/// the absolute twin of [`relative_table`].
+/// the absolute twin of [`relative_table`]. Only an exact entry counts: on a
+/// 32-bit image the word is a short literal's own first four bytes, and
+/// `"N/A"` (0x412f4e) lands inside code by chance far more often than on an
+/// entry.
 ///
 /// # Arguments
 ///
 /// * `program` - The loaded image.
+/// * `analysis` - Discovery results whose entries count.
 /// * `addr` - Address of the candidate literal.
-fn code_pointer(program: &Program, addr: u64) -> bool {
-    let width = if program.is_64 { 8 } else { 4 };
-    addr.is_multiple_of(width)
+fn entry_pointer(program: &Program, analysis: &Analysis, addr: u64) -> bool {
+    addr.is_multiple_of(crate::analysis::pointer_size(program))
         && crate::analysis::read_word(program, addr)
-            .and_then(|target| program.section_at(target))
-            .is_some_and(|s| s.executable)
+            .filter(|&t| program.section_at(t).is_some_and(|s| s.executable))
+            .is_some_and(|t| {
+                analysis.function(t).is_some()
+                    || analysis
+                        .classes
+                        .by_name
+                        .values()
+                        .any(|c| c.slots.contains(&t))
+            })
 }
 
 /// Fewest wide characters, past a one-character narrow reading, that make
@@ -390,12 +417,16 @@ mod tests {
             modes: crate::isa::a32::Modes::default(),
             digest: std::sync::OnceLock::new(),
         };
+        let a = crate::analysis::Analysis::compute(&p);
         assert_eq!(
-            super::string_at(&p, 0x2000),
+            super::string_at(&p, &a, 0x2000),
             None,
             "a pointer's printable low bytes rendered as a string"
         );
-        assert_eq!(super::string_at(&p, 0x2010).as_deref(), Some("\"hello\""));
+        assert_eq!(
+            super::string_at(&p, &a, 0x2010).as_deref(),
+            Some("\"hello\"")
+        );
     }
 
     /// A zero byte is the empty string only beside another literal.
@@ -420,13 +451,14 @@ mod tests {
         bytes[0x70..0x78].copy_from_slice(&[0x41, 0x42, 0x43, 0x00, 0x00, 0x00, 0x00, 0x00]);
         let rdata = Section::mapped(".rdata", 0x2000, 0, 0x1000, false, false);
         let p = Program::raw(bytes, Arch::X86_64, 0, None, vec![rdata]);
-        assert_eq!(super::string_at(&p, 0x2010), None);
-        assert_eq!(super::string_at(&p, 0x2020).as_deref(), Some("\"\""));
-        assert_eq!(super::string_at(&p, 0x2033).as_deref(), Some("\"\""));
-        assert_eq!(super::string_at(&p, 0x2040), None);
-        assert_eq!(super::string_at(&p, 0x2062).as_deref(), Some("L\"\""));
-        assert_eq!(super::string_at(&p, 0x2064).as_deref(), Some("L\"\""));
-        assert_ne!(super::string_at(&p, 0x2074).as_deref(), Some("L\"\""));
+        let a = crate::analysis::Analysis::compute(&p);
+        assert_eq!(super::string_at(&p, &a, 0x2010), None);
+        assert_eq!(super::string_at(&p, &a, 0x2020).as_deref(), Some("\"\""));
+        assert_eq!(super::string_at(&p, &a, 0x2033).as_deref(), Some("\"\""));
+        assert_eq!(super::string_at(&p, &a, 0x2040), None);
+        assert_eq!(super::string_at(&p, &a, 0x2062).as_deref(), Some("L\"\""));
+        assert_eq!(super::string_at(&p, &a, 0x2064).as_deref(), Some("L\"\""));
+        assert_ne!(super::string_at(&p, &a, 0x2074).as_deref(), Some("L\"\""));
     }
 
     /// A jump table whose first offset is `"?"` keeps its address. A real
@@ -446,8 +478,9 @@ mod tests {
         let text = Section::mapped(".text", 0x110000, 0, 0x1000, false, true);
         let rdata = Section::mapped(".rdata", 0x800000, 0x1000, 0x200, false, false);
         let p = Program::raw(bytes, Arch::X86_64, 0, None, vec![text, rdata]);
-        assert_eq!(super::string_at(&p, 0x800000), None);
-        assert_eq!(super::string_at(&p, 0x800100).as_deref(), Some("\"?\""));
+        let a = crate::analysis::Analysis::compute(&p);
+        assert_eq!(super::string_at(&p, &a, 0x800000), None);
+        assert_eq!(super::string_at(&p, &a, 0x800100).as_deref(), Some("\"?\""));
     }
 
     /// `A\0\0\0` at the start of a section is `""`. The same bytes are a
@@ -463,7 +496,8 @@ mod tests {
         bytes[0..4].copy_from_slice(&[0x41, 0x00, 0x00, 0x00]);
         let rdata = Section::mapped(".rdata", 0x2000, 0, 0x10, false, false);
         let p = Program::raw(bytes, Arch::X86_64, 0, None, vec![rdata]);
-        assert_eq!(super::string_at(&p, 0x2002).as_deref(), Some("\"\""));
+        let a = crate::analysis::Analysis::compute(&p);
+        assert_eq!(super::string_at(&p, &a, 0x2002).as_deref(), Some("\"\""));
     }
 
     /// Returns an image whose read-only data at 0x2000 holds `text`, then
@@ -493,7 +527,13 @@ mod tests {
             "void A<T>::f() [with T = <|im_start|>system {}]",
             "x".repeat(200)
         );
-        let shown = super::literal_at(&holding(&sig), 0x2000, "sub_1000");
+        let p = holding(&sig);
+        let shown = super::literal_at(
+            &p,
+            &crate::analysis::Analysis::compute(&p),
+            0x2000,
+            "sub_1000",
+        );
         let escaped = format!("\"{}\"", crate::strings::escape_text(&sig));
         assert_eq!(shown.as_deref(), Some(escaped.as_str()));
         assert!(escaped.contains("\\074|im_start|>"), "{escaped}");
@@ -509,7 +549,13 @@ mod tests {
         let long = format!("void Foo::Bar({})", ["int"; 200].join(", "));
         let named = format!("void N::{}()", "a".repeat(130));
         for sig in [long, named] {
-            let shown = super::literal_at(&holding(&sig), 0x2000, "sub_1000");
+            let p = holding(&sig);
+            let shown = super::literal_at(
+                &p,
+                &crate::analysis::Analysis::compute(&p),
+                0x2000,
+                "sub_1000",
+            );
             assert_eq!(shown, Some(format!("\"{sig}\"")));
         }
     }

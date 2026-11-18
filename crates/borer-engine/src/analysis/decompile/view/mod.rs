@@ -221,12 +221,19 @@ impl<'a> Facts<'a> {
     /// # Arguments
     ///
     /// * `program` - The loaded image.
+    /// * `analysis` - Its analysis.
     /// * `literal` - The token's exact quoted spelling.
     /// * `tally` - Counts ambiguous matches.
-    fn string_link(&self, program: &Program, literal: &str, tally: &mut Tally) -> Option<Ref> {
+    fn string_link(
+        &self,
+        program: &Program,
+        analysis: &Analysis,
+        literal: &str,
+        tally: &mut Tally,
+    ) -> Option<Ref> {
         let by = self
             .strings
-            .get_or_init(|| data::candidate_strings(program, &self.own, &self.refs));
+            .get_or_init(|| data::candidate_strings(program, analysis, &self.own, &self.refs));
         match by.get(literal) {
             Some(&Some(va)) => Some(Ref::String(va)),
             Some(&None) => {
@@ -1407,7 +1414,7 @@ impl<'a> Reader<'a> {
                     let tok = line.get(span.clone()).unwrap_or_default();
                     let link = scope
                         .facts
-                        .and_then(|f| f.string_link(self.program, tok, tally));
+                        .and_then(|f| f.string_link(self.program, self.analysis, tok, tally));
                     (Kind::String, link, false)
                 }
                 Piece::Token(Lex::Punct) => (Kind::Punct, None, false),

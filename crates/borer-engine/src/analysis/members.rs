@@ -661,7 +661,12 @@ mod tests {
         let mut bytes = b"void A<S>::f() [with S = Str<'\"'>]".to_vec();
         bytes.resize(0x28, 0);
         let p = Program::raw(bytes, Arch::X86_64, 0, None, vec![rdata]);
-        let shown = crate::analysis::decompile::literal_at(&p, 0x2000, "sub_1000");
+        let shown = crate::analysis::decompile::literal_at(
+            &p,
+            &crate::analysis::Analysis::compute(&p),
+            0x2000,
+            "sub_1000",
+        );
         let line = format!("f({}, \"this->m_count\");", shown.unwrap_or_default());
         assert_eq!(first_literal(&line), None, "{line}");
     }

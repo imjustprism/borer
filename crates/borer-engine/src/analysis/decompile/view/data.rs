@@ -33,16 +33,18 @@ pub(crate) fn is_mapped_data(program: &Program, va: u64) -> bool {
 /// # Arguments
 ///
 /// * `program` - The loaded image.
+/// * `analysis` - Its analysis.
 /// * `own` - Bare name of the function whose text is read.
 /// * `refs` - Reference targets of that function.
 pub(super) fn candidate_strings(
     program: &Program,
+    analysis: &Analysis,
     own: &str,
     refs: &BTreeSet<u64>,
 ) -> BTreeMap<String, Option<u64>> {
     let mut by: BTreeMap<String, Option<u64>> = BTreeMap::new();
     for &v in refs {
-        let Some(spelled) = super::super::literal::literal_at(program, v, own) else {
+        let Some(spelled) = super::super::literal::literal_at(program, analysis, v, own) else {
             continue;
         };
         by.entry(spelled)

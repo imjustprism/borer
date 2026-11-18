@@ -512,7 +512,7 @@ pub fn function_strings_tsv(p: &Program, a: &Analysis, o: &Overlay, entry: u64) 
     let mut seen = BTreeSet::new();
     for (target, site) in a.refs_from(entry) {
         let Some((start, lit)) = referenced_literal(p, a, target, 120).or_else(|| {
-            crate::analysis::decompile::empty_literal_at(p, target).map(|lit| (target, lit))
+            crate::analysis::decompile::empty_literal_at(p, a, target).map(|lit| (target, lit))
         }) else {
             continue;
         };

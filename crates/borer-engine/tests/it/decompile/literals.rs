@@ -2,6 +2,7 @@
 //! literal shows, marked `...`; only a signature prints whole. Short ones:
 //! a code pointer is not a literal.
 
+use borer_engine::analysis::Analysis;
 use borer_engine::analysis::decompile::literal_at;
 use borer_engine::program::{Arch, Program, Section};
 
@@ -27,7 +28,8 @@ fn holding(text: &str) -> Program {
 ///
 /// * `text` - The string's bytes, without their terminator.
 fn shown(text: &str) -> String {
-    literal_at(&holding(text), AT, "sub_1000").unwrap_or_default()
+    let p = holding(text);
+    literal_at(&p, &Analysis::compute(&p), AT, "sub_1000").unwrap_or_default()
 }
 
 /// Asserts `text` prints cut: at most 120 characters of it, then `...`.
@@ -151,4 +153,45 @@ fn a_word_pointing_into_code_is_not_a_short_literal() {
         text.contains("140003000") && text.contains("140003008"),
         "{text}"
     );
+}
+
+/// A 32-bit image keeps the strings whose first four bytes happen to read
+/// as an address in its code.
+///
+/// The words are the literals' own bytes: `L"HARDWARE\\DESCRIPTION\\System"`
+/// is 0x00410048, `L"VBOX"` 0x00420056 and `"N/A"` 0x00412f4e, all inside
+/// `.text`. 0x420056 is also the entry point, a discovered function: the
+/// wide reading is tried first and wins, so `L"VBOX"` still prints; only a
+/// one to three character narrow reading gives way to an entry.
+#[test]
+fn a_32_bit_string_reading_as_a_code_address_stays_a_literal() {
+    let mut bytes = vec![0u8; 0x21000];
+    bytes[0x1f056] = 0xc3; // ASM: ret
+    let wide = |s: &str| -> Vec<u8> { s.encode_utf16().flat_map(u16::to_le_bytes).collect() };
+    let hardware = wide("HARDWARE\\DESCRIPTION\\System");
+    bytes[0x20100..0x20100 + hardware.len()].copy_from_slice(&hardware);
+    let vbox = wide("VBOX");
+    bytes[0x20200..0x20200 + vbox.len()].copy_from_slice(&vbox);
+    bytes[0x20300..0x20303].copy_from_slice(b"N/A");
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86,
+        0x40_0000,
+        Some(0x42_0056),
+        vec![
+            Section::mapped(".text", 0x40_1000, 0, 0x2_0000, false, true),
+            Section::mapped(".rdata", 0x42_1000, 0x2_0000, 0x1000, false, false),
+        ],
+    );
+    p.format = borer_engine::program::BinaryFormat::Pe;
+    let a = Analysis::compute(&p);
+    assert!(a.function(0x42_0056).is_some(), "the entry is no function");
+    assert!(a.function(0x41_2f4e).is_none(), "N/A's word is an entry");
+    let at = |va| literal_at(&p, &a, va, "sub_401000");
+    assert_eq!(
+        at(0x42_1100).as_deref(),
+        Some("L\"HARDWARE\\\\DESCRIPTION\\\\System\"")
+    );
+    assert_eq!(at(0x42_1200).as_deref(), Some("L\"VBOX\""));
+    assert_eq!(at(0x42_1300).as_deref(), Some("\"N/A\""));
 }

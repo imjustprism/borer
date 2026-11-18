@@ -685,10 +685,10 @@ impl Exec<'_, '_> {
                 self.write_op0(instr, v);
             }
             Mnemonic::Lea if instr.op_count() == 2 && instr.op0_kind() == OpKind::Register => {
-                let a = self.lea(instr);
+                let (a, c) = (self.lea(instr), &*self.ctx);
                 let v = match a {
-                    Expr::Const(t) if !self.ctx.overlay.names.contains_key(&t) => {
-                        literal_at(self.ctx.program, t, &self.ctx.own_name).map_or(a, Expr::Str)
+                    Expr::Const(t) if !c.overlay.names.contains_key(&t) => {
+                        literal_at(c.program, c.analysis, t, &c.own_name).map_or(a, Expr::Str)
                     }
                     other => other,
                 };

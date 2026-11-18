@@ -168,7 +168,9 @@ impl Names<'_> {
         if !mapped && let Some(n) = crate::winconst::name(v) {
             return Some(n.to_owned());
         }
-        if literal && let Some(text) = super::literal_at(self.program, v, &self.own_name) {
+        if literal
+            && let Some(text) = super::literal_at(self.program, self.analysis, v, &self.own_name)
+        {
             return Some(text);
         }
         if super::globals::rip_data(self.program, self.analysis).contains(&v) {
@@ -202,7 +204,7 @@ impl Names<'_> {
                 .and_then(|b| self.program.read_va(b, 1))
                 .is_some_and(|b| b == [0]);
         first
-            && super::literal_at(self.program, v, &self.own_name)
+            && super::literal_at(self.program, self.analysis, v, &self.own_name)
                 .is_some_and(|l| !matches!(l.as_str(), "\"\"" | "L\"\""))
     }
 
@@ -212,7 +214,7 @@ impl Names<'_> {
     ///
     /// * `v` - The constant.
     fn empty_literal(&self, v: u64) -> bool {
-        super::literal_at(self.program, v, &self.own_name)
+        super::literal_at(self.program, self.analysis, v, &self.own_name)
             .is_some_and(|l| matches!(l.as_str(), "\"\"" | "L\"\""))
     }
 
