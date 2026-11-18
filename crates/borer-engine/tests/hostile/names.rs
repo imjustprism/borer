@@ -1069,3 +1069,52 @@ fn a_chain_of_signatures_is_named_in_linear_work() {
         .count();
     assert_eq!(named, CHAINED);
 }
+
+/// Template signatures packed back to back.
+const BOUND: usize = 2048;
+
+/// Longest name a signature may give a function, in bytes.
+const NAME_MAX: usize = 120;
+
+/// Back-to-back template signatures name nothing longer than a name may
+/// be, in the heap the file-size bar allows.
+///
+/// Each binds one parameter its class spells sixty-four times, and the
+/// image takes at most a byte per signature byte over the same image
+/// holding prose.
+///
+/// Spelling each binding into the class's arguments made names and heap
+/// grow with the uses times the binding, past both bounds (C-208). The
+/// read-only data is padded to a megabyte: two thousand functions take
+/// their own heap, signatures or not.
+#[test]
+fn bound_signatures_stay_within_the_name_and_heap_bars() {
+    let _serial = serial();
+    let sig = |k: usize| {
+        let head = format!("void A{k:04}<{}T>() [with T = ", "T,".repeat(63));
+        format!("{head}{}]\0", "a".repeat(204 - head.len()))
+    };
+    let width = sig(0).len();
+    let analyzed = |text: &dyn Fn(usize) -> String| {
+        let mut rdata: String = (0..BOUND).map(text).collect();
+        assert_eq!(rdata.len(), width * BOUND);
+        rdata.push_str(&"\0".repeat((1 << 20) - rdata.len()));
+        let p = referencing(BOUND, rdata.as_bytes(), |k| [width * k, width * k]);
+        let (a, extra) = measured(|| Analysis::compute(&p));
+        let longest = a
+            .functions
+            .iter()
+            .filter_map(|f| f.name.as_ref())
+            .map(String::len)
+            .max();
+        (p.bytes.len(), extra, longest)
+    };
+    let (_, plain, _) = analyzed(&|_| format!("{}\0", "a".repeat(width - 1)));
+    let (size, extra, longest) = analyzed(&sig);
+    println!("bound signatures: {size} byte file, {extra} bytes of heap, {plain} for prose");
+    assert!(
+        extra <= LOAD_HEAP_PER_BYTE * size && extra <= plain + width * BOUND,
+        "a {size} byte file took {extra} bytes of heap to analyze, {plain} for prose"
+    );
+    assert!(longest.is_none_or(|n| n <= NAME_MAX), "{longest:?}");
+}

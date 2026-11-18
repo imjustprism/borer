@@ -609,6 +609,47 @@ pub(crate) fn parse_signature(text: &str) -> Option<Signature> {
     })
 }
 
+/// Splits a GCC or Clang template signature into its name and its
+/// bindings, as written.
+///
+/// GCC appends `[with T = int; U = float]` to the signature of a
+/// template's instantiation, Clang `[T = int, U = float]`, and the text
+/// before them must parse as a signature ([`parse_signature`]). It is read
+/// only to be shown: such a signature names and types nothing, since every
+/// instantiation of a template shares its name, its types are the
+/// template's (`Fill(const T &)`), and spelling the bindings into them
+/// multiplies the text.
+///
+/// # Arguments
+///
+/// * `text` - The string as read.
+///
+/// # Returns
+///
+/// The qualified name and the bracketed bindings, or `None` when the text
+/// is not a signature followed by a bracketed list holding a ` = `.
+pub(crate) fn template_signature(text: &str) -> Option<(String, &str)> {
+    if !text.ends_with(']') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let open = text.bytes().enumerate().rev().find_map(|(i, b)| {
+        match b {
+            b']' => depth += 1,
+            b'[' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        (depth == 0).then_some(i)
+    })?;
+    let bindings = text.get(open..)?;
+    let inner = bindings.strip_prefix('[')?.strip_suffix(']')?;
+    if !inner.strip_prefix("with ").unwrap_or(inner).contains(" = ") {
+        return None;
+    }
+    let sig = parse_signature(text.get(..open)?.trim_end())?;
+    Some((sig.name, bindings))
+}
+
 /// The type a conversion operator converts to: `Base::NetStreamBase *` for
 /// `Core::Ptr<Base::NetStreamBase>::operator Base::NetStreamBase *`.
 ///

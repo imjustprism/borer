@@ -2,7 +2,8 @@
 //!
 //! It covers the next steps a function that asserts points at, and each member
 //! its asserts spell paired with the field offset the code around them reads,
-//! and a long `__PRETTY_FUNCTION__` read whole in parts.
+//! a long `__PRETTY_FUNCTION__` read whole in parts, and template
+//! signatures shown whole without naming anything.
 //!
 //! The image is a stripped build with assertions on, the shape GitHub issue
 //! 24's binary has: every method guards one member and reports a failure
@@ -247,12 +248,18 @@ fn guarded_assert(at: u64, guard: Guard, expr: u64, line: u32, sig: u64) -> Vec<
     code
 }
 
-/// Builds the image.
+/// Builds an image of methods that assert.
 ///
 /// It places `.text` at 0x1000, entered at a `main` that calls each of
-/// [`METHODS`], and a read-only `.rdata` at 0x2000 holding the reporter's
+/// `methods`, and a read-only `.rdata` at 0x2000 holding the reporter's
 /// import slot, the path, the expressions and the signatures.
-fn widget() -> Program {
+///
+/// # Arguments
+///
+/// * `methods` - Entry, guard, expression, signature address and
+///   signature of each method.
+/// * `texts` - Each expression's address and its terminated bytes.
+fn image(methods: &[(u64, Guard, u64, u64, &str)], texts: &[(u64, &[u8])]) -> Program {
     let mut bytes = vec![0xccu8; 0x1000];
     bytes.resize(0x2000, 0);
     let mut put = |va: u64, b: &[u8]| {
@@ -260,7 +267,7 @@ fn widget() -> Program {
         bytes[off..off + b.len()].copy_from_slice(b);
     };
     let mut main = Vec::new();
-    for (k, &(entry, guard, expr, sig_at, sig)) in (0u64..).zip(&METHODS) {
+    for (k, &(entry, guard, expr, sig_at, sig)) in (0u64..).zip(methods) {
         main.extend(rip(0x1000 + 5 * k, &[0xe8], entry)); // ASM: call method
         put(sig_at, &[sig.as_bytes(), &[0]].concat());
         put(
@@ -271,20 +278,9 @@ fn widget() -> Program {
     main.push(0xc3); // ASM: ret
     put(0x1000, &main);
     put(PATH, b"src/widget.cpp\0");
-    put(NAME, b"this->m_name\0");
-    put(SIZE, b"this->m_size > 0\0");
-    put(FLAGS, b"this->m_flags < this->m_limit\0");
-    put(COUNT, b"count > 0\0");
-    put(ID, b"this->m_id\0");
-    put(KEY, b"this->m_key\0");
-    put(READY, b"this->IsReady()\0");
-    put(DEPTH, b"this->m_depth\0");
-    put(RECT, b"this->m_rect.w > 0\0");
-    put(QUOTE, b"this->m_key == \"\" || this->m_val\0");
-    put(
-        FAR,
-        &[&*b"1 == 1 && ".repeat(16), b"this->m_far\0"].concat(),
-    );
+    for &(at, text) in texts {
+        put(at, text);
+    }
     let mut p = Program::raw(
         bytes,
         Arch::X86_64,
@@ -301,6 +297,27 @@ fn widget() -> Program {
         kind: SymbolKind::Import,
     });
     p
+}
+
+/// Builds the image of [`METHODS`] and their expressions.
+fn widget() -> Program {
+    let far = [&*b"1 == 1 && ".repeat(16), b"this->m_far\0"].concat();
+    image(
+        &METHODS,
+        &[
+            (NAME, b"this->m_name\0"),
+            (SIZE, b"this->m_size > 0\0"),
+            (FLAGS, b"this->m_flags < this->m_limit\0"),
+            (COUNT, b"count > 0\0"),
+            (ID, b"this->m_id\0"),
+            (KEY, b"this->m_key\0"),
+            (READY, b"this->IsReady()\0"),
+            (DEPTH, b"this->m_depth\0"),
+            (RECT, b"this->m_rect.w > 0\0"),
+            (QUOTE, b"this->m_key == \"\" || this->m_val\0"),
+            (FAR, &far),
+        ],
+    )
 }
 
 /// A method whose text shows an assert points at the members its class's
@@ -445,20 +462,21 @@ fn a_member_asserted_at_two_offsets_names_neither() {
     assert_eq!(names.get(&0x270).map(String::as_str), Some("m_name"));
 }
 
-/// A `__PRETTY_FUNCTION__` too long to print whole is cut in the text, and
-/// a read of it says where the rest starts, so its template arguments,
-/// the part the cut drops, are read whole in two reads.
+/// A long `__PRETTY_FUNCTION__` shows its template bindings whole in the
+/// text, and a read of it, which caps at 200 characters, says where the
+/// rest starts, so the string reads whole in two reads.
 ///
-/// GitHub issue 24's agent pruned the prefix fragments the cut left
+/// GitHub issue 24's agent pruned the prefix fragments a cut left
 /// instead of reading the type names behind them.
 #[test]
 fn a_long_pretty_function_reads_whole_in_parts() {
     let p = widget();
     let a = Analysis::compute(&p);
     let text = decompile(&p, &a, &Overlay::default(), 0x1240).expect("decompiles");
+    let bindings = PRETTY.split_once(") ").map(|(_, b)| b).expect("bindings");
     assert!(
-        text.contains(&PRETTY[..60]) && !text.contains(&PRETTY[150..]),
-        "the text does not cut the long literal: {text}"
+        text.contains(&format!("__FUNCSIG__(Box<T>::Put {bindings})")),
+        "the text cuts the long literal: {text}"
     );
     let first = read_values(&p, LONG, Kind::CStr, 1).expect("reads");
     assert_eq!(
@@ -476,4 +494,57 @@ fn a_long_pretty_function_reads_whole_in_parts() {
     let short = read_values(&p, PATH, Kind::CStr, 1).expect("reads");
     assert_eq!(rest_of_cut(&short[0], Kind::CStr), None);
     assert_eq!(rest_of_cut(&short[0], Kind::U8), None);
+}
+
+/// `"this->m_count"`, asserted by the template methods.
+const CNT: u64 = 0x2120;
+
+/// The GCC, Clang and MSVC signatures of template methods, each with its
+/// method's entry and where it sits, guarding `m_count` at +0x10.
+const TEMPLATES: [(u64, u64, &str); 5] = [
+    (0x1100, 0x2200, "void Box<T>::Grow() [with T = int]"),
+    (0x1140, 0x2280, "void Box<T>::Grow() [with T = float]"),
+    (0x1180, 0x2300, "void Box<int>::Fill(const T &) [T = int]"),
+    (
+        0x11c0,
+        0x2380,
+        "std::vector<T, A> Pool<T, A>::Take(unsigned long) [with T = std::pair<int, int>; A = std::allocator<std::pair<int, int> >]",
+    ),
+    (0x1200, 0x2480, "void __cdecl Box<int>::Drain(void)"),
+];
+
+/// A GCC or Clang template signature names and types nothing, and its
+/// assert shows it whole, bindings included; MSVC's, which spells its
+/// arguments inline, names its method as before.
+///
+/// Every instantiation of `Box<T>::Grow` shares the name, `Fill`'s
+/// parameter is the template's `T`, and spelling the bindings into a
+/// signature multiplied its text: names drawn from the bindings were
+/// false or unbounded (C-208). They are shown, not believed: no method
+/// is named or typed, nor `Pool<T, A>` given a field.
+#[test]
+fn template_signatures_show_whole_and_name_nothing() {
+    let methods = TEMPLATES.map(|(entry, at, sig)| (entry, Guard::Field(0x10), CNT, at, sig));
+    let p = image(&methods, &[(CNT, b"this->m_count\0")]);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let names = [
+        "Box<T>::Grow",
+        "Box<T>::Grow",
+        "Box<int>::Fill",
+        "Pool<T, A>::Take",
+    ];
+    for (&(entry, _, sig), name) in TEMPLATES.iter().zip(names) {
+        let f = a.function(entry).expect("found");
+        assert!(f.name.is_none() && f.signature.is_none(), "{sig}");
+        let (_, bindings) = sig.split_once(") ").expect("bindings");
+        let text = decompile(&p, &a, &o, entry).expect("decompiles");
+        assert!(
+            text.contains(&format!("__FUNCSIG__({name} {bindings})")),
+            "{sig}: {text}"
+        );
+    }
+    let drain = a.function(0x1200).and_then(|f| f.name.clone());
+    assert_eq!(drain.as_deref(), Some("Box<int>::Drain"));
+    assert!(field_names(&p, &a, &o, "Pool<T, A>").is_empty());
 }

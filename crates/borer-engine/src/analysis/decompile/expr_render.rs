@@ -2325,9 +2325,13 @@ pub(super) fn vector_equality<'a>(l: &'a Expr, r: &Expr) -> Option<(&'a Expr, &'
 /// A signature string is the compiler's `__FUNCSIG__`: it renders as that
 /// macro when it names the function being rendered and as
 /// `__FUNCSIG__(Qualified::Name)` when it names another (an inlined helper's
-/// assert). A source path (a separator-bearing, space-free literal ending in
-/// a C or C++ file extension) keeps its last two components. Anything else
-/// is returned as is.
+/// assert). A GCC or Clang template signature shows whole as
+/// `__FUNCSIG__(Box<T>::Put [with T = int])`, its name as written and its
+/// bindings after it ([`crate::analysis::naming::template_signature`]).
+/// The file spells the names, so their comment marks are broken
+/// ([`uncomment`]). A source path (a separator-bearing, space-free literal
+/// ending in a C or C++ file extension) keeps its last two components.
+/// Anything else is returned as is.
 ///
 /// # Arguments
 ///
@@ -2344,8 +2348,11 @@ pub(super) fn compact_literal(quoted: &str, own_name: &str) -> String {
         return if sig.name == own_name {
             "__FUNCSIG__".to_owned()
         } else {
-            format!("__FUNCSIG__({})", sig.name)
+            uncomment(&format!("__FUNCSIG__({})", sig.name))
         };
+    }
+    if let Some((name, bindings)) = crate::analysis::naming::template_signature(inner) {
+        return uncomment(&format!("__FUNCSIG__({name} {bindings})"));
     }
     let path_like = !inner.contains(' ')
         && inner.contains(['/', '\\'])
@@ -2358,6 +2365,27 @@ pub(super) fn compact_literal(quoted: &str, own_name: &str) -> String {
         }
     }
     quoted.to_owned()
+}
+
+/// Breaks the comment marks in text the file spells with a space.
+///
+/// Every `/*`, `*/` and `//` becomes `/ *`, `* /` and `/ /`, overlapping
+/// ones too (`///` is `/ / /`), so the text opens or closes no comment.
+///
+/// # Arguments
+///
+/// * `text` - The text as rendered.
+fn uncomment(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut prev = ' ';
+    for c in text.chars() {
+        if matches!((prev, c), ('/', '/' | '*') | ('*', '/')) {
+            out.push(' ');
+        }
+        out.push(c);
+        prev = c;
+    }
+    out
 }
 
 #[cfg(test)]

@@ -2,6 +2,40 @@
 
 use super::*;
 
+/// A method that inlined a library template's assert keeps the name its
+/// own signature gives it, and shows the template's whole.
+///
+/// `Lexer::Next` references `void Lexer::Next()` and the assert of the
+/// `std::vector<Token>::operator[]` it inlined. Read as a candidate, the
+/// template's signature was a second name only `Lexer::Next` references,
+/// and the method stayed `sub_` (C-208).
+#[test]
+fn an_inlined_template_assert_leaves_its_method_named() {
+    let code = [
+        0x48, 0x8d, 0x05, 0xf9, 0x0f, 0x00, 0x00, // ASM: lea rax,[rip+0xff9]
+        0x48, 0x8d, 0x0d, 0xf2, 0x10, 0x00, 0x00, // ASM: lea rcx,[rip+0x10f2]
+        0xc3, // ASM: ret
+    ];
+    let bindings = "[with _Tp = Token; _Alloc = std::allocator<Token>; reference = Token&; size_type = long unsigned int]";
+    let subscript = format!(
+        "std::vector<_Tp, _Alloc>::reference std::vector<_Tp, _Alloc>::operator[](size_type) {bindings}"
+    );
+    let mut data = subscript.into_bytes();
+    data.resize(0x100, 0);
+    data.extend_from_slice(b"void Lexer::Next()\0");
+    let p = program64_with_data(&code, &data);
+    let a = Analysis::compute(&p);
+    let f = a.function(0x1_4000_1000).expect("found");
+    assert_eq!(f.name.as_deref(), Some("Lexer::Next"));
+    let text = decompile(&p, &a, &Overlay::default(), f.entry).unwrap_or_default();
+    assert!(
+        text.contains(&format!(
+            "__FUNCSIG__(std::vector<_Tp, _Alloc>::operator[] {bindings})"
+        )),
+        "{text}"
+    );
+}
+
 /// A class's field names are read from its methods once: the second
 /// call answers from the memo on the analysis, with the same names.
 #[test]

@@ -6,9 +6,10 @@ use crate::strings::{cstr_text_at, wide_run_start, wstr_text_at};
 
 /// Renders the literal at `addr` compactly.
 ///
-/// A signature or source-path string is read in full (up to 512 bytes) and
-/// shortened by [`expr::compact_literal`]; anything else is the capped
-/// [`string_at`] text.
+/// A signature or source-path string is read in full, up to the 4096
+/// bytes a string scan reads, so a template signature's bindings show
+/// whole, and is shortened by [`expr::compact_literal`]; anything else is
+/// the capped [`string_at`] text.
 ///
 /// # Arguments
 ///
@@ -22,13 +23,11 @@ use crate::strings::{cstr_text_at, wide_run_start, wstr_text_at};
 /// The quoted literal, or `None` when `addr` holds none the text prints.
 #[must_use]
 pub fn literal_at(program: &Program, addr: u64, own_name: &str) -> Option<String> {
-    /// Longest signature or path read in full.
-    const FULL: usize = 512;
     literal_section(program, addr)?;
     if let Some(literal) = crate::analysis::qt::literal(program, addr) {
         return Some(literal);
     }
-    if let Some((_, raw)) = cstr_at(program, addr, 4, FULL) {
+    if let Some((_, raw)) = cstr_at(program, addr, 4, crate::strings::SCAN_MAX) {
         let quoted = format!("\"{}\"", raw.replace('\\', "\\\\").replace('"', "\\\""));
         let compact = expr::compact_literal(&quoted, own_name);
         if compact != quoted {
