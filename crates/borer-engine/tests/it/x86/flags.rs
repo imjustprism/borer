@@ -704,8 +704,10 @@ fn inc_then_jo_agrees_with_the_emulator() {
 }
 
 /// `dec` sets the overflow when its operand is the smallest signed value,
-/// and only then: `jo` after `dec` of `0x80000000` is taken, after `dec` of
-/// `0x80000001` it is not.
+/// and only then.
+///
+/// `jo` after `dec` of `0x80000000` is taken, after `dec` of `0x80000001`
+/// it is not, and `seto` after each agrees with the lifter.
 ///
 /// `mov eax,imm; dec eax; jo L; xor eax,eax; ret; L: mov eax,1; ret`.
 #[test]
@@ -716,6 +718,12 @@ fn dec_at_int_min_then_jo_agrees_with_the_emulator() {
             0x00, 0x00, 0x00, 0xc3,
         ];
         assert_eq!(emulated_64(&code), Some((Stop::Returned, want)), "{low:#x}");
+        agrees_with_the_emulator_64(&[
+            0xb8, low, 0x00, 0x00, 0x80, // ASM: mov eax, imm
+            0xff, 0xc8, // ASM: dec eax
+            0x0f, 0x90, 0xc0, // ASM: seto al
+            0xc3, // ASM: ret
+        ]);
     }
 }
 
@@ -741,7 +749,7 @@ fn dec_rbp_then_jg_runs() {
 #[test]
 fn inc_and_dec_overflow_at_every_width_agrees_with_the_emulator() {
     let seto = [0x0f, 0x90];
-    let cases: [(&[u8], [u8; 2], u64); 11] = [
+    let cases: [(&[u8], [u8; 2], u64); 12] = [
         (&[0xb0, 0x7f, 0xfe, 0xc0], seto, 1), // ASM: mov al, 0x7f; inc al
         (&[0xb0, 0x7e, 0xfe, 0xc0], seto, 0), // ASM: mov al, 0x7e; inc al
         (&[0xb0, 0x80, 0xfe, 0xc8], seto, 1), // ASM: mov al, 0x80; dec al
@@ -763,11 +771,14 @@ fn inc_and_dec_overflow_at_every_width_agrees_with_the_emulator() {
             seto,
             1,
         ), // ASM: mov rax, 0x8000000000000000; dec rax
-        (&[0xb8, 0xff, 0xff, 0xff, 0x7f, 0x48, 0xff, 0xc0], seto, 0), // ASM: mov eax, 0x7fffffff; inc rax
+        // ASM: mov eax, 0x7fffffff; inc rax
+        (&[0xb8, 0xff, 0xff, 0xff, 0x7f, 0x48, 0xff, 0xc0], seto, 0),
         (&[0xf9, 0xb0, 0xff, 0xfe, 0xc0], [0x0f, 0x92], 1), // ASM: stc; mov al, 0xff; inc al
+        (&[0xf9, 0xb0, 0x80, 0xfe, 0xc8], [0x0f, 0x92], 1), // ASM: stc; mov al, 0x80; dec al
     ];
     for (step, setcc, want) in cases {
-        let read = [setcc[0], setcc[1], 0xc0, 0x0f, 0xb6, 0xc0, 0xc3]; // ASM: setcc al; movzx eax, al; ret
+        // ASM: setcc al; movzx eax, al; ret
+        let read = [setcc[0], setcc[1], 0xc0, 0x0f, 0xb6, 0xc0, 0xc3];
         let code = [step, &read[..]].concat();
         assert_eq!(
             emulated_64(&code),
