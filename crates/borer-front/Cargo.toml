@@ -14,4 +14,4 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-borer-engine = { version = "0.3.0", path = "../borer-engine" }
+borer-engine = { version = "0.3.1", path = "../borer-engine" }
