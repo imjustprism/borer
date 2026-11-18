@@ -688,7 +688,7 @@ const DOMINANT: (usize, usize) = (3, 4);
 /// # Returns
 ///
 /// The dominant shape by `(introducing class, slot)`.
-fn dominant_shapes(
+pub(super) fn dominant_shapes(
     analysis: &Analysis,
     classes: &BTreeMap<String, ClassInfo>,
 ) -> BTreeMap<(String, usize), u64> {

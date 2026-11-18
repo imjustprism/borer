@@ -2,15 +2,18 @@
 //! same slot, and the slot names one member gives the others.
 //!
 //! Two tables of one slot count that hold one function at one index hold
-//! the same virtual there: neither class overrode it. Tables that agree so
-//! at [`ANCHORS_MIN`] indexes are aligned slot for slot, so a name any
-//! member gives index `k` names slot `k` in all of them, the abstract
-//! base's included, whose own entry is a stub no assert names. This finds
-//! siblings the constructors never link: the parent links of
-//! [`super::propagate_slot_names`] join tables of different lengths, a
-//! family joins tables of one length. A slot keeps a name only when every
-//! member that spells one agrees; disagreement is reported, not resolved,
-//! and nothing is renamed.
+//! the same virtual there: neither class overrode it, so both inherit it
+//! from a base whose table reaches that index, and every slot up to it is
+//! that base's virtual in both. Tables that agree so at [`ANCHORS_MIN`]
+//! indexes are one family. A member's name for slot `k` is a hint for
+//! another member's slot `k` only when the two share a function at `k` or
+//! above, or `k` is below the table of a parent the constructors name for
+//! both: past that, two siblings' slots `k` may be each one's own new
+//! virtual. The guards of [`super::propagate_slot_names`] hold too: a name
+//! the class already gives another slot does not travel, nor one whose
+//! function differs in shape from nearly every function at that slot. A
+//! slot keeps a hint only when every member that gives one agrees;
+//! disagreement is reported, not resolved, and nothing is renamed.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -143,9 +146,12 @@ fn families(classes: &BTreeMap<String, ClassInfo>) -> Families {
 /// Returns the family of `class`, with the names its members give each
 /// slot.
 ///
-/// A member's name counts for a slot when the function its table holds
+/// A member's name counts for slot `k` when the function its table holds
 /// there has a method name ([`method_part`]) that is not a `vfunc_` index
-/// name; constructors, destructors and disambiguated names do not count.
+/// name (constructors, destructors and disambiguated names do not count),
+/// the member reaches `k` ([`reach`]), the class gives that method name to
+/// no other slot, and the function is not the odd shape out at its slot
+/// ([`super::names::dominant_shapes`]).
 ///
 /// # Arguments
 ///
@@ -158,34 +164,50 @@ fn families(classes: &BTreeMap<String, ClassInfo>) -> Families {
 /// The family, or `None` when the class shares no family.
 #[must_use]
 pub fn family_of(analysis: &Analysis, overlay: &Overlay, class: &str) -> Option<Family> {
-    let all = analysis.derived.get_or_build("vtable_families", (), || {
-        families(&analysis.classes.by_name)
-    });
+    let classes = &analysis.classes.by_name;
+    let all = analysis
+        .derived
+        .get_or_build("vtable_families", (), || families(classes));
     let group = all.groups.get(*all.of.get(class)?)?;
-    let own = analysis.classes.by_name.get(class)?;
+    let own = classes.get(class)?;
+    let shapes = analysis.derived.get_or_build("vtable_slot_shapes", (), || {
+        super::names::dominant_shapes(analysis, classes)
+    });
+    let method_at = |f: u64| {
+        (f != 0)
+            .then(|| method_part(Some(&name_of(analysis, overlay, f))))
+            .flatten()
+            .filter(|m| !m.starts_with("vfunc_"))
+    };
+    let own_methods: Vec<Option<String>> = own.slots.iter().map(|&f| method_at(f)).collect();
     let mut votes: BTreeMap<usize, BTreeMap<String, Vec<String>>> = BTreeMap::new();
     let mut members = Vec::new();
-    for m in group {
-        let Some(info) = analysis.classes.by_name.get(m) else {
+    for m in group.iter().filter(|m| *m != class) {
+        let Some(info) = classes.get(m) else {
             continue;
         };
-        if m != class {
-            let shared = info
-                .slots
-                .iter()
-                .zip(&own.slots)
-                .filter(|(a, b)| **a != 0 && a == b)
-                .count();
-            members.push((m.clone(), shared));
-        }
-        for (k, &f) in info.slots.iter().enumerate() {
-            let Some(method) = (f != 0)
-                .then(|| method_part(Some(&name_of(analysis, overlay, f))))
-                .flatten()
-                .filter(|m| !m.starts_with("vfunc_"))
-            else {
+        let shared = info
+            .slots
+            .iter()
+            .zip(&own.slots)
+            .filter(|(a, b)| **a != 0 && a == b)
+            .count();
+        members.push((m.clone(), shared));
+        let limit = reach(classes, own, info);
+        for (k, &f) in info.slots.iter().enumerate().take(limit) {
+            let Some(method) = method_at(f) else {
                 continue;
             };
+            let elsewhere = own_methods
+                .iter()
+                .enumerate()
+                .any(|(j, o)| j != k && o.as_deref() == Some(method.as_str()));
+            let odd = shapes
+                .get(&(super::names::introducer(classes, m, k), k))
+                .is_some_and(|&shape| analysis.function(f).is_some_and(|x| x.shape_hash != shape));
+            if elsewhere || odd {
+                continue;
+            }
             votes
                 .entry(k)
                 .or_default()
@@ -215,13 +237,40 @@ pub fn family_of(analysis: &Analysis, overlay: &Overlay, class: &str) -> Option<
     })
 }
 
+/// Returns how many of `own`'s slots `member`'s names are hints for.
+///
+/// That is up to and including the last index the two tables hold one
+/// function at, or the length of a parent's table the constructors name
+/// for both, the larger.
+///
+/// # Arguments
+///
+/// * `classes` - Classes with their tables and parents.
+/// * `own` - The class being named.
+/// * `member` - The member whose names would travel.
+fn reach(classes: &BTreeMap<String, ClassInfo>, own: &ClassInfo, member: &ClassInfo) -> usize {
+    let shared = member
+        .slots
+        .iter()
+        .zip(&own.slots)
+        .rposition(|(a, b)| *a != 0 && a == b)
+        .map_or(0, |k| k + 1);
+    let parent = own
+        .parent
+        .as_ref()
+        .filter(|p| member.parent.as_ref() == Some(*p) || **p == member.name)
+        .and_then(|p| classes.get(p))
+        .map_or(0, |p| p.slots.len());
+    shared.max(parent)
+}
+
 /// Renders a class's table for its layout: a line per slot, the first
 /// `shown`, each with what its family names it.
 ///
-/// A slot whose own function has no method name shows the name its family
-/// agrees on; a slot the family spells two ways shows every spelling, and
-/// stays unnamed. The family line before the slots says who the members
-/// are and how many slots each shares.
+/// A slot whose own function has no method name shows, as a hint, the name
+/// the members that reach it agree on ([`family_of`]); a slot they spell
+/// two ways shows every spelling. The family line before the slots says
+/// who the members are and how many slots each shares.
 ///
 /// # Arguments
 ///
@@ -256,7 +305,7 @@ pub fn render_slots(
         let more = fam.members.len().saturating_sub(MEMBERS_SHOWN);
         let _ = writeln!(
             out,
-            "family: {}{}; each {}-slot table holds the same function at those slots, so a name one member gives a slot names it in all",
+            "family: {}{}; each {}-slot table holds the same function at the shared slots, so a member's name for a slot at or below the last one it shares is a hint for this one",
             listed.join(", "),
             if more > 0 {
                 format!(", +{more}")
@@ -306,7 +355,8 @@ fn slot_note(verdict: &SlotName, own: &str) -> Option<String> {
     match verdict {
         SlotName::Agreed(method, members) => {
             let named = method_part(Some(own)).is_some_and(|m| !m.starts_with("vfunc_"));
-            (!named).then(|| format!("  family names it {method} (spelled by {})", by(members)))
+            let verb = if members.len() == 1 { "names" } else { "name" };
+            (!named).then(|| format!("  {} {verb} this slot {method}", by(members)))
         }
         SlotName::Disputed(spelled) => {
             let list: Vec<String> = spelled
@@ -314,7 +364,7 @@ fn slot_note(verdict: &SlotName, own: &str) -> Option<String> {
                 .map(|(m, members)| format!("{m} ({})", by(members)))
                 .collect();
             Some(format!(
-                "  family disagrees: {}; left unnamed",
+                "  members name this slot differently: {}",
                 list.join(", ")
             ))
         }

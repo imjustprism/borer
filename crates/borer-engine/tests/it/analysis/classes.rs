@@ -1180,20 +1180,15 @@ fn an_applied_class_layout_types_each_methods_object() {
     assert!(set.contains("this->f_10 = "), "{set}");
 }
 
-/// A name one class gives a slot names it across the classes whose tables
-/// hold the same functions slot for slot, and a slot they spell two ways
-/// stays unnamed.
+/// Builds an analysis of an empty image holding the classes given, each
+/// with its vtable's address and slots, and the overlay naming functions.
 ///
-/// `Base`, `A` and `B` have five slots each and hold `Release` and
-/// `AddRef` at slots 0 and 1, so they are one family. `Base`'s slots 2 and
-/// 3 hold functions nothing names; `B` calls its slot 2 `Update`, and `A`
-/// and `B` both call slot 3 `Draw`, so those name `Base`'s. Slot 4 is
-/// `Paint` in `A` and `Render` in `B`: reported, not chosen. `Short` shares
-/// both anchors but has four slots, and `Lone` shares one anchor alone:
-/// neither is in the family.
-#[test]
-fn a_class_family_names_the_slots_one_member_spells() {
-    use borer_engine::analysis::vtables::{ClassInfo, SlotName, family_of, render_slots};
+/// # Arguments
+///
+/// * `tables` - Each class, its vtable and its slots.
+/// * `names` - Each function's name.
+fn family_fixture(tables: &[(&str, u64, &[u64])], names: &[(u64, &str)]) -> (Analysis, Overlay) {
+    use borer_engine::analysis::vtables::ClassInfo;
     let mut bytes = vec![0u8; 0x2000];
     bytes[0x1000] = 0xc3;
     let p = Program::raw(
@@ -1206,14 +1201,7 @@ fn a_class_family_names_the_slots_one_member_spells() {
         )],
     );
     let mut a = Analysis::compute(&p);
-    let tables: [(&str, u64, &[u64]); 5] = [
-        ("Base", 0x8000, &[0x100, 0x200, 0x300, 0x400, 0x500]),
-        ("A", 0x8100, &[0x100, 0x200, 0x300, 0x410, 0x510]),
-        ("B", 0x8200, &[0x100, 0x200, 0x320, 0x420, 0x520]),
-        ("Short", 0x8300, &[0x100, 0x200, 0x330, 0x430]),
-        ("Lone", 0x8400, &[0x100, 0x240, 0x340, 0x440, 0x540]),
-    ];
-    for (name, vtable, slots) in tables {
+    for &(name, vtable, slots) in tables {
         a.classes.by_name.insert(
             name.to_owned(),
             ClassInfo {
@@ -1225,23 +1213,62 @@ fn a_class_family_names_the_slots_one_member_spells() {
         );
     }
     let mut o = Overlay::default();
-    for (va, name) in [
-        (0x100, "Base::Release"),
-        (0x200, "Base::AddRef"),
-        (0x320, "B::Update"),
-        (0x410, "A::Draw"),
-        (0x420, "B::Draw"),
-        (0x510, "A::Paint"),
-        (0x520, "B::Render"),
-        (0x440, "Lone::Draw"),
-    ] {
+    for &(va, name) in names {
         o.names.insert(va, name.to_owned());
     }
+    (a, o)
+}
+
+/// A name one class gives a slot is a hint for another class of its
+/// family only up to the last slot the two share, and a slot they spell
+/// two ways keeps every spelling.
+///
+/// `Base`, `A`, `B` and `C` have six slots each and hold `Release` and
+/// `AddRef` at slots 0 and 1, so they are one family. `A` and `B` also
+/// share slot 5 with `Base`, so their names reach all of `Base`'s slots:
+/// `B` calls slot 2 `Update`, both call slot 3 `Draw`, and slot 4 is
+/// `Paint` in `A` and `Render` in `B`, reported, not chosen. `C` shares
+/// only slots 0 and 1, so its `Bind` at slot 2 may be its own new virtual
+/// and is no hint. `Short` shares both anchors but has five slots, and
+/// `Lone` shares one anchor alone: neither is in the family.
+#[test]
+fn a_class_family_names_the_slots_one_member_spells() {
+    use borer_engine::analysis::vtables::{SlotName, family_of, render_slots};
+    let (a, o) = family_fixture(
+        &[
+            ("Base", 0x8000, &[0x100, 0x200, 0x300, 0x400, 0x500, 0x600]),
+            ("A", 0x8100, &[0x100, 0x200, 0x300, 0x410, 0x510, 0x600]),
+            ("B", 0x8200, &[0x100, 0x200, 0x320, 0x420, 0x520, 0x600]),
+            ("C", 0x8300, &[0x100, 0x200, 0x330, 0x430, 0x530, 0x630]),
+            ("Short", 0x8400, &[0x100, 0x200, 0x340, 0x440, 0x540]),
+            ("Lone", 0x8500, &[0x100, 0x250, 0x350, 0x450, 0x550, 0x650]),
+        ],
+        &[
+            (0x100, "Base::Release"),
+            (0x200, "Base::AddRef"),
+            (0x320, "B::Update"),
+            (0x330, "C::Bind"),
+            (0x410, "A::Draw"),
+            (0x420, "B::Draw"),
+            (0x510, "A::Paint"),
+            (0x520, "B::Render"),
+            (0x450, "Lone::Draw"),
+        ],
+    );
     let fam = family_of(&a, &o, "Base").expect("Base has a family");
     assert_eq!(
         fam.members,
-        vec![("A".to_owned(), 3), ("B".to_owned(), 2)],
+        vec![
+            ("A".to_owned(), 4),
+            ("B".to_owned(), 3),
+            ("C".to_owned(), 2)
+        ],
         "{fam:?}"
+    );
+    assert_eq!(
+        fam.names.get(&2),
+        Some(&SlotName::Agreed("Update".to_owned(), vec!["B".to_owned()])),
+        "C's slot 2 is past what it shares: {fam:?}"
     );
     assert_eq!(
         fam.names.get(&3),
@@ -1256,7 +1283,7 @@ fn a_class_family_names_the_slots_one_member_spells() {
     );
     assert!(
         family_of(&a, &o, "Short").is_none(),
-        "four slots is another table"
+        "five slots is another table"
     );
     assert!(
         family_of(&a, &o, "Lone").is_none(),
@@ -1264,12 +1291,41 @@ fn a_class_family_names_the_slots_one_member_spells() {
     );
     let text = render_slots(&a, &o, &a.classes.by_name["Base"], 48);
     for want in [
-        "family: A (3 shared), B (2 shared); each 5-slot table",
-        "  [2] sub_300  family names it Update (spelled by B)\n",
-        "  [3] sub_400  family names it Draw (spelled by A, B)\n",
-        "  [4] sub_500  family disagrees: Paint (A), Render (B); left unnamed\n",
+        "family: A (4 shared), B (3 shared), C (2 shared); each 6-slot table",
+        "  [2] sub_300  B names this slot Update\n",
+        "  [3] sub_400  A, B name this slot Draw\n",
+        "  [4] sub_500  members name this slot differently: Paint (A), Render (B)\n",
         "  [0] Base::Release\n",
     ] {
         assert!(text.contains(want), "missing {want:?}:\n{text}");
     }
+    assert!(!text.contains("Bind"), "{text}");
+}
+
+/// Two siblings that share only their base's slots lend no names for the
+/// slots past it, where each adds a virtual of its own.
+///
+/// `Texture` and `Sound` both derive from a `RefCounted` with `AddRef` and
+/// `Release`, then add two virtuals each; their tables are one length and
+/// share slots 0 and 1, so they are one family, but `Texture`'s `Bind` at
+/// slot 2 says nothing of `Sound`'s slot 2.
+#[test]
+fn siblings_lend_no_names_past_the_slots_they_share() {
+    use borer_engine::analysis::vtables::{family_of, render_slots};
+    let (a, o) = family_fixture(
+        &[
+            ("Texture", 0x8000, &[0x100, 0x200, 0x310, 0x410]),
+            ("Sound", 0x8100, &[0x100, 0x200, 0x320, 0x420]),
+        ],
+        &[
+            (0x100, "RefCounted::AddRef"),
+            (0x200, "RefCounted::Release"),
+            (0x310, "Texture::Bind"),
+            (0x410, "Texture::Upload"),
+        ],
+    );
+    assert!(family_of(&a, &o, "Sound").is_some(), "they are one family");
+    let text = render_slots(&a, &o, &a.classes.by_name["Sound"], 48);
+    assert!(!text.contains("Bind"), "{text}");
+    assert!(!text.contains("Upload"), "{text}");
 }
