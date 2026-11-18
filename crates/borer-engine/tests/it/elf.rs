@@ -849,6 +849,44 @@ fn a_section_cut_by_the_end_of_the_file_is_not_called_zero_filled() {
     );
 }
 
+/// A thread-local `.tbss` takes no image addresses: a `.bss` inside its
+/// range is found as itself, and an address only `.tbss` would cover is
+/// not mapped.
+///
+/// The fixture's `.eh_frame_hdr` and `.eh_frame` rows are rewritten into
+/// a `NOBITS|TLS` `.tbss` of 0x1000 bytes at `BASE + 0x1000` and, declared
+/// after it, a `NOBITS` `.bss` of 0x100 bytes at `BASE + 0x1800`.
+#[test]
+fn a_thread_local_bss_takes_no_addresses() {
+    let mut bytes = elf_bytes(false);
+    for (index, name, flags, addr, size) in [
+        (
+            11,
+            b".tbss\0".as_slice(),
+            0x403u64,
+            BASE + 0x1000,
+            0x1000u64,
+        ),
+        (12, b".bss\0".as_slice(), 0x3, BASE + 0x1800, 0x100),
+    ] {
+        let row = SHOFF + index * 64;
+        let name_at = usize::try_from(u32::from_le_bytes(
+            bytes[row..row + 4].try_into().expect("four bytes"),
+        ))
+        .expect("fits");
+        bytes[0x4e0 + name_at..0x4e0 + name_at + name.len()].copy_from_slice(name);
+        bytes[row + 4..row + 8].copy_from_slice(&8u32.to_le_bytes());
+        bytes[row + 8..row + 16].copy_from_slice(&flags.to_le_bytes());
+        bytes[row + 16..row + 24].copy_from_slice(&addr.to_le_bytes());
+        bytes[row + 32..row + 40].copy_from_slice(&size.to_le_bytes());
+    }
+    let p = Program::from_bytes(std::path::PathBuf::from("tls.elf"), bytes).expect("parses");
+    let bss = p.no_bytes_at(BASE + 0x1810);
+    assert!(bss.contains("in .bss"), "{bss}");
+    let tls = p.no_bytes_at(BASE + 0x1000);
+    assert!(tls.contains("not mapped"), "{tls}");
+}
+
 /// A section name that is not UTF-8 no longer refuses the file.
 ///
 /// The strict parse fails, the lenient one reads the rest, and the summary says

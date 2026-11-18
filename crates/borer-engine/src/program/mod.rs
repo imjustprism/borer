@@ -375,6 +375,27 @@ pub(crate) fn named_code(symbols: &[Symbol]) -> BTreeSet<u64> {
         .collect()
 }
 
+/// Returns the bytes an ELF section takes in the image: its size, but none
+/// for thread-local storage the file holds no bytes for (`.tbss`).
+///
+/// A `.tbss` is a template each thread's block is made from; its address
+/// range overlaps the sections after it (glibc lays `.init_array` and
+/// `.dynamic` there), so it takes none of their addresses.
+///
+/// # Arguments
+///
+/// * `sh` - The section header.
+fn image_size(sh: &goblin::elf::SectionHeader) -> u64 {
+    /// `SHF_TLS`.
+    const TLS: u64 = 0x400;
+    let nobits = sh.sh_type == goblin::elf::section_header::SHT_NOBITS;
+    if nobits && sh.sh_flags & TLS != 0 {
+        0
+    } else {
+        sh.sh_size
+    }
+}
+
 /// Finds the first-declared file-backed section holding an address, by a
 /// binary search of a table's rows ([`Program::index_sections`]).
 ///
@@ -1195,7 +1216,7 @@ impl Program {
                     sections.push(Section {
                         name: names.take(raw),
                         va: Va(sh.sh_addr),
-                        vsize: sh.sh_size,
+                        vsize: image_size(sh),
                         file_off: FileOff(sh.sh_offset),
                         file_size: if nobits { 0 } else { sh.sh_size },
                         readable: true,
