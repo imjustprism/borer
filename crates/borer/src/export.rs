@@ -417,7 +417,8 @@ impl Units<'_> {
     }
 
     /// Writes out every file's held text: a file's first write creates it
-    /// with its prologue, a later one appends.
+    /// with its prologue, a later one appends; neither goes through a link
+    /// ([`no_link_under`]).
     ///
     /// # Errors
     ///
@@ -427,8 +428,8 @@ impl Units<'_> {
         for (file, text) in std::mem::take(&mut self.held) {
             let path = self.dir.join(&file);
             let shown = short_path(&path.display().to_string());
+            no_link_under(self.dir, &file)?;
             let mut out = if self.made.insert(file.clone()) {
-                no_link_under(self.dir, &file)?;
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)
                         .with_context(|| format!("creating the directory of {shown}"))?;
@@ -449,8 +450,8 @@ impl Units<'_> {
     }
 }
 
-/// Refuses a link at any directory between `dir` and the file `file`
-/// names under it, so a split never writes through one.
+/// Refuses a link at `dir` or at any directory between it and the file
+/// `file` names under it, so a split never writes through one.
 ///
 /// # Arguments
 ///
@@ -459,17 +460,16 @@ impl Units<'_> {
 ///
 /// # Errors
 ///
-/// When a directory on the way is a link, or something that is not a
-/// directory.
+/// When `dir` or a directory on the way is a link, or something that is
+/// not a directory.
 fn no_link_under(dir: &Path, file: &str) -> anyhow::Result<()> {
     let mut at = dir.to_path_buf();
-    for part in file
-        .split('/')
-        .collect::<Vec<_>>()
-        .split_last()
-        .map_or(&[][..], |(_, d)| d)
-    {
-        at.push(part);
+    let parts: Vec<&str> = file.split('/').collect();
+    let dirs = parts.split_last().map_or(&[][..], |(_, d)| d);
+    for part in std::iter::once("").chain(dirs.iter().copied()) {
+        if !part.is_empty() {
+            at.push(part);
+        }
         #[expect(
             clippy::disallowed_methods,
             reason = "a sanitized path under the split's directory"
@@ -519,10 +519,18 @@ fn write_whole(path: &Path, text: &[u8]) -> anyhow::Result<()> {
 ///
 /// # Errors
 ///
-/// When the directory holds anything, or one of the two cannot be created.
+/// When the directory holds anything or cannot be read, or one of the two
+/// cannot be created or is a link.
 fn split_dirs(root: &Path, shown: &str) -> anyhow::Result<(PathBuf, PathBuf)> {
     #[expect(clippy::disallowed_methods, reason = "unusable_path cleared the root")]
-    let occupied = std::fs::read_dir(root).is_ok_and(|mut d| d.next().is_some());
+    let listed = std::fs::read_dir(root);
+    let occupied = match listed {
+        Ok(mut d) => d.next().is_some(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => {
+            return Err(e).with_context(|| format!("reading {shown}; nothing was written"));
+        }
+    };
     if occupied {
         anyhow::bail!(
             "{shown} is not empty; name a new or empty directory for --split; nothing was written"
@@ -531,6 +539,7 @@ fn split_dirs(root: &Path, shown: &str) -> anyhow::Result<(PathBuf, PathBuf)> {
     let (src, include) = (root.join("src"), root.join("include"));
     for d in [&src, &include] {
         std::fs::create_dir_all(d).with_context(|| format!("creating {}", d.display()))?;
+        no_link_under(d, "")?;
     }
     Ok((src, include))
 }
@@ -667,8 +676,10 @@ pub fn write_split(
     let binary = short_path(&program.path.display().to_string());
     write_whole(&src.join(split::DECLS), hoisted.head(&binary).as_bytes())?;
     let headers = &split_headers.classes;
+    no_link_under(&include, split::SDK_HEADER)?;
     write_whole(&include.join(split::SDK_HEADER), &shared)?;
     for (_, file, text) in headers {
+        no_link_under(&include, file)?;
         write_whole(&include.join(file), text.as_bytes())?;
     }
     let named: Vec<(&str, &str)> = headers
@@ -1352,5 +1363,79 @@ mod tests {
             "{why}"
         );
         assert!(!written, "nothing was written");
+    }
+
+    /// Makes `link` a directory link to `target`: a symlink, or on Windows
+    /// a junction where symlinks need a privilege.
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - The directory linked to.
+    /// * `link` - The link to create.
+    ///
+    /// # Returns
+    ///
+    /// Whether the link was made.
+    fn dir_link(target: &std::path::Path, link: &std::path::Path) -> bool {
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(target, link).is_ok();
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_dir(target, link).is_ok()
+            || std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .is_ok_and(|o| o.status.success());
+        made
+    }
+
+    /// A split refuses to write through a link at its `src` directory, at a
+    /// directory below it on a file's first write, and at one planted
+    /// before a later append; skipped where links cannot be made.
+    ///
+    /// # Panics
+    ///
+    /// When a write follows a link.
+    #[test]
+    fn a_split_writes_through_no_link() {
+        let root = std::env::temp_dir().join(format!("borer-split-link-{}", std::process::id()));
+        let away = root.join("away");
+        let src = root.join("src");
+        std::fs::create_dir_all(&away).expect("a temp dir");
+        std::fs::create_dir_all(&src).expect("a temp dir");
+        let units = |dir| super::Units {
+            dir,
+            held: std::collections::BTreeMap::new(),
+            made: std::collections::BTreeSet::new(),
+            bytes: 0,
+        };
+        let mut split = units(&src);
+        split.add("sub/a.c", "first\n").expect("held");
+        split.flush().expect("a plain directory takes the file");
+        std::fs::remove_dir_all(src.join("sub")).expect("removed");
+        std::fs::write(away.join("a.c"), "untouched").expect("written");
+        if dir_link(&away, &src.join("sub")) {
+            split.add("sub/a.c", "second\n").expect("held");
+            let appended = split.flush();
+            assert!(appended.is_err(), "an append went through a link");
+            split.add("sub/b.c", "third\n").expect("held");
+            assert!(split.flush().is_err(), "a first write went through a link");
+            let linked = root.join("linked");
+            assert!(dir_link(&away, &linked));
+            let mut through = units(&linked);
+            through.add("c.c", "fourth\n").expect("held");
+            assert!(through.flush().is_err(), "the src directory is a link");
+            assert_eq!(
+                walk(&away),
+                vec!["a.c"],
+                "nothing reached the link's target"
+            );
+            assert_eq!(
+                std::fs::read_to_string(away.join("a.c")).expect("reads"),
+                "untouched"
+            );
+        }
+        std::fs::remove_dir_all(&root).ok();
     }
 }
