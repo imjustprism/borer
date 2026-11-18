@@ -26,6 +26,7 @@ use super::decompile::decompile_named;
 use super::decompile::interp::debug_local;
 use super::protos::{self, Proto, Var, VarKey};
 use super::reads::{Tag, Tracked};
+use super::settable::{self, Annotation};
 use super::stated::{self, Field, Mode, Statement};
 use super::utypes::{self, TypeExpr, UserType};
 use super::{Analysis, Overlay, apply, cdecl, name_of, parse_addr, project, resolve};
@@ -602,7 +603,9 @@ impl Draft {
     ///
     /// # Errors
     ///
-    /// When the edit is refused; the message says why.
+    /// When the edit is refused; the message says why. A name, comment or
+    /// applied type at an address no section declares is refused here, for
+    /// every caller alike ([`settable::must_be_in_a_section`]).
     fn step(
         &mut self,
         (p, a): (&Program, &Analysis),
@@ -611,8 +614,12 @@ impl Draft {
     ) -> Result<(), String> {
         let word: u64 = if p.is_64 { 8 } else { 4 };
         match edit {
-            Edit::Name { at, name } => self.name((p, a), *at, name, force),
+            Edit::Name { at, name } => {
+                settable::must_be_in_a_section(p, *at, Annotation::Name)?;
+                self.name((p, a), *at, name, force)
+            }
             Edit::Comment { at, text } => {
+                settable::must_be_in_a_section(p, *at, Annotation::Comment)?;
                 self.put(Change::Comment(*at, to(Some(text.clone()))));
                 self.lines.push(Line::Commented { at: *at });
                 Ok(())
@@ -644,7 +651,10 @@ impl Draft {
                     .map_err(|e| e.to_string())?;
                 self.define((p, a), name, ty)
             }
-            Edit::Apply { at, ty } => self.apply_at(a, *at, ty, word),
+            Edit::Apply { at, ty } => {
+                settable::must_be_in_a_section(p, *at, Annotation::Type)?;
+                self.apply_at(a, *at, ty, word)
+            }
             Edit::Proto { entry, proto } => self.prototype((p, a), *entry, proto),
             Edit::Var {
                 entry,

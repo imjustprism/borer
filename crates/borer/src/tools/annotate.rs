@@ -142,7 +142,6 @@ impl BorerServer {
                 .enumerate()
                 .map(|(i, (address, name))| {
                     let at = self.addr(p, address).map_err(|e| item(i, e))?;
-                    must_be_in_a_section(p, at, Annotation::Name).map_err(|e| item(i, e))?;
                     Ok(Edit::Name {
                         at,
                         name: name.clone(),
@@ -208,7 +207,6 @@ impl BorerServer {
         must_fit_a_row(&comment, Annotation::Comment)?;
         self.with_program(|p| {
             let va = self.addr(p, &address)?;
-            must_be_in_a_section(p, va, Annotation::Comment)?;
             let edits = [Edit::Comment {
                 at: va,
                 text: comment.clone(),

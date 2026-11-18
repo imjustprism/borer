@@ -553,3 +553,39 @@ fn a_revert_says_what_it_takes_back() {
         ]
     );
 }
+
+/// A name, comment or applied type at an address no section declares is
+/// refused by the plan itself, so every edit path refuses it alike; each
+/// in a `.bss` passes.
+#[test]
+fn an_annotation_no_section_declares_is_refused_by_the_plan() {
+    use borer_engine::program::Section;
+    let mut bss = Section::mapped(".bss", 0x2000, 0, 0x100, true, false);
+    bss.file_size = 0;
+    let text = Section::mapped(".text", 0x1000, 0, 0x10, false, true);
+    let p = Program::raw(vec![0xc3; 0x10], Arch::X86_64, 0, None, vec![text, bss]);
+    let (a, o) = (Analysis::default(), Overlay::default());
+    let ty = parse_type("u32").expect("a type");
+    let kinds: [(&str, &dyn Fn(u64) -> Edit); 3] = [
+        ("name", &|at| Edit::Name {
+            at,
+            name: "counter".to_owned(),
+        }),
+        ("comment", &|at| Edit::Comment {
+            at,
+            text: "here".to_owned(),
+        }),
+        ("type", &|at| Edit::Apply { at, ty: ty.clone() }),
+    ];
+    for (what, edit) in kinds {
+        let refused = plan(&p, &a, &o, &[edit(0x1)], Force::Refuse).expect_err("refused");
+        assert!(
+            refused.to_string().starts_with(&format!(
+                "0x1 is in no section, so nothing there can take a {what}; "
+            )),
+            "{refused}"
+        );
+        let placed = plan(&p, &a, &o, &[edit(0x2010)], Force::Refuse);
+        assert!(placed.is_ok(), "{what}: {placed:?}");
+    }
+}
