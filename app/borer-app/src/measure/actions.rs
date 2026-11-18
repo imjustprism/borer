@@ -881,7 +881,8 @@ impl Harness {
         }
     }
 
-    /// Does one step.
+    /// Does one step; a key is dispatched once the harness update ends, as a key dispatch
+    /// draws the window and the harness is its root view.
     ///
     /// # Arguments
     ///
@@ -917,7 +918,9 @@ impl Harness {
                     key: key.clone(),
                     key_char: Some(key),
                 };
-                window.dispatch_keystroke(keystroke, cx);
+                window.defer(cx, move |window, cx| {
+                    window.dispatch_keystroke(keystroke, cx);
+                });
             }
             Move::Cursor => {
                 let tab = self.item(cx)?;
