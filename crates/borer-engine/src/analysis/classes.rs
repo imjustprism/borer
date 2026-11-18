@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use super::decompile::decompile_plain;
 use super::fieldrefs::{FieldAccess, FieldRef};
-use super::members::{MEMBER_STRING_CAP, collect_assert_names};
+use super::members::{MEMBER_STRING_CAP, collect_assert_names, spread_members};
 use super::{
     Analysis, Function, Overlay, Signature, name_of, plain_text_cached, slot_name_of, striped,
 };
@@ -486,7 +486,8 @@ fn collect_call_types(
 /// a member name wins wherever a source gives one: the name most of the
 /// member names the class's guarded asserts tie to the field agree on
 /// ([`majority_member`]), else the one its template's other
-/// instantiations agree on ([`sibling_votes`]), else an inlined setter's
+/// instantiations agree on ([`sibling_votes`]), neither when the member is
+/// asserted at another offset too ([`super::members::spread_members`]), else an inlined setter's
 /// ([`setter_names`]). A field no source gives a member name, whose
 /// asserts all go through a getter, is labelled by the getter most of
 /// them call ([`sole_reader`]). [`class_layout`], a field's typed uses, a
@@ -520,8 +521,9 @@ pub fn field_labels(
                 let own = method_votes(program, analysis, overlay, &methods);
                 let siblings = sibling_votes(program, analysis, overlay, class);
                 let mut labels = super::stated::labels(overlay, class);
+                let spread = spread_members(own.iter().chain(&siblings));
                 for (off, u) in own.iter().chain(&siblings) {
-                    if let Some(name) = majority_member(u) {
+                    if let Some(name) = majority_member(u).filter(|n| !spread.contains(n)) {
                         labels.entry(*off).or_insert(FieldLabel::Member(name));
                     }
                 }
@@ -730,9 +732,7 @@ fn method_votes(
 ) -> BTreeMap<u64, FieldUse> {
     let mut fields: BTreeMap<u64, FieldUse> = BTreeMap::new();
     let read: Vec<u64> = methods.iter().copied().take(METHODS_MAX).collect();
-    for votes in &striped(&read, |&entry| {
-        assert_votes(program, analysis, overlay, entry)
-    }) {
+    for votes in &striped(&read, |&e| assert_votes(program, analysis, overlay, e)) {
         add_votes(&mut fields, votes);
     }
     fields

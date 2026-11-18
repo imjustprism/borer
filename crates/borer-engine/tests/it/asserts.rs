@@ -425,6 +425,26 @@ fn asserted_members_pair_with_the_offsets_their_guards_read() {
     );
 }
 
+/// A member asserted at two offsets names neither of the class's fields,
+/// while a member asserted at one offset keeps its name.
+///
+/// `m_size` is guarded at 0x10 by one method and at 0x18 by another: it
+/// is at one of them at most, and `borer://asserts` lists the pair as
+/// contested. Counted per offset, each vote won its offset, and every
+/// reader of the class's field names took `m_size` at both (C-207).
+#[test]
+fn a_member_asserted_at_two_offsets_names_neither() {
+    let p = widget();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let names = field_names(&p, &a, &o, "Widget");
+    assert!(
+        !names.contains_key(&0x10) && !names.contains_key(&0x18),
+        "{names:?}"
+    );
+    assert_eq!(names.get(&0x270).map(String::as_str), Some("m_name"));
+}
+
 /// A `__PRETTY_FUNCTION__` too long to print whole is cut in the text, and
 /// a read of it says where the rest starts, so its template arguments,
 /// the part the cut drops, are read whole in two reads.

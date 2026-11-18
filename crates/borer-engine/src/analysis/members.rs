@@ -13,6 +13,33 @@ use super::single;
 /// characters: a member spelled past it is not paired.
 pub(crate) const MEMBER_STRING_CAP: usize = 160;
 
+/// Returns the members asserted at more than one offset.
+///
+/// A member whose guards read 0x10 in one method and 0x18 in another is
+/// at one of them at most; naming both would print it twice, and choosing
+/// one would resolve what `borer://asserts` lists as contested. Neither
+/// offset takes its name. Getter votes (`IsSet()`) name no field and are
+/// not counted.
+///
+/// # Arguments
+///
+/// * `fields` - The class's field uses by offset, its own and its
+///   siblings'.
+pub(crate) fn spread_members<'a>(
+    fields: impl Iterator<Item = (&'a u64, &'a FieldUse)>,
+) -> BTreeSet<String> {
+    let mut at: BTreeMap<&str, BTreeSet<u64>> = BTreeMap::new();
+    for (off, u) in fields {
+        for member in u.names.keys().filter(|n| !n.ends_with(')')) {
+            at.entry(member).or_default().insert(*off);
+        }
+    }
+    at.into_iter()
+        .filter(|(_, offs)| offs.len() > 1)
+        .map(|(member, _)| member.to_owned())
+        .collect()
+}
+
 /// How a condition spells a member of `this`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Spelled {
