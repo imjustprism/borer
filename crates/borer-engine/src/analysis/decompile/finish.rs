@@ -986,12 +986,13 @@ pub(super) fn float_bit_copies(text: &str) -> String {
 /// asserts anything says where it lives. That is the subsystem it belongs
 /// to, and the question "what is this part of" is otherwise answered only
 /// by reading its callers. A body citing several files inlined a callee
-/// that asserts too, and a header's inline code is inlined wherever it is
-/// used, so a cited source file wins over every header; among the files
-/// left, one is taken when it is the only one, when the function's class
-/// names it (`Skills::GameSkill` names `gameskill.cc`), or when it is
-/// cited more often than any other ([`pick_path`]); nothing is written
-/// when the evidence ties, since a guessed location is worse than none.
+/// that asserts too, so the file is taken when it is the only one, when
+/// the function's class names it (`Skills::GameSkill` names
+/// `gameskill.cc`), or else, a header's inline code being inlined wherever
+/// it is used, when it is the most cited of the source files, or of the
+/// headers when no source file is cited ([`pick_path`]); nothing is
+/// written when the evidence ties, since a guessed location is worse than
+/// none.
 ///
 /// # Arguments
 ///
@@ -1092,9 +1093,10 @@ pub(super) fn cited_paths(line: &str) -> Vec<&str> {
 
 /// Chooses the function's own file from the ones its body cites.
 ///
-/// A cited file that is no header ([`HEADER_EXTENSIONS`]) wins
-/// over every header. Among the files left, the only one wins, then the
-/// one the function's class names, then the most cited; a tie is none.
+/// The only file cited wins, then the one the function's class names (a
+/// template method lives in its header even when an inlined callee brings
+/// a source file), then a file that is no header ([`HEADER_EXTENSIONS`])
+/// over every header, then the most cited of the files left; a tie is none.
 ///
 /// # Arguments
 ///
@@ -1110,9 +1112,6 @@ pub(super) fn pick_path<'a>(
     order: &[&'a str],
     head: &str,
 ) -> Option<&'a str> {
-    let header = |p: &str| HEADER_EXTENSIONS.iter().any(|e| p.ends_with(e));
-    let sources: Vec<&'a str> = order.iter().copied().filter(|p| !header(p)).collect();
-    let order = if sources.is_empty() { order } else { &sources };
     if let [only] = order {
         return Some(only);
     }
@@ -1136,6 +1135,9 @@ pub(super) fn pick_path<'a>(
     {
         return Some(p);
     }
+    let header = |p: &str| HEADER_EXTENSIONS.iter().any(|e| p.ends_with(e));
+    let sources: Vec<&'a str> = order.iter().copied().filter(|p| !header(p)).collect();
+    let order = if sources.is_empty() { order } else { &sources };
     let counts: Vec<(&str, usize)> = order
         .iter()
         .map(|p| (*p, counts.get(p).copied().unwrap_or(0)))

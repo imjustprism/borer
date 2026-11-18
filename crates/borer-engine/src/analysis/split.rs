@@ -484,9 +484,9 @@ mod tests {
 
     /// A function's source file is the one its `// source:` line names.
     ///
-    /// A cited source file wins over every header, then the only file
-    /// left, the one its class names, or the most cited; a tie names none,
-    /// so the function is not filed.
+    /// The only file cited wins, then the one its class names among two or
+    /// more, then a source file over every header, then the most cited; a
+    /// tie names none, so the function is not filed.
     ///
     /// # Panics
     ///
@@ -502,7 +502,17 @@ mod tests {
             text
         };
         let class = head("Vec::Push", &["inc/vec.h", "net/a.cpp", "net/a.cpp"]);
-        assert_eq!(unit_of(&class).as_deref(), Some("net/a.cpp"));
+        assert_eq!(unit_of(&class).as_deref(), Some("inc/vec.h"));
+        let skill = head(
+            "Skills::GameSkill::Use",
+            &[
+                "src/other.cpp",
+                "src/other.cpp",
+                "src/gameskill.cc",
+                "inc/util.h",
+            ],
+        );
+        assert_eq!(unit_of(&skill).as_deref(), Some("src/gameskill.cc"));
         let level = head("f", &["game/level.cpp", "core/array.h", "core/array.h"]);
         assert_eq!(unit_of(&level).as_deref(), Some("game/level.cpp"));
         let cxx = head(
