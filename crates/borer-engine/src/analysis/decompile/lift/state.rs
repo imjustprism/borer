@@ -461,10 +461,7 @@ impl<'a> Exec<'_, 'a> {
     pub(in crate::analysis::decompile) fn is_data(&self, a: u64) -> bool {
         let program = self.ctx.program;
         crate::analysis::decompile::expr::tls_slot(a).is_some()
-            || program
-                .section_at(a)
-                .or_else(|| program.zero_fill_at(a))
-                .is_some_and(|s| !s.executable)
+            || program.declared_at(a).is_some_and(|s| !s.executable)
     }
 
     /// Tells whether a value is the thread's TLS array: `*(gs + 0x58)` or a

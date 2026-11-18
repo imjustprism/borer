@@ -18,8 +18,7 @@ use crate::program::{BinaryFormat, Program};
 /// * `program` - The loaded image.
 /// * `va` - Candidate virtual address.
 pub(crate) fn is_mapped_data(program: &Program, va: u64) -> bool {
-    program.section_at(va).is_some()
-        || program.zero_fill_at(va).is_some()
+    program.declared_at(va).is_some()
         || program.in_headers(va)
         || (program.format == BinaryFormat::Pe && va == program.image_base)
 }

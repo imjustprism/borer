@@ -428,8 +428,9 @@ pub(super) fn rip_data(
         }
         leas.retain(|&a| {
             !immediates.contains(&a)
-                && program.section_at(a).is_none()
-                && program.zero_fill_at(a).is_some_and(|s| !s.executable)
+                && program
+                    .declared_at(a)
+                    .is_some_and(|s| s.file_size == 0 && !s.executable)
         });
         leas
     })

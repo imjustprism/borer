@@ -101,6 +101,10 @@ pub struct HexRows {
     pub va: u64,
     /// The runs, each starting where the one before ends.
     pub spans: Vec<HexSpan>,
+    /// Why the file holds no byte at `va`
+    /// ([`crate::program::Program::no_bytes_at`]), when the first run is
+    /// not the file's bytes.
+    pub refusal: Option<String>,
 }
 
 impl HexRows {
@@ -111,18 +115,26 @@ impl HexRows {
     /// # Returns
     ///
     /// A `# va..end section` header covering those bytes, then their rows
-    /// ([`hexdump`]); `None` when the file holds no bytes at `va`.
-    #[must_use]
-    pub fn spell(&self) -> Option<String> {
-        let first = self.spans.first()?;
-        let HexFill::Bytes(bytes) = &first.fill else {
-            return None;
+    /// ([`hexdump`]).
+    ///
+    /// # Errors
+    ///
+    /// When the file holds no bytes at `va`: the section declaring it and
+    /// why it holds none there, or that nothing maps it
+    /// ([`HexRows::refusal`]).
+    pub fn spell(&self) -> Result<String, String> {
+        let Some(HexSpan {
+            fill: HexFill::Bytes(bytes),
+            section,
+            ..
+        }) = self.spans.first()
+        else {
+            return Err(self.refusal.clone().unwrap_or_default());
         };
-        let sec = first
-            .section
+        let sec = section
             .as_deref()
             .map_or_else(String::new, |s| format!(" {s}"));
-        Some(format!(
+        Ok(format!(
             "# {:#x}..{:#x}{sec}\n{}",
             self.va,
             self.va.wrapping_add(from_usize(bytes.len())),
@@ -155,8 +167,7 @@ pub fn hex_rows(program: &crate::program::Program, va: u64, len: usize) -> HexRo
     let mut at = va;
     while left > 0 {
         let want = usize::try_from(left).unwrap_or(HEXDUMP_MAX);
-        let found = program.section_at(at);
-        let holding = found.or_else(|| program.zero_fill_at(at));
+        let holding = program.declared_at(at);
         let next = || {
             program
                 .sections
@@ -171,7 +182,7 @@ pub fn hex_rows(program: &crate::program::Program, va: u64, len: usize) -> HexRo
             (Some(bytes), _) => (
                 from_usize(bytes.len()),
                 HexFill::Bytes(bytes.to_vec()),
-                found,
+                holding,
             ),
             (None, Some(s)) => (
                 s.va.0
@@ -198,7 +209,11 @@ pub fn hex_rows(program: &crate::program::Program, va: u64, len: usize) -> HexRo
         };
         at = after;
     }
-    HexRows { va, spans }
+    let refusal = spans
+        .first()
+        .filter(|s| !matches!(s.fill, HexFill::Bytes(_)))
+        .map(|_| program.no_bytes_at(va));
+    HexRows { va, spans, refusal }
 }
 
 /// Renders up to `max` bytes of the file at a file offset, rows addressed
@@ -367,6 +382,9 @@ mod tests {
     /// address within its section, the next section's left out, and none
     /// for an address without file bytes.
     ///
+    /// That address is refused with the section that holds no bytes
+    /// there, or as not mapped.
+    ///
     /// # Panics
     ///
     /// When the text differs.
@@ -375,18 +393,22 @@ mod tests {
         let (bytes, p) = sections();
         assert_eq!(
             hex_rows(&p, 0x1008, 0x10).spell().as_deref(),
-            Some(
+            Ok(
                 "# 0x1008..0x1010 .text\n0x0000001008  49 4a 4b 4c 4d 4e 4f 50                           |IJKLMNOP|\n"
             )
         );
         assert_eq!(
             hex_rows(&p, 0x1010, 0x10).spell(),
-            Some(format!(
+            Ok(format!(
                 "# 0x1010..0x1020 .data\n{}",
                 hexdump(&bytes[0x10..], 0x1010)
             ))
         );
-        assert_eq!(hex_rows(&p, 0x1020, 4).spell(), None);
-        assert_eq!(hex_rows(&p, 0x9000, 4).spell(), None);
+        assert_eq!(
+            hex_rows(&p, 0x1020, 4).spell().unwrap_err(),
+            "address 0x1020 is in .bss, which holds no file bytes (the loader zero-fills it)"
+        );
+        let unmapped = hex_rows(&p, 0x9000, 4).spell().unwrap_err();
+        assert!(unmapped.contains("not mapped"), "{unmapped}");
     }
 }

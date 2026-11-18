@@ -282,8 +282,7 @@ fn link_ok(
             })
         }),
         Ref::Global(va) => {
-            let mapped = p.section_at(*va).is_some()
-                || p.zero_fill_at(*va).is_some()
+            let mapped = p.declared_at(*va).is_some()
                 || p.in_headers(*va)
                 || (p.format == BinaryFormat::Pe && *va == p.image_base);
             mapped && referenced(*va) && global_hex(tok).is_none_or(|g| g == *va)

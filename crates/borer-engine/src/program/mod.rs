@@ -1744,22 +1744,6 @@ impl Program {
                 .any(|&(start, end)| (start..end).contains(&va))
     }
 
-    /// Finds the zero-filled section containing `va`: one the loader maps
-    /// but the file holds no bytes for (`.bss`, a PE section with no raw
-    /// data), where a program keeps its uninitialized globals.
-    ///
-    /// # Arguments
-    ///
-    /// * `va` - A virtual address.
-    ///
-    /// # Returns
-    ///
-    /// The first-declared such section holding `va`, or `None`, also when
-    /// a file-backed section holds it.
-    pub fn zero_fill_at(&self, va: u64) -> Option<&Section> {
-        self.declared_at(va).filter(|s| s.file_size == 0)
-    }
-
     /// Finds the section the table declares at `va`, whether or not the
     /// file holds bytes for it, by one binary search of
     /// [`Program::section_index`].
