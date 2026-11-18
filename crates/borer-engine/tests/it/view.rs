@@ -22,7 +22,7 @@ use borer_engine::view::{Kind, Ref, Unlinked, View};
 pub(crate) const TEXT: u64 = 0x1_4000_1000;
 
 /// The read-only page of [`image`], where an import's slot sits.
-const SLOT: u64 = 0x1_4000_2000;
+pub(crate) const SLOT: u64 = 0x1_4000_2000;
 
 /// The writable page of [`image`], where a global sits.
 const GLOBAL: u64 = 0x1_4000_3000;
@@ -39,7 +39,7 @@ const GLOBAL: u64 = 0x1_4000_3000;
     clippy::expect_used,
     reason = "fixture code offsets sit inside the text page"
 )]
-fn image(code: &[(u64, &[u8])], symbols: Vec<Symbol>) -> Program {
+pub(crate) fn image(code: &[(u64, &[u8])], symbols: Vec<Symbol>) -> Program {
     let mut bytes = vec![0u8; 0x3000];
     bytes[..0x1000].fill(0xcc);
     for &(at, piece) in code {
@@ -70,7 +70,7 @@ fn image(code: &[(u64, &[u8])], symbols: Vec<Symbol>) -> Program {
 /// * `name` - Its name.
 /// * `addr` - Its address.
 /// * `kind` - What it is.
-fn symbol(name: &str, addr: u64, kind: SymbolKind) -> Symbol {
+pub(crate) fn symbol(name: &str, addr: u64, kind: SymbolKind) -> Symbol {
     Symbol {
         name: name.to_owned(),
         addr,

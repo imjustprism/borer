@@ -123,9 +123,11 @@ pub(super) struct Index {
 /// The index reads the names alone, so it is keyed without the passes and
 /// choice points ([`Overlay::names_key`]): the texts a repair search builds
 /// under other passes and choices share it, where each of them built the
-/// whole index again. Taking it reads every function's name; a caller that
-/// looks it up by the names one text spells takes it unnoted and notes the
-/// text ([`crate::analysis::reads`]).
+/// whole index again. Building it reads every function's name, so it is
+/// taken unnoted and a caller notes the names it looks up as calls
+/// ([`note_calls`]), which a rename to or from that name touches
+/// ([`crate::analysis::reads::Edit::touches`]); noted as built, every
+/// decompile read every name and any rename let go of every text.
 ///
 /// # Arguments
 ///
@@ -133,41 +135,71 @@ pub(super) struct Index {
 /// * `analysis` - Its functions.
 /// * `overlay` - User names.
 pub(super) fn index(program: &Program, analysis: &Analysis, overlay: &Overlay) -> Arc<Index> {
-    analysis
-        .derived
-        .get_or_build_named("unit_index", overlay.names_key(), (), || {
-            let mut ix = Index::default();
-            for f in &analysis.functions {
-                let name = expr::bare(&name_of(analysis, overlay, f.entry)).into_owned();
-                match ix.functions.entry(name) {
-                    std::collections::btree_map::Entry::Occupied(e) => {
-                        ix.shared.insert(e.key().clone());
-                    }
-                    std::collections::btree_map::Entry::Vacant(e) => {
-                        e.insert(f.entry);
-                    }
-                }
-            }
-            for s in &program.symbols {
-                match s.kind {
-                    SymbolKind::Import => {
-                        ix.imports.insert(expr::bare(&s.name).into_owned());
-                    }
-                    SymbolKind::Export | SymbolKind::Local | SymbolKind::Data => {
-                        if s.kind == SymbolKind::Export {
-                            ix.exported.insert(s.addr);
+    crate::analysis::reads::unnoted(|| {
+        analysis
+            .derived
+            .get_or_build_named("unit_index", overlay.names_key(), (), || {
+                let mut ix = Index::default();
+                for f in &analysis.functions {
+                    let name = expr::bare(&name_of(analysis, overlay, f.entry)).into_owned();
+                    match ix.functions.entry(name) {
+                        std::collections::btree_map::Entry::Occupied(e) => {
+                            ix.shared.insert(e.key().clone());
                         }
-                        if s.addr != 0 && analysis.function(s.addr).is_none() {
-                            ix.data
-                                .entry(expr_render::data_name(&s.name))
-                                .or_insert(s.addr);
+                        std::collections::btree_map::Entry::Vacant(e) => {
+                            e.insert(f.entry);
                         }
                     }
-                    SymbolKind::Forwarder => {}
                 }
-            }
-            ix
-        })
+                for s in &program.symbols {
+                    match s.kind {
+                        SymbolKind::Import => {
+                            ix.imports.insert(expr::bare(&s.name).into_owned());
+                        }
+                        SymbolKind::Export | SymbolKind::Local | SymbolKind::Data => {
+                            if s.kind == SymbolKind::Export {
+                                ix.exported.insert(s.addr);
+                            }
+                            if s.addr != 0 && analysis.function(s.addr).is_none() {
+                                ix.data
+                                    .entry(expr_render::data_name(&s.name))
+                                    .or_insert(s.addr);
+                            }
+                        }
+                        SymbolKind::Forwarder => {}
+                    }
+                }
+                ix
+            })
+    })
+}
+
+/// Notes that the build running on this thread looked `names` up in the
+/// [`Index`], each as a call to it ([`crate::analysis::reads::note_body`]).
+///
+/// # Arguments
+///
+/// * `names` - The names as the text spells them.
+fn note_calls<'n>(names: impl IntoIterator<Item = &'n str>) {
+    let calls: String = names.into_iter().map(|n| format!("{n}(")).collect();
+    if !calls.is_empty() {
+        crate::analysis::reads::note_body(&Arc::from(calls));
+    }
+}
+
+/// Returns the names a unit looks up in the [`Index`] to declare them: the
+/// words of `text` and the entries of its function tables, noted as
+/// looked up ([`note_calls`]).
+///
+/// # Arguments
+///
+/// * `text` - A finished decompilation.
+/// * `tables` - Its function tables ([`designators`]).
+fn looked(text: &str, tables: &[Table]) -> Vec<String> {
+    let mut names = words(text);
+    names.extend(tables.iter().flat_map(|t| t.entries.iter().cloned()));
+    note_calls(names.iter().map(String::as_str));
+    names
 }
 
 /// Returns the entry of the function a text names `name`, under the names
@@ -191,6 +223,7 @@ pub(super) fn function_named(
     name: &str,
 ) -> Option<u64> {
     let ix = index(program, analysis, overlay);
+    note_calls([name]);
     if ix.shared.contains(name) {
         return None;
     }
@@ -273,8 +306,7 @@ pub(super) fn close(
     let ix = index(program, analysis, overlay);
     let own = expr::bare(&name_of(analysis, overlay, entry)).into_owned();
     let mut tables = designators(text, program, analysis, overlay, &ix);
-    let mut names = words(text);
-    names.extend(tables.iter().flat_map(|t| t.entries.iter().cloned()));
+    let names = looked(text, &tables);
     let mut decls: BTreeMap<String, Declared> = BTreeMap::new();
     let mut bodies = 0usize;
     for name in names {
