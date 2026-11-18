@@ -1,0 +1,123 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# CodeRabbit pull request review (https://docs.coderabbit.ai/reference/configuration).
+# The rule book is CLAUDE.md; the instructions below are its diff-checkable part.
+language: en-US
+tone_instructions: >-
+  Terse and technical. Report defects with the concrete input or sequence that
+  triggers them. No praise, no summaries of what the code does, no style nits
+  the gate (rustfmt, clippy, typos, ruff) already enforces.
+early_access: false
+reviews:
+  profile: chill
+  high_level_summary: false
+  review_status: true
+  review_details: false
+  collapse_walkthrough: true
+  changed_files_summary: true
+  sequence_diagrams: false
+  estimate_code_review_effort: false
+  assess_linked_issues: false
+  related_issues: false
+  related_prs: false
+  suggested_labels: false
+  auto_apply_labels: false
+  suggested_reviewers: false
+  auto_assign_reviewers: false
+  in_progress_fortune: false
+  poem: false
+  abort_on_close: true
+  auto_review:
+    enabled: true
+    drafts: false
+    auto_incremental_review: true
+    base_branches:
+      - ^dev$
+      - ^main$
+  finishing_touches:
+    unit_tests:
+      enabled: false
+    simplify:
+      enabled: false
+  pre_merge_checks:
+    title:
+      mode: warning
+      requirements: >-
+        `type: summary`: lowercase, imperative, plain ASCII, at most 72
+        characters, no scope, no trailing period. Type is one of add, fix,
+        improve, refactor, perf, docs, test, chore, revert. Each commit in
+        the PR follows the same rule and holds one concern.
+    description:
+      mode: "off"
+    issue_assessment:
+      mode: "off"
+  path_filters:
+    - "!Cargo.lock"
+    - "!app/Cargo.lock"
+    - "!fuzz/Cargo.lock"
+    - "!scripts/run/*.tsv"
+    - "!scripts/check/*.tsv"
+    - "!crates/borer-engine/src/analysis/sdk/*.tsv"
+    - "!brand/**"
+    - "!packaging/borer-app/icons/**"
+    - "!**/*.png"
+    - "!**/*.svg"
+    - "!**/*.ico"
+    - "!**/*.icns"
+  path_instructions:
+    - path: "**/*.rs"
+      instructions: |
+        Apply these rules from CLAUDE.md; flag only real violations.
+        - Never claim more than the engine shows: a heuristic answer names its evidence and says when it is unsure; a missed finding beats a false one.
+        - Determinism: no clock, random seed, hash-map or hash-set iteration order, or environment variable may reach an answer. Same binary and query give the same bytes at any thread count.
+        - Untrusted input: every read of file bytes is bounds-checked, every scan capped, every walk fuel-limited. Arithmetic on values from the file is checked, saturating or wrapping. Hostile input must never panic, hang or allocate without bound.
+        - No unwrap, expect, panic!, unreachable! or todo! outside tests.
+        - No integer `as` casts: width conversions use num::lo32, cast_signed, cast_unsigned, u64::from, try_from or num::as_f64.
+        - Match borer's own enums exhaustively; a wildcard arm only over a foreign enum.
+        - No `//` or `/* */` comments except `// SAFETY:` on unsafe blocks and `// ASM:` on hand-assembled bytes; explanations belong in rustdoc. Every item has rustdoc whose first line is one third-person sentence.
+        - No `#[allow(...)]`; a silenced lint is `#[expect(lint, reason = "...")]` on the one site.
+        - unsafe only in crates/borer-live and tests, each block under a `// SAFETY:` line.
+        - No `let _ =` or `.ok()` on a Result that matters.
+        - Addresses are u64 virtual addresses; a file offset or size says so (`off`, `len`, `size`) and converts only through Program::offset_to_va and va_to_offset.
+        - No abstraction without a second user, no dead or commented-out code, no compatibility shims; functions within 100 lines, files within 1500.
+        - A test or benchmark changed only to make it pass is a defect. Every fix comes with a test (decompiler fixes under tests/it/decompile/, lifter fixes as an *_agrees_with_the_emulator test); a parser crash input becomes a test in tests/hostile.rs.
+    - path: "crates/borer-engine/**"
+      instructions: |
+        borer-engine is pure: sync functions of explicit inputs. Flag any async, tokio, MCP types, filesystem writes, global state, or a second Mutex memo map (results are memoized in Analysis::derived via get_or_build). Program is immutable; user names, comments and types live in an Overlay. Per-function parallel work uses std::thread::scope over stripes with results in address order, never rayon. Decoders stay behind the isa module. Target knowledge lives in packs/*.borer, never as names in engine code.
+    - path: "crates/borer/**"
+      instructions: |
+        The server is a thin adapter: logic belongs in the engine behind a test. stdout is the MCP protocol, so no print!/println! to stdout; diagnostics go to stderr or into tool results. A failing handler returns ErrorData, never error text inside a success. Every list is a plain table with a `#` header line, takes filter, offset, limit and count, and is hard-capped with `showing N of M`. A tool that changes state is a dry run by default. A parameter taking one of a few words is a schema enum, never a string match. Tool descriptions state what is returned, the caps and the defaults.
+    - path: "app/**"
+      instructions: |
+        borer-app is an adapter like the server: it formats the engine's tokens and never derives a fact of its own. No engine call on the UI thread; engine work runs as a cancellable background task. Every edit goes through the edit path agents use. Every action is reachable from the command palette. The main workspace (crates/) must never gain a dependency on a GPL crate.
+    - path: "scripts/**"
+      instructions: |
+        Python checks and the gate. A check must fail with a nonzero exit status, never only print. Ratchet files (sizes.tsv, dupes.tsv, paths.tsv) may shrink, never grow. Paths go through pathlib, never string joins with a separator.
+    - path: ".github/workflows/**"
+      instructions: |
+        Pin third-party actions to a full commit SHA, keep token permissions minimal, and never interpolate untrusted event fields (PR titles, branch names, bodies) into run scripts. Determinism and the gate are unchanged by CI edits.
+  tools:
+    clippy:
+      enabled: false
+    ruff:
+      enabled: false
+    markdownlint:
+      enabled: false
+    languagetool:
+      enabled: false
+chat:
+  art: false
+  integrations:
+    jira:
+      usage: disabled
+    linear:
+      usage: disabled
+knowledge_base:
+  jira:
+    usage: disabled
+  linear:
+    usage: disabled
+issue_enrichment:
+  auto_enrich:
+    enabled: false
+  planning:
+    enabled: false
