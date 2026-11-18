@@ -166,6 +166,22 @@ pub fn sources(p: &Program, a: &Analysis) -> Sources {
     out
 }
 
+impl Filed<'_> {
+    /// Returns why a function went to [`REMAINDER`], `None` when it was
+    /// filed under its source.
+    #[must_use]
+    pub fn why(self) -> Option<&'static str> {
+        match self {
+            Filed::Source(_) => None,
+            Filed::Nothing => Some("cite no source file"),
+            Filed::Tie => Some("cite several and settle on none"),
+            Filed::Ambiguous => Some("name a cut path that fits several"),
+            Filed::Unmatched => Some("name a file they do not reference"),
+            Filed::PastCap => Some("cite a file past the 4096 a split writes"),
+        }
+    }
+}
+
 impl Sources {
     /// Returns where the split files a function.
     ///
@@ -231,7 +247,7 @@ pub(crate) fn header_file(taken: &mut Taken, ident: &str) -> String {
 #[must_use]
 pub fn unit_prologue(file: &str) -> String {
     let what = if file == REMAINDER {
-        "the functions whose asserts cite no source file".to_owned()
+        "the functions the split filed under no source file (the export's answer counts why: no cited file, a tie, a cut path fitting several, a file past the cap; the ones that did not decompile or were cut for size are here too)".to_owned()
     } else {
         format!("{file}: the functions whose asserts cite this source file")
     };
@@ -250,34 +266,39 @@ pub fn unit_prologue(file: &str) -> String {
 /// * `o` - Names in force.
 /// * `sdk` - The classes.
 /// * `headers` - Each class written with its header file.
-/// * `units` - Each written function's source file, by entry.
+/// * `exported` - Each exported function's source path by entry, `None`
+///   for one filed under none.
 ///
 /// # Returns
 ///
 /// A `#` header line with the counts, a column header and one
 /// tab-separated row per class of the SDK: class, header (`-` when none
-/// was written), source file (`-` when no method's asserts cite one),
-/// evidence, methods, fields, slots.
+/// was written), source file (`-` when none of its exported methods is
+/// filed under one), evidence, methods, fields, slots.
 #[must_use]
 pub fn split_map(
     a: &Analysis,
     o: &Overlay,
     sdk: &Sdk,
     headers: &[(&str, &str)],
-    units: &BTreeMap<u64, String>,
+    exported: &BTreeMap<u64, Option<String>>,
 ) -> String {
     let files: BTreeMap<&str, &str> = headers.iter().copied().collect();
     let mut out = format!(
-        "# {} classes, {} with a header; a class's source file is the one most of its methods' asserts cite\n# class\theader\tsource\tevidence\tmethods\tfields\tslots\n",
+        "# {} classes, {} with a header; a class's source file is the one most of its exported methods are filed under\n# class\theader\tsource\tevidence\tmethods\tfields\tslots\n",
         sdk.classes.len(),
         headers.len()
     );
     for c in &sdk.classes {
         let methods = super::classes::methods_of(a, o, &c.name);
         let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut out_of = 0usize;
         for e in &methods {
-            if let Some(u) = units.get(e) {
-                *counts.entry(u.as_str()).or_default() += 1;
+            if let Some(unit) = exported.get(e) {
+                out_of += 1;
+                if let Some(u) = unit {
+                    *counts.entry(u.as_str()).or_default() += 1;
+                }
             }
         }
         let best = counts
@@ -293,12 +314,16 @@ pub fn split_map(
                 };
                 (
                     (*unit).to_owned(),
-                    format!("{n} of {} methods' asserts cite it{also}", methods.len()),
+                    format!("{n} of {out_of} exported methods filed under it{also}"),
                 )
             }
+            None if out_of == 0 => (
+                "-".to_owned(),
+                format!("none of its {} methods was exported", methods.len()),
+            ),
             None => (
                 "-".to_owned(),
-                "no method's asserts cite a source file".to_owned(),
+                format!("none of its {out_of} exported methods is filed under a source file"),
             ),
         };
         let _ = writeln!(
@@ -349,6 +374,60 @@ mod tests {
         assert_eq!(header_file(&mut headers, "_sdk"), "_sdk_2.h");
         assert_eq!(header_file(&mut headers, "Foo"), "Foo.h");
         assert_eq!(header_file(&mut headers, "foo"), "foo_2.h");
+    }
+
+    /// A class whose methods were not exported is not said to cite no
+    /// source file: the map says they were not exported.
+    ///
+    /// # Panics
+    ///
+    /// When the map's row blames the asserts.
+    #[test]
+    fn a_class_with_no_exported_method_is_not_blamed_on_its_asserts() {
+        use crate::analysis::modsdk::{Class, Size};
+        use crate::program::{Arch, Section};
+        let mut bytes = vec![0u8; 0x2000];
+        bytes[0x1000] = 0xc3;
+        let p = Program::raw(
+            bytes,
+            Arch::X86_64,
+            0,
+            Some(0x1000),
+            vec![Section::mapped(
+                ".text", 0x1000, 0x1000, 0x1000, false, true,
+            )],
+        );
+        let a = Analysis::compute(&p);
+        let mut o = Overlay::default();
+        o.names.insert(0x1000, "Foo::Bar".to_owned());
+        let sdk = Sdk {
+            module: "t".to_owned(),
+            image_base: 0,
+            word: 8,
+            classes: vec![Class {
+                name: "Foo".to_owned(),
+                size: Size::AtLeast(0),
+                parent: None,
+                vtable: None,
+                slots: Vec::new(),
+                fields: Vec::new(),
+                notes: Vec::new(),
+            }],
+            globals: Vec::new(),
+            tls: Vec::new(),
+            functions: Vec::new(),
+        };
+        let none = split_map(&a, &o, &sdk, &[], &BTreeMap::new());
+        assert!(
+            none.contains("none of its 1 methods was exported"),
+            "{none}"
+        );
+        assert!(!none.contains("asserts cite"), "{none}");
+        let unfiled = split_map(&a, &o, &sdk, &[], &[(0x1000, None)].into_iter().collect());
+        assert!(
+            unfiled.contains("none of its 1 exported methods is filed under a source file"),
+            "{unfiled}"
+        );
     }
 
     /// A function's source file is the one its `// source:` line would

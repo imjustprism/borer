@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use borer_engine::analysis::decompile::export::{BUDGET_BLOCKS, Hoisted, Library, export};
@@ -466,6 +466,28 @@ fn write_whole(path: &Path, text: &str) -> anyhow::Result<()> {
         .with_context(|| format!("writing {shown}"))
 }
 
+/// Creates the `src` and `include` directories of a split.
+///
+/// # Arguments
+///
+/// * `root` - The split's directory, cleared by
+///   [`borer_engine::program::unusable_path`].
+///
+/// # Returns
+///
+/// The `src` and the `include` directory.
+///
+/// # Errors
+///
+/// When one of the two cannot be created.
+fn split_dirs(root: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
+    let (src, include) = (root.join("src"), root.join("include"));
+    for d in [&src, &include] {
+        std::fs::create_dir_all(d).with_context(|| format!("creating {}", d.display()))?;
+    }
+    Ok((src, include))
+}
+
 /// Writes the export split per source file and per class into `dir`.
 ///
 /// The C goes to `src/`: one file per source path the functions cite,
@@ -514,10 +536,7 @@ pub fn write_split(
         anyhow::bail!("{why}; nothing was written");
     }
     let shown = short_path(dir);
-    let (src, include) = (root.join("src"), root.join("include"));
-    for d in [&src, &include] {
-        std::fs::create_dir_all(d).with_context(|| format!("creating {}", d.display()))?;
-    }
+    let (src, include) = split_dirs(root)?;
     let sources = split::sources(program, analysis);
     let set = only.map(|e| e.iter().copied().collect::<BTreeSet<u64>>());
     let mut units = Units {
@@ -526,8 +545,8 @@ pub fn write_split(
         made: BTreeSet::new(),
         bytes: 0,
     };
-    let mut cited: BTreeMap<u64, String> = BTreeMap::new();
-    let mut left = 0usize;
+    let mut exported: BTreeMap<u64, Option<String>> = BTreeMap::new();
+    let mut why: BTreeMap<&'static str, usize> = BTreeMap::new();
     let hoisted = export_units(
         program,
         analysis,
@@ -535,19 +554,19 @@ pub fn write_split(
         library,
         set.as_ref(),
         &mut |entry, text| {
-            let file = match sources.filed(entry, text) {
-                split::Filed::Source(path) => {
-                    cited.insert(entry, path.to_owned());
-                    sources
-                        .files
-                        .get(path)
-                        .map_or(split::REMAINDER, String::as_str)
-                }
-                _ => {
-                    left += 1;
-                    split::REMAINDER
-                }
+            let filed = sources.filed(entry, text);
+            let path = if let split::Filed::Source(path) = filed {
+                Some(path)
+            } else {
+                None
             };
+            if let Some(reason) = filed.why() {
+                *why.entry(reason).or_default() += 1;
+            }
+            exported.insert(entry, path.map(str::to_owned));
+            let file = path
+                .and_then(|p| sources.files.get(p))
+                .map_or(split::REMAINDER, String::as_str);
             units.add(file, text)
         },
     )?;
@@ -557,6 +576,15 @@ pub fn write_split(
             "the request's deadline passed before every function was decompiled, so the files under {shown} are partial; export fewer functions (--only) or raise BORER_DEADLINE_SECS"
         );
     }
+    let left: usize = why.values().sum();
+    let reasons = if why.is_empty() {
+        "none".to_owned()
+    } else {
+        why.iter()
+            .map(|(reason, n)| format!("{n} {reason}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     let binary = short_path(&program.path.display().to_string());
     write_whole(&src.join(split::DECLS), &hoisted.head(&binary))?;
     let sdk = modsdk::build(program, analysis, overlay);
@@ -577,13 +605,16 @@ pub fn write_split(
         .collect();
     write_whole(
         &root.join("MAP.tsv"),
-        &split::split_map(analysis, overlay, &sdk, &named, &cited),
+        &split::split_map(analysis, overlay, &sdk, &named, &exported),
     )?;
     Ok(format!(
-        "wrote {} functions to {} source files under {shown}/src ({left} whose asserts cite no source file in {}), {} class headers under {shown}/include{} and {shown}/MAP.tsv",
+        "wrote {} functions to {} source files under {shown}/src, {left} to {} ({}; {} did not decompile and {} were cut for size, counted among them), {} class headers under {shown}/include{} and {shown}/MAP.tsv",
         hoisted.written,
-        units.made.len(),
+        units.made.len() - usize::from(units.made.contains(split::REMAINDER)),
         split::REMAINDER,
+        reasons,
+        hoisted.failed,
+        hoisted.cut,
         headers.len(),
         if split_headers.left_out > 0 {
             format!(
