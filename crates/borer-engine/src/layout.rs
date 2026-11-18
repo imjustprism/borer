@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context as _, anyhow, bail};
+use anyhow::{Context as _, anyhow, bail, ensure};
 
 use crate::analysis::parse_addr;
 use crate::program::{Arch, FileOff, Program, Section, Va};
@@ -168,9 +168,7 @@ impl Layout {
     /// message names the region and its numbers.
     pub fn program(&self, path: PathBuf, bytes: Vec<u8>) -> anyhow::Result<Program> {
         let file_len = crate::num::from_usize(bytes.len());
-        if file_len == 0 {
-            bail!("the file is empty: there is nothing to map");
-        }
+        ensure!(file_len > 0, "the file is empty: there is nothing to map");
         let whole = [Region {
             va: self.base,
             off: 0,
