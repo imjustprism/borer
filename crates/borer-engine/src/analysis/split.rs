@@ -501,4 +501,52 @@ mod tests {
         assert_eq!(unit_of(&tie), None);
         assert_eq!(unit_of(&head("f", &["no path"])), None);
     }
+
+    /// A function referencing several paths is filed only on the one its
+    /// text settles on.
+    ///
+    /// A tie, a cut spelling that fits two paths, a file it does not
+    /// reference and a file past the cap each leave it unfiled.
+    ///
+    /// # Panics
+    ///
+    /// When one of them is filed under a path.
+    #[test]
+    fn a_function_referencing_several_paths_is_filed_only_on_its_text() {
+        let path = |p: &str| p.to_owned();
+        let s = Sources {
+            files: ["a/x.cpp", "b/x.cpp", "a/y.cpp"]
+                .into_iter()
+                .map(|p| (path(p), format!("{p}.c")))
+                .collect(),
+            of: [
+                (1, vec![path("a/x.cpp"), path("a/y.cpp")]),
+                (2, vec![path("a/x.cpp"), path("b/x.cpp")]),
+                (3, vec![path("a/x.cpp"), path("a/y.cpp")]),
+                (4, vec![path("a/x.cpp"), path("z/past.cpp")]),
+                (5, vec![path("a/x.cpp"), path("a/y.cpp")]),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let text = |cites: &[&str]| {
+            let mut t = "// f @ 0x1000: 9 instructions\n".to_owned();
+            for (line, p) in cites.iter().enumerate() {
+                t.push_str(&format!("  f(\"x\", \"{p}\", {line});\n"));
+            }
+            t
+        };
+        assert_eq!(s.filed(1, &text(&["a/x.cpp", "a/y.cpp"])), Filed::Tie);
+        assert_eq!(s.filed(2, &text(&["x.cpp"])), Filed::Ambiguous);
+        assert_eq!(s.filed(3, &text(&["q/other.cpp"])), Filed::Unmatched);
+        assert_eq!(
+            s.filed(4, &text(&["z/past.cpp", "z/past.cpp", "a/x.cpp"])),
+            Filed::PastCap
+        );
+        assert_eq!(
+            s.filed(5, &text(&["a/y.cpp", "a/y.cpp", "a/x.cpp"])),
+            Filed::Source("a/y.cpp")
+        );
+        assert_eq!(s.filed(6, &text(&[])), Filed::Nothing);
+    }
 }
