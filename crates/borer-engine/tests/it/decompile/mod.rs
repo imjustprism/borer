@@ -26,6 +26,7 @@ mod classes;
 mod floats;
 mod flow;
 mod lanes;
+mod literals;
 mod origins;
 mod results;
 mod rounding;
