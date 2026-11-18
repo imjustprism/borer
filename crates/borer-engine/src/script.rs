@@ -443,18 +443,9 @@ impl Host {
         if let Some(answer) = &self.query {
             return answer(uri).map_err(Into::into);
         }
-        let asked = crate::answer::Suffixed::read(uri)?;
-        let again = asked.again();
-        let page = asked.page(&again);
-        crate::answer::read(
-            &self.program,
-            Some(&self.analysis),
-            &self.overlay,
-            asked.core,
-            page,
-        )
-        .unwrap_or_else(|| Err(unanswered(uri)))
-        .map_err(Into::into)
+        crate::answer::ask(&self.program, &self.analysis, &self.overlay, uri)
+            .unwrap_or_else(|| Err(unanswered(uri)))
+            .map_err(Into::into)
     }
 
     /// Lists the resources `query` reads, against the query budget: the

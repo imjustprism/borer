@@ -763,6 +763,46 @@ pub fn read(
     }))
 }
 
+/// Answers a resource URI as a reader wrote it, page suffixes and all,
+/// from a program with its analysis held.
+///
+/// It is what a front end without a server's session reads through: a
+/// script's `query` with no front end, and the app's chat, so both see the
+/// bytes [`read`] gives for the same URI and page.
+///
+/// # Arguments
+///
+/// * `program` - The loaded program.
+/// * `analysis` - Its analysis.
+/// * `overlay` - The names, comments and types in force.
+/// * `uri` - The URI, with any `!offset=`, `!limit=`, `!since=` or
+///   `!fresh` suffixes.
+///
+/// # Returns
+///
+/// [`read`]'s answer, `Err` also when a suffix does not read; `None` when
+/// the engine does not answer the resource.
+#[must_use]
+pub fn ask(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    uri: &str,
+) -> Option<Result<String, String>> {
+    let asked = match Suffixed::read(uri) {
+        Ok(asked) => asked,
+        Err(why) => return Some(Err(why)),
+    };
+    let again = asked.again();
+    read(
+        program,
+        Some(analysis),
+        overlay,
+        asked.core,
+        asked.page(&again),
+    )
+}
+
 /// Returns facts of the loaded file, kept in the held analysis's memo
 /// ([`Analysis::derived`]) once one is held and worked out for this read
 /// alone before.
@@ -1510,7 +1550,7 @@ mod tests {
         r#"set_type {"address":"0x1000","dry_run":false,"type":"uint32_t (Rec *)"}"#,
     ];
 
-    use super::{Page, decompile, enum_row, need, read};
+    use super::{Page, ask, decompile, enum_row, need, read};
     use crate::analysis::{Analysis, Overlay};
     use crate::program::Program;
 
@@ -1576,6 +1616,35 @@ mod tests {
             read(&p, Some(&a), &o, "borer://about/%20", Page::whole(uri)),
             Some(Err(super::ABOUT_NEEDS_A_NAME.to_owned()))
         );
+    }
+
+    /// A URI asked with its page suffixes answers what [`read`] answers for
+    /// its core and that page, a suffix that does not read is refused, and
+    /// a resource the engine does not answer is handed on.
+    ///
+    /// # Panics
+    ///
+    /// When an answer differs from [`read`]'s or a refusal is lost.
+    #[test]
+    fn a_uri_with_suffixes_asks_what_read_answers() {
+        let p = Program::raw_x64(&[0xc3; 0x10]);
+        let a = Analysis::compute(&p);
+        let o = Overlay::default();
+        let again = super::again("borer://encoded", NonZeroUsize::new(1));
+        let page = Page {
+            offset: None,
+            limit: NonZeroUsize::new(1),
+            again: &again,
+        };
+        assert_eq!(
+            ask(&p, &a, &o, "borer://encoded!limit=1"),
+            read(&p, Some(&a), &o, "borer://encoded", page)
+        );
+        assert!(matches!(
+            ask(&p, &a, &o, "borer://encoded!limit=1!limit=2"),
+            Some(Err(_))
+        ));
+        assert_eq!(ask(&p, &a, &o, "borer://session"), None);
     }
 
     /// A read of the program's code with no analysis given is refused, so
