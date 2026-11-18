@@ -417,8 +417,10 @@ impl Units<'_> {
     }
 
     /// Writes out every file's held text: a file's first write creates it
-    /// with its prologue, a later one appends; neither goes through a link
-    /// ([`no_link_under`]).
+    /// with its prologue, failing when a file or link is already there, and
+    /// a later one appends to a regular file only. The directories on the
+    /// way are checked for links first ([`no_link_under`]); one swapped in
+    /// between that check and the write is not caught.
     ///
     /// # Errors
     ///
@@ -434,8 +436,8 @@ impl Units<'_> {
                     std::fs::create_dir_all(parent)
                         .with_context(|| format!("creating the directory of {shown}"))?;
                 }
-                let mut f = create(&path, Existing::Replace)
-                    .with_context(|| format!("creating {shown}"))?;
+                let mut f =
+                    create(&path, Existing::Keep).with_context(|| format!("creating {shown}"))?;
                 f.write_all(unit_prologue(&file).as_bytes())
                     .with_context(|| format!("writing {shown}"))?;
                 f
@@ -451,7 +453,7 @@ impl Units<'_> {
 }
 
 /// Refuses a link at `dir` or at any directory between it and the file
-/// `file` names under it, so a split never writes through one.
+/// `file` names under it, as they are when it looks.
 ///
 /// # Arguments
 ///
@@ -486,7 +488,7 @@ fn no_link_under(dir: &Path, file: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Writes one file of a split whole, replacing what is there.
+/// Writes one file of a split whole, as a new file.
 ///
 /// # Arguments
 ///
@@ -495,10 +497,11 @@ fn no_link_under(dir: &Path, file: &str) -> anyhow::Result<()> {
 ///
 /// # Errors
 ///
-/// When the file cannot be created or written.
+/// When a file or link is already there, or the file cannot be created or
+/// written.
 fn write_whole(path: &Path, text: &[u8]) -> anyhow::Result<()> {
     let shown = short_path(&path.display().to_string());
-    create(path, Existing::Replace)
+    create(path, Existing::Keep)
         .with_context(|| format!("creating {shown}"))?
         .write_all(text)
         .with_context(|| format!("writing {shown}"))
@@ -1642,5 +1645,33 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A split file already there when the split creates it is an error,
+    /// never emptied: a source file on its first write and a whole file.
+    ///
+    /// # Panics
+    ///
+    /// When either is written over.
+    #[test]
+    fn a_split_file_already_there_is_never_emptied() {
+        let root = std::env::temp_dir().join(format!("borer-split-kept-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("a temp dir");
+        std::fs::write(root.join("a.c"), "kept").expect("written");
+        std::fs::write(root.join("_decls.h"), "kept").expect("written");
+        let mut split = super::Units {
+            dir: &root,
+            held: std::collections::BTreeMap::new(),
+            made: std::collections::BTreeSet::new(),
+            bytes: 0,
+        };
+        split.add("a.c", "new\n").expect("held");
+        let first = split.flush();
+        let whole = super::write_whole(&root.join("_decls.h"), b"new");
+        let read = |f: &str| std::fs::read_to_string(root.join(f)).unwrap_or_default();
+        let kept = (read("a.c"), read("_decls.h"));
+        std::fs::remove_dir_all(&root).ok();
+        assert!(first.is_err() && whole.is_err(), "{first:?} {whole:?}");
+        assert_eq!(kept, ("kept".to_owned(), "kept".to_owned()));
     }
 }
