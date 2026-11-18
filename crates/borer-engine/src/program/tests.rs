@@ -376,6 +376,50 @@ fn the_section_index_answers_as_a_scan_does() {
     }
 }
 
+/// The index finds a section without file bytes as a scan does: a
+/// file-backed section holding the address first, else the first-declared
+/// section without file bytes, however they overlap.
+///
+/// # Panics
+///
+/// When a look-up differs from the scan.
+#[test]
+fn the_section_index_finds_sections_without_file_bytes_as_a_scan_does() {
+    use super::{Section, declared_in, section_in};
+    let sections: Vec<Section> = (0..600u64)
+        .map(|k| {
+            let mut s = Section::mapped(
+                &format!("s{k}"),
+                0x1000 + (k % 23) * 0x300,
+                0,
+                0x8000 - k * 0x30,
+                false,
+                false,
+            );
+            if k % 3 != 0 {
+                s.file_size = 0;
+            }
+            s
+        })
+        .collect();
+    let index = Program::index_sections(&sections);
+    let holds = |s: &Section, va: u64| va >= s.va.0 && va - s.va.0 < s.vsize.max(s.file_size);
+    for va in (0..0x2_0000u64).step_by(0x1f) {
+        let backed = sections.iter().find(|s| s.file_size > 0 && holds(s, va));
+        let scan = backed.or_else(|| sections.iter().find(|s| holds(s, va)));
+        assert_eq!(
+            declared_in(&sections, &index, va).map(|s| s.name.as_str()),
+            scan.map(|s| s.name.as_str()),
+            "{va:#x}"
+        );
+        assert_eq!(
+            section_in(&sections, &index, va).map(|s| s.name.as_str()),
+            backed.map(|s| s.name.as_str()),
+            "{va:#x}"
+        );
+    }
+}
+
 /// A read by path takes only a regular file within its cap, judged
 /// before it is opened, so a pipe or a device never blocks or reads
 /// forever.

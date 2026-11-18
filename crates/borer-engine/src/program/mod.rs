@@ -341,7 +341,8 @@ pub struct Program {
 }
 
 /// Rows of [`Program::section_index`]: one stretch of addresses and the
-/// first-declared file-backed section holding all of it.
+/// first-declared section holding all of it, a file-backed one before one
+/// the file holds no bytes for.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SectionRow {
     /// The stretch's first virtual address.
@@ -350,7 +351,8 @@ pub(crate) struct SectionRow {
     end: u64,
     /// The section's index in [`Program::sections`]: the lowest of every
     /// file-backed section whose span (the larger of its memory and file
-    /// sizes) holds the stretch, the one a linear scan in file order finds.
+    /// sizes) holds the stretch, the one a linear scan in file order finds;
+    /// when none does, the lowest of the sections without file bytes.
     index: usize,
 }
 
@@ -390,6 +392,23 @@ pub(crate) fn section_in<'s>(
     index: &[SectionRow],
     va: u64,
 ) -> Option<&'s Section> {
+    declared_in(sections, index, va).filter(|s| s.file_size > 0)
+}
+
+/// Finds the first-declared section holding an address, file-backed or
+/// not, by a binary search of a table's rows ([`Program::index_sections`]).
+///
+/// # Arguments
+///
+/// * `sections` - The section table.
+/// * `index` - Its rows.
+/// * `va` - A virtual address.
+///
+/// # Returns
+///
+/// The first-declared file-backed section holding `va`, else the
+/// first-declared one without file bytes, else `None`.
+fn declared_in<'s>(sections: &'s [Section], index: &[SectionRow], va: u64) -> Option<&'s Section> {
     let row = index.get(index.partition_point(|r| r.va <= va).checked_sub(1)?)?;
     (va < row.end).then(|| sections.get(row.index)).flatten()
 }
@@ -1598,11 +1617,13 @@ impl Program {
 
     /// Builds the address-ordered lookup rows of a section table.
     ///
-    /// The file-backed sections' spans ([`Program::section_at`]'s answers)
-    /// are cut at every span's start and end into stretches that do not
-    /// overlap, each naming the first-declared section holding it: the
-    /// same section a linear scan of the table in file order returns,
-    /// however the sections nest or overlap, found by one binary search
+    /// Every section's span (the larger of its memory and file sizes) is
+    /// cut at every span's start and end into stretches that do not
+    /// overlap, each naming the first-declared file-backed section holding
+    /// it ([`Program::section_at`]'s answer), else the first-declared one
+    /// without file bytes ([`Program::declared_at`]'s): the same section a
+    /// linear scan of the table in file order returns, however the
+    /// sections nest or overlap, found by one binary search
     /// ([`section_in`]) even when every section overlaps every other.
     ///
     /// # Arguments
@@ -1613,42 +1634,41 @@ impl Program {
     ///
     /// The rows, sorted by virtual address.
     pub(crate) fn index_sections(sections: &[Section]) -> Vec<SectionRow> {
-        let mut spans: Vec<(u64, u64, usize)> = sections
+        let mut spans: Vec<(u64, u64, (bool, usize))> = sections
             .iter()
             .enumerate()
-            .filter(|&(_, s)| s.file_size > 0)
             .map(|(index, s)| {
                 (
                     s.va.0,
                     s.va.0.saturating_add(s.vsize.max(s.file_size)),
-                    index,
+                    (s.file_size == 0, index),
                 )
             })
             .filter(|&(va, end, _)| end > va)
             .collect();
         spans.sort_unstable();
-        let mut ends: Vec<(u64, usize)> =
-            spans.iter().map(|&(_, end, index)| (end, index)).collect();
+        let mut ends: Vec<(u64, (bool, usize))> =
+            spans.iter().map(|&(_, end, key)| (end, key)).collect();
         ends.sort_unstable();
         let mut bounds: Vec<u64> = spans.iter().flat_map(|&(va, end, _)| [va, end]).collect();
         bounds.sort_unstable();
         bounds.dedup();
         let (mut opened, mut closed) = (0, 0);
-        let mut live: BTreeSet<usize> = BTreeSet::new();
+        let mut live: BTreeSet<(bool, usize)> = BTreeSet::new();
         let mut rows: Vec<SectionRow> = Vec::new();
         for pair in bounds.windows(2) {
             let &[lo, hi] = pair else {
                 continue;
             };
-            while let Some(&(_, index)) = ends.get(closed).filter(|&&(end, _)| end <= lo) {
-                live.remove(&index);
+            while let Some(&(_, key)) = ends.get(closed).filter(|&&(end, _)| end <= lo) {
+                live.remove(&key);
                 closed += 1;
             }
-            while let Some(&(_, _, index)) = spans.get(opened).filter(|&&(va, ..)| va <= lo) {
-                live.insert(index);
+            while let Some(&(_, _, key)) = spans.get(opened).filter(|&&(va, ..)| va <= lo) {
+                live.insert(key);
                 opened += 1;
             }
-            let Some(&index) = live.first() else {
+            let Some(&(_, index)) = live.first() else {
                 continue;
             };
             match rows.last_mut() {
@@ -1713,16 +1733,15 @@ impl Program {
     ///
     /// # Returns
     ///
-    /// The first-declared such section holding `va`, or `None`.
+    /// The first-declared such section holding `va`, or `None`, also when
+    /// a file-backed section holds it.
     pub fn zero_fill_at(&self, va: u64) -> Option<&Section> {
-        self.sections
-            .iter()
-            .find(|s| s.file_size == 0 && s.va.0 <= va && va < s.va.0.saturating_add(s.vsize))
+        self.declared_at(va).filter(|s| s.file_size == 0)
     }
 
     /// Finds the section the table declares at `va`, whether or not the
-    /// file holds bytes for it: [`Program::section_at`], else
-    /// [`Program::zero_fill_at`].
+    /// file holds bytes for it, by one binary search of
+    /// [`Program::section_index`].
     ///
     /// # Arguments
     ///
@@ -1730,10 +1749,12 @@ impl Program {
     ///
     /// # Returns
     ///
-    /// The section, or `None` when no section declares `va`.
+    /// [`Program::section_at`]'s section, else the first-declared section
+    /// without file bytes holding `va`, or `None` when no section declares
+    /// it.
     #[must_use]
     pub fn declared_at(&self, va: u64) -> Option<&Section> {
-        self.section_at(va).or_else(|| self.zero_fill_at(va))
+        declared_in(&self.sections, &self.section_index, va)
     }
 
     /// Says why a section declared at `va` gives no file bytes there.
