@@ -503,12 +503,7 @@ pub fn typed_tsv(
     let bytes = p
         .read_va_upto(va, usize::try_from(want).unwrap_or(0).max(1))
         .filter(|b| !b.is_empty())
-        .ok_or_else(|| {
-            format!(
-                "address {va:#x} is not mapped to file bytes; sections: {}",
-                p.section_list()
-            )
-        })?;
+        .ok_or_else(|| p.no_bytes_at(va))?;
     let bytes = bytes
         .get(..usize::try_from(want).unwrap_or(0))
         .unwrap_or(bytes);

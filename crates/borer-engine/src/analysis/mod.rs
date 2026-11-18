@@ -2310,10 +2310,12 @@ pub fn function_entry(program: &Program, analysis: &Analysis, va: u64) -> Result
 
 /// Says that no discovered function contains `va`, and what to try.
 ///
-/// An address outside every section names the image's span and, when
-/// the image base plus it is mapped, that address, since an RVA passed
-/// for a virtual address is the usual slip; one inside names the nearest
-/// function before it.
+/// An address in a section the file holds no bytes for names that
+/// section ([`Program::unbacked_at`]). One no section declares names the
+/// image's span, says whether it lies between sections or outside them
+/// and, when the image base plus it is mapped, that address, since an RVA
+/// passed for a virtual address is the usual slip; one inside names the
+/// nearest function before it.
 ///
 /// # Arguments
 ///
@@ -2333,6 +2335,9 @@ pub fn no_function_at(program: &Program, analysis: &Analysis, va: u64) -> String
         .reduce(|(lo, hi), (a, b)| (lo.min(a), hi.max(b)));
     match span {
         Some((lo, hi)) if program.section_at(va).is_none() => {
+            if let Some(why) = program.unbacked_at(va) {
+                return format!("no discovered function contains {va:#x}: it is {why}");
+            }
             let rva = program
                 .image_base
                 .checked_add(va)
@@ -2340,8 +2345,13 @@ pub fn no_function_at(program: &Program, analysis: &Analysis, va: u64) -> String
                 .map_or_else(String::new, |at| {
                     format!("; as an RVA it is {at:#x}, which is mapped")
                 });
+            let place = if (lo..hi).contains(&va) {
+                "in no section, between the image's sections"
+            } else {
+                "outside the image"
+            };
             format!(
-                "no discovered function contains {va:#x}: it is outside the image ({lo:#x}..{hi:#x}){rva}"
+                "no discovered function contains {va:#x}: it is {place} ({lo:#x}..{hi:#x}){rva}"
             )
         }
         Some(_) | None => {

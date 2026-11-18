@@ -511,6 +511,62 @@ fn pe_with_headers() -> borer_engine::program::Program {
     p
 }
 
+/// An address in a section the file holds no bytes for is named as in it.
+///
+/// Every read and the function lookup say the section and that the loader
+/// zero-fills it; never "not mapped", "outside the image" or an `off:`
+/// hint. A section's zero-filled tail is said as such, and an address no
+/// section declares is still not mapped.
+#[test]
+fn a_section_without_file_bytes_is_named_not_unmapped() {
+    use borer_engine::analysis::{Analysis, no_function_at};
+    use borer_engine::memory::{Kind, read_values};
+    use borer_engine::program::{Arch, BinaryFormat, Program, Section};
+    let mut bytes = vec![0u8; 0x400];
+    bytes.extend_from_slice(&[0x90; 16]);
+    let mut text = Section::mapped(".text", 0x401000, 0x400, 16, false, true);
+    text.vsize = 0x100;
+    let mut themida = Section::mapped(".themida", 0x402000, 0, 0x1000, true, true);
+    themida.file_size = 0;
+    let data = Section::mapped(".data", 0x404000, 0x400, 8, true, false);
+    let sections = vec![text, themida, data];
+    let mut p = Program::raw(bytes, Arch::X86_64, 0x400000, None, sections);
+    p.format = BinaryFormat::Pe;
+    let a = Analysis::compute(&p);
+    let inside =
+        "address 0x402010 is in .themida, which holds no file bytes (the loader zero-fills it)";
+    assert_eq!(p.no_bytes_at(0x402010), inside);
+    assert_eq!(hexdump::hex_rows(&p, 0x402010, 64).spell(), None);
+    assert_eq!(read_values(&p, 0x402010, Kind::U8, 1).unwrap_err(), inside);
+    let none = no_function_at(&p, &a, 0x402010);
+    assert_eq!(
+        none,
+        "no discovered function contains 0x402010: it is in .themida, which holds no file bytes (the loader zero-fills it)"
+    );
+    assert_eq!(
+        p.no_bytes_at(0x401020),
+        "address 0x401020 is in .text past its 0x10 file bytes (the loader zero-fills the rest)"
+    );
+    let outside = p.no_bytes_at(0x900000);
+    assert!(
+        outside.starts_with("address 0x900000 is not mapped to file bytes; sections: .text("),
+        "{outside}"
+    );
+    assert_eq!(read_values(&p, 0x900000, Kind::U8, 1).unwrap_err(), outside);
+    assert!(
+        no_function_at(&p, &a, 0x900000)
+            .ends_with(": it is outside the image (0x401000..0x404008)"),
+        "{}",
+        no_function_at(&p, &a, 0x900000)
+    );
+    let gap = no_function_at(&p, &a, 0x403000);
+    assert_eq!(
+        gap,
+        "no discovered function contains 0x403000: it is in no section, between the image's sections (0x401000..0x404008)"
+    );
+    assert!(p.no_bytes_at(0x403000).contains("not mapped"));
+}
+
 /// Exact reads refuse to spill into the next section or into a section's
 /// zero-filled tail; bounded reads stop at the file extent.
 #[test]

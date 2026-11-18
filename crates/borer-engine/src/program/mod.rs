@@ -1720,6 +1720,99 @@ impl Program {
             .find(|s| s.file_size == 0 && s.va.0 <= va && va < s.va.0.saturating_add(s.vsize))
     }
 
+    /// Finds the section the table declares at `va`, whether or not the
+    /// file holds bytes for it: [`Program::section_at`], else
+    /// [`Program::zero_fill_at`].
+    ///
+    /// # Arguments
+    ///
+    /// * `va` - A virtual address.
+    ///
+    /// # Returns
+    ///
+    /// The section, or `None` when no section declares `va`.
+    #[must_use]
+    pub fn declared_at(&self, va: u64) -> Option<&Section> {
+        self.section_at(va).or_else(|| self.zero_fill_at(va))
+    }
+
+    /// Says why a section declared at `va` gives no file bytes there.
+    ///
+    /// # Arguments
+    ///
+    /// * `va` - A virtual address.
+    ///
+    /// # Returns
+    ///
+    /// A clause naming the section (`in .bss, which holds no file bytes
+    /// (the loader zero-fills it)`, or past its file bytes, or past the
+    /// end of a file cut short), or `None` when no section declares `va`
+    /// or the file holds a byte there.
+    #[must_use]
+    pub fn unbacked_at(&self, va: u64) -> Option<String> {
+        let s = self.declared_at(va)?;
+        if self.read_va_upto(va, 1).is_some() {
+            return None;
+        }
+        let name = &s.name;
+        Some(if s.file_size == 0 {
+            format!("in {name}, which holds no file bytes (the loader zero-fills it)")
+        } else if va.saturating_sub(s.va.0) >= s.file_size {
+            format!(
+                "in {name} past its {:#x} file bytes (the loader zero-fills the rest)",
+                s.file_size
+            )
+        } else {
+            format!("in {name}, whose file bytes there lie past the end of the file")
+        })
+    }
+
+    /// Says why a read at `va` found no file bytes, for the error a read
+    /// answers with.
+    ///
+    /// # Arguments
+    ///
+    /// * `va` - The address the read started at.
+    ///
+    /// # Returns
+    ///
+    /// The section's clause ([`Program::unbacked_at`]) when one declares
+    /// `va`; otherwise that `va` is not mapped, with the sections and how
+    /// to read the bytes no section maps.
+    #[must_use]
+    pub fn no_bytes_at(&self, va: u64) -> String {
+        self.unbacked_at(va).map_or_else(
+            || {
+                format!(
+                    "address {va:#x} is not mapped to file bytes; sections: {}{}",
+                    self.section_list(),
+                    self.by_offset_hint()
+                )
+            },
+            |why| format!("address {va:#x} is {why}"),
+        )
+    }
+
+    /// Says how to read the bytes no section maps, for an error about an
+    /// address no section maps.
+    ///
+    /// # Returns
+    ///
+    /// A clause to append to the error, empty when the sections cover the
+    /// whole file.
+    fn by_offset_hint(&self) -> String {
+        match self.unmapped().first() {
+            None => String::new(),
+            Some(_) if self.sections.is_empty() => {
+                "; the file's bytes are read by file offset, as off:0x0".to_owned()
+            }
+            Some((off, bytes)) => format!(
+                "; bytes no section maps are read by file offset, as off:{off:#x} ({:#x} bytes there)",
+                bytes.len()
+            ),
+        }
+    }
+
     /// Converts a virtual address to its file offset.
     ///
     /// # Arguments

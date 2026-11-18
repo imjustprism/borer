@@ -345,12 +345,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             let va = s.address(arg(args, 2, "hexdump needs an address")?)?;
             let dump = hexfmt::hex_rows(&s.program, va, n)
                 .spell()
-                .with_context(|| {
-                    format!(
-                        "address {va:#x} not mapped{}",
-                        memory::by_offset_hint(&s.program)
-                    )
-                })?;
+                .with_context(|| s.program.no_bytes_at(va))?;
             print!("{dump}");
         }
         Query::Entropy => {
@@ -409,7 +404,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             let code = s
                 .program
                 .read_va_upto(va, 16 * 1024)
-                .with_context(|| format!("address {va:#x} not mapped"))?;
+                .with_context(|| s.program.no_bytes_at(va))?;
             if va != asked {
                 println!("# {asked:#x} is inside an instruction, listing from {va:#x}");
             }

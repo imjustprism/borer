@@ -57,12 +57,9 @@ impl BorerServer {
             } else {
                 format!("; {asked:#x} is inside an instruction, listing from {va:#x}")
             };
-            let code = p.read_va_upto(va, 16 * 1024).ok_or_else(|| {
-                format!(
-                    "address {va:#x} is not mapped to file bytes; sections: {}",
-                    p.section_list()
-                )
-            })?;
+            let code = p
+                .read_va_upto(va, 16 * 1024)
+                .ok_or_else(|| p.no_bytes_at(va))?;
             let limit = render::sweep_limit(p, &a, va);
             let window = limit
                 .and_then(|end| usize::try_from(end - va).ok())
@@ -344,13 +341,9 @@ impl BorerServer {
                 return hexfmt::file_hexdump(p, off, length.n);
             }
             let va = self.addr(p, &address)?;
-            hexfmt::hex_rows(p, va, length.n).spell().ok_or_else(|| {
-                format!(
-                    "address {va:#x} not mapped; sections: {}{}",
-                    p.section_list(),
-                    memory::by_offset_hint(p)
-                )
-            })
+            hexfmt::hex_rows(p, va, length.n)
+                .spell()
+                .ok_or_else(|| p.no_bytes_at(va))
         })
         .map(|text| length.noted(text))
     }

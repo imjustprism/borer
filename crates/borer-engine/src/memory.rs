@@ -159,9 +159,10 @@ const STR_CAP: usize = 200;
 ///
 /// # Errors
 ///
-/// Returns a message naming the address and the mapped sections when not
-/// even the first value could be read, and how to read the bytes no section
-/// maps when the file has some.
+/// Returns a message when not even the first value could be read: the
+/// section declaring the address that holds no file bytes there, else the
+/// mapped sections and how to read the bytes no section maps
+/// ([`Program::no_bytes_at`]).
 pub fn read_values(
     program: &Program,
     va: u64,
@@ -175,11 +176,7 @@ pub fn read_values(
         kind,
         count,
         |first| match first {
-            None => format!(
-                "address {va:#x} is not mapped to file bytes; sections: {}{}",
-                program.section_list(),
-                by_offset_hint(program)
-            ),
+            None => program.no_bytes_at(va),
             Some(first) => refusal(kind, first, &format!("{va:#x}"), program, || {
                 format!("; sections: {}", program.section_list())
             }),
@@ -301,30 +298,6 @@ pub(crate) fn one_empty(kind: Kind, start: u64, raw: &[u8]) -> Option<Value> {
         target: None,
         size,
     })
-}
-
-/// Says how to read the bytes no section maps, for an error about an
-/// address no section maps.
-///
-/// # Arguments
-///
-/// * `program` - The loaded image.
-///
-/// # Returns
-///
-/// A clause to append to the error, empty when the sections cover the
-/// whole file.
-pub fn by_offset_hint(program: &Program) -> String {
-    match program.unmapped().first() {
-        None => String::new(),
-        Some(_) if program.sections.is_empty() => {
-            "; the file's bytes are read by file offset, as off:0x0".to_owned()
-        }
-        Some((off, bytes)) => format!(
-            "; bytes no section maps are read by file offset, as off:{off:#x} ({:#x} bytes there)",
-            bytes.len()
-        ),
-    }
 }
 
 /// The refusal of a read whose first byte is there but whose first value
