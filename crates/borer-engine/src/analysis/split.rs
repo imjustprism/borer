@@ -153,19 +153,26 @@ pub fn sources(p: &Program, a: &Analysis) -> Sources {
 
 /// Returns the stem of a cited path's split file.
 ///
-/// Its components are made safe, at most [`DEPTH_MAX`] directories are
-/// kept, the innermost, and a directory named like a split file (`a.c/`,
+/// A `..` drops the directory before it (`ui/../core/a.h` is
+/// `core/a.h`) and none past the start, its components are made safe, at
+/// most [`DEPTH_MAX`] directories are kept, the innermost, and a directory named like a split file (`a.c/`,
 /// `b.h/`) takes a `_`, so no file is named as a directory.
 ///
 /// # Arguments
 ///
 /// * `short` - The path, the build root dropped, `/`-separated.
 fn rel_stem(short: &str) -> String {
-    let mut parts: Vec<String> = short
-        .split('/')
-        .filter(|c| !c.is_empty() && *c != "." && *c != "..")
-        .map(safe_component)
-        .collect();
+    let mut resolved: Vec<&str> = Vec::new();
+    for c in short.split('/') {
+        match c {
+            "" | "." => {}
+            ".." => {
+                resolved.pop();
+            }
+            _ => resolved.push(c),
+        }
+    }
+    let mut parts: Vec<String> = resolved.into_iter().map(safe_component).collect();
     let dirs = parts.len().saturating_sub(1);
     for dir in parts.iter_mut().take(dirs) {
         if [".c", ".h"]
@@ -415,6 +422,7 @@ mod tests {
         assert_eq!(rel_stem("B.H/y.h"), "B.H_/y.h");
         assert_eq!(rel_stem("../../x/./con.cpp"), "x/_con.cpp");
         assert_eq!(rel_stem("/"), "_");
+        assert_eq!(rel_stem("ui/../core/assert.h"), "core/assert.h");
         assert_eq!(rel_stem("a/b/c/d/e/f/g/h/i/j/k.cc"), "c/d/e/f/g/h/i/j/k.cc");
     }
 
