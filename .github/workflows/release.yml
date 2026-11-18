@@ -104,6 +104,14 @@ jobs:
         with:
           ref: ${{ needs.source.outputs.sha }}
 
+      # The commit is checked out by hash, so a release build fetches its
+      # tag: `git describe` then names it and the binary says the release's
+      # version, not `-dev`.
+      - name: release tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: git fetch --no-tags --depth=1 origin "+refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
+
       # rust-toolchain.toml pins the channel; the target is added to it.
       - name: toolchain
         shell: bash
@@ -113,6 +121,18 @@ jobs:
 
       - name: build
         run: cargo build --locked --profile dist -p borer --target ${{ matrix.target }}
+
+      # A release must say its own version. The x86_64 macOS binary is
+      # cross-built and is not run here.
+      - name: version
+        if: startsWith(github.ref, 'refs/tags/v') && matrix.target != 'x86_64-apple-darwin'
+        shell: bash
+        run: |
+          said=$(target/${{ matrix.target }}/dist/borer --version)
+          if [ "$said" != "borer ${GITHUB_REF_NAME#v}" ]; then
+            echo "::error::the build of $GITHUB_REF_NAME says '$said'"
+            exit 1
+          fi
 
       # The licenses of the crates, the standard library and the C sources
       # this target's binary links; rust-docs (rust-toolchain.toml) holds the
@@ -177,6 +197,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.source.outputs.sha }}
+
+      # The commit is checked out by hash, so a release build fetches its
+      # tag: `git describe` then names it and the binary says the release's
+      # version, not `-dev`.
+      - name: release tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: git fetch --no-tags --depth=1 origin "+refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
 
       - name: linux packages
         if: runner.os == 'Linux'
