@@ -796,7 +796,8 @@ fn inc_and_dec_overflow_at_every_width_agrees_with_the_emulator() {
 /// `pushfq` made with the overflow known: a `jo` after any other
 /// word stops, as it does without the push. That takes in a nested push, a
 /// word moved to another slot, `syscall`'s `r11`, and a word whose overflow
-/// bit the routine set itself, in a forged word or in the trusted one. A
+/// bit the routine set itself, in a forged word or in the trusted one, and
+/// a run on the same machine after the one that forged a word. A
 /// routine that forged nothing restores a known overflow from any word it
 /// pushed.
 #[test]
@@ -823,6 +824,20 @@ fn a_pushed_unknown_overflow_stays_unknown() {
             "{saved:02x?}: {stop:?}"
         );
     }
+    let callees = [
+        0x9c, 0x58, 0xc3, // ASM: pushfq; pop rax; ret
+        0x51, 0x9d, // ASM: push rcx; popfq
+        0x70, 0x01, 0xc3, 0xc3, // ASM: jo +1; ret; ret
+    ];
+    let p = raw::image(Arch::X86_64, &callees, &[]);
+    let stop = Emulator::new(&p, 100).map(|mut emu| {
+        emu.run(0x401000);
+        emu.run(0x401003).stop
+    });
+    assert!(
+        matches!(&stop, Some(Stop::Unmodeled(what)) if what.contains("did not set")),
+        "a later run: {stop:?}"
+    );
     let pushed = [
         0xb8, 0x05, 0x00, 0x00, 0x00, // ASM: mov eax, 5
         0xc1, 0xe0, 0x02, // ASM: shl eax, 2

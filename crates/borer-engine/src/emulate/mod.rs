@@ -256,13 +256,15 @@ pub struct Emulator<'a> {
     /// Unknown makes a signed jump stop the run instead, which is a diagnosis
     /// rather than a wrong answer.
     flags_over: Option<bool>,
-    /// Whether this run wrote a flags word ([`Emulator::rflags`]) while
-    /// [`Emulator::flags_over`] was unknown: a word whose overflow bit is a
-    /// clear the machine did not compute.
+    /// Whether this machine ever wrote a flags word ([`Emulator::rflags`])
+    /// while [`Emulator::flags_over`] was unknown: a word whose overflow bit
+    /// is a clear the machine did not compute. Never reset, since memory and
+    /// registers outlive a run and a later run may pop the word.
     forged: bool,
     /// The stack slot of the last `pushf` made with the overflow known, until
-    /// a write covers its overflow byte or a `popf` takes it: once a word is
-    /// forged, the only word `popf` restores a known overflow from.
+    /// a write covers its overflow byte, a `popf` takes it or a run starts
+    /// (memory may be poked between runs): once a word is forged, the only
+    /// word `popf` restores a known overflow from.
     clean: Option<u64>,
     /// Steps a run may take.
     budget: usize,
@@ -1418,7 +1420,7 @@ impl<'a> Emulator<'a> {
     /// order.
     pub fn run(&mut self, entry: u64) -> Run {
         let mut ip = entry;
-        (self.steps, self.forged, self.clean) = (0, false, None);
+        (self.steps, self.clean) = (0, None);
         let stop = loop {
             if self.stop_at == Some(ip) {
                 break Stop::Stopped(ip);
