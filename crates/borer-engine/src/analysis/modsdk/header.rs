@@ -71,12 +71,12 @@ pub fn header(sdk: &Sdk) -> String {
 /// ([`crate::analysis::split::header_file`]) and text, in the SDK's order.
 #[must_use]
 pub fn class_headers(sdk: &Sdk) -> (String, Vec<(String, String, String)>) {
-    use crate::analysis::split::{SDK_HEADER, header_file};
+    use crate::analysis::split::{SDK_HEADER, header_file, header_names};
     let names = names(sdk);
     let mut shared = declarations(sdk, &names);
     addresses(&mut shared, sdk, &names);
     shared.push_str("\n} // namespace sdk\n");
-    let mut taken = std::collections::BTreeSet::new();
+    let mut taken = header_names();
     let mut classes = Vec::new();
     let mut bytes = 0usize;
     for c in &sdk.classes {

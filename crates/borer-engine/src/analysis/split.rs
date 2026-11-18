@@ -11,10 +11,10 @@
 //! system refuses, at most [`DEPTH_MAX`] directories deep, and unique
 //! however the file system folds case.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use super::modsdk::Sdk;
+use super::modsdk::{Sdk, Taken, unique};
 use super::{Analysis, Overlay};
 use crate::program::Program;
 
@@ -72,25 +72,22 @@ fn safe_component(part: &str) -> String {
     out
 }
 
-/// Returns `want`, or `want` with `_2`, `_3` ... before its extension, the
-/// first no other file took in any case, and takes it.
+/// Returns `stem` and `ext`, or `stem` with `_2`, `_3` ... before `ext`,
+/// the first no other file took however the file system folds case, and
+/// takes it.
+///
+/// A stem wanted again resumes at the suffix it reached ([`unique`]), so
+/// many names folding to one stay linear.
 ///
 /// # Arguments
 ///
-/// * `taken` - The files taken so far, lower-cased.
-/// * `want` - The file wanted, a relative path of safe components.
-fn unique_file(taken: &mut BTreeSet<String>, want: &str) -> String {
-    let (stem, ext) = match want.rsplit_once('.') {
-        Some((stem, ext)) if !stem.is_empty() && !stem.ends_with('/') => (stem, format!(".{ext}")),
-        _ => (want, String::new()),
-    };
-    let mut file = want.to_owned();
-    let mut n = 1usize;
-    while !taken.insert(file.to_ascii_lowercase()) {
-        n += 1;
-        file = format!("{stem}_{n}{ext}");
-    }
-    file
+/// * `taken` - The stems taken so far, lower-cased.
+/// * `stem` - The file wanted without its extension: safe components.
+/// * `ext` - The extension, with its dot.
+fn unique_file(taken: &mut Taken, stem: &str, ext: &str) -> String {
+    let key = unique(taken, &stem.to_ascii_lowercase());
+    let suffix = key.get(stem.len()..).unwrap_or_default();
+    format!("{stem}{suffix}{ext}")
 }
 
 /// Where the split files one function, or why it goes to [`REMAINDER`].
@@ -139,7 +136,9 @@ pub struct Sources {
 pub fn sources(p: &Program, a: &Analysis) -> Sources {
     let cited = super::render::cited_sources(p, a);
     let root = super::render::common_root(cited.keys());
-    let mut taken: BTreeSet<String> = [DECLS, REMAINDER].into_iter().map(str::to_owned).collect();
+    let mut taken: Taken = [REMAINDER.trim_end_matches(".c").to_owned()]
+        .into_iter()
+        .collect();
     let mut out = Sources::default();
     for (path, entries) in &cited {
         for &e in entries {
@@ -162,7 +161,7 @@ pub fn sources(p: &Program, a: &Analysis) -> Sources {
             kept.join("/")
         };
         out.files
-            .insert(path.clone(), unique_file(&mut taken, &format!("{rel}.c")));
+            .insert(path.clone(), unique_file(&mut taken, &rel, ".c"));
     }
     out
 }
@@ -203,19 +202,24 @@ impl Sources {
     }
 }
 
+/// Returns the names a split's class headers start from: [`SDK_HEADER`]'s
+/// is taken.
+#[must_use]
+pub(crate) fn header_names() -> Taken {
+    [SDK_HEADER.trim_end_matches(".h").to_owned()]
+        .into_iter()
+        .collect()
+}
+
 /// Returns a class header's file name, unique among the split's headers.
 ///
 /// # Arguments
 ///
-/// * `taken` - The headers taken so far, lower-cased; [`SDK_HEADER`] is
-///   taken first.
+/// * `taken` - The headers taken so far ([`header_names`]).
 /// * `ident` - The class's C++ identifier.
 #[must_use]
-pub fn header_file(taken: &mut BTreeSet<String>, ident: &str) -> String {
-    if taken.is_empty() {
-        taken.insert(SDK_HEADER.to_owned());
-    }
-    unique_file(taken, &format!("{}.h", safe_component(ident)))
+pub(crate) fn header_file(taken: &mut Taken, ident: &str) -> String {
+    unique_file(taken, &safe_component(ident), ".h")
 }
 
 /// Returns the opening of one split C file: what it holds, how rough it
@@ -328,20 +332,20 @@ mod tests {
         assert_eq!(safe_component("a:b*c?.h. "), "a_b_c_.h");
         assert_eq!(safe_component(""), "_");
         assert_eq!(safe_component(&"x".repeat(200)).len(), COMPONENT_MAX);
-        let mut taken = BTreeSet::new();
+        let mut taken = Taken::default();
         assert_eq!(
-            unique_file(&mut taken, "net/Socket.cpp.c"),
+            unique_file(&mut taken, "net/Socket.cpp", ".c"),
             "net/Socket.cpp.c"
         );
         assert_eq!(
-            unique_file(&mut taken, "net/socket.cpp.c"),
+            unique_file(&mut taken, "net/socket.cpp", ".c"),
             "net/socket.cpp_2.c"
         );
         assert_eq!(
-            unique_file(&mut taken, "net/socket.cpp.c"),
+            unique_file(&mut taken, "net/socket.cpp", ".c"),
             "net/socket.cpp_3.c"
         );
-        let mut headers = BTreeSet::new();
+        let mut headers = header_names();
         assert_eq!(header_file(&mut headers, "_sdk"), "_sdk_2.h");
         assert_eq!(header_file(&mut headers, "Foo"), "Foo.h");
         assert_eq!(header_file(&mut headers, "foo"), "foo_2.h");

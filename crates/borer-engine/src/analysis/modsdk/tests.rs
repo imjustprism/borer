@@ -884,3 +884,41 @@ fn fits_refuses_a_cancelled_render_under_the_cap() {
     assert!(ct.is_err_and(|e| e.to_string().contains("deadline passed")));
     assert!(super::fits(&sdk, "C++ header", header(&sdk).into_bytes()).is_ok());
 }
+
+/// Many classes whose header files fold to one name are named in linear
+/// time.
+///
+/// 131,072 classes spelling one name in every mix of case all want one
+/// file on a case-folding file system, and each must not try every suffix
+/// from 2 again.
+///
+/// # Panics
+///
+/// When [`class_headers`] takes over ten seconds, or two headers share a
+/// file however case folds.
+#[test]
+fn many_classes_of_one_folded_name_are_split_in_linear_time() {
+    use super::header::class_headers;
+    let mut sdk = sample();
+    let template = sdk.classes.first().cloned().expect("a class");
+    sdk.classes = (0..1u32 << 17)
+        .map(|k| Class {
+            name: (0..17)
+                .map(|bit| if k >> bit & 1 == 1 { 'Q' } else { 'q' })
+                .collect(),
+            vtable: None,
+            slots: Vec::new(),
+            ..template.clone()
+        })
+        .collect();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || tx.send(class_headers(&sdk)));
+    let (_, headers) = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the headers are split within ten seconds");
+    let folded: BTreeSet<String> = headers
+        .iter()
+        .map(|(_, file, _)| file.to_ascii_lowercase())
+        .collect();
+    assert_eq!(folded.len(), headers.len(), "two headers share a file");
+}
