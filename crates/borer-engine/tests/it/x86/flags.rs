@@ -781,34 +781,37 @@ fn inc_and_dec_overflow_at_every_width_agrees_with_the_emulator() {
 /// `pushfq` of an overflow nothing computed does not come back from `popfq`
 /// as a known clear.
 ///
-/// The signed jump after it stops, as it does without the push. A word whose overflow bit the routine set, or one it pushed
-/// itself, restores a known overflow.
+/// Once a flags word is forged, `popfq` trusts only the slot of the last
+/// `pushfq` made with the overflow known: a `jo` after any other
+/// word stops, as it does without the push. That takes in a nested push, a
+/// word moved to another slot, `syscall`'s `r11`, and a word whose overflow
+/// bit the routine set itself, in a forged word or in the trusted one. A
+/// routine that forged nothing restores a known overflow from any word it
+/// pushed.
 #[test]
 fn a_pushed_unknown_overflow_stays_unknown() {
-    let unknown = [
-        0xb8, 0x05, 0x00, 0x00, 0x00, // ASM: mov eax, 5
-        0xc1, 0xe0, 0x02, // ASM: shl eax, 2
-        0x9c, // ASM: pushfq
-        0x9d, // ASM: popfq
-        0x7f, 0x01, // ASM: jg +1
-        0xc3, 0xc3, // ASM: ret; ret
+    let unknown = [0xb8, 0x05, 0x00, 0x00, 0x00, 0xc1, 0xe0, 0x02]; // ASM: mov eax, 5; shl eax, 2
+    let stops: [&[u8]; 6] = [
+        &[0x9c, 0x9d],                   // ASM: pushfq; popfq
+        &[0x9c, 0x9c, 0x9d, 0x9d],       // ASM: pushfq; pushfq; popfq; popfq
+        &[0x9c, 0x59, 0x53, 0x51, 0x9d], // ASM: pushfq; pop rcx; push rbx; push rcx; popfq
+        // ASM: pushfq; or qword [rsp], 0x800; popfq
+        &[0x9c, 0x48, 0x81, 0x0c, 0x24, 0x00, 0x08, 0x00, 0x00, 0x9d],
+        // ASM: mov eax, 39; syscall; push r11; popfq
+        &[0xb8, 0x27, 0x00, 0x00, 0x00, 0x0f, 0x05, 0x41, 0x53, 0x9d],
+        // ASM: pushfq; pop rcx; xor eax, eax; pushfq; or qword [rsp], 0x800; popfq
+        &[
+            0x9c, 0x59, 0x31, 0xc0, 0x9c, 0x48, 0x81, 0x0c, 0x24, 0x00, 0x08, 0x00, 0x00, 0x9d,
+        ],
     ];
-    let stop = emulated_64(&unknown).map(|(stop, _)| stop);
-    assert!(
-        matches!(&stop, Some(Stop::Unmodeled(what)) if what.contains("did not set")),
-        "{stop:?}"
-    );
-    let set = [
-        0xb8, 0x05, 0x00, 0x00, 0x00, // ASM: mov eax, 5
-        0xc1, 0xe0, 0x02, // ASM: shl eax, 2
-        0x9c, // ASM: pushfq
-        0x48, 0x81, 0x0c, 0x24, 0x00, 0x08, 0x00, 0x00, // ASM: or qword [rsp], 0x800
-        0x9d, // ASM: popfq
-        0x70, 0x03, // ASM: jo L
-        0x31, 0xc0, 0xc3, // ASM: xor eax, eax; ret
-        0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3, // ASM: L: mov eax, 1; ret
-    ];
-    assert_eq!(emulated_64(&set), Some((Stop::Returned, 1)));
+    for saved in stops {
+        let jo = [0x70, 0x01, 0xc3, 0xc3]; // ASM: jo +1; ret; ret
+        let stop = emulated_64(&[&unknown[..], saved, &jo[..]].concat()).map(|(stop, _)| stop);
+        assert!(
+            matches!(&stop, Some(Stop::Unmodeled(what)) if what.contains("did not set")),
+            "{saved:02x?}: {stop:?}"
+        );
+    }
     let pushed = [
         0xb8, 0x05, 0x00, 0x00, 0x00, // ASM: mov eax, 5
         0xc1, 0xe0, 0x02, // ASM: shl eax, 2

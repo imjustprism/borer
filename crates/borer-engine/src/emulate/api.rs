@@ -639,7 +639,8 @@ impl Emulator<'_> {
         });
         if self.bitness == 64 {
             self.set_reg(Register::RCX, i.next_ip());
-            self.set_reg(Register::R11, self.rflags());
+            let flags = self.rflags();
+            self.set_reg(Register::R11, flags);
         }
         Ok(None)
     }

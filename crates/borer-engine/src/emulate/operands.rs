@@ -349,6 +349,8 @@ impl Emulator<'_> {
     /// A write outside the stack is recorded as materialized: the bytes a
     /// packer decrypts into memory, which [`Emulator::run`] can then execute.
     /// On a 32-bit target the bytes past `0xffff_ffff` wrap to address zero.
+    /// A write over the overflow byte of the [`Emulator::clean`] slot ends
+    /// that slot's trust.
     ///
     /// # Errors
     ///
@@ -357,6 +359,12 @@ impl Emulator<'_> {
     pub(super) fn write(&mut self, addr: u64, v: u64, bytes: usize) -> Result<(), Stop> {
         if self.trace_cap > 0 {
             self.step_memory.borrow_mut().push((true, addr, bytes, v));
+        }
+        if let Some(slot) = self.clean {
+            let over = slot.wrapping_add(u64::from(OF_BIT / 8));
+            if self.narrow(over.wrapping_sub(addr)) < from_usize(bytes) {
+                self.clean = None;
+            }
         }
         for k in 0..from_usize(bytes) {
             let a = self.narrow(addr.wrapping_add(k));
@@ -417,12 +425,16 @@ impl Emulator<'_> {
     /// Assembles the tracked flags into an `x86` `RFLAGS`/`EFLAGS` word.
     ///
     /// Only the flags the model tracks are set: carry, parity, zero, sign,
-    /// overflow and direction, plus the always-one reserved bit. An overflow
-    /// the last instruction did not compute reads as clear, which `pushf`
-    /// records in [`Emulator::forged_over`] so that `popf` does not restore
-    /// it as known. Used by `pushf` so the value a later `popf` restores
-    /// round-trips the flags that gate branches.
-    pub(super) fn rflags(&self) -> u64 {
+    /// overflow and direction, plus the always-one reserved bit. Used by
+    /// `pushf` and `syscall` so the value a later `popf` restores round-trips
+    /// the flags that gate branches.
+    ///
+    /// An overflow the last instruction did not compute reads as clear and
+    /// marks the run [`Emulator::forged`], so that `popf` restores a known
+    /// overflow only from the [`Emulator::clean`] slot. A forged word read as
+    /// data (`pushfq; pop rax; test ah, 8`) still reads the clear as known.
+    pub(super) fn rflags(&mut self) -> u64 {
+        self.forged |= self.flags_over.is_none();
         let mut v = 0x2u64;
         v |= u64::from(self.flags_carry);
         v |= u64::from(self.flags_parity) << 2;
@@ -538,19 +550,18 @@ impl Emulator<'_> {
                 self.store(i, v)?;
             }
             Mnemonic::Pushf | Mnemonic::Pushfd | Mnemonic::Pushfq => {
-                self.push(self.rflags(), bytes)?;
-                let at = self.reg(Register::RSP);
-                if self.flags_over.is_none() {
-                    self.forged_over = Some(at);
-                } else if self.forged_over == Some(at) {
-                    self.forged_over = None;
+                let v = self.rflags();
+                self.push(v, bytes)?;
+                if self.flags_over.is_some() {
+                    self.clean = Some(self.reg(Register::RSP));
                 }
             }
             Mnemonic::Popf | Mnemonic::Popfd | Mnemonic::Popfq => {
                 let at = self.reg(Register::RSP);
                 let v = self.pop(bytes)?;
+                let trusted = !self.forged || self.clean.take() == Some(at);
                 self.set_rflags(v);
-                if self.forged_over.take_if(|f| *f == at).is_some() && v >> OF_BIT & 1 == 0 {
+                if !trusted {
                     self.flags_over = None;
                 }
             }
