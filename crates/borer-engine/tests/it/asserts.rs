@@ -1031,7 +1031,7 @@ fn the_export_split_files_each_function_by_its_cited_source() {
         &Overlay::default(),
         Library::Include,
         None,
-        &mut |entry, text| {
+        &mut |entry, text, _| {
             assert!(!text.is_empty(), "{entry:#x} has a definition");
             let unit = match s.filed(entry, text) {
                 Filed::Source(path) => Some(path.to_owned()),

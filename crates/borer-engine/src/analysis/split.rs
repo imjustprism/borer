@@ -264,7 +264,7 @@ pub(crate) fn header_file(taken: &mut Taken, ident: &str) -> String {
 #[must_use]
 pub fn unit_prologue(file: &str) -> String {
     let what = if file == REMAINDER {
-        "the functions the split filed under no source file (the export's answer counts why: no cited file, a tie, a cut path fitting several, a file past the cap; the ones that did not decompile or were cut for size are here too)".to_owned()
+        "the functions the split filed under no source file (the export's answer counts why: no cited file, a tie, a cut path fitting several, a file past the cap, or no text to read: it did not decompile or was cut for size; one of those referencing a single source path is filed under it)".to_owned()
     } else {
         format!("{file}: the functions whose asserts cite this source file")
     };

@@ -376,7 +376,7 @@ fn a_cut_path_is_placed_under_the_full_path_it_names() {
     );
     let s = sources(&p, &a);
     let mut filed = None;
-    export_units(&p, &a, &o, Library::Include, None, &mut |entry, text| {
+    export_units(&p, &a, &o, Library::Include, None, &mut |entry, text, _| {
         if entry == 0x1810 {
             filed = Some(match s.filed(entry, text) {
                 Filed::Source(path) => Ok(path.to_owned()),

@@ -640,6 +640,17 @@ pub fn export(
     export_on(cores(), program, analysis, overlay, library, only, sink)
 }
 
+/// How one function went into an export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Written {
+    /// With its decompiled body.
+    Body,
+    /// As a comment: it does not decompile.
+    Failed,
+    /// As a comment: it is over [`BUDGET_BLOCKS`] and was not decompiled.
+    Cut,
+}
+
 /// Exports every function as [`export`] does, but hands each function's
 /// definition to `sink` alone, so a writer can file it by source file
 /// ([`crate::analysis::split::Sources::filed`]).
@@ -648,8 +659,8 @@ pub fn export(
 ///
 /// * `program`, `analysis`, `overlay`, `library`, `only` - As for
 ///   [`export`].
-/// * `sink` - Takes each function's entry and its definition, in
-///   [`order`].
+/// * `sink` - Takes each function's entry, its definition and how it was
+///   written, in [`order`].
 ///
 /// # Returns
 ///
@@ -664,7 +675,7 @@ pub fn export_units(
     overlay: &Overlay,
     library: Library,
     only: Option<&BTreeSet<u64>>,
-    sink: &mut dyn FnMut(u64, &str) -> anyhow::Result<()>,
+    sink: &mut dyn FnMut(u64, &str, Written) -> anyhow::Result<()>,
 ) -> anyhow::Result<Hoisted> {
     export_with(
         cores(),
@@ -682,7 +693,7 @@ enum Sink<'a> {
     /// Runs of definitions about [`SINK_BYTES`] long.
     Runs(&'a mut dyn FnMut(&str) -> anyhow::Result<()>),
     /// Each function's definition alone, with its entry.
-    Functions(&'a mut dyn FnMut(u64, &str) -> anyhow::Result<()>),
+    Functions(&'a mut dyn FnMut(u64, &str, Written) -> anyhow::Result<()>),
 }
 
 /// Exports as [`export`] does, rendering on at most `cores` workers.
@@ -787,14 +798,20 @@ fn export_with(
     let window = Window::export(cores, entries.len());
     in_order(&entries, window, &cost, &render, &mut |entry, text| {
         let name = name_of(analysis, overlay, entry);
-        match over(entry) {
-            Some(blocks) => hoisted.cut(&name, entry, blocks, &mut out),
-            None => hoisted.add(&name, entry, text.as_deref(), &mut out),
-        }
+        let written = match (over(entry), text.as_deref()) {
+            (Some(blocks), _) => {
+                hoisted.cut(&name, entry, blocks, &mut out);
+                Written::Cut
+            }
+            (None, text) => {
+                hoisted.add(&name, entry, text, &mut out);
+                text.map_or(Written::Failed, |_| Written::Body)
+            }
+        };
         match &mut sink {
             Sink::Runs(_) if out.len() < SINK_BYTES => return Ok(()),
             Sink::Runs(run) => run(&out)?,
-            Sink::Functions(each) => each(entry, &out)?,
+            Sink::Functions(each) => each(entry, &out, written)?,
         }
         out.clear();
         Ok(())

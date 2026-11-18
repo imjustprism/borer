@@ -580,7 +580,7 @@ pub fn write_split(
     only: Option<&[u64]>,
     dir: &str,
 ) -> anyhow::Result<String> {
-    use borer_engine::analysis::decompile::export::export_units;
+    use borer_engine::analysis::decompile::export::{Written, export_units};
     use borer_engine::analysis::{modsdk, split};
     let root = Path::new(dir);
     if let Some(why) = borer_engine::program::unusable_path(root) {
@@ -610,20 +610,36 @@ pub fn write_split(
     };
     let mut exported: BTreeMap<u64, Option<String>> = BTreeMap::new();
     let mut why: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let (mut total, mut rough) = (0usize, 0usize);
     let hoisted = export_units(
         program,
         analysis,
         overlay,
         library,
         set.as_ref(),
-        &mut |entry, text| {
+        &mut |entry, text, written| {
+            use split::Filed;
+            total += 1;
             let filed = sources.filed(entry, text);
-            let path = if let split::Filed::Source(path) = filed {
-                Some(path)
-            } else {
-                None
+            let path = match filed {
+                Filed::Source(path) => Some(path),
+                Filed::Nothing
+                | Filed::Tie
+                | Filed::Ambiguous
+                | Filed::Unmatched
+                | Filed::PastCap => None,
             };
-            if let Some(reason) = filed.why() {
+            let reason = match (path, written) {
+                (Some(_), Written::Body) => None,
+                (Some(_), Written::Failed | Written::Cut) => {
+                    rough += 1;
+                    None
+                }
+                (None, Written::Body) => filed.why(),
+                (None, Written::Failed) => Some("did not decompile"),
+                (None, Written::Cut) => Some("were cut for size"),
+            };
+            if let Some(reason) = reason {
                 *why.entry(reason).or_default() += 1;
             }
             exported.insert(entry, path.map(str::to_owned));
@@ -663,14 +679,18 @@ pub fn write_split(
         &root.join("MAP.tsv"),
         split::split_map(analysis, overlay, &sdk, &named, &exported).as_bytes(),
     )?;
+    let rough = if rough > 0 {
+        format!(
+            "; {rough} of the filed did not decompile or were cut for size, filed by the one source path each references"
+        )
+    } else {
+        String::new()
+    };
     Ok(format!(
-        "wrote {} functions to {} source files under {shown}/src, {left} to {} ({}; {} did not decompile and {} were cut for size, counted among them), {} class headers under {shown}/include{} and {shown}/MAP.tsv",
-        hoisted.written,
+        "wrote {total} functions under {shown}/src: {} to {} source files and {left} to {} ({reasons}){rough}; {} class headers under {shown}/include{} and {shown}/MAP.tsv",
+        total.saturating_sub(left),
         units.made.len() - usize::from(units.made.contains(split::REMAINDER)),
         split::REMAINDER,
-        reasons,
-        hoisted.failed,
-        hoisted.cut,
         headers.len(),
         if split_headers.left_out > 0 {
             format!(
@@ -1103,7 +1123,13 @@ mod tests {
             &dir.display().to_string(),
         )
         .expect("writes");
-        assert!(said.contains("source files under"), "{said}");
+        assert_eq!(
+            said,
+            format!(
+                "wrote 3 functions under {0}/src: 1 to 1 source files and 2 to _unattributed.c (2 cite no source file); 0 class headers under {0}/include and {0}/MAP.tsv",
+                borer_engine::text::short_path(&dir.display().to_string())
+            )
+        );
         let read = |rel: &str| std::fs::read_to_string(dir.join(rel)).unwrap_or_default();
         let unit = read("src/a.cpp.c");
         assert!(unit.contains("#include \"_decls.h\""), "{unit}");
