@@ -836,6 +836,19 @@ fn a_section_the_file_ends_inside_keeps_only_what_the_file_holds() {
     assert!(a.function(MAIN).is_some(), "main is still found");
 }
 
+/// An address in a section past where a truncated file ends is said to be
+/// cut off, its bytes missing, not zero-filled as a `.bss` tail is.
+#[test]
+fn a_section_cut_by_the_end_of_the_file_is_not_called_zero_filled() {
+    let p = with_rodata_size(0x1000_0000);
+    let why = p.no_bytes_at(BASE + 0x1000);
+    assert!(!why.contains("zero-fills"), "{why}");
+    assert_eq!(
+        why,
+        "address 0x401000 is in .rodata, past where the file is cut short: the bytes there are missing, not zero"
+    );
+}
+
 /// A section name that is not UTF-8 no longer refuses the file.
 ///
 /// The strict parse fails, the lenient one reads the rest, and the summary says

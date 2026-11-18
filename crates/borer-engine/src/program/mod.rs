@@ -1766,9 +1766,10 @@ impl Program {
     /// # Returns
     ///
     /// A clause naming the section (`in .bss, which holds no file bytes
-    /// (the loader zero-fills it)`, or past its file bytes, or past the
-    /// end of a file cut short), or `None` when no section declares `va`
-    /// or the file holds a byte there.
+    /// (the loader zero-fills it)`, or past its file bytes, or past where
+    /// a truncated file ([`Headers::truncated`]) ends inside the section's
+    /// file bytes, which are missing rather than zero), or `None` when no
+    /// section declares `va` or the file holds a byte there.
     #[must_use]
     pub fn unbacked_at(&self, va: u64) -> Option<String> {
         let s = self.declared_at(va)?;
@@ -1776,15 +1777,19 @@ impl Program {
             return None;
         }
         let name = &s.name;
+        let cut = self.headers.truncated.is_some()
+            && s.file_off.0.saturating_add(s.file_size) >= from_usize(self.bytes.len());
         Some(if s.file_size == 0 {
             format!("in {name}, which holds no file bytes (the loader zero-fills it)")
-        } else if va.saturating_sub(s.va.0) >= s.file_size {
+        } else if cut || va.saturating_sub(s.va.0) < s.file_size {
+            format!(
+                "in {name}, past where the file is cut short: the bytes there are missing, not zero"
+            )
+        } else {
             format!(
                 "in {name} past its {:#x} file bytes (the loader zero-fills the rest)",
                 s.file_size
             )
-        } else {
-            format!("in {name}, whose file bytes there lie past the end of the file")
         })
     }
 
