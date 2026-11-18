@@ -563,7 +563,8 @@ fn split_dirs(root: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
 ///
 /// The C goes to `src/`: one file per source path the functions cite,
 /// each function under the one it came from
-/// ([`borer_engine::analysis::split::Sources::filed`]), the functions
+/// ([`borer_engine::analysis::split::Sources::filed`]) or, a method citing
+/// none, the one its class's methods cite, the functions
 /// filed under none to `src/_unattributed.c`, and the hoisted
 /// declarations every file includes to `src/_decls.h`. The mod SDK goes
 /// to `include/`: one header per class and `include/_sdk.h` they include
@@ -625,7 +626,8 @@ pub fn write_split(
         std::mem::take(&mut split_headers.shared).into_bytes(),
     )?;
     let (src, include) = split_dirs(root)?;
-    let sources = split::sources(program, analysis);
+    let mut sources = split::sources(program, analysis);
+    sources.file_by_class(analysis, overlay, &sdk);
     let set = only.map(|e| e.iter().copied().collect::<BTreeSet<u64>>());
     let mut units = Units {
         dir: &src,
@@ -633,7 +635,7 @@ pub fn write_split(
         made: BTreeSet::new(),
         bytes: 0,
     };
-    let mut exported: BTreeMap<u64, Option<&str>> = BTreeMap::new();
+    let mut exported: BTreeMap<u64, split::Filed<'_>> = BTreeMap::new();
     let mut tally = Tally::default();
     let hoisted = export_units(
         program,
@@ -642,8 +644,9 @@ pub fn write_split(
         library,
         set.as_ref(),
         &mut |entry, text, written| {
-            let path = tally.count(sources.filed(entry, text), written);
-            exported.insert(entry, path);
+            let filed = sources.filed(entry, text);
+            let path = tally.count(filed, written);
+            exported.insert(entry, filed);
             let file = path
                 .and_then(|p| sources.files.get(p))
                 .map_or(split::REMAINDER, String::as_str);
@@ -683,9 +686,14 @@ pub fn write_split(
 struct Tally {
     /// Functions written.
     total: usize,
-    /// Functions filed under a source file that did not decompile or were
-    /// cut for size.
+    /// Functions filed under a source file by the paths they reference that
+    /// did not decompile or were cut for size.
     rough: usize,
+    /// Functions filed under a source file by their class, referencing none.
+    by_class: usize,
+    /// Of [`Tally::by_class`], those that did not decompile or were cut for
+    /// size.
+    class_rough: usize,
     /// Functions filed under none, by why.
     why: BTreeMap<String, usize>,
 }
@@ -709,16 +717,20 @@ impl Tally {
         use borer_engine::analysis::decompile::export::Written;
         use borer_engine::analysis::split::Filed;
         self.total += 1;
-        let path = match filed {
-            Filed::Source(path) => Some(path),
+        let (path, rough) = match filed {
+            Filed::Source(path) => (Some(path), &mut self.rough),
+            Filed::Class(path) => {
+                self.by_class += 1;
+                (Some(path), &mut self.class_rough)
+            }
             Filed::Nothing | Filed::Tie | Filed::Ambiguous | Filed::Unmatched | Filed::PastCap => {
-                None
+                (None, &mut self.rough)
             }
         };
         let reason = match (path, written) {
             (Some(_), Written::Body) => None,
             (Some(_), Written::Failed | Written::Cut) => {
-                self.rough += 1;
+                *rough += 1;
                 None
             }
             (None, Written::Body) => filed.why(),
@@ -773,10 +785,22 @@ impl Tally {
         } else {
             String::new()
         };
+        let filed = self.total.saturating_sub(left);
+        let how = match (self.by_class, self.class_rough) {
+            (0, _) => String::new(),
+            (k, cut) => format!(
+                " ({} by the paths they reference, {k} by their class, citing none: the one file its other methods cite{})",
+                filed.saturating_sub(k),
+                if cut > 0 {
+                    format!("; {cut} of those did not decompile or were cut for size")
+                } else {
+                    String::new()
+                }
+            ),
+        };
         format!(
-            "wrote {} functions under {shown}/src: {} to {files} source files and {left} to {} ({reasons}){rough}; {} class headers under {shown}/include{past} and {shown}/MAP.tsv",
+            "wrote {} functions under {shown}/src: {filed} to {files} source files{how} and {left} to {} ({reasons}){rough}; {} class headers under {shown}/include{past} and {shown}/MAP.tsv",
             self.total,
-            self.total.saturating_sub(left),
             split::REMAINDER,
             headers.classes.len(),
         )
@@ -1328,6 +1352,146 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("cleans up");
     }
 
+    /// Returns the reply of a split of `funcs` ([`asserting`]) with a struct
+    /// stated for each of `classes`, the files under its `src` holding each
+    /// function by name, and its map.
+    ///
+    /// # Arguments
+    ///
+    /// * `tag` - Names the split's directory apart from other tests'.
+    /// * `funcs` - The functions and what their asserts cite.
+    /// * `classes` - The classes the SDK knows.
+    ///
+    /// # Panics
+    ///
+    /// When the split is not written.
+    fn split_of(
+        tag: &str,
+        funcs: &[(&str, &[&str])],
+        classes: &[&str],
+    ) -> (
+        String,
+        std::collections::BTreeMap<String, Vec<String>>,
+        String,
+    ) {
+        use borer_engine::analysis::utypes::{UserStruct, UserType};
+        let (p, mut o) = asserting(funcs);
+        for c in classes {
+            o.types.insert(
+                (*c).to_owned(),
+                UserType::Struct(UserStruct {
+                    size: 8,
+                    fields: std::collections::BTreeMap::new(),
+                }),
+            );
+        }
+        let a = Analysis::compute(&p);
+        let dir = std::env::temp_dir().join(format!("borer-split-{tag}-{}", std::process::id()));
+        let said = super::write_split(
+            &p,
+            &a,
+            &o,
+            Library::Include,
+            None,
+            &dir.display().to_string(),
+        )
+        .expect("writes")
+        .replace(
+            &borer_engine::text::short_path(&dir.display().to_string()),
+            "<dir>",
+        );
+        let read = |rel: &str| std::fs::read_to_string(dir.join(rel)).unwrap_or_default();
+        let mut holding = std::collections::BTreeMap::new();
+        for unit in walk(&dir.join("src")) {
+            let text = read(&format!("src/{unit}"));
+            for (name, _) in funcs {
+                if text.contains(&format!("// {name} @ ")) {
+                    holding
+                        .entry((*name).to_owned())
+                        .or_insert_with(Vec::new)
+                        .push(unit.clone());
+                }
+            }
+        }
+        let map = read("MAP.tsv");
+        std::fs::remove_dir_all(&dir).expect("cleans up");
+        (said, holding, map)
+    }
+
+    /// A method whose asserts cite nothing is filed under the one source
+    /// file its class's other methods cite, saying it was filed by class.
+    ///
+    /// The reply and the map say so; a class citing two files, and a free
+    /// function in a namespace citing one, file nothing by class.
+    ///
+    /// `C::a` cites `src/c.cpp` and `C::b` nothing; `D::x` cites
+    /// `src/d1.cpp`, `D::y` `src/d2.cpp` and `D::z` nothing; `net::send`
+    /// cites `src/net.cpp` and `net::recv` nothing, `net` being no class.
+    ///
+    /// # Panics
+    ///
+    /// When a function is filed elsewhere or the reply or map differ.
+    #[test]
+    fn a_method_citing_nothing_is_filed_by_its_class_and_says_so() {
+        let (said, holding, map) = split_of(
+            "class",
+            &[
+                ("C::a", &["src/c.cpp"]),
+                ("C::b", &[]),
+                ("D::x", &["src/d1.cpp"]),
+                ("D::y", &["src/d2.cpp"]),
+                ("D::z", &[]),
+                ("net::send", &["src/net.cpp"]),
+                ("net::recv", &[]),
+            ],
+            &["C", "D"],
+        );
+        assert_eq!(
+            said,
+            "wrote 8 functions under <dir>/src: 5 to 4 source files (4 by the paths they reference, 1 by their class, citing none: the one file its other methods cite) and 3 to _unattributed.c (3 cite no source file); 2 class headers under <dir>/include and <dir>/MAP.tsv"
+        );
+        let at = |name: &str| holding.get(name).cloned().unwrap_or_default();
+        assert_eq!(at("C::b"), vec!["c.cpp.c"], "{holding:?}");
+        assert_eq!(at("D::z"), vec!["_unattributed.c"], "{holding:?}");
+        assert_eq!(at("net::recv"), vec!["_unattributed.c"], "{holding:?}");
+        let row = |class: &str| {
+            map.lines()
+                .find(|l| l.starts_with(&format!("{class}\t")))
+                .map(|l| l.split('\t').skip(2).take(2).collect::<Vec<_>>().join("\t"))
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            row("C"),
+            "src/c.cpp\t1 of 2 exported methods filed under it; 1 of 2 filed under it by their class, citing no source file themselves",
+            "{map}"
+        );
+        assert_eq!(
+            row("D"),
+            "src/d1.cpp\t1 of 3 exported methods filed under it; 1 other files cited too",
+            "{map}"
+        );
+    }
+
+    /// A method whose class's methods cite only a header is not filed by
+    /// its class: a header's code is inlined wherever it is used.
+    ///
+    /// `H::a` cites `inc/h.h`; `H::b` cites nothing.
+    ///
+    /// # Panics
+    ///
+    /// When `H::b` is filed under the header.
+    #[test]
+    fn a_class_citing_only_a_header_files_nothing_by_class() {
+        let (said, holding, _) =
+            split_of("header", &[("H::a", &["inc/h.h"]), ("H::b", &[])], &["H"]);
+        assert_eq!(
+            holding.get("H::b").cloned().unwrap_or_default(),
+            vec!["_unattributed.c"],
+            "{holding:?}"
+        );
+        assert!(!said.contains("by their class"), "{said}");
+    }
+
     /// Lists the files under a directory, relative to it, `/`-separated.
     ///
     /// # Arguments
@@ -1434,6 +1598,34 @@ mod tests {
                 ("name a file they do not reference", 1),
                 ("were cut for size", 5),
             ]
+        );
+    }
+
+    /// A split's tally counts a function filed by its class apart from one
+    /// filed by its paths, its failures and cuts apart from theirs, and the
+    /// three counts of the reply sum to the total.
+    ///
+    /// # Panics
+    ///
+    /// When a function filed by class is counted another way.
+    #[test]
+    fn the_split_tally_counts_filing_by_class_apart() {
+        use borer_engine::analysis::decompile::export::Written;
+        use borer_engine::analysis::split::Filed;
+        let mut tally = super::Tally::default();
+        for written in [Written::Body, Written::Failed, Written::Cut] {
+            assert_eq!(tally.count(Filed::Class("a.cpp"), written), Some("a.cpp"));
+        }
+        tally.count(Filed::Source("a.cpp"), Written::Body);
+        tally.count(Filed::Nothing, Written::Body);
+        let headers = borer_engine::analysis::modsdk::header::ClassHeaders::default();
+        assert_eq!(
+            (tally.total, tally.by_class, tally.class_rough, tally.rough),
+            (5, 3, 2, 0)
+        );
+        assert_eq!(
+            tally.said("d", 1, &headers),
+            "wrote 5 functions under d/src: 4 to 1 source files (1 by the paths they reference, 3 by their class, citing none: the one file its other methods cite; 2 of those did not decompile or were cut for size) and 1 to _unattributed.c (1 cite no source file); 0 class headers under d/include and d/MAP.tsv"
         );
     }
 

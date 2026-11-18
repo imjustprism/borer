@@ -1135,8 +1135,7 @@ pub(super) fn pick_path<'a>(
     {
         return Some(p);
     }
-    let header = |p: &str| HEADER_EXTENSIONS.iter().any(|e| p.ends_with(e));
-    let sources: Vec<&'a str> = order.iter().copied().filter(|p| !header(p)).collect();
+    let sources: Vec<&'a str> = order.iter().copied().filter(|p| !is_header(p)).collect();
     let order = if sources.is_empty() { order } else { &sources };
     let counts: Vec<(&str, usize)> = order
         .iter()

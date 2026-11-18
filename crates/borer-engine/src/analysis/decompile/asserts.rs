@@ -193,6 +193,15 @@ pub(crate) const CITED_EXTENSIONS: [&str; 9] = [
 /// function lives than a cited source file.
 pub(crate) const HEADER_EXTENSIONS: [&str; 5] = [".h", ".hpp", ".hh", ".hxx", ".inl"];
 
+/// Tells whether a cited path names a header ([`HEADER_EXTENSIONS`]).
+///
+/// # Arguments
+///
+/// * `path` - The path as cited.
+pub(crate) fn is_header(path: &str) -> bool {
+    HEADER_EXTENSIONS.iter().any(|e| path.ends_with(e))
+}
+
 /// The extension of a textual include, read as a path but never a file to
 /// file a function under.
 ///

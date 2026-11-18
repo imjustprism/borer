@@ -225,7 +225,7 @@ fn method_index(analysis: &Analysis, overlay: &Overlay) -> MethodIndex {
 /// # Returns
 ///
 /// The name a symbol, an assert or the user gave it, or `None`.
-fn declared_name<'a>(overlay: &'a Overlay, f: &'a Function) -> Option<&'a str> {
+pub(crate) fn declared_name<'a>(overlay: &'a Overlay, f: &'a Function) -> Option<&'a str> {
     overlay
         .names
         .get(&f.entry)

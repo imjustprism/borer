@@ -11,7 +11,7 @@
 //! system refuses, at most [`DEPTH_MAX`] directories deep, and unique
 //! however the file system folds case.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use super::modsdk::{Sdk, Taken, unique};
@@ -90,7 +90,12 @@ pub enum Filed<'a> {
     /// The source path it came from, as the binary cites it with `/`
     /// separators: a key of [`Sources::files`].
     Source(&'a str),
-    /// It references no source path and its text cites none.
+    /// It references no source path, but it is a method of a class whose
+    /// methods that reference any all reference this one, no header: a key
+    /// of [`Sources::files`] ([`Sources::file_by_class`]).
+    Class(&'a str),
+    /// It references no source path, its text cites none, and its class
+    /// settles on none.
     Nothing,
     /// It references several and its text settles on none.
     Tie,
@@ -115,6 +120,18 @@ pub struct Sources {
     /// The paths each function references, as indexes into `paths`, in
     /// byte order.
     of: BTreeMap<u64, Vec<usize>>,
+    /// The path each function referencing none is filed under by its class,
+    /// as an index into `paths` ([`Sources::file_by_class`]).
+    class: BTreeMap<u64, usize>,
+}
+
+/// What the methods of one class that reference a source path reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cites {
+    /// Each references this one path alone, an index into [`Sources::paths`].
+    One(usize),
+    /// Two reference different paths, or one references several.
+    Several,
 }
 
 /// Returns the cited source paths with the C file each goes to and the
@@ -198,7 +215,7 @@ impl Filed<'_> {
     #[must_use]
     pub fn why(self) -> Option<String> {
         let why = match self {
-            Filed::Source(_) => return None,
+            Filed::Source(_) | Filed::Class(_) => return None,
             Filed::Nothing => "cite no source file",
             Filed::Tie => "cite several and settle on none",
             Filed::Ambiguous => "name a cut path that fits several",
@@ -218,7 +235,9 @@ impl Sources {
     /// referencing several came from the one its text names
     /// ([`super::decompile::unit_of`]), which the decompiler cuts to its
     /// last components, so that spelling is matched back to the paths the
-    /// function references ([`super::render::spelled_as`]).
+    /// function references ([`super::render::spelled_as`]). One
+    /// referencing none, whose text cites none, goes where its class files
+    /// it ([`Sources::file_by_class`]).
     ///
     /// # Arguments
     ///
@@ -236,7 +255,14 @@ impl Sources {
         let path = match paths.as_slice() {
             [one] => *one,
             _ => match super::decompile::unit_of(text) {
-                None if paths.is_empty() => return Filed::Nothing,
+                None if paths.is_empty() => {
+                    return self
+                        .class
+                        .get(&entry)
+                        .and_then(|&at| self.paths.get(at))
+                        .and_then(|p| self.files.get_key_value(p))
+                        .map_or(Filed::Nothing, |(key, _)| Filed::Class(key));
+                }
                 None => return Filed::Tie,
                 Some(spelled) => match super::render::spelled_as(&paths, &spelled) {
                     Ok(path) => path,
@@ -248,6 +274,94 @@ impl Sources {
         self.files
             .get_key_value(path)
             .map_or(Filed::PastCap, |(key, _)| Filed::Source(key))
+    }
+
+    /// Files each method referencing no source path under the one its
+    /// class settles on, which [`Sources::filed`] then answers as
+    /// [`Filed::Class`].
+    ///
+    /// A class settles on a path when every method of it referencing any
+    /// references that one alone, a source file within [`UNITS_MAX`], not
+    /// a header.
+    ///
+    /// A method is a function whose name's qualifier
+    /// ([`super::classes::class_of`]) is one of the SDK's classes, so a
+    /// free function in a namespace, or a template method whose class was
+    /// never recovered, has none.
+    ///
+    /// # Arguments
+    ///
+    /// * `a` - The analysis, for the functions.
+    /// * `o` - Names in force, for each function's class.
+    /// * `sdk` - The classes.
+    pub fn file_by_class(&mut self, a: &Analysis, o: &Overlay, sdk: &Sdk) {
+        let known: BTreeSet<&str> = sdk.classes.iter().map(|c| c.name.as_str()).collect();
+        let methods = a.functions.iter().filter_map(|f| {
+            let class = super::classes::declared_name(o, f).and_then(super::classes::class_of)?;
+            known.contains(class).then_some((f.entry, class))
+        });
+        self.class = self.by_class(methods);
+    }
+
+    /// Returns the path each method referencing no source path is filed
+    /// under by its class.
+    ///
+    /// A class settles on a path when it has a method referencing one and
+    /// every method of it referencing any references that one alone; a
+    /// method referencing several, or two referencing different paths,
+    /// settle it on none. A header settles nothing, its code being inlined
+    /// wherever it is used, nor does a path past [`UNITS_MAX`]; a method
+    /// two classes claim is filed only when both settle on one path.
+    ///
+    /// # Arguments
+    ///
+    /// * `methods` - Each method's entry with its class, in any order.
+    ///
+    /// # Returns
+    ///
+    /// The path by entry, an index into `paths`, for the methods
+    /// referencing none whose class settles on one.
+    fn by_class<'n>(
+        &self,
+        methods: impl Iterator<Item = (u64, &'n str)> + Clone,
+    ) -> BTreeMap<u64, usize> {
+        let mut cites: BTreeMap<&str, Cites> = BTreeMap::new();
+        for (entry, class) in methods.clone() {
+            let seen = match self.of.get(&entry).map(Vec::as_slice) {
+                None | Some([]) => continue,
+                Some(&[one]) => Cites::One(one),
+                Some(_) => Cites::Several,
+            };
+            cites
+                .entry(class)
+                .and_modify(|c| {
+                    if *c != seen {
+                        *c = Cites::Several;
+                    }
+                })
+                .or_insert(seen);
+        }
+        let mut out: BTreeMap<u64, Option<usize>> = BTreeMap::new();
+        for (entry, class) in methods.filter(|(e, _)| !self.of.contains_key(e)) {
+            let at = match cites.get(class) {
+                Some(&Cites::One(at)) => self
+                    .paths
+                    .get(at)
+                    .filter(|p| !super::decompile::is_header(p) && self.files.contains_key(*p))
+                    .map(|_| at),
+                Some(Cites::Several) | None => None,
+            };
+            out.entry(entry)
+                .and_modify(|was| {
+                    if *was != at {
+                        *was = None;
+                    }
+                })
+                .or_insert(at);
+        }
+        out.into_iter()
+            .filter_map(|(entry, at)| Some((entry, at?)))
+            .collect()
     }
 }
 
@@ -283,7 +397,7 @@ pub fn unit_prologue(file: &str) -> String {
         "the functions the split filed under no source file (the export's answer counts why: no cited file, a tie, a cut path fitting several, a file past the cap, or no text to read: it did not decompile or was cut for size; one of those referencing a single source path is filed under it)".to_owned()
     } else {
         format!(
-            "{file}: the functions filed under this source file, the one source path their literals name or the one their text settles on among several"
+            "{file}: the functions filed under this source file, the one source path their literals name or the one their text settles on among several, or, naming none, the one their class's methods all name"
         )
     };
     format!(
@@ -301,22 +415,23 @@ pub fn unit_prologue(file: &str) -> String {
 /// * `o` - Names in force.
 /// * `sdk` - The classes.
 /// * `headers` - Each class written with its header file.
-/// * `exported` - Each exported function's source path by entry
-///   ([`Sources::filed`]), `None` for one filed under none.
+/// * `exported` - Where the split filed each exported function, by entry
+///   ([`Sources::filed`]).
 ///
 /// # Returns
 ///
 /// A `#` header line with the counts, a column header and one
 /// tab-separated row per class of the SDK: class, header (`-` when none
 /// was written), source file (`-` when none of its exported methods is
-/// filed under one), evidence, methods, fields, slots.
+/// filed under one), evidence (how many were filed there by the paths
+/// they reference and how many by their class), methods, fields, slots.
 #[must_use]
 pub fn split_map(
     a: &Analysis,
     o: &Overlay,
     sdk: &Sdk,
     headers: &[(&str, &str)],
-    exported: &BTreeMap<u64, Option<&str>>,
+    exported: &BTreeMap<u64, Filed<'_>>,
 ) -> String {
     let files: BTreeMap<&str, &str> = headers.iter().copied().collect();
     let mut out = format!(
@@ -327,31 +442,42 @@ pub fn split_map(
     let by_class = super::classes::methods_by_class(a, o);
     for c in &sdk.classes {
         let methods = by_class.get(&c.name).map_or(&[][..], Vec::as_slice);
-        let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut counts: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
         let mut out_of = 0usize;
         for e in methods {
-            if let Some(unit) = exported.get(e) {
-                out_of += 1;
-                if let Some(u) = unit {
-                    *counts.entry(u).or_default() += 1;
-                }
+            let Some(filed) = exported.get(e) else {
+                continue;
+            };
+            out_of += 1;
+            match *filed {
+                Filed::Source(u) => counts.entry(u).or_default().0 += 1,
+                Filed::Class(u) => counts.entry(u).or_default().1 += 1,
+                Filed::Nothing
+                | Filed::Tie
+                | Filed::Ambiguous
+                | Filed::Unmatched
+                | Filed::PastCap => {}
             }
         }
         let best = counts
             .iter()
             .max_by(|x, y| x.1.cmp(y.1).then_with(|| y.0.cmp(x.0)));
         let (source, evidence) = match best {
-            Some((unit, n)) => {
+            Some((unit, &(n, k))) => {
+                let mut said = Vec::new();
+                if n > 0 {
+                    said.push(format!("{n} of {out_of} exported methods filed under it"));
+                }
+                if k > 0 {
+                    said.push(format!(
+                        "{k} of {out_of} filed under it by their class, citing no source file themselves"
+                    ));
+                }
                 let others = counts.len().saturating_sub(1);
-                let also = if others > 0 {
-                    format!("; {others} other files cited too")
-                } else {
-                    String::new()
-                };
-                (
-                    (*unit).to_owned(),
-                    format!("{n} of {out_of} exported methods filed under it{also}"),
-                )
+                if others > 0 {
+                    said.push(format!("{others} other files cited too"));
+                }
+                ((*unit).to_owned(), said.join("; "))
             }
             None if out_of == 0 => (
                 "-".to_owned(),
@@ -475,7 +601,13 @@ mod tests {
             "{none}"
         );
         assert!(!none.contains("asserts cite"), "{none}");
-        let unfiled = split_map(&a, &o, &sdk, &[], &[(0x1000, None)].into_iter().collect());
+        let unfiled = split_map(
+            &a,
+            &o,
+            &sdk,
+            &[],
+            &[(0x1000, Filed::Nothing)].into_iter().collect(),
+        );
         assert!(
             unfiled.contains("none of its 1 exported methods is filed under a source file"),
             "{unfiled}"
@@ -560,6 +692,7 @@ mod tests {
             ]
             .into_iter()
             .collect(),
+            class: BTreeMap::new(),
         };
         let text = |cites: &[&str]| {
             let mut t = "// f @ 0x1000: 9 instructions\n".to_owned();
@@ -584,6 +717,72 @@ mod tests {
             Filed::PastCap.why().as_deref(),
             Some("cite a file past the 4096 a split writes")
         );
+    }
+
+    /// A method referencing no source path is filed by its class only when
+    /// every method of the class referencing one references the same
+    /// single path, a source file within the cap.
+    ///
+    /// `C` cites `c.cpp` alone; `D` cites `d1.cpp` and `d2.cpp`; `E` has a
+    /// method citing `c.cpp` and `e.h` at once; `H` cites only `h.h`; `P`
+    /// cites a path past the cap; `Big` has 100,000 methods, one citing
+    /// `c.cpp`; entry 30 is claimed by `C` and `D`, entry 31 by `C` and
+    /// `Big`, which settle on one path.
+    ///
+    /// # Panics
+    ///
+    /// When a method is filed where its class does not settle.
+    #[test]
+    fn a_method_citing_nothing_is_filed_only_by_a_class_that_settles() {
+        let paths = ["c.cpp", "d1.cpp", "d2.cpp", "e.h", "h.h", "past.cpp"];
+        let mut s = Sources {
+            files: [0, 1, 2, 3, 4]
+                .map(|i: usize| (paths[i].to_owned(), format!("{}.c", paths[i])))
+                .into_iter()
+                .collect(),
+            paths: paths.iter().map(|p| (*p).to_owned()).collect(),
+            of: [
+                (1, vec![0]),
+                (3, vec![1]),
+                (4, vec![2]),
+                (6, vec![0, 3]),
+                (8, vec![4]),
+                (10, vec![5]),
+                (100, vec![0]),
+            ]
+            .into_iter()
+            .collect(),
+            class: BTreeMap::new(),
+        };
+        let big = (100..100_100).map(|e| (e, "Big"));
+        let methods = [
+            (1, "C"),
+            (2, "C"),
+            (3, "D"),
+            (4, "D"),
+            (5, "D"),
+            (6, "E"),
+            (7, "E"),
+            (8, "H"),
+            (9, "H"),
+            (10, "P"),
+            (11, "P"),
+            (30, "C"),
+            (30, "D"),
+            (31, "C"),
+            (31, "Big"),
+        ];
+        s.class = s.by_class(methods.into_iter().chain(big));
+        let none = "// f @ 0x1000: 9 instructions\n";
+        assert_eq!(s.filed(2, none), Filed::Class("c.cpp"));
+        assert_eq!(s.filed(31, none), Filed::Class("c.cpp"));
+        assert_eq!(s.filed(100_099, none), Filed::Class("c.cpp"));
+        assert_eq!(s.filed(1, none), Filed::Source("c.cpp"));
+        for unsettled in [5, 7, 9, 11, 30, 12] {
+            assert_eq!(s.filed(unsettled, none), Filed::Nothing, "{unsettled}");
+        }
+        assert_eq!(s.class.len(), 100_001);
+        assert_eq!(Filed::Class("c.cpp").why(), None);
     }
 
     /// A split file's opening says how its functions were filed, not that
