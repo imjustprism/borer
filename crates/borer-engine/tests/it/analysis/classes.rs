@@ -364,10 +364,15 @@ fn a_cut_path_is_placed_under_the_full_path_it_names() {
     let p = fixture();
     let a = Analysis::compute(&p);
     let o = Overlay::default();
-    let files = borer_engine::analysis::render::source_tree_tsv(&p, &a, &o, "fourcc");
+    let files = borer_engine::analysis::render::source_vocabulary_tsv(&p, &a, &o, "fourcc");
     assert!(
         files.contains("\tws/code/foundation/util/fourcc.h\tf.IsValid()\n"),
         "{files}"
+    );
+    let tree = borer_engine::analysis::render::source_tree_tsv(&p, &a, "fourcc");
+    assert!(
+        !tree.contains("f.IsValid()") && tree.contains("# borer://vocab/fourcc lists"),
+        "the file listing is one table and points at the expressions: {tree}"
     );
     let s = sources(&p, &a);
     let mut filed = None;
@@ -395,15 +400,14 @@ fn a_cut_path_is_placed_under_the_full_path_it_names() {
 fn the_source_tree_groups_functions_by_file() {
     let p = fixture();
     let a = Analysis::compute(&p);
-    let dirs = borer_engine::analysis::render::source_tree_tsv(&p, &a, &Overlay::default(), "");
+    let dirs = borer_engine::analysis::render::source_tree_tsv(&p, &a, "");
     assert!(dirs.contains("directory"), "{dirs}");
     assert!(dirs.contains("fourcc.h") || dirs.contains("util"), "{dirs}");
     assert!(
         dirs.contains("# base: C:/\n"),
         "the build root is written once: {dirs}"
     );
-    let files =
-        borer_engine::analysis::render::source_tree_tsv(&p, &a, &Overlay::default(), "fourcc");
+    let files = borer_engine::analysis::render::source_tree_tsv(&p, &a, "fourcc");
     assert!(files.contains("fourcc.h"), "{files}");
     assert!(
         files.contains("# base: C:/\n"),

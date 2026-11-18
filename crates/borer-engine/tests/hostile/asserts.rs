@@ -137,7 +137,7 @@ fn references_into_a_long_run_hold_no_text() {
     let p = referencing(&rdata, &targets);
     let a = Analysis::compute(&p);
     let o = Overlay::default();
-    source_tree_tsv(&p, &a, &o, "");
+    source_tree_tsv(&p, &a, "");
     let (text, extra) = measured(|| asserted_fields_tsv(&p, &a, &o, "zzz"));
     assert!(text.starts_with("# 0 of 0 asserted field names"), "{text}");
     let size = p.bytes.len();

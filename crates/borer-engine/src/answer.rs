@@ -558,7 +558,10 @@ const ANSWERS: &[Answer] = &[
         Ok(render::asserted_fields_tsv(q.p, q.a, q.o, q.arg))
     }),
     rows("sources", Either, Code(Decompile), |q| {
-        Ok(render::source_tree_tsv(q.p, q.a, q.o, q.arg))
+        Ok(render::source_tree_tsv(q.p, q.a, q.arg))
+    }),
+    rows("vocab", Either, Code(Decompile), |q| {
+        Ok(render::source_vocabulary_tsv(q.p, q.a, q.o, q.arg))
     }),
     rows("classes", Either, Code(Decompile), |q| {
         Ok(render::class_ids_tsv(q.a, q.arg))

@@ -141,7 +141,11 @@ pub(crate) const RESOURCES: &[(&str, &str)] = &[
     ),
     (
         "borer://sources",
-        "The source files the binary's assertions cite, by directory with how many files and functions each holds: the subsystems the binary was built from; borer://sources/<file> adds the expressions each file's asserts check",
+        "The source files the binary's assertions cite, by directory with how many files and functions each holds: the subsystems the binary was built from; borer://vocab/<file> lists each file's assert expressions",
+    ),
+    (
+        "borer://vocab",
+        "The expressions the binary's assertions check, by the source file they cite, each file's most frequent first, read from at most 200 functions in total: the developers' own words for what each file guards",
     ),
     (
         "borer://classes",
@@ -359,8 +363,13 @@ pub(crate) const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
     ),
     (
         "borer://sources/{filter}",
-        "Source files whose path contains the filter, with how many functions came from each and the lowest of their entries, then each file's assert expressions, most frequent first (from at most 200 of its functions)",
+        "Source files whose path contains the filter, with how many functions came from each and the lowest of their entries",
         "borer://sources/net",
+    ),
+    (
+        "borer://vocab/{filter}",
+        "The assert expressions of the source files whose path contains the filter, each file's most frequent first, read from at most 200 functions in total",
+        "borer://vocab/net",
     ),
     (
         "borer://classes/{filter}",

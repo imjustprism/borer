@@ -984,17 +984,17 @@ fn an_inlined_assert_names_only_its_own_class() {
 /// `main` asserts nothing and is not read as citing the file.
 #[test]
 fn a_source_file_lists_its_assert_expressions_most_frequent_first() {
-    use borer_engine::analysis::render::source_tree_tsv;
+    use borer_engine::analysis::render::source_vocabulary_tsv;
     let p = widget();
     let a = Analysis::compute(&p);
-    let text = source_tree_tsv(&p, &a, &Overlay::default(), "widget");
+    let text = source_vocabulary_tsv(&p, &a, &Overlay::default(), "widget");
     let rows: Vec<&str> = text
         .lines()
         .skip_while(|l| !l.starts_with("# asserts\t"))
         .skip(1)
         .collect();
     assert!(
-        text.contains("assert expressions in the 1 matched files, each file's most frequent first; all 18 functions citing them read\n"),
+        text.contains("assert expressions in the 1 matched files, each file's most frequent first; 18 of the 18 functions citing them read\n"),
         "{text}"
     );
     let at = |row: &str| rows.iter().position(|r| *r == row);
