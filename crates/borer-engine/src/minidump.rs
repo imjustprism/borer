@@ -130,7 +130,8 @@ impl<'a> Streams<'a> {
         };
         let bytes = self.bytes;
         let at = usize::try_from(at).ok().unwrap_or(usize::MAX);
-        let (Some(count), Some(base)) = (u64_le(bytes, at), u64_le(bytes, at + 8)) else {
+        let base = at.checked_add(8).and_then(|b| u64_le(bytes, b));
+        let (Some(count), Some(base)) = (u64_le(bytes, at), base) else {
             return Vec::new();
         };
         let count = usize::try_from(count)
@@ -144,7 +145,8 @@ impl<'a> Streams<'a> {
             let Some(entry) = entry else {
                 break;
             };
-            let (Some(start), Some(size)) = (u64_le(bytes, entry), u64_le(bytes, entry + 8)) else {
+            let size = entry.checked_add(8).and_then(|e| u64_le(bytes, e));
+            let (Some(start), Some(size)) = (u64_le(bytes, entry), size) else {
                 break;
             };
             out.push(Range {
