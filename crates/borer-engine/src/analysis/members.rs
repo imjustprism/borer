@@ -145,6 +145,11 @@ const ASSERT_CALL_SPAN: u64 = 48;
 /// Longest signature literal read when telling an assert call apart.
 const SIGNATURE_CAP: usize = 1024;
 
+/// Fewest characters an assert's condition is read with: MSVC's wide
+/// `L"this->m_x"` read as bytes stops after its first character, which
+/// names nothing.
+pub(crate) const CONDITION_MIN: usize = 2;
+
 /// Returns the conditions a function passes to an assert reporter, read
 /// from its bytes.
 ///
@@ -202,7 +207,7 @@ fn read_assert_conditions(
         .into_iter()
         .filter(|(t, _)| program.section_at(*t).is_some_and(|s| !s.executable))
         .filter_map(|(t, site)| {
-            let (len, text) = crate::strings::cstr_at(program, t, 1, SIGNATURE_CAP)?;
+            let (len, text) = crate::strings::cstr_at(program, t, CONDITION_MIN, SIGNATURE_CAP)?;
             let role = if is_source_path(&text) {
                 Role::Path
             } else if naming::is_signature(&text) {
@@ -227,7 +232,7 @@ fn read_assert_conditions(
         .filter_map(|l| {
             Some((
                 l.1,
-                crate::strings::cstr_at(program, l.1, 1, MEMBER_STRING_CAP)?.1,
+                crate::strings::cstr_at(program, l.1, CONDITION_MIN, MEMBER_STRING_CAP)?.1,
             ))
         })
         .collect()
@@ -498,6 +503,22 @@ mod tests {
         );
         let far = format!("{}m_far", "x && ".repeat(40));
         assert!(named(&far).0.is_empty());
+    }
+
+    /// A wide literal read as bytes is no condition: its first character
+    /// alone would be a bare candidate.
+    #[test]
+    fn a_wide_literal_read_as_bytes_is_no_condition() {
+        let wide: Vec<u8> = "this->m_x"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let read = crate::strings::cstr_in(&wide, super::CONDITION_MIN, super::MEMBER_STRING_CAP);
+        assert_eq!(read, None);
+        assert_eq!(
+            crate::strings::cstr_in(b"!p\0", super::CONDITION_MIN, 8).map(|(n, _)| n),
+            Some(2)
+        );
     }
 
     /// A bare condition votes only where it was asked for, only from a

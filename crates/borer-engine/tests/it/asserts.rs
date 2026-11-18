@@ -858,6 +858,34 @@ fn a_bare_local_or_parameter_pairs_strong_nowhere() {
     assert!(field_names(&p, &a, &o, "Registry").is_empty());
 }
 
+/// `L"this->m_x"`, as MSVC writes a wide condition.
+const WIDE: u64 = 0x2120;
+
+/// Methods asserting a wide condition over +0x20.
+const WIDE_ASSERTS: [(u64, Guard, u64, u64, &str); 2] = [
+    (0x1100, Guard::Field(0x20), WIDE, 0x2200, "void Wide::Get()"),
+    (0x1140, Guard::Field(0x20), WIDE, 0x2240, "void Wide::Put()"),
+];
+
+/// A one-character read of a wide literal names nothing.
+///
+/// Read as bytes, `L"this->m_x"` stops after its first character, `t`,
+/// which once read as a bare candidate of `Wide`.
+#[test]
+fn a_wide_literal_read_as_bytes_names_nothing() {
+    let wide: Vec<u8> = "this->m_x\0"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let p = image(&WIDE_ASSERTS, &[(WIDE, &wide)]);
+    let a = Analysis::compute(&p);
+    let all = asserted_fields_tsv(&p, &a, &Overlay::default(), "");
+    assert!(
+        !all.contains("\tt\t") && !all.contains(BARE_HEADER),
+        "{all}"
+    );
+}
+
 /// A function's assert conditions are read once per analysis: every
 /// read, filter and page of the index asks the memo.
 #[test]

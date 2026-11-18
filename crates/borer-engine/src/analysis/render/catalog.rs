@@ -279,14 +279,14 @@ fn asserted_members(p: &Program, a: &Analysis, o: &Overlay) -> (BTreeMap<String,
 /// * `o` - User names, for each function's class.
 fn bare_members(p: &Program, a: &Analysis, o: &Overlay) -> Named {
     use crate::analysis::members::{
-        MEMBER_STRING_CAP, Spelled, assert_conditions, condition_members,
+        CONDITION_MIN, MEMBER_STRING_CAP, Spelled, assert_conditions, condition_members,
     };
     let mut named = Named::new();
     for (target, _) in literal_targets(p, a)
         .iter()
         .take_while(|_| !crate::cancel::Cancel::raised())
     {
-        let Some((_, raw)) = cstr_at(p, *target, 1, MEMBER_STRING_CAP) else {
+        let Some((_, raw)) = cstr_at(p, *target, CONDITION_MIN, MEMBER_STRING_CAP) else {
             continue;
         };
         let (spelled, how) = condition_members(&raw);
