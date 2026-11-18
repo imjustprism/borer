@@ -1271,7 +1271,7 @@ fn family_fixture(tables: &[(&str, u64, &[u64])], names: &[(u64, &str)]) -> (Ana
 /// `Lone` shares one anchor alone: neither is in the family.
 #[test]
 fn a_class_family_names_the_slots_one_member_spells() {
-    use borer_engine::analysis::vtables::{SlotName, family_of, render_slots};
+    use borer_engine::analysis::vtables::{SlotName, Spellers, family_of, render_slots};
     let (a, o) = family_fixture(
         &[
             ("Base", 0x8000, &[0x100, 0x200, 0x300, 0x400, 0x500, 0x600]),
@@ -1294,6 +1294,7 @@ fn a_class_family_names_the_slots_one_member_spells() {
         ],
     );
     let fam = family_of(&a, &o, "Base").expect("Base has a family");
+    assert_eq!(fam.member_count, 3, "{fam:?}");
     assert_eq!(
         fam.members,
         vec![
@@ -1305,18 +1306,27 @@ fn a_class_family_names_the_slots_one_member_spells() {
     );
     assert_eq!(
         fam.names.get(&2),
-        Some(&SlotName::Agreed("Update".to_owned(), vec!["B".to_owned()])),
+        Some(&SlotName::Agreed(
+            "Update".to_owned(),
+            Spellers {
+                shown: vec!["B".to_owned()],
+                count: 1
+            }
+        )),
         "C's slot 2 is past what it shares: {fam:?}"
     );
     assert_eq!(
         fam.names.get(&3),
         Some(&SlotName::Agreed(
             "Draw".to_owned(),
-            vec!["A".to_owned(), "B".to_owned()]
+            Spellers {
+                shown: vec!["A".to_owned(), "B".to_owned()],
+                count: 2
+            }
         ))
     );
     assert!(
-        matches!(fam.names.get(&4), Some(SlotName::Disputed(s)) if s.len() == 2),
+        matches!(fam.names.get(&4), Some(SlotName::Disputed(s, 2)) if s.len() == 2),
         "{fam:?}"
     );
     assert!(

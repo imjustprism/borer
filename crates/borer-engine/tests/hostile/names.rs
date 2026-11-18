@@ -1116,3 +1116,46 @@ fn bound_signatures_stay_within_the_name_and_heap_bars() {
     );
     assert!(longest.is_none_or(|n| n <= NAME_MAX), "{longest:?}");
 }
+
+/// A family of thousands of classes keeps, for each class asked, only the
+/// members and spellers its layout shows, with their counts.
+///
+/// 4096 four-slot tables are chained into one family: even and odd
+/// neighbours share their slots 0 and 1, odd and even ones their slots 2
+/// and 3. Kept whole, each class's family held every other member's name.
+#[test]
+fn a_huge_class_family_keeps_what_its_layout_shows() {
+    use borer_engine::analysis::vtables::{ClassInfo, family_of};
+    let _serial = serial();
+    const CLASSES: u64 = 4096;
+    let code = borer_engine::program::Section::mapped(".text", 0x1000, 0, 0x10, false, true);
+    let p = Program::raw(vec![0xc3; 0x10], Arch::X86_64, 0, Some(0x1000), vec![code]);
+    let mut a = Analysis::compute(&p);
+    let link = |n: u64, k: u64| 0x10_0000 + n * 0x10 + k;
+    for i in 0..CLASSES {
+        let (up, down) = if i % 2 == 0 {
+            (i, i.checked_sub(1).unwrap_or(CLASSES))
+        } else {
+            (i - 1, i)
+        };
+        let slots = vec![link(up, 0), link(up, 1), link(down, 2), link(down, 3)];
+        let name = format!("Class{i:05}");
+        a.classes.by_name.insert(
+            name.clone(),
+            ClassInfo {
+                name,
+                vtable: Some(0x8000_0000 + i * 0x20),
+                slots,
+                ..ClassInfo::default()
+            },
+        );
+    }
+    let o = Overlay::default();
+    let first = family_of(&a, &o, "Class00000").expect("a family");
+    assert_eq!(first.member_count, 4095, "{first:?}");
+    let (fam, bytes) = measured(|| family_of(&a, &o, "Class00001"));
+    let fam = fam.expect("a family");
+    assert_eq!(fam.member_count, 4095);
+    assert_eq!(fam.members.len(), 8);
+    assert!(bytes < 64 << 10, "one class's family took {bytes} bytes");
+}

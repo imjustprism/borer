@@ -19,6 +19,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use super::ClassInfo;
 use super::names::method_part;
@@ -53,22 +54,35 @@ struct Families {
     stubs: BTreeSet<u64>,
 }
 
+/// The members that spell a slot one way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Spellers {
+    /// The first [`SPELLERS_SHOWN`] of them, in name order.
+    pub shown: Vec<String>,
+    /// How many there are.
+    pub count: usize,
+}
+
 /// What a family says of one slot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlotName {
     /// Every member that names the slot names it so: the method and the
     /// members that spell it.
-    Agreed(String, Vec<String>),
-    /// Members spell the slot differently: each method with its members.
-    Disputed(Vec<(String, Vec<String>)>),
+    Agreed(String, Spellers),
+    /// Members spell the slot differently: the first [`MEMBERS_SHOWN`]
+    /// methods with their members, and how many methods there are.
+    Disputed(Vec<(String, Spellers)>, usize),
 }
 
 /// One class's family.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Family {
-    /// The other members, each with how many anchors (a function each
-    /// table holds at that index alone) it shares with the class's own.
+    /// The first [`MEMBERS_SHOWN`] other members in name order, each with
+    /// how many anchors (a function each table holds at that index alone)
+    /// it shares with the class's own.
     pub members: Vec<(String, usize)>,
+    /// How many other members there are.
+    pub member_count: usize,
     /// The slot count every member's table has.
     pub slots: usize,
     /// The linking stopped at its work cap, so members may be missing.
@@ -221,16 +235,64 @@ fn families(classes: &BTreeMap<String, ClassInfo>) -> Families {
 ///
 /// # Returns
 ///
-/// The family, or `None` when the class shares no family.
+/// The family, shared with the memo, or `None` when the class shares no
+/// family.
 #[must_use]
-pub fn family_of(analysis: &Analysis, overlay: &Overlay, class: &str) -> Option<Family> {
-    let built = analysis.derived.get_or_build_named(
+pub fn family_of(analysis: &Analysis, overlay: &Overlay, class: &str) -> Option<Arc<Family>> {
+    let built = analysis.derived.get_or_build_item(
         "vtable_family",
         overlay.fingerprint(),
         class.to_owned(),
-        || build_family(analysis, overlay, class),
+        || build_family(analysis, overlay, class).map(Arc::new),
+        |fam| fam.as_deref().map_or(0, weight),
     );
     (*built).clone()
+}
+
+/// Returns the bytes a family holds beyond its own size.
+///
+/// # Arguments
+///
+/// * `fam` - The family.
+fn weight(fam: &Family) -> usize {
+    let spelled = |s: &Spellers| {
+        s.shown.capacity() * size_of::<String>()
+            + s.shown.iter().map(String::capacity).sum::<usize>()
+    };
+    let slot = |v: &SlotName| match v {
+        SlotName::Agreed(m, s) => m.capacity() + spelled(s),
+        SlotName::Disputed(all, _) => {
+            all.capacity() * size_of::<(String, Spellers)>()
+                + all
+                    .iter()
+                    .map(|(m, s)| m.capacity() + spelled(s))
+                    .sum::<usize>()
+        }
+    };
+    size_of::<Family>()
+        + fam.members.capacity() * size_of::<(String, usize)>()
+        + fam.members.iter().map(|(m, _)| m.capacity()).sum::<usize>()
+        + fam
+            .names
+            .values()
+            .map(|v| size_of::<(usize, SlotName)>() + slot(v))
+            .sum::<usize>()
+}
+
+/// Returns the first [`SPELLERS_SHOWN`] of some members, with their count.
+///
+/// # Arguments
+///
+/// * `by` - The members, in name order.
+fn spellers(by: &[&str]) -> Spellers {
+    Spellers {
+        shown: by
+            .iter()
+            .take(SPELLERS_SHOWN)
+            .map(|m| (*m).to_owned())
+            .collect(),
+        count: by.len(),
+    }
 }
 
 /// Builds what [`family_of`] returns.
@@ -255,8 +317,9 @@ fn build_family(analysis: &Analysis, overlay: &Overlay, class: &str) -> Option<F
             .filter(|m| !m.starts_with("vfunc_"))
     };
     let own_methods: Vec<Option<String>> = own.slots.iter().map(|&f| method_at(f)).collect();
-    let mut votes: BTreeMap<usize, BTreeMap<String, Vec<String>>> = BTreeMap::new();
+    let mut votes: BTreeMap<usize, BTreeMap<String, Vec<&str>>> = BTreeMap::new();
     let mut members = Vec::new();
+    let mut member_count = 0usize;
     let mut own_anchors = anchors(&own.slots, &all.stubs);
     own_anchors.retain(|&f| !reports_pure_call(&name_of(analysis, overlay, f)));
     for m in group.iter().filter(|m| *m != class) {
@@ -271,7 +334,10 @@ fn build_family(analysis: &Analysis, overlay: &Overlay, class: &str) -> Option<F
             .zip(&own.slots)
             .filter(|(a, b)| a == b && anchor(**a))
             .count();
-        members.push((m.clone(), shared));
+        member_count += 1;
+        if members.len() < MEMBERS_SHOWN {
+            members.push((m.clone(), shared));
+        }
         let limit = reach(classes, own, info, &anchor);
         for (k, &f) in info.slots.iter().enumerate().take(limit) {
             let Some(method) = method_at(f) else {
@@ -292,25 +358,31 @@ fn build_family(analysis: &Analysis, overlay: &Overlay, class: &str) -> Option<F
                 .or_default()
                 .entry(method)
                 .or_default()
-                .push(m.clone());
+                .push(m.as_str());
         }
     }
     let names = votes
         .into_iter()
         .map(|(k, spelled)| {
-            let mut spelled: Vec<(String, Vec<String>)> = spelled.into_iter().collect();
-            let verdict = match spelled.len() {
-                1 => {
-                    let (method, by) = spelled.remove(0);
-                    SlotName::Agreed(method, by)
-                }
-                _ => SlotName::Disputed(spelled),
+            let count = spelled.len();
+            let mut spelled = spelled.into_iter().map(|(m, by)| (m, spellers(&by)));
+            let verdict = match (count, spelled.next()) {
+                (1, Some((method, by))) => SlotName::Agreed(method, by),
+                (_, first) => SlotName::Disputed(
+                    first
+                        .into_iter()
+                        .chain(spelled)
+                        .take(MEMBERS_SHOWN)
+                        .collect(),
+                    count,
+                ),
             };
             (k, verdict)
         })
         .collect();
     Some(Family {
         members,
+        member_count,
         slots: own.slots.len(),
         capped: all.capped,
         names,
@@ -388,10 +460,9 @@ pub fn render_slots(
         let listed: Vec<String> = fam
             .members
             .iter()
-            .take(MEMBERS_SHOWN)
             .map(|(m, n)| format!("{m} ({n} shared)"))
             .collect();
-        let more = fam.members.len().saturating_sub(MEMBERS_SHOWN);
+        let more = fam.member_count.saturating_sub(fam.members.len());
         let _ = writeln!(
             out,
             "family: {}{}; each {}-slot table holds the same function at the shared slots, so a member's name for a slot at or below the last one it shares is a hint for this one",
@@ -432,33 +503,34 @@ pub fn render_slots(
 /// * `verdict` - What the family names the slot.
 /// * `own` - The slot's own name.
 fn slot_note(verdict: &SlotName, own: &str) -> Option<String> {
-    let by = |members: &[String]| {
-        let s: Vec<&str> = members
-            .iter()
-            .take(SPELLERS_SHOWN)
-            .map(String::as_str)
-            .collect();
-        let more = members.len().saturating_sub(SPELLERS_SHOWN);
+    let by = |s: &Spellers| {
+        let more = s.count.saturating_sub(s.shown.len());
         let tail = if more > 0 {
             format!(", +{more}")
         } else {
             String::new()
         };
-        format!("{}{tail}", s.join(", "))
+        format!("{}{tail}", s.shown.join(", "))
     };
     match verdict {
         SlotName::Agreed(method, members) => {
             let named = method_part(Some(own)).is_some_and(|m| !m.starts_with("vfunc_"));
-            let verb = if members.len() == 1 { "names" } else { "name" };
+            let verb = if members.count == 1 { "names" } else { "name" };
             (!named).then(|| format!("  {} {verb} this slot {method}", by(members)))
         }
-        SlotName::Disputed(spelled) => {
+        SlotName::Disputed(spelled, count) => {
             let list: Vec<String> = spelled
                 .iter()
                 .map(|(m, members)| format!("{m} ({})", by(members)))
                 .collect();
+            let more = count.saturating_sub(spelled.len());
+            let tail = if more > 0 {
+                format!(", +{more} more")
+            } else {
+                String::new()
+            };
             Some(format!(
-                "  members name this slot differently: {}",
+                "  members name this slot differently: {}{tail}",
                 list.join(", ")
             ))
         }
