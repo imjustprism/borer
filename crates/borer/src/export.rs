@@ -504,8 +504,7 @@ fn write_whole(path: &Path, text: &[u8]) -> anyhow::Result<()> {
         .with_context(|| format!("writing {shown}"))
 }
 
-/// Creates the `src` and `include` directories of a split under a new or
-/// empty directory.
+/// Refuses a split directory that holds anything, before any work.
 ///
 /// # Arguments
 ///
@@ -513,15 +512,10 @@ fn write_whole(path: &Path, text: &[u8]) -> anyhow::Result<()> {
 ///   [`borer_engine::program::unusable_path`].
 /// * `shown` - The directory as messages spell it.
 ///
-/// # Returns
-///
-/// The `src` and the `include` directory.
-///
 /// # Errors
 ///
-/// When the directory holds anything or cannot be read, or one of the two
-/// cannot be created or is a link.
-fn split_dirs(root: &Path, shown: &str) -> anyhow::Result<(PathBuf, PathBuf)> {
+/// When the directory holds anything or cannot be read.
+fn refuse_occupied(root: &Path, shown: &str) -> anyhow::Result<()> {
     #[expect(clippy::disallowed_methods, reason = "unusable_path cleared the root")]
     let listed = std::fs::read_dir(root);
     let occupied = match listed {
@@ -536,6 +530,24 @@ fn split_dirs(root: &Path, shown: &str) -> anyhow::Result<(PathBuf, PathBuf)> {
             "{shown} is not empty; name a new or empty directory for --split; nothing was written"
         );
     }
+    Ok(())
+}
+
+/// Creates the `src` and `include` directories of a split under its
+/// directory, which [`refuse_occupied`] found new or empty.
+///
+/// # Arguments
+///
+/// * `root` - The split's directory.
+///
+/// # Returns
+///
+/// The `src` and the `include` directory.
+///
+/// # Errors
+///
+/// When one of the two cannot be created or is a link.
+fn split_dirs(root: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
     let (src, include) = (root.join("src"), root.join("include"));
     for d in [&src, &include] {
         std::fs::create_dir_all(d).with_context(|| format!("creating {}", d.display()))?;
@@ -596,6 +608,7 @@ pub fn write_split(
         anyhow::bail!("{why}; nothing was written");
     }
     let shown = short_path(dir);
+    refuse_occupied(root, &shown)?;
     let sdk = modsdk::build(program, analysis, overlay);
     if borer_engine::cancel::Cancel::raised() {
         anyhow::bail!(
@@ -608,7 +621,7 @@ pub fn write_split(
         ModFile::Header.what(),
         std::mem::take(&mut split_headers.shared).into_bytes(),
     )?;
-    let (src, include) = split_dirs(root, &shown)?;
+    let (src, include) = split_dirs(root)?;
     let sources = split::sources(program, analysis);
     let set = only.map(|e| e.iter().copied().collect::<BTreeSet<u64>>());
     let mut units = Units {
@@ -1377,6 +1390,40 @@ mod tests {
             "{why}"
         );
         assert!(!written, "nothing was written");
+    }
+
+    /// A split into a directory that holds anything is refused before the
+    /// SDK is built: with the deadline already passed, which the build
+    /// would answer, the refusal still names the directory.
+    ///
+    /// # Panics
+    ///
+    /// When the refusal is another or the directory is written to.
+    #[test]
+    fn a_full_split_directory_is_refused_before_the_build() {
+        let text = Section::mapped(".text", 0x1000, 0, 0x10, false, true);
+        let p = Program::raw(vec![0xc3; 0x10], Arch::X86_64, 0, Some(0x1000), vec![text]);
+        let a = Analysis::compute(&p);
+        let dir = std::env::temp_dir().join(format!("borer-split-full-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        std::fs::write(dir.join("kept"), "kept").expect("written");
+        let flag = borer_engine::cancel::Cancel::new();
+        flag.raise();
+        let refused = flag.within(|| {
+            super::write_split(
+                &p,
+                &a,
+                &Overlay::default(),
+                Library::Include,
+                None,
+                &dir.display().to_string(),
+            )
+        });
+        let left = walk(&dir);
+        std::fs::remove_dir_all(&dir).ok();
+        let why = format!("{:#}", refused.expect_err("a full directory"));
+        assert!(why.contains("is not empty"), "{why}");
+        assert_eq!(left, vec!["kept"]);
     }
 
     /// Makes `link` a directory link to `target`: a symlink, or on Windows
