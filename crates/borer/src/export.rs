@@ -618,7 +618,7 @@ pub fn write_split(
         bytes: 0,
     };
     let mut exported: BTreeMap<u64, Option<&str>> = BTreeMap::new();
-    let mut why: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut why: BTreeMap<String, usize> = BTreeMap::new();
     let (mut total, mut rough) = (0usize, 0usize);
     let hoisted = export_units(
         program,
@@ -645,8 +645,8 @@ pub fn write_split(
                     None
                 }
                 (None, Written::Body) => filed.why(),
-                (None, Written::Failed) => Some("did not decompile"),
-                (None, Written::Cut) => Some("were cut for size"),
+                (None, Written::Failed) => Some("did not decompile".to_owned()),
+                (None, Written::Cut) => Some("were cut for size".to_owned()),
             };
             if let Some(reason) = reason {
                 *why.entry(reason).or_default() += 1;

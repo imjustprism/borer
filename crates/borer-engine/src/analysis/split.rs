@@ -189,15 +189,18 @@ impl Filed<'_> {
     /// Returns why a function went to [`REMAINDER`], `None` when it was
     /// filed under its source.
     #[must_use]
-    pub fn why(self) -> Option<&'static str> {
-        match self {
-            Filed::Source(_) => None,
-            Filed::Nothing => Some("cite no source file"),
-            Filed::Tie => Some("cite several and settle on none"),
-            Filed::Ambiguous => Some("name a cut path that fits several"),
-            Filed::Unmatched => Some("name a file they do not reference"),
-            Filed::PastCap => Some("cite a file past the 4096 a split writes"),
-        }
+    pub fn why(self) -> Option<String> {
+        let why = match self {
+            Filed::Source(_) => return None,
+            Filed::Nothing => "cite no source file",
+            Filed::Tie => "cite several and settle on none",
+            Filed::Ambiguous => "name a cut path that fits several",
+            Filed::Unmatched => "name a file they do not reference",
+            Filed::PastCap => {
+                return Some(format!("cite a file past the {UNITS_MAX} a split writes"));
+            }
+        };
+        Some(why.to_owned())
     }
 }
 
@@ -555,5 +558,9 @@ mod tests {
             Filed::Source("a/y.cpp")
         );
         assert_eq!(s.filed(6, &text(&[])), Filed::Nothing);
+        assert_eq!(
+            Filed::PastCap.why().as_deref(),
+            Some("cite a file past the 4096 a split writes")
+        );
     }
 }
