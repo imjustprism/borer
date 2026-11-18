@@ -2,6 +2,7 @@
 //! rule an agent's annotations and a project file's are held to alike.
 
 use super::Overlay;
+use crate::program::Program;
 
 /// Which annotation a call carries, for the message that refuses one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +58,46 @@ pub fn must_fit_an_escaped_row(text: &str, what: Annotation) -> Result<(), Strin
         ));
     }
     Ok(())
+}
+
+/// Tells whether an annotation at `va` has a place: a section declares
+/// it, with or without file bytes ([`Program::declared_at`]).
+///
+/// Nothing borer lists lives outside the image, so a name or comment there
+/// would sit in the overlay and the project file and never be shown; `0x1`
+/// is a typo, not a place. A section the file holds no bytes for (`.bss`)
+/// is in the image, and the decompiler names its globals, so it is one.
+/// The annotating tools and a loaded project file are held to it alike.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `va` - The address the annotation is for.
+#[must_use]
+pub fn placeable(program: &Program, va: u64) -> bool {
+    program.declared_at(va).is_some()
+}
+
+/// Refuses an annotation at an address that is no place for one
+/// ([`placeable`]).
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `va` - The address the annotation is for.
+/// * `what` - Which annotation it is, for the message.
+///
+/// # Errors
+///
+/// When no section declares `va`, listing the sections that exist.
+pub fn must_be_in_a_section(program: &Program, va: u64, what: Annotation) -> Result<(), String> {
+    if placeable(program, va) {
+        return Ok(());
+    }
+    Err(format!(
+        "{va:#x} is in no section, so nothing there can take a {what}; sections: {}",
+        program.section_list()
+    ))
 }
 
 /// Punctuation a name may hold besides letters and digits: C++ scopes,

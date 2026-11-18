@@ -72,6 +72,21 @@ pub(crate) fn tiny_pe() -> Vec<u8> {
     b
 }
 
+/// A [`tiny_pe`] with a second section, `.bss` at RVA 0x2000: 0x100 bytes
+/// the file holds none of, as a linker writes uninitialized data.
+pub(crate) fn tiny_pe_with_bss() -> Vec<u8> {
+    /// The second section row's file offset, after the first's 40 bytes.
+    const ROW: usize = 0x80 + 24 + 0xf0 + 40;
+    let mut b = tiny_pe();
+    put(&mut b, 0x80 + 6, &2u16.to_le_bytes());
+    put(&mut b, 0x80 + 24 + 56, &0x3000u32.to_le_bytes());
+    put(&mut b, ROW, b".bss");
+    put(&mut b, ROW + 8, &0x100u32.to_le_bytes());
+    put(&mut b, ROW + 12, &0x2000u32.to_le_bytes());
+    put(&mut b, ROW + 36, &0xc000_0080u32.to_le_bytes());
+    b
+}
+
 /// Builds a [`tiny_pe`] fixture carrying a `CodeView` PDB70 record for `pdb_name`.
 ///
 /// # Arguments

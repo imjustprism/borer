@@ -1,7 +1,7 @@
 //! Tool and prompt parameters: what each MCP call accepts, as the JSON
 //! schema an agent reads before it calls.
 
-pub(crate) use borer_engine::analysis::settable::Annotation;
+pub(crate) use borer_engine::analysis::settable::{Annotation, must_be_in_a_section};
 use borer_engine::analysis::{render, settable};
 use borer_engine::program;
 use rmcp::{ErrorData, schemars};
@@ -1103,38 +1103,6 @@ pub(crate) fn must_fit_a_row(text: &str, what: Annotation) -> Result<(), ErrorDa
 /// or mangled name has; the message names the character.
 pub(crate) fn must_be_a_name(name: &str) -> Result<(), ErrorData> {
     settable::must_be_a_name(name).map_err(err_params)
-}
-
-/// Refuses an annotation at an address no section maps.
-///
-/// Nothing borer lists lives outside the image, so a name or comment there
-/// would sit in the overlay and the project file and never be shown; `0x1`
-/// is a typo, not a place. Both annotating tools refuse it alike. A
-/// section the file holds no bytes for (`.bss`) is in the image, and the
-/// decompiler names its globals, so it takes annotations.
-///
-/// # Arguments
-///
-/// * `program` - The loaded image.
-/// * `va` - The address the annotation is for.
-/// * `what` - Which annotation it is, for the message.
-///
-/// # Errors
-///
-/// When no section declares `va` ([`program::Program::declared_at`]),
-/// listing the sections that exist.
-pub(crate) fn must_be_in_a_section(
-    program: &program::Program,
-    va: u64,
-    what: Annotation,
-) -> Result<(), String> {
-    if program.declared_at(va).is_some() {
-        return Ok(());
-    }
-    Err(format!(
-        "{va:#x} is in no section, so nothing there can take a {what}; sections: {}",
-        program.section_list()
-    ))
 }
 
 /// What the parameter parser starts a refused argument's message with.

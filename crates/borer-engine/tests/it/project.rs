@@ -154,3 +154,24 @@ fn a_file_stating_no_field_never_asks_for_the_analysis() {
     admit(&program, analysis, &Overlay::default(), &file, false).expect("admitted");
     assert!(!asked.get(), "the analysis was asked for");
 }
+
+/// A project's name in a section the file holds no bytes for is kept, as
+/// `set_name` takes it: a `.bss` global's name survives a load.
+#[test]
+fn a_name_in_a_section_without_file_bytes_is_kept() {
+    use borer_engine::analysis::project::keep_placeable;
+    use borer_engine::program::Section;
+    let mut bss = Section::mapped(".bss", 0x2000, 0, 0x100, true, false);
+    bss.file_size = 0;
+    let text = Section::mapped(".text", 0x1000, 0, 0x10, false, true);
+    let p = Program::raw(vec![0xc3; 0x10], Arch::X86_64, 0, None, vec![text, bss]);
+    let mut o = Overlay::default();
+    o.names.insert(0x2010, "g_state".to_owned());
+    assert!(keep_placeable(&mut o, &p).is_empty());
+    assert_eq!(o.names.get(&0x2010).map(String::as_str), Some("g_state"));
+    o.names.insert(0x9000, "nowhere".to_owned());
+    assert_eq!(
+        keep_placeable(&mut o, &p),
+        ["name at 0x9000 (in no section)"]
+    );
+}

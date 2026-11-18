@@ -331,6 +331,30 @@ fn answer(
     }
 }
 
+/// A name `set_name` takes in a section the file holds no bytes for is
+/// saved and loaded back, not dropped as in no section.
+#[test]
+fn a_bss_name_survives_save_and_load() {
+    let dir = std::env::temp_dir().join(format!("borer-project-bss-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = dir.join("bss.exe");
+    std::fs::write(&bin, crate::contract::tiny_pe_with_bss()).unwrap();
+    let project = dir.join("bss.json").display().to_string();
+    let mut client = Client::start(&bin.display().to_string());
+    let mut call = |name: &str, arguments: serde_json::Value| answer(&mut client, name, &arguments);
+    let args = serde_json::json!({"address": "0x140002010", "name": "g_state", "dry_run": false});
+    call("set_name", args).unwrap();
+    let saved = call("save_project", serde_json::json!({"path": project})).unwrap();
+    assert!(saved.starts_with("saved 1 names"), "{saved}");
+    let loaded = call("load_project", serde_json::json!({"path": project})).unwrap();
+    assert!(loaded.starts_with("loaded 1 names"), "{loaded}");
+    assert!(!loaded.contains("in no section"), "{loaded}");
+    let ledger = call("annotations", serde_json::json!({})).unwrap();
+    assert!(ledger.contains("0x140002010  name: g_state"), "{ledger}");
+    client.finish();
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// Over the server, projects are keyed by hash and the ledger pages.
 ///
 /// A project loads into a copy of its binary at another path, a rebuilt

@@ -864,8 +864,10 @@ impl std::io::Write for BoundedJson {
 }
 
 /// Leaves out of an overlay what `set_name`, `set_comment` and `set_type`
-/// refuse of the loaded binary: an annotation at an address no section
-/// holds, and a blank name or comment.
+/// refuse of the loaded binary.
+///
+/// That is an annotation at an address no section declares
+/// ([`settable::placeable`]), and a blank name or comment.
 ///
 /// A project file is edited by hand and may be loaded into a binary other
 /// than the one it was saved for; an annotation outside every section would
@@ -884,7 +886,7 @@ impl std::io::Write for BoundedJson {
 pub fn keep_placeable(o: &mut Overlay, program: &Program) -> Vec<String> {
     let mut left_out: Vec<String> = Vec::new();
     let mut keep = |what: &str, va: u64, text: Option<&str>| {
-        let why = if program.section_at(va).is_none() {
+        let why = if !settable::placeable(program, va) {
             "in no section"
         } else if text.is_some_and(|t| t.trim().is_empty()) {
             "blank"
