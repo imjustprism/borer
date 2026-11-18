@@ -135,7 +135,7 @@ pub(crate) fn playbook(name: &str, argument: Option<&str>) -> Option<String> {
 
 /// The instructions up to the prompts: where to start and the tools of a
 /// session, each tool written `{name}` and filled from the tool router.
-const WORKFLOW: &str = "borer: agent-native binary analysis (x86/x64 and arm64 PE/ELF/Mach-O; \
+const WORKFLOW: &str = "borer: binary analysis (x86/x64 and arm64 PE/ELF/Mach-O; \
      arm64 decompiles, but taint, layout and the x86 machine's tools read x86 only). Start: {load_binary}, then query borer://triage: what the file is, how it is \
      protected, what it can do, and the functions to read first ({load_binary} already \
      answers the summary {binary_info} repeats). Then {function_summary} triages a \

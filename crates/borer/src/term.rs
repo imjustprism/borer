@@ -527,8 +527,8 @@ fn marked(styled: bool, ok: bool) -> &'static str {
     }
 }
 
-/// What `borer` alone says at a terminal: what it is, how agents start it,
-/// and the commands a person reaches for first.
+/// Returns what `borer` alone says at a terminal: what it is, how an MCP client
+/// starts it, and the commands a person reaches for first.
 pub(crate) fn welcome() -> String {
     /// The commands a person reaches for first, with what each does.
     const FIRST: [(&str, &str); 5] = [
@@ -554,8 +554,8 @@ pub(crate) fn welcome() -> String {
     };
     let version = crate::doctor::version();
     let mut out = format!(
-        "{b}borer{r} {d}{version}{r}  reverse engineering for AI agents and people\n\n\
-         borer is an MCP server: your agent starts it over stdin and stdout.\n\n"
+        "{b}borer{r} {d}{version}{r}  reverse engineering for humans and AI\n\n\
+         The commands below answer here; an MCP client starts borer over stdin and stdout.\n\n"
     );
     for (command, what) in FIRST {
         let _ = writeln!(out, "  {b}{command:<31}{r} {d}{what}{r}");
