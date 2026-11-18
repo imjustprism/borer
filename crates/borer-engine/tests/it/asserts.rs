@@ -898,6 +898,40 @@ fn a_bare_local_or_parameter_pairs_strong_nowhere() {
     assert!(field_names(&p, &a, &o, "Registry").is_empty());
 }
 
+/// `"this->m_open"`, a member a method of [`LOCALS`]' class spells after
+/// `this->`.
+const OPEN: u64 = 0x2160;
+
+/// `Registry::Open`, asserting [`OPEN`] over +0x40.
+const OPENS: (u64, Guard, u64, u64, &str) = (
+    0x1200,
+    Guard::Field(0x40),
+    OPEN,
+    0x2300,
+    "void Registry::Open()",
+);
+
+/// A class whose asserts spell a member after `this->` pairs none of its
+/// bare names: its answer is the one without the bare asserts, byte for
+/// byte.
+///
+/// Such a class spells its members that way, so `!stopped`, the local
+/// `Stop` and `Halt` hold, is no member of it.
+#[test]
+fn a_class_spelling_this_pairs_no_bare_name() {
+    let texts: [(u64, &[u8]); 2] = [(STOPPED, b"!stopped\0"), (OPEN, b"this->m_open\0")];
+    let answer = |methods: &[(u64, Guard, u64, u64, &str)]| {
+        let p = image(methods, &texts);
+        asserted_fields_tsv(&p, &Analysis::compute(&p), &Overlay::default(), "")
+    };
+    let all = answer(&[LOCALS[0], LOCALS[1], OPENS]);
+    assert!(
+        all.contains("\tm_open\t") && !all.contains("bare\t"),
+        "{all}"
+    );
+    assert_eq!(all, answer(&[OPENS]));
+}
+
 /// `L"this->m_x"`, as MSVC writes a wide condition.
 const WIDE: u64 = 0x2120;
 

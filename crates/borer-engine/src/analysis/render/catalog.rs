@@ -270,7 +270,10 @@ fn asserted_members(p: &Program, a: &Analysis, o: &Overlay) -> (BTreeMap<String,
 /// and are paired only in a tier of their own. Each function's conditions
 /// are read once per analysis and looked up by address, and a raised
 /// cancel flag
-/// ([`crate::cancel::Cancel`]) reads no further literal.
+/// ([`crate::cancel::Cancel`]) reads no further literal. A class whose
+/// asserts spell any member after `this->` ([`this_classes`]) spells its
+/// members that way, so its bare names are its locals and parameters and
+/// it gets none.
 ///
 /// # Arguments
 ///
@@ -281,6 +284,7 @@ fn bare_members(p: &Program, a: &Analysis, o: &Overlay) -> Named {
     use crate::analysis::members::{
         CONDITION_MIN, MEMBER_STRING_CAP, Spelled, assert_conditions, condition_members,
     };
+    let this = this_classes(p, a, o);
     let mut named = Named::new();
     for (target, _) in literal_targets(p, a)
         .iter()
@@ -309,6 +313,7 @@ fn bare_members(p: &Program, a: &Analysis, o: &Overlay) -> Named {
             let Some(class) = passed
                 .then(|| crate::analysis::classes::class_of(&name))
                 .flatten()
+                .filter(|c| !this.contains(*c))
             else {
                 continue;
             };
@@ -319,6 +324,22 @@ fn bare_members(p: &Program, a: &Analysis, o: &Overlay) -> Named {
         }
     }
     named
+}
+
+/// Returns the classes whose asserts spell some member after `this->`,
+/// the classes `borer://asserts` lists names for, read once per overlay.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image, for reading the strings.
+/// * `a` - Cross-references and functions.
+/// * `o` - User names, for each function's class.
+pub(super) fn this_classes(p: &Program, a: &Analysis, o: &Overlay) -> Arc<BTreeSet<String>> {
+    a.derived
+        .get_or_build_named("this_classes", o.fingerprint(), (), || {
+            let (fields, _) = asserted_members(p, a, o);
+            fields.into_values().flat_map(|f| f.classes).collect()
+        })
 }
 
 /// The functions whose asserts spell each member of `this`, by class and
