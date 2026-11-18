@@ -200,7 +200,7 @@ fn read_assert_conditions(
         Condition,
         Other,
     }
-    let lits: Vec<(u64, u64, Role)> = analysis
+    let literals: Vec<(u64, u64, Role)> = analysis
         .refs_from(entry)
         .into_iter()
         .filter(|(t, _)| program.section_at(*t).is_some_and(|s| !s.executable))
@@ -219,13 +219,15 @@ fn read_assert_conditions(
         })
         .collect();
     let near = |va: u64, role: Role| {
-        let from = lits.partition_point(|l| l.0 < va.saturating_sub(ASSERT_CALL_SPAN));
-        lits.iter()
+        let from = literals.partition_point(|l| l.0 < va.saturating_sub(ASSERT_CALL_SPAN));
+        literals
+            .iter()
             .skip(from)
             .take_while(|l| l.0 <= va.saturating_add(ASSERT_CALL_SPAN))
             .any(|l| l.2 == role)
     };
-    lits.iter()
+    literals
+        .iter()
         .filter(|l| l.2 == Role::Condition && near(l.0, Role::Path) && near(l.0, Role::Signature))
         .filter_map(|l| {
             Some((
