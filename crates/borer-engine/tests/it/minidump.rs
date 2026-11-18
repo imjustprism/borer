@@ -385,6 +385,27 @@ fn a_range_longer_than_the_file_is_clamped_to_it() {
     assert!(p.read_va_upto(0x7ff0_0000 + held, 4).is_none());
 }
 
+/// A range the end of the dump cuts is missing past what the file holds,
+/// not zero-filled: a dump's memory is all bytes it captured.
+///
+/// The last `Memory64ListStream` range claims 0x2000 bytes at
+/// `0x5000_0000` and the file holds 0x1000 of them.
+#[test]
+fn a_range_the_dump_cuts_is_missing_not_zero() {
+    let mut d = dump();
+    let at = add_stream(&mut d, 9, &memory64(0, &[(0x5000_0000, 0x2000)]));
+    let base = d.len();
+    u64_at(&mut d, at + 8, u64::try_from(base).expect("fits"));
+    d.resize(base + 0x1000, 0x90);
+    let p = Program::from_bytes("cut64.dmp".into(), d).expect("loads");
+    let why = p.no_bytes_at(0x5000_1800);
+    assert!(!why.contains("zero-fills"), "{why}");
+    assert!(
+        why.contains("cut short: the bytes there are missing"),
+        "{why}"
+    );
+}
+
 /// A range of size zero holds nothing and maps no section.
 #[test]
 fn a_zero_size_range_is_skipped() {
