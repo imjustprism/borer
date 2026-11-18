@@ -852,8 +852,9 @@ pub(crate) fn assert_votes(
         overlay.fingerprint(),
         (entry, receiver),
         || {
+            let name = name_of(analysis, overlay, entry);
             decompile_plain(program, analysis, overlay, entry)
-                .map(|text| votes_in(&text, receiver))
+                .map(|text| votes_in(&text, receiver, class_of(&name)))
                 .unwrap_or_default()
                 .into_iter()
                 .flat_map(|(off, u)| u.names.into_iter().map(move |(m, n)| (off, m, n)))

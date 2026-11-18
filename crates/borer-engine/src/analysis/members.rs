@@ -321,14 +321,43 @@ fn read_directly(guard: &str, at: usize) -> bool {
 /// * `text` - The function's decompiled text.
 /// * `receiver` - The spelling read; a condition spelled the other way
 ///   votes nothing.
-pub(crate) fn votes_in(text: &str, receiver: Receiver) -> BTreeMap<u64, FieldUse> {
+/// * `class` - The function's class, which an inlined assert's signature
+///   must name ([`own_signature`]).
+pub(crate) fn votes_in(
+    text: &str,
+    receiver: Receiver,
+    class: Option<&str>,
+) -> BTreeMap<u64, FieldUse> {
     let mut fields: BTreeMap<u64, FieldUse> = BTreeMap::new();
     let mut prev = "";
     for line in text.lines() {
-        collect_assert_names(prev, line.trim(), receiver, &mut fields);
+        collect_assert_names(prev, line.trim(), receiver, class, &mut fields);
         prev = line.trim();
     }
     fields
+}
+
+/// Tells whether an assert call's signature is its function's own or that
+/// of a method of its function's class, so the members it names are of a
+/// `this` its guard can read.
+///
+/// An assert inlined from another class's method (`__FUNCSIG__(B::Get)` in
+/// a method of `A`) names `B`'s members, and its guard reads whatever `A`
+/// holds there.
+///
+/// # Arguments
+///
+/// * `call` - The call line.
+/// * `class` - The function's class.
+fn own_signature(call: &str, class: Option<&str>) -> bool {
+    let Some((_, rest)) = call.split_once("__FUNCSIG__") else {
+        return false;
+    };
+    let Some(named) = rest.strip_prefix('(') else {
+        return true;
+    };
+    let name = named.split_once(')').map_or(named, |(n, _)| n);
+    class.is_some_and(|c| super::classes::class_of(name) == Some(c))
 }
 
 /// Names a field from a guarded assert.
@@ -340,22 +369,25 @@ pub(crate) fn votes_in(text: &str, receiver: Receiver) -> BTreeMap<u64, FieldUse
 /// names `Util::String`'s field 0x38 `strLen`. A getter votes as
 /// `IsSet()`. Anything with several fields or several members is skipped,
 /// and so is a member reached into (`this->m_rect.w`), an expression the
-/// text cut ([`first_literal`]), one spelled other than `receiver`, and a
-/// bare one whose call cites no source file.
+/// text cut ([`first_literal`]), one spelled other than `receiver`, a
+/// bare one whose call cites no source file, and one inlined from another
+/// class's method ([`own_signature`]).
 ///
 /// # Arguments
 ///
 /// * `guard` - The previous line.
 /// * `call` - The current line.
 /// * `receiver` - The spelling read.
+/// * `class` - The function's class.
 /// * `fields` - Field uses; the vote lands on the field's offset.
 fn collect_assert_names(
     guard: &str,
     call: &str,
     receiver: Receiver,
+    class: Option<&str>,
     fields: &mut BTreeMap<u64, FieldUse>,
 ) {
-    if !(guard.starts_with("if (") && guard.ends_with('{') && call.contains("__FUNCSIG__")) {
+    if !(guard.starts_with("if (") && guard.ends_with('{') && own_signature(call, class)) {
         return;
     }
     let Some(expr) = first_literal(call) else {
@@ -459,8 +491,8 @@ mod tests {
             )
         };
         let text = assert("!m_stop", "src/a.cpp");
-        assert!(votes_in(&text, Receiver::This).is_empty());
-        let votes = votes_in(&text, Receiver::Bare);
+        assert!(votes_in(&text, Receiver::This, None).is_empty());
+        let votes = votes_in(&text, Receiver::Bare, None);
         let names = votes
             .get(&0x20)
             .map(|f| f.names.keys().cloned().collect::<Vec<_>>());
@@ -472,7 +504,7 @@ mod tests {
             ("this->m_stop", "src/a.cpp"),
         ] {
             let text = assert(cond, path);
-            assert!(votes_in(&text, Receiver::Bare).is_empty(), "{cond}");
+            assert!(votes_in(&text, Receiver::Bare, None).is_empty(), "{cond}");
         }
     }
 
@@ -524,22 +556,25 @@ mod tests {
             "if (*(uint32_t*)(*(uint64_t*)(this + 0x40) + 8) == 0) {",
             call,
             Receiver::This,
+            None,
             &mut fields,
         );
         collect_assert_names(
             direct,
             "f(\"this->m_rect.w > 0\", \"a.cc\", 1, __FUNCSIG__);",
             Receiver::This,
+            None,
             &mut fields,
         );
         collect_assert_names(
             direct,
             r#"f("this->m_key == \"\" || this->m_val", "a.cc", 1, __FUNCSIG__);"#,
             Receiver::This,
+            None,
             &mut fields,
         );
         assert!(fields.is_empty(), "{fields:?}");
-        collect_assert_names(direct, call, Receiver::This, &mut fields);
+        collect_assert_names(direct, call, Receiver::This, None, &mut fields);
         assert_eq!(fields.get(&0x40).map(|f| f.names.len()), Some(1));
     }
 
@@ -557,5 +592,23 @@ mod tests {
         let shown = crate::analysis::decompile::literal_at(&p, 0x2000, "sub_1000");
         let line = format!("f({}, \"this->m_count\");", shown.unwrap_or_default());
         assert_eq!(first_literal(&line), None, "{line}");
+    }
+
+    /// An assert inlined from another class's method votes for none of the
+    /// caller's fields; its own and its class's methods' asserts do.
+    #[test]
+    fn an_inlined_assert_votes_only_for_its_own_class() {
+        let votes = |sig: &str, class: Option<&str>| {
+            let text = format!(
+                "if (*(uint32_t*)(this + 0x38) == 0) {{\nf(\"this->m_owner\", \"a.cc\", 1, {sig});\n"
+            );
+            votes_in(&text, Receiver::This, class).len()
+        };
+        assert_eq!(votes("__FUNCSIG__(B::Get)", Some("A")), 0);
+        assert_eq!(votes("__FUNCSIG__(B::Get)", None), 0);
+        assert_eq!(votes("__FUNCSIG__(ns::A::Get)", Some("A")), 0);
+        assert_eq!(votes("__FUNCSIG__(A::Get)", Some("A")), 1);
+        assert_eq!(votes("__FUNCSIG__", Some("A")), 1);
+        assert_eq!(votes("__FUNCSIG__", None), 1);
     }
 }

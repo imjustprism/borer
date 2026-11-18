@@ -755,3 +755,53 @@ fn a_bare_assert_points_at_the_asserts() {
         "{free:?}"
     );
 }
+
+/// `"this->m_owner"`, asserted by a method of another class.
+const OWNER: u64 = 0x2120;
+
+/// `"this->m_flag"`, asserted by a method of the caller's own class.
+const FLAG: u64 = 0x2140;
+
+/// Methods of `A`, renamed so by the overlay, whose asserts were inlined:
+/// `Fetch` and `Load` from `B::Get` and `B::Peek`, guarding +0x40, and
+/// `Own` from `A::Check`, guarding +0x48.
+const INLINED: [(u64, Guard, u64, u64, &str); 3] = [
+    (0x1100, Guard::Field(0x40), OWNER, 0x2200, "void B::Get()"),
+    (0x1140, Guard::Field(0x40), OWNER, 0x2240, "void B::Peek()"),
+    (0x1180, Guard::Field(0x48), FLAG, 0x2280, "void A::Check()"),
+];
+
+/// An assert inlined from another class's method names none of the
+/// caller's fields, while one inlined from its own class's names them.
+///
+/// GitHub issue 24's `vulkan.hpp` asserts `m_owner` and `m_dispatch` in
+/// every caller they were inlined into, and each caller's guard read its
+/// own object, so the pairing put `VulkanRenderContext::m_owner` at four
+/// offsets.
+#[test]
+fn an_inlined_assert_names_only_its_own_class() {
+    let p = image(
+        &INLINED,
+        &[(OWNER, b"this->m_owner\0"), (FLAG, b"this->m_flag\0")],
+    );
+    let a = Analysis::compute(&p);
+    let mut o = Overlay::default();
+    for (entry, name) in [
+        (0x1100, "A::Fetch"),
+        (0x1140, "A::Load"),
+        (0x1180, "A::Own"),
+    ] {
+        o.names.insert(entry, name.to_owned());
+    }
+    let text = decompile(&p, &a, &o, 0x1100).expect("decompiles");
+    assert!(text.contains("__FUNCSIG__(B::Get)"), "{text}");
+    let names = field_names(&p, &a, &o, "A");
+    assert!(!names.contains_key(&0x40), "{names:?}");
+    assert_eq!(names.get(&0x48).map(String::as_str), Some("m_flag"));
+    let all = asserted_fields_tsv(&p, &a, &o, "");
+    assert!(!all.contains("\tA\tm_owner\t0x40"), "{all}");
+    assert!(
+        all.lines().any(|l| l == "weak\tA\tm_flag\t0x48\t0x1180"),
+        "{all}"
+    );
+}
