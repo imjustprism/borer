@@ -627,7 +627,7 @@ pub fn write_split(
     )?;
     let (src, include) = split_dirs(root)?;
     let mut sources = split::sources(program, analysis);
-    sources.file_by_class(analysis, overlay, &sdk);
+    sources.file_by_class(program, analysis, overlay, &sdk);
     let set = only.map(|e| e.iter().copied().collect::<BTreeSet<u64>>());
     let mut units = Units {
         dir: &src,
@@ -694,6 +694,9 @@ struct Tally {
     /// Of [`Tally::by_class`], those that did not decompile or were cut for
     /// size.
     class_rough: usize,
+    /// The fewest methods citing the file in their own asserts of any class
+    /// that filed a function, `None` when none did.
+    witnesses: Option<usize>,
     /// Functions filed under none, by why.
     why: BTreeMap<String, usize>,
 }
@@ -719,9 +722,10 @@ impl Tally {
         self.total += 1;
         let (path, rough) = match filed {
             Filed::Source(path) => (Some(path), &mut self.rough),
-            Filed::Class(path) => {
+            Filed::Class(by) => {
                 self.by_class += 1;
-                (Some(path), &mut self.class_rough)
+                self.witnesses = Some(self.witnesses.map_or(by.cite, |w| w.min(by.cite)));
+                (Some(by.path), &mut self.class_rough)
             }
             Filed::Nothing | Filed::Tie | Filed::Ambiguous | Filed::Unmatched | Filed::PastCap => {
                 (None, &mut self.rough)
@@ -786,10 +790,10 @@ impl Tally {
             String::new()
         };
         let filed = self.total.saturating_sub(left);
-        let how = match (self.by_class, self.class_rough) {
-            (0, _) => String::new(),
-            (k, cut) => format!(
-                " ({} by the paths they reference, {k} by their class, citing none: the one file its other methods cite{})",
+        let how = match (self.by_class, self.witnesses, self.class_rough) {
+            (0, _, _) | (_, None, _) => String::new(),
+            (k, Some(least), cut) => format!(
+                " ({} by the paths they reference, {k} by their class, citing none: at least {least} methods of each such class cite its file in their own asserts and none cites another, each class's count in MAP.tsv{})",
                 filed.saturating_sub(k),
                 if cut > 0 {
                     format!("; {cut} of those did not decompile or were cut for size")
@@ -1238,6 +1242,22 @@ mod tests {
     ///
     /// When the functions or their asserts do not fit the image.
     fn asserting(funcs: &[(&str, &[&str])]) -> (Program, Overlay) {
+        assembled(funcs, &[])
+    }
+
+    /// Builds the image [`asserting`] builds, the asserts of each function
+    /// in `signed` also passing its own signature, `void __cdecl <name>(void)`,
+    /// at `0x2800`, `0x2880` and on.
+    ///
+    /// # Arguments
+    ///
+    /// * `funcs` - As for [`asserting`].
+    /// * `signed` - The functions whose asserts pass their signature.
+    ///
+    /// # Panics
+    ///
+    /// When the functions or their asserts do not fit the image.
+    fn assembled(funcs: &[(&str, &[&str])], signed: &[&str]) -> (Program, Overlay) {
         use borer_engine::program::{Symbol, SymbolKind};
         let mut bytes = vec![0xccu8; 0x2000];
         let rel = |at: u64, to: u64| borer_engine::num::lo32(to.wrapping_sub(at)).to_le_bytes();
@@ -1263,8 +1283,18 @@ mod tests {
                 code.extend([0x48, 0x8d, 0x15]); // ASM: lea rdx, [rip+path]
                 code.extend(rel(here + 14, string));
                 code.extend([0x41, 0xb8, u8::try_from(line).expect("few"), 0, 0, 0]); // ASM: mov r8d, line
+                let mut call = here + 20;
+                if signed.contains(name) {
+                    let sig = 0x2800 + 0x80 * u64::try_from(i).expect("few");
+                    let off = usize::try_from(sig - 0x1000).expect("fits");
+                    let text = format!("void __cdecl {name}(void) ");
+                    bytes[off..off + text.len()].copy_from_slice(text.as_bytes());
+                    code.extend([0x4c, 0x8d, 0x0d]); // ASM: lea r9, [rip+signature]
+                    code.extend(rel(call + 7, sig));
+                    call += 7;
+                }
                 code.extend([0xff, 0x15]); // ASM: call qword [rip+iat]
-                code.extend(rel(here + 26, 0x2000));
+                code.extend(rel(call + 6, 0x2000));
             }
             code.push(0xc3); // ASM: ret
             let off = usize::try_from(entry - 0x1000).expect("fits");
@@ -1352,14 +1382,18 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("cleans up");
     }
 
-    /// Returns the reply of a split of `funcs` ([`asserting`]) with a struct
-    /// stated for each of `classes`, the files under its `src` holding each
-    /// function by name, and its map.
+    /// What a test split wrote: its reply with the directory spelled
+    /// `<dir>`, each file under `src` with its text, and `MAP.tsv`.
+    type SplitOut = (String, std::collections::BTreeMap<String, String>, String);
+
+    /// Returns what a split of `funcs` ([`assembled`]) writes with a struct
+    /// stated for each of `classes`.
     ///
     /// # Arguments
     ///
     /// * `tag` - Names the split's directory apart from other tests'.
     /// * `funcs` - The functions and what their asserts cite.
+    /// * `signed` - The functions whose asserts pass their own signature.
     /// * `classes` - The classes the SDK knows.
     ///
     /// # Panics
@@ -1368,14 +1402,11 @@ mod tests {
     fn split_of(
         tag: &str,
         funcs: &[(&str, &[&str])],
+        signed: &[&str],
         classes: &[&str],
-    ) -> (
-        String,
-        std::collections::BTreeMap<String, Vec<String>>,
-        String,
-    ) {
+    ) -> SplitOut {
         use borer_engine::analysis::utypes::{UserStruct, UserType};
-        let (p, mut o) = asserting(funcs);
+        let (p, mut o) = assembled(funcs, signed);
         for c in classes {
             o.types.insert(
                 (*c).to_owned(),
@@ -1387,6 +1418,7 @@ mod tests {
         }
         let a = Analysis::compute(&p);
         let dir = std::env::temp_dir().join(format!("borer-split-{tag}-{}", std::process::id()));
+        let shown = borer_engine::text::short_path(&dir.display().to_string());
         let said = super::write_split(
             &p,
             &a,
@@ -1396,64 +1428,75 @@ mod tests {
             &dir.display().to_string(),
         )
         .expect("writes")
-        .replace(
-            &borer_engine::text::short_path(&dir.display().to_string()),
-            "<dir>",
-        );
+        .replace(&shown, "<dir>");
         let read = |rel: &str| std::fs::read_to_string(dir.join(rel)).unwrap_or_default();
-        let mut holding = std::collections::BTreeMap::new();
-        for unit in walk(&dir.join("src")) {
-            let text = read(&format!("src/{unit}"));
-            for (name, _) in funcs {
-                if text.contains(&format!("// {name} @ ")) {
-                    holding
-                        .entry((*name).to_owned())
-                        .or_insert_with(Vec::new)
-                        .push(unit.clone());
-                }
-            }
-        }
+        let units = walk(&dir.join("src"))
+            .into_iter()
+            .map(|u| (u.clone(), read(&format!("src/{u}"))))
+            .collect();
         let map = read("MAP.tsv");
         std::fs::remove_dir_all(&dir).expect("cleans up");
-        (said, holding, map)
+        (said, units, map)
+    }
+
+    /// Returns the files of a split holding a function.
+    ///
+    /// # Arguments
+    ///
+    /// * `units` - Each file with its text.
+    /// * `name` - The function.
+    fn holding(units: &std::collections::BTreeMap<String, String>, name: &str) -> Vec<String> {
+        units
+            .iter()
+            .filter(|(_, text)| text.contains(&format!("// {name} @ ")))
+            .map(|(u, _)| u.clone())
+            .collect()
     }
 
     /// A method whose asserts cite nothing is filed under the one source
-    /// file its class's other methods cite, saying it was filed by class.
+    /// file two of its class's methods cite in their own asserts.
     ///
-    /// The reply and the map say so; a class citing two files, and a free
-    /// function in a namespace citing one, file nothing by class.
+    /// The reply and the map say it was filed by class and on how many
+    /// witnesses; a class whose methods cite
+    /// two files, and one with a single witness, file nothing by class.
     ///
-    /// `C::a` cites `src/c.cpp` and `C::b` nothing; `D::x` cites
-    /// `src/d1.cpp`, `D::y` `src/d2.cpp` and `D::z` nothing; `net::send`
-    /// cites `src/net.cpp` and `net::recv` nothing, `net` being no class.
+    /// `C::a` and `C::b` cite `src/c.cpp` in their own asserts, `C::c`
+    /// nothing; `D::x` cites `src/d1.cpp`, `D::y` `src/d2.cpp` and `D::z`
+    /// nothing; `One::a` cites `src/one.cpp` and `One::b` nothing.
     ///
     /// # Panics
     ///
     /// When a function is filed elsewhere or the reply or map differ.
     #[test]
     fn a_method_citing_nothing_is_filed_by_its_class_and_says_so() {
-        let (said, holding, map) = split_of(
+        let signed = ["C::a", "C::b", "D::x", "D::y", "One::a"];
+        let (said, units, map) = split_of(
             "class",
             &[
                 ("C::a", &["src/c.cpp"]),
-                ("C::b", &[]),
+                ("C::b", &["src/c.cpp"]),
+                ("C::c", &[]),
                 ("D::x", &["src/d1.cpp"]),
                 ("D::y", &["src/d2.cpp"]),
                 ("D::z", &[]),
-                ("net::send", &["src/net.cpp"]),
-                ("net::recv", &[]),
+                ("One::a", &["src/one.cpp"]),
+                ("One::b", &[]),
             ],
-            &["C", "D"],
+            &signed,
+            &["C", "D", "One"],
         );
         assert_eq!(
             said,
-            "wrote 8 functions under <dir>/src: 5 to 4 source files (4 by the paths they reference, 1 by their class, citing none: the one file its other methods cite) and 3 to _unattributed.c (3 cite no source file); 2 class headers under <dir>/include and <dir>/MAP.tsv"
+            "wrote 9 functions under <dir>/src: 6 to 4 source files (5 by the paths they reference, 1 by their class, citing none: at least 2 methods of each such class cite its file in their own asserts and none cites another, each class's count in MAP.tsv) and 3 to _unattributed.c (3 cite no source file); 3 class headers under <dir>/include and <dir>/MAP.tsv"
         );
-        let at = |name: &str| holding.get(name).cloned().unwrap_or_default();
-        assert_eq!(at("C::b"), vec!["c.cpp.c"], "{holding:?}");
-        assert_eq!(at("D::z"), vec!["_unattributed.c"], "{holding:?}");
-        assert_eq!(at("net::recv"), vec!["_unattributed.c"], "{holding:?}");
+        assert_eq!(holding(&units, "C::c"), vec!["c.cpp.c"], "{units:?}");
+        for unfiled in ["D::z", "One::b"] {
+            assert_eq!(
+                holding(&units, unfiled),
+                vec!["_unattributed.c"],
+                "{units:?}"
+            );
+        }
         let row = |class: &str| {
             map.lines()
                 .find(|l| l.starts_with(&format!("{class}\t")))
@@ -1462,7 +1505,7 @@ mod tests {
         };
         assert_eq!(
             row("C"),
-            "src/c.cpp\t1 of 2 exported methods filed under it; 1 of 2 filed under it by their class, citing no source file themselves",
+            "src/c.cpp\t2 of 3 exported methods filed under it; 1 of 3 filed under it by their class, citing none themselves: 2 methods of 3 cite it in their own asserts",
             "{map}"
         );
         assert_eq!(
@@ -1472,23 +1515,55 @@ mod tests {
         );
     }
 
-    /// A method whose class's methods cite only a header is not filed by
-    /// its class: a header's code is inlined wherever it is used.
+    /// A class files nothing by class on paths its methods reference
+    /// beside no signature of their own, on a header, or in an anonymous
+    /// namespace, where two classes of two files read as one.
     ///
-    /// `H::a` cites `inc/h.h`; `H::b` cites nothing.
+    /// `Foo::Tick` and `Foo::Tock` load `src/physics.cpp` with no signature
+    /// (an inlined assert, a file name), `Foo::a` cites nothing; `H::a` and
+    /// `H::b` cite `inc/h.h` in their own asserts, `H::c` nothing; two
+    /// methods of `(anonymous namespace)::Impl` cite `src/a.cpp` in their
+    /// own asserts and a third nothing.
     ///
     /// # Panics
     ///
-    /// When `H::b` is filed under the header.
+    /// When `Foo::a`, `H::c` or the third `Impl` method is filed by class.
     #[test]
-    fn a_class_citing_only_a_header_files_nothing_by_class() {
-        let (said, holding, _) =
-            split_of("header", &[("H::a", &["inc/h.h"]), ("H::b", &[])], &["H"]);
-        assert_eq!(
-            holding.get("H::b").cloned().unwrap_or_default(),
-            vec!["_unattributed.c"],
-            "{holding:?}"
+    fn a_class_without_two_own_witnesses_of_a_source_files_nothing_by_class() {
+        let anon = "(anonymous namespace)::Impl";
+        let (x, y, z) = (
+            format!("{anon}::x"),
+            format!("{anon}::y"),
+            format!("{anon}::z"),
         );
+        let (said, units, _) = split_of(
+            "unwitnessed",
+            &[
+                ("Foo::Tick", &["src/physics.cpp"]),
+                ("Foo::Tock", &["src/physics.cpp"]),
+                ("Foo::a", &[]),
+                ("H::a", &["inc/h.h"]),
+                ("H::b", &["inc/h.h"]),
+                ("H::c", &[]),
+            ],
+            &["H::a", "H::b"],
+            &["Foo", "H"],
+        );
+        for unfiled in ["Foo::a", "H::c"] {
+            assert_eq!(
+                holding(&units, unfiled),
+                vec!["_unattributed.c"],
+                "{units:?}"
+            );
+        }
+        assert!(!said.contains("by their class"), "{said}");
+        let (said, units, _) = split_of(
+            "anonymous",
+            &[(&x, &["src/a.cpp"]), (&y, &["src/a.cpp"]), (&z, &[])],
+            &[&x, &y],
+            &[anon],
+        );
+        assert_eq!(holding(&units, &z), vec!["_unattributed.c"], "{units:?}");
         assert!(!said.contains("by their class"), "{said}");
     }
 
@@ -1611,10 +1686,16 @@ mod tests {
     #[test]
     fn the_split_tally_counts_filing_by_class_apart() {
         use borer_engine::analysis::decompile::export::Written;
-        use borer_engine::analysis::split::Filed;
+        use borer_engine::analysis::split::{ByClass, Filed};
         let mut tally = super::Tally::default();
-        for written in [Written::Body, Written::Failed, Written::Cut] {
-            assert_eq!(tally.count(Filed::Class("a.cpp"), written), Some("a.cpp"));
+        for (written, cite) in [(Written::Body, 3), (Written::Failed, 2), (Written::Cut, 4)] {
+            let by = ByClass {
+                path: "a.cpp",
+                class: "A",
+                cite,
+                methods: 9,
+            };
+            assert_eq!(tally.count(Filed::Class(by), written), Some("a.cpp"));
         }
         tally.count(Filed::Source("a.cpp"), Written::Body);
         tally.count(Filed::Nothing, Written::Body);
@@ -1625,7 +1706,7 @@ mod tests {
         );
         assert_eq!(
             tally.said("d", 1, &headers),
-            "wrote 5 functions under d/src: 4 to 1 source files (1 by the paths they reference, 3 by their class, citing none: the one file its other methods cite; 2 of those did not decompile or were cut for size) and 1 to _unattributed.c (1 cite no source file); 0 class headers under d/include and d/MAP.tsv"
+            "wrote 5 functions under d/src: 4 to 1 source files (1 by the paths they reference, 3 by their class, citing none: at least 2 methods of each such class cite its file in their own asserts and none cites another, each class's count in MAP.tsv; 2 of those did not decompile or were cut for size) and 1 to _unattributed.c (1 cite no source file); 0 class headers under d/include and d/MAP.tsv"
         );
     }
 

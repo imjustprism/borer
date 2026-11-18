@@ -181,26 +181,33 @@ pub(crate) fn assert_conditions(
         })
 }
 
-/// Reads the conditions [`assert_conditions`] keeps.
+/// What a literal a function references is to an assert call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    /// A source path ([`is_source_path`]).
+    Path,
+    /// A function signature ([`naming::is_signature`]).
+    Signature,
+    /// Text no longer than [`MEMBER_STRING_CAP`]: maybe a condition.
+    Condition,
+    /// Anything else.
+    Other,
+}
+
+/// One literal a function references: the referencing site, the literal's
+/// address and its [`Role`].
+type Literal = (u64, u64, Role);
+
+/// Returns the literals a function references in data, by site, each with
+/// its [`Role`].
 ///
 /// # Arguments
 ///
 /// * `program` - The loaded image, read for the strings.
 /// * `analysis` - Cross-references.
 /// * `entry` - The function.
-fn read_assert_conditions(
-    program: &Program,
-    analysis: &Analysis,
-    entry: u64,
-) -> BTreeMap<u64, String> {
-    #[derive(Clone, Copy, PartialEq)]
-    enum Role {
-        Path,
-        Signature,
-        Condition,
-        Other,
-    }
-    let literals: Vec<(u64, u64, Role)> = analysis
+fn assert_literals(program: &Program, analysis: &Analysis, entry: u64) -> Vec<Literal> {
+    analysis
         .refs_from(entry)
         .into_iter()
         .filter(|(t, _)| program.section_at(*t).is_some_and(|s| !s.executable))
@@ -217,24 +224,90 @@ fn read_assert_conditions(
             };
             Some((site.va, t, role))
         })
-        .collect();
-    let near = |va: u64, role: Role| {
-        let from = literals.partition_point(|l| l.0 < va.saturating_sub(ASSERT_CALL_SPAN));
-        literals
-            .iter()
-            .skip(from)
-            .take_while(|l| l.0 <= va.saturating_add(ASSERT_CALL_SPAN))
-            .any(|l| l.2 == role)
-    };
+        .collect()
+}
+
+/// Returns the literals of a role referenced within [`ASSERT_CALL_SPAN`]
+/// bytes of a site: the arguments one reporter call sets up.
+///
+/// # Arguments
+///
+/// * `literals` - A function's literals by site ([`assert_literals`]).
+/// * `va` - The site.
+/// * `role` - The role wanted.
+fn near(literals: &[Literal], va: u64, role: Role) -> impl Iterator<Item = &Literal> {
+    let from = literals.partition_point(|l| l.0 < va.saturating_sub(ASSERT_CALL_SPAN));
     literals
         .iter()
-        .filter(|l| l.2 == Role::Condition && near(l.0, Role::Path) && near(l.0, Role::Signature))
+        .skip(from)
+        .take_while(move |l| l.0 <= va.saturating_add(ASSERT_CALL_SPAN))
+        .filter(move |l| l.2 == role)
+}
+
+/// Reads the conditions [`assert_conditions`] keeps.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image, read for the strings.
+/// * `analysis` - Cross-references.
+/// * `entry` - The function.
+fn read_assert_conditions(
+    program: &Program,
+    analysis: &Analysis,
+    entry: u64,
+) -> BTreeMap<u64, String> {
+    let literals = assert_literals(program, analysis, entry);
+    let beside = |va: u64, role: Role| near(&literals, va, role).next().is_some();
+    literals
+        .iter()
+        .filter(|l| {
+            l.2 == Role::Condition && beside(l.0, Role::Path) && beside(l.0, Role::Signature)
+        })
         .filter_map(|l| {
             Some((
                 l.1,
                 crate::strings::cstr_at(program, l.1, PRINTABLE_MIN, MEMBER_STRING_CAP)?.1,
             ))
         })
+        .collect()
+}
+
+/// Returns the source paths a function's own asserts cite, read from its
+/// bytes.
+///
+/// An own assert passes a source path within [`ASSERT_CALL_SPAN`] bytes of
+/// a signature naming the function itself, the test the decompiler shows
+/// as a bare `__FUNCSIG__`; a path beside another function's signature
+/// came with code inlined from it, and a path beside none may be any
+/// literal.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image, read for the strings.
+/// * `analysis` - Cross-references.
+/// * `entry` - The function.
+/// * `own` - The function's name.
+///
+/// # Returns
+///
+/// The paths, separators read as `/`, in byte order, each once.
+pub(crate) fn own_assert_paths(
+    program: &Program,
+    analysis: &Analysis,
+    entry: u64,
+    own: &str,
+) -> BTreeSet<String> {
+    let literals = assert_literals(program, analysis, entry);
+    let names_own = |l: &Literal| {
+        crate::strings::cstr_at(program, l.1, PRINTABLE_MIN, SIGNATURE_CAP)
+            .and_then(|(_, text)| naming::parse_signature(&text))
+            .is_some_and(|sig| sig.name == own)
+    };
+    literals
+        .iter()
+        .filter(|l| l.2 == Role::Path && near(&literals, l.0, Role::Signature).any(names_own))
+        .filter_map(|l| crate::strings::cstr_at(program, l.1, PRINTABLE_MIN, SIGNATURE_CAP))
+        .map(|(_, text)| crate::analysis::render::slashed(&text))
         .collect()
 }
 
