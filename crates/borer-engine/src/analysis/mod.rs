@@ -56,6 +56,7 @@ pub mod senders;
 pub mod settable;
 pub mod sigs;
 pub mod snapshot;
+pub mod split;
 pub mod stated;
 pub mod stats;
 mod stripes;

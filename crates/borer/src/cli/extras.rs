@@ -98,10 +98,27 @@ impl Extra {
 /// a write that fails.
 pub(super) fn export(args: &[String], s: &Session) -> anyhow::Result<()> {
     let asked = super::args::export_args(args)?;
-    for out in asked.c.iter().chain(asked.mods.iter().map(|(_, out)| out)) {
+    for out in asked
+        .c
+        .iter()
+        .chain(asked.mods.iter().map(|(_, out)| out))
+        .chain(&asked.split)
+    {
         super::packs::writable(out)?;
     }
     let mut a = s.analysis(Feature::Decompile)?;
+    if let Some(dir) = asked.split {
+        let said = borer::export::write_split(
+            &s.program,
+            &a,
+            &s.overlay,
+            asked.library,
+            asked.only.as_deref(),
+            dir,
+        )?;
+        println!("{said}");
+        return Ok(());
+    }
     let replace = borer::output::Existing::Replace;
     if !asked.mods.is_empty() {
         let said =

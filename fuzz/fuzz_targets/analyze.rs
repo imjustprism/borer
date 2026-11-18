@@ -13,12 +13,13 @@
 
 #![no_main]
 
-use borer_engine::analysis::decompile::decompile;
 use borer_engine::analysis::decompile::view::view_of;
+use borer_engine::analysis::decompile::{decompile, unit_of};
 use borer_engine::analysis::render::{
     Bytes, Dir, Level, Walk, asserted_fields_tsv, band, call_children, callgraph, cfg,
-    disasm_function_with, disasm_view, linear, next_steps, propose, triage,
+    disasm_function_with, disasm_view, linear, next_steps, propose, source_tree_tsv, triage,
 };
+use borer_engine::analysis::split::unit_files;
 use borer_engine::analysis::stats::stats_tsv;
 use borer_engine::analysis::utypes::{type_detail, type_rows};
 use borer_engine::analysis::{Analysis, Overlay};
@@ -73,6 +74,7 @@ fuzz_target!(|data: &[u8]| {
         }
         if let Some(text) = decompile(&program, &analysis, &overlay, f.entry) {
             _ = view_of(&program, &analysis, &overlay, f.entry, &text);
+            _ = unit_of(&text);
         }
         _ = propose(&program, &analysis, &overlay, &format!("{:#x}", f.entry));
     }
@@ -122,6 +124,8 @@ fuzz_target!(|data: &[u8]| {
         _ = managed::detail(&program, &analysis, m.token, 0);
     }
     _ = asserted_fields_tsv(&program, &analysis, &overlay, "");
+    _ = source_tree_tsv(&program, &analysis, &overlay, ".");
+    _ = unit_files(&program, &analysis);
     _ = markers_tsv(&program, &analysis, "");
     _ = managed::methods_tsv(&program, &analysis, "");
     for spec in [

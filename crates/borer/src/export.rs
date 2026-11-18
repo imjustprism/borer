@@ -6,7 +6,7 @@
 //! are rendered, and the file is then written as the hoisted declarations
 //! followed by that part, so memory never holds the file.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::Path;
@@ -17,7 +17,7 @@ use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::program::Program;
 use borer_engine::text::short_path;
 
-use crate::output::{Existing, create};
+use crate::output::{Existing, append, create};
 
 /// What an export wrote.
 #[derive(Debug)]
@@ -379,6 +379,206 @@ pub fn write_mod_files(
     Ok(lines)
 }
 
+/// Bytes a split holds before it appends what it holds to its files.
+const SPLIT_BUFFER: usize = 32 << 20;
+
+/// The C files of a split being written: the text each holds that is not
+/// on disk yet.
+struct Units<'a> {
+    /// The `src` directory the files go under.
+    dir: &'a Path,
+    /// Text by file, relative to `dir`.
+    held: BTreeMap<String, String>,
+    /// The files created so far.
+    made: BTreeSet<String>,
+    /// Bytes held.
+    bytes: usize,
+}
+
+impl Units<'_> {
+    /// Adds a function's text to a file, writing every file out once
+    /// [`SPLIT_BUFFER`] bytes are held.
+    ///
+    /// # Arguments
+    ///
+    /// * `file` - The file, relative to the `src` directory.
+    /// * `text` - The text.
+    ///
+    /// # Errors
+    ///
+    /// When a write fails.
+    fn add(&mut self, file: &str, text: &str) -> anyhow::Result<()> {
+        self.bytes = self.bytes.saturating_add(text.len());
+        self.held.entry(file.to_owned()).or_default().push_str(text);
+        if self.bytes > SPLIT_BUFFER {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    /// Writes out every file's held text: a file's first write creates it
+    /// with its prologue, a later one appends.
+    ///
+    /// # Errors
+    ///
+    /// When a directory or file cannot be created, or a write fails.
+    fn flush(&mut self) -> anyhow::Result<()> {
+        use borer_engine::analysis::split::unit_prologue;
+        for (file, text) in std::mem::take(&mut self.held) {
+            let path = self.dir.join(&file);
+            let shown = short_path(&path.display().to_string());
+            let mut out = if self.made.insert(file.clone()) {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)
+                        .with_context(|| format!("creating the directory of {shown}"))?;
+                }
+                let mut f = create(&path, Existing::Replace)
+                    .with_context(|| format!("creating {shown}"))?;
+                f.write_all(unit_prologue(&file).as_bytes())
+                    .with_context(|| format!("writing {shown}"))?;
+                f
+            } else {
+                append(&path).with_context(|| format!("appending to {shown}"))?
+            };
+            out.write_all(text.as_bytes())
+                .with_context(|| format!("writing {shown}"))?;
+        }
+        self.bytes = 0;
+        Ok(())
+    }
+}
+
+/// Writes one file of a split whole, replacing what is there.
+///
+/// # Arguments
+///
+/// * `path` - The file.
+/// * `text` - Its text.
+///
+/// # Errors
+///
+/// When the file cannot be created or written.
+fn write_whole(path: &Path, text: &str) -> anyhow::Result<()> {
+    let shown = short_path(&path.display().to_string());
+    create(path, Existing::Replace)
+        .with_context(|| format!("creating {shown}"))?
+        .write_all(text.as_bytes())
+        .with_context(|| format!("writing {shown}"))
+}
+
+/// Writes the export split per source file and per class into `dir`.
+///
+/// The C goes to `src/`: one file per source file the functions' asserts
+/// cite ([`borer_engine::analysis::decompile::unit_of`]), named after it
+/// ([`borer_engine::analysis::split::unit_files`]), the functions whose
+/// asserts cite none to `src/_unattributed.c`, and the hoisted
+/// declarations every file includes to `src/_decls.h`. The mod SDK goes
+/// to `include/`: one header per class and `include/_sdk.h` they include
+/// ([`borer_engine::analysis::modsdk::header::class_headers`]). `MAP.tsv`
+/// lists each class's header, its source file and the evidence
+/// ([`borer_engine::analysis::split::split_map`]). Text is held in memory
+/// up to [`SPLIT_BUFFER`] bytes, then appended, so memory never holds the
+/// export.
+///
+/// # Arguments
+///
+/// * `program` - The loaded binary.
+/// * `analysis` - Its analysis.
+/// * `overlay` - Names, types and comments to apply.
+/// * `library` - Whether library code is written.
+/// * `only` - Entries to write, or every function when `None`.
+/// * `dir` - The directory; created when missing, files in it replaced.
+///
+/// # Returns
+///
+/// One line saying what was written.
+///
+/// # Errors
+///
+/// When the path is unusable, a directory or file cannot be created or
+/// written, or the request's deadline passed while the functions were
+/// decompiled; the files written before stay, partial, and the error says
+/// so.
+pub fn write_split(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    library: Library,
+    only: Option<&[u64]>,
+    dir: &str,
+) -> anyhow::Result<String> {
+    use borer_engine::analysis::decompile::export::export_units;
+    use borer_engine::analysis::{modsdk, split};
+    let root = Path::new(dir);
+    if let Some(why) = borer_engine::program::unusable_path(root) {
+        anyhow::bail!("{why}; nothing was written");
+    }
+    let shown = short_path(dir);
+    let (src, include) = (root.join("src"), root.join("include"));
+    for d in [&src, &include] {
+        std::fs::create_dir_all(d).with_context(|| format!("creating {}", d.display()))?;
+    }
+    let files = split::unit_files(program, analysis);
+    let set = only.map(|e| e.iter().copied().collect::<BTreeSet<u64>>());
+    let mut units = Units {
+        dir: &src,
+        held: BTreeMap::new(),
+        made: BTreeSet::new(),
+        bytes: 0,
+    };
+    let mut cited: BTreeMap<u64, String> = BTreeMap::new();
+    let mut left = 0usize;
+    let hoisted = export_units(
+        program,
+        analysis,
+        overlay,
+        library,
+        set.as_ref(),
+        &mut |entry, unit, text| {
+            let file = unit.and_then(|u| files.get(u)).map_or_else(
+                || {
+                    left += 1;
+                    split::REMAINDER
+                },
+                String::as_str,
+            );
+            if let Some(u) = unit {
+                cited.insert(entry, u.to_owned());
+            }
+            units.add(file, text)
+        },
+    )?;
+    units.flush()?;
+    if borer_engine::cancel::Cancel::raised() {
+        anyhow::bail!(
+            "the request's deadline passed before every function was decompiled, so the files under {shown} are partial; export fewer functions (--only) or raise BORER_DEADLINE_SECS"
+        );
+    }
+    let binary = short_path(&program.path.display().to_string());
+    write_whole(&src.join(split::DECLS), &hoisted.head(&binary))?;
+    let sdk = modsdk::build(program, analysis, overlay);
+    let (common, headers) = modsdk::header::class_headers(&sdk);
+    write_whole(&include.join(split::SDK_HEADER), &common)?;
+    for (_, file, text) in &headers {
+        write_whole(&include.join(file), text)?;
+    }
+    let named: Vec<(&str, &str)> = headers
+        .iter()
+        .map(|(class, file, _)| (class.as_str(), file.as_str()))
+        .collect();
+    write_whole(
+        &root.join("MAP.tsv"),
+        &split::split_map(analysis, overlay, &sdk, &named, &cited),
+    )?;
+    Ok(format!(
+        "wrote {} functions to {} source files under {shown}/src ({left} whose asserts cite no source file in {}), {} class headers under {shown}/include and {shown}/MAP.tsv",
+        hoisted.written,
+        units.made.len(),
+        split::REMAINDER,
+        headers.len()
+    ))
+}
+
 #[cfg(test)]
 #[expect(clippy::disallowed_methods, reason = "the tests read their own files")]
 mod tests {
@@ -732,5 +932,90 @@ mod tests {
                 eprintln!("no C++ compiler runs here; the header was checked for its asserts only");
             }
         }
+    }
+
+    /// The split files a function by the source file its assert cites, the
+    /// rest apart, and writes the declarations, the SDK header and the map.
+    ///
+    /// `main` calls `check`, whose assert cites `src/a.cpp`, and `one`,
+    /// which asserts nothing.
+    ///
+    /// # Panics
+    ///
+    /// When a file is missing or holds the wrong function.
+    #[test]
+    fn the_split_files_a_function_by_the_source_its_assert_cites() {
+        use borer_engine::program::{Symbol, SymbolKind};
+        let mut bytes = vec![0xccu8; 0x2000];
+        let rel = |at: u64, to: u64| borer_engine::num::lo32(to.wrapping_sub(at)).to_le_bytes();
+        let mut code = vec![0x48, 0x8d, 0x0d]; // ASM: lea rcx, [rip+expr]
+        code.extend(rel(0x1007, 0x2030));
+        code.extend([0x48, 0x8d, 0x15]); // ASM: lea rdx, [rip+path]
+        code.extend(rel(0x100e, 0x2010));
+        code.extend([0x41, 0xb8, 0x07, 0, 0, 0]); // ASM: mov r8d, 7
+        code.extend([0xff, 0x15]); // ASM: call qword [rip+iat]
+        code.extend(rel(0x101a, 0x2000));
+        code.push(0xc3); // ASM: ret
+        bytes[..code.len()].copy_from_slice(&code);
+        bytes[0x20..0x26].copy_from_slice(&[0xb8, 0x01, 0, 0, 0, 0xc3]); // ASM: mov eax, 1; ret
+        let mut main = vec![0xe8]; // ASM: call check
+        main.extend(rel(0x1045, 0x1000));
+        main.push(0xe8); // ASM: call one
+        main.extend(rel(0x104a, 0x1020));
+        main.push(0xc3); // ASM: ret
+        bytes[0x40..0x40 + main.len()].copy_from_slice(&main);
+        bytes[0x1010..0x101a].copy_from_slice(b"src/a.cpp\0");
+        bytes[0x1030..0x1036].copy_from_slice(b"x > 0\0");
+        let mut p = Program::raw(
+            bytes,
+            Arch::X86_64,
+            0,
+            Some(0x1040),
+            vec![
+                Section::mapped(".text", 0x1000, 0, 0x1000, false, true),
+                Section::mapped(".rdata", 0x2000, 0x1000, 0x1000, false, false),
+            ],
+        );
+        p.symbols.push(Symbol {
+            name: "KERNEL32.dll!ReportAssertFailure".to_owned(),
+            addr: 0x2000,
+            kind: SymbolKind::Import,
+        });
+        let a = Analysis::compute(&p);
+        let mut o = Overlay::default();
+        o.names.insert(0x1000, "check".to_owned());
+        o.names.insert(0x1020, "one".to_owned());
+        let typed =
+            borer_engine::analysis::protos::Proto::parse("int one(int count)").expect("parses");
+        o.prototypes.insert(0x1020, typed);
+        let dir = std::env::temp_dir().join(format!("borer-split-{}", std::process::id()));
+        let said = super::write_split(
+            &p,
+            &a,
+            &o,
+            Library::Include,
+            None,
+            &dir.display().to_string(),
+        )
+        .expect("writes");
+        assert!(said.contains("source files under"), "{said}");
+        let read = |rel: &str| std::fs::read_to_string(dir.join(rel)).unwrap_or_default();
+        let unit = read("src/a.cpp.c");
+        assert!(unit.contains("#include \"_decls.h\""), "{unit}");
+        assert!(unit.contains("// check @ 0x1000"), "{unit}");
+        assert!(!unit.contains("// one @"), "{unit}");
+        let rest = read("src/_unattributed.c");
+        assert!(
+            rest.contains("// one @ 0x1020") && !rest.contains("// check @"),
+            "{rest}"
+        );
+        assert!(
+            rest.contains("one(int count)") || read("src/_decls.h").contains("one(int count)"),
+            "the project's typed prototype is in the C: {rest}"
+        );
+        assert!(read("src/_decls.h").contains("functions decompiled by borer"));
+        assert!(read("include/_sdk.h").contains("namespace sdk"));
+        assert!(read("MAP.tsv").contains("# class\theader\tsource\tevidence"));
+        std::fs::remove_dir_all(&dir).expect("cleans up");
     }
 }

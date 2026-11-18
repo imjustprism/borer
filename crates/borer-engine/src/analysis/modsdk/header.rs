@@ -35,16 +35,7 @@ struct Names {
 #[must_use]
 pub fn header(sdk: &Sdk) -> String {
     let names = names(sdk);
-    let mut out = prelude(sdk);
-    for c in &sdk.classes {
-        if super::full(&out) {
-            break;
-        }
-        let _ = writeln!(out, "struct {};", names.structs[&c.name]);
-        if c.vtable.is_some() {
-            let _ = writeln!(out, "struct {};", names.vtables[&c.name]);
-        }
-    }
+    let mut out = declarations(sdk, &names);
     out.push_str("\n#pragma pack(push, 1)\n");
     for c in &sdk.classes {
         if super::full(&out) {
@@ -57,6 +48,74 @@ pub fn header(sdk: &Sdk) -> String {
     out.push_str("\n#pragma pack(pop)\n");
     addresses(&mut out, sdk, &names);
     out.push_str("\n} // namespace sdk\n");
+    out
+}
+
+/// Returns the mod SDK split per class: a header the classes share and
+/// one header per class.
+///
+/// The shared header, [`crate::analysis::split::SDK_HEADER`], is
+/// [`header`]'s opening, forward declarations and addresses; each class's
+/// header includes it and holds the class's vtable struct and packed
+/// struct, so a mod includes only the classes it touches. The classes
+/// stop once their text passes [`super::FILE_MAX`] bytes, as the single
+/// header's do.
+///
+/// # Arguments
+///
+/// * `sdk` - What [`super::build`] gathered.
+///
+/// # Returns
+///
+/// The shared header's text, and each class's name, header file
+/// ([`crate::analysis::split::header_file`]) and text, in the SDK's order.
+#[must_use]
+pub fn class_headers(sdk: &Sdk) -> (String, Vec<(String, String, String)>) {
+    use crate::analysis::split::{SDK_HEADER, header_file};
+    let names = names(sdk);
+    let mut shared = declarations(sdk, &names);
+    addresses(&mut shared, sdk, &names);
+    shared.push_str("\n} // namespace sdk\n");
+    let mut taken = std::collections::BTreeSet::new();
+    let mut classes = Vec::new();
+    let mut bytes = 0usize;
+    for c in &sdk.classes {
+        let Some(id) = names.structs.get(&c.name) else {
+            continue;
+        };
+        if bytes > super::FILE_MAX || crate::cancel::Cancel::raised() {
+            break;
+        }
+        let text = format!(
+            "/* {}: one class of the mod SDK borer recovered; {SDK_HEADER} holds the declarations and addresses. */\n#pragma once\n#include \"{SDK_HEADER}\"\n\nnamespace sdk {{\n\n#pragma pack(push, 1)\n{}{}#pragma pack(pop)\n\n}} // namespace sdk\n",
+            comment(&c.name),
+            vtable_struct(sdk, c, &names),
+            class_struct(sdk, c, &names)
+        );
+        bytes = bytes.saturating_add(text.len());
+        classes.push((c.name.clone(), header_file(&mut taken, id), text));
+    }
+    (shared, classes)
+}
+
+/// Returns the header's opening ([`prelude`]) and a forward declaration of
+/// every class and vtable struct.
+///
+/// # Arguments
+///
+/// * `sdk` - The classes.
+/// * `names` - The identifiers.
+fn declarations(sdk: &Sdk, names: &Names) -> String {
+    let mut out = prelude(sdk);
+    for c in &sdk.classes {
+        if super::full(&out) {
+            break;
+        }
+        let _ = writeln!(out, "struct {};", names.structs[&c.name]);
+        if c.vtable.is_some() {
+            let _ = writeln!(out, "struct {};", names.vtables[&c.name]);
+        }
+    }
     out
 }
 

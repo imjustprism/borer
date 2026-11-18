@@ -289,6 +289,38 @@ pub fn create(path: &Path, existing: Existing) -> std::io::Result<std::fs::File>
     options.open(path)
 }
 
+/// Opens a regular file for appending, never through a link.
+///
+/// # Arguments
+///
+/// * `path` - The file, which must be there.
+///
+/// # Returns
+///
+/// The file, open to append.
+///
+/// # Errors
+///
+/// When the path is unusable, nothing or something other than a regular
+/// file is there, or the open fails.
+pub fn append(path: &Path) -> std::io::Result<std::fs::File> {
+    if let Some(why) = borer_engine::program::unusable_path(path) {
+        return Err(std::io::Error::other(why));
+    }
+    #[expect(clippy::disallowed_methods, reason = "unusable_path cleared path")]
+    let meta = std::fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return Err(std::io::Error::other(
+            "a link or not a regular file is there",
+        ));
+    }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "unusable_path and symlink_metadata cleared path"
+    )]
+    std::fs::OpenOptions::new().append(true).open(path)
+}
+
 #[cfg(test)]
 #[expect(clippy::disallowed_methods, reason = "the tests read their own files")]
 mod tests {

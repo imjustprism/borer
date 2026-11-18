@@ -640,6 +640,56 @@ pub fn export(
     export_on(cores(), program, analysis, overlay, library, only, sink)
 }
 
+/// Exports every function as [`export`] does, but hands each function's
+/// definition to `sink` alone, with the source file its asserts cite
+/// ([`super::unit_of`]), so a writer can file it by source file.
+///
+/// # Arguments
+///
+/// * `program`, `analysis`, `overlay`, `library`, `only` - As for
+///   [`export`].
+/// * `sink` - Takes each function's entry, its source file (`None` when
+///   its asserts cite none) and its definition, in [`order`].
+///
+/// # Returns
+///
+/// The hoisted declarations and the counts.
+///
+/// # Errors
+///
+/// The first error `sink` returns, which stops the export.
+pub fn export_units(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    library: Library,
+    only: Option<&BTreeSet<u64>>,
+    sink: &mut UnitSink<'_>,
+) -> anyhow::Result<Hoisted> {
+    let mut each = |entry: u64, text: &str| sink(entry, super::unit_of(text).as_deref(), text);
+    export_with(
+        cores(),
+        program,
+        analysis,
+        overlay,
+        library,
+        only,
+        Sink::Functions(&mut each),
+    )
+}
+
+/// What [`export_units`] hands each function to: its entry, its source
+/// file and its definition.
+pub type UnitSink<'a> = dyn FnMut(u64, Option<&str>, &str) -> anyhow::Result<()> + 'a;
+
+/// Where an export's definitions go.
+enum Sink<'a> {
+    /// Runs of definitions about [`SINK_BYTES`] long.
+    Runs(&'a mut dyn FnMut(&str) -> anyhow::Result<()>),
+    /// Each function's definition alone, with its entry.
+    Functions(&'a mut dyn FnMut(u64, &str) -> anyhow::Result<()>),
+}
+
 /// Exports as [`export`] does, rendering on at most `cores` workers.
 ///
 /// # Arguments
@@ -663,6 +713,41 @@ fn export_on(
     library: Library,
     only: Option<&BTreeSet<u64>>,
     sink: &mut dyn FnMut(&str) -> anyhow::Result<()>,
+) -> anyhow::Result<Hoisted> {
+    export_with(
+        cores,
+        program,
+        analysis,
+        overlay,
+        library,
+        only,
+        Sink::Runs(sink),
+    )
+}
+
+/// Exports as [`export_on`] does, to a sink of runs or of functions.
+///
+/// # Arguments
+///
+/// * `cores`, `program`, `analysis`, `overlay`, `library`, `only` - As for
+///   [`export_on`].
+/// * `sink` - Where the definitions go.
+///
+/// # Returns
+///
+/// The hoisted declarations and the counts.
+///
+/// # Errors
+///
+/// The first error `sink` returns, which stops the export.
+fn export_with(
+    cores: usize,
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    library: Library,
+    only: Option<&BTreeSet<u64>>,
+    mut sink: Sink<'_>,
 ) -> anyhow::Result<Hoisted> {
     let mut entries = order(analysis, library);
     let left_out = analysis.functions.len().saturating_sub(entries.len());
@@ -711,14 +796,17 @@ fn export_on(
             Some(blocks) => hoisted.cut(&name, entry, blocks, &mut out),
             None => hoisted.add(&name, entry, text.as_deref(), &mut out),
         }
-        if out.len() < SINK_BYTES {
-            return Ok(());
+        match &mut sink {
+            Sink::Runs(_) if out.len() < SINK_BYTES => return Ok(()),
+            Sink::Runs(run) => run(&out)?,
+            Sink::Functions(each) => each(entry, &out)?,
         }
-        sink(&out)?;
         out.clear();
         Ok(())
     })?;
-    sink(&out)?;
+    if let Sink::Runs(run) = &mut sink {
+        run(&out)?;
+    }
     Ok(hoisted)
 }
 

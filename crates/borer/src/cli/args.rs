@@ -91,7 +91,7 @@ commands:
   pack <file>                              read a pack and report its name, its keys by section and what borer does not read
   pack-keys                                every key a pack can set, with its default and meaning
   packs <binary>                           the packs borer knows and whether each loads for the binary: the named ones, and every pack-directory pack whose [match] lines all hold
-  export <binary> [--c <out.c> [--library] [--only <addrs>]] [--h <out.h>] [--ct <out.ct>] [--rcnet <out.rcnet>]  --c: every function, or the comma-separated entries after --only, as one C file: the includes, each type, prototype, table and global once at the top, then every body leaves first; library functions (a signature named them) are left out unless --library; a function over 4096 basic blocks is written as a comment saying it was cut. --h, --ct, --rcnet: the mod SDK (vtable and RTTI classes with the fields their methods access, the overlay's structs, singletons, named globals and functions) as a C++ header with offset asserts and image-relative addresses, a Cheat Engine table of the globals and their fields, a ReClass.NET project of the layouts; each guessed field says it is unsure
+  export <binary> [--c <out.c> [--library] [--only <addrs>]] [--h <out.h>] [--ct <out.ct>] [--rcnet <out.rcnet>] | --split <dir>  --c: every function, or the comma-separated entries after --only, as one C file: the includes, each type, prototype, table and global once at the top, then every body leaves first; library functions (a signature named them) are left out unless --library; a function over 4096 basic blocks is written as a comment saying it was cut. --h, --ct, --rcnet: the mod SDK (vtable and RTTI classes with the fields their methods access, the overlay's structs, singletons, named globals and functions) as a C++ header with offset asserts and image-relative addresses, a Cheat Engine table of the globals and their fields, a ReClass.NET project of the layouts; each guessed field says it is unsure; --split <dir> [--library] [--only <addrs>]: the C as one file per source file its asserts cite (src/, the rest in src/_unattributed.c, sharing src/_decls.h), the mod SDK as one header per class (include/, sharing include/_sdk.h), and MAP.tsv: each class's header, the source file most of its methods' asserts cite, the evidence and counts
   export-pack <binary> <name> [project] [all]the names a project file gave (and with all, the names borer recovered) as a pack that finds the same functions in another build by their first bytes
   sigmake <out> <name> <library>...         the functions of static libraries or objects (.lib, .obj, .a, .o, Rust .rlib) as a pack of signatures, the relocated bytes masked, that names them in any program linked with them; an <out> ending in .bsig is a compact set like the ones borer ships
   script <binary> <file> [args...]           run a Rhai script in a sandbox: it reads functions, strings, bytes and xrefs, prints, and proposes names and comments; --save <project> writes them for export-pack
@@ -303,7 +303,7 @@ pub(super) enum Query {
     Hidden,
     /// `read <address|name> [kind] [count]`: typed values.
     Read,
-    /// `export [--c <out.c> [--library] [--only <addrs>]] [--h|--ct|--rcnet <out>]`: those functions, or every one, as one C file, leaves first; the mod SDK as a C++ header, Cheat Engine table or ReClass.NET project.
+    /// `export [--c <out.c> [--library] [--only <addrs>]] [--h|--ct|--rcnet <out>] | --split <dir>`: those functions, or every one, as one C file, leaves first; the mod SDK as a C++ header, Cheat Engine table or ReClass.NET project; or both split per source file and per class.
     Export,
     /// `export-pack <name> [project] [all]`: the names a project file gave as a pack that finds the same functions in another build.
     ExportPack,
@@ -672,13 +672,17 @@ pub(super) struct ExportArgs<'a> {
     pub(super) library: borer_engine::analysis::decompile::export::Library,
     /// The entries `--only` names; `None` writes every function.
     pub(super) only: Option<Vec<u64>>,
+    /// The directory `--split` writes one C file per source file and one
+    /// header per class into.
+    pub(super) split: Option<&'a str>,
 }
 
 /// Reads `export`'s arguments after the binary.
 ///
 /// They are `--c <out.c>` with `--library` to write library code too and
 /// `--only <addrs>` to write those entries, and the mod files
-/// `--h <out.h>`, `--ct <out.ct>` and `--rcnet <out.rcnet>`.
+/// `--h <out.h>`, `--ct <out.ct>` and `--rcnet <out.rcnet>`; or
+/// `--split <dir>` alone, with `--library` and `--only`.
 ///
 /// # Arguments
 ///
@@ -692,7 +696,8 @@ pub(super) struct ExportArgs<'a> {
 ///
 /// When no file is named, a file flag has no path after it, `--library`
 /// or `--only` comes without `--c`, `--only` has no address, an address
-/// does not parse, a word is none of these, or two flags name one file.
+/// does not parse, a word is none of these, two flags name one file, or
+/// `--split` comes with another file.
 pub(super) fn export_args(args: &[String]) -> anyhow::Result<ExportArgs<'_>> {
     use borer::export::ModFile;
     use borer_engine::analysis::decompile::export::Library;
@@ -701,6 +706,7 @@ pub(super) fn export_args(args: &[String]) -> anyhow::Result<ExportArgs<'_>> {
         mods: Vec::new(),
         library: Library::Skip,
         only: None,
+        split: None,
     };
     let mut rest = args.iter().skip(2);
     while let Some(word) = rest.next() {
@@ -716,15 +722,24 @@ pub(super) fn export_args(args: &[String]) -> anyhow::Result<ExportArgs<'_>> {
             "--library" => out.library = Library::Include,
             "--only" => out.only = Some(only_addrs(rest.next())?),
             "--c" => out.c = Some(file_after(rest.next(), flag)?),
+            "--split" => out.split = Some(file_after(rest.next(), flag)?),
             other => bail!(
-                "export takes --c <out.c> (with --library and --only <addrs>), --h <out.h>, --ct <out.ct> and --rcnet <out.rcnet>, not {}",
+                "export takes --c <out.c> (with --library and --only <addrs>), --h <out.h>, --ct <out.ct>, --rcnet <out.rcnet> and --split <dir>, not {}",
                 quoted(other)
             ),
         }
     }
+    if out.split.is_some() {
+        if out.c.is_some() || !out.mods.is_empty() {
+            bail!("--split writes the C files and the headers itself; name no other file with it");
+        }
+        return Ok(out);
+    }
     if out.c.is_none() {
         if out.mods.is_empty() {
-            bail!("export needs --c <out.c>, --h <out.h>, --ct <out.ct> or --rcnet <out.rcnet>");
+            bail!(
+                "export needs --c <out.c>, --h <out.h>, --ct <out.ct>, --rcnet <out.rcnet> or --split <dir>"
+            );
         }
         if out.only.is_some() || out.library == Library::Include {
             bail!("--library and --only choose what --c writes; name --c <out.c> with them");

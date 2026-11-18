@@ -767,24 +767,7 @@ pub(super) struct SourceFile {
 /// the lowest entry among them and the file, then the expressions section.
 pub fn source_tree_tsv(p: &Program, a: &Analysis, o: &Overlay, filter: &str) -> String {
     let want = filter.to_lowercase();
-    let mut files: BTreeMap<String, BTreeSet<u64>> = BTreeMap::new();
-    for (target, lit) in literal_targets(p, a).iter() {
-        let sites = a.xrefs_to(*target);
-        let Some(path) = lit.strip_prefix('"').and_then(|t| t.strip_suffix('"')) else {
-            continue;
-        };
-        if !crate::analysis::decompile::is_source_path(path) {
-            continue;
-        }
-        let entries: BTreeSet<u64> = sites.iter().filter_map(|s| s.from_entry).collect();
-        if entries.is_empty() {
-            continue;
-        }
-        files
-            .entry(path.replace('\\', "/"))
-            .or_default()
-            .extend(entries);
-    }
+    let files = cited_sources(p, a);
     let root = common_root(files.keys());
     let mut by_dir: BTreeMap<String, (usize, BTreeSet<u64>)> = BTreeMap::new();
     let mut rows: Vec<SourceFile> = Vec::new();
@@ -944,8 +927,47 @@ fn expressions_tsv(
         let expr = expr.replace(['\t', '\n', '\r'], " ");
         let _ = writeln!(out, "{sites}\t{}\t{file}\t{expr}", fns.len());
     }
-    more_line(&mut out, rows.len(), EXPRESSIONS_MAX, "expressions not listed");
+    more_line(
+        &mut out,
+        rows.len(),
+        EXPRESSIONS_MAX,
+        "expressions not listed",
+    );
     out
+}
+
+/// Returns the source paths the binary's literals name, each with the
+/// functions referencing it.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image, for reading the strings.
+/// * `a` - Cross-references and functions.
+///
+/// # Returns
+///
+/// The functions by path, separators normalized to `/`; a path nothing
+/// references from a function is left out.
+pub(crate) fn cited_sources(p: &Program, a: &Analysis) -> BTreeMap<String, BTreeSet<u64>> {
+    let mut files: BTreeMap<String, BTreeSet<u64>> = BTreeMap::new();
+    for (target, lit) in literal_targets(p, a).iter() {
+        let sites = a.xrefs_to(*target);
+        let Some(path) = lit.strip_prefix('"').and_then(|t| t.strip_suffix('"')) else {
+            continue;
+        };
+        if !crate::analysis::decompile::is_source_path(path) {
+            continue;
+        }
+        let entries: BTreeSet<u64> = sites.iter().filter_map(|s| s.from_entry).collect();
+        if entries.is_empty() {
+            continue;
+        }
+        files
+            .entry(path.replace('\\', "/"))
+            .or_default()
+            .extend(entries);
+    }
+    files
 }
 
 /// The build root most of the paths share.
@@ -962,7 +984,7 @@ fn expressions_tsv(
 /// # Returns
 ///
 /// The root with a trailing separator, or an empty string.
-pub(super) fn common_root<'a>(paths: impl Iterator<Item = &'a String>) -> String {
+pub(crate) fn common_root<'a>(paths: impl Iterator<Item = &'a String>) -> String {
     let dirs: Vec<Vec<&str>> = paths
         .filter_map(|p| p.rsplit_once('/'))
         .map(|(d, _)| d.split('/').collect())

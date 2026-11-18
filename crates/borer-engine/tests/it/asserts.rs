@@ -1011,3 +1011,40 @@ fn a_source_file_lists_its_assert_expressions_most_frequent_first() {
         "rows run from most to least frequent:\n{text}"
     );
 }
+
+/// The export split files each function by the source file its asserts
+/// cite, and `main`, which asserts nothing, by none.
+///
+/// Every method of [`widget`] cites `src/widget.cpp`; the split names its
+/// file after the path with the build root dropped.
+#[test]
+fn the_export_split_files_each_function_by_its_cited_source() {
+    use borer_engine::analysis::decompile::export::{Library, export_units};
+    use borer_engine::analysis::split::unit_files;
+    let p = widget();
+    let a = Analysis::compute(&p);
+    let mut units = std::collections::BTreeMap::new();
+    export_units(
+        &p,
+        &a,
+        &Overlay::default(),
+        Library::Include,
+        None,
+        &mut |entry, unit, text| {
+            assert!(!text.is_empty(), "{entry:#x} has a definition");
+            units.insert(entry, unit.map(str::to_owned));
+            Ok(())
+        },
+    )
+    .expect("the sink takes everything");
+    assert_eq!(units.get(&0x1000), Some(&None), "{units:?}");
+    let path = Some("src/widget.cpp".to_owned());
+    for (entry, ..) in METHODS {
+        assert_eq!(units.get(&entry), Some(&path), "{entry:#x}: {units:?}");
+    }
+    let files = unit_files(&p, &a);
+    assert_eq!(
+        files.get("src/widget.cpp").map(String::as_str),
+        Some("widget.cpp.c")
+    );
+}
