@@ -1,5 +1,6 @@
 //! Long string literals: an ordinary one stays cut at the 120 characters a
-//! literal shows, marked `...`; only a signature prints whole.
+//! literal shows, marked `...`; only a signature prints whole. Short ones:
+//! a code pointer is not a literal.
 
 use borer_engine::analysis::decompile::literal_at;
 use borer_engine::program::{Arch, Program, Section};
@@ -112,4 +113,42 @@ fn a_signature_past_the_scan_is_marked_cut() {
     );
     assert_eq!(sig.len(), 5000);
     assert!(shown(&sig).ends_with("...\""), "{}", shown(&sig));
+}
+
+/// Two read-only words holding one code pointer print as two addresses,
+/// not as the string their low bytes spell.
+///
+/// The pointer 0x140002760 is the bytes `60 27 00 40 01 00 00 00`, which
+/// read as `` "`'" ``: notepad stored two vtable slots that way and both
+/// printed as that one literal.
+#[test]
+fn a_word_pointing_into_code_is_not_a_short_literal() {
+    let code: &[u8] = &[
+        0x48, 0x8d, 0x05, 0xf9, 0x1f, 0x00, 0x00, // ASM: lea rax, [rip+0x1ff9] (0x140003000)
+        0x48, 0x89, 0x01, // ASM: mov [rcx], rax
+        0x48, 0x8d, 0x05, 0xf7, 0x1f, 0x00, 0x00, // ASM: lea rax, [rip+0x1ff7] (0x140003008)
+        0x48, 0x89, 0x41, 0x08, // ASM: mov [rcx+8], rax
+        0xc3, // ASM: ret
+    ];
+    let mut bytes = vec![0u8; 0x3000];
+    bytes[..code.len()].copy_from_slice(code);
+    let slot = 0x1_4000_2760u64.to_le_bytes();
+    bytes[0x2000..0x2008].copy_from_slice(&slot);
+    bytes[0x2008..0x2010].copy_from_slice(&slot);
+    let p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0x1_4000_0000,
+        Some(0x1_4000_1000),
+        vec![
+            Section::mapped(".text", 0x1_4000_1000, 0, 0x2000, false, true),
+            Section::mapped(".rdata", 0x1_4000_3000, 0x2000, 0x1000, false, false),
+        ],
+    );
+    let text = crate::decompiled::decompiled(&p, 0x1_4000_1000);
+    assert!(!text.contains("\"`'\""), "{text}");
+    assert!(
+        text.contains("140003000") && text.contains("140003008"),
+        "{text}"
+    );
 }

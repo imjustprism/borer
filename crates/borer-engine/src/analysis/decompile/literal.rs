@@ -143,7 +143,9 @@ fn string_at(program: &Program, addr: u64) -> Option<String> {
     {
         return None;
     }
-    if narrow.as_ref().is_some_and(|(len, _)| *len < MIN) && relative_table(program, addr) {
+    if narrow.as_ref().is_some_and(|(len, _)| *len < MIN)
+        && (relative_table(program, addr) || code_pointer(program, addr))
+    {
         return None;
     }
     let run = wide_run_start(program, addr)
@@ -265,6 +267,24 @@ fn relative_table(program: &Program, addr: u64) -> bool {
         }
     }
     hits >= 3
+}
+
+/// Whether `addr` holds a pointer-aligned word pointing into executable code.
+///
+/// A vtable slot or callback whose low bytes are printable and a zero
+/// (`60 27 00 40 01 00 00 00`, 0x140002760) otherwise reads as `` "`'" ``,
+/// the absolute twin of [`relative_table`].
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `addr` - Address of the candidate literal.
+fn code_pointer(program: &Program, addr: u64) -> bool {
+    let width = if program.is_64 { 8 } else { 4 };
+    addr.is_multiple_of(width)
+        && crate::analysis::read_word(program, addr)
+            .and_then(|target| program.section_at(target))
+            .is_some_and(|s| s.executable)
 }
 
 /// Fewest wide characters, past a one-character narrow reading, that make
