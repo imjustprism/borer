@@ -268,7 +268,8 @@ fn asserted_members(p: &Program, a: &Analysis, o: &Overlay) -> (BTreeMap<String,
 /// ([`crate::analysis::members::condition_members`]). A local or a
 /// parameter is spelled the same way, so these are never listed as names
 /// and are paired only in a tier of their own. Each function's conditions
-/// are looked up by address, and a raised cancel flag
+/// are read once per analysis and looked up by address, and a raised
+/// cancel flag
 /// ([`crate::cancel::Cancel`]) reads no further literal.
 ///
 /// # Arguments
@@ -281,7 +282,6 @@ fn bare_members(p: &Program, a: &Analysis, o: &Overlay) -> Named {
         MEMBER_STRING_CAP, Spelled, assert_conditions, condition_members,
     };
     let mut named = Named::new();
-    let mut conditions: BTreeMap<u64, BTreeMap<u64, String>> = BTreeMap::new();
     for (target, _) in literal_targets(p, a)
         .iter()
         .take_while(|_| !crate::cancel::Cancel::raised())
@@ -304,10 +304,7 @@ fn bare_members(p: &Program, a: &Analysis, o: &Overlay) -> Named {
             .filter_map(|s| s.from_entry)
             .collect();
         for entry in entries {
-            let passed = conditions
-                .entry(entry)
-                .or_insert_with(|| assert_conditions(p, a, entry))
-                .contains_key(target);
+            let passed = assert_conditions(p, a, entry).contains_key(target);
             let name = name_of(a, o, entry);
             let Some(class) = passed
                 .then(|| crate::analysis::classes::class_of(&name))

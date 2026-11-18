@@ -5,6 +5,7 @@
 //! `borer://asserts` pairs members with offsets from.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use super::classes::{FieldUse, parse_number};
 use super::{Analysis, naming, single};
@@ -178,8 +179,28 @@ pub(crate) fn is_source_path(text: &str) -> bool {
 /// # Returns
 ///
 /// The text of each condition no longer than [`MEMBER_STRING_CAP`], by
-/// address, so a caller asks for one in a lookup.
+/// address, so a caller asks for one in a lookup; read once per function
+/// and kept in [`Analysis::derived`].
 pub(crate) fn assert_conditions(
+    program: &Program,
+    analysis: &Analysis,
+    entry: u64,
+) -> Arc<BTreeMap<u64, String>> {
+    analysis
+        .derived
+        .get_or_build("assert_conditions", entry, || {
+            read_assert_conditions(program, analysis, entry)
+        })
+}
+
+/// Reads the conditions [`assert_conditions`] keeps.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image, read for the strings.
+/// * `analysis` - Cross-references.
+/// * `entry` - The function.
+fn read_assert_conditions(
     program: &Program,
     analysis: &Analysis,
     entry: u64,

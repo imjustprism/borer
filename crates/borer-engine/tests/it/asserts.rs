@@ -858,6 +858,25 @@ fn a_bare_local_or_parameter_pairs_strong_nowhere() {
     assert!(field_names(&p, &a, &o, "Registry").is_empty());
 }
 
+/// A function's assert conditions are read once per analysis: every
+/// read, filter and page of the index asks the memo.
+#[test]
+fn assert_conditions_are_read_once_per_function() {
+    let p = registry();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let all = asserted_fields_tsv(&p, &a, &o, "");
+    assert_eq!(
+        a.derived.held("assert_conditions"),
+        BARE.len(),
+        "{:?}",
+        a.derived
+    );
+    assert_eq!(asserted_fields_tsv(&p, &a, &o, ""), all);
+    asserted_fields_tsv(&p, &a, &o, "m_stop");
+    assert_eq!(a.derived.held("assert_conditions"), BARE.len());
+}
+
 /// A method whose only assert spells its member bare points at its
 /// class's bare names, saying they may be no members.
 ///
