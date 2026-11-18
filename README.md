@@ -2,7 +2,7 @@
   <a href="https://borer.lol">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="brand/banner-dark.png">
-      <img alt="borer: one reverse-engineering engine for AI agents and the people who read binaries" src="brand/banner-light.png" width="100%">
+      <img alt="borer: blazing fast, Rust-based reverse engineering tool built for humans and AI" src="brand/banner-light.png" width="100%">
     </picture>
   </a>
 </p>
@@ -11,6 +11,7 @@
   <a href="https://github.com/imjustprism/borer/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/imjustprism/borer?style=flat-square&labelColor=0b0c0e&color=26272b&label=release"></a>
   <a href="https://github.com/imjustprism/borer/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/imjustprism/borer/ci.yml?branch=main&style=flat-square&labelColor=0b0c0e&color=26272b&label=ci"></a>
   <a href="LICENSE"><img alt="AGPL-3.0 license" src="https://img.shields.io/badge/license-AGPL--3.0-26272b?style=flat-square&labelColor=0b0c0e&color=26272b"></a>
+  <img alt="Desktop app" src="https://img.shields.io/badge/desktop-app-26272b?style=flat-square&labelColor=0b0c0e&color=26272b">
   <img alt="MCP server" src="https://img.shields.io/badge/MCP-server-26272b?style=flat-square&labelColor=0b0c0e&color=26272b">
 </p>
 
@@ -23,19 +24,26 @@
   <a href="https://borer.lol/llms.txt">llms.txt</a>
 </p>
 
-borer is a reverse-engineering engine for AI agents and for the people who
-read binaries by hand. Its loader, lifters, emulator and decompiler are its
-own Rust code, over format and instruction-decoder crates (goblin, iced-x86,
-yaxpeax-arm); it never drives another reverse-engineering tool underneath.
-One engine answers three ways:
+**Blazing fast, Rust-based reverse engineering tool built for humans and AI.**
 
-- **Agents:** `borer` with no arguments is an MCP server. Every list is paged
-  and says how much it left out; triage and decompiles end with what to read next.
-- **People and scripts:** `borer <command>` gives the same answers in a terminal.
-- **Desktop:** the desktop app, `borer-app`, puts the engine in Zed's
-  workspace: a function list, decompile tabs and the command palette. On one
-  Windows machine it meets its frame, input, startup, open and memory bars
-  ([measured below](#a-desktop-app-held-to-the-same-bars)).
+borer is one pure Rust engine for the people who read binaries by hand and
+for the AI agents that read them too. Its loader, lifters, emulator and
+decompiler are its own Rust code, over format and instruction-decoder crates
+(goblin, iced-x86, yaxpeax-arm); it never drives another reverse-engineering
+tool underneath. Its emulator checks the decompiled text against the binary,
+and the same query always gives the same bytes. One engine answers three
+ways, each with the same facts:
+
+- **Desktop app:** `borer-app` puts the engine in Zed's workspace: a function
+  list, decompile, listing, graph and hex tabs, xrefs, types and the command
+  palette. Each release attaches its installers for Windows, macOS and Linux.
+  On one Windows machine it meets its frame, input, startup, open and memory
+  bars ([measured below](#a-desktop-app-held-to-the-same-bars)).
+- **Command line and scripts:** `borer <command>` answers in a terminal, and
+  `borer script` runs a sandboxed Rhai script over the whole program.
+- **MCP server:** `borer` with no arguments serves AI agents over MCP. Every
+  list is paged and says how much it left out; triage and decompiles end with
+  what to read next.
 
 > [!WARNING]
 > borer is early-stage. Tool names, output and resource URIs still change
@@ -51,7 +59,7 @@ One engine answers three ways:
 | Decompile check | `certify` runs the text as C beside the binary and grades it (x86, x86-64) | on ntdll's `sub_180102184`: grade `agrees`, 20 of 64 inputs agree, 44 unchecked and named, 0 differ ([below](#the-decompiler-checks-its-own-work)) |
 | Emulator | x86, x86-64, arm64; runs one function on typed inputs, never the file; on x86 and x86-64 it also drives solving, unpacking, devirtualization, taint and struct recovery | ntdll's CRC-32 answers the published check value `0xcbf43926` ([below](#it-runs-code-without-running-the-file)) |
 | Live process | read-only attach, objects by class, value and pointer-chain scans (Windows) | |
-| Agent interface | MCP server, 42 tools and the `borer://` resources | notepad.exe triage in 2,408 bytes, ending with what to call next |
+| MCP server | 42 tools and the `borer://` resources | notepad.exe triage in 2,408 bytes, ending with what to call next |
 | Command line | the same binary; `borer help` lists every command | notepad.exe triage, 523 functions, in about 2.3 s |
 | Desktop app | Zed's workspace, function list, decompile tabs, command palette (measured on Windows) | frame, input, startup, open and memory bars met ([table below](#a-desktop-app-held-to-the-same-bars)) |
 
@@ -131,8 +139,8 @@ never replaced by a guess.
 
 ### It runs code without running the file
 
-borer has its own emulator, so an agent can call a function on typed inputs
-and read the result. Here the function `RtlComputeCrc32` forwards to gets the
+borer has its own emulator, so you or an agent can call a function on typed
+inputs and read the result. Here the function `RtlComputeCrc32` forwards to gets the
 standard CRC-32 test string, and answers the published check value
 `0xcbf43926`. The last column says the decompiled text, run on the same
 inputs, gave the same results:
@@ -198,7 +206,7 @@ Classes, vtables, message formats, opcode dispatchers, decoded and generated
 strings, IOCs and YARA rules come from the same engine: `borer help` lists
 every command, and `borer://help` every resource.
 
-### Answers sized for a context window
+### Answers sized for a screen and a context window
 
 Every list is filtered and paged on the server, and says how much it left
 out:
@@ -250,7 +258,7 @@ whole file in about 2.3 seconds (release build `7d9bb42c`, three runs: 2.24,
 2.41, 2.29 s). A cold decompile takes under 7 ms per function at the 95th
 percentile (`tests/bench.rs`, release build `70b5db2c`, three runs: 6.64,
 6.48, 6.49 ms). Both on one desktop machine. The time bars, 25 ms at p95 and
-5 s at worst per function, are part of the gate. An agent or a reviewer can
+5 s at worst per function, are part of the gate. A person or an agent can
 read every function instead of guessing where to look.
 
 ### A desktop app held to the same bars
@@ -269,9 +277,9 @@ and saved docks. No engine call runs on the UI thread. Release build
 | notepad.exe open to its function list, median of 10 | 247.0 ms | 1 s |
 | Memory beyond the engine | 87.1 MB | 150 MB |
 
-The app draws with Zed's base theme. It shows the function list and the
-decompile; disassembly, hex, strings, xrefs and in-place editing are in the
-command line and the MCP server. Windows is the measured platform.
+Beside the function list and decompile tabs, the app has a linear listing,
+control-flow graphs, a hex view, strings, imports, exports, xrefs, a call tree
+and a types editor. Windows is the measured platform.
 
 ## Platforms
 
@@ -285,6 +293,16 @@ command line and the MCP server. Windows is the measured platform.
 Formats: PE, ELF, Mach-O, raw code and memory dumps.
 
 ## Install
+
+### Desktop app
+
+Every release attaches the desktop app's installers beside the archives: an
+MSI for Windows x64, a `.dmg` for macOS (arm64 and x64) and a `.tar.gz` for
+Linux x64, with SHA256SUMS to check them. They are not signed yet, so each
+system warns once; [packaging/borer-app/README.md](packaging/borer-app/README.md)
+has the steps, and [Quick start](#quick-start) builds it from source.
+
+### Command line and MCP server
 
 macOS and Linux:
 
@@ -302,9 +320,6 @@ The installer downloads the latest release, checks it against the release's
 SHA256SUMS and registers borer with every MCP client it finds: Claude Code,
 Claude Desktop, Cursor, VS Code, Windsurf, Zed, Codex CLI, Gemini CLI and 20
 more. Restart the clients it names afterwards.
-
-The desktop app builds from source and is not in the release downloads yet
-(see [Quick start](#quick-start)).
 
 Package managers install the same release binary:
 
@@ -340,7 +355,33 @@ three with `--uninstall` (`-Uninstall` in PowerShell).
 
 ## Quick start
 
-From an agent:
+In the desktop app, open a file (drop it on the window, or Ctrl+O) and the
+function list fills; the command palette (Ctrl+Shift+P, Cmd+Shift+P on macOS)
+lists every action. To build it from source, in its own cargo workspace under
+`app/`: on Windows it needs the MSVC C++ x64 build tools, the Windows 10/11
+SDK 10.0.20348 or newer, Rust 1.98.1, `git` and about 0.6 GB in Cargo's git
+cache for the pinned Zed checkout (`app/Cargo.toml`); a clean release build
+takes about 11 minutes:
+
+```bash
+cd app && cargo build --release
+target/release/borer-app notepad.exe
+```
+
+From the command line:
+
+```bash
+borer triage    sample.exe
+borer decompile sample.exe <address|name>
+borer xrefs     sample.exe <address|name>
+borer certify   sample.exe <address|name>   # how far the decompiled text was checked
+borer help                                  # every command
+```
+
+`--pack <file>` loads target knowledge, `--no-pdb` skips the companion PDB, and
+`--arch x86|x64|arm64` with `--base` and `--entry` maps raw code or a dump.
+
+From an AI agent over MCP:
 
 1. `load_binary`
 2. read `borer://triage`: what the file is, how it is protected, where to start
@@ -364,29 +405,6 @@ Deeper analyses are `borer://` resources: taint, struct layout, emulation,
 input solving, unpacking, deobfuscation, binary diff, decoded strings, IOCs,
 signatures and YARA rules. `borer://help` lists them all, and a client without
 resource support passes the same URI to `query`.
-
-From the command line:
-
-```bash
-borer triage    sample.exe
-borer decompile sample.exe <address|name>
-borer xrefs     sample.exe <address|name>
-borer certify   sample.exe <address|name>   # how far the decompiled text was checked
-borer help                                  # every command
-```
-
-`--pack <file>` loads target knowledge, `--no-pdb` skips the companion PDB, and
-`--arch x86|x64|arm64` with `--base` and `--entry` maps raw code or a dump.
-
-From the desktop app, in its own cargo workspace under `app/`. On Windows it
-needs the MSVC C++ x64 build tools, the Windows 10/11 SDK 10.0.20348 or
-newer, Rust 1.98.1, `git` and about 0.6 GB in Cargo's git cache for the pinned
-Zed checkout (`app/Cargo.toml`); a clean release build takes about 11 minutes:
-
-```bash
-cd app && cargo build --release
-target/release/borer-app notepad.exe
-```
 
 ## More of what it does
 
