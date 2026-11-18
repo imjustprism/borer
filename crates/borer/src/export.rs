@@ -1533,6 +1533,43 @@ mod tests {
         assert_eq!(left, vec!["kept"]);
     }
 
+    /// A split into a directory it cannot list is refused, and nothing is
+    /// written; skipped where the user can list it anyway (root).
+    ///
+    /// # Panics
+    ///
+    /// When the split is not refused or writes into the directory.
+    #[cfg(unix)]
+    #[test]
+    fn a_split_directory_that_cannot_be_listed_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let text = Section::mapped(".text", 0x1000, 0, 0x10, false, true);
+        let p = Program::raw(vec![0xc3; 0x10], Arch::X86_64, 0, Some(0x1000), vec![text]);
+        let a = Analysis::compute(&p);
+        let dir = std::env::temp_dir().join(format!("borer-split-shut-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        std::fs::write(dir.join("kept"), "kept").expect("written");
+        let mode = |m| std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(m));
+        mode(0o300).expect("chmod");
+        if std::fs::read_dir(&dir).is_err() {
+            let refused = super::write_split(
+                &p,
+                &a,
+                &Overlay::default(),
+                Library::Include,
+                None,
+                &dir.display().to_string(),
+            );
+            mode(0o700).expect("chmod");
+            let why = format!("{:#}", refused.expect_err("an unlistable directory"));
+            assert!(why.contains("nothing was written"), "{why}");
+            assert!(why.starts_with("reading "), "{why}");
+            assert_eq!(walk(&dir), vec!["kept"]);
+        }
+        mode(0o700).expect("chmod");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Makes `link` a directory link to `target`: a symlink, or on Windows
     /// a junction where symlinks need a privilege.
     ///
