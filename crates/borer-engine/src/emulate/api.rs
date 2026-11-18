@@ -488,10 +488,7 @@ impl Emulator<'_> {
     pub(super) fn allocate(&mut self) -> u64 {
         let (base, sections) = (self.program.image_base, &self.program.sections);
         let start = sections.iter().map(|s| s.va.0).fold(base, u64::min);
-        let end = sections
-            .iter()
-            .map(|s| s.va.0.saturating_add(s.vsize.max(s.file_size)))
-            .fold(base, u64::max);
+        let end = sections.iter().map(|s| s.span().end).fold(base, u64::max);
         let mut at = self.alloc_next;
         if at < end && at.saturating_add(ALLOC_STRIDE) > start {
             let Some(past) = end.checked_next_multiple_of(ALLOC_STRIDE) else {

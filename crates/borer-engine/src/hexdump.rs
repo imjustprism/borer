@@ -185,10 +185,7 @@ pub fn hex_rows(program: &crate::program::Program, va: u64, len: usize) -> HexRo
                 program.section_at(at),
             ),
             (None, Some(s)) => (
-                s.va.0
-                    .saturating_add(s.vsize.max(s.file_size))
-                    .saturating_sub(at)
-                    .min(next()),
+                s.span().end.saturating_sub(at).min(next()),
                 HexFill::Unbacked,
                 Some(s),
             ),

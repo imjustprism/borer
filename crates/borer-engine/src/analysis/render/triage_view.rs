@@ -667,12 +667,7 @@ fn blind_spots(p: &Program, a: &Analysis, o: &Overlay, packing: &Packing) -> Vec
     }
     let bare: Vec<&str> = sized()
         .filter(|s| s.executable)
-        .filter(|s| {
-            let end = s.va.0.saturating_add(s.vsize.max(s.file_size));
-            !a.functions
-                .iter()
-                .any(|f| f.entry >= s.va.0 && f.entry < end)
-        })
+        .filter(|s| !a.functions.iter().any(|f| s.holds(f.entry)))
         .map(|s| s.name.as_str())
         .collect();
     if !bare.is_empty() {

@@ -2181,9 +2181,9 @@ fn opens_as_data(program: &Program, va: u64) -> bool {
 /// * `program` - The loaded image.
 /// * `va` - A virtual address.
 pub(crate) fn is_executable_va(program: &Program, va: u64) -> bool {
-    program.section_at(va).is_some_and(|s| {
-        s.executable && va >= s.va.0 && va < s.va.0.saturating_add(s.vsize.max(s.file_size))
-    })
+    program
+        .section_at(va)
+        .is_some_and(|s| s.executable && s.holds(va))
 }
 
 /// Whether `va` is executable, or lies in the section that holds the entry.
@@ -2331,7 +2331,7 @@ pub fn no_function_at(program: &Program, analysis: &Analysis, va: u64) -> String
     let span = program
         .sections
         .iter()
-        .map(|s| (s.va.0, s.va.0.saturating_add(s.vsize.max(s.file_size))))
+        .map(|s| (s.span().start, s.span().end))
         .reduce(|(lo, hi), (a, b)| (lo.min(a), hi.max(b)));
     match span {
         Some((lo, hi)) if program.section_at(va).is_none() => {

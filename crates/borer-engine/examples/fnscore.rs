@@ -377,12 +377,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     let secs = started.elapsed().as_secs_f64();
     let base = program.image_base;
-    let exec = |va: u64| {
-        program
-            .sections
-            .iter()
-            .any(|s| s.executable && va >= s.va.0 && va < s.va.0 + s.vsize.max(s.file_size))
-    };
+    let exec = |va: u64| program.sections.iter().any(|s| s.executable && s.holds(va));
     let truth: BTreeMap<u64, Truth> = truth(&pdb_path)?
         .into_iter()
         .map(|(rva, t)| (base + u64::from(rva), t))

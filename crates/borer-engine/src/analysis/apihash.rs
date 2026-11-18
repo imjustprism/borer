@@ -251,10 +251,7 @@ fn plausible(program: &Program, v: u32) -> bool {
     let va = u64::from(v);
     v >= VALUE_MIN
         && (3..=29).contains(&v.count_ones())
-        && !program
-            .sections
-            .iter()
-            .any(|s| va >= s.va.0 && va - s.va.0 < s.vsize.max(s.file_size))
+        && !program.sections.iter().any(|s| s.holds(va))
 }
 
 /// Finds the constants that hash a known API name.

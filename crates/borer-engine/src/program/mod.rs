@@ -153,6 +153,30 @@ impl Section {
         }
     }
 
+    /// Returns the image addresses the section takes: the larger of its
+    /// memory and file sizes from [`Section::va`], empty for a thread-local
+    /// section the file holds no bytes for (`.tbss`), whose size is each
+    /// thread's block, not image addresses.
+    #[must_use]
+    pub fn span(&self) -> std::ops::Range<u64> {
+        let len = if self.thread_local && self.file_size == 0 {
+            0
+        } else {
+            self.vsize.max(self.file_size)
+        };
+        self.va.0..self.va.0.saturating_add(len)
+    }
+
+    /// Tells whether the section takes the image address `va` ([`Section::span`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `va` - A virtual address.
+    #[must_use]
+    pub fn holds(&self, va: u64) -> bool {
+        self.span().contains(&va)
+    }
+
     /// Tells whether the section holds what the loader, the linker or an
     /// unwinder reads about the image, never data its code addresses.
     ///
@@ -1656,7 +1680,7 @@ impl Program {
 
     /// Builds the address-ordered lookup rows of a section table.
     ///
-    /// Every section's span (the larger of its memory and file sizes) is
+    /// Every section's span ([`Section::span`]) is
     /// cut at every span's start and end into stretches that do not
     /// overlap, each naming the first-declared file-backed section holding
     /// it ([`Program::section_at`]'s answer), else the first-declared one
@@ -1676,14 +1700,7 @@ impl Program {
         let mut spans: Vec<(u64, u64, (bool, usize))> = sections
             .iter()
             .enumerate()
-            .filter(|(_, s)| !(s.thread_local && s.file_size == 0))
-            .map(|(index, s)| {
-                (
-                    s.va.0,
-                    s.va.0.saturating_add(s.vsize.max(s.file_size)),
-                    (s.file_size == 0, index),
-                )
-            })
+            .map(|(index, s)| (s.span().start, s.span().end, (s.file_size == 0, index)))
             .filter(|&(va, end, _)| end > va)
             .collect();
         spans.sort_unstable();
@@ -1737,8 +1754,7 @@ impl Program {
     pub fn section_at(&self, va: u64) -> Option<&Section> {
         if let Some(first) = self.sections.first()
             && first.file_size > 0
-            && first.va.0 <= va
-            && va < first.va.0.saturating_add(first.vsize.max(first.file_size))
+            && first.holds(va)
         {
             return Some(first);
         }
@@ -2202,25 +2218,19 @@ impl Program {
     /// Returns a compact `name(start..end)` listing of the sections.
     ///
     /// Error messages about unmapped addresses append it so an agent can
-    /// correct the address without another call; `none` for a file with no
-    /// sections, so the message does not end on an empty list. At most
+    /// correct the address without another call; only sections that take
+    /// addresses ([`Section::span`]) are named, `none` when no section does,
+    /// so the message does not end on an empty list. At most
     /// [`SECTIONS_SHOWN`] are named, then `... N more`.
     pub fn section_list(&self) -> String {
-        if self.sections.is_empty() {
+        let placed = || self.sections.iter().filter(|s| !s.span().is_empty());
+        if placed().next().is_none() {
             return "none".to_owned();
         }
-        let more = self.sections.len().saturating_sub(SECTIONS_SHOWN);
-        self.sections
-            .iter()
+        let more = placed().count().saturating_sub(SECTIONS_SHOWN);
+        placed()
             .take(SECTIONS_SHOWN)
-            .map(|s| {
-                format!(
-                    "{}({:#x}..{:#x})",
-                    s.name,
-                    s.va.0,
-                    s.va.0.saturating_add(s.vsize.max(s.file_size))
-                )
-            })
+            .map(|s| format!("{}({:#x}..{:#x})", s.name, s.span().start, s.span().end))
             .chain((more > 0).then(|| format!("... {more} more")))
             .collect::<Vec<_>>()
             .join(" ")

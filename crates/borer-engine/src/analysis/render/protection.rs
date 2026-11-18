@@ -1645,8 +1645,7 @@ pub(crate) fn upx_entry(p: &Program) -> UpxEntry {
     if entry_stubs(p).iter().any(|(sig, _)| sig.packer == "UPX") {
         return UpxEntry::Packed;
     }
-    let end = upx0.va.0.saturating_add(upx0.vsize.max(upx0.file_size));
-    if p.entry.is_some_and(|e| e >= upx0.va.0 && e < end) {
+    if p.entry.is_some_and(|e| upx0.holds(e)) {
         UpxEntry::Unpacked
     } else {
         UpxEntry::MaybeUnpacked

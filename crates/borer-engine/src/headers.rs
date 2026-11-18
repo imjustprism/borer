@@ -827,8 +827,7 @@ fn in_mapped_headers(pe: &PE<'_>, va: u64) -> bool {
 
 /// Reports whether `va` falls in `s`.
 fn in_section(s: &Section, va: u64) -> bool {
-    let start = s.va.0;
-    va >= start && va < start.saturating_add(s.vsize.max(s.file_size))
+    s.holds(va)
 }
 
 /// Returns `n` file bytes at `rva`.

@@ -9,6 +9,7 @@
     reason = "assertions are the point of a test"
 )]
 
+use borer_engine::analysis::render::{Dir, LINES_MAX, linear, listing_caveat};
 use borer_engine::analysis::{Analysis, Overlay, decompile::decompile};
 use borer_engine::num::lo32;
 use borer_engine::program::{Feature, Program, SymbolKind};
@@ -883,38 +884,52 @@ fn a_cut_segment_is_missing_only_for_the_bytes_it_states() {
     );
 }
 
-/// A thread-local `.tbss` takes no image addresses: a `.bss` inside its
-/// range is found as itself, and an address only `.tbss` would cover is
-/// not mapped.
+/// Returns the fixture with its `.eh_frame_hdr` and `.eh_frame` rows (11
+/// and 12) rewritten, each to a name, type, flags, address and size.
 ///
-/// The fixture's `.eh_frame_hdr` and `.eh_frame` rows are rewritten into
-/// a `NOBITS|TLS` `.tbss` of 0x1000 bytes at `BASE + 0x1000` and, declared
-/// after it, a `NOBITS` `.bss` of 0x100 bytes at `BASE + 0x1800`.
-#[test]
-fn a_thread_local_bss_takes_no_addresses() {
+/// # Arguments
+///
+/// * `rows` - Row 11's then row 12's name (with its NUL, no longer than the
+///   one it replaces), `sh_type`, `sh_flags`, `sh_addr` and `sh_size`.
+#[expect(
+    clippy::expect_used,
+    reason = "a fixture that does not parse has no useful recovery"
+)]
+fn retyped(rows: [(&[u8], u32, u64, u64, u64); 2]) -> Program {
     let mut bytes = elf_bytes(false);
-    for (index, name, flags, addr, size) in [
-        (
-            11,
-            b".tbss\0".as_slice(),
-            0x403u64,
-            BASE + 0x1000,
-            0x1000u64,
-        ),
-        (12, b".bss\0".as_slice(), 0x3, BASE + 0x1800, 0x100),
-    ] {
+    for (index, (name, kind, flags, addr, size)) in (11..).zip(rows) {
         let row = SHOFF + index * 64;
         let name_at = usize::try_from(u32::from_le_bytes(
             bytes[row..row + 4].try_into().expect("four bytes"),
         ))
         .expect("fits");
         bytes[0x4e0 + name_at..0x4e0 + name_at + name.len()].copy_from_slice(name);
-        bytes[row + 4..row + 8].copy_from_slice(&8u32.to_le_bytes());
+        bytes[row + 4..row + 8].copy_from_slice(&kind.to_le_bytes());
         bytes[row + 8..row + 16].copy_from_slice(&flags.to_le_bytes());
         bytes[row + 16..row + 24].copy_from_slice(&addr.to_le_bytes());
         bytes[row + 32..row + 40].copy_from_slice(&size.to_le_bytes());
     }
-    let p = Program::from_bytes(std::path::PathBuf::from("tls.elf"), bytes).expect("parses");
+    Program::from_bytes(std::path::PathBuf::from("tls.elf"), bytes).expect("parses")
+}
+
+/// The fixture with a `NOBITS|TLS` `.tbss` of 0x1000 bytes at
+/// `BASE + 0x1000` and, declared after it, a `NOBITS` `.bss` of 0x100
+/// bytes at `BASE + 0x1800`.
+fn tls_bss() -> Program {
+    retyped([
+        (b".tbss\0", 8, 0x403, BASE + 0x1000, 0x1000),
+        (b".bss\0", 8, 0x3, BASE + 0x1800, 0x100),
+    ])
+}
+
+/// A thread-local `.tbss` takes no image addresses: a `.bss` inside its
+/// range is found as itself, and an address only `.tbss` would cover is
+/// not mapped.
+///
+/// The fixture is [`tls_bss`].
+#[test]
+fn a_thread_local_bss_takes_no_addresses() {
+    let p = tls_bss();
     let bss = p.no_bytes_at(BASE + 0x1810);
     assert!(bss.contains("in .bss"), "{bss}");
     let tls = p.no_bytes_at(BASE + 0x1000);
@@ -930,6 +945,45 @@ fn a_thread_local_bss_takes_no_addresses() {
         let found = p.declared_at(va).map(|s| s.name.as_str());
         assert_ne!(found, Some(".tbss"), "{va:#x}");
     }
+}
+
+/// Every scan over the sections skips a `.tbss`: the linear listing maps
+/// `.bss` where the `.tbss` would lie, and an unmapped address's refusal
+/// offers no `.tbss` range.
+#[test]
+fn a_thread_local_bss_is_in_no_listing_or_refusal() {
+    let p = tls_bss();
+    let tls = p.no_bytes_at(BASE + 0x1000);
+    assert!(!tls.contains(".tbss("), "{tls}");
+    assert!(tls.contains(".bss(0x401800..0x401900)"), "{tls}");
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let mut text = String::new();
+    let mut at = Some(BASE);
+    while let Some(va) = at {
+        let page = linear(&p, &a, &o, va, Dir::Next, LINES_MAX).expect("a page");
+        text.extend(
+            (0..page.view.lines())
+                .filter_map(|i| page.view.line(i))
+                .map(|l| format!("{l}\n")),
+        );
+        at = page.next;
+    }
+    assert!(!text.contains(".tbss"), "{text}");
+    assert!(text.contains(".bss"), "{text}");
+}
+
+/// A listing at an address a `.tbss` declares first names the section
+/// declared after it that holds the address.
+#[test]
+fn a_listing_after_a_thread_local_bss_names_the_section_holding_it() {
+    let p = retyped([
+        (b".tbss\0", 8, 0x403, BASE + 0x1000, 0x1000),
+        (b".data\0", 1, 0x3, BASE + 0x1000, 8),
+    ]);
+    let a = Analysis::compute(&p);
+    let caveat = listing_caveat(&p, &a, BASE + 0x1000);
+    assert!(caveat.contains("is in .data (rw-)"), "{caveat}");
 }
 
 /// A section name that is not UTF-8 no longer refuses the file.

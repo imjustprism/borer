@@ -710,7 +710,7 @@ fn regions(p: &Program) -> Vec<Region> {
         .map(|(i, s)| {
             let start = s.va.0;
             let held = s.file_size.min(len.saturating_sub(s.file_off.0));
-            let end = start.saturating_add(s.vsize.max(s.file_size));
+            let end = s.span().end;
             (held == 0, start, end, i, start.saturating_add(held))
         })
         .filter(|&(_, start, end, ..)| start < end)

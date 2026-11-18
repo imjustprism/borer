@@ -144,11 +144,7 @@ impl Names<'_> {
         if v == self.program.image_base && self.program.format == BinaryFormat::Pe {
             return Some("&__ImageBase".to_owned());
         }
-        let mapped = self
-            .program
-            .sections
-            .iter()
-            .any(|s| v >= s.va.0 && v < s.va.0 + s.vsize.max(s.file_size));
+        let mapped = self.program.sections.iter().any(|s| s.holds(v));
         if mapped && let Some(n) = self.overlay.names.get(&v) {
             return Some(format!("&{n}"));
         }

@@ -480,7 +480,7 @@ fn image_byte(program: &Program, va: u64) -> Option<u8> {
         return Some(b);
     }
     if program.sections.iter().any(|s| {
-        let mapped = s.vsize.max(s.file_size).wrapping_add(PAGE - 1) & !(PAGE - 1);
+        let mapped = (s.span().end - s.va.0).wrapping_add(PAGE - 1) & !(PAGE - 1);
         va >= s.va.0 && va - s.va.0 < mapped
     }) {
         return Some(0);

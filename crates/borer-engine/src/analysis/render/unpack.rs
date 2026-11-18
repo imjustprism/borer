@@ -1054,11 +1054,9 @@ fn writes_code(p: &Program, regions: &[(u64, u64)], oep: Option<u64>) -> bool {
     oep.is_some()
         || regions.iter().any(|&(start, len)| {
             let end = start.saturating_add(len);
-            p.sections.iter().any(|s| {
-                s.executable
-                    && s.va.0 < end
-                    && start < s.va.0.saturating_add(s.vsize.max(s.file_size))
-            })
+            p.sections
+                .iter()
+                .any(|s| s.executable && s.va.0 < end && start < s.span().end)
         })
 }
 
@@ -1305,11 +1303,7 @@ pub(super) fn rebuild_pe(
     copy_max: u64,
 ) -> Option<Program> {
     let base = p.image_base;
-    let image_end = p
-        .sections
-        .iter()
-        .map(|s| s.va.0 + s.vsize.max(s.file_size))
-        .max()?;
+    let image_end = p.sections.iter().map(|s| s.span().end).max()?;
     let image_size = usize::try_from(image_end.checked_sub(base)?).ok()?;
     if image_size == 0 || image_size > 0x8000_0000 {
         return None;

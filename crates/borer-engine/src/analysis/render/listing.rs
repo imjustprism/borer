@@ -970,10 +970,7 @@ const PACKED_WINDOW: u64 = 4096;
 /// every discovered function`, said only where functions are discovered),
 /// and an empty string for code inside one.
 pub fn listing_caveat(p: &Program, a: &Analysis, va: u64) -> String {
-    let covering = p
-        .sections
-        .iter()
-        .find(|s| va >= s.va.0 && va < s.va.0.saturating_add(s.vsize.max(s.file_size)));
+    let covering = p.sections.iter().find(|s| s.holds(va));
     if let Some(s) = covering {
         if !s.executable {
             return format!(

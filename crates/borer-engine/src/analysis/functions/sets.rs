@@ -40,10 +40,7 @@ impl AddrSet {
             .iter()
             .filter(|s| s.executable && s.file_size > 0)
             .fold((u64::MAX, 0), |(lo, hi), s| {
-                (
-                    lo.min(s.va.0),
-                    hi.max(s.va.0.saturating_add(s.vsize.max(s.file_size))),
-                )
+                (lo.min(s.va.0), hi.max(s.span().end))
             });
         let span = hi.saturating_sub(lo);
         let words = if span > ADDR_BITS_MAX {

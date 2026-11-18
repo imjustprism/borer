@@ -670,7 +670,7 @@ pub(crate) fn find<'a>(
         sections
             .iter()
             .filter(|s| s.executable)
-            .map(|s| (s.va.0, s.va.0.saturating_add(s.vsize.max(s.file_size)))),
+            .map(|s| (s.span().start, s.span().end)),
     );
     let code = |va: u64| spans.holds(va);
     let named = |s: &Section| s.name == ".gopclntab" || s.name.ends_with("__gopclntab");

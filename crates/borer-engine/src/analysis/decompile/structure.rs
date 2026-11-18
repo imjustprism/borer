@@ -2321,10 +2321,7 @@ pub(super) fn fold_static(program: &Program, e: &Expr, depth: u8) -> Option<u64>
         }
         Expr::Deref(addr, ty) => {
             let at = fold_static(program, addr, d)?;
-            let section = program
-                .sections
-                .iter()
-                .find(|s| at >= s.va.0 && at < s.va.0.saturating_add(s.vsize))?;
+            let section = program.sections.iter().find(|s| s.holds(at))?;
             if section.writable {
                 return None;
             }

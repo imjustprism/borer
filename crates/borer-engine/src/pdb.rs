@@ -577,10 +577,9 @@ pub(crate) fn sources(
 /// holds it.
 fn data_va(image_base: u64, rva: u32, sections: &[Section]) -> Option<u64> {
     let va = image_base.checked_add(u64::from(rva))?;
-    sections.iter().find_map(|s| {
-        let limit = s.va.0.checked_add(s.vsize.max(s.file_size))?;
-        (!s.executable && va >= s.va.0 && va < limit).then_some(va)
-    })
+    sections
+        .iter()
+        .find_map(|s| (!s.executable && s.holds(va)).then_some(va))
 }
 
 /// Maps a procedure's extent to virtual addresses an executable section
@@ -610,8 +609,7 @@ fn extent_va(image_base: u64, rva: u32, end: u32, sections: &[Section]) -> Optio
     let start = image_base.checked_add(u64::from(rva))?;
     let end = image_base.checked_add(u64::from(end))?;
     sections.iter().find_map(|s| {
-        let limit = s.va.0.checked_add(s.vsize.max(s.file_size))?;
-        (s.executable && start >= s.va.0 && start < limit && end <= limit).then_some((start, end))
+        (s.executable && s.holds(start) && end <= s.span().end).then_some((start, end))
     })
 }
 

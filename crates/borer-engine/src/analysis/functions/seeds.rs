@@ -40,17 +40,13 @@ pub(super) struct DataRef {
 ///
 /// * `program` - The loaded image.
 pub(super) fn mapped_range(program: &Program) -> std::ops::Range<u64> {
-    let (lo, hi) =
-        program
-            .sections
-            .iter()
-            .filter(|s| s.file_size > 0)
-            .fold((u64::MAX, 0), |(lo, hi), s| {
-                (
-                    lo.min(s.va.0),
-                    hi.max(s.va.0.saturating_add(s.vsize.max(s.file_size))),
-                )
-            });
+    let (lo, hi) = program
+        .sections
+        .iter()
+        .filter(|s| s.file_size > 0)
+        .fold((u64::MAX, 0), |(lo, hi), s| {
+            (lo.min(s.va.0), hi.max(s.span().end))
+        });
     lo..hi.max(lo)
 }
 
