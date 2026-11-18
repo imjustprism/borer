@@ -63,6 +63,7 @@ pub mod rsrc;
 pub mod script;
 pub mod search;
 pub mod session;
+pub(crate) mod sets;
 pub mod strings;
 pub mod table;
 pub mod text;

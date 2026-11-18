@@ -78,7 +78,7 @@ crates/borer-engine/src/analysis/decompile/traces.rs::included#1	106
 crates/borer-engine/src/analysis/decompile/types.rs	2245
 crates/borer-engine/src/analysis/decompile/types.rs::callable_pointers#1	114
 crates/borer-engine/src/analysis/decompile/types.rs::stack_arrays#1	101
-crates/borer-engine/src/analysis/decompile/vars.rs	2244
+crates/borer-engine/src/analysis/decompile/vars.rs	2214
 crates/borer-engine/src/analysis/decompile/vars.rs::occs#1	102
 crates/borer-engine/src/analysis/decompile/vars.rs::plan#1	104
 crates/borer-engine/src/analysis/decompile/vars.rs::read#1	115

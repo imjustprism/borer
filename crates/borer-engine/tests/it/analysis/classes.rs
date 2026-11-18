@@ -1363,3 +1363,21 @@ fn siblings_lend_no_names_past_the_slots_they_share() {
     assert!(!text.contains("Bind"), "{text}");
     assert!(!text.contains("Upload"), "{text}");
 }
+
+/// A function a table holds at two slots is a stub, not an anchor: it
+/// neither links two tables nor counts as a slot they share.
+#[test]
+fn a_repeated_stub_is_no_shared_slot() {
+    use borer_engine::analysis::vtables::family_of;
+    let (a, o) = family_fixture(
+        &[
+            ("X", 0x8000, &[0x100, 0x200, 0x900, 0x900]),
+            ("Y", 0x8100, &[0x100, 0x200, 0x900, 0x900]),
+            ("Z", 0x8200, &[0x100, 0x300, 0x900, 0x900]),
+        ],
+        &[],
+    );
+    let fam = family_of(&a, &o, "X").expect("X and Y share two anchors");
+    assert_eq!(fam.members, vec![("Y".to_owned(), 2)], "{fam:?}");
+    assert!(family_of(&a, &o, "Z").is_none(), "a stub links nothing");
+}

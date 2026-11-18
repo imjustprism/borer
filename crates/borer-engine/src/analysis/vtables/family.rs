@@ -21,6 +21,7 @@ use std::fmt::Write as _;
 use super::ClassInfo;
 use super::names::method_part;
 use crate::analysis::{Analysis, Overlay, name_of, slot_name_of};
+use crate::sets::Sets;
 
 /// Fewest indexes two tables must hold one function at to be one family.
 const ANCHORS_MIN: usize = 2;
@@ -43,6 +44,9 @@ struct Families {
     groups: Vec<Vec<String>>,
     /// The family index of each member.
     of: BTreeMap<String, usize>,
+    /// The linking stopped at [`PAIR_WORK_MAX`], so a family may miss
+    /// members.
+    capped: bool,
 }
 
 /// What a family says of one slot.
@@ -58,14 +62,33 @@ pub enum SlotName {
 /// One class's family.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Family {
-    /// The other members, each with how many indexes its table holds the
-    /// same function at as the class's own.
+    /// The other members, each with how many anchors (a function each
+    /// table holds at that index alone) it shares with the class's own.
     pub members: Vec<(String, usize)>,
     /// The slot count every member's table has.
     pub slots: usize,
+    /// The linking stopped at its work cap, so members may be missing.
+    pub capped: bool,
     /// What the family names each slot, by index; a slot no member names
     /// is absent.
     pub names: BTreeMap<usize, SlotName>,
+}
+
+/// Returns the functions a table holds at one index only, the anchors it
+/// can share: a function at two indexes is a stub, and a `0` is data.
+///
+/// # Arguments
+///
+/// * `slots` - The table's slots.
+fn anchors(slots: &[u64]) -> BTreeSet<u64> {
+    let mut seen: BTreeMap<u64, usize> = BTreeMap::new();
+    for &f in slots {
+        *seen.entry(f).or_default() += 1;
+    }
+    seen.into_iter()
+        .filter(|&(f, n)| f != 0 && n == 1)
+        .map(|(f, _)| f)
+        .collect()
 }
 
 /// Groups the classes into families.
@@ -75,65 +98,56 @@ pub struct Family {
 /// * `classes` - Classes with their tables.
 fn families(classes: &BTreeMap<String, ClassInfo>) -> Families {
     let names: Vec<&String> = classes.keys().collect();
-    let mut buckets: BTreeMap<(usize, usize, u64), Vec<usize>> = BTreeMap::new();
+    let mut held: Vec<(usize, usize, u64, usize)> = Vec::new();
     for (at, info) in classes.values().enumerate() {
         if info.vtable.is_none() {
             continue;
         }
-        let mut seen: BTreeMap<u64, usize> = BTreeMap::new();
-        for &f in &info.slots {
-            *seen.entry(f).or_default() += 1;
-        }
+        let once = anchors(&info.slots);
         for (k, &f) in info.slots.iter().enumerate() {
-            if f != 0 && seen.get(&f) == Some(&1) {
-                buckets
-                    .entry((info.slots.len(), k, f))
-                    .or_default()
-                    .push(at);
+            if once.contains(&f) {
+                held.push((info.slots.len(), k, f, at));
             }
         }
     }
+    held.sort_unstable();
     let mut pairs: BTreeMap<(usize, usize), usize> = BTreeMap::new();
     let mut work = 0usize;
-    for members in buckets
-        .values()
-        .filter(|m| (2..=BUCKET_MAX).contains(&m.len()))
-    {
-        for (i, &a) in members.iter().enumerate() {
-            for &b in members.iter().skip(i + 1) {
+    let mut capped = false;
+    for bucket in held.chunk_by(|x, y| (x.0, x.1, x.2) == (y.0, y.1, y.2)) {
+        if !(2..=BUCKET_MAX).contains(&bucket.len()) {
+            continue;
+        }
+        for (i, a) in bucket.iter().enumerate() {
+            for b in bucket.iter().skip(i + 1) {
                 work += 1;
                 if work > PAIR_WORK_MAX {
+                    capped = true;
                     break;
                 }
-                *pairs.entry((a, b)).or_default() += 1;
+                *pairs.entry((a.3, b.3)).or_default() += 1;
             }
         }
     }
-    let mut parent: Vec<usize> = (0..names.len()).collect();
-    let root = |parent: &[usize], mut at: usize| {
-        while parent.get(at).is_some_and(|&up| up != at) {
-            at = parent.get(at).copied().unwrap_or(at);
-        }
-        at
-    };
+    let mut sets = Sets::new(names.len());
     let mut linked: BTreeSet<usize> = BTreeSet::new();
     for (&(a, b), _) in pairs.iter().filter(|&(_, &n)| n >= ANCHORS_MIN) {
-        let (ra, rb) = (root(&parent, a), root(&parent, b));
-        if let Some(up) = parent.get_mut(ra.max(rb)) {
-            *up = ra.min(rb);
-        }
+        sets.union(a, b);
         linked.extend([a, b]);
     }
     let mut grouped: BTreeMap<usize, Vec<String>> = BTreeMap::new();
     for &at in &linked {
         if let Some(name) = names.get(at) {
             grouped
-                .entry(root(&parent, at))
+                .entry(sets.find(at))
                 .or_default()
                 .push((*name).clone());
         }
     }
-    let mut out = Families::default();
+    let mut out = Families {
+        capped,
+        ..Families::default()
+    };
     for members in grouped.into_values() {
         for m in &members {
             out.of.insert(m.clone(), out.groups.len());
@@ -164,6 +178,21 @@ fn families(classes: &BTreeMap<String, ClassInfo>) -> Families {
 /// The family, or `None` when the class shares no family.
 #[must_use]
 pub fn family_of(analysis: &Analysis, overlay: &Overlay, class: &str) -> Option<Family> {
+    let built = analysis.derived.get_or_build_named(
+        "vtable_family",
+        overlay.fingerprint(),
+        class.to_owned(),
+        || build_family(analysis, overlay, class),
+    );
+    (*built).clone()
+}
+
+/// Builds what [`family_of`] returns.
+///
+/// # Arguments
+///
+/// * `analysis`, `overlay`, `class` - As for [`family_of`].
+fn build_family(analysis: &Analysis, overlay: &Overlay, class: &str) -> Option<Family> {
     let classes = &analysis.classes.by_name;
     let all = analysis
         .derived
@@ -182,15 +211,17 @@ pub fn family_of(analysis: &Analysis, overlay: &Overlay, class: &str) -> Option<
     let own_methods: Vec<Option<String>> = own.slots.iter().map(|&f| method_at(f)).collect();
     let mut votes: BTreeMap<usize, BTreeMap<String, Vec<String>>> = BTreeMap::new();
     let mut members = Vec::new();
+    let own_anchors = anchors(&own.slots);
     for m in group.iter().filter(|m| *m != class) {
         let Some(info) = classes.get(m) else {
             continue;
         };
+        let theirs = anchors(&info.slots);
         let shared = info
             .slots
             .iter()
             .zip(&own.slots)
-            .filter(|(a, b)| **a != 0 && a == b)
+            .filter(|(a, b)| a == b && own_anchors.contains(a) && theirs.contains(a))
             .count();
         members.push((m.clone(), shared));
         let limit = reach(classes, own, info);
@@ -233,6 +264,7 @@ pub fn family_of(analysis: &Analysis, overlay: &Overlay, class: &str) -> Option<
     Some(Family {
         members,
         slots: own.slots.len(),
+        capped: all.capped,
         names,
     })
 }
@@ -314,6 +346,11 @@ pub fn render_slots(
             },
             fam.slots
         );
+        if fam.capped {
+            out.push_str(
+                "family: the linking stopped at its work cap, so members may be missing\n",
+            );
+        }
     }
     for (i, &s) in info.slots.iter().enumerate().take(shown) {
         let own = slot_name_of(analysis, overlay, s);

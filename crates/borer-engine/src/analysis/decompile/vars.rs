@@ -28,6 +28,7 @@
 use super::lexer::{Lex, Line, Tok, lex};
 use super::traces::{Handler, Stmt, blank, statements};
 use super::*;
+use crate::sets::Sets;
 
 /// Most nodes times tracked variables one text is analysed for: the
 /// liveness and web walks are linear in each, and a text past this keeps
@@ -649,60 +650,6 @@ fn occs(
     }
     vars.reads(l, (start, end), &mut o.uses, bad);
     (o, None)
-}
-
-/// A disjoint-set forest over a variable's definitions and the points it
-/// is read at.
-#[derive(Debug)]
-struct Sets {
-    /// Each element's parent.
-    parent: Vec<usize>,
-}
-
-impl Sets {
-    /// A forest of `n` single elements.
-    ///
-    /// # Arguments
-    ///
-    /// * `n` - How many elements.
-    fn new(n: usize) -> Self {
-        Self {
-            parent: (0..n).collect(),
-        }
-    }
-
-    /// The root of an element's set.
-    ///
-    /// # Arguments
-    ///
-    /// * `x` - The element.
-    fn find(&mut self, mut x: usize) -> usize {
-        while let Some(&p) = self.parent.get(x) {
-            if p == x {
-                break;
-            }
-            let gp = self.parent.get(p).copied().unwrap_or(p);
-            if let Some(slot) = self.parent.get_mut(x) {
-                *slot = gp;
-            }
-            x = gp;
-        }
-        x
-    }
-
-    /// Joins two elements' sets under the smaller root.
-    ///
-    /// # Arguments
-    ///
-    /// * `a` - One element.
-    /// * `b` - The other.
-    fn union(&mut self, a: usize, b: usize) {
-        let (ra, rb) = (self.find(a), self.find(b));
-        let (lo, hi) = (ra.min(rb), ra.max(rb));
-        if let Some(slot) = self.parent.get_mut(hi) {
-            *slot = lo;
-        }
-    }
 }
 
 /// One variable's webs: the web of each definition and read.
