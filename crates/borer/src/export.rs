@@ -589,7 +589,7 @@ pub fn write_split(
     only: Option<&[u64]>,
     dir: &str,
 ) -> anyhow::Result<String> {
-    use borer_engine::analysis::decompile::export::{Written, export_units};
+    use borer_engine::analysis::decompile::export::export_units;
     use borer_engine::analysis::{modsdk, split};
     let root = Path::new(dir);
     if let Some(why) = borer_engine::program::unusable_path(root) {
@@ -602,11 +602,11 @@ pub fn write_split(
             "the request's deadline passed while the classes were read, so nothing was written; raise BORER_DEADLINE_SECS"
         );
     }
-    let split_headers = modsdk::header::class_headers(&sdk);
+    let mut split_headers = modsdk::header::class_headers(&sdk);
     let shared = modsdk::fits(
         &sdk,
         ModFile::Header.what(),
-        split_headers.shared.into_bytes(),
+        std::mem::take(&mut split_headers.shared).into_bytes(),
     )?;
     let (src, include) = split_dirs(root, &shown)?;
     let sources = split::sources(program, analysis);
@@ -618,8 +618,7 @@ pub fn write_split(
         bytes: 0,
     };
     let mut exported: BTreeMap<u64, Option<&str>> = BTreeMap::new();
-    let mut why: BTreeMap<String, usize> = BTreeMap::new();
-    let (mut total, mut rough) = (0usize, 0usize);
+    let mut tally = Tally::default();
     let hoisted = export_units(
         program,
         analysis,
@@ -627,30 +626,7 @@ pub fn write_split(
         library,
         set.as_ref(),
         &mut |entry, text, written| {
-            use split::Filed;
-            total += 1;
-            let filed = sources.filed(entry, text);
-            let path = match filed {
-                Filed::Source(path) => Some(path),
-                Filed::Nothing
-                | Filed::Tie
-                | Filed::Ambiguous
-                | Filed::Unmatched
-                | Filed::PastCap => None,
-            };
-            let reason = match (path, written) {
-                (Some(_), Written::Body) => None,
-                (Some(_), Written::Failed | Written::Cut) => {
-                    rough += 1;
-                    None
-                }
-                (None, Written::Body) => filed.why(),
-                (None, Written::Failed) => Some("did not decompile".to_owned()),
-                (None, Written::Cut) => Some("were cut for size".to_owned()),
-            };
-            if let Some(reason) = reason {
-                *why.entry(reason).or_default() += 1;
-            }
+            let path = tally.count(sources.filed(entry, text), written);
             exported.insert(entry, path);
             let file = path
                 .and_then(|p| sources.files.get(p))
@@ -664,15 +640,6 @@ pub fn write_split(
             "the request's deadline passed before every function was decompiled, so the files under {shown} are partial; export fewer functions (--only) or raise BORER_DEADLINE_SECS"
         );
     }
-    let left: usize = why.values().sum();
-    let reasons = if why.is_empty() {
-        "none".to_owned()
-    } else {
-        why.iter()
-            .map(|(reason, n)| format!("{n} {reason}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
     let binary = short_path(&program.path.display().to_string());
     write_whole(&src.join(split::DECLS), hoisted.head(&binary).as_bytes())?;
     let headers = &split_headers.classes;
@@ -690,30 +657,114 @@ pub fn write_split(
         &root.join("MAP.tsv"),
         split::split_map(analysis, overlay, &sdk, &named, &exported).as_bytes(),
     )?;
-    let rough = if rough > 0 {
-        format!(
-            "; {rough} of the filed did not decompile or were cut for size, filed by the one source path each references"
-        )
-    } else {
-        String::new()
-    };
-    Ok(format!(
-        "wrote {total} functions under {shown}/src: {} to {} source files and {left} to {} ({reasons}){rough}; {} class headers under {shown}/include{} and {shown}/MAP.tsv",
-        total.saturating_sub(left),
-        units.made.len() - usize::from(units.made.contains(split::REMAINDER)),
-        split::REMAINDER,
-        headers.len(),
-        if split_headers.left_out > 0 {
+    let files = units.made.len() - usize::from(units.made.contains(split::REMAINDER));
+    Ok(tally.said(&shown, files, &split_headers))
+}
+
+/// How many functions a split wrote, and why each it filed under no source
+/// file went to [`borer_engine::analysis::split::REMAINDER`].
+#[derive(Debug, Default)]
+struct Tally {
+    /// Functions written.
+    total: usize,
+    /// Functions filed under a source file that did not decompile or were
+    /// cut for size.
+    rough: usize,
+    /// Functions filed under none, by why.
+    why: BTreeMap<String, usize>,
+}
+
+impl Tally {
+    /// Counts one function.
+    ///
+    /// # Arguments
+    ///
+    /// * `filed` - Where the split files it.
+    /// * `written` - How the export wrote it.
+    ///
+    /// # Returns
+    ///
+    /// The source path it is filed under, `None` for none.
+    fn count<'a>(
+        &mut self,
+        filed: borer_engine::analysis::split::Filed<'a>,
+        written: borer_engine::analysis::decompile::export::Written,
+    ) -> Option<&'a str> {
+        use borer_engine::analysis::decompile::export::Written;
+        use borer_engine::analysis::split::Filed;
+        self.total += 1;
+        let path = match filed {
+            Filed::Source(path) => Some(path),
+            Filed::Nothing | Filed::Tie | Filed::Ambiguous | Filed::Unmatched | Filed::PastCap => {
+                None
+            }
+        };
+        let reason = match (path, written) {
+            (Some(_), Written::Body) => None,
+            (Some(_), Written::Failed | Written::Cut) => {
+                self.rough += 1;
+                None
+            }
+            (None, Written::Body) => filed.why(),
+            (None, Written::Failed) => Some("did not decompile".to_owned()),
+            (None, Written::Cut) => Some("were cut for size".to_owned()),
+        };
+        if let Some(reason) = reason {
+            *self.why.entry(reason).or_default() += 1;
+        }
+        path
+    }
+
+    /// Returns the line a split answers with.
+    ///
+    /// # Arguments
+    ///
+    /// * `shown` - The split's directory as messages spell it.
+    /// * `files` - The source files written.
+    /// * `headers` - The class headers.
+    fn said(
+        &self,
+        shown: &str,
+        files: usize,
+        headers: &borer_engine::analysis::modsdk::header::ClassHeaders,
+    ) -> String {
+        use borer_engine::analysis::{modsdk, split};
+        let left: usize = self.why.values().sum();
+        let reasons = if self.why.is_empty() {
+            "none".to_owned()
+        } else {
+            self.why
+                .iter()
+                .map(|(reason, n)| format!("{n} {reason}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let rough = if self.rough > 0 {
+            format!(
+                "; {} of the filed did not decompile or were cut for size, filed by the one source path each references",
+                self.rough
+            )
+        } else {
+            String::new()
+        };
+        let past = if headers.left_out > 0 {
             format!(
                 " ({} classes left out past the {} MiB or {} files the headers hold)",
-                split_headers.left_out,
+                headers.left_out,
                 modsdk::FILE_MAX >> 20,
                 modsdk::header::HEADERS_MAX
             )
         } else {
             String::new()
-        }
-    ))
+        };
+        format!(
+            "wrote {} functions under {shown}/src: {} to {files} source files and {left} to {} ({reasons}){rough}; {} class headers under {shown}/include{past} and {shown}/MAP.tsv",
+            self.total,
+            self.total.saturating_sub(left),
+            split::REMAINDER,
+            headers.classes.len(),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -1082,49 +1133,11 @@ mod tests {
     /// When a file is missing or holds the wrong function.
     #[test]
     fn the_split_files_a_function_by_the_source_its_assert_cites() {
-        use borer_engine::program::{Symbol, SymbolKind};
-        let mut bytes = vec![0xccu8; 0x2000];
-        let rel = |at: u64, to: u64| borer_engine::num::lo32(to.wrapping_sub(at)).to_le_bytes();
-        let mut code = vec![0x48, 0x8d, 0x0d]; // ASM: lea rcx, [rip+expr]
-        code.extend(rel(0x1007, 0x2030));
-        code.extend([0x48, 0x8d, 0x15]); // ASM: lea rdx, [rip+path]
-        code.extend(rel(0x100e, 0x2010));
-        code.extend([0x41, 0xb8, 0x07, 0, 0, 0]); // ASM: mov r8d, 7
-        code.extend([0xff, 0x15]); // ASM: call qword [rip+iat]
-        code.extend(rel(0x101a, 0x2000));
-        code.push(0xc3); // ASM: ret
-        bytes[..code.len()].copy_from_slice(&code);
-        bytes[0x20..0x26].copy_from_slice(&[0xb8, 0x01, 0, 0, 0, 0xc3]); // ASM: mov eax, 1; ret
-        let mut main = vec![0xe8]; // ASM: call check
-        main.extend(rel(0x1045, 0x1000));
-        main.push(0xe8); // ASM: call one
-        main.extend(rel(0x104a, 0x1020));
-        main.push(0xc3); // ASM: ret
-        bytes[0x40..0x40 + main.len()].copy_from_slice(&main);
-        bytes[0x1010..0x101a].copy_from_slice(b"src/a.cpp\0");
-        bytes[0x1030..0x1036].copy_from_slice(b"x > 0\0");
-        let mut p = Program::raw(
-            bytes,
-            Arch::X86_64,
-            0,
-            Some(0x1040),
-            vec![
-                Section::mapped(".text", 0x1000, 0, 0x1000, false, true),
-                Section::mapped(".rdata", 0x2000, 0x1000, 0x1000, false, false),
-            ],
-        );
-        p.symbols.push(Symbol {
-            name: "KERNEL32.dll!ReportAssertFailure".to_owned(),
-            addr: 0x2000,
-            kind: SymbolKind::Import,
-        });
+        let (p, mut o) = asserting(&[("check", &["src/a.cpp"]), ("one", &[])]);
         let a = Analysis::compute(&p);
-        let mut o = Overlay::default();
-        o.names.insert(0x1000, "check".to_owned());
-        o.names.insert(0x1020, "one".to_owned());
         let typed =
             borer_engine::analysis::protos::Proto::parse("int one(int count)").expect("parses");
-        o.prototypes.insert(0x1020, typed);
+        o.prototypes.insert(0x1100, typed);
         let dir = std::env::temp_dir().join(format!("borer-split-{}", std::process::id()));
         let said = super::write_split(
             &p,
@@ -1149,7 +1162,7 @@ mod tests {
         assert!(!unit.contains("// one @"), "{unit}");
         let rest = read("src/_unattributed.c");
         assert!(
-            rest.contains("// one @ 0x1020") && !rest.contains("// check @"),
+            rest.contains("// one @ 0x1100") && !rest.contains("// check @"),
             "{rest}"
         );
         assert!(
