@@ -98,11 +98,19 @@ jobs:
       - name: advisories
         run: cargo deny check advisories
 
+  # The gate in three parts side by side (`PARTS` in scripts/gate.py): the
+  # checks and tests, the dogfood sweeps with the time bars, and the GPUI
+  # app. Each check belongs to one part, so every check still runs once;
+  # in one job they ran past the 2-hour limit.
   gate:
-    name: gate (windows)
+    name: gate (windows, ${{ matrix.part }})
     if: github.base_ref == 'main' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [checks, sweeps, app]
     runs-on: windows-latest
-    timeout-minutes: 120
+    timeout-minutes: 90
     steps:
       # Full history: the gate's first step checks every commit message
       # since origin/main.
@@ -122,9 +130,11 @@ jobs:
       - name: toolchain
         run: rustup toolchain install --no-self-update
 
+      # One cache per part: each builds its own profiles.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           cache-all-crates: true
+          key: ${{ matrix.part }}
 
       - name: gate tools
         uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
@@ -137,7 +147,7 @@ jobs:
       # --check: verify only, and a tool the gate needs that is missing is
       # a failure here, never a skip.
       - name: gate
-        run: python scripts/gate.py --check
+        run: python scripts/gate.py --check --part ${{ matrix.part }}
         env:
           # Where the commits under test start: a pull request's base, or
           # the commit a push started from (empty on a manual run).
