@@ -11,6 +11,9 @@ use crate::isa::x86::{
 };
 use crate::num::{from_usize, lo8};
 
+/// The bit of the overflow flag in an `x86` `RFLAGS` word.
+const OF_BIT: u32 = 11;
+
 impl Emulator<'_> {
     /// Reads operand 0 as a value (for read-modify-write instructions).
     ///
@@ -411,6 +414,43 @@ impl Emulator<'_> {
             && addr < self.stack_base.wrapping_add(self.stack_span)
     }
 
+    /// Assembles the tracked flags into an `x86` `RFLAGS`/`EFLAGS` word.
+    ///
+    /// Only the flags the model tracks are set: carry, parity, zero, sign,
+    /// overflow and direction, plus the always-one reserved bit. An overflow
+    /// the last instruction did not compute reads as clear, which `pushf`
+    /// records in [`Emulator::forged_over`] so that `popf` does not restore
+    /// it as known. Used by `pushf` so the value a later `popf` restores
+    /// round-trips the flags that gate branches.
+    pub(super) fn rflags(&self) -> u64 {
+        let mut v = 0x2u64;
+        v |= u64::from(self.flags_carry);
+        v |= u64::from(self.flags_parity) << 2;
+        v |= u64::from(self.flags_zero) << 6;
+        v |= u64::from(self.flags_sign) << 7;
+        v |= u64::from(self.flags_df) << 10;
+        v |= u64::from(self.flags_over.unwrap_or(false)) << OF_BIT;
+        v
+    }
+
+    /// Sets the tracked flags from an `x86` `RFLAGS`/`EFLAGS` word.
+    ///
+    /// The inverse of [`Emulator::rflags`], for `popf`: it reads back carry,
+    /// parity, zero, sign, overflow and direction and leaves the untracked
+    /// bits alone.
+    ///
+    /// # Arguments
+    ///
+    /// * `v` - The flags word popped from the stack.
+    fn set_rflags(&mut self, v: u64) {
+        self.flags_carry = v & 1 != 0;
+        self.flags_parity = v >> 2 & 1 != 0;
+        self.flags_zero = v >> 6 & 1 != 0;
+        self.flags_sign = v >> 7 & 1 != 0;
+        self.flags_df = v >> 10 & 1 != 0;
+        self.flags_over = Some(v >> OF_BIT & 1 != 0);
+    }
+
     /// Pushes a value onto the scratch stack.
     ///
     /// # Arguments
@@ -510,7 +550,7 @@ impl Emulator<'_> {
                 let at = self.reg(Register::RSP);
                 let v = self.pop(bytes)?;
                 self.set_rflags(v);
-                if self.forged_over.take_if(|f| *f == at).is_some() && v >> 11 & 1 == 0 {
+                if self.forged_over.take_if(|f| *f == at).is_some() && v >> OF_BIT & 1 == 0 {
                     self.flags_over = None;
                 }
             }

@@ -883,43 +883,6 @@ impl<'a> Emulator<'a> {
         }
     }
 
-    /// Assembles the tracked flags into an `x86` `RFLAGS`/`EFLAGS` word.
-    ///
-    /// Only the flags the model tracks are set: carry, parity, zero, sign,
-    /// overflow and direction, plus the always-one reserved bit. An overflow
-    /// the last instruction did not compute reads as clear, which `pushf`
-    /// records in [`Emulator::forged_over`] so that `popf` does not restore
-    /// it as known. Used by `pushf` so the value a later `popf` restores
-    /// round-trips the flags that gate branches.
-    fn rflags(&self) -> u64 {
-        let mut v = 0x2u64;
-        v |= u64::from(self.flags_carry);
-        v |= u64::from(self.flags_parity) << 2;
-        v |= u64::from(self.flags_zero) << 6;
-        v |= u64::from(self.flags_sign) << 7;
-        v |= u64::from(self.flags_df) << 10;
-        v |= u64::from(self.flags_over.unwrap_or(false)) << 11;
-        v
-    }
-
-    /// Sets the tracked flags from an `x86` `RFLAGS`/`EFLAGS` word.
-    ///
-    /// The inverse of [`Emulator::rflags`], for `popf`: it reads back carry,
-    /// parity, zero, sign, overflow and direction and leaves the untracked
-    /// bits alone.
-    ///
-    /// # Arguments
-    ///
-    /// * `v` - The flags word popped from the stack.
-    fn set_rflags(&mut self, v: u64) {
-        self.flags_carry = v & 1 != 0;
-        self.flags_parity = v >> 2 & 1 != 0;
-        self.flags_zero = v >> 6 & 1 != 0;
-        self.flags_sign = v >> 7 & 1 != 0;
-        self.flags_df = v >> 10 & 1 != 0;
-        self.flags_over = Some(v >> 11 & 1 != 0);
-    }
-
     /// Backs the caller's frame above the stack base with zeros, so a
     /// routine given no stack arguments reads zeros there instead of
     /// faulting at its first one.
