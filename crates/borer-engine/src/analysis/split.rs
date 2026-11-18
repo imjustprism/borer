@@ -529,6 +529,8 @@ mod tests {
         let tie = head("f", &["x/b.cc", "x/a.cpp", "x/a.h", "x/a.h"]);
         assert_eq!(unit_of(&tie), None);
         assert_eq!(unit_of(&head("f", &["no path"])), None);
+        let shader = "// f @ 0x1000: 9 instructions\n  load(\"shaders/lit.inc\");\n";
+        assert_eq!(unit_of(shader), None);
     }
 
     /// A function referencing several paths is filed only on the one its

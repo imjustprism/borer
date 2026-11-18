@@ -184,14 +184,22 @@ pub(super) fn call_starts(line: &str) -> Vec<usize> {
 }
 
 /// The file extensions a cited C or C++ source path ends with.
-pub(crate) const CITED_EXTENSIONS: [&str; 10] = [
-    ".h", ".hpp", ".hh", ".hxx", ".inl", ".c", ".cc", ".cpp", ".cxx", ".inc",
+pub(crate) const CITED_EXTENSIONS: [&str; 9] = [
+    ".h", ".hpp", ".hh", ".hxx", ".inl", ".c", ".cc", ".cpp", ".cxx",
 ];
 
 /// The extensions of [`CITED_EXTENSIONS`] a header ends with: its code is
 /// inlined wherever it is used, so a cited header says less of where a
 /// function lives than a cited source file.
-pub(crate) const HEADER_EXTENSIONS: [&str; 6] = [".h", ".hpp", ".hh", ".hxx", ".inl", ".inc"];
+pub(crate) const HEADER_EXTENSIONS: [&str; 5] = [".h", ".hpp", ".hh", ".hxx", ".inl"];
+
+/// The extension of a textual include, read as a path but never a file to
+/// file a function under.
+///
+/// An assert's file argument and a literal cut for display take it, but a
+/// bare literal ending in it is as often data (a shader, a table) as
+/// source.
+const INCLUDE_EXTENSION: &str = ".inc";
 
 /// Tells whether an argument is a literal naming a C or C++ source file
 /// ([`is_source_path`]).
@@ -204,13 +212,15 @@ pub(super) fn source_path(arg: &str) -> bool {
 }
 
 /// Tells whether a literal's text names a C or C++ source file, as an
-/// assert cites one: no space, a [`CITED_EXTENSIONS`] extension.
+/// assert cites one: no space, a [`CITED_EXTENSIONS`] extension or
+/// [`INCLUDE_EXTENSION`].
 ///
 /// # Arguments
 ///
 /// * `text` - The literal's text, unquoted.
 pub(crate) fn is_source_path(text: &str) -> bool {
-    !text.contains(' ') && CITED_EXTENSIONS.iter().any(|e| text.ends_with(e))
+    !text.contains(' ')
+        && (CITED_EXTENSIONS.iter().any(|e| text.ends_with(e)) || text.ends_with(INCLUDE_EXTENSION))
 }
 
 /// Most variables the asserts name in one function.

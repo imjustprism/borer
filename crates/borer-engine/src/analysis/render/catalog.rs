@@ -1067,13 +1067,14 @@ pub(crate) fn spelled_as<'a, S: AsRef<str>>(
 /// The functions by path, separators normalized to `/`; a path nothing
 /// references from a function is left out.
 pub(crate) fn cited_sources(p: &Program, a: &Analysis) -> BTreeMap<String, BTreeSet<u64>> {
+    use crate::analysis::decompile::CITED_EXTENSIONS;
     let mut files: BTreeMap<String, BTreeSet<u64>> = BTreeMap::new();
     for (target, lit) in literal_targets(p, a).iter() {
         let sites = a.xrefs_to(*target);
         let Some(path) = lit.strip_prefix('"').and_then(|t| t.strip_suffix('"')) else {
             continue;
         };
-        if !crate::analysis::decompile::is_source_path(path) {
+        if path.contains(' ') || !CITED_EXTENSIONS.iter().any(|e| path.ends_with(e)) {
             continue;
         }
         let entries: BTreeSet<u64> = sites.iter().filter_map(|s| s.from_entry).collect();
