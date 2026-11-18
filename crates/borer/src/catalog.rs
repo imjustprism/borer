@@ -137,7 +137,7 @@ pub(crate) const RESOURCES: &[(&str, &str)] = &[
     ),
     (
         "borer://asserts",
-        "The member names the binary's assertions spell (`this->m_name`), each with how many functions assert it and their classes, then each paired with the field offset the code around its asserts reads: strong (the sites of two or more functions agree), contested (sites disagree; listed, not resolved) or weak, each with its sites, and the set_type call that states the strong ones; a decompile or summary of a function that asserts points here",
+        "The member names the binary's assertions spell (`this->m_name`), each with how many functions assert it and their classes, then each paired with the field offset the code around its asserts reads: strong (the sites of two or more functions agree), contested (sites disagree; listed, not resolved), weak or bare (no this->, maybe a local), each with its sites, and the set_type call that states the strong ones; a decompile or summary of a function that asserts points here",
     ),
     (
         "borer://sources",
@@ -646,6 +646,24 @@ mod tests {
         let devirt = described("borer://devirt/{address}");
         for setting in ["budget=", "strict", "reg="] {
             assert!(devirt.contains(setting), "{setting}: {devirt}");
+        }
+    }
+
+    /// The `borer://asserts` description names every tier its pairing rows
+    /// spell.
+    ///
+    /// # Panics
+    ///
+    /// When a tier is unnamed.
+    #[test]
+    fn the_asserts_description_names_every_tier() {
+        let (_, text) = super::RESOURCES
+            .iter()
+            .find(|&&(u, _)| u == "borer://asserts")
+            .copied()
+            .expect("listed");
+        for tier in ["strong", "contested", "weak", "bare"] {
+            assert!(text.contains(tier), "{tier}: {text}");
         }
     }
 
