@@ -6,7 +6,7 @@
 //! from a base whose table reaches that index, and every slot up to it is
 //! that base's virtual in both. Tables that agree so at [`ANCHORS_MIN`]
 //! indexes are one family. A member's name for slot `k` is a hint for
-//! another member's slot `k` only when the two share a function at `k` or
+//! another member's slot `k` only when the two share an anchor at `k` or
 //! above, or `k` is below the table of a parent the constructors name for
 //! both: past that, two siblings' slots `k` may be each one's own new
 //! virtual. The guards of [`super::propagate_slot_names`] hold too: a name
@@ -217,14 +217,15 @@ fn build_family(analysis: &Analysis, overlay: &Overlay, class: &str) -> Option<F
             continue;
         };
         let theirs = anchors(&info.slots);
+        let anchor = |f: u64| own_anchors.contains(&f) && theirs.contains(&f);
         let shared = info
             .slots
             .iter()
             .zip(&own.slots)
-            .filter(|(a, b)| a == b && own_anchors.contains(a) && theirs.contains(a))
+            .filter(|(a, b)| a == b && anchor(**a))
             .count();
         members.push((m.clone(), shared));
-        let limit = reach(classes, own, info);
+        let limit = reach(classes, own, info, &anchor);
         for (k, &f) in info.slots.iter().enumerate().take(limit) {
             let Some(method) = method_at(f) else {
                 continue;
@@ -271,21 +272,29 @@ fn build_family(analysis: &Analysis, overlay: &Overlay, class: &str) -> Option<F
 
 /// Returns how many of `own`'s slots `member`'s names are hints for.
 ///
-/// That is up to and including the last index the two tables hold one
-/// function at, or the length of a parent's table the constructors name
-/// for both, the larger.
+/// That is up to and including the last index the two tables share an
+/// anchor at, or the length of a parent's table the constructors name for
+/// both, the larger. A stub both tables hold twice shares nothing: two
+/// siblings each fill their own new slots with it.
 ///
 /// # Arguments
 ///
 /// * `classes` - Classes with their tables and parents.
 /// * `own` - The class being named.
 /// * `member` - The member whose names would travel.
-fn reach(classes: &BTreeMap<String, ClassInfo>, own: &ClassInfo, member: &ClassInfo) -> usize {
+/// * `anchor` - Whether a function is an anchor of both tables
+///   ([`anchors`]).
+fn reach(
+    classes: &BTreeMap<String, ClassInfo>,
+    own: &ClassInfo,
+    member: &ClassInfo,
+    anchor: &dyn Fn(u64) -> bool,
+) -> usize {
     let shared = member
         .slots
         .iter()
         .zip(&own.slots)
-        .rposition(|(a, b)| *a != 0 && a == b)
+        .rposition(|(a, b)| a == b && anchor(*a))
         .map_or(0, |k| k + 1);
     let parent = own
         .parent

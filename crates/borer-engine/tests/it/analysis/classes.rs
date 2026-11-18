@@ -1368,6 +1368,27 @@ fn siblings_lend_no_names_past_the_slots_they_share() {
     assert!(!text.contains("Upload"), "{text}");
 }
 
+/// A stub two siblings both hold past their own virtuals carries no name
+/// down to them.
+///
+/// `Texture` and `Sound` end in the same two pure-virtual stubs at slots 3
+/// and 4, which neither inherited from the other, so `Texture`'s `Bind` at
+/// slot 2 is still no hint for `Sound`'s slot 2.
+#[test]
+fn a_stub_siblings_both_end_in_lends_no_names() {
+    use borer_engine::analysis::vtables::render_slots;
+    let (a, o) = family_fixture(
+        &[
+            ("Texture", 0x8000, &[0x100, 0x200, 0x310, 0x900, 0x900]),
+            ("Sound", 0x8100, &[0x100, 0x200, 0x320, 0x900, 0x900]),
+        ],
+        &[(0x310, "Texture::Bind")],
+    );
+    let text = render_slots(&a, &o, &a.classes.by_name["Sound"], 48);
+    assert!(text.contains("family: Texture (2 shared)"), "{text}");
+    assert!(!text.contains("Bind"), "{text}");
+}
+
 /// A function a table holds at two slots is a stub, not an anchor: it
 /// neither links two tables nor counts as a slot they share.
 #[test]
