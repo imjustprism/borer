@@ -160,7 +160,7 @@ const WORKFLOW: &str = "borer: agent-native binary analysis (x86/x64 and arm64 P
 
 /// The instructions' resource sentence before the groups, tools written as
 /// in [`WORKFLOW`].
-const RESOURCES_LEAD: &str = "Resources are read by URI through resources/read or {query}; a \
+const RESOURCES_LEAD: &str = "Resources are read by URI with resources/read or {query}; a \
      template read without its argument (borer://emulate) gives its grammar and an \
      example, and borer://help lists all. Lists page with !offset=<n> and \
      !limit=<n> on the URI, and borer://session says what this session loaded, \
@@ -176,7 +176,7 @@ const LIVE: &str = "Live: {live_attach}(process) opens the running program read-
      every live address may be a static address or a name. ";
 
 /// The instructions' last sentence: the reload.
-const RELOAD: &str = "After a rebuild of borer, {reload} restarts the server in place.";
+const RELOAD: &str = "After rebuilding borer, {reload} restarts the server in place.";
 
 /// The resources by what an agent wants of them: every resource name in
 /// exactly one group, which the instructions list them under.
