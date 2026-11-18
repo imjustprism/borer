@@ -541,6 +541,15 @@ fn a_section_without_file_bytes_is_named_not_unmapped() {
         inside
     );
     assert_eq!(read_values(&p, 0x402010, Kind::U8, 1).unwrap_err(), inside);
+    let ty = borer_engine::analysis::utypes::parse_type("u32").expect("a type");
+    let typed = borer_engine::analysis::render::typed_tsv(
+        &p,
+        Some(&a),
+        &borer_engine::analysis::Overlay::default(),
+        0x402010,
+        &ty,
+    );
+    assert_eq!(typed.unwrap_err(), inside);
     let none = no_function_at(&p, &a, 0x402010);
     assert_eq!(
         none,

@@ -292,6 +292,31 @@ fn cli_refuses_what_it_cannot_answer() {
     assert!(stdout.contains(": returned after "), "{stdout}");
 }
 
+/// `hexdump` and `disasm` in a section the file holds no bytes for name
+/// the section, as the tools do, not "not mapped".
+///
+/// # Panics
+///
+/// When a command reads there, or its refusal does not name `.bss`.
+#[test]
+fn cli_reads_in_a_section_without_file_bytes_name_it() {
+    let path = std::env::temp_dir().join(format!("borer_contract_bss_{}.exe", std::process::id()));
+    std::fs::write(&path, tiny_pe_with_bss()).expect("the fixture is written");
+    let bin = path.display().to_string();
+    let want =
+        "address 0x140002010 is in .bss, which holds no file bytes (the loader zero-fills it)";
+    for args in [
+        ["hexdump", bin.as_str(), "0x140002010", "8"],
+        ["disasm", bin.as_str(), "0x140002010", "1"],
+    ] {
+        let run = borer(&args).expect("borer runs");
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert_eq!(run.status.code(), Some(1), "{args:?}: {stderr}");
+        assert!(stderr.contains(want), "{args:?}: {stderr}");
+    }
+    std::fs::remove_file(&path).ok();
+}
+
 /// `doctor` answers one line per item of the setup without a binary, and
 /// `offline` keeps it off the network; a word it does not take is refused.
 ///

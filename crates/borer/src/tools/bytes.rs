@@ -414,4 +414,40 @@ mod tests {
             "{both}"
         );
     }
+
+    /// A hexdump, a disassembly and a read in a section the file holds no
+    /// bytes for name the section and say the loader zero-fills it.
+    ///
+    /// # Panics
+    ///
+    /// When a tool answers, or its refusal calls the address not mapped.
+    #[test]
+    fn reads_in_a_section_without_file_bytes_name_it() {
+        use crate::params::{DisassembleParams, HexdumpParams};
+        let mut bss = Section::mapped(".bss", 0x2000, 0, 0x100, true, false);
+        bss.file_size = 0;
+        let text = Section::mapped(".text", 0x1000, 0, 0x10, false, true);
+        let program = Program::raw(vec![0xc3; 0x10], Arch::X86_64, 0, None, vec![text, bss]);
+        let server = crate::testing::server_with(program);
+        let want =
+            "address 0x2010 is in .bss, which holds no file bytes (the loader zero-fills it)";
+        let dump = server.hexdump(Parameters(HexdumpParams {
+            address: "0x2010".to_owned(),
+            length: None,
+        }));
+        assert_eq!(dump.expect_err("refused").message, want);
+        let code = server.disassemble(Parameters(DisassembleParams {
+            address: "0x2010".to_owned(),
+            count: None,
+            bytes: None,
+        }));
+        assert_eq!(code.expect_err("refused").message, want);
+        let read = server.read(Parameters(ReadParams {
+            address: "0x2010".to_owned(),
+            kind: Some(ReadKind::U8),
+            r#type: None,
+            count: None,
+        }));
+        assert_eq!(read.expect_err("refused").message, want);
+    }
 }
