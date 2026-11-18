@@ -1753,7 +1753,7 @@ fn imm_op(i: &Instruction) -> Option<u64> {
 /// # Returns
 ///
 /// The name.
-fn reg_name(reg: Register) -> String {
+pub(super) fn reg_name(reg: Register) -> String {
     format!("{reg:?}").to_lowercase()
 }
 

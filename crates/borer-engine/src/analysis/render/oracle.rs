@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::analysis::decompile::decompile_named;
-use crate::analysis::decompile::signature::{passing, printed};
+use crate::analysis::decompile::signature::{Passing, passing, printed};
 use crate::text::{one_line, quoted};
 
 /// Check values a standard checksum produces for the probe string.
@@ -74,7 +74,11 @@ pub(super) struct Candidate {
 /// An argument index that cannot be read is refused rather than taken as the
 /// first argument, so a caller who asked about `a2` and mistyped it does not
 /// read a report about `a1` with nothing to say the question changed; so is
-/// one the function's signature does not list ([`beyond_parameters`]).
+/// one the function's signature does not list ([`beyond_parameters`]). The
+/// default question is not refused when the signature lists no parameter,
+/// since a signature may under-report one (`push rcx; pop rax`): the first
+/// argument's place is probed anyway, under a heading that says so and
+/// calls it by its register, never `argument 1`.
 ///
 /// # Arguments
 ///
@@ -131,7 +135,7 @@ pub fn solve_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
         .function_at(start)
         .ok_or_else(|| format!("no function contains {start:#x}"))?;
     let entry = f.entry;
-    beyond_parameters(p, a, o, entry, slot)?;
+    let unlisted = beyond_parameters(p, a, o, entry, named.map(|_| slot))?;
     let instrs = function_instructions(p, a, entry);
     let candidates = compared_constants(
         &instrs,
@@ -159,12 +163,8 @@ pub fn solve_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
         };
         answers.entry(answer).or_default().push(*c);
     }
-    let mut out = format!(
-        "# argument {} of {}, over {} value(s) the function compares against\n",
-        slot + 1,
-        short_name(a, o, entry),
-        candidates.len()
-    );
+    let name = short_name(a, o, entry);
+    let (what, mut out) = heading(&name, &pass, slot, unlisted, candidates.len());
     if answers.len() <= 1 {
         let same = answers.keys().next().cloned().unwrap_or_default();
         let why = if same.starts_with("returns") {
@@ -186,7 +186,7 @@ pub fn solve_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
         if dereferenced {
             let _ = writeln!(
                 out,
-                "# argument {0} is read through, so it is a pointer: a constant in it is an address, not a value. Set up a buffer instead, with emulate {entry:#x},a{0}=<addr>,w<addr>=<bytes>",
+                "# {what} is read through, so it is a pointer: a constant in it is an address, not a value. Set up a buffer instead, with emulate {entry:#x},a{}=<addr>,w<addr>=<bytes>",
                 slot + 1
             );
         }
@@ -284,10 +284,10 @@ pub(super) fn compared_constants(
 /// `solve 0x401000,a99` ran 48 emulations varying a register no
 /// convention passes anything in and reported `argument 99` as if it were
 /// one. A signature that does not print, or a variadic one, refuses
-/// nothing: the argument may be real where the text cannot say. A
-/// signature with no parameters refuses the default first argument too:
-/// probing `rcx` of `xor eax, eax; ret` answered about an argument that is
-/// not there.
+/// nothing: the argument may be real where the text cannot say. Only an
+/// argument asked for by name is refused; the default question probes the
+/// first argument's place even when the signature lists none
+/// ([`solve_tsv`]).
 ///
 /// # Arguments
 ///
@@ -295,7 +295,13 @@ pub(super) fn compared_constants(
 /// * `a` - The analysis.
 /// * `o` - User names.
 /// * `entry` - The function's entry.
-/// * `slot` - The argument asked for, from zero.
+/// * `slot` - The argument asked for by name, from zero; `None` for the
+///   default first one.
+///
+/// # Returns
+///
+/// Whether the default question is asked of a signature listing no
+/// parameter.
 ///
 /// # Errors
 ///
@@ -306,33 +312,93 @@ fn beyond_parameters(
     a: &Analysis,
     o: &Overlay,
     entry: u64,
-    slot: usize,
-) -> Result<(), String> {
-    let word = u8::try_from(p.arch.bitness().unwrap_or(64)).unwrap_or(64);
-    let Some(sig) = decompile_named(p, a, o, entry).and_then(|t| printed(&t, word).ok()) else {
-        return Ok(());
+    slot: Option<usize>,
+) -> Result<bool, String> {
+    let (at, (count, text)) = match (slot, listed_parameters(p, a, o, entry)) {
+        (None, listed) => return Ok(listed.is_some_and(|(n, _)| n == 0)),
+        (Some(s), Some(listed)) if s >= listed.0 => (s + 1, listed),
+        _ => return Ok(false),
     };
-    let count = sig.parameter_kinds().len();
-    if slot < count || sig.text.contains("...") {
-        return Ok(());
-    }
-    if count == 0 {
-        return Err(format!(
-            "{} takes no parameters ({}); there is no argument to solve",
-            short_name(a, o, entry),
-            sig.text
-        ));
-    }
+    let name = short_name(a, o, entry);
+    let takes = match count {
+        0 => "no parameters".to_owned(),
+        1 => "1 parameter".to_owned(),
+        n => format!("{n} parameters"),
+    };
+    let tail = if count == 0 {
+        ": its recovered signature lists none"
+    } else {
+        " of them"
+    };
     Err(format!(
-        "{} takes {} ({}); a{} is not one of them",
-        short_name(a, o, entry),
-        match count {
-            1 => "1 parameter".to_owned(),
-            n => format!("{n} parameters"),
-        },
-        sig.text,
-        slot + 1
+        "{name} takes {takes} ({text}); a{at} is not one{tail}"
     ))
+}
+
+/// Returns how a solve names the place it varies, and its report's first
+/// line.
+///
+/// # Arguments
+///
+/// * `name` - The function's short name.
+/// * `pass` - How the function's arguments are passed.
+/// * `slot` - The argument varied, from zero.
+/// * `unlisted` - Whether the signature lists no parameter, so the place
+///   is named by its register, not as an argument.
+/// * `tried` - How many values were tried.
+fn heading(
+    name: &str,
+    pass: &Passing,
+    slot: usize,
+    unlisted: bool,
+    tried: usize,
+) -> (String, String) {
+    let tail = format!("over {tried} value(s) the function compares against\n");
+    if !unlisted {
+        let what = format!("argument {}", slot + 1);
+        let line = format!("# {what} of {name}, {tail}");
+        return (what, line);
+    }
+    let (what, place) = pass.conv.args.first().map_or_else(
+        || {
+            (
+                "the first stack argument".to_owned(),
+                "the first stack argument".to_owned(),
+            )
+        },
+        |&r| {
+            let reg = partial::reg_name(r.full_register());
+            (reg.clone(), format!("the first argument register ({reg})"))
+        },
+    );
+    let line = format!(
+        "# the recovered signature of {name} lists no parameter; probing {place} anyway, {tail}"
+    );
+    (what, line)
+}
+
+/// Returns how many parameters a function's recovered signature lists.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - User names.
+/// * `entry` - The function's entry.
+///
+/// # Returns
+///
+/// The count and the signature's text, `None` when the signature does not
+/// print or is variadic: then the count says nothing.
+fn listed_parameters(
+    p: &Program,
+    a: &Analysis,
+    o: &Overlay,
+    entry: u64,
+) -> Option<(usize, String)> {
+    let word = u8::try_from(p.arch.bitness().unwrap_or(64)).unwrap_or(64);
+    let sig = decompile_named(p, a, o, entry).and_then(|t| printed(&t, word).ok())?;
+    (!sig.text.contains("...")).then(|| (sig.parameter_kinds().len(), sig.text))
 }
 
 /// Runs a function on one prepared input and reports what came back.
@@ -730,23 +796,54 @@ mod tests {
         assert!(solve_tsv(&read, &a, &o, "0x1000,a1").is_ok());
     }
 
-    /// A solve of a function with no parameters says there is no argument
-    /// to solve instead of probing the first argument register.
+    /// A default solve of a function whose signature lists no parameter
+    /// probes the first argument register anyway and says so; `a1` asked
+    /// by name is refused.
+    ///
+    /// `push rcx; pop rax` reads `rcx` though the signature misses it, so
+    /// refusing lost the `0x7` answer; `xor eax, eax` never reads it, and
+    /// neither answer may call `rcx` an argument.
     ///
     /// # Panics
     ///
-    /// When the default solve answers about an argument.
+    /// When the heading is missing, an answer is lost or `argument 1` is
+    /// claimed.
     #[test]
-    fn solve_refuses_a_function_with_no_parameters() {
+    fn solve_probes_rcx_when_the_signature_lists_no_parameter() {
+        let o = Overlay::default();
+        let heading = "# the recovered signature of sub_1000 lists no parameter; probing the first argument register (rcx) anyway";
+        let pushed = Program::raw_x64(&[
+            0x51, // ASM: push rcx
+            0x58, // ASM: pop rax
+            0x83, 0xf8, 0x07, // ASM: cmp eax,7
+            0x0f, 0x94, 0xc0, // ASM: sete al
+            0x0f, 0xb6, 0xc0, // ASM: movzx eax,al
+            0xc3, // ASM: ret
+        ]);
+        let a = Analysis::compute(&pushed);
+        let out = solve_tsv(&pushed, &a, &o, "0x1000").unwrap();
+        assert!(out.starts_with(heading), "{out}");
+        assert!(
+            out.contains("\n# returns 0x1: 0x7 (from 0x1002)\n"),
+            "{out}"
+        );
+        assert!(!out.contains("argument 1"), "{out}");
         let none = Program::raw_x64(&[
             0x31, 0xc0, // ASM: xor eax,eax
             0xc3, // ASM: ret
         ]);
         let a = Analysis::compute(&none);
-        let refused = solve_tsv(&none, &a, &Overlay::default(), "0x1000").unwrap_err();
+        let out = solve_tsv(&none, &a, &o, "0x1000").unwrap();
+        assert!(out.starts_with(heading), "{out}");
+        assert!(
+            out.contains("every candidate returns 0x0, so none of its own constants decides this"),
+            "{out}"
+        );
+        assert!(!out.contains("argument 1"), "{out}");
+        let refused = solve_tsv(&none, &a, &o, "0x1000,a1").unwrap_err();
         assert!(
             refused.starts_with("sub_1000 takes no parameters (")
-                && refused.ends_with("); there is no argument to solve"),
+                && refused.ends_with("); a1 is not one: its recovered signature lists none"),
             "{refused}"
         );
     }
