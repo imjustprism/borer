@@ -1043,17 +1043,15 @@ fn referencing(n: usize, rdata: &[u8], targets: impl Fn(usize) -> [usize; 2]) ->
 const CHAINED: usize = 4096;
 
 /// A chain of functions, each referencing its own signature and the one
-/// before it, is named whole, in work linear in its references.
+/// before it, is named whole from a loaded image.
 ///
 /// Only the last function references a signature no other does; naming
 /// it leaves the one before it the last unnamed referrer of its own, and
-/// so on down. The choosing loop named one function per pass over all of
-/// them, about 4n² keyed lookups (10^10 for 50,000 functions in a 1.9 MB
-/// file). It now takes a few steps per reference, and a loop that
-/// rescanned every function would run out of them and leave the chain
-/// unnamed.
+/// so on down, so the chain is named one function per round. The work
+/// that takes is bounded in `naming`'s own test, which counts its steps.
 #[test]
-fn a_chain_of_signatures_is_named_in_linear_work() {
+fn a_chain_of_signatures_is_named_whole() {
+    let _serial = serial();
     let sig = |k: usize| format!("void A::f{k:05}()\0");
     let width = sig(0).len();
     let rdata: String = (0..CHAINED).map(sig).collect();

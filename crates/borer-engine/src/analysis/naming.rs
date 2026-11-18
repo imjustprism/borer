@@ -86,7 +86,7 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
         .map(|f| f.entry)
         .collect();
     let mut assigned = vec![false; found.referrers.len()];
-    let mut chosen = choose_own(&found, &mut named, &mut assigned);
+    let (mut chosen, _) = choose_own(&found, &mut named, &mut assigned);
     chosen.extend(choose_helpers(program, analysis, &found, &named, &assigned));
     let mut seen: BTreeMap<String, u32> = BTreeMap::new();
     for f in &mut analysis.functions {
@@ -183,19 +183,21 @@ fn signatures(program: &Program, analysis: &mut Analysis) -> Found {
 ///
 /// # Returns
 ///
-/// The index in `found.sigs` of each newly named function's signature.
+/// The index in `found.sigs` of each newly named function's signature,
+/// and the steps spent.
 fn choose_own(
     found: &Found,
     named: &mut BTreeSet<u64>,
     assigned: &mut [bool],
-) -> BTreeMap<u64, usize> {
+) -> (BTreeMap<u64, usize>, usize) {
     let mut unnamed: Vec<usize> = found
         .referrers
         .iter()
         .map(|r| r.iter().filter(|f| !named.contains(f)).count())
         .collect();
     let references: usize = found.referrers.iter().map(BTreeSet::len).sum();
-    let mut fuel = references.saturating_mul(FUEL_PER_REFERENCE);
+    let budget = references.saturating_mul(FUEL_PER_REFERENCE);
+    let mut fuel = budget;
     let mut chosen = BTreeMap::new();
     let mut undecidable = BTreeSet::new();
     let mut queue: BTreeSet<u64> = found
@@ -211,7 +213,7 @@ fn choose_own(
             .filter_map(|e| found.candidates.get_key_value(e))
         {
             let Some(left) = fuel.checked_sub(cands.len()) else {
-                return chosen;
+                return (chosen, budget);
             };
             fuel = left;
             let mut own = cands
@@ -246,7 +248,7 @@ fn choose_own(
                 *count = count.saturating_sub(1);
                 if *count == 1 {
                     let Some(left) = fuel.checked_sub(refs.len()) else {
-                        return chosen;
+                        return (chosen, budget);
                     };
                     fuel = left;
                     next.extend(refs.iter().find(|f| !named.contains(f)));
@@ -255,7 +257,7 @@ fn choose_own(
         }
         queue = next.difference(&undecidable).copied().collect();
     }
-    chosen
+    (chosen, budget.saturating_sub(fuel))
 }
 
 /// Names the helper behind each signature several unnamed functions still
@@ -776,7 +778,9 @@ fn strip_keywords(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{handler_name, parse_signature, setter_member};
+    use super::{
+        BTreeMap, BTreeSet, Found, choose_own, handler_name, parse_signature, setter_member,
+    };
 
     /// A handler's type check names the handler; prose and other asserts do not.
     ///
@@ -868,5 +872,42 @@ mod tests {
         assert!(parse_signature("Failed to open file (%s)").is_none());
         assert!(parse_signature("Error in function main(int)").is_none());
         assert!(parse_signature("call foo() now").is_none());
+    }
+
+    /// A chain of functions, each referencing its own name and the one
+    /// before it, is named whole in at most three steps per reference.
+    ///
+    /// Only the last function's name has one referrer; naming it leaves
+    /// the one before it the last referrer of its own, and so on down, one
+    /// function per round. A loop that rescanned every function each round
+    /// spent steps quadratic in the chain.
+    ///
+    /// # Panics
+    ///
+    /// When the chain is not named whole or the steps pass the bound.
+    #[test]
+    fn a_chain_is_chosen_in_linear_steps() {
+        const N: usize = 1000;
+        let entry = |k: usize| 0x1000 + crate::num::from_usize(k);
+        let found = Found {
+            sigs: Vec::new(),
+            candidates: (0..N)
+                .map(|k| {
+                    let names = [(k, k), (k.saturating_sub(1), k.saturating_sub(1))];
+                    (entry(k), names.into_iter().collect())
+                })
+                .collect(),
+            referrers: (0..N)
+                .map(|n| [entry(n), entry((n + 1).min(N - 1))].into_iter().collect())
+                .collect(),
+        };
+        let references: usize = found.referrers.iter().map(BTreeSet::len).sum();
+        let (chosen, steps) = choose_own(&found, &mut BTreeSet::new(), &mut vec![false; N]);
+        let whole = (0..N).map(|k| (entry(k), k)).collect::<BTreeMap<_, _>>();
+        assert!(chosen == whole, "{} of {N} named", chosen.len());
+        assert!(
+            steps <= 3 * references,
+            "{steps} steps for {references} references"
+        );
     }
 }
