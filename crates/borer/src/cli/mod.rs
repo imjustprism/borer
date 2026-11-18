@@ -344,7 +344,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             }
             let va = s.address(arg(args, 2, "hexdump needs an address")?)?;
             let dump = hexfmt::hex_rows(&s.program, va, n)
-                .spell()
+                .spell(&s.program)
                 .map_err(anyhow::Error::msg)?;
             print!("{dump}");
         }

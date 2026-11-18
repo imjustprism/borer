@@ -341,7 +341,7 @@ impl BorerServer {
                 return hexfmt::file_hexdump(p, off, length.n);
             }
             let va = self.addr(p, &address)?;
-            hexfmt::hex_rows(p, va, length.n).spell()
+            hexfmt::hex_rows(p, va, length.n).spell(p)
         })
         .map(|text| length.noted(text))
     }

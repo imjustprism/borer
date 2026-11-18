@@ -560,7 +560,7 @@ fn a_section_without_file_bytes_is_named_not_unmapped() {
         "address 0x402010 is in .themida, which holds no file bytes (the loader zero-fills it)";
     assert_eq!(p.no_bytes_at(0x402010), inside);
     assert_eq!(
-        hexdump::hex_rows(&p, 0x402010, 64).spell().unwrap_err(),
+        hexdump::hex_rows(&p, 0x402010, 64).spell(&p).unwrap_err(),
         inside
     );
     assert_eq!(read_values(&p, 0x402010, Kind::U8, 1).unwrap_err(), inside);

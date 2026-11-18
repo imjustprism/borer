@@ -101,16 +101,16 @@ pub struct HexRows {
     pub va: u64,
     /// The runs, each starting where the one before ends.
     pub spans: Vec<HexSpan>,
-    /// Why the file holds no byte at `va`
-    /// ([`crate::program::Program::no_bytes_at`]), when the first run is
-    /// not the file's bytes.
-    pub refusal: Option<String>,
 }
 
 impl HexRows {
     /// Returns the dump as the `hexdump` tool and the CLI print it: the
     /// bytes of the first run, the file's bytes from `va` within its
     /// section.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The image the runs were read from, for the refusal.
     ///
     /// # Returns
     ///
@@ -121,15 +121,15 @@ impl HexRows {
     ///
     /// When the file holds no bytes at `va`: the section declaring it and
     /// why it holds none there, or that nothing maps it
-    /// ([`HexRows::refusal`]).
-    pub fn spell(&self) -> Result<String, String> {
+    /// ([`crate::program::Program::no_bytes_at`]).
+    pub fn spell(&self, program: &crate::program::Program) -> Result<String, String> {
         let Some(HexSpan {
             fill: HexFill::Bytes(bytes),
             section,
             ..
         }) = self.spans.first()
         else {
-            return Err(self.refusal.clone().unwrap_or_default());
+            return Err(program.no_bytes_at(self.va));
         };
         let sec = section
             .as_deref()
@@ -209,11 +209,7 @@ pub fn hex_rows(program: &crate::program::Program, va: u64, len: usize) -> HexRo
         };
         at = after;
     }
-    let refusal = spans
-        .first()
-        .filter(|s| !matches!(s.fill, HexFill::Bytes(_)))
-        .map(|_| program.no_bytes_at(va));
-    HexRows { va, spans, refusal }
+    HexRows { va, spans }
 }
 
 /// Renders up to `max` bytes of the file at a file offset, rows addressed
@@ -392,23 +388,23 @@ mod tests {
     fn hex_rows_spell_the_first_section_s_bytes() {
         let (bytes, p) = sections();
         assert_eq!(
-            hex_rows(&p, 0x1008, 0x10).spell().as_deref(),
+            hex_rows(&p, 0x1008, 0x10).spell(&p).as_deref(),
             Ok(
                 "# 0x1008..0x1010 .text\n0x0000001008  49 4a 4b 4c 4d 4e 4f 50                           |IJKLMNOP|\n"
             )
         );
         assert_eq!(
-            hex_rows(&p, 0x1010, 0x10).spell(),
+            hex_rows(&p, 0x1010, 0x10).spell(&p),
             Ok(format!(
                 "# 0x1010..0x1020 .data\n{}",
                 hexdump(&bytes[0x10..], 0x1010)
             ))
         );
         assert_eq!(
-            hex_rows(&p, 0x1020, 4).spell().unwrap_err(),
+            hex_rows(&p, 0x1020, 4).spell(&p).unwrap_err(),
             "address 0x1020 is in .bss, which holds no file bytes (the loader zero-fills it)"
         );
-        let unmapped = hex_rows(&p, 0x9000, 4).spell().unwrap_err();
+        let unmapped = hex_rows(&p, 0x9000, 4).spell(&p).unwrap_err();
         assert!(unmapped.contains("not mapped"), "{unmapped}");
     }
 }
