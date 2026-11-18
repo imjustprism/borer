@@ -64,6 +64,27 @@ fn an_ordinary_long_literal_stays_cut() {
     }
 }
 
+/// Prose spelled as a signature, a message on a qualified name with a
+/// long argument or bracketed details, stays cut.
+///
+/// Its words before the name read as a return type, and the message
+/// printed whole, about 700 characters, at every reference.
+#[test]
+fn prose_shaped_as_a_signature_stays_cut() {
+    let open = format!(
+        "Fatal error in Net::Session::Open({})",
+        "the remote host refused the session and no retry was left ".repeat(11)
+    );
+    let details = format!(
+        "Error in Foo::Bar() [details = {}]",
+        "the request carried no token ".repeat(17)
+    );
+    for text in [open, details] {
+        assert!(text.len() > 500);
+        assert_cut(&text);
+    }
+}
+
 /// A template signature over 300 bytes prints whole, escaped as any
 /// literal is.
 #[test]

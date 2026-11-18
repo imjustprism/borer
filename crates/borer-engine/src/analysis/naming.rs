@@ -51,6 +51,20 @@ const TYPE_WORDS: [&str; 16] = [
     "static", "const", "size_t", "auto", "virtual", "inline",
 ];
 
+/// Keywords a return type may spell beside its name, past [`TYPE_WORDS`].
+const SPECIFIERS: [&str; 10] = [
+    "volatile",
+    "constexpr",
+    "extern",
+    "explicit",
+    "typename",
+    "mutable",
+    "wchar_t",
+    "char8_t",
+    "char16_t",
+    "char32_t",
+];
+
 /// Steps [`choose_own`] may take per reference from a function to a name.
 ///
 /// Each function is decided in at most two visits that read its
@@ -633,11 +647,15 @@ fn read_signature(text: &str) -> Option<Signature> {
 /// template's instantiation, Clang's `[T = int, U = float]`, when the text
 /// before it reads as a signature.
 ///
+/// A return type spelling two plain words side by side, neither a
+/// keyword (`Fatal error in Net::Session::Open(...)`), is prose: C++
+/// spells a type by one name among keywords.
+///
 /// # Arguments
 ///
 /// * `text` - The string as read.
 pub(crate) fn is_signature(text: &str) -> bool {
-    if read_signature(text).is_some() {
+    if reads_as_signature(text) {
         return true;
     }
     let Some(body) = text.strip_suffix(']') else {
@@ -658,7 +676,29 @@ pub(crate) fn is_signature(text: &str) -> bool {
     inner.strip_prefix("with ").unwrap_or(inner).contains(" = ")
         && body
             .get(..open)
-            .is_some_and(|head| read_signature(head.trim_end()).is_some())
+            .is_some_and(|head| reads_as_signature(head.trim_end()))
+}
+
+/// Tells whether `text` reads as a signature whose return type is no
+/// prose: no two plain words side by side that are not keywords.
+///
+/// # Arguments
+///
+/// * `text` - The string as read.
+fn reads_as_signature(text: &str) -> bool {
+    let plain = |w: &str| {
+        w.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            && !w.starts_with("__")
+            && !TYPE_WORDS.contains(&w)
+            && !SPECIFIERS.contains(&w)
+    };
+    read_signature(text).is_some_and(|sig| {
+        let words = sig.ret.split_whitespace();
+        !words
+            .clone()
+            .zip(words.skip(1))
+            .any(|(a, b)| plain(a) && plain(b))
+    })
 }
 
 /// The type a conversion operator converts to: `Base::NetStreamBase *` for
