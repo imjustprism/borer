@@ -305,9 +305,18 @@ fn image(methods: &[(u64, Guard, u64, u64, &str)], texts: &[(u64, &[u8])]) -> Pr
 
 /// Builds the image of [`METHODS`] and their expressions.
 fn widget() -> Program {
+    widget_of(&METHODS)
+}
+
+/// Builds the image of `methods` over the expressions of [`METHODS`].
+///
+/// # Arguments
+///
+/// * `methods` - As [`METHODS`] lists them.
+fn widget_of(methods: &[(u64, Guard, u64, u64, &str)]) -> Program {
     let far = [&*b"1 == 1 && ".repeat(16), b"this->m_far\0"].concat();
     image(
-        &METHODS,
+        methods,
         &[
             (NAME, b"this->m_name\0"),
             (SIZE, b"this->m_size > 0\0"),
@@ -488,6 +497,37 @@ fn a_this_answer_is_as_it_was() {
     let a = Analysis::compute(&p);
     let all = asserted_fields_tsv(&p, &a, &Overlay::default(), "");
     assert_eq!(all, WIDGET_ANSWER.concat());
+}
+
+/// A method named without the namespace its own signature spells keeps
+/// its assert as its own.
+///
+/// `SetName`'s signature reads `void ui::Widget::SetName()`, and the
+/// overlay names it `Widget::SetName` and `Rename` `Widget::Rename`, so its
+/// text shows `__FUNCSIG__(ui::Widget::SetName)`. Compared by spelling with
+/// its class `Widget`, that read as an assert inlined from another class:
+/// `m_name` lost its strong pair, its `set_type` line and its field name.
+#[test]
+fn a_renamed_method_keeps_its_own_signature() {
+    let mut methods = METHODS;
+    methods[0].4 = "void ui::Widget::SetName()";
+    let p = widget_of(&methods);
+    let a = Analysis::compute(&p);
+    let mut o = Overlay::default();
+    o.names.insert(0x1100, "Widget::SetName".to_owned());
+    o.names.insert(0x1140, "Widget::Rename".to_owned());
+    let text = decompile(&p, &a, &o, 0x1100).expect("decompiles");
+    assert!(text.contains("__FUNCSIG__(ui::Widget::SetName)"), "{text}");
+    assert!(!text.contains("(this + 0x270)"), "{text}");
+    let all = asserted_fields_tsv(&p, &a, &o, "m_name");
+    for row in [
+        "strong\tWidget\tm_name\t0x270\t0x1100, 0x1140",
+        "# state Widget's strong pairs: set_type(name=\"Widget\", fields=[\"0x270:m_name\"])",
+    ] {
+        assert!(all.lines().any(|l| l == row), "{row}:\n{all}");
+    }
+    let names = field_names(&p, &a, &o, "Widget");
+    assert_eq!(names.get(&0x270).map(String::as_str), Some("m_name"));
 }
 
 /// A member asserted at two offsets names neither of the class's fields,

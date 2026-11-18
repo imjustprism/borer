@@ -342,15 +342,21 @@ fn read_directly(guard: &str, at: usize) -> bool {
 ///   votes nothing.
 /// * `class` - The function's class, which an inlined assert's signature
 ///   must name ([`own_signature`]).
+/// * `own` - The name of the signature naming resolved to the function,
+///   when the function is named so now up to its qualification
+///   (`ui::Widget::SetName` for `Widget::SetName`): its own then. One
+///   renamed past its qualification (`B::Get` named `A::Fetch`) holds an
+///   assert inlined from what naming took it for.
 pub(crate) fn votes_in(
     text: &str,
     receiver: Receiver,
     class: Option<&str>,
+    own: Option<&str>,
 ) -> BTreeMap<u64, FieldUse> {
     let mut fields: BTreeMap<u64, FieldUse> = BTreeMap::new();
     let mut prev = "";
     for line in text.lines() {
-        collect_assert_names(prev, line.trim(), receiver, class, &mut fields);
+        collect_assert_names(prev, line.trim(), receiver, (class, own), &mut fields);
         prev = line.trim();
     }
     fields
@@ -359,20 +365,24 @@ pub(crate) fn votes_in(
 /// Tells whether the members an assert call names are of a `this` its
 /// guard can read.
 ///
-/// That is, its signature is its function's own or, for a member spelled
-/// after `this->`, that of a method of its function's class. An assert inlined from another class's method (`__FUNCSIG__(B::Get)` in
-/// a method of `A`) names `B`'s members, and its guard reads whatever `A`
-/// holds there. A bare name inlined from another method of the same class
-/// may be that method's parameter (`CheckIndex(m_cursor)` asserting
-/// `index >= 0`), so a bare condition counts only under the function's
-/// own signature.
+/// That is, its signature is its function's own (shown bare, or the one
+/// [`votes_in`] takes as `own`: `__FUNCSIG__(ui::Widget::SetName)` in a
+/// method renamed `Widget::SetName`) or, for a member spelled after
+/// `this->`, that of a
+/// method of its function's class. An assert inlined from another class's
+/// method (`__FUNCSIG__(B::Get)` in a method of `A`) names `B`'s members,
+/// and its guard reads whatever `A` holds there. A bare name inlined from
+/// another method of the same class may be that method's parameter
+/// (`CheckIndex(m_cursor)` asserting `index >= 0`), so a bare condition
+/// counts only under the function's own signature.
 ///
 /// # Arguments
 ///
 /// * `call` - The call line.
-/// * `class` - The function's class.
+/// * `(class, own)` - The function's class, and the name of the signature
+///   naming resolved to it.
 /// * `receiver` - The spelling read.
-fn own_signature(call: &str, class: Option<&str>, receiver: Receiver) -> bool {
+fn own_signature(call: &str, (class, own): Names<'_>, receiver: Receiver) -> bool {
     let Some((_, rest)) = call.split_once("__FUNCSIG__") else {
         return false;
     };
@@ -380,8 +390,14 @@ fn own_signature(call: &str, class: Option<&str>, receiver: Receiver) -> bool {
         return true;
     };
     let name = named.split_once(')').map_or(named, |(n, _)| n);
-    receiver == Receiver::This && class.is_some_and(|c| super::classes::class_of(name) == Some(c))
+    own == Some(name)
+        || (receiver == Receiver::This
+            && class.is_some_and(|c| super::classes::class_of(name) == Some(c)))
 }
+
+/// A function's class and the name of the signature naming resolved to
+/// it, what [`own_signature`] tells its own asserts apart by.
+type Names<'a> = (Option<&'a str>, Option<&'a str>);
 
 /// Names a field from a guarded assert.
 ///
@@ -401,16 +417,16 @@ fn own_signature(call: &str, class: Option<&str>, receiver: Receiver) -> bool {
 /// * `guard` - The previous line.
 /// * `call` - The current line.
 /// * `receiver` - The spelling read.
-/// * `class` - The function's class.
+/// * `names` - The function's class and own signature ([`Names`]).
 /// * `fields` - Field uses; the vote lands on the field's offset.
 fn collect_assert_names(
     guard: &str,
     call: &str,
     receiver: Receiver,
-    class: Option<&str>,
+    names: Names<'_>,
     fields: &mut BTreeMap<u64, FieldUse>,
 ) {
-    if !(guard.starts_with("if (") && guard.ends_with('{') && own_signature(call, class, receiver))
+    if !(guard.starts_with("if (") && guard.ends_with('{') && own_signature(call, names, receiver))
     {
         return;
     }
@@ -531,19 +547,20 @@ mod tests {
             )
         };
         let text = assert("!m_stop", "src/a.cpp");
-        assert!(votes_in(&text, Receiver::This, None).is_empty());
-        let votes = votes_in(&text, Receiver::Bare, None);
+        assert!(votes_in(&text, Receiver::This, None, None).is_empty());
+        let votes = votes_in(&text, Receiver::Bare, None, None);
         let names = votes
             .get(&0x20)
             .map(|f| f.names.keys().cloned().collect::<Vec<_>>());
         assert_eq!(names, Some(vec!["m_stop".to_owned()]));
         let inlined = text.replace("__FUNCSIG__", "__FUNCSIG__(A::Check)");
-        assert!(votes_in(&inlined, Receiver::Bare, Some("A")).is_empty());
+        assert!(votes_in(&inlined, Receiver::Bare, Some("A"), None).is_empty());
         assert_eq!(
             votes_in(
                 &inlined.replace("!m_stop", "this->m_stop"),
                 Receiver::This,
-                Some("A")
+                Some("A"),
+                None
             )
             .len(),
             1
@@ -555,7 +572,10 @@ mod tests {
             ("this->m_stop", "src/a.cpp"),
         ] {
             let text = assert(cond, path);
-            assert!(votes_in(&text, Receiver::Bare, None).is_empty(), "{cond}");
+            assert!(
+                votes_in(&text, Receiver::Bare, None, None).is_empty(),
+                "{cond}"
+            );
         }
     }
 
@@ -607,25 +627,25 @@ mod tests {
             "if (*(uint32_t*)(*(uint64_t*)(this + 0x40) + 8) == 0) {",
             call,
             Receiver::This,
-            None,
+            (None, None),
             &mut fields,
         );
         collect_assert_names(
             direct,
             "f(\"this->m_rect.w > 0\", \"a.cc\", 1, __FUNCSIG__);",
             Receiver::This,
-            None,
+            (None, None),
             &mut fields,
         );
         collect_assert_names(
             direct,
             r#"f("this->m_key == \"\" || this->m_val", "a.cc", 1, __FUNCSIG__);"#,
             Receiver::This,
-            None,
+            (None, None),
             &mut fields,
         );
         assert!(fields.is_empty(), "{fields:?}");
-        collect_assert_names(direct, call, Receiver::This, None, &mut fields);
+        collect_assert_names(direct, call, Receiver::This, (None, None), &mut fields);
         assert_eq!(fields.get(&0x40).map(|f| f.names.len()), Some(1));
     }
 
@@ -653,7 +673,7 @@ mod tests {
             let text = format!(
                 "if (*(uint32_t*)(this + 0x38) == 0) {{\nf(\"this->m_owner\", \"a.cc\", 1, {sig});\n"
             );
-            votes_in(&text, Receiver::This, class).len()
+            votes_in(&text, Receiver::This, class, None).len()
         };
         assert_eq!(votes("__FUNCSIG__(B::Get)", Some("A")), 0);
         assert_eq!(votes("__FUNCSIG__(B::Get)", None), 0);
@@ -661,5 +681,23 @@ mod tests {
         assert_eq!(votes("__FUNCSIG__(A::Get)", Some("A")), 1);
         assert_eq!(votes("__FUNCSIG__", Some("A")), 1);
         assert_eq!(votes("__FUNCSIG__", None), 1);
+    }
+
+    /// A signature naming the function's own, however the function is
+    /// named now, is its own under either spelling.
+    #[test]
+    fn the_resolved_signature_is_its_functions_own() {
+        let text = |cond: &str| {
+            format!(
+                "if (*(uint32_t*)(this + 0x38) == 0) {{\nf(\"{cond}\", \"a.cc\", 1, __FUNCSIG__(ui::A::Get));\n"
+            )
+        };
+        let own = Some("ui::A::Get");
+        for (cond, receiver) in [("this->m_x", Receiver::This), ("!m_x", Receiver::Bare)] {
+            let votes = |own| votes_in(&text(cond), receiver, Some("A"), own).len();
+            assert_eq!((votes(None), votes(own)), (0, 1), "{cond}");
+        }
+        let other = votes_in(&text("!m_x"), Receiver::Bare, Some("A"), Some("A::Get"));
+        assert!(other.is_empty());
     }
 }

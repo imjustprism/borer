@@ -859,8 +859,15 @@ pub(crate) fn assert_votes(
         (entry, receiver),
         || {
             let name = name_of(analysis, overlay, entry);
+            let own = analysis
+                .function(entry)
+                .and_then(|f| Some(f.signature.as_ref()?.name.as_str()))
+                .filter(|s| {
+                    s.strip_suffix(name.as_str())
+                        .is_some_and(|q| q.ends_with("::"))
+                });
             decompile_plain(program, analysis, overlay, entry)
-                .map(|text| votes_in(&text, receiver, class_of(&name)))
+                .map(|text| votes_in(&text, receiver, class_of(&name), own))
                 .unwrap_or_default()
                 .into_iter()
                 .flat_map(|(off, u)| u.names.into_iter().map(move |(m, n)| (off, m, n)))
