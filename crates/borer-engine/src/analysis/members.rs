@@ -10,6 +10,7 @@ use std::sync::Arc;
 use super::classes::{FieldUse, parse_number};
 use super::decompile::is_source_path;
 use super::{Analysis, naming, single};
+use crate::analysis::render::PRINTABLE_MIN;
 use crate::program::Program;
 
 /// Longest assert condition read when looking for a member to pair, in
@@ -145,15 +146,12 @@ const ASSERT_CALL_SPAN: u64 = 48;
 /// Longest signature literal read when telling an assert call apart.
 const SIGNATURE_CAP: usize = 1024;
 
-/// Fewest characters an assert's condition is read with: MSVC's wide
-/// `L"this->m_x"` read as bytes stops after its first character, which
-/// names nothing.
-pub(crate) const CONDITION_MIN: usize = 2;
-
 /// Returns the conditions a function passes to an assert reporter, read
 /// from its bytes.
 ///
-/// A condition is each literal it references within [`ASSERT_CALL_SPAN`]
+/// A condition is each literal of [`PRINTABLE_MIN`] characters or more,
+/// as `borer://asserts` lists them (MSVC's wide `L"this->m_x"`, read as
+/// bytes, stops after its first), it references within [`ASSERT_CALL_SPAN`]
 /// bytes of both a reference to a source path ([`is_source_path`]) and one
 /// to a function signature, the `(expression, file, line, signature)` call
 /// GCC's, Clang's and most engines' asserts make. Only a condition's text
@@ -207,7 +205,7 @@ fn read_assert_conditions(
         .into_iter()
         .filter(|(t, _)| program.section_at(*t).is_some_and(|s| !s.executable))
         .filter_map(|(t, site)| {
-            let (len, text) = crate::strings::cstr_at(program, t, CONDITION_MIN, SIGNATURE_CAP)?;
+            let (len, text) = crate::strings::cstr_at(program, t, PRINTABLE_MIN, SIGNATURE_CAP)?;
             let role = if is_source_path(&text) {
                 Role::Path
             } else if naming::is_signature(&text) {
@@ -232,7 +230,7 @@ fn read_assert_conditions(
         .filter_map(|l| {
             Some((
                 l.1,
-                crate::strings::cstr_at(program, l.1, CONDITION_MIN, MEMBER_STRING_CAP)?.1,
+                crate::strings::cstr_at(program, l.1, PRINTABLE_MIN, MEMBER_STRING_CAP)?.1,
             ))
         })
         .collect()
@@ -263,7 +261,7 @@ pub(crate) fn asserts_a_member(
             program
                 .section_at(target)
                 .is_some_and(|s| !s.executable)
-                .then(|| crate::strings::cstr_at(program, target, 4, MEMBER_STRING_CAP))
+                .then(|| crate::strings::cstr_at(program, target, PRINTABLE_MIN, MEMBER_STRING_CAP))
                 .flatten()
                 .is_some_and(|(_, t)| t.contains("this->"))
         }),
@@ -522,19 +520,18 @@ mod tests {
     }
 
     /// A wide literal read as bytes is no condition: its first character
-    /// alone would be a bare candidate.
+    /// alone would be a bare candidate. Nor is a text shorter than the
+    /// literals `borer://asserts` lists, which would point at no row.
     #[test]
-    fn a_wide_literal_read_as_bytes_is_no_condition() {
+    fn a_wide_or_short_literal_is_no_condition() {
         let wide: Vec<u8> = "this->m_x"
             .encode_utf16()
             .flat_map(u16::to_le_bytes)
             .collect();
-        let read = crate::strings::cstr_in(&wide, super::CONDITION_MIN, super::MEMBER_STRING_CAP);
-        assert_eq!(read, None);
-        assert_eq!(
-            crate::strings::cstr_in(b"!p\0", super::CONDITION_MIN, 8).map(|(n, _)| n),
-            Some(2)
-        );
+        let read = |raw: &[u8]| crate::strings::cstr_in(raw, super::PRINTABLE_MIN, 8);
+        assert_eq!(read(&wide), None);
+        assert_eq!(read(b"n>0\0"), None);
+        assert_eq!(read(b"!m_p\0").map(|(n, _)| n), Some(4));
     }
 
     /// A bare condition votes only where it was asked for, only from a

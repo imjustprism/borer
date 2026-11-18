@@ -477,7 +477,11 @@ fn layout_step(p: &Program, f: &Function, bits: u32, text: &str, params: usize) 
 /// function's asserts spell a member of `this`, or spell one bare in a
 /// function the text gives a `this` (`Registry *this`), which a local or a
 /// parameter spells the same way and the step says so; a free function's
-/// namespace never reads as a class. It filters by its last component,
+/// namespace never reads as a class. A bare one is offered only where
+/// `borer://asserts` lists a bare row for it: the function's own guarded
+/// assert pairs a name with a field
+/// ([`crate::analysis::classes::assert_votes`]), and no assert of its
+/// class spells `this->` ([`this_classes`]). It filters by its last component,
 /// which is a substring of the qualified name, and a template's is left
 /// out, since its brackets are no filter. The file is offered only when
 /// the asserts cited it: a `// source:` line from debug information
@@ -507,14 +511,19 @@ fn assert_step(p: &Program, a: &Analysis, o: &Overlay, f: &Function, text: &str)
     use crate::analysis::members::Receiver;
     let method = text.contains(" *this)") || text.contains(" *this,");
     let asserts = |r| crate::analysis::members::asserts_a_member(p, a, f.entry, r);
+    let own = crate::analysis::classes::class_of(&name);
+    let paired = || {
+        own.is_some_and(|c| !this_classes(p, a, o).contains(c))
+            && !crate::analysis::classes::assert_votes(p, a, o, f.entry, Receiver::Bare).is_empty()
+    };
     let what = if asserts(Receiver::This) {
         Some("the members its class's asserts name")
     } else {
-        (method && asserts(Receiver::Bare))
+        (method && asserts(Receiver::Bare) && paired())
             .then_some("the names its class's asserts spell bare: members, locals or parameters")
     };
     let class = what
-        .and_then(|_| crate::analysis::classes::class_of(&name))
+        .and(own)
         .and_then(|c| c.rsplit("::").next())
         .filter(|c| !c.is_empty() && c.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_'))
         .zip(what)

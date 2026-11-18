@@ -982,22 +982,68 @@ fn assert_conditions_are_read_once_per_function() {
 /// A method whose only assert spells its member bare points at its
 /// class's bare names, saying they may be no members.
 ///
-/// A free function's bare assert does not read its namespace as a class.
+/// A free function's bare assert does not read its namespace as a class,
+/// and `At`, whose assert names two candidates and so pairs none, is not
+/// pointed at a row of its own.
 #[test]
 fn a_bare_assert_points_at_the_asserts() {
     let p = registry();
     let a = Analysis::compute(&p);
     let o = Overlay::default();
-    let step = "borer://asserts/Registry (the names its class's asserts spell bare: members, locals or parameters), borer://sources/widget.cpp (the source file they cite)";
-    for entry in [0x1100, 0x11c0] {
+    for entry in [0x1100, 0x1140] {
         let header = answer_header(&p, &a, &o, entry, None).unwrap_or_default();
-        assert!(header.contains(&format!("// next: {step}")), "{header}");
+        assert!(
+            header.contains(&format!("// next: {BARE_STEP}")),
+            "{header}"
+        );
     }
-    let free = next_steps(&p, &a, &o, 0x1280);
-    assert!(
-        free.iter().all(|s| !s.contains("borer://asserts")),
-        "{free:?}"
+    for entry in [0x11c0, 0x1280] {
+        let steps = next_steps(&p, &a, &o, entry);
+        assert!(
+            steps.iter().all(|s| !s.contains("borer://asserts")),
+            "{steps:?}"
+        );
+    }
+}
+
+/// The step a method whose bare assert pairs a name points at.
+const BARE_STEP: &str = "borer://asserts/Registry (the names its class's asserts spell bare: members, locals or parameters), borer://sources/widget.cpp (the source file they cite)";
+
+/// A bare assert points at `borer://asserts` only where it lists a bare
+/// row for the class.
+///
+/// `!p` is shorter than the literals the listing reads; `index >= 0`,
+/// inlined from `CheckIndex` into the overlay's `Run` and `Step`, pairs
+/// nothing; and a class with a method asserting `this->m_open` pairs no
+/// bare name. Each once pointed at an empty bare section.
+#[test]
+fn a_bare_assert_points_only_at_a_bare_row() {
+    let steps = |p: &Program, o: &Overlay, entry: u64| {
+        let a = Analysis::compute(p);
+        let text = answer_header(p, &a, o, entry, None).unwrap_or_default();
+        (
+            text.contains(BARE_STEP),
+            asserted_fields_tsv(p, &a, o, "Registry"),
+        )
+    };
+    let short = image(&LOCALS[..2], &[(STOPPED, b"!p\0")]);
+    let o = Overlay::default();
+    assert!(!steps(&short, &o, 0x1100).0);
+    let locals = image(
+        &LOCALS,
+        &[(STOPPED, b"!stopped\0"), (INDEX0, b"index >= 0\0")],
     );
+    let mut renamed = Overlay::default();
+    renamed.names.insert(0x1180, "Registry::Run".to_owned());
+    renamed.names.insert(0x11c0, "Registry::Step".to_owned());
+    let (pointed, all) = steps(&locals, &renamed, 0x1100);
+    assert!(pointed && all.contains("bare\tRegistry\tstopped"), "{all}");
+    let inlined = image(&LOCALS[2..], &[(INDEX0, b"index >= 0\0")]);
+    let (pointed, all) = steps(&inlined, &renamed, 0x1180);
+    assert!(!pointed && !all.contains("bare\t"), "{all}");
+    let texts: [(u64, &[u8]); 2] = [(STOPPED, b"!stopped\0"), (OPEN, b"this->m_open\0")];
+    let open = image(&[LOCALS[0], LOCALS[1], OPENS], &texts);
+    assert!(!steps(&open, &o, 0x1100).0);
 }
 
 /// `"this->m_owner"`, asserted by a method of another class.
