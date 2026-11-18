@@ -1,5 +1,5 @@
 class Borer < Formula
-  desc "Reverse-engineering engine for AI agents and people: MCP server and CLI"
+  desc "Blazing fast, Rust-based reverse engineering tool built for humans and AI"
   homepage "https://github.com/imjustprism/borer"
   version "0.2.5"
   license "AGPL-3.0-only"

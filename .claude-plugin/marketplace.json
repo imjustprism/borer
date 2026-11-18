@@ -2,7 +2,7 @@
   "name": "borer",
   "owner": { "name": "imjustprism" },
   "metadata": {
-    "description": "borer, the reverse-engineering engine for AI agents and people, as a Claude Code plugin."
+    "description": "borer as a Claude Code plugin. Blazing fast, Rust-based reverse engineering tool built for humans and AI."
   },
   "plugins": [
     {

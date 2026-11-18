@@ -1,7 +1,8 @@
 # borer-app
 
-The desktop app of borer, a reverse-engineering engine: Zed's workspace with
-borer's function list in the left dock and decompile tabs in the center. It is
+The desktop app of borer, the blazing fast, Rust-based reverse engineering
+tool built for humans and AI: Zed's workspace with borer's function list in
+the left dock and decompile tabs in the center. It is
 a preview: rough edges are expected, and the app is unsigned.
 
 ## Install it

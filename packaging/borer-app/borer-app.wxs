@@ -33,7 +33,7 @@
     <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
       <Component>
         <File Source="$(var.Dir)\borer-app.exe" KeyPath="yes">
-          <Shortcut Id="StartMenuShortcut" Name="borer" Description="Reverse-engineering engine"
+          <Shortcut Id="StartMenuShortcut" Name="borer" Description="Blazing fast, Rust-based reverse engineering tool built for humans and AI."
                     Directory="ProgramMenuFolder" WorkingDirectory="INSTALLFOLDER" Icon="borer.ico" />
         </File>
       </Component>

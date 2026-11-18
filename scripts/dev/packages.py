@@ -43,8 +43,15 @@ from harness.root import ROOT  # noqa: E402
 REPO = "https://github.com/imjustprism/borer"
 """Where the releases are published."""
 
-DESCRIPTION = "Reverse-engineering engine for AI agents and people: MCP server and CLI"
+DESCRIPTION = (
+    "Blazing fast, Rust-based reverse engineering tool built for humans and AI: "
+    "one pure Rust engine behind a desktop app, a CLI and an MCP server."
+)
 """The one-line summary every package carries."""
+
+TAGLINE = DESCRIPTION.partition(":")[0]
+"""The summary cut to its tagline, for Homebrew's `desc` (at most 80 characters,
+no final period)."""
 
 LICENSE = "AGPL-3.0-only"
 """borer's SPDX license expression."""
@@ -67,8 +74,9 @@ cannot hold a scope, so its command is plain `borer`."""
 
 ABOUT = f"""# borer
 
-{DESCRIPTION}. This package installs the prebuilt `borer` binary of the
-matching GitHub release; see {REPO} for what it does and how to use it.
+{DESCRIPTION} This package installs the prebuilt `borer` binary, the CLI and
+MCP server, of the matching GitHub release; the desktop app's installers are
+attached to that release. See {REPO} for what it does and how to use it.
 """
 """The README of every published package."""
 
@@ -159,7 +167,7 @@ def formula(version: str, archives: dict[str, tuple[str, str]]) -> str:
 
     return (
         "class Borer < Formula\n"
-        f'  desc "{DESCRIPTION}"\n'
+        f'  desc "{TAGLINE}"\n'
         f'  homepage "{REPO}"\n'
         f'  version "{version}"\n'
         f'  license "{LICENSE}"\n'
@@ -268,7 +276,15 @@ def npm(assets: Path, out: Path) -> None:
         "name": NPM,
         "description": DESCRIPTION,
         **common,
-        "keywords": ["mcp", "mcp-server", "reverse-engineering", "decompiler", "disassembler"],
+        "keywords": [
+            "reverse-engineering",
+            "decompiler",
+            "disassembler",
+            "binary-analysis",
+            "cli",
+            "mcp",
+            "mcp-server",
+        ],
         "bin": {"borer": "bin/borer.js"},
         "engines": {"node": ">=18"},
         "optionalDependencies": platforms,

@@ -14,7 +14,7 @@ edition = "2024"
 rust-version = "1.96"
 license = "AGPL-3.0-only"
 repository = "https://github.com/imjustprism/borer"
-description = "Reverse-engineering engine for AI agents and people: Rust core, MCP server and CLI"
+description = "Blazing fast, Rust-based reverse engineering tool built for humans and AI: one pure Rust engine behind a desktop app, a CLI and an MCP server."
 keywords = ["reverse-engineering", "decompiler", "disassembler", "mcp", "binary-analysis"]
 categories = ["development-tools", "parsing"]
 
