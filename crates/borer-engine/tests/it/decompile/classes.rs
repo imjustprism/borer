@@ -1579,7 +1579,9 @@ fn an_applied_class_layout_types_a_qualified_method() {
 /// The guard `if (a1 == 0)` precedes `assert("<condition>", "src/reader.cc",
 /// 7)`. `(uint32_t)reader` names `a1` `reader`; `(f)(x)` calls through `f`
 /// and `(a) and b` tests two names, so neither names `a1`: skipping every
-/// parenthesised word as a cast's type named it `x` and `b`.
+/// parenthesised word as a cast's type named it `x` and `b`. `(len_t) and
+/// b` tests two names too, though `len_t` reads as a type: an operator
+/// word after it is no operand.
 #[test]
 fn a_cast_names_its_operand_and_parentheses_alone_do_not() {
     let code = [
@@ -1598,7 +1600,7 @@ fn a_cast_names_its_operand_and_parentheses_alone_do_not() {
     };
     let cast = named("(uint32_t)reader");
     assert!(cast.contains("var1 = reader;"), "{cast}");
-    for (condition, wrong) in [("(f)(x)", "x"), ("(a) and b", "b")] {
+    for (condition, wrong) in [("(f)(x)", "x"), ("(a) and b", "b"), ("(len_t) and b", "b")] {
         let text = named(condition);
         assert!(text.contains("a1"), "{condition}: {text}");
         assert!(
