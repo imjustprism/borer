@@ -262,7 +262,7 @@ pub struct Emulator<'a> {
     /// registers outlive a run and a later run may pop the word.
     forged: bool,
     /// The stack slot of the last `pushf` made with the overflow known, until
-    /// a write covers its overflow byte, a `popf` takes it or a run starts
+    /// a write covers its overflow byte, a `popf` from it takes it or a run starts
     /// (memory may be poked between runs): once a word is forged, the only
     /// word `popf` restores a known overflow from.
     clean: Option<u64>,

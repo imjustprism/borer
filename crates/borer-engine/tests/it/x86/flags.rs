@@ -797,9 +797,9 @@ fn inc_and_dec_overflow_at_every_width_agrees_with_the_emulator() {
 /// word stops, as it does without the push. That takes in a nested push, a
 /// word moved to another slot, `syscall`'s `r11`, and a word whose overflow
 /// bit the routine set itself, in a forged word or in the trusted one, and
-/// a run on the same machine after the one that forged a word. A
-/// routine that forged nothing restores a known overflow from any word it
-/// pushed.
+/// a run on the same machine after the one that forged a word. A `popfq`
+/// of another word leaves the trusted slot trusted. A routine that forged
+/// nothing restores a known overflow from any word it pushed.
 #[test]
 fn a_pushed_unknown_overflow_stays_unknown() {
     let unknown = [0xb8, 0x05, 0x00, 0x00, 0x00, 0xc1, 0xe0, 0x02]; // ASM: mov eax, 5; shl eax, 2
@@ -861,4 +861,15 @@ fn a_pushed_unknown_overflow_stays_unknown() {
         0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3, // ASM: L: mov eax, 1; ret
     ];
     assert_eq!(emulated_64(&repushed), Some((Stop::Returned, 0)));
+    let nested = [
+        0x31, 0xc0, // ASM: xor eax, eax
+        0x9c, // ASM: pushfq
+        0xc1, 0xe0, 0x02, // ASM: shl eax, 2
+        0x9c, // ASM: pushfq
+        0x9d, 0x9d, // ASM: popfq; popfq
+        0x7c, 0x03, // ASM: jl L
+        0x31, 0xc0, 0xc3, // ASM: xor eax, eax; ret
+        0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3, // ASM: L: mov eax, 1; ret
+    ];
+    assert_eq!(emulated_64(&nested), Some((Stop::Returned, 0)));
 }

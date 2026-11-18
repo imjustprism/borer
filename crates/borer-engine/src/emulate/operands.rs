@@ -559,7 +559,7 @@ impl Emulator<'_> {
             Mnemonic::Popf | Mnemonic::Popfd | Mnemonic::Popfq => {
                 let at = self.reg(Register::RSP);
                 let v = self.pop(bytes)?;
-                let trusted = !self.forged || self.clean.take() == Some(at);
+                let trusted = !self.forged || self.clean.take_if(|s| *s == at).is_some();
                 self.set_rflags(v);
                 if !trusted {
                     self.flags_over = None;
