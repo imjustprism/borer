@@ -701,8 +701,9 @@ fn block_rows(
 /// Returns the sections' regions in address order.
 ///
 /// File-backed sections come first, each cut to start where an earlier one ends; a section the
-/// file holds no bytes for (`.bss`, a thread-local `.tbss` laid over the
-/// sections after it) fills only what none of them maps.
+/// file holds no bytes for (`.bss`) fills only what none of them maps. A
+/// thread-local `.tbss` takes no image addresses ([`crate::program::Section::span`])
+/// and makes no region.
 ///
 /// # Arguments
 ///
