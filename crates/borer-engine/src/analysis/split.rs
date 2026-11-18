@@ -20,7 +20,9 @@ use crate::program::Program;
 
 /// The file every split C file includes: the export's hoisted declarations.
 pub const DECLS: &str = "_decls.h";
-/// The C file of the functions whose asserts cite no source file.
+/// The C file of the functions the split files under no source file: they
+/// reference none and their class settles on none, or their text settles
+/// on none of several.
 pub const REMAINDER: &str = "_unattributed.c";
 /// The header every class header includes: the SDK's forward declarations
 /// and addresses.
@@ -277,6 +279,28 @@ fn rel_stem(short: &str) -> String {
 }
 
 impl Filed<'_> {
+    /// Returns the comment a split file holds before a method it filed by
+    /// class, so a reader tells it from the methods citing the file, and
+    /// `None` for any other filing.
+    #[must_use]
+    pub fn note(self) -> Option<String> {
+        match self {
+            Filed::Class(by) => Some(format!(
+                "/* filed by its class {}, citing no source file itself: {} of the class's {} methods cite this one in their own asserts and none cites another */
+",
+                by.class.replace("*/", "* /"),
+                by.cite,
+                by.methods
+            )),
+            Filed::Source(_)
+            | Filed::Nothing
+            | Filed::Tie
+            | Filed::Ambiguous
+            | Filed::Unmatched
+            | Filed::PastCap => None,
+        }
+    }
+
     /// Returns why a function went to [`REMAINDER`], `None` when it was
     /// filed under its source.
     #[must_use]
@@ -469,10 +493,10 @@ pub(crate) fn header_file(taken: &mut Taken, ident: &str) -> String {
 #[must_use]
 pub fn unit_prologue(file: &str) -> String {
     let what = if file == REMAINDER {
-        "the functions the split filed under no source file (the export's answer counts why: no cited file, a tie, a cut path fitting several, a file past the cap, or no text to read: it did not decompile or was cut for size; one of those referencing a single source path is filed under it)".to_owned()
+        "the functions the split filed under no source file (the export's answer counts why: no cited file and a class that settles on none, a tie, a cut path fitting several, a file past the cap, or no text to read: it did not decompile or was cut for size; one of those referencing a single source path is filed under it, and one referencing none under the file its class settles on)".to_owned()
     } else {
         format!(
-            "{file}: the functions filed under this source file, the one source path their literals name or the one their text settles on among several, or, naming none, the one their class's methods all name"
+            "{file}: the functions filed under this source file, the one source path their literals name or the one their text settles on among several, and, marked so before each, a method naming none filed by its class: at least {WITNESSES_MIN} of the class's methods cite the file in their own asserts and none cites another"
         )
     };
     format!(

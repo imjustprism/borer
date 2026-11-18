@@ -650,6 +650,9 @@ pub fn write_split(
             let file = path
                 .and_then(|p| sources.files.get(p))
                 .map_or(split::REMAINDER, String::as_str);
+            if let Some(note) = filed.note() {
+                units.add(file, &note)?;
+            }
             units.add(file, text)
         },
     )?;
@@ -1456,8 +1459,8 @@ mod tests {
     /// A method whose asserts cite nothing is filed under the one source
     /// file two of its class's methods cite in their own asserts.
     ///
-    /// The reply and the map say it was filed by class and on how many
-    /// witnesses; a class whose methods cite
+    /// The reply, the map and a comment before it in its file say it was
+    /// filed by class and on how many witnesses; a class whose methods cite
     /// two files, and one with a single witness, file nothing by class.
     ///
     /// `C::a` and `C::b` cite `src/c.cpp` in their own asserts, `C::c`
@@ -1497,6 +1500,12 @@ mod tests {
                 "{units:?}"
             );
         }
+        let unit = units.get("c.cpp.c").cloned().unwrap_or_default();
+        assert!(
+            unit.contains("/* filed by its class C, citing no source file itself: 2 of the class's 3 methods cite this one in their own asserts and none cites another */\n// C::c @ "),
+            "{unit}"
+        );
+        assert!(!unit.contains("*/\n// C::a @ "), "{unit}");
         let row = |class: &str| {
             map.lines()
                 .find(|l| l.starts_with(&format!("{class}\t")))
