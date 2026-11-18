@@ -1433,6 +1433,36 @@ fn a_pure_call_handler_links_no_family() {
     assert!(family_of(&a, &o, "Y").is_none(), "one anchor links nothing");
 }
 
+/// A parent both constructors name bounds what two siblings inherit, so an
+/// anchor past its table lends no names.
+///
+/// `Texture` and `Sound` share `0x100`, `0x200` and an unnamed `0x900` at
+/// slot 3. With both naming `Resource`, whose table ends at slot 2, the
+/// `0x900` is no inherited virtual and `Texture`'s `Bind` at slot 2 is no
+/// hint; with no parent known, the anchor stands and so does the hint.
+#[test]
+fn a_known_parent_bounds_the_names_past_its_table() {
+    use borer_engine::analysis::vtables::render_slots;
+    let hint = "  [2] sub_320  Texture names this slot Bind\n";
+    for parent in [None, Some("Resource")] {
+        let (mut a, o) = family_fixture(
+            &[
+                ("Resource", 0x7000, &[0x100, 0x200]),
+                ("Texture", 0x8000, &[0x100, 0x200, 0x310, 0x900]),
+                ("Sound", 0x8100, &[0x100, 0x200, 0x320, 0x900]),
+            ],
+            &[(0x310, "Texture::Bind")],
+        );
+        for child in ["Texture", "Sound"] {
+            if let Some(info) = a.classes.by_name.get_mut(child) {
+                info.parent = parent.map(str::to_owned);
+            }
+        }
+        let text = render_slots(&a, &o, &a.classes.by_name["Sound"], 48);
+        assert_eq!(text.contains(hint), parent.is_none(), "{parent:?}:\n{text}");
+    }
+}
+
 /// A stub each sibling holds once, at the same slot, is no shared slot
 /// once the program shows it is a stub, so the sibling's names stop at the
 /// slots they truly share.

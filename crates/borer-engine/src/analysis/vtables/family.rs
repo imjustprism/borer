@@ -8,11 +8,12 @@
 //! tables hold at several indexes or in more than [`BUCKET_MAX`] tables,
 //! or one named as the pure-call handler. Tables that agree so at
 //! [`ANCHORS_MIN`] indexes are one family. A member's name for slot `k` is a hint for
-//! another member's slot `k` only when the two share an anchor at `k` or
-//! above, or `k` is below the table of a parent the constructors name for
-//! both: past that, two siblings' slots `k` may be each one's own new
-//! virtual. The guards of [`super::propagate_slot_names`] hold too: a name
-//! the class already gives another slot does not travel, nor one whose
+//! another member's slot `k` only when `k` is below the table of a parent
+//! the constructors name for both, or, with no such parent known, when the
+//! two share an anchor at `k` or above: past that, two siblings' slots `k`
+//! may be each one's own new virtual. The guards of
+//! [`super::propagate_slot_names`] hold too: a name the class already
+//! gives another slot does not travel, nor one whose
 //! function differs in shape from nearly every function at that slot. A
 //! slot keeps a hint only when every member that gives one agrees;
 //! disagreement is reported, not resolved, and nothing is renamed.
@@ -405,9 +406,11 @@ fn build_family(analysis: &Analysis, overlay: &Overlay, class: &str) -> Option<F
 
 /// Returns how many of `own`'s slots `member`'s names are hints for.
 ///
-/// That is up to and including the last index the two tables share an
-/// anchor at, or the length of a parent's table the constructors name for
-/// both, the larger. A stub shares nothing ([`slot_stubs`],
+/// That is the length of a parent's table the constructors name for both,
+/// which also bounds what they inherit: an anchor past it is a function
+/// each added on its own. With no such parent known, it is up to and
+/// including the last index the two tables share an anchor at. A stub
+/// shares nothing ([`slot_stubs`],
 /// [`reports_pure_call`]): two siblings each fill their own new slots with
 /// it.
 ///
@@ -435,8 +438,9 @@ fn reach(
         .as_ref()
         .filter(|p| member.parent.as_ref() == Some(*p) || **p == member.name)
         .and_then(|p| classes.get(p))
-        .map_or(0, |p| p.slots.len());
-    shared.max(parent)
+        .filter(|p| p.vtable.is_some())
+        .map(|p| p.slots.len());
+    parent.unwrap_or(shared)
 }
 
 /// Renders a class's table for its layout: a line per slot, the first
