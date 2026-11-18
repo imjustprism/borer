@@ -32,6 +32,8 @@ mod elfgen;
 #[expect(dead_code, reason = "writer helpers serve integration tests")]
 mod machogen;
 
+#[path = "hostile/asserts.rs"]
+mod asserts;
 #[path = "hostile/heap.rs"]
 mod heap;
 #[path = "hostile/lift.rs"]

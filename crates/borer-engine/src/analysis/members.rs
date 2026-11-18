@@ -175,13 +175,13 @@ pub(crate) fn is_source_path(text: &str) -> bool {
 ///
 /// # Returns
 ///
-/// `(address, text)` of each condition no longer than
-/// [`MEMBER_STRING_CAP`], in reference order, repeats included.
+/// The text of each condition no longer than [`MEMBER_STRING_CAP`], by
+/// address, so a caller asks for one in a lookup.
 pub(crate) fn assert_conditions(
     program: &Program,
     analysis: &Analysis,
     entry: u64,
-) -> Vec<(u64, String)> {
+) -> BTreeMap<u64, String> {
     #[derive(PartialEq)]
     enum Role {
         Path,
@@ -248,9 +248,9 @@ pub(crate) fn asserts_a_member(
                 .flatten()
                 .is_some_and(|(_, t)| t.contains("this->"))
         }),
-        Receiver::Bare => assert_conditions(program, analysis, entry).iter().any(
-            |(_, text)| matches!(condition_members(text), (m, Receiver::Bare) if !m.is_empty()),
-        ),
+        Receiver::Bare => assert_conditions(program, analysis, entry)
+            .values()
+            .any(|text| matches!(condition_members(text), (m, Receiver::Bare) if !m.is_empty())),
     }
 }
 
