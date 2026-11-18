@@ -280,19 +280,25 @@ mod tests {
         assert_eq!(header_file(&mut headers, "foo"), "foo_2.h");
     }
 
-    /// A function's source file is the source file its asserts cite, over a
-    /// header cited more often, whose inline template it took in.
+    /// A function's source file is the one its `// source:` line would
+    /// name: the only file cited, or the one its class names, or the most
+    /// cited; a tie names none, so the function is not filed.
     ///
     /// # Panics
     ///
-    /// When a function is filed under another file.
+    /// When a function is filed under another file, or a tie is filed.
     #[test]
-    fn a_source_file_wins_over_a_header_the_asserts_cite_more() {
+    fn a_function_is_filed_as_its_source_line_names_it_and_a_tie_is_not() {
         use crate::analysis::decompile::unit_of;
-        let text = "  f(\"n < size\", \"inc\\\\vec.h\", 0x10);\n  f(\"n > 0\", \"inc\\\\vec.h\", 0x11);\n  g(\"p != 0\", \"net\\\\a.cpp\", 7);\n";
-        assert_eq!(unit_of(text).as_deref(), Some("net/a.cpp"));
-        let headers = "  f(\"a\", \"b.h\", 1);\n  f(\"a\", \"a.h\", 2);\n";
-        assert_eq!(unit_of(headers).as_deref(), Some("a.h"));
-        assert_eq!(unit_of("  f(\"a\", \"no path\", 1);\n"), None);
+        let class = "// Vec::Push @ 0x1000: 9 instructions\n  f(\"n > 0\", \"inc/vec.h\", 1);\n  g(\"p\", \"net/a.cpp\", 2);\n  g(\"q\", \"net/a.cpp\", 3);\n";
+        assert_eq!(unit_of(class).as_deref(), Some("inc/vec.h"));
+        let most = "// f @ 0x1000: 9 instructions\n  f(\"a\", \"x/b.h\", 1);\n  f(\"b\", \"x/a.h\", 2);\n  f(\"c\", \"x/a.h\", 3);\n";
+        assert_eq!(unit_of(most).as_deref(), Some("x/a.h"));
+        let tie = "// f @ 0x1000: 9 instructions\n  f(\"a\", \"x/b.h\", 1);\n  f(\"b\", \"x/a.cpp\", 2);\n";
+        assert_eq!(unit_of(tie), None);
+        assert_eq!(
+            unit_of("// f @ 0x1000\n  f(\"a\", \"no path\", 1);\n"),
+            None
+        );
     }
 }

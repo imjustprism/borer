@@ -105,40 +105,24 @@ pub fn assert_calls(line: &str) -> Vec<(&str, &str)> {
     out
 }
 
-/// Returns the source file a function's text came from: the file its
-/// assert calls cite ([`assert_calls`]).
-///
-/// An assert's file argument is the file the asserting code is in, the
-/// function's own source file or a header whose inline code it took in,
-/// so a source file (`.c`, `.cc`, `.cpp`, `.cxx`) wins over a header; then
-/// the most cited, then the first in byte order. A function whose asserts
-/// cite headers alone is filed under the most cited header.
+/// Returns the source file a function's text came from, as its
+/// `// source:` line names it ([`super::own_source`]).
 ///
 /// # Arguments
 ///
-/// * `text` - The function's decompiled text.
+/// * `text` - The function's decompiled text, its `// name @ address`
+///   line first.
 ///
 /// # Returns
 ///
-/// The path with an escaped `\\` and a bare `\` read as `/`, or `None`
-/// when the text asserts nothing.
+/// The path as the text spells it, an escaped `\\` and a bare `\` read as
+/// `/`; `None` when the text cites no source file or the evidence ties.
 #[must_use]
 pub fn unit_of(text: &str) -> Option<String> {
-    const SOURCES: [&str; 4] = [".c", ".cc", ".cpp", ".cxx"];
-    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    for line in text.lines() {
-        for (_, path) in assert_calls(line) {
-            *counts
-                .entry(path.replace("\\\\", "/").replace('\\', "/"))
-                .or_default() += 1;
-        }
+    match super::own_source(text) {
+        super::Cited::File(path) => Some(path.replace("\\\\", "/").replace('\\', "/")),
+        super::Cited::Nothing | super::Cited::Tie => None,
     }
-    let rank = |path: &str, n: usize| (SOURCES.iter().any(|e| path.ends_with(e)), n);
-    counts
-        .into_iter()
-        .rev()
-        .max_by_key(|(path, n)| rank(path, *n))
-        .map(|(path, _)| path)
 }
 
 /// Returns a literal's text inside its quotes, `None` when it is not quoted.

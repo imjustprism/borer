@@ -1006,9 +1006,39 @@ pub(super) fn source_file(text: &str) -> String {
     {
         return text.to_owned();
     }
+    let Cited::File(pick) = own_source(text) else {
+        return text.to_owned();
+    };
+    let mut out: Vec<String> = lines.iter().map(|l| (*l).to_owned()).collect();
+    out.insert(header_len(&lines), format!("// source: {pick}"));
+    let mut joined = out.join("\n");
+    joined.push('\n');
+    joined
+}
+
+/// What a function's text says of the source file it came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Cited<'a> {
+    /// The text cites no source file.
+    Nothing,
+    /// It cites several and the evidence ties ([`pick_path`]).
+    Tie,
+    /// The file, spelled as the text spells it.
+    File(&'a str),
+}
+
+/// Returns the source file a function's text came from: the one
+/// [`source_file`] writes on its `// source:` line, chosen from the paths
+/// the text quotes ([`cited_paths`]) by [`pick_path`].
+///
+/// # Arguments
+///
+/// * `text` - A decompiled function, its `// name @ address` line first.
+#[must_use]
+pub(crate) fn own_source(text: &str) -> Cited<'_> {
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     let mut order: Vec<&str> = Vec::new();
-    for line in &lines {
+    for line in text.lines() {
         for p in cited_paths(line) {
             if counts
                 .insert(p, counts.get(p).copied().unwrap_or(0) + 1)
@@ -1018,14 +1048,10 @@ pub(super) fn source_file(text: &str) -> String {
             }
         }
     }
-    let Some(pick) = pick_path(&counts, &order, lines.first().copied().unwrap_or("")) else {
-        return text.to_owned();
-    };
-    let mut out: Vec<String> = lines.iter().map(|l| (*l).to_owned()).collect();
-    out.insert(header_len(&lines), format!("// source: {pick}"));
-    let mut joined = out.join("\n");
-    joined.push('\n');
-    joined
+    if order.is_empty() {
+        return Cited::Nothing;
+    }
+    pick_path(&counts, &order, text.lines().next().unwrap_or("")).map_or(Cited::Tie, Cited::File)
 }
 
 /// Lists the source paths a line quotes, and the crate file a Rust

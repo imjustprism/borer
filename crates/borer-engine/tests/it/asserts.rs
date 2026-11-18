@@ -1048,3 +1048,22 @@ fn the_export_split_files_each_function_by_its_cited_source() {
         Some("widget.cpp.c")
     );
 }
+
+/// The split files a function where its decompile's `// source:` line
+/// says it lives.
+#[test]
+fn the_split_files_a_function_where_its_source_line_says() {
+    use borer_engine::analysis::decompile::unit_of;
+    let p = widget();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    for (entry, ..) in METHODS {
+        let text = decompile(&p, &a, &o, entry).expect("decompiles");
+        let line = text
+            .lines()
+            .find_map(|l| l.strip_prefix("// source: "))
+            .map(str::to_owned);
+        assert!(line.is_some(), "{text}");
+        assert_eq!(unit_of(&text), line, "{entry:#x}:\n{text}");
+    }
+}
