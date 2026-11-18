@@ -68,8 +68,8 @@ const FAR: u64 = 0x2760;
 const LONG: u64 = 0x2400;
 
 /// The `__PRETTY_FUNCTION__` GCC writes for a method of a class
-/// template, 292 characters: its arguments come last, after the
-/// decompiler's 120 and the read's 200.
+/// template, 292 characters: its arguments come last, after the 200
+/// characters a read shows.
 const PRETTY: &str = "void Box<T>::Put(const T&) [with T = std::map<std::__cxx11::basic_string<char>, std::vector<Widget*, std::allocator<Widget*> >, std::less<std::__cxx11::basic_string<char> >, std::allocator<std::pair<const std::__cxx11::basic_string<char>, std::vector<Widget*, std::allocator<Widget*> > > > >]";
 
 /// What a method's guard reads before it reports.

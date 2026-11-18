@@ -481,7 +481,7 @@ mod tests {
 
     /// A signature naming does not read prints whole as a literal.
     ///
-    /// One 513 to 4095 bytes long, or naming its function by more than
+    /// One 513 to 4096 bytes long, or naming its function by more than
     /// 120 bytes, names nothing, so in the function it names it is not
     /// `__FUNCSIG__(Foo::Bar)`, the form of another function's.
     #[test]
