@@ -1,5 +1,6 @@
 //! Assert-shaped references in bulk: the assertion index reads them in
-//! time linear in the references and in heap within the file-size bar.
+//! time linear in the references, and its conditions reader in heap
+//! within the file-size bar.
 
 use borer_engine::analysis::render::{asserted_fields_tsv, source_tree_tsv};
 use borer_engine::analysis::{Analysis, Overlay};
@@ -115,12 +116,18 @@ fn many_assert_sites_in_one_function_read_in_linear_time() {
     );
 }
 
-/// The assertion index holds no text for the references that are no
-/// assert's condition, within the file-size heap bar.
+/// The assert conditions reader holds no text for the references that are
+/// no assert's condition.
 ///
 /// One function references a 1 MB run of printable bytes at a hundred
 /// thousand places, beside one real assert: every reference's text, up to
 /// a kilobyte each, was read and kept before the shape was checked.
+///
+/// It measures `borer://asserts` once the literal index the string
+/// listings share exists (built here by `source_tree_tsv`), so it bounds
+/// what reading the conditions adds, within the file-size bar. It does not
+/// bound the cold path: that index keeps each referenced literal's text,
+/// up to 400 characters a target, past the bar on this image.
 #[test]
 fn references_into_a_long_run_hold_no_text() {
     /// References into the run.
