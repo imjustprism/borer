@@ -491,16 +491,16 @@ fn no_link_under(dir: &Path, file: &str) -> anyhow::Result<()> {
 /// # Arguments
 ///
 /// * `path` - The file.
-/// * `text` - Its text.
+/// * `text` - Its bytes.
 ///
 /// # Errors
 ///
 /// When the file cannot be created or written.
-fn write_whole(path: &Path, text: &str) -> anyhow::Result<()> {
+fn write_whole(path: &Path, text: &[u8]) -> anyhow::Result<()> {
     let shown = short_path(&path.display().to_string());
     create(path, Existing::Replace)
         .with_context(|| format!("creating {shown}"))?
-        .write_all(text.as_bytes())
+        .write_all(text)
         .with_context(|| format!("writing {shown}"))
 }
 
@@ -565,8 +565,10 @@ fn split_dirs(root: &Path, shown: &str) -> anyhow::Result<(PathBuf, PathBuf)> {
 ///
 /// # Errors
 ///
-/// When the path is unusable, the directory is not empty, a directory on
-/// the way to a file is a link, a directory or file cannot be created or
+/// When the path is unusable, `include/_sdk.h` would pass the bytes a mod
+/// file holds ([`borer_engine::analysis::modsdk::fits`], before anything is
+/// written), the directory is not empty, a directory on the way to a file
+/// is a link, a directory or file cannot be created or
 /// written, or the request's deadline passed while the functions were
 /// decompiled; the files written before stay, partial, and the error says
 /// so.
@@ -585,6 +587,18 @@ pub fn write_split(
         anyhow::bail!("{why}; nothing was written");
     }
     let shown = short_path(dir);
+    let sdk = modsdk::build(program, analysis, overlay);
+    if borer_engine::cancel::Cancel::raised() {
+        anyhow::bail!(
+            "the request's deadline passed while the classes were read, so nothing was written; raise BORER_DEADLINE_SECS"
+        );
+    }
+    let split_headers = modsdk::header::class_headers(&sdk);
+    let shared = modsdk::fits(
+        &sdk,
+        ModFile::Header.what(),
+        split_headers.shared.into_bytes(),
+    )?;
     let (src, include) = split_dirs(root, &shown)?;
     let sources = split::sources(program, analysis);
     let set = only.map(|e| e.iter().copied().collect::<BTreeSet<u64>>());
@@ -635,18 +649,11 @@ pub fn write_split(
             .join(", ")
     };
     let binary = short_path(&program.path.display().to_string());
-    write_whole(&src.join(split::DECLS), &hoisted.head(&binary))?;
-    let sdk = modsdk::build(program, analysis, overlay);
-    if borer_engine::cancel::Cancel::raised() {
-        anyhow::bail!(
-            "the request's deadline passed while the classes were read, so the headers under {shown}/include were not written; raise BORER_DEADLINE_SECS"
-        );
-    }
-    let split_headers = modsdk::header::class_headers(&sdk);
+    write_whole(&src.join(split::DECLS), hoisted.head(&binary).as_bytes())?;
     let headers = &split_headers.classes;
-    write_whole(&include.join(split::SDK_HEADER), &split_headers.shared)?;
+    write_whole(&include.join(split::SDK_HEADER), &shared)?;
     for (_, file, text) in headers {
-        write_whole(&include.join(file), text)?;
+        write_whole(&include.join(file), text.as_bytes())?;
     }
     let named: Vec<(&str, &str)> = headers
         .iter()
@@ -654,7 +661,7 @@ pub fn write_split(
         .collect();
     write_whole(
         &root.join("MAP.tsv"),
-        &split::split_map(analysis, overlay, &sdk, &named, &exported),
+        split::split_map(analysis, overlay, &sdk, &named, &exported).as_bytes(),
     )?;
     Ok(format!(
         "wrote {} functions to {} source files under {shown}/src, {left} to {} ({}; {} did not decompile and {} were cut for size, counted among them), {} class headers under {shown}/include{} and {shown}/MAP.tsv",
@@ -1275,5 +1282,49 @@ mod tests {
         }
         out.sort();
         out
+    }
+
+    /// A split whose shared SDK header would pass the bytes a mod file
+    /// holds is refused as `--h` refuses it, before anything is written.
+    ///
+    /// Eleven hundred stated structs with names of 62,000 characters make
+    /// forward declarations past 64 MiB.
+    ///
+    /// # Panics
+    ///
+    /// When the split is written or the refusal does not name the cap.
+    #[test]
+    fn a_split_whose_sdk_header_passes_the_cap_is_refused() {
+        use borer_engine::analysis::utypes::{UserStruct, UserType};
+        let text = Section::mapped(".text", 0x1000, 0, 0x10, false, true);
+        let p = Program::raw(vec![0xc3; 0x10], Arch::X86_64, 0, Some(0x1000), vec![text]);
+        let a = Analysis::compute(&p);
+        let mut o = Overlay::default();
+        for k in 0..1100 {
+            o.types.insert(
+                format!("S{k}{}", "x".repeat(62_000)),
+                UserType::Struct(UserStruct {
+                    size: 8,
+                    fields: std::collections::BTreeMap::new(),
+                }),
+            );
+        }
+        let dir = std::env::temp_dir().join(format!("borer-split-cap-{}", std::process::id()));
+        let refused = super::write_split(
+            &p,
+            &a,
+            &o,
+            Library::Include,
+            None,
+            &dir.display().to_string(),
+        );
+        let written = dir.exists();
+        std::fs::remove_dir_all(&dir).ok();
+        let why = format!("{:#}", refused.expect_err("a header past the cap"));
+        assert!(
+            why.starts_with("the mod SDK header passes the 67108864 bytes a mod file holds"),
+            "{why}"
+        );
+        assert!(!written, "nothing was written");
     }
 }
