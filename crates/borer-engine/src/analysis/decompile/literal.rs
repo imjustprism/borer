@@ -31,14 +31,18 @@ pub fn literal_at(program: &Program, addr: u64, own_name: &str) -> Option<String
         return Some(literal);
     }
     if let Some((len, raw)) = cstr_at(program, addr, 4, crate::strings::SCAN_MAX) {
-        let quoted = format!("\"{}\"", raw.replace('\\', "\\\\").replace('"', "\\\""));
-        let compact = expr::compact_literal(&quoted, own_name);
-        if len <= naming::SIG_MAX && compact != quoted {
-            return Some(compact);
+        if len <= naming::SIG_MAX {
+            let quoted = format!("\"{}\"", raw.replace('\\', "\\\\").replace('"', "\\\""));
+            let compact = expr::compact_literal(&quoted, own_name);
+            if compact != quoted {
+                return Some(compact);
+            }
         }
-        let whole = format!("\"{}\"", crate::strings::escape_text(&raw));
-        if naming::is_signature(&raw) && round_trips(program, addr, &whole) {
-            return Some(whole);
+        if naming::is_signature(&raw) {
+            let whole = format!("\"{}\"", crate::strings::escape_text(&raw));
+            if round_trips(program, addr, &whole) {
+                return Some(whole);
+            }
         }
     }
     string_at(program, addr)
