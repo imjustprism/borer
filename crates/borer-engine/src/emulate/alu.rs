@@ -218,4 +218,35 @@ impl Emulator<'_> {
         self.store(i, r)?;
         Ok(None)
     }
+
+    /// `inc` and `dec`: an add or subtract of one that leaves the carry.
+    ///
+    /// SPEC: Intel SDM Vol. 2, INC and DEC: OF, SF, ZF, AF and PF are set
+    /// from the result and CF is unaffected. The overflow is the signed
+    /// wrap: `inc` of the largest signed value, `dec` of the smallest. AF is
+    /// not modeled.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - The instruction.
+    /// * `m` - Its mnemonic, [`Mnemonic::Inc`] or [`Mnemonic::Dec`].
+    ///
+    /// # Errors
+    ///
+    /// When the operand cannot be read or written.
+    pub(super) fn inc_dec(&mut self, i: &Instruction, m: Mnemonic) -> Result<Option<u64>, Stop> {
+        let a = self.dest(i)?;
+        let bits = op_bits(i);
+        let min = 1 << (bits - 1);
+        let (r, over) = if m == Mnemonic::Inc {
+            let r = a.wrapping_add(1);
+            (r, mask(r, bits) == min)
+        } else {
+            (a.wrapping_sub(1), mask(a, bits) == min)
+        };
+        self.set_flags(r, bits);
+        self.flags_over = Some(over);
+        self.store(i, r)?;
+        Ok(None)
+    }
 }

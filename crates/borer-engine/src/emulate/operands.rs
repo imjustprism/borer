@@ -499,10 +499,20 @@ impl Emulator<'_> {
             }
             Mnemonic::Pushf | Mnemonic::Pushfd | Mnemonic::Pushfq => {
                 self.push(self.rflags(), bytes)?;
+                let at = self.reg(Register::RSP);
+                if self.flags_over.is_none() {
+                    self.forged_over = Some(at);
+                } else if self.forged_over == Some(at) {
+                    self.forged_over = None;
+                }
             }
             Mnemonic::Popf | Mnemonic::Popfd | Mnemonic::Popfq => {
+                let at = self.reg(Register::RSP);
                 let v = self.pop(bytes)?;
                 self.set_rflags(v);
+                if self.forged_over.take_if(|f| *f == at).is_some() && v >> 11 & 1 == 0 {
+                    self.flags_over = None;
+                }
             }
             Mnemonic::Pusha | Mnemonic::Pushad => {
                 for v in PUSHA.map(|r| self.reg(r)) {

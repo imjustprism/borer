@@ -1,6 +1,7 @@
 //! Conditions read from the flags an instruction leaves.
 
 use super::*;
+use borer_engine::emulate::{Emulator, Stop};
 
 /// `dec ecx; jl` jumps when SF != OF, which is the counter before the
 /// decrement being below one: at `INT_MIN` the decrement overflows, the
@@ -660,4 +661,175 @@ fn a_16_bit_double_shift_by_a_loaded_count_agrees_with_the_emulator() {
             agrees_with_the_emulator(&[load, count, shift].concat());
         }
     }
+}
+
+/// Runs 64-bit `code` at 0x401000 of a raw image to its end.
+///
+/// # Arguments
+///
+/// * `code` - The bytes of `.text`.
+///
+/// # Returns
+///
+/// How the run stopped and `rax` after it, or `None` when no machine runs
+/// the image.
+fn emulated_64(code: &[u8]) -> Option<(Stop, u64)> {
+    let p = raw::image(Arch::X86_64, code, &[]);
+    let mut emu = Emulator::new(&p, 100)?;
+    let stop = emu.run(0x401000).stop;
+    Some((stop, emu.register("rax")?))
+}
+
+/// `inc` sets the overflow at the signed wrap and `pushfq; popfq` keeps it.
+///
+/// `jo` after `inc` of `0x7fffffff` is taken. The emulator once left the
+/// overflow unknown and the push wrote it as a known clear, so the run
+/// returned 0.
+///
+/// `mov eax,0x7fffffff; inc eax; pushfq; popfq; jo L; xor eax,eax; ret;
+/// L: mov eax,1; ret`.
+#[test]
+fn inc_then_jo_agrees_with_the_emulator() {
+    let code = [
+        0xb8, 0xff, 0xff, 0xff, 0x7f, 0xff, 0xc0, 0x9c, 0x9d, 0x70, 0x03, 0x31, 0xc0, 0xc3, 0xb8,
+        0x01, 0x00, 0x00, 0x00, 0xc3,
+    ];
+    assert_eq!(emulated_64(&code), Some((Stop::Returned, 1)));
+    agrees_with_the_emulator_64(&[
+        0xb8, 0xff, 0xff, 0xff, 0x7f, // ASM: mov eax, 0x7fffffff
+        0xff, 0xc0, // ASM: inc eax
+        0x0f, 0x90, 0xc0, // ASM: seto al
+        0xc3, // ASM: ret
+    ]);
+}
+
+/// `dec` sets the overflow when its operand is the smallest signed value,
+/// and only then: `jo` after `dec` of `0x80000000` is taken, after `dec` of
+/// `0x80000001` it is not.
+///
+/// `mov eax,imm; dec eax; jo L; xor eax,eax; ret; L: mov eax,1; ret`.
+#[test]
+fn dec_at_int_min_then_jo_agrees_with_the_emulator() {
+    for (low, want) in [(0x00, 1), (0x01, 0)] {
+        let code = [
+            0xb8, low, 0x00, 0x00, 0x80, 0xff, 0xc8, 0x70, 0x03, 0x31, 0xc0, 0xc3, 0xb8, 0x01,
+            0x00, 0x00, 0x00, 0xc3,
+        ];
+        assert_eq!(emulated_64(&code), Some((Stop::Returned, want)), "{low:#x}");
+    }
+}
+
+/// `dec rbp; jg` runs on, where the emulator once stopped on an overflow
+/// it did not set: `rbp` 2 decrements to 1 and the jump is taken.
+///
+/// `mov ebp,2; dec rbp; jg L; xor eax,eax; ret; L: mov eax,1; ret`.
+#[test]
+fn dec_rbp_then_jg_runs() {
+    let code = [
+        0xbd, 0x02, 0x00, 0x00, 0x00, 0x48, 0xff, 0xcd, 0x7f, 0x03, 0x31, 0xc0, 0xc3, 0xb8, 0x01,
+        0x00, 0x00, 0x00, 0xc3,
+    ];
+    assert_eq!(emulated_64(&code), Some((Stop::Returned, 1)));
+}
+
+/// The overflow of `inc` and `dec` is the signed wrap of the operand's own
+/// width, at 8, 16, 32 and 64 bits, in the emulator and in the lifter, and
+/// neither touches the carry.
+///
+/// Each case sets an operand and steps it, then `setcc al; movzx eax, al;
+/// ret` reads the flag.
+#[test]
+fn inc_and_dec_overflow_at_every_width_agrees_with_the_emulator() {
+    let seto = [0x0f, 0x90];
+    let cases: [(&[u8], [u8; 2], u64); 11] = [
+        (&[0xb0, 0x7f, 0xfe, 0xc0], seto, 1), // ASM: mov al, 0x7f; inc al
+        (&[0xb0, 0x7e, 0xfe, 0xc0], seto, 0), // ASM: mov al, 0x7e; inc al
+        (&[0xb0, 0x80, 0xfe, 0xc8], seto, 1), // ASM: mov al, 0x80; dec al
+        (&[0x66, 0xb8, 0xff, 0x7f, 0x66, 0xff, 0xc0], seto, 1), // ASM: mov ax, 0x7fff; inc ax
+        (&[0x66, 0xb8, 0x00, 0x80, 0x66, 0xff, 0xc8], seto, 1), // ASM: mov ax, 0x8000; dec ax
+        (&[0x66, 0xb8, 0x01, 0x80, 0x66, 0xff, 0xc8], seto, 0), // ASM: mov ax, 0x8001; dec ax
+        (&[0xb8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xc0], seto, 0), // ASM: mov eax, -1; inc eax
+        (
+            &[
+                0x48, 0xb8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f, 0x48, 0xff, 0xc0,
+            ],
+            seto,
+            1,
+        ), // ASM: mov rax, 0x7fffffffffffffff; inc rax
+        (
+            &[
+                0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x48, 0xff, 0xc8,
+            ],
+            seto,
+            1,
+        ), // ASM: mov rax, 0x8000000000000000; dec rax
+        (&[0xb8, 0xff, 0xff, 0xff, 0x7f, 0x48, 0xff, 0xc0], seto, 0), // ASM: mov eax, 0x7fffffff; inc rax
+        (&[0xf9, 0xb0, 0xff, 0xfe, 0xc0], [0x0f, 0x92], 1), // ASM: stc; mov al, 0xff; inc al
+    ];
+    for (step, setcc, want) in cases {
+        let read = [setcc[0], setcc[1], 0xc0, 0x0f, 0xb6, 0xc0, 0xc3]; // ASM: setcc al; movzx eax, al; ret
+        let code = [step, &read[..]].concat();
+        assert_eq!(
+            emulated_64(&code),
+            Some((Stop::Returned, want)),
+            "{step:02x?}"
+        );
+        agrees_with_the_emulator_64(&code);
+    }
+}
+
+/// `pushfq` of an overflow nothing computed does not come back from `popfq`
+/// as a known clear.
+///
+/// The signed jump after it stops, as it does without the push. A word whose overflow bit the routine set, or one it pushed
+/// itself, restores a known overflow.
+#[test]
+fn a_pushed_unknown_overflow_stays_unknown() {
+    let unknown = [
+        0xb8, 0x05, 0x00, 0x00, 0x00, // ASM: mov eax, 5
+        0xc1, 0xe0, 0x02, // ASM: shl eax, 2
+        0x9c, // ASM: pushfq
+        0x9d, // ASM: popfq
+        0x7f, 0x01, // ASM: jg +1
+        0xc3, 0xc3, // ASM: ret; ret
+    ];
+    let stop = emulated_64(&unknown).map(|(stop, _)| stop);
+    assert!(
+        matches!(&stop, Some(Stop::Unmodeled(what)) if what.contains("did not set")),
+        "{stop:?}"
+    );
+    let set = [
+        0xb8, 0x05, 0x00, 0x00, 0x00, // ASM: mov eax, 5
+        0xc1, 0xe0, 0x02, // ASM: shl eax, 2
+        0x9c, // ASM: pushfq
+        0x48, 0x81, 0x0c, 0x24, 0x00, 0x08, 0x00, 0x00, // ASM: or qword [rsp], 0x800
+        0x9d, // ASM: popfq
+        0x70, 0x03, // ASM: jo L
+        0x31, 0xc0, 0xc3, // ASM: xor eax, eax; ret
+        0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3, // ASM: L: mov eax, 1; ret
+    ];
+    assert_eq!(emulated_64(&set), Some((Stop::Returned, 1)));
+    let pushed = [
+        0xb8, 0x05, 0x00, 0x00, 0x00, // ASM: mov eax, 5
+        0xc1, 0xe0, 0x02, // ASM: shl eax, 2
+        0x6a, 0x02, // ASM: push 2
+        0x9d, // ASM: popfq
+        0x70, 0x03, // ASM: jo L
+        0x31, 0xc0, 0xc3, // ASM: xor eax, eax; ret
+        0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3, // ASM: L: mov eax, 1; ret
+    ];
+    assert_eq!(emulated_64(&pushed), Some((Stop::Returned, 0)));
+    let repushed = [
+        0xb8, 0x05, 0x00, 0x00, 0x00, // ASM: mov eax, 5
+        0xc1, 0xe0, 0x02, // ASM: shl eax, 2
+        0x9c, // ASM: pushfq
+        0x59, // ASM: pop rcx
+        0x31, 0xc0, // ASM: xor eax, eax
+        0x9c, // ASM: pushfq
+        0x9d, // ASM: popfq
+        0x70, 0x03, // ASM: jo L
+        0x31, 0xc0, 0xc3, // ASM: xor eax, eax; ret
+        0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3, // ASM: L: mov eax, 1; ret
+    ];
+    assert_eq!(emulated_64(&repushed), Some((Stop::Returned, 0)));
 }

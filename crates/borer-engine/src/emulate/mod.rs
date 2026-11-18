@@ -256,6 +256,11 @@ pub struct Emulator<'a> {
     /// Unknown makes a signed jump stop the run instead, which is a diagnosis
     /// rather than a wrong answer.
     flags_over: Option<bool>,
+    /// The stack address of the word the last `pushf` wrote while
+    /// [`Emulator::flags_over`] was unknown, whose overflow bit is a clear
+    /// the machine did not compute; a `popf` from there with that bit still
+    /// clear restores the overflow as unknown rather than as a known clear.
+    forged_over: Option<u64>,
     /// Steps a run may take.
     budget: usize,
     /// Steps the current run has taken: one per instruction, and one more
@@ -757,6 +762,7 @@ impl<'a> Emulator<'a> {
             flags_df: false,
             flags_parity: false,
             flags_over: None,
+            forged_over: None,
             budget,
             steps: 0,
             memory_max: MEMORY_MAX,
@@ -881,9 +887,10 @@ impl<'a> Emulator<'a> {
     ///
     /// Only the flags the model tracks are set: carry, parity, zero, sign,
     /// overflow and direction, plus the always-one reserved bit. An overflow
-    /// the last instruction did not compute reads as clear. Used by `pushf`
-    /// so the value a later `popf` restores round-trips the flags that gate
-    /// branches.
+    /// the last instruction did not compute reads as clear, which `pushf`
+    /// records in [`Emulator::forged_over`] so that `popf` does not restore
+    /// it as known. Used by `pushf` so the value a later `popf` restores
+    /// round-trips the flags that gate branches.
     fn rflags(&self) -> u64 {
         let mut v = 0x2u64;
         v |= u64::from(self.flags_carry);
@@ -1653,17 +1660,7 @@ impl<'a> Emulator<'a> {
                 self.string_op(i, op, bytes)
             }
             _ if let Some(op) = Alu::of(m) => self.alu(i, op),
-            Mnemonic::Inc | Mnemonic::Dec => {
-                let a = self.dest(i)?;
-                let r = if m == Mnemonic::Inc {
-                    a.wrapping_add(1)
-                } else {
-                    a.wrapping_sub(1)
-                };
-                self.set_flags(r, op_bits(i));
-                self.store(i, r)?;
-                Ok(None)
-            }
+            Mnemonic::Inc | Mnemonic::Dec => self.inc_dec(i, m),
             Mnemonic::Neg | Mnemonic::Not => {
                 let a = self.dest(i)?;
                 let r = if m == Mnemonic::Neg {
