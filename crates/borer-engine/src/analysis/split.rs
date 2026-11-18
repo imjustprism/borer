@@ -110,8 +110,11 @@ pub struct Sources {
     /// The C file of each cited path, relative to the split's `src`
     /// directory, for the first [`UNITS_MAX`] paths in byte order.
     pub files: BTreeMap<String, String>,
-    /// The paths each function references, in byte order.
-    of: BTreeMap<u64, Vec<String>>,
+    /// Every cited path, in byte order.
+    paths: Vec<String>,
+    /// The paths each function references, as indexes into `paths`, in
+    /// byte order.
+    of: BTreeMap<u64, Vec<usize>>,
 }
 
 /// Returns the cited source paths with the C file each goes to and the
@@ -134,17 +137,16 @@ pub fn sources(p: &Program, a: &Analysis) -> Sources {
         .into_iter()
         .collect();
     let mut out = Sources::default();
-    for (path, entries) in &cited {
-        for &e in entries {
-            out.of.entry(e).or_default().push(path.clone());
+    for (at, (path, entries)) in cited.into_iter().enumerate() {
+        for e in entries {
+            out.of.entry(e).or_default().push(at);
         }
-    }
-    for path in cited.keys().take(UNITS_MAX) {
-        let short = path.strip_prefix(root.as_str()).unwrap_or(path);
-        out.files.insert(
-            path.clone(),
-            unique_file(&mut taken, &rel_stem(short), ".c"),
-        );
+        if at < UNITS_MAX {
+            let short = path.strip_prefix(root.as_str()).unwrap_or(&path);
+            let file = unique_file(&mut taken, &rel_stem(short), ".c");
+            out.files.insert(path.clone(), file);
+        }
+        out.paths.push(path);
     }
     out
 }
@@ -214,24 +216,28 @@ impl Sources {
     /// * `text` - Its decompiled text.
     #[must_use]
     pub fn filed(&self, entry: u64, text: &str) -> Filed<'_> {
-        let paths = self.of.get(&entry).map_or(&[][..], Vec::as_slice);
-        let path = match paths {
-            [one] => one.as_str(),
+        let paths: Vec<&str> = self
+            .of
+            .get(&entry)
+            .into_iter()
+            .flatten()
+            .filter_map(|&at| self.paths.get(at).map(String::as_str))
+            .collect();
+        let path = match paths.as_slice() {
+            [one] => *one,
             _ => match super::decompile::unit_of(text) {
                 None if paths.is_empty() => return Filed::Nothing,
                 None => return Filed::Tie,
-                Some(spelled) => match super::render::spelled_as(paths, &spelled) {
+                Some(spelled) => match super::render::spelled_as(&paths, &spelled) {
                     Ok(path) => path,
                     Err(0) => return Filed::Unmatched,
                     Err(_) => return Filed::Ambiguous,
                 },
             },
         };
-        if self.files.contains_key(path) {
-            Filed::Source(path)
-        } else {
-            Filed::PastCap
-        }
+        self.files
+            .get_key_value(path)
+            .map_or(Filed::PastCap, |(key, _)| Filed::Source(key))
     }
 }
 
@@ -283,8 +289,8 @@ pub fn unit_prologue(file: &str) -> String {
 /// * `o` - Names in force.
 /// * `sdk` - The classes.
 /// * `headers` - Each class written with its header file.
-/// * `exported` - Each exported function's source path by entry, `None`
-///   for one filed under none.
+/// * `exported` - Each exported function's source path by entry
+///   ([`Sources::filed`]), `None` for one filed under none.
 ///
 /// # Returns
 ///
@@ -298,7 +304,7 @@ pub fn split_map(
     o: &Overlay,
     sdk: &Sdk,
     headers: &[(&str, &str)],
-    exported: &BTreeMap<u64, Option<String>>,
+    exported: &BTreeMap<u64, Option<&str>>,
 ) -> String {
     let files: BTreeMap<&str, &str> = headers.iter().copied().collect();
     let mut out = format!(
@@ -315,7 +321,7 @@ pub fn split_map(
             if let Some(unit) = exported.get(e) {
                 out_of += 1;
                 if let Some(u) = unit {
-                    *counts.entry(u.as_str()).or_default() += 1;
+                    *counts.entry(u).or_default() += 1;
                 }
             }
         }
@@ -513,18 +519,19 @@ mod tests {
     /// When one of them is filed under a path.
     #[test]
     fn a_function_referencing_several_paths_is_filed_only_on_its_text() {
-        let path = |p: &str| p.to_owned();
+        let paths = ["a/x.cpp", "a/y.cpp", "b/x.cpp", "z/past.cpp"];
         let s = Sources {
-            files: ["a/x.cpp", "b/x.cpp", "a/y.cpp"]
-                .into_iter()
-                .map(|p| (path(p), format!("{p}.c")))
+            files: paths[..3]
+                .iter()
+                .map(|p| ((*p).to_owned(), format!("{p}.c")))
                 .collect(),
+            paths: paths.iter().map(|p| (*p).to_owned()).collect(),
             of: [
-                (1, vec![path("a/x.cpp"), path("a/y.cpp")]),
-                (2, vec![path("a/x.cpp"), path("b/x.cpp")]),
-                (3, vec![path("a/x.cpp"), path("a/y.cpp")]),
-                (4, vec![path("a/x.cpp"), path("z/past.cpp")]),
-                (5, vec![path("a/x.cpp"), path("a/y.cpp")]),
+                (1, vec![0, 1]),
+                (2, vec![0, 2]),
+                (3, vec![0, 1]),
+                (4, vec![0, 3]),
+                (5, vec![0, 1]),
             ]
             .into_iter()
             .collect(),

@@ -617,7 +617,7 @@ pub fn write_split(
         made: BTreeSet::new(),
         bytes: 0,
     };
-    let mut exported: BTreeMap<u64, Option<String>> = BTreeMap::new();
+    let mut exported: BTreeMap<u64, Option<&str>> = BTreeMap::new();
     let mut why: BTreeMap<&'static str, usize> = BTreeMap::new();
     let (mut total, mut rough) = (0usize, 0usize);
     let hoisted = export_units(
@@ -651,7 +651,7 @@ pub fn write_split(
             if let Some(reason) = reason {
                 *why.entry(reason).or_default() += 1;
             }
-            exported.insert(entry, path.map(str::to_owned));
+            exported.insert(entry, path);
             let file = path
                 .and_then(|p| sources.files.get(p))
                 .map_or(split::REMAINDER, String::as_str);
