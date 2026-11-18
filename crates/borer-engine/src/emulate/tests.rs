@@ -1798,3 +1798,79 @@ fn never_panics_on_arbitrary_bytes() {
         }
     }
 }
+
+/// Every way memory is written ends the trust in the flags slot it covers.
+///
+/// The routine forges a flags word, pushes one with the overflow known at
+/// the address in `rdi` and stops before the `popfq`; the write lands on
+/// the slot's overflow byte, and the resumed `jo` stops as on a flag
+/// nothing set. Left alone, the slot restores a known clear. The writes
+/// are a store, a poke, a poked run, a planted value, the zeros an
+/// anti-debug answer writes and the image `LoadLibraryA` maps.
+///
+/// # Panics
+///
+/// When a write over the slot leaves the popped overflow known, or the
+/// untouched slot does not restore it.
+#[test]
+fn every_write_over_the_trusted_flags_slot_ends_its_trust() {
+    /// The stub address the test's API answers at.
+    const STUB: u64 = 0x7000;
+    /// A write of the byte at an address, through one entry point.
+    type Write = fn(&mut Emulator<'_>, u64);
+    let api = |emu: &mut Emulator<'_>, name: &str, arg: usize, at: u64| {
+        std::sync::Arc::make_mut(&mut emu.apis).insert(STUB, format!("KERNEL32.dll!{name}"));
+        emu.set_arg(arg, at);
+        assert!(emu.service_api(STUB).is_ok(), "{name}");
+    };
+    let writes: [(&str, Option<Write>); 7] = [
+        ("nothing", None),
+        (
+            "store",
+            Some(|emu, at| assert!(emu.write(at, 0, 1).is_ok())),
+        ),
+        ("poke", Some(|emu, at| emu.poke(at, 0))),
+        ("poke_run", Some(|emu, at| emu.poke_run(at, &[0]))),
+        ("plant", Some(|emu, at| emu.plant(at, 0, 1))),
+        ("write_zeros", None),
+        ("LoadLibraryA", None),
+    ];
+    let code = [
+        0xb8, 0x05, 0x00, 0x00, 0x00, // ASM: mov eax, 5
+        0xc1, 0xe0, 0x02, // ASM: shl eax, 2
+        0x9c, 0x59, // ASM: pushfq; pop rcx
+        0x31, 0xc0, // ASM: xor eax, eax
+        0x48, 0x89, 0xe3, // ASM: mov rbx, rsp
+        0x48, 0x89, 0xfc, // ASM: mov rsp, rdi
+        0x9c, // ASM: pushfq
+        0x9d, // ASM: popfq
+        0x48, 0x89, 0xdc, // ASM: mov rsp, rbx
+        0x70, 0x03, // ASM: jo L
+        0x31, 0xc0, 0xc3, // ASM: xor eax, eax; ret
+        0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3, // ASM: L: mov eax, 1; ret
+    ];
+    let p = image(&code, b"@\0");
+    let mut trusted = Vec::new();
+    for (name, write) in writes {
+        let mut emu = Emulator::new(&p, 100).expect("emulator");
+        let slot = emu.alloc_next + 0x100;
+        emu.set_register("rdi", slot + 8);
+        emu.stop_at(Some(0x1013));
+        emu.run(0x1000);
+        emu.stop_at(None);
+        match (name, write) {
+            (_, Some(write)) => write(&mut emu, slot + 1),
+            ("write_zeros", None) => api(&mut emu, "CheckRemoteDebuggerPresent", 1, slot + 1),
+            ("LoadLibraryA", None) => api(&mut emu, "LoadLibraryA", 0, 0x2000),
+            _ => {}
+        }
+        emu.set_register("rsp", slot);
+        let stop = emu.run(0x1013).stop;
+        if name == "nothing" {
+            assert_eq!((stop, emu.register("rax")), (Stop::Returned, Some(0)));
+        } else if !matches!(&stop, Stop::Unmodeled(what) if what.contains("did not set")) {
+            trusted.push((name, stop));
+        }
+    }
+    assert!(trusted.is_empty(), "still trusted after {trusted:?}");
+}
