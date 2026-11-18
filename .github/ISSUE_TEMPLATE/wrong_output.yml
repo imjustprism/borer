@@ -6,7 +6,7 @@ body:
     id: ran
     attributes:
       label: What you ran
-      description: The CLI command or MCP tool call, with its arguments.
+      description: The CLI command, the desktop app action, or the MCP tool call, with its arguments.
       render: text
     validations:
       required: true
@@ -43,8 +43,9 @@ body:
     attributes:
       label: How you ran it
       options:
+        - Desktop app
         - Command line
-        - MCP server, driven by an agent
+        - MCP server, driven by an AI agent
   - type: input
     id: version
     attributes:

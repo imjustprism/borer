@@ -6,14 +6,14 @@ body:
     id: want
     attributes:
       label: What you want to do
-      description: The question you want answered about a binary, or the task an agent could not finish.
+      description: The question you want answered about a binary, or the task you or your agent could not finish.
     validations:
       required: true
   - type: textarea
     id: today
     attributes:
       label: What borer does today
-      description: The command or MCP tool you tried and what it answered, trimmed to the part that matters.
+      description: The command, app view or MCP tool you tried and what it answered, trimmed to the part that matters.
       render: text
   - type: textarea
     id: example

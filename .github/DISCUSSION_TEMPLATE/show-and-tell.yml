@@ -10,5 +10,5 @@ body:
     id: how
     attributes:
       label: The calls that mattered
-      description: The commands or MCP tool calls someone else could repeat.
+      description: The commands, app steps or MCP tool calls someone else could repeat.
       render: text

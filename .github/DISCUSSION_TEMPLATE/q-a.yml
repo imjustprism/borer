@@ -10,7 +10,7 @@ body:
     id: tried
     attributes:
       label: What you tried
-      description: The CLI command or MCP tool call and the part of the answer that matters.
+      description: The CLI command, app action or MCP tool call and the part of the answer that matters.
       render: text
   - type: input
     id: version
