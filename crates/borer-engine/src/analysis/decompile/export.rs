@@ -641,15 +641,15 @@ pub fn export(
 }
 
 /// Exports every function as [`export`] does, but hands each function's
-/// definition to `sink` alone, with the source file its asserts cite
-/// ([`super::unit_of`]), so a writer can file it by source file.
+/// definition to `sink` alone, so a writer can file it by source file
+/// ([`crate::analysis::split::Sources::filed`]).
 ///
 /// # Arguments
 ///
 /// * `program`, `analysis`, `overlay`, `library`, `only` - As for
 ///   [`export`].
-/// * `sink` - Takes each function's entry, its source file (`None` when
-///   its asserts cite none) and its definition, in [`order`].
+/// * `sink` - Takes each function's entry and its definition, in
+///   [`order`].
 ///
 /// # Returns
 ///
@@ -664,9 +664,8 @@ pub fn export_units(
     overlay: &Overlay,
     library: Library,
     only: Option<&BTreeSet<u64>>,
-    sink: &mut UnitSink<'_>,
+    sink: &mut dyn FnMut(u64, &str) -> anyhow::Result<()>,
 ) -> anyhow::Result<Hoisted> {
-    let mut each = |entry: u64, text: &str| sink(entry, super::unit_of(text).as_deref(), text);
     export_with(
         cores(),
         program,
@@ -674,13 +673,9 @@ pub fn export_units(
         overlay,
         library,
         only,
-        Sink::Functions(&mut each),
+        Sink::Functions(sink),
     )
 }
-
-/// What [`export_units`] hands each function to: its entry, its source
-/// file and its definition.
-pub type UnitSink<'a> = dyn FnMut(u64, Option<&str>, &str) -> anyhow::Result<()> + 'a;
 
 /// Where an export's definitions go.
 enum Sink<'a> {

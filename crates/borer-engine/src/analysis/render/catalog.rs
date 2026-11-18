@@ -824,7 +824,7 @@ pub fn source_tree_tsv(p: &Program, a: &Analysis, o: &Overlay, filter: &str) -> 
         .iter()
         .filter_map(|r| files.get(&r.full).map(|e| (r, e)))
         .collect();
-    out.push_str(&expressions_tsv(p, a, o, &matched));
+    out.push_str(&expressions_tsv(p, a, o, &files, &matched));
     out
 }
 
@@ -846,6 +846,8 @@ pub fn source_tree_tsv(p: &Program, a: &Analysis, o: &Overlay, filter: &str) -> 
 /// * `p` - The loaded image.
 /// * `a` - The analysis.
 /// * `o` - Names in force.
+/// * `cited` - Every cited path with the functions citing it, which the
+///   text's cut spelling of a path is matched back to ([`spelled_as`]).
 /// * `matched` - The files, in the listing's order, with the functions
 ///   citing each.
 ///
@@ -860,6 +862,7 @@ fn expressions_tsv(
     p: &Program,
     a: &Analysis,
     o: &Overlay,
+    cited: &BTreeMap<String, BTreeSet<u64>>,
     matched: &[(&SourceFile, &BTreeSet<u64>)],
 ) -> String {
     if matched.is_empty() {
@@ -884,12 +887,24 @@ fn expressions_tsv(
         .enumerate()
         .map(|(at, (f, _))| (f.full.as_str(), at))
         .collect();
+    let wanted: BTreeSet<u64> = read.iter().copied().collect();
+    let mut of: BTreeMap<u64, Vec<&str>> = BTreeMap::new();
+    for (path, entries) in cited {
+        for &e in entries.iter().filter(|e| wanted.contains(e)) {
+            of.entry(e).or_default().push(path.as_str());
+        }
+    }
     let mut counts: BTreeMap<(usize, &str), (usize, BTreeSet<u64>)> = BTreeMap::new();
+    let mut unplaced = 0usize;
     for (&entry, text) in read.iter().zip(&texts) {
+        let paths = of.get(&entry).map_or(&[][..], Vec::as_slice);
         for line in text.as_deref().into_iter().flat_map(str::lines) {
-            for (condition, path) in crate::analysis::decompile::assert_calls(line) {
-                let path = path.replace("\\\\", "/").replace('\\', "/");
-                let Some(&at) = file_of.get(path.as_str()) else {
+            for (condition, spelled) in crate::analysis::decompile::assert_calls(line) {
+                let Ok(path) = spelled_as(paths, spelled) else {
+                    unplaced += 1;
+                    continue;
+                };
+                let Some(&at) = file_of.get(path) else {
                     continue;
                 };
                 let e = counts.entry((at, condition)).or_default();
@@ -916,6 +931,13 @@ fn expressions_tsv(
     } else {
         format!("all {} functions citing them read", citing.len())
     };
+    let read_note = if unplaced > 0 {
+        format!(
+            "{read_note}; {unplaced} assert calls left out, their cut path fitting none or several of the paths their function cites"
+        )
+    } else {
+        read_note
+    };
     let mut out = format!(
         "# {} of {} assert expressions in the {} matched files, each file's most frequent first; {read_note}\n# asserts\tfunctions\tfile\texpression\n",
         rows.len().min(EXPRESSIONS_MAX),
@@ -934,6 +956,51 @@ fn expressions_tsv(
         "expressions not listed",
     );
     out
+}
+
+/// Returns a path with an escaped `\\` and a bare `\` read as `/`.
+///
+/// # Arguments
+///
+/// * `path` - The path as a literal or a text spells it.
+#[must_use]
+pub(crate) fn slashed(path: &str) -> String {
+    path.replace("\\\\", "/").replace('\\', "/")
+}
+
+/// Returns the one path among `paths` a cut spelling names.
+///
+/// The decompiler writes a cited path by its last two components
+/// (`util/fourcc.h` for `C:\\ws\\util/fourcc.h`), so the spelling names the
+/// paths equal to it or ending in `/` and it.
+///
+/// # Arguments
+///
+/// * `paths` - The full paths, `/`-separated.
+/// * `spelled` - The spelling, in either separator.
+///
+/// # Returns
+///
+/// The path, or how many fit when that is not one.
+///
+/// # Errors
+///
+/// `0` when no path fits, or the count when several do.
+pub(crate) fn spelled_as<'a, S: AsRef<str>>(
+    paths: &'a [S],
+    spelled: &str,
+) -> Result<&'a str, usize> {
+    let want = slashed(spelled);
+    let tail = format!("/{want}");
+    let fits: Vec<&str> = paths
+        .iter()
+        .map(AsRef::as_ref)
+        .filter(|p| *p == want || p.ends_with(&tail))
+        .collect();
+    match fits.as_slice() {
+        [one] => Ok(one),
+        more => Err(more.len()),
+    }
 }
 
 /// Returns the source paths the binary's literals name, each with the

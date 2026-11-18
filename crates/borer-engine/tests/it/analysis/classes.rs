@@ -351,6 +351,40 @@ fn the_class_registry_lists_a_registered_class() {
     );
 }
 
+/// A path the decompiler cuts to its last components is placed under the
+/// full path the binary cites, by the expressions and by the split.
+///
+/// `AS` at 0x1810 asserts `f.IsValid()` citing
+/// `C:\ws\code\foundation\util/fourcc.h`, which its text spells
+/// `util/fourcc.h`.
+#[test]
+fn a_cut_path_is_placed_under_the_full_path_it_names() {
+    use borer_engine::analysis::decompile::export::{Library, export_units};
+    use borer_engine::analysis::split::{Filed, sources};
+    let p = fixture();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let files = borer_engine::analysis::render::source_tree_tsv(&p, &a, &o, "fourcc");
+    assert!(
+        files.contains("\tws/code/foundation/util/fourcc.h\tf.IsValid()\n"),
+        "{files}"
+    );
+    let s = sources(&p, &a);
+    let mut filed = None;
+    export_units(&p, &a, &o, Library::Include, None, &mut |entry, text| {
+        if entry == 0x1810 {
+            filed = Some(match s.filed(entry, text) {
+                Filed::Source(path) => Ok(path.to_owned()),
+                other => Err(format!("{other:?}")),
+            });
+        }
+        Ok(())
+    })
+    .expect("the sink takes everything");
+    let path = filed.expect("0x1810 is exported").expect("0x1810 is filed");
+    assert!(s.files.contains_key(&path), "{path} is not a unit");
+}
+
 /// The source tree groups the functions by the file that asserts.
 ///
 /// A reader opening an unknown binary asks which subsystems it was built

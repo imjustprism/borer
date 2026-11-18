@@ -93,29 +93,59 @@ fn unique_file(taken: &mut BTreeSet<String>, want: &str) -> String {
     file
 }
 
-/// Returns the C file each cited source file's functions go to.
+/// Where the split files one function, or why it goes to [`REMAINDER`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Filed<'a> {
+    /// The source path it came from, as the binary cites it with `/`
+    /// separators: a key of [`Sources::files`].
+    Source(&'a str),
+    /// It references no source path and its text cites none.
+    Nothing,
+    /// It references several and its text settles on none.
+    Tie,
+    /// The file its text names, cut to its last components, fits several
+    /// of the paths it references.
+    Ambiguous,
+    /// The file its text names is none of the paths it references.
+    Unmatched,
+    /// Its source path is past the [`UNITS_MAX`] files a split writes.
+    PastCap,
+}
+
+/// The cited source paths, the file each goes to, and the paths each
+/// function references.
+#[derive(Debug, Default)]
+pub struct Sources {
+    /// The C file of each cited path, relative to the split's `src`
+    /// directory, for the first [`UNITS_MAX`] paths in byte order.
+    pub files: BTreeMap<String, String>,
+    /// The paths each function references, in byte order.
+    of: BTreeMap<u64, Vec<String>>,
+}
+
+/// Returns the cited source paths with the C file each goes to and the
+/// paths each function references.
 ///
 /// The build root most paths share is dropped ([`super::render::common_root`]),
 /// each component is made safe, a path deeper than [`DEPTH_MAX`] keeps its
 /// innermost directories, and `.c` is added (`net/socket.cpp` goes to
-/// `net/socket.cpp.c`). The first [`UNITS_MAX`] paths in byte order get a
-/// file.
+/// `net/socket.cpp.c`).
 ///
 /// # Arguments
 ///
 /// * `p` - The loaded image, for the cited paths.
 /// * `a` - The analysis, for the references to them.
-///
-/// # Returns
-///
-/// The file, relative to the split's `src` directory, by the path as
-/// [`super::decompile::unit_of`] spells it.
 #[must_use]
-pub fn unit_files(p: &Program, a: &Analysis) -> BTreeMap<String, String> {
+pub fn sources(p: &Program, a: &Analysis) -> Sources {
     let cited = super::render::cited_sources(p, a);
     let root = super::render::common_root(cited.keys());
     let mut taken: BTreeSet<String> = [DECLS, REMAINDER].into_iter().map(str::to_owned).collect();
-    let mut out = BTreeMap::new();
+    let mut out = Sources::default();
+    for (path, entries) in &cited {
+        for &e in entries {
+            out.of.entry(e).or_default().push(path.clone());
+        }
+    }
     for path in cited.keys().take(UNITS_MAX) {
         let short = path.strip_prefix(root.as_str()).unwrap_or(path);
         let parts: Vec<String> = short
@@ -131,9 +161,46 @@ pub fn unit_files(p: &Program, a: &Analysis) -> BTreeMap<String, String> {
         } else {
             kept.join("/")
         };
-        out.insert(path.clone(), unique_file(&mut taken, &format!("{rel}.c")));
+        out.files
+            .insert(path.clone(), unique_file(&mut taken, &format!("{rel}.c")));
     }
     out
+}
+
+impl Sources {
+    /// Returns where the split files a function.
+    ///
+    /// A function referencing one source path came from it. One
+    /// referencing several came from the one its text names
+    /// ([`super::decompile::unit_of`]), which the decompiler cuts to its
+    /// last components, so that spelling is matched back to the paths the
+    /// function references ([`super::render::spelled_as`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `entry` - The function's entry.
+    /// * `text` - Its decompiled text.
+    #[must_use]
+    pub fn filed(&self, entry: u64, text: &str) -> Filed<'_> {
+        let paths = self.of.get(&entry).map_or(&[][..], Vec::as_slice);
+        let path = match paths {
+            [one] => one.as_str(),
+            _ => match super::decompile::unit_of(text) {
+                None if paths.is_empty() => return Filed::Nothing,
+                None => return Filed::Tie,
+                Some(spelled) => match super::render::spelled_as(paths, &spelled) {
+                    Ok(path) => path,
+                    Err(0) => return Filed::Unmatched,
+                    Err(_) => return Filed::Ambiguous,
+                },
+            },
+        };
+        if self.files.contains_key(path) {
+            Filed::Source(path)
+        } else {
+            Filed::PastCap
+        }
+    }
 }
 
 /// Returns a class header's file name, unique among the split's headers.

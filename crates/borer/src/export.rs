@@ -468,10 +468,10 @@ fn write_whole(path: &Path, text: &str) -> anyhow::Result<()> {
 
 /// Writes the export split per source file and per class into `dir`.
 ///
-/// The C goes to `src/`: one file per source file the functions' asserts
-/// cite ([`borer_engine::analysis::decompile::unit_of`]), named after it
-/// ([`borer_engine::analysis::split::unit_files`]), the functions whose
-/// asserts cite none to `src/_unattributed.c`, and the hoisted
+/// The C goes to `src/`: one file per source path the functions cite,
+/// each function under the one it came from
+/// ([`borer_engine::analysis::split::Sources::filed`]), the functions
+/// filed under none to `src/_unattributed.c`, and the hoisted
 /// declarations every file includes to `src/_decls.h`. The mod SDK goes
 /// to `include/`: one header per class and `include/_sdk.h` they include
 /// ([`borer_engine::analysis::modsdk::header::class_headers`]). `MAP.tsv`
@@ -518,7 +518,7 @@ pub fn write_split(
     for d in [&src, &include] {
         std::fs::create_dir_all(d).with_context(|| format!("creating {}", d.display()))?;
     }
-    let files = split::unit_files(program, analysis);
+    let sources = split::sources(program, analysis);
     let set = only.map(|e| e.iter().copied().collect::<BTreeSet<u64>>());
     let mut units = Units {
         dir: &src,
@@ -534,17 +534,20 @@ pub fn write_split(
         overlay,
         library,
         set.as_ref(),
-        &mut |entry, unit, text| {
-            let file = unit.and_then(|u| files.get(u)).map_or_else(
-                || {
+        &mut |entry, text| {
+            let file = match sources.filed(entry, text) {
+                split::Filed::Source(path) => {
+                    cited.insert(entry, path.to_owned());
+                    sources
+                        .files
+                        .get(path)
+                        .map_or(split::REMAINDER, String::as_str)
+                }
+                _ => {
                     left += 1;
                     split::REMAINDER
-                },
-                String::as_str,
-            );
-            if let Some(u) = unit {
-                cited.insert(entry, u.to_owned());
-            }
+                }
+            };
             units.add(file, text)
         },
     )?;

@@ -19,7 +19,7 @@ use borer_engine::analysis::render::{
     Bytes, Dir, Level, Walk, asserted_fields_tsv, band, call_children, callgraph, cfg,
     disasm_function_with, disasm_view, linear, next_steps, propose, source_tree_tsv, triage,
 };
-use borer_engine::analysis::split::unit_files;
+use borer_engine::analysis::split::sources;
 use borer_engine::analysis::stats::stats_tsv;
 use borer_engine::analysis::utypes::{type_detail, type_rows};
 use borer_engine::analysis::{Analysis, Overlay};
@@ -125,7 +125,7 @@ fuzz_target!(|data: &[u8]| {
     }
     _ = asserted_fields_tsv(&program, &analysis, &overlay, "");
     _ = source_tree_tsv(&program, &analysis, &overlay, ".");
-    _ = unit_files(&program, &analysis);
+    _ = sources(&program, &analysis);
     _ = markers_tsv(&program, &analysis, "");
     _ = managed::methods_tsv(&program, &analysis, "");
     for spec in [

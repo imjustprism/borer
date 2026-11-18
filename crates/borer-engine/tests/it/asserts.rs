@@ -1012,17 +1012,18 @@ fn a_source_file_lists_its_assert_expressions_most_frequent_first() {
     );
 }
 
-/// The export split files each function by the source file its asserts
-/// cite, and `main`, which asserts nothing, by none.
+/// The export split files each function by the source file it cites, and
+/// `main`, which cites none, by none.
 ///
 /// Every method of [`widget`] cites `src/widget.cpp`; the split names its
 /// file after the path with the build root dropped.
 #[test]
 fn the_export_split_files_each_function_by_its_cited_source() {
     use borer_engine::analysis::decompile::export::{Library, export_units};
-    use borer_engine::analysis::split::unit_files;
+    use borer_engine::analysis::split::{Filed, sources};
     let p = widget();
     let a = Analysis::compute(&p);
+    let s = sources(&p, &a);
     let mut units = std::collections::BTreeMap::new();
     export_units(
         &p,
@@ -1030,9 +1031,13 @@ fn the_export_split_files_each_function_by_its_cited_source() {
         &Overlay::default(),
         Library::Include,
         None,
-        &mut |entry, unit, text| {
+        &mut |entry, text| {
             assert!(!text.is_empty(), "{entry:#x} has a definition");
-            units.insert(entry, unit.map(str::to_owned));
+            let unit = match s.filed(entry, text) {
+                Filed::Source(path) => Some(path.to_owned()),
+                _ => None,
+            };
+            units.insert(entry, unit);
             Ok(())
         },
     )
@@ -1042,9 +1047,8 @@ fn the_export_split_files_each_function_by_its_cited_source() {
     for (entry, ..) in METHODS {
         assert_eq!(units.get(&entry), Some(&path), "{entry:#x}: {units:?}");
     }
-    let files = unit_files(&p, &a);
     assert_eq!(
-        files.get("src/widget.cpp").map(String::as_str),
+        s.files.get("src/widget.cpp").map(String::as_str),
         Some("widget.cpp.c")
     );
 }

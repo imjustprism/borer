@@ -119,9 +119,9 @@ pub fn assert_calls(line: &str) -> Vec<(&str, &str)> {
 /// `/`; `None` when the text cites no source file or the evidence ties.
 #[must_use]
 pub fn unit_of(text: &str) -> Option<String> {
-    match super::own_source(text) {
-        super::Cited::File(path) => Some(path.replace("\\\\", "/").replace('\\', "/")),
-        super::Cited::Nothing | super::Cited::Tie => None,
+    match own_source(text) {
+        Cited::File(path) => Some(crate::analysis::render::slashed(path)),
+        Cited::Nothing | Cited::Tie => None,
     }
 }
 
