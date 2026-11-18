@@ -268,7 +268,7 @@ pub struct EntropyParams {
 }
 
 /// Parameters for `find_function_by_string`.
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FindFunctionByStringParams {
     /// A string under 4 printable characters must equal it.
@@ -291,7 +291,7 @@ pub struct HexdumpParams {
 }
 
 /// Parameters for `strings`.
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StringsParams {
     /// Minimum length (default 5, min 4).
@@ -309,7 +309,7 @@ pub struct StringsParams {
 }
 
 /// Parameters for `symbols`.
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SymbolsParams {
     /// One kind of symbol only (default every kind); drops the kind column.
@@ -345,7 +345,7 @@ impl From<FunctionSort> for render::FunctionOrder {
 }
 
 /// Parameters for `functions`.
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FunctionsParams {
     /// Case-insensitive filter on name or entry hex; `thunk` or `funclet` lists what is otherwise left out.
@@ -379,7 +379,7 @@ pub struct FunctionDetailParams {
 }
 
 /// Parameters for `xrefs`.
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct XrefsParams {
     /// Address or name (function, import, overlay name), or Class+offset.
@@ -437,7 +437,7 @@ pub struct CfgParams {
 }
 
 /// Parameters for `decompile`.
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DecompileParams {
     /// Function entry or any address inside it.
@@ -461,7 +461,7 @@ pub struct QueryParams {
 }
 
 /// Parameters for `search`.
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SearchParams {
     /// Hex bytes with ?? wildcards (kind=bytes) or a literal substring (kind=text).
@@ -477,7 +477,7 @@ pub struct SearchParams {
 }
 
 /// Parameters for `types`.
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TypesParams {
     /// Substring filter on name or applied address.

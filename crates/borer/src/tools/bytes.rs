@@ -6,7 +6,6 @@ pub(crate) use borer_front::tools::entropy_threshold;
 #[cfg(test)]
 mod tests {
     use borer_engine::program::{Arch, Program, Section};
-    use rmcp::handler::server::wrapper::Parameters;
 
     use crate::params::{ReadKind, ReadParams};
 
@@ -29,14 +28,17 @@ mod tests {
         let server =
             crate::testing::server_with(Program::raw(bytes, Arch::X86_64, 0, None, sections));
         let read = |address: &str, count: u32| {
-            server
-                .read(Parameters(ReadParams {
+            borer_front::tools::read(
+                &server,
+                &ReadParams {
                     address: address.to_owned(),
                     kind: Some(ReadKind::CStr),
                     r#type: None,
                     count: Some(count),
-                }))
-                .expect("reads")
+                },
+            )
+            .map_err(crate::errors::failed)
+            .expect("reads")
         };
         let first = read("0x2000", 1);
         assert!(
@@ -72,23 +74,35 @@ mod tests {
         let server = crate::testing::server_with(program);
         let want =
             "address 0x2010 is in .bss, which holds no file bytes (the loader zero-fills it)";
-        let dump = server.hexdump(Parameters(HexdumpParams {
-            address: "0x2010".to_owned(),
-            length: None,
-        }));
+        let dump = borer_front::tools::hexdump(
+            &server,
+            &HexdumpParams {
+                address: "0x2010".to_owned(),
+                length: None,
+            },
+        )
+        .map_err(crate::errors::failed);
         assert_eq!(dump.expect_err("refused").message, want);
-        let code = server.disassemble(Parameters(DisassembleParams {
-            address: "0x2010".to_owned(),
-            count: None,
-            bytes: None,
-        }));
+        let code = borer_front::tools::disassemble(
+            &server,
+            &DisassembleParams {
+                address: "0x2010".to_owned(),
+                count: None,
+                bytes: None,
+            },
+        )
+        .map_err(crate::errors::failed);
         assert_eq!(code.expect_err("refused").message, want);
-        let read = server.read(Parameters(ReadParams {
-            address: "0x2010".to_owned(),
-            kind: Some(ReadKind::U8),
-            r#type: None,
-            count: None,
-        }));
+        let read = borer_front::tools::read(
+            &server,
+            &ReadParams {
+                address: "0x2010".to_owned(),
+                kind: Some(ReadKind::U8),
+                r#type: None,
+                count: None,
+            },
+        )
+        .map_err(crate::errors::failed);
         assert_eq!(read.expect_err("refused").message, want);
     }
 }

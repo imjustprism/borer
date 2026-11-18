@@ -826,15 +826,18 @@ mod tests {
                 format!("named {shown} of sub_1000 (0x1000) {ty} kept"),
                 "{arch:?}"
             );
-            let text = server
-                .decompile(Parameters(DecompileParams {
+            let text = borer_front::tools::decompile(
+                &server,
+                &DecompileParams {
                     address: "0x1000".to_owned(),
                     detail: None,
                     filter: None,
                     offset: None,
                     limit: None,
-                }))
-                .unwrap_or_else(|e| e.message.into_owned());
+                },
+            )
+            .map_err(crate::errors::failed)
+            .unwrap_or_else(|e| e.message.into_owned());
             assert!(
                 text.contains(&format!("\n{ty} kept;\n")) && !text.contains(shown),
                 "{arch:?}: {text}"

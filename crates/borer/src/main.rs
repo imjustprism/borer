@@ -1167,13 +1167,16 @@ mod tests {
             pdb_applied: std::sync::Arc::new(std::sync::RwLock::new(true)),
             ..super::BorerServer::default()
         };
-        let out = server
-            .disassemble(Parameters(DisassembleParams {
+        let out = borer_front::tools::disassemble(
+            &server,
+            &DisassembleParams {
                 address: "0x1002".to_owned(),
                 count: None,
                 bytes: None,
-            }))
-            .expect("arm64 disassembles");
+            },
+        )
+        .map_err(crate::errors::failed)
+        .expect("arm64 disassembles");
         assert!(
             out.starts_with(
                 "# 2 instructions at 0x1000; 0x1002 is inside an instruction, listing from 0x1000;"
@@ -1187,25 +1190,31 @@ mod tests {
             }))
             .expect("a script answers");
         assert!(out.starts_with("ret\n1\n"), "{out}");
-        let listed = server
-            .functions(Parameters(FunctionsParams {
+        let listed = borer_front::tools::functions(
+            &server,
+            &FunctionsParams {
                 filter: None,
                 sort: None,
                 offset: None,
                 limit: None,
                 count_only: None,
-            }))
-            .expect("arm64 functions are discovered");
+            },
+        )
+        .map_err(crate::errors::failed)
+        .expect("arm64 functions are discovered");
         assert!(listed.lines().any(|l| l.starts_with("0x1000 ")), "{listed}");
-        let text = server
-            .decompile(Parameters(DecompileParams {
+        let text = borer_front::tools::decompile(
+            &server,
+            &DecompileParams {
                 address: "0x1000".to_owned(),
                 detail: None,
                 filter: None,
                 offset: None,
                 limit: None,
-            }))
-            .expect("arm64 decompiles");
+            },
+        )
+        .map_err(crate::errors::failed)
+        .expect("arm64 decompiles");
         assert!(
             text.contains("// signature: void sub_1000()")
                 && text.contains("// checked vs binary: statements as emitted, 1/1 blocks")
@@ -1565,16 +1574,18 @@ mod tests {
     #[test]
     fn a_misspelled_name_is_refused_with_the_nearest() {
         use crate::params::FunctionParams;
-        use rmcp::handler::server::wrapper::Parameters;
         let server = raw_server();
         crate::state::write_lock(&server.overlay)
             .names
             .insert(0x1000, "check_serial".to_owned());
-        let refused = server
-            .function_summary(Parameters(FunctionParams {
+        let refused = borer_front::tools::function_summary(
+            &server,
+            &FunctionParams {
                 address: "chk_serial".to_owned(),
-            }))
-            .expect_err("no such name");
+            },
+        )
+        .map_err(crate::errors::failed)
+        .expect_err("no such name");
         assert!(
             refused.message.contains("; nearest: check_serial; "),
             "{}",
@@ -1595,18 +1606,20 @@ mod tests {
         use crate::params::HexdumpParams;
         use crate::params::ReadParams;
         use crate::params::StringsParams;
-        use rmcp::handler::server::wrapper::Parameters;
         let server = raw_server();
         let functions = |limit| {
-            server
-                .functions(Parameters(FunctionsParams {
+            borer_front::tools::functions(
+                &server,
+                &FunctionsParams {
                     filter: None,
                     sort: None,
                     offset: None,
                     limit,
                     count_only: None,
-                }))
-                .expect("lists")
+                },
+            )
+            .map_err(crate::errors::failed)
+            .expect("lists")
         };
         let capped = functions(Some(99_999));
         assert!(
@@ -1620,38 +1633,47 @@ mod tests {
         );
         assert!(!functions(Some(300)).contains("capped"));
 
-        let strings = server
-            .strings(Parameters(StringsParams {
+        let strings = borer_front::tools::strings(
+            &server,
+            &StringsParams {
                 min_length: None,
                 filter: None,
                 encoding: None,
                 offset: None,
                 limit: Some(1_000),
                 count_only: None,
-            }))
-            .expect("lists");
+            },
+        )
+        .map_err(crate::errors::failed)
+        .expect("lists");
         assert!(
             strings.starts_with("# limit 1000 capped at 500\n# showing "),
             "{strings}"
         );
-        let dump = server
-            .hexdump(Parameters(HexdumpParams {
+        let dump = borer_front::tools::hexdump(
+            &server,
+            &HexdumpParams {
                 address: "0x1000".to_owned(),
                 length: Some(99_999),
-            }))
-            .expect("dumps");
+            },
+        )
+        .map_err(crate::errors::failed)
+        .expect("dumps");
         assert!(
             dump.starts_with("# length 99999 capped at 4096\n# 0x1000..0x1100 .text\n"),
             "{dump}"
         );
-        let read = server
-            .read(Parameters(ReadParams {
+        let read = borer_front::tools::read(
+            &server,
+            &ReadParams {
                 address: "0x1000".to_owned(),
                 kind: Some(super::params::ReadKind::U8),
                 r#type: None,
                 count: Some(300),
-            }))
-            .expect("reads");
+            },
+        )
+        .map_err(crate::errors::failed)
+        .expect("reads");
         assert!(
             read.starts_with("# count 300 capped at 256\n# 256 x u8 at 0x1000"),
             "{read}"
@@ -1667,59 +1689,61 @@ mod tests {
     /// When a zero is answered, or refused another way.
     #[test]
     fn every_list_tool_refuses_a_zero_limit_alike() {
-        use crate::params::DecompileParams;
-        use crate::params::FindFunctionByStringParams;
-        use crate::params::FunctionsParams;
-        use crate::params::LiveInstancesParams;
-        use crate::params::LiveModulesParams;
-        use crate::params::LiveWatchParams;
-        use crate::params::SearchParams;
-        use crate::params::StringsParams;
-        use crate::params::SymbolsParams;
-        use crate::params::XrefsParams;
+        use crate::params::{LiveInstancesParams, LiveModulesParams, LiveWatchParams};
         use rmcp::handler::server::wrapper::Parameters;
         let server = super::BorerServer::default();
         let refusals = [
-            server.strings(Parameters(StringsParams {
-                min_length: None,
-                filter: None,
-                encoding: None,
-                offset: None,
-                limit: Some(0),
-                count_only: None,
-            })),
-            server.symbols(Parameters(SymbolsParams {
-                kind: None,
-                filter: None,
-                offset: None,
-                limit: Some(0),
-                count_only: None,
-            })),
-            server.functions(Parameters(FunctionsParams {
-                filter: None,
-                sort: None,
-                offset: None,
-                limit: Some(0),
-                count_only: None,
-            })),
-            server.xrefs(Parameters(XrefsParams {
-                address: "main".to_owned(),
-                offset: None,
-                limit: Some(0),
-                count_only: None,
-            })),
-            server.search(Parameters(SearchParams {
-                query: "90".to_owned(),
-                kind: None,
-                offset: None,
-                limit: Some(0),
-                count_only: None,
-            })),
-            server.find_function_by_string(Parameters(FindFunctionByStringParams {
-                filter: "x".to_owned(),
-                offset: None,
-                limit: Some(0),
-            })),
+            crate::testing::call(
+                borer_front::tools::strings,
+                &server,
+                &crate::params::StringsParams {
+                    limit: Some(0),
+                    ..Default::default()
+                },
+            ),
+            crate::testing::call(
+                borer_front::tools::symbols,
+                &server,
+                &crate::params::SymbolsParams {
+                    limit: Some(0),
+                    ..Default::default()
+                },
+            ),
+            crate::testing::call(
+                borer_front::tools::functions,
+                &server,
+                &crate::params::FunctionsParams {
+                    limit: Some(0),
+                    ..Default::default()
+                },
+            ),
+            crate::testing::call(
+                borer_front::tools::xrefs,
+                &server,
+                &crate::params::XrefsParams {
+                    address: "main".to_owned(),
+                    limit: Some(0),
+                    ..Default::default()
+                },
+            ),
+            crate::testing::call(
+                borer_front::tools::search,
+                &server,
+                &crate::params::SearchParams {
+                    query: "90".to_owned(),
+                    limit: Some(0),
+                    ..Default::default()
+                },
+            ),
+            crate::testing::call(
+                borer_front::tools::find_function_by_string,
+                &server,
+                &crate::params::FindFunctionByStringParams {
+                    filter: "x".to_owned(),
+                    limit: Some(0),
+                    ..Default::default()
+                },
+            ),
             server.live_instances(Parameters(LiveInstancesParams {
                 class: "Player".to_owned(),
                 offset: None,
@@ -1748,15 +1772,16 @@ mod tests {
             .expect_err("a watch of no bytes is refused");
         assert_eq!(watch.code, rmcp::model::ErrorCode::INVALID_PARAMS);
         assert_eq!(watch.message, "length must be at least 1");
-        let all = server
-            .decompile(Parameters(DecompileParams {
+        let all = crate::testing::call(
+            borer_front::tools::decompile,
+            &server,
+            &crate::params::DecompileParams {
                 address: "main".to_owned(),
-                detail: None,
-                filter: None,
-                offset: None,
                 limit: Some(0),
-            }))
-            .expect_err("a zero limit is refused");
+                ..Default::default()
+            },
+        )
+        .expect_err("a zero limit is refused");
         assert_eq!(
             all.message,
             crate::tools::decompile::LIMIT_ZERO,

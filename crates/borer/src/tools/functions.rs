@@ -87,25 +87,27 @@ mod tests {
     #[test]
     fn functions_refuses_without_a_binary_like_every_other_tool() {
         let server = crate::BorerServer::default();
-        let refused = server
-            .functions(rmcp::handler::server::wrapper::Parameters(
-                crate::params::FunctionsParams {
-                    filter: None,
-                    sort: None,
-                    offset: None,
-                    limit: None,
-                    count_only: None,
-                },
-            ))
-            .expect_err("nothing is loaded");
-        let sibling = server
-            .function(rmcp::handler::server::wrapper::Parameters(
-                crate::params::FunctionDetailParams {
-                    address: "0x1000".to_owned(),
-                    offset: None,
-                },
-            ))
-            .expect_err("nothing is loaded");
+        let refused = borer_front::tools::functions(
+            &server,
+            &crate::params::FunctionsParams {
+                filter: None,
+                sort: None,
+                offset: None,
+                limit: None,
+                count_only: None,
+            },
+        )
+        .map_err(crate::errors::failed)
+        .expect_err("nothing is loaded");
+        let sibling = borer_front::tools::function(
+            &server,
+            &crate::params::FunctionDetailParams {
+                address: "0x1000".to_owned(),
+                offset: None,
+            },
+        )
+        .map_err(crate::errors::failed)
+        .expect_err("nothing is loaded");
         assert_eq!(refused.code, rmcp::model::ErrorCode::INVALID_PARAMS);
         assert_eq!(refused.code, sibling.code);
         assert_eq!(refused.message, sibling.message);
@@ -128,7 +130,6 @@ mod tests {
     fn xrefs_reads_a_class_and_an_offset_as_a_field() {
         use crate::params::XrefsParams;
         use borer_engine::program::{Arch, Program, Section};
-        use rmcp::handler::server::wrapper::Parameters;
         let mut code = vec![0xc3; 0x100];
         // ASM: mov dword [rcx+0x24], 5; ret
         code[..8].copy_from_slice(&[0xc7, 0x41, 0x24, 0x05, 0x00, 0x00, 0x00, 0xc3]);
@@ -145,12 +146,16 @@ mod tests {
             ..crate::BorerServer::default()
         };
         let xrefs = |address: &str| {
-            server.xrefs(Parameters(XrefsParams {
-                address: address.to_owned(),
-                offset: None,
-                limit: None,
-                count_only: None,
-            }))
+            borer_front::tools::xrefs(
+                &server,
+                &XrefsParams {
+                    address: address.to_owned(),
+                    offset: None,
+                    limit: None,
+                    count_only: None,
+                },
+            )
+            .map_err(crate::errors::failed)
         };
         let field = xrefs("Foo+0x24").expect("a field");
         assert!(

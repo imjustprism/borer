@@ -105,18 +105,20 @@ mod tests {
     #[test]
     fn a_search_page_says_showing_n_of_m() {
         use crate::params::SearchParams;
-        use rmcp::handler::server::wrapper::Parameters;
         let server = raw_server();
         let search = |count_only| {
-            server
-                .search(Parameters(SearchParams {
+            borer_front::tools::search(
+                &server,
+                &SearchParams {
                     query: "c3".to_owned(),
                     kind: None,
                     offset: None,
                     limit: None,
                     count_only: Some(count_only),
-                }))
-                .expect("searches")
+                },
+            )
+            .map_err(crate::errors::failed)
+            .expect("searches")
         };
         let page = search(false);
         assert!(

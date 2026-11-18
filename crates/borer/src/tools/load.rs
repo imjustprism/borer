@@ -1034,13 +1034,11 @@ mod tests {
             entry: None,
             regions: None,
         }));
-        let functions = server.functions(Parameters(FunctionsParams {
-            filter: None,
-            sort: None,
-            offset: None,
-            limit: None,
-            count_only: None,
-        }));
+        let functions = crate::testing::call(
+            borer_front::tools::functions,
+            &server,
+            &FunctionsParams::default(),
+        );
         let past = server.load_binary(Parameters(LoadBinaryParams {
             path: shown.clone(),
             entry_file_offset: None,

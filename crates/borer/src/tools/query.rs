@@ -379,7 +379,6 @@ mod tests {
     fn query_answers_a_uri_as_resources_read_does() {
         use crate::params::QueryParams;
         use borer_engine::program::{Arch, Program, Section};
-        use rmcp::handler::server::wrapper::Parameters;
         let mut code = vec![0x90; 0x200];
         code.push(0xc3);
         let text = Section::mapped(".text", 0x1000, 0, 0x201, false, true);
@@ -392,9 +391,13 @@ mod tests {
             ..crate::BorerServer::default()
         };
         let query = |uri: &str| {
-            server.query(Parameters(QueryParams {
-                uri: uri.to_owned(),
-            }))
+            borer_front::tools::query(
+                &server,
+                &QueryParams {
+                    uri: uri.to_owned(),
+                },
+            )
+            .map_err(crate::errors::failed)
         };
         let uri = "borer://disasm/0x1000";
         let (read_as, whole) = server.read_uri(uri).expect("reads");

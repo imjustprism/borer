@@ -515,15 +515,18 @@ mod tests {
             "{note}"
         );
         let decompile = |offset, limit| {
-            server
-                .decompile(Parameters(DecompileParams {
+            borer_front::tools::decompile(
+                &server,
+                &DecompileParams {
                     address: "0x1000".to_owned(),
                     detail: None,
                     filter: None,
                     offset,
                     limit: Some(limit),
-                }))
-                .expect("decompiles")
+                },
+            )
+            .map_err(crate::errors::failed)
+            .expect("decompiles")
         };
         let whole = decompile(None, u32::MAX);
         let lines: Vec<&str> = whole.lines().collect();
@@ -591,15 +594,18 @@ mod tests {
             (Some("qstring"), vec![]),
             (Some("thunk"), vec!["0x401010"]),
         ] {
-            let listed = server
-                .functions(Parameters(FunctionsParams {
+            let listed = borer_front::tools::functions(
+                &server,
+                &FunctionsParams {
                     filter: filter.map(str::to_owned),
                     sort: None,
                     offset: None,
                     limit: None,
                     count_only: None,
-                }))
-                .expect("lists");
+                },
+            )
+            .map_err(crate::errors::failed)
+            .expect("lists");
             let batch = server
                 .decompile_batch(Parameters(DecompileBatchParams {
                     filter: filter.map(str::to_owned),
@@ -794,15 +800,18 @@ mod tests {
         use rmcp::handler::server::wrapper::Parameters;
         let server = raw_server();
         let answer = |detail| {
-            server
-                .decompile(Parameters(DecompileParams {
+            borer_front::tools::decompile(
+                &server,
+                &DecompileParams {
                     address: "0x1000".to_owned(),
                     detail,
                     filter: None,
                     offset: None,
                     limit: Some(u32::MAX),
-                }))
-                .expect("decompiles")
+                },
+            )
+            .map_err(crate::errors::failed)
+            .expect("decompiles")
         };
         for detail in [None, Some(Detail::Skeleton)] {
             let text = answer(detail);
@@ -851,7 +860,6 @@ mod tests {
         use crate::params::{DecompileParams, Detail};
         use borer_engine::analysis::decompile;
         use borer_engine::program::Arch;
-        use rmcp::handler::server::wrapper::Parameters;
         let mut code = vec![
             0x81, 0xf9, 0xcd, 0xab, 0x37, 0x13, // ASM: cmp ecx, 0x1337abcd
             0x0f, 0x94, 0xc0, // ASM: sete al
@@ -861,15 +869,18 @@ mod tests {
         code.resize(0x10, 0xcc);
         let server = crate::testing::code_server(Arch::X86_64, &code);
         for detail in [None, Some(Detail::Skeleton)] {
-            let tool = server
-                .decompile(Parameters(DecompileParams {
+            let tool = borer_front::tools::decompile(
+                &server,
+                &DecompileParams {
                     address: "0x1000".to_owned(),
                     detail,
                     filter: None,
                     offset: None,
                     limit: None,
-                }))
-                .expect("decompiles");
+                },
+            )
+            .map_err(crate::errors::failed)
+            .expect("decompiles");
             let a = server.ensure_analysis().expect("analyzed");
             let engine = server
                 .with_program(|p| {
@@ -898,7 +909,6 @@ mod tests {
         use crate::params::DecompileParams;
         use crate::params::FunctionParams;
         use borer_engine::program::{Arch, Program, Section};
-        use rmcp::handler::server::wrapper::Parameters;
         let mut code = vec![
             0x81, 0xf9, 0xcd, 0xab, 0x37, 0x13, // ASM: cmp ecx, 0x1337abcd
             0x0f, 0x94, 0xc0, // ASM: sete al
@@ -916,15 +926,18 @@ mod tests {
             ..crate::BorerServer::default()
         };
         let step = "borer://solve/0x1000,a1 (compares against 0x1337abcd: solve tries it as a1)";
-        let answer = server
-            .decompile(Parameters(DecompileParams {
+        let answer = borer_front::tools::decompile(
+            &server,
+            &DecompileParams {
                 address: "0x1000".to_owned(),
                 detail: None,
                 filter: None,
                 offset: None,
                 limit: Some(u32::MAX),
-            }))
-            .expect("decompiles");
+            },
+        )
+        .map_err(crate::errors::failed)
+        .expect("decompiles");
         let lines: Vec<&str> = answer.lines().collect();
         assert!(
             lines
@@ -937,11 +950,14 @@ mod tests {
             Some(format!("// next: {step}").as_str()),
             "{answer}"
         );
-        let summary = server
-            .function_summary(Parameters(FunctionParams {
+        let summary = borer_front::tools::function_summary(
+            &server,
+            &FunctionParams {
                 address: "0x1000".to_owned(),
-            }))
-            .expect("summarizes");
+            },
+        )
+        .map_err(crate::errors::failed)
+        .expect("summarizes");
         assert!(summary.ends_with(&format!("# next: {step}\n")), "{summary}");
     }
 
@@ -961,7 +977,6 @@ mod tests {
     fn a_decompile_answer_warns_of_a_callee_with_no_prototype() {
         use crate::params::DecompileParams;
         use borer_engine::program::{Arch, Program, Section, Symbol, SymbolKind};
-        use rmcp::handler::server::wrapper::Parameters;
         let mut code = vec![
             0xe8, 0x0b, 0x00, 0x00, 0x00, // ASM: call 0x1010
             0xc3, // ASM: ret
@@ -987,15 +1002,18 @@ mod tests {
             ..crate::BorerServer::default()
         };
         let answer = |address: &str| {
-            server
-                .decompile(Parameters(DecompileParams {
+            borer_front::tools::decompile(
+                &server,
+                &DecompileParams {
                     address: address.to_owned(),
                     detail: None,
                     filter: None,
                     offset: None,
                     limit: Some(u32::MAX),
-                }))
-                .expect("decompiles")
+                },
+            )
+            .map_err(crate::errors::failed)
+            .expect("decompiles")
         };
         let caller = answer("0x1000");
         let lines: Vec<&str> = caller.lines().collect();
@@ -1026,7 +1044,6 @@ mod tests {
     fn a_decompile_answer_does_not_mark_an_unset_read() {
         use crate::params::DecompileParams;
         use borer_engine::program::{Arch, Program, Section};
-        use rmcp::handler::server::wrapper::Parameters;
         let mut code = vec![
             0x4c, 0x89, 0xd0, // ASM: mov rax, r10
             0xc3, // ASM: ret
@@ -1041,15 +1058,18 @@ mod tests {
             pdb_applied: std::sync::Arc::new(std::sync::RwLock::new(true)),
             ..crate::BorerServer::default()
         };
-        let answer = server
-            .decompile(Parameters(DecompileParams {
+        let answer = borer_front::tools::decompile(
+            &server,
+            &DecompileParams {
                 address: "0x1000".to_owned(),
                 detail: None,
                 filter: None,
                 offset: None,
                 limit: Some(u32::MAX),
-            }))
-            .expect("decompiles");
+            },
+        )
+        .map_err(crate::errors::failed)
+        .expect("decompiles");
         assert!(answer.contains("r10"), "{answer}");
         assert!(!answer.contains("!unset"), "{answer}");
     }

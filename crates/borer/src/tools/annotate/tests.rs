@@ -16,15 +16,18 @@ fn a_rename_lets_go_of_the_text_read_under_the_old_names() {
     use rmcp::handler::server::wrapper::Parameters;
     let server = raw_server();
     let decompile = || {
-        server
-            .decompile(Parameters(DecompileParams {
+        borer_front::tools::decompile(
+            &server,
+            &DecompileParams {
                 address: "0x1000".to_owned(),
                 detail: None,
                 filter: None,
                 offset: None,
                 limit: Some(u32::MAX),
-            }))
-            .expect("decompiles")
+            },
+        )
+        .map_err(crate::errors::failed)
+        .expect("decompiles")
     };
     let held = || {
         server
@@ -71,15 +74,17 @@ fn a_rename_keeps_the_texts_that_did_not_read_the_name() {
     use rmcp::handler::server::wrapper::Parameters;
     let server = raw_server();
     let decompile = || {
-        server
-            .decompile(Parameters(DecompileParams {
+        borer_front::tools::decompile(
+            &server,
+            &DecompileParams {
                 address: "0x1000".to_owned(),
                 detail: None,
                 filter: None,
                 offset: None,
                 limit: Some(u32::MAX),
-            }))
-            .expect("decompiles")
+            },
+        )
+        .expect("decompiles")
     };
     let derived = || {
         let a = server.ensure_analysis().expect("analyzed");
@@ -192,10 +197,14 @@ fn a_name_that_reads_as_a_number_is_noted_and_reachable() {
         .expect("renames");
     assert!(set.contains("also reads as the number 0xcafe"), "{set}");
     let function = |address: &str| {
-        server.function(Parameters(FunctionDetailParams {
-            address: address.to_owned(),
-            offset: None,
-        }))
+        borer_front::tools::function(
+            &server,
+            &FunctionDetailParams {
+                address: address.to_owned(),
+                offset: None,
+            },
+        )
+        .map_err(crate::errors::failed)
     };
     let by_name = function("cafe").expect("the name resolves");
     assert!(by_name.contains("cafe"), "{by_name}");
@@ -257,14 +266,11 @@ fn set_type_defines_applies_and_refuses() {
         out.starts_with("dry-run: would define struct Player"),
         "{out}"
     );
-    let listed = server
-        .types(Parameters(TypesParams {
-            filter: None,
-            offset: None,
-            limit: None,
-            count_only: Some(true),
-        }))
-        .expect("lists");
+    let counted = TypesParams {
+        count_only: Some(true),
+        ..TypesParams::default()
+    };
+    let listed = borer_front::tools::types(&server, &counted).expect("lists");
     assert!(listed.contains("0 rows (0 type(s), 0 applied)"), "{listed}");
     let out = server
         .set_type(Parameters(SetTypeParams {
@@ -283,14 +289,11 @@ fn set_type_defines_applies_and_refuses() {
         "{out}"
     );
     assert!(out.contains("applied Player * at 0x2000"), "{out}");
-    let listed = server
-        .types(Parameters(TypesParams {
-            filter: Some("player".to_owned()),
-            offset: None,
-            limit: None,
-            count_only: None,
-        }))
-        .expect("lists");
+    let player = TypesParams {
+        filter: Some("player".to_owned()),
+        ..TypesParams::default()
+    };
+    let listed = borer_front::tools::types(&server, &player).expect("lists");
     assert!(
         listed.contains("struct\tPlayer\t0x20\t0x18 hp u32, 0x1c mp u32"),
         "{listed}"
@@ -391,14 +394,11 @@ fn a_layout_applies_as_a_struct_on_request() {
     use rmcp::handler::server::wrapper::Parameters;
     let server = record_server();
     let types = || {
-        server
-            .types(Parameters(TypesParams {
-                filter: None,
-                offset: None,
-                limit: None,
-                count_only: Some(true),
-            }))
-            .expect("lists")
+        let count = TypesParams {
+            count_only: Some(true),
+            ..Default::default()
+        };
+        borer_front::tools::types(&server, &count).expect("lists")
     };
     let before = server.overlay_plain();
     let dry = server
@@ -449,15 +449,18 @@ fn a_layout_applies_as_a_struct_on_request() {
         "{}",
         types()
     );
-    let text = server
-        .decompile(Parameters(DecompileParams {
+    let text = borer_front::tools::decompile(
+        &server,
+        &DecompileParams {
             address: "0x401000".to_owned(),
             detail: None,
             filter: None,
             offset: None,
             limit: None,
-        }))
-        .expect("decompiles");
+        },
+    )
+    .map_err(crate::errors::failed)
+    .expect("decompiles");
     assert!(text.contains("a1->f_10"), "{text}");
     assert!(text.contains("a1->f_20 = 1;"), "{text}");
     let bad = server
@@ -531,25 +534,31 @@ fn set_type_reads_c_declarations() {
         dry,
         "dry-run: would define 1 type(s) from C, laid out for x64 Windows:\nstruct S (0x10 bytes, align 8): 0x0 c char, 0x4 n i32, 0x8 p char *\npass dry_run=false to apply.\n"
     );
-    let listed = x64
-        .types(Parameters(TypesParams {
+    let listed = borer_front::tools::types(
+        &x64,
+        &TypesParams {
             filter: None,
             offset: None,
             limit: None,
             count_only: Some(true),
-        }))
-        .expect("lists");
+        },
+    )
+    .map_err(crate::errors::failed)
+    .expect("lists");
     assert!(listed.contains("0 rows (0 type(s)"), "{listed}");
     let done = decl(&x64, text, Some(false)).expect("defines");
     assert!(done.starts_with("defined 1 type(s) from C"), "{done}");
-    let read = x64
-        .read(Parameters(ReadParams {
+    let read = borer_front::tools::read(
+        &x64,
+        &ReadParams {
             address: "0x2000".to_owned(),
             kind: None,
             r#type: Some("S".to_owned()),
             count: None,
-        }))
-        .expect("reads");
+        },
+    )
+    .map_err(crate::errors::failed)
+    .expect("reads");
     assert!(read.contains("0x2000       c char   'A'\n"), "{read}");
     assert!(read.contains("0x2004       n i32    7\n"), "{read}");
     let x86 = server_for(Arch::X86);
@@ -612,12 +621,16 @@ fn read_lays_a_user_type_over_the_bytes() {
         }))
         .expect("defines");
     let read = |kind: Option<ReadKind>, ty: &str, address: &str, count: Option<u32>| {
-        server.read(Parameters(ReadParams {
-            address: address.to_owned(),
-            kind,
-            r#type: Some(ty.to_owned()),
-            count,
-        }))
+        borer_front::tools::read(
+            &server,
+            &ReadParams {
+                address: address.to_owned(),
+                kind,
+                r#type: Some(ty.to_owned()),
+                count,
+            },
+        )
+        .map_err(crate::errors::failed)
     };
     let text = read(None, "Item", "0x2000", Some(2)).expect("reads");
     assert!(
@@ -691,14 +704,17 @@ fn set_type_defines_enums_and_refuses() {
         out.contains("applied State at 0x2000 (4 byte(s)); decompile names its values"),
         "{out}"
     );
-    let listed = server
-        .types(Parameters(TypesParams {
+    let listed = borer_front::tools::types(
+        &server,
+        &TypesParams {
             filter: Some("state".to_owned()),
             offset: None,
             limit: None,
             count_only: None,
-        }))
-        .expect("lists");
+        },
+    )
+    .map_err(crate::errors::failed)
+    .expect("lists");
     assert!(
         listed.contains("enum\tState\t0x4\tIdle = 0, Run = 1"),
         "{listed}"

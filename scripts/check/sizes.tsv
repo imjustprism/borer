@@ -169,7 +169,7 @@ crates/borer/src/cli/mod.rs::cli#1	150
 crates/borer/src/cli/mod.rs::query#1	700
 crates/borer/src/index.rs	1564
 crates/borer/src/main.rs::call_tool#1	106
-crates/borer/src/tools/annotate/tests.rs::set_type_defines_applies_and_refuses#1	125
+crates/borer/src/tools/annotate/tests.rs::set_type_defines_applies_and_refuses#1	119
 crates/borer/src/tools/decompile.rs::decompile_batch#1	111
-crates/borer/src/tools/load.rs::load_binary_maps_raw_code_at_a_stated_layout#1	107
+crates/borer/src/tools/load.rs::load_binary_maps_raw_code_at_a_stated_layout#1	105
 crates/borer/tests/it/contract.rs::cli_refuses_what_it_cannot_answer#1	115

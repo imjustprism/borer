@@ -61,47 +61,6 @@ pub(crate) fn catalog() -> ToolRouter<BorerServer> {
         })
 }
 
-/// Lets the tests call a catalog tool as they call a server tool, with its
-/// typed parameters, answering the server's error.
-#[cfg(test)]
-macro_rules! catalog_calls {
-    ($($name:ident: $params:ident),* $(,)?) => {
-        impl BorerServer {
-            $(
-                #[doc = concat!("Runs the catalog's `", stringify!($name), "` over this server.")]
-                #[doc = ""]
-                #[doc = "# Errors"]
-                #[doc = ""]
-                #[doc = "The tool's failure, as a server tool answers it."]
-                pub(crate) fn $name(
-                    &self,
-                    rmcp::handler::server::wrapper::Parameters(p): rmcp::handler::server::wrapper::Parameters<crate::params::$params>,
-                ) -> Result<String, rmcp::ErrorData> {
-                    borer_front::tools::$name(self, &p).map_err(failed)
-                }
-            )*
-        }
-    };
-}
-
-#[cfg(test)]
-catalog_calls! {
-    decompile: DecompileParams,
-    disassemble: DisassembleParams,
-    find_function_by_string: FindFunctionByStringParams,
-    function: FunctionDetailParams,
-    function_summary: FunctionParams,
-    functions: FunctionsParams,
-    hexdump: HexdumpParams,
-    query: QueryParams,
-    read: ReadParams,
-    search: SearchParams,
-    strings: StringsParams,
-    symbols: SymbolsParams,
-    types: TypesParams,
-    xrefs: XrefsParams,
-}
-
 #[cfg(test)]
 mod tests {
     use borer_front::tools::{SERVER_ONLY, TOOLS};

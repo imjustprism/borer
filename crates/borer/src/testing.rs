@@ -106,3 +106,23 @@ pub(crate) fn load_raw(
 pub(crate) fn tiny_server() -> crate::BorerServer {
     code_server(borer_engine::program::Arch::X86_64, &[0xc3])
 }
+
+/// Runs a catalog tool over a server, its failure as the server's tools
+/// answer one ([`crate::errors::failed`]).
+///
+/// # Arguments
+///
+/// * `tool` - The catalog's handler ([`borer_front::tools`]).
+/// * `server` - The server it runs over.
+/// * `params` - The tool's parameters.
+///
+/// # Errors
+///
+/// The tool's failure.
+pub(crate) fn call<P>(
+    tool: fn(&dyn borer_front::tools::Held, &P) -> Result<String, borer_front::tools::Failure>,
+    server: &crate::BorerServer,
+    params: &P,
+) -> Result<String, rmcp::ErrorData> {
+    tool(server, params).map_err(crate::errors::failed)
+}

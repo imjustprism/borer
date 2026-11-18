@@ -849,7 +849,6 @@ mod tests {
     #[test]
     fn a_program_without_analysis_walks_its_strings_once() {
         use crate::params::StringsParams;
-        use rmcp::handler::server::wrapper::Parameters;
         let server = crate::testing::code_server(
             borer_engine::program::Arch::Unknown,
             b"plain text here\0more plain text\0",
@@ -858,14 +857,18 @@ mod tests {
         let held = server.analysis_or_empty();
         assert!(std::sync::Arc::ptr_eq(&held, &server.analysis_or_empty()));
         for filter in [None, Some("more".to_owned())] {
-            let page = server.strings(Parameters(StringsParams {
-                min_length: None,
-                filter,
-                encoding: None,
-                offset: None,
-                limit: None,
-                count_only: None,
-            }));
+            let page = borer_front::tools::strings(
+                &server,
+                &StringsParams {
+                    min_length: None,
+                    filter,
+                    encoding: None,
+                    offset: None,
+                    limit: None,
+                    count_only: None,
+                },
+            )
+            .map_err(crate::errors::failed);
             assert!(page.is_ok(), "{page:?}");
         }
         assert_eq!(held.derived.held("string_walks"), 1);
@@ -1054,14 +1057,18 @@ mod tests {
             let done = done.clone();
             std::thread::spawn(move || {
                 for _ in 0..ROUNDS {
-                    let read = server.strings(Parameters(StringsParams {
-                        min_length: None,
-                        filter: None,
-                        encoding: None,
-                        offset: None,
-                        limit: None,
-                        count_only: Some(true),
-                    }));
+                    let read = borer_front::tools::strings(
+                        &server,
+                        &StringsParams {
+                            min_length: None,
+                            filter: None,
+                            encoding: None,
+                            offset: None,
+                            limit: None,
+                            count_only: Some(true),
+                        },
+                    )
+                    .map_err(crate::errors::failed);
                     assert!(read.is_ok(), "{read:?}");
                 }
                 done.send("reader").expect("the test waits");
