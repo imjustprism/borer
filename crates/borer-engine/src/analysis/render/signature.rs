@@ -221,7 +221,8 @@ fn decode_masked(
 ///
 /// # Errors
 ///
-/// When the image is not x86 or x86-64 code, or nothing is mapped at `va`.
+/// When the image is not x86 or x86-64 code, or the file holds no bytes
+/// at `va` ([`Program::no_bytes_at`]).
 pub fn signature(p: &Program, va: u64, end: Option<u64>) -> Result<Signature, String> {
     let bitness = x86_bitness(p)?;
     let room = end.map_or(SIGNATURE_MAX, |e| {
@@ -230,7 +231,7 @@ pub fn signature(p: &Program, va: u64, end: Option<u64>) -> Result<Signature, St
     let bytes = p
         .read_va_upto(va, room)
         .filter(|b| !b.is_empty())
-        .ok_or_else(|| format!("nothing is mapped at {va:#x}"))?;
+        .ok_or_else(|| p.no_bytes_at(va))?;
     let mut pattern: Vec<Option<u8>> = Vec::new();
     let mut best = Signature {
         pattern: Vec::new(),
@@ -826,7 +827,7 @@ fn yara_signature(p: &Program, f: &Function) -> Result<String, String> {
     let bytes = p
         .read_va_upto(f.entry, room)
         .filter(|b| !b.is_empty())
-        .ok_or_else(|| format!("nothing is mapped at {:#x}", f.entry))?;
+        .ok_or_else(|| p.no_bytes_at(f.entry))?;
     let decoded = decode_masked(p, bitness, f.entry, bytes);
     if decoded.is_empty() {
         return Err(format!("no instruction decodes at {:#x}", f.entry));

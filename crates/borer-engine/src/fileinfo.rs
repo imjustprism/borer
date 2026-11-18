@@ -435,7 +435,7 @@ pub fn locate(
     let _ = writeln!(
         out,
         "section:  {}",
-        program.section_at(va).map_or("-", |s| s.name.as_str())
+        program.declared_at(va).map_or("-", |s| s.name.as_str())
     );
     if let Some(a) = analysis
         && let Some(f) = a.function_at(va)
@@ -493,6 +493,22 @@ mod tests {
         assert_eq!(locate(&p, None, &o, "rva:0x1010").expect("an rva"), by_va);
         assert!(locate(&p, None, &o, "off:0x10").is_err());
         assert!(locate(&p, None, &o, "nowhere").is_err());
+    }
+
+    /// An address in a section the file holds no bytes for names that
+    /// section, with no file offset.
+    ///
+    /// # Panics
+    ///
+    /// When the section line says none.
+    #[test]
+    fn an_address_without_file_bytes_names_its_section() {
+        let mut bss = Section::mapped(".bss", 0x2000, 0, 0x100, true, false);
+        bss.file_size = 0;
+        let p = Program::raw(vec![0xc3; 0x10], Arch::X86_64, 0, None, vec![bss]);
+        let at = locate(&p, None, &Overlay::default(), "0x2010").expect("a va");
+        assert!(at.contains("section:  .bss\n"), "{at}");
+        assert!(at.contains("offset:   - (in no file bytes"), "{at}");
     }
 
     /// A number with a hex letter and no `0x` reads as hex in every form,

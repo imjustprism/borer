@@ -493,7 +493,7 @@ fn address(p: &Program, a: &Analysis, o: &Overlay, n: &Needle, place: Place, fou
     };
     let text = va.and_then(|va| match a.function_at(va) {
         Some(f) => Some(format!("{}{}", name_of(a, o, f.entry), f.offset_of(va))),
-        None => p.section_at(va).map(|s| s.name.clone()),
+        None => p.declared_at(va).map(|s| s.name.clone()),
     });
     let mut best = Best::new(HitKind::Address);
     match text {

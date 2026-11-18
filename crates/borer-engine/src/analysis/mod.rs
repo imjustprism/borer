@@ -2341,7 +2341,7 @@ pub fn no_function_at(program: &Program, analysis: &Analysis, va: u64) -> String
             let rva = program
                 .image_base
                 .checked_add(va)
-                .filter(|&at| at != va && program.section_at(at).is_some())
+                .filter(|&at| at != va && program.declared_at(at).is_some())
                 .map_or_else(String::new, |at| {
                     format!("; as an RVA it is {at:#x}, which is mapped")
                 });
