@@ -830,7 +830,7 @@ fn a_pushed_unknown_overflow_stays_unknown() {
     }
     let callees = [
         0x9c, 0x58, 0xc3, // ASM: pushfq; pop rax; ret
-        0x51, 0x9d, // ASM: push rcx; popfq
+        0x50, 0x9d, // ASM: push rax; popfq
         0x70, 0x01, 0xc3, 0xc3, // ASM: jo +1; ret; ret
     ];
     let p = raw::image(Arch::X86_64, &callees, &[]);

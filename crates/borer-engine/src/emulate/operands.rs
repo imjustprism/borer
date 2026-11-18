@@ -430,9 +430,10 @@ impl Emulator<'_> {
     /// the flags that gate branches.
     ///
     /// An overflow the last instruction did not compute reads as clear and
-    /// marks the run [`Emulator::forged`], so that `popf` restores a known
-    /// overflow only from the [`Emulator::clean`] slot. A forged word read as
-    /// data (`pushfq; pop rax; test ah, 8`) still reads the clear as known.
+    /// marks the machine [`Emulator::forged`] for its life, so `popf`
+    /// restores a known overflow only from the [`Emulator::clean`] slot. A
+    /// forged word read as data (`pushfq; pop rax; test ah, 8`) still reads
+    /// the clear as known.
     pub(super) fn rflags(&mut self) -> u64 {
         self.forged |= self.flags_over.is_none();
         let mut v = 0x2u64;
