@@ -196,7 +196,10 @@ pub(crate) fn class_methods<'a>(a: &'a Analysis, o: &'a Overlay, sdk: &Sdk) -> C
         let Some(class) = super::classes::class_of(name) else {
             continue;
         };
-        if known.contains(class) && !class.contains("anonymous namespace") {
+        let anonymous = ["anonymous namespace", "{anonymous}"]
+            .iter()
+            .any(|a| class.contains(a));
+        if known.contains(class) && !anonymous {
             out.entry(class).or_default().push((f.entry, name));
         }
     }
@@ -892,6 +895,53 @@ mod tests {
         }
         assert_eq!(s.class.len(), 1 + 99_998);
         assert_eq!(by("C", 2, 3).why(), None);
+    }
+
+    /// A class in an anonymous namespace has no methods to file by class,
+    /// nor does a function whose qualified name borer guessed.
+    ///
+    /// `Foo::run` is named by the user, `Foo::slot` by a vtable slot, and
+    /// the classes of the other two are in an anonymous namespace, as MSVC
+    /// and GCC spell it.
+    ///
+    /// # Panics
+    ///
+    /// When a method other than `Foo::run` is listed.
+    #[test]
+    fn a_class_in_an_anonymous_namespace_or_a_guessed_name_has_no_methods() {
+        use crate::analysis::NameSource;
+        use crate::analysis::utypes::{UserStruct, UserType};
+        use crate::program::{Arch, Section};
+        let mut bytes = vec![0xc3u8; 0x2000];
+        bytes[0x1000..0x100f].copy_from_slice(&[
+            0xe8, 0x0b, 0, 0, 0, 0xe8, 0x16, 0, 0, 0, 0xe8, 0x21, 0, 0, 0,
+        ]); // ASM: call 0x1010; call 0x1020; call 0x1030
+        let text = Section::mapped(".text", 0x1000, 0x1000, 0x1000, false, true);
+        let p = Program::raw(bytes, Arch::X86_64, 0, Some(0x1000), vec![text]);
+        let mut a = Analysis::compute(&p);
+        let (anon, gnu) = ("`anonymous namespace'::Impl", "{anonymous}::Job");
+        let mut o = Overlay::default();
+        o.names.insert(0x1000, "Foo::run".to_owned());
+        o.names.insert(0x1010, format!("{anon}::x"));
+        o.names.insert(0x1030, format!("{gnu}::run"));
+        for f in a.functions.iter_mut().filter(|f| f.entry == 0x1020) {
+            f.name = Some("Foo::slot".to_owned());
+            f.name_source = NameSource::Slot;
+        }
+        for class in ["Foo", anon, gnu] {
+            let shape = UserStruct {
+                size: 8,
+                fields: BTreeMap::new(),
+            };
+            o.types.insert(class.to_owned(), UserType::Struct(shape));
+        }
+        let sdk = crate::analysis::modsdk::build(&p, &a, &o);
+        let methods = class_methods(&a, &o, &sdk);
+        assert_eq!(a.functions.len(), 4);
+        assert_eq!(
+            methods.into_iter().collect::<Vec<_>>(),
+            vec![("Foo", vec![(0x1000, "Foo::run")])]
+        );
     }
 
     /// A split file's opening says how its functions were filed, not that
