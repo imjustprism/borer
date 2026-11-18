@@ -97,9 +97,10 @@ pub struct Section {
     pub file_off: FileOff,
     /// Number of bytes backed by the file (`0` for `.bss`-style sections).
     pub file_size: u64,
-    /// Bytes of the file extent the header states that lie past the end of
-    /// a truncated file: the `lost` addresses after `file_size` are
-    /// missing, not zero-filled; `0` when the file holds the whole extent.
+    /// File bytes the header states that lie past the end of a truncated
+    /// file, counted in bytes of the file: the `lost` addresses after
+    /// `file_size` are missing, not zero-filled; `0` when the file holds
+    /// the whole extent.
     pub lost: u64,
     /// The section is thread-local storage (ELF `SHF_TLS`): a template each
     /// thread's block is made from. One the file holds no bytes for
