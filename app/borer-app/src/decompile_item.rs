@@ -471,8 +471,11 @@ impl DecompileItem {
         cx.notify();
     }
 
-    /// Moves to the first line that shows the instruction at `va` ([`View::line_of`]), now
-    /// or once the view is built; an address no line shows moves nowhere.
+    /// Moves to the first line that shows the instruction at `va` ([`View::line_of`]), else
+    /// to the first whose origin is the block holding it, now or once the view is built.
+    ///
+    /// The function's own entry, when no line shows it, keeps the view at its start; any
+    /// other address no line stands for moves nowhere, and the status line says so.
     ///
     /// # Arguments
     ///
@@ -483,11 +486,35 @@ impl DecompileItem {
             self.waiting = Some(va);
             return;
         };
-        if let Some((view, _)) = code.get(0)
-            && let Some(line) = view.line_of(va)
-        {
-            self.jump_to_line(line, cx);
+        let Some((view, _)) = code.get(0) else {
+            return;
+        };
+        if self.entry == Some(va) && view.line_of(va).is_none() {
+            return;
         }
+        let block = self.loaded.analysis.block_at(va).map(|(_, b)| b.start);
+        let line = view.line_of(va).or_else(|| {
+            let block = block?;
+            (0..view.lines()).find(|&line| view.origin(line) == Some(block))
+        });
+        match line {
+            Some(line) => self.jump_to_line(line, cx),
+            None => self.say(format!("No line here stands for {va:#x}."), cx),
+        }
+    }
+
+    /// Returns the address the cursor's line stands for: the instruction it shows, else its
+    /// origin block's start; `None` for a line with neither (a header, a declaration).
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Application context reading the editor.
+    #[must_use]
+    pub fn line_va(&self, cx: &App) -> Option<u64> {
+        let line = self
+            .cursor(cx)
+            .and_then(|(row, _)| self.code.as_ref()?.get(row));
+        line.and_then(|(view, line)| view.address(line).or_else(|| view.origin(line)))
     }
 
     /// Hands the new editor to the toolbar of the pane showing the tab, once the current
@@ -993,19 +1020,15 @@ impl DecompileItem {
         ))
     }
 
-    /// Returns the address of the cursor's line as its view says, else the tab's function's
-    /// entry; `None` for measured lines.
+    /// Returns the address the cursor's line stands for ([`Self::line_va`]), else the tab's
+    /// function's entry; `None` for measured lines.
     ///
     /// # Arguments
     ///
     /// * `cx` - Application context reading the editor.
     #[must_use]
     pub fn cursor_address(&self, cx: &App) -> Option<u64> {
-        let line = self
-            .cursor(cx)
-            .and_then(|(row, _)| self.code.as_ref()?.get(row));
-        line.and_then(|(view, line)| view.address(line))
-            .or(self.entry)
+        self.line_va(cx).or(self.entry)
     }
 
     /// Follows the link of the token under the cursor: a call opens its function and an
@@ -1086,8 +1109,9 @@ impl DecompileItem {
         }
     }
 
-    /// Opens the function's other view, decompile or listing, at its start, keeping this
-    /// tab; a tab of measured lines has no function to switch.
+    /// Opens the function's other view, decompile or listing, at the line standing for the
+    /// cursor's ([`Self::line_va`]), else at its start, keeping this tab; a tab of measured
+    /// lines has no function to switch.
     ///
     /// # Arguments
     ///
@@ -1096,15 +1120,8 @@ impl DecompileItem {
     pub fn toggle_listing(&self, window: &Window, cx: &mut Context<'_, Self>) {
         if let Some(entry) = self.entry {
             let form = self.form.other();
-            self.open_beside(
-                Place::Code {
-                    entry,
-                    form,
-                    at: None,
-                },
-                window,
-                cx,
-            );
+            let at = self.line_va(cx);
+            self.open_beside(Place::Code { entry, form, at }, window, cx);
         }
     }
 
@@ -1119,7 +1136,7 @@ impl DecompileItem {
     /// * `cx` - Item context.
     fn open_function_place(
         &self,
-        place: fn(u64) -> Place,
+        place: impl FnOnce(u64) -> Place,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
@@ -1172,14 +1189,7 @@ impl DecompileItem {
         let Some(entry) = self.entry else {
             return;
         };
-        let at = self
-            .code
-            .as_ref()
-            .zip(self.cursor(cx))
-            .and_then(|(code, (row, _))| {
-                let (view, line) = code.get(row)?;
-                view.address(line)
-            });
+        let at = self.line_va(cx);
         self.open_beside(Place::Graph { entry, at }, window, cx);
     }
 }
@@ -1424,7 +1434,8 @@ impl Render for DecompileItem {
                 item.show_check(None, cx);
             }))
             .on_action(cx.listener(|item, _: &ShowHex, window, cx| {
-                item.open_function_place(|entry| Place::Hex { at: Some(entry) }, window, cx);
+                let at = item.cursor_address(cx);
+                item.open_function_place(|_| Place::Hex { at }, window, cx);
             }))
             .relative()
             .size_full()
@@ -1476,6 +1487,7 @@ pub(crate) mod tests {
     use crate::app_view::tests::{
         CALLEE, CALLER, binary_in, init, open, open_place, sample, shown,
     };
+    use crate::check_marks::tests::one_function;
     use crate::code_semantics::for_one_view;
     use crate::code_view::tests::sample_program;
     use crate::code_view::{CodeLines, CodePalette, Role, describe};
@@ -1942,6 +1954,39 @@ pub(crate) mod tests {
         };
         open_place(&workspace, &loaded, place, TabMode::Preview, cx);
         assert_eq!(active(&workspace, cx), Some((CALLER, Form::Listing, line)));
+    }
+
+    /// Tab from a listing line opens the decompile at the first line whose origin is the
+    /// block holding its instruction, and Tab from there opens the listing at that block's
+    /// first instruction.
+    ///
+    /// # Panics
+    ///
+    /// Panics if either toggle opens at another line.
+    #[gpui::test]
+    fn the_toggle_keeps_the_cursor_line_block(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
+        let entry = 0x1000;
+        let loaded = one_function(&[
+            0x48, 0x89, 0x0a, // ASM: mov [rdx], rcx
+            0xc3, // ASM: ret
+        ]);
+        let code = decompile_blocking(&loaded, entry).unwrap();
+        let listing = listing_blocking(&loaded, entry).unwrap();
+        let ret = listing.line_of(0x1003).unwrap();
+        let origin_line = (0..code.lines())
+            .find(|&line| code.origin(line) == Some(entry))
+            .unwrap();
+        let tab = open_tab(&workspace, &loaded, (entry, Form::Listing), cx);
+        put_cursor(&tab, (ret, 0), cx);
+        cx.simulate_keystrokes("tab");
+        let want = Some((entry, Form::Decompile, origin_line));
+        assert_eq!(active(&workspace, cx), want);
+        cx.simulate_keystrokes("tab");
+        let want = Some((entry, Form::Listing, listing.line_of(entry).unwrap()));
+        assert_eq!(active(&workspace, cx), want);
     }
 
     /// Zed's buffer search opens over a code tab and finds every place its text spells the
