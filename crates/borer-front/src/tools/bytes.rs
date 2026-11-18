@@ -8,6 +8,7 @@
 use std::fmt::Write as _;
 
 use borer_engine::analysis::{Analysis, Overlay, parse_off, render, stated};
+use borer_engine::answer::Need;
 use borer_engine::program::Feature;
 use borer_engine::strings::walk::string_rows;
 use borer_engine::{disasm, entropy, hexdump as hexfmt, memory, num};
@@ -17,7 +18,7 @@ use super::params::{
     HexdumpParams, Page, QueryParams, ReadParams, SearchKind, SearchParams, StringsParams,
     SymbolsParams, TypesParams, count_param, to_usize,
 };
-use super::{Failure, Held, HeldExt};
+use super::{Failure, Held, run, tabled};
 
 /// Disassembles a run of instructions at an address or name.
 ///
@@ -34,11 +35,11 @@ pub fn disassemble(h: &dyn Held, p: &DisassembleParams) -> Result<String, Failur
     let count = count_param(p.count, 32, 256, "count")?;
     let n = count.n;
     let with_bytes = p.bytes.unwrap_or(false);
-    h.run(Box::new(|prog| {
-        let asked = h.addr(prog, &p.address)?;
+    run(h, Need::Best(Feature::Discover), |s| {
+        let (prog, a) = (s.program(), s.analysis());
+        let asked = s.addr(&p.address)?;
         let isa = prog.isa_for(Feature::Disasm)?;
-        let a = h.analysis_or_empty();
-        let va = render::instruction_at_or_before(prog, &a, asked).unwrap_or(asked);
+        let va = render::instruction_at_or_before(prog, a, asked).unwrap_or(asked);
         let snapped = if va == asked {
             String::new()
         } else {
@@ -47,17 +48,17 @@ pub fn disassemble(h: &dyn Held, p: &DisassembleParams) -> Result<String, Failur
         let code = prog
             .read_va_upto(va, 16 * 1024)
             .ok_or_else(|| prog.no_bytes_at(va))?;
-        let limit = render::sweep_limit(prog, &a, va);
+        let limit = render::sweep_limit(prog, a, va);
         let window = limit
             .and_then(|end| usize::try_from(end - va).ok())
             .and_then(|n| code.get(..n.min(code.len())))
             .unwrap_or(code);
         let lines = disasm::disassemble_program(prog, window, va, isa, n);
-        let o = h.overlay();
+        let o = s.overlay();
         let ends = limit.map_or(String::new(), |end| {
             format!("; code ends at {end:#x}, what follows is data")
         });
-        let caveat = Some(render::listing_caveat(prog, &a, va))
+        let caveat = Some(render::listing_caveat(prog, a, va))
             .filter(|c| !c.is_empty())
             .map_or(String::new(), |c| format!("; {c}"));
         let mut out = format!(
@@ -84,7 +85,7 @@ pub fn disassemble(h: &dyn Held, p: &DisassembleParams) -> Result<String, Failur
             }
         }
         Ok(out)
-    }))
+    })
     .map(|text| count.noted(text))
 }
 
@@ -123,20 +124,19 @@ pub fn read(h: &dyn Held, p: &ReadParams) -> Result<String, Failure> {
         } else {
             parsed
         };
-        return h
-            .run(Box::new(|prog| {
-                if parse_off(address).is_some() {
-                    return Err("a typed read takes an address; off: reads by `kind`".to_owned());
-                }
-                let va = h.addr(prog, address)?;
-                let analysis = h.analysis_kept();
-                render::typed_tsv(prog, analysis.as_deref(), &h.overlay(), va, &parsed)
-            }))
-            .map(|text| count.noted(text));
+        return run(h, Need::File, |s| {
+            if parse_off(address).is_some() {
+                return Err("a typed read takes an address; off: reads by `kind`".to_owned());
+            }
+            let va = s.addr(address)?;
+            render::typed_tsv(s.program(), s.kept(), s.overlay(), va, &parsed)
+        })
+        .map(|text| count.noted(text));
     }
     let kind_text = p.kind.unwrap_or_default();
     let kind: memory::Kind = kind_text.into();
-    h.run(Box::new(|prog| {
+    run(h, Need::File, |s| {
+        let prog = s.program();
         let (start, values, place) = match parse_off(address) {
             Some(off) => (
                 off,
@@ -144,12 +144,11 @@ pub fn read(h: &dyn Held, p: &ReadParams) -> Result<String, Failure> {
                 "off:",
             ),
             None => {
-                let va = h.addr(prog, address)?;
+                let va = s.addr(address)?;
                 (va, memory::read_values(prog, va, kind, n)?, "")
             }
         };
-        let analysis = h.analysis_kept();
-        let o = h.overlay();
+        let o = s.overlay();
         let sec = if place.is_empty() {
             prog.section_at(start)
                 .map_or_else(String::new, |s| format!(" in {}", s.name))
@@ -170,7 +169,7 @@ pub fn read(h: &dyn Held, p: &ReadParams) -> Result<String, Failure> {
             let mut text = v.text.clone();
             if let Some(name) = v
                 .target
-                .and_then(|t| render::pointee_name(prog, analysis.as_deref(), &o, t))
+                .and_then(|t| render::pointee_name(prog, s.kept(), o, t))
             {
                 text.push_str(&format!(" -> {name}"));
             }
@@ -186,7 +185,7 @@ pub fn read(h: &dyn Held, p: &ReadParams) -> Result<String, Failure> {
             out.push_str(&format!("{:<12} {text}\n", format!("{:#x}", v.at)));
         }
         Ok(out)
-    }))
+    })
     .map(|text| count.noted(text))
 }
 
@@ -211,15 +210,15 @@ pub fn entropy(h: &dyn Held, p: &EntropyParams) -> Result<String, Failure> {
         entropy::REGIONS_MAX,
         entropy::REGIONS_MAX,
     )?;
-    h.run(Box::new(|prog| {
+    run(h, Need::File, |s| {
         Ok(entropy::report(
-            prog,
+            s.program(),
             window,
             threshold,
             page.offset,
             page.limit.n,
         ))
-    }))
+    })
     .map(|text| page.limit.noted(text))
 }
 
@@ -257,13 +256,13 @@ pub fn entropy_threshold(threshold: f64) -> Result<f64, String> {
 /// When no binary is loaded or the range is not entirely mapped.
 pub fn hexdump(h: &dyn Held, p: &HexdumpParams) -> Result<String, Failure> {
     let length = count_param(p.length, 64, hexfmt::HEXDUMP_MAX, "length")?;
-    h.run(Box::new(|prog| {
+    run(h, Need::File, |s| {
         if let Some(off) = parse_off(&p.address) {
-            return hexfmt::file_hexdump(prog, off, length.n);
+            return hexfmt::file_hexdump(s.program(), off, length.n);
         }
-        let va = h.addr(prog, &p.address)?;
-        hexfmt::hex_rows(prog, va, length.n).spell(prog)
-    }))
+        let va = s.addr(&p.address)?;
+        hexfmt::hex_rows(s.program(), va, length.n).spell(s.program())
+    })
     .map(|text| length.noted(text))
 }
 
@@ -280,15 +279,15 @@ pub fn hexdump(h: &dyn Held, p: &HexdumpParams) -> Result<String, Failure> {
 /// When no binary is loaded.
 pub fn find_crypto_constants(h: &dyn Held, p: &CryptoParams) -> Result<String, Failure> {
     let page = Page::new(p.offset, p.limit, None, 200, 500)?;
-    h.run(Box::new(|prog| {
+    run(h, Need::Best(Feature::Discover), |s| {
         Ok(render::crypto_tsv(
-            prog,
-            &h.analysis_or_empty(),
-            &h.overlay(),
+            s.program(),
+            s.analysis(),
+            s.overlay(),
             page.offset,
             page.limit.n,
         ))
-    }))
+    })
     .map(|text| page.limit.noted(text))
 }
 
@@ -308,9 +307,14 @@ pub fn find_function_by_string(
 ) -> Result<String, Failure> {
     let offset = to_usize(p.offset.unwrap_or(0));
     let limit = count_param(p.limit, 50, 300, "limit")?;
-    h.with_analysis(Feature::Discover, |prog, a, o| {
+    run(h, Need::Code(Feature::Discover), |s| {
         Ok(render::functions_by_string_tsv(
-            prog, a, o, &p.filter, offset, limit.n,
+            s.program(),
+            s.analysis(),
+            s.overlay(),
+            &p.filter,
+            offset,
+            limit.n,
         ))
     })
     .map(|text| limit.noted(text))
@@ -330,11 +334,11 @@ pub fn strings(h: &dyn Held, p: &StringsParams) -> Result<String, Failure> {
     let min = to_usize(p.min_length.unwrap_or(5).max(4));
     let encoding = p.encoding.unwrap_or_default().into();
     let page = Page::new(p.offset, p.limit, p.count_only, 200, 500)?;
-    h.run(Box::new(|prog| {
+    run(h, Need::Best(Feature::Discover), |s| {
         let limit = if page.count_only { 0 } else { page.limit.n };
         let rows = string_rows(
-            prog,
-            &h.analysis_or_empty(),
+            s.program(),
+            s.analysis(),
             encoding,
             min,
             p.filter.as_deref(),
@@ -346,7 +350,7 @@ pub fn strings(h: &dyn Held, p: &StringsParams) -> Result<String, Failure> {
         } else {
             rows.spell()
         })
-    }))
+    })
     .map(|text| page.limit.noted(text))
 }
 
@@ -366,10 +370,10 @@ pub fn strings(h: &dyn Held, p: &StringsParams) -> Result<String, Failure> {
 pub fn symbols(h: &dyn Held, p: &SymbolsParams) -> Result<String, Failure> {
     let want = p.kind.map(borer_engine::program::SymbolKind::from);
     let page = Page::new(p.offset, p.limit, p.count_only, 50, 1000)?;
-    h.run(Box::new(|prog| {
+    run(h, Need::Best(Feature::Discover), |s| {
         let rows = render::symbol_rows(
-            prog,
-            &h.analysis_or_empty(),
+            s.program(),
+            s.analysis(),
             want,
             p.filter.as_deref(),
             page.offset,
@@ -380,7 +384,7 @@ pub fn symbols(h: &dyn Held, p: &SymbolsParams) -> Result<String, Failure> {
         } else {
             rows.spell()
         })
-    }))
+    })
     .map(|text| page.limit.noted(text))
 }
 
@@ -414,7 +418,8 @@ pub fn search(h: &dyn Held, p: &SearchParams) -> Result<String, Failure> {
             "the query is empty: give hex bytes with ?? wildcards, or kind=text and a substring",
         ));
     }
-    h.run(Box::new(|prog| {
+    run(h, Need::Best(Feature::Discover), |s| {
+        let prog = s.program();
         let mut hits = match kind {
             SearchKind::Bytes => {
                 let pattern = borer_engine::search::parse_pattern(query).ok_or_else(|| {
@@ -428,10 +433,13 @@ pub fn search(h: &dyn Held, p: &SearchParams) -> Result<String, Failure> {
             SearchKind::Text => borer_engine::search::find_text(prog, query, offset),
         };
         hits.hits.truncate(limit.n);
-        let a = h.analysis_or_empty();
-        let o = h.overlay();
-        Ok(render_hits(&hits, offset, count_only, (&a, &o)))
-    }))
+        Ok(render_hits(
+            &hits,
+            offset,
+            count_only,
+            (s.analysis(), s.overlay()),
+        ))
+    })
     .map(|text| limit.noted(text))
 }
 
@@ -519,7 +527,7 @@ pub fn types(h: &dyn Held, p: &TypesParams) -> Result<String, Failure> {
         50,
         borer_engine::analysis::utypes::TYPES_ROWS_MAX,
     )?;
-    let o = h.overlay();
+    let o = tabled(&h.user_overlay());
     let rows = stated::rows(&o);
     let (_, total, table) = borer_engine::analysis::utypes::list_tsv(
         &o.types,
@@ -559,7 +567,7 @@ pub fn annotations(h: &dyn Held, p: &AnnotationsParams) -> Result<String, Failur
         render::LEDGER_ROWS_MAX,
     )?;
     let out = render::annotations_tsv(
-        &h.overlay(),
+        &tabled(&h.user_overlay()),
         &borer_engine::text::Filter::new(p.filter.as_deref()),
         page.offset,
         page.limit.n,

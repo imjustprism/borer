@@ -197,4 +197,97 @@ mod tests {
             .collect();
         assert_eq!(listed, both);
     }
+
+    /// Every catalog tool answers the same bytes through the plainest front
+    /// end as through the server.
+    ///
+    /// The plainest front end is [`borer_front::tools::Loaded`], over the
+    /// server's program, analysis and names; the bytes are answers, refusals
+    /// and the field a bad argument names. The server's `query` adds its session's lines,
+    /// left out here.
+    ///
+    /// # Panics
+    ///
+    /// When a tool answers otherwise on the two faces.
+    #[test]
+    fn every_catalog_tool_answers_alike_through_a_plain_front_end() {
+        use borer_engine::program::Arch;
+        let code = [
+            0x48, 0x8d, 0x41, 0x01, // ASM: lea rax, [rcx+1]
+            0xe8, 0x01, 0x00, 0x00, 0x00, // ASM: call 0x100a
+            0xc3, // ASM: ret
+            0x31, 0xc0, // ASM: xor eax, eax
+            0xc3, // ASM: ret
+        ];
+        let calls = [
+            ("annotations", serde_json::json!({})),
+            ("callgraph", serde_json::json!({"address": "0x1000"})),
+            ("cfg", serde_json::json!({"address": "0x1000"})),
+            ("decompile", serde_json::json!({"address": "0x1000"})),
+            (
+                "disassemble",
+                serde_json::json!({"address": "0x1000", "count": 4}),
+            ),
+            (
+                "disassemble_function",
+                serde_json::json!({"address": "sub_1000"}),
+            ),
+            ("entropy", serde_json::json!({"window": 64})),
+            ("find_crypto_constants", serde_json::json!({})),
+            (
+                "find_function_by_string",
+                serde_json::json!({"filter": "x"}),
+            ),
+            ("function", serde_json::json!({"address": "0x1000"})),
+            ("function_strings", serde_json::json!({"address": "0x1000"})),
+            ("function_summary", serde_json::json!({"address": "0x1000"})),
+            ("functions", serde_json::json!({})),
+            ("functions", serde_json::json!({"limit": "x"})),
+            (
+                "hexdump",
+                serde_json::json!({"address": "0x1000", "length": 16}),
+            ),
+            ("query", serde_json::json!({"uri": "borer://disasm/0x1000"})),
+            (
+                "reaches",
+                serde_json::json!({"from": "0x1000", "to": "0x100a"}),
+            ),
+            (
+                "read",
+                serde_json::json!({"address": "sub_1000", "count": 2}),
+            ),
+            ("search", serde_json::json!({"query": "c3"})),
+            ("strings", serde_json::json!({})),
+            ("symbols", serde_json::json!({})),
+            ("types", serde_json::json!({})),
+            ("xrefs", serde_json::json!({"address": "0x100a"})),
+            ("xrefs", serde_json::json!({"address": "nosuch"})),
+        ];
+        let session = |text: String| {
+            text.lines()
+                .filter(|l| !l.starts_with("# since=") && !l.starts_with("# evidence:"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        for server in [
+            crate::testing::raw_server(),
+            crate::testing::code_server(Arch::X86_64, &code),
+        ] {
+            let plain = borer_front::tools::Loaded {
+                program: server.loaded().expect("loaded"),
+                analysis: server.analysis_or_empty(),
+                overlay: server.overlay_plain(),
+            };
+            let mut reached: Vec<&str> = Vec::new();
+            for (name, args) in &calls {
+                let t = borer_front::tools::tool(name).expect("a catalog tool");
+                let args = args.as_object().cloned().unwrap_or_default();
+                let served = (t.run)(&server, args.clone()).map(session);
+                let plainly = (t.run)(&plain, args).map(session);
+                assert_eq!(served, plainly, "{name}");
+                reached.push(name);
+            }
+            assert!(TOOLS.iter().all(|t| reached.contains(&t.name)));
+        }
+    }
 }

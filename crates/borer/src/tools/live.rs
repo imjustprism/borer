@@ -7,7 +7,6 @@ use borer_engine::analysis::parse_addr;
 use borer_engine::live::{self as live, Memory as _, Rebase, Snapshot};
 use borer_engine::program::{Feature, Program};
 use borer_engine::{memory, num};
-use borer_front::tools::HeldExt;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ErrorData, tool, tool_router};
 

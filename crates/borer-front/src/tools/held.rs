@@ -1,11 +1,18 @@
-//! What a tool reads through: the program a front end holds, its analysis
-//! and its names ([`Held`]), the lookups every tool makes over them
-//! ([`HeldExt`]), and how a tool fails ([`Failure`]).
+//! What a tool reads through.
+//!
+//! A front end gives the catalog one thing: a consistent view of the program
+//! it holds and that program's analysis, as a tool's [`Need`] asks for them
+//! ([`Held::view`]), with the names the user left. The catalog owns the rest
+//! of a tool's execution ([`run`]): the refusal before a load, the fault
+//! guard, the overlay as tools read it ([`tabled`]) and one [`Snapshot`] a
+//! body reads everything from, so its program and analysis are one pair.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use borer_engine::analysis::{Analysis, Overlay};
+use borer_engine::analysis::edit::{self, Edit, Force, Plan};
+use borer_engine::analysis::{Analysis, EnumSource, Overlay};
+use borer_engine::answer::{self, Need};
 use borer_engine::clr::managed;
 use borer_engine::program::{Feature, Program};
 
@@ -100,83 +107,131 @@ pub fn guarded<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, Failure> {
     }
 }
 
-/// A tool body, run against the program held.
-pub type Body<'a> = Box<dyn FnOnce(&Program) -> Result<String, String> + 'a>;
+/// Returns `o` as tools read it: constants rendered by the binary's own
+/// name tables ([`EnumSource::Binary`]).
+///
+/// # Arguments
+///
+/// * `o` - The overlay as the user left it.
+#[must_use]
+pub fn tabled(o: &Overlay) -> Overlay {
+    Overlay {
+        enum_source: EnumSource::Binary,
+        ..o.clone()
+    }
+}
+
+/// The program a front end holds and its analysis, taken together.
+#[derive(Debug, Clone)]
+pub struct View {
+    /// The program held.
+    pub program: Arc<Program>,
+    /// Its analysis as the [`Need`] asked: the program's own for
+    /// [`Need::Code`] and [`Need::Best`] where it does the stage, an empty
+    /// one for [`Need::Best`] where it does not, `None` for [`Need::Code`]
+    /// where it does not, and the one already held, if any, for
+    /// [`Need::File`].
+    pub analysis: Option<Arc<Analysis>>,
+}
+
+/// Finds a function in an analysis, or grows a copy that holds it: the grown
+/// copy (`None` when the analysis given holds it) and the entry.
+pub type Find<'a> = &'a dyn Fn(&Analysis) -> Option<(Option<Analysis>, u64)>;
+
+/// Whether an edit a tool planned is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Apply {
+    /// Plan only: a dry run, or a proposal the face holds for its person.
+    Preview,
+    /// Plan and commit, where the face commits edits.
+    Commit,
+}
 
 /// What a front end holds for its tools: one program, its analysis and the
 /// names in force.
 ///
 /// The MCP server holds them behind its session's locks, computing the
-/// analysis on first use; the app holds a binary's snapshot. A tool reads
-/// only through these, so it answers alike on both.
+/// analysis on first use; the app holds a binary's snapshot ([`super::Loaded`]).
+/// A tool reads only through a [`Snapshot`] the catalog builds from these.
 pub trait Held {
-    /// Runs a tool body against the program held, under whatever keeps
-    /// that program in place while it runs, behind the fault boundary
-    /// ([`guarded`]).
+    /// Returns the program held with its analysis as `need` asks, taken
+    /// together, so the analysis is that program's.
     ///
     /// # Arguments
     ///
-    /// * `body` - The tool body; its `Err` text is a refusal.
-    ///
-    /// # Errors
-    ///
-    /// [`NO_BINARY`] when nothing is loaded; the body's refusal or fault.
-    fn run(&self, body: Body<'_>) -> Result<String, Failure>;
-
-    /// Returns the program held, `None` before one is loaded.
-    fn loaded(&self) -> Option<Arc<Program>>;
-
-    /// Returns the analysis of the program held, computing it on first use.
-    ///
-    /// # Errors
-    ///
-    /// When nothing is loaded or its architecture has no code analysis.
-    fn ensure_analysis(&self) -> Result<Arc<Analysis>, String>;
-
-    /// Returns the analysis, or an empty one held for the program when its
-    /// architecture has none, so facts of the file still answer.
-    fn analysis_or_empty(&self) -> Arc<Analysis>;
-
-    /// Returns the analysis when one is held, without computing it.
-    fn analysis_kept(&self) -> Option<Arc<Analysis>>;
-
-    /// Returns a snapshot of the names, comments and types in force, with
-    /// constants rendered by the binary's name tables.
-    fn overlay(&self) -> Overlay;
-
-    /// Resolves the function to decompile at an argument, starting one at
-    /// an ARM32 address no discovered function's blocks hold
-    /// ([`borer_engine::answer::decompile_entry`]).
-    ///
-    /// A front end that keeps the recovered function for later reads stores
-    /// the grown analysis; this default keeps it for the one read.
-    ///
-    /// # Arguments
-    ///
-    /// * `p` - The program held.
-    /// * `a` - Its analysis.
-    /// * `text` - The function as the caller wrote it.
+    /// * `need` - What the tool reads of the program.
     ///
     /// # Returns
     ///
-    /// The analysis that holds the function, and its entry.
+    /// `None` before a program is loaded; `Err` when the analysis the need
+    /// asks for cannot be had, with the reason.
+    fn view(&self, need: Need) -> Option<Result<View, String>>;
+
+    /// Returns the names, comments and types as the user left them.
+    fn user_overlay(&self) -> Overlay;
+
+    /// Finds the function a decompile names in the analysis this face keeps
+    /// for `program`, starting one where `find` grows one
+    /// ([`borer_engine::answer::recovered`]), and keeps what it grew.
+    ///
+    /// This default grows `base` for the one read; a face that keeps its
+    /// analysis between reads stores the grown one.
+    ///
+    /// # Arguments
+    ///
+    /// * `_program` - The program the snapshot holds.
+    /// * `base` - The snapshot's analysis.
+    /// * `find` - Finds the function in an analysis, or grows a copy holding it.
+    ///
+    /// # Returns
+    ///
+    /// The analysis that holds the function and its entry; `None` when
+    /// `find` finds none.
+    fn recover(
+        &self,
+        _program: &Arc<Program>,
+        base: Arc<Analysis>,
+        find: Find<'_>,
+    ) -> Option<(Arc<Analysis>, u64)> {
+        let (grown, entry) = find(&base)?;
+        Some((grown.map_or(base, Arc::new), entry))
+    }
+
+    /// Plans edits over the names in force and, where this face commits
+    /// edits and `apply` asks, commits them: the seam every edit tool goes
+    /// through, so a face decides whether a plan lands or waits as a
+    /// proposal.
+    ///
+    /// This default only plans: a face that holds proposals for a person
+    /// keeps the plan it returns.
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - The snapshot the tool read.
+    /// * `edits` - The edits.
+    /// * `force` - Whether a name another address answers to is taken.
+    /// * `_apply` - Whether to commit where the face commits.
+    ///
+    /// # Returns
+    ///
+    /// The plan, committed when the face committed it.
     ///
     /// # Errors
     ///
-    /// When the text names nothing, or no function holds the address and
-    /// none starts there.
-    fn decompile_entry(
+    /// When an edit is refused or the edits would pass a cap; nothing was
+    /// applied.
+    fn edit(
         &self,
-        p: &Program,
-        a: Arc<Analysis>,
-        text: &str,
-    ) -> Result<(Arc<Analysis>, u64), String> {
-        let (grown, entry) = borer_engine::answer::decompile_entry(p, &a, &self.overlay(), text)?;
-        Ok((grown.map_or(a, Arc::new), entry))
+        s: &Snapshot<'_>,
+        edits: &[Edit],
+        force: Force,
+        _apply: Apply,
+    ) -> Result<Plan, String> {
+        edit::plan(s.program(), s.analysis(), s.overlay(), edits, force).map_err(|e| e.to_string())
     }
 
     /// Answers a `borer://` resource URI as the `query` tool reads it, page
-    /// suffixes and all.
+    /// suffixes and all; [`super::ask`] answers what the engine answers.
     ///
     /// # Arguments
     ///
@@ -189,37 +244,101 @@ pub trait Held {
     fn read(&self, uri: &str) -> Result<String, Failure>;
 }
 
-/// The lookups every tool makes through what a front end holds.
-pub trait HeldExt: Held {
-    /// Runs `f` against the program held, its analysis and a snapshot of
-    /// the names: the prologue of every tool that reads code.
-    ///
-    /// A tool names the stage it reads, so a program whose instruction set
-    /// has functions but no lifter yet answers the discovery tools and
-    /// refuses the rest with the sentence [`Program::refuses`] gives,
-    /// rather than an answer read as "nothing found".
+/// One consistent reading of what a front end holds: the program, its
+/// analysis and the names as tools read them, built by [`run`].
+pub struct Snapshot<'h> {
+    /// What the front end holds, for a later view of the same program.
+    held: &'h dyn Held,
+    /// What the snapshot was taken for.
+    need: Need,
+    /// The program.
+    program: Arc<Program>,
+    /// Its analysis as `need` asked, an empty one where none was given.
+    analysis: Arc<Analysis>,
+    /// Whether the front end gave an analysis.
+    given: bool,
+    /// The names as tools read them.
+    overlay: Overlay,
+}
+
+impl std::fmt::Debug for Snapshot<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Snapshot")
+            .field("need", &self.need)
+            .field("program", &self.program.path)
+            .field("given", &self.given)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Snapshot<'_> {
+    /// Returns the program.
+    #[must_use]
+    pub fn program(&self) -> &Program {
+        &self.program
+    }
+
+    /// Returns the program as held, shared.
+    #[must_use]
+    pub fn program_arc(&self) -> &Arc<Program> {
+        &self.program
+    }
+
+    /// Returns the analysis taken, an empty one where none was given.
+    #[must_use]
+    pub fn analysis(&self) -> &Analysis {
+        &self.analysis
+    }
+
+    /// Returns the analysis taken, shared.
+    #[must_use]
+    pub fn analysis_arc(&self) -> &Arc<Analysis> {
+        &self.analysis
+    }
+
+    /// Returns the analysis the front end gave, `None` where it gave none.
+    #[must_use]
+    pub fn kept(&self) -> Option<&Analysis> {
+        self.given.then_some(&*self.analysis)
+    }
+
+    /// Returns the names, comments and types as tools read them.
+    #[must_use]
+    pub fn overlay(&self) -> &Overlay {
+        &self.overlay
+    }
+
+    /// Returns the analysis a body reading `stage` reads.
     ///
     /// # Arguments
     ///
-    /// * `feature` - The stage the tool reads.
-    /// * `f` - The tool body; its `Err` text is a refusal.
+    /// * `stage` - The stage the body reads.
     ///
     /// # Errors
     ///
-    /// When nothing is loaded, the engine does not do `feature` with the
-    /// architecture, or `f` refuses or faults.
-    fn with_analysis(
-        &self,
-        feature: Feature,
-        f: impl FnOnce(&Program, &Analysis, &Overlay) -> Result<String, String>,
-    ) -> Result<String, Failure> {
-        self.run(Box::new(|p| {
-            if let Some(why) = p.refuses(feature) {
-                return Err(why);
-            }
-            let a = self.ensure_analysis()?;
-            f(p, &a, &self.overlay())
-        }))
+    /// The sentence [`Program::refuses`] gives when the program does not do
+    /// the stage.
+    pub fn code(&self, stage: Feature) -> Result<&Analysis, String> {
+        match self.program.refuses(stage) {
+            Some(why) => Err(why),
+            None => Ok(&self.analysis),
+        }
+    }
+
+    /// Returns the analysis names are looked up in: the one taken, or, for
+    /// a snapshot taken for the file alone, the program's own or an empty
+    /// one, asked for only now.
+    fn names(&self) -> Arc<Analysis> {
+        if !matches!(self.need, Need::File) {
+            return Arc::clone(&self.analysis);
+        }
+        match self.held.view(Need::Best(Feature::Discover)) {
+            Some(Ok(View {
+                program,
+                analysis: Some(a),
+            })) if Arc::ptr_eq(&program, &self.program) => a,
+            Some(_) | None => Arc::default(),
+        }
     }
 
     /// Resolves an address argument: `0x`-hex text, else a name looked up
@@ -228,15 +347,14 @@ pub trait HeldExt: Held {
     ///
     /// # Arguments
     ///
-    /// * `p` - The program held.
     /// * `text` - The argument as the caller passed it.
     ///
     /// # Errors
     ///
     /// When the text is neither an address nor a known name, naming the
     /// names nearest it.
-    fn addr(&self, p: &Program, text: &str) -> Result<u64, String> {
-        borer_engine::answer::address(p, text, || (self.analysis_or_empty(), self.overlay()))
+    pub fn addr(&self, text: &str) -> Result<u64, String> {
+        answer::address(&self.program, text, || (self.names(), &self.overlay))
     }
 
     /// Resolves an argument to the entry of the discovered function
@@ -244,115 +362,132 @@ pub trait HeldExt: Held {
     ///
     /// # Arguments
     ///
-    /// * `p` - The program held.
-    /// * `a` - Its analysis.
-    /// * `text` - Address or name ([`HeldExt::addr`]).
+    /// * `text` - Address or name ([`Snapshot::addr`]).
     ///
     /// # Errors
     ///
     /// When the text does not resolve or no function contains the address.
-    fn function_entry(&self, p: &Program, a: &Analysis, text: &str) -> Result<u64, String> {
-        let va = self.addr(p, text)?;
-        borer_engine::answer::entry_of(p, a, va, text)
+    pub fn entry(&self, text: &str) -> Result<u64, String> {
+        answer::entry_of(&self.program, &self.analysis, self.addr(text)?, text)
     }
 
-    /// Answers a request about managed code with the program and its
-    /// analysis, or an empty one when the machine has no native discovery:
-    /// .NET metadata and IL read the same on any machine.
+    /// Returns the .NET members an argument names, when it names managed
+    /// code ([`managed::named`]).
     ///
     /// # Arguments
     ///
-    /// * `f` - The answer.
+    /// * `text` - The argument as the caller passed it.
+    #[must_use]
+    pub fn managed(&self, text: &str) -> Option<BTreeSet<u32>> {
+        self.program.clr()?;
+        managed::named(&self.program, text, self.addr(text).ok())
+    }
+
+    /// Returns the IL method an argument names ([`managed::il_method_named`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The argument as the caller passed it.
+    #[must_use]
+    pub fn il_method(&self, text: &str) -> Option<u32> {
+        self.program.clr()?;
+        managed::il_method_named(&self.program, text, self.addr(text).ok())
+    }
+
+    /// Resolves the function to decompile at an argument, starting one at an
+    /// ARM32 address no discovered function's blocks hold, through the
+    /// front end that keeps it ([`Held::recover`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - Address or name ([`Snapshot::addr`]).
+    ///
+    /// # Returns
+    ///
+    /// The analysis that holds the function, and its entry.
     ///
     /// # Errors
     ///
-    /// When nothing is loaded, or `f`'s error.
-    fn with_managed(
-        &self,
-        f: impl FnOnce(&Program, &Analysis) -> Result<String, String>,
-    ) -> Result<String, Failure> {
-        self.run(Box::new(|p| f(p, &self.analysis_or_empty())))
+    /// When the text names nothing, or no function holds the address and
+    /// none starts there.
+    pub fn decompile_entry(&self, text: &str) -> Result<(Arc<Analysis>, u64), String> {
+        let (p, a) = (&self.program, &self.analysis);
+        let va = self.addr(text)?;
+        if let Some(entry) = answer::held_entry(p, a, va) {
+            return Ok((Arc::clone(a), entry));
+        }
+        let find = |base: &Analysis| answer::recovered(p, base, va);
+        match self.held.recover(p, Arc::clone(a), &find) {
+            Some(found) => Ok(found),
+            None => Ok((Arc::clone(a), answer::entry_of(p, a, va, text)?)),
+        }
     }
 
-    /// Answers through [`HeldExt::with_managed`] with what `pick` read off
-    /// the program loaded now, refusing when another binary was loaded
-    /// between the pick and the answer, so no token meets another file.
+    /// Plans edits and, where the front end commits and `apply` asks,
+    /// commits them ([`Held::edit`]).
     ///
     /// # Arguments
     ///
-    /// * `pick` - What the request names, `None` when it names no managed
-    ///   code.
-    /// * `f` - The answer for what was picked.
+    /// * `edits` - The edits.
+    /// * `force` - Whether a name another address answers to is taken.
+    /// * `apply` - Whether to commit where the face commits.
     ///
-    /// # Returns
+    /// # Errors
     ///
-    /// The answer, `None` when nothing is loaded or `pick` found nothing.
-    fn managed_pick<T>(
-        &self,
-        pick: impl FnOnce(&Program) -> Option<T>,
-        f: impl FnOnce(&Program, &Analysis, T) -> Result<String, String>,
-    ) -> Option<Result<String, Failure>> {
-        let picked_from = self.loaded()?;
-        let picked = pick(&picked_from)?;
-        Some(self.with_managed(|p, a| {
-            if !std::ptr::eq(p, Arc::as_ptr(&picked_from)) {
-                return Err("another binary was loaded during the request; ask again".to_owned());
-            }
-            f(p, a, picked)
-        }))
-    }
-
-    /// Answers a request naming .NET members ([`managed::named`]) through
-    /// [`HeldExt::with_managed`].
-    ///
-    /// # Arguments
-    ///
-    /// * `text` - The argument as the caller passed it.
-    /// * `f` - The answer for the tokens it names.
-    ///
-    /// # Returns
-    ///
-    /// The answer, `None` when the argument names no managed code and the
-    /// caller answers it natively.
-    fn managed_answer(
-        &self,
-        text: &str,
-        f: impl FnOnce(&Program, &Analysis, &BTreeSet<u32>) -> Result<String, String>,
-    ) -> Option<Result<String, Failure>> {
-        self.managed_pick(
-            |p| {
-                p.clr()?;
-                managed::named(p, text, self.addr(p, text).ok())
-            },
-            |p, a, targets| f(p, a, &targets),
-        )
-    }
-
-    /// Answers a request naming an IL method ([`managed::il_method_named`])
-    /// through [`HeldExt::with_managed`].
-    ///
-    /// # Arguments
-    ///
-    /// * `text` - The argument as the caller passed it.
-    /// * `f` - The answer for the method's token.
-    ///
-    /// # Returns
-    ///
-    /// The answer, `None` when the argument names no IL method and the
-    /// caller answers it natively.
-    fn il_answer(
-        &self,
-        text: &str,
-        f: impl FnOnce(&Program, &Analysis, u32) -> Result<String, String>,
-    ) -> Option<Result<String, Failure>> {
-        self.managed_pick(
-            |p| {
-                p.clr()?;
-                managed::il_method_named(p, text, self.addr(p, text).ok())
-            },
-            f,
-        )
+    /// When an edit is refused or the edits would pass a cap.
+    pub fn edit(&self, edits: &[Edit], force: Force, apply: Apply) -> Result<Plan, String> {
+        self.held.edit(self, edits, force, apply)
     }
 }
 
-impl<H: Held + ?Sized> HeldExt for H {}
+/// Runs a tool body against one snapshot of what a front end holds: the
+/// execution policy every tool shares.
+///
+/// Nothing loaded is [`NO_BINARY`]; a [`Need::Code`] stage the program
+/// does not do is refused with the sentence [`Program::refuses`] gives;
+/// the view, the body and anything they fault in run behind [`guarded`].
+///
+/// # Arguments
+///
+/// * `h` - What the front end holds.
+/// * `need` - What the body reads of the program.
+/// * `body` - The tool body; its `Err` text is a refusal.
+///
+/// # Errors
+///
+/// [`Cause::Asked`] for a refusal, [`Cause::Engine`] for a fault.
+pub fn run(
+    h: &dyn Held,
+    need: Need,
+    body: impl FnOnce(&Snapshot<'_>) -> Result<String, String>,
+) -> Result<String, Failure> {
+    guarded(|| body(&snapshot(h, need)?))
+}
+
+/// Takes a snapshot of what a front end holds ([`run`]).
+///
+/// # Arguments
+///
+/// * `h` - What the front end holds.
+/// * `need` - What the body reads of the program.
+///
+/// # Errors
+///
+/// [`NO_BINARY`] before a load; the view's refusal; the program's when a
+/// [`Need::Code`] stage is one it does not do.
+pub fn snapshot(h: &dyn Held, need: Need) -> Result<Snapshot<'_>, String> {
+    let view = h.view(need).ok_or(NO_BINARY)??;
+    if let Need::Code(stage) = need
+        && let Some(why) = view.program.refuses(stage)
+    {
+        return Err(why);
+    }
+    Ok(Snapshot {
+        held: h,
+        need,
+        given: view.analysis.is_some(),
+        analysis: view.analysis.unwrap_or_default(),
+        program: view.program,
+        overlay: tabled(&h.user_overlay()),
+    })
+}

@@ -5,10 +5,11 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use borer_engine::analysis::edit::{self, Edit, Force, Plan};
-use borer_engine::analysis::{Analysis, EnumSource, Overlay};
+use borer_engine::analysis::{Analysis, Overlay};
+use borer_engine::answer::Need;
 use borer_engine::pack::{Pack, Packs};
 use borer_engine::program::{Feature, Program};
-use borer_front::tools::{Body, Cause, Failure, Held, HeldExt};
+use borer_front::tools::{Apply, Cause, Failure, Held, Snapshot, View};
 use rmcp::ErrorData;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::InitializeRequestParams;
@@ -35,18 +36,7 @@ pub(crate) struct RawLoad {
 
 pub(crate) use borer_front::tools::{NO_BINARY, fault_text};
 
-/// Returns `o` as tools read it: constants rendered by the binary's own
-/// name tables ([`EnumSource::Binary`]).
-///
-/// # Arguments
-///
-/// * `o` - The overlay as the user left it.
-pub(crate) fn tabled(o: &Overlay) -> Overlay {
-    Overlay {
-        enum_source: EnumSource::Binary,
-        ..o.clone()
-    }
-}
+pub(crate) use borer_front::tools::tabled;
 
 /// Reads under a lock, through a poisoning.
 ///
@@ -239,7 +229,7 @@ impl BorerServer {
     ///
     /// Every tool takes the same snapshot, so an answer never depends on
     /// which calls came before it. A decompilation reads only the tables of
-    /// the functions it calls, each computed once ([`EnumSource::Binary`]),
+    /// the functions it calls, each computed once ([`borer_engine::analysis::EnumSource::Binary`]),
     /// so no call waits for the binary's every table.
     pub(crate) fn overlay(&self) -> Overlay {
         tabled(&read_lock(&self.overlay))
@@ -254,8 +244,8 @@ impl BorerServer {
         self.loaded().ok_or_else(|| err_params(NO_BINARY))
     }
 
-    /// Runs `f` against the loaded program ([`Held::run`]), its failure as
-    /// the JSON-RPC error a server tool answers with.
+    /// Runs `f` against the loaded program under its read lock, behind the
+    /// fault boundary ([`guarded`]), for the tools the server keeps.
     ///
     /// # Arguments
     ///
@@ -272,7 +262,11 @@ impl BorerServer {
         &self,
         f: impl FnOnce(&Program) -> Result<String, String>,
     ) -> Result<String, ErrorData> {
-        self.run(Box::new(f)).map_err(failed)
+        let guard = read_lock(&self.program);
+        let Some(p) = guard.as_ref() else {
+            return Err(err_params(NO_BINARY));
+        };
+        guarded(|| f(p))
     }
 
     /// Returns what a script runs over: the loaded program and its
@@ -535,8 +529,8 @@ impl BorerServer {
     }
 
     /// Runs `f` against the loaded program, its analysis and a snapshot of
-    /// the overlay ([`HeldExt::with_analysis`]), its failure as the
-    /// JSON-RPC error a server tool answers with.
+    /// the overlay: the prologue of every tool the server keeps that reads
+    /// code.
     ///
     /// # Arguments
     ///
@@ -556,7 +550,52 @@ impl BorerServer {
         feature: Feature,
         f: impl FnOnce(&Program, &Analysis, &Overlay) -> Result<String, String>,
     ) -> Result<String, ErrorData> {
-        HeldExt::with_analysis(self, feature, f).map_err(failed)
+        self.with_program(|p| {
+            if let Some(why) = p.refuses(feature) {
+                return Err(why);
+            }
+            let a = self.ensure_analysis()?;
+            f(p, &a, &self.overlay())
+        })
+    }
+
+    /// Resolves an address argument: `0x`-hex text, else a name looked up
+    /// through the analysis, symbols and overlay, else decimal or bare-hex
+    /// text ([`borer_engine::answer::address`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `p` - The loaded program.
+    /// * `text` - The argument as the agent passed it.
+    ///
+    /// # Errors
+    ///
+    /// When the text is neither an address nor a known name, naming the
+    /// names nearest it.
+    pub(crate) fn addr(&self, p: &Program, text: &str) -> Result<u64, String> {
+        borer_engine::answer::address(p, text, || (self.analysis_or_empty(), self.overlay()))
+    }
+
+    /// Resolves an argument to the entry of the discovered function containing it.
+    ///
+    /// # Arguments
+    ///
+    /// * `p` - The loaded program.
+    /// * `a` - Its analysis.
+    /// * `text` - Address or name (see [`Self::addr`]).
+    ///
+    /// # Errors
+    ///
+    /// When the text does not resolve or no function contains the address
+    /// ([`borer_engine::answer::entry_of`] says an import's slot is one).
+    pub(crate) fn function_entry(
+        &self,
+        p: &Program,
+        a: &Analysis,
+        text: &str,
+    ) -> Result<u64, String> {
+        let va = self.addr(p, text)?;
+        borer_engine::answer::entry_of(p, a, va, text)
     }
 
     /// A server with nothing loaded, the packs `BORER_PACKS` names, live
@@ -664,73 +703,83 @@ impl BorerServer {
 }
 
 impl Held for BorerServer {
-    /// Runs a tool body under the program's read lock, so no `load_binary`
-    /// swaps the program while it runs, behind the fault boundary.
-    ///
-    /// A fault in an analysis pass would unwind out of the handler and take
-    /// the session with it: the call gets no reply at all, the agent cannot
-    /// tell a crash from a hang, and everything learned so far in the
-    /// session is gone with the process. Every tool body reaching a program
-    /// comes through here, so one boundary turns a fault into an answer the
-    /// caller can read and act on. The panic hook is left alone on purpose:
-    /// unlike a damaged file, which is the job and expected, a fault here is
-    /// a bug and worth a backtrace in the log.
-    fn run(&self, body: Body<'_>) -> Result<String, Failure> {
+    /// Everything is decided under the program's lock, so no load in
+    /// between pairs one program with another's analysis. A [`Need::Code`]
+    /// or [`Need::Best`] view reads the analysis where the program does the
+    /// stage, computing it on first use; a [`Need::Best`] one reads the
+    /// empty analysis held for the program where it does not, which keeps
+    /// a `.NET` listing's index from one read to the next; a [`Need::File`]
+    /// one reads the analysis only once one is held.
+    fn view(&self, need: Need) -> Option<Result<View, String>> {
         let guard = read_lock(&self.program);
-        let Some(p) = guard.as_ref() else {
-            return Err(Failure::asked(NO_BINARY));
+        let program = Arc::clone(guard.as_ref()?);
+        let analysis = match need {
+            Need::Code(stage) | Need::Best(stage) if program.refuses(stage).is_none() => {
+                match self.ensure_analysis() {
+                    Ok(a) => Some(a),
+                    Err(why) => return Some(Err(why)),
+                }
+            }
+            Need::Code(_) => None,
+            Need::Best(_) => Some(self.empty_analysis()),
+            Need::File => read_lock(&self.analysis).clone(),
         };
-        borer_front::tools::guarded(|| body(p))
+        Some(Ok(View { program, analysis }))
     }
 
-    fn loaded(&self) -> Option<Arc<Program>> {
-        BorerServer::loaded(self)
-    }
-
-    fn ensure_analysis(&self) -> Result<Arc<Analysis>, String> {
-        BorerServer::ensure_analysis(self)
-    }
-
-    fn analysis_or_empty(&self) -> Arc<Analysis> {
-        BorerServer::analysis_or_empty(self)
-    }
-
-    fn analysis_kept(&self) -> Option<Arc<Analysis>> {
-        read_lock(&self.analysis).clone()
-    }
-
-    fn overlay(&self) -> Overlay {
-        BorerServer::overlay(self)
+    fn user_overlay(&self) -> Overlay {
+        self.overlay_plain()
     }
 
     /// The analysis is shared, so a recovered function goes into a copy of
     /// it that replaces the stored one. Recoveries run one at a time under
     /// the analysis's write lock and start from the analysis stored then,
-    /// so one recovered by a request that ran first is kept; the program
-    /// cannot change meanwhile, as the tool body holds its read lock. A
-    /// request already holding the old analysis keeps it. The code index
-    /// `grep` reads is built from what discovery found
+    /// so one recovered by a request that ran first is kept; a program
+    /// loaded over meanwhile keeps nothing grown for the old one. A request
+    /// already holding the old analysis keeps it. The code index `grep`
+    /// reads is built from what discovery found
     /// ([`crate::index::load_or_build`]), as the CLI's is, so it does not
     /// hold a function recovered here.
-    fn decompile_entry(
+    fn recover(
         &self,
-        p: &Program,
-        a: Arc<Analysis>,
-        text: &str,
-    ) -> Result<(Arc<Analysis>, u64), String> {
-        let o = self.overlay();
-        let (None, entry) = borer_engine::answer::decompile_entry(p, &a, &o, text)? else {
-            let mut slot = write_lock(&self.analysis);
-            let base = slot.clone().unwrap_or_else(|| Arc::clone(&a));
-            let (grown, entry) = borer_engine::answer::decompile_entry(p, &base, &o, text)?;
-            let Some(grown) = grown else {
-                return Ok((base, entry));
-            };
-            let grown = Arc::new(grown);
-            *slot = Some(Arc::clone(&grown));
-            return Ok((grown, entry));
+        program: &Arc<Program>,
+        base: Arc<Analysis>,
+        find: &dyn Fn(&Analysis) -> Option<(Option<Analysis>, u64)>,
+    ) -> Option<(Arc<Analysis>, u64)> {
+        let loaded = read_lock(&self.program);
+        let held = loaded.as_ref().is_some_and(|now| Arc::ptr_eq(now, program));
+        let mut slot = write_lock(&self.analysis);
+        let start = slot.clone().filter(|_| held).unwrap_or(base);
+        let (grown, entry) = find(&start)?;
+        let Some(grown) = grown else {
+            return Some((start, entry));
         };
-        Ok((a, entry))
+        let grown = Arc::new(grown);
+        if held {
+            *slot = Some(Arc::clone(&grown));
+        }
+        Some((grown, entry))
+    }
+
+    /// A plan committed is committed only to the program the snapshot
+    /// read, still loaded ([`BorerServer::commit`]); one another edit
+    /// overtook is planned again over the overlay as tools read it.
+    fn edit(
+        &self,
+        s: &Snapshot<'_>,
+        edits: &[Edit],
+        force: Force,
+        apply: Apply,
+    ) -> Result<Plan, String> {
+        let (p, a, o) = (s.program(), s.analysis(), s.overlay());
+        let made = edit::plan(p, a, o, edits, force).map_err(|e| e.to_string())?;
+        if apply == Apply::Preview {
+            return Ok(made);
+        }
+        self.commit((p, Some(s.program_arc())), made, |now| {
+            edit::plan(p, a, &tabled(now), edits, force)
+        })
+        .map_err(|e| e.to_string())
     }
 
     /// The answer is [`BorerServer::read_uri`]'s, which `resources/read`

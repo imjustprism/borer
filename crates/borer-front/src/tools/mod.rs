@@ -1,27 +1,28 @@
 //! The tool catalog: the tools both faces list and run.
 //!
-//! The faces are the MCP server over stdio and the app's chat. Each tool has
-//! its name, typed parameters, caps and defaults (in the parameters'
-//! schema), description, effects and the handler that answers it over what a
-//! front end holds ([`Held`]).
-//!
-//! The server builds its tool list, schemas and dispatch for these from
+//! The faces are the MCP server over stdio and the app's chat. Each row
+//! ([`Tool`]) ties a tool's name, its typed parameters (whose schema states
+//! the caps and defaults), its description, effects and hints, and the
+//! handler that answers it over what a front end holds ([`Held`]). The
+//! server builds its list, schemas and dispatch for these rows from
 //! [`TOOLS`]; the app builds its model's tool list from the same rows
-//! ([`Tool::input_schema`]) and runs a call with [`Tool::run`], so a tool
-//! reads the same, takes the same arguments and answers the same bytes
-//! either way. The tools that need what only the server has stay the
-//! server's, each named in [`SERVER_ONLY`] with its reason.
+//! ([`Tool::input_schema`]) and runs a call with [`Tool::run`].
 //!
-//! What every answer passes through on its way out is split by owner: the
-//! byte cut ([`crate::budget::cut_to`]) is shared, one function for both faces at
-//! each face's own budget; the `# since=` memory and the `# evidence:`
-//! ledger belong to the server's session, keyed by its requests, and stay
-//! there.
+//! Given the same program, analysis and names, a catalog tool's answer, its
+//! refusal and the field a bad argument names are the same bytes on both
+//! faces: the catalog owns how a tool runs ([`run`]). What differs is the
+//! face's own: the server's session adds the `# since=` memory of answers,
+//! the `# evidence:` line, a deadline's note and the cut to its byte budget
+//! ([`crate::budget`]); `query` reads every resource on the server and,
+//! elsewhere, what the engine answers, refusing a server resource by name
+//! ([`ask`]). The tools that need what only the server has stay the
+//! server's, each named in [`SERVER_ONLY`] with its reason.
 
 mod bytes;
 mod code;
 mod held;
 pub mod params;
+mod read;
 
 use schemars::JsonSchema;
 use serde_json::{Map, Value};
@@ -34,8 +35,12 @@ pub use code::{
     callgraph, cfg, class_field, decompile, disassemble_function, function, function_strings,
     function_summary, functions, reaches, xrefs,
 };
-pub use held::{Body, Cause, Failure, Held, HeldExt, NO_BINARY, fault_text, guarded};
-use params::DESERIALIZE_PREFIX;
+pub use held::{
+    Apply, Cause, Failure, Find, Held, NO_BINARY, Snapshot, View, fault_text, guarded, run,
+    snapshot, tabled,
+};
+use params::{DESERIALIZE_PREFIX, misfit};
+pub use read::{Loaded, SERVER_RESOURCES, ask, read_engine};
 
 /// Something a tool touches outside the loaded program and its analysis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,7 +129,8 @@ const READS: Hints = Hints {
 /// Answers one call: what the front end holds and the call's arguments.
 pub type Run = fn(&dyn Held, Map<String, Value>) -> Result<String, Failure>;
 
-/// One tool both faces list and run.
+/// One tool both faces list and run, built by the catalog's `row!` macro so
+/// its schema and its handler read one parameters type.
 #[derive(Debug, Clone, Copy)]
 pub struct Tool {
     /// Its name, as a caller calls it.
@@ -136,7 +142,7 @@ pub struct Tool {
     pub effects: &'static [Effect],
     /// Its annotation hints.
     pub hints: Hints,
-    /// Its parameters' JSON schema as derived, before [`slim`].
+    /// Its parameters' JSON schema as derived, before [`slim`], keys sorted.
     pub schema: fn() -> Map<String, Value>,
     /// Answers a call: parses the arguments into the typed parameters and
     /// runs the handler.
@@ -144,10 +150,11 @@ pub struct Tool {
 }
 
 impl Tool {
-    /// Returns the parameters' schema as a caller reads it ([`slim`]).
+    /// Returns the parameters' schema as a caller reads it ([`slim`]), keys
+    /// sorted.
     #[must_use]
     pub fn input_schema(&self) -> Map<String, Value> {
-        slim((self.schema)())
+        sorted_map(slim((self.schema)()))
     }
 }
 
@@ -169,15 +176,24 @@ pub fn tool(name: &str) -> Option<&'static Tool> {
 ///
 /// # Errors
 ///
-/// A refusal starting with [`DESERIALIZE_PREFIX`] and saying what did not
-/// read, as the MCP SDK words one.
-pub fn parse<P: serde::de::DeserializeOwned>(args: Map<String, Value>) -> Result<P, Failure> {
-    serde_json::from_value(Value::Object(args))
-        .map_err(|e| Failure::asked(format!("{DESERIALIZE_PREFIX} {e}")))
+/// A refusal starting with [`DESERIALIZE_PREFIX`], as the MCP SDK words
+/// one, naming the first argument the schema does not admit ([`misfit`])
+/// and saying what did not read.
+pub fn parse<P: serde::de::DeserializeOwned + JsonSchema>(
+    args: &Map<String, Value>,
+) -> Result<P, Failure> {
+    serde_json::from_value(Value::Object(args.clone())).map_err(|e| {
+        let field =
+            misfit(&schema::<P>(), args).map_or_else(String::new, |f| format!(" field `{f}`:"));
+        Failure::asked(format!("{DESERIALIZE_PREFIX}{field} {e}"))
+    })
 }
 
-/// Returns a parameters type's JSON schema as derived: JSON Schema 2020-12,
-/// without the root's title and description (the type's name and rustdoc).
+/// Returns a parameters type's JSON schema as derived.
+///
+/// It is JSON Schema 2020-12, without the root's title and description (the
+/// type's name and rustdoc), its keys sorted at every level whatever order
+/// the JSON map keeps.
 #[must_use]
 pub fn schema<P: JsonSchema>() -> Map<String, Value> {
     let root = schemars::generate::SchemaSettings::draft2020_12()
@@ -189,7 +205,31 @@ pub fn schema<P: JsonSchema>() -> Map<String, Value> {
     };
     object.remove("title");
     object.remove("description");
-    object
+    sorted_map(object)
+}
+
+/// Returns a JSON object with its keys sorted at every level.
+///
+/// # Arguments
+///
+/// * `object` - The object, its keys in any order.
+fn sorted_map(object: Map<String, Value>) -> Map<String, Value> {
+    let mut entries: Vec<(String, Value)> = object.into_iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries.into_iter().map(|(k, v)| (k, sorted(v))).collect()
+}
+
+/// Returns a JSON value with every object's keys sorted ([`sorted_map`]).
+///
+/// # Arguments
+///
+/// * `value` - The value.
+fn sorted(value: Value) -> Value {
+    match value {
+        Value::Object(object) => Value::Object(sorted_map(object)),
+        Value::Array(items) => Value::Array(items.into_iter().map(sorted).collect()),
+        other => other,
+    }
 }
 
 /// Strips schema noise a caller never needs.
@@ -281,245 +321,225 @@ fn slim_property(o: &mut Map<String, Value>, defs: &Map<String, Value>) {
 
 /// The tools the server keeps, each with why it is not in the catalog.
 pub const SERVER_ONLY: &[(&str, &str)] = &[
-    ("binary_info", "reads the resource catalog the server holds"),
+    ("binary_info", "it lists the resources the MCP server holds"),
     (
         "class_layout",
-        "changes the session; moves with the edit tools",
+        "with apply it saves a struct into the session: it joins with the edit tools",
     ),
     (
         "decompile_batch",
-        "writes files under the server's output root",
+        "it decompiles on the MCP server's rayon pool, and with out writes files under its output root",
     ),
-    ("fetch_pdb", "reaches a symbol server over the network"),
+    ("fetch_pdb", "it reaches a symbol server over the network"),
     (
         "live_attach",
-        "reads another process through the OS (Windows)",
+        "it reads another process through the OS (Windows)",
     ),
     (
         "live_detach",
-        "reads another process through the OS (Windows)",
+        "it reads another process through the OS (Windows)",
     ),
     (
         "live_instances",
-        "reads another process through the OS (Windows)",
+        "it reads another process through the OS (Windows)",
     ),
     (
         "live_modules",
-        "reads another process through the OS (Windows)",
+        "it reads another process through the OS (Windows)",
     ),
     (
         "live_object",
-        "reads another process through the OS (Windows)",
+        "it reads another process through the OS (Windows)",
     ),
     (
         "live_read",
-        "reads another process through the OS (Windows)",
+        "it reads another process through the OS (Windows)",
     ),
     (
         "live_scan",
-        "reads another process through the OS (Windows)",
+        "it reads another process through the OS (Windows)",
     ),
     (
         "live_watch",
-        "reads another process through the OS (Windows)",
+        "it reads another process through the OS (Windows)",
     ),
-    ("load_binary", "reads a file a path names into the session"),
-    ("load_project", "reads a project file into the session"),
-    ("reload", "restarts the server process"),
+    (
+        "load_binary",
+        "it reads a file a path names into the session",
+    ),
+    ("load_project", "it reads a project file into the session"),
+    ("reload", "it restarts the MCP server's process"),
     (
         "save_project",
-        "writes a project file under the output root",
+        "it writes a project file under the output root",
     ),
     (
         "script",
-        "applies its proposals to the session; moves with the edit tools",
+        "with dry_run=false it applies its proposals to the session, and its query() reads the MCP server's resources: it joins with the edit tools",
     ),
     (
         "set_comment",
-        "changes the session; moves with the edit tools",
+        "it edits the session: it joins with the edit tools",
     ),
-    ("set_name", "changes the session; moves with the edit tools"),
-    ("set_type", "changes the session; moves with the edit tools"),
+    (
+        "set_name",
+        "it edits the session: it joins with the edit tools",
+    ),
+    (
+        "set_type",
+        "it edits the session: it joins with the edit tools",
+    ),
 ];
+
+/// Builds a catalog row whose schema, parser and handler read one
+/// parameters type, the handler named as the tool.
+macro_rules! row {
+    ($name:ident, $params:ident, $effects:expr, $description:literal) => {
+        Tool {
+            name: stringify!($name),
+            description: $description,
+            effects: $effects,
+            hints: READS,
+            schema: schema::<params::$params>,
+            run: |h, args| $name(h, &parse::<params::$params>(&args)?),
+        }
+    };
+}
 
 /// Every tool both faces list and run, in name order.
 pub const TOOLS: &[Tool] = &[
-    Tool {
-        name: "annotations",
-        description: "List the names, findings and open questions (comments opening with ?) added this session, paged. Use it to resume work; not for binary symbols (use symbols) or user types (use types).",
-        effects: &[],
-        hints: READS,
-        schema: schema::<params::AnnotationsParams>,
-        run: |h, args| annotations(h, &parse(args)?),
-    },
-    Tool {
-        name: "callgraph",
-        description: "Draw a function's call graph as mermaid: callees, or callers with callers=true; imports are leaves and a %% line counts nodes cut by max_nodes. Not for one path (use reaches) or a caller list (use xrefs).",
-        effects: &[],
-        hints: READS,
-        schema: schema::<params::CallgraphParams>,
-        run: |h, args| callgraph(h, &parse(args)?),
-    },
-    Tool {
-        name: "cfg",
-        description: "Draw a function's control-flow graph as mermaid: blocks and successor edges, 300 blocks a page, a %% line when cut. Not for reading logic (use decompile) or a block table (use function).",
-        effects: &[],
-        hints: READS,
-        schema: schema::<params::CfgParams>,
-        run: |h, args| cfg(h, &parse(args)?),
-    },
-    Tool {
-        name: "decompile",
-        description: "Decompile one function to pseudo-C. Locals are local_N/arg_N (local_N: N hex bytes below frame base, x86 entry sp-word (rbp-N after push rbp; mov rbp,rsp), arm entry sp; higher N, lower address; local_mN: N bytes above); /* asm */: unmodeled code. Header: what was checked (proved vs lift: equal to lift, 1 emulator sample), `// warn:` what is wrong. Use function_summary first.",
-        effects: &[],
-        hints: READS,
-        schema: schema::<params::DecompileParams>,
-        run: |h, args| decompile(h, &parse(args)?),
-    },
-    Tool {
-        name: "disassemble",
-        description: "Disassemble count instructions from any address as `va text` rows. Use it for a few instructions or code outside functions; for a whole function use disassemble_function. Fails if unmapped.",
-        effects: &[],
-        hints: READS,
-        schema: schema::<params::DisassembleParams>,
-        run: |h, args| disassemble(h, &parse(args)?),
-    },
-    Tool {
-        name: "disassemble_function",
-        description: "Disassemble a whole function by blocks, with `L_<addr>:` labels and named call targets, CIL for .NET. Use it when exact instructions matter; for C use decompile, for a few instructions disassemble.",
-        effects: &[],
-        hints: READS,
-        schema: schema::<params::DisassembleFunctionParams>,
-        run: |h, args| disassemble_function(h, &parse(args)?),
-    },
-    Tool {
-        name: "entropy",
-        description: "Find packed, compressed or encrypted data: chunks at or above threshold bits/byte, as `off va len entropy` rows, at most 200, paged. To name the packer query borer://protection instead.",
-        effects: &[],
-        hints: READS,
-        schema: schema::<params::EntropyParams>,
-        run: |h, args| entropy(h, &parse(args)?),
-    },
-    Tool {
-        name: "find_crypto_constants",
-        description: "Find crypto constants and tables (AES, SHA, MD5, CRC-32, ChaCha, Blowfish, FNV, Base64) and hashed API names as `va section algorithm` rows, paged. Use it to locate crypto code, then xrefs a hit; not for strings (use strings).",
-        effects: &[],
-        hints: READS,
-        schema: schema::<params::CryptoParams>,
-        run: |h, args| find_crypto_constants(h, &parse(args)?),
-    },
-    Tool {
-        name: "find_function_by_string",
-        description: "Find the functions whose strings contain a text, case-insensitively: a numbered legend, `entry name: 1 2` rows, and, on a miss, texts built at run time as `built_by written_at text` rows.",
-        effects: &[],
-        hints: READS,
-        schema: schema::<params::FindFunctionByStringParams>,
-        run: |h, args| find_function_by_string(h, &parse(args)?),
-    },
-    Tool {
-        name: "function",
-        description: "Show one function's raw facts: range, counts, callers, callees and block table (`start size term successors`), 300 blocks a page. Not for a readable triage (use function_summary).",
-        effects: &[],
-        hints: READS,
-        schema: schema::<params::FunctionDetailParams>,
-        run: |h, args| function(h, &parse(args)?),
-    },
-    Tool {
-        name: "function_strings",
-        description: "List the string literals one function references as `site string_va text` rows, at most 100. Not for finding a text's functions (use find_function_by_string).",
-        effects: &[],
-        hints: READS,
-        schema: schema::<params::FunctionParams>,
-        run: |h, args| function_strings(h, &parse(args)?),
-    },
-    Tool {
-        name: "function_summary",
-        description: "Triage one function in one call: shape, loops, jump tables, callers, callees, strings and data, then `# next:` lines. Use it before decompile; for the raw block table use function.",
-        effects: &[],
-        hints: READS,
-        schema: schema::<params::FunctionParams>,
-        run: |h, args| function_summary(h, &parse(args)?),
-    },
-    Tool {
-        name: "functions",
-        description: "List discovered functions as `entry size blocks instrs callers callees src name` rows, paged; filter on name or entry hex, sort=size for the largest. Not for imports (use symbols).",
-        effects: &[],
-        hints: READS,
-        schema: schema::<params::FunctionsParams>,
-        run: |h, args| functions(h, &parse(args)?),
-    },
-    Tool {
-        name: "hexdump",
-        description: "Hexdump raw bytes at an address as `address hex |ascii|` rows; a range past mapped bytes shows what is there. Not for typed values (use read), text (use strings) or a live process (live_read).",
-        effects: &[],
-        hints: READS,
-        schema: schema::<params::HexdumpParams>,
-        run: |h, args| hexdump(h, &parse(args)?),
-    },
-    Tool {
-        name: "query",
-        description: "Read a borer:// resource (triage, taint, emulate, solve, grep...) for hosts without MCP resources; same answer as resources/read. Use it for analyses no tool has; borer://help lists them, !offset=N!limit=N pages.",
-        effects: &[Effect::ReadsFiles],
-        hints: READS,
-        schema: schema::<params::QueryParams>,
-        run: |h, args| query(h, &parse(args)?),
-    },
-    Tool {
-        name: "reaches",
-        description: "Find the shortest call chain from one function to another or to an import, or say none exists within depth. Not for the whole neighbourhood (use callgraph) or direct callers (use xrefs).",
-        effects: &[],
-        hints: READS,
-        schema: schema::<params::ReachesParams>,
-        run: |h, args| reaches(h, &parse(args)?),
-    },
-    Tool {
-        name: "read",
-        description: "Read typed values (kind) as `va value` rows, or a user type (type) one row per field, pointers named; stops at the first unmapped byte. Not for raw bytes (use hexdump) or a live process (live_read).",
-        effects: &[],
-        hints: READS,
-        schema: schema::<params::ReadParams>,
-        run: |h, args| read(h, &parse(args)?),
-    },
-    Tool {
-        name: "search",
-        description: "Search every byte of the file for a hex pattern with ?? wildcards, or text with kind=text, as `function: va ...` rows, paged. Not for listing strings (use strings).",
-        effects: &[],
-        hints: READS,
-        schema: schema::<params::SearchParams>,
-        run: |h, args| search(h, &parse(args)?),
-    },
-    Tool {
-        name: "strings",
-        description: "List printable ASCII and UTF-16LE strings as `va len enc text` rows, paged, skipping bytes of code. Not for the code using one (use find_function_by_string).",
-        effects: &[],
-        hints: READS,
-        schema: schema::<params::StringsParams>,
-        run: |h, args| strings(h, &parse(args)?),
-    },
-    Tool {
-        name: "symbols",
-        description: "List imports, exports, forwards, locals and data as demangled `kind addr name` rows by module, paged. Not for discovered code (use functions) or call sites (use xrefs).",
-        effects: &[],
-        hints: READS,
-        schema: schema::<params::SymbolsParams>,
-        run: |h, args| symbols(h, &parse(args)?),
-    },
-    Tool {
-        name: "types",
-        description: "List user-defined types and where each is applied, paged. Not for defining one (use set_type) or names and comments (use annotations).",
-        effects: &[],
-        hints: READS,
-        schema: schema::<params::TypesParams>,
-        run: |h, args| types(h, &parse(args)?),
-    },
-    Tool {
-        name: "xrefs",
-        description: "List references to an address or name, one row per function, paged; an import lists calls through its slot, `Class+0x24` who touches that field. Not for call paths (use reaches).",
-        effects: &[],
-        hints: READS,
-        schema: schema::<params::XrefsParams>,
-        run: |h, args| xrefs(h, &parse(args)?),
-    },
+    row!(
+        annotations,
+        AnnotationsParams,
+        &[],
+        "List the names, findings and open questions (comments opening with ?) added this session, paged. Use it to resume work; not for binary symbols (use symbols) or user types (use types)."
+    ),
+    row!(
+        callgraph,
+        CallgraphParams,
+        &[],
+        "Draw a function's call graph as mermaid: callees, or callers with callers=true; imports are leaves and a %% line counts nodes cut by max_nodes. Not for one path (use reaches) or a caller list (use xrefs)."
+    ),
+    row!(
+        cfg,
+        CfgParams,
+        &[],
+        "Draw a function's control-flow graph as mermaid: blocks and successor edges, 300 blocks a page, a %% line when cut. Not for reading logic (use decompile) or a block table (use function)."
+    ),
+    row!(
+        decompile,
+        DecompileParams,
+        &[],
+        "Decompile one function to pseudo-C. Locals are local_N/arg_N (local_N: N hex bytes below frame base, x86 entry sp-word (rbp-N after push rbp; mov rbp,rsp), arm entry sp; higher N, lower address; local_mN: N bytes above); /* asm */: unmodeled code. Header: what was checked (proved vs lift: equal to lift, 1 emulator sample), `// warn:` what is wrong. Use function_summary first."
+    ),
+    row!(
+        disassemble,
+        DisassembleParams,
+        &[],
+        "Disassemble count instructions from any address as `va text` rows. Use it for a few instructions or code outside functions; for a whole function use disassemble_function. Fails if unmapped."
+    ),
+    row!(
+        disassemble_function,
+        DisassembleFunctionParams,
+        &[],
+        "Disassemble a whole function by blocks, with `L_<addr>:` labels and named call targets, CIL for .NET. Use it when exact instructions matter; for C use decompile, for a few instructions disassemble."
+    ),
+    row!(
+        entropy,
+        EntropyParams,
+        &[],
+        "Find packed, compressed or encrypted data: chunks at or above threshold bits/byte, as `off va len entropy` rows, at most 200, paged. To name the packer query borer://protection instead."
+    ),
+    row!(
+        find_crypto_constants,
+        CryptoParams,
+        &[],
+        "Find crypto constants and tables (AES, SHA, MD5, CRC-32, ChaCha, Blowfish, FNV, Base64) and hashed API names as `va section algorithm` rows, paged. Use it to locate crypto code, then xrefs a hit; not for strings (use strings)."
+    ),
+    row!(
+        find_function_by_string,
+        FindFunctionByStringParams,
+        &[],
+        "Find the functions whose strings contain a text, case-insensitively: a numbered legend, `entry name: 1 2` rows, and, on a miss, texts built at run time as `built_by written_at text` rows."
+    ),
+    row!(
+        function,
+        FunctionDetailParams,
+        &[],
+        "Show one function's raw facts: range, counts, callers, callees and block table (`start size term successors`), 300 blocks a page. Not for a readable triage (use function_summary)."
+    ),
+    row!(
+        function_strings,
+        FunctionParams,
+        &[],
+        "List the string literals one function references as `site string_va text` rows, at most 100. Not for finding a text's functions (use find_function_by_string)."
+    ),
+    row!(
+        function_summary,
+        FunctionParams,
+        &[],
+        "Triage one function in one call: shape, loops, jump tables, callers, callees, strings and data, then `# next:` lines. Use it before decompile; for the raw block table use function."
+    ),
+    row!(
+        functions,
+        FunctionsParams,
+        &[],
+        "List discovered functions as `entry size blocks instrs callers callees src name` rows, paged; filter on name or entry hex, sort=size for the largest. Not for imports (use symbols)."
+    ),
+    row!(
+        hexdump,
+        HexdumpParams,
+        &[],
+        "Hexdump raw bytes at an address as `address hex |ascii|` rows; a range past mapped bytes shows what is there. Not for typed values (use read), text (use strings) or a live process (live_read)."
+    ),
+    row!(
+        query,
+        QueryParams,
+        &[Effect::ReadsFiles],
+        "Read a borer:// resource (triage, taint, emulate, solve, grep...) for hosts without MCP resources; same answer as resources/read. Use it for analyses no tool has; borer://help lists them, !offset=N!limit=N pages."
+    ),
+    row!(
+        reaches,
+        ReachesParams,
+        &[],
+        "Find the shortest call chain from one function to another or to an import, or say none exists within depth. Not for the whole neighbourhood (use callgraph) or direct callers (use xrefs)."
+    ),
+    row!(
+        read,
+        ReadParams,
+        &[],
+        "Read typed values (kind) as `va value` rows, or a user type (type) one row per field, pointers named; stops at the first unmapped byte. Not for raw bytes (use hexdump) or a live process (live_read)."
+    ),
+    row!(
+        search,
+        SearchParams,
+        &[],
+        "Search every byte of the file for a hex pattern with ?? wildcards, or text with kind=text, as `function: va ...` rows, paged. Not for listing strings (use strings)."
+    ),
+    row!(
+        strings,
+        StringsParams,
+        &[],
+        "List printable ASCII and UTF-16LE strings as `va len enc text` rows, paged, skipping bytes of code. Not for the code using one (use find_function_by_string)."
+    ),
+    row!(
+        symbols,
+        SymbolsParams,
+        &[],
+        "List imports, exports, forwards, locals and data as demangled `kind addr name` rows by module, paged. Not for discovered code (use functions) or call sites (use xrefs)."
+    ),
+    row!(
+        types,
+        TypesParams,
+        &[],
+        "List user-defined types and where each is applied, paged. Not for defining one (use set_type) or names and comments (use annotations)."
+    ),
+    row!(
+        xrefs,
+        XrefsParams,
+        &[],
+        "List references to an address or name, one row per function, paged; an import lists calls through its slot, `Class+0x24` who touches that field. Not for call paths (use reaches)."
+    ),
 ];
 
 #[cfg(test)]
@@ -551,10 +571,115 @@ mod tests {
     /// When a call without its URI reads, or the refusal says otherwise.
     #[test]
     fn arguments_that_do_not_read_are_refused() {
-        let refused = parse::<QueryParams>(serde_json::Map::new()).expect_err("no uri");
+        let refused = parse::<QueryParams>(&serde_json::Map::new()).expect_err("no uri");
         assert_eq!(
             refused.message,
             "failed to deserialize parameters: missing field `uri`"
+        );
+    }
+
+    /// Every schema the catalog gives has its keys sorted at every level.
+    ///
+    /// So it has whichever order the JSON map keeps: `cargo test -p
+    /// borer-front --features serde_json/preserve_order` runs this with the
+    /// insertion order the app's build keeps.
+    ///
+    /// # Panics
+    ///
+    /// When an object's keys come out of order.
+    #[test]
+    fn every_schema_lists_its_keys_in_order() {
+        fn ordered(value: &serde_json::Value) -> bool {
+            match value {
+                serde_json::Value::Object(o) => {
+                    o.keys().zip(o.keys().skip(1)).all(|(a, b)| a < b) && o.values().all(ordered)
+                }
+                serde_json::Value::Array(items) => items.iter().all(ordered),
+                _ => true,
+            }
+        }
+        for t in TOOLS {
+            assert!(
+                ordered(&serde_json::Value::Object((t.schema)())),
+                "{}",
+                t.name
+            );
+            assert!(
+                ordered(&serde_json::Value::Object(t.input_schema())),
+                "{}",
+                t.name
+            );
+        }
+    }
+
+    /// An edit goes through the face's seam: a face that holds proposals
+    /// returns the plan and leaves its names as they were.
+    ///
+    /// # Panics
+    ///
+    /// When the plan is not made, says nothing, or the names change.
+    #[test]
+    fn an_edit_is_planned_through_the_seam() {
+        use std::sync::Arc;
+
+        use borer_engine::analysis::edit::{Edit, Force};
+        use borer_engine::analysis::{Analysis, Overlay};
+        use borer_engine::answer::Need;
+        use borer_engine::program::{Arch, Feature, Program, Section};
+
+        use super::{Apply, Loaded, snapshot};
+        let text = Section::mapped(".text", 0x1000, 0, 0x10, false, true);
+        let program = Program::raw(vec![0xc3; 0x10], Arch::X86_64, 0, Some(0x1000), vec![text]);
+        let analysis = Arc::new(Analysis::compute(&program));
+        let plain = Loaded {
+            program: Arc::new(program),
+            analysis,
+            overlay: Overlay::default(),
+        };
+        let s = snapshot(&plain, Need::Code(Feature::Discover)).expect("a snapshot");
+        let edits = [Edit::Name {
+            at: 0x1000,
+            name: "start".to_owned(),
+        }];
+        let plan = s
+            .edit(&edits, Force::Refuse, Apply::Commit)
+            .expect("planned");
+        assert!(!plan.lines().is_empty());
+        assert!(plain.overlay.names.is_empty());
+    }
+
+    /// A face without the server's session answers what the engine
+    /// answers and refuses a resource only the server has by name, with
+    /// why, and sends the reader nowhere it cannot go.
+    ///
+    /// # Panics
+    ///
+    /// When the engine's answer is refused or a server resource answers.
+    #[test]
+    fn query_refuses_the_server_resources_by_name() {
+        use std::sync::Arc;
+
+        use borer_engine::analysis::{Analysis, Overlay};
+        use borer_engine::program::{Arch, Program, Section};
+
+        use super::{Cause, Loaded, ask};
+        let text = Section::mapped(".text", 0x1000, 0, 0x10, false, true);
+        let program = Program::raw(vec![0xc3; 0x10], Arch::X86_64, 0, Some(0x1000), vec![text]);
+        let plain = Loaded {
+            analysis: Arc::new(Analysis::compute(&program)),
+            program: Arc::new(program),
+            overlay: Overlay::default(),
+        };
+        assert!(ask(&plain, "borer://disasm/0x1000").is_ok());
+        for uri in ["borer://help", "borer://grep/main"] {
+            let refused = ask(&plain, uri).expect_err("the server's");
+            assert_eq!(refused.cause, Cause::Asked, "{uri}");
+            assert!(refused.message.contains(" is not answered here: "), "{uri}");
+            assert!(!refused.message.contains("borer://help lists"), "{uri}");
+        }
+        assert_eq!(
+            ask(&plain, "borer://nope").expect_err("no such").cause,
+            Cause::Missing
         );
     }
 }

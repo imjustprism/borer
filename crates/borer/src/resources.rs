@@ -17,7 +17,6 @@ use borer_engine::analysis::{Analysis, Overlay, render};
 use borer_engine::answer::Need;
 use borer_engine::program::{Feature, Program};
 use borer_engine::strings::walk::{Needle, StringRow, row_matches};
-use borer_front::tools::{Held, HeldExt};
 use rmcp::ErrorData;
 
 use crate::BorerServer;
@@ -275,8 +274,9 @@ impl BorerServer {
         /// Most rows one read returns.
         const PAGE: usize = 200;
         let again = asked.again();
-        HeldExt::with_managed(self, |p, a| {
-            borer_engine::analysis::stats::stats_tsv(p, a, spec, asked.page(&again).window(PAGE))
+        borer_front::tools::run(self, Need::Best(Feature::Discover), |s| {
+            let window = asked.page(&again).window(PAGE);
+            borer_engine::analysis::stats::stats_tsv(s.program(), s.analysis(), spec, window)
         })
         .map_err(failed)
     }
@@ -743,58 +743,6 @@ impl BorerServer {
             )),
             Err(why) => Err(err_params(why)),
         }
-    }
-
-    /// Answers a resource the engine answers on its own
-    /// ([`borer_engine::answer::read`]), with what it reads prepared.
-    ///
-    /// Everything is decided under the program's lock, so no load in
-    /// between pairs one program with another's analysis. A [`Need::Code`]
-    /// resource reads the analysis, and the engine refuses an architecture
-    /// without the stage; a [`Need::Best`] one reads it where the program
-    /// does the stage, else the empty analysis held for the program, which
-    /// keeps a `.NET` listing's index from one read to the next; a
-    /// [`Need::File`] one reads the file alone, its facts kept in the
-    /// analysis's memo once one is held.
-    ///
-    /// # Arguments
-    ///
-    /// * `need` - What the resource reads ([`borer_engine::answer::need`]).
-    /// * `asked` - The URI with its suffixes read off, for the page.
-    ///
-    /// # Errors
-    ///
-    /// Invalid params when no binary is loaded or the engine refuses the
-    /// argument or the architecture; internal error when the analysis
-    /// faults.
-    pub(crate) fn engine_answer(&self, need: Need, asked: &Asked) -> Result<String, ErrorData> {
-        let again = asked.again();
-        let page = asked.page(&again);
-        self.with_program(|p| {
-            let mut analysis = match need {
-                Need::Code(stage) | Need::Best(stage) if p.refuses(stage).is_none() => {
-                    Some(self.ensure_analysis()?)
-                }
-                Need::Code(_) => None,
-                Need::Best(_) => Some(self.empty_analysis()),
-                Need::File => read_lock(&self.analysis).clone(),
-            };
-            if p.arch == borer_engine::program::Arch::Arm
-                && let (Some(a), Some(("decompile", Some(arg)))) =
-                    (&analysis, borer_engine::answer::split(&asked.core))
-                && let Ok((grown, _)) = self.decompile_entry(p, Arc::clone(a), &arg)
-            {
-                analysis = Some(grown);
-            }
-            let o = self.overlay();
-            borer_engine::answer::read(p, analysis.as_deref(), &o, &asked.core, page)
-                .unwrap_or_else(|| {
-                    Err(format!(
-                        "the engine does not answer {}",
-                        borer_engine::text::one_line(&asked.core)
-                    ))
-                })
-        })
     }
 }
 

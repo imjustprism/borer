@@ -6,7 +6,6 @@ use borer_engine::analysis::protos::Proto;
 use borer_engine::analysis::utypes::parse_type;
 use borer_engine::analysis::{Analysis, Overlay, stated};
 use borer_engine::program::Feature;
-use borer_front::tools::HeldExt;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ErrorData, tool, tool_router};
 

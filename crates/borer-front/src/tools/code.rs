@@ -2,13 +2,14 @@
 //! cross-references, the call graph, the CFG, disassembly and decompilation.
 
 use borer_engine::analysis::{Analysis, Overlay, decompile, parse_addr, render, resolve};
+use borer_engine::answer::Need;
 use borer_engine::program::{Feature, Program};
 
 use super::params::{
     CallgraphParams, CfgParams, DecompileParams, DisassembleFunctionParams, FunctionDetailParams,
     FunctionParams, FunctionsParams, Page, ReachesParams, XrefsParams, count_param, to_usize,
 };
-use super::{Failure, Held, HeldExt};
+use super::{Failure, Held, run};
 
 /// Returns the one-call triage of a function.
 ///
@@ -21,12 +22,11 @@ use super::{Failure, Held, HeldExt};
 ///
 /// When no binary is loaded or the address is not inside a discovered function.
 pub fn function_summary(h: &dyn Held, p: &FunctionParams) -> Result<String, Failure> {
-    h.run(Box::new(|prog| {
-        let a = h.ensure_analysis()?;
-        let entry = h.function_entry(prog, &a, &p.address)?;
-        render::function_summary(prog, &a, &h.overlay(), entry)
+    run(h, Need::Code(Feature::Discover), |s| {
+        let entry = s.entry(&p.address)?;
+        render::function_summary(s.program(), s.analysis(), s.overlay(), entry)
             .ok_or_else(|| format!("no function at {entry:#x}"))
-    }))
+    })
 }
 
 /// Lists the string literals a function references.
@@ -40,12 +40,13 @@ pub fn function_summary(h: &dyn Held, p: &FunctionParams) -> Result<String, Fail
 ///
 /// When no binary is loaded or the address is not inside a discovered function.
 pub fn function_strings(h: &dyn Held, p: &FunctionParams) -> Result<String, Failure> {
-    if let Some(answer) = h.il_answer(&p.address, borer_engine::clr::managed::strings_tsv) {
-        return answer;
-    }
-    h.with_analysis(Feature::Discover, |prog, a, o| {
-        let entry = h.function_entry(prog, a, &p.address)?;
-        render::function_strings_tsv(prog, a, o, entry)
+    run(h, Need::Best(Feature::Discover), |s| {
+        if let Some(token) = s.il_method(&p.address) {
+            return borer_engine::clr::managed::strings_tsv(s.program(), s.analysis(), token);
+        }
+        let a = s.code(Feature::Discover)?;
+        let entry = s.entry(&p.address)?;
+        render::function_strings_tsv(s.program(), a, s.overlay(), entry)
             .ok_or_else(|| format!("no function at {entry:#x}"))
     })
 }
@@ -67,7 +68,8 @@ pub fn function_strings(h: &dyn Held, p: &FunctionParams) -> Result<String, Fail
 pub fn functions(h: &dyn Held, p: &FunctionsParams) -> Result<String, Failure> {
     let page = Page::new(p.offset, p.limit, p.count_only, 50, 300)?;
     let order = p.sort.unwrap_or_default().into();
-    h.with_analysis(Feature::Discover, |_, a, o| {
+    run(h, Need::Code(Feature::Discover), |s| {
+        let (a, o) = (s.analysis(), s.overlay());
         let rows =
             render::function_rows(a, o, p.filter.as_deref(), order, page.offset, page.limit.n);
         Ok(if page.count_only {
@@ -91,14 +93,13 @@ pub fn functions(h: &dyn Held, p: &FunctionsParams) -> Result<String, Failure> {
 /// When no binary is loaded or the address is not inside a discovered function.
 pub fn function(h: &dyn Held, p: &FunctionDetailParams) -> Result<String, Failure> {
     let offset = to_usize(p.offset.unwrap_or(0));
-    if let Some(answer) = h.il_answer(&p.address, |prog, a, token| {
-        borer_engine::clr::managed::detail(prog, a, token, offset)
-    }) {
-        return answer;
-    }
-    h.with_analysis(Feature::Discover, |prog, a, o| {
-        let entry = h.function_entry(prog, a, &p.address)?;
-        render::function_detail(a, o, entry, offset)
+    run(h, Need::Best(Feature::Discover), |s| {
+        if let Some(token) = s.il_method(&p.address) {
+            return borer_engine::clr::managed::detail(s.program(), s.analysis(), token, offset);
+        }
+        let a = s.code(Feature::Discover)?;
+        let entry = s.entry(&p.address)?;
+        render::function_detail(a, s.overlay(), entry, offset)
             .ok_or_else(|| format!("no function at {entry:#x}"))
     })
 }
@@ -131,20 +132,20 @@ pub fn xrefs(h: &dyn Held, p: &XrefsParams) -> Result<String, Failure> {
         render::XREF_ROWS_MAX,
     )?;
     let address = &p.address;
-    if let Some(answer) = h.managed_answer(address, |prog, a, targets| {
-        borer_engine::clr::managed::xrefs_tsv(
-            prog,
-            a,
-            targets,
-            page.offset,
-            page.limit.n,
-            page.count_only,
-        )
-    }) {
-        return answer.map(|text| page.limit.noted(text));
-    }
-    h.with_analysis(Feature::Discover, |prog, a, o| {
-        let va = match h.addr(prog, address) {
+    run(h, Need::Best(Feature::Discover), |s| {
+        let (prog, o) = (s.program(), s.overlay());
+        if let Some(targets) = s.managed(address) {
+            return borer_engine::clr::managed::xrefs_tsv(
+                prog,
+                s.analysis(),
+                &targets,
+                page.offset,
+                page.limit.n,
+                page.count_only,
+            );
+        }
+        let a = s.code(Feature::Discover)?;
+        let va = match s.addr(address) {
             Ok(va) => va,
             Err(unknown) => return field_xrefs(prog, (a, o), address, &unknown, page),
         };
@@ -258,11 +259,12 @@ pub fn class_field(p: &Program, a: &Analysis, o: &Overlay, text: &str) -> Option
 pub fn callgraph(h: &dyn Held, p: &CallgraphParams) -> Result<String, Failure> {
     let max = count_param(p.max_nodes, 30, 100, "max_nodes")?;
     let callers = p.callers.unwrap_or(false);
-    h.with_analysis(Feature::Discover, |prog, a, o| {
-        let root = match h.function_entry(prog, a, &p.address) {
+    run(h, Need::Code(Feature::Discover), |s| {
+        let (prog, a, o) = (s.program(), s.analysis(), s.overlay());
+        let root = match s.entry(&p.address) {
             Ok(root) => root,
             Err(e) => {
-                let va = h.addr(prog, &p.address)?;
+                let va = s.addr(&p.address)?;
                 if callers && (a.symbol_at(prog, va).is_some() || a.xrefs.contains_key(&va)) {
                     va
                 } else {
@@ -291,12 +293,13 @@ pub fn callgraph(h: &dyn Held, p: &CallgraphParams) -> Result<String, Failure> {
 /// or `to` is neither inside one nor an import.
 pub fn reaches(h: &dyn Held, p: &ReachesParams) -> Result<String, Failure> {
     let deep = count_param(p.depth, 24, 64, "depth")?;
-    h.with_analysis(Feature::Discover, |prog, a, o| {
-        let start = h.function_entry(prog, a, &p.from)?;
-        let goal = match h.function_entry(prog, a, &p.to) {
+    run(h, Need::Code(Feature::Discover), |s| {
+        let (prog, a, o) = (s.program(), s.analysis(), s.overlay());
+        let start = s.entry(&p.from)?;
+        let goal = match s.entry(&p.to) {
             Ok(goal) => goal,
             Err(e) => {
-                let va = h.addr(prog, &p.to)?;
+                let va = s.addr(&p.to)?;
                 if a.symbol_at(prog, va)
                     .is_some_and(|s| s.kind == borer_engine::program::SymbolKind::Import)
                 {
@@ -323,9 +326,9 @@ pub fn reaches(h: &dyn Held, p: &ReachesParams) -> Result<String, Failure> {
 /// When no binary is loaded or the address is not inside a discovered function.
 pub fn cfg(h: &dyn Held, p: &CfgParams) -> Result<String, Failure> {
     let offset = to_usize(p.offset.unwrap_or(0));
-    h.with_analysis(Feature::Discover, |prog, a, o| {
-        let entry = h.function_entry(prog, a, &p.address)?;
-        render::cfg_mermaid(prog, a, o, entry, offset)
+    run(h, Need::Code(Feature::Discover), |s| {
+        let entry = s.entry(&p.address)?;
+        render::cfg_mermaid(s.program(), s.analysis(), s.overlay(), entry, offset)
             .ok_or_else(|| format!("no function at {entry:#x}"))
     })
 }
@@ -347,17 +350,16 @@ pub fn disassemble_function(
 ) -> Result<String, Failure> {
     use borer_engine::answer::{FUNCTION_INSTRS_DEFAULT, disasm_function};
     let max = count_param(p.max_instrs, FUNCTION_INSTRS_DEFAULT, 2000, "max_instrs")?;
-    h.run(Box::new(|prog| {
-        let a = h.analysis_or_empty();
+    run(h, Need::Best(Feature::Discover), |s| {
         disasm_function(
-            prog,
-            &a,
-            &h.overlay(),
+            s.program(),
+            s.analysis(),
+            s.overlay(),
             &p.address,
             max.n,
             p.bytes.unwrap_or(false),
         )
-    }))
+    })
     .map(|text| max.noted(text))
 }
 
@@ -392,13 +394,10 @@ pub fn decompile(h: &dyn Held, p: &DecompileParams) -> Result<String, Failure> {
     if p.limit == Some(0) {
         return Err(Failure::asked(decompile::LIMIT_ZERO));
     }
-    h.run(Box::new(|prog| {
-        if let Some(why) = prog.refuses(Feature::Decompile) {
-            return Err(why);
-        }
-        let (a, entry) = h.decompile_entry(prog, h.ensure_analysis()?, &p.address)?;
+    run(h, Need::Code(Feature::Decompile), |s| {
+        let (a, entry) = s.decompile_entry(&p.address)?;
         let detail = p.detail.unwrap_or_default().into();
-        let text = decompile::answer(prog, &a, &h.overlay(), entry, detail)
+        let text = decompile::answer(s.program(), &a, s.overlay(), entry, detail)
             .ok_or_else(|| format!("decompilation failed at {entry:#x}"))?;
         Ok(decompile::window(
             &text,
@@ -406,5 +405,5 @@ pub fn decompile(h: &dyn Held, p: &DecompileParams) -> Result<String, Failure> {
             p.offset,
             p.limit,
         ))
-    }))
+    })
 }

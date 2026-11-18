@@ -644,7 +644,11 @@ const ANSWERS: &[Answer] = &[
         disasm_function(q.p, q.a, q.o, q.arg, FUNCTION_INSTRS_DEFAULT, false)
     }),
     rows("decompile", Argument, Code(Decompile), |q| {
-        let (grown, entry) = decompile_entry(q.p, q.a, q.o, q.arg)?;
+        let va = address(q.p, q.arg, || (q.a, q.o))?;
+        let (grown, entry) = match recovered(q.p, q.a, va) {
+            Some(found) => found,
+            None => (None, entry_of(q.p, q.a, va, q.arg)?),
+        };
         let a = grown.as_ref().unwrap_or(q.a);
         let text = decompile::answer(q.p, a, q.o, entry, decompile::Detail::Full)
             .ok_or_else(|| format!("decompilation failed at {entry:#x}"))?;
@@ -710,8 +714,26 @@ pub fn disasm_function(
         .ok_or_else(|| format!("no function at {entry:#x}"))
 }
 
-/// Resolves the function to decompile at an argument, starting one at an
-/// ARM32 address no discovered function's blocks hold.
+/// Returns the entry of the function whose blocks hold an address.
+///
+/// # Arguments
+///
+/// * `p` - The loaded program.
+/// * `a` - Its analysis.
+/// * `va` - The address.
+///
+/// # Returns
+///
+/// The entry, `None` when no function's blocks hold the address.
+#[must_use]
+pub fn held_entry(p: &Program, a: &Analysis, va: u64) -> Option<u64> {
+    function_entry(p, a, va)
+        .ok()
+        .filter(|&e| crate::analysis::in_blocks(p, a, e, va))
+}
+
+/// Finds the function to decompile at an address, starting one at an ARM32
+/// address no discovered function's blocks hold.
 ///
 /// The function so recovered goes into a copy of the analysis
 /// ([`crate::analysis::entry_or_gap`]); a front end that keeps it for later
@@ -721,39 +743,23 @@ pub fn disasm_function(
 ///
 /// * `p` - The loaded program.
 /// * `a` - Its analysis.
-/// * `o` - The names in force.
-/// * `text` - The function as the agent wrote it.
+/// * `va` - The address.
 ///
 /// # Returns
 ///
-/// The grown analysis when one was recovered, and the function's entry.
-///
-/// # Errors
-///
-/// When the text names nothing, or no function holds the address and none
-/// starts there.
-pub fn decompile_entry(
-    p: &Program,
-    a: &Analysis,
-    o: &Overlay,
-    text: &str,
-) -> Result<(Option<Analysis>, u64), String> {
-    let va = address(p, text, || (a, o))?;
-    let held = function_entry(p, a, va)
-        .ok()
-        .filter(|&e| crate::analysis::in_blocks(p, a, e, va));
-    if let Some(entry) = held {
-        return Ok((None, entry));
+/// The grown analysis when one was recovered, `None` when `a` holds the
+/// function, and the function's entry; `None` when neither finds one.
+#[must_use]
+pub fn recovered(p: &Program, a: &Analysis, va: u64) -> Option<(Option<Analysis>, u64)> {
+    if let Some(entry) = held_entry(p, a, va) {
+        return Some((None, entry));
     }
-    if p.arch == crate::program::Arch::Arm {
-        let mut grown = a.clone();
-        if let Ok(entry) = crate::analysis::entry_or_gap(p, &mut grown, va)
-            && grown.functions.len() > a.functions.len()
-        {
-            return Ok((Some(grown), entry));
-        }
+    if p.arch != crate::program::Arch::Arm {
+        return None;
     }
-    Ok((None, entry_of(p, a, va, text)?))
+    let mut grown = a.clone();
+    let entry = crate::analysis::entry_or_gap(p, &mut grown, va).ok()?;
+    (grown.functions.len() > a.functions.len()).then_some((Some(grown), entry))
 }
 
 /// Lists the names of the resources the engine answers, in no promised

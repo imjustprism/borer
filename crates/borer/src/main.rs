@@ -48,6 +48,7 @@ mod testing;
 mod tools;
 mod update;
 
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -58,7 +59,7 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, CompleteRequestParams, CompleteResult,
-    CompletionInfo, ContentBlock, CustomRequest, CustomResult, ErrorCode,
+    CompletionInfo, ContentBlock, CustomRequest, CustomResult, ErrorCode, JsonObject,
     ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
     ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult,
     Reference, Resource, ResourceContents, ResourceTemplate, ResultType, Tool,
@@ -322,14 +323,8 @@ impl ServerHandler for BorerServer {
                 CallToolResponse::Complete(result)
             }
             CallToolResponse::Complete(mut result) if result.is_error == Some(true) => {
-                if let [ContentBlock::Text(t)] = result.content.as_mut_slice()
-                    && let Some(rest) = t.text.strip_prefix(params::DESERIALIZE_PREFIX)
-                    && let (name, Some(args)) = &named
-                    && let Some(field) = Self::tool_router()
-                        .get(name)
-                        .and_then(|tool| params::misfit(&tool.input_schema, args))
-                {
-                    t.text = format!("{} field `{field}`:{rest}", params::DESERIALIZE_PREFIX);
+                if let [ContentBlock::Text(t)] = result.content.as_mut_slice() {
+                    t.text = field_named(std::mem::take(&mut t.text), &named);
                 }
                 CallToolResponse::Complete(result)
             }
@@ -540,6 +535,31 @@ impl ServerHandler for BorerServer {
     }
 }
 
+/// Names the argument a refused call's parser could not read.
+///
+/// It is read from the tool's schema ([`params::misfit`]): serde words the
+/// value alone. A catalog tool's refusal names it already
+/// ([`borer_front::tools::parse`]).
+///
+/// # Arguments
+///
+/// * `text` - The refusal's text.
+/// * `(name, args)` - The tool called and its arguments.
+fn field_named(text: String, (name, args): &(Cow<'static, str>, Option<JsonObject>)) -> String {
+    let field = text
+        .strip_prefix(params::DESERIALIZE_PREFIX)
+        .filter(|_| borer_front::tools::tool(name).is_none())
+        .zip(args.as_ref())
+        .and_then(|(rest, args)| {
+            let tool = BorerServer::tool_router().get(name).cloned()?;
+            Some((rest, params::misfit(&tool.input_schema, args)?))
+        });
+    match field {
+        Some((rest, field)) => format!("{} field `{field}`:{rest}", params::DESERIALIZE_PREFIX),
+        None => text,
+    }
+}
+
 /// The methods borer serves that take params, each with the shape they
 /// take, for the refusal of one sent without them
 /// ([`BorerServer::on_custom_request`]).
@@ -664,15 +684,12 @@ impl BorerServer {
         let Some((kind, arg)) = borer_engine::answer::split(uri) else {
             return Err(resources::unknown_resource(uri));
         };
-        let unloaded = kind == "annotations" && self.loaded().is_none();
-        if let Some(need) = borer_engine::answer::need(kind, arg.as_deref())
-            && !unloaded
-        {
-            return self.engine_answer(need.map_err(err_params)?, asked);
+        let again = asked.again();
+        if let Some(answer) = borer_front::tools::read_engine(self, uri, asked.page(&again)) {
+            return answer.map_err(errors::failed);
         }
         let text = match (kind, arg) {
             ("info", None) => self.binary_info()?,
-            ("annotations", None) => borer_engine::answer::annotations(&self.overlay()),
             ("stats", Some(spec)) => return self.stats_text(&spec, asked),
             ("find", Some(query)) => self.find_text(&query)?,
             ("diff", Some(other)) => self.diff_text(&other)?,
