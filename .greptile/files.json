@@ -1,0 +1,8 @@
+{
+  "files": [
+    {
+      "path": "CLAUDE.md",
+      "description": "The project's rule book (YAML): simplicity, correctness, untrusted input, workflow, engine, server, app, types, errors and docs rules every change must follow"
+    }
+  ]
+}

@@ -1,0 +1,91 @@
+{
+  "strictness": 3,
+  "commentTypes": ["logic", "syntax"],
+  "includeBranches": ["dev", "main"],
+  "autoReview": ["open"],
+  "statusCheck": true,
+  "shouldUpdateDescription": false,
+  "ignorePatterns": "Cargo.lock\napp/Cargo.lock\nfuzz/Cargo.lock\nscripts/run/*.tsv\nscripts/check/*.tsv\ncrates/borer-engine/src/analysis/sdk/*.tsv\nbrand/\npackaging/borer-app/icons/\n*.png\n*.svg\n*.ico\n*.icns",
+  "summarySection": { "included": true, "collapsible": true, "defaultOpen": false },
+  "issuesTableSection": { "included": true },
+  "sequenceDiagramSection": { "included": false },
+  "instructions": "borer is a reverse-engineering engine (Rust): borer-engine is a pure, sync analysis library, crates/borer a thin MCP server and CLI over it, app/ a GPUI desktop app. CLAUDE.md is the rule book. Report real defects with the concrete input or sequence that triggers them; no praise, no restating the change, no style nits that rustfmt, clippy, typos or ruff already enforce in the project's gate.",
+  "rules": [
+    {
+      "id": "evidence",
+      "rule": "Never claim more than the engine shows: a heuristic answer names its evidence and says when it is unsure; a missed finding beats a false one.",
+      "scope": ["crates/**", "app/**"],
+      "severity": "high"
+    },
+    {
+      "id": "determinism",
+      "rule": "No clock, random seed, hash-map or hash-set iteration order, or environment variable may reach an answer: the same binary and query give the same bytes at any thread count.",
+      "scope": ["crates/**"],
+      "severity": "high"
+    },
+    {
+      "id": "untrusted-input",
+      "rule": "File bytes are hostile: every read is bounds-checked, every scan capped, every walk fuel-limited, and arithmetic on values from the file is checked, saturating or wrapping. No input may cause a panic, hang or unbounded allocation.",
+      "scope": ["crates/**", "fuzz/**"],
+      "severity": "high"
+    },
+    {
+      "id": "no-panics",
+      "rule": "No unwrap, expect, panic!, unreachable! or todo! outside tests. No `let _ =` or `.ok()` that drops a Result that matters.",
+      "scope": ["**/*.rs"],
+      "severity": "high"
+    },
+    {
+      "id": "tests",
+      "rule": "A test or benchmark changed only to make it pass is a defect. Every fix comes with a test: decompiler fixes under tests/it/decompile/, lifter fixes as an *_agrees_with_the_emulator test, a parser crash input in tests/hostile.rs.",
+      "severity": "high"
+    },
+    {
+      "id": "engine-purity",
+      "rule": "borer-engine stays pure: no async, tokio, MCP types, filesystem writes or global state; memoized results go through Analysis::derived (get_or_build), never a second Mutex map; per-function parallel work uses std::thread::scope with results in address order, never rayon.",
+      "scope": ["crates/borer-engine/**"],
+      "severity": "high"
+    },
+    {
+      "id": "casts",
+      "rule": "No integer `as` casts: width conversions use num::lo32, cast_signed, cast_unsigned, u64::from, try_from or num::as_f64.",
+      "scope": ["**/*.rs"],
+      "severity": "medium"
+    },
+    {
+      "id": "exhaustive-match",
+      "rule": "Match borer's own enums exhaustively; a wildcard arm is allowed only over a foreign enum.",
+      "scope": ["**/*.rs"],
+      "severity": "medium"
+    },
+    {
+      "id": "comments",
+      "rule": "No `//` or `/* */` comments except `// SAFETY:` above an unsafe block and `// ASM:` on hand-assembled bytes; explanations belong in rustdoc. unsafe appears only in crates/borer-live and tests.",
+      "scope": ["**/*.rs"],
+      "severity": "medium"
+    },
+    {
+      "id": "lint-silencing",
+      "rule": "No `#[allow(...)]`; a silenced lint is `#[expect(lint, reason = \"...\")]` on the one site.",
+      "scope": ["**/*.rs"],
+      "severity": "medium"
+    },
+    {
+      "id": "server-lists",
+      "rule": "The server is a thin adapter: logic belongs in the engine. stdout is the MCP protocol, so nothing else prints to it. Every list is a plain table with a `#` header line, takes filter, offset, limit and count, and is hard-capped with `showing N of M`. A failing handler returns ErrorData, never error text inside a success. A state-changing tool is a dry run by default.",
+      "scope": ["crates/borer/**"],
+      "severity": "medium"
+    },
+    {
+      "id": "app-adapter",
+      "rule": "borer-app formats the engine's tokens and never derives a fact of its own; no engine call on the UI thread; every edit goes through the agents' edit path. The main workspace under crates/ never depends on a GPL crate.",
+      "scope": ["app/**", "**/Cargo.toml"],
+      "severity": "medium"
+    },
+    {
+      "id": "commits",
+      "rule": "Each commit holds one concern. Commit and PR titles are `type: summary`: lowercase, imperative, plain ASCII, at most 72 characters, no scope, no trailing period; type is one of add, fix, improve, refactor, perf, docs, test, chore, revert.",
+      "severity": "low"
+    }
+  ]
+}
