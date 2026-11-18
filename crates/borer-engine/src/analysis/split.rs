@@ -463,9 +463,11 @@ mod tests {
         );
     }
 
-    /// A function's source file is the one its `// source:` line would
-    /// name: the only file cited, or the one its class names, or the most
-    /// cited; a tie names none, so the function is not filed.
+    /// A function's source file is the one its `// source:` line names.
+    ///
+    /// A cited source file wins over every header, then the only file
+    /// left, the one its class names, or the most cited; a tie names none,
+    /// so the function is not filed.
     ///
     /// # Panics
     ///
@@ -473,15 +475,30 @@ mod tests {
     #[test]
     fn a_function_is_filed_as_its_source_line_names_it_and_a_tie_is_not() {
         use crate::analysis::decompile::unit_of;
-        let class = "// Vec::Push @ 0x1000: 9 instructions\n  f(\"n > 0\", \"inc/vec.h\", 1);\n  g(\"p\", \"net/a.cpp\", 2);\n  g(\"q\", \"net/a.cpp\", 3);\n";
-        assert_eq!(unit_of(class).as_deref(), Some("inc/vec.h"));
-        let most = "// f @ 0x1000: 9 instructions\n  f(\"a\", \"x/b.h\", 1);\n  f(\"b\", \"x/a.h\", 2);\n  f(\"c\", \"x/a.h\", 3);\n";
-        assert_eq!(unit_of(most).as_deref(), Some("x/a.h"));
-        let tie = "// f @ 0x1000: 9 instructions\n  f(\"a\", \"x/b.h\", 1);\n  f(\"b\", \"x/a.cpp\", 2);\n";
-        assert_eq!(unit_of(tie), None);
-        assert_eq!(
-            unit_of("// f @ 0x1000\n  f(\"a\", \"no path\", 1);\n"),
-            None
+        let head = |name: &str, cites: &[&str]| {
+            let mut text = format!("// {name} @ 0x1000: 9 instructions\n");
+            for (line, path) in cites.iter().enumerate() {
+                text.push_str(&format!("  f(\"x\", \"{path}\", {line});\n"));
+            }
+            text
+        };
+        let class = head("Vec::Push", &["inc/vec.h", "net/a.cpp", "net/a.cpp"]);
+        assert_eq!(unit_of(&class).as_deref(), Some("net/a.cpp"));
+        let level = head("f", &["game/level.cpp", "core/array.h", "core/array.h"]);
+        assert_eq!(unit_of(&level).as_deref(), Some("game/level.cpp"));
+        let cxx = head(
+            "Foo::Run",
+            &[
+                r"C:\ws\src\foo.cxx",
+                r"C:\ws\inc\vec.hh",
+                r"C:\ws\inc\vec.hh",
+            ],
         );
+        assert_eq!(unit_of(&cxx).as_deref(), Some("C:/ws/src/foo.cxx"));
+        let most = head("f", &["x/b.h", "x/a.h", "x/a.h"]);
+        assert_eq!(unit_of(&most).as_deref(), Some("x/a.h"));
+        let tie = head("f", &["x/b.cc", "x/a.cpp", "x/a.h", "x/a.h"]);
+        assert_eq!(unit_of(&tie), None);
+        assert_eq!(unit_of(&head("f", &["no path"])), None);
     }
 }

@@ -986,10 +986,12 @@ pub(super) fn float_bit_copies(text: &str) -> String {
 /// asserts anything says where it lives. That is the subsystem it belongs
 /// to, and the question "what is this part of" is otherwise answered only
 /// by reading its callers. A body citing several files inlined a callee
-/// that asserts too, so the file is taken when it is the only one, when the
-/// function's class names it (`Skills::GameSkill` names `gameskill.cc`), or
-/// when one is cited more often than any other; nothing is written when the
-/// evidence ties, since a guessed location is worse than none.
+/// that asserts too, and a header's inline code is inlined wherever it is
+/// used, so a cited source file wins over every header; among the files
+/// left, one is taken when it is the only one, when the function's class
+/// names it (`Skills::GameSkill` names `gameskill.cc`), or when it is
+/// cited more often than any other ([`pick_path`]); nothing is written
+/// when the evidence ties, since a guessed location is worse than none.
 ///
 /// # Arguments
 ///
@@ -1065,8 +1067,6 @@ pub(crate) fn own_source(text: &str) -> Cited<'_> {
 ///
 /// Each quoted token that names a source file, then the location's file.
 pub(super) fn cited_paths(line: &str) -> Vec<&str> {
-    /// Extensions a cited source file ends in.
-    const EXTENSIONS: [&str; 6] = [".h", ".hpp", ".inl", ".c", ".cc", ".cpp"];
     let mut out = Vec::new();
     let mut rest = line;
     while let Some((_, tail)) = rest.split_once('"') {
@@ -1074,7 +1074,7 @@ pub(super) fn cited_paths(line: &str) -> Vec<&str> {
             break;
         };
         rest = after;
-        if !text.contains(' ') && EXTENSIONS.iter().any(|e| text.ends_with(e)) {
+        if !text.contains(' ') && CITED_EXTENSIONS.iter().any(|e| text.ends_with(e)) {
             out.push(text);
         }
     }
@@ -1092,6 +1092,10 @@ pub(super) fn cited_paths(line: &str) -> Vec<&str> {
 
 /// Chooses the function's own file from the ones its body cites.
 ///
+/// A cited file that is no header ([`HEADER_EXTENSIONS`]) wins
+/// over every header. Among the files left, the only one wins, then the
+/// one the function's class names, then the most cited; a tie is none.
+///
 /// # Arguments
 ///
 /// * `counts` - How often each path appears.
@@ -1106,6 +1110,9 @@ pub(super) fn pick_path<'a>(
     order: &[&'a str],
     head: &str,
 ) -> Option<&'a str> {
+    let header = |p: &str| HEADER_EXTENSIONS.iter().any(|e| p.ends_with(e));
+    let sources: Vec<&'a str> = order.iter().copied().filter(|p| !header(p)).collect();
+    let order = if sources.is_empty() { order } else { &sources };
     if let [only] = order {
         return Some(only);
     }
@@ -1129,8 +1136,12 @@ pub(super) fn pick_path<'a>(
     {
         return Some(p);
     }
-    let best = counts.values().max().copied()?;
-    let mut top = counts.iter().filter(|(_, n)| **n == best);
+    let counts: Vec<(&str, usize)> = order
+        .iter()
+        .map(|p| (*p, counts.get(p).copied().unwrap_or(0)))
+        .collect();
+    let best = counts.iter().map(|(_, n)| *n).max()?;
+    let mut top = counts.iter().filter(|(_, n)| *n == best);
     let (only, None) = (top.next()?, top.next()) else {
         return None;
     };

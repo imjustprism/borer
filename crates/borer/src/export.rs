@@ -1126,4 +1126,154 @@ mod tests {
         assert!(again.to_string().contains("is not empty"), "{again}");
         std::fs::remove_dir_all(&dir).expect("cleans up");
     }
+
+    /// Builds an image whose functions each assert once per path given,
+    /// citing it, and a `main` at `0x1800` calling each in turn, with the
+    /// overlay naming them.
+    ///
+    /// # Arguments
+    ///
+    /// * `funcs` - Each function's name and the paths its asserts cite, at
+    ///   `0x1000`, `0x1100` and on.
+    ///
+    /// # Panics
+    ///
+    /// When the functions or their asserts do not fit the image.
+    fn asserting(funcs: &[(&str, &[&str])]) -> (Program, Overlay) {
+        use borer_engine::program::{Symbol, SymbolKind};
+        let mut bytes = vec![0xccu8; 0x2000];
+        let rel = |at: u64, to: u64| borer_engine::num::lo32(to.wrapping_sub(at)).to_le_bytes();
+        bytes[0x1008..0x100e].copy_from_slice(b"x > 0\0");
+        let mut paths: Vec<&str> = Vec::new();
+        let mut o = Overlay::default();
+        let mut main = Vec::new();
+        for (i, (name, cites)) in funcs.iter().enumerate() {
+            let entry = 0x1000 + 0x100 * u64::try_from(i).expect("few");
+            let mut code = Vec::new();
+            for (line, path) in cites.iter().enumerate() {
+                let at = paths.iter().position(|p| p == path).unwrap_or_else(|| {
+                    paths.push(path);
+                    paths.len() - 1
+                });
+                let string = 0x2040 + 0x80 * u64::try_from(at).expect("few");
+                let off = usize::try_from(string - 0x1000).expect("fits");
+                bytes[off..off + path.len()].copy_from_slice(path.as_bytes());
+                bytes[off + path.len()] = 0;
+                let here = entry + u64::try_from(code.len()).expect("fits");
+                code.extend([0x48, 0x8d, 0x0d]); // ASM: lea rcx, [rip+expr]
+                code.extend(rel(here + 7, 0x2008));
+                code.extend([0x48, 0x8d, 0x15]); // ASM: lea rdx, [rip+path]
+                code.extend(rel(here + 14, string));
+                code.extend([0x41, 0xb8, u8::try_from(line).expect("few"), 0, 0, 0]); // ASM: mov r8d, line
+                code.extend([0xff, 0x15]); // ASM: call qword [rip+iat]
+                code.extend(rel(here + 26, 0x2000));
+            }
+            code.push(0xc3); // ASM: ret
+            let off = usize::try_from(entry - 0x1000).expect("fits");
+            bytes[off..off + code.len()].copy_from_slice(&code);
+            let at = 0x1800 + u64::try_from(main.len()).expect("fits");
+            main.push(0xe8); // ASM: call the function
+            main.extend(rel(at + 5, entry));
+            o.names.insert(entry, (*name).to_owned());
+        }
+        main.push(0xc3); // ASM: ret
+        bytes[0x800..0x800 + main.len()].copy_from_slice(&main);
+        let mut p = Program::raw(
+            bytes,
+            Arch::X86_64,
+            0,
+            Some(0x1800),
+            vec![
+                Section::mapped(".text", 0x1000, 0, 0x1000, false, true),
+                Section::mapped(".rdata", 0x2000, 0x1000, 0x1000, false, false),
+            ],
+        );
+        p.symbols.push(Symbol {
+            name: "KERNEL32.dll!ReportAssertFailure".to_owned(),
+            addr: 0x2000,
+            kind: SymbolKind::Import,
+        });
+        (p, o)
+    }
+
+    /// A function citing a source file files under it however many times
+    /// it cites a header, whatever the source file's extension, and the map
+    /// gives its class that source.
+    ///
+    /// `Foo::Run` cites `C:\ws\src\foo.cxx` three times and
+    /// `C:\ws\inc\vec.h` once; `Level` cites `game/level.cpp` once and
+    /// `core/array.h` twice.
+    ///
+    /// # Panics
+    ///
+    /// When a function is filed elsewhere or the map names another source.
+    #[test]
+    fn a_cited_source_file_wins_over_a_header_in_the_split() {
+        use borer_engine::analysis::utypes::{UserStruct, UserType};
+        let foo = r"C:\ws\src\foo.cxx";
+        let (p, mut o) = asserting(&[
+            ("Foo::Run", &[foo, r"C:\ws\inc\vec.h", foo, foo]),
+            ("Level", &["core/array.h", "game/level.cpp", "core/array.h"]),
+        ]);
+        o.types.insert(
+            "Foo".to_owned(),
+            UserType::Struct(UserStruct {
+                size: 8,
+                fields: std::collections::BTreeMap::new(),
+            }),
+        );
+        let a = Analysis::compute(&p);
+        let dir = std::env::temp_dir().join(format!("borer-split-src-{}", std::process::id()));
+        super::write_split(
+            &p,
+            &a,
+            &o,
+            Library::Include,
+            None,
+            &dir.display().to_string(),
+        )
+        .expect("writes");
+        let read = |rel: &str| std::fs::read_to_string(dir.join(rel)).unwrap_or_default();
+        let units: Vec<String> = walk(&dir.join("src"));
+        let holding = |name: &str| {
+            units
+                .iter()
+                .filter(|u| read(&format!("src/{u}")).contains(&format!("// {name} @ ")))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(holding("Foo::Run"), vec!["src/foo.cxx.c"], "{units:?}");
+        assert_eq!(holding("Level"), vec!["game/level.cpp.c"], "{units:?}");
+        let map = read("MAP.tsv");
+        assert!(
+            map.lines().any(
+                |l| l.starts_with("Foo\t") && l.split('\t').nth(2) == Some("C:/ws/src/foo.cxx")
+            ),
+            "{map}"
+        );
+        std::fs::remove_dir_all(&dir).expect("cleans up");
+    }
+
+    /// Lists the files under a directory, relative to it, `/`-separated.
+    ///
+    /// # Arguments
+    ///
+    /// * `dir` - The directory.
+    ///
+    /// # Panics
+    ///
+    /// When the directory cannot be listed.
+    fn walk(dir: &std::path::Path) -> Vec<String> {
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(dir).expect("lists").flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if e.path().is_dir() {
+                out.extend(walk(&e.path()).into_iter().map(|f| format!("{name}/{f}")));
+            } else {
+                out.push(name);
+            }
+        }
+        out.sort();
+        out
+    }
 }

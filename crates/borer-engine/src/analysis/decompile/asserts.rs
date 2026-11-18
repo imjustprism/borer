@@ -188,6 +188,11 @@ pub(crate) const CITED_EXTENSIONS: [&str; 10] = [
     ".h", ".hpp", ".hh", ".hxx", ".inl", ".c", ".cc", ".cpp", ".cxx", ".inc",
 ];
 
+/// The extensions of [`CITED_EXTENSIONS`] a header ends with: its code is
+/// inlined wherever it is used, so a cited header says less of where a
+/// function lives than a cited source file.
+pub(crate) const HEADER_EXTENSIONS: [&str; 6] = [".h", ".hpp", ".hh", ".hxx", ".inl", ".inc"];
+
 /// Tells whether an argument is a literal naming a C or C++ source file
 /// ([`is_source_path`]).
 ///
