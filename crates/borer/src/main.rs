@@ -50,7 +50,7 @@ mod update;
 
 use std::borrow::Cow;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
 
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::pack::Packs;
@@ -132,25 +132,29 @@ struct BorerServer {
 }
 
 impl BorerServer {
-    /// Returns every tool the server answers: the catalog's
+    /// Returns every tool the server answers, built on first use: the catalog's
     /// ([`tools::catalog`]) and the server's own, one router per area
     /// ([`tools`]).
     ///
     /// The live tools read another process through the Windows API, so
     /// off Windows they are left out rather than listed and always refused.
-    fn tool_router() -> ToolRouter<Self> {
-        let live = if cfg!(windows) {
-            Self::live_tools() + Self::live_scan_tools()
-        } else {
-            ToolRouter::new()
-        };
-        tools::catalog()
-            + Self::load_tools()
-            + Self::function_tools()
-            + Self::decompile_tools()
-            + Self::annotate_tools()
-            + live
-            + Self::query_tools()
+    fn tool_router() -> &'static ToolRouter<Self> {
+        /// The router, built once: its schemas are derived as it is built.
+        static ROUTER: LazyLock<ToolRouter<BorerServer>> = LazyLock::new(|| {
+            let live = if cfg!(windows) {
+                BorerServer::live_tools() + BorerServer::live_scan_tools()
+            } else {
+                ToolRouter::new()
+            };
+            tools::catalog()
+                + BorerServer::load_tools()
+                + BorerServer::function_tools()
+                + BorerServer::decompile_tools()
+                + BorerServer::annotate_tools()
+                + live
+                + BorerServer::query_tools()
+        });
+        &ROUTER
     }
 }
 
