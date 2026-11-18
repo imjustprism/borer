@@ -140,16 +140,35 @@ impl Section {
         executable: bool,
     ) -> Section {
         Section {
-            name: name.to_owned(),
-            va: Va(va),
-            vsize: size,
-            file_off: FileOff(file_off),
-            file_size: size,
-            lost: 0,
-            readable: true,
             writable,
             executable,
+            ..Section::backed(name.to_owned(), Va(va), FileOff(file_off), size)
+        }
+    }
+
+    /// Returns a readable section backed by `size` bytes of the file at
+    /// `file_off`, mapped at `va` with the same size, neither writable nor
+    /// executable: the base a loader sets its permissions over.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The section's name.
+    /// * `va` - Where the first byte maps.
+    /// * `file_off` - Where its bytes sit in the file.
+    /// * `size` - Bytes, in the file and in memory alike.
+    #[must_use]
+    pub(crate) fn backed(name: String, va: Va, file_off: FileOff, size: u64) -> Section {
+        Section {
+            name,
+            va,
+            vsize: size,
+            file_off,
+            file_size: size,
+            lost: 0,
             thread_local: false,
+            readable: true,
+            writable: false,
+            executable: false,
         }
     }
 

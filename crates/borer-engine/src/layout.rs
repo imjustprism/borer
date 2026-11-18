@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use anyhow::{Context as _, anyhow, bail};
 
 use crate::analysis::parse_addr;
-use crate::program::{Arch, Program, Section};
+use crate::program::{Arch, FileOff, Program, Section, Va};
 use crate::text::quoted;
 
 /// Most regions one layout maps.
@@ -263,10 +263,11 @@ impl Layout {
                 let name = Some(format!("region{i}"))
                     .filter(|_| !self.regions.is_empty())
                     .unwrap_or_else(|| "raw".to_owned());
-                let s = Section::mapped(&name, r.va, r.off, r.len, r.writable, r.executable);
                 Section {
                     readable: r.readable,
-                    ..s
+                    writable: r.writable,
+                    executable: r.executable,
+                    ..Section::backed(name, Va(r.va), FileOff(r.off), r.len)
                 }
             })
             .collect();
