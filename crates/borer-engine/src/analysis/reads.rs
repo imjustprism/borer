@@ -72,12 +72,14 @@ pub enum Field {
     Class,
     /// [`Overlay::fields`], by the class's name.
     Fields,
+    /// The functions going by a name, by the name ([`note_name`]).
+    Name,
 }
 
 impl Field {
     /// Every field, in order; a field's place is its code in
     /// [`Reads::keys`].
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Names,
         Self::Comments,
         Self::Types,
@@ -87,6 +89,7 @@ impl Field {
         Self::Enums,
         Self::Class,
         Self::Fields,
+        Self::Name,
     ];
 
     /// The field's bit in a mask of fields, by its [`Field::code`].
@@ -106,6 +109,7 @@ impl Field {
             Self::Enums => 6,
             Self::Class => 7,
             Self::Fields => 8,
+            Self::Name => 9,
         }
     }
 }
@@ -624,6 +628,18 @@ pub(crate) fn note_class(class: &str) {
     note(Field::Class, class.fact());
 }
 
+/// Notes that the build running on this thread took the functions going
+/// by `name` from an index it took [`unnoted`]; a rename to or from `name`
+/// lets the build go ([`Edit::touches`]).
+///
+/// # Arguments
+///
+/// * `name` - The name as the build looked it up, the display name or as a
+///   text spells it.
+pub(crate) fn note_name(name: &str) {
+    note(Field::Name, name.fact());
+}
+
 /// Notes that the build running on this thread took, from an index it took
 /// [`unnoted`], the functions going by every display name `name` for which
 /// `name(` occurs in `body`.
@@ -795,9 +811,10 @@ pub struct Edit {
     /// Keys whose entries were added, removed or changed, and the classes
     /// a renamed address went by before and after.
     keys: FxHashSet<(Field, u64)>,
-    /// `name(` for each display name a renamed address went by before and
-    /// after, raw and as a text spells it, as a body that called it reads.
-    calls: Vec<String>,
+    /// Each display name a renamed address went by before and after, raw
+    /// and as a text spells it, by its length in bytes: a body calls one
+    /// where it occurs right before a `(`.
+    calls: BTreeMap<usize, FxHashSet<String>>,
 }
 
 impl Edit {
@@ -844,6 +861,10 @@ impl Edit {
     /// Tells whether the edit changed a fact `reads` names: a key read, any
     /// key of a field read whole, or a call a body read names.
     ///
+    /// Each check is one pass over what the result read, however many
+    /// names the edit changed: a key is looked up in the edit's keys, and a
+    /// body's text before each `(` in the names of each length renamed.
+    ///
     /// # Arguments
     ///
     /// * `reads` - What a result read.
@@ -851,10 +872,35 @@ impl Edit {
     pub fn touches(&self, reads: &Reads) -> bool {
         reads.whole & self.fields != 0
             || reads.any_key(&|k| self.keys.contains(k))
-            || reads
-                .texts
-                .iter()
-                .any(|body| self.calls.iter().any(|call| body.contains(call.as_str())))
+            || reads.texts.iter().any(|body| self.calls_in(body))
+    }
+
+    /// Tells whether `body` calls a name the edit renamed: the name occurs
+    /// right before a `(`, as part of a longer word too.
+    ///
+    /// # Arguments
+    ///
+    /// * `body` - A text a result looked names up in.
+    fn calls_in(&self, body: &str) -> bool {
+        !self.calls.is_empty()
+            && body.match_indices('(').any(|(open, _)| {
+                self.calls.iter().any(|(len, names)| {
+                    open.checked_sub(*len)
+                        .and_then(|at| body.get(at..open))
+                        .is_some_and(|w| names.contains(w))
+                })
+            })
+    }
+
+    /// Adds a name a renamed address went by: a read of its key
+    /// ([`note_name`]) and a body that calls it go.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The name, the display name or as a text spells it.
+    fn call(&mut self, name: String) {
+        self.keys.insert((Field::Name, name.fact()));
+        self.calls.entry(name.len()).or_default().insert(name);
     }
 
     /// Adds the keys of one field whose entries differ between `a` and `b`.
@@ -908,22 +954,22 @@ impl Edit {
             self.keys.insert((Field::Class, class.fact()));
         }
         let Some(n) = declared else {
-            self.calls.push(format!("sub_{at:x}("));
+            self.call(format!("sub_{at:x}"));
             return;
         };
         let spelled = super::decompile::expr_render::bare(n);
         if spelled != n.as_str() {
-            self.calls.push(format!("{spelled}("));
+            self.call(spelled.into_owned());
         }
-        self.calls.push(format!("{n}("));
+        self.call(n.clone());
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        Edit, FactKey, Field, Handle, SHARED_KEYS_MIN, absorb, note_body, note_class, recording,
-        unnoted,
+        Edit, FactKey, Field, Handle, SHARED_KEYS_MIN, absorb, note_body, note_class, note_name,
+        recording, unnoted,
     };
     use crate::analysis::{Analysis, Overlay};
     use std::sync::Arc;
@@ -1013,5 +1059,51 @@ mod tests {
         away.names.insert(0x18, "between".to_owned());
         let edit = Edit::between(&Analysis::default(), &o, &away).expect("same tables");
         assert!(!edit.touches(&outer));
+    }
+
+    /// A rename of many functions checks a result that looked up many names
+    /// and a long body in one pass over each, not once per name renamed.
+    ///
+    /// 100,000 renames against 100,000 names looked up and a body of
+    /// 100,000 calls: a scan of the body per renamed name runs about 10^11
+    /// byte comparisons a check, minutes; a lookup per name and per `(`,
+    /// milliseconds. A name renamed, and a call to it in a body, still let
+    /// the result go.
+    ///
+    /// # Panics
+    ///
+    /// When the checks take ten seconds or more, or miss a renamed name.
+    #[test]
+    fn a_wide_rename_checks_each_result_in_one_pass() {
+        const NAMES: u64 = 100_000;
+        let before = Overlay::default();
+        let mut after = before.clone();
+        for k in 0..NAMES {
+            after.names.insert(k * 0x10, format!("renamed_{k}"));
+        }
+        let edit = Edit::between(&Analysis::default(), &before, &after).expect("same tables");
+        let body: Arc<str> = Arc::from(
+            (0..NAMES)
+                .map(|k| format!("looked_{k}("))
+                .collect::<String>(),
+        );
+        let ((), read) = recording(|| {
+            (0..NAMES).for_each(|k| note_name(&format!("looked_{k}")));
+            note_body(&body);
+        });
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test bounds the time a wide rename takes"
+        )]
+        let started = std::time::Instant::now();
+        assert!(!edit.touches(&read));
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_secs(10), "took {took:?}");
+        for hit in ["renamed_7", "sub_70"] {
+            let ((), named) = recording(|| note_name(hit));
+            let call: Arc<str> = Arc::from(format!("x = {hit}(1);"));
+            let ((), called) = recording(|| note_body(&call));
+            assert!(edit.touches(&named) && edit.touches(&called), "{hit}");
+        }
     }
 }

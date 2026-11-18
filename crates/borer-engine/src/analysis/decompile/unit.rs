@@ -124,10 +124,11 @@ pub(super) struct Index {
 /// choice points ([`Overlay::names_key`]): the texts a repair search builds
 /// under other passes and choices share it, where each of them built the
 /// whole index again. Building it reads every function's name, so it is
-/// taken unnoted and a caller notes the names it looks up as calls
-/// ([`note_calls`]), which a rename to or from that name touches
-/// ([`crate::analysis::reads::Edit::touches`]); noted as built, every
-/// decompile read every name and any rename let go of every text.
+/// taken unnoted and a caller notes each name it looks up
+/// ([`crate::analysis::reads::note_name`]), which a rename to or from that
+/// name touches ([`crate::analysis::reads::Edit::touches`]); noted as
+/// built, every decompile read every name and any rename let go of every
+/// text.
 ///
 /// # Arguments
 ///
@@ -174,22 +175,9 @@ pub(super) fn index(program: &Program, analysis: &Analysis, overlay: &Overlay) -
     })
 }
 
-/// Notes that the build running on this thread looked `names` up in the
-/// [`Index`], each as a call to it ([`crate::analysis::reads::note_body`]).
-///
-/// # Arguments
-///
-/// * `names` - The names as the text spells them.
-fn note_calls<'n>(names: impl IntoIterator<Item = &'n str>) {
-    let calls: String = names.into_iter().map(|n| format!("{n}(")).collect();
-    if !calls.is_empty() {
-        crate::analysis::reads::note_body(&Arc::from(calls));
-    }
-}
-
 /// Returns the names a unit looks up in the [`Index`] to declare them: the
-/// words of `text` and the entries of its function tables, noted as
-/// looked up ([`note_calls`]).
+/// words of `text` and the entries of its function tables, each noted as
+/// looked up ([`crate::analysis::reads::note_name`]).
 ///
 /// # Arguments
 ///
@@ -198,7 +186,9 @@ fn note_calls<'n>(names: impl IntoIterator<Item = &'n str>) {
 fn looked(text: &str, tables: &[Table]) -> Vec<String> {
     let mut names = words(text);
     names.extend(tables.iter().flat_map(|t| t.entries.iter().cloned()));
-    note_calls(names.iter().map(String::as_str));
+    names
+        .iter()
+        .for_each(|n| crate::analysis::reads::note_name(n));
     names
 }
 
@@ -223,7 +213,7 @@ pub(super) fn function_named(
     name: &str,
 ) -> Option<u64> {
     let ix = index(program, analysis, overlay);
-    note_calls([name]);
+    crate::analysis::reads::note_name(name);
     if ix.shared.contains(name) {
         return None;
     }
