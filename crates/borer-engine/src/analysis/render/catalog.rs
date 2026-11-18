@@ -751,10 +751,6 @@ pub(super) struct SourceFile {
 /// the functions, files and directory of each row; with one the functions,
 /// the lowest entry among them and the file.
 pub fn source_tree_tsv(p: &Program, a: &Analysis, filter: &str) -> String {
-    /// File extensions a cited source path ends with.
-    const EXTENSIONS: [&str; 10] = [
-        ".h", ".hpp", ".hh", ".hxx", ".inl", ".c", ".cc", ".cpp", ".cxx", ".inc",
-    ];
     let want = filter.to_lowercase();
     let mut files: BTreeMap<String, BTreeSet<u64>> = BTreeMap::new();
     for (target, lit) in literal_targets(p, a).iter() {
@@ -762,7 +758,7 @@ pub fn source_tree_tsv(p: &Program, a: &Analysis, filter: &str) -> String {
         let Some(path) = lit.strip_prefix('"').and_then(|t| t.strip_suffix('"')) else {
             continue;
         };
-        if path.contains(' ') || !EXTENSIONS.iter().any(|e| path.ends_with(e)) {
+        if !crate::analysis::decompile::is_source_path(path) {
             continue;
         }
         let entries: BTreeSet<u64> = sites.iter().filter_map(|s| s.from_entry).collect();

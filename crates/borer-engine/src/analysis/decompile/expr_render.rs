@@ -2334,9 +2334,6 @@ pub(super) fn vector_equality<'a>(l: &'a Expr, r: &Expr) -> Option<(&'a Expr, &'
 /// * `quoted` - The literal as rendered, quotes and escapes included.
 /// * `own_name` - The bare name of the function being rendered.
 pub(super) fn compact_literal(quoted: &str, own_name: &str) -> String {
-    const EXTENSIONS: [&str; 10] = [
-        ".h", ".hpp", ".hh", ".hxx", ".inl", ".c", ".cc", ".cpp", ".cxx", ".inc",
-    ];
     let Some(inner) = quoted.strip_prefix('"').and_then(|q| q.strip_suffix('"')) else {
         return quoted.to_owned();
     };
@@ -2347,9 +2344,7 @@ pub(super) fn compact_literal(quoted: &str, own_name: &str) -> String {
             format!("__FUNCSIG__({})", sig.name)
         };
     }
-    let path_like = !inner.contains(' ')
-        && inner.contains(['/', '\\'])
-        && EXTENSIONS.iter().any(|e| inner.ends_with(e));
+    let path_like = inner.contains(['/', '\\']) && super::is_source_path(inner);
     if path_like {
         let parts: Vec<&str> = inner.split(['/', '\\']).filter(|p| !p.is_empty()).collect();
         if parts.len() > 2 {

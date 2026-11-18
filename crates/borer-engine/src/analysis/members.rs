@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use super::classes::{FieldUse, parse_number};
+use super::decompile::is_source_path;
 use super::{Analysis, naming, single};
 use crate::program::Program;
 
@@ -143,22 +144,6 @@ const ASSERT_CALL_SPAN: u64 = 48;
 
 /// Longest signature literal read when telling an assert call apart.
 const SIGNATURE_CAP: usize = 1024;
-
-/// Tells whether a literal names a C or C++ source file: no space, a known
-/// extension.
-///
-/// # Arguments
-///
-/// * `text` - The literal's text, unquoted.
-pub(crate) fn is_source_path(text: &str) -> bool {
-    const EXTENSIONS: [&str; 10] = [
-        ".h", ".hpp", ".hh", ".hxx", ".inl", ".c", ".cc", ".cpp", ".cxx", ".inc",
-    ];
-    !text.contains(' ')
-        && EXTENSIONS
-            .iter()
-            .any(|e| text.len() > e.len() && text.ends_with(e))
-}
 
 /// Returns the conditions a function passes to an assert reporter, read
 /// from its bytes.

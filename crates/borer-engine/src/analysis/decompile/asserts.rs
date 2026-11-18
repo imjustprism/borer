@@ -133,18 +133,29 @@ pub(super) fn call_starts(line: &str) -> Vec<usize> {
     out
 }
 
-/// Tells whether an argument is a literal naming a C or C++ source file.
+/// Tells whether an argument is a literal naming a C or C++ source file
+/// ([`is_source_path`]).
 ///
 /// # Arguments
 ///
 /// * `arg` - The argument as rendered, quotes included.
 pub(super) fn source_path(arg: &str) -> bool {
+    arg.strip_prefix('"')
+        .and_then(|a| a.strip_suffix('"'))
+        .is_some_and(is_source_path)
+}
+
+/// Tells whether a literal's text names a C or C++ source file, as an
+/// assert cites one: no space, a C or C++ file extension.
+///
+/// # Arguments
+///
+/// * `text` - The literal's text, unquoted.
+pub(crate) fn is_source_path(text: &str) -> bool {
     const EXTENSIONS: [&str; 10] = [
         ".h", ".hpp", ".hh", ".hxx", ".inl", ".c", ".cc", ".cpp", ".cxx", ".inc",
     ];
-    arg.strip_prefix('"')
-        .and_then(|a| a.strip_suffix('"'))
-        .is_some_and(|a| !a.contains(' ') && EXTENSIONS.iter().any(|e| a.ends_with(e)))
+    !text.contains(' ') && EXTENSIONS.iter().any(|e| text.ends_with(e))
 }
 
 /// Most variables the asserts name in one function.
@@ -546,7 +557,25 @@ fn without_literals(line: &str) -> String {
 
 #[cfg(test)]
 mod naming_tests {
-    use super::{Rename, assert_names, guarded_variable, subject_of};
+    use super::{Rename, assert_names, guarded_variable, is_source_path, subject_of};
+
+    /// A cited source file has a C or C++ extension and no space, quoted
+    /// or not.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn a_source_path_has_an_extension_and_no_space() {
+        for path in ["src/a.cpp", "a.h", "x\\y.inl", ".h"] {
+            assert!(is_source_path(path), "{path}");
+        }
+        for text in ["a message.c", "a.cpp.bak", "!m_stop", ""] {
+            assert!(!is_source_path(text), "{text}");
+        }
+        assert!(super::source_path("\"src/a.cc\""));
+        assert!(!super::source_path("src/a.cc"));
+    }
 
     /// The subject is the one identifier the condition uses as a value;
     /// members, scopes, keywords, constants and free calls are not it.
