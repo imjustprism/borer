@@ -1776,7 +1776,7 @@ impl Program {
     /// file bytes, which are missing rather than zero), or `None` when no
     /// section declares `va` or the file holds a byte there.
     #[must_use]
-    pub fn unbacked_at(&self, va: u64) -> Option<String> {
+    pub(crate) fn unbacked_at(&self, va: u64) -> Option<String> {
         let s = self.declared_at(va)?;
         if self.read_va_upto(va, 1).is_some() {
             return None;
@@ -1807,7 +1807,7 @@ impl Program {
     ///
     /// # Returns
     ///
-    /// The section's clause ([`Program::unbacked_at`]) when one declares
+    /// The section and why the file holds no bytes there when one declares
     /// `va`; otherwise that `va` is not mapped, with the sections and how
     /// to read the bytes no section maps.
     #[must_use]

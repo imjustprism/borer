@@ -2311,7 +2311,7 @@ pub fn function_entry(program: &Program, analysis: &Analysis, va: u64) -> Result
 /// Says that no discovered function contains `va`, and what to try.
 ///
 /// An address in a section the file holds no bytes for names that
-/// section ([`Program::unbacked_at`]). One no section declares names the
+/// section and why it holds none there. One no section declares names the
 /// image's span, says whether it lies between sections or outside them
 /// and, when the image base plus it is mapped, that address, since an RVA
 /// passed for a virtual address is the usual slip; one inside names the
