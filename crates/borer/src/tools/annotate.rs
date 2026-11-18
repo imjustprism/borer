@@ -4,20 +4,19 @@
 use borer_engine::analysis::edit::{self, Edit, Force, Plan};
 use borer_engine::analysis::protos::Proto;
 use borer_engine::analysis::utypes::parse_type;
-use borer_engine::analysis::{Analysis, Overlay, render, stated};
+use borer_engine::analysis::{Analysis, Overlay, stated};
 use borer_engine::program::Feature;
+use borer_front::tools::HeldExt;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ErrorData, tool, tool_router};
 
 use crate::BorerServer;
 use crate::errors::err_params;
 use crate::params::{
-    Annotation, AnnotationsParams, Filter, Page, SetCommentParams, SetNameParams, SetTypeParams,
-    TypesParams, field_var, must_be_a_name, must_be_in_a_section, must_fit_a_row, stated_fields,
-    stated_values,
+    Annotation, SetCommentParams, SetNameParams, SetTypeParams, field_var, must_be_a_name,
+    must_be_in_a_section, must_fit_a_row, stated_fields, stated_values,
 };
 use crate::safety::{Effect, effects};
-use crate::state::read_lock;
 
 impl BorerServer {
     /// Defines the types C declarations state, laid out by the loaded
@@ -339,117 +338,6 @@ impl BorerServer {
                 .map(|plan| answered(&plan, dry))
                 .map_err(|e| e.to_string())
         })
-    }
-
-    /// Lists the user types and where they are applied.
-    ///
-    /// # Arguments
-    ///
-    /// * `TypesParams` - Destructured tool parameters (see its field docs).
-    ///
-    /// # Errors
-    ///
-    /// When `limit` is zero.
-    #[tool(
-        description = "List user-defined types and where each is applied, paged. Not for defining one (use set_type) or names and comments (use annotations).",
-        annotations(
-            read_only_hint = true,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    pub(crate) fn types(
-        &self,
-        Parameters(TypesParams {
-            filter,
-            offset,
-            limit,
-            count_only,
-        }): Parameters<TypesParams>,
-    ) -> Result<String, ErrorData> {
-        let page = Page::new(
-            offset,
-            limit,
-            count_only,
-            50,
-            borer_engine::analysis::utypes::TYPES_ROWS_MAX,
-        )?;
-        let o = read_lock(&self.overlay);
-        let rows = stated::rows(&o);
-        let (_, total, table) = borer_engine::analysis::utypes::list_tsv(
-            &o.types,
-            &o.applied,
-            &rows,
-            filter.as_deref(),
-            page.offset,
-            page.limit.n,
-        );
-        let (types, applied) = (o.types.len(), o.applied.len());
-        drop(o);
-        if page.count_only {
-            return Ok(format!(
-                "# {total} rows ({types} type(s), {applied} applied)\n"
-            ));
-        }
-        Ok(page.limit.noted(table))
-    }
-
-    /// Lists the overlay's entries: names, then the fields stated of
-    /// classes, then findings, then open questions, a page at a time.
-    ///
-    /// A comment opening with a question mark is a hypothesis, not a
-    /// finding. Separating the two is what makes the overlay a ledger an
-    /// agent can return to: a conclusion it proved is worth building on,
-    /// and one it guessed at is worth checking before it does. The ledger
-    /// grows with the session, so it pages like every list: the header
-    /// says `showing N of M` of the rows the filter keeps, and only the
-    /// page asked for is held while the rows are counted.
-    ///
-    /// # Arguments
-    ///
-    /// * `AnnotationsParams` - Destructured tool parameters (see its field docs).
-    ///
-    /// # Errors
-    ///
-    /// When `limit` is zero.
-    #[tool(
-        description = "List the names, findings and open questions (comments opening with ?) added this session, paged. Use it to resume work; not for binary symbols (use symbols) or user types (use types).",
-        annotations(
-            read_only_hint = true,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    pub(crate) fn annotations(
-        &self,
-        Parameters(AnnotationsParams {
-            filter,
-            offset,
-            limit,
-            count_only,
-        }): Parameters<AnnotationsParams>,
-    ) -> Result<String, ErrorData> {
-        let page = Page::new(
-            offset,
-            limit,
-            count_only,
-            render::LEDGER_ROWS_DEFAULT,
-            render::LEDGER_ROWS_MAX,
-        )?;
-        let out = render::annotations_tsv(
-            &read_lock(&self.overlay),
-            &Filter::new(filter.as_deref()),
-            page.offset,
-            page.limit.n,
-            page.count_only,
-        );
-        if page.count_only {
-            return Ok(out);
-        }
-
-        Ok(page.limit.noted(out))
     }
 }
 

@@ -12,46 +12,13 @@ use rmcp::{ErrorData, tool, tool_router};
 use crate::BorerServer;
 use crate::paging;
 use crate::params::{
-    Annotation, QueryParams, ScriptParams, must_be_a_name, must_be_in_a_section, must_fit_a_row,
+    Annotation, ScriptParams, must_be_a_name, must_be_in_a_section, must_fit_a_row,
 };
 use crate::safety::{Effect, effects};
 use crate::state::tabled;
 
 #[tool_router(router = query_tools, vis = "pub(crate)")]
 impl BorerServer {
-    /// Reads a `borer://` resource by URI, for an agent whose host has no
-    /// way to read MCP resources: without it the resources (scenarios,
-    /// grep, taint, emulate and the rest) are out of its reach.
-    ///
-    /// The answer is [`BorerServer::read_uri`]'s, which `resources/read`
-    /// sends too: the same text, the same errors, and one answer memory, so
-    /// a URI read one way is remembered for the other.
-    ///
-    /// # Arguments
-    ///
-    /// * `QueryParams` - Destructured tool parameters (see its field docs).
-    ///
-    /// # Errors
-    ///
-    /// As `resources/read`: resource-not-found for an unknown URI, naming
-    /// the resources nearest it; otherwise the resource's own error.
-    #[tool(
-        description = "Read a borer:// resource (triage, taint, emulate, solve, grep...) for hosts without MCP resources; same answer as resources/read. Use it for analyses no tool has; borer://help lists them, !offset=N!limit=N pages.",
-        meta = effects(&[Effect::ReadsFiles]),
-        annotations(
-            read_only_hint = true,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    pub(crate) fn query(
-        &self,
-        Parameters(QueryParams { uri }): Parameters<QueryParams>,
-    ) -> Result<String, ErrorData> {
-        self.read_uri(&uri).map(|(_, text)| text)
-    }
-
     /// Runs an agent's Rhai script against the loaded program in borer's
     /// sandbox, answering its `query` calls from the resources.
     ///

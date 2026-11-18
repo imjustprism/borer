@@ -7,11 +7,12 @@ use borer_engine::analysis::parse_addr;
 use borer_engine::live::{self as live, Memory as _, Rebase, Snapshot};
 use borer_engine::program::{Feature, Program};
 use borer_engine::{memory, num};
+use borer_front::tools::HeldExt;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ErrorData, tool, tool_router};
 
 use crate::BorerServer;
-use crate::errors::err_params;
+use crate::errors::{err_params, failed};
 use crate::params::{
     Annotation, Filter, LiveAttachParams, LiveInstancesParams, LiveModulesParams, LiveObjectParams,
     LiveReadParams, LiveWatchParams, Page, count_param, must_fit_a_row,
@@ -541,7 +542,7 @@ impl BorerServer {
             count_only,
         }): Parameters<LiveModulesParams>,
     ) -> Result<String, ErrorData> {
-        let page = Page::new(offset, limit, count_only, 50, 500)?;
+        let page = Page::new(offset, limit, count_only, 50, 500).map_err(failed)?;
         let filter = Filter::new(filter.as_deref());
         self.with_live(|s| {
             let image = s.rebase.as_ref().ok().map(|r| r.live_base);
@@ -591,7 +592,7 @@ impl BorerServer {
     ) -> Result<String, ErrorData> {
         let kind_text = kind.unwrap_or_default();
         let kind: memory::Kind = kind_text.into();
-        let count = count_param(count, 1, 256, "count")?;
+        let count = count_param(count, 1, 256, "count").map_err(failed)?;
         let n = count.n;
         let program = self.loaded();
         let overlay = self.overlay();
@@ -705,7 +706,7 @@ impl BorerServer {
             count_only,
         }): Parameters<LiveInstancesParams>,
     ) -> Result<String, ErrorData> {
-        let page = Page::new(offset, limit, count_only, 64, 512)?;
+        let page = Page::new(offset, limit, count_only, 64, 512).map_err(failed)?;
         let collect = if page.count_only {
             live::COUNT_MAX
         } else {
@@ -764,7 +765,8 @@ impl BorerServer {
         must_fit_a_row(&name, Annotation::Name)?;
         let length = length
             .map(|n| count_param(Some(n), 1, live::READ_MAX, "length"))
-            .transpose()?;
+            .transpose()
+            .map_err(failed)?;
         let program = self.loaded();
         let overlay = self.overlay();
         self.with_live(|s| {

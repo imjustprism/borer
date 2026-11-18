@@ -1,5 +1,6 @@
 //! The JSON-RPC errors a tool or a resource answers with.
 
+use borer_front::tools::{Cause, Failure};
 use rmcp::ErrorData;
 use rmcp::model::{CallToolResponse, CallToolResult, ContentBlock, ErrorCode};
 
@@ -19,6 +20,21 @@ pub(crate) fn err_params(msg: impl std::fmt::Display) -> ErrorData {
 /// * `msg` - The message shown to the agent.
 pub(crate) fn err_internal(msg: impl std::fmt::Display) -> ErrorData {
     ErrorData::new(ErrorCode::INTERNAL_ERROR, msg.to_string(), None)
+}
+
+/// Returns the JSON-RPC error a catalog tool's failure answers with:
+/// invalid params for a refused request, internal error for a fault,
+/// resource-not-found for a URI no resource answers.
+///
+/// # Arguments
+///
+/// * `failure` - What the tool failed with.
+pub(crate) fn failed(failure: Failure) -> ErrorData {
+    match failure.cause {
+        Cause::Asked => err_params(failure.message),
+        Cause::Engine => err_internal(failure.message),
+        Cause::Missing => err_not_found(failure.message),
+    }
 }
 
 /// Builds a "resource not found" JSON-RPC error.

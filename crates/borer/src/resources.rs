@@ -17,11 +17,12 @@ use borer_engine::analysis::{Analysis, Overlay, render};
 use borer_engine::answer::Need;
 use borer_engine::program::{Feature, Program};
 use borer_engine::strings::walk::{Needle, StringRow, row_matches};
+use borer_front::tools::{Held, HeldExt};
 use rmcp::ErrorData;
 
 use crate::BorerServer;
 use crate::catalog::{RESOURCE_TEMPLATES, RESOURCES, resource_name};
-use crate::errors::{err_internal, err_not_found, err_params};
+use crate::errors::{err_internal, err_not_found, err_params, failed};
 use crate::paging::Asked;
 use crate::session;
 use crate::state::{lock, read_lock};
@@ -274,9 +275,10 @@ impl BorerServer {
         /// Most rows one read returns.
         const PAGE: usize = 200;
         let again = asked.again();
-        self.with_managed(|p, a| {
+        HeldExt::with_managed(self, |p, a| {
             borer_engine::analysis::stats::stats_tsv(p, a, spec, asked.page(&again).window(PAGE))
         })
+        .map_err(failed)
     }
 
     /// Compares the loaded binary against another version and reports the diff.

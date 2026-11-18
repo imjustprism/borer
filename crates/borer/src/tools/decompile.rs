@@ -11,7 +11,8 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ErrorData, tool, tool_router};
 
 use crate::BorerServer;
-use crate::params::{DecompileBatchParams, DecompileParams, count_param};
+use crate::errors::failed;
+use crate::params::{DecompileBatchParams, count_param};
 use crate::safety::{Effect, effects};
 
 #[cfg(test)]
@@ -56,70 +57,6 @@ pub(crate) fn truncated(text: &str, cap: usize, entry: u64, header: usize) -> St
 
 #[tool_router(router = decompile_tools, vis = "pub(crate)")]
 impl BorerServer {
-    /// Returns the pseudo-C of one function.
-    ///
-    /// `detail` is an enum: anything but `skeleton` used to fall through to
-    /// the whole function, so a caller who misspelled it read a complete
-    /// decompilation believing it was the outline and was never told
-    /// otherwise. Every other choice of words in these tools refuses one it
-    /// does not know.
-    ///
-    /// The answer is the engine's ([`borer_engine::analysis::decompile::answer()`]),
-    /// paged ([`window`]). Its second line says what of it was checked
-    /// against the binary ([`borer_engine::analysis::decompile::checked_header`]).
-    /// The index stores another form of it
-    /// ([`borer_engine::analysis::decompile::shown`]), made without the
-    /// repair search and under the empty overlay: none of the session's
-    /// names, comments, types, prototypes or fields, and no name tables. Its
-    /// lines can differ from these: each comment is a line of its own, so
-    /// the lines after one are numbered otherwise there; a function the
-    /// check flags has no note and no repaired rendering there; and what the
-    /// session named or typed, or a constant a name table spells, reads as
-    /// the binary alone gives it.
-    ///
-    /// # Arguments
-    ///
-    /// * `DecompileParams` - Destructured tool parameters (see its field docs).
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, the address is not inside a discovered function,
-    /// or the decompiler produces nothing.
-    #[tool(
-        description = "Decompile one function to pseudo-C. Locals are local_N/arg_N (local_N: N hex bytes below frame base, x86 entry sp-word (rbp-N after push rbp; mov rbp,rsp), arm entry sp; higher N, lower address; local_mN: N bytes above); /* asm */: unmodeled code. Header: what was checked (proved vs lift: equal to lift, 1 emulator sample), `// warn:` what is wrong. Use function_summary first.",
-        annotations(
-            read_only_hint = true,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    pub(crate) fn decompile(
-        &self,
-        Parameters(DecompileParams {
-            address,
-            detail,
-            filter,
-            offset,
-            limit,
-        }): Parameters<DecompileParams>,
-    ) -> Result<String, ErrorData> {
-        use borer_engine::analysis::decompile;
-        if limit == Some(0) {
-            return Err(crate::errors::err_params(LIMIT_ZERO));
-        }
-        self.with_program(|p| {
-            if let Some(why) = p.refuses(Feature::Decompile) {
-                return Err(why);
-            }
-            let (a, entry) = self.decompile_entry(p, self.ensure_analysis()?, &address)?;
-            let detail = detail.unwrap_or_default().into();
-            let text = decompile::answer(p, &a, &self.overlay(), entry, detail)
-                .ok_or_else(|| format!("decompilation failed at {entry:#x}"))?;
-            Ok(window(&text, filter.as_deref(), offset, limit))
-        })
-    }
-
     /// Returns the pseudo-C of several functions, decompiled in parallel and
     /// emitted in discovery order.
     ///
@@ -168,7 +105,7 @@ impl BorerServer {
         const PER_FN: usize = 6_000;
         /// Longest total output.
         const TOTAL: usize = 40_000;
-        let cap = count_param(max_functions, 10, 50, "max_functions")?;
+        let cap = count_param(max_functions, 10, 50, "max_functions").map_err(failed)?;
         let max = cap.n;
         self.with_program(|p| {
             if let Some(why) = p.refuses(Feature::Decompile) {

@@ -1,21 +1,20 @@
 //! The server's state: what is loaded, its analysis and names, the locks
 //! around them, and how a server starts or resumes.
 
-use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use borer_engine::analysis::edit::{self, Edit, Force, Plan};
 use borer_engine::analysis::{Analysis, EnumSource, Overlay};
-use borer_engine::clr::managed;
 use borer_engine::pack::{Pack, Packs};
 use borer_engine::program::{Feature, Program};
+use borer_front::tools::{Body, Cause, Failure, Held, HeldExt};
 use rmcp::ErrorData;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::InitializeRequestParams;
 
 use crate::BorerServer;
-use crate::errors::{err_internal, err_params};
+use crate::errors::{err_params, failed};
 use crate::handover::Resume;
 use crate::params::{LoadBinaryParams, RawArch};
 
@@ -34,8 +33,7 @@ pub(crate) struct RawLoad {
     pub(crate) regions: Option<String>,
 }
 
-/// The refusal every tool answers before `load_binary`.
-pub(crate) const NO_BINARY: &str = "no binary loaded; call load_binary first";
+pub(crate) use borer_front::tools::{NO_BINARY, fault_text};
 
 /// Returns `o` as tools read it: constants rendered by the binary's own
 /// name tables ([`EnumSource::Binary`]).
@@ -84,26 +82,8 @@ pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The message a caught panic carries, for an answer that says a tool
-/// faulted.
-///
-/// # Arguments
-///
-/// * `e` - The panic's payload, as `catch_unwind` hands it back.
-///
-/// # Returns
-///
-/// The payload's text, or `no message` when it is neither `&str` nor
-/// `String`.
-pub(crate) fn fault_text(e: &(dyn std::any::Any + Send)) -> String {
-    e.downcast_ref::<&str>()
-        .map(|s| (*s).to_owned())
-        .or_else(|| e.downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "no message".to_owned())
-}
-
 /// Runs `f` behind the fault boundary of a tool body
-/// ([`BorerServer::with_program`]).
+/// ([`borer_front::tools::guarded`]).
 ///
 /// # Arguments
 ///
@@ -113,13 +93,7 @@ pub(crate) fn fault_text(e: &(dyn std::any::Any + Send)) -> String {
 ///
 /// Invalid params when `f` refuses; internal error only when `f` faults.
 pub(crate) fn guarded<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, ErrorData> {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
-        Ok(answer) => answer.map_err(err_params),
-        Err(e) => Err(err_internal(format!(
-            "the analysis faulted on this binary: {}. The session is still up; another tool or another address may still answer.",
-            fault_text(e.as_ref())
-        ))),
-    }
+    borer_front::tools::guarded(f).map_err(failed)
 }
 
 /// Says that `program`, read outside its lock, was put out of place by a
@@ -194,46 +168,48 @@ impl BorerServer {
         read_lock(&self.program).clone()
     }
 
-    /// The loaded program, for a tool that needs it outside a tool body.
+    /// Returns the derived analysis of the current program, computing and
+    /// caching it on first use.
+    ///
+    /// A caller outside a tool body holds no lock on the program while the
+    /// analysis is computed, so a `load_binary` may finish meanwhile: the
+    /// analysis is kept only when the program it was computed for is still
+    /// the one loaded, checked under the program's lock, which
+    /// `load_binary` takes to replace the program and drop its analysis.
+    /// When another request stored an analysis of the same program first,
+    /// that one is kept and returned, so a function it recovered
+    /// ([`Held::decompile_entry`]) is not dropped. The analysis is computed
+    /// under a cancel flag of its own that nothing raises: it is kept for
+    /// every later request, so the deadline of the request that happened
+    /// to compute it must not cut it short.
     ///
     /// # Errors
     ///
-    /// Invalid params when no binary is loaded.
-    pub(crate) fn require_loaded(&self) -> Result<Arc<Program>, ErrorData> {
-        self.loaded().ok_or_else(|| err_params(NO_BINARY))
-    }
-
-    /// Runs `f` against the loaded program.
-    ///
-    /// A fault in an analysis pass would unwind out of the handler and take
-    /// the session with it: the call gets no reply at all, the agent cannot
-    /// tell a crash from a hang, and everything learned so far in the
-    /// session is gone with the process. Every tool body reaching a program
-    /// comes through here, so one boundary turns a fault into an answer the
-    /// caller can read and act on. The panic hook is left alone on purpose:
-    /// unlike a damaged file, which is the job and expected, a fault here is
-    /// a bug and worth a backtrace in the log.
-    ///
-    /// # Arguments
-    ///
-    /// * `f` - The tool body; its `Err` text becomes an invalid-params error,
-    ///   since a body refuses only what it was asked (an address that names
-    ///   nothing, a function that is not there) and does no I/O that could
-    ///   fail on its own.
-    ///
-    /// # Errors
-    ///
-    /// Invalid params when no binary is loaded or `f` refuses the request;
-    /// internal error only when `f` faults.
-    pub(crate) fn with_program(
-        &self,
-        f: impl FnOnce(&Program) -> Result<String, String>,
-    ) -> Result<String, ErrorData> {
-        let guard = read_lock(&self.program);
-        let Some(p) = guard.as_ref() else {
-            return Err(err_params(NO_BINARY));
-        };
-        guarded(|| f(p))
+    /// When no binary is loaded or its architecture has no code analysis.
+    pub(crate) fn ensure_analysis(&self) -> Result<Arc<Analysis>, String> {
+        if let Some(a) = read_lock(&self.analysis).clone() {
+            return Ok(a);
+        }
+        let program = self.loaded().ok_or(NO_BINARY)?;
+        if let Some(why) = program.refuses(Feature::Discover) {
+            return Err(why);
+        }
+        let packs = Arc::clone(&read_lock(&self.program_packs));
+        let a = Arc::new(
+            borer_engine::cancel::Cancel::new().within(|| Analysis::compute_with(&program, packs)),
+        );
+        let loaded = read_lock(&self.program);
+        if loaded
+            .as_ref()
+            .is_some_and(|now| Arc::ptr_eq(now, &program))
+        {
+            let mut slot = write_lock(&self.analysis);
+            if let Some(kept) = slot.as_ref() {
+                return Ok(Arc::clone(kept));
+            }
+            *slot = Some(a.clone());
+        }
+        Ok(a)
     }
 
     /// The derived analysis, or an empty one when the architecture has none.
@@ -256,6 +232,47 @@ impl BorerServer {
     pub(crate) fn analysis_or_empty(&self) -> Arc<Analysis> {
         self.ensure_analysis()
             .unwrap_or_else(|_| self.empty_analysis())
+    }
+
+    /// Returns a snapshot of the annotation overlay, rendering constants by
+    /// the binary's name tables.
+    ///
+    /// Every tool takes the same snapshot, so an answer never depends on
+    /// which calls came before it. A decompilation reads only the tables of
+    /// the functions it calls, each computed once ([`EnumSource::Binary`]),
+    /// so no call waits for the binary's every table.
+    pub(crate) fn overlay(&self) -> Overlay {
+        tabled(&read_lock(&self.overlay))
+    }
+
+    /// The loaded program, for a tool that needs it outside a tool body.
+    ///
+    /// # Errors
+    ///
+    /// Invalid params when no binary is loaded.
+    pub(crate) fn require_loaded(&self) -> Result<Arc<Program>, ErrorData> {
+        self.loaded().ok_or_else(|| err_params(NO_BINARY))
+    }
+
+    /// Runs `f` against the loaded program ([`Held::run`]), its failure as
+    /// the JSON-RPC error a server tool answers with.
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The tool body; its `Err` text becomes an invalid-params error,
+    ///   since a body refuses only what it was asked (an address that names
+    ///   nothing, a function that is not there) and does no I/O that could
+    ///   fail on its own.
+    ///
+    /// # Errors
+    ///
+    /// Invalid params when no binary is loaded or `f` refuses the request;
+    /// internal error only when `f` faults.
+    pub(crate) fn with_program(
+        &self,
+        f: impl FnOnce(&Program) -> Result<String, String>,
+    ) -> Result<String, ErrorData> {
+        self.run(Box::new(f)).map_err(failed)
     }
 
     /// Returns what a script runs over: the loaded program and its
@@ -332,50 +349,6 @@ impl BorerServer {
         })
     }
 
-    /// Returns the derived analysis of the current program, computing and
-    /// caching it on first use.
-    ///
-    /// A caller outside a tool body holds no lock on the program while the
-    /// analysis is computed, so a `load_binary` may finish meanwhile: the
-    /// analysis is kept only when the program it was computed for is still
-    /// the one loaded, checked under the program's lock, which
-    /// `load_binary` takes to replace the program and drop its analysis.
-    /// When another request stored an analysis of the same program first,
-    /// that one is kept and returned, so a function it recovered
-    /// ([`Self::decompile_entry`]) is not dropped. The analysis is computed
-    /// under a cancel flag of its own that nothing raises: it is kept for
-    /// every later request, so the deadline of the request that happened
-    /// to compute it must not cut it short.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded or its architecture has no code analysis.
-    pub(crate) fn ensure_analysis(&self) -> Result<Arc<Analysis>, String> {
-        if let Some(a) = read_lock(&self.analysis).clone() {
-            return Ok(a);
-        }
-        let program = self.loaded().ok_or(NO_BINARY)?;
-        if let Some(why) = program.refuses(Feature::Discover) {
-            return Err(why);
-        }
-        let packs = Arc::clone(&read_lock(&self.program_packs));
-        let a = Arc::new(
-            borer_engine::cancel::Cancel::new().within(|| Analysis::compute_with(&program, packs)),
-        );
-        let loaded = read_lock(&self.program);
-        if loaded
-            .as_ref()
-            .is_some_and(|now| Arc::ptr_eq(now, &program))
-        {
-            let mut slot = write_lock(&self.analysis);
-            if let Some(kept) = slot.as_ref() {
-                return Ok(Arc::clone(kept));
-            }
-            *slot = Some(a.clone());
-        }
-        Ok(a)
-    }
-
     /// Puts `program` in place of the loaded one, with the way it was
     /// loaded, and lets go of what belonged to the old one: its names and
     /// comments and its analysis, with the string walks its memo holds.
@@ -423,52 +396,6 @@ impl BorerServer {
         *write_lock(&self.analysis) = None;
         *write_lock(&self.no_code) = None;
         (loaded.replace(program), dropped)
-    }
-
-    /// Runs `f` against the loaded program, its analysis and a snapshot of
-    /// the overlay: the prologue of every tool that reads code.
-    ///
-    /// A tool names the stage it reads, so a program whose instruction set
-    /// has functions but no lifter yet answers the discovery tools and
-    /// refuses the rest with the sentence [`Program::refuses`] gives,
-    /// rather than an answer read as "nothing found".
-    ///
-    /// # Arguments
-    ///
-    /// * `feature` - The stage the tool reads: [`Feature::Discover`] for
-    ///   functions, blocks, references and calls, [`Feature::Decompile`]
-    ///   for anything read from lifted code, [`Feature::Emulate`] for
-    ///   anything that runs it.
-    /// * `f` - The tool body; its `Err` text becomes an internal error.
-    ///
-    /// # Errors
-    ///
-    /// Invalid params when no binary is loaded; internal error when the
-    /// engine does not do `feature` with the architecture or `f` fails or
-    /// faults.
-    pub(crate) fn with_analysis(
-        &self,
-        feature: Feature,
-        f: impl FnOnce(&Program, &Analysis, &Overlay) -> Result<String, String>,
-    ) -> Result<String, ErrorData> {
-        self.with_program(|p| {
-            if let Some(why) = p.refuses(feature) {
-                return Err(why);
-            }
-            let a = self.ensure_analysis()?;
-            f(p, &a, &self.overlay())
-        })
-    }
-
-    /// Returns a snapshot of the annotation overlay, rendering constants by
-    /// the binary's name tables.
-    ///
-    /// Every tool takes the same snapshot, so an answer never depends on
-    /// which calls came before it. A decompilation reads only the tables of
-    /// the functions it calls, each computed once ([`EnumSource::Binary`]),
-    /// so no call waits for the binary's every table.
-    pub(crate) fn overlay(&self) -> Overlay {
-        tabled(&read_lock(&self.overlay))
     }
 
     /// Returns the annotation overlay as the user left it, without the
@@ -607,208 +534,29 @@ impl BorerServer {
         })
     }
 
-    /// Resolves an address argument: `0x`-hex text, else a name looked up
-    /// through the analysis, symbols and overlay (agents name things), else
-    /// decimal or bare-hex text ([`resolve`]).
-    ///
-    /// A name comes before the number reading, so a function named `cafe`
-    /// or `1234` is reachable by its name; only `0x` text skips the lookup.
-    /// A program with no code analysis looks names up in its symbols and
-    /// the overlay alone.
+    /// Runs `f` against the loaded program, its analysis and a snapshot of
+    /// the overlay ([`HeldExt::with_analysis`]), its failure as the
+    /// JSON-RPC error a server tool answers with.
     ///
     /// # Arguments
     ///
-    /// * `p` - The loaded program.
-    /// * `text` - The argument as the agent passed it.
+    /// * `feature` - The stage the tool reads: [`Feature::Discover`] for
+    ///   functions, blocks, references and calls, [`Feature::Decompile`]
+    ///   for anything read from lifted code, [`Feature::Emulate`] for
+    ///   anything that runs it.
+    /// * `f` - The tool body; its `Err` text becomes an invalid-params error.
     ///
     /// # Errors
     ///
-    /// When the text is neither an address nor a known name, naming the
-    /// names nearest it ([`borer_engine::analysis::resolve_suggesting`]).
-    pub(crate) fn addr(&self, p: &Program, text: &str) -> Result<u64, String> {
-        borer_engine::answer::address(p, text, || (self.analysis_or_empty(), self.overlay()))
-    }
-
-    /// The .NET members an argument names, when it names managed code
-    /// ([`managed::named`]).
-    ///
-    /// # Arguments
-    ///
-    /// * `p` - The loaded program.
-    /// * `text` - The argument as the agent passed it.
-    pub(crate) fn managed_targets(&self, p: &Program, text: &str) -> Option<BTreeSet<u32>> {
-        p.clr()?;
-        managed::named(p, text, self.addr(p, text).ok())
-    }
-
-    /// The IL method an argument names ([`managed::il_method_named`]).
-    ///
-    /// # Arguments
-    ///
-    /// * `p` - The loaded program.
-    /// * `text` - The argument as the agent passed it.
-    pub(crate) fn il_method(&self, p: &Program, text: &str) -> Option<u32> {
-        p.clr()?;
-        managed::il_method_named(p, text, self.addr(p, text).ok())
-    }
-
-    /// Answers a request about managed code with the program and its
-    /// analysis, or an empty analysis when the machine has no native
-    /// discovery: .NET metadata and IL read the same on any machine.
-    ///
-    /// # Arguments
-    ///
-    /// * `f` - The answer.
-    ///
-    /// # Errors
-    ///
-    /// When no binary is loaded, or `f`'s error.
-    pub(crate) fn with_managed(
+    /// Invalid params when no binary is loaded, the engine does not do
+    /// `feature` with the architecture or `f` refuses; internal error when
+    /// `f` faults.
+    pub(crate) fn with_analysis(
         &self,
-        f: impl FnOnce(&Program, &Analysis) -> Result<String, String>,
+        feature: Feature,
+        f: impl FnOnce(&Program, &Analysis, &Overlay) -> Result<String, String>,
     ) -> Result<String, ErrorData> {
-        self.with_program(|p| f(p, &self.analysis_or_empty()))
-    }
-
-    /// Answers through [`Self::with_managed`] with what `pick` read off the
-    /// program loaded now, refusing when another binary was loaded between
-    /// the pick and the answer, so no token meets another file.
-    ///
-    /// # Arguments
-    ///
-    /// * `pick` - What the request names, `None` when it names no managed
-    ///   code.
-    /// * `f` - The answer for what was picked.
-    ///
-    /// # Returns
-    ///
-    /// The answer, `None` when nothing is loaded or `pick` found nothing.
-    fn managed_pick<T>(
-        &self,
-        pick: impl FnOnce(&Program) -> Option<T>,
-        f: impl FnOnce(&Program, &Analysis, T) -> Result<String, String>,
-    ) -> Option<Result<String, ErrorData>> {
-        let picked_from = self.loaded()?;
-        let picked = pick(&picked_from)?;
-        Some(self.with_managed(|p, a| {
-            if !std::ptr::eq(p, Arc::as_ptr(&picked_from)) {
-                return Err("another binary was loaded during the request; ask again".to_owned());
-            }
-            f(p, a, picked)
-        }))
-    }
-
-    /// Answers a request naming .NET members ([`Self::managed_targets`])
-    /// through [`Self::with_managed`].
-    ///
-    /// # Arguments
-    ///
-    /// * `text` - The argument as the agent passed it.
-    /// * `f` - The answer for the tokens it names.
-    ///
-    /// # Returns
-    ///
-    /// The answer, `None` when the argument names no managed code and the
-    /// caller answers it natively.
-    pub(crate) fn managed_answer(
-        &self,
-        text: &str,
-        f: impl FnOnce(&Program, &Analysis, &BTreeSet<u32>) -> Result<String, String>,
-    ) -> Option<Result<String, ErrorData>> {
-        self.managed_pick(
-            |p| self.managed_targets(p, text),
-            |p, a, targets| f(p, a, &targets),
-        )
-    }
-
-    /// Answers a request naming an IL method ([`Self::il_method`]) through
-    /// [`Self::with_managed`].
-    ///
-    /// # Arguments
-    ///
-    /// * `text` - The argument as the agent passed it.
-    /// * `f` - The answer for the method's token.
-    ///
-    /// # Returns
-    ///
-    /// The answer, `None` when the argument names no IL method and the
-    /// caller answers it natively.
-    pub(crate) fn il_answer(
-        &self,
-        text: &str,
-        f: impl FnOnce(&Program, &Analysis, u32) -> Result<String, String>,
-    ) -> Option<Result<String, ErrorData>> {
-        self.managed_pick(|p| self.il_method(p, text), f)
-    }
-
-    /// Resolves an argument to the function to decompile, starting one at an
-    /// ARM32 address no discovered function's blocks hold.
-    ///
-    /// The analysis is shared, so a recovered function goes into a copy of
-    /// it ([`borer_engine::analysis::entry_or_gap`]) that replaces the stored
-    /// one. Recoveries run one at a time under the analysis's write lock and
-    /// start from the analysis stored then, so one recovered by a request
-    /// that ran first is kept; the program cannot change meanwhile, as the
-    /// tool body holds its read lock. A request already holding the old
-    /// analysis keeps it. The code index `grep` reads is built from what
-    /// discovery found ([`crate::index::load_or_build`]), as the CLI's is, so
-    /// it does not hold a function recovered here.
-    ///
-    /// # Arguments
-    ///
-    /// * `p` - The loaded program.
-    /// * `a` - Its analysis.
-    /// * `text` - Address or name (see [`Self::addr`]).
-    ///
-    /// # Returns
-    ///
-    /// The analysis that holds the function, and the function's entry.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::function_entry`], when no function holds the address and
-    /// none starts there.
-    pub(crate) fn decompile_entry(
-        &self,
-        p: &Program,
-        a: Arc<Analysis>,
-        text: &str,
-    ) -> Result<(Arc<Analysis>, u64), String> {
-        let o = self.overlay();
-        let (None, entry) = borer_engine::answer::decompile_entry(p, &a, &o, text)? else {
-            let mut slot = write_lock(&self.analysis);
-            let base = slot.clone().unwrap_or_else(|| Arc::clone(&a));
-            let (grown, entry) = borer_engine::answer::decompile_entry(p, &base, &o, text)?;
-            let Some(grown) = grown else {
-                return Ok((base, entry));
-            };
-            let grown = Arc::new(grown);
-            *slot = Some(Arc::clone(&grown));
-            return Ok((grown, entry));
-        };
-        Ok((a, entry))
-    }
-
-    /// Resolves an argument to the entry of the discovered function containing it.
-    ///
-    /// # Arguments
-    ///
-    /// * `p` - The loaded program.
-    /// * `a` - Its analysis.
-    /// * `text` - Address or name (see [`Self::addr`]).
-    ///
-    /// # Errors
-    ///
-    /// When the text does not resolve or no function contains the address
-    /// ([`borer_engine::answer::entry_of`] says an import's slot is one).
-    pub(crate) fn function_entry(
-        &self,
-        p: &Program,
-        a: &Analysis,
-        text: &str,
-    ) -> Result<u64, String> {
-        let va = self.addr(p, text)?;
-        borer_engine::answer::entry_of(p, a, va, text)
+        HeldExt::with_analysis(self, feature, f).map_err(failed)
     }
 
     /// A server with nothing loaded, the packs `BORER_PACKS` names, live
@@ -912,6 +660,93 @@ impl BorerServer {
             }
         }
         peer_info
+    }
+}
+
+impl Held for BorerServer {
+    /// Runs a tool body under the program's read lock, so no `load_binary`
+    /// swaps the program while it runs, behind the fault boundary.
+    ///
+    /// A fault in an analysis pass would unwind out of the handler and take
+    /// the session with it: the call gets no reply at all, the agent cannot
+    /// tell a crash from a hang, and everything learned so far in the
+    /// session is gone with the process. Every tool body reaching a program
+    /// comes through here, so one boundary turns a fault into an answer the
+    /// caller can read and act on. The panic hook is left alone on purpose:
+    /// unlike a damaged file, which is the job and expected, a fault here is
+    /// a bug and worth a backtrace in the log.
+    fn run(&self, body: Body<'_>) -> Result<String, Failure> {
+        let guard = read_lock(&self.program);
+        let Some(p) = guard.as_ref() else {
+            return Err(Failure::asked(NO_BINARY));
+        };
+        borer_front::tools::guarded(|| body(p))
+    }
+
+    fn loaded(&self) -> Option<Arc<Program>> {
+        BorerServer::loaded(self)
+    }
+
+    fn ensure_analysis(&self) -> Result<Arc<Analysis>, String> {
+        BorerServer::ensure_analysis(self)
+    }
+
+    fn analysis_or_empty(&self) -> Arc<Analysis> {
+        BorerServer::analysis_or_empty(self)
+    }
+
+    fn analysis_kept(&self) -> Option<Arc<Analysis>> {
+        read_lock(&self.analysis).clone()
+    }
+
+    fn overlay(&self) -> Overlay {
+        BorerServer::overlay(self)
+    }
+
+    /// The analysis is shared, so a recovered function goes into a copy of
+    /// it that replaces the stored one. Recoveries run one at a time under
+    /// the analysis's write lock and start from the analysis stored then,
+    /// so one recovered by a request that ran first is kept; the program
+    /// cannot change meanwhile, as the tool body holds its read lock. A
+    /// request already holding the old analysis keeps it. The code index
+    /// `grep` reads is built from what discovery found
+    /// ([`crate::index::load_or_build`]), as the CLI's is, so it does not
+    /// hold a function recovered here.
+    fn decompile_entry(
+        &self,
+        p: &Program,
+        a: Arc<Analysis>,
+        text: &str,
+    ) -> Result<(Arc<Analysis>, u64), String> {
+        let o = self.overlay();
+        let (None, entry) = borer_engine::answer::decompile_entry(p, &a, &o, text)? else {
+            let mut slot = write_lock(&self.analysis);
+            let base = slot.clone().unwrap_or_else(|| Arc::clone(&a));
+            let (grown, entry) = borer_engine::answer::decompile_entry(p, &base, &o, text)?;
+            let Some(grown) = grown else {
+                return Ok((base, entry));
+            };
+            let grown = Arc::new(grown);
+            *slot = Some(Arc::clone(&grown));
+            return Ok((grown, entry));
+        };
+        Ok((a, entry))
+    }
+
+    /// The answer is [`BorerServer::read_uri`]'s, which `resources/read`
+    /// sends too: the same text, the same errors, and one answer memory, so
+    /// a URI read one way is remembered for the other.
+    fn read(&self, uri: &str) -> Result<String, Failure> {
+        self.read_uri(uri)
+            .map(|(_, text)| text)
+            .map_err(|e| Failure {
+                cause: match e.code {
+                    rmcp::model::ErrorCode::INTERNAL_ERROR => Cause::Engine,
+                    rmcp::model::ErrorCode::RESOURCE_NOT_FOUND => Cause::Missing,
+                    _ => Cause::Asked,
+                },
+                message: e.message.into_owned(),
+            })
     }
 }
 

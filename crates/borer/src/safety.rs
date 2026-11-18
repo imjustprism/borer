@@ -18,66 +18,7 @@ pub(crate) const EFFECTS_KEY: &str = "lol.borer/effects";
 /// The manifest's schema id; a change of its shape changes the version.
 const SCHEMA: &str = "borer.tool-safety.v1";
 
-/// Something a tool touches outside the loaded program and its analysis.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Effect {
-    /// Reads a file at a path the caller names.
-    ReadsFiles,
-    /// Writes a file: under the output root, or the symbol cache. The
-    /// decompilation index a read of `borer://index` or `borer://grep`
-    /// builds is borer's own cache of what it derived and is not one.
-    WritesFiles,
-    /// Connects to a server over the network.
-    Network,
-    /// Reads the memory of another running process, never writing it.
-    ReadsProcessMemory,
-    /// Changes the session: its names, comments, types, loaded program or attach.
-    ChangesSession,
-    /// Replaces the server process with the borer binary now on disk.
-    RestartsServer,
-}
-
-impl Effect {
-    /// Every effect, in the manifest's order.
-    const ALL: [Self; 6] = [
-        Self::ReadsFiles,
-        Self::WritesFiles,
-        Self::Network,
-        Self::ReadsProcessMemory,
-        Self::ChangesSession,
-        Self::RestartsServer,
-    ];
-
-    /// Returns the effect's word in `_meta` and the manifest.
-    const fn word(self) -> &'static str {
-        match self {
-            Self::ReadsFiles => "reads-files",
-            Self::WritesFiles => "writes-files",
-            Self::Network => "network",
-            Self::ReadsProcessMemory => "reads-process-memory",
-            Self::ChangesSession => "changes-session",
-            Self::RestartsServer => "restarts-server",
-        }
-    }
-
-    /// Returns the effect's meaning, for the manifest's legend.
-    const fn meaning(self) -> &'static str {
-        match self {
-            Self::ReadsFiles => "reads a file at a path the caller names",
-            Self::WritesFiles => {
-                "writes a file under the output root or into the symbol cache; not counted: the decompilation index a read of borer://index or borer://grep builds in borer's own cache directory"
-            }
-            Self::Network => "connects to a server over the network (https only)",
-            Self::ReadsProcessMemory => {
-                "reads the memory of another running process (Windows), never writing it"
-            }
-            Self::ChangesSession => {
-                "changes the session in memory: names, comments, types, the loaded program or the attach; never the binary"
-            }
-            Self::RestartsServer => "replaces the server process with the borer binary now on disk",
-        }
-    }
-}
+pub(crate) use borer_front::tools::Effect;
 
 /// Returns the `_meta` a tool's definition carries its effects in.
 ///

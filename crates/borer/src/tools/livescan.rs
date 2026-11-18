@@ -10,7 +10,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ErrorData, tool, tool_router};
 
 use crate::BorerServer;
-use crate::errors::err_params;
+use crate::errors::{err_params, failed};
 use crate::params::{Annotation, LiveScanParams, Page, ScanCompare, ScanScope, must_fit_a_row};
 use crate::safety::{Effect, effects};
 use crate::tools::live::LiveSession;
@@ -232,7 +232,7 @@ impl BorerServer {
     ) -> Result<String, ErrorData> {
         must_fit_a_row(&name, Annotation::Name)?;
         if compare == Some(ScanCompare::Path) {
-            let page = Page::new(offset, limit, count_only, 20, path::PAGE_MAX)?;
+            let page = Page::new(offset, limit, count_only, 20, path::PAGE_MAX).map_err(failed)?;
             if kind.is_some() || tolerance.is_some() || scope.is_some() {
                 return Err(err_params(
                     "compare=path takes value, module and paging, not kind, tolerance or scope",
@@ -250,7 +250,7 @@ impl BorerServer {
             }
             return self.livepath_text(&spec).map(|text| page.limit.noted(text));
         }
-        let page = Page::new(offset, limit, count_only, 50, 500)?;
+        let page = Page::new(offset, limit, count_only, 50, 500).map_err(failed)?;
         self.with_live(|s| {
             if compare.is_none() && value.is_none() {
                 let set = s.scans.get(&name).ok_or_else(|| {
