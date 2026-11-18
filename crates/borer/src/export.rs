@@ -1392,6 +1392,113 @@ mod tests {
         assert!(!written, "nothing was written");
     }
 
+    /// A split's tally counts each way a function is filed and written:
+    /// a filed function that did not decompile or was cut is rough, and an
+    /// unfiled one is counted by why, its failure or cut first.
+    ///
+    /// # Panics
+    ///
+    /// When a pair is counted another way.
+    #[test]
+    fn the_split_tally_counts_every_filing_and_writing() {
+        use borer_engine::analysis::decompile::export::Written;
+        use borer_engine::analysis::split::Filed;
+        let mut tally = super::Tally::default();
+        let filings = [
+            Filed::Source("a.cpp"),
+            Filed::Nothing,
+            Filed::Tie,
+            Filed::Ambiguous,
+            Filed::Unmatched,
+            Filed::PastCap,
+        ];
+        for filed in filings {
+            for written in [Written::Body, Written::Failed, Written::Cut] {
+                let path = tally.count(filed, written);
+                assert_eq!(path, (filed == Filed::Source("a.cpp")).then_some("a.cpp"));
+            }
+        }
+        let why: Vec<(&str, usize)> = tally.why.iter().map(|(r, n)| (r.as_str(), *n)).collect();
+        assert_eq!((tally.total, tally.rough), (18, 2));
+        assert_eq!(
+            why,
+            vec![
+                ("cite a file past the 4096 a split writes", 1),
+                ("cite no source file", 1),
+                ("cite several and settle on none", 1),
+                ("did not decompile", 5),
+                ("name a cut path that fits several", 1),
+                ("name a file they do not reference", 1),
+                ("were cut for size", 5),
+            ]
+        );
+    }
+
+    /// A split counts a filed function over the export's block budget as
+    /// rough, not as unfiled, and says so.
+    ///
+    /// `main` calls `small` and `big`, which each load `src/a.cpp`; `big`
+    /// has more blocks than the export decompiles.
+    ///
+    /// # Panics
+    ///
+    /// When the reply differs.
+    #[test]
+    fn a_split_counts_a_cut_filed_function_as_rough() {
+        use borer_engine::analysis::decompile::export::BUDGET_BLOCKS;
+        let mut bytes = vec![0xccu8; 0x5100];
+        let rel = |at: u64, to: u64| borer_engine::num::lo32(to.wrapping_sub(at)).to_le_bytes();
+        let mut code = vec![0xe8]; // ASM: call small
+        code.extend(rel(0x1005, 0x1040));
+        code.push(0xe8); // ASM: call big
+        code.extend(rel(0x100a, 0x1060));
+        code.push(0xc3); // ASM: ret
+        bytes[..code.len()].copy_from_slice(&code);
+        for at in [0x1040u64, 0x1060] {
+            let off = usize::try_from(at - 0x1000).expect("fits");
+            bytes[off..off + 3].copy_from_slice(&[0x48, 0x8d, 0x15]); // ASM: lea rdx, [rip+path]
+            bytes[off + 3..off + 7].copy_from_slice(&rel(at + 7, 0x6000));
+            bytes[off + 7..off + 10].copy_from_slice(&[0x31, 0xc0, 0xc3]); // ASM: xor eax, eax; ret
+        }
+        let mut at = 0x60 + 7;
+        for _ in 0..BUDGET_BLOCKS / 2 + 1 {
+            bytes[at..at + 8].copy_from_slice(&[0x85, 0xc0, 0x74, 0x02, 0xff, 0xc1, 0xff, 0xc0]); // ASM: test eax, eax; je +2; inc ecx; inc eax
+            at += 8;
+        }
+        bytes[at] = 0xc3; // ASM: ret
+        bytes[0x5000..0x500a].copy_from_slice(b"src/a.cpp\0");
+        let p = Program::raw(
+            bytes,
+            Arch::X86_64,
+            0,
+            Some(0x1000),
+            vec![
+                Section::mapped(".text", 0x1000, 0, 0x5000, false, true),
+                Section::mapped(".rdata", 0x6000, 0x5000, 0x100, false, false),
+            ],
+        );
+        let a = Analysis::compute(&p);
+        let dir = std::env::temp_dir().join(format!("borer-split-cut-{}", std::process::id()));
+        let said = super::write_split(
+            &p,
+            &a,
+            &Overlay::default(),
+            Library::Include,
+            None,
+            &dir.display().to_string(),
+        );
+        let unit = std::fs::read_to_string(dir.join("src/a.cpp.c")).unwrap_or_default();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(
+            said.expect("writes"),
+            format!(
+                "wrote 3 functions under {0}/src: 2 to 1 source files and 1 to _unattributed.c (1 cite no source file); 1 of the filed did not decompile or were cut for size, filed by the one source path each references; 0 class headers under {0}/include and {0}/MAP.tsv",
+                borer_engine::text::short_path(&dir.display().to_string())
+            )
+        );
+        assert!(unit.contains("@ 0x1060: cut, not decompiled"), "{unit}");
+    }
+
     /// A split into a directory that holds anything is refused before the
     /// SDK is built: with the deadline already passed, which the build
     /// would answer, the refusal still names the directory.
