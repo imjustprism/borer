@@ -360,12 +360,7 @@ impl Emulator<'_> {
         if self.trace_cap > 0 {
             self.step_memory.borrow_mut().push((true, addr, bytes, v));
         }
-        if let Some(slot) = self.clean {
-            let over = slot.wrapping_add(u64::from(OF_BIT / 8));
-            if self.narrow(over.wrapping_sub(addr)) < from_usize(bytes) {
-                self.clean = None;
-            }
-        }
+        self.overwrite(addr, from_usize(bytes));
         for k in 0..from_usize(bytes) {
             let a = self.narrow(addr.wrapping_add(k));
             if self.mem.len() >= self.memory_max && !self.mem.contains(a) {
@@ -464,6 +459,23 @@ impl Emulator<'_> {
         self.flags_over = Some(v >> OF_BIT & 1 != 0);
     }
 
+    /// Ends the trust in the [`Emulator::clean`] slot when a write of `len`
+    /// bytes at `addr` covers its overflow byte; every write to memory, in a
+    /// run or before one, passes through here.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - The first byte written.
+    /// * `len` - How many bytes, wrapping at the top of the address space.
+    pub(super) fn overwrite(&mut self, addr: u64, len: u64) {
+        if let Some(slot) = self.clean {
+            let over = slot.wrapping_add(u64::from(OF_BIT / 8));
+            if self.narrow(over.wrapping_sub(addr)) < len {
+                self.clean = None;
+            }
+        }
+    }
+
     /// Pushes a value onto the scratch stack.
     ///
     /// # Arguments
@@ -560,7 +572,7 @@ impl Emulator<'_> {
             Mnemonic::Popf | Mnemonic::Popfd | Mnemonic::Popfq => {
                 let at = self.reg(Register::RSP);
                 let v = self.pop(bytes)?;
-                let trusted = !self.forged || self.clean.take_if(|s| *s == at).is_some();
+                let trusted = !self.forged || self.clean == Some(at);
                 self.set_rflags(v);
                 if !trusted {
                     self.flags_over = None;

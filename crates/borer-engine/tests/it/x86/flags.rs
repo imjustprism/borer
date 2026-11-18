@@ -797,8 +797,9 @@ fn inc_and_dec_overflow_at_every_width_agrees_with_the_emulator() {
 /// word stops, as it does without the push. That takes in a nested push, a
 /// word moved to another slot, `syscall`'s `r11`, and a word whose overflow
 /// bit the routine set itself, in a forged word or in the trusted one, and
-/// a run on the same machine after the one that forged a word. A `popfq`
-/// of another word leaves the trusted slot trusted. A routine that forged
+/// a run on the same machine after the one that forged a word, or a poke
+/// over the trusted slot between runs. A `popfq` of another word leaves the
+/// trusted slot trusted, and a run stopped and resumed answers as one run. A routine that forged
 /// nothing restores a known overflow from any word it pushed.
 #[test]
 fn a_pushed_unknown_overflow_stays_unknown() {
@@ -865,6 +866,28 @@ fn a_pushed_unknown_overflow_stays_unknown() {
         0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3, // ASM: L: mov eax, 1; ret
     ];
     assert_eq!(emulated_64(&repushed), Some((Stop::Returned, 0)));
+    let p = raw::image(Arch::X86_64, &repushed, &[]);
+    for poke in [false, true] {
+        let resumed = Emulator::new(&p, 100).and_then(|mut emu| {
+            emu.stop_at(Some(0x40100d));
+            emu.run(0x401000);
+            emu.stop_at(None);
+            if poke {
+                let sp = emu.register("rsp")?;
+                emu.poke(sp.wrapping_add(1), 0);
+            }
+            let stop = emu.run(0x40100d).stop;
+            Some((stop, emu.register("rax")?))
+        });
+        if poke {
+            assert!(
+                matches!(&resumed, Some((Stop::Unmodeled(what), _)) if what.contains("did not set")),
+                "a poked slot: {resumed:?}"
+            );
+        } else {
+            assert_eq!(resumed, Some((Stop::Returned, 0)), "a resumed run");
+        }
+    }
     let nested = [
         0x31, 0xc0, // ASM: xor eax, eax
         0x9c, // ASM: pushfq

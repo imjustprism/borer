@@ -262,9 +262,8 @@ pub struct Emulator<'a> {
     /// registers outlive a run and a later run may pop the word.
     forged: bool,
     /// The stack slot of the last `pushf` made with the overflow known, until
-    /// a write covers its overflow byte, a `popf` from it takes it or a run starts
-    /// (memory may be poked between runs): once a word is forged, the only
-    /// word `popf` restores a known overflow from.
+    /// any write covers its overflow byte ([`Emulator::overwrite`]): once a
+    /// word is forged, the only word `popf` restores a known overflow from.
     clean: Option<u64>,
     /// Steps a run may take.
     budget: usize,
@@ -872,6 +871,7 @@ impl<'a> Emulator<'a> {
     /// * `v` - The value, little-endian.
     /// * `bytes` - How many of its low bytes.
     fn plant(&mut self, addr: u64, v: u64, bytes: usize) {
+        self.overwrite(addr, from_usize(bytes));
         self.mem
             .plant(addr, (0..from_usize(bytes)).map(|k| lo8(v >> (k * 8))));
     }
@@ -1306,6 +1306,7 @@ impl<'a> Emulator<'a> {
     /// * `addr` - The address.
     /// * `value` - The byte.
     pub fn poke(&mut self, addr: u64, value: u8) {
+        self.overwrite(addr, 1);
         self.mem.poke(addr, value);
     }
 
@@ -1318,6 +1319,7 @@ impl<'a> Emulator<'a> {
     ///   wrapping at the top of the address space.
     /// * `bytes` - The bytes, in address order.
     pub fn poke_run(&mut self, at: u64, bytes: &[u8]) {
+        self.overwrite(at, from_usize(bytes.len()));
         self.mem.poke_run(at, bytes);
     }
 
@@ -1420,7 +1422,7 @@ impl<'a> Emulator<'a> {
     /// order.
     pub fn run(&mut self, entry: u64) -> Run {
         let mut ip = entry;
-        (self.steps, self.clean) = (0, None);
+        self.steps = 0;
         let stop = loop {
             if self.stop_at == Some(ip) {
                 break Stop::Stopped(ip);
