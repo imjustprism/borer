@@ -688,41 +688,40 @@ fn registry() -> Program {
     )
 }
 
-/// Members an assert spells bare are listed and paired like those
-/// spelled after `this->`, and the answer says a bare name may be a local.
+/// The header line of the tier bare pairs are listed in.
+const BARE_HEADER: &str =
+    "a bare name may be a local or a parameter that holds the field, so none is strong or stated";
+
+/// Members an assert spells bare are paired in a tier of their own, never
+/// strong, never stated, and never listed as names.
 ///
-/// `!m_stop` over +0x20 in two methods is strong. `m_replicas.size()`
-/// reaches into its member, so +0x28 may be a part of it: listed, not
-/// paired. `index >= 0 && index < (int)m_replicas.size()` names two
-/// candidates over one field, which says nothing of which is where, and
-/// `index` is a parameter: listed as spelled, paired with nothing, and
-/// not offered as a member with no offset either, since nothing shows a
-/// bare name is a member. The decompiler names fields from `this->` alone.
+/// `!m_stop` over +0x20 in two methods is `bare`, with both sites.
+/// `m_replicas.size()` reaches into its member, so +0x28 may be a part of
+/// it: not paired. `index >= 0 && index < (int)m_replicas.size()` names
+/// two candidates over one field, which says nothing of which is where,
+/// and `index` is a parameter: paired with nothing, and not offered with
+/// no offset either, since nothing shows a bare name is a member. The
+/// decompiler names fields from `this->` alone.
 #[test]
-fn bare_members_are_listed_and_paired() {
+fn bare_members_are_paired_in_their_own_tier() {
     let p = registry();
     let a = Analysis::compute(&p);
     let o = Overlay::default();
     let all = asserted_fields_tsv(&p, &a, &o, "");
-    for row in [
-        "2\tm_stop\tRegistry",
-        "3\tm_replicas\tRegistry",
-        "2\tindex\tRegistry",
-        "1\tm_entityComponents\tRegistry",
-        "strong\tRegistry\tm_stop\t0x20\t0x1100, 0x1140",
-        "# state Registry's strong pairs: set_type(name=\"Registry\", fields=[\"0x20:m_stop\"])",
-    ] {
-        assert!(all.lines().any(|l| l == row), "{row}:\n{all}");
-    }
-    let note = "a local or a parameter is spelled the same way";
+    let header = all.lines().find(|l| l.contains(BARE_HEADER));
     assert!(
-        all.lines().next().is_some_and(|l| l.contains(note)),
+        header.is_some_and(|l| l.starts_with("# 1 bare pairings")),
         "{all}"
     );
     assert!(
         all.lines()
-            .any(|l| l.starts_with("# 1 pairings") && l.contains(note)),
+            .any(|l| l == "bare\tRegistry\tm_stop\t0x20\t0x1100, 0x1140"),
         "{all}"
+    );
+    assert!(
+        !all.contains("strong\t") && !all.contains("set_type("),
+        "a bare pairing was made strong:
+{all}"
     );
     for member in [
         "index",
@@ -730,9 +729,88 @@ fn bare_members_are_listed_and_paired() {
         "m_entityComponents",
         "m_entityBitsets",
     ] {
-        let row = format!("\tRegistry\t{member}\t");
-        assert!(!all.contains(&row), "{member} was paired:\n{all}");
+        assert!(
+            !all.contains(member),
+            "{member} was listed:
+{all}"
+        );
     }
+    assert!(field_names(&p, &a, &o, "Registry").is_empty());
+}
+
+/// `"!stopped"`, a local that holds the field its guard reads.
+const STOPPED: u64 = 0x2120;
+
+/// `"index >= 0"`, a parameter of the method it was inlined from.
+const INDEX0: u64 = 0x2140;
+
+/// Methods whose one bare candidate is no member.
+///
+/// `Stop` and `Halt` hold `bool stopped = m_stop; assert(!stopped);`, the
+/// local the guard of +0x20 reads. `Run` and `Step`, as the overlay names
+/// them, inlined `Registry::CheckIndex(int index) const`, which asserts
+/// `index >= 0`, and its twin `CheckSlot` as `CheckIndex(m_cursor)`, the
+/// guard reading +0x30.
+const LOCALS: [(u64, Guard, u64, u64, &str); 4] = [
+    (
+        0x1100,
+        Guard::Field(0x20),
+        STOPPED,
+        0x2200,
+        "void Registry::Stop()",
+    ),
+    (
+        0x1140,
+        Guard::Field(0x20),
+        STOPPED,
+        0x2240,
+        "void Registry::Halt()",
+    ),
+    (
+        0x1180,
+        Guard::Field(0x30),
+        INDEX0,
+        0x2280,
+        "void Registry::CheckIndex(int) const",
+    ),
+    (
+        0x11c0,
+        Guard::Field(0x30),
+        INDEX0,
+        0x22c0,
+        "void Registry::CheckSlot(int) const",
+    ),
+];
+
+/// A bare name that is a local or a parameter holding the field pairs
+/// strong nowhere and is stated nowhere: the bytes cannot tell it from a
+/// member.
+///
+/// Two methods agreeing on `stopped` at +0x20 is `bare`, never strong. An
+/// assert inlined from another method of the class casts no bare vote,
+/// so the overlay's `Run` and `Step` pair `index` with nothing.
+#[test]
+fn a_bare_local_or_parameter_pairs_strong_nowhere() {
+    let p = image(
+        &LOCALS,
+        &[(STOPPED, b"!stopped\0"), (INDEX0, b"index >= 0\0")],
+    );
+    let a = Analysis::compute(&p);
+    let mut o = Overlay::default();
+    o.names.insert(0x1180, "Registry::Run".to_owned());
+    o.names.insert(0x11c0, "Registry::Step".to_owned());
+    let all = asserted_fields_tsv(&p, &a, &o, "");
+    assert!(
+        !all.contains("strong\t") && !all.contains("set_type("),
+        "a local or a parameter was paired strong:
+{all}"
+    );
+    assert!(
+        all.lines()
+            .any(|l| l == "bare\tRegistry\tstopped\t0x20\t0x1100, 0x1140"),
+        "{all}"
+    );
+    assert!(!all.contains("index\t0x30"), "{all}");
     assert!(field_names(&p, &a, &o, "Registry").is_empty());
 }
 

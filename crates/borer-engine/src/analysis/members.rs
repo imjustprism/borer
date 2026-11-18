@@ -337,19 +337,23 @@ pub(crate) fn votes_in(
     fields
 }
 
-/// Tells whether an assert call's signature is its function's own or that
-/// of a method of its function's class, so the members it names are of a
-/// `this` its guard can read.
+/// Tells whether the members an assert call names are of a `this` its
+/// guard can read.
 ///
-/// An assert inlined from another class's method (`__FUNCSIG__(B::Get)` in
+/// That is, its signature is its function's own or, for a member spelled
+/// after `this->`, that of a method of its function's class. An assert inlined from another class's method (`__FUNCSIG__(B::Get)` in
 /// a method of `A`) names `B`'s members, and its guard reads whatever `A`
-/// holds there.
+/// holds there. A bare name inlined from another method of the same class
+/// may be that method's parameter (`CheckIndex(m_cursor)` asserting
+/// `index >= 0`), so a bare condition counts only under the function's
+/// own signature.
 ///
 /// # Arguments
 ///
 /// * `call` - The call line.
 /// * `class` - The function's class.
-fn own_signature(call: &str, class: Option<&str>) -> bool {
+/// * `receiver` - The spelling read.
+fn own_signature(call: &str, class: Option<&str>, receiver: Receiver) -> bool {
     let Some((_, rest)) = call.split_once("__FUNCSIG__") else {
         return false;
     };
@@ -357,7 +361,7 @@ fn own_signature(call: &str, class: Option<&str>) -> bool {
         return true;
     };
     let name = named.split_once(')').map_or(named, |(n, _)| n);
-    class.is_some_and(|c| super::classes::class_of(name) == Some(c))
+    receiver == Receiver::This && class.is_some_and(|c| super::classes::class_of(name) == Some(c))
 }
 
 /// Names a field from a guarded assert.
@@ -387,7 +391,8 @@ fn collect_assert_names(
     class: Option<&str>,
     fields: &mut BTreeMap<u64, FieldUse>,
 ) {
-    if !(guard.starts_with("if (") && guard.ends_with('{') && own_signature(call, class)) {
+    if !(guard.starts_with("if (") && guard.ends_with('{') && own_signature(call, class, receiver))
+    {
         return;
     }
     let Some(expr) = first_literal(call) else {
@@ -497,6 +502,17 @@ mod tests {
             .get(&0x20)
             .map(|f| f.names.keys().cloned().collect::<Vec<_>>());
         assert_eq!(names, Some(vec!["m_stop".to_owned()]));
+        let inlined = text.replace("__FUNCSIG__", "__FUNCSIG__(A::Check)");
+        assert!(votes_in(&inlined, Receiver::Bare, Some("A")).is_empty());
+        assert_eq!(
+            votes_in(
+                &inlined.replace("!m_stop", "this->m_stop"),
+                Receiver::This,
+                Some("A")
+            )
+            .len(),
+            1
+        );
         for (cond, path) in [
             ("!m_stop", "a message"),
             ("index < m_count", "src/a.cpp"),
