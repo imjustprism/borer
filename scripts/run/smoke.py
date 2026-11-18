@@ -539,6 +539,7 @@ assert uris == [
     "borer://stackstrings",
     "borer://triage",
     "borer://vm",
+    "borer://vocab",
 ], uris
 flat, triage = read_many("borer://flat", "borer://triage")
 assert flat.startswith("# "), flat[:200]
