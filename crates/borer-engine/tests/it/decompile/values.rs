@@ -202,6 +202,24 @@ fn the_lifter_agrees_with_the_emulator_where_it_once_did_not() {
     }
 }
 
+/// A `sal` (opcode extension /6, the twin of `shl`) checks against the
+/// emulator instead of stopping it as unmodeled.
+#[test]
+fn a_sal_agrees_with_the_emulator() {
+    use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
+    let code: &[u8] = &[
+        0x41, 0xd2, 0xf1, // ASM: sal r9b, cl
+        0xc3, // ASM: ret
+    ];
+    let p = program64(code);
+    let a = Analysis::compute(&p);
+    for seed in 1..=8 {
+        let v = verify(&p, &a, &[0x1_4000_1000], seed);
+        assert_eq!(v.checked, 1, "seed {seed}: {}", verify_tsv(&v));
+        assert!(v.mismatches.is_empty(), "seed {seed}: {}", verify_tsv(&v));
+    }
+}
+
 /// An `xadd`'s block checks against the emulator.
 ///
 /// Its register result counts as unreadable (the environment does not

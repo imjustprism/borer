@@ -666,6 +666,34 @@ fn a_shift_count_wraps_at_the_operand_width() {
     assert_eq!(emu.register("rax"), Some(2));
 }
 
+/// `sal` (opcode extension /6) is `shl`: both leave the same register and
+/// flags.
+///
+/// iced decodes /6 as its own mnemonic, which the machine once stopped on
+/// as unmodeled while the identical `shl` (/4) ran.
+///
+/// # Panics
+///
+/// When a run does not return, or the two differ.
+#[test]
+fn sal_is_shl() {
+    let run = |modrm: u8| {
+        let code: &[u8] = &[
+            0x41, 0xb9, 0xc1, 0x00, 0x00, 0x00, // ASM: mov r9d, 0xc1
+            0xb9, 0x01, 0x00, 0x00, 0x00, // ASM: mov ecx, 1
+            0x41, 0xd2, modrm, // ASM: sal r9b, cl (0xf1) or shl r9b, cl (0xe1)
+            0x9c,  // ASM: pushfq
+            0x58,  // ASM: pop rax
+            0xc3,  // ASM: ret
+        ];
+        let emu = returned(image(code, &[]));
+        (emu.register("r9"), emu.register("rax"))
+    };
+    let sal = run(0xf1);
+    assert_eq!(sal.0, Some(0x82));
+    assert_eq!(sal, run(0xe1));
+}
+
 /// A rotate through carry carries the flag back into the operand.
 ///
 /// The carry flag is one more bit of the value, which is how a bignum

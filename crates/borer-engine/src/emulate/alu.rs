@@ -85,7 +85,7 @@ impl Shift {
     /// The shift, or `None` when `m` is not one of these.
     pub(super) fn of(m: Mnemonic) -> Option<Shift> {
         Some(match m {
-            Mnemonic::Shl => Shift::Shl,
+            Mnemonic::Shl | Mnemonic::Sal => Shift::Shl,
             Mnemonic::Shr => Shift::Shr,
             Mnemonic::Sar => Shift::Sar,
             Mnemonic::Rol => Shift::Rol,
