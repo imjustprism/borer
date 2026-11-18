@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use super::classes::{FieldUse, parse_number};
-use super::decompile::is_source_path;
+use super::decompile::{asserted_condition, is_source_path};
 use super::{Analysis, naming, single};
 use crate::analysis::render::PRINTABLE_MIN;
 use crate::program::Program;
@@ -407,8 +407,9 @@ type Names<'a> = (Option<&'a str>, Option<&'a str>);
 /// `IsSet()`. Anything with several fields or several members is skipped,
 /// and so is a member reached into (`this->m_rect.w`), an expression the
 /// text cut ([`first_literal`]), one spelled other than `receiver`, a
-/// bare one whose call cites no source file, and one inlined from another
-/// class's method ([`own_signature`]).
+/// bare one whose call is no `(condition, path, line, ...)` assert
+/// ([`asserted_condition`]), and one inlined from another class's method
+/// ([`own_signature`]).
 ///
 /// # Arguments
 ///
@@ -432,8 +433,7 @@ fn collect_assert_names(
         return;
     };
     let (named, how) = condition_members(&expr);
-    let cites = || call.split('"').skip(3).step_by(2).any(is_source_path);
-    if how != receiver || (how == Receiver::Bare && !cites()) {
+    if how != receiver || (how == Receiver::Bare && asserted_condition(call).is_none()) {
         return;
     }
     let members: BTreeSet<String> = named
@@ -550,6 +550,8 @@ mod tests {
             .get(&0x20)
             .map(|f| f.names.keys().cloned().collect::<Vec<_>>());
         assert_eq!(names, Some(vec!["m_stop".to_owned()]));
+        let late = text.replace("\"src/a.cpp\", 1", "1, \"src/a.cpp\"");
+        assert!(votes_in(&late, Receiver::Bare, None, None).is_empty());
         let inlined = text.replace("__FUNCSIG__", "__FUNCSIG__(A::Check)");
         assert!(votes_in(&inlined, Receiver::Bare, Some("A"), None).is_empty());
         assert_eq!(

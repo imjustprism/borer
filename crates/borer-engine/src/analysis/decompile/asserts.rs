@@ -401,12 +401,14 @@ pub(super) struct Rename {
     pub(super) name: String,
 }
 
-/// The condition an assert line carries, when the line is one.
+/// The condition an assert line carries, when the line is one: a call
+/// whose arguments run condition, cited source path ([`source_path`]) and
+/// line number.
 ///
 /// # Arguments
 ///
 /// * `line` - A decompiled line.
-fn asserted_condition(line: &str) -> Option<String> {
+pub(crate) fn asserted_condition(line: &str) -> Option<String> {
     for start in call_starts(line) {
         let open = line.get(start..)?.find('(')? + start;
         let Some(close) = matching_paren(line, open) else {
