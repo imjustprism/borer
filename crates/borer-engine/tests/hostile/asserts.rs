@@ -83,8 +83,9 @@ fn asserting(n: usize) -> Program {
 /// Each condition was checked against the function's whole list of
 /// conditions, n²/2 comparisons with no cancel check: a function of a
 /// million sites held a request for about ten minutes. Eight times the
-/// sites now take about eight times the time, where the quadratic check
-/// took sixty-four.
+/// sites now take about eight to ten times the time, where the quadratic
+/// check took sixty-four; the bound, thirty-two, holds while the gate runs
+/// heavy steps beside it and still fails the quadratic check.
 #[test]
 fn many_assert_sites_in_one_function_read_in_linear_time() {
     /// Sites in the smaller function.
@@ -110,7 +111,7 @@ fn many_assert_sites_in_one_function_read_in_linear_time() {
         8 * SITES
     );
     assert!(
-        long <= short * 16 + std::time::Duration::from_millis(100),
+        long <= short * 32 + std::time::Duration::from_millis(100),
         "{} sites took {long:?}, {SITES} took {short:?}",
         8 * SITES
     );
