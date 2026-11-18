@@ -850,14 +850,14 @@ fn a_section_cut_by_the_end_of_the_file_is_not_called_zero_filled() {
     );
 }
 
-/// A segment a truncated file cuts is missing only for the file bytes it
-/// states and lost; past them, the memory it states beyond its file
-/// size is zero-filled as the loader fills it.
-///
-/// One `PT_LOAD` at 0x400000 states 0x230 file bytes at offset 0x100 and
-/// 0x1238 in memory; the file ends 0xf0 bytes into it.
-#[test]
-fn a_cut_segment_is_missing_only_for_the_bytes_it_states() {
+/// Returns an ELF whose one `PT_LOAD` at 0x400000 states 0x230 file bytes
+/// at offset 0x100 and 0x1238 in memory, in a file that ends 0xf0 bytes
+/// into it.
+#[expect(
+    clippy::expect_used,
+    reason = "a fixture that does not parse has no useful recovery"
+)]
+fn cut_segment() -> Program {
     let mut im = Image(vec![0u8; 0x1f0]);
     im.put(0, &[0x7f, b'E', b'L', b'F', 2, 1, 1, 0]);
     im.u16(0x10, 2);
@@ -871,7 +871,41 @@ fn a_cut_segment_is_missing_only_for_the_bytes_it_states() {
     im.u16(0x3a, 64);
     im.phdr(0x40, 1, 6, 0x100, 0x40_0000, 0x230);
     im.u64(0x40 + 40, 0x1238);
-    let p = Program::from_bytes(std::path::PathBuf::from("cut.elf"), im.0).expect("parses");
+    Program::from_bytes(std::path::PathBuf::from("cut.elf"), im.0).expect("parses")
+}
+
+/// The linear listing says the bytes a truncated file lost are missing and
+/// only the rest of the segment past its stated file bytes is zero-filled.
+#[test]
+fn a_cut_segment_lists_its_lost_bytes_as_missing() {
+    let p = cut_segment();
+    let a = Analysis::compute(&p);
+    let page =
+        linear(&p, &a, &Overlay::default(), 0x40_0000, Dir::Next, LINES_MAX).expect("a page");
+    let text: Vec<&str> = (0..page.view.lines())
+        .filter_map(|i| page.view.line(i))
+        .collect();
+    assert!(
+        text.iter()
+            .any(|l| l.starts_with("; missing 0x4000f0..0x400230 ")),
+        "{text:#?}"
+    );
+    assert!(
+        text.iter()
+            .any(|l| l.starts_with("; zero-filled 0x400230..0x401238 ")),
+        "{text:#?}"
+    );
+}
+
+/// A segment a truncated file cuts is missing only for the file bytes it
+/// states and lost; past them, the memory it states beyond its file
+/// size is zero-filled as the loader fills it.
+///
+/// One `PT_LOAD` at 0x400000 states 0x230 file bytes at offset 0x100 and
+/// 0x1238 in memory; the file ends 0xf0 bytes into it.
+#[test]
+fn a_cut_segment_is_missing_only_for_the_bytes_it_states() {
+    let p = cut_segment();
     let tail = p.no_bytes_at(0x40_0900);
     assert_eq!(
         tail,

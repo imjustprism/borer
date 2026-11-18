@@ -202,6 +202,8 @@ enum Fact {
     Named(Named),
     /// File bytes inside a section that no fact covers.
     Unexplored,
+    /// Bytes a section states the file holds that a truncated file lost.
+    Missing,
     /// Bytes a section maps that the file holds none of.
     Unbacked,
     /// Addresses between two sections.
@@ -215,7 +217,7 @@ impl Fact {
             Self::Code | Self::Spill(_) => CellKind::Code,
             Self::Text(_) => CellKind::String,
             Self::Typed(_) | Self::Pointer(_) | Self::Named(_) => CellKind::Data,
-            Self::Unexplored | Self::Unbacked => CellKind::Unexplored,
+            Self::Unexplored | Self::Missing | Self::Unbacked => CellKind::Unexplored,
             Self::Unmapped => CellKind::Unmapped,
         }
     }
@@ -282,6 +284,10 @@ struct Region {
     end: u64,
     /// One past the last address the file holds bytes for.
     backed: u64,
+    /// One past the last address the section states file bytes for: those
+    /// from [`Region::backed`] on are missing from a truncated file
+    /// ([`crate::program::Section::lost`]), not zero-filled.
+    missing: u64,
     /// The section, by its place in [`Program::sections`].
     section: usize,
 }
@@ -703,7 +709,7 @@ fn block_rows(
 /// * `p` - The loaded image.
 fn regions(p: &Program) -> Vec<Region> {
     let len = from_usize(p.bytes.len());
-    let mut all: Vec<(bool, u64, u64, usize, u64)> = p
+    let mut all: Vec<(bool, u64, u64, usize, u64, u64)> = p
         .sections
         .iter()
         .enumerate()
@@ -711,13 +717,15 @@ fn regions(p: &Program) -> Vec<Region> {
             let start = s.va.0;
             let held = s.file_size.min(len.saturating_sub(s.file_off.0));
             let end = s.span().end;
-            (held == 0, start, end, i, start.saturating_add(held))
+            let stated = s.file_size.saturating_add(s.lost).max(held);
+            let (held, stated) = (start.saturating_add(held), start.saturating_add(stated));
+            (held == start, start, end, i, held, stated)
         })
         .filter(|&(_, start, end, ..)| start < end)
         .collect();
     all.sort_unstable();
     let (mut backed, mut bare): (Vec<Region>, Vec<Region>) = (Vec::new(), Vec::new());
-    for (no_bytes, start, end, section, held) in all {
+    for (no_bytes, start, end, section, held, stated) in all {
         let into = if no_bytes { &mut bare } else { &mut backed };
         let start = into.last().map_or(start, |r| start.max(r.end));
         if start < end {
@@ -725,6 +733,7 @@ fn regions(p: &Program) -> Vec<Region> {
                 start,
                 end,
                 backed: held.max(start).min(end),
+                missing: stated.max(start).min(end),
                 section,
             });
         }
@@ -759,8 +768,8 @@ fn regions(p: &Program) -> Vec<Region> {
 
 /// Pushes the uncovered stretch `from..to` of a region.
 ///
-/// The part the file holds is [`Fact::Unexplored`], the rest
-/// [`Fact::Unbacked`]. The bytes a [`Fact::Named`] span names run on into the part the file holds.
+/// The part the file holds is [`Fact::Unexplored`], the part a truncated
+/// file lost [`Fact::Missing`], the rest [`Fact::Unbacked`]. The bytes a [`Fact::Named`] span names run on into the part the file holds.
 ///
 /// # Arguments
 ///
@@ -776,7 +785,12 @@ fn hole(spans: &mut Vec<Span>, r: &Region, mut from: u64, to: u64) {
         named.end = cut;
         from = cut;
     }
-    for (start, end, fact) in [(from, cut, Fact::Unexplored), (cut, to, Fact::Unbacked)] {
+    let lost = r.missing.max(cut).min(to);
+    for (start, end, fact) in [
+        (from, cut, Fact::Unexplored),
+        (cut, lost, Fact::Missing),
+        (lost, to, Fact::Unbacked),
+    ] {
         if start < end {
             spans.push(Span { start, end, fact });
         }
@@ -882,7 +896,12 @@ fn rank(f: &Fact) -> u8 {
         Fact::Pointer(_) => 2,
         Fact::Text(_) => 3,
         Fact::Named(_) => 4,
-        Fact::Code | Fact::Spill(_) | Fact::Unexplored | Fact::Unbacked | Fact::Unmapped => 5,
+        Fact::Code
+        | Fact::Spill(_)
+        | Fact::Unexplored
+        | Fact::Missing
+        | Fact::Unbacked
+        | Fact::Unmapped => 5,
     }
 }
 
@@ -1017,6 +1036,7 @@ impl Cx<'_> {
             | Fact::Text(_)
             | Fact::Typed(_)
             | Fact::Pointer(_)
+            | Fact::Missing
             | Fact::Unbacked
             | Fact::Unmapped => s.start,
         }
@@ -1203,6 +1223,11 @@ impl Cx<'_> {
                     comment(out, &range_text("unexplored", s, &self.reason(s)));
                 }
                 self.hex_row(s, cur, RowKind::Unexplored, out)
+            }
+            Fact::Missing => {
+                let why = "the file is cut short before the bytes its header states";
+                comment(out, &range_text("missing", s, why));
+                (RowKind::Unbacked, s.end)
             }
             Fact::Unbacked => {
                 let why = "the file holds no bytes for it";
