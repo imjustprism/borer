@@ -1178,3 +1178,97 @@ fn an_applied_class_layout_types_each_methods_object() {
     assert!(set.contains("this->f_8 = a2;"), "{set}");
     assert!(set.contains("this->f_10 = "), "{set}");
 }
+
+/// A name one class gives a slot names it across the classes whose tables
+/// hold the same functions slot for slot, and a slot they spell two ways
+/// stays unnamed.
+///
+/// `Base`, `A` and `B` have five slots each and hold `Release` and
+/// `AddRef` at slots 0 and 1, so they are one family. `Base`'s slots 2 and
+/// 3 hold functions nothing names; `B` calls its slot 2 `Update`, and `A`
+/// and `B` both call slot 3 `Draw`, so those name `Base`'s. Slot 4 is
+/// `Paint` in `A` and `Render` in `B`: reported, not chosen. `Short` shares
+/// both anchors but has four slots, and `Lone` shares one anchor alone:
+/// neither is in the family.
+#[test]
+fn a_class_family_names_the_slots_one_member_spells() {
+    use borer_engine::analysis::vtables::{ClassInfo, SlotName, family_of, render_slots};
+    let mut bytes = vec![0u8; 0x2000];
+    bytes[0x1000] = 0xc3;
+    let p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0,
+        Some(0x1000),
+        vec![Section::mapped(
+            ".text", 0x1000, 0x1000, 0x1000, false, true,
+        )],
+    );
+    let mut a = Analysis::compute(&p);
+    let tables: [(&str, u64, &[u64]); 5] = [
+        ("Base", 0x8000, &[0x100, 0x200, 0x300, 0x400, 0x500]),
+        ("A", 0x8100, &[0x100, 0x200, 0x300, 0x410, 0x510]),
+        ("B", 0x8200, &[0x100, 0x200, 0x320, 0x420, 0x520]),
+        ("Short", 0x8300, &[0x100, 0x200, 0x330, 0x430]),
+        ("Lone", 0x8400, &[0x100, 0x240, 0x340, 0x440, 0x540]),
+    ];
+    for (name, vtable, slots) in tables {
+        a.classes.by_name.insert(
+            name.to_owned(),
+            ClassInfo {
+                name: name.to_owned(),
+                vtable: Some(vtable),
+                slots: slots.to_vec(),
+                ..ClassInfo::default()
+            },
+        );
+    }
+    let mut o = Overlay::default();
+    for (va, name) in [
+        (0x100, "Base::Release"),
+        (0x200, "Base::AddRef"),
+        (0x320, "B::Update"),
+        (0x410, "A::Draw"),
+        (0x420, "B::Draw"),
+        (0x510, "A::Paint"),
+        (0x520, "B::Render"),
+        (0x440, "Lone::Draw"),
+    ] {
+        o.names.insert(va, name.to_owned());
+    }
+    let fam = family_of(&a, &o, "Base").expect("Base has a family");
+    assert_eq!(
+        fam.members,
+        vec![("A".to_owned(), 3), ("B".to_owned(), 2)],
+        "{fam:?}"
+    );
+    assert_eq!(
+        fam.names.get(&3),
+        Some(&SlotName::Agreed(
+            "Draw".to_owned(),
+            vec!["A".to_owned(), "B".to_owned()]
+        ))
+    );
+    assert!(
+        matches!(fam.names.get(&4), Some(SlotName::Disputed(s)) if s.len() == 2),
+        "{fam:?}"
+    );
+    assert!(
+        family_of(&a, &o, "Short").is_none(),
+        "four slots is another table"
+    );
+    assert!(
+        family_of(&a, &o, "Lone").is_none(),
+        "one anchor links nothing"
+    );
+    let text = render_slots(&a, &o, &a.classes.by_name["Base"], 48);
+    for want in [
+        "family: A (3 shared), B (2 shared); each 5-slot table",
+        "  [2] sub_300  family names it Update (spelled by B)\n",
+        "  [3] sub_400  family names it Draw (spelled by A, B)\n",
+        "  [4] sub_500  family disagrees: Paint (A), Render (B); left unnamed\n",
+        "  [0] Base::Release\n",
+    ] {
+        assert!(text.contains(want), "missing {want:?}:\n{text}");
+    }
+}

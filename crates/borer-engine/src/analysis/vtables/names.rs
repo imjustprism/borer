@@ -843,7 +843,7 @@ pub(super) fn propagate_slot_names(
 /// # Arguments
 ///
 /// * `name` - The function name, if any.
-fn method_part(name: Option<&str>) -> Option<String> {
+pub(super) fn method_part(name: Option<&str>) -> Option<String> {
     let name = name?;
     let class = class_of(name)?;
     let method = name.get(class.len() + 2..)?;

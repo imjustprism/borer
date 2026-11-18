@@ -268,7 +268,7 @@ impl BorerServer {
     /// When no binary is loaded, the address is not a class method, nothing
     /// belongs to the class, or the struct to apply is refused.
     #[tool(
-        description = "Infer a C++ class's fields, methods and vftable from how its methods use the object: offset, width, reads, writes. Use it on an unknown class; for a known layout use set_type. apply=Name saves it as a struct (dry run until dry_run=false).",
+        description = "Infer a C++ class's fields, methods and vftable from how its methods use the object: offset, width, reads, writes; an unnamed slot shows the name its family (tables sharing functions slot for slot) agrees on. Use it on an unknown class; for a known layout use set_type. apply=Name saves it as a struct (dry run until dry_run=false).",
         meta = effects(&[Effect::ChangesSession]),
         annotations(
             read_only_hint = false,

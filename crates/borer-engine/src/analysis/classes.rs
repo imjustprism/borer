@@ -23,9 +23,7 @@ use std::sync::Arc;
 use super::decompile::decompile_plain;
 use super::fieldrefs::{FieldAccess, FieldRef};
 use super::members::{Receiver, asserts_a_member, spread_members, votes_in};
-use super::{
-    Analysis, Function, Overlay, Signature, name_of, plain_text_cached, slot_name_of, striped,
-};
+use super::{Analysis, Function, Overlay, Signature, name_of, plain_text_cached, striped};
 use crate::fxmap::FxHashMap;
 use crate::program::Program;
 
@@ -2072,15 +2070,12 @@ pub fn render_layout(layout: &ClassLayout, analysis: &Analysis, overlay: &Overla
         if let Some(code) = analysis.classes.ids.get(&layout.name) {
             let _ = writeln!(out, "wire id: {}", fourcc(*code));
         }
-        if let Some(v) = info.vtable {
-            let _ = writeln!(out, "vftable: {v:#x} ({} slots)", info.slots.len());
-            for (i, &s) in info.slots.iter().enumerate().take(SLOTS_SHOWN) {
-                let _ = writeln!(out, "  [{i}] {}", slot_name_of(analysis, overlay, s));
-            }
-            if info.slots.len() > SLOTS_SHOWN {
-                let _ = writeln!(out, "  ... {} more", info.slots.len() - SLOTS_SHOWN);
-            }
-        }
+        out.push_str(&super::vtables::render_slots(
+            analysis,
+            overlay,
+            info,
+            SLOTS_SHOWN,
+        ));
         let names = |entries: &[u64]| -> String {
             entries
                 .iter()

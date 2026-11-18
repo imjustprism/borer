@@ -9,7 +9,7 @@ crates/borer-engine/src/analysis/apihash.rs::scan#1	109
 crates/borer-engine/src/analysis/attributes.rs::catalog#1	109
 crates/borer-engine/src/analysis/attributes.rs::catalog_tsv#1	165
 crates/borer-engine/src/analysis/cdecl.rs::lex#1	112
-crates/borer-engine/src/analysis/classes.rs::render_layout#1	165
+crates/borer-engine/src/analysis/classes.rs::render_layout#1	162
 crates/borer-engine/src/analysis/decompile/cir/print.rs::line#1	109
 crates/borer-engine/src/analysis/decompile/ctext.rs::tokens#1	102
 crates/borer-engine/src/analysis/decompile/emit.rs::emit_block#1	445
