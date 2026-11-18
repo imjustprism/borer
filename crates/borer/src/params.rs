@@ -1109,7 +1109,9 @@ pub(crate) fn must_be_a_name(name: &str) -> Result<(), ErrorData> {
 ///
 /// Nothing borer lists lives outside the image, so a name or comment there
 /// would sit in the overlay and the project file and never be shown; `0x1`
-/// is a typo, not a place. Both annotating tools refuse it alike.
+/// is a typo, not a place. Both annotating tools refuse it alike. A
+/// section the file holds no bytes for (`.bss`) is in the image, and the
+/// decompiler names its globals, so it takes annotations.
 ///
 /// # Arguments
 ///
@@ -1119,13 +1121,14 @@ pub(crate) fn must_be_a_name(name: &str) -> Result<(), ErrorData> {
 ///
 /// # Errors
 ///
-/// When no section contains `va`, listing the sections that exist.
+/// When no section declares `va` ([`program::Program::declared_at`]),
+/// listing the sections that exist.
 pub(crate) fn must_be_in_a_section(
     program: &program::Program,
     va: u64,
     what: Annotation,
 ) -> Result<(), String> {
-    if program.section_at(va).is_some() {
+    if program.declared_at(va).is_some() {
         return Ok(());
     }
     Err(format!(
@@ -1492,6 +1495,21 @@ mod tests {
             "{name}"
         );
         assert_eq!(comment, name.replace("a name", "a comment"));
+    }
+
+    /// An annotation in a section the file holds no bytes for is in the
+    /// image, so it passes.
+    ///
+    /// # Panics
+    ///
+    /// When an address in `.bss` is refused as in no section.
+    #[test]
+    fn an_annotation_in_a_section_without_file_bytes_passes() {
+        use borer_engine::program::{Arch, Program, Section};
+        let mut bss = Section::mapped(".bss", 0x2000, 0, 0x100, true, false);
+        bss.file_size = 0;
+        let p = Program::raw(vec![0xc3; 0x10], Arch::X86_64, 0, None, vec![bss]);
+        assert_eq!(must_be_in_a_section(&p, 0x2010, Annotation::Name), Ok(()));
     }
 
     /// A field offset is hex with its `0x` and decimal without, as an
