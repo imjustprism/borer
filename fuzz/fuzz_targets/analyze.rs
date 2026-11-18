@@ -52,7 +52,9 @@ fuzz_target!(|data: &[u8]| {
     }
     let analysis = Analysis::compute(&program);
     let overlay = Overlay::default();
-    let cited = sources(&program, &analysis);
+    let sdk = modsdk::build(&program, &analysis, &overlay);
+    let mut cited = sources(&program, &analysis);
+    cited.file_by_class(&program, &analysis, &overlay, &sdk);
     for f in analysis.functions.iter().take(DECOMPILED) {
         for bytes in [Bytes::Hidden, Bytes::Shown] {
             let text = disasm_function_with(&program, &analysis, &overlay, f.entry, LISTED, bytes);
@@ -138,7 +140,6 @@ fuzz_target!(|data: &[u8]| {
             _ = render_layout(&layout, &analysis, &overlay);
         }
     }
-    let sdk = modsdk::build(&program, &analysis, &overlay);
     let split = class_headers(&sdk);
     let named: Vec<(&str, &str)> = split
         .classes
