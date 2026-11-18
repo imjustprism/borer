@@ -1016,7 +1016,7 @@ dependencies = [
 
 [[package]]
 name = "borer-engine"
-version = "0.2.12"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "cpp_demangle",
@@ -1035,7 +1035,7 @@ dependencies = [
 
 [[package]]
 name = "borer-front"
-version = "0.2.12"
+version = "0.3.0"
 dependencies = [
  "borer-engine",
 ]
