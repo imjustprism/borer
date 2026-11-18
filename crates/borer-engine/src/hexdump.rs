@@ -182,7 +182,7 @@ pub fn hex_rows(program: &crate::program::Program, va: u64, len: usize) -> HexRo
             (Some(bytes), _) => (
                 from_usize(bytes.len()),
                 HexFill::Bytes(bytes.to_vec()),
-                holding,
+                program.section_at(at),
             ),
             (None, Some(s)) => (
                 s.va.0
@@ -356,6 +356,35 @@ mod tests {
         assert!(
             matches!(&spans[1].fill, HexFill::Bytes(b) if b.starts_with(b"MZ")),
             "{spans:?}"
+        );
+    }
+
+    /// A PE's header bytes are in no section, also when a hostile table
+    /// declares a section without file bytes over them.
+    ///
+    /// # Panics
+    ///
+    /// When the headers are put under the section declared over them.
+    #[test]
+    fn hex_rows_put_header_bytes_under_no_section() {
+        let base = 0x1_4000_0000;
+        let mut image = vec![0u8; 0x210];
+        image[..2].copy_from_slice(b"MZ");
+        let text = Section::mapped(".text", base + 0x1000, 0x200, 0x10, false, true);
+        let mut bss = Section::mapped(".bss", base, 0, 0x1000, true, false);
+        bss.file_size = 0;
+        let mut pe = Program::raw(image, Arch::X86_64, base, None, vec![text, bss]);
+        pe.format = BinaryFormat::Pe;
+        let rows = hex_rows(&pe, base, 0x10);
+        assert_eq!(rows.spans.len(), 1, "{rows:?}");
+        assert_eq!(rows.spans[0].section, None);
+        let spelled = rows.spell(&pe).expect("the header bytes");
+        assert!(
+            spelled.starts_with(
+                "# 0x140000000..0x140000010
+"
+            ),
+            "{spelled}"
         );
     }
 
