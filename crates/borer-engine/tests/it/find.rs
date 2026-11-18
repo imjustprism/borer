@@ -586,3 +586,54 @@ fn a_whole_import_name_is_exact() {
     assert_eq!(rank("kernel32"), Rank::Prefix);
     assert_eq!(rank("32.dll"), Rank::Substring);
 }
+
+/// An address in a `.bss` is a place by name wherever one is asked for: a
+/// find hit, the signature and YARA refusals, and the RVA a number is
+/// read as when no function holds it.
+///
+/// The YARA rule is asked of an image whose function's section lost its
+/// file bytes, the one way a function's entry has none.
+#[test]
+fn a_bss_address_is_named_by_find_signature_and_function_answers() {
+    use borer_engine::analysis::no_function_at;
+    use borer_engine::analysis::render::{signature, yara_rule};
+    let text = || Section::mapped(".text", 0x40_1000, 0, 0x10, false, true);
+    let bss = |name: &str, va: u64| {
+        let mut bss = Section::mapped(name, va, 0, 0x1000, true, false);
+        bss.file_size = 0;
+        bss
+    };
+    let image = |sections| Program::raw(vec![0xc3; 0x10], Arch::X86_64, 0x40_0000, None, sections);
+    let p = image(vec![text(), bss(".bss", 0x40_2000)]);
+    let (a, o) = (Analysis::compute(&p), Overlay::default());
+    let found = everywhere(&p, &a, &o, &Query::parse("0x402010"), 100);
+    let first = found.hits.first().map(|h| (h.kind(), h.addr, &*h.text));
+    assert_eq!(first, Some((HitKind::Address, Some(0x40_2010), ".bss")));
+    assert_eq!(
+        signature(&p, 0x40_2010, None).err().as_deref(),
+        Some("address 0x402010 is in .bss, which holds no file bytes (the loader zero-fills it)")
+    );
+    assert_eq!(
+        no_function_at(&p, &a, 0x2010),
+        "no discovered function contains 0x2010: it is outside the image (0x401000..0x403000); as an RVA it is 0x402010, which is mapped"
+    );
+    let at = |section| {
+        Program::raw(
+            vec![0xc3; 0x10],
+            Arch::X86_64,
+            0,
+            Some(0x1000),
+            vec![section],
+        )
+    };
+    let functions = Analysis::compute(&at(Section::mapped(".text", 0x1000, 0, 0x10, false, true)));
+    assert!(functions.function_at(0x1000).is_some());
+    let why = yara_rule(&at(bss(".bss", 0x1000)), &functions, &o, &[0x1000])
+        .expect_err("no bytes to match");
+    assert!(
+        why.ends_with(
+            ": address 0x1000 is in .bss, which holds no file bytes (the loader zero-fills it)"
+        ),
+        "{why}"
+    );
+}
