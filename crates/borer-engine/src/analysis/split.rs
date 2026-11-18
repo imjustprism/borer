@@ -147,23 +147,46 @@ pub fn sources(p: &Program, a: &Analysis) -> Sources {
     }
     for path in cited.keys().take(UNITS_MAX) {
         let short = path.strip_prefix(root.as_str()).unwrap_or(path);
-        let parts: Vec<String> = short
-            .split('/')
-            .filter(|c| !c.is_empty() && *c != "." && *c != "..")
-            .map(safe_component)
-            .collect();
-        let kept = parts
-            .get(parts.len().saturating_sub(DEPTH_MAX + 1)..)
-            .unwrap_or_default();
-        let rel = if kept.is_empty() {
-            "_".to_owned()
-        } else {
-            kept.join("/")
-        };
-        out.files
-            .insert(path.clone(), unique_file(&mut taken, &rel, ".c"));
+        out.files.insert(
+            path.clone(),
+            unique_file(&mut taken, &rel_stem(short), ".c"),
+        );
     }
     out
+}
+
+/// Returns the stem of a cited path's split file.
+///
+/// Its components are made safe, at most [`DEPTH_MAX`] directories are
+/// kept, the innermost, and a directory named like a split file (`a.c/`,
+/// `b.h/`) takes a `_`, so no file is named as a directory.
+///
+/// # Arguments
+///
+/// * `short` - The path, the build root dropped, `/`-separated.
+fn rel_stem(short: &str) -> String {
+    let mut parts: Vec<String> = short
+        .split('/')
+        .filter(|c| !c.is_empty() && *c != "." && *c != "..")
+        .map(safe_component)
+        .collect();
+    let dirs = parts.len().saturating_sub(1);
+    for dir in parts.iter_mut().take(dirs) {
+        if [".c", ".h"]
+            .iter()
+            .any(|e| dir.to_ascii_lowercase().ends_with(e))
+        {
+            dir.push('_');
+        }
+    }
+    let kept = parts
+        .get(parts.len().saturating_sub(DEPTH_MAX + 1)..)
+        .unwrap_or_default();
+    if kept.is_empty() {
+        "_".to_owned()
+    } else {
+        kept.join("/")
+    }
 }
 
 impl Filed<'_> {
@@ -374,6 +397,21 @@ mod tests {
         assert_eq!(header_file(&mut headers, "_sdk"), "_sdk_2.h");
         assert_eq!(header_file(&mut headers, "Foo"), "Foo.h");
         assert_eq!(header_file(&mut headers, "foo"), "foo_2.h");
+    }
+
+    /// A cited path's file stays under the split however the binary spells
+    /// it, and a directory named like a split file takes a `_`.
+    ///
+    /// # Panics
+    ///
+    /// When a stem leaves the directory or names a file as a directory.
+    #[test]
+    fn a_cited_path_becomes_a_safe_stem() {
+        assert_eq!(rel_stem("a.c/x.cpp"), "a.c_/x.cpp");
+        assert_eq!(rel_stem("B.H/y.h"), "B.H_/y.h");
+        assert_eq!(rel_stem("../../x/./con.cpp"), "x/_con.cpp");
+        assert_eq!(rel_stem("/"), "_");
+        assert_eq!(rel_stem("a/b/c/d/e/f/g/h/i/j/k.cc"), "c/d/e/f/g/h/i/j/k.cc");
     }
 
     /// A class whose methods were not exported is not said to cite no

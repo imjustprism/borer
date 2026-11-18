@@ -428,6 +428,7 @@ impl Units<'_> {
             let path = self.dir.join(&file);
             let shown = short_path(&path.display().to_string());
             let mut out = if self.made.insert(file.clone()) {
+                no_link_under(self.dir, &file)?;
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)
                         .with_context(|| format!("creating the directory of {shown}"))?;
@@ -448,6 +449,43 @@ impl Units<'_> {
     }
 }
 
+/// Refuses a link at any directory between `dir` and the file `file`
+/// names under it, so a split never writes through one.
+///
+/// # Arguments
+///
+/// * `dir` - The directory the file is under.
+/// * `file` - The file, relative to `dir`, `/`-separated.
+///
+/// # Errors
+///
+/// When a directory on the way is a link, or something that is not a
+/// directory.
+fn no_link_under(dir: &Path, file: &str) -> anyhow::Result<()> {
+    let mut at = dir.to_path_buf();
+    for part in file
+        .split('/')
+        .collect::<Vec<_>>()
+        .split_last()
+        .map_or(&[][..], |(_, d)| d)
+    {
+        at.push(part);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a sanitized path under the split's directory"
+        )]
+        let meta = std::fs::symlink_metadata(&at);
+        match meta {
+            Ok(m) if m.file_type().is_symlink() || !m.is_dir() => anyhow::bail!(
+                "{} is a link or not a directory; nothing more was written",
+                short_path(&at.display().to_string())
+            ),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Writes one file of a split whole, replacing what is there.
 ///
 /// # Arguments
@@ -466,12 +504,14 @@ fn write_whole(path: &Path, text: &str) -> anyhow::Result<()> {
         .with_context(|| format!("writing {shown}"))
 }
 
-/// Creates the `src` and `include` directories of a split.
+/// Creates the `src` and `include` directories of a split under a new or
+/// empty directory.
 ///
 /// # Arguments
 ///
 /// * `root` - The split's directory, cleared by
 ///   [`borer_engine::program::unusable_path`].
+/// * `shown` - The directory as messages spell it.
 ///
 /// # Returns
 ///
@@ -479,8 +519,15 @@ fn write_whole(path: &Path, text: &str) -> anyhow::Result<()> {
 ///
 /// # Errors
 ///
-/// When one of the two cannot be created.
-fn split_dirs(root: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
+/// When the directory holds anything, or one of the two cannot be created.
+fn split_dirs(root: &Path, shown: &str) -> anyhow::Result<(PathBuf, PathBuf)> {
+    #[expect(clippy::disallowed_methods, reason = "unusable_path cleared the root")]
+    let occupied = std::fs::read_dir(root).is_ok_and(|mut d| d.next().is_some());
+    if occupied {
+        anyhow::bail!(
+            "{shown} is not empty; name a new or empty directory for --split; nothing was written"
+        );
+    }
     let (src, include) = (root.join("src"), root.join("include"));
     for d in [&src, &include] {
         std::fs::create_dir_all(d).with_context(|| format!("creating {}", d.display()))?;
@@ -509,7 +556,8 @@ fn split_dirs(root: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
 /// * `overlay` - Names, types and comments to apply.
 /// * `library` - Whether library code is written.
 /// * `only` - Entries to write, or every function when `None`.
-/// * `dir` - The directory; created when missing, files in it replaced.
+/// * `dir` - The directory, created when missing; one holding anything is
+///   refused.
 ///
 /// # Returns
 ///
@@ -517,7 +565,8 @@ fn split_dirs(root: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
 ///
 /// # Errors
 ///
-/// When the path is unusable, a directory or file cannot be created or
+/// When the path is unusable, the directory is not empty, a directory on
+/// the way to a file is a link, a directory or file cannot be created or
 /// written, or the request's deadline passed while the functions were
 /// decompiled; the files written before stay, partial, and the error says
 /// so.
@@ -536,7 +585,7 @@ pub fn write_split(
         anyhow::bail!("{why}; nothing was written");
     }
     let shown = short_path(dir);
-    let (src, include) = split_dirs(root)?;
+    let (src, include) = split_dirs(root, &shown)?;
     let sources = split::sources(program, analysis);
     let set = only.map(|e| e.iter().copied().collect::<BTreeSet<u64>>());
     let mut units = Units {
@@ -1065,6 +1114,16 @@ mod tests {
         assert!(read("src/_decls.h").contains("functions decompiled by borer"));
         assert!(read("include/_sdk.h").contains("namespace sdk"));
         assert!(read("MAP.tsv").contains("# class\theader\tsource\tevidence"));
+        let again = super::write_split(
+            &p,
+            &a,
+            &o,
+            Library::Include,
+            None,
+            &dir.display().to_string(),
+        )
+        .expect_err("a directory holding a split is refused");
+        assert!(again.to_string().contains("is not empty"), "{again}");
         std::fs::remove_dir_all(&dir).expect("cleans up");
     }
 }
