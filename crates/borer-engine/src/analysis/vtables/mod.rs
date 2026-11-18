@@ -83,6 +83,7 @@ use constants::read_slots;
 pub(crate) use constants::slot_rows;
 pub use constants::{SlotConstant, slot_constants, slot_constants_tsv};
 pub use family::{Family, SlotName, family_of, render_slots};
+pub(crate) use family::{reports_pure_call, slot_stubs};
 pub(in crate::analysis) use hints::object_type;
 use hints::{
     Bound, ValueHints, common_class, deepest_class, named_class, param_class, receiver_class,

@@ -1748,9 +1748,7 @@ impl Exec<'_, '_> {
     /// * `entry` - The slot's function.
     pub(super) fn pure_stub(&self, entry: u64) -> bool {
         let analysis = self.ctx.analysis;
-        name_of(analysis, self.ctx.overlay, entry)
-            .to_ascii_lowercase()
-            .contains("purecall")
+        crate::analysis::vtables::reports_pure_call(&name_of(analysis, self.ctx.overlay, entry))
             || analysis
                 .derived
                 .get_or_build("pure_stubs", (), || pure_stubs(analysis))
@@ -3011,16 +3009,8 @@ fn names_variable(args: &[String], name: &str) -> bool {
 /// no path returns from: no `ret`, no jump out of the function.
 fn pure_stubs(analysis: &crate::analysis::Analysis) -> BTreeSet<u64> {
     use crate::analysis::BlockTerm;
-    let mut indexes: BTreeMap<u64, BTreeSet<usize>> = BTreeMap::new();
-    for info in analysis.classes.by_name.values() {
-        for (i, e) in info.slots.iter().enumerate() {
-            indexes.entry(*e).or_default().insert(i);
-        }
-    }
-    indexes
+    crate::analysis::vtables::slot_stubs(&analysis.classes.by_name, usize::MAX)
         .into_iter()
-        .filter(|(_, at)| at.len() >= 2)
-        .map(|(e, _)| e)
         .filter(|e| {
             analysis.function(*e).is_some_and(|f| {
                 let inside = |s: &u64| f.blocks.iter().any(|b| b.start == *s);

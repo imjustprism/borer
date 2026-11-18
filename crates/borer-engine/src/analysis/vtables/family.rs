@@ -4,8 +4,10 @@
 //! Two tables of one slot count that hold one function at one index hold
 //! the same virtual there: neither class overrode it, so both inherit it
 //! from a base whose table reaches that index, and every slot up to it is
-//! that base's virtual in both. Tables that agree so at [`ANCHORS_MIN`]
-//! indexes are one family. A member's name for slot `k` is a hint for
+//! that base's virtual in both, unless the function is a stub: one the
+//! tables hold at several indexes or in more than [`BUCKET_MAX`] tables,
+//! or one named as the pure-call handler. Tables that agree so at
+//! [`ANCHORS_MIN`] indexes are one family. A member's name for slot `k` is a hint for
 //! another member's slot `k` only when the two share an anchor at `k` or
 //! above, or `k` is below the table of a parent the constructors name for
 //! both: past that, two siblings' slots `k` may be each one's own new
@@ -47,6 +49,8 @@ struct Families {
     /// The linking stopped at [`PAIR_WORK_MAX`], so a family may miss
     /// members.
     capped: bool,
+    /// The functions no table holds as an anchor ([`slot_stubs`]).
+    stubs: BTreeSet<u64>,
 }
 
 /// What a family says of one slot.
@@ -74,20 +78,60 @@ pub struct Family {
     pub names: BTreeMap<usize, SlotName>,
 }
 
-/// Returns the functions a table holds at one index only, the anchors it
-/// can share: a function at two indexes is a stub, and a `0` is data.
+/// Returns the functions no table holds as an anchor: each one the
+/// tables hold at two or more slot indexes, or more than `tables_max`
+/// tables hold.
+///
+/// A virtual a hierarchy shares sits at one index in every table that
+/// inherits it; the stub of a pure virtual slot, or a folded `return 0`,
+/// fills slots at any index in unrelated classes.
+///
+/// # Arguments
+///
+/// * `classes` - Classes with their tables.
+/// * `tables_max` - Most tables one function may be held by and still be
+///   an anchor.
+pub(crate) fn slot_stubs(
+    classes: &BTreeMap<String, ClassInfo>,
+    tables_max: usize,
+) -> BTreeSet<u64> {
+    let mut seen: BTreeMap<u64, (BTreeSet<usize>, usize)> = BTreeMap::new();
+    for info in classes.values() {
+        for (i, &f) in info.slots.iter().enumerate() {
+            let (at, held) = seen.entry(f).or_default();
+            at.insert(i);
+            *held += 1;
+        }
+    }
+    seen.into_iter()
+        .filter(|(_, (at, held))| at.len() >= 2 || *held > tables_max)
+        .map(|(f, _)| f)
+        .collect()
+}
+
+/// Tells whether a function's name says it reports a pure virtual call
+/// (`_purecall`).
+///
+/// # Arguments
+///
+/// * `name` - The function's name.
+pub(crate) fn reports_pure_call(name: &str) -> bool {
+    name.to_ascii_lowercase().contains("purecall")
+}
+
+/// Returns the functions a table holds that it can share as anchors:
+/// none of the program's stubs ([`slot_stubs`]), and no `0`, which is
+/// data.
 ///
 /// # Arguments
 ///
 /// * `slots` - The table's slots.
-fn anchors(slots: &[u64]) -> BTreeSet<u64> {
-    let mut seen: BTreeMap<u64, usize> = BTreeMap::new();
-    for &f in slots {
-        *seen.entry(f).or_default() += 1;
-    }
-    seen.into_iter()
-        .filter(|&(f, n)| f != 0 && n == 1)
-        .map(|(f, _)| f)
+/// * `stubs` - The program's stubs.
+fn anchors(slots: &[u64], stubs: &BTreeSet<u64>) -> BTreeSet<u64> {
+    slots
+        .iter()
+        .copied()
+        .filter(|f| *f != 0 && !stubs.contains(f))
         .collect()
 }
 
@@ -98,12 +142,13 @@ fn anchors(slots: &[u64]) -> BTreeSet<u64> {
 /// * `classes` - Classes with their tables.
 fn families(classes: &BTreeMap<String, ClassInfo>) -> Families {
     let names: Vec<&String> = classes.keys().collect();
+    let stubs = slot_stubs(classes, BUCKET_MAX);
     let mut held: Vec<(usize, usize, u64, usize)> = Vec::new();
     for (at, info) in classes.values().enumerate() {
         if info.vtable.is_none() {
             continue;
         }
-        let once = anchors(&info.slots);
+        let once = anchors(&info.slots, &stubs);
         for (k, &f) in info.slots.iter().enumerate() {
             if once.contains(&f) {
                 held.push((info.slots.len(), k, f, at));
@@ -146,6 +191,7 @@ fn families(classes: &BTreeMap<String, ClassInfo>) -> Families {
     }
     let mut out = Families {
         capped,
+        stubs,
         ..Families::default()
     };
     for members in grouped.into_values() {
@@ -211,12 +257,13 @@ fn build_family(analysis: &Analysis, overlay: &Overlay, class: &str) -> Option<F
     let own_methods: Vec<Option<String>> = own.slots.iter().map(|&f| method_at(f)).collect();
     let mut votes: BTreeMap<usize, BTreeMap<String, Vec<String>>> = BTreeMap::new();
     let mut members = Vec::new();
-    let own_anchors = anchors(&own.slots);
+    let mut own_anchors = anchors(&own.slots, &all.stubs);
+    own_anchors.retain(|&f| !reports_pure_call(&name_of(analysis, overlay, f)));
     for m in group.iter().filter(|m| *m != class) {
         let Some(info) = classes.get(m) else {
             continue;
         };
-        let theirs = anchors(&info.slots);
+        let theirs = anchors(&info.slots, &all.stubs);
         let anchor = |f: u64| own_anchors.contains(&f) && theirs.contains(&f);
         let shared = info
             .slots
@@ -274,8 +321,9 @@ fn build_family(analysis: &Analysis, overlay: &Overlay, class: &str) -> Option<F
 ///
 /// That is up to and including the last index the two tables share an
 /// anchor at, or the length of a parent's table the constructors name for
-/// both, the larger. A stub both tables hold twice shares nothing: two
-/// siblings each fill their own new slots with it.
+/// both, the larger. A stub shares nothing ([`slot_stubs`],
+/// [`reports_pure_call`]): two siblings each fill their own new slots with
+/// it.
 ///
 /// # Arguments
 ///

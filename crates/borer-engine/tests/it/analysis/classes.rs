@@ -1406,3 +1406,48 @@ fn a_repeated_stub_is_no_shared_slot() {
     assert_eq!(fam.members, vec![("Y".to_owned(), 2)], "{fam:?}");
     assert!(family_of(&a, &o, "Z").is_none(), "a stub links nothing");
 }
+
+/// A stub each sibling holds once, at the same slot, is no shared slot
+/// once the program shows it is a stub, so the sibling's names stop at the
+/// slots they truly share.
+///
+/// `Texture` and `Sound` share `0x100` and `0x200` and end in `0x900`.
+/// Named `_purecall`, or held at another index by `Shader`, `0x900` is a
+/// stub: `Texture`'s `Bind` at slot 2 is no hint for `Sound`, and they
+/// share two slots. With neither, nothing tells `0x900` from a virtual
+/// both inherit at slot 3, whose base then reaches slot 2 too, so the
+/// hint stands.
+#[test]
+fn a_stub_each_sibling_holds_once_lends_no_names() {
+    use borer_engine::analysis::vtables::render_slots;
+    let texture: &[u64] = &[0x100, 0x200, 0x310, 0x900];
+    let sound: &[u64] = &[0x100, 0x200, 0x320, 0x900];
+    let bind = (0x310, "Texture::Bind");
+    let named = family_fixture(
+        &[("Texture", 0x8000, texture), ("Sound", 0x8100, sound)],
+        &[bind, (0x900, "_purecall")],
+    );
+    let elsewhere = family_fixture(
+        &[
+            ("Texture", 0x8000, texture),
+            ("Sound", 0x8100, sound),
+            ("Shader", 0x8200, &[0x900, 0x700, 0x800]),
+        ],
+        &[bind],
+    );
+    for (a, o) in [named, elsewhere] {
+        let text = render_slots(&a, &o, &a.classes.by_name["Sound"], 48);
+        assert!(text.contains("family: Texture (2 shared)"), "{text}");
+        assert!(!text.contains("Bind"), "{text}");
+    }
+    let (a, o) = family_fixture(
+        &[("Texture", 0x8000, texture), ("Sound", 0x8100, sound)],
+        &[bind],
+    );
+    let text = render_slots(&a, &o, &a.classes.by_name["Sound"], 48);
+    assert!(text.contains("family: Texture (3 shared)"), "{text}");
+    assert!(
+        text.contains("  [2] sub_320  Texture names this slot Bind\n"),
+        "{text}"
+    );
+}
