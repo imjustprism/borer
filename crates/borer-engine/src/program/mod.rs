@@ -2251,12 +2251,16 @@ impl Program {
     /// Returns a compact `name(start..end)` listing of the sections.
     ///
     /// Error messages about unmapped addresses append it so an agent can
-    /// correct the address without another call; only sections that take
-    /// addresses ([`Section::span`]) are named, `none` when no section does,
-    /// so the message does not end on an empty list. At most
-    /// [`SECTIONS_SHOWN`] are named, then `... N more`.
+    /// correct the address without another call; a `.tbss`, which takes no
+    /// image addresses ([`Section::span`]), is left out, and `none` stands
+    /// for an empty list. At most [`SECTIONS_SHOWN`] are named, then
+    /// `... N more`.
     pub fn section_list(&self) -> String {
-        let placed = || self.sections.iter().filter(|s| !s.span().is_empty());
+        let placed = || {
+            self.sections
+                .iter()
+                .filter(|s| !(s.thread_local && s.span().is_empty()))
+        };
         if placed().next().is_none() {
             return "none".to_owned();
         }

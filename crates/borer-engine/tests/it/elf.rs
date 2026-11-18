@@ -1007,6 +1007,20 @@ fn a_thread_local_bss_is_in_no_listing_or_refusal() {
     assert!(text.contains(".bss"), "{text}");
 }
 
+/// The section list an unmapped address's refusal offers leaves out only
+/// a `.tbss`: an empty section that is not thread-local (an empty
+/// `.tm_clone_table`) is still named.
+#[test]
+fn the_section_list_leaves_out_only_a_thread_local_bss() {
+    let p = retyped([
+        (b".tbss\0", 8, 0x403, BASE + 0x1000, 0x1000),
+        (b".empty\0", 1, 0x3, BASE + 0x1800, 0),
+    ]);
+    let list = p.section_list();
+    assert!(!list.contains(".tbss("), "{list}");
+    assert!(list.contains(".empty(0x401800..0x401800)"), "{list}");
+}
+
 /// A listing at an address a `.tbss` declares first names the section
 /// declared after it that holds the address.
 #[test]
