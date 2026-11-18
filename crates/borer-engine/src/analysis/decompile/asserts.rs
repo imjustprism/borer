@@ -368,7 +368,9 @@ fn asserted_condition(line: &str) -> Option<String> {
 /// A subject is an identifier used as a value or an object (`reader` in
 /// `reader.isvalid()`, `index` in `index < this->count`): not a keyword,
 /// not a member after `.` or `->`, not a scope before or after `::`, not
-/// a constant spelled in capitals, not the type of a cast (`(Foo *)p`).
+/// a constant spelled in capitals, not the type of a cast: one token in
+/// parentheses that is plainly a type (`(Foo *)p`, `(uint32_t)i`) followed
+/// by an operand, so `(f)(x)` and `(a) and b` keep both their names.
 /// One followed by `.`, `->` or `[` is reached into
 /// ([`Spelled::Sub`](crate::analysis::members::Spelled::Sub)), and one
 /// spelled both ways counts as reached into.
@@ -397,13 +399,17 @@ pub(crate) fn subjects(
             }
             return None;
         }
+        let pointer = after.starts_with(['*', '&']);
         let cast = before.ends_with('(')
+            && (pointer || w.ends_with("_t"))
             && after
                 .trim_start_matches(['*', '&', ' '])
                 .strip_prefix(')')
+                .map(str::trim_start)
                 .is_some_and(|r| {
-                    r.trim_start()
-                        .starts_with(|c: char| is_ident_char(c) || c == '(')
+                    let next = r.split(|c: char| !is_ident_char(c)).next().unwrap_or("");
+                    r.starts_with('(')
+                        || (!next.is_empty() && !matches!(next, "and" | "or" | "not" | "xor"))
                 });
         if NOT_NAMES.contains(&w)
             || w.chars().all(|c| c.is_ascii_uppercase() || c == '_')

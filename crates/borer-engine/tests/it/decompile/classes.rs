@@ -1572,3 +1572,38 @@ fn an_applied_class_layout_types_a_qualified_method() {
     assert!(qualified.contains("ns::Cls *this"), "{qualified}");
     assert!(!qualified.contains("this->f_30"), "{qualified}");
 }
+
+/// A condition names its variable through a cast to a plain type, and
+/// names none where a parenthesised name is no cast.
+///
+/// The guard `if (a1 == 0)` precedes `assert("<condition>", "src/reader.cc",
+/// 7)`. `(uint32_t)reader` names `a1` `reader`; `(f)(x)` calls through `f`
+/// and `(a) and b` tests two names, so neither names `a1`: skipping every
+/// parenthesised word as a cast's type named it `x` and `b`.
+#[test]
+fn a_cast_names_its_operand_and_parentheses_alone_do_not() {
+    let code = [
+        0x8b, 0x44, 0x24, 0x04, 0x85, 0xc0, 0x75, 0x14, 0x6a, 0x07, 0x68, 0x12, 0x20, 0x40, 0x00,
+        0x68, 0x00, 0x20, 0x40, 0x00, 0xe8, 0x06, 0x00, 0x00, 0x00, 0x83, 0xc4, 0x0c, 0x8b, 0x00,
+        0xc3, 0xc3,
+    ]; // ASM: mov eax,[esp+4]; test eax,eax; jnz; push 7; push path; push cond; call; add esp,12; mov eax,[eax]; ret; ret
+    let named = |condition: &str| {
+        let mut data = condition.as_bytes().to_vec();
+        data.resize(0x12, 0);
+        data.extend_from_slice(b"src/reader.cc\0");
+        let p = crate::raw::image(borer_engine::program::Arch::X86, &code, &data);
+        let a = Analysis::compute(&p);
+        borer_engine::analysis::decompile::decompile_named(&p, &a, &Overlay::default(), 0x401000)
+            .unwrap_or_default()
+    };
+    let cast = named("(uint32_t)reader");
+    assert!(cast.contains("var1 = reader;"), "{cast}");
+    for (condition, wrong) in [("(f)(x)", "x"), ("(a) and b", "b")] {
+        let text = named(condition);
+        assert!(text.contains("a1"), "{condition}: {text}");
+        assert!(
+            !text.contains(&format!("var1 = {wrong};")),
+            "{condition}: {text}"
+        );
+    }
+}
