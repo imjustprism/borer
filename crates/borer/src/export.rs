@@ -1524,6 +1524,46 @@ mod tests {
         );
     }
 
+    /// The map gives a class the file most of its exported methods are
+    /// filed under, those cited and those filed by class counted alike.
+    ///
+    /// `C::a` and `C::b` cite `src/c.cpp` in their own asserts and `C::x`
+    /// and `C::y` nothing, so four are filed under it; `C::t1` to `C::t3`
+    /// load `src/other.cpp` beside no signature, three filed under that.
+    ///
+    /// # Panics
+    ///
+    /// When the map names `src/other.cpp`.
+    #[test]
+    fn the_map_names_the_file_most_exported_methods_are_filed_under() {
+        let (_, _, map) = split_of(
+            "most",
+            &[
+                ("C::a", &["src/c.cpp"]),
+                ("C::b", &["src/c.cpp"]),
+                ("C::t1", &["src/other.cpp"]),
+                ("C::t2", &["src/other.cpp"]),
+                ("C::t3", &["src/other.cpp"]),
+                ("C::x", &[]),
+                ("C::y", &[]),
+            ],
+            &["C::a", "C::b"],
+            &["C"],
+        );
+        let row = map
+            .lines()
+            .find(|l| l.starts_with("C\t"))
+            .unwrap_or_default();
+        assert_eq!(
+            row.split('\t').skip(2).take(2).collect::<Vec<_>>(),
+            vec![
+                "src/c.cpp",
+                "2 of 7 exported methods filed under it; 2 of 7 filed under it by their class, citing none themselves: 2 methods of 7 cite it in their own asserts; 1 other files cited too"
+            ],
+            "{map}"
+        );
+    }
+
     /// A class files nothing by class on paths its methods reference
     /// beside no signature of their own, on a header, or in an anonymous
     /// namespace, where two classes of two files read as one.
@@ -1531,7 +1571,7 @@ mod tests {
     /// `Foo::Tick` and `Foo::Tock` load `src/physics.cpp` with no signature
     /// (an inlined assert, a file name), `Foo::a` cites nothing; `H::a` and
     /// `H::b` cite `inc/h.h` in their own asserts, `H::c` nothing; two
-    /// methods of `(anonymous namespace)::Impl` cite `src/a.cpp` in their
+    /// methods of the class `Impl` in an anonymous namespace cite `src/a.cpp` in their
     /// own asserts and a third nothing.
     ///
     /// # Panics
@@ -1539,7 +1579,7 @@ mod tests {
     /// When `Foo::a`, `H::c` or the third `Impl` method is filed by class.
     #[test]
     fn a_class_without_two_own_witnesses_of_a_source_files_nothing_by_class() {
-        let anon = "(anonymous namespace)::Impl";
+        let anon = "`anonymous namespace'::Impl";
         let (x, y, z) = (
             format!("{anon}::x"),
             format!("{anon}::y"),
