@@ -51,6 +51,25 @@ const TYPE_WORDS: [&str; 16] = [
     "static", "const", "size_t", "auto", "virtual", "inline",
 ];
 
+/// Steps [`choose_own`] may take per reference from a function to a name.
+///
+/// Each function is decided in at most two visits that read its
+/// references, and each name's referrers are read once: three steps per
+/// reference.
+const FUEL_PER_REFERENCE: usize = 4;
+
+/// The signature strings the code references.
+struct Found {
+    /// Each signature read, one per string, in address order.
+    sigs: Vec<Signature>,
+    /// Each referring function's candidates: a name, by its index in
+    /// `referrers`, to the index in `sigs` of the first string the
+    /// function references under it.
+    candidates: BTreeMap<u64, BTreeMap<usize, usize>>,
+    /// The functions referencing each name, names in the order met.
+    referrers: Vec<BTreeSet<u64>>,
+}
+
 /// Fills the name and signature of every unnamed function that references a
 /// signature string only it can be, and marks those names inferred.
 ///
@@ -59,8 +78,48 @@ const TYPE_WORDS: [&str; 16] = [
 /// * `program` - The image the strings are read from.
 /// * `analysis` - Functions and cross-references; names are written in place.
 pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
-    let mut candidates: BTreeMap<u64, BTreeMap<String, Signature>> = BTreeMap::new();
-    let mut referrers: BTreeMap<String, BTreeSet<u64>> = BTreeMap::new();
+    let found = signatures(program, analysis);
+    let mut named: BTreeSet<u64> = analysis
+        .functions
+        .iter()
+        .filter(|f| f.name.is_some())
+        .map(|f| f.entry)
+        .collect();
+    let mut assigned = vec![false; found.referrers.len()];
+    let mut chosen = choose_own(&found, &mut named, &mut assigned);
+    chosen.extend(choose_helpers(program, analysis, &found, &named, &assigned));
+    let mut seen: BTreeMap<String, u32> = BTreeMap::new();
+    for f in &mut analysis.functions {
+        let Some(sig) = chosen.get(&f.entry).and_then(|&s| found.sigs.get(s)) else {
+            continue;
+        };
+        let n = seen.entry(sig.name.clone()).or_insert(0);
+        *n += 1;
+        f.name = Some(if *n == 1 {
+            sig.name.clone()
+        } else {
+            format!("{}_{n}", sig.name)
+        });
+        f.name_inferred = true;
+        f.name_source = NameSource::Signature;
+        f.signature = Some(sig.clone());
+    }
+}
+
+/// Reads the signature strings the code references, each once, and
+/// records the setters among them in `analysis.classes.setters`.
+///
+/// # Arguments
+///
+/// * `program` - The image the strings are read from.
+/// * `analysis` - Cross-references; the setters are written in place.
+fn signatures(program: &Program, analysis: &mut Analysis) -> Found {
+    let mut found = Found {
+        sigs: Vec::new(),
+        candidates: BTreeMap::new(),
+        referrers: Vec::new(),
+    };
+    let mut ids: BTreeMap<String, usize> = BTreeMap::new();
     let targets: Vec<u64> = analysis
         .xrefs
         .keys()
@@ -83,105 +142,182 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
                 .or_default()
                 .push((*target, member.to_owned()));
         }
+        let n = *ids.entry(sig.name.clone()).or_insert_with(|| {
+            found.referrers.push(BTreeSet::new());
+            found.referrers.len() - 1
+        });
+        let s = found.sigs.len();
         for from in data_referrers(sites) {
-            candidates
+            found
+                .candidates
                 .entry(from)
                 .or_default()
-                .entry(sig.name.clone())
-                .or_insert_with(|| sig.clone());
-            referrers.entry(sig.name.clone()).or_default().insert(from);
+                .entry(n)
+                .or_insert(s);
+            if let Some(refs) = found.referrers.get_mut(n) {
+                refs.insert(from);
+            }
         }
+        found.sigs.push(sig);
     }
     analysis.classes.setters = setters;
-    let mut named: BTreeSet<u64> = analysis
-        .functions
+    found
+}
+
+/// Names each function by the one candidate only it still references.
+///
+/// A candidate is a function's own once every other function referencing
+/// its name has a name. Functions are decided in rounds, each against the
+/// names the rounds before it gave, so the answer does not hang on the
+/// order they are visited in: one with a single own candidate takes it,
+/// and one with two never takes any, since naming more functions only
+/// adds own candidates. A function is visited again only when a name it
+/// references is left with it as its one unnamed referrer, so the work is
+/// linear in the references, and [`FUEL_PER_REFERENCE`] holds it there.
+///
+/// # Arguments
+///
+/// * `found` - The candidates and referrers.
+/// * `named` - The functions holding a name; those named here are added.
+/// * `assigned` - Whether each name is taken; those taken here are set.
+///
+/// # Returns
+///
+/// The index in `found.sigs` of each newly named function's signature.
+fn choose_own(
+    found: &Found,
+    named: &mut BTreeSet<u64>,
+    assigned: &mut [bool],
+) -> BTreeMap<u64, usize> {
+    let mut unnamed: Vec<usize> = found
+        .referrers
         .iter()
-        .filter(|f| f.name.is_some())
-        .map(|f| f.entry)
+        .map(|r| r.iter().filter(|f| !named.contains(f)).count())
         .collect();
-    let mut chosen: BTreeMap<u64, Signature> = BTreeMap::new();
-    let mut assigned: BTreeSet<String> = BTreeSet::new();
-    let mut arity: BTreeMap<u64, usize> = BTreeMap::new();
-    loop {
-        loop {
-            let mut changed = false;
-            for (&entry, cands) in &candidates {
-                if named.contains(&entry) {
-                    continue;
+    let references: usize = found.referrers.iter().map(BTreeSet::len).sum();
+    let mut fuel = references.saturating_mul(FUEL_PER_REFERENCE);
+    let mut chosen = BTreeMap::new();
+    let mut undecidable = BTreeSet::new();
+    let mut queue: BTreeSet<u64> = found
+        .candidates
+        .keys()
+        .copied()
+        .filter(|e| !named.contains(e))
+        .collect();
+    while !queue.is_empty() {
+        let mut picks = Vec::new();
+        for (&entry, cands) in queue
+            .iter()
+            .filter_map(|e| found.candidates.get_key_value(e))
+        {
+            let Some(left) = fuel.checked_sub(cands.len()) else {
+                return chosen;
+            };
+            fuel = left;
+            let mut own = cands
+                .iter()
+                .filter(|&(&n, _)| assigned.get(n) == Some(&false) && unnamed.get(n) == Some(&1));
+            match (own.next(), own.next()) {
+                (Some((&n, &s)), None) => picks.push((entry, n, s)),
+                (Some(_), Some(_)) => {
+                    undecidable.insert(entry);
                 }
-                let own = cands.iter().filter(|(n, _)| {
-                    !assigned.contains(*n)
-                        && referrers
-                            .get(*n)
-                            .is_some_and(|r| r.iter().all(|f| *f == entry || named.contains(f)))
-                });
-                let Some((n, sig)) = single(own) else {
+                (None, _) => {}
+            }
+        }
+        for &(entry, n, s) in &picks {
+            chosen.insert(entry, s);
+            named.insert(entry);
+            if let Some(taken) = assigned.get_mut(n) {
+                *taken = true;
+            }
+        }
+        let mut next = BTreeSet::new();
+        for (entry, _, _) in picks {
+            for &m in found
+                .candidates
+                .get(&entry)
+                .into_iter()
+                .flat_map(BTreeMap::keys)
+            {
+                let (Some(count), Some(refs)) = (unnamed.get_mut(m), found.referrers.get(m)) else {
                     continue;
                 };
-                chosen.insert(entry, sig.clone());
-                assigned.insert(n.clone());
-                named.insert(entry);
-                changed = true;
-            }
-            if !changed {
-                break;
+                *count = count.saturating_sub(1);
+                if *count == 1 {
+                    let Some(left) = fuel.checked_sub(refs.len()) else {
+                        return chosen;
+                    };
+                    fuel = left;
+                    next.extend(refs.iter().find(|f| !named.contains(f)));
+                }
             }
         }
-        let mut progressed = false;
-        for (name, refs) in &referrers {
-            if assigned.contains(name) {
-                continue;
-            }
-            let unnamed: Vec<u64> = refs
-                .iter()
-                .copied()
-                .filter(|r| !named.contains(r))
-                .collect();
-            if unnamed.len() < 2 {
-                continue;
-            }
-            let Some(sig) = unnamed
-                .iter()
-                .find_map(|r| candidates.get(r).and_then(|c| c.get(name)))
-            else {
-                continue;
-            };
-            let expected = sig.params.len() + usize::from(sig.by_pointer);
-            let fits = unnamed.iter().copied().filter(|r| {
-                candidates.get(r).is_some_and(|c| c.len() == 1)
-                    && analysis.function(*r).is_some_and(|f| {
-                        let n = *arity.entry(*r).or_insert_with(|| args_read(program, f));
-                        n == expected || n == expected + 1
-                    })
-            });
-            let Some(only) = single(fits) else {
-                continue;
-            };
-            chosen.insert(only, sig.clone());
-            assigned.insert(name.clone());
-            named.insert(only);
-            progressed = true;
-        }
-        if !progressed {
-            break;
-        }
+        queue = next.difference(&undecidable).copied().collect();
     }
-    let mut seen: BTreeMap<String, u32> = BTreeMap::new();
-    for f in &mut analysis.functions {
-        let Some(sig) = chosen.get(&f.entry) else {
+    chosen
+}
+
+/// Names the helper behind each signature several unnamed functions still
+/// reference.
+///
+/// It is the one of them that mentions no other signature and reads
+/// exactly the argument registers the signature declares (`this`
+/// included).
+///
+/// Such a helper references its own name only, so naming it changes no
+/// other name's referrers, and one pass decides them all.
+///
+/// # Arguments
+///
+/// * `program` - Bytes, format and bitness.
+/// * `analysis` - The functions.
+/// * `found` - The candidates and referrers.
+/// * `named` - The functions holding a name.
+/// * `assigned` - Whether each name is taken.
+///
+/// # Returns
+///
+/// Each helper's entry and the index in `found.sigs` of its signature.
+fn choose_helpers(
+    program: &Program,
+    analysis: &Analysis,
+    found: &Found,
+    named: &BTreeSet<u64>,
+    assigned: &[bool],
+) -> Vec<(u64, usize)> {
+    let mut picks = Vec::new();
+    for (n, refs) in found.referrers.iter().enumerate() {
+        if assigned.get(n) != Some(&false) {
+            continue;
+        }
+        let unnamed: Vec<u64> = refs
+            .iter()
+            .copied()
+            .filter(|r| !named.contains(r))
+            .collect();
+        if unnamed.len() < 2 {
+            continue;
+        }
+        let Some((s, sig)) = unnamed.iter().find_map(|r| {
+            let s = *found.candidates.get(r)?.get(&n)?;
+            Some((s, found.sigs.get(s)?))
+        }) else {
             continue;
         };
-        let n = seen.entry(sig.name.clone()).or_insert(0);
-        *n += 1;
-        f.name = Some(if *n == 1 {
-            sig.name.clone()
-        } else {
-            format!("{}_{n}", sig.name)
+        let expected = sig.params.len() + usize::from(sig.by_pointer);
+        let fits = unnamed.iter().copied().filter(|r| {
+            found.candidates.get(r).is_some_and(|c| c.len() == 1)
+                && analysis.function(*r).is_some_and(|f| {
+                    let k = args_read(program, f);
+                    k == expected || k == expected + 1
+                })
         });
-        f.name_inferred = true;
-        f.name_source = NameSource::Signature;
-        f.signature = Some(sig.clone());
+        if let Some(only) = single(fits) {
+            picks.push((only, s));
+        }
     }
+    picks
 }
 
 /// The opening of a command dispatcher's wrong-type message, up to the type.

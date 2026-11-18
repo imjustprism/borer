@@ -980,3 +980,92 @@ fn a_find_over_many_matches_holds_only_its_share() {
         "a find over {strings} strings took {extra} bytes of heap"
     );
 }
+
+/// Builds an x64 image whose `main` calls `n` tiny functions.
+///
+/// Function `k` is a `lea rcx,[rip+target]` for each of its two targets,
+/// then `ret`; `targets` gives them as offsets into `rdata`, the read-only
+/// section after `.text`.
+///
+/// # Arguments
+///
+/// * `n` - How many functions.
+/// * `rdata` - The read-only data.
+/// * `targets` - The two offsets into `rdata` function `k` references.
+fn referencing(n: usize, rdata: &[u8], targets: impl Fn(usize) -> [usize; 2]) -> Program {
+    use borer_engine::program::Section;
+    /// Bytes of each function: two `lea`s and a `ret`, padded.
+    const SLOT: usize = 16;
+    let base = 0x1000u64;
+    let first = (5 * n + 1).next_multiple_of(SLOT);
+    let text_len = (first + SLOT * n).next_multiple_of(0x1000);
+    let rdata_va = base + from_usize(text_len);
+    let mut bytes = vec![0xccu8; text_len];
+    let rel = |end: usize, to: u64| {
+        borer_engine::num::lo32(to.wrapping_sub(base + from_usize(end))).to_le_bytes()
+    };
+    for k in 0..n {
+        let f = first + SLOT * k;
+        bytes[5 * k] = 0xe8; // ASM: call f
+        bytes[5 * k + 1..5 * k + 5].copy_from_slice(&rel(5 * k + 5, base + from_usize(f)));
+        for (i, target) in targets(k).into_iter().enumerate() {
+            let at = f + 7 * i;
+            bytes[at..at + 3].copy_from_slice(&[0x48, 0x8d, 0x0d]); // ASM: lea rcx,[rip+target]
+            let to = rdata_va + from_usize(target);
+            bytes[at + 3..at + 7].copy_from_slice(&rel(at + 7, to));
+        }
+        bytes[f + 14] = 0xc3; // ASM: ret
+    }
+    bytes[5 * n] = 0xc3; // ASM: ret
+    let rdata_len = rdata.len().next_multiple_of(0x1000);
+    bytes.extend_from_slice(rdata);
+    bytes.resize(text_len + rdata_len, 0);
+    Program::raw(
+        bytes,
+        Arch::X86_64,
+        0,
+        Some(base),
+        vec![
+            Section::mapped(".text", base, 0, from_usize(text_len), false, true),
+            Section::mapped(
+                ".rdata",
+                rdata_va,
+                from_usize(text_len),
+                from_usize(rdata_len),
+                false,
+                false,
+            ),
+        ],
+    )
+}
+
+/// Functions in the chain of signatures.
+const CHAINED: usize = 4096;
+
+/// A chain of functions, each referencing its own signature and the one
+/// before it, is named whole, in work linear in its references.
+///
+/// Only the last function references a signature no other does; naming
+/// it leaves the one before it the last unnamed referrer of its own, and
+/// so on down. The choosing loop named one function per pass over all of
+/// them, about 4n² keyed lookups (10^10 for 50,000 functions in a 1.9 MB
+/// file). It now takes a few steps per reference, and a loop that
+/// rescanned every function would run out of them and leave the chain
+/// unnamed.
+#[test]
+fn a_chain_of_signatures_is_named_in_linear_work() {
+    let sig = |k: usize| format!("void A::f{k:05}()\0");
+    let width = sig(0).len();
+    let rdata: String = (0..CHAINED).map(sig).collect();
+    let p = referencing(CHAINED, rdata.as_bytes(), |k| {
+        [width * k, width * k.saturating_sub(1)]
+    });
+    let a = Analysis::compute(&p);
+    let named = a
+        .functions
+        .iter()
+        .filter_map(|f| f.name.as_deref())
+        .filter(|n| n.starts_with("A::f"))
+        .count();
+    assert_eq!(named, CHAINED);
+}
