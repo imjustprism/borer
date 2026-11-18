@@ -306,11 +306,12 @@ pub fn split_map(
         sdk.classes.len(),
         headers.len()
     );
+    let by_class = super::classes::methods_by_class(a, o);
     for c in &sdk.classes {
-        let methods = super::classes::methods_of(a, o, &c.name);
+        let methods = by_class.get(&c.name).map_or(&[][..], Vec::as_slice);
         let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
         let mut out_of = 0usize;
-        for e in &methods {
+        for e in methods {
             if let Some(unit) = exported.get(e) {
                 out_of += 1;
                 if let Some(u) = unit {

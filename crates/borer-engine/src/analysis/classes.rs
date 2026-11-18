@@ -163,15 +163,23 @@ pub fn class_of(name: &str) -> Option<&str> {
 ///
 /// The method entries in address order.
 pub fn methods_of(analysis: &Analysis, overlay: &Overlay, class: &str) -> Vec<u64> {
-    let index = super::reads::unnoted(|| {
-        analysis
-            .derived
-            .get_or_build_named("methods", overlay.fingerprint(), (), || {
-                method_index(analysis, overlay)
-            })
-    });
+    let index = methods_by_class(analysis, overlay);
     super::reads::note_class(class);
     index.get(class).cloned().unwrap_or_default()
+}
+
+/// Returns every class's methods in address order, by class: what
+/// [`methods_of`] answers for each, for a caller that asks for many
+/// classes and would hash the overlay once per question.
+///
+/// # Arguments
+///
+/// * `analysis` - Discovery results.
+/// * `overlay` - User names take precedence.
+pub(crate) fn methods_by_class(analysis: &Analysis, overlay: &Overlay) -> Arc<MethodIndex> {
+    let (derived, key) = (&analysis.derived, overlay.fingerprint());
+    let build = || method_index(analysis, overlay);
+    super::reads::unnoted(|| derived.get_or_build_named("methods", key, (), build))
 }
 
 /// Every class's methods in address order, by class: what [`methods_of`]
