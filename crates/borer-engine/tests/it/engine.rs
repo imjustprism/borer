@@ -511,6 +511,29 @@ fn pe_with_headers() -> borer_engine::program::Program {
     p
 }
 
+/// A PE section a truncated file cuts is missing for the raw bytes it
+/// states and lost, and zero-filled past them.
+///
+/// `.text` states 0x1000 raw bytes at 0x200 and 0x4000 in memory; the
+/// file ends 0x100 bytes into its raw data.
+#[test]
+fn a_cut_pe_section_is_zero_filled_past_its_stated_raw_size() {
+    use borer_engine::program::Program;
+    let mut bytes = crate::carve::tiny_pe();
+    let row = 0x80 + 24 + 0xf0;
+    bytes[row + 8..row + 12].copy_from_slice(&0x4000u32.to_le_bytes());
+    bytes[row + 16..row + 20].copy_from_slice(&0x1000u32.to_le_bytes());
+    bytes[0x80 + 24 + 56..0x80 + 24 + 60].copy_from_slice(&0x6000u32.to_le_bytes());
+    bytes.truncate(0x300);
+    let p = Program::from_bytes(std::path::PathBuf::from("cut.exe"), bytes).expect("parses");
+    assert!(p.headers.truncated.is_some(), "{:?}", p.sections);
+    let base = 0x1_4000_0000u64;
+    let tail = p.no_bytes_at(base + 0x4000);
+    assert!(tail.contains("(the loader zero-fills the rest)"), "{tail}");
+    let lost = p.no_bytes_at(base + 0x1800);
+    assert!(lost.contains("cut short"), "{lost}");
+}
+
 /// An address in a section the file holds no bytes for is named as in it.
 ///
 /// Every read and the function lookup say the section and that the loader

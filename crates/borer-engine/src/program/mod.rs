@@ -97,6 +97,10 @@ pub struct Section {
     pub file_off: FileOff,
     /// Number of bytes backed by the file (`0` for `.bss`-style sections).
     pub file_size: u64,
+    /// Bytes of the file extent the header states that lie past the end of
+    /// a truncated file: the `lost` addresses after `file_size` are
+    /// missing, not zero-filled; `0` when the file holds the whole extent.
+    pub lost: u64,
     /// Section is readable when mapped.
     pub readable: bool,
     /// Section is writable when mapped.
@@ -137,6 +141,7 @@ impl Section {
             vsize: size,
             file_off: FileOff(file_off),
             file_size: size,
+            lost: 0,
             readable: true,
             writable,
             executable,
@@ -375,6 +380,33 @@ pub(crate) fn named_code(symbols: &[Symbol]) -> BTreeSet<u64> {
         .collect()
 }
 
+/// Returns an ELF's `PT_LOAD` segments as sections, for a file with no
+/// section table: `LOAD0`, `LOAD1`, ... in header order.
+///
+/// # Arguments
+///
+/// * `headers` - The program headers.
+fn load_segments(headers: &[goblin::elf::ProgramHeader]) -> Vec<Section> {
+    /// `PF_X`, `PF_W`, `PF_R`.
+    const PF: (u32, u32, u32) = (1, 2, 4);
+    headers
+        .iter()
+        .filter(|p| p.p_type == goblin::elf::program_header::PT_LOAD)
+        .enumerate()
+        .map(|(i, ph)| Section {
+            name: format!("LOAD{i}"),
+            va: Va(ph.p_vaddr),
+            vsize: ph.p_memsz,
+            file_off: FileOff(ph.p_offset),
+            file_size: ph.p_filesz,
+            lost: 0,
+            readable: ph.p_flags & PF.2 != 0,
+            writable: ph.p_flags & PF.1 != 0,
+            executable: ph.p_flags & PF.0 != 0,
+        })
+        .collect()
+}
+
 /// Returns the bytes an ELF section takes in the image: its size, but none
 /// for thread-local storage the file holds no bytes for (`.tbss`).
 ///
@@ -553,6 +585,7 @@ pub(crate) fn fit_sections(sections: &mut Vec<Section>, file_len: u64) -> Fit {
         let end = s.file_off.0.saturating_add(s.file_size);
         if s.file_size > 0 && end > file_len {
             fit.note_cut(end);
+            s.lost = end - file_len;
             s.file_size = file_len - s.file_off.0;
         }
         true
@@ -1062,6 +1095,7 @@ impl Program {
                             vsize,
                             file_off: FileOff(rawoff),
                             file_size: if cut { file_len - rawoff } else { rawsz },
+                            lost: if cut { rawoff + rawsz - file_len } else { 0 },
                             readable: s.characteristics & READ != 0,
                             writable: s.characteristics & WRITE != 0,
                             executable: s.characteristics & EXEC != 0,
@@ -1079,6 +1113,7 @@ impl Program {
                         vsize: file_len,
                         file_off: FileOff(0),
                         file_size: file_len,
+                        lost: 0,
                         readable: true,
                         writable: true,
                         executable: true,
@@ -1206,6 +1241,7 @@ impl Program {
                                 vsize: 0,
                                 file_off: FileOff(sh.sh_offset),
                                 file_size: sh.sh_size,
+                                lost: 0,
                                 readable: false,
                                 writable: false,
                                 executable: false,
@@ -1219,33 +1255,14 @@ impl Program {
                         vsize: image_size(sh),
                         file_off: FileOff(sh.sh_offset),
                         file_size: if nobits { 0 } else { sh.sh_size },
+                        lost: 0,
                         readable: true,
                         writable: sh.sh_flags & WRITE != 0,
                         executable: sh.sh_flags & EXEC != 0,
                     });
                 }
                 if elf.section_headers.is_empty() {
-                    /// `PT_LOAD`.
-                    const PT_LOAD: u32 = 1;
-                    /// `PF_X`, `PF_W`, `PF_R`.
-                    const PF: (u32, u32, u32) = (1, 2, 4);
-                    for (i, ph) in elf
-                        .program_headers
-                        .iter()
-                        .filter(|p| p.p_type == PT_LOAD)
-                        .enumerate()
-                    {
-                        sections.push(Section {
-                            name: format!("LOAD{i}"),
-                            va: Va(ph.p_vaddr),
-                            vsize: ph.p_memsz,
-                            file_off: FileOff(ph.p_offset),
-                            file_size: ph.p_filesz,
-                            readable: ph.p_flags & PF.2 != 0,
-                            writable: ph.p_flags & PF.1 != 0,
-                            executable: ph.p_flags & PF.0 != 0,
-                        });
-                    }
+                    sections.extend(load_segments(&elf.program_headers));
                     if !sections.is_empty() {
                         lenient.push(
                             "no section table to read; the PT_LOAD segments are mapped in its place"
@@ -1771,10 +1788,10 @@ impl Program {
     /// # Returns
     ///
     /// A clause naming the section (`in .bss, which holds no file bytes
-    /// (the loader zero-fills it)`, or past its file bytes, or past where
-    /// a truncated file ([`Headers::truncated`]) ends inside the section's
-    /// file bytes, which are missing rather than zero), or `None` when no
-    /// section declares `va` or the file holds a byte there.
+    /// (the loader zero-fills it)`, or past its file bytes, or in the
+    /// bytes it states that a truncated file lost ([`Section::lost`]),
+    /// which are missing rather than zero), or `None` when no section
+    /// declares `va` or the file holds a byte there.
     #[must_use]
     pub(crate) fn unbacked_at(&self, va: u64) -> Option<String> {
         let s = self.declared_at(va)?;
@@ -1782,20 +1799,20 @@ impl Program {
             return None;
         }
         let name = &s.name;
-        let cut = self.headers.truncated.is_some()
-            && s.file_off.0.saturating_add(s.file_size) >= from_usize(self.bytes.len());
-        Some(if s.file_size == 0 {
-            format!("in {name}, which holds no file bytes (the loader zero-fills it)")
-        } else if cut || va.saturating_sub(s.va.0) < s.file_size {
-            format!(
-                "in {name}, past where the file is cut short: the bytes there are missing, not zero"
-            )
-        } else {
-            format!(
-                "in {name} past its {:#x} file bytes (the loader zero-fills the rest)",
-                s.file_size
-            )
-        })
+        Some(
+            if va.saturating_sub(s.va.0) < s.file_size.saturating_add(s.lost) {
+                format!(
+                    "in {name}, past where the file is cut short: the bytes there are missing, not zero"
+                )
+            } else if s.file_size == 0 {
+                format!("in {name}, which holds no file bytes (the loader zero-fills it)")
+            } else {
+                format!(
+                    "in {name} past its {:#x} file bytes (the loader zero-fills the rest)",
+                    s.file_size.saturating_add(s.lost)
+                )
+            },
+        )
     }
 
     /// Says why a read at `va` found no file bytes, for the error a read

@@ -849,6 +849,40 @@ fn a_section_cut_by_the_end_of_the_file_is_not_called_zero_filled() {
     );
 }
 
+/// A segment a truncated file cuts is missing only for the file bytes it
+/// states and lost; past them, the memory it states beyond its file
+/// size is zero-filled as the loader fills it.
+///
+/// One `PT_LOAD` at 0x400000 states 0x230 file bytes at offset 0x100 and
+/// 0x1238 in memory; the file ends 0xf0 bytes into it.
+#[test]
+fn a_cut_segment_is_missing_only_for_the_bytes_it_states() {
+    let mut im = Image(vec![0u8; 0x1f0]);
+    im.put(0, &[0x7f, b'E', b'L', b'F', 2, 1, 1, 0]);
+    im.u16(0x10, 2);
+    im.u16(0x12, 62);
+    im.u32(0x14, 1);
+    im.u64(0x18, 0x40_0000);
+    im.u64(0x20, 0x40);
+    im.u16(0x34, 64);
+    im.u16(0x36, 56);
+    im.u16(0x38, 1);
+    im.u16(0x3a, 64);
+    im.phdr(0x40, 1, 6, 0x100, 0x40_0000, 0x230);
+    im.u64(0x40 + 40, 0x1238);
+    let p = Program::from_bytes(std::path::PathBuf::from("cut.elf"), im.0).expect("parses");
+    let tail = p.no_bytes_at(0x40_0900);
+    assert_eq!(
+        tail,
+        "address 0x400900 is in LOAD0 past its 0x230 file bytes (the loader zero-fills the rest)"
+    );
+    let lost = p.no_bytes_at(0x40_0100);
+    assert!(
+        lost.contains("cut short: the bytes there are missing, not zero"),
+        "{lost}"
+    );
+}
+
 /// A thread-local `.tbss` takes no image addresses: a `.bss` inside its
 /// range is found as itself, and an address only `.tbss` would cover is
 /// not mapped.

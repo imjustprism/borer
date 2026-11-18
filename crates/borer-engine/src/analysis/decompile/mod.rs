@@ -3056,16 +3056,9 @@ g(tmp_5);";
         ];
         let mut bytes = vec![0u8; 0x2000];
         bytes[0x1000..0x1000 + code.len()].copy_from_slice(code);
-        let sections = vec![crate::program::Section {
-            name: ".text".to_owned(),
-            va: crate::program::Va(0x1000),
-            vsize: 0x1000,
-            file_off: crate::program::FileOff(0x1000),
-            file_size: 0x1000,
-            readable: true,
-            writable: false,
-            executable: true,
-        }];
+        let sections = vec![crate::program::Section::mapped(
+            ".text", 0x1000, 0x1000, 0x1000, false, true,
+        )];
         let p = crate::program::Program::raw(
             bytes,
             crate::program::Arch::X86_64,

@@ -25,7 +25,7 @@ use goblin::mach::{Mach, MachO};
 
 use crate::headers::Headers;
 use crate::num::{from_usize, u16_le, u32_le, u64_le};
-use crate::program::{Arch, FileOff, Fit, Section, Symbol, SymbolKind, Va, fit_sections};
+use crate::program::{Arch, FileOff, Fit, Section, Symbol, SymbolKind, fit_sections};
 use crate::text::{Names, head};
 
 /// `CPU_TYPE_X86`.
@@ -843,15 +843,13 @@ fn image<'a>(
     for s in &raw {
         let kind = s.flags & SECTION_TYPE;
         let holds_bytes = !ZEROFILL.contains(&kind);
+        let executable = s.prot & PROT.2 != 0 && s.flags & INSTRUCTIONS != 0;
+        let base = Section::mapped(&s.name, s.addr, 0, s.size, s.prot & PROT.1 != 0, executable);
         sections.push(Section {
-            name: s.name.clone(),
-            va: Va(s.addr),
-            vsize: s.size,
             file_off: FileOff(if holds_bytes { s.offset } else { 0 }),
             file_size: if holds_bytes { s.size } else { 0 },
             readable: s.prot & PROT.0 != 0,
-            writable: s.prot & PROT.1 != 0,
-            executable: s.prot & PROT.2 != 0 && s.flags & INSTRUCTIONS != 0,
+            ..base
         });
     }
     let fit = fit_sections(&mut sections, from_usize(file.len()));

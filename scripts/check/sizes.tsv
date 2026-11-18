@@ -59,7 +59,7 @@ crates/borer-engine/src/analysis/decompile/mir/egraph/rules.rs::boolean#1	102
 crates/borer-engine/src/analysis/decompile/mir/egraph/rules.rs::mba#1	152
 crates/borer-engine/src/analysis/decompile/mir/egraph/rules.rs::ufloor_node#1	101
 crates/borer-engine/src/analysis/decompile/mir/eval.rs::value#1	116
-crates/borer-engine/src/analysis/decompile/mod.rs	2467
+crates/borer-engine/src/analysis/decompile/mod.rs	2460
 crates/borer-engine/src/analysis/decompile/mod.rs::decompile_in#1	955
 crates/borer-engine/src/analysis/decompile/mod.rs::name_fields#1	109
 crates/borer-engine/src/analysis/decompile/params.rs::detect_params#1	118
@@ -138,10 +138,10 @@ crates/borer-engine/src/isa/a32/mod.rs::registers#1	234
 crates/borer-engine/src/isa/a32/thumb.rs::narrow#1	254
 crates/borer-engine/src/isa/a64/decode.rs::mnemonic#1	233
 crates/borer-engine/src/isa/a64/roles.rs::data#1	142
-crates/borer-engine/src/layout.rs::program#1	120
-crates/borer-engine/src/macho.rs::image#1	137
+crates/borer-engine/src/layout.rs::program#1	116
+crates/borer-engine/src/macho.rs::image#1	135
 crates/borer-engine/src/pdb.rs::gather#1	145
-crates/borer-engine/src/program/mod.rs::from_bytes_with#1	515
+crates/borer-engine/src/program/mod.rs::from_bytes_with#1	501
 crates/borer-engine/src/program/mod.rs::summary#1	164
 crates/borer-engine/src/script.rs::register#1	297
 crates/borer-engine/src/unwind.rs::cxx4#1	109

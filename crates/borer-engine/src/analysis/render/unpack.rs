@@ -1556,6 +1556,7 @@ mod tests {
             vsize: 0x1000,
             file_off: crate::program::FileOff(0x2000),
             file_size: 0,
+            lost: 0,
             readable: true,
             writable: true,
             executable: true,
