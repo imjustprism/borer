@@ -131,9 +131,7 @@ pub fn solve_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
         .function_at(start)
         .ok_or_else(|| format!("no function contains {start:#x}"))?;
     let entry = f.entry;
-    if named.is_some() {
-        beyond_parameters(p, a, o, entry, slot)?;
-    }
+    beyond_parameters(p, a, o, entry, slot)?;
     let instrs = function_instructions(p, a, entry);
     let candidates = compared_constants(
         &instrs,
@@ -169,10 +167,12 @@ pub fn solve_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<S
     );
     if answers.len() <= 1 {
         let same = answers.keys().next().cloned().unwrap_or_default();
-        let _ = writeln!(
-            out,
-            "# every candidate {same}, so none of its own constants decides this"
-        );
+        let why = if same.starts_with("returns") {
+            "so none of its own constants decides this"
+        } else {
+            "so no run decided anything"
+        };
+        let _ = writeln!(out, "# every candidate {same}, {why}");
         if let Some(hint) = partial::partial_hint(p, a, o, entry) {
             let _ = writeln!(out, "# next: {hint}");
         }
@@ -284,7 +284,10 @@ pub(super) fn compared_constants(
 /// `solve 0x401000,a99` ran 48 emulations varying a register no
 /// convention passes anything in and reported `argument 99` as if it were
 /// one. A signature that does not print, or a variadic one, refuses
-/// nothing: the argument may be real where the text cannot say.
+/// nothing: the argument may be real where the text cannot say. A
+/// signature with no parameters refuses the default first argument too:
+/// probing `rcx` of `xor eax, eax; ret` answered about an argument that is
+/// not there.
 ///
 /// # Arguments
 ///
@@ -296,7 +299,8 @@ pub(super) fn compared_constants(
 ///
 /// # Errors
 ///
-/// When the signature lists fewer arguments than `slot + 1`, naming it.
+/// When the signature lists fewer arguments than `slot + 1`, naming it, or
+/// none at all.
 fn beyond_parameters(
     p: &Program,
     a: &Analysis,
@@ -312,11 +316,17 @@ fn beyond_parameters(
     if slot < count || sig.text.contains("...") {
         return Ok(());
     }
+    if count == 0 {
+        return Err(format!(
+            "{} takes no parameters ({}); there is no argument to solve",
+            short_name(a, o, entry),
+            sig.text
+        ));
+    }
     Err(format!(
         "{} takes {} ({}); a{} is not one of them",
         short_name(a, o, entry),
         match count {
-            0 => "no parameters".to_owned(),
             1 => "1 parameter".to_owned(),
             n => format!("{n} parameters"),
         },
@@ -718,6 +728,49 @@ mod tests {
             "{refused}"
         );
         assert!(solve_tsv(&read, &a, &o, "0x1000,a1").is_ok());
+    }
+
+    /// A solve of a function with no parameters says there is no argument
+    /// to solve instead of probing the first argument register.
+    ///
+    /// # Panics
+    ///
+    /// When the default solve answers about an argument.
+    #[test]
+    fn solve_refuses_a_function_with_no_parameters() {
+        let none = Program::raw_x64(&[
+            0x31, 0xc0, // ASM: xor eax,eax
+            0xc3, // ASM: ret
+        ]);
+        let a = Analysis::compute(&none);
+        let refused = solve_tsv(&none, &a, &Overlay::default(), "0x1000").unwrap_err();
+        assert!(
+            refused.starts_with("sub_1000 takes no parameters (")
+                && refused.ends_with("); there is no argument to solve"),
+            "{refused}"
+        );
+    }
+
+    /// A solve where every run stops does not say the function's constants
+    /// decide nothing: no run decided anything, and the stop is named.
+    ///
+    /// # Panics
+    ///
+    /// When the stop is not named or the constants are blamed.
+    #[test]
+    fn a_solve_where_every_run_stops_decides_nothing() {
+        let stops = Program::raw_x64(&[
+            0x0f, 0x01, 0xd0, // ASM: xgetbv
+            0x01, 0xc8, // ASM: add eax,ecx
+            0xc3, // ASM: ret
+        ]);
+        let a = Analysis::compute(&stops);
+        let out = solve_tsv(&stops, &a, &Overlay::default(), "0x1000").unwrap();
+        assert!(
+            out.contains("every candidate does not return: unmodeled Xgetbv, so no run decided"),
+            "{out}"
+        );
+        assert!(!out.contains("none of its own constants"), "{out}");
     }
 
     /// A flat solve calls an argument a pointer only when read through.
