@@ -126,7 +126,8 @@ on the large DLL the list scroll loads, each action 50 times on the first functi
 address that call another (the first call token of each for xrefs), dispatched through
 the path its key takes. Ack is dispatch to the first presented frame whose stamp (active
 tab and its revision, its top line, the functions panel's row and filter, the go-to
-picker, running jobs, status line) differs; settle is dispatch to the presented frame
+picker, the xrefs panel's referent and rows, status line) differs, a count of running
+requests left out as nothing on screen shows it; settle is dispatch to the presented frame
 after which no job runs, every open view shows the binary's state and the stamp holds
 one more frame. Pan and zoom sweep 2 s each on notepad's 20 largest graphs and the large
 DLL's largest, timed by frame draw. A large DLL that is missing or too slow to analyze

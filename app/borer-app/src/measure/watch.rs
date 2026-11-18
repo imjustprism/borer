@@ -1,11 +1,12 @@
 //! The ack and settle detectors of the actions phase.
 //!
 //! Once a frame, the phase reads what the window shows ([`seen`]): a cheap [`Stamp`] of what
-//! a person sees change, and whether the app is quiet, no [`Jobs`] request running and every
+//! a person sees change, nothing they do not (no count of running requests), and whether the app is quiet, no [`Jobs`] request running and every
 //! open view on the binary's state. A [`Watch`] started at an action's dispatch takes those
 //! reads and names the frame of the first change (ack) and the frame after which the app is
 //! quiet and the stamp holds for one more frame (settle).
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{App, Entity, EntityId};
@@ -18,7 +19,8 @@ use crate::functions_panel::FunctionsPanel;
 use crate::goto::GoToDelegate;
 use crate::places::view_of;
 use crate::rows_panel::Rows as _;
-use crate::worker::Jobs;
+use crate::worker::{Jobs, Referent};
+use crate::xrefs::XrefsPanel;
 
 /// What a person sees change in the window, cheap enough to read every frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,8 +33,9 @@ pub(super) struct Stamp {
     panel: Option<(usize, String)>,
     /// The go-to picker's query and its line count, while it is open.
     picker: Option<(String, usize)>,
-    /// Requests running in [`Jobs`].
-    jobs: usize,
+    /// The xrefs panel's referent and the rows it shows, by identity: the rows change when
+    /// an answer lands, not when its request starts.
+    xrefs: Option<(Option<Referent>, Option<usize>)>,
     /// The status line.
     status: String,
 }
@@ -72,6 +75,13 @@ pub(super) fn seen(workspace: &Entity<Workspace>, binary: &Entity<Binary>, cx: &
             let picker = picker.read(cx);
             (picker.query(cx), picker.delegate.match_count())
         });
+    let xrefs = workspace.panel::<XrefsPanel>(cx).map(|panel| {
+        let panel = panel.read(cx);
+        (
+            *panel.target(),
+            panel.rows().map(|rows| Arc::as_ptr(rows).addr()),
+        )
+    });
     let jobs = Jobs::running(cx).len();
     let now = binary.read(cx).loaded().map(|loaded| loaded.fingerprint);
     let current = workspace.panes().iter().all(|pane| {
@@ -85,7 +95,7 @@ pub(super) fn seen(workspace: &Entity<Workspace>, binary: &Entity<Binary>, cx: &
             top,
             panel,
             picker,
-            jobs,
+            xrefs,
             status: binary.read(cx).status().to_owned(),
         },
         quiet: jobs == 0 && current,
