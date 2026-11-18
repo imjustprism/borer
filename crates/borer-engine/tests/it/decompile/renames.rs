@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::view::{SLOT, TEXT, exported_four, image, symbol, tokens};
 use borer_engine::analysis::decompile::view::view;
-use borer_engine::analysis::decompile::{Detail, answer};
+use borer_engine::analysis::decompile::{Detail, Pass, Passes, answer};
 use borer_engine::analysis::{Analysis, EnumSource, Overlay};
 use borer_engine::program::SymbolKind;
 use borer_engine::view::{Kind, Ref, View};
@@ -58,8 +58,9 @@ fn renamed_views(at: u64, name: &str) -> [(Arc<View>, Arc<View>, Arc<View>); 2] 
 /// looked up, so renaming `fb`, which `fa` calls, keeps `fc`'s view.
 #[test]
 fn a_rename_keeps_each_answered_view_that_does_not_name_it() {
-    let [_, (apart, kept, _)] = renamed_views(TEXT + 0x40, "renamed_b");
+    let [_, (apart, kept, fresh)] = renamed_views(TEXT + 0x40, "renamed_b");
     assert!(Arc::ptr_eq(&apart, &kept), "the apart view was built again");
+    assert_eq!(tokens(&kept), tokens(&fresh));
 }
 
 /// A rename builds the answered view of the renamed function's caller again.
@@ -124,5 +125,55 @@ fn a_rename_to_a_name_a_text_calls_builds_that_text_again() {
     let now = answer(&p, &a, &after, TEXT, Detail::Full).expect("an answer");
     let fresh = answer(&p, &Analysis::compute(&p), &after, TEXT, Detail::Full);
     assert_ne!(was, now);
+    assert_eq!(Some(now), fresh);
+}
+
+/// A rename that makes a callee's name name two functions builds the
+/// caller's text again, without the unit's declarations to note it.
+///
+/// `fa` passes its parameter to `g`, which hands its own to `strlen`, so
+/// `fa`'s parameter reads `g`'s `char *`. Once `fh` goes by `g` too, the
+/// name no longer says which function `fa` calls, and its parameter stays
+/// untyped, as a fresh analysis reads it. The unit closure is left out and
+/// the overlay's own tables are in force, so only the callee lookup notes
+/// the name.
+///
+/// `fa` at [`TEXT`]: `sub rsp,0x28; mov rax,rcx; mov rcx,rax; call g; add
+/// rsp,0x28; ret`; `g` at `TEXT + 0x40`: `sub rsp,0x28; call [SLOT]; add
+/// rsp,0x28; ret`; `fh` at `TEXT + 0x80`: `mov eax,3; ret`.
+#[test]
+fn a_rename_that_shares_a_callees_name_builds_its_caller_again() {
+    let (g, h) = (TEXT + 0x40, TEXT + 0x80);
+    let code: [(u64, &[u8]); 9] = [
+        (TEXT, &[0x48, 0x83, 0xec, 0x28]),              // ASM: sub rsp,0x28
+        (TEXT + 0x04, &[0x48, 0x89, 0xc8]),             // ASM: mov rax,rcx
+        (TEXT + 0x07, &[0x48, 0x89, 0xc1]),             // ASM: mov rcx,rax
+        (TEXT + 0x0a, &[0xe8, 0x31, 0, 0, 0]),          // ASM: call g
+        (TEXT + 0x0f, &[0x48, 0x83, 0xc4, 0x28, 0xc3]), // ASM: add rsp,0x28; ret
+        (g, &[0x48, 0x83, 0xec, 0x28]),                 // ASM: sub rsp,0x28
+        (g + 0x04, &[0xff, 0x15, 0xb6, 0x0f, 0, 0]),    // ASM: call [rip+0xfb6]
+        (g + 0x0a, &[0x48, 0x83, 0xc4, 0x28, 0xc3]),    // ASM: add rsp,0x28; ret
+        (h, &[0xb8, 3, 0, 0, 0, 0xc3]),                 // ASM: mov eax,3; ret
+    ];
+    let symbols = vec![
+        symbol("msvcrt.dll!strlen", SLOT, SymbolKind::Import),
+        symbol("fa", TEXT, SymbolKind::Export),
+        symbol("g", g, SymbolKind::Export),
+        symbol("fh", h, SymbolKind::Export),
+    ];
+    let p = image(&code, symbols);
+    let a = Analysis::compute(&p);
+    let before = Overlay {
+        passes: Passes::NONE.without(Pass::UnitClosure),
+        ..Overlay::default()
+    };
+    let was = answer(&p, &a, &before, TEXT, Detail::Full).expect("an answer");
+    assert!(was.contains("char *a1"), "{was}");
+    let mut after = before.clone();
+    after.names.insert(h, "g".to_owned());
+    a.derived.moved(&a, &before, &after);
+    let now = answer(&p, &a, &after, TEXT, Detail::Full).expect("an answer");
+    let fresh = answer(&p, &Analysis::compute(&p), &after, TEXT, Detail::Full);
+    assert!(!now.contains("char *a1"), "{now}");
     assert_eq!(Some(now), fresh);
 }
