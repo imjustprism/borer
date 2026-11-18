@@ -560,9 +560,15 @@ pub fn write_split(
     let binary = short_path(&program.path.display().to_string());
     write_whole(&src.join(split::DECLS), &hoisted.head(&binary))?;
     let sdk = modsdk::build(program, analysis, overlay);
-    let (common, headers) = modsdk::header::class_headers(&sdk);
-    write_whole(&include.join(split::SDK_HEADER), &common)?;
-    for (_, file, text) in &headers {
+    if borer_engine::cancel::Cancel::raised() {
+        anyhow::bail!(
+            "the request's deadline passed while the classes were read, so the headers under {shown}/include were not written; raise BORER_DEADLINE_SECS"
+        );
+    }
+    let split_headers = modsdk::header::class_headers(&sdk);
+    let headers = &split_headers.classes;
+    write_whole(&include.join(split::SDK_HEADER), &split_headers.shared)?;
+    for (_, file, text) in headers {
         write_whole(&include.join(file), text)?;
     }
     let named: Vec<(&str, &str)> = headers
@@ -574,11 +580,20 @@ pub fn write_split(
         &split::split_map(analysis, overlay, &sdk, &named, &cited),
     )?;
     Ok(format!(
-        "wrote {} functions to {} source files under {shown}/src ({left} whose asserts cite no source file in {}), {} class headers under {shown}/include and {shown}/MAP.tsv",
+        "wrote {} functions to {} source files under {shown}/src ({left} whose asserts cite no source file in {}), {} class headers under {shown}/include{} and {shown}/MAP.tsv",
         hoisted.written,
         units.made.len(),
         split::REMAINDER,
-        headers.len()
+        headers.len(),
+        if split_headers.left_out > 0 {
+            format!(
+                " ({} classes left out past the {} MiB the headers hold)",
+                split_headers.left_out,
+                modsdk::FILE_MAX >> 20
+            )
+        } else {
+            String::new()
+        }
     ))
 }
 

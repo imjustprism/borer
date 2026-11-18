@@ -913,12 +913,36 @@ fn many_classes_of_one_folded_name_are_split_in_linear_time() {
         .collect();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || tx.send(class_headers(&sdk)));
-    let (_, headers) = rx
+    let headers = rx
         .recv_timeout(std::time::Duration::from_secs(10))
-        .expect("the headers are split within ten seconds");
+        .expect("the headers are split within ten seconds")
+        .classes;
     let folded: BTreeSet<String> = headers
         .iter()
         .map(|(_, file, _)| file.to_ascii_lowercase())
         .collect();
     assert_eq!(folded.len(), headers.len(), "two headers share a file");
+}
+
+/// Class headers past the bytes a mod file holds are counted as left out,
+/// not dropped unsaid.
+///
+/// # Panics
+///
+/// When no class is left out, or a class is neither written nor counted.
+#[test]
+fn class_headers_past_the_cap_are_counted_as_left_out() {
+    use super::header::class_headers;
+    let mut sdk = sample();
+    let template = sdk.classes.first().cloned().expect("a class");
+    let long = "N".repeat(1 << 20);
+    sdk.classes = (0..48)
+        .map(|k| Class {
+            name: format!("{long}{k}"),
+            ..template.clone()
+        })
+        .collect();
+    let split = class_headers(&sdk);
+    assert!(split.left_out > 0, "{} written", split.classes.len());
+    assert_eq!(split.classes.len() + split.left_out, sdk.classes.len());
 }

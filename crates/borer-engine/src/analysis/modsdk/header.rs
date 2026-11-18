@@ -51,6 +51,18 @@ pub fn header(sdk: &Sdk) -> String {
     out
 }
 
+/// The mod SDK split per class ([`class_headers`]).
+#[derive(Debug, Default)]
+pub struct ClassHeaders {
+    /// The header every class header includes.
+    pub shared: String,
+    /// Each class's name, header file and text, in the SDK's order.
+    pub classes: Vec<(String, String, String)>,
+    /// The classes left out once the headers passed [`super::FILE_MAX`]
+    /// bytes.
+    pub left_out: usize,
+}
+
 /// Returns the mod SDK split per class: a header the classes share and
 /// one header per class.
 ///
@@ -59,7 +71,7 @@ pub fn header(sdk: &Sdk) -> String {
 /// header includes it and holds the class's vtable struct and packed
 /// struct, so a mod includes only the classes it touches. The classes
 /// stop once their text passes [`super::FILE_MAX`] bytes, as the single
-/// header's do.
+/// header's do, and the rest are counted as left out.
 ///
 /// # Arguments
 ///
@@ -67,10 +79,11 @@ pub fn header(sdk: &Sdk) -> String {
 ///
 /// # Returns
 ///
-/// The shared header's text, and each class's name, header file
-/// ([`crate::analysis::split::header_file`]) and text, in the SDK's order.
+/// The shared header, each class's name, header file
+/// ([`crate::analysis::split::header_file`]) and text, and how many
+/// classes were left out.
 #[must_use]
-pub fn class_headers(sdk: &Sdk) -> (String, Vec<(String, String, String)>) {
+pub fn class_headers(sdk: &Sdk) -> ClassHeaders {
     use crate::analysis::split::{SDK_HEADER, header_file, header_names};
     let names = names(sdk);
     let mut shared = declarations(sdk, &names);
@@ -83,7 +96,7 @@ pub fn class_headers(sdk: &Sdk) -> (String, Vec<(String, String, String)>) {
         let Some(id) = names.structs.get(&c.name) else {
             continue;
         };
-        if bytes > super::FILE_MAX || crate::cancel::Cancel::raised() {
+        if bytes > super::FILE_MAX {
             break;
         }
         let text = format!(
@@ -95,7 +108,11 @@ pub fn class_headers(sdk: &Sdk) -> (String, Vec<(String, String, String)>) {
         bytes = bytes.saturating_add(text.len());
         classes.push((c.name.clone(), header_file(&mut taken, id), text));
     }
-    (shared, classes)
+    ClassHeaders {
+        shared,
+        left_out: sdk.classes.len().saturating_sub(classes.len()),
+        classes,
+    }
 }
 
 /// Returns the header's opening ([`prelude`]) and a forward declaration of
