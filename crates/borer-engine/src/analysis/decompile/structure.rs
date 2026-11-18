@@ -2321,7 +2321,7 @@ pub(super) fn fold_static(program: &Program, e: &Expr, depth: u8) -> Option<u64>
         }
         Expr::Deref(addr, ty) => {
             let at = fold_static(program, addr, d)?;
-            let section = program.sections.iter().find(|s| s.holds(at))?;
+            let section = program.sections.iter().find(|s| s.loaded().contains(&at))?;
             if section.writable {
                 return None;
             }
@@ -2415,5 +2415,46 @@ mod tests {
             0xc3, // ASM: ret
         ];
         assert_eq!(return_len(&code(kept)), 4);
+    }
+
+    /// A slot past a PE section's `VirtualSize` reads as the writable
+    /// section the loader puts there, so a jump through it does not fold.
+    ///
+    /// `.rdata` maps 0x10 bytes at 0x402000 but its 0x1200 raw bytes reach
+    /// over `.data` at 0x403000; the slot 0x403008 may change at run time.
+    #[test]
+    fn a_slot_past_a_pe_sections_virtual_size_does_not_fold() {
+        use crate::analysis::decompile::expr::{Expr, Ty};
+        use crate::program::{Arch, FileOff, Program, Section, Va};
+        let section = |name: &str, va: u64, vsize: u64, off: u64, size: u64| Section {
+            name: name.to_owned(),
+            va: Va(va),
+            vsize,
+            file_off: FileOff(off),
+            file_size: size,
+            lost: 0,
+            thread_local: false,
+            readable: true,
+            writable: name == ".data",
+            executable: false,
+        };
+        let mut bytes = vec![0u8; 0x2300];
+        for at in [0x2008, 0x2208] {
+            bytes[at..at + 8].copy_from_slice(&0x40_1010u64.to_le_bytes());
+        }
+        let p = Program::raw(
+            bytes,
+            Arch::X86_64,
+            0x40_0000,
+            Some(0x40_1000),
+            vec![
+                Section::mapped(".text", 0x40_1000, 0, 0x1000, false, true),
+                section(".rdata", 0x40_2000, 0x10, 0x1000, 0x1200),
+                section(".data", 0x40_3000, 0x100, 0x2200, 0x100),
+            ],
+        );
+        let slot = |va| Expr::Deref(Box::new(Expr::Const(va)), Ty::U64);
+        assert_eq!(super::fold_static(&p, &slot(0x40_3008), 4), None);
+        assert_eq!(super::fold_static(&p, &slot(0x40_2000), 4), Some(0));
     }
 }

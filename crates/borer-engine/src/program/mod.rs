@@ -173,18 +173,31 @@ impl Section {
         }
     }
 
-    /// Returns the image addresses the section takes: the larger of its
-    /// memory and file sizes from [`Section::va`], empty for a thread-local
-    /// section the file holds no bytes for (`.tbss`), whose size is each
-    /// thread's block, not image addresses.
+    /// Returns the image addresses the loader maps for the section: its
+    /// memory size from [`Section::va`], empty for a thread-local section
+    /// the file holds no bytes for (`.tbss`), whose size is each thread's
+    /// block, not image addresses.
+    ///
+    /// A PE section's raw bytes past its `VirtualSize` are not loaded, so
+    /// a read-only verdict drawn from them could cover the writable section
+    /// the loader places there.
     #[must_use]
-    pub fn span(&self) -> std::ops::Range<u64> {
+    pub fn loaded(&self) -> std::ops::Range<u64> {
         let len = if self.thread_local && self.file_size == 0 {
             0
         } else {
-            self.vsize.max(self.file_size)
+            self.vsize
         };
         self.va.0..self.va.0.saturating_add(len)
+    }
+
+    /// Returns the image addresses the section takes: the larger of its
+    /// memory and file sizes from [`Section::va`], empty for a `.tbss`
+    /// ([`Section::loaded`]).
+    #[must_use]
+    pub fn span(&self) -> std::ops::Range<u64> {
+        let loaded = self.loaded();
+        loaded.start..loaded.end.max(self.va.0.saturating_add(self.file_size))
     }
 
     /// Tells whether the section takes the image address `va` ([`Section::span`]).
