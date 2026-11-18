@@ -477,7 +477,7 @@ impl HexItem {
     ) -> Self {
         let revised = cx.subscribe(&binary, |item, _, event, _| match event {
             BinaryEvent::Revised(loaded) => item.loaded = loaded.clone(),
-            BinaryEvent::Opened(_) | BinaryEvent::Closed => {}
+            BinaryEvent::Opened(_) | BinaryEvent::Closed | BinaryEvent::Rechecked { .. } => {}
         });
         let mut item = Self {
             workspace: workspace.downgrade(),

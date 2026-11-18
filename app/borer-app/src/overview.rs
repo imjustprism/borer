@@ -270,7 +270,7 @@ impl OverviewItem {
         let follows = cx.subscribe(&binary, |item, _, event, cx| match event {
             BinaryEvent::Closed => cx.emit(ItemEvent::CloseItem),
             BinaryEvent::Revised(loaded) => item.build(loaded.clone(), cx),
-            BinaryEvent::Opened(_) => {}
+            BinaryEvent::Opened(_) | BinaryEvent::Rechecked { .. } => {}
         });
         let mut item = Self {
             workspace,

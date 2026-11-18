@@ -525,7 +525,7 @@ pub fn new_workspace(
                     });
                 }
                 BinaryEvent::Closed => close_binary_tabs(&opener, window, cx),
-                BinaryEvent::Revised(_) => {}
+                BinaryEvent::Revised(_) | BinaryEvent::Rechecked { .. } => {}
             },
         )
         .detach();

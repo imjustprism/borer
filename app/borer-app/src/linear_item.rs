@@ -358,7 +358,7 @@ impl LinearItem {
         });
         let revised = cx.subscribe_in(&binary, window, |item, _, event, window, cx| match event {
             BinaryEvent::Revised(loaded) => item.revise(loaded.clone(), window, cx),
-            BinaryEvent::Opened(_) | BinaryEvent::Closed => {}
+            BinaryEvent::Opened(_) | BinaryEvent::Closed | BinaryEvent::Rechecked { .. } => {}
         });
         let mut item = Self {
             binary,

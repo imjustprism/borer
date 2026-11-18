@@ -434,6 +434,7 @@ impl CallTreePanel {
                     cx.notify();
                 }
             }
+            BinaryEvent::Rechecked { .. } => {}
             BinaryEvent::Revised(loaded) => {
                 if let Some(root) = self.tree().map(CallTree::root) {
                     self.set_root(loaded, root, cx);

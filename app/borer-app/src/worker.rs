@@ -2,6 +2,7 @@
 //! the UI-thread call counter, and the engine calls the app makes.
 
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::rc::Rc;
@@ -35,7 +36,7 @@ use borer_engine::pack::Packs;
 use borer_engine::program::{Feature, Program, SymbolKind, read_regular};
 use borer_engine::session::{self, Open, Pdb};
 use borer_engine::strings::walk::{StringEncoding, StringRows, WALK_MIN, string_rows};
-use borer_engine::view::View;
+use borer_engine::view::{LineBlock, View};
 use borer_front::project_file::{self, Existing};
 use gpui::{App, Context, Global, SharedString, Task, Window};
 
@@ -964,11 +965,10 @@ pub fn check_blocking(loaded: &LoadedBinary, entry: u64) -> Arc<Option<TextCheck
     text_check(program, analysis, &answered, entry)
 }
 
-/// Grades each of `code`'s lines from the check of the function it stands for: `entry`'s,
-/// else the block's own function's.
+/// Grades each of `code`'s lines from the check of the function its block was written from.
 ///
-/// Each check is [`check_blocking`]'s, under the names the answer is drawn under, which are
-/// the names a decompile view's text is built under.
+/// The check is the one in `held`, else [`check_blocking`]'s, under the names the answer is
+/// drawn under, which are the names a decompile view's text is built under.
 ///
 /// Must be called inside [`spawn_engine`]; each check is memoized by the engine, so the
 /// one the text was built with is a lookup.
@@ -977,11 +977,18 @@ pub fn check_blocking(loaded: &LoadedBinary, entry: u64) -> Arc<Option<TextCheck
 ///
 /// * `loaded` - Previously loaded binary state.
 /// * `code` - A tab's lines.
-/// * `entry` - The tab's function, `None` for lines of no one function.
+/// * `held` - Checks of `loaded` at hand by function entry: those rechecks left in the
+///   session and those the tab's earlier marks hold.
 #[must_use]
-pub fn marks_blocking(loaded: &LoadedBinary, code: &CodeLines, entry: Option<u64>) -> Marks {
-    Marks::new(&loaded.analysis, code, entry, |at| {
-        check_blocking(loaded, at)
+pub fn marks_blocking(
+    loaded: &LoadedBinary,
+    code: &Arc<CodeLines>,
+    held: &BTreeMap<u64, Arc<Option<TextCheck>>>,
+) -> Marks {
+    Marks::new(loaded.fingerprint, code, |at| {
+        held.get(&at)
+            .cloned()
+            .unwrap_or_else(|| check_blocking(loaded, at))
     })
 }
 
@@ -994,29 +1001,32 @@ pub fn marks_blocking(loaded: &LoadedBinary, code: &CodeLines, entry: Option<u64
 /// # Arguments
 ///
 /// * `loaded` - Previously loaded binary state.
-/// * `(entry, start)` - The function and the block's start.
-/// * `states` - States to try, which the engine holds within its cap.
+/// * `block` - The block, with the function whose check graded it.
+/// * `states` - States to try, which the engine holds within its bounds.
 ///
 /// # Returns
 ///
-/// The block's record, `None` when the engine cannot recheck it.
+/// The block's record and the function's check it rechecks ([`check_blocking`]), `None`
+/// when the engine cannot recheck it.
 #[must_use]
 pub fn recheck_blocking(
     loaded: &LoadedBinary,
-    (entry, start): (u64, u64),
+    block: LineBlock,
     states: u32,
-) -> Option<BlockCheck> {
+) -> Option<(BlockCheck, Arc<Option<TextCheck>>)> {
     let (program, analysis) = (&loaded.program, &loaded.analysis);
+    let entry = block.function;
     let (answered, _) = answered_flagged(program, analysis, &loaded.overlay, entry);
-    recheck_block(
+    let record = recheck_block(
         program,
         analysis,
         &answered,
         entry,
-        start,
+        block.start,
         ANSWER_SEED,
         states,
-    )
+    )?;
+    Some((record, check_blocking(loaded, entry)))
 }
 
 /// Builds one page of the linear listing of `loaded`, or says why none.
@@ -1434,7 +1444,7 @@ pub(crate) mod tests {
     }
 
     /// Returns every module of the crate but this one, by path under `src`, with its text.
-    fn sources() -> [(&'static str, &'static str); 54] {
+    fn sources() -> [(&'static str, &'static str); 55] {
         [
             ("actions.rs", include_str!("actions.rs")),
             ("app_assets.rs", include_str!("app_assets.rs")),
@@ -1452,6 +1462,10 @@ pub(crate) mod tests {
             ("commands/tests.rs", include_str!("commands/tests.rs")),
             ("conformance.rs", include_str!("conformance.rs")),
             ("decompile_item.rs", include_str!("decompile_item.rs")),
+            (
+                "decompile_item/checks.rs",
+                include_str!("decompile_item/checks.rs"),
+            ),
             ("features.rs", include_str!("features.rs")),
             ("function_columns.rs", include_str!("function_columns.rs")),
             ("functions_panel.rs", include_str!("functions_panel.rs")),

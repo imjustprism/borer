@@ -1,12 +1,14 @@
 //! The machine's grade of each code line: a mark in the gutter of the decompile, listing
 //! and linear tabs, one glyph and one color per [`Grade`].
 //!
-//! A decompile line takes the grade of the block it stands for ([`View::origin`], known
-//! from the line origins through the text passes); a listing or linear line shows an
-//! instruction, and takes the grade of the block holding it ([`Analysis::block_at`]). The
-//! grade is the record of that block start in its function's check, the one the graph and
-//! the status bar read ([`check_blocking`](crate::worker::check_blocking)). A line with no
-//! origin and no instruction has no mark.
+//! A line's block is the one its view says it was written from
+//! ([`View::block`](borer_engine::view::View::block)): a
+//! decompile line's origin, a listing or linear instruction line's block under its own
+//! function. Its grade and evidence are what the engine answers for that block in that
+//! function's check ([`BlockAnswer`]), the answer the graph and the status bar read; the
+//! checks are the session's ([`Binary::rechecked`](crate::binary::Binary::rechecked)
+//! before [`check_blocking`](crate::worker::check_blocking)), so a recheck shows in every
+//! view. A line written from no block has no mark.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -14,9 +16,8 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use borer_engine::analysis::Analysis;
-use borer_engine::analysis::decompile::replay::{BlockCheck, Grade, TextCheck};
-use borer_engine::view::View;
+use borer_engine::analysis::decompile::replay::{BlockAnswer, Grade, TextCheck};
+use borer_engine::view::LineBlock;
 use editor::display_map::{
     BlockContext, BlockPlacement, BlockProperties, BlockStyle, CustomBlockId, RenderBlock,
 };
@@ -29,15 +30,34 @@ use language::Point;
 use theme::ActiveTheme as _;
 use ui::{Color, Label, LabelCommon as _};
 
+use crate::binary::Digest;
 use crate::code_view::CodeLines;
 use crate::decompile_item::{buffer_row, whole_rows};
 use crate::status::grade_color;
 
-/// A line's block: the entry of the function whose check grades it, and the block's start.
-pub type LineBlock = (u64, u64);
+/// Returns how many grades there are: a grade added to the engine fails this match until
+/// it is counted, and the count then fails every array of [`GRADE_COUNT`] grades.
+const fn grade_count() -> usize {
+    match Grade::Unchecked {
+        Grade::Proved | Grade::Tested | Grade::Wrong | Grade::Unchecked => 4,
+    }
+}
+
+/// How many grades there are.
+pub const GRADE_COUNT: usize = grade_count();
 
 /// Every grade, each at its [`grade_index`].
-pub const GRADES: [Grade; 4] = [Grade::Proved, Grade::Tested, Grade::Wrong, Grade::Unchecked];
+pub const GRADES: [Grade; GRADE_COUNT] =
+    [Grade::Proved, Grade::Tested, Grade::Wrong, Grade::Unchecked];
+
+/// Every grade sits at its own [`grade_index`] in [`GRADES`].
+const _: () = {
+    let mut ix = 0;
+    while ix < GRADE_COUNT {
+        assert!(grade_index(GRADES[ix]) == ix);
+        ix += 1;
+    }
+};
 
 /// Returns the place of `grade` in [`GRADES`].
 ///
@@ -69,134 +89,143 @@ pub const fn glyph(grade: Grade) -> &'static str {
     }
 }
 
-/// Returns the block line `line` of `view` stands for, with the function whose check grades
-/// it.
-///
-/// The block is the line's origin in a decompiled text, else the block holding the
-/// instruction it shows; the check is `entry`'s, else that of the function owning the block.
+/// Returns the word the status line names `grade` by.
 ///
 /// # Arguments
 ///
-/// * `analysis` - The binary's functions and blocks.
-/// * `entry` - The tab's function, `None` for lines of no one function.
-/// * `view` - The line's view.
-/// * `line` - The line in `view`.
-///
-/// # Returns
-///
-/// The block, `None` for a line with no origin that shows no instruction of a known block.
+/// * `grade` - The engine's grade.
 #[must_use]
-pub fn line_block(
-    analysis: &Analysis,
-    entry: Option<u64>,
-    view: &View,
-    line: usize,
-) -> Option<LineBlock> {
-    let start = match view.origin(line) {
-        Some(origin) => origin,
-        None => analysis.block_at(view.address(line)?)?.1.start,
-    };
-    let owner = match entry {
-        Some(entry) => entry,
-        None => analysis.block_at(start)?.0.entry,
-    };
-    Some((owner, start))
+pub const fn grade_word(grade: Grade) -> &'static str {
+    match grade {
+        Grade::Proved => "proved",
+        Grade::Tested => "tested",
+        Grade::Wrong => "wrong",
+        Grade::Unchecked => "unchecked",
+    }
 }
 
-/// The grade of every shown line of a code tab, from the check of each function its lines
-/// stand for.
-#[derive(Debug, Default)]
+/// Which way a step between wrong blocks goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Toward {
+    /// To the lines below, going round past the last.
+    Down,
+    /// To the lines above, going round past the first.
+    Up,
+}
+
+/// Returns the block shown line `row` of `code` was written from, `None` for a line
+/// written from no block.
+///
+/// # Arguments
+///
+/// * `code` - The tab's lines.
+/// * `row` - Zero-based shown line.
+#[must_use]
+pub fn line_block(code: &CodeLines, row: usize) -> Option<LineBlock> {
+    let (view, line) = code.get(row)?;
+    view.block(line)
+}
+
+/// The checks the shown lines of a code tab are graded by, and where their wrong blocks
+/// start.
+#[derive(Debug)]
 pub struct Marks {
-    /// Each view's lines' blocks, by view then line.
-    blocks: Vec<Vec<Option<LineBlock>>>,
-    /// The check of each function the lines stand for, by entry; `None` inside when the
-    /// function does not decompile or the image has no emulator.
+    /// The lines the marks were made for, whose rows [`Marks::wrong`] counts.
+    code: Arc<CodeLines>,
+    /// [`LoadedBinary::fingerprint`](crate::worker::LoadedBinary::fingerprint) of the
+    /// state the checks are of.
+    revision: u64,
+    /// The check of each function the lines are written from, by entry; `None` inside
+    /// when no check ran.
     checks: BTreeMap<u64, Arc<Option<TextCheck>>>,
-    /// The records rechecks gave, which stand in for the check's.
-    rechecked: BTreeMap<LineBlock, BlockCheck>,
+    /// The first shown line of each run of lines one wrong block marks, ascending.
+    wrong: Vec<usize>,
 }
 
 impl Marks {
-    /// Returns the marks of `code`, each function's check from `check`; runs in the
-    /// background.
+    /// Returns the marks of `code` under state `revision`, each function's check from
+    /// `check`; runs in the background.
     ///
     /// # Arguments
     ///
-    /// * `analysis` - The binary's functions and blocks.
+    /// * `revision` - Fingerprint of the state the checks are of.
     /// * `code` - The tab's lines.
-    /// * `entry` - The tab's function, `None` for lines of no one function.
     /// * `check` - The check of the function at an entry.
     #[must_use]
     pub fn new(
-        analysis: &Analysis,
-        code: &CodeLines,
-        entry: Option<u64>,
+        revision: u64,
+        code: &Arc<CodeLines>,
         mut check: impl FnMut(u64) -> Arc<Option<TextCheck>>,
     ) -> Self {
-        let blocks: Vec<Vec<_>> = code
-            .each_view()
-            .iter()
-            .map(|view| {
-                (0..view.lines())
-                    .map(|line| line_block(analysis, entry, view, line))
-                    .collect()
-            })
-            .collect();
         let mut checks = BTreeMap::new();
-        for &(owner, _) in blocks.iter().flatten().flatten() {
-            checks.entry(owner).or_insert_with(|| check(owner));
+        for view in code.each_view() {
+            for line in 0..view.lines() {
+                if let Some(b) = view.block(line) {
+                    checks
+                        .entry(b.function)
+                        .or_insert_with(|| check(b.function));
+                }
+            }
         }
-        Self {
-            blocks,
+        let mut marks = Self {
+            code: code.clone(),
+            revision,
             checks,
-            rechecked: BTreeMap::new(),
+            wrong: Vec::new(),
+        };
+        let mut last = None;
+        for row in 0..code.len() {
+            let block = line_block(code, row);
+            let wrong = marks.grade(code, row) == Some(Grade::Wrong);
+            if wrong && block != last {
+                marks.wrong.push(row);
+            }
+            last = block.filter(|_| wrong);
         }
+        marks
     }
 
-    /// Returns the block shown line `row` of `code` stands for, `None` for a line with no
-    /// mark.
+    /// Returns whether the marks were made for `code`, so their wrong blocks are its rows.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - A tab's lines.
+    #[must_use]
+    pub fn is_for(&self, code: &Arc<CodeLines>) -> bool {
+        Arc::ptr_eq(&self.code, code)
+    }
+
+    /// Returns the fingerprint of the state the checks are of.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Returns the checks the marks hold, by function entry.
+    #[must_use]
+    pub const fn checks(&self) -> &BTreeMap<u64, Arc<Option<TextCheck>>> {
+        &self.checks
+    }
+
+    /// Returns what the engine answers for the block shown line `row` was written from.
     ///
     /// # Arguments
     ///
     /// * `code` - The lines the marks were made for.
     /// * `row` - Zero-based shown line.
+    ///
+    /// # Returns
+    ///
+    /// The answer, `None` for a line written from no block or of a function whose check
+    /// the marks do not hold yet.
     #[must_use]
-    pub fn block(&self, code: &CodeLines, row: usize) -> Option<LineBlock> {
-        let (v, line) = code.slot(row)?;
-        *self.blocks.get(v)?.get(line)?
+    pub fn answer(&self, code: &CodeLines, row: usize) -> Option<BlockAnswer<'_>> {
+        let b = line_block(code, row)?;
+        let check = self.checks.get(&b.function)?;
+        Some(BlockAnswer::of(check.as_ref().as_ref(), b.start))
     }
 
-    /// Puts `record`, what a recheck of `block` gave, in place of the check's record of it.
-    ///
-    /// # Arguments
-    ///
-    /// * `block` - The block, with the function whose check graded it.
-    /// * `record` - The recheck's record.
-    pub fn set_recheck(&mut self, block: LineBlock, record: BlockCheck) {
-        self.rechecked.insert(block, record);
-    }
-
-    /// Returns the record of `block`: the last recheck's, else the check's; `None` when
-    /// neither has one.
-    ///
-    /// # Arguments
-    ///
-    /// * `(entry, start)` - The block, with the function whose check grades it.
-    #[must_use]
-    pub fn record(&self, (entry, start): LineBlock) -> Option<&BlockCheck> {
-        if let Some(record) = self.rechecked.get(&(entry, start)) {
-            return Some(record);
-        }
-        let check = self.checks.get(&entry)?.as_ref().as_ref()?;
-        let ix = check
-            .blocks
-            .binary_search_by_key(&start, BlockCheck::start)
-            .ok()?;
-        check.blocks.get(ix)
-    }
-
-    /// Returns the grade shown line `row` is marked with: its block's, unchecked when the
-    /// check holds no record of it; `None` for a line with no block.
+    /// Returns the grade shown line `row` is marked with, `None` for a line with no mark.
     ///
     /// # Arguments
     ///
@@ -204,15 +233,11 @@ impl Marks {
     /// * `row` - Zero-based shown line.
     #[must_use]
     pub fn grade(&self, code: &CodeLines, row: usize) -> Option<Grade> {
-        let block = self.block(code, row)?;
-        Some(
-            self.record(block)
-                .map_or(Grade::Unchecked, BlockCheck::grade),
-        )
+        self.answer(code, row).map(|a| a.grade())
     }
 
-    /// Returns the evidence behind shown line `row`'s mark: its block's record as the
-    /// engine spells it, and for a decompile line how its block is known.
+    /// Returns the evidence behind shown line `row`'s mark: the engine's answer for its
+    /// block, and for a decompile line how its block is known.
     ///
     /// # Arguments
     ///
@@ -224,13 +249,9 @@ impl Marks {
     /// The evidence, `None` for a line with no mark.
     #[must_use]
     pub fn evidence(&self, code: &CodeLines, row: usize) -> Option<String> {
-        let block @ (_, start) = self.block(code, row)?;
-        let mut said = self.record(block).map_or_else(
-            || format!("block {start:#x}: unchecked: the check holds no record of it"),
-            BlockCheck::spell,
-        );
+        let mut said = self.answer(code, row)?.spell();
         let (view, line) = code.get(row)?;
-        if view.origin(line).is_some() {
+        if let Some(start) = view.origin(line) {
             said.push_str(&format!(
                 "\nthis line stands for block {start:#x}, known from the line origins through the text passes"
             ));
@@ -238,35 +259,48 @@ impl Marks {
         Some(said)
     }
 
-    /// Returns the next shown line after `from` marked wrong, or the one before it when
-    /// `back`, going round past either end; `from` itself is the last tried.
+    /// Returns the first line of the next wrong block after line `from`, going round past
+    /// either end; `from`'s own block is the last tried.
     ///
     /// # Arguments
     ///
-    /// * `code` - The lines the marks were made for.
     /// * `from` - Zero-based shown line to start from.
-    /// * `back` - Whether to look upward.
+    /// * `toward` - Which way to look.
     ///
     /// # Returns
     ///
     /// The line, `None` when no line is marked wrong.
     #[must_use]
-    pub fn next_wrong(&self, code: &CodeLines, from: usize, back: bool) -> Option<usize> {
-        let n = code.len();
-        let from = from.min(n.saturating_sub(1));
-        (1..=n)
-            .map(|k| {
-                if back {
-                    (from + n - k) % n
-                } else {
-                    (from + k) % n
-                }
-            })
-            .find(|&row| self.grade(code, row) == Some(Grade::Wrong))
+    pub fn next_wrong(&self, from: usize, toward: Toward) -> Option<usize> {
+        let (first, last) = (*self.wrong.first()?, *self.wrong.last()?);
+        Some(match toward {
+            Toward::Down => {
+                let after = self.wrong.partition_point(|&row| row <= from);
+                self.wrong.get(after).copied().unwrap_or(first)
+            }
+            Toward::Up => {
+                let before = self.wrong.partition_point(|&row| row < from);
+                let prior = before.checked_sub(1).and_then(|k| self.wrong.get(k));
+                prior.copied().unwrap_or(last)
+            }
+        })
+    }
+
+    /// Returns `digest` with the grade of every shown line of `code` folded in, a line
+    /// with no mark as none.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - The lines the marks were made for.
+    /// * `digest` - The fold so far.
+    #[must_use]
+    pub fn digest(&self, code: &CodeLines, digest: Digest) -> Digest {
+        (0..code.len()).fold(digest, |d, row| {
+            d.text(self.grade(code, row).map_or("", glyph))
+        })
     }
 }
 
-/// The key of the gutter highlight of the lines one grade marks: Zed keys a gutter
 /// highlight by type, so each grade, by [`grade_index`], is a type of its own.
 struct GradeMark<const G: usize>;
 
@@ -297,7 +331,7 @@ pub fn paint_gutter(
     cx: &mut Context<'_, Editor>,
 ) {
     let snapshot = editor.buffer().read(cx).snapshot(cx);
-    let mut ranges: [Vec<Range<Anchor>>; 4] = Default::default();
+    let mut ranges: [Vec<Range<Anchor>>; GRADE_COUNT] = Default::default();
     for row in rows.start..rows.end.min(code.len()) {
         let (Some(grade), Ok(at)) = (marks.grade(code, row), u32::try_from(row)) else {
             continue;
@@ -459,40 +493,22 @@ pub(crate) mod tests {
     use borer_engine::analysis::decompile::replay::{
         BlockCheck, Claim, Disagreement, Grade, TextCheck,
     };
-
+    use borer_engine::analysis::render::{Dir, linear};
     use borer_engine::analysis::{Analysis, EnumSource, Overlay};
     use borer_engine::program::{Arch, BinaryFormat, Program, Section};
     use borer_engine::view::View;
-    use gpui::{Entity, TestAppContext, VisualTestContext};
 
-    use super::{GRADES, Marks, glyph, grade_index};
-    use crate::app_view::tests::{CALLEE, CALLER, init, loaded_of, open, sample};
+    use super::{GRADES, Marks, Toward, glyph, grade_index};
+    use crate::app_view::tests::loaded_of;
     use crate::code_view::CodeLines;
-    use crate::decompile_item::tests::{open_tab, put_cursor};
-    use crate::decompile_item::{DecompileItem, Form};
-    use crate::linear_item::tests::{open_linear, settle};
-    use crate::worker::{
-        LoadedBinary, check_blocking, decompile_blocking, listing_blocking, load_binary_blocking,
-    };
+    use crate::worker::{LoadedBinary, listing_blocking};
 
-    /// Three blocks the check grades proved, unchecked and proved.
-    ///
-    /// `test ecx, ecx; je` goes to a block with a packed float multiply the replay leaves
-    /// out, or to a `return 1`, so a line graded by its neighbor's block shows.
-    const FLOAT_BETWEEN: [u8; 16] = [
-        0x85, 0xc9, // ASM: test ecx, ecx
-        0x74, 0x06, // ASM: je 0x100a
-        0x0f, 0x59, 0xc1, // ASM: mulps xmm0, xmm1
-        0x31, 0xc0, // ASM: xor eax, eax
-        0xc3, // ASM: ret
-        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
-        0xc3, // ASM: ret
-    ];
+    /// `jmp 0x1001` into its own second byte: blocks `0x1000` (`jmp`) and `0x1001`
+    /// (`inc eax; ret`) overlap, and `inc eax` sits under `L_1001:`.
+    // ASM: jmp 0x1001 (eb ff) ; from 0x1001: inc eax (ff c0) ; ret
+    pub(crate) const OVERLAP: [u8; 4] = [0xeb, 0xff, 0xc0, 0xc3];
 
-    /// Most functions of the test executable whose tabs are checked.
-    const TABS: usize = 12;
-
-    /// Returns a raw x86-64 image of one function at `0x1000` holding `code`.
+    /// Returns a raw x86-64 image of `code` at `0x1000`.
     pub(crate) fn one_function(code: &[u8]) -> Arc<LoadedBinary> {
         let overlay = Overlay {
             enum_source: EnumSource::Binary,
@@ -507,245 +523,153 @@ pub(crate) mod tests {
         loaded_of(program, analysis, overlay)
     }
 
-    /// Returns the grade line `line` of `view` should be marked with, apart from the marks.
-    ///
-    /// That is the record of the block it stands for (its origin, else the block holding
-    /// its instruction) in the check of `entry`, else of the block's function, unchecked
-    /// without one; `None` for a line with neither.
-    pub(crate) fn want_grade(
-        loaded: &LoadedBinary,
-        entry: Option<u64>,
-        view: &View,
-        line: usize,
-    ) -> Option<Grade> {
-        let a = &*loaded.analysis;
-        let start = match view.origin(line) {
-            Some(origin) => origin,
-            None => a.block_at(view.address(line)?)?.1.start,
-        };
-        let owner = entry.unwrap_or_else(|| a.block_at(start).unwrap().0.entry);
-        let check = check_blocking(loaded, owner);
-        let records = check.as_ref().as_ref().map_or(&[][..], |c| &*c.blocks);
-        let record = records.iter().find(|r| r.start() == start);
-        Some(record.map_or(Grade::Unchecked, BlockCheck::grade))
+    /// Returns `F` at `0x1000` calling `G` at `0x1010` and running on into it, so
+    /// `0x1010..0x1020` is `F`'s block `0x1005` and `G`'s block `0x1010`.
+    fn shared() -> Arc<LoadedBinary> {
+        let mut code = vec![0xe8, 0x0b, 0x00, 0x00, 0x00]; // ASM: call 0x1010
+        code.resize(0x1f, 0x90); // ASM: nop up to 0x101f
+        code.push(0xc3); // ASM: ret
+        one_function(&code)
     }
 
-    /// Asserts every shown line of `tab` is marked as [`want_grade`] says, and returns the
-    /// grades seen.
-    fn assert_marked(
-        tab: &Entity<DecompileItem>,
-        loaded: &LoadedBinary,
-        cx: &mut VisualTestContext,
-    ) -> BTreeSet<usize> {
-        tab.read_with(cx, |item, _| {
-            let code = item.code().unwrap();
-            let mut seen = BTreeSet::new();
-            for row in 0..code.len() {
-                let (view, line) = code.get(row).unwrap();
-                let want = want_grade(loaded, item.entry(), view, line);
-                assert_eq!(item.grade(row), want, "{:?} row {row}", item.entry());
-                seen.extend(want.map(grade_index));
-            }
-            seen
-        })
-    }
-
-    /// Every decompile line is marked with its origin block's grade and every instruction
-    /// line of a listing tab and of the linear listing with its block's, and a line with
-    /// neither has no mark, for every function of the samples and the first of the test
-    /// executable.
-    #[gpui::test]
-    fn every_line_takes_its_block_grade(cx: &mut TestAppContext) {
-        let app_state = init(cx);
-        let (app, cx) = open(&app_state, cx);
-        let workspace = app.workspace;
-        let exe = std::env::current_exe().unwrap();
-        let sources = crate::worker::Sources::default();
-        let mut seen = BTreeSet::new();
-        for loaded in [
-            sample(),
-            one_function(&FLOAT_BETWEEN),
-            load_binary_blocking(exe, &sources, Vec::new()).unwrap(),
-        ] {
-            let entries: Vec<u64> = loaded.analysis.functions.iter().map(|f| f.entry).collect();
-            for entry in entries.into_iter().take(TABS) {
-                for form in [Form::Decompile, Form::Listing] {
-                    let tab = open_tab(&workspace, &loaded, (entry, form), cx);
-                    seen.extend(assert_marked(&tab, &loaded, cx));
+    /// Returns a check of the blocks at `starts`, each wrong when `wrong` holds it, else
+    /// proved.
+    fn check(starts: &[u64], wrong: &[u64]) -> Arc<Option<TextCheck>> {
+        let blocks = starts
+            .iter()
+            .map(|&start| {
+                if !wrong.contains(&start) {
+                    return BlockCheck::new(start, Ok(None), (3, 1), Vec::new());
                 }
-            }
-        }
-        let loaded = sample();
-        let linear = open_linear(&workspace, &loaded, None, cx);
-        settle(&linear, cx);
-        let code = linear.read_with(cx, |item, _| item.code().clone());
-        seen.extend(assert_marked(&code, &loaded, cx));
-        assert!(seen.len() >= 2, "{seen:?}");
-    }
-
-    /// One block storing `rcx` whole through `rdx`.
-    const STORE: [u8; 4] = [
-        0x48, 0x89, 0x0a, // ASM: mov [rdx], rcx
-        0xc3, // ASM: ret
-    ];
-
-    /// Returns a check of the function at `0x1000` that found its one block wrong: the text
-    /// stores zero where the machine stores `rcx`.
-    pub(crate) fn wrong_check() -> Arc<Option<TextCheck>> {
-        let found = Disagreement {
-            function: 0x1000,
-            block: 0x1000,
-            at: 0x1000,
-            claim: Claim::Memory,
-            place: "[rdx]".to_owned(),
-            text: 0,
-            machine: 0x1234,
-            bits: 64,
-            lane: false,
-            expr: "0".to_owned(),
-        };
-        let record = BlockCheck::new(0x1000, Ok(Some("differed")), (8, 1), vec![found]);
+                let found = Disagreement {
+                    function: 0x1000,
+                    block: start,
+                    at: start,
+                    claim: Claim::Memory,
+                    place: "[rdx]".to_owned(),
+                    text: 0,
+                    machine: 0x1234,
+                    bits: 64,
+                    lane: false,
+                    expr: "0".to_owned(),
+                };
+                BlockCheck::new(start, Ok(Some("differed")), (3, 1), vec![found])
+            })
+            .collect();
         Arc::new(Some(TextCheck {
-            blocks: vec![record],
-            disagree: vec![0x1000],
+            blocks,
+            disagree: wrong.to_vec(),
         }))
     }
 
-    /// A check that finds a block wrong marks the listing line of the disagreeing
-    /// instruction and every decompile line whose origin is that block wrong, and no other.
-    #[test]
-    fn a_disagreeing_block_marks_its_lines_wrong() {
-        let loaded = one_function(&STORE);
-        let a = &*loaded.analysis;
-        let listing = listing_blocking(&loaded, 0x1000).unwrap();
-        let decompile = decompile_blocking(&loaded, 0x1000).unwrap();
-        let mut wrong = 0;
-        for view in [listing, decompile] {
-            let code = CodeLines::new(vec![view.clone()]);
-            let marks = Marks::new(a, &code, Some(0x1000), |_| wrong_check());
-            for line in 0..view.lines() {
-                let ours = view.origin(line).or(view.address(line)).is_some();
-                let want = ours.then_some(Grade::Wrong);
-                assert_eq!(marks.grade(&code, line), want, "{:?}", view.line(line));
-                wrong += usize::from(ours);
-            }
-        }
-        assert!(wrong >= 3, "{wrong}");
-    }
-
-    /// Returns the evidence line `line` of `view` should show, apart from the marks: its
-    /// block's record as the engine spells it, and the origins sentence on a decompile line.
-    fn want_evidence(loaded: &LoadedBinary, entry: u64, view: &View, line: usize) -> String {
-        let a = &*loaded.analysis;
-        let start = view
-            .origin(line)
-            .unwrap_or_else(|| a.block_at(view.address(line).unwrap()).unwrap().1.start);
-        let check = check_blocking(loaded, entry);
-        let record = check.as_ref().as_ref().unwrap();
-        let record = record.blocks.iter().find(|r| r.start() == start).unwrap();
-        let mut want = record.spell();
-        if view.origin(line).is_some() {
-            want.push_str(&format!(
-                "\nthis line stands for block {start:#x}, known from the line origins through the text passes"
-            ));
-        }
-        want
-    }
-
-    /// The evidence under a marked line is its block's record as the engine spells it, with
-    /// one more sentence on a decompile line; a line with no mark shows none, and asking
-    /// again on the same line hides it.
-    #[gpui::test]
-    fn the_evidence_is_the_engine_spelling_of_the_line_block(cx: &mut TestAppContext) {
-        let app_state = init(cx);
-        let (app, cx) = open(&app_state, cx);
-        let workspace = app.workspace;
-        let mut shown = [0; 2];
-        let tabs = [
-            (sample(), CALLER),
-            (sample(), CALLEE),
-            (one_function(&FLOAT_BETWEEN), 0x1000),
-        ];
-        for ((loaded, entry), form) in tabs
-            .into_iter()
-            .flat_map(|tab| [(tab.clone(), Form::Decompile), (tab, Form::Listing)])
-        {
-            let tab = open_tab(&workspace, &loaded, (entry, form), cx);
-            let code = tab.read_with(cx, |item, _| item.code().unwrap().clone());
-            for row in 0..code.len() {
-                let (view, line) = code.get(row).unwrap();
-                tab.update(cx, |item, cx| item.show_check(Some(row), cx));
-                let said = tab.read_with(cx, |item, _| item.evidence().map(str::to_owned));
-                let marked = view.origin(line).or(view.address(line)).is_some();
-                let want = marked.then(|| want_evidence(&loaded, entry, view, line));
-                assert_eq!(said, want, "{form:?} row {row}");
-                shown[usize::from(view.origin(line).is_some())] += usize::from(marked);
-                tab.update(cx, |item, cx| item.show_check(Some(row), cx));
-                assert!(tab.read_with(cx, |item, _| item.evidence().is_none()));
-            }
-        }
-        assert!(shown.iter().all(|&n| n > 1), "{shown:?}");
-    }
-
-    /// A recheck from the answer's seed gives the same record twice, which stands in for the
-    /// check's: it tried the states asked for, and the evidence says it is a recheck.
-    #[gpui::test]
-    fn a_recheck_is_deterministic_and_updates_the_record(cx: &mut TestAppContext) {
-        let app_state = init(cx);
-        let (app, cx) = open(&app_state, cx);
-        let workspace = app.workspace;
-        let tab = open_tab(&workspace, &sample(), (CALLER, Form::Listing), cx);
-        let row = tab.read_with(cx, |item, _| {
-            let code = item.code().unwrap();
-            (0..code.len()).find(|&r| item.marks().unwrap().block(code, r).is_some())
+    /// Returns the marks of `view` with each function's check from `checks`.
+    fn marks_of(
+        view: Arc<View>,
+        checks: &[(u64, Arc<Option<TextCheck>>)],
+    ) -> (Marks, Arc<CodeLines>) {
+        let code = Arc::new(CodeLines::new(vec![view]));
+        let marks = Marks::new(0, &code, |at| {
+            let found = checks.iter().find(|(f, _)| *f == at);
+            found.map_or_else(|| Arc::new(None), |(_, c)| c.clone())
         });
-        let row = row.unwrap();
-        put_cursor(&tab, (row, 0), cx);
-        let mut records = Vec::new();
-        for _ in 0..2 {
-            tab.update(cx, |item, cx| item.recheck(64, cx));
-            cx.run_until_parked();
-            records.push(tab.read_with(cx, |item, _| {
-                let (marks, code) = (item.marks().unwrap(), item.code().unwrap());
-                marks
-                    .record(marks.block(code, row).unwrap())
-                    .cloned()
-                    .unwrap()
-            }));
-        }
-        assert_eq!(records[0], records[1]);
-        assert_eq!(records[0].states(), 64, "{:?}", records[0]);
-        tab.update(cx, |item, cx| item.show_check(Some(row), cx));
-        let said = tab.read_with(cx, |item, _| item.evidence().unwrap().to_owned());
-        assert!(said.contains("rechecked from up to 64 states"), "{said}");
+        (marks, code)
     }
 
-    /// Next and previous wrong go round to the lines a wrong block marks, from any line, and
-    /// find none in a function whose check finds nothing wrong.
+    /// Returns the grade of each line of `code` holding `needle`.
+    fn grades(marks: &Marks, code: &CodeLines, needle: &str) -> Vec<Option<Grade>> {
+        (0..code.len())
+            .filter(|&row| {
+                let line = code.get(row).and_then(|(v, l)| v.line(l));
+                line.is_some_and(|l| l.contains(needle))
+            })
+            .map(|row| marks.grade(code, row))
+            .collect()
+    }
+
+    /// `inc eax` takes the grade of `L_1001`, the block it sits under, in the listing and
+    /// in the linear listing; the header, label, function and section lines have none.
     #[test]
-    fn next_and_previous_wrong_go_round() {
-        let loaded = one_function(&STORE);
-        let a = &*loaded.analysis;
-        let view = decompile_blocking(&loaded, 0x1000).unwrap();
-        let code = CodeLines::new(vec![view.clone()]);
-        let marks = Marks::new(a, &code, Some(0x1000), |_| wrong_check());
-        let wrong: Vec<usize> = (0..code.len())
-            .filter(|&row| view.origin(row).is_some())
-            .collect();
-        let (first, last) = (wrong[0], *wrong.last().unwrap());
-        for from in 0..code.len() {
-            let next = wrong.iter().copied().find(|&r| r > from).unwrap_or(first);
-            let prev = wrong
-                .iter()
-                .rev()
-                .copied()
-                .find(|&r| r < from)
-                .unwrap_or(last);
-            assert_eq!(marks.next_wrong(&code, from, false), Some(next), "{from}");
-            assert_eq!(marks.next_wrong(&code, from, true), Some(prev), "{from}");
+    fn a_line_under_a_label_takes_that_block_grade() {
+        let loaded = one_function(&OVERLAP);
+        let checks = [(0x1000, check(&[0x1000, 0x1001], &[0x1001]))];
+        let listing = listing_blocking(&loaded, 0x1000).unwrap();
+        let (marks, code) = marks_of(listing, &checks);
+        assert_eq!(grades(&marks, &code, "jmp"), [Some(Grade::Proved)]);
+        assert_eq!(grades(&marks, &code, "inc"), [Some(Grade::Wrong)]);
+        assert_eq!(grades(&marks, &code, "ret"), [Some(Grade::Wrong)]);
+        assert_eq!(grades(&marks, &code, "L_1001:"), [None]);
+        assert_eq!(marks.grade(&code, 0), None, "the header");
+        let (p, a, o) = (&loaded.program, &loaded.analysis, &loaded.overlay);
+        let page = linear(p, a, o, 0x1000, Dir::Next, 16).unwrap();
+        let (marks, code) = marks_of(Arc::new(page.view), &checks);
+        assert_eq!(grades(&marks, &code, "inc"), [Some(Grade::Wrong)]);
+        assert_eq!(grades(&marks, &code, "jmp"), [Some(Grade::Proved)]);
+        for none in ["; function", "L_1001:", "; section"] {
+            assert_eq!(grades(&marks, &code, none), [None], "{none}");
         }
-        let clean = Marks::new(a, &code, Some(0x1000), |_| Arc::new(None));
-        assert_eq!(clean.next_wrong(&code, 0, false), None);
+    }
+
+    /// Code two functions share takes each function's own grade in its own listing, the
+    /// evidence is that function's record, and next wrong stops on it in `F`'s listing.
+    #[test]
+    fn shared_code_takes_each_function_own_grade() {
+        let loaded = shared();
+        let checks = [
+            (0x1000, check(&[0x1000, 0x1005], &[0x1005])),
+            (0x1010, check(&[0x1010], &[])),
+        ];
+        let f = listing_blocking(&loaded, 0x1000).unwrap();
+        let g = listing_blocking(&loaded, 0x1010).unwrap();
+        let (f_row, g_row) = (f.line_of(0x1014).unwrap(), g.line_of(0x1014).unwrap());
+        let first_wrong = f.line_of(0x1005).unwrap();
+        let (fm, fc) = marks_of(f.clone(), &checks);
+        let (gm, gc) = marks_of(g, &checks);
+        assert_eq!(fm.grade(&fc, f_row), Some(Grade::Wrong));
+        assert_eq!(gm.grade(&gc, g_row), Some(Grade::Proved));
+        let said = fm.evidence(&fc, f_row).unwrap();
+        assert!(said.starts_with("block 0x1005: wrong:"), "{said}");
+        let said = gm.evidence(&gc, g_row).unwrap();
+        assert!(said.starts_with("block 0x1010: proved"), "{said}");
+        assert_eq!(fm.next_wrong(0, Toward::Down), Some(first_wrong));
+        assert_eq!(fm.next_wrong(f_row, Toward::Down), Some(first_wrong));
+        assert_eq!(gm.next_wrong(0, Toward::Down), None);
+        let (none, nc) = marks_of(f, &[]);
+        let said = none.evidence(&nc, f_row).unwrap();
+        assert!(said.contains("no check ran"), "{said}");
+        assert_eq!(none.grade(&nc, f_row), Some(Grade::Unchecked));
+    }
+
+    /// Next and previous wrong step block by block, from any line, and go round past
+    /// either end.
+    #[test]
+    fn next_and_previous_wrong_step_by_block_and_go_round() {
+        let loaded = one_function(&OVERLAP);
+        let listing = listing_blocking(&loaded, 0x1000).unwrap();
+        let (jmp, inc) = (
+            listing.line_of(0x1000).unwrap(),
+            listing.line_of(0x1001).unwrap(),
+        );
+        let ret = listing.line_of(0x1003).unwrap();
+        let checks = [(0x1000, check(&[0x1000, 0x1001], &[0x1000, 0x1001]))];
+        let (marks, _) = marks_of(listing, &checks);
+        assert_eq!(marks.next_wrong(jmp, Toward::Down), Some(inc));
+        assert_eq!(
+            marks.next_wrong(inc, Toward::Down),
+            Some(jmp),
+            "round past the end"
+        );
+        assert_eq!(
+            marks.next_wrong(ret, Toward::Down),
+            Some(jmp),
+            "past inc's own block"
+        );
+        assert_eq!(
+            marks.next_wrong(jmp, Toward::Up),
+            Some(inc),
+            "round past the start"
+        );
+        assert_eq!(marks.next_wrong(ret, Toward::Up), Some(inc));
+        assert_eq!(marks.next_wrong(0, Toward::Down), Some(jmp));
     }
 
     /// Each grade has a glyph of its own, so marks are told apart with their colors

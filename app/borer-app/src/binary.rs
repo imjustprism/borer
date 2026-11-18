@@ -1,11 +1,13 @@
 //! The binary a window has open: its background load, its edits and project file, its load
 //! status, the binaries opened before it, and the status-bar item that shows that status.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use borer_engine::analysis::decompile::replay::{BlockCheck, Rechecked, TextCheck};
 use borer_engine::analysis::edit::Edit;
 use borer_engine::analysis::project::{Foreign, Project};
 use futures::channel::oneshot;
@@ -74,6 +76,14 @@ pub enum BinaryEvent {
     /// No binary is open any more: a load started, failed or was cancelled, or the binary
     /// was closed.
     Closed,
+    /// A recheck changed the check of a function of a state: views of it read the check
+    /// again ([`Binary::rechecked`]).
+    Rechecked {
+        /// [`LoadedBinary::fingerprint`] of the state.
+        revision: u64,
+        /// The function's entry.
+        function: u64,
+    },
 }
 
 /// A view over a state of the window's binary, which says which state it shows, so a check
@@ -207,6 +217,9 @@ pub struct Binary {
     /// The window the binary is shown in, where its questions are asked; `None` until
     /// [`Self::set_window`], and then nothing asks before dropping edits.
     window: Option<AnyWindowHandle>,
+    /// The checks rechecks changed, by state fingerprint and function entry, all of one
+    /// state: the one place every view reads a rechecked block from.
+    rechecked: BTreeMap<(u64, u64), Arc<Option<TextCheck>>>,
 }
 
 impl EventEmitter<BinaryEvent> for Binary {}
@@ -251,6 +264,7 @@ impl Binary {
             edit: Job::default(),
             editing: None,
             window: None,
+            rechecked: BTreeMap::new(),
         }
     }
 
@@ -336,6 +350,66 @@ impl Binary {
             .as_deref()
             .map_or_else(String::new, |path| format!(" ({})", file_name(path)));
         format!("{}{mark}{project}", file_name(&loaded.path))
+    }
+
+    /// Returns the check of the function at `function` of state `revision` as rechecks
+    /// left it, `None` when no recheck changed it.
+    ///
+    /// # Arguments
+    ///
+    /// * `revision` - Fingerprint of the state.
+    /// * `function` - The function's entry.
+    #[must_use]
+    pub fn rechecked(&self, revision: u64, function: u64) -> Option<Arc<Option<TextCheck>>> {
+        self.rechecked.get(&(revision, function)).cloned()
+    }
+
+    /// Returns every function of state `revision` a recheck changed, with its check as
+    /// rechecks left it.
+    ///
+    /// # Arguments
+    ///
+    /// * `revision` - Fingerprint of the state.
+    pub fn rechecks(
+        &self,
+        revision: u64,
+    ) -> impl Iterator<Item = (u64, &Arc<Option<TextCheck>>)> + '_ {
+        self.rechecked
+            .iter()
+            .filter(move |((at, _), _)| *at == revision)
+            .map(|((_, function), check)| (*function, check))
+    }
+
+    /// Puts `record`, a recheck of a block of a function under a state, into that
+    /// function's check as the engine merges it ([`TextCheck::put_recheck`]), drops the
+    /// rechecks of every other state, and tells the views.
+    ///
+    /// # Arguments
+    ///
+    /// * `(revision, function)` - Fingerprint of the state the recheck ran under, and the
+    ///   function's entry.
+    /// * `check` - The function's check before any recheck.
+    /// * `record` - The recheck's record.
+    /// * `cx` - Binary context.
+    ///
+    /// # Returns
+    ///
+    /// What the merge did, `None` when the function has no check to merge into.
+    pub fn put_recheck(
+        &mut self,
+        (revision, function): (u64, u64),
+        check: &Arc<Option<TextCheck>>,
+        record: BlockCheck,
+        cx: &mut Context<'_, Self>,
+    ) -> Option<Rechecked> {
+        let held = self.rechecked(revision, function);
+        let mut merged = held.as_ref().unwrap_or(check).as_ref().clone()?;
+        let done = merged.put_recheck(record);
+        self.rechecked.retain(|(at, _), _| *at == revision);
+        self.rechecked
+            .insert((revision, function), Arc::new(Some(merged)));
+        cx.emit(BinaryEvent::Rechecked { revision, function });
+        Some(done)
     }
 
     /// Replaces the status line with `status`.

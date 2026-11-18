@@ -496,6 +496,7 @@ impl<K: RowKind> RowsPanel<K> {
                 |this, _, event: &BinaryEvent, window, cx| match event {
                     BinaryEvent::Revised(loaded) => this.revise(loaded.clone(), cx),
                     BinaryEvent::Opened(_) | BinaryEvent::Closed => this.follow(window, cx),
+                    BinaryEvent::Rechecked { .. } => {}
                 },
             ),
             cx.observe_global::<SettingsStore>(Self::relayout),

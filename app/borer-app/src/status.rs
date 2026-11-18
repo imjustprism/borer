@@ -10,7 +10,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use borer_engine::analysis::decompile::replay::Grade;
+use borer_engine::analysis::decompile::replay::{Grade, TextCheck};
 use gpui::{
     Action, AnyElement, App, AppContext as _, Context, Entity, Hsla, InteractiveElement as _,
     IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
@@ -26,6 +26,7 @@ use workspace::{HideStatusItem, ItemHandle, StatusItemView};
 use crate::actions::{PALETTE_HINT, ToggleTheme};
 use crate::app_assets::{AppIcon, Glyph};
 use crate::binary::{Binary, Loading, reading_label, status_label};
+use crate::check_marks::GRADE_COUNT;
 use crate::decompile_item::DecompileItem;
 use crate::worker::{GradeCounts, Job, LoadedBinary, grade_counts_blocking};
 
@@ -53,28 +54,39 @@ fn function_tab(item: Option<&dyn ItemHandle>, cx: &App) -> Option<Entity<Decomp
         .filter(|tab| tab.read(cx).entry().is_some())
 }
 
-/// The function a check is for: the binary, by identity, and the entry.
+/// The function a check is for: the binary, by identity, the entry, and the check rechecks
+/// left in the session, by identity.
 #[derive(Debug, Clone)]
 struct Checked {
     /// The binary the tab's function belongs to.
     loaded: Arc<LoadedBinary>,
     /// The function's entry.
     entry: u64,
+    /// The function's check as rechecks left it ([`Binary::rechecked`]), `None` when no
+    /// recheck changed it.
+    rechecked: Option<Arc<Option<TextCheck>>>,
 }
 
 impl Checked {
-    /// Returns whether `other` is the same function of the same loaded binary.
+    /// Returns whether `other` is the same function of the same loaded binary, under the
+    /// same rechecks.
     ///
     /// # Arguments
     ///
     /// * `other` - Another function.
     fn is(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.loaded, &other.loaded) && self.entry == other.entry
+        let same = match (&self.rechecked, &other.rechecked) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            (Some(_), None) | (None, Some(_)) => false,
+        };
+        Arc::ptr_eq(&self.loaded, &other.loaded) && self.entry == other.entry && same
     }
 }
 
 /// The grades of the function in the active tab, in the order the bar shows them.
-const SHOWN_GRADES: [Grade; 4] = [Grade::Proved, Grade::Tested, Grade::Unchecked, Grade::Wrong];
+const SHOWN_GRADES: [Grade; GRADE_COUNT] =
+    [Grade::Proved, Grade::Tested, Grade::Unchecked, Grade::Wrong];
 
 /// Returns the theme's syntax key of `grade` and the words the engine's header line counts
 /// it with.
@@ -113,6 +125,8 @@ pub struct Grades {
     tab: Option<(Entity<DecompileItem>, Subscription)>,
     /// The running background check.
     job: Job,
+    /// The window's binary, whose session holds the rechecked checks.
+    binary: Entity<Binary>,
 }
 
 impl std::fmt::Debug for Grades {
@@ -125,13 +139,18 @@ impl std::fmt::Debug for Grades {
 
 impl Grades {
     /// Returns the item, showing nothing until a function tab is active.
+    ///
+    /// # Arguments
+    ///
+    /// * `binary` - The window's binary.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(binary: Entity<Binary>) -> Self {
         Self {
             shown: None,
             running: None,
             tab: None,
             job: Job::default(),
+            binary,
         }
     }
 
@@ -160,9 +179,15 @@ impl Grades {
     fn request(&mut self, cx: &mut Context<'_, Self>) {
         let target = self.tab.as_ref().and_then(|(tab, _)| {
             let tab = tab.read(cx);
+            let entry = tab.entry()?;
+            let rechecked = self
+                .binary
+                .read(cx)
+                .rechecked(tab.loaded().fingerprint, entry);
             Some(Checked {
                 loaded: tab.loaded().clone(),
-                entry: tab.entry()?,
+                entry,
+                rechecked,
             })
         });
         let Some(target) = target else {
@@ -187,19 +212,16 @@ impl Grades {
         self.running = Some(target.clone());
         cx.notify();
         let job = target.clone();
-        let work = move || grade_counts_blocking(&job.loaded, job.entry);
+        let work = move || match &job.rechecked {
+            Some(check) => check.as_ref().as_ref().map(GradeCounts::of),
+            None => grade_counts_blocking(&job.loaded, job.entry),
+        };
         let label = format!("Grading {:#x}", target.entry);
         self.job.run(label, cx, work, |grades, counts, cx| {
             grades.running = None;
             grades.shown = Some((target, counts));
             cx.notify();
         });
-    }
-}
-
-impl Default for Grades {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -560,7 +582,7 @@ pub fn add_items(
     window: &mut Window,
     cx: &mut Context<'_, workspace::Workspace>,
 ) {
-    let grades = cx.new(|_| Grades::new());
+    let grades = cx.new(|_| Grades::new(binary.clone()));
     let work = cx.new(|cx| Work::new(binary.clone(), cx));
     let address = cx.new(|_| Address::default());
     let theme = cx.new(|_| ThemeSwitch);

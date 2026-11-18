@@ -7,7 +7,6 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use borer_engine::analysis::decompile::replay::Grade;
 use borer_engine::analysis::name_of;
 use borer_engine::view::{Ref, View};
 use editor::actions::GoToDefinition;
@@ -42,16 +41,16 @@ use crate::actions::{
 };
 use crate::binary::{Binary, BinaryEvent, Digest, Revision};
 use crate::card::{Card, Tone};
-use crate::check_marks::{MarkHits, Marks, glyph_layer, insert_evidence, paint_gutter};
+use crate::check_marks::{MarkHits, Marks, Toward, glyph_layer, paint_gutter};
 use crate::code_semantics::for_one_view;
 use crate::code_view::{ClickOutcome, CodeLines, CodePalette, Role, resolve_ref_click};
 use crate::commands;
 use crate::places::{PERMANENT, Place, open_beside, open_later};
-use crate::stored::recheck_states;
-use crate::worker::{
-    Job, LoadedBinary, Referent, decompile_or_why, listing_blocking, marks_blocking,
-    recheck_blocking,
-};
+use crate::worker::{Job, LoadedBinary, Referent, decompile_or_why, listing_blocking};
+
+mod checks;
+
+use checks::{RECHECK_STATES, act_on_code};
 
 /// Fewest logical pixels a row of code is tall.
 const MIN_ROW_HEIGHT_PX: f32 = 8.0;
@@ -452,7 +451,13 @@ impl DecompileItem {
                     for_one_view(&code).map(|s| -> Rc<dyn SemanticsProvider> { Rc::new(s) });
                 self.editor
                     .update(cx, |editor, _| editor.set_semantics_provider(semantics));
-                self.marks = None;
+                if self
+                    .marks
+                    .as_ref()
+                    .is_some_and(|m| m.revision() != self.loaded.fingerprint)
+                {
+                    self.marks = None;
+                }
                 self.evidence = None;
                 self.recheck_job.stop();
                 self.grade_lines(code.clone(), cx);
@@ -490,14 +495,10 @@ impl DecompileItem {
             return;
         };
         if self.entry == Some(va) && view.line_of(va).is_none() {
+            self.jump_to_line(0, cx);
             return;
         }
-        let block = self.loaded.analysis.block_at(va).map(|(_, b)| b.start);
-        let line = view.line_of(va).or_else(|| {
-            let block = block?;
-            (0..view.lines()).find(|&line| view.origin(line) == Some(block))
-        });
-        match line {
+        match view.line_for(&self.loaded.analysis, va) {
             Some(line) => self.jump_to_line(line, cx),
             None => self.say(format!("No line here stands for {va:#x}."), cx),
         }
@@ -568,167 +569,6 @@ impl DecompileItem {
             self.paint(false, cx);
             cx.notify();
         }
-    }
-
-    /// Grades `code`, the lines shown now, in the background, from the check of each
-    /// function they stand for, and marks them once graded.
-    ///
-    /// # Arguments
-    ///
-    /// * `code` - The shown lines.
-    /// * `cx` - Item context.
-    fn grade_lines(&mut self, code: Arc<CodeLines>, cx: &mut Context<'_, Self>) {
-        let (loaded, entry) = (self.loaded.clone(), self.entry);
-        let label = entry.map_or_else(
-            || "Grading lines".to_owned(),
-            |at| format!("Grading {at:#x}"),
-        );
-        let work = move || marks_blocking(&loaded, &code, entry);
-        self.marks_job.run(label, cx, work, |item, marks, cx| {
-            item.marks = Some(marks);
-            item.paint(true, cx);
-            cx.notify();
-        });
-    }
-
-    /// Shows the evidence behind the mark of shown line `row`, else of the cursor's line,
-    /// in a block under it, or hides it when it is shown there already; the status line
-    /// says why a line has none.
-    ///
-    /// # Arguments
-    ///
-    /// * `row` - Zero-based shown line, `None` for the cursor's.
-    /// * `cx` - Item context.
-    pub fn show_check(&mut self, row: Option<usize>, cx: &mut Context<'_, Self>) {
-        let Some(row) = row.or_else(|| Some(self.cursor(cx)?.0)) else {
-            return;
-        };
-        let here = self.evidence.as_ref().is_some_and(|(at, _, _)| *at == row);
-        self.hide_check(cx);
-        if here {
-            return;
-        }
-        let Some((marks, code)) = self.marks.as_ref().zip(self.code.as_deref()) else {
-            self.say("The lines are still being graded.".to_owned(), cx);
-            return;
-        };
-        let Some(said) = marks.evidence(code, row) else {
-            let why = "This line stands for no block, so it has no grade.";
-            self.say(why.to_owned(), cx);
-            return;
-        };
-        let block = self
-            .editor
-            .update(cx, |editor, cx| insert_evidence(editor, row, &said, cx));
-        self.evidence = block.map(|block| (row, said, block));
-    }
-
-    /// Hides the evidence shown under a line, if any.
-    ///
-    /// # Arguments
-    ///
-    /// * `cx` - Item context.
-    fn hide_check(&mut self, cx: &mut Context<'_, Self>) {
-        if let Some((_, _, block)) = self.evidence.take() {
-            self.editor.update(cx, |editor, cx| {
-                editor.remove_blocks([block].into_iter().collect(), None, cx);
-            });
-        }
-    }
-
-    /// Replays the block of the cursor's line from `states` states in the background, as
-    /// the answer's check seeds them, and marks its lines and shows its evidence by the new
-    /// record; leaving the tab drops it.
-    ///
-    /// # Arguments
-    ///
-    /// * `states` - States to try, which the engine holds within its cap.
-    /// * `cx` - Item context.
-    pub fn recheck(&mut self, states: u32, cx: &mut Context<'_, Self>) {
-        let row = self.cursor(cx).map(|(row, _)| row);
-        let marks = self.marks.as_ref().zip(self.code.as_deref());
-        let Some(block @ (_, start)) = marks.zip(row).and_then(|((m, c), r)| m.block(c, r)) else {
-            self.say(
-                "This line stands for no graded block to recheck.".to_owned(),
-                cx,
-            );
-            return;
-        };
-        let loaded = self.loaded.clone();
-        let work = move || recheck_blocking(&loaded, block, states);
-        let label = format!("Rechecking {start:#x}");
-        self.recheck_job
-            .run(label, cx, work, move |item, record, cx| {
-                let Some(record) = record else {
-                    item.say(
-                        format!("The engine could not recheck block {start:#x}."),
-                        cx,
-                    );
-                    return;
-                };
-                if let Some(marks) = item.marks.as_mut() {
-                    marks.set_recheck(block, record);
-                }
-                item.paint(true, cx);
-                let shown = item.evidence.as_ref().map(|(row, _, _)| *row);
-                if let Some(row) = shown.filter(|&row| item.block_of(row) == Some(block)) {
-                    item.hide_check(cx);
-                    item.show_check(Some(row), cx);
-                }
-                cx.notify();
-            });
-    }
-
-    /// Returns the block shown line `row` stands for, `None` while the lines are graded and
-    /// for a line with no mark.
-    ///
-    /// # Arguments
-    ///
-    /// * `row` - Zero-based shown line.
-    fn block_of(&self, row: usize) -> Option<(u64, u64)> {
-        self.marks.as_ref()?.block(self.code.as_deref()?, row)
-    }
-
-    /// Returns the grades of the shown lines, once they are in.
-    #[must_use]
-    pub const fn marks(&self) -> Option<&Marks> {
-        self.marks.as_ref()
-    }
-
-    /// Returns the evidence shown under a line, `None` when none is.
-    #[must_use]
-    pub fn evidence(&self) -> Option<&str> {
-        self.evidence.as_ref().map(|(_, said, _)| said.as_str())
-    }
-
-    /// Moves to the next line after the cursor's marked wrong, or the one before it when
-    /// `back`, going round past either end; the status line says when no line is.
-    ///
-    /// # Arguments
-    ///
-    /// * `back` - Whether to look upward.
-    /// * `cx` - Item context.
-    pub fn step_wrong(&mut self, back: bool, cx: &mut Context<'_, Self>) {
-        let Some((marks, code)) = self.marks.as_ref().zip(self.code.as_deref()) else {
-            self.say("The lines are still being graded.".to_owned(), cx);
-            return;
-        };
-        let from = self.cursor(cx).map_or(0, |(row, _)| row);
-        match marks.next_wrong(code, from, back) {
-            Some(row) => self.jump_to_line(row, cx),
-            None => self.say("No line of this tab is marked wrong.".to_owned(), cx),
-        }
-    }
-
-    /// Returns the grade shown line `row` is marked with, `None` while the lines are graded
-    /// and for a line with no mark.
-    ///
-    /// # Arguments
-    ///
-    /// * `row` - Zero-based shown line.
-    #[must_use]
-    pub fn grade(&self, row: usize) -> Option<Grade> {
-        self.marks.as_ref()?.grade(self.code.as_deref()?, row)
     }
 
     /// Colors the tokens of the buffer rows around the shown ones, unless they are colored
@@ -838,13 +678,15 @@ impl DecompileItem {
     ) {
         match event {
             BinaryEvent::Revised(loaded) => self.move_to(loaded.clone(), window, cx),
+            BinaryEvent::Rechecked { revision, .. } => self.rechecked(*revision, cx),
             BinaryEvent::Opened(_) | BinaryEvent::Closed => {}
         }
     }
 
     /// Moves the tab to `loaded`, a later state of its binary that an edit or a project
     /// left, and builds its function again under the names there, keeping its top line; the
-    /// lines shown stay until the new ones arrive. Measured lines stay as they are.
+    /// lines shown stay until the new ones arrive. Measured lines stay as they are, and are
+    /// graded under `loaded` from the next lines they are given.
     ///
     /// # Arguments
     ///
@@ -857,10 +699,10 @@ impl DecompileItem {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
+        self.loaded = loaded;
         let Some(entry) = self.entry else {
             return;
         };
-        self.loaded = loaded;
         self.keep_top = Some(self.top_line());
         let (source, form) = (self.loaded.clone(), self.form);
         self.load(move || form.build(&source, entry), window, cx);
@@ -1290,7 +1132,11 @@ impl Revision for DecompileItem {
         let d = Digest::default()
             .text(&format!("{:?}", self.form))
             .text(failed);
-        self.code.as_ref().map_or(d, |code| code.digest(d)).value()
+        let Some(code) = self.code.as_deref() else {
+            return d.value();
+        };
+        let d = code.digest(d);
+        self.marks.as_ref().map_or(d, |m| m.digest(code, d)).value()
     }
 }
 
@@ -1381,26 +1227,37 @@ pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
             }
         },
     );
-    commands::register(workspace, binary, |workspace, _: &RecheckBlock, _, cx| {
-        if let Some(item) = workspace.active_item_as::<DecompileItem>(cx) {
-            let states = recheck_states(cx);
-            item.update(cx, |item, cx| item.recheck(states, cx));
-        }
-    });
-    commands::register(workspace, binary, |workspace, _: &NextWrongBlock, _, cx| {
-        if let Some(item) = workspace.active_item_as::<DecompileItem>(cx) {
-            item.update(cx, |item, cx| item.step_wrong(false, cx));
-        }
-    });
+    let b = binary.clone();
     commands::register(
         workspace,
         binary,
-        |workspace, _: &PreviousWrongBlock, _, cx| {
-            if let Some(item) = workspace.active_item_as::<DecompileItem>(cx) {
-                item.update(cx, |item, cx| item.step_wrong(true, cx));
-            }
+        move |workspace, _: &RecheckBlock, _, cx| {
+            act_on_code(workspace, &b, cx, |item, cx| {
+                item.recheck(RECHECK_STATES, cx);
+            });
         },
     );
+    let b = binary.clone();
+    commands::register(
+        workspace,
+        binary,
+        move |workspace, _: &NextWrongBlock, _, cx| {
+            act_on_code(workspace, &b, cx, |item, cx| {
+                item.step_wrong(Toward::Down, cx);
+            });
+        },
+    );
+    let b = binary.clone();
+    commands::register(
+        workspace,
+        binary,
+        move |workspace, _: &PreviousWrongBlock, _, cx| {
+            act_on_code(workspace, &b, cx, |item, cx| {
+                item.step_wrong(Toward::Up, cx);
+            });
+        },
+    );
+
     commands::register(
         workspace,
         binary,

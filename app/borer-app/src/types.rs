@@ -512,7 +512,7 @@ impl StructItem {
                 item.redraft(None);
                 item.ask(cx);
             }
-            BinaryEvent::Opened(_) | BinaryEvent::Closed => {}
+            BinaryEvent::Opened(_) | BinaryEvent::Closed | BinaryEvent::Rechecked { .. } => {}
         });
         let mut item = Self {
             workspace,

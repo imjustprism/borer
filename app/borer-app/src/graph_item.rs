@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use borer_engine::analysis::decompile::replay::{Grade, TextCheck};
+use borer_engine::analysis::decompile::replay::{BlockAnswer, Grade, TextCheck};
 use borer_engine::analysis::name_of;
 use borer_engine::analysis::render::{Cfg, Cut, EdgeKind};
 use borer_engine::num::from_usize;
@@ -162,9 +162,16 @@ impl GraphItem {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Self {
-        let revised = cx.subscribe(&binary, |item, _, event, cx| match event {
+        let revised = cx.subscribe(&binary, |item, binary, event, cx| match event {
             BinaryEvent::Revised(loaded) => item.build(loaded.clone(), cx),
-            BinaryEvent::Opened(_) | BinaryEvent::Closed => {}
+            BinaryEvent::Rechecked { revision, function }
+                if (*revision, *function) == (item.loaded.fingerprint, item.entry) =>
+            {
+                item.check = binary.read(cx).rechecked(*revision, *function);
+                item.regrade();
+                cx.notify();
+            }
+            BinaryEvent::Opened(_) | BinaryEvent::Closed | BinaryEvent::Rechecked { .. } => {}
         });
         let mut item = Self {
             workspace,
@@ -233,7 +240,8 @@ impl GraphItem {
                 }
             },
         );
-        let work = move || check_blocking(&loaded, entry);
+        let rechecked = self.binary.read(cx).rechecked(loaded.fingerprint, entry);
+        let work = move || rechecked.unwrap_or_else(|| check_blocking(&loaded, entry));
         self.check_job.run(
             format!("Checking {entry:#x}"),
             cx,
@@ -336,18 +344,11 @@ impl GraphItem {
         let (Some(graph), Some(check)) = (&self.graph, &self.check) else {
             return;
         };
+        let check = check.as_ref().as_ref();
         self.grades = graph
             .nodes
             .iter()
-            .map(|n| {
-                check.as_ref().as_ref().map_or(Grade::Unchecked, |c| {
-                    c.blocks
-                        .binary_search_by_key(&n.start, |b| b.start())
-                        .ok()
-                        .and_then(|ix| c.blocks.get(ix))
-                        .map_or(Grade::Unchecked, |b| b.grade())
-                })
-            })
+            .map(|n| BlockAnswer::of(check, n.start).grade())
             .collect();
     }
 
@@ -509,18 +510,8 @@ impl GraphItem {
             .map(|n| n.start);
         match (self.check.as_deref(), start) {
             (None, _) => "Checking the decompiled text...".to_owned(),
-            (Some(None), _) => {
-                "No check: the function does not decompile or the image has no emulator.".to_owned()
-            }
-            (Some(Some(check)), Some(start)) => check
-                .blocks
-                .iter()
-                .find(|b| b.start() == start)
-                .map_or_else(
-                    || format!("No record of the block at {start:#x}."),
-                    |b| b.spell(),
-                ),
-            (Some(Some(_)), None) => String::new(),
+            (Some(check), Some(start)) => BlockAnswer::of(check.as_ref(), start).spell(),
+            (Some(_), None) => String::new(),
         }
     }
 
