@@ -3,6 +3,7 @@
 //! of every row of a catalog.
 
 use super::*;
+use crate::analysis::members::Receiver;
 use crate::fxmap::FxHashMap;
 
 /// A legend numbering the names that repeat on one page of a catalog, so a
@@ -74,6 +75,11 @@ impl Legend {
     }
 }
 
+/// What a header adds when some names were read bare: rough, a local or a
+/// parameter reads the same.
+const BARE_NOTE: &str =
+    "; names spelled without this-> are candidates: a local or a parameter is spelled the same way";
+
 /// Most fields listed in one read of the assertion index.
 pub(super) const FIELDS_MAX: usize = 200;
 
@@ -121,7 +127,7 @@ pub(super) struct Asserted {
 /// contested or weak, with the sites that say so.
 pub fn asserted_fields_tsv(p: &Program, a: &Analysis, o: &Overlay, filter: &str) -> String {
     let want = filter.to_lowercase();
-    let (fields, members) = asserted_members(p, a, o);
+    let (fields, members, bare) = asserted_members(p, a, o);
     let total = fields.len();
     let mut rows: Vec<(&String, &Asserted)> = fields
         .iter()
@@ -136,9 +142,10 @@ pub fn asserted_fields_tsv(p: &Program, a: &Analysis, o: &Overlay, filter: &str)
         .collect();
     rows.sort_by_key(|(name, field)| (std::cmp::Reverse(field.functions.len()), (*name).clone()));
     let mut out = format!(
-        "# {} of {total} asserted field names{}\n",
+        "# {} of {total} asserted field names{}{}\n",
         rows.len().min(FIELDS_MAX),
-        narrows(rows.len(), FIELDS_MAX, "asserts")
+        narrows(rows.len(), FIELDS_MAX, "asserts"),
+        if bare { BARE_NOTE } else { "" }
     );
     out.push_str("# functions\tfield\tclasses\n");
     for (name, field) in rows.iter().take(FIELDS_MAX) {
@@ -175,7 +182,11 @@ pub fn asserted_fields_tsv(p: &Program, a: &Analysis, o: &Overlay, filter: &str)
         .take(FIELDS_MAX)
         .map(|(name, _)| name.as_str())
         .collect();
-    out.push_str(&pairs_tsv(p, a, o, &members, &shown, &want));
+    let mut pairs = pairs_tsv(p, a, o, &members, &shown, &want);
+    if bare && let Some(end) = pairs.find('\n') {
+        pairs.insert_str(end, BARE_NOTE);
+    }
+    out.push_str(&pairs);
     out
 }
 
@@ -185,11 +196,14 @@ pub fn asserted_fields_tsv(p: &Program, a: &Analysis, o: &Overlay, filter: &str)
 /// assert it, and each class's members with the functions that assert them
 /// ([`Named`]).
 ///
-/// The names are read from the listed literal, as far as the listing
-/// reads one; the members to pair are read from the bytes at the
-/// reference, as the pairing's votes read them
-/// ([`crate::analysis::members::this_members`]): only a member read as a
-/// value, within the first
+/// A literal spelling `this->` is read as an assertion wherever it is
+/// referenced, its names as far as the listing reads it; one spelling no
+/// member that way is read only at the sites that pass it to an assert
+/// reporter ([`crate::analysis::members::assert_conditions`]), its bare
+/// candidates being its names. The members to pair are read from the
+/// bytes at the reference, as the pairing's votes read them
+/// ([`crate::analysis::members::condition_members`]): only a member read
+/// as a value, within the first
 /// [`MEMBER_STRING_CAP`](crate::analysis::members::MEMBER_STRING_CAP)
 /// characters.
 ///
@@ -198,64 +212,93 @@ pub fn asserted_fields_tsv(p: &Program, a: &Analysis, o: &Overlay, filter: &str)
 /// * `p` - The loaded image, for reading the strings.
 /// * `a` - Cross-references and functions.
 /// * `o` - User names, for each function's class.
-fn asserted_members(p: &Program, a: &Analysis, o: &Overlay) -> (BTreeMap<String, Asserted>, Named) {
-    use crate::analysis::members::{MEMBER_STRING_CAP, Spelled, this_members};
+///
+/// # Returns
+///
+/// The names, the class members, and whether any name was read bare.
+fn asserted_members(
+    p: &Program,
+    a: &Analysis,
+    o: &Overlay,
+) -> (BTreeMap<String, Asserted>, Named, bool) {
+    use crate::analysis::members::{
+        MEMBER_STRING_CAP, Spelled, assert_conditions, condition_members,
+    };
     let mut fields: BTreeMap<String, Asserted> = BTreeMap::new();
     let mut members = Named::new();
+    let mut conditions: BTreeMap<u64, Vec<(u64, String)>> = BTreeMap::new();
+    let mut bare = false;
     for (target, lit) in literal_targets(p, a).iter() {
-        let sites = a.xrefs_to(*target);
-        let mut owners: Vec<(String, u64)> = Vec::new();
+        let Some((_, raw)) = cstr_at(p, *target, 1, MEMBER_STRING_CAP) else {
+            continue;
+        };
+        let (spelled, how) = condition_members(&raw);
+        let mut names: Vec<String> = Vec::new();
         let mut rest = lit.as_str();
         while let Some(at) = rest.find("this->") {
             let tail = rest.get(at + 6..).unwrap_or("");
             let end = tail
                 .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
                 .unwrap_or(tail.len());
-            let name = tail.get(..end).unwrap_or("");
+            names.extend(tail.get(..end).filter(|n| !n.is_empty()).map(str::to_owned));
             rest = tail.get(end..).unwrap_or("");
-            if name.is_empty() {
-                continue;
+        }
+        let mut entries: BTreeSet<u64> = a
+            .xrefs_to(*target)
+            .iter()
+            .filter_map(|s| s.from_entry)
+            .collect();
+        if names.is_empty() && how == Receiver::Bare && !spelled.is_empty() {
+            entries.retain(|&e| {
+                conditions
+                    .entry(e)
+                    .or_insert_with(|| assert_conditions(p, a, e))
+                    .iter()
+                    .any(|(t, _)| t == target)
+            });
+            if !entries.is_empty() {
+                names = spelled.iter().map(|(n, _)| n.clone()).collect();
+                bare = true;
             }
-            let e = fields.entry(name.to_owned()).or_default();
+        }
+        let owners: Vec<(String, u64)> = entries
+            .iter()
+            .filter_map(|&e| {
+                crate::analysis::classes::class_of(&name_of(a, o, e)).map(|c| (c.to_owned(), e))
+            })
+            .collect();
+        for name in &names {
+            let e = fields.entry(name.clone()).or_default();
             if let Some(text) = lit.strip_prefix('"').and_then(|t| t.strip_suffix('"'))
                 && text.len() <= CONDITION_MAX
             {
                 e.conditions.insert(text.to_owned());
             }
-            owners.clear();
-            for site in sites {
-                let Some(entry) = site.from_entry else {
-                    continue;
-                };
-                e.functions.insert(entry);
-                if let Some(class) = crate::analysis::classes::class_of(&name_of(a, o, entry)) {
-                    e.classes.insert(class.to_owned());
-                    owners.push((class.to_owned(), entry));
+            e.functions.extend(&entries);
+            e.classes.extend(owners.iter().map(|(c, _)| c.clone()));
+        }
+        for (name, _) in spelled.iter().filter(|(_, how)| *how == Spelled::Member) {
+            for (class, entry) in &owners {
+                let slot = members
+                    .entry((class.clone(), name.clone()))
+                    .or_insert_with(|| (BTreeSet::new(), how));
+                slot.0.insert(*entry);
+                if how == Receiver::This {
+                    slot.1 = how;
                 }
             }
         }
-        let Some((_, raw)) = cstr_at(p, *target, 4, MEMBER_STRING_CAP) else {
-            continue;
-        };
-        for (name, how) in this_members(&raw) {
-            if how != Spelled::Member {
-                continue;
-            }
-            for (class, entry) in &owners {
-                members
-                    .entry((class.clone(), name.to_owned()))
-                    .or_default()
-                    .insert(*entry);
-            }
-        }
     }
-    (fields, members)
+    (fields, members, bare)
 }
 
 /// The functions whose asserts spell each member of `this`, by class and
-/// member; a member called as a method (`this->IsSet()`) is a getter, not
-/// a member, and is left out.
-pub(super) type Named = BTreeMap<(String, String), BTreeSet<u64>>;
+/// member.
+///
+/// Each carries [`Receiver::This`] when one spells it after `this->`; a
+/// member called as a method (`this->IsSet()`) is a getter, not a member,
+/// and is left out.
+pub(super) type Named = BTreeMap<(String, String), (BTreeSet<u64>, Receiver)>;
 
 /// Most functions whose asserts one read pairs with offsets.
 pub(super) const PAIR_FUNCTIONS_MAX: usize = 400;
@@ -314,7 +357,9 @@ type PairRow<'a> = (Tier, &'a str, &'a str, Option<u64>, String);
 /// offset another member's sites claim, is contested, and every offset is
 /// listed with its own sites, since a missed pairing costs a reader less
 /// than a false one. A member no site reads one field for is weak with no
-/// offset, its evidence the functions that assert it. The listed classes'
+/// offset, its evidence the functions that assert it, unless every assert
+/// spells it bare: then nothing shows it is a member and not a local, and
+/// it is left out. The listed classes'
 /// asserting functions are read round-robin by class, at most
 /// [`PAIR_FUNCTIONS_MAX`] ([`budgeted`]), since another member's site can
 /// contest an offset; a class with functions left unread says how many,
@@ -357,7 +402,7 @@ fn pairs_tsv(
         return String::new();
     }
     let mut by_class: BTreeMap<&str, BTreeSet<u64>> = BTreeMap::new();
-    for ((class, _), entries) in named {
+    for ((class, _), (entries, _)) in named {
         if classes.contains(class.as_str()) {
             by_class.entry(class.as_str()).or_default().extend(entries);
         }
@@ -376,7 +421,7 @@ fn pairs_tsv(
     let asserting: usize = by_class.values().map(BTreeSet::len).sum();
     let (sites, owners) = assert_sites(p, a, o, &read);
     let mut rows: Vec<PairRow<'_>> = Vec::new();
-    for ((class, member), entries) in named
+    for ((class, member), (entries, how)) in named
         .iter()
         .filter(|((c, m), _)| keep(c.as_str(), m.as_str()))
     {
@@ -387,6 +432,9 @@ fn pairs_tsv(
             String::new()
         };
         let Some(by_off) = sites.get(&(class.clone(), member.clone())) else {
+            if *how == Receiver::Bare {
+                continue;
+            }
             let evidence = site_list(entries.iter().map(|&e| (e, 1)));
             rows.push((
                 Tier::Weak,
@@ -473,7 +521,8 @@ type Sites = (
 );
 
 /// Gathers the single-offset assert sites of the functions in `read`
-/// ([`crate::analysis::classes::assert_votes`]), getters left out.
+/// ([`crate::analysis::classes::assert_votes`]), members spelled after
+/// `this->` and bare alike, getters left out.
 ///
 /// # Arguments
 ///
@@ -483,7 +532,8 @@ type Sites = (
 /// * `read` - The functions, in address order.
 fn assert_sites(p: &Program, a: &Analysis, o: &Overlay, read: &[u64]) -> Sites {
     let votes = crate::analysis::striped(read, |&entry| {
-        crate::analysis::classes::assert_votes(p, a, o, entry)
+        [Receiver::This, Receiver::Bare]
+            .map(|r| crate::analysis::classes::assert_votes(p, a, o, entry, r))
     });
     let mut sites: Sites = (BTreeMap::new(), BTreeMap::new());
     for (&entry, votes) in read.iter().zip(&votes) {
@@ -492,7 +542,8 @@ fn assert_sites(p: &Program, a: &Analysis, o: &Overlay, read: &[u64]) -> Sites {
         else {
             continue;
         };
-        for (off, member, n) in votes.iter().filter(|(_, m, _)| !m.ends_with(')')) {
+        let votes = votes.iter().flat_map(|v| v.iter());
+        for (off, member, n) in votes.filter(|(_, m, _)| !m.ends_with(')')) {
             *sites
                 .0
                 .entry((class.clone(), member.clone()))

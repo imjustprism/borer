@@ -351,22 +351,32 @@ fn asserted_condition(line: &str) -> Option<String> {
     None
 }
 
-/// The one subject an asserted condition speaks of, when it has one.
+/// Returns every subject an asserted condition speaks of, each with how
+/// it is spelled.
 ///
 /// A subject is an identifier used as a value or an object (`reader` in
 /// `reader.isvalid()`, `index` in `index < this->count`): not a keyword,
 /// not a member after `.` or `->`, not a scope before or after `::`, not
-/// a constant spelled in capitals. A free call (`IsValid(reader)`) tests
-/// its result, not its argument, so a condition with one has no subject;
-/// a condition with two subjects (`offers.Size() == amounts.Size()`) says
-/// nothing about which variable is which.
+/// a constant spelled in capitals, not the type of a cast (`(Foo *)p`).
+/// One followed by `.`, `->` or `[` is reached into
+/// ([`Spelled::Sub`](crate::analysis::members::Spelled::Sub)), and one
+/// spelled both ways counts as reached into.
 ///
 /// # Arguments
 ///
 /// * `condition` - The condition as the literal spelled it.
-fn subject_of(condition: &str) -> Option<String> {
+///
+/// # Returns
+///
+/// The subjects in the order they appear, or `None` when the condition
+/// calls a free function (`IsValid(reader)`), which tests its result, not
+/// its argument.
+pub(crate) fn subjects(
+    condition: &str,
+) -> Option<Vec<(String, crate::analysis::members::Spelled)>> {
+    use crate::analysis::members::Spelled;
     let text = without_literals(condition);
-    let mut subjects: Vec<&str> = Vec::new();
+    let mut subjects: Vec<(String, Spelled)> = Vec::new();
     for (w, start, end) in words(&text) {
         let before = text[..start].trim_end();
         let after = text[end..].trim_start();
@@ -376,8 +386,17 @@ fn subject_of(condition: &str) -> Option<String> {
             }
             return None;
         }
+        let cast = before.ends_with('(')
+            && after
+                .trim_start_matches(['*', '&', ' '])
+                .strip_prefix(')')
+                .is_some_and(|r| {
+                    r.trim_start()
+                        .starts_with(|c: char| is_ident_char(c) || c == '(')
+                });
         if NOT_NAMES.contains(&w)
             || w.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+            || cast
             || before.ends_with('.')
             || before.ends_with("->")
             || before.ends_with("::")
@@ -385,12 +404,30 @@ fn subject_of(condition: &str) -> Option<String> {
         {
             continue;
         }
-        if !subjects.contains(&w) {
-            subjects.push(w);
+        let how = if after.starts_with(['.', '[']) || after.starts_with("->") {
+            Spelled::Sub
+        } else {
+            Spelled::Member
+        };
+        match subjects.iter_mut().find(|(s, _)| s == w) {
+            Some(seen) if how == Spelled::Sub => seen.1 = how,
+            Some(_) => {}
+            None => subjects.push((w.to_owned(), how)),
         }
     }
-    match subjects.as_slice() {
-        [one] => Some((*one).to_owned()),
+    Some(subjects)
+}
+
+/// The one subject an asserted condition speaks of, when it has one
+/// ([`subjects`]): a condition with two (`offers.Size() ==
+/// amounts.Size()`) says nothing about which variable is which.
+///
+/// # Arguments
+///
+/// * `condition` - The condition as the literal spelled it.
+fn subject_of(condition: &str) -> Option<String> {
+    match subjects(condition)?.as_slice() {
+        [(one, _)] => Some(one.clone()),
         _ => None,
     }
 }
@@ -534,6 +571,11 @@ mod naming_tests {
         assert_eq!(subject_of("IsValid(reader)"), None);
         assert_eq!(subject_of("this->handled"), None);
         assert_eq!(subject_of("0 == strcmp(name, \"x\")"), None);
+        assert_eq!(
+            subject_of("(uint32_t)index < count_ || (Node *)node").as_deref(),
+            None
+        );
+        assert_eq!(subject_of("(uint32_t)index < 4").as_deref(), Some("index"));
     }
 
     /// The guard names its one variable: directly, through a dereference,

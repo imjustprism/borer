@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use super::decompile::decompile_plain;
 use super::fieldrefs::{FieldAccess, FieldRef};
-use super::members::{MEMBER_STRING_CAP, collect_assert_names, spread_members};
+use super::members::{Receiver, asserts_a_member, spread_members, votes_in};
 use super::{
     Analysis, Function, Overlay, Signature, name_of, plain_text_cached, slot_name_of, striped,
 };
@@ -732,7 +732,9 @@ fn method_votes(
 ) -> BTreeMap<u64, FieldUse> {
     let mut fields: BTreeMap<u64, FieldUse> = BTreeMap::new();
     let read: Vec<u64> = methods.iter().copied().take(METHODS_MAX).collect();
-    for votes in &striped(&read, |&e| assert_votes(program, analysis, overlay, e)) {
+    for votes in &striped(&read, |&e| {
+        assert_votes(program, analysis, overlay, e, Receiver::This)
+    }) {
         add_votes(&mut fields, votes);
     }
     fields
@@ -779,12 +781,12 @@ fn sibling_votes(
         .into_iter()
         .flatten()
         .filter(|(_, other)| other != class)
-        .filter(|(entry, _)| asserts_a_member(program, analysis, *entry))
+        .filter(|(entry, _)| asserts_a_member(program, analysis, *entry, Receiver::This))
         .take(SIBLING_METHODS_MAX)
         .map(|(entry, _)| *entry)
         .collect();
     for votes in &striped(&siblings, |&entry| {
-        assert_votes(program, analysis, overlay, entry)
+        assert_votes(program, analysis, overlay, entry, Receiver::This)
     }) {
         add_votes(&mut fields, votes);
     }
@@ -817,14 +819,16 @@ fn template_index(analysis: &Analysis, overlay: &Overlay) -> TemplateIndex {
 }
 
 /// One method's assertion votes: each `(offset, member, count)` its guarded
-/// assertions tie together ([`super::members::collect_assert_names`]).
+/// assertions tie together ([`super::members::votes_in`]).
 pub(crate) type Votes = Vec<(u64, String, usize)>;
 
-/// The assertion votes of one method, read once from its decompilation.
+/// The assertion votes of one method under one spelling, read once from
+/// its decompilation.
 ///
 /// A method is asked for by its own class and by every sibling
 /// instantiation of its template, and its votes are a few words where its
-/// text is kilobytes.
+/// text is kilobytes. The class's field names read only the members
+/// spelled after `this->`; `borer://asserts` reads the bare ones too.
 ///
 /// # Arguments
 ///
@@ -832,29 +836,25 @@ pub(crate) type Votes = Vec<(u64, String, usize)>;
 /// * `analysis` - Discovery results.
 /// * `overlay` - User names.
 /// * `entry` - The method.
+/// * `receiver` - The spelling read.
 pub(crate) fn assert_votes(
     program: &Program,
     analysis: &Analysis,
     overlay: &Overlay,
     entry: u64,
+    receiver: Receiver,
 ) -> Arc<Votes> {
-    if !asserts_a_member(program, analysis, entry) {
+    if !asserts_a_member(program, analysis, entry, receiver) {
         return Arc::default();
     }
     analysis.derived.get_or_build_item(
         "assert_votes",
         overlay.fingerprint(),
-        entry,
+        (entry, receiver),
         || {
-            let mut fields: BTreeMap<u64, FieldUse> = BTreeMap::new();
-            if let Some(text) = decompile_plain(program, analysis, overlay, entry) {
-                let mut prev = "";
-                for line in text.lines() {
-                    collect_assert_names(prev, line.trim(), &mut fields);
-                    prev = line.trim();
-                }
-            }
-            fields
+            decompile_plain(program, analysis, overlay, entry)
+                .map(|text| votes_in(&text, receiver))
+                .unwrap_or_default()
                 .into_iter()
                 .flat_map(|(off, u)| u.names.into_iter().map(move |(m, n)| (off, m, n)))
                 .collect::<Votes>()
@@ -885,7 +885,7 @@ fn add_votes(fields: &mut BTreeMap<u64, FieldUse>, votes: &Votes) {
 
 /// Returns the member name most of a field's assert votes agree on.
 ///
-/// [`super::members::collect_assert_names`] records `IsLocked()` for a
+/// [`super::members::votes_in`] records `IsLocked()` for a
 /// condition that calls
 /// a method, which says what reads the field, not what the field is called;
 /// rendering the field as `this->IsLocked()` would put a call in the text
@@ -945,35 +945,6 @@ fn generic_name(class: &str) -> String {
 /// The names a template agrees on repeat in nearly every method, so a small
 /// sample settles them and the biggest templates stay cheap.
 const SIBLING_METHODS_MAX: usize = 24;
-
-/// Tells whether a function can name a field at all.
-///
-/// [`super::members::collect_assert_names`] reads the name out of a quoted
-/// condition, so a
-/// function that references no string holding `this->` cannot contribute
-/// one. Checking the referenced bytes costs a read where decompiling the
-/// function costs a decompile, and the classes with the most methods are the
-/// ones where that matters.
-///
-/// # Arguments
-///
-/// * `program` - The loaded image, read for the strings.
-/// * `analysis` - Cross-references.
-/// * `entry` - The function's entry address.
-///
-/// # Returns
-///
-/// Whether some referenced string mentions a member of `this`.
-pub(crate) fn asserts_a_member(program: &Program, analysis: &Analysis, entry: u64) -> bool {
-    analysis.refs_from(entry).iter().any(|&(target, _)| {
-        program
-            .section_at(target)
-            .is_some_and(|s| !s.executable)
-            .then(|| crate::strings::cstr_at(program, target, 4, MEMBER_STRING_CAP))
-            .flatten()
-            .is_some_and(|(_, t)| t.contains("this->"))
-    })
-}
 
 /// Renders the four characters of a code, unprintable bytes as `?`.
 ///

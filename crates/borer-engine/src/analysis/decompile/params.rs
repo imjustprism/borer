@@ -2,6 +2,7 @@
 //! as arguments, and its prologue.
 
 use super::*;
+use crate::analysis::members::{Receiver::This, asserts_a_member};
 use crate::analysis::protos::CallConv;
 use crate::analysis::typelib::Pass;
 
@@ -667,7 +668,7 @@ pub(super) fn shape_of(
             s.is_const
                 || (classes::class_of(&s.name).is_some()
                     && (positions > s.params.len() + hidden
-                        || classes::asserts_a_member(ctx.program, ctx.analysis, f.entry)))
+                        || asserts_a_member(ctx.program, ctx.analysis, f.entry, This)))
         }
         None => {
             let full = name_of(ctx.analysis, ctx.overlay, f.entry);

@@ -474,8 +474,9 @@ fn layout_step(p: &Program, f: &Function, bits: u32, text: &str, params: usize) 
 ///
 /// The rule is tried last, so a function another rule already points
 /// somewhere keeps those steps. The class is offered only when the
-/// function's asserts spell a member of `this`, so a free function's
-/// namespace never reads as a class; it filters by its last component,
+/// function's asserts spell a member of `this`, or spell one bare in a
+/// function the text gives a `this` (`Registry *this`), so a free
+/// function's namespace never reads as a class; it filters by its last component,
 /// which is a substring of the qualified name, and a template's is left
 /// out, since its brackets are no filter. The file is offered only when
 /// the asserts cited it: a `// source:` line from debug information
@@ -502,7 +503,10 @@ fn assert_step(p: &Program, a: &Analysis, o: &Overlay, f: &Function, text: &str)
         .filter(|file| !file.is_empty() && !file.contains(':'))
         .map(|file| format!("borer://sources/{file} (the source file they cite)"));
     let name = name_of(a, o, f.entry);
-    let class = crate::analysis::classes::asserts_a_member(p, a, f.entry)
+    use crate::analysis::members::Receiver;
+    let method = text.contains(" *this)") || text.contains(" *this,");
+    let asserts = |r| crate::analysis::members::asserts_a_member(p, a, f.entry, r);
+    let class = (asserts(Receiver::This) || (method && asserts(Receiver::Bare)))
         .then(|| crate::analysis::classes::class_of(&name))
         .flatten()
         .and_then(|c| c.rsplit("::").next())
