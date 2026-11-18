@@ -37,6 +37,20 @@ fn segment_slot(code: &[u8]) -> (Mnemonic, Register, Register, Register, u64) {
     )
 }
 
+/// Each site of a technique names the function it is in: a `cpuid` in two
+/// functions is two groups, each with its own name, not both in the first.
+#[test]
+fn each_site_names_its_own_function() {
+    // ASM: call 0x401008; cpuid; ret; cpuid (0x401008); ret
+    let text = report(&[
+        0xe8, 0x03, 0x00, 0x00, 0x00, 0x0f, 0xa2, 0xc3, 0x0f, 0xa2, 0xc3,
+    ]);
+    assert!(
+        text.contains("0x401005 (in sub_401000), 0x401008 (in sub_401008)"),
+        "{text}"
+    );
+}
+
 /// One `cpuid` and one `rdtsc` are a feature probe and a read. A hypervisor
 /// leaf and a subtracted pair are the probes the old labels claimed for every
 /// one of them.

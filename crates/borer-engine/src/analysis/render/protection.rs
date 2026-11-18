@@ -83,24 +83,33 @@ pub fn anti_analysis_tsv(p: &Program, a: &Analysis, o: &Overlay) -> String {
     let sites = anti_sites(p, a);
     let mut out = String::new();
     for (tag, at) in sites.iter() {
-        let shown: Vec<String> = at
-            .iter()
-            .take(ANTI_SITES_MAX)
-            .map(|a| format!("{a:#x}"))
-            .collect();
-        let more = if at.len() > shown.len() {
-            format!(" +{} more", at.len() - shown.len())
+        let mut groups: Vec<(Option<u64>, Vec<String>)> = Vec::new();
+        for &site in at.iter().take(ANTI_SITES_MAX) {
+            let home = a.function_at(site).map(|f| f.entry);
+            match groups.last_mut() {
+                Some((g, list)) if *g == home => list.push(format!("{site:#x}")),
+                _ => groups.push((home, vec![format!("{site:#x}")])),
+            }
+        }
+        let shown = at.len().min(ANTI_SITES_MAX);
+        let more = if at.len() > shown {
+            format!(" +{} more", at.len() - shown)
         } else {
             String::new()
         };
-        let named = a.function_at(at[0]).map_or_else(|| at[0], |f| f.entry);
+        let place: Vec<String> = groups
+            .iter()
+            .map(|(home, list)| {
+                let name = home.map_or_else(|| "no function".to_owned(), |e| name_of(a, o, e));
+                format!("{} (in {name})", list.join(", "))
+            })
+            .collect();
         let _ = writeln!(
             out,
-            "{:<32} {:>4}  {} (in {}){more}",
+            "{:<32} {:>4}  {}{more}",
             tag,
             at.len(),
-            shown.join(", "),
-            name_of(a, o, named)
+            place.join(", ")
         );
     }
     let imports = anti_imports(p);
