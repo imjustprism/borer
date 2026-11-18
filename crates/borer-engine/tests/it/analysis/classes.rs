@@ -1451,3 +1451,27 @@ fn a_stub_each_sibling_holds_once_lends_no_names() {
         "{text}"
     );
 }
+
+/// A member's name is no hint for a slot when the class already gives
+/// that name to another slot of its own.
+///
+/// `Base` and `A` share slots 0, 1 and 3, so `A`'s names reach slot 2,
+/// where `A` holds `A::Draw`. Once `Base` names its slot 4 `Draw`, slot 2
+/// takes no hint.
+#[test]
+fn a_name_the_class_gives_another_slot_is_no_hint() {
+    use borer_engine::analysis::vtables::render_slots;
+    let tables: [(&str, u64, &[u64]); 2] = [
+        ("Base", 0x8000, &[0x100, 0x200, 0x300, 0x400, 0x600]),
+        ("A", 0x8100, &[0x100, 0x200, 0x310, 0x400, 0x610]),
+    ];
+    let (a, o) = family_fixture(&tables, &[(0x310, "A::Draw")]);
+    let text = render_slots(&a, &o, &a.classes.by_name["Base"], 48);
+    assert!(
+        text.contains("  [2] sub_300  A names this slot Draw\n"),
+        "{text}"
+    );
+    let (a, o) = family_fixture(&tables, &[(0x310, "A::Draw"), (0x600, "Base::Draw")]);
+    let text = render_slots(&a, &o, &a.classes.by_name["Base"], 48);
+    assert!(!text.contains("names this slot Draw"), "{text}");
+}
