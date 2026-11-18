@@ -64,6 +64,10 @@ pub(super) struct Store {
     split: u64,
     /// Bytes held below [`Store::split`].
     below: usize,
+    /// The one byte whose next write is watched for: the overflow byte of
+    /// the flags word `popf` may trust ([`super::Emulator::forged`]). Every
+    /// write that covers it, through any entry point, clears it.
+    watch: Option<u64>,
 }
 
 /// The chunk key of an address and the position of its byte in the chunk.
@@ -164,6 +168,20 @@ impl Store {
         }
     }
 
+    /// Watches the byte at `a` for a write, or stops watching on `None`.
+    ///
+    /// # Arguments
+    ///
+    /// * `a` - The address.
+    pub(super) fn watch(&mut self, a: Option<u64>) {
+        self.watch = a;
+    }
+
+    /// The watched byte ([`Store::watch`]), if nothing has written it since.
+    pub(super) fn watched(&self) -> Option<u64> {
+        self.watch
+    }
+
     /// How many bytes are held.
     pub(super) fn len(&self) -> usize {
         self.len
@@ -254,6 +272,9 @@ impl Store {
     /// * `v` - The byte.
     /// * `dirty` - Whether the run wrote it outside the stack.
     pub(super) fn set(&mut self, a: u64, v: u8, dirty: bool) {
+        if self.watch == Some(a) {
+            self.watch = None;
+        }
         let (key, k) = place(a);
         let bit = 1 << k;
         let c = own_chunk(
@@ -320,6 +341,12 @@ impl Store {
             self.plant_marked(at, bytes.iter().copied(), true);
             return;
         };
+        if self
+            .watch
+            .is_some_and(|w| w.wrapping_sub(at) < from_usize(bytes.len()))
+        {
+            self.watch = None;
+        }
         let (first, _) = place(at);
         let (last, _) = place(end - 1);
         let mut shared = self.base.range(first..=last).peekable();
@@ -371,10 +398,14 @@ impl Store {
             len,
             split,
             below,
+            watch,
         } = self;
         let mut a = at;
         let mut slot: Option<(u64, &mut Chunk)> = None;
         for v in bytes {
+            if *watch == Some(a) {
+                *watch = None;
+            }
             let (key, k) = place(a);
             a = a.wrapping_add(1);
             if slot.as_ref().is_none_or(|(held, _)| *held != key) {
@@ -475,6 +506,41 @@ impl Store {
 )]
 mod tests {
     use super::Store;
+
+    /// A way of writing one byte to a store at an address.
+    type Write = fn(&mut Store, u64);
+
+    /// Every way of writing memory ends the watch on a byte it covers, and
+    /// none ends it from beside the byte: setting, planting, poking, and
+    /// poking a run into a fresh store or one that holds bytes already.
+    #[test]
+    fn every_write_over_the_watched_byte_ends_the_watch() {
+        let writes: [(&str, Write); 5] = [
+            ("set", |s, a| s.set(a, 0, false)),
+            ("plant", |s, a| s.plant(a, [0])),
+            ("poke", |s, a| s.poke(a, 0)),
+            ("poke_run fresh", |s, a| s.poke_run(a, &[0])),
+            ("poke_run held", |s, a| {
+                s.set(0x9000, 0, false);
+                s.poke_run(a, &[0]);
+            }),
+        ];
+        for (name, write) in writes {
+            let mut s = Store::default();
+            s.watch(Some(0x5001));
+            write(&mut s, 0x5000);
+            write(&mut s, 0x5002);
+            assert_eq!(s.watched(), Some(0x5001), "{name} beside the byte");
+            write(&mut s, 0x5001);
+            assert_eq!(s.watched(), None, "{name} over the byte");
+        }
+        for (at, kept) in [(0x4ff9, true), (0x4ffc, false)] {
+            let mut s = Store::default();
+            s.watch(Some(0x5001));
+            s.poke_run(at, &[0; 8]);
+            assert_eq!(s.watched().is_some(), kept, "a fresh run of 8 at {at:#x}");
+        }
+    }
 
     /// A filled block takes one entry per eight bytes, where a map of
     /// single bytes took one per byte, and reads back byte for byte.

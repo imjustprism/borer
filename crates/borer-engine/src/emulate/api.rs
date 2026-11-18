@@ -564,7 +564,6 @@ impl Emulator<'_> {
         if addr == 0 {
             return;
         }
-        self.overwrite(addr, len.min(256));
         for k in 0..len.min(256) {
             self.mem.set(addr.wrapping_add(k), 0, false);
         }

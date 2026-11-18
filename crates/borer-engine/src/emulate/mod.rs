@@ -259,12 +259,10 @@ pub struct Emulator<'a> {
     /// Whether this machine ever wrote a flags word ([`Emulator::rflags`])
     /// while [`Emulator::flags_over`] was unknown: a word whose overflow bit
     /// is a clear the machine did not compute. Never reset, since memory and
-    /// registers outlive a run and a later run may pop the word.
+    /// registers outlive a run and a later run may pop the word. Once set,
+    /// `popf` keeps a known overflow only from the word whose overflow byte
+    /// memory still watches ([`Store::watch`]).
     forged: bool,
-    /// The stack slot of the last `pushf` made with the overflow known, until
-    /// any write covers its overflow byte ([`Emulator::overwrite`]): once a
-    /// word is forged, the only word `popf` restores a known overflow from.
-    clean: Option<u64>,
     /// Steps a run may take.
     budget: usize,
     /// Steps the current run has taken: one per instruction, and one more
@@ -767,7 +765,6 @@ impl<'a> Emulator<'a> {
             flags_parity: false,
             flags_over: None,
             forged: false,
-            clean: None,
             budget,
             steps: 0,
             memory_max: MEMORY_MAX,
@@ -871,7 +868,6 @@ impl<'a> Emulator<'a> {
     /// * `v` - The value, little-endian.
     /// * `bytes` - How many of its low bytes.
     fn plant(&mut self, addr: u64, v: u64, bytes: usize) {
-        self.overwrite(addr, from_usize(bytes));
         self.mem
             .plant(addr, (0..from_usize(bytes)).map(|k| lo8(v >> (k * 8))));
     }
@@ -1306,7 +1302,6 @@ impl<'a> Emulator<'a> {
     /// * `addr` - The address.
     /// * `value` - The byte.
     pub fn poke(&mut self, addr: u64, value: u8) {
-        self.overwrite(addr, 1);
         self.mem.poke(addr, value);
     }
 
@@ -1319,7 +1314,6 @@ impl<'a> Emulator<'a> {
     ///   wrapping at the top of the address space.
     /// * `bytes` - The bytes, in address order.
     pub fn poke_run(&mut self, at: u64, bytes: &[u8]) {
-        self.overwrite(at, from_usize(bytes.len()));
         self.mem.poke_run(at, bytes);
     }
 

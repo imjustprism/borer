@@ -349,8 +349,6 @@ impl Emulator<'_> {
     /// A write outside the stack is recorded as materialized: the bytes a
     /// packer decrypts into memory, which [`Emulator::run`] can then execute.
     /// On a 32-bit target the bytes past `0xffff_ffff` wrap to address zero.
-    /// A write over the overflow byte of the [`Emulator::clean`] slot ends
-    /// that slot's trust.
     ///
     /// # Errors
     ///
@@ -360,7 +358,6 @@ impl Emulator<'_> {
         if self.trace_cap > 0 {
             self.step_memory.borrow_mut().push((true, addr, bytes, v));
         }
-        self.overwrite(addr, from_usize(bytes));
         for k in 0..from_usize(bytes) {
             let a = self.narrow(addr.wrapping_add(k));
             if self.mem.len() >= self.memory_max && !self.mem.contains(a) {
@@ -426,7 +423,7 @@ impl Emulator<'_> {
     ///
     /// An overflow the last instruction did not compute reads as clear and
     /// marks the machine [`Emulator::forged`] for its life, so `popf`
-    /// restores a known overflow only from the [`Emulator::clean`] slot. A
+    /// restores a known overflow only from the trusted slot. A
     /// forged word read as data (`pushfq; pop rax; test ah, 8`) still reads
     /// the clear as known.
     pub(super) fn rflags(&mut self) -> u64 {
@@ -459,21 +456,17 @@ impl Emulator<'_> {
         self.flags_over = Some(v >> OF_BIT & 1 != 0);
     }
 
-    /// Ends the trust in the [`Emulator::clean`] slot when a write of `len`
-    /// bytes at `addr` covers its overflow byte; every write to memory, in a
-    /// run or before one, passes through here.
+    /// The address of the overflow byte of a flags word at `slot`.
+    ///
+    /// The trusted slot is the last `pushf` made with the overflow known:
+    /// memory watches this byte ([`super::store::Store::watch`]), so any
+    /// write over it, in a run or before one, ends the trust.
     ///
     /// # Arguments
     ///
-    /// * `addr` - The first byte written.
-    /// * `len` - How many bytes, wrapping at the top of the address space.
-    pub(super) fn overwrite(&mut self, addr: u64, len: u64) {
-        if let Some(slot) = self.clean {
-            let over = slot.wrapping_add(u64::from(OF_BIT / 8));
-            if self.narrow(over.wrapping_sub(addr)) < len {
-                self.clean = None;
-            }
-        }
+    /// * `slot` - The word's stack address.
+    fn overflow_byte(&self, slot: u64) -> u64 {
+        self.narrow(slot.wrapping_add(u64::from(OF_BIT / 8)))
     }
 
     /// Pushes a value onto the scratch stack.
@@ -566,13 +559,14 @@ impl Emulator<'_> {
                 let v = self.rflags();
                 self.push(v, bytes)?;
                 if self.flags_over.is_some() {
-                    self.clean = Some(self.reg(Register::RSP));
+                    let at = self.overflow_byte(self.reg(Register::RSP));
+                    self.mem.watch(Some(at));
                 }
             }
             Mnemonic::Popf | Mnemonic::Popfd | Mnemonic::Popfq => {
                 let at = self.reg(Register::RSP);
                 let v = self.pop(bytes)?;
-                let trusted = !self.forged || self.clean == Some(at);
+                let trusted = !self.forged || self.mem.watched() == Some(self.overflow_byte(at));
                 self.set_rflags(v);
                 if !trusted {
                     self.flags_over = None;
