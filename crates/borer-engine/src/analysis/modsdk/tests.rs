@@ -946,3 +946,28 @@ fn class_headers_past_the_cap_are_counted_as_left_out() {
     assert!(split.left_out > 0, "{} written", split.classes.len());
     assert_eq!(split.classes.len() + split.left_out, sdk.classes.len());
 }
+
+/// Class headers past the files one split writes are counted as left out,
+/// however small each is.
+///
+/// # Panics
+///
+/// When more than [`super::header::HEADERS_MAX`] headers are written or
+/// the rest are not counted.
+#[test]
+fn class_headers_past_the_file_count_are_counted_as_left_out() {
+    use super::header::{HEADERS_MAX, class_headers};
+    let mut sdk = sample();
+    let template = sdk.classes.first().cloned().expect("a class");
+    sdk.classes = (0..HEADERS_MAX + 3)
+        .map(|k| Class {
+            name: format!("C{k}"),
+            vtable: None,
+            slots: Vec::new(),
+            ..template.clone()
+        })
+        .collect();
+    let split = class_headers(&sdk);
+    assert_eq!(split.classes.len(), HEADERS_MAX);
+    assert_eq!(split.left_out, 3);
+}

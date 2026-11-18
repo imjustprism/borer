@@ -705,9 +705,10 @@ pub fn write_split(
         headers.len(),
         if split_headers.left_out > 0 {
             format!(
-                " ({} classes left out past the {} MiB the headers hold)",
+                " ({} classes left out past the {} MiB or {} files the headers hold)",
                 split_headers.left_out,
-                modsdk::FILE_MAX >> 20
+                modsdk::FILE_MAX >> 20,
+                modsdk::header::HEADERS_MAX
             )
         } else {
             String::new()

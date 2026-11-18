@@ -51,6 +51,9 @@ pub fn header(sdk: &Sdk) -> String {
     out
 }
 
+/// Most class headers one split writes.
+pub const HEADERS_MAX: usize = 16_384;
+
 /// The mod SDK split per class ([`class_headers`]).
 #[derive(Debug, Default)]
 pub struct ClassHeaders {
@@ -59,7 +62,7 @@ pub struct ClassHeaders {
     /// Each class's name, header file and text, in the SDK's order.
     pub classes: Vec<(String, String, String)>,
     /// The classes left out once the headers passed [`super::FILE_MAX`]
-    /// bytes.
+    /// bytes or [`HEADERS_MAX`] files.
     pub left_out: usize,
 }
 
@@ -71,7 +74,8 @@ pub struct ClassHeaders {
 /// header includes it and holds the class's vtable struct and packed
 /// struct, so a mod includes only the classes it touches. The classes
 /// stop once their text passes [`super::FILE_MAX`] bytes, as the single
-/// header's do, and the rest are counted as left out.
+/// header's do, or they reach [`HEADERS_MAX`] files, and the rest are
+/// counted as left out.
 ///
 /// # Arguments
 ///
@@ -96,7 +100,7 @@ pub fn class_headers(sdk: &Sdk) -> ClassHeaders {
         let Some(id) = names.structs.get(&c.name) else {
             continue;
         };
-        if bytes > super::FILE_MAX {
+        if bytes > super::FILE_MAX || classes.len() >= HEADERS_MAX {
             break;
         }
         let text = format!(
