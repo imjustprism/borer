@@ -19,16 +19,6 @@ use borer_engine::text::Op;
 /// Answers shorter than this carry no tag and are sent whole every time: a
 /// note in their place would save nothing.
 const RECALL_MIN: usize = 512;
-/// Environment variable capping every answer at this many bytes, cut at a
-/// line with a note saying how to get the rest; unset for
-/// [`BUDGET_DEFAULT`], `0` for no cap.
-const BUDGET_ENV: &str = "BORER_BUDGET";
-/// The byte budget when `BORER_BUDGET` sets none.
-///
-/// It is under the 25,000 tokens Claude Code takes from one MCP answer,
-/// at about three bytes a token of pseudo-C, so a whole `decompile` of a
-/// huge function is cut with a note rather than refused whole by the host.
-const BUDGET_DEFAULT: usize = 72_000;
 /// The tool argument that passes back the tag of the answer the reader
 /// holds; the server takes it off before the tool sees its arguments.
 pub(crate) const SINCE_ARG: &str = "since";
@@ -379,66 +369,9 @@ impl Recall {
     }
 }
 
-pub(crate) use borer_front::tools::Narrow;
-
-/// Caps an answer at the byte budget `BORER_BUDGET` sets, cut at the last
-/// line that fits, with a note on what was left out ([`cut_to`]).
-///
-/// # Arguments
-///
-/// * `text` - The answer.
-/// * `narrow` - How its reader asks for less.
-pub(crate) fn budgeted(text: String, narrow: Narrow) -> String {
-    match budget() {
-        Some(budget) => cut_to(text, budget, narrow),
-        None => text,
-    }
-}
-
-/// The byte budget `BORER_BUDGET` sets ([`budget_of`]).
-fn budget() -> Option<usize> {
-    budget_of(std::env::var(BUDGET_ENV).ok().as_deref())
-}
-
-/// Reads a `BORER_BUDGET` value.
-///
-/// # Arguments
-///
-/// * `value` - The variable's value, `None` when it is unset.
-///
-/// # Returns
-///
-/// [`BUDGET_DEFAULT`] when unset or not a number, `None` (no cap) at `0`,
-/// else the number.
-fn budget_of(value: Option<&str>) -> Option<usize> {
-    match value.map(|v| v.trim().parse::<usize>()) {
-        Some(Ok(0)) => None,
-        Some(Ok(bytes)) => Some(bytes),
-        Some(Err(_)) | None => Some(BUDGET_DEFAULT),
-    }
-}
-
-/// Whether an answer of `len` bytes is past the byte budget, and so cut
-/// ([`budgeted`]).
-///
-/// # Arguments
-///
-/// * `len` - The answer's length in bytes.
-pub(crate) fn over_budget(len: usize) -> bool {
-    budget().is_some_and(|b| len > b)
-}
-
-/// Cuts an answer to `budget` bytes at the last whole line, with a note
-/// naming `BORER_BUDGET` ([`borer_front::tools::cut_to`]).
-///
-/// # Arguments
-///
-/// * `text` - The answer.
-/// * `budget` - Most bytes kept, the tag line included.
-/// * `narrow` - How its reader asks for less.
-fn cut_to(text: String, budget: usize, narrow: Narrow) -> String {
-    borer_front::tools::cut_to(text, budget, BUDGET_ENV, narrow)
-}
+#[cfg(test)]
+use borer_front::budget::{BUDGET_DEFAULT, budget, budget_of, cut_to};
+pub(crate) use borer_front::budget::{Narrow, budgeted, over_budget};
 
 #[cfg(test)]
 mod tests {
