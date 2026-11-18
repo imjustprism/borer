@@ -43,8 +43,8 @@
 //! Reading notes no overlay fact beyond its text's and the spellings it
 //! looked up ([`reads`]): the whole-program indexes are taken unnoted, the
 //! text is noted as the body its names were looked up in, a name looked up
-//! with no `(` after it is noted as if one followed, and who stated a name
-//! is read by its referent's own key. A view of an answer
+//! with no `(` after it is noted by itself ([`reads::note_name`]), and who
+//! stated a name is read by its referent's own key. A view of an answer
 //! ([`view`]) reads what the answer read as well, so it is kept across an
 //! edit exactly when its answer is.
 
@@ -458,10 +458,7 @@ pub fn view_of(
         said::of(program, analysis, overlay, r, w)
     });
     reads::note_body(view.text());
-    if !tally.looked.is_empty() {
-        let called: String = tally.looked.iter().map(|w| format!("{w}(")).collect();
-        reads::note_body(&Arc::from(called));
-    }
+    tally.looked.iter().for_each(|w| reads::note_name(w));
     Some(view)
 }
 
