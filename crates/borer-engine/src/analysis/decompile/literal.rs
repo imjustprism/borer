@@ -11,8 +11,8 @@ use crate::strings::{cstr_text_at, wide_run_start, wstr_text_at};
 /// [`naming::SIG_MAX`] bytes) or a source path is shortened by
 /// [`expr::compact_literal`]. Any other signature ([`naming::is_signature`]:
 /// a template's, carrying its bindings, or one too long to name by) is a
-/// plain literal, whole up to the bytes a string scan reads: its text is the
-/// answer, not a name. Anything else is the capped [`string_at`] text.
+/// plain literal, whole when its terminator lies within the bytes a string
+/// scan reads: its text is the answer, not a name. Anything else is the capped [`string_at`] text.
 ///
 /// # Arguments
 ///
@@ -37,7 +37,7 @@ pub fn literal_at(program: &Program, addr: u64, own_name: &str) -> Option<String
             return Some(compact);
         }
         let whole = format!("\"{}\"", crate::strings::escape_text(&raw));
-        if naming::is_signature(&raw) {
+        if naming::is_signature(&raw) && round_trips(program, addr, &whole) {
             return Some(whole);
         }
     }
@@ -488,5 +488,23 @@ mod tests {
             let shown = super::literal_at(&holding(&sig), 0x2000, "sub_1000");
             assert_eq!(shown, Some(format!("\"{sig}\"")));
         }
+    }
+
+    /// A signature run past the bytes a string scan reads is marked cut,
+    /// even when the last byte read closes its bindings.
+    ///
+    /// The scan stopped on the `]` at byte 4096 of a 5000-byte run, and
+    /// the run printed as a complete literal.
+    #[test]
+    fn a_signature_past_the_scan_is_marked_cut() {
+        let head = "void A<T>::f() [with T = ";
+        let sig = format!(
+            "{head}{}]{}",
+            "x".repeat(4095 - head.len()),
+            "y".repeat(904)
+        );
+        assert_eq!(sig.len(), 5000);
+        let shown = super::literal_at(&holding(&sig), 0x2000, "sub_1000").unwrap_or_default();
+        assert!(shown.ends_with("...\""), "{shown}");
     }
 }
