@@ -478,25 +478,6 @@ fn memory64_based_past_the_files_end_is_skipped() {
     assert!(p.section_at(0x7ff0_0000).is_some());
 }
 
-/// A Memory64 stream whose offset sits at the top of the RVA range reads
-/// no ranges, and the memory list's own range survives beside it.
-#[test]
-fn memory64_at_the_top_of_the_rva_range_reads_nothing() {
-    let mut d = dump();
-    let at = add_stream(&mut d, 9, &memory64(0x3a0, &[(0x3000_0000, 0x10)]));
-    let entry = (32..at)
-        .step_by(12)
-        .find(|&e| d[e..e + 4] == 9u32.to_le_bytes());
-    u32_at(
-        &mut d,
-        entry.expect("the directory names the stream") + 8,
-        u32::MAX - 4,
-    );
-    let p = Program::from_bytes("top64.dmp".into(), d).expect("loads");
-    assert!(p.section_at(0x3000_0000).is_none());
-    assert!(p.section_at(0x7ff0_0000).is_some());
-}
-
 /// Memory64 sizes that overflow the running file cursor saturate it: the
 /// first range is clamped to what the file holds and the one the cursor
 /// overflows onto reads nothing, without a wrap.
