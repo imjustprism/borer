@@ -28,7 +28,7 @@ use crate::program::{BinaryFormat, Program};
 use crate::strings::cstr_at;
 
 /// Longest signature string read.
-const SIG_MAX: usize = 512;
+pub(crate) const SIG_MAX: usize = 512;
 /// Shortest text considered.
 const SIG_MIN: usize = 8;
 /// Longest inferred name kept.
@@ -515,8 +515,23 @@ pub(super) fn in_data(program: &Program, va: u64) -> bool {
 ///
 /// # Returns
 ///
-/// The signature, or `None` when the text is not a function signature.
+/// The signature, or `None` when the text is not a function signature or
+/// names one by more than [`NAME_MAX`] bytes.
 pub(crate) fn parse_signature(text: &str) -> Option<Signature> {
+    read_signature(text).filter(|sig| sig.name.len() <= NAME_MAX)
+}
+
+/// Parses a signature string as [`parse_signature`] does, a name of any
+/// length included.
+///
+/// # Arguments
+///
+/// * `text` - The string as read.
+///
+/// # Returns
+///
+/// The signature, or `None` when the text is not a function signature.
+fn read_signature(text: &str) -> Option<Signature> {
     if text.ends_with("...") {
         return None;
     }
@@ -559,7 +574,6 @@ pub(crate) fn parse_signature(text: &str) -> Option<Signature> {
     };
     let name = strip_keywords(raw);
     if name.is_empty()
-        || name.len() > NAME_MAX
         || !name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_' || c == '<')
     {
         return None;
@@ -609,45 +623,40 @@ pub(crate) fn parse_signature(text: &str) -> Option<Signature> {
     })
 }
 
-/// Splits a GCC or Clang template signature into its name and its
-/// bindings, as written.
+/// Tells whether a string is a function signature, one [`parse_signature`]
+/// takes or not.
 ///
-/// GCC appends `[with T = int; U = float]` to the signature of a
-/// template's instantiation, Clang `[T = int, U = float]`, and the text
-/// before them must parse as a signature ([`parse_signature`]). It is read
-/// only to be shown: such a signature names and types nothing, since every
-/// instantiation of a template shares its name, its types are the
-/// template's (`Fill(const T &)`), and spelling the bindings into them
-/// multiplies the text.
+/// A name longer than [`NAME_MAX`] is no bar, and neither is the
+/// `[with T = int; U = float]` GCC appends to the signature of a
+/// template's instantiation, Clang's `[T = int, U = float]`, when the text
+/// before it reads as a signature.
 ///
 /// # Arguments
 ///
 /// * `text` - The string as read.
-///
-/// # Returns
-///
-/// The qualified name and the bracketed bindings, or `None` when the text
-/// is not a signature followed by a bracketed list holding a ` = `.
-pub(crate) fn template_signature(text: &str) -> Option<(String, &str)> {
-    if !text.ends_with(']') {
-        return None;
+pub(crate) fn is_signature(text: &str) -> bool {
+    if read_signature(text).is_some() {
+        return true;
     }
-    let mut depth = 0usize;
-    let open = text.bytes().enumerate().rev().find_map(|(i, b)| {
+    let Some(body) = text.strip_suffix(']') else {
+        return false;
+    };
+    let mut depth = 1usize;
+    let Some(open) = body.bytes().rposition(|b| {
         match b {
             b']' => depth += 1,
             b'[' => depth = depth.saturating_sub(1),
             _ => {}
         }
-        (depth == 0).then_some(i)
-    })?;
-    let bindings = text.get(open..)?;
-    let inner = bindings.strip_prefix('[')?.strip_suffix(']')?;
-    if !inner.strip_prefix("with ").unwrap_or(inner).contains(" = ") {
-        return None;
-    }
-    let sig = parse_signature(text.get(..open)?.trim_end())?;
-    Some((sig.name, bindings))
+        depth == 0
+    }) else {
+        return false;
+    };
+    let inner = body.get(open + 1..).unwrap_or("");
+    inner.strip_prefix("with ").unwrap_or(inner).contains(" = ")
+        && body
+            .get(..open)
+            .is_some_and(|head| read_signature(head.trim_end()).is_some())
 }
 
 /// The type a conversion operator converts to: `Base::NetStreamBase *` for

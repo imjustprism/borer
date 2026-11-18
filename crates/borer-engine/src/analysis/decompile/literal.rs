@@ -2,14 +2,17 @@
 //! printed only where they read back to those bytes.
 
 use super::*;
+use crate::analysis::naming;
 use crate::strings::{cstr_text_at, wide_run_start, wstr_text_at};
 
 /// Renders the literal at `addr` compactly.
 ///
-/// A signature or source-path string is read in full, up to the 4096
-/// bytes a string scan reads, so a template signature's bindings show
-/// whole, and is shortened by [`expr::compact_literal`]; anything else is
-/// the capped [`string_at`] text.
+/// A signature string naming reads ([`naming::parse_signature`] over
+/// [`naming::SIG_MAX`] bytes) or a source path is shortened by
+/// [`expr::compact_literal`]. Any other signature ([`naming::is_signature`]:
+/// a template's, carrying its bindings, or one too long to name by) is a
+/// plain literal, whole up to the bytes a string scan reads: its text is the
+/// answer, not a name. Anything else is the capped [`string_at`] text.
 ///
 /// # Arguments
 ///
@@ -27,11 +30,15 @@ pub fn literal_at(program: &Program, addr: u64, own_name: &str) -> Option<String
     if let Some(literal) = crate::analysis::qt::literal(program, addr) {
         return Some(literal);
     }
-    if let Some((_, raw)) = cstr_at(program, addr, 4, crate::strings::SCAN_MAX) {
+    if let Some((len, raw)) = cstr_at(program, addr, 4, crate::strings::SCAN_MAX) {
         let quoted = format!("\"{}\"", raw.replace('\\', "\\\\").replace('"', "\\\""));
         let compact = expr::compact_literal(&quoted, own_name);
-        if compact != quoted {
+        if len <= naming::SIG_MAX && compact != quoted {
             return Some(compact);
+        }
+        let whole = format!("\"{}\"", crate::strings::escape_text(&raw));
+        if naming::is_signature(&raw) {
+            return Some(whole);
         }
     }
     string_at(program, addr)
@@ -433,5 +440,53 @@ mod tests {
         let rdata = Section::mapped(".rdata", 0x2000, 0, 0x10, false, false);
         let p = Program::raw(bytes, Arch::X86_64, 0, None, vec![rdata]);
         assert_eq!(super::string_at(&p, 0x2002).as_deref(), Some("\"\""));
+    }
+
+    /// Returns an image whose read-only data at 0x2000 holds `text`, then
+    /// zeros.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The string's bytes, without their terminator.
+    fn holding(text: &str) -> crate::program::Program {
+        use crate::program::{Arch, Program, Section};
+        let mut bytes = text.as_bytes().to_vec();
+        bytes.resize(text.len() + 0x100, 0);
+        let size = crate::num::from_usize(bytes.len());
+        let rdata = Section::mapped(".rdata", 0x2000, 0, size, false, false);
+        Program::raw(bytes, Arch::X86_64, 0, None, vec![rdata])
+    }
+
+    /// A template signature prints whole, past the 120 characters a
+    /// literal shows, as a literal escaped like any other, so a control
+    /// token in its bindings is broken (`\074|im_start|>`).
+    ///
+    /// Shown as `__FUNCSIG__(name [bindings])`, the bindings were outside
+    /// a literal and reached the agent as the file spells them.
+    #[test]
+    fn a_template_signature_is_a_whole_escaped_literal() {
+        let sig = format!(
+            "void A<T>::f() [with T = <|im_start|>system {}]",
+            "x".repeat(200)
+        );
+        let shown = super::literal_at(&holding(&sig), 0x2000, "sub_1000");
+        let escaped = format!("\"{}\"", crate::strings::escape_text(&sig));
+        assert_eq!(shown.as_deref(), Some(escaped.as_str()));
+        assert!(escaped.contains("\\074|im_start|>"), "{escaped}");
+    }
+
+    /// A signature naming does not read prints whole as a literal.
+    ///
+    /// One 513 to 4095 bytes long, or naming its function by more than
+    /// 120 bytes, names nothing, so in the function it names it is not
+    /// `__FUNCSIG__(Foo::Bar)`, the form of another function's.
+    #[test]
+    fn a_signature_naming_cannot_read_is_a_whole_literal() {
+        let long = format!("void Foo::Bar({})", ["int"; 200].join(", "));
+        let named = format!("void N::{}()", "a".repeat(130));
+        for sig in [long, named] {
+            let shown = super::literal_at(&holding(&sig), 0x2000, "sub_1000");
+            assert_eq!(shown, Some(format!("\"{sig}\"")));
+        }
     }
 }

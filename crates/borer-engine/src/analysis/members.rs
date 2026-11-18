@@ -274,4 +274,20 @@ mod tests {
         collect_assert_names(direct, call, &mut fields);
         assert_eq!(fields.get(&0x40).map(|f| f.names.len()), Some(1));
     }
+
+    /// A quote in a template signature's bindings stays inside its literal.
+    ///
+    /// The line's first literal is that signature, skipped for its quote,
+    /// not the text between it and the condition (`'>]), `).
+    #[test]
+    fn a_quote_in_template_bindings_stays_in_its_literal() {
+        use crate::program::{Arch, Program, Section};
+        let rdata = Section::mapped(".rdata", 0x2000, 0, 0x28, false, false);
+        let mut bytes = b"void A<S>::f() [with S = Str<'\"'>]".to_vec();
+        bytes.resize(0x28, 0);
+        let p = Program::raw(bytes, Arch::X86_64, 0, None, vec![rdata]);
+        let shown = crate::analysis::decompile::literal_at(&p, 0x2000, "sub_1000");
+        let line = format!("f({}, \"this->m_count\");", shown.unwrap_or_default());
+        assert_eq!(first_literal(&line), None, "{line}");
+    }
 }

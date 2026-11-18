@@ -16,7 +16,8 @@
 )]
 
 use borer_engine::analysis::classes::field_names;
-use borer_engine::analysis::decompile::{answer_header, decompile};
+use borer_engine::analysis::decompile::{answer_header, decompile, skeleton};
+use borer_engine::analysis::protos::Proto;
 use borer_engine::analysis::render::{NEXT_MAX, asserted_fields_tsv, function_summary, next_steps};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::memory::{Kind, read_values, rest_of_cut};
@@ -462,9 +463,12 @@ fn a_member_asserted_at_two_offsets_names_neither() {
     assert_eq!(names.get(&0x270).map(String::as_str), Some("m_name"));
 }
 
-/// A long `__PRETTY_FUNCTION__` shows its template bindings whole in the
-/// text, and a read of it, which caps at 200 characters, says where the
-/// rest starts, so the string reads whole in two reads.
+/// A long `__PRETTY_FUNCTION__` shows whole in the text, and a read of it
+/// says where the rest starts.
+///
+/// The text holds it as a plain literal, return type, parameters and
+/// template bindings; a read caps at 200 characters, so the string reads
+/// whole in two reads.
 ///
 /// GitHub issue 24's agent pruned the prefix fragments a cut left
 /// instead of reading the type names behind them.
@@ -473,9 +477,8 @@ fn a_long_pretty_function_reads_whole_in_parts() {
     let p = widget();
     let a = Analysis::compute(&p);
     let text = decompile(&p, &a, &Overlay::default(), 0x1240).expect("decompiles");
-    let bindings = PRETTY.split_once(") ").map(|(_, b)| b).expect("bindings");
     assert!(
-        text.contains(&format!("__FUNCSIG__(Box<T>::Put {bindings})")),
+        text.contains(&format!("\"{PRETTY}\"")),
         "the text cuts the long literal: {text}"
     );
     let first = read_values(&p, LONG, Kind::CStr, 1).expect("reads");
@@ -514,8 +517,8 @@ const TEMPLATES: [(u64, u64, &str); 5] = [
 ];
 
 /// A GCC or Clang template signature names and types nothing, and its
-/// assert shows it whole, bindings included; MSVC's, which spells its
-/// arguments inline, names its method as before.
+/// assert shows it whole, bindings included, as a plain literal; MSVC's,
+/// which spells its arguments inline, names its method as before.
 ///
 /// Every instantiation of `Box<T>::Grow` shares the name, `Fill`'s
 /// parameter is the template's `T`, and spelling the bindings into a
@@ -528,23 +531,63 @@ fn template_signatures_show_whole_and_name_nothing() {
     let p = image(&methods, &[(CNT, b"this->m_count\0")]);
     let a = Analysis::compute(&p);
     let o = Overlay::default();
-    let names = [
-        "Box<T>::Grow",
-        "Box<T>::Grow",
-        "Box<int>::Fill",
-        "Pool<T, A>::Take",
-    ];
-    for (&(entry, _, sig), name) in TEMPLATES.iter().zip(names) {
+    for &(entry, _, sig) in &TEMPLATES[..4] {
         let f = a.function(entry).expect("found");
         assert!(f.name.is_none() && f.signature.is_none(), "{sig}");
-        let (_, bindings) = sig.split_once(") ").expect("bindings");
         let text = decompile(&p, &a, &o, entry).expect("decompiles");
-        assert!(
-            text.contains(&format!("__FUNCSIG__({name} {bindings})")),
-            "{sig}: {text}"
-        );
+        assert!(text.contains(&format!("\"{sig}\"")), "{sig}: {text}");
     }
     let drain = a.function(0x1200).and_then(|f| f.name.clone());
     assert_eq!(drain.as_deref(), Some("Box<int>::Drain"));
     assert!(field_names(&p, &a, &o, "Pool<T, A>").is_empty());
+}
+
+/// A template method named and declared by hand, its `this` read, casts
+/// no vote for its class's fields from its assert, as before template
+/// signatures were shown whole.
+///
+/// The signature is a plain literal, no `__FUNCSIG__`, so the assert is
+/// not read as one naming a member of `Box<int>`.
+#[test]
+fn a_named_template_method_casts_no_assert_vote() {
+    let sig = TEMPLATES[0].2;
+    let p = image(
+        &[(0x1100, Guard::Field(0x10), CNT, 0x2200, sig)],
+        &[(CNT, b"this->m_count\0")],
+    );
+    let a = Analysis::compute(&p);
+    let mut o = Overlay::default();
+    o.names.insert(0x1100, "Box<int>::Grow".to_owned());
+    let proto = Proto::parse("void Grow(void *this)").expect("parses");
+    o.prototypes.insert(0x1100, proto);
+    assert!(field_names(&p, &a, &o, "Box<int>").is_empty());
+}
+
+/// `"bits/stl_vector.h"`, the file a libstdc++ assert cites.
+const STL: u64 = 0x2140;
+
+/// A libstdc++ assert, which cites its file before its condition, is not
+/// folded into `assert(bits/stl_vector.h);` in the skeleton, and its
+/// condition shows.
+///
+/// `std::__glibcxx_assert_fail` takes the file, the line, the function and
+/// the condition; here the reporter's path slot holds the condition, so
+/// the file comes first and the template signature last. Shown as
+/// `__FUNCSIG__(...)`, the signature made the call read as a guarded
+/// assert whose first literal is its condition.
+#[test]
+fn a_libstdcxx_assert_is_not_folded_on_its_file() {
+    let sig = "std::vector<_Tp, _Alloc>::reference std::vector<_Tp, _Alloc>::operator[](size_type) [with _Tp = int; _Alloc = std::allocator<int>; reference = int&; size_type = long unsigned int]";
+    let p = image(
+        &[(0x1100, Guard::Field(0x10), STL, 0x2200, sig)],
+        &[
+            (STL, b"bits/stl_vector.h\0"),
+            (PATH, b"__n < this->size()\0"),
+        ],
+    );
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), 0x1100).expect("decompiles");
+    let outline = skeleton(&text);
+    assert!(!outline.contains("assert("), "{outline}");
+    assert!(outline.contains("\"__n < this->size()\""), "{outline}");
 }

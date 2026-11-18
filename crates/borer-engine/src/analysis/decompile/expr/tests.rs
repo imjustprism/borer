@@ -397,37 +397,3 @@ fn literals_compact() {
     assert_eq!(compact_literal("\"f.IsValid()\"", "x"), "\"f.IsValid()\"");
     assert_eq!(compact_literal("\"a/b.h\"", "x"), "\"a/b.h\"");
 }
-
-/// A GCC or Clang template signature shows whole, its name as written and
-/// its bindings after it, and no comment mark in either survives; a
-/// bracketed suffix that binds nothing is no signature.
-///
-/// # Panics
-///
-/// When a rendering disagrees with its expectation.
-#[test]
-fn template_signatures_show_whole_without_comment_marks() {
-    for (sig, shown) in [
-        (
-            "void Box<T>::Put(const T&) [with T = int]",
-            "__FUNCSIG__(Box<T>::Put [with T = int])",
-        ),
-        (
-            "void Box<int>::Fill(const T &) [T = int]",
-            "__FUNCSIG__(Box<int>::Fill [T = int])",
-        ),
-        (
-            "void Box<T>::B/*x(int) [with T = a*/b]",
-            "__FUNCSIG__(Box<T>::B/ *x [with T = a* /b])",
-        ),
-        (
-            "void Box<T>::B//x(int) [with T = a///b*/*c]",
-            "__FUNCSIG__(Box<T>::B/ /x [with T = a/ / /b* / *c])",
-        ),
-    ] {
-        assert_eq!(compact_literal(&format!("\"{sig}\""), "x"), shown, "{sig}");
-    }
-    for prose in ["\"void Box<T>::Put() [abc]\"", "\"see [with T = int]\""] {
-        assert_eq!(compact_literal(prose, "x"), prose);
-    }
-}

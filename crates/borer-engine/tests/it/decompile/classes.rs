@@ -16,11 +16,8 @@ fn an_inlined_template_assert_leaves_its_method_named() {
         0x48, 0x8d, 0x0d, 0xf2, 0x10, 0x00, 0x00, // ASM: lea rcx,[rip+0x10f2]
         0xc3, // ASM: ret
     ];
-    let bindings = "[with _Tp = Token; _Alloc = std::allocator<Token>; reference = Token&; size_type = long unsigned int]";
-    let subscript = format!(
-        "std::vector<_Tp, _Alloc>::reference std::vector<_Tp, _Alloc>::operator[](size_type) {bindings}"
-    );
-    let mut data = subscript.into_bytes();
+    let subscript = "std::vector<_Tp, _Alloc>::reference std::vector<_Tp, _Alloc>::operator[](size_type) [with _Tp = Token; _Alloc = std::allocator<Token>; reference = Token&; size_type = long unsigned int]";
+    let mut data = subscript.as_bytes().to_vec();
     data.resize(0x100, 0);
     data.extend_from_slice(b"void Lexer::Next()\0");
     let p = program64_with_data(&code, &data);
@@ -28,12 +25,7 @@ fn an_inlined_template_assert_leaves_its_method_named() {
     let f = a.function(0x1_4000_1000).expect("found");
     assert_eq!(f.name.as_deref(), Some("Lexer::Next"));
     let text = decompile(&p, &a, &Overlay::default(), f.entry).unwrap_or_default();
-    assert!(
-        text.contains(&format!(
-            "__FUNCSIG__(std::vector<_Tp, _Alloc>::operator[] {bindings})"
-        )),
-        "{text}"
-    );
+    assert!(text.contains(&format!("\"{subscript}\"")), "{text}");
 }
 
 /// A class's field names are read from its methods once: the second
