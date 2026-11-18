@@ -13,15 +13,19 @@
 
 #![no_main]
 
+use borer_engine::analysis::classes::{class_layout, render_layout};
 use borer_engine::analysis::decompile::view::view_of;
 use borer_engine::analysis::decompile::{decompile, unit_of};
+use borer_engine::analysis::modsdk::{self, header::class_headers};
 use borer_engine::analysis::render::{
     Bytes, Dir, Level, Walk, asserted_fields_tsv, band, call_children, callgraph, cfg,
-    disasm_function_with, disasm_view, linear, next_steps, propose, source_tree_tsv, triage,
+    disasm_function_with, disasm_view, linear, next_steps, propose, source_tree_tsv,
+    source_vocabulary_tsv, triage,
 };
-use borer_engine::analysis::split::sources;
+use borer_engine::analysis::split::{sources, split_map};
 use borer_engine::analysis::stats::stats_tsv;
 use borer_engine::analysis::utypes::{type_detail, type_rows};
+use borer_engine::analysis::vtables::family_of;
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::clr::managed::{self, Managed};
 use borer_engine::clr::markers::markers_tsv;
@@ -48,6 +52,7 @@ fuzz_target!(|data: &[u8]| {
     }
     let analysis = Analysis::compute(&program);
     let overlay = Overlay::default();
+    let cited = sources(&program, &analysis);
     for f in analysis.functions.iter().take(DECOMPILED) {
         for bytes in [Bytes::Hidden, Bytes::Shown] {
             let text = disasm_function_with(&program, &analysis, &overlay, f.entry, LISTED, bytes);
@@ -75,6 +80,7 @@ fuzz_target!(|data: &[u8]| {
         if let Some(text) = decompile(&program, &analysis, &overlay, f.entry) {
             _ = view_of(&program, &analysis, &overlay, f.entry, &text);
             _ = unit_of(&text);
+            _ = cited.filed(f.entry, &text);
         }
         _ = propose(&program, &analysis, &overlay, &format!("{:#x}", f.entry));
     }
@@ -124,8 +130,22 @@ fuzz_target!(|data: &[u8]| {
         _ = managed::detail(&program, &analysis, m.token, 0);
     }
     _ = asserted_fields_tsv(&program, &analysis, &overlay, "");
-    _ = source_tree_tsv(&program, &analysis, &overlay, ".");
-    _ = sources(&program, &analysis);
+    _ = source_tree_tsv(&program, &analysis, ".");
+    _ = source_vocabulary_tsv(&program, &analysis, &overlay, ".");
+    for class in analysis.classes.by_name.keys().take(DECOMPILED) {
+        _ = family_of(&analysis, &overlay, class);
+        if let Some(layout) = class_layout(&program, &analysis, &overlay, class) {
+            _ = render_layout(&layout, &analysis, &overlay);
+        }
+    }
+    let sdk = modsdk::build(&program, &analysis, &overlay);
+    let split = class_headers(&sdk);
+    let named: Vec<(&str, &str)> = split
+        .classes
+        .iter()
+        .map(|(class, file, _)| (class.as_str(), file.as_str()))
+        .collect();
+    _ = split_map(&analysis, &overlay, &sdk, &named, &Default::default());
     _ = markers_tsv(&program, &analysis, "");
     _ = managed::methods_tsv(&program, &analysis, "");
     for spec in [
