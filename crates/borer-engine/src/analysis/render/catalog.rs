@@ -517,22 +517,25 @@ fn pairs_tsv(
     render_pairs(o, &rows, read.len(), asserting, receiver)
 }
 
-/// Picks the functions to read, round-robin by class: each class's first,
-/// then each one's second, until `max`, so a class late in the order is
-/// read as far as an early one.
+/// Picks the functions to read, round-robin by group (a class, a source
+/// file): each group's first, then each one's second, until `max`, so a
+/// group late in the order is read as far as an early one.
 ///
 /// # Arguments
 ///
-/// * `by_class` - Each class's asserting functions.
+/// * `groups` - Each group's functions, by group.
 /// * `max` - Most functions picked.
 ///
 /// # Returns
 ///
 /// The functions, in address order.
-fn budgeted(by_class: &BTreeMap<&str, BTreeSet<u64>>, max: usize) -> Vec<u64> {
-    let lists: Vec<Vec<u64>> = by_class
+fn budgeted<K, V: std::borrow::Borrow<BTreeSet<u64>>>(
+    groups: &BTreeMap<K, V>,
+    max: usize,
+) -> Vec<u64> {
+    let lists: Vec<Vec<u64>> = groups
         .values()
-        .map(|entries| entries.iter().copied().collect())
+        .map(|entries| entries.borrow().iter().copied().collect())
         .collect();
     let longest = lists.iter().map(Vec::len).max().unwrap_or(0);
     let mut picked: BTreeSet<u64> = BTreeSet::new();
@@ -718,9 +721,18 @@ fn render_pairs(
 /// Most rows in one read of the source tree.
 pub(super) const SOURCES_MAX: usize = 200;
 
+/// Most functions one read of the matched files' assert expressions
+/// decompiles.
+pub(super) const EXPRESSION_FUNCTIONS_MAX: usize = 200;
+
+/// Most assert expression rows listed in one read.
+pub(super) const EXPRESSIONS_MAX: usize = 200;
+
 /// One source file an assertion cites, and the functions that cite it.
 #[derive(Debug)]
 pub(super) struct SourceFile {
+    /// The path as the binary cites it, separators normalized to `/`.
+    pub(super) full: String,
     /// The path, with the build root stripped.
     pub(super) path: String,
     /// How many functions cite it.
@@ -737,20 +749,23 @@ pub(super) struct SourceFile {
 /// them agree on is dropped from every row ([`common_root`]) and written
 /// once, as a `# base: <root>` line, when there is one. Without a filter
 /// this is one row per directory, which is the subsystem list; with one it
-/// is the files that match, each with the functions that came from it.
+/// is the files that match, each with the functions that came from it, then
+/// the assert expressions of those files ([`expressions_tsv`]).
 ///
 /// # Arguments
 ///
 /// * `p` - The loaded image, for reading the strings.
 /// * `a` - Cross-references and functions.
+/// * `o` - Names in force, for the decompiled text the expressions are
+///   read from.
 /// * `filter` - Case-insensitive substring of the path, or empty.
 ///
 /// # Returns
 ///
 /// The listing as text, the busiest first, tab-separated: without a filter
 /// the functions, files and directory of each row; with one the functions,
-/// the lowest entry among them and the file.
-pub fn source_tree_tsv(p: &Program, a: &Analysis, filter: &str) -> String {
+/// the lowest entry among them and the file, then the expressions section.
+pub fn source_tree_tsv(p: &Program, a: &Analysis, o: &Overlay, filter: &str) -> String {
     let want = filter.to_lowercase();
     let mut files: BTreeMap<String, BTreeSet<u64>> = BTreeMap::new();
     for (target, lit) in literal_targets(p, a).iter() {
@@ -783,6 +798,7 @@ pub fn source_tree_tsv(p: &Program, a: &Analysis, filter: &str) -> String {
         e.1.extend(entries.iter().copied());
         if !want.is_empty() && short.to_lowercase().contains(&want) {
             rows.push(SourceFile {
+                full: path.clone(),
                 path: short.to_owned(),
                 functions: entries.len(),
                 first: entries.iter().copied().min().unwrap_or_default(),
@@ -802,7 +818,9 @@ pub fn source_tree_tsv(p: &Program, a: &Analysis, filter: &str) -> String {
             files.len(),
             by_dir.len()
         );
-        out.push_str("# functions\tfiles\tdirectory (borer://sources/<filter> for the files)\n");
+        out.push_str(
+            "# functions\tfiles\tdirectory (borer://sources/<filter> for the files and their assert expressions)\n",
+        );
         for (dir, (n, entries)) in dirs.iter().take(SOURCES_MAX) {
             let _ = writeln!(out, "{}\t{n}\t{dir}", entries.len());
         }
@@ -819,6 +837,114 @@ pub fn source_tree_tsv(p: &Program, a: &Analysis, filter: &str) -> String {
         let _ = writeln!(out, "{}\t{:#x}\t{}", r.functions, r.first, r.path);
     }
     more_line(&mut out, rows.len(), SOURCES_MAX, "not listed");
+    let matched: Vec<(&SourceFile, &BTreeSet<u64>)> = rows
+        .iter()
+        .filter_map(|r| files.get(&r.full).map(|e| (r, e)))
+        .collect();
+    out.push_str(&expressions_tsv(p, a, o, &matched));
+    out
+}
+
+/// Lists the assert expressions of the matched source files, each file's
+/// most frequent first.
+///
+/// The asserts of one translation unit are its developers' own words for
+/// the state its code guards (`speed <= maxSpeed`, `entity.IsValid()`),
+/// which a decompiled body spells as offsets. The functions citing the
+/// files are decompiled round-robin by file, at most
+/// [`EXPRESSION_FUNCTIONS_MAX`] ([`budgeted`]), and each assert call
+/// ([`crate::analysis::decompile::assert_calls`]) counts toward the file its own file argument names
+/// (the text's escaped `\\` and a bare `\` read as `/`): a function's
+/// assert citing another file, a header whose template it inlined, counts
+/// there and not here.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `o` - Names in force.
+/// * `matched` - The files, in the listing's order, with the functions
+///   citing each.
+///
+/// # Returns
+///
+/// A header with the counts and how many functions were read, a column
+/// header, and one tab-separated row per file and expression: the assert
+/// calls, the functions holding them, the file and the expression, at
+/// most [`EXPRESSIONS_MAX`] with a `# N more` line; empty when no file
+/// matched.
+fn expressions_tsv(
+    p: &Program,
+    a: &Analysis,
+    o: &Overlay,
+    matched: &[(&SourceFile, &BTreeSet<u64>)],
+) -> String {
+    if matched.is_empty() {
+        return String::new();
+    }
+    let citing: BTreeSet<u64> = matched
+        .iter()
+        .flat_map(|(_, e)| e.iter().copied())
+        .collect();
+    let by_file: BTreeMap<usize, &BTreeSet<u64>> = matched
+        .iter()
+        .enumerate()
+        .map(|(at, (_, e))| (at, *e))
+        .collect();
+    let read = budgeted(&by_file, EXPRESSION_FUNCTIONS_MAX);
+    let key = o.fingerprint();
+    let texts = crate::analysis::striped(&read, |&entry| {
+        crate::analysis::plain_text_cached(p, a, o, key, entry)
+    });
+    let file_of: BTreeMap<&str, usize> = matched
+        .iter()
+        .enumerate()
+        .map(|(at, (f, _))| (f.full.as_str(), at))
+        .collect();
+    let mut counts: BTreeMap<(usize, &str), (usize, BTreeSet<u64>)> = BTreeMap::new();
+    for (&entry, text) in read.iter().zip(&texts) {
+        for line in text.as_deref().into_iter().flat_map(str::lines) {
+            for (condition, path) in crate::analysis::decompile::assert_calls(line) {
+                let path = path.replace("\\\\", "/").replace('\\', "/");
+                let Some(&at) = file_of.get(path.as_str()) else {
+                    continue;
+                };
+                let e = counts.entry((at, condition)).or_default();
+                e.0 += 1;
+                e.1.insert(entry);
+            }
+        }
+    }
+    let mut rows: Vec<_> = counts.into_iter().collect();
+    rows.sort_by_key(|((at, expr), (sites, fns))| {
+        (
+            *at,
+            std::cmp::Reverse(*sites),
+            std::cmp::Reverse(fns.len()),
+            *expr,
+        )
+    });
+    let read_note = if read.len() < citing.len() {
+        format!(
+            "{} of the {} functions citing them read; a narrower filter reads the rest",
+            read.len(),
+            citing.len()
+        )
+    } else {
+        format!("all {} functions citing them read", citing.len())
+    };
+    let mut out = format!(
+        "# {} of {} assert expressions in the {} matched files, each file's most frequent first; {read_note}\n# asserts\tfunctions\tfile\texpression\n",
+        rows.len().min(EXPRESSIONS_MAX),
+        rows.len(),
+        matched.len()
+    );
+    for ((at, expr), (sites, fns)) in rows.iter().take(EXPRESSIONS_MAX) {
+        let file = matched.get(*at).map_or("", |(f, _)| f.path.as_str());
+        let expr = expr.replace(['\t', '\n', '\r'], " ");
+        let _ = writeln!(out, "{sites}\t{}\t{file}\t{expr}", fns.len());
+    }
+    more_line(&mut out, rows.len(), EXPRESSIONS_MAX, "expressions not listed");
     out
 }
 

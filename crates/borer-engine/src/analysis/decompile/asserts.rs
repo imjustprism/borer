@@ -32,32 +32,11 @@ pub fn asserts_of(body: &str) -> Option<String> {
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut conditions: Vec<String> = Vec::new();
     for line in body.lines() {
-        for start in call_starts(line) {
-            let Some(open) = line
-                .get(start..)
-                .and_then(|t| t.find('('))
-                .map(|i| start + i)
-            else {
-                continue;
-            };
-            let Some(close) = matching_paren(line, open) else {
-                continue;
-            };
-            let args = split_arguments(line.get(open + 1..close).unwrap_or(""));
-            let [condition, path, number, ..] = args.as_slice() else {
-                continue;
-            };
-            if !source_path(path) || parse_const(number).is_none() {
+        for (condition, _) in assert_calls(line) {
+            if condition.is_empty() || condition.contains(['{', '}']) {
                 continue;
             }
-            let Some(text) = condition
-                .strip_prefix('"')
-                .and_then(|c| c.strip_suffix('"'))
-                .filter(|c| !c.is_empty() && !c.contains(['{', '}']))
-                .map(quotes_to_ticks)
-            else {
-                continue;
-            };
+            let text = quotes_to_ticks(condition);
             if seen.insert(text.clone()) {
                 conditions.push(text);
             }
@@ -82,6 +61,57 @@ pub fn asserts_of(body: &str) -> Option<String> {
         let _ = write!(out, ", +{} more", conditions.len() - listed);
     }
     Some(out)
+}
+
+/// Returns the assert calls on one line of decompiled text.
+///
+/// An assert call is one whose first argument is a string literal, whose
+/// second is a literal naming a C or C++ source file ([`source_path`]) and
+/// whose third is a number.
+///
+/// # Arguments
+///
+/// * `line` - One emitted line.
+///
+/// # Returns
+///
+/// Each call's condition and file, inside their quotes and as the text
+/// spells them (escapes kept), in the order the calls start.
+#[must_use]
+pub fn assert_calls(line: &str) -> Vec<(&str, &str)> {
+    let mut out = Vec::new();
+    for start in call_starts(line) {
+        let Some(open) = line
+            .get(start..)
+            .and_then(|t| t.find('('))
+            .map(|i| start + i)
+        else {
+            continue;
+        };
+        let Some(close) = matching_paren(line, open) else {
+            continue;
+        };
+        let args = split_arguments(line.get(open + 1..close).unwrap_or(""));
+        let [condition, path, number, ..] = args.as_slice() else {
+            continue;
+        };
+        if !source_path(path) || parse_const(number).is_none() {
+            continue;
+        }
+        if let (Some(condition), Some(path)) = (unquoted(condition), unquoted(path)) {
+            out.push((condition, path));
+        }
+    }
+    out
+}
+
+/// Returns a literal's text inside its quotes, `None` when it is not quoted.
+///
+/// # Arguments
+///
+/// * `arg` - The argument as rendered.
+fn unquoted(arg: &str) -> Option<&str> {
+    arg.strip_prefix('"').and_then(|a| a.strip_suffix('"'))
 }
 
 /// Rewrites the quotes of an asserted condition as single quotes.
@@ -140,9 +170,7 @@ pub(super) fn call_starts(line: &str) -> Vec<usize> {
 ///
 /// * `arg` - The argument as rendered, quotes included.
 pub(super) fn source_path(arg: &str) -> bool {
-    arg.strip_prefix('"')
-        .and_then(|a| a.strip_suffix('"'))
-        .is_some_and(is_source_path)
+    unquoted(arg).is_some_and(is_source_path)
 }
 
 /// Tells whether a literal's text names a C or C++ source file, as an

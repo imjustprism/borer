@@ -361,14 +361,15 @@ fn the_class_registry_lists_a_registered_class() {
 fn the_source_tree_groups_functions_by_file() {
     let p = fixture();
     let a = Analysis::compute(&p);
-    let dirs = borer_engine::analysis::render::source_tree_tsv(&p, &a, "");
+    let dirs = borer_engine::analysis::render::source_tree_tsv(&p, &a, &Overlay::default(), "");
     assert!(dirs.contains("directory"), "{dirs}");
     assert!(dirs.contains("fourcc.h") || dirs.contains("util"), "{dirs}");
     assert!(
         dirs.contains("# base: C:/\n"),
         "the build root is written once: {dirs}"
     );
-    let files = borer_engine::analysis::render::source_tree_tsv(&p, &a, "fourcc");
+    let files =
+        borer_engine::analysis::render::source_tree_tsv(&p, &a, &Overlay::default(), "fourcc");
     assert!(files.contains("fourcc.h"), "{files}");
     assert!(
         files.contains("# base: C:/\n"),

@@ -141,7 +141,7 @@ pub(crate) const RESOURCES: &[(&str, &str)] = &[
     ),
     (
         "borer://sources",
-        "The source files the binary's assertions cite, by directory with how many files and functions each holds: the subsystems the binary was built from",
+        "The source files the binary's assertions cite, by directory with how many files and functions each holds: the subsystems the binary was built from; borer://sources/<file> adds the expressions each file's asserts check",
     ),
     (
         "borer://classes",
@@ -359,7 +359,7 @@ pub(crate) const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
     ),
     (
         "borer://sources/{filter}",
-        "Source files whose path contains the filter, with how many functions came from each and the lowest of their entries",
+        "Source files whose path contains the filter, with how many functions came from each and the lowest of their entries, then each file's assert expressions, most frequent first (from at most 200 of its functions)",
         "borer://sources/net",
     ),
     (

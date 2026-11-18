@@ -975,3 +975,39 @@ fn an_inlined_assert_names_only_its_own_class() {
         "{all}"
     );
 }
+
+/// A source file's listing ends with the expressions its asserts check,
+/// the most frequent first.
+///
+/// Every method of [`widget`] cites `src/widget.cpp`; `this->m_name` is
+/// asserted by two methods, `count > 0` by one, so the first comes first.
+/// `main` asserts nothing and is not read as citing the file.
+#[test]
+fn a_source_file_lists_its_assert_expressions_most_frequent_first() {
+    use borer_engine::analysis::render::source_tree_tsv;
+    let p = widget();
+    let a = Analysis::compute(&p);
+    let text = source_tree_tsv(&p, &a, &Overlay::default(), "widget");
+    let rows: Vec<&str> = text
+        .lines()
+        .skip_while(|l| !l.starts_with("# asserts\t"))
+        .skip(1)
+        .collect();
+    assert!(
+        text.contains("assert expressions in the 1 matched files, each file's most frequent first; all 18 functions citing them read\n"),
+        "{text}"
+    );
+    let at = |row: &str| rows.iter().position(|r| *r == row);
+    let name = at("2\t2\twidget.cpp\tthis->m_name").expect("m_name is asserted twice");
+    let count = at("1\t1\twidget.cpp\tcount > 0").expect("count > 0 is asserted once");
+    assert!(name < count, "the more frequent comes first:\n{text}");
+    assert_eq!(rows.len(), 11, "one row per distinct expression:\n{text}");
+    let counts: Vec<usize> = rows
+        .iter()
+        .filter_map(|r| r.split('\t').next()?.parse().ok())
+        .collect();
+    assert!(
+        counts.windows(2).all(|w| w[0] >= w[1]),
+        "rows run from most to least frequent:\n{text}"
+    );
+}
