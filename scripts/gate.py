@@ -6,6 +6,8 @@
                                        a missing tool fails instead of skipping, nothing is cached)
     python scripts/gate.py --fast      skip the slow tail (smoke, deny, doc, dogfood, app, bench)
     python scripts/gate.py --no-cache  rerun every step, passed before or not
+    python scripts/gate.py --part P    run only the steps of one part (`PARTS`): CI runs each
+                                       part in a job of its own, side by side
 
 Helpers are grouped under this directory. `check` fails when a generated
 table, the commit messages, or a comment drifts. `run` drives a built server.
@@ -132,6 +134,13 @@ EVERYTHING = ("",)
 WIDE_CORES = 8
 """Cores a machine needs for the gate to run its steps side by side."""
 
+PARTS = ("checks", "sweeps", "app")
+"""The parts CI splits the gate into, one runner each: `sweeps` (the dogfood
+sweeps and the time bars, in the sweep build) and `app` (the GPUI desktop
+workspace) each held a 4-core runner for over half an hour, so in one job
+the gate ran past the 2-hour limit. Every check belongs to exactly one part;
+only a build may belong to two, so each check still runs once per CI run."""
+
 HEAVY_MAX = 2
 """Heavy steps run side by side at most. Each holds most of the cores on
 its own; all of them at once (the tests, three sweeps and smoke) ran each
@@ -160,6 +169,8 @@ class Step:
     """Whether it rewrites files it reads (fmt), so its key is taken after it runs."""
     heavy: bool = False
     """Whether it runs work that holds every core for minutes (`HEAVY_MAX`)."""
+    parts: tuple[str, ...] = ("checks",)
+    """The `PARTS` it runs in; more than one only for a build two parts read."""
 
 
 class Runner:
@@ -637,8 +648,9 @@ def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[St
             "build corpus",
             ["cargo", "build", "-p", "borer", "--profile", "corpus"],
             {"CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER": "link.exe"},
+            parts=("checks", "sweeps"),
         ),
-        Step("build sweep", [*sweep, "--test", "bench", "--no-run"]),
+        Step("build sweep", [*sweep, "--test", "bench", "--no-run"], parts=("sweeps",)),
         Step(
             "dogfood",
             [*sweep, "--", "--ignored"]
@@ -669,6 +681,7 @@ def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[St
             inputs=RUST,
             needs=("build corpus", "build sweep"),
             heavy=True,
+            parts=("sweeps",),
         ),
         # The text check alone: its replay takes 35 s by itself and 409 s
         # beside the sweeps above, which hold every core as it does.
@@ -685,6 +698,7 @@ def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[St
             inputs=RUST,
             needs=("dogfood",),
             heavy=True,
+            parts=("sweeps",),
         ),
     ]
     # The corpus is x86-64 only. A 32-bit binary with x87 math catches what
@@ -707,6 +721,7 @@ def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[St
                 extra=(x86,),
                 needs=("build sweep", "dogfood text"),
                 heavy=True,
+                parts=("sweeps",),
             )
         )
     else:
@@ -787,6 +802,7 @@ def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[St
                 "scripts/harness/",
             ),
             heavy=True,
+            parts=("app",),
         ),
     ]
     # The decompile time bars (`timings` in tests/bench.rs: the p95 and the
@@ -805,6 +821,7 @@ def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[St
                 extra=(notepad,),
                 needs=("build sweep", "test", "dogfood text", "dogfood x86", "smoke", "app"),
                 heavy=True,
+                parts=("sweeps",),
             )
         )
     else:
@@ -874,6 +891,11 @@ def main(argv: list[str]) -> int:
     check_only = "--check" in argv
     fast = "--fast" in argv
     use_cache = not check_only and "--no-cache" not in argv
+    part = ""
+    if "--part" in argv:
+        part = next(iter(argv[argv.index("--part") + 1 :]), "")
+        if part not in PARTS:
+            raise SystemExit(f"gate.py: --part takes one of {', '.join(PARTS)}")
     if not os.environ.get("CARGO_TARGET_DIR") and (shared := shared_target()):
         os.environ["CARGO_TARGET_DIR"] = shared
         print(f"[info] linked worktree: building in {shared}", flush=True)
@@ -883,6 +905,9 @@ def main(argv: list[str]) -> int:
     claim(target)
     wide = (os.cpu_count() or 1) >= WIDE_CORES
     first, rest = plan(check_only, fast, target, wide)
+    if part:
+        first = [s for s in first if part in s.parts]
+        rest = [s for s in rest if part in s.parts]
     cache = Cache(os.path.join(target, "gate-cache.json"), use_cache)
     runner = Runner(Path(target) / "gate-logs", check_only)
     t0 = time.time()
