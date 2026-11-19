@@ -239,19 +239,33 @@ const fn text_column(
     }
 }
 
+/// Most of the imports table the module column takes, so long module names never push the
+/// names off a panel of the default width.
+const MODULE_SHARE: f32 = 0.4;
+
+/// Returns how many characters an import's module name is.
+///
+/// # Arguments
+///
+/// * `row` - The import.
+fn module_chars(row: &SymbolRow) -> u64 {
+    row.module
+        .as_ref()
+        .map_or(0, |m| from_usize(m.chars().count()))
+}
+
 /// Every column of the imports table.
 const IMPORT_COLUMNS: &[Column<SymbolRow>] = &[
     addr_column("slot"),
-    text_column(
-        "module",
-        |row| row.module.clone().unwrap_or_default().into(),
-        |row| {
-            row.module
-                .as_ref()
-                .map_or(0, |m| from_usize(m.chars().count()))
-        },
-        |a, b| a.module.cmp(&b.module),
-    ),
+    Column {
+        fit: Fit::UpTo(module_chars, MODULE_SHARE),
+        ..text_column(
+            "module",
+            |row| row.module.clone().unwrap_or_default().into(),
+            module_chars,
+            |a, b| a.module.cmp(&b.module),
+        )
+    },
     name_column(Role::Import),
     text_column(
         "referenced",

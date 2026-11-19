@@ -547,17 +547,20 @@ fn header(tree: &CallTree) -> AnyElement {
     h_flex()
         .px(px(8.0))
         .py(px(4.0))
+        .gap_2()
         .justify_between()
         .child(
             h_flex()
+                .min_w_0()
                 .gap_2()
                 .child(
                     Label::new(format!("{title} {}", root_label(tree)))
-                        .weight(FontWeight::SEMIBOLD),
+                        .weight(FontWeight::SEMIBOLD)
+                        .truncate(),
                 )
-                .child(muted(note)),
+                .child(muted(note).truncate()),
         )
-        .children(showing.map(muted))
+        .children(showing.map(|showing| div().flex_none().child(muted(showing))))
         .into_any_element()
 }
 
@@ -691,11 +694,14 @@ fn render_row(
             div()
                 .font(look.font.clone())
                 .text_color(color)
-                .whitespace_nowrap()
+                .min_w_0()
+                .truncate()
                 .child(name),
         )
-        .end_slot(
+        .child(
             h_flex()
+                .flex_none()
+                .ml_auto()
                 .gap_2()
                 .children(note.map(muted))
                 .children(detail.map(muted)),

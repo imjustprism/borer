@@ -38,7 +38,7 @@ use crate::code_view::CodePalette;
 use crate::decompile_item::{TabMode, code_row_height};
 use crate::panels::{PanelSpec, spec_panel};
 use crate::places::{Opening, Place, open_later};
-use crate::table::{Column, Columns, Ink, aligned, cells, count_text, widths};
+use crate::table::{Column, Columns, Fit, Ink, aligned, count_text, fit_width, row_cells, widths};
 use crate::worker::{Job, LoadedBinary, Referent};
 
 /// Rows one page asks the engine for.
@@ -429,6 +429,9 @@ pub struct RowsPanel<K: RowKind> {
     /// Widths of the shown columns, laid out again when the rows, the columns, the
     /// settings or the table's width change.
     widths: Entity<ResizableColumnsState>,
+    /// Per shown column, whether its width is capped under its widest cell, so its cells
+    /// carry their whole text in a tooltip.
+    capped: Arc<[bool]>,
     /// Width of the table as last painted, the panel's default before its first paint.
     table_width: Pixels,
     /// Dock the panel sits in.
@@ -517,6 +520,7 @@ impl<K: RowKind> RowsPanel<K> {
             active: false,
             stale: false,
             widths: cx.new(|_| ResizableColumnsState::new(0, Vec::<Pixels>::new(), Vec::new())),
+            capped: Arc::from([]),
             table_width: px(K::PANEL.size_px),
             position,
             filter_job: Job::default(),
@@ -548,7 +552,18 @@ impl<K: RowKind> RowsPanel<K> {
             size
         });
         let rows = self.rows().map_or(&[][..], |rows| rows.rows());
-        let widths = widths(K::columns(self.columns), rows, ch, pad, self.table_width);
+        let shown = K::columns(self.columns);
+        let widths = widths(shown, rows, ch, pad, self.table_width);
+        self.capped = shown
+            .iter()
+            .zip(&widths)
+            .map(|(column, width)| {
+                matches!(column.fit, Fit::UpTo(..))
+                    && column
+                        .chars(rows)
+                        .is_some_and(|chars| fit_width(chars, ch, pad) > *width)
+            })
+            .collect();
         let cols = widths.len();
         let resize = vec![TableResizeBehavior::None; cols];
         self.widths = cx.new(|_| ResizableColumnsState::new(cols, widths, resize));
@@ -1122,6 +1137,7 @@ impl<K: RowKind> RowsPanel<K> {
         let panel = cx.entity().downgrade();
         let drawn = panel.clone();
         let shown = K::columns(self.columns);
+        let capped = self.capped.clone();
         let headers = self.headers(cx);
         Table::new(shown.len())
             .width_config(ColumnWidthConfig::Resizable(self.widths.clone()))
@@ -1177,22 +1193,8 @@ impl<K: RowKind> RowsPanel<K> {
                         return Vec::new();
                     };
                     range
-                        .filter_map(|ix| rows.rows().get(ix))
-                        .map(|row| {
-                            cells(row, shown)
-                                .into_iter()
-                                .zip(shown)
-                                .enumerate()
-                                .map(|(col, (cell, c))| {
-                                    aligned(c.align, cell)
-                                        .text_color(ink(c.ink))
-                                        .when(col == 0, |d| {
-                                            d.debug_selector(|| ENTRY_SELECTOR.to_owned())
-                                        })
-                                        .into_any_element()
-                                })
-                                .collect()
-                        })
+                        .filter_map(|ix| Some((ix, rows.rows().get(ix)?)))
+                        .map(|(ix, row)| row_cells((ix, row), shown, &capped, ink, ENTRY_SELECTOR))
                         .collect()
                 },
             )
@@ -1313,11 +1315,13 @@ impl<K: RowKind> Render for RowsPanel<K> {
             .child(Label::new(K::PANEL.title).weight(FontWeight::SEMIBOLD))
             .children(rows.map(|rows| {
                 h_flex()
+                    .min_w_0()
                     .gap_2()
                     .child(
                         Label::new(self.count_line(rows))
                             .size(LabelSize::Small)
-                            .color(Color::Muted),
+                            .color(Color::Muted)
+                            .truncate(),
                     )
                     .children(rows.hidden().map(|(short, tip)| {
                         div().id("rows-hidden").tooltip(Tooltip::text(tip)).child(

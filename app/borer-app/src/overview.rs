@@ -412,14 +412,22 @@ impl OverviewItem {
                 let item = item.clone();
                 let mut line = h_flex()
                     .id(ix)
-                    .px_2()
+                    .w_full()
                     .pl(px(8.0 + indent))
+                    .pr_2()
                     .gap_2()
                     .children(row.basis.map(|basis| {
                         let (words, color) = basis_label(basis);
-                        Label::new(words).size(LabelSize::XSmall).color(color)
+                        div()
+                            .flex_none()
+                            .child(Label::new(words).size(LabelSize::XSmall).color(color))
                     }))
-                    .child(Label::new(row.text.clone()).size(size).color(color));
+                    .child(
+                        Label::new(row.text.clone())
+                            .size(size)
+                            .color(color)
+                            .truncate(),
+                    );
                 if self.selected == Some(ix) {
                     line = line.bg(selected_bg);
                 }

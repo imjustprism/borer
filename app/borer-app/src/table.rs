@@ -6,7 +6,11 @@
 use std::cmp::Ordering;
 
 use gpui::prelude::FluentBuilder as _;
-use gpui::{Div, IntoElement, ParentElement as _, Pixels, SharedString, Styled as _, div};
+use gpui::{
+    AnyElement, Div, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
+    SharedString, StatefulInteractiveElement as _, Styled as _, div,
+};
+use ui::Tooltip;
 
 use crate::code_view::Role;
 
@@ -34,6 +38,9 @@ pub enum Fit<R> {
     /// As wide as its header or its widest cell, which is the cell of the row with the
     /// largest key, so the column is never ellipsized.
     Widest(fn(&R) -> u64),
+    /// As wide as [`Fit::Widest`] makes it, but at most this share of the table; a cell
+    /// wider than that ends in an ellipsis.
+    UpTo(fn(&R) -> u64, f32),
     /// What the other columns leave of the table.
     Fill,
 }
@@ -87,7 +94,7 @@ impl<R> Column<R> {
     /// * `rows` - Every row the table shows; one pass.
     #[must_use]
     pub fn chars(&self, rows: &[R]) -> Option<usize> {
-        let Fit::Widest(key) = self.fit else {
+        let (Fit::Widest(key) | Fit::UpTo(key, _)) = self.fit else {
             return None;
         };
         let widest = rows.iter().max_by_key(|row| key(row));
@@ -109,8 +116,9 @@ pub fn cells<R>(row: &R, shown: &[Column<R>]) -> Vec<SharedString> {
 
 /// Returns the width of each column of `shown`, in order.
 ///
-/// A fitted column holds its characters with one to spare, and the fill column takes what
-/// the others leave of `table`, but never under [`FILL_MIN_CHARS`].
+/// A fitted column holds its characters with one to spare, up to its share of `table` for
+/// a [`Fit::UpTo`] column, and the fill column takes what the others leave of `table`, but
+/// never under [`FILL_MIN_CHARS`].
 ///
 /// # Arguments
 ///
@@ -127,29 +135,94 @@ pub fn widths<R>(
     pad: Pixels,
     table: Pixels,
 ) -> Vec<Pixels> {
-    let width = |chars: usize| ch * (chars + 1) + pad;
+    let width = |chars: usize| fit_width(chars, ch, pad);
     let fitted: Vec<Option<Pixels>> = shown
         .iter()
-        .map(|column| column.chars(rows).map(width))
+        .map(|column| {
+            let fit = column.chars(rows).map(width);
+            match column.fit {
+                Fit::UpTo(_, share) => fit.map(|w| w.min(table * share)),
+                Fit::Widest(_) | Fit::Fill => fit,
+            }
+        })
         .collect();
     let rest = table - fitted.iter().flatten().sum::<Pixels>();
     let fill = rest.max(width(FILL_MIN_CHARS));
     fitted.into_iter().map(|w| w.unwrap_or(fill)).collect()
 }
 
-/// Returns `child` as the content of a table cell, filling it and sitting where `align`
-/// says.
+/// Returns how wide a fitted column of `chars` characters is: one character to spare and
+/// the cell's padding.
+///
+/// # Arguments
+///
+/// * `chars` - The column's characters.
+/// * `ch` - Advance of one character of the table's font.
+/// * `pad` - Horizontal padding of a cell, both sides together.
+#[must_use]
+pub fn fit_width(chars: usize, ch: Pixels, pad: Pixels) -> Pixels {
+    ch * (chars + 1) + pad
+}
+
+/// Returns `child` as the content of a header cell, filling it and sitting where `align`
+/// says, on one line ending in an ellipsis where the column is narrower.
 ///
 /// # Arguments
 ///
 /// * `align` - Where the content sits in its column.
-/// * `child` - The cell's text or label.
+/// * `child` - The header's label.
 pub fn aligned(align: Align, child: impl IntoElement) -> Div {
     div()
         .w_full()
         .flex()
         .when(align == Align::End, Div::justify_end)
-        .child(child)
+        .child(div().min_w_0().truncate().child(child))
+}
+
+/// Returns the drawn cells of one row.
+///
+/// Each is one line of text filling its cell, sitting where its column says and ending in
+/// an ellipsis where the column is narrower; a capped column's cell carries its whole text
+/// in a tooltip.
+///
+/// # Arguments
+///
+/// * `(ix, row)` - The row's index in the table, and the row.
+/// * `shown` - The columns shown.
+/// * `capped` - Per shown column, whether its width is capped under its widest cell.
+/// * `ink` - The color of each kind of cell.
+/// * `first` - Debug selector of the first column's cells, which tests read.
+pub fn row_cells<R>(
+    (ix, row): (usize, &R),
+    shown: &[Column<R>],
+    capped: &[bool],
+    ink: impl Fn(Ink) -> Hsla,
+    first: &'static str,
+) -> Vec<AnyElement> {
+    let capped = capped.iter().copied().chain(std::iter::repeat(false));
+    cells(row, shown)
+        .into_iter()
+        .zip(shown)
+        .zip(capped)
+        .enumerate()
+        .map(|(col, ((text, column), capped))| {
+            let tip = capped.then(|| text.clone());
+            let drawn = div()
+                .w_full()
+                .truncate()
+                .when(column.align == Align::End, Div::text_right)
+                .text_color(ink(column.ink))
+                .when(col == 0, |d| d.debug_selector(|| first.to_owned()))
+                .child(text);
+            match tip {
+                Some(tip) => drawn
+                    .id(("capped", ix))
+                    .tooltip(Tooltip::text(tip))
+                    .into_any_element(),
+                None => drawn.into_any_element(),
+            }
+        })
+        .collect()
 }
 
 /// Returns a table's count as a person reads it: `481 functions` when the page holds every
