@@ -19,7 +19,7 @@
     reason = "the process API is foreign; every call is wrapped here with its invariants"
 )]
 
-pub use os::{Process, Tether, processes, run_at_full_speed, run_below_normal};
+pub use os::{Process, Tether, process_cpu_ticks, processes, run_at_full_speed, run_below_normal};
 
 use libmimalloc_sys as _;
 
@@ -131,6 +131,7 @@ mod os {
         ProcessMemoryPriority, ProcessPowerThrottling, SetPriorityClass, SetProcessInformation,
         THREAD_QUERY_INFORMATION,
     };
+    use windows_sys::Win32::System::WindowsProgramming::QueryProcessCycleTime;
 
     /// What `NtQueryInformationThread(ThreadBasicInformation)` fills: the
     /// documented `THREAD_BASIC_INFORMATION`, which the bindings do not
@@ -264,6 +265,26 @@ mod os {
                 size,
             )
         };
+    }
+
+    /// Returns the processor time this process has spent, in every thread it
+    /// ran, ended ones too, in user and in kernel mode.
+    ///
+    /// It is the processor's cycle counter while the process's threads ran
+    /// (`QueryProcessCycleTime`), counted at every switch rather than sampled
+    /// at the 15.6 ms clock tick `GetProcessTimes` charges by. Its ticks are
+    /// in no unit this names: only two readings of one process compare.
+    ///
+    /// # Returns
+    ///
+    /// The ticks so far; `None` when the system refuses the query.
+    #[must_use]
+    pub fn process_cpu_ticks() -> Option<u64> {
+        let mut cycles = 0u64;
+        // SAFETY: the pseudo-handle names this process and the pointer is to
+        // `cycles`, a live u64 the call writes.
+        let read = unsafe { QueryProcessCycleTime(GetCurrentProcess(), &raw mut cycles) };
+        (read != 0).then_some(cycles)
     }
 
     /// A job that ends every process tied to it when the process holding it
@@ -809,6 +830,31 @@ mod os {
     /// a process for having no window (macOS's App Nap is for apps with
     /// one), and no slowdown was measured there to opt out of.
     pub fn run_at_full_speed() {}
+
+    /// Returns the processor time this process has spent, in every thread it
+    /// ran, ended ones too, in user and in kernel mode (`getrusage` of
+    /// `RUSAGE_SELF`).
+    ///
+    /// # Returns
+    ///
+    /// The time in nanoseconds; compare two readings of one process, as
+    /// the Windows ticks are compared. `None` when the call fails.
+    #[must_use]
+    pub fn process_cpu_ticks() -> Option<u64> {
+        // SAFETY: `rusage` is integers only, so all-zero bytes are one.
+        let mut usage: libc::rusage = unsafe { core::mem::zeroed() };
+        // SAFETY: the pointer is to `usage`, a live `rusage` the call writes.
+        if unsafe { libc::getrusage(libc::RUSAGE_SELF, &raw mut usage) } != 0 {
+            return None;
+        }
+        let nanos = |t: libc::timeval| {
+            let secs = u64::try_from(t.tv_sec).ok()?;
+            let micros = u64::try_from(t.tv_usec).ok()?;
+            secs.checked_mul(1_000_000_000)?
+                .checked_add(micros.checked_mul(1000)?)
+        };
+        nanos(usage.ru_utime)?.checked_add(nanos(usage.ru_stime)?)
+    }
 
     /// Ties nothing off Windows: a worker there ends when its input closes,
     /// which is when its relay ends unless the worker is mid-request.

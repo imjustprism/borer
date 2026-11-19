@@ -136,6 +136,7 @@ name = "borer-live"
 version = "0.3.1"
 dependencies = [
  "borer-engine",
+ "libc",
  "libmimalloc-sys",
  "windows-sys",
 ]
