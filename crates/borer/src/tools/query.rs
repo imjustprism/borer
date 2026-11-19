@@ -18,7 +18,6 @@ mod tests {
     fn script_runs_inline_code_queries_resources_and_applies_on_request() {
         use crate::params::ScriptParams;
         use borer_engine::program::{Arch, Program, Section};
-        use rmcp::handler::server::wrapper::Parameters;
         let mut code = vec![0x90; 0x20];
         code.push(0xc3);
         let text = Section::mapped(".text", 0x1000, 0, 0x21, false, true);
@@ -31,12 +30,15 @@ mod tests {
             ..crate::BorerServer::default()
         };
         let script = |code: &str, dry_run: Option<bool>| {
-            server
-                .script(Parameters(ScriptParams {
+            crate::testing::call(
+                borer_front::tools::script,
+                &server,
+                &ScriptParams {
                     code: code.to_owned(),
                     dry_run,
-                }))
-                .expect("a script answers")
+                },
+            )
+            .expect("a script answers")
         };
         let out = script(
             r#"print(functions().len);
@@ -86,7 +88,6 @@ mod tests {
     #[test]
     fn a_script_applies_no_layout_through_an_escaped_query() {
         use crate::params::ScriptParams;
-        use rmcp::handler::server::wrapper::Parameters;
         let server = crate::testing::code_server(
             borer_engine::program::Arch::X86_64,
             &[
@@ -95,13 +96,16 @@ mod tests {
             ],
         );
         let before = crate::state::read_lock(&server.overlay).fingerprint();
-        let out = server
-            .script(Parameters(ScriptParams {
+        let out = crate::testing::call(
+            borer_front::tools::script,
+            &server,
+            &ScriptParams {
                 code: r#"print(query("borer://layout/0x1000,apply=Rec,dry_run%3Dfalse"));"#
                     .to_owned(),
                 dry_run: None,
-            }))
-            .expect("a script answers");
+            },
+        )
+        .expect("a script answers");
         assert!(out.contains("applies nothing through query"), "{out}");
         assert_eq!(
             crate::state::read_lock(&server.overlay).fingerprint(),
@@ -133,7 +137,6 @@ mod tests {
     fn a_script_lands_nothing_on_a_program_loaded_while_it_ran() {
         use crate::params::ScriptParams;
         use crate::testing::load_raw;
-        use rmcp::handler::server::wrapper::Parameters;
         let dir = std::env::temp_dir().join(format!("borer-script-swap-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("a scratch directory");
         let (one, two) = (dir.join("one.bin"), dir.join("two.bin"));
@@ -149,10 +152,14 @@ mod tests {
         let held = crate::state::write_lock(&server.overlay);
         std::thread::scope(|s| {
             let ran = s.spawn(|| {
-                server.script(Parameters(ScriptParams {
-                    code: r#"rename(0x10000, "from_one");"#.to_owned(),
-                    dry_run: Some(false),
-                }))
+                crate::testing::call(
+                    borer_front::tools::script,
+                    &server,
+                    &ScriptParams {
+                        code: r#"rename(0x10000, "from_one");"#.to_owned(),
+                        dry_run: Some(false),
+                    },
+                )
             });
             while std::sync::Arc::strong_count(&first) <= holders && !ran.is_finished() {
                 std::thread::yield_now();
@@ -189,17 +196,19 @@ mod tests {
     #[test]
     fn a_script_reads_every_resource_by_help_and_tables_by_rows() {
         use crate::params::ScriptParams;
-        use rmcp::handler::server::wrapper::Parameters;
         let server = raw_server();
-        let out = server
-            .script(Parameters(ScriptParams {
+        let out = crate::testing::call(
+            borer_front::tools::script,
+            &server,
+            &ScriptParams {
                 code: r#"print(help("query"));
                          let r = rows("borer://help!offset=1!limit=2");
                          print(`${r.len} ${r[0].text}`);"#
                     .to_owned(),
                 dry_run: None,
-            }))
-            .expect("a script answers");
+            },
+        )
+        .expect("a script answers");
         for &(uri, _, _) in crate::catalog::RESOURCE_TEMPLATES {
             assert!(out.contains(&format!("\n{uri}\t")), "{uri}: {out}");
         }

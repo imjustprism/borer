@@ -1146,7 +1146,6 @@ mod tests {
         use crate::params::FunctionsParams;
         use crate::params::ScriptParams;
         use borer_engine::program::{Arch, Program, Section};
-        use rmcp::handler::server::wrapper::Parameters;
         let code: Vec<u8> = [
             // ASM: bti c
             0xd503_245fu32,
@@ -1181,12 +1180,15 @@ mod tests {
             ) && out.contains("\n0x1000  bti c\n0x1004  ret\n"),
             "{out}"
         );
-        let out = server
-            .script(Parameters(ScriptParams {
+        let out = crate::testing::call(
+            borer_front::tools::script,
+            &server,
+            &ScriptParams {
                 code: "print(disasm(0x1000, 2)[1].text); print(functions().len);".to_owned(),
                 dry_run: None,
-            }))
-            .expect("a script answers");
+            },
+        )
+        .expect("a script answers");
         assert!(out.starts_with("ret\n1\n"), "{out}");
         let listed = borer_front::tools::functions(
             &server,

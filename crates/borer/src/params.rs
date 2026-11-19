@@ -541,7 +541,6 @@ mod tests {
     fn set_type_names_the_slot_the_text_shows() {
         use crate::params::{DecompileParams, SetTypeParams};
         use borer_engine::program::Arch;
-        use rmcp::handler::server::wrapper::Parameters;
         let words = |ws: &[u32]| -> Vec<u8> { ws.iter().flat_map(|w| w.to_le_bytes()).collect() };
         let cases = [
             (
@@ -592,8 +591,10 @@ mod tests {
         ];
         for (arch, code, shown, ty) in cases {
             let server = crate::testing::code_server(arch, &code);
-            let said = server
-                .set_type(Parameters(SetTypeParams {
+            let said = crate::testing::call(
+                borer_front::tools::set_type,
+                &server,
+                &SetTypeParams {
                     name: Some("kept".to_owned()),
                     fields: None,
                     values: None,
@@ -603,8 +604,9 @@ mod tests {
                     var: Some(shown.to_owned()),
                     dry_run: Some(false),
                     ..SetTypeParams::default()
-                }))
-                .unwrap_or_else(|e| e.message.into_owned());
+                },
+            )
+            .unwrap_or_else(|e| e.message.into_owned());
             assert_eq!(
                 said,
                 format!("named {shown} of sub_1000 (0x1000) {ty} kept"),

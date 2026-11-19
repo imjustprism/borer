@@ -924,7 +924,6 @@ mod tests {
     fn a_name_set_on_one_program_never_lands_on_the_next() {
         use crate::params::SetNameParams;
         use crate::testing::load_raw;
-        use rmcp::handler::server::wrapper::Parameters;
         /// Loads of the second program the test checks after.
         const ROUNDS: usize = 300;
         let dir = std::env::temp_dir().join(format!("borer-name-swap-{}", std::process::id()));
@@ -937,13 +936,17 @@ mod tests {
         let landed = std::thread::scope(|s| {
             s.spawn(|| {
                 while !done.load(std::sync::atomic::Ordering::SeqCst) {
-                    let named = server.set_name(Parameters(SetNameParams {
-                        address: Some("0x10000".to_owned()),
-                        name: Some("from_one".to_owned()),
-                        names: None,
-                        force: None,
-                        dry_run: Some(false),
-                    }));
+                    let named = crate::testing::call(
+                        borer_front::tools::set_name,
+                        &server,
+                        &SetNameParams {
+                            address: Some("0x10000".to_owned()),
+                            name: Some("from_one".to_owned()),
+                            names: None,
+                            force: None,
+                            dry_run: Some(false),
+                        },
+                    );
                     if named.is_err() {
                         std::thread::yield_now();
                     }

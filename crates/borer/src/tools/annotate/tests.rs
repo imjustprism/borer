@@ -1,4 +1,6 @@
-use crate::testing::raw_server;
+use borer_front::tools::{class_layout, script, set_comment, set_name, set_type};
+
+use crate::testing::{call, raw_server};
 
 /// A rename and a comment each let go of the text read under the names
 /// before them: the old text is not kept beside the new one, and the
@@ -13,7 +15,6 @@ fn a_rename_lets_go_of_the_text_read_under_the_old_names() {
     use crate::params::DecompileParams;
     use crate::params::SetCommentParams;
     use crate::params::SetNameParams;
-    use rmcp::handler::server::wrapper::Parameters;
     let server = raw_server();
     let decompile = || {
         borer_front::tools::decompile(
@@ -38,25 +39,31 @@ fn a_rename_lets_go_of_the_text_read_under_the_old_names() {
     };
     assert!(!decompile().contains("renamed"));
     assert_eq!(held(), 1);
-    server
-        .set_name(Parameters(SetNameParams {
+    call(
+        set_name,
+        &server,
+        &SetNameParams {
             address: Some("0x1000".to_owned()),
             name: Some("renamed".to_owned()),
             names: None,
             force: None,
             dry_run: Some(false),
-        }))
-        .expect("renames");
+        },
+    )
+    .expect("renames");
     assert_eq!(held(), 0, "the text under the old name is let go");
     assert!(decompile().contains("renamed"));
     assert_eq!(held(), 1);
-    server
-        .set_comment(Parameters(SetCommentParams {
+    call(
+        set_comment,
+        &server,
+        &SetCommentParams {
             address: "0x1000".to_owned(),
             comment: "seen".to_owned(),
             dry_run: Some(false),
-        }))
-        .expect("comments");
+        },
+    )
+    .expect("comments");
     assert_eq!(held(), 0, "the text without the comment is let go");
 }
 
@@ -71,7 +78,6 @@ fn a_rename_lets_go_of_the_text_read_under_the_old_names() {
 fn a_rename_keeps_the_texts_that_did_not_read_the_name() {
     use crate::params::DecompileParams;
     use crate::params::SetNameParams;
-    use rmcp::handler::server::wrapper::Parameters;
     let server = raw_server();
     let decompile = || {
         borer_front::tools::decompile(
@@ -92,15 +98,18 @@ fn a_rename_keeps_the_texts_that_did_not_read_the_name() {
     };
     let text = decompile();
     assert_eq!(derived().0, 1);
-    server
-        .set_name(Parameters(SetNameParams {
+    call(
+        set_name,
+        &server,
+        &SetNameParams {
             address: Some("0x1080".to_owned()),
             name: Some("elsewhere".to_owned()),
             names: None,
             force: None,
             dry_run: Some(false),
-        }))
-        .expect("renames");
+        },
+    )
+    .expect("renames");
     let (held, built) = derived();
     assert_eq!(held, 1, "the text is carried over");
     assert_eq!(decompile(), text);
@@ -117,16 +126,19 @@ fn a_rename_keeps_the_texts_that_did_not_read_the_name() {
 #[test]
 fn set_name_refuses_bad_and_taken_names_and_renames_in_batches() {
     use crate::params::SetNameParams;
-    use rmcp::handler::server::wrapper::Parameters;
     let server = raw_server();
     let set = |address: Option<&str>, name: Option<&str>, names: Option<&[&str]>, force| {
-        server.set_name(Parameters(SetNameParams {
-            address: address.map(str::to_owned),
-            name: name.map(str::to_owned),
-            names: names.map(|n| n.iter().map(|s| (*s).to_owned()).collect()),
-            force,
-            dry_run: Some(false),
-        }))
+        call(
+            set_name,
+            &server,
+            &SetNameParams {
+                address: address.map(str::to_owned),
+                name: name.map(str::to_owned),
+                names: names.map(|n| n.iter().map(|s| (*s).to_owned()).collect()),
+                force,
+                dry_run: Some(false),
+            },
+        )
     };
     let spaced = set(Some("0x1000"), Some("foo bar"), None, None).expect_err("a space");
     assert!(spaced.message.contains("holds ' '"), "{}", spaced.message);
@@ -184,17 +196,19 @@ fn set_name_refuses_bad_and_taken_names_and_renames_in_batches() {
 fn a_name_that_reads_as_a_number_is_noted_and_reachable() {
     use crate::params::FunctionDetailParams;
     use crate::params::SetNameParams;
-    use rmcp::handler::server::wrapper::Parameters;
     let server = raw_server();
-    let set = server
-        .set_name(Parameters(SetNameParams {
+    let set = call(
+        set_name,
+        &server,
+        &SetNameParams {
             address: Some("0x1000".to_owned()),
             name: Some("cafe".to_owned()),
             names: None,
             force: None,
             dry_run: Some(false),
-        }))
-        .expect("renames");
+        },
+    )
+    .expect("renames");
     assert!(set.contains("also reads as the number 0xcafe"), "{set}");
     let function = |address: &str| {
         borer_front::tools::function(
@@ -234,7 +248,6 @@ fn set_type_defines_applies_and_refuses() {
     use crate::params::SetTypeParams;
     use crate::params::TypesParams;
     use borer_engine::program::{Arch, Program, Section};
-    use rmcp::handler::server::wrapper::Parameters;
     let text = Section::mapped(".text", 0x1000, 0, 0x100, false, true);
     let data = Section::mapped(".data", 0x2000, 0x100, 0x100, true, false);
     let program = Program::raw(
@@ -250,18 +263,18 @@ fn set_type_defines_applies_and_refuses() {
         ..crate::BorerServer::default()
     };
     let fields = || vec!["0x18:hp:u32".to_owned(), "0x1c:mp:u32".to_owned()];
-    let out = server
-        .set_type(Parameters(SetTypeParams {
+    let out = call(
+        set_type,
+        &server,
+        &SetTypeParams {
             name: Some("Player".to_owned()),
             fields: Some(fields()),
-            values: None,
-            size: None,
             address: Some("0x2000".to_owned()),
             r#type: Some("Player *".to_owned()),
-            dry_run: None,
             ..SetTypeParams::default()
-        }))
-        .expect("dry-runs");
+        },
+    )
+    .expect("dry-runs");
     assert!(
         out.starts_with("dry-run: would define struct Player"),
         "{out}"
@@ -272,18 +285,19 @@ fn set_type_defines_applies_and_refuses() {
     };
     let listed = borer_front::tools::types(&server, &counted).expect("lists");
     assert!(listed.contains("0 rows (0 type(s), 0 applied)"), "{listed}");
-    let out = server
-        .set_type(Parameters(SetTypeParams {
+    let out = call(
+        set_type,
+        &server,
+        &SetTypeParams {
             name: Some("Player".to_owned()),
             fields: Some(fields()),
-            values: None,
-            size: None,
             address: Some("0x2000".to_owned()),
             r#type: Some("Player *".to_owned()),
             dry_run: Some(false),
             ..SetTypeParams::default()
-        }))
-        .expect("defines and applies");
+        },
+    )
+    .expect("defines and applies");
     assert!(
         out.contains("defined struct Player: 2 field(s), 0x20 byte(s)"),
         "{out}"
@@ -299,50 +313,48 @@ fn set_type_defines_applies_and_refuses() {
         "{listed}"
     );
     assert!(listed.contains("applied\t0x2000\t-\tPlayer *"), "{listed}");
-    let bad = server
-        .set_type(Parameters(SetTypeParams {
-            name: None,
-            fields: None,
-            values: None,
-            size: None,
+    let bad = call(
+        set_type,
+        &server,
+        &SetTypeParams {
             address: Some("0x2000".to_owned()),
             r#type: Some("three of them".to_owned()),
             dry_run: Some(false),
             ..SetTypeParams::default()
-        }))
-        .expect_err("garbage refused");
+        },
+    )
+    .expect_err("garbage refused");
     assert!(bad.message.contains("'three of them'"), "{}", bad.message);
     let mut unknown = fields();
     unknown.push("0x20:next:Missing *".to_owned());
-    let bad = server
-        .set_type(Parameters(SetTypeParams {
+    let bad = call(
+        set_type,
+        &server,
+        &SetTypeParams {
             name: Some("Player".to_owned()),
             fields: Some(unknown),
-            values: None,
-            size: None,
-            address: None,
             r#type: None,
             dry_run: Some(false),
             ..SetTypeParams::default()
-        }))
-        .expect_err("unknown name refused");
+        },
+    )
+    .expect_err("unknown name refused");
     assert!(
         bad.message.contains("resolves to no size"),
         "{}",
         bad.message
     );
-    let bad = server
-        .set_type(Parameters(SetTypeParams {
-            name: None,
-            fields: None,
-            values: None,
-            size: None,
+    let bad = call(
+        set_type,
+        &server,
+        &SetTypeParams {
             address: Some("0x1000".to_owned()),
             r#type: Some("u32".to_owned()),
             dry_run: Some(false),
             ..SetTypeParams::default()
-        }))
-        .expect_err("code refused");
+        },
+    )
+    .expect_err("code refused");
     assert!(
         bad.message.contains("types apply to data globals"),
         "{}",
@@ -385,13 +397,9 @@ fn record_server() -> crate::BorerServer {
 /// the applied text misses a field, or a refusal accepts.
 #[test]
 fn a_layout_applies_as_a_struct_on_request() {
-    use crate::params::ClassLayoutParams;
-    use crate::params::DecompileParams;
-    use crate::params::ScriptParams;
-    use crate::params::TypesParams;
+    use crate::params::{ClassLayoutParams, DecompileParams, ScriptParams, TypesParams};
     use borer_engine::analysis::Analysis;
     use borer_engine::analysis::edit::{self, Edit, Force, Laid};
-    use rmcp::handler::server::wrapper::Parameters;
     let server = record_server();
     let types = || {
         let count = TypesParams {
@@ -409,12 +417,15 @@ fn a_layout_applies_as_a_struct_on_request() {
         "plan: struct Rec and 1 prototype(s), nothing applied by a read; send the set_type calls below and decompile names the fields:\nstruct Rec (0x21 bytes): 0x10 f_10 u32, 0x18 f_18 u64, 0x20 f_20 u8\nprototype sub_401000 (0x401000): uint64_t (Rec *)\nset_type {\"dry_run\":false,\"fields\":[\"0x10:f_10:u32\",\"0x18:f_18:u64\",\"0x20:f_20:u8\"],\"name\":\"Rec\",\"size\":33}\nset_type {\"address\":\"0x401000\",\"dry_run\":false,\"type\":\"uint64_t (Rec *)\"}\n"
     );
     assert!(types().starts_with("# 0 rows"), "{}", types());
-    let scripted = server
-        .script(Parameters(ScriptParams {
+    let scripted = call(
+        script,
+        &server,
+        &ScriptParams {
             code: "print(query(\"borer://layout/0x401000,apply=Rec,dry_run=false\"));".to_owned(),
             dry_run: None,
-        }))
-        .expect("a script answers");
+        },
+    )
+    .expect("a script answers");
     assert!(
         scripted.contains("applies nothing through query"),
         "{scripted}"
@@ -436,7 +447,7 @@ fn a_layout_applies_as_a_struct_on_request() {
     edit::commit(&program, &Analysis::default(), &mut planned, &made).expect("commits");
     for call in done.lines().filter_map(|l| l.strip_prefix("set_type ")) {
         let params = serde_json::from_str(call).expect("the call's arguments");
-        server.set_type(Parameters(params)).expect("applies");
+        crate::testing::call(set_type, &server, &params).expect("applies");
     }
     let stated = server.overlay_plain();
     assert_eq!(
@@ -453,10 +464,7 @@ fn a_layout_applies_as_a_struct_on_request() {
         &server,
         &DecompileParams {
             address: "0x401000".to_owned(),
-            detail: None,
-            filter: None,
-            offset: None,
-            limit: None,
+            ..DecompileParams::default()
         },
     )
     .map_err(crate::errors::failed)
@@ -471,13 +479,16 @@ fn a_layout_applies_as_a_struct_on_request() {
         "{}",
         bad.message
     );
-    let no_class = server
-        .class_layout(Parameters(ClassLayoutParams {
+    let no_class = call(
+        class_layout,
+        &server,
+        &ClassLayoutParams {
             class: "Nope".to_owned(),
             apply: Some("N".to_owned()),
             dry_run: None,
-        }))
-        .expect_err("no such class");
+        },
+    )
+    .expect_err("no such class");
     assert!(
         no_class.message.contains("no function belongs"),
         "{}",
@@ -500,18 +511,21 @@ fn set_type_reads_c_declarations() {
     use crate::params::SetTypeParams;
     use crate::params::TypesParams;
     use borer_engine::program::{Arch, Program, Section};
-    use rmcp::handler::server::wrapper::Parameters;
     let decl = |server: &crate::BorerServer, text: &str, dry_run: Option<bool>| {
-        server.set_type(Parameters(SetTypeParams {
-            name: None,
-            fields: None,
-            values: None,
-            size: None,
-            address: None,
-            r#type: Some(text.to_owned()),
-            dry_run,
-            ..SetTypeParams::default()
-        }))
+        call(
+            set_type,
+            server,
+            &SetTypeParams {
+                name: None,
+                fields: None,
+                values: None,
+                size: None,
+                address: None,
+                r#type: Some(text.to_owned()),
+                dry_run,
+                ..SetTypeParams::default()
+            },
+        )
     };
     let server_for = |arch: Arch| {
         let mut bytes = vec![0u8; 0x200];
@@ -595,7 +609,6 @@ fn read_lays_a_user_type_over_the_bytes() {
     use crate::params::ReadParams;
     use crate::params::SetTypeParams;
     use borer_engine::program::{Arch, Program, Section};
-    use rmcp::handler::server::wrapper::Parameters;
     let mut bytes = vec![0u8; 0x200];
     bytes[0x100..0x104].copy_from_slice(&7u32.to_le_bytes());
     bytes[0x104..0x108].copy_from_slice(b"hi\0\0");
@@ -608,8 +621,10 @@ fn read_lays_a_user_type_over_the_bytes() {
         pdb_applied: std::sync::Arc::new(std::sync::RwLock::new(true)),
         ..crate::BorerServer::default()
     };
-    server
-        .set_type(Parameters(SetTypeParams {
+    call(
+        set_type,
+        &server,
+        &SetTypeParams {
             name: Some("Item".to_owned()),
             fields: Some(vec!["0:id:u32".to_owned(), "4:tag:char[4]".to_owned()]),
             values: None,
@@ -618,8 +633,9 @@ fn read_lays_a_user_type_over_the_bytes() {
             r#type: None,
             dry_run: Some(false),
             ..SetTypeParams::default()
-        }))
-        .expect("defines");
+        },
+    )
+    .expect("defines");
     let read = |kind: Option<ReadKind>, ty: &str, address: &str, count: Option<u32>| {
         borer_front::tools::read(
             &server,
@@ -669,7 +685,6 @@ fn set_type_defines_enums_and_refuses() {
     use crate::params::SetTypeParams;
     use crate::params::TypesParams;
     use borer_engine::program::{Arch, Program, Section};
-    use rmcp::handler::server::wrapper::Parameters;
     let text = Section::mapped(".text", 0x1000, 0, 0x100, false, true);
     let data = Section::mapped(".data", 0x2000, 0x100, 0x100, true, false);
     let program = Program::raw(
@@ -684,8 +699,10 @@ fn set_type_defines_enums_and_refuses() {
         pdb_applied: std::sync::Arc::new(std::sync::RwLock::new(true)),
         ..crate::BorerServer::default()
     };
-    let out = server
-        .set_type(Parameters(SetTypeParams {
+    let out = call(
+        set_type,
+        &server,
+        &SetTypeParams {
             name: Some("State".to_owned()),
             fields: None,
             values: Some(vec!["Run:1".to_owned(), "Idle:0".to_owned()]),
@@ -694,8 +711,9 @@ fn set_type_defines_enums_and_refuses() {
             r#type: Some("State".to_owned()),
             dry_run: Some(false),
             ..SetTypeParams::default()
-        }))
-        .expect("defines and applies");
+        },
+    )
+    .expect("defines and applies");
     assert!(
         out.contains("defined enum State: 2 value(s), 0x4 byte(s)"),
         "{out}"
@@ -720,8 +738,10 @@ fn set_type_defines_enums_and_refuses() {
         "{listed}"
     );
     assert!(listed.contains("applied\t0x2000\t-\tState"), "{listed}");
-    let bad = server
-        .set_type(Parameters(SetTypeParams {
+    let bad = call(
+        set_type,
+        &server,
+        &SetTypeParams {
             name: Some("Bad".to_owned()),
             fields: None,
             values: Some(vec!["A:0".to_owned(), "B:0".to_owned()]),
@@ -730,15 +750,18 @@ fn set_type_defines_enums_and_refuses() {
             r#type: None,
             dry_run: Some(false),
             ..SetTypeParams::default()
-        }))
-        .expect_err("a duplicate value refused");
+        },
+    )
+    .expect_err("a duplicate value refused");
     assert!(
         bad.message.contains("names value 0 twice"),
         "{}",
         bad.message
     );
-    let bad = server
-        .set_type(Parameters(SetTypeParams {
+    let bad = call(
+        set_type,
+        &server,
+        &SetTypeParams {
             name: Some("Bad".to_owned()),
             fields: Some(vec!["0x0:f:u32".to_owned()]),
             values: Some(vec!["A:0".to_owned()]),
@@ -747,8 +770,9 @@ fn set_type_defines_enums_and_refuses() {
             r#type: None,
             dry_run: Some(false),
             ..SetTypeParams::default()
-        }))
-        .expect_err("fields beside values refused");
+        },
+    )
+    .expect_err("fields beside values refused");
     assert!(
         bad.message.contains("both fields and values"),
         "{}",
@@ -767,7 +791,6 @@ fn set_type_defines_enums_and_refuses() {
 fn set_type_refuses_a_type_too_deep_to_walk() {
     use crate::params::SetTypeParams;
     use borer_engine::program::{Arch, Program, Section};
-    use rmcp::handler::server::wrapper::Parameters;
     let data = Section::mapped(".data", 0x2000, 0, 0x100, true, false);
     let program = Program::raw(vec![0; 0x100], Arch::X86_64, 0, None, vec![data]);
     let server = crate::BorerServer {
@@ -776,8 +799,10 @@ fn set_type_refuses_a_type_too_deep_to_walk() {
         ..crate::BorerServer::default()
     };
     let refuse = |name: Option<&str>, address: Option<&str>, ty: &str| {
-        server
-            .set_type(Parameters(SetTypeParams {
+        call(
+            set_type,
+            &server,
+            &SetTypeParams {
                 name: name.map(str::to_owned),
                 fields: None,
                 values: None,
@@ -786,9 +811,10 @@ fn set_type_refuses_a_type_too_deep_to_walk() {
                 r#type: Some(ty.to_owned()),
                 dry_run: None,
                 ..SetTypeParams::default()
-            }))
-            .expect_err("a type too deep to walk was accepted")
-            .message
+            },
+        )
+        .expect_err("a type too deep to walk was accepted")
+        .message
     };
     let deep = format!("u8 {}", "*".repeat(17));
     let long = format!("u8 {}", "*".repeat(20_000));
@@ -819,7 +845,6 @@ fn set_type_states_prototypes_and_variables() {
     use crate::params::SetTypeParams;
     use borer_engine::analysis::protos::VarKey;
     use borer_engine::program::{Arch, Program, Section};
-    use rmcp::handler::server::wrapper::Parameters;
     let mut bytes = vec![0xcc; 0x200];
     // ASM: lea eax, [rcx+1]; ret
     bytes[..4].copy_from_slice(&[0x8d, 0x41, 0x01, 0xc3]);
@@ -836,17 +861,21 @@ fn set_type_states_prototypes_and_variables() {
                 var: Option<&str>,
                 name: Option<&str>,
                 dry: Option<bool>| {
-        server.set_type(Parameters(SetTypeParams {
-            name: name.map(str::to_owned),
-            fields: None,
-            values: None,
-            size: None,
-            address: Some(address.to_owned()),
-            r#type: ty.map(str::to_owned),
-            var: var.map(str::to_owned),
-            dry_run: dry,
-            ..SetTypeParams::default()
-        }))
+        call(
+            set_type,
+            &server,
+            &SetTypeParams {
+                name: name.map(str::to_owned),
+                fields: None,
+                values: None,
+                size: None,
+                address: Some(address.to_owned()),
+                r#type: ty.map(str::to_owned),
+                var: var.map(str::to_owned),
+                dry_run: dry,
+                ..SetTypeParams::default()
+            },
+        )
     };
     let before = server.overlay_plain().fingerprint();
     let out = call("0x1000", Some("int f(int n)"), None, None, None).expect("dry-runs");
@@ -914,14 +943,17 @@ fn set_type_states_prototypes_and_variables() {
 fn a_comment_outside_every_section_is_refused_as_a_name_is() {
     use crate::params::SetCommentParams;
     use crate::params::SetNameParams;
-    use rmcp::handler::server::wrapper::Parameters;
     let server = raw_server();
     let comment = |address: &str, dry_run| {
-        server.set_comment(Parameters(SetCommentParams {
-            address: address.to_owned(),
-            comment: "typo".to_owned(),
-            dry_run,
-        }))
+        call(
+            set_comment,
+            &server,
+            &SetCommentParams {
+                address: address.to_owned(),
+                comment: "typo".to_owned(),
+                dry_run,
+            },
+        )
     };
     let refused = comment("0x1", Some(false)).expect_err("outside the image");
     assert!(
@@ -932,15 +964,18 @@ fn a_comment_outside_every_section_is_refused_as_a_name_is() {
         refused.message
     );
     assert!(comment("0x1", None).is_err(), "a dry run is refused too");
-    let named = server
-        .set_name(Parameters(SetNameParams {
+    let named = call(
+        set_name,
+        &server,
+        &SetNameParams {
             address: Some("0x1".to_owned()),
             name: Some("typo".to_owned()),
             names: None,
             force: None,
             dry_run: None,
-        }))
-        .expect_err("outside the image");
+        },
+    )
+    .expect_err("outside the image");
     assert_eq!(named.code, refused.code);
     assert_eq!(
         named.message,
@@ -968,16 +1003,19 @@ fn a_comment_outside_every_section_is_refused_as_a_name_is() {
 #[test]
 fn set_type_refuses_a_struct_holding_itself_by_value() {
     use crate::params::SetTypeParams;
-    use rmcp::handler::server::wrapper::Parameters;
     let server = raw_server();
     let state = |name: Option<&str>, field: Option<&str>, ty: Option<&str>| {
-        server.set_type(Parameters(SetTypeParams {
-            name: name.map(str::to_owned),
-            fields: field.map(|f| vec![f.to_owned()]),
-            r#type: ty.map(str::to_owned),
-            dry_run: Some(false),
-            ..SetTypeParams::default()
-        }))
+        call(
+            set_type,
+            &server,
+            &SetTypeParams {
+                name: name.map(str::to_owned),
+                fields: field.map(|f| vec![f.to_owned()]),
+                r#type: ty.map(str::to_owned),
+                dry_run: Some(false),
+                ..SetTypeParams::default()
+            },
+        )
     };
     state(Some("S"), Some("0x0:a:u32"), None).expect("S is a u32");
     state(Some("B"), Some("0x0:s:S"), None).expect("B holds S");
@@ -1004,7 +1042,6 @@ fn an_edit_past_what_a_project_holds_is_refused() {
     use crate::params::{SetCommentParams, SetNameParams, SetTypeParams};
     use borer_engine::analysis::project::{COMMENTS_MAX, NAMES_MAX};
     use borer_engine::analysis::utypes::{APPLIED_MAX, TypeExpr};
-    use rmcp::handler::server::wrapper::Parameters;
     use std::collections::BTreeMap;
     let server = raw_server();
     {
@@ -1022,24 +1059,36 @@ fn an_edit_past_what_a_project_holds_is_refused() {
         o.applied = applied.into();
     }
     for dry_run in [Some(false), None] {
-        let named = server.set_name(Parameters(SetNameParams {
-            address: Some("0x1000".to_owned()),
-            name: Some("fresh".to_owned()),
-            names: None,
-            force: None,
-            dry_run,
-        }));
-        let commented = server.set_comment(Parameters(SetCommentParams {
-            address: "0x1000".to_owned(),
-            comment: "fresh".to_owned(),
-            dry_run,
-        }));
-        let typed = server.set_type(Parameters(SetTypeParams {
-            address: Some("0x10f0".to_owned()),
-            r#type: Some("u32".to_owned()),
-            dry_run,
-            ..SetTypeParams::default()
-        }));
+        let named = call(
+            set_name,
+            &server,
+            &SetNameParams {
+                address: Some("0x1000".to_owned()),
+                name: Some("fresh".to_owned()),
+                names: None,
+                force: None,
+                dry_run,
+            },
+        );
+        let commented = call(
+            set_comment,
+            &server,
+            &SetCommentParams {
+                address: "0x1000".to_owned(),
+                comment: "fresh".to_owned(),
+                dry_run,
+            },
+        );
+        let typed = call(
+            set_type,
+            &server,
+            &SetTypeParams {
+                address: Some("0x10f0".to_owned()),
+                r#type: Some("u32".to_owned()),
+                dry_run,
+                ..SetTypeParams::default()
+            },
+        );
         for (refused, says) in [
             (named, "262145 names, past the 262144"),
             (commented, "262145 comments, past the 262144"),
