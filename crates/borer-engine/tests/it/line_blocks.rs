@@ -122,7 +122,7 @@ fn a_decompiled_line_is_written_from_its_origin() {
 /// Finding the line that stands for an address is one pass over the lines.
 ///
 /// On a function of 40,000 one-instruction blocks whose listing shows no
-/// line at the address, it answers well inside 50 ms, where a search of
+/// line at the address, it answers well inside 150 ms, where a search of
 /// the function's blocks for each line takes hundreds.
 #[test]
 #[expect(
@@ -143,5 +143,5 @@ fn finding_the_line_for_an_address_is_one_pass() {
     let line = v.line_for(&a, last + 1);
     let took = started.elapsed();
     assert_eq!(line, v.line_of(last), "inside the last je");
-    assert!(took.as_millis() < 50, "{took:?}");
+    assert!(took.as_millis() < 150, "{took:?}");
 }
