@@ -23,7 +23,8 @@ seconds (typos, the comment check, ruff check and format, the type library
 the modules that may name a decoder crate or a seeded map (scripts/check/paths.py),
 the duplicate scan (scripts/check/dupes.py) and cargo deny (offline subset)); cargo clippy -D
 warnings and then cargo doc with warnings as errors (private items
-included); the debug build, cargo test and the doctests; the corpus and
+included); cargo check of the fuzz targets, a workspace of their own that
+clippy never builds; the debug build, cargo test and the doctests; the corpus and
 sweep builds, then the dogfood sweeps over real binaries, the GPUI desktop
 app check (`scripts/run/app.py`), and, after every heavy step, the decompile
 time bars (`timings` in tests/bench.rs); and, once the builds they drive are
@@ -606,6 +607,12 @@ def plan(check_only: bool, fast: bool, target: str, wide: bool) -> tuple[list[St
             "clippy",
             ["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"],
             lint,
+        ),
+        Step(
+            "fuzz check",
+            ["cargo", "check", "--manifest-path", "fuzz/Cargo.toml", "--bins", "--locked"],
+            lint,
+            inputs=RUST + ("fuzz/",),
         ),
         # The crackme the ground-truth test decompiles is an example; the
         # engine's own examples are left to clippy, which compiles them
