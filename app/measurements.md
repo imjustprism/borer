@@ -181,7 +181,15 @@ overview ack p99 18.0 ms (a miss); every other action as above or faster.
 The full script on that build: first frame median 192 ms, notepad open median 234 ms,
 memory delta 146.0 MB, list scroll draw p99 3.2 ms, code scroll draw p99 3.6 ms.
 
-Input phase: the clicks reach the window (9 presses and 9 releases in the stalled run)
-but none opened a function, so input-to-paint is reported as not measured, with that
-reason, and the script fails; why a click on the announced call token opens nothing is
-not found yet.
+Input phase: the clicks reached the window but opened nothing because Zed's editor takes
+every Ctrl+click on text and stops it before the tab's own listener; the tab now follows a
+call from a capture listener and from Go to Definition. Rerun on 2026-11-19, the full script
+on one release build, another agent's cargo build (4 rustc/cargo processes) running during
+it: first frame median 197.7 ms (bar 300), notepad open median 227.7 ms (bar 1000), memory
+delta 143.6 MB (bar 150), list scroll draw p99 3.2 ms and code scroll draw p99 3.9 ms (bar
+8.3), input-to-paint p95/p99 10.5/12.2 ms over 498 samples (bar 16), call tree 157 of 200
+expansions timed (a miss), engine calls on the UI thread 0. Action acks over their 16 ms
+bar on that run: notepad overview 18.7, large goto 20.9, xrefs 85.7, listing 30.8, graph
+19.6, filter 20.4, overview 256.9; large listing settle p95 28.3 (bar 16). Every notepad
+action but overview held its bars; the large-DLL misses fall in the run where the other
+build was compiling and need a run on a quiet machine before they are read as regressions.
