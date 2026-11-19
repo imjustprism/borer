@@ -1198,18 +1198,15 @@ impl Render for Harness {
                 this.buttons.0 = this.buttons.0.saturating_add(1);
                 this.arrive(cx);
             }))
-            .capture_any_mouse_up(cx.listener(|this, _: &MouseUpEvent, _, cx| {
+            .capture_any_mouse_up(cx.listener(|this, event: &MouseUpEvent, _, cx| {
                 this.buttons.1 = this.buttons.1.saturating_add(1);
                 this.arrive(cx);
+                if event.button == MouseButton::Left
+                    && let Some((_, click)) = this.before.as_mut()
+                {
+                    *click = true;
+                }
             }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, _| {
-                    if let Some((_, click)) = this.before.as_mut() {
-                        *click = true;
-                    }
-                }),
-            )
             .child(self.root.clone())
     }
 }

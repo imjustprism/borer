@@ -7,8 +7,7 @@ use std::time::{Duration, Instant};
 
 use borer_engine::cancel::Cancel;
 use borer_engine::view::Ref;
-use gpui::{App, Context, Window, px};
-use language::Point;
+use gpui::{App, Context, Window};
 
 use super::{
     CALL_CLICKS, FILTER_KEYS, Harness, InjectTracker, MarkWait, PendingInputMark, nanos,
@@ -409,45 +408,22 @@ impl Harness {
     ///
     /// Logical `(x, y)` window coordinates, or `None` when no call token is visible.
     fn call_target(&self, window: &mut Window, cx: &mut App) -> Option<(f32, f32)> {
-        let item_entity = self.item(cx)?;
-        let (code, current, editor, top) = {
-            let item = item_entity.read(cx);
-            (
-                item.code()?.clone(),
-                item.entry(),
-                item.editor().clone(),
-                item.top_line(),
-            )
+        let item = self.item(cx)?;
+        let (row, col) = {
+            let tab = item.read(cx);
+            let (code, current) = (tab.code()?, tab.entry());
+            (tab.top_line()..code.len())
+                .take(CALL_SCAN_ROWS)
+                .find_map(|row| {
+                    let (view, line) = code.get(row)?;
+                    view.tokens(line).find_map(|(span, _, link)| match link {
+                        Some(Ref::Function(t)) if Some(*t) != current => Some((row, span.start)),
+                        _ => None,
+                    })
+                })?
         };
-        let bounds = *editor.read(cx).last_bounds()?;
-        editor.update(cx, |editor, cx| {
-            let snapshot = editor.snapshot(window, cx);
-            let style = editor.style(cx).clone();
-            let font_id = window.text_system().resolve_font(&style.text.font());
-            let font_size = style.text.font_size.to_pixels(window.rem_size());
-            let line_height = style.text.line_height_in_pixels(window.rem_size());
-            let gutter = snapshot.gutter_dimensions(font_id, font_size, &style, window, cx);
-            for row in (top..code.len()).take(CALL_SCAN_ROWS) {
-                let (view, line) = code.get(row)?;
-                let call = view.tokens(line).find_map(|(span, _, link)| match link {
-                    Some(Ref::Function(t)) if Some(*t) != current => Some(span.start),
-                    _ => None,
-                });
-                let Some(start) = call else {
-                    continue;
-                };
-                let at = Point::new(u32::try_from(row).ok()?, u32::try_from(start).ok()?);
-                let anchor = snapshot.display_snapshot.buffer_snapshot().anchor_after(at);
-                let at = editor.to_pixel_point(anchor, &snapshot, window, cx)?;
-                let y = bounds.top() + at.y + line_height * 0.5;
-                if y > bounds.bottom() {
-                    return None;
-                }
-                let x = bounds.left() + gutter.full_width() + at.x + px(3.0);
-                return Some((f32::from(x), f32::from(y)));
-            }
-            None
-        })
+        let at = item.update(cx, |tab, cx| tab.pixel_of((row, col), window, cx))?;
+        Some((f32::from(at.x), f32::from(at.y)))
     }
 
     /// Returns the `MEASURE_INPUT` quantile summary line once the clicks complete.

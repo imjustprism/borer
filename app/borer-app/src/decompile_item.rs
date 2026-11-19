@@ -843,6 +843,42 @@ impl DecompileItem {
         });
     }
 
+    /// Returns where in the window the character at byte `col` of buffer row `row` is shown:
+    /// its left edge plus 3 pixels, at the middle of its line, inside the editor's text.
+    ///
+    /// # Arguments
+    ///
+    /// * `(row, col)` - Buffer row and byte in the row.
+    /// * `window` - Window the editor laid its lines out in.
+    /// * `cx` - Application context.
+    ///
+    /// # Returns
+    ///
+    /// The point, `None` before the editor's first paint and for a row above or below the
+    /// shown ones.
+    pub(crate) fn pixel_of(
+        &self,
+        (row, col): (usize, usize),
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<gpui::Point<Pixels>> {
+        let bounds = *self.editor.read(cx).last_bounds()?;
+        self.editor.update(cx, |editor, cx| {
+            let snapshot = editor.snapshot(window, cx);
+            let style = editor.style(cx).clone();
+            let font_id = window.text_system().resolve_font(&style.text.font());
+            let font_size = style.text.font_size.to_pixels(window.rem_size());
+            let line_height = style.text.line_height_in_pixels(window.rem_size());
+            let gutter = snapshot.gutter_dimensions(font_id, font_size, &style, window, cx);
+            let at = Point::new(u32::try_from(row).ok()?, u32::try_from(col).ok()?);
+            let anchor = snapshot.display_snapshot.buffer_snapshot().anchor_after(at);
+            let at = editor.to_pixel_point(anchor, &snapshot, window, cx)?;
+            let y = bounds.top() + at.y + line_height * 0.5;
+            let x = bounds.left() + gutter.full_width() + at.x + px(3.0);
+            (y <= bounds.bottom()).then(|| gpui::point(x, y))
+        })
+    }
+
     /// Returns the cursor's buffer row and byte in its row.
     ///
     /// # Arguments
@@ -879,22 +915,27 @@ impl DecompileItem {
     ///   it to Zed's own handling of the click.
     /// * `window` - Window the tab is in.
     /// * `cx` - Item context.
+    ///
+    /// # Returns
+    ///
+    /// Whether a link was followed.
     pub fn follow_cursor(
         &mut self,
         same_view: bool,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
-    ) {
+    ) -> bool {
         let (Some(code), Some((row, col))) = (self.code.clone(), self.cursor(cx)) else {
-            return;
+            return false;
         };
         let Some((view, line, (_, _, Some(target)))) = code.token_at(row, col) else {
-            return;
+            return false;
         };
         match resolve_ref_click(view, target) {
             ClickOutcome::OpenFunction(_) | ClickOutcome::Import(_) => {
                 let (view, target) = (view.clone(), target.clone());
                 self.follow(&view, &target, (row, line), window, cx);
+                true
             }
             ClickOutcome::ScrollToLine(_) if same_view => {
                 self.editor.update(cx, |editor, cx| {
@@ -903,8 +944,9 @@ impl DecompileItem {
                         .go_to_definition(&definition, window, cx)
                         .detach_and_log_err(cx);
                 });
+                true
             }
-            ClickOutcome::ScrollToLine(_) | ClickOutcome::None => {}
+            ClickOutcome::ScrollToLine(_) | ClickOutcome::None => false,
         }
     }
 
@@ -1294,18 +1336,36 @@ impl Render for DecompileItem {
             .size_full()
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|item, event: &MouseUpEvent, window, cx| {
+                cx.listener(|item, event: &MouseUpEvent, _, cx| {
                     let hit =
                         item.hits.borrow().iter().find_map(|(bounds, row)| {
                             bounds.contains(&event.position).then_some(*row)
                         });
                     if let Some(row) = hit {
                         item.show_check(Some(row), cx);
-                    } else if event.modifiers.secondary(cx) {
-                        item.follow_cursor(false, window, cx);
                     }
                 }),
             )
+            .capture_any_mouse_up(cx.listener(|item, event: &MouseUpEvent, window, cx| {
+                let on_glyph = item
+                    .hits
+                    .borrow()
+                    .iter()
+                    .any(|(b, _)| b.contains(&event.position));
+                if event.button == MouseButton::Left && event.modifiers.secondary(cx) && !on_glyph {
+                    let tab = cx.entity();
+                    window.defer(cx, move |window, cx| {
+                        tab.update(cx, |item, cx| {
+                            item.follow_cursor(false, window, cx);
+                        });
+                    });
+                }
+            }))
+            .capture_action(cx.listener(|item, _: &GoToDefinition, window, cx| {
+                if item.follow_cursor(false, window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
             .child(self.editor.clone())
             .child(marks)
             .children(over.map(|over| div().absolute().inset_0().child(over)))
@@ -1327,8 +1387,9 @@ pub(crate) mod tests {
     use borer_engine::analysis::{Analysis, Overlay};
     use borer_engine::program::{Arch, Feature, Program, Section};
     use borer_engine::view::{Kind, Ref, View};
+    use editor::actions::GoToDefinition;
     use editor::{SelectionEffects, SemanticsProvider as _, ToPoint as _};
-    use gpui::{Entity, TestAppContext, VisualTestContext};
+    use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
     use language::{Point, ToPoint as _};
     use search::BufferSearchBar;
     use search::buffer_search::Deploy;
@@ -1630,6 +1691,40 @@ pub(crate) mod tests {
                 })
                 .unwrap()
         })
+    }
+
+    /// Ctrl+click on a call opens the callee's tab, as Go to Definition (F12) on it does:
+    /// the editor's own handling of the click opens nothing outside its buffer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if either opens another function or none.
+    #[gpui::test]
+    fn ctrl_click_and_f12_on_a_call_open_the_callee(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let workspace = app.workspace;
+        let loaded = sample();
+        let callee = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, cx| {
+                let item = workspace.active_item_as::<DecompileItem>(cx)?;
+                item.read(cx).entry()
+            })
+        };
+        let caller = open_tab(&workspace, &loaded, (CALLER, Form::Decompile), cx);
+        let (row, span, _) = find_link(&caller, |_, _, l| *l == Ref::Function(CALLEE), cx);
+        let at = caller.update_in(cx, |item, window, cx| {
+            item.pixel_of((row, span.start), window, cx)
+        });
+        let secondary = cx.update(|_, cx| Modifiers::secondary_key(cx));
+        cx.simulate_click(at.unwrap(), secondary);
+        cx.run_until_parked();
+        assert_eq!(callee(cx), Some(CALLEE), "ctrl+click");
+        let caller = open_tab(&workspace, &loaded, (CALLER, Form::Decompile), cx);
+        put_cursor(&caller, (row, span.start), cx);
+        cx.dispatch_action(GoToDefinition::default());
+        cx.run_until_parked();
+        assert_eq!(callee(cx), Some(CALLEE), "go to definition");
     }
 
     /// Enter on a call opens its callee, and following a link into the view moves the
