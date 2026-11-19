@@ -125,33 +125,124 @@ fn run_at_full_speed() {
     }
 }
 
-/// Passes taken; the fastest is reported.
-const PASSES: usize = 5;
+/// Rounds [`timings`] times analysis in, once without a progress and once
+/// under one each round ([`paired`]).
+const ANALYSIS_ROUNDS: usize = 24;
 
-/// Most the best time under a progress may be of the best time without one.
+/// Rounds [`timings`] times the decompile slice in, as [`ANALYSIS_ROUNDS`].
+const DECOMPILE_ROUNDS: usize = 6;
+
+/// Most the median round's time under a progress may be of its time
+/// without one ([`progress_ratio`]).
 ///
 /// The counting is a thread-local read a sweep and an add every 64 items a
-/// worker, so anything past the passes' spread is a regression.
+/// worker, so anything past the rounds' spread is a regression.
 const REPORTED_RATIO: f64 = 1.10;
 
 /// Functions decompiled per pass, from the start of the program.
 const SLICE: usize = 2000;
 
-/// Returns the fastest of `PASSES` runs of `f`.
+/// Returns how long one run of `f` took, its output dropped after the
+/// clock stops.
 ///
 /// # Arguments
 ///
 /// * `f` - The work to time.
-fn best<T>(mut f: impl FnMut() -> T) -> Duration {
-    let mut best = Duration::MAX;
-    for _ in 0..PASSES {
-        let t = Instant::now();
-        let out = f();
-        let d = t.elapsed();
-        drop(out);
-        best = best.min(d);
-    }
-    best
+fn timed<T>(f: &mut impl FnMut() -> T) -> Duration {
+    let t = Instant::now();
+    let out = f();
+    let d = t.elapsed();
+    drop(out);
+    d
+}
+
+/// Returns the times of `rounds` rounds of `plain` and `under` run back to
+/// back.
+///
+/// `plain` runs first in even rounds and second in odd ones (A B B A), so
+/// load that lands on a round lands on both of its halves alike.
+///
+/// # Arguments
+///
+/// * `rounds` - How many rounds to run.
+/// * `plain` - The work without a progress.
+/// * `under` - The same work under a progress.
+///
+/// # Returns
+///
+/// Each round's time without the progress and under it, in round order.
+fn paired<T>(
+    rounds: usize,
+    mut plain: impl FnMut() -> T,
+    mut under: impl FnMut() -> T,
+) -> Vec<(Duration, Duration)> {
+    (0..rounds)
+        .map(|i| {
+            if i % 2 == 0 {
+                let p = timed(&mut plain);
+                (p, timed(&mut under))
+            } else {
+                let u = timed(&mut under);
+                (timed(&mut plain), u)
+            }
+        })
+        .collect()
+}
+
+/// Returns the median of the rounds' ratios of the time under a progress
+/// to the time without one, and whether it is within [`REPORTED_RATIO`].
+///
+/// Each ratio pairs two runs taken back to back, so load on the machine
+/// meets both; the median sets aside the rounds load met on one half only,
+/// in either direction, up to half of them, while a progress that costs
+/// more raises every round's ratio and so the median.
+///
+/// # Arguments
+///
+/// * `rounds` - Each round's time without a progress and under one.
+///
+/// # Returns
+///
+/// The median ratio, the mean of the middle two for an even count, and
+/// whether it is at most [`REPORTED_RATIO`]; no rounds read as an infinite
+/// ratio, past it.
+fn progress_ratio(rounds: &[(Duration, Duration)]) -> (f64, bool) {
+    let mut ratios: Vec<f64> = rounds
+        .iter()
+        .map(|(plain, under)| under.as_secs_f64() / plain.as_secs_f64())
+        .collect();
+    ratios.sort_unstable_by(f64::total_cmp);
+    let low = ratios.get(ratios.len().saturating_sub(1) / 2);
+    let high = ratios.get(ratios.len() / 2);
+    let median = low
+        .zip(high)
+        .map_or(f64::INFINITY, |(l, h)| f64::midpoint(*l, *h));
+    (median, median <= REPORTED_RATIO)
+}
+
+/// Holds [`progress_ratio`] to its purpose on made-up rounds.
+///
+/// A round load spiked, on either half, does not fail a progress that
+/// costs nothing, and a progress that costs 13% fails whatever one round
+/// says.
+#[test]
+fn a_spiked_round_passes_and_a_dearer_progress_fails() {
+    let ms = |p: f64, u: f64| {
+        (
+            Duration::from_secs_f64(p / 1e3),
+            Duration::from_secs_f64(u / 1e3),
+        )
+    };
+    let mut spiked = vec![ms(29.0, 30.0); 9];
+    spiked.push(ms(29.2, 70.5));
+    assert!(progress_ratio(&spiked).1, "{:?}", progress_ratio(&spiked));
+    let mut dearer: Vec<_> = (0..10u32)
+        .map(|i| ms(29.0 + f64::from(i), (29.0 + f64::from(i)) * 1.13))
+        .collect();
+    assert!(!progress_ratio(&dearer).1, "{:?}", progress_ratio(&dearer));
+    dearer[0] = ms(70.5, 29.2);
+    assert!(!progress_ratio(&dearer).1, "{:?}", progress_ratio(&dearer));
+    assert!(!progress_ratio(&[]).1);
 }
 
 /// The p95 of one function's cold decompile, in milliseconds, that
@@ -185,8 +276,12 @@ const VIEW_MAX_MS: u128 = 100;
 const LAYOUT_WORST_MS: u128 = 100;
 
 /// Reports the best time for analysis and for decompiling a fixed slice,
-/// then each function of the slice cold and alone: its p50, p95 and
-/// slowest, held to [`DECOMPILE_P95_MS`] and [`DECOMPILE_MAX_MS`].
+/// then each function of the slice cold and alone.
+///
+/// Analysis and the slice are each timed in rounds beside the same work
+/// under a progress and held to [`REPORTED_RATIO`] of it ([`paired`],
+/// [`progress_ratio`]); each function's p50, p95 and slowest are held to
+/// [`DECOMPILE_P95_MS`] and [`DECOMPILE_MAX_MS`].
 ///
 /// Also times reading each text so made as a view, held to
 /// [`VIEW_P95_US`] and [`VIEW_MAX_MS`], and laying out every function's
@@ -197,40 +292,42 @@ fn timings() {
     run_at_full_speed();
     let path = std::env::var("BORER_BENCH").expect("BORER_BENCH env var");
     let program = Program::load(std::path::Path::new(&path)).expect("load");
-    let analysis = best(|| Analysis::compute(&program));
+    let progress = borer_engine::progress::Progress::new();
+    let analysis = paired(
+        ANALYSIS_ROUNDS,
+        || Analysis::compute(&program),
+        || progress.within(|| Analysis::compute(&program)),
+    );
     let a = Analysis::compute(&program);
     let o = Overlay::default();
     let entries: Vec<u64> = a.functions.iter().take(SLICE).map(|f| f.entry).collect();
-    let all = best(|| decompile_all(&program, &a, &o, &entries));
-    let per = all.as_nanos() / entries.len().max(1) as u128;
+    let all = paired(
+        DECOMPILE_ROUNDS,
+        || decompile_all(&program, &a, &o, &entries),
+        || progress.within(|| decompile_all(&program, &a, &o, &entries)),
+    );
     println!("binary:     {path}");
     println!(
         "functions:  {} total, {} timed",
         a.functions.len(),
         entries.len()
     );
-    println!(
-        "analysis:   {:.1} ms (best of {PASSES})",
-        analysis.as_secs_f64() * 1e3
-    );
-    println!(
-        "decompile:  {:.1} ms for {} functions, {} ns each (best of {PASSES})",
-        all.as_secs_f64() * 1e3,
-        entries.len(),
-        per
-    );
-    let progress = borer_engine::progress::Progress::new();
-    let watched = best(|| progress.within(|| Analysis::compute(&program)));
-    let swept = best(|| progress.within(|| decompile_all(&program, &a, &o, &entries)));
-    println!(
-        "reported:   analysis {:.1} ms, decompile {:.1} ms under a progress (best of {PASSES})",
-        watched.as_secs_f64() * 1e3,
-        swept.as_secs_f64() * 1e3
-    );
-    for (what, under, plain) in [("analysis", watched, analysis), ("decompile", swept, all)] {
+    for (what, rounds) in [("analysis", &analysis), ("decompile", &all)] {
+        let ms = |d: &Duration| format!("{:.1}", d.as_secs_f64() * 1e3);
+        let (plain, under): (Vec<String>, Vec<String>) =
+            rounds.iter().map(|(p, u)| (ms(p), ms(u))).unzip();
+        let best = rounds.iter().map(|r| r.0).min().unwrap_or_default();
+        let (ratio, within) = progress_ratio(rounds);
+        println!(
+            "{what}: best {} ms of {} rounds; ms plain [{}], under a progress [{}]; median ratio {ratio:.3}",
+            ms(&best),
+            rounds.len(),
+            plain.join(" "),
+            under.join(" ")
+        );
         assert!(
-            under.as_secs_f64() <= plain.as_secs_f64() * REPORTED_RATIO,
-            "{what} under a progress took {under:?}, past {REPORTED_RATIO} times {plain:?}"
+            within,
+            "{what} under a progress took a median {ratio:.3} times its time without, past {REPORTED_RATIO}"
         );
     }
     let cold = Analysis::compute(&program);
