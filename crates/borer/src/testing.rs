@@ -131,6 +131,7 @@ macro_rules! served {
 
 served!(
     class_layout: ClassLayoutParams,
+    script: ScriptParams,
     set_comment: SetCommentParams,
     set_name: SetNameParams,
     set_type: SetTypeParams,

@@ -723,6 +723,17 @@ impl Held for BorerServer {
         })
     }
 
+    /// A script reads what [`BorerServer::listing`] answers: every resource
+    /// the server holds, without the answer memory or the byte budget.
+    fn querier(&self) -> borer_engine::script::Query {
+        let server = self.clone();
+        std::rc::Rc::new(move |uri: &str| {
+            server
+                .listing(&crate::paging::Asked::read(uri)?)
+                .map_err(|e| e.message.into_owned())
+        })
+    }
+
     /// The answer is [`BorerServer::read_uri`]'s, which `resources/read`
     /// sends too: the same text, the same errors, and one answer memory, so
     /// a URI read one way is remembered for the other.

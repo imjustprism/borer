@@ -83,16 +83,6 @@ pub(crate) struct ExplainFunctionArgs {
     pub(crate) address: String,
 }
 
-/// Parameters for `script`.
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ScriptParams {
-    /// Rhai source.
-    pub(crate) code: String,
-    /// Preview only (default true); false applies.
-    pub(crate) dry_run: Option<bool>,
-}
-
 /// Parameters for `decompile_batch`.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]

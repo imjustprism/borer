@@ -3,11 +3,13 @@
 //! answer of a face without the MCP server's session ([`ask`]).
 
 use std::num::NonZeroUsize;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::answer::{self, Need, Page};
 use borer_engine::program::Program;
+use borer_engine::script::Query;
 
 use super::{Cause, Failure, Held, View, run, tabled};
 
@@ -165,6 +167,11 @@ impl Held for Loaded {
 
     fn user_overlay(&self) -> Overlay {
         self.overlay.clone()
+    }
+
+    fn querier(&self) -> Query {
+        let held = self.clone();
+        Rc::new(move |uri: &str| ask(&held, uri).map_err(|f| f.message))
     }
 
     fn read(&self, uri: &str) -> Result<String, Failure> {

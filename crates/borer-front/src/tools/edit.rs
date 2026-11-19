@@ -1,25 +1,30 @@
 //! The tools that edit the names in force: `set_name`, `set_comment`,
-//! `set_type` and `class_layout` given `apply`.
+//! `set_type`, `class_layout` given `apply`, and `script`'s proposals.
 //!
-//! Each builds its edits and hands them to the face ([`super::Snapshot::edit`]).
+//! Each builds its edits and hands them to the face ([`Snapshot::edit`]).
 //! A dry run, the default, plans them, and every face answers the same plan
 //! text. Applied, what happens is the face's: the MCP server commits the
 //! plan, and a face that holds proposals for a person keeps it instead
 //! ([`Held::edit`]).
+
+use std::collections::HashSet;
+use std::rc::Rc;
+use std::sync::Arc;
 
 use borer_engine::analysis::edit::{self, Edit, Force, Laid, Plan};
 use borer_engine::analysis::protos::Proto;
 use borer_engine::analysis::settable::{Annotation, must_be_in_a_section};
 use borer_engine::analysis::utypes::parse_type;
 use borer_engine::analysis::{Analysis, Overlay, apply, classes, name_of, stated};
-use borer_engine::answer::Need;
+use borer_engine::answer::{Need, percent_decode};
 use borer_engine::program::Feature;
+use borer_engine::script::Query;
 
 use super::params::{
-    ClassLayoutParams, SetCommentParams, SetNameParams, SetTypeParams, field_var, must_be_a_name,
-    must_fit_a_row, stated_fields, stated_values,
+    ClassLayoutParams, ScriptParams, SetCommentParams, SetNameParams, SetTypeParams, field_var,
+    must_be_a_name, must_fit_a_row, stated_fields, stated_values,
 };
-use super::{Apply, Failure, Held, run};
+use super::{Apply, Failure, Held, Snapshot, run};
 
 /// Returns whether a call is a dry run, and what the face is asked to do
 /// with its plan.
@@ -436,6 +441,127 @@ fn type_edits(
         (None, None) => {}
     }
     Ok(edits)
+}
+
+/// Runs a Rhai script against the program in borer's sandbox, answering
+/// its `query` calls through the face ([`Held::querier`]).
+///
+/// The script runs on the snapshot and holds no lock while it runs. A
+/// `query` of `borer://script/...` is refused, since a script that ran
+/// scripts could recurse without end, and so is one saying
+/// `dry_run=false`, which no read obeys, since a script only proposes and
+/// `dry_run` here decides what is applied; the URI is read as the resource
+/// reads it, percent-decoded, so an escaped `dry_run%3Dfalse` is refused
+/// too. A failed script still answers what it printed and proposed before
+/// its error, and applies nothing; applied, a proposal the listings could
+/// not show, or at an address no section holds, is skipped and counted.
+///
+/// # Arguments
+///
+/// * `h` - What the front end holds.
+/// * `p` - The tool's parameters.
+///
+/// # Errors
+///
+/// When no binary is loaded or borer does not disassemble its
+/// architecture; a failing script, or one whose names or comments would
+/// take the session past what a project file holds, is an answer that
+/// applies nothing, not an error.
+pub fn script(h: &dyn Held, p: &ScriptParams) -> Result<String, Failure> {
+    run(h, Need::Best(Feature::Discover), |s| {
+        if let Some(why) = s.program().refuses(Feature::Disasm) {
+            return Err(why);
+        }
+        let face = h.querier();
+        let query: Query = Rc::new(move |uri: &str| {
+            if uri.starts_with("borer://script/") {
+                return Err(
+                    "a script cannot query borer://script/...: scripts do not run scripts"
+                        .to_owned(),
+                );
+            }
+            if percent_decode(uri).contains("dry_run=false") {
+                return Err(
+                    "a script proposes and applies nothing through query: drop dry_run=false"
+                        .to_owned(),
+                );
+            }
+            face(uri)
+        });
+        let ran = borer_engine::script::run_with(
+            Arc::clone(s.program_arc()),
+            Arc::clone(s.analysis_arc()),
+            Arc::new(s.overlay().clone()),
+            &p.code,
+            &[],
+            Some(query),
+        );
+        let mut text = borer_engine::script::run_tsv(&ran);
+        if ran.names.is_empty() && ran.comments.is_empty() {
+            return Ok(text);
+        }
+        if ran.error.is_some() {
+            text.push_str("# nothing applied: the script failed\n");
+        } else if p.dry_run.unwrap_or(true) {
+            text.push_str("# dry-run: pass dry_run=false to apply these\n");
+        } else {
+            text.push_str(&proposed(s, &ran));
+        }
+        Ok(text)
+    })
+}
+
+/// Applies the names and comments a script proposed, through the face, and
+/// says what landed.
+///
+/// # Arguments
+///
+/// * `s` - The snapshot the script ran on.
+/// * `ran` - The script's run.
+///
+/// # Returns
+///
+/// One line: what was applied and what skipped, or why nothing was.
+fn proposed(s: &Snapshot<'_>, ran: &borer_engine::script::ScriptRun) -> String {
+    let (program, analysis) = (s.program(), s.analysis());
+    let (mut named, mut commented) = (HashSet::new(), HashSet::new());
+    let mut skipped = 0usize;
+    let mut edits = Vec::with_capacity(ran.names.len() + ran.comments.len());
+    for (at, name) in &ran.names {
+        if must_fit_a_row(name, Annotation::Name).is_ok()
+            && must_be_a_name(name).is_ok()
+            && must_be_in_a_section(program, *at, Annotation::Name).is_ok()
+        {
+            named.insert(analysis.function_at(*at).map_or(*at, |f| f.entry));
+            edits.push(Edit::Name {
+                at: *at,
+                name: name.clone(),
+            });
+        } else {
+            skipped += 1;
+        }
+    }
+    for (at, comment) in &ran.comments {
+        if must_fit_a_row(comment, Annotation::Comment).is_ok()
+            && must_be_in_a_section(program, *at, Annotation::Comment).is_ok()
+        {
+            commented.insert(*at);
+            edits.push(Edit::Comment {
+                at: *at,
+                text: comment.clone(),
+            });
+        } else {
+            skipped += 1;
+        }
+    }
+    match s.edit(&edits, Force::Take, Apply::Commit) {
+        Err(why) => format!("# nothing applied: {why}\n"),
+        Ok(_) => format!(
+            "# applied names at {} addresses and comments at {}, the last proposal for an address winning; {skipped} skipped (empty, unprintable, no name set_name sets, or in no section)\n",
+            named.len(),
+            commented.len()
+        ),
+    }
 }
 
 /// Answers a plan whose lines are blocks of their own (types from C, a

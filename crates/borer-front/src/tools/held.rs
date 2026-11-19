@@ -15,6 +15,7 @@ use borer_engine::analysis::{Analysis, EnumSource, Overlay};
 use borer_engine::answer::{self, Need};
 use borer_engine::clr::managed;
 use borer_engine::program::{Feature, Program};
+use borer_engine::script::Query;
 
 /// Who a failed tool call is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,6 +232,14 @@ pub trait Held {
     ) -> anyhow::Result<Plan> {
         edit::plan(s.program(), s.analysis(), s.overlay(), edits, force)
     }
+
+    /// Returns how a script's `query(uri)` reads a resource on this face:
+    /// the text alone, page suffixes read, without a session's memory of
+    /// answers or byte budget.
+    ///
+    /// The script holds it past the call that made it, so it owns what it
+    /// reads through.
+    fn querier(&self) -> Query;
 
     /// Answers a `borer://` resource URI as the `query` tool reads it, page
     /// suffixes and all; [`super::ask`] answers what the engine answers.

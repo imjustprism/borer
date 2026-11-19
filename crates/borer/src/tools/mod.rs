@@ -70,8 +70,9 @@ mod tests {
         AnnotationsParams, CallgraphParams, CfgParams, ClassLayoutParams, CryptoParams,
         DecompileParams, DisassembleFunctionParams, DisassembleParams, EntropyParams,
         FindFunctionByStringParams, FunctionDetailParams, FunctionParams, FunctionsParams,
-        HexdumpParams, QueryParams, ReachesParams, ReadParams, SearchParams, SetCommentParams,
-        SetNameParams, SetTypeParams, StringsParams, SymbolsParams, TypesParams, XrefsParams,
+        HexdumpParams, QueryParams, ReachesParams, ReadParams, ScriptParams, SearchParams,
+        SetCommentParams, SetNameParams, SetTypeParams, StringsParams, SymbolsParams, TypesParams,
+        XrefsParams,
     };
 
     /// The tool list the app builds from the catalog is the MCP server's,
@@ -142,6 +143,7 @@ mod tests {
             ("query", schema_for_input::<QueryParams>()),
             ("reaches", schema_for_input::<ReachesParams>()),
             ("read", schema_for_input::<ReadParams>()),
+            ("script", schema_for_input::<ScriptParams>()),
             ("search", schema_for_input::<SearchParams>()),
             ("set_comment", schema_for_input::<SetCommentParams>()),
             ("set_name", schema_for_input::<SetNameParams>()),
@@ -230,6 +232,10 @@ mod tests {
                 "read",
                 serde_json::json!({"address": "sub_1000", "count": 2}),
             ),
+            (
+                "script",
+                serde_json::json!({"code": "print(query(\"borer://disasm/0x1000\"));"}),
+            ),
             ("search", serde_json::json!({"query": "c3"})),
             (
                 "set_comment",
@@ -281,14 +287,9 @@ mod tests {
     /// refused; applied, the server commits the plan and the plain face
     /// changes nothing.
     ///
-    /// Each call runs on the server and on a [`borer_front::tools::Loaded`]
-    /// taken of the server just before it, so both read the same names.
-    ///
     /// # Panics
     ///
-    /// When the faces answer otherwise, the server's names change on a
-    /// call that did not apply or stay on one that did, or the plain face's
-    /// names change.
+    /// As [`lands_alike`].
     #[test]
     fn an_applied_edit_lands_on_the_server_and_nowhere_on_a_plain_face() {
         let server = crate::testing::code_server(borer_engine::program::Arch::X86_64, &[0xc3; 16]);
@@ -342,6 +343,58 @@ mod tests {
             ),
             ("set_type", serde_json::json!({"size": "big"})),
         ];
+        lands_alike(&server, calls);
+    }
+
+    /// A script's proposals land on the server when applied and nowhere on
+    /// a plain face, which answers the same text ([`lands_alike`]).
+    ///
+    /// # Panics
+    ///
+    /// As [`lands_alike`].
+    #[test]
+    fn a_script_proposes_alike_and_applies_on_the_server_alone() {
+        let server = crate::testing::code_server(borer_engine::program::Arch::X86_64, &[0xc3; 16]);
+        let proposes = r#"rename(0x1000, "scripted"); comment(0x1000, "by script");"#;
+        let scripts = [
+            ("script", serde_json::json!({"code": proposes})),
+            (
+                "script",
+                serde_json::json!({"code": proposes, "dry_run": false}),
+            ),
+            (
+                "script",
+                serde_json::json!({"code": "rename(0x1, \"nowhere\");", "dry_run": false}),
+            ),
+            (
+                "script",
+                serde_json::json!({"code": "query(\"borer://script/x.rhai\");"}),
+            ),
+            (
+                "script",
+                serde_json::json!({"code": "not rhai", "dry_run": false}),
+            ),
+        ];
+        lands_alike(&server, scripts);
+    }
+
+    /// Runs each call on the server and on a [`borer_front::tools::Loaded`]
+    /// taken of the server just before it, so both read the same names.
+    ///
+    /// # Arguments
+    ///
+    /// * `server` - The server.
+    /// * `calls` - Each tool's name and arguments.
+    ///
+    /// # Panics
+    ///
+    /// When the faces answer otherwise, the server's names change on a
+    /// call that did not apply or stay on one that did, or the plain face's
+    /// names change.
+    fn lands_alike<const N: usize>(
+        server: &crate::BorerServer,
+        calls: [(&str, serde_json::Value); N],
+    ) {
         let annotations = borer_front::tools::tool("annotations").expect("a catalog tool");
         for (name, args) in calls {
             let t = borer_front::tools::tool(name).expect("a catalog tool");
@@ -355,10 +408,18 @@ mod tests {
             let before = format!("{:?}", server.overlay_plain());
             let listed = (annotations.run)(&plain, serde_json::Map::new());
             let plainly = (t.run)(&plain, args.clone());
-            let served = (t.run)(&server, args);
+            let served = (t.run)(server, args);
             let landed = format!("{:?}", server.overlay_plain()) != before;
             assert_eq!(served, plainly, "{name}");
-            assert_eq!(landed, applies && served.is_ok(), "{name}: {served:?}");
+            let said_nothing = name == "script"
+                && served
+                    .as_ref()
+                    .is_ok_and(|s| !s.contains("# applied names at 1 addresses"));
+            assert_eq!(
+                landed,
+                applies && served.is_ok() && !said_nothing,
+                "{name}: {served:?}"
+            );
             assert_eq!(format!("{:?}", plain.overlay), before, "{name}");
             let again = (annotations.run)(&plain, serde_json::Map::new());
             assert_eq!(again, listed, "{name}");

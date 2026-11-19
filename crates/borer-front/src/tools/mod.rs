@@ -36,7 +36,7 @@ pub use code::{
     callgraph, cfg, class_field, decompile, disassemble_function, function, function_strings,
     function_summary, functions, reaches, xrefs,
 };
-pub use edit::{class_layout, set_comment, set_name, set_type};
+pub use edit::{class_layout, script, set_comment, set_name, set_type};
 pub use held::{
     Apply, Cause, Failure, Find, Held, NO_BINARY, Snapshot, View, fault_text, guarded, run,
     snapshot, tabled,
@@ -380,10 +380,6 @@ pub const SERVER_ONLY: &[(&str, &str)] = &[
         "save_project",
         "it writes a project file under the output root",
     ),
-    (
-        "script",
-        "with dry_run=false it applies its proposals to the session, and its query() reads the MCP server's resources: it joins with the edit tools",
-    ),
 ];
 
 /// Builds a catalog row whose schema, parser and handler read one
@@ -515,6 +511,16 @@ pub const TOOLS: &[Tool] = &[
         ReadParams,
         &[],
         "Read typed values (kind) as `va value` rows, or a user type (type) one row per field, pointers named; stops at the first unmapped byte. Not for raw bytes (use hexdump) or a live process (live_read)."
+    ),
+    row!(
+        script,
+        ScriptParams,
+        &[Effect::ReadsFiles, Effect::ChangesSession],
+        Hints {
+            idempotent: false,
+            ..EDITS
+        },
+        "Run a sandboxed Rhai script on a snapshot of the program: query(uri) and rows(uri) read any resource. Use it when no single tool answers. Proposed names apply only with dry_run=false; a failed script applies nothing."
     ),
     row!(
         search,
@@ -718,6 +724,9 @@ mod tests {
                 let plan = edit::plan(s.program(), s.analysis(), s.overlay(), edits, force)?;
                 self.kept.borrow_mut().push(plan.clone());
                 Ok(plan)
+            }
+            fn querier(&self) -> borer_engine::script::Query {
+                self.loaded.querier()
             }
             fn read(&self, uri: &str) -> Result<String, Failure> {
                 self.loaded.read(uri)

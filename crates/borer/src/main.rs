@@ -146,11 +146,7 @@ impl BorerServer {
             } else {
                 ToolRouter::new()
             };
-            tools::catalog()
-                + BorerServer::load_tools()
-                + BorerServer::decompile_tools()
-                + live
-                + BorerServer::query_tools()
+            tools::catalog() + BorerServer::load_tools() + BorerServer::decompile_tools() + live
         });
         &ROUTER
     }

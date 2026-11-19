@@ -518,6 +518,16 @@ pub struct ClassLayoutParams {
     pub dry_run: Option<bool>,
 }
 
+/// Parameters for `script`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ScriptParams {
+    /// Rhai source.
+    pub code: String,
+    /// Preview only (default true); false applies.
+    pub dry_run: Option<bool>,
+}
+
 /// Parameters for `set_name`.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]

@@ -11,7 +11,8 @@
 use std::fmt::Write as _;
 use std::num::NonZeroUsize;
 
-pub(crate) use borer_engine::answer::percent_decode;
+#[cfg(test)]
+use borer_engine::answer::percent_decode;
 use borer_engine::answer::{LIMIT_SUFFIX, OFFSET_SUFFIX, Page, Suffixed};
 
 use crate::recall::Tag;
