@@ -1,65 +1,73 @@
 //! The start tab: the tab a pane holds when it has no decompile tab.
 //!
 //! A file dropped on any pane so reaches a tab's drop handler and never Zed's own open path.
-//! With nothing loaded the tab is the welcome column: the mark, the open button, the
-//! binaries opened before and the keys that matter first; while a binary loads it says which.
+//! With nothing loaded the tab is one narrow centred column, as Zed's welcome page is: the
+//! mark and a greeting, the actions to start with, then the binaries opened before; while a
+//! binary loads it says which.
 
 use std::any::Any;
 
-use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, ClickEvent, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, FontWeight, InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _,
-    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
-    px, svg,
+    Action, AnyElement, App, AppContext as _, Bounds, Context, Entity, EventEmitter, FocusHandle,
+    Focusable, InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Pixels,
+    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
+    canvas, div, px, svg,
 };
 use theme::ActiveTheme as _;
-use ui::{Color, KeyBinding, Label, LabelCommon as _, LabelSize, h_flex, rems_from_px, v_flex};
+use ui::{
+    Color, Divider, DividerColor, Headline, Icon, IconName, IconSize, KeyBinding, Label,
+    LabelCommon as _, LabelSize, ListItem, ListItemSpacing, SpinnerLabel, Toggleable as _, h_flex, rems_from_px,
+    v_flex,
+};
 use workspace::{Item, Pane};
 
-use crate::actions::{Open, PALETTE_HINT, hint_row};
+use crate::actions::{KEY_PX, Open};
 use crate::app_assets::MARK_PATH;
 use crate::app_view::open_dropped;
 use crate::binary::{Binary, reading_label};
 use crate::recent::{RecentBinary, SHOWN_MAX};
 use crate::rows_panel::{Rows, row_keys};
 
-/// Side in logical pixels of the borer mark on the welcome column.
-const MARK_PX: f32 = 64.0;
+/// Side in logical pixels of the borer mark beside the greeting.
+const MARK_PX: f32 = 40.0;
 
-/// Size in logical pixels of the welcome column's headline.
-const HEADLINE_PX: f32 = 20.0;
+/// Width in logical pixels of the start column.
+const COLUMN_PX: f32 = 360.0;
 
-/// Size in logical pixels of the chrome's text: the welcome column, the title bar and the
-/// menu bar.
+/// Least space in logical pixels left and right of the start column.
+const SIDE_PX: f32 = 16.0;
+
+/// Size in logical pixels of the chrome's text: the title bar and the menu bar.
 pub(crate) const TEXT_PX: f32 = 12.5;
 
-/// Height in logical pixels of the open button.
-const BUTTON_PX: f32 = 32.0;
+/// What the line under the greeting says borer is, in the project's own words.
+const TAGLINE: &str = "Reverse engineering for people and agents";
 
-/// Corner radius in logical pixels of the open button.
-const BUTTON_RADIUS_PX: f32 = 6.0;
-
-/// Width in logical pixels of the recent list.
-const RECENT_WIDTH_PX: f32 = 520.0;
-
-/// Height in logical pixels of a row of the recent list.
-const ROW_PX: f32 = 28.0;
-
-/// Width in logical pixels of the name column of the recent list.
-const NAME_PX: f32 = 160.0;
-
-/// What the welcome column says the app reads.
-const READS: &str = "PE, ELF or Mach-O. x86, x64 or arm64. Nothing leaves this machine.";
+/// The actions the start column offers first, each with its icon and label, in order.
+const STARTS: [(IconName, &str, &dyn Action); 3] = [
+    (IconName::FolderOpen, "Open File...", &Open),
+    (
+        IconName::ListCollapse,
+        "Open Command Palette",
+        &zed_actions::command_palette::Toggle,
+    ),
+    (
+        IconName::Settings,
+        "Open Settings File",
+        &zed_actions::OpenSettingsFile,
+    ),
+];
 
 /// A tab that says how to open a binary and opens a binary dropped on it.
 pub struct StartItem {
-    /// The window's binary, which a drop, the button or a recent row opens.
+    /// The window's binary, which a drop, an action row or a recent row opens.
     binary: Entity<Binary>,
     /// Focus handle of the tab.
     focus_handle: FocusHandle,
-    /// Index of the highlighted recent row.
+    /// Index of the highlighted row: the [`STARTS`] rows, then the recent ones.
     selected: usize,
+    /// Where the tab was laid out in the window last frame, which the column centres by.
+    pane: Option<Bounds<Pixels>>,
     /// Repaints the tab when the binary starts or ends a load.
     _observe: Subscription,
 }
@@ -152,10 +160,12 @@ fn fill(pane: &Entity<Pane>, binary: &Entity<Binary>, window: &mut Window, cx: &
     if pane.read(cx).items_len() > 0 {
         return;
     }
+    let recent = binary.read(cx).recent().len();
     let item = cx.new(|cx| StartItem {
         binary: binary.clone(),
         focus_handle: cx.focus_handle(),
-        selected: 0,
+        selected: first_selected(recent),
+        pane: None,
         _observe: cx.observe(binary, |_, _, cx| cx.notify()),
     });
     pane.update(cx, |pane, cx| {
@@ -188,9 +198,22 @@ impl StartItem {
         let Some(path) = self.shown(cx).get(row).map(|recent| recent.path.clone()) else {
             return;
         };
-        self.selected = row;
+        self.selected = STARTS.len() + row;
         self.binary
             .update(cx, |binary, cx| binary.open_path(path, cx));
+    }
+
+    /// Runs the highlighted row: its action for a [`STARTS`] row, else opens its binary.
+    ///
+    /// # Arguments
+    ///
+    /// * `window` - Window the tab is in.
+    /// * `cx` - Tab context.
+    fn activate(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        match STARTS.get(self.selected) {
+            Some((_, _, action)) => window.dispatch_action(action.boxed_clone(), cx),
+            None => self.open_row(self.selected.saturating_sub(STARTS.len()), cx),
+        }
     }
 
     /// Opens the recent row whose digit `event` typed, `1` for the first.
@@ -212,7 +235,73 @@ impl StartItem {
         }
     }
 
-    /// Returns the recent list: a header, then one row per binary opened before.
+    /// Returns the greeting: the mark beside `Welcome to borer`, `Welcome back` once a binary
+    /// was opened before, and what borer is under it.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Tab context.
+    fn render_greeting(&self, cx: &Context<'_, Self>) -> AnyElement {
+        let welcome = if self.shown(cx).is_empty() {
+            "Welcome to borer"
+        } else {
+            "Welcome back to borer"
+        };
+        h_flex()
+            .w_full()
+            .justify_center()
+            .gap_4()
+            .mb_4()
+            .child(
+                svg()
+                    .path(MARK_PATH)
+                    .size(px(MARK_PX))
+                    .flex_none()
+                    .text_color(cx.theme().colors().text_muted),
+            )
+            .child(
+                v_flex().child(Headline::new(welcome)).child(
+                    Label::new(TAGLINE)
+                        .size(LabelSize::Small)
+                        .color(Color::Muted)
+                        .italic(),
+                ),
+            )
+            .into_any_element()
+    }
+
+    /// Returns the action rows, then a line saying a file can be dropped instead.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Tab context.
+    fn render_starts(&self, cx: &mut Context<'_, Self>) -> AnyElement {
+        let focus = self.focus_handle.clone();
+        let rows = STARTS
+            .iter()
+            .enumerate()
+            .map(|(ix, (icon, label, action))| {
+                let key = KeyBinding::for_action_in(*action, &focus, cx).size(rems_from_px(KEY_PX));
+                let row = start_row(("start", ix), (*icon, Label::new(*label)), key);
+                row.toggle_state(ix == self.selected).on_click(cx.listener(
+                    move |this, _, window, cx| {
+                        this.selected = ix;
+                        this.activate(window, cx);
+                    },
+                ))
+            });
+        let drop = Label::new("or drop a file on the window")
+            .size(LabelSize::Small)
+            .color(Color::Placeholder);
+        v_flex()
+            .w_full()
+            .child(section("Get Started", cx))
+            .children(rows)
+            .child(div().px_2().pt_1().child(drop))
+            .into_any_element()
+    }
+
+    /// Returns the binaries opened before, one row each with its digit, `None` with none.
     ///
     /// # Arguments
     ///
@@ -222,88 +311,78 @@ impl StartItem {
         if shown.is_empty() {
             return None;
         }
-        let colors = cx.theme().colors();
-        let (line, lit, hover) = (colors.border, colors.element_selected, colors.element_hover);
-        let header = h_flex()
-            .justify_between()
-            .px(px(10.0))
-            .pb(px(4.0))
-            .border_b_1()
-            .border_color(line)
-            .child(small("Recent", Color::Placeholder))
-            .child(small("enter opens", Color::Placeholder));
         let rows = shown.into_iter().enumerate().map(|(ix, recent)| {
-            div()
-                .id(("recent", ix))
-                .h(px(ROW_PX))
-                .px(px(10.0))
-                .flex()
-                .items_center()
-                .gap(px(12.0))
-                .rounded(px(4.0))
-                .when(ix == self.selected, |row| row.bg(lit))
-                .hover(move |row| row.bg(hover))
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_row(ix, cx)))
+            let name = h_flex()
+                .min_w_0()
+                .gap_2()
+                .child(div().flex_none().child(Label::new(recent.name())))
                 .child(
-                    div().w(px(NAME_PX)).child(
-                        Label::new(recent.name())
-                            .buffer_font(cx)
-                            .size(LabelSize::Small)
-                            .truncate(),
-                    ),
-                )
-                .child(
-                    div().flex_1().min_w(px(0.0)).child(
-                        Label::new(recent.folder())
-                            .buffer_font(cx)
-                            .size(LabelSize::Small)
-                            .color(Color::Placeholder)
-                            .truncate(),
-                    ),
-                )
-                .child(small(recent.kind, Color::Placeholder))
-                .child(small((ix + 1).to_string(), Color::Placeholder))
+                    Label::new(recent.folder())
+                        .size(LabelSize::Small)
+                        .color(Color::Muted)
+                        .truncate_start(),
+                );
+            let digit = div().pr_0p5().child(
+                Label::new((ix + 1).to_string())
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            );
+            let tip = format!("{} - {}", recent.kind, recent.path.display());
+            start_row(("recent", ix), (IconName::File, name), digit)
+                .toggle_state(STARTS.len() + ix == self.selected)
+                .tooltip(ui::Tooltip::text(tip))
+                .on_click(cx.listener(move |this, _, _, cx| this.open_row(ix, cx)))
         });
         Some(
             v_flex()
-                .w(px(RECENT_WIDTH_PX))
-                .gap(px(2.0))
-                .child(header)
+                .w_full()
+                .child(section("Recent", cx))
                 .children(rows)
                 .into_any_element(),
         )
     }
+}
 
-    /// Returns the primary button, which opens the file dialog, with its key.
-    ///
-    /// # Arguments
-    ///
-    /// * `cx` - Tab context.
-    fn render_open_button(cx: &mut Context<'_, Self>) -> AnyElement {
-        let colors = cx.theme().colors();
-        let (fill, ink) = (colors.text, colors.editor_background);
-        div()
-            .id("open-binary")
-            .h(px(BUTTON_PX))
-            .px(px(14.0))
-            .flex()
-            .items_center()
-            .gap(px(10.0))
-            .rounded(px(BUTTON_RADIUS_PX))
-            .bg(fill)
-            .text_color(ink)
-            .cursor_pointer()
-            .on_click(|_, window, cx| window.dispatch_action(Box::new(Open), cx))
-            .child(
-                Label::new("Open binary")
-                    .size(LabelSize::Custom(rems_from_px(TEXT_PX)))
-                    .weight(FontWeight::SEMIBOLD)
-                    .color(Color::Custom(ink)),
-            )
-            .child(KeyBinding::for_action(&Open, cx))
-            .into_any_element()
-    }
+/// Returns a section's header as Zed's welcome page draws it: its title in small capitals,
+/// then a hairline to the column's edge.
+///
+/// # Arguments
+///
+/// * `title` - The section's title.
+/// * `cx` - Application context reading the buffer font.
+fn section(title: &str, cx: &App) -> impl IntoElement {
+    h_flex()
+        .px_1()
+        .mb_2()
+        .gap_2()
+        .child(
+            Label::new(title.to_ascii_uppercase())
+                .buffer_font(cx)
+                .color(Color::Muted)
+                .size(LabelSize::XSmall),
+        )
+        .child(Divider::horizontal().color(DividerColor::BorderVariant))
+}
+
+/// Returns one row of the start column as Zed's lists draw it: a muted icon and `label` on
+/// the left, `end` against the right edge, the whole row one click target.
+///
+/// # Arguments
+///
+/// * `id` - The row's element id.
+/// * `(icon, label)` - What the row shows on its left.
+/// * `end` - What the row shows on its right: a key binding or a digit.
+fn start_row(
+    id: impl Into<gpui::ElementId>,
+    (icon, label): (IconName, impl IntoElement),
+    end: impl IntoElement,
+) -> ListItem {
+    ListItem::new(id)
+        .inset(true)
+        .spacing(ListItemSpacing::Sparse)
+        .start_slot(Icon::new(icon).color(Color::Muted).size(IconSize::Small))
+        .child(label)
+        .end_slot(div().flex_none().child(end))
 }
 
 /// Returns a label in the chrome's text size ([`TEXT_PX`]) and `color`.
@@ -324,11 +403,12 @@ impl Rows for StartItem {
     }
 
     fn select(&mut self, row: usize, cx: &mut Context<'_, Self>) {
-        let len = self.shown(cx).len();
-        if len > 0 {
-            self.selected = row.min(len - 1);
-            cx.notify();
-        }
+        let last = STARTS
+            .len()
+            .saturating_add(self.shown(cx).len())
+            .saturating_sub(1);
+        self.selected = row.min(last);
+        cx.notify();
     }
 }
 
@@ -363,64 +443,182 @@ impl Item for StartItem {
 }
 
 impl Render for StartItem {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let column = v_flex().items_center().gap(px(14.0)).child(
-            svg()
-                .path(MARK_PATH)
-                .size(px(MARK_PX))
-                .text_color(cx.theme().colors().text_muted),
-        );
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let column = v_flex().w(px(COLUMN_PX)).max_w_full().gap_6();
         let binary = self.binary.read(cx);
         let column = if let Some(busy) = binary.busy() {
-            column.child(headline(reading_label(busy)))
+            let reading = h_flex()
+                .justify_center()
+                .gap_2()
+                .child(SpinnerLabel::new())
+                .child(Label::new(reading_label(busy)).color(Color::Muted));
+            column.child(reading)
         } else {
-            let error = binary
-                .load_error()
-                .map(|e| small(e.to_owned(), Color::Error));
-            let hints = h_flex()
-                .gap(px(10.0))
-                .pt(px(18.0))
-                .child(small("Drop a file here", Color::Placeholder))
-                .child(hint_row(PALETTE_HINT, cx));
+            let error = binary.load_error().map(|e| {
+                Label::new(e.to_owned())
+                    .size(LabelSize::Small)
+                    .color(Color::Error)
+            });
             column
-                .child(headline("Open a binary".to_owned()))
-                .child(small(READS, Color::Placeholder))
+                .child(self.render_greeting(cx))
                 .children(error)
-                .child(div().pt(px(10.0)).child(Self::render_open_button(cx)))
-                .children(
-                    self.render_recent(cx)
-                        .map(|list| div().pt(px(26.0)).child(list)),
-                )
-                .child(hints)
+                .child(self.render_starts(cx))
+                .children(self.render_recent(cx))
         };
+        let (left, right) = self.pane.map_or((px(0.0), px(0.0)), |pane| {
+            centring(window.viewport_size().width, pane.origin.x, pane.size.width)
+        });
+        let item = cx.entity().downgrade();
+        let watch = canvas(
+            move |bounds, window, cx| {
+                let moved = item.upgrade().is_some_and(|item| {
+                    item.update(cx, |item, _| item.pane.replace(bounds) != Some(bounds))
+                });
+                if moved {
+                    window.defer(cx, |window, _| window.refresh());
+                }
+            },
+            |_, (), _, _| {},
+        )
+        .absolute()
+        .size_full();
         let root = div()
             .id("start")
             .debug_selector(|| "start-item".to_owned())
             .key_context("StartItem")
             .track_focus(&self.focus_handle);
         row_keys(root, cx)
-            .on_action(cx.listener(|this, _: &menu::Confirm, _, cx| {
-                this.open_row(this.selected, cx);
+            .on_action(cx.listener(|this, _: &menu::Confirm, window, cx| {
+                this.activate(window, cx);
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                 this.open_by_digit(event, cx);
             }))
+            .relative()
             .size_full()
             .bg(cx.theme().colors().editor_background)
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(column)
+            .child(watch)
+            .child(
+                div()
+                    .id("start-scroll")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .child(
+                        v_flex()
+                            .min_h_full()
+                            .w_full()
+                            .items_center()
+                            .justify_center()
+                            .py_8()
+                            .pl(px(SIDE_PX) + left)
+                            .pr(px(SIDE_PX) + right)
+                            .child(column),
+                    ),
+            )
     }
 }
 
-/// Returns the welcome column's headline.
+/// Returns the highlighted row a new start tab begins on: the first binary opened before,
+/// so Enter opens it, else Open File.
 ///
 /// # Arguments
 ///
-/// * `text` - What it says.
-fn headline(text: impl Into<SharedString>) -> Label {
-    Label::new(text)
-        .size(LabelSize::Custom(rems_from_px(HEADLINE_PX)))
-        .weight(FontWeight::SEMIBOLD)
+/// * `recent` - How many binaries were opened before.
+const fn first_selected(recent: usize) -> usize {
+    if recent > 0 { STARTS.len() } else { 0 }
+}
+
+/// Returns the padding to add left and right of the start column to centre it on the window.
+///
+/// The column then sits under the title-bar title rather than at the middle of the pane
+/// beside the rail and docks; with no room for that, no padding, and it centres on the pane.
+///
+/// # Arguments
+///
+/// * `window` - Width of the window.
+/// * `left` - Left edge of the pane, in the window.
+/// * `pane` - Width of the pane.
+fn centring(window: Pixels, left: Pixels, pane: Pixels) -> (Pixels, Pixels) {
+    let shift = window / 2.0 - left - pane / 2.0;
+    let pad = shift.abs() * 2.0;
+    if pane - pad < px(COLUMN_PX + 2.0 * SIDE_PX) {
+        return (px(0.0), px(0.0));
+    }
+    if shift < px(0.0) {
+        (px(0.0), pad)
+    } else {
+        (pad, px(0.0))
+    }
+}
+#[cfg(test)]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test; gpui::test hides each body in an undocumented fn"
+)]
+mod tests {
+    use command_palette::CommandPalette;
+    use gpui::{TestAppContext, px};
+
+    use super::{COLUMN_PX, SIDE_PX, STARTS, StartItem, centring, first_selected};
+    use crate::app_view::tests::{init, open};
+    use crate::rows_panel::Rows as _;
+
+    /// A new start tab highlights the first binary opened before, so Enter opens it, and
+    /// Open File when none was.
+    #[test]
+    fn the_highlight_starts_on_the_first_recent_binary() {
+        assert_eq!(first_selected(0), 0);
+        assert_eq!(first_selected(1), STARTS.len());
+        assert_eq!(first_selected(5), STARTS.len());
+    }
+
+    /// Enter on an action row runs its action: the palette row opens the command palette.
+    #[gpui::test]
+    fn enter_on_an_action_row_runs_it(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        cx.run_until_parked();
+        let start = app
+            .workspace
+            .read_with(cx, |workspace, cx| {
+                workspace.active_item_as::<StartItem>(cx)
+            })
+            .unwrap();
+        let palette = STARTS
+            .iter()
+            .position(|(_, label, _)| *label == "Open Command Palette")
+            .unwrap();
+        cx.update(|window, cx| {
+            start.update(cx, |start, cx| {
+                start.select(palette, cx);
+                window.focus(&start.focus_handle, cx);
+            });
+        });
+        cx.dispatch_action(menu::Confirm);
+        cx.run_until_parked();
+        let opened = app.workspace.read_with(cx, |workspace, cx| {
+            workspace.active_modal::<CommandPalette>(cx).is_some()
+        });
+        assert!(opened);
+    }
+
+    /// The column centres on the window, beside a rail on the left or a dock on the right,
+    /// and on the pane when it would not fit there.
+    #[test]
+    fn the_column_centres_on_the_window_when_it_fits() {
+        assert_eq!(
+            centring(px(1440.0), px(40.0), px(1400.0)),
+            (px(0.0), px(40.0))
+        );
+        assert_eq!(
+            centring(px(1440.0), px(0.0), px(1040.0)),
+            (px(400.0), px(0.0))
+        );
+        assert_eq!(
+            centring(px(1440.0), px(0.0), px(1440.0)),
+            (px(0.0), px(0.0))
+        );
+        let tight = px(COLUMN_PX + 2.0 * SIDE_PX + 30.0);
+        assert_eq!(centring(px(1440.0), px(1000.0), tight), (px(0.0), px(0.0)));
+    }
 }
