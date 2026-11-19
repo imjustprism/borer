@@ -60,6 +60,67 @@ use std::time::{Duration, Instant};
 )]
 mod drawn;
 
+/// `PROCESS_POWER_THROTTLING_STATE`, as `SetProcessInformation` reads it.
+#[cfg(windows)]
+#[repr(C)]
+struct Throttling {
+    /// The structure's version, 1.
+    version: u32,
+    /// The throttling kinds the call sets.
+    control: u32,
+    /// Which of them are on.
+    state: u32,
+}
+
+#[cfg(windows)]
+#[expect(unsafe_code, reason = "the bench opts out of throttling as borer does")]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    /// Returns the pseudo-handle naming this process.
+    fn GetCurrentProcess() -> *mut core::ffi::c_void;
+    /// Sets a fact of a process; nonzero on success.
+    fn SetProcessInformation(
+        process: *mut core::ffi::c_void,
+        class: i32,
+        info: *const core::ffi::c_void,
+        size: u32,
+    ) -> i32;
+}
+
+/// Keeps the bench at full speed as `borer_live::run_at_full_speed` keeps
+/// borer, so Windows does not slow it a few seconds in on a busy machine
+/// and the passes timed later are not timed at another clock.
+fn run_at_full_speed() {
+    #[cfg(windows)]
+    {
+        /// `ProcessPowerThrottling`, the class of fact set.
+        const POWER_THROTTLING: i32 = 4;
+        /// `PROCESS_POWER_THROTTLING_EXECUTION_SPEED`.
+        const EXECUTION_SPEED: u32 = 1;
+        let state = Throttling {
+            version: 1,
+            control: EXECUTION_SPEED,
+            state: 0,
+        };
+        let size = u32::try_from(size_of::<Throttling>()).unwrap_or(0);
+        #[expect(unsafe_code, reason = "the bench opts out of throttling as borer does")]
+        // SAFETY: the pointer and length describe `state`, which outlives
+        // the call, and the pseudo-handle names this process.
+        let set = unsafe {
+            SetProcessInformation(
+                GetCurrentProcess(),
+                POWER_THROTTLING,
+                core::ptr::from_ref(&state).cast(),
+                size,
+            )
+        };
+        assert_ne!(
+            set, 0,
+            "SetProcessInformation refused the throttling opt-out"
+        );
+    }
+}
+
 /// Passes taken; the fastest is reported.
 const PASSES: usize = 5;
 
@@ -129,6 +190,7 @@ const LAYOUT_WORST_MS: u128 = 100;
 #[test]
 #[ignore = "set BORER_BENCH to a binary path to run this harness"]
 fn timings() {
+    run_at_full_speed();
     let path = std::env::var("BORER_BENCH").expect("BORER_BENCH env var");
     let program = Program::load(std::path::Path::new(&path)).expect("load");
     let analysis = best(|| Analysis::compute(&program));
