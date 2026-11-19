@@ -1,4 +1,5 @@
-//! The check for a newer release of borer on GitHub, and the title bar's notice of one.
+//! The app's version as About shows it, the check for a newer release of borer on GitHub,
+//! and the title bar's notice of one.
 //!
 //! The check is one `GET` of [`LATEST_URL`] carrying only `User-Agent: borer-app/<version>`
 //! ([`user_agent`]) and `Accept: application/vnd.github+json`: no identifier, file, cookie or
@@ -231,6 +232,17 @@ async fn ask(http: Option<Arc<dyn HttpClient>>) -> Option<(u16, Vec<u8>)> {
     Some((status, body))
 }
 
+/// Returns what the About dialog says: the app, the version `borer --version` shows for the
+/// same build ([`borer_front::release::shown_version`]), and its license.
+#[must_use]
+pub fn about_text() -> String {
+    format!(
+        "borer-app {}, license {}",
+        borer_front::release::shown_version(),
+        env!("CARGO_PKG_LICENSE")
+    )
+}
+
 /// Runs a check now, as the palette's Check for Updates asks, and says what it found, or
 /// why it asked nothing, in a toast.
 ///
@@ -314,7 +326,7 @@ mod tests {
     use http_client::{AsyncBody, FakeHttpClient, RedirectPolicy, RequestTimeout, Response};
     use settings::SettingsStore;
 
-    use super::{Off, Updates, check_with, notice};
+    use super::{Off, Updates, about_text, check_with, notice};
     use crate::app_view::tests::init;
 
     /// One request a fake client saw.
@@ -484,5 +496,18 @@ mod tests {
             let held = kept.then_some(NEWER);
             assert_eq!(shown(cx), (held, kept), "{status} {body}");
         }
+    }
+
+    /// The About dialog names the version `borer --version` shows for the same build: the
+    /// package version, with `-dev` and where the build stands on a development build.
+    #[test]
+    fn about_names_the_version_the_cli_shows() {
+        let shown = borer_front::release::shown_version();
+        assert_eq!(
+            about_text(),
+            format!("borer-app {shown}, license AGPL-3.0-only")
+        );
+        let dev = format!("{VERSION}-dev");
+        assert!(shown == VERSION || shown.starts_with(&dev), "{shown}");
     }
 }

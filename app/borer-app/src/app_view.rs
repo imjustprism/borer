@@ -769,11 +769,7 @@ fn open_settings_file(binary: &Entity<Binary>, cx: &mut App) {
 /// * `window` - Window the dialog opens over.
 /// * `cx` - Application context.
 fn about(window: &mut Window, cx: &mut App) {
-    let detail = format!(
-        "borer-app {}, license {}",
-        env!("CARGO_PKG_VERSION"),
-        env!("CARGO_PKG_LICENSE")
-    );
+    let detail = crate::update::about_text();
     let answer = window.prompt(PromptLevel::Info, "borer", Some(&detail), &["OK"], cx);
     cx.background_spawn(answer).detach();
 }
