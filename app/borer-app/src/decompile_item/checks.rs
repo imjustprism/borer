@@ -9,7 +9,7 @@ use gpui::{App, Context, Entity};
 use workspace::Workspace;
 
 use super::DecompileItem;
-use crate::binary::Binary;
+use crate::binary::{Binary, RECHECKED_MAX};
 use crate::check_marks::{Marks, Toward, grade_word, insert_evidence, line_block};
 use crate::code_view::CodeLines;
 use crate::linear_item::LinearItem;
@@ -64,12 +64,13 @@ pub(super) fn act_on_code(
 ///
 /// * `start` - The block's start.
 /// * `(grade, states)` - The recheck's grade and the states it tried.
-/// * `merged` - What the session did with the record, `None` with no check to put it in.
+/// * `merged` - What the session did with the record and the functions whose rechecks it
+///   dropped to make room, `None` with no check to put it in.
 #[must_use]
 pub(super) fn recheck_said(
     start: u64,
     (grade, states): (Grade, u32),
-    merged: Option<Rechecked>,
+    merged: Option<(Rechecked, Vec<u64>)>,
 ) -> String {
     let said = format!(
         "Block {start:#x} rechecked from {states} states: {}",
@@ -83,11 +84,22 @@ pub(super) fn recheck_said(
         };
         format!("{whose}: {} from {} states", grade_word(p.grade), p.states)
     };
-    match merged {
-        None => format!("{said}; the function has no check to hold it."),
-        Some(Rechecked::Added) => format!("{said}."),
-        Some(Rechecked::Replaced(p)) => format!("{said}; it replaced {}.", prior(p)),
-        Some(Rechecked::KeptWrong(p)) => format!("{said}; it stays wrong, as {}.", prior(p)),
+    let Some((done, dropped)) = merged else {
+        return format!("{said}; the function has no check to hold it.");
+    };
+    let said = match done {
+        Rechecked::Added => said,
+        Rechecked::Replaced(p) => format!("{said}; it replaced {}", prior(p)),
+        Rechecked::KeptWrong(p) => format!("{said}; it stays wrong, as {}", prior(p)),
+    };
+    let gone: Vec<String> = dropped.iter().map(|f| format!("{f:#x}")).collect();
+    if gone.is_empty() {
+        format!("{said}.")
+    } else {
+        format!(
+            "{said}; the oldest recheck, of {}, was dropped: the session keeps {RECHECKED_MAX}.",
+            gone.join(", ")
+        )
     }
 }
 
@@ -101,6 +113,23 @@ impl DecompileItem {
     /// * `code` - The shown lines.
     /// * `cx` - Item context.
     pub(super) fn grade_lines(&mut self, code: Arc<CodeLines>, cx: &mut Context<'_, Self>) {
+        self.grade_lines_fresh(code, None, cx);
+    }
+
+    /// [`Self::grade_lines`] with the check of the function at `fresh`, if any, read again
+    /// rather than taken from the earlier marks.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - The shown lines.
+    /// * `fresh` - The function whose check a recheck changed or dropped.
+    /// * `cx` - Item context.
+    fn grade_lines_fresh(
+        &mut self,
+        code: Arc<CodeLines>,
+        fresh: Option<u64>,
+        cx: &mut Context<'_, Self>,
+    ) {
         let loaded = self.loaded.clone();
         let state = loaded.state();
         let mut held: BTreeMap<_, _> = self
@@ -109,6 +138,9 @@ impl DecompileItem {
             .filter(|m| *m.state() == state)
             .map(|m| m.checks().clone())
             .unwrap_or_default();
+        if let Some(function) = fresh {
+            held.remove(&function);
+        }
         let rechecked = self.binary.read(cx).rechecks(&state);
         held.extend(rechecked.map(|(f, check)| (f, check.clone())));
         let label = self.entry.map_or_else(
@@ -237,14 +269,20 @@ impl DecompileItem {
     ///
     /// # Arguments
     ///
-    /// * `state` - The program and overlay state the recheck ran under.
+    /// * `(state, function)` - The program and overlay state the recheck ran under, and
+    ///   the function whose check changed, which is read again from the session or the
+    ///   engine, never from the earlier marks.
     /// * `cx` - Item context.
-    pub(super) fn rechecked(&mut self, state: &State, cx: &mut Context<'_, Self>) {
+    pub(super) fn rechecked(
+        &mut self,
+        (state, function): (&State, u64),
+        cx: &mut Context<'_, Self>,
+    ) {
         if *state != self.loaded.state() {
             return;
         }
         if let Some(code) = self.code.clone() {
-            self.grade_lines(code, cx);
+            self.grade_lines_fresh(code, Some(function), cx);
         }
         cx.notify();
     }
@@ -321,22 +359,25 @@ impl DecompileItem {
     reason = "assertions are the point of a test; gpui::test hides each body in an undocumented fn"
 )]
 mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
     use std::sync::Arc;
 
-    use borer_engine::analysis::decompile::replay::Grade;
+    use borer_engine::analysis::Overlay;
+    use borer_engine::analysis::decompile::replay::{BlockCheck, Grade};
     use gpui::{Entity, TestAppContext, VisualTestContext};
-    use workspace::Item as _;
+    use workspace::{Item as _, Workspace};
 
     use super::RECHECK_STATES;
     use crate::actions::NextWrongBlock;
     use crate::app_view::tests::{binary_in, init, open};
-    use crate::binary::{Binary, BinaryEvent, Revision as _};
+    use crate::binary::{Binary, BinaryEvent, RECHECKED_MAX, Revision as _};
     use crate::check_marks::line_block;
     use crate::check_marks::tests::{FLOAT_BETWEEN, STORE, one_function, wrong_at};
     use crate::decompile_item::tests::{open_tab, put_cursor};
     use crate::decompile_item::{DecompileItem, Form};
     use crate::linear_item::tests::{open_linear, settle};
-    use crate::worker::{State, check_blocking, run_engine};
+    use crate::worker::{LoadedBinary, State, check_blocking, run_engine};
 
     /// The entry of the one function of [`one_function`].
     const ENTRY: u64 = 0x1000;
@@ -407,32 +448,115 @@ mod tests {
         );
     }
 
-    /// Leaving the tab drops a running recheck and says so, and an edit landing before it
-    /// answers drops it too: the session holds no record of either.
+    /// Leaving the tab drops a running recheck and says so, and a state landing before it
+    /// answers drops it too, a rename in the same program as much as another program: the
+    /// session holds no record of either.
     #[gpui::test]
     fn a_recheck_is_dropped_by_leaving_the_tab_and_by_an_edit(cx: &mut TestAppContext) {
         let app_state = init(cx);
         let (app, cx) = open(&app_state, cx);
         let (workspace, binary) = (app.workspace, app.binary);
-        let (loaded, other) = (one_function(&STORE), one_function(&FLOAT_BETWEEN));
-        let tab = open_tab(&workspace, &loaded, (ENTRY, Form::Listing), cx);
+        let loaded = one_function(&STORE);
+        for other in [renamed(&loaded), one_function(&FLOAT_BETWEEN)] {
+            dropped_by(&workspace, &binary, (&loaded, &other), cx);
+        }
+    }
+
+    /// Returns `loaded` with its function renamed, as an edit leaves it: the same program
+    /// under another overlay.
+    fn renamed(loaded: &LoadedBinary) -> Arc<LoadedBinary> {
+        loaded.with_overlay(Overlay {
+            names: [(ENTRY, "renamed".to_owned())].into_iter().collect(),
+            ..Overlay::default()
+        })
+    }
+
+    /// Runs the steps of [`a_recheck_is_dropped_by_leaving_the_tab_and_by_an_edit`] from
+    /// `loaded` to `other`.
+    fn dropped_by(
+        workspace: &Entity<Workspace>,
+        binary: &Entity<Binary>,
+        (loaded, other): (&Arc<LoadedBinary>, &Arc<LoadedBinary>),
+        cx: &mut VisualTestContext,
+    ) {
+        assert_ne!(loaded.fingerprint, 0);
+        let tab = open_tab(workspace, loaded, (ENTRY, Form::Listing), cx);
         on_a_block(&tab, cx);
         tab.update_in(cx, |item, window, cx| {
             item.recheck(RECHECK_STATES, cx);
             item.deactivated(window, cx);
         });
-        let said = status(&binary, cx);
+        let said = status(binary, cx);
         assert!(said.contains("stopped: the tab was left"), "{said}");
         cx.run_until_parked();
         let held = binary.read_with(cx, |b, _| b.rechecked(&loaded.state(), ENTRY));
         assert!(held.is_none(), "leaving the tab drops it");
         tab.update(cx, |item, cx| item.recheck(RECHECK_STATES, cx));
-        binary.update(cx, |_, cx| cx.emit(BinaryEvent::Revised(other.clone())));
+        let next = other.clone();
+        binary.update(cx, |_, cx| cx.emit(BinaryEvent::Revised(next)));
         cx.run_until_parked();
-        for state in [&loaded, &other] {
+        for state in [loaded, other] {
             let held = binary.read_with(cx, |b, _| b.rechecked(&state.state(), ENTRY));
             assert!(held.is_none(), "an edit drops it");
         }
+    }
+
+    /// Past the session's cap another state's recheck goes first, then the open state's
+    /// oldest, which every view is told of and the merge names; a recheck holding a block
+    /// graded wrong is never dropped.
+    #[gpui::test]
+    fn rechecks_past_the_cap_drop_others_first_and_keep_a_wrong(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let binary = app.binary;
+        let loaded = one_function(&STORE);
+        binary.update(cx, |b, cx| b.show_loaded(loaded.clone(), cx));
+        let open_state = loaded.state();
+        let other = State {
+            identity: "another program".to_owned(),
+            revision: 0,
+        };
+        let check = run_engine(|| check_blocking(&loaded, ENTRY));
+        let told = Rc::new(RefCell::new(Vec::new()));
+        let heard = told.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&binary, move |_, event, _| {
+                if let BinaryEvent::Rechecked { function, .. } = event {
+                    heard.borrow_mut().push(*function);
+                }
+            })
+            .detach();
+        });
+        let tested = || BlockCheck::new(ENTRY, Ok(Some("differed")), (64, 1), Vec::new());
+        let put = |state: &State, function: u64, record, cx: &mut VisualTestContext| {
+            let at = (state.clone(), function);
+            binary.update(cx, |b, cx| b.put_recheck(at, &check, record, cx))
+        };
+        put(&other, 0x9000, tested(), cx);
+        put(&open_state, ENTRY, wrong_at(ENTRY), cx);
+        put(&open_state, 0x2000, tested(), cx);
+        for f in 0..RECHECKED_MAX - 2 {
+            put(
+                &open_state,
+                0x3000 + u64::try_from(f).unwrap(),
+                tested(),
+                cx,
+            );
+        }
+        let held = |state: &State, function, cx: &mut VisualTestContext| {
+            binary.read_with(cx, |b, _| b.rechecked(state, function).is_some())
+        };
+        assert!(!held(&other, 0x9000, cx), "another state goes first");
+        assert!(held(&open_state, 0x2000, cx));
+        told.borrow_mut().clear();
+        let merged = put(&open_state, 0x4000, tested(), cx);
+        assert_eq!(merged.map(|(_, dropped)| dropped), Some(vec![0x2000]));
+        assert!(
+            !held(&open_state, 0x2000, cx),
+            "then the open state's oldest"
+        );
+        assert!(told.borrow().contains(&0x2000), "the views are told");
+        assert!(held(&open_state, ENTRY, cx), "a wrong is kept");
     }
 
     /// Two programs with a function at the same address, under the same overlay, keep
@@ -489,6 +613,26 @@ mod tests {
         settle(&linear, cx);
         assert_eq!(graded(cx), Some(after.state()));
         assert_eq!(at(cx), [Grade::Proved], "graded by the new state's check");
+        let check_of = |cx: &mut VisualTestContext| {
+            code.read_with(cx, |item, _| {
+                let marks = item.marks().unwrap();
+                (
+                    marks.state().revision,
+                    marks.checks().get(&ENTRY).cloned().unwrap(),
+                )
+            })
+        };
+        let (_, first) = check_of(cx);
+        let edited = renamed(&after);
+        let next = edited.clone();
+        binary.update(cx, |_, cx| cx.emit(BinaryEvent::Revised(next)));
+        settle(&linear, cx);
+        let (revision, check) = check_of(cx);
+        assert_eq!(revision, edited.fingerprint, "graded under the rename");
+        assert!(
+            !Arc::ptr_eq(&check, &first),
+            "by the rename's check, not the old state's"
+        );
         let digest = code.read_with(cx, |item, cx| item.digest(cx));
         code.update(cx, |item, _| item.marks = None);
         let bare = code.read_with(cx, |item, cx| item.digest(cx));

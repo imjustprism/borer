@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use borer_engine::analysis::decompile::replay::{BlockCheck, Rechecked, TextCheck};
+use borer_engine::analysis::decompile::replay::{BlockCheck, Grade, Rechecked, TextCheck};
 use borer_engine::analysis::edit::Edit;
 use borer_engine::analysis::project::{Foreign, Project};
 use futures::channel::oneshot;
@@ -392,9 +392,13 @@ impl Binary {
     }
 
     /// Puts `record`, a recheck of a block of a function under a state, into that
-    /// function's check as the engine merges it ([`TextCheck::put_recheck`]), drops the
-    /// oldest rechecked check past [`RECHECKED_MAX`], and tells the views; the rechecks of
-    /// other states of the program stay, so an undo finds them.
+    /// function's check as the engine merges it ([`TextCheck::put_recheck`]), and tells the
+    /// views.
+    ///
+    /// Past [`RECHECKED_MAX`] the oldest rechecked check is dropped: one of another state
+    /// first, then one of this state, never one holding a block graded wrong (a
+    /// disagreement found is a fact the session keeps). A dropped check of the open state
+    /// is told to the views like a recheck, so each reads the check again.
     ///
     /// # Arguments
     ///
@@ -406,29 +410,53 @@ impl Binary {
     ///
     /// # Returns
     ///
-    /// What the merge did, `None` when the function has no check to merge into.
+    /// What the merge did and the functions of the open state whose rechecks were
+    /// dropped; `None` when the function has no check to merge into.
     pub fn put_recheck(
         &mut self,
         (state, function): (State, u64),
         check: &Arc<Option<TextCheck>>,
         record: BlockCheck,
         cx: &mut Context<'_, Self>,
-    ) -> Option<Rechecked> {
+    ) -> Option<(Rechecked, Vec<u64>)> {
         let held = self.rechecked(&state, function);
         let mut merged = held.as_ref().unwrap_or(check).as_ref().clone()?;
         let done = merged.put_recheck(record);
         self.rechecks_put = self.rechecks_put.saturating_add(1);
         let put = (self.rechecks_put, Arc::new(Some(merged)));
-        self.rechecked.insert((state.clone(), function), put);
+        let key = (state.clone(), function);
+        self.rechecked.insert(key.clone(), put);
+        let open = self.loaded.as_ref().map(|loaded| loaded.state());
+        let mut dropped = Vec::new();
         while self.rechecked.len() > RECHECKED_MAX {
-            let oldest = self.rechecked.iter().min_by_key(|(_, (at, _))| *at);
-            let Some(key) = oldest.map(|(key, _)| key.clone()) else {
+            let droppable = |(k, (_, check)): &(&(State, u64), &Rechecks)| {
+                let wrong = check
+                    .as_ref()
+                    .as_ref()
+                    .is_some_and(|c| c.count(Grade::Wrong) > 0);
+                *k != &key && !wrong
+            };
+            let oldest = |of_open: bool| {
+                let all = self.rechecked.iter().filter(droppable);
+                let picked = all.filter(|(k, _)| (Some(&k.0) == open.as_ref()) == of_open);
+                picked
+                    .min_by_key(|(_, (at, _))| *at)
+                    .map(|(k, _)| k.clone())
+            };
+            let Some(gone) = oldest(false).or_else(|| oldest(true)) else {
                 break;
             };
-            self.rechecked.remove(&key);
+            self.rechecked.remove(&gone);
+            if Some(&gone.0) == open.as_ref() {
+                dropped.push(gone.1);
+                cx.emit(BinaryEvent::Rechecked {
+                    state: gone.0,
+                    function: gone.1,
+                });
+            }
         }
         cx.emit(BinaryEvent::Rechecked { state, function });
-        Some(done)
+        Some((done, dropped))
     }
 
     /// Replaces the status line with `status`.

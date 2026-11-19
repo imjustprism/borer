@@ -167,9 +167,14 @@ impl GraphItem {
             BinaryEvent::Rechecked { state, function }
                 if (state, *function) == (&item.loaded.state(), item.entry) =>
             {
-                item.check = binary.read(cx).rechecked(state, *function);
-                item.regrade();
-                cx.notify();
+                match binary.read(cx).rechecked(state, *function) {
+                    Some(check) => {
+                        item.check = Some(check);
+                        item.regrade();
+                        cx.notify();
+                    }
+                    None => item.check_again(cx),
+                }
             }
             BinaryEvent::Opened(_) | BinaryEvent::Closed | BinaryEvent::Rechecked { .. } => {}
         });
@@ -209,8 +214,8 @@ impl GraphItem {
     /// * `loaded` - The binary's state to build over.
     /// * `cx` - Item context.
     fn build(&mut self, loaded: Arc<LoadedBinary>, cx: &mut Context<'_, Self>) {
-        self.loaded = loaded.clone();
         let (source, entry) = (loaded.clone(), self.entry);
+        self.loaded = loaded;
         let work = move || {
             let name = name_of(&source.analysis, &source.overlay, entry);
             (graph_blocking(&source, entry), name)
@@ -240,6 +245,17 @@ impl GraphItem {
                 }
             },
         );
+        self.check_again(cx);
+    }
+
+    /// Checks the graph's function again in the background, the session's rechecked check
+    /// when it holds one, and grades the nodes by it; a recheck landing meanwhile wins.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Item context.
+    fn check_again(&mut self, cx: &mut Context<'_, Self>) {
+        let (loaded, entry) = (self.loaded.clone(), self.entry);
         let state = loaded.state();
         let rechecked = self.binary.read(cx).rechecked(&state, entry);
         let work = move || rechecked.unwrap_or_else(|| check_blocking(&loaded, entry));

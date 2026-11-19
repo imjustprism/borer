@@ -674,7 +674,7 @@ impl DecompileItem {
     ) {
         match event {
             BinaryEvent::Revised(loaded) => self.move_to(loaded.clone(), window, cx),
-            BinaryEvent::Rechecked { state, .. } => self.rechecked(state, cx),
+            BinaryEvent::Rechecked { state, function } => self.rechecked((state, *function), cx),
             BinaryEvent::Opened(_) | BinaryEvent::Closed => {}
         }
     }
