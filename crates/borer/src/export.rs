@@ -553,7 +553,8 @@ fn refuse_occupied(root: &Path, shown: &str) -> anyhow::Result<()> {
 fn split_dirs(root: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
     let (src, include) = (root.join("src"), root.join("include"));
     for d in [&src, &include] {
-        std::fs::create_dir_all(d).with_context(|| format!("creating {}", d.display()))?;
+        std::fs::create_dir_all(d)
+            .with_context(|| format!("creating {}", short_path(&d.display().to_string())))?;
         no_link_under(d, "")?;
     }
     Ok((src, include))
@@ -1995,5 +1996,24 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
         assert!(first.is_err() && whole.is_err(), "{first:?} {whole:?}");
         assert_eq!(kept, ("kept".to_owned(), "kept".to_owned()));
+    }
+
+    /// A split directory that cannot be created is named escaped, as the
+    /// rest of the split names its paths.
+    ///
+    /// `split_dirs` printed the path raw, so `--split` with an escape byte
+    /// in it put that byte on the terminal.
+    ///
+    /// # Panics
+    ///
+    /// When the directory is created or its name is not escaped.
+    #[test]
+    fn a_split_directory_that_cannot_be_made_is_named_escaped() {
+        let file = std::env::temp_dir().join(format!("borer-split-esc-{}", std::process::id()));
+        std::fs::write(&file, "a file, not a directory").expect("written");
+        let made = super::split_dirs(&file.join("\u{1b}[7mx"));
+        std::fs::remove_file(&file).ok();
+        let said = format!("{:#}", made.expect_err("a file is in the way"));
+        assert!(!said.contains('\u{1b}') && said.contains("[7mx"), "{said}");
     }
 }
