@@ -107,7 +107,7 @@ crates/borer-engine/src/analysis/render/runs/mod.rs::judge#1	199
 crates/borer-engine/src/analysis/render/runs/mod.rs::render_runs#1	117
 crates/borer-engine/src/analysis/render/summary.rs::summary_of#1	226
 crates/borer-engine/src/analysis/render/unpack.rs::devirtualize_tsv#1	169
-crates/borer-engine/src/analysis/render/unpack.rs::unpack_tsv#1	157
+crates/borer-engine/src/analysis/render/unpack.rs::unpack_tsv#1	132
 crates/borer-engine/src/analysis/returns.rs	1510
 crates/borer-engine/src/analysis/returns.rs::classify#1	111
 crates/borer-engine/src/analysis/returns.rs::float_results#1	117

@@ -268,7 +268,7 @@ pub(crate) const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
     ),
     (
         "borer://unpack/{address}",
-        "Run a packer's bootstrap and report the code it decrypts into memory, with the original entry point. Settings after the address, comma-separated: steps=<n> (or budget=<n>) raises the step cap (10000000 by default, at most 100000000); strict and reg=<value> as devirt takes them",
+        "Run a packer's bootstrap and report the code it decrypts into memory, with the original entry point. Settings after the address, comma-separated: steps=<n> (or budget=<n>) raises the step cap (10000000 by default, at most 100000000); strict and reg=<value> as devirt takes them. The session keeps the packed image: write the unpacked one with the CLI, borer unpack <binary> <address> <out>, and load_binary that file",
         "borer://unpack/{entry}",
     ),
     (

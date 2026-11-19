@@ -489,6 +489,51 @@ fn an_unpacked_pe_materializes_a_virtual_only_section() {
     );
 }
 
+/// Builds a PE whose stub reads the header byte at `e_lfanew` and stores it
+/// into a writable `.data` section at 0x140003000, then returns.
+///
+/// # Arguments
+///
+/// * `executable` - Whether `.data` is executable, so the store may be code.
+fn header_stub_pe(executable: bool) -> Program {
+    let code: [u8; 17] = [
+        0x0f, 0xb6, 0x05, 0x35, 0xf0, 0xff, 0xff, 0x48, 0x8d, 0x3d, 0xf2, 0x1f, 0x00, 0x00, 0x88,
+        0x07, 0xc3,
+    ];
+    let mut bytes = vec![0u8; 0x4000];
+    bytes[0x3c] = 0x40;
+    bytes[0x1000..0x1000 + code.len()].copy_from_slice(&code);
+    let data = Section::mapped(".data", 0x1_4000_3000, 0x3000, 0x1000, true, executable);
+    packed_pe(bytes, code.len(), vec![data])
+}
+
+/// An unpack answer that re-analyzed the materialized image says the
+/// session still holds the packed one and how to load the unpacked one.
+///
+/// A reader saw functions only the materialized image has, opened them in
+/// the session and found nothing, concluding nothing was readable: the
+/// answer never said the image lived only for the report.
+///
+/// # Panics
+///
+/// When the stub does not run, or the answer leaves out the line or its
+/// command.
+#[test]
+fn an_unpack_answer_says_the_session_keeps_the_packed_image() {
+    let p = header_stub_pe(true);
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let render = |spec| borer_engine::analysis::render::unpack_tsv(&p, &a, &o, spec).unwrap();
+    let line = "# the session still holds the packed image; to read the unpacked one, write it with the CLI, borer unpack <binary> 0x140001000";
+    let text = render("");
+    assert!(
+        text.contains(&format!("{line} <out>, then load_binary <out>\n")),
+        "{text}"
+    );
+    let text = render("0x140001000,steps=5000");
+    assert!(text.contains(&format!("{line},steps=5000 <out>")), "{text}");
+}
+
 /// The emulator maps the PE header page the way the OS loader would.
 ///
 /// A packer's bootstrap walks its own headers to find its imports: it reads
@@ -499,25 +544,7 @@ fn an_unpacked_pe_materializes_a_virtual_only_section() {
 /// read resolved instead of faulting.
 #[test]
 fn the_unpacker_maps_the_header_page() {
-    let code: [u8; 17] = [
-        0x0f, 0xb6, 0x05, 0x35, 0xf0, 0xff, 0xff, 0x48, 0x8d, 0x3d, 0xf2, 0x1f, 0x00, 0x00, 0x88,
-        0x07, 0xc3,
-    ];
-    let mut bytes = vec![0u8; 0x4000];
-    bytes[0x3c] = 0x40;
-    bytes[0x1000..0x1000 + code.len()].copy_from_slice(&code);
-    let p = packed_pe(
-        bytes,
-        code.len(),
-        vec![Section::mapped(
-            ".data",
-            0x1_4000_3000,
-            0x3000,
-            0x1000,
-            true,
-            false,
-        )],
-    );
+    let p = header_stub_pe(false);
     let a = Analysis::compute(&p);
     let o = Overlay::default();
     let text = borer_engine::analysis::render::unpack_tsv(&p, &a, &o, "0x140001000").unwrap();
@@ -538,26 +565,8 @@ fn the_unpacker_maps_the_header_page() {
 /// that is executable may be code, so that image is analyzed again.
 #[test]
 fn an_unpack_that_writes_only_data_is_not_analyzed_again() {
-    let code: [u8; 17] = [
-        0x0f, 0xb6, 0x05, 0x35, 0xf0, 0xff, 0xff, 0x48, 0x8d, 0x3d, 0xf2, 0x1f, 0x00, 0x00, 0x88,
-        0x07, 0xc3,
-    ];
-    let mut bytes = vec![0u8; 0x4000];
-    bytes[0x3c] = 0x40;
-    bytes[0x1000..0x1000 + code.len()].copy_from_slice(&code);
     for (executable, again) in [(false, false), (true, true)] {
-        let p = packed_pe(
-            bytes.clone(),
-            code.len(),
-            vec![Section::mapped(
-                ".data",
-                0x1_4000_3000,
-                0x3000,
-                0x1000,
-                true,
-                executable,
-            )],
-        );
+        let p = header_stub_pe(executable);
         let a = Analysis::compute(&p);
         let text = borer_engine::analysis::render::unpack_tsv(&p, &a, &Overlay::default(), "")
             .expect("the stub runs");

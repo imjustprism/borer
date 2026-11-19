@@ -885,7 +885,10 @@ fn armed<'p>(
 /// as a plain program's startup setting its globals, leaves the code byte
 /// for byte the original's, and analyzing it again was a second whole
 /// analysis of the program, minutes on a large one under load, that never
-/// found a function the first did not.
+/// found a function the first did not. The analyzed image lives only for
+/// the report, since the session's program is immutable, so the report
+/// says the session still holds the packed image and names the CLI
+/// command that writes the unpacked one ([`unpacked_image`]) to load.
 ///
 /// # Arguments
 ///
@@ -1031,34 +1034,60 @@ pub fn unpack_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Resul
             "# not re-analyzed: every byte the run wrote is data, outside the image's executable sections, and none of it ran\n",
         );
     } else if let Some(after) = reanalyzed(p, &emu, &regions) {
-        let _ = writeln!(
-            out,
-            "# re-analyzed the materialized image: {} functions against {} before",
-            after.functions.len(),
-            a.functions.len()
-        );
-        let fresh: Vec<u64> = after
-            .functions
-            .iter()
-            .map(|f| f.entry)
-            .filter(|e| a.function(*e).is_none())
-            .collect();
-        if !fresh.is_empty() {
-            let shown: Vec<String> = fresh
-                .iter()
-                .take(UNPACK_FRESH_MAX)
-                .map(|e| format!("{e:#x}"))
-                .collect();
-            let _ = writeln!(
-                out,
-                "# {} function(s) only the materialized image has: {}{}",
-                fresh.len(),
-                shown.join(", "),
-                plus_more(fresh.len(), UNPACK_FRESH_MAX)
-            );
-        }
+        reanalysis_lines(&mut out, a, &after, entry, spec.budget);
     }
     Ok(out)
+}
+
+/// Appends what analyzing the materialized image found.
+///
+/// That is its function count against the original's, the functions only
+/// it has, and that the session still holds the packed image, with the CLI
+/// command that writes the unpacked one to load.
+///
+/// # Arguments
+///
+/// * `out` - The report.
+/// * `a` - The analysis of the session's image.
+/// * `after` - The analysis of the materialized image.
+/// * `entry` - Where the run started.
+/// * `budget` - The run's step cap, named in the command when not the default.
+fn reanalysis_lines(out: &mut String, a: &Analysis, after: &Analysis, entry: u64, budget: usize) {
+    let _ = writeln!(
+        out,
+        "# re-analyzed the materialized image: {} functions against {} before",
+        after.functions.len(),
+        a.functions.len()
+    );
+    let fresh: Vec<u64> = after
+        .functions
+        .iter()
+        .map(|f| f.entry)
+        .filter(|e| a.function(*e).is_none())
+        .collect();
+    if !fresh.is_empty() {
+        let shown: Vec<String> = fresh
+            .iter()
+            .take(UNPACK_FRESH_MAX)
+            .map(|e| format!("{e:#x}"))
+            .collect();
+        let _ = writeln!(
+            out,
+            "# {} function(s) only the materialized image has: {}{}",
+            fresh.len(),
+            shown.join(", "),
+            plus_more(fresh.len(), UNPACK_FRESH_MAX)
+        );
+    }
+    let steps = if budget == UNPACK_BUDGET {
+        String::new()
+    } else {
+        format!(",steps={budget}")
+    };
+    let _ = writeln!(
+        out,
+        "# the session still holds the packed image; to read the unpacked one, write it with the CLI, borer unpack <binary> {entry:#x}{steps} <out>, then load_binary <out>"
+    );
 }
 
 /// Whether a run may have written code into the image: a written byte in an
