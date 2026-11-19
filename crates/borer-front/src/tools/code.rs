@@ -378,8 +378,11 @@ pub fn disassemble_function(
 /// comments, types, prototypes or fields, and no name tables. Its lines can
 /// differ from these: each comment is a line of its own, so the lines after
 /// one are numbered otherwise there; a function the check flags has no note
-/// and no repaired rendering there; and what the session named or typed, or
-/// a constant a name table spells, reads as the binary alone gives it.
+/// and no repaired rendering there; the notes on the signature strings a
+/// function references (where a name and types taken from one came from)
+/// are left out there, so the lines after them are numbered lower; and what
+/// the session named or typed, or a constant a name table spells, reads as
+/// the binary alone gives it.
 ///
 /// # Arguments
 ///

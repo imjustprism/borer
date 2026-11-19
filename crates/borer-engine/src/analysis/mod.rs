@@ -136,9 +136,10 @@ pub struct BasicBlock {
 ///
 /// A name read out of the binary and one worked out from the code are not
 /// the same kind of fact, and every listing says which it is, so an agent can
-/// treat `Ns::Type::Method` (a signature literal the
-/// function itself carries) differently from `class_141212308::vfunc_5_47`
-/// (a slot of a table whose class is itself a guess).
+/// treat `Ns::Type::Method` (a signature literal the function references:
+/// its own body, code inlined from it, or code handed the string)
+/// differently from `class_141212308::vfunc_5_47` (a slot of a table whose
+/// class is itself a guess).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum NameSource {
     /// No name: the function is `sub_<entry>`.
@@ -149,7 +150,9 @@ pub enum NameSource {
     /// A compiler or runtime helper recognized by its shape (`__chkstk`, a
     /// refcount release, the assert reporter).
     Helper,
-    /// A `__FUNCSIG__`-style signature string only this function references.
+    /// A `__FUNCSIG__`-style signature string only this function references:
+    /// the named function's own body, code inlined from it, or code handed
+    /// the string, which all reference it the same way.
     Signature,
     /// A dispatcher's wrong-type message naming the type this handles.
     Handler,
@@ -200,7 +203,9 @@ impl NameSource {
             NameSource::None => "no name in the binary or the code",
             NameSource::Symbol => "declared in the binary's symbol table",
             NameSource::Helper => "a helper recognized by its shape",
-            NameSource::Signature => "a signature string the function itself carries",
+            NameSource::Signature => {
+                "a signature string the function references (its own body, code inlined from it, or code handed the string)"
+            }
             NameSource::Handler => "the wrong-type message of a command handler",
             NameSource::Slot => "a vtable slot of a recovered class, numbered by position",
             NameSource::Qt => "Qt moc metadata",

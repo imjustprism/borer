@@ -252,6 +252,35 @@ pub fn function_summary(p: &Program, a: &Analysis, o: &Overlay, entry: u64) -> O
         .clone()
 }
 
+/// Returns the summary's `declared:` line.
+///
+/// It is the signature a signature string gave the function, and where it
+/// came from, which a function that inlined the named one, or was handed
+/// its string, reads the same ([`crate::analysis::NameSource::describe`]).
+/// A later name (Qt metadata, a funclet's parent) keeps the types, so the
+/// row names the string, not the name's source.
+///
+/// # Arguments
+///
+/// * `f` - The function.
+///
+/// # Returns
+///
+/// The line with its newline, or an empty string when no signature string
+/// typed the function.
+fn declared_line(f: &Function) -> String {
+    f.signature.as_ref().map_or(String::new(), |s| {
+        format!(
+            "declared: {} {}({}){}; from {}\n",
+            s.ret,
+            s.name,
+            s.params.join(", "),
+            if s.is_const { " const" } else { "" },
+            crate::analysis::NameSource::Signature.describe()
+        )
+    })
+}
+
 /// Builds the triage block [`function_summary`] memoizes.
 ///
 /// # Arguments
@@ -352,15 +381,7 @@ fn summary_of(p: &Program, a: &Analysis, o: &Overlay, entry: u64) -> Option<Stri
     } else {
         format!("messages: {} [{}]\n", sent.len(), capped(&sent, ", "))
     };
-    let declared = f.signature.as_ref().map_or(String::new(), |s| {
-        format!(
-            "declared: {} {}({}){}\n",
-            s.ret,
-            s.name,
-            s.params.join(", "),
-            if s.is_const { " const" } else { "" }
-        )
-    });
+    let declared = declared_line(f);
     let mut typed: Vec<String> = f
         .param_hints
         .iter()

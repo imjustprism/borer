@@ -19,10 +19,13 @@
 )]
 
 use borer_engine::analysis::classes::field_names;
-use borer_engine::analysis::decompile::{answer_header, decompile, skeleton};
+use borer_engine::analysis::decompile::{answer_header, decompile, shown, skeleton};
 use borer_engine::analysis::protos::Proto;
-use borer_engine::analysis::render::{NEXT_MAX, asserted_fields_tsv, function_summary, next_steps};
-use borer_engine::analysis::{Analysis, Overlay};
+use borer_engine::analysis::render::{
+    FunctionOrder, NEXT_MAX, asserted_fields_tsv, function_rows, function_summary, next_steps,
+};
+use borer_engine::analysis::sigs::export_pack;
+use borer_engine::analysis::{Analysis, NameSource, Overlay};
 use borer_engine::memory::{Kind, read_values, rest_of_cut};
 use borer_engine::num::{from_usize, lo32, saturating_usize};
 use borer_engine::program::{Arch, Program, Section, Symbol, SymbolKind};
@@ -1211,4 +1214,129 @@ fn the_split_files_a_function_where_its_source_line_says() {
         assert!(line.is_some(), "{text}");
         assert_eq!(unit_of(&text), line, "{entry:#x}:\n{text}");
     }
+}
+
+/// Where a signature-inferred name came from: the named function's own
+/// body, code inlined from it, or code handed the string.
+const HEDGE: &str = "a signature string the function references (its own body, code inlined from it, or code handed the string)";
+
+/// A function named from a signature string says an inliner reads the same.
+///
+/// Its decompile header and its summary say where its name and types came
+/// from, and that the code may be the named function's own body, code
+/// inlined from it or code handed the string; a name or prototype the user
+/// states drops out of the line.
+///
+/// Clang `-O2` inlines `int Foo::get()` into `baz(Foo *)`, so `baz` is
+/// the string's only referrer and takes `Foo::get` and its types, stated
+/// as fact (C-244).
+#[test]
+fn a_signature_name_says_an_inliner_reads_the_same() {
+    let p = image(
+        &[(0x1100, Guard::Field(0x10), CNT, 0x2200, "int Foo::get()")],
+        &[(CNT, b"this->m_count\0")],
+    );
+    let a = Analysis::compute(&p);
+    let name = a.function(0x1100).and_then(|f| f.name.clone());
+    assert_eq!(name.as_deref(), Some("Foo::get"));
+    let line = |o: &Overlay| hedge_line(&p, &a, o, 0x1100);
+    let mut o = Overlay::default();
+    assert_eq!(line(&o), Some(format!("// name and types: {HEDGE}")));
+    let summary = function_summary(&p, &a, &o, 0x1100).unwrap_or_default();
+    assert!(
+        summary.contains(&format!("declared: int Foo::get(); from {HEDGE}\n")),
+        "{summary}"
+    );
+    o.names.insert(0x1100, "baz".to_owned());
+    assert_eq!(line(&o), Some(format!("// types: {HEDGE}")));
+    o.prototypes
+        .insert(0x1100, Proto::parse("int baz(void *f)").expect("parses"));
+    assert_eq!(line(&o), None);
+    o.names.remove(&0x1100);
+    assert_eq!(line(&o), Some(format!("// name: {HEDGE}")));
+}
+
+/// Returns the line of a function's decompile header that carries the
+/// signature hedge.
+///
+/// # Arguments
+///
+/// * `p` - The image.
+/// * `a` - Its analysis.
+/// * `o` - Names in force.
+/// * `entry` - The function's entry.
+fn hedge_line(p: &Program, a: &Analysis, o: &Overlay, entry: u64) -> Option<String> {
+    let header = answer_header(p, a, o, entry, None).unwrap_or_default();
+    header
+        .lines()
+        .find(|l| l.ends_with(HEDGE))
+        .map(str::to_owned)
+}
+
+/// Types a signature string gave keep their hedge after a later pass
+/// renames the function.
+///
+/// Qt metadata, a funclet's parent and Objective-C metadata name a
+/// function after the signature pass did and keep its types: the header
+/// says the types still come from the string, and the summary's
+/// `declared:` row says the string, not the later source.
+#[test]
+fn types_a_signature_gave_keep_their_hedge_after_a_rename() {
+    let p = image(
+        &[(0x1100, Guard::Field(0x10), CNT, 0x2200, "int Foo::get()")],
+        &[(CNT, b"this->m_count\0")],
+    );
+    let mut a = Analysis::compute(&p);
+    let f = a
+        .functions
+        .iter_mut()
+        .find(|f| f.entry == 0x1100)
+        .expect("found");
+    f.name = Some("Foo::onGet".to_owned());
+    f.name_source = NameSource::Qt;
+    let o = Overlay::default();
+    assert_eq!(
+        hedge_line(&p, &a, &o, 0x1100),
+        Some(format!("// types: {HEDGE}"))
+    );
+    let summary = function_summary(&p, &a, &o, 0x1100).unwrap_or_default();
+    assert!(
+        summary.contains(&format!("declared: int Foo::get(); from {HEDGE}\n")),
+        "{summary}"
+    );
+}
+
+/// The function list and an exported pack mark a signature-inferred name,
+/// and the index leaves the hedge out.
+///
+/// The list gives one `# src sig:` line saying what the `sig` source rests
+/// on, and only when a row shows it; the pack puts a comment above the
+/// name's line, so a name it passes on still says it was inferred.
+#[test]
+fn listings_and_packs_mark_a_signature_name() {
+    let p = image(
+        &[(0x1100, Guard::Field(0x10), CNT, 0x2200, "int Foo::get()")],
+        &[(CNT, b"this->m_count\0")],
+    );
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let legend = format!("# src sig: inferred from {HEDGE}\n");
+    let all = function_rows(&a, &o, None, FunctionOrder::Address, 0, 50).spell();
+    assert_eq!(all.matches(&legend).count(), 1, "{all}");
+    let none = function_rows(
+        &a,
+        &o,
+        Some("zzz_matches_nothing"),
+        FunctionOrder::Address,
+        0,
+        50,
+    )
+    .spell();
+    assert!(!none.contains("# src sig:"), "{none}");
+    let pack = export_pack(&p, &a, &o, "probe", true);
+    let note = format!("# Foo::get: inferred from {HEDGE}\nfn ");
+    assert!(pack.contains(&note), "{pack}");
+    let text = decompile(&p, &a, &o, 0x1100).expect("decompiles");
+    let indexed = shown(&p, &a, &o, 0x1100, Some(&text)).unwrap_or_default();
+    assert!(!indexed.contains(HEDGE), "{indexed}");
 }

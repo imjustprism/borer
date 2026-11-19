@@ -564,7 +564,8 @@ impl Session {
 /// without the `// next:` lines, so a line number `grep` gave named another
 /// line here. `grep` counts the index's lines ([`decompile::shown`]), which
 /// are these only where nothing the index leaves out shows: a comment, name
-/// or type the project gave, or the repair search's note and rendering.
+/// or type the project gave, the repair search's note and rendering, or the
+/// notes on the signature strings the function references.
 ///
 /// # Arguments
 ///

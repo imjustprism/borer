@@ -11,7 +11,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use super::{Kept, Origins, checked_header, decompile_named, origin, skeleton, stack, warn};
-use crate::analysis::{Analysis, Overlay, decompiled_kept, name_of, render};
+use crate::analysis::{Analysis, NameSource, Overlay, decompiled_kept, name_of, render};
 use crate::program::Program;
 
 /// How much of a function's text an answer shows.
@@ -174,11 +174,13 @@ fn answered(
 
 /// Returns the lines a `decompile` answer puts under its first line.
 ///
-/// They are what of the text was checked against the binary
+/// They are what the signature strings the function references say of it
+/// ([`signature_notes`]), what of the text was checked against the binary
 /// ([`checked_header`]), the note that the analysis ran out of budget when
 /// it did ([`render::INCOMPLETE_NOTE`]), the `// warn:` line naming what is
 /// known wrong in the text ([`warnings`]), then a `// next:` line per
-/// resource the function's facts point at ([`render::next_steps`]).
+/// resource the function's facts point at ([`render::next_steps`]). The
+/// index stores the answer without the signature notes ([`shown`]).
 ///
 /// # Arguments
 ///
@@ -201,11 +203,17 @@ pub fn answer_header(
     entry: u64,
     differs: Option<&str>,
 ) -> Option<String> {
-    header_lines(program, analysis, overlay, entry, differs, None)
+    let lines: Vec<String> = signature_notes(analysis, overlay, entry)
+        .into_iter()
+        .chain(header_lines(
+            program, analysis, overlay, entry, differs, None,
+        ))
+        .collect();
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
-/// Returns [`answer_header`]'s lines, read from `body` when the caller
-/// already rendered it.
+/// Returns [`answer_header`]'s lines but the signature notes, read from
+/// `body` when the caller already rendered it.
 ///
 /// # Arguments
 ///
@@ -244,6 +252,37 @@ fn header_lines(
     );
     lines.extend(steps.iter().map(|step| format!("// next: {step}")));
     (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+/// Returns what the signature strings a function references say of it,
+/// one line each.
+///
+/// It is where its name and types came from when a signature string gave
+/// them: the name by [`NameSource::Signature`], the types by the signature
+/// the function keeps, which a later name (Qt metadata, a funclet's
+/// parent) leaves in place. A name or prototype the overlay states is the
+/// user's, so the line names only what the string still gives.
+///
+/// # Arguments
+///
+/// * `analysis` - Its analysis.
+/// * `overlay` - Names and prototypes in force.
+/// * `entry` - The function's entry.
+fn signature_notes(analysis: &Analysis, overlay: &Overlay, entry: u64) -> Vec<String> {
+    let Some(f) = analysis.function(entry) else {
+        return Vec::new();
+    };
+    let name = f.name_source == NameSource::Signature && !overlay.names.contains_key(&entry);
+    let types = f.signature.is_some() && !overlay.prototypes.contains_key(&entry);
+    let what = match (name, types) {
+        (true, true) => Some("name and types"),
+        (true, false) => Some("name"),
+        (false, true) => Some("types"),
+        (false, false) => None,
+    };
+    what.map(|w| format!("// {w}: {}", NameSource::Signature.describe()))
+        .into_iter()
+        .collect()
 }
 
 /// Returns the `// warn:` line for `body`, decompiling when the caller has

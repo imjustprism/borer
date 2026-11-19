@@ -257,7 +257,7 @@ fn refs_from_and_summary() {
     );
     let has = function_summary(&p, &a, &o, 0x1660).unwrap();
     assert!(
-        has.contains("declared: bool Cls::Has(int) const\n"),
+        has.contains("declared: bool Cls::Has(int) const; from a signature string the function references (its own body, code inlined from it, or code handed the string)\n"),
         "{has}"
     );
     let gt = function_summary(&p, &a, &o, 0x18e0).unwrap();
