@@ -46,28 +46,15 @@ fn a_vtable_with_rtti_names_its_class_and_parent() {
     assert_eq!(foo.parent.as_deref(), Some("Base"));
 }
 
-/// A global singleton's loaded pointer resolves the virtual call made
-/// through it, and a global nothing registered does not.
+/// Returns the image with an embedded base.
 ///
-/// The constructor at 0x401000 stores the RTTI-named table of `G2` at
-/// `[ecx]` and registers `this` in the global at 0x4020e0, the only
-/// global-addressing form 32-bit code has; `GU2` 0x401030 loads that
-/// global's word and calls slot 1, which resolves to `G2::vfunc_1`.
-/// `GU3` 0x401040 does the same through 0x4020e4, which no constructor
-/// registered, so its call names the slot only.
-/// A further base's table, stored at `[this+8]` by an inlined base
-/// constructor, types the embedded subobject there, and a call through
-/// that field resolves to the base's method.
-///
-/// The constructor at 0x401000 stores `Foo`'s table at `[ecx]` and the
-/// further base's table 0x402108 at `[ecx+8]`; `Bar`'s own constructor at
-/// 0x401070 stores its table 0x402158, so the embedded subobject at 8 is
-/// a `Bar`. `Foo::vfunc_2` 0x401050 calls slot 1 of the vtable at
-/// `[ecx+8]`, which resolves to `Bar::vfunc_1`; `Foo::vfunc_3` 0x401060
-/// does the same through the field at 0xc, which nothing types, and its
-/// call names the slot only.
-#[test]
-fn embedded_base_fields_resolve_their_calls() {
+/// `Foo`'s constructor at
+/// 0x401000 stores its table at `[ecx]` and the further base's table
+/// 0x402108 at `[ecx+8]`, and `Bar`, whose constructor at 0x401070 stores
+/// its table 0x402158. `Foo::vfunc_2` 0x401050 calls slot 1 of the table
+/// at `[ecx+8]`; `Foo::vfunc_3` 0x401060 calls slot 1 of the one at
+/// `[ecx+0xc]`.
+fn embedded_bases() -> Program {
     let mut code = vec![
         0xc7, 0x01, 0x18, 0x20, 0x40, 0x00, // ASM: mov dword [ecx],0x402018
         0xc7, 0x41, 0x08, 0x08, 0x21, 0x40, 0x00, // ASM: mov dword [ecx+8],0x402108
@@ -123,7 +110,32 @@ fn embedded_base_fields_resolve_their_calls() {
     put(&mut data, 0x154, &le(0x402140));
     put(&mut data, 0x158, &le(0x401010));
     put(&mut data, 0x15c, &le(0x401020));
-    let p = image_with_data(&code, &data);
+    image_with_data(&code, &data)
+}
+
+/// A global singleton's loaded pointer resolves the virtual call made
+/// through it, and a global nothing registered does not.
+///
+/// The constructor at 0x401000 stores the RTTI-named table of `G2` at
+/// `[ecx]` and registers `this` in the global at 0x4020e0, the only
+/// global-addressing form 32-bit code has; `GU2` 0x401030 loads that
+/// global's word and calls slot 1, which resolves to `G2::vfunc_1`.
+/// `GU3` 0x401040 does the same through 0x4020e4, which no constructor
+/// registered, so its call names the slot only.
+/// A further base's table, stored at `[this+8]` by an inlined base
+/// constructor, types the embedded subobject there, and a call through
+/// that field resolves to the base's method.
+///
+/// The constructor at 0x401000 stores `Foo`'s table at `[ecx]` and the
+/// further base's table 0x402108 at `[ecx+8]`; `Bar`'s own constructor at
+/// 0x401070 stores its table 0x402158, so the embedded subobject at 8 is
+/// a `Bar`. `Foo::vfunc_2` 0x401050 calls slot 1 of the vtable at
+/// `[ecx+8]`, which resolves to `Bar::vfunc_1`; `Foo::vfunc_3` 0x401060
+/// does the same through the field at 0xc, which nothing types, and its
+/// call names the slot only.
+#[test]
+fn embedded_base_fields_resolve_their_calls() {
+    let p = embedded_bases();
     let a = Analysis::compute(&p);
     let o = Overlay::default();
     assert_eq!(
@@ -563,4 +575,33 @@ fn a_locators_class_names_a_one_slot_table_on_a_32_bit_image() {
     );
     assert_eq!(name_of(&a, &o, 0x401008), "One::vfunc_0");
     assert_eq!(name_of(&a, &o, 0x401000), "One::ctor_or_dtor");
+}
+
+/// A call through a table read from a subobject's word is listed as a
+/// field, with no class's slot as its candidate.
+///
+/// Only a table read from an object's first word is called a vtable: the
+/// tables at `[ecx+8]` (0x401053, which the decompiler resolves) and
+/// `[ecx+0xc]` (0x401063) may be embedded bases' or any structure's, so
+/// both calls are word 4 of a loaded pointer, and no class candidate is
+/// claimed for either.
+///
+/// # Panics
+///
+/// When a site is missing, or its form or candidates differ.
+#[test]
+fn a_call_through_a_subobject_table_is_a_field_without_candidates() {
+    use borer_engine::analysis::render::{Form, Why, census};
+    let p = embedded_bases();
+    let a = Analysis::compute(&p);
+    let found = census(&p, &a);
+    let site = |at: u64| found.sites.iter().find(|s| s.at == at);
+    let miss = site(0x401063).expect("the call through [ecx+0xc] is listed");
+    assert_eq!(miss.function, 0x401060);
+    assert_eq!(miss.form, Form::Field { offset: 4 });
+    assert_eq!(miss.why, Why::NoTarget);
+    assert_eq!((miss.candidates.len(), miss.candidates_total), (0, 0));
+    let resolved = site(0x401053).expect("discovery left the resolved call unresolved");
+    assert_eq!(resolved.form, Form::Field { offset: 4 });
+    assert_eq!(resolved.candidates_total, 0);
 }

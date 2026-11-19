@@ -722,6 +722,10 @@ const ANSWERS: &[Answer] = &[
     itself("stats", Argument, Best(Discover), &[Column("va")], |q| {
         stats::stats_tsv(q.p, q.a, q.arg, q.page.window(WINDOW_PAGE))
     }),
+    itself("indirect", Either, Code(Discover), &[Column("site")], |q| {
+        render::indirect_tsv(q.p, q.a, q.o, q.arg, q.page.window(WINDOW_PAGE))
+    })
+    .checked(render::indirect_check),
 ];
 
 /// Instructions a whole-function listing shows when no count is asked.

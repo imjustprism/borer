@@ -38,6 +38,8 @@ mod a32;
 mod asserts;
 #[path = "hostile/heap.rs"]
 mod heap;
+#[path = "hostile/indirect.rs"]
+mod indirect;
 #[path = "hostile/lift.rs"]
 mod lift;
 #[path = "hostile/names.rs"]

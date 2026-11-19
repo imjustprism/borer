@@ -296,6 +296,7 @@ const INTENTS: &[(&str, &[&str])] = &[
             "index",
             "bench",
             "addr",
+            "indirect",
         ],
     ),
     ("session", &["session", "annotations", "packs", "script"]),

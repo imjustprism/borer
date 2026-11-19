@@ -1194,3 +1194,79 @@ fn xrefs_page() {
     );
 }
 
+/// The slowest the census of unresolved indirect calls may be built cold,
+/// in milliseconds.
+const CENSUS_MS: u128 = 300;
+
+/// Times the census of unresolved indirect calls cold.
+///
+/// It is held to [`CENSUS_MS`] and prints the sites by form and by why,
+/// the share with a candidate, and how many vtable-shaped sites the
+/// decompiler resolves.
+///
+/// `BORER_BENCH=path/to/bin cargo test -p borer-engine --release --test bench census -- --ignored --nocapture`
+#[test]
+#[ignore = "set BORER_BENCH to a binary path to run this harness"]
+fn census() {
+    use borer_engine::analysis::decompile::virtual_calls;
+    use borer_engine::analysis::render::{Form, census};
+    borer_live::run_at_full_speed();
+    let path = std::env::var("BORER_BENCH").expect("BORER_BENCH env var");
+    let program = Program::load(std::path::Path::new(&path)).expect("load");
+    let o = Overlay::default();
+    let cold = best_cold(&program, |a| census(&program, a));
+    let a = Analysis::compute(&program);
+    let found = census(&program, &a);
+    let mut forms: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut whys: BTreeMap<String, usize> = BTreeMap::new();
+    for s in &found.sites {
+        *forms.entry(s.form.word()).or_default() += 1;
+        let why = s.why.spell();
+        let reason = why.split(' ').take(2).collect::<Vec<_>>().join(" ");
+        *whys.entry(reason).or_default() += 1;
+    }
+    let with = found
+        .sites
+        .iter()
+        .filter(|s| s.candidates_total > 0)
+        .count();
+    let vtable: Vec<_> = found
+        .sites
+        .iter()
+        .filter(|s| matches!(s.form, Form::VtableSlot { .. }))
+        .collect();
+    let resolved = vtable
+        .iter()
+        .filter(|s| {
+            virtual_calls(&program, &a, &o, s.function)
+                .iter()
+                .any(|c| c.site == s.at)
+        })
+        .count();
+    let functions: std::collections::BTreeSet<u64> =
+        found.sites.iter().map(|s| s.function).collect();
+    println!(
+        "census:\t{} sites in {} functions\t{} trampolines\t{:.2} ms cold (best of {COLD_PASSES})",
+        found.sites.len(),
+        functions.len(),
+        found.through.len(),
+        cold.as_secs_f64() * 1e3
+    );
+    println!("census forms:\t{forms:?}");
+    println!("census why:\t{whys:?}");
+    println!(
+        "census candidates:\t{with} of {} sites have one\t{} vtable-shaped, {resolved} of them resolved by the decompiler",
+        found.sites.len(),
+        vtable.len()
+    );
+    let text = borer_engine::answer::ask(&program, &a, &o, "borer://indirect!limit=8");
+    for line in text
+        .and_then(Result::ok)
+        .unwrap_or_default()
+        .lines()
+        .take(15)
+    {
+        println!("{line}");
+    }
+    assert!(cold.as_millis() <= CENSUS_MS, "census took {cold:?}");
+}

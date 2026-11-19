@@ -522,6 +522,7 @@ assert uris == [
     "borer://help",
     "borer://hidden",
     "borer://index",
+    "borer://indirect",
     "borer://info",
     "borer://injection",
     "borer://iocs",

@@ -67,7 +67,10 @@ pub use triage::*;
 pub use triage_view::*;
 pub use typed::*;
 pub use unpack::*;
-pub use unseen::{Reach, unseen_line};
+pub use unseen::{
+    CANDIDATES_MAX, Candidate, Census, Form, Reach, Rule, Site, Why, census, indirect_check,
+    indirect_tsv, unseen_line,
+};
 pub use xrefs::*;
 
 use super::{

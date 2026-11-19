@@ -162,6 +162,10 @@ pub const RESOURCES: &[(&str, &str)] = &[
         "borer://bench",
         "Wall-clock speed of borer's hot queries on the loaded binary (AOB scan, string walks, indexed grep when the index is cached): one row per op with its answer size, fastest elapsed and throughput; timings differ run to run, the counts never do",
     ),
+    (
+        "borer://indirect",
+        "Every indirect call and jump discovery resolved to no target, a row per site: its function, its form (register, vtable slot k of a table read from an object's first word, field +k, global slot, trampoline, jump, memory) read from its block on x86 and arm64, why it stayed unresolved, and candidate targets each with the rule that admitted it (what recovered classes hold in that vtable slot; what x86 stores into that global slot write), the count first and at most 8 kept; candidates are never callers and never complete; 200 rows a page",
+    ),
 ];
 
 /// The resource templates: URI template, description, and an example.
@@ -557,6 +561,11 @@ pub const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
                      (numbered ^N); decompiles \
                      everything once into the index on first use; 200 matching lines at most",
         "borer://grep/memcpy",
+    ),
+    (
+        "borer://indirect/{spec}",
+        "The unresolved indirect calls and jumps of one function, or of one form: spec is [<function or address>][,form=<register|vtable|field|global|trampoline|jump|memory>]; rows as borer://indirect gives them, 200 a page",
+        "borer://indirect/{entry}",
     ),
 ];
 

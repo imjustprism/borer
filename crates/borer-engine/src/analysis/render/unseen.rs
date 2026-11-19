@@ -6,6 +6,12 @@ use std::sync::Arc;
 
 use super::*;
 
+mod form;
+mod rules;
+mod spell;
+
+pub use spell::{indirect_check, indirect_tsv};
+
 /// Fewest calls and jumps to a target before its listing is no longer
 /// short, so the note on what it could not see is left off.
 pub(super) const SHORT_CALLERS: usize = 4;
@@ -23,24 +29,131 @@ pub enum Reach<'a> {
 /// chain counts as resolved.
 const TRAMPOLINE_HOPS: usize = 4;
 
-/// The calls and jumps discovery resolved to no target, read once per
-/// analysis ([`unresolved`]).
+/// Most candidate targets one site keeps; the rest are counted in
+/// [`Site::candidates_total`].
+pub const CANDIDATES_MAX: usize = 8;
+
+/// The calls and jumps discovery resolved to no target, each site with how
+/// it forms its target, why it stayed unresolved and the candidates a rule
+/// admits; read once per analysis ([`census`]).
 #[derive(Debug, Default)]
-struct Unresolved {
-    /// How many each function makes, by entry; functions with none and
-    /// trampolines left out.
-    counts: BTreeMap<u64, usize>,
+pub struct Census {
+    /// Every unresolved site outside the trampolines, in address order.
+    pub sites: Vec<Site>,
     /// The trampolines: one-block functions that only jump on through a
-    /// register, directly or through others.
-    through: BTreeSet<u64>,
+    /// register, directly or through others. Their own jumps are counted
+    /// where they are called, not as sites.
+    pub through: BTreeSet<u64>,
 }
 
-/// Where each call or jump of one function lands, by its site.
+/// One call or jump discovery resolved to no target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Site {
+    /// The entry of the function making it.
+    pub function: u64,
+    /// The call or jump instruction.
+    pub at: u64,
+    /// How it forms its target.
+    pub form: Form,
+    /// Why discovery left it unresolved.
+    pub why: Why,
+    /// The first [`CANDIDATES_MAX`] targets a rule admits, in address
+    /// order; never callers, never complete. Shared by every site the
+    /// same rule and slot admit them for.
+    pub candidates: Arc<[Candidate]>,
+    /// How many targets the rules admit, kept or not.
+    pub candidates_total: usize,
+}
+
+/// How an unresolved call or jump forms its target, as its block shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Form {
+    /// Through a register the block does not load from memory.
+    Register,
+    /// Through `[R+k]`, `R` loaded from memory earlier in the block: slot
+    /// `k / word` of the table `R` points at.
+    VtableSlot {
+        /// The slot's index.
+        slot: usize,
+    },
+    /// Through `[R+k]`, `R` not loaded from memory in the block.
+    Field {
+        /// `k`, in bytes.
+        offset: i64,
+    },
+    /// Through a slot at a fixed address.
+    Global {
+        /// The slot's address.
+        slot: u64,
+    },
+    /// Through a word in memory the block ties to no object and no fixed
+    /// slot: a stack slot, an indexed table, or a register loaded from
+    /// one.
+    Memory,
+    /// Into a trampoline, through a register the block does not show or
+    /// memory that is no fixed slot.
+    IntoTrampoline {
+        /// The trampoline's entry.
+        entry: u64,
+    },
+    /// An indirect jump through a register, no table found.
+    Jump,
+}
+
+/// Why discovery resolved an indirect call or jump to no target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Why {
+    /// Nothing in the file names a target.
+    NoTarget,
+    /// It goes through a slot in data that holds no function in the file.
+    SlotFilledAtRunTime {
+        /// The slot's address.
+        slot: u64,
+    },
+    /// It goes into a trampoline, which goes wherever a register points.
+    Trampoline {
+        /// The trampoline's entry.
+        through: u64,
+    },
+    /// An indirect jump with no jump table found.
+    NoJumpTable,
+}
+
+/// A function an unresolved site may reach, with the rule that admitted
+/// it; never a caller of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    /// The function's entry.
+    pub target: u64,
+    /// The rule that admitted it.
+    pub rule: Rule,
+}
+
+/// The rule that admitted a candidate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Rule {
+    /// A recovered class holds the function in the slot the site calls
+    /// through.
+    VtableSlot {
+        /// The first class, by name, that holds it there, one allocation
+        /// shared by every site it is a candidate of.
+        class: Arc<str>,
+    },
+    /// A store into exactly the slot the site calls through writes the
+    /// function's address, loaded in the store's own block.
+    StoredSlot {
+        /// The store's instruction.
+        store: u64,
+    },
+}
+
+/// Where each call or jump of one function lands, as `(site, landing)`
+/// pairs in site order.
 ///
 /// A target in code lands there, an import's slot on the import, and a
 /// slot in data holding a function's address ([`RefKind::Table`]) on that
 /// function, as a call through a dispatch pointer does. Any other target,
-/// a slot filled at run time, lands nowhere: the site has no landing.
+/// a slot filled at run time, lands nowhere: the site has no pair.
 ///
 /// # Arguments
 ///
@@ -48,32 +161,69 @@ struct Unresolved {
 /// * `a` - The analysis.
 /// * `slots` - What each import slot and function pointer in data lands
 ///   on, by the slot.
-/// * `entry` - The function.
-///
-/// # Returns
-///
-/// The landings of every branch site, by site, empty for one that lands
-/// nowhere.
+/// * `targets` - The function's branch targets ([`targets`]).
 fn landings(
     p: &Program,
     a: &Analysis,
     slots: &BTreeMap<u64, u64>,
-    entry: u64,
-) -> BTreeMap<u64, Vec<u64>> {
-    let mut out: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
-    for (target, s) in a.refs_from(entry) {
-        if s.is_branch() {
-            let code = a.function_at(target).is_some()
-                || p.section_at(target).is_some_and(|sec| sec.executable);
-            let lands = if code {
+    targets: &[(u64, u64)],
+) -> Vec<(u64, u64)> {
+    targets
+        .iter()
+        .filter_map(|&(site, target)| {
+            let lands = if is_code(p, a, target) {
                 Some(target)
             } else {
                 slots.get(&target).copied()
             };
-            out.entry(s.va).or_default().extend(lands);
-        }
-    }
+            lands.map(|t| (site, t))
+        })
+        .collect()
+}
+
+/// Returns a function's call and jump sites with their targets, as
+/// `(site, target)` pairs sorted by site, so a block's are one range.
+///
+/// # Arguments
+///
+/// * `a` - The analysis.
+/// * `entry` - The function.
+fn targets(a: &Analysis, entry: u64) -> Vec<(u64, u64)> {
+    let mut out: Vec<(u64, u64)> = a
+        .refs_by_function
+        .get(&entry)
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .filter_map(|&(t, i)| Some((t, a.xrefs.get(&t)?.get(i)?)))
+        .filter(|(_, s)| s.is_branch())
+        .map(|(t, s)| (s.va, t))
+        .collect();
+    out.sort_unstable();
     out
+}
+
+/// Returns the pairs of a site-sorted list whose site lies in a block.
+///
+/// # Arguments
+///
+/// * `pairs` - `(site, address)` pairs sorted by site.
+/// * `b` - The block.
+fn within<'p>(pairs: &'p [(u64, u64)], b: &BasicBlock) -> &'p [(u64, u64)] {
+    let lo = pairs.partition_point(|&(s, _)| s < b.start);
+    let hi = pairs.partition_point(|&(s, _)| s < b.end);
+    pairs.get(lo..hi).unwrap_or_default()
+}
+
+/// Tells whether a branch target is code: a function's or an executable
+/// section's.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `target` - The target.
+fn is_code(p: &Program, a: &Analysis, target: u64) -> bool {
+    a.function_at(target).is_some() || p.section_at(target).is_some_and(|sec| sec.executable)
 }
 
 /// Whether a block's call or jump reaches no target discovery resolved:
@@ -88,15 +238,10 @@ fn landings(
 /// * `b` - The block.
 /// * `lands` - Where the function's branch sites land ([`landings`]).
 /// * `through` - The trampolines found so far.
-fn blind(
-    a: &Analysis,
-    b: &BasicBlock,
-    lands: &BTreeMap<u64, Vec<u64>>,
-    through: &BTreeSet<u64>,
-) -> bool {
-    let mut to = lands.range(b.start..b.end).flat_map(|(_, t)| t).peekable();
-    let some = to.peek().is_some();
-    let reaches = to.any(|t| !through.contains(t));
+fn blind(a: &Analysis, b: &BasicBlock, lands: &[(u64, u64)], through: &BTreeSet<u64>) -> bool {
+    let to = within(lands, b);
+    let some = !to.is_empty();
+    let reaches = to.iter().any(|(_, t)| !through.contains(t));
     match b.term {
         BlockTerm::Call => !reaches,
         BlockTerm::Indirect => !reaches && a.block_table(b).is_none(),
@@ -105,7 +250,25 @@ fn blind(
     }
 }
 
-/// Counts, for each function, its calls and jumps that discovery resolved
+/// The blocks whose call or jump discovery resolved to no target, read
+/// once per analysis ([`blind_blocks`]): what [`unseen_line`] counts, and
+/// the sites [`census`] reads the forms of.
+#[derive(Debug, Default)]
+struct Blind {
+    /// Each such block outside the trampolines: its function's entry and
+    /// its index among the function's blocks, in function order.
+    blocks: Vec<(u64, usize)>,
+    /// The trampolines ([`Census::through`]).
+    through: BTreeSet<u64>,
+    /// How many blocks each function has, by entry; functions with none
+    /// left out.
+    counts: BTreeMap<u64, usize>,
+    /// What each import slot and function pointer in data lands on, by the
+    /// slot ([`landings`]).
+    slots: BTreeMap<u64, u64>,
+}
+
+/// Finds, for each function, its calls and jumps that discovery resolved
 /// to no target.
 ///
 /// A trampoline is a one-block function that jumps on through a register
@@ -119,11 +282,7 @@ fn blind(
 ///
 /// * `p` - The loaded image, for its imports and code sections.
 /// * `a` - The analysis.
-///
-/// # Returns
-///
-/// The counts and the trampolines.
-fn unresolved(p: &Program, a: &Analysis) -> Arc<Unresolved> {
+fn blind_blocks(p: &Program, a: &Analysis) -> Arc<Blind> {
     a.derived.get_or_build("unresolved_branches", (), || {
         let imports = p
             .symbols
@@ -138,44 +297,132 @@ fn unresolved(p: &Program, a: &Analysis) -> Arc<Unresolved> {
             .filter(|(_, s)| s.kind == RefKind::Table && s.from_entry.is_none())
             .map(|(f, s)| (s.va, f));
         let slots: BTreeMap<u64, u64> = stored.chain(imports).collect();
-        let lone: Vec<_> = a
+        let through = trampolines(p, a, &slots);
+        let mut blocks = Vec::new();
+        let mut counts = BTreeMap::new();
+        let live = a
             .functions
             .iter()
-            .filter_map(|f| match f.blocks.as_slice() {
-                [b] if matches!(b.term, BlockTerm::Indirect | BlockTerm::Jmp) => {
-                    Some((f.entry, b, landings(p, a, &slots, f.entry)))
-                }
-                _ => None,
-            })
-            .collect();
-        let mut through = BTreeSet::new();
-        for _ in 0..=TRAMPOLINE_HOPS {
-            let next: BTreeSet<u64> = lone
-                .iter()
-                .filter(|(_, b, lands)| blind(a, b, lands, &through))
-                .map(|(e, _, _)| *e)
-                .collect();
-            if next == through {
-                break;
-            }
-            through = next;
-        }
-        let counts = a
-            .functions
-            .iter()
-            .filter(|f| !through.contains(&f.entry))
-            .filter_map(|f| {
-                let lands = landings(p, a, &slots, f.entry);
-                let n = f
-                    .blocks
+            .take_while(|_| !crate::cancel::Cancel::raised());
+        for f in live.filter(|f| !through.contains(&f.entry)) {
+            let lands = landings(p, a, &slots, &targets(a, f.entry));
+            let before = blocks.len();
+            blocks.extend(
+                f.blocks
                     .iter()
-                    .filter(|b| blind(a, b, &lands, &through))
-                    .count();
-                (n > 0).then_some((f.entry, n))
-            })
-            .collect();
-        Unresolved { counts, through }
+                    .enumerate()
+                    .filter(|(_, b)| blind(a, b, &lands, &through))
+                    .map(|(i, _)| (f.entry, i)),
+            );
+            if blocks.len() > before {
+                counts.insert(f.entry, blocks.len() - before);
+            }
+        }
+        Blind {
+            blocks,
+            through,
+            counts,
+            slots,
+        }
     })
+}
+
+/// Returns every call and jump discovery resolved to no target, outside
+/// the trampolines, with its form, why and candidates.
+///
+/// Built the first time it is asked for, never at load, from the blocks
+/// [`unseen_line`] counts, less those ending in a direct call or jump that
+/// lands in no trampoline, and memoized for the analysis
+/// ([`crate::analysis::Derived`]). A build the request's cancel flag cuts
+/// short stops between blocks and is not kept.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image, for its imports and code sections.
+/// * `a` - The analysis.
+///
+/// # Returns
+///
+/// The census.
+#[must_use]
+pub fn census(p: &Program, a: &Analysis) -> Arc<Census> {
+    a.derived.get_or_build("indirect_census", (), || {
+        let found = blind_blocks(p, a);
+        let jumps = form::jumps(p, a, &found.through);
+        let mut sites = Vec::with_capacity(found.blocks.len());
+        let mut of = (None, Vec::new(), Vec::new());
+        let none: Arc<[Candidate]> = Arc::from([]);
+        let live = found
+            .blocks
+            .iter()
+            .take_while(|_| !crate::cancel::Cancel::raised());
+        for &(entry, i) in live {
+            let Some(b) = a.function(entry).and_then(|f| f.blocks.get(i)) else {
+                continue;
+            };
+            if of.0 != Some(entry) {
+                let raw = targets(a, entry);
+                let lands = landings(p, a, &found.slots, &raw);
+                of = (Some(entry), raw, lands);
+            }
+            let block = form::Block {
+                targets: within(&of.1, b),
+                lands: within(&of.2, b),
+            };
+            let Some((at, form, why)) = form::site(p, a, b, block, &found.through, &jumps) else {
+                continue;
+            };
+            sites.push(Site {
+                function: entry,
+                at,
+                form,
+                why,
+                candidates: Arc::clone(&none),
+                candidates_total: 0,
+            });
+        }
+        sites.sort_unstable_by_key(|s| (s.at, s.function));
+        rules::fill(p, a, &mut sites);
+        Census {
+            sites,
+            through: found.through.clone(),
+        }
+    })
+}
+
+/// Returns the trampolines: the one-block functions whose jump reaches no
+/// target discovery resolved, or only other trampolines.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `slots` - What each import slot and function pointer in data lands
+///   on, by the slot.
+fn trampolines(p: &Program, a: &Analysis, slots: &BTreeMap<u64, u64>) -> BTreeSet<u64> {
+    let lone: Vec<_> = a
+        .functions
+        .iter()
+        .filter_map(|f| match f.blocks.as_slice() {
+            [b] if matches!(b.term, BlockTerm::Indirect | BlockTerm::Jmp) => {
+                Some((f.entry, b, landings(p, a, slots, &targets(a, f.entry))))
+            }
+            _ => None,
+        })
+        .collect();
+    let mut through = BTreeSet::new();
+    for _ in 0..=TRAMPOLINE_HOPS {
+        let next: BTreeSet<u64> = lone
+            .iter()
+            .filter(|(_, b, lands)| blind(a, b, lands, &through))
+            .map(|(e, _, _)| *e)
+            .collect();
+        if next == through {
+            break;
+        }
+        through = next;
+    }
+    through
 }
 
 /// Says what a call or reference answer could not see: the indirect calls
@@ -199,7 +446,7 @@ fn unresolved(p: &Program, a: &Analysis) -> Arc<Unresolved> {
 /// was resolved.
 #[must_use]
 pub fn unseen_line(p: &Program, a: &Analysis, reach: Reach<'_>, lead: &str) -> Option<String> {
-    let found = unresolved(p, a);
+    let found = blind_blocks(p, a);
     let own = |e: &u64, walked: &BTreeSet<u64>| {
         let callers = a.function(*e).map_or(&[][..], |f| f.callers.as_slice());
         (found.through.contains(e) && !callers.iter().any(|c| walked.contains(c))).then_some(1)

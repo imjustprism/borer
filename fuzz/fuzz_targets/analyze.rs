@@ -168,6 +168,8 @@ fuzz_target!(|data: &[u8]| {
         "borer://find/str:%00%E2%80%AE!limit=3",
         "borer://stats/strings,window=64!offset=1!limit=2",
         "borer://encoded!limit=4",
+        "borer://indirect!limit=3",
+        "borer://indirect/0x401000,form=vtable",
     ] {
         _ = borer_engine::answer::listing(&program, Some(&analysis), &overlay, uri);
     }
