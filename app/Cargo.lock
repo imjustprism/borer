@@ -1038,6 +1038,9 @@ name = "borer-front"
 version = "0.3.1"
 dependencies = [
  "borer-engine",
+ "schemars",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
