@@ -2,6 +2,9 @@
 //!
 //! `BORER_BENCH=path/to/bin cargo test -p borer-engine --release --test bench -- --ignored --nocapture`
 //!
+//! The same `BORER_BENCH` with `search_timings` times a byte, a masked, a
+//! text and two value searches ([`search_timings`]).
+//!
 //! `BORER_ISO=bin1;bin2 cargo test -p borer-engine --release --test bench iso -- --ignored --nocapture`
 //! measures the ISO C check of a decompile answer against the answer itself
 //! ([`iso_check_cost`]).
@@ -53,7 +56,7 @@ use borer_engine::analysis::render::{
 };
 use borer_engine::analysis::{Analysis, EnumSource, Overlay, name_of};
 use borer_engine::num::{as_f64, usize_f64};
-use borer_engine::program::Program;
+use borer_engine::program::{Arch, Program, Section};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -1269,4 +1272,110 @@ fn census() {
         println!("{line}");
     }
     assert!(cold.as_millis() <= CENSUS_MS, "census took {cold:?}");
+}
+
+/// The slowest a value search's first page may be on a cold analysis, in
+/// milliseconds, that [`search_timings`] holds an optimized build to.
+const VALUE_SEARCH_MS: u128 = 300;
+
+/// Runs of each search [`search_timings`] takes; the fastest is reported.
+const SEARCH_RUNS: usize = 5;
+
+/// Returns the fastest of [`SEARCH_RUNS`] runs of `f`.
+///
+/// # Arguments
+///
+/// * `f` - The search to time.
+fn fastest<T>(mut f: impl FnMut() -> T) -> Duration {
+    (0..SEARCH_RUNS)
+        .map(|_| timed(&mut f).wall)
+        .min()
+        .unwrap_or_default()
+}
+
+/// Reports the best time of byte, masked, text and value searches.
+///
+/// They run over the binary `BORER_BENCH` names; the value searches'
+/// first page is held to [`VALUE_SEARCH_MS`].
+#[test]
+#[ignore = "set BORER_BENCH to a binary path to run this harness"]
+fn search_timings() {
+    use borer_engine::search::{find_bytes, find_masked, find_text, form, parse_masked};
+    borer_live::run_at_full_speed();
+    let path = std::env::var("BORER_BENCH").expect("BORER_BENCH env var");
+    let program = Program::load(std::path::Path::new(&path)).expect("load");
+    let o = Overlay::default();
+    let plain = [Some(0x48), Some(0x8b), None, Some(0x24)];
+    let lanes = parse_masked("48 8b 4? 24").expect("a pattern");
+    let rows = [
+        (
+            "bytes 48 8b ?? 24",
+            fastest(|| find_bytes(&program, &plain, 0).map_or(0, |h| h.total)),
+        ),
+        (
+            "masked 48 8b 4? 24",
+            fastest(|| find_masked(&program, &lanes, 0).map_or(0, |h| h.total)),
+        ),
+        (
+            "text GetProc",
+            fastest(|| find_text(&program, "GetProc", 0).map_or(0, |h| h.total)),
+        ),
+    ];
+    for (name, spent) in rows {
+        println!("{name}\t{spent:.2?}");
+    }
+    let page = borer_engine::table::Window::first(200);
+    let a64 = synthetic(Arch::Arm64, |k| 0x5280_0000 | ((k & 0xffff) << 5));
+    let a32 = synthetic(Arch::Arm, |k| {
+        0xe300_0000 | ((k & 0xf000) << 4) | (k & 0x0fff)
+    });
+    let cases = [
+        ("notepad", &program, "value:0x80000000,width=4"),
+        (
+            "notepad",
+            &program,
+            "value:0x1000..0x10ff,width=2 minus in=.text",
+        ),
+        ("arm64", &a64, "value:0x1234,width=4"),
+        ("arm32", &a32, "value:0x1234,width=4"),
+    ];
+    for (name, p, spec) in cases {
+        let spent = best_cold(p, |a| form::search_tsv(p, a, &o, spec, page));
+        let a = Analysis::compute(p);
+        let head = form::search_tsv(p, &a, &o, spec, page).expect("answers");
+        println!(
+            "{name} {spec}\t{spent:.2?} cold\t{}",
+            head.lines().next().unwrap_or_default()
+        );
+        assert!(
+            spent.as_millis() <= VALUE_SEARCH_MS,
+            "{name} {spec}: {spent:?}"
+        );
+    }
+}
+
+/// Instructions in a synthetic image of [`synthetic`].
+const SYNTHETIC_INSNS: u32 = 1 << 18;
+
+/// Returns an image of one function of [`SYNTHETIC_INSNS`] four-byte
+/// instructions, `word(k)` the `k`th, then a return, at 0x1000.
+///
+/// # Arguments
+///
+/// * `arch` - Arm64 or Arm (A32).
+/// * `word` - The `k`th instruction word.
+fn synthetic(arch: Arch, word: impl Fn(u32) -> u32) -> Program {
+    let ret: u32 = if arch == Arch::Arm64 {
+        0xd65f_03c0
+    } else {
+        0xe12f_ff1e
+    };
+    let code: Vec<u8> = (0..SYNTHETIC_INSNS)
+        .map(word)
+        .chain([ret])
+        .flat_map(u32::to_le_bytes)
+        .collect();
+    let len = u64::try_from(code.len()).unwrap_or(0);
+    let text = Section::mapped(".text", 0x1000, 0, len, false, true);
+    Program::raw(code, arch, 0, Some(0x1000), vec![text])
 }
