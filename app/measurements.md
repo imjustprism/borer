@@ -122,7 +122,7 @@ data directory of its own.
 ## Action bars
 
 `python scripts/run/app_measure.py` runs `--measure --phase actions`: on notepad.exe, then
-on the large DLL the list scroll loads, each action 50 times on the first functions by
+on the large DLL the list scroll loads, each action 120 times on the first functions by
 address that call another (xrefs lists the references to each), dispatched through
 the path its key takes. Ack is dispatch to the first presented frame whose stamp (active
 tab and its revision, its top line, the functions panel's row and filter, the go-to
@@ -132,7 +132,8 @@ after which no job runs, every open view shows the binary's state, no docked pan
 an older one (a closed panel marked to ask again when it opens is not older) and the stamp
 holds one more frame. Pan and zoom sweep 2 s each on notepad's 20 largest graphs and the large
 DLL's largest, timed by frame draw. A large DLL that is missing or too slow to analyze
-is printed as skipped; an action whose setup failed in more than 10% of its runs misses. A phase
+is printed as skipped; an action whose setup failed in more than 10% of its runs misses. With 120 runs, an ack's
+p99 is not its slowest sample, so one stall of the machine does not decide it. A phase
 still running after 45 minutes stops and prints a miss naming the runs it did not reach.
 The bars are `BARS` in `borer-app/src/measure/actions.rs`:
 

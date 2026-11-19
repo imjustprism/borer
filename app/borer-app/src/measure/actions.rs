@@ -39,7 +39,7 @@ use crate::worker::{
 };
 
 /// Timed runs of each action on each binary.
-const RUNS: usize = 50;
+const RUNS: usize = 120;
 
 /// Most a timed step may take to settle; one slower is counted late at this time.
 const LATE: Duration = Duration::from_secs(10);
@@ -1170,7 +1170,7 @@ mod tests {
     /// Panics if a run's setup opens a target it should find cold.
     #[test]
     fn no_run_warms_a_later_runs_target() {
-        let targets: Vec<Target> = (0..60u64)
+        let targets: Vec<Target> = (0..=u64::try_from(RUNS).unwrap())
             .map(|i| Target {
                 entry: 0x1000 + i,
                 name: format!("f{i}"),
@@ -1285,6 +1285,32 @@ mod tests {
         assert!(
             missed.is_empty(),
             "nothing timed, nothing else missed: {missed:?}"
+        );
+    }
+
+    /// One slow run of an action's [`RUNS`] is not its 99th percentile, so one stall of the
+    /// machine does not fail an ack bar; two slow runs are, and fail it.
+    #[test]
+    fn one_slow_run_is_not_the_99th_percentile() {
+        let with_slow = |slow: usize| -> Vec<String> {
+            let mut ack = of(RUNS - slow, 1_000_000);
+            ack.extend(of(slow, 100_000_000));
+            let times = Times {
+                settle: of(RUNS, 1_000_000),
+                ack,
+                ..Times::default()
+            };
+            let times = BTreeMap::from([((Bench::Notepad, Act::GoTo), times)]);
+            misses(&times, &BTreeMap::new())
+                .into_iter()
+                .filter(|m| m.contains("what=goto held=ack"))
+                .collect()
+        };
+        assert_eq!(with_slow(1), Vec::<String>::new());
+        let missed = with_slow(2);
+        assert!(
+            missed.iter().any(|m| m.contains("p99_ms=100.000")),
+            "{missed:?}"
         );
     }
 
