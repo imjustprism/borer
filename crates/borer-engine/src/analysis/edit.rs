@@ -229,7 +229,7 @@ impl Overlay {
     /// commits to the overlay it was copied from.
     #[must_use]
     pub fn edits_key(&self) -> u64 {
-        self.without_tables().fingerprint()
+        self.tables_left_key()
     }
 
     /// Tells whether the overlay holds at a change's entry what the change

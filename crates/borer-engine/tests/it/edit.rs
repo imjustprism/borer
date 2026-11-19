@@ -589,3 +589,37 @@ fn an_annotation_no_section_declares_is_refused_by_the_plan() {
         assert!(placed.is_ok(), "{what}: {placed:?}");
     }
 }
+
+/// The key of what an edit writes leaves out where the name tables come
+/// from and holds every name, so a plan made over a copy that reads the
+/// binary's tables commits to the overlay it was copied from.
+#[test]
+fn the_edits_key_ignores_the_tables_source_and_holds_the_names() {
+    use borer_engine::analysis::EnumSource;
+    let mut given = Overlay::default();
+    given.names.insert(0x1000, "start".to_owned());
+    let binary = Overlay {
+        enum_source: EnumSource::Binary,
+        ..given.clone()
+    };
+    assert_ne!(given.fingerprint(), binary.fingerprint());
+    assert_eq!(given.edits_key(), binary.edits_key());
+    let mut renamed = given.clone();
+    renamed.names.insert(0x1000, "main".to_owned());
+    assert_ne!(given.edits_key(), renamed.edits_key());
+    assert_ne!(Overlay::default().edits_key(), given.edits_key());
+}
+
+/// A user name is found whatever its case, past ASCII too: a name the
+/// overlay holds as `ÄRGER` is found by `ärger`, and `Start` by `START`.
+#[test]
+fn a_user_name_is_found_whatever_its_case() {
+    use borer_engine::analysis::resolve;
+    let p = fixture();
+    let a = Analysis::compute(&p);
+    let mut o = Overlay::default();
+    o.names.insert(0x7777_0000, "ÄRGER".to_owned());
+    o.names.insert(0x7777_0008, "Start".to_owned());
+    assert_eq!(resolve(&p, &a, &o, "ärger"), Ok(0x7777_0000));
+    assert_eq!(resolve(&p, &a, &o, "START"), Ok(0x7777_0008));
+}

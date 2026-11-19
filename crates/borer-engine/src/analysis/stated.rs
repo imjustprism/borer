@@ -1402,4 +1402,24 @@ mod tests {
             Overlay::default().fingerprint()
         );
     }
+
+    /// The key of what an edit writes, folded in place, is the fingerprint
+    /// of the copy without the name tables, their source and the passes.
+    ///
+    /// # Panics
+    ///
+    /// When the key differs from the copy's fingerprint.
+    #[test]
+    fn the_edits_key_folds_the_overlay_without_its_tables() {
+        let mut o = Overlay::default();
+        o.names.insert(0x1000, "start".to_owned());
+        o.comments.insert(0x1004, "the call".to_owned());
+        let o = Overlay {
+            enum_source: crate::analysis::EnumSource::Binary,
+            passes: crate::analysis::decompile::Passes::after(1),
+            ..o
+        };
+        assert_eq!(o.edits_key(), o.without_tables().fingerprint());
+        assert_ne!(o.edits_key(), o.fingerprint());
+    }
 }

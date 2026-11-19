@@ -1171,9 +1171,18 @@ fn in_force(overlay: &Overlay) -> [u64; 4] {
     [
         under(EnumSource::Given),
         under(EnumSource::Binary),
-        overlay.without_tables().fingerprint(),
+        overlay.tables_left_key(),
         Overlay::default().fingerprint(),
     ]
+}
+
+/// Whether a fingerprint folds the name tables and what is tried with them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tables {
+    /// Folds them: [`Overlay::fingerprint`].
+    Kept,
+    /// Leaves them out, as [`Overlay::without_tables`] would.
+    Left,
 }
 
 /// Derived analysis results: computed once per [`Program`] and shared.
@@ -1926,6 +1935,17 @@ impl Overlay {
     /// the other's text.
     #[must_use]
     pub fn fingerprint(&self) -> u64 {
+        self.folded(Tables::Kept)
+    }
+
+    /// Returns [`Overlay::fingerprint`], or with [`Tables::Left`] the
+    /// fingerprint of [`Overlay::without_tables`], folded in place.
+    ///
+    /// # Arguments
+    ///
+    /// * `tables` - Whether the name tables, their source, the passes left
+    ///   out and the choice points moved are folded in.
+    fn folded(&self, tables: Tables) -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
         let mut fold = |bytes: &[u8]| {
             for b in bytes {
@@ -1982,6 +2002,10 @@ impl Overlay {
                 fold(&[0]);
             }
         }
+        if tables == Tables::Left {
+            fold(&[0]);
+            return h;
+        }
         for (function, table) in self.enums.raw() {
             fold(function.as_bytes());
             fold(&[0]);
@@ -2011,6 +2035,14 @@ impl Overlay {
             }
         }
         h
+    }
+
+    /// Returns the fingerprint of the facts an edit writes: the
+    /// [`Overlay::fingerprint`] of [`Overlay::without_tables`], folded
+    /// without a copy.
+    #[must_use]
+    pub(crate) fn tables_left_key(&self) -> u64 {
+        self.folded(Tables::Left)
     }
 
     /// Returns the [`Overlay::fingerprint`] of these names without the
@@ -2561,6 +2593,21 @@ fn name_index(program: &Program, analysis: &Analysis) -> Arc<FxHashMap<String, V
     })
 }
 
+/// Tells whether `name` lowercases to `lower`, a text already lowercased,
+/// allocating only when either holds a character past ASCII.
+///
+/// # Arguments
+///
+/// * `name` - The name as stored.
+/// * `lower` - The lowercased text it is matched against.
+fn lower_eq(name: &str, lower: &str) -> bool {
+    if name.is_ascii() && lower.is_ascii() {
+        name.eq_ignore_ascii_case(lower)
+    } else {
+        name.to_lowercase() == lower
+    }
+}
+
 /// [`resolve`], with `miss` saying more about a name nothing matches.
 ///
 /// # Arguments
@@ -2599,7 +2646,7 @@ fn resolve_noting(
     }
     let mut hits: Vec<(u64, String)> = Vec::new();
     for (va, n) in &overlay.names {
-        if n.to_lowercase() == want {
+        if lower_eq(n, &want) {
             hits.push((*va, n.clone()));
         }
     }
