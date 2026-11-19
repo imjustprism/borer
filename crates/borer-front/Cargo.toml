@@ -14,6 +14,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+anyhow = "1.0.104"
 borer-engine = { version = "0.3.1", path = "../borer-engine" }
 schemars = "1.2.2"
 serde = { version = "1.0.229", features = ["derive"] }

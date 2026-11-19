@@ -504,6 +504,18 @@ pub struct AnnotationsParams {
     pub count_only: Option<bool>,
 }
 
+/// Parameters for `class_layout`.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ClassLayoutParams {
+    /// Class name or a method address.
+    pub class: String,
+    /// Struct name to define the layout as.
+    pub apply: Option<String>,
+    /// Preview only; false applies.
+    pub dry_run: Option<bool>,
+}
+
 /// Widens a count parameter to the index type.
 ///
 /// A `u32` fits a 32-bit or wider `usize`, so nothing is lost on any

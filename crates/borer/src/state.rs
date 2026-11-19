@@ -576,28 +576,6 @@ impl BorerServer {
         borer_engine::answer::address(p, text, || (self.analysis_or_empty(), self.overlay()))
     }
 
-    /// Resolves an argument to the entry of the discovered function containing it.
-    ///
-    /// # Arguments
-    ///
-    /// * `p` - The loaded program.
-    /// * `a` - Its analysis.
-    /// * `text` - Address or name (see [`Self::addr`]).
-    ///
-    /// # Errors
-    ///
-    /// When the text does not resolve or no function contains the address
-    /// ([`borer_engine::answer::entry_of`] says an import's slot is one).
-    pub(crate) fn function_entry(
-        &self,
-        p: &Program,
-        a: &Analysis,
-        text: &str,
-    ) -> Result<u64, String> {
-        let va = self.addr(p, text)?;
-        borer_engine::answer::entry_of(p, a, va, text)
-    }
-
     /// A server with nothing loaded, the packs `BORER_PACKS` names, live
     /// attaching opened to any process when `BORER_LIVE_ANY` is `1`, and
     /// the request deadline `BORER_DEADLINE_SECS` names.
@@ -770,16 +748,15 @@ impl Held for BorerServer {
         edits: &[Edit],
         force: Force,
         apply: Apply,
-    ) -> Result<Plan, String> {
+    ) -> anyhow::Result<Plan> {
         let (p, a, o) = (s.program(), s.analysis(), s.overlay());
-        let made = edit::plan(p, a, o, edits, force).map_err(|e| e.to_string())?;
+        let made = edit::plan(p, a, o, edits, force)?;
         if apply == Apply::Preview {
             return Ok(made);
         }
         self.commit((p, Some(s.program_arc())), made, |now| {
             edit::plan(p, a, &tabled(now), edits, force)
         })
-        .map_err(|e| e.to_string())
     }
 
     /// The answer is [`BorerServer::read_uri`]'s, which `resources/read`

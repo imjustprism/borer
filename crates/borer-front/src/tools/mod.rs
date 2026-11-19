@@ -20,6 +20,7 @@
 
 mod bytes;
 mod code;
+mod edit;
 mod held;
 pub mod params;
 mod read;
@@ -35,6 +36,7 @@ pub use code::{
     callgraph, cfg, class_field, decompile, disassemble_function, function, function_strings,
     function_summary, functions, reaches, xrefs,
 };
+pub use edit::class_layout;
 pub use held::{
     Apply, Cause, Failure, Find, Held, NO_BINARY, Snapshot, View, fault_text, guarded, run,
     snapshot, tabled,
@@ -121,6 +123,15 @@ pub struct Hints {
 /// The hints of a tool that only reads the program.
 const READS: Hints = Hints {
     read_only: true,
+    destructive: false,
+    idempotent: true,
+    open_world: false,
+};
+
+/// The hints of a tool that edits the session's names, comments or types,
+/// a dry run unless told otherwise.
+const EDITS: Hints = Hints {
+    read_only: false,
     destructive: false,
     idempotent: true,
     open_world: false,
@@ -323,10 +334,6 @@ fn slim_property(o: &mut Map<String, Value>, defs: &Map<String, Value>) {
 pub const SERVER_ONLY: &[(&str, &str)] = &[
     ("binary_info", "it lists the resources the MCP server holds"),
     (
-        "class_layout",
-        "with apply it saves a struct into the session: it joins with the edit tools",
-    ),
-    (
         "decompile_batch",
         "it decompiles on the MCP server's rayon pool, and with out writes files under its output root",
     ),
@@ -392,14 +399,18 @@ pub const SERVER_ONLY: &[(&str, &str)] = &[
 ];
 
 /// Builds a catalog row whose schema, parser and handler read one
-/// parameters type, the handler named as the tool.
+/// parameters type, the handler named as the tool; its hints are [`READS`]
+/// unless given.
 macro_rules! row {
     ($name:ident, $params:ident, $effects:expr, $description:literal) => {
+        row!($name, $params, $effects, READS, $description)
+    };
+    ($name:ident, $params:ident, $effects:expr, $hints:expr, $description:literal) => {
         Tool {
             name: stringify!($name),
             description: $description,
             effects: $effects,
-            hints: READS,
+            hints: $hints,
             schema: schema::<params::$params>,
             run: |h, args| $name(h, &parse::<params::$params>(&args)?),
         }
@@ -425,6 +436,13 @@ pub const TOOLS: &[Tool] = &[
         CfgParams,
         &[],
         "Draw a function's control-flow graph as mermaid: blocks and successor edges, 300 blocks a page, a %% line when cut. Not for reading logic (use decompile) or a block table (use function)."
+    ),
+    row!(
+        class_layout,
+        ClassLayoutParams,
+        &[Effect::ChangesSession],
+        EDITS,
+        "Infer a C++ class's fields, methods and vftable from how its methods use the object: offset, width, reads, writes; unnamed slots hint names their vtable family agrees on. For a known layout use set_type. apply=Name saves it as a struct (dry run until dry_run=false)."
     ),
     row!(
         decompile,

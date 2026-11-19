@@ -67,11 +67,11 @@ mod tests {
     use rmcp::handler::server::common::schema_for_input;
 
     use crate::params::{
-        AnnotationsParams, CallgraphParams, CfgParams, CryptoParams, DecompileParams,
-        DisassembleFunctionParams, DisassembleParams, EntropyParams, FindFunctionByStringParams,
-        FunctionDetailParams, FunctionParams, FunctionsParams, HexdumpParams, QueryParams,
-        ReachesParams, ReadParams, SearchParams, StringsParams, SymbolsParams, TypesParams,
-        XrefsParams,
+        AnnotationsParams, CallgraphParams, CfgParams, ClassLayoutParams, CryptoParams,
+        DecompileParams, DisassembleFunctionParams, DisassembleParams, EntropyParams,
+        FindFunctionByStringParams, FunctionDetailParams, FunctionParams, FunctionsParams,
+        HexdumpParams, QueryParams, ReachesParams, ReadParams, SearchParams, StringsParams,
+        SymbolsParams, TypesParams, XrefsParams,
     };
 
     /// The tool list the app builds from the catalog is the MCP server's,
@@ -100,6 +100,16 @@ mod tests {
             assert_eq!(*listed.input_schema, t.input_schema(), "{}", t.name);
             let hints = listed.annotations.expect("annotated");
             assert_eq!(hints.read_only_hint, Some(t.hints.read_only), "{}", t.name);
+            let writes = !t.hints.read_only;
+            assert_eq!(
+                (hints.destructive_hint, hints.idempotent_hint),
+                (
+                    writes.then_some(t.hints.destructive),
+                    writes.then_some(t.hints.idempotent)
+                ),
+                "{}",
+                t.name
+            );
             assert_eq!(
                 hints.open_world_hint,
                 Some(t.hints.open_world),
@@ -111,6 +121,7 @@ mod tests {
             ("annotations", schema_for_input::<AnnotationsParams>()),
             ("callgraph", schema_for_input::<CallgraphParams>()),
             ("cfg", schema_for_input::<CfgParams>()),
+            ("class_layout", schema_for_input::<ClassLayoutParams>()),
             ("decompile", schema_for_input::<DecompileParams>()),
             ("disassemble", schema_for_input::<DisassembleParams>()),
             (
@@ -182,6 +193,13 @@ mod tests {
             ("annotations", serde_json::json!({})),
             ("callgraph", serde_json::json!({"address": "0x1000"})),
             ("cfg", serde_json::json!({"address": "0x1000"})),
+            ("class_layout", serde_json::json!({"class": "C"})),
+            ("class_layout", serde_json::json!({"class": "0x1000"})),
+            (
+                "class_layout",
+                serde_json::json!({"class": "C", "apply": "CL"}),
+            ),
+            ("class_layout", serde_json::json!({"klass": "C"})),
             ("decompile", serde_json::json!({"address": "0x1000"})),
             (
                 "disassemble",

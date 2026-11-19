@@ -202,8 +202,10 @@ pub trait Held {
     /// through, so a face decides whether a plan lands or waits as a
     /// proposal.
     ///
-    /// This default only plans: a face that holds proposals for a person
-    /// keeps the plan it returns.
+    /// This default only plans, whatever `apply` asks: a face that holds
+    /// proposals for a person overrides it to keep the plan, which the
+    /// tool's answer words as applied when `apply` asked, so the face shows
+    /// it as a proposal and never commits it from the handler.
     ///
     /// # Arguments
     ///
@@ -218,16 +220,16 @@ pub trait Held {
     ///
     /// # Errors
     ///
-    /// When an edit is refused or the edits would pass a cap; nothing was
-    /// applied.
+    /// An [`edit::Refused`] naming the edit refused, or the cap the edits
+    /// would pass; nothing was applied.
     fn edit(
         &self,
         s: &Snapshot<'_>,
         edits: &[Edit],
         force: Force,
         _apply: Apply,
-    ) -> Result<Plan, String> {
-        edit::plan(s.program(), s.analysis(), s.overlay(), edits, force).map_err(|e| e.to_string())
+    ) -> anyhow::Result<Plan> {
+        edit::plan(s.program(), s.analysis(), s.overlay(), edits, force)
     }
 
     /// Answers a `borer://` resource URI as the `query` tool reads it, page
@@ -434,8 +436,9 @@ impl Snapshot<'_> {
     ///
     /// # Errors
     ///
-    /// When an edit is refused or the edits would pass a cap.
-    pub fn edit(&self, edits: &[Edit], force: Force, apply: Apply) -> Result<Plan, String> {
+    /// An [`edit::Refused`] naming the edit refused, the cap the edits
+    /// would pass, or why the face did not commit.
+    pub fn edit(&self, edits: &[Edit], force: Force, apply: Apply) -> anyhow::Result<Plan> {
         self.held.edit(self, edits, force, apply)
     }
 }

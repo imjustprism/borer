@@ -85,18 +85,6 @@ pub(crate) struct ExplainFunctionArgs {
     pub(crate) address: String,
 }
 
-/// Parameters for `class_layout`.
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ClassLayoutParams {
-    /// Class name or a method address.
-    pub(crate) class: String,
-    /// Struct name to define the layout as.
-    pub(crate) apply: Option<String>,
-    /// Preview only; false applies.
-    pub(crate) dry_run: Option<bool>,
-}
-
 /// Parameters for `script`.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]

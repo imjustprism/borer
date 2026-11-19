@@ -107,6 +107,23 @@ pub(crate) fn tiny_server() -> crate::BorerServer {
     code_server(borer_engine::program::Arch::X86_64, &[0xc3])
 }
 
+impl crate::BorerServer {
+    /// Runs the catalog's `class_layout` over the server ([`call`]), as the
+    /// tests written against the server's own handler call it.
+    ///
+    /// # Errors
+    ///
+    /// The tool's failure.
+    pub(crate) fn class_layout(
+        &self,
+        rmcp::handler::server::wrapper::Parameters(p): rmcp::handler::server::wrapper::Parameters<
+            crate::params::ClassLayoutParams,
+        >,
+    ) -> Result<String, rmcp::ErrorData> {
+        call(borer_front::tools::class_layout, self, &p)
+    }
+}
+
 /// Runs a catalog tool over a server, its failure as the server's tools
 /// answer one ([`crate::errors::failed`]).
 ///

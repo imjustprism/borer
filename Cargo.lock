@@ -124,6 +124,7 @@ version = "0.3.1"
 name = "borer-front"
 version = "0.3.1"
 dependencies = [
+ "anyhow",
  "borer-engine",
  "schemars",
  "serde",

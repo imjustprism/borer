@@ -148,7 +148,6 @@ impl BorerServer {
             };
             tools::catalog()
                 + BorerServer::load_tools()
-                + BorerServer::function_tools()
                 + BorerServer::decompile_tools()
                 + BorerServer::annotate_tools()
                 + live
