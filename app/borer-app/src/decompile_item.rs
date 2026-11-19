@@ -39,7 +39,7 @@ use crate::actions::{
     BACK_HINT, FollowLink, Hint, NextWrongBlock, PreviousWrongBlock, RecheckBlock, ShowCheck,
     ShowHex, ToggleListing, Xrefs,
 };
-use crate::binary::{Binary, BinaryEvent, Digest, Revision};
+use crate::binary::{Binary, BinaryEvent, Revision};
 use crate::card::{Card, Tone};
 use crate::check_marks::{MarkHits, Marks, Toward, glyph_layer, paint_gutter};
 use crate::code_semantics::for_one_view;
@@ -1164,18 +1164,6 @@ impl Revision for DecompileItem {
     fn revision(&self) -> Option<u64> {
         self.revision
     }
-
-    fn digest(&self, _cx: &App) -> u64 {
-        let failed = self.failed.as_deref().unwrap_or_default();
-        let d = Digest::default()
-            .text(&format!("{:?}", self.form))
-            .text(failed);
-        let Some(code) = self.code.as_deref() else {
-            return d.value();
-        };
-        let d = code.digest(d);
-        self.marks().map_or(d, |m| m.digest(code, d)).value()
-    }
 }
 
 impl Focusable for DecompileItem {
@@ -1369,6 +1357,21 @@ impl Render for DecompileItem {
             .child(self.editor.clone())
             .child(marks)
             .children(over.map(|over| div().absolute().inset_0().child(over)))
+    }
+}
+
+#[cfg(test)]
+impl crate::binary::Digested for DecompileItem {
+    fn digest(&self, _cx: &App) -> u64 {
+        let failed = self.failed.as_deref().unwrap_or_default();
+        let d = crate::binary::Digest::default()
+            .text(&format!("{:?}", self.form))
+            .text(failed);
+        let Some(code) = self.code.as_deref() else {
+            return d.value();
+        };
+        let d = code.digest(d);
+        self.marks().map_or(d, |m| m.digest(code, d)).value()
     }
 }
 

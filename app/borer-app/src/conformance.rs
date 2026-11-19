@@ -9,22 +9,26 @@ use std::sync::Arc;
 
 use borer_engine::analysis::utypes::{TypeKind, TypeSource};
 use borer_engine::progress::Workers;
-use gpui::{Entity, TestAppContext, VisualTestContext};
-use workspace::{AppState, Workspace};
+use gpui::{App, Entity, TestAppContext, VisualTestContext};
+use workspace::{AppState, ItemHandle, Workspace};
 
 use crate::app_view::REFUSED_FOLDER;
 use crate::app_view::tests::{
     CALLER, drop_on_center, init, load_sample, open, open_place, sample, take_status,
 };
-use crate::binary::{Digest, Revision as _};
+use crate::binary::{Digest, Digested};
 use crate::card::CARD_SELECTOR;
 use crate::decompile_item::{DecompileItem, TabMode};
 use crate::functions_panel::FunctionsPanel;
+use crate::graph_item::GraphItem;
+use crate::hex_item::HexItem;
+use crate::linear_item::LinearItem;
+use crate::overview::OverviewItem;
 use crate::panels::PANELS;
-use crate::places::{Place, place_of, view_of};
+use crate::places::{Place, place_of};
 use crate::rows_panel::HEADER_SELECTOR;
 use crate::start_item::StartItem;
-use crate::types::TypeKey;
+use crate::types::{StructItem, TypeKey};
 use crate::worker::{Jobs, LoadedBinary, Referent};
 
 /// The panels the suite runs over, by key, in [`PANELS`] order.
@@ -219,6 +223,20 @@ async fn a_folder_dropped_on_any_tab_never_joins_the_project(cx: &mut TestAppCon
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// Returns the digest of what `item` shows, `None` for an item that shows no binary.
+fn digest_of(item: &dyn ItemHandle, cx: &App) -> Option<u64> {
+    /// Returns the digest of `item` as a `T`, `None` when it is another kind.
+    fn of<T: Digested + 'static>(item: &dyn ItemHandle, cx: &App) -> Option<u64> {
+        Some(item.downcast::<T>()?.read(cx).digest(cx))
+    }
+    of::<DecompileItem>(item, cx)
+        .or_else(|| of::<GraphItem>(item, cx))
+        .or_else(|| of::<OverviewItem>(item, cx))
+        .or_else(|| of::<LinearItem>(item, cx))
+        .or_else(|| of::<HexItem>(item, cx))
+        .or_else(|| of::<StructItem>(item, cx))
+}
+
 /// Returns the digest of every place of [`places`], each named by its place, and of the
 /// functions panel.
 ///
@@ -242,7 +260,7 @@ fn digests(
             draw(cx);
             let digest = app.workspace.read_with(cx, |workspace, cx| {
                 let item = workspace.active_item(cx).unwrap();
-                view_of(item.as_ref(), cx).unwrap().digest(cx)
+                digest_of(item.as_ref(), cx).unwrap()
             });
             out.push((format!("{place:?}"), digest));
         }

@@ -11,7 +11,6 @@ use std::sync::Arc;
 use borer_engine::analysis::decompile::replay::{BlockAnswer, Grade, TextCheck};
 use borer_engine::analysis::name_of;
 use borer_engine::analysis::render::{Cfg, Cut, EdgeKind};
-use borer_engine::num::from_usize;
 use gpui::{
     App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, Hsla,
     InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
@@ -29,7 +28,7 @@ use crate::actions::{
     BACK_HINT, FitGraph, FollowLink, ShowCheck, ShowGraph, ToggleGraph, WalkDown, WalkLeft,
     WalkRight, WalkUp, ZoomIn, ZoomOut,
 };
-use crate::binary::{Binary, BinaryEvent, Digest, Revision};
+use crate::binary::{Binary, BinaryEvent, Revision};
 use crate::card::{Card, Tone};
 use crate::code_view::{ClickOutcome, CodePalette, Role, resolve_ref_click};
 use crate::commands;
@@ -937,25 +936,6 @@ impl Revision for GraphItem {
     fn revision(&self) -> Option<u64> {
         Some(self.loaded.fingerprint)
     }
-
-    fn digest(&self, _cx: &App) -> u64 {
-        let mut d = Digest::default().text(self.failed.as_deref().unwrap_or_default());
-        if let Some(graph) = &self.graph {
-            let listing = &graph.listing;
-            d = (0..listing.lines()).fold(d, |d, line| d.line(listing, line));
-            for node in &graph.nodes {
-                let rows = (from_usize(node.lines.start), from_usize(node.lines.end));
-                d = d.num(node.start).num(node.end).num(rows.0).num(rows.1);
-            }
-            for edge in &graph.edges {
-                let ends = d.num(from_usize(edge.from)).num(from_usize(edge.to));
-                d = ends.text(&format!("{:?} {}", edge.kind, edge.back));
-            }
-            d = d.text(&format!("{:?}", graph.cut));
-        }
-        let graded = self.grades.iter().fold(d, |d, g| d.text(&format!("{g:?}")));
-        graded.num(from_usize(self.selected)).value()
-    }
 }
 
 impl Item for GraphItem {
@@ -1053,6 +1033,30 @@ impl Render for GraphItem {
                 )
         });
         root.child(toolbar).child(body).children(evidence)
+    }
+}
+
+#[cfg(test)]
+impl crate::binary::Digested for GraphItem {
+    fn digest(&self, _cx: &App) -> u64 {
+        use borer_engine::num::from_usize;
+        let mut d =
+            crate::binary::Digest::default().text(self.failed.as_deref().unwrap_or_default());
+        if let Some(graph) = &self.graph {
+            let listing = &graph.listing;
+            d = (0..listing.lines()).fold(d, |d, line| d.line(listing, line));
+            for node in &graph.nodes {
+                let rows = (from_usize(node.lines.start), from_usize(node.lines.end));
+                d = d.num(node.start).num(node.end).num(rows.0).num(rows.1);
+            }
+            for edge in &graph.edges {
+                let ends = d.num(from_usize(edge.from)).num(from_usize(edge.to));
+                d = ends.text(&format!("{:?} {}", edge.kind, edge.back));
+            }
+            d = d.text(&format!("{:?}", graph.cut));
+        }
+        let graded = self.grades.iter().fold(d, |d, g| d.text(&format!("{g:?}")));
+        graded.num(from_usize(self.selected)).value()
     }
 }
 

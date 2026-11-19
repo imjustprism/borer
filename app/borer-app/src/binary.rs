@@ -19,8 +19,6 @@ use ui::{Color, Label, LabelCommon as _, LabelSize, h_flex};
 use workspace::{HideStatusItem, ItemHandle, StatusItemView, Workspace};
 
 use borer_engine::cancel::Cancel;
-use borer_engine::num::from_usize;
-use borer_engine::view::View;
 
 use crate::actions::{OpenProject, SaveProject, SaveProjectAs};
 use crate::commands;
@@ -98,82 +96,6 @@ pub trait Revision {
     /// Returns the [`LoadedBinary::fingerprint`] of the state the view shows, `None` while it
     /// shows none.
     fn revision(&self) -> Option<u64>;
-
-    /// Returns a [`Digest`] of what the view shows: its text and token kinds, its marks and
-    /// its row cells, never an address in memory or an entity id.
-    ///
-    /// # Arguments
-    ///
-    /// * `cx` - Application context reading the view's parts.
-    fn digest(&self, cx: &App) -> u64;
-}
-
-/// A 64-bit FNV-1a fold of what a view shows: a fixed fold, like
-/// [`borer_engine::analysis::Overlay::fingerprint`], so one content gives one digest in
-/// every process and at every engine worker count.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Digest(u64);
-
-impl Default for Digest {
-    fn default() -> Self {
-        Self(0xcbf2_9ce4_8422_2325)
-    }
-}
-
-impl Digest {
-    /// Returns the fold with `bytes` added.
-    ///
-    /// # Arguments
-    ///
-    /// * `bytes` - What to add.
-    #[must_use]
-    pub fn bytes(self, bytes: &[u8]) -> Self {
-        Self(bytes.iter().fold(self.0, |h, b| {
-            (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3)
-        }))
-    }
-
-    /// Returns the fold with `n` added, little-endian.
-    ///
-    /// # Arguments
-    ///
-    /// * `n` - What to add.
-    #[must_use]
-    pub fn num(self, n: u64) -> Self {
-        self.bytes(&n.to_le_bytes())
-    }
-
-    /// Returns the fold with `text` added after its length, so two texts never run into
-    /// one.
-    ///
-    /// # Arguments
-    ///
-    /// * `text` - What to add.
-    #[must_use]
-    pub fn text(self, text: &str) -> Self {
-        self.num(from_usize(text.len())).bytes(text.as_bytes())
-    }
-
-    /// Returns the fold with line `line` of `view` added: its text, then each token's end
-    /// and kind.
-    ///
-    /// # Arguments
-    ///
-    /// * `view` - The view.
-    /// * `line` - The line, from 0.
-    #[must_use]
-    pub fn line(self, view: &View, line: usize) -> Self {
-        let text = self.text(view.line(line).unwrap_or_default());
-        view.tokens(line).fold(text, |d, (span, kind, _)| {
-            d.num(from_usize(span.end)).text(&format!("{kind:?}"))
-        })
-    }
-
-    /// Returns the fold as a number.
-    #[must_use]
-    pub const fn value(self) -> u64 {
-        self.0
-    }
 }
 
 /// What the window title ends the binary's name with while its overlay holds edits no
@@ -1456,6 +1378,91 @@ impl StatusItemView for StatusLine {
 
     fn hide_setting(&self, _cx: &App) -> Option<HideStatusItem> {
         None
+    }
+}
+
+#[cfg(test)]
+/// A view whose content folds into a [`Digest`], so a check can hold two views equal.
+pub trait Digested {
+    /// Returns a [`Digest`] of what the view shows: its text and token kinds, its marks and
+    /// its row cells, never an address in memory or an entity id.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Application context reading the view's parts.
+    fn digest(&self, cx: &App) -> u64;
+}
+
+/// A 64-bit FNV-1a fold of what a view shows: a fixed fold, like
+/// [`borer_engine::analysis::Overlay::fingerprint`], so one content gives one digest in
+/// every process and at every engine worker count.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Digest(u64);
+
+#[cfg(test)]
+impl Default for Digest {
+    fn default() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+}
+
+#[cfg(test)]
+impl Digest {
+    /// Returns the fold with `bytes` added.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - What to add.
+    #[must_use]
+    pub fn bytes(self, bytes: &[u8]) -> Self {
+        Self(bytes.iter().fold(self.0, |h, b| {
+            (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3)
+        }))
+    }
+
+    /// Returns the fold with `n` added, little-endian.
+    ///
+    /// # Arguments
+    ///
+    /// * `n` - What to add.
+    #[must_use]
+    pub fn num(self, n: u64) -> Self {
+        self.bytes(&n.to_le_bytes())
+    }
+
+    /// Returns the fold with `text` added after its length, so two texts never run into
+    /// one.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - What to add.
+    #[must_use]
+    pub fn text(self, text: &str) -> Self {
+        self.num(borer_engine::num::from_usize(text.len()))
+            .bytes(text.as_bytes())
+    }
+
+    /// Returns the fold with line `line` of `view` added: its text, then each token's end
+    /// and kind.
+    ///
+    /// # Arguments
+    ///
+    /// * `view` - The view.
+    /// * `line` - The line, from 0.
+    #[must_use]
+    pub fn line(self, view: &borer_engine::view::View, line: usize) -> Self {
+        let text = self.text(view.line(line).unwrap_or_default());
+        view.tokens(line).fold(text, |d, (span, kind, _)| {
+            d.num(borer_engine::num::from_usize(span.end))
+                .text(&format!("{kind:?}"))
+        })
+    }
+
+    /// Returns the fold as a number.
+    #[must_use]
+    pub const fn value(self) -> u64 {
+        self.0
     }
 }
 

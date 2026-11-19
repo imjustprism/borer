@@ -38,7 +38,7 @@ use ui::{Icon, IconName, Tooltip};
 use workspace::{Item, Workspace};
 
 use crate::actions::{BACK_HINT, FollowLink, Hint, ShowInLinear, ShowLinear};
-use crate::binary::{Binary, BinaryEvent, Digest, Revision};
+use crate::binary::{Binary, BinaryEvent, Revision};
 use crate::card::{Card, Tone};
 use crate::code_semantics::ViewSemantics;
 use crate::code_view::CodeLines;
@@ -992,18 +992,6 @@ impl Revision for LinearItem {
     fn revision(&self) -> Option<u64> {
         Some(self.loaded.fingerprint)
     }
-
-    fn digest(&self, _cx: &App) -> u64 {
-        let failed = self.failed.as_deref().unwrap_or_default();
-        let d = Digest::default()
-            .text(&format!("{:?}", self.range))
-            .text(failed);
-        let d = self
-            .band
-            .iter()
-            .fold(d, |d, cell| d.text(&format!("{cell:?}")));
-        self.pages.lines().digest(d).value()
-    }
 }
 
 impl Item for LinearItem {
@@ -1041,6 +1029,21 @@ impl Render for LinearItem {
             )
             .child(self.render_cells(cx))
             .child(self.render_scrollbar(cx))
+    }
+}
+
+#[cfg(test)]
+impl crate::binary::Digested for LinearItem {
+    fn digest(&self, _cx: &App) -> u64 {
+        let failed = self.failed.as_deref().unwrap_or_default();
+        let d = crate::binary::Digest::default()
+            .text(&format!("{:?}", self.range))
+            .text(failed);
+        let d = self
+            .band
+            .iter()
+            .fold(d, |d, cell| d.text(&format!("{cell:?}")));
+        self.pages.lines().digest(d).value()
     }
 }
 

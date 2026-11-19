@@ -371,7 +371,7 @@ mod tests {
     use super::RECHECK_STATES;
     use crate::actions::NextWrongBlock;
     use crate::app_view::tests::{binary_in, init, open};
-    use crate::binary::{Binary, BinaryEvent, RECHECKED_MAX, Revision as _};
+    use crate::binary::{Binary, BinaryEvent, Digested as _, RECHECKED_MAX};
     use crate::check_marks::line_block;
     use crate::check_marks::tests::{FLOAT_BETWEEN, STORE, one_function, wrong_at};
     use crate::decompile_item::tests::{open_tab, put_cursor};

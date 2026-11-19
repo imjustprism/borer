@@ -30,7 +30,6 @@ use language::Point;
 use theme::ActiveTheme as _;
 use ui::{Color, Label, LabelCommon as _};
 
-use crate::binary::Digest;
 use crate::code_view::CodeLines;
 use crate::decompile_item::{buffer_row, whole_rows};
 use crate::status::grade_color;
@@ -285,20 +284,6 @@ impl Marks {
             }
         })
     }
-
-    /// Returns `digest` with the grade of every shown line of `code` folded in, a line
-    /// with no mark as none.
-    ///
-    /// # Arguments
-    ///
-    /// * `code` - The lines the marks were made for.
-    /// * `digest` - The fold so far.
-    #[must_use]
-    pub fn digest(&self, code: &CodeLines, digest: Digest) -> Digest {
-        (0..code.len()).fold(digest, |d, row| {
-            d.text(self.grade(code, row).map_or("", glyph))
-        })
-    }
 }
 
 /// The key of the gutter highlight of the lines one grade marks: Zed keys a gutter
@@ -480,6 +465,23 @@ pub fn glyph_layer(
     )
     .absolute()
     .inset_0()
+}
+
+#[cfg(test)]
+impl Marks {
+    /// Returns `digest` with the grade of every shown line of `code` folded in, a line
+    /// with no mark as none.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - The lines the marks were made for.
+    /// * `digest` - The fold so far.
+    #[must_use]
+    pub fn digest(&self, code: &CodeLines, digest: crate::binary::Digest) -> crate::binary::Digest {
+        (0..code.len()).fold(digest, |d, row| {
+            d.text(self.grade(code, row).map_or("", glyph))
+        })
+    }
 }
 
 #[cfg(test)]

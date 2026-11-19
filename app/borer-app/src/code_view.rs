@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use borer_engine::view::{Kind, Ref, View};
 
-use crate::binary::Digest;
 use gpui::Hsla;
 use theme::Theme;
 
@@ -268,18 +267,6 @@ impl CodeLines {
         Some((self.views.get(v)?, l))
     }
 
-    /// Returns `digest` with every shown line folded in, in order ([`Digest::line`]).
-    ///
-    /// # Arguments
-    ///
-    /// * `digest` - The fold so far.
-    #[must_use]
-    pub fn digest(&self, digest: Digest) -> Digest {
-        (0..self.len())
-            .filter_map(|ix| self.get(ix))
-            .fold(digest, |d, (view, line)| d.line(view, line))
-    }
-
     /// Returns the text the editor holds: the shown lines joined by newlines, so row `i` of
     /// the text is shown line `i`, and one view's text is its [`View::spell`] byte for byte.
     #[must_use]
@@ -434,6 +421,21 @@ pub fn describe(text: &str, kind: Kind, link: Option<&Ref>) -> String {
         Some(Ref::Comment(va)) => format!("the comment at {va:#x}"),
     };
     format!("{text}: {what}, links to {to}")
+}
+
+#[cfg(test)]
+impl CodeLines {
+    /// Returns `digest` with every shown line folded in, in order ([`crate::binary::Digest::line`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `digest` - The fold so far.
+    #[must_use]
+    pub fn digest(&self, digest: crate::binary::Digest) -> crate::binary::Digest {
+        (0..self.len())
+            .filter_map(|ix| self.get(ix))
+            .fold(digest, |d, (view, line)| d.line(view, line))
+    }
 }
 
 #[cfg(test)]
