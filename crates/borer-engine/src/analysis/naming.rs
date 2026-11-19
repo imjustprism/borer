@@ -805,13 +805,27 @@ fn last_token(head: &str) -> &str {
 
 /// Removes elaborated-type keywords and collapses whitespace runs.
 ///
+/// A keyword is removed only as a whole word, at the start or after a byte
+/// that is no identifier byte, so `my_class *` keeps its name.
+///
 /// # Arguments
 ///
 /// * `name` - The raw type or qualified name.
 fn strip_keywords(name: &str) -> String {
-    let mut out = name.to_owned();
-    for k in KEYWORDS {
-        out = out.replace(k, "");
+    let mut out = String::with_capacity(name.len());
+    let mut rest = name;
+    while let Some(c) = rest.chars().next() {
+        let word_start = !out.ends_with(|p: char| p.is_ascii_alphanumeric() || p == '_');
+        if let Some(after) = KEYWORDS
+            .iter()
+            .find_map(|k| rest.strip_prefix(k))
+            .filter(|_| word_start)
+        {
+            rest = after;
+            continue;
+        }
+        out.push(c);
+        rest = rest.get(c.len_utf8()..).unwrap_or("");
     }
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -912,6 +926,27 @@ mod tests {
         assert!(parse_signature("Failed to open file (%s)").is_none());
         assert!(parse_signature("Error in function main(int)").is_none());
         assert!(parse_signature("call foo() now").is_none());
+    }
+
+    /// An elaborated-type keyword is dropped only as a whole word, never
+    /// from the tail of an identifier that ends in one.
+    ///
+    /// # Panics
+    ///
+    /// When a name, return type or parameter loses part of an identifier.
+    #[test]
+    fn keywords_drop_only_as_whole_words() {
+        let s = parse_signature(
+            "class UI::Subclass *__cdecl Box<class my_class *>::Get(const struct my_struct &)",
+        )
+        .expect("msvc signature");
+        assert_eq!(s.name, "Box<my_class *>::Get");
+        assert_eq!(s.ret, "UI::Subclass *");
+        assert_eq!(s.params, vec!["const my_struct &"]);
+        let s = parse_signature("union my_union __cdecl Kind::Of(enum my_enum, int)")
+            .expect("by-value union return");
+        assert_eq!(s.ret, "my_union");
+        assert_eq!(s.params, vec!["my_enum", "int"]);
     }
 
     /// A chain of functions, each referencing its own name and the one

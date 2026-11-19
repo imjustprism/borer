@@ -629,6 +629,27 @@ fn template_signatures_show_whole_and_name_nothing() {
     assert!(field_names(&p, &a, &o, "Pool<T, A>").is_empty());
 }
 
+/// An MSVC signature whose identifiers end in `class` and `struct` names
+/// its method and types its parameter whole.
+///
+/// The elaborated-type keywords were dropped wherever their bytes stood,
+/// so the method was named `Box<my_*>::Get` and its parameter typed
+/// `const my_&`.
+#[test]
+fn a_keyword_ending_an_identifier_stays_in_it() {
+    let sig = "class UI::Subclass *__cdecl Box<class my_class *>::Get(const struct my_struct &)";
+    let p = image(
+        &[(0x1100, Guard::Field(0x10), CNT, 0x2200, sig)],
+        &[(CNT, b"this->m_count\0")],
+    );
+    let a = Analysis::compute(&p);
+    let name = a.function(0x1100).and_then(|f| f.name.clone());
+    assert_eq!(name.as_deref(), Some("Box<my_class *>::Get"));
+    let text = decompile(&p, &a, &Overlay::default(), 0x1100).expect("decompiles");
+    let line = "// signature: UI::Subclass *Box<my_class *>::Get(Box<my_class *> *this, const my_struct &a2)\n";
+    assert!(text.contains(line) && !text.contains("my_&"), "{text}");
+}
+
 /// A template method named and declared by hand, its `this` read, casts
 /// no vote for its class's fields from its assert, as before template
 /// signatures were shown whole.
