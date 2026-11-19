@@ -5,8 +5,9 @@
 //! `OpenRouter`, Ollama and LM Studio.
 //!
 //! Nothing is registered anywhere: a provider is asked for its models only when the person
-//! picks it, through the one HTTP client the chat hands providers ([`ChatHttp`]); the app's
-//! own HTTP client stays blocked. Keys come from the provider's environment variable or the
+//! picks it, through the one HTTP client the chat hands providers ([`ChatHttp`]); Zed's
+//! app-wide HTTP client stays blocked, and the update check builds its own off the UI
+//! thread ([`crate::update`]). Keys come from the provider's environment variable or the
 //! system keychain, under the chat's own entry for the provider's URL ([`key_entry`]).
 
 use std::sync::Arc;
@@ -519,7 +520,8 @@ pub async fn save_key(url: &str, key: Option<&str>, cx: &AsyncApp) -> anyhow::Re
     }
 }
 
-/// The one HTTP client the chat hands its providers, built on the first pick.
+/// The one HTTP client the chat hands its providers, built on the first pick; the update
+/// check ([`crate::update`]) never uses it.
 pub struct ChatHttp(pub Arc<dyn HttpClient>);
 
 impl Global for ChatHttp {}

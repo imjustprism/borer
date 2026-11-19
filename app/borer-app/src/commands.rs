@@ -951,6 +951,12 @@ pub const COMMANDS: &[Command] = &[
         (MenuName::Help, 1),
         Need::Nothing,
     ),
+    item(
+        "borer::CheckForUpdates",
+        "Check for Updates",
+        (MenuName::Help, 1),
+        Need::Nothing,
+    ),
     Command {
         replaces: &["app_menu::OpenApplicationMenu"],
         ..binding(

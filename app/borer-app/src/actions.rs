@@ -29,6 +29,8 @@ gpui::actions!(
         ToggleListing,
         /// Closes the open binary, its tabs and its panels, and shows the welcome column.
         CloseBinary,
+        /// Asks GitHub for the latest release of borer now and says whether it is newer.
+        CheckForUpdates,
         /// Minimizes the window.
         MinimizeWindow,
         /// Maximizes the window, or restores it when it is maximized.

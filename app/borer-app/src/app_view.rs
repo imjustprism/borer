@@ -41,7 +41,7 @@ use workspace::{
     WorkspaceStore,
 };
 
-use crate::actions::{CloseBinary, MinimizeWindow, Open, ZoomWindow};
+use crate::actions::{CheckForUpdates, CloseBinary, MinimizeWindow, Open, ZoomWindow};
 use crate::app_dirs::with_host_env;
 use crate::binary::{Binary, BinaryEvent, StatusLine};
 use crate::commands;
@@ -655,6 +655,8 @@ pub fn add_functions_panel(
 /// open, Zed's add folder (which opens a binary), close, the settings file, minimize, zoom
 /// and about.
 ///
+/// Check for Updates runs [`crate::update::check_now`].
+///
 /// Zed's theme-mode toggle is answered here, before Zed's own handler, so it writes the
 /// app's settings file as [`crate::actions::ToggleTheme`] does.
 ///
@@ -700,6 +702,13 @@ pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
         binary,
         |_, _: &zed_actions::About, window, cx| {
             about(window, cx);
+        },
+    );
+    commands::register(
+        workspace,
+        binary,
+        |workspace, _: &CheckForUpdates, _, cx| {
+            crate::update::check_now(workspace, cx);
         },
     );
 }

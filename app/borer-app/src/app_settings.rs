@@ -173,6 +173,17 @@ fn file_notice(cx: &App) -> Option<SharedString> {
     Some(format!("settings file {how}: {error}").into())
 }
 
+/// Returns whether the person's settings file loaded and every field of it applied, so a
+/// `false` in it is in force; a file that was refused, did not parse or applied only in part
+/// returns false.
+///
+/// # Arguments
+///
+/// * `cx` - Application context reading Zed's settings store.
+pub(crate) fn file_applied(cx: &App) -> bool {
+    cx.global::<SettingsStore>().raw_user_settings().is_some() && file_notice(cx).is_none()
+}
+
 /// Writes `change` of the theme mode to the person's settings file through Zed's settings
 /// store, which applies it, and puts any failure on the status line.
 ///

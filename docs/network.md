@@ -5,6 +5,22 @@ borer has no telemetry or crash reporting. Only these reach the network:
 - A command line run at a terminal checks once a day for a newer release on
   GitHub. It never runs for the MCP server or under `CI`, and
   `BORER_NO_UPDATE_CHECK=1` turns it off.
+- The desktop app checks for a newer release 5 seconds after its window
+  opens, once a day while it runs, and when Check for Updates is picked in
+  its command palette: one `GET` of
+  `https://api.github.com/repos/imjustprism/borer/releases/latest` with only
+  `User-Agent: borer-app/<version>` and `Accept: application/vnd.github+json`,
+  no redirect followed. `BORER_NO_UPDATE_CHECK=1` or `"auto_update": false`
+  in its settings file turns it off, and so does a settings file that does
+  not load in full; the app reads that file at launch, so a change made
+  outside the app counts after a restart. Nothing is downloaded.
+- The desktop app's chat, only once a person picks a provider, talks to that
+  provider's host and nowhere else: Anthropic, OpenAI, Google AI or
+  OpenRouter, or the Ollama or LM Studio address in the settings
+  (`localhost` by default). It lists the provider's models, then sends each
+  turn's conversation (the person's messages, the tools' descriptions and
+  the tool results, which quote the open binary) with the provider's key,
+  following no redirect.
 - `fetch_pdb`, only when asked, sends the PDB's name, GUID and age to the
   symbol server, and `borer doctor` checks that server is reachable unless
   run as `borer doctor offline`.

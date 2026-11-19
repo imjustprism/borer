@@ -1,5 +1,6 @@
 //! The window's title bar, drawn by the app over the full width of the window: the mark,
-//! the menu bar, the open binary's name, and the window controls.
+//! the menu bar, the open binary's name, a newer release's notice ([`crate::update`]) and
+//! the window controls.
 //!
 //! Zed's [`PlatformTitleBar`] gives the drag area, the double click, the caption buttons
 //! of Windows (hit-tested by the platform through their `WindowControlArea`), the controls
@@ -183,7 +184,11 @@ impl Render for TitleBar {
             .child(self.menu_bar.clone())
             .into_any_element();
         let name = self.render_name(window, cx);
-        let right = div().flex_1().into_any_element();
+        let right = h_flex()
+            .flex_1()
+            .justify_end()
+            .children(crate::update::notice(cx))
+            .into_any_element();
         self.platform
             .update(cx, |platform, _| platform.set_children([left, name, right]));
         div()

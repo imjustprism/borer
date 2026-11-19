@@ -49,6 +49,7 @@ pub mod theme_import;
 pub mod theme_picker;
 pub mod title_bar;
 pub mod types;
+pub mod update;
 pub mod user_themes;
 pub mod worker;
 pub mod xrefs;
@@ -95,7 +96,7 @@ pub fn run() -> anyhow::Result<()> {
                 let harness_slot = app_slot.clone();
                 match mode {
                     CliMode::Interactive(path) => {
-                        app_view::open_window(&app_state, path, cx).map(drop)
+                        app_view::open_window(&app_state, path, cx).map(|_| update::start(cx))
                     }
                     measured @ (CliMode::FirstFrame
                     | CliMode::ReportOpen(_)

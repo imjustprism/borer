@@ -51,6 +51,17 @@ The first run there copies in the settings, themes and layout an earlier build
 kept under `borer-app` in the local data directory. `--data-dir <dir>` as the
 first argument keeps everything in another directory.
 
+Five seconds after its window opens, the first launch included, and once a
+day while it runs, the app asks GitHub for borer's latest release with one
+`GET` of `https://api.github.com/repos/imjustprism/borer/releases/latest`,
+sending only `User-Agent: borer-app/<version>` and
+`Accept: application/vnd.github+json`; a newer release shows a button in the
+title bar that opens its page, and nothing is downloaded. Set
+`BORER_NO_UPDATE_CHECK=1` in the environment or `"auto_update": false` in the
+settings file before launching and no request is ever made; a settings file
+that does not load in full stops it too. Check for Updates in the palette
+asks now.
+
 ## License
 
 borer-app is licensed under the GNU Affero General Public License v3.0 only
