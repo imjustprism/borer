@@ -82,6 +82,11 @@ jobs:
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # fuzz/ is a workspace of its own, which clippy never builds; the
+      # shared target directory keeps it in the cache restored above.
+      - name: fuzz check
+        run: cargo check --manifest-path fuzz/Cargo.toml --bins --locked --target-dir target
+
   # Advisories need the network, which the local gate does not assume, and
   # a new one can land with no change here, hence the weekly run.
   advisories:
