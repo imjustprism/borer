@@ -107,22 +107,34 @@ pub(crate) fn tiny_server() -> crate::BorerServer {
     code_server(borer_engine::program::Arch::X86_64, &[0xc3])
 }
 
-impl crate::BorerServer {
-    /// Runs the catalog's `class_layout` over the server ([`call`]), as the
-    /// tests written against the server's own handler call it.
-    ///
-    /// # Errors
-    ///
-    /// The tool's failure.
-    pub(crate) fn class_layout(
-        &self,
-        rmcp::handler::server::wrapper::Parameters(p): rmcp::handler::server::wrapper::Parameters<
-            crate::params::ClassLayoutParams,
-        >,
-    ) -> Result<String, rmcp::ErrorData> {
-        call(borer_front::tools::class_layout, self, &p)
-    }
+/// Gives the server a method per catalog edit tool, run over it ([`call`])
+/// as the tests written against the server's own handlers call them.
+macro_rules! served {
+    ($($tool:ident: $params:ident),* $(,)?) => {
+        impl crate::BorerServer {
+            $(
+                #[doc = concat!("Runs the catalog's `", stringify!($tool), "` over the server.")]
+                ///
+                /// # Errors
+                ///
+                /// The tool's failure.
+                pub(crate) fn $tool(
+                    &self,
+                    rmcp::handler::server::wrapper::Parameters(p): rmcp::handler::server::wrapper::Parameters<crate::params::$params>,
+                ) -> Result<String, rmcp::ErrorData> {
+                    call(borer_front::tools::$tool, self, &p)
+                }
+            )*
+        }
+    };
 }
+
+served!(
+    class_layout: ClassLayoutParams,
+    set_comment: SetCommentParams,
+    set_name: SetNameParams,
+    set_type: SetTypeParams,
+);
 
 /// Runs a catalog tool over a server, its failure as the server's tools
 /// answer one ([`crate::errors::failed`]).

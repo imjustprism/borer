@@ -1,12 +1,10 @@
 //! Tool and prompt parameters: what each MCP call accepts, as the JSON
 //! schema an agent reads before it calls.
 
-use borer_engine::analysis::settable;
 pub(crate) use borer_engine::analysis::settable::{Annotation, must_be_in_a_section};
 use borer_engine::program;
-use rmcp::{ErrorData, schemars};
+use rmcp::schemars;
 
-use crate::errors::err_params;
 pub(crate) use borer_engine::analysis::fieldrefs::{parse_field_offset, parse_unsigned};
 pub(crate) use borer_engine::text::Filter;
 pub(crate) use borer_front::tools::params::*;
@@ -109,58 +107,6 @@ pub(crate) struct DecompileBatchParams {
     pub(crate) library: Option<bool>,
     /// With out: replace an existing file (default false).
     pub(crate) overwrite: Option<bool>,
-}
-
-/// Parameters for `set_name`.
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct SetNameParams {
-    /// Function entry, any address inside it, or a data address.
-    pub(crate) address: Option<String>,
-    /// New name, an identifier (C++ `::<>~`, `@$?.` kept).
-    pub(crate) name: Option<String>,
-    /// Many at once instead: `address=name` each (max 500).
-    pub(crate) names: Option<Vec<String>>,
-    /// Take a name another address holds (default false).
-    pub(crate) force: Option<bool>,
-    /// Preview only (default true); false applies.
-    pub(crate) dry_run: Option<bool>,
-}
-
-/// Parameters for `set_comment`.
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct SetCommentParams {
-    /// Address the comment attaches to.
-    pub(crate) address: String,
-    /// Comment text.
-    pub(crate) comment: String,
-    /// Preview only (default true); false applies.
-    pub(crate) dry_run: Option<bool>,
-}
-
-/// Parameters for `set_type`.
-#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct SetTypeParams {
-    /// Struct, enum, typedef or class, or `var`'s new name.
-    pub(crate) name: Option<String>,
-    /// Each `offset:name[:type]` (`0x1c:mp:u32`), merged by offset.
-    pub(crate) fields: Option<Vec<String>>,
-    /// Drop fields not restated.
-    pub(crate) replace: Option<bool>,
-    /// Enum values, each `name:value` (`Run:1`).
-    pub(crate) values: Option<Vec<String>>,
-    /// Size past the last field, or an enum's width (4 or 8).
-    pub(crate) size: Option<u64>,
-    /// Data global to type, or a function for a prototype or `var`.
-    pub(crate) address: Option<String>,
-    /// Type to apply or typedef (`Player *`), a prototype, or alone C declarations.
-    pub(crate) r#type: Option<String>,
-    /// Variable or field to name/type (`a1`, `local_58`, a debug-info name, `field_0x10`).
-    pub(crate) var: Option<String>,
-    /// False applies.
-    pub(crate) dry_run: Option<bool>,
 }
 
 /// Parameters for `save_project`.
@@ -371,146 +317,6 @@ pub(crate) struct LiveScanParams {
     pub(crate) limit: Option<u32>,
     /// Header line only.
     pub(crate) count_only: Option<bool>,
-}
-
-/// Refuses a name or comment the line-oriented listings could not show.
-///
-/// Every place an annotation is printed is one line of a table, so a
-/// control character would break the table for every reader after it, and
-/// an empty name would name nothing. A name is the caller's to retry, so
-/// this refuses where [`borer_engine::text::one_line`] escapes: that one
-/// takes names out of the file, which cannot be handed back for a second
-/// try, and both go by the same rule about what a row can hold.
-///
-/// # Arguments
-///
-/// * `text` - The annotation as given.
-/// * `what` - Which annotation it is, for the message.
-///
-/// # Errors
-///
-/// When the text is empty, blank, longer than a row can show, or holds
-/// anything that would end its line or move what is printed around it.
-pub(crate) fn must_fit_a_row(text: &str, what: Annotation) -> Result<(), ErrorData> {
-    settable::must_fit_an_escaped_row(text, what).map_err(err_params)?;
-    if borer_engine::text::one_line(text) != text {
-        return Err(err_params(format!(
-            "the {what} holds text that reorders what is printed around it"
-        )));
-    }
-    Ok(())
-}
-
-/// Refuses a name the pseudo-C or a later lookup could not carry
-/// ([`settable::must_be_a_name`]).
-///
-/// # Arguments
-///
-/// * `name` - The name asked for.
-///
-/// # Errors
-///
-/// When the name opens with a digit or holds a character no identifier
-/// or mangled name has; the message names the character.
-pub(crate) fn must_be_a_name(name: &str) -> Result<(), ErrorData> {
-    settable::must_be_a_name(name).map_err(err_params)
-}
-
-/// Reads the fields a struct or a class states, each `offset:name:type`
-/// (`0x1c:mp:u32`) or, to name a field and keep its type, `offset:name`.
-///
-/// The `set_type` tool and the CLI's `set-type` both read them here, so
-/// an offset is a number by one rule ([`parse_unsigned`]): the CLI read
-/// `1c` as `0x1c` where the tool refused it.
-///
-/// # Arguments
-///
-/// * `fields` - The statements.
-///
-/// # Returns
-///
-/// Each field's offset, with its name and the type it states if any, in
-/// the order stated.
-///
-/// # Errors
-///
-/// When a statement has no name, its type does not parse, or its offset
-/// is not a number; the message names the field.
-pub(crate) fn stated_fields(
-    fields: &[String],
-) -> Result<Vec<(u64, borer_engine::analysis::stated::Field)>, String> {
-    use borer_engine::text::one_line;
-    fields
-        .iter()
-        .map(|f| {
-            let (off, rest) = f
-                .split_once(':')
-                .ok_or_else(|| format!("field {} is not offset:name[:type]", one_line(f)))?;
-            let (name, ty) = rest
-                .split_once(':')
-                .map_or((rest, None), |(name, ty)| (name, Some(ty)));
-            let shown = one_line(name);
-            let ty = ty
-                .map(borer_engine::analysis::utypes::parse_type)
-                .transpose()
-                .map_err(|e| format!("field {shown}: {e}"))?;
-            let off = parse_unsigned(off).ok_or_else(|| {
-                format!("field {shown}: offset {} is not a number", one_line(off))
-            })?;
-            let name = name.to_owned();
-            Ok((off, borer_engine::analysis::stated::Field { name, ty }))
-        })
-        .collect()
-}
-
-/// Reads the offset a `var` names when it spells an unnamed field as a
-/// decompile prints one, `field_0x270`.
-///
-/// # Arguments
-///
-/// * `var` - The `var` argument.
-///
-/// # Returns
-///
-/// The byte offset, or `None` for anything else, a variable among them.
-pub(crate) fn field_var(var: &str) -> Option<u64> {
-    var.strip_prefix("field_")
-        .filter(|offset| offset.starts_with("0x"))
-        .and_then(parse_unsigned)
-}
-
-/// Reads the values an enum states, each `name:value` (`Run:1`), by the
-/// rule [`stated_fields`] reads an offset by.
-///
-/// # Arguments
-///
-/// * `values` - The statements.
-///
-/// # Returns
-///
-/// Each value and its name, in the order stated.
-///
-/// # Errors
-///
-/// When a statement is not two parts or its value is not a number.
-pub(crate) fn stated_values(values: &[String]) -> Result<Vec<(u64, String)>, String> {
-    use borer_engine::text::one_line;
-    values
-        .iter()
-        .map(|v| {
-            let (name, value) = v
-                .split_once(':')
-                .ok_or_else(|| format!("value {} is not name:value", one_line(v)))?;
-            let value = parse_unsigned(value).ok_or_else(|| {
-                format!(
-                    "value {}: {} is not a number",
-                    one_line(name),
-                    one_line(value)
-                )
-            })?;
-            Ok((value, name.to_owned()))
-        })
-        .collect()
 }
 
 #[cfg(test)]

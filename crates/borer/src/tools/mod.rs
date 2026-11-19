@@ -70,8 +70,8 @@ mod tests {
         AnnotationsParams, CallgraphParams, CfgParams, ClassLayoutParams, CryptoParams,
         DecompileParams, DisassembleFunctionParams, DisassembleParams, EntropyParams,
         FindFunctionByStringParams, FunctionDetailParams, FunctionParams, FunctionsParams,
-        HexdumpParams, QueryParams, ReachesParams, ReadParams, SearchParams, StringsParams,
-        SymbolsParams, TypesParams, XrefsParams,
+        HexdumpParams, QueryParams, ReachesParams, ReadParams, SearchParams, SetCommentParams,
+        SetNameParams, SetTypeParams, StringsParams, SymbolsParams, TypesParams, XrefsParams,
     };
 
     /// The tool list the app builds from the catalog is the MCP server's,
@@ -143,6 +143,9 @@ mod tests {
             ("reaches", schema_for_input::<ReachesParams>()),
             ("read", schema_for_input::<ReadParams>()),
             ("search", schema_for_input::<SearchParams>()),
+            ("set_comment", schema_for_input::<SetCommentParams>()),
+            ("set_name", schema_for_input::<SetNameParams>()),
+            ("set_type", schema_for_input::<SetTypeParams>()),
             ("strings", schema_for_input::<StringsParams>()),
             ("symbols", schema_for_input::<SymbolsParams>()),
             ("types", schema_for_input::<TypesParams>()),
@@ -194,12 +197,6 @@ mod tests {
             ("callgraph", serde_json::json!({"address": "0x1000"})),
             ("cfg", serde_json::json!({"address": "0x1000"})),
             ("class_layout", serde_json::json!({"class": "C"})),
-            ("class_layout", serde_json::json!({"class": "0x1000"})),
-            (
-                "class_layout",
-                serde_json::json!({"class": "C", "apply": "CL"}),
-            ),
-            ("class_layout", serde_json::json!({"klass": "C"})),
             ("decompile", serde_json::json!({"address": "0x1000"})),
             (
                 "disassemble",
@@ -234,6 +231,18 @@ mod tests {
                 serde_json::json!({"address": "sub_1000", "count": 2}),
             ),
             ("search", serde_json::json!({"query": "c3"})),
+            (
+                "set_comment",
+                serde_json::json!({"address": "0x1000", "comment": "?why"}),
+            ),
+            (
+                "set_name",
+                serde_json::json!({"address": "0x1000", "name": "start"}),
+            ),
+            (
+                "set_type",
+                serde_json::json!({"name": "S", "fields": ["0:a:u32"]}),
+            ),
             ("strings", serde_json::json!({})),
             ("symbols", serde_json::json!({})),
             ("types", serde_json::json!({})),
@@ -265,6 +274,94 @@ mod tests {
                 reached.push(name);
             }
             assert!(TOOLS.iter().all(|t| reached.contains(&t.name)));
+        }
+    }
+
+    /// An edit tool answers the same text on both faces, dry, applied or
+    /// refused; applied, the server commits the plan and the plain face
+    /// changes nothing.
+    ///
+    /// Each call runs on the server and on a [`borer_front::tools::Loaded`]
+    /// taken of the server just before it, so both read the same names.
+    ///
+    /// # Panics
+    ///
+    /// When the faces answer otherwise, the server's names change on a
+    /// call that did not apply or stay on one that did, or the plain face's
+    /// names change.
+    #[test]
+    fn an_applied_edit_lands_on_the_server_and_nowhere_on_a_plain_face() {
+        let server = crate::testing::code_server(borer_engine::program::Arch::X86_64, &[0xc3; 16]);
+        let calls = [
+            ("class_layout", serde_json::json!({"class": "0x1000"})),
+            (
+                "class_layout",
+                serde_json::json!({"class": "C", "apply": "CL"}),
+            ),
+            ("class_layout", serde_json::json!({"klass": "C"})),
+            (
+                "set_name",
+                serde_json::json!({"address": "0x1000", "name": "start"}),
+            ),
+            (
+                "set_name",
+                serde_json::json!({"address": "0x1000", "name": "start", "dry_run": false}),
+            ),
+            (
+                "set_name",
+                serde_json::json!({"names": ["0x1000=a", "nosuch=b"], "dry_run": false}),
+            ),
+            (
+                "set_name",
+                serde_json::json!({"address": "0x1000", "name": "1st"}),
+            ),
+            (
+                "set_comment",
+                serde_json::json!({"address": "start", "comment": "?why"}),
+            ),
+            (
+                "set_comment",
+                serde_json::json!({"address": "start", "comment": "entry", "dry_run": false}),
+            ),
+            (
+                "set_comment",
+                serde_json::json!({"address": "0x1", "comment": "out", "dry_run": false}),
+            ),
+            ("set_comment", serde_json::json!({"address": "0x1000"})),
+            (
+                "set_type",
+                serde_json::json!({"name": "S", "fields": ["0:a:u32"], "dry_run": false}),
+            ),
+            (
+                "set_type",
+                serde_json::json!({"type": "struct D { int x; };", "dry_run": false}),
+            ),
+            (
+                "set_type",
+                serde_json::json!({"address": "0x1000", "type": "int f(int a)"}),
+            ),
+            ("set_type", serde_json::json!({"size": "big"})),
+        ];
+        let annotations = borer_front::tools::tool("annotations").expect("a catalog tool");
+        for (name, args) in calls {
+            let t = borer_front::tools::tool(name).expect("a catalog tool");
+            let args = args.as_object().cloned().unwrap_or_default();
+            let applies = args.get("dry_run") == Some(&false.into());
+            let plain = borer_front::tools::Loaded {
+                program: server.loaded().expect("loaded"),
+                analysis: server.analysis_or_empty(),
+                overlay: server.overlay_plain(),
+            };
+            let before = format!("{:?}", server.overlay_plain());
+            let listed = (annotations.run)(&plain, serde_json::Map::new());
+            let plainly = (t.run)(&plain, args.clone());
+            let served = (t.run)(&server, args);
+            let landed = format!("{:?}", server.overlay_plain()) != before;
+            assert_eq!(served, plainly, "{name}");
+            assert_eq!(landed, applies && served.is_ok(), "{name}: {served:?}");
+            assert_eq!(format!("{:?}", plain.overlay), before, "{name}");
+            let again = (annotations.run)(&plain, serde_json::Map::new());
+            assert_eq!(again, listed, "{name}");
         }
     }
 }

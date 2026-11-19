@@ -230,7 +230,7 @@ impl BorerServer {
             count_only,
         }): Parameters<LiveScanParams>,
     ) -> Result<String, ErrorData> {
-        must_fit_a_row(&name, Annotation::Name)?;
+        must_fit_a_row(&name, Annotation::Name).map_err(failed)?;
         if compare == Some(ScanCompare::Path) {
             let page = Page::new(offset, limit, count_only, 20, path::PAGE_MAX).map_err(failed)?;
             if kind.is_some() || tolerance.is_some() || scope.is_some() {

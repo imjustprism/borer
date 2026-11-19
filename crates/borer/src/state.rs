@@ -492,42 +492,6 @@ impl BorerServer {
             .and_then(|made| self.commit((program, Some(program)), made, planned))
     }
 
-    /// Plans `edits` over the overlay a tool read and, unless `dry`,
-    /// commits them ([`Self::commit`]), planned again over the overlay as
-    /// tools read it ([`tabled`]) when another edit landed first.
-    ///
-    /// # Arguments
-    ///
-    /// * `(p, a, o)` - The loaded program, its analysis and the overlay
-    ///   the tool read.
-    /// * `edits` - The edits.
-    /// * `force` - Whether a name another address answers to is taken.
-    /// * `dry` - Plan them and write nothing.
-    ///
-    /// # Returns
-    ///
-    /// The plan, committed unless `dry`.
-    ///
-    /// # Errors
-    ///
-    /// When an edit is refused ([`edit::Refused`]) or the edits would pass
-    /// a cap; nothing was applied.
-    pub(crate) fn edited(
-        &self,
-        (p, a, o): (&Program, &Analysis, &Overlay),
-        edits: &[Edit],
-        force: Force,
-        dry: bool,
-    ) -> anyhow::Result<Plan> {
-        let made = edit::plan(p, a, o, edits, force)?;
-        if dry {
-            return Ok(made);
-        }
-        self.commit((p, None), made, |now| {
-            edit::plan(p, a, &tabled(now), edits, force)
-        })
-    }
-
     /// Runs `f` against the loaded program, its analysis and a snapshot of
     /// the overlay: the prologue of every tool the server keeps that reads
     /// code.

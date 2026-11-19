@@ -761,7 +761,7 @@ impl BorerServer {
             class,
         }): Parameters<LiveWatchParams>,
     ) -> Result<String, ErrorData> {
-        must_fit_a_row(&name, Annotation::Name)?;
+        must_fit_a_row(&name, Annotation::Name).map_err(failed)?;
         let length = length
             .map(|n| count_param(Some(n), 1, live::READ_MAX, "length"))
             .transpose()

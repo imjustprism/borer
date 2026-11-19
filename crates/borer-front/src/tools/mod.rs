@@ -36,7 +36,7 @@ pub use code::{
     callgraph, cfg, class_field, decompile, disassemble_function, function, function_strings,
     function_summary, functions, reaches, xrefs,
 };
-pub use edit::class_layout;
+pub use edit::{class_layout, set_comment, set_name, set_type};
 pub use held::{
     Apply, Cause, Failure, Find, Held, NO_BINARY, Snapshot, View, fault_text, guarded, run,
     snapshot, tabled,
@@ -384,18 +384,6 @@ pub const SERVER_ONLY: &[(&str, &str)] = &[
         "script",
         "with dry_run=false it applies its proposals to the session, and its query() reads the MCP server's resources: it joins with the edit tools",
     ),
-    (
-        "set_comment",
-        "it edits the session: it joins with the edit tools",
-    ),
-    (
-        "set_name",
-        "it edits the session: it joins with the edit tools",
-    ),
-    (
-        "set_type",
-        "it edits the session: it joins with the edit tools",
-    ),
 ];
 
 /// Builds a catalog row whose schema, parser and handler read one
@@ -535,6 +523,27 @@ pub const TOOLS: &[Tool] = &[
         "Search every byte of the file for a hex pattern with ?? wildcards, or text with kind=text, as `function: va ...` rows, paged. Not for listing strings (use strings)."
     ),
     row!(
+        set_comment,
+        SetCommentParams,
+        &[Effect::ChangesSession],
+        EDITS,
+        "Comment an address in the session overlay, never the binary; a comment opening with ? is an open question. To name it use set_name. Dry run until dry_run=false; save_project keeps it."
+    ),
+    row!(
+        set_name,
+        SetNameParams,
+        &[Effect::ChangesSession],
+        EDITS,
+        "Name a function or data global in the session overlay, never the binary; names=[addr=name,...] renames many, checked first. A taken name needs force=true. Dry run until dry_run=false."
+    ),
+    row!(
+        set_type,
+        SetTypeParams,
+        &[Effect::ChangesSession],
+        EDITS,
+        "Define a struct, enum or typedef, name fields of a struct or class_layout class, or apply a type at an address so decompile names its fields; at a function, type sets the prototype. Checked first; dry run until dry_run=false."
+    ),
+    row!(
         strings,
         StringsParams,
         &[],
@@ -664,6 +673,85 @@ mod tests {
             .expect("planned");
         assert!(!plan.lines().is_empty());
         assert!(plain.overlay.names.is_empty());
+    }
+
+    /// An applied edit through a face that holds proposals answers as the
+    /// dry run's words say it would, hands the face the plan, and changes
+    /// none of the names the face reads.
+    ///
+    /// # Panics
+    ///
+    /// When the face keeps no plan, the plan says otherwise, or a name lands.
+    #[test]
+    fn an_applied_edit_is_a_proposal_on_a_face_that_keeps_plans() {
+        use std::cell::RefCell;
+        use std::sync::Arc;
+
+        use borer_engine::analysis::edit::{self, Edit, Force, Plan};
+        use borer_engine::analysis::{Analysis, Overlay};
+        use borer_engine::answer::Need;
+        use borer_engine::program::{Arch, Program, Section};
+
+        use super::{Apply, Failure, Held, Loaded, Snapshot, View, tool};
+
+        /// The plain face, keeping each plan an edit tool hands it.
+        struct Proposing {
+            /// What it holds.
+            loaded: Loaded,
+            /// The plans kept, in the order they came.
+            kept: RefCell<Vec<Plan>>,
+        }
+        impl Held for Proposing {
+            fn view(&self, need: Need) -> Option<Result<View, String>> {
+                self.loaded.view(need)
+            }
+            fn user_overlay(&self) -> Overlay {
+                self.loaded.user_overlay()
+            }
+            fn edit(
+                &self,
+                s: &Snapshot<'_>,
+                edits: &[Edit],
+                force: Force,
+                _apply: Apply,
+            ) -> anyhow::Result<Plan> {
+                let plan = edit::plan(s.program(), s.analysis(), s.overlay(), edits, force)?;
+                self.kept.borrow_mut().push(plan.clone());
+                Ok(plan)
+            }
+            fn read(&self, uri: &str) -> Result<String, Failure> {
+                self.loaded.read(uri)
+            }
+        }
+        let text = Section::mapped(".text", 0x1000, 0, 0x10, false, true);
+        let program = Program::raw(vec![0xc3; 0x10], Arch::X86_64, 0, Some(0x1000), vec![text]);
+        let face = Proposing {
+            loaded: Loaded {
+                analysis: Arc::new(Analysis::compute(&program)),
+                program: Arc::new(program),
+                overlay: Overlay::default(),
+            },
+            kept: RefCell::new(Vec::new()),
+        };
+        let set_name = tool("set_name").expect("a catalog tool");
+        let asked = |dry_run: bool| {
+            serde_json::json!({"address": "0x1000", "name": "start", "dry_run": dry_run})
+                .as_object()
+                .cloned()
+                .unwrap_or_default()
+        };
+        let dry = (set_name.run)(&face, asked(true)).expect("planned");
+        let applied = (set_name.run)(&face, asked(false)).expect("proposed");
+        assert!(dry.starts_with("dry-run: would "), "{dry}");
+        assert!(!applied.starts_with("dry-run"), "{applied}");
+        let kept = face.kept.borrow();
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].lines(), kept[1].lines());
+        assert!(face.loaded.overlay.names.is_empty());
+        let names =
+            (tool("annotations").expect("a catalog tool").run)(&face, serde_json::Map::new())
+                .expect("lists");
+        assert!(!names.contains("start"), "{names}");
     }
 
     /// A face without the server's session answers what the engine
