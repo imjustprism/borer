@@ -898,3 +898,45 @@ fn a_spilled_double_is_no_pair_of_integer_fields() {
     let text = decompile(&p, &a, &Overlay::default(), 0x401_000).unwrap_or_default();
     assert!(!text.contains(">> 32"), "{text}");
 }
+
+/// Zeroing a vector register by xoring it with itself reads nothing.
+///
+/// Each body is `<zero xmm0>; cvtsi2sd xmm0, edi; cvttsd2si eax, xmm0;
+/// ret`, the System V shape a compiler gives `(int)(double)x`: the zeroing
+/// breaks the dependency `cvtsi2sd` has on what `xmm0` held, so the
+/// function takes `edi` alone. With no zeroing, `cvtsi2sd` keeps the high
+/// lanes it reads, and the same body takes `xmm0` as a second parameter,
+/// which shows the check sees one.
+#[test]
+fn zeroing_a_vector_register_reads_no_parameter() {
+    use borer_engine::program::BinaryFormat;
+    let zeroings: [&[u8]; 7] = [
+        &[],
+        &[0x66, 0x0f, 0xef, 0xc0], // ASM: pxor xmm0,xmm0
+        &[0x0f, 0x57, 0xc0],       // ASM: xorps xmm0,xmm0
+        &[0x66, 0x0f, 0x57, 0xc0], // ASM: xorpd xmm0,xmm0
+        &[0xc5, 0xf9, 0xef, 0xc0], // ASM: vpxor xmm0,xmm0,xmm0
+        &[0xc5, 0xf8, 0x57, 0xc0], // ASM: vxorps xmm0,xmm0,xmm0
+        &[0xc5, 0xf9, 0x57, 0xc0], // ASM: vxorpd xmm0,xmm0,xmm0
+    ];
+    for zero in zeroings {
+        let code = [
+            zero,
+            &[
+                0xf2, 0x0f, 0x2a, 0xc7, // ASM: cvtsi2sd xmm0,edi
+                0xf2, 0x0f, 0x2c, 0xc0, // ASM: cvttsd2si eax,xmm0
+                0xc3, // ASM: ret
+            ],
+        ]
+        .concat();
+        let mut p = program64(&code);
+        p.format = BinaryFormat::Elf;
+        let text = decompiled(&p, 0x1_4000_1000);
+        let head = text
+            .lines()
+            .find(|l| l.contains("sub_140001000("))
+            .unwrap_or("");
+        assert!(head.contains("a1"), "{zero:02x?}: {text}");
+        assert_eq!(head.contains("a2"), zero.is_empty(), "{zero:02x?}: {text}");
+    }
+}
