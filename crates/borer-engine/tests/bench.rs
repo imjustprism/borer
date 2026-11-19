@@ -1126,3 +1126,71 @@ fn unstated<'l>(
         .collect();
     (columns, words)
 }
+
+/// Targets whose first page of cross-references [`xrefs_page`] times.
+const XREF_TARGETS: usize = 100;
+
+/// Cold passes [`best_cold`] takes; the fastest is reported.
+const COLD_PASSES: usize = 5;
+
+/// Returns the fastest of [`COLD_PASSES`] cold runs of `f`.
+///
+/// Each runs on a fresh analysis built outside the time, so whatever `f`
+/// memoizes is cold every pass.
+///
+/// # Arguments
+///
+/// * `p` - The program.
+/// * `f` - The work to time on the analysis.
+fn best_cold<T>(p: &Program, mut f: impl FnMut(&Analysis) -> T) -> Duration {
+    let mut best = Duration::MAX;
+    for _ in 0..COLD_PASSES {
+        let a = Analysis::compute(p);
+        let t = Instant::now();
+        let out = f(&a);
+        best = best.min(t.elapsed());
+        drop(out);
+    }
+    best
+}
+
+/// Times the first page of cross-references to a hundred targets, cold.
+///
+/// The targets are the first [`XREF_TARGETS`] functions with fewer than
+/// four callers, on a fresh analysis each pass, so the first page that
+/// says what it could not see pays for that.
+///
+/// `BORER_BENCH=path/to/bin cargo test -p borer-engine --release --test bench xrefs_page -- --ignored --nocapture`
+#[test]
+#[ignore = "set BORER_BENCH to a binary path to run this harness"]
+fn xrefs_page() {
+    use borer_engine::analysis::render::{XrefView, xref_rows};
+    borer_live::run_at_full_speed();
+    let path = std::env::var("BORER_BENCH").expect("BORER_BENCH env var");
+    let program = Program::load(std::path::Path::new(&path)).expect("load");
+    let o = Overlay::default();
+    let a = Analysis::compute(&program);
+    let targets: Vec<u64> = a
+        .functions
+        .iter()
+        .filter(|f| f.callers.len() < 4)
+        .take(XREF_TARGETS)
+        .map(|f| f.entry)
+        .collect();
+    let view = XrefView::Page {
+        offset: 0,
+        limit: 60,
+    };
+    let page = best_cold(&program, |a| {
+        targets
+            .iter()
+            .map(|&t| xref_rows(&program, a, &o, t, view))
+            .collect::<Vec<_>>()
+    });
+    println!(
+        "xrefs page:\t{} targets\t{:.2} ms cold (best of {COLD_PASSES})",
+        targets.len(),
+        page.as_secs_f64() * 1e3
+    );
+}
+
