@@ -737,6 +737,18 @@ impl<K: RowKind> RowsPanel<K> {
             .height
     }
 
+    /// Returns whether the panel shows nothing older than the binary state `now`: its rows
+    /// are of `now`, it shows none, or it is closed and asks again when it opens.
+    ///
+    /// # Arguments
+    ///
+    /// * `now` - The [`LoadedBinary::fingerprint`] of the binary's state, `None` with none open.
+    #[must_use]
+    pub fn is_current(&self, now: Option<u64>) -> bool {
+        let shown = self.rows.as_ref().map(|rows| rows.revision);
+        shown.is_none() || shown == now || (self.stale && !self.active)
+    }
+
     /// Shows `rows` of `loaded`, clearing the filter and the selection.
     ///
     /// # Arguments
@@ -1431,6 +1443,19 @@ pub fn focus<K: RowKind>(
     workspace.toggle_panel_focus::<RowsPanel<K>>(window, cx);
 }
 
+/// Returns whether the docked rows panel of kind `K` shows nothing older than the binary
+/// state `now`: every rows kind's [`PanelSpec::current`].
+///
+/// # Arguments
+///
+/// * `workspace` - The workspace.
+/// * `now` - The [`LoadedBinary::fingerprint`] of the binary's state, `None` with none open.
+/// * `cx` - Application context reading the panel.
+pub fn current<K: RowKind>(workspace: &Workspace, now: Option<u64>, cx: &App) -> bool {
+    let panel = workspace.panel::<RowsPanel<K>>(cx);
+    panel.is_none_or(|panel| panel.read(cx).is_current(now))
+}
+
 impl<K: RowKind> EventEmitter<PanelEvent> for RowsPanel<K> {}
 
 impl<K: RowKind> Focusable for RowsPanel<K> {
@@ -1483,7 +1508,9 @@ pub(crate) mod tests {
     use workspace::Workspace;
     use workspace::dock::DockPosition;
 
-    use super::{Empty, PAGE_ROWS, Page, RowKind, RowsPanel, Sort, add, clicked, cycled, focus};
+    use super::{
+        Empty, PAGE_ROWS, Page, RowKind, RowsPanel, Sort, add, clicked, current, cycled, focus,
+    };
     use crate::actions::{CycleSort, ToggleXrefs, Xrefs as XrefsAction};
     use crate::app_assets::Glyph;
     use crate::app_view::tests::{binary_in, init, loaded_of, open};
@@ -1731,6 +1758,7 @@ pub(crate) mod tests {
         add: add::<Probe>,
         remove: crate::panels::remove::<RowsPanel<Probe>>,
         focus: focus::<Probe>,
+        current: current::<Probe>,
     };
 
     /// The probe kind's one column: an address, sorted by value.
@@ -1820,6 +1848,7 @@ pub(crate) mod tests {
         add: add::<Many>,
         remove: crate::panels::remove::<RowsPanel<Many>>,
         focus: focus::<Many>,
+        current: current::<Many>,
         ..PROBE
     };
 

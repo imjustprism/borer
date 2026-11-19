@@ -128,8 +128,9 @@ the path its key takes. Ack is dispatch to the first presented frame whose stamp
 tab and its revision, its top line, the functions panel's row and filter, the go-to
 picker, the xrefs panel's referent and rows, status line) differs, a count of running
 requests left out as nothing on screen shows it; settle is dispatch to the presented frame
-after which no job runs, every open view shows the binary's state and the stamp holds
-one more frame. Pan and zoom sweep 2 s each on notepad's 20 largest graphs and the large
+after which no job runs, every open view shows the binary's state, no docked panel shows
+an older one (a closed panel marked to ask again when it opens is not older) and the stamp
+holds one more frame. Pan and zoom sweep 2 s each on notepad's 20 largest graphs and the large
 DLL's largest, timed by frame draw. A large DLL that is missing or too slow to analyze
 is printed as skipped; an action whose setup failed in more than 10% of its runs misses. The bars are `BARS` in `borer-app/src/measure/actions.rs`:
 

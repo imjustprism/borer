@@ -61,7 +61,16 @@ pub const PANEL: PanelSpec = PanelSpec {
     },
     remove: remove::<CallTreePanel>,
     focus: root_and_focus,
+    current: always_current,
 };
+
+/// Returns true: the call tree row's [`PanelSpec::current`].
+///
+/// The panel roots its tree again over every revision of the binary and reads its levels
+/// as jobs, so it never shows an older state once no job runs.
+const fn always_current(_: &Workspace, _: Option<u64>, _: &App) -> bool {
+    true
+}
 
 /// Roots the call tree at the function of the active code tab, when one is active, and
 /// focuses its panel, or moves focus back when the panel has it: the call tree row's

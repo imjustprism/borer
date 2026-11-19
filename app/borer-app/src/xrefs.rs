@@ -16,7 +16,7 @@ use crate::code_view::Role;
 use crate::decompile_item::Form;
 use crate::panels::PanelSpec;
 use crate::places::Place;
-use crate::rows_panel::{Empty, Page, RowKind, RowsPanel, add, focus};
+use crate::rows_panel::{Empty, Page, RowKind, RowsPanel, add, current, focus};
 use crate::table::{Align, Column, Columns, Fit, Ink};
 use crate::worker::{LoadedBinary, Referent, xrefs_blocking};
 
@@ -44,6 +44,7 @@ pub const XREFS: PanelSpec = PanelSpec {
     add: add::<Xrefs>,
     remove: crate::panels::remove::<XrefsPanel>,
     focus: focus::<Xrefs>,
+    current: current::<Xrefs>,
 };
 
 /// Most sites a row's `sites` cell names before it counts the rest.

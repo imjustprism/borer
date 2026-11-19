@@ -40,7 +40,7 @@ use crate::decompile_item::{DecompileItem, Form, TabMode, code_row_height};
 use crate::panels::{PanelSpec, remove};
 use crate::places::{self, Opening, Place};
 use crate::rail::panel;
-use crate::rows_panel::{Answer, Empty, RowKind, RowsPanel, add, focus};
+use crate::rows_panel::{Answer, Empty, RowKind, RowsPanel, add, current, focus};
 use crate::table::{Align, Column, Columns, Fit, Ink};
 use crate::worker::{
     Job, LoadedBinary, plan_blocking, propose_blocking, type_detail_blocking, type_rows_blocking,
@@ -59,6 +59,7 @@ pub const PANEL: PanelSpec = PanelSpec {
     add: add::<Types>,
     remove: remove::<TypesPanel>,
     focus: focus::<Types>,
+    current: current::<Types>,
 };
 
 /// Every type the engine knows, in a dock.

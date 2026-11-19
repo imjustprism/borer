@@ -4,7 +4,7 @@
 //! title, icon, toggle, docks, size, rail hooks and activation priority); [`add_panels`] is
 //! the one way to add them to a workspace, each in the dock the last run left it active in.
 
-use gpui::{Action, Context, Entity, Window};
+use gpui::{Action, App, Context, Entity, Window};
 use workspace::DockStructure;
 use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel};
@@ -38,6 +38,9 @@ pub struct PanelSpec {
     pub remove: fn(&mut Workspace, &mut Window, &mut Context<'_, Workspace>),
     /// Shows the panel and focuses it, or moves focus back: what [`Self::toggle`] does.
     pub focus: fn(&mut Workspace, &mut Window, &mut Context<'_, Workspace>),
+    /// Returns whether the panel shows nothing older than the binary state of the given
+    /// fingerprint; true while it is not docked.
+    pub current: fn(&Workspace, Option<u64>, &App) -> bool,
 }
 
 /// Registers every panel's toggle on `workspace`, docked or not yet, in reach as its

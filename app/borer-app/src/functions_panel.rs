@@ -20,7 +20,7 @@ use crate::panels::{PanelSpec, remove};
 use crate::places::Place;
 use crate::rail::panel;
 pub use crate::rows_panel::Empty;
-use crate::rows_panel::{Answer, RowKind, RowsPanel, add, focus};
+use crate::rows_panel::{Answer, RowKind, RowsPanel, add, current, focus};
 use crate::table::{count_text, grouped};
 use crate::worker::{LoadedBinary, filter_rows_blocking};
 
@@ -37,6 +37,7 @@ pub const PANEL: PanelSpec = PanelSpec {
     add: add::<Functions>,
     remove: remove::<FunctionsPanel>,
     focus: focus::<Functions>,
+    current: current::<Functions>,
 };
 
 /// Registers the functions panel's actions on `workspace`: focus its filter, and show or

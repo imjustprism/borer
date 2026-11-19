@@ -2,8 +2,8 @@
 //!
 //! As each frame draws, and as each frame starts, the phase reads what the window shows
 //! ([`seen`]): a cheap [`Stamp`] of what a person sees change, nothing they do not (no count
-//! of running requests), and whether the app is quiet, no [`Jobs`] request running and every
-//! open view on the binary's state. A [`Watch`] started at an action's dispatch takes those
+//! of running requests), and whether the app is quiet, no [`Jobs`] request running, every
+//! open view on the binary's state and no docked panel on an older one. A [`Watch`] started at an action's dispatch takes those
 //! reads and names the read of the first change (ack) and the read after which the app is
 //! quiet and the stamp holds for one more read (settle).
 
@@ -18,6 +18,7 @@ use crate::binary::Binary;
 use crate::decompile_item::DecompileItem;
 use crate::functions_panel::FunctionsPanel;
 use crate::goto::GoToDelegate;
+use crate::panels::PANELS;
 use crate::places::view_of;
 use crate::rows_panel::Rows as _;
 use crate::worker::{Jobs, Referent};
@@ -46,7 +47,8 @@ pub(super) struct Stamp {
 pub(super) struct Seen {
     /// What the frame shows.
     pub(super) stamp: Stamp,
-    /// Whether no request runs and every open view shows the binary's state.
+    /// Whether no request runs, every open view shows the binary's state and no docked
+    /// panel shows an older one.
     pub(super) quiet: bool,
 }
 
@@ -89,7 +91,7 @@ pub(super) fn seen(workspace: &Entity<Workspace>, binary: &Entity<Binary>, cx: &
         pane.read(cx)
             .items()
             .all(|item| view_of(item.as_ref(), cx).is_none_or(|view| view.revision() == now))
-    });
+    }) && PANELS.iter().all(|spec| (spec.current)(workspace, now, cx));
     Seen {
         stamp: Stamp {
             active,
@@ -186,6 +188,7 @@ mod tests {
     use crate::app_view::tests::{CALLEE, CALLER, init, load_sample, open, open_place, sample};
     use crate::binary::BinaryEvent;
     use crate::decompile_item::TabMode;
+    use crate::functions_panel::FunctionsPanel;
     use crate::measure::now_instant;
     use crate::places::Place;
     use crate::worker::{LoadedBinary, Referent, spawn_engine};
@@ -258,6 +261,50 @@ mod tests {
         assert!(!watch.frame(at(t0, 7), look(&app, cx)));
         assert!(watch.frame(at(t0, 8), look(&app, cx)));
         assert_eq!(watch.settle(), Some(at(t0, 7)));
+    }
+
+    /// A docked panel showing rows of an older state holds quiet back while it is open, and
+    /// while it is closed until a revision marks it to ask again when it opens.
+    #[gpui::test]
+    fn a_panel_on_an_older_state_holds_quiet_back(cx: &mut TestAppContext) {
+        let (app, cx, loaded) = with_caller(cx);
+        let renamed = loaded.with_overlay(Overlay {
+            names: [(CALLEE, "renamed".to_owned())].into_iter().collect(),
+            ..Overlay::default()
+        });
+        app.binary.update(cx, |binary, cx| {
+            binary.show_loaded(renamed.clone(), cx);
+            cx.emit(BinaryEvent::Revised(renamed.clone()));
+        });
+        draw(cx);
+        assert!(
+            look(&app, cx).quiet,
+            "every view and panel on the renamed state"
+        );
+        let panel = app.workspace.read_with(cx, |workspace, cx| {
+            workspace.panel::<FunctionsPanel>(cx).unwrap()
+        });
+        panel.update_in(cx, |panel, window, cx| {
+            let rows = loaded.initial_rows.clone();
+            panel.show(loaded.clone(), rows, window, cx);
+        });
+        draw(cx);
+        assert!(!look(&app, cx).quiet, "an open panel on the older state");
+        app.workspace.update_in(cx, |workspace, window, cx| {
+            workspace.close_panel::<FunctionsPanel>(window, cx);
+        });
+        draw(cx);
+        assert!(
+            !look(&app, cx).quiet,
+            "a closed panel that will not ask again"
+        );
+        app.binary
+            .update(cx, |_, cx| cx.emit(BinaryEvent::Revised(renamed.clone())));
+        draw(cx);
+        assert!(
+            look(&app, cx).quiet,
+            "a closed panel that asks again when it opens"
+        );
     }
 
     /// An action that changes only the status line fires ack on the first frame read after
