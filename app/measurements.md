@@ -169,11 +169,19 @@ the times are upper bounds. Ack and settle p95/p99 in ms:
 | large | back | 8.6/9.8 | 8.6/9.8 |
 
 Graph frame draw p99: pan 2.2 ms (notepad) and 2.0 ms (large), zoom 7.8 and 5.6 ms. UI
-thread engine calls: 0. Misses: xrefs ack on both benches. With the job count out of the
-stamp, the window shows no change after an xrefs on the same call token as the run before
-(same referent, same rows), so the script needs a step that changes the referent before
-this bar measures anything. The other phases of the full script ran to the input phase on
-this build: first frame median 192 ms, notepad open median 234 ms, memory delta 146.0 MB,
-list scroll draw p99 3.2 ms, code scroll draw p99 3.6 ms; the input phase stalled at its
-first click (the window did not take SendInput clicks with the machine busy), so the
-script stopped before the call tree and actions phases, which were run alone.
+thread engine calls: 0.
+
+The xrefs ack was never seen because the harness docked only the functions panel before
+its load, so the app's own docking returned early and the xrefs panel never existed:
+xrefs opened nothing. With every panel docked as a load docks them, a rerun on the same
+machine (still busy) gave: notepad xrefs ack p95/p99 6.3/6.4 ms (36 runs, 14 skipped:
+targets with no call token), large xrefs ack 6.7/78.9 ms (one outlier, a miss), notepad
+overview ack p99 18.0 ms (a miss); every other action as above or faster.
+
+The full script on that build: first frame median 192 ms, notepad open median 234 ms,
+memory delta 146.0 MB, list scroll draw p99 3.2 ms, code scroll draw p99 3.6 ms.
+
+Input phase: the clicks reach the window (9 presses and 9 releases in the stalled run)
+but none opened a function, so input-to-paint is reported as not measured, with that
+reason, and the script fails; why a click on the announced call token opens nothing is
+not found yet.
