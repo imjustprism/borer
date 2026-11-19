@@ -1,7 +1,8 @@
 //! Parses arbitrary text as a find query and runs it over a small program
 //! built from the rest of the input, with symbols (one mangled each way), a
 //! user name and a comment from the text: the path a find box takes on
-//! every keystroke.
+//! every keystroke. The text is then run as a search spec over the same
+//! program, which answers or refuses.
 
 #![no_main]
 
@@ -9,6 +10,7 @@ use borer_engine::analysis::find::{Query, everywhere};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::num::from_usize;
 use borer_engine::program::{Arch, Program, Section, Symbol, SymbolKind};
+use borer_engine::table::Window;
 use libfuzzer_sys::fuzz_target;
 
 /// Where the program's one section maps and its entry.
@@ -45,4 +47,11 @@ fuzz_target!(|data: &[u8]| {
     let found = everywhere(&program, &analysis, &overlay, &query, LISTED);
     assert!(found.hits.len() <= LISTED);
     _ = found.spell();
+    _ = borer_engine::search::form::search_tsv(
+        &program,
+        &analysis,
+        &overlay,
+        &text,
+        Window::first(LISTED),
+    );
 });

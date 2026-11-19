@@ -156,7 +156,7 @@ const WORKFLOW: &str = "borer: binary analysis (x86/x64 and arm64 PE/ELF/Mach-O;
      the same request with \"since\": \"<tag>\" added (on a URI: !since=<tag>) answers \
      a one-line note if nothing changed, else only the changed lines. Every \
      answer's last line is `# evidence: <id>` naming it; \
-     borer://session/evidence/<id> returns the text behind the id, the last 256 kept.";
+     borer://session/evidence/<id> returns the text behind it, the last 256 kept.";
 
 /// The instructions' resource sentence before the groups, tools written as
 /// in [`WORKFLOW`].
@@ -293,6 +293,7 @@ const INTENTS: &[(&str, &[&str])] = &[
             "decompile",
             "disasm",
             "grep",
+            "search",
             "index",
             "bench",
             "addr",

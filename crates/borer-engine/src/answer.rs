@@ -719,6 +719,10 @@ const ANSWERS: &[Answer] = &[
         let query = crate::analysis::find::Query::parse(q.arg);
         Ok(crate::analysis::find::everywhere(q.p, q.a, q.o, &query, usize::MAX).spell())
     }),
+    itself("search", Argument, Best(Discover), &[Column("va")], |q| {
+        crate::search::form::search_tsv(q.p, q.a, q.o, q.arg, q.page.window(WINDOW_PAGE))
+    })
+    .checked(|a| crate::search::spec::parse(a).err()),
     itself("stats", Argument, Best(Discover), &[Column("va")], |q| {
         stats::stats_tsv(q.p, q.a, q.arg, q.page.window(WINDOW_PAGE))
     }),

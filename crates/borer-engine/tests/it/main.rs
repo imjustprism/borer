@@ -107,6 +107,7 @@ mod rv_emulate;
 mod rv_lift;
 mod script;
 mod search;
+mod search_form;
 mod session;
 mod shapes;
 mod stated;

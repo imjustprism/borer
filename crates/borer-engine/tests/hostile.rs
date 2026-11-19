@@ -48,6 +48,8 @@ mod names;
 mod pdb;
 #[path = "hostile/projects.rs"]
 mod projects;
+#[path = "hostile/search.rs"]
+mod search;
 
 /// Where the headers end and the first section's bytes begin.
 const HEADERS: usize = 0x400;

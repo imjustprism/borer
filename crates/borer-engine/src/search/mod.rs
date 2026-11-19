@@ -1,6 +1,11 @@
-//! Byte-pattern and text search over every byte of the file.
+//! Byte-pattern and text search over every byte of the file, and the
+//! search form that combines patterns, texts and values ([`spec`],
+//! [`form`]).
 
-use crate::program::Program;
+use crate::program::{Program, Section};
+
+pub mod form;
+pub mod spec;
 
 /// Hard cap on reported hits per query.
 pub const HITS_MAX: usize = 500;
@@ -69,8 +74,24 @@ impl From<Option<u8>> for Lane {
 /// When the pattern has no token, more than [`PATTERN_MAX`], or a token of
 /// another form, naming its 1-based column and the forms a token takes.
 pub fn parse_masked(s: &str) -> Result<Vec<Lane>, String> {
+    masked_at(s, 0)
+}
+
+/// Parses a masked byte pattern that starts `base` bytes into a longer
+/// text, so a refusal names the column in that text ([`parse_masked`]).
+///
+/// # Arguments
+///
+/// * `s` - The pattern.
+/// * `base` - Its byte offset in the text it came from.
+///
+/// # Errors
+///
+/// As [`parse_masked`].
+pub(crate) fn masked_at(s: &str, base: usize) -> Result<Vec<Lane>, String> {
     let mut lanes = Vec::new();
     for (at, tok) in words(s) {
+        let at = at.saturating_add(base);
         let lane = lane(tok).ok_or_else(|| {
             format!(
                 "column {}: {} is not a byte; write two hex digits (8b), a hex digit and ? for a nibble (4? or ?8), or ? or ?? for any byte",
@@ -443,17 +464,38 @@ pub fn find_text(program: &Program, needle: &str, offset: usize) -> Hits {
         return out;
     };
     for span in spans(program, reach) {
-        let mut here: Vec<u64> = Vec::new();
-        ascii_hits(span.data, narrow, &mut here);
-        wide_hits(span.data, &wide, &mut here);
-        here.retain(|&i| i < span.own);
-        here.sort_unstable();
-        here.dedup();
-        for i in here {
+        for (i, _) in text_hits(&span, narrow, &wide) {
             out.push(&span, i, offset);
         }
     }
     out
+}
+
+/// How a text hit is spelled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Spelling {
+    /// As its UTF-8 bytes.
+    Utf8,
+    /// As UTF-16LE code units.
+    Utf16,
+}
+
+/// Returns where a text starts in a span's run, ascending, each with its
+/// spelling; where both spellings start at one offset, the UTF-8 one.
+///
+/// # Arguments
+///
+/// * `span` - The run and the bytes after it a match may cover.
+/// * `narrow` - The text's UTF-8 bytes.
+/// * `wide` - Its UTF-16LE code units, low byte first.
+pub(crate) fn text_hits(span: &Span<'_>, narrow: &[u8], wide: &[u8]) -> Vec<(u64, Spelling)> {
+    let mut here: Vec<(u64, Spelling)> = Vec::new();
+    ascii_hits(span.data, narrow, &mut here);
+    wide_hits(span.data, wide, &mut here);
+    here.retain(|&(i, _)| i < span.own);
+    here.sort_unstable();
+    here.dedup_by_key(|h| h.0);
+    here
 }
 
 impl Hits {
@@ -481,8 +523,8 @@ impl Hits {
 ///
 /// * `data` - The bytes searched.
 /// * `needle` - The bytes sought; nothing is collected for an empty one.
-/// * `out` - Where the matching offsets go, ascending.
-fn ascii_hits(data: &[u8], needle: &[u8], out: &mut Vec<u64>) {
+/// * `out` - Where the matching offsets go, ascending, as UTF-8 hits.
+fn ascii_hits(data: &[u8], needle: &[u8], out: &mut Vec<(u64, Spelling)>) {
     let Some(&first) = needle.first() else {
         return;
     };
@@ -492,7 +534,7 @@ fn ascii_hits(data: &[u8], needle: &[u8], out: &mut Vec<u64>) {
         folded_pair(first),
         |w| w.eq_ignore_ascii_case(needle),
         |i| {
-            out.push(i);
+            out.push((i, Spelling::Utf8));
             false
         },
     );
@@ -506,8 +548,8 @@ fn ascii_hits(data: &[u8], needle: &[u8], out: &mut Vec<u64>) {
 /// * `data` - The bytes searched.
 /// * `wide` - The code units sought, low byte first; nothing is collected
 ///   for an empty one.
-/// * `out` - Where the matching offsets go, ascending.
-fn wide_hits(data: &[u8], wide: &[u8], out: &mut Vec<u64>) {
+/// * `out` - Where the matching offsets go, ascending, as UTF-16 hits.
+fn wide_hits(data: &[u8], wide: &[u8], out: &mut Vec<(u64, Spelling)>) {
     let [lo, hi, ..] = *wide else {
         return;
     };
@@ -518,7 +560,7 @@ fn wide_hits(data: &[u8], wide: &[u8], out: &mut Vec<u64>) {
         first,
         |w| utf16le_eq_ignore_ascii_case(w, wide),
         |i| {
-            out.push(i);
+            out.push((i, Spelling::Utf16));
             false
         },
     );
@@ -679,33 +721,78 @@ pub(crate) struct Span<'a> {
 ///
 /// One [`Span`] per run.
 fn spans(program: &Program, reach: usize) -> Vec<Span<'_>> {
-    let file = program.bytes.as_slice();
-    let span = |run: &[u8], off: u64, va: Option<u64>| -> Option<Span<'_>> {
-        let start = usize::try_from(off).ok()?;
-        let end = start
-            .checked_add(run.len())?
-            .saturating_add(reach)
-            .min(file.len());
-        Some(Span {
-            data: file.get(start..end)?,
-            own: crate::num::from_usize(run.len()),
-            off,
-            va,
-        })
-    };
-    let mut spans: Vec<Span<'_>> = program
-        .sections
-        .iter()
-        .filter(|s| s.file_size > 0)
-        .filter_map(|s| span(program.section_bytes(s)?, s.file_off.0, Some(s.va.0)))
-        .collect();
+    let mut spans = section_spans(program, reach, |_| true);
     spans.extend(
         program
             .unmapped()
             .into_iter()
-            .filter_map(|(off, b)| span(b, off, None)),
+            .filter_map(|(off, b)| span_at(program, b, off, None, reach)),
     );
     spans
+}
+
+/// Returns the file extents of the sections `keep` accepts, each with its
+/// address and the `reach` bytes the file holds after it ([`spans`]).
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `reach` - Bytes past a run's end a match may cover.
+/// * `keep` - Whether a section is walked.
+fn section_spans(
+    program: &Program,
+    reach: usize,
+    keep: impl Fn(&Section) -> bool,
+) -> Vec<Span<'_>> {
+    program
+        .sections
+        .iter()
+        .filter(|s| s.file_size > 0 && keep(s))
+        .filter_map(|s| {
+            span_at(
+                program,
+                program.section_bytes(s)?,
+                s.file_off.0,
+                Some(s.va.0),
+                reach,
+            )
+        })
+        .collect()
+}
+
+/// Returns one run of the file as a [`Span`], with the `reach` bytes the
+/// file holds after it.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `run` - The run's bytes, a slice of the file.
+/// * `off` - Its file offset.
+/// * `va` - Its address; `None` where no section maps it.
+/// * `reach` - Bytes past its end a match may cover.
+///
+/// # Returns
+///
+/// The span, or `None` when the offset does not fit the file.
+fn span_at<'p>(
+    program: &'p Program,
+    run: &[u8],
+    off: u64,
+    va: Option<u64>,
+    reach: usize,
+) -> Option<Span<'p>> {
+    let file = program.bytes.as_slice();
+    let start = usize::try_from(off).ok()?;
+    let end = start
+        .checked_add(run.len())?
+        .saturating_add(reach)
+        .min(file.len());
+    Some(Span {
+        data: file.get(start..end)?,
+        own: crate::num::from_usize(run.len()),
+        off,
+        va,
+    })
 }
 
 /// Whether `window` holds the UTF-16LE code units `wide`, case-folded where
