@@ -65,9 +65,12 @@ pub fn one_line(text: &str) -> String {
     escaped(text, OUTSIDE_MAX)
 }
 
-/// Returns `text` with every character that hides itself or reorders what
-/// is printed around it written as `\u{...}`, for a person to read; line
-/// breaks are kept.
+/// Returns `text` written out for a person to read.
+///
+/// Every character that hides itself or reorders what is printed around it
+/// is written as `\u{...}`; in a text that holds one, each `\` is doubled
+/// too, so a typed `\u{200b}` never reads as a written-out one. A text
+/// holding none comes back as it is, its backslashes and line breaks kept.
 ///
 /// It is stricter than [`one_line`], which the agents' answers go through
 /// and which leaves zero-width and other invisible characters as they are:
@@ -110,6 +113,8 @@ pub fn visible(text: &str) -> std::borrow::Cow<'_, str> {
     for c in text.chars() {
         if hides(c) {
             let _ = write!(out, "\\u{{{:x}}}", u32::from(c));
+        } else if c == '\\' {
+            out.push_str("\\\\");
         } else {
             out.push(c);
         }
@@ -1817,6 +1822,12 @@ mod tests {
     fn visible_writes_out_what_hides() {
         use super::{mixes_scripts, visible};
         assert_eq!(visible("log_flush\nnext"), "log_flush\nnext");
+        for plain in ["printf(\"%d\\n\")", "C:\\Windows", "typed\\u{200b}"] {
+            assert!(
+                matches!(visible(plain), std::borrow::Cow::Borrowed(_)),
+                "{plain}"
+            );
+        }
         for (hidden, shown) in [
             ("main\u{200b}", "main\\u{200b}"),
             ("a\u{202e}b", "a\\u{202e}b"),
@@ -1826,6 +1837,7 @@ mod tests {
                 "\\u{feff}\\u{ad}\\u{3164}\\u{2028}",
             ),
             ("tab\t", "tab\\u{9}"),
+            ("typed\\u{200b}\u{200b}", "typed\\\\u{200b}\\u{200b}"),
         ] {
             assert_eq!(visible(hidden), shown);
         }

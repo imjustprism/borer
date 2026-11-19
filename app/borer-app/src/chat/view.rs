@@ -236,7 +236,7 @@ impl ChatPanel {
                         ))
                     })
                     .flatten();
-                model(ix, &text::visible(said), name, cx)
+                model(ix, said, name, cx)
             }
             Entry::Tool(_) => match thread.call_at(ix).cloned() {
                 Some(call) => self.tool(&call, cx),
@@ -644,8 +644,9 @@ fn person(said: &str, cx: &Context<'_, ChatPanel>) -> AnyElement {
         .into_any_element()
 }
 
-/// Returns what the model wrote, under its name when it opens the turn, with a copy button
-/// that shows on hover.
+/// Returns what the model wrote, written out ([`text::visible`]) under its name when it
+/// opens the turn, with a copy button that shows on hover and copies the text as the model
+/// wrote it.
 fn model(
     ix: usize,
     said: &str,
@@ -671,7 +672,7 @@ fn model(
                         .visible_on_hover(group),
                 ),
         )
-        .child(prose(said, cx))
+        .child(prose(&text::visible(said), cx))
         .into_any_element()
 }
 
