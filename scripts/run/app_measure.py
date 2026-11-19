@@ -1399,7 +1399,9 @@ def _build_report(
             "seen": list(watcher.children.values()),
         },
     }
-    if not verified:
+    if "not_measured" in input_lat:
+        report["input_latency_not_measured"] = input_lat["not_measured"]
+    elif not verified:
         report["input_latency_fallback"] = input_lat
     return report
 

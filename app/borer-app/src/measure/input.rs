@@ -376,9 +376,8 @@ impl Harness {
                     } else {
                         "clicks reached the window but none opened a function"
                     };
-                    anyhow::bail!(
-                        "input latency benchmark stalled at click {clicks} after 8 retries:                          {why} ({downs} button presses, {ups} releases)"
-                    )
+                    let seen = format!("{downs} button presses, {ups} releases");
+                    anyhow::bail!("input stalled at click {clicks} after 8 retries: {why} ({seen})")
                 }
             }
             return Ok(InputStep::Continue);
