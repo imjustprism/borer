@@ -8,18 +8,22 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/imjustprism/borer/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/imjustprism/borer?style=flat-square&labelColor=0b0c0e&color=26272b&label=release"></a>
-  <a href="https://github.com/imjustprism/borer/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/imjustprism/borer/ci.yml?branch=main&style=flat-square&labelColor=0b0c0e&color=26272b&label=ci"></a>
-  <a href="LICENSE"><img alt="AGPL-3.0 license" src="https://img.shields.io/badge/license-AGPL--3.0-26272b?style=flat-square&labelColor=0b0c0e&color=26272b"></a>
-  <img alt="Desktop app" src="https://img.shields.io/badge/desktop-app-26272b?style=flat-square&labelColor=0b0c0e&color=26272b">
-  <img alt="MCP server" src="https://img.shields.io/badge/MCP-server-26272b?style=flat-square&labelColor=0b0c0e&color=26272b">
+  <a href="https://github.com/imjustprism/borer/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/imjustprism/borer?style=flat-square&labelColor=0b0c0e&color=26272b&label=release&logo=github&logoColor=EEEDE8"></a>
+  <a href="https://github.com/imjustprism/borer/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/imjustprism/borer/ci.yml?branch=main&style=flat-square&labelColor=0b0c0e&color=26272b&label=ci&logo=githubactions&logoColor=EEEDE8"></a>
+  <a href="LICENSE"><img alt="AGPL-3.0 license" src="https://img.shields.io/badge/license-AGPL--3.0-26272b?style=flat-square&labelColor=0b0c0e&color=26272b&logo=gnu&logoColor=EEEDE8"></a>
+  <a href="rust-toolchain.toml"><img alt="Rust 1.96.1" src="https://img.shields.io/badge/rust-1.96.1-26272b?style=flat-square&labelColor=0b0c0e&color=26272b&logo=rust&logoColor=EEEDE8"></a>
+  <a href="#a-desktop-app-held-to-the-same-bars"><img alt="Desktop app" src="https://img.shields.io/badge/desktop-app-26272b?style=flat-square&labelColor=0b0c0e&color=26272b&logo=data:image/svg%2Bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjQgMiA0MCA0NCI%2BPHBhdGggZD0iTTkuNSA0VjMwQTE0IDE0IDAgMCAwIDM3LjUgMzBBMTEuNyAxMS43IDAgMCAwIDE0LjEgMzBBOS40IDkuNCAwIDAgMCAzMi45IDMwQTcuMSA3LjEgMCAwIDAgMTguNyAzMEE0LjggNC44IDAgMCAwIDI4LjMgMzAiIGZpbGw9Im5vbmUiIHN0cm9rZT0iI0VFRURFOCIgc3Ryb2tlLXdpZHRoPSIzIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8%2BPC9zdmc%2B"></a>
+  <a href="#command-line-and-mcp-server"><img alt="MCP server" src="https://img.shields.io/badge/MCP-server-26272b?style=flat-square&labelColor=0b0c0e&color=26272b&logo=modelcontextprotocol&logoColor=EEEDE8"></a>
 </p>
 
 <p align="center">
   <a href="https://borer.lol"><b>borer.lol</b></a> &nbsp;·&nbsp;
   <a href="https://borer.lol/docs">Docs</a> &nbsp;·&nbsp;
-  <a href="#what-it-does">Cases</a> &nbsp;·&nbsp;
   <a href="#install">Install</a> &nbsp;·&nbsp;
+  <a href="#a-desktop-app-held-to-the-same-bars">Desktop app</a> &nbsp;·&nbsp;
+  <a href="#command-line-and-mcp-server">MCP</a> &nbsp;·&nbsp;
+  <a href="#what-it-does">Cases</a> &nbsp;·&nbsp;
+  <a href="#fast-enough-to-read-everything">Benchmarks</a> &nbsp;·&nbsp;
   <a href="https://borer.lol/docs/tools">Tools</a> &nbsp;·&nbsp;
   <a href="https://borer.lol/llms.txt">llms.txt</a>
 </p>
@@ -84,9 +88,10 @@ limits are listed in [docs/limits.md](https://github.com/imjustprism/borer/blob/
 
 Everything below is real output of borer 0.2.12 (release build, commit
 `7d9bb42c`) on two files of Windows 11: `notepad.exe` (sha256
-`2d0b3948...2efb158f`) and `ntdll.dll` (sha256 `b072efae...ce5aed21`). Lines cut for length are marked `...`. Addresses
-differ on another build: `borer symbols ntdll.dll RtlComputeCrc32` finds the
-export, and its decompile names the two functions it forwards to.
+`2d0b3948...2efb158f`) and `ntdll.dll` (sha256 `b072efae...ce5aed21`). Lines
+cut for length are marked `...`. Addresses differ on another build:
+`borer symbols ntdll.dll RtlComputeCrc32` finds the export, and its decompile
+names the two functions it forwards to.
 
 ## What it does
 
@@ -281,7 +286,7 @@ and saved docks. No engine call runs on the UI thread. Release build
 `c3f3742f`, AMD Ryzen 7 9800X3D, Windows ([app/measurements.md](https://github.com/imjustprism/borer/blob/main/app/measurements.md)):
 
 | Measure | Result | Bar |
-| --- | --- | --- |
+| --- | ---: | ---: |
 | 100,000-row list scroll, frame draw p99 | 2.97 ms | 8.3 ms |
 | 1,000,000-line code scroll, frame draw p99 | 2.62 ms | 8.3 ms |
 | Input to paint p99, 200 keys and 100 clicks | 6.83 ms | 16 ms |
@@ -296,7 +301,7 @@ and a types editor. Windows is the measured platform.
 ## Platforms
 
 | Architecture | Disassemble | Decompile | Emulation tools |
-| --- | --- | --- | --- |
+| --- | :---: | :---: | :---: |
 | x86, x86-64 | yes | yes | yes |
 | arm64 | yes | yes | yes |
 | 32-bit ARM (A32, Thumb-2) | yes | yes | no |
@@ -514,8 +519,9 @@ The same spec takes registers, memory writes, a stop address, a step budget,
 a trace and a dump (`borer help` shows the grammar). `borer://diverge` runs a
 function on two inputs and names the first instruction where the paths part.
 
-What borer does not do yet is in [docs/limits.md](https://github.com/imjustprism/borer/blob/main/docs/limits.md). It has no
-telemetry; the few things that reach the network are in
+What borer does not do yet is in
+[docs/limits.md](https://github.com/imjustprism/borer/blob/main/docs/limits.md).
+It has no telemetry; the few things that reach the network are in
 [docs/network.md](https://github.com/imjustprism/borer/blob/main/docs/network.md).
 
 ## Contributing
@@ -539,11 +545,10 @@ borer is free software under the [GNU Affero General Public License
 v3.0](LICENSE) (AGPL-3.0-only). If you distribute borer or a modified version,
 or let users interact with a modified version over a network, you must offer
 its complete source under the same license. Versions 0.1.0 and 0.1.1 were
-released under MIT. A
-commercial license is available for the main workspace (the engine, server
-and live crates) where the AGPL does not fit: open an issue or reach out on GitHub. The desktop app builds on
-GPL-3.0-or-later crates of Zed, so it is AGPL-3.0 only and outside that
-license.
+released under MIT. A commercial license is available for the main workspace
+(the engine, server and live crates) where the AGPL does not fit: open an
+issue or reach out on GitHub. The desktop app builds on GPL-3.0-or-later
+crates of Zed, so it is AGPL-3.0 only and outside that license.
 
 Third-party notices are in [NOTICE](NOTICE), and each release archive carries
 the licenses of everything the binary links. Ghidra is a project of the NSA.
