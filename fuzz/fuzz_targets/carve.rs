@@ -7,7 +7,7 @@
 #![no_main]
 
 use borer_engine::carve;
-use borer_engine::program::Program;
+use borer_engine::program::{FileShown, Program};
 use libfuzzer_sys::fuzz_target;
 
 /// Children asked for again by offset per input, so one input stays fast.
@@ -18,6 +18,6 @@ fuzz_target!(|data: &[u8]| {
         _ = carve::at(data, child.off);
     }
     if let Ok(program) = Program::from_bytes_with("fuzz".into(), data.to_vec(), false, None) {
-        _ = carve::children_tsv(&program);
+        _ = carve::children_tsv(&program, FileShown::Path);
     }
 });
