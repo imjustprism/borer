@@ -54,6 +54,7 @@ pub fn register_toggles(workspace: &mut Workspace, binary: &Entity<Binary>) {
     for spec in PANELS {
         crate::commands::register_boxed(workspace, binary, spec.toggle, spec.focus);
     }
+    crate::chat::register(workspace, binary);
 }
 
 impl std::fmt::Debug for PanelSpec {
@@ -162,6 +163,7 @@ pub const PANELS: &[&PanelSpec] = &[
     &crate::xrefs::XREFS,
     &crate::types::PANEL,
     &crate::call_tree_panel::PANEL,
+    &crate::chat::PANEL,
 ];
 
 /// Returns the activation priority of the panel saved under `key`: its place in [`PANELS`]

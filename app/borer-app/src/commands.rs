@@ -646,6 +646,15 @@ pub const COMMANDS: &[Command] = &[
             Need::Binary,
         )
     },
+    Command {
+        serves: &["query", "set_name"],
+        ..item(
+            "borer::ToggleChat",
+            "Chat",
+            (MenuName::View, 1),
+            Need::Binary,
+        )
+    },
     item(
         "borer::CycleSort",
         "Sort Table by Next Column",
@@ -902,6 +911,58 @@ pub const COMMANDS: &[Command] = &[
         serves: &["calls"],
         ..binding("borer::ShowCallSites", "Call Sites in the Call Tree", &[])
     },
+    binding("borer::StopChat", "Stop the Chat's Turn", &[]),
+    binding("borer::NewChatThread", "New Chat Thread", &[]),
+    binding("borer::SendChat", "Send the Chat Message", &[]),
+    binding("borer::SaveChatKey", "Save the Chat Provider's Key", &[]),
+    binding("borer::NextChatProvider", "Next Chat Provider", &[]),
+    binding("borer::NextChatModel", "Next Chat Model", &[]),
+    binding("borer::PickChatModel", "Pick the Chat's Model", &[]),
+    binding(
+        "borer::ForgetChatKey",
+        "Forget the Chat Provider's Saved Key",
+        &[],
+    ),
+    binding("borer::RetryChat", "Retry the Chat's Failed Turn", &[]),
+    binding(
+        "borer::ToggleChatCall",
+        "Open the Chat's Newest Tool Call",
+        &[],
+    ),
+    binding(
+        "borer::OpenChatCallAddress",
+        "Open the Address of the Chat's Newest Tool Call",
+        &[],
+    ),
+    binding("borer::SendHeldChat", "Send the Held Chat Message", &[]),
+    binding(
+        "borer::DontSendHeldChat",
+        "Don't Send the Held Chat Message",
+        &[],
+    ),
+    Command {
+        needs: Need::Binary,
+        serves: &["set_name"],
+        ..binding(
+            "borer::PlanChatProposalAgain",
+            "Plan the Chat's Proposal Again",
+            &[],
+        )
+    },
+    Command {
+        needs: Need::Binary,
+        serves: &["set_name"],
+        ..binding(
+            "borer::AcceptChatProposal",
+            "Accept the Chat's Proposal",
+            &[],
+        )
+    },
+    binding(
+        "borer::RejectChatProposal",
+        "Reject the Chat's Proposal",
+        &[],
+    ),
     binding(
         "menu::SelectParent",
         "Collapse or Go to Parent",

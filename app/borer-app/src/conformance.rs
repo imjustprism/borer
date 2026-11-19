@@ -41,6 +41,7 @@ const PANELS_RUN: &[&str] = &[
     "Xrefs",
     "Types",
     "CallTree",
+    "Chat",
 ];
 
 /// Returns one example of every [`Place`] variant a tab shows; an xrefs place shows in its

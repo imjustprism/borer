@@ -558,8 +558,33 @@ pub fn edit_blocking(
 ) -> anyhow::Result<(Arc<LoadedBinary>, usize)> {
     let (program, analysis) = (&loaded.program, &loaded.analysis);
     let plan = edit::plan(program, analysis, &loaded.overlay, edits, Force::Refuse)?;
+    commit_blocking(loaded, &plan)
+}
+
+/// Commits `plan` to `loaded`'s overlay through the engine's edit path, as a dry run showed
+/// it: the engine refuses a plan made over another overlay ([`edit::Stale`]).
+///
+/// Must be called inside [`spawn_engine`].
+///
+/// # Arguments
+///
+/// * `loaded` - The state the plan is committed to.
+/// * `plan` - The plan, made over some overlay of `loaded`'s program.
+///
+/// # Returns
+///
+/// The state it leaves and how many overlay entries it changed.
+///
+/// # Errors
+///
+/// Returns [`edit::Stale`] when the overlay moved since the plan was made, or the engine's
+/// refusal.
+pub fn commit_blocking(
+    loaded: &LoadedBinary,
+    plan: &edit::Plan,
+) -> anyhow::Result<(Arc<LoadedBinary>, usize)> {
     let mut overlay = (*loaded.overlay).clone();
-    edit::commit(program, analysis, &mut overlay, &plan)?;
+    edit::commit(&loaded.program, &loaded.analysis, &mut overlay, plan)?;
     Ok((loaded.with_overlay(overlay), plan.changes().len()))
 }
 
@@ -929,10 +954,46 @@ pub fn type_detail_blocking(
 ///
 /// Returns the engine's refusal of the first edit it refuses, or of a cap the edits pass.
 pub fn plan_blocking(loaded: &LoadedBinary, edits: &[Edit]) -> Result<Vec<String>, String> {
+    planned_blocking(loaded, edits, Force::Refuse).map(|(_, lines)| lines)
+}
+
+/// Plans `edits` over `overlay` through the engine's edit path, writing nothing.
+///
+/// It is the chat face's edit seam, planning over the names the person left whatever the
+/// face's answers print. Must be called inside [`spawn_engine`].
+///
+/// # Errors
+///
+/// Returns the engine's refusal of the first edit it refuses, or of a cap the edits pass.
+pub fn plan_over(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    edits: &[Edit],
+    force: Force,
+) -> anyhow::Result<edit::Plan> {
+    edit::plan(program, analysis, overlay, edits, force)
+}
+
+/// Plans `edits` over `loaded`'s overlay as [`plan_blocking`] does, keeping the plan.
+///
+/// A later [`commit_blocking`] commits exactly what its lines say; `force` says whether a
+/// name another address holds is taken.
+///
+/// Must be called inside [`spawn_engine`].
+///
+/// # Errors
+///
+/// Returns the engine's refusal.
+pub fn planned_blocking(
+    loaded: &LoadedBinary,
+    edits: &[Edit],
+    force: Force,
+) -> Result<(edit::Plan, Vec<String>), String> {
     let (p, a) = (&*loaded.program, &*loaded.analysis);
-    let plan =
-        edit::plan(p, a, &loaded.overlay, edits, Force::Refuse).map_err(|e| format!("{e:#}"))?;
-    Ok(plan.lines().iter().map(|line| line.said(true).0).collect())
+    let plan = edit::plan(p, a, &loaded.overlay, edits, force).map_err(|e| format!("{e:#}"))?;
+    let lines = plan.lines().iter().map(|line| line.said(true).0).collect();
+    Ok((plan, lines))
 }
 
 /// Proposes a struct from the accesses of the function at `entry` through its first
@@ -1472,7 +1533,7 @@ pub(crate) mod tests {
     }
 
     /// Returns every module of the crate but this one, by path under `src`, with its text.
-    fn sources() -> [(&'static str, &'static str); 55] {
+    fn sources() -> [(&'static str, &'static str); 65] {
         [
             ("actions.rs", include_str!("actions.rs")),
             ("app_assets.rs", include_str!("app_assets.rs")),
@@ -1483,6 +1544,16 @@ pub(crate) mod tests {
             ("call_tree.rs", include_str!("call_tree.rs")),
             ("call_tree_panel.rs", include_str!("call_tree_panel.rs")),
             ("card.rs", include_str!("card.rs")),
+            ("chat.rs", include_str!("chat.rs")),
+            ("chat/card.rs", include_str!("chat/card.rs")),
+            ("chat/picker.rs", include_str!("chat/picker.rs")),
+            ("chat/providers.rs", include_str!("chat/providers.rs")),
+            ("chat/tests.rs", include_str!("chat/tests.rs")),
+            ("chat/tests/cards.rs", include_str!("chat/tests/cards.rs")),
+            ("chat/tests/panel.rs", include_str!("chat/tests/panel.rs")),
+            ("chat/thread.rs", include_str!("chat/thread.rs")),
+            ("chat/tools.rs", include_str!("chat/tools.rs")),
+            ("chat/view.rs", include_str!("chat/view.rs")),
             ("check_marks.rs", include_str!("check_marks.rs")),
             ("code_semantics.rs", include_str!("code_semantics.rs")),
             ("code_view.rs", include_str!("code_view.rs")),
@@ -1707,10 +1778,36 @@ pub(crate) mod tests {
             "type_rows(",
             "type_detail(",
             "propose(",
+            "answer::ask(",
         ];
         for (name, text) in sources() {
             let code = kept(text);
             for call in calls {
+                assert!(!code.contains(call), "{name} names {call}");
+            }
+        }
+    }
+
+    /// Nothing in the app registers a model provider, names Zed's `language_models::` crate
+    /// (whose `init` adds zed.dev's hosted provider), runs `client::init`, or signs in.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a module names one of them.
+    #[test]
+    fn nothing_registers_providers_or_signs_in() {
+        for (name, text) in sources() {
+            let code: String = kept(text)
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect();
+            for call in [
+                "language_models::",
+                "register_provider",
+                "client::init",
+                "sign_in",
+                "authenticate_with",
+            ] {
                 assert!(!code.contains(call), "{name} names {call}");
             }
         }

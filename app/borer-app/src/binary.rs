@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use borer_engine::analysis::decompile::replay::{BlockCheck, Grade, Rechecked, TextCheck};
-use borer_engine::analysis::edit::Edit;
+use borer_engine::analysis::edit::{self, Edit};
 use borer_engine::analysis::project::{Foreign, Project};
 use futures::channel::oneshot;
 use gpui::{
@@ -26,8 +26,8 @@ use crate::places::Place;
 use crate::recent::{self, RecentBinary, file_name};
 use crate::stored::SavedTab;
 use crate::worker::{
-    Job, LoadedBinary, State, edit_blocking, load_binary_blocking, open_project_blocking,
-    read_project_blocking, save_project_blocking, spawn_engine,
+    Job, LoadedBinary, State, commit_blocking, edit_blocking, load_binary_blocking,
+    open_project_blocking, read_project_blocking, save_project_blocking, spawn_engine,
 };
 
 /// Returns what a load of `path` is called while it runs: `Reading` and the file's name.
@@ -98,6 +98,45 @@ pub trait Revision {
     fn revision(&self) -> Option<u64>;
 }
 
+/// Who made an edit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Author {
+    /// The person at the app.
+    Person,
+    /// A model in the chat panel, whose proposal the person accepted.
+    Model {
+        /// The provider's name, as its registry row gives it.
+        provider: SharedString,
+        /// The model's id at that provider.
+        model: SharedString,
+    },
+}
+
+/// One committed edit in the change feed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Change {
+    /// Who made it.
+    pub author: Author,
+    /// What it did, as the job list called it (`Renaming 0x1000`).
+    pub what: String,
+    /// [`LoadedBinary::fingerprint`] of the overlay it left.
+    pub fingerprint: u64,
+}
+
+/// What became of a plan handed to [`Binary::commit_by`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Committed {
+    /// It was written, and the change feed holds it.
+    Done,
+    /// The overlay moved since the plan was made: nothing was written; plan it again.
+    Stale,
+    /// It was refused, for the reason given; nothing was written.
+    Refused(String),
+    /// Another edit still runs, as the reason says; nothing was written, and the same plan
+    /// can be committed once that edit ends.
+    Busy(String),
+}
+
 /// What the window title ends the binary's name with while its overlay holds edits no
 /// project file has.
 pub const UNSAVED: &str = " *";
@@ -142,6 +181,8 @@ pub struct Binary {
     edit: Job,
     /// What [`Self::edit`] runs, `None` while nothing does.
     editing: Option<String>,
+    /// The edits committed since the binary opened, oldest first.
+    changes: Vec<Change>,
     /// The window the binary is shown in, where its questions are asked; `None` until
     /// [`Self::set_window`], and then nothing asks before dropping edits.
     window: Option<AnyWindowHandle>,
@@ -194,6 +235,7 @@ impl Binary {
             remember_task: None,
             edit: Job::default(),
             editing: None,
+            changes: Vec::new(),
             window: None,
             rechecked: BTreeMap::new(),
             rechecks_put: 0,
@@ -761,6 +803,7 @@ impl Binary {
             this.update(cx, |binary, cx| binary.set_status(why, cx));
         }));
         self.saved = loaded.fingerprint;
+        self.changes.clear();
         self.restore_tabs(&loaded);
         self.loaded = Some(loaded.clone());
         self.rechecked.clear();
@@ -844,23 +887,125 @@ impl Binary {
     /// * `edits` - The edits, in order.
     /// * `cx` - Binary context.
     pub fn edit(&mut self, edits: Vec<Edit>, cx: &mut Context<'_, Self>) {
+        self.edit_by(edits, Author::Person, cx);
+    }
+
+    /// Plans and commits `edits` as [`Self::edit`] does, and adds what they changed to the
+    /// change feed under `author`.
+    ///
+    /// # Arguments
+    ///
+    /// * `edits` - The edits, in order.
+    /// * `author` - Who made them.
+    /// * `cx` - Binary context.
+    pub fn edit_by(&mut self, edits: Vec<Edit>, author: Author, cx: &mut Context<'_, Self>) {
         let label = match edits.first() {
             Some(Edit::Name { at, .. }) => format!("Renaming {at:#x}"),
             _ => "Editing".to_owned(),
         };
+        let what = label.clone();
         self.run(
             label,
             move |loaded| edit_blocking(loaded, &edits),
             |binary, base, out, cx| match out {
                 Ok((next, changes)) => {
-                    if binary.advance(&base, next, cx) {
-                        binary.set_status(format!("{changes} overlay entries changed"), cx);
-                    }
+                    binary.land(&base, next, changes, author, what, cx);
                 }
                 Err(err) => binary.set_status(format!("edit refused: {err:#}"), cx),
             },
             cx,
         );
+    }
+
+    /// Commits `plan` as it was shown, through the engine's edit path in the background, and
+    /// adds it to the change feed under `author`; never plans again, so a plan made over an
+    /// overlay that has moved since is refused as stale.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan, as its lines were shown.
+    /// * `what` - What the job list and the change feed call it.
+    /// * `author` - Who made it.
+    /// * `cx` - Binary context.
+    ///
+    /// # Returns
+    ///
+    /// What became of it, once known; the sender drops when the binary does.
+    pub fn commit_by(
+        &mut self,
+        plan: edit::Plan,
+        what: String,
+        author: Author,
+        cx: &mut Context<'_, Self>,
+    ) -> oneshot::Receiver<Committed> {
+        let (said, heard) = oneshot::channel();
+        let busy = match (&self.loaded, &self.editing) {
+            (None, _) => Some(Committed::Refused("open a binary first".to_owned())),
+            (_, Some(running)) => Some(Committed::Busy(format!(
+                "{running} still runs; accept again once it ends"
+            ))),
+            (Some(_), None) => None,
+        };
+        if let Some(busy) = busy {
+            drop(said.send(busy));
+            return heard;
+        }
+        let label = what.clone();
+        self.run(
+            label,
+            move |loaded| commit_blocking(loaded, &plan),
+            move |binary, base, out, cx| {
+                let committed = match out {
+                    Ok((next, changes)) => {
+                        if binary.land(&base, next, changes, author, what, cx) {
+                            Committed::Done
+                        } else {
+                            Committed::Stale
+                        }
+                    }
+                    Err(err) if err.is::<edit::Stale>() => Committed::Stale,
+                    Err(err) => Committed::Refused(format!("{err:#}")),
+                };
+                drop(said.send(committed));
+            },
+            cx,
+        );
+        heard
+    }
+
+    /// Puts `next`, made over `base`, in place of the open state as [`Self::advance`] does,
+    /// and adds it to the change feed as `what` by `author`.
+    ///
+    /// # Returns
+    ///
+    /// Whether it landed.
+    fn land(
+        &mut self,
+        base: &Arc<LoadedBinary>,
+        next: Arc<LoadedBinary>,
+        changes: usize,
+        author: Author,
+        what: String,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        let fingerprint = next.fingerprint;
+        if !self.advance(base, next, cx) {
+            return false;
+        }
+        self.changes.push(Change {
+            author,
+            what,
+            fingerprint,
+        });
+        self.set_status(format!("{changes} overlay entries changed"), cx);
+        true
+    }
+
+    /// Returns the edits committed since the binary opened, oldest first, each with who
+    /// made it: the change feed.
+    #[must_use]
+    pub fn changes(&self) -> &[Change] {
+        &self.changes
     }
 
     /// Opens the system file dialog for a project file and opens the one picked.
