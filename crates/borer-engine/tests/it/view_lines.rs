@@ -11,7 +11,7 @@
 
 use crate::view::{TEXT, exported_four, filling, tokens};
 use borer_engine::analysis::decompile::decompile_named;
-use borer_engine::analysis::decompile::replay::{BlockCheck, TextCheck};
+use borer_engine::analysis::decompile::replay::{BlockCheck, Claim, Disagreement, TextCheck};
 use borer_engine::analysis::decompile::view::{view, view_of};
 use borer_engine::analysis::edit::{Edit, Force, commit, plan};
 use borer_engine::analysis::protos::{Proto, VarKey, slot_words};
@@ -192,10 +192,20 @@ fn a_checked_header_links_no_more_than_eight_numbers() {
 fn the_replays_checked_line_links_the_instructions_it_names() {
     let p = exported_four();
     let a = Analysis::compute(&p);
-    let check = TextCheck {
-        blocks: vec![BlockCheck::default()],
-        disagree: vec![TEXT + 2, TEXT + 4, TEXT + 9, TEXT + 0xd, TEXT + 0x40],
-    };
+    let found = [2, 4, 9, 0xd, 0x40].map(|off| Disagreement {
+        function: TEXT,
+        block: TEXT,
+        at: TEXT + off,
+        claim: Claim::Memory,
+        place: "[rdx]".to_owned(),
+        text: 0,
+        machine: 1,
+        bits: 64,
+        lane: false,
+        expr: "0".to_owned(),
+    });
+    let block = BlockCheck::new(TEXT, Ok(Some("differed")), (3, 1), found.to_vec());
+    let check = TextCheck::new(vec![block]);
     let text = format!(
         "{}\nuint64_t fa(void)\n{{\n    return 0;\n}}\n",
         check.header()

@@ -1,8 +1,8 @@
 use crate::isa::x86::Register;
 
 use super::{
-    BlockCheck, Claim, Grade, OUTSIDE_FLOAT, OVER_BUDGET, Replayed, Sampling, TextCheck, Witness,
-    replay_effects, replay_function, replay_tsv,
+    BlockCheck, Claim, Disagreement, Grade, OUTSIDE_FLOAT, OVER_BUDGET, Replayed, Sampling,
+    TextCheck, Witness, replay_effects, replay_function, replay_tsv,
 };
 use crate::analysis::decompile::expr::{Expr, Flags, Op, UnOp};
 use crate::analysis::decompile::lift::{ArgAt, Effect, EffectKind};
@@ -38,6 +38,37 @@ pub(super) fn graded(proved: usize, tested: usize, unchecked: &[&'static str]) -
             ..BlockCheck::default()
         })
         .collect()
+}
+
+/// Returns `blocks` with the last block compared found to disagree at each
+/// of `ats`: a tested block that disagrees is graded wrong, which the
+/// header counts among the tested.
+///
+/// # Arguments
+///
+/// * `blocks` - The records, at least one compared and not proved.
+/// * `ats` - The instructions that disagree.
+fn disagreeing(mut blocks: Vec<BlockCheck>, ats: &[u64]) -> Vec<BlockCheck> {
+    let found = ats
+        .iter()
+        .map(|&at| Disagreement {
+            function: 0x1000,
+            block: at,
+            at,
+            claim: Claim::Memory,
+            place: "[rdx]".to_owned(),
+            text: 0,
+            machine: 1,
+            bits: 64,
+            lane: false,
+            expr: "0".to_owned(),
+        })
+        .collect();
+    let last = blocks.iter().rposition(|b| b.grade == Grade::Tested);
+    if let Some(b) = last.and_then(|k| blocks.get_mut(k)) {
+        *b = BlockCheck::new(b.start, Ok(Some("differed")), (3, 1), found);
+    }
+    blocks
 }
 
 /// Asserts that a replay's records count what the replay counted: one
@@ -1253,18 +1284,13 @@ fn a_thread_block_read_is_no_float() {
 /// agreement; past a few, the rest are counted.
 #[test]
 fn the_header_names_the_statements_the_binary_contradicts() {
-    let check = TextCheck {
-        blocks: graded(5, 3, &[]),
-        disagree: vec![0x404171],
-    };
+    let check = TextCheck::new(disagreeing(graded(5, 3, &[]), &[0x404171]));
     assert_eq!(
         check.header(),
         "// checked vs binary: statements as emitted, 8/8 blocks: 5 proved vs lift, 3 tested x3 states; disagree at 0x404171; unchecked: C spelling, later text passes"
     );
-    let many = TextCheck {
-        blocks: graded(5, 3, &[OUTSIDE_FLOAT]),
-        disagree: (0..6).map(|i| 0x401000 + i).collect(),
-    };
+    let ats: Vec<u64> = (0..6).map(|i| 0x401000 + i).collect();
+    let many = TextCheck::new(disagreeing(graded(5, 3, &[OUTSIDE_FLOAT]), &ats));
     assert_eq!(
         many.header(),
         "// checked vs binary: statements as emitted, 8/9 blocks: 5 proved vs lift, 3 tested x3 states, 1 unknown; disagree at 0x401000, 0x401001, 0x401002, 0x401003 (+2 more); unchecked: 1 float/vector, C spelling, later text passes"
@@ -1378,18 +1404,12 @@ fn a_block_the_proof_does_not_model_is_only_tested() {
 /// states tried agree on, and a grade no block has is left out.
 #[test]
 fn the_header_grades_blocks_proved_tested_and_unknown() {
-    let all = TextCheck {
-        blocks: graded(4, 0, &[]),
-        disagree: Vec::new(),
-    };
+    let all = TextCheck::new(graded(4, 0, &[]));
     assert_eq!(
         all.header(),
         "// checked vs binary: statements as emitted, 4/4 blocks: 4 proved vs lift; unchecked: C spelling, later text passes"
     );
-    let none = TextCheck {
-        blocks: graded(0, 3, &[OVER_BUDGET]),
-        disagree: Vec::new(),
-    };
+    let none = TextCheck::new(graded(0, 3, &[OVER_BUDGET]));
     assert_eq!(
         none.header(),
         "// checked vs binary: statements as emitted, 3/4 blocks: 0 proved vs lift, 3 tested x3 states, 1 unknown; unchecked: 1 over budget, C spelling, later text passes"

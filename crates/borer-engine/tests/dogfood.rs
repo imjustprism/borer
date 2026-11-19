@@ -1216,22 +1216,22 @@ fn misgraded(
     let check = borer_engine::analysis::decompile::text_check(p, a, o, f.entry);
     let check = check.as_ref().as_ref()?;
     use borer_engine::analysis::decompile::replay::Grade;
-    let starts: Vec<u64> = check.blocks.iter().map(|b| b.start()).collect();
-    let capped: usize = check.blocks.iter().map(|b| b.past_cap()).sum();
+    let starts: Vec<u64> = check.blocks().iter().map(|b| b.start()).collect();
+    let capped: usize = check.blocks().iter().map(|b| b.past_cap()).sum();
     let held = |at: u64| {
         check
-            .blocks
+            .blocks()
             .iter()
             .any(|b| b.disagreements().iter().any(|d| d.at == at))
     };
     let unheld: Vec<u64> = check
-        .disagree
+        .disagree()
         .iter()
         .copied()
         .filter(|&at| !held(at))
         .collect();
     let unfounded: Vec<u64> = check
-        .blocks
+        .blocks()
         .iter()
         .filter(|b| {
             let (states, why, rows) = (

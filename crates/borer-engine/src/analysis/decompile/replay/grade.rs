@@ -525,11 +525,12 @@ impl<'c> BlockAnswer<'c> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TextCheck {
     /// Each block's check, in block address order.
-    pub blocks: Vec<BlockCheck>,
+    blocks: Vec<BlockCheck>,
     /// The instructions of the statements the machine does not bear out,
     /// lane roughness aside, in address order: from a state tried or one
-    /// the proof chose.
-    pub disagree: Vec<u64>,
+    /// the proof chose; derived from [`TextCheck::blocks`] alone
+    /// ([`TextCheck::new`]), so no check holds one its records do not.
+    disagree: Vec<u64>,
 }
 
 impl TextCheck {
@@ -539,12 +540,36 @@ impl TextCheck {
     ///
     /// * `r` - One function's replay.
     pub(super) fn of(r: Replayed) -> Self {
+        Self::new(r.records)
+    }
+
+    /// Returns the check of these records, the disagreeing instructions
+    /// derived from them.
+    ///
+    /// # Arguments
+    ///
+    /// * `blocks` - Each block's check, in block address order.
+    #[must_use]
+    pub fn new(blocks: Vec<BlockCheck>) -> Self {
         let mut check = Self {
-            blocks: r.records,
+            blocks,
             disagree: Vec::new(),
         };
         check.derive();
         check
+    }
+
+    /// Returns each block's check, in block address order.
+    #[must_use]
+    pub fn blocks(&self) -> &[BlockCheck] {
+        &self.blocks
+    }
+
+    /// Returns the instructions of the statements the machine does not bear
+    /// out, in address order.
+    #[must_use]
+    pub fn disagree(&self) -> &[u64] {
+        &self.disagree
     }
 
     /// Derives [`TextCheck::disagree`] from the records, the one place it

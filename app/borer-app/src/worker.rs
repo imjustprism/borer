@@ -688,14 +688,14 @@ impl GradeCounts {
     /// * `check` - The engine's check of one answer.
     #[must_use]
     pub fn of(check: &TextCheck) -> Self {
-        let blocks = check.blocks.len();
+        let blocks = check.blocks().len();
         let unknown = check.count(Grade::Unchecked);
         let proved = check.count(Grade::Proved);
         Self {
             proved,
             tested: blocks.saturating_sub(unknown).saturating_sub(proved),
             unknown,
-            disagree: check.disagree.len(),
+            disagree: check.disagree().len(),
         }
     }
 

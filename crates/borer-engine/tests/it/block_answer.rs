@@ -37,13 +37,10 @@ fn found(at: u64) -> Disagreement {
 
 /// A check of two blocks: `0x1000` wrong from 3 states, `0x1010` tested.
 fn check() -> TextCheck {
-    TextCheck {
-        blocks: vec![
-            BlockCheck::new(0x1000, Ok(Some("differed")), (3, 1), vec![found(0x1000)]),
-            BlockCheck::new(0x1010, Ok(Some("differed")), (3, 1), Vec::new()),
-        ],
-        disagree: vec![0x1000],
-    }
+    TextCheck::new(vec![
+        BlockCheck::new(0x1000, Ok(Some("differed")), (3, 1), vec![found(0x1000)]),
+        BlockCheck::new(0x1010, Ok(Some("differed")), (3, 1), Vec::new()),
+    ])
 }
 
 /// No check, no record and a record each answer in their own words, and
@@ -89,16 +86,20 @@ fn a_recheck_from_fewer_states_keeps_a_wrong() {
     };
     assert_eq!(c.put_recheck(tested(2)), Rechecked::KeptWrong(was));
     assert_eq!(BlockAnswer::of(Some(&c), 0x1000).grade(), Grade::Wrong);
-    assert_eq!(c.disagree, [0x1000]);
+    assert_eq!(c.disagree(), [0x1000]);
     assert_eq!(c.put_recheck(tested(3)), Rechecked::Replaced(was));
     assert_eq!(BlockAnswer::of(Some(&c), 0x1000).grade(), Grade::Tested);
-    assert_eq!(c.disagree, [0u64; 0], "a cleared wrong no longer disagrees");
+    assert_eq!(
+        c.disagree(),
+        [0u64; 0],
+        "a cleared wrong no longer disagrees"
+    );
     let wrong = BlockCheck::new(0x1010, Ok(Some("differed")), (64, 1), vec![found(0x1010)]);
     assert!(matches!(c.put_recheck(wrong), Rechecked::Replaced(_)));
-    assert_eq!(c.disagree, [0x1010], "a block found wrong disagrees");
+    assert_eq!(c.disagree(), [0x1010], "a block found wrong disagrees");
     let new = BlockCheck::new(0x1008, Ok(None), (3, 1), Vec::new());
     assert_eq!(c.put_recheck(new), Rechecked::Added);
-    let starts: Vec<u64> = c.blocks.iter().map(BlockCheck::start).collect();
+    let starts: Vec<u64> = c.blocks().iter().map(BlockCheck::start).collect();
     assert_eq!(starts, [0x1000, 0x1008, 0x1010]);
 }
 

@@ -223,7 +223,7 @@ fn implicated(site: Site, line: &str, frame: i64) -> bool {
 /// * `entry` - The function's entry.
 fn replay_refutes(p: &Program, a: &Analysis, u: &Overlay, entry: u64) -> Option<Counterexample> {
     let check = text_check(p, a, u, entry);
-    let at = check.as_ref().as_ref()?.disagree.first().copied()?;
+    let at = check.as_ref().as_ref()?.disagree().first().copied()?;
     Some(Counterexample {
         input: "the replay's states".to_owned(),
         line: String::new(),
@@ -467,7 +467,7 @@ pub fn answered_flagged(
     let flagged = text_check(p, a, o, entry)
         .as_ref()
         .as_ref()
-        .is_some_and(|c| !c.disagree.is_empty());
+        .is_some_and(|c| !c.disagree().is_empty());
     if flagged {
         answered(p, a, o, entry)
     } else {

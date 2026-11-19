@@ -602,7 +602,7 @@ mod tests {
     use std::time::Duration;
 
     use borer_engine::analysis::decompile::Site;
-    use borer_engine::analysis::decompile::replay::{BlockCheck, Grade, TextCheck};
+    use borer_engine::analysis::decompile::replay::{Grade, TextCheck};
     use borer_engine::analysis::decompile::text_check;
     use borer_engine::analysis::render::{
         Budget, FunctionOrder, Repair, answered_flagged, function_rows,
@@ -692,16 +692,7 @@ mod tests {
     /// check with a statement the machine does not bear out, so one disagreeing address
     /// makes it.
     fn flag(loaded: &LoadedBinary) {
-        let block = BlockCheck::new(
-            0x1000,
-            Ok(Some("a state tried disagrees")),
-            (1, 1),
-            Vec::new(),
-        );
-        let check = TextCheck {
-            blocks: vec![block],
-            disagree: vec![0x1000],
-        };
+        let check = TextCheck::new(vec![wrong_at(0x1000)]);
         let names = loaded.overlay.fingerprint();
         let derived = &loaded.analysis.derived;
         derived.get_or_build_item("text_check", names, 0x1000_u64, || Some(check), |_| 0);

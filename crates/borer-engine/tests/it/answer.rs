@@ -73,10 +73,7 @@ fn flag(a: &Analysis, o: &Overlay, repair: Repair) {
         (1, 1),
         vec![wrong],
     );
-    let check = TextCheck {
-        blocks: vec![block],
-        disagree: vec![0x1000],
-    };
+    let check = TextCheck::new(vec![block]);
     let names = o.fingerprint();
     a.derived
         .get_or_build_item("text_check", names, 0x1000_u64, || Some(check), |_| 0);

@@ -581,10 +581,7 @@ pub(crate) mod tests {
                 }
             })
             .collect();
-        Arc::new(Some(TextCheck {
-            blocks,
-            disagree: wrong.to_vec(),
-        }))
+        Arc::new(Some(TextCheck::new(blocks)))
     }
 
     /// Returns the marks of `view` with each function's check from `checks`.

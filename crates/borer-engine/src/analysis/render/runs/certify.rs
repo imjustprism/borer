@@ -91,7 +91,7 @@ pub fn certify_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result
                 .strip_prefix("// checked vs binary: ")
                 .unwrap_or(&header);
             let _ = writeln!(out, "lift\t{said}");
-            !c.disagree.is_empty()
+            !c.disagree().is_empty()
         }
         None => {
             out.push_str(
@@ -327,7 +327,7 @@ fn certify_many(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result<St
         || (),
         |(), (entry, name)| {
             let lift = text_check(p, a, o, *entry);
-            let disagree = lift.as_ref().as_ref().and_then(|c| c.disagree.first());
+            let disagree = lift.as_ref().as_ref().and_then(|c| c.disagree().first());
             let runs = x86.clone().and_then(|()| {
                 generated_in(p, a, o, *entry, (count, VERIFY_SEED, budget), Mode::Iso)
             });
