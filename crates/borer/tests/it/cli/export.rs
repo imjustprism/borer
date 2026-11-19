@@ -87,3 +87,14 @@ fn cli_export_refuses_an_unknown_flag_with_its_own_words() {
     );
     assert!(!said.contains("no_such_file"), "{said}");
 }
+
+/// A flag `export` is given twice is refused before the binary loads.
+///
+/// `--split a --split b` silently wrote to `b`.
+#[test]
+fn cli_export_refuses_a_flag_given_twice() {
+    let (ok, said) =
+        super::run_all(&["export", "no_such_file.exe", "--split", "a", "--split", "b"]);
+    assert!(!ok && said.contains("--split is given twice"), "{said}");
+    assert!(!said.contains("no_such_file"), "{said}");
+}

@@ -769,8 +769,8 @@ pub(super) struct ExportArgs<'a> {
 ///
 /// When no file is named, a file flag has no path after it, `--library`
 /// or `--only` comes without `--c`, `--only` has no address, an address
-/// does not parse, a word is none of these, two flags name one file, or
-/// `--split` comes with another file.
+/// does not parse, a word is none of these, a flag is given twice, two
+/// flags name one file, or `--split` comes with another file.
 pub(super) fn export_args(args: &[String]) -> anyhow::Result<ExportArgs<'_>> {
     use borer::export::ModFile;
     use borer_engine::analysis::decompile::export::Library;
@@ -782,8 +782,12 @@ pub(super) fn export_args(args: &[String]) -> anyhow::Result<ExportArgs<'_>> {
         split: None,
     };
     let mut rest = args.iter().skip(2);
+    let mut given = std::collections::BTreeSet::new();
     while let Some(word) = rest.next() {
         let flag = word.as_str();
+        if !given.insert(flag) {
+            bail!("{flag} is given twice");
+        }
         if let Some((kind, _)) = ModFile::ALL
             .iter()
             .find(|(_, ext)| flag.strip_prefix("--") == Some(ext))
