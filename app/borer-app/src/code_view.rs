@@ -480,6 +480,52 @@ pub(crate) mod tests {
         (program, analysis, overlay)
     }
 
+    /// Entry of [`wide_program`]: its function calls every leaf.
+    const ENTRY: u64 = 0x1000;
+
+    /// Leaf functions the wide sample's entry calls: more than the engine's discovery waves
+    /// (64 entries) and per-function stripes (256 functions) take before they run on more than
+    /// one thread.
+    pub(crate) const LEAVES: u32 = 300;
+
+    /// Returns a program whose entry, at [`ENTRY`], calls [`LEAVES`] leaf functions, each
+    /// returning its own number, analyzed, with the overlay of [`sample_program`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if [`LEAVES`] leaves do not fit the program's 32-bit call offsets.
+    pub(crate) fn wide_program() -> (Program, Analysis, Overlay) {
+        let leaf_off = 0x800;
+        let len = leaf_off + 8 * usize::try_from(LEAVES).unwrap();
+        let mut bytes = vec![0xcc; len];
+        for i in 0..LEAVES {
+            let at = 5 * usize::try_from(i).unwrap();
+            let leaf = 0x800 + 8 * i;
+            let rel = leaf.wrapping_sub(u32::try_from(at + 5).unwrap());
+            // ASM: call leaf_i
+            bytes[at] = 0xe8;
+            bytes[at + 1..at + 5].copy_from_slice(&rel.to_le_bytes());
+            let off = usize::try_from(leaf).unwrap();
+            // ASM: mov eax, i ; ret
+            bytes[off] = 0xb8;
+            bytes[off + 1..off + 5].copy_from_slice(&i.to_le_bytes());
+            bytes[off + 5] = 0xc3;
+        }
+        let ret = 5 * usize::try_from(LEAVES).unwrap();
+        // ASM: ret
+        bytes[ret] = 0xc3;
+        let size = u64::try_from(len).unwrap();
+        let sections = vec![Section::mapped(".text", ENTRY, 0, size, false, true)];
+        let mut program = Program::raw(bytes, Arch::X86_64, ENTRY, Some(ENTRY), sections);
+        program.format = BinaryFormat::Pe;
+        let analysis = Analysis::compute(&program);
+        let overlay = Overlay {
+            enum_source: EnumSource::Binary,
+            ..Overlay::default()
+        };
+        (program, analysis, overlay)
+    }
+
     /// Every role sits at its own index, a function naming an import takes the import's
     /// role, and only whitespace has none.
     ///

@@ -14,10 +14,11 @@ use workspace::{AppState, ItemHandle, Workspace};
 
 use crate::app_view::REFUSED_FOLDER;
 use crate::app_view::tests::{
-    CALLER, drop_on_center, init, load_sample, open, open_place, sample, take_status,
+    CALLER, drop_on_center, init, load_sample, loaded_of, open, open_place, sample, take_status,
 };
 use crate::binary::{Digest, Digested};
 use crate::card::CARD_SELECTOR;
+use crate::code_view::tests::{LEAVES, wide_program};
 use crate::decompile_item::{DecompileItem, TabMode};
 use crate::functions_panel::FunctionsPanel;
 use crate::graph_item::GraphItem;
@@ -223,6 +224,12 @@ async fn a_folder_dropped_on_any_tab_never_joins_the_project(cx: &mut TestAppCon
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// Returns [`wide_program`] as a loaded binary.
+fn wide_sample() -> Arc<LoadedBinary> {
+    let (program, analysis, overlay) = wide_program();
+    loaded_of(program, analysis, overlay)
+}
+
 /// Returns the digest of what `item` shows, `None` for an item that shows no binary.
 fn digest_of(item: &dyn ItemHandle, cx: &App) -> Option<u64> {
     /// Returns the digest of `item` as a `T`, `None` when it is another kind.
@@ -240,8 +247,8 @@ fn digest_of(item: &dyn ItemHandle, cx: &App) -> Option<u64> {
 /// Returns the digest of every place of [`places`], each named by its place, and of the
 /// functions panel.
 ///
-/// They are read in a new window over a fresh load of the sample whose engine work, the
-/// load's and the views', runs under a cap of `workers` threads.
+/// They are read in a new window over a fresh load of [`wide_sample`] whose engine work,
+/// the load's and the views', runs under a cap of `workers` threads.
 fn digests(
     app_state: &Arc<AppState>,
     workers: usize,
@@ -250,7 +257,7 @@ fn digests(
     let cap = Workers(NonZeroUsize::new(workers).unwrap());
     cap.within(|| {
         let (app, cx) = open(app_state, cx);
-        let loaded = sample();
+        let loaded = wide_sample();
         app.binary
             .update(cx, |binary, cx| binary.show_loaded(loaded.clone(), cx));
         let mut out = Vec::new();
@@ -274,14 +281,19 @@ fn digests(
 }
 
 /// Every place, and the functions panel, shows the same digest whether the engine ran on
-/// one thread or on sixteen, each over its own load of one file, and no digest is the
-/// empty fold.
+/// one thread or on sixteen, each over its own load of a program wide enough to run on
+/// both, and no digest is the empty fold.
 #[gpui::test]
 fn every_place_shows_the_same_digest_at_one_and_sixteen_workers(cx: &mut TestAppContext) {
     let app_state = init(cx);
     let one = digests(&app_state, 1, cx);
     let sixteen = digests(&app_state, 16, cx);
     assert_eq!(one.len(), places().len() + 1);
+    let functions = wide_sample().initial_rows.rows.len();
+    assert!(
+        functions > usize::try_from(LEAVES).unwrap(),
+        "{functions} functions"
+    );
     assert_eq!(one, sixteen);
     let empty = Digest::default().value();
     assert!(one.iter().all(|(_, digest)| *digest != empty), "{one:?}");
