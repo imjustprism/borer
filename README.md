@@ -49,6 +49,18 @@ ways, each with the same facts:
 > borer is early-stage. Tool names, output and resource URIs still change
 > between releases. Please report anything that looks wrong.
 
+<p align="center">
+  <a href="brand/app-decompile.png"><img alt="borer-app on notepad.exe in the dark theme: the function list on the left with sub_140022440 selected, and its decompile on the right, which creates a directory, writes a probe.autosave file and checks the free disk space; an inline rename of a callee to StringCchPrintfW is open over the code" src="brand/app-decompile.png" width="100%"></a>
+  <br>
+  <sub>The desktop app on notepad.exe: the function list, a decompile tab with its check header, and an inline rename.</sub>
+</p>
+
+<p align="center">
+  <a href="brand/app-chat.png"><img alt="borer-app on notepad.exe with the chat panel open: a scripted demo model answers &quot;What does this binary do?&quot; after a borer://triage query and a decompile tool call" src="brand/app-chat.png" width="100%"></a>
+  <br>
+  <sub>The chat panel, here driven by the app's scripted demo model: two tool calls, then an answer.</sub>
+</p>
+
 ## What it covers today
 
 | Part | What borer has | Measured |
