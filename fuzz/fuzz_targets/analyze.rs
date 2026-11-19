@@ -1,6 +1,8 @@
 //! Loads arbitrary bytes, lists the code at its entry, analyzes what loads,
 //! builds the control-flow graph of its first functions, decompiles them
-//! and reads each text as a view and its next steps, proposes a struct
+//! and reads each text as a view and its next steps, reads the template
+//! signatures each references (every string the program references is
+//! parsed for them on the first ask), proposes a struct
 //! through its first argument, lists the types and opens the first page of
 //! them, lists what the assertions name, pages the linear listing both ways
 //! from the entry, an address the input names and the image's end, draws a
@@ -26,7 +28,7 @@ use borer_engine::analysis::split::{sources, split_map};
 use borer_engine::analysis::stats::stats_tsv;
 use borer_engine::analysis::utypes::{type_detail, type_rows};
 use borer_engine::analysis::vtables::family_of;
-use borer_engine::analysis::{Analysis, Overlay};
+use borer_engine::analysis::{Analysis, Overlay, referenced_signatures};
 use borer_engine::clr::managed::{self, Managed};
 use borer_engine::clr::markers::markers_tsv;
 use borer_engine::disasm::disassemble_program;
@@ -76,6 +78,7 @@ fuzz_target!(|data: &[u8]| {
             _ = call_children(&program, &analysis, &overlay, f.entry, level);
         }
         _ = next_steps(&program, &analysis, &overlay, f.entry);
+        _ = referenced_signatures(&program, &analysis, f.entry);
         if let Ok(g) = cfg(&program, &analysis, &overlay, f.entry) {
             _ = g.listing.lines();
         }

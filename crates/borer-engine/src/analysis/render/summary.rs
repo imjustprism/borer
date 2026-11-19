@@ -252,24 +252,29 @@ pub fn function_summary(p: &Program, a: &Analysis, o: &Overlay, entry: u64) -> O
         .clone()
 }
 
-/// Returns the summary's `declared:` line.
+/// Returns the summary's rows read from the signature strings a function
+/// references.
 ///
-/// It is the signature a signature string gave the function, and where it
-/// came from, which a function that inlined the named one, or was handed
-/// its string, reads the same ([`crate::analysis::NameSource::describe`]).
-/// A later name (Qt metadata, a funclet's parent) keeps the types, so the
-/// row names the string, not the name's source.
+/// The `declared:` row is the signature a signature string gave the
+/// function, and where it came from: its own body, code inlined from it,
+/// or code handed the string ([`crate::analysis::NameSource::describe`]).
+/// A `references the signature of:` row follows for each function whose
+/// template signature it references
+/// ([`crate::analysis::referenced_signatures`]), worded as the decompile
+/// header words it.
 ///
 /// # Arguments
 ///
+/// * `p` - The loaded image, read for the template signatures.
+/// * `a` - The analysis.
 /// * `f` - The function.
 ///
 /// # Returns
 ///
-/// The line with its newline, or an empty string when no signature string
-/// typed the function.
-fn declared_line(f: &Function) -> String {
-    f.signature.as_ref().map_or(String::new(), |s| {
+/// The rows, each with its newline, or an empty string when there are
+/// none.
+fn signature_rows(p: &Program, a: &Analysis, f: &Function) -> String {
+    let mut rows = f.signature.as_ref().map_or(String::new(), |s| {
         format!(
             "declared: {} {}({}){}; from {}\n",
             s.ret,
@@ -278,7 +283,15 @@ fn declared_line(f: &Function) -> String {
             if s.is_const { " const" } else { "" },
             crate::analysis::NameSource::Signature.describe()
         )
-    })
+    });
+    let refs = crate::analysis::referenced_signatures(p, a, f.entry);
+    for l in &refs.lines {
+        rows.push_str(&format!("references the signature of: {l}\n"));
+    }
+    if let Some(more) = refs.showing() {
+        rows.push_str(&format!("signatures referenced: {more}\n"));
+    }
+    rows
 }
 
 /// Builds the triage block [`function_summary`] memoizes.
@@ -381,7 +394,7 @@ fn summary_of(p: &Program, a: &Analysis, o: &Overlay, entry: u64) -> Option<Stri
     } else {
         format!("messages: {} [{}]\n", sent.len(), capped(&sent, ", "))
     };
-    let declared = declared_line(f);
+    let declared = signature_rows(p, a, f);
     let mut typed: Vec<String> = f
         .param_hints
         .iter()

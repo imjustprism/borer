@@ -11,7 +11,9 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use super::{Kept, Origins, checked_header, decompile_named, origin, skeleton, stack, warn};
-use crate::analysis::{Analysis, NameSource, Overlay, decompiled_kept, name_of, render};
+use crate::analysis::{
+    Analysis, NameSource, Overlay, decompiled_kept, name_of, referenced_signatures, render,
+};
 use crate::program::Program;
 
 /// How much of a function's text an answer shows.
@@ -203,7 +205,7 @@ pub fn answer_header(
     entry: u64,
     differs: Option<&str>,
 ) -> Option<String> {
-    let lines: Vec<String> = signature_notes(analysis, overlay, entry)
+    let lines: Vec<String> = signature_notes(program, analysis, overlay, entry)
         .into_iter()
         .chain(header_lines(
             program, analysis, overlay, entry, differs, None,
@@ -257,18 +259,27 @@ fn header_lines(
 /// Returns what the signature strings a function references say of it,
 /// one line each.
 ///
-/// It is where its name and types came from when a signature string gave
+/// First where its name and types came from when a signature string gave
 /// them: the name by [`NameSource::Signature`], the types by the signature
 /// the function keeps, which a later name (Qt metadata, a funclet's
 /// parent) leaves in place. A name or prototype the overlay states is the
-/// user's, so the line names only what the string still gives.
+/// user's, so the line names only what the string still gives. Then one
+/// `// references the signature of:` line per template signature it
+/// references ([`referenced_signatures`]), and how many when more were
+/// found than listed.
 ///
 /// # Arguments
 ///
+/// * `program` - The loaded image, for the template signatures.
 /// * `analysis` - Its analysis.
 /// * `overlay` - Names and prototypes in force.
 /// * `entry` - The function's entry.
-fn signature_notes(analysis: &Analysis, overlay: &Overlay, entry: u64) -> Vec<String> {
+fn signature_notes(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    entry: u64,
+) -> Vec<String> {
     let Some(f) = analysis.function(entry) else {
         return Vec::new();
     };
@@ -280,8 +291,18 @@ fn signature_notes(analysis: &Analysis, overlay: &Overlay, entry: u64) -> Vec<St
         (false, true) => Some("types"),
         (false, false) => None,
     };
+    let refs = referenced_signatures(program, analysis, entry);
     what.map(|w| format!("// {w}: {}", NameSource::Signature.describe()))
         .into_iter()
+        .chain(
+            refs.lines
+                .iter()
+                .map(|l| format!("// references the signature of: {l}")),
+        )
+        .chain(
+            refs.showing()
+                .map(|s| format!("// signatures referenced: {s}")),
+        )
         .collect()
 }
 

@@ -7,6 +7,7 @@
 
 mod a32;
 pub use a32::{entry_or_gap, in_blocks};
+pub use naming::templates::{Referenced, referenced_signatures};
 mod a64;
 pub mod about;
 pub mod anchors;

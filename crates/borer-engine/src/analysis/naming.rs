@@ -16,6 +16,10 @@
 //! signature declares (`this` included). A name goes to one function only:
 //! the other referrers inlined it and stay `sub_`, as does anything still
 //! ambiguous.
+//!
+//! The template signatures GCC and Clang write (`void Box<T>::Grow() [with
+//! T = int]`) name nothing; they say what code a function holds
+//! ([`templates`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -27,6 +31,8 @@ use super::schema::ident_char;
 use super::{Analysis, Function, NameSource, Signature, data_referrers, single};
 use crate::program::{BinaryFormat, Program};
 use crate::strings::cstr_at;
+
+pub(crate) mod templates;
 
 /// Longest signature string read.
 pub(crate) const SIG_MAX: usize = 512;
@@ -552,6 +558,133 @@ fn read_signature(text: &str) -> Option<Signature> {
     if text.ends_with("...") {
         return None;
     }
+    let (head, params, after) = split_signature(text)?;
+    if !(after.is_empty() || after == "const" || after == "const noexcept" || after == "noexcept") {
+        return None;
+    }
+    let conv = CONVENTIONS.iter().find_map(|k| head.rsplit_once(k));
+    let (ret_raw, raw) = match conv {
+        Some((pre, rest)) => (pre, rest.trim()),
+        None => {
+            let head = head.trim_end();
+            let name = last_token(head);
+            (head.get(..head.len() - name.len()).unwrap_or(""), name)
+        }
+    };
+    let name = strip_keywords(raw);
+    if name.is_empty()
+        || !name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_' || c == '<')
+    {
+        return None;
+    }
+    if conv.is_none() && !declares(head, &name, params, |_| false) {
+        return None;
+    }
+    let ret_core = ret_raw.trim().trim_start_matches("const ").trim_start();
+    let elaborated = ["class ", "struct ", "union "]
+        .iter()
+        .any(|k| ret_core.starts_with(k));
+    let ret = strip_keywords(ret_raw.trim_end());
+    let ret = if ret.is_empty() {
+        conversion_type(&name).map_or(ret, str::to_owned)
+    } else {
+        ret
+    };
+    if hand_written(&ret, &[params]) {
+        return None;
+    }
+    let by_pointer = !ret.is_empty()
+        && !ret.ends_with('*')
+        && !ret.ends_with('&')
+        && (elaborated
+            || (conv.is_none()
+                && !ret_core.starts_with("enum ")
+                && (ret.contains("::") || ret.contains('<'))));
+    let params: Vec<String> = split_params(params)
+        .into_iter()
+        .map(strip_keywords)
+        .filter(|p| !p.is_empty() && p != "void")
+        .collect();
+    Some(Signature {
+        ret: if ret.is_empty() {
+            "void".to_owned()
+        } else {
+            ret
+        },
+        name,
+        params,
+        is_const: after.starts_with("const"),
+        by_pointer,
+    })
+}
+
+/// Tells whether a signature-shaped text is one no compiler writes: a log
+/// line spelled like a declaration.
+///
+/// Its return type is prose ([`prose`]: `Error in Net::open()`), or ends
+/// in `:`, a sentence's label (`Retrying: Net::open(...)`), or one of its
+/// parts holds a printf conversion (`%s`, `%zu`, `%-8d`), which no
+/// declaration and no template binding spells.
+///
+/// # Arguments
+///
+/// * `ret` - The return type, elaborated-type keywords dropped.
+/// * `parts` - The parameter list, and a template's bindings.
+fn hand_written(ret: &str, parts: &[&str]) -> bool {
+    let conversion = |text: &&str| {
+        text.match_indices('%').any(|(i, _)| {
+            let spec = text
+                .get(i + 1..)
+                .unwrap_or("")
+                .trim_start_matches(|c: char| "-+ #0123456789.*hlLqjzt".contains(c));
+            spec.starts_with(|c: char| "diouxXfFeEgGaAcspn".contains(c))
+        })
+    };
+    prose(ret) || ret.trim_end().ends_with(':') || parts.iter().any(conversion)
+}
+
+/// Tells whether a head with no calling convention declares a function
+/// rather than reads as prose (`Failed to open file (%s)`).
+///
+/// A qualified name declares one. An unqualified name needs two to four
+/// words before the parameter list, the first a type word (`int main(int,
+/// char **)`), and a parameter list of type characters only.
+///
+/// # Arguments
+///
+/// * `head` - The text before the parameter list.
+/// * `name` - The name read from it.
+/// * `params` - The text inside the parameter list.
+/// * `bound` - Whether a word names a type of its own: a template's bound
+///   parameter (`T Twice(T) [with T = int]`).
+fn declares(head: &str, name: &str, params: &str, bound: impl Fn(&str) -> bool) -> bool {
+    if name.contains("::") {
+        return true;
+    }
+    let words: Vec<&str> = head.split_whitespace().collect();
+    let typed = words
+        .first()
+        .is_some_and(|w| TYPE_WORDS.contains(w) || bound(w));
+    let type_like = params
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || " _*&,:<>[]".contains(c));
+    (2..=4).contains(&words.len()) && typed && type_like
+}
+
+/// Splits a signature at its parameter list.
+///
+/// The list opens at the first `(` outside template arguments, an operator
+/// function's symbol skipped, and closes at the first `)` after it.
+///
+/// # Arguments
+///
+/// * `text` - The signature.
+///
+/// # Returns
+///
+/// The text before the list, the text inside it and the trimmed text after
+/// it, or `None` when there is no list.
+fn split_signature(text: &str) -> Option<(&str, &str, &str)> {
     let symbol_end = operator_symbol_end(text);
     let mut depth = 0i32;
     let mut paren = None;
@@ -578,67 +711,7 @@ fn read_signature(text: &str) -> Option<Signature> {
     let close = tail.find(')')?;
     let params = tail.get(1..close)?;
     let after = tail.get(close + 1..)?.trim();
-    if !(after.is_empty() || after == "const" || after == "const noexcept" || after == "noexcept") {
-        return None;
-    }
-    let conv = CONVENTIONS.iter().find_map(|k| head.rsplit_once(k));
-    let (ret_raw, raw) = match conv {
-        Some((pre, rest)) => (pre, rest.trim()),
-        None => {
-            let head = head.trim_end();
-            let name = last_token(head);
-            (head.get(..head.len() - name.len()).unwrap_or(""), name)
-        }
-    };
-    let name = strip_keywords(raw);
-    if name.is_empty()
-        || !name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_' || c == '<')
-    {
-        return None;
-    }
-    if conv.is_none() && !name.contains("::") {
-        let words: Vec<&str> = head.split_whitespace().collect();
-        let typed = words.first().is_some_and(|w| TYPE_WORDS.contains(w));
-        let type_like = params
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || " _*&,:<>[]".contains(c));
-        if words.len() < 2 || words.len() > 4 || !typed || !type_like {
-            return None;
-        }
-    }
-    let ret_core = ret_raw.trim().trim_start_matches("const ").trim_start();
-    let elaborated = ["class ", "struct ", "union "]
-        .iter()
-        .any(|k| ret_core.starts_with(k));
-    let ret = strip_keywords(ret_raw.trim_end());
-    let ret = if ret.is_empty() {
-        conversion_type(&name).map_or(ret, str::to_owned)
-    } else {
-        ret
-    };
-    let by_pointer = !ret.is_empty()
-        && !ret.ends_with('*')
-        && !ret.ends_with('&')
-        && (elaborated
-            || (conv.is_none()
-                && !ret_core.starts_with("enum ")
-                && (ret.contains("::") || ret.contains('<'))));
-    let params: Vec<String> = split_params(params)
-        .into_iter()
-        .map(strip_keywords)
-        .filter(|p| !p.is_empty() && p != "void")
-        .collect();
-    Some(Signature {
-        ret: if ret.is_empty() {
-            "void".to_owned()
-        } else {
-            ret
-        },
-        name,
-        params,
-        is_const: after.starts_with("const"),
-        by_pointer,
-    })
+    Some((head, params, after))
 }
 
 /// Tells whether a string is a function signature, one [`parse_signature`]
@@ -657,50 +730,63 @@ fn read_signature(text: &str) -> Option<Signature> {
 ///
 /// * `text` - The string as read.
 pub(crate) fn is_signature(text: &str) -> bool {
-    if reads_as_signature(text) {
+    if read_signature(text).is_some() {
         return true;
     }
-    let Some(body) = text.strip_suffix(']') else {
-        return false;
-    };
-    let mut depth = 1usize;
-    let Some(open) = body.bytes().rposition(|b| {
-        match b {
-            b']' => depth += 1,
-            b'[' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-        depth == 0
-    }) else {
+    let Some((body, open)) = bindings_open(text) else {
         return false;
     };
     let inner = body.get(open + 1..).unwrap_or("");
     inner.strip_prefix("with ").unwrap_or(inner).contains(" = ")
         && body
             .get(..open)
-            .is_some_and(|head| reads_as_signature(head.trim_end()))
+            .is_some_and(|head| read_signature(head.trim_end()).is_some())
 }
 
-/// Tells whether `text` reads as a signature whose return type is no
-/// prose: no two plain words side by side that are not keywords.
+/// Finds the `[` that opens the bindings a template signature ends with.
 ///
 /// # Arguments
 ///
 /// * `text` - The string as read.
-fn reads_as_signature(text: &str) -> bool {
+///
+/// # Returns
+///
+/// The text without its final `]` and the index in it of the `[` that
+/// matches that `]`, or `None` when the text does not end in a bracketed
+/// list.
+fn bindings_open(text: &str) -> Option<(&str, usize)> {
+    let body = text.strip_suffix(']')?;
+    let mut depth = 1usize;
+    let open = body.bytes().rposition(|b| {
+        match b {
+            b']' => depth += 1,
+            b'[' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        depth == 0
+    })?;
+    Some((body, open))
+}
+
+/// Tells whether a return type spells two plain words side by side,
+/// neither a keyword: prose, since C++ spells a type by one name among
+/// keywords.
+///
+/// # Arguments
+///
+/// * `ret` - The return type as a signature spells it.
+fn prose(ret: &str) -> bool {
     let plain = |w: &str| {
-        w.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        w.chars().all(ident_char)
             && !w.starts_with("__")
             && !TYPE_WORDS.contains(&w)
             && !SPECIFIERS.contains(&w)
     };
-    read_signature(text).is_some_and(|sig| {
-        let words = sig.ret.split_whitespace();
-        !words
-            .clone()
-            .zip(words.skip(1))
-            .any(|(a, b)| plain(a) && plain(b))
-    })
+    let words = ret.split_whitespace();
+    words
+        .clone()
+        .zip(words.skip(1))
+        .any(|(a, b)| plain(a) && plain(b))
 }
 
 /// The type a conversion operator converts to: `Base::NetStreamBase *` for
@@ -730,6 +816,17 @@ fn conversion_type(name: &str) -> Option<&str> {
 ///
 /// * `params` - The text between the outer parentheses.
 fn split_params(params: &str) -> Vec<&str> {
+    split_outside(params, ',')
+}
+
+/// Splits a list at each `sep` outside template and function-type
+/// brackets, trimming each part.
+///
+/// # Arguments
+///
+/// * `params` - The list.
+/// * `sep` - The separator.
+fn split_outside(params: &str, sep: char) -> Vec<&str> {
     let mut out = Vec::new();
     let mut depth = 0i32;
     let mut start = 0;
@@ -737,7 +834,7 @@ fn split_params(params: &str) -> Vec<&str> {
         match c {
             '<' | '(' => depth += 1,
             '>' | ')' => depth -= 1,
-            ',' if depth == 0 => {
+            c if c == sep && depth == 0 => {
                 out.push(params.get(start..i).unwrap_or("").trim());
                 start = i + 1;
             }
@@ -776,7 +873,7 @@ fn operator_symbol_end(text: &str) -> Option<usize> {
 }
 
 /// Returns the last space-separated token of `head`, keeping spaces inside
-/// template arguments and after `operator`.
+/// template arguments and after `operator`, and the qualifier before it.
 ///
 /// # Arguments
 ///
@@ -798,9 +895,15 @@ fn last_token(head: &str) -> &str {
     }
     let token = trimmed.get(start..).unwrap_or(trimmed);
     let before = trimmed.get(..start).unwrap_or("").trim_end();
-    if before.ends_with("operator") || before.ends_with("::operator") {
+    if before.ends_with("operator") {
         let op_start = before.len() - "operator".len();
-        return trimmed.get(op_start..).unwrap_or(token);
+        let scope = trimmed.get(..op_start).unwrap_or("");
+        let start = if scope.ends_with("::") {
+            op_start - last_token(scope).len()
+        } else {
+            op_start
+        };
+        return trimmed.get(start..).unwrap_or(token);
     }
     token
 }
@@ -965,6 +1068,34 @@ mod tests {
         assert_eq!(s.params, vec!["Foo"]);
         let s = parse_signature("void __cdecl Kind::Take(class my$class *)").expect("dollar");
         assert_eq!(s.params, vec!["my$class *"]);
+    }
+
+    /// An operator keeps its class however it is spaced, and a log line
+    /// spelled like a qualified declaration names nothing.
+    ///
+    /// # Panics
+    ///
+    /// When an operator loses its class or a log line parses.
+    #[test]
+    fn operators_keep_their_class_and_log_lines_name_nothing() {
+        let s = parse_signature("Foo::operator bool() const").expect("conversion operator");
+        assert_eq!(
+            (s.name.as_str(), s.ret.as_str()),
+            ("Foo::operator bool", "bool")
+        );
+        let s = parse_signature("static void* Foo::operator new(std::size_t)")
+            .expect("allocation operator");
+        assert_eq!(s.name, "Foo::operator new");
+        assert_eq!(s.params, vec!["std::size_t"]);
+        for text in [
+            "Retrying: Net::open(%s)",
+            "Retrying: Net::open()",
+            "Error in Net::open()",
+            "Calling Net::Connect(%d)",
+            "Net::Send(%zu bytes)",
+        ] {
+            assert!(parse_signature(text).is_none(), "{text}");
+        }
     }
 
     /// A space between the name and its parameter list leaves the return

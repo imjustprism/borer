@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use borer_engine::analysis::find::{HitKind, KIND_MAX, NEEDLE_MAX, Query, everywhere};
-use borer_engine::analysis::{Analysis, Overlay};
+use borer_engine::analysis::{Analysis, Overlay, referenced_signatures};
 use borer_engine::num::from_usize;
 use borer_engine::program::{Arch, Program, SymbolKind};
 use borer_engine::text::OUTSIDE_MAX;
@@ -1158,4 +1158,195 @@ fn a_huge_class_family_keeps_what_its_layout_shows() {
     assert_eq!(fam.member_count, 4095);
     assert_eq!(fam.members.len(), 8);
     assert!(bytes < 64 << 10, "one class's family took {bytes} bytes");
+}
+
+/// Tiny functions referencing one template signature.
+const SIGNERS: usize = 2000;
+
+/// Builds an image of `n` tiny functions ([`referencing`]), function `k`
+/// referencing the offset `target(k)` into `rdata`.
+///
+/// # Arguments
+///
+/// * `n` - How many functions.
+/// * `rdata` - The read-only data.
+/// * `target` - The offset into `rdata` function `k` references.
+///
+/// # Returns
+///
+/// The image and each function's entry.
+fn signers(n: usize, rdata: &[u8], target: impl Fn(usize) -> usize) -> (Program, Vec<u64>) {
+    let first = 0x1000 + from_usize((5 * n + 1).next_multiple_of(16));
+    let entries = (0..n).map(|k| first + 16 * from_usize(k)).collect();
+    (referencing(n, rdata, |k| [target(k); 2]), entries)
+}
+
+/// Builds an image of `n` tiny functions, each referencing its own text
+/// at the start of a 4096-byte page of read-only data ([`signers`]).
+///
+/// # Arguments
+///
+/// * `n` - How many functions.
+/// * `text` - The text function `k` references, shorter than a page.
+fn paged_signers(n: usize, text: impl Fn(usize) -> String) -> (Program, Vec<u64>) {
+    let mut rdata = Vec::new();
+    for k in 0..n {
+        rdata.extend_from_slice(text(k).as_bytes());
+        assert!(rdata.len() < 4096 * (k + 1), "a text fills its page");
+        rdata.resize(4096 * (k + 1), 0);
+    }
+    signers(n, &rdata, |k| 4096 * k)
+}
+
+/// Returns the [`referenced_signatures`] lines of each function of an
+/// image.
+///
+/// # Arguments
+///
+/// * `p` - The image.
+/// * `a` - Its analysis.
+/// * `entries` - The functions.
+fn lines_of(p: &Program, a: &Analysis, entries: &[u64]) -> Vec<Vec<String>> {
+    entries
+        .iter()
+        .map(|&e| referenced_signatures(p, a, e).lines)
+        .collect()
+}
+
+/// A 4 KB template signature referenced from thousands of functions gives
+/// each the one line it spells and is read once.
+///
+/// Half of them reference bytes inside it, which start no string and give
+/// no line. Every string of the program is read into one map, one cell of
+/// the derived store however many functions ask, and reading every
+/// function's lines keeps a few kilobytes of heap.
+#[test]
+fn a_template_signature_many_functions_reference_is_read_once() {
+    /// Heap reading every function's lines may take beyond the analysis.
+    const LINES_HEAP: usize = 32 << 10;
+    let _serial = serial();
+    let filler = format!("<{}>", "long".repeat(860));
+    let sig = format!("void Box<T>::Put() [with T = int; U = {filler}]\0");
+    assert!(sig.len() > 3000 && sig.len() < 4096, "{}", sig.len());
+    let at = |k: usize| if k.is_multiple_of(2) { 0 } else { 1 + k % 5 };
+    let (p, entries) = signers(SIGNERS, sig.as_bytes(), at);
+    let a = Analysis::compute(&p);
+    let (counted, extra) = measured(|| {
+        entries
+            .iter()
+            .map(|&e| referenced_signatures(&p, &a, e).lines.len())
+            .sum::<usize>()
+    });
+    assert_eq!(counted, SIGNERS / 2);
+    assert_eq!(a.derived.held("template_signatures"), 1);
+    let shown = lines_of(&p, &a, &entries);
+    let rdata = entries
+        .last()
+        .map_or(0, |e| (e + 16).next_multiple_of(0x1000));
+    let line = format!(
+        "Box<int>::Put (string at {rdata:#x}; its own body, code inlined from it, or code handed the string)"
+    );
+    for (k, lines) in shown.iter().enumerate() {
+        let want = if k.is_multiple_of(2) {
+            vec![line.clone()]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(lines, &want, "function {k}");
+    }
+    assert!(extra <= LINES_HEAP, "{extra} bytes of heap for the lines");
+}
+
+/// Hostile template signatures give no line and no panic.
+///
+/// Two hundred bindings spelled into a qualifier past 120 bytes, brackets
+/// left unbalanced, a name that would carry a comment mark or pass 120
+/// bytes: each is no name. Three hundred bindings the name does not spell
+/// still give it.
+#[test]
+fn hostile_template_signatures_give_no_line() {
+    let _serial = serial();
+    let many: String = (0..300).map(|k| format!("T{k} = int; ")).collect();
+    let params: Vec<String> = (0..200).map(|k| format!("T{k}")).collect();
+    let bound: String = (0..200).map(|k| format!("T{k} = int; ")).collect();
+    let texts = [
+        format!("void A<T0>::f() [with {many}U = int]"),
+        format!("void A<{}>::f() [with {bound}U = int]", params.join(", ")),
+        "void A<T::f() [with T = int]".to_owned(),
+        "void A<T>>::f() [with T = int]".to_owned(),
+        "void A<T>::f() [with T = int]]".to_owned(),
+        "void A<T>::f() [with T = x/*y]".to_owned(),
+        "void A</*T*/>::f() [T = int]".to_owned(),
+        format!("void A<T>::f() [with T = {}]", "a".repeat(200)),
+    ];
+    let (p, entries) = paged_signers(texts.len(), |k| texts.get(k).cloned().unwrap_or_default());
+    let a = Analysis::compute(&p);
+    let shown = lines_of(&p, &a, &entries);
+    let first = shown.first().cloned().unwrap_or_default();
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert!(first[0].starts_with("A<int>::f (string at "), "{first:?}");
+    for (k, lines) in shown.iter().enumerate().skip(1) {
+        assert!(lines.is_empty(), "{}: {lines:?}", texts[k]);
+    }
+}
+
+/// Template signatures spelling a thousand unopened qualifiers read fast.
+///
+/// Each binding list ends a thousand qualifiers in a `>` no `<` opens, in
+/// the binding the bindings are split on and the one the name spells;
+/// they are read in the time the same text takes with every `>` spelled
+/// as a letter.
+#[test]
+fn a_template_signature_of_unopened_qualifiers_is_read_in_linear_time() {
+    /// Signatures, each referenced from its own function.
+    const COPIES: usize = 512;
+    /// How many times the plain text's time the hostile one may take.
+    const FACTOR: u32 = 3;
+    let _serial = serial();
+    let timed = |close: &str| {
+        let uses = format!("{close}::T").repeat(1000);
+        let (p, entries) = paged_signers(COPIES, |k| {
+            format!("void A{k:04}<T>::f() [with T = x; U = {uses}]")
+        });
+        let a = Analysis::compute(&p);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test bounds the time a hostile text takes"
+        )]
+        let started = std::time::Instant::now();
+        let shown = lines_of(&p, &a, &entries);
+        let took = started.elapsed();
+        assert!(shown.iter().all(|l| l.len() == 1), "{:?}", shown.first());
+        took
+    };
+    let (plain, hostile) = (timed("a"), timed(">"));
+    println!("unopened qualifiers: {hostile:?}, {plain:?} spelled as letters");
+    assert!(
+        hostile <= plain * FACTOR + std::time::Duration::from_millis(50),
+        "{COPIES} signatures took {hostile:?} with unopened qualifiers, {plain:?} without"
+    );
+}
+
+/// A run the 4096-byte string read would cut gives no line.
+///
+/// Its first 4096 bytes end in a `]` that reads as a template signature;
+/// the same signature terminated within them gives its line.
+#[test]
+fn a_template_signature_the_read_would_cut_gives_no_line() {
+    let _serial = serial();
+    let head = "void Box<T>::Put() [with T = int; U = ";
+    let mut run = format!("{head}{}]", "a".repeat(4095 - head.len()));
+    assert_eq!(run.len(), 4096);
+    run.push_str(&"b".repeat(5000 - run.len()));
+    run.push('\0');
+    let shown = |rdata: &str| {
+        let (p, entries) = signers(1, rdata.as_bytes(), |_| 0);
+        let a = Analysis::compute(&p);
+        lines_of(&p, &a, &entries).concat()
+    };
+    assert_eq!(shown(&run), Vec::<String>::new(), "a cut run gave a line");
+    let whole = format!("{head}{}]\0", "a".repeat(4094 - head.len()));
+    let got = shown(&whole);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert!(got[0].starts_with("Box<int>::Put (string at "), "{got:?}");
 }

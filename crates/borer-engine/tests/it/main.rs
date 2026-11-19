@@ -110,6 +110,7 @@ mod strings;
 mod structure;
 mod syscalls;
 mod tells;
+mod templates;
 mod textcheck;
 mod toolchain;
 mod triage;
